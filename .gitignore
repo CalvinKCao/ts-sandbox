@@ -1,0 +1,147 @@
+# =============================================================================
+# Git Ignore for Time Series Sandbox
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# -----------------------------------------------------------------------------
+# IDE
+# -----------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# -----------------------------------------------------------------------------
+# Jupyter Notebook
+# -----------------------------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb
+
+# -----------------------------------------------------------------------------
+# Large Data Files (use Git LFS or download separately)
+# -----------------------------------------------------------------------------
+
+# All results folders (regeneratable, often huge)
+**/results/
+**/test_results/
+**/test_output/
+
+# -----------------------------------------------------------------------------
+# Model Checkpoints and Weights
+# -----------------------------------------------------------------------------
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.h5
+*.hdf5
+**/checkpoints/
+**/pre-trained-models/
+
+# -----------------------------------------------------------------------------
+# TensorFlow/TensorBoard
+# -----------------------------------------------------------------------------
+**/logs/
+*.tfevents.*
+events.out.*
+
+# -----------------------------------------------------------------------------
+# Academic Papers (local reference only)
+# -----------------------------------------------------------------------------
+papers/
+*.pdf
+
+# Large txt files (papers converted to text)
+models/ViTime-main/*.txt
+models/pathformer-main/*.txt
+models/TFDNet-main/*.txt
+models/Time-Series-Library-main/*.txt
+
+# -----------------------------------------------------------------------------
+# Logs and Databases
+# -----------------------------------------------------------------------------
+*.log
+*.db
+*.sqlite
+*.sqlite3
+training.log
+optuna_study.db
+
+# -----------------------------------------------------------------------------
+# Images and Visualizations (regeneratable)
+# -----------------------------------------------------------------------------
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+**/visualizations/
+**/figs/
+
+# -----------------------------------------------------------------------------
+# OS Files
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -----------------------------------------------------------------------------
+# Temporary Files
+# -----------------------------------------------------------------------------
+*.tmp
+*.temp
+*.bak
+*.npy
+
+# -----------------------------------------------------------------------------
+# Duplicate Datasets in Model Folders
+# -----------------------------------------------------------------------------
+models/TFDNet-main/Datasets/
+models/pathformer-main/datasets/
+models/Time-Series-Library-main/dataset/
+
+# -----------------------------------------------------------------------------
+# Keep These (override ignores above)
+# -----------------------------------------------------------------------------
+!requirements.txt
+!datasets/ETT-small/*.csv
+!datasets/weather/*.csv
+!datasets/electricity/*.csv
+!datasets/exchange_rate/*.csv
+!datasets/illness/*.csv
+!datasets/traffic/traffic_part*.csv
+datasets/traffic/traffic.csv

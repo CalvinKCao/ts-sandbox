@@ -1,0 +1,20 @@
+# Diffusion TSF Requirements
+# Install with: pip install -r requirements.txt
+
+# Core ML
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Data processing
+numpy>=1.21.0
+pandas>=1.3.0
+
+# Hyperparameter optimization
+optuna>=3.0.0
+
+# Optuna storage (SQLite is built-in, but this improves dashboard)
+# optuna-dashboard  # Optional: for visualization
+
+# Progress bars (used by optuna)
+tqdm>=4.60.0
+

@@ -1,0 +1,93 @@
+{
+  "best_config": {
+    "dilate_alpha": 0.9,
+    "dilate_gamma": 0.1,
+    "learning_rate": 0.001,
+    "drop": 0.15
+  },
+  "best_val_loss": 0.08943790301334026,
+  "all_results": [
+    {
+      "config": {
+        "dilate_alpha": 0.9,
+        "dilate_gamma": 0.01,
+        "learning_rate": 0.002,
+        "drop": 0.15
+      },
+      "val_loss": 8.531316313632699,
+      "setting": "dilate_tune_a0.9_g0.01_lr0.002_drop0.15"
+    },
+    {
+      "config": {
+        "dilate_alpha": 0.9,
+        "dilate_gamma": 0.01,
+        "learning_rate": 0.001,
+        "drop": 0.15
+      },
+      "val_loss": 7.982306380604589,
+      "setting": "dilate_tune_a0.9_g0.01_lr0.001_drop0.15"
+    },
+    {
+      "config": {
+        "dilate_alpha": 0.6,
+        "dilate_gamma": 0.01,
+        "learning_rate": 0.002,
+        "drop": 0.15
+      },
+      "val_loss": 7.619284352590872,
+      "setting": "dilate_tune_a0.6_g0.01_lr0.002_drop0.15"
+    },
+    {
+      "config": {
+        "dilate_alpha": 0.9,
+        "dilate_gamma": 0.1,
+        "learning_rate": 0.002,
+        "drop": 0.15
+      },
+      "val_loss": 0.833540370644525,
+      "setting": "dilate_tune_a0.9_g0.1_lr0.002_drop0.15"
+    },
+    {
+      "config": {
+        "dilate_alpha": 0.6,
+        "dilate_gamma": 0.1,
+        "learning_rate": 0.001,
+        "drop": 0.15
+      },
+      "val_loss": 1.5614620502604994,
+      "setting": "dilate_tune_a0.6_g0.1_lr0.001_drop0.15"
+    },
+    {
+      "config": {
+        "dilate_alpha": 0.9,
+        "dilate_gamma": 0.1,
+        "learning_rate": 0.001,
+        "drop": 0.15
+      },
+      "val_loss": 0.08943790301334026,
+      "setting": "dilate_tune_a0.9_g0.1_lr0.001_drop0.15"
+    },
+    {
+      "config": {
+        "dilate_alpha": 0.6,
+        "dilate_gamma": 0.1,
+        "learning_rate": 0.002,
+        "drop": 0.15
+      },
+      "val_loss": 1.9830619706663974,
+      "setting": "dilate_tune_a0.6_g0.1_lr0.002_drop0.15"
+    },
+    {
+      "config": {
+        "dilate_alpha": 0.6,
+        "dilate_gamma": 0.01,
+        "learning_rate": 0.001,
+        "drop": 0.15
+      },
+      "val_loss": 7.62987066978632,
+      "setting": "dilate_tune_a0.6_g0.01_lr0.001_drop0.15"
+    }
+  ],
+  "completed": 8,
+  "total": 8
+}
