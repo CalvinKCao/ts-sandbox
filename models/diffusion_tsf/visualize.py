@@ -34,19 +34,45 @@ def visualize_samples(
     config_dict = checkpoint['config']
     
     # 2. Reconstruct model
+    # Determine model type (defaults to unet if not present)
+    model_type = config_dict.get('model_type', 'unet')
+    # Build config
     model_config = DiffusionTSFConfig(
         lookback_length=512,
         forecast_length=96,
         image_height=128,
-        unet_channels=MODEL_SIZES[config_dict['model_size']],
-        num_res_blocks=2 if config_dict['model_size'] != 'large' else 3,
+        unet_channels=MODEL_SIZES.get(config_dict.get('model_size', 'small'), [64, 128, 256]),
+        num_res_blocks=2 if config_dict.get('model_size', 'small') != 'large' else 3,
         attention_levels=[1, 2],
         num_diffusion_steps=config_dict['diffusion_steps'],
-        noise_schedule=config_dict['noise_schedule']
+        noise_schedule=config_dict['noise_schedule'],
+        model_type=model_type,
     )
+    # If using transformer, optionally override transformer params from checkpoint
+    if model_type == 'transformer':
+        for k in [
+            'transformer_embed_dim',
+            'transformer_depth',
+            'transformer_num_heads',
+            'transformer_patch_size',
+            'transformer_dropout',
+        ]:
+            if k in config_dict:
+                setattr(model_config, k, config_dict[k])
     
+    # Handle legacy checkpoints (keys prefixed with "unet.")
+    state_dict = checkpoint['model_state_dict']
+    if any(k.startswith("unet.") for k in state_dict.keys()):
+        # remap unet.* -> noise_predictor.*
+        remapped = {}
+        for k, v in state_dict.items():
+            if k.startswith("unet."):
+                remapped["noise_predictor." + k[len("unet.") :]] = v
+            else:
+                remapped[k] = v
+        state_dict = remapped
     model = DiffusionTSF(model_config).to(device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(state_dict)
     model.eval()
     
     # 3. Load Dataset (Last windows)
@@ -160,15 +186,24 @@ def find_best_model(base_dir: str) -> Optional[str]:
     return best_overall_model
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Visualize Diffusion TSF samples")
+    parser.add_argument("--model-path", type=str, default=None, help="Path to checkpoint (.pt). If not set, auto-discover best_model.pt")
+    parser.add_argument("--data", type=str, default=os.path.join(script_dir, "../../datasets/electricity/electricity.csv"), help="Path to dataset CSV")
+    parser.add_argument("--num-samples", type=int, default=5, help="Number of samples to visualize")
+    args = parser.parse_args()
+    
     # Setup paths
     BASE_CHECKPOINT_DIR = os.path.join(script_dir, "checkpoints")
-    DATA = os.path.join(script_dir, "../../datasets/electricity/electricity.csv")
     
-    best_model = find_best_model(BASE_CHECKPOINT_DIR)
-    
-    if best_model and os.path.exists(best_model):
-        visualize_samples(best_model, DATA)
+    if args.model_path:
+        model_path = args.model_path
     else:
-        print(f"Error: No suitable model checkpoint found in {BASE_CHECKPOINT_DIR}.")
+        model_path = find_best_model(BASE_CHECKPOINT_DIR)
+    
+    if model_path and os.path.exists(model_path):
+        visualize_samples(model_path, args.data, num_samples=args.num_samples)
+    else:
+        print(f"Error: No suitable model checkpoint found (looked for {args.model_path or 'best_model.pt'}).")
         print("Run training first with: python train_electricity.py")
 

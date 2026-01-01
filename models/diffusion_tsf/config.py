@@ -71,6 +71,14 @@ class DiffusionTSFConfig:
     cfg_dropout: float = 0.1  # Probability of dropping conditioning during training
     cfg_scale: float = 2.0  # Guidance scale during inference (1.0 = no guidance, >1 = stronger conditioning)
     
+    # 2D augmentation (coarse dropout / cutout)
+    cutout_prob: float = 0.5
+    cutout_min_masks: int = 1
+    cutout_max_masks: int = 3
+    cutout_shapes: List[Tuple[int, int]] = field(
+        default_factory=lambda: [(16, 16), (32, 5)]
+    )
+    
     # Decoding
     decode_temperature: float = 0.5  # Lower = sharper peaks in softmax (0.1-1.0 typical)
     
@@ -94,7 +102,9 @@ class DiffusionTSFConfig:
         assert self.max_scale > 0, "max_scale must be positive"
         assert self.blur_kernel_size % 2 == 1, "blur_kernel_size must be odd"
         assert self.num_diffusion_steps > 0, "num_diffusion_steps must be positive"
-        assert self.noise_schedule in ["linear", "cosine"], "Invalid noise schedule"
+        assert self.noise_schedule in ["linear", "cosine", "sigmoid", "quadratic"], "Invalid noise schedule"
+        assert 0 <= self.cutout_prob <= 1, "cutout_prob must be in [0, 1]"
+        assert self.cutout_min_masks > 0 and self.cutout_max_masks >= self.cutout_min_masks, "Invalid cutout mask counts"
     
     @property
     def bin_width(self) -> float:

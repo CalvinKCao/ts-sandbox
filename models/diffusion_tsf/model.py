@@ -198,6 +198,39 @@ class DiffusionTSF(nn.Module):
         
         return x
     
+    def _apply_coarse_dropout(self, image: torch.Tensor) -> torch.Tensor:
+        """Randomly zero rectangular regions to encourage continuity learning."""
+        if not self.training or self.config.cutout_prob <= 0:
+            return image
+        
+        if torch.rand(1, device=image.device).item() >= self.config.cutout_prob:
+            return image
+        
+        b, c, h, w = image.shape
+        num_masks = torch.randint(
+            self.config.cutout_min_masks,
+            self.config.cutout_max_masks + 1,
+            (1,),
+            device=image.device
+        ).item()
+        
+        for _ in range(num_masks):
+            shape_idx = torch.randint(0, len(self.config.cutout_shapes), (1,), device=image.device).item()
+            mask_h, mask_w = self.config.cutout_shapes[shape_idx]
+            mask_h = min(mask_h, h)
+            mask_w = min(mask_w, w)
+            if mask_h <= 0 or mask_w <= 0:
+                continue
+            
+            top_max = max(1, h - mask_h + 1)
+            left_max = max(1, w - mask_w + 1)
+            top = torch.randint(0, top_max, (1,), device=image.device).item()
+            left = torch.randint(0, left_max, (1,), device=image.device).item()
+            
+            image[:, :, top:top + mask_h, left:left + mask_w] = -1.0
+        
+        return image
+    
     def forward(
         self,
         past: torch.Tensor,
@@ -229,6 +262,10 @@ class DiffusionTSF(nn.Module):
         # Encode to 2D
         past_2d = self.encode_to_2d(past_norm)  # (batch, 1, H, past_len)
         future_2d = self.encode_to_2d(future_norm)  # (batch, 1, H, future_len)
+        
+        # Coarse dropout / cutout augmentation
+        past_2d = self._apply_coarse_dropout(past_2d)
+        future_2d = self._apply_coarse_dropout(future_2d)
         
         logger.debug(f"past_2d shape: {past_2d.shape}, future_2d shape: {future_2d.shape}")
         

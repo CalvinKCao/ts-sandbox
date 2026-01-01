@@ -21,7 +21,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 
 import numpy as np
 import pandas as pd
@@ -37,6 +37,7 @@ if script_dir not in sys.path:
 from config import DiffusionTSFConfig
 from model import DiffusionTSF
 from metrics import compute_metrics, log_metrics
+from dataset import apply_1d_augmentations
 
 # Setup logging
 logging.basicConfig(
@@ -88,13 +89,13 @@ def get_hardware_config():
     gpu_mem = get_gpu_memory_gb()
     
     if gpu_mem >= 40:  # Ada 6000, A100, etc.
-        logger.info(f"Detected high-end GPU ({gpu_mem:.1f}GB) - using large batch sizes")
+        logger.info(f"Detected high-end GPU ({gpu_mem:.1f}GB) - using extensive search space")
         return {
-            'learning_rate': (5e-5, 5e-4),
-            'model_size': ['small', 'medium', 'large'],
-            'diffusion_steps': [250, 500, 1000],
-            'batch_size': [32, 64, 128],
-            'noise_schedule': ['linear', 'cosine'],
+            'learning_rate': (1e-5, 1e-3),  # Much wider LR range: 1e-5 to 1e-3
+            'model_size': ['tiny', 'small', 'medium', 'large'],  # Include all model sizes
+            'diffusion_steps': [100, 250, 500, 1000, 2000],  # More diffusion options
+            'batch_size': [16, 32, 64, 128, 256],  # Much larger batch sizes
+            'noise_schedule': ['linear', 'cosine'],  # Well-established noise schedules
         }
     elif gpu_mem >= 16:  # RTX 3090, 4080, etc.
         logger.info(f"Detected mid-range GPU ({gpu_mem:.1f}GB) - using medium batch sizes")
@@ -161,29 +162,40 @@ class ElectricityDataset(Dataset):
         forecast: int = 96,
         column: str = 'OT',
         stride: int = 24,  # Stride for sliding window (1 day = 24 hours)
-        max_samples: Optional[int] = None
+        max_samples: Optional[int] = None,
+        augment: bool = True,
+        data_tensor: Optional[torch.Tensor] = None,
+        indices: Optional[List[int]] = None
     ):
-        logger.info(f"Loading electricity data from {data_path}")
+        if data_tensor is None:
+            logger.info(f"Loading electricity data from {data_path}")
+            df = pd.read_csv(data_path)
+            
+            # Use OT column (Oil Temperature) as target
+            if column not in df.columns:
+                # If OT not available, use first numeric column
+                numeric_cols = df.select_dtypes(include=[np.number]).columns
+                column = numeric_cols[0]
+                logger.warning(f"Column 'OT' not found, using '{column}' instead")
+            
+            self.data = torch.tensor(df[column].values, dtype=torch.float32)
+        else:
+            # Reuse already loaded tensor to avoid extra IO/memory
+            self.data = data_tensor
         
-        df = pd.read_csv(data_path)
-        
-        # Use OT column (Oil Temperature) as target
-        if column not in df.columns:
-            # If OT not available, use first numeric column
-            numeric_cols = df.select_dtypes(include=[np.number]).columns
-            column = numeric_cols[0]
-            logger.warning(f"Column 'OT' not found, using '{column}' instead")
-        
-        self.data = torch.tensor(df[column].values, dtype=torch.float32)
         self.lookback = lookback
         self.forecast = forecast
         self.total_len = lookback + forecast
+        self.augment = augment
         
         # Calculate number of samples
-        num_windows = (len(self.data) - self.total_len) // stride + 1
-        self.indices = [i * stride for i in range(num_windows)]
+        if indices is not None:
+            self.indices = indices
+        else:
+            num_windows = (len(self.data) - self.total_len) // stride + 1
+            self.indices = [i * stride for i in range(num_windows)]
         
-        if max_samples and len(self.indices) > max_samples:
+        if max_samples and indices is None and len(self.indices) > max_samples:
             self.indices = self.indices[:max_samples]
         
         logger.info(f"Created dataset: {len(self.indices)} samples, "
@@ -195,6 +207,10 @@ class ElectricityDataset(Dataset):
     def __getitem__(self, idx):
         start = self.indices[idx]
         window = self.data[start:start + self.total_len]
+        
+        if self.augment:
+            window = apply_1d_augmentations(window)
+        
         past = window[:self.lookback]
         future = window[self.lookback:]
         return past, future
@@ -209,21 +225,43 @@ def get_dataloaders(
 ) -> Tuple[DataLoader, DataLoader]:
     """Create train and validation dataloaders."""
     
-    dataset = ElectricityDataset(
+    # Base dataset (no augmentation) to derive indices and reuse tensor
+    base_dataset = ElectricityDataset(
         DATA_PATH,
         lookback=lookback,
         forecast=forecast,
-        max_samples=max_samples
+        max_samples=max_samples,
+        augment=False
     )
     
     # Split into train/val
-    val_size = int(len(dataset) * val_split)
-    train_size = len(dataset) - val_size
+    val_size = int(len(base_dataset) * val_split)
+    train_size = len(base_dataset) - val_size
     
-    train_dataset, val_dataset = random_split(
-        dataset, 
+    train_subset, val_subset = random_split(
+        base_dataset, 
         [train_size, val_size],
         generator=torch.Generator().manual_seed(42)
+    )
+    
+    train_dataset = ElectricityDataset(
+        DATA_PATH,
+        lookback=lookback,
+        forecast=forecast,
+        max_samples=max_samples,
+        augment=True,
+        data_tensor=base_dataset.data,
+        indices=train_subset.indices
+    )
+    
+    val_dataset = ElectricityDataset(
+        DATA_PATH,
+        lookback=lookback,
+        forecast=forecast,
+        max_samples=max_samples,
+        augment=False,
+        data_tensor=base_dataset.data,
+        indices=val_subset.indices
     )
     
     train_loader = DataLoader(
@@ -737,9 +775,28 @@ def main():
         
         # Use tiny dataset for quick test
         from torch.utils.data import Subset
-        full_dataset = ElectricityDataset(DATA_PATH, lookback=64, forecast=16, max_samples=20)
-        train_dataset = Subset(full_dataset, range(16))
-        val_dataset = Subset(full_dataset, range(16, 20))
+        base_dataset = ElectricityDataset(
+            DATA_PATH, lookback=64, forecast=16, max_samples=20, augment=False
+        )
+        train_indices = list(range(16))
+        val_indices = list(range(16, 20))
+        
+        train_dataset = ElectricityDataset(
+            DATA_PATH,
+            lookback=64,
+            forecast=16,
+            augment=True,
+            data_tensor=base_dataset.data,
+            indices=train_indices
+        )
+        val_dataset = ElectricityDataset(
+            DATA_PATH,
+            lookback=64,
+            forecast=16,
+            augment=False,
+            data_tensor=base_dataset.data,
+            indices=val_indices
+        )
         
         train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=4)

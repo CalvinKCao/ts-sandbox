@@ -47,7 +47,7 @@ class DiffusionScheduler:
             num_steps: Total number of diffusion steps T
             beta_start: Starting value of beta
             beta_end: Ending value of beta
-            schedule: Noise schedule type ("linear" or "cosine")
+            schedule: Noise schedule type ("linear", "cosine", "sigmoid", "quadratic")
             device: Device to place tensors on
         """
         self.num_steps = num_steps
@@ -58,8 +58,12 @@ class DiffusionScheduler:
             betas = torch.linspace(beta_start, beta_end, num_steps, device=device)
         elif schedule == "cosine":
             betas = self._cosine_schedule(num_steps, device)
+        elif schedule == "sigmoid":
+            betas = self._sigmoid_schedule(num_steps, beta_start, beta_end, device)
+        elif schedule == "quadratic":
+            betas = self._quadratic_schedule(num_steps, beta_start, beta_end, device)
         else:
-            raise ValueError(f"Unknown schedule: {schedule}")
+            raise ValueError(f"Unknown schedule: {schedule}. Supported: linear, cosine, sigmoid, quadratic")
         
         self.betas = betas
         self.alphas = 1.0 - betas
@@ -87,6 +91,20 @@ class DiffusionScheduler:
         alpha_bar = torch.cos((steps / num_steps + s) / (1 + s) * math.pi * 0.5) ** 2
         alpha_bar = alpha_bar / alpha_bar[0]
         betas = 1 - (alpha_bar[1:] / alpha_bar[:-1])
+        return torch.clamp(betas, 0.0001, 0.9999)
+
+    def _sigmoid_schedule(self, num_steps: int, beta_start: float, beta_end: float, device: str) -> torch.Tensor:
+        """Sigmoid noise schedule: smooth S-curve from beta_start to beta_end."""
+        steps = torch.linspace(0, 1, num_steps, device=device)
+        # Sigmoid function: maps [0,1] to [beta_start, beta_end] with smooth transition
+        betas = beta_start + (beta_end - beta_start) * torch.sigmoid((steps - 0.5) * 6.0)
+        return torch.clamp(betas, 0.0001, 0.9999)
+
+    def _quadratic_schedule(self, num_steps: int, beta_start: float, beta_end: float, device: str) -> torch.Tensor:
+        """Quadratic noise schedule: quadratic interpolation from beta_start to beta_end."""
+        steps = torch.linspace(0, 1, num_steps, device=device)
+        # Quadratic: starts slow, accelerates in middle
+        betas = beta_start + (beta_end - beta_start) * (steps ** 2)
         return torch.clamp(betas, 0.0001, 0.9999)
     
     def to(self, device: str) -> "DiffusionScheduler":
