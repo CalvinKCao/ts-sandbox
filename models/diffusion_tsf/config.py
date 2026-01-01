@@ -19,7 +19,7 @@ class DiffusionTSFConfig:
         image_height: int - Height of the 2D representation (default: 128)
         max_scale: float - MS parameter for value truncation (default: 3.5)
         blur_kernel_size: int - Vertical Gaussian blur kernel size (default: 31)
-        blur_sigma: float - Sigma for Gaussian blur (default: 6.0)
+        blur_sigma: float - Sigma for Gaussian blur (default: 1.0)
         
         # U-Net architecture
         unet_channels: List[int] - Channel dimensions at each level
@@ -49,7 +49,7 @@ class DiffusionTSFConfig:
     image_height: int = 128
     max_scale: float = 3.5  # MS parameter from ViTime
     blur_kernel_size: int = 31
-    blur_sigma: float = 6.0
+    blur_sigma: float = 1.0
     
     # U-Net architecture
     # Default aligned with ViTime paper (~93M params target)
@@ -81,6 +81,9 @@ class DiffusionTSFConfig:
     
     # Decoding
     decode_temperature: float = 0.5  # Lower = sharper peaks in softmax (0.1-1.0 typical)
+    
+    # EMD loss weighting
+    emd_lambda: float = 0.2
     
     # Model selector: "unet" (default) or "transformer"
     model_type: str = "unet"

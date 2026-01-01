@@ -65,7 +65,8 @@ LOOKBACK_LENGTH = 512      # Same as ViTime paper
 FORECAST_LENGTH = 96       # Common benchmark (paper uses 96, 192, 336, 720)
 IMAGE_HEIGHT = 128         # ViTime paper: h=128
 BLUR_KERNEL = 31           # ViTime paper: kernel=31
-BLUR_SIGMA = 6.0           # ViTime paper uses sigma_b=6 for 31x31 kernel
+BLUR_SIGMA = 1.0           # Sharper labels; EMD handles non-overlap
+EMD_LAMBDA = 0.2           # Weight for EMD loss term
 MAX_SCALE = 3.5            # ViTime paper: MS=3.5
 
 # ============================================================================
@@ -455,7 +456,8 @@ def train(
         image_height=IMAGE_HEIGHT,
         max_scale=MAX_SCALE,
         blur_kernel_size=BLUR_KERNEL,
-        blur_sigma=BLUR_SIGMA,
+        blur_sigma=config.get('blur_sigma', BLUR_SIGMA),
+        emd_lambda=config.get('emd_lambda', EMD_LAMBDA),
         unet_channels=channels,
         num_res_blocks=num_res_blocks,
         attention_levels=attention_levels,
@@ -571,6 +573,8 @@ def objective(trial) -> float:
         'batch_size': trial.suggest_categorical('batch_size', SEARCH_SPACE['batch_size']),
         'noise_schedule': trial.suggest_categorical('noise_schedule', SEARCH_SPACE['noise_schedule']),
         'model_type': SELECTED_MODEL_TYPE,
+        'blur_sigma': trial.suggest_categorical('blur_sigma', SEARCH_SPACE['blur_sigma']),
+        'emd_lambda': trial.suggest_categorical('emd_lambda', SEARCH_SPACE['emd_lambda']),
     }
     
     # Checkpoint for this trial
@@ -709,6 +713,10 @@ def train_with_best_params():
     with open(best_params_path, 'r') as f:
         config = json.load(f)
     
+    # Backward compatibility for older studies
+    config.setdefault('blur_sigma', BLUR_SIGMA)
+    config.setdefault('emd_lambda', EMD_LAMBDA)
+    
     logger.info("Training with best params:")
     logger.info(json.dumps(config, indent=2))
     
@@ -737,6 +745,8 @@ def main():
     parser.add_argument('--trials', type=int, default=NUM_OPTUNA_TRIALS, help='Number of Optuna trials')
     parser.add_argument('--quick', action='store_true', help='Quick test with fewer samples')
     parser.add_argument('--model-type', choices=['unet', 'transformer'], default='unet', help='Backbone: unet (default) or transformer (DiT-style)')
+    parser.add_argument('--blur-sigma', type=float, default=BLUR_SIGMA, help='Vertical blur sigma for preprocessing (label smoothing)')
+    parser.add_argument('--emd-lambda', type=float, default=EMD_LAMBDA, help='Weight for EMD loss term')
     args = parser.parse_args()
     
     # Check for optuna
@@ -756,6 +766,8 @@ def main():
     
     # Initialize hardware-adaptive search space
     SEARCH_SPACE = get_hardware_config()
+    SEARCH_SPACE['blur_sigma'] = [args.blur_sigma]
+    SEARCH_SPACE['emd_lambda'] = [args.emd_lambda]
     # Set selected model type for downstream use
     SELECTED_MODEL_TYPE = args.model_type
     logger.info(f"Search space: batch_sizes={SEARCH_SPACE['batch_size']}, model_sizes={SEARCH_SPACE['model_size']}")
@@ -771,6 +783,8 @@ def main():
             'batch_size': 4,
             'noise_schedule': 'linear',
             'model_type': args.model_type,
+            'blur_sigma': args.blur_sigma,
+            'emd_lambda': args.emd_lambda,
         }
         
         # Use tiny dataset for quick test
@@ -805,7 +819,8 @@ def main():
         tiny_config = DiffusionTSFConfig(
             lookback_length=64, forecast_length=16, image_height=32,
             unet_channels=[16, 32], num_res_blocks=1, attention_levels=[1],
-            num_diffusion_steps=50, ddim_steps=5, model_type=args.model_type
+            num_diffusion_steps=50, ddim_steps=5, model_type=args.model_type,
+            blur_sigma=args.blur_sigma, emd_lambda=args.emd_lambda
         )
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         model = DiffusionTSF(tiny_config).to(device)

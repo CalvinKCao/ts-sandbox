@@ -60,6 +60,10 @@ class DiffusionTSF(nn.Module):
             kernel_size=config.blur_kernel_size,
             sigma=config.blur_sigma
         )
+        self.register_buffer(
+            "decode_smoothing_kernel",
+            self._build_decode_smoothing_kernel(sigma_x=3.0, sigma_y=1.0)
+        )
         
         # Noise prediction backbone (U-Net or Transformer)
         if config.model_type == "transformer":
@@ -136,6 +140,87 @@ class DiffusionTSF(nn.Module):
         mean, std = stats
         return x * std + mean
     
+    def _build_decode_smoothing_kernel(
+        self,
+        sigma_x: float,
+        sigma_y: float
+    ) -> torch.Tensor:
+        """Create anisotropic Gaussian kernel for decode-time smoothing."""
+        size_x = int(6 * sigma_x + 1)
+        size_y = int(6 * sigma_y + 1)
+        if size_x % 2 == 0:
+            size_x += 1
+        if size_y % 2 == 0:
+            size_y += 1
+        
+        x = torch.arange(size_x, dtype=torch.float32) - size_x // 2
+        y = torch.arange(size_y, dtype=torch.float32) - size_y // 2
+        yy, xx = torch.meshgrid(y, x, indexing="ij")
+        kernel = torch.exp(-(xx**2 / (2 * sigma_x**2) + yy**2 / (2 * sigma_y**2)))
+        kernel = kernel / kernel.sum()
+        return kernel.view(1, 1, size_y, size_x)
+    
+    def _apply_decode_smoothing(self, prob: torch.Tensor) -> torch.Tensor:
+        """Apply horizontal-heavy Gaussian smoothing to probability map.
+        
+        This is only used at inference to connect vertical streaks along time.
+        """
+        kernel = self.decode_smoothing_kernel.to(device=prob.device, dtype=prob.dtype)
+        pad_y = kernel.shape[2] // 2
+        pad_x = kernel.shape[3] // 2
+        prob_2d = prob.unsqueeze(1)  # (batch, 1, height, width)
+        prob_padded = F.pad(prob_2d, (pad_x, pad_x, pad_y, pad_y), mode="reflect")
+        smoothed = F.conv2d(prob_padded, kernel)
+        return smoothed.squeeze(1)
+    
+    def _compute_emd_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Compute column-wise Wasserstein-1 distance via CDF trick.
+        
+        pred/target are logits over height; we softmax to get probabilities,
+        build CDFs along height, then take mean L1 difference.
+        """
+        if pred.dim() == 4:
+            pred = pred.squeeze(1)
+            target = target.squeeze(1)
+        
+        temperature = self.config.decode_temperature
+        prob_pred = F.softmax(pred / temperature, dim=1)
+        prob_target = F.softmax(target / temperature, dim=1)
+        
+        cdf_pred = prob_pred.cumsum(dim=1)
+        cdf_target = prob_target.cumsum(dim=1)
+        
+        emd = (cdf_pred - cdf_target).abs().mean()
+        return emd
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        """Backward compatibility for checkpoints without decode_smoothing_kernel."""
+        key = prefix + "decode_smoothing_kernel"
+        if key not in state_dict:
+            # Insert the default kernel so strict loading succeeds.
+            state_dict[key] = self.decode_smoothing_kernel
+            if key in missing_keys:
+                missing_keys.remove(key)
+            logger.warning("decode_smoothing_kernel missing in checkpoint; using default anisotropic kernel.")
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+    
     def encode_to_2d(self, x: torch.Tensor, scale_for_diffusion: bool = True) -> torch.Tensor:
         """Encode 1D time series to blurred 2D representation.
         
@@ -188,6 +273,10 @@ class DiffusionTSF(nn.Module):
         else:
             # Already proper probability-like values
             prob = F.softmax(image, dim=1)
+        
+        # Inference-only anisotropic smoothing to encourage temporal continuity
+        if not self.training and self.decode_smoothing_kernel is not None:
+            prob = self._apply_decode_smoothing(prob)
         
         # Compute expectation: sum_j P(j) * center(j)
         # bin_centers are the normalized values each bin represents
@@ -294,10 +383,20 @@ class DiffusionTSF(nn.Module):
         noise_pred = self.noise_predictor(noisy_future, t, past_2d)
         
         # L2 loss on noise
-        loss = F.mse_loss(noise_pred, noise)
+        noise_loss = F.mse_loss(noise_pred, noise)
+        
+        # Estimate clean image x0_hat from predicted noise
+        x0_pred = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
+        
+        # EMD term between estimated x0 and ground truth x0 (future_2d)
+        emd_loss = self._compute_emd_loss(x0_pred, future_2d)
+        
+        loss = noise_loss + self.config.emd_lambda * emd_loss
         
         return {
             'loss': loss,
+            'noise_loss': noise_loss,
+            'emd_loss': emd_loss,
             'noise': noise,
             'noise_pred': noise_pred,
             'past_2d': past_2d,

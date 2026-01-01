@@ -252,7 +252,7 @@ class Preprocessing(nn.Module):
         height: int = 128,
         max_scale: float = 3.5,
         blur_kernel_size: int = 31,
-        blur_sigma: float = 6.0
+        blur_sigma: float = 1.0
     ):
         super().__init__()
         self.to_2d = TimeSeriesTo2D(height=height, max_scale=max_scale)
