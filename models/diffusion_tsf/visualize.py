@@ -1,7 +1,7 @@
 """
 Visualization script for Diffusion TSF.
 
-Loads a trained model and generates plots for the last windows of the dataset.
+Loads a trained model and generates plots for evenly sampled windows across the dataset.
 """
 
 import os
@@ -57,9 +57,13 @@ def visualize_samples(
         stride=96 # Use non-overlapping windows for test
     )
     
-    # Take the last num_samples
+    # Evenly sample across the dataset for diverse visualizations
     total_samples = len(dataset)
-    indices = range(total_samples - num_samples, total_samples)
+    if total_samples <= num_samples:
+        indices = list(range(total_samples))
+    else:
+        # Use linspace to get evenly spaced indices across the full dataset
+        indices = np.linspace(0, total_samples - 1, num_samples, dtype=int).tolist()
     
     print(f"Generating {num_samples} visualizations...")
     

@@ -126,6 +126,8 @@ def get_hardware_config():
 
 # Get hardware-adaptive search space
 SEARCH_SPACE = None  # Will be set at runtime
+# Selected model type (set from CLI)
+SELECTED_MODEL_TYPE = "unet"
 
 MODEL_SIZES = {
     'tiny': [32, 64],           # ~1M params, for quick tests only
@@ -422,6 +424,7 @@ def train(
         num_diffusion_steps=config['diffusion_steps'],
         noise_schedule=config['noise_schedule'],
         ddim_steps=50,
+        model_type=config.get('model_type', 'unet'),
     )
     
     model = DiffusionTSF(model_config).to(device)
@@ -529,6 +532,7 @@ def objective(trial) -> float:
         'diffusion_steps': trial.suggest_categorical('diffusion_steps', SEARCH_SPACE['diffusion_steps']),
         'batch_size': trial.suggest_categorical('batch_size', SEARCH_SPACE['batch_size']),
         'noise_schedule': trial.suggest_categorical('noise_schedule', SEARCH_SPACE['noise_schedule']),
+        'model_type': SELECTED_MODEL_TYPE,
     }
     
     # Checkpoint for this trial
@@ -687,13 +691,14 @@ def train_with_best_params():
 # ============================================================================
 
 def main():
-    global SEARCH_SPACE
+    global SEARCH_SPACE, SELECTED_MODEL_TYPE
     
     parser = argparse.ArgumentParser(description='Train Diffusion TSF on Electricity dataset')
     parser.add_argument('--resume', action='store_true', help='Resume Optuna search')
     parser.add_argument('--best', action='store_true', help='Train with best found params')
     parser.add_argument('--trials', type=int, default=NUM_OPTUNA_TRIALS, help='Number of Optuna trials')
     parser.add_argument('--quick', action='store_true', help='Quick test with fewer samples')
+    parser.add_argument('--model-type', choices=['unet', 'transformer'], default='unet', help='Backbone: unet (default) or transformer (DiT-style)')
     args = parser.parse_args()
     
     # Check for optuna
@@ -713,6 +718,8 @@ def main():
     
     # Initialize hardware-adaptive search space
     SEARCH_SPACE = get_hardware_config()
+    # Set selected model type for downstream use
+    SELECTED_MODEL_TYPE = args.model_type
     logger.info(f"Search space: batch_sizes={SEARCH_SPACE['batch_size']}, model_sizes={SEARCH_SPACE['model_size']}")
     
     if args.quick:
@@ -725,6 +732,7 @@ def main():
             'diffusion_steps': 50,
             'batch_size': 4,
             'noise_schedule': 'linear',
+            'model_type': args.model_type,
         }
         
         # Use tiny dataset for quick test
@@ -740,7 +748,7 @@ def main():
         tiny_config = DiffusionTSFConfig(
             lookback_length=64, forecast_length=16, image_height=32,
             unet_channels=[16, 32], num_res_blocks=1, attention_levels=[1],
-            num_diffusion_steps=50, ddim_steps=5
+            num_diffusion_steps=50, ddim_steps=5, model_type=args.model_type
         )
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         model = DiffusionTSF(tiny_config).to(device)

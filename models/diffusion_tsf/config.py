@@ -74,6 +74,16 @@ class DiffusionTSFConfig:
     # Decoding
     decode_temperature: float = 0.5  # Lower = sharper peaks in softmax (0.1-1.0 typical)
     
+    # Model selector: "unet" (default) or "transformer"
+    model_type: str = "unet"
+    
+    # Transformer (DiT-style) parameters
+    transformer_embed_dim: int = 256
+    transformer_depth: int = 6
+    transformer_num_heads: int = 8
+    transformer_patch_size: int = 16
+    transformer_dropout: float = 0.1
+    
     # Training
     learning_rate: float = 2e-4
     batch_size: int = 8

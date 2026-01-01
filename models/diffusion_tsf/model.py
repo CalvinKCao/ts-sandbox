@@ -19,11 +19,13 @@ try:
     from .config import DiffusionTSFConfig
     from .preprocessing import Standardizer, TimeSeriesTo2D, VerticalGaussianBlur
     from .unet import ConditionalUNet2D
+    from .transformer import DiffusionTransformer
     from .diffusion import DiffusionScheduler
 except ImportError:
     from config import DiffusionTSFConfig
     from preprocessing import Standardizer, TimeSeriesTo2D, VerticalGaussianBlur
     from unet import ConditionalUNet2D
+    from transformer import DiffusionTransformer
     from diffusion import DiffusionScheduler
 
 logger = logging.getLogger(__name__)
@@ -59,15 +61,25 @@ class DiffusionTSF(nn.Module):
             sigma=config.blur_sigma
         )
         
-        # U-Net for noise prediction
-        self.unet = ConditionalUNet2D(
-            in_channels=1,
-            out_channels=1,
-            channels=config.unet_channels,
-            num_res_blocks=config.num_res_blocks,
-            attention_levels=config.attention_levels,
-            image_height=config.image_height
-        )
+        # Noise prediction backbone (U-Net or Transformer)
+        if config.model_type == "transformer":
+            self.noise_predictor = DiffusionTransformer(
+                image_height=config.image_height,
+                patch_size=config.transformer_patch_size,
+                embed_dim=config.transformer_embed_dim,
+                depth=config.transformer_depth,
+                num_heads=config.transformer_num_heads,
+                dropout=config.transformer_dropout,
+            )
+        else:
+            self.noise_predictor = ConditionalUNet2D(
+                in_channels=1,
+                out_channels=1,
+                channels=config.unet_channels,
+                num_res_blocks=config.num_res_blocks,
+                attention_levels=config.attention_levels,
+                image_height=config.image_height
+            )
         
         # Diffusion scheduler (not a nn.Module, managed separately)
         self.scheduler = DiffusionScheduler(
@@ -242,7 +254,7 @@ class DiffusionTSF(nn.Module):
         noisy_future, noise = self.scheduler.add_noise(future_2d, t)
         
         # Predict noise
-        noise_pred = self.unet(noisy_future, t, past_2d)
+        noise_pred = self.noise_predictor(noisy_future, t, past_2d)
         
         # L2 loss on noise
         loss = F.mse_loss(noise_pred, noise)
@@ -308,7 +320,7 @@ class DiffusionTSF(nn.Module):
         # Generate via diffusion with CFG
         if use_ddim:
             future_2d = self.scheduler.sample_ddim_cfg(
-                model=self.unet,
+                model=self.noise_predictor,
                 shape=future_shape,
                 cond=past_2d,
                 null_cond=null_cond,
@@ -320,7 +332,7 @@ class DiffusionTSF(nn.Module):
             )
         else:
             future_2d = self.scheduler.sample_ddpm_cfg(
-                model=self.unet,
+                model=self.noise_predictor,
                 shape=future_shape,
                 cond=past_2d,
                 null_cond=null_cond,
