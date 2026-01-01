@@ -147,24 +147,44 @@ class DiffusionTSF(nn.Module):
         
         return blurred
     
-    def decode_from_2d(self, image: torch.Tensor, unscale_from_diffusion: bool = True) -> torch.Tensor:
+    def decode_from_2d(self, image: torch.Tensor, from_diffusion: bool = True) -> torch.Tensor:
         """Decode 2D representation to 1D time series.
         
         Uses expectation over the probability distribution at each time step.
         
         Args:
             image: 2D image of shape (batch, 1, height, seq_len)
-            unscale_from_diffusion: If True, unscale from [-1, 1] range
+            from_diffusion: If True, image is in [-1, 1] range from diffusion
             
         Returns:
             Time series of shape (batch, seq_len)
         """
-        if unscale_from_diffusion:
-            # Reverse the scaling: [-1, 1] -> [0, ~0.03]
-            image = (image + 1.0) / 2.0  # [-1, 1] -> [0, 1]
-            image = image / 30.0  # [0, 1] -> [0, ~0.03]
+        # Remove channel dimension: (batch, height, seq_len)
+        if image.dim() == 4:
+            image = image.squeeze(1)
         
-        return self.to_2d.inverse(image)
+        if from_diffusion:
+            # Image is in [-1, 1] range. Higher values = higher probability.
+            # We need to convert to proper probabilities.
+            # 
+            # The key insight: softmax on [-1, 1] values gives meaningful contrast!
+            # exp(1) / exp(-1) ≈ 7.4 ratio, which is good for picking peaks.
+            #
+            # Use temperature scaling for sharper predictions (lower = sharper)
+            temperature = self.config.decode_temperature
+            prob = F.softmax(image / temperature, dim=1)
+        else:
+            # Already proper probability-like values
+            prob = F.softmax(image, dim=1)
+        
+        # Compute expectation: sum_j P(j) * center(j)
+        # bin_centers are the normalized values each bin represents
+        centers = self.to_2d.bin_centers.view(1, -1, 1).to(image.device)
+        
+        # Weighted sum: (batch, seq_len)
+        x = (prob * centers).sum(dim=1)
+        
+        return x
     
     def forward(
         self,
@@ -200,6 +220,20 @@ class DiffusionTSF(nn.Module):
         
         logger.debug(f"past_2d shape: {past_2d.shape}, future_2d shape: {future_2d.shape}")
         
+        # Classifier-Free Guidance: randomly drop conditioning during training
+        # This teaches the model to work both with and without conditioning
+        if self.training and self.config.cfg_dropout > 0:
+            # Create a mask for which samples should have conditioning dropped
+            drop_mask = torch.rand(batch_size, device=device) < self.config.cfg_dropout
+            if drop_mask.any():
+                # Replace dropped conditions with zeros (null conditioning)
+                null_cond = torch.zeros_like(past_2d)
+                past_2d = torch.where(
+                    drop_mask.view(-1, 1, 1, 1).expand_as(past_2d),
+                    null_cond,
+                    past_2d
+                )
+        
         # Sample random timesteps if not provided
         if t is None:
             t = torch.randint(0, self.config.num_diffusion_steps, (batch_size,), device=device)
@@ -230,6 +264,7 @@ class DiffusionTSF(nn.Module):
         use_ddim: bool = True,
         num_ddim_steps: int = 50,
         eta: float = 0.0,
+        cfg_scale: Optional[float] = None,
         verbose: bool = False
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions given past context.
@@ -239,6 +274,8 @@ class DiffusionTSF(nn.Module):
             use_ddim: Whether to use accelerated DDIM sampling
             num_ddim_steps: Number of DDIM steps (ignored if use_ddim=False)
             eta: DDIM stochasticity parameter
+            cfg_scale: Classifier-free guidance scale. If None, uses config value.
+                       1.0 = no guidance, >1 = stronger conditioning adherence
             verbose: Whether to log progress
             
         Returns:
@@ -247,11 +284,18 @@ class DiffusionTSF(nn.Module):
         batch_size = past.shape[0]
         device = past.device
         
+        # Use config cfg_scale if not specified
+        if cfg_scale is None:
+            cfg_scale = self.config.cfg_scale
+        
         # Normalize past
         past_norm, _, stats = self._normalize_sequence(past)
         
         # Encode past to 2D
         past_2d = self.encode_to_2d(past_norm)
+        
+        # Create null conditioning for CFG (zeros)
+        null_cond = torch.zeros_like(past_2d) if cfg_scale > 1.0 else None
         
         # Shape for future image
         future_shape = (
@@ -261,22 +305,26 @@ class DiffusionTSF(nn.Module):
             self.config.forecast_length
         )
         
-        # Generate via diffusion
+        # Generate via diffusion with CFG
         if use_ddim:
-            future_2d = self.scheduler.sample_ddim(
+            future_2d = self.scheduler.sample_ddim_cfg(
                 model=self.unet,
                 shape=future_shape,
                 cond=past_2d,
+                null_cond=null_cond,
+                cfg_scale=cfg_scale,
                 num_steps=num_ddim_steps,
                 eta=eta,
                 device=device,
                 verbose=verbose
             )
         else:
-            future_2d = self.scheduler.sample_ddpm(
+            future_2d = self.scheduler.sample_ddpm_cfg(
                 model=self.unet,
                 shape=future_shape,
                 cond=past_2d,
+                null_cond=null_cond,
+                cfg_scale=cfg_scale,
                 device=device,
                 verbose=verbose
             )

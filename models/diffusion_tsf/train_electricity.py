@@ -631,6 +631,14 @@ def run_optuna_search(n_trials: int = NUM_OPTUNA_TRIALS, resume: bool = True):
         json.dump(study.best_trial.params, f, indent=2)
     logger.info(f"Best params saved to {best_params_path}")
     
+    # Copy best trial checkpoint to best_model.pt
+    best_trial_ckpt = os.path.join(CHECKPOINT_DIR, f"trial_{study.best_trial.number}_best.pt")
+    dest_best_model = os.path.join(CHECKPOINT_DIR, 'best_model.pt')
+    if os.path.exists(best_trial_ckpt):
+        import shutil
+        shutil.copy(best_trial_ckpt, dest_best_model)
+        logger.info(f"Best trial checkpoint copied to {dest_best_model}")
+    
     return study.best_trial.params
 
 

@@ -67,6 +67,13 @@ class DiffusionTSFConfig:
     ddim_steps: int = 50
     ddim_eta: float = 0.0  # 0 = deterministic DDIM
     
+    # Classifier-Free Guidance (CFG)
+    cfg_dropout: float = 0.1  # Probability of dropping conditioning during training
+    cfg_scale: float = 2.0  # Guidance scale during inference (1.0 = no guidance, >1 = stronger conditioning)
+    
+    # Decoding
+    decode_temperature: float = 0.5  # Lower = sharper peaks in softmax (0.1-1.0 typical)
+    
     # Training
     learning_rate: float = 2e-4
     batch_size: int = 8

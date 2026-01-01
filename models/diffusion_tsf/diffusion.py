@@ -362,6 +362,128 @@ class DiffusionScheduler:
                 logger.debug(f"  Step {i + 1}/{num_steps} (t={t})")
         
         return x
+    
+    @torch.no_grad()
+    def sample_ddpm_cfg(
+        self,
+        model: nn.Module,
+        shape: Tuple[int, ...],
+        cond: torch.Tensor,
+        null_cond: Optional[torch.Tensor],
+        cfg_scale: float = 1.0,
+        device: str = "cpu",
+        verbose: bool = True
+    ) -> torch.Tensor:
+        """DDPM sampling with Classifier-Free Guidance.
+        
+        CFG formula: noise_pred = uncond_pred + cfg_scale * (cond_pred - uncond_pred)
+        
+        Args:
+            model: U-Net model that predicts noise
+            shape: Shape of samples to generate
+            cond: Conditioning tensor (past context image)
+            null_cond: Null conditioning (zeros) for unconditional prediction
+            cfg_scale: Guidance scale (1.0 = no guidance, >1 = stronger conditioning)
+            device: Device to generate on
+            verbose: Whether to log progress
+            
+        Returns:
+            Generated samples
+        """
+        # Start from pure noise
+        x = torch.randn(shape, device=device)
+        
+        if verbose:
+            logger.info(f"Starting DDPM+CFG sampling with {self.num_steps} steps (scale={cfg_scale})")
+        
+        use_cfg = cfg_scale > 1.0 and null_cond is not None
+        
+        for t in reversed(range(self.num_steps)):
+            t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
+            
+            if use_cfg:
+                # Classifier-Free Guidance: compute both conditional and unconditional
+                noise_pred_cond = model(x, t_batch, cond)
+                noise_pred_uncond = model(x, t_batch, null_cond)
+                # Interpolate: uncond + scale * (cond - uncond)
+                noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
+            else:
+                noise_pred = model(x, t_batch, cond)
+            
+            # Reverse step
+            x = self.ddpm_step(x, t_batch, noise_pred)
+            
+            if verbose and t % 100 == 0:
+                logger.debug(f"  Step {self.num_steps - t}/{self.num_steps}")
+        
+        return x
+    
+    @torch.no_grad()
+    def sample_ddim_cfg(
+        self,
+        model: nn.Module,
+        shape: Tuple[int, ...],
+        cond: torch.Tensor,
+        null_cond: Optional[torch.Tensor],
+        cfg_scale: float = 1.0,
+        num_steps: int = 50,
+        eta: float = 0.0,
+        device: str = "cpu",
+        verbose: bool = True
+    ) -> torch.Tensor:
+        """Accelerated DDIM sampling with Classifier-Free Guidance.
+        
+        CFG formula: noise_pred = uncond_pred + cfg_scale * (cond_pred - uncond_pred)
+        
+        Args:
+            model: U-Net model that predicts noise
+            shape: Shape of samples to generate
+            cond: Conditioning tensor (past context image)
+            null_cond: Null conditioning (zeros) for unconditional prediction
+            cfg_scale: Guidance scale (1.0 = no guidance, >1 = stronger conditioning)
+            num_steps: Number of DDIM steps
+            eta: Stochasticity (0 = deterministic)
+            device: Device to generate on
+            verbose: Whether to log progress
+            
+        Returns:
+            Generated samples
+        """
+        # Create timestep schedule (evenly spaced)
+        step_size = self.num_steps // num_steps
+        timesteps = list(range(0, self.num_steps, step_size))[:num_steps]
+        timesteps = list(reversed(timesteps))
+        
+        # Start from pure noise
+        x = torch.randn(shape, device=device)
+        
+        if verbose:
+            logger.info(f"Starting DDIM+CFG sampling with {num_steps} steps (eta={eta}, scale={cfg_scale})")
+        
+        use_cfg = cfg_scale > 1.0 and null_cond is not None
+        
+        for i, t in enumerate(timesteps):
+            t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
+            is_final_step = (i == len(timesteps) - 1)
+            t_prev = timesteps[i + 1] if not is_final_step else 0
+            t_prev_batch = torch.full((shape[0],), t_prev, device=device, dtype=torch.long)
+            
+            if use_cfg:
+                # Classifier-Free Guidance: compute both conditional and unconditional
+                noise_pred_cond = model(x, t_batch, cond)
+                noise_pred_uncond = model(x, t_batch, null_cond)
+                # Interpolate: uncond + scale * (cond - uncond)
+                noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
+            else:
+                noise_pred = model(x, t_batch, cond)
+            
+            # DDIM step
+            x = self.ddim_step(x, t_batch, t_prev_batch, noise_pred, eta, is_final_step)
+            
+            if verbose and i % 10 == 0:
+                logger.debug(f"  Step {i + 1}/{num_steps} (t={t})")
+        
+        return x
 
 
 # Import F for the cosine schedule

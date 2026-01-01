@@ -10,7 +10,8 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-from typing import Tuple
+import glob
+from typing import Tuple, Optional
 
 # Setup path for imports
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -117,13 +118,53 @@ def visualize_samples(
         plt.close()
         print(f"  Saved {save_path}")
 
-if __name__ == "__main__":
-    # Update paths as needed
-    BEST_MODEL = "checkpoints/best_model.pt"
-    DATA = "../../datasets/electricity/electricity.csv"
+def find_best_model(base_dir: str) -> Optional[str]:
+    """Find the best model checkpoint in the directory structure."""
+    # 1. Look for best_model.pt in subdirectories (study folders)
+    study_dirs = [d for d in glob.glob(os.path.join(base_dir, "*")) if os.path.isdir(d)]
+    # Sort by modification time, newest first
+    study_dirs.sort(key=os.path.getmtime, reverse=True)
     
-    if os.path.exists(BEST_MODEL):
-        visualize_samples(BEST_MODEL, DATA)
+    # Also check the base directory itself for backward compatibility
+    search_dirs = study_dirs + [base_dir]
+    
+    best_overall_model = None
+    min_val_loss = float('inf')
+    
+    for d in search_dirs:
+        # Priority 1: best_model.pt in this directory
+        best_model_path = os.path.join(d, 'best_model.pt')
+        if os.path.exists(best_model_path):
+            print(f"Found best_model.pt in {d}")
+            return best_model_path
+            
+        # Priority 2: trial_*_best.pt in this directory
+        trial_checkpoints = glob.glob(os.path.join(d, "trial_*_best.pt"))
+        for cp in trial_checkpoints:
+            try:
+                ckpt = torch.load(cp, map_location='cpu')
+                if 'val_loss' in ckpt:
+                    loss = ckpt['val_loss']
+                    if loss < min_val_loss:
+                        min_val_loss = loss
+                        best_overall_model = cp
+            except Exception:
+                continue
+                
+    if best_overall_model:
+        print(f"Found best trial checkpoint: {best_overall_model} (val_loss: {min_val_loss:.4f})")
+    return best_overall_model
+
+if __name__ == "__main__":
+    # Setup paths
+    BASE_CHECKPOINT_DIR = os.path.join(script_dir, "checkpoints")
+    DATA = os.path.join(script_dir, "../../datasets/electricity/electricity.csv")
+    
+    best_model = find_best_model(BASE_CHECKPOINT_DIR)
+    
+    if best_model and os.path.exists(best_model):
+        visualize_samples(best_model, DATA)
     else:
-        print(f"Error: Model not found at {BEST_MODEL}. Run training first.")
+        print(f"Error: No suitable model checkpoint found in {BASE_CHECKPOINT_DIR}.")
+        print("Run training first with: python train_electricity.py")
 
