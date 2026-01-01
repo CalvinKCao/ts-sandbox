@@ -263,9 +263,9 @@ class DiffusionTSF(nn.Module):
         past_2d = self.encode_to_2d(past_norm)  # (batch, 1, H, past_len)
         future_2d = self.encode_to_2d(future_norm)  # (batch, 1, H, future_len)
         
-        # Coarse dropout / cutout augmentation
+        # Coarse dropout / cutout augmentation on CONDITIONING ONLY
+        # Never apply to future_2d - that's the ground truth target!
         past_2d = self._apply_coarse_dropout(past_2d)
-        future_2d = self._apply_coarse_dropout(future_2d)
         
         logger.debug(f"past_2d shape: {past_2d.shape}, future_2d shape: {future_2d.shape}")
         
