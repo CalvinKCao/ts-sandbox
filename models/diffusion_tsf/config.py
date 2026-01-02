@@ -20,6 +20,7 @@ class DiffusionTSFConfig:
         max_scale: float - MS parameter for value truncation (default: 3.5)
         blur_kernel_size: int - Vertical Gaussian blur kernel size (default: 31)
         blur_sigma: float - Sigma for Gaussian blur (default: 1.0)
+        representation_mode: str - "pdf" (stripe) or "cdf" (occupancy map)
         
         # U-Net architecture
         unet_channels: List[int] - Channel dimensions at each level
@@ -50,6 +51,7 @@ class DiffusionTSFConfig:
     max_scale: float = 3.5  # MS parameter from ViTime
     blur_kernel_size: int = 31
     blur_sigma: float = 1.0
+    representation_mode: str = "pdf"  # "pdf" (stripe) or "cdf" (occupancy)
     
     # U-Net architecture
     # Default aligned with ViTime paper (~93M params target)
@@ -81,6 +83,7 @@ class DiffusionTSFConfig:
     
     # Decoding
     decode_temperature: float = 0.5  # Lower = sharper peaks in softmax (0.1-1.0 typical)
+    decode_smoothing: bool = False  # Apply horizontal Gaussian smoothing at inference
     
     # EMD loss weighting
     emd_lambda: float = 0.2
@@ -108,6 +111,7 @@ class DiffusionTSFConfig:
         assert self.noise_schedule in ["linear", "cosine", "sigmoid", "quadratic"], "Invalid noise schedule"
         assert 0 <= self.cutout_prob <= 1, "cutout_prob must be in [0, 1]"
         assert self.cutout_min_masks > 0 and self.cutout_max_masks >= self.cutout_min_masks, "Invalid cutout mask counts"
+        assert self.representation_mode in ["pdf", "cdf"], "representation_mode must be 'pdf' or 'cdf'"
     
     @property
     def bin_width(self) -> float:

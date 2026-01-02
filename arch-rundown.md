@@ -44,7 +44,7 @@ here's the prompt i used to write all this code which should explain the overall
 
 ### Phase 3: Training and Inference
 
-1. **Loss Function:** Use L2​ loss between the added noise and the predicted noise in the 2D space. Note: The loss is computed on the _pixels_, not the numerical values.
+1. **Loss Function:** Use L2​ loss between the added noise and the predicted noise in the 2D space. Note: The loss is computed on the _pixels_, not the numerical values. The implementation may also enable vertical earth mover distance in each column, weighted by a lambda/alpha param or whatever it's called.
     
 2. **Reverse Process (Sampling):** * Start with pure Gaussian noise of shape (H,Future_Length).
     

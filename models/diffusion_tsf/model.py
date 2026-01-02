@@ -54,7 +54,8 @@ class DiffusionTSF(nn.Module):
         # Preprocessing modules
         self.to_2d = TimeSeriesTo2D(
             height=config.image_height,
-            max_scale=config.max_scale
+            max_scale=config.max_scale,
+            representation_mode=config.representation_mode
         )
         self.blur = VerticalGaussianBlur(
             kernel_size=config.blur_kernel_size,
@@ -235,12 +236,15 @@ class DiffusionTSF(nn.Module):
         blurred = self.blur(image)
         
         if scale_for_diffusion:
-            # Scale from [0, ~0.03] to [-1, 1] for proper diffusion SNR
-            # First normalize each column to sum to 1, then scale
-            # The blur already creates a pseudo-probability, but values are small
-            # Multiply by a factor to boost signal, then shift to [-1, 1]
-            blurred = blurred * 30.0  # Now roughly [0, 1]
-            blurred = blurred * 2.0 - 1.0  # Now [-1, 1]
+            if self.config.representation_mode == "pdf":
+                # Scale from [0, ~0.03] to [-1, 1] for proper diffusion SNR
+                # The blur already creates a pseudo-probability, but values are small
+                scaled = blurred * 30.0  # Now roughly [0, 1]
+                scaled = scaled * 2.0 - 1.0  # Now [-1, 1]
+            else:
+                # Occupancy map already dense in [0, 1]; just shift to [-1, 1]
+                scaled = blurred.clamp(min=0.0, max=1.0) * 2.0 - 1.0
+            return scaled
         
         return blurred
     
@@ -260,30 +264,37 @@ class DiffusionTSF(nn.Module):
         if image.dim() == 4:
             image = image.squeeze(1)
         
-        if from_diffusion:
-            # Image is in [-1, 1] range. Higher values = higher probability.
-            # We need to convert to proper probabilities.
-            # 
-            # The key insight: softmax on [-1, 1] values gives meaningful contrast!
-            # exp(1) / exp(-1) ≈ 7.4 ratio, which is good for picking peaks.
-            #
-            # Use temperature scaling for sharper predictions (lower = sharper)
-            temperature = self.config.decode_temperature
-            prob = F.softmax(image / temperature, dim=1)
+        if self.config.representation_mode == "pdf":
+            if from_diffusion:
+                # Image is in [-1, 1] range. Higher values = higher probability.
+                # We need to convert to proper probabilities.
+                temperature = self.config.decode_temperature
+                prob = F.softmax(image / temperature, dim=1)
+            else:
+                prob = F.softmax(image, dim=1)
+            
+            # Inference-only anisotropic smoothing to encourage temporal continuity
+            if not self.training and self.config.decode_smoothing and self.decode_smoothing_kernel is not None:
+                prob = self._apply_decode_smoothing(prob)
+            
+            # Compute expectation: sum_j P(j) * center(j)
+            centers = self.to_2d.bin_centers.view(1, -1, 1).to(image.device)
+            x = (prob * centers).sum(dim=1)
         else:
-            # Already proper probability-like values
-            prob = F.softmax(image, dim=1)
-        
-        # Inference-only anisotropic smoothing to encourage temporal continuity
-        if not self.training and self.decode_smoothing_kernel is not None:
-            prob = self._apply_decode_smoothing(prob)
-        
-        # Compute expectation: sum_j P(j) * center(j)
-        # bin_centers are the normalized values each bin represents
-        centers = self.to_2d.bin_centers.view(1, -1, 1).to(image.device)
-        
-        # Weighted sum: (batch, seq_len)
-        x = (prob * centers).sum(dim=1)
+            if from_diffusion:
+                cdf_map = (image + 1.0) / 2.0
+            else:
+                cdf_map = image
+            
+            cdf_map = torch.clamp(cdf_map, min=0.0)
+            
+            if not self.training and self.config.decode_smoothing and self.decode_smoothing_kernel is not None:
+                cdf_map = self._apply_decode_smoothing(cdf_map)
+            
+            column_sum = cdf_map.sum(dim=1)
+            column_sum = torch.clamp(column_sum, 0.0, float(self.config.image_height))
+            normalized = column_sum / float(self.config.image_height)
+            x = normalized * (2 * self.config.max_scale) - self.config.max_scale
         
         return x
     

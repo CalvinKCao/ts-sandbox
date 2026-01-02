@@ -93,15 +93,23 @@ class TimeSeriesTo2D(nn.Module):
     This is the "stripe" representation from ViTime.
     """
     
-    def __init__(self, height: int = 128, max_scale: float = 3.5):
+    def __init__(
+        self,
+        height: int = 128,
+        max_scale: float = 3.5,
+        representation_mode: str = "pdf"
+    ):
         """
         Args:
             height: Height H of the 2D representation (number of bins)
             max_scale: MS parameter - values beyond [-MS, MS] are clipped
+            representation_mode: "pdf" (stripe) or "cdf" (occupancy map)
         """
         super().__init__()
         self.height = height
         self.max_scale = max_scale
+        assert representation_mode in ["pdf", "cdf"], "representation_mode must be 'pdf' or 'cdf'"
+        self.representation_mode = representation_mode
         
         # Precompute bin centers for inverse mapping
         # Centers: (j + 0.5) * (2*MS/H) - MS for j in [0, H-1]
@@ -135,13 +143,19 @@ class TimeSeriesTo2D(nn.Module):
         bin_indices = ((x_clipped + self.max_scale) / (2 * self.max_scale) * self.height)
         bin_indices = torch.clamp(bin_indices.long(), 0, self.height - 1)
         
-        # Create one-hot encoding along height dimension
-        # Shape: (batch, seq_len, height)
-        one_hot = F.one_hot(bin_indices, num_classes=self.height).float()
-        
-        # Reshape to (batch, 1, height, seq_len)
-        # Transpose to put height before seq_len
-        image = one_hot.permute(0, 2, 1).unsqueeze(1)
+        if self.representation_mode == "pdf":
+            # Create one-hot encoding along height dimension
+            # Shape: (batch, seq_len, height)
+            one_hot = F.one_hot(bin_indices, num_classes=self.height).float()
+            
+            # Reshape to (batch, 1, height, seq_len)
+            # Transpose to put height before seq_len
+            image = one_hot.permute(0, 2, 1).unsqueeze(1)
+        else:
+            # Occupancy/CDF: fill all pixels <= bin index
+            height_range = torch.arange(self.height, device=x.device).view(1, self.height, 1)
+            filled = (height_range <= bin_indices.unsqueeze(1)).float()
+            image = filled.unsqueeze(1)
         
         logger.debug(f"TimeSeriesTo2D: input {x.shape} -> output {image.shape}")
         return image
@@ -162,16 +176,24 @@ class TimeSeriesTo2D(nn.Module):
         if image.dim() == 4:
             image = image.squeeze(1)
         
-        # Normalize each column to be a probability distribution
-        # (in case it's not already normalized)
-        prob = F.softmax(image, dim=1)  # Softmax along height
-        
-        # Compute expectation: sum_j P(j) * center(j)
-        # bin_centers: (height,) -> (1, height, 1)
-        centers = self.bin_centers.view(1, -1, 1)
-        
-        # Weighted sum: (batch, seq_len)
-        x = (prob * centers).sum(dim=1)
+        if self.representation_mode == "pdf":
+            # Normalize each column to be a probability distribution
+            # (in case it's not already normalized)
+            prob = F.softmax(image, dim=1)  # Softmax along height
+            
+            # Compute expectation: sum_j P(j) * center(j)
+            # bin_centers: (height,) -> (1, height, 1)
+            centers = self.bin_centers.view(1, -1, 1)
+            
+            # Weighted sum: (batch, seq_len)
+            x = (prob * centers).sum(dim=1)
+        else:
+            # Occupancy/CDF: value is the column sum mapped back to normalized range
+            occupancy = torch.clamp(image, min=0.0)
+            column_sum = occupancy.sum(dim=1)
+            column_sum = torch.clamp(column_sum, 0.0, float(self.height))
+            normalized = column_sum / float(self.height)
+            x = normalized * (2 * self.max_scale) - self.max_scale
         
         logger.debug(f"TimeSeriesTo2D.inverse: input {image.shape} -> output {x.shape}")
         return x
@@ -252,10 +274,15 @@ class Preprocessing(nn.Module):
         height: int = 128,
         max_scale: float = 3.5,
         blur_kernel_size: int = 31,
-        blur_sigma: float = 1.0
+        blur_sigma: float = 1.0,
+        representation_mode: str = "pdf"
     ):
         super().__init__()
-        self.to_2d = TimeSeriesTo2D(height=height, max_scale=max_scale)
+        self.to_2d = TimeSeriesTo2D(
+            height=height,
+            max_scale=max_scale,
+            representation_mode=representation_mode
+        )
         self.blur = VerticalGaussianBlur(kernel_size=blur_kernel_size, sigma=blur_sigma)
         self.standardizer = Standardizer()
     

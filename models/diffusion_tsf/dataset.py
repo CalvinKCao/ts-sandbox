@@ -12,8 +12,19 @@ import torch.nn.functional as F
 import numpy as np
 import logging
 from typing import Tuple, Optional, List
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DatasetConfig:
+    """Dataset-level configuration toggles."""
+    representation_mode: str = "pdf"  # "pdf" (stripe) or "cdf" (occupancy)
+
+    def __post_init__(self):
+        if self.representation_mode not in ["pdf", "cdf"]:
+            raise ValueError("representation_mode must be 'pdf' or 'cdf'")
 
 
 def apply_1d_augmentations(
