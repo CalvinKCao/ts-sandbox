@@ -130,6 +130,8 @@ def get_hardware_config():
 SEARCH_SPACE = None  # Will be set at runtime
 # Selected model type (set from CLI)
 SELECTED_MODEL_TYPE = "unet"
+# Selected representation mode (stripe/pdf vs occupancy/cdf)
+SELECTED_REPR_MODE = "pdf"
 
 MODEL_SIZES = {
     'tiny': [32, 64],           # ~1M params, for quick tests only
@@ -458,6 +460,7 @@ def train(
         blur_kernel_size=BLUR_KERNEL,
         blur_sigma=config.get('blur_sigma', BLUR_SIGMA),
         emd_lambda=config.get('emd_lambda', EMD_LAMBDA),
+        representation_mode=config.get('representation_mode', SELECTED_REPR_MODE),
         unet_channels=channels,
         num_res_blocks=num_res_blocks,
         attention_levels=attention_levels,
@@ -575,6 +578,7 @@ def objective(trial) -> float:
         'model_type': SELECTED_MODEL_TYPE,
         'blur_sigma': trial.suggest_categorical('blur_sigma', SEARCH_SPACE['blur_sigma']),
         'emd_lambda': trial.suggest_categorical('emd_lambda', SEARCH_SPACE['emd_lambda']),
+        'representation_mode': SELECTED_REPR_MODE,
     }
     
     # Checkpoint for this trial
@@ -673,8 +677,10 @@ def run_optuna_search(n_trials: int = NUM_OPTUNA_TRIALS, resume: bool = True):
     
     # Save best params
     best_params_path = os.path.join(CHECKPOINT_DIR, 'best_params.json')
+    params_to_save = dict(study.best_trial.params)
+    params_to_save['representation_mode'] = SELECTED_REPR_MODE
     with open(best_params_path, 'w') as f:
-        json.dump(study.best_trial.params, f, indent=2)
+        json.dump(params_to_save, f, indent=2)
     logger.info(f"Best params saved to {best_params_path}")
     
     # Copy best trial checkpoint to best_model.pt
@@ -716,6 +722,7 @@ def train_with_best_params():
     # Backward compatibility for older studies
     config.setdefault('blur_sigma', BLUR_SIGMA)
     config.setdefault('emd_lambda', EMD_LAMBDA)
+    config.setdefault('representation_mode', SELECTED_REPR_MODE)
     
     logger.info("Training with best params:")
     logger.info(json.dumps(config, indent=2))
@@ -737,7 +744,7 @@ def train_with_best_params():
 # ============================================================================
 
 def main():
-    global SEARCH_SPACE, SELECTED_MODEL_TYPE
+    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE
     
     parser = argparse.ArgumentParser(description='Train Diffusion TSF on Electricity dataset')
     parser.add_argument('--resume', action='store_true', help='Resume Optuna search')
@@ -747,6 +754,7 @@ def main():
     parser.add_argument('--model-type', choices=['unet', 'transformer'], default='unet', help='Backbone: unet (default) or transformer (DiT-style)')
     parser.add_argument('--blur-sigma', type=float, default=BLUR_SIGMA, help='Vertical blur sigma for preprocessing (label smoothing)')
     parser.add_argument('--emd-lambda', type=float, default=EMD_LAMBDA, help='Weight for EMD loss term')
+    parser.add_argument('--repr-mode', choices=['pdf', 'cdf'], default='pdf', help='Representation: pdf (stripe) or cdf (occupancy)')
     args = parser.parse_args()
     
     # Check for optuna
@@ -768,6 +776,7 @@ def main():
     SEARCH_SPACE = get_hardware_config()
     SEARCH_SPACE['blur_sigma'] = [args.blur_sigma]
     SEARCH_SPACE['emd_lambda'] = [args.emd_lambda]
+    SELECTED_REPR_MODE = args.repr_mode
     # Set selected model type for downstream use
     SELECTED_MODEL_TYPE = args.model_type
     logger.info(f"Search space: batch_sizes={SEARCH_SPACE['batch_size']}, model_sizes={SEARCH_SPACE['model_size']}")
@@ -820,7 +829,8 @@ def main():
             lookback_length=64, forecast_length=16, image_height=32,
             unet_channels=[16, 32], num_res_blocks=1, attention_levels=[1],
             num_diffusion_steps=50, ddim_steps=5, model_type=args.model_type,
-            blur_sigma=args.blur_sigma, emd_lambda=args.emd_lambda
+            blur_sigma=args.blur_sigma, emd_lambda=args.emd_lambda,
+            representation_mode=args.repr_mode
         )
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         model = DiffusionTSF(tiny_config).to(device)
