@@ -114,46 +114,64 @@ class DiffusionTransformer(nn.Module):
         B, C, H, W = x.shape
         p = self.patch_size
 
+        # 1. Process X (noisy future)
         # Pad width to multiple of patch size
-        pad_w = (p - W % p) % p
-        if pad_w > 0:
-            x = F.pad(x, (0, pad_w, 0, 0), mode="reflect")
+        pad_w_x = (p - W % p) % p
+        if pad_w_x > 0:
+            x = F.pad(x, (0, pad_w_x, 0, 0), mode="reflect")
         _, _, _, Wp = x.shape
 
-        # Extract patches: (B, num_patches, p*p)
-        x_patches = x.unfold(2, p, p).unfold(3, p, p)  # (B, C, H/p, Wp/p, p, p)
+        # Extract patches for x: (B, num_x, p*p)
+        x_patches = x.unfold(2, p, p).unfold(3, p, p)
         x_patches = x_patches.contiguous().view(B, C, -1, p, p)
-        x_patches = x_patches.view(B, -1, p * p)  # (B, num_patches, patch_dim)
+        x_patches = x_patches.view(B, -1, p * p)
+        num_x = x_patches.shape[1]
 
-        num_patches = x_patches.shape[1]
+        # 2. Process Cond (clean past)
+        # Pad width to multiple of patch size
+        W_cond = cond.shape[3]
+        pad_w_cond = (p - W_cond % p) % p
+        if pad_w_cond > 0:
+            cond = F.pad(cond, (0, pad_w_cond, 0, 0), mode="reflect")
+        
+        # Extract patches for cond: (B, num_cond, p*p)
+        cond_patches = cond.unfold(2, p, p).unfold(3, p, p)
+        cond_patches = cond_patches.contiguous().view(B, C, -1, p, p)
+        cond_patches = cond_patches.view(B, -1, p * p)
+        num_cond = cond_patches.shape[1]
 
-        # Patch embed + pos
-        tokens = self.patch_embed(x_patches)  # (B, num_patches, D)
-        pos = self._get_pos_embed(num_patches).to(x.device)
-        tokens = tokens + pos
+        # 3. Embed both
+        # We share patch_embed for both as they are in same domain
+        x_tokens = self.patch_embed(x_patches)
+        cond_tokens = self.patch_embed(cond_patches)
 
-        # Time embedding token
+        # 4. Positional Embeddings
+        # We treat cond + x as one long sequence
+        total_len = num_cond + num_x
+        pos = self._get_pos_embed(total_len).to(x.device)
+        
+        # Add positions
+        cond_tokens = cond_tokens + pos[:, :num_cond, :]
+        x_tokens = x_tokens + pos[:, num_cond:, :]
+
+        # 5. Time Token
         t_emb = get_timestep_embedding(t, self.embed_dim).to(x.device)
         t_tok = self.time_proj(t_emb).unsqueeze(1)  # (B, 1, D)
 
-        # Context embedding token: global average over cond -> project
-        cond_feat = cond.mean(dim=[2, 3])  # (B, 1)
-        cond_feat = cond_feat.repeat(1, self.embed_dim)  # simple lift
-        cond_tok = self.context_proj(cond_feat).unsqueeze(1)  # (B, 1, D)
+        # 6. Concatenate: [t, cond, x]
+        tokens = torch.cat([t_tok, cond_tokens, x_tokens], dim=1)
 
-        # Concatenate special tokens at the beginning
-        tokens = torch.cat([t_tok, cond_tok, tokens], dim=1)  # (B, 2 + num_patches, D)
-
-        # Transformer blocks
+        # 7. Transformer blocks
         for blk in self.blocks:
             tokens = blk(tokens)
         tokens = self.norm(tokens)
 
-        # Discard special tokens, keep patch tokens
-        tokens = tokens[:, 2:, :]  # (B, num_patches, D)
+        # 8. Extract x tokens (skip t and cond)
+        # t is 1 token, cond is num_cond tokens
+        x_out_tokens = tokens[:, 1 + num_cond:, :]
 
-        # Project back to patches
-        patch_out = self.patch_out(tokens)  # (B, num_patches, p*p)
+        # 9. Project back
+        patch_out = self.patch_out(x_out_tokens)
 
         # Reshape to image
         patch_out = patch_out.view(B, H // p, Wp // p, p, p)
@@ -161,7 +179,7 @@ class DiffusionTransformer(nn.Module):
         patch_out = patch_out.view(B, 1, H, Wp)
 
         # Remove padding
-        if pad_w > 0:
+        if pad_w_x > 0:
             patch_out = patch_out[:, :, :, :W]
 
         return patch_out
