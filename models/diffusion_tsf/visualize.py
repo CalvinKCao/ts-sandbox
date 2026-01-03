@@ -57,6 +57,52 @@ def visualize_samples(
         num_res_blocks = 2
     
     # Build config (pull representation_mode if present)
+    # Detect use_coordinate_channel from checkpoint weights if not in config
+    state_dict = checkpoint['model_state_dict']
+    
+    # Remap legacy "unet.*" keys to "noise_predictor.*" first
+    if any(k.startswith("unet.") for k in state_dict.keys()):
+        remapped = {}
+        for k, v in state_dict.items():
+            if k.startswith("unet."):
+                remapped["noise_predictor." + k[len("unet."):]] = v
+            else:
+                remapped[k] = v
+        state_dict = remapped
+    
+    # Auto-detect coordinate channel from weight shapes
+    use_coord_channel = config_dict.get('use_coordinate_channel', None)
+    if use_coord_channel is None:
+        # Infer from weights: check patch_embed or init_conv shape
+        if model_type == 'transformer':
+            # For transformer: patch_embed.weight shape is [embed_dim, in_channels * pH * pW]
+            patch_height = config_dict.get('transformer_patch_height', 16)
+            patch_width = config_dict.get('transformer_patch_width', 16)
+            expected_1ch = patch_height * patch_width  # 256 for 16x16
+            expected_2ch = 2 * patch_height * patch_width  # 512 for 16x16
+            
+            patch_key = 'noise_predictor.patch_embed.weight'
+            if patch_key in state_dict:
+                actual_dim = state_dict[patch_key].shape[1]
+                use_coord_channel = (actual_dim == expected_2ch)
+                print(f"Auto-detected use_coordinate_channel={use_coord_channel} from patch_embed shape {state_dict[patch_key].shape}")
+            else:
+                use_coord_channel = False
+        else:
+            # For U-Net: check init_conv weight shape
+            # init_conv expects [out_ch, in_channels + cond_channels, kH, kW]
+            # With coord channel: in_channels=2, without: in_channels=1
+            init_key = 'noise_predictor.init_conv.weight'
+            if init_key in state_dict:
+                # cond_channels is typically 64, so:
+                # without coord: 1 + 64 = 65
+                # with coord: 2 + 64 = 66
+                actual_in = state_dict[init_key].shape[1]
+                use_coord_channel = (actual_in == 66)  # 2 + 64
+                print(f"Auto-detected use_coordinate_channel={use_coord_channel} from init_conv shape {state_dict[init_key].shape}")
+            else:
+                use_coord_channel = False
+    
     model_config = DiffusionTSFConfig(
         lookback_length=512,
         forecast_length=96,
@@ -72,6 +118,7 @@ def visualize_samples(
         num_diffusion_steps=config_dict['diffusion_steps'],
         noise_schedule=config_dict['noise_schedule'],
         model_type=model_type,
+        use_coordinate_channel=use_coord_channel,
     )
     # If using transformer, optionally override transformer params from checkpoint
     if model_type == 'transformer':
@@ -91,17 +138,7 @@ def visualize_samples(
             model_config.transformer_patch_height = legacy_size
             model_config.transformer_patch_width = legacy_size
     
-    # Handle legacy checkpoints (keys prefixed with "unet.")
-    state_dict = checkpoint['model_state_dict']
-    if any(k.startswith("unet.") for k in state_dict.keys()):
-        # remap unet.* -> noise_predictor.*
-        remapped = {}
-        for k, v in state_dict.items():
-            if k.startswith("unet."):
-                remapped["noise_predictor." + k[len("unet.") :]] = v
-            else:
-                remapped[k] = v
-        state_dict = remapped
+    # state_dict already remapped above (legacy unet.* -> noise_predictor.*)
     model = DiffusionTSF(model_config).to(device)
     
     # Use strict=True to catch architecture mismatches!

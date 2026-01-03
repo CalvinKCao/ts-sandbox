@@ -353,20 +353,30 @@ class DiffusionTSF(nn.Module):
     def _compute_emd_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute column-wise Wasserstein-1 distance via CDF trick.
         
-        pred/target are logits over height; we softmax to get probabilities,
-        build CDFs along height, then take mean L1 difference.
+        For PDF mode:
+            Treats 2D maps as logits, converts to probabilities via softmax,
+            then to CDFs, then takes L1.
+        For CDF mode:
+            The 2D maps ARE the CDFs (occupancy), so we take L1 directly.
         """
         if pred.dim() == 4:
             pred = pred.squeeze(1)
             target = target.squeeze(1)
         
-        temperature = self.config.decode_temperature
-        prob_pred = F.softmax(pred / temperature, dim=1)
-        prob_target = F.softmax(target / temperature, dim=1)
-        
-        cdf_pred = prob_pred.cumsum(dim=1)
-        cdf_target = prob_target.cumsum(dim=1)
-        
+        if self.config.representation_mode == "pdf":
+            temperature = self.config.decode_temperature
+            prob_pred = F.softmax(pred / temperature, dim=1)
+            prob_target = F.softmax(target / temperature, dim=1)
+            
+            cdf_pred = prob_pred.cumsum(dim=1)
+            cdf_target = prob_target.cumsum(dim=1)
+        else:
+            # In CDF mode, the image is the occupancy map (the CDF).
+            # We bring it from diffusion range [-1, 1] to [0, 1].
+            # L1 distance between CDFs is exactly the EMD (Wasserstein-1).
+            cdf_pred = (pred + 1.0) / 2.0
+            cdf_target = (target + 1.0) / 2.0
+            
         emd = (cdf_pred - cdf_target).abs().mean()
         return emd
 

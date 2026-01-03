@@ -473,6 +473,7 @@ def train(
         model_type=config.get('model_type', 'unet'),
         transformer_patch_height=config.get('transformer_patch_height', TRANSFORMER_PATCH_HEIGHT),
         transformer_patch_width=config.get('transformer_patch_width', TRANSFORMER_PATCH_WIDTH),
+        use_coordinate_channel=config.get('use_coordinate_channel', True),
     )
     
     model = DiffusionTSF(model_config).to(device)
@@ -586,6 +587,7 @@ def objective(trial) -> float:
         'representation_mode': SELECTED_REPR_MODE,
         'transformer_patch_height': TRANSFORMER_PATCH_HEIGHT,
         'transformer_patch_width': TRANSFORMER_PATCH_WIDTH,
+        'use_coordinate_channel': True,  # Enable vertical spatial awareness
     }
     
     # Checkpoint for this trial
@@ -810,6 +812,7 @@ def main():
             'emd_lambda': args.emd_lambda,
             'transformer_patch_height': args.patch_height,
             'transformer_patch_width': args.patch_width,
+            'use_coordinate_channel': True,  # Enable vertical spatial awareness
         }
         
         # Use tiny dataset for quick test
@@ -849,6 +852,7 @@ def main():
             representation_mode=args.repr_mode,
             transformer_patch_height=min(args.patch_height, 8),  # Use smaller patch for tiny test
             transformer_patch_width=min(args.patch_width, 8),
+            use_coordinate_channel=config.get('use_coordinate_channel', True),
         )
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         model = DiffusionTSF(tiny_config).to(device)
