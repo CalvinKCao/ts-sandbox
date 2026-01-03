@@ -31,6 +31,122 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def beam_search_decoder(
+    cdf_map: torch.Tensor,
+    bin_centers: torch.Tensor,
+    beam_width: int = 5,
+    jump_penalty_scale: float = 1.0,
+    search_radius: int = 10,
+    eps: float = 1e-8
+) -> torch.Tensor:
+    """Beam search decoder for CDF/occupancy maps with temporal continuity.
+    
+    Finds a continuous path through the probability map that maximizes
+    likelihood while penalizing large vertical jumps between time steps.
+    
+    Args:
+        cdf_map: Occupancy map of shape (batch, height, seq_len), values in [0, 1].
+                 High at bottom, low at top.
+        bin_centers: Tensor of shape (height,) mapping bin indices to values.
+        beam_width: Number of candidate paths to keep at each step.
+        jump_penalty_scale: Multiplier for jump penalty (higher = smoother paths).
+        search_radius: Max vertical pixels to search from previous position.
+        eps: Small constant for numerical stability in log.
+        
+    Returns:
+        Decoded values of shape (batch, seq_len).
+    """
+    batch_size, height, seq_len = cdf_map.shape
+    device = cdf_map.device
+    
+    # 1. Convert CDF to PDF: drop[y] = cdf[y] - cdf[y+1] (value drops going up)
+    # For occupancy: high at bottom, low at top, so cdf[y] - cdf[y+1] > 0 at transition
+    # Append zeros at top for shape consistency
+    pdf = torch.zeros_like(cdf_map)
+    pdf[:, :-1, :] = cdf_map[:, :-1, :] - cdf_map[:, 1:, :]
+    pdf = torch.clamp(pdf, min=0.0)
+    
+    # Normalize PDF per column to get valid probabilities
+    pdf_sum = pdf.sum(dim=1, keepdim=True).clamp(min=eps)
+    pdf = pdf / pdf_sum
+    
+    # Log probabilities (with floor to avoid -inf)
+    log_pdf = torch.log(pdf.clamp(min=eps))  # (batch, height, seq_len)
+    
+    results = []
+    
+    for b in range(batch_size):
+        log_pdf_b = log_pdf[b]  # (height, seq_len)
+        
+        # Initialize: top beam_width starting positions at t=0
+        init_scores = log_pdf_b[:, 0]  # (height,)
+        topk_scores, topk_indices = init_scores.topk(min(beam_width, height))
+        
+        # Each beam: (score, [path indices])
+        # Store as tensors for efficiency
+        beam_scores = topk_scores  # (beam_width,)
+        beam_paths = topk_indices.unsqueeze(1)  # (beam_width, 1)
+        
+        # Step through time
+        for t in range(1, seq_len):
+            num_beams = beam_scores.shape[0]
+            
+            # Current ending positions for each beam
+            prev_positions = beam_paths[:, -1]  # (num_beams,)
+            
+            # For each beam, compute scores for all possible next positions
+            # within search_radius
+            all_candidates_scores = []
+            all_candidates_paths = []
+            
+            for beam_idx in range(num_beams):
+                prev_pos = prev_positions[beam_idx].item()
+                prev_score = beam_scores[beam_idx]
+                
+                # Define search window
+                lo = max(0, prev_pos - search_radius)
+                hi = min(height, prev_pos + search_radius + 1)
+                
+                # Candidate positions and their scores
+                candidates = torch.arange(lo, hi, device=device)
+                candidate_log_probs = log_pdf_b[lo:hi, t]
+                
+                # Jump penalties
+                jumps = (candidates - prev_pos).abs().float()
+                penalties = jump_penalty_scale * jumps
+                
+                # Total scores
+                candidate_scores = prev_score + candidate_log_probs - penalties
+                
+                # Store candidates
+                for i, pos in enumerate(candidates):
+                    all_candidates_scores.append(candidate_scores[i])
+                    new_path = torch.cat([beam_paths[beam_idx], pos.unsqueeze(0)])
+                    all_candidates_paths.append(new_path)
+            
+            if len(all_candidates_scores) == 0:
+                # Edge case: no valid candidates, keep current beams
+                continue
+            
+            # Stack and prune to top beam_width
+            all_scores = torch.stack(all_candidates_scores)
+            topk_count = min(beam_width, len(all_scores))
+            topk_scores, topk_idx = all_scores.topk(topk_count)
+            
+            beam_scores = topk_scores
+            beam_paths = torch.stack([all_candidates_paths[i] for i in topk_idx.tolist()])
+        
+        # Select best path
+        best_idx = beam_scores.argmax()
+        best_path = beam_paths[best_idx]  # (seq_len,) indices
+        
+        # Convert indices to values using bin_centers
+        path_values = bin_centers[best_path.long()]
+        results.append(path_values)
+    
+    return torch.stack(results)  # (batch, seq_len)
+
+
 class DiffusionTSF(nn.Module):
     """Diffusion-based Time Series Forecasting Model.
     
@@ -248,7 +364,15 @@ class DiffusionTSF(nn.Module):
         
         return blurred
     
-    def decode_from_2d(self, image: torch.Tensor, from_diffusion: bool = True) -> torch.Tensor:
+    def decode_from_2d(
+        self,
+        image: torch.Tensor,
+        from_diffusion: bool = True,
+        decoder_method: str = "mean",
+        beam_width: int = 5,
+        jump_penalty_scale: float = 1.0,
+        search_radius: int = 10
+    ) -> torch.Tensor:
         """Decode 2D representation to 1D time series.
         
         Uses expectation over the probability distribution at each time step.
@@ -256,6 +380,13 @@ class DiffusionTSF(nn.Module):
         Args:
             image: 2D image of shape (batch, 1, height, seq_len)
             from_diffusion: If True, image is in [-1, 1] range from diffusion
+            decoder_method: For CDF/occupancy mode, select 'mean' (sum),
+                            'median' (first crossing of 0.5),
+                            'mode' (peak of PDF via vertical diff), or
+                            'beam' (beam search with temporal continuity).
+            beam_width: For 'beam' method, number of candidate paths to keep.
+            jump_penalty_scale: For 'beam' method, penalty for vertical jumps.
+            search_radius: For 'beam' method, max pixels to search from prev pos.
             
         Returns:
             Time series of shape (batch, seq_len)
@@ -286,15 +417,91 @@ class DiffusionTSF(nn.Module):
             else:
                 cdf_map = image
             
-            cdf_map = torch.clamp(cdf_map, min=0.0)
+            cdf_map = torch.clamp(cdf_map, min=0.0, max=1.0)
             
             if not self.training and self.config.decode_smoothing and self.decode_smoothing_kernel is not None:
                 cdf_map = self._apply_decode_smoothing(cdf_map)
             
-            column_sum = cdf_map.sum(dim=1)
-            column_sum = torch.clamp(column_sum, 0.0, float(self.config.image_height))
-            normalized = column_sum / float(self.config.image_height)
-            x = normalized * (2 * self.config.max_scale) - self.config.max_scale
+            # Mean: existing column-sum approach (default)
+            if decoder_method == "mean":
+                column_sum = cdf_map.sum(dim=1)
+                column_sum = torch.clamp(column_sum, 0.0, float(self.config.image_height))
+                normalized = column_sum / float(self.config.image_height)
+                x = normalized * (2 * self.config.max_scale) - self.config.max_scale
+                return x
+
+            centers = self.to_2d.bin_centers.view(1, -1, 1).to(cdf_map.device)
+
+            if decoder_method == "median":
+                # Occupancy map: column looks like [1,1,1,0.8,0.5,0.2,0,0] from bottom to top.
+                # We want the transition point where intensity drops below 0.5.
+                # Find the LAST index where value >= 0.5 (i.e., the highest filled bin).
+                
+                # below_half_mask: True where intensity < 0.5
+                below_half_mask = cdf_map < 0.5  # (batch, height, seq_len)
+                
+                # For each column, find if there's any crossing (any value below 0.5)
+                has_below = below_half_mask.any(dim=1)  # (batch, seq_len)
+                
+                # Find first index from bottom where value < 0.5
+                # argmax on float gives first True (first index below 0.5)
+                first_below = below_half_mask.float().argmax(dim=1)  # (batch, seq_len)
+                
+                # The median bin is just before the first below-0.5 bin
+                # (i.e., the last bin that's >= 0.5)
+                median_idx = (first_below - 1).clamp(min=0)
+                
+                # If no value is below 0.5 (column all >= 0.5), use top bin
+                median_idx = torch.where(
+                    has_below,
+                    median_idx,
+                    torch.full_like(median_idx, self.config.image_height - 1)
+                )
+                
+                # If entire column is below 0.5 (first_below == 0), use bottom bin
+                all_below = (first_below == 0) & has_below
+                median_idx = torch.where(
+                    all_below,
+                    torch.zeros_like(median_idx),
+                    median_idx
+                )
+                
+                x = torch.gather(
+                    centers.expand(cdf_map.shape[0], -1, cdf_map.shape[2]),
+                    1,
+                    median_idx.unsqueeze(1)
+                ).squeeze(1)
+            elif decoder_method == "mode":
+                # Occupancy map goes from 1.0 (bottom) to 0.0 (top).
+                # The "PDF" is the drop in value as we go up: -diff = cdf[y-1] - cdf[y].
+                # We want to find where the drop is largest (the transition edge).
+                
+                # Compute drop: how much value decreases going from y-1 to y
+                # drop[y] = cdf[y-1] - cdf[y] (positive where value decreases)
+                drop = -torch.diff(
+                    cdf_map,
+                    dim=1,
+                    prepend=cdf_map[:, :1, :]  # prepend first row so shapes match
+                )
+                drop = torch.relu(drop)  # only care about decreases, not increases
+                
+                peak_idx = drop.argmax(dim=1)
+                x = torch.gather(
+                    centers.expand(cdf_map.shape[0], -1, cdf_map.shape[2]),
+                    1,
+                    peak_idx.unsqueeze(1)
+                ).squeeze(1)
+            elif decoder_method == "beam":
+                # Beam search decoder for temporal continuity
+                x = beam_search_decoder(
+                    cdf_map,
+                    bin_centers=self.to_2d.bin_centers.to(cdf_map.device),
+                    beam_width=beam_width,
+                    jump_penalty_scale=jump_penalty_scale,
+                    search_radius=search_radius
+                )
+            else:
+                raise ValueError(f"Unknown decoder_method '{decoder_method}' (expected 'mean', 'median', 'mode', or 'beam').")
         
         return x
     
@@ -424,7 +631,11 @@ class DiffusionTSF(nn.Module):
         num_ddim_steps: int = 50,
         eta: float = 0.0,
         cfg_scale: Optional[float] = None,
-        verbose: bool = False
+        verbose: bool = False,
+        decoder_method: str = "mean",
+        beam_width: int = 5,
+        jump_penalty_scale: float = 1.0,
+        search_radius: int = 10
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions given past context.
         
@@ -436,6 +647,10 @@ class DiffusionTSF(nn.Module):
             cfg_scale: Classifier-free guidance scale. If None, uses config value.
                        1.0 = no guidance, >1 = stronger conditioning adherence
             verbose: Whether to log progress
+            decoder_method: 'mean', 'median', 'mode', or 'beam' (for CDF mode)
+            beam_width: For 'beam', number of candidate paths to keep
+            jump_penalty_scale: For 'beam', penalty for vertical jumps (higher = smoother)
+            search_radius: For 'beam', max pixels to search from previous position
             
         Returns:
             Dictionary with predictions and intermediate values
@@ -489,7 +704,13 @@ class DiffusionTSF(nn.Module):
             )
         
         # Decode to 1D (normalized)
-        future_norm = self.decode_from_2d(future_2d)
+        future_norm = self.decode_from_2d(
+            future_2d,
+            decoder_method=decoder_method,
+            beam_width=beam_width,
+            jump_penalty_scale=jump_penalty_scale,
+            search_radius=search_radius
+        )
         
         # Denormalize
         future = self._denormalize(future_norm, stats)

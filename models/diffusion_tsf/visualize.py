@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import glob
 from typing import Tuple, Optional
+from torch.utils.data import random_split
 
 # Setup path for imports
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -20,13 +21,17 @@ if script_dir not in sys.path:
 
 from config import DiffusionTSFConfig
 from model import DiffusionTSF
-from train_electricity import ElectricityDataset, MODEL_SIZES
+from train_electricity import ElectricityDataset, MODEL_SIZES, VAL_SPLIT
 
 def visualize_samples(
     model_path: str,
     data_path: str,
     num_samples: int = 5,
-    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+    decoder_method: str = "mean",
+    beam_width: int = 5,
+    jump_penalty_scale: float = 1.0,
+    search_radius: int = 10
 ):
     # 1. Load checkpoint
     print(f"Loading model from {model_path}...")
@@ -36,11 +41,16 @@ def visualize_samples(
     # 2. Reconstruct model
     # Determine model type (defaults to unet if not present)
     model_type = config_dict.get('model_type', 'unet')
-    # Build config
+    # Build config (pull representation_mode if present)
     model_config = DiffusionTSFConfig(
         lookback_length=512,
         forecast_length=96,
         image_height=128,
+        max_scale=config_dict.get('max_scale', 3.5),
+        blur_kernel_size=config_dict.get('blur_kernel_size', 31),
+        blur_sigma=config_dict.get('blur_sigma', 1.0),
+        emd_lambda=config_dict.get('emd_lambda', 0.2),
+        representation_mode=config_dict.get('representation_mode', 'pdf'),
         unet_channels=MODEL_SIZES.get(config_dict.get('model_size', 'small'), [64, 128, 256]),
         num_res_blocks=2 if config_dict.get('model_size', 'small') != 'large' else 3,
         attention_levels=[1, 2],
@@ -75,16 +85,31 @@ def visualize_samples(
     model.load_state_dict(state_dict)
     model.eval()
     
-    # 3. Load Dataset (Last windows)
-    dataset = ElectricityDataset(
+    # 3. Load validation subset (same split logic as training)
+    base_dataset = ElectricityDataset(
         data_path,
         lookback=512,
         forecast=96,
-        stride=96 # Use non-overlapping windows for test
+        augment=False
+    )
+    val_size = int(len(base_dataset) * VAL_SPLIT)
+    train_size = len(base_dataset) - val_size
+    _, val_subset = random_split(
+        base_dataset,
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+    val_dataset = ElectricityDataset(
+        data_path,
+        lookback=512,
+        forecast=96,
+        augment=False,
+        data_tensor=base_dataset.data,
+        indices=val_subset.indices
     )
     
-    # Evenly sample across the dataset for diverse visualizations
-    total_samples = len(dataset)
+    # Evenly sample across the validation dataset for diverse visualizations
+    total_samples = len(val_dataset)
     if total_samples <= num_samples:
         indices = list(range(total_samples))
     else:
@@ -96,12 +121,21 @@ def visualize_samples(
     os.makedirs('visualizations', exist_ok=True)
     
     for i, idx in enumerate(indices):
-        past, future = dataset[idx]
+        past, future = val_dataset[idx]
         past_tensor = past.unsqueeze(0).to(device)
         
         with torch.no_grad():
             # Generate prediction
-            out = model.generate(past_tensor, use_ddim=True, num_ddim_steps=50, verbose=True)
+            out = model.generate(
+                past_tensor,
+                use_ddim=True,
+                num_ddim_steps=50,
+                verbose=True,
+                decoder_method=decoder_method,
+                beam_width=beam_width,
+                jump_penalty_scale=jump_penalty_scale,
+                search_radius=search_radius
+            )
             pred = out['prediction'].cpu().squeeze(0).numpy()
             
             # Extract 2D maps
@@ -191,6 +225,11 @@ if __name__ == "__main__":
     parser.add_argument("--model-path", type=str, default=None, help="Path to checkpoint (.pt). If not set, auto-discover best_model.pt")
     parser.add_argument("--data", type=str, default=os.path.join(script_dir, "../../datasets/electricity/electricity.csv"), help="Path to dataset CSV")
     parser.add_argument("--num-samples", type=int, default=5, help="Number of samples to visualize")
+    parser.add_argument("--decoder-method", type=str, choices=["mean", "median", "mode", "beam"], default="mean", help="Decoding method for CDF occupancy maps")
+    # Beam search parameters
+    parser.add_argument("--beam-width", type=int, default=5, help="Beam width for beam search decoder")
+    parser.add_argument("--jump-penalty", type=float, default=1.0, help="Jump penalty scale for beam search decoder")
+    parser.add_argument("--search-radius", type=int, default=10, help="Search radius (pixels) for beam search decoder")
     args = parser.parse_args()
     
     # Setup paths
@@ -202,7 +241,15 @@ if __name__ == "__main__":
         model_path = find_best_model(BASE_CHECKPOINT_DIR)
     
     if model_path and os.path.exists(model_path):
-        visualize_samples(model_path, args.data, num_samples=args.num_samples)
+        visualize_samples(
+            model_path,
+            args.data,
+            num_samples=args.num_samples,
+            decoder_method=args.decoder_method,
+            beam_width=args.beam_width,
+            jump_penalty_scale=args.jump_penalty,
+            search_radius=args.search_radius
+        )
     else:
         print(f"Error: No suitable model checkpoint found (looked for {args.model_path or 'best_model.pt'}).")
         print("Run training first with: python train_electricity.py")

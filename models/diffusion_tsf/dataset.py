@@ -34,9 +34,16 @@ def apply_1d_augmentations(
     scale_max: float = 1.2,
     warp_prob: float = 0.3,
     warp_min: float = 0.9,
-    warp_max: float = 1.1
+    warp_max: float = 1.1,
+    stretch_prob: float = 0.3,
+    stretch_min: float = 0.7,
+    stretch_max: float = 1.3,
 ) -> torch.Tensor:
-    """Apply lightweight 1D augmentations (scaling and time-warp) to a sequence."""
+    """Apply lightweight 1D augmentations (scaling, warp, and stretch) to a sequence.
+
+    stretch > 1.0 repeats/holds values (nearest), stretch < 1.0 averages/merges (linear),
+    and the result is always resized back to the original length to preserve shape.
+    """
     seq = seq.clone()
     
     # Random scaling
@@ -72,6 +79,29 @@ def apply_1d_augmentations(
         else:
             seq = warped
     
+    # Time-stretch (hold or average contiguous values), then resize back
+    if torch.rand(1).item() < stretch_prob:
+        factor = torch.empty(1).uniform_(stretch_min, stretch_max).item()
+        orig_len = seq.shape[-1]
+        target_len = max(2, int(round(orig_len * factor)))
+
+        # If factor > 1 -> nearest neighbor repeat; if < 1 -> linear (averaging)
+        mode = 'nearest' if factor >= 1.0 else 'linear'
+        stretched = F.interpolate(
+            seq.unsqueeze(0).unsqueeze(0),
+            size=target_len,
+            mode=mode,
+            align_corners=False if mode == 'linear' else None
+        ).squeeze(0).squeeze(0)
+
+        # Resize back to original length (linear for smoothness)
+        seq = F.interpolate(
+            stretched.unsqueeze(0).unsqueeze(0),
+            size=orig_len,
+            mode='linear',
+            align_corners=False
+        ).squeeze(0).squeeze(0)
+
     return seq
 
 
