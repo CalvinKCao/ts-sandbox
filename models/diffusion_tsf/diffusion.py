@@ -91,6 +91,9 @@ class DiffusionScheduler:
         alpha_bar = torch.cos((steps / num_steps + s) / (1 + s) * math.pi * 0.5) ** 2
         alpha_bar = alpha_bar / alpha_bar[0]
         betas = 1 - (alpha_bar[1:] / alpha_bar[:-1])
+        # Note: High betas at the end of schedule can cause DDPM to explode numerically.
+        # Use DDIM for inference which is more stable. The clamp to 0.9999 matches
+        # common implementations but may cause issues with DDPM at extreme timesteps.
         return torch.clamp(betas, 0.0001, 0.9999)
 
     def _sigmoid_schedule(self, num_steps: int, beta_start: float, beta_end: float, device: str) -> torch.Tensor:
@@ -267,8 +270,12 @@ class DiffusionScheduler:
         pred_x0 = (x_t - sqrt_one_minus_alpha_bar_t * noise_pred) / sqrt_alpha_bar_t
         
         # Clip predicted x_0 for stability
-        # Data is scaled to [-1, 1] range, so this clamp is now correct
-        pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+        # Use dynamic clipping: wider range at high noise (early steps), tighter at low noise
+        # This prevents destroying signal at high noise levels while still constraining final output
+        # alpha_bar goes from ~1 (t=0) to ~0 (t=T), so we use it to scale clamp range
+        # At t=0: clamp to [-1, 1]; at high t: clamp to [-2, 2]
+        clamp_scale = 1.0 + (1.0 - alpha_bar_t.mean().item())  # 1.0 to 2.0
+        pred_x0 = torch.clamp(pred_x0, -clamp_scale, clamp_scale)
         
         # Compute variance
         sigma = eta * torch.sqrt(

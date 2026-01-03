@@ -1,7 +1,0 @@
-{
-    "mean_mse": 0.21870209276676178,
-    "mean_mae": 0.4233322739601135,
-    "mean_difference": 0.4232441484928131,
-    "std_difference": 0.5545749068260193,
-    "wasserstein_distance": 0.30170315280930177
-}

@@ -141,11 +141,11 @@ MODEL_SIZES = {
 }
 
 # Training settings
-MAX_EPOCHS = 50
-PATIENCE = 7                    # Early stopping patience
+MAX_EPOCHS = 200
+PATIENCE = 15                   # Early stopping patience (increased for longer training)
 VAL_SPLIT = 0.1
 NUM_OPTUNA_TRIALS = 20          # Total trials to run
-PRUNING_WARMUP = 5              # Don't prune before this epoch
+PRUNING_WARMUP = 20             # Don't prune before this epoch (increased for longer training)
 
 # ============================================================================
 # Dataset
@@ -491,7 +491,7 @@ def train(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=max_epochs,
-        eta_min=config['learning_rate'] * 0.01
+        eta_min=config['learning_rate'] * 0.1  # Higher minimum LR for longer training
     )
     
     # Early stopping
@@ -732,7 +732,7 @@ def train_with_best_params():
     # Train for longer with best params
     best_val_loss = train(
         config,
-        max_epochs=MAX_EPOCHS * 2,  # Train longer
+        max_epochs=MAX_EPOCHS,  # Use the increased MAX_EPOCHS (200)
         checkpoint_path=checkpoint_path
     )
     

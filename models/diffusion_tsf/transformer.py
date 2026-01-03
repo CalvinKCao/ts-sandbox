@@ -76,6 +76,9 @@ class DiffusionTransformer(nn.Module):
 
         # Time projection
         self.time_proj = nn.Linear(embed_dim, embed_dim)
+        
+        # Context projection (separate from patch_embed for conditioning)
+        self.context_proj = nn.Linear(embed_dim, embed_dim)
 
         # Transformer blocks
         self.blocks = nn.ModuleList([
@@ -140,9 +143,9 @@ class DiffusionTransformer(nn.Module):
         num_cond = cond_patches.shape[1]
 
         # 3. Embed both
-        # We share patch_embed for both as they are in same domain
+        # x uses patch_embed, cond uses patch_embed + context_proj for separate representation
         x_tokens = self.patch_embed(x_patches)
-        cond_tokens = self.patch_embed(cond_patches)
+        cond_tokens = self.context_proj(self.patch_embed(cond_patches))
 
         # 4. Positional Embeddings
         # We treat cond + x as one long sequence

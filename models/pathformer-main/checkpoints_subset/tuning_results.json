@@ -1,8 +1,0 @@
-{
-  "best_config": {
-    "learning_rate": 0.002,
-    "d_model": 32,
-    "batch_size": 64,
-    "drop": 0.2
-  },
-  "best_val_loss": 

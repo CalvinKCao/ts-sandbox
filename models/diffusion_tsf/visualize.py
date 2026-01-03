@@ -31,7 +31,8 @@ def visualize_samples(
     decoder_method: str = "mean",
     beam_width: int = 5,
     jump_penalty_scale: float = 1.0,
-    search_radius: int = 10
+    search_radius: int = 10,
+    output_dir: str = "visualizations"
 ):
     # 1. Load checkpoint
     print(f"Loading model from {model_path}...")
@@ -41,6 +42,20 @@ def visualize_samples(
     # 2. Reconstruct model
     # Determine model type (defaults to unet if not present)
     model_type = config_dict.get('model_type', 'unet')
+    
+    # Reconstruct attention_levels and num_res_blocks based on model_size
+    # (must match training logic exactly!)
+    model_size = config_dict.get('model_size', 'small')
+    if model_size == 'large':
+        attention_levels = [1, 2]
+        num_res_blocks = 3
+    elif model_size == 'medium':
+        attention_levels = [1, 2, 3]  # Different from small/large!
+        num_res_blocks = 2
+    else:  # small or tiny
+        attention_levels = [1, 2]
+        num_res_blocks = 2
+    
     # Build config (pull representation_mode if present)
     model_config = DiffusionTSFConfig(
         lookback_length=512,
@@ -51,9 +66,9 @@ def visualize_samples(
         blur_sigma=config_dict.get('blur_sigma', 1.0),
         emd_lambda=config_dict.get('emd_lambda', 0.2),
         representation_mode=config_dict.get('representation_mode', 'pdf'),
-        unet_channels=MODEL_SIZES.get(config_dict.get('model_size', 'small'), [64, 128, 256]),
-        num_res_blocks=2 if config_dict.get('model_size', 'small') != 'large' else 3,
-        attention_levels=[1, 2],
+        unet_channels=MODEL_SIZES.get(model_size, [64, 128, 256]),
+        num_res_blocks=num_res_blocks,
+        attention_levels=attention_levels,
         num_diffusion_steps=config_dict['diffusion_steps'],
         noise_schedule=config_dict['noise_schedule'],
         model_type=model_type,
@@ -82,7 +97,19 @@ def visualize_samples(
                 remapped[k] = v
         state_dict = remapped
     model = DiffusionTSF(model_config).to(device)
-    model.load_state_dict(state_dict)
+    
+    # Use strict=True to catch architecture mismatches!
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as e:
+        print(f"WARNING: State dict loading failed with strict=True: {e}")
+        print("Attempting to load with strict=False (some weights may be random!)")
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"  Missing keys: {missing[:5]}{'...' if len(missing) > 5 else ''}")
+        if unexpected:
+            print(f"  Unexpected keys: {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
+    
     model.eval()
     
     # 3. Load validation subset (same split logic as training)
@@ -117,8 +144,9 @@ def visualize_samples(
         indices = np.linspace(0, total_samples - 1, num_samples, dtype=int).tolist()
     
     print(f"Generating {num_samples} visualizations...")
+    print(f"  Model config: {model_size} model, {model_config.representation_mode} mode")
+    print(f"  Attention levels: {attention_levels}, Res blocks: {num_res_blocks}")
     
-    output_dir = kwargs.get('output_dir', 'visualizations')
     os.makedirs(output_dir, exist_ok=True)
     
     for i, idx in enumerate(indices):
@@ -139,9 +167,17 @@ def visualize_samples(
             )
             pred = out['prediction'].cpu().squeeze(0).numpy()
             
-            # Extract 2D maps
-            past_2d = out['past_2d'].cpu().squeeze(0).squeeze(0).numpy()
-            future_2d = out['future_2d'].cpu().squeeze(0).squeeze(0).numpy()
+            # Extract 2D maps (these are in diffusion-scaled [-1, 1] range)
+            past_2d_raw = out['past_2d'].cpu().squeeze(0).squeeze(0).numpy()
+            future_2d_raw = out['future_2d'].cpu().squeeze(0).squeeze(0).numpy()
+            
+            # Convert from diffusion space [-1, 1] to probability space [0, 1]
+            past_2d = (past_2d_raw + 1.0) / 2.0
+            future_2d = (future_2d_raw + 1.0) / 2.0
+            
+            # Clip to valid range (diffusion can sometimes exceed bounds slightly)
+            past_2d = np.clip(past_2d, 0.0, 1.0)
+            future_2d = np.clip(future_2d, 0.0, 1.0)
         
         # Plotting
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), gridspec_kw={'height_ratios': [1, 1]})
@@ -165,7 +201,9 @@ def visualize_samples(
         # Concatenate past and future 2D maps for full context
         full_2d = np.concatenate([past_2d, future_2d], axis=1)
         
-        im = ax2.imshow(full_2d, aspect='auto', origin='lower', cmap='magma', interpolation='nearest')
+        # Use vmin/vmax to ensure consistent color scaling
+        im = ax2.imshow(full_2d, aspect='auto', origin='lower', cmap='magma', 
+                       interpolation='nearest', vmin=0.0, vmax=1.0)
         ax2.set_title("Diffusion Probability Map (2D Stripe Representation)", fontsize=14)
         ax2.set_xlabel("Time Steps")
         ax2.set_ylabel("Normalized Value Bins")
