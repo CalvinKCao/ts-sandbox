@@ -45,28 +45,38 @@ class TransformerBlock(nn.Module):
 class DiffusionTransformer(nn.Module):
     """DiT-style transformer for 2D stripe images.
 
-    - Splits (1, H, W) into non-overlapping patches (pH x pW)
+    - Splits (C, H, W) into non-overlapping patches (patch_height x patch_width)
     - Flattens to sequence, adds learned positional embeddings
     - Adds time and context tokens
     - Runs Transformer encoder, then projects back to patches and reshapes
+    
+    Note: When use_coordinate_channel is enabled, in_channels=2 (data + vertical coords).
+    The output is always 1 channel (predicted noise for the data channel only).
     """
 
     def __init__(
         self,
         image_height: int = 128,
-        patch_size: int = 16,
+        patch_height: int = 16,
+        patch_width: int = 16,
         embed_dim: int = 256,
         depth: int = 6,
         num_heads: int = 8,
         dropout: float = 0.1,
+        in_channels: int = 1,
     ):
         super().__init__()
-        assert image_height % patch_size == 0, "image_height must be divisible by patch_size"
+        assert image_height % patch_height == 0, "image_height must be divisible by patch_height"
         self.image_height = image_height
-        self.patch_size = patch_size
+        self.patch_height = patch_height
+        self.patch_width = patch_width
         self.embed_dim = embed_dim
+        self.in_channels = in_channels
 
-        patch_dim = patch_size * patch_size  # single-channel input
+        # Patch dimension accounts for input channels
+        patch_dim = in_channels * patch_height * patch_width
+        # Output patch dimension is always 1 channel (predict noise for data only)
+        out_patch_dim = patch_height * patch_width
 
         # Patch projection
         self.patch_embed = nn.Linear(patch_dim, embed_dim)
@@ -87,8 +97,8 @@ class DiffusionTransformer(nn.Module):
         ])
         self.norm = nn.LayerNorm(embed_dim)
 
-        # Output projection back to patch
-        self.patch_out = nn.Linear(embed_dim, patch_dim)
+        # Output projection back to patch (always 1 channel output - predicted noise)
+        self.patch_out = nn.Linear(embed_dim, out_patch_dim)
 
     def _get_pos_embed(self, num_patches: int) -> torch.Tensor:
         # Slice learned positional embeddings to needed length
@@ -107,39 +117,49 @@ class DiffusionTransformer(nn.Module):
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Noisy future image (B, 1, H, W)
+            x: Noisy future image (B, C, H, W) where C=in_channels
             t: Timesteps (B,)
-            cond: Past context image (B, 1, H, W_past)
+            cond: Past context image (B, C, H, W_past) where C=in_channels
         Returns:
-            Noise prediction, same shape as x
+            Noise prediction of shape (B, 1, H, W) - always 1 channel
         """
         B, C, H, W = x.shape
-        p = self.patch_size
+        pH = self.patch_height
+        pW = self.patch_width
 
         # 1. Process X (noisy future)
-        # Pad width to multiple of patch size
-        pad_w_x = (p - W % p) % p
+        # Pad width to multiple of patch_width
+        pad_w_x = (pW - W % pW) % pW
         if pad_w_x > 0:
             x = F.pad(x, (0, pad_w_x, 0, 0), mode="reflect")
         _, _, _, Wp = x.shape
 
-        # Extract patches for x: (B, num_x, p*p)
-        x_patches = x.unfold(2, p, p).unfold(3, p, p)
-        x_patches = x_patches.contiguous().view(B, C, -1, p, p)
-        x_patches = x_patches.view(B, -1, p * p)
+        # Extract patches for x: (B, num_patches, C*pH*pW)
+        # unfold(dim, size, step): dim2=height, dim3=width
+        x_patches = x.unfold(2, pH, pH).unfold(3, pW, pW)
+        # Shape: (B, C, H//pH, Wp//pW, pH, pW)
+        nH_x = x_patches.shape[2]
+        nW_x = x_patches.shape[3]
+        # Reshape to (B, num_patches, C*pH*pW) to include all channels in patch
+        x_patches = x_patches.permute(0, 2, 3, 1, 4, 5).contiguous()
+        x_patches = x_patches.view(B, nH_x * nW_x, C * pH * pW)
         num_x = x_patches.shape[1]
 
-        # 2. Process Cond (clean past)
-        # Pad width to multiple of patch size
+        # 2. Process Cond (clean past with coordinate channel)
+        # Pad width to multiple of patch_width
         W_cond = cond.shape[3]
-        pad_w_cond = (p - W_cond % p) % p
+        pad_w_cond = (pW - W_cond % pW) % pW
         if pad_w_cond > 0:
             cond = F.pad(cond, (0, pad_w_cond, 0, 0), mode="reflect")
+        _, _, _, Wp_cond = cond.shape
         
-        # Extract patches for cond: (B, num_cond, p*p)
-        cond_patches = cond.unfold(2, p, p).unfold(3, p, p)
-        cond_patches = cond_patches.contiguous().view(B, C, -1, p, p)
-        cond_patches = cond_patches.view(B, -1, p * p)
+        # Extract patches for cond: (B, num_patches, C*pH*pW)
+        cond_patches = cond.unfold(2, pH, pH).unfold(3, pW, pW)
+        nH_cond = cond_patches.shape[2]
+        nW_cond = cond_patches.shape[3]
+        # Reshape to include all channels
+        cond_patches = cond_patches.permute(0, 2, 3, 1, 4, 5).contiguous()
+        cond_patches = cond_patches.view(B, nH_cond * nW_cond, C * pH * pW)
         num_cond = cond_patches.shape[1]
 
         # 3. Embed both
@@ -175,10 +195,10 @@ class DiffusionTransformer(nn.Module):
         # 9. Project back
         patch_out = self.patch_out(x_out_tokens)
 
-        # Reshape to image
-        patch_out = patch_out.view(B, H // p, Wp // p, p, p)
+        # Reshape to image: (B, nH_x, nW_x, pH, pW) -> (B, 1, H, Wp)
+        patch_out = patch_out.view(B, nH_x, nW_x, pH, pW)
         patch_out = patch_out.permute(0, 1, 3, 2, 4).contiguous()
-        patch_out = patch_out.view(B, 1, H, Wp)
+        patch_out = patch_out.view(B, 1, nH_x * pH, nW_x * pW)
 
         # Remove padding
         if pad_w_x > 0:

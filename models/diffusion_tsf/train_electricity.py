@@ -132,6 +132,9 @@ SEARCH_SPACE = None  # Will be set at runtime
 SELECTED_MODEL_TYPE = "unet"
 # Selected representation mode (stripe/pdf vs occupancy/cdf)
 SELECTED_REPR_MODE = "pdf"
+# Transformer patch sizes (set from CLI, default 16x16)
+TRANSFORMER_PATCH_HEIGHT = 16
+TRANSFORMER_PATCH_WIDTH = 16
 
 MODEL_SIZES = {
     'tiny': [32, 64],           # ~1M params, for quick tests only
@@ -468,6 +471,8 @@ def train(
         noise_schedule=config['noise_schedule'],
         ddim_steps=50,
         model_type=config.get('model_type', 'unet'),
+        transformer_patch_height=config.get('transformer_patch_height', TRANSFORMER_PATCH_HEIGHT),
+        transformer_patch_width=config.get('transformer_patch_width', TRANSFORMER_PATCH_WIDTH),
     )
     
     model = DiffusionTSF(model_config).to(device)
@@ -579,6 +584,8 @@ def objective(trial) -> float:
         'blur_sigma': trial.suggest_categorical('blur_sigma', SEARCH_SPACE['blur_sigma']),
         'emd_lambda': trial.suggest_categorical('emd_lambda', SEARCH_SPACE['emd_lambda']),
         'representation_mode': SELECTED_REPR_MODE,
+        'transformer_patch_height': TRANSFORMER_PATCH_HEIGHT,
+        'transformer_patch_width': TRANSFORMER_PATCH_WIDTH,
     }
     
     # Checkpoint for this trial
@@ -744,7 +751,7 @@ def train_with_best_params():
 # ============================================================================
 
 def main():
-    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE
+    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH
     
     parser = argparse.ArgumentParser(description='Train Diffusion TSF on Electricity dataset')
     parser.add_argument('--resume', action='store_true', help='Resume Optuna search')
@@ -755,6 +762,8 @@ def main():
     parser.add_argument('--blur-sigma', type=float, default=BLUR_SIGMA, help='Vertical blur sigma for preprocessing (label smoothing)')
     parser.add_argument('--emd-lambda', type=float, default=EMD_LAMBDA, help='Weight for EMD loss term')
     parser.add_argument('--repr-mode', choices=['pdf', 'cdf'], default='pdf', help='Representation: pdf (stripe) or cdf (occupancy)')
+    parser.add_argument('--patch-height', type=int, default=16, choices=[4, 8, 16, 32], help='Transformer patch height (value axis, default: 16)')
+    parser.add_argument('--patch-width', type=int, default=16, choices=[1, 2, 4, 8, 16, 32], help='Transformer patch width (time axis, default: 16). Smaller = finer temporal detail')
     args = parser.parse_args()
     
     # Check for optuna
@@ -779,7 +788,12 @@ def main():
     SELECTED_REPR_MODE = args.repr_mode
     # Set selected model type for downstream use
     SELECTED_MODEL_TYPE = args.model_type
+    # Set transformer patch sizes
+    TRANSFORMER_PATCH_HEIGHT = args.patch_height
+    TRANSFORMER_PATCH_WIDTH = args.patch_width
     logger.info(f"Search space: batch_sizes={SEARCH_SPACE['batch_size']}, model_sizes={SEARCH_SPACE['model_size']}")
+    if args.model_type == 'transformer':
+        logger.info(f"Transformer patch size: {TRANSFORMER_PATCH_HEIGHT}x{TRANSFORMER_PATCH_WIDTH} (HxW)")
     
     if args.quick:
         # Quick test mode - minimal settings for fast verification
@@ -794,6 +808,8 @@ def main():
             'model_type': args.model_type,
             'blur_sigma': args.blur_sigma,
             'emd_lambda': args.emd_lambda,
+            'transformer_patch_height': args.patch_height,
+            'transformer_patch_width': args.patch_width,
         }
         
         # Use tiny dataset for quick test
@@ -830,7 +846,9 @@ def main():
             unet_channels=[16, 32], num_res_blocks=1, attention_levels=[1],
             num_diffusion_steps=50, ddim_steps=5, model_type=args.model_type,
             blur_sigma=args.blur_sigma, emd_lambda=args.emd_lambda,
-            representation_mode=args.repr_mode
+            representation_mode=args.repr_mode,
+            transformer_patch_height=min(args.patch_height, 8),  # Use smaller patch for tiny test
+            transformer_patch_width=min(args.patch_width, 8),
         )
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         model = DiffusionTSF(tiny_config).to(device)

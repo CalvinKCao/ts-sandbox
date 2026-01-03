@@ -95,8 +95,12 @@ class DiffusionTSFConfig:
     transformer_embed_dim: int = 256
     transformer_depth: int = 6
     transformer_num_heads: int = 8
-    transformer_patch_size: int = 16
+    transformer_patch_height: int = 16  # Patch size along value axis
+    transformer_patch_width: int = 16   # Patch size along time axis
     transformer_dropout: float = 0.1
+    
+    # Spatial coordinate channel for vertical awareness
+    use_coordinate_channel: bool = True  # Concatenate vertical gradient to input
     
     # Training
     learning_rate: float = 2e-4

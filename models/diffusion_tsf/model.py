@@ -183,18 +183,23 @@ class DiffusionTSF(nn.Module):
         )
         
         # Noise prediction backbone (U-Net or Transformer)
+        # Input channels: 1 (data) + 1 (coordinate channel if enabled)
+        backbone_in_channels = 2 if config.use_coordinate_channel else 1
+        
         if config.model_type == "transformer":
             self.noise_predictor = DiffusionTransformer(
                 image_height=config.image_height,
-                patch_size=config.transformer_patch_size,
+                patch_height=config.transformer_patch_height,
+                patch_width=config.transformer_patch_width,
                 embed_dim=config.transformer_embed_dim,
                 depth=config.transformer_depth,
                 num_heads=config.transformer_num_heads,
                 dropout=config.transformer_dropout,
+                in_channels=backbone_in_channels,
             )
         else:
             self.noise_predictor = ConditionalUNet2D(
-                in_channels=1,
+                in_channels=backbone_in_channels,
                 out_channels=1,
                 channels=config.unet_channels,
                 num_res_blocks=config.num_res_blocks,
@@ -214,12 +219,67 @@ class DiffusionTSF(nn.Module):
         logger.info(f"  Lookback: {config.lookback_length}, Forecast: {config.forecast_length}")
         logger.info(f"  Image size: {config.image_height} x W")
         logger.info(f"  Diffusion steps: {config.num_diffusion_steps}")
+        logger.info(f"  Coordinate channel: {config.use_coordinate_channel}")
     
     def to(self, device):
         """Move model and scheduler to device."""
         super().to(device)
         self.scheduler = self.scheduler.to(device)
         return self
+    
+    def _get_coordinate_grid(
+        self,
+        batch_size: int,
+        height: int,
+        width: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32
+    ) -> torch.Tensor:
+        """Create a vertical coordinate gradient map.
+        
+        The gradient goes from +1.0 at the top (index 0) to -1.0 at the bottom.
+        This provides the backbone with explicit vertical position information,
+        helping it distinguish between high and low value regions.
+        
+        Args:
+            batch_size: Batch size for the output tensor
+            height: Height of the coordinate map
+            width: Width of the coordinate map
+            device: Device to place the tensor on
+            dtype: Data type of the tensor
+            
+        Returns:
+            Tensor of shape (batch_size, 1, height, width) with vertical gradient
+        """
+        # Create vertical gradient: +1 at top (y=0), -1 at bottom (y=height-1)
+        # This matches the convention where top = high values, bottom = low values
+        y_coords = torch.linspace(1.0, -1.0, height, device=device, dtype=dtype)
+        
+        # Expand to (1, 1, height, 1) then broadcast to (batch_size, 1, height, width)
+        coord_grid = y_coords.view(1, 1, height, 1).expand(batch_size, 1, height, width)
+        
+        return coord_grid
+    
+    def _inject_coordinate_channel(
+        self,
+        x: torch.Tensor
+    ) -> torch.Tensor:
+        """Concatenate vertical coordinate channel to input tensor.
+        
+        Args:
+            x: Input tensor of shape (batch, channels, height, width)
+            
+        Returns:
+            Tensor of shape (batch, channels+1, height, width) with coordinate channel
+        """
+        if not self.config.use_coordinate_channel:
+            return x
+        
+        batch_size, _, height, width = x.shape
+        coord_grid = self._get_coordinate_grid(
+            batch_size, height, width, x.device, x.dtype
+        )
+        return torch.cat([x, coord_grid], dim=1)
     
     def _normalize_sequence(
         self,
@@ -597,8 +657,12 @@ class DiffusionTSF(nn.Module):
         # Add noise to future
         noisy_future, noise = self.scheduler.add_noise(future_2d, t)
         
+        # Inject vertical coordinate channel for spatial awareness
+        noisy_future_with_coords = self._inject_coordinate_channel(noisy_future)
+        past_2d_with_coords = self._inject_coordinate_channel(past_2d)
+        
         # Predict noise
-        noise_pred = self.noise_predictor(noisy_future, t, past_2d)
+        noise_pred = self.noise_predictor(noisy_future_with_coords, t, past_2d_with_coords)
         
         # L2 loss on noise
         noise_loss = F.mse_loss(noise_pred, noise)
@@ -668,10 +732,17 @@ class DiffusionTSF(nn.Module):
         # Encode past to 2D
         past_2d = self.encode_to_2d(past_norm)
         
-        # Create null conditioning for CFG (zeros)
-        null_cond = torch.zeros_like(past_2d) if cfg_scale > 1.0 else None
+        # Inject coordinate channel into past conditioning
+        past_2d_with_coords = self._inject_coordinate_channel(past_2d)
         
-        # Shape for future image
+        # Create null conditioning for CFG (zeros) - also with coordinate channel
+        if cfg_scale > 1.0:
+            null_cond = torch.zeros_like(past_2d)
+            null_cond_with_coords = self._inject_coordinate_channel(null_cond)
+        else:
+            null_cond_with_coords = None
+        
+        # Shape for future image (without coordinate channel - that gets added by wrapper)
         future_shape = (
             batch_size,
             1,
@@ -679,13 +750,20 @@ class DiffusionTSF(nn.Module):
             self.config.forecast_length
         )
         
+        # Create a wrapper that injects coordinate channel before calling the backbone
+        def model_with_coords(x, t, cond):
+            # x is the noisy future (B, 1, H, W), inject coords
+            x_with_coords = self._inject_coordinate_channel(x)
+            # cond already has coords injected
+            return self.noise_predictor(x_with_coords, t, cond)
+        
         # Generate via diffusion with CFG
         if use_ddim:
             future_2d = self.scheduler.sample_ddim_cfg(
-                model=self.noise_predictor,
+                model=model_with_coords,
                 shape=future_shape,
-                cond=past_2d,
-                null_cond=null_cond,
+                cond=past_2d_with_coords,
+                null_cond=null_cond_with_coords,
                 cfg_scale=cfg_scale,
                 num_steps=num_ddim_steps,
                 eta=eta,
@@ -694,10 +772,10 @@ class DiffusionTSF(nn.Module):
             )
         else:
             future_2d = self.scheduler.sample_ddpm_cfg(
-                model=self.noise_predictor,
+                model=model_with_coords,
                 shape=future_shape,
-                cond=past_2d,
-                null_cond=null_cond,
+                cond=past_2d_with_coords,
+                null_cond=null_cond_with_coords,
                 cfg_scale=cfg_scale,
                 device=device,
                 verbose=verbose

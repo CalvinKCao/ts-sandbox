@@ -254,13 +254,15 @@ class ConditioningEncoder(nn.Module):
     Uses a combination of:
     1. Local features via CNN
     2. Global temporal context via pooling + broadcast
+    
+    Note: When use_coordinate_channel is enabled, in_channels=2 (data + vertical coords).
     """
     
     def __init__(self, in_channels: int = 1, out_channels: int = 64, height: int = 128):
         super().__init__()
         self.out_channels = out_channels
         
-        # Local feature encoder
+        # Local feature encoder - now handles variable input channels
         self.local_encoder = nn.Sequential(
             nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
             nn.SiLU(),
@@ -316,6 +318,9 @@ class ConditionalUNet2D(nn.Module):
     
     Conditioning is done via simple channel-wise concatenation:
     Input = [noisy_future, past_context_features] along channel dim
+    
+    Note: When use_coordinate_channel is enabled, in_channels=2 (data + vertical coords).
+    The output is always 1 channel (predicted noise for the data channel only).
     """
     
     def __init__(
@@ -332,8 +337,8 @@ class ConditionalUNet2D(nn.Module):
     ):
         """
         Args:
-            in_channels: Number of input channels (1 for grayscale)
-            out_channels: Number of output channels (1 for noise prediction)
+            in_channels: Number of input channels (1 for grayscale, 2 with coordinate channel)
+            out_channels: Number of output channels (always 1 for noise prediction)
             channels: Channel dimensions at each U-Net level
             num_res_blocks: Number of residual blocks per level
             attention_levels: Which levels to apply self-attention (0-indexed)
@@ -356,7 +361,8 @@ class ConditionalUNet2D(nn.Module):
         )
         
         # Conditioning encoder with proper height
-        self.cond_encoder = ConditioningEncoder(in_channels=1, out_channels=cond_channels, height=image_height)
+        # Uses same in_channels as main input (handles coordinate channel if present)
+        self.cond_encoder = ConditioningEncoder(in_channels=in_channels, out_channels=cond_channels, height=image_height)
         
         # Initial convolution
         # Input: noisy_future (in_channels) + cond_features (cond_channels)

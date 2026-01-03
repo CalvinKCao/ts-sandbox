@@ -79,11 +79,17 @@ def visualize_samples(
             'transformer_embed_dim',
             'transformer_depth',
             'transformer_num_heads',
-            'transformer_patch_size',
+            'transformer_patch_height',
+            'transformer_patch_width',
             'transformer_dropout',
         ]:
             if k in config_dict:
                 setattr(model_config, k, config_dict[k])
+        # Handle legacy checkpoints with single patch_size
+        if 'transformer_patch_size' in config_dict and 'transformer_patch_height' not in config_dict:
+            legacy_size = config_dict['transformer_patch_size']
+            model_config.transformer_patch_height = legacy_size
+            model_config.transformer_patch_width = legacy_size
     
     # Handle legacy checkpoints (keys prefixed with "unet.")
     state_dict = checkpoint['model_state_dict']
@@ -140,13 +146,16 @@ def visualize_samples(
     if total_samples <= num_samples:
         indices = list(range(total_samples))
     else:
-        # Use linspace to get evenly spaced indices across the full dataset
+        # Use linspace to get evenly spaced indices across the validation dataset
         indices = np.linspace(0, total_samples - 1, num_samples, dtype=int).tolist()
-    
-    print(f"Generating {num_samples} visualizations...")
+
+    print(f"Generating {num_samples} visualizations from validation set...")
+    print(f"  Dataset split: {len(base_dataset)} total samples -> {len(val_dataset)} validation samples")
     print(f"  Model config: {model_size} model, {model_config.representation_mode} mode")
     print(f"  Attention levels: {attention_levels}, Res blocks: {num_res_blocks}")
-    
+    print(f"  Sampling indices (within val_dataset): {indices}")
+    print(f"  Corresponding original dataset indices: {[val_subset.indices[i] for i in indices]}")
+
     os.makedirs(output_dir, exist_ok=True)
     
     for i, idx in enumerate(indices):
