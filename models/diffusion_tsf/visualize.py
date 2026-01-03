@@ -118,7 +118,8 @@ def visualize_samples(
     
     print(f"Generating {num_samples} visualizations...")
     
-    os.makedirs('visualizations', exist_ok=True)
+    output_dir = kwargs.get('output_dir', 'visualizations')
+    os.makedirs(output_dir, exist_ok=True)
     
     for i, idx in enumerate(indices):
         past, future = val_dataset[idx]
@@ -177,7 +178,7 @@ def visualize_samples(
         
         plt.tight_layout()
         
-        save_path = f"visualizations/sample_{i+1}_full.png"
+        save_path = f"{output_dir}/sample_{i+1}_full.png"
         plt.savefig(save_path, dpi=150)
         plt.close()
         print(f"  Saved {save_path}")
@@ -225,6 +226,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-path", type=str, default=None, help="Path to checkpoint (.pt). If not set, auto-discover best_model.pt")
     parser.add_argument("--data", type=str, default=os.path.join(script_dir, "../../datasets/electricity/electricity.csv"), help="Path to dataset CSV")
     parser.add_argument("--num-samples", type=int, default=5, help="Number of samples to visualize")
+    parser.add_argument("--output-dir", type=str, default="visualizations", help="Directory to save visualizations")
     parser.add_argument("--decoder-method", type=str, choices=["mean", "median", "mode", "beam"], default="mean", help="Decoding method for CDF occupancy maps")
     # Beam search parameters
     parser.add_argument("--beam-width", type=int, default=5, help="Beam width for beam search decoder")
@@ -245,6 +247,7 @@ if __name__ == "__main__":
             model_path,
             args.data,
             num_samples=args.num_samples,
+            output_dir=args.output_dir,
             decoder_method=args.decoder_method,
             beam_width=args.beam_width,
             jump_penalty_scale=args.jump_penalty,

@@ -74,9 +74,8 @@ class DiffusionTransformer(nn.Module):
         # Positional embeddings (learned)
         self.pos_embed = nn.Parameter(torch.zeros(1, 4096, embed_dim))  # large max, will slice
 
-        # Time and context projections
+        # Time projection
         self.time_proj = nn.Linear(embed_dim, embed_dim)
-        self.context_proj = nn.Linear(embed_dim, embed_dim)
 
         # Transformer blocks
         self.blocks = nn.ModuleList([
