@@ -62,13 +62,17 @@ class ResidualBlock(nn.Module):
         out_channels: int,
         time_emb_dim: int,
         num_groups: int = 8,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        kernel_size: Tuple[int, int] = (3, 3)
     ):
         super().__init__()
         
+        # Calculate padding for 'same' output size: padding = (kernel_size - 1) // 2
+        padding = (kernel_size[0] // 2, kernel_size[1] // 2)
+        
         # First convolution block
         self.norm1 = nn.GroupNorm(num_groups, in_channels)
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
         
         # Time embedding projection
         self.time_mlp = nn.Sequential(
@@ -79,7 +83,7 @@ class ResidualBlock(nn.Module):
         # Second convolution block
         self.norm2 = nn.GroupNorm(num_groups, out_channels)
         self.dropout = nn.Dropout(dropout)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding=padding)
         
         # Skip connection (identity or 1x1 conv if channels change)
         if in_channels != out_channels:
@@ -127,7 +131,8 @@ class DownBlock(nn.Module):
         time_emb_dim: int,
         num_res_blocks: int = 2,
         use_attention: bool = False,
-        num_groups: int = 8
+        num_groups: int = 8,
+        kernel_size: Tuple[int, int] = (3, 3)
     ):
         super().__init__()
         
@@ -135,7 +140,7 @@ class DownBlock(nn.Module):
         for i in range(num_res_blocks):
             in_ch = in_channels if i == 0 else out_channels
             self.res_blocks.append(
-                ResidualBlock(in_ch, out_channels, time_emb_dim, num_groups)
+                ResidualBlock(in_ch, out_channels, time_emb_dim, num_groups, kernel_size=kernel_size)
             )
         
         # Simple self-attention (optional)
@@ -144,8 +149,10 @@ class DownBlock(nn.Module):
             self.attention = nn.MultiheadAttention(out_channels, num_heads=4, batch_first=True)
             self.attn_norm = nn.GroupNorm(num_groups, out_channels)
         
-        # Downsample: 2x2 average pooling or strided conv
-        self.downsample = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=2, padding=1)
+        # Downsample: strided conv with same kernel proportions
+        # Padding calculated for output size = ceil(input_size / 2)
+        downsample_padding = (kernel_size[0] // 2, kernel_size[1] // 2)
+        self.downsample = nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, stride=2, padding=downsample_padding)
     
     def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -180,19 +187,23 @@ class UpBlock(nn.Module):
         time_emb_dim: int,
         num_res_blocks: int = 2,
         use_attention: bool = False,
-        num_groups: int = 8
+        num_groups: int = 8,
+        kernel_size: Tuple[int, int] = (3, 3)
     ):
         super().__init__()
         
-        # Upsample
-        self.upsample = nn.ConvTranspose2d(in_channels, in_channels, kernel_size=4, stride=2, padding=1)
+        # Upsample: use transposed conv with kernel = stride * 2 to avoid checkerboard artifacts
+        # For stride=2, kernel=(4,4) or proportional rectangular version
+        upsample_kernel = (kernel_size[0] + 1, kernel_size[1] + 1)  # Slightly larger for smooth upsampling
+        upsample_padding = (upsample_kernel[0] // 4, upsample_kernel[1] // 4)  # Adjusted padding
+        self.upsample = nn.ConvTranspose2d(in_channels, in_channels, kernel_size=upsample_kernel, stride=2, padding=1)
         
         self.res_blocks = nn.ModuleList()
         for i in range(num_res_blocks):
             # First block takes concatenated features
             in_ch = in_channels + skip_channels if i == 0 else out_channels
             self.res_blocks.append(
-                ResidualBlock(in_ch, out_channels, time_emb_dim, num_groups)
+                ResidualBlock(in_ch, out_channels, time_emb_dim, num_groups, kernel_size=kernel_size)
             )
         
         # Simple self-attention (optional)
@@ -227,12 +238,12 @@ class UpBlock(nn.Module):
 class MiddleBlock(nn.Module):
     """Middle block: ResBlock + Attention + ResBlock."""
     
-    def __init__(self, channels: int, time_emb_dim: int, num_groups: int = 8):
+    def __init__(self, channels: int, time_emb_dim: int, num_groups: int = 8, kernel_size: Tuple[int, int] = (3, 3)):
         super().__init__()
-        self.res1 = ResidualBlock(channels, channels, time_emb_dim, num_groups)
+        self.res1 = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
         self.attention = nn.MultiheadAttention(channels, num_heads=4, batch_first=True)
         self.attn_norm = nn.GroupNorm(num_groups, channels)
-        self.res2 = ResidualBlock(channels, channels, time_emb_dim, num_groups)
+        self.res2 = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
     
     def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
         x = self.res1(x, t_emb)
@@ -258,26 +269,32 @@ class ConditioningEncoder(nn.Module):
     Note: When use_coordinate_channel is enabled, in_channels=2 (data + vertical coords).
     """
     
-    def __init__(self, in_channels: int = 1, out_channels: int = 64, height: int = 128):
+    def __init__(self, in_channels: int = 1, out_channels: int = 64, height: int = 128, kernel_size: Tuple[int, int] = (3, 3)):
         super().__init__()
         self.out_channels = out_channels
         
+        # Calculate padding for 'same' output size
+        padding = (kernel_size[0] // 2, kernel_size[1] // 2)
+        
         # Local feature encoder - now handles variable input channels
         self.local_encoder = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels, 32, kernel_size=kernel_size, padding=padding),
             nn.SiLU(),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.Conv2d(32, 64, kernel_size=kernel_size, padding=padding),
             nn.SiLU(),
-            nn.Conv2d(64, out_channels // 2, kernel_size=3, padding=1),
+            nn.Conv2d(64, out_channels // 2, kernel_size=kernel_size, padding=padding),
         )
         
         # Global context encoder: pool over time, then project
         # This captures the overall pattern of the past without losing it to interpolation
+        # Uses height dimension of kernel only (width=1 for pooled temporal dimension)
         self.global_pool = nn.AdaptiveAvgPool2d((height, 1))  # Pool temporal dim to 1
+        global_kernel = (kernel_size[0], 1)  # Only vertical kernel for global features
+        global_padding = (kernel_size[0] // 2, 0)
         self.global_proj = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=(3, 1), padding=(1, 0)),
+            nn.Conv2d(in_channels, 32, kernel_size=global_kernel, padding=global_padding),
             nn.SiLU(),
-            nn.Conv2d(32, out_channels // 2, kernel_size=(3, 1), padding=(1, 0)),
+            nn.Conv2d(32, out_channels // 2, kernel_size=global_kernel, padding=global_padding),
         )
     
     def forward(self, x: torch.Tensor, target_width: int) -> torch.Tensor:
@@ -333,7 +350,8 @@ class ConditionalUNet2D(nn.Module):
         time_emb_dim: int = 256,
         cond_channels: int = 64,
         num_groups: int = 8,
-        image_height: int = 128
+        image_height: int = 128,
+        kernel_size: Tuple[int, int] = (3, 3)
     ):
         """
         Args:
@@ -346,12 +364,19 @@ class ConditionalUNet2D(nn.Module):
             cond_channels: Number of channels from conditioning encoder
             num_groups: Number of groups for GroupNorm
             image_height: Height of the 2D image representation
+            kernel_size: Tuple (height, width) for convolutional kernels.
+                         Allows rectangular kernels (e.g., (3, 5) for 3 height, 5 width).
+                         Height = value axis, Width = temporal axis.
         """
         super().__init__()
         
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.channels = channels
+        self.kernel_size = kernel_size
+        
+        # Calculate padding for 'same' output size
+        padding = (kernel_size[0] // 2, kernel_size[1] // 2)
         
         # Time embedding network
         self.time_mlp = nn.Sequential(
@@ -360,13 +385,15 @@ class ConditionalUNet2D(nn.Module):
             nn.Linear(time_emb_dim * 4, time_emb_dim)
         )
         
-        # Conditioning encoder with proper height
+        # Conditioning encoder with proper height and kernel size
         # Uses same in_channels as main input (handles coordinate channel if present)
-        self.cond_encoder = ConditioningEncoder(in_channels=in_channels, out_channels=cond_channels, height=image_height)
+        self.cond_encoder = ConditioningEncoder(
+            in_channels=in_channels, out_channels=cond_channels, height=image_height, kernel_size=kernel_size
+        )
         
-        # Initial convolution
+        # Initial convolution with configurable kernel size
         # Input: noisy_future (in_channels) + cond_features (cond_channels)
-        self.init_conv = nn.Conv2d(in_channels + cond_channels, channels[0], kernel_size=3, padding=1)
+        self.init_conv = nn.Conv2d(in_channels + cond_channels, channels[0], kernel_size=kernel_size, padding=padding)
         
         # Downsampling path
         self.down_blocks = nn.ModuleList()
@@ -374,12 +401,12 @@ class ConditionalUNet2D(nn.Module):
         for i, out_ch in enumerate(channels[1:]):
             use_attn = i in attention_levels
             self.down_blocks.append(
-                DownBlock(in_ch, out_ch, time_emb_dim, num_res_blocks, use_attn, num_groups)
+                DownBlock(in_ch, out_ch, time_emb_dim, num_res_blocks, use_attn, num_groups, kernel_size=kernel_size)
             )
             in_ch = out_ch
         
         # Middle block
-        self.middle = MiddleBlock(channels[-1], time_emb_dim, num_groups)
+        self.middle = MiddleBlock(channels[-1], time_emb_dim, num_groups, kernel_size=kernel_size)
         
         # Upsampling path
         # Skip connections come from down blocks and have the same channels as the down block output
@@ -393,14 +420,14 @@ class ConditionalUNet2D(nn.Module):
             skip_ch = reversed_channels[i]  # Skip channels match the down block's output (= in_ch)
             use_attn = (len(channels) - 2 - i) in attention_levels
             self.up_blocks.append(
-                UpBlock(in_ch, out_ch, skip_ch, time_emb_dim, num_res_blocks, use_attn, num_groups)
+                UpBlock(in_ch, out_ch, skip_ch, time_emb_dim, num_res_blocks, use_attn, num_groups, kernel_size=kernel_size)
             )
         
-        # Final convolution
+        # Final convolution with configurable kernel size
         self.final_norm = nn.GroupNorm(num_groups, channels[0])
-        self.final_conv = nn.Conv2d(channels[0], out_channels, kernel_size=3, padding=1)
+        self.final_conv = nn.Conv2d(channels[0], out_channels, kernel_size=kernel_size, padding=padding)
         
-        logger.info(f"ConditionalUNet2D initialized with channels={channels}")
+        logger.info(f"ConditionalUNet2D initialized with channels={channels}, kernel_size={kernel_size}")
     
     def forward(
         self,

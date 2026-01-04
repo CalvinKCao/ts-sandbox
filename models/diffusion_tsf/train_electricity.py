@@ -135,6 +135,8 @@ SELECTED_REPR_MODE = "pdf"
 # Transformer patch sizes (set from CLI, default 16x16)
 TRANSFORMER_PATCH_HEIGHT = 16
 TRANSFORMER_PATCH_WIDTH = 16
+# U-Net kernel size (height, width) - set from CLI
+UNET_KERNEL_SIZE = (3, 3)
 
 MODEL_SIZES = {
     'tiny': [32, 64],           # ~1M params, for quick tests only
@@ -474,6 +476,7 @@ def train(
         transformer_patch_height=config.get('transformer_patch_height', TRANSFORMER_PATCH_HEIGHT),
         transformer_patch_width=config.get('transformer_patch_width', TRANSFORMER_PATCH_WIDTH),
         use_coordinate_channel=config.get('use_coordinate_channel', True),
+        unet_kernel_size=config.get('unet_kernel_size', UNET_KERNEL_SIZE),
     )
     
     model = DiffusionTSF(model_config).to(device)
@@ -588,6 +591,7 @@ def objective(trial) -> float:
         'transformer_patch_height': TRANSFORMER_PATCH_HEIGHT,
         'transformer_patch_width': TRANSFORMER_PATCH_WIDTH,
         'use_coordinate_channel': True,  # Enable vertical spatial awareness
+        'unet_kernel_size': UNET_KERNEL_SIZE,
     }
     
     # Checkpoint for this trial
@@ -753,7 +757,7 @@ def train_with_best_params():
 # ============================================================================
 
 def main():
-    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH
+    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE
     
     parser = argparse.ArgumentParser(description='Train Diffusion TSF on Electricity dataset')
     parser.add_argument('--resume', action='store_true', help='Resume Optuna search')
@@ -766,6 +770,9 @@ def main():
     parser.add_argument('--repr-mode', choices=['pdf', 'cdf'], default='pdf', help='Representation: pdf (stripe) or cdf (occupancy)')
     parser.add_argument('--patch-height', type=int, default=16, choices=[4, 8, 16, 32], help='Transformer patch height (value axis, default: 16)')
     parser.add_argument('--patch-width', type=int, default=16, choices=[1, 2, 4, 8, 16, 32], help='Transformer patch width (time axis, default: 16). Smaller = finer temporal detail')
+    parser.add_argument('--kernel-size', type=int, nargs=2, default=[3, 3], metavar=('H', 'W'),
+                        help='U-Net conv kernel size as (height, width). Height=value axis, Width=time axis. '
+                             'E.g., --kernel-size 3 5 for wider temporal receptive field. Must be odd numbers. (default: 3 3)')
     args = parser.parse_args()
     
     # Check for optuna
@@ -793,7 +800,11 @@ def main():
     # Set transformer patch sizes
     TRANSFORMER_PATCH_HEIGHT = args.patch_height
     TRANSFORMER_PATCH_WIDTH = args.patch_width
+    # Set U-Net kernel size
+    UNET_KERNEL_SIZE = tuple(args.kernel_size)
     logger.info(f"Search space: batch_sizes={SEARCH_SPACE['batch_size']}, model_sizes={SEARCH_SPACE['model_size']}")
+    if args.model_type == 'unet':
+        logger.info(f"U-Net kernel size: {UNET_KERNEL_SIZE} (height x width)")
     if args.model_type == 'transformer':
         logger.info(f"Transformer patch size: {TRANSFORMER_PATCH_HEIGHT}x{TRANSFORMER_PATCH_WIDTH} (HxW)")
     
@@ -813,6 +824,7 @@ def main():
             'transformer_patch_height': args.patch_height,
             'transformer_patch_width': args.patch_width,
             'use_coordinate_channel': True,  # Enable vertical spatial awareness
+            'unet_kernel_size': UNET_KERNEL_SIZE,
         }
         
         # Use tiny dataset for quick test
@@ -853,6 +865,7 @@ def main():
             transformer_patch_height=min(args.patch_height, 8),  # Use smaller patch for tiny test
             transformer_patch_width=min(args.patch_width, 8),
             use_coordinate_channel=config.get('use_coordinate_channel', True),
+            unet_kernel_size=UNET_KERNEL_SIZE,
         )
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         model = DiffusionTSF(tiny_config).to(device)

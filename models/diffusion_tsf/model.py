@@ -204,7 +204,8 @@ class DiffusionTSF(nn.Module):
                 channels=config.unet_channels,
                 num_res_blocks=config.num_res_blocks,
                 attention_levels=config.attention_levels,
-                image_height=config.image_height
+                image_height=config.image_height,
+                kernel_size=config.unet_kernel_size
             )
         
         # Diffusion scheduler (not a nn.Module, managed separately)
@@ -220,6 +221,8 @@ class DiffusionTSF(nn.Module):
         logger.info(f"  Image size: {config.image_height} x W")
         logger.info(f"  Diffusion steps: {config.num_diffusion_steps}")
         logger.info(f"  Coordinate channel: {config.use_coordinate_channel}")
+        if config.model_type == "unet":
+            logger.info(f"  U-Net kernel size: {config.unet_kernel_size}")
     
     def to(self, device):
         """Move model and scheduler to device."""

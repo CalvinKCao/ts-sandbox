@@ -59,6 +59,12 @@ class DiffusionTSFConfig:
     num_res_blocks: int = 2
     attention_levels: List[int] = field(default_factory=lambda: [1, 2])  # Apply attention at deeper levels
     
+    # U-Net kernel size configuration - allows rectangular kernels
+    # Can be int (square) or tuple (height, width) for rectangular kernels
+    # Height = value axis, Width = temporal axis
+    # Example: (3, 5) uses 3-pixel height (value) and 5-pixel width (time)
+    unet_kernel_size: Tuple[int, int] = (3, 3)  # Default square 3x3
+    
     # Diffusion parameters
     num_diffusion_steps: int = 1000
     beta_start: float = 1e-4
@@ -116,6 +122,10 @@ class DiffusionTSFConfig:
         assert 0 <= self.cutout_prob <= 1, "cutout_prob must be in [0, 1]"
         assert self.cutout_min_masks > 0 and self.cutout_max_masks >= self.cutout_min_masks, "Invalid cutout mask counts"
         assert self.representation_mode in ["pdf", "cdf"], "representation_mode must be 'pdf' or 'cdf'"
+        # Validate kernel size
+        kh, kw = self.unet_kernel_size
+        assert kh > 0 and kw > 0, "unet_kernel_size dimensions must be positive"
+        assert kh % 2 == 1 and kw % 2 == 1, "unet_kernel_size dimensions must be odd for symmetric padding"
     
     @property
     def bin_width(self) -> float:
