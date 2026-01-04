@@ -125,37 +125,45 @@ class TimeSeriesTo2D(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Convert 1D time series to 2D binary stripe image.
         
+        Supports both univariate and multivariate inputs:
+        - Univariate: (batch, seq_len) -> (batch, 1, height, seq_len)
+        - Multivariate: (batch, num_vars, seq_len) -> (batch, num_vars, height, seq_len)
+        
         Args:
-            x: Normalized time series of shape (batch, seq_len)
+            x: Normalized time series of shape (batch, seq_len) or (batch, num_vars, seq_len)
             
         Returns:
-            Binary image of shape (batch, 1, height, seq_len)
-            Each column has exactly one 1 (one-hot along height)
+            Binary image of shape (batch, num_vars, height, seq_len)
+            Each column has exactly one 1 (one-hot along height) per variable
         """
-        batch_size, seq_len = x.shape
+        # Handle univariate case: (batch, seq_len) -> (batch, 1, seq_len)
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        
+        batch_size, num_vars, seq_len = x.shape
         
         # Clip values to [-MS, MS] range
         x_clipped = torch.clamp(x, -self.max_scale, self.max_scale)
         
-        # Calculate bin indices
+        # Calculate bin indices: (batch, num_vars, seq_len)
         # Formula: y = (x + MS) / (2*MS) * H, then clip to [0, H-1]
-        # This maps [-MS, MS] -> [0, H]
         bin_indices = ((x_clipped + self.max_scale) / (2 * self.max_scale) * self.height)
         bin_indices = torch.clamp(bin_indices.long(), 0, self.height - 1)
         
         if self.representation_mode == "pdf":
             # Create one-hot encoding along height dimension
-            # Shape: (batch, seq_len, height)
+            # Shape: (batch, num_vars, seq_len, height)
             one_hot = F.one_hot(bin_indices, num_classes=self.height).float()
             
-            # Reshape to (batch, 1, height, seq_len)
-            # Transpose to put height before seq_len
-            image = one_hot.permute(0, 2, 1).unsqueeze(1)
+            # Reshape to (batch, num_vars, height, seq_len)
+            image = one_hot.permute(0, 1, 3, 2)
         else:
             # Occupancy/CDF: fill all pixels <= bin index
-            height_range = torch.arange(self.height, device=x.device).view(1, self.height, 1)
-            filled = (height_range <= bin_indices.unsqueeze(1)).float()
-            image = filled.unsqueeze(1)
+            # height_range: (1, 1, height, 1) for broadcasting
+            height_range = torch.arange(self.height, device=x.device).view(1, 1, self.height, 1)
+            # bin_indices: (batch, num_vars, 1, seq_len) for broadcasting
+            filled = (height_range <= bin_indices.unsqueeze(2)).float()
+            image = filled
         
         logger.debug(f"TimeSeriesTo2D: input {x.shape} -> output {image.shape}")
         return image
@@ -165,35 +173,42 @@ class TimeSeriesTo2D(nn.Module):
         
         Uses expectation: x_t = sum_j P(j) * center(j)
         
+        Supports both univariate and multivariate:
+        - Univariate: (batch, 1, height, seq_len) -> (batch, seq_len)
+        - Multivariate: (batch, num_vars, height, seq_len) -> (batch, num_vars, seq_len)
+        
         Args:
-            image: Probability image of shape (batch, 1, height, seq_len)
+            image: Probability image of shape (batch, num_vars, height, seq_len)
                    Each column should be a valid probability distribution
             
         Returns:
-            Time series of shape (batch, seq_len)
+            Time series of shape (batch, num_vars, seq_len) or (batch, seq_len) if univariate
         """
-        # Remove channel dimension: (batch, height, seq_len)
-        if image.dim() == 4:
-            image = image.squeeze(1)
+        batch_size, num_vars, height, seq_len = image.shape
+        squeeze_output = (num_vars == 1)
         
         if self.representation_mode == "pdf":
             # Normalize each column to be a probability distribution
-            # (in case it's not already normalized)
-            prob = F.softmax(image, dim=1)  # Softmax along height
+            # Softmax along height (dim=2)
+            prob = F.softmax(image, dim=2)
             
             # Compute expectation: sum_j P(j) * center(j)
-            # bin_centers: (height,) -> (1, height, 1)
-            centers = self.bin_centers.view(1, -1, 1)
+            # bin_centers: (height,) -> (1, 1, height, 1)
+            centers = self.bin_centers.view(1, 1, -1, 1)
             
-            # Weighted sum: (batch, seq_len)
-            x = (prob * centers).sum(dim=1)
+            # Weighted sum: (batch, num_vars, seq_len)
+            x = (prob * centers).sum(dim=2)
         else:
             # Occupancy/CDF: value is the column sum mapped back to normalized range
             occupancy = torch.clamp(image, min=0.0)
-            column_sum = occupancy.sum(dim=1)
+            column_sum = occupancy.sum(dim=2)  # Sum along height
             column_sum = torch.clamp(column_sum, 0.0, float(self.height))
             normalized = column_sum / float(self.height)
             x = normalized * (2 * self.max_scale) - self.max_scale
+        
+        # For backwards compatibility, squeeze if univariate
+        if squeeze_output:
+            x = x.squeeze(1)
         
         logger.debug(f"TimeSeriesTo2D.inverse: input {image.shape} -> output {x.shape}")
         return x

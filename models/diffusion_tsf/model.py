@@ -185,14 +185,9 @@ class DiffusionTSF(nn.Module):
         )
         
         # Noise prediction backbone (U-Net or Transformer)
-        # Input channels: 1 (data) + 1 (vertical coord if enabled) + 1 (time ramp if enabled) + 1 (time sine if enabled)
-        backbone_in_channels = 1
-        if config.use_coordinate_channel:
-            backbone_in_channels += 1
-        if config.use_time_ramp:
-            backbone_in_channels += 1
-        if config.use_time_sine:
-            backbone_in_channels += 1
+        # Input channels: num_variables (data) + aux channels (coord, time_ramp, time_sine)
+        # Use the config property for consistent calculation
+        backbone_in_channels = config.backbone_in_channels
         
         if config.model_type == "transformer":
             self.noise_predictor = DiffusionTransformer(
@@ -204,16 +199,18 @@ class DiffusionTSF(nn.Module):
                 num_heads=config.transformer_num_heads,
                 dropout=config.transformer_dropout,
                 in_channels=backbone_in_channels,
+                out_channels=config.num_variables,  # Output one channel per variable
             )
         else:
             self.noise_predictor = ConditionalUNet2D(
                 in_channels=backbone_in_channels,
-                out_channels=1,
+                out_channels=config.num_variables,  # Output one channel per variable
                 channels=config.unet_channels,
                 num_res_blocks=config.num_res_blocks,
                 attention_levels=config.attention_levels,
                 image_height=config.image_height,
-                kernel_size=config.unet_kernel_size
+                kernel_size=config.unet_kernel_size,
+                use_dilated_middle=config.use_dilated_middle
             )
         
         # Diffusion scheduler (not a nn.Module, managed separately)
@@ -225,8 +222,10 @@ class DiffusionTSF(nn.Module):
         )
         
         logger.info(f"DiffusionTSF initialized:")
+        logger.info(f"  Variables: {config.num_variables} ({'multivariate' if config.num_variables > 1 else 'univariate'})")
         logger.info(f"  Lookback: {config.lookback_length}, Forecast: {config.forecast_length}")
         logger.info(f"  Image size: {config.image_height} x W")
+        logger.info(f"  Input channels: {config.backbone_in_channels} (data: {config.num_variables}, aux: {config.num_aux_channels})")
         logger.info(f"  Diffusion steps: {config.num_diffusion_steps}")
         logger.info(f"  Coordinate channel: {config.use_coordinate_channel}")
         logger.info(f"  Time ramp channel: {config.use_time_ramp}")
@@ -235,6 +234,8 @@ class DiffusionTSF(nn.Module):
             logger.info(f"  Seasonal period: {config.seasonal_period}")
         if config.model_type == "unet":
             logger.info(f"  U-Net kernel size: {config.unet_kernel_size}")
+            if config.use_dilated_middle:
+                logger.info(f"  Dilated middle block: enabled (dilations=1,2,4,8)")
     
     def to(self, device):
         """Move model and scheduler to device."""
@@ -372,14 +373,18 @@ class DiffusionTSF(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Normalize sequences using past statistics.
         
+        Supports both univariate and multivariate inputs:
+        - Univariate: (batch, seq_len)
+        - Multivariate: (batch, num_vars, seq_len)
+        
         Args:
-            past: Past sequence of shape (batch, past_len)
-            future: Optional future sequence of shape (batch, future_len)
+            past: Past sequence of shape (batch, [num_vars,] past_len)
+            future: Optional future sequence of shape (batch, [num_vars,] future_len)
             
         Returns:
             (past_norm, future_norm, (mean, std))
         """
-        # Compute statistics from past only
+        # Compute statistics from past only (along the sequence dimension)
         mean = past.mean(dim=-1, keepdim=True)
         std = past.std(dim=-1, keepdim=True) + 1e-8
         
@@ -437,23 +442,26 @@ class DiffusionTSF(nn.Module):
     def _compute_emd_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute column-wise Wasserstein-1 distance via CDF trick.
         
+        Supports multivariate: (batch, num_vars, height, seq_len)
+        EMD is computed over height dimension for each variable.
+        
         For PDF mode:
             Treats 2D maps as logits, converts to probabilities via softmax,
             then to CDFs, then takes L1.
         For CDF mode:
             The 2D maps ARE the CDFs (occupancy), so we take L1 directly.
         """
-        if pred.dim() == 4:
-            pred = pred.squeeze(1)
-            target = target.squeeze(1)
+        # pred and target: (batch, num_vars, height, seq_len)
         
         if self.config.representation_mode == "pdf":
             temperature = self.config.decode_temperature
-            prob_pred = F.softmax(pred / temperature, dim=1)
-            prob_target = F.softmax(target / temperature, dim=1)
+            # Softmax along height (dim=2)
+            prob_pred = F.softmax(pred / temperature, dim=2)
+            prob_target = F.softmax(target / temperature, dim=2)
             
-            cdf_pred = prob_pred.cumsum(dim=1)
-            cdf_target = prob_target.cumsum(dim=1)
+            # Cumsum along height (dim=2)
+            cdf_pred = prob_pred.cumsum(dim=2)
+            cdf_target = prob_target.cumsum(dim=2)
         else:
             # In CDF mode, the image is the occupancy map (the CDF).
             # We bring it from diffusion range [-1, 1] to [0, 1].
@@ -495,12 +503,16 @@ class DiffusionTSF(nn.Module):
     def encode_to_2d(self, x: torch.Tensor, scale_for_diffusion: bool = True) -> torch.Tensor:
         """Encode 1D time series to blurred 2D representation.
         
+        Supports both univariate and multivariate inputs:
+        - Univariate: (batch, seq_len) -> (batch, 1, height, seq_len)
+        - Multivariate: (batch, num_vars, seq_len) -> (batch, num_vars, height, seq_len)
+        
         Args:
-            x: Normalized time series of shape (batch, seq_len)
+            x: Normalized time series of shape (batch, [num_vars,] seq_len)
             scale_for_diffusion: If True, scale output to [-1, 1] range for diffusion
             
         Returns:
-            Blurred 2D image of shape (batch, 1, height, seq_len)
+            Blurred 2D image of shape (batch, num_vars, height, seq_len)
         """
         image = self.to_2d(x)
         blurred = self.blur(image)
@@ -531,8 +543,12 @@ class DiffusionTSF(nn.Module):
         
         Uses expectation over the probability distribution at each time step.
         
+        Supports both univariate and multivariate:
+        - Univariate: (batch, 1, height, seq_len) -> (batch, seq_len)
+        - Multivariate: (batch, num_vars, height, seq_len) -> (batch, num_vars, seq_len)
+        
         Args:
-            image: 2D image of shape (batch, 1, height, seq_len)
+            image: 2D image of shape (batch, num_vars, height, seq_len)
             from_diffusion: If True, image is in [-1, 1] range from diffusion
             decoder_method: For CDF/occupancy mode, select 'mean' (sum),
                             'median' (first crossing of 0.5),
@@ -543,28 +559,29 @@ class DiffusionTSF(nn.Module):
             search_radius: For 'beam' method, max pixels to search from prev pos.
             
         Returns:
-            Time series of shape (batch, seq_len)
+            Time series of shape (batch, [num_vars,] seq_len)
         """
-        # Remove channel dimension: (batch, height, seq_len)
-        if image.dim() == 4:
-            image = image.squeeze(1)
+        batch_size, num_vars, height, seq_len = image.shape
+        squeeze_output = (num_vars == 1)
         
         if self.config.representation_mode == "pdf":
             if from_diffusion:
                 # Image is in [-1, 1] range. Higher values = higher probability.
                 # We need to convert to proper probabilities.
+                # Softmax along height dimension (dim=2)
                 temperature = self.config.decode_temperature
-                prob = F.softmax(image / temperature, dim=1)
+                prob = F.softmax(image / temperature, dim=2)
             else:
-                prob = F.softmax(image, dim=1)
-            
-            # Inference-only anisotropic smoothing to encourage temporal continuity
-            if not self.training and self.config.decode_smoothing and self.decode_smoothing_kernel is not None:
-                prob = self._apply_decode_smoothing(prob)
+                prob = F.softmax(image, dim=2)
             
             # Compute expectation: sum_j P(j) * center(j)
-            centers = self.to_2d.bin_centers.view(1, -1, 1).to(image.device)
-            x = (prob * centers).sum(dim=1)
+            # Shape: (1, 1, height, 1) for broadcasting with (batch, num_vars, height, seq_len)
+            centers = self.to_2d.bin_centers.view(1, 1, -1, 1).to(image.device)
+            x = (prob * centers).sum(dim=2)  # -> (batch, num_vars, seq_len)
+            
+            # Squeeze for univariate backwards compatibility
+            if squeeze_output:
+                x = x.squeeze(1)
         else:
             if from_diffusion:
                 cdf_map = (image + 1.0) / 2.0
@@ -573,18 +590,30 @@ class DiffusionTSF(nn.Module):
             
             cdf_map = torch.clamp(cdf_map, min=0.0, max=1.0)
             
-            if not self.training and self.config.decode_smoothing and self.decode_smoothing_kernel is not None:
-                cdf_map = self._apply_decode_smoothing(cdf_map)
-            
-            # Mean: existing column-sum approach (default)
+            # Mean: column-sum approach (default) - works for multivariate
             if decoder_method == "mean":
-                column_sum = cdf_map.sum(dim=1)
+                # Sum along height dimension (dim=2)
+                column_sum = cdf_map.sum(dim=2)  # -> (batch, num_vars, seq_len)
                 column_sum = torch.clamp(column_sum, 0.0, float(self.config.image_height))
                 normalized = column_sum / float(self.config.image_height)
                 x = normalized * (2 * self.config.max_scale) - self.config.max_scale
+                
+                # Squeeze for univariate backwards compatibility
+                if squeeze_output:
+                    x = x.squeeze(1)
                 return x
 
-            centers = self.to_2d.bin_centers.view(1, -1, 1).to(cdf_map.device)
+            # For other decoders, only support univariate for now
+            if num_vars > 1:
+                raise NotImplementedError(f"decoder_method='{decoder_method}' not yet supported for multivariate. Use 'mean'.")
+            
+            # Squeeze to (batch, height, seq_len) for legacy decoder methods
+            cdf_map_squeezed = cdf_map.squeeze(1)
+            
+            if not self.training and self.config.decode_smoothing and self.decode_smoothing_kernel is not None:
+                cdf_map_squeezed = self._apply_decode_smoothing(cdf_map_squeezed)
+            
+            centers = self.to_2d.bin_centers.view(1, -1, 1).to(cdf_map_squeezed.device)
 
             if decoder_method == "median":
                 # Occupancy map: column looks like [1,1,1,0.8,0.5,0.2,0,0] from bottom to top.
@@ -592,7 +621,7 @@ class DiffusionTSF(nn.Module):
                 # Find the LAST index where value >= 0.5 (i.e., the highest filled bin).
                 
                 # below_half_mask: True where intensity < 0.5
-                below_half_mask = cdf_map < 0.5  # (batch, height, seq_len)
+                below_half_mask = cdf_map_squeezed < 0.5  # (batch, height, seq_len)
                 
                 # For each column, find if there's any crossing (any value below 0.5)
                 has_below = below_half_mask.any(dim=1)  # (batch, seq_len)
@@ -621,7 +650,7 @@ class DiffusionTSF(nn.Module):
                 )
                 
                 x = torch.gather(
-                    centers.expand(cdf_map.shape[0], -1, cdf_map.shape[2]),
+                    centers.expand(cdf_map_squeezed.shape[0], -1, cdf_map_squeezed.shape[2]),
                     1,
                     median_idx.unsqueeze(1)
                 ).squeeze(1)
@@ -633,23 +662,23 @@ class DiffusionTSF(nn.Module):
                 # Compute drop: how much value decreases going from y-1 to y
                 # drop[y] = cdf[y-1] - cdf[y] (positive where value decreases)
                 drop = -torch.diff(
-                    cdf_map,
+                    cdf_map_squeezed,
                     dim=1,
-                    prepend=cdf_map[:, :1, :]  # prepend first row so shapes match
+                    prepend=cdf_map_squeezed[:, :1, :]  # prepend first row so shapes match
                 )
                 drop = torch.relu(drop)  # only care about decreases, not increases
                 
                 peak_idx = drop.argmax(dim=1)
                 x = torch.gather(
-                    centers.expand(cdf_map.shape[0], -1, cdf_map.shape[2]),
+                    centers.expand(cdf_map_squeezed.shape[0], -1, cdf_map_squeezed.shape[2]),
                     1,
                     peak_idx.unsqueeze(1)
                 ).squeeze(1)
             elif decoder_method == "beam":
                 # Beam search decoder for temporal continuity
                 x = beam_search_decoder(
-                    cdf_map,
-                    bin_centers=self.to_2d.bin_centers.to(cdf_map.device),
+                    cdf_map_squeezed,
+                    bin_centers=self.to_2d.bin_centers.to(cdf_map_squeezed.device),
                     beam_width=beam_width,
                     jump_penalty_scale=jump_penalty_scale,
                     search_radius=search_radius
@@ -706,9 +735,11 @@ class DiffusionTSF(nn.Module):
         3. Predict noise with U-Net conditioned on past
         4. Return loss between true and predicted noise
         
+        Supports both univariate and multivariate inputs.
+        
         Args:
-            past: Past sequence of shape (batch, past_len)
-            future: Future sequence of shape (batch, future_len)
+            past: Past sequence of shape (batch, [num_vars,] past_len)
+            future: Future sequence of shape (batch, [num_vars,] future_len)
             t: Optional diffusion timesteps (sampled randomly if None)
             
         Returns:
@@ -721,8 +752,8 @@ class DiffusionTSF(nn.Module):
         past_norm, future_norm, stats = self._normalize_sequence(past, future)
         
         # Encode to 2D
-        past_2d = self.encode_to_2d(past_norm)  # (batch, 1, H, past_len)
-        future_2d = self.encode_to_2d(future_norm)  # (batch, 1, H, future_len)
+        past_2d = self.encode_to_2d(past_norm)  # (batch, num_vars, H, past_len)
+        future_2d = self.encode_to_2d(future_norm)  # (batch, num_vars, H, future_len)
         
         # Coarse dropout / cutout augmentation on CONDITIONING ONLY
         # Never apply to future_2d - that's the ground truth target!
@@ -801,8 +832,10 @@ class DiffusionTSF(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions given past context.
         
+        Supports both univariate and multivariate inputs.
+        
         Args:
-            past: Past sequence of shape (batch, past_len)
+            past: Past sequence of shape (batch, [num_vars,] past_len)
             use_ddim: Whether to use accelerated DDIM sampling
             num_ddim_steps: Number of DDIM steps (ignored if use_ddim=False)
             eta: DDIM stochasticity parameter
@@ -842,17 +875,17 @@ class DiffusionTSF(nn.Module):
         else:
             null_cond_full = None
         
-        # Shape for future image (without extra channels - those get added by wrapper)
+        # Shape for future image (data channels only - aux channels get added by wrapper)
         future_shape = (
             batch_size,
-            1,
+            self.config.num_variables,
             self.config.image_height,
             self.config.forecast_length
         )
         
         # Create a wrapper that injects coordinate and time channels before calling the backbone
         def model_with_channels(x, t, cond):
-            # x is the noisy future (B, 1, H, W), inject coords and time
+            # x is the noisy future (B, num_vars, H, W), inject coords and time
             x_with_coords = self._inject_coordinate_channel(x)
             x_full = self._inject_time_channels(x_with_coords)
             # cond already has all channels injected

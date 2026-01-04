@@ -11,9 +11,60 @@ models/diffusion_tsf/
 ├── model.py            # DiffusionTSF: Main model wrapper combining all components
 ├── dataset.py          # Synthetic data generation and basic 1D augmentations
 ├── metrics.py          # Shape-preservation and standard TSF metrics (MSE/MAE)
-├── train_electricity.py # Main training script with Optuna support
+├── train_electricity.py # Main training script with Optuna support (supports all datasets)
 └── visualize.py        # Utilities for plotting 2D representations and forecasts
 ```
+
+### Supported Datasets
+
+The training script supports multiple time series datasets via the `--dataset` flag:
+
+| Dataset | Columns | Sampling | Seasonal Period | Description |
+|---------|---------|----------|-----------------|-------------|
+| `electricity` | 321 | Hourly | 96 | Electricity consumption from 321 clients |
+| `ETTh1` | 7 | Hourly | 24 | Electricity Transformer Temperature (hourly) |
+| `ETTh2` | 7 | Hourly | 24 | Electricity Transformer Temperature (hourly) |
+| `ETTm1` | 7 | 15-min | 96 | Electricity Transformer Temperature (15-min) |
+| `ETTm2` | 7 | 15-min | 96 | Electricity Transformer Temperature (15-min) |
+| `exchange_rate` | 8 | Daily | 5 | Exchange rates of 8 countries |
+| `illness` | 7 | Weekly | 52 | National illness (ILI) patient counts |
+| `traffic` | 861 | Hourly | 24 | Road occupancy rates from 861 sensors |
+| `weather` | 21 | 10-min | 144 | Weather observations (21 meteorological features) |
+
+**Usage Examples:**
+```bash
+# Train on ETTh1 (univariate)
+python train_electricity.py --dataset ETTh1
+
+# Train on weather (multivariate, all 21 features)
+python train_electricity.py --dataset weather --multivariate
+
+# Quick test on traffic
+python train_electricity.py --dataset traffic --quick --multivariate
+```
+
+### Multivariate Support
+
+The model supports **multivariate time series forecasting** by treating multiple variables as separate image channels (similar to RGB channels in a photo).
+
+1. **Configuration:**
+   - `num_variables: int = 1` in `DiffusionTSFConfig` - Number of time series variables (1 = univariate, >1 = multivariate)
+   - `--multivariate` CLI flag in `train_electricity.py` enables loading all columns from the dataset
+
+2. **Data Format:**
+   - **Univariate:** `(batch, seq_len)` → 2D: `(batch, 1, height, seq_len)`
+   - **Multivariate:** `(batch, num_vars, seq_len)` → 2D: `(batch, num_vars, height, seq_len)`
+
+3. **Architecture Impact:**
+   - Each variable gets its own 2D stripe/occupancy map channel
+   - Auxiliary channels (coordinate, time_ramp, time_sine) are **shared** across all variables
+   - **Input channels** to backbone: `num_variables + num_aux_channels`
+   - **Output channels** from backbone: `num_variables` (predicts noise for each variable)
+   - Helper properties: `config.backbone_in_channels`, `config.num_aux_channels`
+
+4. **Channel Order:** `[Variable_0, Variable_1, ..., Variable_N, Vertical_Coord, Time_Ramp, Time_Sine]`
+
+---
 
 ### Phase 1: Data Preprocessing & 2D Mapping
 

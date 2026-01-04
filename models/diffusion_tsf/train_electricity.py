@@ -55,10 +55,28 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 # Paths
-DATA_PATH = os.path.join(script_dir, '..', '..', 'datasets', 'electricity', 'electricity.csv')
+DATASETS_DIR = os.path.join(script_dir, '..', '..', 'datasets')
 BASE_CHECKPOINT_DIR = os.path.join(script_dir, 'checkpoints')
 CHECKPOINT_DIR = BASE_CHECKPOINT_DIR  # Will be updated by run_optuna_search or train_with_best_params
 OPTUNA_DB = os.path.join(script_dir, 'optuna_study.db')
+
+# Dataset registry: name -> (relative_path, default_target_column, seasonal_period)
+# seasonal_period: 96 for hourly (daily cycle), 24 for 15-min (daily cycle), 168 for weekly
+DATASET_REGISTRY = {
+    'electricity': ('electricity/electricity.csv', 'OT', 96),  # Hourly data
+    'ETTh1': ('ETT-small/ETTh1.csv', 'OT', 24),  # Hourly data (24h cycle)
+    'ETTh2': ('ETT-small/ETTh2.csv', 'OT', 24),
+    'ETTm1': ('ETT-small/ETTm1.csv', 'OT', 96),  # 15-min data (96 = 24h)
+    'ETTm2': ('ETT-small/ETTm2.csv', 'OT', 96),
+    'exchange_rate': ('exchange_rate/exchange_rate.csv', 'OT', 5),  # Daily data (5 = weekly business days)
+    'illness': ('illness/national_illness.csv', 'OT', 52),  # Weekly data (52 = yearly cycle)
+    'traffic': ('traffic/traffic.csv', 'OT', 24),  # Hourly data
+    'weather': ('weather/weather.csv', 'OT', 144),  # 10-min data (144 = daily cycle)
+}
+
+# Default dataset (will be updated from CLI)
+SELECTED_DATASET = 'electricity'
+DATA_PATH = os.path.join(DATASETS_DIR, DATASET_REGISTRY[SELECTED_DATASET][0])
 
 # Fixed parameters (aligned with ViTime paper)
 LOOKBACK_LENGTH = 512      # Same as ViTime paper
@@ -93,9 +111,9 @@ def get_hardware_config():
         logger.info(f"Detected high-end GPU ({gpu_mem:.1f}GB) - using extensive search space")
         return {
             'learning_rate': (1e-5, 1e-3),  # Much wider LR range: 1e-5 to 1e-3
-            'model_size': ['tiny', 'small', 'medium', 'large'],  # Include all model sizes
-            'diffusion_steps': [100, 250, 500, 1000, 2000],  # More diffusion options
-            'batch_size': [16, 32, 64, 128, 256],  # Much larger batch sizes
+            'model_size': ['tiny', 'small', 'medium'],  # Include all model sizes
+            'diffusion_steps': [100, 250, 500, 1000],  # More diffusion options
+            'batch_size': [8, 16, 32, 64],  # Much larger batch sizes
             'noise_schedule': ['linear', 'cosine'],  # Well-established noise schedules
         }
     elif gpu_mem >= 16:  # RTX 3090, 4080, etc.
@@ -142,6 +160,12 @@ USE_TIME_RAMP = True  # Linear ramp channel
 USE_TIME_SINE = True  # Sine wave channel
 SEASONAL_PERIOD = 96
 
+# Multivariate mode (set from CLI)
+USE_ALL_COLUMNS = False  # If True, use all numeric columns for multivariate forecasting
+
+# Dilated middle block (set from CLI)
+USE_DILATED_MIDDLE = True  # If True, use dilated convolutions in U-Net bottleneck
+
 MODEL_SIZES = {
     'tiny': [32, 64],           # ~1M params, for quick tests only
     'small': [64, 128, 256],    # ~10M params
@@ -151,7 +175,7 @@ MODEL_SIZES = {
 
 # Training settings
 MAX_EPOCHS = 200
-PATIENCE = 15                   # Early stopping patience (increased for longer training)
+PATIENCE = 10                   # Early stopping patience (increased for longer training)
 VAL_SPLIT = 0.1
 NUM_OPTUNA_TRIALS = 20          # Total trials to run
 PRUNING_WARMUP = 20             # Don't prune before this epoch (increased for longer training)
@@ -163,7 +187,10 @@ PRUNING_WARMUP = 20             # Don't prune before this epoch (increased for l
 class ElectricityDataset(Dataset):
     """Electricity dataset for time series forecasting.
     
-    Uses a single variable (OT - Oil Temperature) for univariate forecasting.
+    Supports both univariate and multivariate forecasting.
+    - Univariate: Single column (e.g., 'OT') -> tensors of shape (seq_len,)
+    - Multivariate: Multiple columns or 'all' -> tensors of shape (num_vars, seq_len)
+    
     Creates sliding windows of (past, future) pairs.
     """
     
@@ -173,6 +200,8 @@ class ElectricityDataset(Dataset):
         lookback: int = 512,
         forecast: int = 96,
         column: str = 'OT',
+        columns: Optional[List[str]] = None,  # For multivariate: list of columns or None
+        use_all_columns: bool = False,  # If True, use all numeric columns
         stride: int = 24,  # Stride for sliding window (1 day = 24 hours)
         max_samples: Optional[int] = None,
         augment: bool = True,
@@ -183,48 +212,87 @@ class ElectricityDataset(Dataset):
             logger.info(f"Loading electricity data from {data_path}")
             df = pd.read_csv(data_path)
             
-            # Use OT column (Oil Temperature) as target
-            if column not in df.columns:
-                # If OT not available, use first numeric column
-                numeric_cols = df.select_dtypes(include=[np.number]).columns
-                column = numeric_cols[0]
-                logger.warning(f"Column 'OT' not found, using '{column}' instead")
-            
-            self.data = torch.tensor(df[column].values, dtype=torch.float32)
+            # Determine which columns to use
+            if use_all_columns:
+                # Use all numeric columns (exclude date column)
+                numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                self.columns = numeric_cols
+                logger.info(f"Using all {len(self.columns)} numeric columns: {self.columns[:5]}...")
+                self.data = torch.tensor(df[self.columns].values, dtype=torch.float32)  # (time, num_vars)
+                self.data = self.data.T  # -> (num_vars, time) for channel-first
+            elif columns is not None:
+                # Use specified columns (multivariate)
+                self.columns = columns
+                for col in columns:
+                    if col not in df.columns:
+                        raise ValueError(f"Column '{col}' not found in dataset")
+                logger.info(f"Using {len(columns)} columns: {columns}")
+                self.data = torch.tensor(df[columns].values, dtype=torch.float32)  # (time, num_vars)
+                self.data = self.data.T  # -> (num_vars, time)
+            else:
+                # Univariate mode (backwards compatible)
+                if column not in df.columns:
+                    numeric_cols = df.select_dtypes(include=[np.number]).columns
+                    column = numeric_cols[0]
+                    logger.warning(f"Column 'OT' not found, using '{column}' instead")
+                self.columns = [column]
+                self.data = torch.tensor(df[column].values, dtype=torch.float32)  # (time,)
         else:
             # Reuse already loaded tensor to avoid extra IO/memory
             self.data = data_tensor
+            self.columns = ['unknown']
         
         self.lookback = lookback
         self.forecast = forecast
         self.total_len = lookback + forecast
         self.augment = augment
+        self.multivariate = self.data.dim() == 2  # True if (num_vars, time)
+        self.num_variables = self.data.shape[0] if self.multivariate else 1
         
         # Calculate number of samples
+        # data_len is the time dimension
+        data_len = self.data.shape[-1] if self.multivariate else len(self.data)
         if indices is not None:
             self.indices = indices
         else:
-            num_windows = (len(self.data) - self.total_len) // stride + 1
+            num_windows = (data_len - self.total_len) // stride + 1
             self.indices = [i * stride for i in range(num_windows)]
         
         if max_samples and indices is None and len(self.indices) > max_samples:
             self.indices = self.indices[:max_samples]
         
         logger.info(f"Created dataset: {len(self.indices)} samples, "
-                   f"lookback={lookback}, forecast={forecast}")
+                   f"lookback={lookback}, forecast={forecast}, "
+                   f"variables={self.num_variables}")
     
     def __len__(self):
         return len(self.indices)
     
     def __getitem__(self, idx):
         start = self.indices[idx]
-        window = self.data[start:start + self.total_len]
         
-        if self.augment:
-            window = apply_1d_augmentations(window)
+        if self.multivariate:
+            # window shape: (num_vars, total_len)
+            window = self.data[:, start:start + self.total_len]
+            
+            if self.augment:
+                # Apply augmentation to each variable separately
+                augmented = []
+                for v in range(window.shape[0]):
+                    augmented.append(apply_1d_augmentations(window[v]))
+                window = torch.stack(augmented)
+            
+            past = window[:, :self.lookback]  # (num_vars, lookback)
+            future = window[:, self.lookback:]  # (num_vars, forecast)
+        else:
+            window = self.data[start:start + self.total_len]
+            
+            if self.augment:
+                window = apply_1d_augmentations(window)
+            
+            past = window[:self.lookback]
+            future = window[self.lookback:]
         
-        past = window[:self.lookback]
-        future = window[self.lookback:]
         return past, future
 
 
@@ -233,9 +301,15 @@ def get_dataloaders(
     val_split: float = 0.1,
     max_samples: Optional[int] = None,
     lookback: int = LOOKBACK_LENGTH,
-    forecast: int = FORECAST_LENGTH
-) -> Tuple[DataLoader, DataLoader]:
-    """Create train and validation dataloaders."""
+    forecast: int = FORECAST_LENGTH,
+    use_all_columns: bool = False,
+    columns: Optional[List[str]] = None
+) -> Tuple[DataLoader, DataLoader, int]:
+    """Create train and validation dataloaders.
+    
+    Returns:
+        (train_loader, val_loader, num_variables)
+    """
     
     # Base dataset (no augmentation) to derive indices and reuse tensor
     base_dataset = ElectricityDataset(
@@ -243,7 +317,9 @@ def get_dataloaders(
         lookback=lookback,
         forecast=forecast,
         max_samples=max_samples,
-        augment=False
+        augment=False,
+        use_all_columns=use_all_columns,
+        columns=columns
     )
     
     # Split into train/val
@@ -292,9 +368,9 @@ def get_dataloaders(
         pin_memory=True
     )
     
-    logger.info(f"Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples")
+    logger.info(f"Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples, Variables: {base_dataset.num_variables}")
     
-    return train_loader, val_loader
+    return train_loader, val_loader, base_dataset.num_variables
 
 
 # ============================================================================
@@ -481,9 +557,11 @@ def train(
         transformer_patch_width=config.get('transformer_patch_width', TRANSFORMER_PATCH_WIDTH),
         use_coordinate_channel=config.get('use_coordinate_channel', True),
         unet_kernel_size=config.get('unet_kernel_size', UNET_KERNEL_SIZE),
+        use_dilated_middle=config.get('use_dilated_middle', USE_DILATED_MIDDLE),
         use_time_ramp=config.get('use_time_ramp', USE_TIME_RAMP),
         use_time_sine=config.get('use_time_sine', USE_TIME_SINE),
         seasonal_period=config.get('seasonal_period', SEASONAL_PERIOD),
+        num_variables=config.get('num_variables', 1),
     )
     
     model = DiffusionTSF(model_config).to(device)
@@ -491,10 +569,14 @@ def train(
     logger.info(f"Model parameters: {num_params:,}")
     
     # Create dataloaders
-    train_loader, val_loader = get_dataloaders(
+    train_loader, val_loader, num_variables = get_dataloaders(
         batch_size=config['batch_size'],
-        val_split=VAL_SPLIT
+        val_split=VAL_SPLIT,
+        use_all_columns=config.get('use_all_columns', False)
     )
+    
+    # Update config with actual number of variables from dataset
+    config['num_variables'] = num_variables
     
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -599,9 +681,11 @@ def objective(trial) -> float:
         'transformer_patch_width': TRANSFORMER_PATCH_WIDTH,
         'use_coordinate_channel': True,  # Enable vertical spatial awareness
         'unet_kernel_size': UNET_KERNEL_SIZE,
+        'use_dilated_middle': USE_DILATED_MIDDLE,  # Dilated bottleneck
         'use_time_ramp': USE_TIME_RAMP,  # Enable linear ramp time channel
         'use_time_sine': USE_TIME_SINE,  # Enable sine wave time channel
         'seasonal_period': SEASONAL_PERIOD,
+        'use_all_columns': USE_ALL_COLUMNS,  # Multivariate mode
     }
     
     # Checkpoint for this trial
@@ -637,7 +721,7 @@ def run_optuna_search(n_trials: int = NUM_OPTUNA_TRIALS, resume: bool = True):
     
     # Create or load study
     storage = f"sqlite:///{OPTUNA_DB}"
-    base_study_name = "diffusion_tsf_electricity"
+    base_study_name = f"diffusion_tsf_{SELECTED_DATASET}"
     study_name = base_study_name
     
     if resume:
@@ -767,7 +851,7 @@ def train_with_best_params():
 # ============================================================================
 
 def main():
-    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, SEASONAL_PERIOD
+    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, SEASONAL_PERIOD, USE_ALL_COLUMNS, SELECTED_DATASET, DATA_PATH, USE_DILATED_MIDDLE
     
     parser = argparse.ArgumentParser(description='Train Diffusion TSF on Electricity dataset')
     parser.add_argument('--resume', action='store_true', help='Resume Optuna search')
@@ -783,6 +867,8 @@ def main():
     parser.add_argument('--kernel-size', type=int, nargs=2, default=[3, 3], metavar=('H', 'W'),
                         help='U-Net conv kernel size as (height, width). Height=value axis, Width=time axis. '
                              'E.g., --kernel-size 3 5 for wider temporal receptive field. Must be odd numbers. (default: 3 3)')
+    parser.add_argument('--dilated-middle', action='store_true', default=False,
+                        help='Use dilated convolutions in U-Net bottleneck for expanded temporal receptive field')
     parser.add_argument('--use-time-ramp', action='store_true', default=True,
                         help='Add linear ramp time channel (-1 to +1 "progress bar") (default: True)')
     parser.add_argument('--no-time-ramp', dest='use_time_ramp', action='store_false',
@@ -793,6 +879,11 @@ def main():
                         help='Disable sine wave time channel')
     parser.add_argument('--seasonal-period', type=int, default=96,
                         help='Period for sine wave time channel (e.g., 96 for hourly data with daily seasonality)')
+    parser.add_argument('--multivariate', action='store_true', default=False,
+                        help='Enable multivariate forecasting using all columns in the dataset')
+    parser.add_argument('--dataset', type=str, default='electricity',
+                        choices=list(DATASET_REGISTRY.keys()),
+                        help=f'Dataset to use for training. Available: {", ".join(DATASET_REGISTRY.keys())}')
     args = parser.parse_args()
     
     # Check for optuna
@@ -803,12 +894,22 @@ def main():
         logger.error("Optuna not installed. Run: pip install optuna")
         sys.exit(1)
     
-    logger.info("=" * 60)
-    logger.info("DIFFUSION TSF - ELECTRICITY TRAINING")
-    logger.info("=" * 60)
-    logger.info(f"Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
-    logger.info(f"Data: {DATA_PATH}")
-    logger.info(f"Base checkpoints: {BASE_CHECKPOINT_DIR}")
+    # Set all config globals from args FIRST before any logging
+    # Set dataset
+    SELECTED_DATASET = args.dataset
+    dataset_info = DATASET_REGISTRY[SELECTED_DATASET]
+    DATA_PATH = os.path.join(DATASETS_DIR, dataset_info[0])
+    
+    # Set time channel settings
+    USE_TIME_RAMP = args.use_time_ramp
+    USE_TIME_SINE = args.use_time_sine
+    # Use dataset-specific seasonal period unless overridden by CLI
+    if args.seasonal_period == 96:  # Default value means user didn't specify
+        SEASONAL_PERIOD = dataset_info[2]  # Use dataset-specific default
+    else:
+        SEASONAL_PERIOD = args.seasonal_period
+    # Set multivariate mode
+    USE_ALL_COLUMNS = args.multivariate
     
     # Initialize hardware-adaptive search space
     SEARCH_SPACE = get_hardware_config()
@@ -822,16 +923,26 @@ def main():
     TRANSFORMER_PATCH_WIDTH = args.patch_width
     # Set U-Net kernel size
     UNET_KERNEL_SIZE = tuple(args.kernel_size)
-    # Set time channel settings
-    USE_TIME_RAMP = args.use_time_ramp
-    USE_TIME_SINE = args.use_time_sine
-    SEASONAL_PERIOD = args.seasonal_period
+    # Set dilated middle block
+    USE_DILATED_MIDDLE = args.dilated_middle
+    
+    # Now log everything
+    logger.info("=" * 60)
+    logger.info(f"DIFFUSION TSF - {SELECTED_DATASET.upper()} TRAINING")
+    logger.info("=" * 60)
+    logger.info(f"Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
+    logger.info(f"Dataset: {SELECTED_DATASET}")
+    logger.info(f"Data: {DATA_PATH}")
+    logger.info(f"Seasonal period: {SEASONAL_PERIOD}")
+    logger.info(f"Base checkpoints: {BASE_CHECKPOINT_DIR}")
     logger.info(f"Search space: batch_sizes={SEARCH_SPACE['batch_size']}, model_sizes={SEARCH_SPACE['model_size']}")
     if args.model_type == 'unet':
         logger.info(f"U-Net kernel size: {UNET_KERNEL_SIZE} (height x width)")
+        logger.info(f"Dilated middle block: {USE_DILATED_MIDDLE}")
         logger.info(f"Time ramp: {USE_TIME_RAMP}, Time sine: {USE_TIME_SINE} (period={SEASONAL_PERIOD})")
     if args.model_type == 'transformer':
         logger.info(f"Transformer patch size: {TRANSFORMER_PATCH_HEIGHT}x{TRANSFORMER_PATCH_WIDTH} (HxW)")
+    logger.info(f"Multivariate mode: {USE_ALL_COLUMNS}")
     
     if args.quick:
         # Quick test mode - minimal settings for fast verification
@@ -850,18 +961,22 @@ def main():
             'transformer_patch_width': args.patch_width,
             'use_coordinate_channel': True,  # Enable vertical spatial awareness
             'unet_kernel_size': UNET_KERNEL_SIZE,
+            'use_dilated_middle': USE_DILATED_MIDDLE,  # Dilated bottleneck
             'use_time_ramp': USE_TIME_RAMP,  # Enable linear ramp time channel
             'use_time_sine': USE_TIME_SINE,  # Enable sine wave time channel
             'seasonal_period': SEASONAL_PERIOD,
+            'use_all_columns': USE_ALL_COLUMNS,  # Multivariate mode
         }
         
         # Use tiny dataset for quick test
         from torch.utils.data import Subset
         base_dataset = ElectricityDataset(
-            DATA_PATH, lookback=64, forecast=16, max_samples=20, augment=False
+            DATA_PATH, lookback=64, forecast=16, max_samples=20, augment=False,
+            use_all_columns=USE_ALL_COLUMNS
         )
         train_indices = list(range(16))
         val_indices = list(range(16, 20))
+        num_variables = base_dataset.num_variables
         
         train_dataset = ElectricityDataset(
             DATA_PATH,
@@ -894,9 +1009,11 @@ def main():
             transformer_patch_width=min(args.patch_width, 8),
             use_coordinate_channel=config.get('use_coordinate_channel', True),
             unet_kernel_size=UNET_KERNEL_SIZE,
+            use_dilated_middle=USE_DILATED_MIDDLE,
             use_time_ramp=USE_TIME_RAMP,
             use_time_sine=USE_TIME_SINE,
             seasonal_period=SEASONAL_PERIOD,
+            num_variables=num_variables,
         )
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         model = DiffusionTSF(tiny_config).to(device)

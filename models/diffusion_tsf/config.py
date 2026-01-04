@@ -46,6 +46,9 @@ class DiffusionTSFConfig:
     lookback_length: int = 512
     forecast_length: int = 96
     
+    # Multivariate support
+    num_variables: int = 1  # Number of time series variables (1 = univariate, >1 = multivariate)
+    
     # 2D Mapping parameters
     image_height: int = 128
     max_scale: float = 3.5  # MS parameter from ViTime
@@ -64,6 +67,10 @@ class DiffusionTSFConfig:
     # Height = value axis, Width = temporal axis
     # Example: (3, 5) uses 3-pixel height (value) and 5-pixel width (time)
     unet_kernel_size: Tuple[int, int] = (3, 3)  # Default square 3x3
+    
+    # Dilated middle block for expanded temporal receptive field
+    # Uses exponentially increasing dilations (1, 2, 4, 8) on the time axis
+    use_dilated_middle: bool = False  # Enable dilated convolutions in bottleneck
     
     # Diffusion parameters
     num_diffusion_steps: int = 1000
@@ -128,6 +135,7 @@ class DiffusionTSFConfig:
         assert self.cutout_min_masks > 0 and self.cutout_max_masks >= self.cutout_min_masks, "Invalid cutout mask counts"
         assert self.representation_mode in ["pdf", "cdf"], "representation_mode must be 'pdf' or 'cdf'"
         assert self.seasonal_period > 0, "seasonal_period must be positive"
+        assert self.num_variables > 0, "num_variables must be positive"
         # Validate kernel size
         kh, kw = self.unet_kernel_size
         assert kh > 0 and kw > 0, "unet_kernel_size dimensions must be positive"
@@ -145,4 +153,21 @@ class DiffusionTSFConfig:
             (j + 0.5) * self.bin_width - self.max_scale 
             for j in range(self.image_height)
         ]
+    
+    @property
+    def num_aux_channels(self) -> int:
+        """Number of auxiliary channels (coordinate + time channels)."""
+        count = 0
+        if self.use_coordinate_channel:
+            count += 1
+        if self.use_time_ramp:
+            count += 1
+        if self.use_time_sine:
+            count += 1
+        return count
+    
+    @property
+    def backbone_in_channels(self) -> int:
+        """Total input channels for the backbone (data + auxiliary)."""
+        return self.num_variables + self.num_aux_channels
 

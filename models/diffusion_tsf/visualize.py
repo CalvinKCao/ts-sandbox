@@ -116,6 +116,45 @@ def visualize_samples(
             if unet_kernel_size is None:
                 unet_kernel_size = (3, 3)
     
+    # Detect time channel settings from checkpoint or infer from weight shapes
+    # Check if time channel settings are saved in config
+    use_time_ramp = config_dict.get('use_time_ramp', None)
+    use_time_sine = config_dict.get('use_time_sine', None)
+    seasonal_period = config_dict.get('seasonal_period', 96)
+    num_variables = config_dict.get('num_variables', 1)
+    
+    # If time channel settings not in config, try to infer from weight shapes
+    if use_time_ramp is None or use_time_sine is None:
+        # For U-Net, check conditioning encoder input channels
+        cond_key = 'noise_predictor.cond_encoder.local_encoder.0.weight'
+        if cond_key in state_dict:
+            cond_in_channels = state_dict[cond_key].shape[1]
+            # cond_in_channels = num_variables + num_aux_channels
+            # num_aux_channels can be 0-3 (coord, time_ramp, time_sine)
+            num_aux = cond_in_channels - num_variables
+            
+            # Infer which aux channels were used
+            # If coord is True (from earlier detection), remaining are time channels
+            if use_coord_channel:
+                num_time_channels = num_aux - 1  # Subtract coordinate channel
+            else:
+                num_time_channels = num_aux
+            
+            # Default: if 2 time channels, both ramp and sine; if 1, just ramp; if 0, neither
+            if use_time_ramp is None:
+                use_time_ramp = num_time_channels >= 1
+            if use_time_sine is None:
+                use_time_sine = num_time_channels >= 2
+            
+            print(f"Auto-detected time channels: ramp={use_time_ramp}, sine={use_time_sine} from cond_encoder shape (aux_channels={num_aux})")
+        else:
+            # Fallback to False for legacy checkpoints
+            if use_time_ramp is None:
+                use_time_ramp = False
+            if use_time_sine is None:
+                use_time_sine = False
+            print(f"Using default time channels: ramp={use_time_ramp}, sine={use_time_sine}")
+    
     model_config = DiffusionTSFConfig(
         lookback_length=512,
         forecast_length=96,
@@ -133,6 +172,10 @@ def visualize_samples(
         model_type=model_type,
         use_coordinate_channel=use_coord_channel,
         unet_kernel_size=unet_kernel_size,
+        use_time_ramp=use_time_ramp,
+        use_time_sine=use_time_sine,
+        seasonal_period=seasonal_period,
+        num_variables=num_variables,
     )
     # If using transformer, optionally override transformer params from checkpoint
     if model_type == 'transformer':

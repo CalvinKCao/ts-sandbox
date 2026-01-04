@@ -64,6 +64,7 @@ class DiffusionTransformer(nn.Module):
         num_heads: int = 8,
         dropout: float = 0.1,
         in_channels: int = 1,
+        out_channels: int = 1,
     ):
         super().__init__()
         assert image_height % patch_height == 0, "image_height must be divisible by patch_height"
@@ -72,11 +73,12 @@ class DiffusionTransformer(nn.Module):
         self.patch_width = patch_width
         self.embed_dim = embed_dim
         self.in_channels = in_channels
+        self.out_channels = out_channels
 
         # Patch dimension accounts for input channels
         patch_dim = in_channels * patch_height * patch_width
-        # Output patch dimension is always 1 channel (predict noise for data only)
-        out_patch_dim = patch_height * patch_width
+        # Output patch dimension: out_channels per patch (for multivariate)
+        out_patch_dim = out_channels * patch_height * patch_width
 
         # Patch projection
         self.patch_embed = nn.Linear(patch_dim, embed_dim)
@@ -97,7 +99,7 @@ class DiffusionTransformer(nn.Module):
         ])
         self.norm = nn.LayerNorm(embed_dim)
 
-        # Output projection back to patch (always 1 channel output - predicted noise)
+        # Output projection back to patch (out_channels for multivariate noise prediction)
         self.patch_out = nn.Linear(embed_dim, out_patch_dim)
 
     def _get_pos_embed(self, num_patches: int) -> torch.Tensor:
@@ -121,7 +123,7 @@ class DiffusionTransformer(nn.Module):
             t: Timesteps (B,)
             cond: Past context image (B, C, H, W_past) where C=in_channels
         Returns:
-            Noise prediction of shape (B, 1, H, W) - always 1 channel
+            Noise prediction of shape (B, out_channels, H, W) - out_channels for multivariate
         """
         B, C, H, W = x.shape
         pH = self.patch_height
@@ -195,10 +197,11 @@ class DiffusionTransformer(nn.Module):
         # 9. Project back
         patch_out = self.patch_out(x_out_tokens)
 
-        # Reshape to image: (B, nH_x, nW_x, pH, pW) -> (B, 1, H, Wp)
-        patch_out = patch_out.view(B, nH_x, nW_x, pH, pW)
-        patch_out = patch_out.permute(0, 1, 3, 2, 4).contiguous()
-        patch_out = patch_out.view(B, 1, nH_x * pH, nW_x * pW)
+        # Reshape to image: (B, nH_x, nW_x, out_channels, pH, pW) -> (B, out_channels, H, Wp)
+        out_ch = self.out_channels
+        patch_out = patch_out.view(B, nH_x, nW_x, out_ch, pH, pW)
+        patch_out = patch_out.permute(0, 3, 1, 4, 2, 5).contiguous()
+        patch_out = patch_out.view(B, out_ch, nH_x * pH, nW_x * pW)
 
         # Remove padding
         if pad_w_x > 0:

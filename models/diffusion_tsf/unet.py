@@ -235,8 +235,129 @@ class UpBlock(nn.Module):
         return x
 
 
+class DilatedConvBlock(nn.Module):
+    """Single dilated convolution block with time embedding injection.
+    
+    Used in the dilated middle block to capture long-range temporal dependencies.
+    Dilation is applied only to the width (time) axis.
+    """
+    
+    def __init__(
+        self,
+        channels: int,
+        time_emb_dim: int,
+        kernel_size: Tuple[int, int] = (3, 3),
+        dilation: Tuple[int, int] = (1, 1),
+        num_groups: int = 8,
+        dropout: float = 0.1
+    ):
+        super().__init__()
+        
+        # Padding to maintain dimensions: padding = dilation * (kernel_size - 1) // 2
+        padding = (dilation[0] * (kernel_size[0] - 1) // 2, dilation[1] * (kernel_size[1] - 1) // 2)
+        
+        self.norm = nn.GroupNorm(num_groups, channels)
+        self.conv = nn.Conv2d(
+            channels, channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            dilation=dilation
+        )
+        self.time_mlp = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(time_emb_dim, channels)
+        )
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
+        h = self.norm(x)
+        h = F.silu(h)
+        h = self.conv(h)
+        
+        # Add time embedding
+        t_proj = self.time_mlp(t_emb)[:, :, None, None]
+        h = h + t_proj
+        
+        h = self.dropout(h)
+        return x + h  # Residual connection
+
+
+class DilatedMiddleBlock(nn.Module):
+    """Middle block with dilated convolutions for expanded temporal receptive field.
+    
+    Uses exponentially increasing dilation factors on the WIDTH (time) axis only:
+    - Layer 1: dilation=(1, 1)  - Standard convolution
+    - Layer 2: dilation=(1, 2)  - Look at t, t±2
+    - Layer 3: dilation=(1, 4)  - Look at t, t±4
+    - Layer 4: dilation=(1, 8)  - Look at t, t±8
+    
+    Combined receptive field spans ~32 time steps, allowing the model to
+    capture long-range wave patterns and asymmetric decays.
+    """
+    
+    def __init__(
+        self,
+        channels: int,
+        time_emb_dim: int,
+        num_groups: int = 8,
+        kernel_size: Tuple[int, int] = (3, 3),
+        dilation_factors: List[int] = [1, 2, 4, 8]
+    ):
+        super().__init__()
+        
+        # Initial ResBlock to transform features
+        self.res_in = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
+        
+        # Dilated convolution stack - each with increasing dilation on time axis
+        self.dilated_blocks = nn.ModuleList()
+        for d in dilation_factors:
+            self.dilated_blocks.append(
+                DilatedConvBlock(
+                    channels=channels,
+                    time_emb_dim=time_emb_dim,
+                    kernel_size=kernel_size,
+                    dilation=(1, d),  # Only dilate on width (time) axis
+                    num_groups=num_groups
+                )
+            )
+        
+        # Self-attention for global context
+        self.attention = nn.MultiheadAttention(channels, num_heads=4, batch_first=True)
+        self.attn_norm = nn.GroupNorm(num_groups, channels)
+        
+        # Final ResBlock
+        self.res_out = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
+        
+        # Log the receptive field calculation
+        rf = sum([(kernel_size[1] - 1) * d for d in dilation_factors]) + 1
+        logger.info(f"DilatedMiddleBlock: dilations={dilation_factors}, temporal receptive field={rf} steps")
+    
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
+        # Initial transformation
+        x = self.res_in(x, t_emb)
+        
+        # Apply dilated convolutions
+        for dilated_block in self.dilated_blocks:
+            x = dilated_block(x, t_emb)
+        
+        # Self-attention
+        b, c, h, w = x.shape
+        x_flat = x.view(b, c, h * w).permute(0, 2, 1)
+        x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
+        attn_out, _ = self.attention(x_norm, x_norm, x_norm)
+        x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
+        
+        # Final transformation
+        x = self.res_out(x, t_emb)
+        return x
+
+
 class MiddleBlock(nn.Module):
-    """Middle block: ResBlock + Attention + ResBlock."""
+    """Middle block: ResBlock + Attention + ResBlock.
+    
+    Legacy version without dilated convolutions.
+    For expanded receptive field, use DilatedMiddleBlock instead.
+    """
     
     def __init__(self, channels: int, time_emb_dim: int, num_groups: int = 8, kernel_size: Tuple[int, int] = (3, 3)):
         super().__init__()
@@ -351,7 +472,8 @@ class ConditionalUNet2D(nn.Module):
         cond_channels: int = 64,
         num_groups: int = 8,
         image_height: int = 128,
-        kernel_size: Tuple[int, int] = (3, 3)
+        kernel_size: Tuple[int, int] = (3, 3),
+        use_dilated_middle: bool = False
     ):
         """
         Args:
@@ -367,6 +489,8 @@ class ConditionalUNet2D(nn.Module):
             kernel_size: Tuple (height, width) for convolutional kernels.
                          Allows rectangular kernels (e.g., (3, 5) for 3 height, 5 width).
                          Height = value axis, Width = temporal axis.
+            use_dilated_middle: If True, use DilatedMiddleBlock with exponentially
+                               increasing dilations for expanded temporal receptive field.
         """
         super().__init__()
         
@@ -405,8 +529,11 @@ class ConditionalUNet2D(nn.Module):
             )
             in_ch = out_ch
         
-        # Middle block
-        self.middle = MiddleBlock(channels[-1], time_emb_dim, num_groups, kernel_size=kernel_size)
+        # Middle block - optionally use dilated convolutions for expanded receptive field
+        if use_dilated_middle:
+            self.middle = DilatedMiddleBlock(channels[-1], time_emb_dim, num_groups, kernel_size=kernel_size)
+        else:
+            self.middle = MiddleBlock(channels[-1], time_emb_dim, num_groups, kernel_size=kernel_size)
         
         # Upsampling path
         # Skip connections come from down blocks and have the same channels as the down block output
