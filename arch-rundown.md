@@ -55,11 +55,19 @@ models/diffusion_tsf/
 3. **Handling Non-Square Images:**
     - Since forecast length and image height are often different, the U-Net uses `F.interpolate` during upsampling steps if spatial dimensions between skip connections and upsampled features don't match exactly. The Transformer handles this via flexible patch-based sequence lengths and slicing learned positional embeddings.
 
-4. **Diffusion Framework:** * Use the **DDPM (Denoising Diffusion Probabilistic Models)** framework.
+4. **Spatial & Temporal Coordinate Channels:**
+    - **Vertical Coordinate Channel (`use_coordinate_channel`):** Adds a channel with a gradient from +1 (top) to -1 (bottom), providing the backbone with explicit value-axis position awareness.
+    - **Horizontal Time Channels:** Two independently controllable channels for explicit temporal position awareness (fixes "phase drift" in U-Net forecasts):
+        - **Linear Ramp (`use_time_ramp`):** Values from -1.0 (start of window) to +1.0 (end of window). Tells the model "how far along" it is in the forecast (a "progress bar").
+        - **Sine Wave (`use_time_sine`):** `sin(2π * t / seasonal_period)` where `t` is the column index. Provides periodic/seasonal awareness (a "clock"). Default `seasonal_period=96` for hourly data with daily cycles.
+    - These channels are concatenated to the noisy image and past conditioning before being fed to the backbone.
+    - **Channel Order:** `[Noisy_Image, Vertical_Coord (if enabled), Time_Ramp (if enabled), Time_Sine (if enabled)]`
+
+5. **Diffusion Framework:** * Use the **DDPM (Denoising Diffusion Probabilistic Models)** framework.
     - Set T=1000 diffusion steps with a linear, cosine, sigmoid, or quadratic noise schedule.
     - Supports **Classifier-Free Guidance (CFG)** during training (via dropout) and inference (via `cfg_scale`).
     - Supports **DDIM (Denoising Diffusion Implicit Models)** for accelerated sampling (typically 50 steps).
-    - Input to the Backbone: (Noisy Future Image + Time Embedding + Past Context Encoding).
+    - Input to the Backbone: (Noisy Future Image + Coordinate Channels + Time Channels + Diffusion Timestep Embedding + Past Context Encoding).
     - Output: Predicted noise ϵθ​.
         
 

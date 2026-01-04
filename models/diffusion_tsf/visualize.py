@@ -70,15 +70,15 @@ def visualize_samples(
                 remapped[k] = v
         state_dict = remapped
     
-    # Auto-detect coordinate channel from weight shapes
+    # Auto-detect coordinate channel and kernel size from weight shapes
     use_coord_channel = config_dict.get('use_coordinate_channel', None)
-    if use_coord_channel is None:
-        # Infer from weights: check patch_embed or init_conv shape
-        if model_type == 'transformer':
-            # For transformer: patch_embed.weight shape is [embed_dim, in_channels * pH * pW]
+    unet_kernel_size = config_dict.get('unet_kernel_size', None)
+    
+    if model_type == 'transformer':
+        # For transformer: patch_embed.weight shape is [embed_dim, in_channels * pH * pW]
+        if use_coord_channel is None:
             patch_height = config_dict.get('transformer_patch_height', 16)
             patch_width = config_dict.get('transformer_patch_width', 16)
-            expected_1ch = patch_height * patch_width  # 256 for 16x16
             expected_2ch = 2 * patch_height * patch_width  # 512 for 16x16
             
             patch_key = 'noise_predictor.patch_embed.weight'
@@ -88,20 +88,33 @@ def visualize_samples(
                 print(f"Auto-detected use_coordinate_channel={use_coord_channel} from patch_embed shape {state_dict[patch_key].shape}")
             else:
                 use_coord_channel = False
-        else:
-            # For U-Net: check init_conv weight shape
-            # init_conv expects [out_ch, in_channels + cond_channels, kH, kW]
-            # With coord channel: in_channels=2, without: in_channels=1
-            init_key = 'noise_predictor.init_conv.weight'
-            if init_key in state_dict:
-                # cond_channels is typically 64, so:
-                # without coord: 1 + 64 = 65
-                # with coord: 2 + 64 = 66
-                actual_in = state_dict[init_key].shape[1]
+        # Transformer doesn't use unet_kernel_size
+        if unet_kernel_size is None:
+            unet_kernel_size = (3, 3)  # Default, not used for transformer
+    else:
+        # For U-Net: check init_conv weight shape
+        # init_conv expects [out_ch, in_channels + cond_channels, kH, kW]
+        init_key = 'noise_predictor.init_conv.weight'
+        if init_key in state_dict:
+            init_weight_shape = state_dict[init_key].shape
+            # Detect coordinate channel: with coord: in_channels=2, without: in_channels=1
+            # cond_channels is typically 64, so: without coord: 1 + 64 = 65, with coord: 2 + 64 = 66
+            if use_coord_channel is None:
+                actual_in = init_weight_shape[1]
                 use_coord_channel = (actual_in == 66)  # 2 + 64
-                print(f"Auto-detected use_coordinate_channel={use_coord_channel} from init_conv shape {state_dict[init_key].shape}")
-            else:
+                print(f"Auto-detected use_coordinate_channel={use_coord_channel} from init_conv shape {init_weight_shape}")
+            
+            # Detect kernel size from weight shape: [out_ch, in_ch, kH, kW]
+            if unet_kernel_size is None:
+                detected_kh = init_weight_shape[2]
+                detected_kw = init_weight_shape[3]
+                unet_kernel_size = (detected_kh, detected_kw)
+                print(f"Auto-detected unet_kernel_size={unet_kernel_size} from init_conv shape {init_weight_shape}")
+        else:
+            if use_coord_channel is None:
                 use_coord_channel = False
+            if unet_kernel_size is None:
+                unet_kernel_size = (3, 3)
     
     model_config = DiffusionTSFConfig(
         lookback_length=512,
@@ -119,6 +132,7 @@ def visualize_samples(
         noise_schedule=config_dict['noise_schedule'],
         model_type=model_type,
         use_coordinate_channel=use_coord_channel,
+        unet_kernel_size=unet_kernel_size,
     )
     # If using transformer, optionally override transformer params from checkpoint
     if model_type == 'transformer':

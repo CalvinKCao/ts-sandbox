@@ -8,6 +8,8 @@ This module integrates:
 - 2D to 1D decoding
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -183,8 +185,14 @@ class DiffusionTSF(nn.Module):
         )
         
         # Noise prediction backbone (U-Net or Transformer)
-        # Input channels: 1 (data) + 1 (coordinate channel if enabled)
-        backbone_in_channels = 2 if config.use_coordinate_channel else 1
+        # Input channels: 1 (data) + 1 (vertical coord if enabled) + 1 (time ramp if enabled) + 1 (time sine if enabled)
+        backbone_in_channels = 1
+        if config.use_coordinate_channel:
+            backbone_in_channels += 1
+        if config.use_time_ramp:
+            backbone_in_channels += 1
+        if config.use_time_sine:
+            backbone_in_channels += 1
         
         if config.model_type == "transformer":
             self.noise_predictor = DiffusionTransformer(
@@ -221,6 +229,10 @@ class DiffusionTSF(nn.Module):
         logger.info(f"  Image size: {config.image_height} x W")
         logger.info(f"  Diffusion steps: {config.num_diffusion_steps}")
         logger.info(f"  Coordinate channel: {config.use_coordinate_channel}")
+        logger.info(f"  Time ramp channel: {config.use_time_ramp}")
+        logger.info(f"  Time sine channel: {config.use_time_sine}")
+        if config.use_time_sine:
+            logger.info(f"  Seasonal period: {config.seasonal_period}")
         if config.model_type == "unet":
             logger.info(f"  U-Net kernel size: {config.unet_kernel_size}")
     
@@ -283,6 +295,75 @@ class DiffusionTSF(nn.Module):
             batch_size, height, width, x.device, x.dtype
         )
         return torch.cat([x, coord_grid], dim=1)
+    
+    def _get_time_features(
+        self,
+        batch_size: int,
+        height: int,
+        width: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Create horizontal time-aware coordinate channels.
+        
+        Provides the backbone with explicit temporal position information:
+        1. Linear Ramp (Progress Bar): -1.0 at start, +1.0 at end
+        2. Sine Wave (Clock): sin(2*pi*t/period) for seasonal awareness
+        
+        Args:
+            batch_size: Batch size for the output tensor
+            height: Height of the coordinate map
+            width: Width of the coordinate map (sequence length)
+            device: Device to place the tensor on
+            dtype: Data type of the tensor
+            
+        Returns:
+            Tuple of (ramp, sine) tensors, each of shape (batch_size, 1, height, width)
+        """
+        # Linear ramp: -1.0 at start (col 0), +1.0 at end (col width-1)
+        # This is the "progress bar" showing position in the window
+        ramp = torch.linspace(-1.0, 1.0, width, device=device, dtype=dtype)
+        ramp = ramp.view(1, 1, 1, width).expand(batch_size, 1, height, width)
+        
+        # Sine wave: sin(2*pi*t/period) where t is column index
+        # This is the "clock" providing seasonal/periodic awareness
+        t_idx = torch.arange(width, device=device, dtype=dtype)
+        sine = torch.sin(2 * math.pi * t_idx / self.config.seasonal_period)
+        sine = sine.view(1, 1, 1, width).expand(batch_size, 1, height, width)
+        
+        return ramp, sine
+    
+    def _inject_time_channels(
+        self,
+        x: torch.Tensor
+    ) -> torch.Tensor:
+        """Concatenate horizontal time coordinate channels to input tensor.
+        
+        Conditionally adds up to two channels based on config:
+        - Time Ramp (if use_time_ramp): Linear gradient from -1 to +1 across width (progress bar)
+        - Time Sine (if use_time_sine): Sinusoidal wave for seasonal awareness (clock)
+        
+        Args:
+            x: Input tensor of shape (batch, channels, height, width)
+            
+        Returns:
+            Tensor of shape (batch, channels + num_enabled, height, width) with time channels
+        """
+        if not self.config.use_time_ramp and not self.config.use_time_sine:
+            return x
+        
+        batch_size, _, height, width = x.shape
+        ramp, sine = self._get_time_features(
+            batch_size, height, width, x.device, x.dtype
+        )
+        
+        channels_to_add = [x]
+        if self.config.use_time_ramp:
+            channels_to_add.append(ramp)
+        if self.config.use_time_sine:
+            channels_to_add.append(sine)
+        
+        return torch.cat(channels_to_add, dim=1)
     
     def _normalize_sequence(
         self,
@@ -674,8 +755,12 @@ class DiffusionTSF(nn.Module):
         noisy_future_with_coords = self._inject_coordinate_channel(noisy_future)
         past_2d_with_coords = self._inject_coordinate_channel(past_2d)
         
+        # Inject horizontal time channels for temporal awareness
+        noisy_future_full = self._inject_time_channels(noisy_future_with_coords)
+        past_2d_full = self._inject_time_channels(past_2d_with_coords)
+        
         # Predict noise
-        noise_pred = self.noise_predictor(noisy_future_with_coords, t, past_2d_with_coords)
+        noise_pred = self.noise_predictor(noisy_future_full, t, past_2d_full)
         
         # L2 loss on noise
         noise_loss = F.mse_loss(noise_pred, noise)
@@ -745,17 +830,19 @@ class DiffusionTSF(nn.Module):
         # Encode past to 2D
         past_2d = self.encode_to_2d(past_norm)
         
-        # Inject coordinate channel into past conditioning
+        # Inject coordinate and time channels into past conditioning
         past_2d_with_coords = self._inject_coordinate_channel(past_2d)
+        past_2d_full = self._inject_time_channels(past_2d_with_coords)
         
-        # Create null conditioning for CFG (zeros) - also with coordinate channel
+        # Create null conditioning for CFG (zeros) - also with all channels
         if cfg_scale > 1.0:
             null_cond = torch.zeros_like(past_2d)
             null_cond_with_coords = self._inject_coordinate_channel(null_cond)
+            null_cond_full = self._inject_time_channels(null_cond_with_coords)
         else:
-            null_cond_with_coords = None
+            null_cond_full = None
         
-        # Shape for future image (without coordinate channel - that gets added by wrapper)
+        # Shape for future image (without extra channels - those get added by wrapper)
         future_shape = (
             batch_size,
             1,
@@ -763,20 +850,21 @@ class DiffusionTSF(nn.Module):
             self.config.forecast_length
         )
         
-        # Create a wrapper that injects coordinate channel before calling the backbone
-        def model_with_coords(x, t, cond):
-            # x is the noisy future (B, 1, H, W), inject coords
+        # Create a wrapper that injects coordinate and time channels before calling the backbone
+        def model_with_channels(x, t, cond):
+            # x is the noisy future (B, 1, H, W), inject coords and time
             x_with_coords = self._inject_coordinate_channel(x)
-            # cond already has coords injected
-            return self.noise_predictor(x_with_coords, t, cond)
+            x_full = self._inject_time_channels(x_with_coords)
+            # cond already has all channels injected
+            return self.noise_predictor(x_full, t, cond)
         
         # Generate via diffusion with CFG
         if use_ddim:
             future_2d = self.scheduler.sample_ddim_cfg(
-                model=model_with_coords,
+                model=model_with_channels,
                 shape=future_shape,
-                cond=past_2d_with_coords,
-                null_cond=null_cond_with_coords,
+                cond=past_2d_full,
+                null_cond=null_cond_full,
                 cfg_scale=cfg_scale,
                 num_steps=num_ddim_steps,
                 eta=eta,
@@ -785,10 +873,10 @@ class DiffusionTSF(nn.Module):
             )
         else:
             future_2d = self.scheduler.sample_ddpm_cfg(
-                model=model_with_coords,
+                model=model_with_channels,
                 shape=future_shape,
-                cond=past_2d_with_coords,
-                null_cond=null_cond_with_coords,
+                cond=past_2d_full,
+                null_cond=null_cond_full,
                 cfg_scale=cfg_scale,
                 device=device,
                 verbose=verbose

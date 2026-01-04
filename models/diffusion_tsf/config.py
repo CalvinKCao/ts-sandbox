@@ -108,6 +108,11 @@ class DiffusionTSFConfig:
     # Spatial coordinate channel for vertical awareness
     use_coordinate_channel: bool = True  # Concatenate vertical gradient to input
     
+    # Temporal coordinate channels for horizontal awareness (fixes phase drift in U-Net)
+    use_time_ramp: bool = True  # Add linear ramp channel (-1 to +1 "progress bar")
+    use_time_sine: bool = True  # Add sine wave channel (periodic "clock")
+    seasonal_period: int = 96  # Period for sine wave (e.g., 96 for hourly data with daily seasonality)
+    
     # Training
     learning_rate: float = 2e-4
     batch_size: int = 8
@@ -122,6 +127,7 @@ class DiffusionTSFConfig:
         assert 0 <= self.cutout_prob <= 1, "cutout_prob must be in [0, 1]"
         assert self.cutout_min_masks > 0 and self.cutout_max_masks >= self.cutout_min_masks, "Invalid cutout mask counts"
         assert self.representation_mode in ["pdf", "cdf"], "representation_mode must be 'pdf' or 'cdf'"
+        assert self.seasonal_period > 0, "seasonal_period must be positive"
         # Validate kernel size
         kh, kw = self.unet_kernel_size
         assert kh > 0 and kw > 0, "unet_kernel_size dimensions must be positive"

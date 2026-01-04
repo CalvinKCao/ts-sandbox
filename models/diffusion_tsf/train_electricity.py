@@ -137,6 +137,10 @@ TRANSFORMER_PATCH_HEIGHT = 16
 TRANSFORMER_PATCH_WIDTH = 16
 # U-Net kernel size (height, width) - set from CLI
 UNET_KERNEL_SIZE = (3, 3)
+# Time channels for U-Net temporal awareness (set from CLI)
+USE_TIME_RAMP = True  # Linear ramp channel
+USE_TIME_SINE = True  # Sine wave channel
+SEASONAL_PERIOD = 96
 
 MODEL_SIZES = {
     'tiny': [32, 64],           # ~1M params, for quick tests only
@@ -477,6 +481,9 @@ def train(
         transformer_patch_width=config.get('transformer_patch_width', TRANSFORMER_PATCH_WIDTH),
         use_coordinate_channel=config.get('use_coordinate_channel', True),
         unet_kernel_size=config.get('unet_kernel_size', UNET_KERNEL_SIZE),
+        use_time_ramp=config.get('use_time_ramp', USE_TIME_RAMP),
+        use_time_sine=config.get('use_time_sine', USE_TIME_SINE),
+        seasonal_period=config.get('seasonal_period', SEASONAL_PERIOD),
     )
     
     model = DiffusionTSF(model_config).to(device)
@@ -592,6 +599,9 @@ def objective(trial) -> float:
         'transformer_patch_width': TRANSFORMER_PATCH_WIDTH,
         'use_coordinate_channel': True,  # Enable vertical spatial awareness
         'unet_kernel_size': UNET_KERNEL_SIZE,
+        'use_time_ramp': USE_TIME_RAMP,  # Enable linear ramp time channel
+        'use_time_sine': USE_TIME_SINE,  # Enable sine wave time channel
+        'seasonal_period': SEASONAL_PERIOD,
     }
     
     # Checkpoint for this trial
@@ -757,7 +767,7 @@ def train_with_best_params():
 # ============================================================================
 
 def main():
-    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE
+    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, SEASONAL_PERIOD
     
     parser = argparse.ArgumentParser(description='Train Diffusion TSF on Electricity dataset')
     parser.add_argument('--resume', action='store_true', help='Resume Optuna search')
@@ -773,6 +783,16 @@ def main():
     parser.add_argument('--kernel-size', type=int, nargs=2, default=[3, 3], metavar=('H', 'W'),
                         help='U-Net conv kernel size as (height, width). Height=value axis, Width=time axis. '
                              'E.g., --kernel-size 3 5 for wider temporal receptive field. Must be odd numbers. (default: 3 3)')
+    parser.add_argument('--use-time-ramp', action='store_true', default=True,
+                        help='Add linear ramp time channel (-1 to +1 "progress bar") (default: True)')
+    parser.add_argument('--no-time-ramp', dest='use_time_ramp', action='store_false',
+                        help='Disable linear ramp time channel')
+    parser.add_argument('--use-time-sine', action='store_true', default=True,
+                        help='Add sine wave time channel (periodic "clock") (default: True)')
+    parser.add_argument('--no-time-sine', dest='use_time_sine', action='store_false',
+                        help='Disable sine wave time channel')
+    parser.add_argument('--seasonal-period', type=int, default=96,
+                        help='Period for sine wave time channel (e.g., 96 for hourly data with daily seasonality)')
     args = parser.parse_args()
     
     # Check for optuna
@@ -802,9 +822,14 @@ def main():
     TRANSFORMER_PATCH_WIDTH = args.patch_width
     # Set U-Net kernel size
     UNET_KERNEL_SIZE = tuple(args.kernel_size)
+    # Set time channel settings
+    USE_TIME_RAMP = args.use_time_ramp
+    USE_TIME_SINE = args.use_time_sine
+    SEASONAL_PERIOD = args.seasonal_period
     logger.info(f"Search space: batch_sizes={SEARCH_SPACE['batch_size']}, model_sizes={SEARCH_SPACE['model_size']}")
     if args.model_type == 'unet':
         logger.info(f"U-Net kernel size: {UNET_KERNEL_SIZE} (height x width)")
+        logger.info(f"Time ramp: {USE_TIME_RAMP}, Time sine: {USE_TIME_SINE} (period={SEASONAL_PERIOD})")
     if args.model_type == 'transformer':
         logger.info(f"Transformer patch size: {TRANSFORMER_PATCH_HEIGHT}x{TRANSFORMER_PATCH_WIDTH} (HxW)")
     
@@ -825,6 +850,9 @@ def main():
             'transformer_patch_width': args.patch_width,
             'use_coordinate_channel': True,  # Enable vertical spatial awareness
             'unet_kernel_size': UNET_KERNEL_SIZE,
+            'use_time_ramp': USE_TIME_RAMP,  # Enable linear ramp time channel
+            'use_time_sine': USE_TIME_SINE,  # Enable sine wave time channel
+            'seasonal_period': SEASONAL_PERIOD,
         }
         
         # Use tiny dataset for quick test
@@ -866,6 +894,9 @@ def main():
             transformer_patch_width=min(args.patch_width, 8),
             use_coordinate_channel=config.get('use_coordinate_channel', True),
             unet_kernel_size=UNET_KERNEL_SIZE,
+            use_time_ramp=USE_TIME_RAMP,
+            use_time_sine=USE_TIME_SINE,
+            seasonal_period=SEASONAL_PERIOD,
         )
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         model = DiffusionTSF(tiny_config).to(device)
