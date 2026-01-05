@@ -247,6 +247,7 @@ class DiffusionTSF(nn.Module):
         logger.info(f"  Coordinate channel: {config.use_coordinate_channel}")
         logger.info(f"  Time ramp channel: {config.use_time_ramp}")
         logger.info(f"  Time sine channel: {config.use_time_sine}")
+        logger.info(f"  Value channel: {config.use_value_channel}")
         if config.use_time_sine:
             logger.info(f"  Seasonal period: {config.seasonal_period}")
         if config.model_type == "unet":
@@ -384,6 +385,71 @@ class DiffusionTSF(nn.Module):
             channels_to_add.append(sine)
         
         return torch.cat(channels_to_add, dim=1)
+    
+    def _get_value_channel(
+        self,
+        values_norm: torch.Tensor,
+        height: int
+    ) -> torch.Tensor:
+        """Create a 2D channel containing the normalized values broadcast across height.
+        
+        Each column (timestep) of the output will have the same value repeated
+        down the entire height dimension. This provides the backbone with explicit
+        access to the raw numerical values at each timestep.
+        
+        Args:
+            values_norm: Normalized 1D values of shape (batch, [num_vars,] seq_len)
+            height: Height of the 2D image to match
+            
+        Returns:
+            Value channel of shape (batch, 1, height, seq_len) for univariate,
+            or (batch, num_vars, height, seq_len) for multivariate.
+        """
+        # Handle multivariate: (batch, num_vars, seq_len)
+        if values_norm.dim() == 3:
+            batch_size, num_vars, seq_len = values_norm.shape
+            # Expand: (batch, num_vars, seq_len) -> (batch, num_vars, 1, seq_len) -> (batch, num_vars, height, seq_len)
+            value_channel = values_norm.unsqueeze(2).expand(-1, -1, height, -1)
+        else:
+            # Univariate: (batch, seq_len)
+            batch_size, seq_len = values_norm.shape
+            # Expand: (batch, seq_len) -> (batch, 1, 1, seq_len) -> (batch, 1, height, seq_len)
+            value_channel = values_norm.unsqueeze(1).unsqueeze(2).expand(-1, -1, height, -1)
+        
+        # Scale to roughly [-1, 1] range for consistency with other channels
+        # The values are already normalized (mean 0, std 1), so we clamp to max_scale
+        # and then rescale to [-1, 1]
+        value_channel = value_channel.clamp(-self.config.max_scale, self.config.max_scale)
+        value_channel = value_channel / self.config.max_scale  # Now in [-1, 1]
+        
+        return value_channel
+    
+    def _inject_value_channel(
+        self,
+        x: torch.Tensor,
+        values_norm: torch.Tensor
+    ) -> torch.Tensor:
+        """Concatenate value channel to input tensor.
+        
+        Args:
+            x: Input tensor of shape (batch, channels, height, width)
+            values_norm: Normalized 1D values of shape (batch, [num_vars,] seq_len)
+            
+        Returns:
+            Tensor with value channel appended
+        """
+        if not self.config.use_value_channel:
+            return x
+        
+        _, _, height, _ = x.shape
+        value_channel = self._get_value_channel(values_norm, height)
+        
+        # For multivariate, we only use the first variable's values for the aux channel
+        # to keep channel count consistent (otherwise it would vary with num_vars)
+        if value_channel.shape[1] > 1:
+            value_channel = value_channel[:, 0:1, :, :]  # Take first var only
+        
+        return torch.cat([x, value_channel], dim=1)
     
     def _prepare_1d_context(
         self,
@@ -869,6 +935,10 @@ class DiffusionTSF(nn.Module):
         noisy_future_full = self._inject_time_channels(noisy_future_with_coords)
         past_2d_full = self._inject_time_channels(past_2d_with_coords)
         
+        # Inject value channels (normalized values broadcast across height)
+        noisy_future_full = self._inject_value_channel(noisy_future_full, future_norm)
+        past_2d_full = self._inject_value_channel(past_2d_full, past_norm)
+        
         # Predict noise (with optional encoder_hidden_states for hybrid conditioning)
         noise_pred = self.noise_predictor(
             noisy_future_full, t, past_2d_full,
@@ -948,6 +1018,7 @@ class DiffusionTSF(nn.Module):
         # Inject coordinate and time channels into past conditioning
         past_2d_with_coords = self._inject_coordinate_channel(past_2d)
         past_2d_full = self._inject_time_channels(past_2d_with_coords)
+        past_2d_full = self._inject_value_channel(past_2d_full, past_norm)
         
         # Prepare 1D context for hybrid conditioning (if enabled)
         encoder_hidden_states = None
@@ -982,6 +1053,14 @@ class DiffusionTSF(nn.Module):
             # x is the noisy future (B, num_vars, H, W), inject coords and time
             x_with_coords = self._inject_coordinate_channel(x)
             x_full = self._inject_time_channels(x_with_coords)
+            
+            # For value channel during generation, use zeros (we don't know future values)
+            if self.config.use_value_channel:
+                batch_size = x_full.shape[0]
+                _, _, height, width = x_full.shape
+                zero_values = torch.zeros(batch_size, 1, height, width, device=x_full.device, dtype=x_full.dtype)
+                x_full = torch.cat([x_full, zero_values], dim=1)
+            
             # cond already has all channels injected
             
             # Determine which context to use
@@ -1009,6 +1088,13 @@ class DiffusionTSF(nn.Module):
             # Inject channels
             x_with_coords = self._inject_coordinate_channel(x_double)
             x_full = self._inject_time_channels(x_with_coords)
+            
+            # For value channel during generation, use zeros (we don't know future values)
+            if self.config.use_value_channel:
+                batch_double = x_full.shape[0]
+                _, _, height, width = x_full.shape
+                zero_values = torch.zeros(batch_double, 1, height, width, device=x_full.device, dtype=x_full.dtype)
+                x_full = torch.cat([x_full, zero_values], dim=1)
             
             # Run batched prediction
             noise_pred_double = self.noise_predictor(

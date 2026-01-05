@@ -118,6 +118,7 @@ class DiffusionTSFConfig:
     # Temporal coordinate channels for horizontal awareness (fixes phase drift in U-Net)
     use_time_ramp: bool = False  # Add linear ramp channel (-1 to +1 "progress bar")
     use_time_sine: bool = False  # Add sine wave channel (periodic "clock")
+    use_value_channel: bool = False  # Add channel with normalized values broadcast across height
     seasonal_period: int = 96  # Period for sine wave (e.g., 96 for hourly data with daily seasonality)
     
     # Hybrid 1D Cross-Attention Conditioning
@@ -171,6 +172,8 @@ class DiffusionTSFConfig:
         if self.use_time_ramp:
             count += 1
         if self.use_time_sine:
+            count += 1
+        if self.use_value_channel:
             count += 1
         return count
     

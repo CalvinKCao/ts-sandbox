@@ -160,6 +160,7 @@ UNET_KERNEL_SIZE = (3, 3)
 # Time channels for U-Net temporal awareness (set from CLI)
 USE_TIME_RAMP = True  # Linear ramp channel
 USE_TIME_SINE = True  # Sine wave channel
+USE_VALUE_CHANNEL = False  # Value channel (normalized values broadcast)
 SEASONAL_PERIOD = 96
 
 # Multivariate mode (set from CLI)
@@ -167,6 +168,9 @@ USE_ALL_COLUMNS = False  # If True, use all numeric columns for multivariate for
 
 # Dilated middle block (set from CLI)
 USE_DILATED_MIDDLE = True  # If True, use dilated convolutions in U-Net bottleneck
+
+# Hybrid 1D cross-attention conditioning (set from CLI)
+USE_HYBRID_CONDITION = True  # If True, use 1D context encoder + cross-attention
 
 MODEL_SIZES = {
     'tiny': [32, 64],           # ~1M params, for quick tests only
@@ -575,10 +579,11 @@ def train(
         use_dilated_middle=config.get('use_dilated_middle', USE_DILATED_MIDDLE),
         use_time_ramp=config.get('use_time_ramp', USE_TIME_RAMP),
         use_time_sine=config.get('use_time_sine', USE_TIME_SINE),
+        use_value_channel=config.get('use_value_channel', USE_VALUE_CHANNEL),
         seasonal_period=config.get('seasonal_period', SEASONAL_PERIOD),
         num_variables=config.get('num_variables', 1),
         # Hybrid 1D cross-attention conditioning
-        use_hybrid_condition=config.get('use_hybrid_condition', True),
+        use_hybrid_condition=config.get('use_hybrid_condition', USE_HYBRID_CONDITION),
         context_embedding_dim=config.get('context_embedding_dim', 128),
         context_encoder_layers=config.get('context_encoder_layers', 2),
     )
@@ -703,8 +708,10 @@ def objective(trial) -> float:
         'use_dilated_middle': USE_DILATED_MIDDLE,  # Dilated bottleneck
         'use_time_ramp': USE_TIME_RAMP,  # Enable linear ramp time channel
         'use_time_sine': USE_TIME_SINE,  # Enable sine wave time channel
+        'use_value_channel': USE_VALUE_CHANNEL,  # Enable value channel
         'seasonal_period': SEASONAL_PERIOD,
         'use_all_columns': USE_ALL_COLUMNS,  # Multivariate mode
+        'use_hybrid_condition': USE_HYBRID_CONDITION,  # Hybrid 1D conditioning
     }
     
     # Checkpoint for this trial
@@ -894,8 +901,10 @@ def train_with_params(params: dict, run_name: Optional[str] = None):
     config.setdefault('use_dilated_middle', USE_DILATED_MIDDLE)
     config.setdefault('use_time_ramp', USE_TIME_RAMP)
     config.setdefault('use_time_sine', USE_TIME_SINE)
+    config.setdefault('use_value_channel', USE_VALUE_CHANNEL)
     config.setdefault('seasonal_period', SEASONAL_PERIOD)
     config.setdefault('use_all_columns', USE_ALL_COLUMNS)
+    config.setdefault('use_hybrid_condition', USE_HYBRID_CONDITION)
     config.setdefault('use_coordinate_channel', True)
     config.setdefault('transformer_patch_height', TRANSFORMER_PATCH_HEIGHT)
     config.setdefault('transformer_patch_width', TRANSFORMER_PATCH_WIDTH)
@@ -945,7 +954,7 @@ def train_with_params(params: dict, run_name: Optional[str] = None):
 # ============================================================================
 
 def main():
-    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, SEASONAL_PERIOD, USE_ALL_COLUMNS, SELECTED_DATASET, DATA_PATH, USE_DILATED_MIDDLE
+    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, USE_VALUE_CHANNEL, SEASONAL_PERIOD, USE_ALL_COLUMNS, SELECTED_DATASET, DATA_PATH, USE_DILATED_MIDDLE, USE_HYBRID_CONDITION
     
     parser = argparse.ArgumentParser(description='Train Diffusion TSF on Electricity dataset')
     parser.add_argument('--resume', action='store_true', help='Resume Optuna search')
@@ -977,8 +986,16 @@ def main():
                         help='Add sine wave time channel (periodic "clock")')
     parser.add_argument('--no-time-sine', dest='use_time_sine', action='store_false',
                         help='Disable sine wave time channel')
+    parser.add_argument('--use-value-channel', action='store_true', default=False,
+                        help='Add 2D channel with normalized values broadcast across height')
+    parser.add_argument('--no-value-channel', dest='use_value_channel', action='store_false',
+                        help='Disable value channel')
     parser.add_argument('--seasonal-period', type=int, default=96,
                         help='Period for sine wave time channel (e.g., 96 for hourly data with daily seasonality)')
+    parser.add_argument('--use-hybrid-condition', action='store_true', default=True,
+                        help='Enable hybrid 1D cross-attention conditioning (default: True)')
+    parser.add_argument('--no-hybrid-condition', dest='use_hybrid_condition', action='store_false',
+                        help='Disable hybrid 1D cross-attention conditioning')
     parser.add_argument('--multivariate', action='store_true', default=False,
                         help='Enable multivariate forecasting using all columns in the dataset')
     parser.add_argument('--dataset', type=str, default='electricity',
@@ -1003,6 +1020,7 @@ def main():
     # Set time channel settings
     USE_TIME_RAMP = args.use_time_ramp
     USE_TIME_SINE = args.use_time_sine
+    USE_VALUE_CHANNEL = args.use_value_channel
     # Use dataset-specific seasonal period unless overridden by CLI
     if args.seasonal_period == 96:  # Default value means user didn't specify
         SEASONAL_PERIOD = dataset_info[2]  # Use dataset-specific default
@@ -1010,6 +1028,9 @@ def main():
         SEASONAL_PERIOD = args.seasonal_period
     # Set multivariate mode
     USE_ALL_COLUMNS = args.multivariate
+    
+    # Set hybrid conditioning mode
+    USE_HYBRID_CONDITION = args.use_hybrid_condition
     
     # Initialize hardware-adaptive search space
     SEARCH_SPACE = get_hardware_config()
@@ -1039,10 +1060,11 @@ def main():
     if args.model_type == 'unet':
         logger.info(f"U-Net kernel size: {UNET_KERNEL_SIZE} (height x width)")
         logger.info(f"Dilated middle block: {USE_DILATED_MIDDLE}")
-        logger.info(f"Time ramp: {USE_TIME_RAMP}, Time sine: {USE_TIME_SINE} (period={SEASONAL_PERIOD})")
+        logger.info(f"Time ramp: {USE_TIME_RAMP}, Time sine: {USE_TIME_SINE}, Value channel: {USE_VALUE_CHANNEL} (period={SEASONAL_PERIOD})")
     if args.model_type == 'transformer':
         logger.info(f"Transformer patch size: {TRANSFORMER_PATCH_HEIGHT}x{TRANSFORMER_PATCH_WIDTH} (HxW)")
     logger.info(f"Multivariate mode: {USE_ALL_COLUMNS}")
+    logger.info(f"Hybrid 1D conditioning: {USE_HYBRID_CONDITION}")
     
     if args.quick:
         # Quick test mode - minimal settings for fast verification
@@ -1064,8 +1086,10 @@ def main():
             'use_dilated_middle': USE_DILATED_MIDDLE,  # Dilated bottleneck
             'use_time_ramp': USE_TIME_RAMP,  # Enable linear ramp time channel
             'use_time_sine': USE_TIME_SINE,  # Enable sine wave time channel
+            'use_value_channel': USE_VALUE_CHANNEL,  # Enable value channel
             'seasonal_period': SEASONAL_PERIOD,
             'use_all_columns': USE_ALL_COLUMNS,  # Multivariate mode
+            'use_hybrid_condition': USE_HYBRID_CONDITION,  # Hybrid 1D conditioning
         }
         
         # Use tiny dataset for quick test
@@ -1112,9 +1136,10 @@ def main():
             use_dilated_middle=USE_DILATED_MIDDLE,
             use_time_ramp=USE_TIME_RAMP,
             use_time_sine=USE_TIME_SINE,
+            use_value_channel=USE_VALUE_CHANNEL,
             seasonal_period=SEASONAL_PERIOD,
             num_variables=num_variables,
-            use_hybrid_condition=True,  # Enable hybrid 1D conditioning
+            use_hybrid_condition=USE_HYBRID_CONDITION,  # Hybrid 1D conditioning
             context_embedding_dim=32,   # Smaller for quick test
             context_encoder_layers=1,
         )
