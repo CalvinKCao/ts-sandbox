@@ -214,7 +214,9 @@ class DiffusionTSF(nn.Module):
                 kernel_size=config.unet_kernel_size,
                 use_dilated_middle=config.use_dilated_middle,
                 use_hybrid_condition=config.use_hybrid_condition,
-                context_dim=config.context_embedding_dim
+                context_dim=config.context_embedding_dim,
+                conditioning_mode=config.conditioning_mode,
+                visual_cond_channels=config.visual_cond_channels
             )
             
             # Create TimeSeriesContextEncoder for hybrid conditioning
@@ -243,6 +245,7 @@ class DiffusionTSF(nn.Module):
         logger.info(f"  Lookback: {config.lookback_length}, Forecast: {config.forecast_length}")
         logger.info(f"  Image size: {config.image_height} x W")
         logger.info(f"  Input channels: {config.backbone_in_channels} (data: {config.num_variables}, aux: {config.num_aux_channels})")
+        logger.info(f"  Conditioning mode: {config.conditioning_mode}")
         logger.info(f"  Diffusion steps: {config.num_diffusion_steps}")
         logger.info(f"  Coordinate channel: {config.use_coordinate_channel}")
         logger.info(f"  Time ramp channel: {config.use_time_ramp}")
@@ -450,6 +453,43 @@ class DiffusionTSF(nn.Module):
             value_channel = value_channel[:, 0:1, :, :]  # Take first var only
         
         return torch.cat([x, value_channel], dim=1)
+    
+    def _prepare_visual_conditioning(
+        self,
+        past_2d: torch.Tensor,
+        target_width: int
+    ) -> torch.Tensor:
+        """Prepare past 2D image for visual concatenation conditioning.
+        
+        For visual_concat mode, the past image is cropped or interpolated to match
+        the target width (future length) and concatenated directly as conditioning.
+        This allows the model to explicitly "see" the past trajectory pixels.
+        
+        Takes the END of the past context (most relevant for forecasting), similar
+        to ConditioningEncoder behavior.
+        
+        Args:
+            past_2d: Past 2D image of shape (batch, num_vars, height, past_len)
+            target_width: Target width (typically forecast_length)
+            
+        Returns:
+            Visual conditioning of shape (batch, num_vars, height, target_width)
+        """
+        _, _, height, past_len = past_2d.shape
+        
+        if past_len >= target_width:
+            # Take the last target_width timesteps (most relevant for forecasting)
+            visual_cond = past_2d[:, :, :, -target_width:]
+        else:
+            # Past is shorter than target - interpolate to match
+            visual_cond = F.interpolate(
+                past_2d, 
+                size=(height, target_width), 
+                mode='bilinear', 
+                align_corners=False
+            )
+        
+        return visual_cond
     
     def _prepare_1d_context(
         self,
@@ -929,19 +969,29 @@ class DiffusionTSF(nn.Module):
         
         # Inject vertical coordinate channel for spatial awareness
         noisy_future_with_coords = self._inject_coordinate_channel(noisy_future)
-        past_2d_with_coords = self._inject_coordinate_channel(past_2d)
         
         # Inject horizontal time channels for temporal awareness
         noisy_future_full = self._inject_time_channels(noisy_future_with_coords)
-        past_2d_full = self._inject_time_channels(past_2d_with_coords)
         
         # Inject value channels (normalized values broadcast across height)
         noisy_future_full = self._inject_value_channel(noisy_future_full, future_norm)
-        past_2d_full = self._inject_value_channel(past_2d_full, past_norm)
+        
+        # Prepare conditioning based on mode
+        if self.config.conditioning_mode == "visual_concat":
+            # Visual concat mode: pass raw past image channels (no aux channels) as conditioning
+            # The past visual is cropped to future length for direct pixel-level visibility
+            target_width = noisy_future_full.shape[3]  # future_len
+            cond_for_unet = self._prepare_visual_conditioning(past_2d, target_width)
+        else:
+            # Vector embedding mode: pass full past with aux channels to ConditioningEncoder
+            past_2d_with_coords = self._inject_coordinate_channel(past_2d)
+            past_2d_full = self._inject_time_channels(past_2d_with_coords)
+            past_2d_full = self._inject_value_channel(past_2d_full, past_norm)
+            cond_for_unet = past_2d_full
         
         # Predict noise (with optional encoder_hidden_states for hybrid conditioning)
         noise_pred = self.noise_predictor(
-            noisy_future_full, t, past_2d_full,
+            noisy_future_full, t, cond_for_unet,
             encoder_hidden_states=encoder_hidden_states
         )
         
@@ -1015,10 +1065,37 @@ class DiffusionTSF(nn.Module):
         # Encode past to 2D
         past_2d = self.encode_to_2d(past_norm)
         
-        # Inject coordinate and time channels into past conditioning
-        past_2d_with_coords = self._inject_coordinate_channel(past_2d)
-        past_2d_full = self._inject_time_channels(past_2d_with_coords)
-        past_2d_full = self._inject_value_channel(past_2d_full, past_norm)
+        # Prepare conditioning based on mode
+        if self.config.conditioning_mode == "visual_concat":
+            # Visual concat mode: crop past to forecast length for direct pixel visibility
+            target_width = self.config.forecast_length
+            cond_for_unet = self._prepare_visual_conditioning(past_2d, target_width)
+            
+            # Null conditioning for CFG: zeros with same shape as visual conditioning
+            if cfg_scale > 1.0:
+                null_cond_for_unet = torch.zeros_like(cond_for_unet)
+            else:
+                null_cond_for_unet = None
+        else:
+            # Vector embedding mode: inject aux channels for ConditioningEncoder
+            past_2d_with_coords = self._inject_coordinate_channel(past_2d)
+            past_2d_full = self._inject_time_channels(past_2d_with_coords)
+            past_2d_full = self._inject_value_channel(past_2d_full, past_norm)
+            cond_for_unet = past_2d_full
+            
+            # Null conditioning for CFG: zeros with all aux channels
+            if cfg_scale > 1.0:
+                null_cond = torch.zeros_like(past_2d)
+                null_cond_with_coords = self._inject_coordinate_channel(null_cond)
+                null_cond_full = self._inject_time_channels(null_cond_with_coords)
+                # For value channel, use zeros (null conditioning means no value info)
+                if self.config.use_value_channel:
+                    _, _, height, width = null_cond_full.shape
+                    zero_value_channel = torch.zeros(batch_size, 1, height, width, device=device, dtype=null_cond_full.dtype)
+                    null_cond_full = torch.cat([null_cond_full, zero_value_channel], dim=1)
+                null_cond_for_unet = null_cond_full
+            else:
+                null_cond_for_unet = None
         
         # Prepare 1D context for hybrid conditioning (if enabled)
         encoder_hidden_states = None
@@ -1030,19 +1107,6 @@ class DiffusionTSF(nn.Module):
             # Create null context for CFG
             if cfg_scale > 1.0:
                 null_encoder_hidden_states = torch.zeros_like(encoder_hidden_states)
-        
-        # Create null conditioning for CFG (zeros) - also with all channels
-        if cfg_scale > 1.0:
-            null_cond = torch.zeros_like(past_2d)
-            null_cond_with_coords = self._inject_coordinate_channel(null_cond)
-            null_cond_full = self._inject_time_channels(null_cond_with_coords)
-            # For value channel, use zeros (null conditioning means no value info)
-            if self.config.use_value_channel:
-                _, _, height, width = null_cond_full.shape
-                zero_value_channel = torch.zeros(batch_size, 1, height, width, device=device, dtype=null_cond_full.dtype)
-                null_cond_full = torch.cat([null_cond_full, zero_value_channel], dim=1)
-        else:
-            null_cond_full = None
         
         # Shape for future image (data channels only - aux channels get added by wrapper)
         future_shape = (
@@ -1061,12 +1125,14 @@ class DiffusionTSF(nn.Module):
             
             # For value channel during generation, use zeros (we don't know future values)
             if self.config.use_value_channel:
-                batch_size = x_full.shape[0]
+                curr_batch_size = x_full.shape[0]
                 _, _, height, width = x_full.shape
-                zero_values = torch.zeros(batch_size, 1, height, width, device=x_full.device, dtype=x_full.dtype)
+                zero_values = torch.zeros(curr_batch_size, 1, height, width, device=x_full.device, dtype=x_full.dtype)
                 x_full = torch.cat([x_full, zero_values], dim=1)
             
-            # cond already has all channels injected
+            # cond is already prepared based on conditioning_mode:
+            # - visual_concat: raw past visual channels at target width
+            # - vector_embedding: past with aux channels (processed by ConditioningEncoder in U-Net)
             
             # Determine which context to use
             ctx = null_encoder_hidden_states if use_null_context else encoder_hidden_states
@@ -1113,10 +1179,10 @@ class DiffusionTSF(nn.Module):
         # Generate via diffusion with CFG
         if use_ddim:
             future_2d = self.scheduler.sample_ddim_cfg(
-                model=lambda x, t, cond: model_cfg(x, t, cond, null_cond_full, cfg_scale),
+                model=lambda x, t, cond: model_cfg(x, t, cond, null_cond_for_unet, cfg_scale),
                 shape=future_shape,
-                cond=past_2d_full,
-                null_cond=null_cond_full,
+                cond=cond_for_unet,
+                null_cond=null_cond_for_unet,
                 cfg_scale=1.0,  # CFG is handled inside model_cfg
                 num_steps=num_ddim_steps,
                 eta=eta,
@@ -1125,10 +1191,10 @@ class DiffusionTSF(nn.Module):
             )
         else:
             future_2d = self.scheduler.sample_ddpm_cfg(
-                model=lambda x, t, cond: model_cfg(x, t, cond, null_cond_full, cfg_scale),
+                model=lambda x, t, cond: model_cfg(x, t, cond, null_cond_for_unet, cfg_scale),
                 shape=future_shape,
-                cond=past_2d_full,
-                null_cond=null_cond_full,
+                cond=cond_for_unet,
+                null_cond=null_cond_for_unet,
                 cfg_scale=1.0,  # CFG is handled inside model_cfg
                 device=device,
                 verbose=verbose

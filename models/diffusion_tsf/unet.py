@@ -921,14 +921,18 @@ class ConditionalUNet2D(nn.Module):
     - Past context image (conditioning)
     - Optional: 1D context embeddings from TimeSeriesContextEncoder (hybrid mode)
     
-    Conditioning is done via simple channel-wise concatenation:
-    Input = [noisy_future, past_context_features] along channel dim
+    Conditioning modes (controlled by conditioning_mode parameter):
+    - "visual_concat": Directly concatenate past 2D image channels to input.
+                       The past visual is passed through WITHOUT the ConditioningEncoder,
+                       allowing the model to directly "see" the past trajectory pixels.
+    - "vector_embedding": Use ConditioningEncoder to extract local/global features,
+                          then concatenate encoded features to input. (Original behavior)
     
     When use_hybrid_condition=True, cross-attention layers are added at attention_levels
     to attend to 1D context embeddings from TimeSeriesContextEncoder.
     
-    Note: When use_coordinate_channel is enabled, in_channels=2 (data + vertical coords).
-    The output is always 1 channel (predicted noise for the data channel only).
+    Note: When use_coordinate_channel is enabled, in_channels includes aux channels.
+    The output channels = num_variables (predicted noise for each variable).
     """
     
     def __init__(
@@ -945,17 +949,19 @@ class ConditionalUNet2D(nn.Module):
         kernel_size: Tuple[int, int] = (3, 3),
         use_dilated_middle: bool = False,
         use_hybrid_condition: bool = False,
-        context_dim: int = 128
+        context_dim: int = 128,
+        conditioning_mode: str = "visual_concat",
+        visual_cond_channels: int = 1
     ):
         """
         Args:
-            in_channels: Number of input channels (1 for grayscale, 2 with coordinate channel)
-            out_channels: Number of output channels (always 1 for noise prediction)
+            in_channels: Number of input channels (num_vars + aux_channels)
+            out_channels: Number of output channels (num_variables for noise prediction)
             channels: Channel dimensions at each U-Net level
             num_res_blocks: Number of residual blocks per level
             attention_levels: Which levels to apply self-attention (0-indexed)
             time_emb_dim: Dimension of time embedding
-            cond_channels: Number of channels from conditioning encoder
+            cond_channels: Number of channels from conditioning encoder (vector_embedding mode)
             num_groups: Number of groups for GroupNorm
             image_height: Height of the 2D image representation
             kernel_size: Tuple (height, width) for convolutional kernels.
@@ -966,6 +972,10 @@ class ConditionalUNet2D(nn.Module):
             use_hybrid_condition: If True, enable cross-attention with 1D context embeddings
                                   from TimeSeriesContextEncoder at attention levels.
             context_dim: Dimension of 1D context embeddings (from TimeSeriesContextEncoder).
+            conditioning_mode: "visual_concat" or "vector_embedding". Controls how past
+                              context is fed to the model.
+            visual_cond_channels: Number of visual conditioning channels (used in visual_concat mode).
+                                  Typically equals num_variables (past image channels).
         """
         super().__init__()
         
@@ -974,6 +984,8 @@ class ConditionalUNet2D(nn.Module):
         self.channels = channels
         self.kernel_size = kernel_size
         self.use_hybrid_condition = use_hybrid_condition
+        self.conditioning_mode = conditioning_mode
+        self.visual_cond_channels = visual_cond_channels
         
         # Calculate padding for 'same' output size
         padding = (kernel_size[0] // 2, kernel_size[1] // 2)
@@ -985,15 +997,20 @@ class ConditionalUNet2D(nn.Module):
             nn.Linear(time_emb_dim * 4, time_emb_dim)
         )
         
-        # Conditioning encoder with proper height and kernel size
-        # Uses same in_channels as main input (handles coordinate channel if present)
-        self.cond_encoder = ConditioningEncoder(
-            in_channels=in_channels, out_channels=cond_channels, height=image_height, kernel_size=kernel_size
-        )
+        # Conditioning encoder - only used in vector_embedding mode
+        if conditioning_mode == "vector_embedding":
+            self.cond_encoder = ConditioningEncoder(
+                in_channels=in_channels, out_channels=cond_channels, height=image_height, kernel_size=kernel_size
+            )
+            init_conv_in_channels = in_channels + cond_channels
+        else:
+            # visual_concat mode: no ConditioningEncoder, past visual is concatenated directly
+            self.cond_encoder = None
+            # Input = noisy_future (in_channels) + past_visual (visual_cond_channels)
+            init_conv_in_channels = in_channels + visual_cond_channels
         
         # Initial convolution with configurable kernel size
-        # Input: noisy_future (in_channels) + cond_features (cond_channels)
-        self.init_conv = nn.Conv2d(in_channels + cond_channels, channels[0], kernel_size=kernel_size, padding=padding)
+        self.init_conv = nn.Conv2d(init_conv_in_channels, channels[0], kernel_size=kernel_size, padding=padding)
         
         # Downsampling path
         self.down_blocks = nn.ModuleList()
@@ -1058,6 +1075,11 @@ class ConditionalUNet2D(nn.Module):
         self.final_conv = nn.Conv2d(channels[0], out_channels, kernel_size=kernel_size, padding=padding)
         
         logger.info(f"ConditionalUNet2D initialized with channels={channels}, kernel_size={kernel_size}")
+        logger.info(f"  Conditioning mode: {conditioning_mode}")
+        if conditioning_mode == "visual_concat":
+            logger.info(f"  Visual concat: {visual_cond_channels} past image channels directly concatenated")
+        else:
+            logger.info(f"  Vector embedding: ConditioningEncoder with {cond_channels} output channels")
         if use_hybrid_condition:
             logger.info(f"  Hybrid conditioning enabled: cross-attention with context_dim={context_dim}")
     
@@ -1072,7 +1094,10 @@ class ConditionalUNet2D(nn.Module):
         Args:
             x: Noisy future image of shape (batch, in_channels, height, future_len)
             t: Diffusion timesteps of shape (batch,)
-            cond: Past context image of shape (batch, in_channels, height, past_len)
+            cond: Past context conditioning:
+                  - In "vector_embedding" mode: shape (batch, in_channels, height, past_len)
+                  - In "visual_concat" mode: shape (batch, visual_cond_channels, height, future_len)
+                    Already cropped/interpolated to target width by the caller.
             encoder_hidden_states: Optional 1D context embeddings from TimeSeriesContextEncoder,
                                    shape (batch, seq_len, context_dim). Required if use_hybrid_condition=True.
             
@@ -1083,9 +1108,15 @@ class ConditionalUNet2D(nn.Module):
         t_emb = get_timestep_embedding(t, self.time_mlp[0].in_features)
         t_emb = self.time_mlp(t_emb)
         
-        # Encode conditioning (past context) - now properly handles dimension matching
-        target_width = x.shape[3]
-        cond_features = self.cond_encoder(cond, target_width)
+        # Prepare conditioning features based on mode
+        if self.conditioning_mode == "vector_embedding":
+            # Use ConditioningEncoder to extract local/global features
+            target_width = x.shape[3]
+            cond_features = self.cond_encoder(cond, target_width)
+        else:
+            # visual_concat mode: cond is already the past visual at target width
+            # Just use it directly
+            cond_features = cond
         
         # Concatenate along channel dimension
         x = torch.cat([x, cond_features], dim=1)

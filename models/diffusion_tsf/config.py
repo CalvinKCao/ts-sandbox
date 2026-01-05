@@ -121,6 +121,16 @@ class DiffusionTSFConfig:
     use_value_channel: bool = False  # Add channel with normalized values broadcast across height
     seasonal_period: int = 96  # Period for sine wave (e.g., 96 for hourly data with daily seasonality)
     
+    # Conditioning Mode for Past Context
+    # Controls how the past context is fed to the U-Net backbone:
+    # - "visual_concat": Directly concatenate the masked past image (past 2D + zeros for future)
+    #                    to the model input channels. This allows the model to explicitly "see"
+    #                    the past trajectory pixels. Bypasses ConditioningEncoder.
+    # - "vector_embedding": Use the ConditioningEncoder to extract local/global features from
+    #                       the past image, then concatenate these encoded features to input.
+    #                       This is the original approach.
+    conditioning_mode: str = "visual_concat"  # "visual_concat" or "vector_embedding"
+    
     # Hybrid 1D Cross-Attention Conditioning
     # Instead of only using 2D visual conditioning, also inject raw 1D numerical values
     # of the past sequence via Cross-Attention layers in the U-Net
@@ -145,6 +155,8 @@ class DiffusionTSFConfig:
         assert self.representation_mode in ["pdf", "cdf"], "representation_mode must be 'pdf' or 'cdf'"
         assert self.seasonal_period > 0, "seasonal_period must be positive"
         assert self.num_variables > 0, "num_variables must be positive"
+        assert self.conditioning_mode in ["visual_concat", "vector_embedding"], \
+            "conditioning_mode must be 'visual_concat' or 'vector_embedding'"
         # Validate kernel size
         kh, kw = self.unet_kernel_size
         assert kh > 0 and kw > 0, "unet_kernel_size dimensions must be positive"
@@ -179,6 +191,19 @@ class DiffusionTSFConfig:
     
     @property
     def backbone_in_channels(self) -> int:
-        """Total input channels for the backbone (data + auxiliary)."""
+        """Total input channels for the backbone (data + auxiliary).
+        
+        This is the number of channels for the noisy future + auxiliary channels,
+        NOT including conditioning channels which are added separately.
+        """
         return self.num_variables + self.num_aux_channels
+    
+    @property
+    def visual_cond_channels(self) -> int:
+        """Number of visual conditioning channels in visual_concat mode.
+        
+        In visual_concat mode, the past 2D image (with same number of variables)
+        is concatenated directly as conditioning channels.
+        """
+        return self.num_variables
 
