@@ -183,7 +183,7 @@ MODEL_SIZES = {
 
 # Training settings
 MAX_EPOCHS = 200
-PATIENCE = 10                   # Early stopping patience (increased for longer training)
+PATIENCE = 25                   # Early stopping patience (increased for longer training)
 VAL_SPLIT = 0.1
 NUM_OPTUNA_TRIALS = 20          # Total trials to run
 PRUNING_WARMUP = 20             # Don't prune before this epoch (increased for longer training)
@@ -1230,6 +1230,27 @@ def main():
         # Load checkpoint to get the config
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         config = checkpoint['config']
+
+        logger.info("Resuming with checkpoint's original configuration:")
+        logger.info(f"  use_coordinate_channel: {config.get('use_coordinate_channel', True)}")
+        logger.info(f"  use_time_ramp: {config.get('use_time_ramp', False)}")
+        logger.info(f"  use_time_sine: {config.get('use_time_sine', False)}")
+        logger.info(f"  use_value_channel: {config.get('use_value_channel', False)}")
+        logger.info(f"  use_hybrid_condition: {config.get('use_hybrid_condition', True)}")
+
+        # Warn if CLI flags might conflict
+        cli_flags_set = []
+        if args.use_time_ramp: cli_flags_set.append('use_time_ramp')
+        if args.use_time_sine: cli_flags_set.append('use_time_sine')
+        if args.use_value_channel: cli_flags_set.append('use_value_channel')
+        if not args.use_hybrid_condition: cli_flags_set.append('use_hybrid_condition (disabled)')
+
+        if cli_flags_set:
+            logger.warning("WARNING: You specified CLI flags that may conflict with checkpoint config:")
+            for flag in cli_flags_set:
+                logger.warning(f"  --{flag.replace('_', '-')}")
+            logger.warning("When resuming, the checkpoint's saved configuration takes precedence.")
+            logger.warning("The CLI flags are ignored for model architecture settings.")
 
         # Override run name if specified
         run_name = args.run_name or f"resume_{Path(checkpoint_path).stem}"
