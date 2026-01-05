@@ -969,12 +969,12 @@ def main():
                              'E.g., --kernel-size 3 5 for wider temporal receptive field. Must be odd numbers. (default: 3 3)')
     parser.add_argument('--dilated-middle', action='store_true', default=False,
                         help='Use dilated convolutions in U-Net bottleneck for expanded temporal receptive field')
-    parser.add_argument('--use-time-ramp', action='store_true', default=True,
-                        help='Add linear ramp time channel (-1 to +1 "progress bar") (default: True)')
+    parser.add_argument('--use-time-ramp', action='store_true', default=False,
+                        help='Add linear ramp time channel (-1 to +1 "progress bar")')
     parser.add_argument('--no-time-ramp', dest='use_time_ramp', action='store_false',
                         help='Disable linear ramp time channel')
-    parser.add_argument('--use-time-sine', action='store_true', default=True,
-                        help='Add sine wave time channel (periodic "clock") (default: True)')
+    parser.add_argument('--use-time-sine', action='store_true', default=False,
+                        help='Add sine wave time channel (periodic "clock")')
     parser.add_argument('--no-time-sine', dest='use_time_sine', action='store_false',
                         help='Disable sine wave time channel')
     parser.add_argument('--seasonal-period', type=int, default=96,

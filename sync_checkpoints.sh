@@ -44,30 +44,31 @@ mkdir -p "$LOCAL_PATH"
 
 if [ "$BEST_ONLY" = true ]; then
     echo "--------------------------------------------------------"
-    echo "Syncing only the most recent best_model.pt"
+    echo "Syncing only the most recent model checkpoint (best_model.pt or model_best.pt)"
     echo "Remote: ${REMOTE_USER}@${REMOTE_IP}:${REMOTE_PATH}"
     echo "Local:  ${LOCAL_PATH}"
     echo "--------------------------------------------------------"
 
-    # Find all best_model.pt files on remote and show them
-    echo "Searching for best_model.pt files in: ${REMOTE_PATH}"
+    # Find all best_model.pt and model_best.pt files on remote and show them
+    echo "Searching for best_model.pt and model_best.pt files in: ${REMOTE_PATH}"
     echo ""
-    echo "All best_model.pt files found (sorted by modification time):"
-    ssh "${REMOTE_USER}@${REMOTE_IP}" "find ${REMOTE_PATH} -name 'best_model.pt' -type f -printf '%T+ %p\n' 2>/dev/null | sort"
+    echo "All checkpoint files found (sorted by modification time):"
+    ssh "${REMOTE_USER}@${REMOTE_IP}" "find ${REMOTE_PATH} \( -name 'best_model.pt' -o -name 'model_best.pt' \) -type f -printf '%T+ %p\n' 2>/dev/null | sort"
     echo ""
 
     # Get the most recent one (full absolute path)
-    REMOTE_BEST_FILE=$(ssh "${REMOTE_USER}@${REMOTE_IP}" "find ${REMOTE_PATH} -name 'best_model.pt' -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-")
+    REMOTE_BEST_FILE=$(ssh "${REMOTE_USER}@${REMOTE_IP}" "find ${REMOTE_PATH} \( -name 'best_model.pt' -o -name 'model_best.pt' \) -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-")
 
     if [ -z "$REMOTE_BEST_FILE" ]; then
-        echo "No best_model.pt files found on remote machine."
+        echo "No best_model.pt or model_best.pt files found on remote machine."
         exit 1
     fi
 
     echo "Most recent: $REMOTE_BEST_FILE"
 
-    # Local destination
-    LOCAL_BEST_FILE="${LOCAL_PATH}best_model.pt"
+    # Local destination - use the same filename as remote
+    REMOTE_FILENAME=$(basename "$REMOTE_BEST_FILE")
+    LOCAL_BEST_FILE="${LOCAL_PATH}${REMOTE_FILENAME}"
 
     echo "Local destination: $LOCAL_BEST_FILE"
 
