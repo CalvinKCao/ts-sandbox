@@ -12,6 +12,8 @@ Usage:
     python train_electricity.py --resume           # Resume latest study
     python train_electricity.py --best             # Train with best found params of latest study
     python train_electricity.py --use-defaults     # Train with pre-tuned default params (no Optuna)
+    python train_electricity.py --list-checkpoints # List all available checkpoint files
+    python train_electricity.py --resume-checkpoint PATH/TO/CHECKPOINT.pt  # Resume from specific checkpoint
     python train_electricity.py --params-file X    # Train with params from a JSON file
 """
 
@@ -953,6 +955,29 @@ def train_with_params(params: dict, run_name: Optional[str] = None):
 # Main
 # ============================================================================
 
+def list_available_checkpoints():
+    """List all checkpoint files in the checkpoints directory."""
+    if not os.path.exists(BASE_CHECKPOINT_DIR):
+        logger.info(f"No checkpoints directory found at: {BASE_CHECKPOINT_DIR}")
+        return
+
+    checkpoints = []
+    for root, dirs, files in os.walk(BASE_CHECKPOINT_DIR):
+        for file in files:
+            if file.endswith('.pt'):
+                checkpoints.append(os.path.join(root, file))
+
+    if not checkpoints:
+        logger.info("No checkpoint files (.pt) found in checkpoints directory")
+        return
+
+    logger.info("Available checkpoint files:")
+    for i, ckpt in enumerate(sorted(checkpoints), 1):
+        # Get relative path for cleaner display
+        rel_path = os.path.relpath(ckpt, BASE_CHECKPOINT_DIR)
+        logger.info(f"  {i}. {rel_path}")
+
+
 def main():
     global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, USE_VALUE_CHANNEL, SEASONAL_PERIOD, USE_ALL_COLUMNS, SELECTED_DATASET, DATA_PATH, USE_DILATED_MIDDLE, USE_HYBRID_CONDITION
     
@@ -963,6 +988,10 @@ def main():
                         help='Train with pre-tuned default params (no Optuna, fast start)')
     parser.add_argument('--params-file', type=str, default=None, metavar='PATH',
                         help='Train with params from a JSON file (e.g., best_params.json from a previous run)')
+    parser.add_argument('--resume-checkpoint', type=str, default=None, metavar='PATH',
+                        help='Resume training from a specific checkpoint file (.pt)')
+    parser.add_argument('--list-checkpoints', action='store_true',
+                        help='List all available checkpoint files and exit')
     parser.add_argument('--run-name', type=str, default=None, metavar='NAME',
                         help='Name for the training run (used with --use-defaults or --params-file)')
     parser.add_argument('--trials', type=int, default=NUM_OPTUNA_TRIALS, help='Number of Optuna trials')
@@ -1066,6 +1095,11 @@ def main():
     logger.info(f"Multivariate mode: {USE_ALL_COLUMNS}")
     logger.info(f"Hybrid 1D conditioning: {USE_HYBRID_CONDITION}")
     
+    if args.list_checkpoints:
+        # List all checkpoint files and exit
+        list_available_checkpoints()
+        sys.exit(0)
+
     if args.quick:
         # Quick test mode - minimal settings for fast verification
         logger.info("Quick test mode - using minimal settings (16 samples, 2 epochs)")
@@ -1183,7 +1217,30 @@ def main():
             custom_params = json.load(f)
         
         train_with_params(custom_params, run_name=args.run_name)
-        
+
+    elif args.resume_checkpoint:
+        # Resume training from a specific checkpoint file
+        checkpoint_path = args.resume_checkpoint
+        if not os.path.exists(checkpoint_path):
+            logger.error(f"Checkpoint file not found: {checkpoint_path}")
+            sys.exit(1)
+
+        logger.info(f"Resuming training from checkpoint: {checkpoint_path}")
+
+        # Load checkpoint to get the config
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        config = checkpoint['config']
+
+        # Override run name if specified
+        run_name = args.run_name or f"resume_{Path(checkpoint_path).stem}"
+
+        # Call train with the checkpoint path (it will auto-resume)
+        train(
+            config,
+            max_epochs=MAX_EPOCHS,
+            checkpoint_path=checkpoint_path
+        )
+
     else:
         # Run Optuna search
         run_optuna_search(n_trials=args.trials, resume=args.resume)
