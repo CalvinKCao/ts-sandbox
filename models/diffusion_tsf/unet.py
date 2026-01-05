@@ -21,6 +21,344 @@ from typing import List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+class SinusoidalPositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding for sequence models.
+    
+    Adds position information to a sequence via sin/cos embeddings.
+    """
+    
+    def __init__(self, dim: int, max_len: int = 2048):
+        super().__init__()
+        pe = torch.zeros(max_len, dim)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(10000.0) / dim))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # (1, max_len, dim)
+        self.register_buffer('pe', pe)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (batch, seq_len, dim)
+        Returns:
+            Output tensor of shape (batch, seq_len, dim) with positional encoding added
+        """
+        return x + self.pe[:, :x.size(1), :]
+
+
+class TransformerEncoderLayer1D(nn.Module):
+    """Single transformer encoder layer for 1D sequences.
+    
+    Pre-norm architecture with:
+    - Multi-head self-attention
+    - Feedforward network with GELU activation
+    """
+    
+    def __init__(self, dim: int, num_heads: int = 4, mlp_ratio: float = 4.0, dropout: float = 0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, int(dim * mlp_ratio)),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(int(dim * mlp_ratio), dim),
+            nn.Dropout(dropout)
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (batch, seq_len, dim)
+        Returns:
+            Output tensor of shape (batch, seq_len, dim)
+        """
+        # Self-attention with pre-norm
+        x_norm = self.norm1(x)
+        attn_out, _ = self.attn(x_norm, x_norm, x_norm)
+        x = x + attn_out
+        
+        # MLP with pre-norm
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+
+class TimeSeriesContextEncoder(nn.Module):
+    """1D Encoder for raw time series values.
+    
+    Processes the raw past time series data (values + time indices) to produce
+    context embeddings that can be used for cross-attention in the U-Net.
+    
+    Input: (batch, seq_len, context_input_channels)
+        - Channel 0: Normalized time series values
+        - Channel 1: Normalized time indices (0 to 1 ramp)
+    
+    Output: (batch, seq_len, context_embedding_dim)
+    """
+    
+    def __init__(
+        self,
+        input_channels: int = 2,
+        embedding_dim: int = 128,
+        num_layers: int = 2,
+        num_heads: int = 4,
+        dropout: float = 0.1,
+        max_seq_len: int = 2048
+    ):
+        """
+        Args:
+            input_channels: Number of input channels (value + time index = 2)
+            embedding_dim: Dimension of output embeddings
+            num_layers: Number of transformer encoder layers
+            num_heads: Number of attention heads
+            dropout: Dropout rate
+            max_seq_len: Maximum sequence length for positional encoding
+        """
+        super().__init__()
+        
+        # Project input channels to embedding dimension
+        self.input_proj = nn.Linear(input_channels, embedding_dim)
+        
+        # Sinusoidal positional encoding
+        self.pos_encoding = SinusoidalPositionalEncoding(embedding_dim, max_seq_len)
+        
+        # Transformer encoder layers
+        self.layers = nn.ModuleList([
+            TransformerEncoderLayer1D(embedding_dim, num_heads, dropout=dropout)
+            for _ in range(num_layers)
+        ])
+        
+        # Final layer norm
+        self.final_norm = nn.LayerNorm(embedding_dim)
+        
+        logger.info(f"TimeSeriesContextEncoder: input_ch={input_channels}, "
+                    f"embed_dim={embedding_dim}, layers={num_layers}, heads={num_heads}")
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (batch, seq_len, input_channels)
+               - x[:, :, 0] = normalized values
+               - x[:, :, 1] = normalized time indices (0 to 1)
+        
+        Returns:
+            Context embeddings of shape (batch, seq_len, embedding_dim)
+        """
+        # Project to embedding dimension
+        x = self.input_proj(x)
+        
+        # Add positional encoding
+        x = self.pos_encoding(x)
+        
+        # Pass through transformer layers
+        for layer in self.layers:
+            x = layer(x)
+        
+        # Final normalization
+        x = self.final_norm(x)
+        
+        return x
+
+
+class CrossAttentionBlock(nn.Module):
+    """Cross-attention block for conditioning on external context.
+    
+    Computes attention where:
+    - Query (Q): From 2D image features (flattened spatially)
+    - Key (K) & Value (V): From 1D context sequence
+    
+    This allows the U-Net to "look up" precise numerical values from the
+    context encoder rather than guessing from the 2D image resolution.
+    """
+    
+    def __init__(
+        self,
+        query_dim: int,
+        context_dim: int,
+        num_heads: int = 4,
+        head_dim: int = 64,
+        dropout: float = 0.0
+    ):
+        """
+        Args:
+            query_dim: Dimension of query features (U-Net channel dim)
+            context_dim: Dimension of context features (from TimeSeriesContextEncoder)
+            num_heads: Number of attention heads
+            head_dim: Dimension per head
+            dropout: Dropout rate
+        """
+        super().__init__()
+        inner_dim = num_heads * head_dim
+        
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.scale = head_dim ** -0.5
+        
+        # Layer norms
+        self.norm = nn.LayerNorm(query_dim)
+        self.context_norm = nn.LayerNorm(context_dim)
+        
+        # Projections
+        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
+        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, query_dim),
+            nn.Dropout(dropout)
+        )
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        context: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: Query features of shape (batch, seq_len_q, query_dim)
+            context: Context features of shape (batch, seq_len_ctx, context_dim)
+        
+        Returns:
+            Output features of shape (batch, seq_len_q, query_dim)
+        """
+        batch_size, seq_len_q, _ = x.shape
+        
+        # Normalize
+        x_norm = self.norm(x)
+        context_norm = self.context_norm(context)
+        
+        # Compute Q, K, V
+        q = self.to_q(x_norm)  # (batch, seq_len_q, inner_dim)
+        k = self.to_k(context_norm)  # (batch, seq_len_ctx, inner_dim)
+        v = self.to_v(context_norm)  # (batch, seq_len_ctx, inner_dim)
+        
+        # Reshape for multi-head attention
+        q = q.view(batch_size, seq_len_q, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # Compute attention
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        
+        # Apply attention to values
+        out = attn @ v
+        
+        # Reshape back
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len_q, -1)
+        
+        # Output projection + residual
+        return x + self.to_out(out)
+
+
+class SpatialTransformerBlock(nn.Module):
+    """Spatial Transformer Block with self-attention and cross-attention.
+    
+    Similar to Stable Diffusion's attention blocks, this applies:
+    1. Self-attention on flattened 2D features
+    2. Cross-attention with 1D context (from TimeSeriesContextEncoder)
+    3. Feedforward network
+    
+    Used in the deeper levels of the U-Net for conditioning.
+    """
+    
+    def __init__(
+        self,
+        channels: int,
+        context_dim: int,
+        num_heads: int = 4,
+        head_dim: int = 64,
+        num_groups: int = 8,
+        dropout: float = 0.0
+    ):
+        """
+        Args:
+            channels: Number of channels in the 2D feature map
+            context_dim: Dimension of context from TimeSeriesContextEncoder
+            num_heads: Number of attention heads
+            head_dim: Dimension per head
+            num_groups: Number of groups for GroupNorm
+            dropout: Dropout rate
+        """
+        super().__init__()
+        
+        # Input normalization (operates on 2D spatial data)
+        self.norm = nn.GroupNorm(num_groups, channels)
+        
+        # Project channels to a consistent dimension for attention
+        self.proj_in = nn.Conv2d(channels, channels, kernel_size=1)
+        
+        # Self-attention
+        self.self_attn = nn.MultiheadAttention(channels, num_heads, dropout=dropout, batch_first=True)
+        self.self_attn_norm = nn.LayerNorm(channels)
+        
+        # Cross-attention with context
+        self.cross_attn = CrossAttentionBlock(
+            query_dim=channels,
+            context_dim=context_dim,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            dropout=dropout
+        )
+        
+        # Feedforward
+        self.ff = nn.Sequential(
+            nn.LayerNorm(channels),
+            nn.Linear(channels, channels * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(channels * 4, channels),
+            nn.Dropout(dropout)
+        )
+        
+        # Project back to original channels
+        self.proj_out = nn.Conv2d(channels, channels, kernel_size=1)
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        context: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: 2D feature map of shape (batch, channels, height, width)
+            context: 1D context of shape (batch, seq_len, context_dim), optional
+        
+        Returns:
+            Output feature map of shape (batch, channels, height, width)
+        """
+        batch, channels, height, width = x.shape
+        residual = x
+        
+        # Normalize and project
+        x = self.norm(x)
+        x = self.proj_in(x)
+        
+        # Flatten spatial dimensions: (batch, channels, height, width) -> (batch, height*width, channels)
+        x = x.view(batch, channels, height * width).permute(0, 2, 1)
+        
+        # Self-attention
+        x_norm = self.self_attn_norm(x)
+        attn_out, _ = self.self_attn(x_norm, x_norm, x_norm)
+        x = x + attn_out
+        
+        # Cross-attention with context (if provided)
+        if context is not None:
+            x = self.cross_attn(x, context)
+        
+        # Feedforward
+        x = x + self.ff(x)
+        
+        # Reshape back: (batch, height*width, channels) -> (batch, channels, height, width)
+        x = x.permute(0, 2, 1).view(batch, channels, height, width)
+        
+        # Project out and add residual
+        x = self.proj_out(x)
+        
+        return x + residual
+
+
 def get_timestep_embedding(timesteps: torch.Tensor, dim: int) -> torch.Tensor:
     """Create sinusoidal timestep embeddings.
     
@@ -131,6 +469,8 @@ class DownBlock(nn.Module):
         time_emb_dim: int,
         num_res_blocks: int = 2,
         use_attention: bool = False,
+        use_cross_attention: bool = False,
+        context_dim: int = 128,
         num_groups: int = 8,
         kernel_size: Tuple[int, int] = (3, 3)
     ):
@@ -143,19 +483,40 @@ class DownBlock(nn.Module):
                 ResidualBlock(in_ch, out_channels, time_emb_dim, num_groups, kernel_size=kernel_size)
             )
         
-        # Simple self-attention (optional)
-        self.use_attention = use_attention
-        if use_attention:
+        # Simple self-attention (optional) - legacy mode without cross-attention
+        self.use_attention = use_attention and not use_cross_attention
+        if self.use_attention:
             self.attention = nn.MultiheadAttention(out_channels, num_heads=4, batch_first=True)
             self.attn_norm = nn.GroupNorm(num_groups, out_channels)
+        
+        # Spatial Transformer with cross-attention (for hybrid conditioning)
+        self.use_cross_attention = use_cross_attention
+        if use_cross_attention:
+            self.spatial_transformer = SpatialTransformerBlock(
+                channels=out_channels,
+                context_dim=context_dim,
+                num_heads=4,
+                num_groups=num_groups
+            )
         
         # Downsample: strided conv with same kernel proportions
         # Padding calculated for output size = ceil(input_size / 2)
         downsample_padding = (kernel_size[0] // 2, kernel_size[1] // 2)
         self.downsample = nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, stride=2, padding=downsample_padding)
     
-    def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        t_emb: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
+        Args:
+            x: Input tensor of shape (batch, in_channels, height, width)
+            t_emb: Time embedding of shape (batch, time_emb_dim)
+            encoder_hidden_states: Context from TimeSeriesContextEncoder,
+                                   shape (batch, seq_len, context_dim)
+        
         Returns:
             (downsampled output, skip connection output before downsampling)
         """
@@ -169,6 +530,9 @@ class DownBlock(nn.Module):
             x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
             attn_out, _ = self.attention(x_norm, x_norm, x_norm)
             x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
+        
+        if self.use_cross_attention:
+            x = self.spatial_transformer(x, encoder_hidden_states)
         
         skip = x
         x = self.downsample(x)
@@ -187,6 +551,8 @@ class UpBlock(nn.Module):
         time_emb_dim: int,
         num_res_blocks: int = 2,
         use_attention: bool = False,
+        use_cross_attention: bool = False,
+        context_dim: int = 128,
         num_groups: int = 8,
         kernel_size: Tuple[int, int] = (3, 3)
     ):
@@ -206,13 +572,40 @@ class UpBlock(nn.Module):
                 ResidualBlock(in_ch, out_channels, time_emb_dim, num_groups, kernel_size=kernel_size)
             )
         
-        # Simple self-attention (optional)
-        self.use_attention = use_attention
-        if use_attention:
+        # Simple self-attention (optional) - legacy mode without cross-attention
+        self.use_attention = use_attention and not use_cross_attention
+        if self.use_attention:
             self.attention = nn.MultiheadAttention(out_channels, num_heads=4, batch_first=True)
             self.attn_norm = nn.GroupNorm(num_groups, out_channels)
+        
+        # Spatial Transformer with cross-attention (for hybrid conditioning)
+        self.use_cross_attention = use_cross_attention
+        if use_cross_attention:
+            self.spatial_transformer = SpatialTransformerBlock(
+                channels=out_channels,
+                context_dim=context_dim,
+                num_heads=4,
+                num_groups=num_groups
+            )
     
-    def forward(self, x: torch.Tensor, skip: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        skip: torch.Tensor,
+        t_emb: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (batch, in_channels, height, width)
+            skip: Skip connection tensor of shape (batch, skip_channels, height, width)
+            t_emb: Time embedding of shape (batch, time_emb_dim)
+            encoder_hidden_states: Context from TimeSeriesContextEncoder,
+                                   shape (batch, seq_len, context_dim)
+        
+        Returns:
+            Output tensor of shape (batch, out_channels, height, width)
+        """
         x = self.upsample(x)
         
         # Handle size mismatch from non-square images
@@ -231,6 +624,9 @@ class UpBlock(nn.Module):
             x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
             attn_out, _ = self.attention(x_norm, x_norm, x_norm)
             x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
+        
+        if self.use_cross_attention:
+            x = self.spatial_transformer(x, encoder_hidden_states)
         
         return x
 
@@ -301,9 +697,13 @@ class DilatedMiddleBlock(nn.Module):
         time_emb_dim: int,
         num_groups: int = 8,
         kernel_size: Tuple[int, int] = (3, 3),
-        dilation_factors: List[int] = [1, 2, 4, 8]
+        dilation_factors: List[int] = [1, 2, 4, 8],
+        use_cross_attention: bool = False,
+        context_dim: int = 128
     ):
         super().__init__()
+        
+        self.use_cross_attention = use_cross_attention
         
         # Initial ResBlock to transform features
         self.res_in = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
@@ -321,9 +721,18 @@ class DilatedMiddleBlock(nn.Module):
                 )
             )
         
-        # Self-attention for global context
-        self.attention = nn.MultiheadAttention(channels, num_heads=4, batch_first=True)
-        self.attn_norm = nn.GroupNorm(num_groups, channels)
+        # Self-attention for global context (if not using cross-attention)
+        if not use_cross_attention:
+            self.attention = nn.MultiheadAttention(channels, num_heads=4, batch_first=True)
+            self.attn_norm = nn.GroupNorm(num_groups, channels)
+        else:
+            # Spatial Transformer with cross-attention
+            self.spatial_transformer = SpatialTransformerBlock(
+                channels=channels,
+                context_dim=context_dim,
+                num_heads=4,
+                num_groups=num_groups
+            )
         
         # Final ResBlock
         self.res_out = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
@@ -332,7 +741,22 @@ class DilatedMiddleBlock(nn.Module):
         rf = sum([(kernel_size[1] - 1) * d for d in dilation_factors]) + 1
         logger.info(f"DilatedMiddleBlock: dilations={dilation_factors}, temporal receptive field={rf} steps")
     
-    def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        t_emb: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (batch, channels, height, width)
+            t_emb: Time embedding of shape (batch, time_emb_dim)
+            encoder_hidden_states: Context from TimeSeriesContextEncoder,
+                                   shape (batch, seq_len, context_dim)
+        
+        Returns:
+            Output tensor of shape (batch, channels, height, width)
+        """
         # Initial transformation
         x = self.res_in(x, t_emb)
         
@@ -340,12 +764,15 @@ class DilatedMiddleBlock(nn.Module):
         for dilated_block in self.dilated_blocks:
             x = dilated_block(x, t_emb)
         
-        # Self-attention
-        b, c, h, w = x.shape
-        x_flat = x.view(b, c, h * w).permute(0, 2, 1)
-        x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
-        attn_out, _ = self.attention(x_norm, x_norm, x_norm)
-        x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
+        # Attention
+        if self.use_cross_attention:
+            x = self.spatial_transformer(x, encoder_hidden_states)
+        else:
+            b, c, h, w = x.shape
+            x_flat = x.view(b, c, h * w).permute(0, 2, 1)
+            x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
+            attn_out, _ = self.attention(x_norm, x_norm, x_norm)
+            x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
         
         # Final transformation
         x = self.res_out(x, t_emb)
@@ -359,21 +786,60 @@ class MiddleBlock(nn.Module):
     For expanded receptive field, use DilatedMiddleBlock instead.
     """
     
-    def __init__(self, channels: int, time_emb_dim: int, num_groups: int = 8, kernel_size: Tuple[int, int] = (3, 3)):
+    def __init__(
+        self,
+        channels: int,
+        time_emb_dim: int,
+        num_groups: int = 8,
+        kernel_size: Tuple[int, int] = (3, 3),
+        use_cross_attention: bool = False,
+        context_dim: int = 128
+    ):
         super().__init__()
+        self.use_cross_attention = use_cross_attention
+        
         self.res1 = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
-        self.attention = nn.MultiheadAttention(channels, num_heads=4, batch_first=True)
-        self.attn_norm = nn.GroupNorm(num_groups, channels)
+        
+        if not use_cross_attention:
+            self.attention = nn.MultiheadAttention(channels, num_heads=4, batch_first=True)
+            self.attn_norm = nn.GroupNorm(num_groups, channels)
+        else:
+            # Spatial Transformer with cross-attention
+            self.spatial_transformer = SpatialTransformerBlock(
+                channels=channels,
+                context_dim=context_dim,
+                num_heads=4,
+                num_groups=num_groups
+            )
+        
         self.res2 = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
     
-    def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        t_emb: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (batch, channels, height, width)
+            t_emb: Time embedding of shape (batch, time_emb_dim)
+            encoder_hidden_states: Context from TimeSeriesContextEncoder,
+                                   shape (batch, seq_len, context_dim)
+        
+        Returns:
+            Output tensor of shape (batch, channels, height, width)
+        """
         x = self.res1(x, t_emb)
         
-        b, c, h, w = x.shape
-        x_flat = x.view(b, c, h * w).permute(0, 2, 1)
-        x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
-        attn_out, _ = self.attention(x_norm, x_norm, x_norm)
-        x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
+        if self.use_cross_attention:
+            x = self.spatial_transformer(x, encoder_hidden_states)
+        else:
+            b, c, h, w = x.shape
+            x_flat = x.view(b, c, h * w).permute(0, 2, 1)
+            x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
+            attn_out, _ = self.attention(x_norm, x_norm, x_norm)
+            x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
         
         x = self.res2(x, t_emb)
         return x
@@ -453,9 +919,13 @@ class ConditionalUNet2D(nn.Module):
     - Noisy future image x_t
     - Diffusion timestep t
     - Past context image (conditioning)
+    - Optional: 1D context embeddings from TimeSeriesContextEncoder (hybrid mode)
     
     Conditioning is done via simple channel-wise concatenation:
     Input = [noisy_future, past_context_features] along channel dim
+    
+    When use_hybrid_condition=True, cross-attention layers are added at attention_levels
+    to attend to 1D context embeddings from TimeSeriesContextEncoder.
     
     Note: When use_coordinate_channel is enabled, in_channels=2 (data + vertical coords).
     The output is always 1 channel (predicted noise for the data channel only).
@@ -473,7 +943,9 @@ class ConditionalUNet2D(nn.Module):
         num_groups: int = 8,
         image_height: int = 128,
         kernel_size: Tuple[int, int] = (3, 3),
-        use_dilated_middle: bool = False
+        use_dilated_middle: bool = False,
+        use_hybrid_condition: bool = False,
+        context_dim: int = 128
     ):
         """
         Args:
@@ -491,6 +963,9 @@ class ConditionalUNet2D(nn.Module):
                          Height = value axis, Width = temporal axis.
             use_dilated_middle: If True, use DilatedMiddleBlock with exponentially
                                increasing dilations for expanded temporal receptive field.
+            use_hybrid_condition: If True, enable cross-attention with 1D context embeddings
+                                  from TimeSeriesContextEncoder at attention levels.
+            context_dim: Dimension of 1D context embeddings (from TimeSeriesContextEncoder).
         """
         super().__init__()
         
@@ -498,6 +973,7 @@ class ConditionalUNet2D(nn.Module):
         self.out_channels = out_channels
         self.channels = channels
         self.kernel_size = kernel_size
+        self.use_hybrid_condition = use_hybrid_condition
         
         # Calculate padding for 'same' output size
         padding = (kernel_size[0] // 2, kernel_size[1] // 2)
@@ -524,16 +1000,34 @@ class ConditionalUNet2D(nn.Module):
         in_ch = channels[0]
         for i, out_ch in enumerate(channels[1:]):
             use_attn = i in attention_levels
+            # Use cross-attention at attention levels when hybrid conditioning is enabled
+            use_cross_attn = use_hybrid_condition and use_attn
             self.down_blocks.append(
-                DownBlock(in_ch, out_ch, time_emb_dim, num_res_blocks, use_attn, num_groups, kernel_size=kernel_size)
+                DownBlock(
+                    in_ch, out_ch, time_emb_dim, num_res_blocks,
+                    use_attention=use_attn,
+                    use_cross_attention=use_cross_attn,
+                    context_dim=context_dim,
+                    num_groups=num_groups,
+                    kernel_size=kernel_size
+                )
             )
             in_ch = out_ch
         
         # Middle block - optionally use dilated convolutions for expanded receptive field
+        # Always use cross-attention in middle block if hybrid conditioning is enabled
         if use_dilated_middle:
-            self.middle = DilatedMiddleBlock(channels[-1], time_emb_dim, num_groups, kernel_size=kernel_size)
+            self.middle = DilatedMiddleBlock(
+                channels[-1], time_emb_dim, num_groups, kernel_size=kernel_size,
+                use_cross_attention=use_hybrid_condition,
+                context_dim=context_dim
+            )
         else:
-            self.middle = MiddleBlock(channels[-1], time_emb_dim, num_groups, kernel_size=kernel_size)
+            self.middle = MiddleBlock(
+                channels[-1], time_emb_dim, num_groups, kernel_size=kernel_size,
+                use_cross_attention=use_hybrid_condition,
+                context_dim=context_dim
+            )
         
         # Upsampling path
         # Skip connections come from down blocks and have the same channels as the down block output
@@ -546,8 +1040,17 @@ class ConditionalUNet2D(nn.Module):
             out_ch = reversed_channels[i + 1]
             skip_ch = reversed_channels[i]  # Skip channels match the down block's output (= in_ch)
             use_attn = (len(channels) - 2 - i) in attention_levels
+            # Use cross-attention at attention levels when hybrid conditioning is enabled
+            use_cross_attn = use_hybrid_condition and use_attn
             self.up_blocks.append(
-                UpBlock(in_ch, out_ch, skip_ch, time_emb_dim, num_res_blocks, use_attn, num_groups, kernel_size=kernel_size)
+                UpBlock(
+                    in_ch, out_ch, skip_ch, time_emb_dim, num_res_blocks,
+                    use_attention=use_attn,
+                    use_cross_attention=use_cross_attn,
+                    context_dim=context_dim,
+                    num_groups=num_groups,
+                    kernel_size=kernel_size
+                )
             )
         
         # Final convolution with configurable kernel size
@@ -555,21 +1058,26 @@ class ConditionalUNet2D(nn.Module):
         self.final_conv = nn.Conv2d(channels[0], out_channels, kernel_size=kernel_size, padding=padding)
         
         logger.info(f"ConditionalUNet2D initialized with channels={channels}, kernel_size={kernel_size}")
+        if use_hybrid_condition:
+            logger.info(f"  Hybrid conditioning enabled: cross-attention with context_dim={context_dim}")
     
     def forward(
         self,
         x: torch.Tensor,
         t: torch.Tensor,
-        cond: torch.Tensor
+        cond: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Args:
-            x: Noisy future image of shape (batch, 1, height, future_len)
+            x: Noisy future image of shape (batch, in_channels, height, future_len)
             t: Diffusion timesteps of shape (batch,)
-            cond: Past context image of shape (batch, 1, height, past_len)
+            cond: Past context image of shape (batch, in_channels, height, past_len)
+            encoder_hidden_states: Optional 1D context embeddings from TimeSeriesContextEncoder,
+                                   shape (batch, seq_len, context_dim). Required if use_hybrid_condition=True.
             
         Returns:
-            Predicted noise of shape (batch, 1, height, future_len)
+            Predicted noise of shape (batch, out_channels, height, future_len)
         """
         # Get time embeddings
         t_emb = get_timestep_embedding(t, self.time_mlp[0].in_features)
@@ -588,15 +1096,15 @@ class ConditionalUNet2D(nn.Module):
         # Downsampling with skip connections
         skips = []
         for down_block in self.down_blocks:
-            x, skip = down_block(x, t_emb)
+            x, skip = down_block(x, t_emb, encoder_hidden_states)
             skips.append(skip)
         
         # Middle
-        x = self.middle(x, t_emb)
+        x = self.middle(x, t_emb, encoder_hidden_states)
         
         # Upsampling with skip connections
         for up_block, skip in zip(self.up_blocks, reversed(skips)):
-            x = up_block(x, skip, t_emb)
+            x = up_block(x, skip, t_emb, encoder_hidden_states)
         
         # Final output
         x = self.final_norm(x)

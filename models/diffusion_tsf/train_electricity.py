@@ -11,6 +11,8 @@ Usage:
     python train_electricity.py                    # Start fresh (creates new study if exists)
     python train_electricity.py --resume           # Resume latest study
     python train_electricity.py --best             # Train with best found params of latest study
+    python train_electricity.py --use-defaults     # Train with pre-tuned default params (no Optuna)
+    python train_electricity.py --params-file X    # Train with params from a JSON file
 """
 
 import os
@@ -179,6 +181,19 @@ PATIENCE = 10                   # Early stopping patience (increased for longer 
 VAL_SPLIT = 0.1
 NUM_OPTUNA_TRIALS = 20          # Total trials to run
 PRUNING_WARMUP = 20             # Don't prune before this epoch (increased for longer training)
+
+# Pre-tuned default parameters (from best Optuna run)
+# These are good starting points that work well across datasets
+DEFAULT_PARAMS = {
+    "learning_rate": 4.25e-05,
+    "model_size": "small",
+    "diffusion_steps": 100,
+    "batch_size": 16,
+    "noise_schedule": "cosine",
+    "blur_sigma": 1.0,
+    "emd_lambda": 0.0,
+    "representation_mode": "cdf"
+}
 
 # ============================================================================
 # Dataset
@@ -562,6 +577,10 @@ def train(
         use_time_sine=config.get('use_time_sine', USE_TIME_SINE),
         seasonal_period=config.get('seasonal_period', SEASONAL_PERIOD),
         num_variables=config.get('num_variables', 1),
+        # Hybrid 1D cross-attention conditioning
+        use_hybrid_condition=config.get('use_hybrid_condition', True),
+        context_embedding_dim=config.get('context_embedding_dim', 128),
+        context_encoder_layers=config.get('context_encoder_layers', 2),
     )
     
     model = DiffusionTSF(model_config).to(device)
@@ -846,6 +865,81 @@ def train_with_best_params():
     logger.info(f"Final best validation loss: {best_val_loss:.4f}")
 
 
+def train_with_params(params: dict, run_name: Optional[str] = None):
+    """Train with specified parameters (no Optuna).
+    
+    Args:
+        params: Dictionary of hyperparameters to use
+        run_name: Optional name for the run (used for checkpoint directory)
+    """
+    global CHECKPOINT_DIR
+    
+    # Create checkpoint directory for this run
+    if run_name:
+        CHECKPOINT_DIR = os.path.join(BASE_CHECKPOINT_DIR, run_name)
+    else:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        CHECKPOINT_DIR = os.path.join(BASE_CHECKPOINT_DIR, f"direct_train_{timestamp}")
+    
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    logger.info(f"Checkpoints will be saved to: {CHECKPOINT_DIR}")
+    
+    # Build config from params, applying defaults for missing keys
+    config = dict(DEFAULT_PARAMS)  # Start with defaults
+    config.update(params)  # Override with provided params
+    
+    # Apply CLI-driven settings that may override JSON params
+    config.setdefault('model_type', SELECTED_MODEL_TYPE)
+    config.setdefault('unet_kernel_size', UNET_KERNEL_SIZE)
+    config.setdefault('use_dilated_middle', USE_DILATED_MIDDLE)
+    config.setdefault('use_time_ramp', USE_TIME_RAMP)
+    config.setdefault('use_time_sine', USE_TIME_SINE)
+    config.setdefault('seasonal_period', SEASONAL_PERIOD)
+    config.setdefault('use_all_columns', USE_ALL_COLUMNS)
+    config.setdefault('use_coordinate_channel', True)
+    config.setdefault('transformer_patch_height', TRANSFORMER_PATCH_HEIGHT)
+    config.setdefault('transformer_patch_width', TRANSFORMER_PATCH_WIDTH)
+    
+    logger.info("Training with params:")
+    logger.info(json.dumps(config, indent=2, default=str))
+    
+    # Save params for reproducibility
+    params_path = os.path.join(CHECKPOINT_DIR, 'params.json')
+    with open(params_path, 'w') as f:
+        # Convert tuples to lists for JSON serialization
+        serializable_config = {k: list(v) if isinstance(v, tuple) else v for k, v in config.items()}
+        json.dump(serializable_config, f, indent=2)
+    logger.info(f"Params saved to {params_path}")
+    
+    checkpoint_path = os.path.join(CHECKPOINT_DIR, 'model.pt')
+    
+    # Train with automatic batch size reduction on OOM
+    original_batch = config['batch_size']
+    current_batch = original_batch
+    
+    while current_batch >= 2:
+        try:
+            config['batch_size'] = current_batch
+            best_val_loss = train(
+                config,
+                max_epochs=MAX_EPOCHS,
+                checkpoint_path=checkpoint_path
+            )
+            logger.info(f"Final best validation loss: {best_val_loss:.4f}")
+            return best_val_loss
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                torch.cuda.empty_cache()
+                new_batch = current_batch // 2
+                logger.warning(f"OOM with batch_size={current_batch}, retrying with batch_size={new_batch}")
+                current_batch = new_batch
+            else:
+                raise
+    
+    logger.error(f"OOM even with batch_size=2, training failed")
+    return float('inf')
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -855,7 +949,13 @@ def main():
     
     parser = argparse.ArgumentParser(description='Train Diffusion TSF on Electricity dataset')
     parser.add_argument('--resume', action='store_true', help='Resume Optuna search')
-    parser.add_argument('--best', action='store_true', help='Train with best found params')
+    parser.add_argument('--best', action='store_true', help='Train with best found params from latest Optuna study')
+    parser.add_argument('--use-defaults', action='store_true', 
+                        help='Train with pre-tuned default params (no Optuna, fast start)')
+    parser.add_argument('--params-file', type=str, default=None, metavar='PATH',
+                        help='Train with params from a JSON file (e.g., best_params.json from a previous run)')
+    parser.add_argument('--run-name', type=str, default=None, metavar='NAME',
+                        help='Name for the training run (used with --use-defaults or --params-file)')
     parser.add_argument('--trials', type=int, default=NUM_OPTUNA_TRIALS, help='Number of Optuna trials')
     parser.add_argument('--quick', action='store_true', help='Quick test with fewer samples')
     parser.add_argument('--model-type', choices=['unet', 'transformer'], default='unet', help='Backbone: unet (default) or transformer (DiT-style)')
@@ -1014,6 +1114,9 @@ def main():
             use_time_sine=USE_TIME_SINE,
             seasonal_period=SEASONAL_PERIOD,
             num_variables=num_variables,
+            use_hybrid_condition=True,  # Enable hybrid 1D conditioning
+            context_embedding_dim=32,   # Smaller for quick test
+            context_encoder_layers=1,
         )
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         model = DiffusionTSF(tiny_config).to(device)
@@ -1037,6 +1140,24 @@ def main():
         
     elif args.best:
         train_with_best_params()
+    
+    elif args.use_defaults:
+        # Train with pre-tuned default params (no Optuna)
+        logger.info("Using pre-tuned default parameters (no Optuna search)")
+        train_with_params(DEFAULT_PARAMS, run_name=args.run_name)
+    
+    elif args.params_file:
+        # Train with params from a JSON file
+        params_path = args.params_file
+        if not os.path.exists(params_path):
+            logger.error(f"Params file not found: {params_path}")
+            sys.exit(1)
+        
+        logger.info(f"Loading params from: {params_path}")
+        with open(params_path, 'r') as f:
+            custom_params = json.load(f)
+        
+        train_with_params(custom_params, run_name=args.run_name)
         
     else:
         # Run Optuna search

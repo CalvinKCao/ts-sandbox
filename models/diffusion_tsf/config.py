@@ -116,9 +116,17 @@ class DiffusionTSFConfig:
     use_coordinate_channel: bool = True  # Concatenate vertical gradient to input
     
     # Temporal coordinate channels for horizontal awareness (fixes phase drift in U-Net)
-    use_time_ramp: bool = True  # Add linear ramp channel (-1 to +1 "progress bar")
-    use_time_sine: bool = True  # Add sine wave channel (periodic "clock")
+    use_time_ramp: bool = False  # Add linear ramp channel (-1 to +1 "progress bar")
+    use_time_sine: bool = False  # Add sine wave channel (periodic "clock")
     seasonal_period: int = 96  # Period for sine wave (e.g., 96 for hourly data with daily seasonality)
+    
+    # Hybrid 1D Cross-Attention Conditioning
+    # Instead of only using 2D visual conditioning, also inject raw 1D numerical values
+    # of the past sequence via Cross-Attention layers in the U-Net
+    use_hybrid_condition: bool = True  # Enable 1D context encoder + cross-attention
+    context_embedding_dim: int = 128  # Dimension of the 1D context embeddings
+    context_input_channels: int = 2  # 1 for value + 1 for time index
+    context_encoder_layers: int = 2  # Number of transformer layers in context encoder
     
     # Training
     learning_rate: float = 2e-4

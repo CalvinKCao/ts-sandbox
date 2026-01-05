@@ -20,13 +20,13 @@ from typing import Dict, Optional, Tuple
 try:
     from .config import DiffusionTSFConfig
     from .preprocessing import Standardizer, TimeSeriesTo2D, VerticalGaussianBlur
-    from .unet import ConditionalUNet2D
+    from .unet import ConditionalUNet2D, TimeSeriesContextEncoder
     from .transformer import DiffusionTransformer
     from .diffusion import DiffusionScheduler
 except ImportError:
     from config import DiffusionTSFConfig
     from preprocessing import Standardizer, TimeSeriesTo2D, VerticalGaussianBlur
-    from unet import ConditionalUNet2D
+    from unet import ConditionalUNet2D, TimeSeriesContextEncoder
     from transformer import DiffusionTransformer
     from diffusion import DiffusionScheduler
 
@@ -201,6 +201,8 @@ class DiffusionTSF(nn.Module):
                 in_channels=backbone_in_channels,
                 out_channels=config.num_variables,  # Output one channel per variable
             )
+            # Note: Transformer backbone does not yet support hybrid conditioning
+            self.context_encoder = None
         else:
             self.noise_predictor = ConditionalUNet2D(
                 in_channels=backbone_in_channels,
@@ -210,8 +212,23 @@ class DiffusionTSF(nn.Module):
                 attention_levels=config.attention_levels,
                 image_height=config.image_height,
                 kernel_size=config.unet_kernel_size,
-                use_dilated_middle=config.use_dilated_middle
+                use_dilated_middle=config.use_dilated_middle,
+                use_hybrid_condition=config.use_hybrid_condition,
+                context_dim=config.context_embedding_dim
             )
+            
+            # Create TimeSeriesContextEncoder for hybrid conditioning
+            if config.use_hybrid_condition:
+                self.context_encoder = TimeSeriesContextEncoder(
+                    input_channels=config.context_input_channels,
+                    embedding_dim=config.context_embedding_dim,
+                    num_layers=config.context_encoder_layers,
+                    num_heads=4,
+                    dropout=0.1,
+                    max_seq_len=max(config.lookback_length, config.forecast_length) + 256
+                )
+            else:
+                self.context_encoder = None
         
         # Diffusion scheduler (not a nn.Module, managed separately)
         self.scheduler = DiffusionScheduler(
@@ -236,6 +253,8 @@ class DiffusionTSF(nn.Module):
             logger.info(f"  U-Net kernel size: {config.unet_kernel_size}")
             if config.use_dilated_middle:
                 logger.info(f"  Dilated middle block: enabled (dilations=1,2,4,8)")
+            if config.use_hybrid_condition:
+                logger.info(f"  Hybrid 1D conditioning: enabled (context_dim={config.context_embedding_dim}, layers={config.context_encoder_layers})")
     
     def to(self, device):
         """Move model and scheduler to device."""
@@ -365,6 +384,49 @@ class DiffusionTSF(nn.Module):
             channels_to_add.append(sine)
         
         return torch.cat(channels_to_add, dim=1)
+    
+    def _prepare_1d_context(
+        self,
+        past_norm: torch.Tensor
+    ) -> torch.Tensor:
+        """Prepare 1D context input for the TimeSeriesContextEncoder.
+        
+        Creates a tensor with two channels:
+        - Channel 0: Normalized time series values
+        - Channel 1: Normalized time index (0.0 to 1.0 ramp)
+        
+        Supports both univariate and multivariate inputs.
+        For multivariate, we flatten all variables into a single sequence.
+        
+        Args:
+            past_norm: Normalized past sequence of shape (batch, [num_vars,] past_len)
+            
+        Returns:
+            Context input of shape (batch, seq_len, context_input_channels)
+            For univariate: seq_len = past_len
+            For multivariate: seq_len = past_len (each variable processed separately)
+        """
+        # Handle multivariate: shape is (batch, num_vars, seq_len)
+        # We use only the first variable for context encoding for now
+        # TODO: Consider encoding all variables (concatenate or separate attention)
+        if past_norm.dim() == 3:
+            # Use first variable for context (or could average across variables)
+            past_1d = past_norm[:, 0, :]  # (batch, past_len)
+        else:
+            past_1d = past_norm  # (batch, past_len)
+        
+        batch_size, seq_len = past_1d.shape
+        device = past_1d.device
+        dtype = past_1d.dtype
+        
+        # Create time index channel: linear ramp from 0.0 to 1.0
+        time_idx = torch.linspace(0.0, 1.0, seq_len, device=device, dtype=dtype)
+        time_idx = time_idx.unsqueeze(0).expand(batch_size, -1)  # (batch, seq_len)
+        
+        # Stack to create (batch, seq_len, 2)
+        context_input = torch.stack([past_1d, time_idx], dim=-1)
+        
+        return context_input
     
     def _normalize_sequence(
         self,
@@ -761,6 +823,23 @@ class DiffusionTSF(nn.Module):
         
         logger.debug(f"past_2d shape: {past_2d.shape}, future_2d shape: {future_2d.shape}")
         
+        # Prepare 1D context for hybrid conditioning (if enabled)
+        encoder_hidden_states = None
+        if self.context_encoder is not None:
+            context_input = self._prepare_1d_context(past_norm)
+            encoder_hidden_states = self.context_encoder(context_input)
+            
+            # Apply CFG dropout to context as well
+            if self.training and self.config.cfg_dropout > 0:
+                drop_mask = torch.rand(batch_size, device=device) < self.config.cfg_dropout
+                if drop_mask.any():
+                    null_context = torch.zeros_like(encoder_hidden_states)
+                    encoder_hidden_states = torch.where(
+                        drop_mask.view(-1, 1, 1).expand_as(encoder_hidden_states),
+                        null_context,
+                        encoder_hidden_states
+                    )
+        
         # Classifier-Free Guidance: randomly drop conditioning during training
         # This teaches the model to work both with and without conditioning
         if self.training and self.config.cfg_dropout > 0:
@@ -790,8 +869,11 @@ class DiffusionTSF(nn.Module):
         noisy_future_full = self._inject_time_channels(noisy_future_with_coords)
         past_2d_full = self._inject_time_channels(past_2d_with_coords)
         
-        # Predict noise
-        noise_pred = self.noise_predictor(noisy_future_full, t, past_2d_full)
+        # Predict noise (with optional encoder_hidden_states for hybrid conditioning)
+        noise_pred = self.noise_predictor(
+            noisy_future_full, t, past_2d_full,
+            encoder_hidden_states=encoder_hidden_states
+        )
         
         # L2 loss on noise
         noise_loss = F.mse_loss(noise_pred, noise)
@@ -867,6 +949,17 @@ class DiffusionTSF(nn.Module):
         past_2d_with_coords = self._inject_coordinate_channel(past_2d)
         past_2d_full = self._inject_time_channels(past_2d_with_coords)
         
+        # Prepare 1D context for hybrid conditioning (if enabled)
+        encoder_hidden_states = None
+        null_encoder_hidden_states = None
+        if self.context_encoder is not None:
+            context_input = self._prepare_1d_context(past_norm)
+            encoder_hidden_states = self.context_encoder(context_input)
+            
+            # Create null context for CFG
+            if cfg_scale > 1.0:
+                null_encoder_hidden_states = torch.zeros_like(encoder_hidden_states)
+        
         # Create null conditioning for CFG (zeros) - also with all channels
         if cfg_scale > 1.0:
             null_cond = torch.zeros_like(past_2d)
@@ -884,21 +977,56 @@ class DiffusionTSF(nn.Module):
         )
         
         # Create a wrapper that injects coordinate and time channels before calling the backbone
-        def model_with_channels(x, t, cond):
+        # This closure captures the encoder_hidden_states for hybrid conditioning
+        def model_with_channels(x, t, cond, use_null_context=False):
             # x is the noisy future (B, num_vars, H, W), inject coords and time
             x_with_coords = self._inject_coordinate_channel(x)
             x_full = self._inject_time_channels(x_with_coords)
             # cond already has all channels injected
-            return self.noise_predictor(x_full, t, cond)
+            
+            # Determine which context to use
+            ctx = null_encoder_hidden_states if use_null_context else encoder_hidden_states
+            
+            return self.noise_predictor(x_full, t, cond, encoder_hidden_states=ctx)
+        
+        # Create CFG-aware model wrapper
+        def model_cfg(x, t, cond, null_cond=None, cfg_scale=1.0):
+            """Model wrapper that handles CFG internally."""
+            if cfg_scale <= 1.0 or null_cond is None:
+                return model_with_channels(x, t, cond, use_null_context=False)
+            
+            # Run conditional and unconditional in parallel via batching
+            x_double = torch.cat([x, x], dim=0)
+            t_double = torch.cat([t, t], dim=0)
+            cond_double = torch.cat([cond, null_cond], dim=0)
+            
+            # For hybrid conditioning, also double the context
+            if encoder_hidden_states is not None:
+                ctx_double = torch.cat([encoder_hidden_states, null_encoder_hidden_states], dim=0)
+            else:
+                ctx_double = None
+            
+            # Inject channels
+            x_with_coords = self._inject_coordinate_channel(x_double)
+            x_full = self._inject_time_channels(x_with_coords)
+            
+            # Run batched prediction
+            noise_pred_double = self.noise_predictor(
+                x_full, t_double, cond_double, encoder_hidden_states=ctx_double
+            )
+            
+            # Split and apply CFG
+            noise_cond, noise_uncond = noise_pred_double.chunk(2, dim=0)
+            return noise_uncond + cfg_scale * (noise_cond - noise_uncond)
         
         # Generate via diffusion with CFG
         if use_ddim:
             future_2d = self.scheduler.sample_ddim_cfg(
-                model=model_with_channels,
+                model=lambda x, t, cond: model_cfg(x, t, cond, null_cond_full, cfg_scale),
                 shape=future_shape,
                 cond=past_2d_full,
                 null_cond=null_cond_full,
-                cfg_scale=cfg_scale,
+                cfg_scale=1.0,  # CFG is handled inside model_cfg
                 num_steps=num_ddim_steps,
                 eta=eta,
                 device=device,
@@ -906,11 +1034,11 @@ class DiffusionTSF(nn.Module):
             )
         else:
             future_2d = self.scheduler.sample_ddpm_cfg(
-                model=model_with_channels,
+                model=lambda x, t, cond: model_cfg(x, t, cond, null_cond_full, cfg_scale),
                 shape=future_shape,
                 cond=past_2d_full,
                 null_cond=null_cond_full,
-                cfg_scale=cfg_scale,
+                cfg_scale=1.0,  # CFG is handled inside model_cfg
                 device=device,
                 verbose=verbose
             )
