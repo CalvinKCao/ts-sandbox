@@ -1036,6 +1036,11 @@ class DiffusionTSF(nn.Module):
             null_cond = torch.zeros_like(past_2d)
             null_cond_with_coords = self._inject_coordinate_channel(null_cond)
             null_cond_full = self._inject_time_channels(null_cond_with_coords)
+            # For value channel, use zeros (null conditioning means no value info)
+            if self.config.use_value_channel:
+                _, _, height, width = null_cond_full.shape
+                zero_value_channel = torch.zeros(batch_size, 1, height, width, device=device, dtype=null_cond_full.dtype)
+                null_cond_full = torch.cat([null_cond_full, zero_value_channel], dim=1)
         else:
             null_cond_full = None
         
