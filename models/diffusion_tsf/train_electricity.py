@@ -218,11 +218,23 @@ def load_itransformer_from_checkpoint(
         iTransformerGuidance wrapper around the loaded model
     """
     import sys
+    import importlib.util
+    
+    # Use importlib to load from absolute path to avoid conflicts with local model.py
+    itrans_model_path = os.path.join(script_dir, '..', 'iTransformer', 'model', 'iTransformer.py')
+    itrans_model_path = os.path.abspath(itrans_model_path)
+    
+    # Also need to add iTransformer to path for its internal imports (layers, etc.)
     itrans_dir = os.path.join(script_dir, '..', 'iTransformer')
+    itrans_dir = os.path.abspath(itrans_dir)
     if itrans_dir not in sys.path:
         sys.path.insert(0, itrans_dir)
     
-    from model.iTransformer import Model as iTransformerModel
+    # Load the module using spec
+    spec = importlib.util.spec_from_file_location("iTransformer_module", itrans_model_path)
+    itrans_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(itrans_module)
+    iTransformerModel = itrans_module.Model
     
     # Load checkpoint
     logger.info(f"Loading iTransformer from: {checkpoint_path}")

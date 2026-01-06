@@ -28,8 +28,17 @@ if [[ -n "${EXISTING_CKPT}" ]]; then
   ITRANS_CKPT="${EXISTING_CKPT}"
 else
   echo "🔥 Training iTransformer on Electricity (univariate)..."
+  echo "   Using parameters from iTransformer paper (ICLR 2024), Section A.2"
+  echo "   Paper defaults: batch=32, epochs=10, L∈{2,3,4}, D∈{256,512}, lr∈{1e-3,5e-4,1e-4}"
   
   cd models/iTransformer
+  # iTransformer paper parameters (Section A.2):
+  # - batch_size=32, train_epochs=10
+  # - e_layers (L) ∈ {2, 3, 4}, d_model (D) ∈ {256, 512}
+  # - learning_rate ∈ {1e-3, 5e-4, 1e-4}
+  # - num_workers=10, patience=3
+  # ECL dataset: 321 variates total, but we use univariate (features=S, enc_in=1)
+  # Paper uses lookback=96, but we use 512 to match diffusion model requirements
   python3 run.py \
     --is_training 1 \
     --root_path "${REPO_ROOT}/datasets/electricity" \
@@ -42,33 +51,31 @@ else
     --freq h \
     --checkpoints "${ITRANS_CKPT_BASE}/" \
     --seq_len 512 \
-    --label_len 0 \
+    --label_len 48 \
     --pred_len 96 \
     --enc_in 1 \
     --dec_in 1 \
     --c_out 1 \
     --d_model 512 \
     --n_heads 8 \
-    --e_layers 3 \
+    --e_layers 4 \
+    --d_layers 1 \
     --d_ff 2048 \
     --factor 1 \
     --dropout 0.1 \
     --embed timeF \
     --activation gelu \
-    --output_attention \
-    --num_workers 4 \
+    --num_workers 10 \
     --itr 1 \
-    --train_epochs 20 \
-    --batch_size 16 \
-    --patience 5 \
+    --train_epochs 10 \
+    --batch_size 32 \
+    --patience 3 \
     --learning_rate 0.0001 \
     --des guidance \
     --loss MSE \
     --lradj type1 \
-    --use_amp \
     --gpu 0 \
     --exp_name MTSF \
-    --inverse \
     --class_strategy projection \
     --use_norm 1
   
