@@ -451,27 +451,49 @@ def visualize_samples(
     
     model.eval()
     
-    # 3. Load validation subset (same split logic as training)
+    # 3. Load evaluation subset using CHRONOLOGICAL splits
+    # This ensures consistency with iTransformer's training and avoids data leakage
+    # Split: Train (first 70%), Val (next 10%), Test (last 20%)
     base_dataset = ElectricityDataset(
         data_path,
         lookback=512,
         forecast=96,
         augment=False
     )
-    val_size = int(len(base_dataset) * VAL_SPLIT)
-    train_size = len(base_dataset) - val_size
-    _, val_subset = random_split(
-        base_dataset,
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
-    )
+    
+    total_samples = len(base_dataset)
+    train_end = int(total_samples * 0.7)
+    val_end = int(total_samples * 0.8)
+    
+    if use_guidance_channel and guidance_type == 'itransformer':
+        # When using iTransformer, evaluate on TEST set (last 20%)
+        # to ensure we're evaluating on data neither model has seen
+        print("\n⚠️  Using CHRONOLOGICAL TEST set (last 20%) for fair iTransformer evaluation")
+        print("   (Both iTransformer and diffusion were trained on first 70%)")
+        
+        eval_indices = list(range(val_end, total_samples))
+        eval_set_name = "chronological test set (last 20%)"
+    else:
+        # When not using iTransformer, use validation set (middle 10%)
+        # for consistency with chronological split training
+        print("\n📊 Using CHRONOLOGICAL validation set (middle 10%)")
+        
+        eval_indices = list(range(train_end, val_end))
+        eval_set_name = "chronological validation set (10%)"
+    
+    print(f"   Dataset: {total_samples} total samples")
+    print(f"   Train:   indices 0-{train_end-1} (70%)")
+    print(f"   Val:     indices {train_end}-{val_end-1} (10%)")
+    print(f"   Test:    indices {val_end}-{total_samples-1} (20%)")
+    print(f"   Using:   {len(eval_indices)} samples from {eval_set_name}\n")
+    
     val_dataset = ElectricityDataset(
         data_path,
         lookback=512,
         forecast=96,
         augment=False,
         data_tensor=base_dataset.data,
-        indices=val_subset.indices
+        indices=eval_indices
     )
     
     # Evenly sample across the validation dataset for diverse visualizations
@@ -482,12 +504,11 @@ def visualize_samples(
         # Use linspace to get evenly spaced indices across the validation dataset
         indices = np.linspace(0, total_samples - 1, num_samples, dtype=int).tolist()
 
-    print(f"Generating {num_samples} visualizations from validation set...")
-    print(f"  Dataset split: {len(base_dataset)} total samples -> {len(val_dataset)} validation samples")
+    print(f"Generating {num_samples} visualizations from {eval_set_name}...")
     print(f"  Model config: {model_size} model, {model_config.representation_mode} mode")
     print(f"  Attention levels: {attention_levels}, Res blocks: {num_res_blocks}")
-    print(f"  Sampling indices (within val_dataset): {indices}")
-    print(f"  Corresponding original dataset indices: {[val_subset.indices[i] for i in indices]}")
+    print(f"  Sampling indices (within eval_dataset): {indices}")
+    print(f"  Corresponding original dataset indices: {[eval_indices[i] for i in indices]}")
 
     os.makedirs(output_dir, exist_ok=True)
     

@@ -187,6 +187,11 @@ USE_GUIDANCE_CHANNEL = False  # If True, use Stage 1 predictor as guidance
 GUIDANCE_TYPE = "linear"  # "linear", "last_value", or "itransformer"
 GUIDANCE_CHECKPOINT = None  # Path to pre-trained iTransformer checkpoint (if guidance_type="itransformer")
 
+# Data split settings
+# IMPORTANT: Use chronological splits (70% train, 10% val, 20% test) when using
+# iTransformer guidance to match iTransformer's training split and avoid data leakage
+USE_CHRONOLOGICAL_SPLIT = False  # If True, use chronological split instead of random
+
 MODEL_SIZES = {
     'tiny': [32, 64],           # ~1M params, for quick tests only
     'small': [64, 128, 256],    # ~10M params
@@ -484,9 +489,21 @@ def get_dataloaders(
     lookback: int = LOOKBACK_LENGTH,
     forecast: int = FORECAST_LENGTH,
     use_all_columns: bool = False,
-    columns: Optional[List[str]] = None
+    columns: Optional[List[str]] = None,
+    use_chronological_split: bool = False
 ) -> Tuple[DataLoader, DataLoader, int]:
     """Create train and validation dataloaders.
+    
+    Args:
+        batch_size: Batch size for dataloaders
+        val_split: Fraction of data to use for validation (only used if not chronological)
+        max_samples: Maximum number of samples to use (None = all)
+        lookback: Lookback window length
+        forecast: Forecast horizon length
+        use_all_columns: If True, use all columns (multivariate)
+        columns: Specific columns to use (if not use_all_columns)
+        use_chronological_split: If True, use chronological split (70% train, 10% val, 20% test)
+                                 to match iTransformer's split and avoid data leakage
     
     Returns:
         (train_loader, val_loader, num_variables)
@@ -503,15 +520,39 @@ def get_dataloaders(
         columns=columns
     )
     
-    # Split into train/val
-    val_size = int(len(base_dataset) * val_split)
-    train_size = len(base_dataset) - val_size
+    total_samples = len(base_dataset)
     
-    train_subset, val_subset = random_split(
-        base_dataset, 
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
-    )
+    if use_chronological_split:
+        # CHRONOLOGICAL SPLIT: matches iTransformer's split exactly
+        # Train: first 70%, Val: next 10%, Test: last 20%
+        # This prevents data leakage when using iTransformer guidance
+        train_end = int(total_samples * 0.7)
+        val_end = int(total_samples * 0.8)
+        
+        train_indices = list(range(0, train_end))
+        val_indices = list(range(train_end, val_end))
+        
+        logger.info(f"Using CHRONOLOGICAL split (matches iTransformer):")
+        logger.info(f"  Train: indices 0-{train_end-1} ({len(train_indices)} samples, 70%)")
+        logger.info(f"  Val:   indices {train_end}-{val_end-1} ({len(val_indices)} samples, 10%)")
+        logger.info(f"  Test:  indices {val_end}-{total_samples-1} (held out, 20%)")
+    else:
+        # RANDOM SPLIT: original behavior
+        val_size = int(total_samples * val_split)
+        train_size = total_samples - val_size
+        
+        train_subset, val_subset = random_split(
+            base_dataset, 
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(42)
+        )
+        
+        train_indices = list(train_subset.indices)
+        val_indices = list(val_subset.indices)
+        
+        logger.info(f"Using RANDOM split (seed=42):")
+        logger.info(f"  Train: {len(train_indices)} samples ({100-val_split*100:.0f}%)")
+        logger.info(f"  Val:   {len(val_indices)} samples ({val_split*100:.0f}%)")
     
     train_dataset = ElectricityDataset(
         DATA_PATH,
@@ -520,7 +561,7 @@ def get_dataloaders(
         max_samples=max_samples,
         augment=True,
         data_tensor=base_dataset.data,
-        indices=train_subset.indices
+        indices=train_indices
     )
     
     val_dataset = ElectricityDataset(
@@ -530,7 +571,7 @@ def get_dataloaders(
         max_samples=max_samples,
         augment=False,
         data_tensor=base_dataset.data,
-        indices=val_subset.indices
+        indices=val_indices
     )
     
     train_loader = DataLoader(
@@ -771,10 +812,12 @@ def train(
     logger.info(f"Blur sigma: {model_config.blur_sigma}, EMD lambda: {model_config.emd_lambda}")
     
     # Create dataloaders
+    # Use chronological split when using iTransformer guidance to match its training split
     train_loader, val_loader, num_variables = get_dataloaders(
         batch_size=config['batch_size'],
         val_split=VAL_SPLIT,
-        use_all_columns=config.get('use_all_columns', False)
+        use_all_columns=config.get('use_all_columns', False),
+        use_chronological_split=USE_CHRONOLOGICAL_SPLIT
     )
     
     # Update config with actual number of variables from dataset
@@ -1164,7 +1207,7 @@ def list_available_checkpoints():
 
 
 def main():
-    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, USE_VALUE_CHANNEL, SEASONAL_PERIOD, USE_ALL_COLUMNS, SELECTED_DATASET, DATA_PATH, USE_DILATED_MIDDLE, USE_HYBRID_CONDITION, USE_COORDINATE_CHANNEL, USE_GUIDANCE_CHANNEL, GUIDANCE_TYPE, GUIDANCE_CHECKPOINT
+    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, USE_VALUE_CHANNEL, SEASONAL_PERIOD, USE_ALL_COLUMNS, SELECTED_DATASET, DATA_PATH, USE_DILATED_MIDDLE, USE_HYBRID_CONDITION, USE_COORDINATE_CHANNEL, USE_GUIDANCE_CHANNEL, GUIDANCE_TYPE, GUIDANCE_CHECKPOINT, USE_CHRONOLOGICAL_SPLIT
     
     parser = argparse.ArgumentParser(description='Train Diffusion TSF on Electricity dataset')
     parser.add_argument('--resume', action='store_true', help='Resume Optuna search')
@@ -1270,6 +1313,13 @@ def main():
     if USE_GUIDANCE_CHANNEL and GUIDANCE_TYPE == 'itransformer' and not GUIDANCE_CHECKPOINT:
         logger.error("--guidance-type=itransformer requires --guidance-checkpoint PATH")
         sys.exit(1)
+    
+    # IMPORTANT: Use chronological split when using iTransformer guidance
+    # This ensures the diffusion model's train/val data doesn't overlap with
+    # iTransformer's training data, preventing data leakage
+    USE_CHRONOLOGICAL_SPLIT = USE_GUIDANCE_CHANNEL and GUIDANCE_TYPE == 'itransformer'
+    if USE_CHRONOLOGICAL_SPLIT:
+        logger.info("Enabling CHRONOLOGICAL split (matches iTransformer's 70/10/20 split)")
     
     # Initialize hardware-adaptive search space
     SEARCH_SPACE = get_hardware_config()

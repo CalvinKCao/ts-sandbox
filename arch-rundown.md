@@ -129,6 +129,13 @@ The model supports a **two-stage hybrid forecasting** approach where a determini
    - `guidance_2d`: The 2D ghost image used for conditioning
    - `guidance_1d`: The decoded 1D coarse forecast (for comparison/analysis)
 
+7. **Data Split Requirements:**
+   - When using iTransformer guidance, **CHRONOLOGICAL splits must be used** to prevent data leakage
+   - iTransformer uses: Train (first 70%), Val (next 10%), Test (last 20%)
+   - Diffusion model automatically uses the same split when `--use-guidance --guidance-type itransformer`
+   - This ensures the diffusion model's training/validation data doesn't overlap with iTransformer's training data
+   - Visualization script uses the TEST set (last 20%) when evaluating iTransformer-guided models
+
 ---
 
 ### Phase 1: Data Preprocessing & 2D Mapping

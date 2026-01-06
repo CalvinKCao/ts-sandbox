@@ -2,7 +2,24 @@
 # Pretrain iTransformer on Electricity (univariate) and then train DiffusionTSF with that checkpoint as guidance.
 # Usage (from repo root):
 #   chmod +x train_with_guidance.sh && ./train_with_guidance.sh
+#   chmod +x train_with_guidance.sh && ./train_with_guidance.sh --force-retrain  # Force retrain iTransformer
 set -euo pipefail
+
+# Parse arguments
+FORCE_RETRAIN=false
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --force-retrain)
+      FORCE_RETRAIN=true
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: $0 [--force-retrain]"
+      exit 1
+      ;;
+  esac
+done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${REPO_ROOT}"
@@ -23,8 +40,17 @@ mkdir -p "${ITRANS_CKPT_BASE}"
 # Check if any checkpoint exists in the base dir
 EXISTING_CKPT=$(find "${ITRANS_CKPT_BASE}" -name "checkpoint.pth" 2>/dev/null | head -n1 || true)
 
+# Force retrain: delete existing checkpoint
+if [[ "${FORCE_RETRAIN}" == "true" && -n "${EXISTING_CKPT}" ]]; then
+  echo "🗑️  --force-retrain: Deleting existing iTransformer checkpoint..."
+  rm -rf "${ITRANS_CKPT_BASE}"
+  mkdir -p "${ITRANS_CKPT_BASE}"
+  EXISTING_CKPT=""
+fi
+
 if [[ -n "${EXISTING_CKPT}" ]]; then
   echo "✅ iTransformer checkpoint already exists at ${EXISTING_CKPT}, skipping training..."
+  echo "   (Use --force-retrain to retrain from scratch)"
   ITRANS_CKPT="${EXISTING_CKPT}"
 else
   echo "🔥 Training iTransformer on Electricity (univariate)..."
@@ -99,8 +125,17 @@ echo ""
 echo "🔥 Training DiffusionTSF with iTransformer guidance..."
 echo "   Checkpoint: ${ITRANS_CKPT}"
 echo ""
+echo "📊 Data splits (CHRONOLOGICAL, matches iTransformer):"
+echo "   Train: first 70% of data"
+echo "   Val:   next 10% of data"
+echo "   Test:  last 20% of data (held out)"
+echo ""
 
-# Value channel now uses last past value extended to forecast length (no leakage)
+# IMPORTANT: When --use-guidance with --guidance-type itransformer is set,
+# the training script automatically uses CHRONOLOGICAL splits (70/10/20)
+# to match iTransformer's training split and prevent data leakage.
+
+# Value channel now uses last forecast_length values from past (no leakage)
 # This gives the model context about recent value levels
 
 python3 models/diffusion_tsf/train_electricity.py \
