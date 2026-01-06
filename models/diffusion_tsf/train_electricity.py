@@ -347,7 +347,7 @@ def create_guidance_for_training(
         raise ValueError(f"Unknown guidance_type: {guidance_type}")
 
 # Training settings
-MAX_EPOCHS = 200
+MAX_EPOCHS = 275
 PATIENCE = 25                   # Early stopping patience (increased for longer training)
 VAL_SPLIT = 0.1
 NUM_OPTUNA_TRIALS = 20          # Total trials to run
