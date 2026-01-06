@@ -88,7 +88,7 @@ FORECAST_LENGTH = 96       # Common benchmark (paper uses 96, 192, 336, 720)
 IMAGE_HEIGHT = 128         # ViTime paper: h=128
 BLUR_KERNEL = 31           # ViTime paper: kernel=31
 BLUR_SIGMA = 1.0           # Sharper labels; EMD handles non-overlap
-EMD_LAMBDA = 0.2           # Weight for EMD loss term
+EMD_LAMBDA = 0.0           # Best found value (was 0.2)
 MAX_SCALE = 3.5            # ViTime paper: MS=3.5
 
 # ============================================================================
@@ -163,6 +163,7 @@ UNET_KERNEL_SIZE = (3, 3)
 USE_TIME_RAMP = True  # Linear ramp channel
 USE_TIME_SINE = True  # Sine wave channel
 USE_VALUE_CHANNEL = False  # Value channel (normalized values broadcast)
+USE_COORDINATE_CHANNEL = True  # Vertical coordinate channel
 SEASONAL_PERIOD = 96
 
 # Multivariate mode (set from CLI)
@@ -593,6 +594,8 @@ def train(
     model = DiffusionTSF(model_config).to(device)
     num_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Model parameters: {num_params:,}")
+    logger.info(f"Representation mode: {model_config.representation_mode}")
+    logger.info(f"Blur sigma: {model_config.blur_sigma}, EMD lambda: {model_config.emd_lambda}")
     
     # Create dataloaders
     train_loader, val_loader, num_variables = get_dataloaders(
@@ -705,7 +708,7 @@ def objective(trial) -> float:
         'representation_mode': SELECTED_REPR_MODE,
         'transformer_patch_height': TRANSFORMER_PATCH_HEIGHT,
         'transformer_patch_width': TRANSFORMER_PATCH_WIDTH,
-        'use_coordinate_channel': True,  # Enable vertical spatial awareness
+        'use_coordinate_channel': USE_COORDINATE_CHANNEL,  # Vertical spatial awareness
         'unet_kernel_size': UNET_KERNEL_SIZE,
         'use_dilated_middle': USE_DILATED_MIDDLE,  # Dilated bottleneck
         'use_time_ramp': USE_TIME_RAMP,  # Enable linear ramp time channel
@@ -897,19 +900,22 @@ def train_with_params(params: dict, run_name: Optional[str] = None):
     config = dict(DEFAULT_PARAMS)  # Start with defaults
     config.update(params)  # Override with provided params
     
-    # Apply CLI-driven settings that may override JSON params
-    config.setdefault('model_type', SELECTED_MODEL_TYPE)
-    config.setdefault('unet_kernel_size', UNET_KERNEL_SIZE)
-    config.setdefault('use_dilated_middle', USE_DILATED_MIDDLE)
-    config.setdefault('use_time_ramp', USE_TIME_RAMP)
-    config.setdefault('use_time_sine', USE_TIME_SINE)
-    config.setdefault('use_value_channel', USE_VALUE_CHANNEL)
-    config.setdefault('seasonal_period', SEASONAL_PERIOD)
-    config.setdefault('use_all_columns', USE_ALL_COLUMNS)
-    config.setdefault('use_hybrid_condition', USE_HYBRID_CONDITION)
-    config.setdefault('use_coordinate_channel', True)
-    config.setdefault('transformer_patch_height', TRANSFORMER_PATCH_HEIGHT)
-    config.setdefault('transformer_patch_width', TRANSFORMER_PATCH_WIDTH)
+    # CLI flags ALWAYS override defaults (user intent takes precedence)
+    config['model_type'] = SELECTED_MODEL_TYPE
+    config['representation_mode'] = SELECTED_REPR_MODE
+    config['blur_sigma'] = SEARCH_SPACE['blur_sigma'][0]
+    config['emd_lambda'] = SEARCH_SPACE['emd_lambda'][0]
+    config['unet_kernel_size'] = UNET_KERNEL_SIZE
+    config['use_dilated_middle'] = USE_DILATED_MIDDLE
+    config['use_time_ramp'] = USE_TIME_RAMP
+    config['use_time_sine'] = USE_TIME_SINE
+    config['use_value_channel'] = USE_VALUE_CHANNEL
+    config['use_coordinate_channel'] = USE_COORDINATE_CHANNEL
+    config['seasonal_period'] = SEASONAL_PERIOD
+    config['use_all_columns'] = USE_ALL_COLUMNS
+    config['use_hybrid_condition'] = USE_HYBRID_CONDITION
+    config['transformer_patch_height'] = TRANSFORMER_PATCH_HEIGHT
+    config['transformer_patch_width'] = TRANSFORMER_PATCH_WIDTH
     
     logger.info("Training with params:")
     logger.info(json.dumps(config, indent=2, default=str))
@@ -979,7 +985,7 @@ def list_available_checkpoints():
 
 
 def main():
-    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, USE_VALUE_CHANNEL, SEASONAL_PERIOD, USE_ALL_COLUMNS, SELECTED_DATASET, DATA_PATH, USE_DILATED_MIDDLE, USE_HYBRID_CONDITION
+    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, USE_VALUE_CHANNEL, SEASONAL_PERIOD, USE_ALL_COLUMNS, SELECTED_DATASET, DATA_PATH, USE_DILATED_MIDDLE, USE_HYBRID_CONDITION, USE_COORDINATE_CHANNEL
     
     parser = argparse.ArgumentParser(description='Train Diffusion TSF on Electricity dataset')
     parser.add_argument('--resume', action='store_true', help='Resume Optuna search')
@@ -999,9 +1005,13 @@ def main():
     parser.add_argument('--model-type', choices=['unet', 'transformer'], default='unet', help='Backbone: unet (default) or transformer (DiT-style)')
     parser.add_argument('--blur-sigma', type=float, default=BLUR_SIGMA, help='Vertical blur sigma for preprocessing (label smoothing)')
     parser.add_argument('--emd-lambda', type=float, default=EMD_LAMBDA, help='Weight for EMD loss term')
-    parser.add_argument('--repr-mode', choices=['pdf', 'cdf'], default='pdf', help='Representation: pdf (stripe) or cdf (occupancy)')
+    parser.add_argument('--repr-mode', choices=['pdf', 'cdf'], default='cdf', help='Representation: pdf (stripe) or cdf (occupancy)')
     parser.add_argument('--patch-height', type=int, default=16, choices=[4, 8, 16, 32], help='Transformer patch height (value axis, default: 16)')
     parser.add_argument('--patch-width', type=int, default=16, choices=[1, 2, 4, 8, 16, 32], help='Transformer patch width (time axis, default: 16). Smaller = finer temporal detail')
+    parser.add_argument('--use-coordinate-channel', action='store_true', default=True,
+                        help='Add vertical coordinate channel (gradient +1 to -1) for spatial awareness (default: True)')
+    parser.add_argument('--no-coordinate-channel', dest='use_coordinate_channel', action='store_false',
+                        help='Disable vertical coordinate channel')
     parser.add_argument('--kernel-size', type=int, nargs=2, default=[3, 3], metavar=('H', 'W'),
                         help='U-Net conv kernel size as (height, width). Height=value axis, Width=time axis. '
                              'E.g., --kernel-size 3 5 for wider temporal receptive field. Must be odd numbers. (default: 3 3)')
@@ -1050,6 +1060,7 @@ def main():
     USE_TIME_RAMP = args.use_time_ramp
     USE_TIME_SINE = args.use_time_sine
     USE_VALUE_CHANNEL = args.use_value_channel
+    USE_COORDINATE_CHANNEL = args.use_coordinate_channel
     # Use dataset-specific seasonal period unless overridden by CLI
     if args.seasonal_period == 96:  # Default value means user didn't specify
         SEASONAL_PERIOD = dataset_info[2]  # Use dataset-specific default
@@ -1115,7 +1126,7 @@ def main():
             'emd_lambda': args.emd_lambda,
             'transformer_patch_height': args.patch_height,
             'transformer_patch_width': args.patch_width,
-            'use_coordinate_channel': True,  # Enable vertical spatial awareness
+            'use_coordinate_channel': USE_COORDINATE_CHANNEL,
             'unet_kernel_size': UNET_KERNEL_SIZE,
             'use_dilated_middle': USE_DILATED_MIDDLE,  # Dilated bottleneck
             'use_time_ramp': USE_TIME_RAMP,  # Enable linear ramp time channel
@@ -1240,6 +1251,7 @@ def main():
 
         # Warn if CLI flags might conflict
         cli_flags_set = []
+        if args.use_coordinate_channel is not True: cli_flags_set.append('no_coordinate_channel')
         if args.use_time_ramp: cli_flags_set.append('use_time_ramp')
         if args.use_time_sine: cli_flags_set.append('use_time_sine')
         if args.use_value_channel: cli_flags_set.append('use_value_channel')

@@ -66,6 +66,8 @@ if [ "$BEST_ONLY" = true ]; then
 
     echo "Most recent: $REMOTE_BEST_FILE"
 
+    
+
     # Local destination - use the same filename as remote
     REMOTE_FILENAME=$(basename "$REMOTE_BEST_FILE")
     LOCAL_BEST_FILE="${LOCAL_PATH}${REMOTE_FILENAME}"

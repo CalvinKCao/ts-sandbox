@@ -39,6 +39,14 @@ def visualize_samples(
     checkpoint = torch.load(model_path, map_location=device)
     config_dict = checkpoint['config']
     
+    # Debug: Print what's actually in the checkpoint config
+    print(f"\n=== Checkpoint Config ===")
+    print(f"  representation_mode: {config_dict.get('representation_mode', 'NOT FOUND (defaulting to pdf)')}")
+    print(f"  blur_sigma: {config_dict.get('blur_sigma', 'NOT FOUND')}")
+    print(f"  emd_lambda: {config_dict.get('emd_lambda', 'NOT FOUND')}")
+    print(f"  model_size: {config_dict.get('model_size', 'NOT FOUND')}")
+    print(f"=========================\n")
+    
     # 2. Reconstruct model
     # Determine model type (defaults to unet if not present)
     model_type = config_dict.get('model_type', 'unet')
@@ -70,9 +78,34 @@ def visualize_samples(
                 remapped[k] = v
         state_dict = remapped
     
+    # Get basic settings from config
+    num_variables = config_dict.get('num_variables', 1)
+    seasonal_period = config_dict.get('seasonal_period', 96)
+    
+    # Auto-detect conditioning_mode from state_dict (not config default!)
+    # If cond_encoder keys exist -> vector_embedding mode
+    # If no cond_encoder keys -> visual_concat mode
+    cond_encoder_key = 'noise_predictor.cond_encoder.local_encoder.0.weight'
+    has_cond_encoder = cond_encoder_key in state_dict
+    
+    if 'conditioning_mode' in config_dict:
+        conditioning_mode = config_dict['conditioning_mode']
+    else:
+        # Auto-detect from state_dict
+        conditioning_mode = 'vector_embedding' if has_cond_encoder else 'visual_concat'
+    print(f"Conditioning mode: {conditioning_mode} (has_cond_encoder={has_cond_encoder})")
+    
+    # Detect hybrid conditioning (1D cross-attention)
+    context_encoder_key = 'context_encoder.time_embed.weight'
+    has_context_encoder = context_encoder_key in state_dict
+    use_hybrid_condition = config_dict.get('use_hybrid_condition', has_context_encoder)
+    
     # Auto-detect coordinate channel and kernel size from weight shapes
     use_coord_channel = config_dict.get('use_coordinate_channel', None)
     unet_kernel_size = config_dict.get('unet_kernel_size', None)
+    use_time_ramp = config_dict.get('use_time_ramp', None)
+    use_time_sine = config_dict.get('use_time_sine', None)
+    use_value_channel = config_dict.get('use_value_channel', None)
     
     if model_type == 'transformer':
         # For transformer: patch_embed.weight shape is [embed_dim, in_channels * pH * pW]
@@ -91,18 +124,17 @@ def visualize_samples(
         # Transformer doesn't use unet_kernel_size
         if unet_kernel_size is None:
             unet_kernel_size = (3, 3)  # Default, not used for transformer
+        # Default time channels for transformer
+        if use_time_ramp is None: use_time_ramp = False
+        if use_time_sine is None: use_time_sine = False
+        if use_value_channel is None: use_value_channel = False
     else:
         # For U-Net: check init_conv weight shape
-        # init_conv expects [out_ch, in_channels + cond_channels, kH, kW]
+        # init_conv expects [out_ch, total_in_channels, kH, kW]
         init_key = 'noise_predictor.init_conv.weight'
         if init_key in state_dict:
             init_weight_shape = state_dict[init_key].shape
-            # Detect coordinate channel: with coord: in_channels=2, without: in_channels=1
-            # cond_channels is typically 64, so: without coord: 1 + 64 = 65, with coord: 2 + 64 = 66
-            if use_coord_channel is None:
-                actual_in = init_weight_shape[1]
-                use_coord_channel = (actual_in == 66)  # 2 + 64
-                print(f"Auto-detected use_coordinate_channel={use_coord_channel} from init_conv shape {init_weight_shape}")
+            total_in_channels = init_weight_shape[1]
             
             # Detect kernel size from weight shape: [out_ch, in_ch, kH, kW]
             if unet_kernel_size is None:
@@ -110,50 +142,50 @@ def visualize_samples(
                 detected_kw = init_weight_shape[3]
                 unet_kernel_size = (detected_kh, detected_kw)
                 print(f"Auto-detected unet_kernel_size={unet_kernel_size} from init_conv shape {init_weight_shape}")
-        else:
-            if use_coord_channel is None:
-                use_coord_channel = False
-            if unet_kernel_size is None:
-                unet_kernel_size = (3, 3)
-    
-    # Detect time channel settings from checkpoint or infer from weight shapes
-    # Check if time channel settings are saved in config
-    use_time_ramp = config_dict.get('use_time_ramp', None)
-    use_time_sine = config_dict.get('use_time_sine', None)
-    seasonal_period = config_dict.get('seasonal_period', 96)
-    num_variables = config_dict.get('num_variables', 1)
-    
-    # If time channel settings not in config, try to infer from weight shapes
-    if use_time_ramp is None or use_time_sine is None:
-        # For U-Net, check conditioning encoder input channels
-        cond_key = 'noise_predictor.cond_encoder.local_encoder.0.weight'
-        if cond_key in state_dict:
-            cond_in_channels = state_dict[cond_key].shape[1]
-            # cond_in_channels = num_variables + num_aux_channels
-            # num_aux_channels can be 0-3 (coord, time_ramp, time_sine)
-            num_aux = cond_in_channels - num_variables
             
-            # Infer which aux channels were used
-            # If coord is True (from earlier detection), remaining are time channels
-            if use_coord_channel:
-                num_time_channels = num_aux - 1  # Subtract coordinate channel
+            # Compute expected channels based on conditioning mode to infer aux channels
+            # For visual_concat: total = backbone_in + visual_cond = (num_vars + aux) + num_vars = 2*num_vars + aux
+            # For vector_embedding: total = backbone_in + 64 = (num_vars + aux) + 64
+            if conditioning_mode == 'visual_concat':
+                # total_in = 2*num_variables + num_aux_channels
+                num_aux_channels = total_in_channels - 2 * num_variables
             else:
-                num_time_channels = num_aux
+                # total_in = num_variables + num_aux_channels + 64
+                num_aux_channels = total_in_channels - num_variables - 64
             
-            # Default: if 2 time channels, both ramp and sine; if 1, just ramp; if 0, neither
+            print(f"Detected {num_aux_channels} auxiliary channels from init_conv (total_in={total_in_channels})")
+            
+            # Infer which aux channels are enabled based on count
+            # Order in model: [data, coord, time_ramp, time_sine, value]
+            # Most common configurations:
+            # 0 aux: none
+            # 1 aux: coord only
+            # 2 aux: coord + time_ramp
+            # 3 aux: coord + time_ramp + value OR coord + time_ramp + time_sine
+            # 4 aux: coord + time_ramp + time_sine + value
+            if use_coord_channel is None:
+                use_coord_channel = num_aux_channels >= 1
             if use_time_ramp is None:
-                use_time_ramp = num_time_channels >= 1
+                use_time_ramp = num_aux_channels >= 2
             if use_time_sine is None:
-                use_time_sine = num_time_channels >= 2
+                use_time_sine = num_aux_channels >= 4  # Only if all 4 aux channels
+            if use_value_channel is None:
+                use_value_channel = num_aux_channels >= 3
             
-            print(f"Auto-detected time channels: ramp={use_time_ramp}, sine={use_time_sine} from cond_encoder shape (aux_channels={num_aux})")
+            print(f"Auto-detected aux channels: coord={use_coord_channel}, time_ramp={use_time_ramp}, "
+                  f"time_sine={use_time_sine}, value={use_value_channel}")
         else:
-            # Fallback to False for legacy checkpoints
-            if use_time_ramp is None:
-                use_time_ramp = False
-            if use_time_sine is None:
-                use_time_sine = False
-            print(f"Using default time channels: ramp={use_time_ramp}, sine={use_time_sine}")
+            if use_coord_channel is None: use_coord_channel = False
+            if unet_kernel_size is None: unet_kernel_size = (3, 3)
+            if use_time_ramp is None: use_time_ramp = False
+            if use_time_sine is None: use_time_sine = False
+            if use_value_channel is None: use_value_channel = False
+    
+    # Fallback defaults
+    if use_coord_channel is None: use_coord_channel = False
+    if use_time_ramp is None: use_time_ramp = False
+    if use_time_sine is None: use_time_sine = False
+    if use_value_channel is None: use_value_channel = False
     
     model_config = DiffusionTSFConfig(
         lookback_length=512,
@@ -174,8 +206,13 @@ def visualize_samples(
         unet_kernel_size=unet_kernel_size,
         use_time_ramp=use_time_ramp,
         use_time_sine=use_time_sine,
+        use_value_channel=use_value_channel,
         seasonal_period=seasonal_period,
         num_variables=num_variables,
+        conditioning_mode=conditioning_mode,
+        use_hybrid_condition=use_hybrid_condition,
+        context_embedding_dim=config_dict.get('context_embedding_dim', 128),
+        context_encoder_layers=config_dict.get('context_encoder_layers', 2),
     )
     # If using transformer, optionally override transformer params from checkpoint
     if model_type == 'transformer':
@@ -307,7 +344,8 @@ def visualize_samples(
         # Use vmin/vmax to ensure consistent color scaling
         im = ax2.imshow(full_2d, aspect='auto', origin='lower', cmap='magma', 
                        interpolation='nearest', vmin=0.0, vmax=1.0)
-        ax2.set_title("Diffusion Probability Map (2D Stripe Representation)", fontsize=14)
+        mode_label = "PDF/Stripe" if model_config.representation_mode == "pdf" else "CDF/Occupancy"
+        ax2.set_title(f"2D Representation ({mode_label} mode)", fontsize=14)
         ax2.set_xlabel("Time Steps")
         ax2.set_ylabel("Normalized Value Bins")
         
@@ -326,24 +364,37 @@ def visualize_samples(
 
 def find_best_model(base_dir: str) -> Optional[str]:
     """Find the best model checkpoint in the directory structure."""
-    # 1. Look for best_model.pt in subdirectories (study folders)
+    # 1. Look for best_model.pt and model_best.pt in subdirectories (study folders)
     study_dirs = [d for d in glob.glob(os.path.join(base_dir, "*")) if os.path.isdir(d)]
     # Sort by modification time, newest first
     study_dirs.sort(key=os.path.getmtime, reverse=True)
-    
+
     # Also check the base directory itself for backward compatibility
     search_dirs = study_dirs + [base_dir]
-    
+
     best_overall_model = None
     min_val_loss = float('inf')
-    
+
     for d in search_dirs:
-        # Priority 1: best_model.pt in this directory
+        # Priority 1: best_model.pt or model_best.pt in this directory
         best_model_path = os.path.join(d, 'best_model.pt')
+        model_best_path = os.path.join(d, 'model_best.pt')
+
+        # Check both naming conventions
+        candidate_paths = []
         if os.path.exists(best_model_path):
-            print(f"Found best_model.pt in {d}")
-            return best_model_path
-            
+            candidate_paths.append(best_model_path)
+        if os.path.exists(model_best_path):
+            candidate_paths.append(model_best_path)
+
+        # Find the newest among the candidates
+        if candidate_paths:
+            # Sort by modification time (newest first)
+            candidate_paths.sort(key=os.path.getmtime, reverse=True)
+            chosen_path = candidate_paths[0]
+            print(f"Found best model checkpoint in {d}: {os.path.basename(chosen_path)}")
+            return chosen_path
+
         # Priority 2: trial_*_best.pt in this directory
         trial_checkpoints = glob.glob(os.path.join(d, "trial_*_best.pt"))
         for cp in trial_checkpoints:
@@ -356,7 +407,7 @@ def find_best_model(base_dir: str) -> Optional[str]:
                         best_overall_model = cp
             except Exception:
                 continue
-                
+
     if best_overall_model:
         print(f"Found best trial checkpoint: {best_overall_model} (val_loss: {min_val_loss:.4f})")
     return best_overall_model

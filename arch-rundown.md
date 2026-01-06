@@ -58,9 +58,11 @@ The model supports **multivariate time series forecasting** by treating multiple
 3. **Architecture Impact:**
    - Each variable gets its own 2D stripe/occupancy map channel
    - Auxiliary channels (coordinate, time_ramp, time_sine) are **shared** across all variables
-   - **Input channels** to backbone: `num_variables + num_aux_channels`
+   - **Input channels** to backbone (initial conv): `noisy_channels + conditioning_channels`
+     - `noisy_channels` = `num_variables + num_aux_channels`
+     - `conditioning_channels` = `num_variables` (for `visual_concat`) OR `64` (for `vector_embedding`)
    - **Output channels** from backbone: `num_variables` (predicts noise for each variable)
-   - Helper properties: `config.backbone_in_channels`, `config.num_aux_channels`
+   - Helper properties: `config.backbone_in_channels`, `config.num_aux_channels`, `config.visual_cond_channels`
 
 4. **Channel Order:** `[Variable_0, Variable_1, ..., Variable_N, Vertical_Coord, Time_Ramp, Time_Sine]`
 
@@ -100,7 +102,9 @@ The model supports **multivariate time series forecasting** by treating multiple
    - **Transformer (DiT):** A patch-based Transformer encoder. Splits the 2D image into patches, flattens them, and adds learned positional embeddings.
 
 2. **Conditioning (Past Context):**
-    - **U-Net Path:** Uses a `ConditioningEncoder` to extract local/global features from the past image, which are then **concatenated** along the channel dimension.
+    - **U-Net Path:** Controlled by `conditioning_mode` in `DiffusionTSFConfig`.
+        - **`visual_concat` (Default):** Directly concatenates the past 2D image (ground truth past + zeros for future) to the input along the channel dimension. This allows the model to explicitly "see" the past trajectory pixels. Bypasses `ConditioningEncoder` to save compute.
+        - **`vector_embedding`:** Uses a separate `ConditioningEncoder` to extract local/global features from the past image, which are then concatenated along the channel dimension. (Original backward-compatible mode).
     - **Transformer Path:** Uses **special tokens**. The global historical context is projected into a "context token" and prepended to the patch sequence, similar to a `[CLS]` token.
 
 3. **Handling Non-Square Images:**
@@ -154,6 +158,7 @@ The model supports **multivariate time series forecasting** by treating multiple
     - In addition to MSE/MAE, use a **Shape-Preservation Metric**.
     - This compares **first-order gradients** (xt​−xt−1​) of the prediction vs. ground truth.
     - Metrics include Gradient MAE, Pearson Correlation of gradients, and Sign Agreement.
-- **Config Management:** All hyperparameters are centralized in `DiffusionTSFConfig` using Python dataclasses.
+- **Config Management:** All hyperparameters are centralized in `DiffusionTSFConfig` using Python dataclasses. Key new flags:
+    - `conditioning_mode`: Selects between `"visual_concat"` (pixel-level visibility) and `"vector_embedding"` (encoded features).
 - Before you are finished, run a test backward and forward pass on a tiny toy dataset to ensure everything works smoothly.
 - before starting, examine @models/ViTime-main/Yang et al. - 2025 - ViTime Foundation Model for Time Series Forecasting Powered by Vision Intelligence.txt and take some notes on the similar implementation. this is not the exact thing i am trying to reimplement but the whole image representation thing is inspired by it so it may give you a better idea of what im looking for. again, this prompt overrides anything that paper says though. after examining the paper, check in with me before starting - i.e. do you have any questions before starting?
