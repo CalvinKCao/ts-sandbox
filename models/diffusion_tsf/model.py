@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 # Handle imports for both module and script execution
 try:
@@ -23,12 +23,14 @@ try:
     from .unet import ConditionalUNet2D, TimeSeriesContextEncoder
     from .transformer import DiffusionTransformer
     from .diffusion import DiffusionScheduler
+    from .guidance import GuidanceModel, LinearRegressionGuidance, create_guidance_model
 except ImportError:
     from config import DiffusionTSFConfig
     from preprocessing import Standardizer, TimeSeriesTo2D, VerticalGaussianBlur
     from unet import ConditionalUNet2D, TimeSeriesContextEncoder
     from transformer import DiffusionTransformer
     from diffusion import DiffusionScheduler
+    from guidance import GuidanceModel, LinearRegressionGuidance, create_guidance_model
 
 logger = logging.getLogger(__name__)
 
@@ -159,12 +161,25 @@ class DiffusionTSF(nn.Module):
     4. Train U-Net to denoise future conditioned on past
     5. At inference: generate future via DDPM/DDIM
     6. Decode 2D representation back to 1D
+    
+    Optional Hybrid "Visual Guide" mode (use_guidance_channel=True):
+    - A Stage 1 predictor (e.g., iTransformer) generates a coarse forecast
+    - The coarse forecast is converted to a 2D "ghost image"
+    - This ghost image is concatenated to the U-Net input
+    - The diffusion model focuses on refining texture/residuals
     """
     
-    def __init__(self, config: DiffusionTSFConfig):
+    def __init__(
+        self,
+        config: DiffusionTSFConfig,
+        guidance_model: Optional[Union[GuidanceModel, nn.Module]] = None
+    ):
         """
         Args:
             config: Model configuration
+            guidance_model: Optional Stage 1 predictor for hybrid forecasting.
+                           If config.use_guidance_channel is True but no model
+                           is provided, a LinearRegressionGuidance is used as default.
         """
         super().__init__()
         self.config = config
@@ -183,6 +198,17 @@ class DiffusionTSF(nn.Module):
             "decode_smoothing_kernel",
             self._build_decode_smoothing_kernel(sigma_x=3.0, sigma_y=1.0)
         )
+        
+        # Guidance model for hybrid "visual guide" forecasting
+        if config.use_guidance_channel:
+            if guidance_model is not None:
+                self.guidance_model = guidance_model
+            else:
+                # Default to linear regression if no model provided
+                self.guidance_model = LinearRegressionGuidance()
+                logger.info("Using default LinearRegressionGuidance for guidance channel")
+        else:
+            self.guidance_model = None
         
         # Noise prediction backbone (U-Net or Transformer)
         # Input channels: num_variables (data) + aux channels (coord, time_ramp, time_sine)
@@ -244,13 +270,15 @@ class DiffusionTSF(nn.Module):
         logger.info(f"  Variables: {config.num_variables} ({'multivariate' if config.num_variables > 1 else 'univariate'})")
         logger.info(f"  Lookback: {config.lookback_length}, Forecast: {config.forecast_length}")
         logger.info(f"  Image size: {config.image_height} x W")
-        logger.info(f"  Input channels: {config.backbone_in_channels} (data: {config.num_variables}, aux: {config.num_aux_channels})")
+        logger.info(f"  Input channels: {config.backbone_in_channels} (data: {config.num_variables}, aux: {config.num_aux_channels}, guidance: {config.guidance_channels})")
         logger.info(f"  Conditioning mode: {config.conditioning_mode}")
         logger.info(f"  Diffusion steps: {config.num_diffusion_steps}")
         logger.info(f"  Coordinate channel: {config.use_coordinate_channel}")
         logger.info(f"  Time ramp channel: {config.use_time_ramp}")
         logger.info(f"  Time sine channel: {config.use_time_sine}")
         logger.info(f"  Value channel: {config.use_value_channel}")
+        if config.use_guidance_channel:
+            logger.info(f"  Guidance channel: enabled (Stage 1 → 2D ghost image)")
         if config.use_time_sine:
             logger.info(f"  Seasonal period: {config.seasonal_period}")
         if config.model_type == "unet":
@@ -265,6 +293,25 @@ class DiffusionTSF(nn.Module):
         super().to(device)
         self.scheduler = self.scheduler.to(device)
         return self
+    
+    def set_guidance_model(self, guidance_model: Optional[Union[GuidanceModel, nn.Module]]) -> None:
+        """Set or replace the guidance model for hybrid forecasting.
+        
+        This allows swapping the Stage 1 predictor after model initialization,
+        e.g., to plug in a pre-trained iTransformer checkpoint.
+        
+        Args:
+            guidance_model: Stage 1 predictor model. Set to None to disable
+                           guidance (requires config.use_guidance_channel=False).
+        """
+        if guidance_model is None and self.config.use_guidance_channel:
+            raise ValueError(
+                "Cannot set guidance_model to None when use_guidance_channel=True. "
+                "Either provide a guidance model or set config.use_guidance_channel=False."
+            )
+        self.guidance_model = guidance_model
+        if guidance_model is not None:
+            logger.info(f"Guidance model set: {type(guidance_model).__name__}")
     
     def _get_coordinate_grid(
         self,
@@ -453,6 +500,63 @@ class DiffusionTSF(nn.Module):
             value_channel = value_channel[:, 0:1, :, :]  # Take first var only
         
         return torch.cat([x, value_channel], dim=1)
+    
+    def _generate_guidance_2d(
+        self,
+        past: torch.Tensor,
+        past_norm: torch.Tensor,
+        stats: Tuple[torch.Tensor, torch.Tensor],
+        forecast_length: int
+    ) -> torch.Tensor:
+        """Generate 2D "ghost image" from Stage 1 guidance model.
+        
+        This converts the coarse 1D forecast from the guidance model into
+        a 2D image representation that can be concatenated to the U-Net input.
+        
+        Args:
+            past: Original (unnormalized) past sequence (batch, [num_vars,] past_len)
+            past_norm: Normalized past sequence (batch, [num_vars,] past_len)
+            stats: Tuple of (mean, std) from normalization
+            forecast_length: Number of future steps to predict
+            
+        Returns:
+            Guidance 2D image of shape (batch, num_vars, height, forecast_length)
+        """
+        if self.guidance_model is None:
+            raise ValueError("Guidance model is None but guidance channel is requested")
+        
+        # Get coarse forecast from Stage 1 model (in original scale)
+        with torch.no_grad():
+            coarse_forecast = self.guidance_model.get_forecast(past, forecast_length)
+        
+        # Normalize using same stats as past
+        mean, std = stats
+        coarse_norm = (coarse_forecast - mean) / std
+        
+        # Convert to 2D representation
+        guidance_2d = self.encode_to_2d(coarse_norm, scale_for_diffusion=True)
+        
+        return guidance_2d
+    
+    def _inject_guidance_channel(
+        self,
+        x: torch.Tensor,
+        guidance_2d: Optional[torch.Tensor]
+    ) -> torch.Tensor:
+        """Concatenate guidance 2D image to input tensor.
+        
+        Args:
+            x: Input tensor of shape (batch, channels, height, width)
+            guidance_2d: Guidance image of shape (batch, num_vars, height, width)
+                        or None if guidance is disabled
+            
+        Returns:
+            Tensor with guidance channels appended (if enabled)
+        """
+        if not self.config.use_guidance_channel or guidance_2d is None:
+            return x
+        
+        return torch.cat([x, guidance_2d], dim=1)
     
     def _prepare_visual_conditioning(
         self,
@@ -976,6 +1080,13 @@ class DiffusionTSF(nn.Module):
         # Inject value channels (normalized values broadcast across height)
         noisy_future_full = self._inject_value_channel(noisy_future_full, future_norm)
         
+        # Generate and inject guidance channel (Stage 1 coarse forecast as "ghost image")
+        guidance_2d = None
+        if self.config.use_guidance_channel:
+            forecast_length = future.shape[-1]
+            guidance_2d = self._generate_guidance_2d(past, past_norm, stats, forecast_length)
+            noisy_future_full = self._inject_guidance_channel(noisy_future_full, guidance_2d)
+        
         # Prepare conditioning based on mode
         if self.config.conditioning_mode == "visual_concat":
             # Visual concat mode: pass raw past image channels (no aux channels) as conditioning
@@ -1006,7 +1117,7 @@ class DiffusionTSF(nn.Module):
         
         loss = noise_loss + self.config.emd_lambda * emd_loss
         
-        return {
+        result = {
             'loss': loss,
             'noise_loss': noise_loss,
             'emd_loss': emd_loss,
@@ -1017,6 +1128,12 @@ class DiffusionTSF(nn.Module):
             'noisy_future': noisy_future,
             't': t
         }
+        
+        # Include guidance image in output for visualization/debugging
+        if guidance_2d is not None:
+            result['guidance_2d'] = guidance_2d
+        
+        return result
     
     @torch.no_grad()
     def generate(
@@ -1116,9 +1233,20 @@ class DiffusionTSF(nn.Module):
             self.config.forecast_length
         )
         
+        # Generate guidance 2D image if enabled (Stage 1 coarse forecast as "ghost image")
+        guidance_2d = None
+        null_guidance_2d = None
+        if self.config.use_guidance_channel:
+            guidance_2d = self._generate_guidance_2d(
+                past, past_norm, stats, self.config.forecast_length
+            )
+            # Null guidance for CFG: zeros with same shape
+            if cfg_scale > 1.0:
+                null_guidance_2d = torch.zeros_like(guidance_2d)
+        
         # Create a wrapper that injects coordinate and time channels before calling the backbone
-        # This closure captures the encoder_hidden_states for hybrid conditioning
-        def model_with_channels(x, t, cond, use_null_context=False):
+        # This closure captures the encoder_hidden_states and guidance_2d for conditioning
+        def model_with_channels(x, t, cond, use_null_context=False, use_null_guidance=False):
             # x is the noisy future (B, num_vars, H, W), inject coords and time
             x_with_coords = self._inject_coordinate_channel(x)
             x_full = self._inject_time_channels(x_with_coords)
@@ -1129,6 +1257,11 @@ class DiffusionTSF(nn.Module):
                 _, _, height, width = x_full.shape
                 zero_values = torch.zeros(curr_batch_size, 1, height, width, device=x_full.device, dtype=x_full.dtype)
                 x_full = torch.cat([x_full, zero_values], dim=1)
+            
+            # Inject guidance channel (Stage 1 ghost image)
+            if self.config.use_guidance_channel:
+                guide = null_guidance_2d if use_null_guidance else guidance_2d
+                x_full = self._inject_guidance_channel(x_full, guide)
             
             # cond is already prepared based on conditioning_mode:
             # - visual_concat: raw past visual channels at target width
@@ -1143,7 +1276,7 @@ class DiffusionTSF(nn.Module):
         def model_cfg(x, t, cond, null_cond=None, cfg_scale=1.0):
             """Model wrapper that handles CFG internally."""
             if cfg_scale <= 1.0 or null_cond is None:
-                return model_with_channels(x, t, cond, use_null_context=False)
+                return model_with_channels(x, t, cond, use_null_context=False, use_null_guidance=False)
             
             # Run conditional and unconditional in parallel via batching
             x_double = torch.cat([x, x], dim=0)
@@ -1166,6 +1299,12 @@ class DiffusionTSF(nn.Module):
                 _, _, height, width = x_full.shape
                 zero_values = torch.zeros(batch_double, 1, height, width, device=x_full.device, dtype=x_full.dtype)
                 x_full = torch.cat([x_full, zero_values], dim=1)
+            
+            # Inject guidance channel for both conditional and unconditional branches
+            # For CFG batching: [conditional, unconditional] -> [guidance_2d, null_guidance_2d]
+            if self.config.use_guidance_channel:
+                guidance_double = torch.cat([guidance_2d, null_guidance_2d], dim=0)
+                x_full = self._inject_guidance_channel(x_full, guidance_double)
             
             # Run batched prediction
             noise_pred_double = self.noise_predictor(
@@ -1212,12 +1351,21 @@ class DiffusionTSF(nn.Module):
         # Denormalize
         future = self._denormalize(future_norm, stats)
         
-        return {
+        result = {
             'prediction': future,
             'prediction_norm': future_norm,
             'future_2d': future_2d,
             'past_2d': past_2d
         }
+        
+        # Include guidance image and Stage 1 forecast in output for analysis
+        if guidance_2d is not None:
+            result['guidance_2d'] = guidance_2d
+            # Also decode the guidance to 1D for comparison
+            guidance_norm = self.decode_from_2d(guidance_2d, decoder_method=decoder_method)
+            result['guidance_1d'] = self._denormalize(guidance_norm, stats)
+        
+        return result
     
     def get_loss(
         self,

@@ -42,6 +42,13 @@ from config import DiffusionTSFConfig
 from model import DiffusionTSF
 from metrics import compute_metrics, log_metrics
 from dataset import apply_1d_augmentations
+from guidance import (
+    GuidanceModel, 
+    LastValueGuidance, 
+    LinearRegressionGuidance, 
+    iTransformerGuidance,
+    create_guidance_model
+)
 
 # Setup logging
 logging.basicConfig(
@@ -175,12 +182,152 @@ USE_DILATED_MIDDLE = True  # If True, use dilated convolutions in U-Net bottlene
 # Hybrid 1D cross-attention conditioning (set from CLI)
 USE_HYBRID_CONDITION = True  # If True, use 1D context encoder + cross-attention
 
+# Visual Guide (Stage 1 predictor) settings (set from CLI)
+USE_GUIDANCE_CHANNEL = False  # If True, use Stage 1 predictor as guidance
+GUIDANCE_TYPE = "linear"  # "linear", "last_value", or "itransformer"
+GUIDANCE_CHECKPOINT = None  # Path to pre-trained iTransformer checkpoint (if guidance_type="itransformer")
+
 MODEL_SIZES = {
     'tiny': [32, 64],           # ~1M params, for quick tests only
     'small': [64, 128, 256],    # ~10M params
     'medium': [64, 128, 256, 512],  # ~40M params
     'large': [128, 256, 512],   # ~80M params (close to ViTime's 93M)
 }
+
+# ============================================================================
+# Guidance Model Loading
+# ============================================================================
+
+def load_itransformer_from_checkpoint(
+    checkpoint_path: str,
+    seq_len: int = LOOKBACK_LENGTH,
+    pred_len: int = FORECAST_LENGTH,
+    num_variables: int = 1,
+    device: str = 'cpu'
+) -> iTransformerGuidance:
+    """Load a pre-trained iTransformer model as guidance.
+    
+    Args:
+        checkpoint_path: Path to iTransformer checkpoint (.pt file)
+        seq_len: Input sequence length (should match training)
+        pred_len: Prediction length (should match training)
+        num_variables: Number of variables in the dataset
+        device: Device to load model on
+        
+    Returns:
+        iTransformerGuidance wrapper around the loaded model
+    """
+    import sys
+    itrans_dir = os.path.join(script_dir, '..', 'iTransformer')
+    if itrans_dir not in sys.path:
+        sys.path.insert(0, itrans_dir)
+    
+    from model.iTransformer import Model as iTransformerModel
+    
+    # Load checkpoint
+    logger.info(f"Loading iTransformer from: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Try to extract config from checkpoint
+    if 'config' in checkpoint:
+        ckpt_config = checkpoint['config']
+        logger.info(f"Found config in checkpoint: seq_len={ckpt_config.get('seq_len')}, pred_len={ckpt_config.get('pred_len')}")
+    else:
+        ckpt_config = {}
+    
+    # Create a config object for iTransformer
+    class iTransConfig:
+        def __init__(self):
+            self.seq_len = ckpt_config.get('seq_len', seq_len)
+            self.pred_len = ckpt_config.get('pred_len', pred_len)
+            self.output_attention = False
+            self.use_norm = True
+            self.d_model = ckpt_config.get('d_model', 512)
+            self.embed = 'fixed'
+            self.freq = 'h'
+            self.dropout = 0.1
+            self.factor = 1
+            self.n_heads = ckpt_config.get('n_heads', 8)
+            self.d_ff = ckpt_config.get('d_ff', 2048)
+            self.activation = 'gelu'
+            self.e_layers = ckpt_config.get('e_layers', 3)
+            self.class_strategy = 'projection'
+            self.enc_in = num_variables
+    
+    config = iTransConfig()
+    
+    # Create model
+    model = iTransformerModel(config)
+    
+    # Load weights
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    elif 'state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['state_dict'])
+    else:
+        # Assume checkpoint IS the state dict
+        model.load_state_dict(checkpoint)
+    
+    model = model.to(device)
+    model.eval()
+    
+    logger.info(f"iTransformer loaded: seq_len={config.seq_len}, pred_len={config.pred_len}")
+    
+    # Wrap in guidance interface
+    guidance = iTransformerGuidance(
+        model=model,
+        use_norm=config.use_norm,
+        seq_len=config.seq_len,
+        pred_len=config.pred_len
+    )
+    
+    return guidance
+
+
+def create_guidance_for_training(
+    guidance_type: str,
+    guidance_checkpoint: Optional[str],
+    seq_len: int,
+    pred_len: int,
+    num_variables: int,
+    device: str
+) -> Optional[GuidanceModel]:
+    """Create guidance model based on configuration.
+    
+    Args:
+        guidance_type: Type of guidance ("linear", "last_value", "itransformer")
+        guidance_checkpoint: Path to checkpoint (required for itransformer)
+        seq_len: Lookback length
+        pred_len: Forecast length
+        num_variables: Number of variables
+        device: Device to use
+        
+    Returns:
+        GuidanceModel instance or None if guidance is disabled
+    """
+    if guidance_type == "linear":
+        logger.info("Using LinearRegressionGuidance for Stage 1 predictions")
+        return LinearRegressionGuidance()
+    
+    elif guidance_type == "last_value":
+        logger.info("Using LastValueGuidance for Stage 1 predictions")
+        return LastValueGuidance()
+    
+    elif guidance_type == "itransformer":
+        if not guidance_checkpoint:
+            raise ValueError(
+                "guidance_type='itransformer' requires --guidance-checkpoint PATH"
+            )
+        return load_itransformer_from_checkpoint(
+            checkpoint_path=guidance_checkpoint,
+            seq_len=seq_len,
+            pred_len=pred_len,
+            num_variables=num_variables,
+            device=device
+        )
+    
+    else:
+        raise ValueError(f"Unknown guidance_type: {guidance_type}")
 
 # Training settings
 MAX_EPOCHS = 200
@@ -589,9 +736,23 @@ def train(
         use_hybrid_condition=config.get('use_hybrid_condition', USE_HYBRID_CONDITION),
         context_embedding_dim=config.get('context_embedding_dim', 128),
         context_encoder_layers=config.get('context_encoder_layers', 2),
+        # Visual Guide (Stage 1 predictor)
+        use_guidance_channel=config.get('use_guidance_channel', USE_GUIDANCE_CHANNEL),
     )
     
-    model = DiffusionTSF(model_config).to(device)
+    # Create guidance model if enabled
+    guidance_model = None
+    if model_config.use_guidance_channel:
+        guidance_model = create_guidance_for_training(
+            guidance_type=config.get('guidance_type', GUIDANCE_TYPE),
+            guidance_checkpoint=config.get('guidance_checkpoint', GUIDANCE_CHECKPOINT),
+            seq_len=LOOKBACK_LENGTH,
+            pred_len=FORECAST_LENGTH,
+            num_variables=config.get('num_variables', 1),
+            device=device
+        )
+    
+    model = DiffusionTSF(model_config, guidance_model=guidance_model).to(device)
     num_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Model parameters: {num_params:,}")
     logger.info(f"Representation mode: {model_config.representation_mode}")
@@ -717,6 +878,9 @@ def objective(trial) -> float:
         'seasonal_period': SEASONAL_PERIOD,
         'use_all_columns': USE_ALL_COLUMNS,  # Multivariate mode
         'use_hybrid_condition': USE_HYBRID_CONDITION,  # Hybrid 1D conditioning
+        'use_guidance_channel': USE_GUIDANCE_CHANNEL,  # Visual Guide (Stage 1)
+        'guidance_type': GUIDANCE_TYPE,
+        'guidance_checkpoint': GUIDANCE_CHECKPOINT,
     }
     
     # Checkpoint for this trial
@@ -914,6 +1078,9 @@ def train_with_params(params: dict, run_name: Optional[str] = None):
     config['seasonal_period'] = SEASONAL_PERIOD
     config['use_all_columns'] = USE_ALL_COLUMNS
     config['use_hybrid_condition'] = USE_HYBRID_CONDITION
+    config['use_guidance_channel'] = USE_GUIDANCE_CHANNEL
+    config['guidance_type'] = GUIDANCE_TYPE
+    config['guidance_checkpoint'] = GUIDANCE_CHECKPOINT
     config['transformer_patch_height'] = TRANSFORMER_PATCH_HEIGHT
     config['transformer_patch_width'] = TRANSFORMER_PATCH_WIDTH
     
@@ -985,7 +1152,7 @@ def list_available_checkpoints():
 
 
 def main():
-    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, USE_VALUE_CHANNEL, SEASONAL_PERIOD, USE_ALL_COLUMNS, SELECTED_DATASET, DATA_PATH, USE_DILATED_MIDDLE, USE_HYBRID_CONDITION, USE_COORDINATE_CHANNEL
+    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, USE_VALUE_CHANNEL, SEASONAL_PERIOD, USE_ALL_COLUMNS, SELECTED_DATASET, DATA_PATH, USE_DILATED_MIDDLE, USE_HYBRID_CONDITION, USE_COORDINATE_CHANNEL, USE_GUIDANCE_CHANNEL, GUIDANCE_TYPE, GUIDANCE_CHECKPOINT
     
     parser = argparse.ArgumentParser(description='Train Diffusion TSF on Electricity dataset')
     parser.add_argument('--resume', action='store_true', help='Resume Optuna search')
@@ -1040,6 +1207,16 @@ def main():
     parser.add_argument('--dataset', type=str, default='electricity',
                         choices=list(DATASET_REGISTRY.keys()),
                         help=f'Dataset to use for training. Available: {", ".join(DATASET_REGISTRY.keys())}')
+    # Visual Guide (Stage 1 predictor) arguments
+    parser.add_argument('--use-guidance', action='store_true', default=False,
+                        help='Enable Visual Guide: use Stage 1 predictor to guide diffusion')
+    parser.add_argument('--guidance-type', type=str, default='linear',
+                        choices=['linear', 'last_value', 'itransformer'],
+                        help='Type of guidance model: linear (regression), last_value (naive), '
+                             'or itransformer (requires --guidance-checkpoint)')
+    parser.add_argument('--guidance-checkpoint', type=str, default=None, metavar='PATH',
+                        help='Path to pre-trained iTransformer checkpoint for guidance '
+                             '(required when --guidance-type=itransformer)')
     args = parser.parse_args()
     
     # Check for optuna
@@ -1071,6 +1248,16 @@ def main():
     
     # Set hybrid conditioning mode
     USE_HYBRID_CONDITION = args.use_hybrid_condition
+    
+    # Set Visual Guide (Stage 1 predictor) settings
+    USE_GUIDANCE_CHANNEL = args.use_guidance
+    GUIDANCE_TYPE = args.guidance_type
+    GUIDANCE_CHECKPOINT = args.guidance_checkpoint
+    
+    # Validate guidance settings
+    if USE_GUIDANCE_CHANNEL and GUIDANCE_TYPE == 'itransformer' and not GUIDANCE_CHECKPOINT:
+        logger.error("--guidance-type=itransformer requires --guidance-checkpoint PATH")
+        sys.exit(1)
     
     # Initialize hardware-adaptive search space
     SEARCH_SPACE = get_hardware_config()
@@ -1105,6 +1292,10 @@ def main():
         logger.info(f"Transformer patch size: {TRANSFORMER_PATCH_HEIGHT}x{TRANSFORMER_PATCH_WIDTH} (HxW)")
     logger.info(f"Multivariate mode: {USE_ALL_COLUMNS}")
     logger.info(f"Hybrid 1D conditioning: {USE_HYBRID_CONDITION}")
+    if USE_GUIDANCE_CHANNEL:
+        logger.info(f"Visual Guide: enabled (type={GUIDANCE_TYPE})")
+        if GUIDANCE_CHECKPOINT:
+            logger.info(f"  Guidance checkpoint: {GUIDANCE_CHECKPOINT}")
     
     if args.list_checkpoints:
         # List all checkpoint files and exit
@@ -1135,6 +1326,9 @@ def main():
             'seasonal_period': SEASONAL_PERIOD,
             'use_all_columns': USE_ALL_COLUMNS,  # Multivariate mode
             'use_hybrid_condition': USE_HYBRID_CONDITION,  # Hybrid 1D conditioning
+            'use_guidance_channel': USE_GUIDANCE_CHANNEL,  # Visual Guide
+            'guidance_type': GUIDANCE_TYPE,
+            'guidance_checkpoint': GUIDANCE_CHECKPOINT,
         }
         
         # Use tiny dataset for quick test
@@ -1187,9 +1381,23 @@ def main():
             use_hybrid_condition=USE_HYBRID_CONDITION,  # Hybrid 1D conditioning
             context_embedding_dim=32,   # Smaller for quick test
             context_encoder_layers=1,
+            use_guidance_channel=USE_GUIDANCE_CHANNEL,  # Visual Guide
         )
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        model = DiffusionTSF(tiny_config).to(device)
+        
+        # Create guidance model for quick test if enabled
+        guidance_model = None
+        if USE_GUIDANCE_CHANNEL:
+            guidance_model = create_guidance_for_training(
+                guidance_type=GUIDANCE_TYPE,
+                guidance_checkpoint=GUIDANCE_CHECKPOINT,
+                seq_len=64,  # Quick test uses shorter sequences
+                pred_len=16,
+                num_variables=num_variables,
+                device=device
+            )
+        
+        model = DiffusionTSF(tiny_config, guidance_model=guidance_model).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
         
         logger.info(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
@@ -1248,6 +1456,9 @@ def main():
         logger.info(f"  use_time_sine: {config.get('use_time_sine', False)}")
         logger.info(f"  use_value_channel: {config.get('use_value_channel', False)}")
         logger.info(f"  use_hybrid_condition: {config.get('use_hybrid_condition', True)}")
+        logger.info(f"  use_guidance_channel: {config.get('use_guidance_channel', False)}")
+        if config.get('use_guidance_channel'):
+            logger.info(f"  guidance_type: {config.get('guidance_type', 'linear')}")
 
         # Warn if CLI flags might conflict
         cli_flags_set = []
@@ -1256,6 +1467,7 @@ def main():
         if args.use_time_sine: cli_flags_set.append('use_time_sine')
         if args.use_value_channel: cli_flags_set.append('use_value_channel')
         if not args.use_hybrid_condition: cli_flags_set.append('use_hybrid_condition (disabled)')
+        if args.use_guidance: cli_flags_set.append('use_guidance')
 
         if cli_flags_set:
             logger.warning("WARNING: You specified CLI flags that may conflict with checkpoint config:")

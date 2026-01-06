@@ -8,6 +8,7 @@ models/diffusion_tsf/
 ├── unet.py             # ConditionalUNet2D: Default U-Net backbone
 ├── transformer.py      # DiffusionTransformer: DiT-style backbone option
 ├── diffusion.py        # DiffusionScheduler: DDPM/DDIM forward and reverse processes
+├── guidance.py         # GuidanceModel: Stage 1 predictors for hybrid forecasting (iTransformer, Linear, etc.)
 ├── model.py            # DiffusionTSF: Main model wrapper combining all components
 ├── dataset.py          # Synthetic data generation and basic 1D augmentations
 ├── metrics.py          # Shape-preservation and standard TSF metrics (MSE/MAE)
@@ -64,7 +65,69 @@ The model supports **multivariate time series forecasting** by treating multiple
    - **Output channels** from backbone: `num_variables` (predicts noise for each variable)
    - Helper properties: `config.backbone_in_channels`, `config.num_aux_channels`, `config.visual_cond_channels`
 
-4. **Channel Order:** `[Variable_0, Variable_1, ..., Variable_N, Vertical_Coord, Time_Ramp, Time_Sine]`
+4. **Channel Order:** `[Variable_0, Variable_1, ..., Variable_N, Vertical_Coord, Time_Ramp, Time_Sine, Guidance_0, ..., Guidance_N (if enabled)]`
+
+---
+
+### Hybrid "Visual Guide" Forecasting
+
+The model supports a **two-stage hybrid forecasting** approach where a deterministic Stage 1 predictor provides coarse trend guidance, and the diffusion model refines it with texture and local details.
+
+1. **Configuration:**
+   - `use_guidance_channel: bool = False` in `DiffusionTSFConfig` - Enable/disable guidance channel
+   - When enabled, adds `num_variables` extra input channels to the backbone
+
+2. **Guidance Models (`guidance.py`):**
+   - **`GuidanceModel` Protocol:** Defines the interface `get_forecast(past, forecast_length) -> future`
+   - **Built-in Implementations:**
+     - `LastValueGuidance`: Naive baseline - repeats last observed value
+     - `LinearRegressionGuidance`: Fits linear trend on lookback window and extrapolates
+     - `iTransformerGuidance`: Wrapper for pre-trained iTransformer checkpoints
+   - **Factory Function:** `create_guidance_model(guidance_type, **kwargs)`
+
+3. **Pipeline Flow:**
+   ```
+   Past Window → [Stage 1 Predictor] → Coarse 1D Forecast
+                                            ↓
+                                     [TimeSeriesTo2D + Blur]
+                                            ↓
+                                     "Ghost Image" (2D)
+                                            ↓
+   [Noisy Future + Aux Channels + Ghost Image] → [U-Net] → Refined Forecast
+   ```
+
+4. **Channel Order (with guidance):**
+   ```
+   [Noisy_Var_0, ..., Noisy_Var_N,   # num_variables channels
+    Vertical_Coord (if enabled),      # 1 channel
+    Time_Ramp (if enabled),           # 1 channel  
+    Time_Sine (if enabled),           # 1 channel
+    Guide_Var_0, ..., Guide_Var_N]    # num_variables channels (if use_guidance_channel)
+   ```
+
+5. **Usage:**
+   ```python
+   from models.diffusion_tsf.config import DiffusionTSFConfig
+   from models.diffusion_tsf.model import DiffusionTSF
+   from models.diffusion_tsf.guidance import LinearRegressionGuidance, iTransformerGuidance
+   
+   # Option 1: Use default LinearRegressionGuidance
+   config = DiffusionTSFConfig(use_guidance_channel=True)
+   model = DiffusionTSF(config)  # Auto-creates LinearRegressionGuidance
+   
+   # Option 2: Provide custom guidance model
+   guidance = LinearRegressionGuidance(use_last_n=96)
+   model = DiffusionTSF(config, guidance_model=guidance)
+   
+   # Option 3: Swap in iTransformer after loading checkpoint
+   itrans = load_pretrained_itransformer(...)
+   guidance = iTransformerGuidance(itrans, seq_len=512, pred_len=96)
+   model.set_guidance_model(guidance)
+   ```
+
+6. **Output Includes:**
+   - `guidance_2d`: The 2D ghost image used for conditioning
+   - `guidance_1d`: The decoded 1D coarse forecast (for comparison/analysis)
 
 ---
 
@@ -158,7 +221,8 @@ The model supports **multivariate time series forecasting** by treating multiple
     - In addition to MSE/MAE, use a **Shape-Preservation Metric**.
     - This compares **first-order gradients** (xt​−xt−1​) of the prediction vs. ground truth.
     - Metrics include Gradient MAE, Pearson Correlation of gradients, and Sign Agreement.
-- **Config Management:** All hyperparameters are centralized in `DiffusionTSFConfig` using Python dataclasses. Key new flags:
+- **Config Management:** All hyperparameters are centralized in `DiffusionTSFConfig` using Python dataclasses. Key flags:
     - `conditioning_mode`: Selects between `"visual_concat"` (pixel-level visibility) and `"vector_embedding"` (encoded features).
+    - `use_guidance_channel`: Enable hybrid forecasting with Stage 1 predictor guidance (default: False).
 - Before you are finished, run a test backward and forward pass on a tiny toy dataset to ensure everything works smoothly.
 - before starting, examine @models/ViTime-main/Yang et al. - 2025 - ViTime Foundation Model for Time Series Forecasting Powered by Vision Intelligence.txt and take some notes on the similar implementation. this is not the exact thing i am trying to reimplement but the whole image representation thing is inspired by it so it may give you a better idea of what im looking for. again, this prompt overrides anything that paper says though. after examining the paper, check in with me before starting - i.e. do you have any questions before starting?

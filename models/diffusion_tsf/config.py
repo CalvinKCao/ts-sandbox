@@ -131,6 +131,12 @@ class DiffusionTSFConfig:
     #                       This is the original approach.
     conditioning_mode: str = "visual_concat"  # "visual_concat" or "vector_embedding"
     
+    # Hybrid "Visual Guide" Forecasting (Stage 1 Predictor → Diffusion Refinement)
+    # When enabled, a coarse forecast from a Stage 1 model (e.g., iTransformer) is converted
+    # to a 2D "ghost image" and concatenated to the U-Net input. This allows the diffusion
+    # model to focus on refining texture/residuals rather than guessing the global trend.
+    use_guidance_channel: bool = False  # Enable guidance channel from Stage 1 predictor
+    
     # Hybrid 1D Cross-Attention Conditioning
     # Instead of only using 2D visual conditioning, also inject raw 1D numerical values
     # of the past sequence via Cross-Attention layers in the U-Net
@@ -191,12 +197,19 @@ class DiffusionTSFConfig:
     
     @property
     def backbone_in_channels(self) -> int:
-        """Total input channels for the backbone (data + auxiliary).
+        """Total input channels for the backbone (data + auxiliary + guidance).
         
         This is the number of channels for the noisy future + auxiliary channels,
         NOT including conditioning channels which are added separately.
+        
+        If use_guidance_channel is True, adds num_variables extra channels for
+        the 2D representation of the Stage 1 predictor's coarse forecast.
         """
-        return self.num_variables + self.num_aux_channels
+        base_channels = self.num_variables + self.num_aux_channels
+        if self.use_guidance_channel:
+            # Add one guidance channel per variable (the "ghost image")
+            base_channels += self.num_variables
+        return base_channels
     
     @property
     def visual_cond_channels(self) -> int:
@@ -206,4 +219,12 @@ class DiffusionTSFConfig:
         is concatenated directly as conditioning channels.
         """
         return self.num_variables
+    
+    @property
+    def guidance_channels(self) -> int:
+        """Number of guidance channels from Stage 1 predictor.
+        
+        Returns num_variables if guidance is enabled, 0 otherwise.
+        """
+        return self.num_variables if self.use_guidance_channel else 0
 
