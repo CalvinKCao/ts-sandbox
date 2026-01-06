@@ -252,6 +252,28 @@ def load_itransformer_from_checkpoint(
     else:
         ckpt_config = {}
     
+    # Get the state dict to infer model architecture
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    elif 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict']
+    else:
+        state_dict = checkpoint
+    
+    # Auto-detect e_layers from state_dict by counting encoder.attn_layers.X
+    detected_e_layers = 0
+    for key in state_dict.keys():
+        if key.startswith('encoder.attn_layers.'):
+            layer_idx = int(key.split('.')[2])
+            detected_e_layers = max(detected_e_layers, layer_idx + 1)
+    
+    # Auto-detect d_model from embedding weight shape
+    detected_d_model = 512  # default
+    if 'enc_embedding.value_embedding.weight' in state_dict:
+        detected_d_model = state_dict['enc_embedding.value_embedding.weight'].shape[0]
+    
+    logger.info(f"Auto-detected from state_dict: e_layers={detected_e_layers}, d_model={detected_d_model}")
+    
     # Create a config object for iTransformer
     class iTransConfig:
         def __init__(self):
@@ -259,7 +281,7 @@ def load_itransformer_from_checkpoint(
             self.pred_len = ckpt_config.get('pred_len', pred_len)
             self.output_attention = False
             self.use_norm = True
-            self.d_model = ckpt_config.get('d_model', 512)
+            self.d_model = ckpt_config.get('d_model', detected_d_model)
             self.embed = 'fixed'
             self.freq = 'h'
             self.dropout = 0.1
@@ -267,7 +289,7 @@ def load_itransformer_from_checkpoint(
             self.n_heads = ckpt_config.get('n_heads', 8)
             self.d_ff = ckpt_config.get('d_ff', 2048)
             self.activation = 'gelu'
-            self.e_layers = ckpt_config.get('e_layers', 3)
+            self.e_layers = ckpt_config.get('e_layers', detected_e_layers if detected_e_layers > 0 else 3)
             self.class_strategy = 'projection'
             self.enc_in = num_variables
     
@@ -277,13 +299,7 @@ def load_itransformer_from_checkpoint(
     model = iTransformerModel(config)
     
     # Load weights
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    elif 'state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['state_dict'])
-    else:
-        # Assume checkpoint IS the state dict
-        model.load_state_dict(checkpoint)
+    model.load_state_dict(state_dict)
     
     model = model.to(device)
     model.eval()
