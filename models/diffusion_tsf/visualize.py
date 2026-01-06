@@ -2,6 +2,7 @@
 Visualization script for Diffusion TSF.
 
 Loads a trained model and generates plots for evenly sampled windows across the dataset.
+Supports models trained with iTransformer guidance and plots guidance predictions.
 """
 
 import os
@@ -11,6 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import glob
+import importlib.util
 from typing import Tuple, Optional
 from torch.utils.data import random_split
 
@@ -22,6 +24,134 @@ if script_dir not in sys.path:
 from config import DiffusionTSFConfig
 from model import DiffusionTSF
 from train_electricity import ElectricityDataset, MODEL_SIZES, VAL_SPLIT
+from guidance import iTransformerGuidance, LinearRegressionGuidance, LastValueGuidance
+
+
+def load_itransformer_guidance(
+    checkpoint_path: str,
+    seq_len: int = 512,
+    pred_len: int = 96,
+    num_variables: int = 1,
+    device: str = 'cpu'
+) -> iTransformerGuidance:
+    """Load a pre-trained iTransformer model as guidance for visualization.
+    
+    Args:
+        checkpoint_path: Path to iTransformer checkpoint (.pt file)
+        seq_len: Input sequence length
+        pred_len: Prediction length
+        num_variables: Number of variables in the dataset
+        device: Device to load model on
+        
+    Returns:
+        iTransformerGuidance wrapper around the loaded model
+    """
+    # Use importlib to load from absolute path to avoid conflicts with local model.py
+    itrans_model_path = os.path.join(script_dir, '..', 'iTransformer', 'model', 'iTransformer.py')
+    itrans_model_path = os.path.abspath(itrans_model_path)
+    
+    # Also need to add iTransformer to path for its internal imports (layers, etc.)
+    itrans_dir = os.path.join(script_dir, '..', 'iTransformer')
+    itrans_dir = os.path.abspath(itrans_dir)
+    if itrans_dir not in sys.path:
+        sys.path.insert(0, itrans_dir)
+    
+    # Load the module using spec
+    spec = importlib.util.spec_from_file_location("iTransformer_module", itrans_model_path)
+    itrans_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(itrans_module)
+    iTransformerModel = itrans_module.Model
+    
+    # Load checkpoint
+    print(f"Loading iTransformer from: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Try to extract config from checkpoint
+    if 'config' in checkpoint:
+        ckpt_config = checkpoint['config']
+        print(f"Found config in checkpoint: seq_len={ckpt_config.get('seq_len')}, pred_len={ckpt_config.get('pred_len')}")
+    else:
+        ckpt_config = {}
+    
+    # Create a config object for iTransformer
+    class iTransConfig:
+        def __init__(self):
+            self.seq_len = ckpt_config.get('seq_len', seq_len)
+            self.pred_len = ckpt_config.get('pred_len', pred_len)
+            self.output_attention = False
+            self.use_norm = True
+            self.d_model = ckpt_config.get('d_model', 512)
+            self.embed = 'fixed'
+            self.freq = 'h'
+            self.dropout = 0.1
+            self.factor = 1
+            self.n_heads = ckpt_config.get('n_heads', 8)
+            self.d_ff = ckpt_config.get('d_ff', 2048)
+            self.activation = 'gelu'
+            self.e_layers = ckpt_config.get('e_layers', 3)
+            self.class_strategy = 'projection'
+            self.enc_in = num_variables
+    
+    config = iTransConfig()
+    
+    # Create model
+    model = iTransformerModel(config)
+    
+    # Load weights
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    elif 'state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['state_dict'])
+    else:
+        # Assume checkpoint IS the state dict
+        model.load_state_dict(checkpoint)
+    
+    model = model.to(device)
+    model.eval()
+    
+    print(f"iTransformer loaded: seq_len={config.seq_len}, pred_len={config.pred_len}")
+    
+    # Wrap in guidance interface
+    guidance = iTransformerGuidance(
+        model=model,
+        use_norm=config.use_norm,
+        seq_len=config.seq_len,
+        pred_len=config.pred_len
+    )
+    
+    return guidance
+
+
+def create_guidance_for_visualization(
+    guidance_type: str,
+    guidance_checkpoint: Optional[str],
+    seq_len: int,
+    pred_len: int,
+    num_variables: int,
+    device: str
+):
+    """Create guidance model based on configuration."""
+    if guidance_type == "linear":
+        print("Using LinearRegressionGuidance for Stage 1 predictions")
+        return LinearRegressionGuidance()
+    
+    elif guidance_type == "last_value":
+        print("Using LastValueGuidance for Stage 1 predictions")
+        return LastValueGuidance()
+    
+    elif guidance_type == "itransformer":
+        if not guidance_checkpoint:
+            raise ValueError("guidance_checkpoint is required for itransformer guidance")
+        return load_itransformer_guidance(
+            checkpoint_path=guidance_checkpoint,
+            seq_len=seq_len,
+            pred_len=pred_len,
+            num_variables=num_variables,
+            device=device
+        )
+    
+    else:
+        raise ValueError(f"Unknown guidance type: {guidance_type}")
 
 def visualize_samples(
     model_path: str,
@@ -32,7 +162,8 @@ def visualize_samples(
     beam_width: int = 5,
     jump_penalty_scale: float = 1.0,
     search_radius: int = 10,
-    output_dir: str = "visualizations"
+    output_dir: str = "visualizations",
+    guidance_checkpoint: Optional[str] = None
 ):
     # 1. Load checkpoint
     print(f"Loading model from {model_path}...")
@@ -232,8 +363,79 @@ def visualize_samples(
             model_config.transformer_patch_height = legacy_size
             model_config.transformer_patch_width = legacy_size
     
+    # Detect guidance channel settings from config
+    use_guidance_channel = config_dict.get('use_guidance_channel', False)
+    guidance_type = config_dict.get('guidance_type', None)
+    saved_guidance_checkpoint = config_dict.get('guidance_checkpoint', None)
+    
+    # Use provided guidance_checkpoint or fall back to saved one from training
+    effective_guidance_checkpoint = guidance_checkpoint or saved_guidance_checkpoint
+    
+    # Remap remote paths to local paths (e.g., /root/ts-sandbox/... -> local project)
+    if effective_guidance_checkpoint and not os.path.exists(effective_guidance_checkpoint):
+        # Try to remap common remote path patterns
+        remote_prefixes = [
+            '/root/ts-sandbox/',
+            '~/ts-sandbox/',
+            '/home/cao/ts-sandbox/',
+        ]
+        project_root = os.path.dirname(os.path.dirname(script_dir))  # Go up from diffusion_tsf to ts-sandbox
+        
+        for prefix in remote_prefixes:
+            if effective_guidance_checkpoint.startswith(prefix):
+                relative_path = effective_guidance_checkpoint[len(prefix):]
+                local_path = os.path.join(project_root, relative_path)
+                if os.path.exists(local_path):
+                    print(f"Remapped guidance checkpoint path:")
+                    print(f"  Remote: {effective_guidance_checkpoint}")
+                    print(f"  Local:  {local_path}")
+                    effective_guidance_checkpoint = local_path
+                    break
+    
+    if use_guidance_channel:
+        model_config.use_guidance_channel = True
+        print(f"\n=== Guidance Configuration ===")
+        print(f"  use_guidance_channel: {use_guidance_channel}")
+        print(f"  guidance_type: {guidance_type}")
+        print(f"  guidance_checkpoint: {effective_guidance_checkpoint}")
+        print(f"==============================\n")
+    
     # state_dict already remapped above (legacy unet.* -> noise_predictor.*)
     model = DiffusionTSF(model_config).to(device)
+    
+    # Load guidance model if checkpoint was trained with guidance
+    guidance_model = None
+    guidance_loaded = False
+    if use_guidance_channel and guidance_type:
+        if guidance_type == 'itransformer' and not effective_guidance_checkpoint:
+            print("WARNING: Model was trained with iTransformer guidance but no checkpoint provided!")
+            print("         Use --guidance-checkpoint to specify the iTransformer checkpoint path.")
+            print("         Guidance predictions will NOT be shown in visualizations.")
+        else:
+            try:
+                guidance_model = create_guidance_for_visualization(
+                    guidance_type=guidance_type,
+                    guidance_checkpoint=effective_guidance_checkpoint,
+                    seq_len=512,
+                    pred_len=96,
+                    num_variables=num_variables,
+                    device=device
+                )
+                model.set_guidance_model(guidance_model)
+                guidance_loaded = True
+                print(f"✅ Guidance model loaded successfully!")
+            except Exception as e:
+                print(f"WARNING: Failed to load guidance model: {e}")
+                print("         Guidance predictions will NOT be shown in visualizations.")
+    
+    # Filter out guidance_model.* keys if we couldn't load the guidance model
+    # (these keys are saved with the checkpoint when training with guidance)
+    if not guidance_loaded:
+        guidance_keys = [k for k in state_dict.keys() if k.startswith('guidance_model.')]
+        if guidance_keys:
+            print(f"Filtering out {len(guidance_keys)} guidance_model.* keys from state_dict (guidance not loaded)")
+            for k in guidance_keys:
+                del state_dict[k]
     
     # Use strict=True to catch architecture mismatches!
     try:
@@ -289,6 +491,12 @@ def visualize_samples(
 
     os.makedirs(output_dir, exist_ok=True)
     
+    # Track metrics for summary
+    diffusion_maes = []
+    guidance_maes = []
+    diffusion_rmses = []
+    guidance_rmses = []
+    
     for i, idx in enumerate(indices):
         past, future = val_dataset[idx]
         past_tensor = past.unsqueeze(0).to(device)
@@ -307,6 +515,16 @@ def visualize_samples(
             )
             pred = out['prediction'].cpu().squeeze(0).numpy()
             
+            # Extract guidance prediction if available
+            guidance_pred = None
+            guidance_2d = None
+            if 'guidance_1d' in out:
+                guidance_pred = out['guidance_1d'].cpu().squeeze(0).numpy()
+            if 'guidance_2d' in out:
+                guidance_2d_raw = out['guidance_2d'].cpu().squeeze(0).squeeze(0).numpy()
+                guidance_2d = (guidance_2d_raw + 1.0) / 2.0
+                guidance_2d = np.clip(guidance_2d, 0.0, 1.0)
+            
             # Extract 2D maps (these are in diffusion-scaled [-1, 1] range)
             past_2d_raw = out['past_2d'].cpu().squeeze(0).squeeze(0).numpy()
             future_2d_raw = out['future_2d'].cpu().squeeze(0).squeeze(0).numpy()
@@ -319,8 +537,17 @@ def visualize_samples(
             past_2d = np.clip(past_2d, 0.0, 1.0)
             future_2d = np.clip(future_2d, 0.0, 1.0)
         
-        # Plotting
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), gridspec_kw={'height_ratios': [1, 1]})
+        # Determine figure layout based on whether we have guidance
+        has_guidance = guidance_pred is not None
+        
+        if has_guidance and guidance_2d is not None:
+            # 3 rows: 1D time series, 2D probability map, 2D guidance map
+            fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 16), 
+                                                 gridspec_kw={'height_ratios': [1, 1, 1]})
+        else:
+            # 2 rows: 1D time series, 2D probability map
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), 
+                                            gridspec_kw={'height_ratios': [1, 1]})
         
         # 1. Plot 1D Time Series
         # Combine past and future for context
@@ -331,13 +558,19 @@ def visualize_samples(
         ax1.plot(time_future, future.numpy(), label='True Future', color='blue', linewidth=2)
         ax1.plot(time_future, pred, label='Diffusion Forecast', color='red', linestyle='--', linewidth=2)
         
-        ax1.set_title(f"Diffusion TSF Forecast - Sample {i+1} (Dataset Index {idx})", fontsize=14)
+        # Add guidance prediction if available
+        if has_guidance:
+            ax1.plot(time_future, guidance_pred, label='iTransformer Guidance', 
+                    color='green', linestyle=':', linewidth=2, alpha=0.8)
+        
+        title_suffix = " (with iTransformer Guidance)" if has_guidance else ""
+        ax1.set_title(f"Diffusion TSF Forecast - Sample {i+1} (Dataset Index {idx}){title_suffix}", fontsize=14)
         ax1.set_xlabel("Time Steps")
         ax1.set_ylabel("Value (Normalized)")
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         
-        # 2. Plot 2D Probability Map
+        # 2. Plot 2D Probability Map (Diffusion Output)
         # Concatenate past and future 2D maps for full context
         full_2d = np.concatenate([past_2d, future_2d], axis=1)
         
@@ -345,7 +578,7 @@ def visualize_samples(
         im = ax2.imshow(full_2d, aspect='auto', origin='lower', cmap='magma', 
                        interpolation='nearest', vmin=0.0, vmax=1.0)
         mode_label = "PDF/Stripe" if model_config.representation_mode == "pdf" else "CDF/Occupancy"
-        ax2.set_title(f"2D Representation ({mode_label} mode)", fontsize=14)
+        ax2.set_title(f"2D Representation - Diffusion Output ({mode_label} mode)", fontsize=14)
         ax2.set_xlabel("Time Steps")
         ax2.set_ylabel("Normalized Value Bins")
         
@@ -355,12 +588,72 @@ def visualize_samples(
         # Add colorbar
         plt.colorbar(im, ax=ax2, label='Density')
         
+        # 3. Plot 2D Guidance Map (if available)
+        if has_guidance and guidance_2d is not None:
+            # Create a full 2D view by padding the guidance with zeros for the past
+            guidance_full_2d = np.zeros_like(full_2d)
+            guidance_full_2d[:, len(past):] = guidance_2d
+            
+            im3 = ax3.imshow(guidance_full_2d, aspect='auto', origin='lower', cmap='magma', 
+                            interpolation='nearest', vmin=0.0, vmax=1.0)
+            ax3.set_title(f"2D Representation - iTransformer Guidance ({mode_label} mode)", fontsize=14)
+            ax3.set_xlabel("Time Steps")
+            ax3.set_ylabel("Normalized Value Bins")
+            
+            # Add vertical line at the forecast start
+            ax3.axvline(x=len(past), color='white', linestyle='-', linewidth=2, alpha=0.8, label='Forecast Start')
+            
+            # Add colorbar
+            plt.colorbar(im3, ax=ax3, label='Density')
+        
         plt.tight_layout()
         
         save_path = f"{output_dir}/sample_{i+1}_full.png"
         plt.savefig(save_path, dpi=150)
         plt.close()
+        
+        # Calculate and track metrics
+        future_np = future.numpy()
+        diffusion_mae = np.mean(np.abs(pred - future_np))
+        diffusion_rmse = np.sqrt(np.mean((pred - future_np) ** 2))
+        diffusion_maes.append(diffusion_mae)
+        diffusion_rmses.append(diffusion_rmse)
+        
+        if has_guidance:
+            guidance_mae = np.mean(np.abs(guidance_pred - future_np))
+            guidance_rmse = np.sqrt(np.mean((guidance_pred - future_np) ** 2))
+            guidance_maes.append(guidance_mae)
+            guidance_rmses.append(guidance_rmse)
+            print(f"  Sample {i+1}: Diffusion MAE={diffusion_mae:.4f}, RMSE={diffusion_rmse:.4f} | "
+                  f"Guidance MAE={guidance_mae:.4f}, RMSE={guidance_rmse:.4f}")
+        else:
+            print(f"  Sample {i+1}: Diffusion MAE={diffusion_mae:.4f}, RMSE={diffusion_rmse:.4f}")
+        
         print(f"  Saved {save_path}")
+    
+    # Print summary statistics
+    print("\n" + "=" * 60)
+    print("SUMMARY - Forecast Error Metrics (lower is better)")
+    print("=" * 60)
+    print(f"Diffusion Model:")
+    print(f"  Mean MAE:  {np.mean(diffusion_maes):.4f} ± {np.std(diffusion_maes):.4f}")
+    print(f"  Mean RMSE: {np.mean(diffusion_rmses):.4f} ± {np.std(diffusion_rmses):.4f}")
+    
+    if guidance_maes:
+        print(f"\niTransformer Guidance:")
+        print(f"  Mean MAE:  {np.mean(guidance_maes):.4f} ± {np.std(guidance_maes):.4f}")
+        print(f"  Mean RMSE: {np.mean(guidance_rmses):.4f} ± {np.std(guidance_rmses):.4f}")
+        
+        # Calculate improvement
+        mae_improvement = (np.mean(guidance_maes) - np.mean(diffusion_maes)) / np.mean(guidance_maes) * 100
+        rmse_improvement = (np.mean(guidance_rmses) - np.mean(diffusion_rmses)) / np.mean(guidance_rmses) * 100
+        
+        print(f"\nDiffusion vs Guidance Improvement:")
+        print(f"  MAE:  {mae_improvement:+.1f}% {'(better)' if mae_improvement > 0 else '(worse)'}")
+        print(f"  RMSE: {rmse_improvement:+.1f}% {'(better)' if rmse_improvement > 0 else '(worse)'}")
+    
+    print("=" * 60)
+
 
 def find_best_model(base_dir: str) -> Optional[str]:
     """Find the best model checkpoint in the directory structure."""
@@ -424,6 +717,10 @@ if __name__ == "__main__":
     parser.add_argument("--beam-width", type=int, default=5, help="Beam width for beam search decoder")
     parser.add_argument("--jump-penalty", type=float, default=1.0, help="Jump penalty scale for beam search decoder")
     parser.add_argument("--search-radius", type=int, default=10, help="Search radius (pixels) for beam search decoder")
+    # Guidance parameters
+    parser.add_argument("--guidance-checkpoint", type=str, default=None, 
+                       help="Path to iTransformer checkpoint for guidance. If model was trained with guidance "
+                            "and this is not set, will try to use the checkpoint path from training config.")
     args = parser.parse_args()
     
     # Setup paths
@@ -443,7 +740,8 @@ if __name__ == "__main__":
             decoder_method=args.decoder_method,
             beam_width=args.beam_width,
             jump_penalty_scale=args.jump_penalty,
-            search_radius=args.search_radius
+            search_radius=args.search_radius,
+            guidance_checkpoint=args.guidance_checkpoint
         )
     else:
         print(f"Error: No suitable model checkpoint found (looked for {args.model_path or 'best_model.pt'}).")

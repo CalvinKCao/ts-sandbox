@@ -178,8 +178,9 @@ The model supports a **two-stage hybrid forecasting** approach where a determini
     - **Horizontal Time Channels:** Two independently controllable channels for explicit temporal position awareness (fixes "phase drift" in U-Net forecasts):
         - **Linear Ramp (`use_time_ramp`):** Values from -1.0 (start of window) to +1.0 (end of window). Tells the model "how far along" it is in the forecast (a "progress bar").
         - **Sine Wave (`use_time_sine`):** `sin(2π * t / seasonal_period)` where `t` is the column index. Provides periodic/seasonal awareness (a "clock"). Default `seasonal_period=96` for hourly data with daily cycles.
+    - **Value Channel (`use_value_channel`):** Shows the last `forecast_length` values from the past as a simple 1D→2D representation. Each column contains the normalized value at that timestep broadcast across all rows (height). For example, if `past=[v0..v511]` and `forecast_len=96`, the value channel shows `[v416..v511]` - the 96 timesteps immediately before the forecast. This provides recent value context without leaking future information (same values used at train and inference time).
     - These channels are concatenated to the noisy image and past conditioning before being fed to the backbone.
-    - **Channel Order:** `[Noisy_Image, Vertical_Coord (if enabled), Time_Ramp (if enabled), Time_Sine (if enabled)]`
+    - **Channel Order:** `[Noisy_Image, Vertical_Coord (if enabled), Time_Ramp (if enabled), Time_Sine (if enabled), Value_Channel (if enabled)]`
 
 5. **Diffusion Framework:** * Use the **DDPM (Denoising Diffusion Probabilistic Models)** framework.
     - Set T=1000 diffusion steps with a linear, cosine, sigmoid, or quadratic noise schedule.

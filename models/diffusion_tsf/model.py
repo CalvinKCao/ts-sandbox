@@ -501,6 +501,35 @@ class DiffusionTSF(nn.Module):
         
         return torch.cat([x, value_channel], dim=1)
     
+    def _get_guidance_forecast(
+        self,
+        past_norm: torch.Tensor,
+        stats: Tuple[torch.Tensor, torch.Tensor],
+        forecast_length: int
+    ) -> torch.Tensor:
+        """Get 1D forecast from Stage 1 guidance model.
+        
+        Args:
+            past_norm: Normalized past sequence (batch, [num_vars,] past_len)
+            stats: Tuple of (mean, std) from normalization
+            forecast_length: Number of future steps to predict
+            
+        Returns:
+            Guidance 1D forecast of shape (batch, [num_vars,] forecast_length) in original scale
+        """
+        if self.guidance_model is None:
+            raise ValueError("Guidance model is None but guidance forecast is requested")
+        
+        # Denormalize past for guidance model (most expect original scale)
+        mean, std = stats
+        past = past_norm * std + mean
+        
+        # Get coarse forecast from Stage 1 model (in original scale)
+        with torch.no_grad():
+            coarse_forecast = self.guidance_model.get_forecast(past, forecast_length)
+        
+        return coarse_forecast
+    
     def _generate_guidance_2d(
         self,
         past: torch.Tensor,
@@ -1077,8 +1106,19 @@ class DiffusionTSF(nn.Module):
         # Inject horizontal time channels for temporal awareness
         noisy_future_full = self._inject_time_channels(noisy_future_with_coords)
         
-        # Inject value channels (normalized values broadcast across height)
-        noisy_future_full = self._inject_value_channel(noisy_future_full, future_norm)
+        # Inject value channels using the LAST forecast_length values from past
+        # This provides recent value context without leaking future information
+        # Each column shows the value at that relative position from the end of past
+        # E.g., if past=[v0..v511] and forecast_len=96, value channel = [v416..v511]
+        if self.config.use_value_channel:
+            forecast_length = future.shape[-1]
+            if past_norm.dim() == 3:
+                # Multivariate: (batch, num_vars, past_len) -> take last forecast_length values
+                recent_values = past_norm[:, :, -forecast_length:]  # (batch, num_vars, forecast_len)
+            else:
+                # Univariate: (batch, past_len) -> take last forecast_length values
+                recent_values = past_norm[:, -forecast_length:]  # (batch, forecast_len)
+            noisy_future_full = self._inject_value_channel(noisy_future_full, recent_values)
         
         # Generate and inject guidance channel (Stage 1 coarse forecast as "ghost image")
         guidance_2d = None
@@ -1233,7 +1273,7 @@ class DiffusionTSF(nn.Module):
             self.config.forecast_length
         )
         
-        # Generate guidance 2D image if enabled (Stage 1 coarse forecast as "ghost image")
+        # Generate guidance forecast if enabled (Stage 1 coarse forecast)
         guidance_2d = None
         null_guidance_2d = None
         if self.config.use_guidance_channel:
@@ -1244,6 +1284,21 @@ class DiffusionTSF(nn.Module):
             if cfg_scale > 1.0:
                 null_guidance_2d = torch.zeros_like(guidance_2d)
         
+        # Prepare value channel using last forecast_length values from past (same as training)
+        # Each column shows the value at that relative position from the end of past
+        past_value_channel = None
+        if self.config.use_value_channel:
+            if past_norm.dim() == 3:
+                # Multivariate: (batch, num_vars, past_len) -> take last forecast_length values
+                recent_values = past_norm[:, :, -self.config.forecast_length:]  # (batch, num_vars, forecast_len)
+            else:
+                # Univariate: (batch, past_len) -> take last forecast_length values
+                recent_values = past_norm[:, -self.config.forecast_length:]  # (batch, forecast_len)
+            # Create 2D value channel
+            past_value_channel = self._get_value_channel(recent_values, self.config.image_height)
+            if past_value_channel.shape[1] > 1:
+                past_value_channel = past_value_channel[:, 0:1, :, :]
+        
         # Create a wrapper that injects coordinate and time channels before calling the backbone
         # This closure captures the encoder_hidden_states and guidance_2d for conditioning
         def model_with_channels(x, t, cond, use_null_context=False, use_null_guidance=False):
@@ -1251,12 +1306,9 @@ class DiffusionTSF(nn.Module):
             x_with_coords = self._inject_coordinate_channel(x)
             x_full = self._inject_time_channels(x_with_coords)
             
-            # For value channel during generation, use zeros (we don't know future values)
-            if self.config.use_value_channel:
-                curr_batch_size = x_full.shape[0]
-                _, _, height, width = x_full.shape
-                zero_values = torch.zeros(curr_batch_size, 1, height, width, device=x_full.device, dtype=x_full.dtype)
-                x_full = torch.cat([x_full, zero_values], dim=1)
+            # For value channel: use extended past values (same as training)
+            if self.config.use_value_channel and past_value_channel is not None:
+                x_full = torch.cat([x_full, past_value_channel], dim=1)
             
             # Inject guidance channel (Stage 1 ghost image)
             if self.config.use_guidance_channel:
@@ -1293,12 +1345,11 @@ class DiffusionTSF(nn.Module):
             x_with_coords = self._inject_coordinate_channel(x_double)
             x_full = self._inject_time_channels(x_with_coords)
             
-            # For value channel during generation, use zeros (we don't know future values)
-            if self.config.use_value_channel:
-                batch_double = x_full.shape[0]
-                _, _, height, width = x_full.shape
-                zero_values = torch.zeros(batch_double, 1, height, width, device=x_full.device, dtype=x_full.dtype)
-                x_full = torch.cat([x_full, zero_values], dim=1)
+            # For value channel: use extended past values (same as training)
+            if self.config.use_value_channel and past_value_channel is not None:
+                # Double the past value channel for CFG batching
+                value_double = torch.cat([past_value_channel, past_value_channel], dim=0)
+                x_full = torch.cat([x_full, value_double], dim=1)
             
             # Inject guidance channel for both conditional and unconditional branches
             # For CFG batching: [conditional, unconditional] -> [guidance_2d, null_guidance_2d]

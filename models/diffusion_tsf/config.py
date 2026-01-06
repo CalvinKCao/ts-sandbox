@@ -118,7 +118,10 @@ class DiffusionTSFConfig:
     # Temporal coordinate channels for horizontal awareness (fixes phase drift in U-Net)
     use_time_ramp: bool = False  # Add linear ramp channel (-1 to +1 "progress bar")
     use_time_sine: bool = False  # Add sine wave channel (periodic "clock")
-    use_value_channel: bool = False  # Add channel with normalized values broadcast across height
+    # Value channel: shows the last forecast_length values from past as a 1D representation
+    # Each column t contains past_norm[-(forecast_length-t)] broadcast across height
+    # This gives recent value context without leaking future info (train/test consistent)
+    use_value_channel: bool = False  # Add channel with recent past values (1D→2D broadcast)
     seasonal_period: int = 96  # Period for sine wave (e.g., 96 for hourly data with daily seasonality)
     
     # Conditioning Mode for Past Context

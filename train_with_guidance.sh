@@ -100,6 +100,9 @@ echo "🔥 Training DiffusionTSF with iTransformer guidance..."
 echo "   Checkpoint: ${ITRANS_CKPT}"
 echo ""
 
+# Value channel now uses last past value extended to forecast length (no leakage)
+# This gives the model context about recent value levels
+
 python3 models/diffusion_tsf/train_electricity.py \
   --blur-sigma 1.0 \
   --emd-lambda 0 \
