@@ -15,8 +15,16 @@ fi
 # ------------------------------------------------------------------
 # Stage 1: Train iTransformer on Electricity (univariate, target=OT)
 # ------------------------------------------------------------------
-ITRANS_CKPT="${REPO_ROOT}/checkpoints/itransformer/itransformer_electricity.pt"
-mkdir -p "$(dirname "${ITRANS_CKPT}")"
+# iTransformer saves as: checkpoints/[setting]/checkpoint.pth
+# where setting = model_id_model_data_features_ft{seq_len}_sl{label_len}_ll{pred_len}_..._0
+ITRANS_CKPT_DIR="${REPO_ROOT}/checkpoints/itransformer/itransformer_electricity_512_96_iTransformer_custom_S_ft512_sl0_ll96_pl512_dm8_el3_dl1_df2048_fc1_ebtimeF_ebTrue_dt_electricity_training_projection_0"
+ITRANS_CKPT="${ITRANS_CKPT_DIR}/checkpoint.pth"
+
+if [[ -f "${ITRANS_CKPT}" ]]; then
+  echo "✅ iTransformer checkpoint already exists at ${ITRANS_CKPT}, skipping training..."
+else
+  mkdir -p "${ITRANS_CKPT_DIR}"
+  echo "🔥 Training iTransformer..."
 
 python3 models/iTransformer/run.py \
   --is_training 1 \
@@ -27,21 +35,41 @@ python3 models/iTransformer/run.py \
   --model iTransformer \
   --features S \
   --target OT \
+  --freq h \
+  --checkpoints "${ITRANS_CKPT_DIR}/" \
   --seq_len 512 \
   --label_len 0 \
   --pred_len 96 \
-  --e_layers 3 \
+  --enc_in 1 \
+  --dec_in 1 \
+  --c_out 1 \
   --d_model 512 \
   --n_heads 8 \
+  --e_layers 3 \
   --d_ff 2048 \
-  --dropout 0.1 \
   --factor 1 \
-  --batch_size 32 \
-  --learning_rate 1e-4 \
+  --dropout 0.1 \
+  --embed timeF \
+  --activation gelu \
+  --output_attention \
+  --num_workers 4 \
+  --itr 1 \
   --train_epochs 20 \
+  --batch_size 16 \
   --patience 5 \
-  --save_dir "$(dirname "${ITRANS_CKPT}")" \
-  --ckpt "${ITRANS_CKPT}"
+  --learning_rate 0.0001 \
+  --des electricity_training \
+  --loss MSE \
+  --lradj type1 \
+  --use_amp \
+  --use_gpu True \
+  --gpu 0 \
+  --exp_name MTSF \
+  --channel_independence False \
+  --inverse \
+  --class_strategy projection \
+  --use_norm True
+fi
 
 # ------------------------------------------------------------------
 # Stage 2: Train DiffusionTSF with Visual Guide from iTransformer
