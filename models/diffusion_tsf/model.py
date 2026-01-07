@@ -555,11 +555,31 @@ class DiffusionTSF(nn.Module):
             raise ValueError("Guidance model is None but guidance channel is requested")
         
         # Get coarse forecast from Stage 1 model (in original scale)
+        # NOTE: We pass the ORIGINAL (unnormalized) past to the guidance model.
+        # Most guidance models (including iTransformer with use_norm=True) handle
+        # their own internal normalization and output in original scale.
         with torch.no_grad():
             coarse_forecast = self.guidance_model.get_forecast(past, forecast_length)
         
-        # Normalize using same stats as past
+        # Sanity check: detect potential double-normalization
+        # If guidance model already outputs normalized values (near zero mean, unit var),
+        # normalizing again will corrupt the signal
         mean, std = stats
+        forecast_mean = coarse_forecast.mean().item()
+        forecast_std = coarse_forecast.std().item()
+        past_mean = past.mean().item()
+        past_std = past.std().item()
+        
+        # Warning if guidance output looks already normalized while past is not
+        if abs(forecast_mean) < 0.5 and 0.5 < forecast_std < 2.0:
+            if abs(past_mean) > 1.0 or past_std > 5.0:
+                logger.warning(
+                    f"Guidance output may already be normalized (mean={forecast_mean:.2f}, std={forecast_std:.2f}) "
+                    f"while past is in original scale (mean={past_mean:.2f}, std={past_std:.2f}). "
+                    f"This could indicate double-normalization. Check your guidance model's output scale."
+                )
+        
+        # Normalize using same stats as past
         coarse_norm = (coarse_forecast - mean) / std
         
         # Convert to 2D representation
@@ -1062,35 +1082,35 @@ class DiffusionTSF(nn.Module):
         
         logger.debug(f"past_2d shape: {past_2d.shape}, future_2d shape: {future_2d.shape}")
         
+        # Classifier-Free Guidance: randomly drop conditioning during training
+        # This teaches the model to work both with and without conditioning
+        # IMPORTANT: Use the SAME mask for all conditioning signals (visual, 1D context)
+        # to ensure consistent unconditional vs conditional training
+        cfg_drop_mask = None
+        if self.training and self.config.cfg_dropout > 0:
+            cfg_drop_mask = torch.rand(batch_size, device=device) < self.config.cfg_dropout
+            if cfg_drop_mask.any():
+                # Replace dropped conditions with zeros (null conditioning)
+                null_cond = torch.zeros_like(past_2d)
+                past_2d = torch.where(
+                    cfg_drop_mask.view(-1, 1, 1, 1).expand_as(past_2d),
+                    null_cond,
+                    past_2d
+                )
+        
         # Prepare 1D context for hybrid conditioning (if enabled)
         encoder_hidden_states = None
         if self.context_encoder is not None:
             context_input = self._prepare_1d_context(past_norm)
             encoder_hidden_states = self.context_encoder(context_input)
             
-            # Apply CFG dropout to context as well
-            if self.training and self.config.cfg_dropout > 0:
-                drop_mask = torch.rand(batch_size, device=device) < self.config.cfg_dropout
-                if drop_mask.any():
-                    null_context = torch.zeros_like(encoder_hidden_states)
-                    encoder_hidden_states = torch.where(
-                        drop_mask.view(-1, 1, 1).expand_as(encoder_hidden_states),
-                        null_context,
-                        encoder_hidden_states
-                    )
-        
-        # Classifier-Free Guidance: randomly drop conditioning during training
-        # This teaches the model to work both with and without conditioning
-        if self.training and self.config.cfg_dropout > 0:
-            # Create a mask for which samples should have conditioning dropped
-            drop_mask = torch.rand(batch_size, device=device) < self.config.cfg_dropout
-            if drop_mask.any():
-                # Replace dropped conditions with zeros (null conditioning)
-                null_cond = torch.zeros_like(past_2d)
-                past_2d = torch.where(
-                    drop_mask.view(-1, 1, 1, 1).expand_as(past_2d),
-                    null_cond,
-                    past_2d
+            # Apply CFG dropout to context using the SAME mask as visual conditioning
+            if cfg_drop_mask is not None and cfg_drop_mask.any():
+                null_context = torch.zeros_like(encoder_hidden_states)
+                encoder_hidden_states = torch.where(
+                    cfg_drop_mask.view(-1, 1, 1).expand_as(encoder_hidden_states),
+                    null_context,
+                    encoder_hidden_states
                 )
         
         # Sample random timesteps if not provided

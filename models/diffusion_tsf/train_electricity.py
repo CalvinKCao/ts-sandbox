@@ -188,9 +188,11 @@ GUIDANCE_TYPE = "linear"  # "linear", "last_value", or "itransformer"
 GUIDANCE_CHECKPOINT = None  # Path to pre-trained iTransformer checkpoint (if guidance_type="itransformer")
 
 # Data split settings
-# IMPORTANT: Use chronological splits (70% train, 10% val, 20% test) when using
-# iTransformer guidance to match iTransformer's training split and avoid data leakage
-USE_CHRONOLOGICAL_SPLIT = False  # If True, use chronological split instead of random
+# IMPORTANT: Time series data MUST use chronological splits to avoid data leakage.
+# With sliding windows, adjacent samples share ~90% of their data. Random splitting
+# causes train and val sets to overlap temporally, making validation metrics meaningless.
+# Split: Train (first 70%), Val (next 10%), Test (last 20%)
+USE_CHRONOLOGICAL_SPLIT = True  # ALWAYS True for time series - random split causes severe data leakage
 
 MODEL_SIZES = {
     'tiny': [32, 64],           # ~1M params, for quick tests only
@@ -506,7 +508,7 @@ def get_dataloaders(
     forecast: int = FORECAST_LENGTH,
     use_all_columns: bool = False,
     columns: Optional[List[str]] = None,
-    use_chronological_split: bool = False
+    use_chronological_split: bool = True  # MUST be True for time series to avoid data leakage
 ) -> Tuple[DataLoader, DataLoader, int]:
     """Create train and validation dataloaders.
     
@@ -518,12 +520,20 @@ def get_dataloaders(
         forecast: Forecast horizon length
         use_all_columns: If True, use all columns (multivariate)
         columns: Specific columns to use (if not use_all_columns)
-        use_chronological_split: If True, use chronological split (70% train, 10% val, 20% test)
-                                 to match iTransformer's split and avoid data leakage
+        use_chronological_split: If True (DEFAULT), use chronological split (70% train, 10% val, 20% test).
+                                 WARNING: Setting to False causes severe data leakage in time series!
     
     Returns:
         (train_loader, val_loader, num_variables)
     """
+    # CRITICAL: Warn if someone tries to use random split
+    if not use_chronological_split:
+        logger.warning(
+            "⚠️  RANDOM SPLIT ENABLED - THIS CAUSES SEVERE DATA LEAKAGE FOR TIME SERIES!\n"
+            "   With sliding windows (stride=24, window=608), adjacent samples share 584 timesteps.\n"
+            "   Random shuffle means train/val samples are interleaved temporally.\n"
+            "   Your validation metrics will be MEANINGLESS. Use use_chronological_split=True."
+        )
     
     # Base dataset (no augmentation) to derive indices and reuse tensor
     base_dataset = ElectricityDataset(
@@ -539,19 +549,55 @@ def get_dataloaders(
     total_samples = len(base_dataset)
     
     if use_chronological_split:
-        # CHRONOLOGICAL SPLIT: matches iTransformer's split exactly
-        # Train: first 70%, Val: next 10%, Test: last 20%
-        # This prevents data leakage when using iTransformer guidance
-        train_end = int(total_samples * 0.7)
-        val_end = int(total_samples * 0.8)
+        # CHRONOLOGICAL SPLIT WITH GAPS to prevent window overlap
+        # 
+        # Problem: With stride=24 and window=608, adjacent samples share data:
+        #   Sample i covers timesteps [i*stride, i*stride + window)
+        #   Sample i+1 covers timesteps [(i+1)*stride, (i+1)*stride + window)
+        #   Overlap = window - stride = 608 - 24 = 584 timesteps!
+        #
+        # Solution: Insert a GAP of ceil(window/stride) indices between splits
+        # This ensures the last window of train doesn't overlap with first window of val.
+        
+        window_size = lookback + forecast  # Total timesteps per sample
+        stride = 24  # Default stride from ElectricityDataset
+        gap_indices = (window_size + stride - 1) // stride  # Ceiling division
+        
+        # Target proportions: ~70% train, ~10% val, ~20% test
+        # But we need gaps, so effective sizes are smaller
+        raw_train_end = int(total_samples * 0.7)
+        raw_val_end = int(total_samples * 0.8)
+        
+        train_end = raw_train_end
+        val_start = train_end + gap_indices  # Gap after train
+        val_end = raw_val_end
+        test_start = val_end + gap_indices   # Gap after val
+        
+        # Ensure we have valid ranges
+        if val_start >= val_end:
+            logger.warning(f"Gap too large for val split! Reducing gap.")
+            val_start = train_end + 1
+        if test_start >= total_samples:
+            test_start = val_end + 1
         
         train_indices = list(range(0, train_end))
-        val_indices = list(range(train_end, val_end))
+        val_indices = list(range(val_start, val_end))
+        # test_indices would be range(test_start, total_samples) if needed
         
-        logger.info(f"Using CHRONOLOGICAL split (matches iTransformer):")
-        logger.info(f"  Train: indices 0-{train_end-1} ({len(train_indices)} samples, 70%)")
-        logger.info(f"  Val:   indices {train_end}-{val_end-1} ({len(val_indices)} samples, 10%)")
-        logger.info(f"  Test:  indices {val_end}-{total_samples-1} (held out, 20%)")
+        # Calculate actual timestep ranges for logging
+        train_ts_end = (train_end - 1) * stride + window_size if train_end > 0 else 0
+        val_ts_start = val_start * stride
+        val_ts_end = (val_end - 1) * stride + window_size if val_end > val_start else val_ts_start
+        
+        logger.info(f"Using CHRONOLOGICAL split with gaps (no window overlap):")
+        logger.info(f"  Window size: {window_size} timesteps, stride: {stride}, gap: {gap_indices} indices")
+        logger.info(f"  Train: indices 0-{train_end-1} ({len(train_indices)} samples)")
+        logger.info(f"         timesteps 0-{train_ts_end}")
+        logger.info(f"  [GAP]: {gap_indices} indices ({gap_indices * stride} timesteps)")
+        logger.info(f"  Val:   indices {val_start}-{val_end-1} ({len(val_indices)} samples)")
+        logger.info(f"         timesteps {val_ts_start}-{val_ts_end}")
+        logger.info(f"  [GAP]: {gap_indices} indices")
+        logger.info(f"  Test:  indices {test_start}-{total_samples-1} (held out)")
     else:
         # RANDOM SPLIT: original behavior
         val_size = int(total_samples * val_split)
@@ -1333,12 +1379,11 @@ def main():
         logger.error("--guidance-type=itransformer requires --guidance-checkpoint PATH")
         sys.exit(1)
     
-    # IMPORTANT: Use chronological split when using iTransformer guidance
-    # This ensures the diffusion model's train/val data doesn't overlap with
-    # iTransformer's training data, preventing data leakage
-    USE_CHRONOLOGICAL_SPLIT = USE_GUIDANCE_CHANNEL and GUIDANCE_TYPE == 'itransformer'
-    if USE_CHRONOLOGICAL_SPLIT:
-        logger.info("Enabling CHRONOLOGICAL split (matches iTransformer's 70/10/20 split)")
+    # IMPORTANT: Time series ALWAYS needs chronological split to avoid data leakage.
+    # With sliding windows (stride=24), adjacent samples share ~583 of 608 timesteps.
+    # Random splitting means train sample 0 and val sample 5 share 90%+ of data!
+    # USE_CHRONOLOGICAL_SPLIT is now always True by default (set at module level).
+    logger.info("Using CHRONOLOGICAL split (70% train / 10% val / 20% test) - required for time series")
     
     # Initialize hardware-adaptive search space
     SEARCH_SPACE = get_hardware_config()

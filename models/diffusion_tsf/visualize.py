@@ -540,29 +540,48 @@ def visualize_samples(
         print(f"   This may cause dimension mismatches!")
     
     total_samples = len(base_dataset)
-    train_end = int(total_samples * 0.7)
-    val_end = int(total_samples * 0.8)
+    
+    # Use same gap-based split as training to match exactly
+    window_size = 512 + 96  # lookback + forecast
+    stride = 24
+    gap_indices = (window_size + stride - 1) // stride  # ~26 indices
+    
+    raw_train_end = int(total_samples * 0.7)
+    raw_val_end = int(total_samples * 0.8)
+    
+    train_end = raw_train_end
+    val_start = train_end + gap_indices
+    val_end = raw_val_end
+    test_start = val_end + gap_indices
+    
+    # Ensure valid ranges
+    if val_start >= val_end:
+        val_start = train_end + 1
+    if test_start >= total_samples:
+        test_start = val_end + 1
     
     if use_guidance_channel and guidance_type == 'itransformer':
-        # When using iTransformer, evaluate on TEST set (last 20%)
+        # When using iTransformer, evaluate on TEST set
         # to ensure we're evaluating on data neither model has seen
-        print("\n⚠️  Using CHRONOLOGICAL TEST set (last 20%) for fair iTransformer evaluation")
-        print("   (Both iTransformer and diffusion were trained on first 70%)")
+        print("\n⚠️  Using CHRONOLOGICAL TEST set for fair iTransformer evaluation")
+        print("   (Both iTransformer and diffusion were trained on train set)")
         
-        eval_indices = list(range(val_end, total_samples))
-        eval_set_name = "chronological test set (last 20%)"
+        eval_indices = list(range(test_start, total_samples))
+        eval_set_name = "chronological test set"
     else:
-        # When not using iTransformer, use validation set (middle 10%)
-        # for consistency with chronological split training
-        print("\n📊 Using CHRONOLOGICAL validation set (middle 10%)")
+        # When not using iTransformer, use validation set
+        print("\n📊 Using CHRONOLOGICAL validation set")
         
-        eval_indices = list(range(train_end, val_end))
-        eval_set_name = "chronological validation set (10%)"
+        eval_indices = list(range(val_start, val_end))
+        eval_set_name = "chronological validation set"
     
     print(f"   Dataset: {total_samples} total samples")
-    print(f"   Train:   indices 0-{train_end-1} (70%)")
-    print(f"   Val:     indices {train_end}-{val_end-1} (10%)")
-    print(f"   Test:    indices {val_end}-{total_samples-1} (20%)")
+    print(f"   Window: {window_size} timesteps, stride: {stride}, gap: {gap_indices} indices")
+    print(f"   Train:   indices 0-{train_end-1} ({train_end} samples)")
+    print(f"   [GAP]:   {gap_indices} indices (no overlap zone)")
+    print(f"   Val:     indices {val_start}-{val_end-1} ({val_end - val_start} samples)")
+    print(f"   [GAP]:   {gap_indices} indices")
+    print(f"   Test:    indices {test_start}-{total_samples-1} ({total_samples - test_start} samples)")
     print(f"   Using:   {len(eval_indices)} samples from {eval_set_name}\n")
     
     val_dataset = ElectricityDataset(

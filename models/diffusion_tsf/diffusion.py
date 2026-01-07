@@ -9,6 +9,7 @@ Implements:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 import logging
 from typing import Optional, Tuple
@@ -360,10 +361,10 @@ class DiffusionScheduler:
         Returns:
             Generated samples
         """
-        # Create timestep schedule (evenly spaced)
-        step_size = self.num_steps // num_steps
-        timesteps = list(range(0, self.num_steps, step_size))[:num_steps]
-        timesteps = list(reversed(timesteps))
+        # Create timestep schedule (evenly spaced, including the max timestep)
+        # We want num_steps timesteps from T-1 down to 0, evenly spaced
+        # E.g., for T=1000 and num_steps=50: [999, 979, 959, ..., 19]
+        timesteps = torch.linspace(self.num_steps - 1, 0, num_steps, dtype=torch.long).tolist()
         
         # Start from pure noise
         x = torch.randn(shape, device=device)
@@ -474,10 +475,10 @@ class DiffusionScheduler:
         Returns:
             Generated samples
         """
-        # Create timestep schedule (evenly spaced)
-        step_size = self.num_steps // num_steps
-        timesteps = list(range(0, self.num_steps, step_size))[:num_steps]
-        timesteps = list(reversed(timesteps))
+        # Create timestep schedule (evenly spaced, including the max timestep)
+        # We want num_steps timesteps from T-1 down to 0, evenly spaced
+        # E.g., for T=1000 and num_steps=50: [999, 979, 959, ..., 19]
+        timesteps = torch.linspace(self.num_steps - 1, 0, num_steps, dtype=torch.long).tolist()
         
         # Start from pure noise
         x = torch.randn(shape, device=device)
@@ -511,6 +512,4 @@ class DiffusionScheduler:
         return x
 
 
-# Import F for the cosine schedule
-import torch.nn.functional as F
 
