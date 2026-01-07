@@ -49,7 +49,7 @@ pip install torch torchvision --index-url "$WHL_URL"
 
 # 6. Install Project Requirements
 echo "📚 Installing libraries..."
-pip install numpy pandas optuna tqdm requests matplotlib
+pip install numpy pandas optuna tqdm requests matplotlib scikit-learn reformer-pytorch
 
 # 7. Verification
 echo "✅ Setup Complete. Running verification..."
