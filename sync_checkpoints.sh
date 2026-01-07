@@ -1,12 +1,17 @@
 #!/bin/bash
 
-# Usage: ./sync_checkpoints.sh [remote_ip] [--best-only] [--guidance-only] [--all]
+# Usage: ./sync_checkpoints.sh [remote_ip] [options]
 # This script copies the checkpoints from a remote machine to the local project.
-# Use --best-only to sync only the most recent best_model.pt file.
-# Use --guidance-only to sync only iTransformer/guidance model checkpoints.
-# Use --all (default) to sync both diffusion and guidance checkpoints.
+#
+# Options:
+#   --best-only      Sync only the most recent best_model.pt file
+#   --trials         Sync best checkpoints from each Optuna trial (trial_*_best.pt, best_model.pt, best_params.json)
+#   --guidance-only  Sync only iTransformer/guidance model checkpoints
+#   --no-guidance    Skip guidance checkpoints
+#   --all            Sync both diffusion and guidance (default)
 
 BEST_ONLY=false
+TRIALS_BEST=false
 GUIDANCE_ONLY=false
 SYNC_GUIDANCE=true
 SYNC_DIFFUSION=true
@@ -16,6 +21,10 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --best-only)
             BEST_ONLY=true
+            shift
+            ;;
+        --trials|--trial-best|--optuna)
+            TRIALS_BEST=true
             shift
             ;;
         --guidance-only)
@@ -45,6 +54,8 @@ if [ -z "$REMOTE_IP" ]; then
     echo ""
     echo "Options:"
     echo "  --best-only      Sync only the most recent best_model.pt file"
+    echo "  --trials         Sync best checkpoints from each Optuna trial"
+    echo "                   (trial_*_best.pt, best_model.pt, best_params.json)"
     echo "  --guidance-only  Sync only iTransformer/guidance checkpoints"
     echo "  --no-guidance    Skip guidance checkpoints"
     echo "  --all            Sync both diffusion and guidance (default)"
@@ -52,6 +63,7 @@ if [ -z "$REMOTE_IP" ]; then
     echo "Examples:"
     echo "  $0 192.168.1.100                    # Sync everything"
     echo "  $0 192.168.1.100 --best-only        # Sync only best diffusion model"
+    echo "  $0 192.168.1.100 --trials           # Sync best from each Optuna trial"
     echo "  $0 192.168.1.100 --guidance-only    # Sync only iTransformer checkpoints"
     exit 1
 fi
@@ -78,7 +90,58 @@ SYNC_SUCCESS=true
 # Sync Diffusion TSF Checkpoints
 # ============================================================================
 if [ "$SYNC_DIFFUSION" = true ]; then
-    if [ "$BEST_ONLY" = true ]; then
+    if [ "$TRIALS_BEST" = true ]; then
+        echo "========================================================"
+        echo "📦 Syncing Optuna Trial Best Checkpoints"
+        echo "   Remote: ${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIFFUSION_PATH}"
+        echo "   Local:  ${LOCAL_DIFFUSION_PATH}"
+        echo "========================================================"
+        echo ""
+        echo "This will sync:"
+        echo "  - trial_*_best.pt  (best checkpoint from each trial)"
+        echo "  - best_model.pt    (overall best across all trials)"
+        echo "  - best_params.json (best hyperparameters found)"
+        echo "  - params.json      (run parameters)"
+        echo ""
+
+        # Find and display all trial best files
+        echo "🔍 Searching for Optuna trial checkpoints..."
+        echo ""
+        
+        # Count files on remote
+        TRIAL_COUNT=$(ssh "${REMOTE_USER}@${REMOTE_IP}" "find ${REMOTE_DIFFUSION_PATH} -name 'trial_*_best.pt' -type f 2>/dev/null | wc -l")
+        BEST_COUNT=$(ssh "${REMOTE_USER}@${REMOTE_IP}" "find ${REMOTE_DIFFUSION_PATH} -name 'best_model.pt' -type f 2>/dev/null | wc -l")
+        PARAMS_COUNT=$(ssh "${REMOTE_USER}@${REMOTE_IP}" "find ${REMOTE_DIFFUSION_PATH} \( -name 'best_params.json' -o -name 'params.json' \) -type f 2>/dev/null | wc -l")
+        
+        echo "Found on remote:"
+        echo "  - ${TRIAL_COUNT} trial_*_best.pt files"
+        echo "  - ${BEST_COUNT} best_model.pt files"
+        echo "  - ${PARAMS_COUNT} params JSON files"
+        echo ""
+
+        # Show study directories
+        echo "📁 Study directories with best checkpoints:"
+        ssh "${REMOTE_USER}@${REMOTE_IP}" "find ${REMOTE_DIFFUSION_PATH} -name 'best_model.pt' -type f -exec dirname {} \; 2>/dev/null | sort -u"
+        echo ""
+
+        # Use rsync with include/exclude filters to sync only trial best files
+        # This preserves directory structure while only syncing specific files
+        echo "📥 Syncing trial best checkpoints..."
+        rsync -avzP \
+            --include='*/' \
+            --include='trial_*_best.pt' \
+            --include='best_model.pt' \
+            --include='best_params.json' \
+            --include='params.json' \
+            --exclude='*.pt' \
+            --exclude='*.db' \
+            --prune-empty-dirs \
+            "${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIFFUSION_PATH}" "$LOCAL_DIFFUSION_PATH" || SYNC_SUCCESS=false
+        
+        echo ""
+        echo "✅ Trial best checkpoints synced!"
+        
+    elif [ "$BEST_ONLY" = true ]; then
         echo "========================================================"
         echo "📦 Syncing Diffusion TSF (best model only)"
         echo "   Remote: ${REMOTE_USER}@${REMOTE_IP}:${REMOTE_DIFFUSION_PATH}"
