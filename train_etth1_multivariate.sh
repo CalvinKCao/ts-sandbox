@@ -3,19 +3,39 @@
 # Variables: HUFL, HULL, MUFL, MULL, LUFL, LULL, OT
 # Usage: chmod +x train_etth1_multivariate.sh && ./train_etth1_multivariate.sh
 #        chmod +x train_etth1_multivariate.sh && ./train_etth1_multivariate.sh --force-retrain
+#        chmod +x train_etth1_multivariate.sh && ./train_etth1_multivariate.sh --stride 12  # Half-day stride
+#        chmod +x train_etth1_multivariate.sh && ./train_etth1_multivariate.sh --dry-run    # Test without training
 set -euo pipefail
 
 # Parse arguments
 FORCE_RETRAIN=false
+STRIDE=24  # Default stride for ETTh1 (24 = 1 day, matches hourly seasonality)
+DRY_RUN=false  # Dry run mode for testing
 while [[ $# -gt 0 ]]; do
   case $1 in
     --force-retrain)
       FORCE_RETRAIN=true
       shift
       ;;
+    --stride)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --stride requires an integer argument"
+        exit 1
+      fi
+      STRIDE="$2"
+      if ! [[ "$STRIDE" =~ ^[0-9]+$ ]] || [[ "$STRIDE" -le 0 ]]; then
+        echo "Error: --stride must be a positive integer, got: $STRIDE"
+        exit 1
+      fi
+      shift 2
+      ;;
+    --dry-run|--test)
+      DRY_RUN=true
+      shift
+      ;;
     *)
       echo "Unknown option: $1"
-      echo "Usage: $0 [--force-retrain]"
+      echo "Usage: $0 [--force-retrain] [--stride N] [--dry-run|--test]"
       exit 1
       ;;
   esac
@@ -126,6 +146,55 @@ echo "   Train: first 70% of data"
 echo "   Val:   next 10% of data"
 echo "   Test:  last 20% of data (held out)"
 echo ""
+echo "📊 Dataset stride: ${STRIDE} (ETTh1 hourly data: 24 = 1 day)"
+echo "   Window size: 608 timesteps (512 lookback + 96 forecast)"
+echo "   Gap between splits: ceil(608/${STRIDE}) = $(( (608 + STRIDE - 1) / STRIDE )) indices"
+echo "   → No inter-split overlap/leakage"
+echo ""
+
+# DRY RUN MODE: Just validate and show what would happen
+if [[ "${DRY_RUN}" == "true" ]]; then
+  echo "🧪 DRY RUN MODE - No actual training will be performed"
+  echo ""
+
+  echo "📁 Checkpoint status:"
+  if [[ -n "${EXISTING_CKPT}" ]]; then
+    echo "   ✅ iTransformer checkpoint found: ${EXISTING_CKPT}"
+    echo "   → Would reuse existing checkpoint (no retraining needed)"
+  else
+    echo "   ❌ No iTransformer checkpoint found"
+    if [[ "${FORCE_RETRAIN}" == "true" ]]; then
+      echo "   → Would train new iTransformer (--force-retrain specified)"
+    else
+      echo "   → Would train new iTransformer"
+    fi
+  fi
+  echo ""
+
+  echo "🔧 Training command that would be executed:"
+  echo "python3 models/diffusion_tsf/train_electricity.py \\"
+  echo "  --dataset ETTh1 \\"
+  echo "  --multivariate \\"
+  echo "  --blur-sigma 1.0 \\"
+  echo "  --emd-lambda 0 \\"
+  echo "  --repr-mode cdf \\"
+  echo "  --model-type unet \\"
+  echo "  --kernel-size 3 9 \\"
+  echo "  --stride \"${STRIDE}\" \\"
+  echo "  --use-time-ramp \\"
+  echo "  --use-value-channel \\"
+  echo "  --no-hybrid-condition \\"
+  echo "  --use-guidance \\"
+  echo "  --guidance-type itransformer \\"
+  if [[ -n "${EXISTING_CKPT}" ]]; then
+    echo "  --guidance-checkpoint \"${EXISTING_CKPT}\""
+  else
+    echo "  --guidance-checkpoint \"[WOULD BE SET AFTER iTRANSFORMER TRAINING]\""
+  fi
+  echo ""
+  echo "✨ Dry run complete! Remove --dry-run to actually train."
+  exit 0
+fi
 
 python3 models/diffusion_tsf/train_electricity.py \
   --dataset ETTh1 \
@@ -135,6 +204,7 @@ python3 models/diffusion_tsf/train_electricity.py \
   --repr-mode cdf \
   --model-type unet \
   --kernel-size 3 9 \
+  --stride "${STRIDE}" \
   --use-time-ramp \
   --use-value-channel \
   --no-hybrid-condition \

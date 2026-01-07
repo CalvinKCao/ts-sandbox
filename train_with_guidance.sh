@@ -11,7 +11,7 @@ set -euo pipefail
 # Parse arguments
 FORCE_RETRAIN=false
 REPR_MODE="cdf"  # Default to CDF (occupancy) mode
-STRIDE=24  # Default stride (1 day for hourly data)
+STRIDE=1  # Default stride (1 day for hourly data)
 DRY_RUN=false  # Dry run mode for testing
 while [[ $# -gt 0 ]]; do
   case $1 in

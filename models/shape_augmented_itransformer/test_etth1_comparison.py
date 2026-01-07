@@ -6,6 +6,7 @@ This script:
 2. Compares vanilla iTransformer vs iTransformer+CNN
 3. Plots predictions from both models
 4. Saves best model checkpoints for reuse
+5. Optionally visualizes smudged PDF maps to verify 2D encoding
 
 Usage:
     python test_etth1_comparison.py                 # Run with defaults (train both)
@@ -938,6 +939,39 @@ def plot_comparison(
     logger.info(f"Saved comparison plot to {save_path}")
 
 
+def visualize_smudged_samples(
+    loader: DataLoader,
+    save_dir: str,
+    max_samples: int = 2,
+    max_variates: int = 3,
+) -> None:
+    """Save a few smudged PDF maps from the loader for quick visual checks."""
+    os.makedirs(save_dir, exist_ok=True)
+    saved = 0
+    for batch_idx, batch in enumerate(loader):
+        imgs = batch['past_img']  # (B, N, H, L)
+        # Ensure CPU numpy for plotting
+        imgs_np = imgs.detach().cpu().numpy()
+        B, N, H, L = imgs_np.shape
+        for b in range(B):
+            if saved >= max_samples:
+                return
+            for v in range(min(max_variates, N)):
+                fig, ax = plt.subplots(figsize=(6, 3))
+                ax.imshow(imgs_np[b, v], aspect='auto', origin='lower', cmap='magma')
+                ax.set_title(f"Sample {saved+1} | Variate {v} | Shape: {H}x{L}")
+                ax.set_xlabel("Time (lookback steps)")
+                ax.set_ylabel("Value bins (PDF height)")
+                ax.grid(False)
+                fname = os.path.join(save_dir, f"sample{saved+1}_var{v}.png")
+                plt.tight_layout()
+                plt.savefig(fname, dpi=150, bbox_inches='tight')
+                plt.close(fig)
+            saved += 1
+        if saved >= max_samples:
+            return
+
+
 def compute_test_metrics(
     model: nn.Module,
     test_loader: DataLoader,
@@ -1159,6 +1193,12 @@ def main():
                        help='Force retrain even if checkpoints exist')
     parser.add_argument('--list-checkpoints', action='store_true',
                        help='List available checkpoints and exit')
+    parser.add_argument('--viz-smudges', action='store_true',
+                       help='Visualize and save a few smudged PDF maps')
+    parser.add_argument('--viz-samples', type=int, default=2,
+                       help='How many samples to visualize for smudges')
+    parser.add_argument('--viz-variates', type=int, default=3,
+                       help='How many variates per sample to visualize')
     
     args = parser.parse_args()
     
@@ -1201,6 +1241,17 @@ def main():
         batch_size=32, lookback=LOOKBACK_LENGTH, forecast=FORECAST_LENGTH
     )
     
+    # Optional: visualize smudged PDF maps from train loader
+    if args.viz_smudges:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        smudge_dir = os.path.join(RESULTS_DIR, f'smudges_{timestamp}')
+        visualize_smudged_samples(
+            train_loader,
+            smudge_dir,
+            max_samples=max(1, args.viz_samples),
+            max_variates=max(1, args.viz_variates),
+        )
+
     final_epochs = 30 if args.quick else 100
     
     vanilla_model = None
