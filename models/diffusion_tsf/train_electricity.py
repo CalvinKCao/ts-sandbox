@@ -88,6 +88,7 @@ DATASET_REGISTRY = {
 # Default dataset (will be updated from CLI)
 SELECTED_DATASET = 'electricity'
 DATA_PATH = os.path.join(DATASETS_DIR, DATASET_REGISTRY[SELECTED_DATASET][0])
+TARGET_COLUMN = None  # None = use dataset default from registry
 
 # Fixed parameters (aligned with ViTime paper)
 LOOKBACK_LENGTH = 512      # Same as ViTime paper
@@ -511,6 +512,7 @@ def get_dataloaders(
     forecast: int = FORECAST_LENGTH,
     use_all_columns: bool = False,
     columns: Optional[List[str]] = None,
+    column: Optional[str] = None,  # Target column for univariate (None = use global TARGET_COLUMN)
     use_chronological_split: bool = True  # MUST be True for time series to avoid data leakage
 ) -> Tuple[DataLoader, DataLoader, int]:
     """Create train and validation dataloaders.
@@ -523,12 +525,15 @@ def get_dataloaders(
         forecast: Forecast horizon length
         use_all_columns: If True, use all columns (multivariate)
         columns: Specific columns to use (if not use_all_columns)
+        column: Target column for univariate forecasting (overrides global TARGET_COLUMN)
         use_chronological_split: If True (DEFAULT), use chronological split (70% train, 10% val, 20% test).
                                  WARNING: Setting to False causes severe data leakage in time series!
     
     Returns:
         (train_loader, val_loader, num_variables)
     """
+    # Use provided column, else fall back to global TARGET_COLUMN
+    target_column = column if column is not None else TARGET_COLUMN
     # CRITICAL: Warn if someone tries to use random split
     if not use_chronological_split:
         logger.warning(
@@ -543,6 +548,7 @@ def get_dataloaders(
         DATA_PATH,
         lookback=lookback,
         forecast=forecast,
+        column=target_column,
         max_samples=max_samples,
         augment=False,
         use_all_columns=use_all_columns,
@@ -1361,6 +1367,9 @@ def main():
     parser.add_argument('--dataset', type=str, default='electricity',
                         choices=list(DATASET_REGISTRY.keys()),
                         help=f'Dataset to use for training. Available: {", ".join(DATASET_REGISTRY.keys())}')
+    parser.add_argument('--target', type=str, default=None, metavar='COLUMN',
+                        help='Target column for univariate forecasting (overrides dataset default). '
+                             'For ETTh1/ETTh2 use HUFL, HULL, MUFL, MULL, LUFL, LULL, or OT')
     # Visual Guide (Stage 1 predictor) arguments
     parser.add_argument('--use-guidance', action='store_true', default=False,
                         help='Enable Visual Guide: use Stage 1 predictor to guide diffusion')
@@ -1385,9 +1394,12 @@ def main():
     
     # Set all config globals from args FIRST before any logging
     # Set dataset
+    global TARGET_COLUMN
     SELECTED_DATASET = args.dataset
     dataset_info = DATASET_REGISTRY[SELECTED_DATASET]
     DATA_PATH = os.path.join(DATASETS_DIR, dataset_info[0])
+    # Set target column: use CLI arg if provided, else dataset default from registry
+    TARGET_COLUMN = args.target if args.target else dataset_info[1]
     
     # Set time channel settings
     USE_TIME_RAMP = args.use_time_ramp
@@ -1447,6 +1459,7 @@ def main():
     logger.info(f"Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
     logger.info(f"Dataset: {SELECTED_DATASET}")
     logger.info(f"Data: {DATA_PATH}")
+    logger.info(f"Target column: {TARGET_COLUMN} (univariate)" if not USE_ALL_COLUMNS else "Multivariate (all columns)")
     logger.info(f"Seasonal period: {SEASONAL_PERIOD}")
     logger.info(f"Base checkpoints: {BASE_CHECKPOINT_DIR}")
     logger.info(f"Search space: batch_sizes={SEARCH_SPACE['batch_size']}, model_sizes={SEARCH_SPACE['model_size']}")
