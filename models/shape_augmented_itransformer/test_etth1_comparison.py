@@ -5,11 +5,16 @@ This script:
 1. Runs 3 quick Optuna trials to tune key hyperparameters
 2. Compares vanilla iTransformer vs iTransformer+CNN
 3. Plots predictions from both models
+4. Saves best model checkpoints for reuse
 
 Usage:
-    python test_etth1_comparison.py                 # Run with defaults
+    python test_etth1_comparison.py                 # Run with defaults (train both)
     python test_etth1_comparison.py --n-trials 5   # More trials
     python test_etth1_comparison.py --quick        # Very quick test (fewer epochs)
+    python test_etth1_comparison.py --only-vanilla # Only train/search vanilla iTransformer
+    python test_etth1_comparison.py --only-augmented # Only train/search augmented model
+    python test_etth1_comparison.py --eval-only    # Only evaluate existing checkpoints
+    python test_etth1_comparison.py --force-retrain # Force retrain even if checkpoints exist
 """
 
 import os
@@ -65,7 +70,15 @@ from preprocessing import TimeSeriesTo2D, VerticalGaussianBlur, Standardizer
 DATASETS_DIR = os.path.join(project_root, 'datasets')
 ETTH1_PATH = os.path.join(DATASETS_DIR, 'ETT-small', 'ETTh1.csv')
 RESULTS_DIR = os.path.join(script_dir, 'results')
+CHECKPOINTS_DIR = os.path.join(script_dir, 'checkpoints')
 os.makedirs(RESULTS_DIR, exist_ok=True)
+os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
+
+# Checkpoint file paths
+VANILLA_CHECKPOINT_PATH = os.path.join(CHECKPOINTS_DIR, 'vanilla_itransformer_best.pt')
+AUGMENTED_CHECKPOINT_PATH = os.path.join(CHECKPOINTS_DIR, 'augmented_itransformer_cnn_best.pt')
+VANILLA_PARAMS_PATH = os.path.join(CHECKPOINTS_DIR, 'vanilla_best_params.json')
+AUGMENTED_PARAMS_PATH = os.path.join(CHECKPOINTS_DIR, 'augmented_best_params.json')
 
 # Fixed parameters for fair comparison
 LOOKBACK_LENGTH = 96   # Shorter for faster testing
@@ -387,8 +400,8 @@ def train_model(
     config: dict,
     device: str,
     use_img: bool = True,
-    max_epochs: int = 50,
-    patience: int = 10,
+    max_epochs: int = 75,
+    patience: int = 25,
 ) -> Tuple[nn.Module, Dict]:
     """Full training loop with early stopping."""
     optimizer = torch.optim.AdamW(
@@ -439,8 +452,234 @@ def train_model(
 
 
 # ============================================================================
+# Checkpoint Save/Load Functions
+# ============================================================================
+
+def save_checkpoint(
+    model: nn.Module,
+    config: dict,
+    params: dict,
+    metrics: Dict[str, float],
+    path: str,
+    params_path: str,
+):
+    """Save model checkpoint and best parameters."""
+    checkpoint = {
+        'model_state_dict': model.state_dict(),
+        'config': config,
+        'params': params,
+        'metrics': metrics,
+    }
+    torch.save(checkpoint, path)
+    logger.info(f"Saved checkpoint to {path}")
+    
+    # Also save params as JSON for easy viewing
+    with open(params_path, 'w') as f:
+        json.dump({
+            'params': params,
+            'metrics': metrics,
+            'config': config,
+        }, f, indent=2)
+    logger.info(f"Saved params to {params_path}")
+
+
+def load_checkpoint(
+    path: str,
+    model_class,
+    device: str,
+) -> Tuple[nn.Module, dict, dict, Dict[str, float]]:
+    """Load model from checkpoint.
+    
+    Returns:
+        model, config, params, metrics
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+    
+    checkpoint = torch.load(path, map_location=device)
+    config = checkpoint['config']
+    params = checkpoint['params']
+    metrics = checkpoint.get('metrics', {})
+    
+    # Reconstruct model config
+    model_config = ShapeAugmentedConfig(**config)
+    
+    # Create model and load weights
+    model = model_class(model_config)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model = model.to(device)
+    
+    logger.info(f"Loaded checkpoint from {path}")
+    logger.info(f"  Metrics: {metrics}")
+    
+    return model, config, params, metrics
+
+
+def checkpoint_exists(path: str) -> bool:
+    """Check if a checkpoint file exists."""
+    return os.path.exists(path)
+
+
+def load_params(params_path: str) -> Optional[dict]:
+    """Load saved parameters from JSON."""
+    if os.path.exists(params_path):
+        with open(params_path, 'r') as f:
+            data = json.load(f)
+        return data.get('params', data)
+    return None
+
+
+# ============================================================================
 # Optuna Hyperparameter Search
 # ============================================================================
+
+def run_optuna_search_vanilla(
+    n_trials: int = 3,
+    max_epochs: int = 30,
+    device: str = 'cuda',
+    quick: bool = False,
+    train_loader: DataLoader = None,
+    val_loader: DataLoader = None,
+    num_variates: int = 7,
+) -> dict:
+    """Run Optuna hyperparameter search for vanilla iTransformer only."""
+    import optuna
+    from optuna.pruners import MedianPruner
+    from optuna.samplers import TPESampler
+    
+    if quick:
+        max_epochs = 10
+    
+    def objective_vanilla(trial):
+        config = {
+            'learning_rate': trial.suggest_float('learning_rate', 1e-4, 1e-3, log=True),
+            'd_model': trial.suggest_categorical('d_model', [64, 128, 256]),
+            'n_heads': trial.suggest_categorical('n_heads', [4, 8]),
+            'e_layers': trial.suggest_int('e_layers', 1, 3),
+            'd_ff': trial.suggest_categorical('d_ff', [128, 256, 512]),
+            'dropout': trial.suggest_float('dropout', 0.05, 0.3),
+        }
+        
+        model_config = ShapeAugmentedConfig(
+            seq_len=LOOKBACK_LENGTH,
+            pred_len=FORECAST_LENGTH,
+            num_variates=num_variates,
+            d_model=config['d_model'],
+            n_heads=config['n_heads'],
+            e_layers=config['e_layers'],
+            d_ff=config['d_ff'],
+            dropout=config['dropout'],
+            image_height=IMAGE_HEIGHT,
+        )
+        
+        model = VanillaiTransformer(model_config).to(device)
+        
+        try:
+            model, history = train_model(
+                model, train_loader, val_loader, config, device,
+                use_img=False, max_epochs=max_epochs, patience=8
+            )
+            return min(history['val_loss'])
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                torch.cuda.empty_cache()
+                return float('inf')
+            raise
+    
+    logger.info("=" * 60)
+    logger.info("Searching hyperparameters for VANILLA iTransformer...")
+    logger.info("=" * 60)
+    
+    study = optuna.create_study(
+        direction='minimize',
+        sampler=TPESampler(seed=42),
+        pruner=MedianPruner(n_startup_trials=1, n_warmup_steps=5)
+    )
+    study.optimize(objective_vanilla, n_trials=n_trials, show_progress_bar=True)
+    
+    logger.info(f"Best vanilla val_loss: {study.best_value:.4f}")
+    logger.info(f"Best vanilla params: {study.best_params}")
+    
+    return study.best_params
+
+
+def run_optuna_search_augmented(
+    n_trials: int = 3,
+    max_epochs: int = 30,
+    device: str = 'cuda',
+    quick: bool = False,
+    train_loader: DataLoader = None,
+    val_loader: DataLoader = None,
+    num_variates: int = 7,
+) -> dict:
+    """Run Optuna hyperparameter search for augmented iTransformer+CNN only."""
+    import optuna
+    from optuna.pruners import MedianPruner
+    from optuna.samplers import TPESampler
+    
+    if quick:
+        max_epochs = 10
+    
+    def objective_augmented(trial):
+        config = {
+            'learning_rate': trial.suggest_float('learning_rate', 1e-4, 1e-3, log=True),
+            'd_model': trial.suggest_categorical('d_model', [64, 128, 256]),
+            'n_heads': trial.suggest_categorical('n_heads', [4, 8]),
+            'e_layers': trial.suggest_int('e_layers', 1, 3),
+            'd_ff': trial.suggest_categorical('d_ff', [128, 256, 512]),
+            'dropout': trial.suggest_float('dropout', 0.05, 0.3),
+            'cnn_depth': trial.suggest_int('cnn_depth', 2, 4),
+            'fusion_mode': trial.suggest_categorical('fusion_mode', ['add', 'concat']),
+        }
+        
+        cnn_channels = [32 * (2 ** i) for i in range(config['cnn_depth'])]
+        cnn_kernel_sizes = [(3, 3)] * config['cnn_depth']
+        
+        model_config = ShapeAugmentedConfig(
+            seq_len=LOOKBACK_LENGTH,
+            pred_len=FORECAST_LENGTH,
+            num_variates=num_variates,
+            d_model=config['d_model'],
+            n_heads=config['n_heads'],
+            e_layers=config['e_layers'],
+            d_ff=config['d_ff'],
+            dropout=config['dropout'],
+            image_height=IMAGE_HEIGHT,
+            cnn_channels=cnn_channels,
+            cnn_kernel_sizes=cnn_kernel_sizes,
+            fusion_mode=config['fusion_mode'],
+        )
+        
+        model = ShapeAugmentediTransformer(model_config).to(device)
+        
+        try:
+            model, history = train_model(
+                model, train_loader, val_loader, config, device,
+                use_img=True, max_epochs=max_epochs, patience=8
+            )
+            return min(history['val_loss'])
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                torch.cuda.empty_cache()
+                return float('inf')
+            raise
+    
+    logger.info("=" * 60)
+    logger.info("Searching hyperparameters for AUGMENTED iTransformer+CNN...")
+    logger.info("=" * 60)
+    
+    study = optuna.create_study(
+        direction='minimize',
+        sampler=TPESampler(seed=42),
+        pruner=MedianPruner(n_startup_trials=1, n_warmup_steps=5)
+    )
+    study.optimize(objective_augmented, n_trials=n_trials, show_progress_bar=True)
+    
+    logger.info(f"Best augmented val_loss: {study.best_value:.4f}")
+    logger.info(f"Best augmented params: {study.best_params}")
+    
+    return study.best_params
+
 
 def run_optuna_search(
     n_trials: int = 3,
@@ -737,17 +976,219 @@ def compute_test_metrics(
 # Main
 # ============================================================================
 
+def train_and_save_vanilla(
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    test_loader: DataLoader,
+    num_variates: int,
+    device: str,
+    n_trials: int,
+    max_epochs: int,
+    final_epochs: int,
+    quick: bool,
+    force_retrain: bool,
+) -> Tuple[nn.Module, dict, Dict[str, float]]:
+    """Train vanilla iTransformer and save checkpoint."""
+    
+    # Check if we can load existing checkpoint
+    if checkpoint_exists(VANILLA_CHECKPOINT_PATH) and not force_retrain:
+        logger.info("Found existing vanilla iTransformer checkpoint!")
+        saved_params = load_params(VANILLA_PARAMS_PATH)
+        if saved_params:
+            logger.info(f"Using saved params: {saved_params}")
+            model, config, params, metrics = load_checkpoint(
+                VANILLA_CHECKPOINT_PATH, VanillaiTransformer, device
+            )
+            return model, params, metrics
+    
+    # Run Optuna search
+    best_params = run_optuna_search_vanilla(
+        n_trials=n_trials,
+        max_epochs=max_epochs,
+        device=device,
+        quick=quick,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        num_variates=num_variates,
+    )
+    
+    # Train final model with best params
+    logger.info("=" * 60)
+    logger.info("Training FINAL vanilla iTransformer with best hyperparameters...")
+    logger.info("=" * 60)
+    
+    config_dict = {
+        'seq_len': LOOKBACK_LENGTH,
+        'pred_len': FORECAST_LENGTH,
+        'num_variates': num_variates,
+        'd_model': best_params.get('d_model', 128),
+        'n_heads': best_params.get('n_heads', 4),
+        'e_layers': best_params.get('e_layers', 2),
+        'd_ff': best_params.get('d_ff', 256),
+        'dropout': best_params.get('dropout', 0.1),
+        'image_height': IMAGE_HEIGHT,
+    }
+    
+    model_config = ShapeAugmentedConfig(**config_dict)
+    model = VanillaiTransformer(model_config).to(device)
+    logger.info(f"Vanilla model params: {count_parameters(model):,}")
+    
+    model, history = train_model(
+        model, train_loader, val_loader,
+        {'learning_rate': best_params.get('learning_rate', 5e-4)},
+        device, use_img=False, max_epochs=final_epochs, patience=15
+    )
+    
+    # Evaluate on test set
+    test_metrics = compute_test_metrics(model, test_loader, device, use_img=False)
+    
+    # Save checkpoint
+    save_checkpoint(
+        model=model,
+        config=config_dict,
+        params=best_params,
+        metrics=test_metrics,
+        path=VANILLA_CHECKPOINT_PATH,
+        params_path=VANILLA_PARAMS_PATH,
+    )
+    
+    return model, best_params, test_metrics
+
+
+def train_and_save_augmented(
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    test_loader: DataLoader,
+    num_variates: int,
+    device: str,
+    n_trials: int,
+    max_epochs: int,
+    final_epochs: int,
+    quick: bool,
+    force_retrain: bool,
+) -> Tuple[nn.Module, dict, Dict[str, float]]:
+    """Train augmented iTransformer+CNN and save checkpoint."""
+    
+    # Check if we can load existing checkpoint
+    if checkpoint_exists(AUGMENTED_CHECKPOINT_PATH) and not force_retrain:
+        logger.info("Found existing augmented iTransformer+CNN checkpoint!")
+        saved_params = load_params(AUGMENTED_PARAMS_PATH)
+        if saved_params:
+            logger.info(f"Using saved params: {saved_params}")
+            model, config, params, metrics = load_checkpoint(
+                AUGMENTED_CHECKPOINT_PATH, ShapeAugmentediTransformer, device
+            )
+            return model, params, metrics
+    
+    # Run Optuna search
+    best_params = run_optuna_search_augmented(
+        n_trials=n_trials,
+        max_epochs=max_epochs,
+        device=device,
+        quick=quick,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        num_variates=num_variates,
+    )
+    
+    # Train final model with best params
+    logger.info("=" * 60)
+    logger.info("Training FINAL augmented iTransformer+CNN with best hyperparameters...")
+    logger.info("=" * 60)
+    
+    cnn_depth = best_params.get('cnn_depth', 3)
+    cnn_channels = [32 * (2 ** i) for i in range(cnn_depth)]
+    cnn_kernel_sizes = [(3, 3)] * cnn_depth
+    
+    config_dict = {
+        'seq_len': LOOKBACK_LENGTH,
+        'pred_len': FORECAST_LENGTH,
+        'num_variates': num_variates,
+        'd_model': best_params.get('d_model', 128),
+        'n_heads': best_params.get('n_heads', 4),
+        'e_layers': best_params.get('e_layers', 2),
+        'd_ff': best_params.get('d_ff', 256),
+        'dropout': best_params.get('dropout', 0.1),
+        'image_height': IMAGE_HEIGHT,
+        'cnn_channels': cnn_channels,
+        'cnn_kernel_sizes': cnn_kernel_sizes,
+        'fusion_mode': best_params.get('fusion_mode', 'add'),
+    }
+    
+    model_config = ShapeAugmentedConfig(**config_dict)
+    model = ShapeAugmentediTransformer(model_config).to(device)
+    logger.info(f"Augmented model params: {count_parameters(model):,}")
+    
+    model, history = train_model(
+        model, train_loader, val_loader,
+        {'learning_rate': best_params.get('learning_rate', 5e-4)},
+        device, use_img=True, max_epochs=final_epochs, patience=15
+    )
+    
+    # Evaluate on test set
+    test_metrics = compute_test_metrics(model, test_loader, device, use_img=True)
+    
+    # Save checkpoint
+    save_checkpoint(
+        model=model,
+        config=config_dict,
+        params=best_params,
+        metrics=test_metrics,
+        path=AUGMENTED_CHECKPOINT_PATH,
+        params_path=AUGMENTED_PARAMS_PATH,
+    )
+    
+    return model, best_params, test_metrics
+
+
 def main():
     parser = argparse.ArgumentParser(description='Test ShapeAugmentediTransformer on ETTh1')
     parser.add_argument('--n-trials', type=int, default=3, help='Number of Optuna trials')
     parser.add_argument('--max-epochs', type=int, default=50, help='Max epochs per trial')
     parser.add_argument('--quick', action='store_true', help='Quick test mode (fewer epochs)')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Model selection options
+    parser.add_argument('--only-vanilla', action='store_true', 
+                       help='Only train/search vanilla iTransformer (skip augmented)')
+    parser.add_argument('--only-augmented', action='store_true',
+                       help='Only train/search augmented iTransformer+CNN (skip vanilla)')
+    parser.add_argument('--eval-only', action='store_true',
+                       help='Only evaluate existing checkpoints (no training)')
+    parser.add_argument('--force-retrain', action='store_true',
+                       help='Force retrain even if checkpoints exist')
+    parser.add_argument('--list-checkpoints', action='store_true',
+                       help='List available checkpoints and exit')
+    
     args = parser.parse_args()
+    
+    # Handle conflicting options
+    if args.only_vanilla and args.only_augmented:
+        logger.error("Cannot use --only-vanilla and --only-augmented together")
+        return
+    
+    # List checkpoints mode
+    if args.list_checkpoints:
+        logger.info("Available checkpoints:")
+        logger.info(f"  Vanilla: {VANILLA_CHECKPOINT_PATH}")
+        logger.info(f"    Exists: {checkpoint_exists(VANILLA_CHECKPOINT_PATH)}")
+        if checkpoint_exists(VANILLA_CHECKPOINT_PATH):
+            params = load_params(VANILLA_PARAMS_PATH)
+            if params:
+                logger.info(f"    Params: {params}")
+        
+        logger.info(f"  Augmented: {AUGMENTED_CHECKPOINT_PATH}")
+        logger.info(f"    Exists: {checkpoint_exists(AUGMENTED_CHECKPOINT_PATH)}")
+        if checkpoint_exists(AUGMENTED_CHECKPOINT_PATH):
+            params = load_params(AUGMENTED_PARAMS_PATH)
+            if params:
+                logger.info(f"    Params: {params}")
+        return
     
     device = args.device
     logger.info(f"Using device: {device}")
     logger.info(f"ETTh1 data path: {ETTH1_PATH}")
+    logger.info(f"Checkpoints dir: {CHECKPOINTS_DIR}")
     
     # Verify data file exists
     if not os.path.exists(ETTH1_PATH):
@@ -755,126 +1196,112 @@ def main():
         logger.error("Please ensure the datasets/ETT-small/ directory contains ETTh1.csv")
         return
     
-    # Run Optuna search
-    best_vanilla, best_augmented = run_optuna_search(
-        n_trials=args.n_trials,
-        max_epochs=args.max_epochs,
-        device=device,
-        quick=args.quick,
-    )
-    
     # Get data loaders
     train_loader, val_loader, test_loader, num_variates = get_dataloaders(
         batch_size=32, lookback=LOOKBACK_LENGTH, forecast=FORECAST_LENGTH
     )
     
-    logger.info("=" * 60)
-    logger.info("Training FINAL models with best hyperparameters...")
-    logger.info("=" * 60)
-    
-    # Train final vanilla model
-    vanilla_config = ShapeAugmentedConfig(
-        seq_len=LOOKBACK_LENGTH,
-        pred_len=FORECAST_LENGTH,
-        num_variates=num_variates,
-        d_model=best_vanilla.get('d_model', 128),
-        n_heads=best_vanilla.get('n_heads', 4),
-        e_layers=best_vanilla.get('e_layers', 2),
-        d_ff=best_vanilla.get('d_ff', 256),
-        dropout=best_vanilla.get('dropout', 0.1),
-        image_height=IMAGE_HEIGHT,
-    )
-    
-    vanilla_model = VanillaiTransformer(vanilla_config).to(device)
-    logger.info(f"Vanilla model params: {count_parameters(vanilla_model):,}")
-    
     final_epochs = 30 if args.quick else 100
-    vanilla_model, vanilla_history = train_model(
-        vanilla_model, train_loader, val_loader,
-        {'learning_rate': best_vanilla.get('learning_rate', 5e-4)},
-        device, use_img=False, max_epochs=final_epochs, patience=15
-    )
     
-    # Train final augmented model
-    cnn_depth = best_augmented.get('cnn_depth', 3)
-    cnn_channels = [32 * (2 ** i) for i in range(cnn_depth)]
-    cnn_kernel_sizes = [(3, 3)] * cnn_depth
+    vanilla_model = None
+    augmented_model = None
+    best_vanilla = {}
+    best_augmented = {}
+    vanilla_test = {}
+    augmented_test = {}
     
-    augmented_config = ShapeAugmentedConfig(
-        seq_len=LOOKBACK_LENGTH,
-        pred_len=FORECAST_LENGTH,
-        num_variates=num_variates,
-        d_model=best_augmented.get('d_model', 128),
-        n_heads=best_augmented.get('n_heads', 4),
-        e_layers=best_augmented.get('e_layers', 2),
-        d_ff=best_augmented.get('d_ff', 256),
-        dropout=best_augmented.get('dropout', 0.1),
-        image_height=IMAGE_HEIGHT,
-        cnn_channels=cnn_channels,
-        cnn_kernel_sizes=cnn_kernel_sizes,
-        fusion_mode=best_augmented.get('fusion_mode', 'add'),
-    )
+    # Determine what to train
+    train_vanilla = not args.only_augmented
+    train_augmented = not args.only_vanilla
     
-    augmented_model = ShapeAugmentediTransformer(augmented_config).to(device)
-    logger.info(f"Augmented model params: {count_parameters(augmented_model):,}")
+    # Eval-only mode
+    if args.eval_only:
+        if train_vanilla:
+            if checkpoint_exists(VANILLA_CHECKPOINT_PATH):
+                vanilla_model, _, best_vanilla, vanilla_test = load_checkpoint(
+                    VANILLA_CHECKPOINT_PATH, VanillaiTransformer, device
+                )
+                # Re-evaluate to ensure fresh metrics
+                vanilla_test = compute_test_metrics(vanilla_model, test_loader, device, use_img=False)
+            else:
+                logger.warning("Vanilla checkpoint not found, skipping evaluation")
+                train_vanilla = False
+        
+        if train_augmented:
+            if checkpoint_exists(AUGMENTED_CHECKPOINT_PATH):
+                augmented_model, _, best_augmented, augmented_test = load_checkpoint(
+                    AUGMENTED_CHECKPOINT_PATH, ShapeAugmentediTransformer, device
+                )
+                # Re-evaluate to ensure fresh metrics
+                augmented_test = compute_test_metrics(augmented_model, test_loader, device, use_img=True)
+            else:
+                logger.warning("Augmented checkpoint not found, skipping evaluation")
+                train_augmented = False
+    else:
+        # Training mode
+        if train_vanilla:
+            vanilla_model, best_vanilla, vanilla_test = train_and_save_vanilla(
+                train_loader, val_loader, test_loader, num_variates, device,
+                args.n_trials, args.max_epochs, final_epochs, args.quick, args.force_retrain
+            )
+        
+        if train_augmented:
+            augmented_model, best_augmented, augmented_test = train_and_save_augmented(
+                train_loader, val_loader, test_loader, num_variates, device,
+                args.n_trials, args.max_epochs, final_epochs, args.quick, args.force_retrain
+            )
     
-    augmented_model, augmented_history = train_model(
-        augmented_model, train_loader, val_loader,
-        {'learning_rate': best_augmented.get('learning_rate', 5e-4)},
-        device, use_img=True, max_epochs=final_epochs, patience=15
-    )
-    
-    # Evaluate on test set
+    # Report results
     logger.info("=" * 60)
-    logger.info("Evaluating on TEST set...")
+    logger.info("RESULTS")
     logger.info("=" * 60)
     
-    vanilla_test = compute_test_metrics(vanilla_model, test_loader, device, use_img=False)
-    augmented_test = compute_test_metrics(augmented_model, test_loader, device, use_img=True)
+    if vanilla_test:
+        logger.info(f"VANILLA iTransformer TEST metrics:")
+        logger.info(f"  MSE: {vanilla_test['mse']:.4f}")
+        logger.info(f"  MAE: {vanilla_test['mae']:.4f}")
+        logger.info(f"  RMSE: {vanilla_test['rmse']:.4f}")
     
-    logger.info(f"VANILLA iTransformer TEST metrics:")
-    logger.info(f"  MSE: {vanilla_test['mse']:.4f}")
-    logger.info(f"  MAE: {vanilla_test['mae']:.4f}")
-    logger.info(f"  RMSE: {vanilla_test['rmse']:.4f}")
+    if augmented_test:
+        logger.info(f"AUGMENTED iTransformer+CNN TEST metrics:")
+        logger.info(f"  MSE: {augmented_test['mse']:.4f}")
+        logger.info(f"  MAE: {augmented_test['mae']:.4f}")
+        logger.info(f"  RMSE: {augmented_test['rmse']:.4f}")
     
-    logger.info(f"AUGMENTED iTransformer+CNN TEST metrics:")
-    logger.info(f"  MSE: {augmented_test['mse']:.4f}")
-    logger.info(f"  MAE: {augmented_test['mae']:.4f}")
-    logger.info(f"  RMSE: {augmented_test['rmse']:.4f}")
-    
-    # Compare
-    mse_improvement = (vanilla_test['mse'] - augmented_test['mse']) / vanilla_test['mse'] * 100
-    logger.info(f"\nMSE improvement: {mse_improvement:.2f}%")
-    
-    # Get predictions for plotting
-    pasts_v, preds_v, targets_v = get_predictions(vanilla_model, test_loader, device, use_img=False)
-    pasts_a, preds_a, targets_a = get_predictions(augmented_model, test_loader, device, use_img=True)
-    
-    # Plot comparison
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    plot_path = os.path.join(RESULTS_DIR, f'comparison_{timestamp}.png')
-    plot_comparison(pasts_v, preds_v, targets_v, pasts_a, preds_a, targets_a, plot_path)
-    
-    # Save results
-    results = {
-        'timestamp': timestamp,
-        'best_params_vanilla': best_vanilla,
-        'best_params_augmented': best_augmented,
-        'test_metrics_vanilla': vanilla_test,
-        'test_metrics_augmented': augmented_test,
-        'mse_improvement_pct': mse_improvement,
-        'config': {
-            'lookback': LOOKBACK_LENGTH,
-            'forecast': FORECAST_LENGTH,
-            'image_height': IMAGE_HEIGHT,
-            'num_variates': num_variates,
-        }
-    }
-    
-    results_path = os.path.join(RESULTS_DIR, f'results_{timestamp}.json')
-    with open(results_path, 'w') as f:
-        json.dump(results, f, indent=2)
-    logger.info(f"Saved results to {results_path}")
+    # Compare if both models available
+    if vanilla_test and augmented_test:
+        mse_improvement = (vanilla_test['mse'] - augmented_test['mse']) / vanilla_test['mse'] * 100
+        logger.info(f"\nMSE improvement (augmented vs vanilla): {mse_improvement:.2f}%")
+        
+        # Plot comparison
+        if vanilla_model and augmented_model:
+            pasts_v, preds_v, targets_v = get_predictions(vanilla_model, test_loader, device, use_img=False)
+            pasts_a, preds_a, targets_a = get_predictions(augmented_model, test_loader, device, use_img=True)
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            plot_path = os.path.join(RESULTS_DIR, f'comparison_{timestamp}.png')
+            plot_comparison(pasts_v, preds_v, targets_v, pasts_a, preds_a, targets_a, plot_path)
+            
+            # Save results summary
+            results = {
+                'timestamp': timestamp,
+                'best_params_vanilla': best_vanilla,
+                'best_params_augmented': best_augmented,
+                'test_metrics_vanilla': vanilla_test,
+                'test_metrics_augmented': augmented_test,
+                'mse_improvement_pct': mse_improvement,
+                'config': {
+                    'lookback': LOOKBACK_LENGTH,
+                    'forecast': FORECAST_LENGTH,
+                    'image_height': IMAGE_HEIGHT,
+                    'num_variates': num_variates,
+                }
+            }
+            
+            results_path = os.path.join(RESULTS_DIR, f'results_{timestamp}.json')
+            with open(results_path, 'w') as f:
+                json.dump(results, f, indent=2)
+            logger.info(f"Saved results to {results_path}")
     
     logger.info("=" * 60)
     logger.info("DONE!")

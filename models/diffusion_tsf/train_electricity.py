@@ -194,6 +194,8 @@ GUIDANCE_CHECKPOINT = None  # Path to pre-trained iTransformer checkpoint (if gu
 # Split: Train (first 70%), Val (next 10%), Test (last 20%)
 USE_CHRONOLOGICAL_SPLIT = True  # ALWAYS True for time series - random split causes severe data leakage
 
+DATASET_STRIDE = 24  # Stride for sliding window (configurable via CLI)
+
 MODEL_SIZES = {
     'tiny': [32, 64],           # ~1M params, for quick tests only
     'small': [64, 128, 256],    # ~10M params
@@ -560,7 +562,7 @@ def get_dataloaders(
         # This ensures the last window of train doesn't overlap with first window of val.
         
         window_size = lookback + forecast  # Total timesteps per sample
-        stride = 24  # Default stride from ElectricityDataset
+        stride = DATASET_STRIDE  # Configurable stride from CLI/global
         gap_indices = (window_size + stride - 1) // stride  # Ceiling division
         
         # Target proportions: ~70% train, ~10% val, ~20% test
@@ -1337,6 +1339,8 @@ def main():
     parser.add_argument('--guidance-checkpoint', type=str, default=None, metavar='PATH',
                         help='Path to pre-trained iTransformer checkpoint for guidance '
                              '(required when --guidance-type=itransformer)')
+    parser.add_argument('--stride', type=int, default=24,
+                        help='Stride for sliding window (default: 24, meaning 1 day for hourly data)')
     args = parser.parse_args()
     
     # Check for optuna
@@ -1373,6 +1377,10 @@ def main():
     USE_GUIDANCE_CHANNEL = args.use_guidance
     GUIDANCE_TYPE = args.guidance_type
     GUIDANCE_CHECKPOINT = args.guidance_checkpoint
+
+    # Set dataset stride
+    global DATASET_STRIDE
+    DATASET_STRIDE = args.stride
     
     # Validate guidance settings
     if USE_GUIDANCE_CHANNEL and GUIDANCE_TYPE == 'itransformer' and not GUIDANCE_CHECKPOINT:

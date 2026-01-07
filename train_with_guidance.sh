@@ -4,11 +4,15 @@
 #   chmod +x train_with_guidance.sh && ./train_with_guidance.sh
 #   chmod +x train_with_guidance.sh && ./train_with_guidance.sh --repr-mode pdf  # Use PDF (stripe) representation
 #   chmod +x train_with_guidance.sh && ./train_with_guidance.sh --force-retrain  # Force retrain iTransformer
+#   chmod +x train_with_guidance.sh && ./train_with_guidance.sh --stride 12     # Use stride of 12 (half day for hourly data)
+#   chmod +x train_with_guidance.sh && ./train_with_guidance.sh --dry-run       # Test without actually training
 set -euo pipefail
 
 # Parse arguments
 FORCE_RETRAIN=false
 REPR_MODE="cdf"  # Default to CDF (occupancy) mode
+STRIDE=24  # Default stride (1 day for hourly data)
+DRY_RUN=false  # Dry run mode for testing
 while [[ $# -gt 0 ]]; do
   case $1 in
     --force-retrain)
@@ -27,15 +31,32 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
       ;;
+    --stride)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --stride requires an integer argument"
+        exit 1
+      fi
+      STRIDE="$2"
+      if ! [[ "$STRIDE" =~ ^[0-9]+$ ]] || [[ "$STRIDE" -le 0 ]]; then
+        echo "Error: --stride must be a positive integer, got: $STRIDE"
+        exit 1
+      fi
+      shift 2
+      ;;
+    --dry-run|--test)
+      DRY_RUN=true
+      shift
+      ;;
     *)
       echo "Unknown option: $1"
-      echo "Usage: $0 [--force-retrain] [--repr-mode pdf|cdf]"
+      echo "Usage: $0 [--force-retrain] [--repr-mode pdf|cdf] [--stride N] [--dry-run|--test]"
       exit 1
       ;;
   esac
 done
 
 echo "📊 Representation mode: ${REPR_MODE}"
+echo "📊 Dataset stride: ${STRIDE}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${REPO_ROOT}"
@@ -152,6 +173,55 @@ echo "   Train: first 70% of data"
 echo "   Val:   next 10% of data"
 echo "   Test:  last 20% of data (held out)"
 echo ""
+echo "📊 Stride & No-Leak Guarantee:"
+echo "   Stride: ${STRIDE} timesteps between windows"
+echo "   Window size: 608 timesteps (512 lookback + 96 forecast)"
+echo "   Gap between splits: ceil(608/${STRIDE}) = $(( (608 + STRIDE - 1) / STRIDE )) indices"
+echo "   → No inter-split overlap/leakage"
+echo ""
+
+# DRY RUN MODE: Just validate and show what would happen
+if [[ "${DRY_RUN}" == "true" ]]; then
+  echo "🧪 DRY RUN MODE - No actual training will be performed"
+  echo ""
+
+  echo "📁 Checkpoint status:"
+  if [[ -n "${EXISTING_CKPT}" ]]; then
+    echo "   ✅ iTransformer checkpoint found: ${EXISTING_CKPT}"
+    echo "   → Would reuse existing checkpoint (no retraining needed)"
+  else
+    echo "   ❌ No iTransformer checkpoint found"
+    if [[ "${FORCE_RETRAIN}" == "true" ]]; then
+      echo "   → Would train new iTransformer (--force-retrain specified)"
+    else
+      echo "   → Would train new iTransformer"
+    fi
+  fi
+  echo ""
+
+  echo "🔧 Training command that would be executed:"
+  echo "python3 models/diffusion_tsf/train_electricity.py \\"
+  echo "  --blur-sigma 1.0 \\"
+  echo "  --emd-lambda 0 \\"
+  echo "  --repr-mode \"${REPR_MODE}\" \\"
+  echo "  --model-type unet \\"
+  echo "  --kernel-size 3 9 \\"
+  echo "  --stride \"${STRIDE}\" \\"
+  echo "  --use-defaults \\"
+  echo "  --use-time-ramp \\"
+  echo "  --use-value-channel \\"
+  echo "  --no-hybrid-condition \\"
+  echo "  --use-guidance \\"
+  echo "  --guidance-type itransformer \\"
+  if [[ -n "${EXISTING_CKPT}" ]]; then
+    echo "  --guidance-checkpoint \"${EXISTING_CKPT}\""
+  else
+    echo "  --guidance-checkpoint \"[WOULD BE SET AFTER iTRANSFORMER TRAINING]\""
+  fi
+  echo ""
+  echo "✨ Dry run complete! Remove --dry-run to actually train."
+  exit 0
+fi
 
 # IMPORTANT: When --use-guidance with --guidance-type itransformer is set,
 # the training script automatically uses CHRONOLOGICAL splits (70/10/20)
@@ -166,6 +236,7 @@ python3 models/diffusion_tsf/train_electricity.py \
   --repr-mode "${REPR_MODE}" \
   --model-type unet \
   --kernel-size 3 9 \
+  --stride "${STRIDE}" \
   --use-defaults \
   --use-time-ramp \
   --use-value-channel \
