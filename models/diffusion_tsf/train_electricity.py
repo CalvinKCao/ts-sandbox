@@ -775,6 +775,19 @@ def train(
         attention_levels = [1, 2]
         num_res_blocks = 2
     
+    # Create dataloaders FIRST to get actual num_variables from dataset
+    # Use chronological split when using iTransformer guidance to match its training split
+    train_loader, val_loader, num_variables = get_dataloaders(
+        batch_size=config['batch_size'],
+        val_split=VAL_SPLIT,
+        use_all_columns=config.get('use_all_columns', False),
+        use_chronological_split=USE_CHRONOLOGICAL_SPLIT
+    )
+    
+    # Update config with actual number of variables from dataset
+    config['num_variables'] = num_variables
+    logger.info(f"Dataset num_variables: {num_variables}")
+    
     model_config = DiffusionTSFConfig(
         lookback_length=LOOKBACK_LENGTH,
         forecast_length=FORECAST_LENGTH,
@@ -800,7 +813,7 @@ def train(
         use_time_sine=config.get('use_time_sine', USE_TIME_SINE),
         use_value_channel=config.get('use_value_channel', USE_VALUE_CHANNEL),
         seasonal_period=config.get('seasonal_period', SEASONAL_PERIOD),
-        num_variables=config.get('num_variables', 1),
+        num_variables=num_variables,  # Use actual value from dataset
         # Hybrid 1D cross-attention conditioning
         use_hybrid_condition=config.get('use_hybrid_condition', USE_HYBRID_CONDITION),
         context_embedding_dim=config.get('context_embedding_dim', 128),
@@ -817,7 +830,7 @@ def train(
             guidance_checkpoint=config.get('guidance_checkpoint', GUIDANCE_CHECKPOINT),
             seq_len=LOOKBACK_LENGTH,
             pred_len=FORECAST_LENGTH,
-            num_variables=config.get('num_variables', 1),
+            num_variables=num_variables,  # Use actual value from dataset
             device=device
         )
     
@@ -826,18 +839,6 @@ def train(
     logger.info(f"Model parameters: {num_params:,}")
     logger.info(f"Representation mode: {model_config.representation_mode}")
     logger.info(f"Blur sigma: {model_config.blur_sigma}, EMD lambda: {model_config.emd_lambda}")
-    
-    # Create dataloaders
-    # Use chronological split when using iTransformer guidance to match its training split
-    train_loader, val_loader, num_variables = get_dataloaders(
-        batch_size=config['batch_size'],
-        val_split=VAL_SPLIT,
-        use_all_columns=config.get('use_all_columns', False),
-        use_chronological_split=USE_CHRONOLOGICAL_SPLIT
-    )
-    
-    # Update config with actual number of variables from dataset
-    config['num_variables'] = num_variables
     
     # Optimizer
     optimizer = torch.optim.AdamW(
