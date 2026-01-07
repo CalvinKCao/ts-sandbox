@@ -122,9 +122,9 @@ def get_hardware_config():
         logger.info(f"Detected high-end GPU ({gpu_mem:.1f}GB) - using extensive search space")
         return {
             'learning_rate': (1e-5, 1e-3),  # Much wider LR range: 1e-5 to 1e-3
-            'model_size': ['tiny', 'small', 'medium'],  # Include all model sizes
-            'diffusion_steps': [100, 250, 500, 1000],  # More diffusion options
-            'batch_size': [8, 16, 32, 64],  # Much larger batch sizes
+            'model_size': ['tiny', 'small', 'medium', 'large'],  # Include all model sizes
+            'diffusion_steps': [100, 500, 1000, 2000, 3000],  # More diffusion options
+            'batch_size': [8, 16, 32, 64, 128, 256],  # Much larger batch sizes
             'noise_schedule': ['linear', 'cosine'],  # Well-established noise schedules
         }
     elif gpu_mem >= 16:  # RTX 3090, 4080, etc.

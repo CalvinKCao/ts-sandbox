@@ -478,12 +478,25 @@ def visualize_samples(
     # 3. Load evaluation subset using CHRONOLOGICAL splits
     # This ensures consistency with iTransformer's training and avoids data leakage
     # Split: Train (first 70%), Val (next 10%), Test (last 20%)
+    
+    # Detect if model was trained multivariate (num_variables > 1)
+    use_all_columns = config_dict.get('use_all_columns', False) or num_variables > 1
+    if use_all_columns:
+        print(f"\n📊 Multivariate mode: loading all {num_variables} columns from dataset")
+    
     base_dataset = ElectricityDataset(
         data_path,
         lookback=512,
         forecast=96,
-        augment=False
+        augment=False,
+        use_all_columns=use_all_columns
     )
+    
+    # Verify dataset num_variables matches model
+    dataset_num_vars = base_dataset.num_variables
+    if dataset_num_vars != num_variables:
+        print(f"⚠️  WARNING: Dataset has {dataset_num_vars} variables but model expects {num_variables}")
+        print(f"   This may cause dimension mismatches!")
     
     total_samples = len(base_dataset)
     train_end = int(total_samples * 0.7)
@@ -516,6 +529,7 @@ def visualize_samples(
         lookback=512,
         forecast=96,
         augment=False,
+        use_all_columns=use_all_columns,
         data_tensor=base_dataset.data,
         indices=eval_indices
     )
@@ -566,13 +580,22 @@ def visualize_samples(
             if 'guidance_1d' in out:
                 guidance_pred = out['guidance_1d'].cpu().squeeze(0).numpy()
             if 'guidance_2d' in out:
-                guidance_2d_raw = out['guidance_2d'].cpu().squeeze(0).squeeze(0).numpy()
+                guidance_2d_raw = out['guidance_2d'].cpu().squeeze(0).numpy()
+                # For multivariate, take first variable for visualization
+                if guidance_2d_raw.ndim == 3:
+                    guidance_2d_raw = guidance_2d_raw[0]  # (height, width)
                 guidance_2d = (guidance_2d_raw + 1.0) / 2.0
                 guidance_2d = np.clip(guidance_2d, 0.0, 1.0)
             
             # Extract 2D maps (these are in diffusion-scaled [-1, 1] range)
-            past_2d_raw = out['past_2d'].cpu().squeeze(0).squeeze(0).numpy()
-            future_2d_raw = out['future_2d'].cpu().squeeze(0).squeeze(0).numpy()
+            past_2d_raw = out['past_2d'].cpu().squeeze(0).numpy()
+            future_2d_raw = out['future_2d'].cpu().squeeze(0).numpy()
+            
+            # For multivariate, take first variable for 2D visualization
+            if past_2d_raw.ndim == 3:
+                past_2d_raw = past_2d_raw[0]  # (height, width)
+            if future_2d_raw.ndim == 3:
+                future_2d_raw = future_2d_raw[0]  # (height, width)
             
             # Convert from diffusion space [-1, 1] to probability space [0, 1]
             past_2d = (past_2d_raw + 1.0) / 2.0
@@ -581,6 +604,20 @@ def visualize_samples(
             # Clip to valid range (diffusion can sometimes exceed bounds slightly)
             past_2d = np.clip(past_2d, 0.0, 1.0)
             future_2d = np.clip(future_2d, 0.0, 1.0)
+        
+        # For multivariate, extract first variable for 1D plotting
+        past_1d = past.numpy()
+        future_1d = future.numpy()
+        pred_1d = pred
+        guidance_pred_1d = guidance_pred
+        
+        if past_1d.ndim == 2:
+            # Multivariate: (num_vars, time) -> take first variable
+            past_1d = past_1d[0]
+            future_1d = future_1d[0]
+            pred_1d = pred[0] if pred.ndim == 2 else pred
+            if guidance_pred is not None and guidance_pred.ndim == 2:
+                guidance_pred_1d = guidance_pred[0]
         
         # Determine figure layout based on whether we have guidance
         has_guidance = guidance_pred is not None
@@ -594,30 +631,31 @@ def visualize_samples(
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), 
                                             gridspec_kw={'height_ratios': [1, 1]})
         
-        # 1. Plot 1D Time Series
-        # Combine past and future for context
-        time_past = np.arange(len(past))
-        time_future = np.arange(len(past), len(past) + len(future))
+        # 1. Plot 1D Time Series (first variable for multivariate)
+        time_past = np.arange(len(past_1d))
+        time_future = np.arange(len(past_1d), len(past_1d) + len(future_1d))
         
-        ax1.plot(time_past, past.numpy(), label='Past (Context)', color='gray', alpha=0.6)
-        ax1.plot(time_future, future.numpy(), label='True Future', color='blue', linewidth=2)
-        ax1.plot(time_future, pred, label='Diffusion Forecast', color='red', linestyle='--', linewidth=2)
+        var_label = " (Variable 0)" if num_variables > 1 else ""
+        ax1.plot(time_past, past_1d, label=f'Past (Context){var_label}', color='gray', alpha=0.6)
+        ax1.plot(time_future, future_1d, label='True Future', color='blue', linewidth=2)
+        ax1.plot(time_future, pred_1d, label='Diffusion Forecast', color='red', linestyle='--', linewidth=2)
         
         # Add guidance prediction if available
-        if has_guidance:
-            ax1.plot(time_future, guidance_pred, label='iTransformer Guidance', 
+        if has_guidance and guidance_pred_1d is not None:
+            ax1.plot(time_future, guidance_pred_1d, label='iTransformer Guidance', 
                     color='green', linestyle=':', linewidth=2, alpha=0.8)
         
         title_suffix = " (with iTransformer Guidance)" if has_guidance else ""
-        ax1.set_title(f"Diffusion TSF Forecast - Sample {i+1} (Dataset Index {idx}){title_suffix}", fontsize=14)
+        multivar_suffix = f" [showing var 0 of {num_variables}]" if num_variables > 1 else ""
+        ax1.set_title(f"Diffusion TSF Forecast - Sample {i+1} (Dataset Index {idx}){title_suffix}{multivar_suffix}", fontsize=14)
         ax1.set_xlabel("Time Steps")
         ax1.set_ylabel("Value (Normalized)")
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         
-        # 2. Plot 2D Probability Map (Diffusion Output)
-        # Concatenate past and future 2D maps for full context
-        full_2d = np.concatenate([past_2d, future_2d], axis=1)
+        # 2. Plot 2D Probability Map (Diffusion Output) - first variable for multivariate
+        # Concatenate past and future 2D maps for full context (along width/time axis)
+        full_2d = np.concatenate([past_2d, future_2d], axis=1)  # axis=1 is width for 2D arrays
         
         # Use vmin/vmax to ensure consistent color scaling
         im = ax2.imshow(full_2d, aspect='auto', origin='lower', cmap='magma', 
@@ -627,8 +665,8 @@ def visualize_samples(
         ax2.set_xlabel("Time Steps")
         ax2.set_ylabel("Normalized Value Bins")
         
-        # Add vertical line at the forecast start
-        ax2.axvline(x=len(past), color='white', linestyle='-', linewidth=2, alpha=0.8, label='Forecast Start')
+        # Add vertical line at the forecast start (use past_2d width, not past tensor length)
+        ax2.axvline(x=past_2d.shape[1], color='white', linestyle='-', linewidth=2, alpha=0.8, label='Forecast Start')
         
         # Add colorbar
         plt.colorbar(im, ax=ax2, label='Density')
@@ -637,7 +675,7 @@ def visualize_samples(
         if has_guidance and guidance_2d is not None:
             # Create a full 2D view by padding the guidance with zeros for the past
             guidance_full_2d = np.zeros_like(full_2d)
-            guidance_full_2d[:, len(past):] = guidance_2d
+            guidance_full_2d[:, past_2d.shape[1]:] = guidance_2d
             
             im3 = ax3.imshow(guidance_full_2d, aspect='auto', origin='lower', cmap='magma', 
                             interpolation='nearest', vmin=0.0, vmax=1.0)
@@ -646,7 +684,7 @@ def visualize_samples(
             ax3.set_ylabel("Normalized Value Bins")
             
             # Add vertical line at the forecast start
-            ax3.axvline(x=len(past), color='white', linestyle='-', linewidth=2, alpha=0.8, label='Forecast Start')
+            ax3.axvline(x=past_2d.shape[1], color='white', linestyle='-', linewidth=2, alpha=0.8, label='Forecast Start')
             
             # Add colorbar
             plt.colorbar(im3, ax=ax3, label='Density')

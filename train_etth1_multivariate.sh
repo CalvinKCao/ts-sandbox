@@ -88,7 +88,7 @@ else
     --activation gelu \
     --num_workers 10 \
     --itr 1 \
-    --train_epochs 10 \
+    --train_epochs 20 \
     --batch_size 32 \
     --patience 3 \
     --learning_rate 0.0001 \
@@ -135,7 +135,6 @@ python3 models/diffusion_tsf/train_electricity.py \
   --repr-mode cdf \
   --model-type unet \
   --kernel-size 3 9 \
-  --use-defaults \
   --use-time-ramp \
   --use-value-channel \
   --no-hybrid-condition \
