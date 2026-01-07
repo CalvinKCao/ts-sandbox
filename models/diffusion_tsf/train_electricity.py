@@ -953,6 +953,7 @@ def objective(trial) -> float:
         'use_guidance_channel': USE_GUIDANCE_CHANNEL,  # Visual Guide (Stage 1)
         'guidance_type': GUIDANCE_TYPE,
         'guidance_checkpoint': GUIDANCE_CHECKPOINT,
+        'dataset': SELECTED_DATASET,  # Dataset name for visualization
     }
     
     # Checkpoint for this trial
@@ -1155,6 +1156,7 @@ def train_with_params(params: dict, run_name: Optional[str] = None):
     config['guidance_checkpoint'] = GUIDANCE_CHECKPOINT
     config['transformer_patch_height'] = TRANSFORMER_PATCH_HEIGHT
     config['transformer_patch_width'] = TRANSFORMER_PATCH_WIDTH
+    config['dataset'] = SELECTED_DATASET  # Dataset name for visualization
     
     logger.info("Training with params:")
     logger.info(json.dumps(config, indent=2, default=str))
@@ -1408,6 +1410,7 @@ def main():
             'use_guidance_channel': USE_GUIDANCE_CHANNEL,  # Visual Guide
             'guidance_type': GUIDANCE_TYPE,
             'guidance_checkpoint': GUIDANCE_CHECKPOINT,
+            'dataset': SELECTED_DATASET,  # Dataset name for visualization
         }
         
         # Use tiny dataset for quick test

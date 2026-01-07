@@ -23,8 +23,11 @@ if script_dir not in sys.path:
 
 from config import DiffusionTSFConfig
 from model import DiffusionTSF
-from train_electricity import ElectricityDataset, MODEL_SIZES, VAL_SPLIT
+from train_electricity import ElectricityDataset, MODEL_SIZES, VAL_SPLIT, DATASET_REGISTRY
 from guidance import iTransformerGuidance, LinearRegressionGuidance, LastValueGuidance
+
+# Datasets directory (relative to script)
+DATASETS_DIR = os.path.join(script_dir, '..', '..', 'datasets')
 
 
 def load_itransformer_guidance(
@@ -194,8 +197,46 @@ def visualize_samples(
     checkpoint = torch.load(model_path, map_location=device)
     config_dict = checkpoint['config']
     
+    # Resolve dataset from checkpoint config (with smart fallback for old checkpoints)
+    dataset_name = config_dict.get('dataset', None)
+    num_variables = config_dict.get('num_variables', 1)
+    
+    if dataset_name and dataset_name in DATASET_REGISTRY:
+        # Checkpoint has dataset name saved - use it directly
+        dataset_info = DATASET_REGISTRY[dataset_name]
+        resolved_data_path = os.path.join(DATASETS_DIR, dataset_info[0])
+        print(f"📊 Using dataset from checkpoint: {dataset_name}")
+        print(f"   Data path: {resolved_data_path}")
+    else:
+        # OLD checkpoint without 'dataset' key - try to infer from num_variables
+        # Map num_variables to likely datasets
+        dataset_by_vars = {
+            321: 'electricity',  # electricity has 321 clients
+            7: 'ETTh1',  # ETT datasets have 7 columns (HUFL, HULL, MUFL, MULL, LUFL, LULL, OT)
+            8: 'exchange_rate',  # exchange_rate has 8 countries
+            21: 'weather',  # weather has 21 features
+            861: 'traffic',  # traffic has 861 sensors
+        }
+        
+        inferred_dataset = dataset_by_vars.get(num_variables, None)
+        
+        if inferred_dataset and inferred_dataset in DATASET_REGISTRY:
+            dataset_name = inferred_dataset
+            dataset_info = DATASET_REGISTRY[dataset_name]
+            resolved_data_path = os.path.join(DATASETS_DIR, dataset_info[0])
+            print(f"📊 Inferred dataset from num_variables={num_variables}: {dataset_name}")
+            print(f"   Data path: {resolved_data_path}")
+            print(f"   (Old checkpoint without 'dataset' key - using inference)")
+        else:
+            # Fallback to provided data_path
+            resolved_data_path = data_path
+            dataset_name = 'unknown'
+            print(f"⚠️  Could not determine dataset (num_variables={num_variables})")
+            print(f"   Using provided data path: {data_path}")
+    
     # Debug: Print what's actually in the checkpoint config
     print(f"\n=== Checkpoint Config ===")
+    print(f"  dataset: {dataset_name}")
     print(f"  representation_mode: {config_dict.get('representation_mode', 'NOT FOUND (defaulting to pdf)')}")
     print(f"  blur_sigma: {config_dict.get('blur_sigma', 'NOT FOUND')}")
     print(f"  emd_lambda: {config_dict.get('emd_lambda', 'NOT FOUND')}")
@@ -485,7 +526,7 @@ def visualize_samples(
         print(f"\n📊 Multivariate mode: loading all {num_variables} columns from dataset")
     
     base_dataset = ElectricityDataset(
-        data_path,
+        resolved_data_path,
         lookback=512,
         forecast=96,
         augment=False,
@@ -525,7 +566,7 @@ def visualize_samples(
     print(f"   Using:   {len(eval_indices)} samples from {eval_set_name}\n")
     
     val_dataset = ElectricityDataset(
-        data_path,
+        resolved_data_path,
         lookback=512,
         forecast=96,
         augment=False,
@@ -694,6 +735,104 @@ def visualize_samples(
         save_path = f"{output_dir}/sample_{i+1}_full.png"
         plt.savefig(save_path, dpi=150)
         plt.close()
+        
+        # ===============================================================
+        # MULTIVARIATE VISUALIZATION: Grid of all variables
+        # ===============================================================
+        if num_variables > 1:
+            # Determine grid layout: aim for roughly square grid
+            n_vars = num_variables
+            n_cols = min(4, n_vars)  # Max 4 columns for readability
+            n_rows = (n_vars + n_cols - 1) // n_cols  # Ceiling division
+            
+            # Extract raw data arrays for all variables
+            past_np = past.numpy()  # (num_vars, lookback)
+            future_np_full = future.numpy()  # (num_vars, forecast)
+            pred_np = pred  # (num_vars, forecast)
+            
+            # ---- 1D Time Series Grid ----
+            fig_1d, axes_1d = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+            axes_1d = np.atleast_2d(axes_1d).flatten()  # Ensure 1D array of axes
+            
+            for var_idx in range(n_vars):
+                ax = axes_1d[var_idx]
+                past_v = past_np[var_idx]
+                future_v = future_np_full[var_idx]
+                pred_v = pred_np[var_idx] if pred_np.ndim == 2 else pred_np
+                
+                time_past_v = np.arange(len(past_v))
+                time_future_v = np.arange(len(past_v), len(past_v) + len(future_v))
+                
+                ax.plot(time_past_v[-96:], past_v[-96:], label='Past (last 96)', color='gray', alpha=0.6)
+                ax.plot(time_future_v, future_v, label='True', color='blue', linewidth=1.5)
+                ax.plot(time_future_v, pred_v, label='Pred', color='red', linestyle='--', linewidth=1.5)
+                
+                if has_guidance and guidance_pred is not None and guidance_pred.ndim == 2:
+                    guidance_v = guidance_pred[var_idx]
+                    ax.plot(time_future_v, guidance_v, label='Guide', color='green', linestyle=':', linewidth=1.5)
+                
+                ax.set_title(f'Variable {var_idx}', fontsize=10)
+                ax.grid(True, alpha=0.3)
+                if var_idx == 0:
+                    ax.legend(fontsize=8, loc='upper right')
+            
+            # Hide unused subplots
+            for var_idx in range(n_vars, len(axes_1d)):
+                axes_1d[var_idx].set_visible(False)
+            
+            fig_1d.suptitle(f'Multivariate Forecast - Sample {i+1} ({n_vars} variables)', fontsize=14)
+            plt.tight_layout()
+            
+            multivar_1d_path = f"{output_dir}/sample_{i+1}_multivar_1d.png"
+            plt.savefig(multivar_1d_path, dpi=150)
+            plt.close()
+            
+            # ---- 2D Representation Grid ----
+            # Get full 2D representations for all variables
+            past_2d_full = out['past_2d'].cpu().squeeze(0).numpy()  # (num_vars, height, width)
+            future_2d_full = out['future_2d'].cpu().squeeze(0).numpy()  # (num_vars, height, width)
+            
+            fig_2d, axes_2d = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 3 * n_rows))
+            axes_2d = np.atleast_2d(axes_2d).flatten()
+            
+            for var_idx in range(n_vars):
+                ax = axes_2d[var_idx]
+                
+                # Get 2D representation for this variable
+                if past_2d_full.ndim == 3:
+                    p2d = past_2d_full[var_idx]
+                    f2d = future_2d_full[var_idx]
+                else:
+                    p2d = past_2d_full
+                    f2d = future_2d_full
+                
+                # Convert from diffusion space [-1, 1] to [0, 1]
+                p2d = np.clip((p2d + 1.0) / 2.0, 0.0, 1.0)
+                f2d = np.clip((f2d + 1.0) / 2.0, 0.0, 1.0)
+                
+                # Concatenate past and future
+                full_2d_v = np.concatenate([p2d, f2d], axis=1)
+                
+                im = ax.imshow(full_2d_v, aspect='auto', origin='lower', cmap='magma', 
+                              interpolation='nearest', vmin=0.0, vmax=1.0)
+                ax.axvline(x=p2d.shape[1], color='white', linestyle='-', linewidth=1, alpha=0.8)
+                ax.set_title(f'Variable {var_idx}', fontsize=10)
+                ax.set_xlabel('Time')
+                ax.set_ylabel('Value')
+            
+            # Hide unused subplots
+            for var_idx in range(n_vars, len(axes_2d)):
+                axes_2d[var_idx].set_visible(False)
+            
+            mode_label = "PDF" if model_config.representation_mode == "pdf" else "CDF"
+            fig_2d.suptitle(f'2D Representations ({mode_label}) - Sample {i+1} ({n_vars} variables)', fontsize=14)
+            plt.tight_layout()
+            
+            multivar_2d_path = f"{output_dir}/sample_{i+1}_multivar_2d.png"
+            plt.savefig(multivar_2d_path, dpi=150)
+            plt.close()
+            
+            print(f"  Saved multivariate visualizations: {multivar_1d_path}, {multivar_2d_path}")
         
         # Calculate and track metrics
         future_np = future.numpy()

@@ -199,6 +199,10 @@ class iTransformerGuidance(BaseGuidance):
     a Stage 1 guidance model. The iTransformer provides accurate
     point forecasts that the diffusion model can refine.
     
+    IMPORTANT: The iTransformer is kept frozen in eval mode at all times.
+    When the parent DiffusionTSF model's train() method is called, this
+    module stays in eval mode to ensure consistent guidance predictions.
+    
     Usage:
         # Load pre-trained iTransformer
         itrans_model = load_itransformer_checkpoint(...)
@@ -231,7 +235,36 @@ class iTransformerGuidance(BaseGuidance):
         # Freeze the model - we're using it for inference only
         for param in self.model.parameters():
             param.requires_grad = False
+        
+        # Force eval mode: both self.training and wrapped model
+        self.training = False
         self.model.eval()
+    
+    def train(self, mode: bool = True):
+        """Override train() to keep iTransformer ALWAYS in eval mode.
+        
+        The guidance model is pre-trained and frozen. It should not be affected
+        by the parent model's training state. This prevents dropout and batch norm
+        layers in the iTransformer from switching to training mode when
+        model.train() is called on the parent DiffusionTSF model.
+        
+        Args:
+            mode: Ignored - the model always stays in eval mode.
+            
+        Returns:
+            self
+        """
+        # Set self.training for consistency with nn.Module API
+        # but keep the actual model in eval mode
+        self.training = False
+        self.model.eval()
+        return self
+    
+    def eval(self):
+        """Set the module to evaluation mode (always the case for guidance)."""
+        self.training = False
+        self.model.eval()
+        return self
     
     @torch.no_grad()
     def get_forecast(

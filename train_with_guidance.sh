@@ -2,24 +2,40 @@
 # Pretrain iTransformer on Electricity (univariate) and then train DiffusionTSF with that checkpoint as guidance.
 # Usage (from repo root):
 #   chmod +x train_with_guidance.sh && ./train_with_guidance.sh
+#   chmod +x train_with_guidance.sh && ./train_with_guidance.sh --repr-mode pdf  # Use PDF (stripe) representation
 #   chmod +x train_with_guidance.sh && ./train_with_guidance.sh --force-retrain  # Force retrain iTransformer
 set -euo pipefail
 
 # Parse arguments
 FORCE_RETRAIN=false
+REPR_MODE="cdf"  # Default to CDF (occupancy) mode
 while [[ $# -gt 0 ]]; do
   case $1 in
     --force-retrain)
       FORCE_RETRAIN=true
       shift
       ;;
+    --repr-mode)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --repr-mode requires an argument (pdf or cdf)"
+        exit 1
+      fi
+      REPR_MODE="$2"
+      if [[ "$REPR_MODE" != "pdf" && "$REPR_MODE" != "cdf" ]]; then
+        echo "Error: --repr-mode must be 'pdf' or 'cdf', got: $REPR_MODE"
+        exit 1
+      fi
+      shift 2
+      ;;
     *)
       echo "Unknown option: $1"
-      echo "Usage: $0 [--force-retrain]"
+      echo "Usage: $0 [--force-retrain] [--repr-mode pdf|cdf]"
       exit 1
       ;;
   esac
 done
+
+echo "📊 Representation mode: ${REPR_MODE}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${REPO_ROOT}"
@@ -124,6 +140,12 @@ fi
 echo ""
 echo "🔥 Training DiffusionTSF with iTransformer guidance..."
 echo "   Checkpoint: ${ITRANS_CKPT}"
+echo "   Representation mode: ${REPR_MODE}"
+if [[ "$REPR_MODE" == "pdf" ]]; then
+  echo "     → Using stripe/one-hot encoding (probability density)"
+else
+  echo "     → Using occupancy map encoding (cumulative distribution)"
+fi
 echo ""
 echo "📊 Data splits (CHRONOLOGICAL, matches iTransformer):"
 echo "   Train: first 70% of data"
@@ -141,7 +163,7 @@ echo ""
 python3 models/diffusion_tsf/train_electricity.py \
   --blur-sigma 1.0 \
   --emd-lambda 0 \
-  --repr-mode cdf \
+  --repr-mode "${REPR_MODE}" \
   --model-type unet \
   --kernel-size 3 9 \
   --use-defaults \
