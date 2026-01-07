@@ -370,15 +370,16 @@ def create_guidance_for_training(
 MAX_EPOCHS = 275
 PATIENCE = 25                   # Early stopping patience (increased for longer training)
 VAL_SPLIT = 0.1
-NUM_OPTUNA_TRIALS = 20          # Total trials to run
+NUM_OPTUNA_TRIALS = 12          # Total trials to run
 PRUNING_WARMUP = 20             # Don't prune before this epoch (increased for longer training)
+OVERALL_SAVE_INTERVAL = 25      # Re-save the global best every N epochs to avoid loss on interrupts
 
 # Pre-tuned default parameters (from best Optuna run)
 # These are good starting points that work well across datasets
 DEFAULT_PARAMS = {
     "learning_rate": 4.25e-05,
     "model_size": "small",
-    "diffusion_steps": 100,
+    "diffusion_steps": 200,
     "batch_size": 16,
     "noise_schedule": "cosine",
     "blur_sigma": 1.0,
@@ -707,6 +708,15 @@ def save_checkpoint(
     logger.info(f"Checkpoint saved: {path}")
 
 
+def _load_val_loss_from_checkpoint(path: str) -> float:
+    """Safely load val_loss from a checkpoint, return inf if unavailable."""
+    try:
+        ckpt = torch.load(path, map_location="cpu")
+        return float(ckpt.get("val_loss", float("inf")))
+    except Exception:
+        return float("inf")
+
+
 def load_checkpoint(path: str, model: nn.Module, optimizer: Optional[torch.optim.Optimizer] = None):
     """Load training checkpoint."""
     checkpoint = torch.load(path, map_location='cpu')
@@ -907,6 +917,10 @@ def train(
     
     best_val_loss = float('inf')
     start_epoch = 0
+    # Track global best across all trials/runs inside the current CHECKPOINT_DIR
+    best_model_path = os.path.join(CHECKPOINT_DIR, 'best_model.pt')
+    overall_best_loss = _load_val_loss_from_checkpoint(best_model_path)
+    logger.info(f"Current overall best (if any): {overall_best_loss:.4f}" if overall_best_loss < float('inf') else "No overall best model yet.")
     
     # Resume from checkpoint if exists
     if checkpoint_path and os.path.exists(checkpoint_path):
@@ -946,6 +960,13 @@ def train(
                     model, optimizer, epoch, train_loss, val_loss,
                     config, checkpoint_path.replace('.pt', '_best.pt')
                 )
+                # Also update the global overall best if this run beats it
+                if val_loss < overall_best_loss:
+                    overall_best_loss = val_loss
+                    save_checkpoint(
+                        model, optimizer, epoch, train_loss, val_loss,
+                        config, best_model_path
+                    )
         
         # Save regular checkpoint
         if checkpoint_path and epoch % 5 == 0:
@@ -953,6 +974,17 @@ def train(
                 model, optimizer, epoch, train_loss, val_loss,
                 config, checkpoint_path
             )
+
+        # Periodically re-save the best checkpoint of this run as the global best (defensive)
+        if checkpoint_path and epoch % OVERALL_SAVE_INTERVAL == 0 and epoch > 0:
+            run_best_path = checkpoint_path.replace('.pt', '_best.pt')
+            if os.path.exists(run_best_path):
+                run_best_loss = _load_val_loss_from_checkpoint(run_best_path)
+                if run_best_loss < overall_best_loss:
+                    overall_best_loss = run_best_loss
+                    import shutil
+                    shutil.copy2(run_best_path, best_model_path)
+                    logger.info(f"Updated best_model.pt at epoch {epoch} (val_loss={overall_best_loss:.4f})")
         
         # Optuna pruning
         if trial is not None:
