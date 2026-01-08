@@ -49,7 +49,9 @@ NUM_TRIALS=10
 REPR_MODE="cdf"
 SKIP_ITRANSFORMER=false
 SINGLE_DATASET=""
-STRIDE=24  # Default stride for sliding window
+STRIDE=1  # Default stride for sliding window
+USE_MONO=false
+MONO_WEIGHT=10.0
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -105,6 +107,18 @@ while [[ $# -gt 0 ]]; do
       SINGLE_DATASET="$2"
       shift 2
       ;;
+    --use-mono|--use-monotonicity-loss)
+      USE_MONO=true
+      shift
+      ;;
+    --mono-weight|--monotonicity-weight)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --monotonicity-weight requires a float argument"
+        exit 1
+      fi
+      MONO_WEIGHT="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown option: $1"
       echo "Usage: $0 [--dry-run] [--seed N] [--trials N] [--repr-mode pdf|cdf] [--stride N] [--skip-itrans] [--dataset NAME]"
@@ -122,6 +136,33 @@ cd "${REPO_ROOT}"
 # Activate venv if present
 if [[ -f "${REPO_ROOT}/venv/bin/activate" ]]; then
   source "${REPO_ROOT}/venv/bin/activate"
+fi
+
+# =============================================================================
+# Merge Split Datasets (if needed)
+# =============================================================================
+
+# Check if traffic dataset needs to be merged from parts
+TRAFFIC_CSV="${REPO_ROOT}/datasets/traffic/traffic.csv"
+TRAFFIC_PART1="${REPO_ROOT}/datasets/traffic/traffic_part1.csv"
+TRAFFIC_PART2="${REPO_ROOT}/datasets/traffic/traffic_part2.csv"
+
+if [[ ! -f "${TRAFFIC_CSV}" ]] && [[ -f "${TRAFFIC_PART1}" ]] && [[ -f "${TRAFFIC_PART2}" ]]; then
+  echo "📦 Merging split traffic dataset..."
+  echo "   Part1: ${TRAFFIC_PART1}"
+  echo "   Part2: ${TRAFFIC_PART2}"
+  echo "   Output: ${TRAFFIC_CSV}"
+  
+  # Merge: header from part1, then data from part1 (skip header), then data from part2 (skip header)
+  head -1 "${TRAFFIC_PART1}" > "${TRAFFIC_CSV}"
+  tail -n +2 "${TRAFFIC_PART1}" >> "${TRAFFIC_CSV}"
+  tail -n +2 "${TRAFFIC_PART2}" >> "${TRAFFIC_CSV}"
+  
+  MERGED_LINES=$(wc -l < "${TRAFFIC_CSV}")
+  echo "   ✅ Merged! Total lines: ${MERGED_LINES}"
+  echo ""
+elif [[ -f "${TRAFFIC_CSV}" ]]; then
+  echo "✅ Traffic dataset already exists: ${TRAFFIC_CSV}"
 fi
 
 # =============================================================================
@@ -182,6 +223,7 @@ echo "   Optuna trials per dataset: ${NUM_TRIALS}"
 echo "   Representation mode: ${REPR_MODE}"
 echo "   Stride: ${STRIDE}"
 echo "   Skip iTransformer: ${SKIP_ITRANSFORMER}"
+echo "   Monotonicity loss: ${USE_MONO} (weight=${MONO_WEIGHT})"
 if [[ -n "${SINGLE_DATASET}" ]]; then
   echo "   Single dataset mode: ${SINGLE_DATASET}"
 fi
@@ -274,6 +316,10 @@ for DATASET in "${DATASETS[@]}"; do
     echo "               --use-time-ramp \\"
     echo "               --use-value-channel \\"
     echo "               --no-hybrid-condition \\"
+    if [[ "${USE_MONO}" == "true" ]]; then
+      echo "               --use-monotonicity-loss \\"
+      echo "               --monotonicity-weight ${MONO_WEIGHT} \\"
+    fi
     if [[ "${SKIP_ITRANSFORMER}" != "true" ]]; then
       echo "               --use-guidance \\"
       echo "               --guidance-type itransformer \\"
@@ -393,6 +439,14 @@ for DATASET in "${DATASETS[@]}"; do
     --no-hybrid-condition
   )
   
+  # Add monotonicity flags if enabled
+  if [[ "${USE_MONO}" == "true" ]]; then
+    TRAIN_CMD+=(
+      --use-monotonicity-loss
+      --monotonicity-weight "${MONO_WEIGHT}"
+    )
+  fi
+
   # Add guidance if iTransformer was trained
   if [[ "${SKIP_ITRANSFORMER}" != "true" && -n "${ITRANS_CKPT}" ]]; then
     TRAIN_CMD+=(

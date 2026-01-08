@@ -100,6 +100,10 @@ class DiffusionTSFConfig:
     
     # EMD loss weighting
     emd_lambda: float = 0.2
+
+    # Monotonicity regularization (CDF mode)
+    use_monotonicity_loss: bool = False
+    monotonicity_weight: float = 1.0
     
     # Model selector: "unet" (default) or "transformer"
     model_type: str = "unet"

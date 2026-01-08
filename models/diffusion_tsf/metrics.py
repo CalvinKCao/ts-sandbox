@@ -40,6 +40,22 @@ def mae(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return F.l1_loss(pred, target)
 
 
+def monotonicity_loss(pred_x0: torch.Tensor) -> torch.Tensor:
+    """Penalize monotonicity violations along the height axis of a CDF map.
+    
+    Args:
+        pred_x0: Tensor of shape (batch, channels, height, width) representing
+                 a denoised occupancy/CDF map.
+                 
+    Returns:
+        Scalar loss = mean positive increase between consecutive height rows.
+    """
+    # diff[y] = value[y+1] - value[y]; positive values are violations
+    diff = pred_x0[:, :, 1:, :] - pred_x0[:, :, :-1, :]
+    violations = F.relu(diff)
+    return violations.mean()
+
+
 def first_order_gradient(x: torch.Tensor) -> torch.Tensor:
     """Compute first-order differences (discrete derivative).
     

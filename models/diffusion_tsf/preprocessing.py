@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,60 @@ class TimeSeriesTo2D(nn.Module):
         logger.debug(f"TimeSeriesTo2D: input {x.shape} -> output {image.shape}")
         return image
     
-    def inverse(self, image: torch.Tensor) -> torch.Tensor:
+    def _decode_cdf_pdf_expectation(
+        self,
+        cdf_map: torch.Tensor,
+        pdf_temperature: Optional[float] = None,
+        eps: float = 1e-8
+    ) -> torch.Tensor:
+        """Decode a CDF/occupancy map using a PDF expectation approach.
+        
+        Steps:
+        1) Convert CDF → PDF via vertical gradient (drop between rows).
+        2) ReLU to remove negative gradients (monotonicity violations).
+        3) Normalize PDF column-wise.
+        4) Compute expected pixel index and map back to value space.
+        """
+        # Ensure valid CDF range
+        cdf_map = torch.clamp(cdf_map, 0.0, 1.0)
+        
+        # Pad a zero row at the top so the final drop to 0 is captured
+        cdf_padded = torch.cat(
+            [cdf_map, torch.zeros_like(cdf_map[:, :, :1, :])],
+            dim=2
+        )
+        
+        # PDF is the positive drop between adjacent rows (bottom -> top)
+        pdf = cdf_padded[:, :, :-1, :] - cdf_padded[:, :, 1:, :]
+        pdf = F.relu(pdf)
+        
+        # Optional sharpening temperature (temperature < 1 sharpens)
+        if pdf_temperature is not None and pdf_temperature != 1.0:
+            # Use a power transform to mimic temperature scaling
+            power = 1.0 / max(pdf_temperature, eps)
+            pdf = torch.pow(pdf, power)
+        
+        # Normalize per column
+        pdf_sum = pdf.sum(dim=2, keepdim=True).clamp(min=eps)
+        pdf = pdf / pdf_sum
+        
+        # Expectation over pixel indices (0 .. H-1)
+        indices = torch.arange(self.height, device=cdf_map.device, dtype=cdf_map.dtype)
+        indices = indices.view(1, 1, -1, 1)
+        expected_idx = (pdf * indices).sum(dim=2)  # -> (batch, num_vars, seq_len)
+        
+        # Map back to normalized value space using existing scalar logic
+        denom = float(self.height)
+        normalized = expected_idx / max(denom, eps)
+        x = normalized * (2 * self.max_scale) - self.max_scale
+        return x
+    
+    def inverse(
+        self,
+        image: torch.Tensor,
+        cdf_decoder: str = "mean",
+        pdf_temperature: Optional[float] = None
+    ) -> torch.Tensor:
         """Convert 2D probability image back to 1D time series.
         
         Uses expectation: x_t = sum_j P(j) * center(j)
@@ -199,12 +253,15 @@ class TimeSeriesTo2D(nn.Module):
             # Weighted sum: (batch, num_vars, seq_len)
             x = (prob * centers).sum(dim=2)
         else:
-            # Occupancy/CDF: value is the column sum mapped back to normalized range
-            occupancy = torch.clamp(image, min=0.0)
-            column_sum = occupancy.sum(dim=2)  # Sum along height
-            column_sum = torch.clamp(column_sum, 0.0, float(self.height))
-            normalized = column_sum / float(self.height)
-            x = normalized * (2 * self.max_scale) - self.max_scale
+            if cdf_decoder == "pdf_expectation":
+                x = self._decode_cdf_pdf_expectation(image, pdf_temperature)
+            else:
+                # Occupancy/CDF: value is the column sum mapped back to normalized range
+                occupancy = torch.clamp(image, min=0.0, max=1.0)
+                column_sum = occupancy.sum(dim=2)  # Sum along height
+                column_sum = torch.clamp(column_sum, 0.0, float(self.height))
+                normalized = column_sum / float(self.height)
+                x = normalized * (2 * self.max_scale) - self.max_scale
         
         # For backwards compatibility, squeeze if univariate
         if squeeze_output:

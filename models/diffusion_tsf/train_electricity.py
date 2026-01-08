@@ -180,6 +180,10 @@ USE_ALL_COLUMNS = False  # If True, use all numeric columns for multivariate for
 # Dilated middle block (set from CLI)
 USE_DILATED_MIDDLE = True  # If True, use dilated convolutions in U-Net bottleneck
 
+# Monotonicity loss (CDF regularization)
+USE_MONOTONICITY_LOSS = False
+MONOTONICITY_WEIGHT = 10.0
+
 # Hybrid 1D cross-attention conditioning (set from CLI)
 USE_HYBRID_CONDITION = True  # If True, use 1D context encoder + cross-attention
 
@@ -385,7 +389,9 @@ DEFAULT_PARAMS = {
     "noise_schedule": "cosine",
     "blur_sigma": 1.0,
     "emd_lambda": 0.0,
-    "representation_mode": "cdf"
+    "representation_mode": "cdf",
+    "use_monotonicity_loss": False,
+    "monotonicity_weight": 1.0,
 }
 
 # ============================================================================
@@ -860,6 +866,8 @@ def train(
         blur_kernel_size=BLUR_KERNEL,
         blur_sigma=config.get('blur_sigma', BLUR_SIGMA),
         emd_lambda=config.get('emd_lambda', EMD_LAMBDA),
+        use_monotonicity_loss=config.get('use_monotonicity_loss', USE_MONOTONICITY_LOSS),
+        monotonicity_weight=config.get('monotonicity_weight', MONOTONICITY_WEIGHT),
         representation_mode=config.get('representation_mode', SELECTED_REPR_MODE),
         unet_channels=channels,
         num_res_blocks=num_res_blocks,
@@ -1040,6 +1048,8 @@ def objective(trial) -> float:
         'guidance_type': GUIDANCE_TYPE,
         'guidance_checkpoint': GUIDANCE_CHECKPOINT,
         'dataset': SELECTED_DATASET,  # Dataset name for visualization
+        'use_monotonicity_loss': USE_MONOTONICITY_LOSS,
+        'monotonicity_weight': MONOTONICITY_WEIGHT,
     }
     
     # Checkpoint for this trial
@@ -1243,6 +1253,8 @@ def train_with_params(params: dict, run_name: Optional[str] = None):
     config['transformer_patch_height'] = TRANSFORMER_PATCH_HEIGHT
     config['transformer_patch_width'] = TRANSFORMER_PATCH_WIDTH
     config['dataset'] = SELECTED_DATASET  # Dataset name for visualization
+    config['use_monotonicity_loss'] = USE_MONOTONICITY_LOSS
+    config['monotonicity_weight'] = MONOTONICITY_WEIGHT
     
     logger.info("Training with params:")
     logger.info(json.dumps(config, indent=2, default=str))
@@ -1333,6 +1345,10 @@ def main():
     parser.add_argument('--blur-sigma', type=float, default=BLUR_SIGMA, help='Vertical blur sigma for preprocessing (label smoothing)')
     parser.add_argument('--emd-lambda', type=float, default=EMD_LAMBDA, help='Weight for EMD loss term')
     parser.add_argument('--repr-mode', choices=['pdf', 'cdf'], default='cdf', help='Representation: pdf (stripe) or cdf (occupancy)')
+    parser.add_argument('--use-monotonicity-loss', action='store_true', default=False,
+                        help='Add monotonicity regularization on predicted CDF (optional)')
+    parser.add_argument('--monotonicity-weight', type=float, default=10.0,
+                        help='Weight for monotonicity loss term')
     parser.add_argument('--patch-height', type=int, default=16, choices=[4, 8, 16, 32], help='Transformer patch height (value axis, default: 16)')
     parser.add_argument('--patch-width', type=int, default=16, choices=[1, 2, 4, 8, 16, 32], help='Transformer patch width (time axis, default: 16). Smaller = finer temporal detail')
     parser.add_argument('--use-coordinate-channel', action='store_true', default=True,
@@ -1442,6 +1458,8 @@ def main():
     SEARCH_SPACE['blur_sigma'] = [args.blur_sigma]
     SEARCH_SPACE['emd_lambda'] = [args.emd_lambda]
     SELECTED_REPR_MODE = args.repr_mode
+    USE_MONOTONICITY_LOSS = args.use_monotonicity_loss
+    MONOTONICITY_WEIGHT = args.monotonicity_weight
     # Set selected model type for downstream use
     SELECTED_MODEL_TYPE = args.model_type
     # Set transformer patch sizes
@@ -1471,6 +1489,7 @@ def main():
         logger.info(f"Transformer patch size: {TRANSFORMER_PATCH_HEIGHT}x{TRANSFORMER_PATCH_WIDTH} (HxW)")
     logger.info(f"Multivariate mode: {USE_ALL_COLUMNS}")
     logger.info(f"Hybrid 1D conditioning: {USE_HYBRID_CONDITION}")
+    logger.info(f"Monotonicity loss: {USE_MONOTONICITY_LOSS} (weight={MONOTONICITY_WEIGHT})")
     if USE_GUIDANCE_CHANNEL:
         logger.info(f"Visual Guide: enabled (type={GUIDANCE_TYPE})")
         if GUIDANCE_CHECKPOINT:
@@ -1509,6 +1528,8 @@ def main():
             'guidance_type': GUIDANCE_TYPE,
             'guidance_checkpoint': GUIDANCE_CHECKPOINT,
             'dataset': SELECTED_DATASET,  # Dataset name for visualization
+            'use_monotonicity_loss': USE_MONOTONICITY_LOSS,
+            'monotonicity_weight': MONOTONICITY_WEIGHT,
         }
         
         # Use tiny dataset for quick test
@@ -1562,6 +1583,8 @@ def main():
             context_embedding_dim=32,   # Smaller for quick test
             context_encoder_layers=1,
             use_guidance_channel=USE_GUIDANCE_CHANNEL,  # Visual Guide
+            use_monotonicity_loss=USE_MONOTONICITY_LOSS,
+            monotonicity_weight=MONOTONICITY_WEIGHT,
         )
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         

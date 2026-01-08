@@ -24,6 +24,7 @@ try:
     from .transformer import DiffusionTransformer
     from .diffusion import DiffusionScheduler
     from .guidance import GuidanceModel, LinearRegressionGuidance, create_guidance_model
+    from .metrics import monotonicity_loss
 except ImportError:
     from config import DiffusionTSFConfig
     from preprocessing import Standardizer, TimeSeriesTo2D, VerticalGaussianBlur
@@ -31,6 +32,7 @@ except ImportError:
     from transformer import DiffusionTransformer
     from diffusion import DiffusionScheduler
     from guidance import GuidanceModel, LinearRegressionGuidance, create_guidance_model
+    from metrics import monotonicity_loss
 
 logger = logging.getLogger(__name__)
 
@@ -872,6 +874,7 @@ class DiffusionTSF(nn.Module):
             image: 2D image of shape (batch, num_vars, height, seq_len)
             from_diffusion: If True, image is in [-1, 1] range from diffusion
             decoder_method: For CDF/occupancy mode, select 'mean' (sum),
+                            'pdf_expectation' (PDF centroid),
                             'median' (first crossing of 0.5),
                             'mode' (peak of PDF via vertical diff), or
                             'beam' (beam search with temporal continuity).
@@ -924,9 +927,18 @@ class DiffusionTSF(nn.Module):
                     x = x.squeeze(1)
                 return x
 
+            if decoder_method == "pdf_expectation":
+                x = self.to_2d._decode_cdf_pdf_expectation(
+                    cdf_map,
+                    pdf_temperature=getattr(self.config, "decode_temperature", None)
+                )
+                if squeeze_output:
+                    x = x.squeeze(1)
+                return x
+
             # For other decoders, only support univariate for now
             if num_vars > 1:
-                raise NotImplementedError(f"decoder_method='{decoder_method}' not yet supported for multivariate. Use 'mean'.")
+                raise NotImplementedError(f"decoder_method='{decoder_method}' not yet supported for multivariate. Use 'mean' or 'pdf_expectation'.")
             
             # Squeeze to (batch, height, seq_len) for legacy decoder methods
             cdf_map_squeezed = cdf_map.squeeze(1)
@@ -1005,7 +1017,7 @@ class DiffusionTSF(nn.Module):
                     search_radius=search_radius
                 )
             else:
-                raise ValueError(f"Unknown decoder_method '{decoder_method}' (expected 'mean', 'median', 'mode', or 'beam').")
+                raise ValueError(f"Unknown decoder_method '{decoder_method}' (expected 'mean', 'pdf_expectation', 'median', 'mode', or 'beam').")
         
         return x
     
@@ -1175,12 +1187,22 @@ class DiffusionTSF(nn.Module):
         # EMD term between estimated x0 and ground truth x0 (future_2d)
         emd_loss = self._compute_emd_loss(x0_pred, future_2d)
         
+        # Optional monotonicity regularization for CDF mode
+        mono_loss = torch.tensor(0.0, device=device)
+        if self.config.use_monotonicity_loss and self.config.representation_mode == "cdf":
+            # Convert to occupancy range [0, 1] to align with monotonic constraint
+            cdf_pred = torch.clamp((x0_pred + 1.0) / 2.0, 0.0, 1.0)
+            mono_loss = monotonicity_loss(cdf_pred)
+        
         loss = noise_loss + self.config.emd_lambda * emd_loss
+        if self.config.use_monotonicity_loss and self.config.representation_mode == "cdf":
+            loss = loss + self.config.monotonicity_weight * mono_loss
         
         result = {
             'loss': loss,
             'noise_loss': noise_loss,
             'emd_loss': emd_loss,
+            'monotonicity_loss': mono_loss,
             'noise': noise,
             'noise_pred': noise_pred,
             'past_2d': past_2d,
@@ -1221,7 +1243,8 @@ class DiffusionTSF(nn.Module):
             cfg_scale: Classifier-free guidance scale. If None, uses config value.
                        1.0 = no guidance, >1 = stronger conditioning adherence
             verbose: Whether to log progress
-            decoder_method: 'mean', 'median', 'mode', or 'beam' (for CDF mode)
+            decoder_method: 'mean', 'pdf_expectation', 'median', 'mode', or 'beam'
+                            (CDF mode only; PDF mode always uses expectation)
             beam_width: For 'beam', number of candidate paths to keep
             jump_penalty_scale: For 'beam', penalty for vertical jumps (higher = smoother)
             search_radius: For 'beam', max pixels to search from previous position
