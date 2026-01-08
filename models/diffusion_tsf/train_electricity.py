@@ -41,7 +41,8 @@ if script_dir not in sys.path:
 from config import DiffusionTSFConfig
 from model import DiffusionTSF
 from metrics import compute_metrics, log_metrics
-from dataset import apply_1d_augmentations
+from dataset import apply_1d_augmentations, create_mixed_dataset
+from realts import RealTS
 from guidance import (
     GuidanceModel, 
     LastValueGuidance, 
@@ -191,6 +192,10 @@ USE_HYBRID_CONDITION = True  # If True, use 1D context encoder + cross-attention
 USE_GUIDANCE_CHANNEL = False  # If True, use Stage 1 predictor as guidance
 GUIDANCE_TYPE = "linear"  # "linear", "last_value", or "itransformer"
 GUIDANCE_CHECKPOINT = None  # Path to pre-trained iTransformer checkpoint (if guidance_type="itransformer")
+
+# Synthetic data augmentation settings (set from CLI)
+USE_SYNTHETIC_DATA = False  # If True, mix RealTS synthetic data with real data during training
+SYNTHETIC_SIZE = 10000  # Number of synthetic samples to generate
 
 # Data split settings
 # IMPORTANT: Time series data MUST use chronological splits to avoid data leakage.
@@ -519,7 +524,9 @@ def get_dataloaders(
     use_all_columns: bool = False,
     columns: Optional[List[str]] = None,
     column: Optional[str] = None,  # Target column for univariate (None = use global TARGET_COLUMN)
-    use_chronological_split: bool = True  # MUST be True for time series to avoid data leakage
+    use_chronological_split: bool = True,  # MUST be True for time series to avoid data leakage
+    use_synthetic_data: bool = False,  # If True, mix RealTS synthetic data with training data
+    synthetic_size: int = 10000  # Number of synthetic samples to add
 ) -> Tuple[DataLoader, DataLoader, int]:
     """Create train and validation dataloaders.
     
@@ -534,6 +541,8 @@ def get_dataloaders(
         column: Target column for univariate forecasting (overrides global TARGET_COLUMN)
         use_chronological_split: If True (DEFAULT), use chronological split (70% train, 10% val, 20% test).
                                  WARNING: Setting to False causes severe data leakage in time series!
+        use_synthetic_data: If True, mix RealTS synthetic time series with training data
+        synthetic_size: Number of synthetic samples to generate when use_synthetic_data is True
     
     Returns:
         (train_loader, val_loader, num_variables)
@@ -640,6 +649,17 @@ def get_dataloaders(
         data_tensor=base_dataset.data,
         indices=train_indices
     )
+    
+    # Optionally mix synthetic data with training data
+    if use_synthetic_data:
+        logger.info(f"Adding {synthetic_size} RealTS synthetic samples to training data")
+        train_dataset = create_mixed_dataset(
+            real_dataset=train_dataset,
+            synthetic_size=synthetic_size,
+            lookback_length=lookback,
+            forecast_length=forecast,
+            seed=42  # Fixed seed for reproducibility
+        )
     
     val_dataset = ElectricityDataset(
         DATA_PATH,
@@ -851,7 +871,9 @@ def train(
         batch_size=config['batch_size'],
         val_split=VAL_SPLIT,
         use_all_columns=config.get('use_all_columns', False),
-        use_chronological_split=USE_CHRONOLOGICAL_SPLIT
+        use_chronological_split=USE_CHRONOLOGICAL_SPLIT,
+        use_synthetic_data=config.get('use_synthetic_data', USE_SYNTHETIC_DATA),
+        synthetic_size=config.get('synthetic_size', SYNTHETIC_SIZE)
     )
     
     # Update config with actual number of variables from dataset
@@ -1050,6 +1072,9 @@ def objective(trial) -> float:
         'dataset': SELECTED_DATASET,  # Dataset name for visualization
         'use_monotonicity_loss': USE_MONOTONICITY_LOSS,
         'monotonicity_weight': MONOTONICITY_WEIGHT,
+        # Synthetic data augmentation
+        'use_synthetic_data': USE_SYNTHETIC_DATA,
+        'synthetic_size': SYNTHETIC_SIZE,
     }
     
     # Checkpoint for this trial
@@ -1255,6 +1280,9 @@ def train_with_params(params: dict, run_name: Optional[str] = None):
     config['dataset'] = SELECTED_DATASET  # Dataset name for visualization
     config['use_monotonicity_loss'] = USE_MONOTONICITY_LOSS
     config['monotonicity_weight'] = MONOTONICITY_WEIGHT
+    # Synthetic data augmentation
+    config['use_synthetic_data'] = USE_SYNTHETIC_DATA
+    config['synthetic_size'] = SYNTHETIC_SIZE
     
     logger.info("Training with params:")
     logger.info(json.dumps(config, indent=2, default=str))
@@ -1398,6 +1426,13 @@ def main():
                              '(required when --guidance-type=itransformer)')
     parser.add_argument('--stride', type=int, default=24,
                         help='Stride for sliding window (default: 24, meaning 1 day for hourly data)')
+    # Synthetic data augmentation arguments
+    parser.add_argument('--use-synthetic-data', action='store_true', default=False,
+                        help='Mix RealTS synthetic time series with real data during training '
+                             '(improves generalizability for small datasets)')
+    parser.add_argument('--synthetic-size', type=int, default=10000, metavar='N',
+                        help='Number of synthetic samples to generate when --use-synthetic-data is enabled '
+                             '(default: 10000)')
     args = parser.parse_args()
     
     # Check for optuna
@@ -1447,6 +1482,19 @@ def main():
         logger.error("--guidance-type=itransformer requires --guidance-checkpoint PATH")
         sys.exit(1)
     
+    # Set synthetic data settings
+    global USE_SYNTHETIC_DATA, SYNTHETIC_SIZE
+    USE_SYNTHETIC_DATA = args.use_synthetic_data
+    SYNTHETIC_SIZE = args.synthetic_size
+    
+    # Validate synthetic data constraint: only CDF mode is supported
+    if USE_SYNTHETIC_DATA and args.repr_mode == 'pdf':
+        logger.error(
+            "Synthetic augmentation is currently only supported in CDF representation mode. "
+            "Please switch to --repr-mode cdf."
+        )
+        sys.exit(1)
+    
     # IMPORTANT: Time series ALWAYS needs chronological split to avoid data leakage.
     # With sliding windows (stride=24), adjacent samples share ~583 of 608 timesteps.
     # Random splitting means train sample 0 and val sample 5 share 90%+ of data!
@@ -1494,6 +1542,8 @@ def main():
         logger.info(f"Visual Guide: enabled (type={GUIDANCE_TYPE})")
         if GUIDANCE_CHECKPOINT:
             logger.info(f"  Guidance checkpoint: {GUIDANCE_CHECKPOINT}")
+    if USE_SYNTHETIC_DATA:
+        logger.info(f"Synthetic data augmentation: enabled ({SYNTHETIC_SIZE} samples)")
     
     if args.list_checkpoints:
         # List all checkpoint files and exit
@@ -1530,6 +1580,9 @@ def main():
             'dataset': SELECTED_DATASET,  # Dataset name for visualization
             'use_monotonicity_loss': USE_MONOTONICITY_LOSS,
             'monotonicity_weight': MONOTONICITY_WEIGHT,
+            # Synthetic data not used in quick test
+            'use_synthetic_data': False,
+            'synthetic_size': 0,
         }
         
         # Use tiny dataset for quick test

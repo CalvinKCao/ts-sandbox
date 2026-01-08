@@ -219,6 +219,63 @@ def find_optuna_checkpoints(base_dir: str, dataset_filter: Optional[str] = None)
     
     print(f"🔍 Scanning for Optuna study directories in: {base_dir}")
     
+    # Helper to register a checkpoint entry
+    def _add_checkpoint(dataset_name: str, ckpt_path: str, item_dir: str, item_name: str):
+        try:
+            ckpt = torch.load(ckpt_path, map_location='cpu')
+            val_loss = ckpt.get('val_loss', None)
+            epoch = ckpt.get('epoch', None)
+            config = ckpt.get('config', {})
+        except Exception as e:
+            print(f"      ⚠️  Failed to load {ckpt_path}: {e}")
+            return
+        
+        target_column = config.get('target_column', config.get('target', 'unknown'))
+        info = {
+            'path': ckpt_path,
+            'dir': item_dir,
+            'name': item_name,
+            'val_loss': val_loss,
+            'epoch': epoch,
+            'config': config,
+            'dataset': dataset_name,
+            'target_column': target_column,
+        }
+        checkpoints.setdefault(dataset_name, []).append(info)
+        print(f"      ✓ {os.path.basename(ckpt_path)}, val_loss={val_loss}, target={target_column}")
+    
+    # Detect direct checkpoint files when base_dir itself is the dataset directory
+    direct_candidates = []
+    for fname in ["best_model.pt", "model_best.pt"]:
+        fpath = os.path.join(base_dir, fname)
+        if os.path.exists(fpath):
+            direct_candidates.append(fpath)
+    direct_candidates.extend(sorted(glob.glob(os.path.join(base_dir, "trial_*_best.pt"))))
+    
+    if direct_candidates:
+        base_name = os.path.basename(os.path.normpath(base_dir))
+        # Try to extract dataset from base name (e.g., diffusion_tsf_ETTh2 -> ETTh2)
+        m = re.match(r"diffusion_tsf_([^/]+)", base_name)
+        dataset_name = m.group(1) if m else base_name
+        if dataset_filter and dataset_name.lower() != dataset_filter.lower():
+            pass  # ignore if filtered out
+        else:
+            print(f"   Found direct checkpoints in base_dir -> dataset={dataset_name}")
+            best_loss = float('inf')
+            best_path = None
+            for cand in direct_candidates:
+                try:
+                    ckpt = torch.load(cand, map_location='cpu')
+                    loss = ckpt.get('val_loss', float('inf'))
+                except Exception:
+                    continue
+                if loss < best_loss:
+                    best_loss = loss
+                    best_path = cand
+            if best_path is None:
+                best_path = direct_candidates[0]
+            _add_checkpoint(dataset_name, best_path, base_dir, base_name)
+    
     # Look for study directories matching our pattern
     for item in os.listdir(base_dir):
         item_path = os.path.join(base_dir, item)
@@ -272,35 +329,7 @@ def find_optuna_checkpoints(base_dir: str, dataset_filter: Optional[str] = None)
             print(f"      ⚠️  No checkpoint files found in {item}")
             continue
         
-        # Load checkpoint metadata
-        try:
-            ckpt = torch.load(checkpoint_path, map_location='cpu')
-            val_loss = ckpt.get('val_loss', None)
-            epoch = ckpt.get('epoch', None)
-            config = ckpt.get('config', {})
-        except Exception as e:
-            print(f"      ⚠️  Failed to load {checkpoint_path}: {e}")
-            continue
-        
-        # Extract target column if available
-        target_column = config.get('target_column', config.get('target', 'unknown'))
-        
-        info = {
-            'path': checkpoint_path,
-            'dir': item_path,
-            'name': item,
-            'val_loss': val_loss,
-            'epoch': epoch,
-            'config': config,
-            'dataset': dataset_name,
-            'target_column': target_column,
-        }
-        
-        if dataset_name not in checkpoints:
-            checkpoints[dataset_name] = []
-        checkpoints[dataset_name].append(info)
-        
-        print(f"      ✓ {os.path.basename(checkpoint_path)}, val_loss={val_loss}, target={target_column}")
+        _add_checkpoint(dataset_name, checkpoint_path, item_path, item)
     
     # Sort each dataset's checkpoints by val_loss (best first)
     for ds in checkpoints:

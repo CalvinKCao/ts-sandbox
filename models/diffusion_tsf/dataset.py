@@ -4,15 +4,24 @@ Dataset utilities for Diffusion TSF.
 Provides:
 - Synthetic data generation for testing
 - Simple loading from common TSF datasets
+- RealTS synthetic data mixing for improved generalizability
 """
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 import torch.nn.functional as F
 import numpy as np
 import logging
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Union
 from dataclasses import dataclass
+
+# Import RealTS for synthetic data generation (ViTime-inspired)
+# Use try/except to handle both relative imports (when used as package)
+# and absolute imports (when used as script)
+try:
+    from .realts import RealTS, create_realts_dataset
+except ImportError:
+    from realts import RealTS, create_realts_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +305,93 @@ def get_dataloader(
     
     return DataLoader(
         dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers
+    )
+
+
+# ============================================================================
+# RealTS Synthetic Data Mixing
+# ============================================================================
+
+def create_mixed_dataset(
+    real_dataset: Dataset,
+    synthetic_size: int = 10000,
+    lookback_length: int = 512,
+    forecast_length: int = 96,
+    seed: Optional[int] = None
+) -> ConcatDataset:
+    """Create a combined dataset of real and synthetic data.
+    
+    Combines the real dataset with synthetically generated time series
+    to improve model generalizability and structural learning, especially
+    useful for small datasets.
+    
+    Args:
+        real_dataset: The real data dataset (e.g., ElectricityDataset)
+        synthetic_size: Number of synthetic samples to generate
+        lookback_length: Past context window length
+        forecast_length: Forecast horizon length
+        seed: Random seed for synthetic data (None for random)
+        
+    Returns:
+        ConcatDataset combining real and synthetic data
+    """
+    # Create synthetic dataset
+    synthetic_dataset = RealTS(
+        num_samples=synthetic_size,
+        lookback_length=lookback_length,
+        forecast_length=forecast_length,
+        seed=seed
+    )
+    
+    # Combine datasets
+    combined = ConcatDataset([real_dataset, synthetic_dataset])
+    
+    logger.info(
+        f"Created mixed dataset: {len(real_dataset)} real + "
+        f"{len(synthetic_dataset)} synthetic = {len(combined)} total samples"
+    )
+    
+    return combined
+
+
+def get_mixed_dataloader(
+    real_dataset: Dataset,
+    synthetic_size: int = 10000,
+    lookback_length: int = 512,
+    forecast_length: int = 96,
+    batch_size: int = 8,
+    shuffle: bool = True,
+    num_workers: int = 0,
+    seed: Optional[int] = None
+) -> DataLoader:
+    """Create a DataLoader for mixed real + synthetic data.
+    
+    Args:
+        real_dataset: The real data dataset
+        synthetic_size: Number of synthetic samples
+        lookback_length: Past context window length
+        forecast_length: Forecast horizon length
+        batch_size: Batch size
+        shuffle: Whether to shuffle
+        num_workers: Number of worker processes
+        seed: Random seed for synthetic data
+        
+    Returns:
+        DataLoader with mixed real and synthetic data
+    """
+    combined = create_mixed_dataset(
+        real_dataset=real_dataset,
+        synthetic_size=synthetic_size,
+        lookback_length=lookback_length,
+        forecast_length=forecast_length,
+        seed=seed
+    )
+    
+    return DataLoader(
+        combined,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers

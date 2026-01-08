@@ -2,85 +2,22 @@
   {
     "dataset": "ETTh2",
     "target_column": "unknown",
-    "checkpoint": "/home/cao/ts-sandbox/models/diffusion_tsf/checkpoints/diffusion_tsf_ETTh2_20260107_204622/best_model.pt",
-    "val_loss": 0.005845853127539158,
+    "checkpoint": "models/diffusion_tsf/checkpoints/diffusion_tsf_ETTh2/best_model.pt",
+    "val_loss": 0.007705232128500938,
     "success": true,
     "error": null,
     "metrics": {
-      "diffusion_mean_mae": 3.3624484539031982,
-      "diffusion_std_mae": 0.3281519412994385,
-      "diffusion_mean_rmse": 4.255622863769531,
-      "diffusion_std_rmse": 0.4659540355205536,
+      "diffusion_mean_mae": 3.792414426803589,
+      "diffusion_std_mae": 0.3212217688560486,
+      "diffusion_mean_rmse": 4.818059921264648,
+      "diffusion_std_rmse": 0.33133023977279663,
       "num_samples": 5,
       "guidance_loaded": true,
-      "guidance_mean_mae": 3.1743969917297363,
-      "guidance_std_mae": 0.5341732501983643,
-      "guidance_mean_rmse": 4.143390655517578,
-      "guidance_std_rmse": 0.620754063129425,
-      "improvement_pct": -5.92400598526001
-    }
-  },
-  {
-    "dataset": "exchange_rate",
-    "target_column": "unknown",
-    "checkpoint": "/home/cao/ts-sandbox/models/diffusion_tsf/checkpoints/diffusion_tsf_exchange_rate/best_model.pt",
-    "val_loss": 0.001497059827670455,
-    "success": true,
-    "error": null,
-    "metrics": {
-      "diffusion_mean_mae": 0.0199146531522274,
-      "diffusion_std_mae": 0.0028263358399271965,
-      "diffusion_mean_rmse": 0.02471739426255226,
-      "diffusion_std_rmse": 0.003651211503893137,
-      "num_samples": 5,
-      "guidance_loaded": true,
-      "guidance_mean_mae": 0.010188397020101547,
-      "guidance_std_mae": 0.0034539748448878527,
-      "guidance_mean_rmse": 0.01236593909561634,
-      "guidance_std_rmse": 0.004321918357163668,
-      "improvement_pct": -95.46404266357422
-    }
-  },
-  {
-    "dataset": "ETTm1",
-    "target_column": "unknown",
-    "checkpoint": "/home/cao/ts-sandbox/models/diffusion_tsf/checkpoints/diffusion_tsf_ETTm1/best_model.pt",
-    "val_loss": 0.0029050536220893266,
-    "success": true,
-    "error": null,
-    "metrics": {
-      "diffusion_mean_mae": 4.647149085998535,
-      "diffusion_std_mae": 2.376786470413208,
-      "diffusion_mean_rmse": 5.852778434753418,
-      "diffusion_std_rmse": 2.638721227645874,
-      "num_samples": 5,
-      "guidance_loaded": true,
-      "guidance_mean_mae": 2.641664743423462,
-      "guidance_std_mae": 1.3467111587524414,
-      "guidance_mean_rmse": 3.0469095706939697,
-      "guidance_std_rmse": 1.5509635210037231,
-      "improvement_pct": -75.91744995117188
-    }
-  },
-  {
-    "dataset": "illness",
-    "target_column": "unknown",
-    "checkpoint": "/home/cao/ts-sandbox/models/diffusion_tsf/checkpoints/diffusion_tsf_illness/best_model.pt",
-    "val_loss": 0.005154499318450689,
-    "success": true,
-    "error": null,
-    "metrics": {
-      "diffusion_mean_mae": 126635.796875,
-      "diffusion_std_mae": 4990.46484375,
-      "diffusion_mean_rmse": 159437.03125,
-      "diffusion_std_rmse": 90.7109375,
-      "num_samples": 2,
-      "guidance_loaded": true,
-      "guidance_mean_mae": 92702.7578125,
-      "guidance_std_mae": 1359.03125,
-      "guidance_mean_rmse": 115531.9453125,
-      "guidance_std_rmse": 1320.34375,
-      "improvement_pct": -36.604129791259766
+      "guidance_mean_mae": 3.1666367053985596,
+      "guidance_std_mae": 0.8366999626159668,
+      "guidance_mean_rmse": 4.268908977508545,
+      "guidance_std_rmse": 1.160831332206726,
+      "improvement_pct": -19.76158905029297
     }
   }
 ]

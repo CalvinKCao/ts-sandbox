@@ -35,6 +35,8 @@
 #   ./train_multi_dataset_optuna.sh --repr-mode pdf   # Use PDF (stripe) mode
 #   ./train_multi_dataset_optuna.sh --skip-itrans     # Skip iTransformer training
 #   ./train_multi_dataset_optuna.sh --dataset ETTh2   # Train only on ETTh2
+#   ./train_multi_dataset_optuna.sh --use-synthetic   # Add RealTS synthetic data augmentation
+#   ./train_multi_dataset_optuna.sh --synthetic-size 5000  # Custom synthetic sample count
 #
 set -euo pipefail
 
@@ -52,6 +54,8 @@ SINGLE_DATASET=""
 STRIDE=1  # Default stride for sliding window
 USE_MONO=false
 MONO_WEIGHT=10.0
+USE_SYNTHETIC=false  # RealTS synthetic data augmentation
+SYNTHETIC_SIZE=10000  # Number of synthetic samples to generate
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -119,9 +123,22 @@ while [[ $# -gt 0 ]]; do
       MONO_WEIGHT="$2"
       shift 2
       ;;
+    --use-synthetic|--use-synthetic-data)
+      USE_SYNTHETIC=true
+      shift
+      ;;
+    --synthetic-size)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --synthetic-size requires an integer argument"
+        exit 1
+      fi
+      SYNTHETIC_SIZE="$2"
+      USE_SYNTHETIC=true  # Implicitly enable synthetic if size is specified
+      shift 2
+      ;;
     *)
       echo "Unknown option: $1"
-      echo "Usage: $0 [--dry-run] [--seed N] [--trials N] [--repr-mode pdf|cdf] [--stride N] [--skip-itrans] [--dataset NAME]"
+      echo "Usage: $0 [--dry-run] [--seed N] [--trials N] [--repr-mode pdf|cdf] [--stride N] [--skip-itrans] [--dataset NAME] [--use-synthetic] [--synthetic-size N]"
       exit 1
       ;;
   esac
@@ -224,8 +241,17 @@ echo "   Representation mode: ${REPR_MODE}"
 echo "   Stride: ${STRIDE}"
 echo "   Skip iTransformer: ${SKIP_ITRANSFORMER}"
 echo "   Monotonicity loss: ${USE_MONO} (weight=${MONO_WEIGHT})"
+echo "   Synthetic augmentation: ${USE_SYNTHETIC} (size=${SYNTHETIC_SIZE})"
 if [[ -n "${SINGLE_DATASET}" ]]; then
   echo "   Single dataset mode: ${SINGLE_DATASET}"
+fi
+
+# Validate: Synthetic data requires CDF mode
+if [[ "${USE_SYNTHETIC}" == "true" && "${REPR_MODE}" != "cdf" ]]; then
+  echo ""
+  echo "❌ ERROR: Synthetic data augmentation requires CDF representation mode."
+  echo "   Please use --repr-mode cdf when using --use-synthetic"
+  exit 1
 fi
 echo ""
 echo "🔒 DATA LEAKAGE PREVENTION:"
@@ -319,6 +345,10 @@ for DATASET in "${DATASETS[@]}"; do
     if [[ "${USE_MONO}" == "true" ]]; then
       echo "               --use-monotonicity-loss \\"
       echo "               --monotonicity-weight ${MONO_WEIGHT} \\"
+    fi
+    if [[ "${USE_SYNTHETIC}" == "true" ]]; then
+      echo "               --use-synthetic-data \\"
+      echo "               --synthetic-size ${SYNTHETIC_SIZE} \\"
     fi
     if [[ "${SKIP_ITRANSFORMER}" != "true" ]]; then
       echo "               --use-guidance \\"
@@ -446,6 +476,14 @@ for DATASET in "${DATASETS[@]}"; do
       --monotonicity-weight "${MONO_WEIGHT}"
     )
   fi
+  
+  # Add synthetic data augmentation if enabled
+  if [[ "${USE_SYNTHETIC}" == "true" ]]; then
+    TRAIN_CMD+=(
+      --use-synthetic-data
+      --synthetic-size "${SYNTHETIC_SIZE}"
+    )
+  fi
 
   # Add guidance if iTransformer was trained
   if [[ "${SKIP_ITRANSFORMER}" != "true" && -n "${ITRANS_CKPT}" ]]; then
@@ -486,6 +524,12 @@ if [[ "${DRY_RUN}" != "true" ]]; then
   echo "   ✅ Gaps between splits prevent window overlap"
   echo "   ✅ Per-sample normalization uses only past data"
   echo "   ✅ iTransformer guidance frozen, uses same split"
+  if [[ "${USE_SYNTHETIC}" == "true" ]]; then
+    echo ""
+    echo "🧪 Synthetic data augmentation:"
+    echo "   ✅ RealTS synthetic samples added: ${SYNTHETIC_SIZE}"
+    echo "   ✅ Generators: RWB, PWB, LGB, TWDB, IFFTB, seasonal_periodicity"
+  fi
   echo ""
   echo "📝 NORMALIZATION VERIFICATION (code inspection confirms):"
   echo "   model.py:_normalize_sequence():"
