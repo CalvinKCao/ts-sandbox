@@ -41,7 +41,7 @@ if script_dir not in sys.path:
 from config import DiffusionTSFConfig
 from model import DiffusionTSF
 from metrics import compute_metrics, log_metrics
-from dataset import apply_1d_augmentations, create_mixed_dataset
+from dataset import apply_1d_augmentations, get_synthetic_dataloader
 from realts import RealTS
 from guidance import (
     GuidanceModel, 
@@ -193,9 +193,10 @@ USE_GUIDANCE_CHANNEL = False  # If True, use Stage 1 predictor as guidance
 GUIDANCE_TYPE = "linear"  # "linear", "last_value", or "itransformer"
 GUIDANCE_CHECKPOINT = None  # Path to pre-trained iTransformer checkpoint (if guidance_type="itransformer")
 
-# Synthetic data augmentation settings (set from CLI)
-USE_SYNTHETIC_DATA = False  # If True, mix RealTS synthetic data with real data during training
-SYNTHETIC_SIZE = 10000  # Number of synthetic samples to generate
+# Synthetic data pre-training settings (set from CLI)
+# Two-phase training: (1) pre-train on synthetic data, (2) fine-tune on real data
+SYNTHETIC_PRETRAIN_EPOCHS = 0  # Number of epochs to pre-train on synthetic data (0 = disabled)
+SYNTHETIC_SIZE = 10000  # Number of synthetic samples to generate for pre-training
 
 # Data split settings
 # IMPORTANT: Time series data MUST use chronological splits to avoid data leakage.
@@ -524,11 +525,11 @@ def get_dataloaders(
     use_all_columns: bool = False,
     columns: Optional[List[str]] = None,
     column: Optional[str] = None,  # Target column for univariate (None = use global TARGET_COLUMN)
-    use_chronological_split: bool = True,  # MUST be True for time series to avoid data leakage
-    use_synthetic_data: bool = False,  # If True, mix RealTS synthetic data with training data
-    synthetic_size: int = 10000  # Number of synthetic samples to add
+    use_chronological_split: bool = True  # MUST be True for time series to avoid data leakage
 ) -> Tuple[DataLoader, DataLoader, int]:
-    """Create train and validation dataloaders.
+    """Create train and validation dataloaders for REAL data.
+    
+    NOTE: For synthetic pre-training, use get_synthetic_dataloader() from dataset.py.
     
     Args:
         batch_size: Batch size for dataloaders
@@ -541,8 +542,6 @@ def get_dataloaders(
         column: Target column for univariate forecasting (overrides global TARGET_COLUMN)
         use_chronological_split: If True (DEFAULT), use chronological split (70% train, 10% val, 20% test).
                                  WARNING: Setting to False causes severe data leakage in time series!
-        use_synthetic_data: If True, mix RealTS synthetic time series with training data
-        synthetic_size: Number of synthetic samples to generate when use_synthetic_data is True
     
     Returns:
         (train_loader, val_loader, num_variables)
@@ -649,17 +648,6 @@ def get_dataloaders(
         data_tensor=base_dataset.data,
         indices=train_indices
     )
-    
-    # Optionally mix synthetic data with training data
-    if use_synthetic_data:
-        logger.info(f"Adding {synthetic_size} RealTS synthetic samples to training data")
-        train_dataset = create_mixed_dataset(
-            real_dataset=train_dataset,
-            synthetic_size=synthetic_size,
-            lookback_length=lookback,
-            forecast_length=forecast,
-            seed=42  # Fixed seed for reproducibility
-        )
     
     val_dataset = ElectricityDataset(
         DATA_PATH,
@@ -871,10 +859,23 @@ def train(
         batch_size=config['batch_size'],
         val_split=VAL_SPLIT,
         use_all_columns=config.get('use_all_columns', False),
-        use_chronological_split=USE_CHRONOLOGICAL_SPLIT,
-        use_synthetic_data=config.get('use_synthetic_data', USE_SYNTHETIC_DATA),
-        synthetic_size=config.get('synthetic_size', SYNTHETIC_SIZE)
+        use_chronological_split=USE_CHRONOLOGICAL_SPLIT
     )
+    
+    # Create synthetic dataloader for pre-training phase (if enabled)
+    synthetic_pretrain_epochs = config.get('synthetic_pretrain_epochs', SYNTHETIC_PRETRAIN_EPOCHS)
+    synthetic_loader = None
+    if synthetic_pretrain_epochs > 0:
+        synthetic_size = config.get('synthetic_size', SYNTHETIC_SIZE)
+        synthetic_loader = get_synthetic_dataloader(
+            num_samples=synthetic_size,
+            lookback_length=LOOKBACK_LENGTH,
+            forecast_length=FORECAST_LENGTH,
+            batch_size=config['batch_size'],
+            shuffle=True,
+            seed=42  # Fixed seed for reproducibility
+        )
+        logger.info(f"Synthetic pre-training enabled: {synthetic_pretrain_epochs} epochs on {synthetic_size} samples")
     
     # Update config with actual number of variables from dataset
     config['num_variables'] = num_variables
@@ -965,11 +966,56 @@ def train(
         best_val_loss = ckpt['val_loss']
         logger.info(f"Resuming from epoch {start_epoch}, best val_loss: {best_val_loss:.4f}")
     
-    # Training loop
+    # =========================================================================
+    # PHASE 1: Pre-train on synthetic data (if enabled)
+    # =========================================================================
+    if synthetic_loader is not None and start_epoch == 0:
+        logger.info("=" * 60)
+        logger.info("PHASE 1: PRE-TRAINING ON SYNTHETIC DATA")
+        logger.info("=" * 60)
+        
+        for pretrain_epoch in range(synthetic_pretrain_epochs):
+            epoch_start = time.time()
+            
+            # Train on synthetic data
+            train_loss = train_epoch(model, synthetic_loader, optimizer, device, pretrain_epoch)
+            
+            # Validate on REAL validation data (to track transfer quality)
+            val_metrics = validate(model, val_loader, device, use_generation=False)
+            val_loss = val_metrics['val_loss']
+            
+            # Update scheduler
+            scheduler.step()
+            
+            epoch_time = time.time() - epoch_start
+            logger.info(f"[PRETRAIN] Epoch {pretrain_epoch}/{synthetic_pretrain_epochs} | "
+                       f"Synth Train: {train_loss:.4f} | Real Val: {val_loss:.4f} | "
+                       f"LR: {scheduler.get_last_lr()[0]:.2e} | "
+                       f"Time: {epoch_time:.1f}s")
+        
+        # Save pre-trained checkpoint before fine-tuning
+        if checkpoint_path:
+            pretrain_ckpt_path = checkpoint_path.replace('.pt', '_pretrained.pt')
+            save_checkpoint(
+                model, optimizer, synthetic_pretrain_epochs - 1, train_loss, val_loss,
+                config, pretrain_ckpt_path
+            )
+            logger.info(f"Pre-trained checkpoint saved: {pretrain_ckpt_path}")
+        
+        logger.info("=" * 60)
+        logger.info("PHASE 2: FINE-TUNING ON REAL DATA")
+        logger.info("=" * 60)
+        
+        # Reset early stopping for fine-tuning phase
+        early_stopping = EarlyStopping(patience=PATIENCE)
+    
+    # =========================================================================
+    # PHASE 2: Fine-tune on real data (or regular training if no pre-training)
+    # =========================================================================
     for epoch in range(start_epoch, max_epochs):
         epoch_start = time.time()
         
-        # Train
+        # Train on REAL data
         train_loss = train_epoch(model, train_loader, optimizer, device, epoch)
         
         # Validate
@@ -980,7 +1026,8 @@ def train(
         scheduler.step()
         
         epoch_time = time.time() - epoch_start
-        logger.info(f"Epoch {epoch}/{max_epochs} | "
+        phase_label = "[FINETUNE] " if synthetic_loader is not None else ""
+        logger.info(f"{phase_label}Epoch {epoch}/{max_epochs} | "
                    f"Train: {train_loss:.4f} | Val: {val_loss:.4f} | "
                    f"LR: {scheduler.get_last_lr()[0]:.2e} | "
                    f"Time: {epoch_time:.1f}s")
@@ -1072,8 +1119,8 @@ def objective(trial) -> float:
         'dataset': SELECTED_DATASET,  # Dataset name for visualization
         'use_monotonicity_loss': USE_MONOTONICITY_LOSS,
         'monotonicity_weight': MONOTONICITY_WEIGHT,
-        # Synthetic data augmentation
-        'use_synthetic_data': USE_SYNTHETIC_DATA,
+        # Synthetic pre-training (two-phase: pretrain on synthetic, then fine-tune on real)
+        'synthetic_pretrain_epochs': SYNTHETIC_PRETRAIN_EPOCHS,
         'synthetic_size': SYNTHETIC_SIZE,
     }
     
@@ -1280,8 +1327,8 @@ def train_with_params(params: dict, run_name: Optional[str] = None):
     config['dataset'] = SELECTED_DATASET  # Dataset name for visualization
     config['use_monotonicity_loss'] = USE_MONOTONICITY_LOSS
     config['monotonicity_weight'] = MONOTONICITY_WEIGHT
-    # Synthetic data augmentation
-    config['use_synthetic_data'] = USE_SYNTHETIC_DATA
+    # Synthetic pre-training (two-phase: pretrain on synthetic, then fine-tune on real)
+    config['synthetic_pretrain_epochs'] = SYNTHETIC_PRETRAIN_EPOCHS
     config['synthetic_size'] = SYNTHETIC_SIZE
     
     logger.info("Training with params:")
@@ -1426,12 +1473,13 @@ def main():
                              '(required when --guidance-type=itransformer)')
     parser.add_argument('--stride', type=int, default=24,
                         help='Stride for sliding window (default: 24, meaning 1 day for hourly data)')
-    # Synthetic data augmentation arguments
-    parser.add_argument('--use-synthetic-data', action='store_true', default=False,
-                        help='Mix RealTS synthetic time series with real data during training '
-                             '(improves generalizability for small datasets)')
+    # Synthetic data pre-training arguments (two-phase: pretrain on synthetic, then fine-tune on real)
+    parser.add_argument('--synthetic-pretrain-epochs', type=int, default=0, metavar='N',
+                        help='Number of epochs to PRE-TRAIN on synthetic RealTS data before fine-tuning '
+                             'on real data. Set to 0 to disable (default: 0). '
+                             'Recommended: 20-50 epochs for small datasets.')
     parser.add_argument('--synthetic-size', type=int, default=10000, metavar='N',
-                        help='Number of synthetic samples to generate when --use-synthetic-data is enabled '
+                        help='Number of synthetic samples to generate for pre-training '
                              '(default: 10000)')
     args = parser.parse_args()
     
@@ -1482,15 +1530,15 @@ def main():
         logger.error("--guidance-type=itransformer requires --guidance-checkpoint PATH")
         sys.exit(1)
     
-    # Set synthetic data settings
-    global USE_SYNTHETIC_DATA, SYNTHETIC_SIZE
-    USE_SYNTHETIC_DATA = args.use_synthetic_data
+    # Set synthetic pre-training settings
+    global SYNTHETIC_PRETRAIN_EPOCHS, SYNTHETIC_SIZE
+    SYNTHETIC_PRETRAIN_EPOCHS = args.synthetic_pretrain_epochs
     SYNTHETIC_SIZE = args.synthetic_size
     
-    # Validate synthetic data constraint: only CDF mode is supported
-    if USE_SYNTHETIC_DATA and args.repr_mode == 'pdf':
+    # Validate synthetic pre-training constraint: only CDF mode is supported
+    if SYNTHETIC_PRETRAIN_EPOCHS > 0 and args.repr_mode == 'pdf':
         logger.error(
-            "Synthetic augmentation is currently only supported in CDF representation mode. "
+            "Synthetic pre-training is currently only supported in CDF representation mode. "
             "Please switch to --repr-mode cdf."
         )
         sys.exit(1)
@@ -1542,8 +1590,8 @@ def main():
         logger.info(f"Visual Guide: enabled (type={GUIDANCE_TYPE})")
         if GUIDANCE_CHECKPOINT:
             logger.info(f"  Guidance checkpoint: {GUIDANCE_CHECKPOINT}")
-    if USE_SYNTHETIC_DATA:
-        logger.info(f"Synthetic data augmentation: enabled ({SYNTHETIC_SIZE} samples)")
+    if SYNTHETIC_PRETRAIN_EPOCHS > 0:
+        logger.info(f"Synthetic pre-training: {SYNTHETIC_PRETRAIN_EPOCHS} epochs on {SYNTHETIC_SIZE} samples")
     
     if args.list_checkpoints:
         # List all checkpoint files and exit
@@ -1580,8 +1628,8 @@ def main():
             'dataset': SELECTED_DATASET,  # Dataset name for visualization
             'use_monotonicity_loss': USE_MONOTONICITY_LOSS,
             'monotonicity_weight': MONOTONICITY_WEIGHT,
-            # Synthetic data not used in quick test
-            'use_synthetic_data': False,
+            # Synthetic pre-training not used in quick test
+            'synthetic_pretrain_epochs': 0,
             'synthetic_size': 0,
         }
         

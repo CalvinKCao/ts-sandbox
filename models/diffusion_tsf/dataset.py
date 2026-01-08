@@ -312,8 +312,56 @@ def get_dataloader(
 
 
 # ============================================================================
-# RealTS Synthetic Data Mixing
+# RealTS Synthetic Data for Pre-training
 # ============================================================================
+
+def get_synthetic_dataloader(
+    num_samples: int = 10000,
+    lookback_length: int = 512,
+    forecast_length: int = 96,
+    batch_size: int = 8,
+    shuffle: bool = True,
+    num_workers: int = 0,
+    seed: Optional[int] = None
+) -> DataLoader:
+    """Create a DataLoader with ONLY synthetic RealTS data for pre-training.
+    
+    This is used for the pre-training phase where the model learns general
+    time series structure from diverse synthetic patterns before fine-tuning
+    on real data.
+    
+    Args:
+        num_samples: Number of synthetic samples to generate
+        lookback_length: Past context window length
+        forecast_length: Forecast horizon length
+        batch_size: Batch size
+        shuffle: Whether to shuffle
+        num_workers: Number of worker processes
+        seed: Random seed for reproducibility (None for random)
+        
+    Returns:
+        DataLoader with synthetic-only data
+    """
+    synthetic_dataset = RealTS(
+        num_samples=num_samples,
+        lookback_length=lookback_length,
+        forecast_length=forecast_length,
+        seed=seed
+    )
+    
+    logger.info(
+        f"Created synthetic-only dataloader: {num_samples} samples, "
+        f"lookback={lookback_length}, forecast={forecast_length}"
+    )
+    
+    return DataLoader(
+        synthetic_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+
 
 def create_mixed_dataset(
     real_dataset: Dataset,
@@ -324,9 +372,11 @@ def create_mixed_dataset(
 ) -> ConcatDataset:
     """Create a combined dataset of real and synthetic data.
     
-    Combines the real dataset with synthetically generated time series
-    to improve model generalizability and structural learning, especially
-    useful for small datasets.
+    NOTE: For pre-train + fine-tune workflow, use get_synthetic_dataloader()
+    for pre-training and real dataloader for fine-tuning instead.
+    
+    This function is kept for backward compatibility but the two-phase
+    approach (pre-train on synthetic, then fine-tune on real) is preferred.
     
     Args:
         real_dataset: The real data dataset (e.g., ElectricityDataset)
@@ -368,6 +418,9 @@ def get_mixed_dataloader(
     seed: Optional[int] = None
 ) -> DataLoader:
     """Create a DataLoader for mixed real + synthetic data.
+    
+    NOTE: For pre-train + fine-tune workflow, use get_synthetic_dataloader()
+    for pre-training and real dataloader for fine-tuning instead.
     
     Args:
         real_dataset: The real data dataset

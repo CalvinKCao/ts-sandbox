@@ -35,8 +35,8 @@
 #   ./train_multi_dataset_optuna.sh --repr-mode pdf   # Use PDF (stripe) mode
 #   ./train_multi_dataset_optuna.sh --skip-itrans     # Skip iTransformer training
 #   ./train_multi_dataset_optuna.sh --dataset ETTh2   # Train only on ETTh2
-#   ./train_multi_dataset_optuna.sh --use-synthetic   # Add RealTS synthetic data augmentation
-#   ./train_multi_dataset_optuna.sh --synthetic-size 5000  # Custom synthetic sample count
+#   ./train_multi_dataset_optuna.sh --synthetic-pretrain 30  # Pre-train 30 epochs on synthetic data
+#   ./train_multi_dataset_optuna.sh --synthetic-size 5000    # Custom synthetic sample count
 #
 set -euo pipefail
 
@@ -54,7 +54,7 @@ SINGLE_DATASET=""
 STRIDE=1  # Default stride for sliding window
 USE_MONO=false
 MONO_WEIGHT=10.0
-USE_SYNTHETIC=false  # RealTS synthetic data augmentation
+SYNTHETIC_PRETRAIN_EPOCHS=0  # Epochs to pre-train on synthetic data (0 = disabled)
 SYNTHETIC_SIZE=10000  # Number of synthetic samples to generate
 
 while [[ $# -gt 0 ]]; do
@@ -123,9 +123,13 @@ while [[ $# -gt 0 ]]; do
       MONO_WEIGHT="$2"
       shift 2
       ;;
-    --use-synthetic|--use-synthetic-data)
-      USE_SYNTHETIC=true
-      shift
+    --synthetic-pretrain|--synthetic-pretrain-epochs)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --synthetic-pretrain requires an integer argument (number of epochs)"
+        exit 1
+      fi
+      SYNTHETIC_PRETRAIN_EPOCHS="$2"
+      shift 2
       ;;
     --synthetic-size)
       if [[ -z "${2:-}" ]]; then
@@ -133,12 +137,11 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       SYNTHETIC_SIZE="$2"
-      USE_SYNTHETIC=true  # Implicitly enable synthetic if size is specified
       shift 2
       ;;
     *)
       echo "Unknown option: $1"
-      echo "Usage: $0 [--dry-run] [--seed N] [--trials N] [--repr-mode pdf|cdf] [--stride N] [--skip-itrans] [--dataset NAME] [--use-synthetic] [--synthetic-size N]"
+      echo "Usage: $0 [--dry-run] [--seed N] [--trials N] [--repr-mode pdf|cdf] [--stride N] [--skip-itrans] [--dataset NAME] [--synthetic-pretrain N] [--synthetic-size N]"
       exit 1
       ;;
   esac
@@ -241,16 +244,20 @@ echo "   Representation mode: ${REPR_MODE}"
 echo "   Stride: ${STRIDE}"
 echo "   Skip iTransformer: ${SKIP_ITRANSFORMER}"
 echo "   Monotonicity loss: ${USE_MONO} (weight=${MONO_WEIGHT})"
-echo "   Synthetic augmentation: ${USE_SYNTHETIC} (size=${SYNTHETIC_SIZE})"
+if [[ "${SYNTHETIC_PRETRAIN_EPOCHS}" -gt 0 ]]; then
+  echo "   Synthetic pre-training: ${SYNTHETIC_PRETRAIN_EPOCHS} epochs on ${SYNTHETIC_SIZE} samples"
+else
+  echo "   Synthetic pre-training: disabled"
+fi
 if [[ -n "${SINGLE_DATASET}" ]]; then
   echo "   Single dataset mode: ${SINGLE_DATASET}"
 fi
 
-# Validate: Synthetic data requires CDF mode
-if [[ "${USE_SYNTHETIC}" == "true" && "${REPR_MODE}" != "cdf" ]]; then
+# Validate: Synthetic pre-training requires CDF mode
+if [[ "${SYNTHETIC_PRETRAIN_EPOCHS}" -gt 0 && "${REPR_MODE}" != "cdf" ]]; then
   echo ""
-  echo "❌ ERROR: Synthetic data augmentation requires CDF representation mode."
-  echo "   Please use --repr-mode cdf when using --use-synthetic"
+  echo "❌ ERROR: Synthetic pre-training requires CDF representation mode."
+  echo "   Please use --repr-mode cdf when using --synthetic-pretrain"
   exit 1
 fi
 echo ""
@@ -346,8 +353,8 @@ for DATASET in "${DATASETS[@]}"; do
       echo "               --use-monotonicity-loss \\"
       echo "               --monotonicity-weight ${MONO_WEIGHT} \\"
     fi
-    if [[ "${USE_SYNTHETIC}" == "true" ]]; then
-      echo "               --use-synthetic-data \\"
+    if [[ "${SYNTHETIC_PRETRAIN_EPOCHS}" -gt 0 ]]; then
+      echo "               --synthetic-pretrain-epochs ${SYNTHETIC_PRETRAIN_EPOCHS} \\"
       echo "               --synthetic-size ${SYNTHETIC_SIZE} \\"
     fi
     if [[ "${SKIP_ITRANSFORMER}" != "true" ]]; then
@@ -477,10 +484,10 @@ for DATASET in "${DATASETS[@]}"; do
     )
   fi
   
-  # Add synthetic data augmentation if enabled
-  if [[ "${USE_SYNTHETIC}" == "true" ]]; then
+  # Add synthetic pre-training if enabled (two-phase: pretrain on synthetic, then fine-tune on real)
+  if [[ "${SYNTHETIC_PRETRAIN_EPOCHS}" -gt 0 ]]; then
     TRAIN_CMD+=(
-      --use-synthetic-data
+      --synthetic-pretrain-epochs "${SYNTHETIC_PRETRAIN_EPOCHS}"
       --synthetic-size "${SYNTHETIC_SIZE}"
     )
   fi
@@ -524,10 +531,11 @@ if [[ "${DRY_RUN}" != "true" ]]; then
   echo "   ✅ Gaps between splits prevent window overlap"
   echo "   ✅ Per-sample normalization uses only past data"
   echo "   ✅ iTransformer guidance frozen, uses same split"
-  if [[ "${USE_SYNTHETIC}" == "true" ]]; then
+  if [[ "${SYNTHETIC_PRETRAIN_EPOCHS}" -gt 0 ]]; then
     echo ""
-    echo "🧪 Synthetic data augmentation:"
-    echo "   ✅ RealTS synthetic samples added: ${SYNTHETIC_SIZE}"
+    echo "🧪 Synthetic pre-training (two-phase approach):"
+    echo "   ✅ Phase 1: Pre-trained ${SYNTHETIC_PRETRAIN_EPOCHS} epochs on ${SYNTHETIC_SIZE} synthetic samples"
+    echo "   ✅ Phase 2: Fine-tuned on real data"
     echo "   ✅ Generators: RWB, PWB, LGB, TWDB, IFFTB, seasonal_periodicity"
   fi
   echo ""
