@@ -1,6 +1,6 @@
 ================================================================================
 TRAIN_MULTI_DATASET_OPTUNA.SH VISUALIZATION SUMMARY
-Generated: 2026-01-08 11:52:45
+Generated: 2026-01-08 18:46:24
 Datasets: ETTh2, ETTm1, illness, exchange_rate, traffic, weather
 ================================================================================
 
@@ -14,14 +14,14 @@ RESULTS BY DATASET (from train_multi_dataset_optuna.sh)
 
 Dataset       Target     Diff MAE       iTrans MAE     Improve    Val Loss  
 ----------------------------------------------------------------------------------------------------
-ETTh2         unknown    3.7924±0.3212  3.1666±0.8367  -19.8%     0.0077    
+ETTh2         unknown    5.4775±1.0816  3.1666±0.8367  -73.0%     0.0025    
 
 ----------------------------------------------------------------------
 MISSING DATASETS (no checkpoints found)
 ----------------------------------------------------------------------
 
   - traffic
-  - exchange_rate
   - ETTm1
-  - weather
   - illness
+  - exchange_rate
+  - weather

@@ -461,6 +461,7 @@ for DATASET in "${DATASETS[@]}"; do
   # Build the training command
   TRAIN_CMD=(
     python3 models/diffusion_tsf/train_electricity.py
+    --resume
     --dataset "${DATASET}"
     --target "${TARGET_COLUMN}"
     --trials "${NUM_TRIALS}"

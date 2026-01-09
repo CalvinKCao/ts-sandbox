@@ -1,0 +1,25 @@
+{
+  "learning_rate": 4.25e-05,
+  "model_size": "small",
+  "diffusion_steps": 100,
+  "batch_size": 16,
+  "noise_schedule": "cosine",
+  "blur_sigma": 2.0,
+  "emd_lambda": 0.2,
+  "representation_mode": "pdf",
+  "model_type": "unet",
+  "unet_kernel_size": [
+    3,
+    9
+  ],
+  "use_dilated_middle": false,
+  "use_time_ramp": true,
+  "use_time_sine": false,
+  "use_value_channel": true,
+  "use_coordinate_channel": true,
+  "seasonal_period": 96,
+  "use_all_columns": false,
+  "use_hybrid_condition": false,
+  "transformer_patch_height": 16,
+  "transformer_patch_width": 16
+}

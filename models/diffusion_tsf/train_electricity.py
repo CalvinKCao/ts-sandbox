@@ -116,19 +116,49 @@ def get_gpu_memory_gb() -> float:
     except Exception:
         return 8.0  # Assume 8GB if detection fails
 
+def get_high_end_search_space():
+    """Return the high-end GPU search space (for synthetic pre-training or forced mode)."""
+    return {
+        'learning_rate': (1e-5, 1e-3),  # Wide LR range: 1e-5 to 1e-3
+        'model_size': ['small', 'large'],  # Include all model sizes
+        'diffusion_steps': [2000, 4000],  # More diffusion options
+        'batch_size': [128, 512],  # Much larger batch sizes
+        'noise_schedule': ['linear'],  # Well-established noise schedules
+    }
+
+
+def get_finetune_search_space():
+    """Return a more conservative search space for fine-tuning pre-trained models.
+    
+    Uses lower learning rates to avoid catastrophic forgetting when fine-tuning
+    a universal pre-trained model on domain-specific data.
+    """
+    return {
+        'learning_rate': (1e-6, 1e-4),  # More conservative LR for fine-tuning
+        'model_size': ['small', 'large'],  # Same model sizes
+        'diffusion_steps': [2000, 4000],  # Same diffusion options
+        'batch_size': [128, 512],  # Same batch sizes
+        'noise_schedule': ['linear'],  # Same noise schedule
+    }
+
+
 def get_hardware_config():
     """Get hardware-adaptive search space based on GPU memory."""
+    # If fine-tuning from pretrained checkpoint, use conservative LR range
+    if FINETUNE_MODE and PRETRAINED_CHECKPOINT_PATH:
+        logger.info("Fine-tuning mode enabled - using conservative LR range (1e-6, 1e-4)")
+        return get_finetune_search_space()
+    
+    # If forced, use high-end search space regardless of hardware
+    if FORCE_HIGH_END_SEARCH:
+        logger.info("Forced high-end search space enabled - using extensive search space")
+        return get_high_end_search_space()
+    
     gpu_mem = get_gpu_memory_gb()
     
     if gpu_mem >= 40:  # Ada 6000, A100, etc.
         logger.info(f"Detected high-end GPU ({gpu_mem:.1f}GB) - using extensive search space")
-        return {
-            'learning_rate': (1e-5, 1e-3),  # Much wider LR range: 1e-5 to 1e-3
-            'model_size': ['tiny', 'small', 'medium', 'large'],  # Include all model sizes
-            'diffusion_steps': [100, 500, 1000, 2000, 3000],  # More diffusion options
-            'batch_size': [8, 16, 32, 64, 128, 256],  # Much larger batch sizes
-            'noise_schedule': ['linear', 'cosine'],  # Well-established noise schedules
-        }
+        return get_high_end_search_space()
     elif gpu_mem >= 16:  # RTX 3090, 4080, etc.
         logger.info(f"Detected mid-range GPU ({gpu_mem:.1f}GB) - using medium batch sizes")
         return {
@@ -197,6 +227,22 @@ GUIDANCE_CHECKPOINT = None  # Path to pre-trained iTransformer checkpoint (if gu
 # Two-phase training: (1) pre-train on synthetic data, (2) fine-tune on real data
 SYNTHETIC_PRETRAIN_EPOCHS = 0  # Number of epochs to pre-train on synthetic data (0 = disabled)
 SYNTHETIC_SIZE = 10000  # Number of synthetic samples to generate for pre-training
+
+# Pure synthetic training mode (for hyperparameter search on synthetic data)
+SYNTHETIC_ONLY_MODE = False  # If True, train ONLY on synthetic data (no real data)
+
+# Pre-trained checkpoint for fine-tuning (set from CLI)
+PRETRAINED_CHECKPOINT_PATH = None  # Path to a pre-trained model to start fine-tuning from
+
+# Force high-end search space regardless of GPU detection
+FORCE_HIGH_END_SEARCH = False
+
+# Custom run name for Optuna studies (overrides default naming)
+CUSTOM_RUN_NAME = None
+
+# Fine-tuning mode (enables more conservative LR range when loading pretrained checkpoint)
+# When True and pretrained_checkpoint is set, uses LR range (1e-6, 1e-4) instead of (1e-5, 1e-3)
+FINETUNE_MODE = False
 
 # Data split settings
 # IMPORTANT: Time series data MUST use chronological splits to avoid data leakage.
@@ -381,7 +427,7 @@ def create_guidance_for_training(
 MAX_EPOCHS = 275
 PATIENCE = 25                   # Early stopping patience (increased for longer training)
 VAL_SPLIT = 0.1
-NUM_OPTUNA_TRIALS = 12          # Total trials to run
+NUM_OPTUNA_TRIALS = 10          # Total trials to run
 PRUNING_WARMUP = 20             # Don't prune before this epoch (increased for longer training)
 OVERALL_SAVE_INTERVAL = 25      # Re-save the global best every N epochs to avoid loss on interrupts
 
@@ -935,6 +981,21 @@ def train(
     logger.info(f"Representation mode: {model_config.representation_mode}")
     logger.info(f"Blur sigma: {model_config.blur_sigma}, EMD lambda: {model_config.emd_lambda}")
     
+    # Load pre-trained weights if specified (for fine-tuning)
+    pretrained_path = config.get('pretrained_checkpoint', PRETRAINED_CHECKPOINT_PATH)
+    if pretrained_path and os.path.exists(pretrained_path):
+        logger.info(f"Loading pre-trained weights from: {pretrained_path}")
+        pretrained_ckpt = torch.load(pretrained_path, map_location=device)
+        
+        # Load model weights (ignore mismatched keys for flexibility)
+        model_state = pretrained_ckpt.get('model_state_dict', pretrained_ckpt)
+        missing, unexpected = model.load_state_dict(model_state, strict=False)
+        if missing:
+            logger.warning(f"Missing keys in pretrained checkpoint: {missing}")
+        if unexpected:
+            logger.warning(f"Unexpected keys in pretrained checkpoint: {unexpected}")
+        logger.info("Pre-trained weights loaded successfully!")
+    
     # Optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -966,8 +1027,88 @@ def train(
         best_val_loss = ckpt['val_loss']
         logger.info(f"Resuming from epoch {start_epoch}, best val_loss: {best_val_loss:.4f}")
     
+    # Check if we're in synthetic-only mode
+    synthetic_only = config.get('synthetic_only', SYNTHETIC_ONLY_MODE)
+    
     # =========================================================================
-    # PHASE 1: Pre-train on synthetic data (if enabled)
+    # SYNTHETIC-ONLY MODE: Train purely on synthetic data (for HP search)
+    # =========================================================================
+    if synthetic_only:
+        logger.info("=" * 60)
+        logger.info("SYNTHETIC-ONLY MODE: Training on synthetic data, validating on real data")
+        logger.info("=" * 60)
+        
+        # Create synthetic loader for all training
+        synthetic_loader_for_training = get_synthetic_dataloader(
+            num_samples=config.get('synthetic_size', SYNTHETIC_SIZE),
+            lookback_length=LOOKBACK_LENGTH,
+            forecast_length=FORECAST_LENGTH,
+            batch_size=config['batch_size'],
+            shuffle=True,
+            seed=42
+        )
+        
+        for epoch in range(start_epoch, max_epochs):
+            epoch_start = time.time()
+            
+            # Train on SYNTHETIC data
+            train_loss = train_epoch(model, synthetic_loader_for_training, optimizer, device, epoch)
+            
+            # Validate on REAL validation data (to track transfer quality)
+            val_metrics = validate(model, val_loader, device, use_generation=(epoch % 5 == 0))
+            val_loss = val_metrics['val_loss']
+            
+            # Update scheduler
+            scheduler.step()
+            
+            epoch_time = time.time() - epoch_start
+            logger.info(f"[SYNTH-ONLY] Epoch {epoch}/{max_epochs} | "
+                       f"Synth Train: {train_loss:.4f} | Real Val: {val_loss:.4f} | "
+                       f"LR: {scheduler.get_last_lr()[0]:.2e} | "
+                       f"Time: {epoch_time:.1f}s")
+            
+            if 'val_mse' in val_metrics:
+                logger.info(f"  Generation metrics: {log_metrics({k: v for k, v in val_metrics.items() if k != 'val_loss'})}")
+            
+            # Save best model (based on real validation performance)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                if checkpoint_path:
+                    save_checkpoint(
+                        model, optimizer, epoch, train_loss, val_loss,
+                        config, checkpoint_path.replace('.pt', '_best.pt')
+                    )
+                    # Also update the global overall best
+                    if val_loss < overall_best_loss:
+                        overall_best_loss = val_loss
+                        save_checkpoint(
+                            model, optimizer, epoch, train_loss, val_loss,
+                            config, best_model_path
+                        )
+            
+            # Save regular checkpoint
+            if checkpoint_path and epoch % 5 == 0:
+                save_checkpoint(
+                    model, optimizer, epoch, train_loss, val_loss,
+                    config, checkpoint_path
+                )
+            
+            # Optuna pruning
+            if trial is not None:
+                trial.report(val_loss, epoch)
+                if epoch >= PRUNING_WARMUP and trial.should_prune():
+                    logger.info(f"Trial pruned at epoch {epoch}")
+                    raise optuna.TrialPruned()
+            
+            # Early stopping
+            if early_stopping(val_loss):
+                logger.info(f"Early stopping at epoch {epoch}")
+                break
+        
+        return best_val_loss
+    
+    # =========================================================================
+    # PHASE 1: Pre-train on synthetic data (if enabled, not synthetic-only)
     # =========================================================================
     if synthetic_loader is not None and start_epoch == 0:
         logger.info("=" * 60)
@@ -1122,6 +1263,10 @@ def objective(trial) -> float:
         # Synthetic pre-training (two-phase: pretrain on synthetic, then fine-tune on real)
         'synthetic_pretrain_epochs': SYNTHETIC_PRETRAIN_EPOCHS,
         'synthetic_size': SYNTHETIC_SIZE,
+        # Pure synthetic training mode (no real data training)
+        'synthetic_only': SYNTHETIC_ONLY_MODE,
+        # Pre-trained checkpoint for fine-tuning
+        'pretrained_checkpoint': PRETRAINED_CHECKPOINT_PATH,
     }
     
     # Checkpoint for this trial
@@ -1149,43 +1294,55 @@ def objective(trial) -> float:
     return float('inf')
 
 
-def run_optuna_search(n_trials: int = NUM_OPTUNA_TRIALS, resume: bool = True):
-    """Run Optuna hyperparameter search."""
+def run_optuna_search(n_trials: int = NUM_OPTUNA_TRIALS, resume: bool = True, run_name: Optional[str] = None):
+    """Run Optuna hyperparameter search.
+    
+    Args:
+        n_trials: Number of Optuna trials to run
+        resume: Whether to resume from existing study
+        run_name: Custom name for the study/checkpoint directory (overrides default naming)
+    """
     import optuna
     from optuna.pruners import MedianPruner
     from optuna.samplers import TPESampler
     
     # Create or load study
     storage = f"sqlite:///{OPTUNA_DB}"
-    base_study_name = f"diffusion_tsf_{SELECTED_DATASET}"
-    study_name = base_study_name
     
-    if resume:
-        # Try to find the latest study in the storage
-        try:
-            summaries = optuna.get_all_study_summaries(storage=storage)
-            if summaries:
-                # Filter for studies that start with our base name
-                related_studies = [s for s in summaries if s.study_name.startswith(base_study_name)]
-                if related_studies:
-                    # Sort by last trial time or creation time if available, 
-                    # but summaries don't have creation time. We'll use the name which often has a timestamp.
-                    # Actually, if we use timestamps, sorting by name works.
-                    # If some don't have timestamps (like the default one), we'll handle that.
-                    study_name = max(related_studies, key=lambda s: s.study_name).study_name
-                    logger.info(f"Resuming latest study: {study_name}")
-        except Exception as e:
-            logger.warning(f"Could not list studies: {e}. Using default study name.")
+    # Use custom run name if provided, otherwise default naming
+    if run_name or CUSTOM_RUN_NAME:
+        study_name = run_name or CUSTOM_RUN_NAME
+        logger.info(f"Using custom study name: {study_name}")
     else:
-        # Check if default study exists
-        try:
-            optuna.load_study(study_name=study_name, storage=storage)
-            # If it exists and we are NOT resuming, we should create a new one
-            study_name = f"{base_study_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            logger.info(f"Existing study found and resume=False. Creating new study: {study_name}")
-        except KeyError:
-            # Study doesn't exist, use default name
-            pass
+        base_study_name = f"diffusion_tsf_{SELECTED_DATASET}"
+        study_name = base_study_name
+        
+        if resume:
+            # Try to find the latest study in the storage
+            try:
+                summaries = optuna.get_all_study_summaries(storage=storage)
+                if summaries:
+                    # Filter for studies that start with our base name
+                    related_studies = [s for s in summaries if s.study_name.startswith(base_study_name)]
+                    if related_studies:
+                        # Sort by last trial time or creation time if available, 
+                        # but summaries don't have creation time. We'll use the name which often has a timestamp.
+                        # Actually, if we use timestamps, sorting by name works.
+                        # If some don't have timestamps (like the default one), we'll handle that.
+                        study_name = max(related_studies, key=lambda s: s.study_name).study_name
+                        logger.info(f"Resuming latest study: {study_name}")
+            except Exception as e:
+                logger.warning(f"Could not list studies: {e}. Using default study name.")
+        else:
+            # Check if default study exists
+            try:
+                optuna.load_study(study_name=study_name, storage=storage)
+                # If it exists and we are NOT resuming, we should create a new one
+                study_name = f"{base_study_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                logger.info(f"Existing study found and resume=False. Creating new study: {study_name}")
+            except KeyError:
+                # Study doesn't exist, use default name
+                pass
     
     # Update checkpoint directory for this study
     global CHECKPOINT_DIR
@@ -1330,6 +1487,10 @@ def train_with_params(params: dict, run_name: Optional[str] = None):
     # Synthetic pre-training (two-phase: pretrain on synthetic, then fine-tune on real)
     config['synthetic_pretrain_epochs'] = SYNTHETIC_PRETRAIN_EPOCHS
     config['synthetic_size'] = SYNTHETIC_SIZE
+    # Pure synthetic training mode
+    config['synthetic_only'] = SYNTHETIC_ONLY_MODE
+    # Pre-trained checkpoint for fine-tuning
+    config['pretrained_checkpoint'] = PRETRAINED_CHECKPOINT_PATH
     
     logger.info("Training with params:")
     logger.info(json.dumps(config, indent=2, default=str))
@@ -1481,6 +1642,21 @@ def main():
     parser.add_argument('--synthetic-size', type=int, default=10000, metavar='N',
                         help='Number of synthetic samples to generate for pre-training '
                              '(default: 10000)')
+    # Pure synthetic training mode (for hyperparameter search)
+    parser.add_argument('--synthetic-only', action='store_true', default=False,
+                        help='Train ONLY on synthetic data (no real data). Used for hyperparameter '
+                             'search on synthetic data to find best params for universal pre-training.')
+    # Pre-trained checkpoint for fine-tuning
+    parser.add_argument('--pretrained-checkpoint', type=str, default=None, metavar='PATH',
+                        help='Path to a pre-trained model checkpoint (.pt) to initialize weights from. '
+                             'Used for fine-tuning a universal pre-trained model on real data.')
+    # Force high-end search space
+    parser.add_argument('--force-high-end-search', action='store_true', default=False,
+                        help='Force using high-end GPU search space regardless of actual hardware. '
+                             'Useful for consistent hyperparameter ranges across different machines.')
+    parser.add_argument('--finetune-mode', action='store_true', default=False,
+                        help='Enable fine-tuning mode with conservative LR range (1e-6, 1e-4). '
+                             'Automatically enabled when --pretrained-checkpoint is set.')
     args = parser.parse_args()
     
     # Check for optuna
@@ -1531,14 +1707,30 @@ def main():
         sys.exit(1)
     
     # Set synthetic pre-training settings
-    global SYNTHETIC_PRETRAIN_EPOCHS, SYNTHETIC_SIZE
+    global SYNTHETIC_PRETRAIN_EPOCHS, SYNTHETIC_SIZE, SYNTHETIC_ONLY_MODE, PRETRAINED_CHECKPOINT_PATH, FORCE_HIGH_END_SEARCH, CUSTOM_RUN_NAME, FINETUNE_MODE
     SYNTHETIC_PRETRAIN_EPOCHS = args.synthetic_pretrain_epochs
     SYNTHETIC_SIZE = args.synthetic_size
+    SYNTHETIC_ONLY_MODE = args.synthetic_only
+    PRETRAINED_CHECKPOINT_PATH = args.pretrained_checkpoint
+    FORCE_HIGH_END_SEARCH = args.force_high_end_search
+    CUSTOM_RUN_NAME = args.run_name
+    # Auto-enable finetune mode when pretrained checkpoint is provided
+    FINETUNE_MODE = args.finetune_mode or (args.pretrained_checkpoint is not None)
+    
+    # Validate: synthetic-only requires synthetic-pretrain-epochs or will be used as pure synthetic training
+    if SYNTHETIC_ONLY_MODE and SYNTHETIC_SIZE <= 0:
+        logger.error("--synthetic-only requires --synthetic-size > 0")
+        sys.exit(1)
+    
+    # Validate: pretrained-checkpoint must exist if specified
+    if PRETRAINED_CHECKPOINT_PATH and not os.path.exists(PRETRAINED_CHECKPOINT_PATH):
+        logger.error(f"Pre-trained checkpoint not found: {PRETRAINED_CHECKPOINT_PATH}")
+        sys.exit(1)
     
     # Validate synthetic pre-training constraint: only CDF mode is supported
-    if SYNTHETIC_PRETRAIN_EPOCHS > 0 and args.repr_mode == 'pdf':
+    if (SYNTHETIC_PRETRAIN_EPOCHS > 0 or SYNTHETIC_ONLY_MODE) and args.repr_mode == 'pdf':
         logger.error(
-            "Synthetic pre-training is currently only supported in CDF representation mode. "
+            "Synthetic training is currently only supported in CDF representation mode. "
             "Please switch to --repr-mode cdf."
         )
         sys.exit(1)
@@ -1592,6 +1784,14 @@ def main():
             logger.info(f"  Guidance checkpoint: {GUIDANCE_CHECKPOINT}")
     if SYNTHETIC_PRETRAIN_EPOCHS > 0:
         logger.info(f"Synthetic pre-training: {SYNTHETIC_PRETRAIN_EPOCHS} epochs on {SYNTHETIC_SIZE} samples")
+    if SYNTHETIC_ONLY_MODE:
+        logger.info(f"SYNTHETIC-ONLY MODE: Training purely on {SYNTHETIC_SIZE} synthetic samples (no real data)")
+    if PRETRAINED_CHECKPOINT_PATH:
+        logger.info(f"Fine-tuning from pre-trained checkpoint: {PRETRAINED_CHECKPOINT_PATH}")
+    if FINETUNE_MODE:
+        logger.info("Fine-tuning mode: ENABLED (conservative LR range 1e-6 to 1e-4)")
+    if FORCE_HIGH_END_SEARCH:
+        logger.info("Force high-end search space: ENABLED")
     
     if args.list_checkpoints:
         # List all checkpoint files and exit
@@ -1792,7 +1992,7 @@ def main():
 
     else:
         # Run Optuna search
-        run_optuna_search(n_trials=args.trials, resume=args.resume)
+        run_optuna_search(n_trials=args.trials, resume=args.resume, run_name=args.run_name)
 
 
 if __name__ == "__main__":
