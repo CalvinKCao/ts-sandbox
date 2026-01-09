@@ -420,8 +420,10 @@ else
   log ""
   
   # Build command for Stage 0
+  # --resume allows auto-resuming if interrupted
   STAGE0_CMD=(
     python3 models/diffusion_tsf/train_electricity.py
+    --resume
     --dataset ETTh2
     --trials "${SYNTHETIC_SEARCH_TRIALS}"
     --synthetic-only

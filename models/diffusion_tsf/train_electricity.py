@@ -1350,17 +1350,24 @@ def run_optuna_search(n_trials: int = NUM_OPTUNA_TRIALS, resume: bool = True, ru
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     logger.info(f"Study checkpoints will be saved to: {CHECKPOINT_DIR}")
     
+    # When using custom run_name, always load_if_exists to allow resuming
+    # (the user explicitly wants this specific study name)
+    should_load_if_exists = resume or (run_name is not None) or (CUSTOM_RUN_NAME is not None)
+    
+    if should_load_if_exists:
+        logger.info(f"Will resume existing study '{study_name}' if it exists")
+    
     study = optuna.create_study(
         study_name=study_name,
         direction="minimize",
         storage=storage,
-        load_if_exists=resume,
+        load_if_exists=should_load_if_exists,
         sampler=TPESampler(seed=42),  # Bayesian optimization
         pruner=MedianPruner(n_startup_trials=3, n_warmup_steps=PRUNING_WARMUP)
     )
     
     logger.info(f"Starting Optuna search: {n_trials} trials")
-    logger.info(f"Previous trials: {len(study.trials)}")
+    logger.info(f"Previous trials in study: {len(study.trials)}")
     
     remaining_trials = max(0, n_trials - len(study.trials))
     
