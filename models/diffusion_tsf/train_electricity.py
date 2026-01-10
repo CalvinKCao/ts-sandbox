@@ -987,14 +987,40 @@ def train(
         logger.info(f"Loading pre-trained weights from: {pretrained_path}")
         pretrained_ckpt = torch.load(pretrained_path, map_location=device)
         
-        # Load model weights (ignore mismatched keys for flexibility)
-        model_state = pretrained_ckpt.get('model_state_dict', pretrained_ckpt)
-        missing, unexpected = model.load_state_dict(model_state, strict=False)
-        if missing:
-            logger.warning(f"Missing keys in pretrained checkpoint: {missing}")
-        if unexpected:
-            logger.warning(f"Unexpected keys in pretrained checkpoint: {unexpected}")
-        logger.info("Pre-trained weights loaded successfully!")
+        # Load model weights with PARTIAL loading (handles size mismatches gracefully)
+        pretrained_state = pretrained_ckpt.get('model_state_dict', pretrained_ckpt)
+        model_state = model.state_dict()
+        
+        loaded_keys = []
+        skipped_keys = []
+        
+        for key in pretrained_state.keys():
+            if key in model_state:
+                # Check if shapes match
+                if pretrained_state[key].shape == model_state[key].shape:
+                    model_state[key] = pretrained_state[key]
+                    loaded_keys.append(key)
+                else:
+                    # Handle partial loading for first conv (guidance channel added)
+                    if 'init_conv.weight' in key:
+                        # Copy the channels that exist in pretrained, leave new channel random
+                        pretrained_channels = pretrained_state[key].shape[1]
+                        model_state[key][:, :pretrained_channels, :, :] = pretrained_state[key]
+                        loaded_keys.append(f"{key} (partial: {pretrained_channels}/{model_state[key].shape[1]} channels)")
+                    else:
+                        skipped_keys.append(f"{key} (shape mismatch: {pretrained_state[key].shape} vs {model_state[key].shape})")
+            else:
+                skipped_keys.append(f"{key} (not in model)")
+        
+        model.load_state_dict(model_state)
+        
+        logger.info(f"Loaded {len(loaded_keys)} weight tensors from pretrained checkpoint")
+        if skipped_keys:
+            logger.warning(f"Skipped {len(skipped_keys)} tensors due to shape/key mismatch:")
+            for k in skipped_keys[:10]:  # Show first 10
+                logger.warning(f"  - {k}")
+            if len(skipped_keys) > 10:
+                logger.warning(f"  ... and {len(skipped_keys) - 10} more")
     
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -1229,14 +1255,46 @@ def train(
 # Hyperparameter Search with Optuna
 # ============================================================================
 
+# Cache for pretrained checkpoint config (to avoid reloading for every trial)
+_PRETRAINED_CONFIG_CACHE = {}
+
+def _get_pretrained_config(checkpoint_path: str) -> dict:
+    """Load and cache config from pretrained checkpoint."""
+    if checkpoint_path not in _PRETRAINED_CONFIG_CACHE:
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            ckpt = torch.load(checkpoint_path, map_location='cpu')
+            _PRETRAINED_CONFIG_CACHE[checkpoint_path] = ckpt.get('config', {})
+        else:
+            _PRETRAINED_CONFIG_CACHE[checkpoint_path] = {}
+    return _PRETRAINED_CONFIG_CACHE[checkpoint_path]
+
+
 def objective(trial) -> float:
     """Optuna objective function."""
     
-    # Sample hyperparameters
+    # If fine-tuning from pretrained checkpoint, extract architecture params that MUST match
+    forced_model_size = None
+    forced_diffusion_steps = None
+    if PRETRAINED_CHECKPOINT_PATH and os.path.exists(PRETRAINED_CHECKPOINT_PATH):
+        pretrained_config = _get_pretrained_config(PRETRAINED_CHECKPOINT_PATH)
+        if pretrained_config:
+            # MUST use same model_size as pretrained to load weights correctly
+            forced_model_size = pretrained_config.get('model_size')
+            forced_diffusion_steps = pretrained_config.get('diffusion_steps')
+            # Only log on first trial to avoid spam
+            if trial.number == 0:
+                if forced_model_size:
+                    logger.info(f"Fine-tuning: forcing model_size={forced_model_size} from pretrained checkpoint")
+                if forced_diffusion_steps:
+                    logger.info(f"Fine-tuning: forcing diffusion_steps={forced_diffusion_steps} from pretrained checkpoint")
+                if not forced_model_size:
+                    logger.warning("Pretrained checkpoint has no model_size in config - architecture mismatch may occur!")
+    
+    # Sample hyperparameters (force architecture params if fine-tuning)
     config = {
         'learning_rate': trial.suggest_float('learning_rate', *SEARCH_SPACE['learning_rate'], log=True),
-        'model_size': trial.suggest_categorical('model_size', SEARCH_SPACE['model_size']),
-        'diffusion_steps': trial.suggest_categorical('diffusion_steps', SEARCH_SPACE['diffusion_steps']),
+        'model_size': forced_model_size if forced_model_size else trial.suggest_categorical('model_size', SEARCH_SPACE['model_size']),
+        'diffusion_steps': forced_diffusion_steps if forced_diffusion_steps else trial.suggest_categorical('diffusion_steps', SEARCH_SPACE['diffusion_steps']),
         'batch_size': trial.suggest_categorical('batch_size', SEARCH_SPACE['batch_size']),
         'noise_schedule': trial.suggest_categorical('noise_schedule', SEARCH_SPACE['noise_schedule']),
         'model_type': SELECTED_MODEL_TYPE,
