@@ -74,7 +74,7 @@ else
         python3 -c "
 import sys
 sys.path.insert(0, 'models/diffusion_tsf')
-from synthetic_data import RealTS
+from realts import RealTS
 import pandas as pd
 import numpy as np
 
