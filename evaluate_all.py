@@ -5,6 +5,8 @@ import torch
 import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 # Add paths
 # Use relative path to find model files regardless of where the script is run
@@ -22,9 +24,15 @@ from visualize import create_guidance_for_visualization
 # Parse arguments
 parser = argparse.ArgumentParser(description="Evaluate DiffusionTSF models")
 parser.add_argument('--dry-run', action='store_true', help="Quick test with 1 dataset, 3 samples, no real checkpoints needed")
+parser.add_argument('--stride', type=int, default=8, help="Sample every N-th test point (default: 8 for speed, use 1 for full eval)")
+parser.add_argument('--batch-size', type=int, default=32, help="Batch size for inference (default: 32)")
+parser.add_argument('--ddim-steps', type=int, default=50, help="DDIM sampling steps (default: 50, lower=faster)")
 args = parser.parse_args()
 
 DRY_RUN = args.dry_run
+EVAL_STRIDE = args.stride
+BATCH_SIZE = args.batch_size
+DDIM_STEPS = args.ddim_steps
 
 datasets = {
     "ETTh2": "MUFL",
@@ -43,6 +51,7 @@ if DRY_RUN:
 checkpoint_base = os.path.join(script_dir, "checkpoints")
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Using device: {device}")
+print(f"Settings: stride={EVAL_STRIDE}, batch_size={BATCH_SIZE}, ddim_steps={DDIM_STEPS}")
 
 def sanitize_name(name):
     # This must match exactly how the shell script sanitized the names
@@ -179,36 +188,44 @@ def evaluate_model(ds_name, col):
         print(f"⚠️  Warning: Dataset {ds_name} too small for full gap. Reducing gap to 1.")
         test_start = min(val_end + 1, total_samples - 1)
         
-    test_indices = list(range(test_start, total_samples))
+    # Apply stride to subsample test set (use every N-th sample)
+    all_test_indices = list(range(test_start, total_samples))
     
-    if not test_indices:
+    if not all_test_indices:
         print(f"❌ Error: No test samples available for {ds_name} after splitting.")
         return None
+    
+    # Subsample with stride
+    test_indices = all_test_indices[::EVAL_STRIDE]
     
     # In dry run, limit to 3 samples
     if DRY_RUN and len(test_indices) > 3:
         test_indices = test_indices[:3]
         print(f"   🧪 DRY RUN: Limiting to {len(test_indices)} samples")
         
-    print(f"   Test set: {len(test_indices)} samples (indices {test_start} to {test_start + len(test_indices) - 1})")
+    print(f"   Test set: {len(test_indices)} samples (from {len(all_test_indices)} total, stride={EVAL_STRIDE})")
     
     test_dataset = ElectricityDataset(
         data_path, lookback=512, forecast=96, stride=eval_stride, augment=False, 
         use_all_columns=False, data_tensor=base_dataset.data, indices=test_indices
     )
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
     
     # 3. Predict and compute metrics
     all_preds = []
     all_targets = []
     
     # Fewer DDIM steps for dry run
-    ddim_steps = 10 if DRY_RUN else 50
+    ddim_steps = 10 if DRY_RUN else DDIM_STEPS
+    total_batches = len(test_loader)
     
+    start_time = time.time()
     with torch.no_grad():
         for batch_idx, (past, future) in enumerate(test_loader):
-            if DRY_RUN:
-                print(f"   🧪 Processing batch {batch_idx + 1}...")
+            if batch_idx % 5 == 0 or DRY_RUN:
+                elapsed = time.time() - start_time
+                eta = (elapsed / (batch_idx + 1)) * (total_batches - batch_idx - 1) if batch_idx > 0 else 0
+                print(f"   Batch {batch_idx + 1}/{total_batches} (ETA: {eta:.0f}s)")
             past = past.to(device)
             out = model.generate(past, use_ddim=True, num_ddim_steps=ddim_steps)
             all_preds.append(out['prediction'].cpu())
