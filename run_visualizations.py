@@ -3,7 +3,9 @@ import sys
 import torch
 
 # Add paths
-script_dir = "/home/cao/ts-sandbox/models/diffusion_tsf"
+# Use relative path to find model files regardless of where the script is run
+current_dir = os.path.dirname(os.path.abspath(__file__))
+script_dir = os.path.join(current_dir, "models", "diffusion_tsf")
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
@@ -19,12 +21,11 @@ datasets = {
     "weather": "raining (s)"
 }
 
-checkpoint_base = "/home/cao/ts-sandbox/models/diffusion_tsf/checkpoints"
-output_base = "/home/cao/ts-sandbox/models/diffusion_tsf/final_visualizations"
+checkpoint_base = os.path.join(script_dir, "checkpoints")
+output_base = os.path.join(script_dir, "final_visualizations")
 
 def sanitize_name(name):
     # This must match exactly how the shell script sanitized the names
-    # shell script used: echo "$name" | sed 's/[^a-zA-Z0-9_-]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//'
     import re
     # Replace anything not alphanumeric, hyphen or underscore with underscore
     sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
@@ -49,7 +50,7 @@ for ds_name, col in datasets.items():
         print(f"No guidance found for {ds_var}")
     
     data_rel_path = DATASET_REGISTRY[ds_name][0]
-    data_path = os.path.join("/home/cao/ts-sandbox/datasets", data_rel_path)
+    data_path = os.path.join(current_dir, "datasets", data_rel_path)
     
     print(f"\n>>> Visualizing {ds_var}...")
     try:

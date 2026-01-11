@@ -6,7 +6,9 @@ import pandas as pd
 from torch.utils.data import DataLoader
 
 # Add paths
-script_dir = "/home/cao/ts-sandbox/models/diffusion_tsf"
+# Use relative path to find model files regardless of where the script is run
+current_dir = os.path.dirname(os.path.abspath(__file__))
+script_dir = os.path.join(current_dir, "models", "diffusion_tsf")
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
@@ -25,7 +27,7 @@ datasets = {
     "weather": "raining (s)"
 }
 
-checkpoint_base = "/home/cao/ts-sandbox/models/diffusion_tsf/checkpoints"
+checkpoint_base = os.path.join(script_dir, "checkpoints")
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def sanitize_name(name):
@@ -45,6 +47,7 @@ def evaluate_model(ds_name, col):
     model_path = os.path.join(checkpoint_base, ds_var, "best_model.pt")
     
     if not os.path.exists(model_path):
+        print(f"Skipping {ds_var}, model not found at {model_path}")
         return None
         
     print(f"\n>>> Evaluating {ds_var} on full test set...")
@@ -107,7 +110,7 @@ def evaluate_model(ds_name, col):
     
     # 2. Load test set
     data_rel_path = DATASET_REGISTRY[ds_name][0]
-    data_path = os.path.join("/home/cao/ts-sandbox/datasets", data_rel_path)
+    data_path = os.path.join(current_dir, "datasets", data_rel_path)
     
     base_dataset = ElectricityDataset(data_path, lookback=512, forecast=96, augment=False, use_all_columns=False)
     total_samples = len(base_dataset)
