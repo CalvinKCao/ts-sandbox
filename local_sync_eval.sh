@@ -69,6 +69,18 @@ if ! sync_with_retry "Syncing evaluation scripts" \
     exit 1
 fi
 
+# 1.5. Sync datasets (only final CSV files, not split parts)
+echo "📊 Syncing datasets..."
+if ! sync_with_retry "Syncing datasets" \
+  --include="*/" \
+  --include="*.csv" \
+  --exclude="*_part*.csv" \
+  --exclude="*.Zone.Identifier" \
+  "${LOCAL_ROOT}/datasets/" \
+  "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/datasets/"; then
+    echo "⚠️  Warning: Failed to sync datasets. Continuing anyway..."
+fi
+
 # 2. Sync checkpoints (only the 'big' files)
 # -avz: archive, verbose, compress
 # --progress: show transfer progress

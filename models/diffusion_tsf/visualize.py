@@ -197,11 +197,25 @@ def visualize_samples(
     checkpoint = torch.load(model_path, map_location=device)
     config_dict = checkpoint['config']
     
-    # Resolve dataset from checkpoint config (with smart fallback for old checkpoints)
-    dataset_name = config_dict.get('dataset', None)
+    # Resolve dataset - prioritize explicitly provided data_path (for pretrain-only mode)
+    # Only fall back to checkpoint config if data_path is not provided or is generic
     num_variables = config_dict.get('num_variables', 1)
-    
+    dataset_name = config_dict.get('dataset', None)
+
+    # Check if the provided data_path is different from the checkpoint's dataset
+    # This happens in pretrain-only mode where we use one model on multiple datasets
+    checkpoint_dataset_path = None
     if dataset_name and dataset_name in DATASET_REGISTRY:
+        checkpoint_dataset_path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
+
+    # If data_path is explicitly provided and different from checkpoint path, use it
+    # This allows pretrain-only visualizations to work with different datasets
+    if data_path and checkpoint_dataset_path and os.path.abspath(data_path) != os.path.abspath(checkpoint_dataset_path):
+        resolved_data_path = data_path
+        print(f"📊 Using provided data_path (differs from checkpoint): {dataset_name} → {os.path.basename(data_path)}")
+        print(f"   Data path: {resolved_data_path}")
+        # Keep dataset_name as is for logging, but use the provided path
+    elif dataset_name and dataset_name in DATASET_REGISTRY:
         # Checkpoint has dataset name saved - use it directly
         dataset_info = DATASET_REGISTRY[dataset_name]
         resolved_data_path = os.path.join(DATASETS_DIR, dataset_info[0])
@@ -217,9 +231,9 @@ def visualize_samples(
             21: 'weather',  # weather has 21 features
             861: 'traffic',  # traffic has 861 sensors
         }
-        
+
         inferred_dataset = dataset_by_vars.get(num_variables, None)
-        
+
         if inferred_dataset and inferred_dataset in DATASET_REGISTRY:
             dataset_name = inferred_dataset
             dataset_info = DATASET_REGISTRY[dataset_name]
