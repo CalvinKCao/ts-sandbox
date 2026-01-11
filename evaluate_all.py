@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse
 import torch
 import numpy as np
 import pandas as pd
@@ -18,6 +19,13 @@ from train_electricity import ElectricityDataset, DATASET_REGISTRY, MODEL_SIZES
 from metrics import compute_metrics, log_metrics
 from visualize import create_guidance_for_visualization
 
+# Parse arguments
+parser = argparse.ArgumentParser(description="Evaluate DiffusionTSF models")
+parser.add_argument('--dry-run', action='store_true', help="Quick test with 1 dataset, 3 samples, no real checkpoints needed")
+args = parser.parse_args()
+
+DRY_RUN = args.dry_run
+
 datasets = {
     "ETTh2": "MUFL",
     "ETTm1": "HUFL",
@@ -27,8 +35,14 @@ datasets = {
     "weather": "raining (s)"
 }
 
+# In dry run, only test ETTh2
+if DRY_RUN:
+    print("🧪 DRY RUN MODE: Testing pipeline with minimal data")
+    datasets = {"ETTh2": "MUFL"}
+
 checkpoint_base = os.path.join(script_dir, "checkpoints")
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f"Using device: {device}")
 
 def sanitize_name(name):
     # This must match exactly how the shell script sanitized the names
@@ -46,20 +60,36 @@ def evaluate_model(ds_name, col):
     ds_var = f"{ds_name}_{sanitized_col}"
     model_path = os.path.join(checkpoint_base, ds_var, "best_model.pt")
     
+    use_dummy_model = False
     if not os.path.exists(model_path):
-        print(f"Skipping {ds_var}, model not found at {model_path}")
-        return None
+        if DRY_RUN:
+            print(f"🧪 DRY RUN: Creating dummy model for {ds_var} (no checkpoint)")
+            use_dummy_model = True
+        else:
+            print(f"Skipping {ds_var}, model not found at {model_path}")
+            return None
         
-    print(f"\n>>> Evaluating {ds_var} on full test set...")
+    print(f"\n>>> Evaluating {ds_var} on {'dry run' if DRY_RUN else 'full'} test set...")
     
     # 1. Load checkpoint and reconstruct model
-    checkpoint = torch.load(model_path, map_location=device)
-    config_dict = checkpoint['config']
-    state_dict = checkpoint['model_state_dict']
-    
-    # Remap legacy unet.* keys to noise_predictor.*
-    if any(k.startswith("unet.") for k in state_dict.keys()):
-        state_dict = {"noise_predictor." + k[len("unet."):] if k.startswith("unet.") else k: v for k, v in state_dict.items()}
+    if use_dummy_model:
+        # Minimal config for dry run
+        config_dict = {
+            'model_size': 'small',
+            'diffusion_steps': 100,  # Very few steps for speed
+            'noise_schedule': 'linear',
+            'num_variables': 1,
+            'use_guidance_channel': False,
+        }
+        state_dict = None
+    else:
+        checkpoint = torch.load(model_path, map_location=device)
+        config_dict = checkpoint['config']
+        state_dict = checkpoint['model_state_dict']
+        
+        # Remap legacy unet.* keys to noise_predictor.*
+        if any(k.startswith("unet.") for k in state_dict.keys()):
+            state_dict = {"noise_predictor." + k[len("unet."):] if k.startswith("unet.") else k: v for k, v in state_dict.items()}
     
     model_size = config_dict.get('model_size', 'small')
     if model_size == 'large':
@@ -71,6 +101,14 @@ def evaluate_model(ds_name, col):
         
     num_variables = config_dict.get('num_variables', 1)
     
+    # Use tiny architecture for dry run
+    if DRY_RUN and use_dummy_model:
+        unet_channels = [32, 64]  # Tiny model
+        diffusion_steps = 100
+    else:
+        unet_channels = MODEL_SIZES.get(model_size, [64, 128, 256])
+        diffusion_steps = config_dict.get('diffusion_steps', 2000)
+    
     model_config = DiffusionTSFConfig(
         lookback_length=512, forecast_length=96, image_height=128,
         max_scale=config_dict.get('max_scale', 3.5),
@@ -78,10 +116,10 @@ def evaluate_model(ds_name, col):
         blur_sigma=config_dict.get('blur_sigma', 1.0),
         emd_lambda=config_dict.get('emd_lambda', 0.0),
         representation_mode=config_dict.get('representation_mode', 'pdf'),
-        unet_channels=MODEL_SIZES.get(model_size, [64, 128, 256]),
+        unet_channels=unet_channels,
         num_res_blocks=num_res_blocks, attention_levels=attention_levels,
-        num_diffusion_steps=config_dict['diffusion_steps'],
-        noise_schedule=config_dict['noise_schedule'],
+        num_diffusion_steps=diffusion_steps,
+        noise_schedule=config_dict.get('noise_schedule', 'linear'),
         use_coordinate_channel=config_dict.get('use_coordinate_channel', True),
         unet_kernel_size=config_dict.get('unet_kernel_size', (3, 9)),
         use_time_ramp=config_dict.get('use_time_ramp', True),
@@ -107,8 +145,9 @@ def evaluate_model(ds_name, col):
         model.set_guidance_model(guidance_model)
         # Also keep a standalone copy for baseline evaluation
         standalone_guidance_model = guidance_model
-        
-    model.load_state_dict(state_dict, strict=False)
+    
+    if state_dict is not None:
+        model.load_state_dict(state_dict, strict=False)
     model.eval()
     
     # 2. Load test set
@@ -117,7 +156,7 @@ def evaluate_model(ds_name, col):
     
     # Use stride=1 for evaluation to maximize sample count
     eval_stride = 1
-    base_dataset = ElectricityDataset(data_path, lookback=512, forecast=96, stride=eval_stride, augment=False, use_all_columns=False)
+    base_dataset = ElectricityDataset(data_path, lookback=512, forecast=96, stride=eval_stride, augment=False, use_all_columns=False, column=col)
     total_samples = len(base_dataset)
     
     if total_samples == 0:
@@ -145,8 +184,13 @@ def evaluate_model(ds_name, col):
     if not test_indices:
         print(f"❌ Error: No test samples available for {ds_name} after splitting.")
         return None
+    
+    # In dry run, limit to 3 samples
+    if DRY_RUN and len(test_indices) > 3:
+        test_indices = test_indices[:3]
+        print(f"   🧪 DRY RUN: Limiting to {len(test_indices)} samples")
         
-    print(f"   Test set: {len(test_indices)} samples (indices {test_start} to {total_samples-1})")
+    print(f"   Test set: {len(test_indices)} samples (indices {test_start} to {test_start + len(test_indices) - 1})")
     
     test_dataset = ElectricityDataset(
         data_path, lookback=512, forecast=96, stride=eval_stride, augment=False, 
@@ -158,10 +202,15 @@ def evaluate_model(ds_name, col):
     all_preds = []
     all_targets = []
     
+    # Fewer DDIM steps for dry run
+    ddim_steps = 10 if DRY_RUN else 50
+    
     with torch.no_grad():
-        for past, future in test_loader:
+        for batch_idx, (past, future) in enumerate(test_loader):
+            if DRY_RUN:
+                print(f"   🧪 Processing batch {batch_idx + 1}...")
             past = past.to(device)
-            out = model.generate(past, use_ddim=True, num_ddim_steps=50)
+            out = model.generate(past, use_ddim=True, num_ddim_steps=ddim_steps)
             all_preds.append(out['prediction'].cpu())
             all_targets.append(future)
             
@@ -187,8 +236,8 @@ def evaluate_model(ds_name, col):
         with torch.no_grad():
             for past, future in test_loader:
                 past = past.to(device)
-                # Get guidance prediction directly
-                guidance_pred = standalone_guidance_model(past)
+                # Get guidance prediction directly (pass forecast_length=96)
+                guidance_pred = standalone_guidance_model(past, forecast_length=96)
                 guidance_preds.append(guidance_pred.cpu())
 
         guidance_preds = torch.cat(guidance_preds, dim=0)

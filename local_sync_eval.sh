@@ -24,10 +24,18 @@ fi
 
 echo "🚀 Starting sync to ${REMOTE_USER}@${REMOTE_HOST}..."
 
-# 1. Sync checkpoints (only the 'big' files)
+# 1. Sync evaluation scripts first (small files)
+echo "📄 Syncing evaluation scripts..."
+rsync -avz --progress \
+  "${LOCAL_ROOT}/evaluate_all.py" \
+  "${LOCAL_ROOT}/run_eval.sh" \
+  "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/"
+
+# 2. Sync checkpoints (only the 'big' files)
 # -avz: archive, verbose, compress
 # --progress: show transfer progress
 # includes/excludes: focus on best models and params only
+echo "📦 Syncing checkpoints..."
 rsync -avz --progress \
   --include="*/" \
   --include="best_model.pt" \
@@ -41,8 +49,7 @@ rsync -avz --progress \
 echo "✅ Sync complete!"
 echo "🔥 Triggering evaluation on remote..."
 
-# 2. Run the evaluation script on the remote via SSH
-# This assumes run_eval.sh and evaluate_all.py are already on the remote
+# 3. Run the evaluation script on the remote via SSH
 ssh "${REMOTE_USER}@${REMOTE_HOST}" "cd ${REMOTE_PATH} && chmod +x run_eval.sh && ./run_eval.sh"
 
 echo ""

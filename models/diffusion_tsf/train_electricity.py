@@ -1374,33 +1374,33 @@ def run_optuna_search(n_trials: int = NUM_OPTUNA_TRIALS, resume: bool = True, ru
     else:
         base_study_name = f"diffusion_tsf_{SELECTED_DATASET}"
         study_name = base_study_name
-        
-        if resume:
-            # Try to find the latest study in the storage
-            try:
-                summaries = optuna.get_all_study_summaries(storage=storage)
-                if summaries:
-                    # Filter for studies that start with our base name
-                    related_studies = [s for s in summaries if s.study_name.startswith(base_study_name)]
-                    if related_studies:
-                        # Sort by last trial time or creation time if available, 
-                        # but summaries don't have creation time. We'll use the name which often has a timestamp.
-                        # Actually, if we use timestamps, sorting by name works.
-                        # If some don't have timestamps (like the default one), we'll handle that.
-                        study_name = max(related_studies, key=lambda s: s.study_name).study_name
-                        logger.info(f"Resuming latest study: {study_name}")
-            except Exception as e:
-                logger.warning(f"Could not list studies: {e}. Using default study name.")
-        else:
-            # Check if default study exists
-            try:
-                optuna.load_study(study_name=study_name, storage=storage)
-                # If it exists and we are NOT resuming, we should create a new one
-                study_name = f"{base_study_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                logger.info(f"Existing study found and resume=False. Creating new study: {study_name}")
-            except KeyError:
-                # Study doesn't exist, use default name
-                pass
+    
+    if resume:
+        # Try to find the latest study in the storage
+        try:
+            summaries = optuna.get_all_study_summaries(storage=storage)
+            if summaries:
+                # Filter for studies that start with our base name
+                related_studies = [s for s in summaries if s.study_name.startswith(base_study_name)]
+                if related_studies:
+                    # Sort by last trial time or creation time if available, 
+                    # but summaries don't have creation time. We'll use the name which often has a timestamp.
+                    # Actually, if we use timestamps, sorting by name works.
+                    # If some don't have timestamps (like the default one), we'll handle that.
+                    study_name = max(related_studies, key=lambda s: s.study_name).study_name
+                    logger.info(f"Resuming latest study: {study_name}")
+        except Exception as e:
+            logger.warning(f"Could not list studies: {e}. Using default study name.")
+    else:
+        # Check if default study exists
+        try:
+            optuna.load_study(study_name=study_name, storage=storage)
+            # If it exists and we are NOT resuming, we should create a new one
+            study_name = f"{base_study_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            logger.info(f"Existing study found and resume=False. Creating new study: {study_name}")
+        except KeyError:
+            # Study doesn't exist, use default name
+            pass
     
     # Update checkpoint directory for this study
     global CHECKPOINT_DIR
