@@ -112,13 +112,41 @@ def evaluate_model(ds_name, col):
     data_rel_path = DATASET_REGISTRY[ds_name][0]
     data_path = os.path.join(current_dir, "datasets", data_rel_path)
     
-    base_dataset = ElectricityDataset(data_path, lookback=512, forecast=96, augment=False, use_all_columns=False)
+    # Use stride=1 for evaluation to maximize sample count
+    eval_stride = 1
+    base_dataset = ElectricityDataset(data_path, lookback=512, forecast=96, stride=eval_stride, augment=False, use_all_columns=False)
     total_samples = len(base_dataset)
-    test_start = int(total_samples * 0.8) + (512 + 96 + 23) // 24 # Rough estimate of gap
+    
+    if total_samples == 0:
+        print(f"❌ Error: Dataset {ds_name} has 0 possible windows with lookback=512, forecast=96")
+        return None
+
+    # Use same gap logic as training: ceil(window_size / stride)
+    window_size = 512 + 96
+    gap_indices = (window_size + eval_stride - 1) // eval_stride
+    
+    # Split: 70% Train, 10% Val, 20% Test
+    train_end = int(total_samples * 0.7)
+    val_end = int(total_samples * 0.8)
+    
+    test_start = val_end + gap_indices
+    
+    # Fallback for small datasets: if gap is too large, reduce it to 1 step 
+    # to at least get SOME test data (with warning)
+    if test_start >= total_samples - 1:
+        print(f"⚠️  Warning: Dataset {ds_name} too small for full gap. Reducing gap to 1.")
+        test_start = min(val_end + 1, total_samples - 1)
+        
     test_indices = list(range(test_start, total_samples))
     
+    if not test_indices:
+        print(f"❌ Error: No test samples available for {ds_name} after splitting.")
+        return None
+        
+    print(f"   Test set: {len(test_indices)} samples (indices {test_start} to {total_samples-1})")
+    
     test_dataset = ElectricityDataset(
-        data_path, lookback=512, forecast=96, augment=False, 
+        data_path, lookback=512, forecast=96, stride=eval_stride, augment=False, 
         use_all_columns=False, data_tensor=base_dataset.data, indices=test_indices
     )
     test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
@@ -134,6 +162,10 @@ def evaluate_model(ds_name, col):
             all_preds.append(out['prediction'].cpu())
             all_targets.append(future)
             
+    if not all_preds:
+        print(f"❌ Error: No predictions generated for {ds_name}")
+        return None
+
     preds = torch.cat(all_preds, dim=0)
     targets = torch.cat(all_targets, dim=0)
     
