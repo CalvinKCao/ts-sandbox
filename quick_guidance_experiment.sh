@@ -79,7 +79,7 @@ import pandas as pd
 import numpy as np
 
 # Generate synthetic data
-synth = RealTS(n_samples=${SYNTHETIC_SIZE}, lookback=512, forecast=96)
+synth = RealTS(num_samples=${SYNTHETIC_SIZE}, lookback_length=512, forecast_length=96)
 print(f'Generated {len(synth)} synthetic samples')
 
 # Create a CSV with synthetic time series (concatenate lookback+forecast)
