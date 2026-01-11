@@ -97,6 +97,7 @@ def evaluate_model(ds_name, col):
     
     # Load guidance if enabled
     guidance_path = os.path.join(checkpoint_base, ds_var, "guidance", "checkpoint.pth")
+    standalone_guidance_model = None
     if model_config.use_guidance_channel and os.path.exists(guidance_path):
         guidance_model = create_guidance_for_visualization(
             guidance_type=config_dict.get('guidance_type', 'itransformer'),
@@ -104,6 +105,8 @@ def evaluate_model(ds_name, col):
             seq_len=512, pred_len=96, num_variables=num_variables, device=device
         )
         model.set_guidance_model(guidance_model)
+        # Also keep a standalone copy for baseline evaluation
+        standalone_guidance_model = guidance_model
         
     model.load_state_dict(state_dict, strict=False)
     model.eval()
@@ -172,24 +175,63 @@ def evaluate_model(ds_name, col):
     # Ensure shapes are (batch, forecast_len)
     if preds.ndim == 3: preds = preds.squeeze(1)
     if targets.ndim == 3: targets = targets.squeeze(1)
-    
-    metrics = compute_metrics(preds, targets)
-    return metrics
+
+    diffusion_metrics = compute_metrics(preds, targets)
+
+    # Also evaluate standalone iTransformer baseline if available
+    itransformer_metrics = None
+    if standalone_guidance_model is not None:
+        print(f"   Evaluating iTransformer baseline...")
+        guidance_preds = []
+
+        with torch.no_grad():
+            for past, future in test_loader:
+                past = past.to(device)
+                # Get guidance prediction directly
+                guidance_pred = standalone_guidance_model(past)
+                guidance_preds.append(guidance_pred.cpu())
+
+        guidance_preds = torch.cat(guidance_preds, dim=0)
+        if guidance_preds.ndim == 3: guidance_preds = guidance_preds.squeeze(1)
+
+        itransformer_metrics = compute_metrics(guidance_preds, targets)
+
+    return diffusion_metrics, itransformer_metrics
 
 results = {}
-for ds_name, col in datasets.items():
-    metrics = evaluate_model(ds_name, col)
-    if metrics:
-        results[ds_name] = metrics
-        print(f"Results for {ds_name}: {log_metrics(metrics)}")
+itransformer_results = {}
 
-print("\n" + "="*60)
+for ds_name, col in datasets.items():
+    eval_result = evaluate_model(ds_name, col)
+    if eval_result:
+        diffusion_metrics, itransformer_metrics = eval_result
+        results[ds_name] = diffusion_metrics
+
+        print(f"Diffusion ({ds_name}): {log_metrics(diffusion_metrics)}")
+        if itransformer_metrics:
+            itransformer_results[ds_name] = itransformer_metrics
+            print(f"iTransformer ({ds_name}): {log_metrics(itransformer_metrics)}")
+
+            # Calculate improvement
+            mse_improvement = ((itransformer_metrics['mse'] - diffusion_metrics['mse']) / itransformer_metrics['mse']) * 100
+            mae_improvement = ((itransformer_metrics['mae'] - diffusion_metrics['mae']) / itransformer_metrics['mae']) * 100
+            grad_mae_improvement = ((itransformer_metrics['gradient_mae'] - diffusion_metrics['gradient_mae']) / itransformer_metrics['gradient_mae']) * 100
+
+            print(f"Improvement: MSE {mse_improvement:+.1f}% | MAE {mae_improvement:+.1f}% | GradMAE {grad_mae_improvement:+.1f}%")
+
+print("\n" + "="*80)
 print("FINAL TEST SET EVALUATION SUMMARY")
-print("="*60)
-print(f"{'Dataset':<15} | {'MSE':<8} | {'MAE':<8} | {'GradMAE':<8} | {'GradCorr':<8}")
-print("-" * 60)
-for ds, m in results.items():
-    print(f"{ds:<15} | {m['mse']:.4f} | {m['mae']:.4f} | {m['gradient_mae']:.4f} | {m['gradient_correlation']:.4f}")
-print("="*60)
+print("="*80)
+print(f"{'Dataset':<15} | {'Model':<12} | {'MSE':<8} | {'MAE':<8} | {'GradMAE':<8} | {'GradCorr':<8}")
+print("-" * 80)
+for ds, diffusion_metrics in results.items():
+    print(f"{ds:<15} | {'Diffusion':<12} | {diffusion_metrics['mse']:.4f} | {diffusion_metrics['mae']:.4f} | {diffusion_metrics['gradient_mae']:.4f} | {diffusion_metrics['gradient_correlation']:.4f}")
+
+if itransformer_results:
+    print("-" * 80)
+    for ds, itransformer_metrics in itransformer_results.items():
+        print(f"{ds:<15} | {'iTransformer':<12} | {itransformer_metrics['mse']:.4f} | {itransformer_metrics['mae']:.4f} | {itransformer_metrics['gradient_mae']:.4f} | {itransformer_metrics['gradient_correlation']:.4f}")
+
+print("="*80)
 
 
