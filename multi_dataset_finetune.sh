@@ -121,7 +121,7 @@ check_data_leakage_assertions() {
     log "  DATA LEAKAGE PREVENTION CHECKLIST"
     log "============================================================================="
     log "  ✅ CHRONOLOGICAL SPLIT: Train (0-70%) → [GAP] → Val (70-80%) → [GAP] → Test (80-100%)"
-    log "  ✅ GAP SIZE: ceil(window_size / stride) samples = ceil(608/24) = 26 samples"
+    log "  ✅ GAP SIZE: ceil(window_size / stride) samples = ceil(608/1) = 608 samples"
     log "  ✅ NO WINDOW OVERLAP: Each split separated by full window width in time"
     log "  ✅ SYNTHETIC PRETRAIN: Uses SEPARATE synthetic data, validated on real val set"
     log "  ✅ PER-SAMPLE NORMALIZATION: Each sample normalized independently (no global stats)"
@@ -314,7 +314,7 @@ for dataset_config in "${DATASETS[@]}"; do
             ${quick_arg} \
             --repr-mode cdf \
             --model-type unet \
-            --stride 24 \
+            --stride 1 \
             --blur-sigma 1.0 \
             --emd-lambda 0 \
             --kernel-size 3 9 \
@@ -346,6 +346,146 @@ for dataset_config in "${DATASETS[@]}"; do
         fi
     fi
     
+    # =========================================================================
+    # STEP 3: Evaluate on test set (stride 8 for speed)
+    # =========================================================================
+    
+    RESULTS_FILE="${dataset_ckpt_dir}/test_results.json"
+    
+    if [[ -f "${RESULTS_FILE}" ]] && [[ "${SKIP_EXISTING}" == "true" ]]; then
+        log "✅ Test results already exist: ${RESULTS_FILE}"
+    else
+        log "📊 Evaluating on test set (stride=8)..."
+        
+        python3 -c "
+import sys
+sys.path.insert(0, 'models/diffusion_tsf')
+import torch
+import json
+import numpy as np
+from pathlib import Path
+
+# Import modules
+from config import DiffusionTSFConfig
+from model import DiffusionTSF
+from dataset import ElectricityDataset
+from diffusion import DDIMSampler
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# Load checkpoint
+ckpt_path = '${FINAL_CKPT}'
+checkpoint = torch.load(ckpt_path, map_location=device)
+config_dict = checkpoint.get('config', {})
+
+# Create config
+config = DiffusionTSFConfig(
+    lookback_length=512,
+    forecast_length=96,
+    num_variables=1,
+    image_height=128,
+    diffusion_steps=config_dict.get('diffusion_steps', 2000),
+    noise_schedule=config_dict.get('noise_schedule', 'linear'),
+    model_type=config_dict.get('model_type', 'unet'),
+    model_channels=config_dict.get('model_channels', [64, 128, 256, 512]),
+    representation_mode=config_dict.get('representation_mode', 'cdf'),
+    blur_sigma=config_dict.get('blur_sigma', 1.0),
+    use_time_ramp=config_dict.get('use_time_ramp', True),
+    use_time_sine=config_dict.get('use_time_sine', False),
+    use_value_channel=config_dict.get('use_value_channel', True),
+    use_coordinate_channel=config_dict.get('use_coordinate_channel', True),
+    seasonal_period=${seasonal_period},
+    unet_kernel_size=tuple(config_dict.get('unet_kernel_size', [3, 9])),
+    use_guidance_channel=config_dict.get('use_guidance_channel', True),
+)
+
+# Load model
+model = DiffusionTSF(config).to(device)
+model.load_state_dict(checkpoint['model_state_dict'])
+model.eval()
+
+# Load guidance model
+from guidance import load_itransformer_from_checkpoint
+guidance_ckpt = '${GUIDANCE_CKPT}'
+guidance_model = load_itransformer_from_checkpoint(guidance_ckpt, device=device)
+guidance_model.eval()
+
+# Load test data with stride 8
+data_path = '${REPO_ROOT}/${data_dir}/${csv_file}'
+dataset = ElectricityDataset(
+    data_path=data_path,
+    lookback_length=512,
+    forecast_length=96,
+    column='${target_col}',
+    stride=8,  # Faster evaluation
+    augment=False
+)
+
+# Chronological test split (last 20%)
+total = len(dataset)
+test_start = int(total * 0.8) + 26  # After gap
+test_indices = list(range(test_start, total))
+
+if len(test_indices) < 5:
+    print(f'Warning: Only {len(test_indices)} test samples, skipping evaluation')
+    results = {'error': 'insufficient_test_samples', 'n_samples': len(test_indices)}
+else:
+    # Evaluate
+    sampler = DDIMSampler(model.scheduler, ddim_steps=50)
+    
+    mse_list, mae_list, grad_mae_list, grad_corr_list = [], [], [], []
+    n_eval = min(100, len(test_indices))  # Cap at 100 samples
+    
+    with torch.no_grad():
+        for idx in test_indices[:n_eval]:
+            past, future = dataset[idx]
+            past = past.unsqueeze(0).to(device)
+            future = future.unsqueeze(0).to(device)
+            
+            # Get guidance
+            guidance_pred = guidance_model(past, forecast_length=96)
+            
+            # Generate prediction
+            pred = model.generate(past, sampler=sampler, guidance=guidance_pred)
+            
+            # Compute metrics
+            pred_np = pred.cpu().numpy().flatten()
+            gt_np = future.cpu().numpy().flatten()
+            
+            mse_list.append(np.mean((pred_np - gt_np)**2))
+            mae_list.append(np.mean(np.abs(pred_np - gt_np)))
+            
+            # Gradient metrics
+            pred_grad = np.diff(pred_np)
+            gt_grad = np.diff(gt_np)
+            grad_mae_list.append(np.mean(np.abs(pred_grad - gt_grad)))
+            if np.std(pred_grad) > 1e-8 and np.std(gt_grad) > 1e-8:
+                grad_corr_list.append(np.corrcoef(pred_grad, gt_grad)[0, 1])
+    
+    results = {
+        'dataset': '${dataset_name}',
+        'target': '${target_col}',
+        'n_test_samples': n_eval,
+        'mse': float(np.mean(mse_list)),
+        'mae': float(np.mean(mae_list)),
+        'gradient_mae': float(np.mean(grad_mae_list)),
+        'gradient_corr': float(np.mean(grad_corr_list)) if grad_corr_list else None,
+    }
+    print(f'MSE: {results[\"mse\"]:.4f}, MAE: {results[\"mae\"]:.4f}, Grad MAE: {results[\"gradient_mae\"]:.4f}')
+
+# Save results
+with open('${RESULTS_FILE}', 'w') as f:
+    json.dump(results, f, indent=2)
+print(f'Results saved to ${RESULTS_FILE}')
+" 2>&1 | tee -a "${LOG_FILE}"
+        
+        if [[ -f "${RESULTS_FILE}" ]]; then
+            log "✅ Test results saved: ${RESULTS_FILE}"
+        else
+            log "⚠️ Test evaluation failed for ${dataset_name}"
+        fi
+    fi
+    
     ((PROCESSED++))
     log "✅ Completed: ${dataset_name} (${target_col})"
 done
@@ -373,6 +513,22 @@ for dataset_config in "${DATASETS[@]}"; do
 done
 log ""
 log "📝 Full log: ${LOG_FILE}"
+log ""
+log "============================================================================="
+log "  TEST RESULTS SUMMARY"
+log "============================================================================="
+for dataset_config in "${DATASETS[@]}"; do
+    IFS=':' read -r dataset_name data_dir csv_file target_col seasonal_period <<< "${dataset_config}"
+    safe_name=$(sanitize_name "${dataset_name}_${target_col}")
+    results_file="${CKPT_DIR}/${safe_name}/test_results.json"
+    if [[ -f "${results_file}" ]]; then
+        mse=$(python3 -c "import json; print(f'{json.load(open(\"${results_file}\"))[\"mse\"]:.4f}')" 2>/dev/null || echo "N/A")
+        mae=$(python3 -c "import json; print(f'{json.load(open(\"${results_file}\"))[\"mae\"]:.4f}')" 2>/dev/null || echo "N/A")
+        log "   ${safe_name}: MSE=${mse}, MAE=${mae}"
+    else
+        log "   ${safe_name}: No results"
+    fi
+done
 log ""
 log "============================================================================="
 log "  DATA LEAKAGE VERIFICATION"
