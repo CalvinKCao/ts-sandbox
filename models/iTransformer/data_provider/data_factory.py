@@ -1,5 +1,6 @@
 from data_provider.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom, Dataset_Solar, Dataset_PEMS, \
     Dataset_Pred
+from data_provider.data_loader_fair import Dataset_Fair
 from torch.utils.data import DataLoader
 
 data_dict = {
@@ -10,6 +11,12 @@ data_dict = {
     'Solar': Dataset_Solar,
     'PEMS': Dataset_PEMS,
     'custom': Dataset_Custom,
+    # Fair versions with gap-based splits (matches DiffusionTSF)
+    'fair': Dataset_Fair,
+    'ETTh1_fair': Dataset_Fair,
+    'ETTh2_fair': Dataset_Fair,
+    'ETTm1_fair': Dataset_Fair,
+    'ETTm2_fair': Dataset_Fair,
 }
 
 

@@ -41,8 +41,9 @@ def run_itransformer_trial(
     # Sample hyperparameters
     # Continuous log-uniform LR search from 1e-5 to 1e-3
     lr = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
-    e_layers = trial.suggest_categorical("e_layers", [2, 3, 4])
-    d_model = trial.suggest_categorical("d_model", [256, 512])
+    # Fixed e_layers=4 and d_model=512 to match pretrained DiffusionTSF's embedded guidance model
+    e_layers = 4
+    d_model = 512
     d_ff = d_model  # Match d_ff to d_model as is common practice
     
     trial_id = f"trial_{trial.number}"
@@ -50,13 +51,14 @@ def run_itransformer_trial(
     os.makedirs(trial_ckpt_dir, exist_ok=True)
     
     # Build command
+    # Always use 'fair' data type for gap-based splits matching DiffusionTSF
     cmd = [
         "python3", "run.py",
         "--is_training", "1",
         "--model_id", f"{model_id}_{trial_id}",
         "--root_path", root_path,
         "--data_path", data_path,
-        "--data", data_type,
+        "--data", "fair",  # Use fair splits (same as DiffusionTSF)
         "--model", "iTransformer",
         "--features", "S",
         "--target", target_col,
@@ -164,16 +166,18 @@ def main():
     os.chdir(itrans_dir)
     
     print(f"\n{'='*60}")
-    print(f"iTransformer Optuna Hyperparameter Tuning")
+    print(f"iTransformer Optuna Hyperparameter Tuning (FAIR MODE)")
     print(f"{'='*60}")
     print(f"Dataset: {args.root_path}/{args.data_path}")
     print(f"Target: {args.target}")
     print(f"Trials: {args.n_trials}")
     print(f"Epochs/trial: {args.n_epochs}")
+    print(f"Data split: FAIR (gap-based, matches DiffusionTSF)")
+    print(f"  - Train: 70% | [GAP: 608 indices] | Val: 10% | [GAP] | Test: 20%")
     print(f"Search space:")
     print(f"  - learning_rate: [1e-5, 1e-3] (log-uniform)")
-    print(f"  - e_layers: [2, 3, 4]")
-    print(f"  - d_model: [256, 512]")
+    print(f"  - e_layers: 4 (fixed to match pretrained DiffusionTSF)")
+    print(f"  - d_model: 512 (fixed to match pretrained DiffusionTSF)")
     print(f"{'='*60}\n")
     
     # Create Optuna study

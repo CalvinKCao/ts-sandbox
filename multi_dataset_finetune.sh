@@ -232,7 +232,7 @@ for dataset_config in "${DATASETS[@]}"; do
         log "✅ iTransformer already exists: ${GUIDANCE_CKPT}"
     else
         log "🔥 Tuning iTransformer on ${dataset_name} (${OPTUNA_TRIALS} Optuna trials)..."
-        log "   Search space: lr=[1e-5, 1e-3] (log), e_layers={2,3,4}, d_model={256,512}"
+        log "   Search space: lr=[1e-5, 1e-3] (log), e_layers=4 (fixed), d_model=512 (fixed)"
         
         mkdir -p "${dataset_ckpt_dir}/guidance"
         
