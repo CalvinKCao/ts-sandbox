@@ -22,6 +22,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${REPO_ROOT}"
 
+# Activate venv if it exists
+if [[ -f "${REPO_ROOT}/venv/bin/activate" ]]; then
+    source "${REPO_ROOT}/venv/bin/activate"
+fi
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -195,7 +200,7 @@ for dataset_config in "${DATASETS[@]}"; do
     data_path="${REPO_ROOT}/${data_dir}/${csv_file}"
     if [[ ! -f "${data_path}" ]]; then
         log "⚠️ Skipping - file not found: ${data_path}"
-        ((FAILED++))
+        FAILED=$((FAILED + 1))
         continue
     fi
     
@@ -205,7 +210,7 @@ for dataset_config in "${DATASETS[@]}"; do
     
     if [[ ${row_count} -lt ${MIN_DATASET_SIZE} ]]; then
         log "⚠️ Skipping - dataset too small (${row_count} < ${MIN_DATASET_SIZE})"
-        ((FAILED++))
+        FAILED=$((FAILED + 1))
         continue
     fi
     
@@ -274,7 +279,7 @@ for dataset_config in "${DATASETS[@]}"; do
         if [[ -z "${ITRANS_FOUND}" ]]; then
             log "❌ iTransformer training failed for ${dataset_name} - no checkpoint found"
             log "   Searched in: ${dataset_ckpt_dir}/guidance"
-            ((FAILED++))
+            FAILED=$((FAILED + 1))
             continue
         fi
         # Copy to expected location (don't move, in case nested path is needed)
@@ -296,26 +301,27 @@ for dataset_config in "${DATASETS[@]}"; do
     else
         log "🔥 Fine-tuning DiffusionTSF on ${dataset_name} (${OPTUNA_TRIALS} Optuna trials)..."
         
-        # Build target column argument
-        target_arg=""
-        if [[ "${target_col}" != "OT" ]]; then
-            target_arg="--target ${target_col}"
-        fi
-        
         # Add --quick flag for smoke test
         quick_arg=""
         if [[ "${SMOKE_TEST}" == "true" ]]; then
             quick_arg="--quick"
         fi
         
-        python3 models/diffusion_tsf/train_electricity.py \
-            --dataset "${dataset_name}" \
-            ${target_arg} \
-            --params-file "${PARAMS_FILE}" \
-            --pretrained-checkpoint "${SYNTH_DIFFUSION_CKPT}" \
-            --finetune-mode \
-            --trials ${OPTUNA_TRIALS} \
-            ${quick_arg} \
+        # Build command with proper quoting for target column
+        cmd="python3 models/diffusion_tsf/train_electricity.py"
+        cmd+=" --dataset ${dataset_name}"
+        if [[ "${target_col}" != "OT" ]]; then
+            cmd+=" --target '${target_col}'"
+        fi
+        cmd+=" --params-file ${PARAMS_FILE}"
+        cmd+=" --pretrained-checkpoint ${SYNTH_DIFFUSION_CKPT}"
+        cmd+=" --finetune-mode"
+        cmd+=" --trials ${OPTUNA_TRIALS}"
+        if [[ -n "${quick_arg}" ]]; then
+            cmd+=" ${quick_arg}"
+        fi
+        
+        eval ${cmd} \
             --repr-mode cdf \
             --model-type unet \
             --stride 1 \
@@ -344,184 +350,14 @@ for dataset_config in "${DATASETS[@]}"; do
                 log "✅ DiffusionTSF saved: ${FINAL_CKPT}"
             else
                 log "⚠️ No checkpoint found for ${dataset_name}"
-                ((FAILED++))
+                FAILED=$((FAILED + 1))
                 continue
             fi
         fi
     fi
     
-    # =========================================================================
-    # STEP 3: Evaluate on test set (stride 8 for speed)
-    # =========================================================================
     
-    RESULTS_FILE="${dataset_ckpt_dir}/test_results.json"
-    
-    if [[ -f "${RESULTS_FILE}" ]] && [[ "${SKIP_EXISTING}" == "true" ]]; then
-        log "✅ Test results already exist: ${RESULTS_FILE}"
-    else
-        log "📊 Evaluating on test set (stride=8)..."
-        
-        python3 -c "
-import sys
-sys.path.insert(0, 'models/diffusion_tsf')
-import torch
-import json
-import numpy as np
-import pandas as pd
-from pathlib import Path
-from torch.utils.data import Dataset
-
-# Import modules
-from config import DiffusionTSFConfig
-from model import DiffusionTSF
-
-# Inline dataset class (simpler than importing from train_electricity.py)
-class SimpleDataset(Dataset):
-    def __init__(self, data_path, lookback, forecast, column, stride=1):
-        df = pd.read_csv(data_path)
-        if column in df.columns:
-            self.values = df[column].values.astype(np.float32)
-        else:
-            # Try numeric column name
-            self.values = df.iloc[:, 1].values.astype(np.float32)
-        self.lookback = lookback
-        self.forecast = forecast
-        self.stride = stride
-        self.n_samples = max(0, (len(self.values) - lookback - forecast) // stride + 1)
-    
-    def __len__(self):
-        return self.n_samples
-    
-    def __getitem__(self, idx):
-        start = idx * self.stride
-        past = self.values[start:start + self.lookback]
-        future = self.values[start + self.lookback:start + self.lookback + self.forecast]
-        # Per-sample normalization
-        mean, std = past.mean(), past.std() + 1e-8
-        past = (past - mean) / std
-        future = (future - mean) / std
-        return torch.tensor(past), torch.tensor(future)
-
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-# Load checkpoint - use the saved config directly
-ckpt_path = '${FINAL_CKPT}'
-checkpoint = torch.load(ckpt_path, map_location=device)
-
-# The checkpoint should have a 'config' that's already a DiffusionTSFConfig or dict
-if 'config' in checkpoint and hasattr(checkpoint['config'], 'lookback_length'):
-    config = checkpoint['config']
-else:
-    # Fallback: create config from dict
-    cfg = checkpoint.get('config', {})
-    config = DiffusionTSFConfig(
-        lookback_length=512,
-        forecast_length=96,
-        num_variables=1,
-        image_height=128,
-        num_diffusion_steps=cfg.get('diffusion_steps', 2000),
-        noise_schedule=cfg.get('noise_schedule', 'linear'),
-        representation_mode=cfg.get('representation_mode', 'cdf'),
-        blur_sigma=cfg.get('blur_sigma', 1.0),
-        use_time_ramp=cfg.get('use_time_ramp', True),
-        use_time_sine=cfg.get('use_time_sine', False),
-        use_value_channel=cfg.get('use_value_channel', True),
-        use_coordinate_channel=cfg.get('use_coordinate_channel', True),
-        seasonal_period=${seasonal_period},
-        unet_kernel_size=tuple(cfg.get('unet_kernel_size', [3, 9])),
-        use_guidance_channel=cfg.get('use_guidance_channel', True),
-    )
-
-# Load model
-model = DiffusionTSF(config).to(device)
-model.load_state_dict(checkpoint['model_state_dict'])
-model.eval()
-
-# Load guidance model (import from train_electricity which has the loader)
-import importlib.util
-spec = importlib.util.spec_from_file_location('train_elec', 'models/diffusion_tsf/train_electricity.py')
-train_mod = importlib.util.module_from_spec(spec)
-sys.modules['train_elec'] = train_mod
-spec.loader.exec_module(train_mod)
-
-guidance_ckpt = '${GUIDANCE_CKPT}'
-guidance_model = train_mod.load_itransformer_from_checkpoint(guidance_ckpt, device=device)
-guidance_model.eval()
-
-# Load test data with stride 8
-data_path = '${REPO_ROOT}/${data_dir}/${csv_file}'
-dataset = SimpleDataset(
-    data_path=data_path,
-    lookback=512,
-    forecast=96,
-    column='${target_col}',
-    stride=8  # Faster evaluation
-)
-
-# Chronological test split (last 20%)
-total = len(dataset)
-test_start = int(total * 0.8) + 26  # After gap
-test_indices = list(range(test_start, total))
-
-if len(test_indices) < 5:
-    print(f'Warning: Only {len(test_indices)} test samples, skipping evaluation')
-    results = {'error': 'insufficient_test_samples', 'n_samples': len(test_indices)}
-else:
-    # Evaluate
-    mse_list, mae_list, grad_mae_list, grad_corr_list = [], [], [], []
-    n_eval = min(50, len(test_indices))  # Cap at 50 samples for speed
-    
-    with torch.no_grad():
-        for idx in test_indices[:n_eval]:
-            past, future = dataset[idx]
-            past = past.unsqueeze(0).to(device)
-            future = future.unsqueeze(0).to(device)
-            
-            # Get guidance
-            guidance_pred = guidance_model(past, forecast_length=96)
-            
-            # Generate prediction using DDIM (built into model)
-            pred = model.generate(past, use_ddim=True, num_ddim_steps=20, guidance=guidance_pred)
-            
-            # Compute metrics
-            pred_np = pred.cpu().numpy().flatten()
-            gt_np = future.cpu().numpy().flatten()
-            
-            mse_list.append(np.mean((pred_np - gt_np)**2))
-            mae_list.append(np.mean(np.abs(pred_np - gt_np)))
-            
-            # Gradient metrics
-            pred_grad = np.diff(pred_np)
-            gt_grad = np.diff(gt_np)
-            grad_mae_list.append(np.mean(np.abs(pred_grad - gt_grad)))
-            if np.std(pred_grad) > 1e-8 and np.std(gt_grad) > 1e-8:
-                grad_corr_list.append(np.corrcoef(pred_grad, gt_grad)[0, 1])
-    
-    results = {
-        'dataset': '${dataset_name}',
-        'target': '${target_col}',
-        'n_test_samples': n_eval,
-        'mse': float(np.mean(mse_list)),
-        'mae': float(np.mean(mae_list)),
-        'gradient_mae': float(np.mean(grad_mae_list)),
-        'gradient_corr': float(np.mean(grad_corr_list)) if grad_corr_list else None,
-    }
-    print(f'MSE: {results[\"mse\"]:.4f}, MAE: {results[\"mae\"]:.4f}, Grad MAE: {results[\"gradient_mae\"]:.4f}')
-
-# Save results
-with open('${RESULTS_FILE}', 'w') as f:
-    json.dump(results, f, indent=2)
-print(f'Results saved to ${RESULTS_FILE}')
-" 2>&1 | tee -a "${LOG_FILE}"
-        
-        if [[ -f "${RESULTS_FILE}" ]]; then
-            log "✅ Test results saved: ${RESULTS_FILE}"
-        else
-            log "⚠️ Test evaluation failed for ${dataset_name}"
-        fi
-    fi
-    
-    ((PROCESSED++))
+    PROCESSED=$((PROCESSED + 1))
     log "✅ Completed: ${dataset_name} (${target_col})"
 done
 
@@ -550,20 +386,12 @@ log ""
 log "📝 Full log: ${LOG_FILE}"
 log ""
 log "============================================================================="
-log "  TEST RESULTS SUMMARY"
+log "  RUNNING EVALUATION"
 log "============================================================================="
-for dataset_config in "${DATASETS[@]}"; do
-    IFS=':' read -r dataset_name data_dir csv_file target_col seasonal_period <<< "${dataset_config}"
-    safe_name=$(sanitize_name "${dataset_name}_${target_col}")
-    results_file="${CKPT_DIR}/${safe_name}/test_results.json"
-    if [[ -f "${results_file}" ]]; then
-        mse=$(python3 -c "import json; print(f'{json.load(open(\"${results_file}\"))[\"mse\"]:.4f}')" 2>/dev/null || echo "N/A")
-        mae=$(python3 -c "import json; print(f'{json.load(open(\"${results_file}\"))[\"mae\"]:.4f}')" 2>/dev/null || echo "N/A")
-        log "   ${safe_name}: MSE=${mse}, MAE=${mae}"
-    else
-        log "   ${safe_name}: No results"
-    fi
-done
+
+# Run evaluation on all trained models
+python3 evaluate_all.py --stride 8 2>&1 | tee -a "${LOG_FILE}"
+
 log ""
 log "============================================================================="
 log "  DATA LEAKAGE VERIFICATION"
