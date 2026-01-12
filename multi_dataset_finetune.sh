@@ -268,15 +268,19 @@ for dataset_config in "${DATASETS[@]}"; do
         
         cd "${REPO_ROOT}"
         
-        # Find and move checkpoint
+        # Find and copy checkpoint (iTransformer saves to nested subdirectory)
+        sleep 2  # Wait for file to be written
         ITRANS_FOUND=$(find "${dataset_ckpt_dir}/guidance" -name "checkpoint.pth" -type f 2>/dev/null | head -1 || true)
         if [[ -z "${ITRANS_FOUND}" ]]; then
-            log "❌ iTransformer training failed for ${dataset_name}"
+            log "❌ iTransformer training failed for ${dataset_name} - no checkpoint found"
+            log "   Searched in: ${dataset_ckpt_dir}/guidance"
             ((FAILED++))
             continue
         fi
+        # Copy to expected location (don't move, in case nested path is needed)
         if [[ "${ITRANS_FOUND}" != "${GUIDANCE_CKPT}" ]]; then
-            mv "${ITRANS_FOUND}" "${GUIDANCE_CKPT}"
+            cp "${ITRANS_FOUND}" "${GUIDANCE_CKPT}"
+            log "   Copied from: ${ITRANS_FOUND}"
         fi
         log "✅ iTransformer saved: ${GUIDANCE_CKPT}"
     fi
@@ -363,62 +367,95 @@ sys.path.insert(0, 'models/diffusion_tsf')
 import torch
 import json
 import numpy as np
+import pandas as pd
 from pathlib import Path
+from torch.utils.data import Dataset
 
 # Import modules
 from config import DiffusionTSFConfig
 from model import DiffusionTSF
-from dataset import ElectricityDataset
-from diffusion import DDIMSampler
+
+# Inline dataset class (simpler than importing from train_electricity.py)
+class SimpleDataset(Dataset):
+    def __init__(self, data_path, lookback, forecast, column, stride=1):
+        df = pd.read_csv(data_path)
+        if column in df.columns:
+            self.values = df[column].values.astype(np.float32)
+        else:
+            # Try numeric column name
+            self.values = df.iloc[:, 1].values.astype(np.float32)
+        self.lookback = lookback
+        self.forecast = forecast
+        self.stride = stride
+        self.n_samples = max(0, (len(self.values) - lookback - forecast) // stride + 1)
+    
+    def __len__(self):
+        return self.n_samples
+    
+    def __getitem__(self, idx):
+        start = idx * self.stride
+        past = self.values[start:start + self.lookback]
+        future = self.values[start + self.lookback:start + self.lookback + self.forecast]
+        # Per-sample normalization
+        mean, std = past.mean(), past.std() + 1e-8
+        past = (past - mean) / std
+        future = (future - mean) / std
+        return torch.tensor(past), torch.tensor(future)
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# Load checkpoint
+# Load checkpoint - use the saved config directly
 ckpt_path = '${FINAL_CKPT}'
 checkpoint = torch.load(ckpt_path, map_location=device)
-config_dict = checkpoint.get('config', {})
 
-# Create config
-config = DiffusionTSFConfig(
-    lookback_length=512,
-    forecast_length=96,
-    num_variables=1,
-    image_height=128,
-    diffusion_steps=config_dict.get('diffusion_steps', 2000),
-    noise_schedule=config_dict.get('noise_schedule', 'linear'),
-    model_type=config_dict.get('model_type', 'unet'),
-    model_channels=config_dict.get('model_channels', [64, 128, 256, 512]),
-    representation_mode=config_dict.get('representation_mode', 'cdf'),
-    blur_sigma=config_dict.get('blur_sigma', 1.0),
-    use_time_ramp=config_dict.get('use_time_ramp', True),
-    use_time_sine=config_dict.get('use_time_sine', False),
-    use_value_channel=config_dict.get('use_value_channel', True),
-    use_coordinate_channel=config_dict.get('use_coordinate_channel', True),
-    seasonal_period=${seasonal_period},
-    unet_kernel_size=tuple(config_dict.get('unet_kernel_size', [3, 9])),
-    use_guidance_channel=config_dict.get('use_guidance_channel', True),
-)
+# The checkpoint should have a 'config' that's already a DiffusionTSFConfig or dict
+if 'config' in checkpoint and hasattr(checkpoint['config'], 'lookback_length'):
+    config = checkpoint['config']
+else:
+    # Fallback: create config from dict
+    cfg = checkpoint.get('config', {})
+    config = DiffusionTSFConfig(
+        lookback_length=512,
+        forecast_length=96,
+        num_variables=1,
+        image_height=128,
+        num_diffusion_steps=cfg.get('diffusion_steps', 2000),
+        noise_schedule=cfg.get('noise_schedule', 'linear'),
+        representation_mode=cfg.get('representation_mode', 'cdf'),
+        blur_sigma=cfg.get('blur_sigma', 1.0),
+        use_time_ramp=cfg.get('use_time_ramp', True),
+        use_time_sine=cfg.get('use_time_sine', False),
+        use_value_channel=cfg.get('use_value_channel', True),
+        use_coordinate_channel=cfg.get('use_coordinate_channel', True),
+        seasonal_period=${seasonal_period},
+        unet_kernel_size=tuple(cfg.get('unet_kernel_size', [3, 9])),
+        use_guidance_channel=cfg.get('use_guidance_channel', True),
+    )
 
 # Load model
 model = DiffusionTSF(config).to(device)
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
 
-# Load guidance model
-from guidance import load_itransformer_from_checkpoint
+# Load guidance model (import from train_electricity which has the loader)
+import importlib.util
+spec = importlib.util.spec_from_file_location('train_elec', 'models/diffusion_tsf/train_electricity.py')
+train_mod = importlib.util.module_from_spec(spec)
+sys.modules['train_elec'] = train_mod
+spec.loader.exec_module(train_mod)
+
 guidance_ckpt = '${GUIDANCE_CKPT}'
-guidance_model = load_itransformer_from_checkpoint(guidance_ckpt, device=device)
+guidance_model = train_mod.load_itransformer_from_checkpoint(guidance_ckpt, device=device)
 guidance_model.eval()
 
 # Load test data with stride 8
 data_path = '${REPO_ROOT}/${data_dir}/${csv_file}'
-dataset = ElectricityDataset(
+dataset = SimpleDataset(
     data_path=data_path,
-    lookback_length=512,
-    forecast_length=96,
+    lookback=512,
+    forecast=96,
     column='${target_col}',
-    stride=8,  # Faster evaluation
-    augment=False
+    stride=8  # Faster evaluation
 )
 
 # Chronological test split (last 20%)
@@ -431,10 +468,8 @@ if len(test_indices) < 5:
     results = {'error': 'insufficient_test_samples', 'n_samples': len(test_indices)}
 else:
     # Evaluate
-    sampler = DDIMSampler(model.scheduler, ddim_steps=50)
-    
     mse_list, mae_list, grad_mae_list, grad_corr_list = [], [], [], []
-    n_eval = min(100, len(test_indices))  # Cap at 100 samples
+    n_eval = min(50, len(test_indices))  # Cap at 50 samples for speed
     
     with torch.no_grad():
         for idx in test_indices[:n_eval]:
@@ -445,8 +480,8 @@ else:
             # Get guidance
             guidance_pred = guidance_model(past, forecast_length=96)
             
-            # Generate prediction
-            pred = model.generate(past, sampler=sampler, guidance=guidance_pred)
+            # Generate prediction using DDIM (built into model)
+            pred = model.generate(past, use_ddim=True, num_ddim_steps=20, guidance=guidance_pred)
             
             # Compute metrics
             pred_np = pred.cpu().numpy().flatten()
