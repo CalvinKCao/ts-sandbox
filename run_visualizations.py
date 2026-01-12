@@ -32,12 +32,13 @@ import random
 random.seed(args.seed)
 
 datasets = {
-    "ETTh2": "MUFL",
+    "ETTh2": "OT",
     "ETTm1": "HUFL",
-    "illness": "AGE 0-4",
-    "exchange_rate": "OT",
+    "electricity": "42",
+    "exchange_rate": "3",
     "traffic": "394",
-    "weather": "raining (s)"
+    "weather": "T (degC)",
+    "illness": "ILITOTAL",
 }
 
 # Filter to specific dataset if requested
@@ -49,7 +50,7 @@ if args.dataset:
         print(f"Available: {list(datasets.keys())}")
         sys.exit(1)
 
-checkpoint_base = os.path.join(script_dir, "checkpoints")
+checkpoint_base = os.path.join(script_dir, "checkpoints", "multi_dataset_finetune")
 
 if PRETRAIN_ONLY:
     output_base = os.path.join(script_dir, "final_visualizations_pretrain")

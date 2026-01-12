@@ -217,7 +217,13 @@ for dataset_config in "${DATASETS[@]}"; do
     mkdir -p "${dataset_ckpt_dir}"
     
     # =========================================================================
-    # STEP 1: Fine-tune iTransformer on this dataset
+    # STEP 1: Fine-tune iTransformer on this dataset (with Optuna HP tuning)
+    # =========================================================================
+    # Hyperparameters (from paper):
+    #   - Learning rate: {1e-3, 5e-4, 1e-4}
+    #   - Number of blocks (e_layers): {2, 3, 4}
+    #   - Embedding dimension (d_model): {256, 512}
+    # Fixed: Adam optimizer, MSE loss, batch_size=32, epochs=10
     # =========================================================================
     
     GUIDANCE_CKPT="${dataset_ckpt_dir}/guidance/checkpoint.pth"
@@ -225,67 +231,45 @@ for dataset_config in "${DATASETS[@]}"; do
     if [[ -f "${GUIDANCE_CKPT}" ]] && [[ "${SKIP_EXISTING}" == "true" ]]; then
         log "✅ iTransformer already exists: ${GUIDANCE_CKPT}"
     else
-        log "🔥 Fine-tuning iTransformer on ${dataset_name}..."
+        log "🔥 Tuning iTransformer on ${dataset_name} (${OPTUNA_TRIALS} Optuna trials)..."
+        log "   Search space: lr=[1e-5, 1e-3] (log), e_layers={2,3,4}, d_model={256,512}"
         
         mkdir -p "${dataset_ckpt_dir}/guidance"
         
-        # Copy synthetic pretrain as starting point (for potential warm start)
-        # Note: iTransformer run.py doesn't support warm start, but we keep for reference
-        
-        cd models/iTransformer
-        
-        # Determine correct data loader type
+        # Determine correct data loader type for iTransformer
         if [[ "${dataset_name}" == ETT* ]]; then
             data_type="${dataset_name}"
         else
             data_type="custom"
         fi
         
-        python3 run.py \
-            --is_training 1 \
-            --model_id "${safe_name}_guidance" \
-            --root_path "${REPO_ROOT}/${data_dir}" \
-            --data_path "${csv_file}" \
-            --data "${data_type}" \
-            --model iTransformer \
-            --features S \
+        # iTransformer epochs: 10 for full run, less for smoke test
+        itrans_epochs=10
+        itrans_patience=3
+        if [[ "${SMOKE_TEST}" == "true" ]]; then
+            itrans_epochs=1
+            itrans_patience=1
+        elif [[ "${DRY_RUN}" == "true" ]]; then
+            itrans_epochs=2
+            itrans_patience=2
+        fi
+        
+        python3 tune_itransformer.py \
+            --root-path "${REPO_ROOT}/${data_dir}" \
+            --data-path "${csv_file}" \
+            --data-type "${data_type}" \
             --target "${target_col}" \
-            --freq h \
-            --checkpoints "${dataset_ckpt_dir}/guidance" \
-            --seq_len 512 \
-            --label_len 48 \
-            --pred_len 96 \
-            --e_layers 4 \
-            --d_model 512 \
-            --d_ff 512 \
-            --factor 1 \
-            --enc_in 1 \
-            --dec_in 1 \
-            --c_out 1 \
-            --des "${safe_name}" \
-            --loss MSE \
-            --lradj type1 \
-            --gpu 0 \
-            --train_epochs ${ITRANS_EPOCHS} \
-            --batch_size 32 \
-            --learning_rate 0.0001 \
-            --patience 7 2>&1 | tee -a "${LOG_FILE}"
+            --checkpoint-dir "${dataset_ckpt_dir}/guidance_trials" \
+            --model-id "${safe_name}_guidance" \
+            --n-trials ${OPTUNA_TRIALS} \
+            --n-epochs ${itrans_epochs} \
+            --patience ${itrans_patience} \
+            --output-checkpoint "${GUIDANCE_CKPT}" 2>&1 | tee -a "${LOG_FILE}"
         
-        cd "${REPO_ROOT}"
-        
-        # Find and copy checkpoint (iTransformer saves to nested subdirectory)
-        sleep 2  # Wait for file to be written
-        ITRANS_FOUND=$(find "${dataset_ckpt_dir}/guidance" -name "checkpoint.pth" -type f 2>/dev/null | head -1 || true)
-        if [[ -z "${ITRANS_FOUND}" ]]; then
-            log "❌ iTransformer training failed for ${dataset_name} - no checkpoint found"
-            log "   Searched in: ${dataset_ckpt_dir}/guidance"
+        if [[ ! -f "${GUIDANCE_CKPT}" ]]; then
+            log "❌ iTransformer tuning failed for ${dataset_name} - no checkpoint found"
             FAILED=$((FAILED + 1))
             continue
-        fi
-        # Copy to expected location (don't move, in case nested path is needed)
-        if [[ "${ITRANS_FOUND}" != "${GUIDANCE_CKPT}" ]]; then
-            cp "${ITRANS_FOUND}" "${GUIDANCE_CKPT}"
-            log "   Copied from: ${ITRANS_FOUND}"
         fi
         log "✅ iTransformer saved: ${GUIDANCE_CKPT}"
     fi

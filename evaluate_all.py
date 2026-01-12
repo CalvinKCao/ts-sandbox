@@ -35,12 +35,13 @@ BATCH_SIZE = args.batch_size
 DDIM_STEPS = args.ddim_steps
 
 datasets = {
-    "ETTh2": "MUFL",
+    "ETTh2": "OT",
     "ETTm1": "HUFL",
-    "illness": "AGE 0-4",
-    "exchange_rate": "OT",
+    "electricity": "42",
+    "exchange_rate": "3",
     "traffic": "394",
-    "weather": "raining (s)"
+    "weather": "T (degC)",
+    "illness": "ILITOTAL",
 }
 
 # In dry run, only test ETTh2
@@ -48,7 +49,7 @@ if DRY_RUN:
     print("🧪 DRY RUN MODE: Testing pipeline with minimal data")
     datasets = {"ETTh2": "MUFL"}
 
-checkpoint_base = os.path.join(script_dir, "checkpoints")
+checkpoint_base = os.path.join(script_dir, "checkpoints", "multi_dataset_finetune")
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Using device: {device}")
 print(f"Settings: stride={EVAL_STRIDE}, batch_size={BATCH_SIZE}, ddim_steps={DDIM_STEPS}")
