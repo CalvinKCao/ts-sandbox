@@ -17,12 +17,33 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${REPO_ROOT}"
 
+# Parse arguments
+DRY_RUN=false
+for arg in "$@"; do
+    case $arg in
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+    esac
+done
+
 # Configuration
 EXPERIMENT_NAME="full_synthetic_pretrain"
+if [[ "${DRY_RUN}" == "true" ]]; then
+    EXPERIMENT_NAME="dry_run_test"
+    SYNTHETIC_SIZE=100
+    ITRANS_EPOCHS=2
+    DIFFUSION_EPOCHS=2
+else
+    SYNTHETIC_SIZE=10000
+    ITRANS_EPOCHS=20
+    DIFFUSION_EPOCHS=100
+fi
+
 CKPT_DIR="${REPO_ROOT}/models/diffusion_tsf/checkpoints/${EXPERIMENT_NAME}"
 PARAMS_FILE="${REPO_ROOT}/models/diffusion_tsf/checkpoints/universal_synthetic_pretrain/best_params.json"
 LOG_FILE="${REPO_ROOT}/logs/${EXPERIMENT_NAME}_$(date +%Y%m%d_%H%M%S).log"
-SYNTHETIC_SIZE=10000
 
 mkdir -p "${CKPT_DIR}"
 mkdir -p "$(dirname "${LOG_FILE}")"
@@ -36,10 +57,14 @@ log "===========================================================================
 log "  FULL SYNTHETIC PRETRAIN EXPERIMENT"
 log "============================================================================="
 log ""
+if [[ "${DRY_RUN}" == "true" ]]; then
+    log "🧪 DRY RUN MODE - minimal data for testing"
+fi
 log "📁 Checkpoint dir: ${CKPT_DIR}"
 log "📋 Params file: ${PARAMS_FILE}"
 log "📝 Log file: ${LOG_FILE}"
 log "🔢 Synthetic size: ${SYNTHETIC_SIZE}"
+log "📊 iTransformer epochs: ${ITRANS_EPOCHS}"
 log ""
 
 # Check if params file exists
@@ -82,23 +107,30 @@ import numpy as np
 synth = RealTS(num_samples=${SYNTHETIC_SIZE}, lookback_length=512, forecast_length=96)
 print(f'Generated {len(synth)} synthetic samples')
 
-# Create a CSV with synthetic time series (concatenate lookback+forecast)
-all_series = []
-for i in range(min(${SYNTHETIC_SIZE}, len(synth))):
-    past, future = synth[i]
-    full = np.concatenate([past.numpy(), future.numpy()])
-    all_series.append(full)
+# Create a continuous time series that gives ~SYNTHETIC_SIZE samples for iTransformer
+# With seq_len=512 + pred_len=96, each sample needs 608 timesteps
+# To get N samples with stride 1, we need N + 607 rows
+# We'll concatenate just enough synthetic samples to reach target size
+target_rows = ${SYNTHETIC_SIZE} + 700  # Extra buffer for train/val/test splits
 
-# Stack into DataFrame
-data = np.stack(all_series)  # (n_samples, 608)
-# Transpose to (608, n_samples) for time-major format
-df = pd.DataFrame(data.T, columns=[f'var_{i}' for i in range(data.shape[0])])
-df['date'] = pd.date_range('2020-01-01', periods=len(df), freq='H')
-df = df[['date'] + [c for c in df.columns if c != 'date']]
-df['OT'] = df['var_0']  # Use first variable as target
+all_values = []
+samples_needed = (target_rows // 560) + 2  # Each sample contributes ~560 unique timesteps
+for i in range(min(samples_needed, len(synth))):
+    past, future = synth[i]
+    full = np.concatenate([past.numpy(), future.numpy()[:48]])
+    all_values.extend(full.tolist())
+    if len(all_values) >= target_rows:
+        break
+
+all_values = all_values[:target_rows]  # Trim to exact size
+
+# Create DataFrame with continuous time series
+df = pd.DataFrame({'OT': all_values})
+df['date'] = range(len(df))
+df = df[['date', 'OT']]
 df.to_csv('${SYNTH_CSV}', index=False)
 print(f'Saved synthetic CSV: ${SYNTH_CSV}')
-print(f'Shape: {df.shape}')
+print(f'Shape: {df.shape} ({len(df)} timesteps)')
 " 2>&1 | tee -a "${LOG_FILE}"
     fi
     
@@ -106,6 +138,7 @@ print(f'Shape: {df.shape}')
     
     python3 run.py \
         --is_training 1 \
+        --model_id "synth_guidance" \
         --root_path "${SYNTH_DATA_DIR}" \
         --data_path "synthetic_${SYNTHETIC_SIZE}.csv" \
         --data custom \
@@ -128,7 +161,7 @@ print(f'Shape: {df.shape}')
         --loss MSE \
         --lradj type1 \
         --gpu 0 \
-        --train_epochs 20 \
+        --train_epochs ${ITRANS_EPOCHS} \
         --batch_size 32 \
         --learning_rate 0.0001 \
         --patience 7 2>&1 | tee -a "${LOG_FILE}"
@@ -224,6 +257,7 @@ else
     
     python3 run.py \
         --is_training 1 \
+        --model_id "real_guidance" \
         --root_path "${REPO_ROOT}/datasets/ETT-small" \
         --data_path "ETTh2.csv" \
         --data ETTh2 \
@@ -246,7 +280,7 @@ else
         --loss MSE \
         --lradj type1 \
         --gpu 0 \
-        --train_epochs 20 \
+        --train_epochs ${ITRANS_EPOCHS} \
         --batch_size 32 \
         --learning_rate 0.0001 \
         --patience 7 2>&1 | tee -a "${LOG_FILE}"

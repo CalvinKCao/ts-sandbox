@@ -93,8 +93,13 @@ def load_itransformer_guidance(
     
     # Auto-detect d_model from embedding weight shape
     detected_d_model = 512  # default
+    detected_d_ff = 2048  # default
     if 'enc_embedding.value_embedding.weight' in state_dict:
         detected_d_model = state_dict['enc_embedding.value_embedding.weight'].shape[0]
+    
+    # Auto-detect d_ff from conv1 weight shape
+    if 'encoder.attn_layers.0.conv1.weight' in state_dict:
+        detected_d_ff = state_dict['encoder.attn_layers.0.conv1.weight'].shape[0]
     
     # Auto-detect n_heads from attention projection shape
     detected_n_heads = 8  # default
@@ -104,7 +109,7 @@ def load_itransformer_guidance(
         # We can infer from the projector output size
         pass  # Keep default, hard to infer n_heads from weights
     
-    print(f"Auto-detected from state_dict: e_layers={detected_e_layers}, d_model={detected_d_model}")
+    print(f"Auto-detected from state_dict: e_layers={detected_e_layers}, d_model={detected_d_model}, d_ff={detected_d_ff}")
     
     # Create a config object for iTransformer
     class iTransConfig:
@@ -119,7 +124,7 @@ def load_itransformer_guidance(
             self.dropout = 0.1
             self.factor = 1
             self.n_heads = ckpt_config.get('n_heads', 8)
-            self.d_ff = ckpt_config.get('d_ff', 2048)
+            self.d_ff = ckpt_config.get('d_ff', detected_d_ff)
             self.activation = 'gelu'
             self.e_layers = ckpt_config.get('e_layers', detected_e_layers if detected_e_layers > 0 else 3)
             self.class_strategy = 'projection'
