@@ -190,3 +190,4 @@ class Dataset_Fair(Dataset):
     def inverse_transform(self, data):
         return self.scaler.inverse_transform(data)
 
+

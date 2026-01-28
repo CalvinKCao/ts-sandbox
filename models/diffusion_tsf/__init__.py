@@ -11,15 +11,14 @@ that are typically lost in MSE-based regression.
 """
 
 from .config import DiffusionTSFConfig
-from .preprocessing import Standardizer, TimeSeriesTo2D, VerticalGaussianBlur
+from .preprocessing import TimeSeriesTo2D, VerticalGaussianBlur
 from .unet import ConditionalUNet2D
 from .diffusion import DiffusionScheduler
-from .model import DiffusionTSF
+from .diffusion_model import DiffusionTSF
 from .metrics import compute_metrics, shape_preservation_score
 
 __all__ = [
     "DiffusionTSFConfig",
-    "Standardizer",
     "TimeSeriesTo2D", 
     "VerticalGaussianBlur",
     "ConditionalUNet2D",

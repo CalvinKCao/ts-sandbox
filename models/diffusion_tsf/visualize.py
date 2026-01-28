@@ -21,9 +21,9 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
+from dataset import ElectricityDataset
+from diffusion_model import DiffusionTSF
 from config import DiffusionTSFConfig
-from model import DiffusionTSF
-from train_electricity import ElectricityDataset, MODEL_SIZES, VAL_SPLIT, DATASET_REGISTRY
 from guidance import iTransformerGuidance, LinearRegressionGuidance, LastValueGuidance
 
 # Datasets directory (relative to script)

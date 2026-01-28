@@ -1,0 +1,10 @@
+{
+  "learning_rate": 0.0003558475656999144,
+  "model_size": "small",
+  "diffusion_steps": 1000,
+  "batch_size": 16,
+  "noise_schedule": "linear",
+  "blur_sigma": 1.0,
+  "emd_lambda": 0.2,
+  "representation_mode": "cdf"
+}

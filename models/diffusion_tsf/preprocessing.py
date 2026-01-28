@@ -18,72 +18,6 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-class Standardizer:
-    """Z-score standardization using local mean and standard deviation.
-    
-    Normalizes input windows to have zero mean and unit variance.
-    Stores the normalization parameters for inverse transform.
-    """
-    
-    def __init__(self, eps: float = 1e-8):
-        """
-        Args:
-            eps: Small constant for numerical stability
-        """
-        self.eps = eps
-        self.mean = None
-        self.std = None
-    
-    def fit_transform(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute mean/std from x and normalize.
-        
-        Args:
-            x: Input tensor of shape (batch, seq_len) or (batch, channels, seq_len)
-            
-        Returns:
-            Normalized tensor of same shape
-        """
-        # Handle both 2D and 3D inputs
-        if x.dim() == 2:
-            # (batch, seq_len) -> compute stats over seq_len
-            self.mean = x.mean(dim=-1, keepdim=True)
-            self.std = x.std(dim=-1, keepdim=True) + self.eps
-        else:
-            # (batch, channels, seq_len)
-            self.mean = x.mean(dim=-1, keepdim=True)
-            self.std = x.std(dim=-1, keepdim=True) + self.eps
-        
-        normalized = (x - self.mean) / self.std
-        logger.debug(f"Standardizer: mean={self.mean.mean().item():.4f}, std={self.std.mean().item():.4f}")
-        return normalized
-    
-    def transform(self, x: torch.Tensor) -> torch.Tensor:
-        """Normalize using stored mean/std.
-        
-        Args:
-            x: Input tensor
-            
-        Returns:
-            Normalized tensor
-        """
-        if self.mean is None or self.std is None:
-            raise ValueError("Standardizer must be fit before transform")
-        return (x - self.mean) / self.std
-    
-    def inverse_transform(self, x: torch.Tensor) -> torch.Tensor:
-        """Denormalize using stored mean/std.
-        
-        Args:
-            x: Normalized tensor
-            
-        Returns:
-            Original scale tensor
-        """
-        if self.mean is None or self.std is None:
-            raise ValueError("Standardizer must be fit before inverse_transform")
-        return x * self.std + self.mean
-
-
 class TimeSeriesTo2D(nn.Module):
     """Maps 1D time series to 2D "stripe" binary images.
     
@@ -221,34 +155,42 @@ class TimeSeriesTo2D(nn.Module):
         self,
         image: torch.Tensor,
         cdf_decoder: str = "mean",
-        pdf_temperature: Optional[float] = None
+        pdf_temperature: Optional[float] = None,
+        squeeze_univariate: bool = True
     ) -> torch.Tensor:
         """Convert 2D probability image back to 1D time series.
         
         Uses expectation: x_t = sum_j P(j) * center(j)
         
         Supports both univariate and multivariate:
-        - Univariate: (batch, 1, height, seq_len) -> (batch, seq_len)
+        - Univariate: (batch, 1, height, seq_len) -> (batch, seq_len) if squeeze_univariate
         - Multivariate: (batch, num_vars, height, seq_len) -> (batch, num_vars, seq_len)
         
         Args:
             image: Probability image of shape (batch, num_vars, height, seq_len)
-                   Each column should be a valid probability distribution
+                   Each column should be a valid probability distribution.
+                   For CDF mode, values should be in [0, 1] range.
+            cdf_decoder: For CDF mode, 'mean' (column sum) or 'pdf_expectation'
+            pdf_temperature: Temperature for softmax (PDF mode) or power scaling (CDF pdf_expectation).
+                            Lower = sharper peaks. None uses default (no scaling).
+            squeeze_univariate: If True, squeeze output for univariate case (backwards compat)
             
         Returns:
             Time series of shape (batch, num_vars, seq_len) or (batch, seq_len) if univariate
         """
         batch_size, num_vars, height, seq_len = image.shape
-        squeeze_output = (num_vars == 1)
+        squeeze_output = squeeze_univariate and (num_vars == 1)
         
         if self.representation_mode == "pdf":
-            # Normalize each column to be a probability distribution
-            # Softmax along height (dim=2)
-            prob = F.softmax(image, dim=2)
+            # Apply temperature scaling if provided
+            if pdf_temperature is not None:
+                prob = F.softmax(image / pdf_temperature, dim=2)
+            else:
+                prob = F.softmax(image, dim=2)
             
             # Compute expectation: sum_j P(j) * center(j)
             # bin_centers: (height,) -> (1, 1, height, 1)
-            centers = self.bin_centers.view(1, 1, -1, 1)
+            centers = self.bin_centers.view(1, 1, -1, 1).to(image.device)
             
             # Weighted sum: (batch, num_vars, seq_len)
             x = (prob * centers).sum(dim=2)
@@ -335,67 +277,4 @@ class VerticalGaussianBlur(nn.Module):
         return blurred
 
 
-class Preprocessing(nn.Module):
-    """Complete preprocessing pipeline: normalize -> 2D encode -> blur.
-    
-    Combines all preprocessing steps into a single module.
-    """
-    
-    def __init__(
-        self,
-        height: int = 128,
-        max_scale: float = 3.5,
-        blur_kernel_size: int = 31,
-        blur_sigma: float = 1.0,
-        representation_mode: str = "pdf"
-    ):
-        super().__init__()
-        self.to_2d = TimeSeriesTo2D(
-            height=height,
-            max_scale=max_scale,
-            representation_mode=representation_mode
-        )
-        self.blur = VerticalGaussianBlur(kernel_size=blur_kernel_size, sigma=blur_sigma)
-        self.standardizer = Standardizer()
-    
-    def encode(self, x: torch.Tensor, fit_standardizer: bool = True) -> torch.Tensor:
-        """Encode 1D time series to blurred 2D representation.
-        
-        Args:
-            x: Time series of shape (batch, seq_len)
-            fit_standardizer: If True, fit standardizer on this data
-            
-        Returns:
-            Blurred 2D image of shape (batch, 1, height, seq_len)
-        """
-        # Normalize
-        if fit_standardizer:
-            x_norm = self.standardizer.fit_transform(x)
-        else:
-            x_norm = self.standardizer.transform(x)
-        
-        # Convert to 2D
-        image = self.to_2d(x_norm)
-        
-        # Apply vertical blur
-        blurred = self.blur(image)
-        
-        return blurred
-    
-    def decode(self, image: torch.Tensor) -> torch.Tensor:
-        """Decode 2D representation back to 1D time series.
-        
-        Args:
-            image: 2D probability image of shape (batch, 1, height, seq_len)
-            
-        Returns:
-            Time series of shape (batch, seq_len) in original scale
-        """
-        # Convert to 1D (normalized scale)
-        x_norm = self.to_2d.inverse(image)
-        
-        # Denormalize
-        x = self.standardizer.inverse_transform(x_norm)
-        
-        return x
 

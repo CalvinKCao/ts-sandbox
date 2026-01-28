@@ -39,7 +39,7 @@ if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
 from config import DiffusionTSFConfig
-from model import DiffusionTSF
+from diffusion_model import DiffusionTSF
 from metrics import compute_metrics, log_metrics
 from dataset import apply_1d_augmentations, get_synthetic_dataloader
 from realts import RealTS
@@ -47,8 +47,7 @@ from guidance import (
     GuidanceModel, 
     LastValueGuidance, 
     LinearRegressionGuidance, 
-    iTransformerGuidance,
-    create_guidance_model
+    iTransformerGuidance
 )
 
 # Setup logging
@@ -66,39 +65,148 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ============================================================================
 
-# Paths
+from dataclasses import dataclass, field
+
+# Paths (constants)
 DATASETS_DIR = os.path.join(script_dir, '..', '..', 'datasets')
 BASE_CHECKPOINT_DIR = os.path.join(script_dir, 'checkpoints')
-CHECKPOINT_DIR = BASE_CHECKPOINT_DIR  # Will be updated by run_optuna_search or train_with_best_params
 OPTUNA_DB = os.path.join(script_dir, 'optuna_study.db')
 
 # Dataset registry: name -> (relative_path, default_target_column, seasonal_period)
-# seasonal_period: 96 for hourly (daily cycle), 24 for 15-min (daily cycle), 168 for weekly
 DATASET_REGISTRY = {
-    'electricity': ('electricity/electricity.csv', 'OT', 96),  # Hourly data
-    'ETTh1': ('ETT-small/ETTh1.csv', 'OT', 24),  # Hourly data (24h cycle)
+    'electricity': ('electricity/electricity.csv', 'OT', 96),
+    'ETTh1': ('ETT-small/ETTh1.csv', 'OT', 24),
     'ETTh2': ('ETT-small/ETTh2.csv', 'OT', 24),
-    'ETTm1': ('ETT-small/ETTm1.csv', 'OT', 96),  # 15-min data (96 = 24h)
+    'ETTm1': ('ETT-small/ETTm1.csv', 'OT', 96),
     'ETTm2': ('ETT-small/ETTm2.csv', 'OT', 96),
-    'exchange_rate': ('exchange_rate/exchange_rate.csv', 'OT', 5),  # Daily data (5 = weekly business days)
-    'illness': ('illness/national_illness.csv', 'OT', 52),  # Weekly data (52 = yearly cycle)
-    'traffic': ('traffic/traffic.csv', 'OT', 24),  # Hourly data
-    'weather': ('weather/weather.csv', 'OT', 144),  # 10-min data (144 = daily cycle)
+    'exchange_rate': ('exchange_rate/exchange_rate.csv', 'OT', 5),
+    'illness': ('illness/national_illness.csv', 'OT', 52),
+    'traffic': ('traffic/traffic.csv', 'OT', 24),
+    'weather': ('weather/weather.csv', 'OT', 144),
 }
 
-# Default dataset (will be updated from CLI)
+# Fixed parameters (aligned with ViTime paper)
+LOOKBACK_LENGTH = 512
+FORECAST_LENGTH = 96
+IMAGE_HEIGHT = 128
+BLUR_KERNEL = 31
+MAX_SCALE = 3.5
+
+
+@dataclass
+class TrainingConfig:
+    """Runtime configuration for training.
+    
+    Consolidates all CLI args and runtime settings into a single object.
+    """
+    # Dataset
+    dataset: str = 'electricity'
+    target_column: Optional[str] = None
+    data_path: str = ''
+    stride: int = 24
+    use_all_columns: bool = False
+    seasonal_period: int = 96
+    
+    # Model architecture
+    model_type: str = 'unet'
+    repr_mode: str = 'cdf'
+    blur_sigma: float = 1.0
+    emd_lambda: float = 0.0
+    unet_kernel_size: Tuple[int, int] = (3, 3)
+    use_dilated_middle: bool = False
+    transformer_patch_height: int = 16
+    transformer_patch_width: int = 16
+    
+    # Auxiliary channels
+    use_coordinate_channel: bool = True
+    use_time_ramp: bool = False
+    use_time_sine: bool = False
+    use_value_channel: bool = False
+    use_hybrid_condition: bool = True
+    
+    # Guidance
+    use_guidance_channel: bool = False
+    guidance_type: str = 'linear'
+    guidance_checkpoint: Optional[str] = None
+    
+    # Regularization
+    use_monotonicity_loss: bool = False
+    monotonicity_weight: float = 10.0
+    
+    # Synthetic data
+    synthetic_pretrain_epochs: int = 0
+    synthetic_size: int = 10000
+    synthetic_only_mode: bool = False
+    
+    # Fine-tuning
+    pretrained_checkpoint: Optional[str] = None
+    finetune_mode: bool = False
+    force_high_end_search: bool = False
+    
+    # Training
+    run_name: Optional[str] = None
+    num_trials: int = 10
+    
+    def __post_init__(self):
+        """Set derived fields."""
+        if not self.data_path and self.dataset in DATASET_REGISTRY:
+            self.data_path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[self.dataset][0])
+        if self.target_column is None and self.dataset in DATASET_REGISTRY:
+            self.target_column = DATASET_REGISTRY[self.dataset][1]
+        if self.seasonal_period == 96 and self.dataset in DATASET_REGISTRY:
+            # Use dataset-specific default unless overridden
+            self.seasonal_period = DATASET_REGISTRY[self.dataset][2]
+    
+    @classmethod
+    def from_args(cls, args) -> 'TrainingConfig':
+        """Create config from argparse Namespace."""
+        dataset_info = DATASET_REGISTRY.get(args.dataset, ('', 'OT', 96))
+        return cls(
+            dataset=args.dataset,
+            target_column=args.target if args.target else dataset_info[1],
+            data_path=os.path.join(DATASETS_DIR, dataset_info[0]),
+            stride=args.stride,
+            use_all_columns=args.multivariate,
+            seasonal_period=args.seasonal_period if args.seasonal_period != 96 else dataset_info[2],
+            model_type=args.model_type,
+            repr_mode=args.repr_mode,
+            blur_sigma=args.blur_sigma,
+            emd_lambda=args.emd_lambda,
+            unet_kernel_size=tuple(args.kernel_size),
+            use_dilated_middle=args.dilated_middle,
+            transformer_patch_height=args.patch_height,
+            transformer_patch_width=args.patch_width,
+            use_coordinate_channel=args.use_coordinate_channel,
+            use_time_ramp=args.use_time_ramp,
+            use_time_sine=args.use_time_sine,
+            use_value_channel=args.use_value_channel,
+            use_hybrid_condition=args.use_hybrid_condition,
+            use_guidance_channel=args.use_guidance,
+            guidance_type=args.guidance_type,
+            guidance_checkpoint=args.guidance_checkpoint,
+            use_monotonicity_loss=args.use_monotonicity_loss,
+            monotonicity_weight=args.monotonicity_weight,
+            synthetic_pretrain_epochs=args.synthetic_pretrain_epochs,
+            synthetic_size=args.synthetic_size,
+            synthetic_only_mode=args.synthetic_only,
+            pretrained_checkpoint=args.pretrained_checkpoint,
+            finetune_mode=args.finetune_mode or (args.pretrained_checkpoint is not None),
+            force_high_end_search=args.force_high_end_search,
+            run_name=args.run_name,
+            num_trials=args.trials,
+        )
+
+
+# Global config instance (set from CLI args in main())
+_config: Optional[TrainingConfig] = None
+
+# Legacy globals for backwards compatibility (set from _config)
+CHECKPOINT_DIR = BASE_CHECKPOINT_DIR
 SELECTED_DATASET = 'electricity'
 DATA_PATH = os.path.join(DATASETS_DIR, DATASET_REGISTRY[SELECTED_DATASET][0])
-TARGET_COLUMN = None  # None = use dataset default from registry
-
-# Fixed parameters (aligned with ViTime paper)
-LOOKBACK_LENGTH = 512      # Same as ViTime paper
-FORECAST_LENGTH = 96       # Common benchmark (paper uses 96, 192, 336, 720)
-IMAGE_HEIGHT = 128         # ViTime paper: h=128
-BLUR_KERNEL = 31           # ViTime paper: kernel=31
-BLUR_SIGMA = 1.0           # Sharper labels; EMD handles non-overlap
-EMD_LAMBDA = 0.0           # Best found value (was 0.2)
-MAX_SCALE = 3.5            # ViTime paper: MS=3.5
+TARGET_COLUMN = None
+BLUR_SIGMA = 1.0
+EMD_LAMBDA = 0.0
 
 # ============================================================================
 # Hardware-Adaptive Configuration
@@ -109,58 +217,53 @@ def get_gpu_memory_gb() -> float:
     if not torch.cuda.is_available():
         return 0.0
     try:
-        # Get total memory of the first GPU
         props = torch.cuda.get_device_properties(0)
-        total_gb = props.total_memory / (1024 ** 3)
-        return total_gb
+        return props.total_memory / (1024 ** 3)
     except Exception:
-        return 8.0  # Assume 8GB if detection fails
+        return 8.0
 
 def get_high_end_search_space():
-    """Return the high-end GPU search space (for synthetic pre-training or forced mode)."""
+    """Return the high-end GPU search space."""
     return {
-        'learning_rate': (1e-6, 1e-3),  # Wide LR range: 1e-5 to 1e-3
-        'model_size': ['small', 'large'],  # Include all model sizes
-        'diffusion_steps': [2000, 4000],  # More diffusion options
-        'batch_size': [128, 512],  # Much larger batch sizes
-        'noise_schedule': ['linear'],  # Well-established noise schedules
+        'learning_rate': (1e-6, 1e-3),
+        'model_size': ['small', 'large'],
+        'diffusion_steps': [2000, 4000],
+        'batch_size': [128, 512],
+        'noise_schedule': ['linear'],
     }
-
 
 def get_finetune_search_space():
-    """Return a more conservative search space for fine-tuning pre-trained models.
-    
-    Uses lower learning rates to avoid catastrophic forgetting when fine-tuning
-    a universal pre-trained model on domain-specific data.
-    """
+    """Return conservative search space for fine-tuning."""
     return {
-        'learning_rate': (1e-6, 1e-4),  # More conservative LR for fine-tuning
-        'model_size': ['small', 'large'],  # Same model sizes
-        'diffusion_steps': [2000, 4000],  # Same diffusion options
-        'batch_size': [128, 512],  # Same batch sizes
-        'noise_schedule': ['linear'],  # Same noise schedule
+        'learning_rate': (1e-6, 1e-4),
+        'model_size': ['small', 'large'],
+        'diffusion_steps': [2000, 4000],
+        'batch_size': [128, 512],
+        'noise_schedule': ['linear'],
     }
 
-
-def get_hardware_config():
-    """Get hardware-adaptive search space based on GPU memory."""
-    # If fine-tuning from pretrained checkpoint, use conservative LR range
-    if FINETUNE_MODE and PRETRAINED_CHECKPOINT_PATH:
+def get_hardware_config(cfg: Optional[TrainingConfig] = None) -> dict:
+    """Get hardware-adaptive search space based on GPU memory and config."""
+    # Use config if provided, else fall back to globals
+    finetune = cfg.finetune_mode if cfg else FINETUNE_MODE
+    pretrained = cfg.pretrained_checkpoint if cfg else PRETRAINED_CHECKPOINT_PATH
+    force_high = cfg.force_high_end_search if cfg else FORCE_HIGH_END_SEARCH
+    
+    if finetune and pretrained:
         logger.info("Fine-tuning mode enabled - using conservative LR range (1e-6, 1e-4)")
         return get_finetune_search_space()
     
-    # If forced, use high-end search space regardless of hardware
-    if FORCE_HIGH_END_SEARCH:
-        logger.info("Forced high-end search space enabled - using extensive search space")
+    if force_high:
+        logger.info("Forced high-end search space enabled")
         return get_high_end_search_space()
     
     gpu_mem = get_gpu_memory_gb()
     
-    if gpu_mem >= 40:  # Ada 6000, A100, etc.
-        logger.info(f"Detected high-end GPU ({gpu_mem:.1f}GB) - using extensive search space")
+    if gpu_mem >= 40:
+        logger.info(f"Detected high-end GPU ({gpu_mem:.1f}GB)")
         return get_high_end_search_space()
-    elif gpu_mem >= 16:  # RTX 3090, 4080, etc.
-        logger.info(f"Detected mid-range GPU ({gpu_mem:.1f}GB) - using medium batch sizes")
+    elif gpu_mem >= 16:
+        logger.info(f"Detected mid-range GPU ({gpu_mem:.1f}GB)")
         return {
             'learning_rate': (5e-5, 5e-4),
             'model_size': ['small', 'medium'],
@@ -168,8 +271,8 @@ def get_hardware_config():
             'batch_size': [16, 32],
             'noise_schedule': ['linear', 'cosine'],
         }
-    elif gpu_mem >= 8:  # RTX 3070, laptop GPUs, etc.
-        logger.info(f"Detected mid-low GPU ({gpu_mem:.1f}GB) - using small batch sizes")
+    elif gpu_mem >= 8:
+        logger.info(f"Detected mid-low GPU ({gpu_mem:.1f}GB)")
         return {
             'learning_rate': (5e-5, 5e-4),
             'model_size': ['tiny', 'small'],
@@ -177,8 +280,8 @@ def get_hardware_config():
             'batch_size': [8, 16],
             'noise_schedule': ['cosine'],
         }
-    else:  # Low-end or integrated GPU
-        logger.info(f"Detected low-end GPU ({gpu_mem:.1f}GB) - using minimal settings")
+    else:
+        logger.info(f"Detected low-end GPU ({gpu_mem:.1f}GB)")
         return {
             'learning_rate': (1e-4, 3e-4),
             'model_size': ['tiny'],
@@ -187,77 +290,94 @@ def get_hardware_config():
             'noise_schedule': ['cosine'],
         }
 
-# Get hardware-adaptive search space
-SEARCH_SPACE = None  # Will be set at runtime
-# Selected model type (set from CLI)
+
+def _sync_globals_from_config(cfg: TrainingConfig) -> None:
+    """Sync legacy global variables from config for backwards compatibility."""
+    global SELECTED_DATASET, DATA_PATH, TARGET_COLUMN, CHECKPOINT_DIR
+    global SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, BLUR_SIGMA, EMD_LAMBDA
+    global TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE
+    global USE_TIME_RAMP, USE_TIME_SINE, USE_VALUE_CHANNEL, USE_COORDINATE_CHANNEL
+    global SEASONAL_PERIOD, USE_ALL_COLUMNS, USE_DILATED_MIDDLE
+    global USE_MONOTONICITY_LOSS, MONOTONICITY_WEIGHT, USE_HYBRID_CONDITION
+    global USE_GUIDANCE_CHANNEL, GUIDANCE_TYPE, GUIDANCE_CHECKPOINT
+    global SYNTHETIC_PRETRAIN_EPOCHS, SYNTHETIC_SIZE, SYNTHETIC_ONLY_MODE
+    global PRETRAINED_CHECKPOINT_PATH, FORCE_HIGH_END_SEARCH, CUSTOM_RUN_NAME
+    global FINETUNE_MODE, DATASET_STRIDE, SEARCH_SPACE, _config
+    
+    _config = cfg
+    SELECTED_DATASET = cfg.dataset
+    DATA_PATH = cfg.data_path
+    TARGET_COLUMN = cfg.target_column
+    SELECTED_MODEL_TYPE = cfg.model_type
+    SELECTED_REPR_MODE = cfg.repr_mode
+    BLUR_SIGMA = cfg.blur_sigma
+    EMD_LAMBDA = cfg.emd_lambda
+    TRANSFORMER_PATCH_HEIGHT = cfg.transformer_patch_height
+    TRANSFORMER_PATCH_WIDTH = cfg.transformer_patch_width
+    UNET_KERNEL_SIZE = cfg.unet_kernel_size
+    USE_TIME_RAMP = cfg.use_time_ramp
+    USE_TIME_SINE = cfg.use_time_sine
+    USE_VALUE_CHANNEL = cfg.use_value_channel
+    USE_COORDINATE_CHANNEL = cfg.use_coordinate_channel
+    SEASONAL_PERIOD = cfg.seasonal_period
+    USE_ALL_COLUMNS = cfg.use_all_columns
+    USE_DILATED_MIDDLE = cfg.use_dilated_middle
+    USE_MONOTONICITY_LOSS = cfg.use_monotonicity_loss
+    MONOTONICITY_WEIGHT = cfg.monotonicity_weight
+    USE_HYBRID_CONDITION = cfg.use_hybrid_condition
+    USE_GUIDANCE_CHANNEL = cfg.use_guidance_channel
+    GUIDANCE_TYPE = cfg.guidance_type
+    GUIDANCE_CHECKPOINT = cfg.guidance_checkpoint
+    SYNTHETIC_PRETRAIN_EPOCHS = cfg.synthetic_pretrain_epochs
+    SYNTHETIC_SIZE = cfg.synthetic_size
+    SYNTHETIC_ONLY_MODE = cfg.synthetic_only_mode
+    PRETRAINED_CHECKPOINT_PATH = cfg.pretrained_checkpoint
+    FORCE_HIGH_END_SEARCH = cfg.force_high_end_search
+    CUSTOM_RUN_NAME = cfg.run_name
+    FINETUNE_MODE = cfg.finetune_mode
+    DATASET_STRIDE = cfg.stride
+    
+    # Initialize search space
+    SEARCH_SPACE = get_hardware_config(cfg)
+    SEARCH_SPACE['blur_sigma'] = [cfg.blur_sigma]
+    SEARCH_SPACE['emd_lambda'] = [cfg.emd_lambda]
+
+
+# Legacy globals (set via _sync_globals_from_config)
+SEARCH_SPACE = None
 SELECTED_MODEL_TYPE = "unet"
-# Selected representation mode (stripe/pdf vs occupancy/cdf)
-SELECTED_REPR_MODE = "pdf"
-# Transformer patch sizes (set from CLI, default 16x16)
+SELECTED_REPR_MODE = "cdf"
 TRANSFORMER_PATCH_HEIGHT = 16
 TRANSFORMER_PATCH_WIDTH = 16
-# U-Net kernel size (height, width) - set from CLI
 UNET_KERNEL_SIZE = (3, 3)
-# Time channels for U-Net temporal awareness (set from CLI)
-USE_TIME_RAMP = True  # Linear ramp channel
-USE_TIME_SINE = True  # Sine wave channel
-USE_VALUE_CHANNEL = False  # Value channel (normalized values broadcast)
-USE_COORDINATE_CHANNEL = True  # Vertical coordinate channel
+USE_TIME_RAMP = False
+USE_TIME_SINE = False
+USE_VALUE_CHANNEL = False
+USE_COORDINATE_CHANNEL = True
 SEASONAL_PERIOD = 96
-
-# Multivariate mode (set from CLI)
-USE_ALL_COLUMNS = False  # If True, use all numeric columns for multivariate forecasting
-
-# Dilated middle block (set from CLI)
-USE_DILATED_MIDDLE = True  # If True, use dilated convolutions in U-Net bottleneck
-
-# Monotonicity loss (CDF regularization)
+USE_ALL_COLUMNS = False
+USE_DILATED_MIDDLE = False
 USE_MONOTONICITY_LOSS = False
 MONOTONICITY_WEIGHT = 10.0
-
-# Hybrid 1D cross-attention conditioning (set from CLI)
-USE_HYBRID_CONDITION = True  # If True, use 1D context encoder + cross-attention
-
-# Visual Guide (Stage 1 predictor) settings (set from CLI)
-USE_GUIDANCE_CHANNEL = False  # If True, use Stage 1 predictor as guidance
-GUIDANCE_TYPE = "linear"  # "linear", "last_value", or "itransformer"
-GUIDANCE_CHECKPOINT = None  # Path to pre-trained iTransformer checkpoint (if guidance_type="itransformer")
-
-# Synthetic data pre-training settings (set from CLI)
-# Two-phase training: (1) pre-train on synthetic data, (2) fine-tune on real data
-SYNTHETIC_PRETRAIN_EPOCHS = 0  # Number of epochs to pre-train on synthetic data (0 = disabled)
-SYNTHETIC_SIZE = 10000  # Number of synthetic samples to generate for pre-training
-
-# Pure synthetic training mode (for hyperparameter search on synthetic data)
-SYNTHETIC_ONLY_MODE = False  # If True, train ONLY on synthetic data (no real data)
-
-# Pre-trained checkpoint for fine-tuning (set from CLI)
-PRETRAINED_CHECKPOINT_PATH = None  # Path to a pre-trained model to start fine-tuning from
-
-# Force high-end search space regardless of GPU detection
+USE_HYBRID_CONDITION = True
+USE_GUIDANCE_CHANNEL = False
+GUIDANCE_TYPE = "linear"
+GUIDANCE_CHECKPOINT = None
+SYNTHETIC_PRETRAIN_EPOCHS = 0
+SYNTHETIC_SIZE = 10000
+SYNTHETIC_ONLY_MODE = False
+PRETRAINED_CHECKPOINT_PATH = None
 FORCE_HIGH_END_SEARCH = False
-
-# Custom run name for Optuna studies (overrides default naming)
 CUSTOM_RUN_NAME = None
-
-# Fine-tuning mode (enables more conservative LR range when loading pretrained checkpoint)
-# When True and pretrained_checkpoint is set, uses LR range (1e-6, 1e-4) instead of (1e-5, 1e-3)
 FINETUNE_MODE = False
-
-# Data split settings
-# IMPORTANT: Time series data MUST use chronological splits to avoid data leakage.
-# With sliding windows, adjacent samples share ~90% of their data. Random splitting
-# causes train and val sets to overlap temporally, making validation metrics meaningless.
-# Split: Train (first 70%), Val (next 10%), Test (last 20%)
-USE_CHRONOLOGICAL_SPLIT = True  # ALWAYS True for time series - random split causes severe data leakage
-
-DATASET_STRIDE = 24  # Stride for sliding window (configurable via CLI)
+USE_CHRONOLOGICAL_SPLIT = True
+DATASET_STRIDE = 24
 
 MODEL_SIZES = {
-    'tiny': [32, 64],           # ~1M params, for quick tests only
-    'small': [64, 128, 256],    # ~10M params
-    'medium': [64, 128, 256, 512],  # ~40M params
-    'large': [128, 256, 512],   # ~80M params (close to ViTime's 93M)
+    'tiny': [32, 64],
+    'small': [64, 128, 256],
+    'medium': [64, 128, 256, 512],
+    'large': [128, 256, 512],
 }
 
 # ============================================================================
@@ -1629,8 +1749,6 @@ def list_available_checkpoints():
 
 
 def main():
-    global SEARCH_SPACE, SELECTED_MODEL_TYPE, SELECTED_REPR_MODE, TRANSFORMER_PATCH_HEIGHT, TRANSFORMER_PATCH_WIDTH, UNET_KERNEL_SIZE, USE_TIME_RAMP, USE_TIME_SINE, USE_VALUE_CHANNEL, SEASONAL_PERIOD, USE_ALL_COLUMNS, SELECTED_DATASET, DATA_PATH, USE_DILATED_MIDDLE, USE_HYBRID_CONDITION, USE_COORDINATE_CHANNEL, USE_GUIDANCE_CHANNEL, GUIDANCE_TYPE, GUIDANCE_CHECKPOINT, USE_CHRONOLOGICAL_SPLIT
-    
     parser = argparse.ArgumentParser(description='Train Diffusion TSF on Electricity dataset')
     parser.add_argument('--resume', action='store_true', help='Resume Optuna search')
     parser.add_argument('--best', action='store_true', help='Train with best found params from latest Optuna study')
@@ -1736,130 +1854,65 @@ def main():
         logger.error("Optuna not installed. Run: pip install optuna")
         sys.exit(1)
     
-    # Set all config globals from args FIRST before any logging
-    # Set dataset
-    global TARGET_COLUMN
-    SELECTED_DATASET = args.dataset
-    dataset_info = DATASET_REGISTRY[SELECTED_DATASET]
-    DATA_PATH = os.path.join(DATASETS_DIR, dataset_info[0])
-    # Set target column: use CLI arg if provided, else dataset default from registry
-    TARGET_COLUMN = args.target if args.target else dataset_info[1]
+    # Create config from args and sync to globals
+    cfg = TrainingConfig.from_args(args)
+    _sync_globals_from_config(cfg)
     
-    # Set time channel settings
-    USE_TIME_RAMP = args.use_time_ramp
-    USE_TIME_SINE = args.use_time_sine
-    USE_VALUE_CHANNEL = args.use_value_channel
-    USE_COORDINATE_CHANNEL = args.use_coordinate_channel
-    # Use dataset-specific seasonal period unless overridden by CLI
-    if args.seasonal_period == 96:  # Default value means user didn't specify
-        SEASONAL_PERIOD = dataset_info[2]  # Use dataset-specific default
-    else:
-        SEASONAL_PERIOD = args.seasonal_period
-    # Set multivariate mode
-    USE_ALL_COLUMNS = args.multivariate
-    
-    # Set hybrid conditioning mode
-    USE_HYBRID_CONDITION = args.use_hybrid_condition
-    
-    # Set Visual Guide (Stage 1 predictor) settings
-    USE_GUIDANCE_CHANNEL = args.use_guidance
-    GUIDANCE_TYPE = args.guidance_type
-    GUIDANCE_CHECKPOINT = args.guidance_checkpoint
-
-    # Set dataset stride
-    global DATASET_STRIDE
-    DATASET_STRIDE = args.stride
-    
-    # Validate guidance settings
-    if USE_GUIDANCE_CHANNEL and GUIDANCE_TYPE == 'itransformer' and not GUIDANCE_CHECKPOINT:
+    # Validation checks
+    if cfg.use_guidance_channel and cfg.guidance_type == 'itransformer' and not cfg.guidance_checkpoint:
         logger.error("--guidance-type=itransformer requires --guidance-checkpoint PATH")
         sys.exit(1)
     
-    # Set synthetic pre-training settings
-    global SYNTHETIC_PRETRAIN_EPOCHS, SYNTHETIC_SIZE, SYNTHETIC_ONLY_MODE, PRETRAINED_CHECKPOINT_PATH, FORCE_HIGH_END_SEARCH, CUSTOM_RUN_NAME, FINETUNE_MODE
-    SYNTHETIC_PRETRAIN_EPOCHS = args.synthetic_pretrain_epochs
-    SYNTHETIC_SIZE = args.synthetic_size
-    SYNTHETIC_ONLY_MODE = args.synthetic_only
-    PRETRAINED_CHECKPOINT_PATH = args.pretrained_checkpoint
-    FORCE_HIGH_END_SEARCH = args.force_high_end_search
-    CUSTOM_RUN_NAME = args.run_name
-    # Auto-enable finetune mode when pretrained checkpoint is provided
-    FINETUNE_MODE = args.finetune_mode or (args.pretrained_checkpoint is not None)
-    
-    # Validate: synthetic-only requires synthetic-pretrain-epochs or will be used as pure synthetic training
-    if SYNTHETIC_ONLY_MODE and SYNTHETIC_SIZE <= 0:
+    if cfg.synthetic_only_mode and cfg.synthetic_size <= 0:
         logger.error("--synthetic-only requires --synthetic-size > 0")
         sys.exit(1)
     
-    # Validate: pretrained-checkpoint must exist if specified
-    if PRETRAINED_CHECKPOINT_PATH and not os.path.exists(PRETRAINED_CHECKPOINT_PATH):
-        logger.error(f"Pre-trained checkpoint not found: {PRETRAINED_CHECKPOINT_PATH}")
+    if cfg.pretrained_checkpoint and not os.path.exists(cfg.pretrained_checkpoint):
+        logger.error(f"Pre-trained checkpoint not found: {cfg.pretrained_checkpoint}")
         sys.exit(1)
     
-    # Validate synthetic pre-training constraint: only CDF mode is supported
-    if (SYNTHETIC_PRETRAIN_EPOCHS > 0 or SYNTHETIC_ONLY_MODE) and args.repr_mode == 'pdf':
+    if (cfg.synthetic_pretrain_epochs > 0 or cfg.synthetic_only_mode) and cfg.repr_mode == 'pdf':
         logger.error(
             "Synthetic training is currently only supported in CDF representation mode. "
             "Please switch to --repr-mode cdf."
         )
         sys.exit(1)
     
-    # IMPORTANT: Time series ALWAYS needs chronological split to avoid data leakage.
-    # With sliding windows (stride=24), adjacent samples share ~583 of 608 timesteps.
-    # Random splitting means train sample 0 and val sample 5 share 90%+ of data!
-    # USE_CHRONOLOGICAL_SPLIT is now always True by default (set at module level).
     logger.info("Using CHRONOLOGICAL split (70% train / 10% val / 20% test) - required for time series")
     
-    # Initialize hardware-adaptive search space
-    SEARCH_SPACE = get_hardware_config()
-    SEARCH_SPACE['blur_sigma'] = [args.blur_sigma]
-    SEARCH_SPACE['emd_lambda'] = [args.emd_lambda]
-    SELECTED_REPR_MODE = args.repr_mode
-    USE_MONOTONICITY_LOSS = args.use_monotonicity_loss
-    MONOTONICITY_WEIGHT = args.monotonicity_weight
-    # Set selected model type for downstream use
-    SELECTED_MODEL_TYPE = args.model_type
-    # Set transformer patch sizes
-    TRANSFORMER_PATCH_HEIGHT = args.patch_height
-    TRANSFORMER_PATCH_WIDTH = args.patch_width
-    # Set U-Net kernel size
-    UNET_KERNEL_SIZE = tuple(args.kernel_size)
-    # Set dilated middle block
-    USE_DILATED_MIDDLE = args.dilated_middle
-    
-    # Now log everything
+    # Log configuration
     logger.info("=" * 60)
-    logger.info(f"DIFFUSION TSF - {SELECTED_DATASET.upper()} TRAINING")
+    logger.info(f"DIFFUSION TSF - {cfg.dataset.upper()} TRAINING")
     logger.info("=" * 60)
     logger.info(f"Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
-    logger.info(f"Dataset: {SELECTED_DATASET}")
-    logger.info(f"Data: {DATA_PATH}")
-    logger.info(f"Target column: {TARGET_COLUMN} (univariate)" if not USE_ALL_COLUMNS else "Multivariate (all columns)")
-    logger.info(f"Seasonal period: {SEASONAL_PERIOD}")
+    logger.info(f"Dataset: {cfg.dataset}")
+    logger.info(f"Data: {cfg.data_path}")
+    logger.info(f"Target column: {cfg.target_column} (univariate)" if not cfg.use_all_columns else "Multivariate (all columns)")
+    logger.info(f"Seasonal period: {cfg.seasonal_period}")
     logger.info(f"Base checkpoints: {BASE_CHECKPOINT_DIR}")
     logger.info(f"Search space: batch_sizes={SEARCH_SPACE['batch_size']}, model_sizes={SEARCH_SPACE['model_size']}")
-    if args.model_type == 'unet':
-        logger.info(f"U-Net kernel size: {UNET_KERNEL_SIZE} (height x width)")
-        logger.info(f"Dilated middle block: {USE_DILATED_MIDDLE}")
-        logger.info(f"Time ramp: {USE_TIME_RAMP}, Time sine: {USE_TIME_SINE}, Value channel: {USE_VALUE_CHANNEL} (period={SEASONAL_PERIOD})")
-    if args.model_type == 'transformer':
-        logger.info(f"Transformer patch size: {TRANSFORMER_PATCH_HEIGHT}x{TRANSFORMER_PATCH_WIDTH} (HxW)")
-    logger.info(f"Multivariate mode: {USE_ALL_COLUMNS}")
-    logger.info(f"Hybrid 1D conditioning: {USE_HYBRID_CONDITION}")
-    logger.info(f"Monotonicity loss: {USE_MONOTONICITY_LOSS} (weight={MONOTONICITY_WEIGHT})")
-    if USE_GUIDANCE_CHANNEL:
-        logger.info(f"Visual Guide: enabled (type={GUIDANCE_TYPE})")
-        if GUIDANCE_CHECKPOINT:
-            logger.info(f"  Guidance checkpoint: {GUIDANCE_CHECKPOINT}")
-    if SYNTHETIC_PRETRAIN_EPOCHS > 0:
-        logger.info(f"Synthetic pre-training: {SYNTHETIC_PRETRAIN_EPOCHS} epochs on {SYNTHETIC_SIZE} samples")
-    if SYNTHETIC_ONLY_MODE:
-        logger.info(f"SYNTHETIC-ONLY MODE: Training purely on {SYNTHETIC_SIZE} synthetic samples (no real data)")
-    if PRETRAINED_CHECKPOINT_PATH:
-        logger.info(f"Fine-tuning from pre-trained checkpoint: {PRETRAINED_CHECKPOINT_PATH}")
-    if FINETUNE_MODE:
+    if cfg.model_type == 'unet':
+        logger.info(f"U-Net kernel size: {cfg.unet_kernel_size} (height x width)")
+        logger.info(f"Dilated middle block: {cfg.use_dilated_middle}")
+        logger.info(f"Time ramp: {cfg.use_time_ramp}, Time sine: {cfg.use_time_sine}, Value channel: {cfg.use_value_channel} (period={cfg.seasonal_period})")
+    if cfg.model_type == 'transformer':
+        logger.info(f"Transformer patch size: {cfg.transformer_patch_height}x{cfg.transformer_patch_width} (HxW)")
+    logger.info(f"Multivariate mode: {cfg.use_all_columns}")
+    logger.info(f"Hybrid 1D conditioning: {cfg.use_hybrid_condition}")
+    logger.info(f"Monotonicity loss: {cfg.use_monotonicity_loss} (weight={cfg.monotonicity_weight})")
+    if cfg.use_guidance_channel:
+        logger.info(f"Visual Guide: enabled (type={cfg.guidance_type})")
+        if cfg.guidance_checkpoint:
+            logger.info(f"  Guidance checkpoint: {cfg.guidance_checkpoint}")
+    if cfg.synthetic_pretrain_epochs > 0:
+        logger.info(f"Synthetic pre-training: {cfg.synthetic_pretrain_epochs} epochs on {cfg.synthetic_size} samples")
+    if cfg.synthetic_only_mode:
+        logger.info(f"SYNTHETIC-ONLY MODE: Training purely on {cfg.synthetic_size} synthetic samples (no real data)")
+    if cfg.pretrained_checkpoint:
+        logger.info(f"Fine-tuning from pre-trained checkpoint: {cfg.pretrained_checkpoint}")
+    if cfg.finetune_mode:
         logger.info("Fine-tuning mode: ENABLED (conservative LR range 1e-6 to 1e-4)")
-    if FORCE_HIGH_END_SEARCH:
+    if cfg.force_high_end_search:
         logger.info("Force high-end search space: ENABLED")
     
     if args.list_checkpoints:

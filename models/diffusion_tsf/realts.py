@@ -23,6 +23,11 @@ from torch.utils.data import Dataset
 from typing import Optional, Tuple
 import logging
 
+try:
+    from .augmentation import generate_multivariate_synthetic_data
+except ImportError:
+    from augmentation import generate_multivariate_synthetic_data
+
 logger = logging.getLogger(__name__)
 
 
@@ -285,8 +290,10 @@ class RealTS(Dataset):
     """Synthetic Time Series Dataset for training data augmentation.
     
     Generates diverse synthetic time series using multiple generator functions.
-    Returns raw 1D sequences that match the format expected by the diffusion
+    Returns raw sequences that match the format expected by the diffusion
     training pipeline (past, future) tuples.
+    
+    Supports both univariate and multivariate generation.
     
     Mixing probabilities (from ViTime paper):
     - IFFTB: 60% (complex periodicities)
@@ -301,6 +308,7 @@ class RealTS(Dataset):
         forecast_length: Length of forecast horizon
         seed: Random seed for reproducibility (None for random)
         augment: Whether to apply additional augmentations (reserved for future)
+        num_variables: Number of variables to generate (default: 1)
     """
     
     # Generator functions and their probabilities
@@ -319,13 +327,15 @@ class RealTS(Dataset):
         lookback_length: int = 512,
         forecast_length: int = 96,
         seed: Optional[int] = None,
-        augment: bool = False
+        augment: bool = False,
+        num_variables: int = 1
     ):
         self.num_samples = num_samples
         self.lookback_length = lookback_length
         self.forecast_length = forecast_length
         self.total_length = lookback_length + forecast_length
         self.augment = augment
+        self.num_variables = num_variables
         
         # Extract generators and probabilities
         self.generators = [g for g, _ in self.GENERATORS]
@@ -337,26 +347,15 @@ class RealTS(Dataset):
         
         logger.info(
             f"RealTS initialized: {num_samples} samples, "
-            f"lookback={lookback_length}, forecast={forecast_length}"
+            f"lookback={lookback_length}, forecast={forecast_length}, "
+            f"variables={num_variables}"
         )
     
     def __len__(self) -> int:
         return self.num_samples
     
     def _normalize_sequence(self, seq: np.ndarray) -> np.ndarray:
-        """Apply ViTime-style normalization.
-        
-        Uses a modified mean calculation based on the paper:
-        mu = sqrt(|mean(x^muNorm * sign(x))|) * sign(mean(...))
-        
-        For simplicity, we use muNorm=1 which gives standard z-score.
-        
-        Args:
-            seq: Raw sequence of shape (length,)
-            
-        Returns:
-            Normalized sequence
-        """
+        """Apply ViTime-style normalization."""
         # Compute mean and std
         mean = np.mean(seq)
         std = np.std(seq) + 1e-7
@@ -369,37 +368,48 @@ class RealTS(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get a synthetic (past, future) pair.
         
-        Generates a full sequence using a randomly selected generator,
-        normalizes it, and splits into past and future segments.
-        
         Args:
             idx: Sample index (not used since data is generated on-the-fly)
             
         Returns:
             Tuple of (past, future):
-            - past: shape (lookback_length,)
-            - future: shape (forecast_length,)
+            - past: shape (lookback_length,) or (num_vars, lookback_length)
+            - future: shape (forecast_length,) or (num_vars, forecast_length)
         """
-        # Select generator based on probabilities
-        generator = np.random.choice(self.generators, p=self.probabilities)
-        
-        # Generate full sequence
-        seq = generator(self.total_length)
-        
-        # Randomly flip the sequence (data augmentation)
-        if np.random.random() < 0.5:
-            seq = seq[::-1].copy()
-        
-        # Randomly negate (data augmentation)
-        if np.random.random() < 0.5:
-            seq = -seq
-        
-        # Normalize
-        seq = self._normalize_sequence(seq)
-        
-        # Split into past and future
-        past = seq[:self.lookback_length]
-        future = seq[self.lookback_length:]
+        if self.num_variables > 1:
+            # Multivariate generation using augmentation module
+            # Generate 1 sample with num_variables
+            # Shape: (1, num_vars, total_length) -> squeeze to (num_vars, total_length)
+            seq_batch = generate_multivariate_synthetic_data(
+                num_samples=1,
+                num_vars=self.num_variables,
+                length=self.total_length
+            )
+            seq = seq_batch[0]  # (num_vars, total_length)
+            
+            # Split into past and future
+            past = seq[:, :self.lookback_length]
+            future = seq[:, self.lookback_length:]
+            
+        else:
+            # Univariate generation (original logic)
+            generator = np.random.choice(self.generators, p=self.probabilities)
+            seq = generator(self.total_length)
+            
+            # Randomly flip the sequence (data augmentation)
+            if np.random.random() < 0.5:
+                seq = seq[::-1].copy()
+            
+            # Randomly negate (data augmentation)
+            if np.random.random() < 0.5:
+                seq = -seq
+            
+            # Normalize
+            seq = self._normalize_sequence(seq)
+            
+            # Split into past and future
+            past = seq[:self.lookback_length]
+            future = seq[self.lookback_length:]
         
         # Convert to tensors
         past_tensor = torch.tensor(past, dtype=torch.float32)
@@ -408,70 +418,4 @@ class RealTS(Dataset):
         return past_tensor, future_tensor
 
 
-def create_realts_dataset(
-    num_samples: int = 10000,
-    lookback_length: int = 512,
-    forecast_length: int = 96,
-    seed: Optional[int] = None
-) -> RealTS:
-    """Factory function to create a RealTS dataset.
-    
-    Args:
-        num_samples: Number of synthetic samples
-        lookback_length: Past context window length
-        forecast_length: Forecast horizon length
-        seed: Random seed (None for random)
-        
-    Returns:
-        RealTS dataset instance
-    """
-    return RealTS(
-        num_samples=num_samples,
-        lookback_length=lookback_length,
-        forecast_length=forecast_length,
-        seed=seed
-    )
-
-
-# ============================================================================
-# Testing / Demo
-# ============================================================================
-
-if __name__ == "__main__":
-    # Quick test of all generators
-    import matplotlib.pyplot as plt
-    
-    length = 608  # 512 + 96
-    
-    fig, axes = plt.subplots(3, 2, figsize=(12, 10))
-    axes = axes.flatten()
-    
-    generators = [
-        ("RWB (Random Walk)", RWB),
-        ("PWB (Periodic Wave)", PWB),
-        ("LGB (Logistic Growth)", LGB),
-        ("TWDB (Trend + Wave)", TWDB),
-        ("IFFTB (Inverse FFT)", IFFTB),
-        ("Seasonal Periodicity", seasonal_periodicity),
-    ]
-    
-    for ax, (name, gen) in zip(axes, generators):
-        seq = gen(length)
-        ax.plot(seq, linewidth=0.8)
-        ax.axvline(x=512, color='r', linestyle='--', alpha=0.5, label='Forecast start')
-        ax.set_title(name)
-        ax.set_xlabel('Time step')
-        ax.legend()
-    
-    plt.tight_layout()
-    plt.savefig('realts_generators_demo.png', dpi=150)
-    print("Saved demo plot to realts_generators_demo.png")
-    
-    # Test RealTS dataset
-    print("\nTesting RealTS dataset...")
-    dataset = RealTS(num_samples=100, lookback_length=512, forecast_length=96)
-    past, future = dataset[0]
-    print(f"Past shape: {past.shape}, Future shape: {future.shape}")
-    print(f"Past range: [{past.min():.2f}, {past.max():.2f}]")
-    print(f"Future range: [{future.min():.2f}, {future.max():.2f}]")
 

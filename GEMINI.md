@@ -1,0 +1,1 @@
+This is a WSL folder. Make sure to activate the venv in the root folder before running any commands. Also, before doing anything in a new session, read the arch-rundown.md file for a summary of the project architecture. You can use this to track the previous mistakes stuff too.

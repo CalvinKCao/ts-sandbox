@@ -951,7 +951,8 @@ class ConditionalUNet2D(nn.Module):
         use_hybrid_condition: bool = False,
         context_dim: int = 128,
         conditioning_mode: str = "visual_concat",
-        visual_cond_channels: int = 1
+        visual_cond_channels: int = 1,
+        cond_in_channels: Optional[int] = None
     ):
         """
         Args:
@@ -976,6 +977,10 @@ class ConditionalUNet2D(nn.Module):
                               context is fed to the model.
             visual_cond_channels: Number of visual conditioning channels (used in visual_concat mode).
                                   Typically equals num_variables (past image channels).
+            cond_in_channels: Number of input channels for the ConditioningEncoder.
+                              If None, defaults to in_channels.
+                              Used when noisy input x and past cond have different channel counts
+                              (e.g. when guidance channels are added to x but not cond).
         """
         super().__init__()
         
@@ -986,6 +991,10 @@ class ConditionalUNet2D(nn.Module):
         self.use_hybrid_condition = use_hybrid_condition
         self.conditioning_mode = conditioning_mode
         self.visual_cond_channels = visual_cond_channels
+        
+        # Default cond_in_channels to in_channels if not specified
+        if cond_in_channels is None:
+            cond_in_channels = in_channels
         
         # Calculate padding for 'same' output size
         padding = (kernel_size[0] // 2, kernel_size[1] // 2)
@@ -1000,7 +1009,7 @@ class ConditionalUNet2D(nn.Module):
         # Conditioning encoder - only used in vector_embedding mode
         if conditioning_mode == "vector_embedding":
             self.cond_encoder = ConditioningEncoder(
-                in_channels=in_channels, out_channels=cond_channels, height=image_height, kernel_size=kernel_size
+                in_channels=cond_in_channels, out_channels=cond_channels, height=image_height, kernel_size=kernel_size
             )
             init_conv_in_channels = in_channels + cond_channels
         else:

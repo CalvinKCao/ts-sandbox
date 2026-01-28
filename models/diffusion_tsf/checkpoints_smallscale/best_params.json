@@ -1,7 +1,0 @@
-{
-  "learning_rate": 0.0001930335008629333,
-  "model_size": "tiny",
-  "diffusion_steps": 250,
-  "batch_size": 4,
-  "noise_schedule": "cosine"
-}
