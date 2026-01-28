@@ -223,6 +223,7 @@ def main():
     parser.add_argument('--dataset', type=str, default='ETTh2')
     parser.add_argument('--smoke-test', action='store_true')
     parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--unified-time-axis', action='store_true', default=False, help='Enable Unified L+F time axis (Slower)')
     args = parser.parse_args()
     
     # Load Best Params
@@ -266,6 +267,7 @@ def main():
         num_variables=num_vars, # Updated later
         use_time_sine=True,
         use_guidance_channel=True,
+        unified_time_axis=args.unified_time_axis,
         num_diffusion_steps=best_params.get('diffusion_steps', 200) if not args.smoke_test else 10,
         noise_schedule=best_params.get('noise_schedule', 'linear')
     )

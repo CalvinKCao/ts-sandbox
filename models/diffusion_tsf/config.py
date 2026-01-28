@@ -50,11 +50,18 @@ class DiffusionTSFConfig:
     num_variables: int = 1  # Number of time series variables (1 = univariate, >1 = multivariate)
     
     # 2D Mapping parameters
-    image_height: int = 128
+    image_height: int = 64  # Height of the 2D representation (default: 64 for speed)
     max_scale: float = 3.5  # MS parameter from ViTime
     blur_kernel_size: int = 31
     blur_sigma: float = 1.0
     representation_mode: str = "pdf"  # "pdf" (stripe) or "cdf" (occupancy)
+    
+    # Unified Time Axis (L+F vs Future-Only)
+    # If True: Diffuse on (Lookback + Forecast) combined width. Concatenates past and future.
+    #          Input width = 512 + 96 = 608. Slower, but better continuity.
+    # If False: Diffuse on Forecast only. Conditions on Past via Cross-Attention/Visual Cond.
+    #           Input width = 96. MUCH Faster (6x).
+    unified_time_axis: bool = False
     
     # U-Net architecture
     # Default aligned with ViTime paper (~93M params target)

@@ -696,7 +696,7 @@ class DiffusionTSF(nn.Module):
         future: torch.Tensor,
         t: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        """Training forward pass using unified L+F channel scheme."""
+        """Training forward pass using either unified L+F or optimized Future-Only scheme."""
         batch_size = past.shape[0]
         device = past.device
         past_norm, future_norm, stats = self._normalize_sequence(past, future)
@@ -713,47 +713,81 @@ class DiffusionTSF(nn.Module):
         
         noisy_future, noise = self.scheduler.add_noise(future_2d, t)
         
-        past_padded = self._pad_to_window(past_2d, 'past', total_len)
-        noisy_future_padded = self._pad_to_window(noisy_future, 'future', total_len)
-        canvas = past_padded + noisy_future_padded
-        
-        canvas_with_coords = self._inject_coordinate_channel(canvas)
-        canvas_full = self._inject_time_channels(canvas_with_coords)
-        
-        if self.config.use_value_channel:
-            if past_norm.dim() == 3: past_vals = past_norm
-            else: past_vals = past_norm.unsqueeze(1)
-            vals_padded = F.pad(past_vals, (0, future_len))
-            val_channel = self._get_value_channel(vals_padded, self.config.image_height)
-            if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
-            canvas_full = torch.cat([canvas_full, val_channel], dim=1)
-            
-        guidance_2d = None
-        if self.config.use_guidance_channel:
-            guidance_2d = self._generate_guidance_2d(past, past_norm, stats, future_len)
-            guidance_padded = self._pad_to_window(guidance_2d, 'future', total_len)
-            canvas_full = self._inject_guidance_channel(canvas_full, guidance_padded)
-        
-        # Conditioning: Must match canvas length (608) for visual_concat
-        # We do NOT inject aux channels (coords, time) here because they are already in the main canvas
-        # and shared across the spatial dimensions.
-        cond_for_unet = past_padded
-        
-        # Value channel for conditioning (if used)
-        if self.config.use_value_channel:
-             # Use same value channel as input
-             cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
-        
         encoder_hidden_states = None
         if self.context_encoder is not None:
             context_input = self._prepare_1d_context(past_norm)
             encoder_hidden_states = self.context_encoder(context_input)
+            
+        # Guidance Generation (Common)
+        guidance_2d = None
+        if self.config.use_guidance_channel:
+            guidance_2d = self._generate_guidance_2d(past, past_norm, stats, future_len)
 
-        noise_pred_full = self.noise_predictor(
-            canvas_full, t, cond_for_unet,
-            encoder_hidden_states=encoder_hidden_states
-        )
-        noise_pred = noise_pred_full[..., past_len:]
+        if self.config.unified_time_axis:
+            # === UNIFIED MODE (Slower, Better Continuity) ===
+            # Diffuse on full L+F width
+            
+            past_padded = self._pad_to_window(past_2d, 'past', total_len)
+            noisy_future_padded = self._pad_to_window(noisy_future, 'future', total_len)
+            canvas = past_padded + noisy_future_padded
+            
+            canvas = self._inject_coordinate_channel(canvas)
+            canvas = self._inject_time_channels(canvas)
+            
+            val_channel = None
+            if self.config.use_value_channel:
+                if past_norm.dim() == 3: past_vals = past_norm
+                else: past_vals = past_norm.unsqueeze(1)
+                vals_padded = F.pad(past_vals, (0, future_len))
+                val_channel = self._get_value_channel(vals_padded, self.config.image_height)
+                if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
+                canvas = torch.cat([canvas, val_channel], dim=1)
+                
+            if guidance_2d is not None:
+                guidance_padded = self._pad_to_window(guidance_2d, 'future', total_len)
+                canvas = self._inject_guidance_channel(canvas, guidance_padded)
+            
+            # Conditioning: past_padded
+            cond_for_unet = past_padded
+            if val_channel is not None:
+                 cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
+
+            noise_pred_full = self.noise_predictor(
+                canvas, t, cond_for_unet,
+                encoder_hidden_states=encoder_hidden_states
+            )
+            noise_pred = noise_pred_full[..., past_len:]
+            
+        else:
+            # === OPTIMIZED MODE (Faster) ===
+            # Diffuse on Future width only
+            
+            canvas = noisy_future
+            canvas = self._inject_coordinate_channel(canvas)
+            canvas = self._inject_time_channels(canvas)
+            
+            val_channel = None
+            if self.config.use_value_channel:
+                # Broadcast last past value as reference
+                if past_norm.dim() == 3: last_val = past_norm[:, :, -1:]
+                else: last_val = past_norm[:, -1:]
+                last_val_expanded = last_val.expand(-1, -1, future_len)
+                val_channel = self._get_value_channel(last_val_expanded, self.config.image_height)
+                if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
+                canvas = torch.cat([canvas, val_channel], dim=1)
+            
+            if guidance_2d is not None:
+                canvas = self._inject_guidance_channel(canvas, guidance_2d)
+                
+            # Conditioning: Visual part of past matched to future width
+            cond_for_unet = self._prepare_visual_conditioning(past_2d, target_width=future_len)
+            if val_channel is not None:
+                 cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
+                 
+            noise_pred = self.noise_predictor(
+                canvas, t, cond_for_unet,
+                encoder_hidden_states=encoder_hidden_states
+            )
         
         noise_loss = F.mse_loss(noise_pred, noise)
         x0_pred = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
@@ -791,7 +825,7 @@ class DiffusionTSF(nn.Module):
         jump_penalty_scale: float = 1.0,
         search_radius: int = 10
     ) -> Dict[str, torch.Tensor]:
-        """Generate future predictions using the unified (L+F) channel scheme."""
+        """Generate future predictions using unified (L+F) or optimized Future-Only scheme."""
         batch_size = past.shape[0]
         device = past.device
         if cfg_scale is None: cfg_scale = self.config.cfg_scale
@@ -801,32 +835,7 @@ class DiffusionTSF(nn.Module):
         future_len = self.config.forecast_length
         total_len = past_len + future_len
         
-        past_padded = self._pad_to_window(past_2d, 'past', total_len)
-        
-        # Value Channel (Full Window)
-        val_channel = None
-        if self.config.use_value_channel:
-            if past_norm.dim() == 3: past_vals = past_norm
-            else: past_vals = past_norm.unsqueeze(1)
-            vals_padded = F.pad(past_vals, (0, future_len))
-            val_channel = self._get_value_channel(vals_padded, self.config.image_height)
-            if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
-
-        # Conditioning
-        cond_for_unet = past_padded
-        if self.config.use_value_channel:
-             cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
-        
-        null_cond_for_unet = None
-        if cfg_scale > 1.0:
-            null_cond = torch.zeros_like(past_padded)
-            # No aux channels for null cond either
-            if self.config.use_value_channel:
-                 _, _, h, w = null_cond.shape
-                 zvc = torch.zeros(batch_size, 1, h, w, device=device, dtype=past.dtype)
-                 null_cond = torch.cat([null_cond, zvc], dim=1)
-            null_cond_for_unet = null_cond
-
+        # Prepare Conditioning (Common)
         encoder_hidden_states = None
         null_encoder_hidden_states = None
         if self.context_encoder is not None:
@@ -836,69 +845,100 @@ class DiffusionTSF(nn.Module):
                 null_encoder_hidden_states = torch.zeros_like(encoder_hidden_states)
 
         guidance_2d = None
-        guidance_padded = None
-        null_guidance_padded = None
         if self.config.use_guidance_channel:
             guidance_2d = self._generate_guidance_2d(past, past_norm, stats, future_len)
-            guidance_padded = self._pad_to_window(guidance_2d, 'future', total_len)
-            if cfg_scale > 1.0:
-                null_guidance_padded = torch.zeros_like(guidance_padded)
+
+        # === Mode-Specific Setup ===
+        if self.config.unified_time_axis:
+            # UNIFIED MODE SETUP
+            past_padded = self._pad_to_window(past_2d, 'past', total_len)
+            
+            val_channel = None
+            if self.config.use_value_channel:
+                if past_norm.dim() == 3: past_vals = past_norm
+                else: past_vals = past_norm.unsqueeze(1)
+                vals_padded = F.pad(past_vals, (0, future_len))
+                val_channel = self._get_value_channel(vals_padded, self.config.image_height)
+                if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
+            
+            cond_for_unet = past_padded
+            if val_channel is not None:
+                 cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
+            
+            guidance_padded = None
+            null_guidance_padded = None
+            if guidance_2d is not None:
+                guidance_padded = self._pad_to_window(guidance_2d, 'future', total_len)
+                if cfg_scale > 1.0:
+                    null_guidance_padded = torch.zeros_like(guidance_padded)
+        else:
+            # OPTIMIZED MODE SETUP
+            # Value Channel: Broadcast last value
+            val_channel = None
+            if self.config.use_value_channel:
+                if past_norm.dim() == 3: last_val = past_norm[:, :, -1:]
+                else: last_val = past_norm[:, -1:]
+                last_val_expanded = last_val.expand(-1, -1, future_len)
+                val_channel = self._get_value_channel(last_val_expanded, self.config.image_height)
+                if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
+
+            # Conditioning: Visual part matched to future width
+            cond_for_unet = self._prepare_visual_conditioning(past_2d, target_width=future_len)
+            if val_channel is not None:
+                 cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
+            
+            guidance_padded = guidance_2d # Reuse variable name for simplicity
+            null_guidance_padded = None
+            if guidance_2d is not None and cfg_scale > 1.0:
+                 null_guidance_padded = torch.zeros_like(guidance_2d)
+
+        # Null cond for visual concatenation (zeros)
+        null_cond_for_unet = None
+        if cfg_scale > 1.0:
+            null_cond = torch.zeros_like(cond_for_unet)
+            null_cond_for_unet = null_cond
         
         noise_shape = (batch_size, self.config.num_variables, self.config.image_height, future_len)
         
         def model_fn(x_future, t, cond, use_null_context=False, use_null_guidance=False):
-            x_future_padded = self._pad_to_window(x_future, 'future', total_len)
-            canvas = past_padded + x_future_padded
-            canvas_full = self._inject_coordinate_channel(canvas)
-            canvas_full = self._inject_time_channels(canvas_full)
-            if val_channel is not None:
-                canvas_full = torch.cat([canvas_full, val_channel], dim=1)
-            if self.config.use_guidance_channel:
-                guide = null_guidance_padded if use_null_guidance else guidance_padded
-                canvas_full = self._inject_guidance_channel(canvas_full, guide)
-            ctx = null_encoder_hidden_states if use_null_context else encoder_hidden_states
-            out_full = self.noise_predictor(canvas_full, t, cond, encoder_hidden_states=ctx)
-            return out_full[..., past_len:]
+            if self.config.unified_time_axis:
+                # Unified Mode Construction
+                x_future_padded = self._pad_to_window(x_future, 'future', total_len)
+                canvas = past_padded + x_future_padded
+                canvas_full = self._inject_coordinate_channel(canvas)
+                canvas_full = self._inject_time_channels(canvas_full)
+                if val_channel is not None:
+                    canvas_full = torch.cat([canvas_full, val_channel], dim=1)
+                if self.config.use_guidance_channel:
+                    guide = null_guidance_padded if use_null_guidance else guidance_padded
+                    canvas_full = self._inject_guidance_channel(canvas_full, guide)
+                
+                ctx = null_encoder_hidden_states if use_null_context else encoder_hidden_states
+                out_full = self.noise_predictor(canvas_full, t, cond, encoder_hidden_states=ctx)
+                return out_full[..., past_len:]
+            else:
+                # Optimized Mode Construction
+                canvas = x_future
+                canvas_full = self._inject_coordinate_channel(canvas)
+                canvas_full = self._inject_time_channels(canvas_full)
+                if val_channel is not None:
+                    canvas_full = torch.cat([canvas_full, val_channel], dim=1)
+                if self.config.use_guidance_channel:
+                    guide = null_guidance_padded if use_null_guidance else guidance_padded
+                    canvas_full = self._inject_guidance_channel(canvas_full, guide)
+                
+                ctx = null_encoder_hidden_states if use_null_context else encoder_hidden_states
+                out = self.noise_predictor(canvas_full, t, cond, encoder_hidden_states=ctx)
+                return out
             
         def model_cfg(x, t, cond, null_cond, cfg_scale):
             if cfg_scale <= 1.0: return model_fn(x, t, cond)
-            x_dbl = torch.cat([x, x], dim=0)
-            t_dbl = torch.cat([t, t], dim=0)
-            cond_dbl = torch.cat([cond, null_cond], dim=0)
             
-            # Double fixed inputs
-            # Note: We must construct canvas inside to respect batching
-            # But we can also double the fixed parts here passed to model_fn?
-            # model_fn constructs canvas. 
-            # We can't use model_fn directly for batching unless we modify it to take full canvas.
-            # Let's expand logic here for correctness.
-            
-            # This logic is duplicated, but safe.
-            # Actually, `cond` passed here IS `cond_dbl`.
-            # We need `past_padded` doubled, `val_channel` doubled, `guidance` doubled.
-            
-            past_padded_dbl = torch.cat([past_padded, past_padded], dim=0)
-            x_future_padded_dbl = self._pad_to_window(x_dbl, 'future', total_len)
-            canvas_dbl = past_padded_dbl + x_future_padded_dbl
-            
-            canvas_full = self._inject_coordinate_channel(canvas_dbl)
-            canvas_full = self._inject_time_channels(canvas_full)
-            
-            if val_channel is not None:
-                val_dbl = torch.cat([val_channel, val_channel], dim=0)
-                canvas_full = torch.cat([canvas_full, val_dbl], dim=1)
-                
-            if self.config.use_guidance_channel:
-                guide_dbl = torch.cat([guidance_padded, null_guidance_padded], dim=0)
-                canvas_full = self._inject_guidance_channel(canvas_full, guide_dbl)
-                
-            ctx_dbl = None
-            if encoder_hidden_states is not None:
-                ctx_dbl = torch.cat([encoder_hidden_states, null_encoder_hidden_states], dim=0)
-            
-            out_dbl = self.noise_predictor(canvas_full, t_dbl, cond_dbl, encoder_hidden_states=ctx_dbl)
-            out_future = out_dbl[..., past_len:]
-            cond_out, uncond_out = out_future.chunk(2, dim=0)
+            # For efficiency in optimized mode, we can batch; 
+            # for unified mode, batching is also possible but consumes more memory.
+            # Here we just execute twice for simplicity and OOM safety.
+            cond_out = model_fn(x, t, cond, use_null_context=False, use_null_guidance=False)
+            uncond_out = model_fn(x, t, null_cond, use_null_context=True, use_null_guidance=True)
             return uncond_out + cfg_scale * (cond_out - uncond_out)
 
         if use_ddim:
@@ -907,7 +947,7 @@ class DiffusionTSF(nn.Module):
                 shape=noise_shape,
                 cond=cond_for_unet,
                 null_cond=null_cond_for_unet,
-                cfg_scale=1.0,
+                cfg_scale=1.0, # Handled inside model_cfg
                 num_steps=num_ddim_steps,
                 eta=eta,
                 device=device,
@@ -919,7 +959,7 @@ class DiffusionTSF(nn.Module):
                 shape=noise_shape,
                 cond=cond_for_unet,
                 null_cond=null_cond_for_unet,
-                cfg_scale=1.0,
+                cfg_scale=1.0, # Handled inside model_cfg
                 device=device,
                 verbose=verbose
             )

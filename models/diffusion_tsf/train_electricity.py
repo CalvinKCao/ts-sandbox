@@ -88,7 +88,7 @@ DATASET_REGISTRY = {
 # Fixed parameters (aligned with ViTime paper)
 LOOKBACK_LENGTH = 512
 FORECAST_LENGTH = 96
-IMAGE_HEIGHT = 128
+IMAGE_HEIGHT = 64
 BLUR_KERNEL = 31
 MAX_SCALE = 3.5
 
@@ -116,6 +116,8 @@ class TrainingConfig:
     use_dilated_middle: bool = False
     transformer_patch_height: int = 16
     transformer_patch_width: int = 16
+    image_height: int = 64
+    unified_time_axis: bool = False
     
     # Auxiliary channels
     use_coordinate_channel: bool = True
@@ -176,6 +178,8 @@ class TrainingConfig:
             use_dilated_middle=args.dilated_middle,
             transformer_patch_height=args.patch_height,
             transformer_patch_width=args.patch_width,
+            image_height=args.image_height,
+            unified_time_axis=args.unified_time_axis,
             use_coordinate_channel=args.use_coordinate_channel,
             use_time_ramp=args.use_time_ramp,
             use_time_sine=args.use_time_sine,
@@ -1054,7 +1058,7 @@ def train(
     model_config = DiffusionTSFConfig(
         lookback_length=LOOKBACK_LENGTH,
         forecast_length=FORECAST_LENGTH,
-        image_height=IMAGE_HEIGHT,
+        image_height=config.get('image_height', IMAGE_HEIGHT),
         max_scale=MAX_SCALE,
         blur_kernel_size=BLUR_KERNEL,
         blur_sigma=config.get('blur_sigma', BLUR_SIGMA),
@@ -1078,6 +1082,7 @@ def train(
         use_time_sine=config.get('use_time_sine', USE_TIME_SINE),
         use_value_channel=config.get('use_value_channel', USE_VALUE_CHANNEL),
         seasonal_period=config.get('seasonal_period', SEASONAL_PERIOD),
+        unified_time_axis=config.get('unified_time_axis', False),
         num_variables=num_variables,  # Use actual value from dataset
         # Hybrid 1D cross-attention conditioning
         use_hybrid_condition=config.get('use_hybrid_condition', USE_HYBRID_CONDITION),
@@ -1774,6 +1779,8 @@ def main():
                         help='Weight for monotonicity loss term')
     parser.add_argument('--patch-height', type=int, default=16, choices=[4, 8, 16, 32], help='Transformer patch height (value axis, default: 16)')
     parser.add_argument('--patch-width', type=int, default=16, choices=[1, 2, 4, 8, 16, 32], help='Transformer patch width (time axis, default: 16). Smaller = finer temporal detail')
+    parser.add_argument('--image-height', type=int, default=64, help='Height of 2D representation (default: 64). Lower = faster.')
+    parser.add_argument('--unified-time-axis', action='store_true', default=False, help='Enable Unified L+F time axis (Slower). Default is Future-Only (Faster).')
     parser.add_argument('--use-coordinate-channel', action='store_true', default=True,
                         help='Add vertical coordinate channel (gradient +1 to -1) for spatial awareness (default: True)')
     parser.add_argument('--no-coordinate-channel', dest='use_coordinate_channel', action='store_false',
