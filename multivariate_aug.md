@@ -4,7 +4,7 @@
 2. For each covariate `x_i`, sample an **impact function** `f_i` from a simple, constrained function family (piecewise linear with sparse linear-lag terms and optional bias + noise). The impact function maps `(y, x_i)` → a time series of the same output length (`T+h`) but is nonzero only on a selected set of time steps `S(x,y)` (domain selection via quantile-thresholding).
 3. Build an **augmented target** `y_aug = y + sum_i f_i(y, x_i)` (elementwise, for t=1..T+h). Return training sample `(y_aug, {x_i})`. This forces covariates to be predictive in local context so the model can learn in-context covariate→target relationships. (Algorithm 1) 
 
----
+--- 
 
 # Algorithmic details (ready-to-implement)
 

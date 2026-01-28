@@ -260,14 +260,8 @@ def generate_multivariate_synthetic_data(
     Generate a batch of synthetic multivariate time series.
     
     Uses the informative covariate augmentation to couple independently generated series.
+    Now utilizes organic generators (RWB, IFFTB, etc.) for base series.
     
-    Strategy:
-    1. Generate `num_vars` independent base series using `generate_synthetic_covariate` (or other generators).
-    2. Randomly select a causal ordering or graph.
-    3. For each variable, treat it as 'y' and others as 'covariates' to augment it.
-       Or simpler: Generate V independent series, then for each series i, 
-       select random other series j as covariates and augment i with impacts from j.
-       
     Args:
         num_samples: Number of samples (batch size)
         num_vars: Number of variables (channels)
@@ -276,8 +270,16 @@ def generate_multivariate_synthetic_data(
     Returns:
         Data tensor of shape (num_samples, num_vars, length)
     """
+    # Import here to avoid circular dependency with realts.py
+    try:
+        from .realts import IFFTB, seasonal_periodicity, PWB, RWB, LGB, TWDB
+    except ImportError:
+        # Fallback for different execution contexts
+        from models.diffusion_tsf.realts import IFFTB, seasonal_periodicity, PWB, RWB, LGB, TWDB
+
     if seed is not None:
         rng = np.random.default_rng(seed)
+        np.random.seed(seed)
     else:
         rng = np.random.default_rng()
         
@@ -287,43 +289,41 @@ def generate_multivariate_synthetic_data(
             'plagcount': 0.85, 'plagpos': 0.15, 'l': min(100, length // 2),
             's_epsilon': 0.02, 'cmax_e': 10, 'cmax_cp': 5, 'sigma_cp': 2.0
         }
-        
+    
+    # List of available organic generators
+    ORGANIC_GENERATORS = [IFFTB, seasonal_periodicity, PWB, RWB, LGB, TWDB]
+    
     data = np.zeros((num_samples, num_vars, length))
     
     for s in range(num_samples):
-        # 1. Generate base independent series
+        # 1. Generate base independent series using organic generators
         series_list = []
         for v in range(num_vars):
-            base = generate_synthetic_covariate(length, hyperparams, rng)
+            # Pick a random generator for this variable's base behavior
+            gen_idx = rng.integers(0, len(ORGANIC_GENERATORS))
+            gen_func = ORGANIC_GENERATORS[gen_idx]
+            base = gen_func(length)
+            
             # Normalize base
             base = (base - np.mean(base)) / (np.std(base) + 1e-6)
             series_list.append(base)
             
         # 2. Apply augmentation to couple them
-        # We iterate through them and augment each using a subset of others
         augmented_series = []
         for v in range(num_vars):
             y = series_list[v]
             # Potential covariates are all other series
             others = [series_list[j] for j in range(num_vars) if j != v]
             
-            # Apply augmentation
-            # Note: We pass 'others' as the corpus.
-            # We disable synthetic generator inside augmentation to force coupling with existing series
-            # by passing a generator that returns zeros? Or just rely on corpus selection logic.
-            # Actually, `informative_covariate_augmentation` mixes corpus and synthetic.
-            # To force coupling, we want to prioritize the corpus.
-            
-            # Helper to generate zeros if corpus is not picked (though we prefer corpus)
-            def zero_gen(T, hp, r): return np.zeros(T)
-            
-            # We want to encourage using 'others' as covariates.
-            # The current implementation of `informative_covariate_augmentation` has 50% chance.
-            # Let's just use the logic directly here for tighter control if needed, 
-            # or trust the randomness to create diverse connections.
+            # Define a wrapper for the synth generator to be used in augmentation
+            # so it also picks from organic behaviors
+            def organic_synth_wrapper(T, hp, r):
+                idx = rng.integers(0, len(ORGANIC_GENERATORS))
+                g = ORGANIC_GENERATORS[idx]
+                return g(T)
             
             y_aug, _ = informative_covariate_augmentation(
-                y, others, generate_synthetic_covariate, hyperparams, rng
+                y, others, organic_synth_wrapper, hyperparams, rng
             )
             
             # Normalize result

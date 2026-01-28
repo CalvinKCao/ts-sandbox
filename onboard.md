@@ -47,8 +47,10 @@ Instead of stacking "guidance" and "lookback" as separate channels with misalign
 ### 2. Multivariate Augmentation
 Located in `models/diffusion_tsf/augmentation.py`.
 - Generates synthetic multivariate time series by coupling independent random processes.
+- **Updated (2026-01-27):** Now uses "Organic" generators (Random Walks, Inverse FFT, Seasonal patterns, etc. from `realts.py`) as the base behavior for each variable, ensuring realistic textures.
 - Uses "Impact Functions" to model causal effects between variables.
 - Used by `RealTS` dataset when `num_variables > 1`.
+- **Visualization:** Use `models/diffusion_tsf/visualize_synthetic.py` to generate sample plots of the synthetic data.
 
 ## Gotchas & Tips
 - **Module Imports:** When running scripts inside `models/diffusion_tsf/`, always run from the project root using `python -m models.diffusion_tsf.script_name` to avoid `ImportError` and name collisions (especially with `iTransformer`'s `model` module).
