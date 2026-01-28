@@ -944,8 +944,8 @@ def train_epoch(
         optimizer.step()
         total_loss += loss.item()
         
-        if batch_idx % 10 == 0:
-            logger.debug(f"Epoch {epoch} [{batch_idx}/{num_batches}] Loss: {loss.item():.4f}")
+        if batch_idx % 50 == 0:
+            logger.info(f"Epoch {epoch} [{batch_idx}/{num_batches}] Loss: {loss.item():.4f}")
     
     return total_loss / num_batches
 

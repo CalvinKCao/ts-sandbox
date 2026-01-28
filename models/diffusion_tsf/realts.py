@@ -328,7 +328,8 @@ class RealTS(Dataset):
         forecast_length: int = 96,
         seed: Optional[int] = None,
         augment: bool = False,
-        num_variables: int = 1
+        num_variables: int = 1,
+        pregenerate: bool = True
     ):
         self.num_samples = num_samples
         self.lookback_length = lookback_length
@@ -336,6 +337,8 @@ class RealTS(Dataset):
         self.total_length = lookback_length + forecast_length
         self.augment = augment
         self.num_variables = num_variables
+        self.pregenerate = pregenerate
+        self.data_cache = None
         
         # Extract generators and probabilities
         self.generators = [g for g, _ in self.GENERATORS]
@@ -350,6 +353,16 @@ class RealTS(Dataset):
             f"lookback={lookback_length}, forecast={forecast_length}, "
             f"variables={num_variables}"
         )
+        
+        if self.pregenerate and self.num_variables > 1:
+            logger.info(f"Pre-generating {num_samples} multivariate samples (this may take a minute)...")
+            self.data_cache = generate_multivariate_synthetic_data(
+                num_samples=self.num_samples,
+                num_vars=self.num_variables,
+                length=self.total_length,
+                seed=seed
+            )
+            logger.info("Pre-generation complete.")
     
     def __len__(self) -> int:
         return self.num_samples
@@ -377,15 +390,19 @@ class RealTS(Dataset):
             - future: shape (forecast_length,) or (num_vars, forecast_length)
         """
         if self.num_variables > 1:
-            # Multivariate generation using augmentation module
-            # Generate 1 sample with num_variables
-            # Shape: (1, num_vars, total_length) -> squeeze to (num_vars, total_length)
-            seq_batch = generate_multivariate_synthetic_data(
-                num_samples=1,
-                num_vars=self.num_variables,
-                length=self.total_length
-            )
-            seq = seq_batch[0]  # (num_vars, total_length)
+            if self.data_cache is not None:
+                # Use pre-generated data
+                seq = self.data_cache[idx]
+            else:
+                # Multivariate generation using augmentation module
+                # Generate 1 sample with num_variables
+                # Shape: (1, num_vars, total_length) -> squeeze to (num_vars, total_length)
+                seq_batch = generate_multivariate_synthetic_data(
+                    num_samples=1,
+                    num_vars=self.num_variables,
+                    length=self.total_length
+                )
+                seq = seq_batch[0]  # (num_vars, total_length)
             
             # Split into past and future
             past = seq[:, :self.lookback_length]
