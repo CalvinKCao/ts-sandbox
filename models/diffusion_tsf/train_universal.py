@@ -224,6 +224,8 @@ def main():
     parser.add_argument('--smoke-test', action='store_true')
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--unified-time-axis', action='store_true', default=False, help='Enable Unified L+F time axis (Slower)')
+    parser.add_argument('--synthetic-pool-size', type=int, default=200000, help='Size of synthetic data pool')
+    parser.add_argument('--synthetic-cache-dir', type=str, default='./data_cache', help='Cache directory for synthetic data')
     args = parser.parse_args()
     
     # Load Best Params
@@ -343,7 +345,9 @@ def main():
         lookback_length=512 if not args.smoke_test else 64,
         forecast_length=96 if not args.smoke_test else 16,
         batch_size=4 if not args.smoke_test else 2, # Reduced for OOM
-        num_variables=num_vars
+        num_variables=num_vars,
+        pool_size=args.synthetic_pool_size if not args.smoke_test else 10,
+        cache_dir=args.synthetic_cache_dir
     )
     
     checkpoint_dir = os.path.join(project_root, 'models', 'diffusion_tsf', 'checkpoints', f'universal_{args.dataset}')

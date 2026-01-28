@@ -139,6 +139,8 @@ class TrainingConfig:
     synthetic_pretrain_epochs: int = 0
     synthetic_size: int = 10000
     synthetic_only_mode: bool = False
+    synthetic_pool_size: int = 200000
+    synthetic_cache_dir: str = './data_cache'
     
     # Fine-tuning
     pretrained_checkpoint: Optional[str] = None
@@ -193,6 +195,8 @@ class TrainingConfig:
             synthetic_pretrain_epochs=args.synthetic_pretrain_epochs,
             synthetic_size=args.synthetic_size,
             synthetic_only_mode=args.synthetic_only,
+            synthetic_pool_size=args.synthetic_pool_size,
+            synthetic_cache_dir=args.synthetic_cache_dir,
             pretrained_checkpoint=args.pretrained_checkpoint,
             finetune_mode=args.finetune_mode or (args.pretrained_checkpoint is not None),
             force_high_end_search=args.force_high_end_search,
@@ -1047,7 +1051,9 @@ def train(
             forecast_length=FORECAST_LENGTH,
             batch_size=config['batch_size'],
             shuffle=True,
-            seed=42  # Fixed seed for reproducibility
+            seed=42,  # Fixed seed for reproducibility
+            pool_size=config.get('synthetic_pool_size'),
+            cache_dir=config.get('synthetic_cache_dir')
         )
         logger.info(f"Synthetic pre-training enabled: {synthetic_pretrain_epochs} epochs on {synthetic_size} samples")
     
@@ -1200,7 +1206,9 @@ def train(
             forecast_length=FORECAST_LENGTH,
             batch_size=config['batch_size'],
             shuffle=True,
-            seed=42
+            seed=42,
+            pool_size=config.get('synthetic_pool_size'),
+            cache_dir=config.get('synthetic_cache_dir')
         )
         
         for epoch in range(start_epoch, max_epochs):
@@ -1836,6 +1844,10 @@ def main():
     parser.add_argument('--synthetic-size', type=int, default=10000, metavar='N',
                         help='Number of synthetic samples to generate for pre-training '
                              '(default: 10000)')
+    parser.add_argument('--synthetic-pool-size', type=int, default=200000, 
+                        help='Total size of synthetic data pool cached on disk (default: 200k)')
+    parser.add_argument('--synthetic-cache-dir', type=str, default='./data_cache',
+                        help='Directory to store cached synthetic data pool')
     # Pure synthetic training mode (for hyperparameter search)
     parser.add_argument('--synthetic-only', action='store_true', default=False,
                         help='Train ONLY on synthetic data (no real data). Used for hyperparameter '

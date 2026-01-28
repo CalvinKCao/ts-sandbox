@@ -124,7 +124,9 @@ def get_synthetic_dataloader(
     shuffle: bool = True,
     num_workers: int = 0,
     seed: Optional[int] = None,
-    num_variables: int = 1
+    num_variables: int = 1,
+    pool_size: Optional[int] = None,
+    cache_dir: Optional[str] = None
 ) -> DataLoader:
     """Create a DataLoader with ONLY synthetic RealTS data for pre-training.
     
@@ -133,7 +135,7 @@ def get_synthetic_dataloader(
     on real data.
     
     Args:
-        num_samples: Number of synthetic samples to generate
+        num_samples: Number of synthetic samples to generate per epoch (virtual size)
         lookback_length: Past context window length
         forecast_length: Forecast horizon length
         batch_size: Batch size
@@ -141,6 +143,8 @@ def get_synthetic_dataloader(
         num_workers: Number of worker processes
         seed: Random seed for reproducibility (None for random)
         num_variables: Number of variables (default: 1)
+        pool_size: Total number of samples in the cached pool (randomly sampled)
+        cache_dir: Directory to cache the pool (enables large disk-based pools)
         
     Returns:
         DataLoader with synthetic-only data
@@ -150,11 +154,14 @@ def get_synthetic_dataloader(
         lookback_length=lookback_length,
         forecast_length=forecast_length,
         seed=seed,
-        num_variables=num_variables
+        num_variables=num_variables,
+        pool_size=pool_size,
+        cache_dir=cache_dir
     )
     
     logger.info(
-        f"Created synthetic-only dataloader: {num_samples} samples, "
+        f"Created synthetic-only dataloader: {num_samples} samples/epoch "
+        f"(Pool: {pool_size or num_samples}), "
         f"lookback={lookback_length}, forecast={forecast_length}, "
         f"variables={num_variables}"
     )

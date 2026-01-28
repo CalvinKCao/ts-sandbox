@@ -295,7 +295,11 @@ def generate_multivariate_synthetic_data(
     
     data = np.zeros((num_samples, num_vars, length))
     
+    log_interval = max(1, num_samples // 10)
     for s in range(num_samples):
+        if s % log_interval == 0 and s > 0:
+            logger.info(f"Generating synthetic samples: {s}/{num_samples} ({s/num_samples*100:.0f}%)")
+            
         # 1. Generate base independent series using organic generators
         series_list = []
         for v in range(num_vars):

@@ -329,16 +329,22 @@ class RealTS(Dataset):
         seed: Optional[int] = None,
         augment: bool = False,
         num_variables: int = 1,
-        pregenerate: bool = True
+        pregenerate: bool = True,
+        pool_size: Optional[int] = None,
+        cache_dir: Optional[str] = None
     ):
-        self.num_samples = num_samples
+        self.num_samples = num_samples  # Virtual epoch size
         self.lookback_length = lookback_length
         self.forecast_length = forecast_length
         self.total_length = lookback_length + forecast_length
         self.augment = augment
         self.num_variables = num_variables
         self.pregenerate = pregenerate
+        self.pool_size = pool_size or num_samples
+        if self.pool_size < num_samples: self.pool_size = num_samples
+        
         self.data_cache = None
+        self.use_disk_cache = False
         
         # Extract generators and probabilities
         self.generators = [g for g, _ in self.GENERATORS]
@@ -349,19 +355,66 @@ class RealTS(Dataset):
             np.random.seed(seed)
         
         logger.info(
-            f"RealTS initialized: {num_samples} samples, "
+            f"RealTS initialized: {num_samples} samples/epoch, "
             f"lookback={lookback_length}, forecast={forecast_length}, "
             f"variables={num_variables}"
         )
         
-        if self.pregenerate and self.num_variables > 1:
-            logger.info(f"Pre-generating {num_samples} multivariate samples (this may take a minute)...")
+        # Disk Caching Logic (Large Pool)
+        if cache_dir:
+            import os
+            os.makedirs(cache_dir, exist_ok=True)
+            self.use_disk_cache = True
+            
+            # Helper to generate data
+            def gen_data(size):
+                if self.num_variables > 1:
+                    return generate_multivariate_synthetic_data(
+                        num_samples=size,
+                        num_vars=self.num_variables,
+                        length=self.total_length,
+                        seed=seed
+                    )
+                else:
+                    # Generate univariate in bulk
+                    data = np.zeros((size, self.total_length), dtype=np.float32)
+                    for i in range(size):
+                        gen = np.random.choice(self.generators, p=self.probabilities)
+                        seq = gen(self.total_length)
+                        if np.random.random() < 0.5: seq = seq[::-1].copy()
+                        if np.random.random() < 0.5: seq = -seq
+                        data[i] = self._normalize_sequence(seq)
+                    return data
+
+            cache_filename = f"synth_pool_v{self.num_variables}_L{self.total_length}_N{self.pool_size}.npy"
+            if seed is not None:
+                cache_filename = f"synth_pool_v{self.num_variables}_L{self.total_length}_N{self.pool_size}_seed{seed}.npy"
+            
+            cache_path = os.path.join(cache_dir, cache_filename)
+            
+            if os.path.exists(cache_path):
+                logger.info(f"Loading synthetic pool from {cache_path}")
+                # Use mmap_mode='r' to avoid loading everything into RAM if it's huge
+                # But for <10GB, loading into RAM is usually faster for random access training
+                # Let's try mmap first, if user has RAM they can load it.
+                self.data_cache = np.load(cache_path, mmap_mode='r')
+            else:
+                logger.info(f"Generating synthetic pool of {self.pool_size} samples to {cache_path}...")
+                data = gen_data(self.pool_size)
+                np.save(cache_path, data)
+                self.data_cache = np.load(cache_path, mmap_mode='r')
+                logger.info("Pool generation complete.")
+                
+        elif self.pregenerate and self.num_variables > 1:
+            # Memory Caching Logic (Small Pool / Legacy)
+            logger.info(f"Pre-generating {self.num_samples} multivariate samples (RAM)...")
             self.data_cache = generate_multivariate_synthetic_data(
                 num_samples=self.num_samples,
                 num_vars=self.num_variables,
                 length=self.total_length,
                 seed=seed
             )
+            self.pool_size = self.num_samples # Pool size is fixed to what we generated
             logger.info("Pre-generation complete.")
     
     def __len__(self) -> int:
@@ -382,27 +435,47 @@ class RealTS(Dataset):
         """Get a synthetic (past, future) pair.
         
         Args:
-            idx: Sample index (not used since data is generated on-the-fly)
+            idx: Sample index (ignored if using random sampling from pool)
             
         Returns:
             Tuple of (past, future):
             - past: shape (lookback_length,) or (num_vars, lookback_length)
             - future: shape (forecast_length,) or (num_vars, forecast_length)
         """
-        if self.num_variables > 1:
-            if self.data_cache is not None:
-                # Use pre-generated data
-                seq = self.data_cache[idx]
+        
+        # Case 1: Using Cached Pool (Disk or RAM)
+        if self.data_cache is not None:
+            # Pick a random index from the pool to simulate infinite data cycling
+            # We ignore 'idx' which cycles 0..num_samples
+            real_idx = np.random.randint(0, self.pool_size)
+            seq = self.data_cache[real_idx]
+            
+            # Note: For cached univariate, we already did augmentations (flip/negate) at generation time.
+            # But we could do more here if needed. For now, assume pool is sufficient.
+            
+            if self.num_variables > 1:
+                past = seq[:, :self.lookback_length]
+                future = seq[:, self.lookback_length:]
             else:
-                # Multivariate generation using augmentation module
-                # Generate 1 sample with num_variables
-                # Shape: (1, num_vars, total_length) -> squeeze to (num_vars, total_length)
-                seq_batch = generate_multivariate_synthetic_data(
-                    num_samples=1,
-                    num_vars=self.num_variables,
-                    length=self.total_length
-                )
-                seq = seq_batch[0]  # (num_vars, total_length)
+                past = seq[:self.lookback_length]
+                future = seq[self.lookback_length:]
+                
+            # If using mmap, need to copy to array to make it writable/torch-compatible
+            past = np.array(past)
+            future = np.array(future)
+            
+            return torch.tensor(past, dtype=torch.float32), torch.tensor(future, dtype=torch.float32)
+
+        # Case 2: On-the-fly Generation (Legacy / Univariate RAM)
+        if self.num_variables > 1:
+            # Multivariate generation using augmentation module
+            # Generate 1 sample with num_variables
+            seq_batch = generate_multivariate_synthetic_data(
+                num_samples=1,
+                num_vars=self.num_variables,
+                length=self.total_length
+            )
+            seq = seq_batch[0]  # (num_vars, total_length)
             
             # Split into past and future
             past = seq[:, :self.lookback_length]
