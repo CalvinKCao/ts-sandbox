@@ -54,7 +54,7 @@ class DiffusionTSFConfig:
     max_scale: float = 3.5  # MS parameter from ViTime
     blur_kernel_size: int = 31
     blur_sigma: float = 1.0
-    representation_mode: str = "pdf"  # "pdf" (stripe) or "cdf" (occupancy)
+    representation_mode: str = "cdf"  # "pdf" (stripe) or "cdf" (occupancy)
     
     # Unified Time Axis (L+F vs Future-Only)
     # If True: Diffuse on (Lookback + Forecast) combined width. Concatenates past and future.

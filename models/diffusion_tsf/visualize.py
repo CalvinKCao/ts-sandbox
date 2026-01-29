@@ -9,6 +9,8 @@ import os
 import sys
 import torch
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 import glob
@@ -21,7 +23,8 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
-from dataset import ElectricityDataset
+from dataset import apply_1d_augmentations
+from train_electricity import ElectricityDataset, DATASET_REGISTRY, MODEL_SIZES
 from diffusion_model import DiffusionTSF
 from config import DiffusionTSFConfig
 from guidance import iTransformerGuidance, LinearRegressionGuidance, LastValueGuidance
@@ -280,9 +283,9 @@ def visualize_samples(
         num_res_blocks = 2
     
     # Build config (pull representation_mode if present)
-    # Detect use_coordinate_channel from checkpoint weights if not in config
+    # Detect usage of coordinate channel and kernel size from weight shapes
     state_dict = checkpoint['model_state_dict']
-    
+
     # Remap legacy "unet.*" keys to "noise_predictor.*" first
     if any(k.startswith("unet.") for k in state_dict.keys()):
         remapped = {}
@@ -296,6 +299,20 @@ def visualize_samples(
     # Get basic settings from config
     num_variables = config_dict.get('num_variables', 1)
     seasonal_period = config_dict.get('seasonal_period', 96)
+    
+    # Infer num_variables and image_height from weights if missing/default
+    if 'noise_predictor.final_conv.weight' in state_dict:
+        inferred_vars = state_dict['noise_predictor.final_conv.weight'].shape[0]
+        if num_variables == 1 and inferred_vars != 1:
+            print(f"Auto-detected num_variables={inferred_vars} from final_conv weights (config had {num_variables})")
+            num_variables = inferred_vars
+            
+    if 'to_2d.bin_centers' in state_dict:
+        inferred_height = state_dict['to_2d.bin_centers'].shape[0]
+        config_height = config_dict.get('image_height', 128)
+        if inferred_height != config_height:
+            print(f"Auto-detected image_height={inferred_height} from bin_centers (config/default had {config_height})")
+            config_dict['image_height'] = inferred_height
     
     # Auto-detect conditioning_mode from state_dict (not config default!)
     # If cond_encoder keys exist -> vector_embedding mode
@@ -311,8 +328,8 @@ def visualize_samples(
     print(f"Conditioning mode: {conditioning_mode} (has_cond_encoder={has_cond_encoder})")
     
     # Detect hybrid conditioning (1D cross-attention)
-    context_encoder_key = 'context_encoder.time_embed.weight'
-    has_context_encoder = context_encoder_key in state_dict
+    # Check for any context_encoder key, as legacy models might have different internal structure
+    has_context_encoder = any(k.startswith('context_encoder.') for k in state_dict)
     use_hybrid_condition = config_dict.get('use_hybrid_condition', has_context_encoder)
     
     # Auto-detect coordinate channel and kernel size from weight shapes
@@ -362,11 +379,31 @@ def visualize_samples(
             # For visual_concat: total = backbone_in + visual_cond = (num_vars + aux) + num_vars = 2*num_vars + aux
             # For vector_embedding: total = backbone_in + 64 = (num_vars + aux) + 64
             if conditioning_mode == 'visual_concat':
-                # total_in = 2*num_variables + num_aux_channels
-                num_aux_channels = total_in_channels - 2 * num_variables
+                # Base assumption: input = noisy(N) + past(N) + aux(?)
+                # If guidance enabled: input = noisy(N) + past(N) + guidance(N) + aux(?)
+                residual = total_in_channels - 2 * num_variables
+                
+                # Check if guidance fits in the residual
+                # Heuristic: if residual is large enough to contain guidance + at least one aux (or 0)
+                # And if use_guidance_channel is not explicitly set to False in config
+                if residual >= num_variables and config_dict.get('use_guidance_channel') is not False:
+                    # Check if the remaining channels make sense as aux
+                    potential_aux = residual - num_variables
+                    if potential_aux <= 4: # Max 4 aux channels
+                        print(f"Auto-detected use_guidance_channel=True from init_conv (residual {residual} split into {num_variables} guidance + {potential_aux} aux)")
+                        use_guidance_channel = True
+                        num_aux_channels = potential_aux
+                    else:
+                        # Maybe not guidance, just lots of aux? (Unlikely)
+                        num_aux_channels = residual
+                else:
+                    num_aux_channels = residual
             else:
-                # total_in = num_variables + num_aux_channels + 64
+                # Vector embedding: input = noisy(N) + embedding(64) + aux
+                # Guidance logic similar?
                 num_aux_channels = total_in_channels - num_variables - 64
+                if use_guidance_channel: # If config says so
+                     num_aux_channels -= num_variables
             
             print(f"Detected {num_aux_channels} auxiliary channels from init_conv (total_in={total_in_channels})")
             
@@ -403,19 +440,19 @@ def visualize_samples(
     if use_value_channel is None: use_value_channel = False
     
     model_config = DiffusionTSFConfig(
-        lookback_length=512,
-        forecast_length=96,
-        image_height=128,
+        lookback_length=config_dict.get('lookback_length', 512),
+        forecast_length=config_dict.get('forecast_length', 96),
+        image_height=config_dict.get('image_height', 128),
         max_scale=config_dict.get('max_scale', 3.5),
         blur_kernel_size=config_dict.get('blur_kernel_size', 31),
         blur_sigma=config_dict.get('blur_sigma', 1.0),
         emd_lambda=config_dict.get('emd_lambda', 0.2),
-        representation_mode=config_dict.get('representation_mode', 'pdf'),
-        unet_channels=MODEL_SIZES.get(model_size, [64, 128, 256]),
+        representation_mode=config_dict.get('representation_mode', 'cdf'),
+        unet_channels=config_dict.get('unet_channels', MODEL_SIZES.get(model_size, [64, 128, 256])),
         num_res_blocks=num_res_blocks,
         attention_levels=attention_levels,
-        num_diffusion_steps=config_dict['diffusion_steps'],
-        noise_schedule=config_dict['noise_schedule'],
+        num_diffusion_steps=config_dict.get('num_diffusion_steps', config_dict.get('diffusion_steps', 100)),
+        noise_schedule=config_dict.get('noise_schedule', 'linear'),
         model_type=model_type,
         use_coordinate_channel=use_coord_channel,
         unet_kernel_size=unet_kernel_size,
@@ -428,6 +465,7 @@ def visualize_samples(
         use_hybrid_condition=use_hybrid_condition,
         context_embedding_dim=config_dict.get('context_embedding_dim', 128),
         context_encoder_layers=config_dict.get('context_encoder_layers', 2),
+        use_guidance_channel=use_guidance_channel,
     )
     # If using transformer, optionally override transformer params from checkpoint
     if model_type == 'transformer':
@@ -546,8 +584,8 @@ def visualize_samples(
     
     base_dataset = ElectricityDataset(
         resolved_data_path,
-        lookback=512,
-        forecast=96,
+        lookback=model_config.lookback_length,
+        forecast=model_config.forecast_length,
         augment=False,
         use_all_columns=use_all_columns
     )
@@ -561,7 +599,7 @@ def visualize_samples(
     total_samples = len(base_dataset)
     
     # Use same gap-based split as training to match exactly
-    window_size = 512 + 96  # lookback + forecast
+    window_size = model_config.lookback_length + model_config.forecast_length  # lookback + forecast
     stride = 24
     gap_indices = (window_size + stride - 1) // stride  # ~26 indices
     
@@ -605,8 +643,8 @@ def visualize_samples(
     
     val_dataset = ElectricityDataset(
         resolved_data_path,
-        lookback=512,
-        forecast=96,
+        lookback=model_config.lookback_length,
+        forecast=model_config.forecast_length,
         augment=False,
         use_all_columns=use_all_columns,
         data_tensor=base_dataset.data,
@@ -754,7 +792,9 @@ def visualize_samples(
         if has_guidance and guidance_2d is not None:
             # Create a full 2D view by padding the guidance with zeros for the past
             guidance_full_2d = np.zeros_like(full_2d)
-            guidance_full_2d[:, past_2d.shape[1]:] = guidance_2d
+            # Note: past_2d.shape[1] is the width of past context
+            guidance_cols = guidance_2d.shape[1]
+            guidance_full_2d[:, -guidance_cols:] = guidance_2d
             
             im3 = ax3.imshow(guidance_full_2d, aspect='auto', origin='lower', cmap='magma', 
                             interpolation='nearest', vmin=0.0, vmax=1.0)

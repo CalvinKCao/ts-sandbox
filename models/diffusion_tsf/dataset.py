@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DatasetConfig:
     """Dataset-level configuration toggles."""
-    representation_mode: str = "pdf"  # "pdf" (stripe) or "cdf" (occupancy)
+    representation_mode: str = "cdf"  # "pdf" (stripe) or "cdf" (occupancy)
 
     def __post_init__(self):
         if self.representation_mode not in ["pdf", "cdf"]:

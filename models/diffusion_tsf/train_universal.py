@@ -9,6 +9,7 @@ import torch.nn as nn
 import numpy as np
 from torch.utils.data import DataLoader
 from datetime import datetime
+from dataclasses import asdict
 
 # Add project root to sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -147,7 +148,7 @@ def phase_2_diffusion_synthetic(config, synthetic_loader, guidance_ckpt, checkpo
         loss = train_epoch(model, synthetic_loader, optimizer, device, epoch)
         logger.info(f"Epoch {epoch+1}/{epochs} | Loss: {loss:.4f}")
         
-    save_checkpoint(model, optimizer, epochs, loss, loss, {}, save_path)
+    save_checkpoint(model, optimizer, epochs, loss, loss, asdict(config), save_path)
     logger.info(f"Phase 2 Complete. Checkpoint: {save_path}")
     return save_path
 
@@ -210,7 +211,7 @@ def phase_4_diffusion_real(config, real_train_loader, real_val_loader, diff_pret
         
         if val_loss < best_loss:
             best_loss = val_loss
-            save_checkpoint(model, optimizer, epoch, train_loss, val_loss, {}, save_path)
+            save_checkpoint(model, optimizer, epoch, train_loss, val_loss, asdict(config), save_path)
             
         if early_stopping(val_loss):
             break
@@ -223,6 +224,7 @@ def main():
     parser.add_argument('--dataset', type=str, default='ETTh2')
     parser.add_argument('--smoke-test', action='store_true')
     parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--repr-mode', type=str, default='cdf', choices=['pdf', 'cdf'], help='Data representation mode')
     parser.add_argument('--unified-time-axis', action='store_true', default=False, help='Enable Unified L+F time axis (Slower)')
     parser.add_argument('--synthetic-pool-size', type=int, default=200000, help='Size of synthetic data pool')
     parser.add_argument('--synthetic-cache-dir', type=str, default='./data_cache', help='Cache directory for synthetic data')
@@ -267,6 +269,7 @@ def main():
         unet_channels=[64, 128, 256] if not args.smoke_test else [32, 64],
         attention_levels=[2] if not args.smoke_test else [1], # Only attention at bottleneck
         num_variables=num_vars, # Updated later
+        representation_mode=args.repr_mode,
         use_time_sine=True,
         use_guidance_channel=True,
         unified_time_axis=args.unified_time_axis,
@@ -350,8 +353,11 @@ def main():
         cache_dir=args.synthetic_cache_dir
     )
     
-    checkpoint_dir = os.path.join(project_root, 'models', 'diffusion_tsf', 'checkpoints', f'universal_{args.dataset}')
+    # Create timestamped checkpoint directory
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    checkpoint_dir = os.path.join(project_root, 'models', 'diffusion_tsf', 'checkpoints', f'universal_{args.dataset}_{timestamp}')
     os.makedirs(checkpoint_dir, exist_ok=True)
+    logger.info(f"Checkpoints will be saved to: {checkpoint_dir}")
     
     # EXECUTE PHASES
     ckpt_1 = phase_1_itransformer_synthetic(itrans_args, synthetic_loader, checkpoint_dir)
