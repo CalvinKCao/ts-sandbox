@@ -763,8 +763,11 @@ class DiffusionTSF(nn.Module):
             # Diffuse on Future width only
             
             canvas = noisy_future
+            # print(f"DEBUG: Canvas start: {canvas.shape}")
             canvas = self._inject_coordinate_channel(canvas)
+            # print(f"DEBUG: Canvas after coord: {canvas.shape}")
             canvas = self._inject_time_channels(canvas)
+            # print(f"DEBUG: Canvas after time: {canvas.shape}")
             
             val_channel = None
             if self.config.use_value_channel:
@@ -779,6 +782,7 @@ class DiffusionTSF(nn.Module):
                 val_channel = self._get_value_channel(last_val_expanded, self.config.image_height)
                 if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
                 canvas = torch.cat([canvas, val_channel], dim=1)
+                # print(f"DEBUG: Canvas after value: {canvas.shape}")
             
             if guidance_2d is not None:
                 canvas = self._inject_guidance_channel(canvas, guidance_2d)
@@ -787,7 +791,8 @@ class DiffusionTSF(nn.Module):
             cond_for_unet = self._prepare_visual_conditioning(past_2d, target_width=future_len)
             if val_channel is not None:
                  cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
-                 
+            
+            # print(f"DEBUG: Final canvas to UNet: {canvas.shape}, expected channels: {self.config.backbone_in_channels}")
             noise_pred = self.noise_predictor(
                 canvas, t, cond_for_unet,
                 encoder_hidden_states=encoder_hidden_states
