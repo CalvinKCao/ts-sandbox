@@ -1,5 +1,16 @@
 Evaluation Results
 ==================
-MAE:  3.805554
-MSE:  37.171219
-RMSE: 6.096820
+Diffusion Model:
+MAE:  3.875873
+MSE:  38.826553
+RMSE: 6.231096
+
+Guidance (iTransformer):
+MAE:  3.465215
+MSE:  30.322865
+RMSE: 5.506620
+
+Improvement (Diffusion vs Guidance):
+MAE:  -11.85%
+MSE:  -28.04%
+RMSE: -13.16%

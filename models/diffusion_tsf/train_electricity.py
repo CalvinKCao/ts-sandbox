@@ -473,7 +473,7 @@ def load_itransformer_from_checkpoint(
             self.seq_len = ckpt_config.get('seq_len', seq_len)
             self.pred_len = ckpt_config.get('pred_len', pred_len)
             self.output_attention = False
-            self.use_norm = True
+            self.use_norm = ckpt_config.get('use_norm', True)
             self.d_model = ckpt_config.get('d_model', detected_d_model)
             self.embed = 'fixed'
             self.freq = 'h'

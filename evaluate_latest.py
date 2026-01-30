@@ -43,13 +43,17 @@ def find_latest_checkpoint(base_dir, dataset):
     dirs.sort(key=os.path.getmtime, reverse=True)
     return dirs[0]
 
-def evaluate_model(model, val_loader, device, output_dir):
+def evaluate_model(model, val_loader, device, output_dir, guidance_model=None):
     """Run full evaluation on the validation set."""
     model.eval()
     all_preds = []
     all_targets = []
+    all_guidance_preds = []
     
     logger.info("Starting full evaluation on test set...")
+    
+    # Get forecast length from model config
+    forecast_len = model.config.forecast_length
     
     with torch.no_grad():
         for i, (past, future) in enumerate(val_loader):
@@ -69,6 +73,11 @@ def evaluate_model(model, val_loader, device, output_dir):
             all_preds.append(pred.cpu())
             all_targets.append(future.cpu())
             
+            # Generate guidance predictions if available
+            if guidance_model is not None:
+                g_pred = guidance_model.get_forecast(past, forecast_len)
+                all_guidance_preds.append(g_pred.cpu())
+            
             if (i + 1) % 10 == 0:
                 logger.info(f"Processed {i + 1} batches...")
 
@@ -84,12 +93,37 @@ def evaluate_model(model, val_loader, device, output_dir):
     with open(stats_path, "w") as f:
         f.write(f"Evaluation Results\n")
         f.write(f"==================\n")
+        f.write(f"Diffusion Model:\n")
         f.write(f"MAE:  {mae:.6f}\n")
         f.write(f"MSE:  {mse:.6f}\n")
         f.write(f"RMSE: {rmse:.6f}\n")
         
+        if guidance_model is not None and all_guidance_preds:
+            guidance_preds = torch.cat(all_guidance_preds, dim=0).numpy()
+            g_mae = np.mean(np.abs(guidance_preds - targets))
+            g_mse = np.mean((guidance_preds - targets) ** 2)
+            g_rmse = np.sqrt(g_mse)
+            
+            # Calculate improvement (positive = diffusion is better)
+            imp_mae = (g_mae - mae) / g_mae * 100
+            imp_mse = (g_mse - mse) / g_mse * 100
+            imp_rmse = (g_rmse - rmse) / g_rmse * 100
+            
+            f.write(f"\nGuidance (iTransformer):\n")
+            f.write(f"MAE:  {g_mae:.6f}\n")
+            f.write(f"MSE:  {g_mse:.6f}\n")
+            f.write(f"RMSE: {g_rmse:.6f}\n")
+            
+            f.write(f"\nImprovement (Diffusion vs Guidance):\n")
+            f.write(f"MAE:  {imp_mae:+.2f}%\n")
+            f.write(f"MSE:  {imp_mse:+.2f}%\n")
+            f.write(f"RMSE: {imp_rmse:+.2f}%\n")
+            
+            logger.info(f"Guidance - MAE: {g_mae:.4f}, RMSE: {g_rmse:.4f}")
+            logger.info(f"Improvement - MAE: {imp_mae:+.2f}%, RMSE: {imp_rmse:+.2f}%")
+        
     logger.info(f"Stats saved to {stats_path}")
-    logger.info(f"MAE: {mae:.4f}, MSE: {mse:.4f}, RMSE: {rmse:.4f}")
+    logger.info(f"Diffusion - MAE: {mae:.4f}, MSE: {mse:.4f}, RMSE: {rmse:.4f}")
     
     return mae, mse, rmse
 
@@ -265,7 +299,7 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     
     # Run Evaluation
-    evaluate_model(model, val_loader, device, output_dir)
+    evaluate_model(model, val_loader, device, output_dir, guidance_model=guidance_model)
     
     # Generate Visualizations
     logger.info("Generating visualizations...")

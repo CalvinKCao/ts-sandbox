@@ -120,7 +120,7 @@ def load_itransformer_guidance(
             self.seq_len = ckpt_config.get('seq_len', seq_len)
             self.pred_len = ckpt_config.get('pred_len', pred_len)
             self.output_attention = False
-            self.use_norm = True
+            self.use_norm = ckpt_config.get('use_norm', True)
             self.d_model = ckpt_config.get('d_model', detected_d_model)
             self.embed = 'fixed'
             self.freq = 'h'
@@ -526,27 +526,41 @@ def visualize_samples(
     # state_dict already remapped above (legacy unet.* -> noise_predictor.*)
     model = DiffusionTSF(model_config).to(device)
     
-    # Load guidance model if checkpoint was trained with guidance
+    # Load guidance model if checkpoint was trained with guidance OR if explicitly requested
     guidance_model = None
     guidance_loaded = False
-    if use_guidance_channel and guidance_type:
-        if guidance_type == 'itransformer' and not effective_guidance_checkpoint:
+    
+    # We want to load guidance if:
+    # 1. use_guidance_channel is True (model needs it)
+    # 2. guidance_checkpoint is provided (user wants to see it, even if model doesn't use it)
+    
+    should_load_guidance = (use_guidance_channel and guidance_type) or (effective_guidance_checkpoint is not None)
+
+    if should_load_guidance:
+        # Determine type - default to itransformer if checkpoint provided but type missing
+        type_to_load = guidance_type if guidance_type else ('itransformer' if effective_guidance_checkpoint else 'linear')
+        
+        if type_to_load == 'itransformer' and not effective_guidance_checkpoint:
             print("WARNING: Model was trained with iTransformer guidance but no checkpoint provided!")
             print("         Use --guidance-checkpoint to specify the iTransformer checkpoint path.")
             print("         Guidance predictions will NOT be shown in visualizations.")
         else:
             try:
                 guidance_model = create_guidance_for_visualization(
-                    guidance_type=guidance_type,
+                    guidance_type=type_to_load,
                     guidance_checkpoint=effective_guidance_checkpoint,
                     seq_len=512,
                     pred_len=96,
                     num_variables=num_variables,
                     device=device
                 )
-                model.set_guidance_model(guidance_model)
+                
+                # Only attach to model if it was trained to use it
+                if use_guidance_channel:
+                    model.set_guidance_model(guidance_model)
+                
                 guidance_loaded = True
-                print(f"✅ Guidance model loaded successfully!")
+                print(f"✅ Guidance model loaded successfully! (Type: {type_to_load})")
             except Exception as e:
                 print(f"WARNING: Failed to load guidance model: {e}")
                 print("         Guidance predictions will NOT be shown in visualizations.")
@@ -704,6 +718,14 @@ def visualize_samples(
                     guidance_2d_raw = guidance_2d_raw[0]  # (height, width)
                 guidance_2d = (guidance_2d_raw + 1.0) / 2.0
                 guidance_2d = np.clip(guidance_2d, 0.0, 1.0)
+            
+            # MANUAL GUIDANCE GENERATION
+            # If model didn't return guidance (e.g. use_guidance_channel=False) 
+            # but we have a guidance model loaded, generate it now.
+            if guidance_pred is None and guidance_model is not None:
+                # Generate forecast using the guidance model
+                g_pred = guidance_model.get_forecast(past_tensor, model_config.forecast_length)
+                guidance_pred = g_pred.cpu().squeeze(0).numpy()
             
             # Extract 2D maps (these are in diffusion-scaled [-1, 1] range)
             past_2d_raw = out['past_2d'].cpu().squeeze(0).numpy()

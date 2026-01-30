@@ -236,12 +236,12 @@ fi
 # =============================================================================
 
 declare -A DATASET_CONFIGS=(
-  ["ETTh2"]="ETT-small|ETTh2.csv|24|ETTh2"
-  ["ETTm1"]="ETT-small|ETTm1.csv|96|ETTm1"
-  ["illness"]="illness|national_illness.csv|52|custom"
-  ["exchange_rate"]="exchange_rate|exchange_rate.csv|5|custom"
-  ["traffic"]="traffic|traffic.csv|24|custom"
-  ["weather"]="weather|weather.csv|144|custom"
+  ["ETTh2"]="ETT-small|ETTh2.csv|24|fair"
+  ["ETTm1"]="ETT-small|ETTm1.csv|96|fair"
+  ["illness"]="illness|national_illness.csv|52|fair"
+  ["exchange_rate"]="exchange_rate|exchange_rate.csv|5|fair"
+  ["traffic"]="traffic|traffic.csv|24|fair"
+  ["weather"]="weather|weather.csv|144|fair"
 )
 
 # Function to get a random column from a dataset using Python

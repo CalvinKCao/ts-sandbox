@@ -26,7 +26,7 @@ class Dataset_Fair(Dataset):
     
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
-                 target='OT', scale=True, timeenc=0, freq='h'):
+                 target='OT', scale=False, timeenc=0, freq='h'):
         
         if size is None:
             self.seq_len = 512
