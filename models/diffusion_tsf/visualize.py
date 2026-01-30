@@ -200,6 +200,7 @@ def visualize_samples(
     output_dir: str = "visualizations",
     guidance_checkpoint: Optional[str] = None
 ):
+    print("DEBUG: Running UPDATED visualize.py with metric titles and guidance line!")
     # 1. Load checkpoint
     print(f"Loading model from {model_path}...")
     checkpoint = torch.load(model_path, map_location=device)
@@ -752,22 +753,32 @@ def visualize_samples(
         time_past = np.arange(len(past_1d))
         time_future = np.arange(len(past_1d), len(past_1d) + len(future_1d))
         
+        # Calculate per-sample metrics for title
+        sample_diff_mae = np.mean(np.abs(pred_1d - future_1d))
+        sample_diff_rmse = np.sqrt(np.mean((pred_1d - future_1d) ** 2))
+        
+        title_metrics = f"Diffusion MAE: {sample_diff_mae:.3f}"
+        
         var_label = " (Variable 0)" if num_variables > 1 else ""
         ax1.plot(time_past, past_1d, label=f'Past (Context){var_label}', color='gray', alpha=0.6)
         ax1.plot(time_future, future_1d, label='True Future', color='blue', linewidth=2)
-        ax1.plot(time_future, pred_1d, label='Diffusion Forecast', color='red', linestyle='--', linewidth=2)
+        ax1.plot(time_future, pred_1d, label='Diffusion (Final)', color='red', linestyle='-', linewidth=2, alpha=0.8)
         
         # Add guidance prediction if available
         if has_guidance and guidance_pred_1d is not None:
-            ax1.plot(time_future, guidance_pred_1d, label='iTransformer Guidance', 
-                    color='green', linestyle=':', linewidth=2, alpha=0.8)
+            sample_guide_mae = np.mean(np.abs(guidance_pred_1d - future_1d))
+            sample_guide_rmse = np.sqrt(np.mean((guidance_pred_1d - future_1d) ** 2))
+            
+            title_metrics += f" | Guidance MAE: {sample_guide_mae:.3f}"
+            
+            ax1.plot(time_future, guidance_pred_1d, label='iTransformer (Guidance)', 
+                    color='green', linestyle='--', linewidth=2, alpha=0.9)
         
-        title_suffix = " (with iTransformer Guidance)" if has_guidance else ""
         multivar_suffix = f" [showing var 0 of {num_variables}]" if num_variables > 1 else ""
-        ax1.set_title(f"Diffusion TSF Forecast - Sample {i+1} (Dataset Index {idx}){title_suffix}{multivar_suffix}", fontsize=14)
+        ax1.set_title(f"Sample {i+1} (Idx {idx}) - {title_metrics}{multivar_suffix}", fontsize=12)
         ax1.set_xlabel("Time Steps")
         ax1.set_ylabel("Value (Normalized)")
-        ax1.legend()
+        ax1.legend(loc='upper left')
         ax1.grid(True, alpha=0.3)
         
         # 2. Plot 2D Probability Map (Diffusion Output) - first variable for multivariate

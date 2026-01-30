@@ -31,14 +31,39 @@ def main():
     parser = argparse.ArgumentParser(description='Run evaluation on a remote training server')
     parser.add_argument('--host', type=str, required=True, help='Remote host (user@ip)')
     parser.add_argument('--dataset', type=str, default='ETTh2', help='Dataset to evaluate')
-    parser.add_argument('--remote-dir', type=str, default='~/ts-sandbox', help='Project directory on remote')
+    parser.add_argument('--remote-dir', type=str, default='/root/ts-sandbox/ts-sandbox', help='Project directory on remote')
     parser.add_argument('--key', type=str, default=None, help='Path to SSH private key (optional)')
+    parser.add_argument('--python-bin', type=str, default=None, help='Path to python executable on remote (default: <remote-dir>/venv/bin/python)')
     args = parser.parse_args()
 
     ssh_base = f"ssh -o StrictHostKeyChecking=no"
     if args.key:
         ssh_base += f" -i {args.key}"
     
+    # Construct remote command
+    if args.python_bin:
+        venv_python = args.python_bin
+    else:
+        # Assumes venv is in ./venv inside the project dir
+        venv_python = os.path.join(args.remote_dir, 'venv', 'bin', 'python')
+
+    # 0. Check if remote python exists
+    logger.info("=" * 60)
+    logger.info("STEP 0: Verifying remote environment")
+    logger.info("=" * 60)
+    
+    check_cmd = f"{ssh_base} {args.host} 'test -f {venv_python} && echo exists'"
+    logger.info(f"Checking for python at: {venv_python}")
+    result = subprocess.run(check_cmd, shell=True, text=True, capture_output=True)
+    
+    if result.returncode != 0 or 'exists' not in result.stdout:
+        logger.error(f"Remote python interpreter not found at: {venv_python}")
+        logger.error("Please ensure the virtual environment is set up on the remote server.")
+        logger.error("You can specify a different python path using --python-bin")
+        sys.exit(1)
+    else:
+        logger.info(f"Found python interpreter.")
+
     # 1. Sync updated scripts to remote
     # We need to send evaluate_latest.py and models/diffusion_tsf/visualize.py 
     # (visualize.py was patched locally)
@@ -70,8 +95,6 @@ def main():
     logger.info("=" * 60)
     
     # Construct remote command
-    # Assumes venv is in ./venv inside the project dir
-    venv_python = os.path.join(args.remote_dir, 'venv', 'bin', 'python')
     script_path = os.path.join(args.remote_dir, 'evaluate_latest.py')
     
     remote_cmd = f"{venv_python} {script_path} --dataset {args.dataset}"
