@@ -77,7 +77,8 @@ SYNTHETIC_SEARCH_SIZE=10000
 
 # Stage 1: Universal pre-training settings
 UNIVERSAL_PRETRAIN_EPOCHS=100
-UNIVERSAL_PRETRAIN_SIZE=100000
+UNIVERSAL_PRETRAIN_SIZE=1000000
+SYNTHETIC_POOL_SIZE=1000000
 
 # Stage 2: Per-dataset fine-tuning settings
 FINETUNE_TRIALS=10
@@ -183,7 +184,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --stride N                     Stride for sliding window (default: 1)"
       echo "  --synthetic-search-trials N    Optuna trials for synthetic HP search (default: 8)"
       echo "  --universal-pretrain-epochs N  Epochs for universal pre-training (default: 100)"
-      echo "  --universal-pretrain-size N    Samples for universal pre-training (default: 100000)"
+      echo "  --universal-pretrain-size N    Samples for universal pre-training (default: 1000000)"
       echo "  --finetune-trials N            Optuna trials per dataset (default: 10)"
       echo "  --use-mono                     Enable monotonicity loss"
       echo "  --mono-weight F                Weight for monotonicity loss (default: 10.0)"
@@ -330,6 +331,7 @@ if [[ "${DRY_RUN}" == "true" ]]; then
     log "     --trials ${SYNTHETIC_SEARCH_TRIALS} \\"
     log "     --synthetic-only \\"
     log "     --synthetic-size ${SYNTHETIC_SEARCH_SIZE} \\"
+    log "     --synthetic-pool-size ${SYNTHETIC_POOL_SIZE} \\"
     log "     --force-high-end-search \\"
     log "     --repr-mode cdf \\"
     log "     --model-type unet"
@@ -346,6 +348,7 @@ if [[ "${DRY_RUN}" == "true" ]]; then
     log "     --params-file ${UNIVERSAL_CKPT_DIR}/best_params.json \\"
     log "     --synthetic-only \\"
     log "     --synthetic-size ${UNIVERSAL_PRETRAIN_SIZE} \\"
+    log "     --synthetic-pool-size ${SYNTHETIC_POOL_SIZE} \\"
     log "     --repr-mode cdf"
     log "   → Output: ${UNIVERSAL_CKPT_DIR}/best_model.pt"
   fi
@@ -428,6 +431,7 @@ else
     --trials "${SYNTHETIC_SEARCH_TRIALS}"
     --synthetic-only
     --synthetic-size "${SYNTHETIC_SEARCH_SIZE}"
+    --synthetic-pool-size "${SYNTHETIC_POOL_SIZE}"
     --force-high-end-search
     --repr-mode cdf
     --model-type unet
@@ -521,6 +525,7 @@ else
     --params-file "${BEST_PARAMS_FILE}"
     --synthetic-only
     --synthetic-size "${UNIVERSAL_PRETRAIN_SIZE}"
+    --synthetic-pool-size "${SYNTHETIC_POOL_SIZE}"
     --repr-mode cdf
     --model-type unet
     --stride "${STRIDE}"

@@ -887,7 +887,12 @@ class DiffusionTSF(nn.Module):
             if self.config.use_value_channel:
                 if past_norm.dim() == 3: last_val = past_norm[:, :, -1:]
                 else: last_val = past_norm[:, -1:]
-                last_val_expanded = last_val.expand(-1, -1, future_len)
+                
+                if past_norm.dim() == 3:
+                    last_val_expanded = last_val.expand(-1, -1, future_len)
+                else:
+                    last_val_expanded = last_val.expand(-1, future_len)
+                    
                 val_channel = self._get_value_channel(last_val_expanded, self.config.image_height)
                 if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
 

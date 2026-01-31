@@ -299,7 +299,7 @@ def main():
     itrans_args = dotdict()
     itrans_args.model_id = args.dataset
     itrans_args.model = 'iTransformer'
-    itrans_args.data = 'custom'
+    itrans_args.data = 'fair'
     itrans_args.target = 'OT' # Explicitly set target
     itrans_args.features = 'M'
     itrans_args.freq = 'h' # Explicitly set frequency
