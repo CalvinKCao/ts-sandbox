@@ -231,8 +231,12 @@ class DiffusionTSFConfig:
         
         In visual_concat mode, the past 2D image (with same number of variables)
         is concatenated directly as conditioning channels.
+        If value channel is enabled, it is also concatenated to conditioning.
         """
-        return self.num_variables
+        channels = self.num_variables
+        if self.use_value_channel:
+            channels += 1
+        return channels
     
     @property
     def guidance_channels(self) -> int:
