@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def find_latest_checkpoint(base_dir, dataset):
-    """Find the most recent checkpoint directory for the given dataset (legacy or timestamped)."""
+    """Find the most recent checkpoint directory for the given dataset."""
     # Pattern matches both 'universal_ETTh2' and 'universal_ETTh2_2026...'
     search_pattern = os.path.join(base_dir, f"universal_{dataset}*")
     dirs = glob.glob(search_pattern)
@@ -39,8 +39,27 @@ def find_latest_checkpoint(base_dir, dataset):
     if not dirs:
         return None
     
-    # Sort by modification time (newest first)
-    dirs.sort(key=os.path.getmtime, reverse=True)
+    def get_sort_key(dirname):
+        """Sort by timestamp in name if present, else by mtime."""
+        basename = os.path.basename(dirname)
+        # Expected format: universal_{dataset}_{TIMESTAMP}
+        # TIMESTAMP format: %Y%m%d_%H%M%S (15 chars)
+        parts = basename.split('_')
+        if len(parts) >= 3:
+            # Try to parse the last two parts as date_time
+            # e.g. universal_ETTh2_20260131_120000 -> parts[-2]=20260131, parts[-1]=120000
+            try:
+                timestamp_str = f"{parts[-2]}_{parts[-1]}"
+                dt = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+                return dt.timestamp()
+            except ValueError:
+                pass
+        
+        # Fallback to file system modification time
+        return os.path.getmtime(dirname)
+
+    # Sort by key (newest first)
+    dirs.sort(key=get_sort_key, reverse=True)
     return dirs[0]
 
 def evaluate_model(model, val_loader, device, output_dir, guidance_model=None):

@@ -1,0 +1,733 @@
+﻿From Similarity to Superiority: Channel Clustering
+for Time Series Forecasting
+
+Jialin Chen1, Jan Eric Lenssen2,3, Aosong Feng1, Weihua Hu2,
+Matthias Fey2, Leandros Tassiulas1, Jure Leskovec2,4, Rex Ying1
+
+1Yale University, 2Kumo.AI,
+3Max Planck Institute for Informatics, 4Stanford University
+
+Abstract
+
+Time series forecasting has attracted significant attention in recent decades. Previ-
+ous studies have demonstrated that the Channel-Independent (CI) strategy improves
+forecasting performance by treating different channels individually, while it leads
+to poor generalization on unseen instances and ignores potentially necessary in-
+teractions between channels. Conversely, the Channel-Dependent (CD) strategy
+mixes all channels with even irrelevant and indiscriminate information, which,
+however, results in oversmoothing issues and limits forecasting accuracy. There is
+a lack of channel strategy that effectively balances individual channel treatment
+for improved forecasting performance without overlooking essential interactions
+between channels. Motivated by our observation of a correlation between the
+time series model’s performance boost against channel mixing and the intrinsic
+similarity on a pair of channels, we developed a novel and adaptable Channel
+Clustering Module (CCM). CCM dynamically groups channels characterized by
+intrinsic similarities and leverages cluster information instead of individual channel
+identities, combining the best of CD and CI worlds. Extensive experiments on
+real-world datasets demonstrate that CCM can (1) boost the performance of CI and
+CD models by an average margin of 2.4% and 7.2% on long-term and short-term
+forecasting, respectively; (2) enable zero-shot forecasting with mainstream time
+series forecasting models; (3) uncover intrinsic time series patterns among channels
+and improve interpretability of complex time series models 1.
+
+1 Introduction
+
+Time series forecasting has attracted a surge of interest across diverse fields, ranging from economics,
+energy [1, 2], weather [3, 4], to transportation planning [5, 6]. The complexity of the task is heightened
+by factors including seasonality, trend, noise in the data, and potential cross-channel information.
+Despite the numerous deep learning time series models proposed recently [7–14], an unresolved
+challenge persists in the effective management of channel interaction within the forecasting frame-
+work [15, 16]. Previous works have explored two primary channel strategies: Channel-Independent
+(CI) and Channel-Dependent (CD) strategies. The Channel-Independent (CI) strategy has shown
+promise in better forecasting performance by having individual models for each channel. However,
+a critical drawback is its limited generalizability and robustness on unseen channels [17]. Besides,
+it tends to overlook potential interactions between various channels. Conversely, the Channel-
+Dependent (CD) strategy models all channels as a whole and captures intricate channel relations,
+while they tend to show oversmoothing and have trouble fitting to individual channels, especially
+when the similarity between channels is very low. Moreover, existing models typically treat univariate
+
+1The code is available at https://github.com/Graph-and-Geometric-Learning/TimeSeriesCCM
+
+38th Conference on Neural Information Processing Systems (NeurIPS 2024).
+
+arXiv:2404.01340v2  [cs.LG]  6 Nov 2024
+
+
+
+(a) The General Framework (b) Time Series Forecasting Framework Enhanced by Channel Clustering Module
+
+Training Phase .   Zero-shot Forecasting .   
+
+future forecasting
+… 𝜽𝒌 : Layer weights 
+
+of the 𝑘-th cluster
+𝜽𝟏 𝜽𝟐 𝜽𝒌 Cluster-aware Feed Forward
+
+Cluster-aware Feed Forward Weights Averaging
+Feed Forward 𝜽𝒊
+
+𝜽𝒊 = σ𝑘 𝑝𝑖,𝑘 𝜽𝒌: for the 𝑖-th channel
+: prototype
+
+Temporal Cluster Temporal : unseen time series
+Temporal Modules Modules Assigner prototypes e.g., clustering probability 
+
+Modules for a test time series 𝒖:
+𝒑𝒖 = [0.2, 0.2, 0.6]
+
+Cross Attention
+Normalization Normalization
+
+Channel Clustering Prototype Learning Normalization
+
+unseen time series
+
+Figure 1: The pipeline of applying Channel Clustering Module (CCM) to general time series models.
+(a) is the general framework of most time series models. (b) illustrates two modified modules when
+applying CCM: Cluster Assigner and Cluster-aware Feed Forward. Cluster Assigner learns channel
+clustering based on intrinsic similarities and creates prototype embeddings for each cluster via a
+cross-attention mechanism. The clustering probabilities {pi,k} are subsequently used in Cluster-aware
+Feed Forward to average {θk}Kk=1, which are layer weights assigned to K clusters, obtaining weights
+θi for the i-th channel. The learned prototypes retain pre-trained knowledge, enabling zero-shot
+forecasting on unseen samples in both univariate and multivariate scenarios.
+
+data in a CI manner, neglecting the interconnections between time series samples, even though these
+dependencies are commonly observed and beneficial in real-world scenarios, such as stock market or
+weather forecasting [18–20].
+Proposed work. To address the aforementioned challenges, we propose a Channel Clustering Module
+(CCM) that balances individual channel treatment and captures necessary cross-channel dependencies
+simultaneously. CCM is motivated by the key observations that CI and CD models typically rely
+on channel identity information. The level of reliance is anti-correlated with the similarity between
+channels (see Sec. 4.1 for an analysis). This intriguing phenomenon alludes to the model’s analogous
+behavior on similar channels. The proposed CCM thereby involves the strategic clustering of channels
+into cohesive clusters, where intra-cluster channels exhibit a higher degree of similarity. To capture
+the underlying time series patterns within these clusters, we employ cluster-aware Feed Forward to
+assign independent weights to each cluster and replace individual channel treatment with individual
+cluster treatment. Moreover, CCM learns expressive prototype embeddings in training, which enables
+zero-shot forecasting on unseen samples by grouping them into appropriate clusters.
+CCM is a plug-and-play solution that is adaptable to most mainstream time series models. We
+evaluate the effectiveness of CCM on four different time series backbones (aka. base models):
+TSMixer [7], DLinear [8], PatchTST [21], and TimesNet [13]. It can also be applied to other state-of-
+the-art models for enhanced performance. Extensive experiments verify the superiority of CCM in
+long-term and short-term forecasting benchmarks, achieving an average margin of 2.4% and 7.2%,
+respectively. Additionally, we collect stock data from a diverse range of companies to construct a
+new stock univariate dataset. Leveraging information from intra-cluster samples, CCM consistently
+shows a stronger ability to accurately forecast stock prices in the dynamic and intricate stock market.
+Moreover, CCM enhances zero-shot forecasting capacities of time series backbones in cross-domain
+scenarios, which further highlights the robustness and versatility of CCM.
+The contributions of this paper are: (1) We propose a novel and unified channel strategy, i.e.,
+CCM, which is adaptable to most mainstream time series models. CCM explores the optimal
+trade-off between channel individual treatment and cross-channel modeling, (2) CCM demonstrates
+superiority in improving performance on long-term and short-term forecasting, and (3) through
+learning prototypes from clusters, CCM enables zero-shot forecasting on unseen samples in both
+univariate and multivariate scenarios.
+
+2 Related Work
+
+2.1 Time Series Forecasting Models
+
+Traditional machine learning methods such as Prophet [22, 23], ARIMA [24] capture the trend
+component and seasonality in time series [25]. As data availability continues to grow, deep learn-
+
+2
+
+
+
+ing methods revolutionized this field, introducing more complex and efficient models [26, 27].
+Convolutional Neural Networks (CNNs) [13, 14, 28–30], have been widely adopted to capture
+local temporal dependencies. Recurrent Neural Networks (RNNs) [31–34, 28] excel in capturing
+sequential information, yet they often struggle with longer sequences. Transformer-based mod-
+els [11, 35, 12, 21, 36, 37, 9, 38, 10, 39, 40], typically equipped with self-attention mechanisms [41],
+demonstrate their proficiency in handling long-range dependencies, although they require substantial
+computational resources. Recently, linear models [42–44], e.g., DLinear [8], TSMixer [7], have
+gained popularity for their simplicity and effectiveness in long-term time series forecasting, but
+they may underperform with non-linear and complex patterns. Besides, traditional tricks, including
+trend-seasonal decomposition [8, 45, 46] and multi-periodicity analysis [47, 48, 13, 49–52] continue
+to play a crucial role in aiding in the preprocessing stage for advanced models.
+
+2.2 Channel Strategies in Time Series Forecasting
+
+Most deep learning models [12, 39, 10] adopt the Channel-Dependent (CD) strategy, aiming to
+harness the full spectrum of information across channels. Conversely, the Channel-Independent (CI)
+approaches [21, 8] build forecasting models for each channel independently. Prior works on CI and
+CD strategy [17, 15, 53, 54, 16] present that CI leads to higher capacity and lower robustness, whereas
+CD is the opposite. Predicting residuals with regularization (PRReg) [17] is thereby proposed to
+incorporate a regularization term in the objective to encourage smoothness in future forecasting.
+However, the essential challenge from the model design perspective has not been solved and it
+remains challenging to develop a balanced channel strategy. Prior research has explored effective
+clustering of channels to improve the predictive capabilities in diverse applications, including image
+classification [55], natural language processing (NLP) [56, 57], anomaly detection [58–60]. For
+instance, in traffic prediction [61, 62], clustering techniques have been proposed to group relevant
+traffic regions to capture intricate spatial patterns. Despite the considerable progress in these areas,
+the potential and effect of channel clustering in time series forecasting remain under-explored.
+
+3 Preliminaries
+
+Time Series Forecasting. Formally, let X = [x1, . . .xT ] ∈ RT×C be a time series, where T is the
+length of historical data. xt ∈ RC represents the observation at time t. C denotes the number of
+variates (i.e., channels). The objective is to construct a predictive model f that estimates the future
+values of the series, Y = [x̂T+1, . . . , x̂T+H ] ∈ RH×C , where H is the forecasting horizon. We use
+X[:,i] ∈ RT (Xi for simplicity) to denote the i-th channel in the time series.
+Channel Dependent (CD) and Channel Independent (CI). The CI strategy models each channel
+Xi separately and ignores any potential cross-channel interactions. This approach is typically denoted
+as f (i) : RT → RH for i = 1, · · · , C, where f (i) is specifically dedicated to the i-th channel. Refer
+to Appendix A.2 for more details. In contrast, the CD strategy models all the channels as a whole
+with a function f : RT×C → RH×C . This strategy is essential in scenarios where channels are not
+just parallel data streams but are interrelated, such as in financial markets or traffic flows.
+
+4 Proposed Method
+
+In this work, we propose a Channel Clustering Module (CCM), a model-agnostic method that is
+adaptable to most mainstream time series models. The pipeline of applying CCM is visualized
+in Figure 1. General time series models, shown in Figure 1(a), typically consist of three core
+components [15, 63]: an optional normalization layer (e.g., RevIN [64], SAN [65]), temporal modules
+including linear layers, transformer-based, or convolutional backbones, and a feed-forward layer
+that forecasts the future values. Motivated by the empirical observation discussed in Sec. 4.1, CCM
+presents with a cluster assigner preceding the temporal modules, followed by a cluster-aware Feed
+Forward (Sec. 4.2). The cluster assigner implements channel clustering based on intrinsic similarities
+and employs a cross-attention mechanism to generate prototypes for each cluster, which stores the
+knowledge from the training set and endows the model with zero-shot forecasting capacities.
+
+3
+
+
+
+4.1 Motivation for Channel Similarity
+
+To motivate our similarity-based clustering method, we conduct the following toy experiment. We
+select four recent and popular time series models with different backbones. TSMixer [7] and DLinear
+are linear models. PatchTST [21] is a transformer-based model with a patching mechanism and
+TimesNet [13] is a convolutional network that captures multi-periodicity in data. Among these,
+TSMixer and TimesNet utilize a Channel-Dependent strategy while DLinear and PatchTST adopt
+the Channel-Independent design. We train a time series model across all channels and evaluate
+the channel-wise Mean Squared Error (MSE) loss on the test set. Then, we repeat training while
+randomly shuffling channels in each batch. Note that for both CD and CI models, this means channel
+identity information will be removed. We report the average performance gain in terms of MSE
+loss across all channels based on the random shuffling experiments (denoted as ∆L(%)) in Table 1.
+We attribute the models’ performance decrease
+in the random shuffling experiments to the loss Table 1: Averaged performance gain from channel
+of channel identity information. We see that all identity information (∆L(%)) and Pearson Corre-
+models rely on channel identity information to lation Coefficients (PCC) between {∆Lij}i,j and
+achieve better performance. Next, we define {SIM(Xi, Xj)}i,j . The values are averaged across
+channel similarity based on radial basis function all test samples.
+kernels [66] as Base Model TSMixer DLinear PatchTST TimesNet
+
+−∥ Channel Strategy CD CI CI CD
+Xi −Xj∥2SIM(Xi, Xj) = exp( ), (1)
+2σ2 ETTh1 ∆L(%) 2.67 1.10 11.30 18.90
+
+PCC - 0.67 - 0.66 - 0.61 - 0.66
+
+where σ is a scaling factor. Note that the similar- ETTm1 ∆L(%) 4.41 5.55 6.83 14.98
+PCC - 0.68 - 0.67 - 0.68 - 0.67
+
+ity is computed on the standardized time series
+to avoid scaling differences. More details are Exchange ∆L(%) 16.43 19.34 27.98 24.57
+
+PCC - 0.62 - 0.62 - 0.47 - 0.49
+
+discussed in Appendix A.1. The performance
+difference in MSE from the random shuffling experiment for channel i is denoted as ∆Li. We define
+∆Lij := |∆Li −∆Lj | and calculate the Pearson Correlation Coefficients (PCC) between {∆Lij}i,j
+and {SIM(Xi, Xj)}i,j , as shown in Table 1. The toy example verifies the following two assumptions:
+(1) Existing forecasting methods heavily rely on channel identity information. (2) This reliance
+clearly anti-correlates with channel similarity: for channels with high similarity, channel identity
+information is less important. Together, these two assumptions motivate us to design an approach
+that provides cluster identity instead of channel identity, combining the best of both worlds: high
+capacity and generalizability.
+
+4.2 CCM: Channel Clustering Module
+
+Channel Clustering. Motivated by the above observations, we first initialize a set of K cluster
+embeddings {c1, · · · , cK}, where ck ∈ Rd, d is the hidden dimension and K is a hyperparameter.
+Given a multivariate time series X ∈ RT×C , each channel in the input Xi is transformed into a
+d-dimensional channel embedding hi through an MLP. The probability that a given channel Xi is
+associated with the k-th cluster is the normalized inner-product of the cluster embedding ck and the
+channel embedding hi, which is computed as
+
+c⊤k hpi,k = Normalize i
+( ) ∈ [0, 1]. (2)
+
+∑ ∥ck∥∥hi∥
+The normalization operator ensures that k pi,k = 1 and validates the clustering probability distribu-
+tion across k clusters. We utilize reparameterization trick [67] to obtain the clustering membership
+matrix M ∈ RC×K where Mik ≈ Bernoulli(pi,k). Higher probability pi,k results in Mik close to 1,
+leading to the deterministic existence of certain channels in the corresponding cluster.
+Prototype Learning. The cluster assigner also creates a d-dimensional prototype embedding for
+each cluster in the training phase. Let C = [c1, · · · , cK ] ∈ RK×d denote the cluster embedding,
+and H = [h1, · · · , hC ] ∈ RC×d denote the hidden embedding of the channels. To emphasize the
+intra-cluster channels and remove interference from out-of-cluster channel information, we design a
+modified cross-attention as follows, ( )
+
+(W C)(W )⊤
+Ĉ = Normalize exp Q √ KH
+
+( )⊙M⊤ WV H, (3)
+d
+
+4
+
+
+
+where the clustering membership matrix M is an approximately binary matrix to enable sparse
+attention on intra-cluster channels specifically. WQ, WK and WV are learnable parameters. The
+prototype embedding Ĉ ∈ RK×d serves as the updated cluster embedding for subsequent clustering
+probability computing in Eq. 2.
+Cluster Loss. We further introduce a specifically designed loss function for the clustering quality,
+termed ClusterLoss, which incorporates both the alignment of channels with respective clusters and
+the distinctness between different clusters in a self-supervised context. Let S ∈ RC×C denote the
+channel similarity matrix Sij = SIM(Xi, Xj) defined in Eq. 1. The ClusterLoss is formulated as:
+
+(
+LC = −T M⊤ ) (( ) )
+
+r SM +Tr I−MM⊤ S , (4)
+
+( )
+where Tr indicates a trace operator. Tr M⊤SM maximizes th(e( channel simila)rities within clusters,
+which is a fundamental requirement for effective clustering. Tr I−MM⊤)S instead encourages
+separation between clusters, which further prevents overlap and ambiguity in clustering assignments.
+LC captures meaningful time series prototypes without relying on external labels or annotations. The
+overall loss function thereby becomes L = LF + βLC , where LF is the general forecasting loss
+such as MSE loss; and β is a regularization parameter for a balance between forecasting accuracy
+and cluster quality.
+Cluster-aware Feed Forward. Instead of using individual Feed Forward per channel in a CI manner
+or sharing one Feed Forward across all channels in a CD manner, we assign a separate Feed Forward
+to each cluster to capture the underlying shared time series patterns within the clusters. In this way,
+we use cluster identity to replace channel identity. Each Feed Forward is parameterized with a single
+linear layer due to its efficacy in time series forecasting [8, 15, 7]. Let hθ (·) represent the linear layer
+
+k
+
+for the k-th cluster with weights θk. Zi represents the hidden embedding of the i-th channel before
+the last layer. The final forecast is thereby∑averaged across the outputs of all cluster-aware Feed
+Forward with {pi,k} as weights, e.g., Yi = k pi,khθ (Z fo the -th han el.
+
+k i) r i ∑c n For computational
+efficiency, it is equivalent to Yi = hθi(Zi) with averaged weights θi = k pi,kθk.
+Univariate Adaptation. In the context of univariate time series forecasting, we extend the proposed
+method to clustering on samples. We leverage the similarity between two univariate time series
+as defined in Eq. 1, and classify univariate time series with comparable patterns into the same
+cluster. This univariate adaptation allows it to capture interrelation within samples and extract
+valuable insights from analogous time series. This becomes particularly valuable in situations where
+meaningful dependencies exist among various univariate samples, such as the stock market.
+Zero-shot Forecasting. Zero-shot forecasting is useful in time series applications where data privacy
+concerns restrict the feasibility of training models from scratch for unseen samples. The prototype
+embeddings acquired during the training phase serve as a compact representation of the pre-trained
+knowledge and can be harnessed for seamless knowledge transfer to unseen samples or new channels
+in a zero-shot setting. The pre-trained knowledge is applied to unseen instances by computing the
+clustering probability distribution on the pre-trained clusters, following Eq. 2, which is subsequently
+used for averaging cluster-aware Feed Forward. The cross-attention is disabled to fix the prototype
+embeddings in zero-shot forecasting. It is worth noting that zero-shot forecasting is applicable to
+both univariate and multivariate scenarios. We refer to Appendix B for detailed discussion.
+
+4.3 Complexity Analysis
+
+CCM effectively strikes a balance between the CI and CD strategies. On originally CI models, CCM
+introduces strategic clustering on channels, which not only reduces the model complexity but also
+enhances their generalizability. Simultaneously, CCM increases the model complexity on originally
+CD models with negligible overhead for higher capacities. We refer to Figure 5 for empirical
+analysis. Theoretically, the computational complexity of clustering probability computation (Eq. 2)
+and the cross-attention (Eq. 3) are O(KCd), where K,C are the number of clusters and channels,
+respectively, and d is the hidden dimension. One may also use other attention mechanisms [68–70] for
+efficiency. The complexity of cluster-aware Feed Forward scales linearly in C,K, and the forecasting
+horizon H .
+
+5
+
+
+
+5 Experiments
+
+CCM consistently improves performance based on CI or CD models by significant margins across
+multiple benchmarks and settings, including long-term forecasting on 9 public multivariate datasets
+(Sec. 5.2); short-term forecasting on 2 univariate datasets (Sec. 5.3); and zero-shot forecasting in
+cross-domain and cross-granularity scenarios (Sec. 5.4).
+
+5.1 Experimental Setup
+
+Datasets. For long-term forecasting, we experiment on 9 popular benchmarking datasets across
+diverse domains [11, 12, 71], including weather, traffic and electricity. M4 dataset [72] is used in
+short-term forecasting, which is a univariate dataset that covers time series across diverse domains
+and various sampling frequencies from hourly to yearly. We further provide a new stock time series
+dataset with 1390 univariate time series. Each time series records the price history of an individual
+stock spanning 10 years. Due to the potential significant fluctuations in stock performance across
+different companies, this dataset poses challenges for capturing diverse and evolving stock patterns in
+financial markets. The statistics of long- and short-term datasets are shown in Table 2 and Table 3.
+
+Table 2: The statistics of datasets in long-term Table 3: Dataset details of M4 and Stock in short-
+forecasting. Horizon is {96, 192, 336, 720}. term forecasting.
+
+Dataset Channels Length Frequency Dataset Length Horizon
+ETTh1&ETTh2 7 17420 1 hour M4 Yearly 23000 6
+ETTm1&ETTm2 7 69680 15 min M4 Quarterly 24000 8
+ILI 7 966 1 week M4 Monthly 48000 18
+Exchange 8 7588 1 day M4 Weekly 359 13
+Weather 21 52696 10 min M4 Daily 4227 14
+Electricity 321 26304 1 hour M4 Hourly 414 48
+Traffic 862 17544 1 hour Stock (New) 10000 7/24
+
+We follow standard protocols [11–13] for data splitting on public benchmarking datasets. As for the
+stock dataset, we divide the set of stocks into train/validation/test sets with a ratio of 7:2:1. Therefore,
+validation/test sets present unseen samples (i.e., stocks) for model evaluation. This evaluation setting
+emphasizes the data efficiency aspect of time series models for scenarios where historical data is
+limited or insufficient for retraining from scratch given unseen instances. More details on datasets are
+provided in Appendix C.1.
+Base Models and Experimental Details. CCM is a model-agnostic channel strategy that can be
+applied to arbitrary time series forecasting models for improved performance. We meticulously
+select four recent state-of-the-art time series models as base models: TSMixer [7], DLinear [8],
+PatchTST [21] and TimesNet [13], which mainly cover three mainstream paradigms, including linear
+models, transformer-based and convolutional models. For fair evaluation, we use the optimal experi-
+ment configuration as provided in the official code to implement both base models and the enhanced
+version with CCM. All the experiments are implemented with PyTorch on a single NVIDIA RTX
+A6000 48GB GPU. Experiment configurations and implementations are detailed in Appendix C.3.
+Experimental results in the following sections are averaged on five runs with different random seeds.
+Refer to Appendix C.6 for standard deviation results.
+
+5.2 Long-term Forecasting Results
+
+We report the mean squared error (MSE) and mean absolute error (MAE) on nine real-world datasets
+for long-term forecasting evaluation in Table 2. The forecasting horizon is {96, 192, 336, 720}. From
+the table, we observe that the model enhanced with CCM outperforms the base model in general.
+Specifically, CCM improves long-term forecasting performance in 90.27% cases in MSE and 84.03%
+cases in MAE across 144 different experiment settings. Remarkably, CCM achieves a substantial
+boost on DLinear, with a significant reduction on MSE by 5.12% and MAE by 3.04%. The last
+column of the table quantifies the average percentage improvement in terms of MSE/MAE, which
+underscores the consistent enhancement brought by CCM across all forecasting horizons and datasets.
+Intuitively, the CCM method is more useful in scenarios where channel interactions are complex and
+significant, which is usually the case in real-world data. See more analysis in Appendix C.5.
+
+6
+
+
+
+Table 4: Long-term forecasting results on 9 real-world datasets in terms of MSE and MAE, the lower
+the better. The forecasting horizons are {96, 192, 336, 720}. The better performance in each setting
+is shown in bold. The best results for each row are underlined. The last column shows the average
+percentage of MSE/MAE improvement of CCM over four base models.
+
+Model TSMixer + CCM DLinear + CCM PatchTST + CCM TimesNet + CCM
+Metric MSE MAE MSE MAE MSE MAE MSE MAE MSE MAE MSE MAE MSE MAE MSE MAE IMP(%)
+
+96 0.361 0.392 0.365 0.393 0.375 0.399 0.371 0.393 0.375 0.398 0.371 0.396 0.384 0.402 0.380 0.400 0.539
+192 0.404 0.418 0.402 0.418 0.405 0.416 0.404 0.415 0.415 0.425 0.414 0.424 0.436 0.429 0.431 0.425 0.442
+336 0.422 0.430 0.423 0.430 0.445 0.440 0.438 0.443 0.422 0.440 0.417 0.429 0.491 0.469 0.485 0.461 0.908
+720 0.463 0.472 0.462 0.470 0.489 0.488 0.479 0.497 0.449 0.468 0.447 0.469 0.521 0.500 0.520 0.493 0.333
+96 0.285 0.339 0.283 0.337 0.299 0.343 0.298 0.343 0.294 0.351 0.289 0.338 0.338 0.375 0.335 0.371 1.123
+
+192 0.339 0.365 0.336 0.368 0.335 0.365 0.334 0.365 0.334 0.370 0.333 0.363 0.374 0.387 0.373 0.383 0.482
+336 0.361 0.406 0.359 0.393 0.370 0.386 0.365 0.385 0.373 0.397 0.370 0.392 0.410 0.411 0.412 0.416 0.716
+720 0.445 0.470 0.424 0.421 0.427 0.423 0.424 0.417 0.416 0.420 0.419 0.430 0.478 0.450 0.477 0.448 1.852
+96 0.284 0.343 0.278 0.338 0.289 0.353 0.285 0.348 0.278 0.340 0.274 0.336 0.340 0.374 0.336 0.371 1.371
+
+192 0.339 0.385 0.325 0.393 0.384 0.418 0.376 0.413 0.341 0.382 0.339 0.355 0.402 0.414 0.400 0.410 1.806
+336 0.361 0.406 0.361 0.399 0.442 0.459 0.438 0.455 0.329 0.384 0.327 0.383 0.452 0.452 0.449 0.445 0.823
+720 0.445 0.470 0.438 0.464 0.601 0.549 0.499 0.496 0.381 0.424 0.378 0.415 0.462 0.468 0.457 0.461 4.370
+96 0.171 0.260 0.167 0.260 0.167 0.260 0.166 0.258 0.174 0.261 0.168 0.256 0.187 0.267 0.189 0.270 0.860
+
+192 0.221 0.296 0.220 0.296 0.284 0.352 0.243 0.323 0.238 0.307 0.231 0.300 0.249 0.309 0.250 0.310 3.453
+336 0.276 0.329 0.277 0.330 0.369 0.427 0.295 0.358 0.293 0.346 0.275 0.331 0.321 0.351 0.318 0.347 6.012
+720 0.420 0.422 0.369 0.391 0.554 0.522 0.451 0.456 0.373 0.401 0.374 0.400 0.408 0.403 0.394 0.391 7.139
+96 0.089 0.209 0.085 0.206 0.088 0.215 0.085 0.214 0.094 0.216 0.088 0.208 0.107 0.234 0.105 0.231 2.880
+
+192 0.195 0.315 0.177 0.300 0.178 0.317 0.171 0.306 0.191 0.311 0.185 0.309 0.226 0.344 0.224 0.340 3.403
+336 0.343 0.421 0.312 0.405 0.371 0.462 0.300 0.412 0.343 0.427 0.342 0.423 0.367 0.448 0.361 0.442 5.875
+720 0.898 0.710 0.847 0.697 0.966 0.754 0.811 0.683 0.888 0.706 0.813 0.673 0.964 0.746 0.957 0.739 5.970
+24 1.914 0.879 1.938 0.874 2.215 1.081 1.935 0.935 1.593 0.757 1.561 0.750 2.317 0.934 2.139 0.936 4.483
+36 1.808 0.858 1.800 0.851 2.142 0.977 1.938 0.942 1.768 0.794 1.706 0.780 1.972 0.920 1.968 0.914 2.561
+48 1.797 0.873 1.796 0.867 2.335 1.056 2.221 1.030 1.799 0.916 1.774 0.892 2.238 0.940 2.229 0.937 1.602
+60 1.859 0.895 1.810 0.876 2.479 1.088 2.382 1.096 1.850 0.943 1.735 0.880 2.027 0.928 2.041 0.930 2.491
+96 0.149 0.198 0.147 0.194 0.192 0.250 0.187 0.245 0.149 0.198 0.147 0.197 0.172 0.220 0.169 0.215 1.729
+
+192 0.201 0.248 0.192 0.242 0.248 0.297 0.240 0.285 0.194 0.241 0.191 0.238 0.219 0.261 0.215 0.257 2.539
+336 0.264 0.291 0.244 0.281 0.284 0.335 0.274 0.324 0.244 0.282 0.245 0.285 0.280 0.306 0.274 0.291 2.924
+720 0.320 0.336 0.318 0.334 0.339 0.374 0.320 0.357 0.320 0.334 0.316 0.333 0.365 0.359 0.366 0.362 1.476
+96 0.142 0.237 0.139 0.235 0.153 0.239 0.142 0.247 0.138 0.233 0.136 0.231 0.168 0.272 0.158 0.259 2.480
+
+192 0.154 0.248 0.147 0.246 0.158 0.251 0.152 0.248 0.153 0.247 0.153 0.248 0.184 0.289 0.172 0.262 3.226
+336 0.163 0.264 0.161 0.262 0.170 0.269 0.168 0.267 0.170 0.263 0.168 0.262 0.198 0.300 0.181 0.284 2.423
+720 0.208 0.300 0.204 0.299 0.233 0.342 0.230 0.338 0.206 0.296 0.210 0.301 0.220 0.320 0.205 0.309 1.417
+96 0.376 0.264 0.375 0.262 0.411 0.284 0.411 0.282 0.360 0.249 0.357 0.246 0.593 0.321 0.554 0.316 1.488
+
+192 0.397 0.277 0.340 0.279 0.423 0.287 0.422 0.286 0.379 0.256 0.379 0.254 0.617 0.336 0.562 0.331 3.175
+336 0.413 0.290 0.411 0.289 0.438 0.299 0.436 0.297 0.401 0.270 0.389 0.255 0.629 0.336 0.579 0.341 2.120
+720 0.444 0.306 0.441 0.302 0.467 0.316 0.471 0.318 0.443 0.294 0.430 0.281 0.640 0.350 0.587 0.366 1.445
+
+Comparison with Regularization Solution. PRReg [17] recently displays to improve the perfor-
+mance of CD models, by predicting residuals with a regularization term in the training objective. We
+evaluate the effectiveness of PRReg and our proposed CCM on long-term forecasting performance
+enhancement based on CI and CD models. Following the previous training setting [17], we develop
+CI and CD versions for Linear [8] and Transformer [41] and report MSE loss. Table 5 shows that
+CCM surpasses PRReg in most cases, highlighting its efficacy compared with regularization solutions.
+See full results in Appendix C.4.
+
+5.3 Short-term Forecasting Results
+
+In both M4 and stock datasets, we follow the Table 5: Comparison between CCM and existing
+univariate forecasting setting. For M4 bench- regularization method for improved performance
+marks, we adopt the evaluation setting in prior on CI/CD strategies. The best results are high-
+works [42] and report the symmetric mean ab- lighted in bold. The forecasting horizon is 24 for
+solute percentage error (SMAPE), mean abso- ILI dataset and 48 for other datasets. ⋆ denotes our
+lute scaled error (MASE), and overall weighted implementation. Other results collect from [17]
+average (OWA). As for the stock dataset, we
+implement MAE and MSE as metrics in Table 6. CD CI +PRReg +CCM⋆
+
+See more details on metrics in Appendix C.2.
+Remarkably, the efficacy of CCM is consistent ETTh1 Linear 0.402 0.345 0.342 0.342
+
+Transformer 0.861 0.655 0.539 0.518
+across all M4 sub-datasets with different sam- ETTm1 Linear 0.404 0.354 0.311 0.310
+pling frequencies. Specifically, CCM outper- Transformer 0.458 0.379 0.349 0.300
+
+forms the state-of-the-art linear model (DLinear) Weather Linear 0.142 0.169 0.131 0.130
+by a significant margin of 11.62%, and outper- Transformer 0.251 0.168 0.180 0.164
+
+forms the best convolutional method TimesNet ILI Linear 2.343 2.847 2.299 2.279
+Transformer 5.309 4.307 3.254 3.206
+
+by 8.88%. In Table 6, we also observe a sig-
+nificant performance improvement on the stock Electricity Linear 0.195 0.196 0.196 0.195
+
+Transformer 0.250 0.185 0.185 0.183
+dataset, achieved by applying CCM. In the stock
+dataset, we test on new samples (i.e., univariate stock time series) that the model has not seen during
+
+7
+
+Traffic Electricity Weather ILI Exchange ETTm2 ETTh2 ETTm1 ETTh1
+
+
+
+Table 6: Short-term forecasting results on M4 dataset in terms of SMAPE, MASE, and OWA, and
+stock dataset in terms of MSE and MAE. The lower the better. The forecasting horizon is {7, 24} for
+the stock dataset. The better performance in each setting is shown in bold.
+
+Model TSMixer + CCM DLinear + CCM PatchTST + CCM TimesNet + CCM IMP(%)
+SMAPE 14.702 14.676 16.965 14.337 13.477 13.304 15.378 14.426 7.286
+
+M4 (Yearly) MASE 3.343 3.370 4.283 3.144 3.019 2.997 3.554 3.448 9.589
+OWA 0.875 0.873 1.058 0.834 0.792 0.781 0.918 0.802 11.346
+SMAPE 11.187 10.989 12.145 10.513 10.380 10.359 10.465 10.121 6.165
+
+M4 (Quarterly) MASE 1.346 1.332 1.520 1.243 1.233 1.224 1.227 1.183 7.617
+OWA 0.998 0.984 1.106 0.931 0.921 0.915 0.923 0.897 6.681
+SMAPE 13.433 13.407 13.514 13.370 12.959 12.672 13.513 12.790 2.203
+
+M4 (Monthly) MASE 1.022 1.019 1.037 1.005 0.970 0.941 1.039 0.942 4.238
+OWA 0.946 0.944 0.956 0.936 0.905 0.895 0.957 0.891 3.067
+SMAPE 7.067 7.178 6.709 6.160 4.952 4.643 6.913 5.218 10.377
+
+M4 (Others) MASE 5.587 5.302 4.953 4.713 3.347 3.128 4.507 3.892 7.864
+OWA 1.642 1.536 1.487 1.389 1.049 0.997 1.438 1.217 9.472
+SMAPE 12.867 12.807 13.639 12.546 12.059 11.851 12.880 11.914 5.327
+
+M4 (Avg.) MASE 1.887 1.864 2.095 1.740 1.623 1.587 1.836 1.603 10.285
+OWA 0.957 0.948 1.051 0.917 0.869 0.840 0.955 0.894 6.693
+
+Stock (Horizon 7) MSE 0.939 0.938 0.992 0.883 0.896 0.892 0.930 0.915 3.288
+MAE 0.807 0.806 0.831 0.774 0.771 0.771 0.802 0.793 2.026
+
+Stock (Horizon 24) MSE 1.007 0.991 0.996 0.917 0.930 0.880 0.998 0.937 5.252
+MAE 0.829 0.817 0.832 0.781 0.789 0.765 0.830 0.789 3.889
+
+training to evaluate the model’s generalization and robustness. By memorizing cluster-specific knowl-
+edge from analogous samples, the model potentially captures various market trends and behaviors
+and thereby makes more accurate and informed forecasting.
+
+Table 7: Zero-shot forecasting results on ETT datasets. The forecasting horizon is {96, 720}. The
+best value in each row is underlined.
+
+Model TSMixer + CCM DLinear + CCM PatchTST + CCM TimesNet + CCM
+Generalization Task MSE MAE MSE MAE MSE MAE MSE MAE MSE MAE MSE MAE MSE MAE MSE MAE IMP(%)
+
+1 ETTh1→ETTh2 96 0.288 0.357 0.283 0.353 0.308 0.371 0.283 0.349 0.313 0.362 0.292 0.346 0.391 0.412 0.388 0.410 3.661
+720 0.374 0.414 0.370 0.413 0.569 0.549 0.520 0.517 0.414 0.442 0.386 0.423 0.540 0.508 0.516 0.491 4.326
+
+2 ETTh1→ETTm1 96 0.763 0.677 0.710 0.652 0.726 0.658 0.681 0.634 0.729 0.667 0.698 0.647 0.887 0.718 0.827 0.700 4.626
+720 1.252 0.815 1.215 0.803 1.881 0.948 1.138 0.809 1.459 0.845 1.249 0.795 1.623 0.981 1.601 0.964 10.249
+
+3 ETTh1→ETTm2 96 0.959 0.694 0.937 0.689 0.990 0.704 0.896 0.677 0.918 0.694 0.895 0.677 1.199 0.794 1.122 0.731 4.457
+720 1.765 0.982 1.758 0.980 2.091 1.061 1.681 0.954 1.925 1.014 1.718 0.966 2.204 1.031 1.874 1.012 7.824
+
+4 ETTh2→ETTh1 96 0.466 0.462 0.455 0.456 0.462 0.450 0.427 0.432 0.620 0.563 0.509 0.495 0.869 0.624 0.752 0.590 8.016
+720 0.695 0.584 0.540 0.519 0.511 0.518 0.484 0.502 1.010 0.968 0.936 0.686 1.274 0.783 0.845 0.642 16.243
+
+5 ETTh2→ETTm2 96 0.943 0.726 0.876 0.697 0.736 0.656 0.700 0.642 0.840 0.708 0.771 0.688 1.250 0.850 1.064 0.793 6.344
+720 1.472 0.872 1.464 0.866 1.813 0.938 1.253 0.844 1.832 1.052 1.532 0.863 1.861 1.016 1.671 0.967 11.439
+
+6 ETTh2→ETTm1 96 1.254 0.771 1.073 0.714 1.147 0.746 0.894 0.669 0.997 0.721 0.789 0.629 1.049 0.791 0.804 0.657 16.016
+720 2.275 1.137 1.754 1.065 1.992 1.001 1.740 0.970 2.651 1.149 1.695 0.971 2.183 1.103 1.742 0.983 15.952
+
+5.4 Zero-shot Forecasting Results
+
+Existing time series models tend to be rigidly tailored to a specific dataset, leading to poor gener-
+alization on unseen data. In contrast, CCM leverages learned prototypes to capture cluster-specific
+knowledge. This enables meaningful comparisons between unseen time series and pre-trained
+knowledge, facilitating accurate zero-shot forecasting. Following prior work [73], we adopt ETT
+collections [11], where ETTh1 and ETTh2 are hourly recorded, while ETTm1 and ETTm2 are
+minutely recorded. "1" and "2" indicate two different regions where the datasets originated. Table 7
+shows MSE and MAE results on test datasets. CCM consistently improves the zero-shot forecasting
+capacity of base time series models in 48 scenarios, including generalization to different regions and
+different granularities. Specifically, based on the results, we make the following observations. (1)
+CCM exhibits more significant performance improvement with longer forecasting horizons, high-
+lighting the efficacy of memorizing and leveraging pre-trained knowledge in zero-shot forecasting
+scenarios. (2) CCM demonstrates a better effect on originally CI base models. For instance, the
+averaged improvement rates on two CI models, i.e., DLinear and PatchTST, are 10.48% and 11.13%
+respectively, while the improvement rates on TSMixer and TimesNet are 5.14% and 9.63%. Overall,
+the experimental results verify the superiority and efficacy of CCM in enhancing zero-shot forecasting
+and the practical value of generalization within closely related domains under varying conditions.
+
+5.5 Qualitative Visualization
+
+Channel Clustering Visualization. Figure 2 presents the t-SNE visualization of channel and
+prototype embeddings within ETTh1 and ETTh2 datasets with DLinear as the base model. Each
+point represents a channel within a sample, with varying colors indicating different channels. In
+ETTh1 dataset, we discern a pronounced clustering of channels 0, 2, and 4, suggesting that they may
+
+8
+
+
+
+be capturing related or redundant information within the dataset. Concurrently, channels 1, 3, 5, and
+6 coalesce into another cluster.
+The similarity matrix in the
+lower left further corroborates 2D t-SNE Projection of Channels and Clusters 2D t-SNE Projection of Channels and Clusters
+
+these findings. Clustering is also 20
+chchaannel l0 0 15 cchhaanneel l0 0
+chchaannel l1 1 cchhaanneel l1 1
+
+observable in ETTh2 dataset, par- 15 chchaannel l2 2 cchhaanneel l2 2
+chchaannel l3 3 cchhaannnneel l3 3
+
+ticularly among channels 0, 4, chchaannel l4 4 10
+10 cchhaanneel l4 4
+
+chchaannel l5 5 cchhaannnneel l5 5
+chchaannel l6 6 cchhaanneel l6 6
+
+and 5, as well as channels 2, 3, 5 PPrroottottyyppee PPrroottottyyppe5 e
+
+and 6. Comparatively, channel 1 0
+
+shows a dispersion among clus- 0
+5 1.0 1.0
+
+ters, partly due to its capturing 0.8 0.8
+10 5
+
+of unique or diverse aspects of 0.6 0.6
+
+15 0.4 0.4
+
+the data that do not closely align 10
+0.2 0.2
+
+20
+
+with the features represented by
+15 10 5 0 5 10 15 10 5 0 5 10 15
+
+any clusters. The clustering re- t-SNtE-SNFeE aFetautruere1 1 tt--SSNNEE FFeaetautreu 1re 1
+(a) ETTh1 (b) ETTh2
+
+sults demonstrate that CCM not
+only elucidates the intricate rela- Figure 2: t-SNE visualization of channel and prototype embedding
+tionships and potential redundan- by DLinear with CCM on (a) ETTh1 and (b) ETTh2 dataset. The
+cies among the channels but also lower left corner shows the similarity matrix between channels.
+offers critical insights for feature analysis and enhancing the interpretability of time series models.
+Weight Visualization of Cluster-aware Projection. Figure 3 depicts the weights visualization for
+the cluster-aware Feed Forward on ETTh1 and ETTm1 datasets, revealing distinct patterns that are
+indicative of the model’s learned features [15, 8, 51].
+For instance, in the ETTm1 dataset, Cluster 0 Cluster 0 Cluster 0
+
+shows bright diagonal striping patterns, which
+may suggest that it is primarily responsible for
+
+Cluster 1
+capturing the most dominant periodic signals Cluster 1
+
+in the corresponding cluster. In contrast, Clus-
+ter 1 exhibits denser stripes, indicating its role Input Neurons Input Neurons
+
+in refining the representation by capturing more
+subtle or complex periodicities that the first layer (a) ETTh1 Dataset (b) ETTm1 Dataset
+does not. The visualization implies the model’s Figure 3: Weights visualization of cluster-wise lin-
+ability to identify and represent periodicity in ear layers on (a) ETTh1 and (b) ETTm1 datasets.
+diverse patterns, which is crucial for time-series The input and output lengths are 336 and 96, re-
+forecasting tasks that are characterized by intri- spectively. We observe the different periodicities
+cate cyclic behaviors. captured by different clusters.
+
+5.6 Ablation Studies
+
+Figure 4 shows an ablation study on
+cluster ratios, which is defined as the
+ratio of the number of clusters to the
+number of channels. 0.0 means all
+channels are in a single cluster. We
+observe that the MSE loss slightly
+decreases and then increases as the
+cluster ratio increases, especially for
+DLinear, PatchTST, and TimesNet. (a) MSE loss w.r.t. cluster ratios on ETTh1 dataset (b) MSE loss w.r.t. cluster ratios on ETTm1 dataset
+Time series models with CCM achieve
+the best performance when the clus- Figure 4: Ablation Study on Cluster Ratios in terms of MSE
+ter ratio is in the range of [0.2, 0.6]. loss with four base models. The forecasting horizon is 96.
+It is worth noticing that DLinear and (left: ETTh1 dataset; right: ETTm1 dataset)
+PatchTST, two CI models among four
+base models, benefit consistently from channel clustering with any number of clusters. Additional
+ablation studies on the look-back window length and clustering step are provided in Appendix D.
+
+9
+
+t-tS-SNNEE FFeeatautrue r2e 2
+
+Output Neurons Output Neurons
+
+t-t-SSNNEE FFeeatautrue r2e 2
+
+Output Neurons Output Neurons
+
+
+
+5.7 Efficiency Analysis
+
+We evaluate the model size and runtime efficiency of the proposed CCM with various numbers of
+clusters on ETTh1 dataset, as shown in Figure 5. The batch size is 32, and the hidden dimension is 64.
+We keep all other hyperparameters consistent to ensure fair evaluation. It is worth noting that CCM
+reduces the model complexity based on Channel-Independent models (e.g., PatchTST, DLinear),
+since CCM essentially uses cluster identity to replace channel identity. The generalizability of CI
+models is thereby enhanced as well. When it comes to Channel-Dependent models, CCM increases
+the model complexity with negligible overhead, considering the improved forecasting performance.
+
+Model Size Analysis Running Time Efficiency Analysis
+TSMixer (CCM)
+DLinear (CCM)
+TimesNet (CCM)
+
+107
+0.10 PatchTST (CCM)
+
+TSMixer (base)
+TSMixer (CCM) DLinear (base)
+DLinear (CCM) TimesNet (base)
+TimesNet (CCM)
+
+106 PatchTST (base)
+PatchTST (CCM)
+TSMixer (base)
+DLinear (base)
+TimesNet (base)
+PatchTST (base)
+
+105
+
+0.01
+
+1 2 3 4 5 6 7 1 2 3 4 5 6 7
+Number of Clusters Number of Clusters
+
+(a) Model Size Analysis on ETTh1 dataset (b) Runtime Efficiency Analysis on ETTh1 dataset
+
+Figure 5: Efficiency analysis in model size and running time on ETTh1 dataset.
+

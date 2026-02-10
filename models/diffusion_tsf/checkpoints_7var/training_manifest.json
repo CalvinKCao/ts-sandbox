@@ -1,0 +1,2329 @@
+{
+  "seed": 42,
+  "created_at": "2026-02-10T18:24:17.132586",
+  "itrans_hp_done": true,
+  "itrans_best_params": {
+    "learning_rate": 5.6115164153345e-05,
+    "batch_size": 64,
+    "dropout": 0.17959754525911098
+  },
+  "diffusion_hp_done": true,
+  "diffusion_best_params": {
+    "learning_rate": 5.6115164153345e-05,
+    "batch_size": 32
+  },
+  "pretrain_complete": true,
+  "pretrain_checkpoint": "/home/cao/ts-sandbox/models/diffusion_tsf/checkpoints_7var/pretrained_diffusion.pt",
+  "itrans_checkpoint": "/home/cao/ts-sandbox/models/diffusion_tsf/checkpoints_7var/pretrained_itransformer.pt",
+  "subsets": {
+    "ETTh1": {
+      "status": "complete",
+      "checkpoint": "/home/cao/ts-sandbox/models/diffusion_tsf/checkpoints_7var/ETTh1/best.pt",
+      "metrics": {
+        "best_val_loss": 1.418642520904541,
+        "final_epoch": 1,
+        "eval": {
+          "single": {
+            "mse": 1.0483593940734863,
+            "mae": 0.7518764734268188,
+            "trend_accuracy": 0.5210526585578918
+          },
+          "averaged": {
+            "mse": 1.0480732917785645,
+            "mae": 0.7541990280151367,
+            "trend_accuracy": 0.530075192451477
+          }
+        }
+      },
+      "completed_at": "2026-02-10T18:25:00.902282"
+    },
+    "ETTh2": {
+      "status": "pending",
+      "dataset": "ETTh2",
+      "variate_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ]
+    },
+    "ETTm1": {
+      "status": "pending",
+      "dataset": "ETTm1",
+      "variate_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ]
+    },
+    "ETTm2": {
+      "status": "pending",
+      "dataset": "ETTm2",
+      "variate_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ]
+    },
+    "illness": {
+      "status": "pending",
+      "dataset": "illness",
+      "variate_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ]
+    },
+    "exchange_rate-0": {
+      "status": "pending",
+      "dataset": "exchange_rate",
+      "variate_indices": [
+        3,
+        4,
+        6,
+        7,
+        2,
+        5,
+        0
+      ]
+    },
+    "weather-0": {
+      "status": "pending",
+      "dataset": "weather",
+      "variate_indices": [
+        19,
+        5,
+        14,
+        4,
+        9,
+        13,
+        15
+      ]
+    },
+    "weather-1": {
+      "status": "pending",
+      "dataset": "weather",
+      "variate_indices": [
+        18,
+        6,
+        12,
+        17,
+        10,
+        1,
+        11
+      ]
+    },
+    "weather-2": {
+      "status": "pending",
+      "dataset": "weather",
+      "variate_indices": [
+        2,
+        16,
+        7,
+        8,
+        0,
+        3,
+        20
+      ]
+    },
+    "electricity-0": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        318,
+        157,
+        74,
+        123,
+        284,
+        11,
+        33
+      ]
+    },
+    "electricity-1": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        156,
+        113,
+        53,
+        218,
+        88,
+        312,
+        241
+      ]
+    },
+    "electricity-2": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        237,
+        38,
+        19,
+        315,
+        134,
+        1,
+        120
+      ]
+    },
+    "electricity-3": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        250,
+        77,
+        233,
+        46,
+        99,
+        139,
+        93
+      ]
+    },
+    "electricity-4": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        168,
+        212,
+        280,
+        224,
+        18,
+        180,
+        105
+      ]
+    },
+    "electricity-5": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        37,
+        48,
+        131,
+        219,
+        122,
+        25,
+        169
+      ]
+    },
+    "electricity-6": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        96,
+        91,
+        26,
+        10,
+        94,
+        5,
+        257
+      ]
+    },
+    "electricity-7": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        34,
+        153,
+        295,
+        205,
+        154,
+        304,
+        159
+      ]
+    },
+    "electricity-8": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        72,
+        199,
+        100,
+        104,
+        247,
+        203,
+        273
+      ]
+    },
+    "electricity-9": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        197,
+        144,
+        239,
+        223,
+        242,
+        184,
+        86
+      ]
+    },
+    "electricity-10": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        303,
+        316,
+        300,
+        103,
+        294,
+        6,
+        59
+      ]
+    },
+    "electricity-11": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        84,
+        158,
+        243,
+        55,
+        204,
+        195,
+        24
+      ]
+    },
+    "electricity-12": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        311,
+        288,
+        293,
+        60,
+        89,
+        73,
+        187
+      ]
+    },
+    "electricity-13": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        245,
+        161,
+        249,
+        268,
+        200,
+        30,
+        65
+      ]
+    },
+    "electricity-14": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        106,
+        132,
+        147,
+        133,
+        289,
+        7,
+        222
+      ]
+    },
+    "electricity-15": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        90,
+        9,
+        278,
+        220,
+        298,
+        177,
+        70
+      ]
+    },
+    "electricity-16": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        170,
+        179,
+        252,
+        231,
+        146,
+        31,
+        308
+      ]
+    },
+    "electricity-17": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        320,
+        66,
+        115,
+        201,
+        286,
+        238,
+        85
+      ]
+    },
+    "electricity-18": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        173,
+        290,
+        265,
+        221,
+        259,
+        165,
+        42
+      ]
+    },
+    "electricity-19": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        121,
+        151,
+        32,
+        251,
+        17,
+        124,
+        21
+      ]
+    },
+    "electricity-20": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        20,
+        262,
+        234,
+        61,
+        78,
+        202,
+        171
+      ]
+    },
+    "electricity-21": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        4,
+        317,
+        82,
+        166,
+        182,
+        138,
+        248
+      ]
+    },
+    "electricity-22": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        95,
+        244,
+        50,
+        254,
+        253,
+        76,
+        192
+      ]
+    },
+    "electricity-23": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        27,
+        129,
+        45,
+        128,
+        208,
+        0,
+        269
+      ]
+    },
+    "electricity-24": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        207,
+        306,
+        75,
+        264,
+        87,
+        217,
+        227
+      ]
+    },
+    "electricity-25": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        209,
+        178,
+        29,
+        211,
+        2,
+        141,
+        64
+      ]
+    },
+    "electricity-26": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        281,
+        266,
+        188,
+        246,
+        272,
+        226,
+        152
+      ]
+    },
+    "electricity-27": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        108,
+        292,
+        267,
+        160,
+        39,
+        28,
+        319
+      ]
+    },
+    "electricity-28": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        276,
+        270,
+        126,
+        130,
+        213,
+        240,
+        92
+      ]
+    },
+    "electricity-29": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        228,
+        230,
+        109,
+        149,
+        191,
+        299,
+        137
+      ]
+    },
+    "electricity-30": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        143,
+        190,
+        277,
+        271,
+        67,
+        255,
+        117
+      ]
+    },
+    "electricity-31": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        164,
+        301,
+        127,
+        167,
+        225,
+        297,
+        283
+      ]
+    },
+    "electricity-32": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        145,
+        54,
+        309,
+        68,
+        102,
+        80,
+        206
+      ]
+    },
+    "electricity-33": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        8,
+        210,
+        58,
+        14,
+        198,
+        196,
+        215
+      ]
+    },
+    "electricity-34": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        260,
+        175,
+        56,
+        263,
+        282,
+        163,
+        236
+      ]
+    },
+    "electricity-35": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        69,
+        97,
+        118,
+        41,
+        62,
+        261,
+        256
+      ]
+    },
+    "electricity-36": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        43,
+        162,
+        155,
+        36,
+        136,
+        107,
+        181
+      ]
+    },
+    "electricity-37": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        189,
+        83,
+        186,
+        232,
+        291,
+        285,
+        51
+      ]
+    },
+    "electricity-38": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        305,
+        275,
+        148,
+        116,
+        23,
+        35,
+        98
+      ]
+    },
+    "electricity-39": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        185,
+        150,
+        40,
+        193,
+        63,
+        274,
+        235
+      ]
+    },
+    "electricity-40": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        22,
+        135,
+        176,
+        183,
+        49,
+        194,
+        307
+      ]
+    },
+    "electricity-41": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        314,
+        172,
+        110,
+        79,
+        296,
+        174,
+        310
+      ]
+    },
+    "electricity-42": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        81,
+        3,
+        142,
+        229,
+        112,
+        214,
+        313
+      ]
+    },
+    "electricity-43": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        101,
+        287,
+        13,
+        258,
+        119,
+        111,
+        47
+      ]
+    },
+    "electricity-44": {
+      "status": "pending",
+      "dataset": "electricity",
+      "variate_indices": [
+        15,
+        16,
+        216,
+        302,
+        44,
+        279,
+        52
+      ]
+    },
+    "traffic-0": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        732,
+        36,
+        333,
+        705,
+        534,
+        463,
+        24
+      ]
+    },
+    "traffic-1": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        501,
+        92,
+        256,
+        45,
+        533,
+        694,
+        681
+      ]
+    },
+    "traffic-2": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        496,
+        485,
+        140,
+        129,
+        406,
+        290,
+        581
+      ]
+    },
+    "traffic-3": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        442,
+        411,
+        49,
+        375,
+        495,
+        241,
+        110
+      ]
+    },
+    "traffic-4": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        755,
+        666,
+        612,
+        471,
+        472,
+        435,
+        431
+      ]
+    },
+    "traffic-5": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        318,
+        28,
+        564,
+        844,
+        720,
+        629,
+        544
+      ]
+    },
+    "traffic-6": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        461,
+        264,
+        105,
+        330,
+        33,
+        316,
+        542
+      ]
+    },
+    "traffic-7": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        312,
+        768,
+        685,
+        148,
+        585,
+        239,
+        740
+      ]
+    },
+    "traffic-8": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        784,
+        502,
+        294,
+        609,
+        527,
+        571,
+        806
+      ]
+    },
+    "traffic-9": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        690,
+        299,
+        638,
+        645,
+        350,
+        588,
+        236
+      ]
+    },
+    "traffic-10": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        703,
+        247,
+        858,
+        78,
+        605,
+        624,
+        582
+      ]
+    },
+    "traffic-11": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        200,
+        402,
+        779,
+        725,
+        289,
+        771,
+        657
+      ]
+    },
+    "traffic-12": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        709,
+        378,
+        202,
+        193,
+        689,
+        487,
+        757
+      ]
+    },
+    "traffic-13": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        301,
+        641,
+        385,
+        8,
+        825,
+        628,
+        715
+      ]
+    },
+    "traffic-14": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        684,
+        807,
+        587,
+        776,
+        620,
+        293,
+        221
+      ]
+    },
+    "traffic-15": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        569,
+        329,
+        660,
+        802,
+        268,
+        150,
+        232
+      ]
+    },
+    "traffic-16": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        31,
+        504,
+        358,
+        88,
+        467,
+        518,
+        513
+      ]
+    },
+    "traffic-17": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        364,
+        198,
+        50,
+        719,
+        741,
+        700,
+        691
+      ]
+    },
+    "traffic-18": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        619,
+        702,
+        174,
+        838,
+        631,
+        41,
+        152
+      ]
+    },
+    "traffic-19": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        184,
+        814,
+        508,
+        422,
+        670,
+        29,
+        409
+      ]
+    },
+    "traffic-20": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        834,
+        249,
+        231,
+        615,
+        548,
+        335,
+        201
+      ]
+    },
+    "traffic-21": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        10,
+        17,
+        440,
+        743,
+        13,
+        503,
+        828
+      ]
+    },
+    "traffic-22": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        311,
+        816,
+        64,
+        679,
+        792,
+        676,
+        639
+      ]
+    },
+    "traffic-23": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        172,
+        384,
+        229,
+        798,
+        401,
+        510,
+        320
+      ]
+    },
+    "traffic-24": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        791,
+        118,
+        34,
+        452,
+        474,
+        434,
+        374
+      ]
+    },
+    "traffic-25": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        649,
+        475,
+        780,
+        415,
+        826,
+        396,
+        819
+      ]
+    },
+    "traffic-26": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        622,
+        634,
+        42,
+        185,
+        785,
+        173,
+        586
+      ]
+    },
+    "traffic-27": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        302,
+        857,
+        627,
+        592,
+        593,
+        554,
+        458
+      ]
+    },
+    "traffic-28": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        251,
+        56,
+        381,
+        476,
+        188,
+        191,
+        137
+      ]
+    },
+    "traffic-29": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        262,
+        760,
+        192,
+        437,
+        369,
+        454,
+        535
+      ]
+    },
+    "traffic-30": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        600,
+        147,
+        392,
+        5,
+        178,
+        149,
+        840
+      ]
+    },
+    "traffic-31": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        783,
+        557,
+        213,
+        417,
+        575,
+        227,
+        119
+      ]
+    },
+    "traffic-32": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        308,
+        84,
+        805,
+        106,
+        16,
+        277,
+        180
+      ]
+    },
+    "traffic-33": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        39,
+        177,
+        325,
+        810,
+        439,
+        547,
+        423
+      ]
+    },
+    "traffic-34": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        138,
+        304,
+        372,
+        85,
+        538,
+        850,
+        770
+      ]
+    },
+    "traffic-35": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        687,
+        444,
+        343,
+        539,
+        61,
+        336,
+        595
+      ]
+    },
+    "traffic-36": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        365,
+        199,
+        327,
+        456,
+        126,
+        132,
+        636
+      ]
+    },
+    "traffic-37": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        288,
+        395,
+        855,
+        443,
+        560,
+        306,
+        162
+      ]
+    },
+    "traffic-38": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        272,
+        608,
+        414,
+        731,
+        397,
+        859,
+        237
+      ]
+    },
+    "traffic-39": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        265,
+        457,
+        773,
+        742,
+        682,
+        579,
+        559
+      ]
+    },
+    "traffic-40": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        124,
+        667,
+        637,
+        795,
+        847,
+        212,
+        789
+      ]
+    },
+    "traffic-41": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        37,
+        809,
+        507,
+        23,
+        716,
+        430,
+        101
+      ]
+    },
+    "traffic-42": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        115,
+        853,
+        120,
+        460,
+        171,
+        263,
+        793
+      ]
+    },
+    "traffic-43": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        43,
+        86,
+        573,
+        728,
+        109,
+        522,
+        446
+      ]
+    },
+    "traffic-44": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        786,
+        164,
+        354,
+        788,
+        340,
+        421,
+        736
+      ]
+    },
+    "traffic-45": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        155,
+        345,
+        280,
+        207,
+        499,
+        291,
+        315
+      ]
+    },
+    "traffic-46": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        848,
+        555,
+        215,
+        707,
+        428,
+        599,
+        151
+      ]
+    },
+    "traffic-47": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        206,
+        763,
+        528,
+        556,
+        259,
+        490,
+        63
+      ]
+    },
+    "traffic-48": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        356,
+        644,
+        368,
+        398,
+        531,
+        425,
+        578
+      ]
+    },
+    "traffic-49": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        275,
+        266,
+        673,
+        355,
+        481,
+        130,
+        97
+      ]
+    },
+    "traffic-50": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        295,
+        197,
+        366,
+        261,
+        310,
+        842,
+        160
+      ]
+    },
+    "traffic-51": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        176,
+        576,
+        683,
+        393,
+        391,
+        466,
+        297
+      ]
+    },
+    "traffic-52": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        404,
+        133,
+        482,
+        14,
+        652,
+        748,
+        594
+      ]
+    },
+    "traffic-53": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        447,
+        260,
+        328,
+        386,
+        403,
+        509,
+        734
+      ]
+    },
+    "traffic-54": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        800,
+        204,
+        98,
+        337,
+        524,
+        668,
+        116
+      ]
+    },
+    "traffic-55": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        678,
+        179,
+        630,
+        516,
+        113,
+        537,
+        669
+      ]
+    },
+    "traffic-56": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        195,
+        729,
+        359,
+        787,
+        136,
+        419,
+        376
+      ]
+    },
+    "traffic-57": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        342,
+        210,
+        400,
+        662,
+        377,
+        91,
+        12
+      ]
+    },
+    "traffic-58": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        211,
+        90,
+        532,
+        121,
+        489,
+        383,
+        317
+      ]
+    },
+    "traffic-59": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        208,
+        286,
+        653,
+        181,
+        52,
+        493,
+        803
+      ]
+    },
+    "traffic-60": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        349,
+        583,
+        183,
+        20,
+        407,
+        186,
+        157
+      ]
+    },
+    "traffic-61": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        797,
+        635,
+        818,
+        515,
+        693,
+        298,
+        506
+      ]
+    },
+    "traffic-62": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        427,
+        18,
+        279,
+        76,
+        353,
+        38,
+        753
+      ]
+    },
+    "traffic-63": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        494,
+        287,
+        766,
+        361,
+        282,
+        226,
+        778
+      ]
+    },
+    "traffic-64": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        706,
+        523,
+        326,
+        66,
+        710,
+        572,
+        1
+      ]
+    },
+    "traffic-65": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        22,
+        723,
+        424,
+        647,
+        722,
+        47,
+        26
+      ]
+    },
+    "traffic-66": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        832,
+        697,
+        764,
+        258,
+        483,
+        436,
+        324
+      ]
+    },
+    "traffic-67": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        351,
+        815,
+        767,
+        811,
+        107,
+        309,
+        144
+      ]
+    },
+    "traffic-68": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        139,
+        79,
+        491,
+        380,
+        54,
+        455,
+        614
+      ]
+    },
+    "traffic-69": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        688,
+        68,
+        449,
+        480,
+        53,
+        339,
+        477
+      ]
+    },
+    "traffic-70": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        153,
+        283,
+        418,
+        341,
+        4,
+        808,
+        334
+      ]
+    },
+    "traffic-71": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        536,
+        313,
+        154,
+        360,
+        278,
+        426,
+        724
+      ]
+    },
+    "traffic-72": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        661,
+        145,
+        189,
+        125,
+        450,
+        35,
+        451
+      ]
+    },
+    "traffic-73": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        357,
+        672,
+        525,
+        568,
+        75,
+        102,
+        737
+      ]
+    },
+    "traffic-74": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        9,
+        74,
+        530,
+        468,
+        307,
+        134,
+        739
+      ]
+    },
+    "traffic-75": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        561,
+        244,
+        550,
+        209,
+        267,
+        750,
+        831
+      ]
+    },
+    "traffic-76": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        83,
+        40,
+        835,
+        122,
+        413,
+        240,
+        680
+      ]
+    },
+    "traffic-77": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        738,
+        190,
+        82,
+        520,
+        589,
+        851,
+        674
+      ]
+    },
+    "traffic-78": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        514,
+        488,
+        577,
+        58,
+        321,
+        596,
+        664
+      ]
+    },
+    "traffic-79": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        222,
+        303,
+        611,
+        158,
+        498,
+        601,
+        292
+      ]
+    },
+    "traffic-80": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        465,
+        651,
+        399,
+        2,
+        761,
+        168,
+        625
+      ]
+    },
+    "traffic-81": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        749,
+        218,
+        492,
+        839,
+        607,
+        170,
+        242
+      ]
+    },
+    "traffic-82": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        843,
+        15,
+        553,
+        51,
+        727,
+        563,
+        453
+      ]
+    },
+    "traffic-83": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        77,
+        255,
+        762,
+        617,
+        187,
+        713,
+        143
+      ]
+    },
+    "traffic-84": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        829,
+        772,
+        606,
+        794,
+        254,
+        111,
+        347
+      ]
+    },
+    "traffic-85": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        412,
+        62,
+        100,
+        55,
+        478,
+        420,
+        648
+      ]
+    },
+    "traffic-86": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        362,
+        441,
+        812,
+        96,
+        194,
+        416,
+        708
+      ]
+    },
+    "traffic-87": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        248,
+        484,
+        590,
+        584,
+        135,
+        646,
+        219
+      ]
+    },
+    "traffic-88": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        659,
+        285,
+        243,
+        526,
+        626,
+        338,
+        751
+      ]
+    },
+    "traffic-89": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        69,
+        752,
+        60,
+        72,
+        7,
+        830,
+        632
+      ]
+    },
+    "traffic-90": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        235,
+        567,
+        602,
+        21,
+        346,
+        711,
+        230
+      ]
+    },
+    "traffic-91": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        253,
+        123,
+        462,
+        529,
+        448,
+        790,
+        726
+      ]
+    },
+    "traffic-92": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        319,
+        205,
+        675,
+        765,
+        433,
+        621,
+        540
+      ]
+    },
+    "traffic-93": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        744,
+        169,
+        562,
+        486,
+        131,
+        128,
+        545
+      ]
+    },
+    "traffic-94": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        70,
+        497,
+        87,
+        801,
+        745,
+        246,
+        59
+      ]
+    },
+    "traffic-95": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        245,
+        314,
+        371,
+        695,
+        19,
+        500,
+        331
+      ]
+    },
+    "traffic-96": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        613,
+        0,
+        543,
+        552,
+        165,
+        382,
+        717
+      ]
+    },
+    "traffic-97": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        836,
+        769,
+        775,
+        861,
+        305,
+        640,
+        108
+      ]
+    },
+    "traffic-98": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        519,
+        182,
+        512,
+        730,
+        3,
+        782,
+        161
+      ]
+    },
+    "traffic-99": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        445,
+        799,
+        860,
+        821,
+        656,
+        774,
+        804
+      ]
+    },
+    "traffic-100": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        698,
+        117,
+        823,
+        11,
+        566,
+        257,
+        541
+      ]
+    },
+    "traffic-101": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        479,
+        712,
+        390,
+        394,
+        65,
+        610,
+        822
+      ]
+    },
+    "traffic-102": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        696,
+        824,
+        642,
+        156,
+        112,
+        48,
+        93
+      ]
+    },
+    "traffic-103": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        505,
+        521,
+        141,
+        756,
+        796,
+        408,
+        597
+      ]
+    },
+    "traffic-104": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        438,
+        598,
+        269,
+        551,
+        837,
+        252,
+        854
+      ]
+    },
+    "traffic-105": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        271,
+        146,
+        469,
+        658,
+        405,
+        511,
+        671
+      ]
+    },
+    "traffic-106": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        217,
+        322,
+        735,
+        580,
+        216,
+        67,
+        274
+      ]
+    },
+    "traffic-107": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        410,
+        323,
+        845,
+        234,
+        57,
+        332,
+        701
+      ]
+    },
+    "traffic-108": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        224,
+        570,
+        704,
+        655,
+        276,
+        388,
+        473
+      ]
+    },
+    "traffic-109": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        167,
+        856,
+        746,
+        546,
+        175,
+        817,
+        623
+      ]
+    },
+    "traffic-110": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        73,
+        663,
+        699,
+        833,
+        273,
+        686,
+        214
+      ]
+    },
+    "traffic-111": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        363,
+        379,
+        166,
+        373,
+        650,
+        464,
+        820
+      ]
+    },
+    "traffic-112": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        813,
+        103,
+        841,
+        81,
+        296,
+        233,
+        677
+      ]
+    },
+    "traffic-113": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        46,
+        71,
+        721,
+        196,
+        591,
+        370,
+        633
+      ]
+    },
+    "traffic-114": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        643,
+        300,
+        565,
+        80,
+        387,
+        127,
+        549
+      ]
+    },
+    "traffic-115": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        470,
+        747,
+        44,
+        270,
+        618,
+        352,
+        367
+      ]
+    },
+    "traffic-116": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        99,
+        389,
+        94,
+        852,
+        344,
+        781,
+        220
+      ]
+    },
+    "traffic-117": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        159,
+        827,
+        348,
+        846,
+        714,
+        163,
+        777
+      ]
+    },
+    "traffic-118": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        6,
+        284,
+        603,
+        459,
+        225,
+        429,
+        849
+      ]
+    },
+    "traffic-119": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        718,
+        665,
+        733,
+        203,
+        574,
+        27,
+        616
+      ]
+    },
+    "traffic-120": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        517,
+        238,
+        223,
+        95,
+        30,
+        32,
+        432
+      ]
+    },
+    "traffic-121": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        604,
+        89,
+        558,
+        758,
+        692,
+        104,
+        754
+      ]
+    },
+    "traffic-122": {
+      "status": "pending",
+      "dataset": "traffic",
+      "variate_indices": [
+        142,
+        228,
+        250,
+        281,
+        759,
+        25,
+        114
+      ]
+    }
+  }
+}

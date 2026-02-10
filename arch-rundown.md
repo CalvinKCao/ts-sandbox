@@ -3,18 +3,25 @@
 ### Project Structure
 ```text
 models/diffusion_tsf/
-├── config.py           # DiffusionTSFConfig: hyperparameters for model and diffusion
-├── preprocessing.py    # Standardizer, TimeSeriesTo2D (encoding/decoding), VerticalGaussianBlur
-├── unet.py             # ConditionalUNet2D: Default U-Net backbone
-├── transformer.py      # DiffusionTransformer: DiT-style backbone option
-├── diffusion.py        # DiffusionScheduler: DDPM/DDIM forward and reverse processes
-├── guidance.py         # GuidanceModel: Stage 1 predictors for hybrid forecasting (iTransformer, Linear, etc.)
-├── model.py            # DiffusionTSF: Main model wrapper combining all components
-├── dataset.py          # Synthetic data generation and basic 1D augmentations
-├── metrics.py          # Shape-preservation and standard TSF metrics (MSE/MAE)
-├── train_electricity.py # Main training script with Optuna support (supports all datasets)
-└── visualize.py        # Utilities for plotting 2D representations and forecasts
+├── config.py             # DiffusionTSFConfig: hyperparameters for model and diffusion
+├── preprocessing.py      # Standardizer, TimeSeriesTo2D (encoding/decoding), VerticalGaussianBlur
+├── unet.py               # ConditionalUNet2D: Default U-Net backbone
+├── transformer.py        # DiffusionTransformer: DiT-style backbone option
+├── diffusion.py          # DiffusionScheduler: DDPM/DDIM forward and reverse processes
+├── guidance.py           # GuidanceModel: Stage 1 predictors for hybrid forecasting
+├── diffusion_model.py    # DiffusionTSF: Main model wrapper combining all components
+├── dataset.py            # Synthetic data generation and basic 1D augmentations
+├── metrics.py            # Shape-preservation and standard TSF metrics (MSE/MAE)
+├── ccm_adapter.py        # Channel Clustering Module for >7-variate datasets
+├── train_electricity.py  # Training script with Optuna support (single dataset)
+├── train_universal_v2.py # Universal training: pretrain + finetune all datasets
+├── visualize.py          # Utilities for plotting 2D representations and forecasts
+└── tests/
+    └── test_ccm_adapter.py  # Unit tests for CCM module
 ```
+
+**Shell Scripts:**
+- `run_all_datasets.sh` - Runs full pipeline: pretrain on synthetic → finetune on all datasets
 
 ### Supported Datasets
 
@@ -135,6 +142,69 @@ The model supports a **two-stage hybrid forecasting** approach where a determini
    - Diffusion model automatically uses the same split when `--use-guidance --guidance-type itransformer`
    - This ensures the diffusion model's training/validation data doesn't overlap with iTransformer's training data
    - Visualization script uses the TEST set (last 20%) when evaluating iTransformer-guided models
+
+---
+
+### Channel Clustering Module (CCM) for High-Variate Datasets
+
+For datasets with >7 variates (electricity=321, traffic=862, weather=21, exchange_rate=8), we use the **Channel Clustering Module** adapted from Chen et al. (NeurIPS 2024) to cluster channels into 7 "super-channels" that match the pretrained model's architecture.
+
+1. **Key Idea:**
+   - Pretrain diffusion model on 7-variate synthetic data
+   - For high-variate datasets, learn to cluster similar channels together
+   - Aggregate each cluster into a single channel → forward through pretrained model → expand back
+
+2. **Architecture (`ccm_adapter.py`):**
+   ```python
+   class CCMAdapter:
+       - ClusterAssigner: Projects each channel to embedding, computes similarity to K=7 cluster prototypes
+       - cluster_aggregate(): Weighted average of channels per cluster → (B, 7, L)
+       - cluster_expand(): Distribute predictions back to original channels using learned probabilities
+   ```
+
+3. **Cluster Loss (Eq. 4 from paper):**
+   - Maximize intra-cluster similarity (similar channels should cluster together)
+   - Minimize inter-cluster similarity (different clusters should be distinct)
+   - Uses RBF kernel similarity + sinkhorn normalization
+
+4. **Usage:**
+   ```python
+   # Wrap pretrained model for 321-variate electricity dataset
+   adapter = CCMAdapter(n_original_vars=321, n_clusters=7, seq_len=512)
+   
+   past_clustered = adapter.aggregate(past)      # (B, 321, L) → (B, 7, L)
+   pred_clustered = model(past_clustered, ...)   # Pretrained 7-var model
+   pred = adapter.expand(pred_clustered)         # (B, 7, pred_len) → (B, 321, pred_len)
+   
+   loss = diffusion_loss + adapter.get_cluster_loss(past)
+   ```
+
+5. **Visualization:** 
+   - `visualize_clusters()` generates 4-panel plot: assignment heatmap, channels-per-cluster bar, sample series colored by cluster, cluster embedding similarity matrix
+
+---
+
+### Universal Training Pipeline (`train_universal_v2.py`)
+
+Two-phase training for all datasets:
+
+1. **Pretrain Phase (run once):**
+   - Generate 1M synthetic samples with 7 variates
+   - Train diffusion model on synthetic data
+   - Save checkpoint to `checkpoints/universal_v2/pretrained_diffusion.pt`
+
+2. **Finetune Phase (per dataset):**
+   - **7-variate datasets** (ETTh1/h2/m1/m2, illness): Direct fine-tuning
+   - **>7-variate datasets** (electricity, weather, exchange_rate, traffic): Wrap with CCMAdapter
+
+**Shell Script (`run_all_datasets.sh`):**
+```bash
+./run_all_datasets.sh --smoke-test     # Quick validation
+./run_all_datasets.sh                   # Full pipeline (all datasets)
+./run_all_datasets.sh --dataset ETTh1   # Single dataset
+```
+
+**Note:** The script automatically combines `traffic_part1.csv` + `traffic_part2.csv` → `traffic.csv` if needed.
 
 ---
 
