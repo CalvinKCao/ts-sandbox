@@ -17,12 +17,49 @@ echo "=========================================="
 echo "Digital Research Alliance Setup"
 echo "=========================================="
 
-# Check we're on an Alliance cluster
+# Check we're on an Alliance cluster - try to auto-detect PROJECT
 if [ -z "$PROJECT" ]; then
-    echo "ERROR: \$PROJECT not set. Are you on an Alliance cluster?"
-    echo "       This script is for Narval, Fir, Nibi, Rorqual, etc."
-    exit 1
+    echo "WARNING: \$PROJECT not set, attempting auto-detection..."
+    
+    # Try to find project directory from ~/projects symlinks
+    if [ -d "$HOME/projects" ]; then
+        # Get the first def-* project
+        FIRST_PROJECT=$(ls -d $HOME/projects/def-* 2>/dev/null | head -1)
+        if [ -n "$FIRST_PROJECT" ]; then
+            export PROJECT=$(readlink -f "$FIRST_PROJECT")
+            echo "  Auto-detected PROJECT: $PROJECT"
+        fi
+    fi
+    
+    # Still not set? Check for SCRATCH which might give hints
+    if [ -z "$PROJECT" ] && [ -n "$SCRATCH" ]; then
+        # SCRATCH is usually /scratch/username, PROJECT is /project/def-pi
+        echo "  SCRATCH is set to: $SCRATCH"
+        echo ""
+        echo "Please set PROJECT manually. Run:"
+        echo "  ls ~/projects/"
+        echo "  export PROJECT=\$(readlink -f ~/projects/def-YOURPI)"
+        echo "  ./alliance_setup.sh"
+        exit 1
+    fi
+    
+    if [ -z "$PROJECT" ]; then
+        echo ""
+        echo "ERROR: Could not auto-detect PROJECT."
+        echo ""
+        echo "Please set it manually:"
+        echo "  1. Run: ls -la ~/projects/"
+        echo "  2. Find your allocation (e.g., def-smithj)"
+        echo "  3. Run: export PROJECT=\$(readlink -f ~/projects/def-YOURPI)"
+        echo "  4. Run: ./alliance_setup.sh"
+        echo ""
+        echo "If ~/projects/ is empty, you may not have an allocation yet."
+        echo "Check: https://ccdb.alliancecan.ca/me/group_resources"
+        exit 1
+    fi
 fi
+
+echo "Using PROJECT: $PROJECT"
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 STORAGE_ROOT="$PROJECT/diffusion-tsf"
