@@ -104,7 +104,7 @@ if [ ! -d "$VENV_PATH" ]; then
     source "$VENV_PATH/bin/activate"
     pip install --upgrade pip
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib
+    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch
     # Install from requirements if exists
     if [ -f "$PROJECT_ROOT/requirements.txt" ]; then
         pip install -r "$PROJECT_ROOT/requirements.txt"
