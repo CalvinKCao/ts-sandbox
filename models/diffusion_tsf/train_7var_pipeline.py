@@ -233,17 +233,40 @@ def create_shared_study(study_name: str, direction: str = 'minimize') -> optuna.
     """Create an Optuna study that can be shared across parallel workers.
     
     In parallel mode, uses shared SQLite storage so multiple workers
-    can run trials concurrently. Optuna handles the coordination.
+    can run trials concurrently. Worker 0 creates, others wait and join.
     """
     if is_parallel_mode() and _optuna_storage:
-        # Shared storage for parallel workers
-        return optuna.create_study(
-            study_name=study_name,
-            storage=_optuna_storage,
-            direction=direction,
-            load_if_exists=True,  # Workers join existing study
-            sampler=TPESampler(),  # No fixed seed - let workers explore
-        )
+        # Worker 0 creates the study first
+        if is_worker_zero():
+            study = optuna.create_study(
+                study_name=study_name,
+                storage=_optuna_storage,
+                direction=direction,
+                load_if_exists=True,
+                sampler=TPESampler(),
+            )
+            # Signal that study is ready
+            ready_file = os.path.join(os.path.dirname(_optuna_storage.replace('sqlite:///', '')), 
+                                      f'.{study_name}_ready')
+            Path(ready_file).touch()
+            return study
+        else:
+            # Other workers wait for study to be created
+            ready_file = os.path.join(os.path.dirname(_optuna_storage.replace('sqlite:///', '')), 
+                                      f'.{study_name}_ready')
+            logger.info(f"Worker {get_worker_id()}: Waiting for study '{study_name}' to be created...")
+            for _ in range(120):  # Wait up to 2 minutes
+                if os.path.exists(ready_file):
+                    break
+                time.sleep(1)
+            
+            # Now join the existing study
+            time.sleep(get_worker_id() * 0.5)  # Stagger connections
+            return optuna.load_study(
+                study_name=study_name,
+                storage=_optuna_storage,
+                sampler=TPESampler(),
+            )
     else:
         # In-memory study for single process
         return optuna.create_study(
@@ -1054,10 +1077,17 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
     n_workers = int(os.environ.get('SLURM_GPUS_ON_NODE', 1)) if is_parallel_mode() else 1
     trials_per_worker = max(1, n_trials // n_workers)
     
+    logger.info(f"Starting iTransformer HP search: {trials_per_worker} trials (worker {get_worker_id()}/{n_workers})")
+    
+    def log_trial(study, trial):
+        logger.info(f"[iTransformer HP] Trial {trial.number} complete: loss={trial.value:.4f}, "
+                   f"lr={trial.params['learning_rate']:.2e}, bs={trial.params['batch_size']}")
+    
     study.optimize(
         lambda trial: itrans_hp_objective(trial, train_loader, val_loader, device, smoke_test),
         n_trials=trials_per_worker,
-        show_progress_bar=is_worker_zero(),  # Only worker 0 shows progress
+        show_progress_bar=is_worker_zero(),
+        callbacks=[log_trial],
     )
     
     # Wait for all workers to finish their trials
@@ -1189,10 +1219,15 @@ def run_diffusion_hp_tuning(
     n_workers = int(os.environ.get('SLURM_GPUS_ON_NODE', 1)) if is_parallel_mode() else 1
     trials_per_worker = max(1, n_trials // n_workers)
     
+    def log_trial(study, trial):
+        logger.info(f"[Diffusion HP] Trial {trial.number} complete: loss={trial.value:.4f}, "
+                   f"lr={trial.params['learning_rate']:.2e}, bs={trial.params['batch_size']}")
+    
     study.optimize(
         lambda trial: diffusion_hp_objective(trial, train_loader, val_loader, itrans_guidance, device, smoke_test),
         n_trials=trials_per_worker,
         show_progress_bar=is_worker_zero(),
+        callbacks=[log_trial],
     )
     
     # Wait for all workers to finish
@@ -2060,6 +2095,10 @@ def run_pipeline(
                 logger.info(f"Running HP search for {subset_id}...")
                 optuna.logging.set_verbosity(optuna.logging.WARNING)
                 
+                def log_finetune_trial(study, trial):
+                    logger.info(f"[{subset_id} HP] Trial {trial.number}: loss={trial.value:.4f}, "
+                               f"lr={trial.params['learning_rate']:.2e}, bs={trial.params['batch_size']}")
+                
                 if is_parallel_mode():
                     # Parallel workers: all workers run trials concurrently
                     study = create_shared_study(f'finetune_{subset_id}')
@@ -2072,6 +2111,7 @@ def run_pipeline(
                         ),
                         n_trials=trials_per_worker,
                         show_progress_bar=is_worker_zero(),
+                        callbacks=[log_finetune_trial],
                     )
                     parallel_worker_barrier()  # All workers sync
                     tuned_params = study.best_params
@@ -2092,6 +2132,7 @@ def run_pipeline(
                         ),
                         n_trials=n_finetune_trials,
                         show_progress_bar=True,
+                        callbacks=[log_finetune_trial],
                     )
                     tuned_params = study.best_params
                     manifest.subsets[subset_id]['tuned_params'] = tuned_params

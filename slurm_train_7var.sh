@@ -161,24 +161,29 @@ if [ "$NUM_GPUS" -gt 1 ]; then
     export OPTUNA_STORAGE="sqlite:///$STORAGE_ROOT/checkpoints/optuna_study.db"
     
     # Launch parallel workers, each with its own GPU
-    for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
-        echo "Starting worker on GPU $gpu_id..."
-        
-        # Only worker 0 logs to wandb
-        WANDB_FLAG=""
-        if [ "$gpu_id" -eq 0 ]; then
-            WANDB_FLAG="--wandb"
-        fi
-        
+    # Worker 0 starts first and creates Optuna studies
+    echo "Starting worker 0 (main) on GPU 0..."
+    CUDA_VISIBLE_DEVICES=0 python -m models.diffusion_tsf.train_7var_pipeline \
+        --checkpoint-dir "$STORAGE_ROOT/checkpoints" \
+        --results-dir "$STORAGE_ROOT/results" \
+        --parallel-worker 0 \
+        --wandb \
+        $EXTRA_ARGS &
+    
+    # Give worker 0 time to create studies
+    sleep 10
+    
+    # Start other workers
+    for gpu_id in $(seq 1 $((NUM_GPUS - 1))); do
+        echo "Starting worker $gpu_id on GPU $gpu_id..."
         CUDA_VISIBLE_DEVICES=$gpu_id python -m models.diffusion_tsf.train_7var_pipeline \
             --checkpoint-dir "$STORAGE_ROOT/checkpoints" \
             --results-dir "$STORAGE_ROOT/results" \
             --parallel-worker $gpu_id \
-            $WANDB_FLAG \
             $EXTRA_ARGS &
         
-        # Small delay to avoid race conditions on startup
-        sleep 2
+        # Stagger worker starts
+        sleep 3
     done
     
     # Wait for all workers to finish
