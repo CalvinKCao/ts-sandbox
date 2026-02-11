@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion-tsf
-#SBATCH --account=def-YOURPI        # CHANGE THIS to your allocation (e.g., def-smithj)
+#SBATCH --account=def-boyuwang      # Your allocation
 #SBATCH --time=24:00:00             # Max 7 days (168:00:00) on most clusters
 #SBATCH --nodes=1                   # Single node for DDP
 #SBATCH --gpus-per-node=4           # Request 4 GPUs (adjust: 1-4 on Narval A100, 1-4 on Fir H100)
@@ -62,7 +62,30 @@ module load cudnn/8.9
 
 # Project paths - use PROJECT for persistent storage
 export PROJECT_ROOT="$HOME/ts-sandbox"
+
+# Auto-detect PROJECT if not set (common on some clusters)
+if [ -z "$PROJECT" ]; then
+    echo "PROJECT not set, auto-detecting..."
+    # Try to find from ~/projects symlinks
+    if [ -d "$HOME/projects" ]; then
+        FIRST_PROJECT=$(ls -d $HOME/projects/def-* 2>/dev/null | head -1)
+        if [ -n "$FIRST_PROJECT" ]; then
+            export PROJECT=$(readlink -f "$FIRST_PROJECT")
+            echo "Auto-detected PROJECT: $PROJECT"
+        fi
+    fi
+fi
+
+# Final check
+if [ -z "$PROJECT" ]; then
+    echo "ERROR: Could not determine PROJECT path!"
+    echo "Please set it manually in the script or run:"
+    echo "  export PROJECT=/project/def-yourpi"
+    exit 1
+fi
+
 export STORAGE_ROOT="$PROJECT/diffusion-tsf"
+echo "Using STORAGE_ROOT: $STORAGE_ROOT"
 
 # Create persistent storage directories
 mkdir -p "$STORAGE_ROOT/checkpoints"
