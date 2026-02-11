@@ -191,12 +191,104 @@ def barrier():
         dist.barrier()
 
 
-# Logging - only main process logs
+# ============================================================================
+# Parallel Optuna Workers (Multi-GPU HP Tuning)
+# ============================================================================
+
+_parallel_worker_id = None  # None = single process, 0-N = parallel worker ID
+_optuna_storage = None  # Shared storage path for parallel workers
+
+
+def setup_parallel_worker(worker_id: int, storage_path: str = None):
+    """Configure this process as a parallel Optuna worker."""
+    global _parallel_worker_id, _optuna_storage
+    _parallel_worker_id = worker_id
+    
+    # Use env var or provided path for shared storage
+    _optuna_storage = storage_path or os.environ.get('OPTUNA_STORAGE')
+    if not _optuna_storage:
+        # Default to SQLite in checkpoint dir
+        _optuna_storage = f"sqlite:///{os.path.join(script_dir, 'checkpoints_7var', 'optuna_shared.db')}"
+    
+    logger = get_logger()
+    logger.info(f"Parallel worker {worker_id} initialized with storage: {_optuna_storage}")
+
+
+def is_parallel_mode() -> bool:
+    """Check if running in parallel worker mode."""
+    return _parallel_worker_id is not None
+
+
+def get_worker_id() -> int:
+    """Get worker ID (0 for single process or main worker)."""
+    return _parallel_worker_id if _parallel_worker_id is not None else 0
+
+
+def is_worker_zero() -> bool:
+    """Returns True if this is worker 0 (or single process mode)."""
+    return _parallel_worker_id is None or _parallel_worker_id == 0
+
+
+def create_shared_study(study_name: str, direction: str = 'minimize') -> optuna.Study:
+    """Create an Optuna study that can be shared across parallel workers.
+    
+    In parallel mode, uses shared SQLite storage so multiple workers
+    can run trials concurrently. Optuna handles the coordination.
+    """
+    if is_parallel_mode() and _optuna_storage:
+        # Shared storage for parallel workers
+        return optuna.create_study(
+            study_name=study_name,
+            storage=_optuna_storage,
+            direction=direction,
+            load_if_exists=True,  # Workers join existing study
+            sampler=TPESampler(),  # No fixed seed - let workers explore
+        )
+    else:
+        # In-memory study for single process
+        return optuna.create_study(
+            direction=direction,
+            sampler=TPESampler(seed=42),
+        )
+
+
+def parallel_worker_barrier():
+    """Simple file-based barrier for parallel workers (not DDP)."""
+    if not is_parallel_mode():
+        return
+    
+    # Use filesystem for coordination
+    barrier_dir = os.path.join(script_dir, 'checkpoints_7var', '.barriers')
+    os.makedirs(barrier_dir, exist_ok=True)
+    
+    barrier_file = os.path.join(barrier_dir, f'worker_{_parallel_worker_id}.ready')
+    
+    # Signal this worker is ready
+    Path(barrier_file).touch()
+    
+    # Wait for all workers (assume 4 workers max, adjust if needed)
+    n_workers = int(os.environ.get('SLURM_GPUS_ON_NODE', 4))
+    while True:
+        ready = sum(1 for i in range(n_workers) 
+                   if os.path.exists(os.path.join(barrier_dir, f'worker_{i}.ready')))
+        if ready >= n_workers:
+            break
+        time.sleep(0.5)
+    
+    # Clean up
+    if is_worker_zero():
+        time.sleep(0.1)  # Let others finish reading
+        for f in Path(barrier_dir).glob('worker_*.ready'):
+            f.unlink()
+
+
+# Logging - only main process/worker 0 logs fully
 def setup_logging():
-    """Setup logging - only rank 0 logs to file/stdout."""
-    level = logging.INFO if is_main_process() else logging.WARNING
+    """Setup logging - only rank 0 / worker 0 logs to file/stdout."""
+    is_main = is_main_process() and is_worker_zero()
+    level = logging.INFO if is_main else logging.WARNING
     handlers = []
-    if is_main_process():
+    if is_main:
         handlers.append(logging.StreamHandler(sys.stdout))
         handlers.append(logging.FileHandler(os.path.join(script_dir, 'train_7var.log')))
     
@@ -954,15 +1046,23 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
     train_loader = DataLoader(train_subset, batch_size=64, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_subset, batch_size=64, shuffle=False, num_workers=0)
     
-    # Run Optuna
+    # Run Optuna (shared study in parallel mode)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
+    study = create_shared_study('itrans_hp_tuning')
+    
+    # In parallel mode, each worker runs n_trials / n_workers
+    n_workers = int(os.environ.get('SLURM_GPUS_ON_NODE', 1)) if is_parallel_mode() else 1
+    trials_per_worker = max(1, n_trials // n_workers)
     
     study.optimize(
         lambda trial: itrans_hp_objective(trial, train_loader, val_loader, device, smoke_test),
-        n_trials=n_trials,
-        show_progress_bar=True,
+        n_trials=trials_per_worker,
+        show_progress_bar=is_worker_zero(),  # Only worker 0 shows progress
     )
+    
+    # Wait for all workers to finish their trials
+    if is_parallel_mode():
+        parallel_worker_barrier()
     
     best_params = study.best_params
     logger.info(f"Best iTransformer params: lr={best_params['learning_rate']:.2e}, "
@@ -1081,15 +1181,23 @@ def run_diffusion_hp_tuning(
     train_loader = DataLoader(train_subset, batch_size=32, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_subset, batch_size=32, shuffle=False, num_workers=0)
     
-    # Run Optuna
+    # Run Optuna (shared study in parallel mode)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
+    study = create_shared_study('diffusion_hp_tuning')
+    
+    # In parallel mode, each worker runs n_trials / n_workers
+    n_workers = int(os.environ.get('SLURM_GPUS_ON_NODE', 1)) if is_parallel_mode() else 1
+    trials_per_worker = max(1, n_trials // n_workers)
     
     study.optimize(
         lambda trial: diffusion_hp_objective(trial, train_loader, val_loader, itrans_guidance, device, smoke_test),
-        n_trials=n_trials,
-        show_progress_bar=True,
+        n_trials=trials_per_worker,
+        show_progress_bar=is_worker_zero(),
     )
+    
+    # Wait for all workers to finish
+    if is_parallel_mode():
+        parallel_worker_barrier()
     
     best_params = study.best_params
     logger.info(f"Best Diffusion params: lr={best_params['learning_rate']:.2e}, bs={best_params['batch_size']}")
@@ -1815,55 +1923,82 @@ def run_pipeline(
         finetune_patience = FINETUNE_PATIENCE
     
     # =========== PHASE 1A: iTransformer HP Tuning ===========
-    # HP tuning runs on main process only (Optuna not DDP-aware), then broadcasts
+    # In parallel mode, all workers run HP trials concurrently
+    # In DDP mode, only main process runs HP tuning
     if not manifest.itrans_hp_done:
-        if is_main_process():
+        should_run_hp = is_parallel_mode() or is_main_process()
+        if should_run_hp:
             manifest.itrans_best_params = run_itransformer_hp_tuning(n_itrans_trials, smoke_test)
-            manifest.itrans_hp_done = True
-            manifest.save()
-            # Log HP results to wandb
-            log_wandb_hp_search('itransformer', manifest.itrans_best_params, 
-                               manifest.itrans_best_params.get('best_val_loss', 0), n_itrans_trials)
-        barrier()  # Wait for main process to finish HP tuning
-        if not is_main_process():
-            manifest = TrainingManifest.load()  # Reload manifest with HP results
+            
+            if is_worker_zero() or (not is_parallel_mode() and is_main_process()):
+                manifest.itrans_hp_done = True
+                manifest.save()
+                # Log HP results to wandb
+                log_wandb_hp_search('itransformer', manifest.itrans_best_params, 
+                                   manifest.itrans_best_params.get('best_val_loss', 0), n_itrans_trials)
+        
+        barrier()  # DDP barrier
+        if is_parallel_mode():
+            parallel_worker_barrier()
+            manifest = TrainingManifest.load()  # Reload with results
+        elif not is_main_process():
+            manifest = TrainingManifest.load()
     else:
         logger.info(f"Using cached iTransformer params: {manifest.itrans_best_params}")
     
     # =========== PHASE 1C-1: Full iTransformer Pretraining ===========
+    # In parallel mode, only worker 0 trains (others wait for checkpoint to exist)
     itrans_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_itransformer.pt')
     if not manifest.itrans_checkpoint or not os.path.exists(itrans_ckpt):
-        itrans_ckpt = pretrain_itransformer(
-            manifest.itrans_best_params,
-            n_samples=pretrain_samples,
-            epochs=pretrain_epochs,
-            patience=pretrain_patience,
-            checkpoint_dir=CHECKPOINT_DIR,
-            smoke_test=smoke_test,
-        )
-        manifest.itrans_checkpoint = itrans_ckpt
-        if is_main_process():
-            manifest.save()
+        if is_parallel_mode() and not is_worker_zero():
+            logger.info(f"Worker {get_worker_id()}: Waiting for iTransformer training (worker 0)...")
+            while not os.path.exists(itrans_ckpt):
+                time.sleep(5)
+            logger.info(f"Worker {get_worker_id()}: iTransformer checkpoint found, continuing")
+        else:
+            itrans_ckpt = pretrain_itransformer(
+                manifest.itrans_best_params,
+                n_samples=pretrain_samples,
+                epochs=pretrain_epochs,
+                patience=pretrain_patience,
+                checkpoint_dir=CHECKPOINT_DIR,
+                smoke_test=smoke_test,
+            )
+            manifest.itrans_checkpoint = itrans_ckpt
+            if is_main_process() or is_worker_zero():
+                manifest.save()
     else:
         logger.info(f"Using existing iTransformer checkpoint: {itrans_ckpt}")
     
     # =========== PHASE 1B: Diffusion HP Tuning ===========
-    # HP tuning on main process only
+    # In parallel mode, all workers run HP trials concurrently
     if not manifest.diffusion_hp_done:
-        if is_main_process():
+        should_run_hp = is_parallel_mode() or is_main_process()
+        if should_run_hp:
             manifest.diffusion_best_params = run_diffusion_hp_tuning(itrans_ckpt, n_diff_trials, smoke_test)
-            manifest.diffusion_hp_done = True
-            manifest.save()
-            # Log HP results to wandb
-            log_wandb_hp_search('diffusion', manifest.diffusion_best_params,
-                               manifest.diffusion_best_params.get('best_val_loss', 0), n_diff_trials)
-        barrier()
-        if not is_main_process():
+            
+            if is_worker_zero() or (not is_parallel_mode() and is_main_process()):
+                manifest.diffusion_hp_done = True
+                manifest.save()
+                # Log HP results to wandb
+                log_wandb_hp_search('diffusion', manifest.diffusion_best_params,
+                                   manifest.diffusion_best_params.get('best_val_loss', 0), n_diff_trials)
+        
+        barrier()  # DDP barrier
+        if is_parallel_mode():
+            parallel_worker_barrier()
+            manifest = TrainingManifest.load()
+        elif not is_main_process():
             manifest = TrainingManifest.load()
     else:
         logger.info(f"Using cached Diffusion params: {manifest.diffusion_best_params}")
     
     # =========== PHASE 1C-2: Full Diffusion Pretraining ===========
+    # In parallel mode, only worker 0 does full pretraining (other workers exit after HP tuning)
+    if is_parallel_mode() and not is_worker_zero():
+        logger.info(f"Worker {get_worker_id()}: HP tuning complete, exiting (worker 0 will do full training)")
+        return
+    
     diff_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_diffusion.pt')
     if not manifest.pretrain_complete or not os.path.exists(diff_ckpt):
         diff_ckpt = pretrain_diffusion(
@@ -1919,13 +2054,38 @@ def run_pipeline(
             manifest.save()
         
         try:
-            # HP Tuning for this dataset (main process only, then broadcast)
+            # HP Tuning for this dataset
             tuned_params = manifest.subsets[subset_id].get('tuned_params')
             if not tuned_params:
-                if is_main_process():
-                    logger.info(f"Running HP search for {subset_id}...")
-                    optuna.logging.set_verbosity(optuna.logging.WARNING)
-                    study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
+                logger.info(f"Running HP search for {subset_id}...")
+                optuna.logging.set_verbosity(optuna.logging.WARNING)
+                
+                if is_parallel_mode():
+                    # Parallel workers: all workers run trials concurrently
+                    study = create_shared_study(f'finetune_{subset_id}')
+                    n_workers = int(os.environ.get('SLURM_GPUS_ON_NODE', 1))
+                    trials_per_worker = max(1, n_finetune_trials // n_workers)
+                    
+                    study.optimize(
+                        lambda trial: finetune_hp_objective(
+                            trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test
+                        ),
+                        n_trials=trials_per_worker,
+                        show_progress_bar=is_worker_zero(),
+                    )
+                    parallel_worker_barrier()  # All workers sync
+                    tuned_params = study.best_params
+                    
+                    # Only worker 0 saves to manifest
+                    if is_worker_zero():
+                        manifest.subsets[subset_id]['tuned_params'] = tuned_params
+                        manifest.save()
+                        logger.info(f"Best params for {subset_id}: {tuned_params}")
+                    parallel_worker_barrier()  # Sync again before continuing
+                    
+                elif is_main_process():
+                    # DDP mode: only rank 0 does HP search
+                    study = create_shared_study(f'finetune_{subset_id}')
                     study.optimize(
                         lambda trial: finetune_hp_objective(
                             trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test
@@ -1937,8 +2097,9 @@ def run_pipeline(
                     manifest.subsets[subset_id]['tuned_params'] = tuned_params
                     manifest.save()
                     logger.info(f"Best params for {subset_id}: {tuned_params}")
-                barrier()  # Wait for HP tuning
-                if not is_main_process():
+                    
+                barrier()  # DDP barrier
+                if not is_main_process() and not is_parallel_mode():
                     manifest = TrainingManifest.load()
                     tuned_params = manifest.subsets[subset_id].get('tuned_params')
             
@@ -2018,6 +2179,7 @@ def main():
     parser.add_argument('--wandb-project', type=str, default='diffusion-tsf-7var', help='Wandb project name')
     parser.add_argument('--checkpoint-dir', type=str, default=None, help='Override checkpoint directory (for cluster storage)')
     parser.add_argument('--results-dir', type=str, default=None, help='Override results directory')
+    parser.add_argument('--parallel-worker', type=int, default=None, help='Parallel worker ID for multi-GPU Optuna (0-N)')
     
     args = parser.parse_args()
     
@@ -2034,6 +2196,10 @@ def main():
         if not setup_ddp():
             print("ERROR: --ddp flag set but DDP init failed. Use: torchrun --nproc_per_node=N -m ...")
             sys.exit(1)
+    
+    # Setup parallel worker mode (multi-GPU Optuna without DDP)
+    if args.parallel_worker is not None:
+        setup_parallel_worker(args.parallel_worker)
     
     # Initialize logger (respects DDP rank)
     logger = setup_logging()
