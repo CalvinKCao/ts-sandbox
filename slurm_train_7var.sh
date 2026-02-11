@@ -62,7 +62,27 @@ module load cudnn/8.9
 
 # Project paths - use PROJECT for persistent storage
 export PROJECT_ROOT="$HOME/ts-sandbox"
+
+# Auto-detect PROJECT if not set (common issue on Narval batch jobs)
+if [ -z "$PROJECT" ]; then
+    echo "PROJECT not set, auto-detecting from ~/projects..."
+    if [ -d "$HOME/projects" ]; then
+        FIRST_PROJECT=$(ls -d $HOME/projects/def-* 2>/dev/null | head -1)
+        if [ -n "$FIRST_PROJECT" ]; then
+            export PROJECT=$(readlink -f "$FIRST_PROJECT")
+            echo "Found: $PROJECT"
+        fi
+    fi
+fi
+
+if [ -z "$PROJECT" ]; then
+    echo "ERROR: PROJECT not found! Set manually:"
+    echo "  export PROJECT=/project/def-boyuwang"
+    exit 1
+fi
+
 export STORAGE_ROOT="$PROJECT/diffusion-tsf"
+echo "STORAGE_ROOT: $STORAGE_ROOT"
 
 # Create persistent storage directories
 mkdir -p "$STORAGE_ROOT/checkpoints"
