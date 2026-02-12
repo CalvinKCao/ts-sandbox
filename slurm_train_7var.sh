@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion-tsf
 #SBATCH --account=def-boyuwang         # CHANGE THIS to your allocation (e.g., def-smithj)
-#SBATCH --time=24:00:00             # Max 7 days (168:00:00) on most clusters
+#SBATCH --time=96:00:00             # Max 7 days (168:00:00) on most clusters
 #SBATCH --nodes=1                   # Single node
-#SBATCH --gpus-per-node=a100:4      # 4 GPUs for parallel HP trials
-#SBATCH --cpus-per-task=48          # CPU cores (12 per GPU)
-#SBATCH --mem=192G                  # Memory (48G per GPU)
+#SBATCH --gpus-per-node=a100:1      # 1 GPU (reliable, HP tuning is fast enough)
+#SBATCH --cpus-per-task=12          # CPU cores
+#SBATCH --mem=48G                   # Memory
 #SBATCH --output=%x-%j.out          # Output: job-name-jobid.out
 #SBATCH --error=%x-%j.err           # Error: job-name-jobid.err
 #SBATCH --mail-type=BEGIN,END,FAIL  # Email notifications
@@ -119,8 +119,7 @@ export WANDB_DIR="$STORAGE_ROOT/wandb"
 export WANDB_CACHE_DIR="$STORAGE_ROOT/wandb/.cache"
 
 # CUDA settings
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-export NCCL_DEBUG=WARN
+export CUDA_VISIBLE_DEVICES=0
 
 # -----------------------------------------------------------------------------
 # Parse Arguments (passed after script name)
@@ -151,55 +150,12 @@ echo ""
 # Wandb offline mode (compute nodes have no internet)
 export WANDB_MODE=offline
 
-NUM_GPUS=${SLURM_GPUS_ON_NODE:-1}
-echo "Available GPUs: $NUM_GPUS"
-
-if [ "$NUM_GPUS" -gt 1 ]; then
-    echo "Running $NUM_GPUS parallel Optuna workers (one per GPU)..."
-    
-    # Create a shared Optuna storage for coordination
-    export OPTUNA_STORAGE="sqlite:///$STORAGE_ROOT/checkpoints/optuna_study.db"
-    
-    # Launch parallel workers, each with its own GPU
-    # Worker 0 starts first and creates Optuna studies
-    echo "Starting worker 0 (main) on GPU 0..."
-    CUDA_VISIBLE_DEVICES=0 python -m models.diffusion_tsf.train_7var_pipeline \
-        --checkpoint-dir "$STORAGE_ROOT/checkpoints" \
-        --results-dir "$STORAGE_ROOT/results" \
-        --parallel-worker 0 \
-        --wandb \
-        $EXTRA_ARGS &
-    
-    # Give worker 0 time to create studies
-    sleep 10
-    
-    # Start other workers
-    for gpu_id in $(seq 1 $((NUM_GPUS - 1))); do
-        echo "Starting worker $gpu_id on GPU $gpu_id..."
-        CUDA_VISIBLE_DEVICES=$gpu_id python -m models.diffusion_tsf.train_7var_pipeline \
-            --checkpoint-dir "$STORAGE_ROOT/checkpoints" \
-            --results-dir "$STORAGE_ROOT/results" \
-            --parallel-worker $gpu_id \
-            $EXTRA_ARGS &
-        
-        # Stagger worker starts
-        sleep 3
-    done
-    
-    # Wait for all workers to finish
-    wait
-    echo "All workers completed."
-else
-    echo "Running on single GPU..."
-    python -m models.diffusion_tsf.train_7var_pipeline \
-        --wandb \
-        --checkpoint-dir "$STORAGE_ROOT/checkpoints" \
-        --results-dir "$STORAGE_ROOT/results" \
-        $EXTRA_ARGS
-fi
-
-# To sync wandb logs later from login node:
-# wandb sync $STORAGE_ROOT/wandb/offline-*
+echo "Running on single GPU..."
+python -m models.diffusion_tsf.train_7var_pipeline \
+    --wandb \
+    --checkpoint-dir "$STORAGE_ROOT/checkpoints" \
+    --results-dir "$STORAGE_ROOT/results" \
+    $EXTRA_ARGS
 
 # -----------------------------------------------------------------------------
 # Completion

@@ -1069,30 +1069,23 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
     train_loader = DataLoader(train_subset, batch_size=64, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_subset, batch_size=64, shuffle=False, num_workers=0)
     
-    # Run Optuna (shared study in parallel mode)
+    # Run Optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = create_shared_study('itrans_hp_tuning')
+    study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
     
-    # In parallel mode, each worker runs n_trials / n_workers
-    n_workers = int(os.environ.get('SLURM_GPUS_ON_NODE', 1)) if is_parallel_mode() else 1
-    trials_per_worker = max(1, n_trials // n_workers)
-    
-    logger.info(f"Starting iTransformer HP search: {trials_per_worker} trials (worker {get_worker_id()}/{n_workers})")
+    logger.info(f"Starting iTransformer HP search: {n_trials} trials")
     
     def log_trial(study, trial):
-        logger.info(f"[iTransformer HP] Trial {trial.number} complete: loss={trial.value:.4f}, "
-                   f"lr={trial.params['learning_rate']:.2e}, bs={trial.params['batch_size']}")
+        logger.info(f"[iTransformer HP] Trial {trial.number}/{n_trials}: "
+                   f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+                   f"bs={trial.params['batch_size']}, dropout={trial.params['dropout']:.3f}")
     
     study.optimize(
         lambda trial: itrans_hp_objective(trial, train_loader, val_loader, device, smoke_test),
-        n_trials=trials_per_worker,
-        show_progress_bar=is_worker_zero(),
+        n_trials=n_trials,
+        show_progress_bar=True,
         callbacks=[log_trial],
     )
-    
-    # Wait for all workers to finish their trials
-    if is_parallel_mode():
-        parallel_worker_barrier()
     
     best_params = study.best_params
     logger.info(f"Best iTransformer params: lr={best_params['learning_rate']:.2e}, "
@@ -1211,28 +1204,23 @@ def run_diffusion_hp_tuning(
     train_loader = DataLoader(train_subset, batch_size=32, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_subset, batch_size=32, shuffle=False, num_workers=0)
     
-    # Run Optuna (shared study in parallel mode)
+    # Run Optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = create_shared_study('diffusion_hp_tuning')
+    study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
     
-    # In parallel mode, each worker runs n_trials / n_workers
-    n_workers = int(os.environ.get('SLURM_GPUS_ON_NODE', 1)) if is_parallel_mode() else 1
-    trials_per_worker = max(1, n_trials // n_workers)
+    logger.info(f"Starting Diffusion HP search: {n_trials} trials")
     
     def log_trial(study, trial):
-        logger.info(f"[Diffusion HP] Trial {trial.number} complete: loss={trial.value:.4f}, "
-                   f"lr={trial.params['learning_rate']:.2e}, bs={trial.params['batch_size']}")
+        logger.info(f"[Diffusion HP] Trial {trial.number}/{n_trials}: "
+                   f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+                   f"bs={trial.params['batch_size']}")
     
     study.optimize(
         lambda trial: diffusion_hp_objective(trial, train_loader, val_loader, itrans_guidance, device, smoke_test),
-        n_trials=trials_per_worker,
-        show_progress_bar=is_worker_zero(),
+        n_trials=n_trials,
+        show_progress_bar=True,
         callbacks=[log_trial],
     )
-    
-    # Wait for all workers to finish
-    if is_parallel_mode():
-        parallel_worker_barrier()
     
     best_params = study.best_params
     logger.info(f"Best Diffusion params: lr={best_params['learning_rate']:.2e}, bs={best_params['batch_size']}")
@@ -1901,31 +1889,23 @@ def run_pipeline(
     wandb_project: str = "diffusion-tsf-7var",
 ):
     """Run the full training pipeline."""
-    # Seed with rank offset for DDP to ensure different data sampling
-    effective_seed = seed + get_rank()
-    random.seed(effective_seed)
-    np.random.seed(effective_seed)
-    torch.manual_seed(effective_seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     
-    # Only main process handles data prep
-    if is_main_process():
-        recombine_traffic_data()
-    barrier()  # Wait for data prep
+    recombine_traffic_data()
     
-    # Load or create manifest (only main process writes)
+    # Load or create manifest
     if resume and os.path.exists(MANIFEST_PATH):
         manifest = TrainingManifest.load()
         logger.info(f"Resuming from manifest (created: {manifest.created_at})")
     else:
         manifest = TrainingManifest(seed=seed, created_at=datetime.now().isoformat())
     
-    if is_main_process():
-        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    barrier()
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     
     device = get_device()
-    gpu_info = f"GPU {get_rank()}/{get_world_size()}" if _ddp_enabled else "single GPU"
-    logger.info(f"Using device: {device} ({gpu_info})")
+    logger.info(f"Using device: {device}")
     
     # Initialize wandb
     if use_wandb:
@@ -1958,82 +1938,42 @@ def run_pipeline(
         finetune_patience = FINETUNE_PATIENCE
     
     # =========== PHASE 1A: iTransformer HP Tuning ===========
-    # In parallel mode, all workers run HP trials concurrently
-    # In DDP mode, only main process runs HP tuning
     if not manifest.itrans_hp_done:
-        should_run_hp = is_parallel_mode() or is_main_process()
-        if should_run_hp:
-            manifest.itrans_best_params = run_itransformer_hp_tuning(n_itrans_trials, smoke_test)
-            
-            if is_worker_zero() or (not is_parallel_mode() and is_main_process()):
-                manifest.itrans_hp_done = True
-                manifest.save()
-                # Log HP results to wandb
-                log_wandb_hp_search('itransformer', manifest.itrans_best_params, 
-                                   manifest.itrans_best_params.get('best_val_loss', 0), n_itrans_trials)
-        
-        barrier()  # DDP barrier
-        if is_parallel_mode():
-            parallel_worker_barrier()
-            manifest = TrainingManifest.load()  # Reload with results
-        elif not is_main_process():
-            manifest = TrainingManifest.load()
+        manifest.itrans_best_params = run_itransformer_hp_tuning(n_itrans_trials, smoke_test)
+        manifest.itrans_hp_done = True
+        manifest.save()
+        log_wandb_hp_search('itransformer', manifest.itrans_best_params, 
+                           manifest.itrans_best_params.get('best_val_loss', 0), n_itrans_trials)
     else:
         logger.info(f"Using cached iTransformer params: {manifest.itrans_best_params}")
     
     # =========== PHASE 1C-1: Full iTransformer Pretraining ===========
-    # In parallel mode, only worker 0 trains (others wait for checkpoint to exist)
     itrans_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_itransformer.pt')
     if not manifest.itrans_checkpoint or not os.path.exists(itrans_ckpt):
-        if is_parallel_mode() and not is_worker_zero():
-            logger.info(f"Worker {get_worker_id()}: Waiting for iTransformer training (worker 0)...")
-            while not os.path.exists(itrans_ckpt):
-                time.sleep(5)
-            logger.info(f"Worker {get_worker_id()}: iTransformer checkpoint found, continuing")
-        else:
-            itrans_ckpt = pretrain_itransformer(
-                manifest.itrans_best_params,
-                n_samples=pretrain_samples,
-                epochs=pretrain_epochs,
-                patience=pretrain_patience,
-                checkpoint_dir=CHECKPOINT_DIR,
-                smoke_test=smoke_test,
-            )
-            manifest.itrans_checkpoint = itrans_ckpt
-            if is_main_process() or is_worker_zero():
-                manifest.save()
+        itrans_ckpt = pretrain_itransformer(
+            manifest.itrans_best_params,
+            n_samples=pretrain_samples,
+            epochs=pretrain_epochs,
+            patience=pretrain_patience,
+            checkpoint_dir=CHECKPOINT_DIR,
+            smoke_test=smoke_test,
+        )
+        manifest.itrans_checkpoint = itrans_ckpt
+        manifest.save()
     else:
         logger.info(f"Using existing iTransformer checkpoint: {itrans_ckpt}")
     
     # =========== PHASE 1B: Diffusion HP Tuning ===========
-    # In parallel mode, all workers run HP trials concurrently
     if not manifest.diffusion_hp_done:
-        should_run_hp = is_parallel_mode() or is_main_process()
-        if should_run_hp:
-            manifest.diffusion_best_params = run_diffusion_hp_tuning(itrans_ckpt, n_diff_trials, smoke_test)
-            
-            if is_worker_zero() or (not is_parallel_mode() and is_main_process()):
-                manifest.diffusion_hp_done = True
-                manifest.save()
-                # Log HP results to wandb
-                log_wandb_hp_search('diffusion', manifest.diffusion_best_params,
-                                   manifest.diffusion_best_params.get('best_val_loss', 0), n_diff_trials)
-        
-        barrier()  # DDP barrier
-        if is_parallel_mode():
-            parallel_worker_barrier()
-            manifest = TrainingManifest.load()
-        elif not is_main_process():
-            manifest = TrainingManifest.load()
+        manifest.diffusion_best_params = run_diffusion_hp_tuning(itrans_ckpt, n_diff_trials, smoke_test)
+        manifest.diffusion_hp_done = True
+        manifest.save()
+        log_wandb_hp_search('diffusion', manifest.diffusion_best_params,
+                           manifest.diffusion_best_params.get('best_val_loss', 0), n_diff_trials)
     else:
         logger.info(f"Using cached Diffusion params: {manifest.diffusion_best_params}")
     
     # =========== PHASE 1C-2: Full Diffusion Pretraining ===========
-    # In parallel mode, only worker 0 does full pretraining (other workers exit after HP tuning)
-    if is_parallel_mode() and not is_worker_zero():
-        logger.info(f"Worker {get_worker_id()}: HP tuning complete, exiting (worker 0 will do full training)")
-        return
-    
     diff_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_diffusion.pt')
     if not manifest.pretrain_complete or not os.path.exists(diff_ckpt):
         diff_ckpt = pretrain_diffusion(
@@ -2047,8 +1987,7 @@ def run_pipeline(
         )
         manifest.pretrain_checkpoint = diff_ckpt
         manifest.pretrain_complete = True
-        if is_main_process():
-            manifest.save()
+        manifest.save()
     else:
         logger.info(f"Using existing Diffusion checkpoint: {diff_ckpt}")
     
@@ -2064,9 +2003,7 @@ def run_pipeline(
                     'dataset': dataset_name,
                     'variate_indices': subset['variate_indices'],
                 }
-    if is_main_process():
-        manifest.save()
-    barrier()
+    manifest.save()
     
     if smoke_test:
         subset_list = subset_list[:1]  # Just 1 dataset for ultra-fast smoke test
@@ -2085,8 +2022,7 @@ def run_pipeline(
             continue
         
         manifest.subsets[subset_id]['status'] = 'in_progress'
-        if is_main_process():
-            manifest.save()
+        manifest.save()
         
         try:
             # HP Tuning for this dataset
@@ -2096,63 +2032,33 @@ def run_pipeline(
                 optuna.logging.set_verbosity(optuna.logging.WARNING)
                 
                 def log_finetune_trial(study, trial):
-                    logger.info(f"[{subset_id} HP] Trial {trial.number}: loss={trial.value:.4f}, "
-                               f"lr={trial.params['learning_rate']:.2e}, bs={trial.params['batch_size']}")
+                    logger.info(f"[{subset_id} HP] Trial {trial.number}/{n_finetune_trials}: "
+                               f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+                               f"bs={trial.params['batch_size']}")
                 
-                if is_parallel_mode():
-                    # Parallel workers: all workers run trials concurrently
-                    study = create_shared_study(f'finetune_{subset_id}')
-                    n_workers = int(os.environ.get('SLURM_GPUS_ON_NODE', 1))
-                    trials_per_worker = max(1, n_finetune_trials // n_workers)
-                    
-                    study.optimize(
-                        lambda trial: finetune_hp_objective(
-                            trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test
-                        ),
-                        n_trials=trials_per_worker,
-                        show_progress_bar=is_worker_zero(),
-                        callbacks=[log_finetune_trial],
-                    )
-                    parallel_worker_barrier()  # All workers sync
-                    tuned_params = study.best_params
-                    
-                    # Only worker 0 saves to manifest
-                    if is_worker_zero():
-                        manifest.subsets[subset_id]['tuned_params'] = tuned_params
-                        manifest.save()
-                        logger.info(f"Best params for {subset_id}: {tuned_params}")
-                    parallel_worker_barrier()  # Sync again before continuing
-                    
-                elif is_main_process():
-                    # DDP mode: only rank 0 does HP search
-                    study = create_shared_study(f'finetune_{subset_id}')
-                    study.optimize(
-                        lambda trial: finetune_hp_objective(
-                            trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test
-                        ),
-                        n_trials=n_finetune_trials,
-                        show_progress_bar=True,
-                        callbacks=[log_finetune_trial],
-                    )
-                    tuned_params = study.best_params
-                    manifest.subsets[subset_id]['tuned_params'] = tuned_params
-                    manifest.save()
-                    logger.info(f"Best params for {subset_id}: {tuned_params}")
-                    
-                barrier()  # DDP barrier
-                if not is_main_process() and not is_parallel_mode():
-                    manifest = TrainingManifest.load()
-                    tuned_params = manifest.subsets[subset_id].get('tuned_params')
+                study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
+                study.optimize(
+                    lambda trial: finetune_hp_objective(
+                        trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test
+                    ),
+                    n_trials=n_finetune_trials,
+                    show_progress_bar=True,
+                    callbacks=[log_finetune_trial],
+                )
+                tuned_params = study.best_params
+                manifest.subsets[subset_id]['tuned_params'] = tuned_params
+                manifest.save()
+                logger.info(f"Best params for {subset_id}: {tuned_params}")
             
-            # Full fine-tuning (all GPUs)
+            # Full fine-tuning
             ckpt_path, train_metrics = finetune_on_dataset(
                 subset_info, diff_ckpt, itrans_ckpt, tuned_params,
                 epochs=finetune_epochs, patience=finetune_patience,
                 checkpoint_dir=CHECKPOINT_DIR, smoke_test=smoke_test,
             )
             
-            # Evaluation (main process only - simpler and eval is fast)
-            if is_main_process():
+            # Evaluation
+            if True:
                 logger.info(f"Evaluating {subset_id}...")
                 itrans_model = create_itransformer().to(device)
                 ckpt = torch.load(itrans_ckpt, map_location=device, weights_only=False)
@@ -2182,7 +2088,6 @@ def run_pipeline(
                 log_wandb_model_checkpoint(ckpt_path, subset_id)
                 
                 manifest.mark_complete(subset_id, ckpt_path, {**train_metrics, 'eval': eval_results})
-            barrier()  # Sync after eval
             
         except KeyboardInterrupt:
             logger.info(f"\nInterrupted during {subset_id}. Progress saved.")
@@ -2193,8 +2098,7 @@ def run_pipeline(
             traceback.print_exc()
             manifest.subsets[subset_id]['status'] = 'error'
             manifest.subsets[subset_id]['error'] = str(e)
-            if is_main_process():
-                manifest.save()
+            manifest.save()
     
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETE")
