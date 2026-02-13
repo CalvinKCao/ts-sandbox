@@ -39,7 +39,7 @@
 #
 # =============================================================================
 
-set -e  # Exit on error
+# Don't use set -e: we capture exit codes manually to release GPU on failure
 
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
@@ -157,13 +157,25 @@ python -m models.diffusion_tsf.train_7var_pipeline \
     --results-dir "$STORAGE_ROOT/results" \
     $EXTRA_ARGS
 
+EXIT_CODE=$?
+
 # -----------------------------------------------------------------------------
-# Completion
+# Auto-detect crash: release GPU immediately if script failed
 # -----------------------------------------------------------------------------
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo "=========================================="
+    echo "JOB FAILED with exit code $EXIT_CODE at $(date)"
+    echo "Releasing GPU resources immediately."
+    echo "Check error log: diffusion-tsf-${SLURM_JOB_ID}.err"
+    echo "=========================================="
+    exit $EXIT_CODE
+fi
 
 echo ""
 echo "=========================================="
-echo "Job completed: $(date)"
+echo "Job completed successfully: $(date)"
 echo "Results in: $STORAGE_ROOT/results"
 echo "Checkpoints in: $STORAGE_ROOT/checkpoints"
 echo "=========================================="
