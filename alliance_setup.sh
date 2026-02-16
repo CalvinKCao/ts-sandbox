@@ -138,7 +138,7 @@ if [ ! -d "$VENV_PATH" ]; then
     
     echo "  ✓ Virtual environment created"
 else
-    echo "  ✓ Virtual environment already exists"
+    echo "  ✓ Virtual environment already exists in $VENV_PATH"
 fi
 
 # -----------------------------------------------------------------------------
