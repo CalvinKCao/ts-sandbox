@@ -27,12 +27,18 @@ source "$STORAGE_ROOT/venv/bin/activate"
 
 cd "$HOME/ts-sandbox"
 
-echo "Generating visualizations..."
+# Checkpoints are in the local repo (where training saved them)
+CKPT_DIR="$HOME/ts-sandbox/models/diffusion_tsf/checkpoints_7var"
+VIZ_DIR="$STORAGE_ROOT/results/viz"
+
+echo "Checkpoint dir: $CKPT_DIR"
+echo "Output dir: $VIZ_DIR"
+
 python -m models.diffusion_tsf.visualize_7var \
-    --checkpoint-dir "$STORAGE_ROOT/checkpoints" \
-    --output-dir "$STORAGE_ROOT/results/viz" \
+    --checkpoint-dir "$CKPT_DIR" \
+    --output-dir "$VIZ_DIR" \
     --num-samples 3 \
     "$@"
 
-echo "Done! Results in: $STORAGE_ROOT/results/viz/"
+echo "Done! Results in: $VIZ_DIR"
 
