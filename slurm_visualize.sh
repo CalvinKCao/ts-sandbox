@@ -27,8 +27,17 @@ source "$STORAGE_ROOT/venv/bin/activate"
 
 cd "$HOME/ts-sandbox"
 
-# Checkpoints are in the local repo (where training saved them)
-CKPT_DIR="$HOME/ts-sandbox/models/diffusion_tsf/checkpoints_7var"
+# Checkpoints: try PROJECT storage first, fall back to local repo
+if [ -f "$STORAGE_ROOT/checkpoints/training_manifest.json" ]; then
+    CKPT_DIR="$STORAGE_ROOT/checkpoints"
+elif [ -f "$HOME/ts-sandbox/models/diffusion_tsf/checkpoints_7var/training_manifest.json" ]; then
+    CKPT_DIR="$HOME/ts-sandbox/models/diffusion_tsf/checkpoints_7var"
+else
+    echo "ERROR: No training manifest found in either location!"
+    echo "  Tried: $STORAGE_ROOT/checkpoints/"
+    echo "  Tried: $HOME/ts-sandbox/models/diffusion_tsf/checkpoints_7var/"
+    exit 1
+fi
 VIZ_DIR="$STORAGE_ROOT/results/viz"
 
 echo "Checkpoint dir: $CKPT_DIR"
