@@ -112,6 +112,7 @@ def main():
     args = parser.parse_args()
     
     manifest_path = os.path.join(args.checkpoint_dir, 'training_manifest.json')
+    print(f"Looking for manifest at: {manifest_path}")
     
     if args.subset:
         visualize_subset(
@@ -123,10 +124,11 @@ def main():
     else:
         # Visualize all completed models
         if not os.path.exists(manifest_path):
-            print("No training manifest found. Train models first.")
+            print(f"No training manifest found at {manifest_path}")
+            print(f"Train models first, or pass --checkpoint-dir to the right location.")
             return
         
-        manifest = TrainingManifest.load(manifest_path)
+        manifest = TrainingManifest.load(path=manifest_path)
         completed = [k for k, v in manifest.subsets.items() if v.get('status') == 'complete']
         
         if not completed:
