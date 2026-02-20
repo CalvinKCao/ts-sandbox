@@ -54,6 +54,7 @@ Instead of stacking "guidance" and "lookback" as separate channels with misalign
 Located in `models/diffusion_tsf/augmentation.py`.
 - Generates synthetic multivariate time series by coupling independent random processes.
 - **Updated (2026-01-27):** Now uses "Organic" generators (Random Walks, Inverse FFT, Seasonal patterns, etc. from `realts.py`) as the base behavior for each variable, ensuring realistic textures.
+- **Updated (2026-02-20):** Periodic generators (`PWB`, `seasonal_periodicity`, and `TWDB` via `PWB`) now support **irregular period lengths** — 50% of samples have non-uniform period spacing at three severity levels (mild/medium/extreme). Controlled by `_choose_irregularity()` and `_irregular_phase()` in `realts.py`.
 - Uses "Impact Functions" to model causal effects between variables.
 - Used by `RealTS` dataset when `num_variables > 1`.
 - **Visualization:** Use `models/diffusion_tsf/visualize_synthetic.py` to generate sample plots of the synthetic data.
@@ -80,6 +81,7 @@ For datasets with >7 variates (electricity=321, traffic=862, weather=21, exchang
 - **CCM for small variates:** CCM adapter rejects datasets with ≤7 variates (use direct fine-tuning).
 
 ## Recent Changes
+- **2026-02-20:** 2D representation doubled to 128×1216 (was 64×608). >7-variate subsets capped at 5. Synthetic pretraining uses 100k samples (regenerated, not cached). Irregular periodicity added to synthetic generators.
 - **2026-02-04:** Added CCM adapter for >7-variate datasets, `train_universal_v2.py`, `run_all_datasets.sh`
 - Renamed `model.py` to `diffusion_model.py` to avoid conflict with `iTransformer/model`.
 - Implemented `train_universal.py` (legacy 4-phase approach).
@@ -114,15 +116,19 @@ Alternative to CCM approach: train separate models on non-overlapping 7-variate 
     ```
 
 ### How it Works
-1. **Pretrain once** on 1M synthetic 7-variate samples
+1. **Pretrain once** on 100k synthetic 7-variate samples (regenerated each run; no cache reuse)
 2. **Fine-tune** on each dataset:
    - 7-variate datasets (ETTh1/h2/m1/m2, illness): Direct fine-tune
-   - >7-variate datasets: Random shuffle → partition into non-overlapping 7-variate subsets
-     - electricity (321 vars) → 45 subsets: electricity-0, ..., electricity-44
-     - traffic (862 vars) → 123 subsets: traffic-0, ..., traffic-122
+   - >7-variate datasets: Random shuffle → partition into non-overlapping 7-variate subsets, **capped at 5 subsets per dataset**
+     - electricity (321 vars) → 5 subsets (of 45 possible)
+     - traffic (862 vars) → 5 subsets (of 123 possible)
      - weather (21 vars) → 3 subsets: weather-0, weather-1, weather-2
      - exchange_rate (8 vars) → 1 subset: exchange_rate-0
 3. **Evaluate** with single sample AND averaged (30 samples) metrics
+
+### 2D Representation Size
+- **Image dimensions:** 128 × 1216 (height × (lookback + forecast))
+- Lookback: 1024, Forecast: 192, Height: 128
 
 ### Key Features
 - **Resumable:** Progress saved in `training_manifest.json`. Ctrl+C safe.

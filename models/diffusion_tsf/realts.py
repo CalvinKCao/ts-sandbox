@@ -32,6 +32,97 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
+# Irregular Periodicity Helpers
+# ============================================================================
+
+def _choose_irregularity() -> Optional[str]:
+    """Randomly select an irregularity level for periodic generators.
+    
+    Returns None (regular) 50% of the time, otherwise one of three levels:
+    - 'mild': 1-2 periods randomly stretched (20%)
+    - 'medium': period length slowly oscillates over time (15%)
+    - 'extreme': every period has independently random length (15%)
+    """
+    r = np.random.random()
+    if r < 0.50:
+        return None
+    elif r < 0.70:
+        return 'mild'
+    elif r < 0.85:
+        return 'medium'
+    else:
+        return 'extreme'
+
+
+def _irregular_phase(length: int, base_periods: float, level: str) -> np.ndarray:
+    """Generate a phase trajectory with non-uniform period spacing.
+    
+    Instead of linearly increasing phase (constant frequency), the phase
+    advances at a varying rate so some "periods" are longer/shorter than
+    the nominal base period. The total number of cycles stays roughly the
+    same but individual cycle durations vary.
+    
+    Args:
+        length: Number of timesteps
+        base_periods: Approximate number of complete cycles over the window
+        level: 'mild', 'medium', or 'extreme'
+    
+    Returns:
+        Phase array of shape (length,) spanning ~[0, 2π * base_periods]
+    """
+    if level == 'mild':
+        # Mostly constant rate, but 1-2 regions are stretched/compressed
+        rate = np.ones(length, dtype=np.float64)
+        period_len = length / max(base_periods, 0.5)
+        n_bumps = np.random.randint(1, 3)
+        for _ in range(n_bumps):
+            center = np.random.randint(0, length)
+            width = int(period_len * np.random.uniform(0.5, 1.5))
+            half = max(width // 2, 1)
+            lo, hi = max(0, center - half), min(length, center + half)
+            # Slow down → stretches this period
+            rate[lo:hi] *= np.random.uniform(0.4, 0.7)
+        phase = np.cumsum(rate)
+        phase = phase / phase[-1] * (2 * np.pi * base_periods)
+
+    elif level == 'medium':
+        # Phase rate oscillates: periods cycle between shorter and longer
+        mod_freq = np.random.uniform(0.3, 1.5)
+        mod_amp = np.random.uniform(0.3, 0.6)
+        t_norm = np.arange(length, dtype=np.float64) / length
+        rate = 1.0 + mod_amp * np.sin(2 * np.pi * mod_freq * t_norm)
+        phase = np.cumsum(rate)
+        phase = phase / phase[-1] * (2 * np.pi * base_periods)
+
+    elif level == 'extreme':
+        # Each period has a random duration (uniform in [0.4x, 2.5x] base)
+        base_len = length / max(base_periods, 0.5)
+        segments = []
+        total = 0.0
+        while total < length + base_len:
+            plen = base_len * np.random.uniform(0.4, 2.5)
+            segments.append(plen)
+            total += plen
+
+        phase = np.zeros(length, dtype=np.float64)
+        pos = 0.0
+        for i, plen in enumerate(segments):
+            start = int(pos)
+            end = int(pos + plen)
+            if start >= length:
+                break
+            end = min(end, length)
+            n = end - start
+            if n > 0:
+                phase[start:end] = 2 * np.pi * i + np.linspace(0, 2 * np.pi, n, endpoint=False)
+            pos += plen
+    else:
+        phase = np.linspace(0, 2 * np.pi * base_periods, length)
+
+    return phase
+
+
+# ============================================================================
 # Generator Functions
 # ============================================================================
 
@@ -68,9 +159,8 @@ def PWB(length: int) -> np.ndarray:
     """Periodic Wave Behavior.
     
     Generates time series by superimposing multiple periodic waves (sin/cos)
-    with varying amplitudes, frequencies, and phases.
-    
-    Formula: x_t = Σ A_k * sin(2π * f_k * t + φ_k)
+    with varying amplitudes, frequencies, and phases. Supports irregular
+    period lengths to simulate real-world quasi-periodic behavior.
     
     Args:
         length: Number of time steps to generate
@@ -78,28 +168,23 @@ def PWB(length: int) -> np.ndarray:
     Returns:
         1D numpy array of shape (length,)
     """
-    # Number of components: randomly choose 1-5
     num_components = np.random.randint(1, 6)
-    
-    # Time axis normalized to [0, 1]
-    t = np.linspace(0, 1, length)
+    irregularity = _choose_irregularity()
     
     signal = np.zeros(length)
     
     for _ in range(num_components):
-        # Amplitude: uniform [0.5, 2.0]
         amplitude = np.random.uniform(0.5, 2.0)
-        
-        # Frequency: log-uniform distribution for 1 to ~10 cycles per window
-        # Sample log(f) uniformly, then exponentiate
         log_freq = np.random.uniform(np.log(1), np.log(10))
         frequency = np.exp(log_freq)
+        phase_offset = np.random.uniform(0, 2 * np.pi)
         
-        # Phase: uniform [0, 2π]
-        phase = np.random.uniform(0, 2 * np.pi)
-        
-        # Add this component
-        signal += amplitude * np.sin(2 * np.pi * frequency * t + phase)
+        if irregularity:
+            phase = _irregular_phase(length, frequency, irregularity)
+            signal += amplitude * np.sin(phase + phase_offset)
+        else:
+            t = np.linspace(0, 1, length)
+            signal += amplitude * np.sin(2 * np.pi * frequency * t + phase_offset)
     
     return signal
 
@@ -243,6 +328,7 @@ def seasonal_periodicity(length: int) -> np.ndarray:
     
     Generates complex seasonal patterns with multiple harmonics,
     similar to real-world seasonal data (daily, weekly, yearly cycles).
+    Supports irregular period lengths via _irregular_phase.
     
     Args:
         length: Number of time steps to generate
@@ -250,33 +336,42 @@ def seasonal_periodicity(length: int) -> np.ndarray:
     Returns:
         1D numpy array of shape (length,)
     """
-    t = np.linspace(0, 1, length)
-    
-    # Base seasonal period (normalized)
-    # Choose a period that creates 2-8 complete cycles
     num_cycles = np.random.uniform(2, 8)
-    base_period = 1 / num_cycles
+    irregularity = _choose_irregularity()
     
     signal = np.zeros(length)
     
-    # Add fundamental frequency
     amplitude1 = np.random.uniform(1.0, 2.0)
     phase1 = np.random.uniform(0, 2 * np.pi)
-    signal += amplitude1 * np.sin(2 * np.pi * t / base_period + phase1)
     
-    # Add harmonics (2nd and 3rd)
-    for harmonic in [2, 3]:
-        if np.random.random() > 0.3:  # 70% chance to add each harmonic
-            amp = amplitude1 / (harmonic * np.random.uniform(1.5, 3))
-            phase = np.random.uniform(0, 2 * np.pi)
-            signal += amp * np.sin(2 * np.pi * harmonic * t / base_period + phase)
+    if irregularity:
+        # Fundamental with irregular period spacing
+        base_phase = _irregular_phase(length, num_cycles, irregularity)
+        signal += amplitude1 * np.sin(base_phase + phase1)
+        
+        # Harmonics ride on the same warped time base
+        for harmonic in [2, 3]:
+            if np.random.random() > 0.3:
+                amp = amplitude1 / (harmonic * np.random.uniform(1.5, 3))
+                phase = np.random.uniform(0, 2 * np.pi)
+                signal += amp * np.sin(harmonic * base_phase + phase)
+    else:
+        t = np.linspace(0, 1, length)
+        base_period = 1 / num_cycles
+        signal += amplitude1 * np.sin(2 * np.pi * t / base_period + phase1)
+        
+        for harmonic in [2, 3]:
+            if np.random.random() > 0.3:
+                amp = amplitude1 / (harmonic * np.random.uniform(1.5, 3))
+                phase = np.random.uniform(0, 2 * np.pi)
+                signal += amp * np.sin(2 * np.pi * harmonic * t / base_period + phase)
     
-    # Add slow trend modulation
+    # Slow trend modulation
     if np.random.random() > 0.5:
+        t_norm = np.linspace(0, 1, length)
         trend_amp = np.random.uniform(0.1, 0.5)
-        signal *= (1 + trend_amp * t)
+        signal *= (1 + trend_amp * t_norm)
     
-    # Add small noise
     signal += np.random.normal(0, 0.1, length)
     
     return signal

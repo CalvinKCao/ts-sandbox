@@ -141,6 +141,13 @@ fi
 
 cd "$PROJECT_ROOT"
 
+# Purge any cached synthetic data so the updated generators are used
+if [ -d "$STORAGE_ROOT/synthetic_cache" ]; then
+    echo "Clearing old synthetic cache to force regeneration..."
+    rm -rf "$STORAGE_ROOT/synthetic_cache"/*
+    echo "Synthetic cache cleared."
+fi
+
 echo ""
 echo "Starting training with args: $EXTRA_ARGS"
 echo "Checkpoint dir: $STORAGE_ROOT/checkpoints"

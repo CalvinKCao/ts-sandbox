@@ -29,7 +29,7 @@ def load_results(results_dir: str) -> list:
     return results
 
 
-def format_report(results: list) -> str:
+def format_report(results: list, results_dir: str = '.') -> str:
     """Generate a markdown report from results."""
     lines = []
     lines.append("# Diffusion TSF — 7-Variate Pipeline Results\n")
@@ -269,7 +269,7 @@ def main():
         print(f"Sync first: rsync -avz ccao87@narval.alliancecan.ca:/lustre06/project/6054110/diffusion-tsf/results/ ./synced_results/")
         return
     
-    report = format_report(results)
+    report = format_report(results, results_dir)
     
     if args.output:
         with open(args.output, 'w') as f:

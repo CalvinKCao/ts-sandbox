@@ -621,16 +621,19 @@ CHECKPOINT_DIR = os.path.join(script_dir, 'checkpoints_7var')
 MANIFEST_PATH = os.path.join(CHECKPOINT_DIR, 'training_manifest.json')
 RESULTS_DIR = os.path.join(script_dir, 'results_7var')
 
-# Training settings
-LOOKBACK_LENGTH = 512
-FORECAST_LENGTH = 96
-IMAGE_HEIGHT = 64
+# Training settings (2D representation: IMAGE_HEIGHT × (LOOKBACK + FORECAST))
+LOOKBACK_LENGTH = 1024
+FORECAST_LENGTH = 192
+IMAGE_HEIGHT = 128
 N_VARIATES = 7
+
+# Max 7-variate subsets per >7-variate dataset (avoids combinatorial explosion)
+MAX_SUBSETS_PER_DATASET = 5
 
 # Phase 1: Synthetic pretraining
 PRETRAIN_EPOCHS = 200
 PRETRAIN_PATIENCE = 20
-SYNTHETIC_SAMPLES_FULL = 1000000
+SYNTHETIC_SAMPLES_FULL = 100000
 SYNTHETIC_SAMPLES_HP_TUNE = 100000  # For iTransformer HP tuning
 SYNTHETIC_SAMPLES_DIFF_TUNE = 10000  # For Diffusion HP tuning (smaller for speed)
 
@@ -645,10 +648,10 @@ N_ITRANS_HP_TRIALS = 20
 N_DIFFUSION_HP_TRIALS = 8
 N_FINETUNE_HP_TRIALS = 8
 
-# Batch size ranges for A6000 (48GB)
+# Batch size ranges for A6000/A100 (40-48GB) — 128×1216×7 images are 4x larger
 ITRANS_BATCH_SIZES = [64, 128, 256]
-DIFFUSION_BATCH_SIZES = [32, 64, 96]  # 64x96x7 images
-FINETUNE_BATCH_SIZES = [16, 32, 64]
+DIFFUSION_BATCH_SIZES = [8, 16, 32]
+FINETUNE_BATCH_SIZES = [4, 8, 16]
 
 # Dataset registry: name -> (path, date_col, seasonal_period)
 DATASET_REGISTRY = {
@@ -845,8 +848,9 @@ def generate_variate_subsets(dataset_name: str, n_variates: int = 7, seed: int =
     shuffled = list(range(n_total))
     rng.shuffle(shuffled)
     
+    n_subsets = min(n_total // n_variates, MAX_SUBSETS_PER_DATASET)
     subsets = []
-    for i in range(n_total // n_variates):
+    for i in range(n_subsets):
         start = i * n_variates
         indices = shuffled[start:start + n_variates]
         subsets.append({
