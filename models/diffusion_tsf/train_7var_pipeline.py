@@ -816,6 +816,14 @@ def load_dataset(
     
     # Chronological split: 70/10/20
     n = len(data)
+    total_window = lookback + horizon
+    if n < total_window:
+        raise ValueError(
+            f"Dataset '{dataset_name}' has {n} rows but needs at least "
+            f"{total_window} (lookback={lookback} + horizon={horizon}). "
+            f"Skipping this dataset."
+        )
+    
     train_end = int(n * 0.7)
     val_end = int(n * 0.8)
     
@@ -2129,6 +2137,7 @@ def main():
     parser.add_argument('--checkpoint-dir', type=str, default=None, help='Override checkpoint directory (for cluster storage)')
     parser.add_argument('--results-dir', type=str, default=None, help='Override results directory')
     parser.add_argument('--parallel-worker', type=int, default=None, help='Parallel worker ID for multi-GPU Optuna (0-N)')
+    parser.add_argument('--fresh', action='store_true', help='Wipe manifest and checkpoints, start from scratch')
     
     args = parser.parse_args()
     
@@ -2169,6 +2178,18 @@ def main():
             else:
                 print("No manifest found")
         return
+    
+    # --fresh: nuke manifest and checkpoints so the pipeline restarts from zero
+    if args.fresh:
+        if os.path.exists(MANIFEST_PATH):
+            os.remove(MANIFEST_PATH)
+            logger.info(f"Removed old manifest: {MANIFEST_PATH}")
+        for ckpt_file in ['pretrained_itransformer.pt', 'pretrained_diffusion.pt']:
+            p = os.path.join(CHECKPOINT_DIR, ckpt_file)
+            if os.path.exists(p):
+                os.remove(p)
+                logger.info(f"Removed old checkpoint: {p}")
+        args.resume = False
     
     try:
         run_pipeline(

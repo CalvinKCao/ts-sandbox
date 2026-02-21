@@ -130,9 +130,9 @@ for arg in "$@"; do
     EXTRA_ARGS="$EXTRA_ARGS $arg"
 done
 
-# Default to resume mode for long jobs
-if [[ ! "$EXTRA_ARGS" =~ "--resume" ]] && [[ ! "$EXTRA_ARGS" =~ "--smoke-test" ]]; then
-    EXTRA_ARGS="--resume $EXTRA_ARGS"
+# Default to --fresh (start from scratch) unless --resume or --smoke-test passed
+if [[ ! "$EXTRA_ARGS" =~ "--resume" ]] && [[ ! "$EXTRA_ARGS" =~ "--smoke-test" ]] && [[ ! "$EXTRA_ARGS" =~ "--fresh" ]]; then
+    EXTRA_ARGS="--fresh $EXTRA_ARGS"
 fi
 
 # -----------------------------------------------------------------------------
