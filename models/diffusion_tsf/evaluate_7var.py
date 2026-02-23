@@ -62,6 +62,7 @@ from models.diffusion_tsf.train_7var_pipeline import (
     TimeSeriesDataset,
     create_model,
     load_dataset,
+    evaluate_itransformer_baseline,
 )
 
 # Logging
@@ -442,6 +443,58 @@ def create_summary_csv(all_results: Dict, results_dir: str):
 
 
 # ============================================================================
+# Standalone iTransformer Baseline Runner
+# ============================================================================
+
+def run_baseline_eval(
+    checkpoint_dir: str = CHECKPOINT_DIR,
+    results_dir: str = RESULTS_DIR,
+    smoke_test: bool = False,
+    only_subset: str = None,
+):
+    """Re-run iTransformer baseline eval on all completed subsets.
+
+    Useful for populating itransformer_baseline.json on runs that predate
+    the automatic baseline evaluation, or to regenerate it after changes.
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logger.info(f"Using device: {device}")
+
+    if not os.path.exists(MANIFEST_PATH):
+        logger.error("No training manifest found. Run training first.")
+        return
+
+    manifest = TrainingManifest.load()
+    completed = [k for k, v in manifest.subsets.items() if v.get('status') == 'complete']
+    if only_subset:
+        completed = [only_subset] if only_subset in completed else []
+        if not completed:
+            logger.error(f"Subset '{only_subset}' not found or not complete")
+            return
+
+    # Locate pretrained iTransformer checkpoint
+    itrans_ckpt = os.path.join(checkpoint_dir, 'pretrained_itransformer.pt')
+    if not os.path.exists(itrans_ckpt):
+        logger.error(f"iTransformer checkpoint not found: {itrans_ckpt}")
+        return
+
+    logger.info(f"Running iTransformer baseline on {len(completed)} subsets")
+    for subset_id in completed:
+        info = manifest.subsets[subset_id]
+        dataset_name = info.get('dataset', subset_id)
+        variate_indices = info.get('variate_indices', [])
+        try:
+            evaluate_itransformer_baseline(
+                subset_id, dataset_name, variate_indices,
+                itrans_ckpt, results_dir, device, smoke_test=smoke_test,
+            )
+        except Exception as e:
+            logger.error(f"Baseline eval failed for {subset_id}: {e}")
+
+    logger.info(f"Baseline results saved to: {os.path.join(results_dir, 'itransformer_baseline.json')}")
+
+
+# ============================================================================
 # CLI
 # ============================================================================
 
@@ -457,8 +510,20 @@ def main():
                         help='Directory containing checkpoints')
     parser.add_argument('--results-dir', type=str, default=RESULTS_DIR,
                         help='Directory to save results')
+    parser.add_argument('--baseline', action='store_true',
+                        help='Run iTransformer-only baseline eval on all completed subsets '
+                             '(generates itransformer_baseline.json for summarize_results.py)')
     
     args = parser.parse_args()
+
+    if args.baseline:
+        run_baseline_eval(
+            checkpoint_dir=args.checkpoint_dir,
+            results_dir=args.results_dir,
+            smoke_test=args.smoke_test,
+            only_subset=args.subset,
+        )
+        return
     
     evaluate_all_models(
         n_samples=args.n_samples,

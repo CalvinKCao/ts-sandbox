@@ -1864,6 +1864,76 @@ def update_summary_csv(results_dir):
 
 
 # ============================================================================
+# iTransformer Baseline Evaluation
+# ============================================================================
+
+def evaluate_itransformer_baseline(
+    subset_id: str,
+    dataset_name: str,
+    variate_indices: List[int],
+    itrans_checkpoint: str,
+    results_dir: str,
+    device: torch.device,
+    smoke_test: bool = False,
+) -> Dict:
+    """Run iTransformer-only forecast on test set and save to itransformer_baseline.json.
+
+    Reuses the same test split as diffusion eval so the numbers are directly
+    comparable. Results are merged into a single baseline file so summarize_results.py
+    can produce the comparison table automatically.
+    """
+    _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+    if smoke_test:
+        test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
+    test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
+
+    itrans_model = create_itransformer().to(device)
+    ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)
+    itrans_model.load_state_dict(ckpt['model_state_dict'])
+    itrans_model.eval()
+
+    all_preds, all_targets = [], []
+    with torch.no_grad():
+        for past, future in test_loader:
+            past = past.to(device)
+            # iTransformer expects (B, L, C); our tensors are (B, C, L)
+            pred = itrans_model(past.permute(0, 2, 1))  # → (B, pred_len, C)
+            all_preds.append(pred.permute(0, 2, 1).cpu())
+            all_targets.append(future)
+
+    preds = torch.cat(all_preds, dim=0)
+    targets = torch.cat(all_targets, dim=0)
+
+    mse = torch.nn.functional.mse_loss(preds, targets).item()
+    mae = torch.nn.functional.l1_loss(preds, targets).item()
+    pred_diff = preds[:, :, 1:] - preds[:, :, :-1]
+    tgt_diff = targets[:, :, 1:] - targets[:, :, :-1]
+    trend_acc = ((pred_diff > 0) == (tgt_diff > 0)).float().mean().item()
+
+    metrics = {'mse': mse, 'mae': mae, 'trend_accuracy': trend_acc}
+    logger.info(f"[{subset_id}] iTransformer baseline: MSE={mse:.4f}, MAE={mae:.4f}, trend={trend_acc:.3f}")
+
+    # Merge into shared baseline file (one entry per subset)
+    os.makedirs(results_dir, exist_ok=True)
+    baseline_path = os.path.join(results_dir, 'itransformer_baseline.json')
+    baseline = {}
+    if os.path.exists(baseline_path):
+        with open(baseline_path) as f:
+            baseline = json.load(f)
+
+    baseline[subset_id] = {
+        'dataset': dataset_name,
+        'variate_indices': variate_indices,
+        'itransformer_metrics': metrics,
+        'evaluated_at': datetime.now().isoformat(),
+    }
+    with open(baseline_path, 'w') as f:
+        json.dump(baseline, f, indent=2)
+
+    return metrics
+
+
+# ============================================================================
 # Traffic Recombination
 # ============================================================================
 
@@ -2094,6 +2164,15 @@ def run_pipeline(
                 
                 save_eval_results(subset_id, dataset_name, variate_indices, 
                                 {**train_metrics, 'tuned_params': tuned_params}, eval_results, RESULTS_DIR)
+                
+                # iTransformer-only baseline (for comparison table in summarize_results.py)
+                try:
+                    evaluate_itransformer_baseline(
+                        subset_id, dataset_name, variate_indices,
+                        itrans_ckpt, RESULTS_DIR, device, smoke_test=smoke_test,
+                    )
+                except Exception as be:
+                    logger.warning(f"iTransformer baseline eval failed for {subset_id}: {be}")
                 
                 # Log to wandb
                 log_wandb_eval_results(subset_id, eval_results, train_metrics)

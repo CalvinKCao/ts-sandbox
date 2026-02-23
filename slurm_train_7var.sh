@@ -141,11 +141,13 @@ fi
 
 cd "$PROJECT_ROOT"
 
-# Purge any cached synthetic data so the updated generators are used
-if [ -d "$STORAGE_ROOT/synthetic_cache" ]; then
+# Purge cached synthetic data unless resuming (resume reuses existing cache)
+if [[ ! "$EXTRA_ARGS" =~ "--resume" ]] && [ -d "$STORAGE_ROOT/synthetic_cache" ]; then
     echo "Clearing old synthetic cache to force regeneration..."
     rm -rf "$STORAGE_ROOT/synthetic_cache"/*
     echo "Synthetic cache cleared."
+elif [[ "$EXTRA_ARGS" =~ "--resume" ]]; then
+    echo "Resume mode: keeping existing synthetic cache."
 fi
 
 echo ""
