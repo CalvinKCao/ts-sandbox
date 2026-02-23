@@ -301,12 +301,13 @@ def evaluate_all_models(
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f"Using device: {device}")
     
-    # Load manifest
-    if not os.path.exists(MANIFEST_PATH):
-        logger.error("No training manifest found. Run training first.")
+    # Load manifest — derive path from checkpoint_dir so cluster storage works
+    manifest_path = os.path.join(checkpoint_dir, 'training_manifest.json')
+    if not os.path.exists(manifest_path):
+        logger.error(f"No training manifest found at {manifest_path}")
         return
     
-    manifest = TrainingManifest.load()
+    manifest = TrainingManifest.load(manifest_path)
     
     # Get completed subsets
     completed = [k for k, v in manifest.subsets.items() if v.get('status') == 'complete']
@@ -458,11 +459,12 @@ def run_baseline_eval(
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f"Using device: {device}")
 
-    if not os.path.exists(MANIFEST_PATH):
-        logger.error("No training manifest found. Run training first.")
+    manifest_path = os.path.join(checkpoint_dir, 'training_manifest.json')
+    if not os.path.exists(manifest_path):
+        logger.error(f"No training manifest found at {manifest_path}")
         return
 
-    manifest = TrainingManifest.load()
+    manifest = TrainingManifest.load(manifest_path)
     completed = [k for k, v in manifest.subsets.items() if v.get('status') == 'complete']
     if only_subset:
         completed = [only_subset] if only_subset in completed else []
