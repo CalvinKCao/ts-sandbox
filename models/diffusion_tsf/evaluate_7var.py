@@ -453,45 +453,58 @@ def run_baseline_eval(
 ):
     """Re-run iTransformer baseline eval on all completed subsets.
 
-    Useful for populating itransformer_baseline.json on runs that predate
-    the automatic baseline evaluation, or to regenerate it after changes.
+    Discovers subsets by scanning checkpoint_dir for subdirs containing
+    metadata.json — no dependency on training_manifest.json.
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f"Using device: {device}")
 
-    manifest_path = os.path.join(checkpoint_dir, 'training_manifest.json')
-    if not os.path.exists(manifest_path):
-        logger.error(f"No training manifest found at {manifest_path}")
-        return
-
-    manifest = TrainingManifest.load(manifest_path)
-    completed = [k for k, v in manifest.subsets.items() if v.get('status') == 'complete']
-    if only_subset:
-        completed = [only_subset] if only_subset in completed else []
-        if not completed:
-            logger.error(f"Subset '{only_subset}' not found or not complete")
-            return
-
-    # Locate pretrained iTransformer checkpoint
     itrans_ckpt = os.path.join(checkpoint_dir, 'pretrained_itransformer.pt')
     if not os.path.exists(itrans_ckpt):
         logger.error(f"iTransformer checkpoint not found: {itrans_ckpt}")
         return
 
-    logger.info(f"Running iTransformer baseline on {len(completed)} subsets")
-    for subset_id in completed:
-        info = manifest.subsets[subset_id]
-        dataset_name = info.get('dataset', subset_id)
-        variate_indices = info.get('variate_indices', [])
+    # Discover subsets by scanning for {checkpoint_dir}/{subset_id}/metadata.json
+    subsets = []
+    for entry in sorted(Path(checkpoint_dir).iterdir()):
+        if not entry.is_dir():
+            continue
+        meta_path = entry / 'metadata.json'
+        if not meta_path.exists():
+            continue
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            subsets.append({
+                'subset_id': meta.get('subset_id', entry.name),
+                'dataset_name': meta.get('dataset_name', entry.name),
+                'variate_indices': meta.get('variate_indices', []),
+            })
+        except Exception as e:
+            logger.warning(f"Could not read metadata for {entry.name}: {e}")
+
+    if not subsets:
+        logger.error(f"No subset metadata found under {checkpoint_dir}")
+        return
+
+    if only_subset:
+        subsets = [s for s in subsets if s['subset_id'] == only_subset]
+        if not subsets:
+            logger.error(f"Subset '{only_subset}' not found in {checkpoint_dir}")
+            return
+
+    logger.info(f"Running iTransformer baseline on {len(subsets)} subsets")
+    for s in subsets:
         try:
             evaluate_itransformer_baseline(
-                subset_id, dataset_name, variate_indices,
+                s['subset_id'], s['dataset_name'], s['variate_indices'],
                 itrans_ckpt, results_dir, device, smoke_test=smoke_test,
             )
         except Exception as e:
-            logger.error(f"Baseline eval failed for {subset_id}: {e}")
+            logger.error(f"Baseline eval failed for {s['subset_id']}: {e}")
+            import traceback; traceback.print_exc()
 
-    logger.info(f"Baseline results saved to: {os.path.join(results_dir, 'itransformer_baseline.json')}")
+    logger.info(f"Done. Results in: {results_dir}/{{subset_id}}/results.json")
 
 
 # ============================================================================
