@@ -61,7 +61,7 @@ from models.diffusion_tsf.train_7var_pipeline import (
     N_VARIATES,
     TrainingManifest,
     TimeSeriesDataset,
-    create_model,
+    create_diffusion_model,
     load_dataset,
     evaluate_itransformer_baseline,
     _load_subset_results,
@@ -278,7 +278,7 @@ def load_model_for_eval(subset_id: str, checkpoint_dir: str = CHECKPOINT_DIR) ->
         metadata = json.load(f)
     
     # Create and load model
-    model = create_model(n_variates=N_VARIATES)
+    model = create_diffusion_model(n_variates=N_VARIATES)
     checkpoint = torch.load(best_ckpt, map_location='cpu')
     model.load_state_dict(checkpoint['model_state_dict'])
     
