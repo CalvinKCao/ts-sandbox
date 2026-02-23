@@ -71,6 +71,8 @@ def visualize_subset(
     
     if output_dir is None:
         output_dir = os.path.join(RESULTS_DIR, 'viz', subset_id)
+    else:
+        output_dir = os.path.join(output_dir, subset_id)
     
     os.makedirs(output_dir, exist_ok=True)
     
