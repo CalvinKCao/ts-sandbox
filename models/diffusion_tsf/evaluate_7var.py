@@ -29,6 +29,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -63,6 +64,9 @@ from models.diffusion_tsf.train_7var_pipeline import (
     create_model,
     load_dataset,
     evaluate_itransformer_baseline,
+    _load_subset_results,
+    _save_subset_results,
+    update_summary_csv,
 )
 
 # Logging
@@ -351,40 +355,34 @@ def evaluate_all_models(
                 smoke_test=smoke_test,
             )
             
-            all_results[subset_id] = {
-                'dataset': dataset_name,
-                'variate_indices': variate_indices,
-                'metrics': results,
-            }
-            
-            # Log results
             logger.info(f"\nResults for {subset_id}:")
             logger.info(f"  Single sample: MSE={results['single']['mse']:.4f}, MAE={results['single']['mae']:.4f}")
             logger.info(f"  Averaged ({n_samples}): MSE={results['averaged']['mse']:.4f}, MAE={results['averaged']['mae']:.4f}")
             logger.info(f"  Shape metrics (avg): trend_acc={results['averaged']['trend_accuracy']:.3f}, "
                        f"corr={results['averaged']['correlation']:.3f}")
-            
-            # Save individual result
-            result_path = os.path.join(results_dir, f'{subset_id}_results.json')
-            with open(result_path, 'w') as f:
-                json.dump(all_results[subset_id], f, indent=2)
+
+            # Merge into per-subset results.json (preserves itransformer_metrics if present)
+            data = _load_subset_results(results_dir, subset_id)
+            data.update({
+                'subset_id': subset_id,
+                'dataset': dataset_name,
+                'variate_indices': variate_indices,
+                'eval_metrics': results,
+                'evaluated_at': datetime.now().isoformat(),
+            })
+            _save_subset_results(results_dir, subset_id, data)
+            update_summary_csv(results_dir)
+
+            all_results[subset_id] = data
             
         except Exception as e:
             logger.error(f"Error evaluating {subset_id}: {e}")
             all_results[subset_id] = {'error': str(e)}
             continue
     
-    # Save combined results
-    combined_path = os.path.join(results_dir, 'all_results.json')
-    with open(combined_path, 'w') as f:
-        json.dump(all_results, f, indent=2)
-    
-    # Create summary CSV
-    create_summary_csv(all_results, results_dir)
-    
     logger.info(f"\n{'='*60}")
     logger.info("EVALUATION COMPLETE")
-    logger.info(f"Results saved to: {results_dir}")
+    logger.info(f"Results saved to: {results_dir}/{{subset_id}}/results.json")
     logger.info(f"{'='*60}")
 
 

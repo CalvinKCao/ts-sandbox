@@ -1815,49 +1815,75 @@ def evaluate_model(
     }
 
 
+def _subset_results_path(results_dir: str, subset_id: str) -> str:
+    """Return path to the canonical results.json for a subset."""
+    return os.path.join(results_dir, subset_id, 'results.json')
+
+
+def _load_subset_results(results_dir: str, subset_id: str) -> dict:
+    path = _subset_results_path(results_dir, subset_id)
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+
+def _save_subset_results(results_dir: str, subset_id: str, data: dict):
+    subset_dir = os.path.join(results_dir, subset_id)
+    os.makedirs(subset_dir, exist_ok=True)
+    with open(os.path.join(subset_dir, 'results.json'), 'w') as f:
+        json.dump(data, f, indent=2)
+
+
 def save_eval_results(subset_id, dataset_name, variate_indices, train_metrics, eval_results, results_dir):
-    """Save evaluation results."""
-    os.makedirs(results_dir, exist_ok=True)
-    
-    result = {
+    """Save diffusion evaluation results to per-subset subdirectory."""
+    data = _load_subset_results(results_dir, subset_id)
+    data.update({
         'subset_id': subset_id,
         'dataset': dataset_name,
         'variate_indices': variate_indices,
         'train_metrics': train_metrics,
         'eval_metrics': eval_results,
         'evaluated_at': datetime.now().isoformat(),
-    }
-    
-    with open(os.path.join(results_dir, f'{subset_id}_results.json'), 'w') as f:
-        json.dump(result, f, indent=2)
-    
-    # Update summary CSV
+    })
+    _save_subset_results(results_dir, subset_id, data)
     update_summary_csv(results_dir)
 
 
 def update_summary_csv(results_dir):
-    """Update summary CSV."""
+    """Rebuild summary CSV by walking per-subset subdirectories."""
     rows = []
-    for fname in os.listdir(results_dir):
-        if fname.endswith('_results.json'):
-            try:
-                with open(os.path.join(results_dir, fname), 'r') as f:
-                    data = json.load(f)
-                if 'eval_metrics' not in data:
-                    continue
-                metrics = data['eval_metrics']
-                rows.append({
-                    'subset_id': data['subset_id'],
-                    'dataset': data['dataset'],
-                    'best_val_loss': data.get('train_metrics', {}).get('best_val_loss'),
-                    'single_mse': metrics['single']['mse'],
-                    'single_mae': metrics['single']['mae'],
-                    'avg_mse': metrics['averaged']['mse'],
-                    'avg_mae': metrics['averaged']['mae'],
-                })
-            except:
+    results_path = Path(results_dir)
+    for subset_dir in sorted(results_path.iterdir()):
+        if not subset_dir.is_dir():
+            continue
+        rfile = subset_dir / 'results.json'
+        if not rfile.exists():
+            continue
+        try:
+            with open(rfile) as f:
+                data = json.load(f)
+            if 'eval_metrics' not in data:
                 continue
-    
+            m = data['eval_metrics']
+            itrans = data.get('itransformer_metrics', {})
+            row = {
+                'subset_id': data['subset_id'],
+                'dataset': data['dataset'],
+                'best_val_loss': data.get('train_metrics', {}).get('best_val_loss'),
+                'single_mse': m['single']['mse'],
+                'single_mae': m['single']['mae'],
+                'avg_mse': m['averaged']['mse'],
+                'avg_mae': m['averaged']['mae'],
+                'avg_trend_acc': m['averaged'].get('trend_accuracy'),
+                'itrans_mse': itrans.get('mse'),
+                'itrans_mae': itrans.get('mae'),
+                'itrans_trend_acc': itrans.get('trend_accuracy'),
+            }
+            rows.append(row)
+        except Exception:
+            continue
+
     if rows:
         df = pd.DataFrame(rows).sort_values(['dataset', 'subset_id'])
         df.to_csv(os.path.join(results_dir, 'summary.csv'), index=False)
@@ -1913,22 +1939,15 @@ def evaluate_itransformer_baseline(
     metrics = {'mse': mse, 'mae': mae, 'trend_accuracy': trend_acc}
     logger.info(f"[{subset_id}] iTransformer baseline: MSE={mse:.4f}, MAE={mae:.4f}, trend={trend_acc:.3f}")
 
-    # Merge into shared baseline file (one entry per subset)
-    os.makedirs(results_dir, exist_ok=True)
-    baseline_path = os.path.join(results_dir, 'itransformer_baseline.json')
-    baseline = {}
-    if os.path.exists(baseline_path):
-        with open(baseline_path) as f:
-            baseline = json.load(f)
-
-    baseline[subset_id] = {
-        'dataset': dataset_name,
-        'variate_indices': variate_indices,
-        'itransformer_metrics': metrics,
-        'evaluated_at': datetime.now().isoformat(),
-    }
-    with open(baseline_path, 'w') as f:
-        json.dump(baseline, f, indent=2)
+    # Merge into the per-subset results.json (same file as diffusion eval)
+    data = _load_subset_results(results_dir, subset_id)
+    data.setdefault('subset_id', subset_id)
+    data.setdefault('dataset', dataset_name)
+    data.setdefault('variate_indices', variate_indices)
+    data['itransformer_metrics'] = metrics
+    data['itransformer_evaluated_at'] = datetime.now().isoformat()
+    _save_subset_results(results_dir, subset_id, data)
+    update_summary_csv(results_dir)
 
     return metrics
 

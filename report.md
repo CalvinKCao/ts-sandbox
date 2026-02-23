@@ -1,11 +1,12 @@
 # Diffusion TSF — 7-Variate Pipeline Results
 
-**Total models evaluated:** 80
+**Models with diffusion eval:** 80  
+**Models with iTransformer baseline:** 0
 
 ## Per-Dataset Summary
 
-| Dataset | Subsets | Avg MSE (single) | Avg MAE (single) | Avg MSE (30-avg) | Avg MAE (30-avg) | Avg Trend Acc |
-|---------|---------|-------------------|-------------------|-------------------|-------------------|---------------|
+| Dataset | N | Avg MSE (single) | Avg MAE (single) | Avg MSE (30-avg) | Avg MAE (30-avg) | Avg Trend Acc |
+|---------|---|------------------|------------------|------------------|------------------|---------------|
 | ETTh1 | 1 | 3.2932 | 1.2386 | 1.3533 | 0.7990 | 0.552 |
 | ETTh2 | 1 | 0.4894 | 0.4518 | 0.2505 | 0.3582 | 0.580 |
 | ETTm1 | 1 | 0.8011 | 0.5871 | 0.5199 | 0.4619 | 0.553 |
@@ -14,13 +15,13 @@
 | exchange_rate | 1 | 0.2952 | 0.3415 | 0.1394 | 0.2577 | 0.444 |
 | traffic | 27 | 3.2800 | 1.2210 | 1.2955 | 0.7537 | 0.704 |
 | weather | 3 | 0.4238 | 0.3633 | 0.2164 | 0.2803 | 0.547 |
-| **OVERALL** | **80** | **2.7212** | **1.1226** | **1.1329** | **0.7395** | **0.651** |
+| **OVERALL** | **80** | | | **1.1329** | **0.7395** | |
 
-## Best & Worst Models (by averaged MSE)
+## Best & Worst Models (diffusion avg MSE)
 
 ### Top 5 Best
-| Rank | Subset | MSE |
-|------|--------|-----|
+| Rank | Subset | Diff MSE |
+|------|--------|----------|
 | 1 | exchange_rate-0 | 0.1394 |
 | 2 | weather-2 | 0.1653 |
 | 3 | ETTm2 | 0.1783 |
@@ -28,8 +29,8 @@
 | 5 | ETTh2 | 0.2505 |
 
 ### Top 5 Worst
-| Rank | Subset | MSE |
-|------|--------|-----|
+| Rank | Subset | Diff MSE |
+|------|--------|----------|
 | 1 | traffic-3 | 2.2560 |
 | 2 | electricity-43 | 2.2734 |
 | 3 | electricity-0 | 2.5174 |
@@ -64,8 +65,8 @@
 
 ### electricity (45 subsets)
 
-- **MSE:** min=0.4378, max=3.9662, mean=1.1681, std=0.7228
-- **MAE:** min=0.4977, max=1.6169, mean=0.7953, std=0.2435
+- **Diffusion MSE:** min=0.4378, max=3.9662, mean=1.1681, std=0.7228
+- **Diffusion MAE:** min=0.4977, max=1.6169, mean=0.7953, std=0.2435
 
 ### exchange_rate (1 subset)
 
@@ -75,8 +76,8 @@
 
 ### traffic (27 subsets)
 
-- **MSE:** min=0.7425, max=2.2560, mean=1.2955, std=0.4877
-- **MAE:** min=0.5412, max=1.0735, mean=0.7537, std=0.1711
+- **Diffusion MSE:** min=0.7425, max=2.2560, mean=1.2955, std=0.4877
+- **Diffusion MAE:** min=0.5412, max=1.0735, mean=0.7537, std=0.1711
 
 ### weather (3 subsets)
 
