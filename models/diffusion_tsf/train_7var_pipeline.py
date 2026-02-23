@@ -324,8 +324,9 @@ def setup_logging():
     return logging.getLogger(__name__)
 
 
-# Deferred logger initialization (called after DDP setup)
-logger = None
+# Deferred logger initialization (called after DDP setup).
+# Falls back to module-level logger when imported by other scripts.
+logger = logging.getLogger(__name__)
 
 
 def get_logger():
