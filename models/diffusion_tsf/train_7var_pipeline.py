@@ -1922,9 +1922,14 @@ def evaluate_itransformer_baseline(
     with torch.no_grad():
         for past, future in test_loader:
             past = past.to(device)
-            # iTransformer expects (B, L, C); our tensors are (B, C, L)
-            pred = itrans_model(past.permute(0, 2, 1))  # → (B, pred_len, C)
-            all_preds.append(pred.permute(0, 2, 1).cpu())
+            B, C, L = past.shape
+            # iTransformer expects (B, L, C); pass None for unused time marks
+            x_enc = past.permute(0, 2, 1)
+            x_dec = torch.zeros(B, FORECAST_LENGTH, C, device=device, dtype=past.dtype)
+            output = itrans_model(x_enc, None, x_dec, None)
+            if isinstance(output, tuple):
+                output = output[0]  # strip attention weights if present
+            all_preds.append(output.permute(0, 2, 1).cpu())  # → (B, C, pred_len)
             all_targets.append(future)
 
     preds = torch.cat(all_preds, dim=0)
