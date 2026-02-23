@@ -111,9 +111,6 @@ def main():
     
     args = parser.parse_args()
     
-    manifest_path = os.path.join(args.checkpoint_dir, 'training_manifest.json')
-    print(f"Looking for manifest at: {manifest_path}")
-    
     if args.subset:
         visualize_subset(
             args.subset, 
@@ -122,17 +119,17 @@ def main():
             num_samples=args.num_samples,
         )
     else:
-        # Visualize all completed models
-        if not os.path.exists(manifest_path):
-            print(f"No training manifest found at {manifest_path}")
-            print(f"Train models first, or pass --checkpoint-dir to the right location.")
-            return
-        
-        manifest = TrainingManifest.load(path=manifest_path)
-        completed = [k for k, v in manifest.subsets.items() if v.get('status') == 'complete']
+        # Discover subsets by scanning for metadata.json (no manifest dependency)
+        from pathlib import Path
+        ckpt_root = Path(args.checkpoint_dir)
+        completed = sorted([
+            d.name for d in ckpt_root.iterdir()
+            if d.is_dir() and (d / 'metadata.json').exists() and (d / 'best.pt').exists()
+        ])
         
         if not completed:
-            print("No completed models found.")
+            print(f"No subset checkpoints found in {args.checkpoint_dir}")
+            print(f"Expected: {{checkpoint_dir}}/{{subset_id}}/best.pt + metadata.json")
             return
         
         print(f"Visualizing {len(completed)} completed models...")
@@ -141,6 +138,7 @@ def main():
             visualize_subset(
                 subset_id,
                 checkpoint_dir=args.checkpoint_dir,
+                output_dir=args.output_dir,
                 num_samples=args.num_samples,
             )
     
