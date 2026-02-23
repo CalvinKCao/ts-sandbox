@@ -274,6 +274,23 @@ tail -f *.out         # Watch output
 scancel <jobid>       # Cancel job
 ```
 
+### Visualizations
+
+**Comparison plots (iTransformer vs Diffusion):**
+```bash
+# On cluster:
+sbatch slurm_viz_comparison.sh
+# Then sync locally:
+rsync -avz user@narval:~/projects/def-*/diffusion-tsf/results/viz/comparison/ ./synced_results/viz/comparison/
+```
+
+Generates per-dataset PNGs (`comparison_{dataset}.png`) with ground truth, iTransformer-only, and diffusion overlays. 3 samples × 3 variables per dataset.
+
+**Detailed per-subset visualizations (2D representations, etc.):**
+```bash
+sbatch slurm_visualize.sh
+```
+
 ### Syncing Results to Local
 ```bash
 # On your LOCAL machine:
