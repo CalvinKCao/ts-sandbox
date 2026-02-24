@@ -145,3 +145,29 @@ models/Time-Series-Library-main/dataset/
 !datasets/illness/*.csv
 !datasets/traffic/traffic_part*.csv
 datasets/traffic/traffic.csv
+
+# lnai-generated
+.agents/skills/messy
+.agents/skills/natural
+.agents/skills/quick
+.ai/.lnai-manifest.json
+.claude/CLAUDE.md
+.claude/skills/messy
+.claude/skills/natural
+.claude/skills/quick
+.cursor/skills/messy
+.cursor/skills/natural
+.cursor/skills/quick
+.gemini/settings.json
+.gemini/skills/messy
+.gemini/skills/natural
+.gemini/skills/quick
+.github/skills/messy
+.github/skills/natural
+.github/skills/quick
+.windsurf/skills/messy
+.windsurf/skills/natural
+.windsurf/skills/quick
+AGENTS.md
+opencode.json
+# end lnai-generated

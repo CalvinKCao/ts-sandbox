@@ -1,11 +1,11 @@
 {
   "tools": {
     "claudeCode": {
-      "enabled": true,
+      "enabled": false,
       "versionControl": false
     },
     "opencode": {
-      "enabled": true,
+      "enabled": false,
       "versionControl": false
     },
     "cursor": {

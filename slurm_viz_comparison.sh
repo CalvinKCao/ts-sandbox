@@ -39,12 +39,12 @@ OUT_DIR="$STORAGE_ROOT/results/viz/comparison"
 echo "Checkpoint dir: $CKPT_DIR"
 echo "Output dir: $OUT_DIR"
 
+# Default: single diffusion sample (fast). Pass --ensemble 30 for averaged.
 python -m models.diffusion_tsf.visualize_comparison \
     --checkpoint-dir "$CKPT_DIR" \
     --output-dir "$OUT_DIR" \
     --num-samples 3 \
     --vars 3 \
-    --ensemble 3 \
     "$@"
 
 echo "===================="

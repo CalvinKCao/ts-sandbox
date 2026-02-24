@@ -151,12 +151,16 @@ def run_comparison(
                     itrans_out = itrans_out[0]
                 itrans_pred = itrans_out.permute(0, 2, 1).cpu()[0]   # (C, F)
 
-                # Diffusion (ensemble average for smoother result)
-                diff_preds = []
-                for _ in range(diffusion_ensemble):
+                # Diffusion prediction (single or averaged)
+                if diffusion_ensemble <= 1:
                     result = diff_model.generate(past_t)
-                    diff_preds.append(result['prediction'].cpu())
-                diff_pred = torch.stack(diff_preds).mean(0)[0]  # (C, F)
+                    diff_pred = result['prediction'].cpu()[0]  # (C, F)
+                else:
+                    diff_preds = []
+                    for _ in range(diffusion_ensemble):
+                        result = diff_model.generate(past_t)
+                        diff_preds.append(result['prediction'].cpu())
+                    diff_pred = torch.stack(diff_preds).mean(0)[0]  # (C, F)
 
             # Denormalize everything to original scale
             past_dn = denorm(past, mean, std)
@@ -211,7 +215,9 @@ def run_comparison(
         handles, labels = axes[0, 0].get_legend_handles_labels()
         fig.legend(handles, labels, loc='upper center', ncol=3, fontsize=10,
                    bbox_to_anchor=(0.5, 1.01))
-        fig.suptitle(f'{dataset_name}', fontsize=14, fontweight='bold', y=1.04)
+        mode_label = 'single sample' if diffusion_ensemble <= 1 else f'{diffusion_ensemble}-sample avg'
+        fig.suptitle(f'{dataset_name}  ({mode_label})',
+                     fontsize=14, fontweight='bold', y=1.04)
 
         plt.tight_layout()
         out_path = os.path.join(output_dir, f'comparison_{dataset_name}.png')
@@ -228,7 +234,8 @@ def main():
     parser.add_argument('--output-dir', type=str, default=None)
     parser.add_argument('--num-samples', type=int, default=3, help='Samples per dataset')
     parser.add_argument('--vars', type=int, default=3, help='Variables to plot per sample')
-    parser.add_argument('--ensemble', type=int, default=3, help='Diffusion samples to average')
+    parser.add_argument('--ensemble', type=int, default=1,
+                        help='Diffusion samples to average (1=single sample, 30=full avg)')
     args = parser.parse_args()
 
     output_dir = args.output_dir or os.path.join(RESULTS_DIR, 'viz', 'comparison')
