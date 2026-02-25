@@ -1,27 +1,24 @@
 #!/bin/bash
-# run_all_datasets.sh - Universal training pipeline for all datasets
+# run_all_datasets.sh - training loop for everything
 #
-# Usage:
-#   ./run_all_datasets.sh                   # Run full pipeline
-#   ./run_all_datasets.sh --smoke-test      # Quick validation run
-#   ./run_all_datasets.sh --pretrain-only   # Only pretrain on synthetic
-#   ./run_all_datasets.sh --dataset ETTh1   # Fine-tune single dataset
+# usage:
+#   ./run_all_datasets.sh                   # do the whole thing
+#   ./run_all_datasets.sh --smoke-test      # just a quick check
+#   ./run_all_datasets.sh --pretrain-only   # just synthetic stuff
+#   ./run_all_datasets.sh --dataset ETTh1   # fine tune one thing
 
-set -e  # Exit on error
+set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Activate venv if exists
+# get venv if its there
 if [ -d "venv" ]; then
     source venv/bin/activate
-    echo "[INFO] Activated venv"
+    echo "[INFO] venv on"
 fi
 
-# ============================================================================
-# Configuration
-# ============================================================================
-
+# config stuff
 SYNTHETIC_SAMPLES=1000000
 PRETRAIN_EPOCHS=10
 FINETUNE_EPOCHS=20
@@ -31,7 +28,7 @@ LR=0.0001
 CHECKPOINT_DIR="models/diffusion_tsf/checkpoints/universal_v2"
 DATASETS_DIR="datasets"
 
-# Parse arguments
+# args
 SMOKE_TEST=""
 PRETRAIN_ONLY=""
 SINGLE_DATASET=""
@@ -57,15 +54,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ============================================================================
-# Step 0: Prepare Data
-# ============================================================================
-
+# prepare data
 echo "============================================================"
-echo "STEP 0: Data Preparation"
+echo "prep data"
 echo "============================================================"
 
-# Combine traffic files if needed
+# traffic files need to be squashed together
 TRAFFIC_DIR="$DATASETS_DIR/traffic"
 TRAFFIC_CSV="$TRAFFIC_DIR/traffic.csv"
 TRAFFIC_PART1="$TRAFFIC_DIR/traffic_part1.csv"
@@ -73,48 +67,42 @@ TRAFFIC_PART2="$TRAFFIC_DIR/traffic_part2.csv"
 
 if [ ! -f "$TRAFFIC_CSV" ]; then
     if [ -f "$TRAFFIC_PART1" ] && [ -f "$TRAFFIC_PART2" ]; then
-        echo "[INFO] Combining traffic_part1.csv and traffic_part2.csv..."
+        echo "[INFO] smashing traffic_part1 and part2 together..."
         
-        # Copy part1 entirely
+        # part1
         cat "$TRAFFIC_PART1" > "$TRAFFIC_CSV"
         
-        # Append part2 without header
+        # part2 without header
         tail -n +2 "$TRAFFIC_PART2" >> "$TRAFFIC_CSV"
         
-        echo "[INFO] Created $TRAFFIC_CSV"
+        echo "[INFO] done $TRAFFIC_CSV"
         wc -l "$TRAFFIC_CSV"
     else
-        echo "[WARN] Traffic parts not found, skipping combination"
+        echo "[WARN] missing traffic parts"
     fi
 else
-    echo "[INFO] traffic.csv already exists"
+    echo "[INFO] traffic.csv exists"
 fi
 
-# ============================================================================
-# Smoke Test Mode
-# ============================================================================
-
+# smoke test
 if [ -n "$SMOKE_TEST" ]; then
     echo "============================================================"
-    echo "SMOKE TEST MODE"
+    echo "SMOKE TEST"
     echo "============================================================"
     
     python -m models.diffusion_tsf.train_universal_v2 --smoke-test
     
     echo ""
-    echo "[SUCCESS] Smoke test completed!"
+    echo "[SUCCESS] smoke test done"
     exit 0
 fi
 
-# ============================================================================
-# Step 1: Pretrain on Synthetic Data (1M samples, 7 variates)
-# ============================================================================
-
+# pretrain (synthetic)
 PRETRAINED_CKPT="$CHECKPOINT_DIR/pretrained_diffusion.pt"
 
 if [ ! -f "$PRETRAINED_CKPT" ] || [ -n "$PRETRAIN_ONLY" ]; then
     echo "============================================================"
-    echo "STEP 1: Pretraining on Synthetic Data"
+    echo "pretraining"
     echo "============================================================"
     
     python -m models.diffusion_tsf.train_universal_v2 \
@@ -126,32 +114,29 @@ if [ ! -f "$PRETRAINED_CKPT" ] || [ -n "$PRETRAIN_ONLY" ]; then
         --checkpoint-dir "$CHECKPOINT_DIR"
     
     if [ -n "$PRETRAIN_ONLY" ]; then
-        echo "[INFO] Pretrain-only mode, exiting"
+        echo "[INFO] pretrain only, stopping"
         exit 0
     fi
 else
-    echo "[INFO] Pretrained checkpoint exists: $PRETRAINED_CKPT"
+    echo "[INFO] already got pretrained ckpt: $PRETRAINED_CKPT"
 fi
 
-# ============================================================================
-# Step 2: Fine-tune on Real Datasets
-# ============================================================================
-
+# finetune on real data
 echo "============================================================"
-echo "STEP 2: Fine-tuning on Real Datasets"
+echo "finetuning real stuff"
 echo "============================================================"
 
-# 7-variate datasets (direct fine-tuning)
+# 7-var
 DATASETS_7VAR="ETTh1 ETTh2 ETTm1 ETTm2 illness"
 
-# >7-variate datasets (requires CCM)
+# >7-var (needs CCM)
 DATASETS_CCM="electricity weather exchange_rate traffic"
 
 finetune_dataset() {
     local dataset=$1
     echo ""
     echo "------------------------------------------------------------"
-    echo "Fine-tuning on: $dataset"
+    echo "dataset: $dataset"
     echo "------------------------------------------------------------"
     
     python -m models.diffusion_tsf.train_universal_v2 \
@@ -165,42 +150,38 @@ finetune_dataset() {
 }
 
 if [ -n "$SINGLE_DATASET" ]; then
-    # Fine-tune single dataset
     finetune_dataset "$SINGLE_DATASET"
 else
-    # Fine-tune all datasets
+    # do all of them
     
     echo ""
-    echo "[INFO] Fine-tuning 7-variate datasets (direct)..."
+    echo "[INFO] 7-var datasets..."
     for dataset in $DATASETS_7VAR; do
         finetune_dataset "$dataset"
     done
     
     echo ""
-    echo "[INFO] Fine-tuning >7-variate datasets (with CCM)..."
+    echo "[INFO] CCM datasets..."
     for dataset in $DATASETS_CCM; do
         finetune_dataset "$dataset"
     done
 fi
 
-# ============================================================================
-# Summary
-# ============================================================================
-
+# training complete
 echo ""
 echo "============================================================"
-echo "TRAINING COMPLETE"
+echo "DONE"
 echo "============================================================"
 echo ""
-echo "Checkpoints saved to: $CHECKPOINT_DIR"
+echo "ckpts in: $CHECKPOINT_DIR"
 echo ""
 ls -la "$CHECKPOINT_DIR"
 echo ""
 
-# List cluster visualizations if they exist
+# clusters?
 CLUSTER_VIZS=$(find "$CHECKPOINT_DIR" -name "cluster_visualization.png" 2>/dev/null || true)
 if [ -n "$CLUSTER_VIZS" ]; then
-    echo "Cluster visualizations:"
+    echo "cluster viz:"
     echo "$CLUSTER_VIZS"
 fi
 

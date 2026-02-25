@@ -1,9 +1,7 @@
 """
-Dataset utilities for Diffusion TSF.
+Dataset helpers.
 
-Provides:
-- 1D augmentations for time series
-- RealTS synthetic data loading for pre-training
+got some 1D augs and RealTS stuff for pre-training.
 """
 
 import torch
@@ -13,7 +11,7 @@ import logging
 from typing import Optional
 from dataclasses import dataclass
 
-# Import RealTS for synthetic data generation (ViTime-inspired)
+# load RealTS for synthetic data 
 try:
     from .realts import RealTS
 except ImportError:
@@ -24,12 +22,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DatasetConfig:
-    """Dataset-level configuration toggles."""
-    representation_mode: str = "cdf"  # "pdf" (stripe) or "cdf" (occupancy)
+    """just a config class for dataset stuff."""
+    representation_mode: str = "cdf"  # pdf or cdf
 
     def __post_init__(self):
         if self.representation_mode not in ["pdf", "cdf"]:
-            raise ValueError("representation_mode must be 'pdf' or 'cdf'")
+            raise ValueError("bad representation_mode")
 
 
 def apply_1d_augmentations(
@@ -44,19 +42,20 @@ def apply_1d_augmentations(
     stretch_min: float = 0.7,
     stretch_max: float = 1.3,
 ) -> torch.Tensor:
-    """Apply lightweight 1D augmentations (scaling, warp, and stretch) to a sequence.
-
-    stretch > 1.0 repeats/holds values (nearest), stretch < 1.0 averages/merges (linear),
-    and the result is always resized back to the original length to preserve shape.
+    """
+    Apply some lightweight 1D augs (scaling, warp, stretch).
+    
+    stretch > 1.0 repeats stuff, < 1.0 averages.
+    always resizes back to original len.
     """
     seq = seq.clone()
     
-    # Random scaling
+    # random scaling
     if torch.rand(1).item() < scale_prob:
         scale = torch.empty(1).uniform_(scale_min, scale_max).item()
         seq = seq * scale
     
-    # Time-warp via interpolation
+    # time-warp
     if torch.rand(1).item() < warp_prob:
         factor = torch.empty(1).uniform_(warp_min, warp_max).item()
         orig_len = seq.shape[-1]
@@ -70,11 +69,11 @@ def apply_1d_augmentations(
         ).squeeze(0).squeeze(0)
         
         if new_len > orig_len:
-            # Random crop back to original length
+            # crop it
             start = torch.randint(0, new_len - orig_len + 1, (1,)).item()
             seq = warped[start:start + orig_len]
         elif new_len < orig_len:
-            # Pad (replicate edges) to original length; manual to support 1D
+            # pad it
             pad_total = orig_len - new_len
             pad_left = pad_total // 2
             pad_right = pad_total - pad_left
@@ -84,13 +83,13 @@ def apply_1d_augmentations(
         else:
             seq = warped
     
-    # Time-stretch (hold or average contiguous values), then resize back
+    # time-stretch
     if torch.rand(1).item() < stretch_prob:
         factor = torch.empty(1).uniform_(stretch_min, stretch_max).item()
         orig_len = seq.shape[-1]
         target_len = max(2, int(round(orig_len * factor)))
 
-        # If factor > 1 -> nearest neighbor repeat; if < 1 -> linear (averaging)
+        # if factor > 1 use nearest, else linear
         mode = 'nearest' if factor >= 1.0 else 'linear'
         stretched = F.interpolate(
             seq.unsqueeze(0).unsqueeze(0),

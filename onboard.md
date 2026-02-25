@@ -1,63 +1,63 @@
-# Onboarding Guide for Future AI Agents
+# onboarding guide for this thing
 
-## Project Summary
-This project implements a **Diffusion-based Time Series Forecasting (TSF)** model, inspired by the ViTime paper. It treats time series forecasting as a computer vision problem by converting 1D time series into 2D "stripe" images and using a U-Net backbone with DDPM/DDIM diffusion to generate future predictions.
+## summary
+diffusion for time series. basically treats time series like 2D images (stripes) and uses a U-Net + DDPM/DDIM to generate predictions.
 
-## Key Goals
-- **Multivariate Forecasting:** Supports forecasting multiple variables simultaneously.
-- **Universal Pre-training:** Pretrain on 1M synthetic samples (7 variates), then fine-tune on any dataset.
-- **Channel Clustering (CCM):** For datasets with >7 variates, uses Channel Clustering Module to cluster channels into 7 "super-channels" compatible with pretrained model.
-- **Rich Synthetic Data:** Uses a sophisticated multivariate augmentation system to generate realistic synthetic pre-training data.
+## key stuff
+- multivariate: handles multiple variables at once.
+- universal pre-train: train on 1M fake samples (7 vars), then fine-tune on real stuff.
+- CCM: for datasets with more than 7 variables. clusters them into 7 "super-channels".
+- multivariate augs: generates realistic synthetic data for pre-training.
 
-## File Structure & Key Components
+## file layout
 
-### Models
-- `models/diffusion_tsf/`: Core diffusion model logic.
-    - `diffusion_model.py`: Main `DiffusionTSF` class. Handles 2D encoding/decoding, forward pass, generation.
-    - `unet.py`: Conditional U-Net backbone (2D).
-    - `ccm_adapter.py`: **Channel Clustering Module** - clusters >7 variates into 7 super-channels for pretrained model.
-    - `dataset.py`: `ElectricityDataset` for real data and `get_synthetic_dataloader`.
-    - `realts.py`: Synthetic data generator classes.
-    - `train_universal_v2.py`: **Primary Entry Point**. Pretrain on synthetic → fine-tune on all datasets.
-    - `train_electricity.py`: Single-dataset training with Optuna HP search.
-    - `config.py`: Configuration dataclasses.
-    - `tests/test_ccm_adapter.py`: Unit tests for CCM module.
+### models
+- `models/diffusion_tsf/`: core diffusion logic.
+    - `diffusion_model.py`: main `DiffusionTSF` class. encoding/decoding, forward pass, generation.
+    - `unet.py`: the U-Net backbone (2D).
+    - `ccm_adapter.py`: clusters >7 vars into 7 super-channels.
+    - `dataset.py`: dataset stuff (Electricity + synthetic).
+    - `realts.py`: synthetic data generators.
+    - `train_universal_v2.py`: **THE MAIN SCRIPT**. pretrain on synthetic → fine-tune everything.
+    - `train_electricity.py`: single dataset training + optuna.
+    - `config.py`: config dataclasses.
+    - `tests/`: some tests for CCM etc.
 
-- `models/iTransformer/`: iTransformer model (Stage 1 predictor/guidance).
-- `models/TimeSeriesCCM-main/`: Reference implementation of CCM paper.
+- `models/iTransformer/`: iTransformer (Stage 1 predictor).
+- `models/TimeSeriesCCM-main/`: reference code for CCM.
 
-### Scripts
-- `run_all_datasets.sh`: **Master shell script** - runs full pipeline on all 9 datasets.
+### scripts
+- `run_all_datasets.sh`: **master script** - runs everything on 9 datasets.
     ```bash
-    ./run_all_datasets.sh --smoke-test    # Quick validation
-    ./run_all_datasets.sh                  # Full training (all datasets)
-    ./run_all_datasets.sh --dataset ETTh1  # Single dataset
+    ./run_all_datasets.sh --smoke-test    # quick check
+    ./run_all_datasets.sh                  # do everything
+    ./run_all_datasets.sh --dataset ETTh1  # just one dataset
     ```
-- `train_universal_v2.py`: Python entry point.
+- `train_universal_v2.py`: entry point.
     ```bash
     python -m models.diffusion_tsf.train_universal_v2 --smoke-test
     python -m models.diffusion_tsf.train_universal_v2 --mode pretrain --synthetic-samples 1000000
     python -m models.diffusion_tsf.train_universal_v2 --mode finetune --dataset electricity
     ```
 
-## Architecture Highlights
+## architecture notes
 
-### 1. Unified L+F Channel Scheme
-Instead of stacking "guidance" and "lookback" as separate channels with misaligned time axes, we now use a single time axis of length `Lookback + Forecast`.
-- **Input Canvas:** Shape `(Batch, Channels, Height, L+F)`.
-- **Past Part (0 to L):** Contains the ground truth past data.
-- **Future Part (L to L+F):** Contains the noisy future (during training/inference).
-- **Auxiliary Channels:** Coordinate grids, time ramps, and sine waves are injected across the full `L+F` width.
-- **Guidance:** Stage 1 forecasts are converted to 2D and placed in the "Future" part of the canvas.
+### 1. Unified L+F scheme
+we use a single time axis of length `Lookback + Forecast`.
+- Input: `(Batch, Channels, Height, L+F)`.
+- Past (0 to L): ground truth.
+- Future (L to L+F): noisy future.
+- Auxiliary: coordinate grids, time ramps, sine waves.
+- Guidance: Stage 1 forecasts as "ghost images" in the future part.
 
-### 2. Multivariate Augmentation
-Located in `models/diffusion_tsf/augmentation.py`.
-- Generates synthetic multivariate time series by coupling independent random processes.
-- **Updated (2026-01-27):** Now uses "Organic" generators (Random Walks, Inverse FFT, Seasonal patterns, etc. from `realts.py`) as the base behavior for each variable, ensuring realistic textures.
-- **Updated (2026-02-20):** Periodic generators (`PWB`, `seasonal_periodicity`, and `TWDB` via `PWB`) now support **irregular period lengths** — 50% of samples have non-uniform period spacing at three severity levels (mild/medium/extreme). Controlled by `_choose_irregularity()` and `_irregular_phase()` in `realts.py`.
-- Uses "Impact Functions" to model causal effects between variables.
-- Used by `RealTS` dataset when `num_variables > 1`.
-- **Visualization:** Use `models/diffusion_tsf/visualize_synthetic.py` to generate sample plots of the synthetic data.
+### 2. multivariate augs
+in `models/diffusion_tsf/augmentation.py`.
+- generates fake data by coupling random processes.
+- uses "Organic" generators (Random Walks, FFT, etc.) from `realts.py`.
+- periodic generators support irregular periods (50% of samples).
+- impact functions for causal effects.
+- use `models/diffusion_tsf/visualize_synthetic.py` to see what it looks like.
+mple plots of the synthetic data.
 
 ### 3. Channel Clustering Module (CCM)
 For datasets with >7 variates (electricity=321, traffic=862, weather=21, exchange_rate=8):

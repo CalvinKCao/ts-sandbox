@@ -1,12 +1,9 @@
 """
-Channel Clustering Module (CCM) Adapter.
+Channel Clustering Module (CCM) stuff.
 
-Adapts the CCM approach from "From Similarity to Superiority: Channel Clustering
-for Time Series Forecasting" (Chen et al., NeurIPS 2024) to work with our
-pretrained 7-variate diffusion model.
-
-Key idea: For datasets with >7 variates, cluster channels into 7 "super-channels",
-pass through the pretrained model, then expand predictions back to original channels.
+tries to do what that "From Similarity to Superiority" paper says.
+useful if you have more than 7 variables (our model only likes 7).
+squashes them down to 7 super-channels, runs the model, then blows them back up.
 """
 
 import math
@@ -17,17 +14,10 @@ from typing import Optional, Tuple
 
 
 def sinkhorn(out: torch.Tensor, epsilon: float = 0.05, iterations: int = 3) -> torch.Tensor:
-    """Sinkhorn normalization for soft clustering assignments.
-    
-    Args:
-        out: Raw logits (n_vars, n_clusters)
-        epsilon: Temperature for softmax
-        iterations: Number of Sinkhorn iterations (unused, we use simple softmax)
-    
-    Returns:
-        Normalized probabilities (n_vars, n_clusters)
+    """sinkhorn for soft clustering.
+    just a fancy softmax basically.
     """
-    # Numerical stability: subtract max before exp (like log-sum-exp trick)
+    # subtract max so it doesnt blow up
     out_stable = out / epsilon
     out_stable = out_stable - out_stable.max(dim=1, keepdim=True).values
     Q = torch.exp(out_stable)
@@ -37,10 +27,8 @@ def sinkhorn(out: torch.Tensor, epsilon: float = 0.05, iterations: int = 3) -> t
 
 
 class ClusterAssigner(nn.Module):
-    """Assigns channels to clusters based on learned embeddings.
-    
-    Computes soft cluster assignments using cosine similarity between
-    channel embeddings and cluster prototypes.
+    """maps channels to clusters.
+    uses cosine similarity between channel embeddings and prototypes.
     """
     
     def __init__(
@@ -57,47 +45,41 @@ class ClusterAssigner(nn.Module):
         self.d_model = d_model
         self.epsilon = epsilon
         
-        # Project time series to embedding space
+        # time series -> embedding
         self.linear = nn.Linear(seq_len, d_model)
         
-        # Learnable cluster embeddings (prototypes)
+        # learnable cluster prototypes
         self.cluster_emb = nn.Parameter(torch.empty(n_clusters, d_model))
         nn.init.kaiming_uniform_(self.cluster_emb, a=math.sqrt(5))
         
         self.l2norm = lambda x: F.normalize(x, dim=-1, p=2)
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute cluster assignments.
-        
-        Args:
-            x: Input time series (batch, n_vars, seq_len)
-            
-        Returns:
-            prob_avg: Cluster probabilities (n_vars, n_clusters)
-            cluster_emb: Updated cluster embeddings (n_clusters, d_model)
+        """assignments go here.
+        x is (batch, n_vars, seq_len)
         """
         B, C, L = x.shape
         
-        # Embed each channel: (B, C, L) -> (B, C, d_model)
+        # embed channels: (B, C, L) -> (B, C, d_model)
         x_emb = self.linear(x)
         
-        # Flatten batch for similarity computation: (B*C, d_model)
+        # flatten to (B*C, d_model) for similarity
         x_emb_flat = x_emb.reshape(-1, self.d_model)
         
-        # Cosine similarity with cluster embeddings: (B*C, n_clusters)
+        # cosine sim: (B*C, n_clusters)
         sim = torch.mm(self.l2norm(x_emb_flat), self.l2norm(self.cluster_emb).t())
         
-        # Reshape to (B, C, n_clusters) and average over batch
+        # average over batch -> (C, n_clusters)
         prob = sim.reshape(B, C, self.n_clusters)
-        prob_avg = torch.mean(prob, dim=0)  # (C, n_clusters)
+        prob_avg = torch.mean(prob, dim=0)
         
-        # Apply sinkhorn normalization
+        # normalize
         prob_avg = sinkhorn(prob_avg, epsilon=self.epsilon)
         
         return prob_avg, self.cluster_emb
     
     def get_cluster_assignments(self, x: torch.Tensor) -> torch.Tensor:
-        """Get hard cluster assignments for visualization.
+        """get hard assignments for viz stuff.
         
         Args:
             x: Input time series (batch, n_vars, seq_len)

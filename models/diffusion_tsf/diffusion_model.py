@@ -1,8 +1,8 @@
 """
 Complete Diffusion-based Time Series Forecasting Model.
 
-This module integrates:
-- Preprocessing (normalization, 2D encoding, blur)
+stuff in here:
+- Preprocessing (norm, 2D encoding, blur)
 - Conditional U-Net
 - DDPM/DDIM diffusion
 - 2D to 1D decoding
@@ -45,38 +45,26 @@ def beam_search_decoder(
     search_radius: int = 10,
     eps: float = 1e-8
 ) -> torch.Tensor:
-    """Beam search decoder for CDF/occupancy maps with temporal continuity.
+    """beam search for decoding the CDF/occupancy maps.
     
-    Finds a continuous path through the probability map that maximizes
-    likelihood while penalizing large vertical jumps between time steps.
-    
-    Args:
-        cdf_map: Occupancy map of shape (batch, height, seq_len), values in [0, 1].
-                 High at bottom, low at top.
-        bin_centers: Tensor of shape (height,) mapping bin indices to values.
-        beam_width: Number of candidate paths to keep at each step.
-        jump_penalty_scale: Multiplier for jump penalty (higher = smoother paths).
-        search_radius: Max vertical pixels to search from previous position.
-        eps: Small constant for numerical stability in log.
-        
-    Returns:
-        Decoded values of shape (batch, seq_len).
+    finds a path through the prob map. tries to maximize likelihood while 
+    punishing big jumps between time steps so it stays smoothish.
     """
     batch_size, height, seq_len = cdf_map.shape
     device = cdf_map.device
     
-    # 1. Convert CDF to PDF: drop[y] = cdf[y] - cdf[y+1] (value drops going up)
-    # For occupancy: high at bottom, low at top, so cdf[y] - cdf[y+1] > 0 at transition
-    # Append zeros at top for shape consistency
+    # 1. cdf to pdf conversion: drop[y] = cdf[y] - cdf[y+1]
+    # occupancy is high at bottom, low at top. 
+    # stick some zeros at the top so shape matches
     pdf = torch.zeros_like(cdf_map)
     pdf[:, :-1, :] = cdf_map[:, :-1, :] - cdf_map[:, 1:, :]
     pdf = torch.clamp(pdf, min=0.0)
     
-    # Normalize PDF per column to get valid probabilities
+    # norm the pdf per column
     pdf_sum = pdf.sum(dim=1, keepdim=True).clamp(min=eps)
     pdf = pdf / pdf_sum
     
-    # Log probabilities (with floor to avoid -inf)
+    # log probs (clamped to avoid -inf explosion)
     log_pdf = torch.log(pdf.clamp(min=eps))  # (batch, height, seq_len)
     
     results = []
@@ -84,20 +72,19 @@ def beam_search_decoder(
     for b in range(batch_size):
         log_pdf_b = log_pdf[b]  # (height, seq_len)
         
-        # Initialize: top beam_width starting positions at t=0
+        # start with top beam_width positions at t=0
         init_scores = log_pdf_b[:, 0]  # (height,)
         topk_scores, topk_indices = init_scores.topk(min(beam_width, height))
         
-        # Each beam: (score, [path indices])
-        # Store as tensors for efficiency
+        # beams: (score, [path indices])
         beam_scores = topk_scores  # (beam_width,)
         beam_paths = topk_indices.unsqueeze(1)  # (beam_width, 1)
         
-        # Step through time
+        # walk through time
         for t in range(1, seq_len):
             num_beams = beam_scores.shape[0]
             
-            # Current ending positions for each beam
+            # current ends for each beam
             prev_positions = beam_paths[:, -1]  # (num_beams,)
             
             # For each beam, compute scores for all possible next positions

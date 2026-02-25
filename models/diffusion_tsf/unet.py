@@ -1,14 +1,14 @@
 """
-Conditional 2D U-Net for Diffusion-based Time Series Forecasting.
+2D U-Net for diffusion.
 
-This U-Net is designed for non-square, time-series-shaped images:
-- Height: Fixed (e.g., 128 - the value resolution)
-- Width: Variable (sequence length)
+built for long skinny images:
+- Height: fixed (value resolution, usually 64 or 128)
+- Width: variable (sequence length)
 
-Key features:
-- Residual blocks with Group Normalization
-- Sinusoidal time embedding for diffusion timestep
-- Conditioning via channel-wise concatenation of past context image
+stuff in here:
+- res blocks with groupnorm
+- timestep embeddings
+- visual conditioning (concat)
 """
 
 import torch
@@ -22,9 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 class SinusoidalPositionalEncoding(nn.Module):
-    """Sinusoidal positional encoding for sequence models.
-    
-    Adds position information to a sequence via sin/cos embeddings.
+    """pos encodings for transformers.
+    adds sin/cos waves so the model knows where it is.
     """
     
     def __init__(self, dim: int, max_len: int = 2048):
@@ -38,21 +37,15 @@ class SinusoidalPositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Input tensor of shape (batch, seq_len, dim)
-        Returns:
-            Output tensor of shape (batch, seq_len, dim) with positional encoding added
-        """
+        """adds PE to x."""
         return x + self.pe[:, :x.size(1), :]
 
 
 class TransformerEncoderLayer1D(nn.Module):
-    """Single transformer encoder layer for 1D sequences.
-    
-    Pre-norm architecture with:
-    - Multi-head self-attention
-    - Feedforward network with GELU activation
+    """transformer block for 1D.
+    pre-norm setup:
+    - multi-head attention
+    - mlp with gelu
     """
     
     def __init__(self, dim: int, num_heads: int = 4, mlp_ratio: float = 4.0, dropout: float = 0.1):
@@ -69,33 +62,27 @@ class TransformerEncoderLayer1D(nn.Module):
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Input tensor of shape (batch, seq_len, dim)
-        Returns:
-            Output tensor of shape (batch, seq_len, dim)
-        """
-        # Self-attention with pre-norm
+        """standard transformer pass."""
+        # attention
         x_norm = self.norm1(x)
         attn_out, _ = self.attn(x_norm, x_norm, x_norm)
         x = x + attn_out
         
-        # MLP with pre-norm
+        # feed forward
         x = x + self.mlp(self.norm2(x))
         return x
 
 
 class TimeSeriesContextEncoder(nn.Module):
-    """1D Encoder for raw time series values.
+    """encoder for the 1D stuff.
     
-    Processes the raw past time series data (values + time indices) to produce
-    context embeddings that can be used for cross-attention in the U-Net.
+    processes raw past data (values + time) for cross-attention.
     
-    Input: (batch, seq_len, context_input_channels)
-        - Channel 0: Normalized time series values
-        - Channel 1: Normalized time indices (0 to 1 ramp)
+    Input: (batch, seq_len, 2)
+        - val 0: normalized values
+        - val 1: time indices
     
-    Output: (batch, seq_len, context_embedding_dim)
+    Output: (batch, seq_len, dim)
     """
     
     def __init__(

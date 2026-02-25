@@ -1,24 +1,20 @@
 """ 
-Universal Training Script v2 - Trains on all datasets with CCM support.
-
-Phases:
-  1. PRETRAIN: Train iTransformer + Diffusion on 1M synthetic samples (7 variates)
-  2. FINETUNE: Fine-tune on real datasets
-     - 7-variate datasets: Direct fine-tuning
-     - >7-variate datasets: Use CCM to cluster channels to 7
+Universal Training Script v2 - trains on all datasets with CCM support.
+phasses:
+  1. PRETRAIN - train iTransformer + Diffusion on 1M synthetic samples (7 variates)
+  2. FINETUNE - fine-tune on real datasets
+     - 7-variate datasets: direct fine-tuning
+     - >7-variate datasets: use CCM to cluster channels to 7
 
 Usage:
-    # Pre-train (run once)
+    # pre-train (run once)
     python -m models.diffusion_tsf.train_universal_v2 --mode pretrain --synthetic-samples 1000000
     
-    # Fine-tune on specific dataset
+    # fine-tune on specific dataset
     python -m models.diffusion_tsf.train_universal_v2 --mode finetune --dataset ETTh1
     
-    # Fine-tune with CCM (for >7 variate datasets)
+    # fine-tune with CCM (for >7 variate datasets)
     python -m models.diffusion_tsf.train_universal_v2 --mode finetune --dataset electricity
-    
-    # Smoke test (minimal resources)
-    python -m models.diffusion_tsf.train_universal_v2 --smoke-test
 """
 
 import argparse
@@ -36,13 +32,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-# Setup paths
+# path hacks
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# Local imports
+# internal imports
 from models.diffusion_tsf.config import DiffusionTSFConfig
 from models.diffusion_tsf.diffusion_model import DiffusionTSF
 from models.diffusion_tsf.dataset import get_synthetic_dataloader
@@ -57,7 +53,7 @@ from models.diffusion_tsf.train_electricity import (
     EarlyStopping,
 )
 
-# Setup logging
+# setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -66,14 +62,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# Constants
-# ============================================================================
-
+# constants and stuff
 DATASETS_DIR = os.path.join(project_root, 'datasets')
 CHECKPOINT_DIR = os.path.join(current_dir, 'checkpoints', 'universal_v2')
 
-# Dataset info: (path, default_target, seasonal_period, n_variates)
+# dataset info: (path, default_target, seasonal_period, n_variates)
 DATASET_INFO = {
     'ETTh1': ('ETT-small/ETTh1.csv', 'OT', 24, 7),
     'ETTh2': ('ETT-small/ETTh2.csv', 'OT', 24, 7),
