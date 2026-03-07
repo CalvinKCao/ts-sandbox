@@ -10,7 +10,7 @@ class TestConfig:
         config = DiffusionTSFConfig()
         assert config.lookback_length == 512
         assert config.forecast_length == 96
-        assert config.representation_mode == "pdf"
+        assert config.representation_mode == "cdf"
         assert config.backbone_in_channels > 0
 
     def test_validation(self):

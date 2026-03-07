@@ -405,13 +405,28 @@ class DiffusionTSF(nn.Module):
         stats: Tuple[torch.Tensor, torch.Tensor],
         forecast_length: int
     ) -> torch.Tensor:
-        """Generate 2D "ghost image" from Stage 1 guidance model."""
+        """Generate 2D "ghost image" from Stage 1 guidance model.
+
+        When lookback_overlap > 0, the first K guidance columns come from the
+        actual observed past (perfect guidance for the overlap region) and the
+        remaining H columns come from the Stage 1 predictor.
+        """
         if self.guidance_model is None:
             raise ValueError("Guidance model is None but guidance channel is requested")
-        with torch.no_grad():
-            coarse_forecast = self.guidance_model.get_forecast(past, forecast_length)
+
+        K = self.config.lookback_overlap
+        H = forecast_length - K  # pure forecast horizon
         mean, std = stats
+
+        with torch.no_grad():
+            coarse_forecast = self.guidance_model.get_forecast(past, H)
+
         coarse_norm = (coarse_forecast - mean) / std
+
+        if K > 0:
+            overlap_norm = past_norm[..., -K:]
+            coarse_norm = torch.cat([overlap_norm, coarse_norm], dim=-1)
+
         guidance_2d = self.encode_to_2d(coarse_norm, scale_for_diffusion=True)
         return guidance_2d
     
@@ -785,7 +800,14 @@ class DiffusionTSF(nn.Module):
                 encoder_hidden_states=encoder_hidden_states
             )
         
-        noise_loss = F.mse_loss(noise_pred, noise)
+        K = self.config.lookback_overlap
+        if K > 0:
+            noise_loss_past = F.mse_loss(noise_pred[..., :K], noise[..., :K])
+            noise_loss_future = F.mse_loss(noise_pred[..., K:], noise[..., K:])
+            noise_loss = self.config.past_loss_weight * noise_loss_past + noise_loss_future
+        else:
+            noise_loss = F.mse_loss(noise_pred, noise)
+
         x0_pred = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
         emd_loss = self._compute_emd_loss(x0_pred, future_2d)
         
@@ -973,6 +995,13 @@ class DiffusionTSF(nn.Module):
             search_radius=search_radius
         )
         future = self._denormalize(future_norm, stats)
+
+        # Discard the reconstructed overlap, keep only the real forecast
+        K = self.config.lookback_overlap
+        if K > 0:
+            future = future[..., K:]
+            future_norm = future_norm[..., K:]
+
         result = {
             'prediction': future,
             'prediction_norm': future_norm,

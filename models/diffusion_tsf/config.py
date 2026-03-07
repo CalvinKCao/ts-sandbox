@@ -45,6 +45,18 @@ class DiffusionTSFConfig:
     lookback_length: int = 512
     forecast_length: int = 96
     
+    # Lookback overlap: predict the last K observed timesteps alongside the
+    # future horizon to smooth the past/future boundary. The diffusion model
+    # denoises a (K+H)-wide region; during inference the first K are discarded.
+    lookback_overlap: int = 0
+    past_loss_weight: float = 0.3
+    
+    # Lookback overlap: predict the last K observed timesteps alongside the
+    # future horizon to smooth the past/future boundary. The diffusion model
+    # denoises a (K+H)-wide region; during inference the first K are discarded.
+    lookback_overlap: int = 0
+    past_loss_weight: float = 0.3
+    
     # multivariate support
     num_variables: int = 1  # how many variables (1 = uni, >1 = multi)
     

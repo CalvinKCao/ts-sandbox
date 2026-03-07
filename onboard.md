@@ -1,298 +1,157 @@
-# onboarding guide for this thing
+# onboarding guide
 
 ## summary
-diffusion for time series. basically treats time series like 2D images (stripes) and uses a U-Net + DDPM/DDIM to generate predictions.
+diffusion for time series. treats time series like 2D images (stripes/occupancy maps) and uses a U-Net + DDPM/DDIM to generate predictions. iTransformer provides "ghost image" guidance for the diffusion model.
 
 ## key stuff
-- multivariate: handles multiple variables at once.
-- universal pre-train: train on 1M fake samples (7 vars), then fine-tune on real stuff.
-- CCM: for datasets with more than 7 variables. clusters them into 7 "super-channels".
-- multivariate augs: generates realistic synthetic data for pre-training.
+- multivariate: handles multiple variables as separate image channels.
+- dimensionality groups: each unique column count gets its own pretrained model. high-variate datasets (>32 cols) are split into 32-dim subsets.
+- synthetic pretrain + real fine-tune: for each dim group, pretrain on 100k synthetic samples, then fine-tune on real data.
+- iTransformer guidance: Stage 1 coarse forecast → diffusion refines it.
+- multi-GPU parallel: high-variate subset fine-tuning distributed across GPUs.
 
 ## file layout
 
+### root scripts
+- `pipeline.sh`: **THE master script** — runs everything.
+    ```bash
+    ./pipeline.sh                          # full pipeline
+    ./pipeline.sh --smoke-test             # quick validation
+    ./pipeline.sh --gpus 4                 # parallel fine-tuning
+    ./pipeline.sh --dataset electricity    # single dataset
+    ./pipeline.sh --pretrain-only          # just Phase 1
+    ```
+- `slurm_pipeline.sh`: Alliance HPC Slurm wrapper for pipeline.sh.
+- `setup.sh`: one-time env setup (venv, CUDA, deps).
+- `alliance_setup.sh`, `alliance_setup_killarney.sh`: cluster-specific setup.
+- `sync_results.sh`: pull results from remote cluster.
+- `summarize_results.py`: generate markdown report from eval results.
+
 ### models
 - `models/diffusion_tsf/`: core diffusion logic.
-    - `diffusion_model.py`: main `DiffusionTSF` class. encoding/decoding, forward pass, generation.
-    - `unet.py`: the U-Net backbone (2D).
-    - `ccm_adapter.py`: clusters >7 vars into 7 super-channels.
-    - `dataset.py`: dataset stuff (Electricity + synthetic).
-    - `realts.py`: synthetic data generators.
-    - `train_universal_v2.py`: **THE MAIN SCRIPT**. pretrain on synthetic → fine-tune everything.
-    - `train_electricity.py`: single dataset training + optuna.
+    - `diffusion_model.py`: main `DiffusionTSF` class.
+    - `unet.py`: U-Net backbone.
+    - `train_7var_pipeline.py`: **the Python entry point** — pretrain, finetune, eval, baseline.
+    - `train_electricity.py`: single-dataset training + optuna (used internally).
+    - `train_universal_v2.py`: older universal training script.
     - `config.py`: config dataclasses.
-    - `tests/`: some tests for CCM etc.
+    - `dataset.py`: dataset loading + synthetic data.
+    - `realts.py`: synthetic data generators.
+    - `augmentation.py`: multivariate augmentation.
+    - `visualize_comparison.py`: iTransformer vs Diffusion comparison plots.
+    - `visualize_7var.py`: per-subset visualizations.
+    - `evaluate_7var.py`: standalone evaluation.
+    - `ccm_adapter.py`: channel clustering module (legacy approach).
+    - `guidance.py`: iTransformerGuidance wrapper.
+    - `tests/`: unit tests.
 
 - `models/iTransformer/`: iTransformer (Stage 1 predictor).
-- `models/TimeSeriesCCM-main/`: reference code for CCM.
 
-### scripts
-- `run_all_datasets.sh`: **master script** - runs everything on 9 datasets.
-    ```bash
-    ./run_all_datasets.sh --smoke-test    # quick check
-    ./run_all_datasets.sh                  # do everything
-    ./run_all_datasets.sh --dataset ETTh1  # just one dataset
-    ```
-- `train_universal_v2.py`: entry point.
-    ```bash
-    python -m models.diffusion_tsf.train_universal_v2 --smoke-test
-    python -m models.diffusion_tsf.train_universal_v2 --mode pretrain --synthetic-samples 1000000
-    python -m models.diffusion_tsf.train_universal_v2 --mode finetune --dataset electricity
-    ```
+### legacy
+- `legacy/scripts/`: old shell scripts (run_all_datasets.sh, run_7var_pipeline.sh, etc.)
+- `legacy/`: old Python scripts (evaluate_latest.py, remote_evaluate.py, etc.)
+
+## pipeline overview
+
+### dimensionality groups
+| Dim | Datasets | Approach |
+|-----|----------|----------|
+| 7   | ETTh1/h2/m1/m2, illness | Direct fine-tune |
+| 8   | exchange_rate | Direct fine-tune |
+| 21  | weather | Direct fine-tune |
+| 32  | electricity (321 cols → 10 subsets), traffic (861 cols → ~26 subsets) | Split into 32-dim subsets |
+
+### phases
+1. **Phase 1 — Pretrain** (per unique dim): generate 100k synthetic samples → HP tune → pretrain iTransformer + Diffusion.
+2. **Phase 2 — Fine-tune** (per dataset): HP tune → fine-tune → evaluate. High-variate subsets run in parallel across GPUs.
+3. **Phase 3 — Baselines** (high-variate only): train a full-dim iTransformer on ALL columns for comparison.
+4. **Phase 4 — Viz**: comparison plots (ground truth vs iTransformer vs diffusion).
+
+### Python CLI modes
+```bash
+python -m models.diffusion_tsf.train_7var_pipeline --mode pretrain --n-variates 7
+python -m models.diffusion_tsf.train_7var_pipeline --mode finetune --dataset ETTh1 --n-variates 7
+python -m models.diffusion_tsf.train_7var_pipeline --mode finetune-subset --dataset electricity --subset-id electricity-0 --variate-indices 0,1,2,...,31 --n-variates 32
+python -m models.diffusion_tsf.train_7var_pipeline --mode baseline --dataset electricity
+python -m models.diffusion_tsf.train_7var_pipeline --mode list-subsets --dataset electricity --n-variates 32
+python -m models.diffusion_tsf.train_7var_pipeline --mode full  # legacy: run everything in one go
+```
+
+### checkpoint structure
+```
+checkpoints_7var/
+├── pretrained_dim7/
+│   ├── itransformer.pt
+│   └── diffusion.pt
+├── pretrained_dim8/
+│   ├── itransformer.pt
+│   └── diffusion.pt
+├── pretrained_dim21/ ...
+├── pretrained_dim32/ ...
+├── ETTh1/
+│   ├── best.pt
+│   └── metadata.json
+├── electricity-0/
+│   ├── best.pt
+│   └── metadata.json
+├── electricity-baseline/
+│   └── itransformer_full.pt
+├── training_manifest.json
+```
 
 ## architecture notes
 
-### 1. Unified L+F scheme
-we use a single time axis of length `Lookback + Forecast`.
-- Input: `(Batch, Channels, Height, L+F)`.
-- Past (0 to L): ground truth.
-- Future (L to L+F): noisy future.
-- Auxiliary: coordinate grids, time ramps, sine waves.
-- Guidance: Stage 1 forecasts as "ghost images" in the future part.
+### Lookback overlap (boundary smoothing)
+The diffusion model predicts the last K=8 lookback timesteps in addition to the H=192 forecast. Total prediction width = K+H = 200. Loss is weighted: 0.3× for the overlap region, 1.0× for the forecast. During inference, the overlap is trimmed — only the H-step forecast is returned. iTransformer still predicts H steps; its guidance is concatenated with actual observed values for the overlap region.
 
-### 2. multivariate augs
-in `models/diffusion_tsf/augmentation.py`.
-- generates fake data by coupling random processes.
-- uses "Organic" generators (Random Walks, FFT, etc.) from `realts.py`.
-- periodic generators support irregular periods (50% of samples).
-- impact functions for causal effects.
-- use `models/diffusion_tsf/visualize_synthetic.py` to see what it looks like.
-mple plots of the synthetic data.
+Config: `lookback_overlap=8`, `past_loss_weight=0.3`. Constants: `LOOKBACK_OVERLAP`, `PAST_LOSS_WEIGHT` in train_7var_pipeline.py.
 
-### 3. Channel Clustering Module (CCM)
-For datasets with >7 variates (electricity=321, traffic=862, weather=21, exchange_rate=8):
-- **ClusterAssigner**: Projects channels to embedding space, computes similarity to 7 cluster prototypes
-- **Aggregate**: Weighted average of channels per cluster → (B, 7, L)
-- **Expand**: Distribute predictions back using learned cluster probabilities
-- **ClusterLoss**: Encourages similar channels to cluster together (RBF similarity + sinkhorn)
+### Unified L+F scheme
+single time axis of length `Lookback + Forecast` (1024 + 200 = 1224).
+- Input: `(Batch, Channels, Height=128, L+F)`.
+- Past (0..L): ground truth stripe/occupancy.
+- Future (L..L+F): noisy future (K overlap + H forecast).
+- Aux channels: coordinate grid, time ramp, time sine.
+- Guidance channels: iTransformer "ghost images" in the future part.
 
-### Dataset Categories
-| Category | Datasets | Approach |
-|----------|----------|----------|
-| 7-variate | ETTh1/h2/m1/m2, illness | Direct fine-tune |
-| >7-variate | electricity, weather, exchange_rate, traffic | CCM → 7 clusters |
+### 2D Representation
+- **Image:** 128 × 1224 (height × width, with K=8 overlap).
+- PDF mode: one-hot stripe per timestep.
+- CDF mode: occupancy map (cumulative fill).
+- Vertical Gaussian blur softens the representation for diffusion.
 
-**Note:** `traffic.csv` is auto-combined from `traffic_part1.csv` + `traffic_part2.csv` by the shell script.
-
-## Gotchas & Tips
-- **Module Imports:** Run from project root: `python -m models.diffusion_tsf.script_name`
-- **Smoke Test:** Always run `--smoke-test` before full training to verify pipeline.
-- **OOM Issues:** Use `attention_levels=[2]` (bottleneck only) and small batch sizes.
-- **CCM for small variates:** CCM adapter rejects datasets with ≤7 variates (use direct fine-tuning).
-
-## Recent Changes
-- **2026-02-20:** 2D representation doubled to 128×1216 (was 64×608). >7-variate subsets capped at 5. Synthetic pretraining uses 100k samples (regenerated, not cached). Irregular periodicity added to synthetic generators.
-- **2026-02-04:** Added CCM adapter for >7-variate datasets, `train_universal_v2.py`, `run_all_datasets.sh`
-- Renamed `model.py` to `diffusion_model.py` to avoid conflict with `iTransformer/model`.
-- Implemented `train_universal.py` (legacy 4-phase approach).
-
-## 7-Variate Pipeline (NEW)
-
-Alternative to CCM approach: train separate models on non-overlapping 7-variate subsets.
-
-### Scripts
-- `run_7var_pipeline.sh`: Master shell script for 7-variate training
-    ```bash
-    ./run_7var_pipeline.sh --smoke-test    # Quick validation
-    ./run_7var_pipeline.sh                  # Full pipeline (train + eval)
-    ./run_7var_pipeline.sh --train          # Training only
-    ./run_7var_pipeline.sh --evaluate       # Evaluation only
-    ./run_7var_pipeline.sh --resume         # Resume interrupted training
-    ./run_7var_pipeline.sh --status         # Show progress
-    ```
-
-- `train_7var_pipeline.py`: Training script
-    ```bash
-    python -m models.diffusion_tsf.train_7var_pipeline --smoke-test
-    python -m models.diffusion_tsf.train_7var_pipeline --resume
-    python -m models.diffusion_tsf.train_7var_pipeline --list-subsets
-    python -m models.diffusion_tsf.train_7var_pipeline --only traffic-5
-    ```
-
-- `evaluate_7var.py`: Standalone evaluation (can run anytime on completed models)
-    ```bash
-    python -m models.diffusion_tsf.evaluate_7var --smoke-test
-    python -m models.diffusion_tsf.evaluate_7var --n-samples 50
-    ```
-
-### How it Works
-1. **Pretrain once** on 100k synthetic 7-variate samples (regenerated each run; no cache reuse)
-2. **Fine-tune** on each dataset:
-   - 7-variate datasets (ETTh1/h2/m1/m2, illness): Direct fine-tune
-   - >7-variate datasets: Random shuffle → partition into non-overlapping 7-variate subsets, **capped at 5 subsets per dataset**
-     - electricity (321 vars) → 5 subsets (of 45 possible)
-     - traffic (862 vars) → 5 subsets (of 123 possible)
-     - weather (21 vars) → 3 subsets: weather-0, weather-1, weather-2
-     - exchange_rate (8 vars) → 1 subset: exchange_rate-0
-3. **Evaluate** with single sample AND averaged (30 samples) metrics
-
-### 2D Representation Size
-- **Image dimensions:** 128 × 1216 (height × (lookback + forecast))
-- Lookback: 1024, Forecast: 192, Height: 128
-
-### Key Features
-- **Resumable:** Progress saved in `training_manifest.json`. Ctrl+C safe.
-- **Variate tracking:** Each subset's variate indices saved in `metadata.json`
-- **Separate eval:** Run evaluation anytime on completed models
-- **Early stopping:** patience=25, max_epochs=200
-
-### Output Structure
-```
-checkpoints_7var/
-├── pretrained_7var.pt
-├── training_manifest.json
-├── ETTh1/
-│   ├── best.pt
-│   ├── latest.pt
-│   └── metadata.json
-├── traffic-0/
-│   ├── best.pt
-│   └── metadata.json
-...
-
-results_7var/
-├── summary.csv
-├── all_results.json
-└── {subset_id}_results.json
-```
-
-### Syncing Results to Local Machine
-
-After starting training on remote GPU, sync results back to local:
+## Alliance HPC deployment
 
 ```bash
-# On LOCAL machine (not the GPU server)
-./sync_results.sh user@gpu-server           # Use default remote path
-./sync_results.sh user@gpu-server /path     # Custom remote path
-```
-
-This syncs:
-- `results_7var/` - All evaluation results and summary.csv
-- `checkpoints_7var/*.json` - Metadata only (NOT .pt weights)
-- Training logs
-
-**Results are saved incrementally** - you can sync while training is still running to see progress.
-
-## 7-Variate Pipeline with Multi-GPU Support
-
-### New Training Pipeline: `train_7var_pipeline.py`
-A complete pipeline for training on all datasets with HP tuning:
-
-```bash
-# Single GPU
-python -m models.diffusion_tsf.train_7var_pipeline --smoke-test  # Quick test
-python -m models.diffusion_tsf.train_7var_pipeline --resume      # Full training
-
-# Multi-GPU (DDP)
-torchrun --nproc_per_node=4 -m models.diffusion_tsf.train_7var_pipeline --ddp
-torchrun --nproc_per_node=2 -m models.diffusion_tsf.train_7var_pipeline --ddp --resume
-```
-
-### Pipeline Phases
-1. **Phase 1A:** iTransformer HP Tuning (20 trials on 100k synthetic samples)
-2. **Phase 1C-1:** Full iTransformer Pretraining (1M samples, 200 epochs)
-3. **Phase 1B:** Diffusion HP Tuning with iTransformer guidance (8 trials, 10k samples)
-4. **Phase 1C-2:** Full Diffusion Pretraining (1M samples, 200 epochs)
-5. **Phase 2:** Per-dataset HP tuning + fine-tuning + evaluation
-
-### Multi-GPU (DDP) Features
-- Uses `DistributedDataParallel` for efficient multi-GPU training
-- HP tuning runs on main process only (Optuna not DDP-aware)
-- Pretraining/fine-tuning uses all GPUs
-- Evaluation runs on main process only
-- Batch size automatically divided across GPUs
-- Loss averaged across GPUs for consistent logging
-
-### Resumability
-- `TrainingManifest` tracks progress across all phases
-- Safe to interrupt (Ctrl+C) and resume with `--resume`
-- Checkpoints saved in `models/diffusion_tsf/checkpoints_7var/`
-
----
-
-## Digital Research Alliance (Canada HPC) Deployment
-
-### Quick Start on Alliance Clusters
-
-```bash
-# 1. Clone/upload repo to your home directory
-cd ~
-git clone <your-repo> ts-sandbox
-cd ts-sandbox
-
-# 2. Run setup (creates persistent storage in $PROJECT)
+# 1. Setup
 ./alliance_setup.sh
 
-# 3. Edit slurm script with your account
-nano slurm_train_7var.sh
-# Change: --account=def-YOURPI
-# Change: --mail-user=YOUR@EMAIL
+# 2. Edit slurm_pipeline.sh: --account, --mail-user, --gpus-per-node
 
-# 4. Submit job
-./submit_train.sh --smoke-test   # Test first
-./submit_train.sh                # Full training
+# 3. Submit
+sbatch slurm_pipeline.sh --smoke-test   # test
+sbatch slurm_pipeline.sh                # full run
+
+# 4. Monitor
+sq && tail -f diffusion-tsf-*.out
+
+# 5. Sync results locally
+./sync_results.sh user@narval.alliancecan.ca
 ```
 
-### Cluster-Specific GPU Settings
+| Cluster | GPU | VRAM | Flag |
+|---------|-----|------|------|
+| Narval  | A100 | 40GB | `--gpus-per-node=a100:4` |
+| Fir     | H100 | 80GB | `--gpus-per-node=h100:4` |
 
-| Cluster | GPU Model | VRAM | Flag |
-|---------|-----------|------|------|
-| Narval | A100 | 40GB | `--gpus-per-node=a100:4` |
-| Fir | H100 | 80GB | `--gpus-per-node=h100:4` |
-| Nibi | H100 | 80GB | `--gpus-per-node=h100:4` |
-| Rorqual | H100 | 80GB | `--gpus-per-node=h100:4` |
+## Gotchas
+- **Imports:** always run from project root: `python -m models.diffusion_tsf.script_name`
+- **Smoke test first:** `./pipeline.sh --smoke-test` before committing to a full run.
+- **OOM:** use `attention_levels=[2]` and small batch sizes for 32-dim models.
+- **traffic.csv:** auto-combined from part1+part2 by pipeline.sh.
 
-### Storage Strategy
-- **PROJECT** (`$PROJECT/diffusion-tsf/`): Checkpoints, results, datasets - backed up, persistent
-- **SCRATCH**: Only for temporary files during job execution
-- **HOME**: Just the code repo
-
-### Wandb Logging
-The pipeline logs comprehensive metrics to wandb including:
-- Git commit, branch, dirty status
-- All hyperparameters and constants
-- System info (GPU names, CUDA version, etc.)
-- Per-epoch training/validation losses
-- HP search results and best params
-- Final evaluation metrics per dataset
-- Model checkpoints as artifacts
-
-```bash
-# Setup wandb
-pip install wandb
-wandb login
-
-# Enable in training
-python -m models.diffusion_tsf.train_7var_pipeline --wandb
-```
-
-### Monitoring Jobs
-```bash
-sq                    # Check job queue
-./check_status.sh     # Training progress
-tail -f *.out         # Watch output
-scancel <jobid>       # Cancel job
-```
-
-### Visualizations
-
-**Comparison plots (iTransformer vs Diffusion):**
-```bash
-# On cluster:
-sbatch slurm_viz_comparison.sh
-# Then sync locally:
-rsync -avz user@narval:~/projects/def-*/diffusion-tsf/results/viz/comparison/ ./synced_results/viz/comparison/
-```
-
-Generates per-dataset PNGs (`comparison_{dataset}.png`) with ground truth, iTransformer-only, and diffusion overlays. 3 samples × 3 variables per dataset.
-
-**Detailed per-subset visualizations (2D representations, etc.):**
-```bash
-sbatch slurm_visualize.sh
-```
-
-### Syncing Results to Local
-```bash
-# On your LOCAL machine:
-./sync_from_cluster.sh user@narval.alliancecan.ca
-```
+## Recent Changes
+- **2026-03-06:** Lookback overlap: diffusion model now predicts K=8 past steps alongside H=192 forecast to smooth boundary. Weighted loss (0.3× overlap, 1.0× forecast), trimmed at inference.
+- **2026-03-06:** Unified pipeline. Single `pipeline.sh` replaces scattered scripts. Dimensionality groups (7/8/21/32) with per-dim pretraining. Multi-GPU parallel subset fine-tuning. Full-dim iTransformer baseline for high-variate comparison. Old scripts moved to `legacy/`.
+- **2026-02-20:** 2D representation doubled to 128×1216. Synthetic pretraining uses 100k samples. Irregular periodicity added.
+- **2026-02-04:** Added CCM adapter, train_universal_v2.py.

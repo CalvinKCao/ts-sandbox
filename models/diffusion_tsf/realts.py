@@ -426,12 +426,14 @@ class RealTS(Dataset):
         num_variables: int = 1,
         pregenerate: bool = True,
         pool_size: Optional[int] = None,
-        cache_dir: Optional[str] = None
+        cache_dir: Optional[str] = None,
+        lookback_overlap: int = 0,
     ):
         self.num_samples = num_samples  # Virtual epoch size
         self.lookback_length = lookback_length
         self.forecast_length = forecast_length
         self.total_length = lookback_length + forecast_length
+        self.lookback_overlap = lookback_overlap
         self.augment = augment
         self.num_variables = num_variables
         self.pregenerate = pregenerate
@@ -548,12 +550,13 @@ class RealTS(Dataset):
             # Note: For cached univariate, we already did augmentations (flip/negate) at generation time.
             # But we could do more here if needed. For now, assume pool is sufficient.
             
+            K = self.lookback_overlap
             if self.num_variables > 1:
                 past = seq[:, :self.lookback_length]
-                future = seq[:, self.lookback_length:]
+                future = seq[:, self.lookback_length - K:]
             else:
                 past = seq[:self.lookback_length]
-                future = seq[self.lookback_length:]
+                future = seq[self.lookback_length - K:]
                 
             # If using mmap, need to copy to array to make it writable/torch-compatible
             past = np.array(past)
@@ -562,9 +565,9 @@ class RealTS(Dataset):
             return torch.tensor(past, dtype=torch.float32), torch.tensor(future, dtype=torch.float32)
 
         # Case 2: On-the-fly Generation (Legacy / Univariate RAM)
+        K = self.lookback_overlap
         if self.num_variables > 1:
             # Multivariate generation using augmentation module
-            # Generate 1 sample with num_variables
             seq_batch = generate_multivariate_synthetic_data(
                 num_samples=1,
                 num_vars=self.num_variables,
@@ -572,29 +575,23 @@ class RealTS(Dataset):
             )
             seq = seq_batch[0]  # (num_vars, total_length)
             
-            # Split into past and future
             past = seq[:, :self.lookback_length]
-            future = seq[:, self.lookback_length:]
+            future = seq[:, self.lookback_length - K:]
             
         else:
             # Univariate generation (original logic)
             generator = np.random.choice(self.generators, p=self.probabilities)
             seq = generator(self.total_length)
             
-            # Randomly flip the sequence (data augmentation)
             if np.random.random() < 0.5:
                 seq = seq[::-1].copy()
-            
-            # Randomly negate (data augmentation)
             if np.random.random() < 0.5:
                 seq = -seq
             
-            # Normalize
             seq = self._normalize_sequence(seq)
             
-            # Split into past and future
             past = seq[:self.lookback_length]
-            future = seq[self.lookback_length:]
+            future = seq[self.lookback_length - K:]
         
         # Convert to tensors
         past_tensor = torch.tensor(past, dtype=torch.float32)

@@ -30,3 +30,4 @@ May include:
 
 ## General style
 - Keep comments detailed yet terse, sounding natural, not AI-generated
+- THIS IS THE MOST IMPORTANT THING. Your code output/changes should NEVER make it obvious that an AI assistant wrote the code. Absolutely avoid comments like "Sure, here's your rewritten codebase..." or // Function refactored to fit requirement X

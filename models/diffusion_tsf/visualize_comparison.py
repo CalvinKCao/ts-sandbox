@@ -34,6 +34,7 @@ from models.diffusion_tsf.train_7var_pipeline import (
     CHECKPOINT_DIR, RESULTS_DIR, DATASETS_DIR, DATASET_REGISTRY,
     LOOKBACK_LENGTH, FORECAST_LENGTH, N_VARIATES,
     create_itransformer, create_diffusion_model, load_dataset,
+    get_dim_for_dataset, pretrain_dir_for_dim,
 )
 from models.diffusion_tsf.guidance import iTransformerGuidance
 
@@ -56,10 +57,6 @@ def run_comparison(
     print(f"Device: {device}")
 
     ckpt_root = Path(checkpoint_dir)
-    itrans_ckpt_path = ckpt_root / 'pretrained_itransformer.pt'
-    if not itrans_ckpt_path.exists():
-        print(f"ERROR: No iTransformer checkpoint at {itrans_ckpt_path}")
-        return
 
     # Discover subsets and group by dataset (pick first subset per dataset)
     by_dataset = defaultdict(list)
@@ -82,14 +79,31 @@ def run_comparison(
         return
 
     print(f"Found {len(by_dataset)} datasets: {', '.join(sorted(by_dataset))}")
-
-    # Load iTransformer once (shared for baseline eval and as diffusion guidance)
-    itrans_model = create_itransformer().to(device)
-    ckpt = torch.load(str(itrans_ckpt_path), map_location=device, weights_only=False)
-    itrans_model.load_state_dict(ckpt['model_state_dict'])
-    itrans_model.eval()
-
     os.makedirs(output_dir, exist_ok=True)
+
+    # Cache loaded iTransformer models per-dim
+    _itrans_cache = {}
+
+    def _get_itrans_model(dim):
+        if dim in _itrans_cache:
+            return _itrans_cache[dim]
+        # Try new per-dim layout first, fall back to legacy flat layout
+        dim_dir = pretrain_dir_for_dim(dim, base_dir=checkpoint_dir)
+        candidates = [
+            os.path.join(dim_dir, 'itransformer.pt'),
+            os.path.join(checkpoint_dir, 'pretrained_itransformer.pt'),
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                model = create_itransformer(num_vars=dim).to(device)
+                ckpt = torch.load(p, map_location=device, weights_only=False)
+                model.load_state_dict(ckpt['model_state_dict'])
+                model.eval()
+                _itrans_cache[dim] = model
+                print(f"  Loaded iTransformer (dim={dim}) from {p}")
+                return model
+        print(f"  WARNING: no iTransformer checkpoint for dim={dim}")
+        return None
 
     for dataset_name, subsets in sorted(by_dataset.items()):
         sub = subsets[0]
@@ -116,8 +130,15 @@ def run_comparison(
         mean = torch.tensor(norm_stats['mean'], dtype=torch.float32)
         std = torch.tensor(norm_stats['std'], dtype=torch.float32)
 
+        # Load per-dim iTransformer for this dataset
+        n_vars = len(variate_indices)
+        itrans_model = _get_itrans_model(n_vars)
+        if itrans_model is None:
+            print(f"  Skipping {dataset_name}: no iTransformer for dim={n_vars}")
+            continue
+
         # Load fine-tuned diffusion with iTransformer guidance
-        diff_model = create_diffusion_model(use_guidance=True).to(device)
+        diff_model = create_diffusion_model(n_variates=n_vars, use_guidance=True).to(device)
         itrans_guidance = iTransformerGuidance(
             itrans_model, use_norm=True,
             seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH

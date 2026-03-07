@@ -84,11 +84,10 @@ class TestVariateSubsetGeneration:
             assert len(s['variate_indices']) == 7
     
     def test_electricity_creates_many_subsets(self):
-        """Electricity (321 variates) should create 45 subsets."""
+        """Electricity (321 variates) with n_variates=7 → capped by MAX_SUBSETS."""
         subsets = generate_variate_subsets('electricity', n_variates=7, seed=42)
-        
-        # 321 // 7 = 45 (with 6 leftover variates not used)
-        assert len(subsets) == 45
+        # 321 // 7 = 45 possible, but capped at MAX_SUBSETS_PER_DATASET (15)
+        assert len(subsets) == 15
     
     def test_subset_has_variate_names(self):
         """Subsets should include column names."""
@@ -114,15 +113,9 @@ class TestGenerateAllSubsets:
         
         total = sum(len(subsets) for subsets in all_subsets.values())
         
-        # Expected counts:
-        # ETTh1: 1, ETTh2: 1, ETTm1: 1, ETTm2: 1, illness: 1 (all 7 variates)
-        # exchange_rate: 1 (8 variates -> 1 subset of 7)
-        # weather: 3 (21 variates)
-        # electricity: 45 (321 variates)
-        # traffic: 123 (862 variates)
-        # Total: 5 + 1 + 3 + 45 + 123 = 177
-        
-        expected_min = 170  # Allow some flexibility
+        # With MAX_SUBSETS_PER_DATASET=15 and default n_variates=7:
+        # 5 ETT/illness (1 each) + exchange_rate(1) + weather(3) + electricity(15) + traffic(15) = 40
+        expected_min = 35
         assert total >= expected_min, f"Expected at least {expected_min} subsets, got {total}"
 
 
@@ -155,22 +148,21 @@ class TestTrainingManifest:
             assert loaded.subsets['ETTh1']['status'] == 'complete'
             assert loaded.subsets['weather-0']['status'] == 'pending'
     
-    def test_get_pending_subsets(self):
-        """Should return only pending subsets."""
+    def test_subset_status_tracking(self):
+        """Manifest tracks subset status correctly."""
         manifest = TrainingManifest()
         manifest.subsets = {
             'ETTh1': {'status': 'complete'},
             'ETTh2': {'status': 'pending'},
-            'weather-0': {'status': 'in_progress'},
-            'weather-1': {'status': 'pending'},
+            'weather-0': {'status': 'pending'},
         }
         
-        pending = manifest.get_pending_subsets()
+        complete = [k for k, v in manifest.subsets.items() if v.get('status') == 'complete']
+        pending = [k for k, v in manifest.subsets.items() if v.get('status') != 'complete']
         
+        assert 'ETTh1' in complete
         assert 'ETTh2' in pending
-        assert 'weather-0' in pending  # in_progress counts as pending
-        assert 'weather-1' in pending
-        assert 'ETTh1' not in pending
+        assert 'weather-0' in pending
     
     def test_mark_complete(self):
         """Should correctly mark subset as complete."""

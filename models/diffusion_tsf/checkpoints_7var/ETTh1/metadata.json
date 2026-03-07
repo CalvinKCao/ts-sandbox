@@ -43,6 +43,6 @@
   ],
   "tuned_params": {
     "learning_rate": 5.611516415334504e-06,
-    "batch_size": 16
+    "batch_size": 2
   }
 }
