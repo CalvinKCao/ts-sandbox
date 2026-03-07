@@ -19,21 +19,17 @@ cd "$SCRIPT_DIR"
 
 # Kill all child processes on exit/failure/signal so GPUs are released immediately.
 # This catches orphaned background fine-tune jobs from the multi-GPU loop.
-_PIPELINE_EXIT_CODE=0
 cleanup() {
-    _PIPELINE_EXIT_CODE=${_PIPELINE_EXIT_CODE:-$?}
-    if [ "$_PIPELINE_EXIT_CODE" -ne 0 ]; then
-        echo ""
-        echo "[CLEANUP] Pipeline exited with code $_PIPELINE_EXIT_CODE — killing child processes..."
-    fi
+    trap '' EXIT ERR SIGTERM SIGINT SIGHUP  # prevent re-entry
+    local code=${1:-$?}
+    [ "$code" -ne 0 ] && echo "[CLEANUP] exit $code — killing child processes..."
     kill -- -$$ 2>/dev/null || true
     wait 2>/dev/null || true
-    if [ "$_PIPELINE_EXIT_CODE" -ne 0 ]; then
-        echo "[CLEANUP] GPU resources released."
-    fi
+    [ "$code" -ne 0 ] && echo "[CLEANUP] GPU resources released."
+    exit "$code"
 }
-trap 'cleanup' EXIT
-trap '_PIPELINE_EXIT_CODE=1; exit 1' ERR SIGTERM SIGINT SIGHUP
+trap 'cleanup $?' EXIT
+trap 'cleanup 1' ERR SIGTERM SIGINT SIGHUP
 
 # ============================================================================
 # Defaults
@@ -100,6 +96,13 @@ fi
 PYTHON="python -m models.diffusion_tsf.train_7var_pipeline"
 BASE_ARGS="--seed $SEED $SMOKE_TEST $EXTRA_PY_ARGS"
 
+# Read constants directly from the pipeline module so they stay in sync
+read LOOKBACK_LENGTH FORECAST_LENGTH LOOKBACK_OVERLAP < <(python3 -c "
+from models.diffusion_tsf.train_7var_pipeline import LOOKBACK_LENGTH, FORECAST_LENGTH, LOOKBACK_OVERLAP
+print(LOOKBACK_LENGTH, FORECAST_LENGTH, LOOKBACK_OVERLAP)
+")
+export LOOKBACK_LENGTH FORECAST_LENGTH LOOKBACK_OVERLAP
+
 echo "============================================================"
 echo "  Diffusion TSF Pipeline"
 echo "============================================================"
@@ -136,7 +139,7 @@ declare -A DIM_DATASETS  # dim -> space-separated dataset names
 
 discover_dims() {
     python3 -c "
-import pandas as pd, os, json
+import pandas as pd, os
 
 registry = {
     'ETTh1': 'datasets/ETT-small/ETTh1.csv',
@@ -152,11 +155,17 @@ registry = {
 
 threshold = $SUBSET_THRESHOLD
 subset_dim = $SUBSET_DIM
+min_rows = $LOOKBACK_LENGTH + $FORECAST_LENGTH + $LOOKBACK_OVERLAP
 
 for name, path in sorted(registry.items()):
     if not os.path.exists(path):
         continue
-    df = pd.read_csv(path, nrows=1)
+    df = pd.read_csv(path)
+    n_rows = len(df)
+    if n_rows < min_rows:
+        import sys
+        print(f'[SKIP] {name}: only {n_rows} rows (need {min_rows})', file=sys.stderr)
+        continue
     n_cols = sum(1 for c in df.columns if c.lower() != 'date')
     dim = subset_dim if n_cols > threshold else n_cols
     print(f'{name} {n_cols} {dim}')

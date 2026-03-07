@@ -195,6 +195,7 @@ cat > "$PROJECT_ROOT/slurm_train_7var_killarney.sh" << SLURM_EOF
 
 # Kill all child processes on exit/cancel/timeout so GPUs are released
 cleanup() {
+    trap '' EXIT ERR SIGTERM SIGINT SIGUSR1  # prevent re-entry
     echo "[CLEANUP] \$(date) — releasing GPU resources..."
     kill -- -\$\$ 2>/dev/null || true
     pkill -P \$\$ 2>/dev/null || true

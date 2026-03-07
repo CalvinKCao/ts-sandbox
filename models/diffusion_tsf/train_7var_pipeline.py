@@ -2588,6 +2588,14 @@ def _finetune_and_eval_one_subset(
     subset_id = subset_info['subset_id']
     variate_indices = subset_info['variate_indices']
 
+    # Preflight: check dataset has enough rows before wasting a trial slot
+    min_rows = LOOKBACK_LENGTH + FORECAST_LENGTH
+    try:
+        load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+    except ValueError as ve:
+        logger.warning(f"Skipping {subset_id}: {ve}")
+        return
+
     try:
         # HP search
         logger.info(f"HP search for {subset_id} ({n_finetune_trials} trials)...")
@@ -2603,7 +2611,11 @@ def _finetune_and_eval_one_subset(
             ),
             n_trials=n_finetune_trials,
             show_progress_bar=False,
+            catch=(ValueError,),  # don't propagate dataset-size errors as fatal
         )
+        if study.best_trial is None:
+            logger.warning(f"All HP trials failed for {subset_id} — skipping")
+            return
         tuned_params = study.best_params
         logger.info(f"Best params for {subset_id}: {tuned_params}")
 

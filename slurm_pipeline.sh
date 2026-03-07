@@ -118,13 +118,12 @@ echo "Detected $NUM_GPUS GPUs"
 # ---- Cleanup on failure/cancel/timeout — release GPUs immediately ----
 
 cleanup() {
-    echo ""
-    echo "[SLURM CLEANUP] $(date) — killing all child processes..."
+    trap '' EXIT ERR SIGTERM SIGINT SIGUSR1  # prevent re-entry
+    echo "[SLURM CLEANUP] $(date) — killing child processes..."
     kill -- -$$ 2>/dev/null || true
-    # pkill as fallback in case process group kill misses something
     pkill -P $$ 2>/dev/null || true
     wait 2>/dev/null || true
-    echo "[SLURM CLEANUP] Done. GPU resources released."
+    echo "[SLURM CLEANUP] Done."
 }
 trap cleanup EXIT ERR SIGTERM SIGINT SIGUSR1
 
