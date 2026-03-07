@@ -122,27 +122,35 @@ single time axis of length `Lookback + Forecast` (1024 + 200 = 1224).
 
 ## Alliance HPC deployment
 
+**Killarney** (primary cluster): account `aip-boyuwang`, H100 SXM 80GB. Must submit from `/scratch`, not `/home`.
+
 ```bash
-# 1. Setup
-./alliance_setup.sh
+# 1. SSH in, move repo to scratch
+ssh ccao87@killarney.alliancecan.ca
+cp -r ~/ts-sandbox /scratch/$USER/ts-sandbox   # or git clone there
+cd /scratch/$USER/ts-sandbox
 
-# 2. Edit slurm_pipeline.sh: --account, --mail-user, --gpus-per-node
+# 2. One-time setup (venv, datasets, generates slurm scripts)
+./alliance_setup_killarney.sh
 
-# 3. Submit
-sbatch slurm_pipeline.sh --smoke-test   # test
-sbatch slurm_pipeline.sh                # full run
+# 3. Smoke test
+sbatch slurm_pipeline.sh --smoke-test
 
 # 4. Monitor
 sq && tail -f diffusion-tsf-*.out
 
-# 5. Sync results locally
-./sync_results.sh user@narval.alliancecan.ca
+# 5. Full run
+sbatch slurm_pipeline.sh
+
+# 6. Sync results locally (from your WSL machine)
+./sync_from_killarney.sh ccao87@killarney.alliancecan.ca
 ```
 
-| Cluster | GPU | VRAM | Flag |
-|---------|-----|------|------|
-| Narval  | A100 | 40GB | `--gpus-per-node=a100:4` |
-| Fir     | H100 | 80GB | `--gpus-per-node=h100:4` |
+| Cluster | GPU | VRAM | Account prefix | Partitions |
+|---------|-----|------|----------------|------------|
+| Killarney | H100 SXM | 80GB | `aip-` | `gpubase_h100_b1`(3h)..`b5`(7d) |
+| Narval  | A100 | 40GB | `def-` | default |
+| Fir     | H100 | 80GB | `def-` | default |
 
 ## Gotchas
 - **Imports:** always run from project root: `python -m models.diffusion_tsf.script_name`

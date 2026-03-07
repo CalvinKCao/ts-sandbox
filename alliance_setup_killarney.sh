@@ -25,7 +25,8 @@ if [ -z "$PROJECT" ]; then
     echo "WARNING: \$PROJECT not set, attempting auto-detection..."
     
     if [ -d "$HOME/projects" ]; then
-        FIRST_PROJECT=$(ls -d $HOME/projects/def-* 2>/dev/null | head -1)
+        # Killarney uses aip- prefix, other clusters use def-
+        FIRST_PROJECT=$(ls -d $HOME/projects/def-* $HOME/projects/aip-* 2>/dev/null | head -1)
         if [ -n "$FIRST_PROJECT" ]; then
             export PROJECT=$(readlink -f "$FIRST_PROJECT")
             echo "  Auto-detected PROJECT: $PROJECT"
@@ -37,7 +38,7 @@ if [ -z "$PROJECT" ]; then
         echo ""
         echo "Please set PROJECT manually:"
         echo "  ls ~/projects/"
-        echo "  export PROJECT=\$(readlink -f ~/projects/def-YOURPI)"
+        echo "  export PROJECT=\$(readlink -f ~/projects/aip-YOURPI)  # or def-YOURPI"
         echo "  ./alliance_setup_killarney.sh"
         exit 1
     fi
@@ -47,8 +48,8 @@ if [ -z "$PROJECT" ]; then
         echo "ERROR: Could not auto-detect PROJECT."
         echo ""
         echo "  1. Run: ls -la ~/projects/"
-        echo "  2. Find your allocation (e.g., def-boyuwang)"
-        echo "  3. Run: export PROJECT=\$(readlink -f ~/projects/def-boyuwang)"
+        echo "  2. Find your allocation (e.g., aip-boyuwang or def-boyuwang)"
+        echo "  3. Run: export PROJECT=\$(readlink -f ~/projects/aip-boyuwang)"
         echo "  4. Run: ./alliance_setup_killarney.sh"
         echo ""
         echo "No allocation yet? Check: https://ccdb.alliancecan.ca/me/group_resources"
@@ -179,8 +180,9 @@ cat > "$PROJECT_ROOT/slurm_train_7var_killarney.sh" << SLURM_EOF
 #   sbatch slurm_train_7var_killarney.sh --resume     # Resume interrupted run
 # =============================================================================
 #SBATCH --job-name=diffusion-tsf
-#SBATCH --account=def-boyuwang
-#SBATCH --time=96:00:00
+#SBATCH --account=aip-boyuwang
+#SBATCH --partition=gpubase_h100_b4
+#SBATCH --time=3-00:00:00
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=h100:${GPU_COUNT}
 #SBATCH --cpus-per-task=$((CPUS_PER_GPU * GPU_COUNT))
@@ -215,12 +217,20 @@ module load python/3.11
 module load cuda/12.2
 module load cudnn/8.9
 
-export PROJECT_ROOT="\$HOME/ts-sandbox"
+# Killarney forbids running from /home — use scratch copy
+if [ -d "\$SCRATCH/ts-sandbox" ]; then
+    export PROJECT_ROOT="\$SCRATCH/ts-sandbox"
+elif [ -d "\$HOME/ts-sandbox" ]; then
+    export PROJECT_ROOT="\$HOME/ts-sandbox"
+else
+    echo "ERROR: ts-sandbox not found"
+    exit 1
+fi
 
 if [ -z "\$PROJECT" ]; then
     echo "PROJECT not set, auto-detecting..."
     if [ -d "\$HOME/projects" ]; then
-        FIRST_PROJECT=\$(ls -d \$HOME/projects/def-* 2>/dev/null | head -1)
+        FIRST_PROJECT=\$(ls -d \$HOME/projects/def-* \$HOME/projects/aip-* 2>/dev/null | head -1)
         if [ -n "\$FIRST_PROJECT" ]; then
             export PROJECT=\$(readlink -f "\$FIRST_PROJECT")
             echo "Found: \$PROJECT"
@@ -230,7 +240,7 @@ fi
 
 if [ -z "\$PROJECT" ]; then
     echo "ERROR: PROJECT not found. Set manually:"
-    echo "  export PROJECT=/project/def-boyuwang"
+    echo "  export PROJECT=/project/aip-boyuwang"
     exit 1
 fi
 

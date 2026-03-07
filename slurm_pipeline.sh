@@ -1,9 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion-tsf
-#SBATCH --account=def-boyuwang         # CHANGE to your allocation
-#SBATCH --time=96:00:00
+#SBATCH --account=aip-boyuwang
+#SBATCH --partition=gpubase_h100_b4
+#SBATCH --time=3-00:00:00
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=a100:4         # CHANGE: a100:N or h100:N
+#SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=48G
 #SBATCH --output=%x-%j.out
@@ -50,12 +51,20 @@ module load python/3.11
 module load cuda/12.2
 module load cudnn/8.9
 
-export PROJECT_ROOT="$HOME/ts-sandbox"
+# Killarney forbids running from /home — use scratch copy if available
+if [ -d "$SCRATCH/ts-sandbox" ]; then
+    export PROJECT_ROOT="$SCRATCH/ts-sandbox"
+elif [ -d "$HOME/ts-sandbox" ]; then
+    export PROJECT_ROOT="$HOME/ts-sandbox"
+else
+    echo "ERROR: ts-sandbox not found in SCRATCH or HOME"
+    exit 1
+fi
 
-# Auto-detect PROJECT
+# Auto-detect PROJECT (aip- on Killarney, def- on other clusters)
 if [ -z "$PROJECT" ]; then
     if [ -d "$HOME/projects" ]; then
-        FIRST_PROJECT=$(ls -d $HOME/projects/def-* 2>/dev/null | head -1)
+        FIRST_PROJECT=$(ls -d $HOME/projects/def-* $HOME/projects/aip-* 2>/dev/null | head -1)
         [ -n "$FIRST_PROJECT" ] && export PROJECT=$(readlink -f "$FIRST_PROJECT")
     fi
 fi
