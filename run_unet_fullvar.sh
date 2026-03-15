@@ -92,9 +92,13 @@ fi
 # Environment
 # ============================================================================
 
+# Activate venv — try local first, then Alliance cluster paths
 if [ -d "venv" ]; then
     source venv/bin/activate
-    echo "[INFO] venv activated"
+    echo "[INFO] venv activated (local)"
+elif [ -n "$PROJECT" ] && [ -d "$PROJECT/$USER/diffusion-tsf/venv" ]; then
+    source "$PROJECT/$USER/diffusion-tsf/venv/bin/activate"
+    echo "[INFO] venv activated ($PROJECT/$USER/diffusion-tsf/venv)"
 fi
 
 PYTHON="python -m models.diffusion_tsf.train_7var_pipeline"
@@ -104,10 +108,10 @@ BASE_ARGS="$BASE_ARGS --synthetic-samples $SYNTHETIC_SAMPLES"
 BASE_ARGS="$BASE_ARGS --itransformer-trials $ITRANSFORMER_TRIALS"
 BASE_ARGS="$BASE_ARGS --subset-threshold $SUBSET_THRESHOLD"
 
-read LOOKBACK_LENGTH FORECAST_LENGTH LOOKBACK_OVERLAP < <(python3 -c "
-from models.diffusion_tsf.train_7var_pipeline import LOOKBACK_LENGTH, FORECAST_LENGTH, LOOKBACK_OVERLAP
-print(LOOKBACK_LENGTH, FORECAST_LENGTH, LOOKBACK_OVERLAP)
-")
+# Hardcoded to avoid importing torch just to read constants
+LOOKBACK_LENGTH=1024
+FORECAST_LENGTH=192
+LOOKBACK_OVERLAP=8
 
 echo "============================================================"
 echo "  U-Net Full-Variate Training"
