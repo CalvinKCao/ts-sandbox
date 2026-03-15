@@ -26,16 +26,15 @@ if [ -z "$SLURM_JOB_ID" ]; then
     done
 
     if [ "$IS_SMOKE" -eq 1 ]; then
-        echo "Submitting SMOKE TEST (H100, 20GB, b1 = 3h max, 30 min)..."
+        echo "Submitting SMOKE TEST (L40S, 8GB, 15 min)..."
         sbatch \
             --job-name=unet-fullvar-smoke \
             --account=aip-boyuwang \
-            --partition=gpubase_h100_b1 \
-            --time=0:30:00 \
+            --time=0:15:00 \
             --nodes=1 \
-            --gpus-per-node=h100:1 \
-            --cpus-per-task=4 \
-            --mem=20G \
+            --gres=gpu:l40s:1 \
+            --cpus-per-task=2 \
+            --mem=8G \
             --output=unet-fullvar-smoke-%j.out \
             --error=unet-fullvar-smoke-%j.err \
             --mail-type=END,FAIL \
