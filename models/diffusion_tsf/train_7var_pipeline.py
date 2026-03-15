@@ -662,6 +662,11 @@ ITRANS_BATCH_SIZES = [64, 128, 256]
 DIFFUSION_BATCH_SIZES = [8, 16, 32]
 FINETUNE_BATCH_SIZES = [4, 8, 16]
 
+# CI-DiT / memory optimization flags (overridden by CLI)
+MODEL_TYPE = "unet"
+USE_AMP = False
+USE_GRADIENT_CHECKPOINTING = False
+
 # Dataset registry: name -> (path, date_col, seasonal_period)
 DATASET_REGISTRY = {
     'ETTh1': ('ETT-small/ETTh1.csv', 'date', 24),
@@ -802,6 +807,7 @@ def create_diffusion_model(
     """Create DiffusionTSF model with optional guidance channel."""
     if n_variates is None:
         n_variates = N_VARIATES
+    
     config = DiffusionTSFConfig(
         num_variables=n_variates,
         lookback_length=lookback,
@@ -812,11 +818,16 @@ def create_diffusion_model(
         representation_mode='cdf',
         use_coordinate_channel=True,
         use_guidance_channel=use_guidance,
-        use_hybrid_condition=True,
         num_diffusion_steps=1000,
+        model_type=MODEL_TYPE,
+        # UNet params (ignored when model_type != "unet")
         unet_channels=[64, 128, 256],
         attention_levels=[2],
         num_res_blocks=2,
+        use_hybrid_condition=(MODEL_TYPE == "unet"),
+        # CI-DiT params (ignored when model_type != "ci_dit")
+        use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
+        use_amp=USE_AMP,
     )
     return DiffusionTSF(config)
 
@@ -1015,6 +1026,14 @@ class EarlyStopping:
         return self.should_stop
 
 
+def amp_context():
+    """Return the appropriate autocast context for mixed precision."""
+    if USE_AMP and torch.cuda.is_available():
+        return torch.amp.autocast('cuda', dtype=torch.bfloat16)
+    from contextlib import nullcontext
+    return nullcontext()
+
+
 def save_checkpoint(model, optimizer, epoch, train_loss, val_loss, config, path, extra=None):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     ckpt = {
@@ -1210,24 +1229,24 @@ def diffusion_hp_objective(
     best_val_loss = float('inf')
     
     for epoch in range(epochs):
-        # Train
         model.train()
         for past, future in train_loader:
             past, future = past.to(device), future.to(device)
             optimizer.zero_grad()
-            loss = model.get_loss(past, future)
+            with amp_context():
+                loss = model.get_loss(past, future)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
         
-        # Validate
         model.eval()
         val_loss = 0.0
         n_batches = 0
         with torch.no_grad():
             for past, future in val_loader:
                 past, future = past.to(device), future.to(device)
-                loss = model.get_loss(past, future)
+                with amp_context():
+                    loss = model.get_loss(past, future)
                 val_loss += loss.item()
                 n_batches += 1
         val_loss /= max(n_batches, 1)
@@ -1518,9 +1537,9 @@ def pretrain_diffusion(
         for past, future in train_loader:
             past, future = past.to(device), future.to(device)
             optimizer.zero_grad()
-            # Handle DDP wrapper
             base_model = unwrap_model(model)
-            loss = base_model.get_loss(past, future)
+            with amp_context():
+                loss = base_model.get_loss(past, future)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -1536,7 +1555,8 @@ def pretrain_diffusion(
             for past, future in val_loader:
                 past, future = past.to(device), future.to(device)
                 base_model = unwrap_model(model)
-                loss = base_model.get_loss(past, future)
+                with amp_context():
+                    loss = base_model.get_loss(past, future)
                 total_loss += loss.item()
                 n_batches += 1
         val_loss = total_loss / max(n_batches, 1)
@@ -1635,7 +1655,8 @@ def finetune_hp_objective(
         for past, future in train_loader:
             past, future = past.to(device), future.to(device)
             optimizer.zero_grad()
-            loss = model.get_loss(past, future)
+            with amp_context():
+                loss = model.get_loss(past, future)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -1646,7 +1667,8 @@ def finetune_hp_objective(
         with torch.no_grad():
             for past, future in val_loader:
                 past, future = past.to(device), future.to(device)
-                loss = model.get_loss(past, future)
+                with amp_context():
+                    loss = model.get_loss(past, future)
                 val_loss += loss.item()
                 n_batches += 1
         val_loss /= max(n_batches, 1)
@@ -1769,7 +1791,8 @@ def finetune_on_dataset(
             past, future = past.to(device), future.to(device)
             optimizer.zero_grad()
             base_model = unwrap_model(model)
-            loss = base_model.get_loss(past, future)
+            with amp_context():
+                loss = base_model.get_loss(past, future)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -1784,7 +1807,8 @@ def finetune_on_dataset(
             for past, future in val_loader:
                 past, future = past.to(device), future.to(device)
                 base_model = unwrap_model(model)
-                loss = base_model.get_loss(past, future)
+                with amp_context():
+                    loss = base_model.get_loss(past, future)
                 total_loss += loss.item()
                 n_batches += 1
         val_loss = total_loss / max(n_batches, 1)
@@ -2726,6 +2750,15 @@ def main():
                         help='Wipe manifest and checkpoints, start from scratch')
     parser.add_argument('--list-subsets', action='store_true',
                         help='Legacy flag: list subsets')
+    parser.add_argument('--model-type', type=str, default='unet',
+                        choices=['unet', 'ci_dit'],
+                        help='Backbone type (default: unet)')
+    parser.add_argument('--amp', action='store_true',
+                        help='Enable bfloat16 mixed precision training')
+    parser.add_argument('--gradient-checkpointing', action='store_true',
+                        help='Enable gradient checkpointing (saves memory, ~25%% slower)')
+    parser.add_argument('--image-height', type=int, default=None,
+                        help='Override image height (default: 128, use 64 for CI-DiT)')
     
     args = parser.parse_args()
     
@@ -2745,6 +2778,14 @@ def main():
     # Set N_VARIATES from CLI (affects all model/data creation)
     if args.n_variates is not None:
         N_VARIATES = args.n_variates
+    
+    # CI-DiT / memory flags (stored as module-level globals)
+    global MODEL_TYPE, USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT
+    MODEL_TYPE = args.model_type
+    USE_AMP = args.amp
+    USE_GRADIENT_CHECKPOINTING = args.gradient_checkpointing
+    if args.image_height is not None:
+        IMAGE_HEIGHT = args.image_height
     
     # DDP setup
     if args.ddp:

@@ -128,6 +128,19 @@ class DiffusionTSFConfig:
     transformer_patch_width: int = 16   
     transformer_dropout: float = 0.1
     
+    # CI-DiT (channel-independent diffusion transformer) params
+    ci_dit_embed_dim: int = 256
+    ci_dit_depth: int = 8
+    ci_dit_num_heads: int = 8
+    ci_dit_patch_size: Tuple[int, int] = (8, 8)
+    ci_dit_mlp_ratio: float = 4.0
+    ci_dit_cross_variate_every: int = 3  # 0 to disable cross-var attn
+    ci_dit_dropout: float = 0.1
+    
+    # memory optimization flags
+    use_gradient_checkpointing: bool = False
+    use_amp: bool = False  # bfloat16 mixed precision
+    
     # aux channels
     use_coordinate_channel: bool = True  # vertical gradient
     use_time_ramp: bool = False  # linear ramp
@@ -208,4 +221,17 @@ class DiffusionTSFConfig:
     def guidance_channels(self) -> int:
         """guidance channels."""
         return self.num_variables if self.use_guidance_channel else 0
+    
+    @property
+    def ci_dit_in_channels(self) -> int:
+        """Per-variate input channels for CI-DiT backbone."""
+        ch = 1  # data channel
+        if self.use_coordinate_channel: ch += 1
+        if self.use_guidance_channel: ch += 1
+        return ch
+    
+    @property
+    def ci_dit_cond_channels(self) -> int:
+        """Per-variate conditioning channels for CI-DiT."""
+        return 1  # resized past 2D
 

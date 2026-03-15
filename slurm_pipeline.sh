@@ -4,9 +4,9 @@
 #SBATCH --partition=gpubase_h100_b4
 #SBATCH --time=3-00:00:00
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=h100:4
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=48G
+#SBATCH --gpus-per-node=h100:1         # 1 GPU queues much faster; subsets run sequentially
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=50G
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
@@ -119,11 +119,12 @@ echo "Detected $NUM_GPUS GPUs"
 
 cleanup() {
     trap '' EXIT ERR SIGTERM SIGINT SIGUSR1  # prevent re-entry
-    echo "[SLURM CLEANUP] $(date) — killing child processes..."
+    local code=${1:-$?}
+    [ "$code" -ne 0 ] && echo "[SLURM CLEANUP] $(date) — killing child processes..."
     kill -- -$$ 2>/dev/null || true
     pkill -P $$ 2>/dev/null || true
     wait 2>/dev/null || true
-    echo "[SLURM CLEANUP] Done."
+    [ "$code" -ne 0 ] && echo "[SLURM CLEANUP] Done."
 }
 trap cleanup EXIT ERR SIGTERM SIGINT SIGUSR1
 
