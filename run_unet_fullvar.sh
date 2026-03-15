@@ -101,6 +101,11 @@ elif [ -n "$PROJECT" ] && [ -d "$PROJECT/$USER/diffusion-tsf/venv" ]; then
     echo "[INFO] venv activated ($PROJECT/$USER/diffusion-tsf/venv)"
 fi
 
+# On Alliance clusters, `python3` may still point to the system interpreter
+# after venv activation. Force the venv's python for all subprocesses.
+VENV_PYTHON="$(command -v python)"
+echo "[INFO] using: $VENV_PYTHON ($(python --version 2>&1))"
+
 PYTHON="python -m models.diffusion_tsf.train_7var_pipeline"
 BASE_ARGS="--seed $SEED $SMOKE_TEST $EXTRA_PY_ARGS"
 BASE_ARGS="$BASE_ARGS --model-type $MODEL_TYPE $AMP_FLAG --image-height $IMAGE_HEIGHT"
@@ -126,8 +131,13 @@ echo "  Smoke test:   ${SMOKE_TEST:-no}"
 echo ""
 
 # ============================================================================
-# Prep: recombine traffic CSV if needed
+# Prep: locate datasets (may live in STORAGE_ROOT on Alliance clusters)
 # ============================================================================
+
+if [ ! -d "datasets" ] && [ -n "$STORAGE_ROOT" ] && [ -d "$STORAGE_ROOT/datasets" ]; then
+    echo "[INFO] Symlinking datasets from $STORAGE_ROOT/datasets"
+    ln -sf "$STORAGE_ROOT/datasets" datasets
+fi
 
 TRAFFIC_DIR="datasets/traffic"
 TRAFFIC_CSV="$TRAFFIC_DIR/traffic.csv"
@@ -148,7 +158,7 @@ fi
 declare -A DATASET_DIM
 
 discover_dims() {
-    python3 -c "
+    python -c "
 import pandas as pd, os
 
 registry = {
