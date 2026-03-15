@@ -1,0 +1,343 @@
+==========================================
+Job ID: 2395483
+Node: kn173
+GPU: GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-17fe7d1b-2fcd-fe4b-419b-a00c23bb7438)
+Started: Sun Mar 15 12:43:20 AM EDT 2026
+==========================================
+STORAGE_ROOT: /project/6101823/diffusion-tsf-cidit
+Reusing existing venv: /project/6101823/diffusion-tsf/venv
+
+No --dataset specified, running ETTh1 (7-var) and exchange_rate (8-var)
+
+=== ETTh1 (7 variates) ===
+============================================================
+  CI-DiT Pipeline
+============================================================
+  Backbone:     CI-DiT (channel-independent)
+  Image height: 64
+  AMP:          bfloat16
+  Grad ckpt:    enabled
+  Smoke test:   no
+  Dataset:      ETTh1
+
+[INFO] Discovering dataset dimensionalities...
+[INFO] Pretrain dims: 7
+  dim=7:  ETTh1 ETTh2 ETTm1 ETTm2
+
+============================================================
+  PHASE 1: Synthetic Pretraining (CI-DiT)
+============================================================
+
+--- Pretraining CI-DiT dim=7 ---
+2026-03-15 00:43:35,497 - INFO - traffic.csv already exists
+2026-03-15 00:43:35,500 - INFO - Pretraining dim=7
+2026-03-15 00:43:35,500 - INFO - ============================================================
+2026-03-15 00:43:35,500 - INFO - PHASE 1A: iTransformer HP Tuning
+2026-03-15 00:43:35,500 - INFO - Trials: 20
+2026-03-15 00:43:35,500 - INFO - ============================================================
+2026-03-15 00:43:35,842 - INFO - RealTS initialized: 100000 samples/epoch, lookback=1024, forecast=192, variables=7
+2026-03-15 00:43:35,842 - INFO - Pre-generating 100000 multivariate samples (RAM)...
+2026-03-15 00:44:25,639 - INFO - Generating synthetic samples: 10000/100000 (10%)
+2026-03-15 00:45:15,297 - INFO - Generating synthetic samples: 20000/100000 (20%)
+2026-03-15 00:46:04,783 - INFO - Generating synthetic samples: 30000/100000 (30%)
+2026-03-15 00:46:54,175 - INFO - Generating synthetic samples: 40000/100000 (40%)
+2026-03-15 00:47:43,684 - INFO - Generating synthetic samples: 50000/100000 (50%)
+2026-03-15 00:48:33,074 - INFO - Generating synthetic samples: 60000/100000 (60%)
+2026-03-15 00:49:22,611 - INFO - Generating synthetic samples: 70000/100000 (70%)
+2026-03-15 00:50:12,033 - INFO - Generating synthetic samples: 80000/100000 (80%)
+2026-03-15 00:51:01,444 - INFO - Generating synthetic samples: 90000/100000 (90%)
+2026-03-15 00:51:50,960 - INFO - Pre-generation complete.
+2026-03-15 00:51:50,961 - INFO - Created synthetic-only dataloader: 100000 samples/epoch (Pool: 100000), lookback=1024, forecast=192, variables=7
+2026-03-15 00:51:50,965 - INFO - Starting iTransformer HP search: 20 trials
+2026-03-15 01:12:18,742 - INFO - [iTransformer HP] Trial 0/20: loss=0.6243, lr=5.61e-05, bs=64, dropout=0.047
+2026-03-15 01:22:47,346 - INFO - [iTransformer HP] Trial 1/20: loss=0.9593, lr=2.05e-05, bs=128, dropout=0.212
+2026-03-15 01:33:03,182 - INFO - [iTransformer HP] Trial 2/20: loss=0.9751, lr=1.10e-05, bs=64, dropout=0.055
+2026-03-15 01:43:29,925 - INFO - [iTransformer HP] Trial 3/20: loss=0.9041, lr=2.33e-05, bs=128, dropout=0.087
+2026-03-15 01:49:06,875 - INFO - [iTransformer HP] Trial 4/20: loss=0.7295, lr=1.67e-04, bs=256, dropout=0.137
+2026-03-15 01:54:44,383 - INFO - [iTransformer HP] Trial 5/20: loss=0.4865, lr=3.72e-04, bs=256, dropout=0.014
+2026-03-15 01:54:55,731 - INFO - [iTransformer HP] Trial 6/20: loss=1.1301, lr=1.64e-04, bs=256, dropout=0.290
+2026-03-15 01:58:28,879 - INFO - [iTransformer HP] Trial 7/20: loss=0.8371, lr=4.14e-04, bs=256, dropout=0.132
+2026-03-15 01:58:40,026 - INFO - [iTransformer HP] Trial 8/20: loss=1.1161, lr=1.75e-05, bs=256, dropout=0.078
+2026-03-15 02:04:15,861 - INFO - [iTransformer HP] Trial 9/20: loss=0.5742, lr=2.11e-04, bs=256, dropout=0.055
+2026-03-15 02:04:56,569 - INFO - [iTransformer HP] Trial 10/20: loss=1.0846, lr=8.90e-04, bs=64, dropout=0.002
+2026-03-15 02:05:19,175 - INFO - [iTransformer HP] Trial 11/20: loss=1.0010, lr=3.47e-04, bs=256, dropout=0.010
+2026-03-15 02:05:30,453 - INFO - [iTransformer HP] Trial 12/20: loss=1.0915, lr=7.01e-05, bs=256, dropout=0.188
+2026-03-15 02:05:52,964 - INFO - [iTransformer HP] Trial 13/20: loss=1.0004, lr=3.41e-04, bs=256, dropout=0.105
+2026-03-15 02:08:07,537 - INFO - [iTransformer HP] Trial 14/20: loss=0.9209, lr=6.87e-04, bs=256, dropout=0.035
+2026-03-15 02:08:49,891 - INFO - [iTransformer HP] Trial 15/20: loss=1.0105, lr=1.73e-04, bs=128, dropout=0.178
+2026-03-15 02:09:12,313 - INFO - [iTransformer HP] Trial 16/20: loss=1.0145, lr=1.04e-04, bs=256, dropout=0.029
+2026-03-15 02:11:26,873 - INFO - [iTransformer HP] Trial 17/20: loss=0.9286, lr=5.32e-04, bs=256, dropout=0.065
+2026-03-15 02:21:57,727 - INFO - [iTransformer HP] Trial 18/20: loss=0.6679, lr=2.53e-04, bs=128, dropout=0.101
+2026-03-15 02:22:38,986 - INFO - [iTransformer HP] Trial 19/20: loss=1.0718, lr=4.85e-05, bs=64, dropout=0.279
+2026-03-15 02:22:38,987 - INFO - Best iTransformer params: lr=3.72e-04, bs=256, dropout=0.014
+2026-03-15 02:22:38,987 - INFO - Best val loss: 0.4865
+2026-03-15 02:22:38,988 - INFO -   iTransformer ckpt exists: /project/6101823/diffusion-tsf-cidit/checkpoints/pretrained_dim7/itransformer.pt
+2026-03-15 02:22:38,988 - INFO - ============================================================
+2026-03-15 02:22:38,988 - INFO - PHASE 1B: Diffusion HP Tuning (with iTransformer guidance)
+2026-03-15 02:22:38,988 - INFO - Trials: 8
+2026-03-15 02:22:38,988 - INFO - ============================================================
+2026-03-15 02:22:39,270 - INFO - RealTS initialized: 10000 samples/epoch, lookback=1024, forecast=192, variables=7
+2026-03-15 02:22:39,271 - INFO - Pre-generating 10000 multivariate samples (RAM)...
+2026-03-15 02:22:44,235 - INFO - Generating synthetic samples: 1000/10000 (10%)
+2026-03-15 02:22:49,195 - INFO - Generating synthetic samples: 2000/10000 (20%)
+2026-03-15 02:22:54,142 - INFO - Generating synthetic samples: 3000/10000 (30%)
+2026-03-15 02:22:59,107 - INFO - Generating synthetic samples: 4000/10000 (40%)
+2026-03-15 02:23:04,118 - INFO - Generating synthetic samples: 5000/10000 (50%)
+2026-03-15 02:23:09,083 - INFO - Generating synthetic samples: 6000/10000 (60%)
+2026-03-15 02:23:14,063 - INFO - Generating synthetic samples: 7000/10000 (70%)
+2026-03-15 02:23:19,045 - INFO - Generating synthetic samples: 8000/10000 (80%)
+2026-03-15 02:23:24,032 - INFO - Generating synthetic samples: 9000/10000 (90%)
+2026-03-15 02:23:28,989 - INFO - Pre-generation complete.
+2026-03-15 02:23:28,989 - INFO - Created synthetic-only dataloader: 10000 samples/epoch (Pool: 10000), lookback=1024, forecast=192, variables=7
+2026-03-15 02:23:28,991 - INFO - Starting Diffusion HP search: 8 trials
+2026-03-15 02:23:28,993 - INFO - TimeSeriesTo2D initialized: H=64, MS=3.5
+2026-03-15 02:23:29,010 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-15 02:23:29,010 - INFO - Using default LinearRegressionGuidance for guidance channel
+2026-03-15 02:23:29,120 - INFO - ChannelIndependentDiT: 13.0M params | depth=8 dim=256 heads=8 patch=(8, 8) cross_var_every=3 n_variates=7
+2026-03-15 02:23:29,127 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-15 02:23:29,127 - INFO - DiffusionTSF initialized:
+2026-03-15 02:23:29,127 - INFO -   Variables: 7 (multivariate)
+2026-03-15 02:23:29,127 - INFO -   Lookback: 1024, Forecast: 200
+2026-03-15 02:23:29,127 - INFO -   Image size: 64 x W
+2026-03-15 02:23:29,127 - INFO -   Input channels: 15 (data: 7, aux: 1, guidance: 7)
+2026-03-15 02:23:29,127 - INFO -   Conditioning mode: visual_concat
+2026-03-15 02:23:29,127 - INFO -   Diffusion steps: 1000
+2026-03-15 02:23:29,127 - INFO -   Coordinate channel: True
+2026-03-15 02:23:29,127 - INFO -   Time ramp channel: False
+2026-03-15 02:23:29,127 - INFO -   Time sine channel: False
+2026-03-15 02:23:29,128 - INFO -   Value channel: False
+2026-03-15 02:23:29,128 - INFO -   Guidance channel: enabled (Stage 1 → 2D ghost image)
+2026-03-15 02:23:29,136 - INFO - Guidance model set: iTransformerGuidance
+2026-03-15 02:56:33,350 - INFO - [Diffusion HP] Trial 0/8: loss=0.0355, lr=5.61e-05, bs=8
+2026-03-15 02:56:33,352 - INFO - TimeSeriesTo2D initialized: H=64, MS=3.5
+2026-03-15 02:56:33,352 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-15 02:56:33,352 - INFO - Using default LinearRegressionGuidance for guidance channel
+2026-03-15 02:56:33,435 - INFO - ChannelIndependentDiT: 13.0M params | depth=8 dim=256 heads=8 patch=(8, 8) cross_var_every=3 n_variates=7
+2026-03-15 02:56:33,436 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-15 02:56:33,436 - INFO - DiffusionTSF initialized:
+2026-03-15 02:56:33,436 - INFO -   Variables: 7 (multivariate)
+2026-03-15 02:56:33,436 - INFO -   Lookback: 1024, Forecast: 200
+2026-03-15 02:56:33,436 - INFO -   Image size: 64 x W
+2026-03-15 02:56:33,436 - INFO -   Input channels: 15 (data: 7, aux: 1, guidance: 7)
+2026-03-15 02:56:33,436 - INFO -   Conditioning mode: visual_concat
+2026-03-15 02:56:33,436 - INFO -   Diffusion steps: 1000
+2026-03-15 02:56:33,436 - INFO -   Coordinate channel: True
+2026-03-15 02:56:33,436 - INFO -   Time ramp channel: False
+2026-03-15 02:56:33,436 - INFO -   Time sine channel: False
+2026-03-15 02:56:33,436 - INFO -   Value channel: False
+2026-03-15 02:56:33,436 - INFO -   Guidance channel: enabled (Stage 1 → 2D ghost image)
+2026-03-15 02:56:33,445 - INFO - Guidance model set: iTransformerGuidance
+2026-03-15 03:08:29,726 - INFO - [Diffusion HP] Trial 1/8: loss=0.0766, lr=2.05e-05, bs=32
+2026-03-15 03:08:29,731 - INFO - TimeSeriesTo2D initialized: H=64, MS=3.5
+2026-03-15 03:08:29,731 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-15 03:08:29,731 - INFO - Using default LinearRegressionGuidance for guidance channel
+2026-03-15 03:08:29,814 - INFO - ChannelIndependentDiT: 13.0M params | depth=8 dim=256 heads=8 patch=(8, 8) cross_var_every=3 n_variates=7
+2026-03-15 03:08:29,814 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-15 03:08:29,814 - INFO - DiffusionTSF initialized:
+2026-03-15 03:08:29,814 - INFO -   Variables: 7 (multivariate)
+2026-03-15 03:08:29,814 - INFO -   Lookback: 1024, Forecast: 200
+2026-03-15 03:08:29,814 - INFO -   Image size: 64 x W
+2026-03-15 03:08:29,815 - INFO -   Input channels: 15 (data: 7, aux: 1, guidance: 7)
+2026-03-15 03:08:29,815 - INFO -   Conditioning mode: visual_concat
+2026-03-15 03:08:29,815 - INFO -   Diffusion steps: 1000
+2026-03-15 03:08:29,815 - INFO -   Coordinate channel: True
+2026-03-15 03:08:29,815 - INFO -   Time ramp channel: False
+2026-03-15 03:08:29,815 - INFO -   Time sine channel: False
+2026-03-15 03:08:29,815 - INFO -   Value channel: False
+2026-03-15 03:08:29,815 - INFO -   Guidance channel: enabled (Stage 1 → 2D ghost image)
+2026-03-15 03:08:29,824 - INFO - Guidance model set: iTransformerGuidance
+2026-03-15 03:20:25,157 - INFO - [Diffusion HP] Trial 2/8: loss=0.0398, lr=1.59e-04, bs=32
+2026-03-15 03:20:25,159 - INFO - TimeSeriesTo2D initialized: H=64, MS=3.5
+2026-03-15 03:20:25,159 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-15 03:20:25,159 - INFO - Using default LinearRegressionGuidance for guidance channel
+2026-03-15 03:20:25,240 - INFO - ChannelIndependentDiT: 13.0M params | depth=8 dim=256 heads=8 patch=(8, 8) cross_var_every=3 n_variates=7
+2026-03-15 03:20:25,240 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-15 03:20:25,240 - INFO - DiffusionTSF initialized:
+2026-03-15 03:20:25,240 - INFO -   Variables: 7 (multivariate)
+2026-03-15 03:20:25,240 - INFO -   Lookback: 1024, Forecast: 200
+2026-03-15 03:20:25,240 - INFO -   Image size: 64 x W
+2026-03-15 03:20:25,240 - INFO -   Input channels: 15 (data: 7, aux: 1, guidance: 7)
+2026-03-15 03:20:25,240 - INFO -   Conditioning mode: visual_concat
+2026-03-15 03:20:25,240 - INFO -   Diffusion steps: 1000
+2026-03-15 03:20:25,240 - INFO -   Coordinate channel: True
+2026-03-15 03:20:25,240 - INFO -   Time ramp channel: False
+2026-03-15 03:20:25,240 - INFO -   Time sine channel: False
+2026-03-15 03:20:25,240 - INFO -   Value channel: False
+2026-03-15 03:20:25,240 - INFO -   Guidance channel: enabled (Stage 1 → 2D ghost image)
+2026-03-15 03:20:25,249 - INFO - Guidance model set: iTransformerGuidance
+2026-03-15 03:52:45,845 - INFO - [Diffusion HP] Trial 3/8: loss=0.0308, lr=4.62e-04, bs=8
+2026-03-15 03:52:45,854 - INFO - TimeSeriesTo2D initialized: H=64, MS=3.5
+2026-03-15 03:52:45,854 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-15 03:52:45,854 - INFO - Using default LinearRegressionGuidance for guidance channel
+2026-03-15 03:52:45,937 - INFO - ChannelIndependentDiT: 13.0M params | depth=8 dim=256 heads=8 patch=(8, 8) cross_var_every=3 n_variates=7
+2026-03-15 03:52:45,937 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-15 03:52:45,937 - INFO - DiffusionTSF initialized:
+2026-03-15 03:52:45,937 - INFO -   Variables: 7 (multivariate)
+2026-03-15 03:52:45,937 - INFO -   Lookback: 1024, Forecast: 200
+2026-03-15 03:52:45,937 - INFO -   Image size: 64 x W
+2026-03-15 03:52:45,937 - INFO -   Input channels: 15 (data: 7, aux: 1, guidance: 7)
+2026-03-15 03:52:45,937 - INFO -   Conditioning mode: visual_concat
+2026-03-15 03:52:45,937 - INFO -   Diffusion steps: 1000
+2026-03-15 03:52:45,937 - INFO -   Coordinate channel: True
+2026-03-15 03:52:45,937 - INFO -   Time ramp channel: False
+2026-03-15 03:52:45,937 - INFO -   Time sine channel: False
+2026-03-15 03:52:45,938 - INFO -   Value channel: False
+2026-03-15 03:52:45,938 - INFO -   Guidance channel: enabled (Stage 1 → 2D ghost image)
+2026-03-15 03:52:45,947 - INFO - Guidance model set: iTransformerGuidance
+2026-03-15 04:25:41,030 - INFO - [Diffusion HP] Trial 4/8: loss=0.0362, lr=4.06e-05, bs=8
+2026-03-15 04:25:41,032 - INFO - TimeSeriesTo2D initialized: H=64, MS=3.5
+2026-03-15 04:25:41,032 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-15 04:25:41,032 - INFO - Using default LinearRegressionGuidance for guidance channel
+2026-03-15 04:25:41,116 - INFO - ChannelIndependentDiT: 13.0M params | depth=8 dim=256 heads=8 patch=(8, 8) cross_var_every=3 n_variates=7
+2026-03-15 04:25:41,116 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-15 04:25:41,116 - INFO - DiffusionTSF initialized:
+2026-03-15 04:25:41,116 - INFO -   Variables: 7 (multivariate)
+2026-03-15 04:25:41,116 - INFO -   Lookback: 1024, Forecast: 200
+2026-03-15 04:25:41,116 - INFO -   Image size: 64 x W
+2026-03-15 04:25:41,116 - INFO -   Input channels: 15 (data: 7, aux: 1, guidance: 7)
+2026-03-15 04:25:41,116 - INFO -   Conditioning mode: visual_concat
+2026-03-15 04:25:41,116 - INFO -   Diffusion steps: 1000
+2026-03-15 04:25:41,116 - INFO -   Coordinate channel: True
+2026-03-15 04:25:41,116 - INFO -   Time ramp channel: False
+2026-03-15 04:25:41,116 - INFO -   Time sine channel: False
+2026-03-15 04:25:41,116 - INFO -   Value channel: False
+2026-03-15 04:25:41,116 - INFO -   Guidance channel: enabled (Stage 1 → 2D ghost image)
+2026-03-15 04:25:41,125 - INFO - Guidance model set: iTransformerGuidance
+2026-03-15 04:26:05,076 - INFO - [Diffusion HP] Trial 5/8: loss=0.1831, lr=1.67e-04, bs=32
+2026-03-15 04:26:05,076 - INFO - TimeSeriesTo2D initialized: H=64, MS=3.5
+2026-03-15 04:26:05,077 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-15 04:26:05,077 - INFO - Using default LinearRegressionGuidance for guidance channel
+2026-03-15 04:26:05,159 - INFO - ChannelIndependentDiT: 13.0M params | depth=8 dim=256 heads=8 patch=(8, 8) cross_var_every=3 n_variates=7
+2026-03-15 04:26:05,159 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-15 04:26:05,159 - INFO - DiffusionTSF initialized:
+2026-03-15 04:26:05,159 - INFO -   Variables: 7 (multivariate)
+2026-03-15 04:26:05,159 - INFO -   Lookback: 1024, Forecast: 200
+2026-03-15 04:26:05,159 - INFO -   Image size: 64 x W
+2026-03-15 04:26:05,160 - INFO -   Input channels: 15 (data: 7, aux: 1, guidance: 7)
+2026-03-15 04:26:05,160 - INFO -   Conditioning mode: visual_concat
+2026-03-15 04:26:05,160 - INFO -   Diffusion steps: 1000
+2026-03-15 04:26:05,160 - INFO -   Coordinate channel: True
+2026-03-15 04:26:05,160 - INFO -   Time ramp channel: False
+2026-03-15 04:26:05,160 - INFO -   Time sine channel: False
+2026-03-15 04:26:05,160 - INFO -   Value channel: False
+2026-03-15 04:26:05,160 - INFO -   Guidance channel: enabled (Stage 1 → 2D ghost image)
+2026-03-15 04:26:05,169 - INFO - Guidance model set: iTransformerGuidance
+2026-03-15 04:58:57,742 - INFO - [Diffusion HP] Trial 6/8: loss=0.0336, lr=8.17e-05, bs=8
+2026-03-15 04:58:57,743 - INFO - TimeSeriesTo2D initialized: H=64, MS=3.5
+2026-03-15 04:58:57,743 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-15 04:58:57,744 - INFO - Using default LinearRegressionGuidance for guidance channel
+2026-03-15 04:58:57,823 - INFO - ChannelIndependentDiT: 13.0M params | depth=8 dim=256 heads=8 patch=(8, 8) cross_var_every=3 n_variates=7
+2026-03-15 04:58:57,824 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-15 04:58:57,824 - INFO - DiffusionTSF initialized:
+2026-03-15 04:58:57,824 - INFO -   Variables: 7 (multivariate)
+2026-03-15 04:58:57,824 - INFO -   Lookback: 1024, Forecast: 200
+2026-03-15 04:58:57,824 - INFO -   Image size: 64 x W
+2026-03-15 04:58:57,824 - INFO -   Input channels: 15 (data: 7, aux: 1, guidance: 7)
+2026-03-15 04:58:57,824 - INFO -   Conditioning mode: visual_concat
+2026-03-15 04:58:57,824 - INFO -   Diffusion steps: 1000
+2026-03-15 04:58:57,824 - INFO -   Coordinate channel: True
+2026-03-15 04:58:57,824 - INFO -   Time ramp channel: False
+2026-03-15 04:58:57,824 - INFO -   Time sine channel: False
+2026-03-15 04:58:57,824 - INFO -   Value channel: False
+2026-03-15 04:58:57,824 - INFO -   Guidance channel: enabled (Stage 1 → 2D ghost image)
+2026-03-15 04:58:57,833 - INFO - Guidance model set: iTransformerGuidance
+2026-03-15 04:59:32,317 - INFO - [Diffusion HP] Trial 7/8: loss=0.1723, lr=1.53e-04, bs=16
+2026-03-15 04:59:32,318 - INFO - Best Diffusion params: lr=4.62e-04, bs=8
+2026-03-15 04:59:32,318 - INFO - Best val loss: 0.0308
+2026-03-15 04:59:32,319 - INFO - ============================================================
+2026-03-15 04:59:32,319 - INFO - PHASE 1C-2: Full Diffusion Pretraining (with iTransformer guidance)
+2026-03-15 04:59:32,319 - INFO - Samples: 100000, Epochs: 200, Patience: 20
+2026-03-15 04:59:32,319 - INFO - Params: {'learning_rate': 0.000462258900102083, 'batch_size': 8}
+2026-03-15 04:59:32,319 - INFO - ============================================================
+2026-03-15 04:59:32,409 - INFO - RealTS initialized: 100000 samples/epoch, lookback=1024, forecast=192, variables=7
+2026-03-15 04:59:32,409 - INFO - Pre-generating 100000 multivariate samples (RAM)...
+2026-03-15 05:00:22,294 - INFO - Generating synthetic samples: 10000/100000 (10%)
+2026-03-15 05:01:12,087 - INFO - Generating synthetic samples: 20000/100000 (20%)
+2026-03-15 05:02:01,877 - INFO - Generating synthetic samples: 30000/100000 (30%)
+2026-03-15 05:02:51,710 - INFO - Generating synthetic samples: 40000/100000 (40%)
+2026-03-15 05:03:41,531 - INFO - Generating synthetic samples: 50000/100000 (50%)
+2026-03-15 05:04:31,249 - INFO - Generating synthetic samples: 60000/100000 (60%)
+2026-03-15 05:05:20,921 - INFO - Generating synthetic samples: 70000/100000 (70%)
+2026-03-15 05:06:10,679 - INFO - Generating synthetic samples: 80000/100000 (80%)
+2026-03-15 05:07:00,575 - INFO - Generating synthetic samples: 90000/100000 (90%)
+2026-03-15 05:07:50,226 - INFO - Pre-generation complete.
+2026-03-15 05:07:50,226 - INFO - Created synthetic-only dataloader: 100000 samples/epoch (Pool: 100000), lookback=1024, forecast=192, variables=7
+2026-03-15 05:07:50,228 - INFO - TimeSeriesTo2D initialized: H=64, MS=3.5
+2026-03-15 05:07:50,229 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-15 05:07:50,229 - INFO - Using default LinearRegressionGuidance for guidance channel
+2026-03-15 05:07:50,309 - INFO - ChannelIndependentDiT: 13.0M params | depth=8 dim=256 heads=8 patch=(8, 8) cross_var_every=3 n_variates=7
+2026-03-15 05:07:50,309 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-15 05:07:50,309 - INFO - DiffusionTSF initialized:
+2026-03-15 05:07:50,309 - INFO -   Variables: 7 (multivariate)
+2026-03-15 05:07:50,309 - INFO -   Lookback: 1024, Forecast: 200
+2026-03-15 05:07:50,309 - INFO -   Image size: 64 x W
+2026-03-15 05:07:50,309 - INFO -   Input channels: 15 (data: 7, aux: 1, guidance: 7)
+2026-03-15 05:07:50,309 - INFO -   Conditioning mode: visual_concat
+2026-03-15 05:07:50,309 - INFO -   Diffusion steps: 1000
+2026-03-15 05:07:50,309 - INFO -   Coordinate channel: True
+2026-03-15 05:07:50,309 - INFO -   Time ramp channel: False
+2026-03-15 05:07:50,309 - INFO -   Time sine channel: False
+2026-03-15 05:07:50,310 - INFO -   Value channel: False
+2026-03-15 05:07:50,310 - INFO -   Guidance channel: enabled (Stage 1 → 2D ghost image)
+2026-03-15 05:07:50,310 - INFO - Guidance model set: iTransformerGuidance
+2026-03-15 05:19:20,054 - INFO - [Diffusion] Epoch 1/200 | Train: 0.0722 | Val: 0.0550 | LR: 4.62e-04 | Time: 689.7s
+2026-03-15 05:19:20,298 - INFO -   -> New best! Saved to /project/6101823/diffusion-tsf-cidit/checkpoints/pretrained_dim7/pretrained_diffusion.pt
+2026-03-15 05:31:12,555 - INFO - [Diffusion] Epoch 2/200 | Train: 0.0414 | Val: 0.0324 | LR: 4.62e-04 | Time: 712.3s
+2026-03-15 05:31:12,896 - INFO -   -> New best! Saved to /project/6101823/diffusion-tsf-cidit/checkpoints/pretrained_dim7/pretrained_diffusion.pt
+2026-03-15 05:43:15,256 - INFO - [Diffusion] Epoch 3/200 | Train: 0.0357 | Val: 0.0287 | LR: 4.62e-04 | Time: 722.4s
+2026-03-15 05:43:15,511 - INFO -   -> New best! Saved to /project/6101823/diffusion-tsf-cidit/checkpoints/pretrained_dim7/pretrained_diffusion.pt
+2026-03-15 05:55:11,194 - INFO - [Diffusion] Epoch 4/200 | Train: 0.0333 | Val: 0.0260 | LR: 4.62e-04 | Time: 715.7s
+2026-03-15 05:55:11,440 - INFO -   -> New best! Saved to /project/6101823/diffusion-tsf-cidit/checkpoints/pretrained_dim7/pretrained_diffusion.pt
+2026-03-15 06:05:06,867 - INFO - [Diffusion] Epoch 5/200 | Train: 0.0311 | Val: 0.0277 | LR: 4.62e-04 | Time: 595.4s
+2026-03-15 06:15:21,154 - INFO - [Diffusion] Epoch 6/200 | Train: 0.0298 | Val: 0.0288 | LR: 4.61e-04 | Time: 614.3s
+2026-03-15 06:24:31,421 - INFO - [Diffusion] Epoch 7/200 | Train: 0.0288 | Val: 0.0238 | LR: 4.61e-04 | Time: 550.3s
+2026-03-15 06:24:31,653 - INFO -   -> New best! Saved to /project/6101823/diffusion-tsf-cidit/checkpoints/pretrained_dim7/pretrained_diffusion.pt
+2026-03-15 06:34:21,805 - INFO - [Diffusion] Epoch 8/200 | Train: 0.0286 | Val: 0.0222 | LR: 4.60e-04 | Time: 590.2s
+2026-03-15 06:34:22,054 - INFO -   -> New best! Saved to /project/6101823/diffusion-tsf-cidit/checkpoints/pretrained_dim7/pretrained_diffusion.pt
+2026-03-15 06:46:10,699 - INFO - [Diffusion] Epoch 9/200 | Train: 0.0279 | Val: 0.0228 | LR: 4.60e-04 | Time: 708.6s
+2026-03-15 06:58:07,893 - INFO - [Diffusion] Epoch 10/200 | Train: 0.0273 | Val: 0.0275 | LR: 4.59e-04 | Time: 717.2s
+2026-03-15 07:09:22,013 - INFO - [Diffusion] Epoch 11/200 | Train: 0.0267 | Val: 0.0234 | LR: 4.59e-04 | Time: 674.1s
+2026-03-15 07:21:16,163 - INFO - [Diffusion] Epoch 12/200 | Train: 0.0265 | Val: 0.0346 | LR: 4.58e-04 | Time: 714.1s
+2026-03-15 07:33:07,644 - INFO - [Diffusion] Epoch 13/200 | Train: 0.0262 | Val: 0.0225 | LR: 4.58e-04 | Time: 711.5s
+2026-03-15 07:45:02,057 - INFO - [Diffusion] Epoch 14/200 | Train: 0.0256 | Val: 0.0248 | LR: 4.57e-04 | Time: 714.4s
+2026-03-15 07:56:53,282 - INFO - [Diffusion] Epoch 15/200 | Train: 0.0260 | Val: 0.0245 | LR: 4.56e-04 | Time: 711.2s
+2026-03-15 08:08:46,730 - INFO - [Diffusion] Epoch 16/200 | Train: 0.0254 | Val: 0.0227 | LR: 4.55e-04 | Time: 713.4s
+2026-03-15 08:20:48,230 - INFO - [Diffusion] Epoch 17/200 | Train: 0.0253 | Val: 0.0277 | LR: 4.54e-04 | Time: 721.5s
+2026-03-15 08:32:40,580 - INFO - [Diffusion] Epoch 18/200 | Train: 0.0250 | Val: 0.0233 | LR: 4.53e-04 | Time: 712.3s
+2026-03-15 08:44:32,907 - INFO - [Diffusion] Epoch 19/200 | Train: 0.0248 | Val: 0.0308 | LR: 4.52e-04 | Time: 712.3s
+2026-03-15 08:56:30,113 - INFO - [Diffusion] Epoch 20/200 | Train: 0.0245 | Val: 0.0212 | LR: 4.51e-04 | Time: 717.2s
+2026-03-15 08:56:30,350 - INFO -   -> New best! Saved to /project/6101823/diffusion-tsf-cidit/checkpoints/pretrained_dim7/pretrained_diffusion.pt
+2026-03-15 09:08:29,046 - INFO - [Diffusion] Epoch 21/200 | Train: 0.0246 | Val: 0.0224 | LR: 4.50e-04 | Time: 718.7s
+2026-03-15 09:20:15,701 - INFO - [Diffusion] Epoch 22/200 | Train: 0.0244 | Val: 0.0220 | LR: 4.49e-04 | Time: 706.7s
+2026-03-15 09:32:09,575 - INFO - [Diffusion] Epoch 23/200 | Train: 0.0241 | Val: 0.0219 | LR: 4.47e-04 | Time: 713.9s
+2026-03-15 09:43:59,863 - INFO - [Diffusion] Epoch 24/200 | Train: 0.0242 | Val: 0.0444 | LR: 4.46e-04 | Time: 710.3s
+2026-03-15 09:55:50,758 - INFO - [Diffusion] Epoch 25/200 | Train: 0.0242 | Val: 0.0232 | LR: 4.45e-04 | Time: 710.9s
+2026-03-15 10:07:42,087 - INFO - [Diffusion] Epoch 26/200 | Train: 0.0241 | Val: 0.0196 | LR: 4.43e-04 | Time: 711.3s
+2026-03-15 10:07:42,331 - INFO -   -> New best! Saved to /project/6101823/diffusion-tsf-cidit/checkpoints/pretrained_dim7/pretrained_diffusion.pt
+2026-03-15 10:19:39,225 - INFO - [Diffusion] Epoch 27/200 | Train: 0.0252 | Val: 0.0205 | LR: 4.42e-04 | Time: 716.9s
+2026-03-15 10:31:43,662 - INFO - [Diffusion] Epoch 28/200 | Train: 0.0236 | Val: 0.0231 | LR: 4.40e-04 | Time: 724.4s
+2026-03-15 10:43:48,210 - INFO - [Diffusion] Epoch 29/200 | Train: 0.0240 | Val: 0.0253 | LR: 4.39e-04 | Time: 724.5s
+2026-03-15 10:55:55,974 - INFO - [Diffusion] Epoch 30/200 | Train: 0.0237 | Val: 0.0199 | LR: 4.37e-04 | Time: 727.8s
+2026-03-15 11:07:58,363 - INFO - [Diffusion] Epoch 31/200 | Train: 0.0233 | Val: 0.0291 | LR: 4.36e-04 | Time: 722.4s
+2026-03-15 11:20:11,788 - INFO - [Diffusion] Epoch 32/200 | Train: 0.0234 | Val: 0.0206 | LR: 4.34e-04 | Time: 733.4s
+2026-03-15 11:32:25,958 - INFO - [Diffusion] Epoch 33/200 | Train: 0.0359 | Val: 0.0220 | LR: 4.32e-04 | Time: 734.2s
+2026-03-15 11:44:37,110 - INFO - [Diffusion] Epoch 34/200 | Train: 0.0232 | Val: 0.0219 | LR: 4.30e-04 | Time: 731.2s
+2026-03-15 11:56:40,907 - INFO - [Diffusion] Epoch 35/200 | Train: 0.0232 | Val: 0.0195 | LR: 4.29e-04 | Time: 723.8s
+2026-03-15 11:56:41,136 - INFO -   -> New best! Saved to /project/6101823/diffusion-tsf-cidit/checkpoints/pretrained_dim7/pretrained_diffusion.pt
+2026-03-15 12:09:02,161 - INFO - [Diffusion] Epoch 36/200 | Train: 0.0228 | Val: 0.0319 | LR: 4.27e-04 | Time: 741.0s
+2026-03-15 12:21:09,732 - INFO - [Diffusion] Epoch 37/200 | Train: 0.0228 | Val: 0.0221 | LR: 4.25e-04 | Time: 727.6s
+2026-03-15 12:33:09,087 - INFO - [Diffusion] Epoch 38/200 | Train: 0.0228 | Val: 0.0215 | LR: 4.23e-04 | Time: 719.4s
+2026-03-15 12:45:21,765 - INFO - [Diffusion] Epoch 39/200 | Train: 0.0228 | Val: 0.0193 | LR: 4.21e-04 | Time: 732.7s
+2026-03-15 12:45:21,995 - INFO -   -> New best! Saved to /project/6101823/diffusion-tsf-cidit/checkpoints/pretrained_dim7/pretrained_diffusion.pt
+2026-03-15 12:57:34,439 - INFO - [Diffusion] Epoch 40/200 | Train: 0.0225 | Val: 0.0248 | LR: 4.19e-04 | Time: 732.4s
+2026-03-15 13:09:41,683 - INFO - [Diffusion] Epoch 41/200 | Train: 0.0225 | Val: 0.0203 | LR: 4.16e-04 | Time: 727.2s
+2026-03-15 13:21:48,433 - INFO - [Diffusion] Epoch 42/200 | Train: 0.0220 | Val: 0.0253 | LR: 4.14e-04 | Time: 726.7s
+2026-03-15 13:33:47,562 - INFO - [Diffusion] Epoch 43/200 | Train: 0.0224 | Val: 0.0274 | LR: 4.12e-04 | Time: 719.1s
+2026-03-15 13:45:35,533 - INFO - [Diffusion] Epoch 44/200 | Train: 0.0223 | Val: 0.0197 | LR: 4.10e-04 | Time: 708.0s
+2026-03-15 13:57:24,714 - INFO - [Diffusion] Epoch 45/200 | Train: 0.0221 | Val: 0.0184 | LR: 4.07e-04 | Time: 709.2s
+2026-03-15 13:57:38,798 - INFO -   -> New best! Saved to /project/6101823/diffusion-tsf-cidit/checkpoints/pretrained_dim7/pretrained_diffusion.pt
+2026-03-15 14:09:35,450 - INFO - [Diffusion] Epoch 46/200 | Train: 0.0219 | Val: 0.0308 | LR: 4.05e-04 | Time: 716.7s
+2026-03-15 14:21:29,362 - INFO - [Diffusion] Epoch 47/200 | Train: 0.0220 | Val: 0.0198 | LR: 4.03e-04 | Time: 713.9s
+2026-03-15 14:33:16,313 - INFO - [Diffusion] Epoch 48/200 | Train: 0.0222 | Val: 0.0191 | LR: 4.00e-04 | Time: 707.0s
+2026-03-15 14:45:13,297 - INFO - [Diffusion] Epoch 49/200 | Train: 0.0219 | Val: 0.0210 | LR: 3.98e-04 | Time: 717.0s
+2026-03-15 14:57:03,255 - INFO - [Diffusion] Epoch 50/200 | Train: 0.0223 | Val: 0.0240 | LR: 3.95e-04 | Time: 710.0s

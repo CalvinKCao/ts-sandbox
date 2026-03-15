@@ -1,21 +1,22 @@
 #!/bin/bash
 # =============================================================================
-# CI-DiT test — self-resubmitting Slurm script
+# U-Net full-variate — self-resubmitting Slurm script for Killarney
 #
-# When run from the login node, it picks GPU tier + wall time and sbatch's itself.
+# When run from the login node, it picks partition + wall time and sbatch's itself.
 # When run inside a Slurm job (SLURM_JOB_ID is set), it does the actual work.
 #
 # USAGE (from login node):
-#   ./slurm_ci_dit_test.sh --smoke-test             # any GPU, 16GB, 30 min
-#   ./slurm_ci_dit_test.sh                           # H100, 50GB, 12h
-#   ./slurm_ci_dit_test.sh --dataset ETTh1           # H100, 50GB, 12h, single ds
+#   ./slurm_unet_fullvar.sh --smoke-test                     # H100, 20GB, 30 min
+#   ./slurm_unet_fullvar.sh                                  # H100, 60GB, 3 days
+#   ./slurm_unet_fullvar.sh --dataset electricity             # H100, 60GB, 3 days
+#   ./slurm_unet_fullvar.sh --resume --dataset traffic        # resume traffic
 # =============================================================================
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ===========================================================================
-# If we're NOT inside a Slurm job → submit ourselves with the right resources
+# If NOT inside a Slurm job → submit ourselves with the right resources
 # ===========================================================================
 
 if [ -z "$SLURM_JOB_ID" ]; then
@@ -25,9 +26,9 @@ if [ -z "$SLURM_JOB_ID" ]; then
     done
 
     if [ "$IS_SMOKE" -eq 1 ]; then
-        echo "Submitting SMOKE TEST (H100, 20GB, b1 = 3h max)..."
+        echo "Submitting SMOKE TEST (H100, 20GB, b1 = 3h max, 30 min)..."
         sbatch \
-            --job-name=ci-dit-smoke \
+            --job-name=unet-fullvar-smoke \
             --account=aip-boyuwang \
             --partition=gpubase_h100_b1 \
             --time=0:30:00 \
@@ -35,27 +36,27 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --gpus-per-node=h100:1 \
             --cpus-per-task=4 \
             --mem=20G \
-            --output=ci-dit-smoke-%j.out \
-            --error=ci-dit-smoke-%j.err \
+            --output=unet-fullvar-smoke-%j.out \
+            --error=unet-fullvar-smoke-%j.err \
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            "$SCRIPT_DIR/slurm_ci_dit_test.sh" "$@"
+            "$SCRIPT_DIR/slurm_unet_fullvar.sh" "$@"
     else
-        echo "Submitting FULL TEST (H100, 50GB, b3 = 24h max)..."
+        echo "Submitting FULL RUN (H100, 60GB, b4 = 3 days)..."
         sbatch \
-            --job-name=ci-dit-test \
+            --job-name=unet-fullvar \
             --account=aip-boyuwang \
-            --partition=gpubase_h100_b3 \
-            --time=24:00:00 \
+            --partition=gpubase_h100_b4 \
+            --time=3-00:00:00 \
             --nodes=1 \
             --gpus-per-node=h100:1 \
             --cpus-per-task=6 \
-            --mem=50G \
-            --output=ci-dit-test-%j.out \
-            --error=ci-dit-test-%j.err \
+            --mem=60G \
+            --output=unet-fullvar-%j.out \
+            --error=unet-fullvar-%j.err \
             --mail-type=BEGIN,END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            "$SCRIPT_DIR/slurm_ci_dit_test.sh" "$@"
+            "$SCRIPT_DIR/slurm_unet_fullvar.sh" "$@"
     fi
     exit 0
 fi
@@ -88,6 +89,7 @@ else
     exit 1
 fi
 
+# Auto-detect PROJECT
 if [ -z "$PROJECT" ]; then
     if [ -d "$HOME/projects" ]; then
         FIRST_PROJECT=$(ls -d $HOME/projects/def-* $HOME/projects/aip-* 2>/dev/null | head -1)
@@ -100,18 +102,20 @@ if [ -z "$PROJECT" ]; then
     exit 1
 fi
 
-export STORAGE_ROOT="$PROJECT/$USER/diffusion-tsf-cidit"
+# Separate storage root so it doesn't conflict with main pipeline or CI-DiT
+export STORAGE_ROOT="$PROJECT/$USER/diffusion-tsf-fullvar"
 echo "STORAGE_ROOT: $STORAGE_ROOT"
 
 mkdir -p "$STORAGE_ROOT/checkpoints"
 mkdir -p "$STORAGE_ROOT/results"
 
+# Copy datasets to PROJECT if needed
 if [ ! -d "$STORAGE_ROOT/datasets" ]; then
     echo "Copying datasets to PROJECT storage..."
     cp -r "$PROJECT_ROOT/datasets" "$STORAGE_ROOT/datasets"
 fi
 
-# Venv — reuse main pipeline venv if it exists, otherwise create
+# Venv — reuse main pipeline venv if it exists
 VENV_PATH="$PROJECT/$USER/diffusion-tsf/venv"
 if [ ! -d "$VENV_PATH" ]; then
     VENV_PATH="$STORAGE_ROOT/venv"
@@ -152,30 +156,13 @@ for arg in "$@"; do
     PIPELINE_ARGS="$PIPELINE_ARGS $arg"
 done
 
-HAS_DATASET=0
-for arg in "$@"; do
-    [ "$arg" = "--dataset" ] && HAS_DATASET=1
-done
-
 cd "$PROJECT_ROOT"
 
-if [ "$HAS_DATASET" -eq 0 ]; then
-    echo ""
-    echo "No --dataset specified, running ETTh1 (7-var) and exchange_rate (8-var)"
-    echo ""
+echo ""
+echo "Running: ./run_unet_fullvar.sh $PIPELINE_ARGS"
+echo ""
 
-    echo "=== ETTh1 (7 variates) ==="
-    ./run_ci_dit.sh --dataset ETTh1 $PIPELINE_ARGS
-
-    echo ""
-    echo "=== exchange_rate (8 variates) ==="
-    ./run_ci_dit.sh --dataset exchange_rate $PIPELINE_ARGS
-else
-    echo ""
-    echo "Running: ./run_ci_dit.sh $PIPELINE_ARGS"
-    echo ""
-    ./run_ci_dit.sh $PIPELINE_ARGS
-fi
+./run_unet_fullvar.sh $PIPELINE_ARGS
 
 echo ""
 echo "=========================================="

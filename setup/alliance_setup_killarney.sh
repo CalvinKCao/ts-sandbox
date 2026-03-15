@@ -59,8 +59,8 @@ fi
 
 echo "Using PROJECT: $PROJECT"
 
-PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
-STORAGE_ROOT="$PROJECT/diffusion-tsf"
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+STORAGE_ROOT="$PROJECT/$USER/diffusion-tsf"
 
 echo "Project root: $PROJECT_ROOT"
 echo "Storage root: $STORAGE_ROOT"
@@ -245,7 +245,7 @@ if [ -z "\$PROJECT" ]; then
     exit 1
 fi
 
-export STORAGE_ROOT="\$PROJECT/diffusion-tsf"
+export STORAGE_ROOT="\$PROJECT/\$USER/diffusion-tsf"
 echo "STORAGE_ROOT: \$STORAGE_ROOT"
 
 mkdir -p "\$STORAGE_ROOT/checkpoints"
@@ -349,7 +349,7 @@ sq
 
 echo ""
 echo "=== Training Progress ==="
-MANIFEST="$PROJECT/diffusion-tsf/checkpoints/training_manifest.json"
+MANIFEST="$PROJECT/$USER/diffusion-tsf/checkpoints/training_manifest.json"
 if [ -f "$MANIFEST" ]; then
     python3 -c "
 import json
@@ -385,9 +385,9 @@ LOCAL_DIR="./synced_results"
 mkdir -p "\$LOCAL_DIR"
 
 echo "Syncing from \$REMOTE..."
-rsync -avz --progress "\$REMOTE:~/projects/*/diffusion-tsf/results/" "\$LOCAL_DIR/results/"
-rsync -avz --progress "\$REMOTE:~/projects/*/diffusion-tsf/checkpoints/training_manifest.json" "\$LOCAL_DIR/"
-rsync -avz --progress "\$REMOTE:~/projects/*/diffusion-tsf/wandb/" "\$LOCAL_DIR/wandb/"
+rsync -avz --progress "\$REMOTE:~/projects/*/\$USER/diffusion-tsf/results/" "\$LOCAL_DIR/results/"
+rsync -avz --progress "\$REMOTE:~/projects/*/\$USER/diffusion-tsf/checkpoints/training_manifest.json" "\$LOCAL_DIR/"
+rsync -avz --progress "\$REMOTE:~/projects/*/\$USER/diffusion-tsf/wandb/" "\$LOCAL_DIR/wandb/"
 
 echo "Done — results in \$LOCAL_DIR"
 SYNC_EOF

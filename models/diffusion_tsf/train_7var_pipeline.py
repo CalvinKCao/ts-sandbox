@@ -1150,6 +1150,7 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
     
     # Create synthetic data loaders
     n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_HP_TUNE
+    synth_cache = os.path.join(CHECKPOINT_DIR, 'synth_cache')
     synthetic_loader = get_synthetic_dataloader(
         batch_size=64,
         lookback_length=LOOKBACK_LENGTH,
@@ -1158,6 +1159,8 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
         num_samples=n_samples,
         num_workers=0,
         lookback_overlap=LOOKBACK_OVERLAP,
+        cache_dir=synth_cache if not smoke_test else None,
+        skip_cross_var_aug=(N_VARIATES > 32),
     )
     
     # Split for validation
@@ -1290,6 +1293,7 @@ def run_diffusion_hp_tuning(
     
     # Create small synthetic dataset for fast iteration
     n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_DIFF_TUNE
+    synth_cache = os.path.join(CHECKPOINT_DIR, 'synth_cache')
     synthetic_loader = get_synthetic_dataloader(
         batch_size=32,
         lookback_length=LOOKBACK_LENGTH,
@@ -1298,6 +1302,8 @@ def run_diffusion_hp_tuning(
         num_samples=n_samples,
         num_workers=0,
         lookback_overlap=LOOKBACK_OVERLAP,
+        cache_dir=synth_cache if not smoke_test else None,
+        skip_cross_var_aug=(N_VARIATES > 32),
     )
     
     dataset = synthetic_loader.dataset
@@ -1365,6 +1371,7 @@ def pretrain_itransformer(
     effective_batch_size = max(1, effective_batch_size)
     
     # Create data
+    synth_cache = os.path.join(checkpoint_dir, 'synth_cache')
     synthetic_loader = get_synthetic_dataloader(
         batch_size=effective_batch_size,
         lookback_length=LOOKBACK_LENGTH,
@@ -1373,6 +1380,8 @@ def pretrain_itransformer(
         num_samples=n_samples,
         num_workers=0 if smoke_test else 4,
         lookback_overlap=LOOKBACK_OVERLAP,
+        cache_dir=synth_cache if not smoke_test else None,
+        skip_cross_var_aug=(N_VARIATES > 32),
     )
     
     # Split for validation
@@ -1488,6 +1497,7 @@ def pretrain_diffusion(
     )
     
     # Create data
+    synth_cache = os.path.join(checkpoint_dir, 'synth_cache')
     synthetic_loader = get_synthetic_dataloader(
         batch_size=effective_batch_size,
         lookback_length=LOOKBACK_LENGTH,
@@ -1496,6 +1506,8 @@ def pretrain_diffusion(
         num_samples=n_samples,
         num_workers=0 if smoke_test else 4,
         lookback_overlap=LOOKBACK_OVERLAP,
+        cache_dir=synth_cache if not smoke_test else None,
+        skip_cross_var_aug=(N_VARIATES > 32),
     )
     
     dataset = synthetic_loader.dataset
@@ -2759,6 +2771,12 @@ def main():
                         help='Enable gradient checkpointing (saves memory, ~25%% slower)')
     parser.add_argument('--image-height', type=int, default=None,
                         help='Override image height (default: 128, use 64 for CI-DiT)')
+    parser.add_argument('--synthetic-samples', type=int, default=None,
+                        help='Override SYNTHETIC_SAMPLES_FULL (default: 100000)')
+    parser.add_argument('--itransformer-trials', type=int, default=None,
+                        help='Override N_ITRANS_HP_TRIALS (default: 20)')
+    parser.add_argument('--subset-threshold', type=int, default=None,
+                        help='Override SUBSET_THRESHOLD for dim grouping')
     
     args = parser.parse_args()
     
@@ -2781,11 +2799,18 @@ def main():
     
     # CI-DiT / memory flags (stored as module-level globals)
     global MODEL_TYPE, USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT
+    global SYNTHETIC_SAMPLES_FULL, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
     MODEL_TYPE = args.model_type
     USE_AMP = args.amp
     USE_GRADIENT_CHECKPOINTING = args.gradient_checkpointing
     if args.image_height is not None:
         IMAGE_HEIGHT = args.image_height
+    if args.synthetic_samples is not None:
+        SYNTHETIC_SAMPLES_FULL = args.synthetic_samples
+    if args.itransformer_trials is not None:
+        N_ITRANS_HP_TRIALS = args.itransformer_trials
+    if args.subset_threshold is not None:
+        SUBSET_THRESHOLD = args.subset_threshold
     
     # DDP setup
     if args.ddp:

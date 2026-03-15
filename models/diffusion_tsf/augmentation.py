@@ -254,7 +254,8 @@ def generate_multivariate_synthetic_data(
     num_vars: int,
     length: int,
     hyperparams: Optional[Dict[str, Any]] = None,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
+    skip_cross_var_aug: bool = False,
 ) -> np.ndarray:
     """
     Generate a batch of synthetic multivariate time series.
@@ -266,6 +267,8 @@ def generate_multivariate_synthetic_data(
         num_samples: Number of samples (batch size)
         num_vars: Number of variables (channels)
         length: Sequence length (T+h)
+        skip_cross_var_aug: Skip the O(V²) cross-variate augmentation loop.
+            Auto-enabled when num_vars > 32 regardless of this flag.
         
     Returns:
         Data tensor of shape (num_samples, num_vars, length)
@@ -290,6 +293,9 @@ def generate_multivariate_synthetic_data(
             's_epsilon': 0.02, 'cmax_e': 10, 'cmax_cp': 5, 'sigma_cp': 2.0
         }
     
+    # High-variate: cross-var aug is O(V²) in list ops — skip it
+    actually_skip = skip_cross_var_aug or num_vars > 32
+
     # List of available organic generators
     ORGANIC_GENERATORS = [IFFTB, seasonal_periodicity, PWB, RWB, LGB, TWDB]
     
@@ -303,37 +309,35 @@ def generate_multivariate_synthetic_data(
         # 1. Generate base independent series using organic generators
         series_list = []
         for v in range(num_vars):
-            # Pick a random generator for this variable's base behavior
             gen_idx = rng.integers(0, len(ORGANIC_GENERATORS))
             gen_func = ORGANIC_GENERATORS[gen_idx]
             base = gen_func(length)
             
-            # Normalize base
             base = (base - np.mean(base)) / (np.std(base) + 1e-6)
             series_list.append(base)
-            
-        # 2. Apply augmentation to couple them
-        augmented_series = []
-        for v in range(num_vars):
-            y = series_list[v]
-            # Potential covariates are all other series
-            others = [series_list[j] for j in range(num_vars) if j != v]
-            
-            # Define a wrapper for the synth generator to be used in augmentation
-            # so it also picks from organic behaviors
-            def organic_synth_wrapper(T, hp, r):
-                idx = rng.integers(0, len(ORGANIC_GENERATORS))
-                g = ORGANIC_GENERATORS[idx]
-                return g(T)
-            
-            y_aug, _ = informative_covariate_augmentation(
-                y, others, organic_synth_wrapper, hyperparams, rng
-            )
-            
-            # Normalize result
-            y_aug = (y_aug - np.mean(y_aug)) / (np.std(y_aug) + 1e-6)
-            augmented_series.append(y_aug)
-            
-        data[s] = np.stack(augmented_series)
+
+        if actually_skip:
+            # Just stack the independent series — no cross-var coupling
+            data[s] = np.stack(series_list)
+        else:
+            # 2. Apply augmentation to couple them
+            augmented_series = []
+            for v in range(num_vars):
+                y = series_list[v]
+                others = [series_list[j] for j in range(num_vars) if j != v]
+                
+                def organic_synth_wrapper(T, hp, r):
+                    idx = rng.integers(0, len(ORGANIC_GENERATORS))
+                    g = ORGANIC_GENERATORS[idx]
+                    return g(T)
+                
+                y_aug, _ = informative_covariate_augmentation(
+                    y, others, organic_synth_wrapper, hyperparams, rng
+                )
+                
+                y_aug = (y_aug - np.mean(y_aug)) / (np.std(y_aug) + 1e-6)
+                augmented_series.append(y_aug)
+                
+            data[s] = np.stack(augmented_series)
         
     return data

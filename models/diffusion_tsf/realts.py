@@ -428,6 +428,7 @@ class RealTS(Dataset):
         pool_size: Optional[int] = None,
         cache_dir: Optional[str] = None,
         lookback_overlap: int = 0,
+        skip_cross_var_aug: bool = False,
     ):
         self.num_samples = num_samples  # Virtual epoch size
         self.lookback_length = lookback_length
@@ -439,6 +440,7 @@ class RealTS(Dataset):
         self.pregenerate = pregenerate
         self.pool_size = pool_size or num_samples
         if self.pool_size < num_samples: self.pool_size = num_samples
+        self.skip_cross_var_aug = skip_cross_var_aug
         
         self.data_cache = None
         self.use_disk_cache = False
@@ -470,7 +472,8 @@ class RealTS(Dataset):
                         num_samples=size,
                         num_vars=self.num_variables,
                         length=self.total_length,
-                        seed=seed
+                        seed=seed,
+                        skip_cross_var_aug=self.skip_cross_var_aug,
                     )
                 else:
                     # Generate univariate in bulk
@@ -491,9 +494,6 @@ class RealTS(Dataset):
             
             if os.path.exists(cache_path):
                 logger.info(f"Loading synthetic pool from {cache_path}")
-                # Use mmap_mode='r' to avoid loading everything into RAM if it's huge
-                # But for <10GB, loading into RAM is usually faster for random access training
-                # Let's try mmap first, if user has RAM they can load it.
                 self.data_cache = np.load(cache_path, mmap_mode='r')
             else:
                 logger.info(f"Generating synthetic pool of {self.pool_size} samples to {cache_path}...")
@@ -509,7 +509,8 @@ class RealTS(Dataset):
                 num_samples=self.num_samples,
                 num_vars=self.num_variables,
                 length=self.total_length,
-                seed=seed
+                seed=seed,
+                skip_cross_var_aug=self.skip_cross_var_aug,
             )
             self.pool_size = self.num_samples # Pool size is fixed to what we generated
             logger.info("Pre-generation complete.")

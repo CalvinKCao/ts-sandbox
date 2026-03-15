@@ -74,7 +74,7 @@ if [ -z "$PROJECT" ]; then
     exit 1
 fi
 
-export STORAGE_ROOT="$PROJECT/diffusion-tsf"
+export STORAGE_ROOT="$PROJECT/$USER/diffusion-tsf"
 echo "STORAGE_ROOT: $STORAGE_ROOT"
 
 mkdir -p "$STORAGE_ROOT/checkpoints"

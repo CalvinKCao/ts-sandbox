@@ -127,6 +127,7 @@ def get_synthetic_dataloader(
     pool_size: Optional[int] = None,
     cache_dir: Optional[str] = None,
     lookback_overlap: int = 0,
+    skip_cross_var_aug: bool = False,
 ) -> DataLoader:
     """Create a DataLoader with ONLY synthetic RealTS data for pre-training.
     
@@ -146,6 +147,7 @@ def get_synthetic_dataloader(
         pool_size: Total number of samples in the cached pool (randomly sampled)
         cache_dir: Directory to cache the pool (enables large disk-based pools)
         lookback_overlap: Number of past steps to include in the target (K)
+        skip_cross_var_aug: Skip O(V²) cross-variate augmentation for high-V
         
     Returns:
         DataLoader with synthetic-only data
@@ -159,6 +161,7 @@ def get_synthetic_dataloader(
         pool_size=pool_size,
         cache_dir=cache_dir,
         lookback_overlap=lookback_overlap,
+        skip_cross_var_aug=skip_cross_var_aug,
     )
     
     logger.info(

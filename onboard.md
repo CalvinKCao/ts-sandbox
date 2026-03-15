@@ -13,7 +13,7 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
 ## file layout
 
 ### root scripts
-- `pipeline.sh`: **THE master script** — runs everything.
+- `pipeline.sh`: **THE master script** — runs everything (splits high-variate into 32-dim subsets).
     ```bash
     ./pipeline.sh                          # full pipeline
     ./pipeline.sh --smoke-test             # quick validation
@@ -21,16 +21,25 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
     ./pipeline.sh --dataset electricity    # single dataset
     ./pipeline.sh --pretrain-only          # just Phase 1
     ```
+- `run_unet_fullvar.sh`: trains U-Net on full-variate datasets (no subset splitting). bf16, H=96, 75K synth pool.
+    ```bash
+    ./run_unet_fullvar.sh                          # default: traffic (861-var)
+    ./run_unet_fullvar.sh --smoke-test             # quick validation
+    ./run_unet_fullvar.sh --dataset electricity    # 321-var
+    ```
 - `slurm_pipeline.sh`: Alliance HPC Slurm wrapper for pipeline.sh.
-- `setup.sh`: one-time env setup (venv, CUDA, deps).
-- `alliance_setup.sh`, `alliance_setup_killarney.sh`: cluster-specific setup.
-- `sync_results.sh`: pull results from remote cluster.
+- `slurm_unet_fullvar.sh`: self-resubmitting Slurm wrapper for run_unet_fullvar.sh (Killarney).
 - `summarize_results.py`: generate markdown report from eval results.
+- `setup/setup.sh`: one-time local env setup (venv, CUDA, deps).
+- `setup/alliance_setup_killarney.sh`: one-time Killarney cluster setup.
 
 ### models
 - `models/diffusion_tsf/`: core diffusion logic.
     - `diffusion_model.py`: main `DiffusionTSF` class.
     - `unet.py`: U-Net backbone.
+    - `transformer.py`: DiT-style backbone option.
+    - `diffusion.py`: `DiffusionScheduler` — DDPM/DDIM forward and reverse processes.
+    - `preprocessing.py`: `Standardizer`, `TimeSeriesTo2D` (encode/decode), `VerticalGaussianBlur`.
     - `train_7var_pipeline.py`: **the Python entry point** — pretrain, finetune, eval, baseline.
     - `train_electricity.py`: single-dataset training + optuna (used internally).
     - `train_universal_v2.py`: older universal training script.
@@ -38,6 +47,8 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
     - `dataset.py`: dataset loading + synthetic data.
     - `realts.py`: synthetic data generators.
     - `augmentation.py`: multivariate augmentation.
+    - `metrics.py`: shape-preservation + standard TSF metrics (MSE/MAE).
+    - `visualize.py`: general plotting utilities for 2D representations.
     - `visualize_comparison.py`: iTransformer vs Diffusion comparison plots.
     - `visualize_7var.py`: per-subset visualizations.
     - `evaluate_7var.py`: standalone evaluation.
@@ -50,6 +61,18 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
 ### legacy
 - `legacy/scripts/`: old shell scripts (run_all_datasets.sh, run_7var_pipeline.sh, etc.)
 - `legacy/`: old Python scripts (evaluate_latest.py, remote_evaluate.py, etc.)
+
+## datasets
+
+| Dataset | Cols | Sampling | Seasonal period |
+|---------|------|----------|-----------------|
+| ETTh1/h2 | 7 | Hourly | 24 |
+| ETTm1/m2 | 7 | 15-min | 96 |
+| exchange_rate | 8 | Daily | 5 |
+| illness | 7 | Weekly | 52 |
+| weather | 21 | 10-min | 144 |
+| electricity | 321 | Hourly | 96 |
+| traffic | 861 | Hourly | 24 |
 
 ## pipeline overview
 
@@ -107,7 +130,7 @@ The diffusion model predicts the last K=8 lookback timesteps in addition to the 
 Config: `lookback_overlap=8`, `past_loss_weight=0.3`. Constants: `LOOKBACK_OVERLAP`, `PAST_LOSS_WEIGHT` in train_7var_pipeline.py.
 
 ### Unified L+F scheme
-single time axis of length `Lookback + Forecast` (1024 + 200 = 1224).
+Single time axis of length `Lookback + Forecast` (1024 + 200 = 1224).
 - Input: `(Batch, Channels, Height=128, L+F)`.
 - Past (0..L): ground truth stripe/occupancy.
 - Future (L..L+F): noisy future (K overlap + H forecast).
@@ -116,9 +139,36 @@ single time axis of length `Lookback + Forecast` (1024 + 200 = 1224).
 
 ### 2D Representation
 - **Image:** 128 × 1224 (height × width, with K=8 overlap).
-- PDF mode: one-hot stripe per timestep.
-- CDF mode: occupancy map (cumulative fill).
-- Vertical Gaussian blur softens the representation for diffusion.
+- **PDF mode (default):** one-hot stripe — pixel index `y = clip((x-μ)/σ * MS/2 * H + H/2, 0, H-1)` where MS=3.5.
+- **CDF mode:** occupancy map — fill pixels `0..y` as 1.0 (cumulative); softens into a sigmoid boundary after blur.
+- Vertical Gaussian blur (31×1 kernel) blurs only along the value axis, preserving temporal patterns.
+- Decode: PDF → softmax-expectation; CDF → column sum normalized to `[-max_scale, max_scale]`.
+
+### Channel order (full)
+```
+[Var_0..Var_N (noisy),  Vertical_Coord,  Time_Ramp,  Time_Sine,  Guide_Var_0..Guide_Var_N (if guidance)]
+```
+- Multivariate: each variable = one image channel; aux channels shared across all vars.
+- Backbone in-channels: `num_variables + num_aux + (num_variables if guidance)`.
+- Backbone out-channels: `num_variables` (predicts noise per variable).
+
+### Hybrid forecasting flow
+```
+Past → [iTransformer] → coarse 1D forecast
+                              ↓
+                       [TimeSeriesTo2D + Blur]
+                              ↓
+                         "ghost image" (2D)
+                              ↓
+[Noisy future + Aux + Ghost] → [U-Net] → refined forecast
+```
+- iTransformer trained on chronological 70/10/20 split to avoid leakage.
+- Ghost image guidance only populates the future portion (L..L+F) of the input tensor.
+
+### Backbone options
+- **U-Net (default):** residual blocks, GroupNorm, skip connections — best for local spatial hierarchies. `conditioning_mode=visual_concat` directly prepends past 2D image (no extra encoder).
+- **DiT:** patch-based transformer; global context injected as a prepended context token.
+- Diffusion: DDPM (T=1000, linear/cosine/sigmoid schedule), DDIM (50 steps, `eta` controls stochasticity), CFG support.
 
 ## Alliance HPC deployment
 
@@ -131,7 +181,7 @@ cp -r ~/ts-sandbox /scratch/$USER/ts-sandbox   # or git clone there
 cd /scratch/$USER/ts-sandbox
 
 # 2. One-time setup (venv, datasets, generates slurm scripts)
-./alliance_setup_killarney.sh
+./setup/alliance_setup_killarney.sh
 
 # 3. Smoke test
 sbatch slurm_pipeline.sh --smoke-test
@@ -159,6 +209,7 @@ sbatch slurm_pipeline.sh
 - **traffic.csv:** auto-combined from part1+part2 by pipeline.sh.
 
 ## Recent Changes
+- **2026-03-15:** Full-variate U-Net path. `run_unet_fullvar.sh` + `slurm_unet_fullvar.sh` train U-Net directly on native-dim datasets (traffic=861, electricity=321) with bf16, H=96, 75K synth pool, 3 iTransformer HP trials. Cross-var augmentation auto-skipped for V>32. Synthetic pool disk caching via `cache_dir`. New CLI flags: `--synthetic-samples`, `--itransformer-trials`, `--subset-threshold`.
 - **2026-03-06:** Lookback overlap: diffusion model now predicts K=8 past steps alongside H=192 forecast to smooth boundary. Weighted loss (0.3× overlap, 1.0× forecast), trimmed at inference.
 - **2026-03-06:** Unified pipeline. Single `pipeline.sh` replaces scattered scripts. Dimensionality groups (7/8/21/32) with per-dim pretraining. Multi-GPU parallel subset fine-tuning. Full-dim iTransformer baseline for high-variate comparison. Old scripts moved to `legacy/`.
 - **2026-02-20:** 2D representation doubled to 128×1216. Synthetic pretraining uses 100k samples. Irregular periodicity added.
