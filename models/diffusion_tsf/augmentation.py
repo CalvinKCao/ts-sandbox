@@ -256,6 +256,7 @@ def generate_multivariate_synthetic_data(
     hyperparams: Optional[Dict[str, Any]] = None,
     seed: Optional[int] = None,
     skip_cross_var_aug: bool = False,
+    output_path: Optional[str] = None,
 ) -> np.ndarray:
     """
     Generate a batch of synthetic multivariate time series.
@@ -293,20 +294,25 @@ def generate_multivariate_synthetic_data(
             's_epsilon': 0.02, 'cmax_e': 10, 'cmax_cp': 5, 'sigma_cp': 2.0
         }
     
-    # High-variate: cross-var aug is O(V²) in list ops — skip it
     actually_skip = skip_cross_var_aug or num_vars > 32
 
-    # List of available organic generators
     ORGANIC_GENERATORS = [IFFTB, seasonal_periodicity, PWB, RWB, LGB, TWDB]
-    
-    data = np.zeros((num_samples, num_vars, length))
+
+    # For high-variate datasets the full array can be hundreds of GB.
+    # Use an optional memmap output to avoid blowing up RAM.
+    if output_path is not None:
+        data = np.lib.format.open_memmap(
+            output_path, mode='w+', dtype=np.float32,
+            shape=(num_samples, num_vars, length),
+        )
+    else:
+        data = np.zeros((num_samples, num_vars, length), dtype=np.float32)
     
     log_interval = max(1, num_samples // 10)
     for s in range(num_samples):
         if s % log_interval == 0 and s > 0:
             logger.info(f"Generating synthetic samples: {s}/{num_samples} ({s/num_samples*100:.0f}%)")
             
-        # 1. Generate base independent series using organic generators
         series_list = []
         for v in range(num_vars):
             gen_idx = rng.integers(0, len(ORGANIC_GENERATORS))
@@ -314,13 +320,11 @@ def generate_multivariate_synthetic_data(
             base = gen_func(length)
             
             base = (base - np.mean(base)) / (np.std(base) + 1e-6)
-            series_list.append(base)
+            series_list.append(base.astype(np.float32))
 
         if actually_skip:
-            # Just stack the independent series — no cross-var coupling
             data[s] = np.stack(series_list)
         else:
-            # 2. Apply augmentation to couple them
             augmented_series = []
             for v in range(num_vars):
                 y = series_list[v]
@@ -336,8 +340,15 @@ def generate_multivariate_synthetic_data(
                 )
                 
                 y_aug = (y_aug - np.mean(y_aug)) / (np.std(y_aug) + 1e-6)
-                augmented_series.append(y_aug)
+                augmented_series.append(y_aug.astype(np.float32))
                 
             data[s] = np.stack(augmented_series)
-        
+
+        # flush to disk periodically so OS doesn't accumulate dirty pages
+        if output_path is not None and s % 1000 == 999:
+            data.flush()
+
+    if output_path is not None:
+        data.flush()
+    
     return data

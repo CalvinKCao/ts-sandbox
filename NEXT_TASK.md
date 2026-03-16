@@ -1,5 +1,14 @@
 # Task: U-Net Full-Variate Training with bf16, H=96, and Optimized Data Gen
 
+## Status: PARTIALLY IMPLEMENTED — crash fixes applied 2026-03-16
+
+First implementation crashed with OOM on job 2400053. Root causes and fixes:
+1. **OOM in data gen** (FIXED): `augmentation.py` allocated `np.zeros((100K, 862, 1216))` = ~838 GB in RAM. Now uses `np.lib.format.open_memmap()` to write directly to disk when `output_path` is given.
+2. **--synthetic-samples not applied to iTransformer HP** (FIXED): `SYNTHETIC_SAMPLES_HP_TUNE` was hardcoded at 100K; now overridden by `--synthetic-samples` CLI flag.
+3. **iTransformer trials=20 instead of 3** (FIXED): shell script `run_unet_fullvar.sh` defaulted to 20; changed to 3.
+4. **Slurm smoke test used L40S** (FIXED): Killarney only has H100s; changed to `gpubase_h100_b1`.
+5. **Added --min-variates flag** to `run_unet_fullvar.sh` so you can skip 7/8 var datasets.
+
 ## Goal
 
 Modify the existing pipeline to train the **U-Net** backbone directly on **full-variate datasets** (traffic=861, electricity=321, etc.) WITHOUT splitting into 32-dim subsets. Use bf16 mixed precision, image height=96, and optimized synthetic data generation.

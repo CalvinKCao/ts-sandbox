@@ -465,27 +465,6 @@ class RealTS(Dataset):
             os.makedirs(cache_dir, exist_ok=True)
             self.use_disk_cache = True
             
-            # Helper to generate data
-            def gen_data(size):
-                if self.num_variables > 1:
-                    return generate_multivariate_synthetic_data(
-                        num_samples=size,
-                        num_vars=self.num_variables,
-                        length=self.total_length,
-                        seed=seed,
-                        skip_cross_var_aug=self.skip_cross_var_aug,
-                    )
-                else:
-                    # Generate univariate in bulk
-                    data = np.zeros((size, self.total_length), dtype=np.float32)
-                    for i in range(size):
-                        gen = np.random.choice(self.generators, p=self.probabilities)
-                        seq = gen(self.total_length)
-                        if np.random.random() < 0.5: seq = seq[::-1].copy()
-                        if np.random.random() < 0.5: seq = -seq
-                        data[i] = self._normalize_sequence(seq)
-                    return data
-
             cache_filename = f"synth_pool_v{self.num_variables}_L{self.total_length}_N{self.pool_size}.npy"
             if seed is not None:
                 cache_filename = f"synth_pool_v{self.num_variables}_L{self.total_length}_N{self.pool_size}_seed{seed}.npy"
@@ -497,8 +476,25 @@ class RealTS(Dataset):
                 self.data_cache = np.load(cache_path, mmap_mode='r')
             else:
                 logger.info(f"Generating synthetic pool of {self.pool_size} samples to {cache_path}...")
-                data = gen_data(self.pool_size)
-                np.save(cache_path, data)
+                if self.num_variables > 1:
+                    # Write directly to memmap to avoid holding the full array in RAM
+                    generate_multivariate_synthetic_data(
+                        num_samples=self.pool_size,
+                        num_vars=self.num_variables,
+                        length=self.total_length,
+                        seed=seed,
+                        skip_cross_var_aug=self.skip_cross_var_aug,
+                        output_path=cache_path,
+                    )
+                else:
+                    data = np.zeros((self.pool_size, self.total_length), dtype=np.float32)
+                    for i in range(self.pool_size):
+                        gen = np.random.choice(self.generators, p=self.probabilities)
+                        seq = gen(self.total_length)
+                        if np.random.random() < 0.5: seq = seq[::-1].copy()
+                        if np.random.random() < 0.5: seq = -seq
+                        data[i] = self._normalize_sequence(seq)
+                    np.save(cache_path, data)
                 self.data_cache = np.load(cache_path, mmap_mode='r')
                 logger.info("Pool generation complete.")
                 

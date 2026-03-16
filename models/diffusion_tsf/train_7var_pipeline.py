@@ -2799,7 +2799,7 @@ def main():
     
     # CI-DiT / memory flags (stored as module-level globals)
     global MODEL_TYPE, USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT
-    global SYNTHETIC_SAMPLES_FULL, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
+    global SYNTHETIC_SAMPLES_FULL, SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
     MODEL_TYPE = args.model_type
     USE_AMP = args.amp
     USE_GRADIENT_CHECKPOINTING = args.gradient_checkpointing
@@ -2807,6 +2807,7 @@ def main():
         IMAGE_HEIGHT = args.image_height
     if args.synthetic_samples is not None:
         SYNTHETIC_SAMPLES_FULL = args.synthetic_samples
+        SYNTHETIC_SAMPLES_HP_TUNE = args.synthetic_samples
     if args.itransformer_trials is not None:
         N_ITRANS_HP_TRIALS = args.itransformer_trials
     if args.subset_threshold is not None:

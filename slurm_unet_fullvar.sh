@@ -26,22 +26,23 @@ if [ -z "$SLURM_JOB_ID" ]; then
     done
 
     if [ "$IS_SMOKE" -eq 1 ]; then
-        echo "Submitting SMOKE TEST (L40S, 8GB, 15 min)..."
+        echo "Submitting SMOKE TEST (H100, 20GB, b1 = 3h max)..."
         sbatch \
             --job-name=unet-fullvar-smoke \
             --account=aip-boyuwang \
-            --time=0:15:00 \
+            --partition=gpubase_h100_b1 \
+            --time=0:30:00 \
             --nodes=1 \
-            --gres=gpu:l40s:1 \
-            --cpus-per-task=2 \
-            --mem=8G \
+            --gpus-per-node=h100:1 \
+            --cpus-per-task=4 \
+            --mem=20G \
             --output=unet-fullvar-smoke-%j.out \
             --error=unet-fullvar-smoke-%j.err \
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
             "$SCRIPT_DIR/slurm_unet_fullvar.sh" "$@"
     else
-        echo "Submitting FULL RUN (H100, 60GB, b4 = 3 days)..."
+        echo "Submitting FULL RUN (H100, 80GB, b4 = 3 days)..."
         sbatch \
             --job-name=unet-fullvar \
             --account=aip-boyuwang \
@@ -50,7 +51,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --nodes=1 \
             --gpus-per-node=h100:1 \
             --cpus-per-task=6 \
-            --mem=60G \
+            --mem=80G \
             --output=unet-fullvar-%j.out \
             --error=unet-fullvar-%j.err \
             --mail-type=BEGIN,END,FAIL \
@@ -114,24 +115,26 @@ if [ ! -d "$STORAGE_ROOT/datasets" ]; then
     cp -r "$PROJECT_ROOT/datasets" "$STORAGE_ROOT/datasets"
 fi
 
-# Venv — reuse main pipeline venv if it exists
+# Venv — reuse main pipeline venv if it exists.
+# Don't trust `source activate` on Alliance — module-loaded python shadows it.
+# Instead, export PATH with venv/bin prepended explicitly.
 VENV_PATH="$PROJECT/$USER/diffusion-tsf/venv"
 if [ ! -d "$VENV_PATH" ]; then
     VENV_PATH="$STORAGE_ROOT/venv"
-    if [ ! -d "$VENV_PATH" ]; then
-        echo "Creating virtual environment..."
-        python -m venv "$VENV_PATH"
-        source "$VENV_PATH/bin/activate"
-        pip install --upgrade pip
-        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-        pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch
-        [ -f "$PROJECT_ROOT/requirements.txt" ] && pip install -r "$PROJECT_ROOT/requirements.txt"
-    else
-        source "$VENV_PATH/bin/activate"
-    fi
+fi
+
+if [ ! -d "$VENV_PATH" ]; then
+    echo "Creating virtual environment..."
+    python -m venv "$VENV_PATH"
+    export PATH="$VENV_PATH/bin:$PATH"
+    pip install --upgrade pip
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch
+    [ -f "$PROJECT_ROOT/requirements.txt" ] && pip install -r "$PROJECT_ROOT/requirements.txt"
 else
-    source "$VENV_PATH/bin/activate"
-    echo "Reusing existing venv: $VENV_PATH"
+    export PATH="$VENV_PATH/bin:$PATH"
+    echo "Reusing venv: $VENV_PATH"
+    echo "  python: $(command -v python) ($(python --version 2>&1))"
 fi
 
 export WANDB_MODE=offline

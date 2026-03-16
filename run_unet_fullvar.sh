@@ -45,6 +45,7 @@ PRETRAIN_ONLY=""
 SINGLE_DATASET=""
 RESUME=""
 EXTRA_PY_ARGS=""
+MIN_VARIATES=0              # skip datasets with fewer variates than this
 
 # ============================================================================
 # Arg parsing
@@ -56,6 +57,7 @@ while [[ $# -gt 0 ]]; do
         --dataset)        SINGLE_DATASET="$2"; shift 2 ;;
         --pretrain-only)  PRETRAIN_ONLY=1; shift ;;
         --resume)         RESUME=1; shift ;;
+        --min-variates)   MIN_VARIATES="$2"; shift 2 ;;
         --seed)           SEED="$2"; shift 2 ;;
         --wandb)          EXTRA_PY_ARGS="$EXTRA_PY_ARGS --wandb"; shift ;;
         --checkpoint-dir) EXTRA_PY_ARGS="$EXTRA_PY_ARGS --checkpoint-dir $2"; shift 2 ;;
@@ -68,6 +70,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --smoke-test         Quick validation run"
             echo "  --dataset NAME       Process only this dataset (default: traffic)"
+            echo "  --min-variates N     Skip datasets with fewer than N variates"
             echo "  --pretrain-only      Stop after synthetic pretraining"
             echo "  --resume             Skip completed work"
             echo "  --seed N             Random seed (default: 42)"
@@ -83,8 +86,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Default to traffic if no dataset specified
-if [ -z "$SINGLE_DATASET" ]; then
+# Default to traffic if no dataset or filter specified
+if [ -z "$SINGLE_DATASET" ] && [ "$MIN_VARIATES" -eq 0 ]; then
     SINGLE_DATASET="traffic"
 fi
 
@@ -92,21 +95,29 @@ fi
 # Environment
 # ============================================================================
 
-# Activate venv — try local first, then Alliance cluster paths
-if [ -d "venv" ]; then
-    source venv/bin/activate
-    echo "[INFO] venv activated (local)"
-elif [ -n "$PROJECT" ] && [ -d "$PROJECT/$USER/diffusion-tsf/venv" ]; then
-    source "$PROJECT/$USER/diffusion-tsf/venv/bin/activate"
-    echo "[INFO] venv activated ($PROJECT/$USER/diffusion-tsf/venv)"
+# Activate venv — resolve the actual binary path, don't trust PATH.
+# On Alliance clusters `module load python/...` shadows venv activation.
+VENV_BIN=""
+if [ -d "venv/bin" ]; then
+    VENV_BIN="$(cd venv/bin && pwd)"
+elif [ -n "$PROJECT" ] && [ -d "$PROJECT/$USER/diffusion-tsf/venv/bin" ]; then
+    VENV_BIN="$PROJECT/$USER/diffusion-tsf/venv/bin"
 fi
 
-# On Alliance clusters, `python3` may still point to the system interpreter
-# after venv activation. Force the venv's python for all subprocesses.
-VENV_PYTHON="$(command -v python)"
-echo "[INFO] using: $VENV_PYTHON ($(python --version 2>&1))"
+if [ -n "$VENV_BIN" ] && [ -x "$VENV_BIN/python" ]; then
+    export PATH="$VENV_BIN:$PATH"
+    echo "[INFO] venv: $VENV_BIN"
+    echo "[INFO] python: $VENV_BIN/python ($($VENV_BIN/python --version 2>&1))"
+    # Sanity check — bail early if packages are missing
+    if ! "$VENV_BIN/python" -c "import torch, pandas" 2>/dev/null; then
+        echo "[ERROR] venv at $VENV_BIN is missing packages (torch/pandas). Reinstall."
+        exit 1
+    fi
+else
+    echo "[WARN] no venv found, using system python: $(command -v python)"
+fi
 
-PYTHON="python -m models.diffusion_tsf.train_7var_pipeline"
+PYTHON="${VENV_BIN:+$VENV_BIN/}python -m models.diffusion_tsf.train_7var_pipeline"
 BASE_ARGS="--seed $SEED $SMOKE_TEST $EXTRA_PY_ARGS"
 BASE_ARGS="$BASE_ARGS --model-type $MODEL_TYPE $AMP_FLAG --image-height $IMAGE_HEIGHT"
 BASE_ARGS="$BASE_ARGS --synthetic-samples $SYNTHETIC_SAMPLES"
@@ -126,7 +137,7 @@ echo "  Image height: $IMAGE_HEIGHT"
 echo "  Synth pool:   $SYNTHETIC_SAMPLES"
 echo "  iTransformer trials: $ITRANSFORMER_TRIALS"
 echo "  Subset threshold: $SUBSET_THRESHOLD (no splitting)"
-echo "  Dataset:      $SINGLE_DATASET"
+echo "  Dataset:      ${SINGLE_DATASET:-all (min-var=$MIN_VARIATES)}"
 echo "  Smoke test:   ${SMOKE_TEST:-no}"
 echo ""
 
@@ -158,7 +169,7 @@ fi
 declare -A DATASET_DIM
 
 discover_dims() {
-    python -c "
+    ${VENV_BIN:+$VENV_BIN/}python -c "
 import pandas as pd, os
 
 registry = {
@@ -193,41 +204,63 @@ while IFS=' ' read -r ds ncols; do
     DATASET_DIM[$ds]=$ncols
 done < <(discover_dims)
 
-target_dim="${DATASET_DIM[$SINGLE_DATASET]}"
-if [ -z "$target_dim" ]; then
-    echo "[ERROR] Unknown or missing dataset: $SINGLE_DATASET"
-    exit 1
+# Build list of datasets to process
+DATASETS_TO_RUN=()
+if [ -n "$SINGLE_DATASET" ]; then
+    target_dim="${DATASET_DIM[$SINGLE_DATASET]}"
+    if [ -z "$target_dim" ]; then
+        echo "[ERROR] Unknown or missing dataset: $SINGLE_DATASET"
+        exit 1
+    fi
+    DATASETS_TO_RUN=("$SINGLE_DATASET")
+else
+    # Run all datasets above --min-variates threshold
+    for ds in "${!DATASET_DIM[@]}"; do
+        if [ "${DATASET_DIM[$ds]}" -ge "$MIN_VARIATES" ]; then
+            DATASETS_TO_RUN+=("$ds")
+        fi
+    done
+    if [ ${#DATASETS_TO_RUN[@]} -eq 0 ]; then
+        echo "[ERROR] No datasets with >= $MIN_VARIATES variates found"
+        exit 1
+    fi
 fi
 
-echo "[INFO] $SINGLE_DATASET: $target_dim variates (native, no splitting)"
+for ds in "${DATASETS_TO_RUN[@]}"; do
+    echo "[INFO] $ds: ${DATASET_DIM[$ds]} variates (native, no splitting)"
+done
 echo ""
 
 # ============================================================================
-# PHASE 1: Pretrain for native dimensionality
+# Run pretrain + finetune for each dataset
 # ============================================================================
 
-echo "============================================================"
-echo "  PHASE 1: Synthetic Pretraining (dim=$target_dim)"
-echo "============================================================"
+for ds in "${DATASETS_TO_RUN[@]}"; do
+    dim="${DATASET_DIM[$ds]}"
 
-$PYTHON --mode pretrain --n-variates "$target_dim" $BASE_ARGS
+    echo "============================================================"
+    echo "  PHASE 1: Synthetic Pretraining (dim=$dim)"
+    echo "============================================================"
+
+    $PYTHON --mode pretrain --n-variates "$dim" $BASE_ARGS
+
+    if [ -n "$PRETRAIN_ONLY" ]; then
+        echo "[INFO] --pretrain-only: skipping finetune for $ds"
+        continue
+    fi
+
+    echo ""
+    echo "============================================================"
+    echo "  PHASE 2: Fine-tuning $ds (dim=$dim)"
+    echo "============================================================"
+
+    $PYTHON --mode finetune --dataset "$ds" --n-variates "$dim" $BASE_ARGS
+done
 
 if [ -n "$PRETRAIN_ONLY" ]; then
     echo ""
     echo "[INFO] --pretrain-only: stopping after Phase 1"
-    exit 0
 fi
-
-# ============================================================================
-# PHASE 2: Fine-tune on the dataset
-# ============================================================================
-
-echo ""
-echo "============================================================"
-echo "  PHASE 2: Fine-tuning $SINGLE_DATASET (dim=$target_dim)"
-echo "============================================================"
-
-$PYTHON --mode finetune --dataset "$SINGLE_DATASET" --n-variates "$target_dim" $BASE_ARGS
 
 # ============================================================================
 # Summary
