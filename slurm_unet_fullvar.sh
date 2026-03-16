@@ -21,17 +21,37 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ -z "$SLURM_JOB_ID" ]; then
     IS_SMOKE=0
-    for arg in "$@"; do
-        [ "$arg" = "--smoke-test" ] && IS_SMOKE=1
+    HOURS=""
+    PASS_ARGS=()
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --smoke-test) IS_SMOKE=1; PASS_ARGS+=("$1"); shift ;;
+            --hours)      HOURS="$2"; shift 2 ;;
+            *)            PASS_ARGS+=("$1"); shift ;;
+        esac
     done
 
+    # pick partition based on requested hours (b1≤3h, b2≤12h, b3≤24h, b4≤72h, b5≤168h)
+    pick_partition() {
+        local h=$1
+        if   [ "$h" -le 3   ]; then echo "gpubase_h100_b1"
+        elif [ "$h" -le 12  ]; then echo "gpubase_h100_b2"
+        elif [ "$h" -le 24  ]; then echo "gpubase_h100_b3"
+        elif [ "$h" -le 72  ]; then echo "gpubase_h100_b4"
+        else                        echo "gpubase_h100_b5"
+        fi
+    }
+
     if [ "$IS_SMOKE" -eq 1 ]; then
-        echo "Submitting SMOKE TEST (H100, 20GB, b1 = 3h max)..."
+        WALL=${HOURS:-0}
+        PART=$([ "$WALL" -gt 0 ] && pick_partition "$WALL" || echo "gpubase_h100_b1")
+        TIME=$([ "$WALL" -gt 0 ] && printf "%d:00:00" "$WALL" || echo "0:30:00")
+        echo "Submitting SMOKE TEST ($PART, $TIME)..."
         sbatch \
             --job-name=unet-fullvar-smoke \
             --account=aip-boyuwang \
-            --partition=gpubase_h100_b1 \
-            --time=0:30:00 \
+            --partition="$PART" \
+            --time="$TIME" \
             --nodes=1 \
             --gpus-per-node=h100:1 \
             --cpus-per-task=4 \
@@ -40,14 +60,17 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --error=unet-fullvar-smoke-%j.err \
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            "$SCRIPT_DIR/slurm_unet_fullvar.sh" "$@"
+            "$SCRIPT_DIR/slurm_unet_fullvar.sh" "${PASS_ARGS[@]}"
     else
-        echo "Submitting FULL RUN (H100, 80GB, b4 = 3 days)..."
+        WALL=${HOURS:-72}
+        PART=$(pick_partition "$WALL")
+        TIME=$(printf "%d:00:00" "$WALL")
+        echo "Submitting FULL RUN ($PART, ${WALL}h)..."
         sbatch \
             --job-name=unet-fullvar \
             --account=aip-boyuwang \
-            --partition=gpubase_h100_b4 \
-            --time=3-00:00:00 \
+            --partition="$PART" \
+            --time="$TIME" \
             --nodes=1 \
             --gpus-per-node=h100:1 \
             --cpus-per-task=6 \
@@ -56,7 +79,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --error=unet-fullvar-%j.err \
             --mail-type=BEGIN,END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            "$SCRIPT_DIR/slurm_unet_fullvar.sh" "$@"
+            "$SCRIPT_DIR/slurm_unet_fullvar.sh" "${PASS_ARGS[@]}"
     fi
     exit 0
 fi
