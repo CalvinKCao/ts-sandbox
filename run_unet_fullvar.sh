@@ -37,7 +37,7 @@ AMP_FLAG="--amp"
 IMAGE_HEIGHT=96
 SUBSET_THRESHOLD=999999     # treat ALL datasets as native dim (no splitting)
 SYNTHETIC_SAMPLES=75000     # reduced pool for high-V
-ITRANSFORMER_TRIALS=20      # full HP search
+ITRANSFORMER_TRIALS=12      # full HP search
 SEED=42
 
 SMOKE_TEST=""

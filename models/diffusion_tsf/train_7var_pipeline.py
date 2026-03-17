@@ -2481,7 +2481,19 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
     os.makedirs(dim_dir, exist_ok=True)
 
     itrans_ckpt = os.path.join(dim_dir, 'itransformer.pt')
-    diff_ckpt = os.path.join(dim_dir, 'diffusion.pt')
+    diff_ckpt   = os.path.join(dim_dir, 'diffusion.pt')
+    smoke_flag  = os.path.join(dim_dir, '.smoke_test')  # marks partial smoke-test checkpoints
+
+    # If a previous smoke test left checkpoints here, wipe them so a real run
+    # doesn't skip pretraining on the basis of a 1-epoch model.
+    if not smoke_test and os.path.exists(smoke_flag):
+        logger.info(f"  Removing smoke-test checkpoints from {dim_dir} — re-running for real")
+        for f in [itrans_ckpt, diff_ckpt,
+                  os.path.join(dim_dir, 'itrans_hp.json'),
+                  os.path.join(dim_dir, 'diff_hp.json'),
+                  smoke_flag]:
+            if os.path.exists(f):
+                os.remove(f)
 
     n_itrans_trials = 1 if smoke_test else N_ITRANS_HP_TRIALS
     n_diff_trials = 1 if smoke_test else N_DIFFUSION_HP_TRIALS
@@ -2489,9 +2501,20 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
     pretrain_epochs = 1 if smoke_test else PRETRAIN_EPOCHS
     pretrain_patience = 1 if smoke_test else PRETRAIN_PATIENCE
 
-    # Phase 1A: iTransformer HP tuning
+    itrans_hp_path = os.path.join(dim_dir, 'itrans_hp.json')
+    diff_hp_path   = os.path.join(dim_dir, 'diff_hp.json')
+
     logger.info(f"Pretraining dim={n_variates}")
-    best_itrans_params = run_itransformer_hp_tuning(n_itrans_trials, smoke_test)
+
+    # Phase 1A: iTransformer HP tuning — cached to disk so reruns skip it
+    if os.path.exists(itrans_hp_path):
+        with open(itrans_hp_path) as f:
+            best_itrans_params = json.load(f)
+        logger.info(f"  iTransformer HP loaded from cache: {itrans_hp_path}")
+    else:
+        best_itrans_params = run_itransformer_hp_tuning(n_itrans_trials, smoke_test)
+        with open(itrans_hp_path, 'w') as f:
+            json.dump(best_itrans_params, f, indent=2)
 
     # Phase 1C-1: Full iTransformer pretraining
     if not os.path.exists(itrans_ckpt):
@@ -2503,15 +2526,21 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
             checkpoint_dir=dim_dir,
             smoke_test=smoke_test,
         )
-        # pretrain_itransformer saves to dim_dir/pretrained_itransformer.pt
         saved = os.path.join(dim_dir, 'pretrained_itransformer.pt')
         if saved != itrans_ckpt and os.path.exists(saved):
             os.rename(saved, itrans_ckpt)
     else:
         logger.info(f"  iTransformer ckpt exists: {itrans_ckpt}")
 
-    # Phase 1B: Diffusion HP tuning
-    best_diff_params = run_diffusion_hp_tuning(itrans_ckpt, n_diff_trials, smoke_test)
+    # Phase 1B: Diffusion HP tuning — cached to disk so reruns skip it
+    if os.path.exists(diff_hp_path):
+        with open(diff_hp_path) as f:
+            best_diff_params = json.load(f)
+        logger.info(f"  Diffusion HP loaded from cache: {diff_hp_path}")
+    else:
+        best_diff_params = run_diffusion_hp_tuning(itrans_ckpt, n_diff_trials, smoke_test)
+        with open(diff_hp_path, 'w') as f:
+            json.dump(best_diff_params, f, indent=2)
 
     # Phase 1C-2: Full Diffusion pretraining
     if not os.path.exists(diff_ckpt):
@@ -2528,6 +2557,10 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
             os.rename(saved, diff_ckpt)
     else:
         logger.info(f"  Diffusion ckpt exists: {diff_ckpt}")
+
+    if smoke_test:
+        # Mark so a subsequent real run knows to discard these
+        open(smoke_flag, 'w').close()
 
     logger.info(f"Pretrain dim={n_variates} complete")
 
@@ -2552,11 +2585,19 @@ def run_finetune_mode(
 
     dim_dir = pretrain_dir_for_dim(n_variates)
     itrans_ckpt = os.path.join(dim_dir, 'itransformer.pt')
-    diff_ckpt = os.path.join(dim_dir, 'diffusion.pt')
+    diff_ckpt   = os.path.join(dim_dir, 'diffusion.pt')
+    smoke_flag  = os.path.join(dim_dir, '.smoke_test')
 
     if not os.path.exists(diff_ckpt):
         logger.error(f"Pretrained checkpoint not found: {diff_ckpt}")
         logger.error(f"Run --mode pretrain --n-variates {n_variates} first")
+        sys.exit(1)
+
+    if not smoke_test and os.path.exists(smoke_flag):
+        logger.error(
+            f"Pretrain checkpoints in {dim_dir} are from a smoke test. "
+            f"Run --mode pretrain --n-variates {n_variates} first to replace them."
+        )
         sys.exit(1)
 
     subsets = generate_variate_subsets(dataset_name, n_variates=n_variates, seed=seed)
