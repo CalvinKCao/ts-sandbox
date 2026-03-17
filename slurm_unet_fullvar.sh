@@ -21,65 +21,41 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ -z "$SLURM_JOB_ID" ]; then
     IS_SMOKE=0
-    HOURS=""
-    PASS_ARGS=()
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            --smoke-test) IS_SMOKE=1; PASS_ARGS+=("$1"); shift ;;
-            --hours)      HOURS="$2"; shift 2 ;;
-            *)            PASS_ARGS+=("$1"); shift ;;
-        esac
+    for arg in "$@"; do
+        [ "$arg" = "--smoke-test" ] && IS_SMOKE=1
     done
 
-    # pick partition based on requested hours (b1≤3h, b2≤12h, b3≤24h, b4≤72h, b5≤168h)
-    pick_partition() {
-        local h=$1
-        if   [ "$h" -le 3   ]; then echo "gpubase_h100_b1"
-        elif [ "$h" -le 12  ]; then echo "gpubase_h100_b2"
-        elif [ "$h" -le 24  ]; then echo "gpubase_h100_b3"
-        elif [ "$h" -le 72  ]; then echo "gpubase_h100_b4"
-        else                        echo "gpubase_h100_b5"
-        fi
-    }
-
     if [ "$IS_SMOKE" -eq 1 ]; then
-        WALL=${HOURS:-0}
-        PART=$([ "$WALL" -gt 0 ] && pick_partition "$WALL" || echo "gpubase_h100_b1")
-        TIME=$([ "$WALL" -gt 0 ] && printf "%d:00:00" "$WALL" || echo "0:30:00")
-        echo "Submitting SMOKE TEST ($PART, $TIME)..."
+        echo "Submitting SMOKE TEST (L40S, 8GB, 15 min)..."
         sbatch \
             --job-name=unet-fullvar-smoke \
             --account=aip-boyuwang \
-            --partition="$PART" \
-            --time="$TIME" \
+            --time=0:15:00 \
             --nodes=1 \
-            --gpus-per-node=h100:1 \
-            --cpus-per-task=4 \
-            --mem=20G \
+            --gres=gpu:l40s:1 \
+            --cpus-per-task=2 \
+            --mem=8G \
             --output=unet-fullvar-smoke-%j.out \
             --error=unet-fullvar-smoke-%j.err \
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            "$SCRIPT_DIR/slurm_unet_fullvar.sh" "${PASS_ARGS[@]}"
+            "$SCRIPT_DIR/slurm_unet_fullvar.sh" "$@"
     else
-        WALL=${HOURS:-72}
-        PART=$(pick_partition "$WALL")
-        TIME=$(printf "%d:00:00" "$WALL")
-        echo "Submitting FULL RUN ($PART, ${WALL}h)..."
+        echo "Submitting FULL RUN (H100, 60GB, b4 = 3 days)..."
         sbatch \
             --job-name=unet-fullvar \
             --account=aip-boyuwang \
-            --partition="$PART" \
-            --time="$TIME" \
+            --partition=gpubase_h100_b4 \
+            --time=3-00:00:00 \
             --nodes=1 \
             --gpus-per-node=h100:1 \
             --cpus-per-task=6 \
-            --mem=80G \
+            --mem=60G \
             --output=unet-fullvar-%j.out \
             --error=unet-fullvar-%j.err \
             --mail-type=BEGIN,END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            "$SCRIPT_DIR/slurm_unet_fullvar.sh" "${PASS_ARGS[@]}"
+            "$SCRIPT_DIR/slurm_unet_fullvar.sh" "$@"
     fi
     exit 0
 fi
@@ -138,26 +114,24 @@ if [ ! -d "$STORAGE_ROOT/datasets" ]; then
     cp -r "$PROJECT_ROOT/datasets" "$STORAGE_ROOT/datasets"
 fi
 
-# Venv — reuse main pipeline venv if it exists.
-# Don't trust `source activate` on Alliance — module-loaded python shadows it.
-# Instead, export PATH with venv/bin prepended explicitly.
+# Venv — reuse main pipeline venv if it exists
 VENV_PATH="$PROJECT/$USER/diffusion-tsf/venv"
 if [ ! -d "$VENV_PATH" ]; then
     VENV_PATH="$STORAGE_ROOT/venv"
-fi
-
-if [ ! -d "$VENV_PATH" ]; then
-    echo "Creating virtual environment..."
-    python -m venv "$VENV_PATH"
-    export PATH="$VENV_PATH/bin:$PATH"
-    pip install --upgrade pip
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch
-    [ -f "$PROJECT_ROOT/requirements.txt" ] && pip install -r "$PROJECT_ROOT/requirements.txt"
+    if [ ! -d "$VENV_PATH" ]; then
+        echo "Creating virtual environment..."
+        python -m venv "$VENV_PATH"
+        export PATH="$VENV_PATH/bin:$PATH"
+        pip install --upgrade pip
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+        pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch
+        [ -f "$PROJECT_ROOT/requirements.txt" ] && pip install -r "$PROJECT_ROOT/requirements.txt"
+    else
+        export PATH="$VENV_PATH/bin:$PATH"
+    fi
 else
     export PATH="$VENV_PATH/bin:$PATH"
-    echo "Reusing venv: $VENV_PATH"
-    echo "  python: $(command -v python) ($(python --version 2>&1))"
+    echo "Reusing existing venv: $VENV_PATH"
 fi
 
 export WANDB_MODE=offline
