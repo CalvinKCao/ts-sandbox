@@ -173,12 +173,15 @@ cleanup() {
 }
 trap cleanup EXIT ERR SIGTERM SIGINT SIGUSR1
 
-# ---- Build args ----
+# ---- Build args (strip slurm-only flags like --hours) ----
 
 PIPELINE_ARGS="--checkpoint-dir $STORAGE_ROOT/checkpoints --results-dir $STORAGE_ROOT/results"
 
-for arg in "$@"; do
-    PIPELINE_ARGS="$PIPELINE_ARGS $arg"
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --hours) shift 2 ;;           # consumed by submitter, not run_unet_fullvar.sh
+        *)       PIPELINE_ARGS="$PIPELINE_ARGS $1"; shift ;;
+    esac
 done
 
 cd "$PROJECT_ROOT"
