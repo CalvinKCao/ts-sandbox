@@ -7,6 +7,15 @@ synced_results/
 # -----------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
+slides/
+.ai/
+.claude/
+.cursor/
+.gemini/
+.github/
+.windsurf/
+AGENTS.md````
+opencode.json
 *$py.class
 *.so
 .Python
@@ -147,27 +156,15 @@ models/Time-Series-Library-main/dataset/
 datasets/traffic/traffic.csv
 
 # lnai-generated
-.agents/skills/messy
-.agents/skills/natural
-.agents/skills/quick
+.agents/skills/slidev
 .ai/.lnai-manifest.json
 .claude/CLAUDE.md
-.claude/skills/messy
-.claude/skills/natural
-.claude/skills/quick
-.cursor/skills/messy
-.cursor/skills/natural
-.cursor/skills/quick
+.claude/skills/slidev
+.cursor/skills/slidev
 .gemini/settings.json
-.gemini/skills/messy
-.gemini/skills/natural
-.gemini/skills/quick
-.github/skills/messy
-.github/skills/natural
-.github/skills/quick
-.windsurf/skills/messy
-.windsurf/skills/natural
-.windsurf/skills/quick
+.gemini/skills/slidev
+.github/skills/slidev
+.windsurf/skills/slidev
 AGENTS.md
 opencode.json
 # end lnai-generated

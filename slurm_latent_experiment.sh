@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=latent-dim1
 #SBATCH --account=aip-boyuwang
-#SBATCH --partition=gpubase_h100_b4
+# L40S (Standard tier): request GPU type via GRES; do NOT use gpubase_h100_* here — those partitions are H100-only.
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --time=3-00:00:00
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=1              # no GPU type in directive — partition picks default
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=50G
 #SBATCH --output=%x-%j.out
@@ -28,7 +28,14 @@
 #   sbatch slurm_latent_experiment.sh -- --skip-vae-train
 #   sbatch slurm_latent_experiment.sh -- --smoke-test
 #
-# Edit --account / --mail-user in the header to match your allocation (same as slurm_pipeline.sh).
+# Edit --account / --mail-user in the header to match your allocation.
+#
+# GPU choice (Killarney):
+#   - This file: L40S via --gres=gpu:l40s:1 (same pattern as slurm_unet_fullvar.sh smoke). Often shorter queue.
+#   - H100 long runs: comment out --gres=gpu:l40s:1 and use e.g.:
+#       #SBATCH --partition=gpubase_h100_b4
+#       #SBATCH --gpus-per-node=h100:1
+#   - Confirm names on the cluster: sinfo -o "%P %G"  and  scontrol show node | grep -i gres
 # =============================================================================
 
 set -euo pipefail
