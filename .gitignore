@@ -9,12 +9,13 @@ __pycache__/
 *.py[cod]
 slides/
 .ai/
+docs.alliancecan.ca_mediawiki-20260319-wikidump/
 .claude/
 .cursor/
 .gemini/
 .github/
 .windsurf/
-AGENTS.md````
+AGENTS.md
 opencode.json
 *$py.class
 *.so
@@ -168,3 +169,4 @@ datasets/traffic/traffic.csv
 AGENTS.md
 opencode.json
 # end lnai-generated
+docs.alliancecan.ca_mediawiki-20260319-wikidump/docs.alliancecan.ca_mediawiki-20260325-current.xml

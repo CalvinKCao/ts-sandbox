@@ -77,14 +77,32 @@ fi
 export STORAGE_ROOT="$PROJECT/$USER/diffusion-tsf"
 mkdir -p "$STORAGE_ROOT/checkpoints" "$STORAGE_ROOT/synthetic_cache" "$STORAGE_ROOT/results"
 
+# Same venv contract as slurm_pipeline.sh: PROJECT-scoped venv with CUDA torch + iTransformer deps.
 VENV_PATH="$STORAGE_ROOT/venv"
 if [ ! -d "$VENV_PATH" ]; then
-    echo "ERROR: venv not found at $VENV_PATH"
-    echo "Run once on a login node: cd $PROJECT_ROOT && ./setup/alliance_setup_killarney.sh"
-    exit 1
+    echo "Creating virtual environment at $VENV_PATH (first run)..."
+    python -m venv "$VENV_PATH"
+    export PATH="$VENV_PATH/bin:$PATH"
+    pip install --upgrade pip
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch
+    [ -f "$PROJECT_ROOT/requirements.txt" ] && pip install -r "$PROJECT_ROOT/requirements.txt"
+else
+    export PATH="$VENV_PATH/bin:$PATH"
 fi
 # shellcheck source=/dev/null
 source "$VENV_PATH/bin/activate"
+
+PY="$VENV_PATH/bin/python"
+if ! "$PY" -c "import torch" 2>/dev/null; then
+    echo "venv at $VENV_PATH exists but torch is missing; installing..."
+    pip install --upgrade pip
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch
+    [ -f "$PROJECT_ROOT/requirements.txt" ] && pip install -r "$PROJECT_ROOT/requirements.txt"
+fi
+echo "Python: $($PY -c 'import sys; print(sys.executable)')"
+echo "Torch: $($PY -c 'import torch; print(torch.__version__)')"
 
 LATENT_CACHE="$STORAGE_ROOT/synthetic_cache/latent_dim1"
 mkdir -p "$LATENT_CACHE"
@@ -118,10 +136,10 @@ for a in "$@"; do
 done
 
 echo ""
-echo "Running: python -m models.diffusion_tsf.train_latent_experiment --stage all --cache-dir $LATENT_CACHE $EXTRA_ARGS"
+echo "Running: $PY -m models.diffusion_tsf.train_latent_experiment --stage all --cache-dir $LATENT_CACHE $EXTRA_ARGS"
 echo ""
 
-python -m models.diffusion_tsf.train_latent_experiment \
+"$PY" -m models.diffusion_tsf.train_latent_experiment \
     --stage all \
     --cache-dir "$LATENT_CACHE" \
     $EXTRA_ARGS

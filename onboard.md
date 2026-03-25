@@ -28,6 +28,7 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
     ./run_unet_fullvar.sh --dataset electricity    # 321-var
     ```
 - `slurm_pipeline.sh`: Alliance HPC Slurm wrapper for pipeline.sh.
+- `slurm_latent_experiment.sh`: Slurm wrapper for 1-var latent diffusion (`train_latent_experiment.py`). Same `$PROJECT/$USER/diffusion-tsf/venv` + module stack as `slurm_pipeline.sh`.
 - `slurm_unet_fullvar.sh`: self-resubmitting Slurm wrapper for run_unet_fullvar.sh (Killarney).
 - `summarize_results.py`: generate markdown report from eval results.
 - `setup/setup.sh`: one-time local env setup (venv, CUDA, deps).
@@ -194,7 +195,12 @@ sbatch slurm_pipeline.sh
 
 # 6. Sync results locally (from your WSL machine)
 ./sync_from_killarney.sh ccao87@killarney.alliancecan.ca
+
+# Latent 1-var experiment (uses same venv path as pipeline; script creates/repairs venv if torch missing)
+sbatch slurm_latent_experiment.sh
 ```
+
+**Killarney venv:** GPU jobs load `python/3.11` modules, then use **`$PROJECT/$USER/diffusion-tsf/venv`** (not the repo-local `venv/`). `slurm_pipeline.sh` and `slurm_latent_experiment.sh` both create that venv on first run and install CUDA PyTorch + `reformer_pytorch`. The latent script calls **`$VENV/bin/python`** so Slurm never picks system Python by mistake.
 
 | Cluster | GPU | VRAM | Account prefix | Partitions |
 |---------|-----|------|----------------|------------|
@@ -203,6 +209,7 @@ sbatch slurm_pipeline.sh
 | Fir     | H100 | 80GB | `def-` | default |
 
 ## Gotchas
+- **Killarney torch missing:** if a job dies with `No module named 'torch'`, the PROJECT venv is empty or broken. Run `sbatch slurm_pipeline.sh --smoke-test` once, or delete `$PROJECT/$USER/diffusion-tsf/venv` and resubmit so the Slurm script recreates it.
 - **Imports:** always run from project root: `python -m models.diffusion_tsf.script_name`
 - **Smoke test first:** `./pipeline.sh --smoke-test` before committing to a full run.
 - **OOM:** use `attention_levels=[2]` and small batch sizes for 32-dim models.
