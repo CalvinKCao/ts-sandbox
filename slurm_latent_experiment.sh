@@ -4,7 +4,7 @@
 #SBATCH --partition=gpubase_h100_b4
 #SBATCH --time=3-00:00:00
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=h100:1         # 1 GPU queues much faster; subsets run sequentially
+#SBATCH --gpus-per-node=1              # no GPU type in directive — partition picks default
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=50G
 #SBATCH --output=%x-%j.out
