@@ -51,12 +51,6 @@ class DiffusionTSFConfig:
     lookback_overlap: int = 0
     past_loss_weight: float = 0.3
     
-    # Lookback overlap: predict the last K observed timesteps alongside the
-    # future horizon to smooth the past/future boundary. The diffusion model
-    # denoises a (K+H)-wide region; during inference the first K are discarded.
-    lookback_overlap: int = 0
-    past_loss_weight: float = 0.3
-    
     # multivariate support
     num_variables: int = 1  # how many variables (1 = uni, >1 = multi)
     
@@ -234,4 +228,30 @@ class DiffusionTSFConfig:
     def ci_dit_cond_channels(self) -> int:
         """Per-variate conditioning channels for CI-DiT."""
         return 1  # resized past 2D
+
+
+@dataclass
+class LatentDiffusionConfig(DiffusionTSFConfig):
+    """DiffusionTSF hyperparameters plus VAE / latent-space fields."""
+
+    latent_channels: int = 4
+    kl_weight: float = 1e-4
+    vae_lr: float = 1e-4
+    vae_epochs: int = 50
+    image_height: int = 128
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.lookback_overlap % 4 != 0:
+            raise ValueError("lookback_overlap must be divisible by 4 for latent overlap (K_lat = K/4)")
+        if self.image_height % 4 != 0:
+            raise ValueError("image_height must be divisible by 4 for the VAE (2× stride-2)")
+
+    @property
+    def latent_spatial_downsample(self) -> int:
+        return 4
+
+    @property
+    def latent_image_height(self) -> int:
+        return self.image_height // self.latent_spatial_downsample
 
