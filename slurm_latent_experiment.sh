@@ -40,6 +40,9 @@
 
 set -e
 
+# Slurm redirects .out to a file → Python stdout/stderr are block-buffered unless unbuffered.
+export PYTHONUNBUFFERED=1
+
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
@@ -136,10 +139,10 @@ for a in "$@"; do
 done
 
 echo ""
-echo "Running: $PY -m models.diffusion_tsf.train_latent_experiment --stage all --cache-dir $LATENT_CACHE $EXTRA_ARGS"
+echo "Running: $PY -u -m models.diffusion_tsf.train_latent_experiment --stage all --cache-dir $LATENT_CACHE $EXTRA_ARGS"
 echo ""
 
-"$PY" -m models.diffusion_tsf.train_latent_experiment \
+"$PY" -u -m models.diffusion_tsf.train_latent_experiment \
     --stage all \
     --cache-dir "$LATENT_CACHE" \
     $EXTRA_ARGS

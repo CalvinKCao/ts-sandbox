@@ -29,6 +29,11 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
     ```
 - `slurm_pipeline.sh`: Alliance HPC Slurm wrapper for pipeline.sh.
 - `slurm_latent_experiment.sh`: Slurm wrapper for 1-var latent diffusion (`train_latent_experiment.py`). Same `$PROJECT/$USER/diffusion-tsf/venv` + module stack as `slurm_pipeline.sh`.
+- `slurm_ci_latent_etth1.sh`: CI (channel-independent) latent diffusion ablation on ETTh1 7-var. Submit guided vs unguided:
+    ```bash
+    sbatch --job-name=ci-guided   slurm_ci_latent_etth1.sh
+    sbatch --job-name=ci-unguided slurm_ci_latent_etth1.sh -- --no-guidance
+    ```
 - `slurm_unet_fullvar.sh`: self-resubmitting Slurm wrapper for run_unet_fullvar.sh (Killarney).
 - `summarize_results.py`: generate markdown report from eval results.
 - `setup/setup.sh`: one-time local env setup (venv, CUDA, deps).
@@ -42,6 +47,11 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
     - `diffusion.py`: `DiffusionScheduler` — DDPM/DDIM forward and reverse processes.
     - `preprocessing.py`: `Standardizer`, `TimeSeriesTo2D` (encode/decode), `VerticalGaussianBlur`.
     - `train_7var_pipeline.py`: **the Python entry point** — pretrain, finetune, eval, baseline.
+    - `train_latent_experiment.py`: 1-var latent diffusion experiment (VAE → iTransformer → LDM → ETTh1).
+    - `train_ci_latent_etth1.py`: CI latent diffusion ablation on ETTh1 7-var. Tests guided (iTransformer ghost) vs unguided diffusion, both vs iTransformer-only baseline.
+    - `latent_diffusion_model.py`: `LatentDiffusionTSF` — latent-space diffusion with frozen VAE.
+    - `vae.py`: `TimeSeriesVAE` — convolutional VAE for 2D time-series images (4× spatial compression).
+    - `latent_experiment_common.py`: shared helpers for latent experiment scripts.
     - `train_electricity.py`: single-dataset training + optuna (used internally).
     - `train_universal_v2.py`: older universal training script.
     - `config.py`: config dataclasses.
@@ -216,6 +226,7 @@ sbatch slurm_latent_experiment.sh
 - **traffic.csv:** auto-combined from part1+part2 by pipeline.sh.
 
 ## Recent Changes
+- **2026-03-27:** CI latent diffusion ablation. `train_ci_latent_etth1.py` + `slurm_ci_latent_etth1.sh` test channel-independent latent diffusion on ETTh1 (7-var). Each variate processed independently through shared univariate VAE + U-Net. Two variants: `--no-guidance` (pure diffusion) vs guided (iTransformer ghost images via `CIiTransformerGuidance` wrapper that unflattens batch for multivariate iTransformer). Fixed `in_ch` bug in `LatentDiffusionTSF` for `use_guidance_channel=False`.
 - **2026-03-15:** Full-variate U-Net path. `run_unet_fullvar.sh` + `slurm_unet_fullvar.sh` train U-Net directly on native-dim datasets (traffic=861, electricity=321) with bf16, H=96, 75K synth pool, 3 iTransformer HP trials. Cross-var augmentation auto-skipped for V>32. Synthetic pool disk caching via `cache_dir`. New CLI flags: `--synthetic-samples`, `--itransformer-trials`, `--subset-threshold`.
 - **2026-03-06:** Lookback overlap: diffusion model now predicts K=8 past steps alongside H=192 forecast to smooth boundary. Weighted loss (0.3× overlap, 1.0× forecast), trimmed at inference.
 - **2026-03-06:** Unified pipeline. Single `pipeline.sh` replaces scattered scripts. Dimensionality groups (7/8/21/32) with per-dim pretraining. Multi-GPU parallel subset fine-tuning. Full-dim iTransformer baseline for high-variate comparison. Old scripts moved to `legacy/`.

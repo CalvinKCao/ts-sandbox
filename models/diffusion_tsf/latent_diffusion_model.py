@@ -74,7 +74,9 @@ class LatentDiffusionTSF(nn.Module):
 
         cz = config.latent_channels
         n_aux = config.num_aux_channels
-        in_ch = 2 * cz + n_aux
+        in_ch = cz + n_aux
+        if config.use_guidance_channel:
+            in_ch += cz
         h_lat = config.latent_image_height
 
         if config.use_hybrid_condition:

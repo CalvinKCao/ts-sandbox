@@ -488,7 +488,15 @@ class RealTS(Dataset):
                     )
                 else:
                     data = np.zeros((self.pool_size, self.total_length), dtype=np.float32)
+                    log_every = max(5000, self.pool_size // 20)
                     for i in range(self.pool_size):
+                        if i > 0 and i % log_every == 0:
+                            logger.info(
+                                "Synthetic pool progress: %s / %s (%.0f%%)",
+                                i,
+                                self.pool_size,
+                                100.0 * i / self.pool_size,
+                            )
                         gen = np.random.choice(self.generators, p=self.probabilities)
                         seq = gen(self.total_length)
                         if np.random.random() < 0.5: seq = seq[::-1].copy()

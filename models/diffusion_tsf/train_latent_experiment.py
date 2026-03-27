@@ -50,7 +50,11 @@ from models.diffusion_tsf.vae import TimeSeriesVAE, estimate_vae_scale_factor
 from models.diffusion_tsf.guidance import iTransformerGuidance
 from models.diffusion_tsf.metrics import compute_metrics
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    force=True,
+)
 logger = logging.getLogger(__name__)
 
 CKPT_LATENT = _SCRIPT_DIR / "checkpoints_latent"
@@ -466,7 +470,7 @@ def stage3_finetune_eval(
         "forecast_horizon_evaluated": int(y_t.shape[-1]),
         "baseline_mse": _scalar(baseline_metrics["mse"]) if baseline_metrics else None,
         "baseline_mae": _scalar(baseline_metrics["mae"]) if baseline_metrics else None,
-        "note": "Metrics on trimmed test forecasts (OT variate).",
+        "note": "Metrics on trimmed test forecasts (normalized); default variate index 0 = HUFL.",
     }
 
 
@@ -575,6 +579,22 @@ def main():
     results_path = RESULTS_DIR / f"latent_experiment_H{args.image_height}.json"
 
     stages = {"0", "1", "2", "3"} if args.stage == "all" else {args.stage}
+    logger.info(
+        "Latent experiment start: cli_stage=%s run_stages=%s smoke=%s n_syn=%s cache=%s image_H=%s device=%s",
+        args.stage,
+        ",".join(sorted(stages)),
+        args.smoke_test,
+        n_syn,
+        cache,
+        args.image_height,
+        device,
+    )
+    if not args.smoke_test and n_syn >= 10_000:
+        logger.info(
+            "First run builds a %s-sample synthetic pool on disk (CPU-bound); "
+            "can take 30-90+ min on slow NFS. Watch for 'Synthetic pool progress' lines.",
+            n_syn,
+        )
 
     vae = None
     if "0" in stages or "2" in stages or "3" in stages:
@@ -639,4 +659,5 @@ def main():
 
 
 if __name__ == "__main__":
+    main()
     main()
