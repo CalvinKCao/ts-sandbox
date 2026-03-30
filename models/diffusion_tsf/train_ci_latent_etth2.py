@@ -33,6 +33,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
+try:
+    import wandb
+    WANDB_OK = True
+except ImportError:
+    wandb = None
+    WANDB_OK = False
+
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -74,6 +81,85 @@ RESULTS_DIR = _SCRIPT_DIR / "results"
 
 N_VARIATES = 7
 DATASET = "ETTh2"
+WANDB_PROJECT = "diffusion-tsf"
+
+_wb_enabled = False
+
+
+def _wb_init(cfg, args):
+    """Start a wandb run. Resumes from saved run_id if available."""
+    global _wb_enabled
+    if not WANDB_OK or args.smoke_test:
+        return
+    run_id_file = CKPT_DIR / "wandb_run_id.txt"
+    run_id, resume = None, None
+    if run_id_file.is_file():
+        run_id = run_id_file.read_text().strip()
+        resume = "allow"
+        logger.info("Resuming wandb run %s", run_id)
+
+    arch_text = ""
+    arch_path = _PROJECT_ROOT / "arch.md"
+    if arch_path.is_file():
+        arch_text = arch_path.read_text()[:3000]
+
+    run_name = f"{DATASET}-ci-latent-4stage-H{args.image_height}"
+    try:
+        wandb.init(
+            project=WANDB_PROJECT,
+            name=run_name,
+            id=run_id,
+            resume=resume,
+            config={
+                "dataset": DATASET,
+                "pipeline": "ci-latent-4stage",
+                "num_variates": N_VARIATES,
+                "image_height": cfg.image_height,
+                "latent_channels": cfg.latent_channels,
+                "lookback_length": LOOKBACK_LENGTH,
+                "forecast_length": FORECAST_LENGTH,
+                "lookback_overlap": LOOKBACK_OVERLAP,
+                "past_loss_weight": PAST_LOSS_WEIGHT,
+                "unet_channels": cfg.unet_channels,
+                "attention_levels": cfg.attention_levels,
+                "num_res_blocks": cfg.num_res_blocks,
+                "diffusion_steps": cfg.num_diffusion_steps,
+                "representation_mode": cfg.representation_mode,
+                "vae_lr": cfg.vae_lr,
+                "diffusion_lr": cfg.learning_rate,
+                "pretrain_epochs": PRETRAIN_EPOCHS,
+                "finetune_epochs": FINETUNE_EPOCHS,
+                "cfg_scale": cfg.cfg_scale,
+                "architecture": arch_text,
+            },
+            tags=[DATASET, "ci-latent", "4stage"],
+        )
+        # persist run_id for resume
+        CKPT_DIR.mkdir(parents=True, exist_ok=True)
+        run_id_file.write_text(wandb.run.id)
+        _wb_enabled = True
+        logger.info("wandb run: %s", wandb.run.url)
+    except Exception as e:
+        logger.warning("wandb init failed: %s", e)
+        _wb_enabled = False
+
+
+def _wb_log(metrics: dict, step: int | None = None):
+    if _wb_enabled:
+        wandb.log(metrics, step=step)
+
+
+def _wb_summary(metrics: dict):
+    if _wb_enabled:
+        for k, v in metrics.items():
+            wandb.run.summary[k] = v
+
+
+def _wb_finish():
+    global _wb_enabled
+    if _wb_enabled:
+        wandb.finish()
+        _wb_enabled = False
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +490,7 @@ def stage1_pretrain_itransformer(
         tr = train_itransformer_epoch(model, train_dl, opt, criterion, device, sched)
         va = validate_itransformer(model, val_dl, criterion, device)
         logger.info("[iTrans pretrain synth] ep %d  train=%.4f  val=%.4f", ep + 1, tr, va)
+        _wb_log({"s1_itrans_pretrain/train_loss": tr, "s1_itrans_pretrain/val_loss": va})
         if va < best_val:
             best_val = va
             save_itransformer_checkpoint(
@@ -414,6 +501,7 @@ def stage1_pretrain_itransformer(
         if early(va):
             break
 
+    _wb_summary({"s1_itrans_pretrain/best_val": best_val})
     logger.info("Pretrained iTransformer → %s", ckpt_path)
     return ckpt_path
 
@@ -474,6 +562,7 @@ def stage2_pretrain_diffusion(
         va = _ci_eval_loss(model, val_dl, device, N_VARIATES)
         sched.step()
         logger.info("[Diffusion pretrain] ep %d  train=%.4f  val=%.4f", ep + 1, tr, va)
+        _wb_log({"s2_diff_pretrain/train_loss": tr, "s2_diff_pretrain/val_loss": va})
         if va < best_val:
             best_val = va
             torch.save({
@@ -485,6 +574,7 @@ def stage2_pretrain_diffusion(
         if early(va):
             break
 
+    _wb_summary({"s2_diff_pretrain/best_val": best_val})
     logger.info("Pretrained diffusion → %s", out_path)
     return out_path
 
@@ -537,6 +627,7 @@ def stage3_finetune_itransformer(
         tr = train_itransformer_epoch(model, train_dl, opt, criterion, device, sched)
         va = validate_itransformer(model, val_dl, criterion, device)
         logger.info("[iTrans finetune %s] ep %d  train=%.4f  val=%.4f", DATASET, ep + 1, tr, va)
+        _wb_log({"s3_itrans_finetune/train_loss": tr, "s3_itrans_finetune/val_loss": va})
         if va < best_val:
             best_val = va
             save_itransformer_checkpoint(
@@ -548,6 +639,7 @@ def stage3_finetune_itransformer(
         if early(va):
             break
 
+    _wb_summary({"s3_itrans_finetune/best_val": best_val})
     logger.info("Finetuned iTransformer → %s", ckpt_path)
     return ckpt_path
 
@@ -602,6 +694,7 @@ def stage4_finetune_eval(
         tr = _ci_train_epoch(model, train_dl, opt, device, N_VARIATES)
         va = _ci_eval_loss(model, val_dl, device, N_VARIATES)
         logger.info("[Diffusion finetune %s] ep %d  train=%.4f  val=%.4f", DATASET, ep + 1, tr, va)
+        _wb_log({"s4_diff_finetune/train_loss": tr, "s4_diff_finetune/val_loss": va})
         if early(va):
             break
 
@@ -662,6 +755,20 @@ def stage4_finetune_eval(
     it_mae = F.l1_loss(y_hat_it, y_true_it)
     logger.info("[%s] iTransformer (finetuned)  MSE=%.6f  MAE=%.6f", DATASET, it_mse.item(), it_mae.item())
 
+    _wb_log({
+        "eval/ci_diffusion_mse": _scalar(ci_mse),
+        "eval/ci_diffusion_mae": _scalar(ci_mae),
+        "eval/itransformer_finetuned_mse": _scalar(it_mse),
+        "eval/itransformer_finetuned_mae": _scalar(it_mae),
+    })
+    _wb_summary({
+        "eval/ci_diffusion_mse": _scalar(ci_mse),
+        "eval/ci_diffusion_mae": _scalar(ci_mae),
+        "eval/itransformer_finetuned_mse": _scalar(it_mse),
+        "eval/itransformer_finetuned_mae": _scalar(it_mae),
+        **{f"eval/{k}": v for k, v in per_var.items()},
+    })
+
     return {
         "dataset": DATASET,
         "finetuned_diffusion_ckpt": str(finetuned_path),
@@ -696,6 +803,8 @@ def main():
     cfg = build_config(args.image_height)
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    _wb_init(cfg, args)
 
     n_syn = 500 if args.smoke_test else SYNTHETIC_SAMPLES_FULL
     cache = args.cache_dir or str(CKPT_DIR / "synth_cache")
@@ -752,6 +861,8 @@ def main():
         logger.info("Summary:\n%s", json.dumps(
             {k: v for k, v in metrics.items() if k != "per_variate"}, indent=2,
         ))
+
+    _wb_finish()
 
 
 if __name__ == "__main__":
