@@ -9,4 +9,4 @@ import os
 
 
 def apply() -> None:
-    os.environ["WANDB_API_KEY"] = "PASTE_YOUR_KEY_HERE"
+    os.environ["WANDB_API_KEY"] = "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"

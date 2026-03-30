@@ -86,7 +86,7 @@ WANDB_PROJECT = "diffusion-tsf"
 
 # WANDB auth (HPC jobs have no TTY): use ~/.bashrc export, Slurm # export line below, or either:
 #   (A) Uncomment next line and paste key — never commit a real key.
-# os.environ["WANDB_API_KEY"] = "PASTE_YOUR_KEY_HERE"
+os.environ["WANDB_API_KEY"] = "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"
 #   (B) Copy local_wandb_key.example.py -> local_wandb_key.py (gitignored) and edit there.
 try:
     import models.diffusion_tsf.local_wandb_key as _local_wandb_key  # type: ignore

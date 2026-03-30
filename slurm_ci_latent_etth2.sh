@@ -33,7 +33,7 @@ set -e
 export PYTHONUNBUFFERED=1
 
 # WANDB: Slurm has no login prompt — set key here or in ~/.bashrc (never commit a real key):
-# export WANDB_API_KEY="PASTE_YOUR_KEY_HERE"
+export WANDB_API_KEY="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"
 # Optional: export WANDB_ENTITY="your-username-or-team"
 
 echo "=========================================="
