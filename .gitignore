@@ -36,6 +36,11 @@ wheels/
 .installed.cfg
 *.egg
 
+# Secrets (wandb, etc.)
+models/diffusion_tsf/local_wandb_key.py
+.env
+.env.*
+
 # Virtual environments
 venv/
 ENV/

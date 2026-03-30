@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -82,6 +83,17 @@ RESULTS_DIR = _SCRIPT_DIR / "results"
 N_VARIATES = 7
 DATASET = "ETTh2"
 WANDB_PROJECT = "diffusion-tsf"
+
+# WANDB auth (HPC jobs have no TTY): use ~/.bashrc export, Slurm # export line below, or either:
+#   (A) Uncomment next line and paste key — never commit a real key.
+# os.environ["WANDB_API_KEY"] = "PASTE_YOUR_KEY_HERE"
+#   (B) Copy local_wandb_key.example.py -> local_wandb_key.py (gitignored) and edit there.
+try:
+    import models.diffusion_tsf.local_wandb_key as _local_wandb_key  # type: ignore
+except ImportError:
+    pass
+else:
+    _local_wandb_key.apply()
 
 _wb_enabled = False
 
