@@ -33,6 +33,7 @@ SYNTHETIC_SAMPLES_FULL = 100_000
 
 DATASET_REGISTRY = {
     "ETTh1": ("ETT-small/ETTh1.csv", "date", 24),
+    "ETTh2": ("ETT-small/ETTh2.csv", "date", 24),
 }
 
 logger = logging.getLogger(__name__)

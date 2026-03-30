@@ -34,6 +34,11 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
     sbatch --job-name=ci-guided   slurm_ci_latent_etth1.sh
     sbatch --job-name=ci-unguided slurm_ci_latent_etth1.sh -- --no-guidance
     ```
+- `slurm_ci_latent_etth2.sh`: Full 4-stage CI latent diffusion pipeline for ETTh2. Pretrain iTrans + diffusion on synthetic → finetune both on ETTh2 → eval finetuned diffusion vs finetuned iTrans.
+    ```bash
+    sbatch slurm_ci_latent_etth2.sh                              # full run
+    sbatch --job-name=ci-etth2-smoke slurm_ci_latent_etth2.sh -- --smoke-test
+    ```
 - `slurm_unet_fullvar.sh`: self-resubmitting Slurm wrapper for run_unet_fullvar.sh (Killarney).
 - `summarize_results.py`: generate markdown report from eval results.
 - `setup/setup.sh`: one-time local env setup (venv, CUDA, deps).
@@ -48,7 +53,9 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
     - `preprocessing.py`: `Standardizer`, `TimeSeriesTo2D` (encode/decode), `VerticalGaussianBlur`.
     - `train_7var_pipeline.py`: **the Python entry point** — pretrain, finetune, eval, baseline.
     - `train_latent_experiment.py`: 1-var latent diffusion experiment (VAE → iTransformer → LDM → ETTh1).
-    - `train_ci_latent_etth1.py`: CI latent diffusion ablation on ETTh1 7-var. Tests guided (iTransformer ghost) vs unguided diffusion, both vs iTransformer-only baseline.
+    - `train_ci_latent_etth1.py`: CI latent diffusion ablation on ETTh1 7-var. Tests guided (iTransformer ghost) vs unguided diffusion, both vs iTransformer-only baseline. Stage 3 saves `checkpoints_ci_latent/{guided,unguided}_finetuned_H{96|128}.pt` for viz.
+    - `train_ci_latent_etth2.py`: Full 4-stage CI latent pipeline for ETTh2. Stage 1: pretrain iTrans on synth. Stage 2: pretrain diffusion with pretrained iTrans guidance. Stage 3: finetune iTrans on ETTh2. Stage 4: finetune diffusion with *finetuned* iTrans guidance + eval vs finetuned iTrans. Checkpoints in `checkpoints_ci_etth2/`.
+    - `visualize_ci_latent_etth1.py`: Plots GT vs iTransformer vs CI latent on shared ETTh1 test windows (like `visualize_7var_etth1.py` but for latent path). `python -m models.diffusion_tsf.visualize_ci_latent_etth1 --output-dir models/diffusion_tsf/results/latent_viz`
     - `latent_diffusion_model.py`: `LatentDiffusionTSF` — latent-space diffusion with frozen VAE.
     - `vae.py`: `TimeSeriesVAE` — convolutional VAE for 2D time-series images (4× spatial compression).
     - `latent_experiment_common.py`: shared helpers for latent experiment scripts.
@@ -226,6 +233,7 @@ sbatch slurm_latent_experiment.sh
 - **traffic.csv:** auto-combined from part1+part2 by pipeline.sh.
 
 ## Recent Changes
+- **2026-03-29:** CI latent diffusion ETTh2 full pipeline. `train_ci_latent_etth2.py` + `slurm_ci_latent_etth2.sh` — 4-stage pipeline (pretrain iTrans on synth → pretrain diffusion with pretrained iTrans guidance → finetune iTrans on ETTh2 → finetune diffusion with finetuned iTrans + eval). Both eval baselines and diffusion guidance use the dataset-finetuned iTransformer, not the synthetic-pretrained one. Added ETTh2 to `latent_experiment_common.py` DATASET_REGISTRY.
 - **2026-03-27:** CI latent diffusion ablation. `train_ci_latent_etth1.py` + `slurm_ci_latent_etth1.sh` test channel-independent latent diffusion on ETTh1 (7-var). Each variate processed independently through shared univariate VAE + U-Net. Two variants: `--no-guidance` (pure diffusion) vs guided (iTransformer ghost images via `CIiTransformerGuidance` wrapper that unflattens batch for multivariate iTransformer). Fixed `in_ch` bug in `LatentDiffusionTSF` for `use_guidance_channel=False`.
 - **2026-03-15:** Full-variate U-Net path. `run_unet_fullvar.sh` + `slurm_unet_fullvar.sh` train U-Net directly on native-dim datasets (traffic=861, electricity=321) with bf16, H=96, 75K synth pool, 3 iTransformer HP trials. Cross-var augmentation auto-skipped for V>32. Synthetic pool disk caching via `cache_dir`. New CLI flags: `--synthetic-samples`, `--itransformer-trials`, `--subset-threshold`.
 - **2026-03-06:** Lookback overlap: diffusion model now predicts K=8 past steps alongside H=192 forecast to smooth boundary. Weighted loss (0.3× overlap, 1.0× forecast), trimmed at inference.

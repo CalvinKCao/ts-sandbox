@@ -538,6 +538,19 @@ def stage3_finetune_eval(
         if early(va):
             break
 
+    finetuned_path = CKPT_CI / f"{tag}_finetuned_H{cfg.image_height}.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": asdict(cfg),
+            "vae_scale_factor": vae.scale_factor.detach().cpu(),
+            "tag": tag,
+            "use_guidance": use_guidance,
+        },
+        finetuned_path,
+    )
+    logger.info("Saved finetuned CI latent checkpoint → %s", finetuned_path)
+
     # ---- evaluate CI diffusion ----
     model.eval()
     preds_ci, trues_ci = [], []
@@ -594,6 +607,7 @@ def stage3_finetune_eval(
 
     return {
         "mode": tag,
+        "finetuned_checkpoint": str(finetuned_path),
         "ci_diffusion_mse": _scalar(ci_mse),
         "ci_diffusion_mae": _scalar(ci_mae),
         "itransformer_baseline_mse": _scalar(it_mse) if it_mse is not None else None,
