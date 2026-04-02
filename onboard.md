@@ -13,22 +13,12 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
 ## file layout
 
 ### root scripts
-- `pipeline.sh`: **THE master script** — runs everything (splits high-variate into 32-dim subsets).
+- `slurm_unet_fullvar.sh`: **primary Slurm training entry** for full-variate U-Net (no 32-dim subset splitting). Self-`sbatch` from login node; job runs `train_multivariate_pipeline` with bf16, H=96, 75K synth pool; storage under `$PROJECT/$USER/diffusion-tsf-fullvar`.
     ```bash
-    ./pipeline.sh                          # full pipeline
-    ./pipeline.sh --smoke-test             # quick validation
-    ./pipeline.sh --gpus 4                 # parallel fine-tuning
-    ./pipeline.sh --dataset electricity    # single dataset
-    ./pipeline.sh --pretrain-only          # just Phase 1
+    ./slurm_unet_fullvar.sh --smoke-test
+    ./slurm_unet_fullvar.sh --dataset electricity
     ```
-- `run_unet_fullvar.sh`: trains U-Net on full-variate datasets (no subset splitting). bf16, H=96, 75K synth pool.
-    ```bash
-    ./run_unet_fullvar.sh                          # default: traffic (861-var)
-    ./run_unet_fullvar.sh --smoke-test             # quick validation
-    ./run_unet_fullvar.sh --dataset electricity    # 321-var
-    ```
-- `slurm_pipeline.sh`: Alliance HPC Slurm wrapper for pipeline.sh.
-- `slurm_latent_experiment.sh`: Slurm wrapper for 1-var latent diffusion (`train_latent_experiment.py`). Same `$PROJECT/$USER/diffusion-tsf/venv` + module stack as `slurm_pipeline.sh`.
+- `slurm_latent_experiment.sh`: Slurm wrapper for 1-var latent diffusion (`train_latent_experiment.py`). Uses `$PROJECT/$USER/diffusion-tsf/venv` like the other GPU jobs.
 - `slurm_ci_latent_etth1.sh`: CI (channel-independent) latent diffusion ablation on ETTh1 7-var. Submit guided vs unguided:
     ```bash
     sbatch --job-name=ci-guided   slurm_ci_latent_etth1.sh
@@ -39,10 +29,8 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
     sbatch slurm_ci_latent_etth2.sh                              # full run
     sbatch --job-name=ci-etth2-smoke slurm_ci_latent_etth2.sh -- --smoke-test
     ```
-- `slurm_unet_fullvar.sh`: self-resubmitting Slurm wrapper for run_unet_fullvar.sh (Killarney).
-- `summarize_results.py`: generate markdown report from eval results.
-- `setup/setup.sh`: one-time local env setup (venv, CUDA, deps).
-- `setup/alliance_setup_killarney.sh`: one-time Killarney cluster setup.
+- `find_traffic_results.sh`: search cluster storage for traffic experiment artifacts (run over SSH on the cluster).
+- `setup/alliance_setup_killarney.sh`: one-time Killarney cluster setup (creates `sync_from_killarney.sh`, etc.).
 
 ### models
 - `models/diffusion_tsf/`: core diffusion logic.
@@ -51,34 +39,24 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
     - `transformer.py`: DiT-style backbone option.
     - `diffusion.py`: `DiffusionScheduler` — DDPM/DDIM forward and reverse processes.
     - `preprocessing.py`: `Standardizer`, `TimeSeriesTo2D` (encode/decode), `VerticalGaussianBlur`.
-    - `train_7var_pipeline.py`: **the Python entry point** — pretrain, finetune, eval, baseline.
+    - `train_multivariate_pipeline.py`: **the Python entry point** — pretrain, finetune, eval, baseline.
+    - `storage_paths.py`: default checkpoint/results dirs (`checkpoints_multivariate` / `results_multivariate`); falls back to legacy `checkpoints_7var` / `results_7var` if those exist and new dirs do not.
     - `train_latent_experiment.py`: 1-var latent diffusion experiment (VAE → iTransformer → LDM → ETTh1).
     - `train_ci_latent_etth1.py`: CI latent diffusion ablation on ETTh1 7-var. Tests guided (iTransformer ghost) vs unguided diffusion, both vs iTransformer-only baseline. Stage 3 saves `checkpoints_ci_latent/{guided,unguided}_finetuned_H{96|128}.pt` for viz.
     - `train_ci_latent_etth2.py`: Full 4-stage CI latent pipeline for ETTh2. Stage 1: pretrain iTrans on synth. Stage 2: pretrain diffusion with pretrained iTrans guidance. Stage 3: finetune iTrans on ETTh2. Stage 4: finetune diffusion with *finetuned* iTrans guidance + eval vs finetuned iTrans. Checkpoints in `checkpoints_ci_etth2/`.
-    - `visualize_ci_latent_etth1.py`: Plots GT vs iTransformer vs CI latent on shared ETTh1 test windows (like `visualize_7var_etth1.py` but for latent path). `python -m models.diffusion_tsf.visualize_ci_latent_etth1 --output-dir models/diffusion_tsf/results/latent_viz`
     - `latent_diffusion_model.py`: `LatentDiffusionTSF` — latent-space diffusion with frozen VAE.
     - `vae.py`: `TimeSeriesVAE` — convolutional VAE for 2D time-series images (4× spatial compression).
     - `latent_experiment_common.py`: shared helpers for latent experiment scripts.
-    - `train_electricity.py`: single-dataset training + optuna (used internally).
-    - `train_universal_v2.py`: older universal training script.
     - `config.py`: config dataclasses.
     - `dataset.py`: dataset loading + synthetic data.
     - `realts.py`: synthetic data generators.
     - `augmentation.py`: multivariate augmentation.
     - `metrics.py`: shape-preservation + standard TSF metrics (MSE/MAE).
-    - `visualize.py`: general plotting utilities for 2D representations.
-    - `visualize_comparison.py`: iTransformer vs Diffusion comparison plots.
-    - `visualize_7var.py`: per-subset visualizations.
-    - `evaluate_7var.py`: standalone evaluation.
-    - `ccm_adapter.py`: channel clustering module (legacy approach).
-    - `guidance.py`: iTransformerGuidance wrapper.
+    - `visualize_comparison.py`: **only viz script** — multivariate overlays (GT vs iTransformer vs diffusion). Default: scans both `checkpoints_multivariate` and legacy `checkpoints_7var` if present. `python -m models.diffusion_tsf.visualize_comparison --output-dir ... --num-samples 3 --vars 3` (optional `--checkpoint-dir` for a single root).
+    - `guidance.py`: iTransformerGuidance + other guidance wrappers.
     - `tests/`: unit tests.
 
-- `models/iTransformer/`: iTransformer (Stage 1 predictor).
-
-### legacy
-- `legacy/scripts/`: old shell scripts (run_all_datasets.sh, run_7var_pipeline.sh, etc.)
-- `legacy/`: old Python scripts (evaluate_latest.py, remote_evaluate.py, etc.)
+- `models/iTransformer/`: vendored **minimal** iTransformer: `model/iTransformer.py`, `layers/*`, `utils/masking.py` only (upstream `run.py`, `experiments/`, `data_provider/`, extra model variants removed).
 
 ## datasets
 
@@ -106,21 +84,22 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
 1. **Phase 1 — Pretrain** (per unique dim): generate 100k synthetic samples → HP tune → pretrain iTransformer + Diffusion.
 2. **Phase 2 — Fine-tune** (per dataset): HP tune → fine-tune → evaluate. High-variate subsets run in parallel across GPUs.
 3. **Phase 3 — Baselines** (high-variate only): train a full-dim iTransformer on ALL columns for comparison.
-4. **Phase 4 — Viz**: comparison plots (ground truth vs iTransformer vs diffusion).
+4. **Phase 4 — Viz**: run `python -m models.diffusion_tsf.visualize_comparison` on the checkpoint tree (GT vs iTransformer vs diffusion).
 
 ### Python CLI modes
 ```bash
-python -m models.diffusion_tsf.train_7var_pipeline --mode pretrain --n-variates 7
-python -m models.diffusion_tsf.train_7var_pipeline --mode finetune --dataset ETTh1 --n-variates 7
-python -m models.diffusion_tsf.train_7var_pipeline --mode finetune-subset --dataset electricity --subset-id electricity-0 --variate-indices 0,1,2,...,31 --n-variates 32
-python -m models.diffusion_tsf.train_7var_pipeline --mode baseline --dataset electricity
-python -m models.diffusion_tsf.train_7var_pipeline --mode list-subsets --dataset electricity --n-variates 32
-python -m models.diffusion_tsf.train_7var_pipeline --mode full  # legacy: run everything in one go
+python -m models.diffusion_tsf.train_multivariate_pipeline --mode pretrain --n-variates 7
+python -m models.diffusion_tsf.train_multivariate_pipeline --mode finetune --dataset ETTh1 --n-variates 7
+python -m models.diffusion_tsf.train_multivariate_pipeline --mode finetune-subset --dataset electricity --subset-id electricity-0 --variate-indices 0,1,2,...,31 --n-variates 32
+python -m models.diffusion_tsf.train_multivariate_pipeline --mode baseline --dataset electricity
+python -m models.diffusion_tsf.train_multivariate_pipeline --mode list-subsets --dataset electricity --n-variates 32
+python -m models.diffusion_tsf.train_multivariate_pipeline --mode full  # legacy: run everything in one go
 ```
 
 ### checkpoint structure
+Default on-disk names: `checkpoints_multivariate/` (same layout as before). Legacy `checkpoints_7var/` is still read if the new dir is absent.
 ```
-checkpoints_7var/
+checkpoints_multivariate/   # or checkpoints_7var (legacy)
 ├── pretrained_dim7/
 │   ├── itransformer.pt
 │   └── diffusion.pt
@@ -145,7 +124,7 @@ checkpoints_7var/
 ### Lookback overlap (boundary smoothing)
 The diffusion model predicts the last K=8 lookback timesteps in addition to the H=192 forecast. Total prediction width = K+H = 200. Loss is weighted: 0.3× for the overlap region, 1.0× for the forecast. During inference, the overlap is trimmed — only the H-step forecast is returned. iTransformer still predicts H steps; its guidance is concatenated with actual observed values for the overlap region.
 
-Config: `lookback_overlap=8`, `past_loss_weight=0.3`. Constants: `LOOKBACK_OVERLAP`, `PAST_LOSS_WEIGHT` in train_7var_pipeline.py.
+Config: `lookback_overlap=8`, `past_loss_weight=0.3`. Constants: `LOOKBACK_OVERLAP`, `PAST_LOSS_WEIGHT` in train_multivariate_pipeline.py.
 
 ### Unified L+F scheme
 Single time axis of length `Lookback + Forecast` (1024 + 200 = 1224).
@@ -157,10 +136,8 @@ Single time axis of length `Lookback + Forecast` (1024 + 200 = 1224).
 
 ### 2D Representation
 - **Image:** 128 × 1224 (height × width, with K=8 overlap).
-- **PDF mode (default):** one-hot stripe — pixel index `y = clip((x-μ)/σ * MS/2 * H + H/2, 0, H-1)` where MS=3.5.
-- **CDF mode:** occupancy map — fill pixels `0..y` as 1.0 (cumulative); softens into a sigmoid boundary after blur.
-- Vertical Gaussian blur (31×1 kernel) blurs only along the value axis, preserving temporal patterns.
-- Decode: PDF → softmax-expectation; CDF → column sum normalized to `[-max_scale, max_scale]`.
+- **Encoding:** occupancy map — bin normalized value, fill rows `0..y` to 1.0 (MS=3.5); vertical Gaussian blur (31×1) along the value axis only.
+- **Decode:** column sum → normalized level, or optional `expectation` decoder (vertical-gradient mass → expected bin); maps back to `[-max_scale, max_scale]`.
 
 ### Channel order (full)
 ```
@@ -201,23 +178,24 @@ cd /scratch/$USER/ts-sandbox
 # 2. One-time setup (venv, datasets, generates slurm scripts)
 ./setup/alliance_setup_killarney.sh
 
-# 3. Smoke test
-sbatch slurm_pipeline.sh --smoke-test
+# 3. Smoke test (pick one)
+./slurm_unet_fullvar.sh --smoke-test
+# or: python -m models.diffusion_tsf.train_multivariate_pipeline --smoke-test  # from an interactive GPU session
 
 # 4. Monitor
 sq && tail -f diffusion-tsf-*.out
 
-# 5. Full run
-sbatch slurm_pipeline.sh
+# 5. Full-variate U-Net (typical production)
+./slurm_unet_fullvar.sh
 
-# 6. Sync results locally (from your WSL machine)
+# 6. Sync results locally (from your WSL machine; file created by alliance_setup)
 ./sync_from_killarney.sh ccao87@killarney.alliancecan.ca
 
-# Latent 1-var experiment (uses same venv path as pipeline; script creates/repairs venv if torch missing)
+# Latent 1-var experiment
 sbatch slurm_latent_experiment.sh
 ```
 
-**Killarney venv:** GPU jobs load `python/3.11` modules, then use **`$PROJECT/$USER/diffusion-tsf/venv`** (not the repo-local `venv/`). `slurm_pipeline.sh` and `slurm_latent_experiment.sh` both create that venv on first run and install CUDA PyTorch + `reformer_pytorch`. The latent script calls **`$VENV/bin/python`** so Slurm never picks system Python by mistake.
+**Killarney venv:** GPU jobs load `python/3.11` modules, then use **`$PROJECT/$USER/diffusion-tsf/venv`** (not the repo-local `venv/`). Slurm scripts (`slurm_unet_fullvar.sh`, `slurm_latent_experiment.sh`, `slurm_ci_latent_*.sh`) create or reuse that venv and install CUDA PyTorch + `reformer_pytorch`. Prefer **`$VENV/bin/python`** in jobs so Slurm never uses the wrong interpreter.
 
 | Cluster | GPU | VRAM | Account prefix | Partitions |
 |---------|-----|------|----------------|------------|
@@ -226,17 +204,21 @@ sbatch slurm_latent_experiment.sh
 | Fir     | H100 | 80GB | `def-` | default |
 
 ## Gotchas
-- **Killarney torch missing:** if a job dies with `No module named 'torch'`, the PROJECT venv is empty or broken. Run `sbatch slurm_pipeline.sh --smoke-test` once, or delete `$PROJECT/$USER/diffusion-tsf/venv` and resubmit so the Slurm script recreates it.
+- **Killarney torch missing:** if a job dies with `No module named 'torch'`, the PROJECT venv is empty or broken. Delete `$PROJECT/$USER/diffusion-tsf/venv` and resubmit a smoke job, or run `./slurm_unet_fullvar.sh --smoke-test` so the script recreates the venv.
 - **Imports:** always run from project root: `python -m models.diffusion_tsf.script_name`
-- **Smoke test first:** `./pipeline.sh --smoke-test` before committing to a full run.
+- **Smoke test first:** `./slurm_unet_fullvar.sh --smoke-test` before long runs.
 - **OOM:** use `attention_levels=[2]` and small batch sizes for 32-dim models.
-- **traffic.csv:** auto-combined from part1+part2 by pipeline.sh.
+- **traffic.csv:** auto-combined from part1+part2 by `slurm_unet_fullvar.sh` (and the same logic if you run `train_multivariate_pipeline` after merging parts manually).
 
 ## Recent Changes
+- **2026-03-31:** Checkpoint/results default dirs renamed to `checkpoints_multivariate` / `results_multivariate`; `storage_paths.py` still resolves legacy `checkpoints_7var` / `results_7var` when the new folders are missing. `visualize_comparison` defaults to scanning both trees.
+- **2026-03-31:** Renamed `train_7var_pipeline.py` → `train_multivariate_pipeline.py` (any `--n-variates`; default 7 is only ETT-style default).
+- **2026-03-31 (cleanup):** Removed `legacy/` tree. Dropped extra viz scripts; kept `visualize_comparison.py` only. Trimmed `models/iTransformer/` to `iTransformer.py` + `layers/` + `utils/masking.py`.
+- **2026-03-31:** Full-variate training is `slurm_unet_fullvar.sh` only (inlined former `run_unet_fullvar.sh`). Removed `setup/setup.sh`.
 - **2026-03-29:** CI latent diffusion ETTh2 full pipeline. `train_ci_latent_etth2.py` + `slurm_ci_latent_etth2.sh` — 4-stage pipeline (pretrain iTrans on synth → pretrain diffusion with pretrained iTrans guidance → finetune iTrans on ETTh2 → finetune diffusion with finetuned iTrans + eval). Both eval baselines and diffusion guidance use the dataset-finetuned iTransformer, not the synthetic-pretrained one. Added ETTh2 to `latent_experiment_common.py` DATASET_REGISTRY.
 - **2026-03-27:** CI latent diffusion ablation. `train_ci_latent_etth1.py` + `slurm_ci_latent_etth1.sh` test channel-independent latent diffusion on ETTh1 (7-var). Each variate processed independently through shared univariate VAE + U-Net. Two variants: `--no-guidance` (pure diffusion) vs guided (iTransformer ghost images via `CIiTransformerGuidance` wrapper that unflattens batch for multivariate iTransformer). Fixed `in_ch` bug in `LatentDiffusionTSF` for `use_guidance_channel=False`.
-- **2026-03-15:** Full-variate U-Net path. `run_unet_fullvar.sh` + `slurm_unet_fullvar.sh` train U-Net directly on native-dim datasets (traffic=861, electricity=321) with bf16, H=96, 75K synth pool, 3 iTransformer HP trials. Cross-var augmentation auto-skipped for V>32. Synthetic pool disk caching via `cache_dir`. New CLI flags: `--synthetic-samples`, `--itransformer-trials`, `--subset-threshold`.
+- **2026-03-15:** Full-variate U-Net path. `slurm_unet_fullvar.sh` trains U-Net directly on native-dim datasets (traffic=861, electricity=321) with bf16, H=96, 75K synth pool, 12 iTransformer HP trials. Cross-var augmentation auto-skipped for V>32. Synthetic pool disk caching via `cache_dir`. New CLI flags: `--synthetic-samples`, `--itransformer-trials`, `--subset-threshold`.
 - **2026-03-06:** Lookback overlap: diffusion model now predicts K=8 past steps alongside H=192 forecast to smooth boundary. Weighted loss (0.3× overlap, 1.0× forecast), trimmed at inference.
-- **2026-03-06:** Unified pipeline. Single `pipeline.sh` replaces scattered scripts. Dimensionality groups (7/8/21/32) with per-dim pretraining. Multi-GPU parallel subset fine-tuning. Full-dim iTransformer baseline for high-variate comparison. Old scripts moved to `legacy/`.
+- **2026-03-06:** Unified `train_multivariate_pipeline` modes: dimensionality groups (7/8/21/32), per-dim pretraining, multi-GPU subset fine-tuning, full-dim iTransformer baseline for high-variate comparison.
 - **2026-02-20:** 2D representation doubled to 128×1216. Synthetic pretraining uses 100k samples. Irregular periodicity added.
 - **2026-02-04:** Added CCM adapter, train_universal_v2.py.

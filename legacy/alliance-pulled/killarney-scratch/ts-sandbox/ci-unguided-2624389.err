@@ -1,0 +1,126 @@
+The following modules were not unloaded:
+  (Use "module --force purge" to unload all):
+
+  1) CCconfig        6)  ucx/1.14.1         11) flexiblas/3.3.1
+  2) gentoo/2023     7)  libfabric/1.18.0   12) imkl/2023.2.0
+  3) gcccore/.12.3   8)  pmix/4.2.4         13) StdEnv/2023
+  4) gcc/12.3        9)  ucc/1.2.0
+  5) hwloc/2.9.1     10) openmpi/4.1.5
+2026-03-28 07:12:47,962 INFO CI latent ETTh1: mode=unguided stages=0,1,2,3 smoke=False H=128 device=cuda
+2026-03-28 07:12:47,962 INFO Loading existing VAE from /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt
+2026-03-28 07:12:48,273 INFO Unguided mode: training iTransformer anyway (baseline comparison)
+2026-03-28 07:12:48,274 INFO iTransformer checkpoint exists: /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_ci_latent/itransformer_etth1_7var.pt — skipping training
+2026-03-28 07:12:48,276 INFO TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-03-28 07:12:48,331 INFO VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-28 07:12:48,362 INFO TimeSeriesContextEncoder: input_ch=2, embed_dim=128, layers=2, heads=4
+2026-03-28 07:12:48,434 INFO ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 3)
+2026-03-28 07:12:48,434 INFO   Conditioning mode: visual_concat
+2026-03-28 07:12:48,434 INFO   Visual concat: 4 past image channels directly concatenated
+2026-03-28 07:12:48,434 INFO   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-03-28 07:12:48,444 INFO DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-28 07:12:48,446 INFO LatentDiffusionTSF: H_lat=32, in_ch=5, cz=4, aux=1
+2026-03-28 07:12:48,461 INFO RealTS initialized: 100000 samples/epoch, lookback=1024, forecast=192, variables=1
+2026-03-28 07:12:48,462 INFO Loading synthetic pool from /project/6101823/ccao87/diffusion-tsf/synthetic_cache/ci_latent/synth_pool_v1_L1216_N100000.npy
+2026-03-28 07:12:48,466 INFO Created synthetic-only dataloader: 100000 samples/epoch (Pool: 100000), lookback=1024, forecast=192, variables=1
+2026-03-28 07:23:11,501 INFO [Pretrain unguided] ep 1  train=0.0658  val=0.0389
+2026-03-28 07:33:09,185 INFO [Pretrain unguided] ep 2  train=0.0384  val=0.0363
+2026-03-28 07:43:07,657 INFO [Pretrain unguided] ep 3  train=0.0341  val=0.0276
+2026-03-28 07:53:06,003 INFO [Pretrain unguided] ep 4  train=0.0318  val=0.0284
+2026-03-28 08:03:03,824 INFO [Pretrain unguided] ep 5  train=0.0304  val=0.0302
+2026-03-28 08:13:01,149 INFO [Pretrain unguided] ep 6  train=0.0291  val=0.0265
+2026-03-28 08:22:58,909 INFO [Pretrain unguided] ep 7  train=0.0280  val=0.0267
+2026-03-28 08:32:57,048 INFO [Pretrain unguided] ep 8  train=0.0274  val=0.0269
+2026-03-28 08:42:54,626 INFO [Pretrain unguided] ep 9  train=0.0265  val=0.0243
+2026-03-28 08:52:52,516 INFO [Pretrain unguided] ep 10  train=0.0261  val=0.0254
+2026-03-28 09:02:49,457 INFO [Pretrain unguided] ep 11  train=0.0254  val=0.0247
+2026-03-28 09:12:47,657 INFO [Pretrain unguided] ep 12  train=0.0254  val=0.0246
+2026-03-28 09:22:45,374 INFO [Pretrain unguided] ep 13  train=0.0247  val=0.0224
+2026-03-28 09:32:43,305 INFO [Pretrain unguided] ep 14  train=0.0242  val=0.0212
+2026-03-28 09:42:40,790 INFO [Pretrain unguided] ep 15  train=0.0241  val=0.0219
+2026-03-28 09:52:38,742 INFO [Pretrain unguided] ep 16  train=0.0240  val=0.0225
+2026-03-28 10:02:36,398 INFO [Pretrain unguided] ep 17  train=0.0234  val=0.0203
+2026-03-28 10:12:33,995 INFO [Pretrain unguided] ep 18  train=0.0231  val=0.0191
+2026-03-28 10:22:31,298 INFO [Pretrain unguided] ep 19  train=0.0230  val=0.0194
+2026-03-28 10:32:28,637 INFO [Pretrain unguided] ep 20  train=0.0229  val=0.0197
+2026-03-28 10:42:25,395 INFO [Pretrain unguided] ep 21  train=0.0226  val=0.0212
+2026-03-28 10:52:22,901 INFO [Pretrain unguided] ep 22  train=0.0225  val=0.0214
+2026-03-28 11:02:20,283 INFO [Pretrain unguided] ep 23  train=0.0223  val=0.0193
+2026-03-28 11:12:17,596 INFO [Pretrain unguided] ep 24  train=0.0221  val=0.0199
+2026-03-28 11:22:14,917 INFO [Pretrain unguided] ep 25  train=0.0222  val=0.0195
+2026-03-28 11:32:12,593 INFO [Pretrain unguided] ep 26  train=0.0217  val=0.0180
+2026-03-28 11:42:10,138 INFO [Pretrain unguided] ep 27  train=0.0217  val=0.0190
+2026-03-28 11:52:07,804 INFO [Pretrain unguided] ep 28  train=0.0216  val=0.0200
+2026-03-28 12:02:05,571 INFO [Pretrain unguided] ep 29  train=0.0214  val=0.0212
+2026-03-28 12:12:02,985 INFO [Pretrain unguided] ep 30  train=0.0214  val=0.0178
+2026-03-28 12:22:00,428 INFO [Pretrain unguided] ep 31  train=0.0212  val=0.0200
+2026-03-28 12:32:00,528 INFO [Pretrain unguided] ep 32  train=0.0212  val=0.0178
+2026-03-28 12:42:00,527 INFO [Pretrain unguided] ep 33  train=0.0212  val=0.0185
+2026-03-28 12:52:00,240 INFO [Pretrain unguided] ep 34  train=0.0208  val=0.0192
+2026-03-28 13:02:01,329 INFO [Pretrain unguided] ep 35  train=0.0211  val=0.0209
+2026-03-28 13:12:11,501 INFO [Pretrain unguided] ep 36  train=0.0210  val=0.0189
+2026-03-28 13:22:24,252 INFO [Pretrain unguided] ep 37  train=0.0209  val=0.0188
+2026-03-28 13:32:37,162 INFO [Pretrain unguided] ep 38  train=0.0208  val=0.0169
+2026-03-28 13:42:48,978 INFO [Pretrain unguided] ep 39  train=0.0207  val=0.0194
+2026-03-28 13:53:00,204 INFO [Pretrain unguided] ep 40  train=0.0207  val=0.0203
+2026-03-28 14:03:11,419 INFO [Pretrain unguided] ep 41  train=0.0205  val=0.0188
+2026-03-28 14:13:23,154 INFO [Pretrain unguided] ep 42  train=0.0207  val=0.0197
+2026-03-28 14:23:34,137 INFO [Pretrain unguided] ep 43  train=0.0205  val=0.0165
+2026-03-28 14:33:45,838 INFO [Pretrain unguided] ep 44  train=0.0205  val=0.0194
+2026-03-28 14:43:57,834 INFO [Pretrain unguided] ep 45  train=0.0203  val=0.0180
+2026-03-28 14:54:10,585 INFO [Pretrain unguided] ep 46  train=0.0201  val=0.0176
+2026-03-28 15:04:20,309 INFO [Pretrain unguided] ep 47  train=0.0201  val=0.0172
+2026-03-28 15:14:29,593 INFO [Pretrain unguided] ep 48  train=0.0201  val=0.0184
+2026-03-28 15:24:38,798 INFO [Pretrain unguided] ep 49  train=0.0201  val=0.0180
+2026-03-28 15:34:35,703 INFO [Pretrain unguided] ep 50  train=0.0199  val=0.0166
+2026-03-28 15:44:34,619 INFO [Pretrain unguided] ep 51  train=0.0200  val=0.0181
+2026-03-28 15:54:33,281 INFO [Pretrain unguided] ep 52  train=0.0200  val=0.0165
+2026-03-28 16:04:32,609 INFO [Pretrain unguided] ep 53  train=0.0198  val=0.0173
+2026-03-28 16:14:31,351 INFO [Pretrain unguided] ep 54  train=0.0199  val=0.0188
+2026-03-28 16:24:29,709 INFO [Pretrain unguided] ep 55  train=0.0198  val=0.0211
+2026-03-28 16:34:28,410 INFO [Pretrain unguided] ep 56  train=0.0196  val=0.0185
+2026-03-28 16:44:26,734 INFO [Pretrain unguided] ep 57  train=0.0194  val=0.0178
+2026-03-28 16:54:26,003 INFO [Pretrain unguided] ep 58  train=0.0197  val=0.0185
+2026-03-28 17:04:25,273 INFO [Pretrain unguided] ep 59  train=0.0195  val=0.0174
+2026-03-28 17:14:24,186 INFO [Pretrain unguided] ep 60  train=0.0195  val=0.0171
+2026-03-28 17:24:22,347 INFO [Pretrain unguided] ep 61  train=0.0196  val=0.0195
+2026-03-28 17:34:21,054 INFO [Pretrain unguided] ep 62  train=0.0194  val=0.0180
+2026-03-28 17:44:20,333 INFO [Pretrain unguided] ep 63  train=0.0195  val=0.0181
+2026-03-28 17:44:20,334 INFO Pretrained unguided → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_ci_latent/unguided_pretrained_H128.pt
+2026-03-28 17:44:20,355 INFO === Stage 3 [unguided]: fine-tune + eval on ETTh1 ===
+2026-03-28 17:44:20,414 INFO TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-03-28 17:44:20,414 INFO VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-28 17:44:20,422 INFO TimeSeriesContextEncoder: input_ch=2, embed_dim=128, layers=2, heads=4
+2026-03-28 17:44:20,493 INFO ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 3)
+2026-03-28 17:44:20,493 INFO   Conditioning mode: visual_concat
+2026-03-28 17:44:20,493 INFO   Visual concat: 4 past image channels directly concatenated
+2026-03-28 17:44:20,493 INFO   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-03-28 17:44:20,493 INFO DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-28 17:44:20,493 INFO LatentDiffusionTSF: H_lat=32, in_ch=5, cz=4, aux=1
+2026-03-28 17:44:41,955 INFO [Finetune unguided] ep 1  train=0.0312  val=0.0207
+2026-03-28 17:45:03,152 INFO [Finetune unguided] ep 2  train=0.0292  val=0.0223
+2026-03-28 17:45:24,356 INFO [Finetune unguided] ep 3  train=0.0287  val=0.0193
+2026-03-28 17:45:45,547 INFO [Finetune unguided] ep 4  train=0.0280  val=0.0268
+2026-03-28 17:46:06,760 INFO [Finetune unguided] ep 5  train=0.0286  val=0.0103
+2026-03-28 17:46:27,956 INFO [Finetune unguided] ep 6  train=0.0293  val=0.0325
+2026-03-28 17:46:49,158 INFO [Finetune unguided] ep 7  train=0.0276  val=0.0172
+2026-03-28 17:47:10,351 INFO [Finetune unguided] ep 8  train=0.0280  val=0.0191
+2026-03-28 17:47:31,543 INFO [Finetune unguided] ep 9  train=0.0268  val=0.0383
+2026-03-28 17:47:52,763 INFO [Finetune unguided] ep 10  train=0.0273  val=0.0333
+2026-03-28 17:48:13,961 INFO [Finetune unguided] ep 11  train=0.0276  val=0.0365
+2026-03-28 17:48:35,148 INFO [Finetune unguided] ep 12  train=0.0292  val=0.0315
+2026-03-28 17:48:56,337 INFO [Finetune unguided] ep 13  train=0.0281  val=0.0144
+2026-03-28 17:49:17,534 INFO [Finetune unguided] ep 14  train=0.0266  val=0.0263
+2026-03-28 17:49:38,727 INFO [Finetune unguided] ep 15  train=0.0283  val=0.0244
+2026-03-28 17:50:31,921 INFO [unguided] CI diffusion  MSE=1.343580  MAE=0.856509
+2026-03-28 17:50:32,401 INFO [baseline] iTransformer  MSE=0.652443  MAE=0.604694
+2026-03-28 17:50:32,410 INFO Results → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/results/ci_latent_etth1_unguided_H128.json
+2026-03-28 17:50:32,410 INFO Summary: {
+  "mode": "unguided",
+  "ci_diffusion_mse": 1.3435795307159424,
+  "ci_diffusion_mae": 0.856508731842041,
+  "itransformer_baseline_mse": 0.6524433493614197,
+  "itransformer_baseline_mae": 0.604694128036499,
+  "num_variates": 7,
+  "image_height": 128,
+  "forecast_horizon": 192
+}

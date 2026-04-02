@@ -1,0 +1,11 @@
+=== Train full-dim traffic iTransformer baseline (on L40S) ===
+2026-03-13 11:23:48,449 - INFO - traffic.csv already exists
+2026-03-13 11:23:48,518 - INFO - ============================================================
+2026-03-13 11:23:48,518 - INFO - FULL-DIM ITRANSFORMER BASELINE: traffic (862 vars)
+2026-03-13 11:23:48,519 - INFO - Epochs: 50, LR: 0.0001, Batch: 32
+2026-03-13 11:23:48,519 - INFO - ============================================================
+2026-03-13 11:24:02,069 - INFO - [traffic-baseline] Epoch 1/1 | Train: 1.1639 | Val: 1.1073 | 2.1s
+2026-03-13 11:24:03,055 - INFO - [traffic-baseline] Test MSE=1.4606, MAE=0.8731
+=== Rebuild summary.csv from finished subsets ===
+2026-03-13 11:24:13,366 - INFO - Summary updated: /scratch/ccao87/ts-sandbox/models/diffusion_tsf/results_7var/summary.csv
+=== Write intermediate traffic report ===

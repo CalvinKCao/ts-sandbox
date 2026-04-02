@@ -1,0 +1,273 @@
+The following modules were not unloaded:
+  (Use "module --force purge" to unload all):
+
+  1) CCconfig        6)  ucx/1.14.1         11) flexiblas/3.3.1
+  2) gentoo/2023     7)  libfabric/1.18.0   12) imkl/2023.2.0
+  3) gcccore/.12.3   8)  pmix/4.2.4         13) StdEnv/2023
+  4) gcc/12.3        9)  ucc/1.2.0
+  5) hwloc/2.9.1     10) openmpi/4.1.5
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+wandb: Currently logged in as: caocalvin (calvincao) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run xywhu8q6
+wandb: Tracking run with wandb version 0.24.0
+wandb: Run data is saved locally in /scratch/ccao87/ts-sandbox/wandb/run-20260330_003018-xywhu8q6
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run ETTh2-ci-latent-4stage-H128
+wandb: ⭐️ View project at https://wandb.ai/calvincao/diffusion-tsf
+wandb: 🚀 View run at https://wandb.ai/calvincao/diffusion-tsf/runs/xywhu8q6
+2026-03-30 00:30:20,099 INFO wandb run: https://wandb.ai/calvincao/diffusion-tsf/runs/xywhu8q6
+2026-03-30 00:30:20,099 INFO CI latent ETTh2: stages=0,1,2,3,4 smoke=False H=128 device=cuda
+2026-03-30 00:30:20,101 INFO Loading existing VAE from /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt
+2026-03-30 00:30:20,402 INFO === Stage 1: pretrain iTransformer on synthetic 7-var ===
+2026-03-30 00:30:20,402 INFO RealTS initialized: 100000 samples/epoch, lookback=1024, forecast=192, variables=7
+2026-03-30 00:30:20,403 INFO Generating synthetic pool of 100000 samples to /project/6101823/ccao87/diffusion-tsf/synthetic_cache/ci_latent/synth_pool_v7_L1216_N100000.npy...
+2026-03-30 00:30:34,687 INFO Generating synthetic samples: 10000/100000 (10%)
+2026-03-30 00:30:49,091 INFO Generating synthetic samples: 20000/100000 (20%)
+2026-03-30 00:31:03,338 INFO Generating synthetic samples: 30000/100000 (30%)
+2026-03-30 00:31:17,963 INFO Generating synthetic samples: 40000/100000 (40%)
+2026-03-30 00:31:32,172 INFO Generating synthetic samples: 50000/100000 (50%)
+2026-03-30 00:31:47,190 INFO Generating synthetic samples: 60000/100000 (60%)
+2026-03-30 00:32:01,460 INFO Generating synthetic samples: 70000/100000 (70%)
+2026-03-30 00:32:16,453 INFO Generating synthetic samples: 80000/100000 (80%)
+2026-03-30 00:32:30,722 INFO Generating synthetic samples: 90000/100000 (90%)
+2026-03-30 00:32:45,719 INFO Pool generation complete.
+2026-03-30 00:32:45,719 INFO Created synthetic-only dataloader: 100000 samples/epoch (Pool: 100000), lookback=1024, forecast=192, variables=7
+2026-03-30 00:33:45,161 INFO [iTrans pretrain synth] ep 1  train=0.8900  val=0.7584
+2026-03-30 00:34:34,463 INFO [iTrans pretrain synth] ep 2  train=0.7496  val=0.6773
+2026-03-30 00:35:23,142 INFO [iTrans pretrain synth] ep 3  train=0.7089  val=0.6737
+2026-03-30 00:36:11,469 INFO [iTrans pretrain synth] ep 4  train=0.6880  val=0.6596
+2026-03-30 00:36:59,886 INFO [iTrans pretrain synth] ep 5  train=0.6736  val=0.6437
+2026-03-30 00:37:47,533 INFO [iTrans pretrain synth] ep 6  train=0.6562  val=0.6225
+2026-03-30 00:38:34,936 INFO [iTrans pretrain synth] ep 7  train=0.6430  val=0.6340
+2026-03-30 00:39:23,422 INFO [iTrans pretrain synth] ep 8  train=0.6336  val=0.6043
+2026-03-30 00:40:11,552 INFO [iTrans pretrain synth] ep 9  train=0.6251  val=0.5925
+2026-03-30 00:40:59,634 INFO [iTrans pretrain synth] ep 10  train=0.6166  val=0.5924
+2026-03-30 00:41:47,205 INFO [iTrans pretrain synth] ep 11  train=0.6092  val=0.5919
+2026-03-30 00:42:34,886 INFO [iTrans pretrain synth] ep 12  train=0.6018  val=0.5714
+2026-03-30 00:43:23,169 INFO [iTrans pretrain synth] ep 13  train=0.5950  val=0.5711
+2026-03-30 00:44:11,104 INFO [iTrans pretrain synth] ep 14  train=0.5879  val=0.5648
+2026-03-30 00:44:59,497 INFO [iTrans pretrain synth] ep 15  train=0.5839  val=0.5479
+2026-03-30 00:45:47,843 INFO [iTrans pretrain synth] ep 16  train=0.5794  val=0.5482
+2026-03-30 00:46:35,551 INFO [iTrans pretrain synth] ep 17  train=0.5733  val=0.5548
+2026-03-30 00:47:23,807 INFO [iTrans pretrain synth] ep 18  train=0.5659  val=0.5486
+2026-03-30 00:48:11,238 INFO [iTrans pretrain synth] ep 19  train=0.5641  val=0.5322
+2026-03-30 00:48:59,806 INFO [iTrans pretrain synth] ep 20  train=0.5576  val=0.5292
+2026-03-30 00:49:48,113 INFO [iTrans pretrain synth] ep 21  train=0.5557  val=0.5483
+2026-03-30 00:50:36,030 INFO [iTrans pretrain synth] ep 22  train=0.5484  val=0.5054
+2026-03-30 00:51:24,799 INFO [iTrans pretrain synth] ep 23  train=0.5454  val=0.5130
+2026-03-30 00:52:11,251 INFO [iTrans pretrain synth] ep 24  train=0.5409  val=0.5166
+2026-03-30 00:52:58,961 INFO [iTrans pretrain synth] ep 25  train=0.5371  val=0.5005
+2026-03-30 00:53:47,569 INFO [iTrans pretrain synth] ep 26  train=0.5342  val=0.4924
+2026-03-30 00:54:35,892 INFO [iTrans pretrain synth] ep 27  train=0.5304  val=0.4908
+2026-03-30 00:55:24,799 INFO [iTrans pretrain synth] ep 28  train=0.5239  val=0.4974
+2026-03-30 00:56:12,545 INFO [iTrans pretrain synth] ep 29  train=0.5200  val=0.4814
+2026-03-30 00:57:01,313 INFO [iTrans pretrain synth] ep 30  train=0.5186  val=0.4757
+2026-03-30 00:57:49,372 INFO [iTrans pretrain synth] ep 31  train=0.5108  val=0.4694
+2026-03-30 00:58:36,654 INFO [iTrans pretrain synth] ep 32  train=0.5067  val=0.4629
+2026-03-30 00:59:24,509 INFO [iTrans pretrain synth] ep 33  train=0.5044  val=0.4566
+2026-03-30 01:00:12,441 INFO [iTrans pretrain synth] ep 34  train=0.5006  val=0.4674
+2026-03-30 01:01:00,610 INFO [iTrans pretrain synth] ep 35  train=0.4968  val=0.4555
+2026-03-30 01:01:49,199 INFO [iTrans pretrain synth] ep 36  train=0.4934  val=0.4389
+2026-03-30 01:02:36,838 INFO [iTrans pretrain synth] ep 37  train=0.4885  val=0.4384
+2026-03-30 01:03:25,332 INFO [iTrans pretrain synth] ep 38  train=0.4832  val=0.4435
+2026-03-30 01:04:13,236 INFO [iTrans pretrain synth] ep 39  train=0.4806  val=0.4373
+2026-03-30 01:05:01,739 INFO [iTrans pretrain synth] ep 40  train=0.4772  val=0.4241
+2026-03-30 01:05:49,641 INFO [iTrans pretrain synth] ep 41  train=0.4723  val=0.4289
+2026-03-30 01:06:37,101 INFO [iTrans pretrain synth] ep 42  train=0.4710  val=0.4229
+2026-03-30 01:07:25,464 INFO [iTrans pretrain synth] ep 43  train=0.4645  val=0.4119
+2026-03-30 01:08:13,331 INFO [iTrans pretrain synth] ep 44  train=0.4631  val=0.4104
+2026-03-30 01:09:01,756 INFO [iTrans pretrain synth] ep 45  train=0.4581  val=0.4177
+2026-03-30 01:09:49,838 INFO [iTrans pretrain synth] ep 46  train=0.4552  val=0.3972
+2026-03-30 01:10:38,127 INFO [iTrans pretrain synth] ep 47  train=0.4532  val=0.3969
+2026-03-30 01:11:26,765 INFO [iTrans pretrain synth] ep 48  train=0.4488  val=0.4063
+2026-03-30 01:12:14,208 INFO [iTrans pretrain synth] ep 49  train=0.4455  val=0.3999
+2026-03-30 01:13:02,406 INFO [iTrans pretrain synth] ep 50  train=0.4432  val=0.3877
+2026-03-30 01:13:49,729 INFO [iTrans pretrain synth] ep 51  train=0.4404  val=0.3853
+2026-03-30 01:14:36,804 INFO [iTrans pretrain synth] ep 52  train=0.4374  val=0.3956
+2026-03-30 01:15:24,435 INFO [iTrans pretrain synth] ep 53  train=0.4352  val=0.3864
+2026-03-30 01:16:11,461 INFO [iTrans pretrain synth] ep 54  train=0.4324  val=0.3764
+2026-03-30 01:16:59,282 INFO [iTrans pretrain synth] ep 55  train=0.4300  val=0.3782
+2026-03-30 01:17:46,410 INFO [iTrans pretrain synth] ep 56  train=0.4264  val=0.3795
+2026-03-30 01:18:33,842 INFO [iTrans pretrain synth] ep 57  train=0.4245  val=0.3643
+2026-03-30 01:19:20,400 INFO [iTrans pretrain synth] ep 58  train=0.4241  val=0.3632
+2026-03-30 01:20:08,029 INFO [iTrans pretrain synth] ep 59  train=0.4182  val=0.3743
+2026-03-30 01:20:56,297 INFO [iTrans pretrain synth] ep 60  train=0.4180  val=0.3589
+2026-03-30 01:21:44,173 INFO [iTrans pretrain synth] ep 61  train=0.4166  val=0.3547
+2026-03-30 01:22:31,804 INFO [iTrans pretrain synth] ep 62  train=0.4133  val=0.3591
+2026-03-30 01:23:18,651 INFO [iTrans pretrain synth] ep 63  train=0.4105  val=0.3588
+2026-03-30 01:24:04,895 INFO [iTrans pretrain synth] ep 64  train=0.4087  val=0.3495
+2026-03-30 01:24:52,854 INFO [iTrans pretrain synth] ep 65  train=0.4073  val=0.3516
+2026-03-30 01:25:41,310 INFO [iTrans pretrain synth] ep 66  train=0.4040  val=0.3662
+2026-03-30 01:26:29,046 INFO [iTrans pretrain synth] ep 67  train=0.4027  val=0.3407
+2026-03-30 01:27:16,362 INFO [iTrans pretrain synth] ep 68  train=0.4013  val=0.3421
+2026-03-30 01:28:03,679 INFO [iTrans pretrain synth] ep 69  train=0.3991  val=0.3442
+2026-03-30 01:28:51,744 INFO [iTrans pretrain synth] ep 70  train=0.3960  val=0.3442
+2026-03-30 01:29:39,962 INFO [iTrans pretrain synth] ep 71  train=0.3956  val=0.3366
+2026-03-30 01:30:27,454 INFO [iTrans pretrain synth] ep 72  train=0.3930  val=0.3371
+2026-03-30 01:31:15,287 INFO [iTrans pretrain synth] ep 73  train=0.3902  val=0.3379
+2026-03-30 01:32:02,901 INFO [iTrans pretrain synth] ep 74  train=0.3905  val=0.3303
+2026-03-30 01:32:50,213 INFO [iTrans pretrain synth] ep 75  train=0.3901  val=0.3268
+2026-03-30 01:33:38,384 INFO [iTrans pretrain synth] ep 76  train=0.3868  val=0.3401
+2026-03-30 01:34:26,200 INFO [iTrans pretrain synth] ep 77  train=0.3866  val=0.3325
+2026-03-30 01:35:13,744 INFO [iTrans pretrain synth] ep 78  train=0.3845  val=0.3233
+2026-03-30 01:36:01,747 INFO [iTrans pretrain synth] ep 79  train=0.3831  val=0.3256
+2026-03-30 01:36:49,793 INFO [iTrans pretrain synth] ep 80  train=0.3796  val=0.3264
+2026-03-30 01:37:37,985 INFO [iTrans pretrain synth] ep 81  train=0.3788  val=0.3183
+2026-03-30 01:38:25,335 INFO [iTrans pretrain synth] ep 82  train=0.3779  val=0.3163
+2026-03-30 01:39:12,882 INFO [iTrans pretrain synth] ep 83  train=0.3762  val=0.3237
+2026-03-30 01:40:00,303 INFO [iTrans pretrain synth] ep 84  train=0.3744  val=0.3236
+2026-03-30 01:40:48,037 INFO [iTrans pretrain synth] ep 85  train=0.3738  val=0.3152
+2026-03-30 01:41:36,126 INFO [iTrans pretrain synth] ep 86  train=0.3725  val=0.3168
+2026-03-30 01:42:23,697 INFO [iTrans pretrain synth] ep 87  train=0.3719  val=0.3151
+2026-03-30 01:43:11,594 INFO [iTrans pretrain synth] ep 88  train=0.3698  val=0.3079
+2026-03-30 01:43:58,924 INFO [iTrans pretrain synth] ep 89  train=0.3703  val=0.3101
+2026-03-30 01:44:46,601 INFO [iTrans pretrain synth] ep 90  train=0.3677  val=0.3151
+2026-03-30 01:45:34,288 INFO [iTrans pretrain synth] ep 91  train=0.3661  val=0.3114
+2026-03-30 01:46:21,501 INFO [iTrans pretrain synth] ep 92  train=0.3655  val=0.3074
+2026-03-30 01:47:08,663 INFO [iTrans pretrain synth] ep 93  train=0.3647  val=0.3123
+2026-03-30 01:47:56,890 INFO [iTrans pretrain synth] ep 94  train=0.3617  val=0.3114
+2026-03-30 01:48:44,870 INFO [iTrans pretrain synth] ep 95  train=0.3610  val=0.3025
+2026-03-30 01:49:32,699 INFO [iTrans pretrain synth] ep 96  train=0.3607  val=0.2979
+2026-03-30 01:50:19,801 INFO [iTrans pretrain synth] ep 97  train=0.3591  val=0.3084
+2026-03-30 01:51:07,462 INFO [iTrans pretrain synth] ep 98  train=0.3586  val=0.2986
+2026-03-30 01:51:55,819 INFO [iTrans pretrain synth] ep 99  train=0.3573  val=0.2982
+2026-03-30 01:52:42,955 INFO [iTrans pretrain synth] ep 100  train=0.3574  val=0.3079
+2026-03-30 01:53:30,109 INFO [iTrans pretrain synth] ep 101  train=0.3550  val=0.3006
+2026-03-30 01:54:16,590 INFO [iTrans pretrain synth] ep 102  train=0.3556  val=0.2934
+2026-03-30 01:55:04,653 INFO [iTrans pretrain synth] ep 103  train=0.3543  val=0.3038
+2026-03-30 01:55:52,740 INFO [iTrans pretrain synth] ep 104  train=0.3535  val=0.3003
+2026-03-30 01:56:40,753 INFO [iTrans pretrain synth] ep 105  train=0.3518  val=0.2928
+2026-03-30 01:57:29,015 INFO [iTrans pretrain synth] ep 106  train=0.3509  val=0.2916
+2026-03-30 01:58:17,682 INFO [iTrans pretrain synth] ep 107  train=0.3496  val=0.2974
+2026-03-30 01:59:05,030 INFO [iTrans pretrain synth] ep 108  train=0.3477  val=0.2922
+2026-03-30 01:59:53,258 INFO [iTrans pretrain synth] ep 109  train=0.3490  val=0.2907
+2026-03-30 02:00:41,233 INFO [iTrans pretrain synth] ep 110  train=0.3476  val=0.2863
+2026-03-30 02:01:29,245 INFO [iTrans pretrain synth] ep 111  train=0.3463  val=0.2933
+2026-03-30 02:02:17,047 INFO [iTrans pretrain synth] ep 112  train=0.3452  val=0.2930
+2026-03-30 02:03:04,919 INFO [iTrans pretrain synth] ep 113  train=0.3448  val=0.2853
+2026-03-30 02:03:53,170 INFO [iTrans pretrain synth] ep 114  train=0.3440  val=0.2888
+2026-03-30 02:04:40,622 INFO [iTrans pretrain synth] ep 115  train=0.3423  val=0.2891
+2026-03-30 02:05:28,289 INFO [iTrans pretrain synth] ep 116  train=0.3421  val=0.2826
+2026-03-30 02:06:15,913 INFO [iTrans pretrain synth] ep 117  train=0.3418  val=0.2818
+2026-03-30 02:07:04,250 INFO [iTrans pretrain synth] ep 118  train=0.3394  val=0.2892
+2026-03-30 02:07:52,412 INFO [iTrans pretrain synth] ep 119  train=0.3397  val=0.2808
+2026-03-30 02:08:40,617 INFO [iTrans pretrain synth] ep 120  train=0.3389  val=0.2774
+2026-03-30 02:09:28,439 INFO [iTrans pretrain synth] ep 121  train=0.3372  val=0.2868
+2026-03-30 02:10:15,985 INFO [iTrans pretrain synth] ep 122  train=0.3378  val=0.2818
+2026-03-30 02:11:04,393 INFO [iTrans pretrain synth] ep 123  train=0.3369  val=0.2770
+2026-03-30 02:11:52,439 INFO [iTrans pretrain synth] ep 124  train=0.3374  val=0.2786
+2026-03-30 02:12:40,232 INFO [iTrans pretrain synth] ep 125  train=0.3366  val=0.2851
+2026-03-30 02:13:28,049 INFO [iTrans pretrain synth] ep 126  train=0.3351  val=0.2809
+2026-03-30 02:14:15,331 INFO [iTrans pretrain synth] ep 127  train=0.3350  val=0.2755
+2026-03-30 02:15:03,399 INFO [iTrans pretrain synth] ep 128  train=0.3329  val=0.2832
+2026-03-30 02:15:51,430 INFO [iTrans pretrain synth] ep 129  train=0.3319  val=0.2819
+2026-03-30 02:16:38,372 INFO [iTrans pretrain synth] ep 130  train=0.3325  val=0.2744
+2026-03-30 02:17:25,742 INFO [iTrans pretrain synth] ep 131  train=0.3322  val=0.2729
+2026-03-30 02:18:13,549 INFO [iTrans pretrain synth] ep 132  train=0.3314  val=0.2828
+2026-03-30 02:19:02,103 INFO [iTrans pretrain synth] ep 133  train=0.3307  val=0.2751
+2026-03-30 02:19:50,691 INFO [iTrans pretrain synth] ep 134  train=0.3295  val=0.2693
+2026-03-30 02:20:38,543 INFO [iTrans pretrain synth] ep 135  train=0.3304  val=0.2841
+2026-03-30 02:21:26,298 INFO [iTrans pretrain synth] ep 136  train=0.3285  val=0.2738
+2026-03-30 02:22:13,988 INFO [iTrans pretrain synth] ep 137  train=0.3287  val=0.2708
+2026-03-30 02:23:01,925 INFO [iTrans pretrain synth] ep 138  train=0.3268  val=0.2710
+2026-03-30 02:23:50,233 INFO [iTrans pretrain synth] ep 139  train=0.3266  val=0.2751
+2026-03-30 02:24:37,556 INFO [iTrans pretrain synth] ep 140  train=0.3263  val=0.2711
+2026-03-30 02:25:25,303 INFO [iTrans pretrain synth] ep 141  train=0.3264  val=0.2691
+2026-03-30 02:26:13,151 INFO [iTrans pretrain synth] ep 142  train=0.3251  val=0.2724
+2026-03-30 02:27:01,020 INFO [iTrans pretrain synth] ep 143  train=0.3251  val=0.2724
+2026-03-30 02:27:49,039 INFO [iTrans pretrain synth] ep 144  train=0.3249  val=0.2615
+2026-03-30 02:28:36,420 INFO [iTrans pretrain synth] ep 145  train=0.3243  val=0.2647
+2026-03-30 02:29:24,516 INFO [iTrans pretrain synth] ep 146  train=0.3240  val=0.2728
+2026-03-30 02:30:12,125 INFO [iTrans pretrain synth] ep 147  train=0.3224  val=0.2629
+2026-03-30 02:31:00,225 INFO [iTrans pretrain synth] ep 148  train=0.3225  val=0.2688
+2026-03-30 02:31:48,271 INFO [iTrans pretrain synth] ep 149  train=0.3224  val=0.2750
+2026-03-30 02:32:35,496 INFO [iTrans pretrain synth] ep 150  train=0.3208  val=0.2650
+2026-03-30 02:33:23,242 INFO [iTrans pretrain synth] ep 151  train=0.3213  val=0.2651
+2026-03-30 02:34:10,840 INFO [iTrans pretrain synth] ep 152  train=0.3201  val=0.2658
+2026-03-30 02:34:58,814 INFO [iTrans pretrain synth] ep 153  train=0.3194  val=0.2721
+2026-03-30 02:35:47,117 INFO [iTrans pretrain synth] ep 154  train=0.3197  val=0.2631
+2026-03-30 02:36:34,709 INFO [iTrans pretrain synth] ep 155  train=0.3188  val=0.2633
+2026-03-30 02:37:22,618 INFO [iTrans pretrain synth] ep 156  train=0.3174  val=0.2674
+2026-03-30 02:38:09,943 INFO [iTrans pretrain synth] ep 157  train=0.3173  val=0.2619
+2026-03-30 02:38:58,058 INFO [iTrans pretrain synth] ep 158  train=0.3183  val=0.2601
+2026-03-30 02:39:46,203 INFO [iTrans pretrain synth] ep 159  train=0.3174  val=0.2638
+2026-03-30 02:40:33,064 INFO [iTrans pretrain synth] ep 160  train=0.3167  val=0.2728
+2026-03-30 02:41:21,243 INFO [iTrans pretrain synth] ep 161  train=0.3168  val=0.2640
+2026-03-30 02:42:08,466 INFO [iTrans pretrain synth] ep 162  train=0.3161  val=0.2586
+2026-03-30 02:42:56,350 INFO [iTrans pretrain synth] ep 163  train=0.3155  val=0.2690
+2026-03-30 02:43:44,447 INFO [iTrans pretrain synth] ep 164  train=0.3146  val=0.2596
+2026-03-30 02:44:32,035 INFO [iTrans pretrain synth] ep 165  train=0.3156  val=0.2583
+2026-03-30 02:45:20,036 INFO [iTrans pretrain synth] ep 166  train=0.3138  val=0.2547
+2026-03-30 02:46:07,189 INFO [iTrans pretrain synth] ep 167  train=0.3128  val=0.2567
+2026-03-30 02:46:54,832 INFO [iTrans pretrain synth] ep 168  train=0.3129  val=0.2559
+2026-03-30 02:47:42,916 INFO [iTrans pretrain synth] ep 169  train=0.3124  val=0.2576
+2026-03-30 02:48:30,398 INFO [iTrans pretrain synth] ep 170  train=0.3117  val=0.2623
+2026-03-30 02:49:18,298 INFO [iTrans pretrain synth] ep 171  train=0.3114  val=0.2553
+2026-03-30 02:50:06,052 INFO [iTrans pretrain synth] ep 172  train=0.3119  val=0.2553
+2026-03-30 02:50:54,170 INFO [iTrans pretrain synth] ep 173  train=0.3110  val=0.2580
+2026-03-30 02:51:42,389 INFO [iTrans pretrain synth] ep 174  train=0.3092  val=0.2570
+2026-03-30 02:52:30,397 INFO [iTrans pretrain synth] ep 175  train=0.3106  val=0.2530
+2026-03-30 02:53:18,431 INFO [iTrans pretrain synth] ep 176  train=0.3107  val=0.2542
+2026-03-30 02:54:06,737 INFO [iTrans pretrain synth] ep 177  train=0.3086  val=0.2579
+2026-03-30 02:54:55,134 INFO [iTrans pretrain synth] ep 178  train=0.3098  val=0.2543
+2026-03-30 02:55:41,852 INFO [iTrans pretrain synth] ep 179  train=0.3100  val=0.2530
+2026-03-30 02:56:29,260 INFO [iTrans pretrain synth] ep 180  train=0.3076  val=0.2570
+2026-03-30 02:57:17,339 INFO [iTrans pretrain synth] ep 181  train=0.3080  val=0.2561
+2026-03-30 02:58:04,792 INFO [iTrans pretrain synth] ep 182  train=0.3078  val=0.2527
+2026-03-30 02:58:53,096 INFO [iTrans pretrain synth] ep 183  train=0.3085  val=0.2521
+2026-03-30 02:59:40,669 INFO [iTrans pretrain synth] ep 184  train=0.3061  val=0.2618
+2026-03-30 03:00:27,537 INFO [iTrans pretrain synth] ep 185  train=0.3062  val=0.2507
+2026-03-30 03:01:15,722 INFO [iTrans pretrain synth] ep 186  train=0.3071  val=0.2489
+2026-03-30 03:02:03,177 INFO [iTrans pretrain synth] ep 187  train=0.3055  val=0.2530
+2026-03-30 03:02:51,159 INFO [iTrans pretrain synth] ep 188  train=0.3053  val=0.2547
+2026-03-30 03:03:39,700 INFO [iTrans pretrain synth] ep 189  train=0.3067  val=0.2489
+2026-03-30 03:04:27,556 INFO [iTrans pretrain synth] ep 190  train=0.3068  val=0.2515
+2026-03-30 03:05:15,236 INFO [iTrans pretrain synth] ep 191  train=0.3035  val=0.2579
+2026-03-30 03:06:03,361 INFO [iTrans pretrain synth] ep 192  train=0.3043  val=0.2518
+2026-03-30 03:06:51,132 INFO [iTrans pretrain synth] ep 193  train=0.3044  val=0.2484
+2026-03-30 03:07:39,462 INFO [iTrans pretrain synth] ep 194  train=0.3031  val=0.2558
+2026-03-30 03:08:26,800 INFO [iTrans pretrain synth] ep 195  train=0.3041  val=0.2544
+2026-03-30 03:09:14,643 INFO [iTrans pretrain synth] ep 196  train=0.3022  val=0.2485
+2026-03-30 03:10:02,085 INFO [iTrans pretrain synth] ep 197  train=0.3028  val=0.2442
+2026-03-30 03:10:47,705 INFO [iTrans pretrain synth] ep 198  train=0.3021  val=0.2510
+2026-03-30 03:11:35,304 INFO [iTrans pretrain synth] ep 199  train=0.3014  val=0.2467
+2026-03-30 03:12:22,590 INFO [iTrans pretrain synth] ep 200  train=0.3010  val=0.2460
+2026-03-30 03:12:22,592 INFO Pretrained iTransformer → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_ci_etth2/itransformer_pretrained_synth.pt
+2026-03-30 03:12:22,739 INFO === Stage 2: pretrain latent diffusion (guided by pretrained iTrans) ===
+2026-03-30 03:12:22,962 INFO TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-03-30 03:12:22,982 INFO VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-30 03:12:22,996 INFO TimeSeriesContextEncoder: input_ch=2, embed_dim=128, layers=2, heads=4
+2026-03-30 03:12:23,063 INFO ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 3)
+2026-03-30 03:12:23,064 INFO   Conditioning mode: visual_concat
+2026-03-30 03:12:23,064 INFO   Visual concat: 4 past image channels directly concatenated
+2026-03-30 03:12:23,064 INFO   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-03-30 03:12:23,071 INFO DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-30 03:12:23,072 INFO LatentDiffusionTSF: H_lat=32, in_ch=9, cz=4, aux=1
+2026-03-30 03:12:23,086 INFO RealTS initialized: 100000 samples/epoch, lookback=1024, forecast=192, variables=7
+2026-03-30 03:12:23,087 INFO Loading synthetic pool from /project/6101823/ccao87/diffusion-tsf/synthetic_cache/ci_latent/synth_pool_v7_L1216_N100000.npy
+2026-03-30 03:12:23,088 INFO Created synthetic-only dataloader: 100000 samples/epoch (Pool: 100000), lookback=1024, forecast=192, variables=7
+2026-03-30 04:34:19,473 INFO [Diffusion pretrain] ep 1  train=0.0445  val=0.0261
+2026-03-30 05:56:15,567 INFO [Diffusion pretrain] ep 2  train=0.0253  val=0.0250
+2026-03-30 07:18:11,644 INFO [Diffusion pretrain] ep 3  train=0.0224  val=0.0200
+2026-03-30 08:40:08,115 INFO [Diffusion pretrain] ep 4  train=0.0206  val=0.0183
+2026-03-30 10:02:02,936 INFO [Diffusion pretrain] ep 5  train=0.0193  val=0.0169
+2026-03-30 11:23:58,210 INFO [Diffusion pretrain] ep 6  train=0.0186  val=0.0162
+2026-03-30 12:45:53,767 INFO [Diffusion pretrain] ep 7  train=0.0178  val=0.0158
+2026-03-30 14:07:47,638 INFO [Diffusion pretrain] ep 8  train=0.0173  val=0.0171
+2026-03-30 15:29:32,480 INFO [Diffusion pretrain] ep 9  train=0.0169  val=0.0157
+2026-03-30 16:51:15,585 INFO [Diffusion pretrain] ep 10  train=0.0166  val=0.0140
+2026-03-30 18:12:59,162 INFO [Diffusion pretrain] ep 11  train=0.0163  val=0.0152
+2026-03-30 19:34:43,251 INFO [Diffusion pretrain] ep 12  train=0.0161  val=0.0147
+2026-03-30 20:56:27,301 INFO [Diffusion pretrain] ep 13  train=0.0159  val=0.0144
+2026-03-30 22:18:09,891 INFO [Diffusion pretrain] ep 14  train=0.0157  val=0.0149
+2026-03-30 23:39:52,382 INFO [Diffusion pretrain] ep 15  train=0.0156  val=0.0148
+2026-03-31 01:01:35,521 INFO [Diffusion pretrain] ep 16  train=0.0154  val=0.0131
+2026-03-31 02:23:18,808 INFO [Diffusion pretrain] ep 17  train=0.0153  val=0.0138
+2026-03-31 03:45:01,014 INFO [Diffusion pretrain] ep 18  train=0.0152  val=0.0136
+2026-03-31 05:06:43,627 INFO [Diffusion pretrain] ep 19  train=0.0151  val=0.0141
+2026-03-31 06:28:25,799 INFO [Diffusion pretrain] ep 20  train=0.0150  val=0.0137
+2026-03-31 07:50:08,455 INFO [Diffusion pretrain] ep 21  train=0.0149  val=0.0138
+2026-03-31 09:11:51,307 INFO [Diffusion pretrain] ep 22  train=0.0148  val=0.0142
+2026-03-31 10:33:34,105 INFO [Diffusion pretrain] ep 23  train=0.0147  val=0.0137
+2026-03-31 11:55:16,140 INFO [Diffusion pretrain] ep 24  train=0.0147  val=0.0132
+2026-03-31 13:16:58,343 INFO [Diffusion pretrain] ep 25  train=0.0146  val=0.0138

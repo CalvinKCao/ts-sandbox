@@ -1,5 +1,5 @@
 """
-Shared helpers for train_latent_experiment (no optuna / train_7var_pipeline import).
+Shared helpers for train_latent_experiment (no optuna / train_multivariate_pipeline import).
 """
 
 from __future__ import annotations
@@ -318,7 +318,6 @@ def create_pixel_diffusion_baseline(image_height: int) -> "DiffusionTSF":
         lookback_overlap=LOOKBACK_OVERLAP,
         past_loss_weight=PAST_LOSS_WEIGHT,
         image_height=image_height,
-        representation_mode="cdf",
         use_coordinate_channel=True,
         use_guidance_channel=True,
         num_diffusion_steps=1000,

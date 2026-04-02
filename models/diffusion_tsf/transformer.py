@@ -43,7 +43,7 @@ class TransformerBlock(nn.Module):
 
 
 class DiffusionTransformer(nn.Module):
-    """DiT-style transformer for 2D stripe images.
+    """DiT-style transformer for 2D time-series images (value × time).
 
     - Splits (C, H, W) into non-overlapping patches (patch_height x patch_width)
     - Flattens to sequence, adds learned positional embeddings

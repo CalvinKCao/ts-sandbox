@@ -3,13 +3,14 @@
 # U-Net full-variate — self-resubmitting Slurm script for Killarney
 #
 # When run from the login node, it picks partition + wall time and sbatch's itself.
-# When run inside a Slurm job (SLURM_JOB_ID is set), it does the actual work.
+# When run inside a Slurm job (SLURM_JOB_ID is set), it runs full-variate training
+# (same train_multivariate_pipeline as the old run_unet_fullvar.sh: bf16, H=96, no splitting).
 #
-# USAGE (from login node):
-#   ./slurm_unet_fullvar.sh --smoke-test                     # H100, 20GB, 30 min
-#   ./slurm_unet_fullvar.sh                                  # H100, 60GB, 3 days
-#   ./slurm_unet_fullvar.sh --dataset electricity             # H100, 60GB, 3 days
-#   ./slurm_unet_fullvar.sh --resume --dataset traffic        # resume traffic
+# USAGE (from login node, repo root):
+#   ./slurm_unet_fullvar.sh --smoke-test                     # L40S smoke
+#   ./slurm_unet_fullvar.sh                                  # H100 full run
+#   ./slurm_unet_fullvar.sh --dataset electricity
+#   ./slurm_unet_fullvar.sh --resume --dataset traffic
 # =============================================================================
 
 set -e
@@ -101,7 +102,7 @@ if [ -z "$PROJECT" ]; then
     exit 1
 fi
 
-# Separate storage root so it doesn't conflict with main pipeline or CI-DiT
+# Separate storage root so it doesn't conflict with the main multivariate pipeline
 export STORAGE_ROOT="$PROJECT/$USER/diffusion-tsf-fullvar"
 echo "STORAGE_ROOT: $STORAGE_ROOT"
 
@@ -147,24 +148,176 @@ cleanup() {
 }
 trap cleanup EXIT ERR SIGTERM SIGINT SIGUSR1
 
-# ---- Build args (strip slurm-only flags like --hours) ----
+# ---- Args: checkpoint/results from STORAGE_ROOT, then pass-through (strip --hours) ----
 
-PIPELINE_ARGS="--checkpoint-dir $STORAGE_ROOT/checkpoints --results-dir $STORAGE_ROOT/results"
-
+PIPELINE_ARGS=(--checkpoint-dir "$STORAGE_ROOT/checkpoints" --results-dir "$STORAGE_ROOT/results")
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --hours) shift 2 ;;           # consumed by submitter, not run_unet_fullvar.sh
-        *)       PIPELINE_ARGS="$PIPELINE_ARGS $1"; shift ;;
+        --hours) shift 2 ;;
+        *)       PIPELINE_ARGS+=("$1"); shift ;;
     esac
 done
 
 cd "$PROJECT_ROOT"
 
+# ---- Inlined full-variate U-Net driver (former run_unet_fullvar.sh) ----
+
+set -- "${PIPELINE_ARGS[@]}"
+
+AMP_FLAG="--amp"
+IMAGE_HEIGHT=96
+SUBSET_THRESHOLD=999999
+SYNTHETIC_SAMPLES=75000
+ITRANSFORMER_TRIALS=12
+SEED=42
+
+SMOKE_TEST=""
+PRETRAIN_ONLY=""
+SINGLE_DATASET=""
+RESUME=""
+EXTRA_PY_ARGS=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --smoke-test)     SMOKE_TEST="--smoke-test"; shift ;;
+        --dataset)        SINGLE_DATASET="$2"; shift 2 ;;
+        --pretrain-only)  PRETRAIN_ONLY=1; shift ;;
+        --resume)         RESUME=1; shift ;;
+        --seed)           SEED="$2"; shift 2 ;;
+        --wandb)          EXTRA_PY_ARGS="$EXTRA_PY_ARGS --wandb"; shift ;;
+        --checkpoint-dir) EXTRA_PY_ARGS="$EXTRA_PY_ARGS --checkpoint-dir $2"; shift 2 ;;
+        --results-dir)    EXTRA_PY_ARGS="$EXTRA_PY_ARGS --results-dir $2"; shift 2 ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$SINGLE_DATASET" ]; then
+    SINGLE_DATASET="traffic"
+fi
+
+PYTHON="python -m models.diffusion_tsf.train_multivariate_pipeline"
+BASE_ARGS="--seed $SEED $SMOKE_TEST $EXTRA_PY_ARGS"
+BASE_ARGS="$BASE_ARGS $AMP_FLAG --image-height $IMAGE_HEIGHT"
+BASE_ARGS="$BASE_ARGS --synthetic-samples $SYNTHETIC_SAMPLES"
+BASE_ARGS="$BASE_ARGS --itransformer-trials $ITRANSFORMER_TRIALS"
+BASE_ARGS="$BASE_ARGS --subset-threshold $SUBSET_THRESHOLD"
+
+LOOKBACK_LENGTH=1024
+FORECAST_LENGTH=192
+LOOKBACK_OVERLAP=8
+
 echo ""
-echo "Running: ./run_unet_fullvar.sh $PIPELINE_ARGS"
+echo "============================================================"
+echo "  U-Net Full-Variate Training (Slurm)"
+echo "============================================================"
+echo "  Backbone:     U-Net (bf16)"
+echo "  Image height: $IMAGE_HEIGHT"
+echo "  Synth pool:   $SYNTHETIC_SAMPLES"
+echo "  iTransformer trials: $ITRANSFORMER_TRIALS"
+echo "  Subset threshold: $SUBSET_THRESHOLD (no splitting)"
+echo "  Dataset:      $SINGLE_DATASET"
+echo "  Smoke test:   ${SMOKE_TEST:-no}"
+echo "============================================================"
 echo ""
 
-./run_unet_fullvar.sh $PIPELINE_ARGS
+if [ ! -d "datasets" ] && [ -n "$STORAGE_ROOT" ] && [ -d "$STORAGE_ROOT/datasets" ]; then
+    echo "[INFO] Symlinking datasets from $STORAGE_ROOT/datasets"
+    ln -sf "$STORAGE_ROOT/datasets" datasets
+fi
+
+TRAFFIC_DIR="datasets/traffic"
+TRAFFIC_CSV="$TRAFFIC_DIR/traffic.csv"
+if [ ! -f "$TRAFFIC_CSV" ]; then
+    if [ -f "$TRAFFIC_DIR/traffic_part1.csv" ] && [ -f "$TRAFFIC_DIR/traffic_part2.csv" ]; then
+        echo "[INFO] Recombining traffic CSV..."
+        head -1 "$TRAFFIC_DIR/traffic_part1.csv" > "$TRAFFIC_CSV"
+        tail -n +2 "$TRAFFIC_DIR/traffic_part1.csv" >> "$TRAFFIC_CSV"
+        tail -n +2 "$TRAFFIC_DIR/traffic_part2.csv" >> "$TRAFFIC_CSV"
+        echo "[INFO] traffic.csv created ($(wc -l < "$TRAFFIC_CSV") rows)"
+    fi
+fi
+
+declare -A DATASET_DIM
+
+discover_dims() {
+    python -c "
+import pandas as pd, os
+
+registry = {
+    'ETTh1': 'datasets/ETT-small/ETTh1.csv',
+    'ETTh2': 'datasets/ETT-small/ETTh2.csv',
+    'ETTm1': 'datasets/ETT-small/ETTm1.csv',
+    'ETTm2': 'datasets/ETT-small/ETTm2.csv',
+    'illness': 'datasets/illness/national_illness.csv',
+    'exchange_rate': 'datasets/exchange_rate/exchange_rate.csv',
+    'weather': 'datasets/weather/weather.csv',
+    'electricity': 'datasets/electricity/electricity.csv',
+    'traffic': 'datasets/traffic/traffic.csv',
+}
+
+min_rows = $LOOKBACK_LENGTH + $FORECAST_LENGTH + $LOOKBACK_OVERLAP
+
+for name, path in sorted(registry.items()):
+    if not os.path.exists(path):
+        continue
+    df = pd.read_csv(path)
+    if len(df) < min_rows:
+        import sys
+        print(f'[SKIP] {name}: only {len(df)} rows (need {min_rows})', file=sys.stderr)
+        continue
+    n_cols = sum(1 for c in df.columns if c.lower() != 'date')
+    print(f'{name} {n_cols}')
+"
+}
+
+while IFS=' ' read -r ds ncols; do
+    DATASET_DIM[$ds]=$ncols
+done < <(discover_dims)
+
+target_dim="${DATASET_DIM[$SINGLE_DATASET]}"
+if [ -z "$target_dim" ]; then
+    echo "[ERROR] Unknown or missing dataset: $SINGLE_DATASET"
+    exit 1
+fi
+
+echo "[INFO] $SINGLE_DATASET: $target_dim variates (native, no splitting)"
+echo ""
+
+echo "============================================================"
+echo "  PHASE 1: Synthetic Pretraining (dim=$target_dim)"
+echo "============================================================"
+
+$PYTHON --mode pretrain --n-variates "$target_dim" $BASE_ARGS
+
+if [ -n "$PRETRAIN_ONLY" ]; then
+    echo ""
+    echo "[INFO] --pretrain-only: stopping after Phase 1"
+    exit 0
+fi
+
+echo ""
+echo "============================================================"
+echo "  PHASE 2: Fine-tuning $SINGLE_DATASET (dim=$target_dim)"
+echo "============================================================"
+
+$PYTHON --mode finetune --dataset "$SINGLE_DATASET" --n-variates "$target_dim" $BASE_ARGS
+
+echo ""
+echo "============================================================"
+echo "  PIPELINE COMPLETE"
+echo "============================================================"
+
+SUMMARY_CSV=$(find . -name "summary.csv" -path "*/results*" 2>/dev/null | head -1)
+if [ -n "$SUMMARY_CSV" ]; then
+    echo ""
+    echo "Results summary:"
+    head -20 "$SUMMARY_CSV"
+    echo ""
+    echo "Full results: $SUMMARY_CSV"
+fi
 
 echo ""
 echo "=========================================="

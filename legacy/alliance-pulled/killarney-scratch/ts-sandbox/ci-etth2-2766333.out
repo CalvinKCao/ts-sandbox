@@ -1,0 +1,11 @@
+==========================================
+Job ID: 2766333
+Node: kn068
+GPU: GPU 0: NVIDIA L40S (UUID: GPU-34c4571c-01ff-61a4-a47a-66dd3b23cf2d)
+Started: Mon Mar 30 12:30:01 AM EDT 2026
+==========================================
+Python: /project/6101823/ccao87/diffusion-tsf/venv/bin/python
+Torch: 2.10.0
+
+Running: /project/6101823/ccao87/diffusion-tsf/venv/bin/python -u -m models.diffusion_tsf.train_ci_latent_etth2 --stage all --cache-dir /project/6101823/ccao87/diffusion-tsf/synthetic_cache/ci_latent 
+

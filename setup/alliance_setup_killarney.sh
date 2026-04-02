@@ -159,7 +159,7 @@ echo ""
 echo "Generating convenience scripts..."
 
 # Slurm job script for Killarney
-cat > "$PROJECT_ROOT/slurm_train_7var_killarney.sh" << SLURM_EOF
+cat > "$PROJECT_ROOT/slurm_train_multivariate_killarney.sh" << SLURM_EOF
 #!/bin/bash
 # =============================================================================
 # Killarney — H100 SXM 80GB job script
@@ -175,9 +175,9 @@ cat > "$PROJECT_ROOT/slurm_train_7var_killarney.sh" << SLURM_EOF
 # and add: #SBATCH --partition=<name>
 #
 # USAGE:
-#   sbatch slurm_train_7var_killarney.sh              # Full training
-#   sbatch slurm_train_7var_killarney.sh --smoke-test # Quick test (1 GPU)
-#   sbatch slurm_train_7var_killarney.sh --resume     # Resume interrupted run
+#   sbatch slurm_train_multivariate_killarney.sh              # Full training
+#   sbatch slurm_train_multivariate_killarney.sh --smoke-test # Quick test (1 GPU)
+#   sbatch slurm_train_multivariate_killarney.sh --resume     # Resume interrupted run
 # =============================================================================
 #SBATCH --job-name=diffusion-tsf
 #SBATCH --account=aip-boyuwang
@@ -303,7 +303,7 @@ echo ""
 N_GPUS=\$(echo "\$SLURM_GPUS_ON_NODE" | tr ',' '\n' | wc -l)
 if [ "\$N_GPUS" -gt 1 ]; then
     echo "Running DDP on \$N_GPUS GPUs..."
-    torchrun --nproc_per_node=\$N_GPUS -m models.diffusion_tsf.train_7var_pipeline \\
+    torchrun --nproc_per_node=\$N_GPUS -m models.diffusion_tsf.train_multivariate_pipeline \\
         --ddp \\
         --wandb \\
         --checkpoint-dir "\$STORAGE_ROOT/checkpoints" \\
@@ -312,7 +312,7 @@ if [ "\$N_GPUS" -gt 1 ]; then
 else
     echo "Running single GPU..."
     export CUDA_VISIBLE_DEVICES=0
-    python -m models.diffusion_tsf.train_7var_pipeline \\
+    python -m models.diffusion_tsf.train_multivariate_pipeline \\
         --wandb \\
         --checkpoint-dir "\$STORAGE_ROOT/checkpoints" \\
         --results-dir "\$STORAGE_ROOT/results" \\
@@ -330,13 +330,13 @@ fi
 echo "Job completed: \$(date)"
 echo "Results: \$STORAGE_ROOT/results"
 SLURM_EOF
-chmod +x "$PROJECT_ROOT/slurm_train_7var_killarney.sh"
-echo "  ✓ Created: slurm_train_7var_killarney.sh  (${GPU_COUNT}x H100 SXM 80GB, DDP-enabled)"
+chmod +x "$PROJECT_ROOT/slurm_train_multivariate_killarney.sh"
+echo "  ✓ Created: slurm_train_multivariate_killarney.sh  (${GPU_COUNT}x H100 SXM 80GB, DDP-enabled)"
 
 # Submit script
 cat > "$PROJECT_ROOT/submit_train_killarney.sh" << 'SUBMIT_EOF'
 #!/bin/bash
-sbatch slurm_train_7var_killarney.sh "$@"
+sbatch slurm_train_multivariate_killarney.sh "$@"
 SUBMIT_EOF
 chmod +x "$PROJECT_ROOT/submit_train_killarney.sh"
 echo "  ✓ Created: submit_train_killarney.sh"
@@ -424,7 +424,7 @@ echo "NEXT STEPS:"
 echo ""
 echo "1. Check if H100 nodes need a partition flag:"
 echo "   sinfo -o \"%P %G %l\" | grep h100"
-echo "   # If yes, add to slurm_train_7var_killarney.sh: #SBATCH --partition=<name>"
+echo "   # If yes, add to slurm_train_multivariate_killarney.sh: #SBATCH --partition=<name>"
 echo ""
 echo "2. Set up wandb (optional but recommended):"
 echo "   wandb login"

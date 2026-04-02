@@ -134,15 +134,12 @@ class PixelEncoder(nn.Module):
         super().__init__()
         self.to_2d = TimeSeriesTo2D(
             height=cfg.image_height, max_scale=cfg.max_scale,
-            representation_mode=cfg.representation_mode,
         )
         self.blur = VerticalGaussianBlur(kernel_size=cfg.blur_kernel_size, sigma=cfg.blur_sigma)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         im = self.to_2d(x)
         b = self.blur(im)
-        if self.to_2d.representation_mode == "pdf":
-            return b * 30.0 * 2.0 - 1.0
         return b.clamp(0.0, 1.0) * 2.0 - 1.0
 
 
@@ -170,7 +167,6 @@ def build_ci_config(image_height: int, use_guidance: bool) -> LatentDiffusionCon
         lookback_overlap=LOOKBACK_OVERLAP,
         past_loss_weight=PAST_LOSS_WEIGHT,
         image_height=image_height,
-        representation_mode="cdf",
         unified_time_axis=True,
         use_coordinate_channel=True,
         use_time_ramp=False,

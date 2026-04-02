@@ -1,0 +1,9 @@
+==========================================
+Job ID: 2562902
+Node: kn054
+GPU: GPU 0: NVIDIA L40S (UUID: GPU-64aa4fd4-9fa0-96b7-ebd4-546d371783c1)
+Started: Wed Mar 25 03:33:37 PM EDT 2026
+==========================================
+
+Running: python -m models.diffusion_tsf.train_latent_experiment --stage all --cache-dir /project/6101823/ccao87/diffusion-tsf/synthetic_cache/latent_dim1 
+

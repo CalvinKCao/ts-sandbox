@@ -1,14 +1,15 @@
 """
-Generate clean comparison plots: Ground Truth vs iTransformer vs Diffusion.
+Multivariate comparison plots: ground truth vs iTransformer vs diffusion.
 
-For each dataset, picks a few test windows and plots 1D overlays showing
-how the diffusion model's forecast compares to iTransformer-only baseline.
+Only visualization entry point in this repo — walks checkpoint subdirs with
+metadata.json + best.pt, loads per-dim iTransformer + fine-tuned diffusion,
+plots a few test windows per dataset (subset-aware for high-V data).
 
 Usage:
-    python -m models.diffusion_tsf.visualize_comparison \
-        --checkpoint-dir /path/to/checkpoints \
-        --output-dir /path/to/output \
-        --num-samples 3
+    python -m models.diffusion_tsf.visualize_comparison \\
+        --checkpoint-dir /path/to/checkpoints \\
+        --output-dir /path/to/output \\
+        --num-samples 3 --vars 3
 """
 
 import argparse
@@ -17,6 +18,7 @@ import os
 import sys
 from pathlib import Path
 from collections import defaultdict
+from typing import Optional
 
 import numpy as np
 import matplotlib
@@ -30,8 +32,9 @@ project_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from models.diffusion_tsf.train_7var_pipeline import (
-    CHECKPOINT_DIR, RESULTS_DIR, DATASETS_DIR, DATASET_REGISTRY,
+from models.diffusion_tsf.storage_paths import checkpoint_roots_ordered
+from models.diffusion_tsf.train_multivariate_pipeline import (
+    RESULTS_DIR, DATASETS_DIR, DATASET_REGISTRY,
     LOOKBACK_LENGTH, FORECAST_LENGTH, N_VARIATES,
     create_itransformer, create_diffusion_model, load_dataset,
     get_dim_for_dataset, pretrain_dir_for_dim,
@@ -47,7 +50,7 @@ def denorm(x, mean, std):
 
 
 def run_comparison(
-    checkpoint_dir: str,
+    checkpoint_dir: Optional[str],
     output_dir: str,
     num_samples: int = 3,
     variables_to_plot: int = 3,
@@ -56,26 +59,34 @@ def run_comparison(
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 
-    ckpt_root = Path(checkpoint_dir)
+    if checkpoint_dir is None:
+        roots = [Path(p) for p in checkpoint_roots_ordered(script_dir)]
+        print(f"Checkpoint roots: {', '.join(str(r) for r in roots)}")
+    else:
+        roots = [Path(checkpoint_dir)]
 
     # Discover subsets and group by dataset (pick first subset per dataset)
     by_dataset = defaultdict(list)
-    for d in sorted(ckpt_root.iterdir()):
-        meta_path = d / 'metadata.json'
-        best_path = d / 'best.pt'
-        if not d.is_dir() or not meta_path.exists() or not best_path.exists():
+    for ckpt_root in roots:
+        if not ckpt_root.is_dir():
+            print(f"Skip missing checkpoint dir: {ckpt_root}")
             continue
-        with open(meta_path) as f:
-            meta = json.load(f)
-        by_dataset[meta['dataset_name']].append({
-            'subset_id': meta['subset_id'],
-            'variate_indices': meta['variate_indices'],
-            'variate_names': meta.get('variate_names', []),
-            'best_pt': str(best_path),
-        })
+        for d in sorted(ckpt_root.iterdir()):
+            meta_path = d / 'metadata.json'
+            best_path = d / 'best.pt'
+            if not d.is_dir() or not meta_path.exists() or not best_path.exists():
+                continue
+            with open(meta_path) as f:
+                meta = json.load(f)
+            by_dataset[meta['dataset_name']].append({
+                'subset_id': meta['subset_id'],
+                'variate_indices': meta['variate_indices'],
+                'variate_names': meta.get('variate_names', []),
+                'best_pt': str(best_path),
+            })
 
     if not by_dataset:
-        print(f"No subsets found in {checkpoint_dir}")
+        print(f"No subsets found under {roots}")
         return
 
     print(f"Found {len(by_dataset)} datasets: {', '.join(sorted(by_dataset))}")
@@ -87,21 +98,22 @@ def run_comparison(
     def _get_itrans_model(dim):
         if dim in _itrans_cache:
             return _itrans_cache[dim]
-        # Try new per-dim layout first, fall back to legacy flat layout
-        dim_dir = pretrain_dir_for_dim(dim, base_dir=checkpoint_dir)
-        candidates = [
-            os.path.join(dim_dir, 'itransformer.pt'),
-            os.path.join(checkpoint_dir, 'pretrained_itransformer.pt'),
-        ]
-        for p in candidates:
-            if os.path.exists(p):
-                model = create_itransformer(num_vars=dim).to(device)
-                ckpt = torch.load(p, map_location=device, weights_only=False)
-                model.load_state_dict(ckpt['model_state_dict'])
-                model.eval()
-                _itrans_cache[dim] = model
-                print(f"  Loaded iTransformer (dim={dim}) from {p}")
-                return model
+        for base in roots:
+            base_s = str(base)
+            dim_dir = pretrain_dir_for_dim(dim, base_dir=base_s)
+            candidates = [
+                os.path.join(dim_dir, 'itransformer.pt'),
+                os.path.join(base_s, 'pretrained_itransformer.pt'),
+            ]
+            for p in candidates:
+                if os.path.exists(p):
+                    model = create_itransformer(num_vars=dim).to(device)
+                    ckpt = torch.load(p, map_location=device, weights_only=False)
+                    model.load_state_dict(ckpt['model_state_dict'])
+                    model.eval()
+                    _itrans_cache[dim] = model
+                    print(f"  Loaded iTransformer (dim={dim}) from {p}")
+                    return model
         print(f"  WARNING: no iTransformer checkpoint for dim={dim}")
         return None
 
@@ -251,7 +263,10 @@ def run_comparison(
 
 def main():
     parser = argparse.ArgumentParser(description='Diffusion vs iTransformer comparison plots')
-    parser.add_argument('--checkpoint-dir', type=str, default=CHECKPOINT_DIR)
+    parser.add_argument(
+        '--checkpoint-dir', type=str, default=None,
+        help='Single checkpoint root; default: scan checkpoints_multivariate and legacy checkpoints_7var if present',
+    )
     parser.add_argument('--output-dir', type=str, default=None)
     parser.add_argument('--num-samples', type=int, default=3, help='Samples per dataset')
     parser.add_argument('--vars', type=int, default=3, help='Variables to plot per sample')

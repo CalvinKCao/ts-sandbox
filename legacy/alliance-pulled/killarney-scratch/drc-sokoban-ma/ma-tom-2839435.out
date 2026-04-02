@@ -1,0 +1,153 @@
+Phase: train
+PROJECT_ROOT=/scratch/ccao87/drc-sokoban-ma
+STORAGE_ROOT=/project/6101823/ccao87/drc-sokoban-ma
+PROJECT=/project/6101823
+The following modules were not unloaded:
+  (Use "module --force purge" to unload all):
+
+  1) CCconfig        6)  ucx/1.14.1         11) flexiblas/3.3.1
+  2) gentoo/2023     7)  libfabric/1.18.0   12) imkl/2023.2.0
+  3) gcccore/.12.3   8)  pmix/4.2.4         13) StdEnv/2023
+  4) gcc/12.3        9)  ucc/1.2.0
+  5) hwloc/2.9.1     10) openmpi/4.1.5
+Creating venv at /project/6101823/ccao87/drc-sokoban-ma/venv...
+Looking in links: /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v4, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic
+Requirement already satisfied: pip in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (23.2.1)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/pip-26.0.1+computecanada-py3-none-any.whl
+Installing collected packages: pip
+  Attempting uninstall: pip
+    Found existing installation: pip 23.2.1
+    Uninstalling pip-23.2.1:
+      Successfully uninstalled pip-23.2.1
+Successfully installed pip-26.0.1+computecanada
+Looking in indexes: https://download.pytorch.org/whl/cu121
+Looking in links: /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v4, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/torch-2.11.0+computecanada-cp311-cp311-linux_x86_64.whl
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/torchvision-0.26.0+computecanada-cp311-cp311-linux_x86_64.whl
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/filelock-3.25.2+computecanada-py3-none-any.whl (from torch)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/typing_extensions-4.15.0+computecanada-py3-none-any.whl (from torch)
+Requirement already satisfied: setuptools<82 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from torch) (65.5.0)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/sympy-1.14.0+computecanada-py3-none-any.whl (from torch)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/networkx-3.6.1+computecanada-py3-none-any.whl (from torch)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/jinja2-3.1.6+computecanada-py3-none-any.whl (from torch)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/fsspec-2026.3.0+computecanada-py3-none-any.whl (from torch)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/numpy-2.4.2+computecanada-cp311-cp311-linux_x86_64.whl (from torchvision)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/Pillow_SIMD-9.5.0.post2+computecanada-cp311-cp311-linux_x86_64.whl (from torchvision)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/mpmath-1.3.0+computecanada-py3-none-any.whl (from sympy>=1.13.3->torch)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/markupsafe-3.0.3+computecanada-cp311-cp311-linux_x86_64.whl (from jinja2->torch)
+Installing collected packages: mpmath, typing-extensions, sympy, pillow-simd, numpy, networkx, MarkupSafe, fsspec, filelock, jinja2, torch, torchvision
+
+Successfully installed MarkupSafe-3.0.3+computecanada filelock-3.25.2+computecanada fsspec-2026.3.0+computecanada jinja2-3.1.6+computecanada mpmath-1.3.0+computecanada networkx-3.6.1+computecanada numpy-2.4.2+computecanada pillow-simd-9.5.0.post2+computecanada sympy-1.14.0+computecanada torch-2.11.0+computecanada torchvision-0.26.0+computecanada typing-extensions-4.15.0+computecanada
+Looking in links: /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v4, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic
+Requirement already satisfied: torch>=2.0.0 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from -r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 1)) (2.11.0+computecanada)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/numpy-1.26.4+computecanada-cp311-cp311-linux_x86_64.whl (from -r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 2))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/scikit_learn-1.8.0+computecanada-cp311-cp311-linux_x86_64.whl (from -r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 3))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/gymnasium-1.2.3+computecanada-py3-none-any.whl (from -r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 4))
+Collecting gym-sokoban (from -r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 5))
+  Downloading gym_sokoban-0.0.6-py3-none-any.whl.metadata (13 kB)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/matplotlib-3.10.8+computecanada-cp311-cp311-linux_x86_64.whl (from -r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 6))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/pandas-3.0.0+computecanada-cp311-cp311-linux_x86_64.whl (from -r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 7))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/tqdm-4.67.3+computecanada-py3-none-any.whl (from -r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 8))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/cloudpickle-3.1.2+computecanada-py3-none-any.whl (from -r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 9))
+Requirement already satisfied: filelock in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from torch>=2.0.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 1)) (3.25.2+computecanada)
+Requirement already satisfied: typing-extensions>=4.10.0 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from torch>=2.0.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 1)) (4.15.0+computecanada)
+Requirement already satisfied: setuptools<82 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from torch>=2.0.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 1)) (65.5.0)
+Requirement already satisfied: sympy>=1.13.3 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from torch>=2.0.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 1)) (1.14.0+computecanada)
+Requirement already satisfied: networkx>=2.5.1 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from torch>=2.0.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 1)) (3.6.1+computecanada)
+Requirement already satisfied: jinja2 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from torch>=2.0.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 1)) (3.1.6+computecanada)
+Requirement already satisfied: fsspec>=0.8.5 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from torch>=2.0.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 1)) (2026.3.0+computecanada)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/scipy-1.17.0+computecanada-cp311-cp311-linux_x86_64.whl (from scikit-learn>=1.3.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 3))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/joblib-1.5.3+computecanada-py3-none-any.whl (from scikit-learn>=1.3.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 3))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/threadpoolctl-3.6.0+computecanada-py3-none-any.whl (from scikit-learn>=1.3.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 3))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/Farama_Notifications-0.0.4+computecanada-py3-none-any.whl (from gymnasium>=0.29.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 4))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/gym-0.26.2+computecanada-py3-none-any.whl (from gym-sokoban->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 5))
+Collecting imageio>=2.3.0 (from gym-sokoban->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 5))
+  Downloading imageio-2.37.3-py3-none-any.whl.metadata (9.7 kB)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/requests-2.33.1+computecanada-py3-none-any.whl (from gym-sokoban->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 5))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/contourpy-1.3.3+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 6))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/cycler-0.12.1+computecanada-py3-none-any.whl (from matplotlib->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 6))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/fonttools-4.62.1+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 6))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/kiwisolver-1.4.9+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 6))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/packaging-26.0+computecanada-py3-none-any.whl (from matplotlib->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 6))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/pillow-12.1.0+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 6))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/pyparsing-3.3.2+computecanada-py3-none-any.whl (from matplotlib->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 6))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/python_dateutil-2.9.0.post0+computecanada-py2.py3-none-any.whl (from matplotlib->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 6))
+Collecting gym-notices>=0.0.4 (from gym>=0.2.3->gym-sokoban->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 5))
+  Downloading gym_notices-0.1.0-py3-none-any.whl.metadata (1.2 kB)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/six-1.17.0+computecanada-py2.py3-none-any.whl (from python-dateutil>=2.7->matplotlib->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 6))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/charset_normalizer-3.4.6+computecanada-py3-none-any.whl (from requests>=2.22.0->gym-sokoban->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 5))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/idna-3.11+computecanada-py3-none-any.whl (from requests>=2.22.0->gym-sokoban->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 5))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/urllib3-2.6.3+computecanada-py3-none-any.whl (from requests>=2.22.0->gym-sokoban->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 5))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/certifi-2026.2.25+computecanada-py3-none-any.whl (from requests>=2.22.0->gym-sokoban->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 5))
+Requirement already satisfied: mpmath<1.4,>=1.1.0 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from sympy>=1.13.3->torch>=2.0.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 1)) (1.3.0+computecanada)
+Requirement already satisfied: MarkupSafe>=2.0 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from jinja2->torch>=2.0.0->-r /scratch/ccao87/drc-sokoban-ma/drc_sokoban/requirements.txt (line 1)) (3.0.3+computecanada)
+Downloading gym_sokoban-0.0.6-py3-none-any.whl (36 kB)
+Downloading gym_notices-0.1.0-py3-none-any.whl (3.3 kB)
+Downloading imageio-2.37.3-py3-none-any.whl (317 kB)
+Installing collected packages: gym-notices, farama-notifications, urllib3, tqdm, threadpoolctl, six, pyparsing, pillow, packaging, numpy, kiwisolver, joblib, idna, fonttools, cycler, cloudpickle, charset_normalizer, certifi, scipy, requests, python-dateutil, imageio, gymnasium, gym, contourpy, scikit-learn, pandas, matplotlib, gym-sokoban
+  Attempting uninstall: numpy
+    Found existing installation: numpy 2.4.2+computecanada
+    Uninstalling numpy-2.4.2+computecanada:
+      Successfully uninstalled numpy-2.4.2+computecanada
+
+Successfully installed certifi-2026.2.25+computecanada charset_normalizer-3.4.6+computecanada cloudpickle-3.1.2+computecanada contourpy-1.3.3+computecanada cycler-0.12.1+computecanada farama-notifications-0.0.4+computecanada fonttools-4.62.1+computecanada gym-0.26.2+computecanada gym-notices-0.1.0 gym-sokoban-0.0.6 gymnasium-1.2.3+computecanada idna-3.11+computecanada imageio-2.37.3 joblib-1.5.3+computecanada kiwisolver-1.4.9+computecanada matplotlib-3.10.8+computecanada numpy-1.26.4+computecanada packaging-26.0+computecanada pandas-3.0.0+computecanada pillow-12.1.0+computecanada pyparsing-3.3.2+computecanada python-dateutil-2.9.0.post0+computecanada requests-2.33.1+computecanada scikit-learn-1.8.0+computecanada scipy-1.17.0+computecanada six-1.17.0+computecanada threadpoolctl-3.6.0+computecanada tqdm-4.67.3+computecanada urllib3-2.6.3+computecanada
+Looking in links: /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v4, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/wandb-0.24.0+computecanada-py3-none-linux_x86_64.whl
+Requirement already satisfied: tqdm in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (4.67.3+computecanada)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/click-8.3.1+computecanada-py3-none-any.whl (from wandb)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/gitpython-3.1.46+computecanada-py3-none-any.whl (from wandb)
+Requirement already satisfied: packaging in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from wandb) (26.0+computecanada)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/platformdirs-4.9.4+computecanada-py3-none-any.whl (from wandb)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/protobuf-6.33.6+computecanada-cp311-cp311-linux_x86_64.whl (from wandb)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/pydantic-2.12.5+computecanada-py3-none-any.whl (from wandb)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/pyyaml-6.0.3+computecanada-cp311-cp311-linux_x86_64.whl (from wandb)
+Requirement already satisfied: requests<3,>=2.0.0 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from wandb) (2.33.1+computecanada)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/sentry_sdk-2.57.0+computecanada-py2.py3-none-any.whl (from wandb)
+Requirement already satisfied: typing-extensions<5,>=4.8 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from wandb) (4.15.0+computecanada)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/annotated_types-0.7.0+computecanada-py3-none-any.whl (from pydantic<3->wandb)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/pydantic_core-2.41.5+computecanada-cp311-cp311-linux_x86_64.whl (from pydantic<3->wandb)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/typing_inspection-0.4.2+computecanada-py3-none-any.whl (from pydantic<3->wandb)
+Requirement already satisfied: charset_normalizer<4,>=2 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from requests<3,>=2.0.0->wandb) (3.4.6+computecanada)
+Requirement already satisfied: idna<4,>=2.5 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from requests<3,>=2.0.0->wandb) (3.11+computecanada)
+Requirement already satisfied: urllib3<3,>=1.26 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from requests<3,>=2.0.0->wandb) (2.6.3+computecanada)
+Requirement already satisfied: certifi>=2023.5.7 in /project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages (from requests<3,>=2.0.0->wandb) (2026.2.25+computecanada)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/gitdb-4.0.12+computecanada-py3-none-any.whl (from gitpython!=3.1.29,>=1.0.0->wandb)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/smmap-5.0.3+computecanada-py3-none-any.whl (from gitdb<5,>=4.0.1->gitpython!=3.1.29,>=1.0.0->wandb)
+Installing collected packages: typing-inspection, smmap, sentry-sdk, pyyaml, pydantic-core, protobuf, platformdirs, click, annotated-types, pydantic, gitdb, gitpython, wandb
+
+Successfully installed annotated-types-0.7.0+computecanada click-8.3.1+computecanada gitdb-4.0.12+computecanada gitpython-3.1.46+computecanada platformdirs-4.9.4+computecanada protobuf-6.33.6+computecanada pydantic-2.12.5+computecanada pydantic-core-2.41.5+computecanada pyyaml-6.0.3+computecanada sentry-sdk-2.57.0+computecanada smmap-5.0.3+computecanada typing-inspection-0.4.2+computecanada wandb-0.24.0+computecanada
+=== GPU info ===
+NVIDIA L40S, 46068 MiB, 570.148.08
+================
+Creating 64 MA envs...
+Training on cuda | 64 envs | 50,000,000 target steps
+  Partner noise eps: 0.0  (0 = full self-play)
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/scratch/ccao87/drc-sokoban-ma/drc_sokoban/scripts/train_ma.py", line 146, in <module>
+    main()
+  File "/scratch/ccao87/drc-sokoban-ma/drc_sokoban/scripts/train_ma.py", line 138, in main
+    trainer.train(save_path=args.save_path, log_every=500_000)
+  File "/scratch/ccao87/drc-sokoban-ma/drc_sokoban/training/ippo.py", line 144, in train
+    self._maybe_init_wandb(save_path)
+  File "/scratch/ccao87/drc-sokoban-ma/drc_sokoban/training/ippo.py", line 369, in _maybe_init_wandb
+    self._wandb_run = wandb.init(
+                      ^^^^^^^^^^^
+  File "/project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages/wandb/sdk/wandb_init.py", line 1597, in init
+    get_sentry().reraise(e)
+  File "/project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages/wandb/analytics/sentry.py", line 190, in reraise
+    raise exc.with_traceback(tb)
+  File "/project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages/wandb/sdk/wandb_init.py", line 1518, in init
+    wi.maybe_login(init_settings)
+  File "/project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages/wandb/sdk/wandb_init.py", line 196, in maybe_login
+    wandb_login._login(
+  File "/project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages/wandb/sdk/wandb_login.py", line 190, in _login
+    auth = _find_or_prompt_for_key(
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages/wandb/sdk/wandb_login.py", line 266, in _find_or_prompt_for_key
+    auth = wbauth.authenticate_session(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/project/6101823/ccao87/drc-sokoban-ma/venv/lib/python3.11/site-packages/wandb/sdk/lib/wbauth/authenticate.py", line 138, in authenticate_session
+    raise UsageError(
+wandb.errors.errors.UsageError: No API key configured. Use `wandb login` to log in.

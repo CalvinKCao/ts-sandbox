@@ -10,14 +10,11 @@ class TestConfig:
         config = DiffusionTSFConfig()
         assert config.lookback_length == 512
         assert config.forecast_length == 96
-        assert config.representation_mode == "cdf"
         assert config.backbone_in_channels > 0
 
     def test_validation(self):
         with pytest.raises(AssertionError):
             DiffusionTSFConfig(image_height=-10)
-        with pytest.raises(AssertionError):
-            DiffusionTSFConfig(representation_mode="invalid")
             
     def test_calculated_properties(self):
         config = DiffusionTSFConfig(
@@ -34,31 +31,17 @@ class TestConfig:
 
 
 class TestPreprocessing:
-    @pytest.mark.parametrize("mode", ["pdf", "cdf"])
-    def test_timeseries_to_2d_shapes(self, mode, sample_batch):
+    def test_timeseries_to_2d_shapes(self, sample_batch):
         batch_size, seq_len = sample_batch.shape
         height = 32
-        ts2d = TimeSeriesTo2D(height=height, representation_mode=mode)
-        
-        # Univariate input: (batch, seq_len)
+        ts2d = TimeSeriesTo2D(height=height)
+
         out = ts2d(sample_batch)
-        # Output: (batch, 1, height, seq_len)
         assert out.shape == (batch_size, 1, height, seq_len)
-        
-        if mode == "pdf":
-            # Check one-hot property along height (sum should be 1.0)
-            assert torch.allclose(out.sum(dim=2), torch.ones(batch_size, 1, seq_len))
-        else:
-            # CDF: values should be monotonic increasing along height (0 to 1)
-            # Actually our implementation is occupancy: 1s at bottom, 0s at top.
-            # So values are decreasing or equal as y increases? 
-            # Implementation: filled = (height_range <= bin_indices).
-            # height_range increases with y. bin_indices is constant for a col.
-            # So for small y, range < bin -> 1. For large y, range > bin -> 0.
-            # So it's 1s then 0s. Monotonically non-increasing.
-            diff = out[:, :, 1:, :] - out[:, :, :-1, :]
-            # diff should be <= 0
-            assert torch.all(diff <= 0)
+
+        # Occupancy: non-increasing along height (filled low rows, then zeros)
+        diff = out[:, :, 1:, :] - out[:, :, :-1, :]
+        assert torch.all(diff <= 0)
 
     def test_timeseries_to_2d_multivariate(self, sample_batch_multivariate):
         batch, vars, seq = sample_batch_multivariate.shape
@@ -77,7 +60,7 @@ class TestPreprocessing:
         
         # 2. Inverse
         # Use low temperature to sharpen the distribution for better reconstruction
-        recon = ts2d.inverse(img, pdf_temperature=0.01)
+        recon = ts2d.inverse(img)
         
         # Should be reasonably close
         # Note: Discretization error is at most bin_width/2

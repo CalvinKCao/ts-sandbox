@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -84,10 +83,7 @@ N_VARIATES = 7
 DATASET = "ETTh2"
 WANDB_PROJECT = "diffusion-tsf"
 
-# WANDB auth (HPC jobs have no TTY): use ~/.bashrc export, Slurm # export line below, or either:
-#   (A) Uncomment next line and paste key — never commit a real key.
-os.environ["WANDB_API_KEY"] = "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"
-#   (B) Copy local_wandb_key.example.py -> local_wandb_key.py (gitignored) and edit there.
+# WANDB: set WANDB_API_KEY in the environment or ~/.bashrc (do not commit keys).
 try:
     import models.diffusion_tsf.local_wandb_key as _local_wandb_key  # type: ignore
 except ImportError:
@@ -136,7 +132,6 @@ def _wb_init(cfg, args):
                 "attention_levels": cfg.attention_levels,
                 "num_res_blocks": cfg.num_res_blocks,
                 "diffusion_steps": cfg.num_diffusion_steps,
-                "representation_mode": cfg.representation_mode,
                 "vae_lr": cfg.vae_lr,
                 "diffusion_lr": cfg.learning_rate,
                 "pretrain_epochs": PRETRAIN_EPOCHS,
@@ -233,15 +228,12 @@ class PixelEncoder(nn.Module):
         super().__init__()
         self.to_2d = TimeSeriesTo2D(
             height=cfg.image_height, max_scale=cfg.max_scale,
-            representation_mode=cfg.representation_mode,
         )
         self.blur = VerticalGaussianBlur(kernel_size=cfg.blur_kernel_size, sigma=cfg.blur_sigma)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         im = self.to_2d(x)
         b = self.blur(im)
-        if self.to_2d.representation_mode == "pdf":
-            return b * 30.0 * 2.0 - 1.0
         return b.clamp(0.0, 1.0) * 2.0 - 1.0
 
 
@@ -268,7 +260,6 @@ def build_config(image_height: int) -> LatentDiffusionConfig:
         lookback_overlap=LOOKBACK_OVERLAP,
         past_loss_weight=PAST_LOSS_WEIGHT,
         image_height=image_height,
-        representation_mode="cdf",
         unified_time_axis=True,
         use_coordinate_channel=True,
         use_time_ramp=False,

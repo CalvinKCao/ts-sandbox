@@ -1,0 +1,17 @@
+==========================================
+Job ID: 2624388
+Node: kn076
+GPU: GPU 0: NVIDIA L40S (UUID: GPU-37235d16-618e-b2fd-17db-7ec3ae03ca65)
+Started: Fri Mar 27 08:19:14 PM EDT 2026
+==========================================
+Python: /project/6101823/ccao87/diffusion-tsf/venv/bin/python
+Torch: 2.10.0
+
+Running: /project/6101823/ccao87/diffusion-tsf/venv/bin/python -u -m models.diffusion_tsf.train_ci_latent_etth1 --stage all --cache-dir /project/6101823/ccao87/diffusion-tsf/synthetic_cache/ci_latent 
+
+
+==========================================
+Finished: Sat Mar 28 07:38:25 AM EDT 2026
+Checkpoints: /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_ci_latent/
+Results: /scratch/ccao87/ts-sandbox/models/diffusion_tsf/results/
+==========================================

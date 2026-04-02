@@ -80,7 +80,7 @@ fi
 export STORAGE_ROOT="$PROJECT/$USER/diffusion-tsf"
 mkdir -p "$STORAGE_ROOT/checkpoints" "$STORAGE_ROOT/synthetic_cache" "$STORAGE_ROOT/results"
 
-# Same venv contract as slurm_pipeline.sh: PROJECT-scoped venv with CUDA torch + iTransformer deps.
+# Same venv contract as other Slurm scripts: $PROJECT/$USER/diffusion-tsf/venv + deps.
 VENV_PATH="$STORAGE_ROOT/venv"
 if [ ! -d "$VENV_PATH" ]; then
     echo "Creating virtual environment at $VENV_PATH (first run)..."

@@ -49,6 +49,7 @@ from models.diffusion_tsf.preprocessing import TimeSeriesTo2D, VerticalGaussianB
 from models.diffusion_tsf.vae import TimeSeriesVAE, estimate_vae_scale_factor
 from models.diffusion_tsf.guidance import iTransformerGuidance
 from models.diffusion_tsf.metrics import compute_metrics
+from models.diffusion_tsf.storage_paths import resolve_checkpoint_dir
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 CKPT_LATENT = _SCRIPT_DIR / "checkpoints_latent"
 RESULTS_DIR = _SCRIPT_DIR / "results"
-DEFAULT_7VAR_CKPT = _SCRIPT_DIR / "checkpoints_7var"
+DEFAULT_7VAR_CKPT = Path(resolve_checkpoint_dir(str(_SCRIPT_DIR)))
 
 
 def build_latent_config(image_height: int) -> LatentDiffusionConfig:
@@ -71,7 +72,6 @@ def build_latent_config(image_height: int) -> LatentDiffusionConfig:
         lookback_overlap=LOOKBACK_OVERLAP,
         past_loss_weight=PAST_LOSS_WEIGHT,
         image_height=image_height,
-        representation_mode="cdf",
         unified_time_axis=True,
         use_coordinate_channel=True,
         use_time_ramp=False,
@@ -98,7 +98,6 @@ class PixelEncoder(nn.Module):
         self.to_2d = TimeSeriesTo2D(
             height=cfg.image_height,
             max_scale=cfg.max_scale,
-            representation_mode=cfg.representation_mode,
         )
         self.blur = VerticalGaussianBlur(
             kernel_size=cfg.blur_kernel_size,
@@ -108,9 +107,6 @@ class PixelEncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         im = self.to_2d(x)
         b = self.blur(im)
-        if self.to_2d.representation_mode == "pdf":
-            scaled = b * 30.0
-            return scaled * 2.0 - 1.0
         return b.clamp(min=0.0, max=1.0) * 2.0 - 1.0
 
 

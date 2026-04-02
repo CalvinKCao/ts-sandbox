@@ -52,7 +52,6 @@ class LatentDiffusionTSF(nn.Module):
         self.to_2d = TimeSeriesTo2D(
             height=config.image_height,
             max_scale=config.max_scale,
-            representation_mode=config.representation_mode,
         )
         self.blur = VerticalGaussianBlur(
             kernel_size=config.blur_kernel_size,
@@ -237,9 +236,6 @@ class LatentDiffusionTSF(nn.Module):
         image = self.to_2d(x)
         blurred = self.blur(image)
         if scale_for_diffusion:
-            if self.config.representation_mode == "pdf":
-                scaled = blurred * 30.0
-                return scaled * 2.0 - 1.0
             return blurred.clamp(min=0.0, max=1.0) * 2.0 - 1.0
         return blurred
 
@@ -248,26 +244,24 @@ class LatentDiffusionTSF(nn.Module):
         image: torch.Tensor,
         from_diffusion: bool = True,
         decoder_method: str = "mean",
-        **kwargs,
     ) -> torch.Tensor:
         b, num_vars, height, seq_len = image.shape
         squeeze_output = num_vars == 1
-        if self.config.representation_mode == "pdf":
-            temperature = self.config.decode_temperature if from_diffusion else None
-            return self.to_2d.inverse(
-                image,
-                pdf_temperature=temperature,
-                squeeze_univariate=squeeze_output,
-            )
         if from_diffusion:
             cdf_map = (image + 1.0) / 2.0
         else:
             cdf_map = image
         cdf_map = torch.clamp(cdf_map, min=0.0, max=1.0)
+        sharpen = (
+            self.config.decode_temperature
+            if decoder_method == "expectation" and from_diffusion
+            else None
+        )
+        inv = "expectation" if decoder_method == "expectation" else "mean"
         return self.to_2d.inverse(
             cdf_map,
-            cdf_decoder=decoder_method,
-            pdf_temperature=None,
+            cdf_decoder=inv,
+            expectation_sharpen_temp=sharpen,
             squeeze_univariate=squeeze_output,
         )
 
@@ -484,7 +478,6 @@ class LatentDiffusionTSF(nn.Module):
         cfg_scale: Optional[float] = None,
         verbose: bool = False,
         decoder_method: str = "mean",
-        **kwargs,
     ) -> Dict[str, torch.Tensor]:
         device = past.device
         b = past.shape[0]
@@ -629,7 +622,7 @@ class LatentDiffusionTSF(nn.Module):
             )
 
         future_2d = self._latent_scaled_to_pixels(z_future)
-        future_norm = self.decode_from_2d(future_2d, decoder_method=decoder_method, **kwargs)
+        future_norm = self.decode_from_2d(future_2d, decoder_method=decoder_method)
         future = self._denormalize(future_norm, stats)
         K = self.config.lookback_overlap
         if K > 0:

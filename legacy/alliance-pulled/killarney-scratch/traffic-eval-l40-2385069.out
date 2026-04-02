@@ -1,0 +1,8 @@
+2026-03-13 15:18:55,604 - INFO - traffic.csv already exists
+2026-03-13 15:18:55,672 - INFO - ============================================================
+2026-03-13 15:18:55,673 - INFO - FULL-DIM ITRANSFORMER BASELINE: traffic (862 vars)
+2026-03-13 15:18:55,673 - INFO - Epochs: 50, LR: 0.0001, Batch: 32
+2026-03-13 15:18:55,673 - INFO - ============================================================
+2026-03-13 15:19:08,594 - INFO - [traffic-baseline] Epoch 1/1 | Train: 1.1537 | Val: 1.0314 | 2.0s
+2026-03-13 15:19:09,807 - INFO - [traffic-baseline] Test MSE=1.4520, MAE=0.8668
+2026-03-13 15:19:19,559 - INFO - Summary updated: /scratch/ccao87/ts-sandbox/models/diffusion_tsf/results_7var/summary.csv

@@ -9,25 +9,13 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import logging
 from typing import Optional
-from dataclasses import dataclass
-
-# load RealTS for synthetic data 
+# load RealTS for synthetic data
 try:
     from .realts import RealTS
 except ImportError:
     from realts import RealTS
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class DatasetConfig:
-    """just a config class for dataset stuff."""
-    representation_mode: str = "cdf"  # pdf or cdf
-
-    def __post_init__(self):
-        if self.representation_mode not in ["pdf", "cdf"]:
-            raise ValueError("bad representation_mode")
 
 
 def apply_1d_augmentations(

@@ -1,0 +1,342 @@
+The following modules were not unloaded:
+  (Use "module --force purge" to unload all):
+
+  1) CCconfig        6)  ucx/1.14.1         11) flexiblas/3.3.1
+  2) gentoo/2023     7)  libfabric/1.18.0   12) imkl/2023.2.0
+  3) gcccore/.12.3   8)  pmix/4.2.4         13) StdEnv/2023
+  4) gcc/12.3        9)  ucc/1.2.0
+  5) hwloc/2.9.1     10) openmpi/4.1.5
+2026-03-25 15:42:40,023 INFO RealTS initialized: 100000 samples/epoch, lookback=1024, forecast=192, variables=1
+2026-03-25 15:42:40,023 INFO Generating synthetic pool of 100000 samples to /project/6101823/ccao87/diffusion-tsf/synthetic_cache/latent_dim1/synth_pool_v1_L1216_N100000.npy...
+2026-03-25 15:43:03,708 INFO Pool generation complete.
+2026-03-25 15:43:03,711 INFO Created synthetic-only dataloader: 100000 samples/epoch (Pool: 100000), lookback=1024, forecast=192, variables=1
+2026-03-25 15:43:03,728 INFO TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-03-25 15:43:03,818 INFO VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-25 15:49:53,669 INFO VAE epoch 1 train=0.0035 val=0.0003
+2026-03-25 15:49:53,718 INFO VAE scale_factor set to 0.869834
+2026-03-25 15:49:53,741 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.869834
+2026-03-25 15:56:36,801 INFO VAE epoch 2 train=0.0002 val=0.0001
+2026-03-25 15:56:36,841 INFO VAE scale_factor set to 0.781709
+2026-03-25 15:56:36,854 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.781709
+2026-03-25 16:03:19,624 INFO VAE epoch 3 train=0.0001 val=0.0001
+2026-03-25 16:03:19,663 INFO VAE scale_factor set to 0.718151
+2026-03-25 16:03:19,675 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.718151
+2026-03-25 16:10:02,560 INFO VAE epoch 4 train=0.0001 val=0.0001
+2026-03-25 16:10:02,598 INFO VAE scale_factor set to 0.708275
+2026-03-25 16:10:02,608 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.708275
+2026-03-25 16:16:45,605 INFO VAE epoch 5 train=0.0001 val=0.0001
+2026-03-25 16:16:45,645 INFO VAE scale_factor set to 0.715312
+2026-03-25 16:16:45,655 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.715312
+2026-03-25 16:23:28,864 INFO VAE epoch 6 train=0.0001 val=0.0001
+2026-03-25 16:23:28,903 INFO VAE scale_factor set to 0.673683
+2026-03-25 16:23:28,914 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.673683
+2026-03-25 16:30:12,128 INFO VAE epoch 7 train=0.0001 val=0.0001
+2026-03-25 16:30:12,167 INFO VAE scale_factor set to 0.695312
+2026-03-25 16:30:12,178 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.695312
+2026-03-25 16:36:55,064 INFO VAE epoch 8 train=0.0001 val=0.0001
+2026-03-25 16:36:55,104 INFO VAE scale_factor set to 0.681817
+2026-03-25 16:36:55,115 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.681817
+2026-03-25 16:43:38,103 INFO VAE epoch 9 train=0.0001 val=0.0001
+2026-03-25 16:43:38,142 INFO VAE scale_factor set to 0.685971
+2026-03-25 16:43:38,155 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.685971
+2026-03-25 16:50:21,038 INFO VAE epoch 10 train=0.0001 val=0.0001
+2026-03-25 16:57:03,922 INFO VAE epoch 11 train=0.0001 val=0.0001
+2026-03-25 16:57:03,961 INFO VAE scale_factor set to 0.638410
+2026-03-25 16:57:03,977 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.638410
+2026-03-25 17:03:46,882 INFO VAE epoch 12 train=0.0001 val=0.0001
+2026-03-25 17:03:46,921 INFO VAE scale_factor set to 0.658700
+2026-03-25 17:03:46,935 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.658700
+2026-03-25 17:10:29,800 INFO VAE epoch 13 train=0.0001 val=0.0001
+2026-03-25 17:10:29,838 INFO VAE scale_factor set to 0.615423
+2026-03-25 17:10:29,849 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.615423
+2026-03-25 17:17:13,086 INFO VAE epoch 14 train=0.0001 val=0.0001
+2026-03-25 17:23:56,355 INFO VAE epoch 15 train=0.0001 val=0.0001
+2026-03-25 17:23:56,395 INFO VAE scale_factor set to 0.634086
+2026-03-25 17:23:56,406 INFO Saved VAE → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/vae_dim1_H128.pt scale_factor=0.634086
+2026-03-25 17:30:39,405 INFO VAE epoch 16 train=0.0001 val=0.0001
+2026-03-25 17:37:22,268 INFO VAE epoch 17 train=0.0001 val=0.0001
+2026-03-25 17:37:22,293 INFO RealTS initialized: 100000 samples/epoch, lookback=1024, forecast=192, variables=1
+2026-03-25 17:37:22,294 INFO Loading synthetic pool from /project/6101823/ccao87/diffusion-tsf/synthetic_cache/latent_dim1/synth_pool_v1_L1216_N100000.npy
+2026-03-25 17:37:22,296 INFO Created synthetic-only dataloader: 100000 samples/epoch (Pool: 100000), lookback=1024, forecast=192, variables=1
+2026-03-25 17:38:06,560 INFO [iTransformer dim1] epoch 1/200 train=1.0109 val=0.8613
+2026-03-25 17:38:50,829 INFO [iTransformer dim1] epoch 2/200 train=0.8693 val=0.7886
+2026-03-25 17:39:35,097 INFO [iTransformer dim1] epoch 3/200 train=0.7899 val=0.7608
+2026-03-25 17:40:19,381 INFO [iTransformer dim1] epoch 4/200 train=0.7442 val=0.7006
+2026-03-25 17:41:03,679 INFO [iTransformer dim1] epoch 5/200 train=0.7196 val=0.6754
+2026-03-25 17:41:47,967 INFO [iTransformer dim1] epoch 6/200 train=0.7107 val=0.6720
+2026-03-25 17:42:32,380 INFO [iTransformer dim1] epoch 7/200 train=0.6948 val=0.7230
+2026-03-25 17:43:16,534 INFO [iTransformer dim1] epoch 8/200 train=0.6869 val=0.6401
+2026-03-25 17:44:00,873 INFO [iTransformer dim1] epoch 9/200 train=0.6742 val=0.6416
+2026-03-25 17:44:44,899 INFO [iTransformer dim1] epoch 10/200 train=0.6703 val=0.6620
+2026-03-25 17:45:28,999 INFO [iTransformer dim1] epoch 11/200 train=0.6573 val=0.6692
+2026-03-25 17:46:12,795 INFO [iTransformer dim1] epoch 12/200 train=0.6558 val=0.6225
+2026-03-25 17:46:57,167 INFO [iTransformer dim1] epoch 13/200 train=0.6524 val=0.6308
+2026-03-25 17:47:41,404 INFO [iTransformer dim1] epoch 14/200 train=0.6441 val=0.6292
+2026-03-25 17:48:25,462 INFO [iTransformer dim1] epoch 15/200 train=0.6448 val=0.6181
+2026-03-25 17:49:09,690 INFO [iTransformer dim1] epoch 16/200 train=0.6373 val=0.6080
+2026-03-25 17:49:54,022 INFO [iTransformer dim1] epoch 17/200 train=0.6304 val=0.6208
+2026-03-25 17:50:38,043 INFO [iTransformer dim1] epoch 18/200 train=0.6305 val=0.6088
+2026-03-25 17:51:22,240 INFO [iTransformer dim1] epoch 19/200 train=0.6252 val=0.5940
+2026-03-25 17:52:06,419 INFO [iTransformer dim1] epoch 20/200 train=0.6213 val=0.6099
+2026-03-25 17:52:50,489 INFO [iTransformer dim1] epoch 21/200 train=0.6158 val=0.6167
+2026-03-25 17:53:34,770 INFO [iTransformer dim1] epoch 22/200 train=0.6180 val=0.5806
+2026-03-25 17:54:18,965 INFO [iTransformer dim1] epoch 23/200 train=0.6077 val=0.5760
+2026-03-25 17:55:03,128 INFO [iTransformer dim1] epoch 24/200 train=0.6084 val=0.6004
+2026-03-25 17:55:47,187 INFO [iTransformer dim1] epoch 25/200 train=0.6048 val=0.5899
+2026-03-25 17:56:31,136 INFO [iTransformer dim1] epoch 26/200 train=0.6034 val=0.5661
+2026-03-25 17:57:15,344 INFO [iTransformer dim1] epoch 27/200 train=0.6034 val=0.5835
+2026-03-25 17:57:59,359 INFO [iTransformer dim1] epoch 28/200 train=0.5893 val=0.5881
+2026-03-25 17:58:43,369 INFO [iTransformer dim1] epoch 29/200 train=0.5921 val=0.5675
+2026-03-25 17:59:27,311 INFO [iTransformer dim1] epoch 30/200 train=0.5934 val=0.5698
+2026-03-25 18:00:11,282 INFO [iTransformer dim1] epoch 31/200 train=0.5904 val=0.5800
+2026-03-25 18:00:55,361 INFO [iTransformer dim1] epoch 32/200 train=0.5833 val=0.5508
+2026-03-25 18:01:39,497 INFO [iTransformer dim1] epoch 33/200 train=0.5793 val=0.5473
+2026-03-25 18:02:23,670 INFO [iTransformer dim1] epoch 34/200 train=0.5810 val=0.5736
+2026-03-25 18:03:07,783 INFO [iTransformer dim1] epoch 35/200 train=0.5747 val=0.5514
+2026-03-25 18:03:51,938 INFO [iTransformer dim1] epoch 36/200 train=0.5751 val=0.5521
+2026-03-25 18:04:35,821 INFO [iTransformer dim1] epoch 37/200 train=0.5669 val=0.5394
+2026-03-25 18:05:20,222 INFO [iTransformer dim1] epoch 38/200 train=0.5716 val=0.5664
+2026-03-25 18:06:04,296 INFO [iTransformer dim1] epoch 39/200 train=0.5669 val=0.5235
+2026-03-25 18:06:48,620 INFO [iTransformer dim1] epoch 40/200 train=0.5641 val=0.5226
+2026-03-25 18:07:33,125 INFO [iTransformer dim1] epoch 41/200 train=0.5626 val=0.5520
+2026-03-25 18:08:17,312 INFO [iTransformer dim1] epoch 42/200 train=0.5586 val=0.5435
+2026-03-25 18:09:01,506 INFO [iTransformer dim1] epoch 43/200 train=0.5579 val=0.5121
+2026-03-25 18:09:45,983 INFO [iTransformer dim1] epoch 44/200 train=0.5556 val=0.5161
+2026-03-25 18:10:29,776 INFO [iTransformer dim1] epoch 45/200 train=0.5494 val=0.5454
+2026-03-25 18:11:13,841 INFO [iTransformer dim1] epoch 46/200 train=0.5508 val=0.5253
+2026-03-25 18:11:58,063 INFO [iTransformer dim1] epoch 47/200 train=0.5495 val=0.5063
+2026-03-25 18:12:42,416 INFO [iTransformer dim1] epoch 48/200 train=0.5492 val=0.5395
+2026-03-25 18:13:26,571 INFO [iTransformer dim1] epoch 49/200 train=0.5409 val=0.5110
+2026-03-25 18:14:10,689 INFO [iTransformer dim1] epoch 50/200 train=0.5438 val=0.5016
+2026-03-25 18:14:55,116 INFO [iTransformer dim1] epoch 51/200 train=0.5413 val=0.5172
+2026-03-25 18:15:39,310 INFO [iTransformer dim1] epoch 52/200 train=0.5378 val=0.5227
+2026-03-25 18:16:23,198 INFO [iTransformer dim1] epoch 53/200 train=0.5375 val=0.4805
+2026-03-25 18:17:07,319 INFO [iTransformer dim1] epoch 54/200 train=0.5342 val=0.4786
+2026-03-25 18:17:51,922 INFO [iTransformer dim1] epoch 55/200 train=0.5284 val=0.5181
+2026-03-25 18:18:36,215 INFO [iTransformer dim1] epoch 56/200 train=0.5306 val=0.4894
+2026-03-25 18:19:20,538 INFO [iTransformer dim1] epoch 57/200 train=0.5268 val=0.4875
+2026-03-25 18:20:04,808 INFO [iTransformer dim1] epoch 58/200 train=0.5261 val=0.4950
+2026-03-25 18:20:48,960 INFO [iTransformer dim1] epoch 59/200 train=0.5267 val=0.5208
+2026-03-25 18:21:33,112 INFO [iTransformer dim1] epoch 60/200 train=0.5206 val=0.4807
+2026-03-25 18:22:17,125 INFO [iTransformer dim1] epoch 61/200 train=0.5234 val=0.4959
+2026-03-25 18:23:01,361 INFO [iTransformer dim1] epoch 62/200 train=0.5192 val=0.4926
+2026-03-25 18:23:45,508 INFO [iTransformer dim1] epoch 63/200 train=0.5181 val=0.4928
+2026-03-25 18:24:29,734 INFO [iTransformer dim1] epoch 64/200 train=0.5169 val=0.4848
+2026-03-25 18:25:13,930 INFO [iTransformer dim1] epoch 65/200 train=0.5103 val=0.4656
+2026-03-25 18:25:57,870 INFO [iTransformer dim1] epoch 66/200 train=0.5107 val=0.4799
+2026-03-25 18:26:41,813 INFO [iTransformer dim1] epoch 67/200 train=0.5117 val=0.4710
+2026-03-25 18:27:25,847 INFO [iTransformer dim1] epoch 68/200 train=0.5073 val=0.4695
+2026-03-25 18:28:09,863 INFO [iTransformer dim1] epoch 69/200 train=0.5053 val=0.4907
+2026-03-25 18:28:53,813 INFO [iTransformer dim1] epoch 70/200 train=0.5017 val=0.4872
+2026-03-25 18:29:37,886 INFO [iTransformer dim1] epoch 71/200 train=0.5035 val=0.4710
+2026-03-25 18:30:21,952 INFO [iTransformer dim1] epoch 72/200 train=0.4998 val=0.4683
+2026-03-25 18:31:06,109 INFO [iTransformer dim1] epoch 73/200 train=0.4997 val=0.4559
+2026-03-25 18:31:50,431 INFO [iTransformer dim1] epoch 74/200 train=0.4991 val=0.4609
+2026-03-25 18:32:34,452 INFO [iTransformer dim1] epoch 75/200 train=0.4978 val=0.4644
+2026-03-25 18:33:18,342 INFO [iTransformer dim1] epoch 76/200 train=0.4962 val=0.4592
+2026-03-25 18:34:02,337 INFO [iTransformer dim1] epoch 77/200 train=0.4907 val=0.4687
+2026-03-25 18:34:46,366 INFO [iTransformer dim1] epoch 78/200 train=0.4930 val=0.4465
+2026-03-25 18:35:30,519 INFO [iTransformer dim1] epoch 79/200 train=0.4899 val=0.4577
+2026-03-25 18:36:14,509 INFO [iTransformer dim1] epoch 80/200 train=0.4860 val=0.4501
+2026-03-25 18:36:58,547 INFO [iTransformer dim1] epoch 81/200 train=0.4845 val=0.4253
+2026-03-25 18:37:42,786 INFO [iTransformer dim1] epoch 82/200 train=0.4863 val=0.4445
+2026-03-25 18:38:26,835 INFO [iTransformer dim1] epoch 83/200 train=0.4821 val=0.4637
+2026-03-25 18:39:11,071 INFO [iTransformer dim1] epoch 84/200 train=0.4820 val=0.4472
+2026-03-25 18:39:55,214 INFO [iTransformer dim1] epoch 85/200 train=0.4811 val=0.4364
+2026-03-25 18:40:39,260 INFO [iTransformer dim1] epoch 86/200 train=0.4816 val=0.4534
+2026-03-25 18:41:23,329 INFO [iTransformer dim1] epoch 87/200 train=0.4817 val=0.4551
+2026-03-25 18:42:07,243 INFO [iTransformer dim1] epoch 88/200 train=0.4781 val=0.4339
+2026-03-25 18:42:51,237 INFO [iTransformer dim1] epoch 89/200 train=0.4761 val=0.4312
+2026-03-25 18:43:35,245 INFO [iTransformer dim1] epoch 90/200 train=0.4773 val=0.4584
+2026-03-25 18:44:19,060 INFO [iTransformer dim1] epoch 91/200 train=0.4755 val=0.4362
+2026-03-25 18:45:02,930 INFO [iTransformer dim1] epoch 92/200 train=0.4742 val=0.4306
+2026-03-25 18:45:46,838 INFO [iTransformer dim1] epoch 93/200 train=0.4726 val=0.4400
+2026-03-25 18:46:30,380 INFO [iTransformer dim1] epoch 94/200 train=0.4714 val=0.4415
+2026-03-25 18:47:14,410 INFO [iTransformer dim1] epoch 95/200 train=0.4717 val=0.4355
+2026-03-25 18:47:58,413 INFO [iTransformer dim1] epoch 96/200 train=0.4738 val=0.4279
+2026-03-25 18:48:42,429 INFO [iTransformer dim1] epoch 97/200 train=0.4681 val=0.4298
+2026-03-25 18:49:26,567 INFO [iTransformer dim1] epoch 98/200 train=0.4665 val=0.4261
+2026-03-25 18:50:10,422 INFO [iTransformer dim1] epoch 99/200 train=0.4673 val=0.4226
+2026-03-25 18:50:54,742 INFO [iTransformer dim1] epoch 100/200 train=0.4672 val=0.4363
+2026-03-25 18:51:38,847 INFO [iTransformer dim1] epoch 101/200 train=0.4625 val=0.4436
+2026-03-25 18:52:22,953 INFO [iTransformer dim1] epoch 102/200 train=0.4627 val=0.4135
+2026-03-25 18:53:07,297 INFO [iTransformer dim1] epoch 103/200 train=0.4634 val=0.4146
+2026-03-25 18:53:51,441 INFO [iTransformer dim1] epoch 104/200 train=0.4626 val=0.4343
+2026-03-25 18:54:35,422 INFO [iTransformer dim1] epoch 105/200 train=0.4599 val=0.4081
+2026-03-25 18:55:19,628 INFO [iTransformer dim1] epoch 106/200 train=0.4588 val=0.4355
+2026-03-25 18:56:03,710 INFO [iTransformer dim1] epoch 107/200 train=0.4594 val=0.4275
+2026-03-25 18:56:47,711 INFO [iTransformer dim1] epoch 108/200 train=0.4567 val=0.4236
+2026-03-25 18:57:31,697 INFO [iTransformer dim1] epoch 109/200 train=0.4529 val=0.4097
+2026-03-25 18:58:15,707 INFO [iTransformer dim1] epoch 110/200 train=0.4562 val=0.4149
+2026-03-25 18:58:59,676 INFO [iTransformer dim1] epoch 111/200 train=0.4547 val=0.4159
+2026-03-25 18:59:43,651 INFO [iTransformer dim1] epoch 112/200 train=0.4547 val=0.4256
+2026-03-25 19:00:27,615 INFO [iTransformer dim1] epoch 113/200 train=0.4536 val=0.4009
+2026-03-25 19:01:11,731 INFO [iTransformer dim1] epoch 114/200 train=0.4487 val=0.4170
+2026-03-25 19:01:55,576 INFO [iTransformer dim1] epoch 115/200 train=0.4514 val=0.4128
+2026-03-25 19:02:39,596 INFO [iTransformer dim1] epoch 116/200 train=0.4492 val=0.4186
+2026-03-25 19:03:23,476 INFO [iTransformer dim1] epoch 117/200 train=0.4492 val=0.4108
+2026-03-25 19:04:07,404 INFO [iTransformer dim1] epoch 118/200 train=0.4489 val=0.4103
+2026-03-25 19:04:51,244 INFO [iTransformer dim1] epoch 119/200 train=0.4452 val=0.4148
+2026-03-25 19:05:35,080 INFO [iTransformer dim1] epoch 120/200 train=0.4449 val=0.4097
+2026-03-25 19:06:18,807 INFO [iTransformer dim1] epoch 121/200 train=0.4462 val=0.4200
+2026-03-25 19:07:02,644 INFO [iTransformer dim1] epoch 122/200 train=0.4444 val=0.4191
+2026-03-25 19:07:46,512 INFO [iTransformer dim1] epoch 123/200 train=0.4426 val=0.3946
+2026-03-25 19:08:30,546 INFO [iTransformer dim1] epoch 124/200 train=0.4408 val=0.3992
+2026-03-25 19:09:14,393 INFO [iTransformer dim1] epoch 125/200 train=0.4404 val=0.4070
+2026-03-25 19:09:58,262 INFO [iTransformer dim1] epoch 126/200 train=0.4387 val=0.3904
+2026-03-25 19:10:42,316 INFO [iTransformer dim1] epoch 127/200 train=0.4392 val=0.4039
+2026-03-25 19:11:26,282 INFO [iTransformer dim1] epoch 128/200 train=0.4406 val=0.4075
+2026-03-25 19:12:10,291 INFO [iTransformer dim1] epoch 129/200 train=0.4372 val=0.4094
+2026-03-25 19:12:54,226 INFO [iTransformer dim1] epoch 130/200 train=0.4384 val=0.4010
+2026-03-25 19:13:38,161 INFO [iTransformer dim1] epoch 131/200 train=0.4389 val=0.3999
+2026-03-25 19:14:22,071 INFO [iTransformer dim1] epoch 132/200 train=0.4356 val=0.4106
+2026-03-25 19:15:05,995 INFO [iTransformer dim1] epoch 133/200 train=0.4367 val=0.3980
+2026-03-25 19:15:49,926 INFO [iTransformer dim1] epoch 134/200 train=0.4403 val=0.4036
+2026-03-25 19:16:33,783 INFO [iTransformer dim1] epoch 135/200 train=0.4320 val=0.4111
+2026-03-25 19:17:17,787 INFO [iTransformer dim1] epoch 136/200 train=0.4334 val=0.3929
+2026-03-25 19:18:01,815 INFO [iTransformer dim1] epoch 137/200 train=0.4326 val=0.4034
+2026-03-25 19:18:45,747 INFO [iTransformer dim1] epoch 138/200 train=0.4317 val=0.4054
+2026-03-25 19:19:29,530 INFO [iTransformer dim1] epoch 139/200 train=0.4349 val=0.3960
+2026-03-25 19:20:13,295 INFO [iTransformer dim1] epoch 140/200 train=0.4326 val=0.3941
+2026-03-25 19:20:57,058 INFO [iTransformer dim1] epoch 141/200 train=0.4320 val=0.3924
+2026-03-25 19:21:40,884 INFO [iTransformer dim1] epoch 142/200 train=0.4292 val=0.4012
+2026-03-25 19:22:24,650 INFO [iTransformer dim1] epoch 143/200 train=0.4311 val=0.3982
+2026-03-25 19:23:08,415 INFO [iTransformer dim1] epoch 144/200 train=0.4292 val=0.3909
+2026-03-25 19:23:52,252 INFO [iTransformer dim1] epoch 145/200 train=0.4306 val=0.4000
+2026-03-25 19:24:35,963 INFO [iTransformer dim1] epoch 146/200 train=0.4256 val=0.4071
+2026-03-25 19:24:36,421 INFO iTransformer saved → /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/itransformer_dim1.pt
+2026-03-25 19:24:36,658 INFO TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-03-25 19:24:36,658 INFO VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-25 19:24:36,672 INFO TimeSeriesContextEncoder: input_ch=2, embed_dim=128, layers=2, heads=4
+2026-03-25 19:24:36,743 INFO ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 3)
+2026-03-25 19:24:36,743 INFO   Conditioning mode: visual_concat
+2026-03-25 19:24:36,743 INFO   Visual concat: 4 past image channels directly concatenated
+2026-03-25 19:24:36,743 INFO   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-03-25 19:24:36,749 INFO DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-25 19:24:36,749 INFO LatentDiffusionTSF: H_lat=32, in_ch=9, cz=4, aux=1
+2026-03-25 19:24:36,764 INFO RealTS initialized: 100000 samples/epoch, lookback=1024, forecast=192, variables=1
+2026-03-25 19:24:36,765 INFO Loading synthetic pool from /project/6101823/ccao87/diffusion-tsf/synthetic_cache/latent_dim1/synth_pool_v1_L1216_N100000.npy
+2026-03-25 19:24:36,766 INFO Created synthetic-only dataloader: 100000 samples/epoch (Pool: 100000), lookback=1024, forecast=192, variables=1
+2026-03-25 19:35:03,975 INFO Latent diffusion epoch 1 train=0.0665 val=0.0365
+2026-03-25 19:45:29,245 INFO Latent diffusion epoch 2 train=0.0381 val=0.0332
+2026-03-25 19:55:54,983 INFO Latent diffusion epoch 3 train=0.0338 val=0.0290
+2026-03-25 20:06:20,847 INFO Latent diffusion epoch 4 train=0.0316 val=0.0292
+2026-03-25 20:16:50,168 INFO Latent diffusion epoch 5 train=0.0299 val=0.0270
+2026-03-25 20:27:18,819 INFO Latent diffusion epoch 6 train=0.0290 val=0.0262
+2026-03-25 20:37:45,289 INFO Latent diffusion epoch 7 train=0.0280 val=0.0235
+2026-03-25 20:48:13,371 INFO Latent diffusion epoch 8 train=0.0273 val=0.0255
+2026-03-25 20:58:40,805 INFO Latent diffusion epoch 9 train=0.0267 val=0.0248
+2026-03-25 21:09:08,671 INFO Latent diffusion epoch 10 train=0.0263 val=0.0247
+2026-03-25 21:19:34,537 INFO Latent diffusion epoch 11 train=0.0256 val=0.0256
+2026-03-25 21:29:58,721 INFO Latent diffusion epoch 12 train=0.0252 val=0.0242
+2026-03-25 21:40:23,072 INFO Latent diffusion epoch 13 train=0.0247 val=0.0230
+2026-03-25 21:50:46,017 INFO Latent diffusion epoch 14 train=0.0243 val=0.0220
+2026-03-25 22:01:08,952 INFO Latent diffusion epoch 15 train=0.0240 val=0.0233
+2026-03-25 22:11:31,019 INFO Latent diffusion epoch 16 train=0.0239 val=0.0236
+2026-03-25 22:21:55,889 INFO Latent diffusion epoch 17 train=0.0233 val=0.0228
+2026-03-25 22:32:22,294 INFO Latent diffusion epoch 18 train=0.0232 val=0.0211
+2026-03-25 22:42:49,071 INFO Latent diffusion epoch 19 train=0.0229 val=0.0204
+2026-03-25 22:53:14,601 INFO Latent diffusion epoch 20 train=0.0228 val=0.0202
+2026-03-25 23:03:37,978 INFO Latent diffusion epoch 21 train=0.0226 val=0.0226
+2026-03-25 23:14:02,164 INFO Latent diffusion epoch 22 train=0.0222 val=0.0216
+2026-03-25 23:24:25,358 INFO Latent diffusion epoch 23 train=0.0225 val=0.0219
+2026-03-25 23:34:48,568 INFO Latent diffusion epoch 24 train=0.0220 val=0.0228
+2026-03-25 23:45:14,742 INFO Latent diffusion epoch 25 train=0.0221 val=0.0187
+2026-03-25 23:55:42,792 INFO Latent diffusion epoch 26 train=0.0218 val=0.0195
+2026-03-26 00:06:10,447 INFO Latent diffusion epoch 27 train=0.0218 val=0.0203
+2026-03-26 00:16:37,190 INFO Latent diffusion epoch 28 train=0.0215 val=0.0213
+2026-03-26 00:27:02,767 INFO Latent diffusion epoch 29 train=0.0214 val=0.0202
+2026-03-26 00:37:29,881 INFO Latent diffusion epoch 30 train=0.0214 val=0.0184
+2026-03-26 00:47:55,499 INFO Latent diffusion epoch 31 train=0.0212 val=0.0208
+2026-03-26 00:58:20,391 INFO Latent diffusion epoch 32 train=0.0213 val=0.0215
+2026-03-26 01:08:46,030 INFO Latent diffusion epoch 33 train=0.0212 val=0.0189
+2026-03-26 01:19:11,468 INFO Latent diffusion epoch 34 train=0.0210 val=0.0186
+2026-03-26 01:29:38,341 INFO Latent diffusion epoch 35 train=0.0210 val=0.0196
+2026-03-26 01:40:04,111 INFO Latent diffusion epoch 36 train=0.0207 val=0.0198
+2026-03-26 01:50:29,717 INFO Latent diffusion epoch 37 train=0.0208 val=0.0187
+2026-03-26 02:00:55,965 INFO Latent diffusion epoch 38 train=0.0205 val=0.0208
+2026-03-26 02:11:22,291 INFO Latent diffusion epoch 39 train=0.0206 val=0.0205
+2026-03-26 02:21:46,861 INFO Latent diffusion epoch 40 train=0.0207 val=0.0182
+2026-03-26 02:32:12,313 INFO Latent diffusion epoch 41 train=0.0205 val=0.0183
+2026-03-26 02:42:37,894 INFO Latent diffusion epoch 42 train=0.0206 val=0.0175
+2026-03-26 02:53:03,183 INFO Latent diffusion epoch 43 train=0.0205 val=0.0196
+2026-03-26 03:03:27,138 INFO Latent diffusion epoch 44 train=0.0203 val=0.0178
+2026-03-26 03:13:51,212 INFO Latent diffusion epoch 45 train=0.0203 val=0.0182
+2026-03-26 03:24:13,732 INFO Latent diffusion epoch 46 train=0.0203 val=0.0202
+2026-03-26 03:34:37,230 INFO Latent diffusion epoch 47 train=0.0202 val=0.0179
+2026-03-26 03:45:01,116 INFO Latent diffusion epoch 48 train=0.0200 val=0.0175
+2026-03-26 03:55:25,946 INFO Latent diffusion epoch 49 train=0.0200 val=0.0176
+2026-03-26 04:05:52,058 INFO Latent diffusion epoch 50 train=0.0199 val=0.0185
+2026-03-26 04:16:18,868 INFO Latent diffusion epoch 51 train=0.0199 val=0.0204
+2026-03-26 04:26:45,701 INFO Latent diffusion epoch 52 train=0.0197 val=0.0160
+2026-03-26 04:37:13,216 INFO Latent diffusion epoch 53 train=0.0195 val=0.0179
+2026-03-26 04:47:39,954 INFO Latent diffusion epoch 54 train=0.0198 val=0.0162
+2026-03-26 04:58:06,988 INFO Latent diffusion epoch 55 train=0.0197 val=0.0174
+2026-03-26 05:08:32,853 INFO Latent diffusion epoch 56 train=0.0198 val=0.0179
+2026-03-26 05:18:59,473 INFO Latent diffusion epoch 57 train=0.0199 val=0.0188
+2026-03-26 05:29:26,227 INFO Latent diffusion epoch 58 train=0.0195 val=0.0180
+2026-03-26 05:39:52,899 INFO Latent diffusion epoch 59 train=0.0195 val=0.0175
+2026-03-26 05:50:20,280 INFO Latent diffusion epoch 60 train=0.0194 val=0.0190
+2026-03-26 06:00:46,025 INFO Latent diffusion epoch 61 train=0.0196 val=0.0175
+2026-03-26 06:11:12,965 INFO Latent diffusion epoch 62 train=0.0196 val=0.0175
+2026-03-26 06:21:40,764 INFO Latent diffusion epoch 63 train=0.0195 val=0.0213
+2026-03-26 06:32:08,598 INFO Latent diffusion epoch 64 train=0.0195 val=0.0180
+2026-03-26 06:42:34,473 INFO Latent diffusion epoch 65 train=0.0192 val=0.0181
+2026-03-26 06:53:00,580 INFO Latent diffusion epoch 66 train=0.0193 val=0.0198
+2026-03-26 07:03:26,308 INFO Latent diffusion epoch 67 train=0.0192 val=0.0174
+2026-03-26 07:13:52,627 INFO Latent diffusion epoch 68 train=0.0192 val=0.0168
+2026-03-26 07:24:17,440 INFO Latent diffusion epoch 69 train=0.0193 val=0.0194
+2026-03-26 07:34:42,619 INFO Latent diffusion epoch 70 train=0.0190 val=0.0182
+2026-03-26 07:45:09,012 INFO Latent diffusion epoch 71 train=0.0192 val=0.0197
+2026-03-26 07:55:35,959 INFO Latent diffusion epoch 72 train=0.0189 val=0.0177
+2026-03-26 07:55:36,171 INFO TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-03-26 07:55:36,172 INFO VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-26 07:55:36,182 INFO TimeSeriesContextEncoder: input_ch=2, embed_dim=128, layers=2, heads=4
+2026-03-26 07:55:36,251 INFO ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 3)
+2026-03-26 07:55:36,251 INFO   Conditioning mode: visual_concat
+2026-03-26 07:55:36,251 INFO   Visual concat: 4 past image channels directly concatenated
+2026-03-26 07:55:36,251 INFO   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-03-26 07:55:36,252 INFO DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-26 07:55:36,252 INFO LatentDiffusionTSF: H_lat=32, in_ch=9, cz=4, aux=1
+2026-03-26 07:55:41,992 INFO Finetune epoch 1 val=0.0077
+2026-03-26 07:55:47,409 INFO Finetune epoch 2 val=0.0320
+2026-03-26 07:55:52,868 INFO Finetune epoch 3 val=0.0481
+2026-03-26 07:55:58,399 INFO Finetune epoch 4 val=0.0283
+2026-03-26 07:56:03,869 INFO Finetune epoch 5 val=0.0008
+2026-03-26 07:56:09,404 INFO Finetune epoch 6 val=0.0002
+2026-03-26 07:56:14,947 INFO Finetune epoch 7 val=0.0124
+2026-03-26 07:56:20,487 INFO Finetune epoch 8 val=0.0253
+2026-03-26 07:56:25,962 INFO Finetune epoch 9 val=0.1314
+2026-03-26 07:56:31,495 INFO Finetune epoch 10 val=0.0025
+2026-03-26 07:56:37,011 INFO Finetune epoch 11 val=0.0003
+2026-03-26 07:56:42,551 INFO Finetune epoch 12 val=0.0002
+2026-03-26 07:56:48,016 INFO Finetune epoch 13 val=0.0440
+2026-03-26 07:56:53,430 INFO Finetune epoch 14 val=0.0174
+2026-03-26 07:56:58,941 INFO Finetune epoch 15 val=0.0156
+2026-03-26 07:57:04,381 INFO Finetune epoch 16 val=0.0381
+2026-03-26 07:57:12,064 INFO TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-03-26 07:57:12,064 INFO VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-03-26 07:57:12,064 INFO Using default LinearRegressionGuidance for guidance channel
+2026-03-26 07:57:12,137 INFO ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 3)
+2026-03-26 07:57:12,137 INFO   Conditioning mode: visual_concat
+2026-03-26 07:57:12,137 INFO   Visual concat: 1 past image channels directly concatenated
+2026-03-26 07:57:12,137 INFO   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-03-26 07:57:12,146 INFO TimeSeriesContextEncoder: input_ch=2, embed_dim=128, layers=2, heads=4
+2026-03-26 07:57:12,146 INFO DiffusionScheduler initialized: T=1000, schedule=linear
+2026-03-26 07:57:12,146 INFO DiffusionTSF initialized:
+2026-03-26 07:57:12,146 INFO   Variables: 1 (univariate)
+2026-03-26 07:57:12,146 INFO   Lookback: 1024, Forecast: 200
+2026-03-26 07:57:12,146 INFO   Image size: 128 x W
+2026-03-26 07:57:12,146 INFO   Input channels: 3 (data: 1, aux: 1, guidance: 1)
+2026-03-26 07:57:12,146 INFO   Conditioning mode: visual_concat
+2026-03-26 07:57:12,146 INFO   Diffusion steps: 1000
+2026-03-26 07:57:12,146 INFO   Coordinate channel: True
+2026-03-26 07:57:12,146 INFO   Time ramp channel: False
+2026-03-26 07:57:12,146 INFO   Time sine channel: False
+2026-03-26 07:57:12,146 INFO   Value channel: False
+2026-03-26 07:57:12,146 INFO   Guidance channel: enabled (Stage 1 → 2D ghost image)
+2026-03-26 07:57:12,146 INFO   U-Net kernel size: (3, 3)
+2026-03-26 07:57:12,146 INFO   Hybrid 1D conditioning: enabled (context_dim=128, layers=2)
+2026-03-26 07:57:12,160 INFO Guidance model set: iTransformerGuidance
+2026-03-26 07:57:12,162 INFO No baseline checkpoint at /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_7var/pretrained_dim7/pretrained_diffusion.pt; skipping pixel baseline comparison
+2026-03-26 07:57:12,169 INFO Wrote /scratch/ccao87/ts-sandbox/models/diffusion_tsf/results/latent_experiment_H128.json
