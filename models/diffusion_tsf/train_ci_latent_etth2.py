@@ -4,7 +4,7 @@ CI latent diffusion on ETTh2 — full 4-stage pipeline with proper iTransformer 
 Pipeline:
   Stage 0: VAE pretrain (univariate, reuse if exists)
   Stage 1: Pretrain iTransformer on synthetic 7-var data
-  Stage 2: Pretrain latent diffusion on synthetic 1-var, guided by pretrained iTransformer
+  Stage 2: Pretrain latent diffusion on synthetic 7-var (CI-flattened), guided by pretrained iTransformer
   Stage 3: Finetune iTransformer on ETTh2
   Stage 4: Finetune latent diffusion on ETTh2, guided by *finetuned* iTransformer
            + eval vs finetuned iTransformer baseline
@@ -16,6 +16,8 @@ Run from repo root:
   python -m models.diffusion_tsf.train_ci_latent_etth2 --smoke-test
   python -m models.diffusion_tsf.train_ci_latent_etth2 --stage all
   python -m models.diffusion_tsf.train_ci_latent_etth2 --stage 3   # just finetune itrans
+  python -m models.diffusion_tsf.train_ci_latent_etth2 --stage 4   # redo diffusion finetune + eval (needs 0–3 ckpts)
+  python -m models.diffusion_tsf.train_ci_latent_etth2 --stage 4 --stage4-trials 5   # Optuna on stage 4 only
 """
 
 from __future__ import annotations
@@ -40,6 +42,15 @@ except ImportError:
     wandb = None
     WANDB_OK = False
 
+try:
+    import optuna
+    from optuna.samplers import TPESampler
+    OPTUNA_OK = True
+except ImportError:
+    optuna = None
+    TPESampler = None
+    OPTUNA_OK = False
+
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -47,7 +58,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from models.diffusion_tsf.config import LatentDiffusionConfig
 from models.diffusion_tsf.dataset import get_synthetic_dataloader
-from models.diffusion_tsf.guidance import BaseGuidance, LinearRegressionGuidance
+from models.diffusion_tsf.guidance import BaseGuidance
 from models.diffusion_tsf.latent_diffusion_model import LatentDiffusionTSF
 from models.diffusion_tsf.latent_experiment_common import (
     FINETUNE_EPOCHS,
@@ -315,7 +326,9 @@ def _eval_ld(model, loader, device):
     return total / max(n, 1)
 
 
-def _ci_train_epoch(model, loader, optimizer, device, V):
+def _ci_train_epoch(
+    model, loader, optimizer, device, V, grad_clip: float = 1.0,
+):
     model.train()
     total, n = 0.0, 0
     for past, future in loader:
@@ -327,7 +340,7 @@ def _ci_train_epoch(model, loader, optimizer, device, V):
             loss = model.get_loss(past_flat, future_flat)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
-            (p for p in model.parameters() if p.requires_grad), 1.0
+            (p for p in model.parameters() if p.requires_grad), grad_clip
         )
         optimizer.step()
         total += loss.item(); n += 1
@@ -651,6 +664,83 @@ def stage3_finetune_itransformer(
 # stage 4: finetune diffusion on ETTh2 with finetuned iTrans + eval
 # ---------------------------------------------------------------------------
 
+def _state_dict_cpu(model: nn.Module) -> Dict[str, torch.Tensor]:
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+
+def _stage4_make_model(
+    cfg: LatentDiffusionConfig,
+    vae: TimeSeriesVAE,
+    itrans_finetuned: Path,
+    diffusion_pretrained: Path,
+    device: torch.device,
+) -> LatentDiffusionTSF:
+    guidance = _build_ci_guidance(itrans_finetuned, device)
+    model = LatentDiffusionTSF(cfg, vae, guidance_model=guidance).to(device)
+    ckpt = torch.load(diffusion_pretrained, map_location=device, weights_only=False)
+    result = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    if result.missing_keys:
+        logger.info(
+            "Missing keys (expected — guidance swap): %s",
+            [k for k in result.missing_keys if "guidance" in k][:5],
+        )
+    return model
+
+
+def _stage4_run_training(
+    cfg: LatentDiffusionConfig,
+    vae: TimeSeriesVAE,
+    itrans_finetuned: Path,
+    diffusion_pretrained: Path,
+    device: torch.device,
+    train_ds,
+    val_ds,
+    *,
+    lr: float,
+    batch_size: int,
+    weight_decay: float,
+    max_epochs: int,
+    patience: int,
+    min_delta: float,
+    grad_clip: float,
+    trial_tag: str = "",
+) -> tuple[float, Dict[str, torch.Tensor]]:
+    """One finetune run from diffusion_pretrained. Returns (min val loss, best state_dict CPU)."""
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+
+    model = _stage4_make_model(cfg, vae, itrans_finetuned, diffusion_pretrained, device)
+    opt = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=lr,
+        weight_decay=weight_decay,
+    )
+    early = EarlyStopping(patience=patience, min_delta=min_delta)
+    min_val_seen = float("inf")
+    best_state: Dict[str, torch.Tensor] | None = None
+
+    for ep in range(max_epochs):
+        tr = _ci_train_epoch(
+            model, train_dl, opt, device, N_VARIATES, grad_clip=grad_clip,
+        )
+        va = _ci_eval_loss(model, val_dl, device, N_VARIATES)
+        suf = f" {trial_tag}" if trial_tag else ""
+        logger.info(
+            "[Diffusion finetune %s]%s ep %d  train=%.4f  val=%.4f",
+            DATASET, suf, ep + 1, tr, va,
+        )
+        _wb_log({"s4_diff_finetune/train_loss": tr, "s4_diff_finetune/val_loss": va})
+        if va < min_val_seen:
+            min_val_seen = float(va)
+            best_state = _state_dict_cpu(model)
+        if early(va):
+            break
+
+    if best_state is None:
+        best_state = _state_dict_cpu(model)
+    return min_val_seen, best_state
+
+
 def stage4_finetune_eval(
     cfg: LatentDiffusionConfig,
     vae: TimeSeriesVAE,
@@ -658,6 +748,7 @@ def stage4_finetune_eval(
     diffusion_pretrained: Path,
     device: torch.device,
     smoke_test: bool,
+    stage4_trials: int = 0,
 ) -> Dict:
     logger.info("=== Stage 4: finetune diffusion on %s (guidance = finetuned iTrans) ===", DATASET)
 
@@ -672,34 +763,101 @@ def stage4_finetune_eval(
         val_ds = Subset(val_ds, list(range(min(4, len(val_ds)))))
         test_ds = Subset(test_ds, list(range(min(4, len(test_ds)))))
 
-    train_dl = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=0)
-    val_dl = DataLoader(val_ds, batch_size=4, shuffle=False, num_workers=0)
     test_dl = DataLoader(test_ds, batch_size=4, shuffle=False, num_workers=0)
 
-    # finetuned guidance — this is the one used for everything from here on
-    guidance = _build_ci_guidance(itrans_finetuned, device)
-    model = LatentDiffusionTSF(cfg, vae, guidance_model=guidance).to(device)
+    if smoke_test:
+        stage4_trials = 0
 
-    # load pretrained diffusion weights (guidance keys will mismatch — that's fine,
-    # the pretrained ckpt had the synth iTrans; we're swapping in finetuned)
-    ckpt = torch.load(diffusion_pretrained, map_location=device, weights_only=False)
-    result = model.load_state_dict(ckpt["model_state_dict"], strict=False)
-    if result.missing_keys:
-        logger.info("Missing keys (expected — guidance model swap): %s",
-                     [k for k in result.missing_keys if "guidance" in k][:5])
+    # --- train (single run or Optuna) ---
+    if stage4_trials > 0:
+        if not OPTUNA_OK:
+            raise SystemExit("install optuna: pip install optuna")
 
-    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-5)
-    epochs = 2 if smoke_test else min(30, FINETUNE_EPOCHS)
-    patience = 1 if smoke_test else min(10, FINETUNE_PATIENCE)
-    early = EarlyStopping(patience=patience)
+        global_best: Dict = {"min_val": float("inf"), "state": None, "params": None}
 
-    for ep in range(epochs):
-        tr = _ci_train_epoch(model, train_dl, opt, device, N_VARIATES)
-        va = _ci_eval_loss(model, val_dl, device, N_VARIATES)
-        logger.info("[Diffusion finetune %s] ep %d  train=%.4f  val=%.4f", DATASET, ep + 1, tr, va)
-        _wb_log({"s4_diff_finetune/train_loss": tr, "s4_diff_finetune/val_loss": va})
-        if early(va):
-            break
+        def objective(trial) -> float:
+            lr = trial.suggest_float("s4_lr", 3e-6, 3e-4, log=True)
+            batch_size = trial.suggest_categorical("s4_batch_size", [2, 4, 8])
+            weight_decay = trial.suggest_float("s4_weight_decay", 1e-8, 1e-2, log=True)
+            grad_clip = trial.suggest_categorical("s4_grad_clip", [0.5, 1.0, 2.0])
+            max_epochs = 60
+            patience = 15
+            min_delta = 1e-4
+            tag = f"trial{trial.number}"
+            min_v, st = _stage4_run_training(
+                cfg, vae, itrans_finetuned, diffusion_pretrained, device,
+                train_ds, val_ds,
+                lr=lr,
+                batch_size=batch_size,
+                weight_decay=weight_decay,
+                max_epochs=max_epochs,
+                patience=patience,
+                min_delta=min_delta,
+                grad_clip=grad_clip,
+                trial_tag=tag,
+            )
+            params = {
+                "s4_lr": lr,
+                "s4_batch_size": batch_size,
+                "s4_weight_decay": weight_decay,
+                "s4_grad_clip": grad_clip,
+            }
+            if min_v < global_best["min_val"]:
+                global_best["min_val"] = min_v
+                global_best["state"] = st
+                global_best["params"] = params.copy()
+            _wb_log({
+                "s4_optuna/trial": trial.number,
+                "s4_optuna/trial_min_val": min_v,
+                **{f"s4_optuna/{k}": v for k, v in params.items()},
+            })
+            return min_v
+
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = optuna.create_study(direction="minimize", sampler=TPESampler(seed=42))
+        study.optimize(objective, n_trials=stage4_trials)
+        logger.info(
+            "Stage4 Optuna done: best_value=%.6f params=%s",
+            study.best_value,
+            study.best_params,
+        )
+        best_state = global_best["state"]
+        if best_state is None:
+            raise RuntimeError("Stage4 Optuna finished with no saved state (unexpected).")
+        best_hparams = {
+            **(global_best["params"] or {}),
+            "s4_optuna_trials": stage4_trials,
+            "s4_optuna_best_value": float(study.best_value),
+            "s4_optuna_best_trial": int(study.best_trial.number),
+            "s4_optuna_best_params": dict(study.best_params),
+        }
+    else:
+        max_epochs = 2 if smoke_test else min(50, FINETUNE_EPOCHS)
+        patience = 1 if smoke_test else min(15, FINETUNE_PATIENCE)
+        min_v, best_state = _stage4_run_training(
+            cfg, vae, itrans_finetuned, diffusion_pretrained, device,
+            train_ds, val_ds,
+            lr=1e-5,
+            batch_size=4,
+            weight_decay=0.0,
+            max_epochs=max_epochs,
+            patience=patience,
+            min_delta=1e-4,
+            grad_clip=1.0,
+            trial_tag="",
+        )
+        best_hparams = {
+            "s4_lr": 1e-5,
+            "s4_batch_size": 4,
+            "s4_weight_decay": 0.0,
+            "s4_grad_clip": 1.0,
+            "s4_min_val_training": min_v,
+            "s4_max_epochs_cap": max_epochs,
+            "s4_patience": patience,
+        }
+
+    model = _stage4_make_model(cfg, vae, itrans_finetuned, diffusion_pretrained, device)
+    model.load_state_dict({k: t.to(device) for k, t in best_state.items()})
 
     finetuned_path = CKPT_DIR / f"diffusion_finetuned_{DATASET}_H{cfg.image_height}.pt"
     torch.save({
@@ -708,8 +866,9 @@ def stage4_finetune_eval(
         "vae_scale_factor": vae.scale_factor.detach().cpu(),
         "guidance_source": str(itrans_finetuned),
         "dataset": DATASET,
+        "stage4_hparams": best_hparams,
     }, finetuned_path)
-    logger.info("Finetuned diffusion → %s", finetuned_path)
+    logger.info("Finetuned diffusion (best val checkpoint) → %s", finetuned_path)
 
     # ---- eval: CI diffusion (finetuned) ----
     model.eval()
@@ -785,6 +944,7 @@ def stage4_finetune_eval(
         "forecast_horizon": FORECAST_LENGTH,
         "test_stride": 24,
         "per_variate": per_var,
+        "stage4_hparams": best_hparams,
         "note": "Both diffusion and iTransformer baseline are finetuned on ETTh2. Fair comparison.",
     }
 
@@ -800,6 +960,12 @@ def main():
     p.add_argument("--stage", type=str, default="all",
                    choices=["0", "1", "2", "3", "4", "all"])
     p.add_argument("--cache-dir", type=str, default=None)
+    p.add_argument(
+        "--stage4-trials",
+        type=int,
+        default=0,
+        help="Optuna trials for stage-4 diffusion finetune only (0 = one run with default hparams). Ignored with --smoke-test.",
+    )
     args = p.parse_args()
 
     device = get_device()
@@ -857,6 +1023,7 @@ def main():
             raise SystemExit(f"Missing {diff_pretrained} (run stage 2)")
         metrics = stage4_finetune_eval(
             cfg, vae, itrans_finetuned, diff_pretrained, device, args.smoke_test,
+            stage4_trials=max(0, args.stage4_trials),
         )
         with open(results_path, "w") as f:
             json.dump(metrics, f, indent=2)

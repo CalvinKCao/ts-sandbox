@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=ci-etth2
+#SBATCH --job-name=bench-px-lat
 #SBATCH --account=aip-boyuwang
 #SBATCH --gres=gpu:l40s:1
-#SBATCH --time=3-00:00:00
+#SBATCH --time=1:00:00
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=50G
@@ -13,33 +13,32 @@
 #SBATCH --signal=B:USR1@120
 
 # =============================================================================
-# CI latent diffusion on ETTh2 — full 4-stage pipeline
+# Alliance Canada — one-epoch timing: pixel DiffusionTSF vs latent LatentDiffusionTSF
+# (same synthetic RealTS loader, matched windows / image height / U-Net widths).
 #
-# Pipeline:
-#   Stage 0: VAE (univariate, reuse if cached)
-#   Stage 1: Pretrain iTransformer on synthetic 7-var
-#   Stage 2: Pretrain diffusion on synthetic 7-var (CI-flattened), guided by pretrained iTrans
-#   Stage 3: Finetune iTransformer on ETTh2
-#   Stage 4: Finetune diffusion on ETTh2 with *finetuned* iTrans + eval
+# Edit #SBATCH --account (and mail-user) to your CCDB Group Name if different.
+# Run from $SCRATCH copy of the repo on Killarney (not /home).
 #
 # Submit:
-#   sbatch slurm_ci_latent_etth2.sh
+#   sbatch slurm_benchmark_pixel_vs_latent.sh
+#   sbatch slurm_benchmark_pixel_vs_latent.sh -- --num-samples 256 --batch-size 8
+#   sbatch slurm_benchmark_pixel_vs_latent.sh -- --amp --num-samples 512
 #
-# Smoke test:
-#   sbatch --job-name=ci-etth2-smoke slurm_ci_latent_etth2.sh -- --smoke-test
-#
-# Redo stage 4 only (needs checkpoints from 0–3 on same machine):
-#   sbatch slurm_ci_latent_etth2.sh -- --stage 4
-# Stage 4 with 5 Optuna trials (lr, batch, wd, grad_clip):
-#   sbatch slurm_ci_latent_etth2.sh -- --stage 4 --stage4-trials 5
+# Logs: bench-px-lat-<jobid>.out / .err in the directory where you ran sbatch.
 # =============================================================================
 
 set -e
 export PYTHONUNBUFFERED=1
 
-# WANDB: set in the job environment or ~/.bashrc (do not commit keys):
-#   export WANDB_API_KEY="..."
-# Optional: export WANDB_ENTITY="your-username-or-team"
+cleanup() {
+    trap '' EXIT ERR SIGTERM SIGINT SIGUSR1
+    local code=${1:-$?}
+    [ "$code" -ne 0 ] && echo "[SLURM CLEANUP] $(date)"
+    kill -- -$$ 2>/dev/null || true
+    pkill -P $$ 2>/dev/null || true
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT ERR SIGTERM SIGINT SIGUSR1
 
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
@@ -71,7 +70,7 @@ if [ -z "$PROJECT" ]; then
 fi
 
 if [ -z "$PROJECT" ]; then
-    echo "ERROR: PROJECT not found"
+    echo "ERROR: PROJECT not found. Set export PROJECT=/path/to/your/allocation"
     exit 1
 fi
 
@@ -102,31 +101,9 @@ if ! "$PY" -c "import torch" 2>/dev/null; then
 fi
 echo "Python: $($PY -c 'import sys; print(sys.executable)')"
 echo "Torch: $($PY -c 'import torch; print(torch.__version__)')"
-
-CACHE_DIR="$STORAGE_ROOT/synthetic_cache/ci_latent"
-mkdir -p "$CACHE_DIR"
+echo "CUDA: $($PY -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else "")')"
 
 cd "$PROJECT_ROOT"
-
-if [ ! -f datasets/ETT-small/ETTh2.csv ]; then
-    if [ -f "$STORAGE_ROOT/datasets/ETT-small/ETTh2.csv" ]; then
-        echo "Symlinking datasets from PROJECT storage..."
-        ln -sf "$STORAGE_ROOT/datasets" "$PROJECT_ROOT/datasets"
-    else
-        echo "ERROR: Missing datasets/ETT-small/ETTh2.csv"
-        exit 1
-    fi
-fi
-
-cleanup() {
-    trap '' EXIT ERR SIGTERM SIGINT SIGUSR1
-    local code=${1:-$?}
-    [ "$code" -ne 0 ] && echo "[SLURM CLEANUP] $(date)"
-    kill -- -$$ 2>/dev/null || true
-    pkill -P $$ 2>/dev/null || true
-    wait 2>/dev/null || true
-}
-trap cleanup EXIT ERR SIGTERM SIGINT SIGUSR1
 
 EXTRA_ARGS=""
 for a in "$@"; do
@@ -134,18 +111,22 @@ for a in "$@"; do
     EXTRA_ARGS="$EXTRA_ARGS $a"
 done
 
+# Default: one modest epoch + bf16 (typical training); override after --
+DEFAULT_ARGS="--num-samples 512 --batch-size 8 --warmup-batches 3 --amp"
+if [ -z "$EXTRA_ARGS" ]; then
+    EXTRA_ARGS="$DEFAULT_ARGS"
+else
+    # User passed args only — still suggest --amp on GPU if they omitted it
+    echo "Using custom args:$EXTRA_ARGS"
+fi
+
 echo ""
-echo "Running: $PY -u -m models.diffusion_tsf.train_ci_latent_etth2 --stage all --cache-dir $CACHE_DIR $EXTRA_ARGS"
+echo "Running: $PY -u -m models.diffusion_tsf.benchmark_pixel_vs_latent_epoch $EXTRA_ARGS"
 echo ""
 
-"$PY" -u -m models.diffusion_tsf.train_ci_latent_etth2 \
-    --stage all \
-    --cache-dir "$CACHE_DIR" \
-    $EXTRA_ARGS
+"$PY" -u -m models.diffusion_tsf.benchmark_pixel_vs_latent_epoch $EXTRA_ARGS
 
 echo ""
 echo "=========================================="
 echo "Finished: $(date)"
-echo "Checkpoints: $PROJECT_ROOT/models/diffusion_tsf/checkpoints_ci_etth2/"
-echo "Results: $PROJECT_ROOT/models/diffusion_tsf/results/"
 echo "=========================================="
