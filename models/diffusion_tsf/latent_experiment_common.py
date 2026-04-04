@@ -31,10 +31,29 @@ FINETUNE_EPOCHS = 200
 FINETUNE_PATIENCE = 25
 SYNTHETIC_SAMPLES_FULL = 100_000
 
+# (csv path rel to datasets/, date column, seasonal period for time features, iTransformer embed freq)
 DATASET_REGISTRY = {
-    "ETTh1": ("ETT-small/ETTh1.csv", "date", 24),
-    "ETTh2": ("ETT-small/ETTh2.csv", "date", 24),
+    "ETTh1": ("ETT-small/ETTh1.csv", "date", 24, "h"),
+    "ETTh2": ("ETT-small/ETTh2.csv", "date", 24, "h"),
+    "ETTm1": ("ETT-small/ETTm1.csv", "date", 96, "t"),
+    "ETTm2": ("ETT-small/ETTm2.csv", "date", 96, "t"),
+    "exchange_rate": ("exchange_rate/exchange_rate.csv", "date", 5, "h"),
 }
+
+
+def dataset_registry_row(name: str) -> Tuple[str, str, int, str]:
+    row = DATASET_REGISTRY[name]
+    if len(row) == 3:
+        return row[0], row[1], row[2], "h"
+    return row[0], row[1], row[2], row[3]
+
+
+def random_exchange_variate_indices(seed: int, k: int = 7) -> List[int]:
+    """exchange_rate.csv has 8 numeric series (cols 0..6 and OT); pick k=7 without replacement."""
+    rng = np.random.RandomState(seed)
+    all_i = np.arange(8)
+    rng.shuffle(all_i)
+    return sorted(all_i[:k].tolist())
 
 logger = logging.getLogger(__name__)
 
@@ -103,13 +122,18 @@ def load_dataset(
     stride: int = 1,
     lookback_overlap: int = LOOKBACK_OVERLAP,
 ) -> Tuple[Dataset, Dataset, Dataset, Dict]:
-    path = _DATASETS_DIR / DATASET_REGISTRY[dataset_name][0]
-    date_col = DATASET_REGISTRY[dataset_name][1]
+    rel, date_col, _, _ = dataset_registry_row(dataset_name)
+    path = _DATASETS_DIR / rel
     df = pd.read_csv(path)
     data_cols = [c for c in df.columns if c != date_col]
     data = df[data_cols].values.astype(np.float32)
     if variate_indices is not None:
         data = data[:, variate_indices]
+    # Global z-score per column on the *entire* series before train/val/test split.
+    # LatentDiffusionTSF then applies a second, per-window norm (past mean/std) inside
+    # _normalize_sequence. iTransformer finetuning/eval uses only this global-normalized
+    # tensor from the loader — same space as guidance get_forecast(past).
+    # Note: stats include future test rows (mild transductive leakage), not a train/test mismatch.
     mean = data.mean(axis=0, keepdims=True)
     std = data.std(axis=0, keepdims=True) + 1e-8
     data = (data - mean) / std
@@ -147,6 +171,7 @@ def create_itransformer_config(
     e_layers: int = 4,
     n_heads: int = 8,
     dropout: float = 0.1,
+    freq: str = "h",
 ):
     class iTransConfig:
         def __init__(self):
@@ -161,7 +186,7 @@ def create_itransformer_config(
             self.dropout = dropout
             self.activation = "gelu"
             self.embed = "fixed"
-            self.freq = "h"
+            self.freq = freq
             self.factor = 1
             self.enc_in = num_vars
             self.class_strategy = "projection"
@@ -174,10 +199,11 @@ def create_itransformer(
     pred_len: int = FORECAST_LENGTH,
     num_vars: int = 1,
     dropout: float = 0.1,
+    freq: str = "h",
 ) -> nn.Module:
     Model = get_itransformer_class()
     config = create_itransformer_config(
-        seq_len=seq_len, pred_len=pred_len, num_vars=num_vars, dropout=dropout
+        seq_len=seq_len, pred_len=pred_len, num_vars=num_vars, dropout=dropout, freq=freq
     )
     return Model(config)
 

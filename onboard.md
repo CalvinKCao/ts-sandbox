@@ -19,12 +19,17 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
     ./slurm_unet_fullvar.sh --dataset electricity
     ```
 - `slurm_latent_experiment.sh`: Slurm wrapper for 1-var latent diffusion (`train_latent_experiment.py`). Uses `$PROJECT/$USER/diffusion-tsf/venv` like the other GPU jobs.
-- `slurm_ci_latent_etth1.sh`: CI (channel-independent) latent diffusion ablation on ETTh1 7-var. Submit guided vs unguided:
+- `slurm_ci_latent_multidataset.sh`: **one Slurm job** — reuses shared stages 0–2 under `checkpoints_ci_etth2/`, then stages 3–4 for ETTh1, ETTh2, ETTm1, ETTm2, and `exchange_rate` (7 of 8 columns, seed 42). Stage 4 uses **12 Optuna trials** (wide search space). Wall time default 7 days.
     ```bash
-    sbatch --job-name=ci-guided   slurm_ci_latent_etth1.sh
-    sbatch --job-name=ci-unguided slurm_ci_latent_etth1.sh -- --no-guidance
+    sbatch slurm_ci_latent_multidataset.sh
+    sbatch slurm_ci_latent_multidataset.sh -- --smoke-test
     ```
-- `slurm_ci_latent_etth2.sh`: Full 4-stage CI latent diffusion pipeline for ETTh2. Pretrain iTrans + diffusion on synthetic → finetune both on ETTh2 → eval finetuned diffusion vs finetuned iTrans.
+- `submit_ci_latent_multidataset_jobs.sh` (login node): submits **bootstrap** `slurm_ci_latent_bootstrap.sh` (stages 0–2, 2-day cap) then **five** `slurm_ci_latent_finetune_dataset.sh` jobs in parallel (`afterok` bootstrap), each 3-day cap — one job per dataset. Shared setup lives in `slurm_ci_latent_common.inc.sh`. Optional: `SBATCH_EXTRA="--time=24:00:00"` or `SBATCH_ACCOUNT=...` when submitting.
+    ```bash
+    ./submit_ci_latent_multidataset_jobs.sh
+    ./submit_ci_latent_multidataset_jobs.sh -- --smoke-test
+    ```
+- `slurm_ci_latent_etth2.sh`: Single-dataset ETTh2 full pipeline (passes `--shared-ckpt-dir` / `--run-ckpt-dir` like the multi script).
     ```bash
     sbatch slurm_ci_latent_etth2.sh                              # full run
     sbatch --job-name=ci-etth2-smoke slurm_ci_latent_etth2.sh -- --smoke-test
@@ -216,7 +221,8 @@ sbatch slurm_latent_experiment.sh
 - **2026-03-31 (cleanup):** Removed `legacy/` tree. Dropped extra viz scripts; kept `visualize_comparison.py` only. Trimmed `models/iTransformer/` to `iTransformer.py` + `layers/` + `utils/masking.py`.
 - **2026-03-31:** Full-variate training is `slurm_unet_fullvar.sh` only (inlined former `run_unet_fullvar.sh`). Removed `setup/setup.sh`.
 - **2026-03-29:** CI latent diffusion ETTh2 full pipeline. `train_ci_latent_etth2.py` + `slurm_ci_latent_etth2.sh` — 4-stage pipeline (pretrain iTrans on synth → pretrain diffusion with pretrained iTrans guidance → finetune iTrans on ETTh2 → finetune diffusion with finetuned iTrans + eval). Both eval baselines and diffusion guidance use the dataset-finetuned iTransformer, not the synthetic-pretrained one. Added ETTh2 to `latent_experiment_common.py` DATASET_REGISTRY.
-- **2026-03-27:** CI latent diffusion ablation. `train_ci_latent_etth1.py` + `slurm_ci_latent_etth1.sh` test channel-independent latent diffusion on ETTh1 (7-var). Each variate processed independently through shared univariate VAE + U-Net. Two variants: `--no-guidance` (pure diffusion) vs guided (iTransformer ghost images via `CIiTransformerGuidance` wrapper that unflattens batch for multivariate iTransformer). Fixed `in_ch` bug in `LatentDiffusionTSF` for `use_guidance_channel=False`.
+- **2026-04-04:** `slurm_ci_latent_multidataset.sh` + multi-`--dataset` support in `train_ci_latent_etth2.py`; removed `slurm_ci_latent_etth1.sh` (ETTh1 ablation still: `python -m models.diffusion_tsf.train_ci_latent_etth1`).
+- **2026-03-27:** CI latent ETTh1 ablation script `train_ci_latent_etth1.py` (guided vs `--no-guidance`). `CIiTransformerGuidance` batching; `LatentDiffusionTSF` `use_guidance_channel` fix.
 - **2026-03-15:** Full-variate U-Net path. `slurm_unet_fullvar.sh` trains U-Net directly on native-dim datasets (traffic=861, electricity=321) with bf16, H=96, 75K synth pool, 12 iTransformer HP trials. Cross-var augmentation auto-skipped for V>32. Synthetic pool disk caching via `cache_dir`. New CLI flags: `--synthetic-samples`, `--itransformer-trials`, `--subset-threshold`.
 - **2026-03-06:** Lookback overlap: diffusion model now predicts K=8 past steps alongside H=192 forecast to smooth boundary. Weighted loss (0.3× overlap, 1.0× forecast), trimmed at inference.
 - **2026-03-06:** Unified `train_multivariate_pipeline` modes: dimensionality groups (7/8/21/32), per-dim pretraining, multi-GPU subset fine-tuning, full-dim iTransformer baseline for high-variate comparison.

@@ -139,18 +139,26 @@ for a in "$@"; do
     EXTRA_ARGS="$EXTRA_ARGS $a"
 done
 
+DIFFUSION_TS="$PROJECT_ROOT/models/diffusion_tsf"
+SHARED="$DIFFUSION_TS/checkpoints_ci_etth2"
+RUNROOT="$DIFFUSION_TS/checkpoints_ci_runs"
+
 echo ""
-echo "Running: $PY -u -m models.diffusion_tsf.train_ci_latent_etth2 --stage all --cache-dir $CACHE_DIR $EXTRA_ARGS"
+echo "Running: $PY ... train_ci_latent_etth2 --dataset ETTh2 --stage all --shared-ckpt-dir $SHARED --run-ckpt-dir $RUNROOT $EXTRA_ARGS"
 echo ""
 
 "$PY" -u -m models.diffusion_tsf.train_ci_latent_etth2 \
+    --dataset ETTh2 \
     --stage all \
     --cache-dir "$CACHE_DIR" \
+    --shared-ckpt-dir "$SHARED" \
+    --run-ckpt-dir "$RUNROOT" \
     $EXTRA_ARGS
 
 echo ""
 echo "=========================================="
 echo "Finished: $(date)"
-echo "Checkpoints: $PROJECT_ROOT/models/diffusion_tsf/checkpoints_ci_etth2/"
-echo "Results: $PROJECT_ROOT/models/diffusion_tsf/results/"
+echo "Shared pretrain: $SHARED"
+echo "ETTh2 finetune:  $RUNROOT/ETTh2/"
+echo "Results: $DIFFUSION_TS/results/"
 echo "=========================================="

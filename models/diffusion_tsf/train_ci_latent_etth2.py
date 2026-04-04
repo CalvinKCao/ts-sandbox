@@ -18,6 +18,13 @@ Run from repo root:
   python -m models.diffusion_tsf.train_ci_latent_etth2 --stage 3   # just finetune itrans
   python -m models.diffusion_tsf.train_ci_latent_etth2 --stage 4   # redo diffusion finetune + eval (needs 0–3 ckpts)
   python -m models.diffusion_tsf.train_ci_latent_etth2 --stage 4 --stage4-trials 5   # Optuna on stage 4 only
+
+On disk (under models/diffusion_tsf/):
+  Shared pretrained (stages 1–2, default dir checkpoints_ci_etth2/):
+    itransformer_pretrained_synth.pt, diffusion_pretrained_H{96|128}.pt
+  Per-dataset finetune (default parent checkpoints_ci_runs/<run_tag>/):
+    itransformer_finetuned_<run_tag>.pt, diffusion_finetuned_<run_tag>_H*.pt
+  results/ci_latent_<run_tag>_H*.json — metrics, variate_indices (exchange), stage4_hparams / Optuna table.
 """
 
 from __future__ import annotations
@@ -26,9 +33,9 @@ import argparse
 import json
 import logging
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -61,6 +68,7 @@ from models.diffusion_tsf.dataset import get_synthetic_dataloader
 from models.diffusion_tsf.guidance import BaseGuidance
 from models.diffusion_tsf.latent_diffusion_model import LatentDiffusionTSF
 from models.diffusion_tsf.latent_experiment_common import (
+    DATASET_REGISTRY,
     FINETUNE_EPOCHS,
     FINETUNE_PATIENCE,
     FORECAST_LENGTH,
@@ -73,8 +81,10 @@ from models.diffusion_tsf.latent_experiment_common import (
     EarlyStopping,
     amp_context,
     create_itransformer,
+    dataset_registry_row,
     get_device,
     load_dataset,
+    random_exchange_variate_indices,
     save_itransformer_checkpoint,
     train_itransformer_epoch,
     validate_itransformer,
@@ -87,12 +97,69 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 CKPT_LATENT = _SCRIPT_DIR / "checkpoints_latent"
-CKPT_DIR = _SCRIPT_DIR / "checkpoints_ci_etth2"
 RESULTS_DIR = _SCRIPT_DIR / "results"
+_DEFAULT_SHARED = _SCRIPT_DIR / "checkpoints_ci_etth2"
+_DEFAULT_RUN_ROOT = _SCRIPT_DIR / "checkpoints_ci_runs"
 
 N_VARIATES = 7
-DATASET = "ETTh2"
 WANDB_PROJECT = "diffusion-tsf"
+
+
+@dataclass
+class CIRunContext:
+    dataset_name: str
+    run_tag: str
+    variate_indices: Optional[List[int]]
+    shared_ckpt_dir: Path
+    run_ckpt_dir: Path
+    seasonal_period: int
+    itransformer_freq: str
+
+
+_CTX: Optional[CIRunContext] = None
+
+
+def ctx() -> CIRunContext:
+    if _CTX is None:
+        raise RuntimeError("run context not set")
+    return _CTX
+
+
+def build_run_context(args: argparse.Namespace) -> CIRunContext:
+    name = args.dataset
+    if name not in DATASET_REGISTRY:
+        raise SystemExit(f"Unknown dataset {name!r}. Known: {sorted(DATASET_REGISTRY)}")
+
+    _, _, seasonal, embed_freq = dataset_registry_row(name)
+    variate_indices: Optional[List[int]] = None
+    if args.variate_indices:
+        variate_indices = [int(x.strip()) for x in args.variate_indices.split(",") if x.strip()]
+        if len(variate_indices) != N_VARIATES:
+            raise SystemExit(f"--variate-indices must list exactly {N_VARIATES} ints")
+        if name == "exchange_rate":
+            run_tag = "exchange_rate_v" + "_".join(str(i) for i in variate_indices)
+        else:
+            run_tag = name
+    elif name == "exchange_rate":
+        seed = args.exchange_seed if args.exchange_seed is not None else 42
+        variate_indices = random_exchange_variate_indices(seed, N_VARIATES)
+        run_tag = f"exchange_rate_s{seed}"
+    else:
+        run_tag = name
+
+    shared = Path(args.shared_ckpt_dir or _DEFAULT_SHARED).resolve()
+    run_parent = Path(args.run_ckpt_dir or _DEFAULT_RUN_ROOT).resolve()
+    run_dir = run_parent / run_tag
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return CIRunContext(
+        dataset_name=name,
+        run_tag=run_tag,
+        variate_indices=variate_indices,
+        shared_ckpt_dir=shared,
+        run_ckpt_dir=run_dir,
+        seasonal_period=seasonal,
+        itransformer_freq=embed_freq,
+    )
 
 # WANDB: set WANDB_API_KEY in the environment or ~/.bashrc (do not commit keys).
 try:
@@ -108,9 +175,10 @@ _wb_enabled = False
 def _wb_init(cfg, args):
     """Start a wandb run. Resumes from saved run_id if available."""
     global _wb_enabled
-    if not WANDB_OK or args.smoke_test:
+    if not WANDB_OK or args.smoke_test or getattr(args, "no_wandb", False):
         return
-    run_id_file = CKPT_DIR / "wandb_run_id.txt"
+    c = ctx()
+    run_id_file = c.run_ckpt_dir / "wandb_run_id.txt"
     run_id, resume = None, None
     if run_id_file.is_file():
         run_id = run_id_file.read_text().strip()
@@ -122,7 +190,7 @@ def _wb_init(cfg, args):
     if arch_path.is_file():
         arch_text = arch_path.read_text()[:3000]
 
-    run_name = f"{DATASET}-ci-latent-4stage-H{args.image_height}"
+    run_name = f"{c.run_tag}-ci-latent-H{args.image_height}"
     try:
         wandb.init(
             project=WANDB_PROJECT,
@@ -130,7 +198,9 @@ def _wb_init(cfg, args):
             id=run_id,
             resume=resume,
             config={
-                "dataset": DATASET,
+                "dataset": c.dataset_name,
+                "run_tag": c.run_tag,
+                "variate_indices": c.variate_indices,
                 "pipeline": "ci-latent-4stage",
                 "num_variates": N_VARIATES,
                 "image_height": cfg.image_height,
@@ -150,10 +220,9 @@ def _wb_init(cfg, args):
                 "cfg_scale": cfg.cfg_scale,
                 "architecture": arch_text,
             },
-            tags=[DATASET, "ci-latent", "4stage"],
+            tags=[c.run_tag, c.dataset_name, "ci-latent", "4stage"],
         )
-        # persist run_id for resume
-        CKPT_DIR.mkdir(parents=True, exist_ok=True)
+        c.run_ckpt_dir.mkdir(parents=True, exist_ok=True)
         run_id_file.write_text(wandb.run.id)
         _wb_enabled = True
         logger.info("wandb run: %s", wandb.run.url)
@@ -262,7 +331,7 @@ def _unified_2d(pixel_enc: PixelEncoder, past: torch.Tensor, future: torch.Tenso
 # config
 # ---------------------------------------------------------------------------
 
-def build_config(image_height: int) -> LatentDiffusionConfig:
+def build_config(image_height: int, seasonal_period: int = 24) -> LatentDiffusionConfig:
     horizon_pixels = FORECAST_LENGTH + LOOKBACK_OVERLAP
     return LatentDiffusionConfig(
         num_variables=1,
@@ -278,7 +347,7 @@ def build_config(image_height: int) -> LatentDiffusionConfig:
         use_value_channel=False,
         use_guidance_channel=True,
         use_hybrid_condition=True,
-        seasonal_period=24,
+        seasonal_period=seasonal_period,
         unet_channels=[64, 128, 256],
         attention_levels=[2],
         num_res_blocks=2,
@@ -362,7 +431,9 @@ def _ci_eval_loss(model, loader, device, V):
 
 
 def _build_ci_guidance(itrans_ckpt: Path, device: torch.device) -> CIiTransformerGuidance:
-    model = create_itransformer(num_vars=N_VARIATES, pred_len=FORECAST_LENGTH).to(device)
+    model = create_itransformer(
+        num_vars=N_VARIATES, pred_len=FORECAST_LENGTH, freq=ctx().itransformer_freq,
+    ).to(device)
     ckpt = torch.load(itrans_ckpt, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     return CIiTransformerGuidance(
@@ -471,8 +542,9 @@ def stage1_pretrain_itransformer(
     cache_dir: Optional[str],
     smoke_test: bool,
 ) -> Path:
-    CKPT_DIR.mkdir(parents=True, exist_ok=True)
-    ckpt_path = CKPT_DIR / "itransformer_pretrained_synth.pt"
+    sd = ctx().shared_ckpt_dir
+    sd.mkdir(parents=True, exist_ok=True)
+    ckpt_path = sd / "itransformer_pretrained_synth.pt"
     if ckpt_path.is_file():
         logger.info("Pretrained iTransformer exists: %s", ckpt_path)
         return ckpt_path
@@ -492,7 +564,9 @@ def stage1_pretrain_itransformer(
     val_dl = DataLoader(Subset(ds, list(range(len(ds) - n_val, len(ds)))),
                         batch_size=64 if not smoke_test else 8)
 
-    model = create_itransformer(num_vars=N_VARIATES, pred_len=FORECAST_LENGTH).to(device)
+    model = create_itransformer(
+        num_vars=N_VARIATES, pred_len=FORECAST_LENGTH, freq=ctx().itransformer_freq,
+    ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=PRETRAIN_EPOCHS if not smoke_test else 3, eta_min=1e-6)
@@ -535,7 +609,7 @@ def stage2_pretrain_diffusion(
     cache_dir: Optional[str],
     smoke_test: bool,
 ) -> Path:
-    out_path = CKPT_DIR / f"diffusion_pretrained_H{cfg.image_height}.pt"
+    out_path = ctx().shared_ckpt_dir / f"diffusion_pretrained_H{cfg.image_height}.pt"
     if out_path.is_file():
         logger.info("Pretrained diffusion exists: %s", out_path)
         return out_path
@@ -604,15 +678,16 @@ def stage3_finetune_itransformer(
     device: torch.device,
     smoke_test: bool,
 ) -> Path:
-    ckpt_path = CKPT_DIR / f"itransformer_finetuned_{DATASET}.pt"
+    c = ctx()
+    ckpt_path = c.run_ckpt_dir / f"itransformer_finetuned_{c.run_tag}.pt"
     if ckpt_path.is_file():
         logger.info("Finetuned iTransformer exists: %s", ckpt_path)
         return ckpt_path
 
-    logger.info("=== Stage 3: finetune iTransformer on %s ===", DATASET)
+    logger.info("=== Stage 3: finetune iTransformer on %s ===", c.dataset_name)
 
     train_ds, val_ds, _, _ = load_dataset(
-        DATASET, variate_indices=None,
+        c.dataset_name, variate_indices=c.variate_indices,
         lookback=LOOKBACK_LENGTH, horizon=FORECAST_LENGTH,
         stride=24 if not smoke_test else LOOKBACK_LENGTH,
         lookback_overlap=LOOKBACK_OVERLAP,
@@ -626,7 +701,9 @@ def stage3_finetune_itransformer(
     val_dl = DataLoader(val_ds, batch_size=bs, shuffle=False, num_workers=0)
 
     # init from pretrained weights
-    model = create_itransformer(num_vars=N_VARIATES, pred_len=FORECAST_LENGTH).to(device)
+    model = create_itransformer(
+        num_vars=N_VARIATES, pred_len=FORECAST_LENGTH, freq=c.itransformer_freq,
+    ).to(device)
     ckpt = torch.load(itrans_pretrained, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
 
@@ -642,13 +719,14 @@ def stage3_finetune_itransformer(
     for ep in range(epochs):
         tr = train_itransformer_epoch(model, train_dl, opt, criterion, device, sched)
         va = validate_itransformer(model, val_dl, criterion, device)
-        logger.info("[iTrans finetune %s] ep %d  train=%.4f  val=%.4f", DATASET, ep + 1, tr, va)
+        logger.info("[iTrans finetune %s] ep %d  train=%.4f  val=%.4f", c.run_tag, ep + 1, tr, va)
         _wb_log({"s3_itrans_finetune/train_loss": tr, "s3_itrans_finetune/val_loss": va})
         if va < best_val:
             best_val = va
             save_itransformer_checkpoint(
                 model, opt, ep, tr, va,
-                {"num_variates": N_VARIATES, "lr": 5e-5, "dataset": DATASET,
+                {"num_variates": N_VARIATES, "lr": 5e-5, "dataset": c.dataset_name,
+                 "run_tag": c.run_tag, "variate_indices": c.variate_indices,
                  "init_from": str(itrans_pretrained)},
                 ckpt_path,
             )
@@ -727,7 +805,7 @@ def _stage4_run_training(
         suf = f" {trial_tag}" if trial_tag else ""
         logger.info(
             "[Diffusion finetune %s]%s ep %d  train=%.4f  val=%.4f",
-            DATASET, suf, ep + 1, tr, va,
+            ctx().run_tag, suf, ep + 1, tr, va,
         )
         _wb_log({"s4_diff_finetune/train_loss": tr, "s4_diff_finetune/val_loss": va})
         if va < min_val_seen:
@@ -750,10 +828,14 @@ def stage4_finetune_eval(
     smoke_test: bool,
     stage4_trials: int = 0,
 ) -> Dict:
-    logger.info("=== Stage 4: finetune diffusion on %s (guidance = finetuned iTrans) ===", DATASET)
+    c = ctx()
+    logger.info(
+        "=== Stage 4: finetune diffusion on %s (guidance = finetuned iTrans) ===",
+        c.dataset_name,
+    )
 
     train_ds, val_ds, test_ds, _ = load_dataset(
-        DATASET, variate_indices=None,
+        c.dataset_name, variate_indices=c.variate_indices,
         lookback=LOOKBACK_LENGTH, horizon=FORECAST_LENGTH,
         stride=24 if not smoke_test else LOOKBACK_LENGTH,
         lookback_overlap=LOOKBACK_OVERLAP,
@@ -774,15 +856,16 @@ def stage4_finetune_eval(
             raise SystemExit("install optuna: pip install optuna")
 
         global_best: Dict = {"min_val": float("inf"), "state": None, "params": None}
+        s4_trial_history: list = []
 
         def objective(trial) -> float:
-            lr = trial.suggest_float("s4_lr", 3e-6, 3e-4, log=True)
-            batch_size = trial.suggest_categorical("s4_batch_size", [2, 4, 8])
-            weight_decay = trial.suggest_float("s4_weight_decay", 1e-8, 1e-2, log=True)
-            grad_clip = trial.suggest_categorical("s4_grad_clip", [0.5, 1.0, 2.0])
-            max_epochs = 60
-            patience = 15
-            min_delta = 1e-4
+            lr = trial.suggest_float("s4_lr", 1e-6, 5e-4, log=True)
+            batch_size = trial.suggest_categorical("s4_batch_size", [1, 2, 4, 8, 16])
+            weight_decay = trial.suggest_float("s4_weight_decay", 1e-8, 1e-1, log=True)
+            grad_clip = trial.suggest_categorical("s4_grad_clip", [0.25, 0.5, 1.0, 2.0, 4.0])
+            max_epochs = trial.suggest_int("s4_max_epochs", 40, 120)
+            patience = trial.suggest_int("s4_patience", 8, 28)
+            min_delta = trial.suggest_float("s4_min_delta", 1e-5, 1e-3, log=True)
             tag = f"trial{trial.number}"
             min_v, st = _stage4_run_training(
                 cfg, vae, itrans_finetuned, diffusion_pretrained, device,
@@ -801,11 +884,18 @@ def stage4_finetune_eval(
                 "s4_batch_size": batch_size,
                 "s4_weight_decay": weight_decay,
                 "s4_grad_clip": grad_clip,
+                "s4_max_epochs": max_epochs,
+                "s4_patience": patience,
+                "s4_min_delta": min_delta,
             }
             if min_v < global_best["min_val"]:
                 global_best["min_val"] = min_v
                 global_best["state"] = st
                 global_best["params"] = params.copy()
+            hist = {"trial": int(trial.number), "min_val_loss": float(min_v)}
+            for k, v in params.items():
+                hist[k] = float(v) if isinstance(v, float) else int(v) if isinstance(v, int) else v
+            s4_trial_history.append(hist)
             _wb_log({
                 "s4_optuna/trial": trial.number,
                 "s4_optuna/trial_min_val": min_v,
@@ -821,6 +911,10 @@ def stage4_finetune_eval(
             study.best_value,
             study.best_params,
         )
+        logger.info(
+            "Stage4 trial table (min val loss per trial):\n%s",
+            json.dumps(s4_trial_history, indent=2),
+        )
         best_state = global_best["state"]
         if best_state is None:
             raise RuntimeError("Stage4 Optuna finished with no saved state (unexpected).")
@@ -830,6 +924,7 @@ def stage4_finetune_eval(
             "s4_optuna_best_value": float(study.best_value),
             "s4_optuna_best_trial": int(study.best_trial.number),
             "s4_optuna_best_params": dict(study.best_params),
+            "s4_optuna_trial_history": s4_trial_history,
         }
     else:
         max_epochs = 2 if smoke_test else min(50, FINETUNE_EPOCHS)
@@ -859,13 +954,15 @@ def stage4_finetune_eval(
     model = _stage4_make_model(cfg, vae, itrans_finetuned, diffusion_pretrained, device)
     model.load_state_dict({k: t.to(device) for k, t in best_state.items()})
 
-    finetuned_path = CKPT_DIR / f"diffusion_finetuned_{DATASET}_H{cfg.image_height}.pt"
+    finetuned_path = c.run_ckpt_dir / f"diffusion_finetuned_{c.run_tag}_H{cfg.image_height}.pt"
     torch.save({
         "model_state_dict": model.state_dict(),
         "config": asdict(cfg),
         "vae_scale_factor": vae.scale_factor.detach().cpu(),
         "guidance_source": str(itrans_finetuned),
-        "dataset": DATASET,
+        "dataset": c.dataset_name,
+        "run_tag": c.run_tag,
+        "variate_indices": c.variate_indices,
         "stage4_hparams": best_hparams,
     }, finetuned_path)
     logger.info("Finetuned diffusion (best val checkpoint) → %s", finetuned_path)
@@ -887,7 +984,7 @@ def stage4_finetune_eval(
     y_true = torch.cat(trues_ci, 0)
     ci_mse = F.mse_loss(y_hat_ci, y_true)
     ci_mae = F.l1_loss(y_hat_ci, y_true)
-    logger.info("[%s] CI diffusion (finetuned)  MSE=%.6f  MAE=%.6f", DATASET, ci_mse.item(), ci_mae.item())
+    logger.info("[%s] CI diffusion (finetuned)  MSE=%.6f  MAE=%.6f", c.run_tag, ci_mse.item(), ci_mae.item())
 
     per_var = {}
     for vi in range(N_VARIATES):
@@ -896,7 +993,9 @@ def stage4_finetune_eval(
         per_var[f"var{vi}_mae"] = _scalar(m["mae"])
 
     # ---- eval: finetuned iTransformer baseline (same checkpoint as guidance) ----
-    itrans_model = create_itransformer(num_vars=N_VARIATES, pred_len=FORECAST_LENGTH).to(device)
+    itrans_model = create_itransformer(
+        num_vars=N_VARIATES, pred_len=FORECAST_LENGTH, freq=c.itransformer_freq,
+    ).to(device)
     itc = torch.load(itrans_finetuned, map_location=device, weights_only=False)
     itrans_model.load_state_dict(itc["model_state_dict"])
     itrans_model.eval()
@@ -915,7 +1014,7 @@ def stage4_finetune_eval(
     y_true_it = torch.cat(trues_it, 0)
     it_mse = F.mse_loss(y_hat_it, y_true_it)
     it_mae = F.l1_loss(y_hat_it, y_true_it)
-    logger.info("[%s] iTransformer (finetuned)  MSE=%.6f  MAE=%.6f", DATASET, it_mse.item(), it_mae.item())
+    logger.info("[%s] iTransformer (finetuned)  MSE=%.6f  MAE=%.6f", c.run_tag, it_mse.item(), it_mae.item())
 
     _wb_log({
         "eval/ci_diffusion_mse": _scalar(ci_mse),
@@ -932,7 +1031,11 @@ def stage4_finetune_eval(
     })
 
     return {
-        "dataset": DATASET,
+        "dataset": c.dataset_name,
+        "run_tag": c.run_tag,
+        "variate_indices": c.variate_indices,
+        "shared_ckpt_dir": str(c.shared_ckpt_dir),
+        "run_ckpt_dir": str(c.run_ckpt_dir),
         "finetuned_diffusion_ckpt": str(finetuned_path),
         "finetuned_itrans_ckpt": str(itrans_finetuned),
         "ci_diffusion_mse": _scalar(ci_mse),
@@ -945,7 +1048,7 @@ def stage4_finetune_eval(
         "test_stride": 24,
         "per_variate": per_var,
         "stage4_hparams": best_hparams,
-        "note": "Both diffusion and iTransformer baseline are finetuned on ETTh2. Fair comparison.",
+        "note": "Diffusion and iTransformer finetuned on the target dataset; compare fairly.",
     }
 
 
@@ -954,40 +1057,82 @@ def stage4_finetune_eval(
 # ---------------------------------------------------------------------------
 
 def main():
-    p = argparse.ArgumentParser(description=f"CI latent diffusion full pipeline on {DATASET}")
+    global _CTX
+    p = argparse.ArgumentParser(
+        description="CI latent diffusion: shared synthetic stages 1–2, per-dataset stages 3–4.",
+    )
     p.add_argument("--smoke-test", action="store_true")
     p.add_argument("--image-height", type=int, choices=[96, 128], default=128)
     p.add_argument("--stage", type=str, default="all",
                    choices=["0", "1", "2", "3", "4", "all"])
     p.add_argument("--cache-dir", type=str, default=None)
     p.add_argument(
+        "--dataset",
+        type=str,
+        default="ETTh2",
+        help="Target dataset key (ETTh1, ETTh2, ETTm1, ETTm2, exchange_rate).",
+    )
+    p.add_argument(
+        "--shared-ckpt-dir",
+        type=str,
+        default=None,
+        help="Directory with itransformer_pretrained_synth.pt and diffusion_pretrained_H*.pt (default: checkpoints_ci_etth2 next to this file).",
+    )
+    p.add_argument(
+        "--run-ckpt-dir",
+        type=str,
+        default=None,
+        help="Parent directory for per-run finetune checkpoints (subdirs = run_tag). Default: checkpoints_ci_runs/",
+    )
+    p.add_argument(
+        "--exchange-seed",
+        type=int,
+        default=None,
+        help="For exchange_rate: seed to draw 7 variates from 8 columns (default 42).",
+    )
+    p.add_argument(
+        "--variate-indices",
+        type=str,
+        default=None,
+        help="Comma-separated exactly 7 column indices (overrides exchange-rate random subset).",
+    )
+    p.add_argument(
         "--stage4-trials",
         type=int,
-        default=0,
-        help="Optuna trials for stage-4 diffusion finetune only (0 = one run with default hparams). Ignored with --smoke-test.",
+        default=12,
+        help="Optuna trials for stage-4 diffusion finetune (0 = single run, default 12). Ignored with --smoke-test.",
+    )
+    p.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Skip wandb (e.g. silent bootstrap stages in a multi-invocation shell driver).",
     )
     args = p.parse_args()
 
+    _CTX = build_run_context(args)
+    c = ctx()
+
     device = get_device()
-    cfg = build_config(args.image_height)
-    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    cfg = build_config(args.image_height, c.seasonal_period)
+    c.run_ckpt_dir.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     _wb_init(cfg, args)
 
     n_syn = 500 if args.smoke_test else SYNTHETIC_SAMPLES_FULL
-    cache = args.cache_dir or str(CKPT_DIR / "synth_cache")
+    cache = args.cache_dir or str(c.shared_ckpt_dir / "synth_cache")
     stages = {"0", "1", "2", "3", "4"} if args.stage == "all" else {args.stage}
 
     logger.info(
-        "CI latent %s: stages=%s smoke=%s H=%s device=%s",
-        DATASET, ",".join(sorted(stages)), args.smoke_test, args.image_height, device,
+        "CI latent run_tag=%s dataset=%s variates=%s stages=%s smoke=%s H=%s device=%s",
+        c.run_tag, c.dataset_name, c.variate_indices, ",".join(sorted(stages)),
+        args.smoke_test, args.image_height, device,
     )
 
-    itrans_pretrained = CKPT_DIR / "itransformer_pretrained_synth.pt"
-    itrans_finetuned = CKPT_DIR / f"itransformer_finetuned_{DATASET}.pt"
-    diff_pretrained = CKPT_DIR / f"diffusion_pretrained_H{args.image_height}.pt"
-    results_path = RESULTS_DIR / f"ci_latent_{DATASET}_H{args.image_height}.json"
+    itrans_pretrained = c.shared_ckpt_dir / "itransformer_pretrained_synth.pt"
+    itrans_finetuned = c.run_ckpt_dir / f"itransformer_finetuned_{c.run_tag}.pt"
+    diff_pretrained = c.shared_ckpt_dir / f"diffusion_pretrained_H{args.image_height}.pt"
+    results_path = RESULTS_DIR / f"ci_latent_{c.run_tag}_H{args.image_height}.json"
 
     vae = None
 
@@ -1007,7 +1152,7 @@ def main():
             raise SystemExit(f"Missing {itrans_pretrained} (run stage 1)")
         stage2_pretrain_diffusion(cfg, vae, itrans_pretrained, device, n_syn, cache, args.smoke_test)
 
-    # stage 3: finetune iTransformer on ETTh2
+    # stage 3: finetune iTransformer on target dataset
     if "3" in stages:
         if not itrans_pretrained.is_file():
             raise SystemExit(f"Missing {itrans_pretrained} (run stage 1)")

@@ -296,6 +296,8 @@ class LatentDiffusionTSF(nn.Module):
         K = self.config.lookback_overlap
         H = forecast_length - K
         mean, std = stats
+        # past = loader space (global z-score for real data; synthetic scale for pretrain).
+        # Guidance is trained on that same space. Local (mean,std) matches _normalize_sequence.
         with torch.no_grad():
             coarse = self.guidance_model.get_forecast(past, H)
         coarse_norm = (coarse - mean) / std

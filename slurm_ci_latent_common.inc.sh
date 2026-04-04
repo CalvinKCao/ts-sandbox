@@ -1,42 +1,5 @@
-#!/bin/bash
-#SBATCH --job-name=ci-latent-etth1
-#SBATCH --account=aip-boyuwang
-#SBATCH --gres=gpu:l40s:1
-#SBATCH --time=3-00:00:00
-#SBATCH --nodes=1
-#SBATCH --cpus-per-task=6
-#SBATCH --mem=50G
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
-#SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=ccao87@uwo.ca
-#SBATCH --signal=B:USR1@120
-
-# =============================================================================
-# CI latent diffusion ablation on ETTh1 — guided vs unguided
-# =============================================================================
-#
-# Submit BOTH variants:
-#   sbatch --job-name=ci-guided   slurm_ci_latent_etth1.sh
-#   sbatch --job-name=ci-unguided slurm_ci_latent_etth1.sh -- --no-guidance
-#
-# Smoke test:
-#   sbatch --job-name=ci-smoke slurm_ci_latent_etth1.sh -- --smoke-test
-#
-# They share the same VAE and iTransformer checkpoints, so safe to run in
-# parallel (first one to reach training creates the checkpoint, second one
-# loads it).
-# =============================================================================
-
-set -e
-export PYTHONUNBUFFERED=1
-
-echo "=========================================="
-echo "Job ID: $SLURM_JOB_ID"
-echo "Node: $SLURMD_NODENAME"
-echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo 'unknown')"
-echo "Started: $(date)"
-echo "=========================================="
+# Sourced by slurm_ci_latent_*.sh after the caller sets EXTRA_ARGS (string, e.g. " --smoke-test").
+# Caller should: set -e; export PYTHONUNBUFFERED=1; parse "$@" into EXTRA_ARGS; then source this file.
 
 module purge
 module load StdEnv/2023
@@ -55,7 +18,7 @@ fi
 
 if [ -z "$PROJECT" ]; then
     if [ -d "$HOME/projects" ]; then
-        FIRST_PROJECT=$(ls -d $HOME/projects/def-* $HOME/projects/aip-* 2>/dev/null | head -1)
+        FIRST_PROJECT=$(ls -d "$HOME/projects/def-"* "$HOME/projects/aip-"* 2>/dev/null | head -1)
         [ -n "$FIRST_PROJECT" ] && export PROJECT=$(readlink -f "$FIRST_PROJECT")
     fi
 fi
@@ -91,21 +54,22 @@ if ! "$PY" -c "import torch" 2>/dev/null; then
     [ -f "$PROJECT_ROOT/requirements.txt" ] && pip install -r "$PROJECT_ROOT/requirements.txt"
 fi
 echo "Python: $($PY -c 'import sys; print(sys.executable)')"
-echo "Torch: $($PY -c 'import torch; print(torch.__version__)')"
 
 CACHE_DIR="$STORAGE_ROOT/synthetic_cache/ci_latent"
 mkdir -p "$CACHE_DIR"
 
 cd "$PROJECT_ROOT"
 
-if [ ! -f datasets/ETT-small/ETTh1.csv ]; then
-    if [ -f "$STORAGE_ROOT/datasets/ETT-small/ETTh1.csv" ]; then
+if [ ! -d "$PROJECT_ROOT/datasets/ETT-small" ] || [ ! -d "$PROJECT_ROOT/datasets/exchange_rate" ]; then
+    if [ -d "$STORAGE_ROOT/datasets" ]; then
         echo "Symlinking datasets from PROJECT storage..."
         ln -sf "$STORAGE_ROOT/datasets" "$PROJECT_ROOT/datasets"
-    else
-        echo "ERROR: Missing datasets/ETT-small/ETTh1.csv"
-        exit 1
     fi
+fi
+
+if [ ! -f "$PROJECT_ROOT/datasets/ETT-small/ETTh1.csv" ]; then
+    echo "ERROR: Missing datasets (expected datasets/ETT-small/*.csv)"
+    exit 1
 fi
 
 cleanup() {
@@ -118,24 +82,20 @@ cleanup() {
 }
 trap cleanup EXIT ERR SIGTERM SIGINT SIGUSR1
 
-EXTRA_ARGS=""
-for a in "$@"; do
-    [ "$a" = "--" ] && continue
-    EXTRA_ARGS="$EXTRA_ARGS $a"
-done
+DIFFUSION_TS="$PROJECT_ROOT/models/diffusion_tsf"
+SHARED="$DIFFUSION_TS/checkpoints_ci_etth2"
+RUNROOT="$DIFFUSION_TS/checkpoints_ci_runs"
+IMAGE_H=128
+STAGE4_TRIALS=12
+EXCHANGE_SEED=42
 
-echo ""
-echo "Running: $PY -u -m models.diffusion_tsf.train_ci_latent_etth1 --stage all --cache-dir $CACHE_DIR $EXTRA_ARGS"
-echo ""
+mkdir -p "$SHARED" "$RUNROOT"
 
-"$PY" -u -m models.diffusion_tsf.train_ci_latent_etth1 \
-    --stage all \
-    --cache-dir "$CACHE_DIR" \
-    $EXTRA_ARGS
-
-echo ""
-echo "=========================================="
-echo "Finished: $(date)"
-echo "Checkpoints: $PROJECT_ROOT/models/diffusion_tsf/checkpoints_ci_latent/"
-echo "Results: $PROJECT_ROOT/models/diffusion_tsf/results/"
-echo "=========================================="
+run_py() {
+    "$PY" -u -m models.diffusion_tsf.train_ci_latent_etth2 \
+        --cache-dir "$CACHE_DIR" \
+        --shared-ckpt-dir "$SHARED" \
+        --run-ckpt-dir "$RUNROOT" \
+        --image-height "$IMAGE_H" \
+        "$@"
+}
