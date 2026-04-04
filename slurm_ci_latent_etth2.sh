@@ -25,6 +25,11 @@
 # Submit:
 #   sbatch slurm_ci_latent_etth2.sh
 #
+# Wall time: #SBATCH --time=... below is the default. To shorten the limit, pass
+# sbatch options BEFORE the script name (anything after the script goes to Python):
+#   sbatch --time=8:00:00 slurm_ci_latent_etth2.sh -- --stage 4
+#   sbatch --time=8:00:00 slurm_ci_latent_etth2.sh -- --stage 4 --stage4-trials 5
+#
 # Smoke test:
 #   sbatch --job-name=ci-etth2-smoke slurm_ci_latent_etth2.sh -- --smoke-test
 #

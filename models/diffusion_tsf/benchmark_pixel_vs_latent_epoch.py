@@ -14,10 +14,12 @@ Run from repo root:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Tuple
 
@@ -46,6 +48,15 @@ def _sync_cuda():
         torch.cuda.synchronize()
 
 
+def _autocast_ctx(device: torch.device, amp: bool):
+    if not amp or device.type != "cuda":
+        return nullcontext()
+    try:
+        return torch.amp.autocast("cuda", dtype=torch.bfloat16)
+    except AttributeError:
+        return torch.cuda.amp.autocast(dtype=torch.bfloat16)
+
+
 def _run_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -57,21 +68,20 @@ def _run_epoch(
     n_batches = 0
     _sync_cuda()
     t0 = time.perf_counter()
-    scaler = torch.cuda.amp.GradScaler(enabled=amp)
+    scaler = torch.cuda.amp.GradScaler(enabled=amp and device.type == "cuda")
     for past, future in loader:
         past = past.to(device, non_blocking=True)
         future = future.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
-        if amp:
-            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                out = model(past, future)
-                loss = out["loss"]
+        with _autocast_ctx(device, amp):
+            out = model(past, future)
+            loss = out["loss"]
+        if amp and device.type == "cuda":
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            out = model(past, future)
-            out["loss"].backward()
+            loss.backward()
             optimizer.step()
         n_batches += 1
     _sync_cuda()
@@ -89,6 +99,7 @@ def _warmup(
 ) -> None:
     it = iter(loader)
     model.train()
+    scaler = torch.cuda.amp.GradScaler(enabled=amp and device.type == "cuda")
     for _ in range(n_batches):
         try:
             past, future = next(it)
@@ -98,19 +109,35 @@ def _warmup(
         past = past.to(device, non_blocking=True)
         future = future.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
-        if amp:
-            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                loss = model(past, future)["loss"]
-            loss.backward()
+        with _autocast_ctx(device, amp):
+            loss = model(past, future)["loss"]
+        if amp and device.type == "cuda":
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
         else:
-            model(past, future)["loss"].backward()
-        optimizer.step()
+            loss.backward()
+            optimizer.step()
     _sync_cuda()
+
+
+def _free_cuda(*objs):
+    for o in objs:
+        del o
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 def main():
     p = argparse.ArgumentParser(description="Benchmark one epoch pixel vs latent diffusion")
-    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Default 1: unified L+F at H=128×~1224 is VRAM-heavy on ~48GB GPUs.",
+    )
     p.add_argument("--num-samples", type=int, default=512, help="Synthetic dataset size (one epoch)")
     p.add_argument("--warmup-batches", type=int, default=3)
     p.add_argument("--lookback-length", type=int, default=1024)
@@ -201,25 +228,26 @@ def main():
         skip_cross_var_aug=True,
     )
 
+    # Pixel model alone first — loading latent + VAE at the same time OOMs ~48GB GPUs.
     pixel_model = DiffusionTSF(pixel_cfg, guidance_model=guidance).to(device)
+    opt_p = torch.optim.AdamW(pixel_model.parameters(), lr=args.lr)
+    n_params_pixel = sum(x.numel() for x in pixel_model.parameters())
+
+    _warmup(pixel_model, loader, opt_p, device, args.amp, args.warmup_batches)
+    n_p, t_p = _run_epoch(pixel_model, loader, opt_p, device, args.amp)
+    _free_cuda(pixel_model, opt_p)
+
     vae = TimeSeriesVAE(latent_channels=latent_cfg.latent_channels).to(device)
     latent_model = LatentDiffusionTSF(latent_cfg, vae, guidance_model=guidance).to(device)
-
-    opt_p = torch.optim.AdamW(pixel_model.parameters(), lr=args.lr)
     opt_l = torch.optim.AdamW(
         [x for x in latent_model.parameters() if x.requires_grad],
         lr=args.lr,
     )
-
-    _warmup(pixel_model, loader, opt_p, device, args.amp, args.warmup_batches)
-    n_p, t_p = _run_epoch(pixel_model, loader, opt_p, device, args.amp)
+    n_params_latent_train = sum(x.numel() for x in latent_model.parameters() if x.requires_grad)
+    n_params_vae = sum(x.numel() for x in vae.parameters())
 
     _warmup(latent_model, loader, opt_l, device, args.amp, args.warmup_batches)
     n_l, t_l = _run_epoch(latent_model, loader, opt_l, device, args.amp)
-
-    n_params_pixel = sum(x.numel() for x in pixel_model.parameters())
-    n_params_latent_train = sum(x.numel() for x in latent_model.parameters() if x.requires_grad)
-    n_params_vae = sum(x.numel() for x in vae.parameters())
 
     summary = {
         "device": str(device),
@@ -242,7 +270,7 @@ def main():
         "params_pixel_total": n_params_pixel,
         "params_latent_trainable": n_params_latent_train,
         "params_vae_frozen": n_params_vae,
-        "note": "Univariate synthetic RealTS; unified_time_axis=True; LinearRegressionGuidance; matched U-Net channels.",
+        "note": "Univariate RealTS; unified L+F; LinearRegressionGuidance; matched U-Net widths. Pixel then latent loaded sequentially on GPU.",
     }
 
     print("\n" + "=" * 72)

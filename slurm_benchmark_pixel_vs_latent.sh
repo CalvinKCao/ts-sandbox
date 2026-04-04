@@ -29,6 +29,8 @@
 
 set -e
 export PYTHONUNBUFFERED=1
+# Reduce fragmentation OOMs on long-sequence U-Nets (PyTorch 2.x+)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 cleanup() {
     trap '' EXIT ERR SIGTERM SIGINT SIGUSR1
@@ -111,8 +113,8 @@ for a in "$@"; do
     EXTRA_ARGS="$EXTRA_ARGS $a"
 done
 
-# Default: one modest epoch + bf16 (typical training); override after --
-DEFAULT_ARGS="--num-samples 512 --batch-size 8 --warmup-batches 3 --amp"
+# Default: batch 1 — unified 128×(L+F) pixel U-Net is VRAM-heavy on ~48GB GPUs
+DEFAULT_ARGS="--num-samples 512 --batch-size 1 --warmup-batches 2 --amp"
 if [ -z "$EXTRA_ARGS" ]; then
     EXTRA_ARGS="$DEFAULT_ARGS"
 else
