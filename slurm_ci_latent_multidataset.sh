@@ -41,9 +41,21 @@ for a in "$@"; do
     EXTRA_ARGS="$EXTRA_ARGS $a"
 done
 
-_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_INC=""
+if [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "${SLURM_SUBMIT_DIR}/slurm_ci_latent_common.inc.sh" ]; then
+    _INC="${SLURM_SUBMIT_DIR}/slurm_ci_latent_common.inc.sh"
+else
+    _SD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -f "${_SD}/slurm_ci_latent_common.inc.sh" ]; then
+        _INC="${_SD}/slurm_ci_latent_common.inc.sh"
+    fi
+fi
+if [ -z "$_INC" ]; then
+    echo "ERROR: slurm_ci_latent_common.inc.sh not found. Run sbatch from repo root."
+    exit 1
+fi
 # shellcheck source=slurm_ci_latent_common.inc.sh
-source "$_SCRIPT_DIR/slurm_ci_latent_common.inc.sh"
+source "$_INC"
 
 echo ""
 echo "Shared dir: $SHARED"

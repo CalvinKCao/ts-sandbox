@@ -13,6 +13,7 @@ Important: the pretrained iTransformer is ONLY used during stage 2 (synthetic di
 pretraining). After stage 3, all downstream work uses the ETTh2-finetuned iTransformer.
 
 Run from repo root:
+  python -m models.diffusion_tsf.ci_latent_precheck --no-cuda   # fast import/dataset check (login node)
   python -m models.diffusion_tsf.train_ci_latent_etth2 --smoke-test
   python -m models.diffusion_tsf.train_ci_latent_etth2 --stage all
   python -m models.diffusion_tsf.train_ci_latent_etth2 --stage 3   # just finetune itrans

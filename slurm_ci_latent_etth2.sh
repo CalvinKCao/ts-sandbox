@@ -2,7 +2,7 @@
 #SBATCH --job-name=ci-etth2
 #SBATCH --account=aip-boyuwang
 #SBATCH --gres=gpu:l40s:1
-#SBATCH --time=3-00:00:00
+#SBATCH --time=36:00:00
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=50G

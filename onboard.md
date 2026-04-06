@@ -24,11 +24,13 @@ diffusion for time series. treats time series like 2D images (stripes/occupancy 
     sbatch slurm_ci_latent_multidataset.sh
     sbatch slurm_ci_latent_multidataset.sh -- --smoke-test
     ```
-- `submit_ci_latent_multidataset_jobs.sh` (login node): submits **bootstrap** `slurm_ci_latent_bootstrap.sh` (stages 0–2, 2-day cap) then **five** `slurm_ci_latent_finetune_dataset.sh` jobs in parallel (`afterok` bootstrap), each 3-day cap — one job per dataset. Shared setup lives in `slurm_ci_latent_common.inc.sh`. Optional: `SBATCH_EXTRA="--time=24:00:00"` or `SBATCH_ACCOUNT=...` when submitting.
+- `submit_ci_latent_multidataset_jobs.sh` (login node): submits **bootstrap** `slurm_ci_latent_bootstrap.sh` (stages 0–2, 2-day cap) then **five** `slurm_ci_latent_finetune_dataset.sh` jobs in parallel (`afterok` bootstrap) — one job per dataset. **Finetune default wall is 36h** in `slurm_ci_latent_finetune_dataset.sh` (override with `sbatch --time=...` or `SBATCH_EXTRA`). Shared setup: `slurm_ci_latent_common.inc.sh`.
     ```bash
     ./submit_ci_latent_multidataset_jobs.sh
     ./submit_ci_latent_multidataset_jobs.sh -- --smoke-test
+    ./submit_ci_latent_multidataset_jobs.sh --precheck   # short GPU job: imports + CUDA + CSVs
     ```
+- `python -m models.diffusion_tsf.ci_latent_precheck` — same checks without Slurm (`--no-cuda` on login; `--require-cuda` on a GPU node; `--dataset ETTh2` checks only that registry CSV). `slurm_ci_latent_precheck.sh` sources `common.inc` and runs that module with `--require-cuda`; forward args after `--` (e.g. `--dataset ETTh2`).
 - `slurm_ci_latent_etth2.sh`: Single-dataset ETTh2 full pipeline (passes `--shared-ckpt-dir` / `--run-ckpt-dir` like the multi script).
     ```bash
     sbatch slurm_ci_latent_etth2.sh                              # full run
