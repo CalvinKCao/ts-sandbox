@@ -1,6 +1,9 @@
 """
 ETTh2 CI latent: plot test windows — ground truth vs finetuned iTransformer vs finetuned diffusion.
 
+Shaded band + markers: last K=lookback_overlap steps where diffusion is trained to reconstruct
+the known past tail (compare grey past line vs diffusion (overlap recon) on the same x range).
+
 Uses the same splits / stride as training (stride=24 on test). Denormalizes with the global
 mean/std from load_dataset so the y-axis matches real units.
 
@@ -184,9 +187,20 @@ def main():
         B = 1
         past_flat = past.reshape(B * N_VARIATES, LOOKBACK_LENGTH)
 
+        K = LOOKBACK_OVERLAP
         with torch.no_grad():
-            gen = model.generate(past_flat, num_ddim_steps=args.ddim_steps)
-            pred_diff = gen["prediction"].squeeze(1).reshape(B, N_VARIATES, FORECAST_LENGTH)
+            gen = model.generate(
+                past_flat,
+                num_ddim_steps=args.ddim_steps,
+                trim_lookback_overlap=False if K > 0 else True,
+            )
+            pred_flat = gen["prediction"].squeeze(1).reshape(B, N_VARIATES, -1)
+            if K > 0:
+                pred_diff_overlap = pred_flat[:, :, :K]
+                pred_diff = pred_flat[:, :, K:]
+            else:
+                pred_diff_overlap = None
+                pred_diff = pred_flat
 
             x_enc = past.permute(0, 2, 1)
             y_it = itrans(x_enc, None, None, None)
@@ -194,26 +208,48 @@ def main():
                 y_it = y_it[0]
             pred_it = y_it.permute(0, 2, 1)
 
-        gt_fore = future[:, :, LOOKBACK_OVERLAP:]
+        gt_fore = future[:, :, K:]
 
         past_d = _denorm(past.cpu(), mean, std)
         gt_d = _denorm(gt_fore.cpu(), mean, std)
         it_d = _denorm(pred_it.cpu(), mean, std)
         df_d = _denorm(pred_diff.cpu(), mean, std)
+        if K > 0:
+            dfo_d = _denorm(pred_diff_overlap.cpu(), mean, std)
+            past_tail_d = past_d[:, :, -K:]
 
         fig, axes = plt.subplots(1, Vplot, figsize=(3.2 * Vplot, 3.8), sharey=False)
         if Vplot == 1:
             axes = [axes]
         t_past = torch.arange(LOOKBACK_LENGTH)
+        t_overlap = torch.arange(LOOKBACK_LENGTH - K, LOOKBACK_LENGTH) if K > 0 else None
         t_future = torch.arange(LOOKBACK_LENGTH, LOOKBACK_LENGTH + FORECAST_LENGTH)
 
         for v in range(Vplot):
             ax = axes[v]
             ax.plot(t_past, past_d[0, v].numpy(), color="0.35", lw=1.2, label="past (GT)")
+            if K > 0 and t_overlap is not None:
+                ax.axvspan(
+                    LOOKBACK_LENGTH - K - 0.5,
+                    LOOKBACK_LENGTH - 0.5,
+                    color="0.85",
+                    alpha=0.35,
+                    zorder=0,
+                )
+                ax.plot(
+                    t_overlap,
+                    dfo_d[0, v].numpy(),
+                    color="C3",
+                    lw=1.6,
+                    ls="-",
+                    marker="o",
+                    ms=3,
+                    label="diffusion (overlap recon)",
+                )
             ax.plot(t_future, gt_d[0, v].numpy(), color="0.1", lw=1.8, label="future GT")
             ax.plot(t_future, it_d[0, v].numpy(), color="C0", lw=1.4, ls="--", label="iTransformer")
             ax.plot(t_future, df_d[0, v].numpy(), color="C3", lw=1.4, label="CI latent diffusion")
-            ax.axvline(LOOKBACK_LENGTH - 0.5, color="0.7", lw=0.8, ls=":")
+            ax.axvline(LOOKBACK_LENGTH - 0.5, color="0.5", lw=0.9, ls=":")
             ax.set_title(f"var {v}")
             ax.set_xlabel("time step")
             if v == 0:
@@ -227,6 +263,9 @@ def main():
         fig.savefig(png_path, dpi=140, bbox_inches="tight")
         plt.close(fig)
         print(f"Wrote {png_path}")
+        if K > 0:
+            mae_ov = (dfo_d[0] - past_tail_d[0]).abs().mean().item()
+            print(f"  overlap MAE vs past tail (all {N_VARIATES} vars, K={K}): {mae_ov:.5f}")
 
 
 if __name__ == "__main__":

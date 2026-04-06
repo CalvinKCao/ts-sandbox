@@ -480,6 +480,7 @@ class LatentDiffusionTSF(nn.Module):
         cfg_scale: Optional[float] = None,
         verbose: bool = False,
         decoder_method: str = "mean",
+        trim_lookback_overlap: bool = True,
     ) -> Dict[str, torch.Tensor]:
         device = past.device
         b = past.shape[0]
@@ -627,7 +628,7 @@ class LatentDiffusionTSF(nn.Module):
         future_norm = self.decode_from_2d(future_2d, decoder_method=decoder_method)
         future = self._denormalize(future_norm, stats)
         K = self.config.lookback_overlap
-        if K > 0:
+        if K > 0 and trim_lookback_overlap:
             future = future[..., K:]
             future_norm = future_norm[..., K:]
         if self.config.num_variables == 1:
