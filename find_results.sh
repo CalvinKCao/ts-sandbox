@@ -5,7 +5,7 @@
 # Usage: ssh ccao87@killarney.alliancecan.ca 'bash -s' < find_results.sh
 
 set -euo pipefail
-
+ 
 SEP="========================================================"
 USER=${USER:-ccao87}
 
