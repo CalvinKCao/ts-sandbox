@@ -149,6 +149,61 @@ class TimeSeriesContextEncoder(nn.Module):
         return x
 
 
+class VariateCrossEncoder(nn.Module):
+    """compresses V-variate time series into per-variate context tokens for bottleneck cross-attn.
+
+    each variate gets a 3-stat summary (mean, trend, std over a trailing window), then
+    a small transformer runs attention *across* variates so every token picks up
+    info from its neighbors before being fed to the u-net bottleneck.
+
+    designed to work with either iTransformer forecast output (B, V, H_forecast)
+    or the raw normalized past (B, V, L) as input — same encoder either way.
+    """
+
+    STAT_DIM = 3  # mean, trend, std
+
+    def __init__(
+        self,
+        context_dim: int,
+        num_layers: int = 2,
+        num_heads: int = 4,
+        summary_window: int = 32,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.summary_window = summary_window
+        self.in_proj = nn.Linear(self.STAT_DIM, context_dim)
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=context_dim,
+            nhead=num_heads,
+            dim_feedforward=context_dim * 4,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,  # pre-norm is more stable
+        )
+        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+        self.norm = nn.LayerNorm(context_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, V, T) — V-variate normalized time series (any T)
+        Returns:
+            (B, V, context_dim) — one token per variate, after cross-variate attention
+        """
+        w = min(x.shape[-1], self.summary_window)
+        tail = x[..., -w:]                                          # (B, V, w)
+
+        mean  = tail.mean(dim=-1)                                   # (B, V)
+        std   = tail.std(dim=-1).clamp(min=1e-6)                    # (B, V)
+        trend = (tail[..., -1] - tail[..., 0]) / max(w - 1, 1)     # (B, V) — delta per step
+
+        stats = torch.stack([mean, trend, std], dim=-1)             # (B, V, 3)
+        x_emb = self.in_proj(stats)                                 # (B, V, context_dim)
+        x_emb = self.transformer(x_emb)                             # cross-variate attn
+        return self.norm(x_emb)                                     # (B, V, context_dim)
+
+
 class CrossAttentionBlock(nn.Module):
     """Cross-attention block for conditioning on external context.
     

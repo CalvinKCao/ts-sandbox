@@ -666,6 +666,7 @@ FINETUNE_BATCH_SIZES = [4, 8, 16]
 # Memory optimization flags (overridden by CLI)
 USE_AMP = False
 USE_GRADIENT_CHECKPOINTING = False
+DIFFUSION_TYPE = "gaussian"  # "gaussian" | "binary" — set via --binary-diffusion
 
 # Dataset registry: name -> (path, date_col, seasonal_period)
 DATASET_REGISTRY = {
@@ -803,11 +804,12 @@ def create_diffusion_model(
     use_guidance: bool = True,
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
+    diffusion_type: str = "gaussian",
 ) -> DiffusionTSF:
     """Create DiffusionTSF model with optional guidance channel."""
     if n_variates is None:
         n_variates = N_VARIATES
-    
+
     config = DiffusionTSFConfig(
         num_variables=n_variates,
         lookback_length=lookback,
@@ -825,6 +827,7 @@ def create_diffusion_model(
         use_hybrid_condition=True,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         use_amp=USE_AMP,
+        diffusion_type=diffusion_type,
     )
     return DiffusionTSF(config)
 
@@ -914,41 +917,44 @@ def load_dataset(
 # ============================================================================
 
 def generate_variate_subsets(dataset_name: str, n_variates: int = None, seed: int = 42) -> List[Dict]:
-    """Generate non-overlapping subsets of n_variates width for a dataset."""
-    if n_variates is None:
-        n_variates = N_VARIATES
+    """Return one subset covering the full dataset (no splitting).
+
+    A single model is trained per dataset, using all its variates.
+    n_variates is accepted for API compat but ignored — the model is
+    always built with the actual column count (set as N_VARIATES globally
+    before calling this).
+    """
     path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
     df = pd.read_csv(path, nrows=1)
     date_col = DATASET_REGISTRY[dataset_name][1]
     all_cols = [c for c in df.columns if c != date_col]
-    n_total = len(all_cols)
-    
-    if n_total <= n_variates:
-        indices = list(range(n_total))
-        while len(indices) < n_variates:
-            indices.append(indices[len(indices) % n_total])
-        return [{'subset_id': dataset_name, 'variate_indices': indices, 'variate_names': [all_cols[i % n_total] for i in indices]}]
-    
-    rng = random.Random(seed)
-    shuffled = list(range(n_total))
-    rng.shuffle(shuffled)
-    
-    n_subsets = min(n_total // n_variates, MAX_SUBSETS_PER_DATASET)
-    subsets = []
-    for i in range(n_subsets):
-        start = i * n_variates
-        indices = shuffled[start:start + n_variates]
-        subsets.append({
-            'subset_id': f"{dataset_name}-{i}" if n_total > n_variates else dataset_name,
-            'variate_indices': indices,
-            'variate_names': [all_cols[j] for j in indices],
-        })
-    return subsets
+    indices = list(range(len(all_cols)))
+    return [{'subset_id': dataset_name, 'variate_indices': indices, 'variate_names': all_cols}]
 
 
 def generate_all_subsets(seed: int = 42) -> Dict[str, List[Dict]]:
-    """Generate all variate subsets for all datasets."""
-    return {name: generate_variate_subsets(name, seed=seed) for name in DATASET_REGISTRY}
+    """Return one full-dataset subset per dataset, filtered to those whose
+    variate count matches N_VARIATES exactly.
+
+    This avoids needing separate pretrained models for different dataset sizes.
+    Datasets with a different variate count are skipped silently.
+    """
+    result = {}
+    for name in DATASET_REGISTRY:
+        try:
+            n_cols = get_dataset_n_cols(name)
+        except Exception:
+            continue
+        if n_cols != N_VARIATES:
+            logger.debug(f"Skipping {name}: {n_cols} variates (need {N_VARIATES})")
+            continue
+        result[name] = generate_variate_subsets(name, seed=seed)
+    if not result:
+        logger.warning(
+            f"No datasets found with exactly {N_VARIATES} variates. "
+            "Check --n-variates matches your target datasets."
+        )
+    return result
 
 
 # ============================================================================
@@ -1215,7 +1221,7 @@ def diffusion_hp_objective(
     batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else DIFFUSION_BATCH_SIZES)
     
     # Create model with guidance
-    model = create_diffusion_model(use_guidance=True).to(device)
+    model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE).to(device)
     model.set_guidance_model(itrans_guidance)
     
     # Rebuild loader with new batch size
@@ -1522,7 +1528,7 @@ def pretrain_diffusion(
     )
     
     # Create model with guidance and wrap with DDP
-    model = create_diffusion_model(use_guidance=True)
+    model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE)
     model.set_guidance_model(itrans_guidance)
     model = wrap_model_ddp(model)
     
@@ -1647,7 +1653,7 @@ def finetune_hp_objective(
     itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
     
     # Load pretrained diffusion
-    model = create_diffusion_model(use_guidance=True).to(device)
+    model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE).to(device)
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
@@ -1754,7 +1760,7 @@ def finetune_on_dataset(
     itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
     
     # Load pretrained diffusion and wrap with DDP
-    model = create_diffusion_model(use_guidance=True)
+    model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE)
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
@@ -2409,7 +2415,7 @@ def run_pipeline(
                 itrans_model.load_state_dict(ckpt['model_state_dict'])
                 itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
                 
-                model = create_diffusion_model(use_guidance=True).to(device)
+                model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE).to(device)
                 model.set_guidance_model(itrans_guidance)
                 ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
                 model.load_state_dict(ckpt['model_state_dict'])
@@ -2464,6 +2470,67 @@ def run_pipeline(
 # Mode-Specific Entry Points (Slurm / CLI orchestration calls these modes)
 # ============================================================================
 
+def find_existing_itrans_checkpoint(n_variates: int) -> Optional[str]:
+    """Scan known cluster locations for a previously-trained V=n_variates iTransformer.
+
+    Returns the first usable path found, or None if nothing exists.
+    Checks (in order):
+      1. The canonical local pretrain dir for this dim
+      2. The storage roots used by past slurm jobs (SCRATCH / PROJECT variants)
+      3. Any checkpoints/ subtree under the project root
+    """
+    # 1. Local canonical path
+    local = os.path.join(pretrain_dir_for_dim(n_variates), 'itransformer.pt')
+    if os.path.exists(local):
+        return local
+
+    # 2. Cluster storage roots referenced in slurm scripts
+    scratch = os.environ.get('SCRATCH', '')
+    project = os.environ.get('PROJECT', '')
+    user = os.environ.get('USER', os.environ.get('LOGNAME', ''))
+
+    candidate_roots = []
+    if project and user:
+        candidate_roots += [
+            os.path.join(project, user, 'diffusion-tsf-fullvar', 'checkpoints'),
+            os.path.join(project, user, 'diffusion-tsf', 'checkpoints'),
+        ]
+    if scratch:
+        candidate_roots += [
+            os.path.join(scratch, 'ts-sandbox', 'checkpoints'),
+        ]
+    # also check siblings of the current checkpoint dir
+    candidate_roots.append(os.path.dirname(CHECKPOINT_DIR))
+
+    dim_subdirs = [f'pretrained_dim{n_variates}', f'pretrain_dim{n_variates}']
+    filenames   = ['itransformer.pt', 'pretrained_itransformer.pt']
+
+    for root in candidate_roots:
+        for subdir in dim_subdirs:
+            for fname in filenames:
+                p = os.path.join(root, subdir, fname)
+                if os.path.exists(p):
+                    return p
+
+    # 3. Broad project-tree search (limited depth to avoid being slow)
+    project_root_local = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for fname in filenames:
+        for dirpath, dirnames, files in os.walk(project_root_local):
+            # skip venv and hidden dirs
+            dirnames[:] = [d for d in dirnames if d not in ('.git', '.venv', 'venv', '__pycache__')]
+            if fname in files:
+                candidate = os.path.join(dirpath, fname)
+                # lightweight sanity: the file must be a valid torch checkpoint
+                try:
+                    meta = torch.load(candidate, map_location='cpu', weights_only=False)
+                    if 'model_state_dict' in meta:
+                        return candidate
+                except Exception:
+                    pass
+
+    return None
+
+
 def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42):
     """Pretrain iTransformer + Diffusion for a specific dimensionality.
 
@@ -2502,6 +2569,17 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
     diff_hp_path   = os.path.join(dim_dir, 'diff_hp.json')
 
     logger.info(f"Pretraining dim={n_variates}")
+
+    # Try to reuse an existing V=n_variates iTransformer from previous runs
+    # (searches slurm storage roots and the project tree — see find_existing_itrans_checkpoint)
+    if not os.path.exists(itrans_ckpt) and not smoke_test:
+        found = find_existing_itrans_checkpoint(n_variates)
+        if found:
+            import shutil
+            logger.info(f"  Found existing iTransformer checkpoint: {found}")
+            logger.info(f"  Copying to {itrans_ckpt} — skipping iTransformer pretrain")
+            os.makedirs(os.path.dirname(itrans_ckpt), exist_ok=True)
+            shutil.copy2(found, itrans_ckpt)
 
     # Phase 1A: iTransformer HP tuning — cached to disk so reruns skip it
     if os.path.exists(itrans_hp_path):
@@ -2710,7 +2788,7 @@ def _finetune_and_eval_one_subset(
             seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH,
         )
 
-        model = create_diffusion_model(use_guidance=True).to(device)
+        model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE).to(device)
         model.set_guidance_model(itrans_guidance)
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt['model_state_dict'])
@@ -2812,6 +2890,9 @@ def main():
                         help='Override N_ITRANS_HP_TRIALS (default: 20)')
     parser.add_argument('--subset-threshold', type=int, default=None,
                         help='Override SUBSET_THRESHOLD for dim grouping')
+    parser.add_argument('--binary-diffusion', action='store_true',
+                        help='Use binary (bit-flip XOR) diffusion instead of gaussian. '
+                             'Removes gaussian blur, uses BCE loss, 20-step sampling.')
     
     args = parser.parse_args()
     
@@ -2832,10 +2913,12 @@ def main():
     if args.n_variates is not None:
         N_VARIATES = args.n_variates
     
-    global USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT
+    global USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT, DIFFUSION_TYPE
     global SYNTHETIC_SAMPLES_FULL, SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
     USE_AMP = args.amp
     USE_GRADIENT_CHECKPOINTING = args.gradient_checkpointing
+    if args.binary_diffusion:
+        DIFFUSION_TYPE = "binary"
     if args.image_height is not None:
         IMAGE_HEIGHT = args.image_height
     if args.synthetic_samples is not None:

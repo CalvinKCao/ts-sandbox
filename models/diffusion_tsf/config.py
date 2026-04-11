@@ -53,6 +53,10 @@ class DiffusionTSFConfig:
     
     # multivariate support
     num_variables: int = 1  # how many variables (1 = uni, >1 = multi)
+    # process each variate independently thru a shared unet instead of stacking as channels.
+    # the unet sees (B*V, 1, H, W) per step; cross-variate info comes from bottleneck cross-attn.
+    # ignored for V=1 (no-op). requires use_hybrid_condition=True to actually get cross-var attn.
+    variate_factorized: bool = True
     
     # 2d mapping
     image_height: int = 64  # height of 2d rep (64 is faster)
@@ -113,6 +117,21 @@ class DiffusionTSFConfig:
     
     # which backbone
     model_type: str = "unet"
+
+    # -----------------------------------------------------------------------
+    # binary diffusion (BDPM-inspired)
+    # set diffusion_type="binary" to swap gaussian noise for bit-flip XOR diffusion.
+    # removes the need for gaussian blur preprocessing — CDF images stay hard binary.
+    # requires variate_factorized=True (u-net sees single-channel per-variate images).
+    # -----------------------------------------------------------------------
+    diffusion_type: str = "gaussian"       # "gaussian" | "binary"
+    binary_num_steps: int = 1000           # T for bit-flip schedule
+    binary_sample_steps: int = 20          # inference steps (subset of T, like BDPM)
+    binary_beta_start: float = 1e-5        # flip prob at t=0 (near-zero noise)
+    binary_beta_end: float = 0.5           # flip prob at t=T (max entropy)
+    binary_boundary_weight: float = 1.0    # bce weight near cdf boundary
+    binary_background_weight: float = 0.1  # bce weight far from boundary
+    binary_boundary_width: int = 8         # rows within boundary that get high weight
     
     # transformer (DiT) params
     transformer_embed_dim: int = 256
@@ -198,23 +217,26 @@ class DiffusionTSFConfig:
     @property
     def backbone_in_channels(self) -> int:
         """total input channels for the backbone."""
+        if self.variate_factorized:
+            # per-variate: 1 data ch + aux + optional 1 guidance ch
+            return 1 + self.num_aux_channels + (1 if self.use_guidance_channel else 0)
         base_channels = self.num_variables + self.num_aux_channels
         if self.use_guidance_channel:
             base_channels += self.num_variables
         return base_channels
-    
+
     @property
     def visual_cond_channels(self) -> int:
         """channels for visual concat mode."""
-        channels = self.num_variables
-        if self.use_value_channel:
-            channels += 1
-        return channels
-    
+        vars_per = 1 if self.variate_factorized else self.num_variables
+        return vars_per + (1 if self.use_value_channel else 0)
+
     @property
     def guidance_channels(self) -> int:
         """guidance channels."""
-        return self.num_variables if self.use_guidance_channel else 0
+        if not self.use_guidance_channel:
+            return 0
+        return 1 if self.variate_factorized else self.num_variables
     
     @property
     def ci_dit_in_channels(self) -> int:
