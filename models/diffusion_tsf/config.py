@@ -19,7 +19,7 @@ class DiffusionTSFConfig:
         max_scale: for truncating values (default: 3.5)
         blur_kernel_size: gaussian blur kernel size (default: 31)
         blur_sigma: sigma for blur (default: 1.0)
-        2D encoding is always CDF-style (occupancy map along the value axis).
+        representation_mode: "pdf" or "cdf" (occupancy map)
         
     unet:
         unet_channels: channels at each level
@@ -53,12 +53,17 @@ class DiffusionTSFConfig:
     
     # multivariate support
     num_variables: int = 1  # how many variables (1 = uni, >1 = multi)
+    # process each variate independently thru a shared unet instead of stacking as channels.
+    # the unet sees (B*V, 1, H, W) per step; cross-variate info comes from bottleneck cross-attn.
+    # ignored for V=1 (no-op). requires use_hybrid_condition=True to actually get cross-var attn.
+    variate_factorized: bool = True
     
     # 2d mapping
     image_height: int = 64  # height of 2d rep (64 is faster)
     max_scale: float = 3.5  # MS param
     blur_kernel_size: int = 31
     blur_sigma: float = 1.0
+    representation_mode: str = "cdf"  # pdf or cdf
     
     # unified time axis (L+F vs Future-Only)
     # if True: diffuse on (Lookback + Forecast) combined. 
@@ -106,12 +111,44 @@ class DiffusionTSFConfig:
     # emd loss weight
     emd_lambda: float = 0.2
 
-    # monotonicity regularization (occupancy / CDF map)
+    # monotonicity regulariztion (cdf mode)
     use_monotonicity_loss: bool = False
     monotonicity_weight: float = 1.0
     
-    # backbone (U-Net only)
+    # which backbone
     model_type: str = "unet"
+
+    # -----------------------------------------------------------------------
+    # binary diffusion (BDPM-inspired)
+    # set diffusion_type="binary" to swap gaussian noise for bit-flip XOR diffusion.
+    # removes the need for gaussian blur preprocessing — CDF images stay hard binary.
+    # requires variate_factorized=True (u-net sees single-channel per-variate images).
+    # -----------------------------------------------------------------------
+    diffusion_type: str = "gaussian"       # "gaussian" | "binary"
+    binary_num_steps: int = 1000           # T for bit-flip schedule
+    binary_sample_steps: int = 20          # inference steps (subset of T, like BDPM)
+    binary_beta_start: float = 1e-5        # flip prob at t=0 (near-zero noise)
+    binary_beta_end: float = 0.5           # flip prob at t=T (max entropy)
+    binary_boundary_weight: float = 1.0    # bce weight near cdf boundary
+    binary_background_weight: float = 0.1  # bce weight far from boundary
+    binary_boundary_width: int = 8         # rows within boundary that get high weight
+    
+    # transformer (DiT) params
+    transformer_embed_dim: int = 256
+    transformer_depth: int = 6
+    transformer_num_heads: int = 8
+    transformer_patch_height: int = 16  
+    transformer_patch_width: int = 16   
+    transformer_dropout: float = 0.1
+    
+    # CI-DiT (channel-independent diffusion transformer) params
+    ci_dit_embed_dim: int = 256
+    ci_dit_depth: int = 8
+    ci_dit_num_heads: int = 8
+    ci_dit_patch_size: Tuple[int, int] = (8, 8)
+    ci_dit_mlp_ratio: float = 4.0
+    ci_dit_cross_variate_every: int = 3  # 0 to disable cross-var attn
+    ci_dit_dropout: float = 0.1
     
     # memory optimization flags
     use_gradient_checkpointing: bool = False
@@ -152,7 +189,7 @@ class DiffusionTSFConfig:
         assert self.num_diffusion_steps > 0
         assert self.noise_schedule in ["linear", "cosine", "sigmoid", "quadratic"]
         assert 0 <= self.cutout_prob <= 1
-        assert self.model_type == "unet"
+        assert self.representation_mode in ["pdf", "cdf"]
         
     @property
     def bin_width(self) -> float:
@@ -180,23 +217,39 @@ class DiffusionTSFConfig:
     @property
     def backbone_in_channels(self) -> int:
         """total input channels for the backbone."""
+        if self.variate_factorized:
+            # per-variate: 1 data ch + aux + optional 1 guidance ch
+            return 1 + self.num_aux_channels + (1 if self.use_guidance_channel else 0)
         base_channels = self.num_variables + self.num_aux_channels
         if self.use_guidance_channel:
             base_channels += self.num_variables
         return base_channels
-    
+
     @property
     def visual_cond_channels(self) -> int:
         """channels for visual concat mode."""
-        channels = self.num_variables
-        if self.use_value_channel:
-            channels += 1
-        return channels
-    
+        vars_per = 1 if self.variate_factorized else self.num_variables
+        return vars_per + (1 if self.use_value_channel else 0)
+
     @property
     def guidance_channels(self) -> int:
         """guidance channels."""
-        return self.num_variables if self.use_guidance_channel else 0
+        if not self.use_guidance_channel:
+            return 0
+        return 1 if self.variate_factorized else self.num_variables
+    
+    @property
+    def ci_dit_in_channels(self) -> int:
+        """Per-variate input channels for CI-DiT backbone."""
+        ch = 1  # data channel
+        if self.use_coordinate_channel: ch += 1
+        if self.use_guidance_channel: ch += 1
+        return ch
+    
+    @property
+    def ci_dit_cond_channels(self) -> int:
+        """Per-variate conditioning channels for CI-DiT."""
+        return 1  # resized past 2D
 
 
 @dataclass

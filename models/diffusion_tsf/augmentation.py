@@ -294,9 +294,20 @@ def generate_multivariate_synthetic_data(
             's_epsilon': 0.02, 'cmax_e': 10, 'cmax_cp': 5, 'sigma_cp': 2.0
         }
     
-    actually_skip = skip_cross_var_aug or num_vars > 32
-
     ORGANIC_GENERATORS = [IFFTB, seasonal_periodicity, PWB, RWB, LGB, TWDB]
+    COUPLING_GROUP_SIZE = 32  # max group size for O(V²) coupling
+
+    def _couple_group(group: list) -> list:
+        """Apply informative covariate augmentation within one group of series."""
+        result = []
+        for i, y in enumerate(group):
+            others = [group[j] for j in range(len(group)) if j != i]
+            def _synth(T, hp, r):
+                return ORGANIC_GENERATORS[rng.integers(0, len(ORGANIC_GENERATORS))](T)
+            y_aug, _ = informative_covariate_augmentation(y, others, _synth, hyperparams, rng)
+            y_aug = (y_aug - np.mean(y_aug)) / (np.std(y_aug) + 1e-6)
+            result.append(y_aug.astype(np.float32))
+        return result
 
     # For high-variate datasets the full array can be hundreds of GB.
     # Use an optional memmap output to avoid blowing up RAM.
@@ -318,31 +329,21 @@ def generate_multivariate_synthetic_data(
             gen_idx = rng.integers(0, len(ORGANIC_GENERATORS))
             gen_func = ORGANIC_GENERATORS[gen_idx]
             base = gen_func(length)
-            
             base = (base - np.mean(base)) / (np.std(base) + 1e-6)
             series_list.append(base.astype(np.float32))
 
-        if actually_skip:
+        if skip_cross_var_aug:
             data[s] = np.stack(series_list)
-        else:
+        elif num_vars > COUPLING_GROUP_SIZE:
+            # Split into chunks of COUPLING_GROUP_SIZE; couple within each chunk,
+            # independent across chunks. O(V/G * G²) = O(V*G) instead of O(V²).
             augmented_series = []
-            for v in range(num_vars):
-                y = series_list[v]
-                others = [series_list[j] for j in range(num_vars) if j != v]
-                
-                def organic_synth_wrapper(T, hp, r):
-                    idx = rng.integers(0, len(ORGANIC_GENERATORS))
-                    g = ORGANIC_GENERATORS[idx]
-                    return g(T)
-                
-                y_aug, _ = informative_covariate_augmentation(
-                    y, others, organic_synth_wrapper, hyperparams, rng
-                )
-                
-                y_aug = (y_aug - np.mean(y_aug)) / (np.std(y_aug) + 1e-6)
-                augmented_series.append(y_aug.astype(np.float32))
-                
+            for g_start in range(0, num_vars, COUPLING_GROUP_SIZE):
+                group = series_list[g_start:g_start + COUPLING_GROUP_SIZE]
+                augmented_series.extend(_couple_group(group))
             data[s] = np.stack(augmented_series)
+        else:
+            data[s] = np.stack(_couple_group(series_list))
 
         # flush to disk periodically so OS doesn't accumulate dirty pages
         if output_path is not None and s % 1000 == 999:

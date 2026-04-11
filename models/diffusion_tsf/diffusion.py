@@ -512,4 +512,104 @@ class DiffusionScheduler:
         return x
 
 
+class BinaryDiffusionScheduler:
+    """bit-flip diffusion scheduler (BDPM-inspired).
+
+    forward process: xt = x0 XOR Bernoulli(beta_t)
+        beta_t is the per-pixel bit-flip probability, following a quadratic schedule
+        from ~0 at t=0 to 0.5 at t=T (0.5 = max entropy random binary image).
+
+    reverse process: predict x0_hat from xt, then re-add fresh noise at level t-1.
+        no need for fancy DDIM — the binary reverse step is just one XOR.
+
+    quadratic schedule: beta_t = (sqrt(s) + (t/T) * (sqrt(e) - sqrt(s)))^2
+    """
+
+    def __init__(
+        self,
+        num_steps: int = 1000,
+        beta_start: float = 1e-5,
+        beta_end: float = 0.5,
+        device: str = "cpu",
+    ):
+        self.num_steps = num_steps
+        self.device = device
+
+        t = torch.linspace(0.0, 1.0, num_steps, device=device)
+        sq_s = math.sqrt(beta_start)
+        sq_e = math.sqrt(beta_end)
+        self.betas = (sq_s + t * (sq_e - sq_s)) ** 2  # (T,) flip probabilities
+
+        logger.info(
+            f"BinaryDiffusionScheduler: T={num_steps}, beta range=[{self.betas[0]:.2e}, {self.betas[-1]:.3f}]"
+        )
+
+    def to(self, device):
+        self.device = device
+        self.betas = self.betas.to(device)
+        return self
+
+    def add_noise(self, x0: torch.Tensor, t: torch.Tensor):
+        """forward process: add bit-flip noise to binary image x0.
+
+        Args:
+            x0: binary tensor (...) with values in {0, 1}
+            t:  (batch,) integer timesteps
+
+        Returns:
+            xt: noisy binary image, same shape as x0
+            zt: the noise mask that was XOR'd in (also binary)
+        """
+        beta_t = self.betas[t]                                # (batch,)
+        shape  = (-1,) + (1,) * (x0.dim() - 1)               # (-1, 1, 1, 1) for 4d input
+        beta_t = beta_t.view(shape).expand_as(x0)
+        zt = torch.bernoulli(beta_t)                          # {0,1}
+        xt = (x0.bool() ^ zt.bool()).float()
+        return xt, zt
+
+    @torch.no_grad()
+    def sample(
+        self,
+        model_fn,
+        shape: tuple,
+        num_steps: int = 20,
+        device: str = "cpu",
+        verbose: bool = False,
+    ) -> torch.Tensor:
+        """binary reverse sampling using a subset of T timesteps.
+
+        model_fn signature: (xt, t_batch) -> (x0_logits, zt_logits)
+            each output is the same shape as xt
+
+        Args:
+            model_fn: denoiser that returns (x0_logits, zt_logits)
+            shape: output shape, typically (BV, 1, H, W)
+            num_steps: how many denoising steps (20 is fine, vs 1000 for ddpm)
+        """
+        # evenly spaced timesteps from T-1 down to 0
+        step_indices = torch.linspace(self.num_steps - 1, 0, num_steps, dtype=torch.long)
+
+        xt = torch.bernoulli(torch.full(shape, 0.5, device=device))
+
+        for i, t_val in enumerate(step_indices):
+            t_idx  = t_val.item()
+            t_batch = torch.full((shape[0],), t_idx, device=device, dtype=torch.long)
+
+            x0_logits, _zt_logits = model_fn(xt, t_batch)
+            x0_hat = (torch.sigmoid(x0_logits) > 0.5).float()
+
+            if i < len(step_indices) - 1:
+                # re-add noise at the level of the next (lower) timestep
+                t_next = step_indices[i + 1].item()
+                beta_next = self.betas[int(t_next)].item()
+                zt_new = torch.bernoulli(torch.full_like(x0_hat, beta_next))
+                xt = (x0_hat.bool() ^ zt_new.bool()).float()
+            else:
+                xt = x0_hat
+
+            if verbose and i % 5 == 0:
+                logger.debug(f"  binary step {i+1}/{num_steps} (t={t_idx})")
+
+        return xt  # final clean binary image
+
 
