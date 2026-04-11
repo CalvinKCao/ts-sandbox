@@ -1,0 +1,67 @@
+\begin{thebibliography}{10}
+
+\bibitem{guen2023}
+Vincent~Le Guen and Nicolas Thome.
+\newblock Deep time series forecasting with shape and temporal criteria.
+\newblock {\em IEEE Transactions on Pattern Analysis and Machine Intelligence}, 2023.
+
+\bibitem{leguen2023}
+Vincent~Le Guen and Nicolas Thome.
+\newblock Shape and time distortion loss for training deep time series forecasting models.
+\newblock {\em IEEE Transactions on Pattern Analysis and Machine Intelligence}, 2023.
+
+\bibitem{hong2024}
+Shenda Hong, Hongyan Li, Jingwei Liu, and Ling Yang.
+\newblock Retrieval-augmented diffusion models for time series forecasting.
+\newblock {\em Advances in Neural Information Processing Systems 37}, 2024.
+
+\bibitem{kim_comprehensive_2025}
+Jongseon Kim, Hyungjoon Kim, HyunGi Kim, Dongjun Lee, and Sungroh Yoon.
+\newblock A {Comprehensive} {Survey} of {Deep} {Learning} for {Time} {Series} {Forecasting}: {Architectural} {Diversity} and {Open} {Challenges}, May 2025.
+\newblock arXiv:2411.05793 [cs].
+
+\bibitem{kinakh_binary_2025}
+Vitaliy Kinakh and Slava Voloshynovskiy.
+\newblock Binary {Diffusion} {Probabilistic} {Model}, September 2025.
+\newblock arXiv:2501.13915 [cs].
+
+\bibitem{kudrat_patch-wise_2025}
+Dilfira Kudrat, Zongxia Xie, Yanru Sun, Tianyu Jia, and Qinghua Hu.
+\newblock Patch-wise {Structural} {Loss} for {Time} {Series} {Forecasting}, July 2025.
+\newblock arXiv:2503.00877 [cs].
+
+\bibitem{liu2024}
+Yong Liu, Haixu Wu, Jianmin Wang, and Mingsheng Long.
+\newblock itransformer: Inverted transformers are effective for time series forecasting.
+\newblock {\em International Conference on Learning Representations}, 2024.
+
+\bibitem{mahmoudinejad2021}
+Seyed~Ataddin Mahmoudinejad and Naser Safdarian.
+\newblock Evaluating morphological features of electrocardiogram signals for diagnosing of myocardial infarction using classification-based feature selection.
+\newblock {\em Journal of Medical Signals \& Sensors}, 2021.
+
+\bibitem{nie2022}
+Yuqi Nie, Nam~H. Nguyen, Phanwadee Sinthong, and Jayant Kalagnanam.
+\newblock A time series is worth 64 words: Long-term forecasting with transformers.
+\newblock 2022.
+
+\bibitem{piao2024}
+Xihao Piao, Zheng Chen, Taichi Murayama, Yasuko Matsubara, and Yasushi Sakurai.
+\newblock Fredformer: Frequency debiased transformer for time series forecasting.
+\newblock 2024.
+
+\bibitem{wang_fredf_2025}
+Hao Wang, Licheng Pan, Yuan Shen, Zhichao Chen, Degui Yang, Yifei Yang, Sen Zhang, Xinggao Liu, Haoxuan Li, and Dacheng Tao.
+\newblock {FREDF}: {LEARNING} {TO} {FORECAST} {IN} {THE} {FREQUENCY} {DOMAIN}.
+\newblock 2025.
+
+\bibitem{xu2019}
+Zhi-Qin~John Xu.
+\newblock Frequency principle: Fourier analysis sheds light on deep neural networks.
+\newblock {\em Communications in Computational Physics}, 2019.
+
+\bibitem{yang2025vitimefoundationmodeltime}
+Luoxiao Yang, Yun Wang, Xinqi Fan, Israel Cohen, Jingdong Chen, and Zijun Zhang.
+\newblock Vitime: Foundation model for time series forecasting powered by vision intelligence, 2025.
+
+\end{thebibliography}

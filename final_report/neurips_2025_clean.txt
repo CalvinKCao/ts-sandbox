@@ -1,0 +1,122 @@
+Geometry-Aware Time Series Forecasting: Hybrid Diffusion-Transformer Architecture with 2D Occupancy Maps
+
+ABSTRACT
+
+Deep learning architectures frequently struggle to replicate high-frequency geometric structures in time series forecasting. Standard point-wise loss functions encourage regression to the mean, which blurs distinct edges. We address this limitation through a two-stage hybrid iTransformer-diffusion system. A deterministic transformer establishes a global trend and a generative diffusion model refines high-frequency patterns. We represent the signal as a two-dimensional occupancy map. Evaluations on five datasets indicate that this method reduces error in highly seasonal contexts like electricity consumption but sometimes predicts confidently wrong horizons in environments with unstable trends.
+
+INTRODUCTION
+
+Time series forecasting has recently moved from statistical methods to deep learning architectures. Transformers like PatchTST and iTransformer use self-attention mechanisms to process global dependencies across long sequences or inter-variate dependencies. Despite improvements in measures of overall accuracy, these models frequently fail to capture local geometric structures.
+
+Oversmoothing
+
+Models trained with point-wise loss functions, specifically mean squared error (MSE), tend to oversmooth high-frequency textures and struggle to reproduce sharp transitions and local shapes. For example, inventory levels often follow a "staircase" or step-function pattern. Transformers trained with MSE typically approximate these vertical jumps with smooth ramps or sigmoid curves.
+
+This limitation aligns with the "frequency principle" of neural networks. Networks learn low-frequency components faster than high-frequency ones. A step function relies on high-frequencies to define its vertical edge. Deep networks function as low-pass filters during early training stages, which attenuates these frequencies and blurs the distinct corners of the data.
+
+The oversmoothing of results may also be explained by the model minimizing MSE on uncertain data. A model trained with MSE predicts the conditional expectation of the target distribution. In multi-modal distributions, the expectation falls between the modes. If a time series has an equal probability of rising or falling, the mean predictor generates a straight line through the center to minimize variance. Worse, a sharp prediction that misses the exact timing of an event incurs error twice: once for the false alarm at the predicted time and once for the miss at the actual time. A smooth prediction distributes the error across the window, resulting in a lower total loss. So, the optimizer pushes the model toward blurred output.
+
+Impact on Applications
+
+These topological failures affect utility in specific domains. For example, in electrocardiogram (ECG) analysis, diagnosis depends on the morphology of features like the P-wave and QRS complex. MSE-optimized models smooth out high-frequency features like the QRS spike. This reduces diagnostic utility even if the Mean Squared Error remains low.
+
+Our Architecture
+
+To resolve these issues, we implement a two-stage hybrid system. A deterministic transformer first estimates the global trajectory to ensure temporal consistency. A generative diffusion model then refines this estimate to restore local variance and geometric structure. This approach decouples trend prediction from texture generation and circumvents the mean-smoothing issue because 1) the convolutional architecture has an inductive bias that encourages the model to pay attention to 2D geometric patterns that appear throughout the time series and 2) diffusion models are encouraged to generate a single sample that is likely to come from the true distribution, including its volatile, potentially jagged texture, rather than predicting the smooth mean of all samples.
+
+RELATED WORK
+
+Structural and Shape-Based Loss Functions
+
+Standard point-wise objectives often fail to capture the geometric properties of time series data. Several works have attempted to incorporate structural constraints directly into the loss function. The DILATE loss introduces a differentiable objective combining dynamic time warping (DTW) with a temporal penalization term. While this disentangles shape error from temporal delay, DTW-based approaches frequently suffer from too much warping when applied to high-frequency signals. The elasticity of the warping mechanism allows the model to match noise artifacts between the prediction and the target, effectively "over-warping" the sequence and leading the model to collapse into predicting noise.
+
+More recently, Patch-wise Structural (PS) loss segments series into local patches and enforces alignment of correlation, variance, and mean statistics within each segment. This method successfully introduces local texture that MSE typically smoothes out. However, by calculating statistics within isolated or strided windows, this approach risks creating blocking artifacts where the texture characteristics change abruptly at patch boundaries. Furthermore, matching variance alone does not guarantee the reconstruction of specific geometric primitives, such as the distinct vertical edges found in staircase patterns.
+
+Frequency-Domain Forecasting
+
+Recent architectures explicitly address the spectral bias of deep networks, where models are forced to focus on learning low-frequencies. Fredformer identifies that standard Transformers neglect high-frequency bands due to their lower relative energy. By employing frequency-specific attention mechanisms, it attempts to debias the learning process and recover high-frequency details. Similarly, Frequency-enhanced Direct Forecast (FreDF) tackles the label autocorrelation problem in direct forecasting by optimizing an L1 objective in the frequency domain.
+
+While these methods improve the representation of periodic signals, they do not fundamentally resolve the double penalty problem inherent in regression. A sharp prediction that is slightly misaligned in time still incurs a massive penalty in both the time and frequency domains (phase error). Consequently, even frequency-aware models often regress to the mean when faced with high uncertainty, failing to generate the distinct, coherent structures required for non-stationary regime changes.
+
+Generative Forecasting Architectures
+
+Generative models have emerged as a powerful alternative to deterministic regression. A comprehensive survey of diffusion models in forecasting highlights their ability to model complex conditional distributions and quantify uncertainty. Existing diffusion-based forecasters typically operate directly on 1D sequences, using WaveNet or Transformer backbones to denoise the signal.
+
+Despite their generative capabilities, these 1D diffusion models frequently encounter mode collapse, producing repetitive or generic oscillatory patterns that ignore the specific context of the input window. Furthermore, treating the time series as a flat vector or sequence of tokens fails to exploit the spatial intuition that human analysts use to identify shapes. No prior work has attempted to model the time series forecasting problem as a 2D image generation task, where the geometric structure—such as the verticality of a step function—is represented explicitly as a spatial feature in a probability map. Our approach fills this gap by diffusing on a 2D occupancy representation, allowing the model to generate geometric structures that are topologically coherent rather than just statistically probable.
+
+METHODOLOGY
+
+Architecture
+
+The system implements two diffusion paths for multivariate time series forecasting: a pixel-space model and a compressed latent-space model. Both architectures treat time series as 2D occupancy maps and use iTransformer forecasts as spatial guidance.
+
+Pixel-space Guided Diffusion
+
+The pixel-space model maps 1D time series to 2D image sheets using occupancy encoding. A Vertical Gaussian Blur smooths the occupancy maps along the value axis to improve the diffusion gradient. The model uses a Conditional UNet2D to predict noise in these maps.
+
+[Pixel-space diffusion pipeline diagram removed]
+
+The UNet2D backbone consists of three downsampling stages using stride-2 convolutions. Residual blocks inject timestep embeddings at every level. Spatial Transformer blocks provide cross-attention to a 1D past context at the bottleneck and the deepest two levels. The model combines the noisy future occupancy, auxiliary channels, and the iTransformer ghost images into a single channel stack before the initial convolution.
+
+Latent-space Guided Diffusion
+
+The latent-space model operates on compressed representations from a frozen TimeSeriesVAE. This VAE provides four-fold spatial compression in both time and value dimensions. Diffusion occurs in this latent space, reducing the computational cost for high-resolution occupancy maps.
+
+[Latent-space diffusion pipeline diagram removed]
+
+The TimeSeriesVAE maps single-variable pixel sheets to multi-channel latent tensors. For multivariate datasets, the model batches across variables and uses a shared univariate VAE and UNet. The guidance path mirrors the data path: the iTransformer produces a pixel-space forecast, which the VAE encoder then projects into the latent space for conditioning the diffusion model. This method maintains consistency between the guidance and the diffusion target.
+
+System Architecture (continued)
+
+The system transforms one-dimensional time series data into two-dimensional representations by mapping values to a cumulative distribution function layout. This creates a vertical occupancy map where pixel intensity corresponds to probability. A vertical Gaussian blur applies to these maps to provide differentiable gradients for the network. This representation is inspired by recent work in visual time series understanding.
+
+The pipeline consists of two distinct stages. The first stage employs an iTransformer. This model processes the historical window and outputs a coarse prediction of the future. We convert this prediction into the two-dimensional occupancy map. This image serves as a visual guide for the second stage.
+
+The second stage uses a U-Net based diffusion model. It receives the noisy target field concatenated with the guidance image from the first stage. We also provide auxiliary channels containing vertical coordinates and a linear time ramp to ground the model in space and time. The diffusion model iteratively denoises the input to produce the final textured forecast. The pixel intensities in each timestep column are then summed to convert the representation into a 1D standard point forecast.
+
+[Example visualization of occupancy maps and forecasts removed]
+
+Training Protocol
+
+We adopt a synthetic pretraining strategy to improve generalization. Both the guidance transformer and the diffusion backbone train initially on a large dataset of 10k synthetic time series. This synthetic data contains procedurally generated patterns using the RealTS data generation system, including trends and noise. This phase allows the models to learn fundamental temporal dynamics without overfitting to specific real-world statistics.
+
+Following pretraining, we fine-tune the models on specific datasets. We optimized hyperparameters using Optuna with 8 trials per dataset. The search space included learning rates between 1×10^-6 and 1×10^-4 for the diffusion model, and 1×10^-5 to 1×10^-3 for the transformer. We fixed the diffusion process to 2000 steps and employed DDIM sampling with 50 steps during evaluation. All models used the Adam optimizer.
+
+Metrics
+
+In addition to standard error metrics, we employ the Gradient Mean Absolute Error (GradMAE) to evaluate the model's ability to capture high-frequency local geometry. While MSE and MAE measure the absolute positional alignment of the forecast, GradMAE measures the alignment of the first-order derivatives.
+
+GradMAE = (1/(B×T)) × sum(|change in prediction - change in ground truth|)
+
+This metric specifically penalizes oversmoothing. A model that approximates a jagged texture with a smooth mean trajectory will yield a low gradient error, whereas preserving the "roughness" of the signal reduces this score.
+
+RESULTS AND DISCUSSION
+
+We evaluated the hybrid architecture on five univariate datasets: ETTh2, ETTm1, Electricity, Exchange Rate, and Weather. We use the iTransformer without diffusion refinement as the baseline for comparison.
+
+Performance Summary (Single-variable):
+- ETTh2: MSE +4.8% improvement, MAE +4.4% improvement, GradMAE +50.8% improvement
+- ETTm1: MSE +47.8% improvement, MAE +32.0% improvement, GradMAE +12.7% improvement  
+- Electricity: MSE +32.6% improvement, MAE +19.6% improvement, GradMAE +25.5% improvement
+- Exchange Rate: MSE -81.8% (degradation), MAE -38.0% (degradation), GradMAE +12.2% improvement
+- Weather: MSE -27.2% (degradation), MAE -10.9% (degradation), GradMAE +63.5% improvement
+
+The hybrid model demonstrated variable performance across different domains. On the ETTm1 dataset, the diffusion refinement reduced MSE by 47.8% compared to the baseline. The Electricity dataset showed a 32.6% reduction in error. The ETTh2 dataset improved by 4.8%. In these cases, the dataset's high-level structure was highly predictable, with clear repeating seasonal patterns, and the generative component successfully added high-frequency detail that the deterministic baseline smoothed out.
+
+Performance degraded on the other datasets. The Exchange Rate experiment resulted in an 81.8% increase in MSE. The Weather dataset showed a 27.2% increase. The diffusion process in these instances boldly predicted trends that did not correspond to the true horizon, thus losing to the iTransformer models which just predicted flat lines.
+
+The across the board improvement in GradMAE confirms that this method successfully preserves local patterns.
+
+Multivariate Results (7-variable):
+Tested on: ETTh1, ETTh2, ETTm1, ETTm2, electricity, exchange_rate, traffic, weather
+Mixed results with some datasets showing improvements in MSE/MAE and others showing degradation compared to iTransformer baseline.
+
+Multivariate Results (32-variable):
+Tested on: ETTh1, ETTh2, ETTm1, ETTm2, electricity, exchange_rate, traffic, weather
+Variable performance across the board with some improvements but also several cases of degradation as dimensionality increased.
+
+CONCLUSION
+
+This study demonstrates that generative refinement recovers lost geometric detail in time series forecasting. Future research will prioritize optimizing the conditioning mechanism. Aligning the iTransformer guidance and lookback windows on the time axis reduces temporal mismatch. We intend to evaluate multivariate forecasting performance. High-dimensional datasets necessitate compression techniques. Channel clustering methods offer a viable path to reduce computational load while preserving inter-series correlations.
+
+The synthetic data generation module also requires modification. Deliberate injection of high-frequency geometric patterns during pretraining might improve recognition of specific shapes. We will also explore repeated sampling strategies. Generating multiple candidate forecasts allows for the construction of a probability distribution. Averaging these samples may lower the mean squared error.

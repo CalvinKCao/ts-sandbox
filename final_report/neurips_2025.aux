@@ -1,0 +1,77 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{kim_comprehensive_2025}
+\citation{kim_comprehensive_2025}
+\citation{nie2022}
+\citation{liu2024}
+\citation{xu2019}
+\citation{xu2019}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\citation{leguen2023}
+\citation{mahmoudinejad2021}
+\citation{guen2023}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.1}Our Architecture}{2}{subsection.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Structural and Shape-Based Loss Functions}{2}{subsection.2.1}\protected@file@percent }
+\citation{kudrat_patch-wise_2025}
+\citation{piao2024}
+\citation{wang_fredf_2025}
+\citation{hong2024}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Frequency-Domain Forecasting}{3}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Generative Forecasting Architectures}{3}{subsection.2.3}\protected@file@percent }
+\citation{yang2025vitimefoundationmodeltime}
+\citation{yang2025vitimefoundationmodeltime}
+\citation{yang2025vitimefoundationmodeltime}
+\citation{yang2025vitimefoundationmodeltime}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Methodology}{4}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Architecture}{4}{subsection.3.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Multi-column comparison on a short 6-step toy series with shifting support intervals. Left: CDF occupancy map used in our model, where each column is saturated below the lower bound and then fades through its support interval. Right: PDF occupancy map inspired by ViTime \cite  {yang2025vitimefoundationmodeltime}, where each column concentrates mass near its center and tapers toward the interval edges.}}{4}{figure.1}\protected@file@percent }
+\newlabel{fig:cdf_pdf_compare}{{1}{4}{Multi-column comparison on a short 6-step toy series with shifting support intervals. Left: CDF occupancy map used in our model, where each column is saturated below the lower bound and then fades through its support interval. Right: PDF occupancy map inspired by ViTime \cite {yang2025vitimefoundationmodeltime}, where each column concentrates mass near its center and tapers toward the interval edges}{figure.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Pixel-space U-Net.}{5}{section*.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Alternative Backbone: Latent-space Guided Diffusion}{5}{subsection.3.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Top: Lookback window and horizon (ground truth, iTransformer only and iTransformer + guidance. Middle: CDF representation of lookback window (used as conditioning channel) and diffusion forecast. Bottom: CDF representation of iTransformer-only guidance forecast, used as conditioning channel.}}{6}{figure.2}\protected@file@percent }
+\newlabel{fig:example_label}{{2}{6}{Top: Lookback window and horizon (ground truth, iTransformer only and iTransformer + guidance. Middle: CDF representation of lookback window (used as conditioning channel) and diffusion forecast. Bottom: CDF representation of iTransformer-only guidance forecast, used as conditioning channel}{figure.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Pixel-space diffusion pipeline with iTransformer guidance.}}{7}{figure.3}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Latent-space diffusion with frozen VAE compression.}}{7}{figure.4}\protected@file@percent }
+\citation{yang2025vitimefoundationmodeltime}
+\@writefile{toc}{\contentsline {paragraph}{VAE architecture.}{8}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Latent U-Net.}{8}{section*.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Training Protocol}{8}{subsection.3.3}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces VAE reconstruction examples on ETTh2 occupancy images. Left: original input sheets for four variates. Right: reconstructions from the frozen latent autoencoder. The large filled regions, discontinuities, and narrow spikes are preserved with reconstruction MSE on the order of $10^{-5}$, indicating that the VAE retains the geometric structure needed for diffusion.}}{9}{figure.5}\protected@file@percent }
+\newlabel{fig:vae_recon_etth2}{{5}{9}{VAE reconstruction examples on ETTh2 occupancy images. Left: original input sheets for four variates. Right: reconstructions from the frozen latent autoencoder. The large filled regions, discontinuities, and narrow spikes are preserved with reconstruction MSE on the order of $10^{-5}$, indicating that the VAE retains the geometric structure needed for diffusion}{figure.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Metrics}{9}{subsection.3.4}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces Samples of synthetic data generated by the modified RealTS pipeline, showcasing irregular periodicities and non-stationary trends.}}{10}{figure.6}\protected@file@percent }
+\newlabel{fig:synth_samples}{{6}{10}{Samples of synthetic data generated by the modified RealTS pipeline, showcasing irregular periodicities and non-stationary trends}{figure.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Results and Discussion}{10}{section.4}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Test set performance of the Diffusion model. Parentheses indicate relative improvement over the iTransformer baseline (positive values denote error reduction).}}{10}{table.1}\protected@file@percent }
+\newlabel{tab:results}{{1}{10}{Test set performance of the Diffusion model. Parentheses indicate relative improvement over the iTransformer baseline (positive values denote error reduction)}{table.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Results on datasets up to 21 variates. ``Ours'' and ``iTrans'' are both trained on 32-variate channel-independent subsets; ``iTrans baseline'' is a single iTransformer trained on all variates at once (not applicable for these datasets).}}{11}{table.2}\protected@file@percent }
+\newlabel{tab:full}{{2}{11}{Results on datasets up to 21 variates. ``Ours'' and ``iTrans'' are both trained on 32-variate channel-independent subsets; ``iTrans baseline'' is a single iTransformer trained on all variates at once (not applicable for these datasets)}{table.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Results on high-dimensional datasets using a 32-variate channel-independent ensemble. ``Ours (32-var)'' and ``iTrans (32-var)'' are averages over all groups of 32 variates. ``iTrans baseline'' is a single iTransformer trained on the full dataset, which benefits from inter-variate correlations and outperforms the grouped models on point accuracy despite losing on GradMAE.}}{12}{table.3}\protected@file@percent }
+\newlabel{tab:hd}{{3}{12}{Results on high-dimensional datasets using a 32-variate channel-independent ensemble. ``Ours (32-var)'' and ``iTrans (32-var)'' are averages over all groups of 32 variates. ``iTrans baseline'' is a single iTransformer trained on the full dataset, which benefits from inter-variate correlations and outperforms the grouped models on point accuracy despite losing on GradMAE}{table.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Latent-backbone results on ETT datasets. ``iTrans'' denotes the paired iTransformer baseline for the same experiment; lower is better.}}{12}{table.4}\protected@file@percent }
+\newlabel{tab:latent}{{4}{12}{Latent-backbone results on ETT datasets. ``iTrans'' denotes the paired iTransformer baseline for the same experiment; lower is better}{table.4}{}}
+\citation{kinakh_binary_2025}
+\@writefile{lof}{\contentsline {figure}{\numberline {7}{\ignorespaces Latent ETTh2 failure case on a held-out window. Gray shows the observed past and ground-truth future, blue dashed is the iTransformer forecast, and red is the latent diffusion forecast. On several variates, especially 4 through 6, the coarse trend forecast misses the future level and the latent diffusion model does not recover from that error.}}{13}{figure.7}\protected@file@percent }
+\newlabel{fig:latent_etth2_failure}{{7}{13}{Latent ETTh2 failure case on a held-out window. Gray shows the observed past and ground-truth future, blue dashed is the iTransformer forecast, and red is the latent diffusion forecast. On several variates, especially 4 through 6, the coarse trend forecast misses the future level and the latent diffusion model does not recover from that error}{figure.7}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Future Work}{13}{section.5}\protected@file@percent }
+\bibstyle{plain}
+\bibdata{references}
+\bibcite{guen2023}{{1}{}{{}}{{}}}
+\bibcite{leguen2023}{{2}{}{{}}{{}}}
+\bibcite{hong2024}{{3}{}{{}}{{}}}
+\bibcite{kim_comprehensive_2025}{{4}{}{{}}{{}}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Conclusion}{14}{section.6}\protected@file@percent }
+\bibcite{kinakh_binary_2025}{{5}{}{{}}{{}}}
+\bibcite{kudrat_patch-wise_2025}{{6}{}{{}}{{}}}
+\bibcite{liu2024}{{7}{}{{}}{{}}}
+\bibcite{mahmoudinejad2021}{{8}{}{{}}{{}}}
+\bibcite{nie2022}{{9}{}{{}}{{}}}
+\bibcite{piao2024}{{10}{}{{}}{{}}}
+\bibcite{wang_fredf_2025}{{11}{}{{}}{{}}}
+\bibcite{xu2019}{{12}{}{{}}{{}}}
+\bibcite{yang2025vitimefoundationmodeltime}{{13}{}{{}}{{}}}
+\providecommand\NAT@force@numbers{}\NAT@force@numbers
+\gdef \@abspage@last{15}
