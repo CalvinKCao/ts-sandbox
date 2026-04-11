@@ -47,7 +47,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --job-name=unet-fullvar \
             --account=aip-boyuwang \
             --partition=gpubase_h100_b4 \
-            --time=3-00:00:00 \
+            --time=1-12:00:00 \
             --nodes=1 \
             --gpus-per-node=h100:1 \
             --cpus-per-task=6 \
