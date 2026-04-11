@@ -19,7 +19,7 @@ class DiffusionTSFConfig:
         max_scale: for truncating values (default: 3.5)
         blur_kernel_size: gaussian blur kernel size (default: 31)
         blur_sigma: sigma for blur (default: 1.0)
-        2D encoding is always CDF-style (occupancy map along the value axis).
+        representation_mode: "pdf" or "cdf" (occupancy map)
         
     unet:
         unet_channels: channels at each level
@@ -59,6 +59,7 @@ class DiffusionTSFConfig:
     max_scale: float = 3.5  # MS param
     blur_kernel_size: int = 31
     blur_sigma: float = 1.0
+    representation_mode: str = "cdf"  # pdf or cdf
     
     # unified time axis (L+F vs Future-Only)
     # if True: diffuse on (Lookback + Forecast) combined. 
@@ -106,7 +107,7 @@ class DiffusionTSFConfig:
     # emd loss weight
     emd_lambda: float = 0.2
 
-    # monotonicity regularization (occupancy / CDF map)
+    # monotonicity regulariztion (cdf mode)
     use_monotonicity_loss: bool = False
     monotonicity_weight: float = 1.0
     
@@ -120,6 +121,15 @@ class DiffusionTSFConfig:
     transformer_patch_height: int = 16  
     transformer_patch_width: int = 16   
     transformer_dropout: float = 0.1
+    
+    # CI-DiT (channel-independent diffusion transformer) params
+    ci_dit_embed_dim: int = 256
+    ci_dit_depth: int = 8
+    ci_dit_num_heads: int = 8
+    ci_dit_patch_size: Tuple[int, int] = (8, 8)
+    ci_dit_mlp_ratio: float = 4.0
+    ci_dit_cross_variate_every: int = 3  # 0 to disable cross-var attn
+    ci_dit_dropout: float = 0.1
     
     # memory optimization flags
     use_gradient_checkpointing: bool = False
@@ -160,7 +170,7 @@ class DiffusionTSFConfig:
         assert self.num_diffusion_steps > 0
         assert self.noise_schedule in ["linear", "cosine", "sigmoid", "quadratic"]
         assert 0 <= self.cutout_prob <= 1
-        assert self.model_type in ("unet", "transformer")
+        assert self.representation_mode in ["pdf", "cdf"]
         
     @property
     def bin_width(self) -> float:
@@ -205,6 +215,19 @@ class DiffusionTSFConfig:
     def guidance_channels(self) -> int:
         """guidance channels."""
         return self.num_variables if self.use_guidance_channel else 0
+    
+    @property
+    def ci_dit_in_channels(self) -> int:
+        """Per-variate input channels for CI-DiT backbone."""
+        ch = 1  # data channel
+        if self.use_coordinate_channel: ch += 1
+        if self.use_guidance_channel: ch += 1
+        return ch
+    
+    @property
+    def ci_dit_cond_channels(self) -> int:
+        """Per-variate conditioning channels for CI-DiT."""
+        return 1  # resized past 2D
 
 
 @dataclass

@@ -19,21 +19,32 @@ logger = logging.getLogger(__name__)
 
 
 class TimeSeriesTo2D(nn.Module):
-    """Maps 1D time series to 2D occupancy (CDF-style) images along the value axis.
-
-    For each time step, bins the normalized value and fills all rows from the bottom
-    up to that bin — a soft cumulative / bar-stack view (not a one-hot stripe).
+    """Maps 1D time series to 2D "stripe" binary images.
+    
+    For each time step t, calculates the bin index:
+        y_t = clip((x_t / MS) * (H/2) + H/2, 0, H-1)
+    
+    Creates a binary image where only pixel (t, y_t) is 1.
+    This is the "stripe" representation from ViTime.
     """
-
-    def __init__(self, height: int = 128, max_scale: float = 3.5):
+    
+    def __init__(
+        self,
+        height: int = 128,
+        max_scale: float = 3.5,
+        representation_mode: str = "pdf"
+    ):
         """
         Args:
             height: Height H of the 2D representation (number of bins)
             max_scale: MS parameter - values beyond [-MS, MS] are clipped
+            representation_mode: "pdf" (stripe) or "cdf" (occupancy map)
         """
         super().__init__()
         self.height = height
         self.max_scale = max_scale
+        assert representation_mode in ["pdf", "cdf"], "representation_mode must be 'pdf' or 'cdf'"
+        self.representation_mode = representation_mode
         
         # Precompute bin centers for inverse mapping
         # Centers: (j + 0.5) * (2*MS/H) - MS for j in [0, H-1]
@@ -47,10 +58,18 @@ class TimeSeriesTo2D(nn.Module):
         logger.info(f"TimeSeriesTo2D initialized: H={height}, MS={max_scale}")
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """1D normalized series → 2D occupancy map (values in [0, 1] per column).
-
-        Univariate: (batch, seq_len) -> (batch, 1, height, seq_len)
-        Multivariate: (batch, num_vars, seq_len) -> (batch, num_vars, height, seq_len)
+        """Convert 1D time series to 2D binary stripe image.
+        
+        Supports both univariate and multivariate inputs:
+        - Univariate: (batch, seq_len) -> (batch, 1, height, seq_len)
+        - Multivariate: (batch, num_vars, seq_len) -> (batch, num_vars, height, seq_len)
+        
+        Args:
+            x: Normalized time series of shape (batch, seq_len) or (batch, num_vars, seq_len)
+            
+        Returns:
+            Binary image of shape (batch, num_vars, height, seq_len)
+            Each column has exactly one 1 (one-hot along height) per variable
         """
         # Handle univariate case: (batch, seq_len) -> (batch, 1, seq_len)
         if x.dim() == 2:
@@ -65,21 +84,39 @@ class TimeSeriesTo2D(nn.Module):
         # Formula: y = (x + MS) / (2*MS) * H, then clip to [0, H-1]
         bin_indices = ((x_clipped + self.max_scale) / (2 * self.max_scale) * self.height)
         bin_indices = torch.clamp(bin_indices.long(), 0, self.height - 1)
-
-        height_range = torch.arange(self.height, device=x.device).view(1, 1, self.height, 1)
-        filled = (height_range <= bin_indices.unsqueeze(2)).float()
-        image = filled
-
+        
+        if self.representation_mode == "pdf":
+            # Create one-hot encoding along height dimension
+            # Shape: (batch, num_vars, seq_len, height)
+            one_hot = F.one_hot(bin_indices, num_classes=self.height).float()
+            
+            # Reshape to (batch, num_vars, height, seq_len)
+            image = one_hot.permute(0, 1, 3, 2)
+        else:
+            # Occupancy/CDF: fill all pixels <= bin index
+            # height_range: (1, 1, height, 1) for broadcasting
+            height_range = torch.arange(self.height, device=x.device).view(1, 1, self.height, 1)
+            # bin_indices: (batch, num_vars, 1, seq_len) for broadcasting
+            filled = (height_range <= bin_indices.unsqueeze(2)).float()
+            image = filled
+        
         logger.debug(f"TimeSeriesTo2D: input {x.shape} -> output {image.shape}")
         return image
     
-    def _decode_expectation_from_occupancy(
+    def _decode_cdf_pdf_expectation(
         self,
         cdf_map: torch.Tensor,
-        sharpen_temp: Optional[float] = None,
-        eps: float = 1e-8,
+        pdf_temperature: Optional[float] = None,
+        eps: float = 1e-8
     ) -> torch.Tensor:
-        """Decode occupancy map via vertical gradient → normalized mass → expected bin index."""
+        """Decode a CDF/occupancy map using a PDF expectation approach.
+        
+        Steps:
+        1) Convert CDF → PDF via vertical gradient (drop between rows).
+        2) ReLU to remove negative gradients (monotonicity violations).
+        3) Normalize PDF column-wise.
+        4) Compute expected pixel index and map back to value space.
+        """
         # Ensure valid CDF range
         cdf_map = torch.clamp(cdf_map, 0.0, 1.0)
         
@@ -94,8 +131,9 @@ class TimeSeriesTo2D(nn.Module):
         pdf = F.relu(pdf)
         
         # Optional sharpening temperature (temperature < 1 sharpens)
-        if sharpen_temp is not None and sharpen_temp != 1.0:
-            power = 1.0 / max(sharpen_temp, eps)
+        if pdf_temperature is not None and pdf_temperature != 1.0:
+            # Use a power transform to mimic temperature scaling
+            power = 1.0 / max(pdf_temperature, eps)
             pdf = torch.pow(pdf, power)
         
         # Normalize per column
@@ -117,26 +155,57 @@ class TimeSeriesTo2D(nn.Module):
         self,
         image: torch.Tensor,
         cdf_decoder: str = "mean",
-        expectation_sharpen_temp: Optional[float] = None,
-        squeeze_univariate: bool = True,
+        pdf_temperature: Optional[float] = None,
+        squeeze_univariate: bool = True
     ) -> torch.Tensor:
-        """Occupancy map (per-column values in [0,1]) → 1D normalized series.
-
-        cdf_decoder: 'mean' (column sum → value) or 'expectation' (gradient mass → expected bin).
-        expectation_sharpen_temp: optional power scaling when cdf_decoder=='expectation'.
+        """Convert 2D probability image back to 1D time series.
+        
+        Uses expectation: x_t = sum_j P(j) * center(j)
+        
+        Supports both univariate and multivariate:
+        - Univariate: (batch, 1, height, seq_len) -> (batch, seq_len) if squeeze_univariate
+        - Multivariate: (batch, num_vars, height, seq_len) -> (batch, num_vars, seq_len)
+        
+        Args:
+            image: Probability image of shape (batch, num_vars, height, seq_len)
+                   Each column should be a valid probability distribution.
+                   For CDF mode, values should be in [0, 1] range.
+            cdf_decoder: For CDF mode, 'mean' (column sum) or 'pdf_expectation'
+            pdf_temperature: Temperature for softmax (PDF mode) or power scaling (CDF pdf_expectation).
+                            Lower = sharper peaks. None uses default (no scaling).
+            squeeze_univariate: If True, squeeze output for univariate case (backwards compat)
+            
+        Returns:
+            Time series of shape (batch, num_vars, seq_len) or (batch, seq_len) if univariate
         """
         batch_size, num_vars, height, seq_len = image.shape
         squeeze_output = squeeze_univariate and (num_vars == 1)
-
-        if cdf_decoder == "expectation":
-            x = self._decode_expectation_from_occupancy(image, expectation_sharpen_temp)
+        
+        if self.representation_mode == "pdf":
+            # Apply temperature scaling if provided
+            if pdf_temperature is not None:
+                prob = F.softmax(image / pdf_temperature, dim=2)
+            else:
+                prob = F.softmax(image, dim=2)
+            
+            # Compute expectation: sum_j P(j) * center(j)
+            # bin_centers: (height,) -> (1, 1, height, 1)
+            centers = self.bin_centers.view(1, 1, -1, 1).to(image.device)
+            
+            # Weighted sum: (batch, num_vars, seq_len)
+            x = (prob * centers).sum(dim=2)
         else:
-            occupancy = torch.clamp(image, min=0.0, max=1.0)
-            column_sum = occupancy.sum(dim=2)
-            column_sum = torch.clamp(column_sum, 0.0, float(self.height))
-            normalized = column_sum / float(self.height)
-            x = normalized * (2 * self.max_scale) - self.max_scale
-
+            if cdf_decoder == "pdf_expectation":
+                x = self._decode_cdf_pdf_expectation(image, pdf_temperature)
+            else:
+                # Occupancy/CDF: value is the column sum mapped back to normalized range
+                occupancy = torch.clamp(image, min=0.0, max=1.0)
+                column_sum = occupancy.sum(dim=2)  # Sum along height
+                column_sum = torch.clamp(column_sum, 0.0, float(self.height))
+                normalized = column_sum / float(self.height)
+                x = normalized * (2 * self.max_scale) - self.max_scale
+        
+        # For backwards compatibility, squeeze if univariate
         if squeeze_output:
             x = x.squeeze(1)
         

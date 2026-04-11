@@ -22,19 +22,124 @@ try:
     from .preprocessing import TimeSeriesTo2D, VerticalGaussianBlur
     from .unet import ConditionalUNet2D, TimeSeriesContextEncoder
     from .transformer import DiffusionTransformer
+    from .ci_dit import ChannelIndependentDiT
     from .diffusion import DiffusionScheduler
-    from .guidance import GuidanceModel
+    from .guidance import GuidanceModel, LinearRegressionGuidance
     from .metrics import monotonicity_loss
 except ImportError:
     from config import DiffusionTSFConfig
     from preprocessing import TimeSeriesTo2D, VerticalGaussianBlur
     from unet import ConditionalUNet2D, TimeSeriesContextEncoder
     from transformer import DiffusionTransformer
+    from ci_dit import ChannelIndependentDiT
     from diffusion import DiffusionScheduler
-    from guidance import GuidanceModel
+    from guidance import GuidanceModel, LinearRegressionGuidance
     from metrics import monotonicity_loss
 
 logger = logging.getLogger(__name__)
+
+
+def beam_search_decoder(
+    cdf_map: torch.Tensor,
+    bin_centers: torch.Tensor,
+    beam_width: int = 5,
+    jump_penalty_scale: float = 1.0,
+    search_radius: int = 10,
+    eps: float = 1e-8
+) -> torch.Tensor:
+    """beam search for decoding the CDF/occupancy maps.
+    
+    finds a path through the prob map. tries to maximize likelihood while 
+    punishing big jumps between time steps so it stays smoothish.
+    """
+    batch_size, height, seq_len = cdf_map.shape
+    device = cdf_map.device
+    
+    # 1. cdf to pdf conversion: drop[y] = cdf[y] - cdf[y+1]
+    # occupancy is high at bottom, low at top. 
+    # stick some zeros at the top so shape matches
+    pdf = torch.zeros_like(cdf_map)
+    pdf[:, :-1, :] = cdf_map[:, :-1, :] - cdf_map[:, 1:, :]
+    pdf = torch.clamp(pdf, min=0.0)
+    
+    # norm the pdf per column
+    pdf_sum = pdf.sum(dim=1, keepdim=True).clamp(min=eps)
+    pdf = pdf / pdf_sum
+    
+    # log probs (clamped to avoid -inf explosion)
+    log_pdf = torch.log(pdf.clamp(min=eps))  # (batch, height, seq_len)
+    
+    results = []
+    
+    for b in range(batch_size):
+        log_pdf_b = log_pdf[b]  # (height, seq_len)
+        
+        # start with top beam_width positions at t=0
+        init_scores = log_pdf_b[:, 0]  # (height,)
+        topk_scores, topk_indices = init_scores.topk(min(beam_width, height))
+        
+        # beams: (score, [path indices])
+        beam_scores = topk_scores  # (beam_width,)
+        beam_paths = topk_indices.unsqueeze(1)  # (beam_width, 1)
+        
+        # walk through time
+        for t in range(1, seq_len):
+            num_beams = beam_scores.shape[0]
+            
+            # current ends for each beam
+            prev_positions = beam_paths[:, -1]  # (num_beams,)
+            
+            # For each beam, compute scores for all possible next positions
+            # within search_radius
+            all_candidates_scores = []
+            all_candidates_paths = []
+            
+            for beam_idx in range(num_beams):
+                prev_pos = prev_positions[beam_idx].item()
+                prev_score = beam_scores[beam_idx]
+                
+                # Define search window
+                lo = max(0, prev_pos - search_radius)
+                hi = min(height, prev_pos + search_radius + 1)
+                
+                # Candidate positions and their scores
+                candidates = torch.arange(lo, hi, device=device)
+                candidate_log_probs = log_pdf_b[lo:hi, t]
+                
+                # Jump penalties
+                jumps = (candidates - prev_pos).abs().float()
+                penalties = jump_penalty_scale * jumps
+                
+                # Total scores
+                candidate_scores = prev_score + candidate_log_probs - penalties
+                
+                # Store candidates
+                for i, pos in enumerate(candidates):
+                    all_candidates_scores.append(candidate_scores[i])
+                    new_path = torch.cat([beam_paths[beam_idx], pos.unsqueeze(0)])
+                    all_candidates_paths.append(new_path)
+            
+            if len(all_candidates_scores) == 0:
+                # Edge case: no valid candidates, keep current beams
+                continue
+            
+            # Stack and prune to top beam_width
+            all_scores = torch.stack(all_candidates_scores)
+            topk_count = min(beam_width, len(all_scores))
+            topk_scores, topk_idx = all_scores.topk(topk_count)
+            
+            beam_scores = topk_scores
+            beam_paths = torch.stack([all_candidates_paths[i] for i in topk_idx.tolist()])
+        
+        # Select best path
+        best_idx = beam_scores.argmax()
+        best_path = beam_paths[best_idx]  # (seq_len,) indices
+        
+        # Convert indices to values using bin_centers
+        path_values = bin_centers[best_path.long()]
+        results.append(path_values)
+    
+    return torch.stack(results)  # (batch, seq_len)
 
 
 class DiffusionTSF(nn.Module):
@@ -42,7 +147,7 @@ class DiffusionTSF(nn.Module):
     
     Pipeline:
     1. Normalize input (past + future) using local mean/std
-    2. Convert to 2D occupancy (value-axis) representation
+    2. Convert to 2D "stripe" representation
     3. Apply vertical Gaussian blur
     4. Train U-Net to denoise future conditioned on past
     5. At inference: generate future via DDPM/DDIM
@@ -74,6 +179,7 @@ class DiffusionTSF(nn.Module):
         self.to_2d = TimeSeriesTo2D(
             height=config.image_height,
             max_scale=config.max_scale,
+            representation_mode=config.representation_mode
         )
         self.blur = VerticalGaussianBlur(
             kernel_size=config.blur_kernel_size,
@@ -89,17 +195,36 @@ class DiffusionTSF(nn.Module):
             if guidance_model is not None:
                 self.guidance_model = guidance_model
             else:
-                raise ValueError("Guidance model is required when use_guidance_channel=True")
+                # Default to linear regression if no model provided
+                self.guidance_model = LinearRegressionGuidance()
+                logger.info("Using default LinearRegressionGuidance for guidance channel")
         else:
             self.guidance_model = None
-            logger.info("No guidance model provided")
         
         # Noise prediction backbone (U-Net or Transformer)
         # Input channels: num_variables (data) + aux channels (coord, time_ramp, time_sine)
         # Use the config property for consistent calculation
         backbone_in_channels = config.backbone_in_channels
         
-        if config.model_type == "transformer":
+        if config.model_type == "ci_dit":
+            self.noise_predictor = ChannelIndependentDiT(
+                image_height=config.image_height,
+                patch_size=config.ci_dit_patch_size,
+                embed_dim=config.ci_dit_embed_dim,
+                depth=config.ci_dit_depth,
+                num_heads=config.ci_dit_num_heads,
+                mlp_ratio=config.ci_dit_mlp_ratio,
+                in_channels=config.ci_dit_in_channels,
+                cond_channels=config.ci_dit_cond_channels,
+                out_channels=1,
+                n_variates=config.num_variables,
+                cross_variate_every=config.ci_dit_cross_variate_every,
+                dropout=config.ci_dit_dropout,
+                gradient_checkpointing=config.use_gradient_checkpointing,
+            )
+            # CI-DiT does cross-variate attn internally, no separate context encoder
+            self.context_encoder = None
+        elif config.model_type == "transformer":
             self.noise_predictor = DiffusionTransformer(
                 image_height=config.image_height,
                 patch_height=config.transformer_patch_height,
@@ -422,10 +547,18 @@ class DiffusionTSF(nn.Module):
         return smoothed.squeeze(1)
     
     def _compute_emd_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Column-wise Wasserstein-1 on occupancy maps ([-1,1] → CDF in [0,1])."""
-        cdf_pred = (pred + 1.0) / 2.0
-        cdf_target = (target + 1.0) / 2.0
-        return (cdf_pred - cdf_target).abs().mean()
+        """Compute column-wise Wasserstein-1 distance via CDF trick."""
+        if self.config.representation_mode == "pdf":
+            temperature = self.config.decode_temperature
+            prob_pred = F.softmax(pred / temperature, dim=2)
+            prob_target = F.softmax(target / temperature, dim=2)
+            cdf_pred = prob_pred.cumsum(dim=2)
+            cdf_target = prob_target.cumsum(dim=2)
+        else:
+            cdf_pred = (pred + 1.0) / 2.0
+            cdf_target = (target + 1.0) / 2.0
+        emd = (cdf_pred - cdf_target).abs().mean()
+        return emd
 
     def _load_from_state_dict(
         self,
@@ -459,7 +592,12 @@ class DiffusionTSF(nn.Module):
         image = self.to_2d(x)
         blurred = self.blur(image)
         if scale_for_diffusion:
-            return blurred.clamp(min=0.0, max=1.0) * 2.0 - 1.0
+            if self.config.representation_mode == "pdf":
+                scaled = blurred * 30.0
+                scaled = scaled * 2.0 - 1.0
+            else:
+                scaled = blurred.clamp(min=0.0, max=1.0) * 2.0 - 1.0
+            return scaled
         return blurred
     
     def decode_from_2d(
@@ -467,53 +605,67 @@ class DiffusionTSF(nn.Module):
         image: torch.Tensor,
         from_diffusion: bool = True,
         decoder_method: str = "mean",
+        beam_width: int = 5,
+        jump_penalty_scale: float = 1.0,
+        search_radius: int = 10
     ) -> torch.Tensor:
         """Decode 2D representation to 1D time series."""
         batch_size, num_vars, height, seq_len = image.shape
         squeeze_output = (num_vars == 1)
         
-        if from_diffusion:
-            cdf_map = (image + 1.0) / 2.0
+        if self.config.representation_mode == "pdf":
+            temperature = self.config.decode_temperature if from_diffusion else None
+            x = self.to_2d.inverse(
+                image,
+                pdf_temperature=temperature,
+                squeeze_univariate=squeeze_output
+            )
+            return x
         else:
-            cdf_map = image
-        cdf_map = torch.clamp(cdf_map, min=0.0, max=1.0)
-        if decoder_method in ("mean", "expectation"):
-            sharpen = (
-                getattr(self.config, "decode_temperature", None)
-                if decoder_method == "expectation"
-                else None
-            )
-            inv_mode = "expectation" if decoder_method == "expectation" else "mean"
-            return self.to_2d.inverse(
-                cdf_map,
-                cdf_decoder=inv_mode,
-                expectation_sharpen_temp=sharpen,
-                squeeze_univariate=squeeze_output,
-            )
-        if num_vars > 1:
-            raise NotImplementedError(
-                f"decoder_method='{decoder_method}' not yet supported for multivariate."
-            )
-        cdf_map_squeezed = cdf_map.squeeze(1)
-        if not self.training and self.config.decode_smoothing and self.decode_smoothing_kernel is not None:
-            cdf_map_squeezed = self._apply_decode_smoothing(cdf_map_squeezed)
-        centers = self.to_2d.bin_centers.view(1, -1, 1).to(cdf_map_squeezed.device)
-        if decoder_method == "median":
-            below_half_mask = cdf_map_squeezed < 0.5
-            has_below = below_half_mask.any(dim=1)
-            first_below = below_half_mask.float().argmax(dim=1)
-            median_idx = (first_below - 1).clamp(min=0)
-            median_idx = torch.where(has_below, median_idx, torch.full_like(median_idx, self.config.image_height - 1))
-            all_below = (first_below == 0) & has_below
-            median_idx = torch.where(all_below, torch.zeros_like(median_idx), median_idx)
-            x = torch.gather(centers.expand(cdf_map_squeezed.shape[0], -1, cdf_map_squeezed.shape[2]), 1, median_idx.unsqueeze(1)).squeeze(1)
-        elif decoder_method == "mode":
-            drop = -torch.diff(cdf_map_squeezed, dim=1, prepend=cdf_map_squeezed[:, :1, :])
-            drop = torch.relu(drop)
-            peak_idx = drop.argmax(dim=1)
-            x = torch.gather(centers.expand(cdf_map_squeezed.shape[0], -1, cdf_map_squeezed.shape[2]), 1, peak_idx.unsqueeze(1)).squeeze(1)
-        else:
-            raise ValueError(f"Unknown decoder_method '{decoder_method}'")
+            if from_diffusion:
+                cdf_map = (image + 1.0) / 2.0
+            else:
+                cdf_map = image
+            cdf_map = torch.clamp(cdf_map, min=0.0, max=1.0)
+            if decoder_method in ("mean", "pdf_expectation"):
+                temperature = getattr(self.config, "decode_temperature", None) if decoder_method == "pdf_expectation" else None
+                x = self.to_2d.inverse(
+                    cdf_map,
+                    cdf_decoder=decoder_method,
+                    pdf_temperature=temperature,
+                    squeeze_univariate=squeeze_output
+                )
+                return x
+            if num_vars > 1:
+                raise NotImplementedError(f"decoder_method='{decoder_method}' not yet supported for multivariate.")
+            cdf_map_squeezed = cdf_map.squeeze(1)
+            if not self.training and self.config.decode_smoothing and self.decode_smoothing_kernel is not None:
+                cdf_map_squeezed = self._apply_decode_smoothing(cdf_map_squeezed)
+            centers = self.to_2d.bin_centers.view(1, -1, 1).to(cdf_map_squeezed.device)
+            if decoder_method == "median":
+                below_half_mask = cdf_map_squeezed < 0.5
+                has_below = below_half_mask.any(dim=1)
+                first_below = below_half_mask.float().argmax(dim=1)
+                median_idx = (first_below - 1).clamp(min=0)
+                median_idx = torch.where(has_below, median_idx, torch.full_like(median_idx, self.config.image_height - 1))
+                all_below = (first_below == 0) & has_below
+                median_idx = torch.where(all_below, torch.zeros_like(median_idx), median_idx)
+                x = torch.gather(centers.expand(cdf_map_squeezed.shape[0], -1, cdf_map_squeezed.shape[2]), 1, median_idx.unsqueeze(1)).squeeze(1)
+            elif decoder_method == "mode":
+                drop = -torch.diff(cdf_map_squeezed, dim=1, prepend=cdf_map_squeezed[:, :1, :])
+                drop = torch.relu(drop)
+                peak_idx = drop.argmax(dim=1)
+                x = torch.gather(centers.expand(cdf_map_squeezed.shape[0], -1, cdf_map_squeezed.shape[2]), 1, peak_idx.unsqueeze(1)).squeeze(1)
+            elif decoder_method == "beam":
+                x = beam_search_decoder(
+                    cdf_map_squeezed,
+                    bin_centers=self.to_2d.bin_centers.to(cdf_map_squeezed.device),
+                    beam_width=beam_width,
+                    jump_penalty_scale=jump_penalty_scale,
+                    search_radius=search_radius
+                )
+            else:
+                raise ValueError(f"Unknown decoder_method '{decoder_method}'")
         return x
     
     def _apply_coarse_dropout(self, image: torch.Tensor) -> torch.Tensor:
@@ -567,6 +719,9 @@ class DiffusionTSF(nn.Module):
         t: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass using either unified L+F or optimized Future-Only scheme."""
+        if self.config.model_type == "ci_dit":
+            return self._forward_ci_dit(past, future, t)
+        
         batch_size = past.shape[0]
         device = past.device
         past_norm, future_norm, stats = self._normalize_sequence(past, future)
@@ -680,12 +835,12 @@ class DiffusionTSF(nn.Module):
         emd_loss = self._compute_emd_loss(x0_pred, future_2d)
         
         mono_loss = torch.tensor(0.0, device=device)
-        if self.config.use_monotonicity_loss:
+        if self.config.use_monotonicity_loss and self.config.representation_mode == "cdf":
             cdf_pred = torch.clamp((x0_pred + 1.0) / 2.0, 0.0, 1.0)
             mono_loss = monotonicity_loss(cdf_pred)
-
+            
         loss = noise_loss + self.config.emd_lambda * emd_loss + self.config.monotonicity_weight * mono_loss
-
+        
         result = {
             'loss': loss,
             'noise_loss': noise_loss,
@@ -707,8 +862,19 @@ class DiffusionTSF(nn.Module):
         cfg_scale: Optional[float] = None,
         verbose: bool = False,
         decoder_method: str = "mean",
+        beam_width: int = 5,
+        jump_penalty_scale: float = 1.0,
+        search_radius: int = 10
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions using unified (L+F) or optimized Future-Only scheme."""
+        if self.config.model_type == "ci_dit":
+            return self._generate_ci_dit(
+                past, use_ddim=use_ddim, num_ddim_steps=num_ddim_steps,
+                eta=eta, cfg_scale=cfg_scale, verbose=verbose,
+                decoder_method=decoder_method, beam_width=beam_width,
+                jump_penalty_scale=jump_penalty_scale, search_radius=search_radius,
+            )
+        
         batch_size = past.shape[0]
         device = past.device
         if cfg_scale is None: cfg_scale = self.config.cfg_scale
@@ -852,7 +1018,13 @@ class DiffusionTSF(nn.Module):
                 verbose=verbose
             )
 
-        future_norm = self.decode_from_2d(future_2d, decoder_method=decoder_method)
+        future_norm = self.decode_from_2d(
+            future_2d,
+            decoder_method=decoder_method,
+            beam_width=beam_width,
+            jump_penalty_scale=jump_penalty_scale,
+            search_radius=search_radius
+        )
         future = self._denormalize(future_norm, stats)
 
         # Discard the reconstructed overlap, keep only the real forecast
@@ -868,6 +1040,164 @@ class DiffusionTSF(nn.Module):
             'past_2d': past_2d
         }
         if guidance_2d is not None: result['guidance_2d'] = guidance_2d
+        return result
+    
+    # ====================================================================
+    # CI-DiT specific forward/generate — channel-independent processing
+    # ====================================================================
+
+    def _forward_ci_dit(self, past, future, t=None):
+        """CI-DiT training forward: process each variate independently."""
+        B = past.shape[0]
+        V = self.config.num_variables
+        device = past.device
+        H = self.config.image_height
+
+        past_norm, future_norm, stats = self._normalize_sequence(past, future)
+        past_2d = self.encode_to_2d(past_norm)      # (B, V, H, W_past)
+        future_2d = self.encode_to_2d(future_norm)   # (B, V, H, W_fut)
+        past_2d = self._apply_coarse_dropout(past_2d)
+
+        W_past = past_2d.shape[-1]
+        W_fut = future_2d.shape[-1]
+
+        if t is None:
+            t = torch.randint(0, self.config.num_diffusion_steps, (B,), device=device)
+
+        noisy_future, noise = self.scheduler.add_noise(future_2d, t)
+
+        # --- build per-variate input: (B*V, C_per_var, H, W_fut) ---
+        noisy_flat = noisy_future.reshape(B * V, 1, H, W_fut)
+
+        channels = [noisy_flat]
+        if self.config.use_coordinate_channel:
+            coord = self._get_coordinate_grid(1, H, W_fut, device, dtype=noisy_flat.dtype)
+            channels.append(coord.expand(B * V, -1, -1, -1))
+
+        guidance_2d = None
+        if self.config.use_guidance_channel:
+            guidance_2d = self._generate_guidance_2d(past, past_norm, stats, W_fut)
+            channels.append(guidance_2d.reshape(B * V, 1, H, W_fut))
+
+        x_flat = torch.cat(channels, dim=1)  # (BV, ci_dit_in_channels, H, W_fut)
+
+        # --- conditioning: resize past 2D per variate to match future width ---
+        past_flat = past_2d.reshape(B * V, 1, H, W_past)
+        cond_flat = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+
+        # --- run CI-DiT backbone ---
+        noise_pred_flat = self.noise_predictor(x_flat, t, cond_flat)
+        noise_pred = noise_pred_flat.reshape(B, V, H, W_fut)
+
+        # --- loss (same as standard path) ---
+        K = self.config.lookback_overlap
+        if K > 0:
+            noise_loss_past = F.mse_loss(noise_pred[..., :K], noise[..., :K])
+            noise_loss_future = F.mse_loss(noise_pred[..., K:], noise[..., K:])
+            noise_loss = self.config.past_loss_weight * noise_loss_past + noise_loss_future
+        else:
+            noise_loss = F.mse_loss(noise_pred, noise)
+
+        x0_pred = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
+        emd_loss = self._compute_emd_loss(x0_pred, future_2d)
+
+        mono_loss = torch.tensor(0.0, device=device)
+        if self.config.use_monotonicity_loss and self.config.representation_mode == "cdf":
+            cdf_pred = torch.clamp((x0_pred + 1.0) / 2.0, 0.0, 1.0)
+            mono_loss = monotonicity_loss(cdf_pred)
+
+        loss = noise_loss + self.config.emd_lambda * emd_loss + self.config.monotonicity_weight * mono_loss
+
+        result = {
+            'loss': loss, 'noise_loss': noise_loss, 'emd_loss': emd_loss,
+            'noise_pred': noise_pred, 't': t,
+        }
+        if guidance_2d is not None:
+            result['guidance_2d'] = guidance_2d
+        return result
+
+    @torch.no_grad()
+    def _generate_ci_dit(self, past, use_ddim=True, num_ddim_steps=50, eta=0.0,
+                         cfg_scale=None, verbose=False, decoder_method="mean", **kwargs):
+        """CI-DiT generation path."""
+        B = past.shape[0]
+        V = self.config.num_variables
+        device = past.device
+        H = self.config.image_height
+        if cfg_scale is None:
+            cfg_scale = self.config.cfg_scale
+
+        past_norm, _, stats = self._normalize_sequence(past)
+        past_2d = self.encode_to_2d(past_norm)
+        W_past = past_2d.shape[-1]
+        W_fut = self.config.forecast_length
+
+        # conditioning: per-variate past resized to future width
+        past_flat = past_2d.reshape(B * V, 1, H, W_past)
+        cond_flat = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+
+        # shared coordinate channel
+        coord = None
+        if self.config.use_coordinate_channel:
+            coord = self._get_coordinate_grid(1, H, W_fut, device, dtype=cond_flat.dtype)
+            coord = coord.expand(B * V, -1, -1, -1)
+
+        # per-variate guidance
+        guidance_2d = None
+        guide_flat = None
+        if self.config.use_guidance_channel:
+            guidance_2d = self._generate_guidance_2d(past, past_norm, stats, W_fut)
+            guide_flat = guidance_2d.reshape(B * V, 1, H, W_fut)
+
+        null_cond = torch.zeros_like(cond_flat) if cfg_scale > 1.0 else None
+        null_guide = torch.zeros_like(guide_flat) if (guide_flat is not None and cfg_scale > 1.0) else None
+
+        def _build_x(x_noisy, use_null=False):
+            parts = [x_noisy]
+            if coord is not None:
+                parts.append(coord)
+            if guide_flat is not None:
+                parts.append(null_guide if use_null else guide_flat)
+            return torch.cat(parts, dim=1)
+
+        def model_fn(x, t_batch, cond_arg):
+            if cfg_scale <= 1.0:
+                inp = _build_x(x)
+                return self.noise_predictor(inp, t_batch, cond_arg)
+            # CFG: two passes
+            out_c = self.noise_predictor(_build_x(x, use_null=False), t_batch, cond_flat)
+            out_u = self.noise_predictor(_build_x(x, use_null=True), t_batch, null_cond)
+            return out_u + cfg_scale * (out_c - out_u)
+
+        noise_shape = (B * V, 1, H, W_fut)
+
+        if use_ddim:
+            future_2d_flat = self.scheduler.sample_ddim_cfg(
+                model=model_fn, shape=noise_shape, cond=cond_flat,
+                null_cond=null_cond, cfg_scale=1.0,
+                num_steps=num_ddim_steps, eta=eta, device=device, verbose=verbose,
+            )
+        else:
+            future_2d_flat = self.scheduler.sample_ddpm_cfg(
+                model=model_fn, shape=noise_shape, cond=cond_flat,
+                null_cond=null_cond, cfg_scale=1.0, device=device, verbose=verbose,
+            )
+
+        future_2d = future_2d_flat.reshape(B, V, H, W_fut)
+        future_norm = self.decode_from_2d(future_2d, decoder_method=decoder_method, **kwargs)
+        future = self._denormalize(future_norm, stats)
+
+        K = self.config.lookback_overlap
+        if K > 0:
+            future = future[..., K:]
+            future_norm = future_norm[..., K:]
+
+        result = {
+            'prediction': future, 'prediction_norm': future_norm,
+            'future_2d': future_2d, 'past_2d': past_2d,
+        }
+        if guidance_2d is not None:
+            result['guidance_2d'] = guidance_2d
         return result
 
     def get_loss(
