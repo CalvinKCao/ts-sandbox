@@ -57,8 +57,8 @@ if [ "$SMOKE" -eq 1 ]; then
     SMOKE_FLAG="--smoke-test"
     SUFFIX="-smoke"
 else
-    WALL_PRETRAIN="2-00:00:00"
-    WALL_FINETUNE="1-00:00:00"
+    WALL_PRETRAIN="1-08:00:00"
+    WALL_FINETUNE="0-16:00:00"
     MEM="32G"
     CPUS=6
     SMOKE_FLAG=""
