@@ -1,16 +1,23 @@
 #!/bin/bash
 # =============================================================================
-# ETTh2 Gaussian vs Binary diffusion comparison — Killarney, job-chained
+# ETTh2: Gaussian vs Binary diffusion — Killarney, job-chained
 #
 # Dependency graph:
-#   A  iTrans HP + pretrain + Gaussian diffusion HP + pretrain
-#   B  (copy iTrans from A) → Binary diffusion HP + pretrain    [afterok:A]
-#   C  Gaussian finetune ETTh2                                   [afterok:A]
-#   D  Binary  finetune ETTh2                                    [afterok:B]
+#   A  iTrans HP + pretrain + Gaussian diff HP + pretrain
+#   B  (copy iTrans from A) → Binary diff HP + pretrain        [afterok:A]
+#   C  Gaussian finetune ETTh2                                  [afterok:A]
+#   D  Binary  finetune ETTh2                                   [afterok:B]
 #
-# USAGE (from ts-sandbox repo root on login node):
-#   ./slurm_etth2_compare.sh              # full L40S run
-#   ./slurm_etth2_compare.sh --smoke      # smoke test (~20 min per job)
+# USAGE (from ts-sandbox repo root on the login node):
+#   ./slurm_etth2_compare.sh           # full H100 run
+#   ./slurm_etth2_compare.sh --smoke   # L40S smoke test — verifies full chain
+#
+# HOW TO SMOKE TEST:
+#   --smoke submits all 4 jobs with 30-min time limits and passes --smoke-test
+#   to the Python pipeline (1 epoch, 4 samples, 1 HP trial).  Each job should
+#   finish in ~5 min on L40S, so the whole A→B→D chain completes in ~15-20 min.
+#   Watch with:  squeue -u $USER
+#   Check logs:  tail -f $STORE/logs/A-gauss-pretrain-<JOB_ID>.out
 # =============================================================================
 
 set -euo pipefail
@@ -20,68 +27,71 @@ SMOKE=0
 for arg in "$@"; do [ "$arg" = "--smoke" ] && SMOKE=1; done
 
 # ---- Repo root --------------------------------------------------------------
-if   [ -d "$SCRATCH/ts-sandbox" ]; then REPO="$SCRATCH/ts-sandbox"
-elif [ -d "$HOME/ts-sandbox"    ]; then REPO="$HOME/ts-sandbox"
+if   [ -d "${SCRATCH:-}/ts-sandbox" ]; then REPO="$SCRATCH/ts-sandbox"
+elif [ -d "$HOME/ts-sandbox" ];         then REPO="$HOME/ts-sandbox"
 else echo "ERROR: ts-sandbox not found in SCRATCH or HOME" && exit 1
 fi
 
-# ---- Storage (per-user under PROJECT) ---------------------------------------
+# ---- Per-user storage under PROJECT -----------------------------------------
+# Alliance convention: $PROJECT/$USER/... for your working data
 if [ -z "${PROJECT:-}" ]; then
     PROJECT=$(ls -d "$HOME/projects/aip-"* "$HOME/projects/def-"* 2>/dev/null \
               | head -1 || true)
 fi
-if [ -z "${PROJECT:-}" ]; then
-    echo "ERROR: \$PROJECT not set and no ~/projects/aip-* or def-* found"
-    exit 1
-fi
+[ -z "${PROJECT:-}" ] && { echo "ERROR: \$PROJECT not set"; exit 1; }
 
-STORE="$PROJECT/$USER/diffusion-tsf-etth2"
-GAUSS_CKPT="$STORE/checkpoints_gauss"
-GAUSS_RESULTS="$STORE/results_gauss"
-BINARY_CKPT="$STORE/checkpoints_binary"
-BINARY_RESULTS="$STORE/results_binary"
+export STORE="$PROJECT/$USER/diffusion-tsf-etth2"
+export GAUSS_CKPT="$STORE/checkpoints_gauss"
+export GAUSS_RESULTS="$STORE/results_gauss"
+export BINARY_CKPT="$STORE/checkpoints_binary"
+export BINARY_RESULTS="$STORE/results_binary"
 LOG_DIR="$STORE/logs"
 
-mkdir -p "$GAUSS_CKPT" "$GAUSS_RESULTS" "$BINARY_CKPT" "$BINARY_RESULTS" "$LOG_DIR"
+mkdir -p "$GAUSS_CKPT" "$GAUSS_RESULTS" \
+         "$BINARY_CKPT" "$BINARY_RESULTS" \
+         "$LOG_DIR"
 
-if [ ! -e "$STORE/datasets" ]; then
-    ln -s "$REPO/datasets" "$STORE/datasets"
-fi
+# Keep datasets accessible from STORE without copying GBs
+[ ! -e "$STORE/datasets" ] && ln -s "$REPO/datasets" "$STORE/datasets"
 
-# ---- Resources --------------------------------------------------------------
+# ---- Venv path (exported so jobs can see it) --------------------------------
+export VENV="$PROJECT/$USER/diffusion-tsf/venv"
+[ ! -d "$VENV" ] && export VENV="$STORE/venv"
+
+# ---- Repo path (exported) ---------------------------------------------------
+export REPO
+
+# ---- Resources + flags ------------------------------------------------------
 if [ "$SMOKE" -eq 1 ]; then
+    GPU_ARGS=(--gres=gpu:l40s:1)
     WALL_PRETRAIN="0:30:00"
     WALL_FINETUNE="0:30:00"
-    MEM="16G"
-    CPUS=4
-    SMOKE_FLAG="--smoke-test"
+    MEM="16G"; CPUS=4
+    export SMOKE_FLAG="--smoke-test"
     SUFFIX="-smoke"
 else
-    WALL_PRETRAIN="1-08:00:00"
-    WALL_FINETUNE="0-16:00:00"
-    MEM="32G"
-    CPUS=6
-    SMOKE_FLAG=""
+    GPU_ARGS=(--partition=gpubase_h100_b4 --gpus-per-node=h100:1)
+    WALL_PRETRAIN="14:00:00"
+    WALL_FINETUNE="8:00:00"
+    MEM="60G"; CPUS=6
+    export SMOKE_FLAG=""
     SUFFIX=""
 fi
 
-# ---- Shared venv path -------------------------------------------------------
-VENV="$PROJECT/$USER/diffusion-tsf/venv"
-[ ! -d "$VENV" ] && VENV="$STORE/venv"
+# Common Python flags (exported so job bodies can use $SMOKE_FLAG etc.)
+export PY="python -u -m models.diffusion_tsf.train_multivariate_pipeline"
+export PY_COMMON="--n-variates 7 --amp --synthetic-samples 100000 --itransformer-trials 20 $SMOKE_FLAG"
 
-# ---- Python command helpers -------------------------------------------------
-PY_BASE="python -u -m models.diffusion_tsf.train_multivariate_pipeline"
-PY_COMMON="--n-variates 7 --amp --synthetic-samples 100000 --itransformer-trials 20 ${SMOKE_FLAG}"
-
-# ---- Preamble (runs at job start on the compute node) -----------------------
-# Note: submission-time vars like $REPO/$VENV are baked in now.
-#       Runtime Slurm vars like $SLURM_JOB_ID are escaped and expand later.
-read -r -d '' JOB_PREAMBLE << 'PREAMBLE_EOF' || true
+# ---- Shared job body: module load + venv activate + cd ----------------------
+# Written as a quoted heredoc into a temp file so each job can source it.
+# (Avoids duplicating 15 lines × 4 jobs while keeping expansion safe.)
+PREAMBLE_FILE="$(mktemp /tmp/job_preamble_XXXXXX.sh)"
+cat > "$PREAMBLE_FILE" << 'PREAMBLE'
 set -euo pipefail
 echo "======================================================="
-echo "  Job: $SLURM_JOB_NAME  ID: $SLURM_JOB_ID"
+echo "  Job: $SLURM_JOB_NAME   ID: $SLURM_JOB_ID"
 echo "  Node: $SLURMD_NODENAME"
-echo "  GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
+echo "  GPU:  $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
 echo "  Started: $(date)"
 echo "======================================================="
 
@@ -90,221 +100,181 @@ module load StdEnv/2023
 module load python/3.11
 module load cuda/12.2
 module load cudnn/8.9
-PREAMBLE_EOF
 
-# ---- Helper: write a job script to a tmpfile and submit it -----------------
-# Usage: submit_job <tmpfile> [extra sbatch args...]
-# Returns the job ID via stdout.
-submit_job() {
-    local tmpfile="$1"; shift
-    sbatch --parsable "$@" "$tmpfile"
-}
-
-
-# ==========================================================================
-# JOB A — Gaussian pretrain
-# ==========================================================================
-echo "Submitting Job A: Gaussian pretrain..."
-
-TMP_A=$(mktemp /tmp/slurm_jobA_XXXXXX.sh)
-cat > "$TMP_A" << SCRIPT_EOF
-#!/bin/bash
-#SBATCH --job-name=etth2-gauss-pretrain${SUFFIX}
-#SBATCH --gres=gpu:l40s:1
-#SBATCH --time=${WALL_PRETRAIN}
-#SBATCH --nodes=1
-#SBATCH --cpus-per-task=${CPUS}
-#SBATCH --mem=${MEM}
-#SBATCH --output=${LOG_DIR}/A-gauss-pretrain-%j.out
-#SBATCH --error=${LOG_DIR}/A-gauss-pretrain-%j.err
-#SBATCH --account=aip-boyuwang
-#SBATCH --mail-type=FAIL
-#SBATCH --mail-user=ccao87@uwo.ca
-
-${JOB_PREAMBLE}
-
-# Activate venv (create if missing)
-if [ ! -d "${VENV}" ]; then
-    echo "[setup] Creating venv at ${VENV}..."
-    python -m venv "${VENV}"
-    source "${VENV}/bin/activate"
+if [ ! -d "$VENV" ]; then
+    echo "[setup] Creating venv at $VENV ..."
+    python -m venv "$VENV"
+    source "$VENV/bin/activate"
     pip install --upgrade pip -q
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
     pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops -q
-    [ -f "${REPO}/requirements.txt" ] && pip install -r "${REPO}/requirements.txt" -q
+    [ -f "$REPO/requirements.txt" ] && pip install -r "$REPO/requirements.txt" -q
 else
-    source "${VENV}/bin/activate"
+    source "$VENV/bin/activate"
 fi
 
 export WANDB_MODE=offline
 export PYTHONUNBUFFERED=1
-cd "${REPO}"
 
-${PY_BASE} \
-    --mode pretrain \
-    --checkpoint-dir ${GAUSS_CKPT} \
-    --results-dir    ${GAUSS_RESULTS} \
-    ${PY_COMMON}
+echo "[info] python: $(which python)"
+cd "$REPO"
+echo "[info] cwd: $(pwd)"
+echo ""
+PREAMBLE
+# Will be sourced by each job via:  source "$PREAMBLE_FILE"
+export PREAMBLE_FILE
 
-echo "[A] Gaussian pretrain complete: \$(date)"
-SCRIPT_EOF
+# ============================================================================
+# JOB A — Gaussian pretrain
+# ============================================================================
 
-JOB_A=$(submit_job "$TMP_A")
-rm -f "$TMP_A"
-echo "  -> Job A ID: ${JOB_A}"
+echo "Submitting A: Gaussian pretrain..."
 
-
-# ==========================================================================
-# JOB B — Binary pretrain (depends on A)
-# ==========================================================================
-echo "Submitting Job B: Binary pretrain (depends on A=${JOB_A})..."
-
-TMP_B=$(mktemp /tmp/slurm_jobB_XXXXXX.sh)
-cat > "$TMP_B" << SCRIPT_EOF
+JOB_A=$(sbatch --parsable \
+    --job-name="etth2-gauss-pretrain${SUFFIX}" \
+    --account=aip-boyuwang \
+    --nodes=1 --cpus-per-task="$CPUS" --mem="$MEM" \
+    "${GPU_ARGS[@]}" \
+    --time="$WALL_PRETRAIN" \
+    --output="$LOG_DIR/A-gauss-pretrain-%j.out" \
+    --error="$LOG_DIR/A-gauss-pretrain-%j.err" \
+    --mail-type=FAIL --mail-user=ccao87@uwo.ca \
+    << 'ENDSCRIPT'
 #!/bin/bash
-#SBATCH --job-name=etth2-binary-pretrain${SUFFIX}
-#SBATCH --gres=gpu:l40s:1
-#SBATCH --time=${WALL_PRETRAIN}
-#SBATCH --nodes=1
-#SBATCH --cpus-per-task=${CPUS}
-#SBATCH --mem=${MEM}
-#SBATCH --output=${LOG_DIR}/B-binary-pretrain-%j.out
-#SBATCH --error=${LOG_DIR}/B-binary-pretrain-%j.err
-#SBATCH --account=aip-boyuwang
-#SBATCH --mail-type=FAIL
-#SBATCH --mail-user=ccao87@uwo.ca
-#SBATCH --dependency=afterok:${JOB_A}
+source "$PREAMBLE_FILE"
 
-${JOB_PREAMBLE}
-source "${VENV}/bin/activate"
-export WANDB_MODE=offline
-export PYTHONUNBUFFERED=1
-cd "${REPO}"
+$PY --mode pretrain \
+    --checkpoint-dir "$GAUSS_CKPT" \
+    --results-dir    "$GAUSS_RESULTS" \
+    $PY_COMMON
 
-# Reuse iTrans checkpoint from Gaussian run — skip redundant synthetic pretrain
+echo "[A] Gaussian pretrain done: $(date)"
+ENDSCRIPT
+)
+echo "  -> A: $JOB_A"
+
+
+# ============================================================================
+# JOB B — Binary pretrain (copy iTrans from A, then binary diff HP + pretrain)
+# ============================================================================
+
+echo "Submitting B: Binary pretrain [afterok:$JOB_A]..."
+
+JOB_B=$(sbatch --parsable \
+    --job-name="etth2-binary-pretrain${SUFFIX}" \
+    --account=aip-boyuwang \
+    --nodes=1 --cpus-per-task="$CPUS" --mem="$MEM" \
+    "${GPU_ARGS[@]}" \
+    --time="$WALL_PRETRAIN" \
+    --dependency="afterok:$JOB_A" \
+    --output="$LOG_DIR/B-binary-pretrain-%j.out" \
+    --error="$LOG_DIR/B-binary-pretrain-%j.err" \
+    --mail-type=FAIL --mail-user=ccao87@uwo.ca \
+    << 'ENDSCRIPT'
+#!/bin/bash
+source "$PREAMBLE_FILE"
+
+# Reuse iTrans artifacts from the Gaussian run — pipeline skips iTrans pretrain
+# if the checkpoint already exists, so we only pay for binary diffusion HP + pretrain.
 echo "[B] Copying iTrans artifacts from Gaussian checkpoint dir..."
-cp -v "${GAUSS_CKPT}/pretrained_itransformer.pt" "${BINARY_CKPT}/pretrained_itransformer.pt"
-[ -f "${GAUSS_CKPT}/itrans_hp.json" ] && \
-    cp -v "${GAUSS_CKPT}/itrans_hp.json" "${BINARY_CKPT}/itrans_hp.json"
+cp -v "$GAUSS_CKPT/pretrained_itransformer.pt" "$BINARY_CKPT/pretrained_itransformer.pt"
+[ -f "$GAUSS_CKPT/itrans_hp.json" ] && \
+    cp -v "$GAUSS_CKPT/itrans_hp.json" "$BINARY_CKPT/itrans_hp.json"
 
-${PY_BASE} \
-    --mode pretrain \
+echo "[B] Running binary diffusion HP + pretrain..."
+$PY --mode pretrain \
     --binary-diffusion \
-    --checkpoint-dir ${BINARY_CKPT} \
-    --results-dir    ${BINARY_RESULTS} \
-    ${PY_COMMON}
+    --checkpoint-dir "$BINARY_CKPT" \
+    --results-dir    "$BINARY_RESULTS" \
+    $PY_COMMON
 
-echo "[B] Binary pretrain complete: \$(date)"
-SCRIPT_EOF
-
-JOB_B=$(submit_job "$TMP_B")
-rm -f "$TMP_B"
-echo "  -> Job B ID: ${JOB_B}"
+echo "[B] Binary pretrain done: $(date)"
+ENDSCRIPT
+)
+echo "  -> B: $JOB_B"
 
 
-# ==========================================================================
-# JOB C — Gaussian finetune ETTh2 (depends on A)
-# ==========================================================================
-echo "Submitting Job C: Gaussian finetune ETTh2 (depends on A=${JOB_A})..."
+# ============================================================================
+# JOB C — Gaussian finetune ETTh2
+# ============================================================================
 
-TMP_C=$(mktemp /tmp/slurm_jobC_XXXXXX.sh)
-cat > "$TMP_C" << SCRIPT_EOF
+echo "Submitting C: Gaussian finetune ETTh2 [afterok:$JOB_A]..."
+
+JOB_C=$(sbatch --parsable \
+    --job-name="etth2-gauss-finetune${SUFFIX}" \
+    --account=aip-boyuwang \
+    --nodes=1 --cpus-per-task="$CPUS" --mem="$MEM" \
+    "${GPU_ARGS[@]}" \
+    --time="$WALL_FINETUNE" \
+    --dependency="afterok:$JOB_A" \
+    --output="$LOG_DIR/C-gauss-finetune-%j.out" \
+    --error="$LOG_DIR/C-gauss-finetune-%j.err" \
+    --mail-type=FAIL --mail-user=ccao87@uwo.ca \
+    << 'ENDSCRIPT'
 #!/bin/bash
-#SBATCH --job-name=etth2-gauss-finetune${SUFFIX}
-#SBATCH --gres=gpu:l40s:1
-#SBATCH --time=${WALL_FINETUNE}
-#SBATCH --nodes=1
-#SBATCH --cpus-per-task=${CPUS}
-#SBATCH --mem=${MEM}
-#SBATCH --output=${LOG_DIR}/C-gauss-finetune-%j.out
-#SBATCH --error=${LOG_DIR}/C-gauss-finetune-%j.err
-#SBATCH --account=aip-boyuwang
-#SBATCH --mail-type=FAIL
-#SBATCH --mail-user=ccao87@uwo.ca
-#SBATCH --dependency=afterok:${JOB_A}
+source "$PREAMBLE_FILE"
 
-${JOB_PREAMBLE}
-source "${VENV}/bin/activate"
-export WANDB_MODE=offline
-export PYTHONUNBUFFERED=1
-cd "${REPO}"
-
-${PY_BASE} \
-    --mode finetune \
+$PY --mode finetune \
     --dataset ETTh2 \
-    --checkpoint-dir ${GAUSS_CKPT} \
-    --results-dir    ${GAUSS_RESULTS} \
-    ${PY_COMMON}
+    --checkpoint-dir "$GAUSS_CKPT" \
+    --results-dir    "$GAUSS_RESULTS" \
+    $PY_COMMON
 
-echo "[C] Gaussian ETTh2 finetune complete: \$(date)"
-SCRIPT_EOF
-
-JOB_C=$(submit_job "$TMP_C")
-rm -f "$TMP_C"
-echo "  -> Job C ID: ${JOB_C}"
+echo "[C] Gaussian finetune done: $(date)"
+ENDSCRIPT
+)
+echo "  -> C: $JOB_C"
 
 
-# ==========================================================================
-# JOB D — Binary finetune ETTh2 (depends on B)
-# ==========================================================================
-echo "Submitting Job D: Binary finetune ETTh2 (depends on B=${JOB_B})..."
+# ============================================================================
+# JOB D — Binary finetune ETTh2
+# ============================================================================
 
-TMP_D=$(mktemp /tmp/slurm_jobD_XXXXXX.sh)
-cat > "$TMP_D" << SCRIPT_EOF
+echo "Submitting D: Binary finetune ETTh2 [afterok:$JOB_B]..."
+
+JOB_D=$(sbatch --parsable \
+    --job-name="etth2-binary-finetune${SUFFIX}" \
+    --account=aip-boyuwang \
+    --nodes=1 --cpus-per-task="$CPUS" --mem="$MEM" \
+    "${GPU_ARGS[@]}" \
+    --time="$WALL_FINETUNE" \
+    --dependency="afterok:$JOB_B" \
+    --output="$LOG_DIR/D-binary-finetune-%j.out" \
+    --error="$LOG_DIR/D-binary-finetune-%j.err" \
+    --mail-type=FAIL --mail-user=ccao87@uwo.ca \
+    << 'ENDSCRIPT'
 #!/bin/bash
-#SBATCH --job-name=etth2-binary-finetune${SUFFIX}
-#SBATCH --gres=gpu:l40s:1
-#SBATCH --time=${WALL_FINETUNE}
-#SBATCH --nodes=1
-#SBATCH --cpus-per-task=${CPUS}
-#SBATCH --mem=${MEM}
-#SBATCH --output=${LOG_DIR}/D-binary-finetune-%j.out
-#SBATCH --error=${LOG_DIR}/D-binary-finetune-%j.err
-#SBATCH --account=aip-boyuwang
-#SBATCH --mail-type=FAIL
-#SBATCH --mail-user=ccao87@uwo.ca
-#SBATCH --dependency=afterok:${JOB_B}
+source "$PREAMBLE_FILE"
 
-${JOB_PREAMBLE}
-source "${VENV}/bin/activate"
-export WANDB_MODE=offline
-export PYTHONUNBUFFERED=1
-cd "${REPO}"
-
-${PY_BASE} \
-    --mode finetune \
+$PY --mode finetune \
     --dataset ETTh2 \
     --binary-diffusion \
-    --checkpoint-dir ${BINARY_CKPT} \
-    --results-dir    ${BINARY_RESULTS} \
-    ${PY_COMMON}
+    --checkpoint-dir "$BINARY_CKPT" \
+    --results-dir    "$BINARY_RESULTS" \
+    $PY_COMMON
 
-echo "[D] Binary ETTh2 finetune complete: \$(date)"
-SCRIPT_EOF
-
-JOB_D=$(submit_job "$TMP_D")
-rm -f "$TMP_D"
-echo "  -> Job D ID: ${JOB_D}"
+echo "[D] Binary finetune done: $(date)"
+ENDSCRIPT
+)
+echo "  -> D: $JOB_D"
 
 
-# ==========================================================================
+# ============================================================================
 # Summary
-# ==========================================================================
+# ============================================================================
+
 echo ""
 echo "=================================================================="
-echo "  All jobs submitted — dependency chain:"
+echo "  Jobs submitted:"
 echo ""
-echo "  A: ${JOB_A}  Gaussian pretrain"
-echo "  B: ${JOB_B}  Binary  pretrain   [afterok:${JOB_A}]"
-echo "  C: ${JOB_C}  Gaussian finetune  [afterok:${JOB_A}]"
-echo "  D: ${JOB_D}  Binary  finetune   [afterok:${JOB_B}]"
+echo "  A $JOB_A  Gaussian pretrain"
+echo "  B $JOB_B  Binary pretrain      [afterok:$JOB_A]"
+echo "  C $JOB_C  Gaussian finetune    [afterok:$JOB_A]"
+echo "  D $JOB_D  Binary finetune      [afterok:$JOB_B]"
 echo ""
-echo "  Logs:             ${LOG_DIR}/"
-echo "  Gaussian ckpts:   ${GAUSS_CKPT}/"
-echo "  Binary   ckpts:   ${BINARY_CKPT}/"
-echo "  Gaussian results: ${GAUSS_RESULTS}/"
-echo "  Binary   results: ${BINARY_RESULTS}/"
+echo "  Logs (tail -f to watch live):"
+echo "    $LOG_DIR/"
 echo ""
-echo "  Monitor:   squeue -u \$USER"
-echo "  Cancel all: scancel ${JOB_A} ${JOB_B} ${JOB_C} ${JOB_D}"
+echo "  Monitor:     squeue -u \$USER"
+echo "  Cancel all:  scancel $JOB_A $JOB_B $JOB_C $JOB_D"
 echo "=================================================================="
