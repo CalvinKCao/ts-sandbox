@@ -64,16 +64,17 @@ echo "  (set STORE=\$PROJECT/\$USER/diffusion-tsf-etth2 to access later)"
 echo "=================================================================="
 
 # Keep datasets accessible from STORE without copying GBs
-[ ! -e "$STORE/datasets" ] && ln -s "$REPO/datasets" "$STORE/datasets"
+# Use -L to check for the symlink itself (not its target) to avoid broken-symlink traps
+[ ! -L "$STORE/datasets" ] && [ ! -e "$STORE/datasets" ] && \
+    ln -s "$REPO/datasets" "$STORE/datasets"
 
 # ---- Venv path (exported so jobs can see it) --------------------------------
-# $PROJECT is not set on login nodes — resolve it from the ~/projects symlink if possible.
-_PROJECT_RESOLVED="$(ls -d ~/projects/aip-* ~/projects/def-* 2>/dev/null | head -1)"
-if [ -n "$_PROJECT_RESOLVED" ] && [ -d "$_PROJECT_RESOLVED/$USER/diffusion-tsf/venv" ]; then
-    export VENV="$_PROJECT_RESOLVED/$USER/diffusion-tsf/venv"
-else
-    export VENV="$STORE/venv"
-fi
+# $PROJECT is not set on Killarney login nodes — walk ~/projects/ safely without
+# relying on a glob that exits non-zero when nothing matches.
+export VENV="$STORE/venv"   # default; overridden below if a pre-built venv exists
+for _d in ~/projects/aip-* ~/projects/def-*; do
+    [ -d "$_d/$USER/diffusion-tsf/venv" ] && export VENV="$_d/$USER/diffusion-tsf/venv" && break
+done
 
 # ---- Repo path (exported) ---------------------------------------------------
 export REPO
@@ -87,7 +88,7 @@ if [ "$SMOKE" -eq 1 ]; then
     export SMOKE_FLAG="--smoke-test"
     SUFFIX="-smoke"
 else
-    GPU_ARGS=(--partition=gpubase_h100_b4 --gpus-per-node=h100:1)
+    GPU_ARGS=(--gres=gpu:l40s:1)
     WALL_PRETRAIN="14:00:00"
     WALL_FINETUNE="8:00:00"
     MEM="60G"; CPUS=6
