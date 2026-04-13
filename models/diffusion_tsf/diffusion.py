@@ -1,10 +1,10 @@
 """
-DDPM and DDIM Diffusion Scheduler for Time Series Forecasting.
+Diffusion Scheduler for Time Series Forecasting.
 
 Implements:
 - Forward diffusion process (adding noise)
-- Reverse denoising process (DDPM)
-- Accelerated sampling (DDIM)
+- Accelerated DDIM sampling (deterministic at eta=0, stochastic at eta>0)
+- Binary (bit-flip) diffusion scheduler
 """
 
 import torch
@@ -18,19 +18,15 @@ logger = logging.getLogger(__name__)
 
 
 class DiffusionScheduler:
-    """Diffusion noise scheduler supporting DDPM and DDIM.
-    
-    Handles the forward process q(x_t | x_0) and reverse process p(x_{t-1} | x_t).
-    
+    """Diffusion noise scheduler supporting DDIM.
+
+    Handles the forward process q(x_t | x_0) and DDIM reverse process.
+
     Forward process:
         x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * epsilon
-        
-    DDPM reverse process:
-        x_{t-1} = (1/sqrt(alpha_t)) * (x_t - (beta_t/sqrt(1-alpha_bar_t)) * epsilon_theta)
-                  + sigma_t * z
-                  
-    DDIM reverse process (deterministic when eta=0):
-        x_{t-1} = sqrt(alpha_bar_{t-1}) * predicted_x0 
+
+    DDIM reverse process (deterministic when eta=0, stochastic when eta>0):
+        x_{t-1} = sqrt(alpha_bar_{t-1}) * predicted_x0
                   + sqrt(1 - alpha_bar_{t-1} - sigma^2) * epsilon_theta
                   + sigma * z
     """
@@ -74,13 +70,6 @@ class DiffusionScheduler:
         # Pre-compute useful quantities
         self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
         self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod)
-        self.sqrt_recip_alphas = torch.sqrt(1.0 / self.alphas)
-        
-        # For posterior q(x_{t-1} | x_t, x_0)
-        self.posterior_variance = (
-            betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
-        )
-        
         logger.info(f"DiffusionScheduler initialized: T={num_steps}, schedule={schedule}")
         logger.debug(f"  beta range: [{betas[0]:.6f}, {betas[-1]:.6f}]")
         logger.debug(f"  alpha_bar range: [{self.alphas_cumprod[-1]:.6f}, {self.alphas_cumprod[0]:.6f}]")
@@ -120,8 +109,6 @@ class DiffusionScheduler:
         self.alphas_cumprod_prev = self.alphas_cumprod_prev.to(device)
         self.sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(device)
         self.sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(device)
-        self.sqrt_recip_alphas = self.sqrt_recip_alphas.to(device)
-        self.posterior_variance = self.posterior_variance.to(device)
         return self
     
     def add_noise(
@@ -177,56 +164,6 @@ class DiffusionScheduler:
         
         x_0 = (x_t - sqrt_one_minus_alpha_bar * noise_pred) / sqrt_alpha_bar
         return x_0
-    
-    @torch.no_grad()
-    def ddpm_step(
-        self,
-        x_t: torch.Tensor,
-        t: torch.Tensor,
-        noise_pred: torch.Tensor
-    ) -> torch.Tensor:
-        """Single DDPM reverse step: x_t -> x_{t-1}.
-        
-        Args:
-            x_t: Current noisy sample
-            t: Current timestep (scalar or batch)
-            noise_pred: Predicted noise from U-Net
-            
-        Returns:
-            x_{t-1}: Denoised sample at previous timestep
-        """
-        # Ensure t is a tensor
-        if isinstance(t, int):
-            t = torch.tensor([t], device=x_t.device)
-        
-        # Get coefficients
-        beta_t = self.betas[t]
-        sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alphas_cumprod[t]
-        sqrt_recip_alpha = self.sqrt_recip_alphas[t]
-        
-        # Reshape for broadcasting
-        while beta_t.dim() < x_t.dim():
-            beta_t = beta_t.unsqueeze(-1)
-            sqrt_one_minus_alpha_bar = sqrt_one_minus_alpha_bar.unsqueeze(-1)
-            sqrt_recip_alpha = sqrt_recip_alpha.unsqueeze(-1)
-        
-        # Compute mean
-        # mu = (1/sqrt(alpha_t)) * (x_t - (beta_t / sqrt(1-alpha_bar_t)) * epsilon)
-        model_mean = sqrt_recip_alpha * (
-            x_t - (beta_t / sqrt_one_minus_alpha_bar) * noise_pred
-        )
-        
-        # Add noise (except for t=0)
-        if t[0] > 0:
-            noise = torch.randn_like(x_t)
-            posterior_var = self.posterior_variance[t]
-            while posterior_var.dim() < x_t.dim():
-                posterior_var = posterior_var.unsqueeze(-1)
-            x_prev = model_mean + torch.sqrt(posterior_var) * noise
-        else:
-            x_prev = model_mean
-        
-        return x_prev
     
     @torch.no_grad()
     def ddim_step(
@@ -294,155 +231,6 @@ class DiffusionScheduler:
             x_prev = x_prev + sigma * noise
         
         return x_prev
-    
-    @torch.no_grad()
-    def sample_ddpm(
-        self,
-        model: nn.Module,
-        shape: Tuple[int, ...],
-        cond: torch.Tensor,
-        device: str = "cpu",
-        verbose: bool = True
-    ) -> torch.Tensor:
-        """Full DDPM sampling: generate samples from noise.
-        
-        Args:
-            model: U-Net model that predicts noise
-            shape: Shape of samples to generate (batch, channels, height, width)
-            cond: Conditioning tensor (past context image)
-            device: Device to generate on
-            verbose: Whether to log progress
-            
-        Returns:
-            Generated samples
-        """
-        # Start from pure noise
-        x = torch.randn(shape, device=device)
-        
-        if verbose:
-            logger.info(f"Starting DDPM sampling with {self.num_steps} steps")
-        
-        for t in reversed(range(self.num_steps)):
-            t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
-            
-            # Predict noise
-            noise_pred = model(x, t_batch, cond)
-            
-            # Reverse step
-            x = self.ddpm_step(x, t_batch, noise_pred)
-            
-            if verbose and t % 100 == 0:
-                logger.debug(f"  Step {self.num_steps - t}/{self.num_steps}")
-        
-        return x
-    
-    @torch.no_grad()
-    def sample_ddim(
-        self,
-        model: nn.Module,
-        shape: Tuple[int, ...],
-        cond: torch.Tensor,
-        num_steps: int = 50,
-        eta: float = 0.0,
-        device: str = "cpu",
-        verbose: bool = True
-    ) -> torch.Tensor:
-        """Accelerated DDIM sampling.
-        
-        Args:
-            model: U-Net model that predicts noise
-            shape: Shape of samples to generate
-            cond: Conditioning tensor (past context image)
-            num_steps: Number of DDIM steps (can be much smaller than T)
-            eta: Stochasticity (0 = deterministic)
-            device: Device to generate on
-            verbose: Whether to log progress
-            
-        Returns:
-            Generated samples
-        """
-        # Create timestep schedule (evenly spaced, including the max timestep)
-        # We want num_steps timesteps from T-1 down to 0, evenly spaced
-        # E.g., for T=1000 and num_steps=50: [999, 979, 959, ..., 19]
-        timesteps = torch.linspace(self.num_steps - 1, 0, num_steps, dtype=torch.long).tolist()
-        
-        # Start from pure noise
-        x = torch.randn(shape, device=device)
-        
-        if verbose:
-            logger.info(f"Starting DDIM sampling with {num_steps} steps (eta={eta})")
-        
-        for i, t in enumerate(timesteps):
-            t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
-            is_final_step = (i == len(timesteps) - 1)
-            t_prev = timesteps[i + 1] if not is_final_step else 0
-            t_prev_batch = torch.full((shape[0],), t_prev, device=device, dtype=torch.long)
-            
-            # Predict noise
-            noise_pred = model(x, t_batch, cond)
-            
-            # DDIM step
-            x = self.ddim_step(x, t_batch, t_prev_batch, noise_pred, eta, is_final_step)
-            
-            if verbose and i % 10 == 0:
-                logger.debug(f"  Step {i + 1}/{num_steps} (t={t})")
-        
-        return x
-    
-    @torch.no_grad()
-    def sample_ddpm_cfg(
-        self,
-        model: nn.Module,
-        shape: Tuple[int, ...],
-        cond: torch.Tensor,
-        null_cond: Optional[torch.Tensor],
-        cfg_scale: float = 1.0,
-        device: str = "cpu",
-        verbose: bool = True
-    ) -> torch.Tensor:
-        """DDPM sampling with Classifier-Free Guidance.
-        
-        CFG formula: noise_pred = uncond_pred + cfg_scale * (cond_pred - uncond_pred)
-        
-        Args:
-            model: U-Net model that predicts noise
-            shape: Shape of samples to generate
-            cond: Conditioning tensor (past context image)
-            null_cond: Null conditioning (zeros) for unconditional prediction
-            cfg_scale: Guidance scale (1.0 = no guidance, >1 = stronger conditioning)
-            device: Device to generate on
-            verbose: Whether to log progress
-            
-        Returns:
-            Generated samples
-        """
-        # Start from pure noise
-        x = torch.randn(shape, device=device)
-        
-        if verbose:
-            logger.info(f"Starting DDPM+CFG sampling with {self.num_steps} steps (scale={cfg_scale})")
-        
-        use_cfg = cfg_scale > 1.0 and null_cond is not None
-        
-        for t in reversed(range(self.num_steps)):
-            t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
-            
-            if use_cfg:
-                # Classifier-Free Guidance: compute both conditional and unconditional
-                noise_pred_cond = model(x, t_batch, cond)
-                noise_pred_uncond = model(x, t_batch, null_cond)
-                # Interpolate: uncond + scale * (cond - uncond)
-                noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
-            else:
-                noise_pred = model(x, t_batch, cond)
-            
-            # Reverse step
-            x = self.ddpm_step(x, t_batch, noise_pred)
-            
-            if verbose and t % 100 == 0:
-                logger.debug(f"  Step {self.num_steps - t}/{self.num_steps}")
-        
-        return x
     
     @torch.no_grad()
     def sample_ddim_cfg(
