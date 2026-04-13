@@ -32,15 +32,20 @@ elif [ -d "$HOME/ts-sandbox" ];         then REPO="$HOME/ts-sandbox"
 else echo "ERROR: ts-sandbox not found in SCRATCH or HOME" && exit 1
 fi
 
-# ---- Per-user storage under PROJECT -----------------------------------------
-# Alliance convention: $PROJECT/$USER/... for your working data
-if [ -z "${PROJECT:-}" ]; then
-    PROJECT=$(ls -d "$HOME/projects/aip-"* "$HOME/projects/def-"* 2>/dev/null \
-              | head -1 || true)
+# ---- Storage ----------------------------------------------------------------
+# Default: $SCRATCH (always set on Killarney, large, fast — right place for
+# active training).  Set STORE before running to override, e.g. to keep
+# results in PROJECT for longer-term storage:
+#   STORE=$PROJECT/$USER/diffusion-tsf-etth2 ./slurm_etth2_compare.sh
+if [ -z "${STORE:-}" ]; then
+    if [ -z "${SCRATCH:-}" ]; then
+        echo "ERROR: \$SCRATCH is not set. Set STORE manually and re-run."
+        exit 1
+    fi
+    export STORE="$SCRATCH/diffusion-tsf-etth2"
+else
+    export STORE
 fi
-[ -z "${PROJECT:-}" ] && { echo "ERROR: \$PROJECT not set"; exit 1; }
-
-export STORE="$PROJECT/$USER/diffusion-tsf-etth2"
 export GAUSS_CKPT="$STORE/checkpoints_gauss"
 export GAUSS_RESULTS="$STORE/results_gauss"
 export BINARY_CKPT="$STORE/checkpoints_binary"
@@ -50,6 +55,13 @@ LOG_DIR="$STORE/logs"
 mkdir -p "$GAUSS_CKPT" "$GAUSS_RESULTS" \
          "$BINARY_CKPT" "$BINARY_RESULTS" \
          "$LOG_DIR"
+
+# Print resolved paths up front so you always know where to look
+echo "=================================================================="
+echo "  Storage root:  $STORE"
+echo "  Logs:          $LOG_DIR"
+echo "  (set STORE=\$PROJECT/\$USER/diffusion-tsf-etth2 to access later)"
+echo "=================================================================="
 
 # Keep datasets accessible from STORE without copying GBs
 [ ! -e "$STORE/datasets" ] && ln -s "$REPO/datasets" "$STORE/datasets"
