@@ -67,8 +67,13 @@ echo "=================================================================="
 [ ! -e "$STORE/datasets" ] && ln -s "$REPO/datasets" "$STORE/datasets"
 
 # ---- Venv path (exported so jobs can see it) --------------------------------
-export VENV="$PROJECT/$USER/diffusion-tsf/venv"
-[ ! -d "$VENV" ] && export VENV="$STORE/venv"
+# $PROJECT is not set on login nodes — resolve it from the ~/projects symlink if possible.
+_PROJECT_RESOLVED="$(ls -d ~/projects/aip-* ~/projects/def-* 2>/dev/null | head -1)"
+if [ -n "$_PROJECT_RESOLVED" ] && [ -d "$_PROJECT_RESOLVED/$USER/diffusion-tsf/venv" ]; then
+    export VENV="$_PROJECT_RESOLVED/$USER/diffusion-tsf/venv"
+else
+    export VENV="$STORE/venv"
+fi
 
 # ---- Repo path (exported) ---------------------------------------------------
 export REPO
@@ -97,7 +102,9 @@ export PY_COMMON="--n-variates 7 --amp --synthetic-samples 100000 --itransformer
 # ---- Shared job body: module load + venv activate + cd ----------------------
 # Written as a quoted heredoc into a temp file so each job can source it.
 # (Avoids duplicating 15 lines × 4 jobs while keeping expansion safe.)
-PREAMBLE_FILE="$(mktemp /tmp/job_preamble_XXXXXX.sh)"
+# Written to $STORE (shared filesystem) so compute nodes can source it —
+# /tmp on the login node is NOT visible from compute nodes.
+PREAMBLE_FILE="$STORE/job_preamble.sh"
 cat > "$PREAMBLE_FILE" << 'PREAMBLE'
 set -euo pipefail
 echo "======================================================="
