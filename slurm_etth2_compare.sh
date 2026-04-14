@@ -124,14 +124,15 @@ module load cudnn/8.9
 if [ ! -d "$VENV" ]; then
     echo "[setup] Creating venv at $VENV ..."
     python -m venv "$VENV"
-    source "$VENV/bin/activate"
+    export PATH="$VENV/bin:$PATH"
     pip install --upgrade pip -q
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
-    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops -q
+    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch -q
     [ -f "$REPO/requirements.txt" ] && pip install -r "$REPO/requirements.txt" -q
 else
-    source "$VENV/bin/activate"
+    export PATH="$VENV/bin:$PATH"
 fi
+echo "[setup] Using venv: $VENV"
 
 export WANDB_MODE=offline
 export PYTHONUNBUFFERED=1
