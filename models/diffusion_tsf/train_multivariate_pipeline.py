@@ -930,6 +930,8 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
     logger.info(f"Starting iTransformer HP search: {n_trials} trials")
     
     def log_trial(study, trial):
+        if trial.value is None:
+            return
         logger.info(f"[iTransformer HP] Trial {trial.number}/{n_trials}: "
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
                    f"bs={trial.params['batch_size']}, dropout={trial.params['dropout']:.3f}")
@@ -1065,6 +1067,8 @@ def run_diffusion_hp_tuning(
     logger.info(f"Starting Diffusion HP search: {n_trials} trials")
     
     def log_trial(study, trial):
+        if trial.value is None:
+            return
         logger.info(f"[Diffusion HP] Trial {trial.number}/{n_trials}: "
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
                    f"bs={trial.params['batch_size']}")
