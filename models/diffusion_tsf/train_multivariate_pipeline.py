@@ -431,8 +431,8 @@ def finish_wandb():
 # Constants
 # ============================================================================
 
-LOOKBACK_LENGTH = 1024
-FORECAST_LENGTH = 192
+LOOKBACK_LENGTH = 512
+FORECAST_LENGTH = 96
 IMAGE_HEIGHT = 128
 LOOKBACK_OVERLAP = 8
 PAST_LOSS_WEIGHT = 0.3
@@ -460,11 +460,11 @@ N_FINETUNE_HP_TRIALS = 8
 
 # Batch size ranges for A6000/A100 (40-48GB)
 ITRANS_BATCH_SIZES = [64, 128, 256]
-DIFFUSION_BATCH_SIZES = [8, 16, 32]
+DIFFUSION_BATCH_SIZES = [16, 32, 64, 128]
 FINETUNE_BATCH_SIZES = [4, 8, 16]
 
 # Memory optimization flags (overridden by CLI)
-USE_AMP = False
+USE_AMP = True
 USE_GRADIENT_CHECKPOINTING = False
 DIFFUSION_TYPE = "gaussian"  # "gaussian" | "binary" — set via --binary-diffusion
 
@@ -593,6 +593,7 @@ def create_diffusion_model(
         num_diffusion_steps=1000,
         model_type="unet",
         unet_channels=[64, 128, 256],
+        unet_kernel_size=(3, 9),
         attention_levels=[2],
         num_res_blocks=2,
         use_hybrid_condition=True,
