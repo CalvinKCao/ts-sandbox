@@ -88,16 +88,13 @@ if [ "$SMOKE" -eq 1 ]; then
     export SMOKE_FLAG="--smoke-test"
     SUFFIX="-smoke"
 else
-    # 512-LB / 96-FC images are ~2× smaller than previous 1024/192 config.
-    # AMP (BF16) + bs=128 gives ~4–5× throughput vs old FP32 bs=8.
-    # Empirical estimate on L40S:
-    #   HP search  (8 trials × 200 ep × 10k):  ~20 h
-    #   Pretrain   (200 ep × 100k):             ~24 h
-    #   → Job A/B total ≈ 44 h  → request 2 days with headroom
-    #   Jobs C/D   (ETTh2 finetune, early-stop): ~10 h → request 12 h
-    GPU_ARGS=(--gres=gpu:l40s:1)
-    WALL_PRETRAIN="2-00:00:00"
-    WALL_FINETUNE="0-12:00:00"
+    # Full run on H100 (512-LB / 96-FC + AMP).
+    # Conservative wall-time budget:
+    #   Job A/B (HP searches + full synthetic pretrain): ~12-18 h -> request 24 h
+    #   Job C/D (ETTh2 finetune + eval):                 ~4-7 h   -> request 10 h
+    GPU_ARGS=(--partition=gpubase_h100_b4 --gpus-per-node=h100:1)
+    WALL_PRETRAIN="1-00:00:00"
+    WALL_FINETUNE="0-10:00:00"
     MEM="60G"; CPUS=6
     export SMOKE_FLAG=""
     SUFFIX=""

@@ -2033,6 +2033,21 @@ def run_pipeline(
     
     # =========== PHASE 1C-1: Full iTransformer Pretraining ===========
     itrans_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_itransformer.pt')
+    if os.path.exists(itrans_ckpt) and not _is_itrans_checkpoint_compatible(itrans_ckpt):
+        logger.warning(
+            "Existing iTransformer checkpoint is incompatible with current seq/pred "
+            "lengths; removing and retraining from scratch: %s",
+            itrans_ckpt,
+        )
+        try:
+            os.remove(itrans_ckpt)
+        except Exception:
+            pass
+        manifest.itrans_checkpoint = ""
+        manifest.diffusion_hp_done = False
+        manifest.pretrain_complete = False
+        manifest.save()
+
     if not manifest.itrans_checkpoint or not os.path.exists(itrans_ckpt):
         itrans_ckpt = pretrain_itransformer(
             manifest.itrans_best_params,
@@ -2262,6 +2277,28 @@ def find_existing_itrans_checkpoint(n_variates: int) -> Optional[str]:
     return None
 
 
+def _is_itrans_checkpoint_compatible(path: str) -> bool:
+    """Return True only if iTransformer checkpoint matches current seq/pred lengths."""
+    try:
+        ckpt = torch.load(path, map_location='cpu', weights_only=False)
+        state = ckpt.get('model_state_dict', {})
+
+        value_w = state.get('enc_embedding.value_embedding.weight')
+        proj_w = state.get('projector.weight')
+        proj_b = state.get('projector.bias')
+
+        if value_w is None or proj_w is None or proj_b is None:
+            return False
+        if value_w.ndim != 2 or proj_w.ndim != 2 or proj_b.ndim != 1:
+            return False
+
+        seq_ok = int(value_w.shape[1]) == int(LOOKBACK_LENGTH)
+        pred_ok = int(proj_w.shape[0]) == int(FORECAST_LENGTH) and int(proj_b.shape[0]) == int(FORECAST_LENGTH)
+        return seq_ok and pred_ok
+    except Exception:
+        return False
+
+
 def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42):
     """Pretrain iTransformer + Diffusion model.
 
@@ -2299,14 +2336,39 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
 
     logger.info(f"Pretraining for n_variates={n_variates}")
 
+    stale_files = [
+        itrans_ckpt,
+        diff_ckpt,
+        os.path.join(CHECKPOINT_DIR, 'itrans_hp.json'),
+        os.path.join(CHECKPOINT_DIR, 'diff_hp.json'),
+    ]
+
+    # If a checkpoint from a previous geometry (e.g., 1024/192) exists, purge
+    # local pretrain artifacts so this run restarts cleanly with current settings.
+    if os.path.exists(itrans_ckpt) and not _is_itrans_checkpoint_compatible(itrans_ckpt):
+        logger.warning(
+            "Incompatible iTransformer checkpoint detected at %s "
+            "(expected seq_len=%d, pred_len=%d). Removing cached pretrain artifacts.",
+            itrans_ckpt, LOOKBACK_LENGTH, FORECAST_LENGTH
+        )
+        for f in stale_files:
+            if os.path.exists(f):
+                os.remove(f)
+
     # Try to reuse an existing checkpoint from a previous run
     if not os.path.exists(itrans_ckpt) and not smoke_test:
         found = find_existing_itrans_checkpoint(n_variates)
         if found:
             import shutil
-            logger.info(f"  Found existing iTransformer checkpoint: {found}")
-            logger.info(f"  Copying to {itrans_ckpt} — skipping iTransformer pretrain")
-            shutil.copy2(found, itrans_ckpt)
+            if _is_itrans_checkpoint_compatible(found):
+                logger.info(f"  Found existing compatible iTransformer checkpoint: {found}")
+                logger.info(f"  Copying to {itrans_ckpt} — skipping iTransformer pretrain")
+                shutil.copy2(found, itrans_ckpt)
+            else:
+                logger.info(
+                    "  Found iTransformer checkpoint but it is incompatible with "
+                    "current seq/pred lengths; ignoring: %s", found
+                )
 
     if os.path.exists(itrans_hp_path):
         with open(itrans_hp_path) as f:
