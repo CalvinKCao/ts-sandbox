@@ -166,6 +166,7 @@ docs.alliancecan.ca_mediawiki-20260319-wikidump/docs.alliancecan.ca_mediawiki-20
 
 # lnai-generated
 .agents/skills/alliancecan
+.agents/skills/audio_math_explainer
 .agents/skills/messy
 .agents/skills/natural
 .agents/skills/quick
@@ -174,22 +175,26 @@ docs.alliancecan.ca_mediawiki-20260319-wikidump/docs.alliancecan.ca_mediawiki-20
 .claude/CLAUDE.md
 .claude/skills/slidev
 .cursor/skills/alliancecan
+.cursor/skills/audio_math_explainer
 .cursor/skills/messy
 .cursor/skills/natural
 .cursor/skills/quick
 .cursor/skills/slidev
 .gemini/settings.json
 .gemini/skills/alliancecan
+.gemini/skills/audio_math_explainer
 .gemini/skills/messy
 .gemini/skills/natural
 .gemini/skills/quick
 .gemini/skills/slidev
 .github/skills/alliancecan
+.github/skills/audio_math_explainer
 .github/skills/messy
 .github/skills/natural
 .github/skills/quick
 .github/skills/slidev
 .windsurf/skills/alliancecan
+.windsurf/skills/audio_math_explainer
 .windsurf/skills/messy
 .windsurf/skills/natural
 .windsurf/skills/quick

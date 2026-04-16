@@ -10,12 +10,12 @@
 #
 # USAGE (from ts-sandbox repo root on the login node):
 #   ./slurm_etth2_compare.sh           # full H100 run
-#   ./slurm_etth2_compare.sh --smoke   # L40S smoke test — verifies full chain
+#   ./slurm_etth2_compare.sh --smoke   # H100 smoke test — verifies full chain
 #
 # HOW TO SMOKE TEST:
-#   --smoke submits all 4 jobs with 30-min time limits and passes --smoke-test
-#   to the Python pipeline (1 epoch, 4 samples, 1 HP trial).  Each job should
-#   finish in ~5 min on L40S, so the whole A→B→D chain completes in ~15-20 min.
+#   --smoke submits all 4 jobs with short limits and passes --smoke-test to the
+#   Python pipeline (1 epoch, 4 samples, 1 HP trial).  Each job should finish
+#   quickly; if no logs appear, check submission status/reason commands below.
 #   Watch with:  squeue -u $USER
 #   Check logs:  tail -f $STORE/logs/A-gauss-pretrain-<JOB_ID>.out
 # =============================================================================
@@ -81,9 +81,11 @@ export REPO
 
 # ---- Resources + flags ------------------------------------------------------
 if [ "$SMOKE" -eq 1 ]; then
+    # L40S for smoke: much shorter queue, plenty for a 1-epoch sanity check.
+    # Request >=20 min even for smoke — pip install from wheel cache takes 3-5 min.
     GPU_ARGS=(--gres=gpu:l40s:1)
-    WALL_PRETRAIN="0:30:00"
-    WALL_FINETUNE="0:30:00"
+    WALL_PRETRAIN="0:25:00"
+    WALL_FINETUNE="0:25:00"
     MEM="16G"; CPUS=4
     export SMOKE_FLAG="--smoke-test"
     SUFFIX="-smoke"
@@ -119,24 +121,33 @@ echo "  GPU:  $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
 echo "  Started: $(date)"
 echo "======================================================="
 
-module purge
+# || true required: sticky modules (CCconfig, gentoo, compiler stack) refuse to
+# unload and module purge exits non-zero, killing the job under set -e.
+module purge || true
 module load StdEnv/2023
 module load python/3.11
 module load cuda/12.2
 module load cudnn/8.9
 
-if [ ! -d "$VENV" ]; then
-    echo "[setup] Creating venv at $VENV ..."
-    python -m venv "$VENV"
-    export PATH="$VENV/bin:$PATH"
-    pip install --upgrade pip -q
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
-    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch -q
-    [ -f "$REPO/requirements.txt" ] && pip install -r "$REPO/requirements.txt" -q
-else
-    export PATH="$VENV/bin:$PATH"
-fi
-echo "[setup] Using venv: $VENV"
+# Rebuild venv on node-local NVMe each job — avoids catastrophically slow imports
+# from Lustre (/scratch, /project). `import torch` alone can take 5-15 min on
+# a cold Lustre node; $SLURM_TMPDIR reads take seconds.
+echo "[setup] Building venv on \$SLURM_TMPDIR ..."
+virtualenv --no-download "$SLURM_TMPDIR/env"
+source "$SLURM_TMPDIR/env/bin/activate"
+pip install --no-index --upgrade pip -q
+
+# Alliance CA pre-built wheel cache (fast, no network)
+pip install --no-index torch torchvision numpy pandas scipy scikit-learn tqdm -q 2>/dev/null || \
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q && \
+    pip install numpy pandas scipy scikit-learn tqdm -q
+
+# Packages not in the wheel cache — pure-Python, small, needs network
+pip install optuna wandb matplotlib einops reformer_pytorch -q
+
+[ -f "$REPO/requirements.txt" ] && pip install -r "$REPO/requirements.txt" -q || true
+
+echo "[setup] Venv ready: $(which python)"
 
 export WANDB_MODE=offline
 export PYTHONUNBUFFERED=1
@@ -301,5 +312,7 @@ echo "  Logs (tail -f to watch live):"
 echo "    $LOG_DIR/"
 echo ""
 echo "  Monitor:     squeue -u \$USER"
+echo "  Quick check: squeue -j $JOB_A,$JOB_B,$JOB_C,$JOB_D -o '%.18i %.28j %.10T %.20R'"
+echo "  Reasons:     sacct -j $JOB_A,$JOB_B,$JOB_C,$JOB_D -X --format=JobID,JobName,State,ExitCode,Reason"
 echo "  Cancel all:  scancel $JOB_A $JOB_B $JOB_C $JOB_D"
 echo "=================================================================="
