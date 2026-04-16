@@ -90,13 +90,13 @@ if [ "$SMOKE" -eq 1 ]; then
     export SMOKE_FLAG="--smoke-test"
     SUFFIX="-smoke"
 else
-    # Full run on H100 (512-LB / 96-FC + AMP).
-    # Conservative wall-time budget:
-    #   Job A/B (HP searches + full synthetic pretrain): ~12-18 h -> request 24 h
-    #   Job C/D (ETTh2 finetune + eval):                 ~4-7 h   -> request 10 h
-    GPU_ARGS=(--partition=gpubase_h100_b4 --gpus-per-node=h100:1)
-    WALL_PRETRAIN="1-00:00:00"
-    WALL_FINETUNE="0-10:00:00"
+    # Full run on L40S (512-LB / 96-FC + AMP + bs=128).
+    # Wall-time budget (L40S, ~4× slower than H100):
+    #   Job A/B (HP searches + full synthetic pretrain): ~44 h -> request 2 days
+    #   Job C/D (ETTh2 finetune + eval):                 ~10 h -> request 14 h
+    GPU_ARGS=(--gres=gpu:l40s:1)
+    WALL_PRETRAIN="2-00:00:00"
+    WALL_FINETUNE="0-14:00:00"
     MEM="60G"; CPUS=6
     export SMOKE_FLAG=""
     SUFFIX=""
