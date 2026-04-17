@@ -123,7 +123,9 @@ class DiffusionTSF(nn.Module):
                 context_dim=config.context_embedding_dim,
                 conditioning_mode=config.conditioning_mode,
                 visual_cond_channels=config.visual_cond_channels,
-                cond_in_channels=cond_in_channels
+                cond_in_channels=cond_in_channels,
+                use_gradient_checkpointing=config.use_gradient_checkpointing,
+                separable_kernel=config.separable_kernel,
             )
 
             if config.use_hybrid_condition:
@@ -840,12 +842,9 @@ class DiffusionTSF(nn.Module):
         BV = B * V
 
         past_norm, future_norm, stats = self._normalize_sequence(past, future)
-        past_2d   = self.encode_to_2d(past_norm)
         future_2d = self.encode_to_2d(future_norm)
-        past_2d   = self._apply_coarse_dropout(past_2d)
 
-        W_past = past_2d.shape[3]
-        W_fut  = future_2d.shape[3]
+        W_fut = future_2d.shape[3]
 
         if t is None:
             t = torch.randint(0, self.config.num_diffusion_steps, (B,), device=device)
@@ -869,8 +868,14 @@ class DiffusionTSF(nn.Module):
         if guidance_2d is not None:
             canvas = torch.cat([canvas, guidance_2d.reshape(BV, 1, H, W_fut)], dim=1)
 
-        past_flat     = past_2d.reshape(BV, 1, H, W_past)
-        cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+        # Encode only the last W_fut timesteps of the lookback for visual conditioning.
+        # Previously this encoded the full 512-step lookback then bilinearly downsampled to
+        # W_fut=104 — wasteful (5× extra compute + larger intermediate tensors). Encoding the
+        # tail directly keeps CDF column structure intact and is ~5× cheaper.
+        past_tail     = past_norm[..., -W_fut:]                      # (B, V, W_fut)
+        past_2d_cond  = self.encode_to_2d(past_tail)                 # (B, V, H, W_fut)
+        past_2d_cond  = self._apply_coarse_dropout(past_2d_cond.reshape(BV, 1, H, W_fut))
+        cond_for_unet = past_2d_cond
 
         ctx_flat = None
         if ctx is not None:
@@ -1036,11 +1041,7 @@ class DiffusionTSF(nn.Module):
 
         past_norm, future_norm, stats = self._normalize_sequence(past, future)
 
-        past_2d   = self.encode_to_2d_binary(past_norm)
         future_2d = self.encode_to_2d_binary(future_norm)
-        past_2d   = self._apply_coarse_dropout(past_2d)
-
-        W_past = past_2d.shape[3]
         W_fut  = future_2d.shape[3]
 
         if t is None:
@@ -1066,8 +1067,10 @@ class DiffusionTSF(nn.Module):
         if guidance_2d is not None:
             canvas = torch.cat([canvas, guidance_2d.reshape(BV, 1, H, W_fut)], dim=1)
 
-        past_flat     = past_2d.reshape(BV, 1, H, W_past)
-        cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+        past_tail     = past_norm[..., -W_fut:]
+        past_2d_cond  = self.encode_to_2d_binary(past_tail)
+        past_2d_cond  = self._apply_coarse_dropout(past_2d_cond.reshape(BV, 1, H, W_fut))
+        cond_for_unet = past_2d_cond
 
         ctx_flat = None
         if ctx is not None:

@@ -130,9 +130,11 @@ class DiffusionTSFConfig:
     transformer_patch_width: int = 16
     transformer_dropout: float = 0.1
 
-    # memory optimization
+    # memory / compute optimization
     use_gradient_checkpointing: bool = False
     use_amp: bool = False
+    # factor (K_h, K_w) conv into (K_h,1)+(1,K_w) — ~2.25x cheaper for (3,9) kernels
+    separable_kernel: bool = False
 
     # aux channels
     use_coordinate_channel: bool = True

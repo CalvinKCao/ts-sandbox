@@ -120,7 +120,16 @@ def oom_prune_trial():
         yield
     except Exception as e:
         if _is_oom(e):
-            torch.cuda.empty_cache()
+            # Synchronize + multi-pass cache clear to prevent fragmentation from
+            # cascading into subsequent trials (observed: 5 trials OOMing in a row
+            # after one true OOM at bs=128 because the allocator stayed fragmented).
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+                torch.cuda.empty_cache()
+                torch.cuda.empty_cache()  # second pass shakes loose more fragments
             raise optuna.TrialPruned()
         raise
 
@@ -465,7 +474,8 @@ FINETUNE_BATCH_SIZES = [4, 8, 16]
 
 # Memory optimization flags (overridden by CLI)
 USE_AMP = True
-USE_GRADIENT_CHECKPOINTING = False
+USE_GRADIENT_CHECKPOINTING = True   # recomputes activations on backward → saves ~1.5 GB at bs=128
+USE_SEPARABLE_KERNEL = True         # factor (3,9) → (3,1)+(1,9): same receptive field, ~2.25× cheaper conv
 DIFFUSION_TYPE = "gaussian"  # "gaussian" | "binary" — set via --binary-diffusion
 
 # Dataset registry: name -> (path, date_col, seasonal_period)
@@ -599,6 +609,7 @@ def create_diffusion_model(
         use_hybrid_condition=True,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         use_amp=USE_AMP,
+        separable_kernel=USE_SEPARABLE_KERNEL,
         diffusion_type=diffusion_type,
     )
     return DiffusionTSF(config)
@@ -1194,7 +1205,13 @@ def pretrain_diffusion(
     device = get_device()
 
     lr = best_params.get('learning_rate', 1e-4)
-    batch_size = best_params.get('batch_size', 64)
+    # Clamp upward: HP search can find bs=16 when larger batches OOM during tuning
+    # (cascade fragmentation). Enforce a floor so the full pretrain doesn't crawl.
+    MIN_PRETRAIN_BS = 32
+    raw_bs = best_params.get('batch_size', 64)
+    batch_size = max(raw_bs, MIN_PRETRAIN_BS)
+    if batch_size > raw_bs:
+        logger.info(f"  Pretrain batch size clamped up: {raw_bs} → {batch_size}")
 
     itrans_model = create_itransformer().to(device)
     ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)
@@ -1395,7 +1412,8 @@ def finetune_on_dataset(
         dataset_name = subset_id
 
     lr = tuned_params.get('learning_rate', 1e-5)
-    batch_size = tuned_params.get('batch_size', 32)
+    raw_bs = tuned_params.get('batch_size', 32)
+    batch_size = max(raw_bs, 32)
 
     logger.info("=" * 60)
     logger.info(f"FINE-TUNING: {subset_id}")

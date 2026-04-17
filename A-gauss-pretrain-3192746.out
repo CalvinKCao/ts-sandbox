@@ -1,0 +1,623 @@
+=======================================================
+  Job: etth2-gauss-pretrain   ID: 3192746
+  Node: kn043
+  GPU:  GPU 0: NVIDIA L40S (UUID: GPU-516b3aee-4cdc-745d-9dd3-c90a43c5ce4f)
+  Started: Thu Apr 16 06:58:19 PM EDT 2026
+=======================================================
+[setup] Building venv on $SLURM_TMPDIR ...
+created virtual environment CPython3.11.5.final.0-64 in 990ms
+  creator CPython3Posix(dest=/tmp/env, clear=False, no_vcs_ignore=False, global=False)
+  seeder FromAppData(download=False, pip=bundle, setuptools=bundle, wheel=bundle, via=copy, app_data_dir=/home/ccao87/.local/share/virtualenv)
+    added seed packages: pip==26.0.1+computecanada, setuptools==80.7.1, wheel==0.46.3+computecanada
+  activators BashActivator,CShellActivator,FishActivator,NushellActivator,PowerShellActivator,PythonActivator
+[setup] Venv ready: /tmp/env/bin/python
+[info] python: /tmp/env/bin/python
+[info] cwd: /scratch/ccao87/ts-sandbox
+
+2026-04-16 18:59:22,026 - INFO - traffic.csv already exists
+2026-04-16 18:59:22,029 - INFO - Pretraining for n_variates=7
+2026-04-16 18:59:22,266 - INFO -   Found iTransformer checkpoint but it is incompatible with current seq/pred lengths; ignoring: /scratch/ccao87/ts-sandbox/models/diffusion_tsf/checkpoints_latent/pretrained_itransformer.pt
+2026-04-16 18:59:22,267 - INFO - ============================================================
+2026-04-16 18:59:22,267 - INFO - PHASE 1A: iTransformer HP Tuning
+2026-04-16 18:59:22,267 - INFO - Trials: 20
+2026-04-16 18:59:22,267 - INFO - ============================================================
+2026-04-16 18:59:22,340 - INFO - RealTS initialized: 100000 samples/epoch, lookback=512, forecast=96, variables=7
+2026-04-16 18:59:22,343 - INFO - Generating synthetic pool of 100000 samples to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/synth_cache/synth_pool_v7_L608_N100000.npy...
+2026-04-16 19:00:27,562 - INFO - Generating synthetic samples: 10000/100000 (10%)
+2026-04-16 19:01:32,798 - INFO - Generating synthetic samples: 20000/100000 (20%)
+2026-04-16 19:02:37,563 - INFO - Generating synthetic samples: 30000/100000 (30%)
+2026-04-16 19:03:42,495 - INFO - Generating synthetic samples: 40000/100000 (40%)
+2026-04-16 19:04:47,065 - INFO - Generating synthetic samples: 50000/100000 (50%)
+2026-04-16 19:05:51,682 - INFO - Generating synthetic samples: 60000/100000 (60%)
+2026-04-16 19:06:56,656 - INFO - Generating synthetic samples: 70000/100000 (70%)
+2026-04-16 19:08:01,789 - INFO - Generating synthetic samples: 80000/100000 (80%)
+2026-04-16 19:09:06,531 - INFO - Generating synthetic samples: 90000/100000 (90%)
+2026-04-16 19:10:11,468 - INFO - Pool generation complete.
+2026-04-16 19:10:11,469 - INFO - Created synthetic-only dataloader: 100000 samples/epoch (Pool: 100000), lookback=512, forecast=96, variables=7
+2026-04-16 19:10:11,473 - INFO - Starting iTransformer HP search: 20 trials
+2026-04-16 19:34:20,815 - INFO - [iTransformer HP] Trial 0/20: loss=0.6107, lr=5.61e-05, bs=64, dropout=0.047
+2026-04-16 19:46:57,271 - INFO - [iTransformer HP] Trial 1/20: loss=0.9576, lr=2.05e-05, bs=128, dropout=0.212
+2026-04-16 20:10:57,901 - INFO - [iTransformer HP] Trial 2/20: loss=0.8904, lr=1.10e-05, bs=64, dropout=0.055
+2026-04-16 20:18:07,503 - INFO - [iTransformer HP] Trial 3/20: loss=0.9380, lr=2.33e-05, bs=128, dropout=0.087
+2026-04-16 20:24:51,947 - INFO - [iTransformer HP] Trial 4/20: loss=0.7028, lr=1.67e-04, bs=256, dropout=0.137
+2026-04-16 20:31:36,400 - INFO - [iTransformer HP] Trial 5/20: loss=0.4630, lr=3.72e-04, bs=256, dropout=0.014
+2026-04-16 20:31:49,974 - INFO - [iTransformer HP] Trial 6/20: loss=1.0712, lr=1.64e-04, bs=256, dropout=0.290
+2026-04-16 20:38:14,366 - INFO - [iTransformer HP] Trial 7/20: loss=0.7095, lr=4.14e-04, bs=256, dropout=0.132
+2026-04-16 20:38:27,895 - INFO - [iTransformer HP] Trial 8/20: loss=1.1218, lr=1.75e-05, bs=256, dropout=0.078
+2026-04-16 20:45:19,752 - INFO - [iTransformer HP] Trial 9/20: loss=0.5382, lr=2.11e-04, bs=256, dropout=0.055
+2026-04-16 20:47:45,842 - INFO - [iTransformer HP] Trial 10/20: loss=1.0543, lr=8.90e-04, bs=64, dropout=0.002
+2026-04-16 20:47:59,375 - INFO - [iTransformer HP] Trial 11/20: loss=1.0165, lr=3.47e-04, bs=256, dropout=0.010
+2026-04-16 20:48:12,880 - INFO - [iTransformer HP] Trial 12/20: loss=1.0647, lr=7.01e-05, bs=256, dropout=0.188
+2026-04-16 20:55:04,036 - INFO - [iTransformer HP] Trial 13/20: loss=0.6327, lr=3.41e-04, bs=256, dropout=0.105
+2026-04-16 20:59:20,218 - INFO - [iTransformer HP] Trial 14/20: loss=0.7617, lr=6.87e-04, bs=256, dropout=0.035
+2026-04-16 21:00:36,408 - INFO - [iTransformer HP] Trial 15/20: loss=0.9792, lr=1.73e-04, bs=128, dropout=0.178
+2026-04-16 21:00:49,980 - INFO - [iTransformer HP] Trial 16/20: loss=1.0279, lr=1.04e-04, bs=256, dropout=0.029
+2026-04-16 21:07:33,829 - INFO - [iTransformer HP] Trial 17/20: loss=0.6198, lr=5.32e-04, bs=256, dropout=0.065
+2026-04-16 21:18:32,447 - INFO - [iTransformer HP] Trial 18/20: loss=0.6637, lr=2.53e-04, bs=128, dropout=0.101
+2026-04-16 21:19:21,300 - INFO - [iTransformer HP] Trial 19/20: loss=1.0613, lr=4.85e-05, bs=64, dropout=0.279
+2026-04-16 21:19:21,301 - INFO - Best iTransformer params: lr=3.72e-04, bs=256, dropout=0.014
+2026-04-16 21:19:21,301 - INFO - Best val loss: 0.4630
+2026-04-16 21:19:21,320 - INFO - ============================================================
+2026-04-16 21:19:21,320 - INFO - PHASE 1C-1: Full iTransformer Pretraining
+2026-04-16 21:19:21,320 - INFO - Samples: 100000, Epochs: 200, Patience: 20
+2026-04-16 21:19:21,320 - INFO - Params: {'learning_rate': 0.00037183641805732076, 'batch_size': 256, 'dropout': 0.013935123815999317}
+2026-04-16 21:19:21,320 - INFO - ============================================================
+2026-04-16 21:19:21,320 - INFO - RealTS initialized: 100000 samples/epoch, lookback=512, forecast=96, variables=7
+2026-04-16 21:19:21,321 - INFO - Loading synthetic pool from /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/synth_cache/synth_pool_v7_L608_N100000.npy
+2026-04-16 21:19:21,322 - INFO - Created synthetic-only dataloader: 100000 samples/epoch (Pool: 100000), lookback=512, forecast=96, variables=7
+2026-04-16 21:19:35,911 - INFO - [iTransformer] Epoch 1/200 | Train: 1.0537 | Val: 1.0101 | LR: 3.72e-04 | Time: 14.5s
+2026-04-16 21:19:36,066 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:19:50,160 - INFO - [iTransformer] Epoch 2/200 | Train: 0.9860 | Val: 0.9687 | LR: 3.72e-04 | Time: 14.1s
+2026-04-16 21:19:50,296 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:20:04,209 - INFO - [iTransformer] Epoch 3/200 | Train: 0.9609 | Val: 0.9512 | LR: 3.72e-04 | Time: 13.9s
+2026-04-16 21:20:04,347 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:20:18,540 - INFO - [iTransformer] Epoch 4/200 | Train: 0.9446 | Val: 0.9484 | LR: 3.71e-04 | Time: 14.2s
+2026-04-16 21:20:18,668 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:20:32,175 - INFO - [iTransformer] Epoch 5/200 | Train: 0.9292 | Val: 0.9165 | LR: 3.71e-04 | Time: 13.5s
+2026-04-16 21:20:32,316 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:20:46,213 - INFO - [iTransformer] Epoch 6/200 | Train: 0.9074 | Val: 0.8996 | LR: 3.71e-04 | Time: 13.9s
+2026-04-16 21:20:46,353 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:21:00,599 - INFO - [iTransformer] Epoch 7/200 | Train: 0.8845 | Val: 0.8597 | LR: 3.71e-04 | Time: 14.2s
+2026-04-16 21:21:00,740 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:21:15,075 - INFO - [iTransformer] Epoch 8/200 | Train: 0.8616 | Val: 0.8332 | LR: 3.70e-04 | Time: 14.3s
+2026-04-16 21:21:15,292 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:21:29,006 - INFO - [iTransformer] Epoch 9/200 | Train: 0.8280 | Val: 0.8105 | LR: 3.70e-04 | Time: 13.7s
+2026-04-16 21:21:29,136 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:21:42,813 - INFO - [iTransformer] Epoch 10/200 | Train: 0.8025 | Val: 0.7693 | LR: 3.70e-04 | Time: 13.7s
+2026-04-16 21:21:42,943 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:21:57,009 - INFO - [iTransformer] Epoch 11/200 | Train: 0.7700 | Val: 0.7462 | LR: 3.69e-04 | Time: 14.1s
+2026-04-16 21:21:57,146 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:22:11,290 - INFO - [iTransformer] Epoch 12/200 | Train: 0.7433 | Val: 0.7137 | LR: 3.69e-04 | Time: 14.1s
+2026-04-16 21:22:11,433 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:22:25,565 - INFO - [iTransformer] Epoch 13/200 | Train: 0.7166 | Val: 0.6856 | LR: 3.68e-04 | Time: 14.1s
+2026-04-16 21:22:25,704 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:22:40,100 - INFO - [iTransformer] Epoch 14/200 | Train: 0.6904 | Val: 0.6613 | LR: 3.67e-04 | Time: 14.4s
+2026-04-16 21:22:40,240 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:22:54,320 - INFO - [iTransformer] Epoch 15/200 | Train: 0.6692 | Val: 0.6355 | LR: 3.67e-04 | Time: 14.1s
+2026-04-16 21:22:54,470 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:23:08,666 - INFO - [iTransformer] Epoch 16/200 | Train: 0.6467 | Val: 0.6187 | LR: 3.66e-04 | Time: 14.2s
+2026-04-16 21:23:08,805 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:23:22,876 - INFO - [iTransformer] Epoch 17/200 | Train: 0.6313 | Val: 0.6056 | LR: 3.65e-04 | Time: 14.1s
+2026-04-16 21:23:23,016 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:23:36,644 - INFO - [iTransformer] Epoch 18/200 | Train: 0.6150 | Val: 0.5909 | LR: 3.65e-04 | Time: 13.6s
+2026-04-16 21:23:36,785 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:23:49,820 - INFO - [iTransformer] Epoch 19/200 | Train: 0.5986 | Val: 0.5663 | LR: 3.64e-04 | Time: 13.0s
+2026-04-16 21:23:49,951 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:24:03,576 - INFO - [iTransformer] Epoch 20/200 | Train: 0.5866 | Val: 0.5649 | LR: 3.63e-04 | Time: 13.6s
+2026-04-16 21:24:03,709 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:24:17,400 - INFO - [iTransformer] Epoch 21/200 | Train: 0.5742 | Val: 0.5381 | LR: 3.62e-04 | Time: 13.7s
+2026-04-16 21:24:17,542 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:24:31,352 - INFO - [iTransformer] Epoch 22/200 | Train: 0.5626 | Val: 0.5286 | LR: 3.61e-04 | Time: 13.8s
+2026-04-16 21:24:31,629 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:24:45,759 - INFO - [iTransformer] Epoch 23/200 | Train: 0.5521 | Val: 0.5191 | LR: 3.60e-04 | Time: 14.1s
+2026-04-16 21:24:45,892 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:25:00,253 - INFO - [iTransformer] Epoch 24/200 | Train: 0.5419 | Val: 0.5087 | LR: 3.59e-04 | Time: 14.4s
+2026-04-16 21:25:00,380 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:25:14,105 - INFO - [iTransformer] Epoch 25/200 | Train: 0.5333 | Val: 0.5045 | LR: 3.58e-04 | Time: 13.7s
+2026-04-16 21:25:14,239 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:25:27,166 - INFO - [iTransformer] Epoch 26/200 | Train: 0.5261 | Val: 0.4905 | LR: 3.57e-04 | Time: 12.9s
+2026-04-16 21:25:27,318 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:25:41,293 - INFO - [iTransformer] Epoch 27/200 | Train: 0.5176 | Val: 0.4896 | LR: 3.56e-04 | Time: 14.0s
+2026-04-16 21:25:41,442 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:25:55,783 - INFO - [iTransformer] Epoch 28/200 | Train: 0.5115 | Val: 0.4833 | LR: 3.54e-04 | Time: 14.3s
+2026-04-16 21:25:55,920 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:26:10,081 - INFO - [iTransformer] Epoch 29/200 | Train: 0.5043 | Val: 0.4743 | LR: 3.53e-04 | Time: 14.2s
+2026-04-16 21:26:10,226 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:26:24,516 - INFO - [iTransformer] Epoch 30/200 | Train: 0.4976 | Val: 0.4687 | LR: 3.52e-04 | Time: 14.3s
+2026-04-16 21:26:24,656 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:26:38,865 - INFO - [iTransformer] Epoch 31/200 | Train: 0.4930 | Val: 0.4638 | LR: 3.50e-04 | Time: 14.2s
+2026-04-16 21:26:39,019 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:26:53,118 - INFO - [iTransformer] Epoch 32/200 | Train: 0.4863 | Val: 0.4596 | LR: 3.49e-04 | Time: 14.1s
+2026-04-16 21:26:53,285 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:27:07,703 - INFO - [iTransformer] Epoch 33/200 | Train: 0.4817 | Val: 0.4477 | LR: 3.48e-04 | Time: 14.4s
+2026-04-16 21:27:07,831 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:27:21,833 - INFO - [iTransformer] Epoch 34/200 | Train: 0.4770 | Val: 0.4456 | LR: 3.46e-04 | Time: 14.0s
+2026-04-16 21:27:21,977 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:27:36,138 - INFO - [iTransformer] Epoch 35/200 | Train: 0.4729 | Val: 0.4427 | LR: 3.45e-04 | Time: 14.2s
+2026-04-16 21:27:36,286 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:27:50,551 - INFO - [iTransformer] Epoch 36/200 | Train: 0.4677 | Val: 0.4359 | LR: 3.43e-04 | Time: 14.3s
+2026-04-16 21:27:50,693 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:28:04,194 - INFO - [iTransformer] Epoch 37/200 | Train: 0.4635 | Val: 0.4347 | LR: 3.42e-04 | Time: 13.5s
+2026-04-16 21:28:04,354 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:28:18,264 - INFO - [iTransformer] Epoch 38/200 | Train: 0.4589 | Val: 0.4319 | LR: 3.40e-04 | Time: 13.9s
+2026-04-16 21:28:18,397 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:28:31,080 - INFO - [iTransformer] Epoch 39/200 | Train: 0.4553 | Val: 0.4223 | LR: 3.38e-04 | Time: 12.7s
+2026-04-16 21:28:31,214 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:28:44,995 - INFO - [iTransformer] Epoch 40/200 | Train: 0.4519 | Val: 0.4173 | LR: 3.37e-04 | Time: 13.8s
+2026-04-16 21:28:45,133 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:28:58,365 - INFO - [iTransformer] Epoch 41/200 | Train: 0.4479 | Val: 0.4160 | LR: 3.35e-04 | Time: 13.2s
+2026-04-16 21:28:58,497 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:29:12,143 - INFO - [iTransformer] Epoch 42/200 | Train: 0.4451 | Val: 0.4112 | LR: 3.33e-04 | Time: 13.6s
+2026-04-16 21:29:12,293 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:29:25,168 - INFO - [iTransformer] Epoch 43/200 | Train: 0.4417 | Val: 0.4117 | LR: 3.31e-04 | Time: 12.9s
+2026-04-16 21:29:39,136 - INFO - [iTransformer] Epoch 44/200 | Train: 0.4383 | Val: 0.4041 | LR: 3.30e-04 | Time: 14.0s
+2026-04-16 21:29:39,276 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:29:53,244 - INFO - [iTransformer] Epoch 45/200 | Train: 0.4349 | Val: 0.4048 | LR: 3.28e-04 | Time: 14.0s
+2026-04-16 21:30:06,569 - INFO - [iTransformer] Epoch 46/200 | Train: 0.4332 | Val: 0.3986 | LR: 3.26e-04 | Time: 13.3s
+2026-04-16 21:30:06,730 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:30:20,166 - INFO - [iTransformer] Epoch 47/200 | Train: 0.4301 | Val: 0.4005 | LR: 3.24e-04 | Time: 13.4s
+2026-04-16 21:30:34,252 - INFO - [iTransformer] Epoch 48/200 | Train: 0.4272 | Val: 0.3972 | LR: 3.22e-04 | Time: 14.1s
+2026-04-16 21:30:34,411 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:30:47,168 - INFO - [iTransformer] Epoch 49/200 | Train: 0.4235 | Val: 0.3919 | LR: 3.20e-04 | Time: 12.8s
+2026-04-16 21:30:47,306 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:31:01,213 - INFO - [iTransformer] Epoch 50/200 | Train: 0.4212 | Val: 0.3882 | LR: 3.18e-04 | Time: 13.9s
+2026-04-16 21:31:01,360 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:31:15,544 - INFO - [iTransformer] Epoch 51/200 | Train: 0.4186 | Val: 0.3885 | LR: 3.16e-04 | Time: 14.2s
+2026-04-16 21:31:29,249 - INFO - [iTransformer] Epoch 52/200 | Train: 0.4165 | Val: 0.3818 | LR: 3.14e-04 | Time: 13.7s
+2026-04-16 21:31:29,431 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:31:42,225 - INFO - [iTransformer] Epoch 53/200 | Train: 0.4139 | Val: 0.3786 | LR: 3.12e-04 | Time: 12.8s
+2026-04-16 21:31:42,364 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:31:56,300 - INFO - [iTransformer] Epoch 54/200 | Train: 0.4117 | Val: 0.3774 | LR: 3.09e-04 | Time: 13.9s
+2026-04-16 21:31:56,435 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:32:10,061 - INFO - [iTransformer] Epoch 55/200 | Train: 0.4103 | Val: 0.3808 | LR: 3.07e-04 | Time: 13.6s
+2026-04-16 21:32:23,897 - INFO - [iTransformer] Epoch 56/200 | Train: 0.4082 | Val: 0.3782 | LR: 3.05e-04 | Time: 13.8s
+2026-04-16 21:32:38,222 - INFO - [iTransformer] Epoch 57/200 | Train: 0.4057 | Val: 0.3702 | LR: 3.03e-04 | Time: 14.3s
+2026-04-16 21:32:38,359 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:32:51,159 - INFO - [iTransformer] Epoch 58/200 | Train: 0.4043 | Val: 0.3711 | LR: 3.01e-04 | Time: 12.8s
+2026-04-16 21:33:05,215 - INFO - [iTransformer] Epoch 59/200 | Train: 0.4008 | Val: 0.3699 | LR: 2.98e-04 | Time: 14.1s
+2026-04-16 21:33:05,349 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:33:19,643 - INFO - [iTransformer] Epoch 60/200 | Train: 0.3996 | Val: 0.3698 | LR: 2.96e-04 | Time: 14.3s
+2026-04-16 21:33:19,807 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:33:34,143 - INFO - [iTransformer] Epoch 61/200 | Train: 0.3975 | Val: 0.3631 | LR: 2.94e-04 | Time: 14.3s
+2026-04-16 21:33:34,282 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:33:48,347 - INFO - [iTransformer] Epoch 62/200 | Train: 0.3959 | Val: 0.3622 | LR: 2.91e-04 | Time: 14.1s
+2026-04-16 21:33:48,492 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:34:02,333 - INFO - [iTransformer] Epoch 63/200 | Train: 0.3938 | Val: 0.3639 | LR: 2.89e-04 | Time: 13.8s
+2026-04-16 21:34:15,631 - INFO - [iTransformer] Epoch 64/200 | Train: 0.3921 | Val: 0.3597 | LR: 2.86e-04 | Time: 13.3s
+2026-04-16 21:34:15,784 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:34:28,760 - INFO - [iTransformer] Epoch 65/200 | Train: 0.3908 | Val: 0.3575 | LR: 2.84e-04 | Time: 13.0s
+2026-04-16 21:34:28,890 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:34:43,008 - INFO - [iTransformer] Epoch 66/200 | Train: 0.3898 | Val: 0.3562 | LR: 2.81e-04 | Time: 14.1s
+2026-04-16 21:34:43,152 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:34:56,651 - INFO - [iTransformer] Epoch 67/200 | Train: 0.3866 | Val: 0.3559 | LR: 2.79e-04 | Time: 13.5s
+2026-04-16 21:34:56,785 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:35:10,925 - INFO - [iTransformer] Epoch 68/200 | Train: 0.3868 | Val: 0.3520 | LR: 2.76e-04 | Time: 14.1s
+2026-04-16 21:35:11,054 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:35:25,091 - INFO - [iTransformer] Epoch 69/200 | Train: 0.3837 | Val: 0.3545 | LR: 2.74e-04 | Time: 14.0s
+2026-04-16 21:35:38,442 - INFO - [iTransformer] Epoch 70/200 | Train: 0.3822 | Val: 0.3514 | LR: 2.71e-04 | Time: 13.4s
+2026-04-16 21:35:38,576 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:35:52,901 - INFO - [iTransformer] Epoch 71/200 | Train: 0.3815 | Val: 0.3504 | LR: 2.69e-04 | Time: 14.3s
+2026-04-16 21:35:53,037 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:36:06,941 - INFO - [iTransformer] Epoch 72/200 | Train: 0.3808 | Val: 0.3469 | LR: 2.66e-04 | Time: 13.9s
+2026-04-16 21:36:07,072 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:36:20,835 - INFO - [iTransformer] Epoch 73/200 | Train: 0.3785 | Val: 0.3450 | LR: 2.64e-04 | Time: 13.8s
+2026-04-16 21:36:20,986 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:36:34,973 - INFO - [iTransformer] Epoch 74/200 | Train: 0.3759 | Val: 0.3451 | LR: 2.61e-04 | Time: 14.0s
+2026-04-16 21:36:48,155 - INFO - [iTransformer] Epoch 75/200 | Train: 0.3749 | Val: 0.3439 | LR: 2.58e-04 | Time: 13.2s
+2026-04-16 21:36:48,296 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:37:02,595 - INFO - [iTransformer] Epoch 76/200 | Train: 0.3724 | Val: 0.3404 | LR: 2.56e-04 | Time: 14.3s
+2026-04-16 21:37:02,733 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:37:16,784 - INFO - [iTransformer] Epoch 77/200 | Train: 0.3719 | Val: 0.3369 | LR: 2.53e-04 | Time: 14.1s
+2026-04-16 21:37:16,922 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:37:31,009 - INFO - [iTransformer] Epoch 78/200 | Train: 0.3708 | Val: 0.3397 | LR: 2.50e-04 | Time: 14.1s
+2026-04-16 21:37:44,246 - INFO - [iTransformer] Epoch 79/200 | Train: 0.3702 | Val: 0.3380 | LR: 2.47e-04 | Time: 13.2s
+2026-04-16 21:37:58,143 - INFO - [iTransformer] Epoch 80/200 | Train: 0.3682 | Val: 0.3370 | LR: 2.45e-04 | Time: 13.9s
+2026-04-16 21:38:11,630 - INFO - [iTransformer] Epoch 81/200 | Train: 0.3657 | Val: 0.3373 | LR: 2.42e-04 | Time: 13.5s
+2026-04-16 21:38:25,840 - INFO - [iTransformer] Epoch 82/200 | Train: 0.3650 | Val: 0.3333 | LR: 2.39e-04 | Time: 14.2s
+2026-04-16 21:38:25,982 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:38:40,068 - INFO - [iTransformer] Epoch 83/200 | Train: 0.3645 | Val: 0.3313 | LR: 2.36e-04 | Time: 14.1s
+2026-04-16 21:38:40,199 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:38:54,239 - INFO - [iTransformer] Epoch 84/200 | Train: 0.3628 | Val: 0.3329 | LR: 2.34e-04 | Time: 14.0s
+2026-04-16 21:39:07,266 - INFO - [iTransformer] Epoch 85/200 | Train: 0.3621 | Val: 0.3311 | LR: 2.31e-04 | Time: 13.0s
+2026-04-16 21:39:07,446 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:39:21,729 - INFO - [iTransformer] Epoch 86/200 | Train: 0.3603 | Val: 0.3311 | LR: 2.28e-04 | Time: 14.3s
+2026-04-16 21:39:35,737 - INFO - [iTransformer] Epoch 87/200 | Train: 0.3594 | Val: 0.3282 | LR: 2.25e-04 | Time: 14.0s
+2026-04-16 21:39:35,909 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:39:50,017 - INFO - [iTransformer] Epoch 88/200 | Train: 0.3586 | Val: 0.3241 | LR: 2.22e-04 | Time: 14.1s
+2026-04-16 21:39:50,184 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:40:04,316 - INFO - [iTransformer] Epoch 89/200 | Train: 0.3575 | Val: 0.3227 | LR: 2.19e-04 | Time: 14.1s
+2026-04-16 21:40:04,467 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:40:18,608 - INFO - [iTransformer] Epoch 90/200 | Train: 0.3553 | Val: 0.3196 | LR: 2.17e-04 | Time: 14.1s
+2026-04-16 21:40:18,746 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:40:32,602 - INFO - [iTransformer] Epoch 91/200 | Train: 0.3552 | Val: 0.3213 | LR: 2.14e-04 | Time: 13.9s
+2026-04-16 21:40:46,373 - INFO - [iTransformer] Epoch 92/200 | Train: 0.3537 | Val: 0.3180 | LR: 2.11e-04 | Time: 13.8s
+2026-04-16 21:40:46,537 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:41:00,842 - INFO - [iTransformer] Epoch 93/200 | Train: 0.3518 | Val: 0.3219 | LR: 2.08e-04 | Time: 14.3s
+2026-04-16 21:41:15,022 - INFO - [iTransformer] Epoch 94/200 | Train: 0.3509 | Val: 0.3190 | LR: 2.05e-04 | Time: 14.2s
+2026-04-16 21:41:28,996 - INFO - [iTransformer] Epoch 95/200 | Train: 0.3505 | Val: 0.3166 | LR: 2.02e-04 | Time: 14.0s
+2026-04-16 21:41:29,159 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:41:43,314 - INFO - [iTransformer] Epoch 96/200 | Train: 0.3498 | Val: 0.3172 | LR: 1.99e-04 | Time: 14.2s
+2026-04-16 21:41:56,586 - INFO - [iTransformer] Epoch 97/200 | Train: 0.3476 | Val: 0.3151 | LR: 1.96e-04 | Time: 13.3s
+2026-04-16 21:41:56,747 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:42:10,794 - INFO - [iTransformer] Epoch 98/200 | Train: 0.3471 | Val: 0.3168 | LR: 1.94e-04 | Time: 14.0s
+2026-04-16 21:42:24,397 - INFO - [iTransformer] Epoch 99/200 | Train: 0.3465 | Val: 0.3112 | LR: 1.91e-04 | Time: 13.6s
+2026-04-16 21:42:24,557 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:42:38,599 - INFO - [iTransformer] Epoch 100/200 | Train: 0.3448 | Val: 0.3147 | LR: 1.88e-04 | Time: 14.0s
+2026-04-16 21:42:52,738 - INFO - [iTransformer] Epoch 101/200 | Train: 0.3448 | Val: 0.3138 | LR: 1.85e-04 | Time: 14.1s
+2026-04-16 21:43:06,348 - INFO - [iTransformer] Epoch 102/200 | Train: 0.3440 | Val: 0.3149 | LR: 1.82e-04 | Time: 13.6s
+2026-04-16 21:43:20,380 - INFO - [iTransformer] Epoch 103/200 | Train: 0.3418 | Val: 0.3122 | LR: 1.79e-04 | Time: 14.0s
+2026-04-16 21:43:34,614 - INFO - [iTransformer] Epoch 104/200 | Train: 0.3411 | Val: 0.3089 | LR: 1.76e-04 | Time: 14.2s
+2026-04-16 21:43:34,777 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:43:48,358 - INFO - [iTransformer] Epoch 105/200 | Train: 0.3409 | Val: 0.3065 | LR: 1.73e-04 | Time: 13.6s
+2026-04-16 21:43:48,504 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:44:01,363 - INFO - [iTransformer] Epoch 106/200 | Train: 0.3392 | Val: 0.3028 | LR: 1.70e-04 | Time: 12.9s
+2026-04-16 21:44:01,495 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:44:15,404 - INFO - [iTransformer] Epoch 107/200 | Train: 0.3384 | Val: 0.3094 | LR: 1.68e-04 | Time: 13.9s
+2026-04-16 21:44:29,139 - INFO - [iTransformer] Epoch 108/200 | Train: 0.3381 | Val: 0.3004 | LR: 1.65e-04 | Time: 13.7s
+2026-04-16 21:44:29,298 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:44:43,311 - INFO - [iTransformer] Epoch 109/200 | Train: 0.3374 | Val: 0.3045 | LR: 1.62e-04 | Time: 14.0s
+2026-04-16 21:44:57,497 - INFO - [iTransformer] Epoch 110/200 | Train: 0.3356 | Val: 0.3033 | LR: 1.59e-04 | Time: 14.2s
+2026-04-16 21:45:09,883 - INFO - [iTransformer] Epoch 111/200 | Train: 0.3351 | Val: 0.3064 | LR: 1.56e-04 | Time: 12.4s
+2026-04-16 21:45:23,673 - INFO - [iTransformer] Epoch 112/200 | Train: 0.3338 | Val: 0.3013 | LR: 1.53e-04 | Time: 13.8s
+2026-04-16 21:45:37,699 - INFO - [iTransformer] Epoch 113/200 | Train: 0.3333 | Val: 0.3013 | LR: 1.50e-04 | Time: 14.0s
+2026-04-16 21:45:51,564 - INFO - [iTransformer] Epoch 114/200 | Train: 0.3328 | Val: 0.3001 | LR: 1.48e-04 | Time: 13.9s
+2026-04-16 21:45:51,732 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:46:05,728 - INFO - [iTransformer] Epoch 115/200 | Train: 0.3320 | Val: 0.2998 | LR: 1.45e-04 | Time: 14.0s
+2026-04-16 21:46:05,896 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:46:19,279 - INFO - [iTransformer] Epoch 116/200 | Train: 0.3306 | Val: 0.2979 | LR: 1.42e-04 | Time: 13.4s
+2026-04-16 21:46:19,442 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:46:33,586 - INFO - [iTransformer] Epoch 117/200 | Train: 0.3296 | Val: 0.2993 | LR: 1.39e-04 | Time: 14.1s
+2026-04-16 21:46:47,615 - INFO - [iTransformer] Epoch 118/200 | Train: 0.3287 | Val: 0.2991 | LR: 1.36e-04 | Time: 14.0s
+2026-04-16 21:47:01,509 - INFO - [iTransformer] Epoch 119/200 | Train: 0.3295 | Val: 0.2957 | LR: 1.34e-04 | Time: 13.9s
+2026-04-16 21:47:01,671 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:47:15,975 - INFO - [iTransformer] Epoch 120/200 | Train: 0.3286 | Val: 0.2987 | LR: 1.31e-04 | Time: 14.3s
+2026-04-16 21:47:29,855 - INFO - [iTransformer] Epoch 121/200 | Train: 0.3276 | Val: 0.2902 | LR: 1.28e-04 | Time: 13.9s
+2026-04-16 21:47:30,032 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:47:44,061 - INFO - [iTransformer] Epoch 122/200 | Train: 0.3270 | Val: 0.2927 | LR: 1.25e-04 | Time: 14.0s
+2026-04-16 21:47:58,339 - INFO - [iTransformer] Epoch 123/200 | Train: 0.3262 | Val: 0.2917 | LR: 1.23e-04 | Time: 14.3s
+2026-04-16 21:48:12,022 - INFO - [iTransformer] Epoch 124/200 | Train: 0.3256 | Val: 0.2935 | LR: 1.20e-04 | Time: 13.7s
+2026-04-16 21:48:25,043 - INFO - [iTransformer] Epoch 125/200 | Train: 0.3252 | Val: 0.2918 | LR: 1.17e-04 | Time: 13.0s
+2026-04-16 21:48:38,946 - INFO - [iTransformer] Epoch 126/200 | Train: 0.3240 | Val: 0.2894 | LR: 1.15e-04 | Time: 13.9s
+2026-04-16 21:48:39,102 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:48:53,107 - INFO - [iTransformer] Epoch 127/200 | Train: 0.3235 | Val: 0.2918 | LR: 1.12e-04 | Time: 14.0s
+2026-04-16 21:49:07,014 - INFO - [iTransformer] Epoch 128/200 | Train: 0.3229 | Val: 0.2872 | LR: 1.09e-04 | Time: 13.9s
+2026-04-16 21:49:07,180 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:49:21,242 - INFO - [iTransformer] Epoch 129/200 | Train: 0.3217 | Val: 0.2888 | LR: 1.07e-04 | Time: 14.1s
+2026-04-16 21:49:35,304 - INFO - [iTransformer] Epoch 130/200 | Train: 0.3206 | Val: 0.2892 | LR: 1.04e-04 | Time: 14.1s
+2026-04-16 21:49:47,348 - INFO - [iTransformer] Epoch 131/200 | Train: 0.3207 | Val: 0.2889 | LR: 1.02e-04 | Time: 12.0s
+2026-04-16 21:50:01,566 - INFO - [iTransformer] Epoch 132/200 | Train: 0.3204 | Val: 0.2897 | LR: 9.91e-05 | Time: 14.2s
+2026-04-16 21:50:15,731 - INFO - [iTransformer] Epoch 133/200 | Train: 0.3199 | Val: 0.2871 | LR: 9.66e-05 | Time: 14.2s
+2026-04-16 21:50:15,898 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:50:29,813 - INFO - [iTransformer] Epoch 134/200 | Train: 0.3196 | Val: 0.2913 | LR: 9.41e-05 | Time: 13.9s
+2026-04-16 21:50:43,888 - INFO - [iTransformer] Epoch 135/200 | Train: 0.3188 | Val: 0.2872 | LR: 9.16e-05 | Time: 14.1s
+2026-04-16 21:50:57,927 - INFO - [iTransformer] Epoch 136/200 | Train: 0.3180 | Val: 0.2825 | LR: 8.92e-05 | Time: 14.0s
+2026-04-16 21:50:58,092 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:51:12,218 - INFO - [iTransformer] Epoch 137/200 | Train: 0.3175 | Val: 0.2835 | LR: 8.67e-05 | Time: 14.1s
+2026-04-16 21:51:24,710 - INFO - [iTransformer] Epoch 138/200 | Train: 0.3174 | Val: 0.2857 | LR: 8.43e-05 | Time: 12.5s
+2026-04-16 21:51:38,923 - INFO - [iTransformer] Epoch 139/200 | Train: 0.3168 | Val: 0.2817 | LR: 8.19e-05 | Time: 14.2s
+2026-04-16 21:51:39,095 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:51:53,154 - INFO - [iTransformer] Epoch 140/200 | Train: 0.3163 | Val: 0.2839 | LR: 7.96e-05 | Time: 14.1s
+2026-04-16 21:52:06,972 - INFO - [iTransformer] Epoch 141/200 | Train: 0.3151 | Val: 0.2826 | LR: 7.73e-05 | Time: 13.8s
+2026-04-16 21:52:20,340 - INFO - [iTransformer] Epoch 142/200 | Train: 0.3158 | Val: 0.2811 | LR: 7.50e-05 | Time: 13.4s
+2026-04-16 21:52:20,491 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:52:34,525 - INFO - [iTransformer] Epoch 143/200 | Train: 0.3150 | Val: 0.2847 | LR: 7.27e-05 | Time: 14.0s
+2026-04-16 21:52:46,579 - INFO - [iTransformer] Epoch 144/200 | Train: 0.3141 | Val: 0.2818 | LR: 7.05e-05 | Time: 12.1s
+2026-04-16 21:53:00,353 - INFO - [iTransformer] Epoch 145/200 | Train: 0.3144 | Val: 0.2837 | LR: 6.82e-05 | Time: 13.8s
+2026-04-16 21:53:14,284 - INFO - [iTransformer] Epoch 146/200 | Train: 0.3132 | Val: 0.2803 | LR: 6.61e-05 | Time: 13.9s
+2026-04-16 21:53:14,454 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:53:28,133 - INFO - [iTransformer] Epoch 147/200 | Train: 0.3134 | Val: 0.2782 | LR: 6.39e-05 | Time: 13.7s
+2026-04-16 21:53:28,302 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:53:42,594 - INFO - [iTransformer] Epoch 148/200 | Train: 0.3125 | Val: 0.2827 | LR: 6.18e-05 | Time: 14.3s
+2026-04-16 21:53:56,648 - INFO - [iTransformer] Epoch 149/200 | Train: 0.3119 | Val: 0.2800 | LR: 5.97e-05 | Time: 14.1s
+2026-04-16 21:54:08,705 - INFO - [iTransformer] Epoch 150/200 | Train: 0.3115 | Val: 0.2800 | LR: 5.76e-05 | Time: 12.1s
+2026-04-16 21:54:22,574 - INFO - [iTransformer] Epoch 151/200 | Train: 0.3115 | Val: 0.2767 | LR: 5.56e-05 | Time: 13.9s
+2026-04-16 21:54:22,734 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:54:36,675 - INFO - [iTransformer] Epoch 152/200 | Train: 0.3101 | Val: 0.2803 | LR: 5.36e-05 | Time: 13.9s
+2026-04-16 21:54:50,098 - INFO - [iTransformer] Epoch 153/200 | Train: 0.3105 | Val: 0.2745 | LR: 5.16e-05 | Time: 13.4s
+2026-04-16 21:54:50,262 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:55:04,226 - INFO - [iTransformer] Epoch 154/200 | Train: 0.3103 | Val: 0.2762 | LR: 4.97e-05 | Time: 14.0s
+2026-04-16 21:55:18,307 - INFO - [iTransformer] Epoch 155/200 | Train: 0.3100 | Val: 0.2794 | LR: 4.78e-05 | Time: 14.1s
+2026-04-16 21:55:32,288 - INFO - [iTransformer] Epoch 156/200 | Train: 0.3096 | Val: 0.2797 | LR: 4.60e-05 | Time: 14.0s
+2026-04-16 21:55:46,086 - INFO - [iTransformer] Epoch 157/200 | Train: 0.3084 | Val: 0.2757 | LR: 4.41e-05 | Time: 13.8s
+2026-04-16 21:55:56,890 - INFO - [iTransformer] Epoch 158/200 | Train: 0.3080 | Val: 0.2723 | LR: 4.23e-05 | Time: 10.8s
+2026-04-16 21:55:57,053 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:56:11,261 - INFO - [iTransformer] Epoch 159/200 | Train: 0.3090 | Val: 0.2738 | LR: 4.06e-05 | Time: 14.2s
+2026-04-16 21:56:25,233 - INFO - [iTransformer] Epoch 160/200 | Train: 0.3086 | Val: 0.2716 | LR: 3.89e-05 | Time: 14.0s
+2026-04-16 21:56:25,383 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:56:38,457 - INFO - [iTransformer] Epoch 161/200 | Train: 0.3086 | Val: 0.2712 | LR: 3.72e-05 | Time: 13.1s
+2026-04-16 21:56:38,620 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:56:52,711 - INFO - [iTransformer] Epoch 162/200 | Train: 0.3079 | Val: 0.2732 | LR: 3.55e-05 | Time: 14.1s
+2026-04-16 21:57:06,885 - INFO - [iTransformer] Epoch 163/200 | Train: 0.3073 | Val: 0.2721 | LR: 3.39e-05 | Time: 14.2s
+2026-04-16 21:57:20,715 - INFO - [iTransformer] Epoch 164/200 | Train: 0.3071 | Val: 0.2748 | LR: 3.24e-05 | Time: 13.8s
+2026-04-16 21:57:34,780 - INFO - [iTransformer] Epoch 165/200 | Train: 0.3070 | Val: 0.2707 | LR: 3.08e-05 | Time: 14.1s
+2026-04-16 21:57:34,951 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:57:49,221 - INFO - [iTransformer] Epoch 166/200 | Train: 0.3066 | Val: 0.2712 | LR: 2.94e-05 | Time: 14.3s
+2026-04-16 21:58:03,297 - INFO - [iTransformer] Epoch 167/200 | Train: 0.3065 | Val: 0.2713 | LR: 2.79e-05 | Time: 14.1s
+2026-04-16 21:58:17,483 - INFO - [iTransformer] Epoch 168/200 | Train: 0.3062 | Val: 0.2711 | LR: 2.65e-05 | Time: 14.2s
+2026-04-16 21:58:31,510 - INFO - [iTransformer] Epoch 169/200 | Train: 0.3063 | Val: 0.2713 | LR: 2.51e-05 | Time: 14.0s
+2026-04-16 21:58:45,320 - INFO - [iTransformer] Epoch 170/200 | Train: 0.3061 | Val: 0.2729 | LR: 2.38e-05 | Time: 13.8s
+2026-04-16 21:58:59,409 - INFO - [iTransformer] Epoch 171/200 | Train: 0.3055 | Val: 0.2743 | LR: 2.25e-05 | Time: 14.1s
+2026-04-16 21:59:13,320 - INFO - [iTransformer] Epoch 172/200 | Train: 0.3056 | Val: 0.2713 | LR: 2.12e-05 | Time: 13.9s
+2026-04-16 21:59:26,982 - INFO - [iTransformer] Epoch 173/200 | Train: 0.3062 | Val: 0.2722 | LR: 2.00e-05 | Time: 13.7s
+2026-04-16 21:59:40,809 - INFO - [iTransformer] Epoch 174/200 | Train: 0.3052 | Val: 0.2683 | LR: 1.89e-05 | Time: 13.8s
+2026-04-16 21:59:40,980 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 21:59:54,520 - INFO - [iTransformer] Epoch 175/200 | Train: 0.3045 | Val: 0.2739 | LR: 1.77e-05 | Time: 13.5s
+2026-04-16 22:00:08,461 - INFO - [iTransformer] Epoch 176/200 | Train: 0.3045 | Val: 0.2727 | LR: 1.66e-05 | Time: 13.9s
+2026-04-16 22:00:22,221 - INFO - [iTransformer] Epoch 177/200 | Train: 0.3046 | Val: 0.2677 | LR: 1.56e-05 | Time: 13.8s
+2026-04-16 22:00:22,377 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 22:00:34,229 - INFO - [iTransformer] Epoch 178/200 | Train: 0.3051 | Val: 0.2686 | LR: 1.46e-05 | Time: 11.9s
+2026-04-16 22:00:48,199 - INFO - [iTransformer] Epoch 179/200 | Train: 0.3041 | Val: 0.2723 | LR: 1.36e-05 | Time: 14.0s
+2026-04-16 22:01:02,210 - INFO - [iTransformer] Epoch 180/200 | Train: 0.3040 | Val: 0.2672 | LR: 1.27e-05 | Time: 14.0s
+2026-04-16 22:01:02,381 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 22:01:16,245 - INFO - [iTransformer] Epoch 181/200 | Train: 0.3042 | Val: 0.2712 | LR: 1.19e-05 | Time: 13.9s
+2026-04-16 22:01:30,387 - INFO - [iTransformer] Epoch 182/200 | Train: 0.3040 | Val: 0.2685 | LR: 1.10e-05 | Time: 14.1s
+2026-04-16 22:01:41,990 - INFO - [iTransformer] Epoch 183/200 | Train: 0.3037 | Val: 0.2679 | LR: 1.02e-05 | Time: 11.6s
+2026-04-16 22:01:55,861 - INFO - [iTransformer] Epoch 184/200 | Train: 0.3044 | Val: 0.2691 | LR: 9.50e-06 | Time: 13.9s
+2026-04-16 22:02:09,534 - INFO - [iTransformer] Epoch 185/200 | Train: 0.3033 | Val: 0.2683 | LR: 8.80e-06 | Time: 13.7s
+2026-04-16 22:02:23,504 - INFO - [iTransformer] Epoch 186/200 | Train: 0.3038 | Val: 0.2694 | LR: 8.15e-06 | Time: 14.0s
+2026-04-16 22:02:37,601 - INFO - [iTransformer] Epoch 187/200 | Train: 0.3034 | Val: 0.2672 | LR: 7.54e-06 | Time: 14.1s
+2026-04-16 22:02:37,766 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 22:02:51,867 - INFO - [iTransformer] Epoch 188/200 | Train: 0.3030 | Val: 0.2704 | LR: 6.98e-06 | Time: 14.1s
+2026-04-16 22:03:05,843 - INFO - [iTransformer] Epoch 189/200 | Train: 0.3039 | Val: 0.2686 | LR: 6.46e-06 | Time: 14.0s
+2026-04-16 22:03:19,661 - INFO - [iTransformer] Epoch 190/200 | Train: 0.3032 | Val: 0.2711 | LR: 5.98e-06 | Time: 13.8s
+2026-04-16 22:03:33,735 - INFO - [iTransformer] Epoch 191/200 | Train: 0.3030 | Val: 0.2681 | LR: 5.55e-06 | Time: 14.1s
+2026-04-16 22:03:47,726 - INFO - [iTransformer] Epoch 192/200 | Train: 0.3027 | Val: 0.2698 | LR: 5.17e-06 | Time: 14.0s
+2026-04-16 22:04:01,692 - INFO - [iTransformer] Epoch 193/200 | Train: 0.3027 | Val: 0.2661 | LR: 4.83e-06 | Time: 14.0s
+2026-04-16 22:04:01,837 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 22:04:14,695 - INFO - [iTransformer] Epoch 194/200 | Train: 0.3030 | Val: 0.2643 | LR: 4.54e-06 | Time: 12.9s
+2026-04-16 22:04:14,864 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_itransformer.pt
+2026-04-16 22:04:28,676 - INFO - [iTransformer] Epoch 195/200 | Train: 0.3033 | Val: 0.2668 | LR: 4.29e-06 | Time: 13.8s
+2026-04-16 22:04:42,359 - INFO - [iTransformer] Epoch 196/200 | Train: 0.3033 | Val: 0.2680 | LR: 4.08e-06 | Time: 13.7s
+2026-04-16 22:04:56,105 - INFO - [iTransformer] Epoch 197/200 | Train: 0.3028 | Val: 0.2690 | LR: 3.92e-06 | Time: 13.7s
+2026-04-16 22:05:10,030 - INFO - [iTransformer] Epoch 198/200 | Train: 0.3031 | Val: 0.2689 | LR: 3.81e-06 | Time: 13.9s
+2026-04-16 22:05:23,855 - INFO - [iTransformer] Epoch 199/200 | Train: 0.3027 | Val: 0.2648 | LR: 3.74e-06 | Time: 13.8s
+2026-04-16 22:05:37,032 - INFO - [iTransformer] Epoch 200/200 | Train: 0.3032 | Val: 0.2688 | LR: 3.72e-06 | Time: 13.2s
+2026-04-16 22:05:37,032 - INFO - iTransformer pretraining complete. Best val loss: 0.2643
+2026-04-16 22:05:37,079 - INFO - ============================================================
+2026-04-16 22:05:37,079 - INFO - PHASE 1B: Diffusion HP Tuning (with iTransformer guidance)
+2026-04-16 22:05:37,079 - INFO - Trials: 8
+2026-04-16 22:05:37,079 - INFO - ============================================================
+2026-04-16 22:05:37,267 - INFO - RealTS initialized: 10000 samples/epoch, lookback=512, forecast=96, variables=7
+2026-04-16 22:05:37,267 - INFO - Generating synthetic pool of 10000 samples to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/synth_cache/synth_pool_v7_L608_N10000.npy...
+2026-04-16 22:05:43,729 - INFO - Generating synthetic samples: 1000/10000 (10%)
+2026-04-16 22:05:50,306 - INFO - Generating synthetic samples: 2000/10000 (20%)
+2026-04-16 22:05:56,736 - INFO - Generating synthetic samples: 3000/10000 (30%)
+2026-04-16 22:06:03,169 - INFO - Generating synthetic samples: 4000/10000 (40%)
+2026-04-16 22:06:09,517 - INFO - Generating synthetic samples: 5000/10000 (50%)
+2026-04-16 22:06:15,918 - INFO - Generating synthetic samples: 6000/10000 (60%)
+2026-04-16 22:06:22,379 - INFO - Generating synthetic samples: 7000/10000 (70%)
+2026-04-16 22:06:28,848 - INFO - Generating synthetic samples: 8000/10000 (80%)
+2026-04-16 22:06:35,266 - INFO - Generating synthetic samples: 9000/10000 (90%)
+2026-04-16 22:06:41,858 - INFO - Pool generation complete.
+2026-04-16 22:06:41,858 - INFO - Created synthetic-only dataloader: 10000 samples/epoch (Pool: 10000), lookback=512, forecast=96, variables=7
+2026-04-16 22:06:41,860 - INFO - Starting Diffusion HP search: 8 trials
+2026-04-16 22:06:41,862 - INFO - TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-04-16 22:06:41,863 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-04-16 22:06:42,028 - INFO - ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 9)
+2026-04-16 22:06:42,028 - INFO -   Conditioning mode: visual_concat
+2026-04-16 22:06:42,028 - INFO -   Visual concat: 1 past image channels directly concatenated
+2026-04-16 22:06:42,028 - INFO -   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-04-16 22:06:42,041 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-04-16 22:06:42,041 - INFO - DiffusionTSF initialized:
+2026-04-16 22:06:42,041 - INFO -   Variables: 7 (multivariate)
+2026-04-16 22:06:42,041 - INFO -   Lookback: 512, Forecast: 104
+2026-04-16 22:06:42,041 - INFO -   Image size: 128 x W
+2026-04-16 22:06:42,041 - INFO -   Input channels: 3 (data: 7, aux: 1, guidance: 1)
+2026-04-16 22:06:42,041 - INFO -   Conditioning mode: visual_concat
+2026-04-16 22:06:42,041 - INFO -   Diffusion steps: 1000
+2026-04-16 22:06:42,041 - INFO -   Coordinate channel: True
+2026-04-16 22:06:42,041 - INFO -   Time ramp channel: False
+2026-04-16 22:06:42,041 - INFO -   Time sine channel: False
+2026-04-16 22:06:42,041 - INFO -   Value channel: False
+2026-04-16 22:06:42,042 - INFO -   Guidance channel: enabled (iTransformer → 2D ghost image)
+2026-04-16 22:06:42,042 - INFO -   U-Net kernel size: (3, 9)
+2026-04-16 22:06:42,042 - INFO -   Variate-factorized: enabled (B*V=7 per forward, shared weights)
+2026-04-16 22:06:42,042 - INFO -   Hybrid conditioning: VariateCrossEncoder (context_dim=128, layers=2)
+2026-04-16 22:06:42,062 - INFO - Guidance model set: iTransformerGuidance
+2026-04-17 01:19:14,062 - INFO - [Diffusion HP] Trial 0/8: loss=0.0278, lr=5.61e-05, bs=16
+2026-04-17 01:19:14,065 - INFO - TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-04-17 01:19:14,065 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-04-17 01:19:14,236 - INFO - ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 9)
+2026-04-17 01:19:14,236 - INFO -   Conditioning mode: visual_concat
+2026-04-17 01:19:14,236 - INFO -   Visual concat: 1 past image channels directly concatenated
+2026-04-17 01:19:14,236 - INFO -   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-04-17 01:19:14,244 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-04-17 01:19:14,244 - INFO - DiffusionTSF initialized:
+2026-04-17 01:19:14,244 - INFO -   Variables: 7 (multivariate)
+2026-04-17 01:19:14,244 - INFO -   Lookback: 512, Forecast: 104
+2026-04-17 01:19:14,245 - INFO -   Image size: 128 x W
+2026-04-17 01:19:14,245 - INFO -   Input channels: 3 (data: 7, aux: 1, guidance: 1)
+2026-04-17 01:19:14,245 - INFO -   Conditioning mode: visual_concat
+2026-04-17 01:19:14,245 - INFO -   Diffusion steps: 1000
+2026-04-17 01:19:14,245 - INFO -   Coordinate channel: True
+2026-04-17 01:19:14,245 - INFO -   Time ramp channel: False
+2026-04-17 01:19:14,245 - INFO -   Time sine channel: False
+2026-04-17 01:19:14,245 - INFO -   Value channel: False
+2026-04-17 01:19:14,245 - INFO -   Guidance channel: enabled (iTransformer → 2D ghost image)
+2026-04-17 01:19:14,245 - INFO -   U-Net kernel size: (3, 9)
+2026-04-17 01:19:14,245 - INFO -   Variate-factorized: enabled (B*V=7 per forward, shared weights)
+2026-04-17 01:19:14,245 - INFO -   Hybrid conditioning: VariateCrossEncoder (context_dim=128, layers=2)
+2026-04-17 01:19:14,268 - INFO - Guidance model set: iTransformerGuidance
+2026-04-17 01:19:14,885 - INFO - TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-04-17 01:19:14,886 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-04-17 01:19:15,071 - INFO - ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 9)
+2026-04-17 01:19:15,071 - INFO -   Conditioning mode: visual_concat
+2026-04-17 01:19:15,071 - INFO -   Visual concat: 1 past image channels directly concatenated
+2026-04-17 01:19:15,071 - INFO -   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-04-17 01:19:15,079 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-04-17 01:19:15,080 - INFO - DiffusionTSF initialized:
+2026-04-17 01:19:15,080 - INFO -   Variables: 7 (multivariate)
+2026-04-17 01:19:15,080 - INFO -   Lookback: 512, Forecast: 104
+2026-04-17 01:19:15,080 - INFO -   Image size: 128 x W
+2026-04-17 01:19:15,080 - INFO -   Input channels: 3 (data: 7, aux: 1, guidance: 1)
+2026-04-17 01:19:15,080 - INFO -   Conditioning mode: visual_concat
+2026-04-17 01:19:15,080 - INFO -   Diffusion steps: 1000
+2026-04-17 01:19:15,080 - INFO -   Coordinate channel: True
+2026-04-17 01:19:15,080 - INFO -   Time ramp channel: False
+2026-04-17 01:19:15,080 - INFO -   Time sine channel: False
+2026-04-17 01:19:15,080 - INFO -   Value channel: False
+2026-04-17 01:19:15,080 - INFO -   Guidance channel: enabled (iTransformer → 2D ghost image)
+2026-04-17 01:19:15,080 - INFO -   U-Net kernel size: (3, 9)
+2026-04-17 01:19:15,080 - INFO -   Variate-factorized: enabled (B*V=7 per forward, shared weights)
+2026-04-17 01:19:15,080 - INFO -   Hybrid conditioning: VariateCrossEncoder (context_dim=128, layers=2)
+2026-04-17 01:19:15,104 - INFO - Guidance model set: iTransformerGuidance
+2026-04-17 05:19:28,818 - INFO - [Diffusion HP] Trial 2/8: loss=0.0321, lr=1.10e-05, bs=16
+2026-04-17 05:19:28,843 - INFO - TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-04-17 05:19:28,843 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-04-17 05:19:29,011 - INFO - ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 9)
+2026-04-17 05:19:29,011 - INFO -   Conditioning mode: visual_concat
+2026-04-17 05:19:29,011 - INFO -   Visual concat: 1 past image channels directly concatenated
+2026-04-17 05:19:29,011 - INFO -   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-04-17 05:19:29,019 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-04-17 05:19:29,019 - INFO - DiffusionTSF initialized:
+2026-04-17 05:19:29,019 - INFO -   Variables: 7 (multivariate)
+2026-04-17 05:19:29,019 - INFO -   Lookback: 512, Forecast: 104
+2026-04-17 05:19:29,019 - INFO -   Image size: 128 x W
+2026-04-17 05:19:29,019 - INFO -   Input channels: 3 (data: 7, aux: 1, guidance: 1)
+2026-04-17 05:19:29,019 - INFO -   Conditioning mode: visual_concat
+2026-04-17 05:19:29,020 - INFO -   Diffusion steps: 1000
+2026-04-17 05:19:29,020 - INFO -   Coordinate channel: True
+2026-04-17 05:19:29,020 - INFO -   Time ramp channel: False
+2026-04-17 05:19:29,020 - INFO -   Time sine channel: False
+2026-04-17 05:19:29,020 - INFO -   Value channel: False
+2026-04-17 05:19:29,020 - INFO -   Guidance channel: enabled (iTransformer → 2D ghost image)
+2026-04-17 05:19:29,020 - INFO -   U-Net kernel size: (3, 9)
+2026-04-17 05:19:29,020 - INFO -   Variate-factorized: enabled (B*V=7 per forward, shared weights)
+2026-04-17 05:19:29,020 - INFO -   Hybrid conditioning: VariateCrossEncoder (context_dim=128, layers=2)
+2026-04-17 05:19:29,043 - INFO - Guidance model set: iTransformerGuidance
+2026-04-17 05:19:29,535 - INFO - TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-04-17 05:19:29,535 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-04-17 05:19:29,703 - INFO - ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 9)
+2026-04-17 05:19:29,703 - INFO -   Conditioning mode: visual_concat
+2026-04-17 05:19:29,703 - INFO -   Visual concat: 1 past image channels directly concatenated
+2026-04-17 05:19:29,703 - INFO -   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-04-17 05:19:29,710 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-04-17 05:19:29,710 - INFO - DiffusionTSF initialized:
+2026-04-17 05:19:29,711 - INFO -   Variables: 7 (multivariate)
+2026-04-17 05:19:29,711 - INFO -   Lookback: 512, Forecast: 104
+2026-04-17 05:19:29,711 - INFO -   Image size: 128 x W
+2026-04-17 05:19:29,711 - INFO -   Input channels: 3 (data: 7, aux: 1, guidance: 1)
+2026-04-17 05:19:29,711 - INFO -   Conditioning mode: visual_concat
+2026-04-17 05:19:29,711 - INFO -   Diffusion steps: 1000
+2026-04-17 05:19:29,711 - INFO -   Coordinate channel: True
+2026-04-17 05:19:29,711 - INFO -   Time ramp channel: False
+2026-04-17 05:19:29,711 - INFO -   Time sine channel: False
+2026-04-17 05:19:29,711 - INFO -   Value channel: False
+2026-04-17 05:19:29,711 - INFO -   Guidance channel: enabled (iTransformer → 2D ghost image)
+2026-04-17 05:19:29,711 - INFO -   U-Net kernel size: (3, 9)
+2026-04-17 05:19:29,711 - INFO -   Variate-factorized: enabled (B*V=7 per forward, shared weights)
+2026-04-17 05:19:29,711 - INFO -   Hybrid conditioning: VariateCrossEncoder (context_dim=128, layers=2)
+2026-04-17 05:19:29,733 - INFO - Guidance model set: iTransformerGuidance
+2026-04-17 05:19:30,868 - INFO - TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-04-17 05:19:30,869 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-04-17 05:19:31,051 - INFO - ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 9)
+2026-04-17 05:19:31,051 - INFO -   Conditioning mode: visual_concat
+2026-04-17 05:19:31,052 - INFO -   Visual concat: 1 past image channels directly concatenated
+2026-04-17 05:19:31,052 - INFO -   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-04-17 05:19:31,060 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-04-17 05:19:31,060 - INFO - DiffusionTSF initialized:
+2026-04-17 05:19:31,060 - INFO -   Variables: 7 (multivariate)
+2026-04-17 05:19:31,060 - INFO -   Lookback: 512, Forecast: 104
+2026-04-17 05:19:31,060 - INFO -   Image size: 128 x W
+2026-04-17 05:19:31,060 - INFO -   Input channels: 3 (data: 7, aux: 1, guidance: 1)
+2026-04-17 05:19:31,060 - INFO -   Conditioning mode: visual_concat
+2026-04-17 05:19:31,061 - INFO -   Diffusion steps: 1000
+2026-04-17 05:19:31,061 - INFO -   Coordinate channel: True
+2026-04-17 05:19:31,061 - INFO -   Time ramp channel: False
+2026-04-17 05:19:31,061 - INFO -   Time sine channel: False
+2026-04-17 05:19:31,061 - INFO -   Value channel: False
+2026-04-17 05:19:31,061 - INFO -   Guidance channel: enabled (iTransformer → 2D ghost image)
+2026-04-17 05:19:31,061 - INFO -   U-Net kernel size: (3, 9)
+2026-04-17 05:19:31,061 - INFO -   Variate-factorized: enabled (B*V=7 per forward, shared weights)
+2026-04-17 05:19:31,061 - INFO -   Hybrid conditioning: VariateCrossEncoder (context_dim=128, layers=2)
+2026-04-17 05:19:31,082 - INFO - Guidance model set: iTransformerGuidance
+2026-04-17 05:19:31,568 - INFO - TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-04-17 05:19:31,569 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-04-17 05:19:31,737 - INFO - ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 9)
+2026-04-17 05:19:31,737 - INFO -   Conditioning mode: visual_concat
+2026-04-17 05:19:31,737 - INFO -   Visual concat: 1 past image channels directly concatenated
+2026-04-17 05:19:31,737 - INFO -   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-04-17 05:19:31,744 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-04-17 05:19:31,745 - INFO - DiffusionTSF initialized:
+2026-04-17 05:19:31,745 - INFO -   Variables: 7 (multivariate)
+2026-04-17 05:19:31,745 - INFO -   Lookback: 512, Forecast: 104
+2026-04-17 05:19:31,745 - INFO -   Image size: 128 x W
+2026-04-17 05:19:31,745 - INFO -   Input channels: 3 (data: 7, aux: 1, guidance: 1)
+2026-04-17 05:19:31,745 - INFO -   Conditioning mode: visual_concat
+2026-04-17 05:19:31,745 - INFO -   Diffusion steps: 1000
+2026-04-17 05:19:31,745 - INFO -   Coordinate channel: True
+2026-04-17 05:19:31,745 - INFO -   Time ramp channel: False
+2026-04-17 05:19:31,745 - INFO -   Time sine channel: False
+2026-04-17 05:19:31,745 - INFO -   Value channel: False
+2026-04-17 05:19:31,745 - INFO -   Guidance channel: enabled (iTransformer → 2D ghost image)
+2026-04-17 05:19:31,745 - INFO -   U-Net kernel size: (3, 9)
+2026-04-17 05:19:31,745 - INFO -   Variate-factorized: enabled (B*V=7 per forward, shared weights)
+2026-04-17 05:19:31,745 - INFO -   Hybrid conditioning: VariateCrossEncoder (context_dim=128, layers=2)
+2026-04-17 05:19:31,767 - INFO - Guidance model set: iTransformerGuidance
+2026-04-17 05:19:32,145 - INFO - TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-04-17 05:19:32,145 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-04-17 05:19:32,312 - INFO - ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 9)
+2026-04-17 05:19:32,312 - INFO -   Conditioning mode: visual_concat
+2026-04-17 05:19:32,312 - INFO -   Visual concat: 1 past image channels directly concatenated
+2026-04-17 05:19:32,312 - INFO -   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-04-17 05:19:32,319 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-04-17 05:19:32,320 - INFO - DiffusionTSF initialized:
+2026-04-17 05:19:32,320 - INFO -   Variables: 7 (multivariate)
+2026-04-17 05:19:32,320 - INFO -   Lookback: 512, Forecast: 104
+2026-04-17 05:19:32,320 - INFO -   Image size: 128 x W
+2026-04-17 05:19:32,320 - INFO -   Input channels: 3 (data: 7, aux: 1, guidance: 1)
+2026-04-17 05:19:32,320 - INFO -   Conditioning mode: visual_concat
+2026-04-17 05:19:32,320 - INFO -   Diffusion steps: 1000
+2026-04-17 05:19:32,320 - INFO -   Coordinate channel: True
+2026-04-17 05:19:32,320 - INFO -   Time ramp channel: False
+2026-04-17 05:19:32,320 - INFO -   Time sine channel: False
+2026-04-17 05:19:32,320 - INFO -   Value channel: False
+2026-04-17 05:19:32,320 - INFO -   Guidance channel: enabled (iTransformer → 2D ghost image)
+2026-04-17 05:19:32,320 - INFO -   U-Net kernel size: (3, 9)
+2026-04-17 05:19:32,320 - INFO -   Variate-factorized: enabled (B*V=7 per forward, shared weights)
+2026-04-17 05:19:32,320 - INFO -   Hybrid conditioning: VariateCrossEncoder (context_dim=128, layers=2)
+2026-04-17 05:19:32,342 - INFO - Guidance model set: iTransformerGuidance
+2026-04-17 05:19:33,112 - INFO - Best Diffusion params: lr=5.61e-05, bs=16
+2026-04-17 05:19:33,112 - INFO - Best val loss: 0.0278
+2026-04-17 05:19:33,133 - INFO - ============================================================
+2026-04-17 05:19:33,133 - INFO - PHASE 1C-2: Full Diffusion Pretraining (with iTransformer guidance)
+2026-04-17 05:19:33,133 - INFO - Samples: 100000, Epochs: 200, Patience: 20
+2026-04-17 05:19:33,133 - INFO - Params: {'learning_rate': 5.6115164153345e-05, 'batch_size': 16}
+2026-04-17 05:19:33,133 - INFO - ============================================================
+2026-04-17 05:19:33,278 - INFO - RealTS initialized: 100000 samples/epoch, lookback=512, forecast=96, variables=7
+2026-04-17 05:19:33,279 - INFO - Loading synthetic pool from /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/synth_cache/synth_pool_v7_L608_N100000.npy
+2026-04-17 05:19:33,280 - INFO - Created synthetic-only dataloader: 100000 samples/epoch (Pool: 100000), lookback=512, forecast=96, variables=7
+2026-04-17 05:19:33,282 - INFO - TimeSeriesTo2D initialized: H=128, MS=3.5
+2026-04-17 05:19:33,282 - INFO - VerticalGaussianBlur initialized: kernel_size=31, sigma=1.0
+2026-04-17 05:19:33,449 - INFO - ConditionalUNet2D initialized with channels=[64, 128, 256], kernel_size=(3, 9)
+2026-04-17 05:19:33,449 - INFO -   Conditioning mode: visual_concat
+2026-04-17 05:19:33,449 - INFO -   Visual concat: 1 past image channels directly concatenated
+2026-04-17 05:19:33,449 - INFO -   Hybrid conditioning enabled: cross-attention with context_dim=128
+2026-04-17 05:19:33,457 - INFO - DiffusionScheduler initialized: T=1000, schedule=linear
+2026-04-17 05:19:33,457 - INFO - DiffusionTSF initialized:
+2026-04-17 05:19:33,458 - INFO -   Variables: 7 (multivariate)
+2026-04-17 05:19:33,458 - INFO -   Lookback: 512, Forecast: 104
+2026-04-17 05:19:33,458 - INFO -   Image size: 128 x W
+2026-04-17 05:19:33,458 - INFO -   Input channels: 3 (data: 7, aux: 1, guidance: 1)
+2026-04-17 05:19:33,458 - INFO -   Conditioning mode: visual_concat
+2026-04-17 05:19:33,458 - INFO -   Diffusion steps: 1000
+2026-04-17 05:19:33,458 - INFO -   Coordinate channel: True
+2026-04-17 05:19:33,458 - INFO -   Time ramp channel: False
+2026-04-17 05:19:33,458 - INFO -   Time sine channel: False
+2026-04-17 05:19:33,458 - INFO -   Value channel: False
+2026-04-17 05:19:33,458 - INFO -   Guidance channel: enabled (iTransformer → 2D ghost image)
+2026-04-17 05:19:33,458 - INFO -   U-Net kernel size: (3, 9)
+2026-04-17 05:19:33,459 - INFO -   Variate-factorized: enabled (B*V=7 per forward, shared weights)
+2026-04-17 05:19:33,459 - INFO -   Hybrid conditioning: VariateCrossEncoder (context_dim=128, layers=2)
+2026-04-17 05:19:33,459 - INFO - Guidance model set: iTransformerGuidance
+2026-04-17 06:39:54,253 - INFO - [Diffusion] Epoch 1/200 | Train: 0.0887 | Val: 0.0320 | LR: 5.61e-05 | Time: 4820.8s
+2026-04-17 06:39:54,859 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_diffusion.pt
+2026-04-17 08:00:14,750 - INFO - [Diffusion] Epoch 2/200 | Train: 0.0413 | Val: 0.0283 | LR: 5.61e-05 | Time: 4819.9s
+2026-04-17 08:00:15,375 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_diffusion.pt
+2026-04-17 09:20:37,831 - INFO - [Diffusion] Epoch 3/200 | Train: 0.0317 | Val: 0.0282 | LR: 5.61e-05 | Time: 4822.5s
+2026-04-17 09:20:38,467 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_diffusion.pt
+2026-04-17 10:41:00,662 - INFO - [Diffusion] Epoch 4/200 | Train: 0.0280 | Val: 0.0625 | LR: 5.61e-05 | Time: 4822.2s
+2026-04-17 12:01:23,017 - INFO - [Diffusion] Epoch 5/200 | Train: 0.0259 | Val: 0.0192 | LR: 5.60e-05 | Time: 4822.3s
+2026-04-17 12:01:23,624 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_diffusion.pt
+2026-04-17 13:21:45,256 - INFO - [Diffusion] Epoch 6/200 | Train: 0.0236 | Val: 0.0173 | LR: 5.60e-05 | Time: 4821.6s
+2026-04-17 13:21:45,892 - INFO -   -> New best! Saved to /scratch/ccao87/diffusion-tsf-etth2-512x96/checkpoints_gauss/pretrained_diffusion.pt

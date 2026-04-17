@@ -14,6 +14,7 @@ stuff in here:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as grad_ckpt
 import math
 import logging
 from typing import List, Optional, Tuple
@@ -443,28 +444,39 @@ class ResidualBlock(nn.Module):
         time_emb_dim: int,
         num_groups: int = 8,
         dropout: float = 0.1,
-        kernel_size: Tuple[int, int] = (3, 3)
+        kernel_size: Tuple[int, int] = (3, 3),
+        separable_kernel: bool = False,
     ):
         super().__init__()
-        
-        # Calculate padding for 'same' output size: padding = (kernel_size - 1) // 2
+        self.separable_kernel = separable_kernel and (kernel_size[0] > 1 or kernel_size[1] > 1)
+
         padding = (kernel_size[0] // 2, kernel_size[1] // 2)
-        
+
         # First convolution block
         self.norm1 = nn.GroupNorm(num_groups, in_channels)
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
-        
+        if self.separable_kernel:
+            # Factor (K_h, K_w) into (K_h, 1) + (1, K_w).  Saves ~55% FLOPs for large kernels
+            # like (3,9) while preserving the same receptive field on each axis.
+            self.conv1_h = nn.Conv2d(in_channels, in_channels, (kernel_size[0], 1), padding=(padding[0], 0))
+            self.conv1_w = nn.Conv2d(in_channels, out_channels, (1, kernel_size[1]), padding=(0, padding[1]))
+        else:
+            self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
+
         # Time embedding projection
         self.time_mlp = nn.Sequential(
             nn.SiLU(),
             nn.Linear(time_emb_dim, out_channels)
         )
-        
+
         # Second convolution block
         self.norm2 = nn.GroupNorm(num_groups, out_channels)
         self.dropout = nn.Dropout(dropout)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding=padding)
-        
+        if self.separable_kernel:
+            self.conv2_h = nn.Conv2d(out_channels, out_channels, (kernel_size[0], 1), padding=(padding[0], 0))
+            self.conv2_w = nn.Conv2d(out_channels, out_channels, (1, kernel_size[1]), padding=(0, padding[1]))
+        else:
+            self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding=padding)
+
         # Skip connection (identity or 1x1 conv if channels change)
         if in_channels != out_channels:
             self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1)
@@ -481,21 +493,29 @@ class ResidualBlock(nn.Module):
             Output tensor of shape (batch, out_channels, height, width)
         """
         h = x
-        
+
         # First block
         h = self.norm1(h)
         h = F.silu(h)
-        h = self.conv1(h)
-        
+        if self.separable_kernel:
+            h = self.conv1_h(h)
+            h = self.conv1_w(h)
+        else:
+            h = self.conv1(h)
+
         # Add time embedding (broadcast to spatial dimensions)
         t_emb_proj = self.time_mlp(t_emb)[:, :, None, None]
         h = h + t_emb_proj
-        
+
         # Second block
         h = self.norm2(h)
         h = F.silu(h)
         h = self.dropout(h)
-        h = self.conv2(h)
+        if self.separable_kernel:
+            h = self.conv2_h(h)
+            h = self.conv2_w(h)
+        else:
+            h = self.conv2(h)
         
         # Skip connection
         return h + self.skip(x)
@@ -514,15 +534,17 @@ class DownBlock(nn.Module):
         use_cross_attention: bool = False,
         context_dim: int = 128,
         num_groups: int = 8,
-        kernel_size: Tuple[int, int] = (3, 3)
+        kernel_size: Tuple[int, int] = (3, 3),
+        separable_kernel: bool = False,
     ):
         super().__init__()
-        
+
         self.res_blocks = nn.ModuleList()
         for i in range(num_res_blocks):
             in_ch = in_channels if i == 0 else out_channels
             self.res_blocks.append(
-                ResidualBlock(in_ch, out_channels, time_emb_dim, num_groups, kernel_size=kernel_size)
+                ResidualBlock(in_ch, out_channels, time_emb_dim, num_groups,
+                              kernel_size=kernel_size, separable_kernel=separable_kernel)
             )
         
         # Simple self-attention (optional) - legacy mode without cross-attention
@@ -596,22 +618,20 @@ class UpBlock(nn.Module):
         use_cross_attention: bool = False,
         context_dim: int = 128,
         num_groups: int = 8,
-        kernel_size: Tuple[int, int] = (3, 3)
+        kernel_size: Tuple[int, int] = (3, 3),
+        separable_kernel: bool = False,
     ):
         super().__init__()
-        
-        # Upsample: use transposed conv with kernel = stride * 2 to avoid checkerboard artifacts
-        # For stride=2, kernel=(4,4) or proportional rectangular version
-        upsample_kernel = (kernel_size[0] + 1, kernel_size[1] + 1)  # Slightly larger for smooth upsampling
-        upsample_padding = (upsample_kernel[0] // 4, upsample_kernel[1] // 4)  # Adjusted padding
+
+        upsample_kernel = (kernel_size[0] + 1, kernel_size[1] + 1)
         self.upsample = nn.ConvTranspose2d(in_channels, in_channels, kernel_size=upsample_kernel, stride=2, padding=1)
-        
+
         self.res_blocks = nn.ModuleList()
         for i in range(num_res_blocks):
-            # First block takes concatenated features
             in_ch = in_channels + skip_channels if i == 0 else out_channels
             self.res_blocks.append(
-                ResidualBlock(in_ch, out_channels, time_emb_dim, num_groups, kernel_size=kernel_size)
+                ResidualBlock(in_ch, out_channels, time_emb_dim, num_groups,
+                              kernel_size=kernel_size, separable_kernel=separable_kernel)
             )
         
         # Simple self-attention (optional) - legacy mode without cross-attention
@@ -835,26 +855,28 @@ class MiddleBlock(nn.Module):
         num_groups: int = 8,
         kernel_size: Tuple[int, int] = (3, 3),
         use_cross_attention: bool = False,
-        context_dim: int = 128
+        context_dim: int = 128,
+        separable_kernel: bool = False,
     ):
         super().__init__()
         self.use_cross_attention = use_cross_attention
-        
-        self.res1 = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
-        
+
+        self.res1 = ResidualBlock(channels, channels, time_emb_dim, num_groups,
+                                  kernel_size=kernel_size, separable_kernel=separable_kernel)
+
         if not use_cross_attention:
             self.attention = nn.MultiheadAttention(channels, num_heads=4, batch_first=True)
             self.attn_norm = nn.GroupNorm(num_groups, channels)
         else:
-            # Spatial Transformer with cross-attention
             self.spatial_transformer = SpatialTransformerBlock(
                 channels=channels,
                 context_dim=context_dim,
                 num_heads=4,
                 num_groups=num_groups
             )
-        
-        self.res2 = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
+
+        self.res2 = ResidualBlock(channels, channels, time_emb_dim, num_groups,
+                                  kernel_size=kernel_size, separable_kernel=separable_kernel)
     
     def forward(
         self,
@@ -994,7 +1016,9 @@ class ConditionalUNet2D(nn.Module):
         context_dim: int = 128,
         conditioning_mode: str = "visual_concat",
         visual_cond_channels: int = 1,
-        cond_in_channels: Optional[int] = None
+        cond_in_channels: Optional[int] = None,
+        use_gradient_checkpointing: bool = False,
+        separable_kernel: bool = False,
     ):
         """
         Args:
@@ -1033,6 +1057,8 @@ class ConditionalUNet2D(nn.Module):
         self.use_hybrid_condition = use_hybrid_condition
         self.conditioning_mode = conditioning_mode
         self.visual_cond_channels = visual_cond_channels
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.separable_kernel = separable_kernel
         
         # Default cond_in_channels to in_channels if not specified
         if cond_in_channels is None:
@@ -1068,7 +1094,6 @@ class ConditionalUNet2D(nn.Module):
         in_ch = channels[0]
         for i, out_ch in enumerate(channels[1:]):
             use_attn = i in attention_levels
-            # Use cross-attention at attention levels when hybrid conditioning is enabled
             use_cross_attn = use_hybrid_condition and use_attn
             self.down_blocks.append(
                 DownBlock(
@@ -1077,13 +1102,13 @@ class ConditionalUNet2D(nn.Module):
                     use_cross_attention=use_cross_attn,
                     context_dim=context_dim,
                     num_groups=num_groups,
-                    kernel_size=kernel_size
+                    kernel_size=kernel_size,
+                    separable_kernel=separable_kernel,
                 )
             )
             in_ch = out_ch
-        
-        # Middle block - optionally use dilated convolutions for expanded receptive field
-        # Always use cross-attention in middle block if hybrid conditioning is enabled
+
+        # Middle block
         if use_dilated_middle:
             self.middle = DilatedMiddleBlock(
                 channels[-1], time_emb_dim, num_groups, kernel_size=kernel_size,
@@ -1094,21 +1119,18 @@ class ConditionalUNet2D(nn.Module):
             self.middle = MiddleBlock(
                 channels[-1], time_emb_dim, num_groups, kernel_size=kernel_size,
                 use_cross_attention=use_hybrid_condition,
-                context_dim=context_dim
+                context_dim=context_dim,
+                separable_kernel=separable_kernel,
             )
-        
+
         # Upsampling path
-        # Skip connections come from down blocks and have the same channels as the down block output
-        # For channels [c0, c1, c2, c3]: down blocks produce skips with [c1, c2, c3] channels
-        # When reversed: up_block[i] receives skip with reversed_channels[i] channels
         self.up_blocks = nn.ModuleList()
         reversed_channels = list(reversed(channels))
         for i in range(len(channels) - 1):
             in_ch = reversed_channels[i]
             out_ch = reversed_channels[i + 1]
-            skip_ch = reversed_channels[i]  # Skip channels match the down block's output (= in_ch)
+            skip_ch = reversed_channels[i]
             use_attn = (len(channels) - 2 - i) in attention_levels
-            # Use cross-attention at attention levels when hybrid conditioning is enabled
             use_cross_attn = use_hybrid_condition and use_attn
             self.up_blocks.append(
                 UpBlock(
@@ -1117,7 +1139,8 @@ class ConditionalUNet2D(nn.Module):
                     use_cross_attention=use_cross_attn,
                     context_dim=context_dim,
                     num_groups=num_groups,
-                    kernel_size=kernel_size
+                    kernel_size=kernel_size,
+                    separable_kernel=separable_kernel,
                 )
             )
         
@@ -1174,19 +1197,34 @@ class ConditionalUNet2D(nn.Module):
         
         # Initial conv
         x = self.init_conv(x)
-        
+
         # Downsampling with skip connections
         skips = []
         for down_block in self.down_blocks:
-            x, skip = down_block(x, t_emb, encoder_hidden_states)
+            if self.use_gradient_checkpointing and self.training:
+                x, skip = grad_ckpt.checkpoint(
+                    down_block, x, t_emb, encoder_hidden_states, use_reentrant=False
+                )
+            else:
+                x, skip = down_block(x, t_emb, encoder_hidden_states)
             skips.append(skip)
-        
+
         # Middle
-        x = self.middle(x, t_emb, encoder_hidden_states)
-        
+        if self.use_gradient_checkpointing and self.training:
+            x = grad_ckpt.checkpoint(
+                self.middle, x, t_emb, encoder_hidden_states, use_reentrant=False
+            )
+        else:
+            x = self.middle(x, t_emb, encoder_hidden_states)
+
         # Upsampling with skip connections
         for up_block, skip in zip(self.up_blocks, reversed(skips)):
-            x = up_block(x, skip, t_emb, encoder_hidden_states)
+            if self.use_gradient_checkpointing and self.training:
+                x = grad_ckpt.checkpoint(
+                    up_block, x, skip, t_emb, encoder_hidden_states, use_reentrant=False
+                )
+            else:
+                x = up_block(x, skip, t_emb, encoder_hidden_states)
         
         # Final output
         x = self.final_norm(x)

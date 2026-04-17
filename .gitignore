@@ -2,6 +2,7 @@
 # Git Ignore for Time Series Sandbox
 # =============================================================================
 synced_results/
+notes/
 # -----------------------------------------------------------------------------
 # Python
 # -----------------------------------------------------------------------------
@@ -171,6 +172,7 @@ docs.alliancecan.ca_mediawiki-20260319-wikidump/docs.alliancecan.ca_mediawiki-20
 .agents/skills/natural
 .agents/skills/quick
 .agents/skills/slidev
+.agents/skills/slurm-killarney
 .ai/.lnai-manifest.json
 .claude/CLAUDE.md
 .claude/skills/slidev
@@ -180,6 +182,7 @@ docs.alliancecan.ca_mediawiki-20260319-wikidump/docs.alliancecan.ca_mediawiki-20
 .cursor/skills/natural
 .cursor/skills/quick
 .cursor/skills/slidev
+.cursor/skills/slurm-killarney
 .gemini/settings.json
 .gemini/skills/alliancecan
 .gemini/skills/audio_math_explainer
@@ -187,18 +190,21 @@ docs.alliancecan.ca_mediawiki-20260319-wikidump/docs.alliancecan.ca_mediawiki-20
 .gemini/skills/natural
 .gemini/skills/quick
 .gemini/skills/slidev
+.gemini/skills/slurm-killarney
 .github/skills/alliancecan
 .github/skills/audio_math_explainer
 .github/skills/messy
 .github/skills/natural
 .github/skills/quick
 .github/skills/slidev
+.github/skills/slurm-killarney
 .windsurf/skills/alliancecan
 .windsurf/skills/audio_math_explainer
 .windsurf/skills/messy
 .windsurf/skills/natural
 .windsurf/skills/quick
 .windsurf/skills/slidev
+.windsurf/skills/slurm-killarney
 AGENTS.md
 opencode.json
 # end lnai-generated
