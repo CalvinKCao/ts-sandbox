@@ -104,7 +104,7 @@ fi
 
 # Common Python flags (exported so job bodies can use $SMOKE_FLAG etc.)
 export PY="python -u -m models.diffusion_tsf.train_multivariate_pipeline"
-export PY_COMMON="--n-variates 7 --amp --synthetic-samples 100000 --itransformer-trials 20 $SMOKE_FLAG"
+export PY_COMMON="--n-variates 7 --amp --synthetic-samples 60000 --itransformer-trials 20 $SMOKE_FLAG"
 
 # ---- Shared job body: module load + venv activate + cd ----------------------
 # Written as a quoted heredoc into a temp file so each job can source it.

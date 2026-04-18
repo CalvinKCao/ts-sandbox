@@ -276,10 +276,9 @@ def generate_multivariate_synthetic_data(
     """
     # Import here to avoid circular dependency with realts.py
     try:
-        from .realts import IFFTB, seasonal_periodicity, PWB, RWB, LGB, TWDB
+        from .realts import IFFTB, seasonal_periodicity, PWB, RWB, LGB, TWDB, STB
     except ImportError:
-        # Fallback for different execution contexts
-        from models.diffusion_tsf.realts import IFFTB, seasonal_periodicity, PWB, RWB, LGB, TWDB
+        from models.diffusion_tsf.realts import IFFTB, seasonal_periodicity, PWB, RWB, LGB, TWDB, STB
 
     if seed is not None:
         rng = np.random.default_rng(seed)
@@ -294,7 +293,7 @@ def generate_multivariate_synthetic_data(
             's_epsilon': 0.02, 'cmax_e': 10, 'cmax_cp': 5, 'sigma_cp': 2.0
         }
     
-    ORGANIC_GENERATORS = [IFFTB, seasonal_periodicity, PWB, RWB, LGB, TWDB]
+    ORGANIC_GENERATORS = [IFFTB, seasonal_periodicity, STB, PWB, RWB, LGB, TWDB]
     COUPLING_GROUP_SIZE = 32  # max group size for O(V²) coupling
 
     def _couple_group(group: list) -> list:

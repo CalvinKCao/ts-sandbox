@@ -1,20 +1,14 @@
 """
 RealTS: Synthetic Time Series Generation inspired by ViTime paper.
 
-This module implements various time series generation functions that produce
-diverse synthetic patterns for training diffusion models. These help with
-generalizability and structural learning, especially for small datasets.
-
 Generator Functions:
-- RWB: Random Walk Behavior
-- PWB: Periodic Wave Behavior  
-- LGB: Logistic Growth Behavior
+- RWB:  Random Walk Behavior
+- PWB:  Periodic Wave Behavior
+- LGB:  Logistic Growth Behavior
 - TWDB: Trend + Wave Data Behavior
 - IFFTB: Inverse FFT Behavior (synthetic spectrum)
 - seasonal_periodicity: Complex seasonal patterns
-
-Reference: ViTime Paper - "Foundation Model for Time Series Forecasting 
-           Powered by Vision Intelligence" (Yang et al., 2025)
+- STB:  Smooth Trend Behavior (~20% of samples; slow-moving trend, light noise)
 """
 
 import numpy as np
@@ -323,6 +317,75 @@ def IFFTB(length: int) -> np.ndarray:
     return signal
 
 
+def _gaussian_smooth(x: np.ndarray, sigma: float) -> np.ndarray:
+    """Numpy-only Gaussian convolution. Caps kernel half-width so the kernel
+    never exceeds the signal length (np.convolve mode='same' returns
+    max(M,N) which would change the output shape if kernel > signal)."""
+    hw = min(int(3.5 * sigma), (len(x) - 1) // 2)
+    k = np.arange(-hw, hw + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * (k / sigma) ** 2)
+    kernel /= kernel.sum()
+    return np.convolve(x, kernel, mode='same')
+
+
+def STB(length: int) -> np.ndarray:
+    """Smooth Trend Behavior.
+
+    Generates a dominant, slowly-changing trend with minimal noise and at most
+    weak optional seasonality.  Covers four sub-types picked at random:
+
+      poly            — polynomial (degree 1-4), good for monotone or gentle curves
+      smooth_rw       — cumulative random walk run through a heavy Gaussian smoother
+      exp             — exponential growth or decay
+      piecewise       — piecewise-linear interpolated through random knots, then smoothed
+
+    Every sample gets a tiny noise floor (1-8% of signal range) and a 50% chance of
+    a weak seasonal overlay (3-15% amplitude, 1-5 cycles over the window).
+    """
+    t = np.linspace(0, 1, length)
+
+    sub = np.random.choice(['poly', 'smooth_rw', 'exp', 'piecewise'])
+
+    if sub == 'poly':
+        degree = np.random.randint(1, 5)
+        coeffs = np.random.randn(degree + 1)
+        coeffs[0] *= np.random.uniform(1.0, 3.0)
+        signal = np.polyval(coeffs, t * 2 - 1)
+
+    elif sub == 'smooth_rw':
+        steps = np.random.normal(0, 1, length)
+        walk = np.cumsum(steps)
+        sigma = length * np.random.uniform(0.05, 0.15)
+        signal = _gaussian_smooth(walk, sigma)
+
+    elif sub == 'exp':
+        rate = np.random.uniform(1.5, 4.0) * np.random.choice([-1, 1])
+        signal = np.exp(rate * t)
+        if np.random.random() < 0.5:
+            signal = signal[::-1].copy()
+
+    else:  # piecewise
+        n_knots = np.random.randint(3, 7)
+        kx = np.sort(np.concatenate([[0.0], np.random.uniform(0.05, 0.95, n_knots), [1.0]]))
+        ky = np.random.randn(len(kx)) * 2.0
+        signal = np.interp(t, kx, ky)
+        signal = _gaussian_smooth(signal, length * 0.04)
+
+    # Small noise floor
+    sig_range = np.ptp(signal) + 1e-7
+    noise_scale = np.random.uniform(0.01, 0.08)
+    signal = signal + np.random.normal(0, noise_scale * sig_range, length)
+
+    # Optional mild seasonal overlay
+    if np.random.random() < 0.50:
+        n_cycles = np.random.uniform(1, 5)
+        season_amp = np.random.uniform(0.03, 0.15) * sig_range
+        phase = np.random.uniform(0, 2 * np.pi)
+        signal += season_amp * np.sin(2 * np.pi * n_cycles * t + phase)
+
+    return signal
+
+
 def seasonal_periodicity(length: int) -> np.ndarray:
     """Seasonal Periodicity Pattern.
     
@@ -406,14 +469,17 @@ class RealTS(Dataset):
         num_variables: Number of variables to generate (default: 1)
     """
     
-    # Generator functions and their probabilities
+    # Generator functions and their probabilities.
+    # STB (Smooth Trend) gets 20%; the rest are scaled down proportionally from
+    # their original weights so the total still sums to 1.0.
     GENERATORS = [
-        (IFFTB, 0.30),           # Complex periodicities (Type 1)
-        (seasonal_periodicity, 0.30),  # Seasonal patterns (Type 2)
-        (PWB, 0.16),             # Periodic waves
-        (RWB, 0.08),             # Random walks
-        (LGB, 0.08),             # Logistic growth
-        (TWDB, 0.08),            # Trend + waves
+        (IFFTB,               0.24),
+        (seasonal_periodicity, 0.24),
+        (STB,                  0.20),   # smooth trend with light noise
+        (PWB,                  0.13),
+        (TWDB,                 0.07),
+        (RWB,                  0.06),
+        (LGB,                  0.06),
     ]
     
     def __init__(
