@@ -1205,13 +1205,16 @@ def pretrain_diffusion(
     device = get_device()
 
     lr = best_params.get('learning_rate', 1e-4)
-    # Clamp upward: HP search can find bs=16 when larger batches OOM during tuning
-    # (cascade fragmentation). Enforce a floor so the full pretrain doesn't crawl.
-    MIN_PRETRAIN_BS = 32
-    raw_bs = best_params.get('batch_size', 64)
-    batch_size = max(raw_bs, MIN_PRETRAIN_BS)
+    # Factorized forward processes B*V images per step, so a bs=16 HP result
+    # is already bs=112 effective for 7 variates — don't clamp up blindly.
+    # Floor is per-variate: keep effective U-Net batch ≤ ~128.
+    raw_bs = best_params.get('batch_size', 32)
+    max_effective = 128
+    min_bs = max(8, max_effective // max(N_VARIATES, 1))
+    batch_size = max(raw_bs, min_bs)
     if batch_size > raw_bs:
-        logger.info(f"  Pretrain batch size clamped up: {raw_bs} → {batch_size}")
+        logger.info(f"  Pretrain batch size clamped up: {raw_bs} → {batch_size} "
+                    f"(floor={min_bs} for V={N_VARIATES}, effective={batch_size * N_VARIATES})")
 
     itrans_model = create_itransformer().to(device)
     ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)

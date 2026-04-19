@@ -40,6 +40,7 @@ HOST=""
 REMOTE_STORE=""
 OUT_DIR="$(pwd)/runs"
 RUN_NAME=""
+PULL_CHECKPOINTS=0
 PULL_SYNTH=0
 DELETE_REMOTE=0
 DRY_RUN=0
@@ -47,13 +48,14 @@ DRY_RUN=0
 # ---- Arg parsing ------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --host)    HOST="$2"; shift 2 ;;
-        --store)   REMOTE_STORE="$2"; shift 2 ;;
-        --out-dir) OUT_DIR="$2"; shift 2 ;;
-        --name)    RUN_NAME="$2"; shift 2 ;;
-        --synth)   PULL_SYNTH=1; shift ;;
-        --delete)  DELETE_REMOTE=1; shift ;;
-        --dry-run) DRY_RUN=1; shift ;;
+        --host)         HOST="$2"; shift 2 ;;
+        --store)        REMOTE_STORE="$2"; shift 2 ;;
+        --out-dir)      OUT_DIR="$2"; shift 2 ;;
+        --name)         RUN_NAME="$2"; shift 2 ;;
+        --checkpoints)  PULL_CHECKPOINTS=1; shift ;;
+        --synth)        PULL_SYNTH=1; shift ;;
+        --delete)       DELETE_REMOTE=1; shift ;;
+        --dry-run)      DRY_RUN=1; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -72,18 +74,19 @@ RSYNC_FLAGS=(-avz --progress --human-readable)
 [[ "$DRY_RUN" -eq 1 ]] && RSYNC_FLAGS+=(--dry-run)
 
 TIMESTAMP="$(date +%Y%m%d-%H%M)"
-LOCAL_DIR="$OUT_DIR/${TIMESTAMP}_${RUN_NAME}"
+GIT_SHA="$(git -C "$(dirname "$0")/.." rev-parse --short HEAD 2>/dev/null || echo "nogit")"
+LOCAL_DIR="$OUT_DIR/${TIMESTAMP}_${GIT_SHA}_${RUN_NAME}"
 
-mkdir -p "$LOCAL_DIR/gauss/checkpoints" \
-         "$LOCAL_DIR/gauss/results" \
-         "$LOCAL_DIR/binary/checkpoints" \
+mkdir -p "$LOCAL_DIR/gauss/results" \
          "$LOCAL_DIR/binary/results" \
          "$LOCAL_DIR/logs"
+[[ "$PULL_CHECKPOINTS" -eq 1 ]] && mkdir -p "$LOCAL_DIR/gauss/checkpoints" "$LOCAL_DIR/binary/checkpoints"
 
 echo "=================================================================="
 echo "  Pulling from: $HOST:$REMOTE_STORE"
 echo "  Into:         $LOCAL_DIR"
-echo "  Synth pool:   $([ "$PULL_SYNTH" -eq 1 ] && echo yes || echo no)"
+echo "  Checkpoints:  $([ "$PULL_CHECKPOINTS" -eq 1 ] && echo yes || echo "no  (use --checkpoints to include)")"
+echo "  Synth pool:   $([ "$PULL_SYNTH" -eq 1 ] && echo yes || echo "no  (use --synth to include)")"
 echo "  Delete after: $([ "$DELETE_REMOTE" -eq 1 ] && echo yes || echo no)"
 echo "  Dry run:      $([ "$DRY_RUN" -eq 1 ] && echo YES || echo no)"
 echo "=================================================================="
@@ -111,14 +114,18 @@ pull() {
         "$HOST:$remote_path/" "$local_dest/"
 }
 
-# ---- Checkpoints ------------------------------------------------------------
-echo "--- Checkpoints ---------------------------------------------------------"
-# Exclude synth pool unless --synth was set; always exclude the venv copy
-CKPT_EXCLUDES=("venv/" "env/")
-[[ "$PULL_SYNTH" -eq 0 ]] && CKPT_EXCLUDES+=("synth_pool_*.npy")
-
-pull "$REMOTE_STORE/checkpoints_gauss"  "$LOCAL_DIR/gauss/checkpoints"  "${CKPT_EXCLUDES[@]}"
-pull "$REMOTE_STORE/checkpoints_binary" "$LOCAL_DIR/binary/checkpoints" "${CKPT_EXCLUDES[@]}"
+# ---- Checkpoints (opt-in) ---------------------------------------------------
+if [[ "$PULL_CHECKPOINTS" -eq 1 ]]; then
+    echo "--- Checkpoints ---------------------------------------------------------"
+    CKPT_EXCLUDES=("venv/" "env/" "synth_pool_*.npy")
+    pull "$REMOTE_STORE/checkpoints_gauss"  "$LOCAL_DIR/gauss/checkpoints"  "${CKPT_EXCLUDES[@]}"
+    pull "$REMOTE_STORE/checkpoints_binary" "$LOCAL_DIR/binary/checkpoints" "${CKPT_EXCLUDES[@]}"
+    echo ""
+else
+    echo "--- Checkpoints ---------------------------------------------------------"
+    echo "  [skip] not requested (pass --checkpoints to include .pt files)"
+    echo ""
+fi
 
 # ---- Synth pool (de-duplicated by filename) ---------------------------------
 if [[ "$PULL_SYNTH" -eq 1 ]]; then
@@ -179,11 +186,10 @@ if [[ "$DELETE_REMOTE" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
     echo "  Removing checkpoints, results, logs from $HOST:$REMOTE_STORE ..."
     ssh "$HOST" bash << REMOTE_DELETE
 set -e
-rm -rf "$REMOTE_STORE/checkpoints_gauss" \
-       "$REMOTE_STORE/checkpoints_binary" \
-       "$REMOTE_STORE/results_gauss" \
+rm -rf "$REMOTE_STORE/results_gauss" \
        "$REMOTE_STORE/results_binary" \
        "$REMOTE_STORE/logs"
+[ "$PULL_CHECKPOINTS" -eq 1 ] && rm -rf "$REMOTE_STORE/checkpoints_gauss" "$REMOTE_STORE/checkpoints_binary" || true
 [ "$PULL_SYNTH" -eq 1 ] && find "$REMOTE_STORE" -name 'synth_pool_*.npy' -delete 2>/dev/null || true
 echo "[remote] Cleanup done."
 REMOTE_DELETE
