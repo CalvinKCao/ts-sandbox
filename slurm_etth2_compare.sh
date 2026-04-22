@@ -166,8 +166,8 @@ module load cuda/12.2
 module load cudnn/8.9
 
 # Rebuild venv on node-local NVMe each job — avoids catastrophically slow imports
-# from Lustre (/scratch, /project). `import torch` alone can take 5-15 min on
-# a cold Lustre node; $SLURM_TMPDIR reads take seconds.
+# from Lustre (/scratch, /project). (import torch) alone can take 5-15 min on
+# a cold Lustre node; \$SLURM_TMPDIR reads take seconds.
 echo "[setup] Building venv on \$SLURM_TMPDIR ..."
 virtualenv --no-download "\$SLURM_TMPDIR/env"
 source "\$SLURM_TMPDIR/env/bin/activate"
@@ -192,7 +192,7 @@ echo "[setup] Venv ready: \$(which python)"
 
 # Persist run metadata on scratch; syncs to the cloud when WANDB_API_KEY is set
 # and mode is online (default). For air-gapped runs: export WANDB_MODE=offline
-# then `wandb sync $WANDB_DIR/offline-run-*` from a machine with a key.
+# then run: wandb sync \$WANDB_DIR/offline-run-* from a machine with a key.
 export WANDB_DIR="${STORE}/wandb"
 mkdir -p "\$WANDB_DIR"
 export PYTHONUNBUFFERED=1
