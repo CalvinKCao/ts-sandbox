@@ -21,6 +21,10 @@ Usage:
     python -m models.diffusion_tsf.train_multivariate_pipeline --resume
     python -m models.diffusion_tsf.train_multivariate_pipeline --smoke-test
 
+    # After a Slurm timeout during diffusion pretrain: same command + --checkpoint-dir.
+    # If pretrained_diffusion_last.pt exists (written after each epoch), pretrain auto-resumes.
+    # Optional: --resume-pretrain-diffusion errors if you expected a snapshot but it is missing.
+
     # Use job chaining to run multiple datasets concurrently — see slurm script.
 """
 
@@ -1194,8 +1198,15 @@ def pretrain_diffusion(
     patience: int,
     checkpoint_dir: str,
     smoke_test: bool = False,
+    resume: bool = False,
 ) -> str:
-    """Train Diffusion model on synthetic data with iTransformer guidance."""
+    """Train Diffusion model on synthetic data with iTransformer guidance.
+
+    Each completed epoch writes ``pretrained_diffusion_last.pt`` (full optimizer /
+    scheduler / early-stop state) so a timed-out job can continue with
+    ``--resume-pretrain-diffusion``. ``pretrained_diffusion.pt`` still holds only
+    the best-validation weights for downstream finetuning.
+    """
     logger.info("=" * 60)
     logger.info("PHASE 1C-2: Full Diffusion Pretraining (with iTransformer guidance)")
     logger.info(f"Samples: {n_samples}, Epochs: {epochs}, Patience: {patience}")
@@ -1253,12 +1264,48 @@ def pretrain_diffusion(
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
-    
+
     early_stop = EarlyStopping(patience=patience)
     best_val_loss = float('inf')
     ckpt_path = os.path.join(checkpoint_dir, 'pretrained_diffusion.pt')
-    
-    for epoch in range(epochs):
+    last_path = os.path.join(checkpoint_dir, 'pretrained_diffusion_last.pt')
+
+    start_epoch = 0
+    if resume:
+        if not os.path.isfile(last_path):
+            logger.error(
+                "resume requested but %s not found. Need a full per-epoch snapshot "
+                "(written after each epoch). If the job died before epoch 1 finished, "
+                "re-run without --resume-pretrain-diffusion.",
+                last_path,
+            )
+            sys.exit(1)
+        raw = torch.load(last_path, map_location=device, weights_only=False)
+        model.load_state_dict(raw['model_state_dict'])
+        optimizer.load_state_dict(raw['optimizer_state_dict'])
+        if raw.get('scheduler_state_dict'):
+            scheduler.load_state_dict(raw['scheduler_state_dict'])
+        else:
+            logger.warning("No scheduler_state_dict in last checkpoint; LR schedule restarts.")
+        start_epoch = int(raw['epoch']) + 1
+        best_val_loss = float(raw.get('best_val_loss', raw.get('val_loss', float('inf'))))
+        early_stop.counter = int(raw.get('early_stop_counter', 0))
+        early_stop.best_loss = float(raw.get('early_stop_best', best_val_loss))
+        logger.info(
+            "Resuming diffusion pretrain from epoch %d/%d (last completed epoch was %d)",
+            start_epoch + 1,
+            epochs,
+            raw['epoch'] + 1,
+        )
+        if start_epoch >= epochs:
+            logger.info("Training already reached epoch limit; removing last snapshot and exiting.")
+            if os.path.isfile(last_path):
+                os.remove(last_path)
+            log_wandb_summary({'diffusion_pretrain_best_val_loss': best_val_loss})
+            log_wandb_model_checkpoint(ckpt_path, 'pretrained_diffusion')
+            return ckpt_path
+
+    for epoch in range(start_epoch, epochs):
         t0 = time.time()
 
         model.train()
@@ -1287,10 +1334,10 @@ def pretrain_diffusion(
         val_loss = total_loss / max(n_batches, 1)
 
         scheduler.step()
-        
+
         logger.info(f"[Diffusion] Epoch {epoch+1}/{epochs} | Train: {train_loss:.4f} | "
                    f"Val: {val_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.2e} | Time: {time.time()-t0:.1f}s")
-        
+
         log_wandb({
             'train_loss': train_loss,
             'val_loss': val_loss,
@@ -1303,14 +1350,34 @@ def pretrain_diffusion(
             save_checkpoint(model, optimizer, epoch, train_loss, val_loss,
                           {'diffusion_params': best_params, 'itrans_checkpoint': itrans_checkpoint}, ckpt_path)
             logger.info(f"  -> New best! Saved to {ckpt_path}")
-        
-        if early_stop(val_loss):
+
+        stop_now = early_stop(val_loss)
+
+        # Full state for Slurm timeout / resume (written after this epoch completes)
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+            'best_val_loss': best_val_loss,
+            'early_stop_counter': early_stop.counter,
+            'early_stop_best': early_stop.best_loss,
+            'diffusion_params': best_params,
+            'itrans_checkpoint': itrans_checkpoint,
+        }, last_path)
+
+        if stop_now:
             logger.info(f"Early stopping at epoch {epoch+1}")
             break
 
     logger.info(f"Diffusion pretraining complete. Best val loss: {best_val_loss:.4f}")
     log_wandb_summary({'diffusion_pretrain_best_val_loss': best_val_loss})
     log_wandb_model_checkpoint(ckpt_path, 'pretrained_diffusion')
+    if os.path.isfile(last_path):
+        os.remove(last_path)
+        logger.info(f"Removed resume snapshot {last_path} (training finished).")
     return ckpt_path
 
 
@@ -1987,11 +2054,12 @@ def recombine_traffic_data():
 # ============================================================================
 
 def run_pipeline(
-    resume: bool = False, 
-    smoke_test: bool = False, 
+    resume: bool = False,
+    smoke_test: bool = False,
     seed: int = 42,
     use_wandb: bool = False,
     wandb_project: str = "diffusion-tsf",
+    resume_pretrain_diffusion: bool = False,
 ):
     """Run the full training pipeline."""
     random.seed(seed)
@@ -2095,7 +2163,10 @@ def run_pipeline(
     
     # =========== PHASE 1C-2: Full Diffusion Pretraining ===========
     diff_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_diffusion.pt')
-    if not manifest.pretrain_complete or not os.path.exists(diff_ckpt):
+    last_snap = os.path.join(CHECKPOINT_DIR, 'pretrained_diffusion_last.pt')
+    want_resume = os.path.isfile(last_snap)
+    need_diff = (not manifest.pretrain_complete or not os.path.exists(diff_ckpt))
+    if need_diff or want_resume:
         diff_ckpt = pretrain_diffusion(
             manifest.diffusion_best_params,
             itrans_ckpt,
@@ -2104,11 +2175,18 @@ def run_pipeline(
             patience=pretrain_patience,
             checkpoint_dir=CHECKPOINT_DIR,
             smoke_test=smoke_test,
+            resume=want_resume,
         )
         manifest.pretrain_checkpoint = diff_ckpt
         manifest.pretrain_complete = True
         manifest.save()
     else:
+        if resume_pretrain_diffusion:
+            logger.warning(
+                "  --resume-pretrain-diffusion set but %s not found — using existing "
+                "diffusion checkpoint (nothing to resume).",
+                last_snap,
+            )
         logger.info(f"Using existing Diffusion checkpoint: {diff_ckpt}")
     
     # =========== PHASE 2: Fine-tuning per Dataset ===========
@@ -2320,7 +2398,12 @@ def _is_itrans_checkpoint_compatible(path: str) -> bool:
         return False
 
 
-def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42):
+def run_pretrain_mode(
+    n_variates: int,
+    smoke_test: bool = False,
+    seed: int = 42,
+    resume_pretrain_diffusion: bool = False,
+):
     """Pretrain iTransformer + Diffusion model.
 
     Saves checkpoints to CHECKPOINT_DIR (shared across all datasets with the same
@@ -2421,7 +2504,10 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
         with open(diff_hp_path, 'w') as f:
             json.dump(best_diff_params, f, indent=2)
 
-    if not os.path.exists(diff_ckpt):
+    last_snap = os.path.join(CHECKPOINT_DIR, 'pretrained_diffusion_last.pt')
+    # last_snap means an epoch finished but training did not (timeout / kill); always continue.
+    if os.path.isfile(last_snap):
+        logger.info("  Resuming diffusion pretrain from %s", last_snap)
         pretrain_diffusion(
             best_diff_params, itrans_ckpt,
             n_samples=pretrain_samples,
@@ -2429,7 +2515,25 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
             patience=pretrain_patience,
             checkpoint_dir=CHECKPOINT_DIR,
             smoke_test=smoke_test,
+            resume=True,
         )
+    elif not os.path.exists(diff_ckpt):
+        pretrain_diffusion(
+            best_diff_params, itrans_ckpt,
+            n_samples=pretrain_samples,
+            epochs=pretrain_epochs,
+            patience=pretrain_patience,
+            checkpoint_dir=CHECKPOINT_DIR,
+            smoke_test=smoke_test,
+            resume=False,
+        )
+    elif resume_pretrain_diffusion:
+        logger.error(
+            "  --resume-pretrain-diffusion set but %s is missing — nothing to resume. "
+            "Remove the flag, or delete checkpoints to start over.",
+            last_snap,
+        )
+        sys.exit(1)
     else:
         logger.info(f"  Diffusion ckpt exists: {diff_ckpt}")
 
@@ -2608,6 +2712,8 @@ def _finetune_and_eval_one_subset(
             subset_id, dataset_name, variate_indices,
             {**train_metrics, 'tuned_params': tuned_params}, eval_results, RESULTS_DIR,
         )
+        log_wandb_eval_results(subset_id, eval_results, train_metrics)
+        log_wandb_model_checkpoint(ckpt_path, subset_id)
 
         # iTransformer baseline (same fine-tuned checkpoint used for guidance above)
         try:
@@ -2664,6 +2770,14 @@ def main():
     parser.add_argument('--variate-indices', type=str, default=None,
                         help='Comma-separated variate indices (for finetune-subset)')
     parser.add_argument('--resume', action='store_true', help='Resume from checkpoint')
+    parser.add_argument(
+        '--resume-pretrain-diffusion',
+        action='store_true',
+        help=(
+            'Continue diffusion synthetic pretrain from pretrained_diffusion_last.pt '
+            '(same --checkpoint-dir as the timed-out job). No effect if that file is missing.'
+        ),
+    )
     parser.add_argument('--smoke-test', action='store_true', help='Quick validation run')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--status', action='store_true', help='Show status (legacy flag)')
@@ -2758,7 +2872,18 @@ def main():
             print("ERROR: --n-variates required for pretrain mode")
             sys.exit(1)
         N_VARIATES = nv
-        run_pretrain_mode(nv, smoke_test=args.smoke_test, seed=args.seed)
+        try:
+            if args.wandb:
+                init_wandb(project=args.wandb_project, resume=args.resume)
+            run_pretrain_mode(
+                nv,
+                smoke_test=args.smoke_test,
+                seed=args.seed,
+                resume_pretrain_diffusion=args.resume_pretrain_diffusion,
+            )
+        finally:
+            if args.wandb:
+                finish_wandb()
         return
 
     if args.mode == 'finetune':
@@ -2767,7 +2892,13 @@ def main():
             sys.exit(1)
         if args.n_variates is not None:
             N_VARIATES = args.n_variates
-        run_finetune_mode(args.dataset, smoke_test=args.smoke_test, seed=args.seed)
+        try:
+            if args.wandb:
+                init_wandb(project=args.wandb_project, resume=args.resume)
+            run_finetune_mode(args.dataset, smoke_test=args.smoke_test, seed=args.seed)
+        finally:
+            if args.wandb:
+                finish_wandb()
         return
 
     if args.mode == 'finetune-subset':
@@ -2777,10 +2908,16 @@ def main():
         if args.n_variates is not None:
             N_VARIATES = args.n_variates
         vi = [int(x) for x in args.variate_indices.split(',')]
-        run_finetune_subset_mode(
-            args.subset_id, args.dataset, vi,
-            smoke_test=args.smoke_test, seed=args.seed,
-        )
+        try:
+            if args.wandb:
+                init_wandb(project=args.wandb_project, resume=args.resume)
+            run_finetune_subset_mode(
+                args.subset_id, args.dataset, vi,
+                smoke_test=args.smoke_test, seed=args.seed,
+            )
+        finally:
+            if args.wandb:
+                finish_wandb()
         return
 
     if args.mode == 'baseline':
@@ -2815,6 +2952,7 @@ def main():
             seed=args.seed,
             use_wandb=args.wandb,
             wandb_project=args.wandb_project,
+            resume_pretrain_diffusion=args.resume_pretrain_diffusion,
         )
     finally:
         finish_wandb()

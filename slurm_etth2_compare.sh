@@ -12,6 +12,14 @@
 #   ./slurm_etth2_compare.sh           # full H100 run
 #   ./slurm_etth2_compare.sh --smoke   # H100 smoke test — verifies full chain
 #
+# WANDB: jobs pass --wandb. Set API key once (login node):  wandb login
+#   or:  export WANDB_API_KEY=...  before sbatch (Slurm forwards env with --export=ALL).
+# Runs use online mode by default; metrics land under $STORE/wandb/.
+#
+# Resume after pretrain timeout: re-submit the same script. If
+#   $GAUSS_CKPT/pretrained_diffusion_last.pt exists, diffusion pretrain continues
+#   automatically (same checkpoint dir). Finished runs delete that file.
+#
 # HOW TO SMOKE TEST:
 #   --smoke submits all 4 jobs with short limits and passes --smoke-test to the
 #   Python pipeline (1 epoch, 4 samples, 1 HP trial).  Each job should finish
@@ -104,7 +112,7 @@ fi
 
 # Common Python flags (exported so job bodies can use $SMOKE_FLAG etc.)
 export PY="python -u -m models.diffusion_tsf.train_multivariate_pipeline"
-export PY_COMMON="--n-variates 7 --amp --synthetic-samples 60000 --itransformer-trials 20 $SMOKE_FLAG"
+export PY_COMMON="--n-variates 7 --amp --synthetic-samples 60000 --itransformer-trials 20 --wandb --wandb-project diffusion-tsf $SMOKE_FLAG"
 
 # ---- Shared job body: module load + venv activate + cd ----------------------
 # Written as a quoted heredoc into a temp file so each job can source it.
@@ -143,13 +151,18 @@ pip install --no-index torch torchvision numpy pandas scipy scikit-learn tqdm -q
     pip install numpy pandas scipy scikit-learn tqdm -q
 
 # Packages not in the wheel cache — pure-Python, small, needs network
-pip install optuna wandb matplotlib einops reformer_pytorch -q
+# wandb: avoid 0.24.0 (known upload bug in UI); 0.25+ OK
+pip install "wandb>=0.25.0" optuna matplotlib einops reformer_pytorch -q
 
 [ -f "$REPO/requirements.txt" ] && pip install -r "$REPO/requirements.txt" -q || true
 
 echo "[setup] Venv ready: $(which python)"
 
-export WANDB_MODE=offline
+# Persist run metadata on scratch; syncs to the cloud when WANDB_API_KEY is set
+# and mode is online (default). For air-gapped runs: export WANDB_MODE=offline
+# then `wandb sync $WANDB_DIR/offline-run-*` from a machine with a key.
+export WANDB_DIR="${STORE}/wandb"
+mkdir -p "$WANDB_DIR"
 export PYTHONUNBUFFERED=1
 
 echo "[info] python: $(which python)"
