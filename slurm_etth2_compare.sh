@@ -2,6 +2,21 @@
 # =============================================================================
 # ETTh2: Gaussian vs Binary diffusion — Killarney, job-chained
 #
+# RUN ON THE LOGIN NODE (not inside sbatch):
+#   ./slurm_etth2_compare.sh [--smoke]
+#   bash slurm_etth2_compare.sh [--smoke]
+# Do NOT run:  sbatch slurm_etth2_compare.sh
+#   (that would submit *this* file as one job; this script is a wrapper that
+#   calls sbatch four times. If your site requires it, the #SBATCH lines below
+#   make accidental sbatch parse — still prefer bash on the login node.)
+#
+#SBATCH --time=0-01:00:00
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=4G
+#SBATCH --account=aip-boyuwang
+#SBATCH --job-name=etth2-chain-submit
+#
 # Dependency graph:
 #   A  iTrans HP + pretrain + Gaussian diff HP + pretrain
 #   B  (copy iTrans from A) → Binary diff HP + pretrain        [afterok:A]
@@ -9,8 +24,8 @@
 #   D  Binary  finetune ETTh2                                   [afterok:B]
 #
 # USAGE (from ts-sandbox repo root on the login node):
-#   ./slurm_etth2_compare.sh           # full H100 run
-#   ./slurm_etth2_compare.sh --smoke   # H100 smoke test — verifies full chain
+#   ./slurm_etth2_compare.sh           # full run (L40S in script)
+#   ./slurm_etth2_compare.sh --smoke   # smoke test — verifies full chain
 #
 # WANDB: jobs pass --wandb. Set API key once (login node):  wandb login
 #   or:  export WANDB_API_KEY=...  before sbatch (Slurm forwards env with --export=ALL).
