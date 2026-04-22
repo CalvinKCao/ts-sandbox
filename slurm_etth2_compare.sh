@@ -140,13 +140,16 @@ export PY_COMMON="--n-variates 7 --amp --synthetic-samples 60000 --itransformer-
 # Written to $STORE (shared filesystem) so compute nodes can source it —
 # /tmp on the login node is NOT visible from compute nodes.
 PREAMBLE_FILE="$STORE/job_preamble.sh"
-cat > "$PREAMBLE_FILE" << 'PREAMBLE'
+# Unquoted heredoc: bake ${REPO}, ${STORE} at submit time. Batch jobs often do not
+# inherit login-node env — quoted heredocs left \$REPO unset → fast failure under set -u.
+# Use \$ / \$(...) for values that must expand on the compute node when sourced.
+cat > "$PREAMBLE_FILE" <<PREAMBLE
 set -euo pipefail
 echo "======================================================="
-echo "  Job: $SLURM_JOB_NAME   ID: $SLURM_JOB_ID"
-echo "  Node: $SLURMD_NODENAME"
-echo "  GPU:  $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
-echo "  Started: $(date)"
+echo "  Job: \$SLURM_JOB_NAME   ID: \$SLURM_JOB_ID"
+echo "  Node: \$SLURMD_NODENAME"
+echo "  GPU:  \$(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
+echo "  Started: \$(date)"
 echo "======================================================="
 
 # || true required: sticky modules (CCconfig, gentoo, compiler stack) refuse to
@@ -161,8 +164,8 @@ module load cudnn/8.9
 # from Lustre (/scratch, /project). `import torch` alone can take 5-15 min on
 # a cold Lustre node; $SLURM_TMPDIR reads take seconds.
 echo "[setup] Building venv on \$SLURM_TMPDIR ..."
-virtualenv --no-download "$SLURM_TMPDIR/env"
-source "$SLURM_TMPDIR/env/bin/activate"
+virtualenv --no-download "\$SLURM_TMPDIR/env"
+source "\$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 
 # Alliance CA wheel cache first; PyPI fallback for torch stack.
@@ -178,20 +181,20 @@ fi
 pip install "wandb>=0.25.0" optuna matplotlib einops -q
 pip install "reformer-pytorch==1.4.4" -q
 
-[ -f "$REPO/requirements.txt" ] && pip install -r "$REPO/requirements.txt" -q || true
+[ -f "${REPO}/requirements.txt" ] && pip install -r "${REPO}/requirements.txt" -q || true
 
-echo "[setup] Venv ready: $(which python)"
+echo "[setup] Venv ready: \$(which python)"
 
 # Persist run metadata on scratch; syncs to the cloud when WANDB_API_KEY is set
 # and mode is online (default). For air-gapped runs: export WANDB_MODE=offline
 # then `wandb sync $WANDB_DIR/offline-run-*` from a machine with a key.
 export WANDB_DIR="${STORE}/wandb"
-mkdir -p "$WANDB_DIR"
+mkdir -p "\$WANDB_DIR"
 export PYTHONUNBUFFERED=1
 
-echo "[info] python: $(which python)"
-cd "$REPO"
-echo "[info] cwd: $(pwd)"
+echo "[info] python: \$(which python)"
+cd "${REPO}"
+echo "[info] cwd: \$(pwd)"
 echo ""
 PREAMBLE
 # Will be sourced by each job via:  source "$PREAMBLE_FILE"
@@ -203,7 +206,7 @@ export PREAMBLE_FILE
 
 echo "Submitting A: Gaussian pretrain..."
 
-JOB_A=$(sbatch --parsable \
+JOB_A=$(sbatch --parsable --export=ALL \
     --job-name="etth2-gauss-pretrain${SUFFIX}" \
     --account=aip-boyuwang \
     --nodes=1 --cpus-per-task="$CPUS" --mem="$MEM" \
@@ -212,16 +215,16 @@ JOB_A=$(sbatch --parsable \
     --output="$LOG_DIR/A-gauss-pretrain-%j.out" \
     --error="$LOG_DIR/A-gauss-pretrain-%j.err" \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
-    << 'ENDSCRIPT'
+    <<ENDSCRIPT
 #!/bin/bash
-source "$PREAMBLE_FILE"
+source "${PREAMBLE_FILE}"
 
-$PY --mode pretrain \
-    --checkpoint-dir "$GAUSS_CKPT" \
-    --results-dir    "$GAUSS_RESULTS" \
-    $PY_COMMON
+${PY} --mode pretrain \
+    --checkpoint-dir "${GAUSS_CKPT}" \
+    --results-dir    "${GAUSS_RESULTS}" \
+    ${PY_COMMON}
 
-echo "[A] Gaussian pretrain done: $(date)"
+echo "[A] Gaussian pretrain done: \$(date)"
 ENDSCRIPT
 )
 echo "  -> A: $JOB_A"
@@ -233,7 +236,7 @@ echo "  -> A: $JOB_A"
 
 echo "Submitting B: Binary pretrain [afterok:$JOB_A]..."
 
-JOB_B=$(sbatch --parsable \
+JOB_B=$(sbatch --parsable --export=ALL \
     --job-name="etth2-binary-pretrain${SUFFIX}" \
     --account=aip-boyuwang \
     --nodes=1 --cpus-per-task="$CPUS" --mem="$MEM" \
@@ -243,25 +246,25 @@ JOB_B=$(sbatch --parsable \
     --output="$LOG_DIR/B-binary-pretrain-%j.out" \
     --error="$LOG_DIR/B-binary-pretrain-%j.err" \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
-    << 'ENDSCRIPT'
+    <<ENDSCRIPT
 #!/bin/bash
-source "$PREAMBLE_FILE"
+source "${PREAMBLE_FILE}"
 
 # Reuse iTrans artifacts from the Gaussian run — pipeline skips iTrans pretrain
 # if the checkpoint already exists, so we only pay for binary diffusion HP + pretrain.
 echo "[B] Copying iTrans artifacts from Gaussian checkpoint dir..."
-cp -v "$GAUSS_CKPT/pretrained_itransformer.pt" "$BINARY_CKPT/pretrained_itransformer.pt"
-[ -f "$GAUSS_CKPT/itrans_hp.json" ] && \
-    cp -v "$GAUSS_CKPT/itrans_hp.json" "$BINARY_CKPT/itrans_hp.json"
+cp -v "${GAUSS_CKPT}/pretrained_itransformer.pt" "${BINARY_CKPT}/pretrained_itransformer.pt"
+[ -f "${GAUSS_CKPT}/itrans_hp.json" ] && \
+    cp -v "${GAUSS_CKPT}/itrans_hp.json" "${BINARY_CKPT}/itrans_hp.json"
 
 echo "[B] Running binary diffusion HP + pretrain..."
-$PY --mode pretrain \
+${PY} --mode pretrain \
     --binary-diffusion \
-    --checkpoint-dir "$BINARY_CKPT" \
-    --results-dir    "$BINARY_RESULTS" \
-    $PY_COMMON
+    --checkpoint-dir "${BINARY_CKPT}" \
+    --results-dir    "${BINARY_RESULTS}" \
+    ${PY_COMMON}
 
-echo "[B] Binary pretrain done: $(date)"
+echo "[B] Binary pretrain done: \$(date)"
 ENDSCRIPT
 )
 echo "  -> B: $JOB_B"
@@ -273,7 +276,7 @@ echo "  -> B: $JOB_B"
 
 echo "Submitting C: Gaussian finetune ETTh2 [afterok:$JOB_A]..."
 
-JOB_C=$(sbatch --parsable \
+JOB_C=$(sbatch --parsable --export=ALL \
     --job-name="etth2-gauss-finetune${SUFFIX}" \
     --account=aip-boyuwang \
     --nodes=1 --cpus-per-task="$CPUS" --mem="$MEM" \
@@ -283,17 +286,17 @@ JOB_C=$(sbatch --parsable \
     --output="$LOG_DIR/C-gauss-finetune-%j.out" \
     --error="$LOG_DIR/C-gauss-finetune-%j.err" \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
-    << 'ENDSCRIPT'
+    <<ENDSCRIPT
 #!/bin/bash
-source "$PREAMBLE_FILE"
+source "${PREAMBLE_FILE}"
 
-$PY --mode finetune \
+${PY} --mode finetune \
     --dataset ETTh2 \
-    --checkpoint-dir "$GAUSS_CKPT" \
-    --results-dir    "$GAUSS_RESULTS" \
-    $PY_COMMON
+    --checkpoint-dir "${GAUSS_CKPT}" \
+    --results-dir    "${GAUSS_RESULTS}" \
+    ${PY_COMMON}
 
-echo "[C] Gaussian finetune done: $(date)"
+echo "[C] Gaussian finetune done: \$(date)"
 ENDSCRIPT
 )
 echo "  -> C: $JOB_C"
@@ -305,7 +308,7 @@ echo "  -> C: $JOB_C"
 
 echo "Submitting D: Binary finetune ETTh2 [afterok:$JOB_B]..."
 
-JOB_D=$(sbatch --parsable \
+JOB_D=$(sbatch --parsable --export=ALL \
     --job-name="etth2-binary-finetune${SUFFIX}" \
     --account=aip-boyuwang \
     --nodes=1 --cpus-per-task="$CPUS" --mem="$MEM" \
@@ -315,18 +318,18 @@ JOB_D=$(sbatch --parsable \
     --output="$LOG_DIR/D-binary-finetune-%j.out" \
     --error="$LOG_DIR/D-binary-finetune-%j.err" \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
-    << 'ENDSCRIPT'
+    <<ENDSCRIPT
 #!/bin/bash
-source "$PREAMBLE_FILE"
+source "${PREAMBLE_FILE}"
 
-$PY --mode finetune \
+${PY} --mode finetune \
     --dataset ETTh2 \
     --binary-diffusion \
-    --checkpoint-dir "$BINARY_CKPT" \
-    --results-dir    "$BINARY_RESULTS" \
-    $PY_COMMON
+    --checkpoint-dir "${BINARY_CKPT}" \
+    --results-dir    "${BINARY_RESULTS}" \
+    ${PY_COMMON}
 
-echo "[D] Binary finetune done: $(date)"
+echo "[D] Binary finetune done: \$(date)"
 ENDSCRIPT
 )
 echo "  -> D: $JOB_D"
