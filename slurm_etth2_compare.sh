@@ -160,14 +160,18 @@ virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 
-# Alliance CA pre-built wheel cache (fast, no network)
-pip install --no-index torch torchvision numpy pandas scipy scikit-learn tqdm -q 2>/dev/null || \
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q && \
+# Alliance CA wheel cache first; PyPI fallback for torch stack.
+# (Avoid:  cmd1 || cmd2 && cmd3  — if cmd1 succeeds, cmd3 still runs; if cmd2 fails, cmd3 is skipped.)
+if pip install --no-index torch torchvision numpy pandas scipy scikit-learn tqdm -q 2>/dev/null; then
+    :
+else
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
     pip install numpy pandas scipy scikit-learn tqdm -q
+fi
 
-# Packages not in the wheel cache — pure-Python, small, needs network
-# wandb: avoid 0.24.0 (known upload bug in UI); 0.25+ OK
-pip install "wandb>=0.25.0" optuna matplotlib einops reformer_pytorch -q
+# PyPI (hyphenated PyPI name — NOT reformer_pytorch). Pin matches models/iTransformer/requirements.txt
+pip install "wandb>=0.25.0" optuna matplotlib einops -q
+pip install "reformer-pytorch==1.4.4" -q
 
 [ -f "$REPO/requirements.txt" ] && pip install -r "$REPO/requirements.txt" -q || true
 

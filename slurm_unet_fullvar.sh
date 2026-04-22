@@ -125,7 +125,7 @@ if [ ! -d "$VENV_PATH" ]; then
         export PATH="$VENV_PATH/bin:$PATH"
         pip install --upgrade pip
         pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-        pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch
+        pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer-pytorch
         [ -f "$PROJECT_ROOT/requirements.txt" ] && pip install -r "$PROJECT_ROOT/requirements.txt"
     else
         export PATH="$VENV_PATH/bin:$PATH"

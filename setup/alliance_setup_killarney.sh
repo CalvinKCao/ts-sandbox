@@ -140,7 +140,7 @@ if [ ! -d "$VENV_PATH" ]; then
     pip install --upgrade pip
     # cu121 works for CUDA 12.x; swap for cu118 if on older CUDA
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch
+    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer-pytorch
     
     if [ -f "$PROJECT_ROOT/requirements.txt" ]; then
         pip install -r "$PROJECT_ROOT/requirements.txt"
@@ -266,7 +266,7 @@ if [ ! -d "\$VENV_PATH" ]; then
     pip install --upgrade pip
     # cu121 is compatible with CUDA 12.x (H100 SXM requires CUDA 11.8+)
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch
+    pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer-pytorch
     if [ -f "\$PROJECT_ROOT/requirements.txt" ]; then
         pip install -r "\$PROJECT_ROOT/requirements.txt"
     fi
