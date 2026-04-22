@@ -27,20 +27,25 @@
 #   ./slurm_etth2_compare.sh           # full run (L40S in script)
 #   ./slurm_etth2_compare.sh --smoke   # smoke test — verifies full chain
 #
-# WANDB: jobs pass --wandb. Set API key once (login node):  wandb login
-#   or:  export WANDB_API_KEY=...  before sbatch (Slurm forwards env with --export=ALL).
+# WANDB: jobs pass --wandb. API key: repo-root wandb_api_key.txt (see wandb_api_key.example.txt),
+#   or wandb login / export WANDB_API_KEY (Slurm forwards with --export=ALL).
 # Runs use online mode by default; metrics land under $STORE/wandb/.
 #
 # Resume after pretrain timeout: re-submit the same script. If
 #   $GAUSS_CKPT/pretrained_diffusion_last.pt exists, diffusion pretrain continues
 #   automatically (same checkpoint dir). Finished runs delete that file.
 #
-# HOW TO SMOKE TEST:
-#   --smoke submits all 4 jobs with short limits and passes --smoke-test to the
-#   Python pipeline (1 epoch, 4 samples, 1 HP trial).  Each job should finish
-#   quickly; if no logs appear, check submission status/reason commands below.
-#   Watch with:  squeue -u $USER
-#   Check logs:  tail -f $STORE/logs/A-gauss-pretrain-<JOB_ID>.out
+# HOW TO SMOKE TEST (pick one):
+#   1) Pip + imports only (fastest — catches bad PyPI names before burning GPU hours):
+#        salloc ...   # short GPU alloc, see scripts/killarney_smoke_pip.sh header
+#        bash scripts/killarney_smoke_pip.sh
+#   2) Full Slurm chain miniature — this script with --smoke:
+#        ./slurm_etth2_compare.sh --smoke
+#      Submits A–D with short walls; passes --smoke-test (1 epoch, tiny samples, 1 HP trial).
+#      Watch:  squeue -u $USER
+#      Logs:   tail -f $STORE/logs/A-gauss-pretrain-<JOB_ID>.out
+#   3) Local (WSL / laptop):  pytest models/diffusion_tsf/tests/ -q
+#      (no Alliance wheel cache — does not replace 1 or 2.)
 # =============================================================================
 
 set -euo pipefail

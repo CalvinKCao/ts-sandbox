@@ -58,6 +58,43 @@ except ImportError:
     WANDB_AVAILABLE = False
     wandb = None
 
+
+def _maybe_load_wandb_api_key_from_file() -> None:
+    """If WANDB_API_KEY is unset, read repo-root wandb_api_key.txt (first non-comment line).
+
+    Override path with env WANDB_API_KEY_FILE. Ignores placeholder values.
+    """
+    if os.environ.get("WANDB_API_KEY"):
+        return
+    key_file = os.environ.get("WANDB_API_KEY_FILE")
+    if key_file:
+        path = os.path.abspath(os.path.expanduser(key_file))
+    else:
+        path = os.path.join(project_root, "wandb_api_key.txt")
+    if not os.path.isfile(path):
+        return
+    lines: List[str] = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            lines.append(s)
+    if not lines:
+        return
+    raw = lines[0].strip()
+    placeholders = {
+        "",
+        "REPLACE_ME",
+        "YOUR_WANDB_API_KEY_HERE",
+        "REPLACE_WITH_YOUR_WANDB_API_KEY",
+        "paste_your_key_here",
+    }
+    if raw in placeholders:
+        return
+    os.environ["WANDB_API_KEY"] = raw
+
+
 # Setup path
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
@@ -2808,7 +2845,8 @@ def main():
                              'Removes gaussian blur, uses BCE loss, 20-step sampling.')
     
     args = parser.parse_args()
-    
+    _maybe_load_wandb_api_key_from_file()
+
     # Legacy flag compat
     if args.status:
         args.mode = 'status'
