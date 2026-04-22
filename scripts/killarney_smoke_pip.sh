@@ -32,9 +32,12 @@ else
     pip install numpy pandas scipy scikit-learn tqdm -q
 fi
 
-# wandb: must be --no-index (PyPI wandb sdist triggers a wandb-core Go build — no `go` on
+# wandb: must be --no-index (PyPI wandb sdist triggers a wandb-core Go build — no 'go' on
 # Alliance compute nodes). See wiki_docs/Weights_&_Biases_(wandb).md.
-pip install --no-index wandb optuna matplotlib einops -q
+pip install --no-index wandb -q
+for pkg in optuna matplotlib einops; do
+    pip install --no-index "$pkg" -q 2>/dev/null || pip install "$pkg" -q
+done
 pip install "reformer-pytorch==1.4.4" -q
 
 echo "== imports =="

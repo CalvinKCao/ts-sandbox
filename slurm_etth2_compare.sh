@@ -182,15 +182,22 @@ else
     pip install numpy pandas scipy scikit-learn tqdm -q
 fi
 
-# wandb + friends MUST come from the Alliance wheelhouse (--no-index) — recent wandb
-# versions on PyPI ship as sdist that builds wandb-core in Go at metadata-generation time,
-# and compute nodes have no \`go\` binary (observed: "Did not find the 'go' binary" →
-# metadata-generation-failed → set -e kills the job with an almost-empty log).
-# Ref: wiki_docs/Weights_&_Biases_(wandb).md (Alliance docs: pip install --no-index wandb).
-pip install --no-index wandb optuna matplotlib einops -q
+# wandb MUST come from the Alliance wheelhouse (--no-index). Recent wandb on PyPI
+# ships as sdist that builds wandb-core in Go at metadata-generation time, and compute
+# nodes have no go binary. Observed failure (job 3249152):
+#   "Did not find the 'go' binary" -> metadata-generation-failed -> set -e kills the job
+#   with an almost-empty log that only shows "[setup] Building venv on SLURM_TMPDIR".
+# Ref: wiki_docs/Weights_&_Biases_(wandb).md — Alliance docs say: pip install --no-index wandb.
+pip install --no-index wandb -q
 
-# reformer-pytorch — pure Python, not in the wheel cache. Version pinned to match
-# models/iTransformer/requirements.txt (PyPI name is hyphenated, NOT reformer_pytorch).
+# Try Alliance wheelhouse for the rest; PyPI fallback individually so one missing wheel
+# doesn't abort the whole install (optuna/einops sometimes lag in the wheelhouse).
+for pkg in optuna matplotlib einops; do
+    pip install --no-index "\$pkg" -q 2>/dev/null || pip install "\$pkg" -q
+done
+
+# reformer-pytorch — pure Python, not in the wheel cache. Pin matches models/iTransformer/requirements.txt
+# (PyPI name is hyphenated, NOT reformer_pytorch).
 pip install "reformer-pytorch==1.4.4" -q
 
 [ -f "${REPO}/requirements.txt" ] && pip install -r "${REPO}/requirements.txt" -q || true
