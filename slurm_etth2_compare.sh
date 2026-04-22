@@ -84,6 +84,11 @@ mkdir -p "$GAUSS_CKPT" "$GAUSS_RESULTS" \
          "$BINARY_CKPT" "$BINARY_RESULTS" \
          "$LOG_DIR"
 
+# Real on-disk batch bodies (Alliance: pass a script *path* to sbatch — stdin heredocs
+# are fragile; mirrors slurm_unet_fullvar.sh pattern).
+SBATCH_JOBS="$STORE/slurm_etth2_job_scripts"
+mkdir -p "$SBATCH_JOBS"
+
 # Print resolved paths up front so you always know where to look
 echo "=================================================================="
 echo "  Storage root:  $STORE"
@@ -201,6 +206,74 @@ PREAMBLE
 export PREAMBLE_FILE
 
 # ============================================================================
+# Write per-job scripts (paths baked at submit time), then sbatch FILE
+# ============================================================================
+
+cat > "$SBATCH_JOBS/job_A.sh" <<JOB_A
+#!/bin/bash
+source "${PREAMBLE_FILE}"
+
+${PY} --mode pretrain \\
+    --checkpoint-dir "${GAUSS_CKPT}" \\
+    --results-dir    "${GAUSS_RESULTS}" \\
+    ${PY_COMMON}
+
+echo "[A] Gaussian pretrain done: \$(date)"
+JOB_A
+chmod +x "$SBATCH_JOBS/job_A.sh"
+
+cat > "$SBATCH_JOBS/job_B.sh" <<JOB_B
+#!/bin/bash
+source "${PREAMBLE_FILE}"
+
+echo "[B] Copying iTrans artifacts from Gaussian checkpoint dir..."
+cp -v "${GAUSS_CKPT}/pretrained_itransformer.pt" "${BINARY_CKPT}/pretrained_itransformer.pt"
+[ -f "${GAUSS_CKPT}/itrans_hp.json" ] && \\
+    cp -v "${GAUSS_CKPT}/itrans_hp.json" "${BINARY_CKPT}/itrans_hp.json"
+
+echo "[B] Running binary diffusion HP + pretrain..."
+${PY} --mode pretrain \\
+    --binary-diffusion \\
+    --checkpoint-dir "${BINARY_CKPT}" \\
+    --results-dir    "${BINARY_RESULTS}" \\
+    ${PY_COMMON}
+
+echo "[B] Binary pretrain done: \$(date)"
+JOB_B
+chmod +x "$SBATCH_JOBS/job_B.sh"
+
+cat > "$SBATCH_JOBS/job_C.sh" <<JOB_C
+#!/bin/bash
+source "${PREAMBLE_FILE}"
+
+${PY} --mode finetune \\
+    --dataset ETTh2 \\
+    --checkpoint-dir "${GAUSS_CKPT}" \\
+    --results-dir    "${GAUSS_RESULTS}" \\
+    ${PY_COMMON}
+
+echo "[C] Gaussian finetune done: \$(date)"
+JOB_C
+chmod +x "$SBATCH_JOBS/job_C.sh"
+
+cat > "$SBATCH_JOBS/job_D.sh" <<JOB_D
+#!/bin/bash
+source "${PREAMBLE_FILE}"
+
+${PY} --mode finetune \\
+    --dataset ETTh2 \\
+    --binary-diffusion \\
+    --checkpoint-dir "${BINARY_CKPT}" \\
+    --results-dir    "${BINARY_RESULTS}" \\
+    ${PY_COMMON}
+
+echo "[D] Binary finetune done: \$(date)"
+JOB_D
+chmod +x "$SBATCH_JOBS/job_D.sh"
+
+echo "  Batch scripts: $SBATCH_JOBS/job_{A,B,C,D}.sh"
+
+# ============================================================================
 # JOB A — Gaussian pretrain
 # ============================================================================
 
@@ -212,21 +285,11 @@ JOB_A=$(sbatch --parsable --export=ALL \
     --nodes=1 --cpus-per-task="$CPUS" --mem="$MEM" \
     "${GPU_ARGS[@]}" \
     --time="$WALL_PRETRAIN" \
+    --chdir="${REPO}" \
     --output="$LOG_DIR/A-gauss-pretrain-%j.out" \
     --error="$LOG_DIR/A-gauss-pretrain-%j.err" \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
-    <<ENDSCRIPT
-#!/bin/bash
-source "${PREAMBLE_FILE}"
-
-${PY} --mode pretrain \
-    --checkpoint-dir "${GAUSS_CKPT}" \
-    --results-dir    "${GAUSS_RESULTS}" \
-    ${PY_COMMON}
-
-echo "[A] Gaussian pretrain done: \$(date)"
-ENDSCRIPT
-)
+    "$SBATCH_JOBS/job_A.sh")
 echo "  -> A: $JOB_A"
 
 
@@ -243,30 +306,11 @@ JOB_B=$(sbatch --parsable --export=ALL \
     "${GPU_ARGS[@]}" \
     --time="$WALL_PRETRAIN" \
     --dependency="afterok:$JOB_A" \
+    --chdir="${REPO}" \
     --output="$LOG_DIR/B-binary-pretrain-%j.out" \
     --error="$LOG_DIR/B-binary-pretrain-%j.err" \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
-    <<ENDSCRIPT
-#!/bin/bash
-source "${PREAMBLE_FILE}"
-
-# Reuse iTrans artifacts from the Gaussian run — pipeline skips iTrans pretrain
-# if the checkpoint already exists, so we only pay for binary diffusion HP + pretrain.
-echo "[B] Copying iTrans artifacts from Gaussian checkpoint dir..."
-cp -v "${GAUSS_CKPT}/pretrained_itransformer.pt" "${BINARY_CKPT}/pretrained_itransformer.pt"
-[ -f "${GAUSS_CKPT}/itrans_hp.json" ] && \
-    cp -v "${GAUSS_CKPT}/itrans_hp.json" "${BINARY_CKPT}/itrans_hp.json"
-
-echo "[B] Running binary diffusion HP + pretrain..."
-${PY} --mode pretrain \
-    --binary-diffusion \
-    --checkpoint-dir "${BINARY_CKPT}" \
-    --results-dir    "${BINARY_RESULTS}" \
-    ${PY_COMMON}
-
-echo "[B] Binary pretrain done: \$(date)"
-ENDSCRIPT
-)
+    "$SBATCH_JOBS/job_B.sh")
 echo "  -> B: $JOB_B"
 
 
@@ -283,22 +327,11 @@ JOB_C=$(sbatch --parsable --export=ALL \
     "${GPU_ARGS[@]}" \
     --time="$WALL_FINETUNE" \
     --dependency="afterok:$JOB_A" \
+    --chdir="${REPO}" \
     --output="$LOG_DIR/C-gauss-finetune-%j.out" \
     --error="$LOG_DIR/C-gauss-finetune-%j.err" \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
-    <<ENDSCRIPT
-#!/bin/bash
-source "${PREAMBLE_FILE}"
-
-${PY} --mode finetune \
-    --dataset ETTh2 \
-    --checkpoint-dir "${GAUSS_CKPT}" \
-    --results-dir    "${GAUSS_RESULTS}" \
-    ${PY_COMMON}
-
-echo "[C] Gaussian finetune done: \$(date)"
-ENDSCRIPT
-)
+    "$SBATCH_JOBS/job_C.sh")
 echo "  -> C: $JOB_C"
 
 
@@ -315,23 +348,11 @@ JOB_D=$(sbatch --parsable --export=ALL \
     "${GPU_ARGS[@]}" \
     --time="$WALL_FINETUNE" \
     --dependency="afterok:$JOB_B" \
+    --chdir="${REPO}" \
     --output="$LOG_DIR/D-binary-finetune-%j.out" \
     --error="$LOG_DIR/D-binary-finetune-%j.err" \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
-    <<ENDSCRIPT
-#!/bin/bash
-source "${PREAMBLE_FILE}"
-
-${PY} --mode finetune \
-    --dataset ETTh2 \
-    --binary-diffusion \
-    --checkpoint-dir "${BINARY_CKPT}" \
-    --results-dir    "${BINARY_RESULTS}" \
-    ${PY_COMMON}
-
-echo "[D] Binary finetune done: \$(date)"
-ENDSCRIPT
-)
+    "$SBATCH_JOBS/job_D.sh")
 echo "  -> D: $JOB_D"
 
 
