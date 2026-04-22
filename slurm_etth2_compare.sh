@@ -182,8 +182,15 @@ else
     pip install numpy pandas scipy scikit-learn tqdm -q
 fi
 
-# PyPI (hyphenated PyPI name — NOT reformer_pytorch). Pin matches models/iTransformer/requirements.txt
-pip install "wandb>=0.25.0" optuna matplotlib einops -q
+# wandb + friends MUST come from the Alliance wheelhouse (--no-index) — recent wandb
+# versions on PyPI ship as sdist that builds wandb-core in Go at metadata-generation time,
+# and compute nodes have no \`go\` binary (observed: "Did not find the 'go' binary" →
+# metadata-generation-failed → set -e kills the job with an almost-empty log).
+# Ref: wiki_docs/Weights_&_Biases_(wandb).md (Alliance docs: pip install --no-index wandb).
+pip install --no-index wandb optuna matplotlib einops -q
+
+# reformer-pytorch — pure Python, not in the wheel cache. Version pinned to match
+# models/iTransformer/requirements.txt (PyPI name is hyphenated, NOT reformer_pytorch).
 pip install "reformer-pytorch==1.4.4" -q
 
 [ -f "${REPO}/requirements.txt" ] && pip install -r "${REPO}/requirements.txt" -q || true
