@@ -24,7 +24,7 @@
 #   D  Binary  finetune ETTh2                                   [afterok:B]
 #
 # USAGE (from ts-sandbox repo root on the login node):
-#   ./slurm_etth2_compare.sh           # full run (L40S in script)
+#   ./slurm_etth2_compare.sh           # full run (L40S)
 #   ./slurm_etth2_compare.sh --smoke   # smoke test — verifies full chain
 #
 # WANDB: jobs pass --wandb. API key: repo-root wandb_api_key.txt (see wandb_api_key.example.txt),
@@ -123,12 +123,11 @@ if [ "$SMOKE" -eq 1 ]; then
     export SMOKE_FLAG="--smoke-test"
     SUFFIX="-smoke"
 else
-    # Full run on L40S (512-LB / 96-FC + AMP + bs=128).
-    # Wall-time budget (L40S, ~4× slower than H100):
-    #   Job A/B (HP searches + full synthetic pretrain): ~44 h -> request 2 days
-    #   Job C/D (ETTh2 finetune + eval):                 ~10 h -> request 14 h
+    # Full pretrain stays on L40S to avoid the H100 queue. A 2-day L40S job
+    # timed out during diffusion epoch 40/200 after HP tuning, so request more
+    # wall and rely on per-epoch resume snapshots if another chunk is needed.
     GPU_ARGS=(--gres=gpu:l40s:1)
-    WALL_PRETRAIN="2-00:00:00"
+    WALL_PRETRAIN="3-00:00:00"
     WALL_FINETUNE="0-14:00:00"
     MEM="60G"; CPUS=6
     export SMOKE_FLAG=""

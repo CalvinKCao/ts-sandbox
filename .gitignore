@@ -165,6 +165,11 @@ datasets/traffic/traffic.csv
 
 docs.alliancecan.ca_mediawiki-20260319-wikidump/docs.alliancecan.ca_mediawiki-20260325-current.xml
 
+
+
+# local experiment pulls
+runs/
+
 # lnai-generated
 .agents/skills/alliancecan
 .agents/skills/audio_math_explainer
@@ -208,6 +213,3 @@ docs.alliancecan.ca_mediawiki-20260319-wikidump/docs.alliancecan.ca_mediawiki-20
 AGENTS.md
 opencode.json
 # end lnai-generated
-
-# local experiment pulls
-runs/
