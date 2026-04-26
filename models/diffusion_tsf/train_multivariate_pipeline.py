@@ -50,13 +50,8 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
-# Optional wandb
-try:
-    import wandb
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
-    wandb = None
+import wandb
+WANDB_AVAILABLE = True
 
 # Setup path
 script_dir = os.path.dirname(os.path.abspath(__file__))
