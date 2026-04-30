@@ -89,16 +89,64 @@ fi
 
 export WANDB_DIR="$STORE/wandb"
 mkdir -p "$WANDB_DIR"
-if [ -z "${WANDB_API_KEY:-}" ] && [ -f "$PROJECT_ROOT/wandb_api_key.txt" ]; then
-    export WANDB_API_KEY="$(tr -d '[:space:]' < "$PROJECT_ROOT/wandb_api_key.txt")"
+KEY_FILE="$PROJECT_ROOT/wandb_api_key.txt"
+if [ ! -f "$KEY_FILE" ]; then
+    echo "[wandb] ERROR: Missing $KEY_FILE"
+    echo "[wandb] Put exactly one key in $PROJECT_ROOT/wandb_api_key.txt and re-submit."
+    exit 2
 fi
-if [ -z "${WANDB_API_KEY:-}" ] && [ -z "${WANDB_MODE:-}" ]; then
-    export WANDB_MODE=offline
-    echo "[wandb] WANDB_API_KEY not found; using offline mode."
+export WANDB_API_KEY="$(grep -v '^[[:space:]]*#' "$KEY_FILE" | sed -e '/^[[:space:]]*$/d' | head -1 | tr -d '[:space:]')"
+if [ -z "$WANDB_API_KEY" ] || [ "$WANDB_API_KEY" = "REPLACE_ME" ] || [ "$WANDB_API_KEY" = "YOUR_WANDB_API_KEY_HERE" ]; then
+    echo "[wandb] ERROR: Invalid or empty key in $KEY_FILE"
+    echo "[wandb] Use a real key from https://wandb.ai/authorize (single line, no quotes)."
+    exit 2
 fi
+echo "[wandb] Using API key from $KEY_FILE"
 
 export PYTHONUNBUFFERED=1
 cd "$PROJECT_ROOT"
+
+wandb_upload_job_logs() {
+    local checkpoint_dir="$1"
+    shift
+    local run_id_file="${checkpoint_dir}/wandb_run_id.txt"
+    if [ ! -f "$run_id_file" ]; then
+        echo "[wandb] WARN: no run id file at $run_id_file; skipping log upload."
+        return 0
+    fi
+    local run_id
+    run_id="$(tr -d '[:space:]' < "$run_id_file")"
+    [ -z "$run_id" ] && echo "[wandb] WARN: empty run id in $run_id_file; skipping." && return 0
+
+    local files=()
+    local f
+    for f in "$@"; do
+        [ -f "$f" ] && files+=("$f")
+    done
+    [ "${#files[@]}" -eq 0 ] && echo "[wandb] WARN: no log files found to upload." && return 0
+
+    python - "$run_id" "${files[@]}" <<'PY' || true
+import os
+import sys
+import wandb
+
+run_id = sys.argv[1]
+files = sys.argv[2:]
+project = os.environ.get("WANDB_PROJECT", "diffusion-tsf")
+job_id = os.environ.get("SLURM_JOB_ID", "unknown")
+job_name = os.environ.get("SLURM_JOB_NAME", "unknown")
+
+run = wandb.init(project=project, id=run_id, resume="must", reinit=True)
+artifact = wandb.Artifact(f"slurm-job-logs-{job_id}", type="logs")
+artifact.metadata.update({"slurm_job_id": job_id, "slurm_job_name": job_name})
+for path in files:
+    if os.path.isfile(path):
+        artifact.add_file(path)
+run.log_artifact(artifact)
+run.finish()
+print(f"[wandb] Uploaded {len(files)} log file(s) for job {job_id}.")
+PY
+}
 
 echo "[run] profile-one-epoch quick test"
 python -u -m models.diffusion_tsf.train_multivariate_pipeline \
@@ -109,6 +157,10 @@ python -u -m models.diffusion_tsf.train_multivariate_pipeline \
     --amp \
     --wandb \
     --wandb-project diffusion-tsf
+
+wandb_upload_job_logs "$PROJECT_ROOT/models/diffusion_tsf/checkpoints_profile_1epoch" \
+    "$STORE/logs/profile-one-epoch-${SLURM_JOB_ID}.out" \
+    "$STORE/logs/profile-one-epoch-${SLURM_JOB_ID}.err"
 
 echo "Done: $(date)"
 JOB

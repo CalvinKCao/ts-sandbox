@@ -63,17 +63,10 @@ except ImportError:
 
 
 def _maybe_load_wandb_api_key_from_file() -> None:
-    """If WANDB_API_KEY is unset, read repo-root wandb_api_key.txt (first non-comment line).
-
-    Override path with env WANDB_API_KEY_FILE. Ignores placeholder values.
-    """
+    """Load WANDB_API_KEY from repo-root wandb_api_key.txt when env var is unset."""
     if os.environ.get("WANDB_API_KEY"):
         return
-    key_file = os.environ.get("WANDB_API_KEY_FILE")
-    if key_file:
-        path = os.path.abspath(os.path.expanduser(key_file))
-    else:
-        path = os.path.join(project_root, "wandb_api_key.txt")
+    path = os.path.join(project_root, "wandb_api_key.txt")
     if not os.path.isfile(path):
         return
     lines: List[str] = []
@@ -96,6 +89,22 @@ def _maybe_load_wandb_api_key_from_file() -> None:
     if raw in placeholders:
         return
     os.environ["WANDB_API_KEY"] = raw
+
+
+def _require_wandb_api_key_or_exit() -> None:
+    """Fail fast with a clear message when --wandb is requested without a usable key."""
+    key = (os.environ.get("WANDB_API_KEY") or "").strip()
+    if key:
+        return
+    path = os.path.join(project_root, "wandb_api_key.txt")
+    print("ERROR: --wandb requested but API key is missing.", file=sys.stderr)
+    print(f"Expected key file: {path}", file=sys.stderr)
+    print(
+        "Put exactly one valid key from https://wandb.ai/authorize on one line "
+        "in that file, then rerun.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 # Setup path
@@ -3274,6 +3283,8 @@ def main():
     
     args = parser.parse_args()
     _maybe_load_wandb_api_key_from_file()
+    if args.wandb:
+        _require_wandb_api_key_or_exit()
     diffusion_export_epochs = [
         int(x.strip())
         for x in args.diffusion_export_epochs.split(',')
@@ -3386,7 +3397,14 @@ def main():
         N_VARIATES = nv
         try:
             if args.wandb:
-                init_wandb(project=args.wandb_project, resume=args.resume)
+                if not init_wandb(project=args.wandb_project, resume=args.resume):
+                    print(
+                        "ERROR: wandb initialization failed. "
+                        "Most common cause is an invalid/revoked API key in "
+                        "wandb_api_key.txt (W&B 401).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
             run_pretrain_mode(
                 nv,
                 smoke_test=args.smoke_test,
@@ -3407,7 +3425,14 @@ def main():
             N_VARIATES = args.n_variates
         try:
             if args.wandb:
-                init_wandb(project=args.wandb_project, resume=args.resume)
+                if not init_wandb(project=args.wandb_project, resume=args.resume):
+                    print(
+                        "ERROR: wandb initialization failed. "
+                        "Most common cause is an invalid/revoked API key in "
+                        "wandb_api_key.txt (W&B 401).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
             run_finetune_mode(args.dataset, smoke_test=args.smoke_test, seed=args.seed)
         finally:
             if args.wandb:
@@ -3423,7 +3448,14 @@ def main():
         vi = [int(x) for x in args.variate_indices.split(',')]
         try:
             if args.wandb:
-                init_wandb(project=args.wandb_project, resume=args.resume)
+                if not init_wandb(project=args.wandb_project, resume=args.resume):
+                    print(
+                        "ERROR: wandb initialization failed. "
+                        "Most common cause is an invalid/revoked API key in "
+                        "wandb_api_key.txt (W&B 401).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
             run_finetune_subset_mode(
                 args.subset_id, args.dataset, vi,
                 smoke_test=args.smoke_test, seed=args.seed,
