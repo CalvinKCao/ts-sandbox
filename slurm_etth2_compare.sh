@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# ETTh2: Gaussian vs Binary diffusion — Killarney, job-chained
+# ETTh2: Gaussian diffusion epoch sweep — Killarney, job-chained
 #
 # RUN ON THE LOGIN NODE (not inside sbatch):
 #   ./slurm_etth2_compare.sh [--smoke]
@@ -18,14 +18,13 @@
 #SBATCH --job-name=etth2-chain-submit
 #
 # Dependency graph:
-#   A  iTrans HP + pretrain + Gaussian diff HP + pretrain
-#   B  (copy iTrans from A) → Binary diff HP + pretrain        [afterok:A]
-#   C  Gaussian finetune ETTh2                                  [afterok:A]
-#   D  Binary  finetune ETTh2                                   [afterok:B]
+#   A  iTrans HP + pretrain + Gaussian diffusion HP + pretrain
+#      while exporting best-so-far diffusion checkpoints at epochs 10/20/40
+#   B10/B20/B40  copy matching exported checkpoint → finetune/eval ETTh2 [afterok:A]
 #
 # USAGE (from ts-sandbox repo root on the login node):
 #   ./slurm_etth2_compare.sh           # full run (L40S)
-#   ./slurm_etth2_compare.sh --smoke   # smoke test — verifies full chain
+#   ./slurm_etth2_compare.sh --smoke   # smoke test — verifies CPU/Python path locally; Slurm chain exports epoch 1
 #
 # WANDB: jobs pass --wandb. API key: repo-root wandb_api_key.txt (see wandb_api_key.example.txt),
 #   or wandb login / export WANDB_API_KEY (Slurm forwards with --export=ALL).
@@ -41,7 +40,7 @@
 #        bash scripts/killarney_smoke_pip.sh
 #   2) Full Slurm chain miniature — this script with --smoke:
 #        ./slurm_etth2_compare.sh --smoke
-#      Submits A–D with short walls; passes --smoke-test (1 epoch, tiny samples, 1 HP trial).
+#      Submits A + one epoch-1 downstream job with short walls; passes --smoke-test.
 #      Watch:  squeue -u $USER
 #      Logs:   tail -f $STORE/logs/A-gauss-pretrain-<JOB_ID>.out
 #   3) Local (WSL / laptop):  pytest models/diffusion_tsf/tests/ -q
@@ -64,24 +63,25 @@ fi
 # Default: $SCRATCH (always set on Killarney, large, fast — right place for
 # active training).  Set STORE before running to override, e.g. to keep
 # results in PROJECT for longer-term storage:
-#   STORE=$PROJECT/$USER/diffusion-tsf-etth2 ./slurm_etth2_compare.sh
+#   STORE=$PROJECT/$USER/diffusion-tsf-etth2-epoch-sweep ./slurm_etth2_compare.sh
 if [ -z "${STORE:-}" ]; then
     if [ -z "${SCRATCH:-}" ]; then
         echo "ERROR: \$SCRATCH is not set. Set STORE manually and re-run."
         exit 1
     fi
-    export STORE="$SCRATCH/diffusion-tsf-etth2"
+    export STORE="$SCRATCH/diffusion-tsf-etth2-epoch-sweep"
 else
     export STORE
 fi
 export GAUSS_CKPT="$STORE/checkpoints_gauss"
 export GAUSS_RESULTS="$STORE/results_gauss"
-export BINARY_CKPT="$STORE/checkpoints_binary"
-export BINARY_RESULTS="$STORE/results_binary"
+# Left defined only because the old binary job body below is kept unreachable
+# after the epoch-sweep exit. Do not submit/use these in this experiment.
+export BINARY_CKPT="$STORE/unused_checkpoints_binary"
+export BINARY_RESULTS="$STORE/unused_results_binary"
 LOG_DIR="$STORE/logs"
 
 mkdir -p "$GAUSS_CKPT" "$GAUSS_RESULTS" \
-         "$BINARY_CKPT" "$BINARY_RESULTS" \
          "$LOG_DIR"
 
 # Real on-disk batch bodies (Alliance: pass a script *path* to sbatch — stdin heredocs
@@ -122,6 +122,7 @@ if [ "$SMOKE" -eq 1 ]; then
     MEM="16G"; CPUS=4
     export SMOKE_FLAG="--smoke-test"
     SUFFIX="-smoke"
+    MILESTONES=(1)
 else
     # Full pretrain stays on L40S to avoid the H100 queue. A 2-day L40S job
     # timed out during diffusion epoch 40/200 after HP tuning, so request more
@@ -132,11 +133,14 @@ else
     MEM="60G"; CPUS=6
     export SMOKE_FLAG=""
     SUFFIX=""
+    MILESTONES=(10 20 40)
 fi
+
+MILESTONE_CSV=$(IFS=,; echo "${MILESTONES[*]}")
 
 # Common Python flags (exported so job bodies can use $SMOKE_FLAG etc.)
 export PY="python -u -m models.diffusion_tsf.train_multivariate_pipeline"
-export PY_COMMON="--n-variates 7 --amp --synthetic-samples 60000 --itransformer-trials 20 --wandb --wandb-project diffusion-tsf $SMOKE_FLAG"
+export PY_COMMON="--n-variates 7 --amp --synthetic-samples 60000 --itransformer-trials 20 --diffusion-export-epochs ${MILESTONE_CSV} --wandb --wandb-project diffusion-tsf $SMOKE_FLAG"
 
 # ---- Shared job body: module load + venv activate + cd ----------------------
 # Written as a quoted heredoc into a temp file so each job can source it.
@@ -208,7 +212,15 @@ echo "[setup] Venv ready: \$(which python)"
 # then run: wandb sync \$WANDB_DIR/offline-run-* from a machine with a key.
 export WANDB_DIR="${STORE}/wandb"
 mkdir -p "\$WANDB_DIR"
+if [ -z "\${WANDB_API_KEY:-}" ] && [ -f "${REPO}/wandb_api_key.txt" ]; then
+    export WANDB_API_KEY="\$(tr -d '[:space:]' < "${REPO}/wandb_api_key.txt")"
+fi
+if [ -z "\${WANDB_API_KEY:-}" ] && [ -z "\${WANDB_MODE:-}" ]; then
+    export WANDB_MODE=offline
+    echo "[wandb] WANDB_API_KEY not found; using offline mode."
+fi
 export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 echo "[info] python: \$(which python)"
 cd "${REPO}"
@@ -240,6 +252,15 @@ cat > "$SBATCH_JOBS/job_B.sh" <<JOB_B
 source "${PREAMBLE_FILE}"
 
 echo "[B] Copying iTrans artifacts from Gaussian checkpoint dir..."
+if [ -f "${BINARY_CKPT}/.smoke_test" ]; then
+    echo "[B] Removing stale binary smoke-test artifacts before copying iTrans..."
+    rm -f "${BINARY_CKPT}/pretrained_itransformer.pt" \\
+          "${BINARY_CKPT}/pretrained_diffusion.pt" \\
+          "${BINARY_CKPT}/pretrained_diffusion_last.pt" \\
+          "${BINARY_CKPT}/itrans_hp.json" \\
+          "${BINARY_CKPT}/diff_hp.json" \\
+          "${BINARY_CKPT}/.smoke_test"
+fi
 cp -v "${GAUSS_CKPT}/pretrained_itransformer.pt" "${BINARY_CKPT}/pretrained_itransformer.pt"
 [ -f "${GAUSS_CKPT}/itrans_hp.json" ] && \\
     cp -v "${GAUSS_CKPT}/itrans_hp.json" "${BINARY_CKPT}/itrans_hp.json"
@@ -284,7 +305,7 @@ echo "[D] Binary finetune done: \$(date)"
 JOB_D
 chmod +x "$SBATCH_JOBS/job_D.sh"
 
-echo "  Batch scripts: $SBATCH_JOBS/job_{A,B,C,D}.sh"
+echo "  Batch scripts: $SBATCH_JOBS/job_A.sh plus generated milestone jobs"
 
 # ============================================================================
 # JOB A — Gaussian pretrain
@@ -304,6 +325,76 @@ JOB_A=$(sbatch --parsable --export=ALL \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
     "$SBATCH_JOBS/job_A.sh")
 echo "  -> A: $JOB_A"
+
+echo ""
+echo "Submitting downstream ETTh2 finetune/eval jobs for exported Gaussian checkpoints..."
+MILESTONE_JOB_IDS=()
+
+for EPOCH in "${MILESTONES[@]}"; do
+    EPOCH_CKPT="$STORE/checkpoints_gauss_epoch${EPOCH}"
+    EPOCH_RESULTS="$STORE/results_gauss_epoch${EPOCH}"
+    mkdir -p "$EPOCH_CKPT" "$EPOCH_RESULTS"
+
+    cat > "$SBATCH_JOBS/job_gauss_epoch${EPOCH}.sh" <<JOB_EPOCH
+#!/bin/bash
+source "${PREAMBLE_FILE}"
+
+EPOCH_CKPT="${EPOCH_CKPT}"
+EPOCH_RESULTS="${EPOCH_RESULTS}"
+mkdir -p "\$EPOCH_CKPT" "\$EPOCH_RESULTS"
+
+echo "[epoch ${EPOCH}] Preparing checkpoint dir: \$EPOCH_CKPT"
+cp -v "${GAUSS_CKPT}/pretrained_itransformer.pt" "\$EPOCH_CKPT/pretrained_itransformer.pt"
+[ -f "${GAUSS_CKPT}/itrans_hp.json" ] && cp -v "${GAUSS_CKPT}/itrans_hp.json" "\$EPOCH_CKPT/itrans_hp.json"
+[ -f "${GAUSS_CKPT}/diff_hp.json" ] && cp -v "${GAUSS_CKPT}/diff_hp.json" "\$EPOCH_CKPT/diff_hp.json"
+cp -v "${GAUSS_CKPT}/pretrained_diffusion_best_epoch${EPOCH}.pt" "\$EPOCH_CKPT/pretrained_diffusion.pt"
+
+${PY} --mode finetune \
+    --dataset ETTh2 \
+    --checkpoint-dir "\$EPOCH_CKPT" \
+    --results-dir    "\$EPOCH_RESULTS" \
+    ${PY_COMMON}
+
+echo "[epoch ${EPOCH}] ETTh2 finetune/eval done: \$(date)"
+JOB_EPOCH
+    chmod +x "$SBATCH_JOBS/job_gauss_epoch${EPOCH}.sh"
+
+    JOB_E=$(sbatch --parsable --export=ALL \
+        --job-name="etth2-gauss-ep${EPOCH}${SUFFIX}" \
+        --account=aip-boyuwang \
+        --nodes=1 --cpus-per-task="$CPUS" --mem="$MEM" \
+        "${GPU_ARGS[@]}" \
+        --time="$WALL_FINETUNE" \
+        --dependency="afterok:$JOB_A" \
+        --chdir="${REPO}" \
+        --output="$LOG_DIR/gauss-epoch${EPOCH}-finetune-%j.out" \
+        --error="$LOG_DIR/gauss-epoch${EPOCH}-finetune-%j.err" \
+        --mail-type=FAIL --mail-user=ccao87@uwo.ca \
+        "$SBATCH_JOBS/job_gauss_epoch${EPOCH}.sh")
+    MILESTONE_JOB_IDS+=("$JOB_E")
+    echo "  -> epoch ${EPOCH}: $JOB_E"
+done
+
+echo ""
+echo "=================================================================="
+echo "  Jobs submitted:"
+echo ""
+echo "  A $JOB_A  Gaussian pretrain + exports (${MILESTONE_CSV})"
+for i in "${!MILESTONES[@]}"; do
+    echo "  ${MILESTONE_JOB_IDS[$i]}  ETTh2 finetune/eval from best-so-far epoch ${MILESTONES[$i]} [afterok:$JOB_A]"
+done
+echo ""
+echo "  Exported checkpoints will be read from:"
+for EPOCH in "${MILESTONES[@]}"; do
+    echo "    ${GAUSS_CKPT}/pretrained_diffusion_best_epoch${EPOCH}.pt"
+done
+echo ""
+echo "  Logs:        $LOG_DIR/"
+echo "  Base ckpts:  $GAUSS_CKPT/"
+echo "  Monitor:     squeue -u \$USER"
+echo "  Cancel all:  scancel $JOB_A ${MILESTONE_JOB_IDS[*]}"
+echo "=================================================================="
+exit 0
 
 
 # ============================================================================
