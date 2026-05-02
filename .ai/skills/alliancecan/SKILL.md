@@ -247,7 +247,7 @@ from the wheel cache takes 3–5 min; after that imports are <1 min.
 - **`slurm_unet_fullvar.sh` (ts-sandbox):** **L40S** for `--smoke-test`, **H100** + `gpubase_h100_b4` for full runs.
 - **`PYTHONUNBUFFERED=1`** and **`python -u`** help with Slurm log latency (buffering).
 
-## Gotchas (see also project `onboard.md` and `.ai/cluster-paths.md`)
+## Gotchas (see also `AGENTS.md` — Notes space / repo context — and `.ai/cluster-paths.md`)
 
 - **`ls ~/projects/def-*` under `set -euo pipefail` (silent job death):** Many job scripts use `set -euo pipefail` and then `FIRST=$(ls -d "$HOME"/projects/def-* ... 2>/dev/null | head -1)`. If **`~/projects` exists** but **no** `def-*` / `aip-*` match, **`ls` exits with status 2**. With **`pipefail`**, the pipeline fails → **`set -e` aborts the entire batch** in a few seconds. **`sacct`** shows `State=FAILED`, **`ExitCode=2:0`**, `.err` may only show `module purge` noise, `.out` stays nearly empty. **Fix:** use `shopt -s nullglob` and a bash array over the globs (see snippet above), or append `|| true` to the assignment in a way that cannot still fail the pipeline—**do not** rely on `ls` with possibly unmatched globs in a piped command.
 - **`BASH_SOURCE[0]` inside `sbatch` scripts:** Slurm copies the submitted script to a spool path like `/cm/local/apps/slurm/var/spool/job<ID>/slurm_script`, so `BASH_SOURCE[0]` points at the spool copy, not the repo checkout. Sourcing helper files relative to it will fail. **Use `SLURM_SUBMIT_DIR`** when you need repo-local helper scripts or data, and add a guard that errors out if the submit directory is missing the file.
