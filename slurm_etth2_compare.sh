@@ -35,9 +35,8 @@
 #   automatically (same checkpoint dir). Finished runs delete that file.
 #
 # HOW TO SMOKE TEST (pick one):
-#   1) Pip + imports only (fastest — catches bad PyPI names before burning GPU hours):
-#        salloc ...   # short GPU alloc, see scripts/killarney_smoke_pip.sh header
-#        bash scripts/killarney_smoke_pip.sh
+#   1) Pip + imports on a short GPU alloc: fresh venv on the node, pip install
+#      project deps, import torch (and friends) — catches bad wheels before long jobs.
 #   2) Full Slurm chain miniature — this script with --smoke:
 #        ./slurm_etth2_compare.sh --smoke
 #      Submits A + one epoch-1 downstream job with short walls; passes --smoke-test.
