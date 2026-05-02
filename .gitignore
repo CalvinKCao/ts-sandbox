@@ -170,6 +170,16 @@ docs.alliancecan.ca_mediawiki-20260319-wikidump/docs.alliancecan.ca_mediawiki-20
 # local experiment pulls
 runs/
 
+# Local scratch / one-off artifacts (regeneratable; keep out of git)
+.tmp_epoch_sweep_smoke/
+.tmp_timing_full4phase_ckpt/
+.tmp_timing_full4phase_ckpt2/
+data_cache/
+assets/
+final_report/
+wikidump_to_markdown.py
+scripts/
+
 # lnai-generated
 .agents/skills/alliancecan
 .agents/skills/audio_math_explainer
@@ -182,7 +192,9 @@ runs/
 .ai/.lnai-manifest.json
 .cursor/skills/alliancecan
 .cursor/skills/audio_math_explainer
-.cursor/skills/github-semantic-commit
+.cursor/skills/git
+.cursor/skills/lnai
+.cursor/skills/lnai-master-sync
 .cursor/skills/messy
 .cursor/skills/natural
 .cursor/skills/quick
@@ -191,7 +203,9 @@ runs/
 .gemini/settings.json
 .gemini/skills/alliancecan
 .gemini/skills/audio_math_explainer
-.gemini/skills/github-semantic-commit
+.gemini/skills/git
+.gemini/skills/lnai
+.gemini/skills/lnai-master-sync
 .gemini/skills/messy
 .gemini/skills/natural
 .gemini/skills/quick
@@ -199,7 +213,9 @@ runs/
 .gemini/skills/slurm-killarney
 .github/skills/alliancecan
 .github/skills/audio_math_explainer
-.github/skills/github-semantic-commit
+.github/skills/git
+.github/skills/lnai
+.github/skills/lnai-master-sync
 .github/skills/messy
 .github/skills/natural
 .github/skills/quick
