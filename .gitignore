@@ -183,7 +183,7 @@ scripts/
 # lnai-generated
 .agents/skills/alliancecan
 .agents/skills/audio_math_explainer
-.agents/skills/github-semantic-commit
+.agents/skills/git
 .agents/skills/messy
 .agents/skills/natural
 .agents/skills/quick
@@ -223,7 +223,7 @@ scripts/
 .github/skills/slurm-killarney
 .windsurf/skills/alliancecan
 .windsurf/skills/audio_math_explainer
-.windsurf/skills/github-semantic-commit
+.windsurf/skills/git
 .windsurf/skills/messy
 .windsurf/skills/natural
 .windsurf/skills/quick
