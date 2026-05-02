@@ -381,7 +381,7 @@ cat > "$PROJECT_ROOT/sync_from_killarney.sh" << SYNC_EOF
 # Usage: ./sync_from_killarney.sh [user@killarney.alliancecan.ca]
 
 REMOTE="\${1:-$USER@$CLUSTER_HOST}"
-LOCAL_DIR="./synced_results"
+LOCAL_DIR="./results/synced_results"
 mkdir -p "\$LOCAL_DIR"
 
 echo "Syncing from \$REMOTE..."
