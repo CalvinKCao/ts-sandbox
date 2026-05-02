@@ -47,7 +47,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --job-name=unet-fullvar \
             --account=aip-boyuwang \
             --partition=gpubase_h100_b4 \
-            --time=3-00:00:00 \
+            --time=1-12:00:00 \
             --nodes=1 \
             --gpus-per-node=h100:1 \
             --cpus-per-task=6 \
@@ -125,7 +125,7 @@ if [ ! -d "$VENV_PATH" ]; then
         export PATH="$VENV_PATH/bin:$PATH"
         pip install --upgrade pip
         pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-        pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer_pytorch
+        pip install numpy pandas scipy scikit-learn optuna wandb tqdm matplotlib einops reformer-pytorch
         [ -f "$PROJECT_ROOT/requirements.txt" ] && pip install -r "$PROJECT_ROOT/requirements.txt"
     else
         export PATH="$VENV_PATH/bin:$PATH"
@@ -135,7 +135,54 @@ else
     echo "Reusing existing venv: $VENV_PATH"
 fi
 
-export WANDB_MODE=offline
+if [ -z "${WANDB_API_KEY:-}" ]; then
+    echo "[wandb] ERROR: WANDB_API_KEY is not set."
+    echo "[wandb] Export WANDB_API_KEY from https://wandb.ai/authorize and re-submit."
+    exit 2
+fi
+echo "[wandb] Using WANDB_API_KEY from environment."
+
+wandb_upload_job_logs() {
+    local checkpoint_dir="$1"
+    shift
+    local run_id_file="${checkpoint_dir}/wandb_run_id.txt"
+    if [ ! -f "$run_id_file" ]; then
+        echo "[wandb] WARN: no run id file at $run_id_file; skipping log upload."
+        return 0
+    fi
+    local run_id
+    run_id="$(tr -d '[:space:]' < "$run_id_file")"
+    [ -z "$run_id" ] && echo "[wandb] WARN: empty run id in $run_id_file; skipping." && return 0
+
+    local files=()
+    local f
+    for f in "$@"; do
+        [ -f "$f" ] && files+=("$f")
+    done
+    [ "${#files[@]}" -eq 0 ] && echo "[wandb] WARN: no log files found to upload." && return 0
+
+    python - "$run_id" "${files[@]}" <<'PY' || true
+import os
+import sys
+import wandb
+
+run_id = sys.argv[1]
+files = sys.argv[2:]
+project = os.environ.get("WANDB_PROJECT", "diffusion-tsf")
+job_id = os.environ.get("SLURM_JOB_ID", "unknown")
+job_name = os.environ.get("SLURM_JOB_NAME", "unknown")
+
+run = wandb.init(project=project, id=run_id, resume="must", reinit=True)
+artifact = wandb.Artifact(f"slurm-job-logs-{job_id}", type="logs")
+artifact.metadata.update({"slurm_job_id": job_id, "slurm_job_name": job_name})
+for path in files:
+    if os.path.isfile(path):
+        artifact.add_file(path)
+run.log_artifact(artifact)
+run.finish()
+print(f"[wandb] Uploaded {len(files)} log file(s) for job {job_id}.")
+PY
+}
 
 # ---- Cleanup ----
 
@@ -325,3 +372,9 @@ echo "Job completed: $(date)"
 echo "Results: $STORAGE_ROOT/results"
 echo "Checkpoints: $STORAGE_ROOT/checkpoints"
 echo "=========================================="
+
+wandb_upload_job_logs "$STORAGE_ROOT/checkpoints" \
+    "$SCRIPT_DIR/unet-fullvar-${SLURM_JOB_ID}.out" \
+    "$SCRIPT_DIR/unet-fullvar-${SLURM_JOB_ID}.err" \
+    "$SCRIPT_DIR/unet-fullvar-smoke-${SLURM_JOB_ID}.out" \
+    "$SCRIPT_DIR/unet-fullvar-smoke-${SLURM_JOB_ID}.err"

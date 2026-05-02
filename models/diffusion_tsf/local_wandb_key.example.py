@@ -1,12 +1,11 @@
-"""Copy to local_wandb_key.py (gitignored) and set your key.
+"""Optional: copy to local_wandb_key.py (gitignored), implement apply() with your key,
+and import it from a custom entrypoint.
 
-  cp models/diffusion_tsf/local_wandb_key.example.py models/diffusion_tsf/local_wandb_key.py
-
-Prefer export WANDB_API_KEY=... in ~/.bashrc on clusters so nothing sensitive lives in the repo.
+Prefer setting WANDB_API_KEY in your shell environment (~/.bashrc, job exports, CI secrets).
 """
 
 import os
 
 
 def apply() -> None:
-    os.environ["WANDB_API_KEY"] = "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"
+    os.environ["WANDB_API_KEY"] = "YOUR_WANDB_API_KEY_HERE"
