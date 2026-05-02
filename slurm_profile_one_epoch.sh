@@ -89,19 +89,12 @@ fi
 
 export WANDB_DIR="$STORE/wandb"
 mkdir -p "$WANDB_DIR"
-KEY_FILE="$PROJECT_ROOT/wandb_api_key.txt"
-if [ ! -f "$KEY_FILE" ]; then
-    echo "[wandb] ERROR: Missing $KEY_FILE"
-    echo "[wandb] Put exactly one key in $PROJECT_ROOT/wandb_api_key.txt and re-submit."
+if [ -z "${WANDB_API_KEY:-}" ]; then
+    echo "[wandb] ERROR: WANDB_API_KEY is not set."
+    echo "[wandb] Export WANDB_API_KEY from https://wandb.ai/authorize and re-submit."
     exit 2
 fi
-export WANDB_API_KEY="$(grep -v '^[[:space:]]*#' "$KEY_FILE" | sed -e '/^[[:space:]]*$/d' | head -1 | tr -d '[:space:]')"
-if [ -z "$WANDB_API_KEY" ] || [ "$WANDB_API_KEY" = "REPLACE_ME" ] || [ "$WANDB_API_KEY" = "YOUR_WANDB_API_KEY_HERE" ]; then
-    echo "[wandb] ERROR: Invalid or empty key in $KEY_FILE"
-    echo "[wandb] Use a real key from https://wandb.ai/authorize (single line, no quotes)."
-    exit 2
-fi
-echo "[wandb] Using API key from $KEY_FILE"
+echo "[wandb] Using WANDB_API_KEY from environment."
 
 export PYTHONUNBUFFERED=1
 cd "$PROJECT_ROOT"

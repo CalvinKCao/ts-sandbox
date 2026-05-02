@@ -26,8 +26,8 @@
 #   ./slurm_etth2_compare.sh           # full run (L40S)
 #   ./slurm_etth2_compare.sh --smoke   # smoke test — verifies CPU/Python path locally; Slurm chain exports epoch 1
 #
-# WANDB: jobs pass --wandb. API key: repo-root wandb_api_key.txt (see wandb_api_key.example.txt),
-#   or wandb login / export WANDB_API_KEY (Slurm forwards with --export=ALL).
+# WANDB: jobs pass --wandb and expect WANDB_API_KEY in the environment
+# (Slurm forwards with --export=ALL).
 # Runs use online mode by default; metrics land under $STORE/wandb/.
 #
 # Resume after pretrain timeout: re-submit the same script. If
@@ -212,19 +212,12 @@ echo "[setup] Venv ready: \$(which python)"
 # then run: wandb sync \$WANDB_DIR/offline-run-* from a machine with a key.
 export WANDB_DIR="${STORE}/wandb"
 mkdir -p "\$WANDB_DIR"
-KEY_FILE="${REPO}/wandb_api_key.txt"
-if [ ! -f "\$KEY_FILE" ]; then
-    echo "[wandb] ERROR: Missing \$KEY_FILE"
-    echo "[wandb] Put exactly one key in ${REPO}/wandb_api_key.txt and re-submit."
+if [ -z "\${WANDB_API_KEY:-}" ]; then
+    echo "[wandb] ERROR: WANDB_API_KEY is not set."
+    echo "[wandb] Export WANDB_API_KEY from https://wandb.ai/authorize and re-submit."
     exit 2
 fi
-export WANDB_API_KEY="\$(grep -v '^[[:space:]]*#' "\$KEY_FILE" | sed -e '/^[[:space:]]*$/d' | head -1 | tr -d '[:space:]')"
-if [ -z "\$WANDB_API_KEY" ] || [ "\$WANDB_API_KEY" = "REPLACE_ME" ] || [ "\$WANDB_API_KEY" = "YOUR_WANDB_API_KEY_HERE" ]; then
-    echo "[wandb] ERROR: Invalid or empty key in \$KEY_FILE"
-    echo "[wandb] Use a real key from https://wandb.ai/authorize (single line, no quotes)."
-    exit 2
-fi
-echo "[wandb] Using API key from \$KEY_FILE"
+echo "[wandb] Using WANDB_API_KEY from environment."
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 

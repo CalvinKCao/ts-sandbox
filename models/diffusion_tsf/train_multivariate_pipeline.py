@@ -62,46 +62,15 @@ except ImportError:
     wandb = None
 
 
-def _maybe_load_wandb_api_key_from_file() -> None:
-    """Load WANDB_API_KEY from repo-root wandb_api_key.txt when env var is unset."""
-    if os.environ.get("WANDB_API_KEY"):
-        return
-    path = os.path.join(project_root, "wandb_api_key.txt")
-    if not os.path.isfile(path):
-        return
-    lines: List[str] = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            lines.append(s)
-    if not lines:
-        return
-    raw = lines[0].strip()
-    placeholders = {
-        "",
-        "REPLACE_ME",
-        "YOUR_WANDB_API_KEY_HERE",
-        "REPLACE_WITH_YOUR_WANDB_API_KEY",
-        "paste_your_key_here",
-    }
-    if raw in placeholders:
-        return
-    os.environ["WANDB_API_KEY"] = raw
-
-
 def _require_wandb_api_key_or_exit() -> None:
-    """Fail fast with a clear message when --wandb is requested without a usable key."""
+    """Fail fast when --wandb is requested without WANDB_API_KEY."""
     key = (os.environ.get("WANDB_API_KEY") or "").strip()
     if key:
         return
-    path = os.path.join(project_root, "wandb_api_key.txt")
     print("ERROR: --wandb requested but API key is missing.", file=sys.stderr)
-    print(f"Expected key file: {path}", file=sys.stderr)
     print(
-        "Put exactly one valid key from https://wandb.ai/authorize on one line "
-        "in that file, then rerun.",
+        "Set environment variable WANDB_API_KEY to a valid key from "
+        "https://wandb.ai/authorize, then rerun.",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -3282,7 +3251,6 @@ def main():
                         help='Disable tensor shape metadata in PROFILE logs.')
     
     args = parser.parse_args()
-    _maybe_load_wandb_api_key_from_file()
     if args.wandb:
         _require_wandb_api_key_or_exit()
     diffusion_export_epochs = [
@@ -3400,8 +3368,7 @@ def main():
                 if not init_wandb(project=args.wandb_project, resume=args.resume):
                     print(
                         "ERROR: wandb initialization failed. "
-                        "Most common cause is an invalid/revoked API key in "
-                        "wandb_api_key.txt (W&B 401).",
+                        "Most common cause is an invalid/revoked WANDB_API_KEY (W&B 401).",
                         file=sys.stderr,
                     )
                     sys.exit(2)
@@ -3428,8 +3395,7 @@ def main():
                 if not init_wandb(project=args.wandb_project, resume=args.resume):
                     print(
                         "ERROR: wandb initialization failed. "
-                        "Most common cause is an invalid/revoked API key in "
-                        "wandb_api_key.txt (W&B 401).",
+                        "Most common cause is an invalid/revoked WANDB_API_KEY (W&B 401).",
                         file=sys.stderr,
                     )
                     sys.exit(2)
@@ -3451,8 +3417,7 @@ def main():
                 if not init_wandb(project=args.wandb_project, resume=args.resume):
                     print(
                         "ERROR: wandb initialization failed. "
-                        "Most common cause is an invalid/revoked API key in "
-                        "wandb_api_key.txt (W&B 401).",
+                        "Most common cause is an invalid/revoked WANDB_API_KEY (W&B 401).",
                         file=sys.stderr,
                     )
                     sys.exit(2)

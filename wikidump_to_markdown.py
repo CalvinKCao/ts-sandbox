@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-import os
 import re
-import sys
-import html
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -176,7 +173,7 @@ def main():
 
     print(f"Total unique pages found: {len(pages)}")
     
-    for clean_title, (orig_title, content, is_redirect, is_en) in pages.items():
+    for clean_title, (_orig_title, content, is_redirect, _is_en) in pages.items():
         if is_redirect and len(pages) > 100: # Heuristic to skip redirects if we have plenty of real content
             # Only keep redirects if they don't have a clean path already
             continue

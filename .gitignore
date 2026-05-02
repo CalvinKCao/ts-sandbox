@@ -3,7 +3,6 @@
 # =============================================================================
 synced_results/
 notes/
-wandb_api_key.txt
 # -----------------------------------------------------------------------------
 # Python
 # -----------------------------------------------------------------------------
@@ -174,16 +173,16 @@ runs/
 # lnai-generated
 .agents/skills/alliancecan
 .agents/skills/audio_math_explainer
+.agents/skills/github-semantic-commit
 .agents/skills/messy
 .agents/skills/natural
 .agents/skills/quick
 .agents/skills/slidev
 .agents/skills/slurm-killarney
 .ai/.lnai-manifest.json
-.claude/CLAUDE.md
-.claude/skills/slidev
 .cursor/skills/alliancecan
 .cursor/skills/audio_math_explainer
+.cursor/skills/github-semantic-commit
 .cursor/skills/messy
 .cursor/skills/natural
 .cursor/skills/quick
@@ -192,6 +191,7 @@ runs/
 .gemini/settings.json
 .gemini/skills/alliancecan
 .gemini/skills/audio_math_explainer
+.gemini/skills/github-semantic-commit
 .gemini/skills/messy
 .gemini/skills/natural
 .gemini/skills/quick
@@ -199,6 +199,7 @@ runs/
 .gemini/skills/slurm-killarney
 .github/skills/alliancecan
 .github/skills/audio_math_explainer
+.github/skills/github-semantic-commit
 .github/skills/messy
 .github/skills/natural
 .github/skills/quick
@@ -206,12 +207,11 @@ runs/
 .github/skills/slurm-killarney
 .windsurf/skills/alliancecan
 .windsurf/skills/audio_math_explainer
+.windsurf/skills/github-semantic-commit
 .windsurf/skills/messy
 .windsurf/skills/natural
 .windsurf/skills/quick
 .windsurf/skills/slidev
 .windsurf/skills/slurm-killarney
 AGENTS.md
-opencode.json
 # end lnai-generated
-wandb_api_key.txt

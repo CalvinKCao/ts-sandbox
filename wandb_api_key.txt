@@ -1,5 +1,0 @@
-# Copy this file to wandb_api_key.txt (repo root) and put your API key on a
-# single line below. Get a key from https://wandb.ai/authorize
-#
-# Optional: set WANDB_API_KEY_FILE to a different pa
-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
