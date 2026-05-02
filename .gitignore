@@ -12,7 +12,20 @@ slides/
 .ai/
 docs.alliancecan.ca_mediawiki-20260319-wikidump/
 .claude/
-.cursor/
+# .cursor/ mostly local; un-ignore skill symlinks lnai manages (parent must not be fully excluded)
+.cursor/*
+!.cursor/skills/
+.cursor/skills/*
+!.cursor/skills/alliancecan
+!.cursor/skills/audio_math_explainer
+!.cursor/skills/git
+!.cursor/skills/lnai
+!.cursor/skills/lnai-master-sync
+!.cursor/skills/messy
+!.cursor/skills/natural
+!.cursor/skills/quick
+!.cursor/skills/slidev
+!.cursor/skills/slurm-killarney
 .gemini/
 .github/
 .windsurf/
@@ -72,6 +85,10 @@ env/
 
 # All results folders (regeneratable, often huge)
 **/results/
+# Alliance Slurm/Python artifacts (see .ai/skills/alliancecan); flat buckets per job
+**/results/logs/
+**/results/ckpts/
+**/results/datasets/
 **/test_results/
 **/test_output/
 
@@ -134,6 +151,8 @@ optuna_study.db
 .DS_Store
 Thumbs.db
 desktop.ini
+# NTFS / downloaded-file alternate stream junk (often appears as *:Zone.Identifier on WSL)
+*Zone.Identifier*
 
 # -----------------------------------------------------------------------------
 # Temporary Files
@@ -183,23 +202,13 @@ scripts/
 # lnai-generated
 .agents/skills/alliancecan
 .agents/skills/audio_math_explainer
-.agents/skills/git
+.agents/skills/github-semantic-commit
 .agents/skills/messy
 .agents/skills/natural
 .agents/skills/quick
 .agents/skills/slidev
 .agents/skills/slurm-killarney
 .ai/.lnai-manifest.json
-.cursor/skills/alliancecan
-.cursor/skills/audio_math_explainer
-.cursor/skills/git
-.cursor/skills/lnai
-.cursor/skills/lnai-master-sync
-.cursor/skills/messy
-.cursor/skills/natural
-.cursor/skills/quick
-.cursor/skills/slidev
-.cursor/skills/slurm-killarney
 .gemini/settings.json
 .gemini/skills/alliancecan
 .gemini/skills/audio_math_explainer
@@ -223,7 +232,7 @@ scripts/
 .github/skills/slurm-killarney
 .windsurf/skills/alliancecan
 .windsurf/skills/audio_math_explainer
-.windsurf/skills/git
+.windsurf/skills/github-semantic-commit
 .windsurf/skills/messy
 .windsurf/skills/natural
 .windsurf/skills/quick
