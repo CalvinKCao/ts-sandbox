@@ -56,3 +56,11 @@ Implement these behaviors in training, eval, and visualization scripts whenever 
 - Never leave wording that makes AI authorship obvious.
 
 # Notes space for agents
+
+**Boundary:** Do not move, copy, merge, or relocate any content from **above** this `# Notes space for agents` heading into this section. Keep structural instructions in their existing sections upstream; use this block only for **new** session-specific notes you add (scratch reminders, one-off context).
+
+## ts-sandbox (repo context)
+
+ML / time-series experiments (diffusion and related). Slurm entrypoints live at repo root (`slurm_*.sh`); training code under `models/`. Alliance-specific paths: `.ai/cluster-paths.md`; use the **`/alliancecan`** skill for cluster work.
+
+After tasks: semantic commit and push via **`/git`** — see **Wrap-up** above. Do not commit scratch outputs, huge logs, checkpoints, or throwaway scripts — see **Git hygiene** above; extend `.gitignore` in the same change when you add that kind of artifact.
