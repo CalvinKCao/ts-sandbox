@@ -53,13 +53,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, Subset
 
-# Optional wandb
-try:
-    import wandb
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
-    wandb = None
+import wandb
+WANDB_AVAILABLE = True
 
 
 def _require_wandb_api_key_or_exit() -> None:
