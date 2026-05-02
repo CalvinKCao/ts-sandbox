@@ -21,7 +21,7 @@ If `/alliancecan` does not resolve the question, check `wiki_docs/` for cluster-
 If you generate obvious junk, oversized artifacts, or useless throwaway files, **add ignore patterns to `.gitignore` in the same change** (or delete them) so they do not get committed.
 
 ## Wrap-up
-After multi-step work, use the **`/git`** skill to produce semantic commits and **push** to the tracked branch.
+After multi-step work, use the **`/git`** skill (`.ai/skills/git/SKILL.md`) to produce semantic commits and **push** to the tracked branch.
 
 ## ML smoke tests (not unit-test TDD)
 Full test suites are usually impractical for ML. Prefer **smoke tests**: the smallest run that still exercises the real training/eval path end-to-end.
