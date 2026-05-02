@@ -28,11 +28,11 @@
 #
 # WANDB: jobs pass --wandb and expect WANDB_API_KEY in the environment
 # (Slurm forwards with --export=ALL).
-# Runs use online mode by default; metrics land under $STORE/wandb/.
+# Runs use online mode by default; wandb cache under ./results/logs/<stem>_wandb/.
 #
 # Resume after pretrain timeout: re-submit the same script. If
-#   $GAUSS_CKPT/pretrained_diffusion_last.pt exists, diffusion pretrain continues
-#   automatically (same checkpoint dir). Finished runs delete that file.
+#   results/ckpts/<job-A-stem>/pretrained_diffusion_last.pt exists (see
+#   results/logs/etth2-last-gauss-ckpt.txt), pretrain continues in that dir.
 #
 # HOW TO SMOKE TEST (pick one):
 #   1) Pip + imports on a short GPU alloc: fresh venv on the node, pip install
@@ -41,7 +41,7 @@
 #        ./slurm_etth2_compare.sh --smoke
 #      Submits A + one epoch-1 downstream job with short walls; passes --smoke-test.
 #      Watch:  squeue -u $USER
-#      Logs:   tail -f $STORE/logs/A-gauss-pretrain-<JOB_ID>.out
+#      Logs:   tail -f results/logs/<MM-DD>-<jobid4>-gauss-pretrain.log
 #   3) Local (WSL / laptop):  pytest models/diffusion_tsf/tests/ -q
 #      (no Alliance wheel cache — does not replace 1 or 2.)
 # =============================================================================
@@ -58,52 +58,21 @@ elif [ -d "$HOME/ts-sandbox" ];         then REPO="$HOME/ts-sandbox"
 else echo "ERROR: ts-sandbox not found in SCRATCH or HOME" && exit 1
 fi
 
-# ---- Storage ----------------------------------------------------------------
-# Default: $SCRATCH (always set on Killarney, large, fast — right place for
-# active training).  Set STORE before running to override, e.g. to keep
-# results in PROJECT for longer-term storage:
-#   STORE=$PROJECT/$USER/diffusion-tsf-etth2-epoch-sweep ./slurm_etth2_compare.sh
-if [ -z "${STORE:-}" ]; then
-    if [ -z "${SCRATCH:-}" ]; then
-        echo "ERROR: \$SCRATCH is not set. Set STORE manually and re-run."
-        exit 1
-    fi
-    export STORE="$SCRATCH/diffusion-tsf-etth2-epoch-sweep"
-else
-    export STORE
-fi
-export GAUSS_CKPT="$STORE/checkpoints_gauss"
-export GAUSS_RESULTS="$STORE/results_gauss"
-# Left defined only because the old binary job body below is kept unreachable
-# after the epoch-sweep exit. Do not submit/use these in this experiment.
-export BINARY_CKPT="$STORE/unused_checkpoints_binary"
-export BINARY_RESULTS="$STORE/unused_results_binary"
-LOG_DIR="$STORE/logs"
+# ---- Artifacts (Alliance layout) --------------------------------------------
+# All logs, checkpoints, and run outputs live under ./results/ relative to the
+# directory from which you invoke this wrapper (same as SLURM_SUBMIT_DIR for
+# submitted jobs). See .ai/skills/alliancecan (results/{logs,ckpts,datasets}).
 
-mkdir -p "$GAUSS_CKPT" "$GAUSS_RESULTS" \
-         "$LOG_DIR"
+SBATCH_JOBS="$REPO/results/logs/etth2-chain-job-scripts"
+mkdir -p "$SBATCH_JOBS" "$REPO/results/logs" "$REPO/results/ckpts" "$REPO/results/datasets"
 
-# Real on-disk batch bodies (Alliance: pass a script *path* to sbatch — stdin heredocs
-# are fragile; mirrors slurm_unet_fullvar.sh pattern).
-SBATCH_JOBS="$STORE/slurm_etth2_job_scripts"
-mkdir -p "$SBATCH_JOBS"
-
-# Print resolved paths up front so you always know where to look
 echo "=================================================================="
-echo "  Storage root:  $STORE"
-echo "  Logs:          $LOG_DIR"
-echo "  (set STORE=\$PROJECT/\$USER/diffusion-tsf-etth2 to access later)"
+echo "  Repo / submit dir:  $REPO"
+echo "  Artifacts:          $REPO/results/{logs,ckpts,datasets}/"
 echo "=================================================================="
 
-# Keep datasets accessible from STORE without copying GBs
-# Use -L to check for the symlink itself (not its target) to avoid broken-symlink traps
-[ ! -L "$STORE/datasets" ] && [ ! -e "$STORE/datasets" ] && \
-    ln -s "$REPO/datasets" "$STORE/datasets"
-
-# ---- Venv path (exported so jobs can see it) --------------------------------
-# $PROJECT is not set on Killarney login nodes — walk ~/projects/ safely without
-# relying on a glob that exits non-zero when nothing matches.
-export VENV="$STORE/venv"   # default; overridden below if a pre-built venv exists
+# ---- Venv path (informational; batch preamble builds venv on SLURM_TMPDIR) ---
+export VENV="${REPO}/.venv"
 for _d in ~/projects/aip-* ~/projects/def-*; do
     [ -d "$_d/$USER/diffusion-tsf/venv" ] && export VENV="$_d/$USER/diffusion-tsf/venv" && break
 done
@@ -144,19 +113,26 @@ export PY_COMMON="--n-variates 7 --amp --synthetic-samples 60000 --itransformer-
 # ---- Shared job body: module load + venv activate + cd ----------------------
 # Written as a quoted heredoc into a temp file so each job can source it.
 # (Avoids duplicating 15 lines × 4 jobs while keeping expansion safe.)
-# Written to $STORE (shared filesystem) so compute nodes can source it —
-# /tmp on the login node is NOT visible from compute nodes.
-PREAMBLE_FILE="$STORE/job_preamble.sh"
-# Unquoted heredoc: bake ${REPO}, ${STORE} at submit time. Batch jobs often do not
-# inherit login-node env — quoted heredocs left \$REPO unset → fast failure under set -u.
-# Use \$ / \$(...) for values that must expand on the compute node when sourced.
+# Written under results/logs so compute nodes see the same path as the repo checkout.
+PREAMBLE_FILE="$REPO/results/logs/etth2-chain-preamble.sh"
+# Unquoted heredoc: bake ${REPO} at submit time. Use \$ for compute-node expansion.
 cat > "$PREAMBLE_FILE" <<PREAMBLE
 set -euo pipefail
+: "\${ALLIANCE_RUN_SLUG:?set ALLIANCE_RUN_SLUG before sourcing preamble}"
+cd "\${SLURM_SUBMIT_DIR}"
+mkdir -p results/logs results/ckpts results/datasets
+ALLIANCE_RUN_STEM="\$(date +%m-%d)-\${SLURM_JOB_ID: -4}-\${ALLIANCE_RUN_SLUG}"
+export ALLIANCE_RUN_STEM
+export ALLIANCE_JOB_LOG="\${SLURM_SUBMIT_DIR}/results/logs/\${ALLIANCE_RUN_STEM}.log"
+touch "\${ALLIANCE_JOB_LOG}"
+exec >>"\${ALLIANCE_JOB_LOG}" 2>&1
+
 echo "======================================================="
 echo "  Job: \$SLURM_JOB_NAME   ID: \$SLURM_JOB_ID"
 echo "  Node: \$SLURMD_NODENAME"
 echo "  GPU:  \$(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
 echo "  Started: \$(date)"
+echo "  Log: \${ALLIANCE_JOB_LOG}"
 echo "======================================================="
 
 # || true required: sticky modules (CCconfig, gentoo, compiler stack) refuse to
@@ -209,7 +185,7 @@ echo "[setup] Venv ready: \$(which python)"
 # Persist run metadata on scratch; syncs to the cloud when WANDB_API_KEY is set
 # and mode is online (default). For air-gapped runs: export WANDB_MODE=offline
 # then run: wandb sync \$WANDB_DIR/offline-run-* from a machine with a key.
-export WANDB_DIR="${STORE}/wandb"
+export WANDB_DIR="\${SLURM_SUBMIT_DIR}/results/logs/\${ALLIANCE_RUN_STEM}_wandb"
 mkdir -p "\$WANDB_DIR"
 if [ -z "\${WANDB_API_KEY:-}" ]; then
     echo "[wandb] ERROR: WANDB_API_KEY is not set."
@@ -276,57 +252,73 @@ export PREAMBLE_FILE
 
 cat > "$SBATCH_JOBS/job_A.sh" <<JOB_A
 #!/bin/bash
+export ALLIANCE_RUN_SLUG=gauss-pretrain
 source "${PREAMBLE_FILE}"
 
+GAUSS_CKPT="\${SLURM_SUBMIT_DIR}/results/ckpts/\${ALLIANCE_RUN_STEM}"
+GAUSS_RESULTS="\${SLURM_SUBMIT_DIR}/results/datasets/\${ALLIANCE_RUN_STEM}"
+mkdir -p "\$GAUSS_CKPT" "\$GAUSS_RESULTS"
+
 ${PY} --mode pretrain \\
-    --checkpoint-dir "${GAUSS_CKPT}" \\
-    --results-dir    "${GAUSS_RESULTS}" \\
+    --checkpoint-dir "\$GAUSS_CKPT" \\
+    --results-dir    "\$GAUSS_RESULTS" \\
     ${PY_COMMON}
 
+echo "\$GAUSS_CKPT" > "\${SLURM_SUBMIT_DIR}/results/logs/etth2-last-gauss-ckpt.txt"
 echo "[A] Gaussian pretrain done: \$(date)"
-wandb_upload_job_logs "${GAUSS_CKPT}" \
-    "${LOG_DIR}/A-gauss-pretrain-\${SLURM_JOB_ID}.out" \
-    "${LOG_DIR}/A-gauss-pretrain-\${SLURM_JOB_ID}.err"
+wandb_upload_job_logs "\$GAUSS_CKPT" "\${ALLIANCE_JOB_LOG}"
 JOB_A
 chmod +x "$SBATCH_JOBS/job_A.sh"
 
 cat > "$SBATCH_JOBS/job_B.sh" <<JOB_B
 #!/bin/bash
+export ALLIANCE_RUN_SLUG=binary-pretrain
 source "${PREAMBLE_FILE}"
 
+GAUSS_CKPT="\$(cat "\${SLURM_SUBMIT_DIR}/results/logs/etth2-last-gauss-ckpt.txt")"
+BINARY_CKPT="\${SLURM_SUBMIT_DIR}/results/ckpts/\${ALLIANCE_RUN_STEM}"
+BINARY_RESULTS="\${SLURM_SUBMIT_DIR}/results/datasets/\${ALLIANCE_RUN_STEM}"
+mkdir -p "\$BINARY_CKPT" "\$BINARY_RESULTS"
+
 echo "[B] Copying iTrans artifacts from Gaussian checkpoint dir..."
-if [ -f "${BINARY_CKPT}/.smoke_test" ]; then
+if [ -f "\$BINARY_CKPT/.smoke_test" ]; then
     echo "[B] Removing stale binary smoke-test artifacts before copying iTrans..."
-    rm -f "${BINARY_CKPT}/pretrained_itransformer.pt" \\
-          "${BINARY_CKPT}/pretrained_diffusion.pt" \\
-          "${BINARY_CKPT}/pretrained_diffusion_last.pt" \\
-          "${BINARY_CKPT}/itrans_hp.json" \\
-          "${BINARY_CKPT}/diff_hp.json" \\
-          "${BINARY_CKPT}/.smoke_test"
+    rm -f "\$BINARY_CKPT/pretrained_itransformer.pt" \\
+          "\$BINARY_CKPT/pretrained_diffusion.pt" \\
+          "\$BINARY_CKPT/pretrained_diffusion_last.pt" \\
+          "\$BINARY_CKPT/itrans_hp.json" \\
+          "\$BINARY_CKPT/diff_hp.json" \\
+          "\$BINARY_CKPT/.smoke_test"
 fi
-cp -v "${GAUSS_CKPT}/pretrained_itransformer.pt" "${BINARY_CKPT}/pretrained_itransformer.pt"
-[ -f "${GAUSS_CKPT}/itrans_hp.json" ] && \\
-    cp -v "${GAUSS_CKPT}/itrans_hp.json" "${BINARY_CKPT}/itrans_hp.json"
+cp -v "\$GAUSS_CKPT/pretrained_itransformer.pt" "\$BINARY_CKPT/pretrained_itransformer.pt"
+[ -f "\$GAUSS_CKPT/itrans_hp.json" ] && \\
+    cp -v "\$GAUSS_CKPT/itrans_hp.json" "\$BINARY_CKPT/itrans_hp.json"
 
 echo "[B] Running binary diffusion HP + pretrain..."
 ${PY} --mode pretrain \\
     --binary-diffusion \\
-    --checkpoint-dir "${BINARY_CKPT}" \\
-    --results-dir    "${BINARY_RESULTS}" \\
+    --checkpoint-dir "\$BINARY_CKPT" \\
+    --results-dir    "\$BINARY_RESULTS" \\
     ${PY_COMMON}
 
+echo "\$BINARY_CKPT" > "\${SLURM_SUBMIT_DIR}/results/logs/etth2-last-binary-ckpt.txt"
 echo "[B] Binary pretrain done: \$(date)"
 JOB_B
 chmod +x "$SBATCH_JOBS/job_B.sh"
 
 cat > "$SBATCH_JOBS/job_C.sh" <<JOB_C
 #!/bin/bash
+export ALLIANCE_RUN_SLUG=gauss-finetune-etth2
 source "${PREAMBLE_FILE}"
+
+GAUSS_CKPT="\$(cat "\${SLURM_SUBMIT_DIR}/results/logs/etth2-last-gauss-ckpt.txt")"
+GAUSS_RESULTS="\${SLURM_SUBMIT_DIR}/results/datasets/\${ALLIANCE_RUN_STEM}"
+mkdir -p "\$GAUSS_RESULTS"
 
 ${PY} --mode finetune \\
     --dataset ETTh2 \\
-    --checkpoint-dir "${GAUSS_CKPT}" \\
-    --results-dir    "${GAUSS_RESULTS}" \\
+    --checkpoint-dir "\$GAUSS_CKPT" \\
+    --results-dir    "\$GAUSS_RESULTS" \\
     ${PY_COMMON}
 
 echo "[C] Gaussian finetune done: \$(date)"
@@ -335,13 +327,18 @@ chmod +x "$SBATCH_JOBS/job_C.sh"
 
 cat > "$SBATCH_JOBS/job_D.sh" <<JOB_D
 #!/bin/bash
+export ALLIANCE_RUN_SLUG=binary-finetune-etth2
 source "${PREAMBLE_FILE}"
+
+BINARY_CKPT="\$(cat "\${SLURM_SUBMIT_DIR}/results/logs/etth2-last-binary-ckpt.txt")"
+BINARY_RESULTS="\${SLURM_SUBMIT_DIR}/results/datasets/\${ALLIANCE_RUN_STEM}"
+mkdir -p "\$BINARY_RESULTS"
 
 ${PY} --mode finetune \\
     --dataset ETTh2 \\
     --binary-diffusion \\
-    --checkpoint-dir "${BINARY_CKPT}" \\
-    --results-dir    "${BINARY_RESULTS}" \\
+    --checkpoint-dir "\$BINARY_CKPT" \\
+    --results-dir    "\$BINARY_RESULTS" \\
     ${PY_COMMON}
 
 echo "[D] Binary finetune done: \$(date)"
@@ -363,8 +360,8 @@ JOB_A=$(sbatch --parsable --export=ALL \
     "${GPU_ARGS[@]}" \
     --time="$WALL_PRETRAIN" \
     --chdir="${REPO}" \
-    --output="$LOG_DIR/A-gauss-pretrain-%j.out" \
-    --error="$LOG_DIR/A-gauss-pretrain-%j.err" \
+    --output=/dev/null \
+    --error=/dev/null \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
     "$SBATCH_JOBS/job_A.sh")
 echo "  -> A: $JOB_A"
@@ -374,23 +371,21 @@ echo "Submitting downstream ETTh2 finetune/eval jobs for exported Gaussian check
 MILESTONE_JOB_IDS=()
 
 for EPOCH in "${MILESTONES[@]}"; do
-    EPOCH_CKPT="$STORE/checkpoints_gauss_epoch${EPOCH}"
-    EPOCH_RESULTS="$STORE/results_gauss_epoch${EPOCH}"
-    mkdir -p "$EPOCH_CKPT" "$EPOCH_RESULTS"
-
     cat > "$SBATCH_JOBS/job_gauss_epoch${EPOCH}.sh" <<JOB_EPOCH
 #!/bin/bash
+export ALLIANCE_RUN_SLUG=gauss-epoch${EPOCH}-finetune
 source "${PREAMBLE_FILE}"
 
-EPOCH_CKPT="${EPOCH_CKPT}"
-EPOCH_RESULTS="${EPOCH_RESULTS}"
+GAUSS_SRC="\$(cat "\${SLURM_SUBMIT_DIR}/results/logs/etth2-last-gauss-ckpt.txt")"
+EPOCH_CKPT="\${SLURM_SUBMIT_DIR}/results/ckpts/\${ALLIANCE_RUN_STEM}"
+EPOCH_RESULTS="\${SLURM_SUBMIT_DIR}/results/datasets/\${ALLIANCE_RUN_STEM}"
 mkdir -p "\$EPOCH_CKPT" "\$EPOCH_RESULTS"
 
 echo "[epoch ${EPOCH}] Preparing checkpoint dir: \$EPOCH_CKPT"
-cp -v "${GAUSS_CKPT}/pretrained_itransformer.pt" "\$EPOCH_CKPT/pretrained_itransformer.pt"
-[ -f "${GAUSS_CKPT}/itrans_hp.json" ] && cp -v "${GAUSS_CKPT}/itrans_hp.json" "\$EPOCH_CKPT/itrans_hp.json"
-[ -f "${GAUSS_CKPT}/diff_hp.json" ] && cp -v "${GAUSS_CKPT}/diff_hp.json" "\$EPOCH_CKPT/diff_hp.json"
-cp -v "${GAUSS_CKPT}/pretrained_diffusion_best_epoch${EPOCH}.pt" "\$EPOCH_CKPT/pretrained_diffusion.pt"
+cp -v "\$GAUSS_SRC/pretrained_itransformer.pt" "\$EPOCH_CKPT/pretrained_itransformer.pt"
+[ -f "\$GAUSS_SRC/itrans_hp.json" ] && cp -v "\$GAUSS_SRC/itrans_hp.json" "\$EPOCH_CKPT/itrans_hp.json"
+[ -f "\$GAUSS_SRC/diff_hp.json" ] && cp -v "\$GAUSS_SRC/diff_hp.json" "\$EPOCH_CKPT/diff_hp.json"
+cp -v "\$GAUSS_SRC/pretrained_diffusion_best_epoch${EPOCH}.pt" "\$EPOCH_CKPT/pretrained_diffusion.pt"
 
 ${PY} --mode finetune \
     --dataset ETTh2 \
@@ -399,9 +394,7 @@ ${PY} --mode finetune \
     ${PY_COMMON}
 
 echo "[epoch ${EPOCH}] ETTh2 finetune/eval done: \$(date)"
-wandb_upload_job_logs "\$EPOCH_CKPT" \
-    "${LOG_DIR}/gauss-epoch${EPOCH}-finetune-\${SLURM_JOB_ID}.out" \
-    "${LOG_DIR}/gauss-epoch${EPOCH}-finetune-\${SLURM_JOB_ID}.err"
+wandb_upload_job_logs "\$EPOCH_CKPT" "\${ALLIANCE_JOB_LOG}"
 JOB_EPOCH
     chmod +x "$SBATCH_JOBS/job_gauss_epoch${EPOCH}.sh"
 
@@ -413,8 +406,8 @@ JOB_EPOCH
         --time="$WALL_FINETUNE" \
         --dependency="afterok:$JOB_A" \
         --chdir="${REPO}" \
-        --output="$LOG_DIR/gauss-epoch${EPOCH}-finetune-%j.out" \
-        --error="$LOG_DIR/gauss-epoch${EPOCH}-finetune-%j.err" \
+        --output=/dev/null \
+        --error=/dev/null \
         --mail-type=FAIL --mail-user=ccao87@uwo.ca \
         "$SBATCH_JOBS/job_gauss_epoch${EPOCH}.sh")
     MILESTONE_JOB_IDS+=("$JOB_E")
@@ -430,13 +423,13 @@ for i in "${!MILESTONES[@]}"; do
     echo "  ${MILESTONE_JOB_IDS[$i]}  ETTh2 finetune/eval from best-so-far epoch ${MILESTONES[$i]} [afterok:$JOB_A]"
 done
 echo ""
-echo "  Exported checkpoints will be read from:"
+echo "  Exported checkpoints will be read from (under job A ckpt dir, see etth2-last-gauss-ckpt.txt):"
 for EPOCH in "${MILESTONES[@]}"; do
-    echo "    ${GAUSS_CKPT}/pretrained_diffusion_best_epoch${EPOCH}.pt"
+    echo "    pretrained_diffusion_best_epoch${EPOCH}.pt"
 done
 echo ""
-echo "  Logs:        $LOG_DIR/"
-echo "  Base ckpts:  $GAUSS_CKPT/"
+echo "  Logs:        $REPO/results/logs/*.log"
+echo "  Checkpoints: $REPO/results/ckpts/"
 echo "  Monitor:     squeue -u \$USER"
 echo "  Cancel all:  scancel $JOB_A ${MILESTONE_JOB_IDS[*]}"
 echo "=================================================================="
@@ -457,8 +450,8 @@ JOB_B=$(sbatch --parsable --export=ALL \
     --time="$WALL_PRETRAIN" \
     --dependency="afterok:$JOB_A" \
     --chdir="${REPO}" \
-    --output="$LOG_DIR/B-binary-pretrain-%j.out" \
-    --error="$LOG_DIR/B-binary-pretrain-%j.err" \
+    --output=/dev/null \
+    --error=/dev/null \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
     "$SBATCH_JOBS/job_B.sh")
 echo "  -> B: $JOB_B"
@@ -478,8 +471,8 @@ JOB_C=$(sbatch --parsable --export=ALL \
     --time="$WALL_FINETUNE" \
     --dependency="afterok:$JOB_A" \
     --chdir="${REPO}" \
-    --output="$LOG_DIR/C-gauss-finetune-%j.out" \
-    --error="$LOG_DIR/C-gauss-finetune-%j.err" \
+    --output=/dev/null \
+    --error=/dev/null \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
     "$SBATCH_JOBS/job_C.sh")
 echo "  -> C: $JOB_C"
@@ -499,8 +492,8 @@ JOB_D=$(sbatch --parsable --export=ALL \
     --time="$WALL_FINETUNE" \
     --dependency="afterok:$JOB_B" \
     --chdir="${REPO}" \
-    --output="$LOG_DIR/D-binary-finetune-%j.out" \
-    --error="$LOG_DIR/D-binary-finetune-%j.err" \
+    --output=/dev/null \
+    --error=/dev/null \
     --mail-type=FAIL --mail-user=ccao87@uwo.ca \
     "$SBATCH_JOBS/job_D.sh")
 echo "  -> D: $JOB_D"
@@ -520,7 +513,7 @@ echo "  C $JOB_C  Gaussian finetune    [afterok:$JOB_A]"
 echo "  D $JOB_D  Binary finetune      [afterok:$JOB_B]"
 echo ""
 echo "  Logs (tail -f to watch live):"
-echo "    $LOG_DIR/"
+echo "    $REPO/results/logs/"
 echo ""
 echo "  Monitor:     squeue -u \$USER"
 echo "  Quick check: squeue -j $JOB_A,$JOB_B,$JOB_C,$JOB_D -o '%.18i %.28j %.10T %.20R'"

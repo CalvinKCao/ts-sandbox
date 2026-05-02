@@ -36,8 +36,9 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --gres=gpu:l40s:1 \
             --cpus-per-task=2 \
             --mem=8G \
-            --output=unet-fullvar-smoke-%j.out \
-            --error=unet-fullvar-smoke-%j.err \
+            --chdir="$SCRIPT_DIR" \
+            --output=/dev/null \
+            --error=/dev/null \
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
             "$SCRIPT_DIR/slurm_unet_fullvar.sh" "$@"
@@ -52,8 +53,9 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --gpus-per-node=h100:1 \
             --cpus-per-task=6 \
             --mem=60G \
-            --output=unet-fullvar-%j.out \
-            --error=unet-fullvar-%j.err \
+            --chdir="$SCRIPT_DIR" \
+            --output=/dev/null \
+            --error=/dev/null \
             --mail-type=BEGIN,END,FAIL \
             --mail-user=ccao87@uwo.ca \
             "$SCRIPT_DIR/slurm_unet_fullvar.sh" "$@"
@@ -65,16 +67,36 @@ fi
 # We're inside a Slurm job — do the actual work
 # ===========================================================================
 
+set -euo pipefail
+
+cd "$SLURM_SUBMIT_DIR"
+mkdir -p results/logs results/ckpts results/datasets
+case "$SLURM_JOB_NAME" in
+    *smoke*) _slug=unet-fullvar-smoke ;;
+    *)       _slug=unet-fullvar ;;
+esac
+ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-${_slug}"
+ALLIANCE_JOB_LOG="$SLURM_SUBMIT_DIR/results/logs/${ALLIANCE_RUN_STEM}.log"
+touch "$ALLIANCE_JOB_LOG"
+exec >>"$ALLIANCE_JOB_LOG" 2>&1
+
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
 echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo 'unknown')"
 echo "Started: $(date)"
+echo "Log: $ALLIANCE_JOB_LOG"
 echo "=========================================="
+
+CKPT_ROOT="$SLURM_SUBMIT_DIR/results/ckpts/$ALLIANCE_RUN_STEM"
+RES_ROOT="$SLURM_SUBMIT_DIR/results/datasets/$ALLIANCE_RUN_STEM"
+mkdir -p "$CKPT_ROOT" "$RES_ROOT"
+export WANDB_DIR="$SLURM_SUBMIT_DIR/results/logs/${ALLIANCE_RUN_STEM}_wandb"
+mkdir -p "$WANDB_DIR"
 
 # ---- Environment ----
 
-module purge
+module purge || true
 module load StdEnv/2023
 module load python/3.11
 module load cuda/12.2
@@ -89,38 +111,31 @@ else
     exit 1
 fi
 
-# Auto-detect PROJECT
-if [ -z "$PROJECT" ]; then
-    if [ -d "$HOME/projects" ]; then
-        FIRST_PROJECT=$(ls -d $HOME/projects/def-* $HOME/projects/aip-* 2>/dev/null | head -1)
-        [ -n "$FIRST_PROJECT" ] && export PROJECT=$(readlink -f "$FIRST_PROJECT")
+# Auto-detect PROJECT (nullglob — bare ls + pipefail kills the job if globs miss)
+if [ -z "${PROJECT:-}" ] && [ -d "$HOME/projects" ]; then
+    shopt -s nullglob
+    _m=("$HOME"/projects/def-* "$HOME"/projects/aip-*)
+    shopt -u nullglob
+    if [ "${#_m[@]}" -gt 0 ]; then
+        export PROJECT=$(readlink -f "${_m[0]}")
     fi
 fi
 
-if [ -z "$PROJECT" ]; then
+if [ -z "${PROJECT:-}" ]; then
     echo "ERROR: PROJECT not found"
     exit 1
 fi
 
-# Separate storage root so it doesn't conflict with the main multivariate pipeline
-export STORAGE_ROOT="$PROJECT/$USER/diffusion-tsf-fullvar"
-echo "STORAGE_ROOT: $STORAGE_ROOT"
+echo "CKPT_ROOT: $CKPT_ROOT"
+echo "RES_ROOT:  $RES_ROOT"
 
-mkdir -p "$STORAGE_ROOT/checkpoints"
-mkdir -p "$STORAGE_ROOT/results"
-
-# Copy datasets to PROJECT if needed
-if [ ! -d "$STORAGE_ROOT/datasets" ]; then
-    echo "Copying datasets to PROJECT storage..."
-    cp -r "$PROJECT_ROOT/datasets" "$STORAGE_ROOT/datasets"
-fi
-
-# Venv — reuse main pipeline venv if it exists
+# Venv — reuse main pipeline venv if it exists; else a persistent fullvar venv under PROJECT
 VENV_PATH="$PROJECT/$USER/diffusion-tsf/venv"
 if [ ! -d "$VENV_PATH" ]; then
-    VENV_PATH="$STORAGE_ROOT/venv"
+    VENV_PATH="$PROJECT/$USER/diffusion-tsf-fullvar/venv"
     if [ ! -d "$VENV_PATH" ]; then
-        echo "Creating virtual environment..."
+        echo "Creating virtual environment at $VENV_PATH ..."
+        mkdir -p "$(dirname "$VENV_PATH")"
         python -m venv "$VENV_PATH"
         export PATH="$VENV_PATH/bin:$PATH"
         pip install --upgrade pip
@@ -133,6 +148,10 @@ if [ ! -d "$VENV_PATH" ]; then
 else
     export PATH="$VENV_PATH/bin:$PATH"
     echo "Reusing existing venv: $VENV_PATH"
+fi
+
+if [ ! -e "$SLURM_SUBMIT_DIR/results/datasets/repo" ]; then
+    ln -s "$PROJECT_ROOT/datasets" "$SLURM_SUBMIT_DIR/results/datasets/repo"
 fi
 
 if [ -z "${WANDB_API_KEY:-}" ]; then
@@ -195,9 +214,9 @@ cleanup() {
 }
 trap cleanup EXIT ERR SIGTERM SIGINT SIGUSR1
 
-# ---- Args: checkpoint/results from STORAGE_ROOT, then pass-through (strip --hours) ----
+# ---- Args: checkpoint/results under ./results/, then pass-through (strip --hours) ----
 
-PIPELINE_ARGS=(--checkpoint-dir "$STORAGE_ROOT/checkpoints" --results-dir "$STORAGE_ROOT/results")
+PIPELINE_ARGS=(--checkpoint-dir "$CKPT_ROOT" --results-dir "$RES_ROOT")
 while [[ $# -gt 0 ]]; do
     case $1 in
         --hours) shift 2 ;;
@@ -270,9 +289,9 @@ echo "  Smoke test:   ${SMOKE_TEST:-no}"
 echo "============================================================"
 echo ""
 
-if [ ! -d "datasets" ] && [ -n "$STORAGE_ROOT" ] && [ -d "$STORAGE_ROOT/datasets" ]; then
-    echo "[INFO] Symlinking datasets from $STORAGE_ROOT/datasets"
-    ln -sf "$STORAGE_ROOT/datasets" datasets
+if [ ! -d "datasets" ] && [ -d "$SLURM_SUBMIT_DIR/results/datasets/repo" ]; then
+    echo "[INFO] Symlinking datasets from results/datasets/repo"
+    ln -sfn "$SLURM_SUBMIT_DIR/results/datasets/repo" datasets
 fi
 
 TRAFFIC_DIR="datasets/traffic"
@@ -369,12 +388,8 @@ fi
 echo ""
 echo "=========================================="
 echo "Job completed: $(date)"
-echo "Results: $STORAGE_ROOT/results"
-echo "Checkpoints: $STORAGE_ROOT/checkpoints"
+echo "Results: $RES_ROOT"
+echo "Checkpoints: $CKPT_ROOT"
 echo "=========================================="
 
-wandb_upload_job_logs "$STORAGE_ROOT/checkpoints" \
-    "$SCRIPT_DIR/unet-fullvar-${SLURM_JOB_ID}.out" \
-    "$SCRIPT_DIR/unet-fullvar-${SLURM_JOB_ID}.err" \
-    "$SCRIPT_DIR/unet-fullvar-smoke-${SLURM_JOB_ID}.out" \
-    "$SCRIPT_DIR/unet-fullvar-smoke-${SLURM_JOB_ID}.err"
+wandb_upload_job_logs "$CKPT_ROOT" "$ALLIANCE_JOB_LOG"

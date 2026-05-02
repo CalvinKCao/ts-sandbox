@@ -7,8 +7,8 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=50G
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=ccao87@uwo.ca     # CHANGE to your email
 #SBATCH --signal=B:USR1@120            # Send USR1 120s before wall-time kill
@@ -43,6 +43,15 @@ set -e
 # Slurm redirects .out to a file → Python stdout/stderr are block-buffered unless unbuffered.
 export PYTHONUNBUFFERED=1
 
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+    cd "${SLURM_SUBMIT_DIR:-.}"
+    mkdir -p results/logs results/ckpts results/datasets
+    ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-${SLURM_JOB_NAME:-latent-dim1}"
+    export ALLIANCE_RUN_STEM
+    touch "results/logs/${ALLIANCE_RUN_STEM}.log"
+    exec >>"results/logs/${ALLIANCE_RUN_STEM}.log" 2>&1
+fi
+
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
@@ -50,7 +59,7 @@ echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo 'unknown')"
 echo "Started: $(date)"
 echo "=========================================="
 
-module purge
+module purge || true
 module load StdEnv/2023
 module load python/3.11
 module load cuda/12.2
@@ -65,25 +74,24 @@ else
     exit 1
 fi
 
-if [ -z "$PROJECT" ]; then
-    if [ -d "$HOME/projects" ]; then
-        FIRST_PROJECT=$(ls -d $HOME/projects/def-* $HOME/projects/aip-* 2>/dev/null | head -1)
-        [ -n "$FIRST_PROJECT" ] && export PROJECT=$(readlink -f "$FIRST_PROJECT")
+if [ -z "${PROJECT:-}" ] && [ -d "$HOME/projects" ]; then
+    shopt -s nullglob
+    _m=("$HOME"/projects/def-* "$HOME"/projects/aip-*)
+    shopt -u nullglob
+    if [ "${#_m[@]}" -gt 0 ]; then
+        export PROJECT=$(readlink -f "${_m[0]}")
     fi
 fi
 
-if [ -z "$PROJECT" ]; then
+if [ -z "${PROJECT:-}" ]; then
     echo "ERROR: PROJECT not found"
     exit 1
 fi
 
-export STORAGE_ROOT="$PROJECT/$USER/diffusion-tsf"
-mkdir -p "$STORAGE_ROOT/checkpoints" "$STORAGE_ROOT/synthetic_cache" "$STORAGE_ROOT/results"
-
-# Same venv contract as other Slurm scripts: $PROJECT/$USER/diffusion-tsf/venv + deps.
-VENV_PATH="$STORAGE_ROOT/venv"
+VENV_PATH="$PROJECT/$USER/diffusion-tsf/venv"
 if [ ! -d "$VENV_PATH" ]; then
     echo "Creating virtual environment at $VENV_PATH (first run)..."
+    mkdir -p "$(dirname "$VENV_PATH")"
     python -m venv "$VENV_PATH"
     export PATH="$VENV_PATH/bin:$PATH"
     pip install --upgrade pip
@@ -107,15 +115,20 @@ fi
 echo "Python: $($PY -c 'import sys; print(sys.executable)')"
 echo "Torch: $($PY -c 'import torch; print(torch.__version__)')"
 
-LATENT_CACHE="$STORAGE_ROOT/synthetic_cache/latent_dim1"
+_STEM="${ALLIANCE_RUN_STEM:-local-latent}"
+LATENT_CACHE="${SLURM_SUBMIT_DIR:-$PROJECT_ROOT}/results/datasets/${_STEM}_latent_synth_cache"
 mkdir -p "$LATENT_CACHE"
 
 cd "$PROJECT_ROOT"
 
+mkdir -p "${SLURM_SUBMIT_DIR:-$PROJECT_ROOT}/results/ckpts/${_STEM}"
+ln -sfn "${SLURM_SUBMIT_DIR:-$PROJECT_ROOT}/results/ckpts/${_STEM}" \
+    "$PROJECT_ROOT/models/diffusion_tsf/checkpoints_latent"
+
 if [ ! -f datasets/ETT-small/ETTh1.csv ]; then
-    if [ -f "$STORAGE_ROOT/datasets/ETT-small/ETTh1.csv" ]; then
-        echo "Symlinking datasets from PROJECT storage..."
-        ln -sf "$STORAGE_ROOT/datasets" "$PROJECT_ROOT/datasets"
+    if [ -d "$PROJECT/$USER/diffusion-tsf/datasets/ETT-small" ]; then
+        echo "Symlinking datasets from \$PROJECT/\$USER/diffusion-tsf/datasets..."
+        ln -sf "$PROJECT/$USER/diffusion-tsf/datasets" "$PROJECT_ROOT/datasets"
     else
         echo "ERROR: Missing datasets/ETT-small/ETTh1.csv under $PROJECT_ROOT"
         exit 1

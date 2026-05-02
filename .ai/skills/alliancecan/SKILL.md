@@ -105,39 +105,46 @@ Only use `$SCRATCH/$USER/<repo>` if **your site documentation** says scratch is 
 
 ## Repo-local `results/` on the cluster (Slurm + Python)
 
-When you add or edit **Slurm job scripts** or **Python** that runs on Alliance login/compute nodes, put **all** run outputs the job creates—logs, checkpoints, generated datasets, exports—under **`./results/`** relative to the **submission directory** (the directory you `cd` to before `sbatch`, i.e. **`SLURM_SUBMIT_DIR`** in the batch environment). Do **not** anchor paths off the spool copy of the script.
+When you add or edit **Slurm job scripts** or **Python** that runs on Alliance login/compute nodes, put **all** run outputs the job creates—logs, checkpoints, generated datasets, exports—under **`./results/`** relative to **`SLURM_SUBMIT_DIR`** (the directory you were in when you ran `sbatch`). Do **not** put those artifacts under `$SCRATCH/...` or `$HOME` unless the user explicitly overrides. Do **not** anchor paths off the spool copy of the batch script.
 
-Use exactly **three** buckets at the top level of `results/`—**no extra subdirectories** unless the user explicitly asks:
+**Allowed top-level layout under `results/` — nothing else at that level:**
 
 | Path | Use |
 |------|-----|
-| `./results/logs/` | Job/Slurm logs, traces, text or CSV that behave like logs |
-| `./results/ckpts/` | Model checkpoints (`.pt`, `.ckpt`, `.safetensors`, …) |
-| `./results/datasets/` | Generated or copied data files |
+| `./results/logs/` | Job logs, traces, wandb offline roots, text/CSV that behave like logs, small generated helper scripts for a chain |
+| `./results/ckpts/` | Checkpoints; use a **per-run subdirectory** when the training code expects multiple canonical filenames in one dir |
+| `./results/datasets/` | Generated or copied data (symlinks to repo data are OK here) |
 
-**Naming (one file per artifact, flat inside each bucket):**
+Do **not** create sibling trees like `./checkpoints/`, `./slurm_logs/`, or a separate `$STORE` root on scratch for repo jobs unless the user asks.
+
+**Run stem (directory or file basename inside a bucket):**
 
 ```text
-./results/{logs|ckpts|datasets}/{MM-DD}-{last-3-chars-of-$SLURM_JOB_ID}-{short-descriptive-slug}.{ext}
+{MM-DD}-{last-4-characters-of-$SLURM_JOB_ID}-{short-descriptive-slug}
 ```
 
-Example: `./results/logs/05-02-847-etth1-train.log`, `./results/ckpts/05-02-847-best.pt`
+Use the **last four characters** of `SLURM_JOB_ID` (e.g. job `3249152` → `9152`). Pick a **short slug** that says what the job does (`gauss-pretrain`, `unet-fullvar-smoke`, `profile-1epoch`, …).
 
-After `cd "$SLURM_SUBMIT_DIR"` (or equivalent), compute a stem and pass it into Python/CLI via env or flags:
+Examples:
+
+- Single log file: `./results/logs/05-02-9152-gauss-pretrain.log`
+- Pipeline checkpoint dir: `./results/ckpts/05-02-9152-gauss-pretrain/` (contains `pretrained_diffusion.pt`, etc.)
+
+After `cd "$SLURM_SUBMIT_DIR"`, compute the stem **inside the batch job** (so `SLURM_JOB_ID` is known), then export it or pass to Python:
 
 ```bash
-STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-etth1-latent"
 mkdir -p ./results/logs ./results/ckpts ./results/datasets
-# e.g. export RUN_STEM="$STEM" and read in Python; write ckpts to ./results/ckpts/${STEM}.pt
+STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-gauss-pretrain"
+CKPT_DIR="./results/ckpts/${STEM}"
+mkdir -p "$CKPT_DIR"
 ```
 
-**Git:** keep `results/logs/`, `results/ckpts/`, and `results/datasets/` **gitignored** in the repo (nested submit dirs: ignore `**/results/logs/`, etc., or the whole `results/` tree).
+**Git:** keep `results/` **gitignored** (whole tree or per-bucket).
 
-**Slurm: one combined log file (stdout + stderr).** Do not leave the default split of `*.out` and `*.err` if you can avoid it.
+**Slurm: one combined log (stdout + stderr).** Never rely on separate `*.out` and `*.err` for the main job log.
 
-- **Preferred:** set **`#SBATCH --output`** and **`#SBATCH --error`** to the **same file path** under `./results/logs/`—Slurm merges both streams into that file. Slurm expands `%j`, `%x`, etc. in those paths; it does **not** run shell, so for the `MM-DD-…-${SLURM_JOB_ID: -3}-…` pattern either:
-  - use **`exec >>"$LOG" 2>&1`** early in the script (right after `mkdir` and `LOG=…`), with **`#SBATCH --output=/dev/null`** and **`#SBATCH --error=/dev/null`** so only that file receives output, or
-  - use identical `-o`/`-e` with `%j` / `%x` if a simpler name is enough.
+- **Preferred:** at the top of the batch body (after `cd "$SLURM_SUBMIT_DIR"`), set `LOG=./results/logs/${STEM}.log`, `mkdir -p "$(dirname "$LOG")"`, then **`exec >>"$LOG" 2>&1`**, and in `#SBATCH` use **`--output=/dev/null`** and **`--error=/dev/null`** so Slurm does not also write split files.  
+- **Alternative:** set **`#SBATCH --output`** and **`#SBATCH --error`** to the **identical** path under `./results/logs/` (Slurm merges when both are the same file). `#SBATCH` does not expand bash parameter expansion, so the `MM-DD-…-last4-…` shape usually needs the `exec` pattern or a path using only Slurm replacements (`%j`, `%x`, …).
 
 ## Resolving `$PROJECT` in job scripts (ts-sandbox pattern)
 

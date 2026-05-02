@@ -9,7 +9,9 @@
 # Usage (login node, repo root):
 #   ./slurm_profile_one_epoch.sh
 #   ACCOUNT=aip-boyuwang ./slurm_profile_one_epoch.sh
-#   STORE=$SCRATCH/diffusion-tsf-profile ./slurm_profile_one_epoch.sh
+#
+# Artifacts: ./results/{logs,ckpts,datasets}/ under the repo (submit dir). One
+# combined log per job (stdout+stderr) under results/logs/.
 #
 # Notes:
 # - Run with bash on the login node (this script submits sbatch).
@@ -24,14 +26,6 @@ CPUS="${CPUS:-8}"
 MEM="${MEM:-50G}"
 WALL="${WALL:-0-01:00:00}"
 
-if [ -z "${STORE:-}" ]; then
-    if [ -z "${SCRATCH:-}" ]; then
-        echo "ERROR: \$SCRATCH is not set. Set STORE manually and re-run."
-        exit 1
-    fi
-    STORE="$SCRATCH/diffusion-tsf-profile-one-epoch"
-fi
-
 if [ -d "$SCRATCH/ts-sandbox" ]; then
     PROJECT_ROOT="$SCRATCH/ts-sandbox"
 elif [ -d "$HOME/ts-sandbox" ]; then
@@ -41,20 +35,28 @@ else
     exit 1
 fi
 
-LOG_DIR="$STORE/logs"
-JOB_DIR="$STORE/job_scripts"
-mkdir -p "$LOG_DIR" "$JOB_DIR"
+mkdir -p "$PROJECT_ROOT/results/logs" "$PROJECT_ROOT/results/ckpts" "$PROJECT_ROOT/results/datasets"
+JOB_DIR="$PROJECT_ROOT/results/logs/profile-job-scripts"
+mkdir -p "$JOB_DIR"
 
 JOB_SCRIPT="$JOB_DIR/profile_one_epoch.job.sh"
 cat > "$JOB_SCRIPT" <<'JOB'
 #!/bin/bash
 set -euo pipefail
 
+cd "$SLURM_SUBMIT_DIR"
+mkdir -p results/logs results/ckpts results/datasets
+ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-profile-1epoch"
+ALLIANCE_JOB_LOG="$SLURM_SUBMIT_DIR/results/logs/${ALLIANCE_RUN_STEM}.log"
+touch "$ALLIANCE_JOB_LOG"
+exec >>"$ALLIANCE_JOB_LOG" 2>&1
+
 echo "======================================================="
 echo "  Job: $SLURM_JOB_NAME   ID: $SLURM_JOB_ID"
 echo "  Node: $SLURMD_NODENAME"
 echo "  GPU:  $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
 echo "  Start: $(date)"
+echo "  Log: $ALLIANCE_JOB_LOG"
 echo "======================================================="
 
 module purge || true
@@ -72,12 +74,7 @@ else
     exit 1
 fi
 
-if [ -z "${STORE:-}" ]; then
-    echo "ERROR: STORE not exported into batch environment."
-    exit 1
-fi
-
-echo "[setup] Building venv on \$SLURM_TMPDIR ..."
+echo "[setup] Building venv on $SLURM_TMPDIR ..."
 virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
@@ -87,7 +84,11 @@ if [ -f "$PROJECT_ROOT/requirements.txt" ]; then
     pip install -r "$PROJECT_ROOT/requirements.txt" -q || true
 fi
 
-export WANDB_DIR="$STORE/wandb"
+CKPT_DIR="$SLURM_SUBMIT_DIR/results/ckpts/$ALLIANCE_RUN_STEM"
+RES_DIR="$SLURM_SUBMIT_DIR/results/datasets/$ALLIANCE_RUN_STEM"
+mkdir -p "$CKPT_DIR" "$RES_DIR"
+
+export WANDB_DIR="$SLURM_SUBMIT_DIR/results/logs/${ALLIANCE_RUN_STEM}_wandb"
 mkdir -p "$WANDB_DIR"
 if [ -z "${WANDB_API_KEY:-}" ]; then
     echo "[wandb] ERROR: WANDB_API_KEY is not set."
@@ -149,11 +150,11 @@ python -u -m models.diffusion_tsf.train_multivariate_pipeline \
     --profile-max-subsets 1 \
     --amp \
     --wandb \
-    --wandb-project diffusion-tsf
+    --wandb-project diffusion-tsf \
+    --checkpoint-dir "$CKPT_DIR" \
+    --results-dir "$RES_DIR"
 
-wandb_upload_job_logs "$PROJECT_ROOT/models/diffusion_tsf/checkpoints_profile_1epoch" \
-    "$STORE/logs/profile-one-epoch-${SLURM_JOB_ID}.out" \
-    "$STORE/logs/profile-one-epoch-${SLURM_JOB_ID}.err"
+wandb_upload_job_logs "$CKPT_DIR" "$ALLIANCE_JOB_LOG"
 
 echo "Done: $(date)"
 JOB
@@ -168,18 +169,17 @@ JOB_ID=$(sbatch --parsable \
     --cpus-per-task="$CPUS" \
     --mem="$MEM" \
     --time="$WALL" \
-    --export=ALL,STORE="$STORE" \
     --chdir="$PROJECT_ROOT" \
-    --output="$LOG_DIR/profile-one-epoch-%j.out" \
-    --error="$LOG_DIR/profile-one-epoch-%j.err" \
+    --output=/dev/null \
+    --error=/dev/null \
     --mail-type=FAIL,END \
     --mail-user="$EMAIL" \
     "$JOB_SCRIPT")
 
 echo "Submitted: $JOB_ID"
-echo "Logs:"
-echo "  $LOG_DIR/profile-one-epoch-$JOB_ID.out"
-echo "  $LOG_DIR/profile-one-epoch-$JOB_ID.err"
+echo "Log (combined stdout+stderr) under:"
+echo "  $PROJECT_ROOT/results/logs/*-${JOB_ID: -4}-profile-1epoch.log"
+echo "List newest: ls -tr $PROJECT_ROOT/results/logs/*profile-1epoch.log | tail -1"
 echo "Monitor:"
 echo "  squeue -j $JOB_ID -o '%.18i %.20j %.10T %.20R'"
 echo "Check GRES:"

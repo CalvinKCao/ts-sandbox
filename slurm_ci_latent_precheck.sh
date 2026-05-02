@@ -6,8 +6,8 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=16G
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 
 # Same MODULE_ROOT / venv / datasets path as finetune jobs, but only runs import + CUDA smoke.
 # Submit from repo root (so SLURM_SUBMIT_DIR contains slurm_ci_latent_common.inc.sh):
@@ -20,12 +20,6 @@
 
 set -e
 export PYTHONUNBUFFERED=1
-
-echo "=========================================="
-echo "CI latent PRECHECK  Job=$SLURM_JOB_ID  Node=$SLURMD_NODENAME"
-echo "SLURM_SUBMIT_DIR=$SLURM_SUBMIT_DIR"
-echo "Started: $(date)"
-echo "=========================================="
 
 _INC=""
 if [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "${SLURM_SUBMIT_DIR}/slurm_ci_latent_common.inc.sh" ]; then

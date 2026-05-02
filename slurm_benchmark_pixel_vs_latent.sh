@@ -6,8 +6,8 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=50G
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=ccao87@uwo.ca
 #SBATCH --signal=B:USR1@120
@@ -24,13 +24,21 @@
 #   sbatch slurm_benchmark_pixel_vs_latent.sh -- --num-samples 256 --batch-size 8
 #   sbatch slurm_benchmark_pixel_vs_latent.sh -- --amp --num-samples 512
 #
-# Logs: bench-px-lat-<jobid>.out / .err in the directory where you ran sbatch.
+# Logs: ./results/logs/<MM-DD>-<jobid4>-bench-px-lat.log (combined stdout+stderr).
 # =============================================================================
 
 set -e
 export PYTHONUNBUFFERED=1
 # Reduce fragmentation OOMs on long-sequence U-Nets (PyTorch 2.x+)
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+    cd "${SLURM_SUBMIT_DIR:-.}"
+    mkdir -p results/logs results/ckpts results/datasets
+    ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-${SLURM_JOB_NAME:-bench-px-lat}"
+    touch "results/logs/${ALLIANCE_RUN_STEM}.log"
+    exec >>"results/logs/${ALLIANCE_RUN_STEM}.log" 2>&1
+fi
 
 cleanup() {
     trap '' EXIT ERR SIGTERM SIGINT SIGUSR1
@@ -49,7 +57,7 @@ echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo 'unknown')"
 echo "Started: $(date)"
 echo "=========================================="
 
-module purge
+module purge || true
 module load StdEnv/2023
 module load python/3.11
 module load cuda/12.2
@@ -64,10 +72,12 @@ else
     exit 1
 fi
 
-if [ -z "$PROJECT" ]; then
-    if [ -d "$HOME/projects" ]; then
-        FIRST_PROJECT=$(ls -d $HOME/projects/def-* $HOME/projects/aip-* 2>/dev/null | head -1)
-        [ -n "$FIRST_PROJECT" ] && export PROJECT=$(readlink -f "$FIRST_PROJECT")
+if [ -z "${PROJECT:-}" ] && [ -d "$HOME/projects" ]; then
+    shopt -s nullglob
+    _m=("$HOME"/projects/def-* "$HOME"/projects/aip-*)
+    shopt -u nullglob
+    if [ "${#_m[@]}" -gt 0 ]; then
+        export PROJECT=$(readlink -f "${_m[0]}")
     fi
 fi
 
@@ -76,12 +86,10 @@ if [ -z "$PROJECT" ]; then
     exit 1
 fi
 
-export STORAGE_ROOT="$PROJECT/$USER/diffusion-tsf"
-mkdir -p "$STORAGE_ROOT/checkpoints" "$STORAGE_ROOT/synthetic_cache" "$STORAGE_ROOT/results"
-
-VENV_PATH="$STORAGE_ROOT/venv"
+VENV_PATH="$PROJECT/$USER/diffusion-tsf/venv"
 if [ ! -d "$VENV_PATH" ]; then
     echo "Creating virtual environment at $VENV_PATH (first run)..."
+    mkdir -p "$(dirname "$VENV_PATH")"
     python -m venv "$VENV_PATH"
     export PATH="$VENV_PATH/bin:$PATH"
     pip install --upgrade pip

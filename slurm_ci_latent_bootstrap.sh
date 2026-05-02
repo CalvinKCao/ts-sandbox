@@ -6,8 +6,8 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=50G
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=ccao87@uwo.ca
 #SBATCH --signal=B:USR1@120
@@ -21,13 +21,6 @@
 
 set -e
 export PYTHONUNBUFFERED=1
-
-echo "=========================================="
-echo "Job ID: $SLURM_JOB_ID  (bootstrap 0-2)"
-echo "Node: $SLURMD_NODENAME"
-echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo 'unknown')"
-echo "Started: $(date)"
-echo "=========================================="
 
 EXTRA_ARGS=""
 for a in "$@"; do
@@ -54,6 +47,7 @@ fi
 source "$_INC"
 
 echo ""
+echo "Job ID: $SLURM_JOB_ID (bootstrap 0-2)"
 echo "Shared dir: $SHARED"
 echo ""
 

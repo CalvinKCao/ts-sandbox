@@ -6,8 +6,8 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=50G
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=ccao87@uwo.ca
 #SBATCH --signal=B:USR1@120
@@ -24,13 +24,6 @@ export PYTHONUNBUFFERED=1
 
 DS="${CI_DATASET:?Set CI_DATASET (e.g. sbatch --export=ALL,CI_DATASET=ETTh1 ...)}"
 EXS="${CI_EXCHANGE_SEED:-42}"
-
-echo "=========================================="
-echo "Job ID: $SLURM_JOB_ID  finetune dataset=$DS"
-echo "Node: $SLURMD_NODENAME"
-echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo 'unknown')"
-echo "Started: $(date)"
-echo "=========================================="
 
 EXTRA_ARGS=""
 for a in "$@"; do
@@ -55,6 +48,7 @@ fi
 source "$_INC"
 
 echo ""
+echo "Job ID: $SLURM_JOB_ID  dataset=$DS"
 echo "Run root: $RUNROOT"
 echo ""
 

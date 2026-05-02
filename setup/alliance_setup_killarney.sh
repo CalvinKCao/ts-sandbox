@@ -187,8 +187,8 @@ cat > "$PROJECT_ROOT/slurm_train_multivariate_killarney.sh" << SLURM_EOF
 #SBATCH --gpus-per-node=h100:${GPU_COUNT}
 #SBATCH --cpus-per-task=$((CPUS_PER_GPU * GPU_COUNT))
 #SBATCH --mem=${MEM_PER_GPU}
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --output=results/logs/%x-%j.log
+#SBATCH --error=results/logs/%x-%j.log
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=ccao87@uwo.ca
 #SBATCH --signal=B:USR1@120
