@@ -20,6 +20,7 @@ Usage:
     python -m models.diffusion_tsf.train_multivariate_pipeline
     python -m models.diffusion_tsf.train_multivariate_pipeline --resume
     python -m models.diffusion_tsf.train_multivariate_pipeline --smoke-test
+    python -m models.diffusion_tsf.train_multivariate_pipeline --profile-one-epoch
 
     # After a Slurm timeout during diffusion pretrain: same command + --checkpoint-dir.
     # If pretrained_diffusion_last.pt exists (written after each epoch), pretrain auto-resumes.
@@ -35,6 +36,8 @@ import json
 import logging
 import os
 import random
+import re
+import shutil
 import sys
 import time
 from dataclasses import dataclass, asdict, field
@@ -59,40 +62,18 @@ except ImportError:
     wandb = None
 
 
-def _maybe_load_wandb_api_key_from_file() -> None:
-    """If WANDB_API_KEY is unset, read repo-root wandb_api_key.txt (first non-comment line).
-
-    Override path with env WANDB_API_KEY_FILE. Ignores placeholder values.
-    """
-    if os.environ.get("WANDB_API_KEY"):
+def _require_wandb_api_key_or_exit() -> None:
+    """Fail fast when --wandb is requested without WANDB_API_KEY."""
+    key = (os.environ.get("WANDB_API_KEY") or "").strip()
+    if key:
         return
-    key_file = os.environ.get("WANDB_API_KEY_FILE")
-    if key_file:
-        path = os.path.abspath(os.path.expanduser(key_file))
-    else:
-        path = os.path.join(project_root, "wandb_api_key.txt")
-    if not os.path.isfile(path):
-        return
-    lines: List[str] = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            lines.append(s)
-    if not lines:
-        return
-    raw = lines[0].strip()
-    placeholders = {
-        "",
-        "REPLACE_ME",
-        "YOUR_WANDB_API_KEY_HERE",
-        "REPLACE_WITH_YOUR_WANDB_API_KEY",
-        "paste_your_key_here",
-    }
-    if raw in placeholders:
-        return
-    os.environ["WANDB_API_KEY"] = raw
+    print("ERROR: --wandb requested but API key is missing.", file=sys.stderr)
+    print(
+        "Set environment variable WANDB_API_KEY to a valid key from "
+        "https://wandb.ai/authorize, then rerun.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 # Setup path
@@ -223,6 +204,191 @@ def get_logger():
     if logger is None:
         logger = setup_logging()
     return logger
+
+
+class TimingProfiler:
+    """Lightweight wall-clock profiler for short diagnostic runs."""
+
+    def __init__(self):
+        self.enabled = False
+        self.max_batches_per_loop: Optional[int] = None
+        self.max_subsets = 1
+        self.synthetic_samples = 256
+        self.layer_hooks = True
+        self.log_shapes = True
+        self.max_logged_epoch = 1
+
+    def configure(
+        self,
+        *,
+        enabled: bool,
+        max_batches_per_loop: Optional[int] = None,
+        max_subsets: int = 1,
+        synthetic_samples: int = 256,
+        layer_hooks: bool = True,
+        log_shapes: bool = True,
+    ) -> None:
+        self.enabled = enabled
+        self.max_batches_per_loop = max_batches_per_loop
+        self.max_subsets = max_subsets
+        self.synthetic_samples = synthetic_samples
+        self.layer_hooks = layer_hooks
+        self.log_shapes = log_shapes
+
+    def _should_log_name(self, name: str) -> bool:
+        if not self.enabled:
+            return False
+        match = re.search(r"\.epoch(\d+)(?:\.|:|$)", name)
+        if match and int(match.group(1)) > self.max_logged_epoch:
+            return False
+        return True
+
+    def _sync(self) -> None:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    def _shape_summary(self, value: Any) -> str:
+        if not self.log_shapes:
+            return ""
+        if torch.is_tensor(value):
+            return str(tuple(value.shape))
+        if isinstance(value, (list, tuple)):
+            parts = [self._shape_summary(v) for v in value[:3]]
+            return "[" + ", ".join(p for p in parts if p) + "]"
+        if isinstance(value, dict):
+            parts = [f"{k}:{self._shape_summary(v)}" for k, v in list(value.items())[:3]]
+            return "{" + ", ".join(p for p in parts if not p.endswith(":")) + "}"
+        return ""
+
+    def should_stop_batch(self, batch_idx: int) -> bool:
+        return (
+            self.enabled
+            and self.max_batches_per_loop is not None
+            and batch_idx >= self.max_batches_per_loop
+        )
+
+    def log_event(self, name: str, **meta: Any) -> None:
+        if not self._should_log_name(name):
+            return
+        ts = datetime.now().isoformat(timespec="milliseconds")
+        extra = " ".join(f"{k}={v}" for k, v in meta.items() if v is not None)
+        logger.info("[PROFILE] %s | %s%s", ts, name, f" | {extra}" if extra else "")
+
+    @contextlib.contextmanager
+    def section(self, name: str, **meta: Any):
+        if not self._should_log_name(name):
+            yield
+            return
+        self._sync()
+        start = time.perf_counter()
+        self.log_event(f"{name}:start", **meta)
+        try:
+            yield
+        finally:
+            self._sync()
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            self.log_event(f"{name}:end", elapsed_ms=f"{elapsed_ms:.3f}", **meta)
+
+    @contextlib.contextmanager
+    def module_hooks(self, model: nn.Module, prefix: str):
+        if not self.layer_hooks or not self._should_log_name(prefix):
+            yield
+            return
+
+        starts: Dict[int, List[float]] = {}
+        handles = []
+        skip_types = (nn.Dropout, nn.Identity)
+
+        def make_pre_hook(layer_name: str):
+            def pre_hook(module, inputs):
+                self._sync()
+                starts.setdefault(id(module), []).append(time.perf_counter())
+                if inputs:
+                    shape = self._shape_summary(inputs[0])
+                    self.log_event(f"{layer_name}:forward_start", input=shape)
+            return pre_hook
+
+        def make_post_hook(layer_name: str):
+            def post_hook(module, inputs, output):
+                self._sync()
+                stack = starts.get(id(module), [])
+                start = stack.pop() if stack else time.perf_counter()
+                shape = self._shape_summary(output)
+                elapsed_ms = (time.perf_counter() - start) * 1000.0
+                self.log_event(
+                    f"{layer_name}:forward_end",
+                    elapsed_ms=f"{elapsed_ms:.3f}",
+                    output=shape,
+                )
+            return post_hook
+
+        try:
+            for name, module in model.named_modules():
+                if not name or list(module.children()) or isinstance(module, skip_types):
+                    continue
+                layer_name = f"{prefix}.{name}.{module.__class__.__name__}"
+                handles.append(module.register_forward_pre_hook(make_pre_hook(layer_name)))
+                handles.append(module.register_forward_hook(make_post_hook(layer_name)))
+            yield
+        finally:
+            for handle in handles:
+                handle.remove()
+
+    @contextlib.contextmanager
+    def patch_methods(self, obj: Any, prefix: str, method_names: List[str]):
+        if not self._should_log_name(prefix):
+            yield
+            return
+
+        originals = {}
+        try:
+            for name in method_names:
+                if not hasattr(obj, name):
+                    continue
+                original = getattr(obj, name)
+                originals[name] = original
+
+                def timed_method(*args, __original=original, __name=name, **kwargs):
+                    with self.section(f"{prefix}.{__name}"):
+                        return __original(*args, **kwargs)
+
+                setattr(obj, name, timed_method)
+            yield
+        finally:
+            for name, original in originals.items():
+                setattr(obj, name, original)
+
+
+PROFILE = TimingProfiler()
+
+
+@contextlib.contextmanager
+def profile_diffusion_model(model: DiffusionTSF, prefix: str):
+    if not PROFILE.enabled:
+        yield
+        return
+
+    model_methods = [
+        "_normalize_sequence",
+        "encode_to_2d",
+        "encode_to_2d_binary",
+        "_get_guidance_forecast_norm",
+        "_generate_guidance_2d",
+        "_get_cross_variate_context",
+        "_inject_coordinate_channel",
+        "_inject_time_channels",
+        "_prepare_visual_conditioning",
+        "_compute_emd_loss",
+    ]
+    scheduler_methods = ["add_noise", "predict_x0_from_noise"]
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(PROFILE.patch_methods(model, f"{prefix}.major", model_methods))
+        stack.enter_context(PROFILE.patch_methods(model.scheduler, f"{prefix}.scheduler", scheduler_methods))
+        if getattr(model, "binary_scheduler", None) is not None:
+            stack.enter_context(PROFILE.patch_methods(model.binary_scheduler, f"{prefix}.binary_scheduler", scheduler_methods))
+        stack.enter_context(PROFILE.module_hooks(model, f"{prefix}.layers"))
+        yield
 
 
 # ============================================================================
@@ -860,25 +1026,37 @@ def save_checkpoint(model, optimizer, epoch, train_loss, val_loss, config, path,
 # PHASE 1A: iTransformer HP Tuning
 # ============================================================================
 
-def train_itransformer_epoch(model, loader, optimizer, criterion, device, scheduler=None):
+def train_itransformer_epoch(model, loader, optimizer, criterion, device, scheduler=None, phase_label="itrans_train"):
     """Train iTransformer for one epoch."""
     model.train()
     total_loss = 0.0
     n_batches = 0
     
-    for past, future in loader:
-        x_enc = past.permute(0, 2, 1).to(device)
-        y_true = future.permute(0, 2, 1).to(device)
+    for batch_idx, (past, future) in enumerate(loader):
+        if PROFILE.should_stop_batch(batch_idx):
+            PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
+            break
+
+        with PROFILE.section(f"{phase_label}.batch", batch=batch_idx):
+            with PROFILE.section(f"{phase_label}.to_device", batch=batch_idx):
+                x_enc = past.permute(0, 2, 1).to(device)
+                y_true = future.permute(0, 2, 1).to(device)
         # iTransformer predicts H steps; strip the K overlap from target
-        if LOOKBACK_OVERLAP > 0:
-            y_true = y_true[:, LOOKBACK_OVERLAP:, :]
-        
-        optimizer.zero_grad()
-        y_pred = model(x_enc, None, None, None)
-        loss = criterion(y_pred, y_true)
-        oom_safe_backward(loss, optimizer, model)
-        if scheduler:
-            scheduler.step()
+            if LOOKBACK_OVERLAP > 0:
+                y_true = y_true[:, LOOKBACK_OVERLAP:, :]
+
+            with PROFILE.section(f"{phase_label}.zero_grad", batch=batch_idx):
+                optimizer.zero_grad()
+            with PROFILE.module_hooks(model, f"{phase_label}.batch{batch_idx}.itransformer"):
+                with PROFILE.section(f"{phase_label}.forward", batch=batch_idx):
+                    y_pred = model(x_enc, None, None, None)
+            with PROFILE.section(f"{phase_label}.loss", batch=batch_idx):
+                loss = criterion(y_pred, y_true)
+            with PROFILE.section(f"{phase_label}.backward_step", batch=batch_idx):
+                oom_safe_backward(loss, optimizer, model)
+            if scheduler:
+                with PROFILE.section(f"{phase_label}.scheduler_step", batch=batch_idx):
+                    scheduler.step()
         
         total_loss += loss.item()
         n_batches += 1
@@ -886,22 +1064,31 @@ def train_itransformer_epoch(model, loader, optimizer, criterion, device, schedu
     return total_loss / max(n_batches, 1)
 
 
-def validate_itransformer(model, loader, criterion, device):
+def validate_itransformer(model, loader, criterion, device, phase_label="itrans_val"):
     """Validate iTransformer."""
     model.eval()
     total_loss = 0.0
     n_batches = 0
     
     with torch.no_grad():
-        for past, future in loader:
-            x_enc = past.permute(0, 2, 1).to(device)
-            y_true = future.permute(0, 2, 1).to(device)
-            if LOOKBACK_OVERLAP > 0:
-                y_true = y_true[:, LOOKBACK_OVERLAP:, :]
-            y_pred = model(x_enc, None, None, None)
-            loss = criterion(y_pred, y_true)
-            total_loss += loss.item()
-            n_batches += 1
+        for batch_idx, (past, future) in enumerate(loader):
+            if PROFILE.should_stop_batch(batch_idx):
+                PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
+                break
+
+            with PROFILE.section(f"{phase_label}.batch", batch=batch_idx):
+                with PROFILE.section(f"{phase_label}.to_device", batch=batch_idx):
+                    x_enc = past.permute(0, 2, 1).to(device)
+                    y_true = future.permute(0, 2, 1).to(device)
+                    if LOOKBACK_OVERLAP > 0:
+                        y_true = y_true[:, LOOKBACK_OVERLAP:, :]
+                with PROFILE.module_hooks(model, f"{phase_label}.batch{batch_idx}.itransformer"):
+                    with PROFILE.section(f"{phase_label}.forward", batch=batch_idx):
+                        y_pred = model(x_enc, None, None, None)
+                with PROFILE.section(f"{phase_label}.loss", batch=batch_idx):
+                    loss = criterion(y_pred, y_true)
+                total_loss += loss.item()
+                n_batches += 1
     
     return total_loss / max(n_batches, 1)
 
@@ -918,14 +1105,20 @@ def itrans_hp_objective(trial, synthetic_loader, val_loader, device, smoke_test=
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
         criterion = nn.MSELoss()
 
-        epochs = 30 if not smoke_test else 1
-        patience = 5 if not smoke_test else 1
+        epochs = 1 if PROFILE.enabled else (30 if not smoke_test else 1)
+        patience = 1 if PROFILE.enabled else (5 if not smoke_test else 1)
         early_stop = EarlyStopping(patience=patience)
         best_val_loss = float('inf')
 
         for epoch in range(epochs):
-            train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
-            val_loss = validate_itransformer(model, val_loader, criterion, device)
+            train_itransformer_epoch(
+                model, train_loader, optimizer, criterion, device,
+                phase_label=f"phase1A_itrans_hp.trial{trial.number}.epoch{epoch+1}.train",
+            )
+            val_loss = validate_itransformer(
+                model, val_loader, criterion, device,
+                phase_label=f"phase1A_itrans_hp.trial{trial.number}.epoch{epoch+1}.val",
+            )
 
             trial.report(val_loss, epoch)
             if trial.should_prune():
@@ -950,7 +1143,7 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Create synthetic data loaders
-    n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_HP_TUNE
+    n_samples = PROFILE.synthetic_samples if PROFILE.enabled else (4 if smoke_test else SYNTHETIC_SAMPLES_HP_TUNE)
     synth_cache = os.path.join(CHECKPOINT_DIR, 'synth_cache')
     synthetic_loader = get_synthetic_dataloader(
         batch_size=64,
@@ -1027,30 +1220,48 @@ def diffusion_hp_objective(
         train_loader = DataLoader(synthetic_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
-        epochs = 30 if not smoke_test else 1
-        patience = 10 if not smoke_test else 1
+        epochs = 1 if PROFILE.enabled else (30 if not smoke_test else 1)
+        patience = 1 if PROFILE.enabled else (10 if not smoke_test else 1)
         early_stop = EarlyStopping(patience=patience)
         best_val_loss = float('inf')
 
         for epoch in range(epochs):
             model.train()
-            for past, future in train_loader:
-                past, future = past.to(device), future.to(device)
-                optimizer.zero_grad()
-                with amp_context():
-                    loss = model.get_loss(past, future)
-                oom_safe_backward(loss, optimizer, model)
+            phase_label = f"phase1B_diffusion_hp.trial{trial.number}.epoch{epoch+1}.train"
+            for batch_idx, (past, future) in enumerate(train_loader):
+                if PROFILE.should_stop_batch(batch_idx):
+                    PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
+                    break
+                with PROFILE.section(f"{phase_label}.batch", batch=batch_idx):
+                    with PROFILE.section(f"{phase_label}.to_device", batch=batch_idx):
+                        past, future = past.to(device), future.to(device)
+                    with PROFILE.section(f"{phase_label}.zero_grad", batch=batch_idx):
+                        optimizer.zero_grad()
+                    with profile_diffusion_model(model, f"{phase_label}.batch{batch_idx}.diffusion"):
+                        with PROFILE.section(f"{phase_label}.forward_loss", batch=batch_idx):
+                            with amp_context():
+                                loss = model.get_loss(past, future)
+                    with PROFILE.section(f"{phase_label}.backward_step", batch=batch_idx):
+                        oom_safe_backward(loss, optimizer, model)
 
             model.eval()
             val_loss = 0.0
             n_batches = 0
             with torch.no_grad():
-                for past, future in val_loader:
-                    past, future = past.to(device), future.to(device)
-                    with amp_context():
-                        loss = model.get_loss(past, future)
-                    val_loss += loss.item()
-                    n_batches += 1
+                phase_label = f"phase1B_diffusion_hp.trial{trial.number}.epoch{epoch+1}.val"
+                for batch_idx, (past, future) in enumerate(val_loader):
+                    if PROFILE.should_stop_batch(batch_idx):
+                        PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
+                        break
+                    with PROFILE.section(f"{phase_label}.batch", batch=batch_idx):
+                        with PROFILE.section(f"{phase_label}.to_device", batch=batch_idx):
+                            past, future = past.to(device), future.to(device)
+                        with profile_diffusion_model(model, f"{phase_label}.batch{batch_idx}.diffusion"):
+                            with PROFILE.section(f"{phase_label}.forward_loss", batch=batch_idx):
+                                with amp_context():
+                                    loss = model.get_loss(past, future)
+                        val_loss += loss.item()
+                        n_batches += 1
             val_loss /= max(n_batches, 1)
 
             trial.report(val_loss, epoch)
@@ -1091,7 +1302,7 @@ def run_diffusion_hp_tuning(
     )
     
     # Create small synthetic dataset for fast iteration
-    n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_DIFF_TUNE
+    n_samples = PROFILE.synthetic_samples if PROFILE.enabled else (4 if smoke_test else SYNTHETIC_SAMPLES_DIFF_TUNE)
     synth_cache = os.path.join(CHECKPOINT_DIR, 'synth_cache')
     synthetic_loader = get_synthetic_dataloader(
         batch_size=32,
@@ -1198,8 +1409,14 @@ def pretrain_itransformer(
 
     for epoch in range(epochs):
         t0 = time.time()
-        train_loss = train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss = validate_itransformer(model, val_loader, criterion, device)
+        train_loss = train_itransformer_epoch(
+            model, train_loader, optimizer, criterion, device,
+            phase_label=f"phase1C1_itrans_pretrain.epoch{epoch+1}.train",
+        )
+        val_loss = validate_itransformer(
+            model, val_loader, criterion, device,
+            phase_label=f"phase1C1_itrans_pretrain.epoch{epoch+1}.val",
+        )
 
         scheduler.step()
 
@@ -1236,6 +1453,7 @@ def pretrain_diffusion(
     checkpoint_dir: str,
     smoke_test: bool = False,
     resume: bool = False,
+    export_best_epochs: Optional[List[int]] = None,
 ) -> str:
     """Train Diffusion model on synthetic data with iTransformer guidance.
 
@@ -1308,6 +1526,11 @@ def pretrain_diffusion(
     last_path = os.path.join(checkpoint_dir, 'pretrained_diffusion_last.pt')
 
     start_epoch = 0
+    export_best_epochs = sorted({int(e) for e in (export_best_epochs or []) if int(e) > 0})
+    export_best_epochs_set = set(export_best_epochs)
+    if export_best_epochs:
+        logger.info("Will export best-so-far diffusion checkpoints at epochs: %s", export_best_epochs)
+
     if resume:
         if not os.path.isfile(last_path):
             logger.error(
@@ -1348,26 +1571,45 @@ def pretrain_diffusion(
         model.train()
         total_loss = 0.0
         n_batches = 0
-        for past, future in train_loader:
-            past, future = past.to(device), future.to(device)
-            optimizer.zero_grad()
-            with amp_context():
-                loss = model.get_loss(past, future)
-            if oom_safe_backward(loss, optimizer, model):
-                total_loss += loss.item()
-            n_batches += 1
+        phase_label = f"phase1C2_diffusion_pretrain.epoch{epoch+1}.train"
+        for batch_idx, (past, future) in enumerate(train_loader):
+            if PROFILE.should_stop_batch(batch_idx):
+                PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
+                break
+            with PROFILE.section(f"{phase_label}.batch", batch=batch_idx):
+                with PROFILE.section(f"{phase_label}.to_device", batch=batch_idx):
+                    past, future = past.to(device), future.to(device)
+                with PROFILE.section(f"{phase_label}.zero_grad", batch=batch_idx):
+                    optimizer.zero_grad()
+                with profile_diffusion_model(model, f"{phase_label}.batch{batch_idx}.diffusion"):
+                    with PROFILE.section(f"{phase_label}.forward_loss", batch=batch_idx):
+                        with amp_context():
+                            loss = model.get_loss(past, future)
+                with PROFILE.section(f"{phase_label}.backward_step", batch=batch_idx):
+                    step_ok = oom_safe_backward(loss, optimizer, model)
+                if step_ok:
+                    total_loss += loss.item()
+                n_batches += 1
         train_loss = total_loss / max(n_batches, 1)
 
         model.eval()
         total_loss = 0.0
         n_batches = 0
         with torch.no_grad():
-            for past, future in val_loader:
-                past, future = past.to(device), future.to(device)
-                with amp_context():
-                    loss = model.get_loss(past, future)
-                total_loss += loss.item()
-                n_batches += 1
+            phase_label = f"phase1C2_diffusion_pretrain.epoch{epoch+1}.val"
+            for batch_idx, (past, future) in enumerate(val_loader):
+                if PROFILE.should_stop_batch(batch_idx):
+                    PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
+                    break
+                with PROFILE.section(f"{phase_label}.batch", batch=batch_idx):
+                    with PROFILE.section(f"{phase_label}.to_device", batch=batch_idx):
+                        past, future = past.to(device), future.to(device)
+                    with profile_diffusion_model(model, f"{phase_label}.batch{batch_idx}.diffusion"):
+                        with PROFILE.section(f"{phase_label}.forward_loss", batch=batch_idx):
+                            with amp_context():
+                                loss = model.get_loss(past, future)
+                    total_loss += loss.item()
+                    n_batches += 1
         val_loss = total_loss / max(n_batches, 1)
 
         scheduler.step()
@@ -1387,6 +1629,35 @@ def pretrain_diffusion(
             save_checkpoint(model, optimizer, epoch, train_loss, val_loss,
                           {'diffusion_params': best_params, 'itrans_checkpoint': itrans_checkpoint}, ckpt_path)
             logger.info(f"  -> New best! Saved to {ckpt_path}")
+
+        epoch_num = epoch + 1
+        if epoch_num in export_best_epochs_set:
+            export_path = os.path.join(
+                checkpoint_dir,
+                f'pretrained_diffusion_best_epoch{epoch_num}.pt',
+            )
+            if os.path.exists(ckpt_path):
+                shutil.copy2(ckpt_path, export_path)
+                logger.info(
+                    "  -> Exported best-so-far checkpoint at epoch %d to %s",
+                    epoch_num,
+                    export_path,
+                )
+            else:
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    epoch,
+                    train_loss,
+                    val_loss,
+                    {'diffusion_params': best_params, 'itrans_checkpoint': itrans_checkpoint},
+                    export_path,
+                )
+                logger.info(
+                    "  -> Exported current checkpoint at epoch %d to %s (no best checkpoint existed)",
+                    epoch_num,
+                    export_path,
+                )
 
         stop_now = early_stop(val_loss)
 
@@ -1460,30 +1731,48 @@ def finetune_hp_objective(
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
-        epochs = HP_TUNE_EPOCHS if not smoke_test else 1
-        patience = HP_TUNE_PATIENCE if not smoke_test else 1
+        epochs = 1 if PROFILE.enabled else (HP_TUNE_EPOCHS if not smoke_test else 1)
+        patience = 1 if PROFILE.enabled else (HP_TUNE_PATIENCE if not smoke_test else 1)
         early_stop = EarlyStopping(patience=patience)
         best_val_loss = float('inf')
 
         for epoch in range(epochs):
             model.train()
-            for past, future in train_loader:
-                past, future = past.to(device), future.to(device)
-                optimizer.zero_grad()
-                with amp_context():
-                    loss = model.get_loss(past, future)
-                oom_safe_backward(loss, optimizer, model)
+            phase_label = f"phase2_diffusion_finetune_hp.{dataset_name}.trial{trial.number}.epoch{epoch+1}.train"
+            for batch_idx, (past, future) in enumerate(train_loader):
+                if PROFILE.should_stop_batch(batch_idx):
+                    PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
+                    break
+                with PROFILE.section(f"{phase_label}.batch", batch=batch_idx):
+                    with PROFILE.section(f"{phase_label}.to_device", batch=batch_idx):
+                        past, future = past.to(device), future.to(device)
+                    with PROFILE.section(f"{phase_label}.zero_grad", batch=batch_idx):
+                        optimizer.zero_grad()
+                    with profile_diffusion_model(model, f"{phase_label}.batch{batch_idx}.diffusion"):
+                        with PROFILE.section(f"{phase_label}.forward_loss", batch=batch_idx):
+                            with amp_context():
+                                loss = model.get_loss(past, future)
+                    with PROFILE.section(f"{phase_label}.backward_step", batch=batch_idx):
+                        oom_safe_backward(loss, optimizer, model)
 
             model.eval()
             val_loss = 0.0
             n_batches = 0
             with torch.no_grad():
-                for past, future in val_loader:
-                    past, future = past.to(device), future.to(device)
-                    with amp_context():
-                        loss = model.get_loss(past, future)
-                    val_loss += loss.item()
-                    n_batches += 1
+                phase_label = f"phase2_diffusion_finetune_hp.{dataset_name}.trial{trial.number}.epoch{epoch+1}.val"
+                for batch_idx, (past, future) in enumerate(val_loader):
+                    if PROFILE.should_stop_batch(batch_idx):
+                        PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
+                        break
+                    with PROFILE.section(f"{phase_label}.batch", batch=batch_idx):
+                        with PROFILE.section(f"{phase_label}.to_device", batch=batch_idx):
+                            past, future = past.to(device), future.to(device)
+                        with profile_diffusion_model(model, f"{phase_label}.batch{batch_idx}.diffusion"):
+                            with PROFILE.section(f"{phase_label}.forward_loss", batch=batch_idx):
+                                with amp_context():
+                                    loss = model.get_loss(past, future)
+                        val_loss += loss.item()
+                        n_batches += 1
             val_loss /= max(n_batches, 1)
 
             trial.report(val_loss, epoch)
@@ -1519,8 +1808,7 @@ def finetune_on_dataset(
         dataset_name = subset_id
 
     lr = tuned_params.get('learning_rate', 1e-5)
-    raw_bs = tuned_params.get('batch_size', 32)
-    batch_size = max(raw_bs, 32)
+    batch_size = tuned_params.get('batch_size', 32)
 
     logger.info("=" * 60)
     logger.info(f"FINE-TUNING: {subset_id}")
@@ -1581,26 +1869,45 @@ def finetune_on_dataset(
         model.train()
         total_loss = 0.0
         n_batches = 0
-        for past, future in train_loader:
-            past, future = past.to(device), future.to(device)
-            optimizer.zero_grad()
-            with amp_context():
-                loss = model.get_loss(past, future)
-            if oom_safe_backward(loss, optimizer, model):
-                total_loss += loss.item()
-            n_batches += 1
+        phase_label = f"phase2_diffusion_finetune.{subset_id}.epoch{epoch+1}.train"
+        for batch_idx, (past, future) in enumerate(train_loader):
+            if PROFILE.should_stop_batch(batch_idx):
+                PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
+                break
+            with PROFILE.section(f"{phase_label}.batch", batch=batch_idx):
+                with PROFILE.section(f"{phase_label}.to_device", batch=batch_idx):
+                    past, future = past.to(device), future.to(device)
+                with PROFILE.section(f"{phase_label}.zero_grad", batch=batch_idx):
+                    optimizer.zero_grad()
+                with profile_diffusion_model(model, f"{phase_label}.batch{batch_idx}.diffusion"):
+                    with PROFILE.section(f"{phase_label}.forward_loss", batch=batch_idx):
+                        with amp_context():
+                            loss = model.get_loss(past, future)
+                with PROFILE.section(f"{phase_label}.backward_step", batch=batch_idx):
+                    step_ok = oom_safe_backward(loss, optimizer, model)
+                if step_ok:
+                    total_loss += loss.item()
+                n_batches += 1
         train_loss = total_loss / max(n_batches, 1)
 
         model.eval()
         total_loss = 0.0
         n_batches = 0
         with torch.no_grad():
-            for past, future in val_loader:
-                past, future = past.to(device), future.to(device)
-                with amp_context():
-                    loss = model.get_loss(past, future)
-                total_loss += loss.item()
-                n_batches += 1
+            phase_label = f"phase2_diffusion_finetune.{subset_id}.epoch{epoch+1}.val"
+            for batch_idx, (past, future) in enumerate(val_loader):
+                if PROFILE.should_stop_batch(batch_idx):
+                    PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
+                    break
+                with PROFILE.section(f"{phase_label}.batch", batch=batch_idx):
+                    with PROFILE.section(f"{phase_label}.to_device", batch=batch_idx):
+                        past, future = past.to(device), future.to(device)
+                    with profile_diffusion_model(model, f"{phase_label}.batch{batch_idx}.diffusion"):
+                        with PROFILE.section(f"{phase_label}.forward_loss", batch=batch_idx):
+                            with amp_context():
+                                loss = model.get_loss(past, future)
+                    total_loss += loss.item()
+                    n_batches += 1
         val_loss = total_loss / max(n_batches, 1)
 
         scheduler.step()
@@ -1826,40 +2133,65 @@ def finetune_itransformer_on_dataset(
     early_stop = EarlyStopping(patience=patience)
     best_val_loss = float('inf')
 
+    if PROFILE.enabled:
+        epochs = 1
+        patience = 1
+
     for epoch in range(epochs):
         model.train()
-        for past, future in train_loader:
-            past, future = past.to(device), future.to(device)
-            optimizer.zero_grad()
-            B, C, L = past.shape
-            x_enc = past.permute(0, 2, 1)
-            x_dec = torch.zeros(B, FORECAST_LENGTH, C, device=device, dtype=past.dtype)
-            output = model(x_enc, None, x_dec, None)
-            if isinstance(output, tuple):
-                output = output[0]
-            target = future
-            if LOOKBACK_OVERLAP > 0:
-                target = future[..., LOOKBACK_OVERLAP:]
-            loss = criterion(output.permute(0, 2, 1), target)
-            oom_safe_backward(loss, optimizer, model)
-
-        model.eval()
-        val_loss = 0.0
-        n_batches = 0
-        with torch.no_grad():
-            for past, future in val_loader:
-                past, future = past.to(device), future.to(device)
+        phase_label = f"phase2_itrans_finetune.{subset_id}.epoch{epoch+1}.train"
+        for batch_idx, (past, future) in enumerate(train_loader):
+            if PROFILE.should_stop_batch(batch_idx):
+                PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
+                break
+            with PROFILE.section(f"{phase_label}.batch", batch=batch_idx):
+                with PROFILE.section(f"{phase_label}.to_device", batch=batch_idx):
+                    past, future = past.to(device), future.to(device)
+                with PROFILE.section(f"{phase_label}.zero_grad", batch=batch_idx):
+                    optimizer.zero_grad()
                 B, C, L = past.shape
                 x_enc = past.permute(0, 2, 1)
                 x_dec = torch.zeros(B, FORECAST_LENGTH, C, device=device, dtype=past.dtype)
-                output = model(x_enc, None, x_dec, None)
+                with PROFILE.module_hooks(model, f"{phase_label}.batch{batch_idx}.itransformer"):
+                    with PROFILE.section(f"{phase_label}.forward", batch=batch_idx):
+                        output = model(x_enc, None, x_dec, None)
                 if isinstance(output, tuple):
                     output = output[0]
                 target = future
                 if LOOKBACK_OVERLAP > 0:
                     target = future[..., LOOKBACK_OVERLAP:]
-                val_loss += criterion(output.permute(0, 2, 1), target).item()
-                n_batches += 1
+                with PROFILE.section(f"{phase_label}.loss", batch=batch_idx):
+                    loss = criterion(output.permute(0, 2, 1), target)
+                with PROFILE.section(f"{phase_label}.backward_step", batch=batch_idx):
+                    oom_safe_backward(loss, optimizer, model)
+
+        model.eval()
+        val_loss = 0.0
+        n_batches = 0
+        with torch.no_grad():
+            phase_label = f"phase2_itrans_finetune.{subset_id}.epoch{epoch+1}.val"
+            for batch_idx, (past, future) in enumerate(val_loader):
+                if PROFILE.should_stop_batch(batch_idx):
+                    PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
+                    break
+                with PROFILE.section(f"{phase_label}.batch", batch=batch_idx):
+                    with PROFILE.section(f"{phase_label}.to_device", batch=batch_idx):
+                        past, future = past.to(device), future.to(device)
+                    B, C, L = past.shape
+                    x_enc = past.permute(0, 2, 1)
+                    x_dec = torch.zeros(B, FORECAST_LENGTH, C, device=device, dtype=past.dtype)
+                    with PROFILE.module_hooks(model, f"{phase_label}.batch{batch_idx}.itransformer"):
+                        with PROFILE.section(f"{phase_label}.forward", batch=batch_idx):
+                            output = model(x_enc, None, x_dec, None)
+                    if isinstance(output, tuple):
+                        output = output[0]
+                    target = future
+                    if LOOKBACK_OVERLAP > 0:
+                        target = future[..., LOOKBACK_OVERLAP:]
+                    with PROFILE.section(f"{phase_label}.loss", batch=batch_idx):
+                        loss = criterion(output.permute(0, 2, 1), target)
+                    val_loss += loss.item()
+                    n_batches += 1
         val_loss /= max(n_batches, 1)
 
         scheduler.step()
@@ -2097,6 +2429,7 @@ def run_pipeline(
     use_wandb: bool = False,
     wandb_project: str = "diffusion-tsf",
     resume_pretrain_diffusion: bool = False,
+    diffusion_export_epochs: Optional[List[int]] = None,
 ):
     """Run the full training pipeline."""
     random.seed(seed)
@@ -2119,16 +2452,39 @@ def run_pipeline(
     
     # Initialize wandb
     if use_wandb:
-        tags = ['smoke-test'] if smoke_test else []
+        tags = ['profile-one-epoch'] if PROFILE.enabled else (['smoke-test'] if smoke_test else [])
         init_wandb(
             project=wandb_project,
-            config={'seed': seed, 'smoke_test': smoke_test, 'resume': resume},
+            config={
+                'seed': seed,
+                'smoke_test': smoke_test,
+                'resume': resume,
+                'profile_one_epoch': PROFILE.enabled,
+                'profile_max_batches_per_loop': PROFILE.max_batches_per_loop,
+                'profile_synthetic_samples': PROFILE.synthetic_samples,
+            },
             resume=resume,
             tags=tags,
         )
     
     # Smoke test config
-    if smoke_test:
+    if PROFILE.enabled:
+        n_itrans_trials = 1
+        n_diff_trials = 1
+        n_finetune_trials = 1
+        pretrain_samples = PROFILE.synthetic_samples
+        pretrain_epochs = 1
+        pretrain_patience = 1
+        finetune_epochs = 1
+        finetune_patience = 1
+        PROFILE.log_event(
+            "profile_one_epoch.config",
+            synthetic_samples=pretrain_samples,
+            max_batches_per_loop=PROFILE.max_batches_per_loop,
+            max_subsets=PROFILE.max_subsets,
+            layer_hooks=PROFILE.layer_hooks,
+        )
+    elif smoke_test:
         n_itrans_trials = 1
         n_diff_trials = 1
         n_finetune_trials = 1
@@ -2213,6 +2569,7 @@ def run_pipeline(
             checkpoint_dir=CHECKPOINT_DIR,
             smoke_test=smoke_test,
             resume=want_resume,
+            export_best_epochs=diffusion_export_epochs,
         )
         manifest.pretrain_checkpoint = diff_ckpt
         manifest.pretrain_complete = True
@@ -2240,7 +2597,9 @@ def run_pipeline(
                 }
     manifest.save()
     
-    if smoke_test:
+    if PROFILE.enabled:
+        subset_list = subset_list[:PROFILE.max_subsets]
+    elif smoke_test:
         subset_list = subset_list[:1]  # Just 1 dataset for ultra-fast smoke test
     
     for subset_info in subset_list:
@@ -2291,6 +2650,9 @@ def run_pipeline(
                 manifest.subsets[subset_id]['tuned_params'] = tuned_params
                 manifest.save()
                 logger.info(f"Best params for {subset_id}: {tuned_params}")
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             # Full fine-tuning (with fine-tuned itrans guidance)
             ckpt_path, train_metrics = finetune_on_dataset(
@@ -2350,6 +2712,7 @@ def run_pipeline(
             manifest.subsets[subset_id]['status'] = 'error'
             manifest.subsets[subset_id]['error'] = str(e)
             manifest.save()
+            raise
     
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETE")
@@ -2440,6 +2803,7 @@ def run_pretrain_mode(
     smoke_test: bool = False,
     seed: int = 42,
     resume_pretrain_diffusion: bool = False,
+    diffusion_export_epochs: Optional[List[int]] = None,
 ):
     """Pretrain iTransformer + Diffusion model.
 
@@ -2466,11 +2830,11 @@ def run_pretrain_mode(
             if os.path.exists(f):
                 os.remove(f)
 
-    n_itrans_trials = 1 if smoke_test else N_ITRANS_HP_TRIALS
-    n_diff_trials = 1 if smoke_test else N_DIFFUSION_HP_TRIALS
-    pretrain_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_FULL
-    pretrain_epochs = 1 if smoke_test else PRETRAIN_EPOCHS
-    pretrain_patience = 1 if smoke_test else PRETRAIN_PATIENCE
+    n_itrans_trials = 1 if (smoke_test or PROFILE.enabled) else N_ITRANS_HP_TRIALS
+    n_diff_trials = 1 if (smoke_test or PROFILE.enabled) else N_DIFFUSION_HP_TRIALS
+    pretrain_samples = PROFILE.synthetic_samples if PROFILE.enabled else (4 if smoke_test else SYNTHETIC_SAMPLES_FULL)
+    pretrain_epochs = 1 if (smoke_test or PROFILE.enabled) else PRETRAIN_EPOCHS
+    pretrain_patience = 1 if (smoke_test or PROFILE.enabled) else PRETRAIN_PATIENCE
 
     itrans_hp_path = os.path.join(CHECKPOINT_DIR, 'itrans_hp.json')
     diff_hp_path = os.path.join(CHECKPOINT_DIR, 'diff_hp.json')
@@ -2553,6 +2917,7 @@ def run_pretrain_mode(
             checkpoint_dir=CHECKPOINT_DIR,
             smoke_test=smoke_test,
             resume=True,
+            export_best_epochs=diffusion_export_epochs,
         )
     elif not os.path.exists(diff_ckpt):
         pretrain_diffusion(
@@ -2563,6 +2928,7 @@ def run_pretrain_mode(
             checkpoint_dir=CHECKPOINT_DIR,
             smoke_test=smoke_test,
             resume=False,
+            export_best_epochs=diffusion_export_epochs,
         )
     elif resume_pretrain_diffusion:
         logger.error(
@@ -2614,12 +2980,14 @@ def run_finetune_mode(
         sys.exit(1)
 
     subsets = generate_variate_subsets(dataset_name, seed=seed)
-    if smoke_test:
+    if PROFILE.enabled:
+        subsets = subsets[:PROFILE.max_subsets]
+    elif smoke_test:
         subsets = subsets[:1]
 
-    n_finetune_trials = 1 if smoke_test else N_FINETUNE_HP_TRIALS
-    finetune_epochs = 1 if smoke_test else FINETUNE_EPOCHS
-    finetune_patience = 1 if smoke_test else FINETUNE_PATIENCE
+    n_finetune_trials = 1 if (smoke_test or PROFILE.enabled) else N_FINETUNE_HP_TRIALS
+    finetune_epochs = 1 if (smoke_test or PROFILE.enabled) else FINETUNE_EPOCHS
+    finetune_patience = 1 if (smoke_test or PROFILE.enabled) else FINETUNE_PATIENCE
 
     for subset_info in subsets:
         _finetune_and_eval_one_subset(
@@ -2651,9 +3019,9 @@ def run_finetune_subset_mode(
         logger.error(f"Pretrained checkpoint not found: {diff_ckpt}")
         sys.exit(1)
 
-    n_finetune_trials = 1 if smoke_test else N_FINETUNE_HP_TRIALS
-    finetune_epochs = 1 if smoke_test else FINETUNE_EPOCHS
-    finetune_patience = 1 if smoke_test else FINETUNE_PATIENCE
+    n_finetune_trials = 1 if (smoke_test or PROFILE.enabled) else N_FINETUNE_HP_TRIALS
+    finetune_epochs = 1 if (smoke_test or PROFILE.enabled) else FINETUNE_EPOCHS
+    finetune_patience = 1 if (smoke_test or PROFILE.enabled) else FINETUNE_PATIENCE
 
     subset_info = {
         'subset_id': subset_id,
@@ -2692,27 +3060,43 @@ def _finetune_and_eval_one_subset(
             itrans_ckpt, CHECKPOINT_DIR, device, smoke_test=smoke_test,
         )
 
-        # HP search (with fine-tuned itrans guidance)
-        logger.info(f"HP search for {subset_id} ({n_finetune_trials} trials)...")
-        optuna.logging.set_verbosity(optuna.logging.WARNING)
-        study = optuna.create_study(
-            direction='minimize',
-            sampler=TPESampler(seed=42),
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
-        )
-        study.optimize(
-            lambda trial: finetune_hp_objective(
-                trial, dataset_name, variate_indices, diff_ckpt, ft_itrans_ckpt, device, smoke_test
-            ),
-            n_trials=n_finetune_trials,
-            show_progress_bar=False,
-            catch=(ValueError,),
-        )
-        if study.best_trial is None:
-            logger.warning(f"All HP trials failed for {subset_id} — skipping")
-            return
-        tuned_params = study.best_params
-        logger.info(f"Best params for {subset_id}: {tuned_params}")
+        subset_dir = os.path.join(CHECKPOINT_DIR, subset_id)
+        metadata_path = os.path.join(subset_dir, 'metadata.json')
+        tuned_params = None
+        if os.path.exists(metadata_path):
+            try:
+                with open(metadata_path) as f:
+                    tuned_params = json.load(f).get('tuned_params')
+                if tuned_params:
+                    logger.info(f"Using cached fine-tune params for {subset_id}: {tuned_params}")
+            except Exception:
+                tuned_params = None
+
+        if tuned_params is None:
+            # HP search (with fine-tuned itrans guidance)
+            logger.info(f"HP search for {subset_id} ({n_finetune_trials} trials)...")
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
+            study = optuna.create_study(
+                direction='minimize',
+                sampler=TPESampler(seed=42),
+                pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+            )
+            study.optimize(
+                lambda trial: finetune_hp_objective(
+                    trial, dataset_name, variate_indices, diff_ckpt, ft_itrans_ckpt, device, smoke_test
+                ),
+                n_trials=n_finetune_trials,
+                show_progress_bar=False,
+                catch=(ValueError,),
+            )
+            if study.best_trial is None:
+                logger.warning(f"All HP trials failed for {subset_id} — skipping")
+                return
+            tuned_params = study.best_params
+            logger.info(f"Best params for {subset_id}: {tuned_params}")
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Full fine-tune (with fine-tuned itrans guidance)
         ckpt_path, train_metrics = finetune_on_dataset(
@@ -2768,6 +3152,7 @@ def _finetune_and_eval_one_subset(
         logger.error(f"Error with {subset_id}: {e}")
         import traceback
         traceback.print_exc()
+        raise
 
 
 def run_list_subsets_mode(dataset_name: str, seed: int = 42):
@@ -2815,6 +3200,15 @@ def main():
             '(same --checkpoint-dir as the timed-out job). No effect if that file is missing.'
         ),
     )
+    parser.add_argument(
+        '--diffusion-export-epochs',
+        type=str,
+        default="",
+        help=(
+            'Comma-separated synthetic diffusion pretrain epochs at which to copy '
+            'the best-so-far checkpoint, e.g. "10,20,40". Experimental.'
+        ),
+    )
     parser.add_argument('--smoke-test', action='store_true', help='Quick validation run')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--status', action='store_true', help='Show status (legacy flag)')
@@ -2843,9 +3237,27 @@ def main():
     parser.add_argument('--binary-diffusion', action='store_true',
                         help='Use binary (bit-flip XOR) diffusion instead of gaussian. '
                              'Removes gaussian blur, uses BCE loss, 20-step sampling.')
+    parser.add_argument('--profile-one-epoch', action='store_true',
+                        help='Throwaway timing run: 1 trial/epoch per phase with detailed PROFILE logs.')
+    parser.add_argument('--profile-max-batches', type=int, default=2,
+                        help='Max train/val batches per loop during --profile-one-epoch (default: 2).')
+    parser.add_argument('--profile-synthetic-samples', type=int, default=256,
+                        help='Synthetic samples per pretrain/HP phase during --profile-one-epoch.')
+    parser.add_argument('--profile-max-subsets', type=int, default=1,
+                        help='Dataset subsets to fine-tune during --profile-one-epoch.')
+    parser.add_argument('--profile-no-layer-hooks', action='store_true',
+                        help='Disable per-module forward timing hooks in --profile-one-epoch.')
+    parser.add_argument('--profile-no-shapes', action='store_true',
+                        help='Disable tensor shape metadata in PROFILE logs.')
     
     args = parser.parse_args()
-    _maybe_load_wandb_api_key_from_file()
+    if args.wandb:
+        _require_wandb_api_key_or_exit()
+    diffusion_export_epochs = [
+        int(x.strip())
+        for x in args.diffusion_export_epochs.split(',')
+        if x.strip()
+    ]
 
     # Legacy flag compat
     if args.status:
@@ -2853,19 +3265,38 @@ def main():
     if args.list_subsets:
         args.mode = 'list-subsets'
 
+    if args.profile_one_epoch:
+        PROFILE.configure(
+            enabled=True,
+            max_batches_per_loop=args.profile_max_batches,
+            max_subsets=args.profile_max_subsets,
+            synthetic_samples=args.profile_synthetic_samples,
+            layer_hooks=not args.profile_no_layer_hooks,
+            log_shapes=not args.profile_no_shapes,
+        )
+        args.fresh = True
+
     # Override directories
     if args.checkpoint_dir:
         CHECKPOINT_DIR = args.checkpoint_dir
         MANIFEST_PATH = os.path.join(CHECKPOINT_DIR, 'training_manifest.json')
+    elif args.profile_one_epoch:
+        CHECKPOINT_DIR = os.path.join(script_dir, "checkpoints_profile_1epoch")
+        MANIFEST_PATH = os.path.join(CHECKPOINT_DIR, 'training_manifest.json')
     if args.results_dir:
         RESULTS_DIR = args.results_dir
+    elif args.profile_one_epoch:
+        RESULTS_DIR = os.path.join(script_dir, "results_profile_1epoch")
     
     # Set N_VARIATES from CLI (affects all model/data creation)
     if args.n_variates is not None:
         N_VARIATES = args.n_variates
     
     global USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT, DIFFUSION_TYPE
-    global SYNTHETIC_SAMPLES_FULL, SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS
+    global SYNTHETIC_SAMPLES_FULL, SYNTHETIC_SAMPLES_HP_TUNE, SYNTHETIC_SAMPLES_DIFF_TUNE
+    global N_ITRANS_HP_TRIALS, N_DIFFUSION_HP_TRIALS, N_FINETUNE_HP_TRIALS
+    global PRETRAIN_EPOCHS, PRETRAIN_PATIENCE, FINETUNE_EPOCHS, FINETUNE_PATIENCE
+    global HP_TUNE_EPOCHS, HP_TUNE_PATIENCE
     USE_AMP = args.amp
     USE_GRADIENT_CHECKPOINTING = args.gradient_checkpointing
     if args.binary_diffusion:
@@ -2877,8 +3308,30 @@ def main():
         SYNTHETIC_SAMPLES_HP_TUNE = args.synthetic_samples
     if args.itransformer_trials is not None:
         N_ITRANS_HP_TRIALS = args.itransformer_trials
+    if args.profile_one_epoch:
+        SYNTHETIC_SAMPLES_FULL = args.profile_synthetic_samples
+        SYNTHETIC_SAMPLES_HP_TUNE = args.profile_synthetic_samples
+        SYNTHETIC_SAMPLES_DIFF_TUNE = args.profile_synthetic_samples
+        N_ITRANS_HP_TRIALS = 1
+        N_DIFFUSION_HP_TRIALS = 1
+        N_FINETUNE_HP_TRIALS = 1
+        PRETRAIN_EPOCHS = 1
+        PRETRAIN_PATIENCE = 1
+        FINETUNE_EPOCHS = 1
+        FINETUNE_PATIENCE = 1
+        HP_TUNE_EPOCHS = 1
+        HP_TUNE_PATIENCE = 1
     
     logger = setup_logging()
+    if args.profile_one_epoch:
+        PROFILE.log_event(
+            "profile_one_epoch.enabled",
+            checkpoint_dir=CHECKPOINT_DIR,
+            results_dir=RESULTS_DIR,
+            max_batches=args.profile_max_batches,
+            synthetic_samples=args.profile_synthetic_samples,
+            max_subsets=args.profile_max_subsets,
+        )
     
     # ---- Mode dispatch ----
     
@@ -2912,12 +3365,19 @@ def main():
         N_VARIATES = nv
         try:
             if args.wandb:
-                init_wandb(project=args.wandb_project, resume=args.resume)
+                if not init_wandb(project=args.wandb_project, resume=args.resume):
+                    print(
+                        "ERROR: wandb initialization failed. "
+                        "Most common cause is an invalid/revoked WANDB_API_KEY (W&B 401).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
             run_pretrain_mode(
                 nv,
                 smoke_test=args.smoke_test,
                 seed=args.seed,
                 resume_pretrain_diffusion=args.resume_pretrain_diffusion,
+                diffusion_export_epochs=diffusion_export_epochs,
             )
         finally:
             if args.wandb:
@@ -2932,7 +3392,13 @@ def main():
             N_VARIATES = args.n_variates
         try:
             if args.wandb:
-                init_wandb(project=args.wandb_project, resume=args.resume)
+                if not init_wandb(project=args.wandb_project, resume=args.resume):
+                    print(
+                        "ERROR: wandb initialization failed. "
+                        "Most common cause is an invalid/revoked WANDB_API_KEY (W&B 401).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
             run_finetune_mode(args.dataset, smoke_test=args.smoke_test, seed=args.seed)
         finally:
             if args.wandb:
@@ -2948,7 +3414,13 @@ def main():
         vi = [int(x) for x in args.variate_indices.split(',')]
         try:
             if args.wandb:
-                init_wandb(project=args.wandb_project, resume=args.resume)
+                if not init_wandb(project=args.wandb_project, resume=args.resume):
+                    print(
+                        "ERROR: wandb initialization failed. "
+                        "Most common cause is an invalid/revoked WANDB_API_KEY (W&B 401).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
             run_finetune_subset_mode(
                 args.subset_id, args.dataset, vi,
                 smoke_test=args.smoke_test, seed=args.seed,
@@ -2991,6 +3463,7 @@ def main():
             use_wandb=args.wandb,
             wandb_project=args.wandb_project,
             resume_pretrain_diffusion=args.resume_pretrain_diffusion,
+            diffusion_export_epochs=diffusion_export_epochs,
         )
     finally:
         finish_wandb()
