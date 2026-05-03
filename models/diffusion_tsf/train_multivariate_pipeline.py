@@ -169,9 +169,6 @@ def oom_safe_backward(loss, optimizer, model, max_grad_norm=1.0) -> bool:
             logger.warning("OOM on backward — batch skipped, VRAM cache cleared")
             return False
         raise
-def create_dataloader_ddp(dataset, batch_size, shuffle=True, num_workers=4, drop_last=False):
-    return create_dataloader(dataset, batch_size, shuffle, num_workers, drop_last), None
-def barrier(): pass
 
 
 # Logging setup
@@ -212,6 +209,7 @@ class TimingProfiler:
         self.layer_hooks = True
         self.log_shapes = True
         self.max_logged_epoch = 1
+        self.profile_unet_forward = True
 
     def configure(
         self,
@@ -222,6 +220,7 @@ class TimingProfiler:
         synthetic_samples: int = 256,
         layer_hooks: bool = True,
         log_shapes: bool = True,
+        profile_unet_forward: bool = True,
     ) -> None:
         self.enabled = enabled
         self.max_batches_per_loop = max_batches_per_loop
@@ -229,6 +228,16 @@ class TimingProfiler:
         self.synthetic_samples = synthetic_samples
         self.layer_hooks = layer_hooks
         self.log_shapes = log_shapes
+        self.profile_unet_forward = profile_unet_forward
+        try:
+            from models.diffusion_tsf import unet_profile as _unet_profile_mod
+        except ImportError:
+            from . import unet_profile as _unet_profile_mod
+        _unet_profile_mod.configure(
+            enabled=enabled and profile_unet_forward,
+            max_logged_epoch=self.max_logged_epoch,
+            log_epoch=1,
+        )
 
     def _should_log_name(self, name: str) -> bool:
         if not self.enabled:
@@ -977,11 +986,6 @@ def load_dataset(
     if variate_indices is not None:
         data = data[:, variate_indices]
     
-    # Normalize
-    mean = data.mean(axis=0, keepdims=True)
-    std = data.std(axis=0, keepdims=True) + 1e-8
-    data = (data - mean) / std
-    
     # Chronological split: 70/10/20
     n = len(data)
     total_window = lookback + horizon
@@ -994,6 +998,17 @@ def load_dataset(
     
     train_end = int(n * 0.7)
     val_end = int(n * 0.8)
+
+    # Normalize using train split statistics only (prevents val/test leakage).
+    train_slice = data[:train_end]
+    if len(train_slice) == 0:
+        raise ValueError(
+            f"Dataset '{dataset_name}' has no training rows after split "
+            f"(n={n}, train_end={train_end})."
+        )
+    mean = train_slice.mean(axis=0, keepdims=True)
+    std = train_slice.std(axis=0, keepdims=True) + 1e-8
+    data = (data - mean) / std
     
     train_ds = TimeSeriesDataset(data[:train_end], lookback, horizon, stride, lookback_overlap=lookback_overlap)
     val_ds = TimeSeriesDataset(data[train_end:val_end], lookback, horizon, stride=lookback, lookback_overlap=lookback_overlap)
@@ -3346,7 +3361,6 @@ def main():
     )
     parser.add_argument('--smoke-test', action='store_true', help='Quick validation run')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--status', action='store_true', help='Show status (legacy flag)')
     parser.add_argument('--wandb', action='store_true', help='Enable wandb logging')
     parser.add_argument('--wandb-project', type=str, default='diffusion-tsf', help='Wandb project')
     parser.add_argument('--run-descriptor', type=str, default='default',
@@ -3361,8 +3375,6 @@ def main():
                         help='Parallel worker ID for multi-GPU Optuna (0-N)')
     parser.add_argument('--fresh', action='store_true',
                         help='Wipe manifest and checkpoints, start from scratch')
-    parser.add_argument('--list-subsets', action='store_true',
-                        help='Legacy flag: list subsets')
     parser.add_argument('--amp', action='store_true',
                         help='Enable bfloat16 mixed precision training')
     parser.add_argument('--gradient-checkpointing', action='store_true',
@@ -3386,6 +3398,8 @@ def main():
                         help='Dataset subsets to fine-tune during --profile-one-epoch.')
     parser.add_argument('--profile-no-layer-hooks', action='store_true',
                         help='Disable per-module forward timing hooks in --profile-one-epoch.')
+    parser.add_argument('--profile-no-unet-forward', action='store_true',
+                        help='Disable per-section timing inside ConditionalUNet2D.forward.')
     parser.add_argument('--profile-no-shapes', action='store_true',
                         help='Disable tensor shape metadata in PROFILE logs.')
     
@@ -3399,12 +3413,6 @@ def main():
         if x.strip()
     ]
 
-    # Legacy flag compat
-    if args.status:
-        args.mode = 'status'
-    if args.list_subsets:
-        args.mode = 'list-subsets'
-
     if args.profile_one_epoch:
         PROFILE.configure(
             enabled=True,
@@ -3413,6 +3421,7 @@ def main():
             synthetic_samples=args.profile_synthetic_samples,
             layer_hooks=not args.profile_no_layer_hooks,
             log_shapes=not args.profile_no_shapes,
+            profile_unet_forward=not args.profile_no_unet_forward,
         )
         args.fresh = True
 
