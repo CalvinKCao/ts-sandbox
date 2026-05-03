@@ -19,6 +19,8 @@ import math
 import logging
 from typing import List, Optional, Tuple
 
+from . import unet_profile as _unet_prof
+
 logger = logging.getLogger(__name__)
 
 
@@ -1178,58 +1180,56 @@ class ConditionalUNet2D(nn.Module):
         Returns:
             Predicted noise of shape (batch, out_channels, height, future_len)
         """
-        # Get time embeddings
-        t_emb = get_timestep_embedding(t, self.time_mlp[0].in_features)
-        t_emb = self.time_mlp(t_emb)
-        
-        # Prepare conditioning features based on mode
-        if self.conditioning_mode == "vector_embedding":
-            # Use ConditioningEncoder to extract local/global features
-            target_width = x.shape[3]
-            cond_features = self.cond_encoder(cond, target_width)
-        else:
-            # visual_concat mode: cond is already the past visual at target width
-            # Just use it directly
-            cond_features = cond
-        
-        # Concatenate along channel dimension
-        x = torch.cat([x, cond_features], dim=1)
-        
-        # Initial conv
-        x = self.init_conv(x)
+        with _unet_prof.section("time_embed"):
+            t_emb = get_timestep_embedding(t, self.time_mlp[0].in_features)
+            t_emb = self.time_mlp(t_emb)
 
-        # Downsampling with skip connections
-        skips = []
-        for down_block in self.down_blocks:
-            if self.use_gradient_checkpointing and self.training:
-                x, skip = grad_ckpt.checkpoint(
-                    down_block, x, t_emb, encoder_hidden_states, use_reentrant=False
-                )
+        with _unet_prof.section("cond_prepare"):
+            if self.conditioning_mode == "vector_embedding":
+                target_width = x.shape[3]
+                cond_features = self.cond_encoder(cond, target_width)
             else:
-                x, skip = down_block(x, t_emb, encoder_hidden_states)
+                cond_features = cond
+
+        with _unet_prof.section("cat_input"):
+            x = torch.cat([x, cond_features], dim=1)
+
+        with _unet_prof.section("init_conv"):
+            x = self.init_conv(x)
+
+        skips = []
+        for i, down_block in enumerate(self.down_blocks):
+            with _unet_prof.section(f"down_{i}"):
+                if self.use_gradient_checkpointing and self.training:
+                    x, skip = grad_ckpt.checkpoint(
+                        down_block, x, t_emb, encoder_hidden_states, use_reentrant=False
+                    )
+                else:
+                    x, skip = down_block(x, t_emb, encoder_hidden_states)
             skips.append(skip)
 
-        # Middle
-        if self.use_gradient_checkpointing and self.training:
-            x = grad_ckpt.checkpoint(
-                self.middle, x, t_emb, encoder_hidden_states, use_reentrant=False
-            )
-        else:
-            x = self.middle(x, t_emb, encoder_hidden_states)
-
-        # Upsampling with skip connections
-        for up_block, skip in zip(self.up_blocks, reversed(skips)):
+        with _unet_prof.section("middle"):
             if self.use_gradient_checkpointing and self.training:
                 x = grad_ckpt.checkpoint(
-                    up_block, x, skip, t_emb, encoder_hidden_states, use_reentrant=False
+                    self.middle, x, t_emb, encoder_hidden_states, use_reentrant=False
                 )
             else:
-                x = up_block(x, skip, t_emb, encoder_hidden_states)
-        
-        # Final output
-        x = self.final_norm(x)
-        x = F.silu(x)
-        x = self.final_conv(x)
-        
+                x = self.middle(x, t_emb, encoder_hidden_states)
+
+        for i, (up_block, skip) in enumerate(zip(self.up_blocks, reversed(skips))):
+            with _unet_prof.section(f"up_{i}"):
+                if self.use_gradient_checkpointing and self.training:
+                    x = grad_ckpt.checkpoint(
+                        up_block, x, skip, t_emb, encoder_hidden_states, use_reentrant=False
+                    )
+                else:
+                    x = up_block(x, skip, t_emb, encoder_hidden_states)
+
+        with _unet_prof.section("final_norm_act"):
+            x = self.final_norm(x)
+            x = F.silu(x)
+        with _unet_prof.section("final_conv"):
+            x = self.final_conv(x)
+
         return x
 
