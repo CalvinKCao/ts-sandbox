@@ -77,9 +77,14 @@ if [ -z "${STORE:-}" ]; then
     exit 1
 fi
 
-echo "[setup] Building venv on \$SLURM_TMPDIR ..."
-virtualenv --no-download "$SLURM_TMPDIR/env"
-source "$SLURM_TMPDIR/env/bin/activate"
+if [ -x "\$STORE/venv/bin/python" ] && [ -f "\$STORE/venv/bin/activate" ]; then
+    echo "[setup] Using existing venv: \$STORE/venv"
+    source "\$STORE/venv/bin/activate"
+else
+    echo "[setup] Creating venv: \$STORE/venv"
+    virtualenv --no-download "\$STORE/venv"
+    source "\$STORE/venv/bin/activate"
+fi
 pip install --no-index --upgrade pip -q
 pip install --no-index torch numpy pandas scipy scikit-learn tqdm wandb optuna matplotlib einops -q
 pip install reformer-pytorch==1.4.4 -q
