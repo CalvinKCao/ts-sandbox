@@ -71,11 +71,10 @@ echo "  Repo / submit dir:  $REPO"
 echo "  Artifacts:          $REPO/results/{logs,ckpts,datasets}/"
 echo "=================================================================="
 
-# ---- Venv path (informational; batch preamble builds venv on SLURM_TMPDIR) ---
-export VENV="${REPO}/.venv"
-for _d in ~/projects/aip-* ~/projects/def-*; do
-    [ -d "$_d/$USER/diffusion-tsf/venv" ] && export VENV="$_d/$USER/diffusion-tsf/venv" && break
-done
+# Keep datasets accessible from STORE without copying GBs
+# Use -L to check for the symlink itself (not its target) to avoid broken-symlink traps
+[ ! -L "$STORE/datasets" ] && [ ! -e "$STORE/datasets" ] && \
+    ln -s "$REPO/datasets" "$STORE/datasets"
 
 # ---- Repo path (exported) ---------------------------------------------------
 export REPO
@@ -143,12 +142,17 @@ module load python/3.11
 module load cuda/12.2
 module load cudnn/8.9
 
-# Rebuild venv on node-local NVMe each job — avoids catastrophically slow imports
-# from Lustre (/scratch, /project). (import torch) alone can take 5-15 min on
-# a cold Lustre node; \$SLURM_TMPDIR reads take seconds.
-echo "[setup] Building venv on \$SLURM_TMPDIR ..."
-virtualenv --no-download "\$SLURM_TMPDIR/env"
-source "\$SLURM_TMPDIR/env/bin/activate"
+# Python venv: \$STORE/venv only (path baked at submit). Create with virtualenv if missing.
+# STORE can be slower than node-local NVMe for huge I/O; a venv is modest size and jobs
+# mostly pay one-time pip + import cost, not continuous random read throughput.
+if [ -x "${STORE}/venv/bin/python" ] && [ -f "${STORE}/venv/bin/activate" ]; then
+    echo "[setup] Using existing venv: ${STORE}/venv"
+    source "${STORE}/venv/bin/activate"
+else
+    echo "[setup] Creating venv: ${STORE}/venv"
+    virtualenv --no-download "${STORE}/venv"
+    source "${STORE}/venv/bin/activate"
+fi
 pip install --no-index --upgrade pip -q
 
 # Alliance CA wheel cache first; PyPI fallback for torch stack.
@@ -164,7 +168,7 @@ fi
 # ships as sdist that builds wandb-core in Go at metadata-generation time, and compute
 # nodes have no go binary. Observed failure (job 3249152):
 #   "Did not find the 'go' binary" -> metadata-generation-failed -> set -e kills the job
-#   with an almost-empty log that only shows "[setup] Building venv on SLURM_TMPDIR".
+#   with an almost-empty log that only shows the venv setup line.
 # Ref: wiki_docs/Weights_&_Biases_(wandb).md — Alliance docs say: pip install --no-index wandb.
 pip install --no-index wandb -q
 
