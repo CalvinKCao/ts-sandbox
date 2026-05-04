@@ -393,6 +393,100 @@ def profile_diffusion_model(model: DiffusionTSF, prefix: str):
 _wandb_run = None
 _wandb_enabled = False
 _global_step = 0
+_wandb_project = "diffusion-tsf"
+
+# ---- Run grouping (Optuna trial naming + wandb group) ----
+# Trials are named "{MM-DD}-{phase}-{descriptor}-trial{n}"; the parent pipeline
+# run + every trial share the same wandb group "{MM-DD}-{descriptor}", so all
+# four phases of one training run line up in the W&B UI.
+RUN_DESCRIPTOR = "default"
+RUN_DATE_STR = datetime.now().strftime("%m-%d")
+RUN_GROUP = f"{RUN_DATE_STR}-{RUN_DESCRIPTOR}"
+
+
+def set_run_group(descriptor: str) -> str:
+    """Set the descriptor used for trial names and the wandb group."""
+    global RUN_DESCRIPTOR, RUN_DATE_STR, RUN_GROUP
+    RUN_DESCRIPTOR = descriptor or "default"
+    RUN_DATE_STR = datetime.now().strftime("%m-%d")
+    RUN_GROUP = f"{RUN_DATE_STR}-{RUN_DESCRIPTOR}"
+    return RUN_GROUP
+
+
+def trial_run_name(phase: str, trial_number: int) -> str:
+    return f"{RUN_DATE_STR}-{phase}-{RUN_DESCRIPTOR}-trial{trial_number}"
+
+
+def study_name_for(phase: str) -> str:
+    return f"{RUN_DATE_STR}-{phase}-{RUN_DESCRIPTOR}"
+
+
+@contextlib.contextmanager
+def per_trial_wandb_run(phase: str, trial, params: dict, extra_config: Optional[dict] = None):
+    """Open a child wandb run for one Optuna trial, sharing the parent's group.
+
+    No-op when wandb is disabled. Stores the trial name on the optuna trial
+    via user_attrs so it shows up in study dataframes too. After the trial run
+    finishes, re-attaches the parent wandb run so subsequent outer logging
+    (e.g. `log_wandb_hp_search`) keeps writing to the correct run.
+    """
+    global _wandb_run
+    name = trial_run_name(phase, trial.number)
+    try:
+        trial.set_user_attr("name", name)
+        trial.set_user_attr("phase", phase)
+        trial.set_user_attr("run_group", RUN_GROUP)
+    except Exception:
+        pass
+
+    if not (_wandb_enabled and WANDB_AVAILABLE and _wandb_project):
+        yield None
+        return
+
+    parent_id = _wandb_run.id if _wandb_run is not None else None
+    parent_project = _wandb_project
+    parent_group = RUN_GROUP
+
+    cfg = dict(params)
+    if extra_config:
+        cfg.update(extra_config)
+    cfg.setdefault("optuna_trial_number", trial.number)
+    cfg.setdefault("optuna_phase", phase)
+
+    trial_run = None
+    try:
+        trial_run = wandb.init(
+            project=parent_project,
+            name=name,
+            group=parent_group,
+            job_type=phase,
+            config=cfg,
+            reinit=True,
+            tags=["optuna-trial", phase],
+        )
+    except Exception as e:
+        logger.warning(f"Failed to init per-trial wandb run ({name}): {e}")
+        yield None
+        return
+
+    try:
+        yield trial_run
+    finally:
+        try:
+            trial_run.finish()
+        except Exception:
+            pass
+        if parent_id is not None:
+            try:
+                _wandb_run = wandb.init(
+                    project=parent_project,
+                    id=parent_id,
+                    resume="must",
+                    reinit=True,
+                    group=parent_group,
+                )
+            except Exception as e:
+                logger.warning(f"Could not re-attach parent wandb run after trial: {e}")
 
 
 def get_git_info() -> dict:
@@ -448,9 +542,13 @@ def init_wandb(
     config: dict = None,
     resume: bool = False,
     tags: list = None,
+    group: str = None,
+    name: str = None,
 ) -> bool:
-    """Initialize wandb."""
-    global _wandb_run, _wandb_enabled, _global_step
+    """Initialize wandb. `group` defaults to the module-level RUN_GROUP so all
+    phases of a four-phase training run cluster together in the W&B UI."""
+    global _wandb_run, _wandb_enabled, _global_step, _wandb_project
+    _wandb_project = project
 
     if not WANDB_AVAILABLE:
         logger.warning("wandb not installed. Run: pip install wandb")
@@ -489,6 +587,11 @@ def init_wandb(
     if tags is None:
         tags = ['multivariate-pipeline']
 
+    effective_group = group if group is not None else RUN_GROUP
+    effective_name = name if name is not None else f"{RUN_DATE_STR}-pipeline-{RUN_DESCRIPTOR}"
+    full_config.setdefault('run_group', effective_group)
+    full_config.setdefault('run_descriptor', RUN_DESCRIPTOR)
+
     try:
         _wandb_run = wandb.init(
             project=project,
@@ -497,6 +600,8 @@ def init_wandb(
             id=run_id,
             reinit=True,
             tags=tags,
+            group=effective_group,
+            name=effective_name,
             save_code=True,  # Save code for reproducibility
         )
         
@@ -1093,8 +1198,9 @@ def itrans_hp_objective(trial, synthetic_loader, val_loader, device, smoke_test=
     lr = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
     batch_size = trial.suggest_categorical('batch_size', [8, 16] if smoke_test else ITRANS_BATCH_SIZES)
     dropout = trial.suggest_float('dropout', 0.0, 0.3)
+    params = {"learning_rate": lr, "batch_size": batch_size, "dropout": dropout}
 
-    with oom_prune_trial():
+    with per_trial_wandb_run("1-A", trial, params), oom_prune_trial():
         model = create_itransformer(dropout=dropout).to(device)
         train_loader = DataLoader(synthetic_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -1106,7 +1212,7 @@ def itrans_hp_objective(trial, synthetic_loader, val_loader, device, smoke_test=
         best_val_loss = float('inf')
 
         for epoch in range(epochs):
-            train_itransformer_epoch(
+            train_loss = train_itransformer_epoch(
                 model, train_loader, optimizer, criterion, device,
                 phase_label=f"phase1A_itrans_hp.trial{trial.number}.epoch{epoch+1}.train",
             )
@@ -1114,6 +1220,9 @@ def itrans_hp_objective(trial, synthetic_loader, val_loader, device, smoke_test=
                 model, val_loader, criterion, device,
                 phase_label=f"phase1A_itrans_hp.trial{trial.number}.epoch{epoch+1}.val",
             )
+
+            if WANDB_AVAILABLE and wandb.run is not None:
+                wandb.log({"val_loss": val_loss, "train_loss": train_loss, "epoch": epoch + 1})
 
             trial.report(val_loss, epoch)
             if trial.should_prune():
@@ -1124,6 +1233,9 @@ def itrans_hp_objective(trial, synthetic_loader, val_loader, device, smoke_test=
 
             if early_stop(val_loss):
                 break
+
+        if WANDB_AVAILABLE and wandb.run is not None:
+            wandb.run.summary["best_val_loss"] = best_val_loss
 
     return best_val_loss
 
@@ -1166,8 +1278,12 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
     
     # Run Optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
-    
+    study = optuna.create_study(
+        study_name=study_name_for("1-A"),
+        direction='minimize',
+        sampler=TPESampler(seed=42),
+    )
+
     logger.info(f"Starting iTransformer HP search: {n_trials} trials")
     
     def log_trial(study, trial):
@@ -1207,8 +1323,9 @@ def diffusion_hp_objective(
     """Optuna objective for Diffusion HP search."""
     lr = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
     batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else DIFFUSION_BATCH_SIZES)
+    params = {"learning_rate": lr, "batch_size": batch_size}
 
-    with oom_prune_trial():
+    with per_trial_wandb_run("1-B", trial, params), oom_prune_trial():
         model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE).to(device)
         model.set_guidance_model(itrans_guidance)
 
@@ -1259,6 +1376,9 @@ def diffusion_hp_objective(
                         n_batches += 1
             val_loss /= max(n_batches, 1)
 
+            if WANDB_AVAILABLE and wandb.run is not None:
+                wandb.log({"val_loss": val_loss, "epoch": epoch + 1})
+
             trial.report(val_loss, epoch)
             if trial.should_prune():
                 raise optuna.TrialPruned()
@@ -1268,6 +1388,9 @@ def diffusion_hp_objective(
 
             if early_stop(val_loss):
                 break
+
+        if WANDB_AVAILABLE and wandb.run is not None:
+            wandb.run.summary["best_val_loss"] = best_val_loss
 
     return best_val_loss
 
@@ -1321,8 +1444,12 @@ def run_diffusion_hp_tuning(
     
     # Run Optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
-    
+    study = optuna.create_study(
+        study_name=study_name_for("1-B"),
+        direction='minimize',
+        sampler=TPESampler(seed=42),
+    )
+
     logger.info(f"Starting Diffusion HP search: {n_trials} trials")
     
     def log_trial(study, trial):
@@ -1700,8 +1827,10 @@ def finetune_hp_objective(
     """Optuna objective for fine-tuning HP search (lr and batch_size only)."""
     lr = trial.suggest_float('learning_rate', 1e-6, 1e-4, log=True)
     batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else FINETUNE_BATCH_SIZES)
+    params = {"learning_rate": lr, "batch_size": batch_size}
+    phase = f"2-A-{dataset_name}"
 
-    with oom_prune_trial():
+    with per_trial_wandb_run(phase, trial, params, extra_config={"dataset": dataset_name}), oom_prune_trial():
         train_ds, val_ds, _, _ = load_dataset(
             dataset_name, variate_indices,
             stride=24 if not smoke_test else LOOKBACK_LENGTH,
@@ -1770,6 +1899,9 @@ def finetune_hp_objective(
                         n_batches += 1
             val_loss /= max(n_batches, 1)
 
+            if WANDB_AVAILABLE and wandb.run is not None:
+                wandb.log({"val_loss": val_loss, "epoch": epoch + 1})
+
             trial.report(val_loss, epoch)
             if trial.should_prune():
                 raise optuna.TrialPruned()
@@ -1779,6 +1911,9 @@ def finetune_hp_objective(
 
             if early_stop(val_loss):
                 break
+
+        if WANDB_AVAILABLE and wandb.run is not None:
+            wandb.run.summary["best_val_loss"] = best_val_loss
 
     return best_val_loss
 
@@ -2632,7 +2767,11 @@ def run_pipeline(
                                f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
                                f"bs={trial.params['batch_size']}")
 
-                study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
+                study = optuna.create_study(
+                    study_name=study_name_for(f"2-A-{dataset_name}"),
+                    direction='minimize',
+                    sampler=TPESampler(seed=42),
+                )
                 study.optimize(
                     lambda trial: finetune_hp_objective(
                         trial, dataset_name, variate_indices, diff_ckpt, ft_itrans_ckpt, device, smoke_test
@@ -3072,6 +3211,7 @@ def _finetune_and_eval_one_subset(
             logger.info(f"HP search for {subset_id} ({n_finetune_trials} trials)...")
             optuna.logging.set_verbosity(optuna.logging.WARNING)
             study = optuna.create_study(
+                study_name=study_name_for(f"2-A-{dataset_name}"),
                 direction='minimize',
                 sampler=TPESampler(seed=42),
                 pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
@@ -3209,6 +3349,10 @@ def main():
     parser.add_argument('--status', action='store_true', help='Show status (legacy flag)')
     parser.add_argument('--wandb', action='store_true', help='Enable wandb logging')
     parser.add_argument('--wandb-project', type=str, default='diffusion-tsf', help='Wandb project')
+    parser.add_argument('--run-descriptor', type=str, default='default',
+                        help=('Short tag describing this 4-phase run (e.g. "etth1-binary-v2"). '
+                              'Used in optuna trial names "{MM-DD}-{phase}-{descriptor}-trial{n}" '
+                              'and as the wandb group "{MM-DD}-{descriptor}".'))
     parser.add_argument('--checkpoint-dir', type=str, default=None,
                         help='Override checkpoint directory')
     parser.add_argument('--results-dir', type=str, default=None,
@@ -3246,6 +3390,7 @@ def main():
                         help='Disable tensor shape metadata in PROFILE logs.')
     
     args = parser.parse_args()
+    set_run_group(args.run_descriptor)
     if args.wandb:
         _require_wandb_api_key_or_exit()
     diffusion_export_epochs = [
