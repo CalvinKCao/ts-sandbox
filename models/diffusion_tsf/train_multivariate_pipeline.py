@@ -887,12 +887,7 @@ def load_dataset(
     if variate_indices is not None:
         data = data[:, variate_indices]
     
-    # Normalize
-    mean = data.mean(axis=0, keepdims=True)
-    std = data.std(axis=0, keepdims=True) + 1e-8
-    data = (data - mean) / std
-    
-    # Chronological split: 70/10/20
+    # Chronological split: 70/10/20 (boundaries first; z-score uses train slice only)
     n = len(data)
     total_window = lookback + horizon
     if n < total_window:
@@ -904,6 +899,11 @@ def load_dataset(
     
     train_end = int(n * 0.7)
     val_end = int(n * 0.8)
+    
+    train_slice = data[:train_end]
+    mean = train_slice.mean(axis=0, keepdims=True)
+    std = train_slice.std(axis=0, keepdims=True) + 1e-8
+    data = (data - mean) / std
     
     train_ds = TimeSeriesDataset(data[:train_end], lookback, horizon, stride, lookback_overlap=lookback_overlap)
     val_ds = TimeSeriesDataset(data[train_end:val_end], lookback, horizon, stride=lookback, lookback_overlap=lookback_overlap)
