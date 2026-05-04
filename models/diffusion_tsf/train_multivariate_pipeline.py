@@ -679,13 +679,16 @@ HP_TUNE_EPOCHS = 200
 HP_TUNE_PATIENCE = 20
 
 # Optuna settings
-N_ITRANS_HP_TRIALS = 20
-N_DIFFUSION_HP_TRIALS = 8
-N_FINETUNE_HP_TRIALS = 8
+N_ITRANS_HP_TRIALS = 3
+N_DIFFUSION_HP_TRIALS = 3
+N_FINETUNE_HP_TRIALS = 3
 
-# Batch size ranges for A6000/A100 (40-48GB)
-ITRANS_BATCH_SIZES = [64, 128, 256]
-DIFFUSION_BATCH_SIZES = [16, 32, 64, 128]
+# Fixed batch sizes for pretraining phases. Only fine-tuning (Phase 2) still
+# tunes batch_size via Optuna.
+ITRANS_PRETRAIN_BATCH_SIZE = 256   # large synthetic dataset; iTransformer is cheap
+DIFFUSION_PRETRAIN_BATCH_SIZE = 16 # diffusion forward is expensive (B*V images/step)
+
+# Batch size candidates for fine-tuning HP search (Phase 2 only)
 FINETUNE_BATCH_SIZES = [4, 8, 16]
 
 # Memory optimization flags (overridden by CLI)
@@ -802,10 +805,20 @@ def create_diffusion_model(
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
     diffusion_type: str = "gaussian",
+    num_diffusion_steps: int = None,
+    image_height: int = None,
 ) -> DiffusionTSF:
-    """Create DiffusionTSF model with optional guidance channel."""
+    """Create DiffusionTSF model with optional guidance channel.
+
+    `num_diffusion_steps` and `image_height` default to the module-level globals
+    when not specified, so all existing call sites are unaffected.
+    """
     if n_variates is None:
         n_variates = N_VARIATES
+    if num_diffusion_steps is None:
+        num_diffusion_steps = 1000
+    if image_height is None:
+        image_height = IMAGE_HEIGHT
 
     config = DiffusionTSFConfig(
         num_variables=n_variates,
@@ -813,10 +826,10 @@ def create_diffusion_model(
         forecast_length=horizon + lookback_overlap,
         lookback_overlap=lookback_overlap,
         past_loss_weight=past_loss_weight,
-        image_height=IMAGE_HEIGHT,
+        image_height=image_height,
         use_coordinate_channel=True,
         use_guidance_channel=use_guidance,
-        num_diffusion_steps=1000,
+        num_diffusion_steps=num_diffusion_steps,
         model_type="unet",
         unet_channels=[64, 128, 256],
         unet_kernel_size=(3, 9),
@@ -1109,10 +1122,11 @@ def validate_itransformer(model, loader, criterion, device, phase_label="itrans_
 
 
 def itrans_hp_objective(trial, synthetic_loader, val_loader, device, smoke_test=False):
-    """Optuna objective for iTransformer HP search."""
+    """Optuna objective for iTransformer HP search. Batch size is fixed at
+    ITRANS_PRETRAIN_BATCH_SIZE; only lr and dropout are tuned."""
     lr = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [8, 16] if smoke_test else ITRANS_BATCH_SIZES)
     dropout = trial.suggest_float('dropout', 0.0, 0.3)
+    batch_size = ITRANS_PRETRAIN_BATCH_SIZE
 
     with oom_prune_trial():
         model = create_itransformer(dropout=dropout).to(device)
@@ -1195,7 +1209,7 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
             return
         logger.info(f"[iTransformer HP] Trial {trial.number}/{n_trials}: "
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                   f"bs={trial.params['batch_size']}, dropout={trial.params['dropout']:.3f}")
+                   f"bs={ITRANS_PRETRAIN_BATCH_SIZE}(fixed), dropout={trial.params['dropout']:.3f}")
     
     study.optimize(
         lambda trial: itrans_hp_objective(trial, train_loader, val_loader, device, smoke_test),
@@ -1206,7 +1220,7 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
     
     best_params = study.best_params
     logger.info(f"Best iTransformer params: lr={best_params['learning_rate']:.2e}, "
-               f"bs={best_params['batch_size']}, dropout={best_params['dropout']:.3f}")
+               f"bs={ITRANS_PRETRAIN_BATCH_SIZE}(fixed), dropout={best_params['dropout']:.3f}")
     logger.info(f"Best val loss: {study.best_value:.4f}")
     
     return best_params
@@ -1224,9 +1238,10 @@ def diffusion_hp_objective(
     device, 
     smoke_test=False
 ):
-    """Optuna objective for Diffusion HP search."""
+    """Optuna objective for Diffusion HP search. Batch size is fixed at
+    DIFFUSION_PRETRAIN_BATCH_SIZE; only lr is tuned."""
     lr = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else DIFFUSION_BATCH_SIZES)
+    batch_size = DIFFUSION_PRETRAIN_BATCH_SIZE
 
     with oom_prune_trial():
         model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE).to(device)
@@ -1350,7 +1365,7 @@ def run_diffusion_hp_tuning(
             return
         logger.info(f"[Diffusion HP] Trial {trial.number}/{n_trials}: "
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                   f"bs={trial.params['batch_size']}")
+                   f"bs={DIFFUSION_PRETRAIN_BATCH_SIZE}(fixed)")
     
     study.optimize(
         lambda trial: diffusion_hp_objective(trial, train_loader, val_loader, itrans_guidance, device, smoke_test),
@@ -1360,7 +1375,7 @@ def run_diffusion_hp_tuning(
     )
     
     best_params = study.best_params
-    logger.info(f"Best Diffusion params: lr={best_params['learning_rate']:.2e}, bs={best_params['batch_size']}")
+    logger.info(f"Best Diffusion params: lr={best_params['learning_rate']:.2e}, bs={DIFFUSION_PRETRAIN_BATCH_SIZE}(fixed)")
     logger.info(f"Best val loss: {study.best_value:.4f}")
     
     return best_params
@@ -1388,7 +1403,7 @@ def pretrain_itransformer(
     device = get_device()
 
     lr = best_params.get('learning_rate', 1e-4)
-    batch_size = best_params.get('batch_size', 64)
+    batch_size = ITRANS_PRETRAIN_BATCH_SIZE
     dropout = best_params.get('dropout', 0.1)
 
     synth_cache = os.path.join(checkpoint_dir, 'synth_cache')
@@ -1486,16 +1501,7 @@ def pretrain_diffusion(
     device = get_device()
 
     lr = best_params.get('learning_rate', 1e-4)
-    # Factorized forward processes B*V images per step, so a bs=16 HP result
-    # is already bs=112 effective for 7 variates — don't clamp up blindly.
-    # Floor is per-variate: keep effective U-Net batch ≤ ~128.
-    raw_bs = best_params.get('batch_size', 32)
-    max_effective = 128
-    min_bs = max(8, max_effective // max(N_VARIATES, 1))
-    batch_size = max(raw_bs, min_bs)
-    if batch_size > raw_bs:
-        logger.info(f"  Pretrain batch size clamped up: {raw_bs} → {batch_size} "
-                    f"(floor={min_bs} for V={N_VARIATES}, effective={batch_size * N_VARIATES})")
+    batch_size = DIFFUSION_PRETRAIN_BATCH_SIZE
 
     itrans_model = create_itransformer().to(device)
     ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)
