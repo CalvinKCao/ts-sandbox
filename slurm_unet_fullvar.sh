@@ -8,7 +8,7 @@
 #
 # USAGE (from login node, repo root):
 #   ./slurm_unet_fullvar.sh --smoke-test                     # L40S smoke
-#   ./slurm_unet_fullvar.sh                                  # H100 full run
+#   ./slurm_unet_fullvar.sh                                  # L40S full run
 #   ./slurm_unet_fullvar.sh --dataset electricity
 #   ./slurm_unet_fullvar.sh --resume --dataset traffic
 # =============================================================================
@@ -43,16 +43,15 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --mail-user=ccao87@uwo.ca \
             "$SCRIPT_DIR/slurm_unet_fullvar.sh" "$@"
     else
-        echo "Submitting FULL RUN (H100, 60GB, b4 = 3 days)..."
+        echo "Submitting FULL RUN (L40S, 50GB, 1 day wall — extend --time if needed)..."
         sbatch \
             --job-name=unet-fullvar \
             --account=aip-boyuwang \
-            --partition=gpubase_h100_b4 \
-            --time=1-12:00:00 \
+            --time=1-00:00:00 \
             --nodes=1 \
-            --gpus-per-node=h100:1 \
-            --cpus-per-task=6 \
-            --mem=60G \
+            --gres=gpu:l40s:1 \
+            --cpus-per-task=8 \
+            --mem=50G \
             --chdir="$SCRIPT_DIR" \
             --output=/dev/null \
             --error=/dev/null \
@@ -233,7 +232,8 @@ set -- "${PIPELINE_ARGS[@]}"
 AMP_FLAG="--amp"
 IMAGE_HEIGHT=96
 SUBSET_THRESHOLD=999999
-SYNTHETIC_SAMPLES=75000
+# Pretrain synthetic count: omit --synthetic-samples to use pipeline auto-sizing from PRETRAIN_EPOCHS.
+# Optional: SYNTHETIC_SAMPLES=50000 EXTRA_PY_ARGS="$EXTRA_PY_ARGS --synthetic-samples $SYNTHETIC_SAMPLES"
 ITRANSFORMER_TRIALS=12
 SEED=42
 
@@ -267,7 +267,6 @@ fi
 PYTHON="python -m models.diffusion_tsf.train_multivariate_pipeline"
 BASE_ARGS="--seed $SEED $SMOKE_TEST $EXTRA_PY_ARGS"
 BASE_ARGS="$BASE_ARGS $AMP_FLAG --image-height $IMAGE_HEIGHT"
-BASE_ARGS="$BASE_ARGS --synthetic-samples $SYNTHETIC_SAMPLES"
 BASE_ARGS="$BASE_ARGS --itransformer-trials $ITRANSFORMER_TRIALS"
 BASE_ARGS="$BASE_ARGS --subset-threshold $SUBSET_THRESHOLD"
 
@@ -281,7 +280,7 @@ echo "  U-Net Full-Variate Training (Slurm)"
 echo "============================================================"
 echo "  Backbone:     U-Net (bf16)"
 echo "  Image height: $IMAGE_HEIGHT"
-echo "  Synth pool:   $SYNTHETIC_SAMPLES"
+echo "  Synth pool:   auto (or set SYNTHETIC_SAMPLES + pass --synthetic-samples)"
 echo "  iTransformer trials: $ITRANSFORMER_TRIALS"
 echo "  Subset threshold: $SUBSET_THRESHOLD (no splitting)"
 echo "  Dataset:      $SINGLE_DATASET"

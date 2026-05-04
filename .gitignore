@@ -107,6 +107,7 @@ env/
 *.h5
 *.hdf5
 **/checkpoints/
+models/diffusion_tsf/checkpoints_multivariate/
 **/pre-trained-models/
 
 # -----------------------------------------------------------------------------

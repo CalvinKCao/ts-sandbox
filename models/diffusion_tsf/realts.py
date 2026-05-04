@@ -11,6 +11,7 @@ Generator Functions:
 - LGB: Logistic Growth Behavior
 - TWDB: Trend + Wave Data Behavior
 - IFFTB: Inverse FFT Behavior (synthetic spectrum)
+- STB: Smooth Trend Behavior (slow trend + optional mild seasonality)
 - seasonal_periodicity: Complex seasonal patterns
 
 Reference: ViTime Paper - "Foundation Model for Time Series Forecasting 
@@ -22,6 +23,9 @@ import torch
 from torch.utils.data import Dataset
 from typing import Optional, Tuple
 import logging
+import glob
+import os
+import re
 
 try:
     from .augmentation import generate_multivariate_synthetic_data
@@ -323,6 +327,65 @@ def IFFTB(length: int) -> np.ndarray:
     return signal
 
 
+def _gaussian_smooth(x: np.ndarray, sigma: float) -> np.ndarray:
+    """Numpy-only Gaussian convolution. Caps kernel half-width so the kernel
+    never exceeds the signal length (np.convolve mode='same' returns
+    max(M,N) which would change the output shape if kernel > signal)."""
+    hw = min(int(3.5 * sigma), (len(x) - 1) // 2)
+    k = np.arange(-hw, hw + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * (k / sigma) ** 2)
+    kernel /= kernel.sum()
+    return np.convolve(x, kernel, mode='same')
+
+
+def STB(length: int) -> np.ndarray:
+    """Smooth Trend Behavior.
+
+    Dominant slowly-changing trend with light noise and optional weak seasonality.
+    Sub-types: polynomial, smoothed random walk, exponential, piecewise-linear+smooth.
+    """
+    t = np.linspace(0, 1, length)
+
+    sub = np.random.choice(['poly', 'smooth_rw', 'exp', 'piecewise'])
+
+    if sub == 'poly':
+        degree = np.random.randint(1, 5)
+        coeffs = np.random.randn(degree + 1)
+        coeffs[0] *= np.random.uniform(1.0, 3.0)
+        signal = np.polyval(coeffs, t * 2 - 1)
+
+    elif sub == 'smooth_rw':
+        steps = np.random.normal(0, 1, length)
+        walk = np.cumsum(steps)
+        sigma = length * np.random.uniform(0.05, 0.15)
+        signal = _gaussian_smooth(walk, sigma)
+
+    elif sub == 'exp':
+        rate = np.random.uniform(1.5, 4.0) * np.random.choice([-1, 1])
+        signal = np.exp(rate * t)
+        if np.random.random() < 0.5:
+            signal = signal[::-1].copy()
+
+    else:  # piecewise
+        n_knots = np.random.randint(3, 7)
+        kx = np.sort(np.concatenate([[0.0], np.random.uniform(0.05, 0.95, n_knots), [1.0]]))
+        ky = np.random.randn(len(kx)) * 2.0
+        signal = np.interp(t, kx, ky)
+        signal = _gaussian_smooth(signal, length * 0.04)
+
+    sig_range = np.ptp(signal) + 1e-7
+    noise_scale = np.random.uniform(0.01, 0.08)
+    signal = signal + np.random.normal(0, noise_scale * sig_range, length)
+
+    if np.random.random() < 0.50:
+        n_cycles = np.random.uniform(1, 5)
+        season_amp = np.random.uniform(0.03, 0.15) * sig_range
+        phase = np.random.uniform(0, 2 * np.pi)
+        signal += season_amp * np.sin(2 * np.pi * n_cycles * t + phase)
+
+    return signal
+
+
 def seasonal_periodicity(length: int) -> np.ndarray:
     """Seasonal Periodicity Pattern.
     
@@ -377,6 +440,46 @@ def seasonal_periodicity(length: int) -> np.ndarray:
     return signal
 
 
+def find_reusable_synth_pool_cache(
+    cache_dir: str,
+    num_variables: int,
+    total_length: int,
+    seed: Optional[int],
+    min_rows: int,
+) -> Optional[str]:
+    """Return path to an on-disk pool with at least ``min_rows`` rows, or None.
+
+    Picks the **smallest** qualifying file so mmap stays small when a larger
+    leftover pool exists from an older run.
+    """
+    if not cache_dir or not os.path.isdir(cache_dir):
+        return None
+    pattern = os.path.join(
+        cache_dir, f"synth_pool_v{num_variables}_L{total_length}_N*.npy"
+    )
+    best_path: Optional[str] = None
+    best_n: Optional[int] = None
+    for path in glob.glob(pattern):
+        base = os.path.basename(path)
+        m = re.match(
+            rf"^synth_pool_v{num_variables}_L{total_length}_N(\d+)(?:_seed(\d+))?\.npy$",
+            base,
+        )
+        if not m:
+            continue
+        n_rows = int(m.group(1))
+        file_seed = int(m.group(2)) if m.group(2) is not None else None
+        if seed is not None:
+            if file_seed is not None and file_seed != seed:
+                continue
+        if n_rows < min_rows:
+            continue
+        if best_n is None or n_rows < best_n:
+            best_n = n_rows
+            best_path = path
+    return best_path
+
+
 # ============================================================================
 # RealTS Dataset Class
 # ============================================================================
@@ -390,12 +493,8 @@ class RealTS(Dataset):
     
     Supports both univariate and multivariate generation.
     
-    Mixing probabilities (from ViTime paper):
-    - IFFTB: 60% (complex periodicities)
-    - PWB: 16% (periodic waves)
-    - RWB: 8% (random walks)
-    - LGB: 8% (logistic growth)
-    - TWDB: 8% (trend + waves)
+    Generator mix includes STB (smooth trends) and seasonal/IFFTB emphasis;
+    see GENERATORS for exact probabilities.
     
     Args:
         num_samples: Number of synthetic samples to generate
@@ -408,12 +507,13 @@ class RealTS(Dataset):
     
     # Generator functions and their probabilities
     GENERATORS = [
-        (IFFTB, 0.30),           # Complex periodicities (Type 1)
-        (seasonal_periodicity, 0.30),  # Seasonal patterns (Type 2)
-        (PWB, 0.16),             # Periodic waves
-        (RWB, 0.08),             # Random walks
-        (LGB, 0.08),             # Logistic growth
-        (TWDB, 0.08),            # Trend + waves
+        (IFFTB,               0.24),
+        (seasonal_periodicity, 0.24),
+        (STB,                  0.20),
+        (PWB,                  0.13),
+        (TWDB,                 0.07),
+        (RWB,                  0.06),
+        (LGB,                  0.06),
     ]
     
     def __init__(
@@ -462,7 +562,6 @@ class RealTS(Dataset):
         
         # Disk Caching Logic (Large Pool)
         if cache_dir:
-            import os
             os.makedirs(cache_dir, exist_ok=True)
             self.use_disk_cache = True
             
@@ -476,36 +575,54 @@ class RealTS(Dataset):
                 logger.info(f"Loading synthetic pool from {cache_path}")
                 self.data_cache = np.load(cache_path, mmap_mode='r')
             else:
-                logger.info(f"Generating synthetic pool of {self.pool_size} samples to {cache_path}...")
-                if self.num_variables > 1:
-                    # Write directly to memmap to avoid holding the full array in RAM
-                    generate_multivariate_synthetic_data(
-                        num_samples=self.pool_size,
-                        num_vars=self.num_variables,
-                        length=self.total_length,
-                        seed=seed,
-                        skip_cross_var_aug=self.skip_cross_var_aug,
-                        output_path=cache_path,
+                reuse_path = find_reusable_synth_pool_cache(
+                    cache_dir,
+                    self.num_variables,
+                    self.total_length,
+                    self.seed,
+                    self.pool_size,
+                )
+                if reuse_path is not None:
+                    logger.info(
+                        f"Reusing existing synthetic pool {reuse_path} "
+                        f"(required N>={self.pool_size})"
                     )
+                    self.data_cache = np.load(reuse_path, mmap_mode='r')
+                    self.pool_size = int(self.data_cache.shape[0])
                 else:
-                    data = np.zeros((self.pool_size, self.total_length), dtype=np.float32)
-                    log_every = max(5000, self.pool_size // 20)
-                    for i in range(self.pool_size):
-                        if i > 0 and i % log_every == 0:
-                            logger.info(
-                                "Synthetic pool progress: %s / %s (%.0f%%)",
-                                i,
-                                self.pool_size,
-                                100.0 * i / self.pool_size,
-                            )
-                        gen = np.random.choice(self.generators, p=self.probabilities)
-                        seq = gen(self.total_length)
-                        if np.random.random() < 0.5: seq = seq[::-1].copy()
-                        if np.random.random() < 0.5: seq = -seq
-                        data[i] = self._normalize_sequence(seq)
-                    np.save(cache_path, data)
-                self.data_cache = np.load(cache_path, mmap_mode='r')
-                logger.info("Pool generation complete.")
+                    logger.info(
+                        f"Generating synthetic pool of {self.pool_size} samples to {cache_path}..."
+                    )
+                    if self.num_variables > 1:
+                        generate_multivariate_synthetic_data(
+                            num_samples=self.pool_size,
+                            num_vars=self.num_variables,
+                            length=self.total_length,
+                            seed=seed,
+                            skip_cross_var_aug=self.skip_cross_var_aug,
+                            output_path=cache_path,
+                        )
+                    else:
+                        data = np.zeros((self.pool_size, self.total_length), dtype=np.float32)
+                        log_every = max(5000, self.pool_size // 20)
+                        for i in range(self.pool_size):
+                            if i > 0 and i % log_every == 0:
+                                logger.info(
+                                    "Synthetic pool progress: %s / %s (%.0f%%)",
+                                    i,
+                                    self.pool_size,
+                                    100.0 * i / self.pool_size,
+                                )
+                            gen = np.random.choice(self.generators, p=self.probabilities)
+                            seq = gen(self.total_length)
+                            if np.random.random() < 0.5:
+                                seq = seq[::-1].copy()
+                            if np.random.random() < 0.5:
+                                seq = -seq
+                            data[i] = self._normalize_sequence(seq)
+                        np.save(cache_path, data)
+                    self.data_cache = np.load(cache_path, mmap_mode='r')
+                    logger.info("Pool generation complete.")
                 
         elif self.pregenerate and self.num_variables > 1:
             # Memory Caching Logic (Small Pool / Legacy)

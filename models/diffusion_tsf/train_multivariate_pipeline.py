@@ -2,17 +2,14 @@
 Multivariate diffusion TSF training pipeline (any `--n-variates`; default 7 for ETT-style runs).
 
 PHASE 1: Synthetic Pretraining (with HP tuning)
-  1A. iTransformer HP Tuning (20 trials, 100k samples)
-      → tune lr, batch_size, dropout
-  1B. Diffusion HP Tuning with iTransformer guidance (8 trials, 10k samples)
-      → tune lr, batch_size
-  1C. Full Pretraining (200 epochs, patience 20, 1M samples)
-      → First train iTransformer, then Diffusion with guidance
+  1A. iTransformer HP Tuning (Optuna; modest synthetic pool by default)
+  1B. Diffusion HP Tuning with iTransformer guidance
+  1C. Full Pretraining — default 10-epoch-style budgets; synthetic pool auto-sized
+      from PRETRAIN_EPOCHS unless --synthetic-samples is set (disk cache reused when compatible)
 
 PHASE 2: Fine-tuning per Dataset (simplified HP tuning)
-  2A. HP Tune (8 trials, 200 epochs, patience 20)
-      → tune lr, batch_size only
-  2B. Full Fine-tune (200 epochs, patience 25)
+  2A. HP Tune (Optuna)
+  2B. Full Fine-tune (default 10 epochs / patience 5; override via CLI)
   2C. Evaluate
 
 Usage:
@@ -427,7 +424,9 @@ def init_wandb(
         'pretrain_patience': PRETRAIN_PATIENCE,
         'finetune_epochs': FINETUNE_EPOCHS,
         'finetune_patience': FINETUNE_PATIENCE,
-        'synthetic_samples_full': SYNTHETIC_SAMPLES_FULL,
+        'pretrain_virtual_samples': resolve_pretrain_virtual_dataset_size(False),
+        'pretrain_synthetic_override': PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE,
+        'synthetic_samples_full_cap': SYNTHETIC_SAMPLES_CAP,
         'synthetic_samples_hp_tune': SYNTHETIC_SAMPLES_HP_TUNE,
         'synthetic_samples_diff_tune': SYNTHETIC_SAMPLES_DIFF_TUNE,
         'n_itrans_hp_trials': N_ITRANS_HP_TRIALS,
@@ -640,16 +639,21 @@ SUBSET_THRESHOLD = 32        # datasets with >SUBSET_THRESHOLD cols are split
 
 MAX_SUBSETS_PER_DATASET = 15  # enough for traffic(861/32=26) while staying sane
 
-# Phase 1: Synthetic pretraining
-PRETRAIN_EPOCHS = 200
-PRETRAIN_PATIENCE = 20
+# Phase 1: Synthetic pretraining (short runs by default; override with CLI)
+PRETRAIN_EPOCHS = 10
+PRETRAIN_PATIENCE = 5
+# Legacy name: upper bound for auto-sized pretrain pool; HP tuning uses its own constant.
 SYNTHETIC_SAMPLES_FULL = 100000
-SYNTHETIC_SAMPLES_HP_TUNE = 100000  # For iTransformer HP tuning
+SYNTHETIC_SAMPLES_HP_TUNE = 20000
 SYNTHETIC_SAMPLES_DIFF_TUNE = 10000  # For Diffusion HP tuning (smaller for speed)
+SYNTHETIC_SAMPLES_MIN = 4096
+SYNTHETIC_SAMPLES_CAP = 100000
+# If set (e.g. via --synthetic-samples), pretrain uses this virtual dataset size instead of auto.
+PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE: Optional[int] = None
 
 # Phase 2: Fine-tuning
-FINETUNE_EPOCHS = 200
-FINETUNE_PATIENCE = 25
+FINETUNE_EPOCHS = 10
+FINETUNE_PATIENCE = 5
 HP_TUNE_EPOCHS = 200
 HP_TUNE_PATIENCE = 20
 
@@ -666,7 +670,6 @@ FINETUNE_BATCH_SIZES = [4, 8, 16]
 # Memory optimization flags (overridden by CLI)
 USE_AMP = False
 USE_GRADIENT_CHECKPOINTING = False
-DIFFUSION_TYPE = "gaussian"  # "gaussian" | "binary" — set via --binary-diffusion
 
 # Dataset registry: name -> (path, date_col, seasonal_period)
 DATASET_REGISTRY = {
@@ -680,6 +683,25 @@ DATASET_REGISTRY = {
     'electricity': ('electricity/electricity.csv', 'date', 96),
     'traffic': ('traffic/traffic.csv', 'date', 24),
 }
+
+
+def resolve_pretrain_virtual_dataset_size(smoke_test: bool) -> int:
+    """Virtual ``len`` of the synthetic dataset for full pretrain (iTrans + diffusion).
+
+    Scales lightly with ``PRETRAIN_EPOCHS`` so short runs do not allocate 60k–100k
+    sequences by default. Use ``--synthetic-samples`` to force a size; disk pools
+    may still be **reused** when an existing cache is large enough (see RealTS).
+    """
+    if smoke_test:
+        return 4
+    if PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE is not None:
+        return max(4, int(PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE))
+    steps = 32 + 48 * PRETRAIN_EPOCHS
+    steps = max(64, min(800, steps))
+    ref_bs = 8
+    n = steps * ref_bs
+    return max(SYNTHETIC_SAMPLES_MIN, min(SYNTHETIC_SAMPLES_CAP, n))
+
 
 # ============================================================================
 # Dimensionality Helpers
@@ -804,7 +826,6 @@ def create_diffusion_model(
     use_guidance: bool = True,
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
-    diffusion_type: str = "gaussian",
 ) -> DiffusionTSF:
     """Create DiffusionTSF model with optional guidance channel."""
     if n_variates is None:
@@ -827,7 +848,6 @@ def create_diffusion_model(
         use_hybrid_condition=True,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         use_amp=USE_AMP,
-        diffusion_type=diffusion_type,
     )
     return DiffusionTSF(config)
 
@@ -1221,7 +1241,7 @@ def diffusion_hp_objective(
     batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else DIFFUSION_BATCH_SIZES)
     
     # Create model with guidance
-    model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE).to(device)
+    model = create_diffusion_model(use_guidance=True).to(device)
     model.set_guidance_model(itrans_guidance)
     
     # Rebuild loader with new batch size
@@ -1528,7 +1548,7 @@ def pretrain_diffusion(
     )
     
     # Create model with guidance and wrap with DDP
-    model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE)
+    model = create_diffusion_model(use_guidance=True)
     model.set_guidance_model(itrans_guidance)
     model = wrap_model_ddp(model)
     
@@ -1653,7 +1673,7 @@ def finetune_hp_objective(
     itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
     
     # Load pretrained diffusion
-    model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE).to(device)
+    model = create_diffusion_model(use_guidance=True).to(device)
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
@@ -1760,7 +1780,7 @@ def finetune_on_dataset(
     itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
     
     # Load pretrained diffusion and wrap with DDP
-    model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE)
+    model = create_diffusion_model(use_guidance=True)
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
@@ -2281,7 +2301,7 @@ def run_pipeline(
         n_itrans_trials = N_ITRANS_HP_TRIALS
         n_diff_trials = N_DIFFUSION_HP_TRIALS
         n_finetune_trials = N_FINETUNE_HP_TRIALS
-        pretrain_samples = SYNTHETIC_SAMPLES_FULL
+        pretrain_samples = resolve_pretrain_virtual_dataset_size(False)
         pretrain_epochs = PRETRAIN_EPOCHS
         pretrain_patience = PRETRAIN_PATIENCE
         finetune_epochs = FINETUNE_EPOCHS
@@ -2415,7 +2435,7 @@ def run_pipeline(
                 itrans_model.load_state_dict(ckpt['model_state_dict'])
                 itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
                 
-                model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE).to(device)
+                model = create_diffusion_model(use_guidance=True).to(device)
                 model.set_guidance_model(itrans_guidance)
                 ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
                 model.load_state_dict(ckpt['model_state_dict'])
@@ -2561,7 +2581,7 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
 
     n_itrans_trials = 1 if smoke_test else N_ITRANS_HP_TRIALS
     n_diff_trials = 1 if smoke_test else N_DIFFUSION_HP_TRIALS
-    pretrain_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_FULL
+    pretrain_samples = resolve_pretrain_virtual_dataset_size(smoke_test)
     pretrain_epochs = 1 if smoke_test else PRETRAIN_EPOCHS
     pretrain_patience = 1 if smoke_test else PRETRAIN_PATIENCE
 
@@ -2788,7 +2808,7 @@ def _finetune_and_eval_one_subset(
             seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH,
         )
 
-        model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE).to(device)
+        model = create_diffusion_model(use_guidance=True).to(device)
         model.set_guidance_model(itrans_guidance)
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt['model_state_dict'])
@@ -2847,7 +2867,10 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH
-    
+    global USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT
+    global PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE, PRETRAIN_EPOCHS, FINETUNE_EPOCHS
+    global SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
+
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
                         choices=['full', 'pretrain', 'finetune', 'finetune-subset',
@@ -2885,14 +2908,15 @@ def main():
     parser.add_argument('--image-height', type=int, default=None,
                         help='Override image height (default: 128)')
     parser.add_argument('--synthetic-samples', type=int, default=None,
-                        help='Override SYNTHETIC_SAMPLES_FULL (default: 100000)')
+                        help='Fixed pretrain synthetic dataset size (default: auto from PRETRAIN_EPOCHS)')
+    parser.add_argument('--pretrain-epochs', type=int, default=None,
+                        help=f'Override PRETRAIN_EPOCHS (default: {PRETRAIN_EPOCHS})')
+    parser.add_argument('--finetune-epochs', type=int, default=None,
+                        help=f'Override FINETUNE_EPOCHS (default: {FINETUNE_EPOCHS})')
     parser.add_argument('--itransformer-trials', type=int, default=None,
                         help='Override N_ITRANS_HP_TRIALS (default: 20)')
     parser.add_argument('--subset-threshold', type=int, default=None,
                         help='Override SUBSET_THRESHOLD for dim grouping')
-    parser.add_argument('--binary-diffusion', action='store_true',
-                        help='Use binary (bit-flip XOR) diffusion instead of gaussian. '
-                             'Removes gaussian blur, uses BCE loss, 20-step sampling.')
     
     args = parser.parse_args()
     
@@ -2912,18 +2936,18 @@ def main():
     # Set N_VARIATES from CLI (affects all model/data creation)
     if args.n_variates is not None:
         N_VARIATES = args.n_variates
-    
-    global USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT, DIFFUSION_TYPE
-    global SYNTHETIC_SAMPLES_FULL, SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
+
     USE_AMP = args.amp
     USE_GRADIENT_CHECKPOINTING = args.gradient_checkpointing
-    if args.binary_diffusion:
-        DIFFUSION_TYPE = "binary"
     if args.image_height is not None:
         IMAGE_HEIGHT = args.image_height
+    if args.pretrain_epochs is not None:
+        PRETRAIN_EPOCHS = args.pretrain_epochs
+    if args.finetune_epochs is not None:
+        FINETUNE_EPOCHS = args.finetune_epochs
     if args.synthetic_samples is not None:
-        SYNTHETIC_SAMPLES_FULL = args.synthetic_samples
-        SYNTHETIC_SAMPLES_HP_TUNE = args.synthetic_samples
+        PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE = args.synthetic_samples
+        SYNTHETIC_SAMPLES_HP_TUNE = min(int(args.synthetic_samples), 25000)
     if args.itransformer_trials is not None:
         N_ITRANS_HP_TRIALS = args.itransformer_trials
     if args.subset_threshold is not None:

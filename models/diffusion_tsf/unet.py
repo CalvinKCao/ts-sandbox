@@ -14,6 +14,7 @@ stuff in here:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as grad_ckpt
 import math
 import logging
 from typing import List, Optional, Tuple
@@ -996,7 +997,8 @@ class ConditionalUNet2D(nn.Module):
         context_dim: int = 128,
         conditioning_mode: str = "visual_concat",
         visual_cond_channels: int = 1,
-        cond_in_channels: Optional[int] = None
+        cond_in_channels: Optional[int] = None,
+        use_gradient_checkpointing: bool = False,
     ):
         """
         Args:
@@ -1035,6 +1037,7 @@ class ConditionalUNet2D(nn.Module):
         self.use_hybrid_condition = use_hybrid_condition
         self.conditioning_mode = conditioning_mode
         self.visual_cond_channels = visual_cond_channels
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         
         # Default cond_in_channels to in_channels if not specified
         if cond_in_channels is None:

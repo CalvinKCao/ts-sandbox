@@ -16,25 +16,22 @@ import torch.nn.functional as F
 import logging
 from typing import Dict, Optional, Tuple, Union
 
-# Handle imports for both module and script execution
+from .config import DiffusionTSFConfig
+from .preprocessing import TimeSeriesTo2D, VerticalGaussianBlur
+from .unet import ConditionalUNet2D, TimeSeriesContextEncoder, VariateCrossEncoder
+from .diffusion import DiffusionScheduler
+from .guidance import GuidanceModel, LinearRegressionGuidance
+from .metrics import monotonicity_loss
+
 try:
-    from .config import DiffusionTSFConfig
-    from .preprocessing import TimeSeriesTo2D, VerticalGaussianBlur
-    from .unet import ConditionalUNet2D, TimeSeriesContextEncoder, VariateCrossEncoder
     from .transformer import DiffusionTransformer
-    from .ci_dit import ChannelIndependentDiT
-    from .diffusion import DiffusionScheduler, BinaryDiffusionScheduler
-    from .guidance import GuidanceModel, LinearRegressionGuidance
-    from .metrics import monotonicity_loss
 except ImportError:
-    from config import DiffusionTSFConfig
-    from preprocessing import TimeSeriesTo2D, VerticalGaussianBlur
-    from unet import ConditionalUNet2D, TimeSeriesContextEncoder, VariateCrossEncoder
-    from transformer import DiffusionTransformer
-    from ci_dit import ChannelIndependentDiT
-    from diffusion import DiffusionScheduler, BinaryDiffusionScheduler
-    from guidance import GuidanceModel, LinearRegressionGuidance
-    from metrics import monotonicity_loss
+    DiffusionTransformer = None  # type: ignore[misc, assignment]
+
+try:
+    from .ci_dit import ChannelIndependentDiT
+except ImportError:
+    ChannelIndependentDiT = None  # type: ignore[misc, assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +176,6 @@ class DiffusionTSF(nn.Module):
         self.to_2d = TimeSeriesTo2D(
             height=config.image_height,
             max_scale=config.max_scale,
-            representation_mode=config.representation_mode
         )
         self.blur = VerticalGaussianBlur(
             kernel_size=config.blur_kernel_size,
@@ -207,6 +203,11 @@ class DiffusionTSF(nn.Module):
         backbone_in_channels = config.backbone_in_channels
         
         if config.model_type == "ci_dit":
+            if ChannelIndependentDiT is None:
+                raise ImportError(
+                    "model_type='ci_dit' requires models.diffusion_tsf.ci_dit.ChannelIndependentDiT "
+                    "(module not present in this checkout)."
+                )
             self.noise_predictor = ChannelIndependentDiT(
                 image_height=config.image_height,
                 patch_size=config.ci_dit_patch_size,
@@ -225,6 +226,11 @@ class DiffusionTSF(nn.Module):
             # CI-DiT does cross-variate attn internally, no separate context encoder
             self.context_encoder = None
         elif config.model_type == "transformer":
+            if DiffusionTransformer is None:
+                raise ImportError(
+                    "model_type='transformer' requires models.diffusion_tsf.transformer.DiffusionTransformer "
+                    "(module not present in this checkout)."
+                )
             self.noise_predictor = DiffusionTransformer(
                 image_height=config.image_height,
                 patch_height=config.transformer_patch_height,
@@ -242,10 +248,9 @@ class DiffusionTSF(nn.Module):
             # guidance channels only added to the noisy future canvas, not the past cond
             cond_in_channels = backbone_in_channels - config.guidance_channels
 
-            # in factorized mode: unet sees 1 variate at a time → out_channels=1 (gaussian)
-            # or out_channels=2 (binary: x0_hat + zt_hat concatenated along channel dim)
+            # in factorized mode: unet sees 1 variate at a time → out_channels=1
             if config.variate_factorized:
-                unet_out_channels = 2 if config.diffusion_type == "binary" else 1
+                unet_out_channels = 1
             else:
                 unet_out_channels = config.num_variables
 
@@ -262,7 +267,8 @@ class DiffusionTSF(nn.Module):
                 context_dim=config.context_embedding_dim,
                 conditioning_mode=config.conditioning_mode,
                 visual_cond_channels=config.visual_cond_channels,
-                cond_in_channels=cond_in_channels
+                cond_in_channels=cond_in_channels,
+                use_gradient_checkpointing=config.use_gradient_checkpointing,
             )
 
             if config.use_hybrid_condition:
@@ -296,15 +302,6 @@ class DiffusionTSF(nn.Module):
             schedule=config.noise_schedule
         )
 
-        # Binary diffusion scheduler — only created when diffusion_type=="binary"
-        self.binary_scheduler = None
-        if config.diffusion_type == "binary":
-            self.binary_scheduler = BinaryDiffusionScheduler(
-                num_steps=config.binary_num_steps,
-                beta_start=config.binary_beta_start,
-                beta_end=config.binary_beta_end,
-            )
-        
         logger.info(f"DiffusionTSF initialized:")
         logger.info(f"  Variables: {config.num_variables} ({'multivariate' if config.num_variables > 1 else 'univariate'})")
         logger.info(f"  Lookback: {config.lookback_length}, Forecast: {config.forecast_length}")
@@ -334,8 +331,6 @@ class DiffusionTSF(nn.Module):
         """Move model and scheduler to device."""
         super().to(device)
         self.scheduler = self.scheduler.to(device)
-        if self.binary_scheduler is not None:
-            self.binary_scheduler = self.binary_scheduler.to(device)
         return self
     
     def set_guidance_model(self, guidance_model: Optional[Union[GuidanceModel, nn.Module]]) -> None:
@@ -654,15 +649,6 @@ class DiffusionTSF(nn.Module):
             return scaled
         return blurred
     
-    def encode_to_2d_binary(self, x: torch.Tensor) -> torch.Tensor:
-        """encode 1D series to hard binary CDF image — no blur, stays in {0,1}.
-
-        this is the binary diffusion version of encode_to_2d. skipping the gaussian blur
-        is the whole point: binary diffusion provides proper gradients for hard boundaries
-        so we don't need to manufacture soft ones.
-        """
-        return self.to_2d(x)  # already {0,1} float from TimeSeriesTo2D in CDF mode
-
     def decode_from_2d(
         self,
         image: torch.Tensor,
@@ -680,8 +666,9 @@ class DiffusionTSF(nn.Module):
             temperature = self.config.decode_temperature if from_diffusion else None
             x = self.to_2d.inverse(
                 image,
-                pdf_temperature=temperature,
-                squeeze_univariate=squeeze_output
+                cdf_decoder="expectation",
+                expectation_sharpen_temp=temperature,
+                squeeze_univariate=squeeze_output,
             )
             return x
         else:
@@ -692,11 +679,12 @@ class DiffusionTSF(nn.Module):
             cdf_map = torch.clamp(cdf_map, min=0.0, max=1.0)
             if decoder_method in ("mean", "pdf_expectation"):
                 temperature = getattr(self.config, "decode_temperature", None) if decoder_method == "pdf_expectation" else None
+                cdf_decoder = "expectation" if decoder_method == "pdf_expectation" else "mean"
                 x = self.to_2d.inverse(
                     cdf_map,
-                    cdf_decoder=decoder_method,
-                    pdf_temperature=temperature,
-                    squeeze_univariate=squeeze_output
+                    cdf_decoder=cdf_decoder,
+                    expectation_sharpen_temp=temperature,
+                    squeeze_univariate=squeeze_output,
                 )
                 return x
             if num_vars > 1:
@@ -785,8 +773,6 @@ class DiffusionTSF(nn.Module):
         if self.config.model_type == "ci_dit":
             return self._forward_ci_dit(past, future, t)
         if self.config.variate_factorized and self.config.num_variables > 1:
-            if self.config.diffusion_type == "binary":
-                return self._forward_binary_factorized(past, future, t)
             return self._forward_factorized(past, future, t)
         
         batch_size = past.shape[0]
@@ -942,13 +928,6 @@ class DiffusionTSF(nn.Module):
                 jump_penalty_scale=jump_penalty_scale, search_radius=search_radius,
             )
         if self.config.variate_factorized and self.config.num_variables > 1:
-            if self.config.diffusion_type == "binary":
-                return self._generate_binary_factorized(
-                    past, num_steps=self.config.binary_sample_steps,
-                    verbose=verbose, decoder_method=decoder_method,
-                    beam_width=beam_width, jump_penalty_scale=jump_penalty_scale,
-                    search_radius=search_radius,
-                )
             return self._generate_factorized(
                 past, use_ddim=use_ddim, num_ddim_steps=num_ddim_steps,
                 eta=eta, cfg_scale=cfg_scale, verbose=verbose,
@@ -1290,214 +1269,6 @@ class DiffusionTSF(nn.Module):
 
         future_2d  = future_2d_flat.reshape(B, V, H, W_fut)
         future_norm = self.decode_from_2d(future_2d, decoder_method=decoder_method, **kwargs)
-        future      = self._denormalize(future_norm, stats)
-
-        K = self.config.lookback_overlap
-        if K > 0:
-            future      = future[..., K:]
-            future_norm = future_norm[..., K:]
-
-        result = {
-            'prediction': future, 'prediction_norm': future_norm,
-            'future_2d': future_2d, 'past_2d': past_2d,
-        }
-        if guidance_2d is not None:
-            result['guidance_2d'] = guidance_2d
-        return result
-
-    # ====================================================================
-    # Binary diffusion (BDPM-inspired) — per-variate, no gaussian blur
-    # ====================================================================
-
-    def _boundary_bce_loss(
-        self,
-        logits: torch.Tensor,
-        target: torch.Tensor,
-    ) -> torch.Tensor:
-        """spatially-weighted BCE that upweights pixels near the CDF boundary.
-
-        the CDF image is bottom-filled (row 0 = 1, rows above boundary = 0).
-        the boundary is where the column transitions from 1→0.
-        pixels within `binary_boundary_width` rows of that boundary get
-        weight 1.0; everything else gets 0.1. analogous to BDPM bit-plane weighting.
-
-        Args:
-            logits: (BV, 1, H, W) raw model output (pre-sigmoid)
-            target: (BV, 1, H, W) binary ground truth {0,1}
-        """
-        H = target.shape[2]
-        bw = self.config.binary_boundary_width
-        high_w = self.config.binary_boundary_weight
-        low_w  = self.config.binary_background_weight
-
-        # number of filled rows per column = position of boundary
-        # filled_count shape: (BV, 1, W)
-        filled_count = target.sum(dim=2, keepdim=True).long().clamp(0, H - 1)
-
-        # row indices: (1, 1, H, 1) for broadcasting
-        row_idx = torch.arange(H, device=target.device).view(1, 1, H, 1)
-
-        # distance of each row from the boundary row
-        dist = (row_idx - filled_count.unsqueeze(2)).abs()  # (BV, 1, H, W)
-
-        weight = torch.where(dist <= bw,
-                             torch.full_like(dist, high_w, dtype=torch.float),
-                             torch.full_like(dist, low_w,  dtype=torch.float))
-
-        bce = F.binary_cross_entropy_with_logits(logits, target.float(), reduction='none')
-        return (bce * weight).mean()
-
-    def _forward_binary_factorized(
-        self,
-        past: torch.Tensor,
-        future: torch.Tensor,
-        t: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
-        """binary diffusion training: XOR noise, predict x0 + zt, boundary-weighted BCE.
-
-        no gaussian blur on the occupancy images. the U-Net now outputs 2 channels
-        (x0_logits | zt_logits) instead of 1 (noise estimate).
-        cross-variate context at the bottleneck is the same as the gaussian path.
-        """
-        assert self.binary_scheduler is not None, "binary_scheduler not initialized"
-
-        B = past.shape[0]
-        V = self.config.num_variables
-        H = self.config.image_height
-        device = past.device
-        BV = B * V
-
-        past_norm, future_norm, stats = self._normalize_sequence(past, future)
-
-        # hard binary images — no blur at all
-        past_2d   = self.encode_to_2d_binary(past_norm)    # (B, V, H, W_past) {0,1}
-        future_2d = self.encode_to_2d_binary(future_norm)   # (B, V, H, W_fut) {0,1}
-        past_2d   = self._apply_coarse_dropout(past_2d)
-
-        W_past = past_2d.shape[3]
-        W_fut  = future_2d.shape[3]
-
-        if t is None:
-            t = torch.randint(0, self.config.binary_num_steps, (B,), device=device)
-
-        # broadcast t across variates for per-variate noise (same timestep per batch el)
-        t_flat = t.unsqueeze(1).expand(-1, V).reshape(BV)  # (BV,)
-
-        # per-variate XOR noise
-        future_flat = future_2d.reshape(BV, 1, H, W_fut)
-        xt_flat, zt_flat = self.binary_scheduler.add_noise(future_flat, t_flat)
-        # xt_flat, zt_flat: (BV, 1, H, W_fut) {0,1}
-
-        # guidance: binary ghost image from iTransformer (no blur)
-        guidance_forecast_norm = None
-        guidance_2d = None
-        if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
-            guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)  # {0,1}, no blur
-
-        ctx = self._get_cross_variate_context(past_norm, guidance_forecast_norm)
-
-        # build canvas — same channel layout as gaussian factorized path
-        canvas = xt_flat.float()
-        canvas = self._inject_coordinate_channel(canvas)
-        canvas = self._inject_time_channels(canvas)
-
-        if guidance_2d is not None:
-            canvas = torch.cat([canvas, guidance_2d.reshape(BV, 1, H, W_fut)], dim=1)
-
-        past_flat     = past_2d.reshape(BV, 1, H, W_past)
-        cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
-
-        ctx_flat = None
-        if ctx is not None:
-            ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
-
-        # forward — output is (BV, 2, H, W_fut): first ch=x0_logits, second=zt_logits
-        out_flat = self.noise_predictor(canvas, t_flat, cond_for_unet, encoder_hidden_states=ctx_flat)
-        x0_logits = out_flat[:, 0:1, :, :]   # (BV, 1, H, W_fut)
-        zt_logits  = out_flat[:, 1:2, :, :]   # (BV, 1, H, W_fut)
-
-        # boundary-weighted BCE for both predictions
-        loss_x0 = self._boundary_bce_loss(x0_logits, future_flat)
-        loss_zt = self._boundary_bce_loss(zt_logits,  zt_flat)
-        loss    = loss_x0 + loss_zt
-
-        # x0_hat for emd/mono (optional — reshape back for consistency)
-        x0_hat = torch.sigmoid(x0_logits).reshape(B, V, H, W_fut)
-
-        return {
-            'loss': loss,
-            'loss_x0': loss_x0,
-            'loss_zt': loss_zt,
-            'noise_loss': loss,  # keep key name compatible with training loop
-            'emd_loss': torch.tensor(0.0, device=device),
-            'noise_pred': x0_hat,  # expose x0 hat for logging convenience
-            't': t,
-        }
-
-    @torch.no_grad()
-    def _generate_binary_factorized(
-        self,
-        past: torch.Tensor,
-        num_steps: int = 20,
-        verbose: bool = False,
-        decoder_method: str = "mean",
-        **kwargs,
-    ) -> Dict[str, torch.Tensor]:
-        """binary diffusion inference: bit-flip reverse from random binary → clean CDF image."""
-        assert self.binary_scheduler is not None, "binary_scheduler not initialized"
-
-        B = past.shape[0]
-        V = self.config.num_variables
-        H = self.config.image_height
-        device = past.device
-        BV = B * V
-        W_fut = self.config.forecast_length
-
-        past_norm, _, stats = self._normalize_sequence(past)
-        past_2d = self.encode_to_2d_binary(past_norm)
-        W_past  = past_2d.shape[3]
-
-        past_flat     = past_2d.reshape(BV, 1, H, W_past)
-        cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
-
-        coord = None
-        if self.config.use_coordinate_channel:
-            coord = self._get_coordinate_grid(BV, H, W_fut, device, dtype=cond_for_unet.dtype)
-
-        guidance_forecast_norm = None
-        guidance_2d = None
-        guide_flat  = None
-        if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
-            guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
-            guide_flat  = guidance_2d.reshape(BV, 1, H, W_fut)
-
-        ctx = self._get_cross_variate_context(past_norm, guidance_forecast_norm)
-        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
-
-        def model_fn(xt, t_batch):
-            parts = [xt]
-            if coord is not None:
-                parts.append(coord)
-            if guide_flat is not None:
-                parts.append(guide_flat)
-            canvas = torch.cat(parts, dim=1)
-            out = self.noise_predictor(canvas, t_batch, cond_for_unet, encoder_hidden_states=ctx_flat)
-            return out[:, 0:1], out[:, 1:2]  # (x0_logits, zt_logits)
-
-        noise_shape  = (BV, 1, H, W_fut)
-        future_2d_flat = self.binary_scheduler.sample(
-            model_fn=model_fn,
-            shape=noise_shape,
-            num_steps=num_steps,
-            device=device,
-            verbose=verbose,
-        )
-
-        # decode: binary {0,1} image — use from_diffusion=False so we don't rescale
-        future_2d   = future_2d_flat.reshape(B, V, H, W_fut)
-        future_norm = self.decode_from_2d(future_2d, from_diffusion=False, decoder_method=decoder_method, **kwargs)
         future      = self._denormalize(future_norm, stats)
 
         K = self.config.lookback_overlap

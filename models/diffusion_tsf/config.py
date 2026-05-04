@@ -118,21 +118,6 @@ class DiffusionTSFConfig:
     # which backbone
     model_type: str = "unet"
 
-    # -----------------------------------------------------------------------
-    # binary diffusion (BDPM-inspired)
-    # set diffusion_type="binary" to swap gaussian noise for bit-flip XOR diffusion.
-    # removes the need for gaussian blur preprocessing — CDF images stay hard binary.
-    # requires variate_factorized=True (u-net sees single-channel per-variate images).
-    # -----------------------------------------------------------------------
-    diffusion_type: str = "gaussian"       # "gaussian" | "binary"
-    binary_num_steps: int = 1000           # T for bit-flip schedule
-    binary_sample_steps: int = 20          # inference steps (subset of T, like BDPM)
-    binary_beta_start: float = 1e-5        # flip prob at t=0 (near-zero noise)
-    binary_beta_end: float = 0.5           # flip prob at t=T (max entropy)
-    binary_boundary_weight: float = 1.0    # bce weight near cdf boundary
-    binary_background_weight: float = 0.1  # bce weight far from boundary
-    binary_boundary_width: int = 8         # rows within boundary that get high weight
-    
     # transformer (DiT) params
     transformer_embed_dim: int = 256
     transformer_depth: int = 6

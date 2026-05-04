@@ -183,4 +183,4 @@ At inference, DDIM produces `z` then `decode_from_scaled_latent` → pixels (sam
 
 **CI multivariate (ETTh1 7-var):** the same per-variate shapes apply; runs use a **shared** univariate VAE + U-Net per variate (batch over variates), so channel counts stay **C_z**-based, not `N×C_z` in a single forward.
 
-**Code refs:** `DiffusionTSF` / `ConditionalUNet2D` — `diffusion_model.py`, `unet.py`; latent — `latent_diffusion_model.py`, `vae.py`, `config.py` (`LatentDiffusionConfig.latent_image_height`, `latent_spatial_downsample=4`).
+**Code refs:** `DiffusionTSF` / `ConditionalUNet2D` — `diffusion_model.py`, `unet.py`, `config.py`. (Legacy latent-path refs were removed during cleanup.)
