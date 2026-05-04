@@ -82,3 +82,32 @@ Source: *Geometry-Aware Time Series Forecasting: Hybrid Diffusion–Transformer 
 **Exploration branches.** `binary-exp`, `experiment/latent-only`, and `throwaway/profile-four-phase-1epoch` host alternate heads, latent-focused runs, and one-epoch profiling/smoke plumbing; `main` stays the primary integration line.
 
 **Defaults vs paper.** `DiffusionTSFConfig` may differ from the paper’s published grid (e.g. `lookback_length`/`forecast_length`/`image_height`/`num_diffusion_steps`/`unified_time_axis`). Treat the PDF as the reference experiment; align knobs explicitly when reproducing tables.
+
+
+## Repo-local `results/` on the cluster (Slurm + Python)
+
+When you add or edit **Slurm job scripts** or **Python** that runs on Alliance login/compute nodes, put **all** run outputs the job creates—logs, checkpoints, generated datasets, exports—under **`./results/`** relative to the **submission directory** (the directory you `cd` to before `sbatch`, i.e. **`SLURM_SUBMIT_DIR`** in the batch environment). Do **not** anchor paths off the spool copy of the script.
+
+Use exactly **three** buckets at the top level of `results/`—**no extra subdirectories** unless the user explicitly asks:
+
+| Path | Use |
+|------|-----|
+| `./results/logs/` | Job/Slurm logs, traces, text or CSV that behave like logs |
+| `./results/ckpts/` | Model checkpoints (`.pt`, `.ckpt`, `.safetensors`, …) |
+| `./results/datasets/` | Generated or copied data files |
+
+**Naming (one file per artifact, flat inside each bucket):**
+
+```text
+./results/{logs|ckpts|datasets}/{MM-DD}-{last-3-chars-of-$SLURM_JOB_ID}-{short-descriptive-slug}.{ext}
+```
+
+Example: `./results/logs/05-02-847-etth1-train.log`, `./results/ckpts/05-02-847-best.pt`
+
+After `cd "$SLURM_SUBMIT_DIR"` (or equivalent), compute a stem and pass it into Python/CLI via env or flags:
+
+```bash
+STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-etth1-latent"
+mkdir -p ./results/logs ./results/ckpts ./results/datasets
+# e.g. export RUN_STEM="$STEM" and read in Python; write ckpts to ./results/ckpts/${STEM}.pt
+```
