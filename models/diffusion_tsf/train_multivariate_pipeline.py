@@ -710,6 +710,20 @@ DATASET_REGISTRY = {
     'traffic': ('traffic/traffic.csv', 'date', 24),
 }
 
+
+def resolve_registry_dataset_name(subset_info: Dict) -> str:
+    """Map subset_info to a key in DATASET_REGISTRY for load_dataset."""
+    if subset_info.get('dataset'):
+        return subset_info['dataset']
+    subset_id = subset_info['subset_id']
+    if '-' in subset_id and subset_id.split('-')[-1].isdigit():
+        return '-'.join(subset_id.split('-')[:-1])
+    # Throwaway sweeps / ablations: elec-4v-T200H128, elec-4v-ablation-... → electricity
+    if subset_id.startswith('elec-4v-'):
+        return 'electricity'
+    return subset_id
+
+
 # ============================================================================
 # Dimensionality Helpers
 # ============================================================================
@@ -802,6 +816,7 @@ def create_diffusion_model(
     lookback: int = LOOKBACK_LENGTH,
     horizon: int = FORECAST_LENGTH,
     use_guidance: bool = True,
+    use_hybrid_condition: bool = True,
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
     diffusion_type: str = "gaussian",
@@ -835,7 +850,7 @@ def create_diffusion_model(
         unet_kernel_size=(3, 9),
         attention_levels=[2],
         num_res_blocks=2,
-        use_hybrid_condition=True,
+        use_hybrid_condition=use_hybrid_condition,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         use_amp=USE_AMP,
         separable_kernel=USE_SEPARABLE_KERNEL,
@@ -858,12 +873,14 @@ class TimeSeriesDataset(Dataset):
         horizon: int = 96,
         stride: int = 1,
         lookback_overlap: int = 0,
+        return_idx: bool = False,
     ):
         self.data = torch.tensor(data, dtype=torch.float32)
         self.lookback = lookback
         self.horizon = horizon
         self.stride = stride
         self.lookback_overlap = lookback_overlap
+        self.return_idx = return_idx
         total_len = lookback + horizon
         self.n_samples = max(0, (len(data) - total_len) // stride + 1)
     
@@ -877,6 +894,8 @@ class TimeSeriesDataset(Dataset):
         target_start = start + self.lookback - self.lookback_overlap
         target_end = start + self.lookback + self.horizon
         future = self.data[target_start:target_end].T
+        if self.return_idx:
+            return past, future, idx
         return past, future
 
 
@@ -887,6 +906,7 @@ def load_dataset(
     horizon: int = FORECAST_LENGTH,
     stride: int = 1,
     lookback_overlap: int = LOOKBACK_OVERLAP,
+    return_idx: bool = False,
 ) -> Tuple[Dataset, Dataset, Dataset, Dict]:
     """Load dataset and return train/val/test splits."""
     path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
@@ -923,11 +943,54 @@ def load_dataset(
     std = train_slice.std(axis=0, keepdims=True) + 1e-8
     data = (data - mean) / std
     
-    train_ds = TimeSeriesDataset(data[:train_end], lookback, horizon, stride, lookback_overlap=lookback_overlap)
-    val_ds = TimeSeriesDataset(data[train_end:val_end], lookback, horizon, stride=lookback, lookback_overlap=lookback_overlap)
+    train_ds = TimeSeriesDataset(data[:train_end], lookback, horizon, stride, lookback_overlap=lookback_overlap, return_idx=return_idx)
+    val_ds = TimeSeriesDataset(data[train_end:val_end], lookback, horizon, stride=lookback, lookback_overlap=lookback_overlap, return_idx=return_idx)
     test_ds = TimeSeriesDataset(data[val_end:], lookback, horizon, stride=lookback, lookback_overlap=lookback_overlap)
     
     return train_ds, val_ds, test_ds, {'mean': mean, 'std': std}
+
+
+def build_guidance_cache(
+    guidance_model,
+    dataset: Dataset,
+    future_time_steps: int,
+    lookback_overlap: int,
+    device: torch.device,
+    batch_size: int = 64,
+) -> dict:
+    """Pre-compute iTransformer raw forecasts for every window in dataset.
+
+    ``future_time_steps`` is the length of the training ``future`` tensor along
+    time (overlap K + pure horizon), i.e. the same W_fut used in the diffusion
+    forward. The cache stores the iTransformer tail forecast of length
+    ``future_time_steps - lookback_overlap``, which must match
+    ``guidance_model.pred_len`` when that is set.
+
+    Returns dict: int window-index -> (V, H) forecast tensor on CPU.
+    Stores raw (un-normalized) forecasts; per-window normalization happens at
+    training time with the batch's own stats, exactly as before.
+
+    Cache key == sequential position in the passed dataset (shuffle=False scan).
+    When dataset is a Subset, its __getitem__ returns the underlying dataset's
+    index as the third element, so lookups during shuffled training still land on
+    the right entry — provided the Subset indices are contiguous from 0 (which is
+    always true for the smoke_test subsets created here).
+    """
+    from torch.utils.data import DataLoader as _DL
+    loader = _DL(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    cache = {}
+    offset = 0
+    H = future_time_steps - lookback_overlap
+    guidance_model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            past = batch[0].to(device)  # works for (past,future) or (past,future,idx)
+            coarse = guidance_model.get_forecast(past, H)  # (B, V, H)
+            for i, c in enumerate(coarse):
+                cache[offset + i] = c.cpu()
+            offset += past.shape[0]
+    logger.info(f"Guidance cache built: {len(cache)} windows")
+    return cache
 
 
 # ============================================================================
@@ -1484,6 +1547,10 @@ def pretrain_diffusion(
     smoke_test: bool = False,
     resume: bool = False,
     export_best_epochs: Optional[List[int]] = None,
+    use_guidance_channel: bool = True,
+    use_hybrid_condition: bool = True,
+    num_diffusion_steps: Optional[int] = None,
+    image_height: Optional[int] = None,
 ) -> str:
     """Train Diffusion model on synthetic data with iTransformer guidance.
 
@@ -1493,7 +1560,11 @@ def pretrain_diffusion(
     the best-validation weights for downstream finetuning.
     """
     logger.info("=" * 60)
-    logger.info("PHASE 1C-2: Full Diffusion Pretraining (with iTransformer guidance)")
+    logger.info(
+        "PHASE 1C-2: Diffusion pretraining (guidance_channel=%s, hybrid_condition=%s)",
+        use_guidance_channel,
+        use_hybrid_condition,
+    )
     logger.info(f"Samples: {n_samples}, Epochs: {epochs}, Patience: {patience}")
     logger.info(f"Params: {best_params}")
     logger.info("=" * 60)
@@ -1503,16 +1574,18 @@ def pretrain_diffusion(
     lr = best_params.get('learning_rate', 1e-4)
     batch_size = DIFFUSION_PRETRAIN_BATCH_SIZE
 
-    itrans_model = create_itransformer().to(device)
-    ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)
-    itrans_model.load_state_dict(ckpt['model_state_dict'])
-    itrans_guidance = iTransformerGuidance(
-        model=itrans_model,
-        use_norm=True,
-        seq_len=LOOKBACK_LENGTH,
-        pred_len=FORECAST_LENGTH
-    )
-    
+    itrans_guidance = None
+    if use_guidance_channel:
+        itrans_model = create_itransformer().to(device)
+        ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)
+        itrans_model.load_state_dict(ckpt['model_state_dict'])
+        itrans_guidance = iTransformerGuidance(
+            model=itrans_model,
+            use_norm=True,
+            seq_len=LOOKBACK_LENGTH,
+            pred_len=FORECAST_LENGTH
+        )
+
     synth_cache = os.path.join(checkpoint_dir, 'synth_cache')
     synthetic_loader = get_synthetic_dataloader(
         batch_size=batch_size,
@@ -1534,8 +1607,15 @@ def pretrain_diffusion(
     train_loader = create_dataloader(train_subset, batch_size, shuffle=True, num_workers=0 if smoke_test else 4)
     val_loader = create_dataloader(val_subset, batch_size, shuffle=False, num_workers=0)
 
-    model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE)
-    model.set_guidance_model(itrans_guidance)
+    model = create_diffusion_model(
+        use_guidance=use_guidance_channel,
+        use_hybrid_condition=use_hybrid_condition,
+        diffusion_type=DIFFUSION_TYPE,
+        num_diffusion_steps=num_diffusion_steps,
+        image_height=image_height,
+    )
+    if use_guidance_channel:
+        model.set_guidance_model(itrans_guidance)
     model = model.to(device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -1731,6 +1811,7 @@ def finetune_hp_objective(
         train_ds, val_ds, _, _ = load_dataset(
             dataset_name, variate_indices,
             stride=24 if not smoke_test else LOOKBACK_LENGTH,
+            return_idx=True,
         )
 
         if smoke_test:
@@ -1750,6 +1831,13 @@ def finetune_hp_objective(
         ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt['model_state_dict'])
 
+        train_guidance_cache = build_guidance_cache(
+            itrans_guidance, train_ds, FORECAST_LENGTH + LOOKBACK_OVERLAP, LOOKBACK_OVERLAP, device,
+        )
+        val_guidance_cache = build_guidance_cache(
+            itrans_guidance, val_ds, FORECAST_LENGTH + LOOKBACK_OVERLAP, LOOKBACK_OVERLAP, device,
+        )
+
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
         epochs = 1 if PROFILE.enabled else (HP_TUNE_EPOCHS if not smoke_test else 1)
@@ -1759,8 +1847,9 @@ def finetune_hp_objective(
 
         for epoch in range(epochs):
             model.train()
+            model.set_guidance_cache(train_guidance_cache)
             phase_label = f"phase2_diffusion_finetune_hp.{dataset_name}.trial{trial.number}.epoch{epoch+1}.train"
-            for batch_idx, (past, future) in enumerate(train_loader):
+            for batch_idx, (past, future, idx) in enumerate(train_loader):
                 if PROFILE.should_stop_batch(batch_idx):
                     PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
                     break
@@ -1772,16 +1861,17 @@ def finetune_hp_objective(
                     with profile_diffusion_model(model, f"{phase_label}.batch{batch_idx}.diffusion"):
                         with PROFILE.section(f"{phase_label}.forward_loss", batch=batch_idx):
                             with amp_context():
-                                loss = model.get_loss(past, future)
+                                loss = model.get_loss(past, future, idx=idx)
                     with PROFILE.section(f"{phase_label}.backward_step", batch=batch_idx):
                         oom_safe_backward(loss, optimizer, model)
 
             model.eval()
+            model.set_guidance_cache(val_guidance_cache)
             val_loss = 0.0
             n_batches = 0
             with torch.no_grad():
                 phase_label = f"phase2_diffusion_finetune_hp.{dataset_name}.trial{trial.number}.epoch{epoch+1}.val"
-                for batch_idx, (past, future) in enumerate(val_loader):
+                for batch_idx, (past, future, idx) in enumerate(val_loader):
                     if PROFILE.should_stop_batch(batch_idx):
                         PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
                         break
@@ -1791,13 +1881,14 @@ def finetune_hp_objective(
                         with profile_diffusion_model(model, f"{phase_label}.batch{batch_idx}.diffusion"):
                             with PROFILE.section(f"{phase_label}.forward_loss", batch=batch_idx):
                                 with amp_context():
-                                    loss = model.get_loss(past, future)
+                                    loss = model.get_loss(past, future, idx=idx)
                         val_loss += loss.item()
                         n_batches += 1
             val_loss /= max(n_batches, 1)
 
             trial.report(val_loss, epoch)
             if trial.should_prune():
+                model.clear_guidance_cache()
                 raise optuna.TrialPruned()
 
             if val_loss < best_val_loss:
@@ -1805,6 +1896,8 @@ def finetune_hp_objective(
 
             if early_stop(val_loss):
                 break
+
+        model.clear_guidance_cache()
 
     return best_val_loss
 
@@ -1818,15 +1911,15 @@ def finetune_on_dataset(
     patience: int = FINETUNE_PATIENCE,
     checkpoint_dir: str = CHECKPOINT_DIR,
     smoke_test: bool = False,
+    use_guidance_channel: bool = True,
+    use_hybrid_condition: bool = True,
+    num_diffusion_steps: Optional[int] = None,
+    image_height: Optional[int] = None,
 ) -> Tuple[str, Dict]:
     """Fine-tune on a real dataset with tuned params."""
     subset_id = subset_info['subset_id']
     variate_indices = subset_info['variate_indices']
-
-    if '-' in subset_id and subset_id.split('-')[-1].isdigit():
-        dataset_name = '-'.join(subset_id.split('-')[:-1])
-    else:
-        dataset_name = subset_id
+    dataset_name = resolve_registry_dataset_name(subset_info)
 
     lr = tuned_params.get('learning_rate', 1e-5)
     batch_size = tuned_params.get('batch_size', 32)
@@ -1841,6 +1934,7 @@ def finetune_on_dataset(
     train_ds, val_ds, _, norm_stats = load_dataset(
         dataset_name, variate_indices,
         stride=24 if not smoke_test else LOOKBACK_LENGTH,
+        return_idx=True,
     )
 
     if smoke_test:
@@ -1850,16 +1944,45 @@ def finetune_on_dataset(
     train_loader = create_dataloader(train_ds, batch_size, shuffle=True, num_workers=0)
     val_loader = create_dataloader(val_ds, batch_size, shuffle=False, num_workers=0)
 
-    itrans_model = create_itransformer().to(device)
-    ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)
-    itrans_model.load_state_dict(ckpt['model_state_dict'])
-    itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
+    train_guidance_cache = None
+    val_guidance_cache = None
+    if use_guidance_channel:
+        itrans_model = create_itransformer().to(device)
+        ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)
+        itrans_model.load_state_dict(ckpt['model_state_dict'])
+        itrans_guidance = iTransformerGuidance(
+            itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH,
+        )
 
-    model = create_diffusion_model(use_guidance=True, diffusion_type=DIFFUSION_TYPE)
-    model.set_guidance_model(itrans_guidance)
-    ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt['model_state_dict'])
-    model = model.to(device)
+        model = create_diffusion_model(
+            use_guidance=True,
+            use_hybrid_condition=use_hybrid_condition,
+            diffusion_type=DIFFUSION_TYPE,
+            num_diffusion_steps=num_diffusion_steps,
+            image_height=image_height,
+        )
+        model.set_guidance_model(itrans_guidance)
+        ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['model_state_dict'])
+        model = model.to(device)
+
+        train_guidance_cache = build_guidance_cache(
+            itrans_guidance, train_ds, FORECAST_LENGTH + LOOKBACK_OVERLAP, LOOKBACK_OVERLAP, device,
+        )
+        val_guidance_cache = build_guidance_cache(
+            itrans_guidance, val_ds, FORECAST_LENGTH + LOOKBACK_OVERLAP, LOOKBACK_OVERLAP, device,
+        )
+    else:
+        model = create_diffusion_model(
+            use_guidance=False,
+            use_hybrid_condition=use_hybrid_condition,
+            diffusion_type=DIFFUSION_TYPE,
+            num_diffusion_steps=num_diffusion_steps,
+            image_height=image_height,
+        )
+        ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['model_state_dict'])
+        model = model.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
@@ -1888,10 +2011,14 @@ def finetune_on_dataset(
         t0 = time.time()
 
         model.train()
+        if train_guidance_cache is not None:
+            model.set_guidance_cache(train_guidance_cache)
+        else:
+            model.clear_guidance_cache()
         total_loss = 0.0
         n_batches = 0
         phase_label = f"phase2_diffusion_finetune.{subset_id}.epoch{epoch+1}.train"
-        for batch_idx, (past, future) in enumerate(train_loader):
+        for batch_idx, (past, future, idx) in enumerate(train_loader):
             if PROFILE.should_stop_batch(batch_idx):
                 PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
                 break
@@ -1903,7 +2030,10 @@ def finetune_on_dataset(
                 with profile_diffusion_model(model, f"{phase_label}.batch{batch_idx}.diffusion"):
                     with PROFILE.section(f"{phase_label}.forward_loss", batch=batch_idx):
                         with amp_context():
-                            loss = model.get_loss(past, future)
+                            loss = model.get_loss(
+                                past, future,
+                                idx=idx if train_guidance_cache is not None else None,
+                            )
                 with PROFILE.section(f"{phase_label}.backward_step", batch=batch_idx):
                     step_ok = oom_safe_backward(loss, optimizer, model)
                 if step_ok:
@@ -1912,11 +2042,15 @@ def finetune_on_dataset(
         train_loss = total_loss / max(n_batches, 1)
 
         model.eval()
+        if val_guidance_cache is not None:
+            model.set_guidance_cache(val_guidance_cache)
+        else:
+            model.clear_guidance_cache()
         total_loss = 0.0
         n_batches = 0
         with torch.no_grad():
             phase_label = f"phase2_diffusion_finetune.{subset_id}.epoch{epoch+1}.val"
-            for batch_idx, (past, future) in enumerate(val_loader):
+            for batch_idx, (past, future, idx) in enumerate(val_loader):
                 if PROFILE.should_stop_batch(batch_idx):
                     PROFILE.log_event(f"{phase_label}.batch_limit", max_batches=PROFILE.max_batches_per_loop)
                     break
@@ -1926,7 +2060,10 @@ def finetune_on_dataset(
                     with profile_diffusion_model(model, f"{phase_label}.batch{batch_idx}.diffusion"):
                         with PROFILE.section(f"{phase_label}.forward_loss", batch=batch_idx):
                             with amp_context():
-                                loss = model.get_loss(past, future)
+                                loss = model.get_loss(
+                                    past, future,
+                                    idx=idx if val_guidance_cache is not None else None,
+                                )
                     total_loss += loss.item()
                     n_batches += 1
         val_loss = total_loss / max(n_batches, 1)
@@ -1955,6 +2092,7 @@ def finetune_on_dataset(
             logger.info(f"Early stopping at epoch {epoch+1}")
             break
 
+    model.clear_guidance_cache()
     return best_ckpt_path, {'best_val_loss': best_val_loss, 'final_epoch': final_epoch + 1}
 
 
@@ -2626,11 +2764,7 @@ def run_pipeline(
     for subset_info in subset_list:
         subset_id = subset_info['subset_id']
         variate_indices = subset_info['variate_indices']
-        
-        if '-' in subset_id and subset_id.split('-')[-1].isdigit():
-            dataset_name = '-'.join(subset_id.split('-')[:-1])
-        else:
-            dataset_name = subset_id
+        dataset_name = resolve_registry_dataset_name(subset_info)
         
         if manifest.subsets.get(subset_id, {}).get('status') == 'complete':
             logger.info(f"Skipping {subset_id} (already complete)")

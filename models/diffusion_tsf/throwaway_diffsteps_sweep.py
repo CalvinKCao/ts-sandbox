@@ -186,6 +186,8 @@ def run_trial(T: int, H: int, itrans_ckpt: str, store: str,
             patience=1 if smoke_test else DIFFUSION_PRETRAIN_PATIENCE,
             checkpoint_dir=trial_dir,
             smoke_test=smoke_test,
+            num_diffusion_steps=T,
+            image_height=H,
         )
 
     # ------------------------------------------------------------------
@@ -205,6 +207,8 @@ def run_trial(T: int, H: int, itrans_ckpt: str, store: str,
         patience=1 if smoke_test else FINETUNE_PATIENCE,
         checkpoint_dir=trial_dir,
         smoke_test=smoke_test,
+        num_diffusion_steps=T,
+        image_height=H,
     )
 
     # ------------------------------------------------------------------

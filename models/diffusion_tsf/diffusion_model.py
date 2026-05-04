@@ -86,6 +86,10 @@ class DiffusionTSF(nn.Module):
         else:
             self.guidance_model = None
 
+        # keyed by dataset window index -> raw iTransformer forecast (V, H) on CPU.
+        # populated by set_guidance_cache(); bypasses the iTransformer forward during training.
+        self._guidance_cache: Optional[dict] = None
+
         backbone_in_channels = config.backbone_in_channels
 
         if config.model_type == "transformer":
@@ -204,6 +208,20 @@ class DiffusionTSF(nn.Module):
         self.guidance_model = guidance_model
         if guidance_model is not None:
             logger.info(f"Guidance model set: {type(guidance_model).__name__}")
+
+    def set_guidance_cache(self, cache: dict) -> None:
+        """Attach a pre-computed guidance cache.
+
+        cache maps int window-index -> raw iTransformer forecast tensor (V, H) on CPU.
+        When set, _forward_factorized skips the iTransformer forward and looks up the
+        cached forecast instead, then normalizes with the per-window stats as usual.
+        """
+        self._guidance_cache = cache
+        logger.info(f"Guidance cache set: {len(cache)} entries")
+
+    def clear_guidance_cache(self) -> None:
+        """Drop the cache (e.g. between finetune and eval to free memory)."""
+        self._guidance_cache = None
 
     def _get_coordinate_grid(
         self,
@@ -326,19 +344,23 @@ class DiffusionTSF(nn.Module):
         past_norm: torch.Tensor,
         stats: Tuple[torch.Tensor, torch.Tensor],
         forecast_length: int,
+        cached_coarse: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Run guidance model and return normalized forecast (B, V, forecast_length).
+        """Return normalized guidance forecast (B, V, forecast_length).
 
-        separated from _generate_guidance_2d so we can reuse the raw forecast
-        as cross-variate context without calling get_forecast() twice.
+        If cached_coarse is provided (pre-fetched from _guidance_cache), uses that
+        instead of running the iTransformer forward pass.
         """
-        if self.guidance_model is None:
-            raise ValueError("guidance_model is None but guidance channel requested")
         mean, std = stats
         K = self.config.lookback_overlap
         H = forecast_length - K
-        with torch.no_grad():
-            coarse = self.guidance_model.get_forecast(past, H)
+        if cached_coarse is not None:
+            coarse = cached_coarse
+        else:
+            if self.guidance_model is None:
+                raise ValueError("guidance_model is None but guidance channel requested")
+            with torch.no_grad():
+                coarse = self.guidance_model.get_forecast(past, H)
         coarse_norm = (coarse - mean) / std
         if K > 0:
             coarse_norm = torch.cat([past_norm[..., -K:], coarse_norm], dim=-1)
@@ -555,13 +577,14 @@ class DiffusionTSF(nn.Module):
         self,
         past: torch.Tensor,
         future: torch.Tensor,
-        t: Optional[torch.Tensor] = None
+        t: Optional[torch.Tensor] = None,
+        idx: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass using either unified L+F or optimized Future-Only scheme."""
         if self.config.variate_factorized and self.config.num_variables > 1:
             if self.config.diffusion_type == "binary":
                 return self._forward_binary_factorized(past, future, t)
-            return self._forward_factorized(past, future, t)
+            return self._forward_factorized(past, future, t, idx=idx)
 
         batch_size = past.shape[0]
         device = past.device
@@ -829,7 +852,7 @@ class DiffusionTSF(nn.Module):
     # Factorized U-Net forward/generate — per-variate shared-weight U-Net
     # ====================================================================
 
-    def _forward_factorized(self, past: torch.Tensor, future: torch.Tensor, t: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+    def _forward_factorized(self, past: torch.Tensor, future: torch.Tensor, t: Optional[torch.Tensor] = None, idx: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """training forward: each variate's occupancy map denoised independently.
 
         shared U-Net weights across all V variates; cross-variate info injected
@@ -854,7 +877,14 @@ class DiffusionTSF(nn.Module):
         guidance_forecast_norm = None
         guidance_2d = None
         if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            cached_coarse = None
+            if self._guidance_cache is not None and idx is not None:
+                cached_coarse = torch.stack(
+                    [self._guidance_cache[i.item()] for i in idx], dim=0
+                ).to(device)
+            guidance_forecast_norm = self._get_guidance_forecast_norm(
+                past, past_norm, stats, W_fut, cached_coarse=cached_coarse
+            )
             guidance_2d = self.encode_to_2d(guidance_forecast_norm, scale_for_diffusion=True)
 
         ctx = self._get_cross_variate_context(past_norm, guidance_forecast_norm)
@@ -1175,7 +1205,8 @@ class DiffusionTSF(nn.Module):
     def get_loss(
         self,
         past: torch.Tensor,
-        future: torch.Tensor
+        future: torch.Tensor,
+        idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        outputs = self.forward(past, future)
+        outputs = self.forward(past, future, idx=idx)
         return outputs['loss']
