@@ -110,16 +110,8 @@ class DiffusionTSFConfig:
     use_monotonicity_loss: bool = False
     monotonicity_weight: float = 1.0
     
-    # which backbone
+    # backbone (U-Net only)
     model_type: str = "unet"
-    
-    # transformer (DiT) params
-    transformer_embed_dim: int = 256
-    transformer_depth: int = 6
-    transformer_num_heads: int = 8
-    transformer_patch_height: int = 16  
-    transformer_patch_width: int = 16   
-    transformer_dropout: float = 0.1
     
     # memory optimization flags
     use_gradient_checkpointing: bool = False
@@ -160,7 +152,7 @@ class DiffusionTSFConfig:
         assert self.num_diffusion_steps > 0
         assert self.noise_schedule in ["linear", "cosine", "sigmoid", "quadratic"]
         assert 0 <= self.cutout_prob <= 1
-        assert self.model_type in ("unet", "transformer")
+        assert self.model_type == "unet"
         
     @property
     def bin_width(self) -> float:

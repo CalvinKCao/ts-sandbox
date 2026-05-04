@@ -21,7 +21,6 @@ try:
     from .config import DiffusionTSFConfig
     from .preprocessing import TimeSeriesTo2D, VerticalGaussianBlur
     from .unet import ConditionalUNet2D, TimeSeriesContextEncoder
-    from .transformer import DiffusionTransformer
     from .diffusion import DiffusionScheduler
     from .guidance import GuidanceModel
     from .metrics import monotonicity_loss
@@ -29,7 +28,6 @@ except ImportError:
     from config import DiffusionTSFConfig
     from preprocessing import TimeSeriesTo2D, VerticalGaussianBlur
     from unet import ConditionalUNet2D, TimeSeriesContextEncoder
-    from transformer import DiffusionTransformer
     from diffusion import DiffusionScheduler
     from guidance import GuidanceModel
     from metrics import monotonicity_loss
@@ -94,59 +92,44 @@ class DiffusionTSF(nn.Module):
             self.guidance_model = None
             logger.info("No guidance model provided")
         
-        # Noise prediction backbone (U-Net or Transformer)
+        # Noise prediction backbone (U-Net)
         # Input channels: num_variables (data) + aux channels (coord, time_ramp, time_sine)
         # Use the config property for consistent calculation
         backbone_in_channels = config.backbone_in_channels
-        
-        if config.model_type == "transformer":
-            self.noise_predictor = DiffusionTransformer(
-                image_height=config.image_height,
-                patch_height=config.transformer_patch_height,
-                patch_width=config.transformer_patch_width,
-                embed_dim=config.transformer_embed_dim,
-                depth=config.transformer_depth,
-                num_heads=config.transformer_num_heads,
-                dropout=config.transformer_dropout,
-                in_channels=backbone_in_channels,
-                out_channels=config.num_variables,  # Output one channel per variable
+
+        # Calculate input channels for conditioning encoder (past context)
+        # Past context has num_vars + aux channels, but does NOT have guidance channels
+        # (Guidance is added to the noisy future input, not the past context)
+        cond_in_channels = backbone_in_channels - config.guidance_channels
+
+        self.noise_predictor = ConditionalUNet2D(
+            in_channels=backbone_in_channels,
+            out_channels=config.num_variables,  # Output one channel per variable
+            channels=config.unet_channels,
+            num_res_blocks=config.num_res_blocks,
+            attention_levels=config.attention_levels,
+            image_height=config.image_height,
+            kernel_size=config.unet_kernel_size,
+            use_dilated_middle=config.use_dilated_middle,
+            use_hybrid_condition=config.use_hybrid_condition,
+            context_dim=config.context_embedding_dim,
+            conditioning_mode=config.conditioning_mode,
+            visual_cond_channels=config.visual_cond_channels,
+            cond_in_channels=cond_in_channels
+        )
+
+        # Create TimeSeriesContextEncoder for hybrid conditioning
+        if config.use_hybrid_condition:
+            self.context_encoder = TimeSeriesContextEncoder(
+                input_channels=config.context_input_channels,
+                embedding_dim=config.context_embedding_dim,
+                num_layers=config.context_encoder_layers,
+                num_heads=4,
+                dropout=0.1,
+                max_seq_len=max(config.lookback_length, config.forecast_length) + 256
             )
-            # Note: Transformer backbone does not yet support hybrid conditioning
-            self.context_encoder = None
         else:
-            # Calculate input channels for conditioning encoder (past context)
-            # Past context has num_vars + aux channels, but does NOT have guidance channels
-            # (Guidance is added to the noisy future input, not the past context)
-            cond_in_channels = backbone_in_channels - config.guidance_channels
-            
-            self.noise_predictor = ConditionalUNet2D(
-                in_channels=backbone_in_channels,
-                out_channels=config.num_variables,  # Output one channel per variable
-                channels=config.unet_channels,
-                num_res_blocks=config.num_res_blocks,
-                attention_levels=config.attention_levels,
-                image_height=config.image_height,
-                kernel_size=config.unet_kernel_size,
-                use_dilated_middle=config.use_dilated_middle,
-                use_hybrid_condition=config.use_hybrid_condition,
-                context_dim=config.context_embedding_dim,
-                conditioning_mode=config.conditioning_mode,
-                visual_cond_channels=config.visual_cond_channels,
-                cond_in_channels=cond_in_channels
-            )
-            
-            # Create TimeSeriesContextEncoder for hybrid conditioning
-            if config.use_hybrid_condition:
-                self.context_encoder = TimeSeriesContextEncoder(
-                    input_channels=config.context_input_channels,
-                    embedding_dim=config.context_embedding_dim,
-                    num_layers=config.context_encoder_layers,
-                    num_heads=4,
-                    dropout=0.1,
-                    max_seq_len=max(config.lookback_length, config.forecast_length) + 256
-                )
-            else:
-                self.context_encoder = None
+            self.context_encoder = None
         
         # Diffusion scheduler (not a nn.Module, managed separately)
         self.scheduler = DiffusionScheduler(

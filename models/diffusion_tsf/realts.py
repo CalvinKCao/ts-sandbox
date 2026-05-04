@@ -437,6 +437,7 @@ class RealTS(Dataset):
         self.lookback_overlap = lookback_overlap
         self.augment = augment
         self.num_variables = num_variables
+        self.seed = seed
         self.pregenerate = pregenerate
         self.pool_size = pool_size or num_samples
         if self.pool_size < num_samples: self.pool_size = num_samples
@@ -547,9 +548,9 @@ class RealTS(Dataset):
         
         # Case 1: Using Cached Pool (Disk or RAM)
         if self.data_cache is not None:
-            # Pick a random index from the pool to simulate infinite data cycling
-            # We ignore 'idx' which cycles 0..num_samples
-            real_idx = np.random.randint(0, self.pool_size)
+            # Deterministic index mapping keeps synthetic epochs reproducible when
+            # DataLoader shuffles with fixed seeds across runs.
+            real_idx = int(idx) % self.pool_size
             seq = self.data_cache[real_idx]
             
             # Note: For cached univariate, we already did augmentations (flip/negate) at generation time.

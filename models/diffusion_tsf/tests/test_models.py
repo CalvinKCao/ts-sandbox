@@ -2,7 +2,6 @@ import pytest
 import torch
 import torch.nn as nn
 from models.diffusion_tsf.unet import ConditionalUNet2D, TimeSeriesContextEncoder
-from models.diffusion_tsf.transformer import DiffusionTransformer
 from models.diffusion_tsf.diffusion import DiffusionScheduler
 from models.diffusion_tsf.guidance import LastValueGuidance, LinearRegressionGuidance, iTransformerGuidance
 
@@ -50,27 +49,6 @@ class TestArchitecture:
         
         out = model(x, t, cond, encoder_hidden_states=context)
         assert out.shape == (batch, out_ch, height, width)
-
-    def test_transformer_shapes(self):
-        batch, in_ch, height, width = 2, 3, 32, 16
-        # height must be div by patch size (16)
-        model = DiffusionTransformer(
-            image_height=height,
-            patch_height=16,
-            patch_width=16,
-            embed_dim=16,
-            depth=1,
-            num_heads=4,
-            in_channels=in_ch,
-            out_channels=1
-        )
-        
-        x = torch.randn(batch, in_ch, height, width)
-        t = torch.randint(0, 10, (batch,))
-        cond = torch.randn(batch, in_ch, height, width) # Transformer uses same channels for cond usually
-        
-        out = model(x, t, cond)
-        assert out.shape == (batch, 1, height, width)
 
     def test_context_encoder(self):
         encoder = TimeSeriesContextEncoder(
