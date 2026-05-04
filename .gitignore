@@ -90,6 +90,8 @@ env/
 **/results/logs/
 **/results/ckpts/
 **/results/datasets/
+# Pipeline file log (setup_logging in train_multivariate_pipeline)
+models/diffusion_tsf/train_multivariate.log
 **/test_results/
 **/test_output/
 
