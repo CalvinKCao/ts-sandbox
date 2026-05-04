@@ -1,96 +1,67 @@
 #!/bin/bash
-#SBATCH --time=0-10:00:00
+# =============================================================================
+# Throwaway: diffusion-steps × image-height grid sweep (Killarney, L40S)
+#
+# 5 combos: T ∈ {200,500,1000,1500} × H ∈ {64,128} (1000 gets both heights)
+# Each combo: 10-epoch diffusion pretrain → 20-epoch electricity finetune → eval
+# Fixed: lr=2.05e-5, batch=16, n_variates=4 (electricity consumers 93,292,81,84)
+#
+# Usage (from $SCRATCH/ts-sandbox on the login node):
+#   sbatch slurm_throwaway_diffsteps_sweep.sh
+#
+# Logs:        ./results/logs/<MM-DD>-<last3-jobid>-diffsteps-sweep.log
+# Checkpoints: $SCRATCH/diffusion-tsf-diffsteps-sweep/
+# =============================================================================
+#SBATCH --job-name=tsf-diffsteps-sweep
+#SBATCH --account=aip-boyuwang
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=50G
-#SBATCH --job-name=tsf-diffsteps-sweep
-#SBATCH --output=/tmp/tsf-diffsteps-sweep-%j.out
-#SBATCH --error=/tmp/tsf-diffsteps-sweep-%j.err
-# =============================================================================
-# Throwaway: diffusion-steps × image-height grid sweep (Killarney, L40S)
-#
-# Trains iTransformer once, then runs all 8 combos of
-#   T ∈ {200,500,1000,1500}  ×  H ∈ {64,128}
-# Each combo: 10-epoch diffusion pretrain → 20-epoch ETTh2 finetune → eval.
-# Fixed: lr=2.05e-5, batch=16, n_variates=3.
-#
-# Usage (login node, repo root):
-#   ./slurm_throwaway_diffsteps_sweep.sh
-#   ACCOUNT=aip-boyuwang ./slurm_throwaway_diffsteps_sweep.sh
-#   STORE=/scratch/ccao87/diffusion-tsf-diffsteps-sweep ./slurm_throwaway_diffsteps_sweep.sh
-#
-# Expected wall time: ~6–8 h on an L40S (iTransformer + 8 × short runs).
-# =============================================================================
+#SBATCH --time=0-10:00:00
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
+#SBATCH --mail-type=FAIL,END
+#SBATCH --mail-user=ccao87@uwo.ca
 
 set -euo pipefail
 
-ACCOUNT="${ACCOUNT:-aip-boyuwang}"
-EMAIL="${EMAIL:-ccao87@uwo.ca}"
-CPUS="${CPUS:-8}"
-MEM="${MEM:-50G}"
-WALL="${WALL:-0-10:00:00}"
+# All paths anchor to where you ran `sbatch`, NOT the spool copy of this script
+cd "$SLURM_SUBMIT_DIR"
 
-# Resolve repo root
-if [ -d "${SCRATCH:-}/ts-sandbox" ]; then
-    PROJECT_ROOT="$SCRATCH/ts-sandbox"
-elif [ -d "$HOME/ts-sandbox" ]; then
-    PROJECT_ROOT="$HOME/ts-sandbox"
-else
-    echo "ERROR: clone repo to \$SCRATCH/ts-sandbox (or \$HOME/ts-sandbox fallback)."
-    exit 1
-fi
+mkdir -p results/logs results/ckpts
+STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-diffsteps-sweep"
+LOG="results/logs/${STEM}.log"
 
-# Resolve storage root
-if [ -z "${STORE:-}" ]; then
-    if [ -z "${SCRATCH:-}" ]; then
-        echo "ERROR: \$SCRATCH not set. Set STORE manually and re-run."
-        exit 1
-    fi
-    STORE="$SCRATCH/diffusion-tsf-diffsteps-sweep"
-fi
-
-LOG_DIR="$STORE/logs"
-JOB_DIR="$STORE/job_scripts"
-mkdir -p "$LOG_DIR" "$JOB_DIR"
-
-JOB_SCRIPT="$JOB_DIR/diffsteps_sweep.job.sh"
-
-# Write the batch script to disk (single file, no heredoc quoting issues)
-cat > "$JOB_SCRIPT" << 'JOB'
-#!/bin/bash
-set -euo pipefail
+# Single combined log (stdout+stderr) — Slurm itself writes nothing (see /dev/null above)
+exec >>"$LOG" 2>&1
 
 echo "======================================================="
-echo "  Job: $SLURM_JOB_NAME   ID: $SLURM_JOB_ID"
+echo "  Job : $SLURM_JOB_NAME   ID: $SLURM_JOB_ID"
 echo "  Node: $SLURMD_NODENAME"
-echo "  GPU:  $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
+echo "  GPU : $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
 echo "  Start: $(date)"
+echo "  Log : $SLURM_SUBMIT_DIR/$LOG"
 echo "======================================================="
 
-# ---- Resolve repo root inside the batch environment ----
-if [ -d "$SCRATCH/ts-sandbox" ]; then
-    PROJECT_ROOT="$SCRATCH/ts-sandbox"
-elif [ -d "$HOME/ts-sandbox" ]; then
-    PROJECT_ROOT="$HOME/ts-sandbox"
+PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+
+# Bulk artifacts to scratch (not backed up, but big + fast); fall back to repo
+if [ -n "${SCRATCH:-}" ]; then
+    STORE="$SCRATCH/diffusion-tsf-diffsteps-sweep"
 else
-    echo "ERROR: ts-sandbox not found."
-    exit 1
+    STORE="$PROJECT_ROOT/results/ckpts/${STEM}"
 fi
+mkdir -p "$STORE"
+echo "[setup] Checkpoint store: $STORE"
 
-if [ -z "${STORE:-}" ]; then
-    echo "ERROR: STORE not passed into batch environment."
-    exit 1
-fi
-
-# ---- Modules ----
 module purge || true
 module load StdEnv/2023
 module load python/3.11
 module load cuda/12.2
 module load cudnn/8.9
 
-# ---- Build venv on fast local NVMe (avoids slow Lustre imports) ----
+# Venv on node-local NVMe; cold imports from Lustre take 5–15 min and time out smoke runs
 VENV="$SLURM_TMPDIR/env"
 echo "[setup] Building venv on $VENV ..."
 virtualenv --no-download "$VENV"
@@ -103,7 +74,6 @@ if [ -f "$PROJECT_ROOT/requirements.txt" ]; then
 fi
 echo "[setup] Venv ready: $VENV/bin/python"
 
-# ---- wandb ----
 export WANDB_DIR="$STORE/wandb"
 mkdir -p "$WANDB_DIR"
 if [ -z "${WANDB_API_KEY:-}" ]; then
@@ -115,7 +85,6 @@ else
 fi
 
 export PYTHONUNBUFFERED=1
-cd "$PROJECT_ROOT"
 
 echo "[run] Starting diffusion-steps × image-height sweep ..."
 python -u -m models.diffusion_tsf.throwaway_diffsteps_sweep \
@@ -126,40 +95,3 @@ python -u -m models.diffusion_tsf.throwaway_diffsteps_sweep \
     --wandb-project diffusion-tsf
 
 echo "Done: $(date)"
-JOB
-
-chmod +x "$JOB_SCRIPT"
-
-if [ -n "${SLURM_JOB_ID:-}" ]; then
-    echo "Detected direct sbatch mode (job $SLURM_JOB_ID); running payload in-place."
-    export STORE
-    exec "$JOB_SCRIPT"
-fi
-
-echo "Submitting diffusion-steps sweep ..."
-JOB_ID=$(sbatch --parsable \
-    --job-name=tsf-diffsteps-sweep \
-    --account="$ACCOUNT" \
-    --nodes=1 \
-    --gres=gpu:l40s:1 \
-    --cpus-per-task="$CPUS" \
-    --mem="$MEM" \
-    --time="$WALL" \
-    --export=ALL,STORE="$STORE" \
-    --chdir="$PROJECT_ROOT" \
-    --output="$LOG_DIR/diffsteps-sweep-%j.out" \
-    --error="$LOG_DIR/diffsteps-sweep-%j.err" \
-    --mail-type=FAIL,END \
-    --mail-user="$EMAIL" \
-    "$JOB_SCRIPT")
-
-echo "Submitted: $JOB_ID"
-echo "Logs:"
-echo "  stdout: $LOG_DIR/diffsteps-sweep-$JOB_ID.out"
-echo "  stderr: $LOG_DIR/diffsteps-sweep-$JOB_ID.err"
-echo "Tail live output:"
-echo "  tail -f $LOG_DIR/diffsteps-sweep-$JOB_ID.out"
-echo "Monitor:"
-echo "  squeue -j $JOB_ID -o '%.18i %.20j %.10T %.20R'"
-echo "Verify GPU:"
-echo "  scontrol show job=$JOB_ID | grep -i gres"
