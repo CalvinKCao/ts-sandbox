@@ -18,6 +18,10 @@ Usage (repo root)::
 
     python -m models.diffusion_tsf.throwaway_guidance_hybrid_ablation --smoke-test
 
+Full path on local GPU in a few minutes (all four ablations, tiny T/H and sample counts)::
+
+    python -m models.diffusion_tsf.throwaway_guidance_hybrid_ablation --smoke-pipeline --store /tmp/abl-smoke --amp
+
 Cluster::
 
     sbatch slurm_throwaway_guidance_hybrid_ablation.sh
@@ -83,8 +87,15 @@ DEFAULT_NUM_DIFFUSION_STEPS = 1000
 DEFAULT_IMAGE_HEIGHT = 128
 
 SMOKE_ITRANS_SAMPLES = 64
+SMOKE_DIFFUSION_PRETRAIN_SAMPLES = 64
 SMOKE_PRETRAIN_EPOCHS = 1
 SMOKE_FINETUNE_EPOCHS = 1
+SMOKE_FINETUNE_BATCH = 8
+
+# Full-pipeline smoke: still runs iTrans → 4×(diffusion pretrain → finetune → eval), but slashed budgets.
+SMOKE_PIPELINE_ITRANS_SAMPLES = 16
+SMOKE_PIPELINE_DIFFUSION_SAMPLES = 8
+SMOKE_PIPELINE_FINETUNE_BATCH = 4
 
 ABLATION_CONFIGS: List[Tuple[str, bool, bool]] = [
     ('both', True, True),
@@ -109,7 +120,7 @@ def _itrans_ckpt_path(store: str) -> str:
     return os.path.join(store, 'shared_itransformer.pt')
 
 
-def _ensure_itransformer(store: str, smoke_test: bool) -> str:
+def _ensure_itransformer(store: str, smoke_test: bool, smoke_pipeline: bool) -> str:
     ckpt = _itrans_ckpt_path(store)
     if os.path.exists(ckpt):
         print(f"[ablation] Reusing cached iTransformer: {ckpt}")
@@ -119,9 +130,18 @@ def _ensure_itransformer(store: str, smoke_test: bool) -> str:
     P.N_VARIATES = N_VARIATES
 
     best_params = {'learning_rate': FIXED_LR, 'dropout': FIXED_DROPOUT}
-    n_samples = SMOKE_ITRANS_SAMPLES if smoke_test else ITRANS_PRETRAIN_SAMPLES
-    epochs = SMOKE_PRETRAIN_EPOCHS if smoke_test else ITRANS_PRETRAIN_EPOCHS
-    patience = 1 if smoke_test else ITRANS_PRETRAIN_PATIENCE
+    if smoke_pipeline:
+        n_samples = SMOKE_PIPELINE_ITRANS_SAMPLES
+        epochs = 1
+        patience = 1
+    elif smoke_test:
+        n_samples = SMOKE_ITRANS_SAMPLES
+        epochs = SMOKE_PRETRAIN_EPOCHS
+        patience = 1
+    else:
+        n_samples = ITRANS_PRETRAIN_SAMPLES
+        epochs = ITRANS_PRETRAIN_EPOCHS
+        patience = ITRANS_PRETRAIN_PATIENCE
 
     pretrain_itransformer(
         best_params,
@@ -146,6 +166,7 @@ def run_ablation(
     itrans_ckpt: str,
     store: str,
     smoke_test: bool,
+    smoke_pipeline: bool,
     wandb_run: Any,
 ) -> Dict[str, Any]:
     """One ablation: diffusion pretrain → finetune → eval; return metrics + timings."""
@@ -175,7 +196,11 @@ def run_ablation(
         pretrain_diffusion(
             best_params,
             itrans_ckpt,
-            n_samples=SMOKE_ITRANS_SAMPLES if smoke_test else 5000,
+            n_samples=(
+                SMOKE_PIPELINE_DIFFUSION_SAMPLES
+                if smoke_pipeline
+                else (SMOKE_DIFFUSION_PRETRAIN_SAMPLES if smoke_test else 5000)
+            ),
             epochs=SMOKE_PRETRAIN_EPOCHS if smoke_test else MAX_DIFFUSION_PRETRAIN_EPOCHS,
             patience=1 if smoke_test else DIFFUSION_PRETRAIN_PATIENCE,
             checkpoint_dir=trial_dir,
@@ -195,7 +220,12 @@ def run_ablation(
         'variate_indices': VARIATE_INDICES,
         'variate_names': VARIATE_NAMES,
     }
-    tuned_params = {'learning_rate': FIXED_LR, 'batch_size': FIXED_BATCH}
+    ft_batch = (
+        SMOKE_PIPELINE_FINETUNE_BATCH
+        if smoke_pipeline
+        else (SMOKE_FINETUNE_BATCH if smoke_test else FIXED_BATCH)
+    )
+    tuned_params = {'learning_rate': FIXED_LR, 'batch_size': ft_batch}
 
     print(f"[ablation] {name}: finetune ...")
     t0 = time.time()
@@ -349,6 +379,15 @@ def main() -> None:
     )
     parser.add_argument('--store', type=str, default=None, help='Checkpoint / result root')
     parser.add_argument('--smoke-test', action='store_true', help='1 epoch, tiny data')
+    parser.add_argument(
+        '--smoke-pipeline',
+        action='store_true',
+        help=(
+            'Full ablation path on minimal budgets: shared iTrans, then all four configs '
+            '(diffusion pretrain → finetune → eval). Implies --smoke-test and defaults '
+            'T=20, H=32 unless you pass --num-diffusion-steps / --image-height.'
+        ),
+    )
     parser.add_argument('--wandb', action='store_true')
     parser.add_argument('--wandb-project', type=str, default='diffusion-tsf')
     parser.add_argument('--amp', action='store_true')
@@ -367,6 +406,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    smoke_pipeline = bool(args.smoke_pipeline)
+    if smoke_pipeline:
+        args.smoke_test = True
+        if args.num_diffusion_steps == DEFAULT_NUM_DIFFUSION_STEPS:
+            args.num_diffusion_steps = 20
+        if args.image_height == DEFAULT_IMAGE_HEIGHT:
+            args.image_height = 32
+
     setup_logging()
 
     if args.store is None:
@@ -381,6 +428,7 @@ def main() -> None:
     print(
         f'[ablation] Geometry: T={args.num_diffusion_steps}, H={args.image_height}  '
         f'dataset={DATASET} variates={VARIATE_INDICES}'
+        + ('  (smoke-pipeline)' if smoke_pipeline else '')
     )
 
     if args.amp:
@@ -411,6 +459,7 @@ def main() -> None:
                     'H': args.image_height,
                     'ablations': ABLATION_CONFIGS,
                     'smoke_test': args.smoke_test,
+                    'smoke_pipeline': smoke_pipeline,
                 },
                 tags=['throwaway', 'guidance-hybrid-ablation'],
             )
@@ -418,7 +467,7 @@ def main() -> None:
             print(f'[ablation] wandb init failed: {e}. Continuing without wandb.')
             wandb_run = None
 
-    itrans_ckpt = _ensure_itransformer(store, args.smoke_test)
+    itrans_ckpt = _ensure_itransformer(store, args.smoke_test, smoke_pipeline)
 
     results: List[Dict[str, Any]] = []
     for name, ug, uh in ABLATION_CONFIGS:
@@ -432,6 +481,7 @@ def main() -> None:
                 itrans_ckpt,
                 store,
                 args.smoke_test,
+                smoke_pipeline,
                 wandb_run,
             )
             results.append(r)
@@ -449,7 +499,16 @@ def main() -> None:
 
     summary_path = os.path.join(store, 'ablation_summary.json')
     with open(summary_path, 'w') as f:
-        json.dump({'results': results, 'T': args.num_diffusion_steps, 'H': args.image_height}, f, indent=2)
+        json.dump(
+            {
+                'results': results,
+                'T': args.num_diffusion_steps,
+                'H': args.image_height,
+                'smoke_pipeline': smoke_pipeline,
+            },
+            f,
+            indent=2,
+        )
     print(f'[ablation] Summary saved: {summary_path}')
 
     if wandb_run is not None:
