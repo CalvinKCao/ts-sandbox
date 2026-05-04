@@ -1,4 +1,12 @@
 #!/bin/bash
+#SBATCH --time=0-10:00:00
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:l40s:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=50G
+#SBATCH --job-name=tsf-diffsteps-sweep
+#SBATCH --output=/tmp/tsf-diffsteps-sweep-%j.out
+#SBATCH --error=/tmp/tsf-diffsteps-sweep-%j.err
 # =============================================================================
 # Throwaway: diffusion-steps × image-height grid sweep (Killarney, L40S)
 #
@@ -121,6 +129,12 @@ echo "Done: $(date)"
 JOB
 
 chmod +x "$JOB_SCRIPT"
+
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+    echo "Detected direct sbatch mode (job $SLURM_JOB_ID); running payload in-place."
+    export STORE
+    exec "$JOB_SCRIPT"
+fi
 
 echo "Submitting diffusion-steps sweep ..."
 JOB_ID=$(sbatch --parsable \
