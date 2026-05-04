@@ -4,7 +4,7 @@ Complete Diffusion-based Time Series Forecasting Model.
 stuff in here:
 - Preprocessing (norm, 2D encoding, blur)
 - Conditional U-Net
-- DDPM/DDIM diffusion
+- DDPM training objective (ε-prediction MSE); DDIM sampler at inference
 - 2D to 1D decoding
 """
 
@@ -45,7 +45,7 @@ class DiffusionTSF(nn.Module):
     2. Convert to 2D occupancy (value-axis) representation
     3. Apply vertical Gaussian blur
     4. Train U-Net to denoise future conditioned on past
-    5. At inference: generate future via DDPM/DDIM
+    5. At inference: generate future via DDIM (drop-in sampler; trained with DDPM ε-prediction loss)
     6. Decode 2D representation back to 1D
     
     Optional Hybrid "Visual Guide" mode (use_guidance_channel=True):
