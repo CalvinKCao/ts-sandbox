@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import gc
 import importlib.util
 import json
 import logging
@@ -72,6 +73,7 @@ DATASETS_DIR = os.path.join(project_root, "datasets")
 CHECKPOINT_DIR = resolve_checkpoint_dir(script_dir)
 RESULTS_DIR = resolve_results_dir(script_dir)
 MANIFEST_PATH = os.path.join(CHECKPOINT_DIR, "training_manifest.json")
+SYNTH_CACHE_DIR: Optional[str] = None
 
 # ============================================================================
 # DDP (Multi-GPU) Support
@@ -670,8 +672,9 @@ N_ITRANS_HP_TRIALS = 7
 N_DIFFUSION_HP_TRIALS = 10
 N_FINETUNE_HP_TRIALS = 8
 
-# Batch size ranges for A6000/A100 (40-48GB) — 128×1216×7 images are 4x larger
-ITRANS_BATCH_SIZES = [256]
+# Batch size ranges for A6000/A100 (40-48GB) — 128×1216×7 images are 4x larger.
+# iTransformer HP tuning now adapts these based on N_VARIATES to avoid OOM at high dims.
+ITRANS_BATCH_SIZES = [64, 128, 256]
 DIFFUSION_BATCH_SIZES = [16]
 FINETUNE_BATCH_SIZES = [4, 8, 16]
 
@@ -711,6 +714,19 @@ def resolve_pretrain_virtual_dataset_size(smoke_test: bool) -> int:
     ref_bs = 8
     n = steps * ref_bs
     return max(SYNTHETIC_SAMPLES_MIN, min(SYNTHETIC_SAMPLES_CAP, n))
+
+
+def get_synth_cache_dir(checkpoint_dir: Optional[str] = None, smoke_test: bool = False) -> Optional[str]:
+    """Resolve synthetic cache dir; prefer shared cache when configured."""
+    if smoke_test:
+        return None
+    if SYNTH_CACHE_DIR:
+        os.makedirs(SYNTH_CACHE_DIR, exist_ok=True)
+        return SYNTH_CACHE_DIR
+    base = checkpoint_dir or CHECKPOINT_DIR
+    path = os.path.join(base, 'synth_cache')
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 # ============================================================================
@@ -1106,18 +1122,165 @@ def validate_itransformer(model, loader, criterion, device):
     return total_loss / max(n_batches, 1)
 
 
-def itrans_hp_objective(trial, synthetic_loader, val_loader, device, smoke_test=False):
+def auto_select_max_even_batch_size(
+    phase_name: str,
+    max_candidate: int,
+    try_step_fn,
+    min_candidate: int = 2,
+) -> int:
+    """Pick the largest even batch size that passes ``try_step_fn`` without OOM."""
+    max_candidate = max(min_candidate, max_candidate)
+    max_candidate = max_candidate if max_candidate % 2 == 0 else max_candidate - 1
+    min_candidate = max(min_candidate, 2)
+
+    lo = min_candidate
+    hi = max_candidate
+    best = min_candidate
+
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if mid % 2 != 0:
+            mid -= 1
+        if mid < min_candidate:
+            mid = min_candidate
+
+        try:
+            ok = bool(try_step_fn(mid))
+        except torch.OutOfMemoryError:
+            ok = False
+        except RuntimeError as exc:
+            ok = 'out of memory' not in str(exc).lower()
+            if not ok:
+                pass
+            else:
+                raise
+
+        if ok:
+            best = mid
+            lo = mid + 2
+        else:
+            hi = mid - 2
+
+    logger.info(f"[AutoBS] {phase_name}: selected batch_size={best} (max tested={max_candidate})")
+    return best
+
+
+def select_itrans_batch_size(
+    phase_name: str,
+    dataset,
+    device: torch.device,
+    dropout: float,
+    max_candidate: int,
+) -> int:
+    """Probe iTransformer memory with one train step and pick largest safe even batch."""
+    sample_past, sample_future = dataset[0]
+
+    def _try(bs: int) -> bool:
+        model = None
+        optimizer = None
+        x_enc = None
+        y_true = None
+        y_pred = None
+        loss = None
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            model = create_itransformer(dropout=dropout).to(device)
+            model.train()
+            optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+            optimizer.zero_grad(set_to_none=True)
+
+            past = sample_past.unsqueeze(0).repeat(bs, 1, 1).to(device)
+            future = sample_future.unsqueeze(0).repeat(bs, 1, 1).to(device)
+            x_enc = past.permute(0, 2, 1)
+            y_true = future.permute(0, 2, 1)
+            if LOOKBACK_OVERLAP > 0:
+                y_true = y_true[:, LOOKBACK_OVERLAP:, :]
+            y_pred = model(x_enc, None, None, None)
+            loss = nn.functional.mse_loss(y_pred, y_true)
+            loss.backward()
+            optimizer.step()
+            return True
+        finally:
+            del loss, y_pred, y_true, x_enc, optimizer, model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+
+    return auto_select_max_even_batch_size(phase_name, max_candidate, _try, min_candidate=2)
+
+
+def select_diffusion_batch_size(
+    phase_name: str,
+    dataset,
+    device: torch.device,
+    itrans_guidance: iTransformerGuidance,
+    max_candidate: int,
+) -> int:
+    """Probe diffusion memory with one train step and pick largest safe even batch."""
+    sample_past, sample_future = dataset[0]
+
+    def _try(bs: int) -> bool:
+        model = None
+        optimizer = None
+        past = None
+        future = None
+        loss = None
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            model = create_diffusion_model().to(device)
+            model.set_guidance_model(itrans_guidance)
+            model.train()
+            optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+            optimizer.zero_grad(set_to_none=True)
+
+            past = sample_past.unsqueeze(0).repeat(bs, 1, 1).to(device)
+            future = sample_future.unsqueeze(0).repeat(bs, 1, 1).to(device)
+            with amp_context():
+                loss = model.get_loss(past, future)
+            loss.backward()
+            optimizer.step()
+            return True
+        finally:
+            del loss, future, past, optimizer, model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+
+    return auto_select_max_even_batch_size(phase_name, max_candidate, _try, min_candidate=2)
+
+
+def get_itrans_batch_size_candidates(smoke_test: bool) -> List[int]:
+    """Return a safe iTransformer HP batch-size search space for current N_VARIATES."""
+    if smoke_test:
+        return [8, 16]
+    if N_VARIATES >= 512:
+        return [8, 16, 32]
+    if N_VARIATES >= 256:
+        return [16, 32, 64]
+    return ITRANS_BATCH_SIZES
+
+
+def itrans_hp_objective(trial, synthetic_loader, val_loader, device, smoke_test=False, fixed_batch_size: Optional[int] = None):
     """Optuna objective for iTransformer HP search."""
     # Suggest hyperparameters
     lr = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [8, 16] if smoke_test else ITRANS_BATCH_SIZES)
+    if fixed_batch_size is None:
+        batch_size = trial.suggest_categorical('batch_size', get_itrans_batch_size_candidates(smoke_test))
+    else:
+        batch_size = fixed_batch_size
     dropout = trial.suggest_float('dropout', 0.0, 0.3)
     
     # Create model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     model = create_itransformer(dropout=dropout).to(device)
     
     # Rebuild loaders with new batch size
     train_loader = DataLoader(synthetic_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_bs = min(batch_size, 32)
+    val_loader_local = DataLoader(val_loader.dataset, batch_size=val_bs, shuffle=False, num_workers=0)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
@@ -1127,19 +1290,25 @@ def itrans_hp_objective(trial, synthetic_loader, val_loader, device, smoke_test=
     early_stop = EarlyStopping(patience=patience)
     best_val_loss = float('inf')
     
-    for epoch in range(epochs):
-        train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss = validate_itransformer(model, val_loader, criterion, device)
-        
-        trial.report(val_loss, epoch)
-        if trial.should_prune():
-            raise optuna.TrialPruned()
-        
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-        
-        if early_stop(val_loss):
-            break
+    try:
+        for epoch in range(epochs):
+            train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
+            val_loss = validate_itransformer(model, val_loader_local, criterion, device)
+            
+            trial.report(val_loss, epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+            
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+            
+            if early_stop(val_loss):
+                break
+    except torch.OutOfMemoryError:
+        logger.warning(f"[iTransformer HP] OOM at batch_size={batch_size}; pruning trial {trial.number}.")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise optuna.TrialPruned()
     
     return best_val_loss
 
@@ -1155,7 +1324,7 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
     
     # Create synthetic data loaders
     n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_HP_TUNE
-    synth_cache = os.path.join(CHECKPOINT_DIR, 'synth_cache')
+    synth_cache = get_synth_cache_dir()
     synthetic_loader = get_synthetic_dataloader(
         batch_size=64,
         lookback_length=LOOKBACK_LENGTH,
@@ -1164,7 +1333,7 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
         num_samples=n_samples,
         num_workers=0,
         lookback_overlap=LOOKBACK_OVERLAP,
-        cache_dir=synth_cache if not smoke_test else None,
+        cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
     )
     
@@ -1177,8 +1346,15 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
     train_subset = Subset(dataset, train_indices)
     val_subset = Subset(dataset, val_indices)
     
-    train_loader = DataLoader(train_subset, batch_size=64, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_subset, batch_size=64, shuffle=False, num_workers=0)
+    train_bs = select_itrans_batch_size(
+        phase_name='iTransformer HP tune',
+        dataset=train_subset,
+        device=device,
+        dropout=0.1,
+        max_candidate=32 if smoke_test else 256,
+    )
+    train_loader = DataLoader(train_subset, batch_size=train_bs, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_subset, batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
     
     # Run Optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -1187,18 +1363,20 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
     logger.info(f"Starting iTransformer HP search: {n_trials} trials")
     
     def log_trial(study, trial):
+        bs = trial.params.get('batch_size', train_bs)
         logger.info(f"[iTransformer HP] Trial {trial.number}/{n_trials}: "
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                   f"bs={trial.params['batch_size']}, dropout={trial.params['dropout']:.3f}")
+                   f"bs={bs}, dropout={trial.params['dropout']:.3f}")
     
     study.optimize(
-        lambda trial: itrans_hp_objective(trial, train_loader, val_loader, device, smoke_test),
+        lambda trial: itrans_hp_objective(trial, train_loader, val_loader, device, smoke_test, fixed_batch_size=train_bs),
         n_trials=n_trials,
         show_progress_bar=True,
         callbacks=[log_trial],
     )
     
     best_params = study.best_params
+    best_params['batch_size'] = train_bs
     logger.info(f"Best iTransformer params: lr={best_params['learning_rate']:.2e}, "
                f"bs={best_params['batch_size']}, dropout={best_params['dropout']:.3f}")
     logger.info(f"Best val loss: {study.best_value:.4f}")
@@ -1216,11 +1394,15 @@ def diffusion_hp_objective(
     val_loader,
     itrans_guidance: iTransformerGuidance,
     device, 
-    smoke_test=False
+    smoke_test=False,
+    fixed_batch_size: Optional[int] = None,
 ):
     """Optuna objective for Diffusion HP search."""
     lr = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else DIFFUSION_BATCH_SIZES)
+    if fixed_batch_size is None:
+        batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else DIFFUSION_BATCH_SIZES)
+    else:
+        batch_size = fixed_batch_size
     
     # Create model with guidance
     model = create_diffusion_model().to(device)
@@ -1298,7 +1480,7 @@ def run_diffusion_hp_tuning(
     
     # Create small synthetic dataset for fast iteration
     n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_DIFF_TUNE
-    synth_cache = os.path.join(CHECKPOINT_DIR, 'synth_cache')
+    synth_cache = get_synth_cache_dir()
     synthetic_loader = get_synthetic_dataloader(
         batch_size=32,
         lookback_length=LOOKBACK_LENGTH,
@@ -1307,7 +1489,7 @@ def run_diffusion_hp_tuning(
         num_samples=n_samples,
         num_workers=0,
         lookback_overlap=LOOKBACK_OVERLAP,
-        cache_dir=synth_cache if not smoke_test else None,
+        cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
     )
     
@@ -1316,8 +1498,15 @@ def run_diffusion_hp_tuning(
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
     
-    train_loader = DataLoader(train_subset, batch_size=32, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_subset, batch_size=32, shuffle=False, num_workers=0)
+    train_bs = select_diffusion_batch_size(
+        phase_name='Diffusion HP tune',
+        dataset=train_subset,
+        device=device,
+        itrans_guidance=itrans_guidance,
+        max_candidate=8 if smoke_test else 64,
+    )
+    train_loader = DataLoader(train_subset, batch_size=train_bs, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_subset, batch_size=min(train_bs, 16), shuffle=False, num_workers=0)
     
     # Run Optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -1326,18 +1515,22 @@ def run_diffusion_hp_tuning(
     logger.info(f"Starting Diffusion HP search: {n_trials} trials")
     
     def log_trial(study, trial):
+        bs = trial.params.get('batch_size', train_bs)
         logger.info(f"[Diffusion HP] Trial {trial.number}/{n_trials}: "
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                   f"bs={trial.params['batch_size']}")
+                   f"bs={bs}")
     
     study.optimize(
-        lambda trial: diffusion_hp_objective(trial, train_loader, val_loader, itrans_guidance, device, smoke_test),
+        lambda trial: diffusion_hp_objective(
+            trial, train_loader, val_loader, itrans_guidance, device, smoke_test, fixed_batch_size=train_bs
+        ),
         n_trials=n_trials,
         show_progress_bar=True,
         callbacks=[log_trial],
     )
     
     best_params = study.best_params
+    best_params['batch_size'] = train_bs
     logger.info(f"Best Diffusion params: lr={best_params['learning_rate']:.2e}, bs={best_params['batch_size']}")
     logger.info(f"Best val loss: {study.best_value:.4f}")
     
@@ -1368,24 +1561,21 @@ def pretrain_itransformer(
     device = get_device()
     
     lr = require_tuned_param(best_params, 'learning_rate', 'iTransformer pretraining')
-    batch_size = require_tuned_param(best_params, 'batch_size', 'iTransformer pretraining')
+    tuned_batch_size = require_tuned_param(best_params, 'batch_size', 'iTransformer pretraining')
     dropout = require_tuned_param(best_params, 'dropout', 'iTransformer pretraining')
-    
-    # Effective batch size scales with world size
-    effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
-    effective_batch_size = max(1, effective_batch_size)
+    batch_size = tuned_batch_size
     
     # Create data
-    synth_cache = os.path.join(checkpoint_dir, 'synth_cache')
+    synth_cache = get_synth_cache_dir(checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
     synthetic_loader = get_synthetic_dataloader(
-        batch_size=effective_batch_size,
+        batch_size=min(32, max(2, tuned_batch_size)),
         lookback_length=LOOKBACK_LENGTH,
         forecast_length=FORECAST_LENGTH,
         num_variables=N_VARIATES,
         num_samples=n_samples,
         num_workers=0 if smoke_test else 4,
         lookback_overlap=LOOKBACK_OVERLAP,
-        cache_dir=synth_cache if not smoke_test else None,
+        cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
     )
     
@@ -1394,6 +1584,16 @@ def pretrain_itransformer(
     n_val = min(len(dataset) // 10, 5000)
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
+    if not _ddp_enabled:
+        batch_size = select_itrans_batch_size(
+            phase_name='iTransformer pretrain',
+            dataset=train_subset,
+            device=device,
+            dropout=dropout,
+            max_candidate=max(2, tuned_batch_size),
+        )
+    effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
+    effective_batch_size = max(1, effective_batch_size)
     
     # Use DDP-aware data loaders
     train_loader, train_sampler = create_dataloader_ddp(
@@ -1484,11 +1684,8 @@ def pretrain_diffusion(
     device = get_device()
     
     lr = require_tuned_param(best_params, 'learning_rate', 'Diffusion pretraining')
-    batch_size = require_tuned_param(best_params, 'batch_size', 'Diffusion pretraining')
-    
-    # Effective batch size scales with world size
-    effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
-    effective_batch_size = max(1, effective_batch_size)
+    tuned_batch_size = require_tuned_param(best_params, 'batch_size', 'Diffusion pretraining')
+    batch_size = tuned_batch_size
     
     # Load iTransformer as guidance (not wrapped in DDP - used in eval mode only)
     itrans_model = create_itransformer().to(device)
@@ -1502,16 +1699,16 @@ def pretrain_diffusion(
     )
     
     # Create data
-    synth_cache = os.path.join(checkpoint_dir, 'synth_cache')
+    synth_cache = get_synth_cache_dir(checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
     synthetic_loader = get_synthetic_dataloader(
-        batch_size=effective_batch_size,
+        batch_size=min(16, max(2, tuned_batch_size)),
         lookback_length=LOOKBACK_LENGTH,
         forecast_length=FORECAST_LENGTH,
         num_variables=N_VARIATES,
         num_samples=n_samples,
         num_workers=0 if smoke_test else 4,
         lookback_overlap=LOOKBACK_OVERLAP,
-        cache_dir=synth_cache if not smoke_test else None,
+        cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
     )
     
@@ -1519,6 +1716,16 @@ def pretrain_diffusion(
     n_val = min(len(dataset) // 10, 5000)
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
+    if not _ddp_enabled:
+        batch_size = select_diffusion_batch_size(
+            phase_name='Diffusion pretrain',
+            dataset=train_subset,
+            device=device,
+            itrans_guidance=itrans_guidance,
+            max_candidate=max(2, tuned_batch_size),
+        )
+    effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
+    effective_batch_size = max(1, effective_batch_size)
     
     # Use DDP-aware data loaders
     train_loader, train_sampler = create_dataloader_ddp(
@@ -2763,7 +2970,7 @@ def main():
     global USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT
     global PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE, PRETRAIN_EPOCHS, FINETUNE_EPOCHS
     global SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
-    global UNET_CHANNELS, ATTENTION_LEVELS
+    global UNET_CHANNELS, ATTENTION_LEVELS, SYNTH_CACHE_DIR
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -2784,6 +2991,8 @@ def main():
                         help='Override checkpoint directory')
     parser.add_argument('--results-dir', type=str, default=None,
                         help='Override results directory')
+    parser.add_argument('--synth-cache-dir', type=str, default=None,
+                        help='Shared synthetic pool cache directory for reuse across runs')
     parser.add_argument('--parallel-worker', type=int, default=None,
                         help='Parallel worker ID for multi-GPU Optuna (0-N)')
     parser.add_argument('--fresh', action='store_true',
@@ -2821,6 +3030,8 @@ def main():
         MANIFEST_PATH = os.path.join(CHECKPOINT_DIR, 'training_manifest.json')
     if args.results_dir:
         RESULTS_DIR = args.results_dir
+    if args.synth_cache_dir:
+        SYNTH_CACHE_DIR = args.synth_cache_dir
     
     # Set N_VARIATES from CLI (affects all model/data creation)
     if args.n_variates is not None:

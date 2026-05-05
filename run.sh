@@ -96,6 +96,8 @@ echo "=========================================="
 
 CKPT_ROOT="$RUN_CKPT_DIR"
 RES_ROOT="$RUN_DATA_DIR"
+SYNTH_CACHE_ROOT="$SLURM_SUBMIT_DIR/results/ckpts/synth_cache"
+mkdir -p "$SYNTH_CACHE_ROOT"
 export WANDB_DIR="$RUN_LOG_DIR/wandb"
 mkdir -p "$WANDB_DIR"
 
@@ -300,6 +302,7 @@ BASE_ARGS="--seed $SEED $SMOKE_TEST $EXTRA_PY_ARGS"
 BASE_ARGS="$BASE_ARGS $AMP_FLAG --image-height $IMAGE_HEIGHT"
 BASE_ARGS="$BASE_ARGS --itransformer-trials $ITRANSFORMER_TRIALS"
 BASE_ARGS="$BASE_ARGS --unet-channels $UNET_CHANNELS --attention-levels $ATTENTION_LEVELS"
+BASE_ARGS="$BASE_ARGS --synth-cache-dir $SYNTH_CACHE_ROOT"
 
 LOOKBACK_LENGTH=1024
 FORECAST_LENGTH=192
