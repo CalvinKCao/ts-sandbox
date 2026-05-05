@@ -2688,7 +2688,8 @@ def find_existing_itrans_checkpoint(n_variates: int) -> Optional[str]:
             for fname in filenames:
                 p = os.path.join(root, subdir, fname)
                 if os.path.exists(p):
-                    return p
+                    if is_itrans_checkpoint_compatible(p, n_variates):
+                        return p
 
     # 3. Broad project-tree search (limited depth to avoid being slow)
     project_root_local = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -2701,12 +2702,27 @@ def find_existing_itrans_checkpoint(n_variates: int) -> Optional[str]:
                 # lightweight sanity: the file must be a valid torch checkpoint
                 try:
                     meta = torch.load(candidate, map_location='cpu', weights_only=False)
-                    if 'model_state_dict' in meta:
+                    if 'model_state_dict' in meta and is_itrans_checkpoint_compatible(candidate, n_variates):
                         return candidate
                 except Exception:
                     pass
 
     return None
+
+
+def is_itrans_checkpoint_compatible(path: str, n_variates: int) -> bool:
+    """Return True if checkpoint can be loaded into current iTransformer config."""
+    try:
+        ckpt = torch.load(path, map_location='cpu', weights_only=False)
+        state = ckpt.get('model_state_dict')
+        if state is None:
+            return False
+        model = create_itransformer(num_vars=n_variates).cpu()
+        model.load_state_dict(state, strict=True)
+        return True
+    except Exception as e:
+        logger.warning(f"Skipping incompatible iTransformer checkpoint {path}: {e}")
+        return False
 
 
 def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42):
@@ -2749,6 +2765,11 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
 
     logger.info(f"Pretraining dim={n_variates}")
 
+    # Guard against stale checkpoints copied from a mismatched architecture
+    if os.path.exists(itrans_ckpt) and not is_itrans_checkpoint_compatible(itrans_ckpt, n_variates):
+        logger.info(f"  Removing incompatible iTransformer ckpt: {itrans_ckpt}")
+        os.remove(itrans_ckpt)
+
     # Try to reuse an existing V=n_variates iTransformer from previous runs
     # (searches slurm storage roots and the project tree — see find_existing_itrans_checkpoint)
     if not os.path.exists(itrans_ckpt) and not smoke_test:
@@ -2785,6 +2806,11 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
             os.rename(saved, itrans_ckpt)
     else:
         logger.info(f"  iTransformer ckpt exists: {itrans_ckpt}")
+
+    if not is_itrans_checkpoint_compatible(itrans_ckpt, n_variates):
+        raise RuntimeError(
+            f"iTransformer checkpoint remains incompatible after pretrain/reuse: {itrans_ckpt}"
+        )
 
     # Phase 1B: Diffusion HP tuning — cached to disk so reruns skip it
     if os.path.exists(diff_hp_path):
