@@ -55,7 +55,7 @@ class DiffusionTSFConfig:
     num_variables: int = 1  # how many variables (1 = uni, >1 = multi)
     # process each variate independently thru a shared unet instead of stacking as channels.
     # the unet sees (B*V, 1, H, W) per step; cross-variate info comes from bottleneck cross-attn.
-    # ignored for V=1 (no-op). requires use_hybrid_condition=True to actually get cross-var attn.
+    # ignored for V=1 (no-op). cross-attn tokens are always produced when V>1.
     variate_factorized: bool = True
     
     # 2d mapping
@@ -146,18 +146,12 @@ class DiffusionTSFConfig:
     use_value_channel: bool = False  # last past values
     seasonal_period: int = 96  
     
-    # how to feed past context to unet
-    # "visual_concat": stick the past image directly to input
-    # "vector_embedding": use conditioning encoder (the old way)
-    conditioning_mode: str = "visual_concat"  
-    
     # Stage 1 Guidance (e.g. iTransformer)
     # adds a "ghost image" to help the diffusion model
     use_guidance_channel: bool = False  
     
-    # Hybrid 1D conditioning
-    # also use raw 1D values via cross-attention
-    use_hybrid_condition: bool = True  
+    # SpatialTransformerBlock (self+cross attn) always used at attention_levels.
+    # use_hybrid_condition removed — attention_levels is the single knob.
     context_embedding_dim: int = 128  
     context_input_channels: int = 2  
     context_encoder_layers: int = 2  

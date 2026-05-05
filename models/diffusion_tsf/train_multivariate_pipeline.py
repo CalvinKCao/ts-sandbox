@@ -823,11 +823,10 @@ def create_diffusion_model(
     n_variates: int = None,
     lookback: int = LOOKBACK_LENGTH,
     horizon: int = FORECAST_LENGTH,
-    use_guidance: bool = True,
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
 ) -> DiffusionTSF:
-    """Create DiffusionTSF model with optional guidance channel."""
+    """Create DiffusionTSF model with iTransformer guidance channel enabled."""
     if n_variates is None:
         n_variates = N_VARIATES
 
@@ -839,13 +838,12 @@ def create_diffusion_model(
         past_loss_weight=past_loss_weight,
         image_height=IMAGE_HEIGHT,
         use_coordinate_channel=True,
-        use_guidance_channel=use_guidance,
+        use_guidance_channel=True,
         num_diffusion_steps=1000,
         model_type="unet",
         unet_channels=[64, 128, 256],
         attention_levels=[2],
         num_res_blocks=2,
-        use_hybrid_condition=True,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         use_amp=USE_AMP,
     )
@@ -1241,7 +1239,7 @@ def diffusion_hp_objective(
     batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else DIFFUSION_BATCH_SIZES)
     
     # Create model with guidance
-    model = create_diffusion_model(use_guidance=True).to(device)
+    model = create_diffusion_model().to(device)
     model.set_guidance_model(itrans_guidance)
     
     # Rebuild loader with new batch size
@@ -1548,7 +1546,7 @@ def pretrain_diffusion(
     )
     
     # Create model with guidance and wrap with DDP
-    model = create_diffusion_model(use_guidance=True)
+    model = create_diffusion_model()
     model.set_guidance_model(itrans_guidance)
     model = wrap_model_ddp(model)
     
@@ -1673,7 +1671,7 @@ def finetune_hp_objective(
     itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
     
     # Load pretrained diffusion
-    model = create_diffusion_model(use_guidance=True).to(device)
+    model = create_diffusion_model().to(device)
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
@@ -1780,7 +1778,7 @@ def finetune_on_dataset(
     itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
     
     # Load pretrained diffusion and wrap with DDP
-    model = create_diffusion_model(use_guidance=True)
+    model = create_diffusion_model()
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
@@ -2435,7 +2433,7 @@ def run_pipeline(
                 itrans_model.load_state_dict(ckpt['model_state_dict'])
                 itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
                 
-                model = create_diffusion_model(use_guidance=True).to(device)
+                model = create_diffusion_model().to(device)
                 model.set_guidance_model(itrans_guidance)
                 ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
                 model.load_state_dict(ckpt['model_state_dict'])
@@ -2808,7 +2806,7 @@ def _finetune_and_eval_one_subset(
             seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH,
         )
 
-        model = create_diffusion_model(use_guidance=True).to(device)
+        model = create_diffusion_model().to(device)
         model.set_guidance_model(itrans_guidance)
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt['model_state_dict'])
