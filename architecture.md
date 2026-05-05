@@ -215,27 +215,15 @@ Why so much bookkeeping:
 - In diffusion models, a wrong channel count usually does not fail immediately in a readable way; it often appears later as shape mismatch.
 - Reading this section first makes debugging much easier.
 
-### 6.2 Which context encoder gets created? (`use_hybrid_condition`)
+### 6.2 Which context encoder gets created?
 
-`DiffusionTSF` can optionally build a 1D context path that feeds `encoder_hidden_states` into U-Net cross-attention.
+`DiffusionTSF` now uses a single context path for the U-Net: `VariateCrossEncoder`.
 
-The constructor logic is:
-- If `use_hybrid_condition=False`:
-  - `context_encoder = None`.
-  - U-Net runs without cross-attention context tokens.
-- If `use_hybrid_condition=True` and `variate_factorized=True`:
-  - Build `VariateCrossEncoder`.
-  - Input expectation: `(B, V, T)` normalized series.
-  - Output tokens: `(B, V, context_dim)`, i.e. one token per variate.
-  - Important correction: this branch is chosen even when `V=1`; `V>1` is not required by constructor logic.
-- If `use_hybrid_condition=True` and `variate_factorized=False`:
-  - Build `TimeSeriesContextEncoder`.
-  - Input built by `_prepare_1d_context`: stack `[value, normalized_time_index]` per step.
-  - Output tokens: `(B, L_past, context_dim)`, i.e. one token per time step.
-
-What the two encoders represent:
-- `TimeSeriesContextEncoder` preserves full temporal granularity along the past axis; attention can look up step-level context.
-- `VariateCrossEncoder` compresses each variate into summary stats (mean/trend/std over a trailing window), then runs cross-variate transformer attention so each variate token carries interactions with other variates.
+Constructor behavior in U-Net mode:
+- Build `VariateCrossEncoder`.
+- Input expectation: `(B, V, T)` normalized series (typically guidance forecast when available, otherwise normalized past).
+- Output tokens: `(B, V, context_dim)`, i.e. one token per variate.
+- This applies even when `V=1` (the encoder still runs; cross-variate attention simply degenerates to one token).
 
 Why this exists:
 - 2D occupancy conditioning is strong at local geometric structure.
@@ -243,9 +231,8 @@ Why this exists:
 - In factorized mode this is especially useful: each variate map is denoised with shared U-Net weights, while cross-variate coupling is reintroduced through those variate tokens at attention blocks/bottleneck.
 
 Repo-root shell script default behavior:
-- The root Slurm wrappers do not pass a dedicated CLI flag for hybrid conditioning.
-- They call `models.diffusion_tsf.train_multivariate_pipeline`, whose `create_diffusion_model(...)` sets `use_hybrid_condition=True` in `DiffusionTSFConfig`.
-- So for those scripts, hybrid conditioning is effectively on by default unless code is changed.
+- The root Slurm wrappers call `models.diffusion_tsf.train_multivariate_pipeline`.
+- In this code path, U-Net runs with factorized diffusion and `VariateCrossEncoder` context by design.
 
 ### 6.3 `_forward_factorized`: full tensor trail and why each object exists
 
@@ -355,7 +342,7 @@ Important defaults:
 - `num_groups=8`: GroupNorm groups.
 - `kernel_size=(3,3)`: local convolution support over (value-axis, time-axis).
 - `conditioning_mode="visual_concat"` in default pipeline.
-- `use_hybrid_condition`: allows spatial transformer + cross-attention route.
+- Cross-attention route is provided by `VariateCrossEncoder` in the factorized U-Net path.
 
 Why this layout:
 - It is a standard, strong tradeoff for medium-sized diffusion tasks.
@@ -515,90 +502,63 @@ Why:
 
 The U-Net cross-attention in §7.6 needs something to attend *to* — a sequence of tokens with meaningful content. That sequence comes from a **context encoder** that runs before the U-Net on the original 1D time series. This section explains what each encoder does step by step.
 
-There are two encoders; exactly one is used per run:
+The U-Net path uses `iTransformerTokenAdapter` (default, guided path) or `VariateCrossEncoder` (legacy/non-guided fallback) for cross-attention context tokens.
 
-| Encoder | When it is used |
-|---|---|
-| `VariateCrossEncoder` | `variate_factorized=True` (the default multivariate path) |
-| `TimeSeriesContextEncoder` | `variate_factorized=False` (non-factorized, single-variable path) |
-
-Both are only active when `use_hybrid_condition=True`. If that flag is False, `context_encoder` is set to None and no tokens are produced at all.
-
-### 8.1 `VariateCrossEncoder` — the default for multivariate runs
+### 8.1 `iTransformerTokenAdapter` — default for guided multivariate runs
 
 **What problem it is solving.**
-In the factorized setup there are V separate U-Net forward passes (one per variate). Each pass only sees that variate's occupancy image. The encoder's job is to give every one of those passes a compact read-only summary of all the other variates, so the denoising of variate `k` can be informed by what variate `j` is doing.
+In the factorized setup there are V separate U-Net forward passes (one per variate). Each pass only sees that variate's occupancy image. The encoder's job is to give every one of those passes a rich, read-only summary of all the other variates. The previous approach (§8.1 legacy) computed crude 3-stat summaries over the iTransformer's *horizon predictions*, then ran a second cross-variate transformer over those. This was doubly redundant: the iTransformer already does deep cross-variate attention internally over the *lookback*, and the forecast ghost image (§9.2 Place 1) already feeds the horizon predictions into the U-Net as pixels.
 
-**Input.** In the current always-guided path, the input is the iTransformer normalized forecast, shape `(B, V, T)` (with `T` equal to the guided forecast width including overlap). The encoder summarizes that guidance sequence per variate before cross-variate attention. (Fallback to raw past exists only for non-guided/legacy paths.)
+The new approach taps the iTransformer's internal encoder output directly, before its linear projector collapses to the horizon dimension.
 
-**Step 1 — take only the last 32 timesteps (`summary_window=32`).**
+**Input.** Raw (un-normalized) past `(B, V, L)`. This is passed straight to `iTransformerGuidance.get_encoder_tokens()`.
+
+**Step 1 — iTransformer internal normalization + embedding.**
 ```python
-tail = x[..., -min(T, 32):]   # (B, V, 32)
+x_enc = past.permute(0, 2, 1)                     # (B, L, V) — iTransformer axis order
+# iTransformer does per-time-step instance norm internally if use_norm=True
+enc_out = model.enc_embedding(x_enc, None)         # (B, V, d_model)
+enc_out, _ = model.encoder(enc_out, attn_mask=None)  # (B, V, d_model)
 ```
-The full lookback can be hundreds of steps; we only need a recent snapshot to characterise the current regime of each variate.
+This is the same computation iTransformer runs in `get_forecast()` — but we stop before the `projector` linear. Each variate now has a `d_model=512`-dimensional token that reflects its full lookback, and the multi-head self-attention across V variates has already mixed cross-variate information.
 
-**Step 2 — compute three numbers per variate.**
+**Step 2 — project to `context_dim`.**
 ```python
-mean  = tail.mean(dim=-1)                            # (B, V)
-std   = tail.std(dim=-1).clamp(min=1e-6)             # (B, V)
-trend = (tail[..., -1] - tail[..., 0]) / (w - 1)    # (B, V)  per-step slope
+x = nn.Linear(d_model, context_dim)(enc_out)       # (B, V, 256)
 ```
-Each variate is now described by just three scalars: its recent level, its recent volatility, and whether it is rising or falling.
+Reduces from `d_model=512` to `context_dim=256`. Chosen as a middle ground — retains more information than the old 128-d path while staying near the U-Net feature dim range (64–512).
 
-**Step 3 — project those three numbers into a `context_dim`-dimensional vector.**
+**Step 3 — add per-variate identity embedding.**
 ```python
-stats = torch.stack([mean, trend, std], dim=-1)   # (B, V, 3)
-x_emb = nn.Linear(3, context_dim)(stats)          # (B, V, 128)
+ids = torch.arange(V, device=x.device)
+x = x + variate_embed(ids)                         # (B, V, 256)
 ```
-Now we have one 128-d embedding per variate, but the variates haven't talked to each other yet.
+A learned `nn.Embedding(max_variates=512, context_dim)`. Since the factorized U-Net processes one variate per forward pass, each pass's context tokens would otherwise be permutation-equivalent from the model's perspective. The identity embedding lets the diffusion model learn variate-specific refinements (e.g., "variate 3 tends to have sharper peaks").
 
-**Step 4 — run a small transformer *across* the V variate tokens.**
-```python
-x_emb = transformer_encoder(x_emb)   # still (B, V, 128)
-```
-This is a standard transformer with self-attention across the V token sequence. Token `k` attends to all other tokens and updates itself to reflect cross-variate dependencies — e.g. "variate 2 is highly correlated with me and is rising, so I should expect to rise too." Two layers, four heads by default.
-
-**Step 5 — LayerNorm and done.**
-Output: `(B, V, 128)` — one 128-d token per variate, cross-variate-aware.
+**Step 4 — Dropout + LayerNorm and done.**
+Output: `(B, V, 256)` — one 256-d token per variate, carrying rich iTransformer lookback structure plus identity.
 
 **What the U-Net does with this.**
 As shown in §7.6, before calling the U-Net the code replicates this tensor so every variate slot in the `B*V` batch gets the full V-token sequence:
 ```python
 ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
-# (B*V, V, 128) — every variate's U-Net pass can cross-attend to all V tokens
+# (B*V, V, 256) — every variate's U-Net pass can cross-attend to all V tokens
 ```
 The U-Net cross-attention then uses the `H*W` spatial feature tokens as queries and these V tokens as keys/values at every `SpatialTransformerBlock` that is switched on.
 
-### 8.2 `TimeSeriesContextEncoder` — used in non-factorized mode only
+**When `get_encoder_tokens` is called.**
+Both training and inference call `_get_cross_variate_context(..., past_raw=past)` once, before any U-Net calls. The resulting `ctx_flat` is captured by closure and reused across all DDIM steps — zero redundant computation.
 
-This encoder is for the case where variates are not processed separately: the U-Net sees all variates stacked as channels. There is no per-variate token structure; instead the context is a sequence of **time-step tokens** derived from the past values of the first (or only) variate.
+### 8.1-legacy `VariateCrossEncoder` — non-guided / ablation fallback
 
-**Input preparation (`_prepare_1d_context`).**
-Takes the normalized past `(B, T)` and pairs each time step's value with a normalised position index:
-```python
-time_idx = torch.linspace(0.0, 1.0, T)        # position 0 = oldest, 1 = most recent
-context_input = torch.stack([past_1d, time_idx], dim=-1)   # (B, T, 2)
-```
-This gives the encoder both the *what* (value) and the *when* (position) for every step.
+Used when `itrans_token_encoder=False` or `use_guidance_channel=False`. Takes `(B, V, T)` and computes per-variate (mean, trend, std) over a trailing window of 32 steps, projects to `context_dim`, then runs a small 2-layer transformer across V tokens. Kept for ablation and non-guided univariate runs.
 
-**Pipeline.**
-1. `Linear(2 → 128)` — project each time step’s `[value, position]` pair from 2-d into 128-d. This is the standard transformer input projection: a transformer operates on a sequence of fixed-size vectors (the model dimension), so every element — no matter how small the raw input — must be lifted to that size first. The `Linear(2, 128)` weight matrix has shape `(128, 2)` and learns how to spread the two input numbers across all 128 dimensions in a way that makes downstream attention useful. Think of NLP word embeddings: one integer (a token ID) gets mapped to a 768-d vector by the same logic.
-2. Add sinusoidal positional encoding (separate from the `position` scalar already in the input; standard transformer practice to bake in absolute order).
-3. Two transformer encoder layers (self-attention across time steps + FFN, pre-norm).
-4. `LayerNorm`.
-
-Output: `(B, T, 128)` — one 128-d token per past time step.
-
-The U-Net cross-attention then has `T` keys/values to attend to instead of V. Each spatial feature token in the U-Net can look up specific time steps from the past, not just per-variate summaries.
-
-### 8.3 Summary: what the tokens actually represent
+### 8.2 Summary: what the tokens actually represent
 
 | Encoder | Token sequence length | What one token represents |
 |---|---|---|
-| `VariateCrossEncoder` | V (number of variates) | summary of one variate's recent level/trend/volatility, after cross-variate attention |
-| `TimeSeriesContextEncoder` | T (past sequence length) | embedding of one past time step (value + position) |
-
-The first is cheap and cross-variate-aware but very lossy — three numbers summarise a whole variate. The second is richer in temporal detail but doesn't explicitly model variate-to-variate relationships.
+| `iTransformerTokenAdapter` (default) | V | iTransformer lookback embedding projected to 256-d, plus variate identity |
+| `VariateCrossEncoder` (legacy) | V | 3-stat summary of recent level/trend/volatility, after cross-variate attention |
 
 
 ---
@@ -628,39 +588,39 @@ if guidance_2d is not None:
 
 This adds one extra input channel, so `backbone_in_channels` includes the guidance channel in this path. The U-Net literally sees the iTransformer's prediction as a pixel image sitting next to the noisy occupancy map it is trying to denoise.
 
-**Place 2 — input to `VariateCrossEncoder` (cross-attention tokens)**
+**Place 2 — input to `iTransformerTokenAdapter` (cross-attention tokens)**
 
-`_get_cross_variate_context` prefers the iTransformer's normalized forecast over the raw past as input to `VariateCrossEncoder`:
+`_get_cross_variate_context` detects the encoder type and routes accordingly:
 
 ```python
-if guidance_forecast_norm is not None:
-    src = guidance_forecast_norm   # use iTransformer output if available
-else:
-    src = past_norm                # fall back to raw past
+if isinstance(self.context_encoder, iTransformerTokenAdapter):
+    enc_tokens = self.guidance_model.get_encoder_tokens(past_raw)  # (B, V, d_model)
+    return self.context_encoder(enc_tokens)                         # (B, V, context_dim)
 ```
 
-So the V summary tokens that feed into cross-attention are derived from the iTransformer's forecast rather than from the raw lookback. This means the cross-attention tokens encode "what a strong baseline thinks each variate will do" rather than "what each variate has recently been doing".
+The raw past is fed through the iTransformer's frozen encoder (normalization + embedding + multi-head attention), and the resulting `enc_out` — before the horizon projector — is passed to the adapter. The tokens encode "what the lookback looks like per variate, after deep cross-variate attention" rather than "what the forecast will be". The forecast is already present pixel-wise as the ghost image (Place 1); these tokens are complementary, carrying lookback structure that pixels cannot convey.
 
 ### 9.3 The iTransformer itself
 
 The iTransformer is wrapped in `iTransformerGuidance`, which:
 - Keeps the weights **frozen** (`.requires_grad_(False)` at construction; `torch.no_grad()` at every call). It is never co-trained with the diffusion model.
-- Exposes a single method `get_forecast(past, forecast_length) → (B, V, forecast_length)` in the axis order the rest of the pipeline expects.
+- Exposes `get_forecast(past, forecast_length) → (B, V, forecast_length)` for the ghost-image path.
+- Exposes `get_encoder_tokens(past) → (B, V, d_model)` for the cross-attention token path. Runs the same internal normalization + `enc_embedding` + `encoder` as `get_forecast`, but stops before `projector`.
 
-Internally, the iTransformer uses an **inverted embedding**: instead of treating time steps as tokens (as a standard Transformer would), it treats **variates as tokens**. Each variate's full lookback is embedded as one token; the transformer then runs attention across those V tokens to produce a forecast per variate. This is why it captures cross-variate structure well and makes its output a reasonable starting point for the diffusion refinement.
+Internally, the iTransformer uses an **inverted embedding**: instead of treating time steps as tokens (as a standard Transformer would), it treats **variates as tokens**. Each variate's full lookback is embedded as one token; the transformer then runs multi-head attention across those V tokens. This gives `enc_out` its cross-variate-aware structure before any horizon-specific projection is applied.
 
 ### 9.4 At inference
 
-The same two-place injection happens at inference. There is also an optional **guidance cache** (`_guidance_cache`): if the dataset window indices are known ahead of time, iTransformer forecasts can be precomputed and stored to avoid re-running the iTransformer on every DDIM step. When the cache is populated, `_forward_factorized` looks up the precomputed tensor instead of calling `guidance_model.get_forecast`.
+The same two-place injection happens at inference. Both the forecast (for the ghost image) and `get_encoder_tokens` (for context tokens) are computed **once before the DDIM loop** — `_get_cross_variate_context` is called a single time and `ctx_flat` is captured by closure and reused across all 50 denoising steps.
 
 ### 9.5 Summary
 
 ```
 Current pipeline behavior:
-  1. iTransformer runs on the raw past → coarse forecast (B, V, F)
-  2. Forecast → 2D occupancy image → extra channel on the U-Net input canvas
-  3. Forecast (normalized) → VariateCrossEncoder → cross-attention tokens
-     (instead of using the raw past for the tokens)
+  1. iTransformer runs on the raw past → enc_out (B, V, d_model) + coarse forecast (B, V, F)
+  2. Forecast → 2D occupancy image → extra channel on the U-Net input canvas  [Place 1]
+  3. enc_out → iTransformerTokenAdapter (project + variate embed) → cross-attention tokens  [Place 2]
+     (lookback structure in tokens; forecast structure in pixels — complementary signals)
 ```
 
 
@@ -742,9 +702,7 @@ These are default values from `DiffusionTSFConfig` referenced in the original wa
 ### 12.7 Conditioning and context
 - `conditioning_mode="visual_concat"`
 - `use_guidance_channel=True` in the current training pipeline path (hard-enabled there)
-- `use_hybrid_condition=True`
 - `context_embedding_dim=128`
-- `context_input_channels=2`
 - `context_encoder_layers=2`
 - `use_coordinate_channel=True` and related aux-channel toggles.
 

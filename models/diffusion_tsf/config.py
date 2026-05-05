@@ -54,7 +54,7 @@ class DiffusionTSFConfig:
     # multivariate support
     num_variables: int = 1  # how many variables (1 = uni, >1 = multi)
     # process each variate independently thru a shared unet instead of stacking as channels.
-    # the unet sees (B*V, 1, H, W) per step; cross-variate info comes from bottleneck cross-attn.
+    # this is now the only supported U-Net mode.
     # ignored for V=1 (no-op). cross-attn tokens are always produced when V>1.
     variate_factorized: bool = True
     
@@ -152,9 +152,13 @@ class DiffusionTSFConfig:
     
     # SpatialTransformerBlock (self+cross attn) always used at attention_levels.
     # use_hybrid_condition removed — attention_levels is the single knob.
-    context_embedding_dim: int = 128  
-    context_input_channels: int = 2  
-    context_encoder_layers: int = 2  
+    context_embedding_dim: int = 256
+    context_encoder_layers: int = 2   # only used by VariateCrossEncoder (legacy path)
+
+    # iTransformerTokenAdapter: use iTransformer enc_out instead of summary stats.
+    # requires use_guidance_channel=True and an iTransformerGuidance model.
+    itrans_token_encoder: bool = True
+    itrans_d_model: int = 512         # must match iTransformer d_model at construction
     
     # train
     learning_rate: float = 2e-4
@@ -169,6 +173,8 @@ class DiffusionTSFConfig:
         assert self.noise_schedule in ["linear", "cosine", "sigmoid", "quadratic"]
         assert 0 <= self.cutout_prob <= 1
         assert self.representation_mode in ["pdf", "cdf"]
+        if not self.variate_factorized:
+            raise ValueError("variate_factorized=False is no longer supported; use the factorized path.")
         
     @property
     def bin_width(self) -> float:
@@ -196,26 +202,20 @@ class DiffusionTSFConfig:
     @property
     def backbone_in_channels(self) -> int:
         """total input channels for the backbone."""
-        if self.variate_factorized:
-            # per-variate: 1 data ch + aux + optional 1 guidance ch
-            return 1 + self.num_aux_channels + (1 if self.use_guidance_channel else 0)
-        base_channels = self.num_variables + self.num_aux_channels
-        if self.use_guidance_channel:
-            base_channels += self.num_variables
-        return base_channels
+        # per-variate: 1 data ch + aux + optional 1 guidance ch
+        return 1 + self.num_aux_channels + (1 if self.use_guidance_channel else 0)
 
     @property
     def visual_cond_channels(self) -> int:
         """channels for visual concat mode."""
-        vars_per = 1 if self.variate_factorized else self.num_variables
-        return vars_per + (1 if self.use_value_channel else 0)
+        return 1 + (1 if self.use_value_channel else 0)
 
     @property
     def guidance_channels(self) -> int:
         """guidance channels."""
         if not self.use_guidance_channel:
             return 0
-        return 1 if self.variate_factorized else self.num_variables
+        return 1
     
     @property
     def ci_dit_in_channels(self) -> int:
