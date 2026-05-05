@@ -7,10 +7,10 @@
 # (same train_multivariate_pipeline as the old run_unet_fullvar.sh: bf16, H=96, no splitting).
 #
 # USAGE (from login node, repo root):
-#   ./slurm_unet_fullvar.sh --smoke-test                     # L40S smoke
-#   ./slurm_unet_fullvar.sh                                  # L40S full run
-#   ./slurm_unet_fullvar.sh --dataset electricity
-#   ./slurm_unet_fullvar.sh --resume --dataset traffic
+#   ./run.sh --smoke-test                     # L40S smoke
+#   ./run.sh                                  # L40S full run
+#   ./run.sh --dataset electricity
+#   ./run.sh --resume --dataset traffic
 # =============================================================================
 
 set -e
@@ -69,13 +69,17 @@ fi
 set -euo pipefail
 
 cd "$SLURM_SUBMIT_DIR"
-mkdir -p results/logs results/ckpts results/datasets
 case "$SLURM_JOB_NAME" in
     *smoke*) _slug=unet-fullvar-smoke ;;
     *)       _slug=unet-fullvar ;;
 esac
 ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-${_slug}"
-ALLIANCE_JOB_LOG="$SLURM_SUBMIT_DIR/results/logs/${ALLIANCE_RUN_STEM}.log"
+RUN_RESULTS_ROOT="$SLURM_SUBMIT_DIR/results/$ALLIANCE_RUN_STEM"
+RUN_LOG_DIR="$RUN_RESULTS_ROOT/logs"
+RUN_CKPT_DIR="$RUN_RESULTS_ROOT/ckpts"
+RUN_DATA_DIR="$RUN_RESULTS_ROOT/datasets"
+mkdir -p "$RUN_LOG_DIR" "$RUN_CKPT_DIR" "$RUN_DATA_DIR"
+ALLIANCE_JOB_LOG="$RUN_LOG_DIR/${ALLIANCE_RUN_STEM}.log"
 touch "$ALLIANCE_JOB_LOG"
 exec >>"$ALLIANCE_JOB_LOG" 2>&1
 
@@ -87,10 +91,9 @@ echo "Started: $(date)"
 echo "Log: $ALLIANCE_JOB_LOG"
 echo "=========================================="
 
-CKPT_ROOT="$SLURM_SUBMIT_DIR/results/ckpts/$ALLIANCE_RUN_STEM"
-RES_ROOT="$SLURM_SUBMIT_DIR/results/datasets/$ALLIANCE_RUN_STEM"
-mkdir -p "$CKPT_ROOT" "$RES_ROOT"
-export WANDB_DIR="$SLURM_SUBMIT_DIR/results/logs/${ALLIANCE_RUN_STEM}_wandb"
+CKPT_ROOT="$RUN_CKPT_DIR"
+RES_ROOT="$RUN_DATA_DIR"
+export WANDB_DIR="$RUN_LOG_DIR/wandb"
 mkdir -p "$WANDB_DIR"
 
 # ---- Environment ----
@@ -149,8 +152,8 @@ else
     echo "Reusing existing venv: $VENV_PATH"
 fi
 
-if [ ! -e "$SLURM_SUBMIT_DIR/results/datasets/repo" ]; then
-    ln -s "$PROJECT_ROOT/datasets" "$SLURM_SUBMIT_DIR/results/datasets/repo"
+if [ ! -e "$RUN_DATA_DIR/repo" ]; then
+    ln -s "$PROJECT_ROOT/datasets" "$RUN_DATA_DIR/repo"
 fi
 
 if [ -z "${WANDB_API_KEY:-}" ]; then
@@ -231,10 +234,9 @@ set -- "${PIPELINE_ARGS[@]}"
 
 AMP_FLAG="--amp"
 IMAGE_HEIGHT=96
-SUBSET_THRESHOLD=999999
 # Pretrain synthetic count: omit --synthetic-samples to use pipeline auto-sizing from PRETRAIN_EPOCHS.
 # Optional: SYNTHETIC_SAMPLES=50000 EXTRA_PY_ARGS="$EXTRA_PY_ARGS --synthetic-samples $SYNTHETIC_SAMPLES"
-ITRANSFORMER_TRIALS=12
+ITRANSFORMER_TRIALS=7
 SEED=42
 
 SMOKE_TEST=""
@@ -268,7 +270,6 @@ PYTHON="python -m models.diffusion_tsf.train_multivariate_pipeline"
 BASE_ARGS="--seed $SEED $SMOKE_TEST $EXTRA_PY_ARGS"
 BASE_ARGS="$BASE_ARGS $AMP_FLAG --image-height $IMAGE_HEIGHT"
 BASE_ARGS="$BASE_ARGS --itransformer-trials $ITRANSFORMER_TRIALS"
-BASE_ARGS="$BASE_ARGS --subset-threshold $SUBSET_THRESHOLD"
 
 LOOKBACK_LENGTH=1024
 FORECAST_LENGTH=192
@@ -282,15 +283,14 @@ echo "  Backbone:     U-Net (bf16)"
 echo "  Image height: $IMAGE_HEIGHT"
 echo "  Synth pool:   auto (or set SYNTHETIC_SAMPLES + pass --synthetic-samples)"
 echo "  iTransformer trials: $ITRANSFORMER_TRIALS"
-echo "  Subset threshold: $SUBSET_THRESHOLD (no splitting)"
 echo "  Dataset:      $SINGLE_DATASET"
 echo "  Smoke test:   ${SMOKE_TEST:-no}"
 echo "============================================================"
 echo ""
 
-if [ ! -d "datasets" ] && [ -d "$SLURM_SUBMIT_DIR/results/datasets/repo" ]; then
-    echo "[INFO] Symlinking datasets from results/datasets/repo"
-    ln -sfn "$SLURM_SUBMIT_DIR/results/datasets/repo" datasets
+if [ ! -d "datasets" ] && [ -d "$RUN_DATA_DIR/repo" ]; then
+    echo "[INFO] Symlinking datasets from $RUN_DATA_DIR/repo"
+    ln -sfn "$RUN_DATA_DIR/repo" datasets
 fi
 
 TRAFFIC_DIR="datasets/traffic"
