@@ -194,6 +194,17 @@ def barrier():
         dist.barrier()
 
 
+def require_tuned_param(params: Dict, key: str, stage_name: str):
+    """Fail fast when a required tuned hyperparameter is missing."""
+    if params is None:
+        raise RuntimeError(f"{stage_name} requires tuned params, got None.")
+    if key not in params:
+        raise RuntimeError(
+            f"{stage_name} requires tuned param '{key}', but tuning output is missing it."
+        )
+    return params[key]
+
+
 # ============================================================================
 # Parallel Optuna Workers (Multi-GPU HP Tuning)
 # ============================================================================
@@ -623,25 +634,22 @@ def finish_wandb():
 # ============================================================================
 
 # Training settings (2D representation: IMAGE_HEIGHT × (LOOKBACK + FORECAST))
-LOOKBACK_LENGTH = 1024
-FORECAST_LENGTH = 192
-IMAGE_HEIGHT = 128
+LOOKBACK_LENGTH = 512
+FORECAST_LENGTH = 96
+IMAGE_HEIGHT = 64
 
 # Predict the last K lookback steps alongside the forecast to smooth the boundary
 LOOKBACK_OVERLAP = 8
 PAST_LOSS_WEIGHT = 0.3
 
-# Dimensionality groups: datasets above SUBSET_THRESHOLD get split into
-# non-overlapping SUBSET_DIM-variate subsets. Everything else trains natively.
-N_VARIATES = 7               # default (overridden by --n-variates CLI)
-SUBSET_DIM = 32              # variate width for high-dim dataset subsets
-SUBSET_THRESHOLD = 32        # datasets with >SUBSET_THRESHOLD cols are split
-
-MAX_SUBSETS_PER_DATASET = 15  # enough for traffic(861/32=26) while staying sane
+# Dimensionality for model/data creation (overridden by --n-variates CLI)
+N_VARIATES = 7
 
 # Phase 1: Synthetic pretraining (short runs by default; override with CLI)
 PRETRAIN_EPOCHS = 10
 PRETRAIN_PATIENCE = 5
+PRETRAIN_DIFFUSION_EPOCHS = 3
+PRETRAIN_DIFFUSION_MAX_EPOCHS = 15
 # Legacy name: upper bound for auto-sized pretrain pool; HP tuning uses its own constant.
 SYNTHETIC_SAMPLES_FULL = 100000
 SYNTHETIC_SAMPLES_HP_TUNE = 20000
@@ -658,13 +666,13 @@ HP_TUNE_EPOCHS = 200
 HP_TUNE_PATIENCE = 20
 
 # Optuna settings
-N_ITRANS_HP_TRIALS = 20
-N_DIFFUSION_HP_TRIALS = 8
+N_ITRANS_HP_TRIALS = 7
+N_DIFFUSION_HP_TRIALS = 10
 N_FINETUNE_HP_TRIALS = 8
 
 # Batch size ranges for A6000/A100 (40-48GB) — 128×1216×7 images are 4x larger
-ITRANS_BATCH_SIZES = [64, 128, 256]
-DIFFUSION_BATCH_SIZES = [8, 16, 32]
+ITRANS_BATCH_SIZES = [256]
+DIFFUSION_BATCH_SIZES = [16]
 FINETUNE_BATCH_SIZES = [4, 8, 16]
 
 # Memory optimization flags (overridden by CLI)
@@ -716,15 +724,8 @@ def get_dataset_n_cols(dataset_name: str) -> int:
 
 
 def get_dim_for_dataset(dataset_name: str) -> int:
-    """Return the pretrain dimensionality to use for a dataset.
-
-    Datasets with <= SUBSET_THRESHOLD columns → native dim.
-    Datasets above that → SUBSET_DIM (they'll be split into subsets).
-    """
-    n_cols = get_dataset_n_cols(dataset_name)
-    if n_cols > SUBSET_THRESHOLD:
-        return SUBSET_DIM
-    return n_cols
+    """Return native dataset dimensionality (always full variates)."""
+    return get_dataset_n_cols(dataset_name)
 
 
 def get_all_pretrain_dims() -> Dict[int, List[str]]:
@@ -934,24 +935,18 @@ def load_dataset(
 # Variate Subset Management
 # ============================================================================
 
-def generate_variate_subsets(dataset_name: str, n_variates: int = None, seed: int = 42) -> List[Dict]:
-    """Return one subset covering the full dataset (no splitting).
-
-    A single model is trained per dataset, using all its variates.
-    n_variates is accepted for API compat but ignored — the model is
-    always built with the actual column count (set as N_VARIATES globally
-    before calling this).
-    """
+def generate_dataset_job(dataset_name: str, n_variates: int = None, seed: int = 42) -> Dict:
+    """Return one full-dataset training job (no variate partitioning)."""
     path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
     df = pd.read_csv(path, nrows=1)
     date_col = DATASET_REGISTRY[dataset_name][1]
     all_cols = [c for c in df.columns if c != date_col]
     indices = list(range(len(all_cols)))
-    return [{'subset_id': dataset_name, 'variate_indices': indices, 'variate_names': all_cols}]
+    return {'dataset_id': dataset_name, 'variate_indices': indices, 'variate_names': all_cols}
 
 
-def generate_all_subsets(seed: int = 42) -> Dict[str, List[Dict]]:
-    """Return one full-dataset subset per dataset, filtered to those whose
+def generate_all_dataset_jobs(seed: int = 42) -> Dict[str, Dict]:
+    """Return one full-dataset job per dataset, filtered to those whose
     variate count matches N_VARIATES exactly.
 
     This avoids needing separate pretrained models for different dataset sizes.
@@ -966,7 +961,7 @@ def generate_all_subsets(seed: int = 42) -> Dict[str, List[Dict]]:
         if n_cols != N_VARIATES:
             logger.debug(f"Skipping {name}: {n_cols} variates (need {N_VARIATES})")
             continue
-        result[name] = generate_variate_subsets(name, seed=seed)
+        result[name] = generate_dataset_job(name, seed=seed)
     if not result:
         logger.warning(
             f"No datasets found with exactly {N_VARIATES} variates. "
@@ -994,9 +989,6 @@ class TrainingManifest:
     pretrain_checkpoint: str = ""
     itrans_checkpoint: str = ""
     
-    # Phase 2 status
-    subsets: Dict = field(default_factory=dict)
-    
     def save(self, path: str = MANIFEST_PATH):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w') as f:
@@ -1014,16 +1006,6 @@ class TrainingManifest:
             return m
         return cls(created_at=datetime.now().isoformat())
     
-    def mark_complete(self, subset_id: str, checkpoint_path: str, metrics: Dict):
-        self.subsets[subset_id] = {
-            'status': 'complete',
-            'checkpoint': checkpoint_path,
-            'metrics': metrics,
-            'completed_at': datetime.now().isoformat(),
-        }
-        self.save()
-
-
 # ============================================================================
 # Early Stopping & Checkpointing
 # ============================================================================
@@ -1383,9 +1365,9 @@ def pretrain_itransformer(
     
     device = get_device()
     
-    lr = best_params.get('learning_rate', 1e-4)
-    batch_size = best_params.get('batch_size', 64)
-    dropout = best_params.get('dropout', 0.1)
+    lr = require_tuned_param(best_params, 'learning_rate', 'iTransformer pretraining')
+    batch_size = require_tuned_param(best_params, 'batch_size', 'iTransformer pretraining')
+    dropout = require_tuned_param(best_params, 'dropout', 'iTransformer pretraining')
     
     # Effective batch size scales with world size
     effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
@@ -1499,8 +1481,8 @@ def pretrain_diffusion(
     
     device = get_device()
     
-    lr = best_params.get('learning_rate', 1e-4)
-    batch_size = best_params.get('batch_size', 64)
+    lr = require_tuned_param(best_params, 'learning_rate', 'Diffusion pretraining')
+    batch_size = require_tuned_param(best_params, 'batch_size', 'Diffusion pretraining')
     
     # Effective batch size scales with world size
     effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
@@ -1738,8 +1720,8 @@ def finetune_on_dataset(
     else:
         dataset_name = subset_id
     
-    lr = tuned_params.get('learning_rate', 1e-5)
-    batch_size = tuned_params.get('batch_size', 32)
+    lr = require_tuned_param(tuned_params, 'learning_rate', f"Fine-tuning ({subset_id})")
+    batch_size = require_tuned_param(tuned_params, 'batch_size', f"Fine-tuning ({subset_id})")
     
     # Effective batch size for DDP
     effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
@@ -2291,7 +2273,8 @@ def run_pipeline(
         n_diff_trials = 1
         n_finetune_trials = 1
         pretrain_samples = 4  # Ultra minimal
-        pretrain_epochs = 1
+        itrans_pretrain_epochs = 1
+        diff_pretrain_epochs = 1
         pretrain_patience = 1
         finetune_epochs = 1
         finetune_patience = 1
@@ -2300,7 +2283,8 @@ def run_pipeline(
         n_diff_trials = N_DIFFUSION_HP_TRIALS
         n_finetune_trials = N_FINETUNE_HP_TRIALS
         pretrain_samples = resolve_pretrain_virtual_dataset_size(False)
-        pretrain_epochs = PRETRAIN_EPOCHS
+        itrans_pretrain_epochs = PRETRAIN_EPOCHS
+        diff_pretrain_epochs = min(PRETRAIN_DIFFUSION_EPOCHS, PRETRAIN_DIFFUSION_MAX_EPOCHS)
         pretrain_patience = PRETRAIN_PATIENCE
         finetune_epochs = FINETUNE_EPOCHS
         finetune_patience = FINETUNE_PATIENCE
@@ -2321,7 +2305,7 @@ def run_pipeline(
         itrans_ckpt = pretrain_itransformer(
             manifest.itrans_best_params,
             n_samples=pretrain_samples,
-            epochs=pretrain_epochs,
+            epochs=itrans_pretrain_epochs,
             patience=pretrain_patience,
             checkpoint_dir=CHECKPOINT_DIR,
             smoke_test=smoke_test,
@@ -2348,7 +2332,7 @@ def run_pipeline(
             manifest.diffusion_best_params,
             itrans_ckpt,
             n_samples=pretrain_samples,
-            epochs=pretrain_epochs,
+            epochs=diff_pretrain_epochs,
             patience=pretrain_patience,
             checkpoint_dir=CHECKPOINT_DIR,
             smoke_test=smoke_test,
@@ -2359,75 +2343,48 @@ def run_pipeline(
     else:
         logger.info(f"Using existing Diffusion checkpoint: {diff_ckpt}")
     
-    # =========== PHASE 2: Fine-tuning per Dataset ===========
-    all_subsets = generate_all_subsets(seed=seed)
-    subset_list = []
-    for dataset_name, subsets in all_subsets.items():
-        for subset in subsets:
-            subset_list.append(subset)
-            if subset['subset_id'] not in manifest.subsets:
-                manifest.subsets[subset['subset_id']] = {
-                    'status': 'pending',
-                    'dataset': dataset_name,
-                    'variate_indices': subset['variate_indices'],
-                }
-    manifest.save()
-    
+    # =========== PHASE 2: Fine-tuning per Dataset (full variates only) ===========
+    all_jobs = generate_all_dataset_jobs(seed=seed)
+    job_list = list(all_jobs.values())
     if smoke_test:
-        subset_list = subset_list[:1]  # Just 1 dataset for ultra-fast smoke test
-    
-    for subset_info in subset_list:
-        subset_id = subset_info['subset_id']
-        variate_indices = subset_info['variate_indices']
-        
-        if '-' in subset_id and subset_id.split('-')[-1].isdigit():
-            dataset_name = '-'.join(subset_id.split('-')[:-1])
-        else:
-            dataset_name = subset_id
-        
-        if manifest.subsets.get(subset_id, {}).get('status') == 'complete':
-            logger.info(f"Skipping {subset_id} (already complete)")
-            continue
-        
-        manifest.subsets[subset_id]['status'] = 'in_progress'
-        manifest.save()
-        
+        job_list = job_list[:1]  # Just 1 dataset for ultra-fast smoke test
+
+    for job in job_list:
+        dataset_name = job['dataset_id']
+        variate_indices = job['variate_indices']
+
         try:
-            # HP Tuning for this dataset
-            tuned_params = manifest.subsets[subset_id].get('tuned_params')
-            if not tuned_params:
-                logger.info(f"Running HP search for {subset_id}...")
-                optuna.logging.set_verbosity(optuna.logging.WARNING)
-                
-                def log_finetune_trial(study, trial):
-                    logger.info(f"[{subset_id} HP] Trial {trial.number}/{n_finetune_trials}: "
-                               f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                               f"bs={trial.params['batch_size']}")
-                
-                study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
-                study.optimize(
-                    lambda trial: finetune_hp_objective(
-                        trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test
-                    ),
-                    n_trials=n_finetune_trials,
-                    show_progress_bar=True,
-                    callbacks=[log_finetune_trial],
-                )
-                tuned_params = study.best_params
-                manifest.subsets[subset_id]['tuned_params'] = tuned_params
-                manifest.save()
-                logger.info(f"Best params for {subset_id}: {tuned_params}")
+            logger.info(f"Running HP search for {dataset_name}...")
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+            def log_finetune_trial(study, trial):
+                logger.info(f"[{dataset_name} HP] Trial {trial.number}/{n_finetune_trials}: "
+                            f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+                            f"bs={trial.params['batch_size']}")
+
+            study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
+            study.optimize(
+                lambda trial: finetune_hp_objective(
+                    trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test
+                ),
+                n_trials=n_finetune_trials,
+                show_progress_bar=True,
+                callbacks=[log_finetune_trial],
+            )
+            tuned_params = study.best_params
+            logger.info(f"Best params for {dataset_name}: {tuned_params}")
             
             # Full fine-tuning
             ckpt_path, train_metrics = finetune_on_dataset(
-                subset_info, diff_ckpt, itrans_ckpt, tuned_params,
+                {'subset_id': dataset_name, 'variate_indices': variate_indices},
+                diff_ckpt, itrans_ckpt, tuned_params,
                 epochs=finetune_epochs, patience=finetune_patience,
                 checkpoint_dir=CHECKPOINT_DIR, smoke_test=smoke_test,
             )
             
             # Evaluation
             if True:
-                logger.info(f"Evaluating {subset_id}...")
+                logger.info(f"Evaluating {dataset_name}...")
                 itrans_model = create_itransformer().to(device)
                 ckpt = torch.load(itrans_ckpt, map_location=device, weights_only=False)
                 itrans_model.load_state_dict(ckpt['model_state_dict'])
@@ -2445,42 +2402,36 @@ def run_pipeline(
                 
                 eval_results = evaluate_model(model, test_loader, device, n_samples=30, smoke_test=smoke_test)
                 
-                logger.info(f"[{subset_id}] Single: MSE={eval_results['single']['mse']:.4f}, MAE={eval_results['single']['mae']:.4f}")
-                logger.info(f"[{subset_id}] Avg: MSE={eval_results['averaged']['mse']:.4f}, MAE={eval_results['averaged']['mae']:.4f}")
+                logger.info(f"[{dataset_name}] Single: MSE={eval_results['single']['mse']:.4f}, MAE={eval_results['single']['mae']:.4f}")
+                logger.info(f"[{dataset_name}] Avg: MSE={eval_results['averaged']['mse']:.4f}, MAE={eval_results['averaged']['mae']:.4f}")
                 
-                save_eval_results(subset_id, dataset_name, variate_indices, 
+                save_eval_results(dataset_name, dataset_name, variate_indices, 
                                 {**train_metrics, 'tuned_params': tuned_params}, eval_results, RESULTS_DIR)
                 
                 # iTransformer-only baseline (for comparison table in summarize_results.py)
                 try:
                     evaluate_itransformer_baseline(
-                        subset_id, dataset_name, variate_indices,
+                        dataset_name, dataset_name, variate_indices,
                         itrans_ckpt, RESULTS_DIR, device, smoke_test=smoke_test,
                     )
                 except Exception as be:
-                    logger.warning(f"iTransformer baseline eval failed for {subset_id}: {be}")
+                    logger.warning(f"iTransformer baseline eval failed for {dataset_name}: {be}")
                 
                 # Log to wandb
-                log_wandb_eval_results(subset_id, eval_results, train_metrics)
-                log_wandb_model_checkpoint(ckpt_path, subset_id)
-                
-                manifest.mark_complete(subset_id, ckpt_path, {**train_metrics, 'eval': eval_results})
+                log_wandb_eval_results(dataset_name, eval_results, train_metrics)
+                log_wandb_model_checkpoint(ckpt_path, dataset_name)
             
         except KeyboardInterrupt:
-            logger.info(f"\nInterrupted during {subset_id}. Progress saved.")
+            logger.info(f"\nInterrupted during {dataset_name}.")
             return
         except Exception as e:
-            logger.error(f"Error with {subset_id}: {e}")
+            logger.error(f"Error with {dataset_name}: {e}")
             import traceback
             traceback.print_exc()
-            manifest.subsets[subset_id]['status'] = 'error'
-            manifest.subsets[subset_id]['error'] = str(e)
-            manifest.save()
     
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETE")
-    complete = len([s for s in manifest.subsets.values() if s.get('status') == 'complete'])
-    logger.info(f"Trained {complete} models")
+    logger.info(f"Trained {len(job_list)} models")
     logger.info("=" * 60)
 
 
@@ -2580,7 +2531,8 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
     n_itrans_trials = 1 if smoke_test else N_ITRANS_HP_TRIALS
     n_diff_trials = 1 if smoke_test else N_DIFFUSION_HP_TRIALS
     pretrain_samples = resolve_pretrain_virtual_dataset_size(smoke_test)
-    pretrain_epochs = 1 if smoke_test else PRETRAIN_EPOCHS
+    itrans_pretrain_epochs = 1 if smoke_test else PRETRAIN_EPOCHS
+    diff_pretrain_epochs = 1 if smoke_test else min(PRETRAIN_DIFFUSION_EPOCHS, PRETRAIN_DIFFUSION_MAX_EPOCHS)
     pretrain_patience = 1 if smoke_test else PRETRAIN_PATIENCE
 
     itrans_hp_path = os.path.join(dim_dir, 'itrans_hp.json')
@@ -2614,7 +2566,7 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
         pretrain_itransformer(
             best_itrans_params,
             n_samples=pretrain_samples,
-            epochs=pretrain_epochs,
+            epochs=itrans_pretrain_epochs,
             patience=pretrain_patience,
             checkpoint_dir=dim_dir,
             smoke_test=smoke_test,
@@ -2640,7 +2592,7 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
         pretrain_diffusion(
             best_diff_params, itrans_ckpt,
             n_samples=pretrain_samples,
-            epochs=pretrain_epochs,
+            epochs=diff_pretrain_epochs,
             patience=pretrain_patience,
             checkpoint_dir=dim_dir,
             smoke_test=smoke_test,
@@ -2664,11 +2616,7 @@ def run_finetune_mode(
     smoke_test: bool = False,
     seed: int = 42,
 ):
-    """Fine-tune + evaluate all subsets of a single dataset.
-
-    For native-dim datasets, this is just one model.
-    For high-variate datasets split into subsets, this iterates over them all.
-    """
+    """Fine-tune + evaluate one full-dataset model."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -2693,57 +2641,13 @@ def run_finetune_mode(
         )
         sys.exit(1)
 
-    subsets = generate_variate_subsets(dataset_name, n_variates=n_variates, seed=seed)
-    if smoke_test:
-        subsets = subsets[:1]  # just verify one subset in smoke test
-
     n_finetune_trials = 1 if smoke_test else N_FINETUNE_HP_TRIALS
     finetune_epochs = 1 if smoke_test else FINETUNE_EPOCHS
     finetune_patience = 1 if smoke_test else FINETUNE_PATIENCE
-
-    for subset_info in subsets:
-        _finetune_and_eval_one_subset(
-            subset_info, dataset_name, diff_ckpt, itrans_ckpt,
-            n_finetune_trials, finetune_epochs, finetune_patience,
-            device, smoke_test,
-        )
-
-
-def run_finetune_subset_mode(
-    subset_id: str,
-    dataset_name: str,
-    variate_indices: List[int],
-    n_variates: int,
-    smoke_test: bool = False,
-    seed: int = 42,
-):
-    """Fine-tune + evaluate a single subset.  Used by multi-GPU dispatch."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    recombine_traffic_data()
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    dim_dir = pretrain_dir_for_dim(n_variates)
-    itrans_ckpt = os.path.join(dim_dir, 'itransformer.pt')
-    diff_ckpt = os.path.join(dim_dir, 'diffusion.pt')
-
-    if not os.path.exists(diff_ckpt):
-        logger.error(f"Pretrained checkpoint not found: {diff_ckpt}")
-        sys.exit(1)
-
-    n_finetune_trials = 1 if smoke_test else N_FINETUNE_HP_TRIALS
-    finetune_epochs = 1 if smoke_test else FINETUNE_EPOCHS
-    finetune_patience = 1 if smoke_test else FINETUNE_PATIENCE
-
-    subset_info = {
-        'subset_id': subset_id,
-        'variate_indices': variate_indices,
-    }
 
     _finetune_and_eval_one_subset(
-        subset_info, dataset_name, diff_ckpt, itrans_ckpt,
+        {'subset_id': dataset_name, 'variate_indices': generate_dataset_job(dataset_name)['variate_indices']},
+        dataset_name, diff_ckpt, itrans_ckpt,
         n_finetune_trials, finetune_epochs, finetune_patience,
         device, smoke_test,
     )
@@ -2842,17 +2746,6 @@ def _finetune_and_eval_one_subset(
         import traceback
         traceback.print_exc()
 
-
-def run_list_subsets_mode(dataset_name: str, n_variates: int, seed: int = 42):
-    """Print subset info as JSON lines (for parallel subset fine-tune dispatch).
-
-    Intentionally does NOT log anything so stdout is clean JSON only.
-    """
-    subsets = generate_variate_subsets(dataset_name, n_variates=n_variates, seed=seed)
-    for s in subsets:
-        print(json.dumps(s))
-
-
 def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
     """Train full-dimensionality iTransformer baseline for a high-variate dataset."""
     recombine_traffic_data()
@@ -2867,21 +2760,16 @@ def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH
     global USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT
     global PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE, PRETRAIN_EPOCHS, FINETUNE_EPOCHS
-    global SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
+    global SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
-                        choices=['full', 'pretrain', 'finetune', 'finetune-subset',
-                                 'baseline', 'evaluate', 'list-subsets', 'status'],
+                        choices=['full', 'pretrain', 'finetune', 'baseline', 'evaluate', 'status'],
                         help='Pipeline mode (default: full = run everything)')
     parser.add_argument('--n-variates', type=int, default=None,
                         help='Override variate count (default: auto per dataset)')
     parser.add_argument('--dataset', type=str, default=None,
                         help='Single dataset to process')
-    parser.add_argument('--subset-id', type=str, default=None,
-                        help='Specific subset ID for finetune-subset mode')
-    parser.add_argument('--variate-indices', type=str, default=None,
-                        help='Comma-separated variate indices (for finetune-subset)')
     parser.add_argument('--resume', action='store_true', help='Resume from checkpoint')
     parser.add_argument('--smoke-test', action='store_true', help='Quick validation run')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -2897,8 +2785,6 @@ def main():
                         help='Parallel worker ID for multi-GPU Optuna (0-N)')
     parser.add_argument('--fresh', action='store_true',
                         help='Wipe manifest and checkpoints, start from scratch')
-    parser.add_argument('--list-subsets', action='store_true',
-                        help='Legacy flag: list subsets')
     parser.add_argument('--amp', action='store_true',
                         help='Enable bfloat16 mixed precision training')
     parser.add_argument('--gradient-checkpointing', action='store_true',
@@ -2912,17 +2798,12 @@ def main():
     parser.add_argument('--finetune-epochs', type=int, default=None,
                         help=f'Override FINETUNE_EPOCHS (default: {FINETUNE_EPOCHS})')
     parser.add_argument('--itransformer-trials', type=int, default=None,
-                        help='Override N_ITRANS_HP_TRIALS (default: 20)')
-    parser.add_argument('--subset-threshold', type=int, default=None,
-                        help='Override SUBSET_THRESHOLD for dim grouping')
-    
+                        help=f'Override N_ITRANS_HP_TRIALS (default: {N_ITRANS_HP_TRIALS})')
     args = parser.parse_args()
     
     # Legacy flag compat
     if args.status:
         args.mode = 'status'
-    if args.list_subsets:
-        args.mode = 'list-subsets'
 
     # Override directories
     if args.checkpoint_dir:
@@ -2948,8 +2829,6 @@ def main():
         SYNTHETIC_SAMPLES_HP_TUNE = min(int(args.synthetic_samples), 25000)
     if args.itransformer_trials is not None:
         N_ITRANS_HP_TRIALS = args.itransformer_trials
-    if args.subset_threshold is not None:
-        SUBSET_THRESHOLD = args.subset_threshold
     
     # DDP setup
     if args.ddp:
@@ -2972,19 +2851,8 @@ def main():
                 print(f"iTransformer HP done: {m.itrans_hp_done}")
                 print(f"Diffusion HP done: {m.diffusion_hp_done}")
                 print(f"Pretrain complete: {m.pretrain_complete}")
-                complete = len([s for s in m.subsets.values() if s.get('status') == 'complete'])
-                pending = len([s for s in m.subsets.values() if s.get('status') == 'pending'])
-                print(f"Subsets: {complete} complete, {pending} pending")
             else:
                 print("No manifest found")
-        return
-
-    if args.mode == 'list-subsets':
-        if not args.dataset:
-            print("ERROR: --dataset required for list-subsets mode")
-            sys.exit(1)
-        nv = args.n_variates or get_dim_for_dataset(args.dataset)
-        run_list_subsets_mode(args.dataset, nv, seed=args.seed)
         return
 
     if args.mode == 'pretrain':
@@ -3003,19 +2871,6 @@ def main():
         nv = args.n_variates or get_dim_for_dataset(args.dataset)
         N_VARIATES = nv
         run_finetune_mode(args.dataset, nv, smoke_test=args.smoke_test, seed=args.seed)
-        return
-
-    if args.mode == 'finetune-subset':
-        if not args.subset_id or not args.dataset or not args.variate_indices:
-            print("ERROR: --subset-id, --dataset, and --variate-indices required")
-            sys.exit(1)
-        nv = args.n_variates or SUBSET_DIM
-        N_VARIATES = nv
-        vi = [int(x) for x in args.variate_indices.split(',')]
-        run_finetune_subset_mode(
-            args.subset_id, args.dataset, vi, nv,
-            smoke_test=args.smoke_test, seed=args.seed,
-        )
         return
 
     if args.mode == 'baseline':

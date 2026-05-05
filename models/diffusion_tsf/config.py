@@ -48,7 +48,7 @@ class DiffusionTSFConfig:
     # Lookback overlap: predict the last K observed timesteps alongside the
     # future horizon to smooth the past/future boundary. The diffusion model
     # denoises a (K+H)-wide region; during inference the first K are discarded.
-    lookback_overlap: int = 0
+    lookback_overlap: int = 8
     past_loss_weight: float = 0.3
     
     # multivariate support
@@ -148,7 +148,7 @@ class DiffusionTSFConfig:
     
     # Stage 1 Guidance (e.g. iTransformer)
     # adds a "ghost image" to help the diffusion model
-    use_guidance_channel: bool = False  
+    use_guidance_channel: bool = True  
     
     # SpatialTransformerBlock (self+cross attn) always used at attention_levels.
     # use_hybrid_condition removed — attention_levels is the single knob.

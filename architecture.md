@@ -652,7 +652,7 @@ These are default values from `DiffusionTSFConfig` referenced in the original wa
 ### 12.1 Sequence and multivariate geometry
 - `lookback_length=512`: past context length in 1D samples.
 - `forecast_length=96`: target horizon length.
-- `lookback_overlap=0`: overlap handling for lookback/future boundaries.
+- `lookback_overlap=8`: overlap handling for lookback/future boundaries.
 - `past_loss_weight=0.3`: weighting for overlap-related loss partition logic.
 - `num_variables=1` default baseline; multivariate runs override it.
 - `variate_factorized=True`: process variates via factorized route.
@@ -664,9 +664,9 @@ These are default values from `DiffusionTSFConfig` referenced in the original wa
 - `unified_time_axis=False` default: separate width handling mode.
 
 ### 12.3 U-Net architecture
-- `unet_channels=[64,128,256,512]`
+- `unet_channels=[64,128,256]`
 - `num_res_blocks=2`
-- `attention_levels=[1,2]`
+- `attention_levels=[2]`
 - `unet_kernel_size=(3,3)`
 - `use_dilated_middle=False`
 - `separable_kernel=False`
@@ -696,8 +696,7 @@ These are default values from `DiffusionTSFConfig` referenced in the original wa
 ### 12.7 Conditioning and context
 - `conditioning_mode="visual_concat"`
 - `use_guidance_channel=True` in the current training pipeline path (hard-enabled there)
-- `context_embedding_dim=128`
-- `context_encoder_layers=2`
+- `context_embedding_dim=256`
 - `use_coordinate_channel=True` and related aux-channel toggles.
 
 ### 12.8 Optimizer/training basics

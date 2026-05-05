@@ -231,10 +231,9 @@ set -- "${PIPELINE_ARGS[@]}"
 
 AMP_FLAG="--amp"
 IMAGE_HEIGHT=96
-SUBSET_THRESHOLD=999999
 # Pretrain synthetic count: omit --synthetic-samples to use pipeline auto-sizing from PRETRAIN_EPOCHS.
 # Optional: SYNTHETIC_SAMPLES=50000 EXTRA_PY_ARGS="$EXTRA_PY_ARGS --synthetic-samples $SYNTHETIC_SAMPLES"
-ITRANSFORMER_TRIALS=12
+ITRANSFORMER_TRIALS=7
 SEED=42
 
 SMOKE_TEST=""
@@ -268,7 +267,6 @@ PYTHON="python -m models.diffusion_tsf.train_multivariate_pipeline"
 BASE_ARGS="--seed $SEED $SMOKE_TEST $EXTRA_PY_ARGS"
 BASE_ARGS="$BASE_ARGS $AMP_FLAG --image-height $IMAGE_HEIGHT"
 BASE_ARGS="$BASE_ARGS --itransformer-trials $ITRANSFORMER_TRIALS"
-BASE_ARGS="$BASE_ARGS --subset-threshold $SUBSET_THRESHOLD"
 
 LOOKBACK_LENGTH=1024
 FORECAST_LENGTH=192
@@ -282,7 +280,6 @@ echo "  Backbone:     U-Net (bf16)"
 echo "  Image height: $IMAGE_HEIGHT"
 echo "  Synth pool:   auto (or set SYNTHETIC_SAMPLES + pass --synthetic-samples)"
 echo "  iTransformer trials: $ITRANSFORMER_TRIALS"
-echo "  Subset threshold: $SUBSET_THRESHOLD (no splitting)"
 echo "  Dataset:      $SINGLE_DATASET"
 echo "  Smoke test:   ${SMOKE_TEST:-no}"
 echo "============================================================"
