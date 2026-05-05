@@ -670,6 +670,8 @@ FINETUNE_BATCH_SIZES = [4, 8, 16]
 # Memory optimization flags (overridden by CLI)
 USE_AMP = False
 USE_GRADIENT_CHECKPOINTING = False
+UNET_CHANNELS = [64, 128, 256]
+ATTENTION_LEVELS = [2]
 
 # Dataset registry: name -> (path, date_col, seasonal_period)
 DATASET_REGISTRY = {
@@ -841,8 +843,8 @@ def create_diffusion_model(
         use_guidance_channel=True,
         num_diffusion_steps=1000,
         model_type="unet",
-        unet_channels=[64, 128, 256],
-        attention_levels=[2],
+        unet_channels=UNET_CHANNELS,
+        attention_levels=ATTENTION_LEVELS,
         num_res_blocks=2,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         use_amp=USE_AMP,
@@ -2868,6 +2870,7 @@ def main():
     global USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT
     global PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE, PRETRAIN_EPOCHS, FINETUNE_EPOCHS
     global SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
+    global UNET_CHANNELS, ATTENTION_LEVELS
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -2915,6 +2918,10 @@ def main():
                         help='Override N_ITRANS_HP_TRIALS (default: 20)')
     parser.add_argument('--subset-threshold', type=int, default=None,
                         help='Override SUBSET_THRESHOLD for dim grouping')
+    parser.add_argument('--unet-channels', type=str, default=None,
+                        help='Comma-separated U-Net channels, e.g. 64,128,256')
+    parser.add_argument('--attention-levels', type=str, default=None,
+                        help='Comma-separated U-Net attention indices, e.g. 1,2')
     
     args = parser.parse_args()
     
@@ -2950,6 +2957,12 @@ def main():
         N_ITRANS_HP_TRIALS = args.itransformer_trials
     if args.subset_threshold is not None:
         SUBSET_THRESHOLD = args.subset_threshold
+    if args.unet_channels is not None:
+        UNET_CHANNELS = [int(x.strip()) for x in args.unet_channels.split(',') if x.strip()]
+        if len(UNET_CHANNELS) < 2:
+            raise ValueError("--unet-channels must provide at least two levels")
+    if args.attention_levels is not None:
+        ATTENTION_LEVELS = [int(x.strip()) for x in args.attention_levels.split(',') if x.strip()]
     
     # DDP setup
     if args.ddp:
