@@ -2822,6 +2822,8 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
 def run_finetune_mode(
     dataset_name: str,
     n_variates: int,
+    variate_indices: Optional[List[int]] = None,
+    subset_id: Optional[str] = None,
     smoke_test: bool = False,
     seed: int = 42,
 ):
@@ -2854,8 +2856,13 @@ def run_finetune_mode(
     finetune_epochs = 1 if smoke_test else FINETUNE_EPOCHS
     finetune_patience = 1 if smoke_test else FINETUNE_PATIENCE
 
+    if variate_indices is None:
+        variate_indices = generate_dataset_job(dataset_name)['variate_indices']
+    if subset_id is None:
+        subset_id = dataset_name
+
     _finetune_and_eval_one_subset(
-        {'subset_id': dataset_name, 'variate_indices': generate_dataset_job(dataset_name)['variate_indices']},
+        {'subset_id': subset_id, 'variate_indices': variate_indices},
         dataset_name, diff_ckpt, itrans_ckpt,
         n_finetune_trials, finetune_epochs, finetune_patience,
         device, smoke_test,
@@ -2980,6 +2987,10 @@ def main():
                         help='Override variate count (default: auto per dataset)')
     parser.add_argument('--dataset', type=str, default=None,
                         help='Single dataset to process')
+    parser.add_argument('--variate-indices', type=str, default=None,
+                        help='Comma-separated variate indices for subset finetune')
+    parser.add_argument('--subset-id', type=str, default=None,
+                        help='Optional subset id label used in saved results')
     parser.add_argument('--resume', action='store_true', help='Resume from checkpoint')
     parser.add_argument('--smoke-test', action='store_true', help='Quick validation run')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -3097,9 +3108,19 @@ def main():
         if not args.dataset:
             print("ERROR: --dataset required for finetune mode")
             sys.exit(1)
-        nv = args.n_variates or get_dim_for_dataset(args.dataset)
+        variate_indices = None
+        if args.variate_indices:
+            variate_indices = [int(x.strip()) for x in args.variate_indices.split(',') if x.strip()]
+        nv = args.n_variates or (len(variate_indices) if variate_indices else get_dim_for_dataset(args.dataset))
         N_VARIATES = nv
-        run_finetune_mode(args.dataset, nv, smoke_test=args.smoke_test, seed=args.seed)
+        run_finetune_mode(
+            args.dataset,
+            nv,
+            variate_indices=variate_indices,
+            subset_id=args.subset_id,
+            smoke_test=args.smoke_test,
+            seed=args.seed,
+        )
         return
 
     if args.mode == 'baseline':

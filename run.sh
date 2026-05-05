@@ -252,6 +252,8 @@ PRETRAIN_ONLY=""
 SINGLE_DATASET=""
 RESUME=""
 EXTRA_PY_ARGS=""
+SUBSET_VARIATE_INDICES="93,292,81,84"
+SUBSET_ID="electricity-4v-93-292-81-84"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -294,7 +296,7 @@ case "$VARIANT" in
 esac
 
 if [ -z "$SINGLE_DATASET" ]; then
-    SINGLE_DATASET="traffic"
+    SINGLE_DATASET="electricity"
 fi
 
 PYTHON="python -m models.diffusion_tsf.train_multivariate_pipeline"
@@ -383,8 +385,15 @@ if [ -z "$target_dim" ]; then
     echo "[ERROR] Unknown or missing dataset: $SINGLE_DATASET"
     exit 1
 fi
+if [ -n "$SUBSET_VARIATE_INDICES" ]; then
+    target_dim=$(awk -F',' '{print NF}' <<< "$SUBSET_VARIATE_INDICES")
+fi
 
-echo "[INFO] $SINGLE_DATASET: $target_dim variates (native, no splitting)"
+if [ -n "$SUBSET_VARIATE_INDICES" ]; then
+    echo "[INFO] $SINGLE_DATASET subset: indices=[$SUBSET_VARIATE_INDICES] (dim=$target_dim)"
+else
+    echo "[INFO] $SINGLE_DATASET: $target_dim variates (native, no splitting)"
+fi
 echo ""
 
 echo "============================================================"
@@ -404,7 +413,7 @@ echo "============================================================"
 echo "  PHASE 2: Fine-tuning $SINGLE_DATASET (dim=$target_dim)"
 echo "============================================================"
 
-$PYTHON --mode finetune --dataset "$SINGLE_DATASET" --n-variates "$target_dim" $BASE_ARGS
+$PYTHON --mode finetune --dataset "$SINGLE_DATASET" --n-variates "$target_dim" --variate-indices "$SUBSET_VARIATE_INDICES" --subset-id "$SUBSET_ID" $BASE_ARGS
 
 echo ""
 echo "============================================================"
