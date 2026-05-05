@@ -18,7 +18,7 @@ from typing import Dict, Optional, Tuple, Union
 
 from .config import DiffusionTSFConfig
 from .preprocessing import TimeSeriesTo2D, VerticalGaussianBlur
-from .unet import ConditionalUNet2D, TimeSeriesContextEncoder, VariateCrossEncoder
+from .unet import ConditionalUNet2D, iTransformerTokenAdapter
 from .diffusion import DiffusionScheduler
 from .guidance import GuidanceModel, LinearRegressionGuidance
 from .metrics import monotonicity_loss
@@ -245,15 +245,9 @@ class DiffusionTSF(nn.Module):
             # Note: Transformer backbone does not yet support hybrid conditioning
             self.context_encoder = None
         else:
-            # in factorized mode: unet sees 1 variate at a time → out_channels=1
-            if config.variate_factorized:
-                unet_out_channels = 1
-            else:
-                unet_out_channels = config.num_variables
-
             self.noise_predictor = ConditionalUNet2D(
                 in_channels=backbone_in_channels,
-                out_channels=unet_out_channels,
+                out_channels=1,
                 channels=config.unet_channels,
                 num_res_blocks=config.num_res_blocks,
                 attention_levels=config.attention_levels,
@@ -265,25 +259,12 @@ class DiffusionTSF(nn.Module):
                 use_gradient_checkpointing=config.use_gradient_checkpointing,
             )
 
-            if config.variate_factorized:
-                # VariateCrossEncoder: takes (B, V, T) → (B, V, ctx_dim).
-                # each variate gets a summary token; a small transformer mixes cross-variate
-                # info so the bottleneck actually receives meaningful joint context.
-                self.context_encoder = VariateCrossEncoder(
-                    context_dim=config.context_embedding_dim,
-                    num_layers=config.context_encoder_layers,
-                    num_heads=4,
-                    dropout=0.1,
-                )
-            else:
-                self.context_encoder = TimeSeriesContextEncoder(
-                    input_channels=config.context_input_channels,
-                    embedding_dim=config.context_embedding_dim,
-                    num_layers=config.context_encoder_layers,
-                    num_heads=4,
-                    dropout=0.1,
-                    max_seq_len=max(config.lookback_length, config.forecast_length) + 256
-                )
+            # projects frozen iTransformer enc_out to context_dim for bottleneck cross-attn
+            self.context_encoder = iTransformerTokenAdapter(
+                d_model=config.itrans_d_model,
+                context_dim=config.context_embedding_dim,
+                dropout=0.1,
+            )
 
         # Diffusion scheduler (not a nn.Module, managed separately)
         self.scheduler = DiffusionScheduler(
@@ -309,12 +290,15 @@ class DiffusionTSF(nn.Module):
             logger.info(f"  Seasonal period: {config.seasonal_period}")
         if config.model_type == "unet":
             logger.info(f"  U-Net kernel size: {config.unet_kernel_size}")
-            if config.variate_factorized and config.num_variables > 1:
+            if config.num_variables > 1:
                 logger.info(f"  Variate-factorized: enabled (B*V={config.num_variables} per forward, shared weights)")
             if config.use_dilated_middle:
                 logger.info(f"  Dilated middle block: enabled (dilations=1,2,4,8)")
-            enc_type = "VariateCrossEncoder" if config.variate_factorized else "TimeSeriesContextEncoder"
-            logger.info(f"  Context encoder: {enc_type} (context_dim={config.context_embedding_dim}, layers={config.context_encoder_layers})")
+            logger.info(
+                f"  Context encoder: iTransformerTokenAdapter "
+                f"(itrans_d_model={config.itrans_d_model} -> context_dim={config.context_embedding_dim}, "
+                f"variate_embed=True)"
+            )
     
     def to(self, device):
         """Move model and scheduler to device."""
@@ -470,23 +454,6 @@ class DiffusionTSF(nn.Module):
             )
         return visual_cond
     
-    def _prepare_1d_context(
-        self,
-        past_norm: torch.Tensor
-    ) -> torch.Tensor:
-        """Prepare 1D context input for the TimeSeriesContextEncoder."""
-        if past_norm.dim() == 3:
-            past_1d = past_norm[:, 0, :]
-        else:
-            past_1d = past_norm
-        batch_size, seq_len = past_1d.shape
-        device = past_1d.device
-        dtype = past_1d.dtype
-        time_idx = torch.linspace(0.0, 1.0, seq_len, device=device, dtype=dtype)
-        time_idx = time_idx.unsqueeze(0).expand(batch_size, -1)
-        context_input = torch.stack([past_1d, time_idx], dim=-1)
-        return context_input
-    
     def _get_guidance_forecast_norm(
         self,
         past: torch.Tensor,
@@ -511,27 +478,21 @@ class DiffusionTSF(nn.Module):
             coarse_norm = torch.cat([past_norm[..., -K:], coarse_norm], dim=-1)
         return coarse_norm  # (B, V, forecast_length) normalized
 
-    def _get_cross_variate_context(
-        self,
-        past_norm: torch.Tensor,
-        guidance_forecast_norm: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
+    def _get_cross_variate_context(self, past_raw: torch.Tensor) -> Optional[torch.Tensor]:
         """produce (B, V, ctx_dim) encoder_hidden_states for the bottleneck.
 
-        prefers the iTransformer forecast when available — it already has cross-variate
-        structure baked in. falls back to all-variates normalized past otherwise.
+        feeds raw past through the frozen iTransformer encoder and projects to context_dim.
+        returns None when context_encoder is not set (transformer backbone path).
         """
         if self.context_encoder is None:
             return None
-
-        if guidance_forecast_norm is not None:
-            src = guidance_forecast_norm                    # (B, V, H_forecast)
-        elif past_norm.dim() == 3:
-            src = past_norm                                 # (B, V, L)
-        else:
-            src = past_norm.unsqueeze(1)                    # (B, 1, L) univariate edge case
-
-        return self.context_encoder(src)                    # (B, V, ctx_dim)
+        if self.guidance_model is None or not hasattr(self.guidance_model, 'get_encoder_tokens'):
+            raise RuntimeError(
+                "iTransformerTokenAdapter requires a guidance model with get_encoder_tokens(). "
+                "Ensure guidance model is iTransformerGuidance."
+            )
+        enc_tokens = self.guidance_model.get_encoder_tokens(past_raw)   # (B, V, d_model)
+        return self.context_encoder(enc_tokens)                          # (B, V, ctx_dim)
 
     def _normalize_sequence(
         self,
@@ -761,138 +722,7 @@ class DiffusionTSF(nn.Module):
         """Training forward pass using either unified L+F or optimized Future-Only scheme."""
         if self.config.model_type == "ci_dit":
             return self._forward_ci_dit(past, future, t)
-        if self.config.variate_factorized and self.config.num_variables > 1:
-            return self._forward_factorized(past, future, t)
-        
-        batch_size = past.shape[0]
-        device = past.device
-        past_norm, future_norm, stats = self._normalize_sequence(past, future)
-        past_2d = self.encode_to_2d(past_norm)
-        future_2d = self.encode_to_2d(future_norm)
-        past_2d = self._apply_coarse_dropout(past_2d)
-        
-        past_len = past_2d.shape[-1]
-        future_len = future_2d.shape[-1]
-        total_len = past_len + future_len
-        
-        if t is None:
-            t = torch.randint(0, self.config.num_diffusion_steps, (batch_size,), device=device)
-        
-        noisy_future, noise = self.scheduler.add_noise(future_2d, t)
-        
-        encoder_hidden_states = None
-        if self.context_encoder is not None:
-            context_input = self._prepare_1d_context(past_norm)
-            encoder_hidden_states = self.context_encoder(context_input)
-            
-        # Guidance Generation (Common)
-        guidance_2d = None
-        if self.config.use_guidance_channel:
-            guidance_2d = self._generate_guidance_2d(past, past_norm, stats, future_len)
-
-        if self.config.unified_time_axis:
-            # === UNIFIED MODE (Slower, Better Continuity) ===
-            # Diffuse on full L+F width
-            
-            past_padded = self._pad_to_window(past_2d, 'past', total_len)
-            noisy_future_padded = self._pad_to_window(noisy_future, 'future', total_len)
-            canvas = past_padded + noisy_future_padded
-            
-            canvas = self._inject_coordinate_channel(canvas)
-            canvas = self._inject_time_channels(canvas)
-            
-            val_channel = None
-            if self.config.use_value_channel:
-                if past_norm.dim() == 3: past_vals = past_norm
-                else: past_vals = past_norm.unsqueeze(1)
-                vals_padded = F.pad(past_vals, (0, future_len))
-                val_channel = self._get_value_channel(vals_padded, self.config.image_height)
-                if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
-                canvas = torch.cat([canvas, val_channel], dim=1)
-                
-            if guidance_2d is not None:
-                guidance_padded = self._pad_to_window(guidance_2d, 'future', total_len)
-                canvas = self._inject_guidance_channel(canvas, guidance_padded)
-            
-            # Conditioning: past_padded
-            cond_for_unet = past_padded
-            if val_channel is not None:
-                 cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
-
-            noise_pred_full = self.noise_predictor(
-                canvas, t, cond_for_unet,
-                encoder_hidden_states=encoder_hidden_states
-            )
-            noise_pred = noise_pred_full[..., past_len:]
-            
-        else:
-            # === OPTIMIZED MODE (Faster) ===
-            # Diffuse on Future width only
-            
-            canvas = noisy_future
-            # print(f"DEBUG: Canvas start: {canvas.shape}")
-            canvas = self._inject_coordinate_channel(canvas)
-            # print(f"DEBUG: Canvas after coord: {canvas.shape}")
-            canvas = self._inject_time_channels(canvas)
-            # print(f"DEBUG: Canvas after time: {canvas.shape}")
-            
-            val_channel = None
-            if self.config.use_value_channel:
-                # Broadcast last past value as reference
-                if past_norm.dim() == 3: 
-                    last_val = past_norm[:, :, -1:]
-                    last_val_expanded = last_val.expand(-1, -1, future_len)
-                else: 
-                    last_val = past_norm[:, -1:]
-                    last_val_expanded = last_val.expand(-1, future_len)
-                
-                val_channel = self._get_value_channel(last_val_expanded, self.config.image_height)
-                if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
-                canvas = torch.cat([canvas, val_channel], dim=1)
-                # print(f"DEBUG: Canvas after value: {canvas.shape}")
-            
-            if guidance_2d is not None:
-                canvas = self._inject_guidance_channel(canvas, guidance_2d)
-                
-            # Conditioning: Visual part of past matched to future width
-            cond_for_unet = self._prepare_visual_conditioning(past_2d, target_width=future_len)
-            if val_channel is not None:
-                 cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
-            
-            # print(f"DEBUG: Final canvas to UNet: {canvas.shape}, expected channels: {self.config.backbone_in_channels}")
-            noise_pred = self.noise_predictor(
-                canvas, t, cond_for_unet,
-                encoder_hidden_states=encoder_hidden_states
-            )
-        
-        K = self.config.lookback_overlap
-        if K > 0:
-            noise_loss_past = F.mse_loss(noise_pred[..., :K], noise[..., :K])
-            noise_loss_future = F.mse_loss(noise_pred[..., K:], noise[..., K:])
-            noise_loss = self.config.past_loss_weight * noise_loss_past + noise_loss_future
-        else:
-            noise_loss = F.mse_loss(noise_pred, noise)
-
-        x0_pred = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
-        emd_loss = self._compute_emd_loss(x0_pred, future_2d)
-        
-        mono_loss = torch.tensor(0.0, device=device)
-        if self.config.use_monotonicity_loss and self.config.representation_mode == "cdf":
-            cdf_pred = torch.clamp((x0_pred + 1.0) / 2.0, 0.0, 1.0)
-            mono_loss = monotonicity_loss(cdf_pred)
-            
-        loss = noise_loss + self.config.emd_lambda * emd_loss + self.config.monotonicity_weight * mono_loss
-        
-        result = {
-            'loss': loss,
-            'noise_loss': noise_loss,
-            'emd_loss': emd_loss,
-            'noise_pred': noise_pred,
-            't': t
-        }
-        if guidance_2d is not None:
-            result['guidance_2d'] = guidance_2d
-        return result
+        return self._forward_factorized(past, future, t)
 
     @torch.no_grad()
     def generate(
@@ -916,184 +746,16 @@ class DiffusionTSF(nn.Module):
                 decoder_method=decoder_method, beam_width=beam_width,
                 jump_penalty_scale=jump_penalty_scale, search_radius=search_radius,
             )
-        if self.config.variate_factorized and self.config.num_variables > 1:
-            return self._generate_factorized(
-                past, use_ddim=use_ddim, num_ddim_steps=num_ddim_steps,
-                eta=eta, cfg_scale=cfg_scale, verbose=verbose,
-                decoder_method=decoder_method, beam_width=beam_width,
-                jump_penalty_scale=jump_penalty_scale, search_radius=search_radius,
-            )
-        
-        batch_size = past.shape[0]
-        device = past.device
-        if cfg_scale is None: cfg_scale = self.config.cfg_scale
-        past_norm, _, stats = self._normalize_sequence(past)
-        past_2d = self.encode_to_2d(past_norm)
-        past_len = past_2d.shape[-1]
-        future_len = self.config.forecast_length
-        total_len = past_len + future_len
-        
-        # Prepare Conditioning (Common)
-        encoder_hidden_states = None
-        null_encoder_hidden_states = None
-        if self.context_encoder is not None:
-            context_input = self._prepare_1d_context(past_norm)
-            encoder_hidden_states = self.context_encoder(context_input)
-            if cfg_scale > 1.0:
-                null_encoder_hidden_states = torch.zeros_like(encoder_hidden_states)
-
-        guidance_2d = None
-        if self.config.use_guidance_channel:
-            guidance_2d = self._generate_guidance_2d(past, past_norm, stats, future_len)
-
-        # === Mode-Specific Setup ===
-        if self.config.unified_time_axis:
-            # UNIFIED MODE SETUP
-            past_padded = self._pad_to_window(past_2d, 'past', total_len)
-            
-            val_channel = None
-            if self.config.use_value_channel:
-                if past_norm.dim() == 3: past_vals = past_norm
-                else: past_vals = past_norm.unsqueeze(1)
-                vals_padded = F.pad(past_vals, (0, future_len))
-                val_channel = self._get_value_channel(vals_padded, self.config.image_height)
-                if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
-            
-            cond_for_unet = past_padded
-            if val_channel is not None:
-                 cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
-            
-            guidance_padded = None
-            null_guidance_padded = None
-            if guidance_2d is not None:
-                guidance_padded = self._pad_to_window(guidance_2d, 'future', total_len)
-                if cfg_scale > 1.0:
-                    null_guidance_padded = torch.zeros_like(guidance_padded)
-        else:
-            # OPTIMIZED MODE SETUP
-            # Value Channel: Broadcast last value
-            val_channel = None
-            if self.config.use_value_channel:
-                if past_norm.dim() == 3: last_val = past_norm[:, :, -1:]
-                else: last_val = past_norm[:, -1:]
-                
-                if past_norm.dim() == 3:
-                    last_val_expanded = last_val.expand(-1, -1, future_len)
-                else:
-                    last_val_expanded = last_val.expand(-1, future_len)
-                    
-                val_channel = self._get_value_channel(last_val_expanded, self.config.image_height)
-                if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
-
-            # Conditioning: Visual part matched to future width
-            cond_for_unet = self._prepare_visual_conditioning(past_2d, target_width=future_len)
-            if val_channel is not None:
-                 cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
-            
-            guidance_padded = guidance_2d # Reuse variable name for simplicity
-            null_guidance_padded = None
-            if guidance_2d is not None and cfg_scale > 1.0:
-                 null_guidance_padded = torch.zeros_like(guidance_2d)
-
-        # Null cond for visual concatenation (zeros)
-        null_cond_for_unet = None
-        if cfg_scale > 1.0:
-            null_cond = torch.zeros_like(cond_for_unet)
-            null_cond_for_unet = null_cond
-        
-        noise_shape = (batch_size, self.config.num_variables, self.config.image_height, future_len)
-        
-        def model_fn(x_future, t, cond, use_null_context=False, use_null_guidance=False):
-            if self.config.unified_time_axis:
-                # Unified Mode Construction
-                x_future_padded = self._pad_to_window(x_future, 'future', total_len)
-                canvas = past_padded + x_future_padded
-                canvas_full = self._inject_coordinate_channel(canvas)
-                canvas_full = self._inject_time_channels(canvas_full)
-                if val_channel is not None:
-                    canvas_full = torch.cat([canvas_full, val_channel], dim=1)
-                if self.config.use_guidance_channel:
-                    guide = null_guidance_padded if use_null_guidance else guidance_padded
-                    canvas_full = self._inject_guidance_channel(canvas_full, guide)
-                
-                ctx = null_encoder_hidden_states if use_null_context else encoder_hidden_states
-                out_full = self.noise_predictor(canvas_full, t, cond, encoder_hidden_states=ctx)
-                return out_full[..., past_len:]
-            else:
-                # Optimized Mode Construction
-                canvas = x_future
-                canvas_full = self._inject_coordinate_channel(canvas)
-                canvas_full = self._inject_time_channels(canvas_full)
-                if val_channel is not None:
-                    canvas_full = torch.cat([canvas_full, val_channel], dim=1)
-                if self.config.use_guidance_channel:
-                    guide = null_guidance_padded if use_null_guidance else guidance_padded
-                    canvas_full = self._inject_guidance_channel(canvas_full, guide)
-                
-                ctx = null_encoder_hidden_states if use_null_context else encoder_hidden_states
-                out = self.noise_predictor(canvas_full, t, cond, encoder_hidden_states=ctx)
-                return out
-            
-        def model_cfg(x, t, cond, null_cond, cfg_scale):
-            if cfg_scale <= 1.0: return model_fn(x, t, cond)
-            
-            # For efficiency in optimized mode, we can batch; 
-            # for unified mode, batching is also possible but consumes more memory.
-            # Here we just execute twice for simplicity and OOM safety.
-            cond_out = model_fn(x, t, cond, use_null_context=False, use_null_guidance=False)
-            uncond_out = model_fn(x, t, null_cond, use_null_context=True, use_null_guidance=True)
-            return uncond_out + cfg_scale * (cond_out - uncond_out)
-
-        if use_ddim:
-            future_2d = self.scheduler.sample_ddim_cfg(
-                model=lambda x, t, c: model_cfg(x, t, c, null_cond_for_unet, cfg_scale),
-                shape=noise_shape,
-                cond=cond_for_unet,
-                null_cond=null_cond_for_unet,
-                cfg_scale=1.0, # Handled inside model_cfg
-                num_steps=num_ddim_steps,
-                eta=eta,
-                device=device,
-                verbose=verbose
-            )
-        else:
-             future_2d = self.scheduler.sample_ddpm_cfg(
-                model=lambda x, t, c: model_cfg(x, t, c, null_cond_for_unet, cfg_scale),
-                shape=noise_shape,
-                cond=cond_for_unet,
-                null_cond=null_cond_for_unet,
-                cfg_scale=1.0, # Handled inside model_cfg
-                device=device,
-                verbose=verbose
-            )
-
-        future_norm = self.decode_from_2d(
-            future_2d,
-            decoder_method=decoder_method,
-            beam_width=beam_width,
-            jump_penalty_scale=jump_penalty_scale,
-            search_radius=search_radius
+        return self._generate_factorized(
+            past, use_ddim=use_ddim, num_ddim_steps=num_ddim_steps,
+            eta=eta, cfg_scale=cfg_scale, verbose=verbose,
+            decoder_method=decoder_method, beam_width=beam_width,
+            jump_penalty_scale=jump_penalty_scale, search_radius=search_radius,
         )
-        future = self._denormalize(future_norm, stats)
-
-        # Discard the reconstructed overlap, keep only the real forecast
-        K = self.config.lookback_overlap
-        if K > 0:
-            future = future[..., K:]
-            future_norm = future_norm[..., K:]
-
-        result = {
-            'prediction': future,
-            'prediction_norm': future_norm,
-            'future_2d': future_2d,
-            'past_2d': past_2d
-        }
-        if guidance_2d is not None: result['guidance_2d'] = guidance_2d
-        return result
     
     # ====================================================================
     # Factorized U-Net forward/generate — per-variate shared-weight U-Net
-    # with cross-variate context at the bottleneck via VariateCrossEncoder
+    # with cross-variate context at the bottleneck via iTransformerTokenAdapter
     # ====================================================================
 
     def _forward_factorized(self, past: torch.Tensor, future: torch.Tensor, t: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
@@ -1101,7 +763,7 @@ class DiffusionTSF(nn.Module):
 
         the U-Net weights are shared across all V variates. cross-variate info
         is injected at the bottleneck via cross-attention on V context tokens
-        produced by VariateCrossEncoder (from iTransformer output or mean past).
+        from iTransformerTokenAdapter (iTransformer enc_out projected + variate identity).
         """
         B = past.shape[0]
         V = self.config.num_variables
@@ -1129,7 +791,7 @@ class DiffusionTSF(nn.Module):
             guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
             guidance_2d = self.encode_to_2d(guidance_forecast_norm, scale_for_diffusion=True)
 
-        ctx = self._get_cross_variate_context(past_norm, guidance_forecast_norm)
+        ctx = self._get_cross_variate_context(past)
         # ctx: (B, V, ctx_dim) or None
 
         # flatten variates into batch dim for shared-weight U-Net
@@ -1222,7 +884,7 @@ class DiffusionTSF(nn.Module):
         null_guide = torch.zeros_like(guide_flat) if (guide_flat is not None and cfg_scale > 1.0) else None
 
         # cross-variate context tokens — fixed for entire sampling trajectory
-        ctx = self._get_cross_variate_context(past_norm, guidance_forecast_norm)
+        ctx = self._get_cross_variate_context(past)
         ctx_flat      = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
         null_ctx_flat = torch.zeros_like(ctx_flat) if (ctx_flat is not None and cfg_scale > 1.0) else None
 

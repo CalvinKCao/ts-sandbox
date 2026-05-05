@@ -236,7 +236,7 @@ cd "$PROJECT_ROOT"
 set -- "${PIPELINE_ARGS[@]}"
 
 AMP_FLAG="--amp"
-IMAGE_HEIGHT=64
+IMAGE_HEIGHT=96
 # Pretrain synthetic count: omit --synthetic-samples to use pipeline auto-sizing from PRETRAIN_EPOCHS.
 # Optional: SYNTHETIC_SAMPLES=50000 EXTRA_PY_ARGS="$EXTRA_PY_ARGS --synthetic-samples $SYNTHETIC_SAMPLES"
 ITRANSFORMER_TRIALS=7

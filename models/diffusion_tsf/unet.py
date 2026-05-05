@@ -24,187 +24,43 @@ from . import unet_profile as _unet_prof
 logger = logging.getLogger(__name__)
 
 
-class SinusoidalPositionalEncoding(nn.Module):
-    """pos encodings for transformers.
-    adds sin/cos waves so the model knows where it is.
+
+class iTransformerTokenAdapter(nn.Module):
+    """Projects frozen iTransformer encoder tokens to context_dim for U-Net cross-attention.
+
+    Feeds iTransformer enc_out (before its linear projector) through a projection
+    and a learned per-variate identity embedding, producing context tokens for the
+    U-Net bottleneck cross-attention.
+
+    A learned per-variate identity embedding is added so the diffusion model
+    can distinguish variates within the shared-weight factorized forward passes.
     """
-    
-    def __init__(self, dim: int, max_len: int = 2048):
-        super().__init__()
-        pe = torch.zeros(max_len, dim)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(10000.0) / dim))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # (1, max_len, dim)
-        self.register_buffer('pe', pe)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """adds PE to x."""
-        return x + self.pe[:, :x.size(1), :]
-
-
-class TransformerEncoderLayer1D(nn.Module):
-    """transformer block for 1D.
-    pre-norm setup:
-    - multi-head attention
-    - mlp with gelu
-    """
-    
-    def __init__(self, dim: int, num_heads: int = 4, mlp_ratio: float = 4.0, dropout: float = 0.1):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, int(dim * mlp_ratio)),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(int(dim * mlp_ratio), dim),
-            nn.Dropout(dropout)
-        )
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """standard transformer pass."""
-        # attention
-        x_norm = self.norm1(x)
-        attn_out, _ = self.attn(x_norm, x_norm, x_norm)
-        x = x + attn_out
-        
-        # feed forward
-        x = x + self.mlp(self.norm2(x))
-        return x
-
-
-class TimeSeriesContextEncoder(nn.Module):
-    """encoder for the 1D stuff.
-    
-    processes raw past data (values + time) for cross-attention.
-    
-    Input: (batch, seq_len, 2)
-        - val 0: normalized values
-        - val 1: time indices
-    
-    Output: (batch, seq_len, dim)
-    """
-    
-    def __init__(
-        self,
-        input_channels: int = 2,
-        embedding_dim: int = 128,
-        num_layers: int = 2,
-        num_heads: int = 4,
-        dropout: float = 0.1,
-        max_seq_len: int = 2048
-    ):
-        """
-        Args:
-            input_channels: Number of input channels (value + time index = 2)
-            embedding_dim: Dimension of output embeddings
-            num_layers: Number of transformer encoder layers
-            num_heads: Number of attention heads
-            dropout: Dropout rate
-            max_seq_len: Maximum sequence length for positional encoding
-        """
-        super().__init__()
-        
-        # Project input channels to embedding dimension
-        self.input_proj = nn.Linear(input_channels, embedding_dim)
-        
-        # Sinusoidal positional encoding
-        self.pos_encoding = SinusoidalPositionalEncoding(embedding_dim, max_seq_len)
-        
-        # Transformer encoder layers
-        self.layers = nn.ModuleList([
-            TransformerEncoderLayer1D(embedding_dim, num_heads, dropout=dropout)
-            for _ in range(num_layers)
-        ])
-        
-        # Final layer norm
-        self.final_norm = nn.LayerNorm(embedding_dim)
-        
-        logger.info(f"TimeSeriesContextEncoder: input_ch={input_channels}, "
-                    f"embed_dim={embedding_dim}, layers={num_layers}, heads={num_heads}")
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Input tensor of shape (batch, seq_len, input_channels)
-               - x[:, :, 0] = normalized values
-               - x[:, :, 1] = normalized time indices (0 to 1)
-        
-        Returns:
-            Context embeddings of shape (batch, seq_len, embedding_dim)
-        """
-        # Project to embedding dimension
-        x = self.input_proj(x)
-        
-        # Add positional encoding
-        x = self.pos_encoding(x)
-        
-        # Pass through transformer layers
-        for layer in self.layers:
-            x = layer(x)
-        
-        # Final normalization
-        x = self.final_norm(x)
-        
-        return x
-
-
-class VariateCrossEncoder(nn.Module):
-    """compresses V-variate time series into per-variate context tokens for bottleneck cross-attn.
-
-    each variate gets a 3-stat summary (mean, trend, std over a trailing window), then
-    a small transformer runs attention *across* variates so every token picks up
-    info from its neighbors before being fed to the u-net bottleneck.
-
-    designed to work with either iTransformer forecast output (B, V, H_forecast)
-    or the raw normalized past (B, V, L) as input — same encoder either way.
-    """
-
-    STAT_DIM = 3  # mean, trend, std
 
     def __init__(
         self,
+        d_model: int,
         context_dim: int,
-        num_layers: int = 2,
-        num_heads: int = 4,
-        summary_window: int = 32,
+        max_variates: int = 512,
         dropout: float = 0.1,
     ):
         super().__init__()
-        self.summary_window = summary_window
-        self.in_proj = nn.Linear(self.STAT_DIM, context_dim)
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=context_dim,
-            nhead=num_heads,
-            dim_feedforward=context_dim * 4,
-            dropout=dropout,
-            batch_first=True,
-            norm_first=True,  # pre-norm is more stable
-        )
-        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+        self.proj = nn.Linear(d_model, context_dim)
+        self.variate_embed = nn.Embedding(max_variates, context_dim)
+        self.drop = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(context_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, enc_tokens: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: (B, V, T) — V-variate normalized time series (any T)
+            enc_tokens: (B, V, d_model) — iTransformer encoder output
         Returns:
-            (B, V, context_dim) — one token per variate, after cross-variate attention
+            (B, V, context_dim)
         """
-        w = min(x.shape[-1], self.summary_window)
-        tail = x[..., -w:]                                          # (B, V, w)
-
-        mean  = tail.mean(dim=-1)                                   # (B, V)
-        std   = tail.std(dim=-1).clamp(min=1e-6)                    # (B, V)
-        trend = (tail[..., -1] - tail[..., 0]) / max(w - 1, 1)     # (B, V) — delta per step
-
-        stats = torch.stack([mean, trend, std], dim=-1)             # (B, V, 3)
-        x_emb = self.in_proj(stats)                                 # (B, V, context_dim)
-        x_emb = self.transformer(x_emb)                             # cross-variate attn
-        return self.norm(x_emb)                                     # (B, V, context_dim)
+        B, V, _ = enc_tokens.shape
+        x = self.proj(enc_tokens)                                   # (B, V, context_dim)
+        ids = torch.arange(V, device=enc_tokens.device)
+        x = x + self.variate_embed(ids)                             # broadcast over B
+        return self.norm(self.drop(x))                              # (B, V, context_dim)
 
 
 class CrossAttentionBlock(nn.Module):
@@ -229,7 +85,7 @@ class CrossAttentionBlock(nn.Module):
         """
         Args:
             query_dim: Dimension of query features (U-Net channel dim)
-            context_dim: Dimension of context features (from TimeSeriesContextEncoder)
+            context_dim: Dimension of context features (from iTransformerTokenAdapter)
             num_heads: Number of attention heads
             head_dim: Dimension per head
             dropout: Dropout rate
@@ -302,7 +158,7 @@ class SpatialTransformerBlock(nn.Module):
     
     Similar to Stable Diffusion's attention blocks, this applies:
     1. Self-attention on flattened 2D features
-    2. Cross-attention with 1D context (from TimeSeriesContextEncoder)
+    2. Cross-attention with 1D context (from iTransformerTokenAdapter)
     3. Feedforward network
     
     Used in the deeper levels of the U-Net for conditioning.
@@ -320,7 +176,7 @@ class SpatialTransformerBlock(nn.Module):
         """
         Args:
             channels: Number of channels in the 2D feature map
-            context_dim: Dimension of context from TimeSeriesContextEncoder
+            context_dim: Dimension of context from iTransformerTokenAdapter
             num_heads: Number of attention heads
             head_dim: Dimension per head
             num_groups: Number of groups for GroupNorm
@@ -747,7 +603,7 @@ class ConditionalUNet2D(nn.Module):
 
     Predicts noise ε given noisy future image, diffusion timestep, past context image
     (concatenated directly as visual channels), and optional per-variate context tokens
-    from a VariateCrossEncoder.
+    from an iTransformerTokenAdapter.
 
     Attention at levels listed in attention_levels uses SpatialTransformerBlock
     (self-attention + cross-attention to encoder_hidden_states when provided).
@@ -787,7 +643,7 @@ class ConditionalUNet2D(nn.Module):
             image_height: Height of the 2D image representation
             kernel_size: (height, width) kernel; height = value axis, width = time axis.
             use_dilated_middle: If True, use DilatedMiddleBlock (dilations 1,2,4,8 on time axis).
-            context_dim: Dimension of context tokens from VariateCrossEncoder.
+            context_dim: Dimension of context tokens from iTransformerTokenAdapter.
             visual_cond_channels: Past image channels concatenated to the noisy input.
         """
         super().__init__()
@@ -879,7 +735,7 @@ class ConditionalUNet2D(nn.Module):
             t: Diffusion timesteps of shape (batch,)
             cond: Past context image of shape (batch, visual_cond_channels, height, future_len),
                   already cropped/interpolated to target width by the caller.
-            encoder_hidden_states: Optional per-variate context tokens from VariateCrossEncoder,
+            encoder_hidden_states: Optional per-variate context tokens from iTransformerTokenAdapter,
                                    shape (batch, seq_len, context_dim). Cross-attn skipped when None.
             
         Returns:

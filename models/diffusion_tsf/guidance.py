@@ -267,6 +267,35 @@ class iTransformerGuidance(BaseGuidance):
         return self
     
     @torch.no_grad()
+    def get_encoder_tokens(self, past: torch.Tensor) -> torch.Tensor:
+        """Return iTransformer encoder output before the linear projector.
+
+        Mirrors the normalization inside iTransformer.forecast() so the
+        tokens are consistent with what the model uses internally.
+
+        Args:
+            past: (B, V, L) raw (un-normalized) past sequence
+
+        Returns:
+            (B, V, d_model) — cross-variate-aware variate tokens
+        """
+        is_univariate = past.dim() == 2
+        if is_univariate:
+            x_enc = past.unsqueeze(-1)      # (B, L, 1)
+        else:
+            x_enc = past.permute(0, 2, 1)   # (B, V, L) -> (B, L, V)
+
+        if self.model.use_norm:
+            means = x_enc.mean(1, keepdim=True).detach()
+            x_enc = x_enc - means
+            stdev = torch.sqrt(torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5)
+            x_enc = x_enc / stdev
+
+        enc_out = self.model.enc_embedding(x_enc, None)       # (B, V, d_model)
+        enc_out, _ = self.model.encoder(enc_out, attn_mask=None)  # (B, V, d_model)
+        return enc_out
+
+    @torch.no_grad()
     def get_forecast(
         self,
         past: torch.Tensor,
