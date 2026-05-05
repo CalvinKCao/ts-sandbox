@@ -23,7 +23,7 @@ class DiffusionTSFConfig:
     unet:
         unet_channels: channels at each level
         num_res_blocks: res blocks per level
-        attention_levels: where to put attention
+        attention_levels: loop indices (into channels[1:]) where SpatialTransformerBlock is added
 
     diffusion:
         num_diffusion_steps: T (default: 1000)
@@ -143,14 +143,12 @@ class DiffusionTSFConfig:
     use_value_channel: bool = False
     seasonal_period: int = 96
 
-    # conditioning mode
-    conditioning_mode: str = "visual_concat"
-
     # Stage 1 guidance (iTransformerGuidance)
     use_guidance_channel: bool = False
 
     # hybrid 1D conditioning via cross-attention
-    use_hybrid_condition: bool = True
+    # cross-attention (SpatialTransformerBlock) is always used at attention_levels;
+    # use_hybrid_condition has been removed — attention_levels is the single knob.
     context_embedding_dim: int = 128
     context_input_channels: int = 2
     context_encoder_layers: int = 2

@@ -107,8 +107,6 @@ class DiffusionTSF(nn.Module):
             self.context_encoder = None
         else:
             # unet (default)
-            cond_in_channels = backbone_in_channels - config.guidance_channels
-
             if config.variate_factorized:
                 unet_out_channels = 2 if config.diffusion_type == "binary" else 1
             else:
@@ -123,34 +121,28 @@ class DiffusionTSF(nn.Module):
                 image_height=config.image_height,
                 kernel_size=config.unet_kernel_size,
                 use_dilated_middle=config.use_dilated_middle,
-                use_hybrid_condition=config.use_hybrid_condition,
                 context_dim=config.context_embedding_dim,
-                conditioning_mode=config.conditioning_mode,
                 visual_cond_channels=config.visual_cond_channels,
-                cond_in_channels=cond_in_channels,
                 use_gradient_checkpointing=config.use_gradient_checkpointing,
                 separable_kernel=config.separable_kernel,
             )
 
-            if config.use_hybrid_condition:
-                if config.variate_factorized:
-                    self.context_encoder = VariateCrossEncoder(
-                        context_dim=config.context_embedding_dim,
-                        num_layers=config.context_encoder_layers,
-                        num_heads=4,
-                        dropout=0.1,
-                    )
-                else:
-                    self.context_encoder = TimeSeriesContextEncoder(
-                        input_channels=config.context_input_channels,
-                        embedding_dim=config.context_embedding_dim,
-                        num_layers=config.context_encoder_layers,
-                        num_heads=4,
-                        dropout=0.1,
-                        max_seq_len=max(config.lookback_length, config.forecast_length) + 256
-                    )
+            if config.variate_factorized:
+                self.context_encoder = VariateCrossEncoder(
+                    context_dim=config.context_embedding_dim,
+                    num_layers=config.context_encoder_layers,
+                    num_heads=4,
+                    dropout=0.1,
+                )
             else:
-                self.context_encoder = None
+                self.context_encoder = TimeSeriesContextEncoder(
+                    input_channels=config.context_input_channels,
+                    embedding_dim=config.context_embedding_dim,
+                    num_layers=config.context_encoder_layers,
+                    num_heads=4,
+                    dropout=0.1,
+                    max_seq_len=max(config.lookback_length, config.forecast_length) + 256
+                )
 
         self.scheduler = DiffusionScheduler(
             num_steps=config.num_diffusion_steps,
@@ -172,7 +164,6 @@ class DiffusionTSF(nn.Module):
         logger.info(f"  Lookback: {config.lookback_length}, Forecast: {config.forecast_length}")
         logger.info(f"  Image size: {config.image_height} x W")
         logger.info(f"  Input channels: {config.backbone_in_channels} (data: {config.num_variables}, aux: {config.num_aux_channels}, guidance: {config.guidance_channels})")
-        logger.info(f"  Conditioning mode: {config.conditioning_mode}")
         logger.info(f"  Diffusion steps: {config.num_diffusion_steps}")
         logger.info(f"  Coordinate channel: {config.use_coordinate_channel}")
         logger.info(f"  Time ramp channel: {config.use_time_ramp}")
@@ -188,9 +179,8 @@ class DiffusionTSF(nn.Module):
                 logger.info(f"  Variate-factorized: enabled (B*V={config.num_variables} per forward, shared weights)")
             if config.use_dilated_middle:
                 logger.info(f"  Dilated middle block: enabled (dilations=1,2,4,8)")
-            if config.use_hybrid_condition:
-                enc_type = "VariateCrossEncoder" if config.variate_factorized else "TimeSeriesContextEncoder"
-                logger.info(f"  Hybrid conditioning: {enc_type} (context_dim={config.context_embedding_dim}, layers={config.context_encoder_layers})")
+            enc_type = "VariateCrossEncoder" if config.variate_factorized else "TimeSeriesContextEncoder"
+            logger.info(f"  Context encoder: {enc_type} (context_dim={config.context_embedding_dim}, layers={config.context_encoder_layers})")
 
     def to(self, device):
         super().to(device)

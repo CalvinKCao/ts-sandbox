@@ -17,7 +17,6 @@ class TestArchitecture:
             num_res_blocks=1,
             attention_levels=[1],
             image_height=height,
-            conditioning_mode="visual_concat",
             visual_cond_channels=1
         )
         
@@ -29,7 +28,7 @@ class TestArchitecture:
         out = model(x, t, cond)
         assert out.shape == (batch, out_ch, height, width)
 
-    def test_unet_hybrid_shapes(self):
+    def test_unet_with_context_shapes(self):
         batch, in_ch, height, width = 2, 3, 32, 16
         out_ch = 1
         model = ConditionalUNet2D(
@@ -37,17 +36,16 @@ class TestArchitecture:
             out_channels=out_ch,
             channels=[8, 16],
             num_res_blocks=1,
-            use_hybrid_condition=True,
+            attention_levels=[1],
             context_dim=16,
             image_height=height
         )
-        
+
         x = torch.randn(batch, in_ch, height, width)
         t = torch.randint(0, 10, (batch,))
         cond = torch.randn(batch, 1, height, width)
-        # Context: (batch, seq, dim)
         context = torch.randn(batch, 10, 16)
-        
+
         out = model(x, t, cond, encoder_hidden_states=context)
         assert out.shape == (batch, out_ch, height, width)
 

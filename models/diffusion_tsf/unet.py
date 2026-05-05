@@ -524,7 +524,7 @@ class ResidualBlock(nn.Module):
 
 
 class DownBlock(nn.Module):
-    """Downsampling block: ResBlocks + optional attention + downsample."""
+    """Downsampling block: ResBlocks + optional SpatialTransformerBlock + downsample."""
     
     def __init__(
         self,
@@ -533,7 +533,6 @@ class DownBlock(nn.Module):
         time_emb_dim: int,
         num_res_blocks: int = 2,
         use_attention: bool = False,
-        use_cross_attention: bool = False,
         context_dim: int = 128,
         num_groups: int = 8,
         kernel_size: Tuple[int, int] = (3, 3),
@@ -548,66 +547,38 @@ class DownBlock(nn.Module):
                 ResidualBlock(in_ch, out_channels, time_emb_dim, num_groups,
                               kernel_size=kernel_size, separable_kernel=separable_kernel)
             )
-        
-        # Simple self-attention (optional) - legacy mode without cross-attention
-        self.use_attention = use_attention and not use_cross_attention
-        if self.use_attention:
-            self.attention = nn.MultiheadAttention(out_channels, num_heads=4, batch_first=True)
-            self.attn_norm = nn.GroupNorm(num_groups, out_channels)
-        
-        # Spatial Transformer with cross-attention (for hybrid conditioning)
-        self.use_cross_attention = use_cross_attention
-        if use_cross_attention:
+
+        self.use_attention = use_attention
+        if use_attention:
             self.spatial_transformer = SpatialTransformerBlock(
                 channels=out_channels,
                 context_dim=context_dim,
                 num_heads=4,
                 num_groups=num_groups
             )
-        
-        # Downsample: strided conv with same kernel proportions
-        # Padding calculated for output size = ceil(input_size / 2)
+
         downsample_padding = (kernel_size[0] // 2, kernel_size[1] // 2)
         self.downsample = nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, stride=2, padding=downsample_padding)
-    
+
     def forward(
         self,
         x: torch.Tensor,
         t_emb: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            x: Input tensor of shape (batch, in_channels, height, width)
-            t_emb: Time embedding of shape (batch, time_emb_dim)
-            encoder_hidden_states: Context from TimeSeriesContextEncoder,
-                                   shape (batch, seq_len, context_dim)
-        
-        Returns:
-            (downsampled output, skip connection output before downsampling)
-        """
         for res_block in self.res_blocks:
             x = res_block(x, t_emb)
-        
+
         if self.use_attention:
-            b, c, h, w = x.shape
-            # Reshape for attention: (batch, h*w, channels)
-            x_flat = x.view(b, c, h * w).permute(0, 2, 1)
-            x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
-            attn_out, _ = self.attention(x_norm, x_norm, x_norm)
-            x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
-        
-        if self.use_cross_attention:
             x = self.spatial_transformer(x, encoder_hidden_states)
-        
+
         skip = x
         x = self.downsample(x)
-        
         return x, skip
 
 
 class UpBlock(nn.Module):
-    """Upsampling block: upsample + concat skip + ResBlocks + optional attention."""
+    """Upsampling block: upsample + concat skip + ResBlocks + optional SpatialTransformerBlock."""
     
     def __init__(
         self,
@@ -617,7 +588,6 @@ class UpBlock(nn.Module):
         time_emb_dim: int,
         num_res_blocks: int = 2,
         use_attention: bool = False,
-        use_cross_attention: bool = False,
         context_dim: int = 128,
         num_groups: int = 8,
         kernel_size: Tuple[int, int] = (3, 3),
@@ -635,23 +605,16 @@ class UpBlock(nn.Module):
                 ResidualBlock(in_ch, out_channels, time_emb_dim, num_groups,
                               kernel_size=kernel_size, separable_kernel=separable_kernel)
             )
-        
-        # Simple self-attention (optional) - legacy mode without cross-attention
-        self.use_attention = use_attention and not use_cross_attention
-        if self.use_attention:
-            self.attention = nn.MultiheadAttention(out_channels, num_heads=4, batch_first=True)
-            self.attn_norm = nn.GroupNorm(num_groups, out_channels)
-        
-        # Spatial Transformer with cross-attention (for hybrid conditioning)
-        self.use_cross_attention = use_cross_attention
-        if use_cross_attention:
+
+        self.use_attention = use_attention
+        if use_attention:
             self.spatial_transformer = SpatialTransformerBlock(
                 channels=out_channels,
                 context_dim=context_dim,
                 num_heads=4,
                 num_groups=num_groups
             )
-    
+
     def forward(
         self,
         x: torch.Tensor,
@@ -659,39 +622,19 @@ class UpBlock(nn.Module):
         t_emb: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """
-        Args:
-            x: Input tensor of shape (batch, in_channels, height, width)
-            skip: Skip connection tensor of shape (batch, skip_channels, height, width)
-            t_emb: Time embedding of shape (batch, time_emb_dim)
-            encoder_hidden_states: Context from TimeSeriesContextEncoder,
-                                   shape (batch, seq_len, context_dim)
-        
-        Returns:
-            Output tensor of shape (batch, out_channels, height, width)
-        """
         x = self.upsample(x)
-        
-        # Handle size mismatch from non-square images
+
         if x.shape[2:] != skip.shape[2:]:
             x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
-        
-        # Concatenate skip connection
+
         x = torch.cat([x, skip], dim=1)
-        
+
         for res_block in self.res_blocks:
             x = res_block(x, t_emb)
-        
+
         if self.use_attention:
-            b, c, h, w = x.shape
-            x_flat = x.view(b, c, h * w).permute(0, 2, 1)
-            x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
-            attn_out, _ = self.attention(x_norm, x_norm, x_norm)
-            x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
-        
-        if self.use_cross_attention:
             x = self.spatial_transformer(x, encoder_hidden_states)
-        
+
         return x
 
 
@@ -762,17 +705,12 @@ class DilatedMiddleBlock(nn.Module):
         num_groups: int = 8,
         kernel_size: Tuple[int, int] = (3, 3),
         dilation_factors: List[int] = [1, 2, 4, 8],
-        use_cross_attention: bool = False,
         context_dim: int = 128
     ):
         super().__init__()
-        
-        self.use_cross_attention = use_cross_attention
-        
-        # Initial ResBlock to transform features
+
         self.res_in = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
-        
-        # Dilated convolution stack - each with increasing dilation on time axis
+
         self.dilated_blocks = nn.ModuleList()
         for d in dilation_factors:
             self.dilated_blocks.append(
@@ -780,227 +718,89 @@ class DilatedMiddleBlock(nn.Module):
                     channels=channels,
                     time_emb_dim=time_emb_dim,
                     kernel_size=kernel_size,
-                    dilation=(1, d),  # Only dilate on width (time) axis
+                    dilation=(1, d),
                     num_groups=num_groups
                 )
             )
-        
-        # Self-attention for global context (if not using cross-attention)
-        if not use_cross_attention:
-            self.attention = nn.MultiheadAttention(channels, num_heads=4, batch_first=True)
-            self.attn_norm = nn.GroupNorm(num_groups, channels)
-        else:
-            # Spatial Transformer with cross-attention
-            self.spatial_transformer = SpatialTransformerBlock(
-                channels=channels,
-                context_dim=context_dim,
-                num_heads=4,
-                num_groups=num_groups
-            )
-        
-        # Final ResBlock
+
+        self.spatial_transformer = SpatialTransformerBlock(
+            channels=channels,
+            context_dim=context_dim,
+            num_heads=4,
+            num_groups=num_groups
+        )
+
         self.res_out = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
-        
-        # Log the receptive field calculation
+
         rf = sum([(kernel_size[1] - 1) * d for d in dilation_factors]) + 1
         logger.info(f"DilatedMiddleBlock: dilations={dilation_factors}, temporal receptive field={rf} steps")
-    
+
     def forward(
         self,
         x: torch.Tensor,
         t_emb: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """
-        Args:
-            x: Input tensor of shape (batch, channels, height, width)
-            t_emb: Time embedding of shape (batch, time_emb_dim)
-            encoder_hidden_states: Context from TimeSeriesContextEncoder,
-                                   shape (batch, seq_len, context_dim)
-        
-        Returns:
-            Output tensor of shape (batch, channels, height, width)
-        """
-        # Initial transformation
         x = self.res_in(x, t_emb)
-        
-        # Apply dilated convolutions
         for dilated_block in self.dilated_blocks:
             x = dilated_block(x, t_emb)
-        
-        # Attention
-        if self.use_cross_attention:
-            x = self.spatial_transformer(x, encoder_hidden_states)
-        else:
-            b, c, h, w = x.shape
-            x_flat = x.view(b, c, h * w).permute(0, 2, 1)
-            x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
-            attn_out, _ = self.attention(x_norm, x_norm, x_norm)
-            x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
-        
-        # Final transformation
+        x = self.spatial_transformer(x, encoder_hidden_states)
         x = self.res_out(x, t_emb)
         return x
 
 
 class MiddleBlock(nn.Module):
-    """Middle block: ResBlock + Attention + ResBlock.
-    
-    Legacy version without dilated convolutions.
-    For expanded receptive field, use DilatedMiddleBlock instead.
-    """
-    
+    """Middle block: ResBlock + SpatialTransformerBlock + ResBlock."""
+
     def __init__(
         self,
         channels: int,
         time_emb_dim: int,
         num_groups: int = 8,
         kernel_size: Tuple[int, int] = (3, 3),
-        use_cross_attention: bool = False,
         context_dim: int = 128,
         separable_kernel: bool = False,
     ):
         super().__init__()
-        self.use_cross_attention = use_cross_attention
-
         self.res1 = ResidualBlock(channels, channels, time_emb_dim, num_groups,
                                   kernel_size=kernel_size, separable_kernel=separable_kernel)
-
-        if not use_cross_attention:
-            self.attention = nn.MultiheadAttention(channels, num_heads=4, batch_first=True)
-            self.attn_norm = nn.GroupNorm(num_groups, channels)
-        else:
-            self.spatial_transformer = SpatialTransformerBlock(
-                channels=channels,
-                context_dim=context_dim,
-                num_heads=4,
-                num_groups=num_groups
-            )
-
+        self.spatial_transformer = SpatialTransformerBlock(
+            channels=channels,
+            context_dim=context_dim,
+            num_heads=4,
+            num_groups=num_groups
+        )
         self.res2 = ResidualBlock(channels, channels, time_emb_dim, num_groups,
                                   kernel_size=kernel_size, separable_kernel=separable_kernel)
-    
+
     def forward(
         self,
         x: torch.Tensor,
         t_emb: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """
-        Args:
-            x: Input tensor of shape (batch, channels, height, width)
-            t_emb: Time embedding of shape (batch, time_emb_dim)
-            encoder_hidden_states: Context from TimeSeriesContextEncoder,
-                                   shape (batch, seq_len, context_dim)
-        
-        Returns:
-            Output tensor of shape (batch, channels, height, width)
-        """
         x = self.res1(x, t_emb)
-        
-        if self.use_cross_attention:
-            x = self.spatial_transformer(x, encoder_hidden_states)
-        else:
-            b, c, h, w = x.shape
-            x_flat = x.view(b, c, h * w).permute(0, 2, 1)
-            x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
-            attn_out, _ = self.attention(x_norm, x_norm, x_norm)
-            x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
-        
+        x = self.spatial_transformer(x, encoder_hidden_states)
         x = self.res2(x, t_emb)
         return x
 
 
-class ConditioningEncoder(nn.Module):
-    """CNN encoder for the past context image with global context.
-    
-    Processes the past 2D representation to produce conditioning features.
-    Uses a combination of:
-    1. Local features via CNN
-    2. Global temporal context via pooling + broadcast
-    
-    Note: When use_coordinate_channel is enabled, in_channels=2 (data + vertical coords).
-    """
-    
-    def __init__(self, in_channels: int = 1, out_channels: int = 64, height: int = 128, kernel_size: Tuple[int, int] = (3, 3)):
-        super().__init__()
-        self.out_channels = out_channels
-        
-        # Calculate padding for 'same' output size
-        padding = (kernel_size[0] // 2, kernel_size[1] // 2)
-        
-        # Local feature encoder - now handles variable input channels
-        self.local_encoder = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=kernel_size, padding=padding),
-            nn.SiLU(),
-            nn.Conv2d(32, 64, kernel_size=kernel_size, padding=padding),
-            nn.SiLU(),
-            nn.Conv2d(64, out_channels // 2, kernel_size=kernel_size, padding=padding),
-        )
-        
-        # Global context encoder: pool over time, then project
-        # This captures the overall pattern of the past without losing it to interpolation
-        # Uses height dimension of kernel only (width=1 for pooled temporal dimension)
-        self.global_pool = nn.AdaptiveAvgPool2d((height, 1))  # Pool temporal dim to 1
-        global_kernel = (kernel_size[0], 1)  # Only vertical kernel for global features
-        global_padding = (kernel_size[0] // 2, 0)
-        self.global_proj = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=global_kernel, padding=global_padding),
-            nn.SiLU(),
-            nn.Conv2d(32, out_channels // 2, kernel_size=global_kernel, padding=global_padding),
-        )
-    
-    def forward(self, x: torch.Tensor, target_width: int) -> torch.Tensor:
-        """
-        Args:
-            x: Past context image of shape (batch, 1, height, past_len)
-            target_width: Width of the target (future) image to match
-            
-        Returns:
-            Encoded features of shape (batch, out_channels, height, target_width)
-        """
-        batch, _, height, _ = x.shape
-        
-        # Global context: pool time dimension, then broadcast to target width
-        global_feat = self.global_pool(x)  # (batch, 1, height, 1)
-        global_feat = self.global_proj(global_feat)  # (batch, out_channels//2, height, 1)
-        global_feat = global_feat.expand(-1, -1, -1, target_width)  # Broadcast to target width
-        
-        # Local features: use the END of the past context (most relevant for forecasting)
-        # Take the last `target_width` timesteps or interpolate if past is shorter
-        local_x = x[:, :, :, -target_width:] if x.shape[3] >= target_width else \
-                  F.interpolate(x, size=(height, target_width), mode='bilinear', align_corners=False)
-        local_feat = self.local_encoder(local_x)  # (batch, out_channels//2, height, target_width)
-        
-        # Concatenate global and local features
-        combined = torch.cat([global_feat, local_feat], dim=1)  # (batch, out_channels, height, target_width)
-        
-        return combined
-
 
 class ConditionalUNet2D(nn.Module):
     """Conditional 2D U-Net for diffusion-based time series forecasting.
-    
-    The model predicts noise ε given:
-    - Noisy future image x_t
-    - Diffusion timestep t
-    - Past context image (conditioning)
-    - Optional: 1D context embeddings from TimeSeriesContextEncoder (hybrid mode)
-    
-    Conditioning modes (controlled by conditioning_mode parameter):
-    - "visual_concat": Directly concatenate past 2D image channels to input.
-                       The past visual is passed through WITHOUT the ConditioningEncoder,
-                       allowing the model to directly "see" the past trajectory pixels.
-    - "vector_embedding": Use ConditioningEncoder to extract local/global features,
-                          then concatenate encoded features to input. (Original behavior)
-    
-    When use_hybrid_condition=True, cross-attention layers are added at attention_levels
-    to attend to 1D context embeddings from TimeSeriesContextEncoder.
-    
+
+    Predicts noise ε given noisy future image, diffusion timestep, past context image
+    (concatenated directly as visual channels), and optional per-variate context tokens
+    from a VariateCrossEncoder.
+
+    Attention at levels listed in attention_levels uses SpatialTransformerBlock
+    (self-attention + cross-attention to encoder_hidden_states when provided).
+    The middle block always has a SpatialTransformerBlock.
+
     Note: When use_coordinate_channel is enabled, in_channels includes aux channels.
     The output channels = num_variables (predicted noise for each variable).
     """
-    
+
     def __init__(
         self,
         in_channels: int = 1,
@@ -1009,16 +809,12 @@ class ConditionalUNet2D(nn.Module):
         num_res_blocks: int = 2,
         attention_levels: List[int] = [1, 2, 3],
         time_emb_dim: int = 256,
-        cond_channels: int = 64,
         num_groups: int = 8,
         image_height: int = 128,
         kernel_size: Tuple[int, int] = (3, 3),
         use_dilated_middle: bool = False,
-        use_hybrid_condition: bool = False,
         context_dim: int = 128,
-        conditioning_mode: str = "visual_concat",
         visual_cond_channels: int = 1,
-        cond_in_channels: Optional[int] = None,
         use_gradient_checkpointing: bool = False,
         separable_kernel: bool = False,
     ):
@@ -1028,65 +824,39 @@ class ConditionalUNet2D(nn.Module):
             out_channels: Number of output channels (num_variables for noise prediction)
             channels: Channel dimensions at each U-Net level
             num_res_blocks: Number of residual blocks per level
-            attention_levels: Which levels to apply self-attention (0-indexed)
+            attention_levels: Loop indices (0-indexed into channels[1:]) where a
+                              SpatialTransformerBlock is added after the residual stack.
+                              The middle block always has one regardless of this list.
             time_emb_dim: Dimension of time embedding
-            cond_channels: Number of channels from conditioning encoder (vector_embedding mode)
             num_groups: Number of groups for GroupNorm
             image_height: Height of the 2D image representation
-            kernel_size: Tuple (height, width) for convolutional kernels.
-                         Allows rectangular kernels (e.g., (3, 5) for 3 height, 5 width).
-                         Height = value axis, Width = temporal axis.
-            use_dilated_middle: If True, use DilatedMiddleBlock with exponentially
-                               increasing dilations for expanded temporal receptive field.
-            use_hybrid_condition: If True, enable cross-attention with 1D context embeddings
-                                  from TimeSeriesContextEncoder at attention levels.
-            context_dim: Dimension of 1D context embeddings (from TimeSeriesContextEncoder).
-            conditioning_mode: "visual_concat" or "vector_embedding". Controls how past
-                              context is fed to the model.
-            visual_cond_channels: Number of visual conditioning channels (used in visual_concat mode).
-                                  Typically equals num_variables (past image channels).
-            cond_in_channels: Number of input channels for the ConditioningEncoder.
-                              If None, defaults to in_channels.
-                              Used when noisy input x and past cond have different channel counts
-                              (e.g. when guidance channels are added to x but not cond).
+            kernel_size: (height, width) kernel; height = value axis, width = time axis.
+            use_dilated_middle: If True, use DilatedMiddleBlock (dilations 1,2,4,8 on time axis).
+            context_dim: Dimension of context tokens from VariateCrossEncoder.
+            visual_cond_channels: Number of past image channels concatenated to the noisy input.
         """
         super().__init__()
-        
+
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.channels = channels
         self.kernel_size = kernel_size
-        self.use_hybrid_condition = use_hybrid_condition
-        self.conditioning_mode = conditioning_mode
         self.visual_cond_channels = visual_cond_channels
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.separable_kernel = separable_kernel
-        
-        # Default cond_in_channels to in_channels if not specified
-        if cond_in_channels is None:
-            cond_in_channels = in_channels
-        
+
         # Calculate padding for 'same' output size
         padding = (kernel_size[0] // 2, kernel_size[1] // 2)
-        
+
         # Time embedding network
         self.time_mlp = nn.Sequential(
             nn.Linear(time_emb_dim, time_emb_dim * 4),
             nn.SiLU(),
             nn.Linear(time_emb_dim * 4, time_emb_dim)
         )
-        
-        # Conditioning encoder - only used in vector_embedding mode
-        if conditioning_mode == "vector_embedding":
-            self.cond_encoder = ConditioningEncoder(
-                in_channels=cond_in_channels, out_channels=cond_channels, height=image_height, kernel_size=kernel_size
-            )
-            init_conv_in_channels = in_channels + cond_channels
-        else:
-            # visual_concat mode: no ConditioningEncoder, past visual is concatenated directly
-            self.cond_encoder = None
-            # Input = noisy_future (in_channels) + past_visual (visual_cond_channels)
-            init_conv_in_channels = in_channels + visual_cond_channels
+
+        # Input = noisy_future (in_channels) + past_visual (visual_cond_channels)
+        init_conv_in_channels = in_channels + visual_cond_channels
         
         # Initial convolution with configurable kernel size
         self.init_conv = nn.Conv2d(init_conv_in_channels, channels[0], kernel_size=kernel_size, padding=padding)
@@ -1095,13 +865,10 @@ class ConditionalUNet2D(nn.Module):
         self.down_blocks = nn.ModuleList()
         in_ch = channels[0]
         for i, out_ch in enumerate(channels[1:]):
-            use_attn = i in attention_levels
-            use_cross_attn = use_hybrid_condition and use_attn
             self.down_blocks.append(
                 DownBlock(
                     in_ch, out_ch, time_emb_dim, num_res_blocks,
-                    use_attention=use_attn,
-                    use_cross_attention=use_cross_attn,
+                    use_attention=(i in attention_levels),
                     context_dim=context_dim,
                     num_groups=num_groups,
                     kernel_size=kernel_size,
@@ -1110,17 +877,15 @@ class ConditionalUNet2D(nn.Module):
             )
             in_ch = out_ch
 
-        # Middle block
+        # Middle block (always has SpatialTransformerBlock)
         if use_dilated_middle:
             self.middle = DilatedMiddleBlock(
                 channels[-1], time_emb_dim, num_groups, kernel_size=kernel_size,
-                use_cross_attention=use_hybrid_condition,
                 context_dim=context_dim
             )
         else:
             self.middle = MiddleBlock(
                 channels[-1], time_emb_dim, num_groups, kernel_size=kernel_size,
-                use_cross_attention=use_hybrid_condition,
                 context_dim=context_dim,
                 separable_kernel=separable_kernel,
             )
@@ -1132,13 +897,10 @@ class ConditionalUNet2D(nn.Module):
             in_ch = reversed_channels[i]
             out_ch = reversed_channels[i + 1]
             skip_ch = reversed_channels[i]
-            use_attn = (len(channels) - 2 - i) in attention_levels
-            use_cross_attn = use_hybrid_condition and use_attn
             self.up_blocks.append(
                 UpBlock(
                     in_ch, out_ch, skip_ch, time_emb_dim, num_res_blocks,
-                    use_attention=use_attn,
-                    use_cross_attention=use_cross_attn,
+                    use_attention=((len(channels) - 2 - i) in attention_levels),
                     context_dim=context_dim,
                     num_groups=num_groups,
                     kernel_size=kernel_size,
@@ -1151,13 +913,8 @@ class ConditionalUNet2D(nn.Module):
         self.final_conv = nn.Conv2d(channels[0], out_channels, kernel_size=kernel_size, padding=padding)
         
         logger.info(f"ConditionalUNet2D initialized with channels={channels}, kernel_size={kernel_size}")
-        logger.info(f"  Conditioning mode: {conditioning_mode}")
-        if conditioning_mode == "visual_concat":
-            logger.info(f"  Visual concat: {visual_cond_channels} past image channels directly concatenated")
-        else:
-            logger.info(f"  Vector embedding: ConditioningEncoder with {cond_channels} output channels")
-        if use_hybrid_condition:
-            logger.info(f"  Hybrid conditioning enabled: cross-attention with context_dim={context_dim}")
+        logger.info(f"  Visual concat: {visual_cond_channels} past image channels directly concatenated")
+        logger.info(f"  attention_levels={attention_levels}, context_dim={context_dim}")
     
     def forward(
         self,
@@ -1170,12 +927,10 @@ class ConditionalUNet2D(nn.Module):
         Args:
             x: Noisy future image of shape (batch, in_channels, height, future_len)
             t: Diffusion timesteps of shape (batch,)
-            cond: Past context conditioning:
-                  - In "vector_embedding" mode: shape (batch, in_channels, height, past_len)
-                  - In "visual_concat" mode: shape (batch, visual_cond_channels, height, future_len)
-                    Already cropped/interpolated to target width by the caller.
-            encoder_hidden_states: Optional 1D context embeddings from TimeSeriesContextEncoder,
-                                   shape (batch, seq_len, context_dim). Required if use_hybrid_condition=True.
+            cond: Past context image of shape (batch, visual_cond_channels, height, future_len),
+                  already cropped/interpolated to target width by the caller.
+            encoder_hidden_states: Optional per-variate context tokens from VariateCrossEncoder,
+                                   shape (batch, seq_len, context_dim). Cross-attn is skipped when None.
             
         Returns:
             Predicted noise of shape (batch, out_channels, height, future_len)
@@ -1184,15 +939,8 @@ class ConditionalUNet2D(nn.Module):
             t_emb = get_timestep_embedding(t, self.time_mlp[0].in_features)
             t_emb = self.time_mlp(t_emb)
 
-        with _unet_prof.section("cond_prepare"):
-            if self.conditioning_mode == "vector_embedding":
-                target_width = x.shape[3]
-                cond_features = self.cond_encoder(cond, target_width)
-            else:
-                cond_features = cond
-
         with _unet_prof.section("cat_input"):
-            x = torch.cat([x, cond_features], dim=1)
+            x = torch.cat([x, cond], dim=1)
 
         with _unet_prof.section("init_conv"):
             x = self.init_conv(x)

@@ -816,7 +816,6 @@ def create_diffusion_model(
     lookback: int = LOOKBACK_LENGTH,
     horizon: int = FORECAST_LENGTH,
     use_guidance: bool = True,
-    use_hybrid_condition: bool = True,
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
     diffusion_type: str = "gaussian",
@@ -850,7 +849,6 @@ def create_diffusion_model(
         unet_kernel_size=(3, 9),
         attention_levels=[2],
         num_res_blocks=2,
-        use_hybrid_condition=use_hybrid_condition,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         use_amp=USE_AMP,
         separable_kernel=USE_SEPARABLE_KERNEL,
@@ -1548,7 +1546,6 @@ def pretrain_diffusion(
     resume: bool = False,
     export_best_epochs: Optional[List[int]] = None,
     use_guidance_channel: bool = True,
-    use_hybrid_condition: bool = True,
     num_diffusion_steps: Optional[int] = None,
     image_height: Optional[int] = None,
 ) -> str:
@@ -1561,9 +1558,8 @@ def pretrain_diffusion(
     """
     logger.info("=" * 60)
     logger.info(
-        "PHASE 1C-2: Diffusion pretraining (guidance_channel=%s, hybrid_condition=%s)",
+        "PHASE 1C-2: Diffusion pretraining (guidance_channel=%s)",
         use_guidance_channel,
-        use_hybrid_condition,
     )
     logger.info(f"Samples: {n_samples}, Epochs: {epochs}, Patience: {patience}")
     logger.info(f"Params: {best_params}")
@@ -1609,7 +1605,6 @@ def pretrain_diffusion(
 
     model = create_diffusion_model(
         use_guidance=use_guidance_channel,
-        use_hybrid_condition=use_hybrid_condition,
         diffusion_type=DIFFUSION_TYPE,
         num_diffusion_steps=num_diffusion_steps,
         image_height=image_height,
@@ -1912,7 +1907,6 @@ def finetune_on_dataset(
     checkpoint_dir: str = CHECKPOINT_DIR,
     smoke_test: bool = False,
     use_guidance_channel: bool = True,
-    use_hybrid_condition: bool = True,
     num_diffusion_steps: Optional[int] = None,
     image_height: Optional[int] = None,
 ) -> Tuple[str, Dict]:
@@ -1956,7 +1950,6 @@ def finetune_on_dataset(
 
         model = create_diffusion_model(
             use_guidance=True,
-            use_hybrid_condition=use_hybrid_condition,
             diffusion_type=DIFFUSION_TYPE,
             num_diffusion_steps=num_diffusion_steps,
             image_height=image_height,
@@ -1975,7 +1968,6 @@ def finetune_on_dataset(
     else:
         model = create_diffusion_model(
             use_guidance=False,
-            use_hybrid_condition=use_hybrid_condition,
             diffusion_type=DIFFUSION_TYPE,
             num_diffusion_steps=num_diffusion_steps,
             image_height=image_height,
