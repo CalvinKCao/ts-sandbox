@@ -41,7 +41,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --error=/dev/null \
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            "$SCRIPT_DIR/slurm_unet_fullvar.sh" "$@"
+            "$SCRIPT_DIR/run.sh" "$@"
     else
         echo "Submitting FULL RUN (L40S, 50GB, 1 day wall — extend --time if needed)..."
         sbatch \
@@ -57,7 +57,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --error=/dev/null \
             --mail-type=BEGIN,END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            "$SCRIPT_DIR/slurm_unet_fullvar.sh" "$@"
+            "$SCRIPT_DIR/run.sh" "$@"
     fi
     exit 0
 fi
