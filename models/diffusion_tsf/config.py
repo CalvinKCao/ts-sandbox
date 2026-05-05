@@ -153,11 +153,6 @@ class DiffusionTSFConfig:
     # SpatialTransformerBlock (self+cross attn) always used at attention_levels.
     # use_hybrid_condition removed — attention_levels is the single knob.
     context_embedding_dim: int = 256
-    context_encoder_layers: int = 2   # only used by VariateCrossEncoder (legacy path)
-
-    # iTransformerTokenAdapter: use iTransformer enc_out instead of summary stats.
-    # requires use_guidance_channel=True and an iTransformerGuidance model.
-    itrans_token_encoder: bool = True
     itrans_d_model: int = 512         # must match iTransformer d_model at construction
     
     # train

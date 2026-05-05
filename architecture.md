@@ -217,22 +217,22 @@ Why so much bookkeeping:
 
 ### 6.2 Which context encoder gets created?
 
-`DiffusionTSF` now uses a single context path for the U-Net: `VariateCrossEncoder`.
+`DiffusionTSF` uses `iTransformerTokenAdapter` as the sole context encoder for the U-Net.
 
 Constructor behavior in U-Net mode:
-- Build `VariateCrossEncoder`.
-- Input expectation: `(B, V, T)` normalized series (typically guidance forecast when available, otherwise normalized past).
-- Output tokens: `(B, V, context_dim)`, i.e. one token per variate.
-- This applies even when `V=1` (the encoder still runs; cross-variate attention simply degenerates to one token).
+- Build `iTransformerTokenAdapter(d_model=itrans_d_model, context_dim=context_embedding_dim)`.
+- Input: raw past `(B, V, L)` fed through the frozen iTransformer encoder → `(B, V, d_model)`, then projected + variate-identity-embedded → `(B, V, context_dim)`.
+- Output tokens: `(B, V, context_dim)`, one token per variate.
+- Works for `V=1` as well (cross-variate attention degenerates to one token, variate identity still applies).
 
 Why this exists:
 - 2D occupancy conditioning is strong at local geometric structure.
-- Cross-attention tokens add a separate symbolic context stream (temporal or cross-variate) that the U-Net can query while denoising.
+- Cross-attention tokens add a separate symbolic context stream carrying iTransformer's rich lookback representation, complementary to the forecast ghost image.
 - In factorized mode this is especially useful: each variate map is denoised with shared U-Net weights, while cross-variate coupling is reintroduced through those variate tokens at attention blocks/bottleneck.
 
 Repo-root shell script default behavior:
 - The root Slurm wrappers call `models.diffusion_tsf.train_multivariate_pipeline`.
-- In this code path, U-Net runs with factorized diffusion and `VariateCrossEncoder` context by design.
+- In this code path, U-Net runs with factorized diffusion and `iTransformerTokenAdapter` context.
 
 ### 6.3 `_forward_factorized`: full tensor trail and why each object exists
 
@@ -342,7 +342,7 @@ Important defaults:
 - `num_groups=8`: GroupNorm groups.
 - `kernel_size=(3,3)`: local convolution support over (value-axis, time-axis).
 - `conditioning_mode="visual_concat"` in default pipeline.
-- Cross-attention route is provided by `VariateCrossEncoder` in the factorized U-Net path.
+- Cross-attention route is provided by `iTransformerTokenAdapter` in the factorized U-Net path.
 
 Why this layout:
 - It is a standard, strong tradeoff for medium-sized diffusion tasks.
@@ -421,8 +421,7 @@ In factorized multivariate mode, the U-Net predicts one target variate per forwa
 an all-variates-at-once output head.
 
 Cross-variate information is still global: `encoder_hidden_states` comes from
-`VariateCrossEncoder`, which runs over all V variates and emits one token per variate
-`(B, V, context_dim)`.
+`iTransformerTokenAdapter`, which emits one token per variate `(B, V, context_dim)`.
 Before the U-Net call that tensor is broadcast so every variate slot gets all V tokens:
 
 ```python
@@ -502,7 +501,7 @@ Why:
 
 The U-Net cross-attention in §7.6 needs something to attend *to* — a sequence of tokens with meaningful content. That sequence comes from a **context encoder** that runs before the U-Net on the original 1D time series. This section explains what each encoder does step by step.
 
-The U-Net path uses `iTransformerTokenAdapter` (default, guided path) or `VariateCrossEncoder` (legacy/non-guided fallback) for cross-attention context tokens.
+The U-Net path uses `iTransformerTokenAdapter` for cross-attention context tokens.
 
 ### 8.1 `iTransformerTokenAdapter` — default for guided multivariate runs
 
@@ -549,16 +548,11 @@ The U-Net cross-attention then uses the `H*W` spatial feature tokens as queries 
 **When `get_encoder_tokens` is called.**
 Both training and inference call `_get_cross_variate_context(..., past_raw=past)` once, before any U-Net calls. The resulting `ctx_flat` is captured by closure and reused across all DDIM steps — zero redundant computation.
 
-### 8.1-legacy `VariateCrossEncoder` — non-guided / ablation fallback
-
-Used when `itrans_token_encoder=False` or `use_guidance_channel=False`. Takes `(B, V, T)` and computes per-variate (mean, trend, std) over a trailing window of 32 steps, projects to `context_dim`, then runs a small 2-layer transformer across V tokens. Kept for ablation and non-guided univariate runs.
-
 ### 8.2 Summary: what the tokens actually represent
 
 | Encoder | Token sequence length | What one token represents |
 |---|---|---|
-| `iTransformerTokenAdapter` (default) | V | iTransformer lookback embedding projected to 256-d, plus variate identity |
-| `VariateCrossEncoder` (legacy) | V | 3-stat summary of recent level/trend/volatility, after cross-variate attention |
+| `iTransformerTokenAdapter` | V | iTransformer lookback embedding projected to 256-d, plus variate identity |
 
 
 ---

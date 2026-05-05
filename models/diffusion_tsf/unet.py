@@ -24,68 +24,13 @@ from . import unet_profile as _unet_prof
 logger = logging.getLogger(__name__)
 
 
-class VariateCrossEncoder(nn.Module):
-    """compresses V-variate time series into per-variate context tokens for bottleneck cross-attn.
-
-    each variate gets a 3-stat summary (mean, trend, std over a trailing window), then
-    a small transformer runs attention *across* variates so every token picks up
-    info from its neighbors before being fed to the u-net bottleneck.
-
-    designed to work with either iTransformer forecast output (B, V, H_forecast)
-    or the raw normalized past (B, V, L) as input — same encoder either way.
-    """
-
-    STAT_DIM = 3  # mean, trend, std
-
-    def __init__(
-        self,
-        context_dim: int,
-        num_layers: int = 2,
-        num_heads: int = 4,
-        summary_window: int = 32,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        self.summary_window = summary_window
-        self.in_proj = nn.Linear(self.STAT_DIM, context_dim)
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=context_dim,
-            nhead=num_heads,
-            dim_feedforward=context_dim * 4,
-            dropout=dropout,
-            batch_first=True,
-            norm_first=True,  # pre-norm is more stable
-        )
-        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
-        self.norm = nn.LayerNorm(context_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B, V, T) — V-variate normalized time series (any T)
-        Returns:
-            (B, V, context_dim) — one token per variate, after cross-variate attention
-        """
-        w = min(x.shape[-1], self.summary_window)
-        tail = x[..., -w:]                                          # (B, V, w)
-
-        mean  = tail.mean(dim=-1)                                   # (B, V)
-        std   = tail.std(dim=-1).clamp(min=1e-6)                    # (B, V)
-        trend = (tail[..., -1] - tail[..., 0]) / max(w - 1, 1)     # (B, V) — delta per step
-
-        stats = torch.stack([mean, trend, std], dim=-1)             # (B, V, 3)
-        x_emb = self.in_proj(stats)                                 # (B, V, context_dim)
-        x_emb = self.transformer(x_emb)                             # cross-variate attn
-        return self.norm(x_emb)                                     # (B, V, context_dim)
-
 
 class iTransformerTokenAdapter(nn.Module):
     """Projects frozen iTransformer encoder tokens to context_dim for U-Net cross-attention.
 
-    Replaces VariateCrossEncoder in the guided path. Instead of computing crude
-    summary statistics over the iTransformer's predicted horizon, this receives
-    enc_out directly from iTransformer's internal encoder (before its linear
-    projector), which already encodes rich cross-variate lookback structure.
+    Feeds iTransformer enc_out (before its linear projector) through a projection
+    and a learned per-variate identity embedding, producing context tokens for the
+    U-Net bottleneck cross-attention.
 
     A learned per-variate identity embedding is added so the diffusion model
     can distinguish variates within the shared-weight factorized forward passes.
@@ -140,7 +85,7 @@ class CrossAttentionBlock(nn.Module):
         """
         Args:
             query_dim: Dimension of query features (U-Net channel dim)
-            context_dim: Dimension of context features (from VariateCrossEncoder)
+            context_dim: Dimension of context features (from iTransformerTokenAdapter)
             num_heads: Number of attention heads
             head_dim: Dimension per head
             dropout: Dropout rate
@@ -213,7 +158,7 @@ class SpatialTransformerBlock(nn.Module):
     
     Similar to Stable Diffusion's attention blocks, this applies:
     1. Self-attention on flattened 2D features
-    2. Cross-attention with 1D context (from VariateCrossEncoder)
+    2. Cross-attention with 1D context (from iTransformerTokenAdapter)
     3. Feedforward network
     
     Used in the deeper levels of the U-Net for conditioning.
@@ -231,7 +176,7 @@ class SpatialTransformerBlock(nn.Module):
         """
         Args:
             channels: Number of channels in the 2D feature map
-            context_dim: Dimension of context from VariateCrossEncoder
+            context_dim: Dimension of context from iTransformerTokenAdapter
             num_heads: Number of attention heads
             head_dim: Dimension per head
             num_groups: Number of groups for GroupNorm
@@ -658,7 +603,7 @@ class ConditionalUNet2D(nn.Module):
 
     Predicts noise ε given noisy future image, diffusion timestep, past context image
     (concatenated directly as visual channels), and optional per-variate context tokens
-    from a VariateCrossEncoder.
+    from an iTransformerTokenAdapter.
 
     Attention at levels listed in attention_levels uses SpatialTransformerBlock
     (self-attention + cross-attention to encoder_hidden_states when provided).
@@ -698,7 +643,7 @@ class ConditionalUNet2D(nn.Module):
             image_height: Height of the 2D image representation
             kernel_size: (height, width) kernel; height = value axis, width = time axis.
             use_dilated_middle: If True, use DilatedMiddleBlock (dilations 1,2,4,8 on time axis).
-            context_dim: Dimension of context tokens from VariateCrossEncoder.
+            context_dim: Dimension of context tokens from iTransformerTokenAdapter.
             visual_cond_channels: Past image channels concatenated to the noisy input.
         """
         super().__init__()
@@ -790,7 +735,7 @@ class ConditionalUNet2D(nn.Module):
             t: Diffusion timesteps of shape (batch,)
             cond: Past context image of shape (batch, visual_cond_channels, height, future_len),
                   already cropped/interpolated to target width by the caller.
-            encoder_hidden_states: Optional per-variate context tokens from VariateCrossEncoder,
+            encoder_hidden_states: Optional per-variate context tokens from iTransformerTokenAdapter,
                                    shape (batch, seq_len, context_dim). Cross-attn skipped when None.
             
         Returns:

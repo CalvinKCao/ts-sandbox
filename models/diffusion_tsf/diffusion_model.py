@@ -18,7 +18,7 @@ from typing import Dict, Optional, Tuple, Union
 
 from .config import DiffusionTSFConfig
 from .preprocessing import TimeSeriesTo2D, VerticalGaussianBlur
-from .unet import ConditionalUNet2D, VariateCrossEncoder, iTransformerTokenAdapter
+from .unet import ConditionalUNet2D, iTransformerTokenAdapter
 from .diffusion import DiffusionScheduler
 from .guidance import GuidanceModel, LinearRegressionGuidance
 from .metrics import monotonicity_loss
@@ -259,22 +259,12 @@ class DiffusionTSF(nn.Module):
                 use_gradient_checkpointing=config.use_gradient_checkpointing,
             )
 
-            # context encoder: produces (B, V, ctx_dim) tokens for bottleneck cross-attn.
-            # when itrans_token_encoder=True (and use_guidance_channel=True), use the
-            # iTransformer's own encoder output directly instead of crude summary stats.
-            if config.use_guidance_channel and config.itrans_token_encoder:
-                self.context_encoder = iTransformerTokenAdapter(
-                    d_model=config.itrans_d_model,
-                    context_dim=config.context_embedding_dim,
-                    dropout=0.1,
-                )
-            else:
-                self.context_encoder = VariateCrossEncoder(
-                    context_dim=config.context_embedding_dim,
-                    num_layers=config.context_encoder_layers,
-                    num_heads=4,
-                    dropout=0.1,
-                )
+            # projects frozen iTransformer enc_out to context_dim for bottleneck cross-attn
+            self.context_encoder = iTransformerTokenAdapter(
+                d_model=config.itrans_d_model,
+                context_dim=config.context_embedding_dim,
+                dropout=0.1,
+            )
 
         # Diffusion scheduler (not a nn.Module, managed separately)
         self.scheduler = DiffusionScheduler(
@@ -304,17 +294,11 @@ class DiffusionTSF(nn.Module):
                 logger.info(f"  Variate-factorized: enabled (B*V={config.num_variables} per forward, shared weights)")
             if config.use_dilated_middle:
                 logger.info(f"  Dilated middle block: enabled (dilations=1,2,4,8)")
-            if config.use_guidance_channel and config.itrans_token_encoder:
-                logger.info(
-                    f"  Context encoder: iTransformerTokenAdapter "
-                    f"(itrans_d_model={config.itrans_d_model} -> context_dim={config.context_embedding_dim}, "
-                    f"variate_embed=True)"
-                )
-            else:
-                logger.info(
-                    f"  Context encoder: VariateCrossEncoder "
-                    f"(context_dim={config.context_embedding_dim}, layers={config.context_encoder_layers})"
-                )
+            logger.info(
+                f"  Context encoder: iTransformerTokenAdapter "
+                f"(itrans_d_model={config.itrans_d_model} -> context_dim={config.context_embedding_dim}, "
+                f"variate_embed=True)"
+            )
     
     def to(self, device):
         """Move model and scheduler to device."""
@@ -494,40 +478,21 @@ class DiffusionTSF(nn.Module):
             coarse_norm = torch.cat([past_norm[..., -K:], coarse_norm], dim=-1)
         return coarse_norm  # (B, V, forecast_length) normalized
 
-    def _get_cross_variate_context(
-        self,
-        past_norm: torch.Tensor,
-        guidance_forecast_norm: Optional[torch.Tensor] = None,
-        past_raw: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
+    def _get_cross_variate_context(self, past_raw: torch.Tensor) -> Optional[torch.Tensor]:
         """produce (B, V, ctx_dim) encoder_hidden_states for the bottleneck.
 
-        two paths:
-        - iTransformerTokenAdapter: feeds raw past through frozen iTransformer encoder,
-          yielding rich cross-variate lookback tokens. requires past_raw and a guidance
-          model that exposes get_encoder_tokens().
-        - VariateCrossEncoder (legacy): 3-stat summary of iTransformer forecast or past.
+        feeds raw past through the frozen iTransformer encoder and projects to context_dim.
+        returns None when context_encoder is not set (transformer backbone path).
         """
         if self.context_encoder is None:
             return None
-
-        if isinstance(self.context_encoder, iTransformerTokenAdapter):
-            if past_raw is None or self.guidance_model is None or not hasattr(self.guidance_model, 'get_encoder_tokens'):
-                raise RuntimeError(
-                    "iTransformerTokenAdapter requires past_raw and a guidance model with get_encoder_tokens(). "
-                    "Set itrans_token_encoder=False or ensure guidance model is iTransformerGuidance."
-                )
-            enc_tokens = self.guidance_model.get_encoder_tokens(past_raw)   # (B, V, d_model)
-            return self.context_encoder(enc_tokens)                          # (B, V, ctx_dim)
-
-        # VariateCrossEncoder path: summary stats from forecast or past
-        if guidance_forecast_norm is not None:
-            src = guidance_forecast_norm                    # (B, V, H_forecast)
-        elif past_norm.dim() == 3:
-            src = past_norm                                 # (B, V, L)
-        else:
-            src = past_norm.unsqueeze(1)                    # (B, 1, L) univariate edge case
-        return self.context_encoder(src)                    # (B, V, ctx_dim)
+        if self.guidance_model is None or not hasattr(self.guidance_model, 'get_encoder_tokens'):
+            raise RuntimeError(
+                "iTransformerTokenAdapter requires a guidance model with get_encoder_tokens(). "
+                "Ensure guidance model is iTransformerGuidance."
+            )
+        enc_tokens = self.guidance_model.get_encoder_tokens(past_raw)   # (B, V, d_model)
+        return self.context_encoder(enc_tokens)                          # (B, V, ctx_dim)
 
     def _normalize_sequence(
         self,
@@ -790,7 +755,7 @@ class DiffusionTSF(nn.Module):
     
     # ====================================================================
     # Factorized U-Net forward/generate — per-variate shared-weight U-Net
-    # with cross-variate context at the bottleneck via VariateCrossEncoder
+    # with cross-variate context at the bottleneck via iTransformerTokenAdapter
     # ====================================================================
 
     def _forward_factorized(self, past: torch.Tensor, future: torch.Tensor, t: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
@@ -798,7 +763,7 @@ class DiffusionTSF(nn.Module):
 
         the U-Net weights are shared across all V variates. cross-variate info
         is injected at the bottleneck via cross-attention on V context tokens
-        produced by VariateCrossEncoder (from iTransformer output or mean past).
+        from iTransformerTokenAdapter (iTransformer enc_out projected + variate identity).
         """
         B = past.shape[0]
         V = self.config.num_variables
@@ -826,7 +791,7 @@ class DiffusionTSF(nn.Module):
             guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
             guidance_2d = self.encode_to_2d(guidance_forecast_norm, scale_for_diffusion=True)
 
-        ctx = self._get_cross_variate_context(past_norm, guidance_forecast_norm, past_raw=past)
+        ctx = self._get_cross_variate_context(past)
         # ctx: (B, V, ctx_dim) or None
 
         # flatten variates into batch dim for shared-weight U-Net
@@ -919,7 +884,7 @@ class DiffusionTSF(nn.Module):
         null_guide = torch.zeros_like(guide_flat) if (guide_flat is not None and cfg_scale > 1.0) else None
 
         # cross-variate context tokens — fixed for entire sampling trajectory
-        ctx = self._get_cross_variate_context(past_norm, guidance_forecast_norm, past_raw=past)
+        ctx = self._get_cross_variate_context(past)
         ctx_flat      = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
         null_ctx_flat = torch.zeros_like(ctx_flat) if (ctx_flat is not None and cfg_scale > 1.0) else None
 
