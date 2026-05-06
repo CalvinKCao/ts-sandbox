@@ -30,6 +30,9 @@ if [ -z "$SLURM_JOB_ID" ]; then
         if [ "$arg" = "--variant" ] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
             VARIANT="${ARGS[$((i + 1))]}"
         fi
+        if [ "$arg" = "--resume" ] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+            RESUME="${ARGS[$((i + 1))]}"
+        fi
     done
 
     if [ "$IS_SMOKE" -eq 1 ]; then
@@ -50,6 +53,13 @@ if [ -z "$SLURM_JOB_ID" ]; then
             "$SCRIPT_DIR/run.sh" "$@"
     else
         echo "Submitting FULL RUN (L40S, 50GB, 1 day wall — extend --time if needed) [variant=$VARIANT]..."
+        
+        # If resuming, pass RESUME_STEM to the job's environment
+        EXPORT_ARGS="ALL"
+        if [ -n "$RESUME" ]; then
+            EXPORT_ARGS="ALL,RESUME_STEM=$RESUME"
+        fi
+
         sbatch \
             --job-name="unet-fullvar-${VARIANT}" \
             --account=aip-boyuwang \
@@ -63,6 +73,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --error=/dev/null \
             --mail-type=BEGIN,END,FAIL \
             --mail-user=ccao87@uwo.ca \
+            --export="$EXPORT_ARGS" \
             "$SCRIPT_DIR/run.sh" "$@"
     fi
     exit 0
@@ -76,8 +87,16 @@ set -euo pipefail
 
 cd "$SLURM_SUBMIT_DIR"
 _slug="${SLURM_JOB_NAME}"
-ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-${_slug}"
-RUN_RESULTS_ROOT="$SLURM_SUBMIT_DIR/results/$ALLIANCE_RUN_STEM"
+
+# Read RESUME from environment if we passed it via --export
+if [ -n "${RESUME_STEM:-}" ]; then
+    ALLIANCE_RUN_STEM="$RESUME_STEM"
+    echo "Resuming from existing job directory: $ALLIANCE_RUN_STEM"
+else
+    ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-${_slug}"
+fi
+
+RUN_RESULTS_ROOT="$SLURM_SUBMIT_DIR/results/4var/$ALLIANCE_RUN_STEM"
 RUN_LOG_DIR="$RUN_RESULTS_ROOT/logs"
 RUN_CKPT_DIR="$RUN_RESULTS_ROOT/ckpts"
 RUN_DATA_DIR="$RUN_RESULTS_ROOT/datasets"
@@ -260,7 +279,7 @@ while [[ $# -gt 0 ]]; do
         --smoke-test)     SMOKE_TEST="--smoke-test"; shift ;;
         --dataset)        SINGLE_DATASET="$2"; shift 2 ;;
         --pretrain-only)  PRETRAIN_ONLY=1; shift ;;
-        --resume)         RESUME=1; shift ;;
+        --resume)         RESUME="$2"; shift 2 ;;
         --seed)           SEED="$2"; shift 2 ;;
         --variant)        VARIANT="$2"; shift 2 ;;
         --wandb)          EXTRA_PY_ARGS="$EXTRA_PY_ARGS --wandb"; shift ;;
