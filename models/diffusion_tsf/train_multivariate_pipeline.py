@@ -1161,8 +1161,13 @@ def auto_select_max_even_batch_size(
         else:
             hi = mid - 2
 
-    logger.info(f"[AutoBS] {phase_name}: selected batch_size={best} (max tested={max_candidate})")
-    return best
+    # Apply safety margin: a single probe step underestimates sustained
+    # training memory (optimizer state, gradient accumulation, etc.).
+    safe = max(min_candidate, int(best * 0.8))
+    if safe % 2 != 0:
+        safe = max(min_candidate, safe - 1)
+    logger.info(f"[AutoBS] {phase_name}: selected batch_size={safe} (probe_max={best}, tested_max={max_candidate})")
+    return safe
 
 
 def select_itrans_batch_size(
@@ -1919,14 +1924,13 @@ def finetune_on_dataset(
     patience: int = FINETUNE_PATIENCE,
     checkpoint_dir: str = CHECKPOINT_DIR,
     smoke_test: bool = False,
+    dataset_name: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Fine-tune on a dataset with tuned params (DDP-aware)."""
     subset_id = subset_info['subset_id']
     variate_indices = subset_info['variate_indices']
     
-    if '-' in subset_id and subset_id.split('-')[-1].isdigit():
-        dataset_name = '-'.join(subset_id.split('-')[:-1])
-    else:
+    if dataset_name is None:
         dataset_name = subset_id
     
     lr = require_tuned_param(tuned_params, 'learning_rate', f"Fine-tuning ({subset_id})")
@@ -2940,6 +2944,7 @@ def _finetune_and_eval_one_subset(
             subset_info, diff_ckpt, itrans_ckpt, tuned_params,
             epochs=finetune_epochs, patience=finetune_patience,
             checkpoint_dir=CHECKPOINT_DIR, smoke_test=smoke_test,
+            dataset_name=dataset_name,
         )
 
         # Evaluate diffusion
