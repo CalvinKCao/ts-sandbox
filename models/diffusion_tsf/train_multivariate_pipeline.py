@@ -3097,75 +3097,6 @@ def run_itransformer_finetune_hp_tuning(
     return best_params, ckpt_path
 
 
-def finetune_itransformer_on_dataset(
-    dataset_name: str,
-    variate_indices: List[int],
-    pretrained_ckpt: str,
-    best_params: Dict,
-    device: torch.device,
-    epochs: int = PRETRAIN_EPOCHS,
-    patience: int = PRETRAIN_PATIENCE,
-    checkpoint_dir: str = CHECKPOINT_DIR,
-    smoke_test: bool = False,
-    subset_id: Optional[str] = None,
-) -> str:
-    """Fine-tune iTransformer on real data starting from pretrained weights.
-
-    Returns path to the best checkpoint saved during training.
-    """
-    label = subset_id or dataset_name
-    lr = require_tuned_param(best_params, 'learning_rate', f'iTransformer finetune ({label})')
-    dropout = require_tuned_param(best_params, 'dropout', f'iTransformer finetune ({label})')
-    batch_size = require_tuned_param(best_params, 'batch_size', f'iTransformer finetune ({label})')
-
-    logger.info("=" * 60)
-    logger.info(f"iTransformer Finetune: {label}")
-    logger.info(f"Epochs: {epochs}, Patience: {patience}, LR: {lr:.2e}, Dropout: {dropout:.3f}")
-    logger.info("=" * 60)
-
-    train_ds, val_ds, _, _ = load_dataset(
-        dataset_name, variate_indices,
-        stride=24 if not smoke_test else LOOKBACK_LENGTH,
-    )
-    if smoke_test:
-        train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
-        val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
-        epochs = 1
-
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=min(batch_size, 32), shuffle=False, num_workers=0)
-
-    model = create_itransformer(dropout=dropout).to(device)
-    ckpt = torch.load(pretrained_ckpt, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt['model_state_dict'])
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
-    early_stop = EarlyStopping(patience=patience)
-
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    ckpt_path = os.path.join(checkpoint_dir, f'{label}_itransformer_finetuned.pt')
-    best_val_loss = float('inf')
-
-    for epoch in range(epochs):
-        train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss = validate_itransformer(model, val_loader, criterion, device)
-        scheduler.step()
-
-        logger.info(f"[iTrans FT {label}] Epoch {epoch+1}/{epochs} | Val: {val_loss:.4f}")
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save({'model_state_dict': model.state_dict(), 'best_params': best_params}, ckpt_path)
-
-        if early_stop(val_loss):
-            logger.info(f"[iTrans FT {label}] Early stop at epoch {epoch+1}")
-            break
-
-    logger.info(f"iTransformer finetune done ({label}). Best val: {best_val_loss:.4f}")
-    return ckpt_path
-
 
 def _finetune_and_eval_one_subset(
     subset_info, dataset_name, diff_ckpt, itrans_ckpt,
@@ -3174,11 +3105,10 @@ def _finetune_and_eval_one_subset(
 ):
     """Internal: HP tune, fine-tune, and evaluate a single subset.
 
-    Four phases:
-      A. HP tune iTransformer on real data (warm-start from pretrained).
-      B. Full iTransformer finetune on real data with best params.
-      C. HP tune Diffusion on real data (finetuned iTrans as guidance).
-      D. Full Diffusion finetune on real data (finetuned iTrans as guidance).
+    Three phases:
+      A. HP tune iTransformer on real data (warm-start from pretrained) -> best weights promoted.
+      B. HP tune Diffusion on real data (finetuned iTrans as guidance).
+      C. Full Diffusion finetune on real data (finetuned iTrans as guidance).
     """
     subset_id = subset_info['subset_id']
     variate_indices = subset_info['variate_indices']
@@ -3192,11 +3122,10 @@ def _finetune_and_eval_one_subset(
 
     try:
         n_itrans_ft_trials = 1 if smoke_test else N_ITRANS_HP_TRIALS
-        itrans_ft_epochs = 1 if smoke_test else PRETRAIN_EPOCHS
-        itrans_ft_patience = 1 if smoke_test else PRETRAIN_PATIENCE
 
-        # Phase A+B: iTransformer HP tune + full finetune on real data
+        # Phase A: iTransformer HP tune on real data (warm-start from pretrained)
         itrans_hp_cache = os.path.join(CHECKPOINT_DIR, f'{subset_id}_itrans_ft_hp.json')
+        itrans_tune_ckpt = os.path.join(CHECKPOINT_DIR, f'{subset_id}_itrans_ft_hp_best.pt')
         ft_itrans_ckpt = os.path.join(CHECKPOINT_DIR, f'{subset_id}_itransformer_finetuned.pt')
 
         if os.path.exists(ft_itrans_ckpt):
@@ -3215,13 +3144,14 @@ def _finetune_and_eval_one_subset(
                 )
                 with open(itrans_hp_cache, 'w') as f:
                     json.dump(itrans_ft_params, f, indent=2)
-
-            ft_itrans_ckpt = finetune_itransformer_on_dataset(
-                dataset_name, variate_indices, itrans_ckpt, itrans_ft_params,
-                device=device, epochs=itrans_ft_epochs, patience=itrans_ft_patience,
-                checkpoint_dir=CHECKPOINT_DIR, smoke_test=smoke_test,
-                subset_id=subset_id,
-            )
+            
+            if os.path.exists(itrans_tune_ckpt):
+                import shutil
+                shutil.copy2(itrans_tune_ckpt, ft_itrans_ckpt)
+                logger.info(f"  Using best HP tuning model as finetuned iTransformer: {ft_itrans_ckpt}")
+            else:
+                # fallback for missing tune ckpt
+                raise RuntimeError(f"Expected to find {itrans_tune_ckpt} but it was missing.")
 
         # Phase C: Diffusion HP search using finetuned iTransformer as guidance
         # Probe max safe batch size once before HP trials start
@@ -3246,7 +3176,7 @@ def _finetune_and_eval_one_subset(
             torch.cuda.empty_cache()
 
         logger.info(
-            f"Phase 2C — diffusion finetune HP ({subset_id}): "
+            f"Phase 2B — diffusion finetune HP ({subset_id}): "
             f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs} "
             f"(pretrain diffusion HP uses N_DIFFUSION_HP_TRIALS={N_DIFFUSION_HP_TRIALS})..."
         )
