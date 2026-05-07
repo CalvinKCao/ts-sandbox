@@ -10,7 +10,7 @@ Companion to `gaussian_pipeline_extreme_walkthrough.md`. This document is **impl
 
 | Area | Primary files |
 |------|----------------|
-| Slurm orchestration | `slurm_etth2_compare.sh`, `slurm_profile_one_epoch.sh` |
+| Slurm orchestration | `slurm_etth2_compare.sh`, `slurm_profile_one_epoch.sh`, repo-root `run.sh` (Killarney full-variate driver) |
 | CLI / stages / data load | `models/diffusion_tsf/train_multivariate_pipeline.py` |
 | End-to-end model | `models/diffusion_tsf/diffusion_model.py` |
 | U-Net | `models/diffusion_tsf/unet.py` |
@@ -56,9 +56,11 @@ Each batch job sources a generated preamble that:
 
 ---
 
-## 2) Pipeline stages: 4-phase overview
+## 2) Pipeline stages overview
 
-The pipeline runs in two CLI modes that together form four distinct training phases. Each phase has its own HP tuning step and full-training step.
+**Synthetic pretrain** (`run_pretrain_mode`, Slurm `run.sh`, or manifest `--mode full` before dataset loops) is two Optuna phases whose **best checkpoints are promoted directly**—there is no extra multi-epoch “full synthetic pretrain” after either HP search unless a legacy cache has JSON params without the paired `*_hp_best.pt` file.
+
+**Per-dataset finetune** (`--mode finetune`, `_finetune_and_eval_one_subset`, or the finetune stage inside `run.sh`) runs **four phases** on real data (iTrans HP → iTrans full finetune → diffusion HP → diffusion full finetune), then eval.
 
 ```
 ── PRETRAIN (synthetic, Slurm dim dir & manifest CHECKPOINT_DIR) ───────────────
@@ -138,9 +140,25 @@ After Phase 2D, `_finetune_and_eval_one_subset` runs two evaluations:
 
 Both use `{subset_id}_itransformer_finetuned.pt` — not the pretrained one — to keep the comparison fair. Results are saved via `save_eval_results`.
 
+### Implementation parity (`run_pretrain_mode` vs `run_pipeline`)
+
+The manifest **`run_pipeline`** path (`--mode full`) matches **`run_pretrain_mode`** (Slurm `run.sh` Phase 1) for synthetic stages:
+
+- `run_diffusion_hp_tuning(..., checkpoint_dir=…)` writes **`diff_hp_best.pt`** next to **`diff_hp.json`**.
+- That file is **copied to `pretrained_diffusion.pt`** (full-mode checkpoint dir) or **`diffusion.pt`** (`pretrained_dim{V}/`), replacing the older behavior that always ran **`pretrain_diffusion`** after HP search.
+
+Filenames differ by entrypoint (`pretrained_itransformer.pt` in manifest layout vs `itransformer.pt` under `pretrained_dim{V}/`), but the rule is the same: **HP-best weights are the canonical pretrained checkpoint.**
+
 ### Caching and resume
 
-Each phase output is existence-checked before running. Existing `itrans_hp.json`, `itransformer.pt`, `diff_hp.json`, `diffusion.pt`, `{subset_id}_itrans_ft_hp.json`, and `{subset_id}_itransformer_finetuned.pt` all skip their respective phases. Reruns are cheap and partial completions resume cleanly.
+Existence checks skip work when artifacts are already present. Typical synthetic-pretrain artifacts:
+
+- **`itrans_hp.json`**, **`itrans_hp_best.pt`** → promoted **`itransformer.pt`** / **`pretrained_itransformer.pt`**
+- **`diff_hp.json`**, **`diff_hp_best.pt`** → promoted **`diffusion.pt`** / **`pretrained_diffusion.pt`**
+
+Finetune caches under `CHECKPOINT_DIR` include **`{subset_id}_itrans_ft_hp.json`**, **`{subset_id}_itransformer_finetuned.pt`**, and diffusion fine-tuned checkpoints written by **`finetune_on_dataset`**.
+
+When clearing a Slurm smoke run (`.smoke_test` flag), **`run_pretrain_mode`** also deletes **`itrans_hp_best.pt`** and **`diff_hp_best.pt`** so the next real run cannot silently reuse partial HP checkpoints.
 
 ---
 ## 3) Data: dataset loader vs model normalization (two layers)
