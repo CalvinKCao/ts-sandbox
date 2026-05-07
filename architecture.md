@@ -61,14 +61,13 @@ Each batch job sources a generated preamble that:
 The pipeline runs in two CLI modes that together form four distinct training phases. Each phase has its own HP tuning step and full-training step.
 
 ```
-── PRETRAIN ──────────────────────────────────────────────────────────────────
-  Phase 1A │ iTransformer HP tuning       │ synthetic data
-  Phase 1B │ iTransformer full pretrain   │ synthetic data
-  Phase 1C │ Diffusion HP tuning          │ synthetic data  → saves diff.pt directly
+── PRETRAIN (synthetic, Slurm dim dir & manifest CHECKPOINT_DIR) ───────────────
+  Phase 1A │ iTransformer HP tuning       │ best trial weights → itrans_hp_best.pt → itransformer.pt (no extra full-pretrain epoch block)
+  Phase 1B │ Diffusion HP tuning          │ N_DIFFUSION_HP_TRIALS trials → diff_hp_best.pt → diffusion.pt (no extra full synthetic pretrain)
 ── FINETUNE (per dataset/subset) ────────────────────────────────────────────
-  Phase 2A │ iTransformer HP finetune     │ real data (warm-start from 1B)
-  Phase 2B │ iTransformer full finetune   │ real data (warm-start from 1B, best 2A params)
-  Phase 2C │ Diffusion HP finetune        │ real data (guidance = finetuned iTrans from 2B)
+  Phase 2A │ iTransformer HP finetune     │ real data (warm-start from Phase 1A ckpt)
+  Phase 2B │ iTransformer full finetune   │ real data (Phase 1A ckpt + best 2A params)
+  Phase 2C │ Diffusion HP finetune        │ real data; N_FINETUNE_HP_TRIALS Optuna trials (separate budget from pretrain 1B); batch size auto-probed once
   Phase 2D │ Diffusion full finetune      │ real data (guidance = finetuned iTrans from 2B)
   Eval     │ Diffusion eval + iTrans baseline (finetuned iTrans for both)
 ─────────────────────────────────────────────────────────────────────────────
@@ -76,37 +75,30 @@ The pipeline runs in two CLI modes that together form four distinct training pha
 
 ### Phase 1A — iTransformer HP tuning on synthetic data
 
-- **Entry:** `run_itransformer_hp_tuning()`, called from `run_pretrain_mode`
+- **Entry:** `run_itransformer_hp_tuning()`, called from `run_pretrain_mode` / manifest `run_pipeline`
 - **Trials:** `N_ITRANS_HP_TRIALS = 7`, Optuna `TPESampler`, `MedianPruner(n_startup_trials=2)`
 - **Search space:** `learning_rate` (log-uniform 1e-5–1e-3), `batch_size` (categorical), `dropout` (0–0.3)
 - **Per-trial training:** up to 30 epochs, early-stop patience=5
 - **Best-state tracking:** `best_state` dict shared across trials; whenever a trial val loss beats all previous, the model `state_dict` is cloned to CPU and stored
-- **Output:** `itrans_hp.json` (best params, cached so reruns skip this phase)
+- **Output:** `itrans_hp.json` (best params, cached so reruns skip this phase); **`itrans_hp_best.pt`** is promoted to **`itransformer.pt`** / `pretrained_itransformer.pt` — **no** separate synthetic full-pretrain block after HP (only a fallback `pretrain_itransformer` if an **old** run cached JSON without `itrans_hp_best.pt`)
 
-### Phase 1B — iTransformer full pretrain on synthetic data
+### Phase 1B — Diffusion HP tuning on synthetic data
 
-- **Entry:** `pretrain_itransformer()`, called from `run_pretrain_mode`
-- **Epochs:** `PRETRAIN_EPOCHS = 10`, patience `PRETRAIN_PATIENCE = 5`
-- **Data:** `RealTS` synthetic windows via `get_synthetic_dataloader`
-- **Output:** `itransformer.pt` (saved under `pretrain_dir_for_dim(n_variates)`)
-
-### Phase 1C — Diffusion HP tuning on synthetic data
-
-- **Entry:** `run_diffusion_hp_tuning()`, called from `run_pretrain_mode`
-- **Trials:** `N_DIFFUSION_HP_TRIALS = 3`, same Optuna setup as 1A
-- **Search space:** `learning_rate` (log-uniform 1e-5–5e-4), `batch_size` (categorical)
+- **Entry:** `run_diffusion_hp_tuning()`, called from `run_pretrain_mode` and `run_pipeline`
+- **Trials:** `N_DIFFUSION_HP_TRIALS = 3`, same Optuna setup as iTrans HP
+- **Search space:** `learning_rate` (log-uniform 1e-5–5e-4), `batch_size` (fixed after auto probe inside `run_diffusion_hp_tuning`)
 - **Per-trial training:** up to `PRETRAIN_DIFFUSION_MAX_EPOCHS = 15` epochs (early stop)
-- **Guidance:** frozen `itransformer.pt` from Phase 1B
-- **Best-state tracking:** same cross-trial model-state clone mechanism as 1A
-- **Output:** `diff_hp.json` + `diff_hp_best.pt`; **no separate full pretrain** — `diff_hp_best.pt` is copied directly to `diffusion.pt`. Falls back to a short `pretrain_diffusion` run (`PRETRAIN_DIFFUSION_EPOCHS = 3`) only if an older cached HP run left no `diff_hp_best.pt`
+- **Guidance:** frozen Phase **1A** iTransformer checkpoint (promoted from HP best)
+- **Best-state tracking:** cross-trial clone → `diff_hp_best.pt`
+- **Output:** `diff_hp.json` + `diff_hp_best.pt` → copied to `diffusion.pt` / `pretrained_diffusion.pt`. Fallback: full `pretrain_diffusion` up to `PRETRAIN_DIFFUSION_MAX_EPOCHS` only if no `diff_hp_best.pt` exists
 
 ### Phase 2A — iTransformer HP finetune on real data
 
 - **Entry:** `run_itransformer_finetune_hp_tuning()`, called from `_finetune_and_eval_one_subset`
-- **Trials:** `N_ITRANS_HP_TRIALS = 7`, same Optuna/pruner setup as 1A
+- **Trials:** `N_ITRANS_HP_TRIALS = 7`, same Optuna/pruner setup as Phase 1A
 - **Search space:** identical to Phase 1A (`learning_rate`, `batch_size`, `dropout`)
 - **Per-trial training:** 30 epochs, patience=5
-- **Warm-start:** every trial loads pretrained `itransformer.pt` weights before training
+- **Warm-start:** every trial loads pretrained `itransformer.pt` from Phase **1A** before training
 - **Data:** real dataset (70%/10%/20% train/val/test split)
 - **Best-state tracking:** cross-trial clone, same mechanism
 - **Output:** `{subset_id}_itrans_ft_hp.json` (cached) + `{subset_id}_itrans_ft_hp_best.pt`
@@ -115,16 +107,16 @@ The pipeline runs in two CLI modes that together form four distinct training pha
 
 - **Entry:** `finetune_itransformer_on_dataset()`, called from `_finetune_and_eval_one_subset`
 - **Epochs:** `PRETRAIN_EPOCHS = 10`, patience `PRETRAIN_PATIENCE = 5`
-- **Warm-start:** pretrained `itransformer.pt` (same starting point as each 2A trial, but a full clean run with the best 2A params)
+- **Warm-start:** same Phase **1A** `itransformer.pt` as 2A trials, then a full run with best 2A params
 - **Params:** best `learning_rate`, `dropout`, `batch_size` from Phase 2A
 - **Output:** `{subset_id}_itransformer_finetuned.pt`
 
 ### Phase 2C — Diffusion HP finetune on real data
 
-- **Entry:** `finetune_hp_objective` via Optuna in `_finetune_and_eval_one_subset`
-- **Trials:** `N_FINETUNE_HP_TRIALS = 8`, same Optuna/pruner setup
-- **Search space:** `learning_rate`, `batch_size`
-- **Starting model:** pretrained `diffusion.pt` from Phase 1C
+- **Entry:** `finetune_hp_objective` via Optuna in `_finetune_and_eval_one_subset` (and equivalent loop in `run_pipeline`)
+- **Trials:** `N_FINETUNE_HP_TRIALS` (defaults to **3** in code — distinct from pretrain diffusion HP trials); logs explicitly label this as finetune-phase tuning so it is not confused with `N_DIFFUSION_HP_TRIALS`
+- **Search space:** `learning_rate` only — batch size is **auto-probed once** (`select_diffusion_batch_size`) before trials and fixed for all trials
+- **Starting model:** pretrained `diffusion.pt` from Phase **1B**
 - **Guidance:** `{subset_id}_itransformer_finetuned.pt` from Phase 2B (not the pretrained one)
 - **Per-trial training:** `HP_TUNE_EPOCHS` with early stop
 - **Output:** best HP params dict (in-memory)
@@ -133,7 +125,7 @@ The pipeline runs in two CLI modes that together form four distinct training pha
 
 - **Entry:** `finetune_on_dataset()`, called from `_finetune_and_eval_one_subset`
 - **Epochs:** `FINETUNE_EPOCHS = 10`, patience `FINETUNE_PATIENCE = 5`
-- **Starting model:** `diffusion.pt` from Phase 1C, with best 2C params applied
+- **Starting model:** `diffusion.pt` from Phase **1B**, with best 2C params applied
 - **Guidance:** same finetuned iTransformer as 2C
 - **Output:** `{subset_id}_diffusion_finetuned.pt`
 

@@ -670,7 +670,7 @@ HP_TUNE_PATIENCE = 20
 # Optuna settings
 N_ITRANS_HP_TRIALS = 7
 N_DIFFUSION_HP_TRIALS = 3
-N_FINETUNE_HP_TRIALS = 8
+N_FINETUNE_HP_TRIALS = 3
 
 # Batch size ranges for A6000/A100 (40-48GB) — 128×1216×7 images are 4x larger.
 # iTransformer HP tuning now adapts these based on N_VARIATES to avoid OOM at high dims.
@@ -1336,16 +1336,24 @@ def itrans_hp_objective(
     return best_val_loss
 
 
-def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
-    """Run Optuna HP search for iTransformer."""
+def run_itransformer_hp_tuning(
+    n_trials: int,
+    smoke_test: bool = False,
+    checkpoint_dir: Optional[str] = None,
+) -> Tuple[Dict, Optional[str]]:
+    """Run Optuna HP search for iTransformer.
+
+    Returns (best_params, path_to_best_model_or_None). The best model state
+    across all trials is saved to itrans_hp_best.pt in checkpoint_dir so the
+    caller can use it directly without a separate full-pretrain step.
+    """
     logger.info("=" * 60)
     logger.info("PHASE 1A: iTransformer HP Tuning")
     logger.info(f"Trials: {n_trials}")
     logger.info("=" * 60)
-    
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Create synthetic data loaders
+
     n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_HP_TUNE
     synth_cache = get_synth_cache_dir()
     synthetic_loader = get_synthetic_dataloader(
@@ -1359,16 +1367,12 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
         cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
     )
-    
-    # Split for validation
+
     dataset = synthetic_loader.dataset
     n_val = min(len(dataset) // 10, 1000)
-    train_indices = list(range(len(dataset) - n_val))
-    val_indices = list(range(len(dataset) - n_val, len(dataset)))
-    
-    train_subset = Subset(dataset, train_indices)
-    val_subset = Subset(dataset, val_indices)
-    
+    train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
+    val_subset   = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
+
     train_bs = select_itrans_batch_size(
         phase_name='iTransformer HP tune',
         dataset=train_subset,
@@ -1377,34 +1381,48 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
         max_candidate=32 if smoke_test else 256,
     )
     train_loader = DataLoader(train_subset, batch_size=train_bs, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_subset, batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
-    
-    # Run Optuna
+    val_loader   = DataLoader(val_subset,   batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
+
+    _best_state: dict = {'model_state': None, 'val_loss': float('inf')}
+
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
-    
+    study = optuna.create_study(
+        direction='minimize',
+        sampler=TPESampler(seed=42),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+    )
+
     logger.info(f"Starting iTransformer HP search: {n_trials} trials")
-    
+
     def log_trial(study, trial):
-        bs = trial.params.get('batch_size', train_bs)
         logger.info(f"[iTransformer HP] Trial {trial.number}/{n_trials}: "
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                   f"bs={bs}, dropout={trial.params['dropout']:.3f}")
-    
+                   f"bs={train_bs}, dropout={trial.params['dropout']:.3f}")
+
     study.optimize(
-        lambda trial: itrans_hp_objective(trial, train_loader, val_loader, device, smoke_test, fixed_batch_size=train_bs),
+        lambda trial: itrans_hp_objective(
+            trial, train_loader, val_loader, device, smoke_test,
+            fixed_batch_size=train_bs, best_state=_best_state,
+        ),
         n_trials=n_trials,
         show_progress_bar=True,
         callbacks=[log_trial],
     )
-    
+
     best_params = study.best_params
     best_params['batch_size'] = train_bs
     logger.info(f"Best iTransformer params: lr={best_params['learning_rate']:.2e}, "
                f"bs={best_params['batch_size']}, dropout={best_params['dropout']:.3f}")
     logger.info(f"Best val loss: {study.best_value:.4f}")
-    
-    return best_params
+
+    ckpt_path = None
+    if checkpoint_dir is not None and _best_state.get('model_state') is not None:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        ckpt_path = os.path.join(checkpoint_dir, 'itrans_hp_best.pt')
+        torch.save({'model_state_dict': _best_state['model_state'], 'best_params': best_params}, ckpt_path)
+        logger.info(f"  Saved best iTrans HP model → {ckpt_path} (val_loss={_best_state['val_loss']:.4f})")
+
+    return best_params, ckpt_path
 
 
 # ============================================================================
@@ -2527,7 +2545,6 @@ def run_pipeline(
         n_finetune_trials = 1
         pretrain_samples = 4  # Ultra minimal
         itrans_pretrain_epochs = 1
-        diff_pretrain_epochs = 1
         pretrain_patience = 1
         finetune_epochs = 1
         finetune_patience = 1
@@ -2537,59 +2554,75 @@ def run_pipeline(
         n_finetune_trials = N_FINETUNE_HP_TRIALS
         pretrain_samples = resolve_pretrain_virtual_dataset_size(False)
         itrans_pretrain_epochs = PRETRAIN_EPOCHS
-        diff_pretrain_epochs = min(PRETRAIN_DIFFUSION_EPOCHS, PRETRAIN_DIFFUSION_MAX_EPOCHS)
         pretrain_patience = PRETRAIN_PATIENCE
         finetune_epochs = FINETUNE_EPOCHS
         finetune_patience = FINETUNE_PATIENCE
     
-    # =========== PHASE 1A: iTransformer HP Tuning ===========
+    # =========== PHASE 1A: iTransformer HP Tuning (best model saved directly) ===========
+    itrans_tune_ckpt = os.path.join(CHECKPOINT_DIR, 'itrans_hp_best.pt')
     if not manifest.itrans_hp_done:
-        manifest.itrans_best_params = run_itransformer_hp_tuning(n_itrans_trials, smoke_test)
+        manifest.itrans_best_params, _ = run_itransformer_hp_tuning(
+            n_itrans_trials, smoke_test, checkpoint_dir=CHECKPOINT_DIR,
+        )
         manifest.itrans_hp_done = True
         manifest.save()
-        log_wandb_hp_search('itransformer', manifest.itrans_best_params, 
+        log_wandb_hp_search('itransformer', manifest.itrans_best_params,
                            manifest.itrans_best_params.get('best_val_loss', 0), n_itrans_trials)
     else:
         logger.info(f"Using cached iTransformer params: {manifest.itrans_best_params}")
-    
-    # =========== PHASE 1C-1: Full iTransformer Pretraining ===========
+
+    # Phase 1B eliminated: use best HP model directly as itransformer checkpoint
     itrans_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_itransformer.pt')
     if not manifest.itrans_checkpoint or not os.path.exists(itrans_ckpt):
-        itrans_ckpt = pretrain_itransformer(
-            manifest.itrans_best_params,
-            n_samples=pretrain_samples,
-            epochs=itrans_pretrain_epochs,
-            patience=pretrain_patience,
-            checkpoint_dir=CHECKPOINT_DIR,
-            smoke_test=smoke_test,
-        )
+        if os.path.exists(itrans_tune_ckpt):
+            import shutil
+            shutil.copy2(itrans_tune_ckpt, itrans_ckpt)
+            logger.info(f"Using best HP tuning model as iTransformer checkpoint: {itrans_ckpt}")
+        else:
+            itrans_ckpt = pretrain_itransformer(
+                manifest.itrans_best_params,
+                n_samples=pretrain_samples,
+                epochs=itrans_pretrain_epochs,
+                patience=pretrain_patience,
+                checkpoint_dir=CHECKPOINT_DIR,
+                smoke_test=smoke_test,
+            )
         manifest.itrans_checkpoint = itrans_ckpt
         manifest.save()
     else:
         logger.info(f"Using existing iTransformer checkpoint: {itrans_ckpt}")
     
-    # =========== PHASE 1B: Diffusion HP Tuning ===========
+    # =========== PHASE 1C: Diffusion HP tuning (best ckpt saved under CHECKPOINT_DIR) ===========
+    diff_tune_ckpt = os.path.join(CHECKPOINT_DIR, 'diff_hp_best.pt')
     if not manifest.diffusion_hp_done:
-        manifest.diffusion_best_params, _ = run_diffusion_hp_tuning(itrans_ckpt, n_diff_trials, smoke_test)
+        manifest.diffusion_best_params, _ = run_diffusion_hp_tuning(
+            itrans_ckpt, n_diff_trials, smoke_test, checkpoint_dir=CHECKPOINT_DIR,
+        )
         manifest.diffusion_hp_done = True
         manifest.save()
         log_wandb_hp_search('diffusion', manifest.diffusion_best_params,
                            manifest.diffusion_best_params.get('best_val_loss', 0), n_diff_trials)
     else:
         logger.info(f"Using cached Diffusion params: {manifest.diffusion_best_params}")
-    
-    # =========== PHASE 1C-2: Full Diffusion Pretraining ===========
+
+    # =========== Diffusion checkpoint: best from HP only (no separate full synthetic pretrain) ===========
     diff_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_diffusion.pt')
     if not manifest.pretrain_complete or not os.path.exists(diff_ckpt):
-        diff_ckpt = pretrain_diffusion(
-            manifest.diffusion_best_params,
-            itrans_ckpt,
-            n_samples=pretrain_samples,
-            epochs=diff_pretrain_epochs,
-            patience=pretrain_patience,
-            checkpoint_dir=CHECKPOINT_DIR,
-            smoke_test=smoke_test,
-        )
+        if os.path.exists(diff_tune_ckpt):
+            import shutil
+            shutil.copy2(diff_tune_ckpt, diff_ckpt)
+            logger.info(f"Using best diffusion HP model as pretrained checkpoint: {diff_ckpt}")
+        else:
+            fallback_epochs = 1 if smoke_test else PRETRAIN_DIFFUSION_MAX_EPOCHS
+            diff_ckpt = pretrain_diffusion(
+                manifest.diffusion_best_params,
+                itrans_ckpt,
+                n_samples=pretrain_samples,
+                epochs=fallback_epochs,
+                patience=pretrain_patience,
+                checkpoint_dir=CHECKPOINT_DIR,
+                smoke_test=smoke_test,
+            )
         manifest.pretrain_checkpoint = diff_ckpt
         manifest.pretrain_complete = True
         manifest.save()
@@ -2626,7 +2659,10 @@ def run_pipeline(
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            logger.info(f"Running HP search for {dataset_name} (bs={ft_diff_bs})...")
+            logger.info(
+                f"Phase 2C — diffusion finetune HP ({dataset_name}): "
+                f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs}..."
+            )
             optuna.logging.set_verbosity(optuna.logging.WARNING)
 
             def log_finetune_trial(study, trial):
@@ -2814,6 +2850,8 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
         for f in [itrans_ckpt, diff_ckpt,
                   os.path.join(dim_dir, 'itrans_hp.json'),
                   os.path.join(dim_dir, 'diff_hp.json'),
+                  os.path.join(dim_dir, 'itrans_hp_best.pt'),
+                  os.path.join(dim_dir, 'diff_hp_best.pt'),
                   smoke_flag]:
             if os.path.exists(f):
                 os.remove(f)
@@ -2847,28 +2885,38 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
             shutil.copy2(found, itrans_ckpt)
 
     # Phase 1A: iTransformer HP tuning — cached to disk so reruns skip it
+    itrans_tune_ckpt = os.path.join(dim_dir, 'itrans_hp_best.pt')
     if os.path.exists(itrans_hp_path):
         with open(itrans_hp_path) as f:
             best_itrans_params = json.load(f)
         logger.info(f"  iTransformer HP loaded from cache: {itrans_hp_path}")
     else:
-        best_itrans_params = run_itransformer_hp_tuning(n_itrans_trials, smoke_test)
+        best_itrans_params, _ = run_itransformer_hp_tuning(
+            n_itrans_trials, smoke_test, checkpoint_dir=dim_dir,
+        )
         with open(itrans_hp_path, 'w') as f:
             json.dump(best_itrans_params, f, indent=2)
 
-    # Phase 1C-1: Full iTransformer pretraining
+    # Phase 1B (eliminated): use best HP-tuning model directly as itransformer.pt
     if not os.path.exists(itrans_ckpt):
-        pretrain_itransformer(
-            best_itrans_params,
-            n_samples=pretrain_samples,
-            epochs=itrans_pretrain_epochs,
-            patience=pretrain_patience,
-            checkpoint_dir=dim_dir,
-            smoke_test=smoke_test,
-        )
-        saved = os.path.join(dim_dir, 'pretrained_itransformer.pt')
-        if saved != itrans_ckpt and os.path.exists(saved):
-            os.rename(saved, itrans_ckpt)
+        if os.path.exists(itrans_tune_ckpt):
+            import shutil
+            shutil.copy2(itrans_tune_ckpt, itrans_ckpt)
+            logger.info(f"  Using best HP tuning model as iTransformer checkpoint: {itrans_ckpt}")
+        else:
+            # fallback: HP cache from an older run without itrans_hp_best.pt
+            fallback_epochs = 1 if smoke_test else PRETRAIN_EPOCHS
+            pretrain_itransformer(
+                best_itrans_params,
+                n_samples=pretrain_samples,
+                epochs=fallback_epochs,
+                patience=pretrain_patience,
+                checkpoint_dir=dim_dir,
+                smoke_test=smoke_test,
+            )
+            saved = os.path.join(dim_dir, 'pretrained_itransformer.pt')
+            if saved != itrans_ckpt and os.path.exists(saved):
+                os.rename(saved, itrans_ckpt)
     else:
         logger.info(f"  iTransformer ckpt exists: {itrans_ckpt}")
 
@@ -3197,7 +3245,11 @@ def _finetune_and_eval_one_subset(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        logger.info(f"Diffusion HP search for {subset_id} ({n_finetune_trials} trials, bs={ft_diff_bs})...")
+        logger.info(
+            f"Phase 2C — diffusion finetune HP ({subset_id}): "
+            f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs} "
+            f"(pretrain diffusion HP uses N_DIFFUSION_HP_TRIALS={N_DIFFUSION_HP_TRIALS})..."
+        )
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(
             direction='minimize',
