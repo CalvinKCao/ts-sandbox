@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import gc
 import importlib.util
 import json
 import logging
@@ -72,6 +73,7 @@ DATASETS_DIR = os.path.join(project_root, "datasets")
 CHECKPOINT_DIR = resolve_checkpoint_dir(script_dir)
 RESULTS_DIR = resolve_results_dir(script_dir)
 MANIFEST_PATH = os.path.join(CHECKPOINT_DIR, "training_manifest.json")
+SYNTH_CACHE_DIR: Optional[str] = None
 
 # ============================================================================
 # DDP (Multi-GPU) Support
@@ -192,6 +194,17 @@ def barrier():
     """Synchronize all processes."""
     if _ddp_enabled:
         dist.barrier()
+
+
+def require_tuned_param(params: Dict, key: str, stage_name: str):
+    """Fail fast when a required tuned hyperparameter is missing."""
+    if params is None:
+        raise RuntimeError(f"{stage_name} requires tuned params, got None.")
+    if key not in params:
+        raise RuntimeError(
+            f"{stage_name} requires tuned param '{key}', but tuning output is missing it."
+        )
+    return params[key]
 
 
 # ============================================================================
@@ -623,25 +636,22 @@ def finish_wandb():
 # ============================================================================
 
 # Training settings (2D representation: IMAGE_HEIGHT × (LOOKBACK + FORECAST))
-LOOKBACK_LENGTH = 1024
-FORECAST_LENGTH = 192
-IMAGE_HEIGHT = 128
+LOOKBACK_LENGTH = 512
+FORECAST_LENGTH = 96
+IMAGE_HEIGHT = 64
 
 # Predict the last K lookback steps alongside the forecast to smooth the boundary
 LOOKBACK_OVERLAP = 8
 PAST_LOSS_WEIGHT = 0.3
 
-# Dimensionality groups: datasets above SUBSET_THRESHOLD get split into
-# non-overlapping SUBSET_DIM-variate subsets. Everything else trains natively.
-N_VARIATES = 7               # default (overridden by --n-variates CLI)
-SUBSET_DIM = 32              # variate width for high-dim dataset subsets
-SUBSET_THRESHOLD = 32        # datasets with >SUBSET_THRESHOLD cols are split
-
-MAX_SUBSETS_PER_DATASET = 15  # enough for traffic(861/32=26) while staying sane
+# Dimensionality for model/data creation (overridden by --n-variates CLI)
+N_VARIATES = 7
 
 # Phase 1: Synthetic pretraining (short runs by default; override with CLI)
 PRETRAIN_EPOCHS = 10
 PRETRAIN_PATIENCE = 5
+PRETRAIN_DIFFUSION_EPOCHS = 3
+PRETRAIN_DIFFUSION_MAX_EPOCHS = 15
 # Legacy name: upper bound for auto-sized pretrain pool; HP tuning uses its own constant.
 SYNTHETIC_SAMPLES_FULL = 100000
 SYNTHETIC_SAMPLES_HP_TUNE = 20000
@@ -658,18 +668,21 @@ HP_TUNE_EPOCHS = 200
 HP_TUNE_PATIENCE = 20
 
 # Optuna settings
-N_ITRANS_HP_TRIALS = 20
-N_DIFFUSION_HP_TRIALS = 8
-N_FINETUNE_HP_TRIALS = 8
+N_ITRANS_HP_TRIALS = 7
+N_DIFFUSION_HP_TRIALS = 3
+N_FINETUNE_HP_TRIALS = 3
 
-# Batch size ranges for A6000/A100 (40-48GB) — 128×1216×7 images are 4x larger
+# Batch size ranges for A6000/A100 (40-48GB) — 128×1216×7 images are 4x larger.
+# iTransformer HP tuning now adapts these based on N_VARIATES to avoid OOM at high dims.
 ITRANS_BATCH_SIZES = [64, 128, 256]
-DIFFUSION_BATCH_SIZES = [8, 16, 32]
+DIFFUSION_BATCH_SIZES = [16]
 FINETUNE_BATCH_SIZES = [4, 8, 16]
 
 # Memory optimization flags (overridden by CLI)
 USE_AMP = False
 USE_GRADIENT_CHECKPOINTING = False
+UNET_CHANNELS = [64, 128, 256]
+ATTENTION_LEVELS = [2]
 
 # Dataset registry: name -> (path, date_col, seasonal_period)
 DATASET_REGISTRY = {
@@ -703,6 +716,19 @@ def resolve_pretrain_virtual_dataset_size(smoke_test: bool) -> int:
     return max(SYNTHETIC_SAMPLES_MIN, min(SYNTHETIC_SAMPLES_CAP, n))
 
 
+def get_synth_cache_dir(checkpoint_dir: Optional[str] = None, smoke_test: bool = False) -> Optional[str]:
+    """Resolve synthetic cache dir; prefer shared cache when configured."""
+    if smoke_test:
+        return None
+    if SYNTH_CACHE_DIR:
+        os.makedirs(SYNTH_CACHE_DIR, exist_ok=True)
+        return SYNTH_CACHE_DIR
+    base = checkpoint_dir or CHECKPOINT_DIR
+    path = os.path.join(base, 'synth_cache')
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 # ============================================================================
 # Dimensionality Helpers
 # ============================================================================
@@ -716,15 +742,8 @@ def get_dataset_n_cols(dataset_name: str) -> int:
 
 
 def get_dim_for_dataset(dataset_name: str) -> int:
-    """Return the pretrain dimensionality to use for a dataset.
-
-    Datasets with <= SUBSET_THRESHOLD columns → native dim.
-    Datasets above that → SUBSET_DIM (they'll be split into subsets).
-    """
-    n_cols = get_dataset_n_cols(dataset_name)
-    if n_cols > SUBSET_THRESHOLD:
-        return SUBSET_DIM
-    return n_cols
+    """Return native dataset dimensionality (always full variates)."""
+    return get_dataset_n_cols(dataset_name)
 
 
 def get_all_pretrain_dims() -> Dict[int, List[str]]:
@@ -841,8 +860,8 @@ def create_diffusion_model(
         use_guidance_channel=True,
         num_diffusion_steps=1000,
         model_type="unet",
-        unet_channels=[64, 128, 256],
-        attention_levels=[2],
+        unet_channels=UNET_CHANNELS,
+        attention_levels=ATTENTION_LEVELS,
         num_res_blocks=2,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         use_amp=USE_AMP,
@@ -934,24 +953,18 @@ def load_dataset(
 # Variate Subset Management
 # ============================================================================
 
-def generate_variate_subsets(dataset_name: str, n_variates: int = None, seed: int = 42) -> List[Dict]:
-    """Return one subset covering the full dataset (no splitting).
-
-    A single model is trained per dataset, using all its variates.
-    n_variates is accepted for API compat but ignored — the model is
-    always built with the actual column count (set as N_VARIATES globally
-    before calling this).
-    """
+def generate_dataset_job(dataset_name: str, n_variates: int = None, seed: int = 42) -> Dict:
+    """Return one full-dataset training job (no variate partitioning)."""
     path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
     df = pd.read_csv(path, nrows=1)
     date_col = DATASET_REGISTRY[dataset_name][1]
     all_cols = [c for c in df.columns if c != date_col]
     indices = list(range(len(all_cols)))
-    return [{'subset_id': dataset_name, 'variate_indices': indices, 'variate_names': all_cols}]
+    return {'dataset_id': dataset_name, 'variate_indices': indices, 'variate_names': all_cols}
 
 
-def generate_all_subsets(seed: int = 42) -> Dict[str, List[Dict]]:
-    """Return one full-dataset subset per dataset, filtered to those whose
+def generate_all_dataset_jobs(seed: int = 42) -> Dict[str, Dict]:
+    """Return one full-dataset job per dataset, filtered to those whose
     variate count matches N_VARIATES exactly.
 
     This avoids needing separate pretrained models for different dataset sizes.
@@ -966,7 +979,7 @@ def generate_all_subsets(seed: int = 42) -> Dict[str, List[Dict]]:
         if n_cols != N_VARIATES:
             logger.debug(f"Skipping {name}: {n_cols} variates (need {N_VARIATES})")
             continue
-        result[name] = generate_variate_subsets(name, seed=seed)
+        result[name] = generate_dataset_job(name, seed=seed)
     if not result:
         logger.warning(
             f"No datasets found with exactly {N_VARIATES} variates. "
@@ -994,9 +1007,6 @@ class TrainingManifest:
     pretrain_checkpoint: str = ""
     itrans_checkpoint: str = ""
     
-    # Phase 2 status
-    subsets: Dict = field(default_factory=dict)
-    
     def save(self, path: str = MANIFEST_PATH):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w') as f:
@@ -1014,16 +1024,6 @@ class TrainingManifest:
             return m
         return cls(created_at=datetime.now().isoformat())
     
-    def mark_complete(self, subset_id: str, checkpoint_path: str, metrics: Dict):
-        self.subsets[subset_id] = {
-            'status': 'complete',
-            'checkpoint': checkpoint_path,
-            'metrics': metrics,
-            'completed_at': datetime.now().isoformat(),
-        }
-        self.save()
-
-
 # ============================================================================
 # Early Stopping & Checkpointing
 # ============================================================================
@@ -1122,56 +1122,240 @@ def validate_itransformer(model, loader, criterion, device):
     return total_loss / max(n_batches, 1)
 
 
-def itrans_hp_objective(trial, synthetic_loader, val_loader, device, smoke_test=False):
-    """Optuna objective for iTransformer HP search."""
-    # Suggest hyperparameters
+def auto_select_max_even_batch_size(
+    phase_name: str,
+    max_candidate: int,
+    try_step_fn,
+    min_candidate: int = 2,
+) -> int:
+    """Pick the largest even batch size that passes ``try_step_fn`` without OOM."""
+    max_candidate = max(min_candidate, max_candidate)
+    max_candidate = max_candidate if max_candidate % 2 == 0 else max_candidate - 1
+    min_candidate = max(min_candidate, 2)
+
+    lo = min_candidate
+    hi = max_candidate
+    best = min_candidate
+
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if mid % 2 != 0:
+            mid -= 1
+        if mid < min_candidate:
+            mid = min_candidate
+
+        try:
+            ok = bool(try_step_fn(mid))
+        except torch.OutOfMemoryError:
+            ok = False
+        except RuntimeError as exc:
+            ok = 'out of memory' not in str(exc).lower()
+            if not ok:
+                pass
+            else:
+                raise
+
+        if ok:
+            best = mid
+            lo = mid + 2
+        else:
+            hi = mid - 2
+
+    # Apply safety margin: a single probe step underestimates sustained
+    # training memory (optimizer state, gradient accumulation, etc.).
+    safe = max(min_candidate, int(best * 0.8))
+    if safe % 2 != 0:
+        safe = max(min_candidate, safe - 1)
+    logger.info(f"[AutoBS] {phase_name}: selected batch_size={safe} (probe_max={best}, tested_max={max_candidate})")
+    return safe
+
+
+def select_itrans_batch_size(
+    phase_name: str,
+    dataset,
+    device: torch.device,
+    dropout: float,
+    max_candidate: int,
+) -> int:
+    """Probe iTransformer memory with one train step and pick largest safe even batch."""
+    sample_past, sample_future = dataset[0]
+
+    def _try(bs: int) -> bool:
+        model = None
+        optimizer = None
+        x_enc = None
+        y_true = None
+        y_pred = None
+        loss = None
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            model = create_itransformer(dropout=dropout).to(device)
+            model.train()
+            optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+            optimizer.zero_grad(set_to_none=True)
+
+            past = sample_past.unsqueeze(0).repeat(bs, 1, 1).to(device)
+            future = sample_future.unsqueeze(0).repeat(bs, 1, 1).to(device)
+            x_enc = past.permute(0, 2, 1)
+            y_true = future.permute(0, 2, 1)
+            if LOOKBACK_OVERLAP > 0:
+                y_true = y_true[:, LOOKBACK_OVERLAP:, :]
+            y_pred = model(x_enc, None, None, None)
+            loss = nn.functional.mse_loss(y_pred, y_true)
+            loss.backward()
+            optimizer.step()
+            return True
+        finally:
+            del loss, y_pred, y_true, x_enc, optimizer, model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+
+    return auto_select_max_even_batch_size(phase_name, max_candidate, _try, min_candidate=2)
+
+
+def select_diffusion_batch_size(
+    phase_name: str,
+    dataset,
+    device: torch.device,
+    itrans_guidance: iTransformerGuidance,
+    max_candidate: int,
+) -> int:
+    """Probe diffusion memory with one train step and pick largest safe even batch."""
+    sample_past, sample_future = dataset[0]
+
+    def _try(bs: int) -> bool:
+        model = None
+        optimizer = None
+        past = None
+        future = None
+        loss = None
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            model = create_diffusion_model().to(device)
+            model.set_guidance_model(itrans_guidance)
+            model.train()
+            optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+            optimizer.zero_grad(set_to_none=True)
+
+            past = sample_past.unsqueeze(0).repeat(bs, 1, 1).to(device)
+            future = sample_future.unsqueeze(0).repeat(bs, 1, 1).to(device)
+            with amp_context():
+                loss = model.get_loss(past, future)
+            loss.backward()
+            optimizer.step()
+            return True
+        finally:
+            del loss, future, past, optimizer, model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+
+    return auto_select_max_even_batch_size(phase_name, max_candidate, _try, min_candidate=2)
+
+
+def get_itrans_batch_size_candidates(smoke_test: bool) -> List[int]:
+    """Return a safe iTransformer HP batch-size search space for current N_VARIATES."""
+    if smoke_test:
+        return [8, 16]
+    if N_VARIATES >= 512:
+        return [8, 16, 32]
+    if N_VARIATES >= 256:
+        return [16, 32, 64]
+    return ITRANS_BATCH_SIZES
+
+
+def itrans_hp_objective(
+    trial,
+    synthetic_loader,
+    val_loader,
+    device,
+    smoke_test=False,
+    fixed_batch_size: Optional[int] = None,
+    best_state: Optional[dict] = None,
+    pretrained_ckpt: Optional[str] = None,
+):
+    """Optuna objective for iTransformer HP search.
+
+    pretrained_ckpt: if provided, warm-starts each trial from those weights
+        (used for finetune HP search on real data).
+    best_state: shared mutable dict; updated with best cross-trial model state
+        whenever a new minimum val loss is achieved.
+    """
     lr = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [8, 16] if smoke_test else ITRANS_BATCH_SIZES)
+    if fixed_batch_size is None:
+        batch_size = trial.suggest_categorical('batch_size', get_itrans_batch_size_candidates(smoke_test))
+    else:
+        batch_size = fixed_batch_size
     dropout = trial.suggest_float('dropout', 0.0, 0.3)
-    
-    # Create model
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     model = create_itransformer(dropout=dropout).to(device)
-    
-    # Rebuild loaders with new batch size
+    if pretrained_ckpt is not None and os.path.exists(pretrained_ckpt):
+        ckpt = torch.load(pretrained_ckpt, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['model_state_dict'])
+
     train_loader = DataLoader(synthetic_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-    
+    val_bs = min(batch_size, 32)
+    val_loader_local = DataLoader(val_loader.dataset, batch_size=val_bs, shuffle=False, num_workers=0)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
-    
+
     epochs = 30 if not smoke_test else 1
     patience = 5 if not smoke_test else 1
     early_stop = EarlyStopping(patience=patience)
     best_val_loss = float('inf')
-    
-    for epoch in range(epochs):
-        train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss = validate_itransformer(model, val_loader, criterion, device)
-        
-        trial.report(val_loss, epoch)
-        if trial.should_prune():
-            raise optuna.TrialPruned()
-        
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-        
-        if early_stop(val_loss):
-            break
-    
+
+    try:
+        for epoch in range(epochs):
+            train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
+            val_loss = validate_itransformer(model, val_loader_local, criterion, device)
+
+            trial.report(val_loss, epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                if best_state is not None and val_loss < best_state.get('val_loss', float('inf')):
+                    best_state['model_state'] = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                    best_state['val_loss'] = val_loss
+
+            if early_stop(val_loss):
+                break
+    except torch.OutOfMemoryError:
+        logger.warning(f"[iTransformer HP] OOM at batch_size={batch_size}; pruning trial {trial.number}.")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise optuna.TrialPruned()
+
     return best_val_loss
 
 
-def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
-    """Run Optuna HP search for iTransformer."""
+def run_itransformer_hp_tuning(
+    n_trials: int,
+    smoke_test: bool = False,
+    checkpoint_dir: Optional[str] = None,
+) -> Tuple[Dict, Optional[str]]:
+    """Run Optuna HP search for iTransformer.
+
+    Returns (best_params, path_to_best_model_or_None). The best model state
+    across all trials is saved to itrans_hp_best.pt in checkpoint_dir so the
+    caller can use it directly without a separate full-pretrain step.
+    """
     logger.info("=" * 60)
     logger.info("PHASE 1A: iTransformer HP Tuning")
     logger.info(f"Trials: {n_trials}")
     logger.info("=" * 60)
-    
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Create synthetic data loaders
+
     n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_HP_TUNE
-    synth_cache = os.path.join(CHECKPOINT_DIR, 'synth_cache')
+    synth_cache = get_synth_cache_dir()
     synthetic_loader = get_synthetic_dataloader(
         batch_size=64,
         lookback_length=LOOKBACK_LENGTH,
@@ -1180,46 +1364,65 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
         num_samples=n_samples,
         num_workers=0,
         lookback_overlap=LOOKBACK_OVERLAP,
-        cache_dir=synth_cache if not smoke_test else None,
+        cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
     )
-    
-    # Split for validation
+
     dataset = synthetic_loader.dataset
     n_val = min(len(dataset) // 10, 1000)
-    train_indices = list(range(len(dataset) - n_val))
-    val_indices = list(range(len(dataset) - n_val, len(dataset)))
-    
-    train_subset = Subset(dataset, train_indices)
-    val_subset = Subset(dataset, val_indices)
-    
-    train_loader = DataLoader(train_subset, batch_size=64, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_subset, batch_size=64, shuffle=False, num_workers=0)
-    
-    # Run Optuna
+    train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
+    val_subset   = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
+
+    train_bs = select_itrans_batch_size(
+        phase_name='iTransformer HP tune',
+        dataset=train_subset,
+        device=device,
+        dropout=0.1,
+        max_candidate=32 if smoke_test else 256,
+    )
+    train_loader = DataLoader(train_subset, batch_size=train_bs, shuffle=True, num_workers=0)
+    val_loader   = DataLoader(val_subset,   batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
+
+    _best_state: dict = {'model_state': None, 'val_loss': float('inf')}
+
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
-    
+    study = optuna.create_study(
+        direction='minimize',
+        sampler=TPESampler(seed=42),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+    )
+
     logger.info(f"Starting iTransformer HP search: {n_trials} trials")
-    
+
     def log_trial(study, trial):
         logger.info(f"[iTransformer HP] Trial {trial.number}/{n_trials}: "
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                   f"bs={trial.params['batch_size']}, dropout={trial.params['dropout']:.3f}")
-    
+                   f"bs={train_bs}, dropout={trial.params['dropout']:.3f}")
+
     study.optimize(
-        lambda trial: itrans_hp_objective(trial, train_loader, val_loader, device, smoke_test),
+        lambda trial: itrans_hp_objective(
+            trial, train_loader, val_loader, device, smoke_test,
+            fixed_batch_size=train_bs, best_state=_best_state,
+        ),
         n_trials=n_trials,
         show_progress_bar=True,
         callbacks=[log_trial],
     )
-    
+
     best_params = study.best_params
+    best_params['batch_size'] = train_bs
     logger.info(f"Best iTransformer params: lr={best_params['learning_rate']:.2e}, "
                f"bs={best_params['batch_size']}, dropout={best_params['dropout']:.3f}")
     logger.info(f"Best val loss: {study.best_value:.4f}")
-    
-    return best_params
+
+    ckpt_path = None
+    if checkpoint_dir is not None and _best_state.get('model_state') is not None:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        ckpt_path = os.path.join(checkpoint_dir, 'itrans_hp_best.pt')
+        torch.save({'model_state_dict': _best_state['model_state'], 'best_params': best_params}, ckpt_path)
+        logger.info(f"  Saved best iTrans HP model → {ckpt_path} (val_loss={_best_state['val_loss']:.4f})")
+
+    return best_params, ckpt_path
 
 
 # ============================================================================
@@ -1227,31 +1430,39 @@ def run_itransformer_hp_tuning(n_trials: int, smoke_test: bool = False) -> Dict:
 # ============================================================================
 
 def diffusion_hp_objective(
-    trial, 
-    synthetic_loader, 
+    trial,
+    synthetic_loader,
     val_loader,
     itrans_guidance: iTransformerGuidance,
-    device, 
-    smoke_test=False
+    device,
+    smoke_test=False,
+    fixed_batch_size: Optional[int] = None,
+    best_state: Optional[dict] = None,
 ):
-    """Optuna objective for Diffusion HP search."""
+    """Optuna objective for Diffusion HP search.
+
+    best_state is a shared mutable dict; when provided, updates
+    best_state['model_state'] and best_state['val_loss'] whenever this
+    trial achieves a new cross-trial best (used to skip a separate pretrain).
+    """
     lr = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else DIFFUSION_BATCH_SIZES)
-    
-    # Create model with guidance
+    if fixed_batch_size is None:
+        batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else DIFFUSION_BATCH_SIZES)
+    else:
+        batch_size = fixed_batch_size
+
     model = create_diffusion_model().to(device)
     model.set_guidance_model(itrans_guidance)
-    
-    # Rebuild loader with new batch size
+
     train_loader = DataLoader(synthetic_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-    
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    
-    epochs = 30 if not smoke_test else 1
+
+    epochs = 15 if not smoke_test else 1
     patience = 10 if not smoke_test else 1
     early_stop = EarlyStopping(patience=patience)
     best_val_loss = float('inf')
-    
+
     for epoch in range(epochs):
         model.train()
         for past, future in train_loader:
@@ -1262,7 +1473,7 @@ def diffusion_hp_objective(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-        
+
         model.eval()
         val_loss = 0.0
         n_batches = 0
@@ -1274,25 +1485,29 @@ def diffusion_hp_objective(
                 val_loss += loss.item()
                 n_batches += 1
         val_loss /= max(n_batches, 1)
-        
+
         trial.report(val_loss, epoch)
         if trial.should_prune():
             raise optuna.TrialPruned()
-        
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-        
+            if best_state is not None and val_loss < best_state.get('val_loss', float('inf')):
+                best_state['model_state'] = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                best_state['val_loss'] = val_loss
+
         if early_stop(val_loss):
             break
-    
+
     return best_val_loss
 
 
 def run_diffusion_hp_tuning(
     itrans_checkpoint: str,
     n_trials: int,
-    smoke_test: bool = False
-) -> Dict:
+    smoke_test: bool = False,
+    checkpoint_dir: Optional[str] = None,
+) -> Tuple[Dict, Optional[str]]:
     """Run Optuna HP search for Diffusion model."""
     logger.info("=" * 60)
     logger.info("PHASE 1B: Diffusion HP Tuning (with iTransformer guidance)")
@@ -1314,7 +1529,7 @@ def run_diffusion_hp_tuning(
     
     # Create small synthetic dataset for fast iteration
     n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_DIFF_TUNE
-    synth_cache = os.path.join(CHECKPOINT_DIR, 'synth_cache')
+    synth_cache = get_synth_cache_dir()
     synthetic_loader = get_synthetic_dataloader(
         batch_size=32,
         lookback_length=LOOKBACK_LENGTH,
@@ -1323,7 +1538,7 @@ def run_diffusion_hp_tuning(
         num_samples=n_samples,
         num_workers=0,
         lookback_overlap=LOOKBACK_OVERLAP,
-        cache_dir=synth_cache if not smoke_test else None,
+        cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
     )
     
@@ -1332,8 +1547,15 @@ def run_diffusion_hp_tuning(
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
     
-    train_loader = DataLoader(train_subset, batch_size=32, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_subset, batch_size=32, shuffle=False, num_workers=0)
+    train_bs = select_diffusion_batch_size(
+        phase_name='Diffusion HP tune',
+        dataset=train_subset,
+        device=device,
+        itrans_guidance=itrans_guidance,
+        max_candidate=8 if smoke_test else 64,
+    )
+    train_loader = DataLoader(train_subset, batch_size=train_bs, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_subset, batch_size=min(train_bs, 16), shuffle=False, num_workers=0)
     
     # Run Optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -1342,22 +1564,36 @@ def run_diffusion_hp_tuning(
     logger.info(f"Starting Diffusion HP search: {n_trials} trials")
     
     def log_trial(study, trial):
+        bs = trial.params.get('batch_size', train_bs)
         logger.info(f"[Diffusion HP] Trial {trial.number}/{n_trials}: "
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                   f"bs={trial.params['batch_size']}")
+                   f"bs={bs}")
     
+    _best_state: dict = {'model_state': None, 'val_loss': float('inf')}
+
     study.optimize(
-        lambda trial: diffusion_hp_objective(trial, train_loader, val_loader, itrans_guidance, device, smoke_test),
+        lambda trial: diffusion_hp_objective(
+            trial, train_loader, val_loader, itrans_guidance, device, smoke_test,
+            fixed_batch_size=train_bs, best_state=_best_state,
+        ),
         n_trials=n_trials,
         show_progress_bar=True,
         callbacks=[log_trial],
     )
-    
+
     best_params = study.best_params
+    best_params['batch_size'] = train_bs
     logger.info(f"Best Diffusion params: lr={best_params['learning_rate']:.2e}, bs={best_params['batch_size']}")
     logger.info(f"Best val loss: {study.best_value:.4f}")
-    
-    return best_params
+
+    ckpt_path = None
+    if checkpoint_dir is not None and _best_state.get('model_state') is not None:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        ckpt_path = os.path.join(checkpoint_dir, 'diff_hp_best.pt')
+        torch.save({'model_state_dict': _best_state['model_state'], 'best_params': best_params}, ckpt_path)
+        logger.info(f"  Saved best diffusion HP model → {ckpt_path} (val_loss={_best_state['val_loss']:.4f})")
+
+    return best_params, ckpt_path
 
 
 # ============================================================================
@@ -1383,25 +1619,22 @@ def pretrain_itransformer(
     
     device = get_device()
     
-    lr = best_params.get('learning_rate', 1e-4)
-    batch_size = best_params.get('batch_size', 64)
-    dropout = best_params.get('dropout', 0.1)
-    
-    # Effective batch size scales with world size
-    effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
-    effective_batch_size = max(1, effective_batch_size)
+    lr = require_tuned_param(best_params, 'learning_rate', 'iTransformer pretraining')
+    tuned_batch_size = require_tuned_param(best_params, 'batch_size', 'iTransformer pretraining')
+    dropout = require_tuned_param(best_params, 'dropout', 'iTransformer pretraining')
+    batch_size = tuned_batch_size
     
     # Create data
-    synth_cache = os.path.join(checkpoint_dir, 'synth_cache')
+    synth_cache = get_synth_cache_dir(checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
     synthetic_loader = get_synthetic_dataloader(
-        batch_size=effective_batch_size,
+        batch_size=min(32, max(2, tuned_batch_size)),
         lookback_length=LOOKBACK_LENGTH,
         forecast_length=FORECAST_LENGTH,
         num_variables=N_VARIATES,
         num_samples=n_samples,
         num_workers=0 if smoke_test else 4,
         lookback_overlap=LOOKBACK_OVERLAP,
-        cache_dir=synth_cache if not smoke_test else None,
+        cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
     )
     
@@ -1410,6 +1643,16 @@ def pretrain_itransformer(
     n_val = min(len(dataset) // 10, 5000)
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
+    if not _ddp_enabled:
+        batch_size = select_itrans_batch_size(
+            phase_name='iTransformer pretrain',
+            dataset=train_subset,
+            device=device,
+            dropout=dropout,
+            max_candidate=max(2, tuned_batch_size),
+        )
+    effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
+    effective_batch_size = max(1, effective_batch_size)
     
     # Use DDP-aware data loaders
     train_loader, train_sampler = create_dataloader_ddp(
@@ -1499,12 +1742,9 @@ def pretrain_diffusion(
     
     device = get_device()
     
-    lr = best_params.get('learning_rate', 1e-4)
-    batch_size = best_params.get('batch_size', 64)
-    
-    # Effective batch size scales with world size
-    effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
-    effective_batch_size = max(1, effective_batch_size)
+    lr = require_tuned_param(best_params, 'learning_rate', 'Diffusion pretraining')
+    tuned_batch_size = require_tuned_param(best_params, 'batch_size', 'Diffusion pretraining')
+    batch_size = tuned_batch_size
     
     # Load iTransformer as guidance (not wrapped in DDP - used in eval mode only)
     itrans_model = create_itransformer().to(device)
@@ -1518,16 +1758,16 @@ def pretrain_diffusion(
     )
     
     # Create data
-    synth_cache = os.path.join(checkpoint_dir, 'synth_cache')
+    synth_cache = get_synth_cache_dir(checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
     synthetic_loader = get_synthetic_dataloader(
-        batch_size=effective_batch_size,
+        batch_size=min(16, max(2, tuned_batch_size)),
         lookback_length=LOOKBACK_LENGTH,
         forecast_length=FORECAST_LENGTH,
         num_variables=N_VARIATES,
         num_samples=n_samples,
         num_workers=0 if smoke_test else 4,
         lookback_overlap=LOOKBACK_OVERLAP,
-        cache_dir=synth_cache if not smoke_test else None,
+        cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
     )
     
@@ -1535,6 +1775,16 @@ def pretrain_diffusion(
     n_val = min(len(dataset) // 10, 5000)
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
+    if not _ddp_enabled:
+        batch_size = select_diffusion_batch_size(
+            phase_name='Diffusion pretrain',
+            dataset=train_subset,
+            device=device,
+            itrans_guidance=itrans_guidance,
+            max_candidate=max(2, tuned_batch_size),
+        )
+    effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
+    effective_batch_size = max(1, effective_batch_size)
     
     # Use DDP-aware data loaders
     train_loader, train_sampler = create_dataloader_ddp(
@@ -1646,10 +1896,14 @@ def finetune_hp_objective(
     itrans_checkpoint: str,
     device: torch.device,
     smoke_test: bool = False,
+    fixed_batch_size: Optional[int] = None,
 ) -> float:
-    """Optuna objective for fine-tuning HP search (lr and batch_size only)."""
+    """Optuna objective for fine-tuning HP search (lr only; batch_size auto-probed or fixed)."""
     lr = trial.suggest_float('learning_rate', 1e-6, 1e-4, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else FINETUNE_BATCH_SIZES)
+    if fixed_batch_size is not None:
+        batch_size = fixed_batch_size
+    else:
+        batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else FINETUNE_BATCH_SIZES)
     
     # Load data
     train_ds, val_ds, _, _ = load_dataset(
@@ -1728,18 +1982,17 @@ def finetune_on_dataset(
     patience: int = FINETUNE_PATIENCE,
     checkpoint_dir: str = CHECKPOINT_DIR,
     smoke_test: bool = False,
+    dataset_name: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Fine-tune on a dataset with tuned params (DDP-aware)."""
     subset_id = subset_info['subset_id']
     variate_indices = subset_info['variate_indices']
     
-    if '-' in subset_id and subset_id.split('-')[-1].isdigit():
-        dataset_name = '-'.join(subset_id.split('-')[:-1])
-    else:
+    if dataset_name is None:
         dataset_name = subset_id
     
-    lr = tuned_params.get('learning_rate', 1e-5)
-    batch_size = tuned_params.get('batch_size', 32)
+    lr = require_tuned_param(tuned_params, 'learning_rate', f"Fine-tuning ({subset_id})")
+    batch_size = require_tuned_param(tuned_params, 'batch_size', f"Fine-tuning ({subset_id})")
     
     # Effective batch size for DDP
     effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
@@ -2291,7 +2544,7 @@ def run_pipeline(
         n_diff_trials = 1
         n_finetune_trials = 1
         pretrain_samples = 4  # Ultra minimal
-        pretrain_epochs = 1
+        itrans_pretrain_epochs = 1
         pretrain_patience = 1
         finetune_epochs = 1
         finetune_patience = 1
@@ -2300,134 +2553,148 @@ def run_pipeline(
         n_diff_trials = N_DIFFUSION_HP_TRIALS
         n_finetune_trials = N_FINETUNE_HP_TRIALS
         pretrain_samples = resolve_pretrain_virtual_dataset_size(False)
-        pretrain_epochs = PRETRAIN_EPOCHS
+        itrans_pretrain_epochs = PRETRAIN_EPOCHS
         pretrain_patience = PRETRAIN_PATIENCE
         finetune_epochs = FINETUNE_EPOCHS
         finetune_patience = FINETUNE_PATIENCE
     
-    # =========== PHASE 1A: iTransformer HP Tuning ===========
+    # =========== PHASE 1A: iTransformer HP Tuning (best model saved directly) ===========
+    itrans_tune_ckpt = os.path.join(CHECKPOINT_DIR, 'itrans_hp_best.pt')
     if not manifest.itrans_hp_done:
-        manifest.itrans_best_params = run_itransformer_hp_tuning(n_itrans_trials, smoke_test)
+        manifest.itrans_best_params, _ = run_itransformer_hp_tuning(
+            n_itrans_trials, smoke_test, checkpoint_dir=CHECKPOINT_DIR,
+        )
         manifest.itrans_hp_done = True
         manifest.save()
-        log_wandb_hp_search('itransformer', manifest.itrans_best_params, 
+        log_wandb_hp_search('itransformer', manifest.itrans_best_params,
                            manifest.itrans_best_params.get('best_val_loss', 0), n_itrans_trials)
     else:
         logger.info(f"Using cached iTransformer params: {manifest.itrans_best_params}")
-    
-    # =========== PHASE 1C-1: Full iTransformer Pretraining ===========
+
+    # Phase 1B eliminated: use best HP model directly as itransformer checkpoint
     itrans_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_itransformer.pt')
     if not manifest.itrans_checkpoint or not os.path.exists(itrans_ckpt):
-        itrans_ckpt = pretrain_itransformer(
-            manifest.itrans_best_params,
-            n_samples=pretrain_samples,
-            epochs=pretrain_epochs,
-            patience=pretrain_patience,
-            checkpoint_dir=CHECKPOINT_DIR,
-            smoke_test=smoke_test,
-        )
+        if os.path.exists(itrans_tune_ckpt):
+            import shutil
+            shutil.copy2(itrans_tune_ckpt, itrans_ckpt)
+            logger.info(f"Using best HP tuning model as iTransformer checkpoint: {itrans_ckpt}")
+        else:
+            itrans_ckpt = pretrain_itransformer(
+                manifest.itrans_best_params,
+                n_samples=pretrain_samples,
+                epochs=itrans_pretrain_epochs,
+                patience=pretrain_patience,
+                checkpoint_dir=CHECKPOINT_DIR,
+                smoke_test=smoke_test,
+            )
         manifest.itrans_checkpoint = itrans_ckpt
         manifest.save()
     else:
         logger.info(f"Using existing iTransformer checkpoint: {itrans_ckpt}")
     
-    # =========== PHASE 1B: Diffusion HP Tuning ===========
+    # =========== PHASE 1C: Diffusion HP tuning (best ckpt saved under CHECKPOINT_DIR) ===========
+    diff_tune_ckpt = os.path.join(CHECKPOINT_DIR, 'diff_hp_best.pt')
     if not manifest.diffusion_hp_done:
-        manifest.diffusion_best_params = run_diffusion_hp_tuning(itrans_ckpt, n_diff_trials, smoke_test)
+        manifest.diffusion_best_params, _ = run_diffusion_hp_tuning(
+            itrans_ckpt, n_diff_trials, smoke_test, checkpoint_dir=CHECKPOINT_DIR,
+        )
         manifest.diffusion_hp_done = True
         manifest.save()
         log_wandb_hp_search('diffusion', manifest.diffusion_best_params,
                            manifest.diffusion_best_params.get('best_val_loss', 0), n_diff_trials)
     else:
         logger.info(f"Using cached Diffusion params: {manifest.diffusion_best_params}")
-    
-    # =========== PHASE 1C-2: Full Diffusion Pretraining ===========
+
+    # =========== Diffusion checkpoint: best from HP only (no separate full synthetic pretrain) ===========
     diff_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_diffusion.pt')
     if not manifest.pretrain_complete or not os.path.exists(diff_ckpt):
-        diff_ckpt = pretrain_diffusion(
-            manifest.diffusion_best_params,
-            itrans_ckpt,
-            n_samples=pretrain_samples,
-            epochs=pretrain_epochs,
-            patience=pretrain_patience,
-            checkpoint_dir=CHECKPOINT_DIR,
-            smoke_test=smoke_test,
-        )
+        if os.path.exists(diff_tune_ckpt):
+            import shutil
+            shutil.copy2(diff_tune_ckpt, diff_ckpt)
+            logger.info(f"Using best diffusion HP model as pretrained checkpoint: {diff_ckpt}")
+        else:
+            fallback_epochs = 1 if smoke_test else PRETRAIN_DIFFUSION_MAX_EPOCHS
+            diff_ckpt = pretrain_diffusion(
+                manifest.diffusion_best_params,
+                itrans_ckpt,
+                n_samples=pretrain_samples,
+                epochs=fallback_epochs,
+                patience=pretrain_patience,
+                checkpoint_dir=CHECKPOINT_DIR,
+                smoke_test=smoke_test,
+            )
         manifest.pretrain_checkpoint = diff_ckpt
         manifest.pretrain_complete = True
         manifest.save()
     else:
         logger.info(f"Using existing Diffusion checkpoint: {diff_ckpt}")
     
-    # =========== PHASE 2: Fine-tuning per Dataset ===========
-    all_subsets = generate_all_subsets(seed=seed)
-    subset_list = []
-    for dataset_name, subsets in all_subsets.items():
-        for subset in subsets:
-            subset_list.append(subset)
-            if subset['subset_id'] not in manifest.subsets:
-                manifest.subsets[subset['subset_id']] = {
-                    'status': 'pending',
-                    'dataset': dataset_name,
-                    'variate_indices': subset['variate_indices'],
-                }
-    manifest.save()
-    
+    # =========== PHASE 2: Fine-tuning per Dataset (full variates only) ===========
+    all_jobs = generate_all_dataset_jobs(seed=seed)
+    job_list = list(all_jobs.values())
     if smoke_test:
-        subset_list = subset_list[:1]  # Just 1 dataset for ultra-fast smoke test
-    
-    for subset_info in subset_list:
-        subset_id = subset_info['subset_id']
-        variate_indices = subset_info['variate_indices']
-        
-        if '-' in subset_id and subset_id.split('-')[-1].isdigit():
-            dataset_name = '-'.join(subset_id.split('-')[:-1])
-        else:
-            dataset_name = subset_id
-        
-        if manifest.subsets.get(subset_id, {}).get('status') == 'complete':
-            logger.info(f"Skipping {subset_id} (already complete)")
-            continue
-        
-        manifest.subsets[subset_id]['status'] = 'in_progress'
-        manifest.save()
-        
+        job_list = job_list[:1]  # Just 1 dataset for ultra-fast smoke test
+
+    for job in job_list:
+        dataset_name = job['dataset_id']
+        variate_indices = job['variate_indices']
+
         try:
-            # HP Tuning for this dataset
-            tuned_params = manifest.subsets[subset_id].get('tuned_params')
-            if not tuned_params:
-                logger.info(f"Running HP search for {subset_id}...")
-                optuna.logging.set_verbosity(optuna.logging.WARNING)
-                
-                def log_finetune_trial(study, trial):
-                    logger.info(f"[{subset_id} HP] Trial {trial.number}/{n_finetune_trials}: "
-                               f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                               f"bs={trial.params['batch_size']}")
-                
-                study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
-                study.optimize(
-                    lambda trial: finetune_hp_objective(
-                        trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test
-                    ),
-                    n_trials=n_finetune_trials,
-                    show_progress_bar=True,
-                    callbacks=[log_finetune_trial],
-                )
-                tuned_params = study.best_params
-                manifest.subsets[subset_id]['tuned_params'] = tuned_params
-                manifest.save()
-                logger.info(f"Best params for {subset_id}: {tuned_params}")
+            # Probe max safe batch size once before HP trials
+            _p_itrans = create_itransformer().to(device)
+            _p_ckpt = torch.load(itrans_ckpt, map_location=device, weights_only=False)
+            _p_itrans.load_state_dict(_p_ckpt['model_state_dict'])
+            _p_guidance = iTransformerGuidance(
+                _p_itrans, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH,
+            )
+            _p_ds, _, _, _ = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+            ft_diff_bs = select_diffusion_batch_size(
+                phase_name=f'Diff FT HP ({dataset_name})',
+                dataset=_p_ds,
+                device=device,
+                itrans_guidance=_p_guidance,
+                max_candidate=4 if smoke_test else 64,
+            )
+            del _p_itrans, _p_ckpt, _p_guidance, _p_ds
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            logger.info(
+                f"Phase 2C — diffusion finetune HP ({dataset_name}): "
+                f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs}..."
+            )
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+            def log_finetune_trial(study, trial):
+                logger.info(f"[{dataset_name} HP] Trial {trial.number}/{n_finetune_trials}: "
+                            f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+                            f"bs={ft_diff_bs}")
+
+            study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
+            study.optimize(
+                lambda trial: finetune_hp_objective(
+                    trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test,
+                    fixed_batch_size=ft_diff_bs,
+                ),
+                n_trials=n_finetune_trials,
+                show_progress_bar=True,
+                callbacks=[log_finetune_trial],
+            )
+            tuned_params = study.best_params
+            tuned_params['batch_size'] = ft_diff_bs
+            logger.info(f"Best params for {dataset_name}: {tuned_params}")
             
             # Full fine-tuning
             ckpt_path, train_metrics = finetune_on_dataset(
-                subset_info, diff_ckpt, itrans_ckpt, tuned_params,
+                {'subset_id': dataset_name, 'variate_indices': variate_indices},
+                diff_ckpt, itrans_ckpt, tuned_params,
                 epochs=finetune_epochs, patience=finetune_patience,
                 checkpoint_dir=CHECKPOINT_DIR, smoke_test=smoke_test,
             )
             
             # Evaluation
             if True:
-                logger.info(f"Evaluating {subset_id}...")
+                logger.info(f"Evaluating {dataset_name}...")
                 itrans_model = create_itransformer().to(device)
                 ckpt = torch.load(itrans_ckpt, map_location=device, weights_only=False)
                 itrans_model.load_state_dict(ckpt['model_state_dict'])
@@ -2445,42 +2712,36 @@ def run_pipeline(
                 
                 eval_results = evaluate_model(model, test_loader, device, n_samples=30, smoke_test=smoke_test)
                 
-                logger.info(f"[{subset_id}] Single: MSE={eval_results['single']['mse']:.4f}, MAE={eval_results['single']['mae']:.4f}")
-                logger.info(f"[{subset_id}] Avg: MSE={eval_results['averaged']['mse']:.4f}, MAE={eval_results['averaged']['mae']:.4f}")
+                logger.info(f"[{dataset_name}] Single: MSE={eval_results['single']['mse']:.4f}, MAE={eval_results['single']['mae']:.4f}")
+                logger.info(f"[{dataset_name}] Avg: MSE={eval_results['averaged']['mse']:.4f}, MAE={eval_results['averaged']['mae']:.4f}")
                 
-                save_eval_results(subset_id, dataset_name, variate_indices, 
+                save_eval_results(dataset_name, dataset_name, variate_indices,
                                 {**train_metrics, 'tuned_params': tuned_params}, eval_results, RESULTS_DIR)
                 
                 # iTransformer-only baseline (for comparison table in summarize_results.py)
                 try:
                     evaluate_itransformer_baseline(
-                        subset_id, dataset_name, variate_indices,
+                        dataset_name, dataset_name, variate_indices,
                         itrans_ckpt, RESULTS_DIR, device, smoke_test=smoke_test,
                     )
                 except Exception as be:
-                    logger.warning(f"iTransformer baseline eval failed for {subset_id}: {be}")
+                    logger.warning(f"iTransformer baseline eval failed for {dataset_name}: {be}")
                 
                 # Log to wandb
-                log_wandb_eval_results(subset_id, eval_results, train_metrics)
-                log_wandb_model_checkpoint(ckpt_path, subset_id)
-                
-                manifest.mark_complete(subset_id, ckpt_path, {**train_metrics, 'eval': eval_results})
+                log_wandb_eval_results(dataset_name, eval_results, train_metrics)
+                log_wandb_model_checkpoint(ckpt_path, dataset_name)
             
         except KeyboardInterrupt:
-            logger.info(f"\nInterrupted during {subset_id}. Progress saved.")
+            logger.info(f"\nInterrupted during {dataset_name}.")
             return
         except Exception as e:
-            logger.error(f"Error with {subset_id}: {e}")
+            logger.error(f"Error with {dataset_name}: {e}")
             import traceback
             traceback.print_exc()
-            manifest.subsets[subset_id]['status'] = 'error'
-            manifest.subsets[subset_id]['error'] = str(e)
-            manifest.save()
     
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETE")
-    complete = len([s for s in manifest.subsets.values() if s.get('status') == 'complete'])
-    logger.info(f"Trained {complete} models")
+    logger.info(f"Trained {len(job_list)} models")
     logger.info("=" * 60)
 
 
@@ -2528,7 +2789,8 @@ def find_existing_itrans_checkpoint(n_variates: int) -> Optional[str]:
             for fname in filenames:
                 p = os.path.join(root, subdir, fname)
                 if os.path.exists(p):
-                    return p
+                    if is_itrans_checkpoint_compatible(p, n_variates):
+                        return p
 
     # 3. Broad project-tree search (limited depth to avoid being slow)
     project_root_local = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -2541,12 +2803,27 @@ def find_existing_itrans_checkpoint(n_variates: int) -> Optional[str]:
                 # lightweight sanity: the file must be a valid torch checkpoint
                 try:
                     meta = torch.load(candidate, map_location='cpu', weights_only=False)
-                    if 'model_state_dict' in meta:
+                    if 'model_state_dict' in meta and is_itrans_checkpoint_compatible(candidate, n_variates):
                         return candidate
                 except Exception:
                     pass
 
     return None
+
+
+def is_itrans_checkpoint_compatible(path: str, n_variates: int) -> bool:
+    """Return True if checkpoint can be loaded into current iTransformer config."""
+    try:
+        ckpt = torch.load(path, map_location='cpu', weights_only=False)
+        state = ckpt.get('model_state_dict')
+        if state is None:
+            return False
+        model = create_itransformer(num_vars=n_variates).cpu()
+        model.load_state_dict(state, strict=True)
+        return True
+    except Exception as e:
+        logger.warning(f"Skipping incompatible iTransformer checkpoint {path}: {e}")
+        return False
 
 
 def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42):
@@ -2573,6 +2850,8 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
         for f in [itrans_ckpt, diff_ckpt,
                   os.path.join(dim_dir, 'itrans_hp.json'),
                   os.path.join(dim_dir, 'diff_hp.json'),
+                  os.path.join(dim_dir, 'itrans_hp_best.pt'),
+                  os.path.join(dim_dir, 'diff_hp_best.pt'),
                   smoke_flag]:
             if os.path.exists(f):
                 os.remove(f)
@@ -2580,13 +2859,19 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
     n_itrans_trials = 1 if smoke_test else N_ITRANS_HP_TRIALS
     n_diff_trials = 1 if smoke_test else N_DIFFUSION_HP_TRIALS
     pretrain_samples = resolve_pretrain_virtual_dataset_size(smoke_test)
-    pretrain_epochs = 1 if smoke_test else PRETRAIN_EPOCHS
+    itrans_pretrain_epochs = 1 if smoke_test else PRETRAIN_EPOCHS
+    diff_pretrain_epochs = 1 if smoke_test else min(PRETRAIN_DIFFUSION_EPOCHS, PRETRAIN_DIFFUSION_MAX_EPOCHS)
     pretrain_patience = 1 if smoke_test else PRETRAIN_PATIENCE
 
     itrans_hp_path = os.path.join(dim_dir, 'itrans_hp.json')
     diff_hp_path   = os.path.join(dim_dir, 'diff_hp.json')
 
     logger.info(f"Pretraining dim={n_variates}")
+
+    # Guard against stale checkpoints copied from a mismatched architecture
+    if os.path.exists(itrans_ckpt) and not is_itrans_checkpoint_compatible(itrans_ckpt, n_variates):
+        logger.info(f"  Removing incompatible iTransformer ckpt: {itrans_ckpt}")
+        os.remove(itrans_ckpt)
 
     # Try to reuse an existing V=n_variates iTransformer from previous runs
     # (searches slurm storage roots and the project tree — see find_existing_itrans_checkpoint)
@@ -2600,54 +2885,80 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
             shutil.copy2(found, itrans_ckpt)
 
     # Phase 1A: iTransformer HP tuning — cached to disk so reruns skip it
+    itrans_tune_ckpt = os.path.join(dim_dir, 'itrans_hp_best.pt')
     if os.path.exists(itrans_hp_path):
         with open(itrans_hp_path) as f:
             best_itrans_params = json.load(f)
         logger.info(f"  iTransformer HP loaded from cache: {itrans_hp_path}")
     else:
-        best_itrans_params = run_itransformer_hp_tuning(n_itrans_trials, smoke_test)
+        best_itrans_params, _ = run_itransformer_hp_tuning(
+            n_itrans_trials, smoke_test, checkpoint_dir=dim_dir,
+        )
         with open(itrans_hp_path, 'w') as f:
             json.dump(best_itrans_params, f, indent=2)
 
-    # Phase 1C-1: Full iTransformer pretraining
+    # Phase 1B (eliminated): use best HP-tuning model directly as itransformer.pt
     if not os.path.exists(itrans_ckpt):
-        pretrain_itransformer(
-            best_itrans_params,
-            n_samples=pretrain_samples,
-            epochs=pretrain_epochs,
-            patience=pretrain_patience,
-            checkpoint_dir=dim_dir,
-            smoke_test=smoke_test,
-        )
-        saved = os.path.join(dim_dir, 'pretrained_itransformer.pt')
-        if saved != itrans_ckpt and os.path.exists(saved):
-            os.rename(saved, itrans_ckpt)
+        if os.path.exists(itrans_tune_ckpt):
+            import shutil
+            shutil.copy2(itrans_tune_ckpt, itrans_ckpt)
+            logger.info(f"  Using best HP tuning model as iTransformer checkpoint: {itrans_ckpt}")
+        else:
+            # fallback: HP cache from an older run without itrans_hp_best.pt
+            fallback_epochs = 1 if smoke_test else PRETRAIN_EPOCHS
+            pretrain_itransformer(
+                best_itrans_params,
+                n_samples=pretrain_samples,
+                epochs=fallback_epochs,
+                patience=pretrain_patience,
+                checkpoint_dir=dim_dir,
+                smoke_test=smoke_test,
+            )
+            saved = os.path.join(dim_dir, 'pretrained_itransformer.pt')
+            if saved != itrans_ckpt and os.path.exists(saved):
+                os.rename(saved, itrans_ckpt)
     else:
         logger.info(f"  iTransformer ckpt exists: {itrans_ckpt}")
 
+    if not is_itrans_checkpoint_compatible(itrans_ckpt, n_variates):
+        raise RuntimeError(
+            f"iTransformer checkpoint remains incompatible after pretrain/reuse: {itrans_ckpt}"
+        )
+
     # Phase 1B: Diffusion HP tuning — cached to disk so reruns skip it
+    diff_tune_ckpt = os.path.join(dim_dir, 'diff_hp_best.pt')
     if os.path.exists(diff_hp_path):
         with open(diff_hp_path) as f:
             best_diff_params = json.load(f)
         logger.info(f"  Diffusion HP loaded from cache: {diff_hp_path}")
     else:
-        best_diff_params = run_diffusion_hp_tuning(itrans_ckpt, n_diff_trials, smoke_test)
+        best_diff_params, _ = run_diffusion_hp_tuning(
+            itrans_ckpt, n_diff_trials, smoke_test, checkpoint_dir=dim_dir,
+        )
         with open(diff_hp_path, 'w') as f:
             json.dump(best_diff_params, f, indent=2)
 
-    # Phase 1C-2: Full Diffusion pretraining
+    # Phase 1C-2: use the best model saved during HP tuning directly — no separate full pretrain
     if not os.path.exists(diff_ckpt):
-        pretrain_diffusion(
-            best_diff_params, itrans_ckpt,
-            n_samples=pretrain_samples,
-            epochs=pretrain_epochs,
-            patience=pretrain_patience,
-            checkpoint_dir=dim_dir,
-            smoke_test=smoke_test,
-        )
-        saved = os.path.join(dim_dir, 'pretrained_diffusion.pt')
-        if saved != diff_ckpt and os.path.exists(saved):
-            os.rename(saved, diff_ckpt)
+        if os.path.exists(diff_tune_ckpt):
+            import shutil
+            shutil.copy2(diff_tune_ckpt, diff_ckpt)
+            logger.info(f"  Using best HP tuning model as diffusion checkpoint: {diff_ckpt}")
+        else:
+            # fallback: HP cache from an older run that didn't save diff_hp_best.pt —
+            # the already-trained HP model is gone, so run a full training pass
+            fallback_epochs = 1 if smoke_test else PRETRAIN_DIFFUSION_MAX_EPOCHS
+            pretrain_diffusion(
+                best_diff_params, itrans_ckpt,
+                n_samples=pretrain_samples,
+                epochs=fallback_epochs,
+                patience=pretrain_patience,
+                checkpoint_dir=dim_dir,
+                smoke_test=smoke_test,
+            )
+            saved = os.path.join(dim_dir, 'pretrained_diffusion.pt')
+            if saved != diff_ckpt and os.path.exists(saved):
+                os.rename(saved, diff_ckpt)
     else:
         logger.info(f"  Diffusion ckpt exists: {diff_ckpt}")
 
@@ -2661,14 +2972,12 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
 def run_finetune_mode(
     dataset_name: str,
     n_variates: int,
+    variate_indices: Optional[List[int]] = None,
+    subset_id: Optional[str] = None,
     smoke_test: bool = False,
     seed: int = 42,
 ):
-    """Fine-tune + evaluate all subsets of a single dataset.
-
-    For native-dim datasets, this is just one model.
-    For high-variate datasets split into subsets, this iterates over them all.
-    """
+    """Fine-tune + evaluate one full-dataset model."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -2693,60 +3002,169 @@ def run_finetune_mode(
         )
         sys.exit(1)
 
-    subsets = generate_variate_subsets(dataset_name, n_variates=n_variates, seed=seed)
-    if smoke_test:
-        subsets = subsets[:1]  # just verify one subset in smoke test
-
     n_finetune_trials = 1 if smoke_test else N_FINETUNE_HP_TRIALS
     finetune_epochs = 1 if smoke_test else FINETUNE_EPOCHS
     finetune_patience = 1 if smoke_test else FINETUNE_PATIENCE
 
-    for subset_info in subsets:
-        _finetune_and_eval_one_subset(
-            subset_info, dataset_name, diff_ckpt, itrans_ckpt,
-            n_finetune_trials, finetune_epochs, finetune_patience,
-            device, smoke_test,
-        )
-
-
-def run_finetune_subset_mode(
-    subset_id: str,
-    dataset_name: str,
-    variate_indices: List[int],
-    n_variates: int,
-    smoke_test: bool = False,
-    seed: int = 42,
-):
-    """Fine-tune + evaluate a single subset.  Used by multi-GPU dispatch."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    recombine_traffic_data()
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    dim_dir = pretrain_dir_for_dim(n_variates)
-    itrans_ckpt = os.path.join(dim_dir, 'itransformer.pt')
-    diff_ckpt = os.path.join(dim_dir, 'diffusion.pt')
-
-    if not os.path.exists(diff_ckpt):
-        logger.error(f"Pretrained checkpoint not found: {diff_ckpt}")
-        sys.exit(1)
-
-    n_finetune_trials = 1 if smoke_test else N_FINETUNE_HP_TRIALS
-    finetune_epochs = 1 if smoke_test else FINETUNE_EPOCHS
-    finetune_patience = 1 if smoke_test else FINETUNE_PATIENCE
-
-    subset_info = {
-        'subset_id': subset_id,
-        'variate_indices': variate_indices,
-    }
+    if variate_indices is None:
+        variate_indices = generate_dataset_job(dataset_name)['variate_indices']
+    if subset_id is None:
+        subset_id = dataset_name
 
     _finetune_and_eval_one_subset(
-        subset_info, dataset_name, diff_ckpt, itrans_ckpt,
+        {'subset_id': subset_id, 'variate_indices': variate_indices},
+        dataset_name, diff_ckpt, itrans_ckpt,
         n_finetune_trials, finetune_epochs, finetune_patience,
         device, smoke_test,
     )
+
+
+def run_itransformer_finetune_hp_tuning(
+    dataset_name: str,
+    variate_indices: List[int],
+    pretrained_ckpt: str,
+    n_trials: int,
+    device: torch.device,
+    smoke_test: bool = False,
+    checkpoint_dir: Optional[str] = None,
+    subset_id: Optional[str] = None,
+) -> Tuple[Dict, Optional[str]]:
+    """HP tune iTransformer on real data, warm-starting from pretrained weights.
+
+    Same search space as pretrain HP tuning (lr + dropout). Returns
+    (best_params, path_to_best_model_or_None).
+    """
+    label = subset_id or dataset_name
+    logger.info("=" * 60)
+    logger.info(f"iTrans Finetune HP Tuning: {label} ({n_trials} trials)")
+    logger.info("=" * 60)
+
+    train_ds, val_ds, _, _ = load_dataset(
+        dataset_name, variate_indices,
+        stride=24 if not smoke_test else LOOKBACK_LENGTH,
+    )
+    if smoke_test:
+        train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
+        val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
+
+    train_bs = select_itrans_batch_size(
+        phase_name=f'iTransformer FT HP ({label})',
+        dataset=train_ds,
+        device=device,
+        dropout=0.1,
+        max_candidate=32 if smoke_test else 256,
+    )
+    train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
+
+    _best_state: dict = {'model_state': None, 'val_loss': float('inf')}
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(
+        direction='minimize',
+        sampler=TPESampler(seed=42),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+    )
+
+    def log_trial(study, trial):
+        logger.info(f"[iTrans FT HP {label}] Trial {trial.number}/{n_trials}: "
+                   f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+                   f"dropout={trial.params['dropout']:.3f}")
+
+    study.optimize(
+        lambda trial: itrans_hp_objective(
+            trial, train_loader, val_loader, device, smoke_test,
+            fixed_batch_size=train_bs, best_state=_best_state,
+            pretrained_ckpt=pretrained_ckpt,
+        ),
+        n_trials=n_trials,
+        show_progress_bar=False,
+        callbacks=[log_trial],
+    )
+
+    best_params = study.best_params
+    best_params['batch_size'] = train_bs
+    logger.info(f"Best iTrans FT params for {label}: lr={best_params['learning_rate']:.2e}, "
+               f"dropout={best_params['dropout']:.3f}")
+
+    ckpt_path = None
+    if checkpoint_dir is not None and _best_state.get('model_state') is not None:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        ckpt_path = os.path.join(checkpoint_dir, f'{label}_itrans_ft_hp_best.pt')
+        torch.save({'model_state_dict': _best_state['model_state'], 'best_params': best_params}, ckpt_path)
+        logger.info(f"  Saved best iTrans FT HP model → {ckpt_path} (val_loss={_best_state['val_loss']:.4f})")
+
+    return best_params, ckpt_path
+
+
+def finetune_itransformer_on_dataset(
+    dataset_name: str,
+    variate_indices: List[int],
+    pretrained_ckpt: str,
+    best_params: Dict,
+    device: torch.device,
+    epochs: int = PRETRAIN_EPOCHS,
+    patience: int = PRETRAIN_PATIENCE,
+    checkpoint_dir: str = CHECKPOINT_DIR,
+    smoke_test: bool = False,
+    subset_id: Optional[str] = None,
+) -> str:
+    """Fine-tune iTransformer on real data starting from pretrained weights.
+
+    Returns path to the best checkpoint saved during training.
+    """
+    label = subset_id or dataset_name
+    lr = require_tuned_param(best_params, 'learning_rate', f'iTransformer finetune ({label})')
+    dropout = require_tuned_param(best_params, 'dropout', f'iTransformer finetune ({label})')
+    batch_size = require_tuned_param(best_params, 'batch_size', f'iTransformer finetune ({label})')
+
+    logger.info("=" * 60)
+    logger.info(f"iTransformer Finetune: {label}")
+    logger.info(f"Epochs: {epochs}, Patience: {patience}, LR: {lr:.2e}, Dropout: {dropout:.3f}")
+    logger.info("=" * 60)
+
+    train_ds, val_ds, _, _ = load_dataset(
+        dataset_name, variate_indices,
+        stride=24 if not smoke_test else LOOKBACK_LENGTH,
+    )
+    if smoke_test:
+        train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
+        val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
+        epochs = 1
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=min(batch_size, 32), shuffle=False, num_workers=0)
+
+    model = create_itransformer(dropout=dropout).to(device)
+    ckpt = torch.load(pretrained_ckpt, map_location=device, weights_only=False)
+    model.load_state_dict(ckpt['model_state_dict'])
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
+    early_stop = EarlyStopping(patience=patience)
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    ckpt_path = os.path.join(checkpoint_dir, f'{label}_itransformer_finetuned.pt')
+    best_val_loss = float('inf')
+
+    for epoch in range(epochs):
+        train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
+        val_loss = validate_itransformer(model, val_loader, criterion, device)
+        scheduler.step()
+
+        logger.info(f"[iTrans FT {label}] Epoch {epoch+1}/{epochs} | Val: {val_loss:.4f}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save({'model_state_dict': model.state_dict(), 'best_params': best_params}, ckpt_path)
+
+        if early_stop(val_loss):
+            logger.info(f"[iTrans FT {label}] Early stop at epoch {epoch+1}")
+            break
+
+    logger.info(f"iTransformer finetune done ({label}). Best val: {best_val_loss:.4f}")
+    return ckpt_path
 
 
 def _finetune_and_eval_one_subset(
@@ -2754,12 +3172,18 @@ def _finetune_and_eval_one_subset(
     n_finetune_trials, finetune_epochs, finetune_patience,
     device, smoke_test,
 ):
-    """Internal: HP tune, fine-tune, and evaluate a single subset."""
+    """Internal: HP tune, fine-tune, and evaluate a single subset.
+
+    Four phases:
+      A. HP tune iTransformer on real data (warm-start from pretrained).
+      B. Full iTransformer finetune on real data with best params.
+      C. HP tune Diffusion on real data (finetuned iTrans as guidance).
+      D. Full Diffusion finetune on real data (finetuned iTrans as guidance).
+    """
     subset_id = subset_info['subset_id']
     variate_indices = subset_info['variate_indices']
 
     # Preflight: check dataset has enough rows before wasting a trial slot
-    min_rows = LOOKBACK_LENGTH + FORECAST_LENGTH
     try:
         load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
     except ValueError as ve:
@@ -2767,8 +3191,65 @@ def _finetune_and_eval_one_subset(
         return
 
     try:
-        # HP search
-        logger.info(f"HP search for {subset_id} ({n_finetune_trials} trials)...")
+        n_itrans_ft_trials = 1 if smoke_test else N_ITRANS_HP_TRIALS
+        itrans_ft_epochs = 1 if smoke_test else PRETRAIN_EPOCHS
+        itrans_ft_patience = 1 if smoke_test else PRETRAIN_PATIENCE
+
+        # Phase A+B: iTransformer HP tune + full finetune on real data
+        itrans_hp_cache = os.path.join(CHECKPOINT_DIR, f'{subset_id}_itrans_ft_hp.json')
+        ft_itrans_ckpt = os.path.join(CHECKPOINT_DIR, f'{subset_id}_itransformer_finetuned.pt')
+
+        if os.path.exists(ft_itrans_ckpt):
+            logger.info(f"  Using cached finetuned iTransformer: {ft_itrans_ckpt}")
+        else:
+            if os.path.exists(itrans_hp_cache):
+                with open(itrans_hp_cache) as f:
+                    itrans_ft_params = json.load(f)
+                logger.info(f"  iTrans FT HP loaded from cache: {itrans_hp_cache}")
+            else:
+                itrans_ft_params, _ = run_itransformer_finetune_hp_tuning(
+                    dataset_name, variate_indices, itrans_ckpt,
+                    n_trials=n_itrans_ft_trials, device=device,
+                    smoke_test=smoke_test, checkpoint_dir=CHECKPOINT_DIR,
+                    subset_id=subset_id,
+                )
+                with open(itrans_hp_cache, 'w') as f:
+                    json.dump(itrans_ft_params, f, indent=2)
+
+            ft_itrans_ckpt = finetune_itransformer_on_dataset(
+                dataset_name, variate_indices, itrans_ckpt, itrans_ft_params,
+                device=device, epochs=itrans_ft_epochs, patience=itrans_ft_patience,
+                checkpoint_dir=CHECKPOINT_DIR, smoke_test=smoke_test,
+                subset_id=subset_id,
+            )
+
+        # Phase C: Diffusion HP search using finetuned iTransformer as guidance
+        # Probe max safe batch size once before HP trials start
+        _ft_itrans_model = create_itransformer().to(device)
+        _ft_itrans_ckpt_data = torch.load(ft_itrans_ckpt, map_location=device, weights_only=False)
+        _ft_itrans_model.load_state_dict(_ft_itrans_ckpt_data['model_state_dict'])
+        _ft_itrans_guidance = iTransformerGuidance(
+            _ft_itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH,
+        )
+        _probe_ds, _, _, _ = load_dataset(
+            dataset_name, variate_indices, stride=LOOKBACK_LENGTH,
+        )
+        ft_diff_bs = select_diffusion_batch_size(
+            phase_name=f'Diff FT HP ({subset_id})',
+            dataset=_probe_ds,
+            device=device,
+            itrans_guidance=_ft_itrans_guidance,
+            max_candidate=4 if smoke_test else 64,
+        )
+        del _ft_itrans_model, _ft_itrans_ckpt_data, _ft_itrans_guidance, _probe_ds
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        logger.info(
+            f"Phase 2C — diffusion finetune HP ({subset_id}): "
+            f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs} "
+            f"(pretrain diffusion HP uses N_DIFFUSION_HP_TRIALS={N_DIFFUSION_HP_TRIALS})..."
+        )
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(
             direction='minimize',
@@ -2777,29 +3258,32 @@ def _finetune_and_eval_one_subset(
         )
         study.optimize(
             lambda trial: finetune_hp_objective(
-                trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test
+                trial, dataset_name, variate_indices, diff_ckpt, ft_itrans_ckpt, device, smoke_test,
+                fixed_batch_size=ft_diff_bs,
             ),
             n_trials=n_finetune_trials,
             show_progress_bar=False,
-            catch=(ValueError,),  # don't propagate dataset-size errors as fatal
+            catch=(ValueError,),
         )
         if study.best_trial is None:
-            logger.warning(f"All HP trials failed for {subset_id} — skipping")
+            logger.warning(f"All diffusion HP trials failed for {subset_id} — skipping")
             return
         tuned_params = study.best_params
-        logger.info(f"Best params for {subset_id}: {tuned_params}")
+        tuned_params['batch_size'] = ft_diff_bs
+        logger.info(f"Best diffusion params for {subset_id}: {tuned_params}")
 
-        # Full fine-tune
+        # Phase D: Full Diffusion finetune
         ckpt_path, train_metrics = finetune_on_dataset(
-            subset_info, diff_ckpt, itrans_ckpt, tuned_params,
+            subset_info, diff_ckpt, ft_itrans_ckpt, tuned_params,
             epochs=finetune_epochs, patience=finetune_patience,
             checkpoint_dir=CHECKPOINT_DIR, smoke_test=smoke_test,
+            dataset_name=dataset_name,
         )
 
-        # Evaluate diffusion
+        # Evaluate diffusion model
         logger.info(f"Evaluating {subset_id}...")
         itrans_model = create_itransformer().to(device)
-        ckpt = torch.load(itrans_ckpt, map_location=device, weights_only=False)
+        ckpt = torch.load(ft_itrans_ckpt, map_location=device, weights_only=False)
         itrans_model.load_state_dict(ckpt['model_state_dict'])
         itrans_guidance = iTransformerGuidance(
             itrans_model, use_norm=True,
@@ -2825,11 +3309,11 @@ def _finetune_and_eval_one_subset(
             {**train_metrics, 'tuned_params': tuned_params}, eval_results, RESULTS_DIR,
         )
 
-        # Subset-level iTransformer baseline
+        # Finetuned iTransformer as baseline for comparison
         try:
             evaluate_itransformer_baseline(
                 subset_id, dataset_name, variate_indices,
-                itrans_ckpt, RESULTS_DIR, device, smoke_test=smoke_test,
+                ft_itrans_ckpt, RESULTS_DIR, device, smoke_test=smoke_test,
             )
         except Exception as be:
             logger.warning(f"iTransformer baseline eval failed for {subset_id}: {be}")
@@ -2841,17 +3325,6 @@ def _finetune_and_eval_one_subset(
         logger.error(f"Error with {subset_id}: {e}")
         import traceback
         traceback.print_exc()
-
-
-def run_list_subsets_mode(dataset_name: str, n_variates: int, seed: int = 42):
-    """Print subset info as JSON lines (for parallel subset fine-tune dispatch).
-
-    Intentionally does NOT log anything so stdout is clean JSON only.
-    """
-    subsets = generate_variate_subsets(dataset_name, n_variates=n_variates, seed=seed)
-    for s in subsets:
-        print(json.dumps(s))
-
 
 def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
     """Train full-dimensionality iTransformer baseline for a high-variate dataset."""
@@ -2868,20 +3341,20 @@ def main():
     global USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT
     global PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE, PRETRAIN_EPOCHS, FINETUNE_EPOCHS
     global SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
+    global UNET_CHANNELS, ATTENTION_LEVELS, SYNTH_CACHE_DIR
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
-                        choices=['full', 'pretrain', 'finetune', 'finetune-subset',
-                                 'baseline', 'evaluate', 'list-subsets', 'status'],
+                        choices=['full', 'pretrain', 'finetune', 'baseline', 'evaluate', 'status'],
                         help='Pipeline mode (default: full = run everything)')
     parser.add_argument('--n-variates', type=int, default=None,
                         help='Override variate count (default: auto per dataset)')
     parser.add_argument('--dataset', type=str, default=None,
                         help='Single dataset to process')
-    parser.add_argument('--subset-id', type=str, default=None,
-                        help='Specific subset ID for finetune-subset mode')
     parser.add_argument('--variate-indices', type=str, default=None,
-                        help='Comma-separated variate indices (for finetune-subset)')
+                        help='Comma-separated variate indices for subset finetune')
+    parser.add_argument('--subset-id', type=str, default=None,
+                        help='Optional subset id label used in saved results')
     parser.add_argument('--resume', action='store_true', help='Resume from checkpoint')
     parser.add_argument('--smoke-test', action='store_true', help='Quick validation run')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -2893,12 +3366,12 @@ def main():
                         help='Override checkpoint directory')
     parser.add_argument('--results-dir', type=str, default=None,
                         help='Override results directory')
+    parser.add_argument('--synth-cache-dir', type=str, default=None,
+                        help='Shared synthetic pool cache directory for reuse across runs')
     parser.add_argument('--parallel-worker', type=int, default=None,
                         help='Parallel worker ID for multi-GPU Optuna (0-N)')
     parser.add_argument('--fresh', action='store_true',
                         help='Wipe manifest and checkpoints, start from scratch')
-    parser.add_argument('--list-subsets', action='store_true',
-                        help='Legacy flag: list subsets')
     parser.add_argument('--amp', action='store_true',
                         help='Enable bfloat16 mixed precision training')
     parser.add_argument('--gradient-checkpointing', action='store_true',
@@ -2912,17 +3385,19 @@ def main():
     parser.add_argument('--finetune-epochs', type=int, default=None,
                         help=f'Override FINETUNE_EPOCHS (default: {FINETUNE_EPOCHS})')
     parser.add_argument('--itransformer-trials', type=int, default=None,
-                        help='Override N_ITRANS_HP_TRIALS (default: 20)')
+                        help=f'Override N_ITRANS_HP_TRIALS (default: {N_ITRANS_HP_TRIALS})')
     parser.add_argument('--subset-threshold', type=int, default=None,
                         help='Override SUBSET_THRESHOLD for dim grouping')
-    
+    parser.add_argument('--unet-channels', type=str, default=None,
+                        help='Comma-separated U-Net channels, e.g. 64,128,256')
+    parser.add_argument('--attention-levels', type=str, default=None,
+                        help='Comma-separated U-Net attention indices, e.g. 1,2')
+
     args = parser.parse_args()
     
     # Legacy flag compat
     if args.status:
         args.mode = 'status'
-    if args.list_subsets:
-        args.mode = 'list-subsets'
 
     # Override directories
     if args.checkpoint_dir:
@@ -2930,6 +3405,8 @@ def main():
         MANIFEST_PATH = os.path.join(CHECKPOINT_DIR, 'training_manifest.json')
     if args.results_dir:
         RESULTS_DIR = args.results_dir
+    if args.synth_cache_dir:
+        SYNTH_CACHE_DIR = args.synth_cache_dir
     
     # Set N_VARIATES from CLI (affects all model/data creation)
     if args.n_variates is not None:
@@ -2950,6 +3427,12 @@ def main():
         N_ITRANS_HP_TRIALS = args.itransformer_trials
     if args.subset_threshold is not None:
         SUBSET_THRESHOLD = args.subset_threshold
+    if args.unet_channels is not None:
+        UNET_CHANNELS = [int(x.strip()) for x in args.unet_channels.split(',') if x.strip()]
+        if len(UNET_CHANNELS) < 2:
+            raise ValueError("--unet-channels must provide at least two levels")
+    if args.attention_levels is not None:
+        ATTENTION_LEVELS = [int(x.strip()) for x in args.attention_levels.split(',') if x.strip()]
     
     # DDP setup
     if args.ddp:
@@ -2972,19 +3455,8 @@ def main():
                 print(f"iTransformer HP done: {m.itrans_hp_done}")
                 print(f"Diffusion HP done: {m.diffusion_hp_done}")
                 print(f"Pretrain complete: {m.pretrain_complete}")
-                complete = len([s for s in m.subsets.values() if s.get('status') == 'complete'])
-                pending = len([s for s in m.subsets.values() if s.get('status') == 'pending'])
-                print(f"Subsets: {complete} complete, {pending} pending")
             else:
                 print("No manifest found")
-        return
-
-    if args.mode == 'list-subsets':
-        if not args.dataset:
-            print("ERROR: --dataset required for list-subsets mode")
-            sys.exit(1)
-        nv = args.n_variates or get_dim_for_dataset(args.dataset)
-        run_list_subsets_mode(args.dataset, nv, seed=args.seed)
         return
 
     if args.mode == 'pretrain':
@@ -3000,21 +3472,18 @@ def main():
         if not args.dataset:
             print("ERROR: --dataset required for finetune mode")
             sys.exit(1)
-        nv = args.n_variates or get_dim_for_dataset(args.dataset)
+        variate_indices = None
+        if args.variate_indices:
+            variate_indices = [int(x.strip()) for x in args.variate_indices.split(',') if x.strip()]
+        nv = args.n_variates or (len(variate_indices) if variate_indices else get_dim_for_dataset(args.dataset))
         N_VARIATES = nv
-        run_finetune_mode(args.dataset, nv, smoke_test=args.smoke_test, seed=args.seed)
-        return
-
-    if args.mode == 'finetune-subset':
-        if not args.subset_id or not args.dataset or not args.variate_indices:
-            print("ERROR: --subset-id, --dataset, and --variate-indices required")
-            sys.exit(1)
-        nv = args.n_variates or SUBSET_DIM
-        N_VARIATES = nv
-        vi = [int(x) for x in args.variate_indices.split(',')]
-        run_finetune_subset_mode(
-            args.subset_id, args.dataset, vi, nv,
-            smoke_test=args.smoke_test, seed=args.seed,
+        run_finetune_mode(
+            args.dataset,
+            nv,
+            variate_indices=variate_indices,
+            subset_id=args.subset_id,
+            smoke_test=args.smoke_test,
+            seed=args.seed,
         )
         return
 

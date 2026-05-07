@@ -198,6 +198,7 @@ runs/
 .tmp_epoch_sweep_smoke/
 .tmp_timing_full4phase_ckpt/
 .tmp_timing_full4phase_ckpt2/
+temp/
 data_cache/
 assets/
 final_report/

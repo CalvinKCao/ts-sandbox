@@ -22,14 +22,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ -z "$SLURM_JOB_ID" ]; then
     IS_SMOKE=0
-    for arg in "$@"; do
+    VARIANT="default"
+    ARGS=("$@")
+    for ((i=0; i<${#ARGS[@]}; i++)); do
+        arg="${ARGS[$i]}"
         [ "$arg" = "--smoke-test" ] && IS_SMOKE=1
+        if [ "$arg" = "--variant" ] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+            VARIANT="${ARGS[$((i + 1))]}"
+        fi
+        if [ "$arg" = "--resume" ] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+            RESUME="${ARGS[$((i + 1))]}"
+        fi
     done
 
     if [ "$IS_SMOKE" -eq 1 ]; then
-        echo "Submitting SMOKE TEST (L40S, 8GB, 15 min)..."
+        echo "Submitting SMOKE TEST (L40S, 8GB, 15 min) [variant=$VARIANT]..."
         sbatch \
-            --job-name=unet-fullvar-smoke \
+            --job-name="unet-fullvar-${VARIANT}-smoke" \
             --account=aip-boyuwang \
             --time=0:15:00 \
             --nodes=1 \
@@ -43,9 +52,16 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --mail-user=ccao87@uwo.ca \
             "$SCRIPT_DIR/run.sh" "$@"
     else
-        echo "Submitting FULL RUN (L40S, 50GB, 1 day wall — extend --time if needed)..."
+        echo "Submitting FULL RUN (L40S, 50GB, 1 day wall — extend --time if needed) [variant=$VARIANT]..."
+        
+        # If resuming, pass RESUME_STEM to the job's environment
+        EXPORT_ARGS="ALL"
+        if [ -n "$RESUME" ]; then
+            EXPORT_ARGS="ALL,RESUME_STEM=$RESUME"
+        fi
+
         sbatch \
-            --job-name=unet-fullvar \
+            --job-name="unet-fullvar-${VARIANT}" \
             --account=aip-boyuwang \
             --time=1-00:00:00 \
             --nodes=1 \
@@ -57,6 +73,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --error=/dev/null \
             --mail-type=BEGIN,END,FAIL \
             --mail-user=ccao87@uwo.ca \
+            --export="$EXPORT_ARGS" \
             "$SCRIPT_DIR/run.sh" "$@"
     fi
     exit 0
@@ -69,12 +86,17 @@ fi
 set -euo pipefail
 
 cd "$SLURM_SUBMIT_DIR"
-case "$SLURM_JOB_NAME" in
-    *smoke*) _slug=unet-fullvar-smoke ;;
-    *)       _slug=unet-fullvar ;;
-esac
-ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-${_slug}"
-RUN_RESULTS_ROOT="$SLURM_SUBMIT_DIR/results/$ALLIANCE_RUN_STEM"
+_slug="${SLURM_JOB_NAME}"
+
+# Read RESUME from environment if we passed it via --export
+if [ -n "${RESUME_STEM:-}" ]; then
+    ALLIANCE_RUN_STEM="$RESUME_STEM"
+    echo "Resuming from existing job directory: $ALLIANCE_RUN_STEM"
+else
+    ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-${_slug}"
+fi
+
+RUN_RESULTS_ROOT="$SLURM_SUBMIT_DIR/results/4var/$ALLIANCE_RUN_STEM"
 RUN_LOG_DIR="$RUN_RESULTS_ROOT/logs"
 RUN_CKPT_DIR="$RUN_RESULTS_ROOT/ckpts"
 RUN_DATA_DIR="$RUN_RESULTS_ROOT/datasets"
@@ -93,6 +115,8 @@ echo "=========================================="
 
 CKPT_ROOT="$RUN_CKPT_DIR"
 RES_ROOT="$RUN_DATA_DIR"
+SYNTH_CACHE_ROOT="$SLURM_SUBMIT_DIR/results/ckpts/synth_cache"
+mkdir -p "$SYNTH_CACHE_ROOT"
 export WANDB_DIR="$RUN_LOG_DIR/wandb"
 mkdir -p "$WANDB_DIR"
 
@@ -233,25 +257,31 @@ cd "$PROJECT_ROOT"
 set -- "${PIPELINE_ARGS[@]}"
 
 AMP_FLAG="--amp"
-IMAGE_HEIGHT=96
+IMAGE_HEIGHT=64
 # Pretrain synthetic count: omit --synthetic-samples to use pipeline auto-sizing from PRETRAIN_EPOCHS.
 # Optional: SYNTHETIC_SAMPLES=50000 EXTRA_PY_ARGS="$EXTRA_PY_ARGS --synthetic-samples $SYNTHETIC_SAMPLES"
 ITRANSFORMER_TRIALS=7
 SEED=42
+VARIANT="default"
+UNET_CHANNELS="64,128,256"
+ATTENTION_LEVELS="2"
 
 SMOKE_TEST=""
 PRETRAIN_ONLY=""
 SINGLE_DATASET=""
 RESUME=""
 EXTRA_PY_ARGS=""
+SUBSET_VARIATE_INDICES="93,292,81,84"
+SUBSET_ID="electricity-4v-93-292-81-84"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --smoke-test)     SMOKE_TEST="--smoke-test"; shift ;;
         --dataset)        SINGLE_DATASET="$2"; shift 2 ;;
         --pretrain-only)  PRETRAIN_ONLY=1; shift ;;
-        --resume)         RESUME=1; shift ;;
+        --resume)         RESUME="$2"; shift 2 ;;
         --seed)           SEED="$2"; shift 2 ;;
+        --variant)        VARIANT="$2"; shift 2 ;;
         --wandb)          EXTRA_PY_ARGS="$EXTRA_PY_ARGS --wandb"; shift ;;
         --checkpoint-dir) EXTRA_PY_ARGS="$EXTRA_PY_ARGS --checkpoint-dir $2"; shift 2 ;;
         --results-dir)    EXTRA_PY_ARGS="$EXTRA_PY_ARGS --results-dir $2"; shift 2 ;;
@@ -262,14 +292,38 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+case "$VARIANT" in
+    default)
+        ;;
+    h128)
+        IMAGE_HEIGHT=128
+        ;;
+    attn-near-bottleneck)
+        # channels=[64,128,256] has 2 down blocks; level 1 is adjacent to bottleneck
+        ATTENTION_LEVELS="1"
+        ;;
+    deeper-unet)
+        UNET_CHANNELS="64,128,256,512"
+        # Keep attention concentrated at bottleneck/middle path.
+        ATTENTION_LEVELS="3"
+        ;;
+    *)
+        echo "Unknown --variant: $VARIANT"
+        echo "Valid values: default, h128, attn-near-bottleneck, deeper-unet"
+        exit 1
+        ;;
+esac
+
 if [ -z "$SINGLE_DATASET" ]; then
-    SINGLE_DATASET="traffic"
+    SINGLE_DATASET="electricity"
 fi
 
 PYTHON="python -m models.diffusion_tsf.train_multivariate_pipeline"
 BASE_ARGS="--seed $SEED $SMOKE_TEST $EXTRA_PY_ARGS"
 BASE_ARGS="$BASE_ARGS $AMP_FLAG --image-height $IMAGE_HEIGHT"
 BASE_ARGS="$BASE_ARGS --itransformer-trials $ITRANSFORMER_TRIALS"
+BASE_ARGS="$BASE_ARGS --unet-channels $UNET_CHANNELS --attention-levels $ATTENTION_LEVELS"
+BASE_ARGS="$BASE_ARGS --synth-cache-dir $SYNTH_CACHE_ROOT"
 
 LOOKBACK_LENGTH=1024
 FORECAST_LENGTH=192
@@ -281,6 +335,9 @@ echo "  U-Net Full-Variate Training (Slurm)"
 echo "============================================================"
 echo "  Backbone:     U-Net (bf16)"
 echo "  Image height: $IMAGE_HEIGHT"
+echo "  U-Net chans:  $UNET_CHANNELS"
+echo "  Attn levels:  $ATTENTION_LEVELS"
+echo "  Variant:      $VARIANT"
 echo "  Synth pool:   auto (or set SYNTHETIC_SAMPLES + pass --synthetic-samples)"
 echo "  iTransformer trials: $ITRANSFORMER_TRIALS"
 echo "  Dataset:      $SINGLE_DATASET"
@@ -347,8 +404,15 @@ if [ -z "$target_dim" ]; then
     echo "[ERROR] Unknown or missing dataset: $SINGLE_DATASET"
     exit 1
 fi
+if [ -n "$SUBSET_VARIATE_INDICES" ]; then
+    target_dim=$(awk -F',' '{print NF}' <<< "$SUBSET_VARIATE_INDICES")
+fi
 
-echo "[INFO] $SINGLE_DATASET: $target_dim variates (native, no splitting)"
+if [ -n "$SUBSET_VARIATE_INDICES" ]; then
+    echo "[INFO] $SINGLE_DATASET subset: indices=[$SUBSET_VARIATE_INDICES] (dim=$target_dim)"
+else
+    echo "[INFO] $SINGLE_DATASET: $target_dim variates (native, no splitting)"
+fi
 echo ""
 
 echo "============================================================"
@@ -368,7 +432,7 @@ echo "============================================================"
 echo "  PHASE 2: Fine-tuning $SINGLE_DATASET (dim=$target_dim)"
 echo "============================================================"
 
-$PYTHON --mode finetune --dataset "$SINGLE_DATASET" --n-variates "$target_dim" $BASE_ARGS
+$PYTHON --mode finetune --dataset "$SINGLE_DATASET" --n-variates "$target_dim" --variate-indices "$SUBSET_VARIATE_INDICES" --subset-id "$SUBSET_ID" $BASE_ARGS
 
 echo ""
 echo "============================================================"
