@@ -115,8 +115,6 @@ echo "=========================================="
 
 CKPT_ROOT="$RUN_CKPT_DIR"
 RES_ROOT="$RUN_DATA_DIR"
-SYNTH_CACHE_ROOT="$PROJECT_ROOT/synth_data"
-mkdir -p "$SYNTH_CACHE_ROOT"
 export WANDB_DIR="$RUN_LOG_DIR/wandb"
 mkdir -p "$WANDB_DIR"
 
@@ -154,6 +152,9 @@ fi
 
 echo "CKPT_ROOT: $CKPT_ROOT"
 echo "RES_ROOT:  $RES_ROOT"
+
+SYNTH_CACHE_ROOT="$PROJECT_ROOT/synth_data"
+mkdir -p "$SYNTH_CACHE_ROOT"
 
 # Venv — reuse main pipeline venv if it exists; else a persistent fullvar venv under PROJECT
 VENV_PATH="$PROJECT/$USER/diffusion-tsf/venv"
