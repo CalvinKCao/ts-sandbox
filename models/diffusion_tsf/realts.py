@@ -583,10 +583,17 @@ class RealTS(Dataset):
                         # Convert mmap to array to concat, might be memory heavy but this is the simplest way for npy
                         logger.info(f"Appending new samples and saving to {cache_path}...")
                         combined = np.concatenate([np.array(existing_data), new_data], axis=0)
+                        
+                        # Drop the mmap reference explicitly
+                        del existing_data
                     else:
                         combined = new_data
                         
-                    np.save(cache_path, combined)
+                    # Save to a temporary file first, then atomically replace.
+                    # This prevents Bus Errors from overwriting an active memory-mapped file.
+                    temp_path = cache_path + ".tmp"
+                    np.save(temp_path, combined)
+                    os.replace(temp_path, cache_path)
                     logger.info("Pool generation and save complete.")
                 
                 self.data_cache = np.load(cache_path, mmap_mode='r')
