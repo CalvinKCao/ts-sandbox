@@ -2872,11 +2872,13 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
             shutil.copy2(diff_tune_ckpt, diff_ckpt)
             logger.info(f"  Using best HP tuning model as diffusion checkpoint: {diff_ckpt}")
         else:
-            # fallback: HP cache exists from an older run that didn't save diff_hp_best.pt
+            # fallback: HP cache from an older run that didn't save diff_hp_best.pt —
+            # the already-trained HP model is gone, so run a full training pass
+            fallback_epochs = 1 if smoke_test else PRETRAIN_DIFFUSION_MAX_EPOCHS
             pretrain_diffusion(
                 best_diff_params, itrans_ckpt,
                 n_samples=pretrain_samples,
-                epochs=diff_pretrain_epochs,
+                epochs=fallback_epochs,
                 patience=pretrain_patience,
                 checkpoint_dir=dim_dir,
                 smoke_test=smoke_test,
