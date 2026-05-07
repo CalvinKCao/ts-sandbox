@@ -271,8 +271,8 @@ PRETRAIN_ONLY=""
 SINGLE_DATASET=""
 RESUME=""
 EXTRA_PY_ARGS=""
-SUBSET_VARIATE_INDICES="93,292,81,84"
-SUBSET_ID="electricity-4v-93-292-81-84"
+SUBSET_VARIATE_INDICES=""
+SUBSET_ID=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -282,6 +282,7 @@ while [[ $# -gt 0 ]]; do
         --resume)         RESUME="$2"; shift 2 ;;
         --seed)           SEED="$2"; shift 2 ;;
         --variant)        VARIANT="$2"; shift 2 ;;
+        --image-height)   IMAGE_HEIGHT="$2"; shift 2 ;;
         --wandb)          EXTRA_PY_ARGS="$EXTRA_PY_ARGS --wandb"; shift ;;
         --checkpoint-dir) EXTRA_PY_ARGS="$EXTRA_PY_ARGS --checkpoint-dir $2"; shift 2 ;;
         --results-dir)    EXTRA_PY_ARGS="$EXTRA_PY_ARGS --results-dir $2"; shift 2 ;;
