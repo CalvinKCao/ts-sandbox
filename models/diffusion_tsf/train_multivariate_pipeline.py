@@ -723,8 +723,7 @@ def get_synth_cache_dir(checkpoint_dir: Optional[str] = None, smoke_test: bool =
     if SYNTH_CACHE_DIR:
         os.makedirs(SYNTH_CACHE_DIR, exist_ok=True)
         return SYNTH_CACHE_DIR
-    base = checkpoint_dir or CHECKPOINT_DIR
-    path = os.path.join(base, 'synth_cache')
+    path = os.path.join(project_root, 'synth_data')
     os.makedirs(path, exist_ok=True)
     return path
 

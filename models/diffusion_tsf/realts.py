@@ -440,44 +440,7 @@ def seasonal_periodicity(length: int) -> np.ndarray:
     return signal
 
 
-def find_reusable_synth_pool_cache(
-    cache_dir: str,
-    num_variables: int,
-    total_length: int,
-    seed: Optional[int],
-    min_rows: int,
-) -> Optional[str]:
-    """Return path to an on-disk pool with at least ``min_rows`` rows, or None.
 
-    Picks the **smallest** qualifying file so mmap stays small when a larger
-    leftover pool exists from an older run.
-    """
-    if not cache_dir or not os.path.isdir(cache_dir):
-        return None
-    pattern = os.path.join(
-        cache_dir, f"synth_pool_v{num_variables}_L{total_length}_N*.npy"
-    )
-    best_path: Optional[str] = None
-    best_n: Optional[int] = None
-    for path in glob.glob(pattern):
-        base = os.path.basename(path)
-        m = re.match(
-            rf"^synth_pool_v{num_variables}_L{total_length}_N(\d+)(?:_seed(\d+))?\.npy$",
-            base,
-        )
-        if not m:
-            continue
-        n_rows = int(m.group(1))
-        file_seed = int(m.group(2)) if m.group(2) is not None else None
-        if seed is not None:
-            if file_seed is not None and file_seed != seed:
-                continue
-        if n_rows < min_rows:
-            continue
-        if best_n is None or n_rows < best_n:
-            best_n = n_rows
-            best_path = path
-    return best_path
 
 
 # ============================================================================
@@ -565,53 +528,47 @@ class RealTS(Dataset):
             os.makedirs(cache_dir, exist_ok=True)
             self.use_disk_cache = True
             
-            cache_filename = f"synth_pool_v{self.num_variables}_L{self.total_length}_N{self.pool_size}.npy"
-            if seed is not None:
-                cache_filename = f"synth_pool_v{self.num_variables}_L{self.total_length}_N{self.pool_size}_seed{seed}.npy"
-            
+            cache_filename = f"synth_pool_v{self.num_variables}_L{self.total_length}.npy"
             cache_path = os.path.join(cache_dir, cache_filename)
             
+            existing_data = None
             if os.path.exists(cache_path):
-                logger.info(f"Loading synthetic pool from {cache_path}")
-                self.data_cache = np.load(cache_path, mmap_mode='r')
-            else:
-                reuse_path = find_reusable_synth_pool_cache(
-                    cache_dir,
-                    self.num_variables,
-                    self.total_length,
-                    self.seed,
-                    self.pool_size,
-                )
-                if reuse_path is not None:
-                    logger.info(
-                        f"Reusing existing synthetic pool {reuse_path} "
-                        f"(required N>={self.pool_size})"
-                    )
-                    self.data_cache = np.load(reuse_path, mmap_mode='r')
-                    self.pool_size = int(self.data_cache.shape[0])
+                # Load existing to check size
+                existing_data = np.load(cache_path, mmap_mode='r')
+                existing_n = existing_data.shape[0]
+                if existing_n >= self.pool_size:
+                    logger.info(f"Reusing existing synthetic pool {cache_path} (has {existing_n} samples, need {self.pool_size})")
+                    self.data_cache = existing_data
+                    self.pool_size = existing_n
                 else:
-                    logger.info(
-                        f"Generating synthetic pool of {self.pool_size} samples to {cache_path}..."
-                    )
+                    logger.info(f"Existing pool {cache_path} has {existing_n} samples, need {self.pool_size}. Generating {self.pool_size - existing_n} more...")
+            
+            if self.data_cache is None:
+                needed = self.pool_size if existing_data is None else self.pool_size - existing_data.shape[0]
+                
+                if needed > 0:
+                    if existing_data is None:
+                        logger.info(f"Generating new synthetic pool of {self.pool_size} samples to {cache_path}...")
+                        
                     if self.num_variables > 1:
-                        generate_multivariate_synthetic_data(
-                            num_samples=self.pool_size,
+                        new_data = generate_multivariate_synthetic_data(
+                            num_samples=needed,
                             num_vars=self.num_variables,
                             length=self.total_length,
                             seed=seed,
                             skip_cross_var_aug=self.skip_cross_var_aug,
-                            output_path=cache_path,
+                            output_path=None, # In-memory return
                         )
                     else:
-                        data = np.zeros((self.pool_size, self.total_length), dtype=np.float32)
-                        log_every = max(5000, self.pool_size // 20)
-                        for i in range(self.pool_size):
+                        new_data = np.zeros((needed, self.total_length), dtype=np.float32)
+                        log_every = max(5000, needed // 20)
+                        for i in range(needed):
                             if i > 0 and i % log_every == 0:
                                 logger.info(
                                     "Synthetic pool progress: %s / %s (%.0f%%)",
                                     i,
-                                    self.pool_size,
-                                    100.0 * i / self.pool_size,
+                                    needed,
+                                    100.0 * i / needed,
                                 )
                             gen = np.random.choice(self.generators, p=self.probabilities)
                             seq = gen(self.total_length)
@@ -619,10 +576,21 @@ class RealTS(Dataset):
                                 seq = seq[::-1].copy()
                             if np.random.random() < 0.5:
                                 seq = -seq
-                            data[i] = self._normalize_sequence(seq)
-                        np.save(cache_path, data)
-                    self.data_cache = np.load(cache_path, mmap_mode='r')
-                    logger.info("Pool generation complete.")
+                            new_data[i] = self._normalize_sequence(seq)
+                            
+                    # Append logic
+                    if existing_data is not None:
+                        # Convert mmap to array to concat, might be memory heavy but this is the simplest way for npy
+                        logger.info(f"Appending new samples and saving to {cache_path}...")
+                        combined = np.concatenate([np.array(existing_data), new_data], axis=0)
+                    else:
+                        combined = new_data
+                        
+                    np.save(cache_path, combined)
+                    logger.info("Pool generation and save complete.")
+                
+                self.data_cache = np.load(cache_path, mmap_mode='r')
+                self.pool_size = int(self.data_cache.shape[0])
                 
         elif self.pregenerate and self.num_variables > 1:
             # Memory Caching Logic (Small Pool / Legacy)

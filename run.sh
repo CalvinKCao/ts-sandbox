@@ -115,7 +115,7 @@ echo "=========================================="
 
 CKPT_ROOT="$RUN_CKPT_DIR"
 RES_ROOT="$RUN_DATA_DIR"
-SYNTH_CACHE_ROOT="$SLURM_SUBMIT_DIR/results/ckpts/synth_cache"
+SYNTH_CACHE_ROOT="$PROJECT_ROOT/synth_data"
 mkdir -p "$SYNTH_CACHE_ROOT"
 export WANDB_DIR="$RUN_LOG_DIR/wandb"
 mkdir -p "$WANDB_DIR"
