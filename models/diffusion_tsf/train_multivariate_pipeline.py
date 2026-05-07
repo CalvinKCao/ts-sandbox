@@ -1878,10 +1878,14 @@ def finetune_hp_objective(
     itrans_checkpoint: str,
     device: torch.device,
     smoke_test: bool = False,
+    fixed_batch_size: Optional[int] = None,
 ) -> float:
-    """Optuna objective for fine-tuning HP search (lr and batch_size only)."""
+    """Optuna objective for fine-tuning HP search (lr only; batch_size auto-probed or fixed)."""
     lr = trial.suggest_float('learning_rate', 1e-6, 1e-4, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else FINETUNE_BATCH_SIZES)
+    if fixed_batch_size is not None:
+        batch_size = fixed_batch_size
+    else:
+        batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else FINETUNE_BATCH_SIZES)
     
     # Load data
     train_ds, val_ds, _, _ = load_dataset(
@@ -2603,24 +2607,45 @@ def run_pipeline(
         variate_indices = job['variate_indices']
 
         try:
-            logger.info(f"Running HP search for {dataset_name}...")
+            # Probe max safe batch size once before HP trials
+            _p_itrans = create_itransformer().to(device)
+            _p_ckpt = torch.load(itrans_ckpt, map_location=device, weights_only=False)
+            _p_itrans.load_state_dict(_p_ckpt['model_state_dict'])
+            _p_guidance = iTransformerGuidance(
+                _p_itrans, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH,
+            )
+            _p_ds, _, _, _ = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+            ft_diff_bs = select_diffusion_batch_size(
+                phase_name=f'Diff FT HP ({dataset_name})',
+                dataset=_p_ds,
+                device=device,
+                itrans_guidance=_p_guidance,
+                max_candidate=4 if smoke_test else 64,
+            )
+            del _p_itrans, _p_ckpt, _p_guidance, _p_ds
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            logger.info(f"Running HP search for {dataset_name} (bs={ft_diff_bs})...")
             optuna.logging.set_verbosity(optuna.logging.WARNING)
 
             def log_finetune_trial(study, trial):
                 logger.info(f"[{dataset_name} HP] Trial {trial.number}/{n_finetune_trials}: "
                             f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                            f"bs={trial.params['batch_size']}")
+                            f"bs={ft_diff_bs}")
 
             study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
             study.optimize(
                 lambda trial: finetune_hp_objective(
-                    trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test
+                    trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test,
+                    fixed_batch_size=ft_diff_bs,
                 ),
                 n_trials=n_finetune_trials,
                 show_progress_bar=True,
                 callbacks=[log_finetune_trial],
             )
             tuned_params = study.best_params
+            tuned_params['batch_size'] = ft_diff_bs
             logger.info(f"Best params for {dataset_name}: {tuned_params}")
             
             # Full fine-tuning
@@ -3151,7 +3176,28 @@ def _finetune_and_eval_one_subset(
             )
 
         # Phase C: Diffusion HP search using finetuned iTransformer as guidance
-        logger.info(f"Diffusion HP search for {subset_id} ({n_finetune_trials} trials)...")
+        # Probe max safe batch size once before HP trials start
+        _ft_itrans_model = create_itransformer().to(device)
+        _ft_itrans_ckpt_data = torch.load(ft_itrans_ckpt, map_location=device, weights_only=False)
+        _ft_itrans_model.load_state_dict(_ft_itrans_ckpt_data['model_state_dict'])
+        _ft_itrans_guidance = iTransformerGuidance(
+            _ft_itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH,
+        )
+        _probe_ds, _, _, _ = load_dataset(
+            dataset_name, variate_indices, stride=LOOKBACK_LENGTH,
+        )
+        ft_diff_bs = select_diffusion_batch_size(
+            phase_name=f'Diff FT HP ({subset_id})',
+            dataset=_probe_ds,
+            device=device,
+            itrans_guidance=_ft_itrans_guidance,
+            max_candidate=4 if smoke_test else 64,
+        )
+        del _ft_itrans_model, _ft_itrans_ckpt_data, _ft_itrans_guidance, _probe_ds
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        logger.info(f"Diffusion HP search for {subset_id} ({n_finetune_trials} trials, bs={ft_diff_bs})...")
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(
             direction='minimize',
@@ -3160,7 +3206,8 @@ def _finetune_and_eval_one_subset(
         )
         study.optimize(
             lambda trial: finetune_hp_objective(
-                trial, dataset_name, variate_indices, diff_ckpt, ft_itrans_ckpt, device, smoke_test
+                trial, dataset_name, variate_indices, diff_ckpt, ft_itrans_ckpt, device, smoke_test,
+                fixed_batch_size=ft_diff_bs,
             ),
             n_trials=n_finetune_trials,
             show_progress_bar=False,
@@ -3170,6 +3217,7 @@ def _finetune_and_eval_one_subset(
             logger.warning(f"All diffusion HP trials failed for {subset_id} — skipping")
             return
         tuned_params = study.best_params
+        tuned_params['batch_size'] = ft_diff_bs
         logger.info(f"Best diffusion params for {subset_id}: {tuned_params}")
 
         # Phase D: Full Diffusion finetune
