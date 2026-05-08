@@ -170,7 +170,7 @@ def diffusion_probe_max_candidate(n_variates: int, smoke_test: bool) -> int:
 # ---- Loss terms -------------------------------------------------------------------
 
 EMD_LAMBDA: float = 0.2
-GUIDANCE_PENALTY_WEIGHT: float = 0.1  # small penalty for deviating from iTransformer guidance
+GUIDANCE_PENALTY_WEIGHT: float = 0.0  # small penalty for deviating from iTransformer guidance
 
 # ---- Evaluation -------------------------------------------------------------------
 
