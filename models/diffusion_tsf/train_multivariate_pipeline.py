@@ -3007,7 +3007,7 @@ def run_finetune_mode(
 
     if variate_indices is None:
         variate_indices = generate_dataset_job(dataset_name)['variate_indices']
-    if subset_id is None:
+    if not subset_id:
         subset_id = dataset_name
 
     _finetune_and_eval_one_subset(

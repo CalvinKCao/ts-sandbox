@@ -93,10 +93,10 @@ if [ -n "${RESUME_STEM:-}" ]; then
     ALLIANCE_RUN_STEM="$RESUME_STEM"
     echo "Resuming from existing job directory: $ALLIANCE_RUN_STEM"
 else
-    ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-${_slug}"
+    ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID}-${_slug}"
 fi
 
-RUN_RESULTS_ROOT="$SLURM_SUBMIT_DIR/results/4var/$ALLIANCE_RUN_STEM"
+RUN_RESULTS_ROOT="$SLURM_SUBMIT_DIR/results/$ALLIANCE_RUN_STEM"
 RUN_LOG_DIR="$RUN_RESULTS_ROOT/logs"
 RUN_CKPT_DIR="$RUN_RESULTS_ROOT/ckpts"
 RUN_DATA_DIR="$RUN_RESULTS_ROOT/datasets"
@@ -109,7 +109,7 @@ echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
 echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo 'unknown')"
-echo "Started: $(date)"
+echo "Started: $(date '+%m-%d %H:%M:%S')"
 echo "Log: $ALLIANCE_JOB_LOG"
 echo "=========================================="
 
@@ -235,7 +235,7 @@ PY
 cleanup() {
     trap '' EXIT ERR SIGTERM SIGINT SIGUSR1
     local code=${1:-$?}
-    [ "$code" -ne 0 ] && echo "[CLEANUP] $(date) — killing child processes..."
+    [ "$code" -ne 0 ] && echo "[CLEANUP] $(date '+%m-%d %H:%M:%S') — killing child processes..."
     kill -- -$$ 2>/dev/null || true
     wait 2>/dev/null || true
 }
@@ -452,7 +452,7 @@ fi
 
 echo ""
 echo "=========================================="
-echo "Job completed: $(date)"
+echo "Job completed: $(date '+%m-%d %H:%M:%S')"
 echo "Results: $RES_ROOT"
 echo "Checkpoints: $CKPT_ROOT"
 echo "=========================================="
