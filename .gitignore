@@ -92,6 +92,10 @@ env/
 
 # All results folders (regeneratable, often huge)
 **/results/
+**/results_multivariate/
+**/results_7var/
+**/checkpoints_multivariate/
+**/checkpoints_7var/
 # Alliance Slurm/Python artifacts (see .ai/skills/alliancecan); flat buckets per job
 **/results/logs/
 **/results/ckpts/
