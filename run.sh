@@ -23,6 +23,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -z "$SLURM_JOB_ID" ]; then
     IS_SMOKE=0
     VARIANT="default"
+    WALLTIME="1-00:00:00"
+    H_VAL=24
+    USE_H100=0
     ARGS=("$@")
     for ((i=0; i<${#ARGS[@]}; i++)); do
         arg="${ARGS[$i]}"
@@ -32,6 +35,17 @@ if [ -z "$SLURM_JOB_ID" ]; then
         fi
         if [ "$arg" = "--resume" ] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
             RESUME="${ARGS[$((i + 1))]}"
+        fi
+        if [ "$arg" = "--h100" ]; then
+            USE_H100=1
+        fi
+        if [ "$arg" = "--hours" ] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+            h="${ARGS[$((i + 1))]}"
+            H_VAL=$h
+            # Convert hours to DD-HH:MM:SS (approx)
+            days=$(( h / 24 ))
+            rem_h=$(( h % 24 ))
+            WALLTIME="${days}-${rem_h}:00:00"
         fi
     done
 
@@ -51,8 +65,36 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
             "$SCRIPT_DIR/run.sh" "$@"
+    elif [ "$USE_H100" -eq 1 ]; then
+        # Selection logic for H100 partition based on hours
+        PARTITION="gpubase_h100_b2" # up to 24h
+        if [ "$H_VAL" -gt 24 ]; then PARTITION="gpubase_h100_b3"; fi # up to 3 days
+        if [ "$H_VAL" -gt 72 ]; then PARTITION="gpubase_h100_b4"; fi # up to 7 days
+        
+        echo "Submitting H100 FULL RUN (64GB, $WALLTIME wall, $PARTITION) [variant=$VARIANT]..."
+        
+        EXPORT_ARGS="ALL"
+        if [ -n "$RESUME" ]; then
+            EXPORT_ARGS="ALL,RESUME_STEM=$RESUME"
+        fi
+
+        sbatch \
+            --job-name="unet-fullvar-${VARIANT}-h100" \
+            --account=aip-boyuwang \
+            --partition="$PARTITION" \
+            --gpus-per-node=h100:1 \
+            --cpus-per-task=16 \
+            --mem=64G \
+            --time="$WALLTIME" \
+            --chdir="$SCRIPT_DIR" \
+            --output=/dev/null \
+            --error=/dev/null \
+            --mail-type=BEGIN,END,FAIL \
+            --mail-user=ccao87@uwo.ca \
+            --export="$EXPORT_ARGS" \
+            "$SCRIPT_DIR/run.sh" "$@"
     else
-        echo "Submitting FULL RUN (L40S, 50GB, 1 day wall — extend --time if needed) [variant=$VARIANT]..."
+        echo "Submitting FULL RUN (L40S, 50GB, $WALLTIME wall) [variant=$VARIANT]..."
         
         # If resuming, pass RESUME_STEM to the job's environment
         EXPORT_ARGS="ALL"
@@ -63,7 +105,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
         sbatch \
             --job-name="unet-fullvar-${VARIANT}" \
             --account=aip-boyuwang \
-            --time=1-00:00:00 \
+            --time="$WALLTIME" \
             --nodes=1 \
             --gres=gpu:l40s:1 \
             --cpus-per-task=8 \
@@ -250,6 +292,7 @@ PIPELINE_ARGS=(--checkpoint-dir "$CKPT_ROOT" --results-dir "$RES_ROOT")
 while [[ $# -gt 0 ]]; do
     case $1 in
         --hours) shift 2 ;;
+        --h100)  shift ;;
         *)       PIPELINE_ARGS+=("$1"); shift ;;
     esac
 done

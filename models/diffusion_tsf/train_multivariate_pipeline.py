@@ -2039,9 +2039,6 @@ def finetune_on_dataset(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
     
-    early_stop = EarlyStopping(patience=patience)
-    best_val_loss = float('inf')
-    
     subset_dir = os.path.join(checkpoint_dir, subset_id)
     if is_main_process():
         os.makedirs(subset_dir, exist_ok=True)
@@ -2060,9 +2057,33 @@ def finetune_on_dataset(
                 'norm_std': norm_stats['std'].tolist(),
                 'tuned_params': tuned_params,
             }, f, indent=2)
+
+    start_epoch = 0
+    best_val_loss = float('inf')
+    
+    # Try to resume from best.pt if it exists
+    if os.path.exists(best_ckpt_path):
+        try:
+            logger.info(f"  Found existing checkpoint {best_ckpt_path} - attempting to resume...")
+            ckpt = torch.load(best_ckpt_path, map_location=device, weights_only=False)
+            model.load_state_dict(ckpt['model_state_dict'])
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            if 'epoch' in ckpt:
+                start_epoch = ckpt['epoch'] + 1
+            if 'val_loss' in ckpt:
+                best_val_loss = ckpt['val_loss']
+            logger.info(f"  Resuming from epoch {start_epoch} (best val loss: {best_val_loss:.4f})")
+        except Exception as e:
+            logger.warning(f"  Could not resume from {best_ckpt_path}: {e}. Starting from scratch.")
+    
+    early_stop = EarlyStopping(patience=patience)
+    # If we resumed, we need to initialize early stopping with the best loss
+    if best_val_loss < float('inf'):
+        early_stop.best_loss = best_val_loss
+        early_stop.counter = 0 # Reset counter since we just loaded the best
     
     final_epoch = 0
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         
