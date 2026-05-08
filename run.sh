@@ -21,6 +21,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ===========================================================================
 
 if [ -z "$SLURM_JOB_ID" ]; then
+    # Slurm captures stdout/stderr here until `exec >>…` inside the job redirects fds.
+    mkdir -p "$SCRIPT_DIR/results/bootstrap"
+    # Paths are relative to --chdir; %x = job name, %j = Slurm job id.
+    SB_OUT='results/bootstrap/%x-%j.out'
+    SB_ERR='results/bootstrap/%x-%j.err'
+
     IS_SMOKE=0
     VARIANT="default"
     WALLTIME="1-00:00:00"
@@ -60,8 +66,8 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --cpus-per-task=2 \
             --mem=8G \
             --chdir="$SCRIPT_DIR" \
-            --output=/dev/null \
-            --error=/dev/null \
+            --output="$SB_OUT" \
+            --error="$SB_ERR" \
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
             "$SCRIPT_DIR/run.sh" "$@"
@@ -87,8 +93,8 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --mem=64G \
             --time="$WALLTIME" \
             --chdir="$SCRIPT_DIR" \
-            --output=/dev/null \
-            --error=/dev/null \
+            --output="$SB_OUT" \
+            --error="$SB_ERR" \
             --mail-type=BEGIN,END,FAIL \
             --mail-user=ccao87@uwo.ca \
             --export="$EXPORT_ARGS" \
@@ -111,8 +117,8 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --cpus-per-task=8 \
             --mem=50G \
             --chdir="$SCRIPT_DIR" \
-            --output=/dev/null \
-            --error=/dev/null \
+            --output="$SB_OUT" \
+            --error="$SB_ERR" \
             --mail-type=BEGIN,END,FAIL \
             --mail-user=ccao87@uwo.ca \
             --export="$EXPORT_ARGS" \

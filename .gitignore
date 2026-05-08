@@ -87,6 +87,9 @@ env/
 # Large Data Files (use Git LFS or download separately)
 # -----------------------------------------------------------------------------
 
+# Slurm bootstrap logs (stdout/stderr before in-job log redirect); run.sh writes here
+/results/bootstrap/
+
 # All results folders (regeneratable, often huge)
 **/results/
 # Alliance Slurm/Python artifacts (see .ai/skills/alliancecan); flat buckets per job
