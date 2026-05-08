@@ -167,6 +167,11 @@ def diffusion_probe_max_candidate(n_variates: int, smoke_test: bool) -> int:
     return max(DIFFUSION_PROBE_MIN_BATCH, hi)
 
 
+# ---- Loss terms -------------------------------------------------------------------
+
+EMD_LAMBDA: float = 0.2
+GUIDANCE_PENALTY_WEIGHT: float = 0.1  # small penalty for deviating from iTransformer guidance
+
 # ---- Evaluation -------------------------------------------------------------------
 
 EVAL_NUM_SAMPLES: int = 30  # diffusion eval averages this many samples per window

@@ -720,7 +720,6 @@ Flow:
    - Apply DDIM update to move toward cleaner sample.
 4. Reshape sampled output back from `(BV, 1, H, W_fut)` to `(B, V, H, W_fut)`.
 5. Decode final 2D CDF map back to 1D future with `decode_from_2d`.
-6. Optionally smooth decoded sequence depending on decode settings.
 
 Classifier-free guidance details:
 - Training side uses `cfg_dropout` to create unconditional exposure.
@@ -768,7 +767,6 @@ These are default values from `DiffusionTSFConfig` referenced in the original wa
 
 ### 12.5 Decode and augmentation behavior
 - `decode_temperature=0.5`
-- `decode_smoothing=False`
 - plus `cutout_*` augmentation controls.
 
 ### 12.6 Loss terms

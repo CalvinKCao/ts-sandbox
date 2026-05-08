@@ -106,7 +106,6 @@ class DiffusionTSFConfig:
     
     # decoding
     decode_temperature: float = 0.5  # lower = sharper
-    decode_smoothing: bool = False  # smooth it out at the end?
     
     # emd loss weight
     emd_lambda: float = 0.2
@@ -115,6 +114,9 @@ class DiffusionTSFConfig:
     use_monotonicity_loss: bool = False
     monotonicity_weight: float = 1.0
     
+    # penalty for deviating from itransformer guidance ghost image
+    guidance_penalty_weight: float = 0.0
+
     # which backbone
     model_type: str = "unet"
 

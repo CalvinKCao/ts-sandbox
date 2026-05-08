@@ -678,6 +678,7 @@ from models.diffusion_tsf.pipeline_config import (
     USE_GRADIENT_CHECKPOINTING,
     UNET_CHANNELS,
     ATTENTION_LEVELS,
+    GUIDANCE_PENALTY_WEIGHT,
     EVAL_NUM_SAMPLES,
     resolve_pretrain_virtual_dataset_size,
     synthetic_epoch_capacity_itrans_hp,
@@ -874,10 +875,13 @@ def create_diffusion_model(
     horizon: int = FORECAST_LENGTH,
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
+    guidance_penalty_weight: Optional[float] = None,
 ) -> DiffusionTSF:
     """Create DiffusionTSF model with iTransformer guidance channel enabled."""
     if n_variates is None:
         n_variates = N_VARIATES
+    if guidance_penalty_weight is None:
+        guidance_penalty_weight = GUIDANCE_PENALTY_WEIGHT
 
     config = DiffusionTSFConfig(
         num_variables=n_variates,
@@ -888,6 +892,7 @@ def create_diffusion_model(
         image_height=IMAGE_HEIGHT,
         use_coordinate_channel=True,
         use_guidance_channel=True,
+        guidance_penalty_weight=guidance_penalty_weight,
         num_diffusion_steps=1000,
         model_type="unet",
         unet_channels=UNET_CHANNELS,
@@ -3256,7 +3261,7 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 # ============================================================================
 
 def main():
-    global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR
+    global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3287,6 +3292,8 @@ def main():
                         help='Parallel worker ID for multi-GPU Optuna (0-N)')
     parser.add_argument('--fresh', action='store_true',
                         help='Wipe manifest and checkpoints, start from scratch')
+    parser.add_argument('--guidance-penalty-weight', type=float, default=GUIDANCE_PENALTY_WEIGHT,
+                        help='Weight for guidance penalty loss (default from pipeline_config)')
 
     args = parser.parse_args()
 
@@ -3304,6 +3311,9 @@ def main():
 
     if args.n_variates is not None:
         N_VARIATES = args.n_variates
+    
+    # Global overrides from CLI
+    GUIDANCE_PENALTY_WEIGHT = args.guidance_penalty_weight
     
     # DDP setup
     if args.ddp:

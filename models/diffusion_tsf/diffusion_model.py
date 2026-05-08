@@ -181,10 +181,6 @@ class DiffusionTSF(nn.Module):
             kernel_size=config.blur_kernel_size,
             sigma=config.blur_sigma
         )
-        self.register_buffer(
-            "decode_smoothing_kernel",
-            self._build_decode_smoothing_kernel(sigma_x=3.0, sigma_y=1.0)
-        )
         
         # Guidance model for hybrid "visual guide" forecasting
         if config.use_guidance_channel:
@@ -518,33 +514,6 @@ class DiffusionTSF(nn.Module):
         mean, std = stats
         return x * std + mean
     
-    def _build_decode_smoothing_kernel(
-        self,
-        sigma_x: float,
-        sigma_y: float
-    ) -> torch.Tensor:
-        """Create anisotropic Gaussian kernel for decode-time smoothing."""
-        size_x = int(6 * sigma_x + 1)
-        size_y = int(6 * sigma_y + 1)
-        if size_x % 2 == 0: size_x += 1
-        if size_y % 2 == 0: size_y += 1
-        x = torch.arange(size_x, dtype=torch.float32) - size_x // 2
-        y = torch.arange(size_y, dtype=torch.float32) - size_y // 2
-        yy, xx = torch.meshgrid(y, x, indexing="ij")
-        kernel = torch.exp(-(xx**2 / (2 * sigma_x**2) + yy**2 / (2 * sigma_y**2)))
-        kernel = kernel / kernel.sum()
-        return kernel.view(1, 1, size_y, size_x)
-    
-    def _apply_decode_smoothing(self, prob: torch.Tensor) -> torch.Tensor:
-        """Apply horizontal-heavy Gaussian smoothing to probability map."""
-        kernel = self.decode_smoothing_kernel.to(device=prob.device, dtype=prob.dtype)
-        pad_y = kernel.shape[2] // 2
-        pad_x = kernel.shape[3] // 2
-        prob_2d = prob.unsqueeze(1)
-        prob_padded = F.pad(prob_2d, (pad_x, pad_x, pad_y, pad_y), mode="reflect")
-        smoothed = F.conv2d(prob_padded, kernel)
-        return smoothed.squeeze(1)
-    
     def _compute_emd_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute column-wise Wasserstein-1 distance via CDF trick."""
         if self.config.representation_mode == "pdf":
@@ -569,13 +538,10 @@ class DiffusionTSF(nn.Module):
         unexpected_keys,
         error_msgs,
     ):
-        """Backward compatibility for checkpoints without decode_smoothing_kernel."""
+        """Filter out legacy decode_smoothing_kernel from old checkpoints."""
         key = prefix + "decode_smoothing_kernel"
-        if key not in state_dict:
-            state_dict[key] = self.decode_smoothing_kernel
-            if key in missing_keys:
-                missing_keys.remove(key)
-            logger.warning("decode_smoothing_kernel missing in checkpoint; using default anisotropic kernel.")
+        if key in state_dict:
+            del state_dict[key]
         super()._load_from_state_dict(
             state_dict,
             prefix,
@@ -585,7 +551,7 @@ class DiffusionTSF(nn.Module):
             unexpected_keys,
             error_msgs,
         )
-    
+
     def encode_to_2d(self, x: torch.Tensor, scale_for_diffusion: bool = True) -> torch.Tensor:
         """Encode 1D time series to blurred 2D representation."""
         image = self.to_2d(x)
@@ -640,8 +606,6 @@ class DiffusionTSF(nn.Module):
             if num_vars > 1:
                 raise NotImplementedError(f"decoder_method='{decoder_method}' not yet supported for multivariate.")
             cdf_map_squeezed = cdf_map.squeeze(1)
-            if not self.training and self.config.decode_smoothing and self.decode_smoothing_kernel is not None:
-                cdf_map_squeezed = self._apply_decode_smoothing(cdf_map_squeezed)
             centers = self.to_2d.bin_centers.view(1, -1, 1).to(cdf_map_squeezed.device)
             if decoder_method == "median":
                 below_half_mask = cdf_map_squeezed < 0.5
@@ -834,10 +798,20 @@ class DiffusionTSF(nn.Module):
             cdf_pred  = torch.clamp((x0_pred + 1.0) / 2.0, 0.0, 1.0)
             mono_loss = monotonicity_loss(cdf_pred)
 
-        loss = noise_loss + self.config.emd_lambda * emd_loss + self.config.monotonicity_weight * mono_loss
+        guidance_loss = torch.tensor(0.0, device=device)
+        if guidance_2d is not None and self.config.guidance_penalty_weight > 0:
+            guidance_loss = F.mse_loss(x0_pred, guidance_2d)
+
+        loss = (
+            noise_loss + 
+            self.config.emd_lambda * emd_loss + 
+            self.config.monotonicity_weight * mono_loss +
+            self.config.guidance_penalty_weight * guidance_loss
+        )
 
         result = {
             'loss': loss, 'noise_loss': noise_loss, 'emd_loss': emd_loss,
+            'guidance_loss': guidance_loss,
             'noise_pred': noise_pred, 't': t,
         }
         if guidance_2d is not None:
@@ -999,10 +973,20 @@ class DiffusionTSF(nn.Module):
             cdf_pred = torch.clamp((x0_pred + 1.0) / 2.0, 0.0, 1.0)
             mono_loss = monotonicity_loss(cdf_pred)
 
-        loss = noise_loss + self.config.emd_lambda * emd_loss + self.config.monotonicity_weight * mono_loss
+        guidance_loss = torch.tensor(0.0, device=device)
+        if guidance_2d is not None and self.config.guidance_penalty_weight > 0:
+            guidance_loss = F.mse_loss(x0_pred, guidance_2d)
+
+        loss = (
+            noise_loss + 
+            self.config.emd_lambda * emd_loss + 
+            self.config.monotonicity_weight * mono_loss +
+            self.config.guidance_penalty_weight * guidance_loss
+        )
 
         result = {
             'loss': loss, 'noise_loss': noise_loss, 'emd_loss': emd_loss,
+            'guidance_loss': guidance_loss,
             'noise_pred': noise_pred, 't': t,
         }
         if guidance_2d is not None:
