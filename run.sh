@@ -10,7 +10,7 @@
 #   ./run.sh --smoke-test                     # L40S smoke
 #   ./run.sh                                  # L40S full run
 #   ./run.sh --dataset electricity
-#   ./run.sh --resume --dataset traffic
+#   ./run.sh --no-wandb                         # metrics stay local only (no wandb.init)
 # =============================================================================
 
 set -e
@@ -232,13 +232,6 @@ if [ ! -e "$RUN_DATA_DIR/repo" ]; then
     ln -s "$PROJECT_ROOT/datasets" "$RUN_DATA_DIR/repo"
 fi
 
-if [ -z "${WANDB_API_KEY:-}" ]; then
-    echo "[wandb] ERROR: WANDB_API_KEY is not set."
-    echo "[wandb] Export WANDB_API_KEY from https://wandb.ai/authorize and re-submit."
-    exit 2
-fi
-echo "[wandb] Using WANDB_API_KEY from environment."
-
 wandb_upload_job_logs() {
     local checkpoint_dir="$1"
     shift
@@ -309,15 +302,13 @@ cd "$PROJECT_ROOT"
 
 set -- "${PIPELINE_ARGS[@]}"
 
-AMP_FLAG="--amp"
-IMAGE_HEIGHT=64
-# Pretrain synthetic count: omit --synthetic-samples to use pipeline auto-sizing from PRETRAIN_EPOCHS.
-# Optional: SYNTHETIC_SAMPLES=50000 EXTRA_PY_ARGS="$EXTRA_PY_ARGS --synthetic-samples $SYNTHETIC_SAMPLES"
-ITRANSFORMER_TRIALS=7
+# All training-behavior knobs (epochs, trials, patience, U-Net topology,
+# image height, AMP, sequence lengths, etc.) live in:
+#     models/diffusion_tsf/pipeline_config.py
+# Edit that file to change them. This script only handles run-level dispatch.
+
 SEED=42
-VARIANT="default"
-UNET_CHANNELS="64,128,256"
-ATTENTION_LEVELS="2"
+VARIANT="default"   # label-only; only affects Slurm job name
 
 SMOKE_TEST=""
 PRETRAIN_ONLY=""
@@ -326,6 +317,7 @@ RESUME=""
 EXTRA_PY_ARGS=""
 SUBSET_VARIATE_INDICES=""
 SUBSET_ID=""
+ENABLE_WANDB=1
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -335,38 +327,33 @@ while [[ $# -gt 0 ]]; do
         --resume)         RESUME="$2"; shift 2 ;;
         --seed)           SEED="$2"; shift 2 ;;
         --variant)        VARIANT="$2"; shift 2 ;;
-        --image-height)   IMAGE_HEIGHT="$2"; shift 2 ;;
-        --wandb)          EXTRA_PY_ARGS="$EXTRA_PY_ARGS --wandb"; shift ;;
+        --no-wandb)       ENABLE_WANDB=0; shift ;;
+        --wandb)          ENABLE_WANDB=1; shift ;;
         --checkpoint-dir) EXTRA_PY_ARGS="$EXTRA_PY_ARGS --checkpoint-dir $2"; shift 2 ;;
         --results-dir)    EXTRA_PY_ARGS="$EXTRA_PY_ARGS --results-dir $2"; shift 2 ;;
+        --hours)          shift 2 ;;   # consumed by login-side submit logic only
+        --h100)           shift ;;     # consumed by login-side submit logic only
         *)
             echo "Unknown option: $1"
+            echo "Note: training-behavior flags (epochs/trials/patience/topology) were removed."
+            echo "      Edit models/diffusion_tsf/pipeline_config.py instead."
             exit 1
             ;;
     esac
 done
 
-case "$VARIANT" in
-    default)
-        ;;
-    h128)
-        IMAGE_HEIGHT=128
-        ;;
-    attn-near-bottleneck)
-        # channels=[64,128,256] has 2 down blocks; level 1 is adjacent to bottleneck
-        ATTENTION_LEVELS="1"
-        ;;
-    deeper-unet)
-        UNET_CHANNELS="64,128,256,512"
-        # Keep attention concentrated at bottleneck/middle path.
-        ATTENTION_LEVELS="3"
-        ;;
-    *)
-        echo "Unknown --variant: $VARIANT"
-        echo "Valid values: default, h128, attn-near-bottleneck, deeper-unet"
-        exit 1
-        ;;
-esac
+if [ "$ENABLE_WANDB" -eq 1 ]; then
+    EXTRA_PY_ARGS="$EXTRA_PY_ARGS --wandb"
+fi
+
+if [ "$ENABLE_WANDB" -eq 1 ] && [ -z "${WANDB_API_KEY:-}" ]; then
+    echo "[wandb] ERROR: WANDB_API_KEY is not set."
+    echo "[wandb] Export WANDB_API_KEY from https://wandb.ai/authorize and re-submit."
+    exit 2
+fi
+if [ "$ENABLE_WANDB" -eq 1 ]; then
+    echo "[wandb] Using WANDB_API_KEY from environment."
+fi
 
 if [ -z "$SINGLE_DATASET" ]; then
     SINGLE_DATASET="electricity"
@@ -374,28 +361,30 @@ fi
 
 PYTHON="python -m models.diffusion_tsf.train_multivariate_pipeline"
 BASE_ARGS="--seed $SEED $SMOKE_TEST $EXTRA_PY_ARGS"
-BASE_ARGS="$BASE_ARGS $AMP_FLAG --image-height $IMAGE_HEIGHT"
-BASE_ARGS="$BASE_ARGS --itransformer-trials $ITRANSFORMER_TRIALS"
-BASE_ARGS="$BASE_ARGS --unet-channels $UNET_CHANNELS --attention-levels $ATTENTION_LEVELS"
 BASE_ARGS="$BASE_ARGS --synth-cache-dir $SYNTH_CACHE_ROOT"
+# Keep the same wandb run id as the original job when resuming into an existing results stem.
+if [ -n "${RESUME_STEM:-}" ]; then
+    BASE_ARGS="$BASE_ARGS --resume"
+fi
 
-LOOKBACK_LENGTH=1024
-FORECAST_LENGTH=192
-LOOKBACK_OVERLAP=8
+# Pull lookback/forecast/overlap from pipeline_config so dataset filtering
+# uses the same values the pipeline trains with. (Single source of truth.)
+read LOOKBACK_LENGTH FORECAST_LENGTH LOOKBACK_OVERLAP < <(python -c "
+from models.diffusion_tsf.pipeline_config import (
+    LOOKBACK_LENGTH, FORECAST_LENGTH, LOOKBACK_OVERLAP,
+)
+print(LOOKBACK_LENGTH, FORECAST_LENGTH, LOOKBACK_OVERLAP)
+")
 
 echo ""
 echo "============================================================"
 echo "  U-Net Full-Variate Training (Slurm)"
 echo "============================================================"
-echo "  Backbone:     U-Net (bf16)"
-echo "  Image height: $IMAGE_HEIGHT"
-echo "  U-Net chans:  $UNET_CHANNELS"
-echo "  Attn levels:  $ATTENTION_LEVELS"
-echo "  Variant:      $VARIANT"
-echo "  Synth pool:   auto (or set SYNTHETIC_SAMPLES + pass --synthetic-samples)"
-echo "  iTransformer trials: $ITRANSFORMER_TRIALS"
+echo "  Backbone:     U-Net (config in models/diffusion_tsf/pipeline_config.py)"
+echo "  Variant tag:  $VARIANT  (Slurm job name only)"
 echo "  Dataset:      $SINGLE_DATASET"
 echo "  Smoke test:   ${SMOKE_TEST:-no}"
+echo "  wandb:        $([ "$ENABLE_WANDB" -eq 1 ] && echo yes || echo no)"
 echo "============================================================"
 echo ""
 

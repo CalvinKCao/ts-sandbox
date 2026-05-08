@@ -435,8 +435,8 @@ def init_wandb(
         'n_variates': N_VARIATES,
         'pretrain_epochs': PRETRAIN_EPOCHS,
         'pretrain_patience': PRETRAIN_PATIENCE,
-        'finetune_epochs': FINETUNE_EPOCHS,
-        'finetune_patience': FINETUNE_PATIENCE,
+        'hp_tune_epochs': HP_TUNE_EPOCHS,
+        'hp_tune_patience': HP_TUNE_PATIENCE,
         'pretrain_virtual_samples': resolve_pretrain_virtual_dataset_size(False),
         'pretrain_synthetic_override': PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE,
         'synthetic_samples_full_cap': SYNTHETIC_SAMPLES_CAP,
@@ -632,69 +632,52 @@ def finish_wandb():
         _wandb_enabled = False
 
 # ============================================================================
-# Constants
+# Constants — single source of truth lives in `pipeline_config.py`.
+# Edit that file to change defaults; nothing here overrides those values.
 # ============================================================================
 
-# Training settings (2D representation: IMAGE_HEIGHT × (LOOKBACK + FORECAST))
-LOOKBACK_LENGTH = 512
-FORECAST_LENGTH = 96
-# iTransformer inverted embedding uses seq_len as the Linear input width. Papers often use
-# ≤336 on hourly ETT; diffusion still sees full LOOKBACK_LENGTH. Override via --itrans-seq-len.
-ITRANSFORMER_SEQ_LEN = 336
-IMAGE_HEIGHT = 64
+from models.diffusion_tsf.pipeline_config import (
+    LOOKBACK_LENGTH,
+    FORECAST_LENGTH,
+    ITRANSFORMER_SEQ_LEN,
+    IMAGE_HEIGHT,
+    LOOKBACK_OVERLAP,
+    PAST_LOSS_WEIGHT,
+    N_VARIATES_DEFAULT,
+    PRETRAIN_EPOCHS,
+    PRETRAIN_PATIENCE,
+    PRETRAIN_DIFFUSION_EPOCHS,
+    PRETRAIN_DIFFUSION_MAX_EPOCHS,
+    DIFFUSION_HP_MAX_EPOCHS,
+    DIFFUSION_HP_PATIENCE,
+    SYNTHETIC_SAMPLES_FULL,
+    SYNTHETIC_SAMPLES_HP_TUNE,
+    SYNTHETIC_SAMPLES_DIFF_TUNE,
+    SYNTHETIC_SAMPLES_MIN,
+    SYNTHETIC_SAMPLES_CAP,
+    PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE,
+    HP_TUNE_EPOCHS,
+    HP_TUNE_PATIENCE,
+    N_ITRANS_HP_TRIALS,
+    N_DIFFUSION_HP_TRIALS,
+    N_FINETUNE_HP_TRIALS,
+    ITRANS_HP_PRETRAIN_MAX_EPOCHS,
+    ITRANS_HP_PRETRAIN_PATIENCE,
+    ITRANS_HP_FINETUNE_MAX_EPOCHS,
+    ITRANS_HP_FINETUNE_PATIENCE,
+    ITRANS_REAL_COLD_START,
+    ITRANS_BATCH_SIZES,
+    DIFFUSION_BATCH_SIZES,
+    FINETUNE_BATCH_SIZES,
+    USE_AMP,
+    USE_GRADIENT_CHECKPOINTING,
+    UNET_CHANNELS,
+    ATTENTION_LEVELS,
+    EVAL_NUM_SAMPLES,
+)
 
-# Predict the last K lookback steps alongside the forecast to smooth the boundary
-LOOKBACK_OVERLAP = 8
-PAST_LOSS_WEIGHT = 0.3
-
-# Dimensionality for model/data creation (overridden by --n-variates CLI)
-N_VARIATES = 7
-
-# Phase 1: Synthetic pretraining (short runs by default; override with CLI)
-PRETRAIN_EPOCHS = 10
-PRETRAIN_PATIENCE = 5
-PRETRAIN_DIFFUSION_EPOCHS = 3
-PRETRAIN_DIFFUSION_MAX_EPOCHS = 15
-# Legacy name: upper bound for auto-sized pretrain pool; HP tuning uses its own constant.
-SYNTHETIC_SAMPLES_FULL = 100000
-SYNTHETIC_SAMPLES_HP_TUNE = 20000
-SYNTHETIC_SAMPLES_DIFF_TUNE = 10000  # For Diffusion HP tuning (smaller for speed)
-SYNTHETIC_SAMPLES_MIN = 4096
-SYNTHETIC_SAMPLES_CAP = 100000
-# If set (e.g. via --synthetic-samples), pretrain uses this virtual dataset size instead of auto.
-PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE: Optional[int] = None
-
-# Phase 2: Fine-tuning
-FINETUNE_EPOCHS = 10
-FINETUNE_PATIENCE = 5
-HP_TUNE_EPOCHS = 200
-HP_TUNE_PATIENCE = 20
-
-# Optuna settings
-N_ITRANS_HP_TRIALS = 7
-N_DIFFUSION_HP_TRIALS = 3
-N_FINETUNE_HP_TRIALS = 3
-
-# iTransformer HP inner loops (epochs inside each Optuna trial)
-ITRANS_HP_PRETRAIN_MAX_EPOCHS = 30
-ITRANS_HP_PRETRAIN_PATIENCE = 5
-ITRANS_HP_FINETUNE_MAX_EPOCHS = 50
-ITRANS_HP_FINETUNE_PATIENCE = 8
-# Synthetic pretrain on RealTS data tends to plateau at unit-variance MSE (mean predictor),
-# which makes warm-started fine-tunes barely move. Cold-start gives Phase 2A a fair shot.
-ITRANS_REAL_COLD_START = True
-
-# Batch size ranges for A6000/A100 (40-48GB) — 128×1216×7 images are 4x larger.
-# iTransformer HP tuning now adapts these based on N_VARIATES to avoid OOM at high dims.
-ITRANS_BATCH_SIZES = [64, 128, 256]
-DIFFUSION_BATCH_SIZES = [16]
-FINETUNE_BATCH_SIZES = [4, 8, 16]
-
-# Memory optimization flags (overridden by CLI)
-USE_AMP = False
-USE_GRADIENT_CHECKPOINTING = False
-UNET_CHANNELS = [64, 128, 256]
-ATTENTION_LEVELS = [2]
+# Per-run dispatch knob — set from --n-variates at CLI parse time.
+N_VARIATES = N_VARIATES_DEFAULT
 
 # Dataset registry: name -> (path, date_col, seasonal_period)
 DATASET_REGISTRY = {
@@ -1524,8 +1507,8 @@ def diffusion_hp_objective(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
-    epochs = 15 if not smoke_test else 1
-    patience = 10 if not smoke_test else 1
+    epochs = DIFFUSION_HP_MAX_EPOCHS if not smoke_test else 1
+    patience = DIFFUSION_HP_PATIENCE if not smoke_test else 1
     early_stop = EarlyStopping(patience=patience)
     best_val_loss = float('inf')
 
@@ -1949,8 +1932,15 @@ def finetune_hp_objective(
     device: torch.device,
     smoke_test: bool = False,
     fixed_batch_size: Optional[int] = None,
+    trial_ckpt_dir: Optional[str] = None,
 ) -> float:
-    """Optuna objective for fine-tuning HP search (lr only; batch_size auto-probed or fixed)."""
+    """Optuna objective for fine-tuning HP search (lr only; batch_size auto-probed or fixed).
+
+    If ``trial_ckpt_dir`` is provided, this trial's best-epoch model state is saved
+    to ``{trial_ckpt_dir}/_diff_ft_trial_{trial.number}_best.pt``. The caller picks
+    the best study trial and promotes its file to the final ``best.pt`` — no
+    separate "Phase 2C" retrain is performed.
+    """
     lr = trial.suggest_float('learning_rate', 1e-6, 1e-4, log=True)
     if fixed_batch_size is not None:
         batch_size = fixed_batch_size
@@ -1987,7 +1977,12 @@ def finetune_hp_objective(
     patience = HP_TUNE_PATIENCE if not smoke_test else 1
     early_stop = EarlyStopping(patience=patience)
     best_val_loss = float('inf')
-    
+
+    trial_ckpt_path: Optional[str] = None
+    if trial_ckpt_dir is not None:
+        os.makedirs(trial_ckpt_dir, exist_ok=True)
+        trial_ckpt_path = os.path.join(trial_ckpt_dir, f'_diff_ft_trial_{trial.number}_best.pt')
+
     for epoch in range(epochs):
         model.train()
         for past, future in train_loader:
@@ -2017,87 +2012,55 @@ def finetune_hp_objective(
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-        
+            if trial_ckpt_path is not None and is_main_process():
+                save_checkpoint(
+                    unwrap_model(model), optimizer, epoch, float('nan'), val_loss,
+                    {
+                        'tuned_params': {'learning_rate': lr, 'batch_size': batch_size},
+                        'trial_number': trial.number,
+                    },
+                    trial_ckpt_path,
+                )
+
         if early_stop(val_loss):
             break
-    
+
     return best_val_loss
 
 
-def finetune_on_dataset(
+def _promote_best_trial_to_final(
+    study,
+    subset_dir: str,
     subset_info: Dict,
-    pretrained_path: str,
-    itrans_checkpoint: str,
-    tuned_params: Dict,
-    epochs: int = FINETUNE_EPOCHS,
-    patience: int = FINETUNE_PATIENCE,
-    checkpoint_dir: str = CHECKPOINT_DIR,
-    smoke_test: bool = False,
-    dataset_name: Optional[str] = None,
+    dataset_name: str,
+    norm_stats: Dict,
+    fixed_batch_size: int,
 ) -> Tuple[str, Dict]:
-    """Fine-tune on a dataset with tuned params (DDP-aware)."""
+    """Copy the best Optuna trial's checkpoint to ``{subset_dir}/best.pt``, write
+    metadata.json, clean up other trials' temp files, and return the final
+    checkpoint path + a small train-metrics dict.
+
+    Replaces the old "Phase 2C" full retrain — we just keep the best trial.
+    """
+    if study.best_trial is None:
+        raise RuntimeError("Optuna study has no successful trials")
+
     subset_id = subset_info['subset_id']
     variate_indices = subset_info['variate_indices']
-    
-    if dataset_name is None:
-        dataset_name = subset_id
-    
-    lr = require_tuned_param(tuned_params, 'learning_rate', f"Fine-tuning ({subset_id})")
-    batch_size = require_tuned_param(tuned_params, 'batch_size', f"Fine-tuning ({subset_id})")
-    
-    # Effective batch size for DDP
-    effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
-    effective_batch_size = max(1, effective_batch_size)
-    
-    logger.info("=" * 60)
-    logger.info(f"FINE-TUNING: {subset_id}")
-    logger.info(f"Params: lr={lr:.2e}, batch_size={batch_size}" + 
-                (f" (effective={effective_batch_size} per GPU)" if _ddp_enabled else ""))
-    logger.info("=" * 60)
-    
-    device = get_device()
-    
-    # Load data
-    train_ds, val_ds, _, norm_stats = load_dataset(
-        dataset_name, variate_indices,
-        stride=24 if not smoke_test else LOOKBACK_LENGTH,
-    )
-    
-    if smoke_test:
-        train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
-        val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
-    
-    # DDP-aware data loaders
-    train_loader, train_sampler = create_dataloader_ddp(
-        train_ds, effective_batch_size, shuffle=True, num_workers=0
-    )
-    val_loader, _ = create_dataloader_ddp(
-        val_ds, effective_batch_size, shuffle=False, num_workers=0
-    )
-    
-    # Load iTransformer guidance (not wrapped - eval mode only)
-    n_iv = len(variate_indices)
-    itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
-    itrans_guidance = iTransformerGuidance(itrans_model)
-    
-    # Load pretrained diffusion and wrap with DDP
-    model = create_diffusion_model()
-    model.set_guidance_model(itrans_guidance)
-    ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt['model_state_dict'])
-    model = wrap_model_ddp(model)
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
-    
-    subset_dir = os.path.join(checkpoint_dir, subset_id)
+    best_num = study.best_trial.number
+    best_val_loss = float(study.best_value)
+    tuned_params = dict(study.best_params)
+    tuned_params['batch_size'] = fixed_batch_size
+
+    src = os.path.join(subset_dir, f'_diff_ft_trial_{best_num}_best.pt')
+    if not os.path.exists(src):
+        raise RuntimeError(f"Best trial checkpoint missing: {src}")
+
+    dst = os.path.join(subset_dir, 'best.pt')
     if is_main_process():
         os.makedirs(subset_dir, exist_ok=True)
-    barrier()
-    best_ckpt_path = os.path.join(subset_dir, 'best.pt')
-    
-    # Save metadata (main process only)
-    if is_main_process():
+        import shutil
+        shutil.copy2(src, dst)
         with open(os.path.join(subset_dir, 'metadata.json'), 'w') as f:
             json.dump({
                 'subset_id': subset_id,
@@ -2107,104 +2070,28 @@ def finetune_on_dataset(
                 'norm_mean': norm_stats['mean'].tolist(),
                 'norm_std': norm_stats['std'].tolist(),
                 'tuned_params': tuned_params,
+                'best_trial': best_num,
+                'best_val_loss': best_val_loss,
             }, f, indent=2)
-
-    start_epoch = 0
-    best_val_loss = float('inf')
-    
-    # Try to resume from best.pt if it exists
-    if os.path.exists(best_ckpt_path):
-        try:
-            logger.info(f"  Found existing checkpoint {best_ckpt_path} - attempting to resume...")
-            ckpt = torch.load(best_ckpt_path, map_location=device, weights_only=False)
-            model.load_state_dict(ckpt['model_state_dict'])
-            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-            if 'epoch' in ckpt:
-                start_epoch = ckpt['epoch'] + 1
-            if 'val_loss' in ckpt:
-                best_val_loss = ckpt['val_loss']
-            logger.info(f"  Resuming from epoch {start_epoch} (best val loss: {best_val_loss:.4f})")
-        except Exception as e:
-            logger.warning(f"  Could not resume from {best_ckpt_path}: {e}. Starting from scratch.")
-    
-    early_stop = EarlyStopping(patience=patience)
-    # If we resumed, we need to initialize early stopping with the best loss
-    if best_val_loss < float('inf'):
-        early_stop.best_loss = best_val_loss
-        early_stop.counter = 0 # Reset counter since we just loaded the best
-    
-    final_epoch = 0
-    for epoch in range(start_epoch, epochs):
-        if train_sampler is not None:
-            train_sampler.set_epoch(epoch)
-        
-        final_epoch = epoch
-        t0 = time.time()
-        
-        model.train()
-        total_loss = 0.0
-        n_batches = 0
-        for past, future in train_loader:
-            past, future = past.to(device), future.to(device)
-            optimizer.zero_grad()
-            base_model = unwrap_model(model)
-            with amp_context():
-                loss = base_model.get_loss(past, future)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            total_loss += loss.item()
-            n_batches += 1
-        train_loss = total_loss / max(n_batches, 1)
-        
-        model.eval()
-        total_loss = 0.0
-        n_batches = 0
-        with torch.no_grad():
-            for past, future in val_loader:
-                past, future = past.to(device), future.to(device)
-                base_model = unwrap_model(model)
-                with amp_context():
-                    loss = base_model.get_loss(past, future)
-                total_loss += loss.item()
-                n_batches += 1
-        val_loss = total_loss / max(n_batches, 1)
-        
-        # Average loss across GPUs
-        if _ddp_enabled:
-            train_loss_t = torch.tensor([train_loss], device=device)
-            val_loss_t = torch.tensor([val_loss], device=device)
-            train_loss = sync_across_processes(train_loss_t).item()
-            val_loss = sync_across_processes(val_loss_t).item()
-        
-        scheduler.step()
-        
-        logger.info(f"[{subset_id}] Epoch {epoch+1}/{epochs} | Train: {train_loss:.4f} | "
-                   f"Val: {val_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.2e} | Time: {time.time()-t0:.1f}s")
-        
-        # Wandb logging
-        log_wandb({
-            'train_loss': train_loss,
-            'val_loss': val_loss,
-            'lr': scheduler.get_last_lr()[0],
-            'epoch': epoch + 1,
-            'epoch_time_s': time.time() - t0,
-        }, prefix=f'finetune/{subset_id}')
-        
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            if is_main_process():
-                save_checkpoint(unwrap_model(model), optimizer, epoch, train_loss, val_loss, 
-                              {'tuned_params': tuned_params}, best_ckpt_path)
-                logger.info(f"  -> New best!")
-            barrier()
-        
-        if early_stop(val_loss):
-            logger.info(f"Early stopping at epoch {epoch+1}")
-            break
-    
+        for fn in os.listdir(subset_dir):
+            if fn.startswith('_diff_ft_trial_') and fn.endswith('_best.pt'):
+                try:
+                    os.remove(os.path.join(subset_dir, fn))
+                except OSError:
+                    pass
     barrier()
-    return best_ckpt_path, {'best_val_loss': best_val_loss, 'final_epoch': final_epoch + 1}
+
+    return dst, {'best_val_loss': best_val_loss, 'best_trial': best_num}
+
+
+def finetune_on_dataset(*args, **kwargs):
+    """Removed. The Phase 2C full-finetune step has been eliminated; the best
+    Phase 2B Optuna trial's checkpoint is now reused as the final fine-tuned
+    model. See ``_promote_best_trial_to_final``."""
+    raise RuntimeError(
+        "finetune_on_dataset() was removed — Phase 2B's best trial checkpoint is "
+        "the final model. Use _promote_best_trial_to_final() after study.optimize()."
+    )
 
 
 # ============================================================================
@@ -2621,8 +2508,6 @@ def run_pipeline(
         pretrain_samples = 4  # Ultra minimal
         itrans_pretrain_epochs = 1
         pretrain_patience = 1
-        finetune_epochs = 1
-        finetune_patience = 1
     else:
         n_itrans_trials = N_ITRANS_HP_TRIALS
         n_diff_trials = N_DIFFUSION_HP_TRIALS
@@ -2630,8 +2515,6 @@ def run_pipeline(
         pretrain_samples = resolve_pretrain_virtual_dataset_size(False)
         itrans_pretrain_epochs = PRETRAIN_EPOCHS
         pretrain_patience = PRETRAIN_PATIENCE
-        finetune_epochs = FINETUNE_EPOCHS
-        finetune_patience = FINETUNE_PATIENCE
     
     # =========== PHASE 1A: iTransformer HP Tuning (best model saved directly) ===========
     itrans_tune_ckpt = os.path.join(CHECKPOINT_DIR, 'itrans_hp_best.pt')
@@ -2731,9 +2614,12 @@ def run_pipeline(
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+            subset_dir = os.path.join(CHECKPOINT_DIR, dataset_name)
+            os.makedirs(subset_dir, exist_ok=True)
             logger.info(
-                f"Phase 2C — diffusion finetune HP ({dataset_name}): "
-                f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs}..."
+                f"Phase 2B — diffusion finetune HP ({dataset_name}): "
+                f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs}, "
+                f"epochs<={HP_TUNE_EPOCHS} patience={HP_TUNE_PATIENCE}; best trial → final ckpt..."
             )
             optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -2746,7 +2632,7 @@ def run_pipeline(
             study.optimize(
                 lambda trial: finetune_hp_objective(
                     trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test,
-                    fixed_batch_size=ft_diff_bs,
+                    fixed_batch_size=ft_diff_bs, trial_ckpt_dir=subset_dir,
                 ),
                 n_trials=n_finetune_trials,
                 show_progress_bar=True,
@@ -2755,13 +2641,14 @@ def run_pipeline(
             tuned_params = study.best_params
             tuned_params['batch_size'] = ft_diff_bs
             logger.info(f"Best params for {dataset_name}: {tuned_params}")
-            
-            # Full fine-tuning
-            ckpt_path, train_metrics = finetune_on_dataset(
+
+            # Reuse the best trial's checkpoint as the final fine-tuned model
+            # (no separate Phase 2C retrain).
+            _, _, _, norm_stats = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+            ckpt_path, train_metrics = _promote_best_trial_to_final(
+                study, subset_dir,
                 {'subset_id': dataset_name, 'variate_indices': variate_indices},
-                diff_ckpt, itrans_ckpt, tuned_params,
-                epochs=finetune_epochs, patience=finetune_patience,
-                checkpoint_dir=CHECKPOINT_DIR, smoke_test=smoke_test,
+                dataset_name, norm_stats, ft_diff_bs,
             )
             
             # Evaluation
@@ -3082,8 +2969,6 @@ def run_finetune_mode(
         sys.exit(1)
 
     n_finetune_trials = 1 if smoke_test else N_FINETUNE_HP_TRIALS
-    finetune_epochs = 1 if smoke_test else FINETUNE_EPOCHS
-    finetune_patience = 1 if smoke_test else FINETUNE_PATIENCE
 
     if variate_indices is None:
         variate_indices = generate_dataset_job(dataset_name)['variate_indices']
@@ -3093,8 +2978,7 @@ def run_finetune_mode(
     _finetune_and_eval_one_subset(
         {'subset_id': subset_id, 'variate_indices': variate_indices},
         dataset_name, diff_ckpt, itrans_ckpt,
-        n_finetune_trials, finetune_epochs, finetune_patience,
-        device, smoke_test,
+        n_finetune_trials, device, smoke_test,
     )
 
 
@@ -3188,8 +3072,7 @@ def run_itransformer_finetune_hp_tuning(
 
 def _finetune_and_eval_one_subset(
     subset_info, dataset_name, diff_ckpt, itrans_ckpt,
-    n_finetune_trials, finetune_epochs, finetune_patience,
-    device, smoke_test,
+    n_finetune_trials, device, smoke_test,
 ):
     """Internal: HP tune, fine-tune, and evaluate a single subset.
 
@@ -3259,9 +3142,12 @@ def _finetune_and_eval_one_subset(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        subset_dir = os.path.join(CHECKPOINT_DIR, subset_id)
+        os.makedirs(subset_dir, exist_ok=True)
         logger.info(
             f"Phase 2B — diffusion finetune HP ({subset_id}): "
-            f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs} "
+            f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs}, "
+            f"epochs<={HP_TUNE_EPOCHS} patience={HP_TUNE_PATIENCE}; best trial → final ckpt "
             f"(pretrain diffusion HP uses N_DIFFUSION_HP_TRIALS={N_DIFFUSION_HP_TRIALS})..."
         )
         optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -3273,7 +3159,7 @@ def _finetune_and_eval_one_subset(
         study.optimize(
             lambda trial: finetune_hp_objective(
                 trial, dataset_name, variate_indices, diff_ckpt, ft_itrans_ckpt, device, smoke_test,
-                fixed_batch_size=ft_diff_bs,
+                fixed_batch_size=ft_diff_bs, trial_ckpt_dir=subset_dir,
             ),
             n_trials=n_finetune_trials,
             show_progress_bar=False,
@@ -3286,12 +3172,10 @@ def _finetune_and_eval_one_subset(
         tuned_params['batch_size'] = ft_diff_bs
         logger.info(f"Best diffusion params for {subset_id}: {tuned_params}")
 
-        # Phase D: Full Diffusion finetune
-        ckpt_path, train_metrics = finetune_on_dataset(
-            subset_info, diff_ckpt, ft_itrans_ckpt, tuned_params,
-            epochs=finetune_epochs, patience=finetune_patience,
-            checkpoint_dir=CHECKPOINT_DIR, smoke_test=smoke_test,
-            dataset_name=dataset_name,
+        # Reuse the best Phase 2B trial's checkpoint as the final fine-tuned model.
+        _, _, _, norm_stats = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+        ckpt_path, train_metrics = _promote_best_trial_to_final(
+            study, subset_dir, subset_info, dataset_name, norm_stats, ft_diff_bs,
         )
 
         # Evaluate diffusion model
@@ -3346,13 +3230,7 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 # ============================================================================
 
 def main():
-    global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH
-    global USE_AMP, USE_GRADIENT_CHECKPOINTING, IMAGE_HEIGHT
-    global PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE, PRETRAIN_EPOCHS, FINETUNE_EPOCHS
-    global SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
-    global UNET_CHANNELS, ATTENTION_LEVELS, SYNTH_CACHE_DIR
-    global ITRANSFORMER_SEQ_LEN, ITRANS_HP_FINETUNE_MAX_EPOCHS, ITRANS_HP_FINETUNE_PATIENCE
-    global ITRANS_REAL_COLD_START
+    global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3383,44 +3261,13 @@ def main():
                         help='Parallel worker ID for multi-GPU Optuna (0-N)')
     parser.add_argument('--fresh', action='store_true',
                         help='Wipe manifest and checkpoints, start from scratch')
-    parser.add_argument('--amp', action='store_true',
-                        help='Enable bfloat16 mixed precision training')
-    parser.add_argument('--gradient-checkpointing', action='store_true',
-                        help='Enable gradient checkpointing (saves memory, ~25%% slower)')
-    parser.add_argument('--image-height', type=int, default=None,
-                        help='Override image height (default: 128)')
-    parser.add_argument('--synthetic-samples', type=int, default=None,
-                        help='Fixed pretrain synthetic dataset size (default: auto from PRETRAIN_EPOCHS)')
-    parser.add_argument('--pretrain-epochs', type=int, default=None,
-                        help=f'Override PRETRAIN_EPOCHS (default: {PRETRAIN_EPOCHS})')
-    parser.add_argument('--finetune-epochs', type=int, default=None,
-                        help=f'Override FINETUNE_EPOCHS (default: {FINETUNE_EPOCHS})')
-    parser.add_argument('--itransformer-trials', type=int, default=None,
-                        help=f'Override N_ITRANS_HP_TRIALS (default: {N_ITRANS_HP_TRIALS})')
-    parser.add_argument('--itrans-seq-len', type=int, default=None,
-                        help=f'iTransformer seq_len (inverted Linear width); must be ≤ lookback ({LOOKBACK_LENGTH}). '
-                             f'Default: {ITRANSFORMER_SEQ_LEN}')
-    parser.add_argument('--itrans-finetune-max-epochs', type=int, default=None,
-                        help=f'Per-trial max epochs for iTransformer real-data HP (default: {ITRANS_HP_FINETUNE_MAX_EPOCHS})')
-    parser.add_argument('--itrans-finetune-patience', type=int, default=None,
-                        help=f'Early-stop patience for that phase (default: {ITRANS_HP_FINETUNE_PATIENCE})')
-    parser.add_argument('--itrans-warm-start', action='store_true',
-                        help='Re-enable synthetic warm-start in Phase 2A (default: cold-start; warm-start tends '
-                             'to freeze at the synthetic mean predictor)')
-    parser.add_argument('--subset-threshold', type=int, default=None,
-                        help='Override SUBSET_THRESHOLD for dim grouping')
-    parser.add_argument('--unet-channels', type=str, default=None,
-                        help='Comma-separated U-Net channels, e.g. 64,128,256')
-    parser.add_argument('--attention-levels', type=str, default=None,
-                        help='Comma-separated U-Net attention indices, e.g. 1,2')
 
     args = parser.parse_args()
-    
+
     # Legacy flag compat
     if args.status:
         args.mode = 'status'
 
-    # Override directories
     if args.checkpoint_dir:
         CHECKPOINT_DIR = args.checkpoint_dir
         MANIFEST_PATH = os.path.join(CHECKPOINT_DIR, 'training_manifest.json')
@@ -3428,42 +3275,9 @@ def main():
         RESULTS_DIR = args.results_dir
     if args.synth_cache_dir:
         SYNTH_CACHE_DIR = args.synth_cache_dir
-    
-    # Set N_VARIATES from CLI (affects all model/data creation)
+
     if args.n_variates is not None:
         N_VARIATES = args.n_variates
-
-    USE_AMP = args.amp
-    USE_GRADIENT_CHECKPOINTING = args.gradient_checkpointing
-    if args.image_height is not None:
-        IMAGE_HEIGHT = args.image_height
-    if args.pretrain_epochs is not None:
-        PRETRAIN_EPOCHS = args.pretrain_epochs
-    if args.finetune_epochs is not None:
-        FINETUNE_EPOCHS = args.finetune_epochs
-    if args.synthetic_samples is not None:
-        PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE = args.synthetic_samples
-        SYNTHETIC_SAMPLES_HP_TUNE = min(int(args.synthetic_samples), 25000)
-    if args.itransformer_trials is not None:
-        N_ITRANS_HP_TRIALS = args.itransformer_trials
-    if args.itrans_seq_len is not None:
-        if args.itrans_seq_len < 8 or args.itrans_seq_len > LOOKBACK_LENGTH:
-            raise ValueError(f"--itrans-seq-len must be between 8 and {LOOKBACK_LENGTH}")
-        ITRANSFORMER_SEQ_LEN = args.itrans_seq_len
-    if args.itrans_finetune_max_epochs is not None:
-        ITRANS_HP_FINETUNE_MAX_EPOCHS = max(1, int(args.itrans_finetune_max_epochs))
-    if args.itrans_finetune_patience is not None:
-        ITRANS_HP_FINETUNE_PATIENCE = max(1, int(args.itrans_finetune_patience))
-    if args.itrans_warm_start:
-        ITRANS_REAL_COLD_START = False
-    if args.subset_threshold is not None:
-        SUBSET_THRESHOLD = args.subset_threshold
-    if args.unet_channels is not None:
-        UNET_CHANNELS = [int(x.strip()) for x in args.unet_channels.split(',') if x.strip()]
-        if len(UNET_CHANNELS) < 2:
-            raise ValueError("--unet-channels must provide at least two levels")
-    if args.attention_levels is not None:
-        ATTENTION_LEVELS = [int(x.strip()) for x in args.attention_levels.split(',') if x.strip()]
     
     # DDP setup
     if args.ddp:
