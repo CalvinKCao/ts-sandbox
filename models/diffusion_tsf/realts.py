@@ -460,12 +460,17 @@ class RealTS(Dataset):
     see GENERATORS for exact probabilities.
     
     Args:
-        num_samples: Number of synthetic samples to generate
+        num_samples: Virtual epoch length (indices 0 .. num_samples-1 per DataLoader epoch)
         lookback_length: Length of past context window
         forecast_length: Length of forecast horizon
         seed: Random seed for reproducibility (None for random)
         augment: Whether to apply additional augmentations (reserved for future)
         num_variables: Number of variables to generate (default: 1)
+        synthetic_epoch_capacity: When >1 with ``cache_dir``, allocates a disk pool of
+            ``(num_samples - val_tail) * capacity + val_tail`` rows so each training epoch
+            can index a disjoint block (set epoch via ``set_synthetic_epoch``).
+        val_tail_n: Validation tail length; None uses ``min(max(1, num_samples//10), 5000)``
+            capped to ``num_samples - 1``.
     """
     
     # Generator functions and their probabilities
@@ -492,6 +497,8 @@ class RealTS(Dataset):
         cache_dir: Optional[str] = None,
         lookback_overlap: int = 0,
         skip_cross_var_aug: bool = False,
+        synthetic_epoch_capacity: int = 1,
+        val_tail_n: Optional[int] = None,
     ):
         self.num_samples = num_samples  # Virtual epoch size
         self.lookback_length = lookback_length
@@ -502,9 +509,41 @@ class RealTS(Dataset):
         self.num_variables = num_variables
         self.seed = seed
         self.pregenerate = pregenerate
-        self.pool_size = pool_size or num_samples
-        if self.pool_size < num_samples: self.pool_size = num_samples
+        self.synthetic_epoch_capacity = max(1, int(synthetic_epoch_capacity))
+        self._synth_epoch = 0
+
+        if val_tail_n is None:
+            vt = min(max(1, num_samples // 10), 5000, max(0, num_samples - 1))
+        else:
+            vt = int(val_tail_n)
+        vt = max(0, min(vt, max(0, num_samples - 1)))
+        self.val_tail_n = vt
+        self.train_n = num_samples - self.val_tail_n
+        if self.train_n < 1:
+            raise ValueError(
+                f"RealTS: num_samples={num_samples} too small for val_tail_n={self.val_tail_n}"
+            )
+
         self.skip_cross_var_aug = skip_cross_var_aug
+
+        self._use_epoch_stride = False
+        if self.synthetic_epoch_capacity > 1 and cache_dir:
+            self._use_epoch_stride = True
+            self.pool_size = self.train_n * self.synthetic_epoch_capacity + self.val_tail_n
+        elif pool_size is not None:
+            self.pool_size = int(pool_size)
+        else:
+            self.pool_size = int(num_samples)
+        if self.pool_size < num_samples:
+            self.pool_size = num_samples
+        
+        if self.synthetic_epoch_capacity > 1 and not cache_dir:
+            logger.warning(
+                "RealTS: synthetic_epoch_capacity>1 needs cache_dir for disk pool; "
+                "falling back to single-block pool (repeats each epoch)."
+            )
+            self._use_epoch_stride = False
+            self.pool_size = max(self.pool_size, int(num_samples))
         
         self.data_cache = None
         self.use_disk_cache = False
@@ -520,7 +559,9 @@ class RealTS(Dataset):
         logger.info(
             f"RealTS initialized: {num_samples} samples/epoch, "
             f"lookback={lookback_length}, forecast={forecast_length}, "
-            f"variables={num_variables}"
+            f"variables={num_variables}, pool_rows={self.pool_size}, "
+            f"epoch_stride={self._use_epoch_stride} (train_n={self.train_n}, val_tail={self.val_tail_n}, "
+            f"cap={self.synthetic_epoch_capacity})"
         )
         
         # Disk Caching Logic (Large Pool)
@@ -612,6 +653,10 @@ class RealTS(Dataset):
             self.pool_size = self.num_samples # Pool size is fixed to what we generated
             logger.info("Pre-generation complete.")
     
+    def set_synthetic_epoch(self, epoch: int) -> None:
+        """When using epoch-strided disk pools, set 0-based training epoch for row mapping."""
+        self._synth_epoch = max(0, int(epoch))
+
     def __len__(self) -> int:
         return self.num_samples
     
@@ -640,9 +685,15 @@ class RealTS(Dataset):
         
         # Case 1: Using Cached Pool (Disk or RAM)
         if self.data_cache is not None:
-            # Deterministic index mapping keeps synthetic epochs reproducible when
-            # DataLoader shuffles with fixed seeds across runs.
-            real_idx = int(idx) % self.pool_size
+            if self._use_epoch_stride:
+                idx_i = int(idx)
+                if idx_i >= self.train_n:
+                    real_idx = self.train_n * self.synthetic_epoch_capacity + (idx_i - self.train_n)
+                else:
+                    e = min(self._synth_epoch, self.synthetic_epoch_capacity - 1)
+                    real_idx = e * self.train_n + idx_i
+            else:
+                real_idx = int(idx) % self.pool_size
             seq = self.data_cache[real_idx]
             
             # Note: For cached univariate, we already did augmentations (flip/negate) at generation time.

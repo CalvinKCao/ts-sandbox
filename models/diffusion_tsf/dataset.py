@@ -33,6 +33,8 @@ def get_synthetic_dataloader(
     cache_dir: Optional[str] = None,
     lookback_overlap: int = 0,
     skip_cross_var_aug: bool = False,
+    synthetic_epoch_capacity: int = 1,
+    val_tail_n: Optional[int] = None,
 ) -> DataLoader:
     """Create a DataLoader with ONLY synthetic RealTS data for pre-training.
     
@@ -49,10 +51,15 @@ def get_synthetic_dataloader(
         num_workers: Number of worker processes
         seed: Random seed for reproducibility (None for random)
         num_variables: Number of variables (default: 1)
-        pool_size: Total number of samples in the cached pool (randomly sampled)
+        pool_size: Total rows in the cached pool (defaults inside RealTS)
         cache_dir: Directory to cache the pool (enables large disk-based pools)
         lookback_overlap: Number of past steps to include in the target (K)
         skip_cross_var_aug: Skip O(V²) cross-variate augmentation for high-V
+        synthetic_epoch_capacity: When >1 with disk cache, allocate
+            ``(num_samples - val_tail_n) * capacity + val_tail_n`` pool rows so each
+            training epoch can draw a fresh block of series (see RealTS).
+        val_tail_n: Validation tail size; None uses ``min(max(1, num_samples//10), 5000)``
+            capped to ``num_samples - 1`` (must match train/val Subset split).
         
     Returns:
         DataLoader with synthetic-only data
@@ -67,6 +74,8 @@ def get_synthetic_dataloader(
         cache_dir=cache_dir,
         lookback_overlap=lookback_overlap,
         skip_cross_var_aug=skip_cross_var_aug,
+        synthetic_epoch_capacity=synthetic_epoch_capacity,
+        val_tail_n=val_tail_n,
     )
     
     logger.info(

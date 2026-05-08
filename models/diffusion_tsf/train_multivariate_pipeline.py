@@ -448,6 +448,9 @@ def init_wandb(
         'itrans_batch_sizes': ITRANS_BATCH_SIZES,
         'diffusion_batch_sizes': DIFFUSION_BATCH_SIZES,
         'finetune_batch_sizes': FINETUNE_BATCH_SIZES,
+        'diffusion_probe_target_effective_batch': DIFFUSION_PROBE_TARGET_EFFECTIVE_BATCH,
+        'diffusion_probe_max_batch_cap': DIFFUSION_PROBE_MAX_BATCH_CAP,
+        'diffusion_probe_max_candidate_default_v': diffusion_probe_max_candidate(N_VARIATES, False),
         # DDP info
         'ddp_enabled': _ddp_enabled,
         'world_size': get_world_size(),
@@ -650,7 +653,6 @@ from models.diffusion_tsf.pipeline_config import (
     PRETRAIN_DIFFUSION_MAX_EPOCHS,
     DIFFUSION_HP_MAX_EPOCHS,
     DIFFUSION_HP_PATIENCE,
-    SYNTHETIC_SAMPLES_FULL,
     SYNTHETIC_SAMPLES_HP_TUNE,
     SYNTHETIC_SAMPLES_DIFF_TUNE,
     SYNTHETIC_SAMPLES_MIN,
@@ -668,12 +670,20 @@ from models.diffusion_tsf.pipeline_config import (
     ITRANS_REAL_COLD_START,
     ITRANS_BATCH_SIZES,
     DIFFUSION_BATCH_SIZES,
+    DIFFUSION_PROBE_TARGET_EFFECTIVE_BATCH,
+    DIFFUSION_PROBE_MAX_BATCH_CAP,
     FINETUNE_BATCH_SIZES,
+    diffusion_probe_max_candidate,
     USE_AMP,
     USE_GRADIENT_CHECKPOINTING,
     UNET_CHANNELS,
     ATTENTION_LEVELS,
     EVAL_NUM_SAMPLES,
+    resolve_pretrain_virtual_dataset_size,
+    synthetic_epoch_capacity_itrans_hp,
+    synthetic_epoch_capacity_diff_hp,
+    synthetic_epoch_capacity_pretrain_itrans,
+    synthetic_epoch_capacity_pretrain_diffusion,
 )
 
 # Per-run dispatch knob — set from --n-variates at CLI parse time.
@@ -693,22 +703,15 @@ DATASET_REGISTRY = {
 }
 
 
-def resolve_pretrain_virtual_dataset_size(smoke_test: bool) -> int:
-    """Virtual ``len`` of the synthetic dataset for full pretrain (iTrans + diffusion).
-
-    Scales lightly with ``PRETRAIN_EPOCHS`` so short runs do not allocate 60k–100k
-    sequences by default. Use ``--synthetic-samples`` to force a size; disk pools
-    may still be **reused** when an existing cache is large enough (see RealTS).
-    """
-    if smoke_test:
-        return 4
-    if PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE is not None:
-        return max(4, int(PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE))
-    steps = 32 + 48 * PRETRAIN_EPOCHS
-    steps = max(64, min(800, steps))
-    ref_bs = 8
-    n = steps * ref_bs
-    return max(SYNTHETIC_SAMPLES_MIN, min(SYNTHETIC_SAMPLES_CAP, n))
+def set_realts_training_epoch(loader_or_subset_or_dataset, epoch: int) -> None:
+    """If ``loader_or_subset_or_dataset`` wraps a RealTS, set its strided synthetic epoch."""
+    ds = loader_or_subset_or_dataset
+    if isinstance(ds, DataLoader):
+        ds = ds.dataset
+    if isinstance(ds, Subset):
+        ds = ds.dataset
+    if hasattr(ds, 'set_synthetic_epoch'):
+        ds.set_synthetic_epoch(epoch)
 
 
 def get_synth_cache_dir(checkpoint_dir: Optional[str] = None, smoke_test: bool = False) -> Optional[str]:
@@ -1356,6 +1359,7 @@ def itrans_hp_objective(
 
     try:
         for epoch in range(epochs):
+            set_realts_training_epoch(synthetic_loader, epoch)
             train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
             val_loss = validate_itransformer(model, val_loader_local, criterion, device)
 
@@ -1402,6 +1406,8 @@ def run_itransformer_hp_tuning(
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_HP_TUNE
+    n_val = 0 if smoke_test else min(n_samples // 10, 1000)
+    epoch_cap = 1 if smoke_test else synthetic_epoch_capacity_itrans_hp()
     synth_cache = get_synth_cache_dir()
     synthetic_loader = get_synthetic_dataloader(
         batch_size=64,
@@ -1413,6 +1419,8 @@ def run_itransformer_hp_tuning(
         lookback_overlap=LOOKBACK_OVERLAP,
         cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
+        val_tail_n=n_val,
+        synthetic_epoch_capacity=epoch_cap,
     )
 
     dataset = synthetic_loader.dataset
@@ -1513,6 +1521,7 @@ def diffusion_hp_objective(
     best_val_loss = float('inf')
 
     for epoch in range(epochs):
+        set_realts_training_epoch(synthetic_loader, epoch)
         model.train()
         for past, future in train_loader:
             past, future = past.to(device), future.to(device)
@@ -1571,6 +1580,8 @@ def run_diffusion_hp_tuning(
     
     # Create small synthetic dataset for fast iteration
     n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_DIFF_TUNE
+    n_val = 0 if smoke_test else min(n_samples // 10, 500)
+    epoch_cap = 1 if smoke_test else synthetic_epoch_capacity_diff_hp()
     synth_cache = get_synth_cache_dir()
     synthetic_loader = get_synthetic_dataloader(
         batch_size=32,
@@ -1582,6 +1593,8 @@ def run_diffusion_hp_tuning(
         lookback_overlap=LOOKBACK_OVERLAP,
         cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
+        val_tail_n=n_val,
+        synthetic_epoch_capacity=epoch_cap,
     )
     
     dataset = synthetic_loader.dataset
@@ -1594,7 +1607,7 @@ def run_diffusion_hp_tuning(
         dataset=train_subset,
         device=device,
         itrans_guidance=itrans_guidance,
-        max_candidate=8 if smoke_test else 64,
+        max_candidate=diffusion_probe_max_candidate(N_VARIATES, smoke_test),
     )
     train_loader = DataLoader(train_subset, batch_size=train_bs, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_subset, batch_size=min(train_bs, 16), shuffle=False, num_workers=0)
@@ -1668,6 +1681,8 @@ def pretrain_itransformer(
     
     # Create data
     synth_cache = get_synth_cache_dir(checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
+    n_val = 0 if smoke_test else min(n_samples // 10, 5000)
+    epoch_cap = 1 if smoke_test else synthetic_epoch_capacity_pretrain_itrans()
     synthetic_loader = get_synthetic_dataloader(
         batch_size=min(32, max(2, tuned_batch_size)),
         lookback_length=LOOKBACK_LENGTH,
@@ -1678,11 +1693,12 @@ def pretrain_itransformer(
         lookback_overlap=LOOKBACK_OVERLAP,
         cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
+        val_tail_n=n_val,
+        synthetic_epoch_capacity=epoch_cap,
     )
     
-    # Split for validation
+    # Split for validation (indices must match ``val_tail_n`` above)
     dataset = synthetic_loader.dataset
-    n_val = min(len(dataset) // 10, 5000)
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
     if not _ddp_enabled:
@@ -1720,6 +1736,8 @@ def pretrain_itransformer(
     for epoch in range(epochs):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)  # Crucial for DDP shuffling
+        
+        set_realts_training_epoch(train_loader, epoch)
         
         t0 = time.time()
         train_loss = train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
@@ -1794,6 +1812,8 @@ def pretrain_diffusion(
     
     # Create data
     synth_cache = get_synth_cache_dir(checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
+    n_val = 0 if smoke_test else min(n_samples // 10, 5000)
+    epoch_cap = 1 if smoke_test else synthetic_epoch_capacity_pretrain_diffusion()
     synthetic_loader = get_synthetic_dataloader(
         batch_size=min(16, max(2, tuned_batch_size)),
         lookback_length=LOOKBACK_LENGTH,
@@ -1804,10 +1824,11 @@ def pretrain_diffusion(
         lookback_overlap=LOOKBACK_OVERLAP,
         cache_dir=synth_cache,
         skip_cross_var_aug=(N_VARIATES > 32),
+        val_tail_n=n_val,
+        synthetic_epoch_capacity=epoch_cap,
     )
     
     dataset = synthetic_loader.dataset
-    n_val = min(len(dataset) // 10, 5000)
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
     if not _ddp_enabled:
@@ -1816,7 +1837,10 @@ def pretrain_diffusion(
             dataset=train_subset,
             device=device,
             itrans_guidance=itrans_guidance,
-            max_candidate=max(2, tuned_batch_size),
+            max_candidate=max(
+                tuned_batch_size,
+                diffusion_probe_max_candidate(N_VARIATES, smoke_test),
+            ),
         )
     effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
     effective_batch_size = max(1, effective_batch_size)
@@ -1845,6 +1869,8 @@ def pretrain_diffusion(
     for epoch in range(epochs):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
+        
+        set_realts_training_epoch(train_loader, epoch)
         
         t0 = time.time()
         
@@ -2608,7 +2634,7 @@ def run_pipeline(
                 dataset=_p_ds,
                 device=device,
                 itrans_guidance=_p_guidance,
-                max_candidate=4 if smoke_test else 64,
+                max_candidate=diffusion_probe_max_candidate(len(variate_indices), smoke_test),
             )
             del _p_itrans, _p_guidance, _p_ds
             if torch.cuda.is_available():
@@ -3136,7 +3162,7 @@ def _finetune_and_eval_one_subset(
             dataset=_probe_ds,
             device=device,
             itrans_guidance=_ft_itrans_guidance,
-            max_candidate=4 if smoke_test else 64,
+            max_candidate=diffusion_probe_max_candidate(len(variate_indices), smoke_test),
         )
         del _ft_itrans_model, _ft_itrans_guidance, _probe_ds
         if torch.cuda.is_available():
