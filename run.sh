@@ -42,10 +42,10 @@ if [ -z "$SLURM_JOB_ID" ]; then
         if [ "$arg" = "--hours" ] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
             h="${ARGS[$((i + 1))]}"
             H_VAL=$h
-            # Convert hours to DD-HH:MM:SS (approx)
+            # Convert hours to DD-HH:MM:SS
             days=$(( h / 24 ))
             rem_h=$(( h % 24 ))
-            WALLTIME="${days}-${rem_h}:00:00"
+            WALLTIME=$(printf "%d-%02d:00:00" $days $rem_h)
         fi
     done
 
@@ -68,8 +68,8 @@ if [ -z "$SLURM_JOB_ID" ]; then
     elif [ "$USE_H100" -eq 1 ]; then
         # Selection logic for H100 partition based on hours
         PARTITION="gpubase_h100_b2" # up to 24h
-        if [ "$H_VAL" -gt 24 ]; then PARTITION="gpubase_h100_b3"; fi # up to 3 days
-        if [ "$H_VAL" -gt 72 ]; then PARTITION="gpubase_h100_b4"; fi # up to 7 days
+        if [ "$H_VAL" -ge 24 ]; then PARTITION="gpubase_h100_b3"; fi # 24h to 3 days
+        if [ "$H_VAL" -ge 72 ]; then PARTITION="gpubase_h100_b4"; fi # 3 days to 7 days
         
         echo "Submitting H100 FULL RUN (64GB, $WALLTIME wall, $PARTITION) [variant=$VARIANT]..."
         
