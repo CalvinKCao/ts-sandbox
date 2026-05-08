@@ -90,7 +90,8 @@ _slug="${SLURM_JOB_NAME}"
 
 # Read RESUME from environment if we passed it via --export
 if [ -n "${RESUME_STEM:-}" ]; then
-    ALLIANCE_RUN_STEM="$RESUME_STEM"
+    # Strip leading "results/" if the user accidentally included it
+    ALLIANCE_RUN_STEM="${RESUME_STEM#results/}"
     echo "Resuming from existing job directory: $ALLIANCE_RUN_STEM"
 else
     ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID}-${_slug}"
@@ -101,7 +102,9 @@ RUN_LOG_DIR="$RUN_RESULTS_ROOT/logs"
 RUN_CKPT_DIR="$RUN_RESULTS_ROOT/ckpts"
 RUN_DATA_DIR="$RUN_RESULTS_ROOT/datasets"
 mkdir -p "$RUN_LOG_DIR" "$RUN_CKPT_DIR" "$RUN_DATA_DIR"
-ALLIANCE_JOB_LOG="$RUN_LOG_DIR/${ALLIANCE_RUN_STEM}.log"
+# Use basename so we don't try to create a log file with slashes in the name
+LOG_FILENAME="$(basename "$ALLIANCE_RUN_STEM").log"
+ALLIANCE_JOB_LOG="$RUN_LOG_DIR/$LOG_FILENAME"
 touch "$ALLIANCE_JOB_LOG"
 exec >>"$ALLIANCE_JOB_LOG" 2>&1
 
