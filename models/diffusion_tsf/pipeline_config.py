@@ -37,7 +37,7 @@ FORECAST_LENGTH: int = 96
 # iTransformer's inverted embedding uses seq_len as the Linear input width. Papers
 # typically benchmark on ≤336 for hourly ETT; the diffusion model still sees the full
 # LOOKBACK_LENGTH and slices for iTransformer guidance.
-ITRANSFORMER_SEQ_LEN: int = 336
+ITRANSFORMER_SEQ_LEN: int = 512
 
 # Predict the last K observed steps alongside the forecast horizon. The diffusion
 # model denoises a (K + H)-wide region; the K steps are discarded at inference.

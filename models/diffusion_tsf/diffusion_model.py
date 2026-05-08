@@ -273,28 +273,8 @@ class DiffusionTSF(nn.Module):
         logger.info(f"DiffusionTSF initialized:")
         logger.info(f"  Variables: {config.num_variables} ({'multivariate' if config.num_variables > 1 else 'univariate'})")
         logger.info(f"  Lookback: {config.lookback_length}, Forecast: {config.forecast_length}")
-        logger.info(f"  Image size: {config.image_height} x W")
-        logger.info(f"  Input channels: {config.backbone_in_channels} (data: {config.num_variables}, aux: {config.num_aux_channels}, guidance: {config.guidance_channels})")
-        logger.info(f"  Diffusion steps: {config.num_diffusion_steps}")
-        logger.info(f"  Coordinate channel: {config.use_coordinate_channel}")
-        logger.info(f"  Time ramp channel: {config.use_time_ramp}")
-        logger.info(f"  Time sine channel: {config.use_time_sine}")
-        logger.info(f"  Value channel: {config.use_value_channel}")
-        if config.use_guidance_channel:
-            logger.info(f"  Guidance channel: enabled (Stage 1 → 2D ghost image)")
-        if config.use_time_sine:
-            logger.info(f"  Seasonal period: {config.seasonal_period}")
-        if config.model_type == "unet":
-            logger.info(f"  U-Net kernel size: {config.unet_kernel_size}")
-            if config.num_variables > 1:
-                logger.info(f"  Variate-factorized: enabled (B*V={config.num_variables} per forward, shared weights)")
-            if config.use_dilated_middle:
-                logger.info(f"  Dilated middle block: enabled (dilations=1,2,4,8)")
-            logger.info(
-                f"  Context encoder: iTransformerTokenAdapter "
-                f"(itrans_d_model={config.itrans_d_model} -> context_dim={config.context_embedding_dim}, "
-                f"variate_embed=True)"
-            )
+        logger.info(f"  Image size: {config.image_height} x {config.width}")
+
     
     def to(self, device):
         """Move model and scheduler to device."""
@@ -791,6 +771,11 @@ class DiffusionTSF(nn.Module):
             noise_loss = F.mse_loss(noise_pred, noise)
 
         x0_pred  = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
+        
+        # Clamp x0_pred for numerical stability at high t
+        # Matches ddim_step logic: range [-2, 2] provides slack beyond [-1, 1]
+        x0_pred = torch.clamp(x0_pred, -2.0, 2.0)
+        
         emd_loss = self._compute_emd_loss(x0_pred, future_2d)
 
         mono_loss = torch.tensor(0.0, device=device)
@@ -966,6 +951,10 @@ class DiffusionTSF(nn.Module):
             noise_loss = F.mse_loss(noise_pred, noise)
 
         x0_pred = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
+        
+        # Clamp x0_pred for numerical stability at high t
+        x0_pred = torch.clamp(x0_pred, -2.0, 2.0)
+        
         emd_loss = self._compute_emd_loss(x0_pred, future_2d)
 
         mono_loss = torch.tensor(0.0, device=device)

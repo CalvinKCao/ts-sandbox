@@ -865,6 +865,27 @@ def load_itransformer_from_checkpoint(
     )
 
 
+def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Dict) -> None:
+    """Load a diffusion checkpoint while preserving the guidance submodule that the
+    caller already attached via ``set_guidance_model``.
+
+    The diffusion checkpoint's ``model_state_dict`` includes ``guidance_model.*``
+    keys (PyTorch saves all submodules). Reloading those would overwrite the
+    freshly-attached guidance — and breaks loudly when the saved guidance has a
+    different ``seq_len`` than the attached one (e.g. synthetic-pretrain vs
+    real-finetuned iTransformer). We always want to keep the attached guidance
+    and only restore the diffusion backbone weights.
+    """
+    filtered = {k: v for k, v in ckpt_state.items() if not k.startswith('guidance_model.')}
+    missing, unexpected = model.load_state_dict(filtered, strict=False)
+    leaked = [k for k in (missing or []) if not k.startswith('guidance_model.')]
+    if leaked:
+        raise RuntimeError(f"Diffusion ckpt missing non-guidance keys: {leaked[:5]}...")
+    real_unexpected = [k for k in (unexpected or []) if not k.startswith('guidance_model.')]
+    if real_unexpected:
+        raise RuntimeError(f"Diffusion ckpt has unexpected keys: {real_unexpected[:5]}...")
+
+
 # ============================================================================
 # Diffusion Model Creation (with guidance support)
 # ============================================================================
@@ -1996,12 +2017,12 @@ def finetune_hp_objective(
     itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
     itrans_guidance = iTransformerGuidance(itrans_model)
     
-    # Load pretrained diffusion
+    # Load pretrained diffusion (skip guidance keys — keep the attached one)
     model = create_diffusion_model().to(device)
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt['model_state_dict'])
-    
+    load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     
     epochs = HP_TUNE_EPOCHS if not smoke_test else 1
@@ -2692,8 +2713,8 @@ def run_pipeline(
                 model = create_diffusion_model().to(device)
                 model.set_guidance_model(itrans_guidance)
                 ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-                model.load_state_dict(ckpt['model_state_dict'])
-                
+                load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
+
                 _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
                 if smoke_test:
                     test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
@@ -3217,7 +3238,7 @@ def _finetune_and_eval_one_subset(
         model = create_diffusion_model().to(device)
         model.set_guidance_model(itrans_guidance)
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt['model_state_dict'])
+        load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
 
         _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
         if smoke_test:
