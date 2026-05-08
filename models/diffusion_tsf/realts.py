@@ -591,7 +591,7 @@ class RealTS(Dataset):
                         
                     # Save to a temporary file first, then atomically replace.
                     # This prevents Bus Errors from overwriting an active memory-mapped file.
-                    temp_path = cache_path + ".tmp"
+                    temp_path = cache_path.replace(".npy", ".tmp.npy")
                     np.save(temp_path, combined)
                     os.replace(temp_path, cache_path)
                     logger.info("Pool generation and save complete.")
