@@ -680,6 +680,9 @@ ITRANS_HP_PRETRAIN_MAX_EPOCHS = 30
 ITRANS_HP_PRETRAIN_PATIENCE = 5
 ITRANS_HP_FINETUNE_MAX_EPOCHS = 50
 ITRANS_HP_FINETUNE_PATIENCE = 8
+# Synthetic pretrain on RealTS data tends to plateau at unit-variance MSE (mean predictor),
+# which makes warm-started fine-tunes barely move. Cold-start gives Phase 2A a fair shot.
+ITRANS_REAL_COLD_START = True
 
 # Batch size ranges for A6000/A100 (40-48GB) — 128×1216×7 images are 4x larger.
 # iTransformer HP tuning now adapts these based on N_VARIATES to avoid OOM at high dims.
@@ -3105,16 +3108,20 @@ def run_itransformer_finetune_hp_tuning(
     checkpoint_dir: Optional[str] = None,
     subset_id: Optional[str] = None,
 ) -> Tuple[Dict, Optional[str]]:
-    """HP tune iTransformer on real data, warm-starting from pretrained weights.
+    """HP tune iTransformer on real data.
 
-    Same search space as pretrain HP tuning (lr + dropout). Returns
-    (best_params, path_to_best_model_or_None).
+    If ``ITRANS_REAL_COLD_START`` is True, ignore the synthetic warm-start so each
+    trial trains from scratch (synthetic pretrain on this corpus tends to converge
+    near a unit-variance mean predictor, which makes warm-started fine-tunes barely
+    move). Returns (best_params, path_to_best_model_or_None).
     """
     label = subset_id or dataset_name
+    warm = (None if ITRANS_REAL_COLD_START else pretrained_ckpt)
     logger.info("=" * 60)
     logger.info(f"iTrans Finetune HP Tuning: {label} ({n_trials} trials)")
     logger.info(
-        f"Up to {ITRANS_HP_FINETUNE_MAX_EPOCHS} epochs per trial, patience={ITRANS_HP_FINETUNE_PATIENCE}"
+        f"Up to {ITRANS_HP_FINETUNE_MAX_EPOCHS} epochs per trial, patience={ITRANS_HP_FINETUNE_PATIENCE}, "
+        f"warm_start={'no (cold start)' if warm is None else os.path.basename(warm)}"
     )
     logger.info("=" * 60)
 
@@ -3154,7 +3161,7 @@ def run_itransformer_finetune_hp_tuning(
         lambda trial: itrans_hp_objective(
             trial, train_loader, val_loader, device, smoke_test,
             fixed_batch_size=train_bs, best_state=_best_state,
-            pretrained_ckpt=pretrained_ckpt,
+            pretrained_ckpt=warm,
             max_epochs=ITRANS_HP_FINETUNE_MAX_EPOCHS,
             early_stop_patience=ITRANS_HP_FINETUNE_PATIENCE,
         ),
@@ -3166,7 +3173,7 @@ def run_itransformer_finetune_hp_tuning(
     best_params = study.best_params
     best_params['batch_size'] = train_bs
     logger.info(f"Best iTrans FT params for {label}: lr={best_params['learning_rate']:.2e}, "
-               f"dropout={best_params['dropout']:.3f}")
+               f"dropout={best_params['dropout']:.3f} → val_loss={_best_state.get('val_loss', float('inf')):.4f}")
 
     ckpt_path = None
     if checkpoint_dir is not None and _best_state.get('model_state') is not None:
@@ -3345,6 +3352,7 @@ def main():
     global SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
     global UNET_CHANNELS, ATTENTION_LEVELS, SYNTH_CACHE_DIR
     global ITRANSFORMER_SEQ_LEN, ITRANS_HP_FINETUNE_MAX_EPOCHS, ITRANS_HP_FINETUNE_PATIENCE
+    global ITRANS_REAL_COLD_START
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3396,6 +3404,9 @@ def main():
                         help=f'Per-trial max epochs for iTransformer real-data HP (default: {ITRANS_HP_FINETUNE_MAX_EPOCHS})')
     parser.add_argument('--itrans-finetune-patience', type=int, default=None,
                         help=f'Early-stop patience for that phase (default: {ITRANS_HP_FINETUNE_PATIENCE})')
+    parser.add_argument('--itrans-warm-start', action='store_true',
+                        help='Re-enable synthetic warm-start in Phase 2A (default: cold-start; warm-start tends '
+                             'to freeze at the synthetic mean predictor)')
     parser.add_argument('--subset-threshold', type=int, default=None,
                         help='Override SUBSET_THRESHOLD for dim grouping')
     parser.add_argument('--unet-channels', type=str, default=None,
@@ -3443,6 +3454,8 @@ def main():
         ITRANS_HP_FINETUNE_MAX_EPOCHS = max(1, int(args.itrans_finetune_max_epochs))
     if args.itrans_finetune_patience is not None:
         ITRANS_HP_FINETUNE_PATIENCE = max(1, int(args.itrans_finetune_patience))
+    if args.itrans_warm_start:
+        ITRANS_REAL_COLD_START = False
     if args.subset_threshold is not None:
         SUBSET_THRESHOLD = args.subset_threshold
     if args.unet_channels is not None:
