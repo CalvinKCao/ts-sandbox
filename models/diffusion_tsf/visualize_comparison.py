@@ -1,9 +1,10 @@
 """
 Multivariate comparison plots: ground truth vs iTransformer vs diffusion.
 
-Only visualization entry point in this repo — walks checkpoint subdirs with
-metadata.json + best.pt, loads per-dim iTransformer + fine-tuned diffusion,
-plots a few test windows per dataset (subset-aware for high-V data).
+Walks checkpoint subdirs with metadata.json + best.pt, loads the **finetuned**
+per-subset iTransformer (`{subset_id}_itransformer_finetuned.pt`) plus diffusion,
+so curves match training/eval. Falls back to synthetic `pretrained_dim*/itransformer.pt`
+only if finetuned weights are missing.
 
 Usage:
     python -m models.diffusion_tsf.visualize_comparison \\
@@ -34,10 +35,11 @@ if project_root not in sys.path:
 
 from models.diffusion_tsf.storage_paths import checkpoint_roots_ordered
 from models.diffusion_tsf.train_multivariate_pipeline import (
-    RESULTS_DIR, DATASETS_DIR, DATASET_REGISTRY,
-    LOOKBACK_LENGTH, FORECAST_LENGTH, N_VARIATES,
-    create_itransformer, create_diffusion_model, load_dataset,
-    get_dim_for_dataset, pretrain_dir_for_dim,
+    RESULTS_DIR,
+    LOOKBACK_LENGTH, FORECAST_LENGTH, LOOKBACK_OVERLAP,
+    create_diffusion_model, load_dataset,
+    pretrain_dir_for_dim,
+    load_itransformer_from_checkpoint,
 )
 from models.diffusion_tsf.guidance import iTransformerGuidance
 
@@ -92,29 +94,38 @@ def run_comparison(
     print(f"Found {len(by_dataset)} datasets: {', '.join(sorted(by_dataset))}")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Cache loaded iTransformer models per-dim
+    # Cache loaded iTransformer models per subset (finetuned weights differ per subset)
     _itrans_cache = {}
 
-    def _get_itrans_model(dim):
-        if dim in _itrans_cache:
-            return _itrans_cache[dim]
+    def _get_itrans_model(subset_id: str, n_vars: int):
+        key = subset_id
+        if key in _itrans_cache:
+            return _itrans_cache[key]
         for base in roots:
             base_s = str(base)
-            dim_dir = pretrain_dir_for_dim(dim, base_dir=base_s)
+            ft_path = os.path.join(base_s, f'{subset_id}_itransformer_finetuned.pt')
+            if os.path.exists(ft_path):
+                model = load_itransformer_from_checkpoint(ft_path, n_vars, device)
+                _itrans_cache[key] = model
+                print(f"  Loaded finetuned iTransformer ({subset_id}) from {ft_path}")
+                return model
+        for base in roots:
+            base_s = str(base)
+            dim_dir = pretrain_dir_for_dim(n_vars, base_dir=base_s)
             candidates = [
                 os.path.join(dim_dir, 'itransformer.pt'),
                 os.path.join(base_s, 'pretrained_itransformer.pt'),
             ]
             for p in candidates:
                 if os.path.exists(p):
-                    model = create_itransformer(num_vars=dim).to(device)
-                    ckpt = torch.load(p, map_location=device, weights_only=False)
-                    model.load_state_dict(ckpt['model_state_dict'])
-                    model.eval()
-                    _itrans_cache[dim] = model
-                    print(f"  Loaded iTransformer (dim={dim}) from {p}")
+                    model = load_itransformer_from_checkpoint(p, n_vars, device)
+                    _itrans_cache[key] = model
+                    print(
+                        f"  WARNING: using synthetic-pretrained iTransformer from {p} "
+                        f"(no {subset_id}_itransformer_finetuned.pt); orange curve may look random vs real data."
+                    )
                     return model
-        print(f"  WARNING: no iTransformer checkpoint for dim={dim}")
+        print(f"  WARNING: no iTransformer checkpoint for subset={subset_id} dim={n_vars}")
         return None
 
     for dataset_name, subsets in sorted(by_dataset.items()):
@@ -142,19 +153,16 @@ def run_comparison(
         mean = torch.tensor(norm_stats['mean'], dtype=torch.float32)
         std = torch.tensor(norm_stats['std'], dtype=torch.float32)
 
-        # Load per-dim iTransformer for this dataset
+        # Load per-subset finetuned iTransformer (matches diffusion training guidance)
         n_vars = len(variate_indices)
-        itrans_model = _get_itrans_model(n_vars)
+        itrans_model = _get_itrans_model(subset_id, n_vars)
         if itrans_model is None:
-            print(f"  Skipping {dataset_name}: no iTransformer for dim={n_vars}")
+            print(f"  Skipping {dataset_name}: no iTransformer for subset={subset_id}")
             continue
 
-        # Load fine-tuned diffusion with iTransformer guidance
-        diff_model = create_diffusion_model(n_variates=n_vars, use_guidance=True).to(device)
-        itrans_guidance = iTransformerGuidance(
-            itrans_model, use_norm=True,
-            seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH
-        )
+        # Load fine-tuned diffusion with same guidance wrapper as training
+        diff_model = create_diffusion_model(n_variates=n_vars).to(device)
+        itrans_guidance = iTransformerGuidance(itrans_model)
         diff_model.set_guidance_model(itrans_guidance)
         diff_ckpt = torch.load(sub['best_pt'], map_location=device, weights_only=False)
         diff_model.load_state_dict(diff_ckpt['model_state_dict'])
@@ -175,9 +183,12 @@ def run_comparison(
             past_t = past.unsqueeze(0).to(device)   # (1, C, L)
 
             with torch.no_grad():
-                # iTransformer standalone
+                # iTransformer standalone (last seq_sl steps of context, same as training)
                 B, C, L = past_t.shape
-                x_enc = past_t.permute(0, 2, 1)       # (1, L, C)
+                x_enc = past_t.permute(0, 2, 1)
+                seq_sl = getattr(itrans_model, 'seq_len', L)
+                if x_enc.shape[1] > seq_sl:
+                    x_enc = x_enc[:, -seq_sl:, :]
                 x_dec = torch.zeros(B, FORECAST_LENGTH, C, device=device)
                 itrans_out = itrans_model(x_enc, None, x_dec, None)
                 if isinstance(itrans_out, tuple):
@@ -197,9 +208,12 @@ def run_comparison(
 
             # Denormalize everything to original scale
             past_dn = denorm(past, mean, std)
-            future_dn = denorm(future, mean, std)
+            # future includes lookback_overlap; slice it for plotting (last FORECAST_LENGTH steps)
+            future_sliced = future[:, -FORECAST_LENGTH:]
+            future_dn = denorm(future_sliced, mean, std)
             itrans_dn = denorm(itrans_pred, mean, std)
-            diff_dn = denorm(diff_pred, mean, std)
+            diff_pred_sliced = diff_pred[:, -FORECAST_LENGTH:] if diff_pred.shape[-1] > FORECAST_LENGTH else diff_pred
+            diff_dn = denorm(diff_pred_sliced, mean, std)
 
             # Show last N steps of context for visual continuity
             context_len = min(FORECAST_LENGTH * 2, LOOKBACK_LENGTH)
@@ -232,6 +246,9 @@ def run_comparison(
                 # Per-cell MAE annotations
                 it_mae = np.mean(np.abs(it - gt))
                 df_mae = np.mean(np.abs(df - gt))
+                vname = var_names[col] if col < len(var_names) else f'Var {col}'
+                print(f"    - {vname:15}: iTrans MAE={it_mae:.4f}, Diff MAE={df_mae:.4f}")
+
                 ax.text(0.97, 0.97,
                         f'iTrans MAE: {it_mae:.3f}\nDiff MAE: {df_mae:.3f}',
                         transform=ax.transAxes, fontsize=7,

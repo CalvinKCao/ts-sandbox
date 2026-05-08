@@ -638,6 +638,9 @@ def finish_wandb():
 # Training settings (2D representation: IMAGE_HEIGHT × (LOOKBACK + FORECAST))
 LOOKBACK_LENGTH = 512
 FORECAST_LENGTH = 96
+# iTransformer inverted embedding uses seq_len as the Linear input width. Papers often use
+# ≤336 on hourly ETT; diffusion still sees full LOOKBACK_LENGTH. Override via --itrans-seq-len.
+ITRANSFORMER_SEQ_LEN = 336
 IMAGE_HEIGHT = 64
 
 # Predict the last K lookback steps alongside the forecast to smooth the boundary
@@ -671,6 +674,12 @@ HP_TUNE_PATIENCE = 20
 N_ITRANS_HP_TRIALS = 7
 N_DIFFUSION_HP_TRIALS = 3
 N_FINETUNE_HP_TRIALS = 3
+
+# iTransformer HP inner loops (epochs inside each Optuna trial)
+ITRANS_HP_PRETRAIN_MAX_EPOCHS = 30
+ITRANS_HP_PRETRAIN_PATIENCE = 5
+ITRANS_HP_FINETUNE_MAX_EPOCHS = 50
+ITRANS_HP_FINETUNE_PATIENCE = 8
 
 # Batch size ranges for A6000/A100 (40-48GB) — 128×1216×7 images are 4x larger.
 # iTransformer HP tuning now adapts these based on N_VARIATES to avoid OOM at high dims.
@@ -785,7 +794,7 @@ def get_itransformer_class():
 
 
 def create_itransformer_config(
-    seq_len: int = LOOKBACK_LENGTH,
+    seq_len: int = None,
     pred_len: int = FORECAST_LENGTH,
     num_vars: int = None,
     d_model: int = 512,
@@ -795,6 +804,8 @@ def create_itransformer_config(
     dropout: float = 0.1,
 ):
     """Create iTransformer config object."""
+    if seq_len is None:
+        seq_len = ITRANSFORMER_SEQ_LEN
     if num_vars is None:
         num_vars = N_VARIATES
     class iTransConfig:
@@ -818,12 +829,14 @@ def create_itransformer_config(
 
 
 def create_itransformer(
-    seq_len: int = LOOKBACK_LENGTH,
+    seq_len: int = None,
     pred_len: int = FORECAST_LENGTH,
     num_vars: int = None,
     dropout: float = 0.1,
 ) -> nn.Module:
     """Create iTransformer model."""
+    if seq_len is None:
+        seq_len = ITRANSFORMER_SEQ_LEN
     if num_vars is None:
         num_vars = N_VARIATES
     iTransformerModel = get_itransformer_class()
@@ -831,6 +844,35 @@ def create_itransformer(
         seq_len=seq_len, pred_len=pred_len, num_vars=num_vars, dropout=dropout
     )
     return iTransformerModel(config)
+
+
+def load_itransformer_from_checkpoint(
+    path: str,
+    num_vars: int,
+    device: torch.device,
+    dropout: float = 0.1,
+) -> nn.Module:
+    """Load iTransformer weights, trying current seq_len then full lookback for old checkpoints."""
+    last_err: Optional[Exception] = None
+    for seq_len in (ITRANSFORMER_SEQ_LEN, LOOKBACK_LENGTH):
+        model = create_itransformer(
+            seq_len=seq_len, num_vars=num_vars, dropout=dropout,
+        ).to(device)
+        try:
+            ckpt = torch.load(path, map_location=device, weights_only=False)
+            model.load_state_dict(ckpt['model_state_dict'], strict=True)
+            model.eval()
+            return model
+        except RuntimeError as e:
+            last_err = e
+            del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            continue
+    raise RuntimeError(
+        f"Cannot load iTransformer checkpoint {path} "
+        f"(tried seq_len={ITRANSFORMER_SEQ_LEN} and {LOOKBACK_LENGTH}): {last_err}"
+    )
 
 
 # ============================================================================
@@ -1081,6 +1123,9 @@ def train_itransformer_epoch(model, loader, optimizer, criterion, device, schedu
     
     for past, future in loader:
         x_enc = past.permute(0, 2, 1).to(device)
+        seq_sl = getattr(model, 'seq_len', x_enc.shape[1])
+        if x_enc.shape[1] > seq_sl:
+            x_enc = x_enc[:, -seq_sl:, :]
         y_true = future.permute(0, 2, 1).to(device)
         # iTransformer predicts H steps; strip the K overlap from target
         if LOOKBACK_OVERLAP > 0:
@@ -1110,6 +1155,9 @@ def validate_itransformer(model, loader, criterion, device):
     with torch.no_grad():
         for past, future in loader:
             x_enc = past.permute(0, 2, 1).to(device)
+            seq_sl = getattr(model, 'seq_len', x_enc.shape[1])
+            if x_enc.shape[1] > seq_sl:
+                x_enc = x_enc[:, -seq_sl:, :]
             y_true = future.permute(0, 2, 1).to(device)
             if LOOKBACK_OVERLAP > 0:
                 y_true = y_true[:, LOOKBACK_OVERLAP:, :]
@@ -1197,6 +1245,9 @@ def select_itrans_batch_size(
             past = sample_past.unsqueeze(0).repeat(bs, 1, 1).to(device)
             future = sample_future.unsqueeze(0).repeat(bs, 1, 1).to(device)
             x_enc = past.permute(0, 2, 1)
+            seq_sl = getattr(model, 'seq_len', x_enc.shape[1])
+            if x_enc.shape[1] > seq_sl:
+                x_enc = x_enc[:, -seq_sl:, :]
             y_true = future.permute(0, 2, 1)
             if LOOKBACK_OVERLAP > 0:
                 y_true = y_true[:, LOOKBACK_OVERLAP:, :]
@@ -1275,6 +1326,8 @@ def itrans_hp_objective(
     fixed_batch_size: Optional[int] = None,
     best_state: Optional[dict] = None,
     pretrained_ckpt: Optional[str] = None,
+    max_epochs: int = ITRANS_HP_PRETRAIN_MAX_EPOCHS,
+    early_stop_patience: int = ITRANS_HP_PRETRAIN_PATIENCE,
 ):
     """Optuna objective for iTransformer HP search.
 
@@ -1295,7 +1348,13 @@ def itrans_hp_objective(
     model = create_itransformer(dropout=dropout).to(device)
     if pretrained_ckpt is not None and os.path.exists(pretrained_ckpt):
         ckpt = torch.load(pretrained_ckpt, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt['model_state_dict'])
+        try:
+            model.load_state_dict(ckpt['model_state_dict'], strict=True)
+        except RuntimeError as e:
+            logger.warning(
+                "iTransformer warm-start failed (%s); training this trial from scratch.",
+                e,
+            )
 
     train_loader = DataLoader(synthetic_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     val_bs = min(batch_size, 32)
@@ -1304,8 +1363,8 @@ def itrans_hp_objective(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
-    epochs = 30 if not smoke_test else 1
-    patience = 5 if not smoke_test else 1
+    epochs = max_epochs if not smoke_test else 1
+    patience = early_stop_patience if not smoke_test else 1
     early_stop = EarlyStopping(patience=patience)
     best_val_loss = float('inf')
 
@@ -1349,6 +1408,9 @@ def run_itransformer_hp_tuning(
     logger.info("=" * 60)
     logger.info("PHASE 1A: iTransformer HP Tuning")
     logger.info(f"Trials: {n_trials}")
+    logger.info(
+        f"iTransformer seq_len={ITRANSFORMER_SEQ_LEN} (diffusion lookback={LOOKBACK_LENGTH})"
+    )
     logger.info("=" * 60)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -1402,6 +1464,8 @@ def run_itransformer_hp_tuning(
         lambda trial: itrans_hp_objective(
             trial, train_loader, val_loader, device, smoke_test,
             fixed_batch_size=train_bs, best_state=_best_state,
+            max_epochs=ITRANS_HP_PRETRAIN_MAX_EPOCHS,
+            early_stop_patience=ITRANS_HP_PRETRAIN_PATIENCE,
         ),
         n_trials=n_trials,
         show_progress_bar=True,
@@ -1515,16 +1579,9 @@ def run_diffusion_hp_tuning(
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Load iTransformer as guidance
-    itrans_model = create_itransformer().to(device)
-    ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)
-    itrans_model.load_state_dict(ckpt['model_state_dict'])
-    itrans_guidance = iTransformerGuidance(
-        model=itrans_model,
-        use_norm=True,
-        seq_len=LOOKBACK_LENGTH,
-        pred_len=FORECAST_LENGTH
-    )
+    # Load iTransformer as guidance (supports legacy 512-wide and current shorter seq checkpoints)
+    itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, N_VARIATES, device)
+    itrans_guidance = iTransformerGuidance(itrans_model)
     
     # Create small synthetic dataset for fast iteration
     n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_DIFF_TUNE
@@ -1746,15 +1803,8 @@ def pretrain_diffusion(
     batch_size = tuned_batch_size
     
     # Load iTransformer as guidance (not wrapped in DDP - used in eval mode only)
-    itrans_model = create_itransformer().to(device)
-    ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)
-    itrans_model.load_state_dict(ckpt['model_state_dict'])
-    itrans_guidance = iTransformerGuidance(
-        model=itrans_model,
-        use_norm=True,
-        seq_len=LOOKBACK_LENGTH,
-        pred_len=FORECAST_LENGTH
-    )
+    itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, N_VARIATES, device)
+    itrans_guidance = iTransformerGuidance(itrans_model)
     
     # Create data
     synth_cache = get_synth_cache_dir(checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
@@ -1918,10 +1968,9 @@ def finetune_hp_objective(
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
     
     # Load iTransformer guidance
-    itrans_model = create_itransformer().to(device)
-    ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)
-    itrans_model.load_state_dict(ckpt['model_state_dict'])
-    itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
+    n_iv = len(variate_indices)
+    itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
+    itrans_guidance = iTransformerGuidance(itrans_model)
     
     # Load pretrained diffusion
     model = create_diffusion_model().to(device)
@@ -2024,10 +2073,9 @@ def finetune_on_dataset(
     )
     
     # Load iTransformer guidance (not wrapped - eval mode only)
-    itrans_model = create_itransformer().to(device)
-    ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)
-    itrans_model.load_state_dict(ckpt['model_state_dict'])
-    itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
+    n_iv = len(variate_indices)
+    itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
+    itrans_guidance = iTransformerGuidance(itrans_model)
     
     # Load pretrained diffusion and wrap with DDP
     model = create_diffusion_model()
@@ -2327,10 +2375,8 @@ def evaluate_itransformer_baseline(
         test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
     test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
 
-    itrans_model = create_itransformer().to(device)
-    ckpt = torch.load(itrans_checkpoint, map_location=device, weights_only=False)
-    itrans_model.load_state_dict(ckpt['model_state_dict'])
-    itrans_model.eval()
+    n_iv = len(variate_indices)
+    itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
 
     all_preds, all_targets = [], []
     with torch.no_grad():
@@ -2338,6 +2384,9 @@ def evaluate_itransformer_baseline(
             past = past.to(device)
             B, C, L = past.shape
             x_enc = past.permute(0, 2, 1)
+            seq_sl = getattr(itrans_model, 'seq_len', L)
+            if x_enc.shape[1] > seq_sl:
+                x_enc = x_enc[:, -seq_sl:, :]
             x_dec = torch.zeros(B, FORECAST_LENGTH, C, device=device, dtype=past.dtype)
             output = itrans_model(x_enc, None, x_dec, None)
             if isinstance(output, tuple):
@@ -2460,6 +2509,9 @@ def train_full_dim_itransformer_baseline(
         for past, future in test_loader:
             past = past.to(device)
             x_enc = past.permute(0, 2, 1)
+            sl = getattr(model_eval, 'seq_len', x_enc.shape[1])
+            if x_enc.shape[1] > sl:
+                x_enc = x_enc[:, -sl:, :]
             output = model_eval(x_enc, None, None, None)
             if isinstance(output, tuple):
                 output = output[0]
@@ -2661,12 +2713,9 @@ def run_pipeline(
 
         try:
             # Probe max safe batch size once before HP trials
-            _p_itrans = create_itransformer().to(device)
-            _p_ckpt = torch.load(itrans_ckpt, map_location=device, weights_only=False)
-            _p_itrans.load_state_dict(_p_ckpt['model_state_dict'])
-            _p_guidance = iTransformerGuidance(
-                _p_itrans, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH,
-            )
+            n_iv = len(variate_indices)
+            _p_itrans = load_itransformer_from_checkpoint(itrans_ckpt, n_iv, device)
+            _p_guidance = iTransformerGuidance(_p_itrans)
             _p_ds, _, _, _ = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
             ft_diff_bs = select_diffusion_batch_size(
                 phase_name=f'Diff FT HP ({dataset_name})',
@@ -2675,7 +2724,7 @@ def run_pipeline(
                 itrans_guidance=_p_guidance,
                 max_candidate=4 if smoke_test else 64,
             )
-            del _p_itrans, _p_ckpt, _p_guidance, _p_ds
+            del _p_itrans, _p_guidance, _p_ds
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -2715,10 +2764,9 @@ def run_pipeline(
             # Evaluation
             if True:
                 logger.info(f"Evaluating {dataset_name}...")
-                itrans_model = create_itransformer().to(device)
-                ckpt = torch.load(itrans_ckpt, map_location=device, weights_only=False)
-                itrans_model.load_state_dict(ckpt['model_state_dict'])
-                itrans_guidance = iTransformerGuidance(itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH)
+                n_iv = len(variate_indices)
+                itrans_model = load_itransformer_from_checkpoint(itrans_ckpt, n_iv, device)
+                itrans_guidance = iTransformerGuidance(itrans_model)
                 
                 model = create_diffusion_model().to(device)
                 model.set_guidance_model(itrans_guidance)
@@ -2838,9 +2886,17 @@ def is_itrans_checkpoint_compatible(path: str, n_variates: int) -> bool:
         state = ckpt.get('model_state_dict')
         if state is None:
             return False
-        model = create_itransformer(num_vars=n_variates).cpu()
-        model.load_state_dict(state, strict=True)
-        return True
+        last_err: Optional[Exception] = None
+        for seq_len in (ITRANSFORMER_SEQ_LEN, LOOKBACK_LENGTH):
+            model = create_itransformer(num_vars=n_variates, seq_len=seq_len).cpu()
+            try:
+                model.load_state_dict(state, strict=True)
+                return True
+            except RuntimeError as e:
+                last_err = e
+                continue
+        logger.warning(f"Skipping incompatible iTransformer checkpoint {path}: {last_err}")
+        return False
     except Exception as e:
         logger.warning(f"Skipping incompatible iTransformer checkpoint {path}: {e}")
         return False
@@ -3057,6 +3113,9 @@ def run_itransformer_finetune_hp_tuning(
     label = subset_id or dataset_name
     logger.info("=" * 60)
     logger.info(f"iTrans Finetune HP Tuning: {label} ({n_trials} trials)")
+    logger.info(
+        f"Up to {ITRANS_HP_FINETUNE_MAX_EPOCHS} epochs per trial, patience={ITRANS_HP_FINETUNE_PATIENCE}"
+    )
     logger.info("=" * 60)
 
     train_ds, val_ds, _, _ = load_dataset(
@@ -3096,6 +3155,8 @@ def run_itransformer_finetune_hp_tuning(
             trial, train_loader, val_loader, device, smoke_test,
             fixed_batch_size=train_bs, best_state=_best_state,
             pretrained_ckpt=pretrained_ckpt,
+            max_epochs=ITRANS_HP_FINETUNE_MAX_EPOCHS,
+            early_stop_patience=ITRANS_HP_FINETUNE_PATIENCE,
         ),
         n_trials=n_trials,
         show_progress_bar=False,
@@ -3175,12 +3236,8 @@ def _finetune_and_eval_one_subset(
 
         # Phase C: Diffusion HP search using finetuned iTransformer as guidance
         # Probe max safe batch size once before HP trials start
-        _ft_itrans_model = create_itransformer().to(device)
-        _ft_itrans_ckpt_data = torch.load(ft_itrans_ckpt, map_location=device, weights_only=False)
-        _ft_itrans_model.load_state_dict(_ft_itrans_ckpt_data['model_state_dict'])
-        _ft_itrans_guidance = iTransformerGuidance(
-            _ft_itrans_model, use_norm=True, seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH,
-        )
+        _ft_itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, len(variate_indices), device)
+        _ft_itrans_guidance = iTransformerGuidance(_ft_itrans_model)
         _probe_ds, _, _, _ = load_dataset(
             dataset_name, variate_indices, stride=LOOKBACK_LENGTH,
         )
@@ -3191,7 +3248,7 @@ def _finetune_and_eval_one_subset(
             itrans_guidance=_ft_itrans_guidance,
             max_candidate=4 if smoke_test else 64,
         )
-        del _ft_itrans_model, _ft_itrans_ckpt_data, _ft_itrans_guidance, _probe_ds
+        del _ft_itrans_model, _ft_itrans_guidance, _probe_ds
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -3232,13 +3289,8 @@ def _finetune_and_eval_one_subset(
 
         # Evaluate diffusion model
         logger.info(f"Evaluating {subset_id}...")
-        itrans_model = create_itransformer().to(device)
-        ckpt = torch.load(ft_itrans_ckpt, map_location=device, weights_only=False)
-        itrans_model.load_state_dict(ckpt['model_state_dict'])
-        itrans_guidance = iTransformerGuidance(
-            itrans_model, use_norm=True,
-            seq_len=LOOKBACK_LENGTH, pred_len=FORECAST_LENGTH,
-        )
+        itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, len(variate_indices), device)
+        itrans_guidance = iTransformerGuidance(itrans_model)
 
         model = create_diffusion_model().to(device)
         model.set_guidance_model(itrans_guidance)
@@ -3292,6 +3344,7 @@ def main():
     global PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE, PRETRAIN_EPOCHS, FINETUNE_EPOCHS
     global SYNTHETIC_SAMPLES_HP_TUNE, N_ITRANS_HP_TRIALS, SUBSET_THRESHOLD
     global UNET_CHANNELS, ATTENTION_LEVELS, SYNTH_CACHE_DIR
+    global ITRANSFORMER_SEQ_LEN, ITRANS_HP_FINETUNE_MAX_EPOCHS, ITRANS_HP_FINETUNE_PATIENCE
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3336,6 +3389,13 @@ def main():
                         help=f'Override FINETUNE_EPOCHS (default: {FINETUNE_EPOCHS})')
     parser.add_argument('--itransformer-trials', type=int, default=None,
                         help=f'Override N_ITRANS_HP_TRIALS (default: {N_ITRANS_HP_TRIALS})')
+    parser.add_argument('--itrans-seq-len', type=int, default=None,
+                        help=f'iTransformer seq_len (inverted Linear width); must be ≤ lookback ({LOOKBACK_LENGTH}). '
+                             f'Default: {ITRANSFORMER_SEQ_LEN}')
+    parser.add_argument('--itrans-finetune-max-epochs', type=int, default=None,
+                        help=f'Per-trial max epochs for iTransformer real-data HP (default: {ITRANS_HP_FINETUNE_MAX_EPOCHS})')
+    parser.add_argument('--itrans-finetune-patience', type=int, default=None,
+                        help=f'Early-stop patience for that phase (default: {ITRANS_HP_FINETUNE_PATIENCE})')
     parser.add_argument('--subset-threshold', type=int, default=None,
                         help='Override SUBSET_THRESHOLD for dim grouping')
     parser.add_argument('--unet-channels', type=str, default=None,
@@ -3375,6 +3435,14 @@ def main():
         SYNTHETIC_SAMPLES_HP_TUNE = min(int(args.synthetic_samples), 25000)
     if args.itransformer_trials is not None:
         N_ITRANS_HP_TRIALS = args.itransformer_trials
+    if args.itrans_seq_len is not None:
+        if args.itrans_seq_len < 8 or args.itrans_seq_len > LOOKBACK_LENGTH:
+            raise ValueError(f"--itrans-seq-len must be between 8 and {LOOKBACK_LENGTH}")
+        ITRANSFORMER_SEQ_LEN = args.itrans_seq_len
+    if args.itrans_finetune_max_epochs is not None:
+        ITRANS_HP_FINETUNE_MAX_EPOCHS = max(1, int(args.itrans_finetune_max_epochs))
+    if args.itrans_finetune_patience is not None:
+        ITRANS_HP_FINETUNE_PATIENCE = max(1, int(args.itrans_finetune_patience))
     if args.subset_threshold is not None:
         SUBSET_THRESHOLD = args.subset_threshold
     if args.unet_channels is not None:
@@ -3415,7 +3483,26 @@ def main():
             print("ERROR: --n-variates required for pretrain mode")
             sys.exit(1)
         N_VARIATES = nv
-        run_pretrain_mode(nv, smoke_test=args.smoke_test, seed=args.seed)
+        try:
+            if args.wandb:
+                tags = ['smoke-test'] if args.smoke_test else []
+                tags.append('mode-pretrain')
+                init_wandb(
+                    project=args.wandb_project,
+                    config={
+                        'seed': args.seed,
+                        'smoke_test': args.smoke_test,
+                        'resume': args.resume,
+                        'mode': 'pretrain',
+                        'n_variates': nv,
+                    },
+                    resume=args.resume,
+                    tags=tags,
+                )
+            run_pretrain_mode(nv, smoke_test=args.smoke_test, seed=args.seed)
+        finally:
+            finish_wandb()
+            cleanup_ddp()
         return
 
     if args.mode == 'finetune':
@@ -3427,14 +3514,34 @@ def main():
             variate_indices = [int(x.strip()) for x in args.variate_indices.split(',') if x.strip()]
         nv = args.n_variates or (len(variate_indices) if variate_indices else get_dim_for_dataset(args.dataset))
         N_VARIATES = nv
-        run_finetune_mode(
-            args.dataset,
-            nv,
-            variate_indices=variate_indices,
-            subset_id=args.subset_id,
-            smoke_test=args.smoke_test,
-            seed=args.seed,
-        )
+        try:
+            if args.wandb:
+                tags = ['smoke-test'] if args.smoke_test else []
+                tags.append('mode-finetune')
+                init_wandb(
+                    project=args.wandb_project,
+                    config={
+                        'seed': args.seed,
+                        'smoke_test': args.smoke_test,
+                        'resume': args.resume,
+                        'mode': 'finetune',
+                        'dataset': args.dataset,
+                        'n_variates': nv,
+                    },
+                    resume=args.resume,
+                    tags=tags,
+                )
+            run_finetune_mode(
+                args.dataset,
+                nv,
+                variate_indices=variate_indices,
+                subset_id=args.subset_id,
+                smoke_test=args.smoke_test,
+                seed=args.seed,
+            )
+        finally:
+            finish_wandb()
+            cleanup_ddp()
         return
 
     if args.mode == 'baseline':

@@ -223,15 +223,15 @@ class iTransformerGuidance(BaseGuidance):
         Args:
             model: Pre-trained iTransformer model instance.
             use_norm: Whether the model uses internal normalization.
-            seq_len: Expected input sequence length (for validation).
-            pred_len: Expected prediction length (for validation).
+            seq_len: If set, validates/slices past to this length; otherwise uses ``model.seq_len``.
+            pred_len: If set, validates forecast_length against this; otherwise uses ``model.pred_len``.
         """
         super().__init__()
         self.model = model
         self.use_norm = use_norm
         self.seq_len = seq_len
         self.pred_len = pred_len
-        
+
         # Freeze the model - we're using it for inference only
         for param in self.model.parameters():
             param.requires_grad = False
@@ -265,6 +265,39 @@ class iTransformerGuidance(BaseGuidance):
         self.training = False
         self.model.eval()
         return self
+
+    def _past_seq_len(self) -> Optional[int]:
+        if self.seq_len is not None:
+            return self.seq_len
+        return getattr(self.model, 'seq_len', None)
+
+    def _past_pred_len(self) -> Optional[int]:
+        if self.pred_len is not None:
+            return self.pred_len
+        return getattr(self.model, 'pred_len', None)
+
+    def _slice_past_to_model_len(self, past: torch.Tensor) -> torch.Tensor:
+        """Take the last L steps so iTransformer matches its inverted embedding width."""
+        Lwant = self._past_seq_len()
+        if Lwant is None:
+            return past
+        if past.dim() == 2:
+            if past.shape[-1] < Lwant:
+                raise ValueError(
+                    f"past length {past.shape[-1]} < iTransformer seq_len {Lwant}"
+                )
+            if past.shape[-1] > Lwant:
+                return past[:, -Lwant:]
+            return past
+        if past.dim() != 3:
+            raise ValueError(f"past must be (B,L) or (B,V,L), got shape {tuple(past.shape)}")
+        if past.shape[-1] < Lwant:
+            raise ValueError(
+                f"past length {past.shape[-1]} < iTransformer seq_len {Lwant}"
+            )
+        if past.shape[-1] > Lwant:
+            return past[..., -Lwant:]
+        return past
     
     @torch.no_grad()
     def get_encoder_tokens(self, past: torch.Tensor) -> torch.Tensor:
@@ -279,6 +312,7 @@ class iTransformerGuidance(BaseGuidance):
         Returns:
             (B, V, d_model) — cross-variate-aware variate tokens
         """
+        past = self._slice_past_to_model_len(past)
         is_univariate = past.dim() == 2
         if is_univariate:
             x_enc = past.unsqueeze(-1)      # (B, L, 1)
@@ -310,13 +344,15 @@ class iTransformerGuidance(BaseGuidance):
         Returns:
             Predicted future of shape (batch, [num_vars,] forecast_length)
         """
-        # Validation
-        if self.pred_len is not None and forecast_length != self.pred_len:
+        pred_expect = self._past_pred_len()
+        if pred_expect is not None and forecast_length != pred_expect:
             raise ValueError(
-                f"iTransformer was trained for pred_len={self.pred_len}, "
+                f"iTransformer was trained for pred_len={pred_expect}, "
                 f"but got forecast_length={forecast_length}"
             )
-        
+
+        past = self._slice_past_to_model_len(past)
+
         # Handle univariate case - iTransformer expects (batch, seq_len, num_vars)
         is_univariate = (past.dim() == 2)
         if is_univariate:
@@ -326,13 +362,7 @@ class iTransformerGuidance(BaseGuidance):
             past = past.permute(0, 2, 1)
         
         batch_size, seq_len, num_vars = past.shape
-        
-        if self.seq_len is not None and seq_len != self.seq_len:
-            raise ValueError(
-                f"iTransformer was trained for seq_len={self.seq_len}, "
-                f"but got past_len={seq_len}"
-            )
-        
+
         # iTransformer forward expects: x_enc, x_mark_enc, x_dec, x_mark_dec
         # For our purposes, we don't use time marks (pass None/zeros)
         x_enc = past
