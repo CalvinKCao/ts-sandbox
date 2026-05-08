@@ -29,8 +29,9 @@ if [ -z "$SLURM_JOB_ID" ]; then
 
     IS_SMOKE=0
     VARIANT="default"
-    WALLTIME="1-00:00:00"
+    # Walltime as integer minutes — Slurm accepts this unambiguously (avoids D-HH:MM:SS quirks).
     H_VAL=24
+    WALLTIME_MINUTES=$(( H_VAL * 60 ))
     USE_H100=0
     ARGS=("$@")
     for ((i=0; i<${#ARGS[@]}; i++)); do
@@ -48,10 +49,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
         if [ "$arg" = "--hours" ] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
             h="${ARGS[$((i + 1))]}"
             H_VAL=$h
-            # Convert hours to DD-HH:MM:SS
-            days=$(( h / 24 ))
-            rem_h=$(( h % 24 ))
-            WALLTIME=$(printf "%d-%02d:00:00" $days $rem_h)
+            WALLTIME_MINUTES=$(( H_VAL * 60 ))
         fi
     done
 
@@ -72,13 +70,14 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --mail-user=ccao87@uwo.ca \
             "$SCRIPT_DIR/run.sh" "$@"
     elif [ "$USE_H100" -eq 1 ]; then
-        # Selection logic for H100 partition based on hours
-        PARTITION="gpubase_h100_b2" # up to 24h
-        if [ "$H_VAL" -ge 24 ]; then PARTITION="gpubase_h100_b3"; fi # 24h to 3 days
-        if [ "$H_VAL" -ge 72 ]; then PARTITION="gpubase_h100_b4"; fi # 3 days to 7 days
-        
-        echo "Submitting H100 FULL RUN (64GB, $WALLTIME wall, $PARTITION) [variant=$VARIANT]..."
-        
+        # Partition MaxTime must be >= requested wall. On Killarney, b3 is often shorter than
+        # 48h; multi-hour runs beyond 24h typically need b4+. Verify: sinfo -o "%P %l" | grep h100
+        PARTITION="gpubase_h100_b2"
+        if [ "$H_VAL" -gt 24 ]; then PARTITION="gpubase_h100_b4"; fi
+        # If you need >3 days, confirm a longer queue exists: sinfo -o "%P %l" | grep h100
+
+        echo "Submitting H100 FULL RUN (64GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall, $PARTITION) [variant=$VARIANT]..."
+
         EXPORT_ARGS="ALL"
         if [ -n "$RESUME" ]; then
             EXPORT_ARGS="ALL,RESUME_STEM=$RESUME"
@@ -91,7 +90,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --gpus-per-node=h100:1 \
             --cpus-per-task=16 \
             --mem=64G \
-            --time="$WALLTIME" \
+            --time="$WALLTIME_MINUTES" \
             --chdir="$SCRIPT_DIR" \
             --output="$SB_OUT" \
             --error="$SB_ERR" \
@@ -100,7 +99,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --export="$EXPORT_ARGS" \
             "$SCRIPT_DIR/run.sh" "$@"
     else
-        echo "Submitting FULL RUN (L40S, 50GB, $WALLTIME wall) [variant=$VARIANT]..."
+        echo "Submitting FULL RUN (L40S, 50GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall) [variant=$VARIANT]..."
         
         # If resuming, pass RESUME_STEM to the job's environment
         EXPORT_ARGS="ALL"
@@ -111,7 +110,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
         sbatch \
             --job-name="unet-fullvar-${VARIANT}" \
             --account=aip-boyuwang \
-            --time="$WALLTIME" \
+            --time="$WALLTIME_MINUTES" \
             --nodes=1 \
             --gres=gpu:l40s:1 \
             --cpus-per-task=8 \
