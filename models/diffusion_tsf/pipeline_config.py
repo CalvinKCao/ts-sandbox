@@ -52,7 +52,7 @@ UNET_CHANNELS: List[int] = [64, 128, 256]
 ATTENTION_LEVELS: List[int] = [2]
 
 USE_AMP: bool = True               # bfloat16 mixed precision
-USE_GRADIENT_CHECKPOINTING: bool = False
+USE_GRADIENT_CHECKPOINTING: bool = True
 
 
 # ---- Default variate count (only used when --n-variates is not supplied) ----------
@@ -153,7 +153,7 @@ FINETUNE_BATCH_SIZES: List[int] = [4, 8, 16]
 # OOM during the probe lowers B automatically (then a 0.8 safety margin is applied).
 DIFFUSION_PROBE_TARGET_EFFECTIVE_BATCH: int = 512
 DIFFUSION_PROBE_MAX_BATCH_CAP: int = 128   # upper bound on per-device batch B
-DIFFUSION_PROBE_MIN_BATCH: int = 2
+DIFFUSION_PROBE_MIN_BATCH: int = 1
 
 
 def diffusion_probe_max_candidate(n_variates: int, smoke_test: bool) -> int:

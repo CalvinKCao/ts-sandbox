@@ -673,6 +673,7 @@ from models.diffusion_tsf.pipeline_config import (
     DIFFUSION_BATCH_SIZES,
     DIFFUSION_PROBE_TARGET_EFFECTIVE_BATCH,
     DIFFUSION_PROBE_MAX_BATCH_CAP,
+    DIFFUSION_PROBE_MIN_BATCH,
     FINETUNE_BATCH_SIZES,
     diffusion_probe_max_candidate,
     USE_AMP,
@@ -1209,8 +1210,9 @@ def auto_select_max_even_batch_size(
 ) -> int:
     """Pick the largest even batch size that passes ``try_step_fn`` without OOM."""
     max_candidate = max(min_candidate, max_candidate)
-    max_candidate = max_candidate if max_candidate % 2 == 0 else max_candidate - 1
-    min_candidate = max(min_candidate, 2)
+    if max_candidate % 2 != 0 and max_candidate > 1:
+        max_candidate -= 1
+    min_candidate = max(min_candidate, 1)
 
     lo = min_candidate
     hi = max_candidate
@@ -1218,7 +1220,7 @@ def auto_select_max_even_batch_size(
 
     while lo <= hi:
         mid = (lo + hi) // 2
-        if mid % 2 != 0:
+        if mid % 2 != 0 and mid > 1:
             mid -= 1
         if mid < min_candidate:
             mid = min_candidate
@@ -1236,14 +1238,15 @@ def auto_select_max_even_batch_size(
 
         if ok:
             best = mid
-            lo = mid + 2
+            # If mid is 1, stepping by 2 would jump to 3, but lo is updated to mid + 1 if mid == 1, or mid + 2 if even
+            lo = mid + 1 if mid == 1 else mid + 2
         else:
-            hi = mid - 2
+            hi = mid - 1 if mid == 1 else mid - 2
 
     # Apply safety margin: a single probe step underestimates sustained
     # training memory (optimizer state, gradient accumulation, etc.).
     safe = max(min_candidate, int(best * 0.8))
-    if safe % 2 != 0:
+    if safe % 2 != 0 and safe > 1:
         safe = max(min_candidate, safe - 1)
     logger.info(f"[AutoBS] {phase_name}: selected batch_size={safe} (probe_max={best}, tested_max={max_candidate})")
     return safe
@@ -1335,7 +1338,7 @@ def select_diffusion_batch_size(
                 torch.cuda.empty_cache()
             gc.collect()
 
-    return auto_select_max_even_batch_size(phase_name, max_candidate, _try, min_candidate=2)
+    return auto_select_max_even_batch_size(phase_name, max_candidate, _try, min_candidate=DIFFUSION_PROBE_MIN_BATCH)
 
 
 def get_itrans_batch_size_candidates(smoke_test: bool) -> List[int]:

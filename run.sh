@@ -470,7 +470,7 @@ while IFS=' ' read -r ds ncols; do
     DATASET_DIM[$ds]=$ncols
 done < <(discover_dims)
 
-target_dim="${DATASET_DIM[$SINGLE_DATASET]}"
+target_dim="${DATASET_DIM[$SINGLE_DATASET]:-}"
 if [ -z "$target_dim" ]; then
     echo "[ERROR] Unknown or missing dataset: $SINGLE_DATASET"
     exit 1
