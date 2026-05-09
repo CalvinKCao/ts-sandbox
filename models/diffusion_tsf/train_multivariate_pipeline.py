@@ -842,27 +842,41 @@ def load_itransformer_from_checkpoint(
     device: torch.device,
     dropout: float = 0.1,
 ) -> nn.Module:
-    """Load iTransformer weights, trying current seq_len then full lookback for old checkpoints."""
-    last_err: Optional[Exception] = None
-    for seq_len in (ITRANSFORMER_SEQ_LEN, LOOKBACK_LENGTH):
-        model = create_itransformer(
-            seq_len=seq_len, num_vars=num_vars, dropout=dropout,
-        ).to(device)
-        try:
-            ckpt = torch.load(path, map_location=device, weights_only=False)
-            model.load_state_dict(ckpt['model_state_dict'], strict=True)
-            model.eval()
-            return model
-        except RuntimeError as e:
-            last_err = e
-            del model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            continue
-    raise RuntimeError(
-        f"Cannot load iTransformer checkpoint {path} "
-        f"(tried seq_len={ITRANSFORMER_SEQ_LEN} and {LOOKBACK_LENGTH}): {last_err}"
-    )
+    """Load iTransformer weights, inferring ``seq_len`` from the checkpoint itself.
+
+    The inverted-embedding layer stores a Linear of shape ``[d_model, seq_len]`` at
+    key ``enc_embedding.value_embedding.weight``. Reading that shape lets us build
+    a model that matches whatever seq_len the checkpoint was saved with — no
+    hardcoded fallback list.
+    """
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    state = ckpt['model_state_dict']
+    weight_key = 'enc_embedding.value_embedding.weight'
+    if weight_key not in state:
+        raise RuntimeError(
+            f"iTransformer checkpoint {path} is missing key {weight_key!r}; "
+            f"cannot infer seq_len."
+        )
+    ckpt_seq_len = int(state[weight_key].shape[1])
+
+    model = create_itransformer(
+        seq_len=ckpt_seq_len, num_vars=num_vars, dropout=dropout,
+    ).to(device)
+    try:
+        model.load_state_dict(state, strict=True)
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"Cannot load iTransformer checkpoint {path} "
+            f"(inferred seq_len={ckpt_seq_len}): {e}"
+        ) from e
+    model.eval()
+    if ckpt_seq_len != ITRANSFORMER_SEQ_LEN:
+        logger.warning(
+            f"iTransformer checkpoint {path} has seq_len={ckpt_seq_len}, "
+            f"differs from current ITRANSFORMER_SEQ_LEN={ITRANSFORMER_SEQ_LEN}. "
+            f"Loaded with checkpoint's seq_len; ensure callers slice past inputs accordingly."
+        )
+    return model
 
 
 def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Dict) -> None:
