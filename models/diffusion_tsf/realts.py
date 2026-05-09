@@ -530,6 +530,27 @@ class RealTS(Dataset):
         if self.synthetic_epoch_capacity > 1 and cache_dir:
             self._use_epoch_stride = True
             self.pool_size = self.train_n * self.synthetic_epoch_capacity + self.val_tail_n
+            
+            # [Gemini CLI] Enforce global sample cap to prevent massive disk/RAM allocations
+            try:
+                from .pipeline_config import SYNTHETIC_SAMPLES_CAP
+            except (ImportError, ValueError):
+                try:
+                    from pipeline_config import SYNTHETIC_SAMPLES_CAP
+                except ImportError:
+                    SYNTHETIC_SAMPLES_CAP = None
+                    
+            if SYNTHETIC_SAMPLES_CAP is not None and self.pool_size > SYNTHETIC_SAMPLES_CAP:
+                logger.warning(
+                    f"RealTS: calculated pool_size {self.pool_size} exceeds "
+                    f"SYNTHETIC_SAMPLES_CAP {SYNTHETIC_SAMPLES_CAP}. Capping and "
+                    "disabling epoch-stride for safety."
+                )
+                self.pool_size = SYNTHETIC_SAMPLES_CAP
+                # If we cap below the strided size, we must disable stride logic or it 
+                # will OOB during indexing. We fall back to simple wrap-around.
+                self._use_epoch_stride = False
+
         elif pool_size is not None:
             self.pool_size = int(pool_size)
         else:

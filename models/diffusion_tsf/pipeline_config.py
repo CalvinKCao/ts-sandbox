@@ -69,8 +69,8 @@ N_VARIATES_DEFAULT: int = 7
 #     Virtual lengths for Phase 1A (iTransformer HP) and Phase 1B (diffusion HP).
 #
 # SYNTHETIC_SAMPLES_MIN / SYNTHETIC_SAMPLES_CAP
-#     Floor / optional ceiling for the *auto-sized* fallback pretrain pool
-#     (``resolve_pretrain_virtual_dataset_size``). CAP=None means no upper limit.
+#     Floor / optional ceiling for the TOTAL synthetic pool size.
+#     CAP=None means no upper limit.
 #
 # PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE
 #     If set, skip auto-sizing and use exactly this many virtual samples per epoch.
@@ -84,7 +84,12 @@ PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE: Optional[int] = None
 SYNTHETIC_SAMPLES_HP_TUNE: int = 20_000   # Phase 1A: virtual len (per epoch)
 SYNTHETIC_SAMPLES_DIFF_TUNE: int = 10_000  # Phase 1B: virtual len (per epoch)
 SYNTHETIC_SAMPLES_MIN: int = 4_096
-SYNTHETIC_SAMPLES_CAP: Optional[int] = 50000  # None = no cap on auto pretrain size
+SYNTHETIC_SAMPLES_CAP: Optional[int] = 50000  # None = no cap on TOTAL pool size
+
+
+# ---- Phase 1 (synthetic pretrain / HP) --------------------------------------------
+# ... rest of file (Phase 1/2 constants) ...
+# I will actually replace the helper functions at the end too.
 
 
 # ---- Phase 1 (synthetic pretrain / HP) --------------------------------------------
@@ -179,6 +184,29 @@ EVAL_NUM_SAMPLES: int = 30  # diffusion eval averages this many samples per wind
 
 # ---- Synthetic helpers (after phase constants) ------------------------------------
 
+def resolve_synthetic_params(
+    requested_n: int, 
+    requested_cap: int, 
+    smoke_test: bool
+) -> tuple[int, int]:
+    """Resolve (num_samples, capacity) respecting SYNTHETIC_SAMPLES_CAP as total budget."""
+    if smoke_test:
+        return 4, 1
+        
+    n = requested_n
+    cap = requested_cap
+    
+    if SYNTHETIC_SAMPLES_CAP is not None:
+        total = n * cap
+        if total > SYNTHETIC_SAMPLES_CAP:
+            # Scale down n first while keeping it at least SYNTHETIC_SAMPLES_MIN
+            n = max(SYNTHETIC_SAMPLES_MIN, SYNTHETIC_SAMPLES_CAP // cap)
+            # If total is still over, scale down cap
+            if n * cap > SYNTHETIC_SAMPLES_CAP:
+                cap = max(1, SYNTHETIC_SAMPLES_CAP // n)
+                
+    return int(n), int(cap)
+
 
 def synthetic_epoch_capacity_itrans_hp() -> int:
     return ITRANS_HP_PRETRAIN_MAX_EPOCHS
@@ -207,10 +235,13 @@ def resolve_pretrain_virtual_dataset_size(smoke_test: bool) -> int:
         return 4
     if PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE is not None:
         return max(4, int(PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE))
+    
     steps = 32 + 48 * PRETRAIN_EPOCHS
     steps = max(64, steps)
     ref_bs = 8
-    n = steps * ref_bs
-    if SYNTHETIC_SAMPLES_CAP is not None:
-        n = min(int(SYNTHETIC_SAMPLES_CAP), n)
-    return max(SYNTHETIC_SAMPLES_MIN, n)
+    requested_n = steps * ref_bs
+    
+    # Use the larger of the two possible capacities to ensure we stay under cap
+    max_cap = max(PRETRAIN_EPOCHS, PRETRAIN_DIFFUSION_MAX_EPOCHS)
+    n, _ = resolve_synthetic_params(requested_n, max_cap, smoke_test)
+    return n

@@ -657,6 +657,7 @@ from models.diffusion_tsf.pipeline_config import (
     SYNTHETIC_SAMPLES_DIFF_TUNE,
     SYNTHETIC_SAMPLES_MIN,
     SYNTHETIC_SAMPLES_CAP,
+    resolve_synthetic_params,
     PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE,
     HP_TUNE_EPOCHS,
     HP_TUNE_PATIENCE,
@@ -1447,9 +1448,11 @@ def run_itransformer_hp_tuning(
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_HP_TUNE
+    requested_n = SYNTHETIC_SAMPLES_HP_TUNE
+    requested_cap = synthetic_epoch_capacity_itrans_hp()
+    n_samples, epoch_cap = resolve_synthetic_params(requested_n, requested_cap, smoke_test)
+
     n_val = 0 if smoke_test else min(n_samples // 10, 1000)
-    epoch_cap = 1 if smoke_test else synthetic_epoch_capacity_itrans_hp()
     synth_cache = get_synth_cache_dir()
     synthetic_loader = get_synthetic_dataloader(
         batch_size=64,
@@ -1621,9 +1624,11 @@ def run_diffusion_hp_tuning(
     itrans_guidance = iTransformerGuidance(itrans_model)
     
     # Create small synthetic dataset for fast iteration
-    n_samples = 4 if smoke_test else SYNTHETIC_SAMPLES_DIFF_TUNE
+    requested_n = SYNTHETIC_SAMPLES_DIFF_TUNE
+    requested_cap = synthetic_epoch_capacity_diff_hp()
+    n_samples, epoch_cap = resolve_synthetic_params(requested_n, requested_cap, smoke_test)
+
     n_val = 0 if smoke_test else min(n_samples // 10, 500)
-    epoch_cap = 1 if smoke_test else synthetic_epoch_capacity_diff_hp()
     synth_cache = get_synth_cache_dir()
     synthetic_loader = get_synthetic_dataloader(
         batch_size=32,
