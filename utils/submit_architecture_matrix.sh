@@ -35,6 +35,10 @@ DATASET="electricity"
 USE_H100=0
 EXTRA=()
 
+# Default 4-variate subset for electricity (can be overridden by EXTRA args)
+SUBSET_INDICES="93,292,81,84"
+SUBSET_ID="4var"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --hours)    HOURS="$2"; shift 2 ;;
@@ -99,6 +103,9 @@ for i in "${!VARIANTS[@]}"; do
   desc="${DESCRIPTIONS[$i]}"
   ARGS=(./run.sh --dataset "$DATASET" --hours "$HOURS" --variant "$v")
   [[ "$USE_H100" -eq 1 ]] && ARGS+=(--h100)
+  if [[ "$DATASET" == "electricity" && -n "$SUBSET_INDICES" ]]; then
+    ARGS+=(--variate-indices "$SUBSET_INDICES" --subset-id "$SUBSET_ID")
+  fi
   [[ "${#EXTRA[@]}" -gt 0 ]] && ARGS+=("${EXTRA[@]}")
 
   echo ">>> ${ARGS[*]}"
