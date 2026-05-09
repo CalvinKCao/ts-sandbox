@@ -366,8 +366,7 @@ case "$VARIANT" in
         EXTRA_PY_ARGS="$EXTRA_PY_ARGS --guidance-penalty-weight 0.3"
         ;;
     *)
-        echo "Unknown --variant: $VARIANT"
-        exit 1
+        echo "[INFO] Treating --variant $VARIANT as generic label"
         ;;
 esac
 
