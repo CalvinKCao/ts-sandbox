@@ -336,6 +336,8 @@ while [[ $# -gt 0 ]]; do
         --wandb)          ENABLE_WANDB=1; shift ;;
         --checkpoint-dir) EXTRA_PY_ARGS="$EXTRA_PY_ARGS --checkpoint-dir $2"; shift 2 ;;
         --results-dir)    EXTRA_PY_ARGS="$EXTRA_PY_ARGS --results-dir $2"; shift 2 ;;
+        --variate-indices) SUBSET_VARIATE_INDICES="$2"; shift 2 ;;
+        --subset-id)      SUBSET_ID="$2"; shift 2 ;;
         --hours)          shift 2 ;;   # consumed by login-side submit logic only
         --h100)           shift ;;     # consumed by login-side submit logic only
         *)
