@@ -307,15 +307,15 @@ set -- "${PIPELINE_ARGS[@]}"
 # Edit that file to change them. This script only handles run-level dispatch.
 
 SEED=42
-VARIANT="default"   # label-only; only affects Slurm job name
+VARIANT="default"   # default, h128, attn-near-bottleneck, deeper-unet, penalty-0.1, penalty-0.3
 
 SMOKE_TEST=""
 PRETRAIN_ONLY=""
-SINGLE_DATASET=""
+SINGLE_DATASET="electricity"
 RESUME=""
 EXTRA_PY_ARGS=""
-SUBSET_VARIATE_INDICES=""
-SUBSET_ID=""
+SUBSET_VARIATE_INDICES="93,292,81,84"
+SUBSET_ID="electricity-4v-93-292-81-84"
 ENABLE_WANDB=1
 
 while [[ $# -gt 0 ]]; do
@@ -334,12 +334,39 @@ while [[ $# -gt 0 ]]; do
         --h100)           shift ;;     # consumed by login-side submit logic only
         *)
             echo "Unknown option: $1"
-            echo "Note: training-behavior flags (epochs/trials/patience/topology) were removed."
-            echo "      Edit models/diffusion_tsf/pipeline_config.py instead."
             exit 1
             ;;
     esac
 done
+
+# Variant-specific overrides
+case "$VARIANT" in
+    default)
+        ;;
+    h128)
+        EXTRA_PY_ARGS="$EXTRA_PY_ARGS --image-height 128"
+        ;;
+    attn-near-bottleneck)
+        # Assuming defaults are [64, 128, 256], level 1 is next to bottleneck
+        EXTRA_PY_ARGS="$EXTRA_PY_ARGS --attention-levels 1"
+        ;;
+    deeper-unet)
+        EXTRA_PY_ARGS="$EXTRA_PY_ARGS --unet-channels 64,128,256,512 --attention-levels 3"
+        ;;
+    penalty-0.1)
+        EXTRA_PY_ARGS="$EXTRA_PY_ARGS --guidance-penalty-weight 0.1"
+        ;;
+    penalty-0.3)
+        EXTRA_PY_ARGS="$EXTRA_PY_ARGS --guidance-penalty-weight 0.3"
+        ;;
+    *)
+        echo "Unknown --variant: $VARIANT"
+        exit 1
+        ;;
+esac
+
+# Force the 4-var electricity subset experiment settings
+EXTRA_PY_ARGS="$EXTRA_PY_ARGS --lookback-length 1024 --forecast-length 192"
 
 if [ "$ENABLE_WANDB" -eq 1 ]; then
     EXTRA_PY_ARGS="$EXTRA_PY_ARGS --wandb"

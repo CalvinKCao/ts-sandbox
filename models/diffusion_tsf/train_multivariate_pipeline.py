@@ -3283,6 +3283,7 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
+    global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, LOOKBACK_LENGTH, FORECAST_LENGTH
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3315,6 +3316,16 @@ def main():
                         help='Wipe manifest and checkpoints, start from scratch')
     parser.add_argument('--guidance-penalty-weight', type=float, default=GUIDANCE_PENALTY_WEIGHT,
                         help='Weight for guidance penalty loss (default from pipeline_config)')
+    parser.add_argument('--image-height', type=int, default=IMAGE_HEIGHT,
+                        help='Override image height')
+    parser.add_argument('--unet-channels', type=str, default=None,
+                        help='Comma-separated UNet channels (e.g. 64,128,256)')
+    parser.add_argument('--attention-levels', type=str, default=None,
+                        help='Comma-separated attention levels (e.g. 1,2)')
+    parser.add_argument('--lookback-length', type=int, default=LOOKBACK_LENGTH,
+                        help='Override lookback length')
+    parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH,
+                        help='Override forecast length')
 
     args = parser.parse_args()
 
@@ -3335,6 +3346,13 @@ def main():
     
     # Global overrides from CLI
     GUIDANCE_PENALTY_WEIGHT = args.guidance_penalty_weight
+    IMAGE_HEIGHT = args.image_height
+    if args.unet_channels:
+        UNET_CHANNELS = [int(x.strip()) for x in args.unet_channels.split(',') if x.strip()]
+    if args.attention_levels:
+        ATTENTION_LEVELS = [int(x.strip()) for x in args.attention_levels.split(',') if x.strip()]
+    LOOKBACK_LENGTH = args.lookback_length
+    FORECAST_LENGTH = args.forecast_length
     
     # DDP setup
     if args.ddp:
