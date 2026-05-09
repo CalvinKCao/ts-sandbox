@@ -273,7 +273,10 @@ class DiffusionTSF(nn.Module):
         logger.info(f"DiffusionTSF initialized:")
         logger.info(f"  Variables: {config.num_variables} ({'multivariate' if config.num_variables > 1 else 'univariate'})")
         logger.info(f"  Lookback: {config.lookback_length}, Forecast: {config.forecast_length}")
-        logger.info(f"  Image size: {config.image_height} x {config.width}")
+        logger.info(
+            f"  Image size: {config.image_height} x {config.forecast_length} "
+            f"(H x W; denoised future canvas)"
+        )
 
     
     def to(self, device):
