@@ -777,7 +777,21 @@ class DiffusionTSF(nn.Module):
             if guidance_2d is not None:
                 canvas = torch.cat([canvas, guidance_2d.reshape(BV, 1, H, W_fut)], dim=1)
 
-        noise_pred_flat = self.noise_predictor(canvas, t_flat, cond_for_unet, encoder_hidden_states=ctx_flat)
+        chunk_size = self.config.unet_max_chunk_size
+        if chunk_size > 0 and BV > chunk_size:
+            noise_pred_flat_list = []
+            for i in range(0, BV, chunk_size):
+                end = min(i + chunk_size, BV)
+                c_canvas = canvas[i:end]
+                c_t = t_flat[i:end]
+                c_cond = cond_for_unet[i:end]
+                c_ctx = ctx_flat[i:end] if ctx_flat is not None else None
+                c_out = self.noise_predictor(c_canvas, c_t, c_cond, encoder_hidden_states=c_ctx)
+                noise_pred_flat_list.append(c_out)
+            noise_pred_flat = torch.cat(noise_pred_flat_list, dim=0)
+        else:
+            noise_pred_flat = self.noise_predictor(canvas, t_flat, cond_for_unet, encoder_hidden_states=ctx_flat)
+            
         noise_pred = noise_pred_flat.reshape(B, V, H, W_fut)
 
         K = self.config.lookback_overlap
@@ -867,12 +881,28 @@ class DiffusionTSF(nn.Module):
                 c = torch.cat([c, null_guide if use_null else guide_flat], dim=1)
             return c
 
+        def _chunked_model_fn(x_chunk, t_batch_chunk, cond_arg_chunk, ctx_flat_chunk):
+            chunk_size = self.config.unet_max_chunk_size
+            BV_curr = x_chunk.shape[0]
+            if chunk_size > 0 and BV_curr > chunk_size:
+                outs = []
+                for i in range(0, BV_curr, chunk_size):
+                    end = min(i + chunk_size, BV_curr)
+                    c_x = x_chunk[i:end]
+                    c_t = t_batch_chunk[i:end] if t_batch_chunk.shape[0] == BV_curr else t_batch_chunk
+                    c_cond = cond_arg_chunk[i:end] if cond_arg_chunk is not None else None
+                    c_ctx = ctx_flat_chunk[i:end] if ctx_flat_chunk is not None else None
+                    outs.append(self.noise_predictor(c_x, c_t, c_cond, encoder_hidden_states=c_ctx))
+                return torch.cat(outs, dim=0)
+            else:
+                return self.noise_predictor(x_chunk, t_batch_chunk, cond_arg_chunk, encoder_hidden_states=ctx_flat_chunk)
+
         def model_fn(x, t_batch, cond_arg):
             if cfg_scale <= 1.0:
-                return self.noise_predictor(_build_canvas(x), t_batch, cond_arg, encoder_hidden_states=ctx_flat)
+                return _chunked_model_fn(_build_canvas(x), t_batch, cond_arg, ctx_flat)
             # CFG: cond vs uncond pass
-            out_c = self.noise_predictor(_build_canvas(x, use_null=False), t_batch, cond_flat,  encoder_hidden_states=ctx_flat)
-            out_u = self.noise_predictor(_build_canvas(x, use_null=True),  t_batch, null_cond,  encoder_hidden_states=null_ctx_flat)
+            out_c = _chunked_model_fn(_build_canvas(x, use_null=False), t_batch, cond_flat, ctx_flat)
+            out_u = _chunked_model_fn(_build_canvas(x, use_null=True),  t_batch, null_cond, null_ctx_flat)
             return out_u + cfg_scale * (out_c - out_u)
 
         noise_shape = (BV, 1, H, W_fut)

@@ -678,6 +678,7 @@ from models.diffusion_tsf.pipeline_config import (
     diffusion_probe_max_candidate,
     USE_AMP,
     USE_GRADIENT_CHECKPOINTING,
+    UNET_MAX_CHUNK_SIZE,
     UNET_CHANNELS,
     ATTENTION_LEVELS,
     GUIDANCE_PENALTY_WEIGHT,
@@ -938,6 +939,7 @@ def create_diffusion_model(
         attention_levels=ATTENTION_LEVELS,
         num_res_blocks=2,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
+        unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
         use_amp=USE_AMP,
     )
     return DiffusionTSF(config)
@@ -1331,6 +1333,7 @@ def select_diffusion_batch_size(
                 loss = model.get_loss(past, future)
             loss.backward()
             optimizer.step()
+            
             return True
         finally:
             del loss, future, past, optimizer, model

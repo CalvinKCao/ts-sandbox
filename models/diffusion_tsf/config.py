@@ -139,6 +139,7 @@ class DiffusionTSFConfig:
     
     # memory optimization flags
     use_gradient_checkpointing: bool = False
+    unet_max_chunk_size: int = 128
     use_amp: bool = False  # bfloat16 mixed precision
     
     # aux channels
