@@ -84,7 +84,7 @@ PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE: Optional[int] = None
 SYNTHETIC_SAMPLES_HP_TUNE: int = 20_000   # Phase 1A: virtual len (per epoch)
 SYNTHETIC_SAMPLES_DIFF_TUNE: int = 10_000  # Phase 1B: virtual len (per epoch)
 SYNTHETIC_SAMPLES_MIN: int = 4_096
-SYNTHETIC_SAMPLES_CAP: Optional[int] = None  # None = no cap on auto pretrain size
+SYNTHETIC_SAMPLES_CAP: int = 50000  # None = no cap on auto pretrain size
 
 
 # ---- Phase 1 (synthetic pretrain / HP) --------------------------------------------
