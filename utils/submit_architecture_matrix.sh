@@ -104,7 +104,7 @@ for i in "${!VARIANTS[@]}"; do
   ARGS=(./run.sh --dataset "$DATASET" --hours "$HOURS" --variant "$v")
   [[ "$USE_H100" -eq 1 ]] && ARGS+=(--h100)
   if [[ "$DATASET" == "electricity" && -n "$SUBSET_INDICES" ]]; then
-    ARGS+=(--variate-indices "$SUBSET_INDICES" --subset-id "$SUBSET_ID")
+    ARGS+=(--variate-indices "${SUBSET_ID}:${SUBSET_INDICES}")
   fi
   [[ "${#EXTRA[@]}" -gt 0 ]] && ARGS+=("${EXTRA[@]}")
 

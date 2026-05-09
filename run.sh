@@ -337,7 +337,6 @@ while [[ $# -gt 0 ]]; do
         --checkpoint-dir) EXTRA_PY_ARGS="$EXTRA_PY_ARGS --checkpoint-dir $2"; shift 2 ;;
         --results-dir)    EXTRA_PY_ARGS="$EXTRA_PY_ARGS --results-dir $2"; shift 2 ;;
         --variate-indices) SUBSET_VARIATE_INDICES="$2"; shift 2 ;;
-        --subset-id)      SUBSET_ID="$2"; shift 2 ;;
         --hours)          shift 2 ;;   # consumed by login-side submit logic only
         --h100)           shift ;;     # consumed by login-side submit logic only
         *)
@@ -477,12 +476,20 @@ if [ -z "$target_dim" ]; then
     echo "[ERROR] Unknown or missing dataset: $SINGLE_DATASET"
     exit 1
 fi
+
 if [ -n "$SUBSET_VARIATE_INDICES" ]; then
+    if [[ "$SUBSET_VARIATE_INDICES" == *":"* ]]; then
+        SUBSET_ID="${SUBSET_VARIATE_INDICES%%:*}"
+        SUBSET_VARIATE_INDICES="${SUBSET_VARIATE_INDICES#*:}"
+    fi
     target_dim=$(awk -F',' '{print NF}' <<< "$SUBSET_VARIATE_INDICES")
+    if [ -z "$SUBSET_ID" ]; then
+        SUBSET_ID="v${target_dim}"
+    fi
 fi
 
 if [ -n "$SUBSET_VARIATE_INDICES" ]; then
-    echo "[INFO] $SINGLE_DATASET subset: indices=[$SUBSET_VARIATE_INDICES] (dim=$target_dim)"
+    echo "[INFO] $SINGLE_DATASET subset ($SUBSET_ID): indices=[$SUBSET_VARIATE_INDICES] (dim=$target_dim)"
 else
     echo "[INFO] $SINGLE_DATASET: $target_dim variates (native, no splitting)"
 fi
