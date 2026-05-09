@@ -3270,6 +3270,7 @@ def _finetune_and_eval_one_subset(
         logger.error(f"Error with {subset_id}: {e}")
         import traceback
         traceback.print_exc()
+        raise
 
 def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
     """Train full-dimensionality iTransformer baseline for a high-variate dataset."""

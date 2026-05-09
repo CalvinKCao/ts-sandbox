@@ -311,11 +311,12 @@ VARIANT="default"   # default, h128, attn-near-bottleneck, deeper-unet, penalty-
 
 SMOKE_TEST=""
 PRETRAIN_ONLY=""
-SINGLE_DATASET="electricity"
+SINGLE_DATASET=""
 RESUME=""
 EXTRA_PY_ARGS=""
-SUBSET_VARIATE_INDICES="93,292,81,84"
-SUBSET_ID="electricity-4v-93-292-81-84"
+# Optional: comma-separated variate indices and label for subset runs only.
+SUBSET_VARIATE_INDICES=""
+SUBSET_ID=""
 ENABLE_WANDB=1
 
 while [[ $# -gt 0 ]]; do
@@ -364,9 +365,6 @@ case "$VARIANT" in
         exit 1
         ;;
 esac
-
-# Force the 4-var electricity subset experiment settings
-EXTRA_PY_ARGS="$EXTRA_PY_ARGS --lookback-length 1024 --forecast-length 192"
 
 if [ "$ENABLE_WANDB" -eq 1 ]; then
     EXTRA_PY_ARGS="$EXTRA_PY_ARGS --wandb"
@@ -501,7 +499,10 @@ echo "============================================================"
 echo "  PHASE 2: Fine-tuning $SINGLE_DATASET (dim=$target_dim)"
 echo "============================================================"
 
-$PYTHON --mode finetune --dataset "$SINGLE_DATASET" --n-variates "$target_dim" --variate-indices "$SUBSET_VARIATE_INDICES" --subset-id "$SUBSET_ID" $BASE_ARGS
+OPT_SUB=()
+[ -n "$SUBSET_VARIATE_INDICES" ] && OPT_SUB+=(--variate-indices "$SUBSET_VARIATE_INDICES")
+[ -n "$SUBSET_ID" ] && OPT_SUB+=(--subset-id "$SUBSET_ID")
+$PYTHON --mode finetune --dataset "$SINGLE_DATASET" --n-variates "$target_dim" "${OPT_SUB[@]}" $BASE_ARGS
 
 echo ""
 echo "============================================================"
