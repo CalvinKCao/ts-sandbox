@@ -22,61 +22,10 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from typing import Optional, Tuple
-import contextlib
-import errno
 import logging
-import glob
 import os
-import re
 import time
 import uuid
-
-try:
-    import fcntl  # POSIX advisory file lock
-    _HAS_FCNTL = True
-except ImportError:  # non-POSIX (e.g. Windows) — falls back to no locking
-    _HAS_FCNTL = False
-
-
-@contextlib.contextmanager
-def _synth_pool_lock(cache_path: str, timeout_s: float = 7200.0):
-    """Cross-process exclusive lock for the per-(V,L) synthetic pool file.
-
-    Multiple Slurm jobs that share ``$SYNTH_CACHE_ROOT`` and have the same
-    ``num_variables`` + ``total_length`` would otherwise race on the same temp
-    file when generating / extending the pool. This lock serialises the whole
-    generate+save section so concurrent jobs simply wait, then re-check the
-    pool size after the producer is done.
-    """
-    if not _HAS_FCNTL:
-        yield None
-        return
-    lock_path = cache_path + ".lock"
-    deadline = time.time() + timeout_s
-    fh = open(lock_path, 'w')
-    try:
-        while True:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError as e:
-                if e.errno not in (errno.EAGAIN, errno.EACCES):
-                    raise
-                if time.time() > deadline:
-                    raise TimeoutError(
-                        f"Timed out waiting for synth pool lock {lock_path} "
-                        f"after {timeout_s:.0f}s"
-                    ) from e
-                logger.info(
-                    f"Waiting on synth pool lock held by another job: {lock_path}"
-                )
-                time.sleep(15.0)
-        yield fh
-    finally:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        finally:
-            fh.close()
 
 try:
     from .augmentation import generate_multivariate_synthetic_data
@@ -623,97 +572,93 @@ class RealTS(Dataset):
             cache_filename = f"synth_pool_v{self.num_variables}_L{self.total_length}.npy"
             cache_path = os.path.join(cache_dir, cache_filename)
 
-            # Multiple Slurm jobs may share this cache_dir and the same V/L. Hold
-            # an advisory lock for the entire check-or-generate section so only
-            # one process writes; the rest wait, then reuse the resulting pool.
-            with _synth_pool_lock(cache_path):
-                existing_data = None
-                if os.path.exists(cache_path):
-                    existing_data = np.load(cache_path, mmap_mode='r')
-                    existing_n = existing_data.shape[0]
-                    if existing_n >= self.pool_size:
-                        logger.info(
-                            f"Reusing existing synthetic pool {cache_path} "
-                            f"(has {existing_n} samples, need {self.pool_size})"
-                        )
-                        self.data_cache = existing_data
-                        self.pool_size = existing_n
-                    else:
-                        logger.info(
-                            f"Existing pool {cache_path} has {existing_n} samples, "
-                            f"need {self.pool_size}. Generating "
-                            f"{self.pool_size - existing_n} more..."
-                        )
-
-                if self.data_cache is None:
-                    needed = (
-                        self.pool_size
-                        if existing_data is None
-                        else self.pool_size - existing_data.shape[0]
+            existing_data = None
+            if os.path.exists(cache_path):
+                existing_data = np.load(cache_path, mmap_mode='r')
+                existing_n = existing_data.shape[0]
+                if existing_n >= self.pool_size:
+                    logger.info(
+                        f"Reusing existing synthetic pool {cache_path} "
+                        f"(has {existing_n} samples, need {self.pool_size})"
+                    )
+                    self.data_cache = existing_data
+                    self.pool_size = existing_n
+                else:
+                    logger.info(
+                        f"Existing pool {cache_path} has {existing_n} samples, "
+                        f"need {self.pool_size}. Generating "
+                        f"{self.pool_size - existing_n} more..."
                     )
 
-                    if needed > 0:
-                        if existing_data is None:
-                            logger.info(
-                                f"Generating new synthetic pool of {self.pool_size} "
-                                f"samples to {cache_path}..."
-                            )
+            if self.data_cache is None:
+                needed = (
+                    self.pool_size
+                    if existing_data is None
+                    else self.pool_size - existing_data.shape[0]
+                )
 
-                        if self.num_variables > 1:
-                            new_data = generate_multivariate_synthetic_data(
-                                num_samples=needed,
-                                num_vars=self.num_variables,
-                                length=self.total_length,
-                                seed=seed,
-                                skip_cross_var_aug=self.skip_cross_var_aug,
-                                output_path=None,
-                            )
-                        else:
-                            new_data = np.zeros((needed, self.total_length), dtype=np.float32)
-                            log_every = max(5000, needed // 20)
-                            for i in range(needed):
-                                if i > 0 and i % log_every == 0:
-                                    logger.info(
-                                        "Synthetic pool progress: %s / %s (%.0f%%)",
-                                        i,
-                                        needed,
-                                        100.0 * i / needed,
-                                    )
-                                gen = np.random.choice(self.generators, p=self.probabilities)
-                                seq = gen(self.total_length)
-                                if np.random.random() < 0.5:
-                                    seq = seq[::-1].copy()
-                                if np.random.random() < 0.5:
-                                    seq = -seq
-                                new_data[i] = self._normalize_sequence(seq)
-
-                        if existing_data is not None:
-                            logger.info(f"Appending new samples and saving to {cache_path}...")
-                            combined = np.concatenate([np.array(existing_data), new_data], axis=0)
-                            del existing_data
-                        else:
-                            combined = new_data
-
-                        # Save to a process-unique temp file, then atomically rename.
-                        # The PID/UUID suffix prevents concurrent jobs from clobbering
-                        # each other's temp file (parent lock makes this defensive).
-                        temp_path = cache_path.replace(
-                            ".npy",
-                            f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}.npy",
+                if needed > 0:
+                    if existing_data is None:
+                        logger.info(
+                            f"Generating new synthetic pool of {self.pool_size} "
+                            f"samples to {cache_path}..."
                         )
-                        try:
-                            np.save(temp_path, combined)
-                            os.replace(temp_path, cache_path)
-                        finally:
-                            if os.path.exists(temp_path):
-                                try:
-                                    os.remove(temp_path)
-                                except OSError:
-                                    pass
-                        logger.info("Pool generation and save complete.")
 
-                    self.data_cache = np.load(cache_path, mmap_mode='r')
-                    self.pool_size = int(self.data_cache.shape[0])
+                    if self.num_variables > 1:
+                        new_data = generate_multivariate_synthetic_data(
+                            num_samples=needed,
+                            num_vars=self.num_variables,
+                            length=self.total_length,
+                            seed=seed,
+                            skip_cross_var_aug=self.skip_cross_var_aug,
+                            output_path=None,
+                        )
+                    else:
+                        new_data = np.zeros((needed, self.total_length), dtype=np.float32)
+                        log_every = max(5000, needed // 20)
+                        for i in range(needed):
+                            if i > 0 and i % log_every == 0:
+                                logger.info(
+                                    "Synthetic pool progress: %s / %s (%.0f%%)",
+                                    i,
+                                    needed,
+                                    100.0 * i / needed,
+                                )
+                            gen = np.random.choice(self.generators, p=self.probabilities)
+                            seq = gen(self.total_length)
+                            if np.random.random() < 0.5:
+                                seq = seq[::-1].copy()
+                            if np.random.random() < 0.5:
+                                seq = -seq
+                            new_data[i] = self._normalize_sequence(seq)
+
+                    if existing_data is not None:
+                        logger.info(f"Appending new samples and saving to {cache_path}...")
+                        combined = np.concatenate([np.array(existing_data), new_data], axis=0)
+                        del existing_data
+                    else:
+                        combined = new_data
+
+                    # Save to a process-unique temp file, then atomically rename.
+                    # The PID/UUID suffix prevents concurrent jobs from clobbering
+                    # each other's temp file.
+                    temp_path = cache_path.replace(
+                        ".npy",
+                        f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}.npy",
+                    )
+                    try:
+                        np.save(temp_path, combined)
+                        os.replace(temp_path, cache_path)
+                    finally:
+                        if os.path.exists(temp_path):
+                            try:
+                                os.remove(temp_path)
+                            except OSError:
+                                pass
+                    logger.info("Pool generation and save complete.")
+
+                self.data_cache = np.load(cache_path, mmap_mode='r')
+                self.pool_size = int(self.data_cache.shape[0])
                 
         elif self.pregenerate and self.num_variables > 1:
             # Memory Caching Logic (Small Pool / Legacy)

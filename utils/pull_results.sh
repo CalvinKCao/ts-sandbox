@@ -16,36 +16,21 @@ REMOTE_HOST="killarney.alliancecan.ca"
 REMOTE_USER="ccao87"
 REMOTE_PATH="/scratch/ccao87/ts-sandbox/results"
 LOCAL_PATH="./results"
+SSH_OPTS_INTERACTIVE=(
+    -o BatchMode=no
+    -o ConnectTimeout=12
+    -o ConnectionAttempts=1
+    -o StrictHostKeyChecking=accept-new
+)
 
-echo "Checking remote results in $REMOTE_PATH..."
-FOLDERS=$(ssh "${REMOTE_USER}@${REMOTE_HOST}" "ls -1 $REMOTE_PATH" 2>/dev/null)
-
-if [ -z "$FOLDERS" ]; then
-    echo "No folders found in $REMOTE_PATH or SSH failed."
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 <results-folder> [more-folders...]"
+    echo "Example:"
+    echo "  $0 05-08-3476425-unet-fullvar-ETTh1 05-08-3477032-unet-fullvar-ETTm1"
     exit 1
 fi
 
-# If arguments are provided, use them; otherwise, use interactive select
-if [ $# -gt 0 ]; then
-    TARGET_FOLDERS=("$@")
-else
-    echo "Available result folders on remote:"
-    echo "------------------------------------"
-    select FOLDER in $FOLDERS "All" "Cancel"; do
-        case $FOLDER in
-            "Cancel") exit 0 ;;
-            "All") TARGET_FOLDERS=($FOLDERS); break ;;
-            *)
-                if [ -n "$FOLDER" ]; then
-                    TARGET_FOLDERS=("$FOLDER")
-                    break
-                else
-                    echo "Invalid selection."
-                fi
-                ;;
-        esac
-    done
-fi
+TARGET_FOLDERS=("$@")
 
 mkdir -p "$LOCAL_PATH"
 
@@ -56,10 +41,12 @@ RSYNC_OPTS=(
     --include='*/'
     --include='best.pt'
     --include='metadata.json'
+    --include='results.json'
     --include='itransformer.pt'
     --include='*_itransformer_finetuned.pt'
     --include='*_itrans_ft_hp_best.pt'
     --include='*_itrans_ft_hp.json'
+    --include='*.log'
     --exclude='*'
 )
 
@@ -69,8 +56,8 @@ for FOLDER in "${TARGET_FOLDERS[@]}"; do
     echo "------------------------------------------------------------"
     echo "Pulling visualization artifacts for: $FOLDER_CLEAN"
     echo "------------------------------------------------------------"
-    rsync "${RSYNC_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/${FOLDER_CLEAN}" "$LOCAL_PATH/"
+    rsync -e "ssh ${SSH_OPTS_INTERACTIVE[*]}" "${RSYNC_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/${FOLDER_CLEAN}" "$LOCAL_PATH/"
 done
 
 echo ""
-echo "Done. Optimized artifacts pulled to $LOCAL_PATH"
+echo "Done. Pulled requested artifacts to $LOCAL_PATH"

@@ -16,6 +16,8 @@ RESULTS_DIR="${RESULTS_DIR:-./results}"
 OUTPUT_DIR="${OUTPUT_DIR:-./results/viz/comparison}"
 NUM_SAMPLES="${NUM_SAMPLES:-3}"
 VARS="${VARS:-7}"
+LOOKBACK_LENGTH="${LOOKBACK_LENGTH:-512}"
+FORECAST_LENGTH="${FORECAST_LENGTH:-96}"
 
 if [ ! -d "$RESULTS_DIR" ] || [ -z "$(ls -A "$RESULTS_DIR" 2>/dev/null)" ]; then
     echo "No folders under $RESULTS_DIR. Run: ./utils/pull_results.sh '<MM-DD-JOBID-slug>'"
@@ -62,6 +64,8 @@ while IFS= read -r CKPT_DIR; do
         --output-dir "$OUTPUT_DIR" \
         --num-samples "$NUM_SAMPLES" \
         --vars "$VARS" \
+        --lookback-length "$LOOKBACK_LENGTH" \
+        --forecast-length "$FORECAST_LENGTH" \
         --ensemble 1
     RAN=$((RAN + 1))
 done <<< "$CKPT_DIRS"

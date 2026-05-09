@@ -57,6 +57,8 @@ def run_comparison(
     num_samples: int = 3,
     variables_to_plot: int = 3,
     diffusion_ensemble: int = 3,
+    lookback_length: int = LOOKBACK_LENGTH,
+    forecast_length: int = FORECAST_LENGTH,
 ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
@@ -139,7 +141,8 @@ def run_comparison(
 
         try:
             _, _, test_ds, norm_stats = load_dataset(
-                dataset_name, variate_indices, stride=LOOKBACK_LENGTH
+                dataset_name, variate_indices, stride=lookback_length,
+                lookback=lookback_length, horizon=forecast_length
             )
         except ValueError as e:
             print(f"  Skipping {dataset_name}: {e}")
@@ -189,7 +192,7 @@ def run_comparison(
                 seq_sl = getattr(itrans_model, 'seq_len', L)
                 if x_enc.shape[1] > seq_sl:
                     x_enc = x_enc[:, -seq_sl:, :]
-                x_dec = torch.zeros(B, FORECAST_LENGTH, C, device=device)
+                x_dec = torch.zeros(B, forecast_length, C, device=device)
                 itrans_out = itrans_model(x_enc, None, x_dec, None)
                 if isinstance(itrans_out, tuple):
                     itrans_out = itrans_out[0]
@@ -208,17 +211,17 @@ def run_comparison(
 
             # Denormalize everything to original scale
             past_dn = denorm(past, mean, std)
-            # future includes lookback_overlap; slice it for plotting (last FORECAST_LENGTH steps)
-            future_sliced = future[:, -FORECAST_LENGTH:]
+            # future includes lookback_overlap; slice it for plotting (last forecast_length steps)
+            future_sliced = future[:, -forecast_length:]
             future_dn = denorm(future_sliced, mean, std)
             itrans_dn = denorm(itrans_pred, mean, std)
-            diff_pred_sliced = diff_pred[:, -FORECAST_LENGTH:] if diff_pred.shape[-1] > FORECAST_LENGTH else diff_pred
+            diff_pred_sliced = diff_pred[:, -forecast_length:] if diff_pred.shape[-1] > forecast_length else diff_pred
             diff_dn = denorm(diff_pred_sliced, mean, std)
 
             # Show last N steps of context for visual continuity
-            context_len = min(FORECAST_LENGTH * 2, LOOKBACK_LENGTH)
+            context_len = min(forecast_length * 2, lookback_length)
             t_past = np.arange(-context_len, 0)
-            t_future = np.arange(0, FORECAST_LENGTH)
+            t_future = np.arange(0, forecast_length)
 
             for col in range(n_vars_plot):
                 ax = axes[row, col]
@@ -289,10 +292,15 @@ def main():
     parser.add_argument('--vars', type=int, default=3, help='Variables to plot per sample')
     parser.add_argument('--ensemble', type=int, default=1,
                         help='Diffusion samples to average (1=single sample, 30=full avg)')
+    parser.add_argument('--lookback-length', type=int, default=LOOKBACK_LENGTH)
+    parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH)
     args = parser.parse_args()
 
     output_dir = args.output_dir or os.path.join(RESULTS_DIR, 'viz', 'comparison')
-    run_comparison(args.checkpoint_dir, output_dir, args.num_samples, args.vars, args.ensemble)
+    run_comparison(
+        args.checkpoint_dir, output_dir, args.num_samples, args.vars, args.ensemble,
+        args.lookback_length, args.forecast_length
+    )
 
 
 if __name__ == '__main__':
