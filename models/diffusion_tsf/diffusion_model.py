@@ -749,9 +749,6 @@ class DiffusionTSF(nn.Module):
         canvas = self._inject_coordinate_channel(canvas)
         canvas = self._inject_time_channels(canvas)
 
-        if guidance_2d is not None:
-            canvas = torch.cat([canvas, guidance_2d.reshape(BV, 1, H, W_fut)], dim=1)
-
         # visual cond: per-variate past bilinearly resized to match future width
         past_flat     = past_2d.reshape(BV, 1, H, W_past)
         cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
@@ -761,6 +758,24 @@ class DiffusionTSF(nn.Module):
         if ctx is not None:
             # (B, V, ctx_dim) → (BV, V, ctx_dim)
             ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
+
+        # --- Apply Classifier-Free Guidance Dropout ---
+        if self.training and self.config.cfg_dropout > 0.0:
+            drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
+            drop_mask_flat = drop_mask.unsqueeze(1).expand(-1, V).reshape(BV)
+            
+            cond_for_unet = torch.where(drop_mask_flat.view(BV, 1, 1, 1), torch.zeros_like(cond_for_unet), cond_for_unet)
+            
+            if ctx_flat is not None:
+                ctx_flat = torch.where(drop_mask_flat.view(BV, 1, 1), torch.zeros_like(ctx_flat), ctx_flat)
+                
+            if guidance_2d is not None:
+                guidance_2d_flat = guidance_2d.reshape(BV, 1, H, W_fut)
+                guidance_2d_flat = torch.where(drop_mask_flat.view(BV, 1, 1, 1), torch.zeros_like(guidance_2d_flat), guidance_2d_flat)
+                canvas = torch.cat([canvas, guidance_2d_flat], dim=1)
+        else:
+            if guidance_2d is not None:
+                canvas = torch.cat([canvas, guidance_2d.reshape(BV, 1, H, W_fut)], dim=1)
 
         noise_pred_flat = self.noise_predictor(canvas, t_flat, cond_for_unet, encoder_hidden_states=ctx_flat)
         noise_pred = noise_pred_flat.reshape(B, V, H, W_fut)
@@ -830,11 +845,6 @@ class DiffusionTSF(nn.Module):
         cond_flat     = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
         null_cond     = torch.zeros_like(cond_flat) if cfg_scale > 1.0 else None
 
-        # shared coord channel (constant across denoising steps)
-        coord = None
-        if self.config.use_coordinate_channel:
-            coord = self._get_coordinate_grid(BV, H, W_fut, device, dtype=cond_flat.dtype)
-
         # guidance: compute once before loop
         guidance_forecast_norm = None
         guidance_2d = None
@@ -851,12 +861,11 @@ class DiffusionTSF(nn.Module):
         null_ctx_flat = torch.zeros_like(ctx_flat) if (ctx_flat is not None and cfg_scale > 1.0) else None
 
         def _build_canvas(x_noisy, use_null=False):
-            parts = [x_noisy]
-            if coord is not None:
-                parts.append(coord)
+            c = self._inject_coordinate_channel(x_noisy)
+            c = self._inject_time_channels(c)
             if guide_flat is not None:
-                parts.append(null_guide if use_null else guide_flat)
-            return torch.cat(parts, dim=1)
+                c = torch.cat([c, null_guide if use_null else guide_flat], dim=1)
+            return c
 
         def model_fn(x, t_batch, cond_arg):
             if cfg_scale <= 1.0:
@@ -932,13 +941,27 @@ class DiffusionTSF(nn.Module):
         guidance_2d = None
         if self.config.use_guidance_channel:
             guidance_2d = self._generate_guidance_2d(past, past_norm, stats, W_fut)
-            channels.append(guidance_2d.reshape(B * V, 1, H, W_fut))
-
-        x_flat = torch.cat(channels, dim=1)  # (BV, ci_dit_in_channels, H, W_fut)
-
+            
         # --- conditioning: resize past 2D per variate to match future width ---
         past_flat = past_2d.reshape(B * V, 1, H, W_past)
         cond_flat = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+
+        # --- Apply Classifier-Free Guidance Dropout ---
+        if self.training and self.config.cfg_dropout > 0.0:
+            drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
+            drop_mask_flat = drop_mask.unsqueeze(1).expand(-1, V).reshape(B * V)
+            
+            cond_flat = torch.where(drop_mask_flat.view(B * V, 1, 1, 1), torch.zeros_like(cond_flat), cond_flat)
+            
+            if guidance_2d is not None:
+                guidance_2d_flat = guidance_2d.reshape(B * V, 1, H, W_fut)
+                guidance_2d_flat = torch.where(drop_mask_flat.view(B * V, 1, 1, 1), torch.zeros_like(guidance_2d_flat), guidance_2d_flat)
+                channels.append(guidance_2d_flat)
+        else:
+            if guidance_2d is not None:
+                channels.append(guidance_2d.reshape(B * V, 1, H, W_fut))
+
+        x_flat = torch.cat(channels, dim=1)  # (BV, ci_dit_in_channels, H, W_fut)
 
         # --- run CI-DiT backbone ---
         noise_pred_flat = self.noise_predictor(x_flat, t, cond_flat)
@@ -1005,12 +1028,6 @@ class DiffusionTSF(nn.Module):
         past_flat = past_2d.reshape(B * V, 1, H, W_past)
         cond_flat = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
 
-        # shared coordinate channel
-        coord = None
-        if self.config.use_coordinate_channel:
-            coord = self._get_coordinate_grid(1, H, W_fut, device, dtype=cond_flat.dtype)
-            coord = coord.expand(B * V, -1, -1, -1)
-
         # per-variate guidance
         guidance_2d = None
         guide_flat = None
@@ -1022,12 +1039,11 @@ class DiffusionTSF(nn.Module):
         null_guide = torch.zeros_like(guide_flat) if (guide_flat is not None and cfg_scale > 1.0) else None
 
         def _build_x(x_noisy, use_null=False):
-            parts = [x_noisy]
-            if coord is not None:
-                parts.append(coord)
+            c = self._inject_coordinate_channel(x_noisy)
+            c = self._inject_time_channels(c)
             if guide_flat is not None:
-                parts.append(null_guide if use_null else guide_flat)
-            return torch.cat(parts, dim=1)
+                c = torch.cat([c, null_guide if use_null else guide_flat], dim=1)
+            return c
 
         def model_fn(x, t_batch, cond_arg):
             if cfg_scale <= 1.0:
