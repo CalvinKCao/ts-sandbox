@@ -918,6 +918,8 @@ def create_diffusion_model(
     if guidance_penalty_weight is None:
         guidance_penalty_weight = GUIDANCE_PENALTY_WEIGHT
 
+    logger.info(f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}")
+
     config = DiffusionTSFConfig(
         num_variables=n_variates,
         lookback_length=lookback,
