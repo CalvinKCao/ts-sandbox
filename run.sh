@@ -10,7 +10,12 @@
 #   ./run.sh --smoke-test                     # L40S smoke
 #   ./run.sh                                  # L40S full run
 #   ./run.sh --dataset electricity
-#   ./run.sh --no-wandb                         # metrics stay local only (no wandb.init)
+#   ./run.sh --no-wandb                       # metrics stay local only (no wandb.init)
+#
+# Architecture / U-Net ablations (six distinct experiments — one Slurm job each):
+#   --variant default | h128 | attn-near-bottleneck | deeper-unet | penalty-0.1 | penalty-0.3
+# Submit all six at once (same dataset/walltime):  ./utils/submit_architecture_matrix.sh
+# Merge metrics after jobs finish:  python3 utils/collect_architecture_matrix_summaries.py <manifest.tsv>
 # =============================================================================
 
 set -e
