@@ -619,64 +619,106 @@ class RealTS(Dataset):
                 )
 
                 if needed > 0:
-                    if existing_data is None:
-                        logger.info(
-                            f"Generating new synthetic pool of {self.pool_size} "
-                            f"samples to {cache_path}..."
-                        )
-
-                    if self.num_variables > 1:
-                        new_data = generate_multivariate_synthetic_data(
-                            num_samples=needed,
-                            num_vars=self.num_variables,
-                            length=self.total_length,
-                            seed=seed,
-                            skip_cross_var_aug=self.skip_cross_var_aug,
-                            output_path=None,
-                        )
-                    else:
-                        new_data = np.zeros((needed, self.total_length), dtype=np.float32)
-                        log_every = max(5000, needed // 20)
-                        for i in range(needed):
-                            if i > 0 and i % log_every == 0:
-                                logger.info(
-                                    "Synthetic pool progress: %s / %s (%.0f%%)",
-                                    i,
-                                    needed,
-                                    100.0 * i / needed,
-                                )
-                            gen = np.random.choice(self.generators, p=self.probabilities)
-                            seq = gen(self.total_length)
-                            if np.random.random() < 0.5:
-                                seq = seq[::-1].copy()
-                            if np.random.random() < 0.5:
-                                seq = -seq
-                            new_data[i] = self._normalize_sequence(seq)
-
-                    if existing_data is not None:
-                        logger.info(f"Appending new samples and saving to {cache_path}...")
-                        combined = np.concatenate([np.array(existing_data), new_data], axis=0)
-                        del existing_data
-                    else:
-                        combined = new_data
-
-                    # Save to a process-unique temp file, then atomically rename.
-                    # The PID/UUID suffix prevents concurrent jobs from clobbering
-                    # each other's temp file.
+                    # Multivariate pools can be ~100GB+; write via memmap, never materialize full array.
                     temp_path = cache_path.replace(
                         ".npy",
                         f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}.npy",
                     )
                     try:
-                        np.save(temp_path, combined)
-                        os.replace(temp_path, cache_path)
+                        if self.num_variables > 1:
+                            if existing_data is None:
+                                logger.info(
+                                    f"Generating new synthetic pool of {self.pool_size} "
+                                    f"samples to {cache_path} (disk memmap)..."
+                                )
+                                generate_multivariate_synthetic_data(
+                                    num_samples=needed,
+                                    num_vars=self.num_variables,
+                                    length=self.total_length,
+                                    seed=seed,
+                                    skip_cross_var_aug=self.skip_cross_var_aug,
+                                    output_path=temp_path,
+                                )
+                            else:
+                                existing_n = int(existing_data.shape[0])
+                                logger.info(
+                                    f"Extending synthetic pool: copying {existing_n} rows, "
+                                    f"generating {needed} more (memmap) -> {cache_path}..."
+                                )
+                                total_n = existing_n + needed
+                                mm = np.lib.format.open_memmap(
+                                    temp_path,
+                                    mode="w+",
+                                    dtype=np.float32,
+                                    shape=(
+                                        total_n,
+                                        self.num_variables,
+                                        self.total_length,
+                                    ),
+                                )
+                                try:
+                                    copy_chunk = 128
+                                    for start in range(0, existing_n, copy_chunk):
+                                        end = min(start + copy_chunk, existing_n)
+                                        mm[start:end] = existing_data[start:end]
+                                    del existing_data
+                                    existing_data = None
+                                    generate_multivariate_synthetic_data(
+                                        num_samples=needed,
+                                        num_vars=self.num_variables,
+                                        length=self.total_length,
+                                        seed=seed,
+                                        skip_cross_var_aug=self.skip_cross_var_aug,
+                                        output_memmap=mm,
+                                        memmap_row_offset=existing_n,
+                                    )
+                                finally:
+                                    del mm
+                            os.replace(temp_path, cache_path)
+                        else:
+                            if existing_data is None:
+                                logger.info(
+                                    f"Generating new synthetic pool of {self.pool_size} "
+                                    f"samples to {cache_path}..."
+                                )
+                            new_data = np.zeros((needed, self.total_length), dtype=np.float32)
+                            log_every = max(5000, needed // 20)
+                            for i in range(needed):
+                                if i > 0 and i % log_every == 0:
+                                    logger.info(
+                                        "Synthetic pool progress: %s / %s (%.0f%%)",
+                                        i,
+                                        needed,
+                                        100.0 * i / needed,
+                                    )
+                                gen = np.random.choice(self.generators, p=self.probabilities)
+                                seq = gen(self.total_length)
+                                if np.random.random() < 0.5:
+                                    seq = seq[::-1].copy()
+                                if np.random.random() < 0.5:
+                                    seq = -seq
+                                new_data[i] = self._normalize_sequence(seq)
+
+                            if existing_data is not None:
+                                logger.info(
+                                    f"Appending new samples and saving to {cache_path}..."
+                                )
+                                combined = np.concatenate(
+                                    [np.array(existing_data), new_data], axis=0
+                                )
+                                del existing_data
+                            else:
+                                combined = new_data
+
+                            np.save(temp_path, combined)
+                            os.replace(temp_path, cache_path)
+                        logger.info("Pool generation and save complete.")
                     finally:
                         if os.path.exists(temp_path):
                             try:
                                 os.remove(temp_path)
                             except OSError:
                                 pass
-                    logger.info("Pool generation and save complete.")
 
                 self.data_cache = np.load(cache_path, mmap_mode='r')
                 self.pool_size = int(self.data_cache.shape[0])

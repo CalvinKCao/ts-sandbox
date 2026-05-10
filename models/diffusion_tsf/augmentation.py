@@ -257,6 +257,8 @@ def generate_multivariate_synthetic_data(
     seed: Optional[int] = None,
     skip_cross_var_aug: bool = False,
     output_path: Optional[str] = None,
+    output_memmap: Optional[np.ndarray] = None,
+    memmap_row_offset: int = 0,
 ) -> np.ndarray:
     """
     Generate a batch of synthetic multivariate time series.
@@ -270,7 +272,11 @@ def generate_multivariate_synthetic_data(
         length: Sequence length (T+h)
         skip_cross_var_aug: Skip the O(V²) cross-variate augmentation loop.
             Auto-enabled when num_vars > 32 regardless of this flag.
-        
+        output_memmap: Write rows into this array instead of allocating RAM or
+            opening output_path. Use with memmap_row_offset to extend an existing pool file.
+            Mutually exclusive with output_path.
+        output_path: If set, create this .npy via memmap (shape num_samples x num_vars x length).
+
     Returns:
         Data tensor of shape (num_samples, num_vars, length)
     """
@@ -311,7 +317,26 @@ def generate_multivariate_synthetic_data(
 
     # For high-variate datasets the full array can be hundreds of GB.
     # Use an optional memmap output to avoid blowing up RAM.
-    if output_path is not None:
+    if output_memmap is not None and output_path is not None:
+        raise ValueError("Specify at most one of output_path and output_memmap")
+
+    if output_memmap is not None:
+        data = output_memmap
+        need_rows = memmap_row_offset + num_samples
+        if (
+            data.ndim != 3
+            or data.shape[0] < need_rows
+            or data.shape[1] != num_vars
+            or data.shape[2] != length
+        ):
+            raise ValueError(
+                "output_memmap shape mismatch: "
+                f"have {getattr(data, 'shape', None)}, "
+                f"need [{need_rows}, {num_vars}, {length}]"
+            )
+        if data.dtype != np.float32:
+            raise ValueError("output_memmap must be float32")
+    elif output_path is not None:
         data = np.lib.format.open_memmap(
             output_path, mode='w+', dtype=np.float32,
             shape=(num_samples, num_vars, length),
@@ -332,8 +357,9 @@ def generate_multivariate_synthetic_data(
             base = (base - np.mean(base)) / (np.std(base) + 1e-6)
             series_list.append(base.astype(np.float32))
 
+        row = memmap_row_offset + s
         if skip_cross_var_aug:
-            data[s] = np.stack(series_list)
+            data[row] = np.stack(series_list)
         elif num_vars > COUPLING_GROUP_SIZE:
             # Split into chunks of COUPLING_GROUP_SIZE; couple within each chunk,
             # independent across chunks. O(V/G * G²) = O(V*G) instead of O(V²).
@@ -341,15 +367,15 @@ def generate_multivariate_synthetic_data(
             for g_start in range(0, num_vars, COUPLING_GROUP_SIZE):
                 group = series_list[g_start:g_start + COUPLING_GROUP_SIZE]
                 augmented_series.extend(_couple_group(group))
-            data[s] = np.stack(augmented_series)
+            data[row] = np.stack(augmented_series)
         else:
-            data[s] = np.stack(_couple_group(series_list))
+            data[row] = np.stack(_couple_group(series_list))
 
         # flush to disk periodically so OS doesn't accumulate dirty pages
-        if output_path is not None and s % 1000 == 999:
+        if (output_path is not None or output_memmap is not None) and s % 1000 == 999:
             data.flush()
 
-    if output_path is not None:
+    if output_path is not None or output_memmap is not None:
         data.flush()
     
     return data
