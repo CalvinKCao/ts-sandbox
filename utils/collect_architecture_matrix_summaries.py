@@ -53,7 +53,11 @@ def _find_stem_for_job(results_root: Path, job_id: str) -> Optional[Path]:
 
 
 def _read_manifest(path: Path) -> List[Tuple[str, str, str]]:
-    """Return list of (job_id, variant, description)."""
+    """Return list of (job_id, variant, description).
+
+    Columns: ``job_id``, ``variant``, optional ``dataset``, ``description``
+    (tab-separated). Older manifests omit ``dataset``.
+    """
     rows: List[Tuple[str, str, str]] = []
     with path.open(newline="", encoding="utf-8") as f:
         for line in f:
@@ -66,7 +70,10 @@ def _read_manifest(path: Path) -> List[Tuple[str, str, str]]:
             if len(parts) < 2:
                 continue
             jid, variant = parts[0], parts[1]
-            desc = parts[2] if len(parts) > 2 else ""
+            if len(parts) >= 4:
+                desc = parts[3]
+            else:
+                desc = parts[2] if len(parts) > 2 else ""
             rows.append((jid, variant, desc))
     return rows
 

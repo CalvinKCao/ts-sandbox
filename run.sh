@@ -34,6 +34,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
 
     IS_SMOKE=0
     VARIANT="default"
+    SUBMIT_DATASET=""
     # Walltime as integer minutes — Slurm accepts this unambiguously (avoids D-HH:MM:SS quirks).
     H_VAL=24
     WALLTIME_MINUTES=$(( H_VAL * 60 ))
@@ -42,6 +43,9 @@ if [ -z "$SLURM_JOB_ID" ]; then
     for ((i=0; i<${#ARGS[@]}; i++)); do
         arg="${ARGS[$i]}"
         [ "$arg" = "--smoke-test" ] && IS_SMOKE=1
+        if [ "$arg" = "--dataset" ] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
+            SUBMIT_DATASET="${ARGS[$((i + 1))]}"
+        fi
         if [ "$arg" = "--variant" ] && [ $((i + 1)) -lt ${#ARGS[@]} ]; then
             VARIANT="${ARGS[$((i + 1))]}"
         fi
@@ -58,10 +62,14 @@ if [ -z "$SLURM_JOB_ID" ]; then
         fi
     done
 
+    # Short tag for Slurm job names when sweeping datasets (underscores → hyphen).
+    [ -z "$SUBMIT_DATASET" ] && SUBMIT_DATASET="electricity"
+    SUBMIT_DS_TAG="${SUBMIT_DATASET//_/-}"
+
     if [ "$IS_SMOKE" -eq 1 ]; then
-        echo "Submitting SMOKE TEST (L40S, 8GB, 15 min) [variant=$VARIANT]..."
+        echo "Submitting SMOKE TEST (L40S, 8GB, 15 min) [variant=$VARIANT dataset=$SUBMIT_DATASET]..."
         sbatch \
-            --job-name="${VARIANT}-smoke" \
+            --job-name="${VARIANT}-${SUBMIT_DS_TAG}-smoke" \
             --account=aip-boyuwang \
             --time=0:15:00 \
             --nodes=1 \
@@ -81,7 +89,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
         if [ "$H_VAL" -gt 24 ]; then PARTITION="gpubase_h100_b4"; fi
         # If you need >3 days, confirm a longer queue exists: sinfo -o "%P %l" | grep h100
 
-        echo "Submitting H100 FULL RUN (64GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall, $PARTITION) [variant=$VARIANT]..."
+        echo "Submitting H100 FULL RUN (64GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall, $PARTITION) [variant=$VARIANT dataset=$SUBMIT_DATASET]..."
 
         EXPORT_ARGS="ALL"
         if [ -n "$RESUME" ]; then
@@ -89,7 +97,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
         fi
 
         sbatch \
-            --job-name="${VARIANT}-h100" \
+            --job-name="${VARIANT}-${SUBMIT_DS_TAG}-h100" \
             --account=aip-boyuwang \
             --partition="$PARTITION" \
             --gpus-per-node=h100:1 \
@@ -104,7 +112,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
             --export="$EXPORT_ARGS" \
             "$SCRIPT_DIR/run.sh" "$@"
     else
-        echo "Submitting FULL RUN (L40S, 50GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall) [variant=$VARIANT]..."
+        echo "Submitting FULL RUN (L40S, 50GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall) [variant=$VARIANT dataset=$SUBMIT_DATASET]..."
         
         # If resuming, pass RESUME_STEM to the job's environment
         EXPORT_ARGS="ALL"
@@ -113,7 +121,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
         fi
 
         sbatch \
-            --job-name="${VARIANT}" \
+            --job-name="${VARIANT}-${SUBMIT_DS_TAG}" \
             --account=aip-boyuwang \
             --time="$WALLTIME_MINUTES" \
             --nodes=1 \
