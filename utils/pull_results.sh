@@ -23,18 +23,33 @@ SSH_OPTS_INTERACTIVE=(
     -o StrictHostKeyChecking=accept-new
 )
 
-if [ $# -eq 0 ]; then
-    echo "Usage: $0 <results-folder> [more-folders...]"
-    echo "Example:"
+usage() {
+    echo "Usage:"
+    echo "  $0 --recent <hours>              Pull every run folder on the cluster touched in the last N hours"
+    echo "  $0 <results-folder> [more...]   Pull named folders only"
+    echo ""
+    echo "The top-level remote folder \"archive\" is never pulled. Paths may omit a leading results/."
+    echo "Examples:"
+    echo "  $0 --recent 24"
     echo "  $0 05-08-3476425-default 05-08-3477032-h128"
+}
+
+rsync_one() {
+    local FOLDER_CLEAN="$1"
+    echo "------------------------------------------------------------"
+    echo "Pulling visualization artifacts for: $FOLDER_CLEAN"
+    echo "------------------------------------------------------------"
+    rsync -e "ssh ${SSH_OPTS_INTERACTIVE[*]}" "${RSYNC_OPTS[@]}" \
+        "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/${FOLDER_CLEAN}" "${LOCAL_PATH}/"
+}
+
+if [ $# -eq 0 ]; then
+    usage
     exit 1
 fi
 
-TARGET_FOLDERS=("$@")
-
 mkdir -p "$LOCAL_PATH"
 
-# Rsync: traverse dirs, then allow only small artifacts (not full checkpoint trees).
 RSYNC_OPTS=(
     -avz
     --progress
@@ -50,13 +65,42 @@ RSYNC_OPTS=(
     --exclude='*'
 )
 
+TARGET_FOLDERS=()
+
+if [ "$1" = "--recent" ]; then
+    if [ -z "${2:-}" ] || ! [[ "${2}" =~ ^[0-9]+$ ]] || [ "${2}" -lt 1 ]; then
+        echo "error: --recent requires a positive integer hour count (e.g. 24)" >&2
+        exit 1
+    fi
+    HOURS="$2"
+    MINUTES=$((HOURS * 60))
+    echo "Listing run folders under ${REMOTE_PATH} modified in the last ${HOURS} hour(s) (excluding archive)..."
+    mapfile -t TARGET_FOLDERS < <(
+        ssh "${SSH_OPTS_INTERACTIVE[@]}" "${REMOTE_USER}@${REMOTE_HOST}" \
+            "find '${REMOTE_PATH}' -maxdepth 1 -mindepth 1 -type d ! -name archive -mmin -${MINUTES} -printf '%f\\n' | sort"
+    )
+    if [ "${#TARGET_FOLDERS[@]}" -eq 0 ]; then
+        echo "No matching folders on the cluster."
+        exit 0
+    fi
+    echo "Will pull ${#TARGET_FOLDERS[@]} folder(s):"
+    printf '  %s\n' "${TARGET_FOLDERS[@]}"
+    echo ""
+else
+    while [ $# -gt 0 ]; do
+        FOLDER_CLEAN="${1#results/}"
+        if [ "$FOLDER_CLEAN" = "archive" ]; then
+            echo "Skipping excluded folder: archive" >&2
+        else
+            TARGET_FOLDERS+=("$FOLDER_CLEAN")
+        fi
+        shift
+    done
+fi
+
 for FOLDER in "${TARGET_FOLDERS[@]}"; do
-    # Remove 'results/' prefix if passed manually (as in user prompt)
-    FOLDER_CLEAN="${FOLDER#results/}"
-    echo "------------------------------------------------------------"
-    echo "Pulling visualization artifacts for: $FOLDER_CLEAN"
-    echo "------------------------------------------------------------"
-    rsync -e "ssh ${SSH_OPTS_INTERACTIVE[*]}" "${RSYNC_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/${FOLDER_CLEAN}" "$LOCAL_PATH/"
+    [ -n "$FOLDER" ] || continue
+    rsync_one "$FOLDER"
 done
 
 echo ""
