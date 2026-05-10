@@ -26,7 +26,7 @@ SSH_OPTS_INTERACTIVE=(
 if [ $# -eq 0 ]; then
     echo "Usage: $0 <results-folder> [more-folders...]"
     echo "Example:"
-    echo "  $0 05-08-3476425-unet-fullvar-ETTh1 05-08-3477032-unet-fullvar-ETTm1"
+    echo "  $0 05-08-3476425-default 05-08-3477032-h128"
     exit 1
 fi
 

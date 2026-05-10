@@ -2,7 +2,8 @@
 """Print one consolidated table of metrics for a batch of architecture-matrix jobs.
 
 Each job writes ``<stem>/datasets/summary.csv``. Stems look like
-``MM-DD-<jobid>-unet-fullvar-<variant>``.
+``MM-DD-<jobid>-<job-name-slug>`` (Slurm job name: variant, plus ``-smoke`` / ``-h100``
+when applicable). Legacy folders may still contain ``unet-fullvar`` in the slug.
 
 Feed the manifest TSV produced by ``utils/submit_architecture_matrix.sh`` (column
 ``job_id``), or pass explicit Slurm job ids.
@@ -22,23 +23,33 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+
+
+def _variant_slug_from_stem_name(name: str) -> str:
+    """Suffix after MM-DD-JOBID- (supports legacy ``...-unet-fullvar-<rest>``)."""
+    if "unet-fullvar-" in name:
+        return name.split("unet-fullvar-", 1)[-1]
+    m = re.match(r"^\d{2}-\d{2}-\d+-(.+)$", name)
+    return m.group(1) if m else ""
 
 
 def _find_stem_for_job(results_root: Path, job_id: str) -> Optional[Path]:
     if job_id in ("?", "-", ""):
         return None
     pat = f"*-{job_id}-*"
-    matches = sorted(results_root.glob(pat))
+    matches = sorted(p for p in results_root.glob(pat) if p.is_dir())
     if not matches:
         return None
-    # Prefer directory whose name contains unet-fullvar
-    for m in matches:
-        if m.is_dir() and "unet-fullvar" in m.name:
-            return m
-    return matches[0] if matches[0].is_dir() else None
+    # Prefer canonical ``MM-DD-JOBID-…`` top-level stems if globs overlap (e.g. backup copies).
+    prefix_re = re.compile(rf"^\d{{2}}-\d{{2}}-{re.escape(job_id)}-")
+    canonical = [m for m in matches if prefix_re.match(m.name)]
+    if canonical:
+        return canonical[0]
+    return matches[0]
 
 
 def _read_manifest(path: Path) -> List[Tuple[str, str, str]]:
@@ -108,9 +119,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif mo:
         for jid in mo:
             stem = _find_stem_for_job(results_root, jid)
-            variant = ""
-            if stem and "unet-fullvar-" in stem.name:
-                variant = stem.name.split("unet-fullvar-", 1)[-1]
+            variant = _variant_slug_from_stem_name(stem.name) if stem else ""
             entries.append((variant, "", jid, stem))
     else:
         p.print_help()

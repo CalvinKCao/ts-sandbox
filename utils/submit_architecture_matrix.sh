@@ -15,7 +15,7 @@
 #   ./utils/submit_architecture_matrix.sh --hours 48 --dataset electricity --h100
 #
 # Does NOT bundle into one Slurm job: each variant needs its own GPU allocation and
-# isolated results stem (MM-DD-JOBID-unet-fullvar-<variant>).
+# isolated results stem (MM-DD-JOBID-<variant>, optional -smoke / -h100 suffix from run.sh).
 #
 # After jobs finish, merge metrics:
 #   python3 utils/collect_architecture_matrix_summaries.py results/architecture_matrix_manifest_<timestamp>.tsv

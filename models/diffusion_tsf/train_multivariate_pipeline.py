@@ -414,6 +414,7 @@ def init_wandb(
     config: dict = None,
     resume: bool = False,
     tags: list = None,
+    name: str = None,
 ) -> bool:
     """Initialize wandb with comprehensive logging (only on main process)."""
     global _wandb_run, _wandb_enabled, _global_step
@@ -484,17 +485,22 @@ def init_wandb(
         tags = ['multivariate-pipeline']
     if _ddp_enabled:
         tags.append(f'ddp-{get_world_size()}gpu')
-    
+
+    run_name = (name or os.environ.get("WANDB_NAME") or "").strip() or None
+
     try:
-        _wandb_run = wandb.init(
+        init_kw = dict(
             project=project,
             config=full_config,
             resume="allow" if resume else None,
             id=run_id,
             reinit=True,
             tags=tags,
-            save_code=True,  # Save code for reproducibility
+            save_code=True,
         )
+        if run_name is not None:
+            init_kw["name"] = run_name
+        _wandb_run = wandb.init(**init_kw)
         
         # Save run ID for resume
         if _wandb_run:

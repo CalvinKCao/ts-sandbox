@@ -61,7 +61,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
     if [ "$IS_SMOKE" -eq 1 ]; then
         echo "Submitting SMOKE TEST (L40S, 8GB, 15 min) [variant=$VARIANT]..."
         sbatch \
-            --job-name="unet-fullvar-${VARIANT}-smoke" \
+            --job-name="${VARIANT}-smoke" \
             --account=aip-boyuwang \
             --time=0:15:00 \
             --nodes=1 \
@@ -89,7 +89,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
         fi
 
         sbatch \
-            --job-name="unet-fullvar-${VARIANT}-h100" \
+            --job-name="${VARIANT}-h100" \
             --account=aip-boyuwang \
             --partition="$PARTITION" \
             --gpus-per-node=h100:1 \
@@ -113,7 +113,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
         fi
 
         sbatch \
-            --job-name="unet-fullvar-${VARIANT}" \
+            --job-name="${VARIANT}" \
             --account=aip-boyuwang \
             --time="$WALLTIME_MINUTES" \
             --nodes=1 \
@@ -157,6 +157,8 @@ mkdir -p "$RUN_LOG_DIR" "$RUN_CKPT_DIR" "$RUN_DATA_DIR"
 # Use basename so we don't try to create a log file with slashes in the name
 LOG_FILENAME="$(basename "$ALLIANCE_RUN_STEM").log"
 ALLIANCE_JOB_LOG="$RUN_LOG_DIR/$LOG_FILENAME"
+# Wandb run display name (train_multivariate_pipeline reads WANDB_NAME from the environment).
+export WANDB_NAME="$(basename "$ALLIANCE_RUN_STEM")"
 touch "$ALLIANCE_JOB_LOG"
 exec >>"$ALLIANCE_JOB_LOG" 2>&1
 
