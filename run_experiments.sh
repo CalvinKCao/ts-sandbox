@@ -1,36 +1,170 @@
 #!/bin/bash
-# run_experiments.sh
-# This script runs two experimental scenarios across multiple time series datasets.
-# Scenario 1: attention only near the bottleneck (level 2) + 0.2 guidance penalty
-# Scenario 2: no attention in up/down paths (empty string) + 0.2 guidance penalty
-#             This forces the bottleneck to be the *only* place with cross-variate attention.
+# =============================================================================
+# Slurm self-resubmitting script for Univariate vs Bottleneck-Attention Ablation
+#
+# USAGE (from login node):
+#   ./run_experiments.sh
+#   ./run_experiments.sh --smoke-test
+# =============================================================================
 
-# Exit immediately if a command exits with a non-zero status
 set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Activate the virtual environment
-source .venv/bin/activate
+# ===========================================================================
+# If NOT inside a Slurm job → submit ourselves with the right resources
+# ===========================================================================
+if [ -z "${SLURM_JOB_ID:-}" ]; then
+    mkdir -p "$SCRIPT_DIR/results/bootstrap"
+    SB_OUT='results/bootstrap/%x-%j.out'
+    SB_ERR='results/bootstrap/%x-%j.err'
 
-DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "weather" "exchange_rate")
+    DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "weather" "exchange_rate")
+    
+    IS_SMOKE=0
+    if [ "${1:-}" = "--smoke-test" ]; then
+        IS_SMOKE=1
+    fi
 
-for ds in "${DATASETS[@]}"; do
-    echo "=========================================================="
-    echo "Running Scenario 1: attn-near-bottleneck + 0.2 penalty on $ds"
-    echo "=========================================================="
+    for ds in "${DATASETS[@]}"; do
+        DS_TAG="${ds//_/-}"
+        WALLTIME="24:00:00"
+        if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
+
+        for scenario in "attn-bottleneck" "100pct-univariate"; do
+            JOB_NAME="${scenario}-${DS_TAG}"
+            [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
+
+            echo "Submitting $JOB_NAME ..."
+            sbatch \
+                --job-name="$JOB_NAME" \
+                --account=aip-boyuwang \
+                --time="$WALLTIME" \
+                --nodes=1 \
+                --gres=gpu:l40s:1 \
+                --cpus-per-task=8 \
+                --mem=50G \
+                --chdir="$SCRIPT_DIR" \
+                --output="$SB_OUT" \
+                --error="$SB_ERR" \
+                --mail-type=END,FAIL \
+                --mail-user=ccao87@uwo.ca \
+                --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
+                "$SCRIPT_DIR/run_experiments.sh"
+        done
+    done
+    echo "All jobs submitted!"
+    exit 0
+fi
+
+# ===========================================================================
+# Inside Slurm Job — Do the actual training
+# ===========================================================================
+set -euo pipefail
+
+cd "$SLURM_SUBMIT_DIR"
+ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID}-${SLURM_JOB_NAME}"
+
+RUN_RESULTS_ROOT="$SLURM_SUBMIT_DIR/results/$ALLIANCE_RUN_STEM"
+RUN_LOG_DIR="$RUN_RESULTS_ROOT/logs"
+RUN_CKPT_DIR="$RUN_RESULTS_ROOT/ckpts"
+RUN_DATA_DIR="$RUN_RESULTS_ROOT/datasets"
+mkdir -p "$RUN_LOG_DIR" "$RUN_CKPT_DIR" "$RUN_DATA_DIR"
+
+LOG_FILENAME="$(basename "$ALLIANCE_RUN_STEM").log"
+ALLIANCE_JOB_LOG="$RUN_LOG_DIR/$LOG_FILENAME"
+export WANDB_NAME="$(basename "$ALLIANCE_RUN_STEM")"
+export WANDB_DIR="$RUN_LOG_DIR/wandb"
+mkdir -p "$WANDB_DIR"
+
+# Redirect stdout/stderr to the log file inside the run's directory
+exec >>"$ALLIANCE_JOB_LOG" 2>&1
+
+echo "=========================================="
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURMD_NODENAME"
+echo "Scenario: $SCENARIO"
+echo "Dataset: $DATASET"
+echo "Started: $(date '+%m-%d %H:%M:%S')"
+echo "=========================================="
+
+# ---- Environment ----
+module purge || true
+module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
+
+if [ -d "$SCRATCH/ts-sandbox" ]; then
+    export PROJECT_ROOT="$SCRATCH/ts-sandbox"
+elif [ -d "$HOME/ts-sandbox" ]; then
+    export PROJECT_ROOT="$HOME/ts-sandbox"
+else
+    export PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+fi
+
+if [ -z "${PROJECT:-}" ] && [ -d "$HOME/projects" ]; then
+    shopt -s nullglob
+    _m=("$HOME"/projects/def-* "$HOME"/projects/aip-*)
+    shopt -u nullglob
+    if [ "${#_m[@]}" -gt 0 ]; then
+        export PROJECT=$(readlink -f "${_m[0]}")
+    fi
+fi
+
+# Match Alliance Canada persistent venv setup from @run.sh
+if [ -n "${PROJECT:-}" ]; then
+    VENV_PATH="$PROJECT/$USER/diffusion-tsf/venv"
+    if [ ! -d "$VENV_PATH" ]; then
+        VENV_PATH="$PROJECT/$USER/diffusion-tsf-fullvar/venv"
+    fi
+    if [ -d "$VENV_PATH" ]; then
+        export PATH="$VENV_PATH/bin:$PATH"
+        echo "Reusing existing venv: $VENV_PATH"
+    else
+        source .venv/bin/activate
+    fi
+else
+    source .venv/bin/activate
+fi
+
+SYNTH_CACHE_ROOT="$PROJECT_ROOT/synth_data"
+mkdir -p "$SYNTH_CACHE_ROOT"
+
+if [ ! -e "$RUN_DATA_DIR/repo" ]; then
+    ln -s "$PROJECT_ROOT/datasets" "$RUN_DATA_DIR/repo"
+fi
+
+SMOKE_FLAG=""
+if [ "$SMOKE" -eq 1 ]; then
+    SMOKE_FLAG="--smoke-test"
+fi
+
+COMMON_ARGS=(
+    "--dataset" "$DATASET"
+    "--guidance-penalty-weight" "0.2"
+    "--checkpoint-dir" "$RUN_CKPT_DIR"
+    "--results-dir" "$RUN_DATA_DIR"
+    "--synth-cache-dir" "$SYNTH_CACHE_ROOT"
+    "--wandb"
+)
+if [ -n "$SMOKE_FLAG" ]; then
+    COMMON_ARGS+=("$SMOKE_FLAG")
+fi
+
+echo "Running Python Pipeline..."
+
+# NOTE: --attention-levels 1 puts cross-attention exactly in the deepest down block
+# (next to the bottleneck) since channels are [64, 128, 256] and index 1 matches 256.
+if [ "$SCENARIO" == "attn-bottleneck" ]; then
     python3 models/diffusion_tsf/train_multivariate_pipeline.py \
-        --dataset "$ds" \
-        --attention-levels "2" \
-        --guidance-penalty-weight 0.2 \
+        "${COMMON_ARGS[@]}" \
+        --attention-levels "1" \
         --subset-id "attn-bottleneck-pen-0.2"
-
-    echo "=========================================================="
-    echo "Running Scenario 2: 100% univariate (no cross-attn) + 0.2 penalty on $ds"
-    echo "=========================================================="
+elif [ "$SCENARIO" == "100pct-univariate" ]; then
     python3 models/diffusion_tsf/train_multivariate_pipeline.py \
-        --dataset "$ds" \
+        "${COMMON_ARGS[@]}" \
         --disable-cross-attention \
-        --guidance-penalty-weight 0.2 \
         --subset-id "100pct-univariate-pen-0.2"
-done
+else
+    echo "Unknown scenario: $SCENARIO"
+    exit 1
+fi
 
-echo "All experimental scenarios completed successfully!"
+echo "Pipeline complete."
