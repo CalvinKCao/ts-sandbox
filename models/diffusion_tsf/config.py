@@ -53,10 +53,8 @@ class DiffusionTSFConfig:
     
     # multivariate support
     num_variables: int = 1  # how many variables (1 = uni, >1 = multi)
-    # process each variate independently thru a shared unet instead of stacking as channels.
-    # this is now the only supported U-Net mode.
-    # ignored for V=1 (no-op). cross-attn tokens are always produced when V>1.
-    variate_factorized: bool = True
+    # all V variates ride along as channels in a single U-Net pass
+    # (RGB-style). cross-attn tokens are always produced when V>1.
     disable_cross_attention: bool = False
     
     # 2d mapping
@@ -118,29 +116,8 @@ class DiffusionTSFConfig:
     # penalty for deviating from itransformer guidance ghost image
     guidance_penalty_weight: float = 0.0
 
-    # which backbone
-    model_type: str = "unet"
-
-    # transformer (DiT) params
-    transformer_embed_dim: int = 256
-    transformer_depth: int = 6
-    transformer_num_heads: int = 8
-    transformer_patch_height: int = 16  
-    transformer_patch_width: int = 16   
-    transformer_dropout: float = 0.1
-    
-    # CI-DiT (channel-independent diffusion transformer) params
-    ci_dit_embed_dim: int = 256
-    ci_dit_depth: int = 8
-    ci_dit_num_heads: int = 8
-    ci_dit_patch_size: Tuple[int, int] = (8, 8)
-    ci_dit_mlp_ratio: float = 4.0
-    ci_dit_cross_variate_every: int = 3  # 0 to disable cross-var attn
-    ci_dit_dropout: float = 0.1
-    
     # memory optimization flags
     use_gradient_checkpointing: bool = False
-    unet_max_chunk_size: int = 128
     use_amp: bool = False  # bfloat16 mixed precision
     
     # aux channels
@@ -172,8 +149,6 @@ class DiffusionTSFConfig:
         assert self.noise_schedule in ["linear", "cosine", "sigmoid", "quadratic"]
         assert 0 <= self.cutout_prob <= 1
         assert self.representation_mode in ["pdf", "cdf"]
-        if not self.variate_factorized:
-            raise ValueError("variate_factorized=False is no longer supported; use the factorized path.")
         
     @property
     def bin_width(self) -> float:
@@ -200,34 +175,22 @@ class DiffusionTSFConfig:
     
     @property
     def backbone_in_channels(self) -> int:
-        """total input channels for the backbone."""
-        # per-variate: 1 data ch + aux + optional 1 guidance ch
-        return 1 + self.num_aux_channels + (1 if self.use_guidance_channel else 0)
+        """total input channels for the backbone (V noisy + aux + V guidance)."""
+        return (
+            self.num_variables
+            + self.num_aux_channels
+            + (self.num_variables if self.use_guidance_channel else 0)
+        )
 
     @property
     def visual_cond_channels(self) -> int:
-        """channels for visual concat mode."""
-        return 1 + (1 if self.use_value_channel else 0)
+        """channels for visual concat mode (one per variate, +1 if value channel)."""
+        return self.num_variables + (1 if self.use_value_channel else 0)
 
     @property
     def guidance_channels(self) -> int:
-        """guidance channels."""
-        if not self.use_guidance_channel:
-            return 0
-        return 1
-    
-    @property
-    def ci_dit_in_channels(self) -> int:
-        """Per-variate input channels for CI-DiT backbone."""
-        ch = 1  # data channel
-        if self.use_coordinate_channel: ch += 1
-        if self.use_guidance_channel: ch += 1
-        return ch
-    
-    @property
-    def ci_dit_cond_channels(self) -> int:
-        """Per-variate conditioning channels for CI-DiT."""
-        return 1  # resized past 2D
+        """guidance channels (one per variate)."""
+        return self.num_variables if self.use_guidance_channel else 0
 
 
 @dataclass

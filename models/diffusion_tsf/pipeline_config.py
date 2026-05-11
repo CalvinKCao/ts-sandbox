@@ -54,7 +54,6 @@ DISABLE_CROSS_ATTENTION: bool = False
 
 USE_AMP: bool = True               # bfloat16 mixed precision
 USE_GRADIENT_CHECKPOINTING: bool = True
-UNET_MAX_CHUNK_SIZE: int = 128     # To prevent OOM by chunking variates through U-Net
 
 
 # ---- Default variate count (only used when --n-variates is not supplied) ----------

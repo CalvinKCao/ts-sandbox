@@ -686,7 +686,6 @@ from models.diffusion_tsf.pipeline_config import (
     diffusion_probe_max_candidate,
     USE_AMP,
     USE_GRADIENT_CHECKPOINTING,
-    UNET_MAX_CHUNK_SIZE,
     UNET_CHANNELS,
     ATTENTION_LEVELS,
     DISABLE_CROSS_ATTENTION,
@@ -943,13 +942,11 @@ def create_diffusion_model(
         use_guidance_channel=True,
         guidance_penalty_weight=guidance_penalty_weight,
         num_diffusion_steps=1000,
-        model_type="unet",
         unet_channels=UNET_CHANNELS,
         attention_levels=ATTENTION_LEVELS,
         disable_cross_attention=DISABLE_CROSS_ATTENTION,
         num_res_blocks=2,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
-        unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
         use_amp=USE_AMP,
     )
     return DiffusionTSF(config)
