@@ -12,8 +12,9 @@
 #   ./run.sh --dataset electricity
 #   ./run.sh --no-wandb                       # metrics stay local only (no wandb.init)
 #
-# Local dev (no Slurm — uses repo .venv, writes under results/):
-#   ./run.sh --local --smoke-test --dataset ETTh2 --no-wandb
+# Optional: human-readable Slurm job name / results folder stem (wandb display name).
+# Example: ./run.sh --run-name multi-channel --dataset ETTh1 --smoke-test
+#   → job name multi-channel-default-ETTh1-smoke (bootstrap logs, results/MM-DD-JID-…)
 #
 # Architecture / U-Net ablations (six distinct experiments — one Slurm job each):
 #   --variant default | h128 | attn-near-bottleneck | deeper-unet | penalty-0.1 | penalty-0.3
@@ -22,11 +23,19 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Strip --local from argv so sbatch children and inner parser never see it.
+# Strip --local and --run-name so sbatch children never see them; keep RUN_NAME_PREFIX for locals.
 RUN_LOCAL=0
+RUN_NAME_PREFIX=""
 _LOCAL_ARGS=()
-for _a in "$@"; do
-    if [ "$_a" = "--local" ]; then RUN_LOCAL=1; else _LOCAL_ARGS+=("$_a"); fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --local)  RUN_LOCAL=1; shift ;;
+        --run-name)
+            RUN_NAME_PREFIX="${2:-}"
+            shift 2
+            ;;
+        *) _LOCAL_ARGS+=("$1"); shift ;;
+    esac
 done
 set -- "${_LOCAL_ARGS[@]}"
 
@@ -75,10 +84,21 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 0 ]; then
     [ -z "$SUBMIT_DATASET" ] && SUBMIT_DATASET="electricity"
     SUBMIT_DS_TAG="${SUBMIT_DATASET//_/-}"
 
+    # Stem = SLURM_JOB_NAME → bootstrap %x, results/MM-DD-JID-stem, WANDB_NAME
+    JOB_STEM="${VARIANT}-${SUBMIT_DS_TAG}"
+    if [ -n "${RUN_NAME_PREFIX:-}" ]; then
+        _pfx="${RUN_NAME_PREFIX// /-}"
+        _pfx="${_pfx//\//-}"
+        JOB_STEM="${_pfx}-${VARIANT}-${SUBMIT_DS_TAG}"
+    fi
+    if [ "${#JOB_STEM}" -gt 60 ]; then
+        JOB_STEM="${JOB_STEM:0:60}"
+    fi
+
     if [ "$IS_SMOKE" -eq 1 ]; then
-        echo "Submitting SMOKE TEST (L40S, 8GB, 15 min) [variant=$VARIANT dataset=$SUBMIT_DATASET]..."
+        echo "Submitting SMOKE TEST (L40S, 8GB, 15 min) [job=$JOB_STEM-smoke variant=$VARIANT dataset=$SUBMIT_DATASET]..."
         sbatch \
-            --job-name="${VARIANT}-${SUBMIT_DS_TAG}-smoke" \
+            --job-name="${JOB_STEM}-smoke" \
             --account=aip-boyuwang \
             --time=0:15:00 \
             --nodes=1 \
@@ -98,7 +118,7 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 0 ]; then
         if [ "$H_VAL" -gt 24 ]; then PARTITION="gpubase_h100_b4"; fi
         # If you need >3 days, confirm a longer queue exists: sinfo -o "%P %l" | grep h100
 
-        echo "Submitting H100 FULL RUN (64GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall, $PARTITION) [variant=$VARIANT dataset=$SUBMIT_DATASET]..."
+        echo "Submitting H100 FULL RUN (64GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall, $PARTITION) [job=$JOB_STEM-h100 variant=$VARIANT dataset=$SUBMIT_DATASET]..."
 
         EXPORT_ARGS="ALL"
         if [ -n "$RESUME" ]; then
@@ -106,7 +126,7 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 0 ]; then
         fi
 
         sbatch \
-            --job-name="${VARIANT}-${SUBMIT_DS_TAG}-h100" \
+            --job-name="${JOB_STEM}-h100" \
             --account=aip-boyuwang \
             --partition="$PARTITION" \
             --gpus-per-node=h100:1 \
@@ -121,7 +141,7 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 0 ]; then
             --export="$EXPORT_ARGS" \
             "$SCRIPT_DIR/run.sh" "$@"
     else
-        echo "Submitting FULL RUN (L40S, 50GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall) [variant=$VARIANT dataset=$SUBMIT_DATASET]..."
+        echo "Submitting FULL RUN (L40S, 50GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall) [job=$JOB_STEM variant=$VARIANT dataset=$SUBMIT_DATASET]..."
         
         # If resuming, pass RESUME_STEM to the job's environment
         EXPORT_ARGS="ALL"
@@ -130,7 +150,7 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 0 ]; then
         fi
 
         sbatch \
-            --job-name="${VARIANT}-${SUBMIT_DS_TAG}" \
+            --job-name="${JOB_STEM}" \
             --account=aip-boyuwang \
             --time="$WALLTIME_MINUTES" \
             --nodes=1 \
@@ -152,7 +172,25 @@ fi
 if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 1 ]; then
     export SLURM_SUBMIT_DIR="$SCRIPT_DIR"
     export SLURM_JOB_ID="local-$(date +%s)"
-    export SLURM_JOB_NAME="local-run"
+    _vn="default"
+    _ds="electricity"
+    _sm=""
+    _scan=("$@")
+    for ((i=0; i<${#_scan[@]}; i++)); do
+        [ "${_scan[i]}" = "--variant" ] && [ $((i + 1)) -lt ${#_scan[@]} ] && _vn="${_scan[i+1]}"
+        [ "${_scan[i]}" = "--dataset" ] && [ $((i + 1)) -lt ${#_scan[@]} ] && _ds="${_scan[i+1]//_/-}"
+        [ "${_scan[i]}" = "--smoke-test" ] && _sm="-smoke"
+    done
+    _stem="${_vn}-${_ds}"
+    if [ -n "${RUN_NAME_PREFIX:-}" ]; then
+        _pfx="${RUN_NAME_PREFIX// /-}"
+        _pfx="${_pfx//\//-}"
+        _stem="${_pfx}-${_vn}-${_ds}"
+    fi
+    if [ "${#_stem}" -gt 60 ]; then
+        _stem="${_stem:0:60}"
+    fi
+    export SLURM_JOB_NAME="${_stem}${_sm}"
     export SLURMD_NODENAME="${HOSTNAME:-localhost}"
 fi
 
@@ -384,6 +422,7 @@ while [[ $# -gt 0 ]]; do
         --hours)          shift 2 ;;   # consumed by login-side submit logic only
         --h100)           shift ;;     # consumed by login-side submit logic only
         --local)          shift ;;     # stripped at top; ignore if passed through
+        --run-name)       shift 2 ;;   # stripped at top; ignore if passed through
         *)
             echo "Unknown option: $1"
             exit 1
