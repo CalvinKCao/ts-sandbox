@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Slurm self-resubmitting script for Univariate vs Bottleneck-Attention Ablation
+# Slurm self-resubmitting script — DiT scenario only (see scenario loop below).
 #
 # USAGE (from login node):
 #   ./run_experiments.sh
@@ -18,7 +18,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SB_OUT='results/bootstrap/%x-%j.out'
     SB_ERR='results/bootstrap/%x-%j.err'
 
-    DATASETS=("weather" "exchange_rate" "ETTm1")
+    DATASETS=("weather" "exchange_rate" "ETTm1" "ETTh2")
     
     IS_SMOKE=0
     if [ "${1:-}" = "--smoke-test" ]; then
@@ -30,7 +30,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         WALLTIME="24:00:00"
         if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
-        for scenario in "attn-bottleneck" "100pct-univariate" "dit"; do
+        for scenario in "dit"; do
             JOB_NAME="${scenario}-${DS_TAG}"
             [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
 
