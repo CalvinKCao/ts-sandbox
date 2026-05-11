@@ -18,7 +18,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SB_OUT='results/bootstrap/%x-%j.out'
     SB_ERR='results/bootstrap/%x-%j.err'
 
-    DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "weather" "exchange_rate")
+    DATASETS=("weather" "exchange_rate")
     
     IS_SMOKE=0
     if [ "${1:-}" = "--smoke-test" ]; then
@@ -150,21 +150,34 @@ fi
 
 echo "Running Python Pipeline..."
 
-# NOTE: --attention-levels 1 puts cross-attention exactly in the deepest down block
-# (next to the bottleneck) since channels are [64, 128, 256] and index 1 matches 256.
+TARGET_DIM=7
+if [ "$DATASET" = "weather" ]; then TARGET_DIM=21; fi
+if [ "$DATASET" = "exchange_rate" ]; then TARGET_DIM=8; fi
+if [ "$DATASET" = "electricity" ]; then TARGET_DIM=321; fi
+if [ "$DATASET" = "traffic" ]; then TARGET_DIM=862; fi
+
+SCENARIO_ARGS=()
 if [ "$SCENARIO" == "attn-bottleneck" ]; then
-    python3 models/diffusion_tsf/train_multivariate_pipeline.py \
-        "${COMMON_ARGS[@]}" \
-        --attention-levels "1" \
-        --subset-id "attn-bottleneck-pen-0.2"
+    SCENARIO_ARGS=(--attention-levels "1" --subset-id "attn-bottleneck-pen-0.2")
 elif [ "$SCENARIO" == "100pct-univariate" ]; then
-    python3 models/diffusion_tsf/train_multivariate_pipeline.py \
-        "${COMMON_ARGS[@]}" \
-        --disable-cross-attention \
-        --subset-id "100pct-univariate-pen-0.2"
+    SCENARIO_ARGS=(--disable-cross-attention --subset-id "100pct-univariate-pen-0.2")
 else
     echo "Unknown scenario: $SCENARIO"
     exit 1
 fi
+
+echo "Running Phase 1 (Pretrain)..."
+python3 models/diffusion_tsf/train_multivariate_pipeline.py \
+    --mode pretrain \
+    --n-variates "$TARGET_DIM" \
+    "${COMMON_ARGS[@]}" \
+    "${SCENARIO_ARGS[@]}"
+
+echo "Running Phase 2 (Finetune)..."
+python3 models/diffusion_tsf/train_multivariate_pipeline.py \
+    --mode finetune \
+    --n-variates "$TARGET_DIM" \
+    "${COMMON_ARGS[@]}" \
+    "${SCENARIO_ARGS[@]}"
 
 echo "Pipeline complete."
