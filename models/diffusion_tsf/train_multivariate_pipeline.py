@@ -3377,7 +3377,7 @@ def main():
     parser.add_argument('--attention-levels', type=str, default=None,
                         help='Comma-separated attention levels (e.g. 1,2)')
     parser.add_argument('--disable-cross-attention', action='store_true',
-                        help='Disable cross-variate attention completely (creates a 100% univariate baseline)')
+                        help='Disable cross-variate attention (fully univariate baseline)')
     parser.add_argument('--model-type', type=str, default=None, choices=['unet', 'dit'],
                         help="Backbone: 'unet' (default) or 'dit' (FactorizedDiT)")
     parser.add_argument('--lookback-length', type=int, default=LOOKBACK_LENGTH,
