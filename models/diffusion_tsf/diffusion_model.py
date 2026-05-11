@@ -184,16 +184,18 @@ class DiffusionTSF(nn.Module):
         else:
             self.guidance_model = None
         
-        # All V variates ride as channels in a single U-Net pass (RGB-style).
-        # Input: V noisy future + aux (coord/time_ramp/time_sine) + V guidance ghost (if enabled)
-        # Output: V predicted-noise channels
+        # U-Net: one forward with all V variates as channels (RGB-style).
         backbone_in_channels = config.backbone_in_channels
 
         if config.model_type == "dit":
+            # Factorized DiT: shared weights, one variate per sub-batch (BV). Channel counts
+            # are per-variate (same as the old factorized U-Net path), not V-wide stacks.
+            dit_in = 1 + config.num_aux_channels + (1 if config.use_guidance_channel else 0)
+            dit_cond = 1 + (1 if config.use_value_channel else 0)
             self.noise_predictor = FactorizedDiT(
-                in_channels=backbone_in_channels,
-                cond_channels=config.visual_cond_channels,
-                out_channels=config.num_variables,
+                in_channels=dit_in,
+                cond_channels=dit_cond,
+                out_channels=1,
                 image_height=config.image_height,
                 patch_size=config.dit_patch_size,
                 embed_dim=config.dit_embed_dim,
@@ -630,7 +632,9 @@ class DiffusionTSF(nn.Module):
         future: torch.Tensor,
         t: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        """Training forward pass — multi-channel U-Net over all V variates."""
+        """Training forward: U-Net is multi-channel; DiT is factorized (BV, one variate at a time)."""
+        if self.config.model_type == "dit":
+            return self._forward_factorized(past, future, t)
         return self._forward_multichannel(past, future, t)
 
     @torch.no_grad()
@@ -647,7 +651,14 @@ class DiffusionTSF(nn.Module):
         jump_penalty_scale: float = 1.0,
         search_radius: int = 10
     ) -> Dict[str, torch.Tensor]:
-        """Generate future predictions — multi-channel U-Net over all V variates."""
+        """Generate: U-Net multi-channel; DiT factorized."""
+        if self.config.model_type == "dit":
+            return self._generate_factorized(
+                past, use_ddim=use_ddim, num_ddim_steps=num_ddim_steps,
+                eta=eta, cfg_scale=cfg_scale, verbose=verbose,
+                decoder_method=decoder_method, beam_width=beam_width,
+                jump_penalty_scale=jump_penalty_scale, search_radius=search_radius,
+            )
         return self._generate_multichannel(
             past, use_ddim=use_ddim, num_ddim_steps=num_ddim_steps,
             eta=eta, cfg_scale=cfg_scale, verbose=verbose,
@@ -701,8 +712,8 @@ class DiffusionTSF(nn.Module):
         canvas = self._inject_coordinate_channel(canvas)
         canvas = self._inject_time_channels(canvas)
 
-        # visual cond: past 2D (B, V, H, W_past) interpolated to W_fut
-        cond_for_unet = F.interpolate(past_2d, size=(H, W_fut), mode='bilinear', align_corners=False)
+        # visual cond: past 2D (B, V, H, W_past) sliced to match W_fut
+        cond_for_unet = past_2d[:, :, :, -W_fut:] if past_2d.shape[3] >= W_fut else F.interpolate(past_2d, size=(H, W_fut), mode='bilinear', align_corners=False)
 
         # --- Classifier-Free Guidance Dropout (per-sample, drops conditioning across all V) ---
         if self.training and self.config.cfg_dropout > 0.0:
@@ -779,7 +790,7 @@ class DiffusionTSF(nn.Module):
         W_fut   = self.config.forecast_length
 
         # visual cond: past 2D interpolated to future width
-        cond_full = F.interpolate(past_2d, size=(H, W_fut), mode='bilinear', align_corners=False)
+        cond_full = past_2d[:, :, :, -W_fut:] if past_2d.shape[3] >= W_fut else F.interpolate(past_2d, size=(H, W_fut), mode='bilinear', align_corners=False)
         null_cond = torch.zeros_like(cond_full) if cfg_scale > 1.0 else None
 
         # guidance ghost image: compute once, reuse across all DDIM steps
@@ -835,6 +846,247 @@ class DiffusionTSF(nn.Module):
         }
         if guidance_2d is not None:
             result['guidance_2d'] = guidance_2d
+        return result
+
+    def _forward_factorized(self, past: torch.Tensor, future: torch.Tensor, t: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """DiT training: shared backbone, one noisy variate map per sub-batch (BV)."""
+        B = past.shape[0]
+        V = self.config.num_variables
+        H = self.config.image_height
+        device = past.device
+        BV = B * V
+
+        past_norm, future_norm, stats = self._normalize_sequence(past, future)
+        past_2d = self.encode_to_2d(past_norm)
+        future_2d = self.encode_to_2d(future_norm)
+        past_2d = self._apply_coarse_dropout(past_2d)
+
+        W_past = past_2d.shape[3]
+        W_fut = future_2d.shape[3]
+
+        if t is None:
+            t = torch.randint(0, self.config.num_diffusion_steps, (B,), device=device)
+
+        noisy_future, noise = self.scheduler.add_noise(future_2d, t)
+
+        guidance_2d = None
+        if self.config.use_guidance_channel:
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            guidance_2d = self.encode_to_2d(guidance_forecast_norm, scale_for_diffusion=True)
+
+        ctx = None if self.config.disable_cross_attention else self._get_cross_variate_context(past)
+
+        t_flat = t.unsqueeze(1).expand(-1, V).reshape(BV)
+
+        canvas = noisy_future.reshape(BV, 1, H, W_fut)
+        canvas = self._inject_coordinate_channel(canvas)
+        canvas = self._inject_time_channels(canvas)
+
+        past_flat = past_2d.reshape(BV, 1, H, W_past)
+        cond_for_unet = past_flat[:, :, :, -W_fut:] if past_flat.shape[3] >= W_fut else F.interpolate(past_flat, size=(H, W_fut), mode="bilinear", align_corners=False)
+
+        ctx_flat = None
+        if ctx is not None:
+            ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
+
+        if self.training and self.config.cfg_dropout > 0.0:
+            drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
+            drop_mask_flat = drop_mask.unsqueeze(1).expand(-1, V).reshape(BV)
+            cond_for_unet = torch.where(
+                drop_mask_flat.view(BV, 1, 1, 1), torch.zeros_like(cond_for_unet), cond_for_unet
+            )
+            if ctx_flat is not None:
+                ctx_flat = torch.where(
+                    drop_mask_flat.view(BV, 1, 1), torch.zeros_like(ctx_flat), ctx_flat
+                )
+            if guidance_2d is not None:
+                g_flat = guidance_2d.reshape(BV, 1, H, W_fut)
+                g_flat = torch.where(
+                    drop_mask_flat.view(BV, 1, 1, 1), torch.zeros_like(g_flat), g_flat
+                )
+                canvas = torch.cat([canvas, g_flat], dim=1)
+        else:
+            if guidance_2d is not None:
+                canvas = torch.cat([canvas, guidance_2d.reshape(BV, 1, H, W_fut)], dim=1)
+
+        chunk = getattr(self.config, "factorized_max_chunk_size", 0) or 0
+        if chunk > 0 and BV > chunk:
+            parts = []
+            for i in range(0, BV, chunk):
+                end = min(i + chunk, BV)
+                parts.append(
+                    self.noise_predictor(
+                        canvas[i:end],
+                        t_flat[i:end],
+                        cond_for_unet[i:end],
+                        encoder_hidden_states=(ctx_flat[i:end] if ctx_flat is not None else None),
+                    )
+                )
+            noise_pred_flat = torch.cat(parts, dim=0)
+        else:
+            noise_pred_flat = self.noise_predictor(
+                canvas, t_flat, cond_for_unet, encoder_hidden_states=ctx_flat
+            )
+
+        noise_pred = noise_pred_flat.reshape(B, V, H, W_fut)
+
+        K = self.config.lookback_overlap
+        if K > 0:
+            nl_past = F.mse_loss(noise_pred[..., :K], noise[..., :K])
+            nl_fut = F.mse_loss(noise_pred[..., K:], noise[..., K:])
+            noise_loss = self.config.past_loss_weight * nl_past + nl_fut
+        else:
+            noise_loss = F.mse_loss(noise_pred, noise)
+
+        x0_pred = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
+        x0_pred = torch.clamp(x0_pred, -2.0, 2.0)
+
+        emd_loss = self._compute_emd_loss(x0_pred, future_2d)
+
+        mono_loss = torch.tensor(0.0, device=device)
+        if self.config.use_monotonicity_loss and self.config.representation_mode == "cdf":
+            cdf_pred = torch.clamp((x0_pred + 1.0) / 2.0, 0.0, 1.0)
+            mono_loss = monotonicity_loss(cdf_pred)
+
+        guidance_loss = torch.tensor(0.0, device=device)
+        if guidance_2d is not None and self.config.guidance_penalty_weight > 0:
+            guidance_loss = F.mse_loss(x0_pred, guidance_2d)
+
+        loss = (
+            noise_loss
+            + self.config.emd_lambda * emd_loss
+            + self.config.monotonicity_weight * mono_loss
+            + self.config.guidance_penalty_weight * guidance_loss
+        )
+
+        result = {
+            "loss": loss,
+            "noise_loss": noise_loss,
+            "emd_loss": emd_loss,
+            "guidance_loss": guidance_loss,
+            "noise_pred": noise_pred,
+            "t": t,
+        }
+        if guidance_2d is not None:
+            result["guidance_2d"] = guidance_2d
+        return result
+
+    @torch.no_grad()
+    def _generate_factorized(
+        self,
+        past: torch.Tensor,
+        use_ddim: bool = True,
+        num_ddim_steps: int = 50,
+        eta: float = 0.0,
+        cfg_scale: Optional[float] = None,
+        verbose: bool = False,
+        decoder_method: str = "mean",
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        """DiT inference: same BV layout as training; scheduler still steps (B, V, H, W) noise."""
+        B = past.shape[0]
+        V = self.config.num_variables
+        H = self.config.image_height
+        device = past.device
+        BV = B * V
+        if cfg_scale is None:
+            cfg_scale = self.config.cfg_scale
+
+        past_norm, _, stats = self._normalize_sequence(past)
+        past_2d = self.encode_to_2d(past_norm)
+        W_fut = self.config.forecast_length
+
+        past_flat = past_2d.reshape(BV, 1, H, past_2d.shape[3])
+        cond_full = past_flat[:, :, :, -W_fut:] if past_flat.shape[3] >= W_fut else F.interpolate(past_flat, size=(H, W_fut), mode="bilinear", align_corners=False)
+        null_cond = torch.zeros_like(cond_full) if cfg_scale > 1.0 else None
+
+        guidance_2d = None
+        if self.config.use_guidance_channel:
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            guidance_2d = self.encode_to_2d(guidance_forecast_norm, scale_for_diffusion=True)
+        guide_flat = guidance_2d.reshape(BV, 1, H, W_fut) if guidance_2d is not None else None
+        null_guide = torch.zeros_like(guide_flat) if (guide_flat is not None and cfg_scale > 1.0) else None
+
+        ctx = None if self.config.disable_cross_attention else self._get_cross_variate_context(past)
+        ctx_flat = None
+        if ctx is not None:
+            ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
+        null_ctx = torch.zeros_like(ctx_flat) if (ctx_flat is not None and cfg_scale > 1.0) else None
+
+        def _build_x(x_mv: torch.Tensor, use_null: bool = False) -> torch.Tensor:
+            x_flat = x_mv.reshape(BV, 1, H, W_fut)
+            c = self._inject_coordinate_channel(x_flat)
+            c = self._inject_time_channels(c)
+            if guide_flat is not None:
+                g = null_guide if use_null else guide_flat
+                c = torch.cat([c, g], dim=1)
+            return c
+
+        def model_fn(x_mv: torch.Tensor, t_batch: torch.Tensor, cond_arg: torch.Tensor) -> torch.Tensor:
+            t_flat = t_batch.unsqueeze(1).expand(-1, V).reshape(BV)
+            cond_flat = cond_arg.reshape(BV, 1, H, W_fut)
+            if cfg_scale <= 1.0:
+                return self.noise_predictor(
+                    _build_x(x_mv, use_null=False),
+                    t_flat,
+                    cond_flat,
+                    encoder_hidden_states=ctx_flat,
+                ).reshape(B, V, H, W_fut)
+            out_c = self.noise_predictor(
+                _build_x(x_mv, use_null=False),
+                t_flat,
+                cond_flat,
+                encoder_hidden_states=ctx_flat,
+            )
+            out_u = self.noise_predictor(
+                _build_x(x_mv, use_null=True),
+                t_flat,
+                null_cond,
+                encoder_hidden_states=null_ctx,
+            )
+            return (out_u + cfg_scale * (out_c - out_u)).reshape(B, V, H, W_fut)
+
+        noise_shape = (B, V, H, W_fut)
+
+        if use_ddim:
+            future_2d = self.scheduler.sample_ddim_cfg(
+                model=model_fn,
+                shape=noise_shape,
+                cond=cond_full,
+                null_cond=null_cond,
+                cfg_scale=1.0,
+                num_steps=num_ddim_steps,
+                eta=eta,
+                device=device,
+                verbose=verbose,
+            )
+        else:
+            future_2d = self.scheduler.sample_ddpm_cfg(
+                model=model_fn,
+                shape=noise_shape,
+                cond=cond_full,
+                null_cond=null_cond,
+                cfg_scale=1.0,
+                device=device,
+                verbose=verbose,
+            )
+
+        future_norm = self.decode_from_2d(future_2d, decoder_method=decoder_method, **kwargs)
+        future = self._denormalize(future_norm, stats)
+
+        K = self.config.lookback_overlap
+        if K > 0:
+            future = future[..., K:]
+            future_norm = future_norm[..., K:]
+
+        result = {
+            "prediction": future,
+            "prediction_norm": future_norm,
+            "future_2d": future_2d,
+            "past_2d": past_2d,
+        }
+        if guidance_2d is not None:
+            result["guidance_2d"] = guidance_2d
         return result
 
     def get_loss(
