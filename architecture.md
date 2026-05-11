@@ -2,7 +2,7 @@
 
 Companion to `gaussian_pipeline_extreme_walkthrough.md`. This document is **implementation-first**: it traces tensors, names every major submodule down to layer lists, indexes U-Net levels precisely, and records defaults from `DiffusionTSFConfig` as of the repo state when this file was written.
 
-**Scope:** Gaussian diffusion, variate-factorized path (e.g. ETTh2 with `--n-variates 7`), Slurm chain `slurm_etth2_compare.sh`. Binary diffusion and latent-only branches are out of scope except where code is shared.
+**Scope:** Gaussian diffusion, multi-channel U-Net path (all V variates as channels of a single forward pass, e.g. ETTh2 with `--n-variates 7`), Slurm chain `slurm_etth2_compare.sh`. Binary diffusion and latent-only branches are out of scope except where code is shared.
 
 ---
 
@@ -251,81 +251,47 @@ Registered buffer `bin_centers` exists for diagnostics / compatibility; forward 
 
 This section explains how the main model object is assembled when we are in the Gaussian image-diffusion route (not the transformer-only route).
 
-Important current behavior (to avoid old mental models):
-- We do **not** denoise all variates as parallel U-Net channels.
-- In factorized multivariate mode, the U-Net runs on `(BV, 1, H, W)` (one variate-map per sample), with shared weights.
-- Cross-variate information is injected through `encoder_hidden_states` into hybrid attention blocks concentrated in deeper levels and the middle block (near bottleneck).
+Important current behavior:
+- All V variates ride along as **channels** of a single U-Net forward pass (RGB-style). Input shape into the U-Net is `(B, V + aux + V_guidance, H, W_fut)`, output is `(B, V, H, W_fut)`.
+- Cross-variate information enters through (a) the V channels mixing in every conv/attention layer, and (b) `encoder_hidden_states` cross-attention to V context tokens from `iTransformerTokenAdapter` at every level in `attention_levels` and the middle block.
 
-### 6.0 First branch: which model family are we building?
+### 6.1 Channel accounting from `DiffusionTSFConfig`
 
-Inside the model setup logic, there is an early branch:
-- If `config.model_type == "transformer"`, code builds `DiffusionTransformer`.
-- Otherwise, we build the Gaussian `DiffusionTSF` pipeline with U-Net.
+`num_variables=V` is the variate count. Channel counts scale with V:
 
-Why this branch matters:
-- The rest of this document assumes we are in the U-Net image diffusion path.
-- If you accidentally run transformer mode, many tensors and channels described below will not exist in the same way.
+1. `backbone_in_channels` = `V + num_aux_channels + (V if use_guidance_channel else 0)`.
+   - First `V`: noisy future occupancy maps, one channel per variate.
+   - `num_aux_channels`: shared aux channels (coordinate ramp, time ramp, sine) broadcast across all variates — these are 1 channel each regardless of V.
+   - Trailing `V`: iTransformer guidance ghost channels, one per variate, when enabled.
 
-### 6.1 Channel accounting from `DiffusionTSFConfig` (what each channel means)
+2. `visual_cond_channels` = `V (+ 1 if use_value_channel else 0)`.
+   - Past-tail occupancy map per variate (interpolated to W_fut), concatenated on the channel axis inside the U-Net's `init_conv`.
 
-In variate-factorized multivariate mode (common ETTh2 style), each variate is treated almost like its own mini-image diffusion problem, while still allowing cross-variate context.
-
-Core config flags:
-- `variate_factorized=True`: process each variate map as a separate sample in the U-Net forward.
-- `num_variables=V`: number of variates (features) in the time series.
-
-Now define channel counts carefully:
-
-1. `backbone_in_channels`  
-   Formula: `1 + num_aux_channels + (1 if use_guidance_channel else 0)`.
-   - Base `1`: the noisy future occupancy map for one variate.
-   - `num_aux_channels`: optional helper channels (coordinate ramp, time ramp, value hints, etc.).
-   - Optional `+1`: iTransformer guidance ghost channel, if enabled.
-
-2. `visual_cond_channels`  
-   Usually:
-   - `1` for the past-tail occupancy condition map.
-   - Optional +1 for value-channel variants (if enabled).
-
-3. `out_channels`  
-   For Gaussian diffusion this is `1`, because the U-Net predicts one noise field (`epsilon`) per variate map.
-
-4. `cond_in_channels` passed internally  
-   Set as `backbone_in_channels - guidance_channels`.
-   Why: in certain conditioning modes, the conditioning encoder should not receive guidance-only channels that are meant for another role.
+3. `out_channels` = `V`. The U-Net emits one predicted-epsilon field per variate.
 
 Why so much bookkeeping:
 - In diffusion models, a wrong channel count usually does not fail immediately in a readable way; it often appears later as shape mismatch.
-- Reading this section first makes debugging much easier.
 
 ### 6.2 Which context encoder gets created?
 
 `DiffusionTSF` uses `iTransformerTokenAdapter` as the sole context encoder for the U-Net.
 
-Constructor behavior in U-Net mode:
+Constructor behavior:
 - Build `iTransformerTokenAdapter(d_model=itrans_d_model, context_dim=context_embedding_dim)`.
 - Input: raw past `(B, V, L)` fed through the frozen iTransformer encoder → `(B, V, d_model)`, then projected + variate-identity-embedded → `(B, V, context_dim)`.
-- Output tokens: `(B, V, context_dim)`, one token per variate.
-- Works for `V=1` as well (cross-variate attention degenerates to one token, variate identity still applies).
+- Output tokens: `(B, V, context_dim)`, one token per variate, passed directly as `encoder_hidden_states` to every `SpatialTransformerBlock` (no broadcasting needed because there's only one U-Net pass per sample).
 
 Why this exists:
-- 2D occupancy conditioning is strong at local geometric structure.
-- Cross-attention tokens add a separate symbolic context stream carrying iTransformer's rich lookback representation, complementary to the forecast ghost image.
-- In factorized mode this is especially useful: each variate map is denoised with shared U-Net weights, while cross-variate coupling is reintroduced through those variate tokens at attention blocks/bottleneck.
+- The 2D guidance ghost channels carry the iTransformer's coarse **forecast** as pixels.
+- Cross-attention tokens carry the iTransformer's **lookback** representation in token form, complementary to the pixel ghost.
 
-Repo-root shell script default behavior:
-- The root Slurm wrappers call `models.diffusion_tsf.train_multivariate_pipeline`.
-- In this code path, U-Net runs with factorized diffusion and `iTransformerTokenAdapter` context.
-
-### 6.3 `_forward_factorized`: full tensor trail and why each object exists
-
-We now walk one training forward pass in factorized mode.
+### 6.3 `_forward_multichannel`: full tensor trail
 
 Symbols used:
 - `B`: batch size.
 - `V`: number of variates.
 - `H`: image height (`config.image_height`, value-bin axis).
-- `W_fut`: future width in 2D image space (usually forecast length, adjusted by overlap/unified axis logic).
+- `W_fut`: future width in 2D image space (forecast length + lookback_overlap).
 - `T`: total diffusion steps (`config.num_diffusion_steps`).
 
 Step-by-step:
@@ -369,32 +335,29 @@ Step-by-step:
    Why:
    - Lets each per-variate denoising path attend to summary tokens from all variates.
 
-7. Flatten `(B, V)` into one dimension for the U-Net batch.
-   - `BV = B * V`.
-   - `canvas = noisy_future.reshape(BV, 1, H, W_fut)`.
-   - Inject aux channels and optional guidance to reach `backbone_in_channels`.
+7. Build the canvas — V noisy channels + aux + V guidance channels.
+   - `canvas = noisy_future` of shape `(B, V, H, W_fut)`.
+   - Inject coordinate channel (1 channel, shared across variates).
+   - Inject time_ramp / time_sine channels if enabled (1 each, shared).
+   - If `use_guidance_channel`: `canvas = torch.cat([canvas, guidance_2d], dim=1)` where `guidance_2d` is `(B, V, H, W_fut)`. Total channels = `backbone_in_channels = V + aux + V`.
    Why:
-   - Reusing one shared U-Net over `BV` samples is simpler and memory-efficient compared to separate model copies per variate.
+   - One U-Net pass denoises every variate simultaneously; the V output channels can interact through every conv and attention layer.
 
 8. Prepare visual conditioning map.
-   - `past_tail = past_norm[..., -W_fut:]`.
-   - `past_2d_cond = encode_to_2d(past_tail)`.
-   - reshape to `(BV, 1, H, W_fut)`, with dropout rules.
+   - `cond_for_unet = F.interpolate(past_2d, size=(H, W_fut), mode='bilinear')` → `(B, V, H, W_fut)`.
+   - CFG dropout zeros the entire conditioning (all V channels) and the ctx tokens and the guidance channels with the same per-sample mask.
    Why:
-   - The model conditions on recent past geometry aligned to future width.
+   - Conditioning is dropped jointly so the unconditional branch sees a fully blank context, matching what CFG inference expects.
 
-9. Flatten cross-attention tokens when present.
-   - `ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, context_dim)`.
+9. Cross-attention tokens.
+   - `ctx = (B, V, context_dim)` from `iTransformerTokenAdapter` — passed straight to the U-Net as `encoder_hidden_states`, no broadcasting.
    Semantics:
-   - For each of the `BV` denoising items, token memory contains all `V` variate tokens.
-   Why:
-   - Each denoising stream can use cross-variate relationships even though visual input is factorized.
+   - Every `SpatialTransformerBlock` cross-attends over those V tokens regardless of which output channel it is producing.
 
-10. U-Net forward and reshape back.
-    - `noise_pred_flat = noise_predictor(canvas, t_flat, cond_for_unet, encoder_hidden_states=ctx_flat)`.
-    - reshape to `(B, V, H, W_fut)`.
+10. U-Net forward.
+    - `noise_pred = noise_predictor(canvas, t, cond_for_unet, encoder_hidden_states=ctx)` → `(B, V, H, W_fut)`.
     Meaning:
-    - Predicted epsilon (`epsilon_theta`) at each spatial location.
+    - Predicted epsilon (`epsilon_theta`) per variate, per spatial location.
 
 Loss components:
 - `noise_loss`: MSE between predicted epsilon and true epsilon.
@@ -425,7 +388,7 @@ Important defaults:
 - `num_groups=8`: GroupNorm groups.
 - `kernel_size=(3,3)`: local convolution support over (value-axis, time-axis).
 - `conditioning_mode="visual_concat"` in default pipeline.
-- Cross-attention route is provided by `iTransformerTokenAdapter` in the factorized U-Net path.
+- Cross-attention route is provided by `iTransformerTokenAdapter`.
 
 Why this layout:
 - It is a standard, strong tradeoff for medium-sized diffusion tasks.
@@ -499,32 +462,19 @@ convolutions are sufficient at full resolution and it keeps cost down.
 Cross-attention runs *after* self-attention inside every `SpatialTransformerBlock`.
 Its keys and values come from `encoder_hidden_states`, not from the feature map.
 
-In factorized multivariate mode, the U-Net predicts one target variate per forward path
-(implemented as flattening `(B, V, ...) -> (B*V, ...)` with shared weights). It is **not**
-an all-variates-at-once output head.
+The U-Net runs once per sample with all V variates living as channels. The output
+head emits all V predicted-noise channels in a single forward — **all variates at once**.
 
-Cross-variate information is still global: `encoder_hidden_states` comes from
-`iTransformerTokenAdapter`, which emits one token per variate `(B, V, context_dim)`.
-Before the U-Net call that tensor is broadcast so every variate slot gets all V tokens:
-
-```python
-ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
-# (B, V, ctx_dim)  →  (B*V, V, ctx_dim)
-```
-
-So each target variate's `H×W` spatial queries attend over V keys/values — one compact
-stat summary per variate. If `encoder_hidden_states` is `None` (e.g. univariate), the
-cross-attention step is skipped and the block acts as self-attention only.
-
-With the current pipeline defaults, the token source is the iTransformer normalized
-forecast (`guidance_forecast_norm`), not raw past values. The raw past is only a fallback
-when no guidance forecast is present.
+`encoder_hidden_states` is `(B, V, context_dim)` straight from `iTransformerTokenAdapter`
+— one token per variate. There is no `B*V` flattening or broadcasting. Every
+`SpatialTransformerBlock`'s `H*W` spatial queries attend over those V keys/values; the
+queries themselves contain mixed information from all V channels through the preceding
+convolutions and self-attention. If `encoder_hidden_states` is `None`, cross-attention is
+skipped and the block acts as self-attention only.
 
 Guidance enters in two distinct paths:
-- **2D guidance channel (U-Net input):** one ghost CDF map for the **same target variate**
-  is concatenated to that variate's noisy-future canvas (`(BV, 1, H, W_fut)` append).
-- **Cross-attention tokens:** summary stats from **all V variates'** iTransformer forecast
-  become the `V` context tokens each target variate attends to.
+- **2D guidance channels (U-Net input):** `V` ghost CDF maps (one per variate) are concatenated to the V noisy-future channels, giving the U-Net a per-variate forecast prior at the pixel level.
+- **Cross-attention tokens:** the V iTransformer-encoder tokens carry per-variate lookback structure that pixels cannot convey.
 
 Cross-attention is applied in every `SpatialTransformerBlock` (selected down/up levels and
 always in the middle block), not only in a single bottleneck call site.
@@ -589,7 +539,7 @@ The U-Net path uses `iTransformerTokenAdapter` for cross-attention context token
 ### 8.1 `iTransformerTokenAdapter` — default for guided multivariate runs
 
 **What problem it is solving.**
-In the factorized setup there are V separate U-Net forward passes (one per variate). Each pass only sees that variate's occupancy image. The encoder's job is to give every one of those passes a rich, read-only summary of all the other variates. The previous approach (§8.1 legacy) computed crude 3-stat summaries over the iTransformer's *horizon predictions*, then ran a second cross-variate transformer over those. This was doubly redundant: the iTransformer already does deep cross-variate attention internally over the *lookback*, and the forecast ghost image (§9.2 Place 1) already feeds the horizon predictions into the U-Net as pixels.
+In the multi-channel setup the U-Net runs once per sample with V channels in and V channels out. Mixing across variates happens implicitly through every conv and self-attention layer, but the cross-attention tokens still provide a separate symbolic stream summarizing each variate's lookback. The previous approach (§8.1 legacy) computed crude 3-stat summaries over the iTransformer's *horizon predictions*, then ran a second cross-variate transformer over those. This was doubly redundant: the iTransformer already does deep cross-variate attention internally over the *lookback*, and the forecast ghost image (§9.2 Place 1) already feeds the horizon predictions into the U-Net as pixels.
 
 The new approach taps the iTransformer's internal encoder output directly, before its linear projector collapses to the horizon dimension.
 
@@ -615,18 +565,13 @@ Reduces from `d_model=512` to `context_dim=256`. Chosen as a middle ground — r
 ids = torch.arange(V, device=x.device)
 x = x + variate_embed(ids)                         # (B, V, 256)
 ```
-A learned `nn.Embedding(max_variates=512, context_dim)`. Since the factorized U-Net processes one variate per forward pass, each pass's context tokens would otherwise be permutation-equivalent from the model's perspective. The identity embedding lets the diffusion model learn variate-specific refinements (e.g., "variate 3 tends to have sharper peaks").
+A learned `nn.Embedding(max_variates=512, context_dim)`. Without it the V cross-attention tokens would be exchangeable from the model's perspective; the identity embedding lets the diffusion model learn variate-specific refinements (e.g., "variate 3 tends to have sharper peaks") even though the U-Net output channels themselves are also indexed by variate.
 
 **Step 4 — Dropout + LayerNorm and done.**
 Output: `(B, V, 256)` — one 256-d token per variate, carrying rich iTransformer lookback structure plus identity.
 
 **What the U-Net does with this.**
-As shown in §7.6, before calling the U-Net the code replicates this tensor so every variate slot in the `B*V` batch gets the full V-token sequence:
-```python
-ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
-# (B*V, V, 256) — every variate's U-Net pass can cross-attend to all V tokens
-```
-The U-Net cross-attention then uses the `H*W` spatial feature tokens as queries and these V tokens as keys/values at every `SpatialTransformerBlock` that is switched on.
+The `(B, V, 256)` tensor is passed directly to the U-Net as `encoder_hidden_states`. At every active `SpatialTransformerBlock`, the `H*W` spatial feature tokens act as queries and these V tokens as keys/values.
 
 **When `get_encoder_tokens` is called.**
 Both training and inference call `_get_cross_variate_context(..., past_raw=past)` once, before any U-Net calls. The resulting `ctx_flat` is captured by closure and reused across all DDIM steps — zero redundant computation.
@@ -656,14 +601,14 @@ With guidance always enabled in the current pipeline, the iTransformer output is
 
 **Place 1 — extra input channel to the U-Net ("ghost image")**
 
-The coarse forecast `(B, V, forecast_length)` is z-score normalized with the same per-sequence stats used for the diffusion target, then converted to a 2D CDF occupancy map by the same `encode_to_2d` function. In factorized mode this gives a `(B*V, 1, H, W_fut)` image that is concatenated onto the U-Net input canvas alongside the noisy future and the past visual conditioning:
+The coarse forecast `(B, V, forecast_length)` is z-score normalized with the same per-sequence stats used for the diffusion target, then converted to a 2D CDF occupancy map by the same `encode_to_2d` function. This yields a `(B, V, H, W_fut)` image that is concatenated onto the V noisy-future channels:
 
 ```python
 if guidance_2d is not None:
-    canvas = torch.cat([canvas, guidance_2d.reshape(BV, 1, H, W_fut)], dim=1)
+    canvas = torch.cat([canvas, guidance_2d], dim=1)  # (B, V+aux+V, H, W_fut)
 ```
 
-This adds one extra input channel, so `backbone_in_channels` includes the guidance channel in this path. The U-Net literally sees the iTransformer's prediction as a pixel image sitting next to the noisy occupancy map it is trying to denoise.
+This adds V extra input channels (one per variate), so `backbone_in_channels = V + aux + V`. The U-Net literally sees the iTransformer's prediction as a stack of pixel images sitting next to the noisy occupancy maps it is trying to denoise.
 
 **Place 2 — input to `iTransformerTokenAdapter` (cross-attention tokens)**
 
@@ -695,7 +640,7 @@ The same two-place injection happens at inference. Both the forecast (for the gh
 ```
 Current pipeline behavior:
   1. iTransformer runs on the raw past → enc_out (B, V, d_model) + coarse forecast (B, V, F)
-  2. Forecast → 2D occupancy image → extra channel on the U-Net input canvas  [Place 1]
+  2. Forecast → 2D occupancy image → V extra channels on the U-Net input canvas  [Place 1]
   3. enc_out → iTransformerTokenAdapter (project + variate embed) → cross-attention tokens  [Place 2]
      (lookback structure in tokens; forecast structure in pixels — complementary signals)
 ```
@@ -703,23 +648,19 @@ Current pipeline behavior:
 
 ---
 
-## 10) Inference path (`generate` in factorized mode), with intent behind each step
+## 10) Inference path (`generate`), with intent behind each step
 
 At inference we do iterative denoising, usually with DDIM.
 
 Flow:
-1. Normalize past window and build conditioning objects (visual condition + optional context tokens + optional CFG null condition).
-2. Build factorized inference batch and initialize latent noise:
-   - Flatten variates into batch: `BV = B * V`.
-   - Start DDIM state as `x ~ N(0, I)` with shape `(BV, 1, H, W_fut)`.
-   - Keep cross-variate context tokens separately (typically shaped from `(B, V, ctx_dim)` to `(BV, V, ctx_dim)`).
+1. Normalize past window and build conditioning objects (V-channel visual condition + context tokens + optional CFG null condition).
+2. Initialize latent noise at shape `(B, V, H, W_fut)`.
 3. Run DDIM loop from high noise to low noise:
-   - Build per-step canvas similarly to training (same aux/guidance channel injections on top of the single-variate noisy map).
-   - Predict noise with shared U-Net weights for each of the `BV` streams.
-   - Inject cross-variate information through `encoder_hidden_states` at hybrid attention sites near the bottleneck/deep levels.
+   - Build per-step canvas: V noisy channels + aux channels + V guidance channels.
+   - Predict noise in a single U-Net pass, yielding `(B, V, H, W_fut)`.
+   - Cross-attention to `(B, V, ctx_dim)` tokens at every active `SpatialTransformerBlock`.
    - Apply DDIM update to move toward cleaner sample.
-4. Reshape sampled output back from `(BV, 1, H, W_fut)` to `(B, V, H, W_fut)`.
-5. Decode final 2D CDF map back to 1D future with `decode_from_2d`.
+4. Decode the final `(B, V, H, W_fut)` 2D map back to 1D future with `decode_from_2d`.
 
 Classifier-free guidance details:
 - Training side uses `cfg_dropout` to create unconditional exposure.
@@ -736,8 +677,7 @@ These are default values from `DiffusionTSFConfig` referenced in the original wa
 - `forecast_length=96`: target horizon length.
 - `lookback_overlap=8`: overlap handling for lookback/future boundaries.
 - `past_loss_weight=0.3`: weighting for overlap-related loss partition logic.
-- `num_variables=1` default baseline; multivariate runs override it.
-- `variate_factorized=True`: process variates via factorized route.
+- `num_variables=1` default baseline; multivariate runs override it. All V variates are processed as channels in a single multi-channel U-Net pass.
 
 ### 12.2 2D representation
 - `image_height=64`: number of vertical value bins in occupancy map.
