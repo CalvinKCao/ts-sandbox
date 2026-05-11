@@ -108,7 +108,7 @@ Each batch job sources a generated preamble that:
 
 - **Entry:** `finetune_hp_objective` via Optuna in `_finetune_and_eval_one_subset` (and equivalent loop in `run_pipeline`)
 - **Trials:** `N_FINETUNE_HP_TRIALS` (defaults to **3** in code — distinct from pretrain diffusion HP trials); logs explicitly label this as finetune-phase tuning so it is not confused with `N_DIFFUSION_HP_TRIALS`
-- **Search space:** `learning_rate` only — batch size is **auto-probed once** (`select_diffusion_batch_size`) before trials and fixed for all trials
+- **Search space:** `learning_rate` only (log-uniform on `[FINETUNE_HP_LR_MIN, FINETUNE_HP_LR_MAX]` in `pipeline_config.py`, currently **3e‑6–2e‑4**) — batch size is **auto-probed once** (`select_diffusion_batch_size`) before trials and fixed for all trials
 - **Starting model:** pretrained `diffusion.pt` from Phase **1B**
 - **Guidance:** `{subset_id}_itransformer_finetuned.pt` from Phase 2A (not the pretrained one)
 - **Per-trial training:** `HP_TUNE_EPOCHS` with early stop

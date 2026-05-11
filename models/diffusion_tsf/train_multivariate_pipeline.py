@@ -681,12 +681,15 @@ from models.diffusion_tsf.pipeline_config import (
     DIFFUSION_PROBE_MAX_BATCH_CAP,
     DIFFUSION_PROBE_MIN_BATCH,
     FINETUNE_BATCH_SIZES,
+    FINETUNE_HP_LR_MIN,
+    FINETUNE_HP_LR_MAX,
     diffusion_probe_max_candidate,
     USE_AMP,
     USE_GRADIENT_CHECKPOINTING,
     UNET_MAX_CHUNK_SIZE,
     UNET_CHANNELS,
     ATTENTION_LEVELS,
+    DISABLE_CROSS_ATTENTION,
     GUIDANCE_PENALTY_WEIGHT,
     EVAL_NUM_SAMPLES,
     resolve_pretrain_virtual_dataset_size,
@@ -943,6 +946,7 @@ def create_diffusion_model(
         model_type="unet",
         unet_channels=UNET_CHANNELS,
         attention_levels=ATTENTION_LEVELS,
+        disable_cross_attention=DISABLE_CROSS_ATTENTION,
         num_res_blocks=2,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
@@ -2026,7 +2030,9 @@ def finetune_hp_objective(
     the best study trial and promotes its file to the final ``best.pt`` — no
     separate "Phase 2C" retrain is performed.
     """
-    lr = trial.suggest_float('learning_rate', 1e-6, 1e-4, log=True)
+    lr = trial.suggest_float(
+        'learning_rate', FINETUNE_HP_LR_MIN, FINETUNE_HP_LR_MAX, log=True,
+    )
     if fixed_batch_size is not None:
         batch_size = fixed_batch_size
     else:
@@ -3317,7 +3323,7 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
-    global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, LOOKBACK_LENGTH, FORECAST_LENGTH
+    global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION, LOOKBACK_LENGTH, FORECAST_LENGTH
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3356,6 +3362,8 @@ def main():
                         help='Comma-separated UNet channels (e.g. 64,128,256)')
     parser.add_argument('--attention-levels', type=str, default=None,
                         help='Comma-separated attention levels (e.g. 1,2)')
+    parser.add_argument('--disable-cross-attention', action='store_true',
+                        help='Disable cross-variate attention completely (creates a 100% univariate baseline)')
     parser.add_argument('--lookback-length', type=int, default=LOOKBACK_LENGTH,
                         help='Override lookback length')
     parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH,
@@ -3383,8 +3391,10 @@ def main():
     IMAGE_HEIGHT = args.image_height
     if args.unet_channels:
         UNET_CHANNELS = [int(x.strip()) for x in args.unet_channels.split(',') if x.strip()]
-    if args.attention_levels:
+    if args.attention_levels is not None:
         ATTENTION_LEVELS = [int(x.strip()) for x in args.attention_levels.split(',') if x.strip()]
+    if args.disable_cross_attention:
+        DISABLE_CROSS_ATTENTION = True
     LOOKBACK_LENGTH = args.lookback_length
     FORECAST_LENGTH = args.forecast_length
     

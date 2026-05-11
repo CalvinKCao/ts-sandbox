@@ -738,7 +738,7 @@ class DiffusionTSF(nn.Module):
             guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
             guidance_2d = self.encode_to_2d(guidance_forecast_norm, scale_for_diffusion=True)
 
-        ctx = self._get_cross_variate_context(past)
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
         # ctx: (B, V, ctx_dim) or None
 
         # flatten variates into batch dim for shared-weight U-Net
@@ -870,7 +870,7 @@ class DiffusionTSF(nn.Module):
         null_guide = torch.zeros_like(guide_flat) if (guide_flat is not None and cfg_scale > 1.0) else None
 
         # cross-variate context tokens — fixed for entire sampling trajectory
-        ctx = self._get_cross_variate_context(past)
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
         ctx_flat      = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
         null_ctx_flat = torch.zeros_like(ctx_flat) if (ctx_flat is not None and cfg_scale > 1.0) else None
 

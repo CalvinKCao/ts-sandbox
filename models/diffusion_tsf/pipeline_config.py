@@ -50,6 +50,7 @@ PAST_LOSS_WEIGHT: float = 0.3
 IMAGE_HEIGHT: int = 64
 UNET_CHANNELS: List[int] = [64, 128, 256]
 ATTENTION_LEVELS: List[int] = [2]
+DISABLE_CROSS_ATTENTION: bool = False
 
 USE_AMP: bool = True               # bfloat16 mixed precision
 USE_GRADIENT_CHECKPOINTING: bool = True
@@ -133,6 +134,9 @@ ITRANS_REAL_COLD_START: bool = True
 N_FINETUNE_HP_TRIALS: int = 3
 HP_TUNE_EPOCHS: int = 10
 HP_TUNE_PATIENCE: int = 5
+# Optuna log-uniform bounds for Phase 2B only (finetune_hp_objective).
+FINETUNE_HP_LR_MIN: float = 3e-6
+FINETUNE_HP_LR_MAX: float = 2e-4
 
 
 # ---- Batch-size search grids ------------------------------------------------------

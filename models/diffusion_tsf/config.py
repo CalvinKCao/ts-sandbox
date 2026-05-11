@@ -57,6 +57,7 @@ class DiffusionTSFConfig:
     # this is now the only supported U-Net mode.
     # ignored for V=1 (no-op). cross-attn tokens are always produced when V>1.
     variate_factorized: bool = True
+    disable_cross_attention: bool = False
     
     # 2d mapping
     image_height: int = 64  # height of 2d rep (64 is faster)
