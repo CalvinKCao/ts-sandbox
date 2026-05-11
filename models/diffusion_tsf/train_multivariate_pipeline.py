@@ -689,6 +689,13 @@ from models.diffusion_tsf.pipeline_config import (
     UNET_CHANNELS,
     ATTENTION_LEVELS,
     DISABLE_CROSS_ATTENTION,
+    MODEL_TYPE,
+    DIT_PATCH_SIZE,
+    DIT_EMBED_DIM,
+    DIT_DEPTH,
+    DIT_NUM_HEADS,
+    DIT_MLP_RATIO,
+    DIT_DROPOUT,
     GUIDANCE_PENALTY_WEIGHT,
     EVAL_NUM_SAMPLES,
     resolve_pretrain_virtual_dataset_size,
@@ -942,10 +949,17 @@ def create_diffusion_model(
         use_guidance_channel=True,
         guidance_penalty_weight=guidance_penalty_weight,
         num_diffusion_steps=1000,
+        model_type=MODEL_TYPE,
         unet_channels=UNET_CHANNELS,
         attention_levels=ATTENTION_LEVELS,
         disable_cross_attention=DISABLE_CROSS_ATTENTION,
         num_res_blocks=2,
+        dit_patch_size=DIT_PATCH_SIZE,
+        dit_embed_dim=DIT_EMBED_DIM,
+        dit_depth=DIT_DEPTH,
+        dit_num_heads=DIT_NUM_HEADS,
+        dit_mlp_ratio=DIT_MLP_RATIO,
+        dit_dropout=DIT_DROPOUT,
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         use_amp=USE_AMP,
     )
@@ -3321,6 +3335,7 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
     global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION, LOOKBACK_LENGTH, FORECAST_LENGTH
+    global MODEL_TYPE
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3360,7 +3375,9 @@ def main():
     parser.add_argument('--attention-levels', type=str, default=None,
                         help='Comma-separated attention levels (e.g. 1,2)')
     parser.add_argument('--disable-cross-attention', action='store_true',
-                        help='Disable cross-variate attention completely (creates a 100% univariate baseline)')
+                        help='Disable cross-variate attention (fully univariate baseline)')
+    parser.add_argument('--model-type', type=str, default=None, choices=['unet', 'dit'],
+                        help="Diffusion backbone: 'unet' (default) or 'dit'")
     parser.add_argument('--lookback-length', type=int, default=LOOKBACK_LENGTH,
                         help='Override lookback length')
     parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH,
@@ -3392,6 +3409,8 @@ def main():
         ATTENTION_LEVELS = [int(x.strip()) for x in args.attention_levels.split(',') if x.strip()]
     if args.disable_cross_attention:
         DISABLE_CROSS_ATTENTION = True
+    if args.model_type is not None:
+        MODEL_TYPE = args.model_type
     LOOKBACK_LENGTH = args.lookback_length
     FORECAST_LENGTH = args.forecast_length
     

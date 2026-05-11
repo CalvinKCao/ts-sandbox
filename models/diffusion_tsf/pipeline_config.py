@@ -26,7 +26,19 @@ What this file does NOT cover (still picked per run on the CLI):
     - run mode (`--smoke-test`, `--seed`, `--resume`, `--ddp`, `--wandb`, `--fresh`)
 """
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
+
+
+# ---- Backbone --------------------------------------------------------------------
+
+MODEL_TYPE: str = "unet"
+
+DIT_PATCH_SIZE: Tuple[int, int] = (8, 8)
+DIT_EMBED_DIM: int = 384
+DIT_DEPTH: int = 8
+DIT_NUM_HEADS: int = 6
+DIT_MLP_RATIO: float = 4.0
+DIT_DROPOUT: float = 0.0
 
 
 # ---- Sequence / window lengths ---------------------------------------------------

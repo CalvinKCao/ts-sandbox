@@ -116,6 +116,16 @@ class DiffusionTSFConfig:
     # penalty for deviating from itransformer guidance ghost image
     guidance_penalty_weight: float = 0.0
 
+    # backbone: "unet" or "dit" (FactorizedDiT; works for multi-channel layout)
+    model_type: str = "unet"
+
+    dit_patch_size: Tuple[int, int] = (8, 8)
+    dit_embed_dim: int = 384
+    dit_depth: int = 8
+    dit_num_heads: int = 6
+    dit_mlp_ratio: float = 4.0
+    dit_dropout: float = 0.0
+
     # memory optimization flags
     use_gradient_checkpointing: bool = False
     use_amp: bool = False  # bfloat16 mixed precision
@@ -149,7 +159,9 @@ class DiffusionTSFConfig:
         assert self.noise_schedule in ["linear", "cosine", "sigmoid", "quadratic"]
         assert 0 <= self.cutout_prob <= 1
         assert self.representation_mode in ["pdf", "cdf"]
-        
+        if self.model_type not in ("unet", "dit"):
+            raise ValueError(f"model_type must be 'unet' or 'dit', got {self.model_type!r}")
+
     @property
     def bin_width(self) -> float:
         """width of each bin."""

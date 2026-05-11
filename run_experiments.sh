@@ -18,7 +18,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SB_OUT='results/bootstrap/%x-%j.out'
     SB_ERR='results/bootstrap/%x-%j.err'
 
-    DATASETS=("weather" "exchange_rate")
+    DATASETS=("weather" "exchange_rate" "ETTm1")
     
     IS_SMOKE=0
     if [ "${1:-}" = "--smoke-test" ]; then
@@ -30,7 +30,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         WALLTIME="24:00:00"
         if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
-        for scenario in "attn-bottleneck" "100pct-univariate"; do
+        for scenario in "attn-bottleneck" "100pct-univariate" "dit"; do
             JOB_NAME="${scenario}-${DS_TAG}"
             [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
 
@@ -153,6 +153,7 @@ echo "Running Python Pipeline..."
 TARGET_DIM=7
 if [ "$DATASET" = "weather" ]; then TARGET_DIM=21; fi
 if [ "$DATASET" = "exchange_rate" ]; then TARGET_DIM=8; fi
+if [ "$DATASET" = "ETTm1" ] || [ "$DATASET" = "ETTh1" ] || [ "$DATASET" = "ETTh2" ] || [ "$DATASET" = "ETTm2" ]; then TARGET_DIM=7; fi
 if [ "$DATASET" = "electricity" ]; then TARGET_DIM=321; fi
 if [ "$DATASET" = "traffic" ]; then TARGET_DIM=862; fi
 
@@ -161,6 +162,8 @@ if [ "$SCENARIO" == "attn-bottleneck" ]; then
     SCENARIO_ARGS=(--attention-levels "1" --subset-id "attn-bottleneck-pen-0.2")
 elif [ "$SCENARIO" == "100pct-univariate" ]; then
     SCENARIO_ARGS=(--disable-cross-attention --subset-id "100pct-univariate-pen-0.2")
+elif [ "$SCENARIO" == "dit" ]; then
+    SCENARIO_ARGS=(--model-type dit --subset-id "dit-pen-0.2")
 else
     echo "Unknown scenario: $SCENARIO"
     exit 1

@@ -19,6 +19,7 @@ from typing import Dict, Optional, Tuple, Union
 from .config import DiffusionTSFConfig
 from .preprocessing import TimeSeriesTo2D, VerticalGaussianBlur
 from .unet import ConditionalUNet2D, iTransformerTokenAdapter
+from .dit import FactorizedDiT
 from .diffusion import DiffusionScheduler
 from .guidance import GuidanceModel, LinearRegressionGuidance
 from .metrics import monotonicity_loss
@@ -188,19 +189,35 @@ class DiffusionTSF(nn.Module):
         # Output: V predicted-noise channels
         backbone_in_channels = config.backbone_in_channels
 
-        self.noise_predictor = ConditionalUNet2D(
-            in_channels=backbone_in_channels,
-            out_channels=config.num_variables,
-            channels=config.unet_channels,
-            num_res_blocks=config.num_res_blocks,
-            attention_levels=config.attention_levels,
-            image_height=config.image_height,
-            kernel_size=config.unet_kernel_size,
-            use_dilated_middle=config.use_dilated_middle,
-            context_dim=config.context_embedding_dim,
-            visual_cond_channels=config.visual_cond_channels,
-            use_gradient_checkpointing=config.use_gradient_checkpointing,
-        )
+        if config.model_type == "dit":
+            self.noise_predictor = FactorizedDiT(
+                in_channels=backbone_in_channels,
+                cond_channels=config.visual_cond_channels,
+                out_channels=config.num_variables,
+                image_height=config.image_height,
+                patch_size=config.dit_patch_size,
+                embed_dim=config.dit_embed_dim,
+                depth=config.dit_depth,
+                num_heads=config.dit_num_heads,
+                mlp_ratio=config.dit_mlp_ratio,
+                dropout=config.dit_dropout,
+                context_dim=config.context_embedding_dim,
+                gradient_checkpointing=config.use_gradient_checkpointing,
+            )
+        else:
+            self.noise_predictor = ConditionalUNet2D(
+                in_channels=backbone_in_channels,
+                out_channels=config.num_variables,
+                channels=config.unet_channels,
+                num_res_blocks=config.num_res_blocks,
+                attention_levels=config.attention_levels,
+                image_height=config.image_height,
+                kernel_size=config.unet_kernel_size,
+                use_dilated_middle=config.use_dilated_middle,
+                context_dim=config.context_embedding_dim,
+                visual_cond_channels=config.visual_cond_channels,
+                use_gradient_checkpointing=config.use_gradient_checkpointing,
+            )
 
         # projects frozen iTransformer enc_out to context_dim for cross-attention
         self.context_encoder = iTransformerTokenAdapter(
