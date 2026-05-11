@@ -118,25 +118,19 @@ class DiffusionTSFConfig:
     # penalty for deviating from itransformer guidance ghost image
     guidance_penalty_weight: float = 0.0
 
-    # which backbone
+    # which backbone: "unet" (ConditionalUNet2D) or "dit" (FactorizedDiT)
     model_type: str = "unet"
 
-    # transformer (DiT) params
-    transformer_embed_dim: int = 256
-    transformer_depth: int = 6
-    transformer_num_heads: int = 8
-    transformer_patch_height: int = 16  
-    transformer_patch_width: int = 16   
-    transformer_dropout: float = 0.1
-    
-    # CI-DiT (channel-independent diffusion transformer) params
-    ci_dit_embed_dim: int = 256
-    ci_dit_depth: int = 8
-    ci_dit_num_heads: int = 8
-    ci_dit_patch_size: Tuple[int, int] = (8, 8)
-    ci_dit_mlp_ratio: float = 4.0
-    ci_dit_cross_variate_every: int = 3  # 0 to disable cross-var attn
-    ci_dit_dropout: float = 0.1
+    # DiT backbone params (used when model_type == "dit").
+    # Factorized per-variate, AdaLN-Zero time conditioning, single bottleneck
+    # cross-attention to (BV, V, ctx_dim) iTransformer tokens at depth // 2.
+    dit_patch_size: Tuple[int, int] = (8, 8)
+    dit_embed_dim: int = 384
+    dit_depth: int = 8
+    dit_num_heads: int = 6
+    dit_mlp_ratio: float = 4.0
+    dit_dropout: float = 0.0
+
     
     # memory optimization flags
     use_gradient_checkpointing: bool = False
@@ -174,6 +168,8 @@ class DiffusionTSFConfig:
         assert self.representation_mode in ["pdf", "cdf"]
         if not self.variate_factorized:
             raise ValueError("variate_factorized=False is no longer supported; use the factorized path.")
+        if self.model_type not in ("unet", "dit"):
+            raise ValueError(f"model_type must be 'unet' or 'dit', got {self.model_type!r}")
         
     @property
     def bin_width(self) -> float:
@@ -216,20 +212,6 @@ class DiffusionTSFConfig:
             return 0
         return 1
     
-    @property
-    def ci_dit_in_channels(self) -> int:
-        """Per-variate input channels for CI-DiT backbone."""
-        ch = 1  # data channel
-        if self.use_coordinate_channel: ch += 1
-        if self.use_guidance_channel: ch += 1
-        return ch
-    
-    @property
-    def ci_dit_cond_channels(self) -> int:
-        """Per-variate conditioning channels for CI-DiT."""
-        return 1  # resized past 2D
-
-
 @dataclass
 class LatentDiffusionConfig(DiffusionTSFConfig):
     """DiffusionTSF hyperparameters plus VAE / latent-space fields."""

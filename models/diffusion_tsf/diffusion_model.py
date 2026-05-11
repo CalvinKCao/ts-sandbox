@@ -22,16 +22,7 @@ from .unet import ConditionalUNet2D, iTransformerTokenAdapter
 from .diffusion import DiffusionScheduler
 from .guidance import GuidanceModel, LinearRegressionGuidance
 from .metrics import monotonicity_loss
-
-try:
-    from .transformer import DiffusionTransformer
-except ImportError:
-    DiffusionTransformer = None  # type: ignore[misc, assignment]
-
-try:
-    from .ci_dit import ChannelIndependentDiT
-except ImportError:
-    ChannelIndependentDiT = None  # type: ignore[misc, assignment]
+from .dit import FactorizedDiT
 
 logger = logging.getLogger(__name__)
 
@@ -198,48 +189,21 @@ class DiffusionTSF(nn.Module):
         # Use the config property for consistent calculation
         backbone_in_channels = config.backbone_in_channels
         
-        if config.model_type == "ci_dit":
-            if ChannelIndependentDiT is None:
-                raise ImportError(
-                    "model_type='ci_dit' requires models.diffusion_tsf.ci_dit.ChannelIndependentDiT "
-                    "(module not present in this checkout)."
-                )
-            self.noise_predictor = ChannelIndependentDiT(
-                image_height=config.image_height,
-                patch_size=config.ci_dit_patch_size,
-                embed_dim=config.ci_dit_embed_dim,
-                depth=config.ci_dit_depth,
-                num_heads=config.ci_dit_num_heads,
-                mlp_ratio=config.ci_dit_mlp_ratio,
-                in_channels=config.ci_dit_in_channels,
-                cond_channels=config.ci_dit_cond_channels,
+        if config.model_type == "dit":
+            self.noise_predictor = FactorizedDiT(
+                in_channels=backbone_in_channels,
+                cond_channels=config.visual_cond_channels,
                 out_channels=1,
-                n_variates=config.num_variables,
-                cross_variate_every=config.ci_dit_cross_variate_every,
-                dropout=config.ci_dit_dropout,
+                image_height=config.image_height,
+                patch_size=config.dit_patch_size,
+                embed_dim=config.dit_embed_dim,
+                depth=config.dit_depth,
+                num_heads=config.dit_num_heads,
+                mlp_ratio=config.dit_mlp_ratio,
+                dropout=config.dit_dropout,
+                context_dim=config.context_embedding_dim,
                 gradient_checkpointing=config.use_gradient_checkpointing,
             )
-            # CI-DiT does cross-variate attn internally, no separate context encoder
-            self.context_encoder = None
-        elif config.model_type == "transformer":
-            if DiffusionTransformer is None:
-                raise ImportError(
-                    "model_type='transformer' requires models.diffusion_tsf.transformer.DiffusionTransformer "
-                    "(module not present in this checkout)."
-                )
-            self.noise_predictor = DiffusionTransformer(
-                image_height=config.image_height,
-                patch_height=config.transformer_patch_height,
-                patch_width=config.transformer_patch_width,
-                embed_dim=config.transformer_embed_dim,
-                depth=config.transformer_depth,
-                num_heads=config.transformer_num_heads,
-                dropout=config.transformer_dropout,
-                in_channels=backbone_in_channels,
-                out_channels=config.num_variables,  # Output one channel per variable
-            )
-            # Note: Transformer backbone does not yet support hybrid conditioning
-            self.context_encoder = None
         else:
             self.noise_predictor = ConditionalUNet2D(
                 in_channels=backbone_in_channels,
@@ -255,12 +219,13 @@ class DiffusionTSF(nn.Module):
                 use_gradient_checkpointing=config.use_gradient_checkpointing,
             )
 
-            # projects frozen iTransformer enc_out to context_dim for bottleneck cross-attn
-            self.context_encoder = iTransformerTokenAdapter(
-                d_model=config.itrans_d_model,
-                context_dim=config.context_embedding_dim,
-                dropout=0.1,
-            )
+        # iTransformer token adapter is shared by both backbones; it produces the
+        # (B, V, ctx_dim) cross-attention memory consumed at the bottleneck.
+        self.context_encoder = iTransformerTokenAdapter(
+            d_model=config.itrans_d_model,
+            context_dim=config.context_embedding_dim,
+            dropout=0.1,
+        )
 
         # Diffusion scheduler (not a nn.Module, managed separately)
         self.scheduler = DiffusionScheduler(
@@ -461,10 +426,7 @@ class DiffusionTSF(nn.Module):
         """produce (B, V, ctx_dim) encoder_hidden_states for the bottleneck.
 
         feeds raw past through the frozen iTransformer encoder and projects to context_dim.
-        returns None when context_encoder is not set (transformer backbone path).
         """
-        if self.context_encoder is None:
-            return None
         if self.guidance_model is None or not hasattr(self.guidance_model, 'get_encoder_tokens'):
             raise RuntimeError(
                 "iTransformerTokenAdapter requires a guidance model with get_encoder_tokens(). "
@@ -666,9 +628,7 @@ class DiffusionTSF(nn.Module):
         future: torch.Tensor,
         t: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        """Training forward pass using either unified L+F or optimized Future-Only scheme."""
-        if self.config.model_type == "ci_dit":
-            return self._forward_ci_dit(past, future, t)
+        """Training forward pass (shared factorized path for unet and dit backbones)."""
         return self._forward_factorized(past, future, t)
 
     @torch.no_grad()
@@ -685,14 +645,7 @@ class DiffusionTSF(nn.Module):
         jump_penalty_scale: float = 1.0,
         search_radius: int = 10
     ) -> Dict[str, torch.Tensor]:
-        """Generate future predictions using unified (L+F) or optimized Future-Only scheme."""
-        if self.config.model_type == "ci_dit":
-            return self._generate_ci_dit(
-                past, use_ddim=use_ddim, num_ddim_steps=num_ddim_steps,
-                eta=eta, cfg_scale=cfg_scale, verbose=verbose,
-                decoder_method=decoder_method, beam_width=beam_width,
-                jump_penalty_scale=jump_penalty_scale, search_radius=search_radius,
-            )
+        """Generate future predictions (shared factorized path for unet and dit backbones)."""
         return self._generate_factorized(
             past, use_ddim=use_ddim, num_ddim_steps=num_ddim_steps,
             eta=eta, cfg_scale=cfg_scale, verbose=verbose,
@@ -926,185 +879,6 @@ class DiffusionTSF(nn.Module):
         K = self.config.lookback_overlap
         if K > 0:
             future      = future[..., K:]
-            future_norm = future_norm[..., K:]
-
-        result = {
-            'prediction': future, 'prediction_norm': future_norm,
-            'future_2d': future_2d, 'past_2d': past_2d,
-        }
-        if guidance_2d is not None:
-            result['guidance_2d'] = guidance_2d
-        return result
-
-    # ====================================================================
-    # CI-DiT specific forward/generate — channel-independent processing
-    # ====================================================================
-
-    def _forward_ci_dit(self, past, future, t=None):
-        """CI-DiT training forward: process each variate independently."""
-        B = past.shape[0]
-        V = self.config.num_variables
-        device = past.device
-        H = self.config.image_height
-
-        past_norm, future_norm, stats = self._normalize_sequence(past, future)
-        past_2d = self.encode_to_2d(past_norm)      # (B, V, H, W_past)
-        future_2d = self.encode_to_2d(future_norm)   # (B, V, H, W_fut)
-        past_2d = self._apply_coarse_dropout(past_2d)
-
-        W_past = past_2d.shape[-1]
-        W_fut = future_2d.shape[-1]
-
-        if t is None:
-            t = torch.randint(0, self.config.num_diffusion_steps, (B,), device=device)
-
-        noisy_future, noise = self.scheduler.add_noise(future_2d, t)
-
-        # --- build per-variate input: (B*V, C_per_var, H, W_fut) ---
-        noisy_flat = noisy_future.reshape(B * V, 1, H, W_fut)
-
-        channels = [noisy_flat]
-        if self.config.use_coordinate_channel:
-            coord = self._get_coordinate_grid(1, H, W_fut, device, dtype=noisy_flat.dtype)
-            channels.append(coord.expand(B * V, -1, -1, -1))
-
-        guidance_2d = None
-        if self.config.use_guidance_channel:
-            guidance_2d = self._generate_guidance_2d(past, past_norm, stats, W_fut)
-            
-        # --- conditioning: resize past 2D per variate to match future width ---
-        past_flat = past_2d.reshape(B * V, 1, H, W_past)
-        cond_flat = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
-
-        # --- Apply Classifier-Free Guidance Dropout ---
-        if self.training and self.config.cfg_dropout > 0.0:
-            drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
-            drop_mask_flat = drop_mask.unsqueeze(1).expand(-1, V).reshape(B * V)
-            
-            cond_flat = torch.where(drop_mask_flat.view(B * V, 1, 1, 1), torch.zeros_like(cond_flat), cond_flat)
-            
-            if guidance_2d is not None:
-                guidance_2d_flat = guidance_2d.reshape(B * V, 1, H, W_fut)
-                guidance_2d_flat = torch.where(drop_mask_flat.view(B * V, 1, 1, 1), torch.zeros_like(guidance_2d_flat), guidance_2d_flat)
-                channels.append(guidance_2d_flat)
-        else:
-            if guidance_2d is not None:
-                channels.append(guidance_2d.reshape(B * V, 1, H, W_fut))
-
-        x_flat = torch.cat(channels, dim=1)  # (BV, ci_dit_in_channels, H, W_fut)
-
-        # --- run CI-DiT backbone ---
-        noise_pred_flat = self.noise_predictor(x_flat, t, cond_flat)
-        noise_pred = noise_pred_flat.reshape(B, V, H, W_fut)
-
-        # --- loss (same as standard path) ---
-        K = self.config.lookback_overlap
-        if K > 0:
-            noise_loss_past = F.mse_loss(noise_pred[..., :K], noise[..., :K])
-            noise_loss_future = F.mse_loss(noise_pred[..., K:], noise[..., K:])
-            noise_loss = self.config.past_loss_weight * noise_loss_past + noise_loss_future
-        else:
-            noise_loss = F.mse_loss(noise_pred, noise)
-
-        x0_pred = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
-        
-        # Clamp x0_pred for numerical stability at high t
-        x0_pred = torch.clamp(x0_pred, -2.0, 2.0)
-        
-        emd_loss = self._compute_emd_loss(x0_pred, future_2d)
-
-        mono_loss = torch.tensor(0.0, device=device)
-        if self.config.use_monotonicity_loss and self.config.representation_mode == "cdf":
-            cdf_pred = torch.clamp((x0_pred + 1.0) / 2.0, 0.0, 1.0)
-            mono_loss = monotonicity_loss(cdf_pred)
-
-        guidance_loss = torch.tensor(0.0, device=device)
-        if guidance_2d is not None and self.config.guidance_penalty_weight > 0:
-            guidance_loss = F.mse_loss(x0_pred, guidance_2d)
-
-        loss = (
-            noise_loss + 
-            self.config.emd_lambda * emd_loss + 
-            self.config.monotonicity_weight * mono_loss +
-            self.config.guidance_penalty_weight * guidance_loss
-        )
-
-        result = {
-            'loss': loss, 'noise_loss': noise_loss, 'emd_loss': emd_loss,
-            'guidance_loss': guidance_loss,
-            'noise_pred': noise_pred, 't': t,
-        }
-        if guidance_2d is not None:
-            result['guidance_2d'] = guidance_2d
-        return result
-
-    @torch.no_grad()
-    def _generate_ci_dit(self, past, use_ddim=True, num_ddim_steps=50, eta=0.0,
-                         cfg_scale=None, verbose=False, decoder_method="mean", **kwargs):
-        """CI-DiT generation path."""
-        B = past.shape[0]
-        V = self.config.num_variables
-        device = past.device
-        H = self.config.image_height
-        if cfg_scale is None:
-            cfg_scale = self.config.cfg_scale
-
-        past_norm, _, stats = self._normalize_sequence(past)
-        past_2d = self.encode_to_2d(past_norm)
-        W_past = past_2d.shape[-1]
-        W_fut = self.config.forecast_length
-
-        # conditioning: per-variate past resized to future width
-        past_flat = past_2d.reshape(B * V, 1, H, W_past)
-        cond_flat = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
-
-        # per-variate guidance
-        guidance_2d = None
-        guide_flat = None
-        if self.config.use_guidance_channel:
-            guidance_2d = self._generate_guidance_2d(past, past_norm, stats, W_fut)
-            guide_flat = guidance_2d.reshape(B * V, 1, H, W_fut)
-
-        null_cond = torch.zeros_like(cond_flat) if cfg_scale > 1.0 else None
-        null_guide = torch.zeros_like(guide_flat) if (guide_flat is not None and cfg_scale > 1.0) else None
-
-        def _build_x(x_noisy, use_null=False):
-            c = self._inject_coordinate_channel(x_noisy)
-            c = self._inject_time_channels(c)
-            if guide_flat is not None:
-                c = torch.cat([c, null_guide if use_null else guide_flat], dim=1)
-            return c
-
-        def model_fn(x, t_batch, cond_arg):
-            if cfg_scale <= 1.0:
-                inp = _build_x(x)
-                return self.noise_predictor(inp, t_batch, cond_arg)
-            # CFG: two passes
-            out_c = self.noise_predictor(_build_x(x, use_null=False), t_batch, cond_flat)
-            out_u = self.noise_predictor(_build_x(x, use_null=True), t_batch, null_cond)
-            return out_u + cfg_scale * (out_c - out_u)
-
-        noise_shape = (B * V, 1, H, W_fut)
-
-        if use_ddim:
-            future_2d_flat = self.scheduler.sample_ddim_cfg(
-                model=model_fn, shape=noise_shape, cond=cond_flat,
-                null_cond=null_cond, cfg_scale=1.0,
-                num_steps=num_ddim_steps, eta=eta, device=device, verbose=verbose,
-            )
-        else:
-            future_2d_flat = self.scheduler.sample_ddpm_cfg(
-                model=model_fn, shape=noise_shape, cond=cond_flat,
-                null_cond=null_cond, cfg_scale=1.0, device=device, verbose=verbose,
-            )
-
-        future_2d = future_2d_flat.reshape(B, V, H, W_fut)
-        future_norm = self.decode_from_2d(future_2d, decoder_method=decoder_method, **kwargs)
-        future = self._denormalize(future_norm, stats)
-
-        K = self.config.lookback_overlap
-        if K > 0:
-            future = future[..., K:]
             future_norm = future_norm[..., K:]
 
         result = {

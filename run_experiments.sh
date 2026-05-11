@@ -18,11 +18,16 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SB_OUT='results/bootstrap/%x-%j.out'
     SB_ERR='results/bootstrap/%x-%j.err'
 
-    DATASETS=("weather" "exchange_rate")
-    
+    # Default sweep set; override on the CLI: ./run_experiments.sh [--smoke-test] [dataset ...]
+    DATASETS=("ETTh1" "ETTm1" "exchange_rate" "weather")
+
     IS_SMOKE=0
     if [ "${1:-}" = "--smoke-test" ]; then
         IS_SMOKE=1
+        shift
+    fi
+    if [ "$#" -gt 0 ]; then
+        DATASETS=("$@")
     fi
 
     for ds in "${DATASETS[@]}"; do
@@ -30,7 +35,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         WALLTIME="24:00:00"
         if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
-        for scenario in "attn-bottleneck" "100pct-univariate"; do
+        for scenario in "attn-bottleneck" "100pct-univariate" "dit"; do
             JOB_NAME="${scenario}-${DS_TAG}"
             [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
 
@@ -161,6 +166,9 @@ if [ "$SCENARIO" == "attn-bottleneck" ]; then
     SCENARIO_ARGS=(--attention-levels "1" --subset-id "attn-bottleneck-pen-0.2")
 elif [ "$SCENARIO" == "100pct-univariate" ]; then
     SCENARIO_ARGS=(--disable-cross-attention --subset-id "100pct-univariate-pen-0.2")
+elif [ "$SCENARIO" == "dit" ]; then
+    # FactorizedDiT backbone, same cross-variate cross-attn at the bottleneck
+    SCENARIO_ARGS=(--model-type dit --subset-id "dit-pen-0.2")
 else
     echo "Unknown scenario: $SCENARIO"
     exit 1

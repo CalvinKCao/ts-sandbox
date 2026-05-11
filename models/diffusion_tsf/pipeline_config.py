@@ -45,12 +45,29 @@ LOOKBACK_OVERLAP: int = 8
 PAST_LOSS_WEIGHT: float = 0.3
 
 
+# ---- Backbone selection ------------------------------------------------------------
+
+# "unet" -> ConditionalUNet2D (default), "dit" -> FactorizedDiT.
+# Both backbones share the same factorized per-variate call site.
+MODEL_TYPE: str = "unet"
+
+
 # ---- 2D map / U-Net topology ------------------------------------------------------
 
 IMAGE_HEIGHT: int = 64
 UNET_CHANNELS: List[int] = [64, 128, 256]
 ATTENTION_LEVELS: List[int] = [2]
 DISABLE_CROSS_ATTENTION: bool = False
+
+
+# ---- DiT topology (used when MODEL_TYPE == "dit") ----------------------------------
+
+DIT_PATCH_SIZE: tuple = (8, 8)
+DIT_EMBED_DIM: int = 384
+DIT_DEPTH: int = 8
+DIT_NUM_HEADS: int = 6
+DIT_MLP_RATIO: float = 4.0
+DIT_DROPOUT: float = 0.0
 
 USE_AMP: bool = True               # bfloat16 mixed precision
 USE_GRADIENT_CHECKPOINTING: bool = True
