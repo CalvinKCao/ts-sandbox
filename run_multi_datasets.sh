@@ -8,7 +8,8 @@
 #
 # Usage:
 #   ./run_multi_datasets.sh                      # 4-dataset sweep, defaults
-#   ./run_multi_datasets.sh --smoke-test         # smoke each
+#   ./run_multi_datasets.sh --smoke-test         # smoke each (Slurm)
+#   ./run_multi_datasets.sh --local --smoke-test --no-wandb   # laptop, sequential
 #   ./run_multi_datasets.sh --variant h128 --hours 36
 #   ./run_multi_datasets.sh --datasets ETTh1,weather --no-wandb
 

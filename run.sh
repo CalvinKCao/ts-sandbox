@@ -12,6 +12,9 @@
 #   ./run.sh --dataset electricity
 #   ./run.sh --no-wandb                       # metrics stay local only (no wandb.init)
 #
+# Local dev (no Slurm — uses repo .venv, writes under results/):
+#   ./run.sh --local --smoke-test --dataset ETTh2 --no-wandb
+#
 # Architecture / U-Net ablations (six distinct experiments — one Slurm job each):
 #   --variant default | h128 | attn-near-bottleneck | deeper-unet | penalty-0.1 | penalty-0.3
 # =============================================================================
@@ -19,11 +22,19 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Strip --local from argv so sbatch children and inner parser never see it.
+RUN_LOCAL=0
+_LOCAL_ARGS=()
+for _a in "$@"; do
+    if [ "$_a" = "--local" ]; then RUN_LOCAL=1; else _LOCAL_ARGS+=("$_a"); fi
+done
+set -- "${_LOCAL_ARGS[@]}"
+
 # ===========================================================================
 # If NOT inside a Slurm job → submit ourselves with the right resources
 # ===========================================================================
 
-if [ -z "$SLURM_JOB_ID" ]; then
+if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 0 ]; then
     # Slurm captures stdout/stderr here until `exec >>…` inside the job redirects fds.
     mkdir -p "$SCRIPT_DIR/results/bootstrap"
     # Paths are relative to --chdir; %x = job name, %j = Slurm job id.
@@ -137,6 +148,14 @@ if [ -z "$SLURM_JOB_ID" ]; then
     exit 0
 fi
 
+# ---- Fake Slurm env for laptop / CI (must run before job body) ----
+if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 1 ]; then
+    export SLURM_SUBMIT_DIR="$SCRIPT_DIR"
+    export SLURM_JOB_ID="local-$(date +%s)"
+    export SLURM_JOB_NAME="local-run"
+    export SLURMD_NODENAME="${HOSTNAME:-localhost}"
+fi
+
 # ===========================================================================
 # We're inside a Slurm job — do the actual work
 # ===========================================================================
@@ -183,13 +202,18 @@ mkdir -p "$WANDB_DIR"
 
 # ---- Environment ----
 
-module purge || true
-module load StdEnv/2023
-module load python/3.11
-module load cuda/12.2
-module load cudnn/8.9
+if [ "${RUN_LOCAL:-0}" -ne 1 ]; then
+    module purge || true
+    module load StdEnv/2023
+    module load python/3.11
+    module load cuda/12.2
+    module load cudnn/8.9
+fi
 
-if [ -d "$SCRATCH/ts-sandbox" ]; then
+if [ "${RUN_LOCAL:-0}" -eq 1 ]; then
+    export PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+    export PROJECT="${PROJECT:-$SLURM_SUBMIT_DIR}"
+elif [ -d "$SCRATCH/ts-sandbox" ]; then
     export PROJECT_ROOT="$SCRATCH/ts-sandbox"
 elif [ -d "$HOME/ts-sandbox" ]; then
     export PROJECT_ROOT="$HOME/ts-sandbox"
@@ -199,6 +223,7 @@ else
 fi
 
 # Auto-detect PROJECT (nullglob — bare ls + pipefail kills the job if globs miss)
+if [ "${RUN_LOCAL:-0}" -ne 1 ]; then
 if [ -z "${PROJECT:-}" ] && [ -d "$HOME/projects" ]; then
     shopt -s nullglob
     _m=("$HOME"/projects/def-* "$HOME"/projects/aip-*)
@@ -212,14 +237,24 @@ if [ -z "${PROJECT:-}" ]; then
     echo "ERROR: PROJECT not found"
     exit 1
 fi
+fi
 
 echo "CKPT_ROOT: $CKPT_ROOT"
 echo "RES_ROOT:  $RES_ROOT"
 
 SYNTH_CACHE_ROOT="$PROJECT_ROOT/synth_data"
+if [ "${RUN_LOCAL:-0}" -eq 1 ]; then
+    SYNTH_CACHE_ROOT="$SLURM_SUBMIT_DIR/.cache/synth_data"
+fi
 mkdir -p "$SYNTH_CACHE_ROOT"
 
-# Venv — reuse main pipeline venv if it exists; else a persistent fullvar venv under PROJECT
+# Venv — local: prefer repo .venv; cluster: reuse main pipeline venv under PROJECT
+if [ "${RUN_LOCAL:-0}" -eq 1 ] && [ -d "$SLURM_SUBMIT_DIR/.venv" ]; then
+    export PATH="$SLURM_SUBMIT_DIR/.venv/bin:$PATH"
+    echo "Local run: using $SLURM_SUBMIT_DIR/.venv"
+elif [ "${RUN_LOCAL:-0}" -eq 1 ]; then
+    echo "[WARN] No .venv at repo root; using python on PATH ($(command -v python 2>/dev/null || echo missing))"
+else
 VENV_PATH="$PROJECT/$USER/diffusion-tsf/venv"
 if [ ! -d "$VENV_PATH" ]; then
     VENV_PATH="$PROJECT/$USER/diffusion-tsf-fullvar/venv"
@@ -238,6 +273,7 @@ if [ ! -d "$VENV_PATH" ]; then
 else
     export PATH="$VENV_PATH/bin:$PATH"
     echo "Reusing existing venv: $VENV_PATH"
+fi
 fi
 
 if [ ! -e "$RUN_DATA_DIR/repo" ]; then
@@ -347,12 +383,19 @@ while [[ $# -gt 0 ]]; do
         --variate-indices) SUBSET_VARIATE_INDICES="$2"; shift 2 ;;
         --hours)          shift 2 ;;   # consumed by login-side submit logic only
         --h100)           shift ;;     # consumed by login-side submit logic only
+        --local)          shift ;;     # stripped at top; ignore if passed through
         *)
             echo "Unknown option: $1"
             exit 1
             ;;
     esac
 done
+
+# Local laptop runs: do not hard-fail when wandb key is missing (Slurm still requires it).
+if [ "${RUN_LOCAL:-0}" -eq 1 ] && [ "$ENABLE_WANDB" -eq 1 ] && [ -z "${WANDB_API_KEY:-}" ]; then
+    echo "[local] WANDB_API_KEY unset — disabling wandb for this run"
+    ENABLE_WANDB=0
+fi
 
 # Variant-specific overrides
 case "$VARIANT" in
@@ -415,7 +458,11 @@ print(LOOKBACK_LENGTH, FORECAST_LENGTH, LOOKBACK_OVERLAP)
 
 echo ""
 echo "============================================================"
-echo "  U-Net Full-Variate Training (Slurm)"
+if [ "${RUN_LOCAL:-0}" -eq 1 ]; then
+    echo "  U-Net full-variate — LOCAL run (no Slurm)"
+else
+    echo "  U-Net Full-Variate Training (Slurm)"
+fi
 echo "============================================================"
 echo "  Backbone:     U-Net (config in models/diffusion_tsf/pipeline_config.py)"
 echo "  Variant tag:  $VARIANT  (Slurm job name only)"
