@@ -221,11 +221,13 @@ class DiffusionTSF(nn.Module):
                 use_gradient_checkpointing=config.use_gradient_checkpointing,
             )
 
-        # projects frozen iTransformer enc_out to context_dim for cross-attention
+        # iTransformer token adapter: projects frozen enc_out to context_dim for
+        # cross-attention (shared by U-Net and DiT). max_variates stays large enough
+        # for pretrained checkpoints when finetuning on fewer variables.
         self.context_encoder = iTransformerTokenAdapter(
             d_model=config.itrans_d_model,
             context_dim=config.context_embedding_dim,
-            max_variates=config.num_variables,
+            max_variates=max(config.num_variables, 512),
             dropout=0.1,
         )
 
@@ -445,15 +447,19 @@ class DiffusionTSF(nn.Module):
         past: torch.Tensor,
         future: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Normalize sequences using past statistics."""
-        mean = past.mean(dim=-1, keepdim=True)
-        std = past.std(dim=-1, keepdim=True) + 1e-8
-        past_norm = (past - mean) / std
-        if future is not None:
-            future_norm = (future - mean) / std
-        else:
-            future_norm = None
-        return past_norm, future_norm, (mean, std)
+        """Identity pass-through.
+
+        Per-window standardization used to be applied here on top of the
+        dataset-level z-score, but that stacked normalization with the
+        iTransformer's internal instance norm and biased the diffusion target
+        distribution. We now rely on (a) global train-split z-score in the
+        dataloader and (b) iTransformer's own use_norm; nothing per-window.
+        Stats are kept as (0, 1) so downstream denormalize calls are no-ops.
+        """
+        mean = past.new_zeros(past.shape[:-1] + (1,))
+        std = past.new_ones(past.shape[:-1] + (1,))
+        future_norm = future if future is not None else None
+        return past, future_norm, (mean, std)
     
     def _denormalize(
         self,
