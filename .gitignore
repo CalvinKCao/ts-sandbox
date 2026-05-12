@@ -139,8 +139,9 @@ models/TFDNet-main/*.txt
 models/Time-Series-Library-main/*.txt
 
 # -----------------------------------------------------------------------------
-# Logs and Databases
+# Logs, Reports and Databases
 # -----------------------------------------------------------------------------
+reports/
 *.log
 *.db
 *.sqlite
