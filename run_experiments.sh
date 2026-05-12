@@ -12,7 +12,7 @@
 #
 # Defaults: six smaller benchmarks on every scenario; electricity + traffic only on
 # attn-bottleneck (too heavy for repeated HP tuning on attn-0-1 / h128-pen0).
-# Wall: 24h small datasets, 72h large (electricity, traffic); 15m smoke; each job --fresh.
+# Wall: 3h small datasets, 24h large (electricity, traffic); 15m smoke; each job --fresh.
 # =============================================================================
 
 set -e
@@ -53,7 +53,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         fi
         for ds in "${_ds_list[@]}"; do
             DS_TAG="${ds//_/-}"
-            WALLTIME="$(walltime_for_dataset "$ds" "24:00:00" "72:00:00")"
+            WALLTIME="$(walltime_for_dataset "$ds" "03:00:00" "24:00:00")"
             if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
             JOB_NAME="${scenario}-${DS_TAG}"
