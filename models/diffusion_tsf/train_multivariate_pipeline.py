@@ -435,7 +435,6 @@ def init_wandb(
         'image_height': IMAGE_HEIGHT,
         'n_variates': N_VARIATES,
         'pretrain_epochs': PRETRAIN_EPOCHS,
-        'pretrain_patience': PRETRAIN_PATIENCE,
         'hp_tune_epochs': HP_TUNE_EPOCHS,
         'hp_tune_patience': HP_TUNE_PATIENCE,
         'pretrain_virtual_samples': resolve_pretrain_virtual_dataset_size(False),
@@ -446,7 +445,9 @@ def init_wandb(
         'n_itrans_hp_trials': N_ITRANS_HP_TRIALS,
         'n_diffusion_hp_trials': N_DIFFUSION_HP_TRIALS,
         'n_finetune_hp_trials': N_FINETUNE_HP_TRIALS,
-        'itrans_batch_sizes': ITRANS_BATCH_SIZES,
+        'itrans_paper_batch_size': ITRANS_PAPER_BATCH_SIZE,
+        'itrans_paper_lr_grid': ITRANS_PAPER_LR_GRID,
+        'itrans_paper_dropout': ITRANS_PAPER_DROPOUT,
         'diffusion_batch_sizes': DIFFUSION_BATCH_SIZES,
         'finetune_batch_sizes': FINETUNE_BATCH_SIZES,
         'diffusion_probe_target_effective_batch': DIFFUSION_PROBE_TARGET_EFFECTIVE_BATCH,
@@ -654,7 +655,6 @@ from models.diffusion_tsf.pipeline_config import (
     PAST_LOSS_WEIGHT,
     N_VARIATES_DEFAULT,
     PRETRAIN_EPOCHS,
-    PRETRAIN_PATIENCE,
     PRETRAIN_DIFFUSION_EPOCHS,
     PRETRAIN_DIFFUSION_MAX_EPOCHS,
     DIFFUSION_HP_MAX_EPOCHS,
@@ -671,11 +671,11 @@ from models.diffusion_tsf.pipeline_config import (
     N_DIFFUSION_HP_TRIALS,
     N_FINETUNE_HP_TRIALS,
     ITRANS_HP_PRETRAIN_MAX_EPOCHS,
-    ITRANS_HP_PRETRAIN_PATIENCE,
     ITRANS_HP_FINETUNE_MAX_EPOCHS,
-    ITRANS_HP_FINETUNE_PATIENCE,
     ITRANS_REAL_COLD_START,
-    ITRANS_BATCH_SIZES,
+    ITRANS_PAPER_BATCH_SIZE,
+    ITRANS_PAPER_LR_GRID,
+    ITRANS_PAPER_DROPOUT,
     DIFFUSION_BATCH_SIZES,
     DIFFUSION_PROBE_TARGET_EFFECTIVE_BATCH,
     DIFFUSION_PROBE_MAX_BATCH_CAP,
@@ -1004,6 +1004,31 @@ class TimeSeriesDataset(Dataset):
         return past, future
 
 
+def _paper_split_borders(dataset_name: str, n: int, seq_len: int) -> Tuple[List[int], List[int]]:
+    """Return (border1s, border2s) following the iTransformer / TimesNet protocol.
+
+    Each split's window-construction array runs from ``border1s[i]`` to
+    ``border2s[i]``. ``border1s[i] = boundary - seq_len`` for val/test so the
+    first val/test lookback reaches back into the previous split (no "dead
+    zone" of unevaluated steps right after the train boundary).
+
+    ETTh{1,2} and ETTm{1,2} use fixed month-based boundaries. Every other
+    dataset uses the 70/10/20 length-based convention with the same overlap
+    trick — this mirrors ``Dataset_Custom`` in the upstream iTransformer repo.
+    """
+    if dataset_name in ('ETTh1', 'ETTh2'):
+        b2 = [12 * 30 * 24, 12 * 30 * 24 + 4 * 30 * 24, 12 * 30 * 24 + 8 * 30 * 24]
+    elif dataset_name in ('ETTm1', 'ETTm2'):
+        b2 = [12 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 8 * 30 * 24 * 4]
+    else:
+        n_train = int(n * 0.7)
+        n_test = int(n * 0.2)
+        n_val = n - n_train - n_test
+        b2 = [n_train, n_train + n_val, n_train + n_val + n_test]
+    b1 = [0, b2[0] - seq_len, b2[1] - seq_len]
+    return b1, b2
+
+
 def load_dataset(
     dataset_name: str,
     variate_indices: List[int] = None,
@@ -1012,18 +1037,24 @@ def load_dataset(
     stride: int = 1,
     lookback_overlap: int = LOOKBACK_OVERLAP,
 ) -> Tuple[Dataset, Dataset, Dataset, Dict]:
-    """Load dataset and return train/val/test splits."""
+    """Load dataset and return train/val/test splits matching iTransformer paper.
+
+    Splits follow the upstream iTransformer / TimesNet data loaders: fixed
+    month-based boundaries for ETT* and 70/10/20 length-based otherwise, with
+    the standard overlap trick (val/test windows can reach back into the
+    previous split by ``lookback`` steps). All three splits use stride=1 so
+    test MSE is averaged over the full sliding-window protocol from the paper.
+    """
     path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
     date_col = DATASET_REGISTRY[dataset_name][1]
-    
+
     df = pd.read_csv(path)
     data_cols = [c for c in df.columns if c != date_col]
     data = df[data_cols].values.astype(np.float32)
-    
+
     if variate_indices is not None:
         data = data[:, variate_indices]
-    
-    # Chronological split: 70/10/20 (boundaries first; z-score uses train slice only)
+
     n = len(data)
     total_window = lookback + horizon
     if n < total_window:
@@ -1032,19 +1063,28 @@ def load_dataset(
             f"{total_window} (lookback={lookback} + horizon={horizon}). "
             f"Skipping this dataset."
         )
-    
-    train_end = int(n * 0.7)
-    val_end = int(n * 0.8)
-    
+
+    border1s, border2s = _paper_split_borders(dataset_name, n, lookback)
+    train_end = border2s[0]
+
     train_slice = data[:train_end]
     mean = train_slice.mean(axis=0, keepdims=True)
     std = train_slice.std(axis=0, keepdims=True) + 1e-8
     data = (data - mean) / std
-    
-    train_ds = TimeSeriesDataset(data[:train_end], lookback, horizon, stride, lookback_overlap=lookback_overlap)
-    val_ds = TimeSeriesDataset(data[train_end:val_end], lookback, horizon, stride=lookback, lookback_overlap=lookback_overlap)
-    test_ds = TimeSeriesDataset(data[val_end:], lookback, horizon, stride=lookback, lookback_overlap=lookback_overlap)
-    
+
+    train_ds = TimeSeriesDataset(
+        data[border1s[0]:border2s[0]], lookback, horizon, stride,
+        lookback_overlap=lookback_overlap,
+    )
+    val_ds = TimeSeriesDataset(
+        data[border1s[1]:border2s[1]], lookback, horizon, stride,
+        lookback_overlap=lookback_overlap,
+    )
+    test_ds = TimeSeriesDataset(
+        data[border1s[2]:border2s[2]], lookback, horizon, stride,
+        lookback_overlap=lookback_overlap,
+    )
+
     return train_ds, val_ds, test_ds, {'mean': mean, 'std': std}
 
 
@@ -1193,7 +1233,6 @@ def train_itransformer_epoch(model, loader, optimizer, criterion, device, schedu
         y_pred = model(x_enc, None, None, None)
         loss = criterion(y_pred, y_true)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         if scheduler:
             scheduler.step()
@@ -1367,17 +1406,6 @@ def select_diffusion_batch_size(
     return auto_select_max_even_batch_size(phase_name, max_candidate, _try, min_candidate=DIFFUSION_PROBE_MIN_BATCH)
 
 
-def get_itrans_batch_size_candidates(smoke_test: bool) -> List[int]:
-    """Return a safe iTransformer HP batch-size search space for current N_VARIATES."""
-    if smoke_test:
-        return [8, 16]
-    if N_VARIATES >= 512:
-        return [8, 16, 32]
-    if N_VARIATES >= 256:
-        return [16, 32, 64]
-    return ITRANS_BATCH_SIZES
-
-
 def itrans_hp_objective(
     trial,
     synthetic_loader,
@@ -1388,21 +1416,21 @@ def itrans_hp_objective(
     best_state: Optional[dict] = None,
     pretrained_ckpt: Optional[str] = None,
     max_epochs: int = ITRANS_HP_PRETRAIN_MAX_EPOCHS,
-    early_stop_patience: int = ITRANS_HP_PRETRAIN_PATIENCE,
 ):
     """Optuna objective for iTransformer HP search.
+
+    Paper-faithful setup: only learning rate is searched, over the categorical
+    grid {1e-3, 5e-4, 1e-4}. Batch size is fixed at 32, dropout at 0.1, optimizer
+    is plain Adam, no gradient clipping, no early stopping, exactly 10 epochs.
 
     pretrained_ckpt: if provided, warm-starts each trial from those weights
         (used for finetune HP search on real data).
     best_state: shared mutable dict; updated with best cross-trial model state
         whenever a new minimum val loss is achieved.
     """
-    lr = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-    if fixed_batch_size is None:
-        batch_size = trial.suggest_categorical('batch_size', get_itrans_batch_size_candidates(smoke_test))
-    else:
-        batch_size = fixed_batch_size
-    dropout = trial.suggest_float('dropout', 0.0, 0.3)
+    lr = trial.suggest_categorical('learning_rate', ITRANS_PAPER_LR_GRID)
+    batch_size = fixed_batch_size if fixed_batch_size is not None else ITRANS_PAPER_BATCH_SIZE
+    dropout = ITRANS_PAPER_DROPOUT
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -1421,12 +1449,10 @@ def itrans_hp_objective(
     val_bs = min(batch_size, 32)
     val_loader_local = DataLoader(val_loader.dataset, batch_size=val_bs, shuffle=False, num_workers=0)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
     epochs = max_epochs if not smoke_test else 1
-    patience = early_stop_patience if not smoke_test else 1
-    early_stop = EarlyStopping(patience=patience)
     best_val_loss = float('inf')
 
     try:
@@ -1444,9 +1470,6 @@ def itrans_hp_objective(
                 if best_state is not None and val_loss < best_state.get('val_loss', float('inf')):
                     best_state['model_state'] = {k: v.cpu().clone() for k, v in model.state_dict().items()}
                     best_state['val_loss'] = val_loss
-
-            if early_stop(val_loss):
-                break
     except torch.OutOfMemoryError:
         logger.warning(f"[iTransformer HP] OOM at batch_size={batch_size}; pruning trial {trial.number}.")
         if torch.cuda.is_available():
@@ -1502,13 +1525,7 @@ def run_itransformer_hp_tuning(
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset   = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
 
-    train_bs = select_itrans_batch_size(
-        phase_name='iTransformer HP tune',
-        dataset=train_subset,
-        device=device,
-        dropout=0.1,
-        max_candidate=32 if smoke_test else 256,
-    )
+    train_bs = ITRANS_PAPER_BATCH_SIZE
     train_loader = DataLoader(train_subset, batch_size=train_bs, shuffle=True, num_workers=0)
     val_loader   = DataLoader(val_subset,   batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
 
@@ -1526,14 +1543,13 @@ def run_itransformer_hp_tuning(
     def log_trial(study, trial):
         logger.info(f"[iTransformer HP] Trial {trial.number}/{n_trials}: "
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                   f"bs={train_bs}, dropout={trial.params['dropout']:.3f}")
+                   f"bs={train_bs}, dropout={ITRANS_PAPER_DROPOUT}")
 
     study.optimize(
         lambda trial: itrans_hp_objective(
             trial, train_loader, val_loader, device, smoke_test,
             fixed_batch_size=train_bs, best_state=_best_state,
             max_epochs=ITRANS_HP_PRETRAIN_MAX_EPOCHS,
-            early_stop_patience=ITRANS_HP_PRETRAIN_PATIENCE,
         ),
         n_trials=n_trials,
         show_progress_bar=True,
@@ -1542,6 +1558,7 @@ def run_itransformer_hp_tuning(
 
     best_params = study.best_params
     best_params['batch_size'] = train_bs
+    best_params['dropout'] = ITRANS_PAPER_DROPOUT
     logger.info(f"Best iTransformer params: lr={best_params['learning_rate']:.2e}, "
                f"bs={best_params['batch_size']}, dropout={best_params['dropout']:.3f}")
     logger.info(f"Best val loss: {study.best_value:.4f}")
@@ -1735,14 +1752,17 @@ def pretrain_itransformer(
     best_params: Dict,
     n_samples: int,
     epochs: int,
-    patience: int,
     checkpoint_dir: str,
     smoke_test: bool = False,
 ) -> str:
-    """Train iTransformer on synthetic data with tuned params (DDP-aware)."""
+    """Train iTransformer on synthetic data with tuned params (DDP-aware).
+
+    Paper-faithful: Adam (no AdamW), no LR scheduler, no early stopping,
+    no gradient clipping. Fixed epoch count.
+    """
     logger.info("=" * 60)
     logger.info("PHASE 1C-1: Full iTransformer Pretraining")
-    logger.info(f"Samples: {n_samples}, Epochs: {epochs}, Patience: {patience}")
+    logger.info(f"Samples: {n_samples}, Epochs: {epochs}")
     logger.info(f"Params: {best_params}")
     if _ddp_enabled:
         logger.info(f"DDP: {get_world_size()} GPUs")
@@ -1751,16 +1771,15 @@ def pretrain_itransformer(
     device = get_device()
     
     lr = require_tuned_param(best_params, 'learning_rate', 'iTransformer pretraining')
-    tuned_batch_size = require_tuned_param(best_params, 'batch_size', 'iTransformer pretraining')
-    dropout = require_tuned_param(best_params, 'dropout', 'iTransformer pretraining')
-    batch_size = tuned_batch_size
+    batch_size = ITRANS_PAPER_BATCH_SIZE
+    dropout = ITRANS_PAPER_DROPOUT
     
     # Create data
     synth_cache = get_synth_cache_dir(checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
     n_val = 0 if smoke_test else min(n_samples // 10, 5000)
     epoch_cap = 1 if smoke_test else synthetic_epoch_capacity_pretrain_itrans()
     synthetic_loader = get_synthetic_dataloader(
-        batch_size=min(32, max(2, tuned_batch_size)),
+        batch_size=min(32, batch_size),
         lookback_length=LOOKBACK_LENGTH,
         forecast_length=FORECAST_LENGTH,
         num_variables=N_VARIATES,
@@ -1777,14 +1796,6 @@ def pretrain_itransformer(
     dataset = synthetic_loader.dataset
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
-    if not _ddp_enabled:
-        batch_size = select_itrans_batch_size(
-            phase_name='iTransformer pretrain',
-            dataset=train_subset,
-            device=device,
-            dropout=dropout,
-            max_candidate=max(2, tuned_batch_size),
-        )
     effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
     effective_batch_size = max(1, effective_batch_size)
     
@@ -1801,58 +1812,47 @@ def pretrain_itransformer(
     model = create_itransformer(dropout=dropout)
     model = wrap_model_ddp(model)
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
-    
-    early_stop = EarlyStopping(patience=patience)
+
     best_val_loss = float('inf')
     ckpt_path = os.path.join(checkpoint_dir, 'pretrained_itransformer.pt')
-    
+
     for epoch in range(epochs):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)  # Crucial for DDP shuffling
-        
+
         set_realts_training_epoch(train_loader, epoch)
-        
+
         t0 = time.time()
         train_loss = train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
         val_loss = validate_itransformer(model, val_loader, criterion, device)
-        
-        # Average loss across GPUs for consistent logging
+
         if _ddp_enabled:
             train_loss_t = torch.tensor([train_loss], device=device)
             val_loss_t = torch.tensor([val_loss], device=device)
             train_loss = sync_across_processes(train_loss_t).item()
             val_loss = sync_across_processes(val_loss_t).item()
-        
-        scheduler.step()
-        
+
         logger.info(f"[iTransformer] Epoch {epoch+1}/{epochs} | Train: {train_loss:.4f} | "
-                   f"Val: {val_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.2e} | Time: {time.time()-t0:.1f}s")
-        
-        # Wandb logging
+                   f"Val: {val_loss:.4f} | LR: {lr:.2e} | Time: {time.time()-t0:.1f}s")
+
         log_wandb({
             'train_loss': train_loss,
             'val_loss': val_loss,
-            'lr': scheduler.get_last_lr()[0],
+            'lr': lr,
             'epoch': epoch + 1,
             'epoch_time_s': time.time() - t0,
         }, prefix='itrans_pretrain')
-        
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            # Only main process saves checkpoint
             if is_main_process():
                 save_checkpoint(unwrap_model(model), optimizer, epoch, train_loss, val_loss, best_params, ckpt_path)
                 logger.info(f"  -> New best! Saved to {ckpt_path}")
-            barrier()  # Sync before continuing
-        
-        if early_stop(val_loss):
-            logger.info(f"Early stopping at epoch {epoch+1}")
-            break
-    
-    barrier()  # Ensure all processes finish
+            barrier()
+
+    barrier()
     logger.info(f"iTransformer pretraining complete. Best val loss: {best_val_loss:.4f}")
     log_wandb_summary({'itrans_pretrain_best_val_loss': best_val_loss})
     return ckpt_path
@@ -2054,7 +2054,7 @@ def finetune_hp_objective(
     # Load data
     train_ds, val_ds, _, _ = load_dataset(
         dataset_name, variate_indices,
-        stride=24 if not smoke_test else LOOKBACK_LENGTH,
+        stride=1,
     )
     
     if smoke_test:
@@ -2364,7 +2364,7 @@ def evaluate_itransformer_baseline(
     comparable. Results are merged into a single baseline file so summarize_results.py
     can produce the comparison table automatically.
     """
-    _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+    _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=1)
     if smoke_test:
         test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
     test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
@@ -2445,7 +2445,7 @@ def train_full_dim_itransformer_baseline(
 
     train_ds, val_ds, test_ds, norm_stats = load_dataset(
         dataset_name, variate_indices=None,
-        stride=24 if not smoke_test else LOOKBACK_LENGTH,
+        stride=1,
     )
     if smoke_test:
         train_ds = Subset(train_ds, list(range(min(4, len(train_ds)))))
@@ -2611,14 +2611,14 @@ def run_pipeline(
         n_finetune_trials = 1
         pretrain_samples = 4  # Ultra minimal
         itrans_pretrain_epochs = 1
-        pretrain_patience = 1
+        pretrain_patience = 1  # diffusion fallback path still uses this
     else:
         n_itrans_trials = N_ITRANS_HP_TRIALS
         n_diff_trials = N_DIFFUSION_HP_TRIALS
         n_finetune_trials = N_FINETUNE_HP_TRIALS
         pretrain_samples = resolve_pretrain_virtual_dataset_size(False)
         itrans_pretrain_epochs = PRETRAIN_EPOCHS
-        pretrain_patience = PRETRAIN_PATIENCE
+        pretrain_patience = DIFFUSION_HP_PATIENCE  # used by diffusion fallback only
     
     # =========== PHASE 1A: iTransformer HP Tuning (best model saved directly) ===========
     itrans_tune_ckpt = os.path.join(CHECKPOINT_DIR, 'itrans_hp_best.pt')
@@ -2645,7 +2645,6 @@ def run_pipeline(
                 manifest.itrans_best_params,
                 n_samples=pretrain_samples,
                 epochs=itrans_pretrain_epochs,
-                patience=pretrain_patience,
                 checkpoint_dir=CHECKPOINT_DIR,
                 smoke_test=smoke_test,
             )
@@ -2706,7 +2705,7 @@ def run_pipeline(
             n_iv = len(variate_indices)
             _p_itrans = load_itransformer_from_checkpoint(itrans_ckpt, n_iv, device)
             _p_guidance = iTransformerGuidance(_p_itrans)
-            _p_ds, _, _, _ = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+            _p_ds, _, _, _ = load_dataset(dataset_name, variate_indices, stride=1)
             ft_diff_bs = select_diffusion_batch_size(
                 phase_name=f'Diff FT HP ({dataset_name})',
                 dataset=_p_ds,
@@ -2748,7 +2747,7 @@ def run_pipeline(
 
             # Reuse the best trial's checkpoint as the final fine-tuned model
             # (no separate Phase 2C retrain).
-            _, _, _, norm_stats = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+            _, _, _, norm_stats = load_dataset(dataset_name, variate_indices, stride=1)
             ckpt_path, train_metrics = _promote_best_trial_to_final(
                 study, subset_dir,
                 {'subset_id': dataset_name, 'variate_indices': variate_indices},
@@ -2767,7 +2766,7 @@ def run_pipeline(
                 ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
                 load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
 
-                _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+                _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=1)
                 if smoke_test:
                     test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
                 test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
@@ -2931,7 +2930,7 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
     pretrain_samples = resolve_pretrain_virtual_dataset_size(smoke_test)
     itrans_pretrain_epochs = 1 if smoke_test else PRETRAIN_EPOCHS
     diff_pretrain_epochs = 1 if smoke_test else min(PRETRAIN_DIFFUSION_EPOCHS, PRETRAIN_DIFFUSION_MAX_EPOCHS)
-    pretrain_patience = 1 if smoke_test else PRETRAIN_PATIENCE
+    pretrain_patience = 1 if smoke_test else DIFFUSION_HP_PATIENCE  # diffusion fallback only
 
     itrans_hp_path = os.path.join(dim_dir, 'itrans_hp.json')
     diff_hp_path   = os.path.join(dim_dir, 'diff_hp.json')
@@ -2980,7 +2979,6 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
                 best_itrans_params,
                 n_samples=pretrain_samples,
                 epochs=fallback_epochs,
-                patience=pretrain_patience,
                 checkpoint_dir=dim_dir,
                 smoke_test=smoke_test,
             )
@@ -3108,26 +3106,19 @@ def run_itransformer_finetune_hp_tuning(
     logger.info("=" * 60)
     logger.info(f"iTrans Finetune HP Tuning: {label} ({n_trials} trials)")
     logger.info(
-        f"Up to {ITRANS_HP_FINETUNE_MAX_EPOCHS} epochs per trial, patience={ITRANS_HP_FINETUNE_PATIENCE}, "
+        f"{ITRANS_HP_FINETUNE_MAX_EPOCHS} epochs per trial (no early stopping), "
         f"warm_start={'no (cold start)' if warm is None else os.path.basename(warm)}"
     )
     logger.info("=" * 60)
 
     train_ds, val_ds, _, _ = load_dataset(
-        dataset_name, variate_indices,
-        stride=24 if not smoke_test else LOOKBACK_LENGTH,
+        dataset_name, variate_indices, stride=1,
     )
     if smoke_test:
         train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
         val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
 
-    train_bs = select_itrans_batch_size(
-        phase_name=f'iTransformer FT HP ({label})',
-        dataset=train_ds,
-        device=device,
-        dropout=0.1,
-        max_candidate=32 if smoke_test else 256,
-    )
+    train_bs = ITRANS_PAPER_BATCH_SIZE
     train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
 
@@ -3143,7 +3134,7 @@ def run_itransformer_finetune_hp_tuning(
     def log_trial(study, trial):
         logger.info(f"[iTrans FT HP {label}] Trial {trial.number}/{n_trials}: "
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                   f"dropout={trial.params['dropout']:.3f}")
+                   f"dropout={ITRANS_PAPER_DROPOUT}")
 
     study.optimize(
         lambda trial: itrans_hp_objective(
@@ -3151,7 +3142,6 @@ def run_itransformer_finetune_hp_tuning(
             fixed_batch_size=train_bs, best_state=_best_state,
             pretrained_ckpt=warm,
             max_epochs=ITRANS_HP_FINETUNE_MAX_EPOCHS,
-            early_stop_patience=ITRANS_HP_FINETUNE_PATIENCE,
         ),
         n_trials=n_trials,
         show_progress_bar=False,
@@ -3160,6 +3150,7 @@ def run_itransformer_finetune_hp_tuning(
 
     best_params = study.best_params
     best_params['batch_size'] = train_bs
+    best_params['dropout'] = ITRANS_PAPER_DROPOUT
     logger.info(f"Best iTrans FT params for {label}: lr={best_params['learning_rate']:.2e}, "
                f"dropout={best_params['dropout']:.3f} → val_loss={_best_state.get('val_loss', float('inf')):.4f}")
 
@@ -3190,7 +3181,7 @@ def _finetune_and_eval_one_subset(
 
     # Preflight: check dataset has enough rows before wasting a trial slot
     try:
-        load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+        load_dataset(dataset_name, variate_indices, stride=1)
     except ValueError as ve:
         logger.warning(f"Skipping {subset_id}: {ve}")
         return
@@ -3233,7 +3224,7 @@ def _finetune_and_eval_one_subset(
         _ft_itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, len(variate_indices), device)
         _ft_itrans_guidance = iTransformerGuidance(_ft_itrans_model)
         _probe_ds, _, _, _ = load_dataset(
-            dataset_name, variate_indices, stride=LOOKBACK_LENGTH,
+            dataset_name, variate_indices, stride=1,
         )
         ft_diff_bs = select_diffusion_batch_size(
             phase_name=f'Diff FT HP ({subset_id})',
@@ -3277,7 +3268,7 @@ def _finetune_and_eval_one_subset(
         logger.info(f"Best diffusion params for {subset_id}: {tuned_params}")
 
         # Reuse the best Phase 2B trial's checkpoint as the final fine-tuned model.
-        _, _, _, norm_stats = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+        _, _, _, norm_stats = load_dataset(dataset_name, variate_indices, stride=1)
         ckpt_path, train_metrics = _promote_best_trial_to_final(
             study, subset_dir, subset_info, dataset_name, norm_stats, ft_diff_bs,
         )
@@ -3292,7 +3283,7 @@ def _finetune_and_eval_one_subset(
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
 
-        _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=LOOKBACK_LENGTH)
+        _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=1)
         if smoke_test:
             test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
         test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)

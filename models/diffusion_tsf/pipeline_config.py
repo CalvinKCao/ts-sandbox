@@ -31,13 +31,12 @@ from typing import List, Optional
 
 # ---- Sequence / window lengths ---------------------------------------------------
 
-LOOKBACK_LENGTH: int = 512
+LOOKBACK_LENGTH: int = 96
 FORECAST_LENGTH: int = 96
 
-# iTransformer's inverted embedding uses seq_len as the Linear input width. Papers
-# typically benchmark on ≤336 for hourly ETT; the diffusion model still sees the full
-# LOOKBACK_LENGTH and slices for iTransformer guidance.
-ITRANSFORMER_SEQ_LEN: int = 512
+# iTransformer paper benchmarks anchor at T=96 for ETTh1; we use the same lookback
+# for both the diffusion model and the iTransformer guidance.
+ITRANSFORMER_SEQ_LEN: int = 96
 
 # Predict the last K observed steps alongside the forecast horizon. The diffusion
 # model denoises a (K + H)-wide region; the K steps are discarded at inference.
@@ -115,13 +114,13 @@ SYNTHETIC_SAMPLES_CAP: Optional[int] = 50000  # None = no cap on TOTAL pool size
 
 # Phase 1A: iTransformer HP tuning on synthetic data. Best HP-tuning model is saved
 # directly as `itransformer.pt` (no separate "full" pretrain step).
-N_ITRANS_HP_TRIALS: int = 7
-ITRANS_HP_PRETRAIN_MAX_EPOCHS: int = 30
-ITRANS_HP_PRETRAIN_PATIENCE: int = 5
+#
+# Paper-faithful setup: fixed 10 epochs, no early stopping. Only LR is searched.
+N_ITRANS_HP_TRIALS: int = 3
+ITRANS_HP_PRETRAIN_MAX_EPOCHS: int = 10
 
 # Fallback pretrain (only runs if HP cache is missing).
 PRETRAIN_EPOCHS: int = 10
-PRETRAIN_PATIENCE: int = 5
 
 # Phase 1B: Diffusion HP tuning on synthetic data. Best HP-tuning model is saved
 # directly as `diffusion.pt` (no separate "full" pretrain step).
@@ -137,9 +136,8 @@ PRETRAIN_DIFFUSION_MAX_EPOCHS: int = 15
 # ---- Phase 2 (real-data fine-tune / HP) -------------------------------------------
 
 # Phase 2A: iTransformer HP tuning on real data. Best HP model is saved directly as
-# `{subset}_itransformer_finetuned.pt`.
-ITRANS_HP_FINETUNE_MAX_EPOCHS: int = 100
-ITRANS_HP_FINETUNE_PATIENCE: int = 15
+# `{subset}_itransformer_finetuned.pt`. Paper-faithful: 10 epochs, no early stopping.
+ITRANS_HP_FINETUNE_MAX_EPOCHS: int = 10
 # Synthetic pretrain on RealTS data tends to plateau at the unit-variance mean
 # predictor, which makes warm-started fine-tunes barely move. Cold-start gives
 # Phase 2A a fair shot.
@@ -158,8 +156,12 @@ FINETUNE_HP_LR_MAX: float = 2e-4
 
 # ---- Batch-size search grids ------------------------------------------------------
 
-# iTransformer HP tuning adapts these based on N_VARIATES at runtime.
-ITRANS_BATCH_SIZES: List[int] = [64, 128, 256]
+# iTransformer paper uses a fixed batch size of 32 and does not tune it.
+ITRANS_PAPER_BATCH_SIZE: int = 32
+# iTransformer paper LR grid (categorical). Used as the only iTrans HP search axis.
+ITRANS_PAPER_LR_GRID: List[float] = [1e-3, 5e-4, 1e-4]
+# iTransformer paper dropout default; not tuned.
+ITRANS_PAPER_DROPOUT: float = 0.1
 
 # Legacy Optuna categorical grids — only used if ``fixed_batch_size`` is omitted in
 # ``diffusion_hp_objective`` / ``finetune_hp_objective``. Current pipeline always
