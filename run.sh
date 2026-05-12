@@ -16,6 +16,9 @@
 # Example: ./run.sh --run-name multi-channel --dataset ETTh1 --smoke-test
 #   → job name multi-channel-default-ETTh1-smoke (bootstrap logs, results/MM-DD-JID-…)
 #
+# Use code from this checkout on the cluster (not $SCRATCH/ts-sandbox):
+#   ./run.sh --submit-root --dataset ETTh1 --smoke-test
+#
 # Architecture / U-Net ablations (six distinct experiments — one Slurm job each):
 #   --variant default | h128 | attn-near-bottleneck | deeper-unet | penalty-0.1 | penalty-0.3
 # =============================================================================
@@ -23,9 +26,11 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Strip --local and --run-name so sbatch children never see them; keep RUN_NAME_PREFIX for locals.
+# Strip --local, --run-name, --submit-root so sbatch children never see them (submit-root is
+# re-injected via Slurm --export as TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1).
 RUN_LOCAL=0
 RUN_NAME_PREFIX=""
+SUBMIT_ROOT_FOR_PROJECT=0
 _LOCAL_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,6 +39,7 @@ while [[ $# -gt 0 ]]; do
             RUN_NAME_PREFIX="${2:-}"
             shift 2
             ;;
+        --submit-root) SUBMIT_ROOT_FOR_PROJECT=1; shift ;;
         *) _LOCAL_ARGS+=("$1"); shift ;;
     esac
 done
@@ -95,6 +101,19 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 0 ]; then
         JOB_STEM="${JOB_STEM:0:60}"
     fi
 
+    _export_arg="ALL"
+    if [ -n "${RESUME:-}" ]; then
+        _export_arg="${_export_arg},RESUME_STEM=${RESUME}"
+    fi
+    if [ "${SUBMIT_ROOT_FOR_PROJECT:-0}" -eq 1 ]; then
+        _export_arg="${_export_arg},TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1"
+    fi
+    SBATCH_SMOKE_EXPORT=()
+    if [ -n "${RESUME:-}" ] || [ "${SUBMIT_ROOT_FOR_PROJECT:-0}" -eq 1 ]; then
+        SBATCH_SMOKE_EXPORT=(--export="${_export_arg}")
+    fi
+    SBATCH_FULL_EXPORT=(--export="${_export_arg}")
+
     if [ "$IS_SMOKE" -eq 1 ]; then
         echo "Submitting SMOKE TEST (L40S, 8GB, 15 min) [job=$JOB_STEM-smoke variant=$VARIANT dataset=$SUBMIT_DATASET]..."
         sbatch \
@@ -110,6 +129,7 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 0 ]; then
             --error="$SB_ERR" \
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
+            "${SBATCH_SMOKE_EXPORT[@]}" \
             "$SCRIPT_DIR/run.sh" "$@"
     elif [ "$USE_H100" -eq 1 ]; then
         # Partition MaxTime must be >= requested wall. On Killarney, b3 is often shorter than
@@ -119,11 +139,6 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 0 ]; then
         # If you need >3 days, confirm a longer queue exists: sinfo -o "%P %l" | grep h100
 
         echo "Submitting H100 FULL RUN (64GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall, $PARTITION) [job=$JOB_STEM-h100 variant=$VARIANT dataset=$SUBMIT_DATASET]..."
-
-        EXPORT_ARGS="ALL"
-        if [ -n "$RESUME" ]; then
-            EXPORT_ARGS="ALL,RESUME_STEM=$RESUME"
-        fi
 
         sbatch \
             --job-name="${JOB_STEM}-h100" \
@@ -138,16 +153,10 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 0 ]; then
             --error="$SB_ERR" \
             --mail-type=BEGIN,END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export="$EXPORT_ARGS" \
+            "${SBATCH_FULL_EXPORT[@]}" \
             "$SCRIPT_DIR/run.sh" "$@"
     else
         echo "Submitting FULL RUN (L40S, 50GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall) [job=$JOB_STEM variant=$VARIANT dataset=$SUBMIT_DATASET]..."
-        
-        # If resuming, pass RESUME_STEM to the job's environment
-        EXPORT_ARGS="ALL"
-        if [ -n "$RESUME" ]; then
-            EXPORT_ARGS="ALL,RESUME_STEM=$RESUME"
-        fi
 
         sbatch \
             --job-name="${JOB_STEM}" \
@@ -162,7 +171,7 @@ if [ -z "${SLURM_JOB_ID:-}" ] && [ "${RUN_LOCAL:-0}" -eq 0 ]; then
             --error="$SB_ERR" \
             --mail-type=BEGIN,END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export="$EXPORT_ARGS" \
+            "${SBATCH_FULL_EXPORT[@]}" \
             "$SCRIPT_DIR/run.sh" "$@"
     fi
     exit 0
@@ -251,12 +260,14 @@ fi
 if [ "${RUN_LOCAL:-0}" -eq 1 ]; then
     export PROJECT_ROOT="$SLURM_SUBMIT_DIR"
     export PROJECT="${PROJECT:-$SLURM_SUBMIT_DIR}"
+elif [ "${TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR:-}" = "1" ] || [ "${SUBMIT_ROOT_FOR_PROJECT:-0}" -eq 1 ]; then
+    export PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 elif [ -d "$SCRATCH/ts-sandbox" ]; then
     export PROJECT_ROOT="$SCRATCH/ts-sandbox"
 elif [ -d "$HOME/ts-sandbox" ]; then
     export PROJECT_ROOT="$HOME/ts-sandbox"
 else
-    echo "ERROR: ts-sandbox not found in SCRATCH or HOME"
+    echo "ERROR: ts-sandbox not found in SCRATCH or HOME (use --submit-root to run from this checkout)"
     exit 1
 fi
 
@@ -378,6 +389,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --hours) shift 2 ;;
         --h100)  shift ;;
+        --submit-root) shift ;;
         *)       PIPELINE_ARGS+=("$1"); shift ;;
     esac
 done
@@ -424,6 +436,7 @@ while [[ $# -gt 0 ]]; do
         --h100)           shift ;;     # consumed by login-side submit logic only
         --local)          shift ;;     # stripped at top; ignore if passed through
         --run-name)       shift 2 ;;   # stripped at top; ignore if passed through
+        --submit-root)    shift ;;     # stripped at top; ignore if passed through
         *)
             echo "Unknown option: $1"
             exit 1
