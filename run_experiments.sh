@@ -1,15 +1,18 @@
 #!/bin/bash
 # =============================================================================
 # Slurm self-resubmitting script — FactorizedDiT only (pretrain + finetune per dataset).
+# Per dataset: dit (base), dit-h128, dit-pen0. U-Net ablations: branch multi-channel.
 #
 # USAGE (from login node):
 #   ./run_experiments.sh
 #   ./run_experiments.sh --smoke-test
+#   ./run_experiments.sh --smoke-test electricity traffic
 #   ./run_experiments.sh weather exchange_rate
 #
 # Run Python from this checkout instead of $SCRATCH/ts-sandbox:
 #   TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1 ./run_experiments.sh
 #
+# Defaults: same six benchmarks as multi-channel run_experiments; 48h wall (15m smoke).
 # =============================================================================
 
 set -e
@@ -23,8 +26,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SB_OUT='results/bootstrap/%x-%j.out'
     SB_ERR='results/bootstrap/%x-%j.err'
 
-    # Override: ./run_experiments.sh [--smoke-test] [dataset ...]
-    DATASETS=("electricity" "traffic")
+    DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "weather" "exchange_rate")
 
     IS_SMOKE=0
     if [ "${1:-}" = "--smoke-test" ]; then
@@ -37,28 +39,30 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
 
     for ds in "${DATASETS[@]}"; do
         DS_TAG="${ds//_/-}"
-        WALLTIME="24:00:00"
+        WALLTIME="48:00:00"
         if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
-        JOB_NAME="dit-${DS_TAG}"
-        [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
+        for scenario in "dit" "dit-h128" "dit-pen0"; do
+            JOB_NAME="${scenario}-${DS_TAG}"
+            [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
 
-        echo "Submitting $JOB_NAME ..."
-        sbatch \
-            --job-name="$JOB_NAME" \
-            --account=aip-boyuwang \
-            --time="$WALLTIME" \
-            --nodes=1 \
-            --gres=gpu:l40s:1 \
-            --cpus-per-task=8 \
-            --mem=50G \
-            --chdir="$SCRIPT_DIR" \
-            --output="$SB_OUT" \
-            --error="$SB_ERR" \
-            --mail-type=END,FAIL \
-            --mail-user=ccao87@uwo.ca \
-            --export="ALL,DATASET=$ds,SMOKE=$IS_SMOKE" \
-            "$SCRIPT_DIR/run_experiments.sh"
+            echo "Submitting $JOB_NAME ..."
+            sbatch \
+                --job-name="$JOB_NAME" \
+                --account=aip-boyuwang \
+                --time="$WALLTIME" \
+                --nodes=1 \
+                --gres=gpu:l40s:1 \
+                --cpus-per-task=8 \
+                --mem=50G \
+                --chdir="$SCRIPT_DIR" \
+                --output="$SB_OUT" \
+                --error="$SB_ERR" \
+                --mail-type=END,FAIL \
+                --mail-user=ccao87@uwo.ca \
+                --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
+                "$SCRIPT_DIR/run_experiments.sh"
+        done
     done
     echo "All jobs submitted!"
     exit 0
@@ -84,18 +88,16 @@ export WANDB_NAME="$(basename "$ALLIANCE_RUN_STEM")"
 export WANDB_DIR="$RUN_LOG_DIR/wandb"
 mkdir -p "$WANDB_DIR"
 
-# Redirect stdout/stderr to the log file inside the run's directory
 exec >>"$ALLIANCE_JOB_LOG" 2>&1
 
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
-echo "Backbone: DiT (FactorizedDiT)"
+echo "Scenario: $SCENARIO"
 echo "Dataset: $DATASET"
 echo "Started: $(date '+%m-%d %H:%M:%S')"
 echo "=========================================="
 
-# ---- Environment ----
 module purge || true
 module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
 
@@ -118,7 +120,6 @@ if [ -z "${PROJECT:-}" ] && [ -d "$HOME/projects" ]; then
     fi
 fi
 
-# Match Alliance Canada persistent venv setup from @run.sh
 if [ -n "${PROJECT:-}" ]; then
     VENV_PATH="$PROJECT/$USER/diffusion-tsf/venv"
     if [ ! -d "$VENV_PATH" ]; then
@@ -146,29 +147,40 @@ if [ "$SMOKE" -eq 1 ]; then
     SMOKE_FLAG="--smoke-test"
 fi
 
+# guidance 0.2 first; dit-pen0 appends --guidance-penalty-weight 0 (last wins in argparse).
 COMMON_ARGS=(
     "--dataset" "$DATASET"
     "--guidance-penalty-weight" "0.2"
     "--checkpoint-dir" "$RUN_CKPT_DIR"
     "--results-dir" "$RUN_DATA_DIR"
     "--synth-cache-dir" "$SYNTH_CACHE_ROOT"
+    "--fresh"
     "--wandb"
 )
 if [ -n "$SMOKE_FLAG" ]; then
     COMMON_ARGS+=("$SMOKE_FLAG")
 fi
 
-# FactorizedDiT + subset tag (matches former SCENARIO=dit path)
-SCENARIO_ARGS=(--model-type dit --subset-id "dit-pen-0.2")
+SCENARIO_ARGS=()
+if [ "$SCENARIO" == "dit" ]; then
+    SCENARIO_ARGS=(--model-type dit --subset-id "dit-pen-0.2")
+elif [ "$SCENARIO" == "dit-h128" ]; then
+    SCENARIO_ARGS=(--model-type dit --image-height 128 --subset-id "dit-h128-pen-0.2")
+elif [ "$SCENARIO" == "dit-pen0" ]; then
+    SCENARIO_ARGS=(--model-type dit --guidance-penalty-weight 0 --subset-id "dit-pen-0")
+else
+    echo "Unknown scenario: $SCENARIO"
+    exit 1
+fi
 
 echo "Running Python Pipeline..."
 
 TARGET_DIM=7
 if [ "$DATASET" = "weather" ]; then TARGET_DIM=21; fi
 if [ "$DATASET" = "exchange_rate" ]; then TARGET_DIM=8; fi
+if [ "$DATASET" = "ETTm1" ] || [ "$DATASET" = "ETTh1" ] || [ "$DATASET" = "ETTh2" ] || [ "$DATASET" = "ETTm2" ]; then TARGET_DIM=7; fi
 if [ "$DATASET" = "electricity" ]; then TARGET_DIM=321; fi
 if [ "$DATASET" = "traffic" ]; then TARGET_DIM=862; fi
-if [ "$DATASET" = "ETTm1" ] || [ "$DATASET" = "ETTh1" ] || [ "$DATASET" = "ETTh2" ] || [ "$DATASET" = "ETTm2" ]; then TARGET_DIM=7; fi
 
 echo "Running Phase 1 (Pretrain)..."
 python3 models/diffusion_tsf/train_multivariate_pipeline.py \
