@@ -1,10 +1,11 @@
 #!/bin/bash
 # =============================================================================
-# Slurm self-resubmitting script for Univariate vs Bottleneck-Attention Ablation
+# Slurm self-resubmitting script — FactorizedDiT only (pretrain + finetune per dataset).
 #
 # USAGE (from login node):
 #   ./run_experiments.sh
 #   ./run_experiments.sh --smoke-test
+#   ./run_experiments.sh weather exchange_rate
 #
 # Run Python from this checkout instead of $SCRATCH/ts-sandbox:
 #   TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1 ./run_experiments.sh
@@ -22,8 +23,8 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SB_OUT='results/bootstrap/%x-%j.out'
     SB_ERR='results/bootstrap/%x-%j.err'
 
-    # Default sweep set; override on the CLI: ./run_experiments.sh [--smoke-test] [dataset ...]
-    DATASETS=("ETTh1" "ETTm1" "exchange_rate" "weather")
+    # Override: ./run_experiments.sh [--smoke-test] [dataset ...]
+    DATASETS=("electricity" "traffic")
 
     IS_SMOKE=0
     if [ "${1:-}" = "--smoke-test" ]; then
@@ -39,27 +40,25 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         WALLTIME="24:00:00"
         if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
-        for scenario in "attn-bottleneck" "100pct-univariate" "dit"; do
-            JOB_NAME="${scenario}-${DS_TAG}"
-            [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
+        JOB_NAME="dit-${DS_TAG}"
+        [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
 
-            echo "Submitting $JOB_NAME ..."
-            sbatch \
-                --job-name="$JOB_NAME" \
-                --account=aip-boyuwang \
-                --time="$WALLTIME" \
-                --nodes=1 \
-                --gres=gpu:l40s:1 \
-                --cpus-per-task=8 \
-                --mem=50G \
-                --chdir="$SCRIPT_DIR" \
-                --output="$SB_OUT" \
-                --error="$SB_ERR" \
-                --mail-type=END,FAIL \
-                --mail-user=ccao87@uwo.ca \
-                --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
-                "$SCRIPT_DIR/run_experiments.sh"
-        done
+        echo "Submitting $JOB_NAME ..."
+        sbatch \
+            --job-name="$JOB_NAME" \
+            --account=aip-boyuwang \
+            --time="$WALLTIME" \
+            --nodes=1 \
+            --gres=gpu:l40s:1 \
+            --cpus-per-task=8 \
+            --mem=50G \
+            --chdir="$SCRIPT_DIR" \
+            --output="$SB_OUT" \
+            --error="$SB_ERR" \
+            --mail-type=END,FAIL \
+            --mail-user=ccao87@uwo.ca \
+            --export="ALL,DATASET=$ds,SMOKE=$IS_SMOKE" \
+            "$SCRIPT_DIR/run_experiments.sh"
     done
     echo "All jobs submitted!"
     exit 0
@@ -91,7 +90,7 @@ exec >>"$ALLIANCE_JOB_LOG" 2>&1
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
-echo "Scenario: $SCENARIO"
+echo "Backbone: DiT (FactorizedDiT)"
 echo "Dataset: $DATASET"
 echo "Started: $(date '+%m-%d %H:%M:%S')"
 echo "=========================================="
@@ -159,6 +158,9 @@ if [ -n "$SMOKE_FLAG" ]; then
     COMMON_ARGS+=("$SMOKE_FLAG")
 fi
 
+# FactorizedDiT + subset tag (matches former SCENARIO=dit path)
+SCENARIO_ARGS=(--model-type dit --subset-id "dit-pen-0.2")
+
 echo "Running Python Pipeline..."
 
 TARGET_DIM=7
@@ -166,19 +168,7 @@ if [ "$DATASET" = "weather" ]; then TARGET_DIM=21; fi
 if [ "$DATASET" = "exchange_rate" ]; then TARGET_DIM=8; fi
 if [ "$DATASET" = "electricity" ]; then TARGET_DIM=321; fi
 if [ "$DATASET" = "traffic" ]; then TARGET_DIM=862; fi
-
-SCENARIO_ARGS=()
-if [ "$SCENARIO" == "attn-bottleneck" ]; then
-    SCENARIO_ARGS=(--attention-levels "1" --subset-id "attn-bottleneck-pen-0.2")
-elif [ "$SCENARIO" == "100pct-univariate" ]; then
-    SCENARIO_ARGS=(--disable-cross-attention --subset-id "100pct-univariate-pen-0.2")
-elif [ "$SCENARIO" == "dit" ]; then
-    # FactorizedDiT backbone, same cross-variate cross-attn at the bottleneck
-    SCENARIO_ARGS=(--model-type dit --subset-id "dit-pen-0.2")
-else
-    echo "Unknown scenario: $SCENARIO"
-    exit 1
-fi
+if [ "$DATASET" = "ETTm1" ] || [ "$DATASET" = "ETTh1" ] || [ "$DATASET" = "ETTh2" ] || [ "$DATASET" = "ETTm2" ]; then TARGET_DIM=7; fi
 
 echo "Running Phase 1 (Pretrain)..."
 python3 models/diffusion_tsf/train_multivariate_pipeline.py \
