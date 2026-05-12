@@ -1,9 +1,7 @@
 #!/bin/bash
 # =============================================================================
-# Slurm self-resubmitting script: U-Net attention ablations, h128/no-penalty, DiT variants.
-#
-# Backbone: scenarios without --model-type dit use the convolutional diffusion backbone
-# (ConditionalUNet2D). Only dit* scenarios set --model-type dit (FactorizedDiT).
+# Slurm self-resubmitting script — U-Net (ConditionalUNet2D) attention / height ablations.
+# FactorizedDiT jobs: use branch dit-backbone (run_experiments.sh there).
 #
 # USAGE (from login node):
 #   ./run_experiments.sh
@@ -39,7 +37,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         WALLTIME="48:00:00"
         if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
-        for scenario in "attn-bottleneck" "attn-0-1" "h128-pen0" "dit" "dit-h128" "dit-pen0"; do
+        for scenario in "attn-bottleneck" "attn-0-1" "h128-pen0"; do
             JOB_NAME="${scenario}-${DS_TAG}"
             [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
 
@@ -177,14 +175,8 @@ elif [ "$SCENARIO" == "attn-0-1" ]; then
     # Add attention one level up: include index 0 plus bottleneck-side index 1.
     SCENARIO_ARGS=(--attention-levels "0,1" --subset-id "attn-0-1-pen-0.2")
 elif [ "$SCENARIO" == "h128-pen0" ]; then
-    # Legacy-style ViTime height; disable iTransformer guidance-divergence penalty.
+    # ViTime height 128; --guidance-penalty-weight after COMMON_ARGS overrides 0.2 → 0.
     SCENARIO_ARGS=(--image-height 128 --guidance-penalty-weight 0 --subset-id "h128-pen-0")
-elif [ "$SCENARIO" == "dit" ]; then
-    SCENARIO_ARGS=(--model-type dit --subset-id "dit-pen-0.2")
-elif [ "$SCENARIO" == "dit-h128" ]; then
-    SCENARIO_ARGS=(--model-type dit --image-height 128 --subset-id "dit-h128-pen-0.2")
-elif [ "$SCENARIO" == "dit-pen0" ]; then
-    SCENARIO_ARGS=(--model-type dit --guidance-penalty-weight 0 --subset-id "dit-pen-0")
 else
     echo "Unknown scenario: $SCENARIO"
     exit 1
