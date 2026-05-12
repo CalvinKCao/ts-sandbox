@@ -10,8 +10,9 @@
 # Run Python from this checkout instead of $SCRATCH/ts-sandbox (export before submit):
 #   TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1 ./run_experiments.sh
 #
-# Defaults: all four ETT benchmarks, weather, exchange_rate; 48h wall (15m smoke);
-# each job passes --fresh so HP / cache skips do not hide config changes.
+# Defaults: six smaller benchmarks on every scenario; electricity + traffic only on
+# attn-bottleneck (too heavy for repeated HP tuning on attn-0-1 / h128-pen0).
+# 48h wall (15m smoke); each job passes --fresh.
 # =============================================================================
 
 set -e
@@ -25,19 +26,25 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SB_OUT='results/bootstrap/%x-%j.out'
     SB_ERR='results/bootstrap/%x-%j.err'
 
-    DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "weather" "exchange_rate")
+    SMALL_DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "weather" "exchange_rate")
+    LARGE_DATASETS=("electricity" "traffic")
 
     IS_SMOKE=0
     if [ "${1:-}" = "--smoke-test" ]; then
         IS_SMOKE=1
     fi
 
-    for ds in "${DATASETS[@]}"; do
-        DS_TAG="${ds//_/-}"
-        WALLTIME="48:00:00"
-        if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
+    for scenario in "attn-bottleneck" "attn-0-1" "h128-pen0"; do
+        if [ "$scenario" = "attn-bottleneck" ]; then
+            _ds_list=("${SMALL_DATASETS[@]}" "${LARGE_DATASETS[@]}")
+        else
+            _ds_list=("${SMALL_DATASETS[@]}")
+        fi
+        for ds in "${_ds_list[@]}"; do
+            DS_TAG="${ds//_/-}"
+            WALLTIME="48:00:00"
+            if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
-        for scenario in "attn-bottleneck" "attn-0-1" "h128-pen0"; do
             JOB_NAME="${scenario}-${DS_TAG}"
             [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
 
