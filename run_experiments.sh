@@ -14,8 +14,8 @@
 #
 # Defaults: six smaller benchmarks on every scenario; electricity + traffic only on
 # dit (base), not dit-h128 / dit-pen0 (too heavy for repeated HP tuning on ablations).
-# Wall: 6h small datasets, 48h large (electricity, traffic); 15m smoke. Optional dataset
-# args apply to all scenarios (see USAGE).
+# Wall: 3h small datasets, 24h large (electricity, traffic); 15m smoke. Same as
+# multi-channel run_experiments. Optional dataset args apply to all scenarios (see USAGE).
 # =============================================================================
 
 set -e
@@ -52,7 +52,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         DATASETS=("$@")
         for ds in "${DATASETS[@]}"; do
             DS_TAG="${ds//_/-}"
-            WALLTIME="$(walltime_for_dataset "$ds" "06:00:00" "48:00:00")"
+            WALLTIME="$(walltime_for_dataset "$ds" "03:00:00" "24:00:00")"
             if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
             for scenario in "dit" "dit-h128" "dit-pen0"; do
@@ -86,7 +86,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
             fi
             for ds in "${_ds_list[@]}"; do
                 DS_TAG="${ds//_/-}"
-                WALLTIME="$(walltime_for_dataset "$ds" "06:00:00" "48:00:00")"
+                WALLTIME="$(walltime_for_dataset "$ds" "03:00:00" "24:00:00")"
                 if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
                 JOB_NAME="${scenario}-${DS_TAG}"
