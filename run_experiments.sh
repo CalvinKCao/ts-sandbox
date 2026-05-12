@@ -53,13 +53,16 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     if [ "$#" -gt 0 ]; then
         DATASETS=("$@")
         for ds in "${DATASETS[@]}"; do
-            DS_TAG="${ds//_/-}"
-            WALLTIME="$(walltime_for_dataset "$ds" "03:00:00" "24:00:00")"
-            if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
-
             # On multi-channel, we only run the Large datasets on attn-bottleneck scenario by default.
             # But if explicitly requested via args, we'll run it for all three scenarios for that dataset.
             for scenario in "attn-bottleneck" "attn-0-1" "h128-pen0"; do
+                DS_TAG="${ds//_/-}"
+                SMALL_WALL="03:00:00"
+                [ "$scenario" = "attn-0-1" ] && SMALL_WALL="24:00:00"
+
+                WALLTIME="$(walltime_for_dataset "$ds" "$SMALL_WALL" "24:00:00")"
+                if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
+
                 JOB_NAME="${scenario}-${DS_TAG}"
                 [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
 
@@ -90,7 +93,10 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
             fi
             for ds in "${_ds_list[@]}"; do
                 DS_TAG="${ds//_/-}"
-                WALLTIME="$(walltime_for_dataset "$ds" "03:00:00" "24:00:00")"
+                SMALL_WALL="03:00:00"
+                [ "$scenario" = "attn-0-1" ] && SMALL_WALL="24:00:00"
+
+                WALLTIME="$(walltime_for_dataset "$ds" "$SMALL_WALL" "24:00:00")"
                 if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
                 JOB_NAME="${scenario}-${DS_TAG}"
