@@ -225,6 +225,7 @@ class DiffusionTSF(nn.Module):
         self.context_encoder = iTransformerTokenAdapter(
             d_model=config.itrans_d_model,
             context_dim=config.context_embedding_dim,
+            max_variates=config.num_variables,
             dropout=0.1,
         )
 
