@@ -34,6 +34,10 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
 
     walltime_for_dataset() {
         local ds="$1" small="$2" large="$3" x
+        if [ "$ds" = "traffic" ]; then
+            printf '%s' "48:00:00"
+            return 0
+        fi
         for x in "${LARGE_DATASETS[@]}"; do
             if [ "$ds" = "$x" ]; then
                 printf '%s' "$large"
