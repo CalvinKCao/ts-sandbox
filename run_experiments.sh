@@ -48,6 +48,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         IS_SMOKE=1
         shift
     fi
+
     if [ "$#" -gt 0 ]; then
         DATASETS=("$@")
         for ds in "${DATASETS[@]}"; do
@@ -55,6 +56,8 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
             WALLTIME="$(walltime_for_dataset "$ds" "03:00:00" "24:00:00")"
             if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
+            # On dit-backbone, we might want to specify which scenarios to run for these datasets.
+            # For simplicity, we'll run all three standard dit scenarios.
             for scenario in "dit" "dit-h128" "dit-pen0"; do
                 JOB_NAME="${scenario}-${DS_TAG}"
                 [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
