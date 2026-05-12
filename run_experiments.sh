@@ -1,10 +1,16 @@
 #!/bin/bash
 # =============================================================================
-# Slurm self-resubmitting script for Univariate vs Bottleneck-Attention Ablation
+# Slurm self-resubmitting script: U-Net attention ablations, h128/no-penalty, DiT variants.
+#
+# Backbone: scenarios without --model-type dit use the convolutional diffusion backbone
+# (ConditionalUNet2D). Only dit* scenarios set --model-type dit (FactorizedDiT).
 #
 # USAGE (from login node):
 #   ./run_experiments.sh
 #   ./run_experiments.sh --smoke-test
+#
+# Run Python from this checkout instead of $SCRATCH/ts-sandbox (export before submit):
+#   TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1 ./run_experiments.sh
 #
 # Defaults: all four ETT benchmarks, weather, exchange_rate; 48h wall (15m smoke);
 # each job passes --fresh so HP / cache skips do not hide config changes.
@@ -33,7 +39,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         WALLTIME="48:00:00"
         if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
-        for scenario in "attn-bottleneck" "100pct-univariate" "dit"; do
+        for scenario in "attn-bottleneck" "attn-0-1" "h128-pen0" "dit" "dit-h128" "dit-pen0"; do
             JOB_NAME="${scenario}-${DS_TAG}"
             [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
 
@@ -94,7 +100,9 @@ echo "=========================================="
 module purge || true
 module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
 
-if [ -d "$SCRATCH/ts-sandbox" ]; then
+if [ "${TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR:-}" = "1" ]; then
+    export PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+elif [ -d "$SCRATCH/ts-sandbox" ]; then
     export PROJECT_ROOT="$SCRATCH/ts-sandbox"
 elif [ -d "$HOME/ts-sandbox" ]; then
     export PROJECT_ROOT="$HOME/ts-sandbox"
@@ -163,11 +171,20 @@ if [ "$DATASET" = "traffic" ]; then TARGET_DIM=862; fi
 
 SCENARIO_ARGS=()
 if [ "$SCENARIO" == "attn-bottleneck" ]; then
+    # Deepest down block only (default [64,128,256] → index 1 = near bottleneck).
     SCENARIO_ARGS=(--attention-levels "1" --subset-id "attn-bottleneck-pen-0.2")
-elif [ "$SCENARIO" == "100pct-univariate" ]; then
-    SCENARIO_ARGS=(--disable-cross-attention --subset-id "100pct-univariate-pen-0.2")
+elif [ "$SCENARIO" == "attn-0-1" ]; then
+    # Add attention one level up: include index 0 plus bottleneck-side index 1.
+    SCENARIO_ARGS=(--attention-levels "0,1" --subset-id "attn-0-1-pen-0.2")
+elif [ "$SCENARIO" == "h128-pen0" ]; then
+    # Legacy-style ViTime height; disable iTransformer guidance-divergence penalty.
+    SCENARIO_ARGS=(--image-height 128 --guidance-penalty-weight 0 --subset-id "h128-pen-0")
 elif [ "$SCENARIO" == "dit" ]; then
     SCENARIO_ARGS=(--model-type dit --subset-id "dit-pen-0.2")
+elif [ "$SCENARIO" == "dit-h128" ]; then
+    SCENARIO_ARGS=(--model-type dit --image-height 128 --subset-id "dit-h128-pen-0.2")
+elif [ "$SCENARIO" == "dit-pen0" ]; then
+    SCENARIO_ARGS=(--model-type dit --guidance-penalty-weight 0 --subset-id "dit-pen-0")
 else
     echo "Unknown scenario: $SCENARIO"
     exit 1
