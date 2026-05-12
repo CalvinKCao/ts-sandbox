@@ -43,40 +43,74 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     IS_SMOKE=0
     if [ "${1:-}" = "--smoke-test" ]; then
         IS_SMOKE=1
+        shift
     fi
 
-    for scenario in "attn-bottleneck" "attn-0-1" "h128-pen0"; do
-        if [ "$scenario" = "attn-bottleneck" ]; then
-            _ds_list=("${SMALL_DATASETS[@]}" "${LARGE_DATASETS[@]}")
-        else
-            _ds_list=("${SMALL_DATASETS[@]}")
-        fi
-        for ds in "${_ds_list[@]}"; do
+    if [ "$#" -gt 0 ]; then
+        DATASETS=("$@")
+        for ds in "${DATASETS[@]}"; do
             DS_TAG="${ds//_/-}"
             WALLTIME="$(walltime_for_dataset "$ds" "03:00:00" "24:00:00")"
             if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
-            JOB_NAME="${scenario}-${DS_TAG}"
-            [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
+            # On multi-channel, we only run the Large datasets on attn-bottleneck scenario by default.
+            # But if explicitly requested via args, we'll run it for all three scenarios for that dataset.
+            for scenario in "attn-bottleneck" "attn-0-1" "h128-pen0"; do
+                JOB_NAME="${scenario}-${DS_TAG}"
+                [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
 
-            echo "Submitting $JOB_NAME ..."
-            sbatch \
-                --job-name="$JOB_NAME" \
-                --account=aip-boyuwang \
-                --time="$WALLTIME" \
-                --nodes=1 \
-                --gres=gpu:l40s:1 \
-                --cpus-per-task=8 \
-                --mem=50G \
-                --chdir="$SCRIPT_DIR" \
-                --output="$SB_OUT" \
-                --error="$SB_ERR" \
-                --mail-type=END,FAIL \
-                --mail-user=ccao87@uwo.ca \
-                --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
-                "$SCRIPT_DIR/run_experiments.sh"
+                echo "Submitting $JOB_NAME ..."
+                sbatch \
+                    --job-name="$JOB_NAME" \
+                    --account=aip-boyuwang \
+                    --time="$WALLTIME" \
+                    --nodes=1 \
+                    --gres=gpu:l40s:1 \
+                    --cpus-per-task=8 \
+                    --mem=50G \
+                    --chdir="$SCRIPT_DIR" \
+                    --output="$SB_OUT" \
+                    --error="$SB_ERR" \
+                    --mail-type=END,FAIL \
+                    --mail-user=ccao87@uwo.ca \
+                    --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
+                    "$SCRIPT_DIR/run_experiments.sh"
+            done
         done
-    done
+    else
+        for scenario in "attn-bottleneck" "attn-0-1" "h128-pen0"; do
+            if [ "$scenario" = "attn-bottleneck" ]; then
+                _ds_list=("${SMALL_DATASETS[@]}" "${LARGE_DATASETS[@]}")
+            else
+                _ds_list=("${SMALL_DATASETS[@]}")
+            fi
+            for ds in "${_ds_list[@]}"; do
+                DS_TAG="${ds//_/-}"
+                WALLTIME="$(walltime_for_dataset "$ds" "03:00:00" "24:00:00")"
+                if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
+
+                JOB_NAME="${scenario}-${DS_TAG}"
+                [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
+
+                echo "Submitting $JOB_NAME ..."
+                sbatch \
+                    --job-name="$JOB_NAME" \
+                    --account=aip-boyuwang \
+                    --time="$WALLTIME" \
+                    --nodes=1 \
+                    --gres=gpu:l40s:1 \
+                    --cpus-per-task=8 \
+                    --mem=50G \
+                    --chdir="$SCRIPT_DIR" \
+                    --output="$SB_OUT" \
+                    --error="$SB_ERR" \
+                    --mail-type=END,FAIL \
+                    --mail-user=ccao87@uwo.ca \
+                    --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
+                    "$SCRIPT_DIR/run_experiments.sh"
+            done
+        done
+    fi
     echo "All jobs submitted!"
     exit 0
 fi
