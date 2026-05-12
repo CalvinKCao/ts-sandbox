@@ -5,6 +5,10 @@
 # USAGE (from login node):
 #   ./run_experiments.sh
 #   ./run_experiments.sh --smoke-test
+#
+# Run Python from this checkout instead of $SCRATCH/ts-sandbox:
+#   TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1 ./run_experiments.sh
+#
 # =============================================================================
 
 set -e
@@ -91,7 +95,9 @@ echo "=========================================="
 module purge || true
 module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
 
-if [ -d "$SCRATCH/ts-sandbox" ]; then
+if [ "${TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR:-}" = "1" ]; then
+    export PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+elif [ -d "$SCRATCH/ts-sandbox" ]; then
     export PROJECT_ROOT="$SCRATCH/ts-sandbox"
 elif [ -d "$HOME/ts-sandbox" ]; then
     export PROJECT_ROOT="$HOME/ts-sandbox"
