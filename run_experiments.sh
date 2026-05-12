@@ -74,7 +74,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
             fi
             for ds in "${_ds_list[@]}"; do
                 DS_TAG="${ds//_/-}"
-                WALLTIME="48:00:00"
+                WALLTIME="24:00:00"
                 if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
                 JOB_NAME="${scenario}-${DS_TAG}"

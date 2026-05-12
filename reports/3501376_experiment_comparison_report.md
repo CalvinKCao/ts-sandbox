@@ -1,7 +1,8 @@
 # Experiment Comparison Report
 
-Comparing iTransformer Baseline vs Diffusion (Avg Ensemble)
+100 pct runs are univariate only (no cross attn), showing that the multivariate info does give a tad bit help to my model. attn-bottleencks have 0.2 divergence penalty applied.
 
+however results invalid bc classifier free guidance issue
 ### Run: 05-10-3501376-attn-bottleneck-ETTh1
 
 | Dataset | iTrans MSE | iTrans MAE | Diffusion MSE | Diffusion MAE | Improvement (MSE) |
