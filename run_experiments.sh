@@ -8,6 +8,7 @@
 #   ./run_experiments.sh --smoke-test
 #   ./run_experiments.sh --smoke-test electricity traffic
 #   ./run_experiments.sh weather exchange_rate
+#   ./run_experiments.sh electricity      # Train only electricity on base dit
 #
 # Run Python from this checkout instead of $SCRATCH/ts-sandbox:
 #   TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1 ./run_experiments.sh
@@ -55,69 +56,54 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
 
     if [ "$#" -gt 0 ]; then
         DATASETS=("$@")
-        for ds in "${DATASETS[@]}"; do
-            DS_TAG="${ds//_/-}"
-            WALLTIME="$(walltime_for_dataset "$ds" "03:00:00" "24:00:00")"
-            if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
-
-            # On dit-backbone, we might want to specify which scenarios to run for these datasets.
-            # For simplicity, we'll run all three standard dit scenarios.
-            for scenario in "dit" "dit-h128" "dit-pen0"; do
-                JOB_NAME="${scenario}-${DS_TAG}"
-                [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
-
-                echo "Submitting $JOB_NAME ..."
-                sbatch \
-                    --job-name="$JOB_NAME" \
-                    --account=aip-boyuwang \
-                    --time="$WALLTIME" \
-                    --nodes=1 \
-                    --gres=gpu:l40s:1 \
-                    --cpus-per-task=8 \
-                    --mem=50G \
-                    --chdir="$SCRIPT_DIR" \
-                    --output="$SB_OUT" \
-                    --error="$SB_ERR" \
-                    --mail-type=END,FAIL \
-                    --mail-user=ccao87@uwo.ca \
-                    --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
-                    "$SCRIPT_DIR/run_experiments.sh"
-            done
-        done
     else
-        for scenario in "dit" "dit-h128" "dit-pen0"; do
-            if [ "$scenario" = "dit" ]; then
-                _ds_list=("${SMALL_DATASETS[@]}" "${LARGE_DATASETS[@]}")
-            else
-                _ds_list=("${SMALL_DATASETS[@]}")
-            fi
-            for ds in "${_ds_list[@]}"; do
-                DS_TAG="${ds//_/-}"
-                WALLTIME="$(walltime_for_dataset "$ds" "03:00:00" "24:00:00")"
-                if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
-
-                JOB_NAME="${scenario}-${DS_TAG}"
-                [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
-
-                echo "Submitting $JOB_NAME ..."
-                sbatch \
-                    --job-name="$JOB_NAME" \
-                    --account=aip-boyuwang \
-                    --time="$WALLTIME" \
-                    --nodes=1 \
-                    --gres=gpu:l40s:1 \
-                    --cpus-per-task=8 \
-                    --mem=50G \
-                    --chdir="$SCRIPT_DIR" \
-                    --output="$SB_OUT" \
-                    --error="$SB_ERR" \
-                    --mail-type=END,FAIL \
-                    --mail-user=ccao87@uwo.ca \
-                    --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
-                    "$SCRIPT_DIR/run_experiments.sh"
-            done
-        done
+        DATASETS=("${SMALL_DATASETS[@]}" "${LARGE_DATASETS[@]}")
     fi
+
+    for ds in "${DATASETS[@]}"; do
+        DS_TAG="${ds//_/-}"
+        WALLTIME="$(walltime_for_dataset "$ds" "03:00:00" "24:00:00")"
+        if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
+
+        # Large datasets only run on base 'dit' scenario by default.
+        is_large=0
+        for lds in "${LARGE_DATASETS[@]}"; do
+            if [ "$ds" = "$lds" ]; then is_large=1; break; fi
+        done
+
+        if [ "$is_large" -eq 1 ]; then
+            SCENARIOS=("dit")
+        else
+            SCENARIOS=("dit" "dit-h128" "dit-pen0")
+        fi
+
+        # If user explicitly specified multiple datasets, they might want all scenarios
+        # but we follow the "heavy" rule for electricity/traffic to save resources.
+        for scenario in "${SCENARIOS[@]}"; do
+            # Skip non-dit scenarios for large datasets if we are in default mode (no args)
+            # (redundant now with SCENARIOS logic above, but kept for clarity if logic expands)
+            
+            JOB_NAME="${scenario}-${DS_TAG}"
+            [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
+
+            echo "Submitting $JOB_NAME ..."
+            sbatch \
+                --job-name="$JOB_NAME" \
+                --account=aip-boyuwang \
+                --time="$WALLTIME" \
+                --nodes=1 \
+                --gres=gpu:l40s:1 \
+                --cpus-per-task=8 \
+                --mem=50G \
+                --chdir="$SCRIPT_DIR" \
+                --output="$SB_OUT" \
+                --error="$SB_ERR" \
+                --mail-type=END,FAIL \
+                --mail-user=ccao87@uwo.ca \
+                --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
+                "$SCRIPT_DIR/run_experiments.sh"
+        done
+    done
     echo "All jobs submitted!"
     exit 0
 fi

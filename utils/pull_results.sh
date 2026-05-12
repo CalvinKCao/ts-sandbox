@@ -1,58 +1,34 @@
 #!/bin/bash
-# Pull Slurm run artifacts from Killarney needed for local comparison plots + diffusion eval.
+# Pull Slurm run artifacts from Killarney.
 #
-# run.sh layout (on cluster):
-#   results/<MM-DD-JOBID-slug>/ckpts/
-#     pretrained_dim<V>/itransformer.pt     — synthetic HP-best iTransformer (guidance pretrain)
-#     <subset_id>/best.pt                   — fine-tuned diffusion U-Net
-#     <subset_id>/metadata.json
-#     <subset_id>_itransformer_finetuned.pt — real-data fine-tuned iTransformer (guidance at eval)
-#     <subset_id>_itrans_ft_hp_best.pt      — optional; HP-trial best before copy to *_finetuned.pt
-#
-# visualize_comparison looks for *_itransformer_finetuned.pt next to each subset dir; without it,
-# it falls back to pretrained_dim*/itransformer.pt (misleading orange curves on real data).
+# Alliance Best Practices:
+# 1. Use Data Transfer Nodes (DTNs) if available (e.g. dtn.killarney.alliancecan.ca).
+# 2. Use --no-g and --no-p to avoid permission/quota issues on /project.
+# 3. Use --partial to allow resuming interrupted transfers of large model files.
 
-REMOTE_HOST="killarney.alliancecan.ca"
+REMOTE_HOST="${REMOTE_HOST:-killarney.alliancecan.ca}"
 REMOTE_USER="ccao87"
-REMOTE_PATH="/scratch/ccao87/ts-sandbox/results"
 LOCAL_PATH="./results"
-SSH_OPTS_INTERACTIVE=(
-    -o BatchMode=yes
+
+# Multiple remote paths to check
+REMOTE_PATHS=(
+    "/scratch/ccao87/ts-sandbox/results"
+    "/scratch/ccao87/ts-sandbox-dit-parallel/results"
+)
+
+# Regular SSH options
+SSH_OPTS=(
     -o ConnectTimeout=12
     -o ConnectionAttempts=1
     -o StrictHostKeyChecking=accept-new
 )
 
-usage() {
-    echo "Usage:"
-    echo "  $0 --recent <hours>              Pull every run folder on the cluster touched in the last N hours"
-    echo "  $0 <results-folder> [more...]   Pull named folders only"
-    echo ""
-    echo "The top-level remote folder \"archive\" is never pulled. Paths may omit a leading results/."
-    echo "Examples:"
-    echo "  $0 --recent 24"
-    echo "  $0 05-08-3476425-default 05-08-3477032-h128"
-}
-
-rsync_one() {
-    local FOLDER_CLEAN="$1"
-    echo "------------------------------------------------------------"
-    echo "Pulling visualization artifacts for: $FOLDER_CLEAN"
-    echo "------------------------------------------------------------"
-    rsync -e "ssh ${SSH_OPTS_INTERACTIVE[*]}" "${RSYNC_OPTS[@]}" \
-        "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/${FOLDER_CLEAN}" "${LOCAL_PATH}/"
-}
-
-if [ $# -eq 0 ]; then
-    usage
-    exit 1
-fi
-
-mkdir -p "$LOCAL_PATH"
-
 RSYNC_OPTS=(
     -avz
     --progress
+    --no-g    # Best practice: avoid group preservation issues on /project
+    --no-p    # Best practice: avoid permission preservation issues on /project
+    --partial # Best practice: allow resuming large .pt file transfers
     --include='*/'
     --include='best.pt'
     --include='metadata.json'
@@ -63,46 +39,61 @@ RSYNC_OPTS=(
     --include='*_itrans_ft_hp_best.pt'
     --include='*_itrans_ft_hp.json'
     --include='*.log'
+    --exclude='archive/'
     --exclude='*'
 )
 
-TARGET_FOLDERS=()
+mkdir -p "$LOCAL_PATH"
+
+SOURCES=()
 
 if [ "$1" = "--recent" ]; then
-    if [ -z "${2:-}" ] || ! [[ "${2}" =~ ^[0-9]+$ ]] || [ "${2}" -lt 1 ]; then
-        echo "error: --recent requires a positive integer hour count (e.g. 24)" >&2
-        exit 1
-    fi
-    HOURS="$2"
+    HOURS="${2:-24}"
     MINUTES=$((HOURS * 60))
-    echo "Listing run folders under ${REMOTE_PATH} modified in the last ${HOURS} hour(s) (excluding archive)..."
-    mapfile -t TARGET_FOLDERS < <(
-        ssh "${SSH_OPTS_INTERACTIVE[@]}" "${REMOTE_USER}@${REMOTE_HOST}" \
-            "find '${REMOTE_PATH}' -maxdepth 1 -mindepth 1 -type d ! -name archive -mmin -${MINUTES} -printf '%f\\n' | sort"
-    )
-    if [ "${#TARGET_FOLDERS[@]}" -eq 0 ]; then
-        echo "No matching folders on the cluster."
+    echo "Finding folders from the last $HOURS hours on $REMOTE_HOST..."
+    
+    for RP in "${REMOTE_PATHS[@]}"; do
+        echo "  Checking $RP..."
+        mapfile -t TARGET_FOLDERS < <(
+            ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" \
+                "find '${RP}' -maxdepth 1 -mindepth 1 -type d ! -name archive -mmin -${MINUTES} -printf '%f\\n' | sort" 2>/dev/null
+        )
+        for FOLDER in "${TARGET_FOLDERS[@]}"; do
+            [ -n "$FOLDER" ] && SOURCES+=("${REMOTE_USER}@${REMOTE_HOST}:${RP}/${FOLDER}")
+        done
+    done
+
+    if [ "${#SOURCES[@]}" -eq 0 ]; then
+        echo "No folders found."
         exit 0
     fi
-    echo "Will pull ${#TARGET_FOLDERS[@]} folder(s):"
-    printf '  %s\n' "${TARGET_FOLDERS[@]}"
-    echo ""
-else
+    echo "Pulling ${#SOURCES[@]} recent folders..."
+
+elif [ $# -gt 0 ]; then
     while [ $# -gt 0 ]; do
-        FOLDER_CLEAN="${1#results/}"
-        if [ "$FOLDER_CLEAN" = "archive" ]; then
-            echo "Skipping excluded folder: archive" >&2
-        else
-            TARGET_FOLDERS+=("$FOLDER_CLEAN")
+        CLEAN="${1#results/}"
+        if [ "$CLEAN" != "archive" ]; then
+            # We don't know which path it's in, so we'll add both. 
+            # Rsync will handle it (though it might warn if one doesn't exist, we can suppress or just let it be).
+            # To be cleaner, we could check remote existence, but adding both is usually fine for specific pulls.
+            for RP in "${REMOTE_PATHS[@]}"; do
+                SOURCES+=("${REMOTE_USER}@${REMOTE_HOST}:${RP}/${CLEAN}")
+            done
         fi
         shift
     done
+    echo "Pulling specified folders (searching across all remote paths)..."
+else
+    # Default: sync everything from all remote paths
+    for RP in "${REMOTE_PATHS[@]}"; do
+        SOURCES+=("${REMOTE_USER}@${REMOTE_HOST}:${RP}/")
+    done
+    echo "Syncing all folders from all remote locations (excluding archive)..."
 fi
 
-for FOLDER in "${TARGET_FOLDERS[@]}"; do
-    [ -n "$FOLDER" ] || continue
-    rsync_one "$FOLDER"
-done
+# Single rsync call is much faster and more robust
+# We use --ignore-missing-args to prevent errors if a specifically requested folder 
+# only exists in one of the multiple remote paths.
+rsync -e "ssh ${SSH_OPTS[*]}" "${RSYNC_OPTS[@]}" --ignore-missing-args "${SOURCES[@]}" "${LOCAL_PATH}/"
 
-echo ""
-echo "Done. Pulled requested artifacts to $LOCAL_PATH"
+echo "Done."
