@@ -12,7 +12,9 @@
 # Run Python from this checkout instead of $SCRATCH/ts-sandbox:
 #   TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1 ./run_experiments.sh
 #
-# Defaults: same six benchmarks as multi-channel run_experiments; 48h wall (15m smoke).
+# Defaults: six smaller benchmarks on every scenario; electricity + traffic only on
+# dit (base), not dit-h128 / dit-pen0 (too heavy for repeated HP tuning on ablations).
+# 48h wall (15m smoke). Optional dataset args apply to all scenarios (see USAGE).
 # =============================================================================
 
 set -e
@@ -26,7 +28,8 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SB_OUT='results/bootstrap/%x-%j.out'
     SB_ERR='results/bootstrap/%x-%j.err'
 
-    DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "weather" "exchange_rate")
+    SMALL_DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "weather" "exchange_rate")
+    LARGE_DATASETS=("electricity" "traffic")
 
     IS_SMOKE=0
     if [ "${1:-}" = "--smoke-test" ]; then
@@ -35,35 +38,67 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     fi
     if [ "$#" -gt 0 ]; then
         DATASETS=("$@")
-    fi
+        for ds in "${DATASETS[@]}"; do
+            DS_TAG="${ds//_/-}"
+            WALLTIME="48:00:00"
+            if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
-    for ds in "${DATASETS[@]}"; do
-        DS_TAG="${ds//_/-}"
-        WALLTIME="48:00:00"
-        if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
+            for scenario in "dit" "dit-h128" "dit-pen0"; do
+                JOB_NAME="${scenario}-${DS_TAG}"
+                [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
 
-        for scenario in "dit" "dit-h128" "dit-pen0"; do
-            JOB_NAME="${scenario}-${DS_TAG}"
-            [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
-
-            echo "Submitting $JOB_NAME ..."
-            sbatch \
-                --job-name="$JOB_NAME" \
-                --account=aip-boyuwang \
-                --time="$WALLTIME" \
-                --nodes=1 \
-                --gres=gpu:l40s:1 \
-                --cpus-per-task=8 \
-                --mem=50G \
-                --chdir="$SCRIPT_DIR" \
-                --output="$SB_OUT" \
-                --error="$SB_ERR" \
-                --mail-type=END,FAIL \
-                --mail-user=ccao87@uwo.ca \
-                --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
-                "$SCRIPT_DIR/run_experiments.sh"
+                echo "Submitting $JOB_NAME ..."
+                sbatch \
+                    --job-name="$JOB_NAME" \
+                    --account=aip-boyuwang \
+                    --time="$WALLTIME" \
+                    --nodes=1 \
+                    --gres=gpu:l40s:1 \
+                    --cpus-per-task=8 \
+                    --mem=50G \
+                    --chdir="$SCRIPT_DIR" \
+                    --output="$SB_OUT" \
+                    --error="$SB_ERR" \
+                    --mail-type=END,FAIL \
+                    --mail-user=ccao87@uwo.ca \
+                    --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
+                    "$SCRIPT_DIR/run_experiments.sh"
+            done
         done
-    done
+    else
+        for scenario in "dit" "dit-h128" "dit-pen0"; do
+            if [ "$scenario" = "dit" ]; then
+                _ds_list=("${SMALL_DATASETS[@]}" "${LARGE_DATASETS[@]}")
+            else
+                _ds_list=("${SMALL_DATASETS[@]}")
+            fi
+            for ds in "${_ds_list[@]}"; do
+                DS_TAG="${ds//_/-}"
+                WALLTIME="48:00:00"
+                if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
+
+                JOB_NAME="${scenario}-${DS_TAG}"
+                [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}-smoke"
+
+                echo "Submitting $JOB_NAME ..."
+                sbatch \
+                    --job-name="$JOB_NAME" \
+                    --account=aip-boyuwang \
+                    --time="$WALLTIME" \
+                    --nodes=1 \
+                    --gres=gpu:l40s:1 \
+                    --cpus-per-task=8 \
+                    --mem=50G \
+                    --chdir="$SCRIPT_DIR" \
+                    --output="$SB_OUT" \
+                    --error="$SB_ERR" \
+                    --mail-type=END,FAIL \
+                    --mail-user=ccao87@uwo.ca \
+                    --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
+                    "$SCRIPT_DIR/run_experiments.sh"
+            done
+        done
+    fi
     echo "All jobs submitted!"
     exit 0
 fi
