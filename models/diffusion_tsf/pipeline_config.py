@@ -67,6 +67,14 @@ DISABLE_CROSS_ATTENTION: bool = False
 USE_AMP: bool = True               # bfloat16 mixed precision
 USE_GRADIENT_CHECKPOINTING: bool = True
 
+# Diffusion schedule (DDPM training); DDIM inference still uses ddim_steps from config.
+NUM_DIFFUSION_STEPS: int = 200
+NOISE_SCHEDULE: str = "cosine"  # "linear" | "cosine" | "sigmoid" | "quadratic"
+
+# Horizontal temporal cues on the 2D canvas (matches older train_electricity defaults).
+USE_TIME_RAMP: bool = True
+USE_TIME_SINE: bool = True
+
 
 # ---- Default variate count (only used when --n-variates is not supplied) ----------
 
@@ -101,11 +109,6 @@ SYNTHETIC_SAMPLES_CAP: Optional[int] = 50000  # None = no cap on TOTAL pool size
 
 
 # ---- Phase 1 (synthetic pretrain / HP) --------------------------------------------
-# ... rest of file (Phase 1/2 constants) ...
-# I will actually replace the helper functions at the end too.
-
-
-# ---- Phase 1 (synthetic pretrain / HP) --------------------------------------------
 
 # Phase 1A: iTransformer HP tuning on synthetic data. Best HP-tuning model is saved
 # directly as `itransformer.pt` (no separate "full" pretrain step).
@@ -119,13 +122,13 @@ PRETRAIN_PATIENCE: int = 5
 
 # Phase 1B: Diffusion HP tuning on synthetic data. Best HP-tuning model is saved
 # directly as `diffusion.pt` (no separate "full" pretrain step).
-N_DIFFUSION_HP_TRIALS: int = 3
-DIFFUSION_HP_MAX_EPOCHS: int = 15
-DIFFUSION_HP_PATIENCE: int = 10
+N_DIFFUSION_HP_TRIALS: int = 10
+DIFFUSION_HP_MAX_EPOCHS: int = 30
+DIFFUSION_HP_PATIENCE: int = 7
 
 # Fallback diffusion pretrain (only runs if HP cache is missing).
 PRETRAIN_DIFFUSION_EPOCHS: int = 3
-PRETRAIN_DIFFUSION_MAX_EPOCHS: int = 15
+PRETRAIN_DIFFUSION_MAX_EPOCHS: int = 30
 
 
 # ---- Phase 2 (real-data fine-tune / HP) -------------------------------------------
@@ -142,9 +145,9 @@ ITRANS_REAL_COLD_START: bool = True
 # Phase 2B: Diffusion HP tuning on real data (LR-only search; batch size auto-probed).
 # The best trial's checkpoint is reused as the final fine-tuned model — there is no
 # separate "Phase 2C" full retrain.
-N_FINETUNE_HP_TRIALS: int = 3
-HP_TUNE_EPOCHS: int = 10
-HP_TUNE_PATIENCE: int = 5
+N_FINETUNE_HP_TRIALS: int = 10
+HP_TUNE_EPOCHS: int = 30
+HP_TUNE_PATIENCE: int = 7
 # Optuna log-uniform bounds for Phase 2B only (finetune_hp_objective).
 FINETUNE_HP_LR_MIN: float = 3e-6
 FINETUNE_HP_LR_MAX: float = 2e-4

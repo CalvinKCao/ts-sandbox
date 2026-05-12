@@ -27,10 +27,10 @@ class DiffusionTSFConfig:
         attention_levels: where to put attention
         
     diffusion:
-        num_diffusion_steps: T (default: 1000)
+        num_diffusion_steps: T (default: 200)
         beta_start: start beta
         beta_end: end beta
-        noise_schedule: "linear" or "cosine"
+        noise_schedule: "linear" or "cosine" (default cosine)
         
     sampling:
         ddim_steps: steps for DDIM
@@ -82,10 +82,10 @@ class DiffusionTSFConfig:
     use_dilated_middle: bool = False  
     
     # diffusion params
-    num_diffusion_steps: int = 1000
+    num_diffusion_steps: int = 200
     beta_start: float = 1e-4
     beta_end: float = 0.02
-    noise_schedule: str = "linear"  
+    noise_schedule: str = "cosine"
     
     # ddim stuff
     ddim_steps: int = 50
@@ -126,14 +126,18 @@ class DiffusionTSFConfig:
     dit_mlp_ratio: float = 4.0
     dit_dropout: float = 0.0
 
+    # When model_type == "dit", flatten batch×variates (BV) through the backbone; chunk
+    # to limit memory (0 = no chunking).
+    factorized_max_chunk_size: int = 128
+
     # memory optimization flags
     use_gradient_checkpointing: bool = False
     use_amp: bool = False  # bfloat16 mixed precision
     
     # aux channels
     use_coordinate_channel: bool = True  # vertical gradient
-    use_time_ramp: bool = False  # linear ramp
-    use_time_sine: bool = False  # sine wave
+    use_time_ramp: bool = True  # linear ramp along time (horizontal)
+    use_time_sine: bool = True  # periodic time cue
     use_value_channel: bool = False  # last past values
     seasonal_period: int = 96  
     

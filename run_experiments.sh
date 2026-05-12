@@ -5,6 +5,9 @@
 # USAGE (from login node):
 #   ./run_experiments.sh
 #   ./run_experiments.sh --smoke-test
+#
+# Defaults: all four ETT benchmarks, weather, exchange_rate; 48h wall (15m smoke);
+# each job passes --fresh so HP / cache skips do not hide config changes.
 # =============================================================================
 
 set -e
@@ -18,8 +21,8 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SB_OUT='results/bootstrap/%x-%j.out'
     SB_ERR='results/bootstrap/%x-%j.err'
 
-    DATASETS=("weather" "exchange_rate" "ETTm1" "ETTh2")
-    
+    DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "weather" "exchange_rate")
+
     IS_SMOKE=0
     if [ "${1:-}" = "--smoke-test" ]; then
         IS_SMOKE=1
@@ -27,7 +30,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
 
     for ds in "${DATASETS[@]}"; do
         DS_TAG="${ds//_/-}"
-        WALLTIME="24:00:00"
+        WALLTIME="48:00:00"
         if [ "$IS_SMOKE" -eq 1 ]; then WALLTIME="00:15:00"; fi
 
         for scenario in "attn-bottleneck" "100pct-univariate" "dit"; do
@@ -142,6 +145,7 @@ COMMON_ARGS=(
     "--checkpoint-dir" "$RUN_CKPT_DIR"
     "--results-dir" "$RUN_DATA_DIR"
     "--synth-cache-dir" "$SYNTH_CACHE_ROOT"
+    "--fresh"
     "--wandb"
 )
 if [ -n "$SMOKE_FLAG" ]; then

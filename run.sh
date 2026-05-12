@@ -411,6 +411,7 @@ while [[ $# -gt 0 ]]; do
         --smoke-test)     SMOKE_TEST="--smoke-test"; shift ;;
         --dataset)        SINGLE_DATASET="$2"; shift 2 ;;
         --pretrain-only)  PRETRAIN_ONLY=1; shift ;;
+        --fresh)          EXTRA_PY_ARGS="$EXTRA_PY_ARGS --fresh"; shift ;;
         --resume)         RESUME="$2"; shift 2 ;;
         --seed)           SEED="$2"; shift 2 ;;
         --variant)        VARIANT="$2"; shift 2 ;;
