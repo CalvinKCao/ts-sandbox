@@ -117,6 +117,12 @@ class DiffusionTSFConfig:
     
     # penalty for deviating from itransformer guidance ghost image
     guidance_penalty_weight: float = 0.0
+    # If True, only the guidance deviation loss uses a spatial map (noise_loss / emd_loss unchanged).
+    # Per (B,V,w) column: center = dominant vertical jump in guidance_2d; weight=0 for |row−center|≤grace_half_width;
+    # then linear 0→1 over ramp_pixels. guidance_penalty_free_band_pixels stores that half-width (±N rows).
+    guidance_spatial_weighted_penalty: bool = False
+    guidance_penalty_free_band_pixels: int = 5
+    guidance_penalty_ramp_pixels: int = 22
 
     # z-score each window by past mean/std before 2D encode (global z-score still in dataloader)
     per_window_standardize: bool = True

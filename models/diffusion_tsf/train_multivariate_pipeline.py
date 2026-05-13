@@ -714,6 +714,9 @@ N_VARIATES = N_VARIATES_DEFAULT
 FROZEN_HP_PACK_PATH: Optional[str] = None
 PER_WINDOW_STANDARDIZE: bool = True
 EVAL_TEST_FRACTION: float = 0.5
+GUIDANCE_SPATIAL_WEIGHTED_PENALTY: bool = False
+GUIDANCE_PENALTY_FREE_BAND_PIXELS: int = 5
+GUIDANCE_PENALTY_RAMP_PIXELS: int = 22
 
 # Dataset registry: name -> (path, date_col, seasonal_period)
 DATASET_REGISTRY = {
@@ -979,7 +982,10 @@ def create_diffusion_model(
     if guidance_penalty_weight is None:
         guidance_penalty_weight = GUIDANCE_PENALTY_WEIGHT
 
-    logger.info(f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}")
+    logger.info(
+        f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, "
+        f"guidance_spatial_weighted_penalty={GUIDANCE_SPATIAL_WEIGHTED_PENALTY}"
+    )
 
     config = DiffusionTSFConfig(
         num_variables=n_variates,
@@ -991,6 +997,9 @@ def create_diffusion_model(
         use_coordinate_channel=True,
         use_guidance_channel=True,
         guidance_penalty_weight=guidance_penalty_weight,
+        guidance_spatial_weighted_penalty=GUIDANCE_SPATIAL_WEIGHTED_PENALTY,
+        guidance_penalty_free_band_pixels=GUIDANCE_PENALTY_FREE_BAND_PIXELS,
+        guidance_penalty_ramp_pixels=GUIDANCE_PENALTY_RAMP_PIXELS,
         num_diffusion_steps=1000,
         model_type=MODEL_TYPE,
         unet_channels=UNET_CHANNELS,
@@ -3582,6 +3591,7 @@ def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
     global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION, LOOKBACK_LENGTH, FORECAST_LENGTH
     global MODEL_TYPE, FROZEN_HP_PACK_PATH, PER_WINDOW_STANDARDIZE, EVAL_TEST_FRACTION
+    global GUIDANCE_SPATIAL_WEIGHTED_PENALTY, GUIDANCE_PENALTY_FREE_BAND_PIXELS, GUIDANCE_PENALTY_RAMP_PIXELS
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3645,6 +3655,23 @@ def main():
         default=0.5,
         help='Random fraction of test windows used for diffusion eval (default 0.5)',
     )
+    parser.add_argument(
+        '--guidance-spatial-penalty',
+        action='store_true',
+        help='Use row-wise ramped guidance penalty (free band + linear ramp from guidance map)',
+    )
+    parser.add_argument(
+        '--guidance-penalty-free-pixels',
+        type=int,
+        default=5,
+        help='Grace half-width in rows: zero guidance penalty when |row−iTrans_edge|≤this (±N pixels per column)',
+    )
+    parser.add_argument(
+        '--guidance-penalty-ramp-pixels',
+        type=int,
+        default=22,
+        help='Rows beyond free band over which penalty weight ramps linearly 0→1',
+    )
 
     args = parser.parse_args()
 
@@ -3686,6 +3713,9 @@ def main():
     if not (0.0 < EVAL_TEST_FRACTION <= 1.0):
         print('ERROR: --eval-test-fraction must be in (0, 1]')
         sys.exit(1)
+    GUIDANCE_SPATIAL_WEIGHTED_PENALTY = bool(args.guidance_spatial_penalty)
+    GUIDANCE_PENALTY_FREE_BAND_PIXELS = int(args.guidance_penalty_free_pixels)
+    GUIDANCE_PENALTY_RAMP_PIXELS = int(args.guidance_penalty_ramp_pixels)
     
     # DDP setup
     if args.ddp:

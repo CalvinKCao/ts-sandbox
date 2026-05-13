@@ -457,7 +457,29 @@ class DiffusionTSF(nn.Module):
         else:
             future_norm = None
         return past_norm, future_norm, (mean, std)
-    
+
+    def _guidance_spatial_penalty_weight_map(self, guidance_2d: torch.Tensor) -> torch.Tensor:
+        """Per-column spatial weights for the guidance penalty only (not noise or EMD).
+
+        For each (B, V, time-column w): find row center ``h_star`` = argmax |Δ_h guidance| (stop-grad),
+        i.e. strongest CDF edge = iTrans-implied value row. Grace: weight 0 when |row − h_star| ≤
+        ``guidance_penalty_free_band_pixels`` (±N rows). Beyond that, weight ramps linearly 0→1 over
+        ``guidance_penalty_ramp_pixels`` additional row distance (then clamped to 1).
+        """
+        B, V, H, Wdim = guidance_2d.shape
+        if H < 2:
+            return torch.ones(B, V, H, Wdim, device=guidance_2d.device, dtype=guidance_2d.dtype)
+        g = guidance_2d.detach()
+        dh = (g[:, :, 1:, :] - g[:, :, :-1, :]).abs()
+        h_star = dh.argmax(dim=2).to(dtype=g.dtype) + 0.5
+        hh = torch.arange(H, device=g.device, dtype=g.dtype).view(1, 1, H, 1).expand(B, V, H, Wdim)
+        h_exp = h_star.unsqueeze(2).expand_as(hh)
+        dist = (hh - h_exp).abs()
+        grace_hw = float(getattr(self.config, "guidance_penalty_free_band_pixels", 5))
+        ramp = float(getattr(self.config, "guidance_penalty_ramp_pixels", 22))
+        ramp = max(ramp, 1e-3)
+        return ((dist - grace_hw) / ramp).clamp(min=0.0, max=1.0)
+
     def _denormalize(
         self,
         x: torch.Tensor,
@@ -788,7 +810,12 @@ class DiffusionTSF(nn.Module):
 
         guidance_loss = torch.tensor(0.0, device=device)
         if guidance_2d is not None and self.config.guidance_penalty_weight > 0:
-            guidance_loss = F.mse_loss(x0_pred, guidance_2d)
+            if getattr(self.config, "guidance_spatial_weighted_penalty", False):
+                # Only the guidance-alignment squared error is weighted; noise_loss / emd_loss above are unchanged.
+                wmap = self._guidance_spatial_penalty_weight_map(guidance_2d)
+                guidance_loss = ((x0_pred - guidance_2d) ** 2 * wmap).mean()
+            else:
+                guidance_loss = F.mse_loss(x0_pred, guidance_2d)
 
         loss = (
             noise_loss + 

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Submit 12 Slurm jobs: 6 datasets × (A: no per-window norm, pen=0) vs (B: per-window norm, pen=0.03).
+# Submit 18 Slurm jobs: 6 datasets × three arms:
+#   wn-a — no per-window norm, guidance penalty 0
+#   wn-b — default window norm, guidance penalty 0.03 (uniform MSE)
+#   wn-c — default window norm, spatial ramped guidance penalty only (±5 row grace / col), max weight 0.2
 # Requires: repo branch with frozen packs, WANDB_API_KEY, datasets under ./datasets.
 # Run from repo root on Killarney login node.
 
@@ -29,6 +32,7 @@ submit_one () {
 for ds in ETTh1 ETTh2 ETTm1 ETTm2 weather exchange_rate; do
   submit_one "wn-a" "$ds" "--disable-per-window-norm --guidance-penalty-weight 0"
   submit_one "wn-b" "$ds" "--guidance-penalty-weight 0.03"
+  submit_one "wn-c" "$ds" "--guidance-spatial-penalty --guidance-penalty-weight 0.2"
 done
 
-echo "Submitted 12 jobs (Slurm names wn-a-<dataset> / wn-b-<dataset>)."
+echo "Submitted 18 jobs (wn-a-*, wn-b-*, wn-c-* per dataset)."
