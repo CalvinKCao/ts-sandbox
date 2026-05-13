@@ -12,8 +12,8 @@
 #   ./run.sh --dataset electricity
 #   ./run.sh --no-wandb                       # metrics stay local only (no wandb.init)
 #
-# Run from this checkout on the cluster (not $SCRATCH/ts-sandbox):
-#   ./run.sh --submit-root --dataset ETTh1 --smoke-test
+# Code + datasets default to this checkout (PROJECT_ROOT = SLURM_SUBMIT_DIR).
+# Opt out (use $SCRATCH/ts-sandbox or $HOME/ts-sandbox instead): ./run.sh --no-submit-root ...
 #
 # Architecture / U-Net ablations (six distinct experiments — one Slurm job each):
 #   --variant default | h128 | attn-near-bottleneck | deeper-unet | penalty-0.1 | penalty-0.3
@@ -24,12 +24,14 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Strip --submit-root before login-side parsing; sbatch passes TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1 to the job.
-SUBMIT_ROOT_FOR_PROJECT=0
+# Strip submit-root flags before login-side parsing. Default: run Python from this
+# checkout (sbatch exports TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1 for the job).
+SUBMIT_ROOT_FOR_PROJECT=1
 _sr_argv=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --submit-root) SUBMIT_ROOT_FOR_PROJECT=1; shift ;;
+        --submit-root)    SUBMIT_ROOT_FOR_PROJECT=1; shift ;;
+        --no-submit-root) SUBMIT_ROOT_FOR_PROJECT=0; shift ;;
         *) _sr_argv+=("$1"); shift ;;
     esac
 done
@@ -81,16 +83,13 @@ if [ -z "$SLURM_JOB_ID" ]; then
     SUBMIT_DS_TAG="${SUBMIT_DATASET//_/-}"
 
     _export_arg="ALL"
+    if [ "${SUBMIT_ROOT_FOR_PROJECT:-1}" -eq 1 ]; then
+        _export_arg="${_export_arg},TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1"
+    fi
     if [ -n "${RESUME:-}" ]; then
         _export_arg="${_export_arg},RESUME_STEM=${RESUME}"
     fi
-    if [ "${SUBMIT_ROOT_FOR_PROJECT:-0}" -eq 1 ]; then
-        _export_arg="${_export_arg},TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1"
-    fi
-    SBATCH_SMOKE_EXPORT=()
-    if [ -n "${RESUME:-}" ] || [ "${SUBMIT_ROOT_FOR_PROJECT:-0}" -eq 1 ]; then
-        SBATCH_SMOKE_EXPORT=(--export="${_export_arg}")
-    fi
+    SBATCH_SMOKE_EXPORT=(--export="${_export_arg}")
     SBATCH_FULL_EXPORT=(--export="${_export_arg}")
 
     if [ "$IS_SMOKE" -eq 1 ]; then
@@ -215,9 +214,11 @@ elif [ -d "$SCRATCH/ts-sandbox" ]; then
 elif [ -d "$HOME/ts-sandbox" ]; then
     export PROJECT_ROOT="$HOME/ts-sandbox"
 else
-    echo "ERROR: ts-sandbox not found in SCRATCH or HOME (use --submit-root to run from this checkout)"
+    echo "ERROR: ts-sandbox not found in SCRATCH or HOME (clone there or drop --no-submit-root)"
     exit 1
 fi
+
+echo "PROJECT_ROOT=$PROJECT_ROOT (TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=${TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR:-0})"
 
 # Auto-detect PROJECT (nullglob — bare ls + pipefail kills the job if globs miss)
 if [ -z "${PROJECT:-}" ] && [ -d "$HOME/projects" ]; then
@@ -325,7 +326,8 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --hours) shift 2 ;;
         --h100)  shift ;;
-        --submit-root) shift ;;
+        --submit-root)    shift ;;
+        --no-submit-root) shift ;;
         *)       PIPELINE_ARGS+=("$1"); shift ;;
     esac
 done
@@ -370,6 +372,7 @@ while [[ $# -gt 0 ]]; do
         --hours)          shift 2 ;;   # consumed by login-side submit logic only
         --h100)           shift ;;     # consumed by login-side submit logic only
         --submit-root)    shift ;;     # stripped at script start; ignore if passed through
+        --no-submit-root) shift ;;
         *)
             echo "Unknown option: $1"
             exit 1

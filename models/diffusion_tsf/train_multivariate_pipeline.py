@@ -2212,7 +2212,7 @@ def evaluate_model(
     """Evaluate model on test set.
 
     Uses DPM-Solver++ (20 steps) and ``n_samples`` averaged samples per window.
-    Progress is logged per batch via tqdm so silent stalls are easy to spot.
+    Logs periodic progress (batch index, throughput, ETA) for Slurm logs.
     Note: ``test_loader`` should already be subsetted by the caller if a
     half-test sweep is desired (see eval call site).
     """
@@ -2224,6 +2224,9 @@ def evaluate_model(
     all_targets = []
 
     n_batches = min(1, len(test_loader)) if smoke_test else len(test_loader)
+    batch_size = getattr(test_loader, 'batch_size', None) or 1
+    ds = getattr(test_loader, 'dataset', None)
+    n_windows = len(ds) if ds is not None else None
 
     if smoke_test:
         gen_kwargs = {'sampler': 'dpmpp', 'num_inference_steps': 5}
@@ -2231,14 +2234,43 @@ def evaluate_model(
         gen_kwargs = {'sampler': 'dpmpp', 'num_inference_steps': 20}
 
     K = getattr(model.config, 'lookback_overlap', 0)
+    nfe_per_batch = 1 + (1 if smoke_test else n_samples)
+    nfe_total = n_batches * nfe_per_batch * gen_kwargs.get('num_inference_steps', 20)
 
-    pbar = tqdm(enumerate(test_loader), total=n_batches, desc="eval", mininterval=10.0)
+    logger.info(
+        "eval: start | windows=%s batches=%d batch_size=%d n_samples=%d "
+        "sampler=%s steps=%d lookback_overlap=%d device=%s "
+        "(~%d U-Net forward passes across eval)",
+        n_windows if n_windows is not None else '?',
+        n_batches,
+        batch_size,
+        n_samples if not smoke_test else 1,
+        gen_kwargs.get('sampler'),
+        gen_kwargs.get('num_inference_steps'),
+        K,
+        device,
+        nfe_total,
+    )
+
+    use_tqdm = sys.stdout.isatty()
+    pbar = tqdm(
+        enumerate(test_loader),
+        total=n_batches,
+        desc='eval',
+        mininterval=2.0,
+        disable=not use_tqdm,
+        file=sys.stdout,
+    )
+    log_every = max(1, min(50, n_batches // 40 or 1))
+    t0 = time.perf_counter()
+
     with torch.no_grad():
         for batch_idx, (past, future) in pbar:
             if batch_idx >= n_batches:
                 break
 
             past = past.to(device)
+            t_batch = time.perf_counter()
 
             torch.manual_seed(42 + batch_idx)
             result = model.generate(past, **gen_kwargs)
@@ -2258,8 +2290,41 @@ def evaluate_model(
                 future = future[..., K:]
             all_targets.append(future)
 
-            if batch_idx % 25 == 0:
-                logger.info(f"  eval batch {batch_idx + 1}/{n_batches}")
+            done = batch_idx + 1
+            elapsed = time.perf_counter() - t0
+            batch_wall = time.perf_counter() - t_batch
+            rate = done / elapsed if elapsed > 1e-6 else 0.0
+            eta = (n_batches - done) / rate if rate > 1e-9 else float('nan')
+            mem_mb = ''
+            if torch.cuda.is_available() and device.type == 'cuda':
+                try:
+                    mem_mb = f" cuda_alloc_MiB={torch.cuda.memory_allocated() / (1024 ** 2):.0f}"
+                except Exception:
+                    mem_mb = ''
+
+            if (
+                batch_idx < 3
+                or batch_idx % log_every == 0
+                or done == n_batches
+            ):
+                logger.info(
+                    "eval: batch %d/%d (%.1f%%) | last_batch_wall=%.2fs | "
+                    "avg_rate=%.3f batch/s | elapsed=%.1fs | eta=%.1fs%s",
+                    done,
+                    n_batches,
+                    100.0 * done / n_batches,
+                    batch_wall,
+                    rate,
+                    elapsed,
+                    eta,
+                    mem_mb,
+                )
+
+    logger.info(
+        "eval: done | total_wall=%.1fs | batches=%d",
+        time.perf_counter() - t0,
+        n_batches,
+    )
     
     preds_single = torch.cat(all_preds_single, dim=0)
     preds_avg = torch.cat(all_preds_avg, dim=0)
