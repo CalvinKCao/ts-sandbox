@@ -5,6 +5,7 @@
 #   wn-c — default window norm, spatial ramped guidance penalty only (±5 row grace / col), max weight 0.2
 # Requires: repo branch with frozen packs, WANDB_API_KEY, datasets under ./datasets.
 # Run from repo root on Killarney login node. Each job requests 4h wall time.
+# Run this file as: ./utils/window_norm_ablate/submit_12_jobs.sh (the .sh suffix is required).
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

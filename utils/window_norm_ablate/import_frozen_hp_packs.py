@@ -22,6 +22,8 @@ import re
 import sys
 from pathlib import Path
 
+import torch
+
 
 def _slug_to_dataset(slug: str) -> str:
     return slug.replace("-", "_")
@@ -36,6 +38,45 @@ def _infer_dataset(run_dir: Path) -> str:
     if not mo:
         raise ValueError(f"cannot infer dataset id from directory name: {name}")
     return _slug_to_dataset(mo.group(1))
+
+
+def _subset_ckpt_dir(ck: Path, dataset: str) -> Path:
+    """Resolve ckpts/<subset>/ where subset folder name may differ only by case."""
+    want = dataset.lower()
+    for child in ck.iterdir():
+        if child.is_dir() and child.name.lower() == want:
+            return child
+    return ck / dataset
+
+
+def _load_diffusion_finetune_tuned_params(ck: Path, dataset: str) -> dict:
+    """tuned_params with learning_rate (+ batch_size) from metadata.json or trial checkpoints."""
+    subset = _subset_ckpt_dir(ck, dataset)
+    meta_path = subset / "metadata.json"
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        tuned = meta.get("tuned_params") or {}
+        if "learning_rate" in tuned:
+            return tuned
+    best_tp: dict = {}
+    best_v = float("inf")
+    for p in sorted(subset.glob("_diff_ft_trial_*_best.pt")):
+        try:
+            d = torch.load(p, map_location="cpu", weights_only=False)
+        except Exception:
+            continue
+        tp = d.get("tuned_params") or {}
+        if "learning_rate" not in tp:
+            continue
+        v = float(d.get("val_loss", float("inf")))
+        if v < best_v:
+            best_v = v
+            best_tp = tp
+    if best_tp:
+        return best_tp
+    raise FileNotFoundError(
+        f"no tuned diffusion finetune params: tried {meta_path} and {subset}/_diff_ft_trial_*_best.pt"
+    )
 
 
 def _import_one(run_dir: Path, out_root: Path) -> Path:
@@ -54,16 +95,20 @@ def _import_one(run_dir: Path, out_root: Path) -> Path:
     diff_s = json.loads((dim_dir / "diff_hp.json").read_text(encoding="utf-8"))
     itrans_ft_path = ck / f"{dataset}_itrans_ft_hp.json"
     if not itrans_ft_path.is_file():
-        raise FileNotFoundError(itrans_ft_path)
+        for q in ck.glob("*_itrans_ft_hp.json"):
+            if q.name.lower().startswith(f"{dataset.lower()}_"):
+                itrans_ft_path = q
+                break
+    if not itrans_ft_path.is_file():
+        raise FileNotFoundError(f"missing {dataset}_itrans_ft_hp.json under {ck}")
     itrans_ft = json.loads(itrans_ft_path.read_text(encoding="utf-8"))
 
-    meta_path = ck / dataset / "metadata.json"
-    if not meta_path.is_file():
-        raise FileNotFoundError(meta_path)
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    tuned = meta.get("tuned_params") or {}
-    if "learning_rate" not in tuned:
-        raise ValueError(f"{meta_path} missing tuned_params.learning_rate")
+    subset_dir = _subset_ckpt_dir(ck, dataset)
+    meta_path = subset_dir / "metadata.json"
+    meta: dict = {}
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    tuned = _load_diffusion_finetune_tuned_params(ck, dataset)
 
     if meta.get("variate_indices"):
         n_variates = len(meta["variate_indices"])
@@ -110,13 +155,23 @@ def main() -> None:
         type=Path,
         default=Path(__file__).resolve().parent / "frozen_packs",
     )
+    ap.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Log failures but keep processing remaining run dirs",
+    )
     args = ap.parse_args()
+    failed = 0
     for d in args.run_dirs:
         try:
             _import_one(d, args.out_dir)
         except Exception as e:
             print(f"ERROR {d}: {e}", file=sys.stderr)
-            sys.exit(1)
+            failed += 1
+            if not args.continue_on_error:
+                sys.exit(1)
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
