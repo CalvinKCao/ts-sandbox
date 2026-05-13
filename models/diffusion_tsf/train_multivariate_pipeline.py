@@ -28,6 +28,7 @@ import gc
 import importlib.util
 import json
 import logging
+import math
 import os
 import random
 import sys
@@ -709,6 +710,11 @@ from models.diffusion_tsf.pipeline_config import (
 # Per-run dispatch knob — set from --n-variates at CLI parse time.
 N_VARIATES = N_VARIATES_DEFAULT
 
+# Optional ablation / frozen-HP (window-norm throwaway branch); set from CLI in main().
+FROZEN_HP_PACK_PATH: Optional[str] = None
+PER_WINDOW_STANDARDIZE: bool = True
+EVAL_TEST_FRACTION: float = 0.5
+
 # Dataset registry: name -> (path, date_col, seasonal_period)
 DATASET_REGISTRY = {
     'ETTh1': ('ETT-small/ETTh1.csv', 'date', 24),
@@ -721,6 +727,42 @@ DATASET_REGISTRY = {
     'electricity': ('electricity/electricity.csv', 'date', 96),
     'traffic': ('traffic/traffic.csv', 'date', 24),
 }
+
+
+def _load_frozen_hp_pack(path: str) -> dict:
+    with open(path, encoding='utf-8') as f:
+        pack = json.load(f)
+    for k in ('itrans_synth', 'diffusion_synth', 'itrans_finetune', 'diffusion_finetune'):
+        if k not in pack:
+            raise ValueError(f"frozen hp pack {path} missing required key {k!r}")
+    return pack
+
+
+def apply_frozen_hp_pack_phase1(dim_dir: str, pack: dict) -> None:
+    """Write phase-1A/1B HP JSON and remove checkpoints so pretrain retrains from frozen params."""
+    itrans_hp_path = os.path.join(dim_dir, 'itrans_hp.json')
+    diff_hp_path = os.path.join(dim_dir, 'diff_hp.json')
+    with open(itrans_hp_path, 'w', encoding='utf-8') as f:
+        json.dump(pack['itrans_synth'], f, indent=2)
+    with open(diff_hp_path, 'w', encoding='utf-8') as f:
+        json.dump(pack['diffusion_synth'], f, indent=2)
+    for fn in (
+        'itransformer.pt',
+        'diffusion.pt',
+        'itrans_hp_best.pt',
+        'diff_hp_best.pt',
+        'pretrained_itransformer.pt',
+        'pretrained_diffusion.pt',
+    ):
+        p = os.path.join(dim_dir, fn)
+        if os.path.exists(p):
+            os.remove(p)
+            logger.info(f'  removed {p} for frozen-hp phase-1 retrain')
+
+
+def _eval_test_sample_count(n_full: int, fraction: float) -> int:
+    frac = min(max(fraction, 1e-6), 1.0)
+    return max(1, min(n_full, int(math.ceil(n_full * frac))))
 
 
 def set_realts_training_epoch(loader_or_subset_or_dataset, epoch: int) -> None:
@@ -964,6 +1006,7 @@ def create_diffusion_model(
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
         use_amp=USE_AMP,
+        per_window_standardize=PER_WINDOW_STANDARDIZE,
     )
     return DiffusionTSF(config)
 
@@ -2872,11 +2915,14 @@ def run_pipeline(
                     test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
                 else:
                     n_full = len(test_ds)
-                    n_eval = max(1, n_full // 2)
+                    n_eval = _eval_test_sample_count(n_full, EVAL_TEST_FRACTION)
                     rng = np.random.default_rng(seed)
                     eval_idx = sorted(rng.choice(n_full, size=n_eval, replace=False).tolist())
                     test_ds = Subset(test_ds, eval_idx)
-                    logger.info(f"[{dataset_name}] eval subset: {n_eval}/{n_full} windows (seeded random half)")
+                    logger.info(
+                        f"[{dataset_name}] eval subset: {n_eval}/{n_full} windows "
+                        f"(fraction={EVAL_TEST_FRACTION}, seed={seed})"
+                    )
                 test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
 
                 eval_results = evaluate_model(model, test_loader, device, n_samples=3, smoke_test=smoke_test)
@@ -3033,6 +3079,15 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
             if os.path.exists(f):
                 os.remove(f)
 
+    if FROZEN_HP_PACK_PATH:
+        pack = _load_frozen_hp_pack(FROZEN_HP_PACK_PATH)
+        nv_pack = pack.get('n_variates')
+        if nv_pack is not None and int(nv_pack) != n_variates:
+            raise ValueError(
+                f'frozen hp pack n_variates={nv_pack} does not match --n-variates {n_variates}'
+            )
+        apply_frozen_hp_pack_phase1(dim_dir, pack)
+
     n_itrans_trials = 1 if smoke_test else N_ITRANS_HP_TRIALS
     n_diff_trials = 1 if smoke_test else N_DIFFUSION_HP_TRIALS
     pretrain_samples = resolve_pretrain_virtual_dataset_size(smoke_test)
@@ -3052,7 +3107,7 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
 
     # Try to reuse an existing V=n_variates iTransformer from previous runs
     # (searches slurm storage roots and the project tree — see find_existing_itrans_checkpoint)
-    if not os.path.exists(itrans_ckpt) and not smoke_test:
+    if not os.path.exists(itrans_ckpt) and not smoke_test and not FROZEN_HP_PACK_PATH:
         found = find_existing_itrans_checkpoint(n_variates)
         if found:
             import shutil
@@ -3189,6 +3244,7 @@ def run_finetune_mode(
         {'subset_id': subset_id, 'variate_indices': variate_indices},
         dataset_name, diff_ckpt, itrans_ckpt,
         n_finetune_trials, device, smoke_test,
+        seed=seed,
     )
 
 
@@ -3201,6 +3257,7 @@ def run_itransformer_finetune_hp_tuning(
     smoke_test: bool = False,
     checkpoint_dir: Optional[str] = None,
     subset_id: Optional[str] = None,
+    forced_params: Optional[Dict] = None,
 ) -> Tuple[Dict, Optional[str]]:
     """HP tune iTransformer on real data.
 
@@ -3233,14 +3290,25 @@ def run_itransformer_finetune_hp_tuning(
     _best_state: dict = {'model_state': None, 'val_loss': float('inf')}
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
+    pruner = (
+        optuna.pruners.NopPruner()
+        if forced_params is not None
+        else optuna.pruners.MedianPruner(n_startup_trials=2)
+    )
     study = optuna.create_study(
         direction='minimize',
         sampler=TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+        pruner=pruner,
     )
+    trials_to_run = n_trials
+    if forced_params is not None:
+        lr_f = float(forced_params['learning_rate'])
+        study.enqueue_trial({'learning_rate': lr_f})
+        trials_to_run = 1
+        logger.info(f'iTrans FT HP: single forced trial lr={lr_f:.2e}')
 
     def log_trial(study, trial):
-        logger.info(f"[iTrans FT HP {label}] Trial {trial.number}/{n_trials}: "
+        logger.info(f"[iTrans FT HP {label}] Trial {trial.number}/{trials_to_run}: "
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
                    f"dropout={ITRANS_PAPER_DROPOUT}")
 
@@ -3251,7 +3319,7 @@ def run_itransformer_finetune_hp_tuning(
             pretrained_ckpt=warm,
             max_epochs=ITRANS_HP_FINETUNE_MAX_EPOCHS,
         ),
-        n_trials=n_trials,
+        n_trials=trials_to_run,
         show_progress_bar=False,
         callbacks=[log_trial],
     )
@@ -3276,6 +3344,7 @@ def run_itransformer_finetune_hp_tuning(
 def _finetune_and_eval_one_subset(
     subset_info, dataset_name, diff_ckpt, itrans_ckpt,
     n_finetune_trials, device, smoke_test,
+    seed: int = 42,
 ):
     """Internal: HP tune, fine-tune, and evaluate a single subset.
 
@@ -3295,6 +3364,15 @@ def _finetune_and_eval_one_subset(
         return
 
     try:
+        pack_fr: Optional[dict] = None
+        if FROZEN_HP_PACK_PATH:
+            pack_fr = _load_frozen_hp_pack(FROZEN_HP_PACK_PATH)
+            exp_ds = pack_fr.get('dataset')
+            if exp_ds and exp_ds != dataset_name:
+                raise ValueError(
+                    f'frozen hp pack is for dataset {exp_ds!r} but this job is {dataset_name!r}'
+                )
+
         n_itrans_ft_trials = 1 if smoke_test else N_ITRANS_HP_TRIALS
 
         # Phase A: iTransformer HP tune on real data (warm-start from pretrained)
@@ -3305,7 +3383,17 @@ def _finetune_and_eval_one_subset(
         if os.path.exists(ft_itrans_ckpt):
             logger.info(f"  Using cached finetuned iTransformer: {ft_itrans_ckpt}")
         else:
-            if os.path.exists(itrans_hp_cache):
+            if pack_fr is not None:
+                itrans_ft_params, _ = run_itransformer_finetune_hp_tuning(
+                    dataset_name, variate_indices, itrans_ckpt,
+                    n_trials=n_itrans_ft_trials, device=device,
+                    smoke_test=smoke_test, checkpoint_dir=CHECKPOINT_DIR,
+                    subset_id=subset_id,
+                    forced_params=pack_fr['itrans_finetune'],
+                )
+                with open(itrans_hp_cache, 'w') as f:
+                    json.dump(itrans_ft_params, f, indent=2)
+            elif os.path.exists(itrans_hp_cache):
                 with open(itrans_hp_cache) as f:
                     itrans_ft_params = json.load(f)
                 logger.info(f"  iTrans FT HP loaded from cache: {itrans_hp_cache}")
@@ -3318,7 +3406,7 @@ def _finetune_and_eval_one_subset(
                 )
                 with open(itrans_hp_cache, 'w') as f:
                     json.dump(itrans_ft_params, f, indent=2)
-            
+
             if os.path.exists(itrans_tune_ckpt):
                 import shutil
                 shutil.copy2(itrans_tune_ckpt, ft_itrans_ckpt)
@@ -3355,44 +3443,67 @@ def _finetune_and_eval_one_subset(
                 f"at {ckpt_path}; skipping diffusion HP and going straight to eval."
             )
         else:
-            # Phase C: Diffusion HP search using finetuned iTransformer as guidance
-            _ft_itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, len(variate_indices), device)
-            _ft_itrans_guidance = iTransformerGuidance(_ft_itrans_model)
-            _probe_ds, _, _, _ = load_dataset(
-                dataset_name, variate_indices, stride=1,
-            )
-            ft_diff_bs = select_diffusion_batch_size(
-                phase_name=f'Diff FT HP ({subset_id})',
-                dataset=_probe_ds,
-                device=device,
-                itrans_guidance=_ft_itrans_guidance,
-                max_candidate=diffusion_probe_max_candidate(len(variate_indices), smoke_test),
-            )
-            del _ft_itrans_model, _ft_itrans_guidance, _probe_ds
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            if pack_fr is not None:
+                df_tune = pack_fr['diffusion_finetune']
+                ft_diff_bs = int(df_tune.get('batch_size', 8))
+                logger.info(
+                    f"Phase 2B — diffusion finetune HP ({subset_id}): frozen single trial, "
+                    f"bs={ft_diff_bs}, lr={float(df_tune['learning_rate']):.2e}"
+                )
+                optuna.logging.set_verbosity(optuna.logging.WARNING)
+                study = optuna.create_study(
+                    direction='minimize',
+                    sampler=TPESampler(seed=42),
+                    pruner=optuna.pruners.NopPruner(),
+                )
+                study.enqueue_trial({'learning_rate': float(df_tune['learning_rate'])})
+                study.optimize(
+                    lambda trial: finetune_hp_objective(
+                        trial, dataset_name, variate_indices, diff_ckpt, ft_itrans_ckpt, device, smoke_test,
+                        fixed_batch_size=ft_diff_bs, trial_ckpt_dir=subset_dir,
+                    ),
+                    n_trials=1,
+                    show_progress_bar=False,
+                    catch=(ValueError,),
+                )
+            else:
+                _ft_itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, len(variate_indices), device)
+                _ft_itrans_guidance = iTransformerGuidance(_ft_itrans_model)
+                _probe_ds, _, _, _ = load_dataset(
+                    dataset_name, variate_indices, stride=1,
+                )
+                ft_diff_bs = select_diffusion_batch_size(
+                    phase_name=f'Diff FT HP ({subset_id})',
+                    dataset=_probe_ds,
+                    device=device,
+                    itrans_guidance=_ft_itrans_guidance,
+                    max_candidate=diffusion_probe_max_candidate(len(variate_indices), smoke_test),
+                )
+                del _ft_itrans_model, _ft_itrans_guidance, _probe_ds
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-            logger.info(
-                f"Phase 2B — diffusion finetune HP ({subset_id}): "
-                f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs}, "
-                f"epochs<={HP_TUNE_EPOCHS} patience={HP_TUNE_PATIENCE}; best trial → final ckpt "
-                f"(pretrain diffusion HP uses N_DIFFUSION_HP_TRIALS={N_DIFFUSION_HP_TRIALS})..."
-            )
-            optuna.logging.set_verbosity(optuna.logging.WARNING)
-            study = optuna.create_study(
-                direction='minimize',
-                sampler=TPESampler(seed=42),
-                pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
-            )
-            study.optimize(
-                lambda trial: finetune_hp_objective(
-                    trial, dataset_name, variate_indices, diff_ckpt, ft_itrans_ckpt, device, smoke_test,
-                    fixed_batch_size=ft_diff_bs, trial_ckpt_dir=subset_dir,
-                ),
-                n_trials=n_finetune_trials,
-                show_progress_bar=False,
-                catch=(ValueError,),
-            )
+                logger.info(
+                    f"Phase 2B — diffusion finetune HP ({subset_id}): "
+                    f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs}, "
+                    f"epochs<={HP_TUNE_EPOCHS} patience={HP_TUNE_PATIENCE}; best trial → final ckpt "
+                    f"(pretrain diffusion HP uses N_DIFFUSION_HP_TRIALS={N_DIFFUSION_HP_TRIALS})..."
+                )
+                optuna.logging.set_verbosity(optuna.logging.WARNING)
+                study = optuna.create_study(
+                    direction='minimize',
+                    sampler=TPESampler(seed=42),
+                    pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+                )
+                study.optimize(
+                    lambda trial: finetune_hp_objective(
+                        trial, dataset_name, variate_indices, diff_ckpt, ft_itrans_ckpt, device, smoke_test,
+                        fixed_batch_size=ft_diff_bs, trial_ckpt_dir=subset_dir,
+                    ),
+                    n_trials=n_finetune_trials,
+                    show_progress_bar=False,
+                    catch=(ValueError,),
+                )
             if study.best_trial is None:
                 logger.warning(f"All diffusion HP trials failed for {subset_id} — skipping")
                 return
@@ -3420,11 +3531,14 @@ def _finetune_and_eval_one_subset(
             test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
         else:
             n_full = len(test_ds)
-            n_eval = max(1, n_full // 2)
-            rng = np.random.default_rng(42)
+            n_eval = _eval_test_sample_count(n_full, EVAL_TEST_FRACTION)
+            rng = np.random.default_rng(seed)
             eval_idx = sorted(rng.choice(n_full, size=n_eval, replace=False).tolist())
             test_ds = Subset(test_ds, eval_idx)
-            logger.info(f"[{subset_id}] eval subset: {n_eval}/{n_full} windows (seeded random half)")
+            logger.info(
+                f"[{subset_id}] eval subset: {n_eval}/{n_full} windows "
+                f"(fraction={EVAL_TEST_FRACTION}, seed={seed})"
+            )
         test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
 
         eval_results = evaluate_model(model, test_loader, device, n_samples=3, smoke_test=smoke_test)
@@ -3467,7 +3581,7 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
     global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION, LOOKBACK_LENGTH, FORECAST_LENGTH
-    global MODEL_TYPE
+    global MODEL_TYPE, FROZEN_HP_PACK_PATH, PER_WINDOW_STANDARDIZE, EVAL_TEST_FRACTION
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3514,6 +3628,23 @@ def main():
                         help='Override lookback length')
     parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH,
                         help='Override forecast length')
+    parser.add_argument(
+        '--frozen-hp-pack',
+        type=str,
+        default=None,
+        help='JSON with itrans_synth, diffusion_synth, itrans_finetune, diffusion_finetune; skips Optuna',
+    )
+    parser.add_argument(
+        '--disable-per-window-norm',
+        action='store_true',
+        help='Disable DiffusionTSF per-window z-score (past mean/std identity path)',
+    )
+    parser.add_argument(
+        '--eval-test-fraction',
+        type=float,
+        default=0.5,
+        help='Random fraction of test windows used for diffusion eval (default 0.5)',
+    )
 
     args = parser.parse_args()
 
@@ -3545,6 +3676,16 @@ def main():
         MODEL_TYPE = args.model_type
     LOOKBACK_LENGTH = args.lookback_length
     FORECAST_LENGTH = args.forecast_length
+
+    FROZEN_HP_PACK_PATH = args.frozen_hp_pack
+    if FROZEN_HP_PACK_PATH and not os.path.isfile(FROZEN_HP_PACK_PATH):
+        print(f'ERROR: --frozen-hp-pack is not a file: {FROZEN_HP_PACK_PATH!r}')
+        sys.exit(1)
+    PER_WINDOW_STANDARDIZE = not args.disable_per_window_norm
+    EVAL_TEST_FRACTION = float(args.eval_test_fraction)
+    if not (0.0 < EVAL_TEST_FRACTION <= 1.0):
+        print('ERROR: --eval-test-fraction must be in (0, 1]')
+        sys.exit(1)
     
     # DDP setup
     if args.ddp:

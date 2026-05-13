@@ -118,6 +118,9 @@ class DiffusionTSFConfig:
     # penalty for deviating from itransformer guidance ghost image
     guidance_penalty_weight: float = 0.0
 
+    # z-score each window by past mean/std before 2D encode (global z-score still in dataloader)
+    per_window_standardize: bool = True
+
     # which backbone: "unet" (ConditionalUNet2D) or "dit" (FactorizedDiT)
     model_type: str = "unet"
 

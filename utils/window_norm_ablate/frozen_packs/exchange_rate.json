@@ -1,0 +1,8 @@
+{
+  "dataset": "exchange_rate",
+  "n_variates": 8,
+  "itrans_synth": {"learning_rate": 0.001, "batch_size": 32, "dropout": 0.1, "best_val_loss": 0.0},
+  "diffusion_synth": {"learning_rate": 0.0001, "batch_size": 4},
+  "itrans_finetune": {"learning_rate": 0.001, "batch_size": 32, "dropout": 0.1},
+  "diffusion_finetune": {"learning_rate": 0.0001, "batch_size": 8}
+}

@@ -443,7 +443,12 @@ class DiffusionTSF(nn.Module):
         past: torch.Tensor,
         future: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Per-window z-score using past mean/std; future uses the same stats."""
+        """Per-window z-score using past mean/std, or identity when disabled in config."""
+        if not getattr(self.config, "per_window_standardize", True):
+            mean = past.new_zeros(past.shape[:-1] + (1,))
+            std = past.new_ones(past.shape[:-1] + (1,))
+            future_norm = future if future is not None else None
+            return past, future_norm, (mean, std)
         mean = past.mean(dim=-1, keepdim=True)
         std = past.std(dim=-1, keepdim=True) + 1e-8
         past_norm = (past - mean) / std
