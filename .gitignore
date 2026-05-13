@@ -141,7 +141,9 @@ models/Time-Series-Library-main/*.txt
 # -----------------------------------------------------------------------------
 # Logs, Reports and Databases
 # -----------------------------------------------------------------------------
-reports/
+# Track top-level experiment markdown in reports/; keep other report junk untracked.
+reports/*
+!reports/*.md
 *.log
 *.db
 *.sqlite
