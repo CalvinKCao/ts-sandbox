@@ -4,7 +4,7 @@
 #   wn-b — default window norm, guidance penalty 0.03 (uniform MSE)
 #   wn-c — default window norm, spatial ramped guidance penalty only (±5 row grace / col), max weight 0.2
 # Requires: repo branch with frozen packs, WANDB_API_KEY, datasets under ./datasets.
-# Run from repo root on Killarney login node.
+# Run from repo root on Killarney login node. Each job requests 4h wall time.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -23,7 +23,7 @@ submit_one () {
     --submit-root \
     --variant "$arm" \
     --dataset "$dataset" \
-    --hours 24 \
+    --hours 4 \
     --frozen-hp-pack "$PACK_DIR/${dataset}.json" \
     --eval-test-fraction 0.2 \
     $extra_py
