@@ -1,10 +1,13 @@
 #!/bin/bash
 # =============================================================================
-# U-Net full-variate — self-resubmitting Slurm script for Killarney
+# Diffusion TSF full-variate — self-resubmitting Slurm script for Killarney
 #
 # When run from the login node, it picks partition + wall time and sbatch's itself.
 # When run inside a Slurm job (SLURM_JOB_ID is set), it runs full-variate training
 # (same train_multivariate_pipeline as the old run_unet_fullvar.sh: bf16, H=96, no splitting).
+#
+# Window-norm ablation arms (--variant wn-a | wn-b | wn-c) always run the DiT backbone
+# (--model-type dit). Other variants use models/diffusion_tsf/pipeline_config.py MODEL_TYPE.
 #
 # USAGE (from login node, repo root):
 #   ./run.sh --smoke-test                     # L40S smoke
@@ -17,6 +20,7 @@
 #
 # Architecture / U-Net ablations (six distinct experiments — one Slurm job each):
 #   --variant default | h128 | attn-near-bottleneck | deeper-unet | penalty-0.1 | penalty-0.3
+# Window-norm ablation (DiT only): --variant wn-a | wn-b | wn-c
 # Submit all six at once (same dataset/walltime):  ./utils/submit_architecture_matrix.sh
 # Merge metrics after jobs finish:  python3 utils/collect_architecture_matrix_summaries.py <manifest.tsv>
 # =============================================================================
@@ -334,7 +338,7 @@ done
 
 cd "$PROJECT_ROOT"
 
-# ---- Inlined full-variate U-Net driver (former run_unet_fullvar.sh) ----
+# ---- Inlined full-variate driver (former run_unet_fullvar.sh) ----
 
 set -- "${PIPELINE_ARGS[@]}"
 
@@ -407,6 +411,10 @@ case "$VARIANT" in
     penalty-0.3)
         EXTRA_PY_ARGS="$EXTRA_PY_ARGS --guidance-penalty-weight 0.3"
         ;;
+    wn-a|wn-b|wn-c)
+        # Window-norm ablation: DiT backbone only (no U-Net for these arms).
+        EXTRA_PY_ARGS="$EXTRA_PY_ARGS --model-type dit"
+        ;;
     *)
         echo "[INFO] Treating --variant $VARIANT as generic label"
         ;;
@@ -448,9 +456,12 @@ print(LOOKBACK_LENGTH, FORECAST_LENGTH, LOOKBACK_OVERLAP)
 
 echo ""
 echo "============================================================"
-echo "  U-Net Full-Variate Training (Slurm)"
+echo "  Diffusion TSF — full variate (Slurm)"
 echo "============================================================"
-echo "  Backbone:     U-Net (config in models/diffusion_tsf/pipeline_config.py)"
+case "$VARIANT" in
+    wn-a|wn-b|wn-c) echo "  Backbone:     DiT (forced for $VARIANT)" ;;
+    *)              echo "  Backbone:     from pipeline_config.MODEL_TYPE (no run.sh override)" ;;
+esac
 echo "  Variant tag:  $VARIANT  (Slurm job name only)"
 echo "  Dataset:      $SINGLE_DATASET"
 echo "  Smoke test:   ${SMOKE_TEST:-no}"
