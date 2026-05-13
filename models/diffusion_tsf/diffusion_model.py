@@ -650,14 +650,24 @@ class DiffusionTSF(nn.Module):
         decoder_method: str = "mean",
         beam_width: int = 5,
         jump_penalty_scale: float = 1.0,
-        search_radius: int = 10
+        search_radius: int = 10,
+        sampler: str = "ddim",
+        num_inference_steps: Optional[int] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Generate future predictions (shared factorized path for unet and dit backbones)."""
+        """Generate future predictions (shared factorized path for unet and dit backbones).
+
+        sampler:
+            'ddim' (default) — existing DDIM(+CFG) path, ``num_ddim_steps`` steps
+            'ddpm'           — full T-step DDPM(+CFG)
+            'dpmpp'          — DPM-Solver++(2M); CFG not supported (uses cond only)
+        num_inference_steps overrides num_ddim_steps when set (used by dpmpp/ddim).
+        """
         return self._generate_factorized(
             past, use_ddim=use_ddim, num_ddim_steps=num_ddim_steps,
             eta=eta, cfg_scale=cfg_scale, verbose=verbose,
             decoder_method=decoder_method, beam_width=beam_width,
             jump_penalty_scale=jump_penalty_scale, search_radius=search_radius,
+            sampler=sampler, num_inference_steps=num_inference_steps,
         )
     
     # ====================================================================
@@ -799,7 +809,10 @@ class DiffusionTSF(nn.Module):
     def _generate_factorized(self, past: torch.Tensor, use_ddim: bool = True,
                               num_ddim_steps: int = 50, eta: float = 0.0,
                               cfg_scale: Optional[float] = None, verbose: bool = False,
-                              decoder_method: str = "mean", **kwargs) -> Dict[str, torch.Tensor]:
+                              decoder_method: str = "mean",
+                              sampler: str = "ddim",
+                              num_inference_steps: Optional[int] = None,
+                              **kwargs) -> Dict[str, torch.Tensor]:
         """inference: per-variate DDIM/DDPM sampling with cross-variate bottleneck context."""
         B = past.shape[0]
         V = self.config.num_variables
@@ -867,11 +880,18 @@ class DiffusionTSF(nn.Module):
 
         noise_shape = (BV, 1, H, W_fut)
 
-        if use_ddim:
+        if sampler == "dpmpp":
+            steps = num_inference_steps if num_inference_steps is not None else 20
+            future_2d_flat = self.scheduler.sample_dpmpp(
+                model=model_fn, shape=noise_shape, cond=cond_flat,
+                num_steps=steps, device=device, verbose=verbose,
+            )
+        elif use_ddim:
+            steps = num_inference_steps if num_inference_steps is not None else num_ddim_steps
             future_2d_flat = self.scheduler.sample_ddim_cfg(
                 model=model_fn, shape=noise_shape, cond=cond_flat,
                 null_cond=null_cond, cfg_scale=1.0,
-                num_steps=num_ddim_steps, eta=eta, device=device, verbose=verbose,
+                num_steps=steps, eta=eta, device=device, verbose=verbose,
             )
         else:
             future_2d_flat = self.scheduler.sample_ddpm_cfg(

@@ -511,4 +511,84 @@ class DiffusionScheduler:
         
         return x
 
+    @torch.no_grad()
+    def sample_dpmpp(
+        self,
+        model: nn.Module,
+        shape: Tuple[int, ...],
+        cond: torch.Tensor,
+        num_steps: int = 20,
+        device: str = "cpu",
+        verbose: bool = False,
+    ) -> torch.Tensor:
+        """DPM-Solver++(2M) multistep sampler in data-prediction form.
+
+        The model is an epsilon-predictor; we convert each prediction to x0
+        and apply the multistep update from Lu et al. 2022.
+        Usually matches DDPM quality at ~15-25 NFE.
+        """
+        # uniform-in-t schedule incl. endpoints
+        timesteps = torch.linspace(self.num_steps - 1, 0, num_steps, dtype=torch.long, device=device).tolist()
+
+        x = torch.randn(shape, device=device)
+        if verbose:
+            logger.info(f"Starting DPM-Solver++(2M) sampling with {num_steps} steps")
+
+        alphas_bar = self.alphas_cumprod.to(device)
+        # alpha_t and sigma_t in variance-preserving form
+        def _alpha_sigma(t_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+            ab = alphas_bar[t_idx]
+            return torch.sqrt(ab), torch.sqrt(1.0 - ab)
+
+        # log-SNR lambda_t = log(alpha_t / sigma_t)
+        def _lam(t_idx: int) -> torch.Tensor:
+            a, s = _alpha_sigma(t_idx)
+            return torch.log(a) - torch.log(s)
+
+        # cache previous x0 prediction for 2nd-order step
+        prev_x0 = None
+        prev_lam = None
+
+        for i, t in enumerate(timesteps):
+            t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
+            eps = model(x, t_batch, cond)
+
+            a_t, s_t = _alpha_sigma(t)
+            x0 = (x - s_t * eps) / a_t
+            # mild stability clamp (matches existing DDIM clipping convention)
+            x0 = torch.clamp(x0, -2.0, 2.0)
+
+            lam_t = _lam(t)
+            if i == len(timesteps) - 1:
+                # last step: return x0 prediction
+                x = x0
+                break
+
+            t_next = timesteps[i + 1]
+            a_n, s_n = _alpha_sigma(t_next)
+            lam_n = _lam(t_next)
+            h = lam_n - lam_t  # > 0 in denoising direction
+
+            if prev_x0 is None:
+                # first step: DPM-Solver++ 1st order
+                D = x0
+            else:
+                # 2nd-order multistep
+                h_prev = lam_t - prev_lam
+                # r = h_prev / h ; guard against h≈0
+                r = (h_prev / h).clamp(min=1e-5)
+                D = (1.0 + 1.0 / (2.0 * r)) * x0 - (1.0 / (2.0 * r)) * prev_x0
+
+            # update rule for data-prediction DPM-Solver++:
+            # x_next = (sigma_next/sigma_t) * x - alpha_next * (exp(-h) - 1) * D
+            x = (s_n / s_t) * x - a_n * (torch.exp(-h) - 1.0) * D
+
+            prev_x0 = x0
+            prev_lam = lam_t
+
+            if verbose and i % 5 == 0:
+                logger.debug(f"  Step {i + 1}/{num_steps} (t={t})")
+
+        return x
+
 
