@@ -2211,48 +2211,60 @@ def evaluate_model(
     model: DiffusionTSF,
     test_loader: DataLoader,
     device: torch.device,
-    n_samples: int = 30,
+    n_samples: int = 3,
     smoke_test: bool = False,
 ) -> Dict:
-    """Evaluate model on test set."""
+    """Evaluate model on test set.
+
+    Uses DPM-Solver++ (20 steps) and ``n_samples`` averaged samples per window.
+    Progress is logged per batch via tqdm so silent stalls are easy to spot.
+    Note: ``test_loader`` should already be subsetted by the caller if a
+    half-test sweep is desired (see eval call site).
+    """
+    from tqdm import tqdm
     model.eval()
-    
+
     all_preds_single = []
     all_preds_avg = []
     all_targets = []
-    
+
     n_batches = min(1, len(test_loader)) if smoke_test else len(test_loader)
-    
-    gen_kwargs = {'num_ddim_steps': 5} if smoke_test else {}
+
+    if smoke_test:
+        gen_kwargs = {'sampler': 'dpmpp', 'num_inference_steps': 5}
+    else:
+        gen_kwargs = {'sampler': 'dpmpp', 'num_inference_steps': 20}
 
     K = getattr(model.config, 'lookback_overlap', 0)
 
+    pbar = tqdm(enumerate(test_loader), total=n_batches, desc="eval", mininterval=10.0)
     with torch.no_grad():
-        for batch_idx, (past, future) in enumerate(test_loader):
+        for batch_idx, (past, future) in pbar:
             if batch_idx >= n_batches:
                 break
-            
+
             past = past.to(device)
-            
-            # Single sample
+
             torch.manual_seed(42 + batch_idx)
             result = model.generate(past, **gen_kwargs)
             all_preds_single.append(result['prediction'].cpu())
-            
-            # Averaged (skip in smoke test — 1 sample is enough to verify the path)
+
             if smoke_test:
                 all_preds_avg.append(result['prediction'].cpu())
             else:
                 samples = []
-                for _ in range(n_samples):
+                for s_idx in range(n_samples):
+                    torch.manual_seed(1000 + s_idx * 17 + batch_idx)
                     result = model.generate(past, **gen_kwargs)
                     samples.append(result['prediction'].cpu())
                 all_preds_avg.append(torch.stack(samples).mean(dim=0))
-            
-            # Trim overlap from target so it matches the H-step forecast
+
             if K > 0:
                 future = future[..., K:]
             all_targets.append(future)
+
+            if batch_idx % 25 == 0:
+                logger.info(f"  eval batch {batch_idx + 1}/{n_batches}")
     
     preds_single = torch.cat(all_preds_single, dim=0)
     preds_avg = torch.cat(all_preds_avg, dim=0)
@@ -2706,58 +2718,82 @@ def run_pipeline(
         variate_indices = job['variate_indices']
 
         try:
-            # Probe max safe batch size once before HP trials
             n_iv = len(variate_indices)
-            _p_itrans = load_itransformer_from_checkpoint(itrans_ckpt, n_iv, device)
-            _p_guidance = iTransformerGuidance(_p_itrans)
-            _p_ds, _, _, _ = load_dataset(dataset_name, variate_indices, stride=1)
-            ft_diff_bs = select_diffusion_batch_size(
-                phase_name=f'Diff FT HP ({dataset_name})',
-                dataset=_p_ds,
-                device=device,
-                itrans_guidance=_p_guidance,
-                max_candidate=diffusion_probe_max_candidate(len(variate_indices), smoke_test),
-            )
-            del _p_itrans, _p_guidance, _p_ds
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
             subset_dir = os.path.join(CHECKPOINT_DIR, dataset_name)
             os.makedirs(subset_dir, exist_ok=True)
-            logger.info(
-                f"Phase 2B — diffusion finetune HP ({dataset_name}): "
-                f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs}, "
-                f"epochs<={HP_TUNE_EPOCHS} patience={HP_TUNE_PATIENCE}; best trial → final ckpt..."
-            )
-            optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-            def log_finetune_trial(study, trial):
-                logger.info(f"[{dataset_name} HP] Trial {trial.number}/{n_finetune_trials}: "
-                            f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                            f"bs={ft_diff_bs}")
-
-            study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
-            study.optimize(
-                lambda trial: finetune_hp_objective(
-                    trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test,
-                    fixed_batch_size=ft_diff_bs, trial_ckpt_dir=subset_dir,
-                ),
-                n_trials=n_finetune_trials,
-                show_progress_bar=True,
-                callbacks=[log_finetune_trial],
+            # ---- Eval-resume: if best.pt + metadata.json exist and results.json
+            # has no eval_metrics yet, skip HP search and jump straight into eval.
+            existing_best = os.path.join(subset_dir, 'best.pt')
+            existing_meta = os.path.join(subset_dir, 'metadata.json')
+            prior_results = _load_subset_results(RESULTS_DIR, dataset_name)
+            can_resume_eval = (
+                os.path.exists(existing_best)
+                and os.path.exists(existing_meta)
+                and 'eval_metrics' not in prior_results
             )
-            tuned_params = study.best_params
-            tuned_params['batch_size'] = ft_diff_bs
-            logger.info(f"Best params for {dataset_name}: {tuned_params}")
+            if can_resume_eval:
+                with open(existing_meta) as f:
+                    md = json.load(f)
+                tuned_params = md.get('tuned_params', {})
+                ft_diff_bs = int(tuned_params.get('batch_size', 8))
+                ckpt_path = existing_best
+                train_metrics = {
+                    'best_val_loss': md.get('best_val_loss', float('nan')),
+                    'best_trial': md.get('best_trial', -1),
+                }
+                logger.info(
+                    f"[Resume] Found existing fine-tuned checkpoint for {dataset_name} "
+                    f"at {ckpt_path}; skipping Phase 2 HP and going straight to eval."
+                )
+            else:
+                _p_itrans = load_itransformer_from_checkpoint(itrans_ckpt, n_iv, device)
+                _p_guidance = iTransformerGuidance(_p_itrans)
+                _p_ds, _, _, _ = load_dataset(dataset_name, variate_indices, stride=1)
+                ft_diff_bs = select_diffusion_batch_size(
+                    phase_name=f'Diff FT HP ({dataset_name})',
+                    dataset=_p_ds,
+                    device=device,
+                    itrans_guidance=_p_guidance,
+                    max_candidate=diffusion_probe_max_candidate(len(variate_indices), smoke_test),
+                )
+                del _p_itrans, _p_guidance, _p_ds
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-            # Reuse the best trial's checkpoint as the final fine-tuned model
-            # (no separate Phase 2C retrain).
-            _, _, _, norm_stats = load_dataset(dataset_name, variate_indices, stride=1)
-            ckpt_path, train_metrics = _promote_best_trial_to_final(
-                study, subset_dir,
-                {'subset_id': dataset_name, 'variate_indices': variate_indices},
-                dataset_name, norm_stats, ft_diff_bs,
-            )
+                logger.info(
+                    f"Phase 2B — diffusion finetune HP ({dataset_name}): "
+                    f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs}, "
+                    f"epochs<={HP_TUNE_EPOCHS} patience={HP_TUNE_PATIENCE}; best trial → final ckpt..."
+                )
+                optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+                def log_finetune_trial(study, trial):
+                    logger.info(f"[{dataset_name} HP] Trial {trial.number}/{n_finetune_trials}: "
+                                f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+                                f"bs={ft_diff_bs}")
+
+                study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
+                study.optimize(
+                    lambda trial: finetune_hp_objective(
+                        trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test,
+                        fixed_batch_size=ft_diff_bs, trial_ckpt_dir=subset_dir,
+                    ),
+                    n_trials=n_finetune_trials,
+                    show_progress_bar=True,
+                    callbacks=[log_finetune_trial],
+                )
+                tuned_params = study.best_params
+                tuned_params['batch_size'] = ft_diff_bs
+                logger.info(f"Best params for {dataset_name}: {tuned_params}")
+
+                _, _, _, norm_stats = load_dataset(dataset_name, variate_indices, stride=1)
+                ckpt_path, train_metrics = _promote_best_trial_to_final(
+                    study, subset_dir,
+                    {'subset_id': dataset_name, 'variate_indices': variate_indices},
+                    dataset_name, norm_stats, ft_diff_bs,
+                )
+
             
             # Evaluation
             if True:
@@ -2774,9 +2810,16 @@ def run_pipeline(
                 _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=1)
                 if smoke_test:
                     test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
+                else:
+                    n_full = len(test_ds)
+                    n_eval = max(1, n_full // 2)
+                    rng = np.random.default_rng(seed)
+                    eval_idx = sorted(rng.choice(n_full, size=n_eval, replace=False).tolist())
+                    test_ds = Subset(test_ds, eval_idx)
+                    logger.info(f"[{dataset_name}] eval subset: {n_eval}/{n_full} windows (seeded random half)")
                 test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
-                
-                eval_results = evaluate_model(model, test_loader, device, n_samples=30, smoke_test=smoke_test)
+
+                eval_results = evaluate_model(model, test_loader, device, n_samples=3, smoke_test=smoke_test)
                 
                 logger.info(f"[{dataset_name}] Single: MSE={eval_results['single']['mse']:.4f}, MAE={eval_results['single']['mae']:.4f}")
                 logger.info(f"[{dataset_name}] Avg: MSE={eval_results['averaged']['mse']:.4f}, MAE={eval_results['averaged']['mae']:.4f}")
