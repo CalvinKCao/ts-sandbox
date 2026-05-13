@@ -18,6 +18,9 @@
 # Code + datasets default to this checkout (PROJECT_ROOT = SLURM_SUBMIT_DIR).
 # Opt out (use $SCRATCH/ts-sandbox or $HOME/ts-sandbox instead): ./run.sh --no-submit-root ...
 #
+# No Slurm locally (WSL etc.): sbatch is missing. Submit from an Alliance login node, or:
+#   TS_SANDBOX_SBATCH_DRY_RUN=1 ./run.sh ...   # print sbatch line only, exit 0
+#
 # Architecture / U-Net ablations (six distinct experiments — one Slurm job each):
 #   --variant default | h128 | attn-near-bottleneck | deeper-unet | penalty-0.1 | penalty-0.3
 # Window-norm ablation (DiT only): --variant wn-a | wn-b | wn-c
@@ -96,9 +99,25 @@ if [ -z "$SLURM_JOB_ID" ]; then
     SBATCH_SMOKE_EXPORT=(--export="${_export_arg}")
     SBATCH_FULL_EXPORT=(--export="${_export_arg}")
 
+    _ts_sbatch() {
+        if [ "${TS_SANDBOX_SBATCH_DRY_RUN:-0}" = 1 ]; then
+            printf '[dry-run] sbatch'
+            for _a in "$@"; do printf ' %q' "$_a"; done
+            printf '\n'
+            return 0
+        fi
+        sbatch "$@"
+    }
+
+    if [ "${TS_SANDBOX_SBATCH_DRY_RUN:-0}" != 1 ] && ! command -v sbatch >/dev/null 2>&1; then
+        echo "ERROR: sbatch not in PATH. This script only queues jobs on Slurm — run from an Alliance login node (e.g. Killarney), not local WSL." >&2
+        echo "  Local check: TS_SANDBOX_SBATCH_DRY_RUN=1 ./run.sh ...  (prints sbatch line only)" >&2
+        exit 127
+    fi
+
     if [ "$IS_SMOKE" -eq 1 ]; then
         echo "Submitting SMOKE TEST (L40S, 8GB, 15 min) [variant=$VARIANT dataset=$SUBMIT_DATASET]..."
-        sbatch \
+        _ts_sbatch \
             --job-name="${VARIANT}-${SUBMIT_DS_TAG}-smoke" \
             --account=aip-boyuwang \
             --time=0:15:00 \
@@ -122,7 +141,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
 
         echo "Submitting H100 FULL RUN (64GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall, $PARTITION) [variant=$VARIANT dataset=$SUBMIT_DATASET]..."
 
-        sbatch \
+        _ts_sbatch \
             --job-name="${VARIANT}-${SUBMIT_DS_TAG}-h100" \
             --account=aip-boyuwang \
             --partition="$PARTITION" \
@@ -140,7 +159,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
     else
         echo "Submitting FULL RUN (L40S, 50GB, ${H_VAL}h=${WALLTIME_MINUTES}min wall) [variant=$VARIANT dataset=$SUBMIT_DATASET]..."
 
-        sbatch \
+        _ts_sbatch \
             --job-name="${VARIANT}-${SUBMIT_DS_TAG}" \
             --account=aip-boyuwang \
             --time="$WALLTIME_MINUTES" \

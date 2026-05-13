@@ -7,8 +7,11 @@
 # - Slurm wall: 10h per job except ``weather`` (48h). Env: WALL_HOURS_DEFAULT, WALL_HOURS_WEATHER.
 #
 # Usage (repo root or anywhere — script cds to repo root):
+#   Run on an Alliance Slurm login node (e.g. Killarney), not WSL — ./run.sh invokes sbatch.
 #   export WANDB_API_KEY=...
 #   ./throwaway/submit_window_norm_dit_full_tune.sh
+#
+# Local dry-run: export TS_SANDBOX_SBATCH_DRY_RUN=1  (run.sh prints sbatch lines only)
 #
 # Wall time: 10h per job except dataset ``weather`` (48h). Override if needed:
 #   WALL_HOURS_DEFAULT=12 WALL_HOURS_WEATHER=72 ./throwaway/submit_window_norm_dit_full_tune.sh
