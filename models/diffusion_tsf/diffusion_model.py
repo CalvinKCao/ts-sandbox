@@ -734,15 +734,11 @@ class DiffusionTSF(nn.Module):
             guidance_padded = self._pad_to_window(guidance_2d, 'future', total_len)
             canvas_full = self._inject_guidance_channel(canvas_full, guidance_padded)
         
-        # Conditioning: Must match canvas length (608) for visual_concat
-        # We do NOT inject aux channels (coords, time) here because they are already in the main canvas
-        # and shared across the spatial dimensions.
+        # Conditioning for visual_concat: only the raw past occupancy image.
+        # Aux channels (coord, time, value) are already baked into canvas_full and
+        # are counted in backbone_in_channels; adding them here again would mismatch
+        # the visual_cond_channels=num_variables expectation in the U-Net.
         cond_for_unet = past_padded
-        
-        # Value channel for conditioning (if used)
-        if self.config.use_value_channel:
-             # Use same value channel as input
-             cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
         
         encoder_hidden_states = None
         if self.context_encoder is not None:
@@ -812,20 +808,10 @@ class DiffusionTSF(nn.Module):
             val_channel = self._get_value_channel(vals_padded, self.config.image_height)
             if val_channel.shape[1] > 1: val_channel = val_channel[:, 0:1, :, :]
 
-        # Conditioning
+        # Conditioning: only the raw past occupancy image (visual_cond_channels = num_variables).
+        # val_channel and other aux are in canvas_full; don't double-count here.
         cond_for_unet = past_padded
-        if self.config.use_value_channel:
-             cond_for_unet = torch.cat([cond_for_unet, val_channel], dim=1)
-        
-        null_cond_for_unet = None
-        if cfg_scale > 1.0:
-            null_cond = torch.zeros_like(past_padded)
-            # No aux channels for null cond either
-            if self.config.use_value_channel:
-                 _, _, h, w = null_cond.shape
-                 zvc = torch.zeros(batch_size, 1, h, w, device=device, dtype=past.dtype)
-                 null_cond = torch.cat([null_cond, zvc], dim=1)
-            null_cond_for_unet = null_cond
+        null_cond_for_unet = torch.zeros_like(past_padded) if cfg_scale > 1.0 else None
 
         encoder_hidden_states = None
         null_encoder_hidden_states = None
