@@ -75,9 +75,8 @@ class TransformerEncoderLayer1D(nn.Module):
         Returns:
             Output tensor of shape (batch, seq_len, dim)
         """
-        # Self-attention with pre-norm
         x_norm = self.norm1(x)
-        attn_out, _ = self.attn(x_norm, x_norm, x_norm)
+        attn_out, _ = self.attn(x_norm, x_norm, x_norm, need_weights=False)
         x = x + attn_out
         
         # MLP with pre-norm
@@ -238,12 +237,9 @@ class CrossAttentionBlock(nn.Module):
         k = k.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
         
-        # Compute attention
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        
-        # Apply attention to values
-        out = attn @ v
+        # Memory-efficient attention via SDPA (flash attention when available).
+        # Equivalent to softmax((Q @ K^T) * scale) @ V but without materialising N×N.
+        out = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
         
         # Reshape back
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len_q, -1)
@@ -338,9 +334,10 @@ class SpatialTransformerBlock(nn.Module):
         # Flatten spatial dimensions: (batch, channels, height, width) -> (batch, height*width, channels)
         x = x.view(batch, channels, height * width).permute(0, 2, 1)
         
-        # Self-attention
+        # Self-attention — need_weights=False forces the memory-efficient SDPA path
+        # (flash attention / math-efficient kernel); no O(N²) attention matrix is stored.
         x_norm = self.self_attn_norm(x)
-        attn_out, _ = self.self_attn(x_norm, x_norm, x_norm)
+        attn_out, _ = self.self_attn(x_norm, x_norm, x_norm, need_weights=False)
         x = x + attn_out
         
         # Cross-attention with context (if provided)
