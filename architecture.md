@@ -1,8 +1,10 @@
 # Hyper-detailed walkthrough: Gaussian multivariate pipeline (ts-sandbox)
 
-Companion to `gaussian_pipeline_extreme_walkthrough.md`. This document is **implementation-first**: it traces tensors, names every major submodule down to layer lists, indexes U-Net levels precisely, and records defaults from `DiffusionTSFConfig` as of the repo state when this file was written.
+Companion to `gaussian_pipeline_extreme_walkthrough.md`. This document is **implementation-first**: it traces tensors, names every major submodule down to layer lists, indexes U-Net/DiT levels precisely, and records defaults from `DiffusionTSFConfig` as of the repo state when this file was written.
 
 **Scope:** Gaussian diffusion, variate-factorized path (e.g. ETTh2 with `--n-variates 7`), Slurm chain `slurm_etth2_compare.sh`. Binary diffusion and latent-only branches are out of scope except where code is shared.
+
+> **Branch status (e2e-joint-itrans-diffusion):** the default training mode is now **end-to-end joint** training of the iTransformer guidance and the diffusion backbone (`--mode pretrain` / `--mode finetune`). The original 4-phase HP-search pipeline is preserved under `--mode legacy-pretrain` / `--mode legacy-finetune` / `--mode legacy-full`. See §2 for the new 2-phase schedule and §13 for the joint-training implementation. The U-Net-specific tensor walk in §6–§7 still applies to whichever backbone is selected (`model_type="unet"` or `"dit"`); §6.0 covers the branch.
 
 ---
 
@@ -56,25 +58,55 @@ Each batch job sources a generated preamble that:
 
 ---
 
-## 2) Pipeline stages overview
+## 2) Pipeline stages overview (joint, e2e branch)
 
-**Synthetic pretrain** (`run_pretrain_mode`, Slurm `run.sh`, or manifest `--mode full` before dataset loops) is two Optuna phases whose **best checkpoints are promoted directly**—there is no extra multi-epoch “full synthetic pretrain” after either HP search unless a legacy cache has JSON params without the paired `*_hp_best.pt` file.
-
-**Per-dataset finetune** (`--mode finetune`, `_finetune_and_eval_one_subset`, or the finetune stage inside `run.sh`) runs **four phases** on real data (iTrans HP → iTrans full finetune → diffusion HP → diffusion full finetune), then eval.
+The default pipeline collapses to **two phases**, each a single Optuna search over `(diffusion_lr, itrans_lr)`. In both phases the iTransformer guidance is **trained jointly** with the diffusion backbone: gradient from the diffusion loss flows back into the iTransformer encoder through the cross-attention token path, and a separate **auxiliary forecast MSE loss** anchors the iTransformer as a real forecaster (so it does not drift into a pure denoising-helper representation).
 
 ```
-── PRETRAIN (synthetic, Slurm dim dir & manifest CHECKPOINT_DIR) ───────────────
-  Phase 1A │ iTransformer HP tuning       │ best trial weights → itrans_hp_best.pt → itransformer.pt (no extra full-pretrain epoch block)
-  Phase 1B │ Diffusion HP tuning          │ N_DIFFUSION_HP_TRIALS trials → diff_hp_best.pt → diffusion.pt (no extra full synthetic pretrain)
+── PRETRAIN (synthetic, per-dim pretrain dir) ────────────────────────────────
+  Phase 1  │ Joint iTrans + diffusion HP (Optuna, N=N_JOINT_PRETRAIN_TRIALS)
+           │   search space: diffusion_lr ∈ [5e-5, 5e-4]   log-uniform
+           │                  itrans_lr    ∈ [5e-5, 5e-4]  log-uniform
+           │   each trial: optional iTrans-only warmup (aux MSE only) then joint
+           │   best trial state_dict → joint_pretrained.pt + joint_pretrain_hp.json
 ── FINETUNE (per dataset/subset) ────────────────────────────────────────────
-  Phase 2A │ iTransformer HP finetune     │ real data (warm-start from Phase 1A ckpt) -> best trial weights promoted
-  Phase 2B │ Diffusion HP finetune        │ real data; N_FINETUNE_HP_TRIALS Optuna trials; batch size auto-probed once
-  Phase 2C │ Diffusion full finetune      │ real data (guidance = finetuned iTrans from 2A)
-  Eval     │ Diffusion eval + iTrans baseline (finetuned iTrans for both)
+  Phase 2  │ Joint HP finetune on real data (Optuna, N=N_JOINT_FINETUNE_TRIALS)
+           │   warm-start each trial from joint_pretrained.pt
+           │   same search space; best state_dict → {subset}_joint_finetuned.pt
+  Eval     │ Diffusion eval + iTrans baseline (iTrans head inside the joint model)
 ─────────────────────────────────────────────────────────────────────────────
 ```
 
-### Phase 1A — iTransformer HP tuning on synthetic data
+The four-phase pipeline (Phase 1A/1B iTrans-then-diffusion HP search, Phase 2A/2B/2C iTrans-then-diffusion-HP-then-diffusion-full finetune) is kept under `--mode legacy-pretrain` / `--mode legacy-finetune` / `--mode legacy-full` for A/B comparison. Its description is retained as **§2.legacy** below — the joint pipeline above is what the rest of this document defaults to.
+
+### Phase 1 — Joint synthetic pretrain (`run_joint_pretrain_mode`)
+
+- **Entry:** `run_joint_pretrain_mode()` in `train_multivariate_pipeline.py`, dispatched by `--mode pretrain`.
+- **Trials:** `N_JOINT_PRETRAIN_TRIALS = 4` (pipeline_config). Optuna `TPESampler(seed=...)` + `MedianPruner(n_startup_trials=2)`.
+- **Search space:** `diffusion_lr` log-uniform in `[JOINT_DIFFUSION_LR_MIN, JOINT_DIFFUSION_LR_MAX]` (default `5e-5..5e-4`); `itrans_lr` log-uniform in `[JOINT_ITRANS_LR_MIN, JOINT_ITRANS_LR_MAX]` (same range by default).
+- **Fixed iTrans HPs:** d_model, e_layers, n_heads, d_ff, dropout are NOT searched — the iTransformer is fixed at its largest-capacity preset (`itrans_d_model=512`, `e_layers=4`, `n_heads=8`, `d_ff=512`, `dropout=0.1`) so search compute is concentrated on the diffusion backbone (which dominates total params and is the active research target).
+- **Per-trial training:** `JOINT_PRETRAIN_MAX_EPOCHS = 15` total, including `JOINT_WARMUP_EPOCHS = 1` iTrans-only warmup at the start; early-stop patience `JOINT_PRETRAIN_PATIENCE = 5`.
+- **Best-state tracking:** cross-trial best `state_dict` is captured to CPU whenever a trial improves the global best (`optuna_search_joint_phase` in `joint_training.py`).
+- **Output:** `joint_pretrained.pt` (full DiffusionTSF state) + `joint_pretrain_hp.json` (best LR pair + ghost variant + warmup epochs).
+
+### Phase 2 — Joint real-data finetune (`run_joint_finetune_mode`)
+
+- **Entry:** `run_joint_finetune_mode()`, dispatched by `--mode finetune`.
+- **Trials:** `N_JOINT_FINETUNE_TRIALS = 3`.
+- **Search space:** identical to Phase 1 (same LR pair, log-uniform).
+- **Warm start:** every trial loads `joint_pretrained.pt` into a fresh DiffusionTSF before training. Both iTrans and diffusion backbone weights restart from the pretrain best.
+- **Per-trial training:** `JOINT_FINETUNE_MAX_EPOCHS = 10`, patience `JOINT_FINETUNE_PATIENCE = 5`, warmup `JOINT_WARMUP_EPOCHS = 1`.
+- **Output:** `{subset}_joint_finetuned.pt` + `{subset}_joint_ft_hp.json`.
+
+### Evaluation (unchanged from legacy)
+
+After Phase 2, the existing eval harness (`evaluate_model`, `evaluate_itransformer_baseline`) runs against the joint finetuned checkpoint. Because the iTransformer head lives inside the joint model, the iTrans baseline uses the same trained weights via `joint_model.guidance_model.model` — no separate `*_itransformer_finetuned.pt` artifact is needed.
+
+### 2.legacy — Original 4-phase pipeline (deprecated, kept for A/B)
+
+The legacy pipeline runs four Optuna searches: 1A iTrans HP → 1B diffusion HP → 2A iTrans finetune HP → 2B diffusion finetune HP, plus Phase 2C full diffusion finetune. Best checkpoints are promoted directly (no separate full-pretrain block) unless a stale JSON cache lacks the paired `*_hp_best.pt`. The iTransformer is **frozen** through 1B/2B/2C in this pipeline — it never receives diffusion gradient. See `models/diffusion_tsf/train_multivariate_pipeline.py` (`run_pretrain_mode`, `_finetune_and_eval_one_subset`) for the implementation; the previous version of this section described it in detail.
+
+### Phase 1A — iTransformer HP tuning on synthetic data (legacy)
 
 - **Entry:** `run_itransformer_hp_tuning()`, called from `run_pretrain_mode` / manifest `run_pipeline`
 - **Trials:** `N_ITRANS_HP_TRIALS = 7`, Optuna `TPESampler`, `MedianPruner(n_startup_trials=2)`
@@ -83,7 +115,7 @@ Each batch job sources a generated preamble that:
 - **Best-state tracking:** `best_state` dict shared across trials; whenever a trial val loss beats all previous, the model `state_dict` is cloned to CPU and stored
 - **Output:** `itrans_hp.json` (best params, cached so reruns skip this phase); **`itrans_hp_best.pt`** is promoted to **`itransformer.pt`** / `pretrained_itransformer.pt` — **no** separate synthetic full-pretrain block after HP (only a fallback `pretrain_itransformer` if an **old** run cached JSON without `itrans_hp_best.pt`)
 
-### Phase 1B — Diffusion HP tuning on synthetic data
+### Phase 1B — Diffusion HP tuning on synthetic data (legacy)
 
 - **Entry:** `run_diffusion_hp_tuning()`, called from `run_pretrain_mode` and `run_pipeline`
 - **Trials:** `N_DIFFUSION_HP_TRIALS = 3`, same Optuna setup as iTrans HP
@@ -93,7 +125,7 @@ Each batch job sources a generated preamble that:
 - **Best-state tracking:** cross-trial clone → `diff_hp_best.pt`
 - **Output:** `diff_hp.json` + `diff_hp_best.pt` → copied to `diffusion.pt` / `pretrained_diffusion.pt`. Fallback: full `pretrain_diffusion` up to `PRETRAIN_DIFFUSION_MAX_EPOCHS` only if no `diff_hp_best.pt` exists
 
-### Phase 2A — iTransformer HP finetune on real data
+### Phase 2A — iTransformer HP finetune on real data (legacy)
 
 - **Entry:** `run_itransformer_finetune_hp_tuning()`, called from `_finetune_and_eval_one_subset`
 - **Trials:** `N_ITRANS_HP_TRIALS = 7`, same Optuna/pruner setup as Phase 1A
@@ -104,7 +136,7 @@ Each batch job sources a generated preamble that:
 - **Best-state tracking:** cross-trial clone, same mechanism
 - **Output:** `{subset_id}_itrans_ft_hp.json` (cached) + `{subset_id}_itrans_ft_hp_best.pt`
 
-### Phase 2B — Diffusion HP finetune on real data
+### Phase 2B — Diffusion HP finetune on real data (legacy)
 
 - **Entry:** `finetune_hp_objective` via Optuna in `_finetune_and_eval_one_subset` (and equivalent loop in `run_pipeline`)
 - **Trials:** `N_FINETUNE_HP_TRIALS` (defaults to **3** in code — distinct from pretrain diffusion HP trials); logs explicitly label this as finetune-phase tuning so it is not confused with `N_DIFFUSION_HP_TRIALS`
@@ -114,7 +146,7 @@ Each batch job sources a generated preamble that:
 - **Per-trial training:** `HP_TUNE_EPOCHS` with early stop
 - **Output:** best HP params dict (in-memory)
 
-### Phase 2C — Diffusion full finetune on real data
+### Phase 2C — Diffusion full finetune on real data (legacy)
 
 - **Entry:** `finetune_on_dataset()`, called from `_finetune_and_eval_one_subset`
 - **Epochs:** `FINETUNE_EPOCHS = 10`, patience `FINETUNE_PATIENCE = 5`
@@ -790,7 +822,83 @@ Why include defaults in a slow walkthrough:
 
 ---
 
-## 13) Known pitfalls (with practical interpretation)
+## 13) End-to-end joint iTransformer + diffusion training (e2e branch)
+
+This section walks the joint-training implementation that backs `--mode pretrain` / `--mode finetune` on this branch. The legacy §9 frozen-guidance description still applies under `--mode legacy-*`; here we describe how that picture changes when `DiffusionTSFConfig.e2e_joint_training=True`.
+
+### 13.1 What changes from the legacy frozen-guidance picture
+
+| Aspect | Legacy (frozen iTrans) | Joint (e2e branch) |
+|---|---|---|
+| iTrans params | `requires_grad=False`, eval mode locked | trainable, follows parent `.train()/.eval()` |
+| `get_forecast` / `get_encoder_tokens` | wrapped in `@torch.no_grad()` | wrapped only when `iTransformerGuidance(freeze=True)` |
+| Cross-attn token gradient path | dead (frozen iTrans) | live — iTrans gets gradient from diffusion noise/EMD loss |
+| Ghost-image gradient path | dead | dead by design (`encode_to_2d` is non-differentiable); ghost input is `.detach()`ed |
+| Auxiliary forecast loss | absent | `aux_forecast_loss_weight * MSE(coarse_norm, future_norm)` always added |
+| HP search | 4 separate Optuna studies (1A, 1B, 2A, 2B/2C) | 2 joint Optuna studies (Phase 1 pretrain, Phase 2 finetune) |
+| Output checkpoints | `itransformer.pt` + `diffusion.pt` + `*_itransformer_finetuned.pt` + `{subset}/best.pt` | `joint_pretrained.pt` + `{subset}_joint_finetuned.pt` (full DiffusionTSF state in one file each) |
+
+### 13.2 Gradient flow paths in joint mode
+
+Two ghost-image variants are wired in (`config.joint_use_ghost_image`):
+
+- **Option B (default):** the ghost-image channel is kept, but the iTrans coarse forecast is `.detach()`ed before it enters `encode_to_2d`. The U-Net/DiT still sees a ghost pixel map; iTrans receives no gradient through that path.
+- **Option C (tokens-only):** `config.emits_ghost_image == False` ⇒ `backbone_in_channels` drops by 1, no ghost map is emitted. The U-Net/DiT input is just `[noisy_future, aux, cond...]`. Cleaner gradient story; cheaper backbone (one fewer input channel).
+
+In both variants, iTrans gets gradient from:
+
+1. **Auxiliary forecast loss** — `F.mse_loss(coarse_norm[..., K:], future_norm[..., K:])` directly on iTransformer's prediction. K is `config.lookback_overlap`; the K prepended past-tail timesteps are known truth and not scored.
+2. **Cross-attention tokens** — `_get_cross_variate_context(past)` calls `guidance_model.get_encoder_tokens(past)` (no `no_grad`), runs the result through `iTransformerTokenAdapter` (`context_encoder.*`), and feeds it as `encoder_hidden_states` to the noise predictor. Gradient flows backward through the cross-attn block(s), through the adapter projection, into the iTransformer encoder.
+
+Both paths are active simultaneously. The aux loss provides a clean per-batch signal that dominates iTrans gradients early; the cross-attn-token path provides the noisier but representation-shaping signal from the diffusion loss.
+
+### 13.3 The joint trainer (`joint_training.train_joint_phase`)
+
+Single-trial joint training loop, used both standalone and as the inner loop of the Optuna search.
+
+**Parameter groups.** `_split_param_groups(model)` partitions trainable params into:
+- `itrans_params`: anything under `guidance_model.model.*` (the inner iTransformer) or `context_encoder.*` (the adapter).
+- `diff_params`: everything else (`noise_predictor.*`, etc.).
+
+Each group goes to its own AdamW param_group with its own LR. CosineAnnealingLR steps both jointly.
+
+**iTrans-only warmup.** When `epoch < warmup_epochs` (default 1), `_train_one_epoch` does NOT call `model(past, future)`. Instead it calls `_aux_forecast_loss(model, past, future)` which:
+- runs `model._normalize_sequence(past, future)`,
+- calls `model.guidance_model.get_forecast(past, H)` under grad,
+- normalizes with the same per-window stats,
+- returns `F.mse_loss(coarse_norm, future_norm[..., K:])`.
+
+No `encode_to_2d`, no diffusion noise prediction, no EMD term. The diffusion backbone gets zero gradient that epoch. This gives the iTrans + adapter a chance to converge to a meaningful starting representation before the cross-attn tokens start being interpreted by the (still-random or pretrained) backbone.
+
+**Joint epochs** (everything after warmup): standard `model(past, future)` forward, full loss (`noise_loss + emd_lambda*emd_loss + aux_forecast_loss_weight * aux_forecast_loss + ...`), `loss.backward()`, separately-clipped grad norms per param group, optimizer step.
+
+**Early stopping & best-state tracking.** Only joint-phase val losses count; warmup-only val numbers are not comparable. When a joint epoch beats the global best, the full `state_dict` is cloned to CPU and stashed.
+
+### 13.4 The Optuna wrapper (`joint_training.optuna_search_joint_phase`)
+
+A thin wrapper that:
+
+1. Each trial calls `model_factory()` to get a fresh DiffusionTSF (fresh iTrans + fresh backbone, or pretrain-loaded for finetune trials).
+2. Samples `diffusion_lr` and `itrans_lr` log-uniformly from `JointSearchConfig.{diffusion,itrans}_lr_{min,max}`.
+3. Runs `train_joint_phase` with those LRs, reporting joint-phase val losses back to Optuna for median pruning (warmup-phase val loss is skipped from pruner reports).
+4. Cross-trial best `state_dict` is captured (CPU-resident) whenever a trial improves the global best — no need for a retraining pass after the search.
+5. Returns `(best_params, best_state_dict, study)`. Saved by the caller as `joint_pretrained.pt` / `{subset}_joint_finetuned.pt` plus `*_hp.json`.
+
+### 13.5 Aux loss weighting — the most important new HP
+
+`aux_forecast_loss_weight` is the single new hyperparameter that doesn't exist in the legacy pipeline. Practical guidance:
+
+- Too low (e.g. 0): iTrans drifts into a denoising-helper role. Forecast accuracy collapses; you've lost the iTrans baseline.
+- Too high (e.g. >>1): iTrans is effectively re-frozen — diffusion-loss gradients to iTrans are dominated by aux MSE gradients. You've lost the representation-learning benefit of joint training.
+- Default `1.0` is calibrated so the aux MSE term is roughly comparable to the noise-prediction term after the first few hundred steps in practice. Tune in `pipeline_config.py:JOINT_AUX_FORECAST_LOSS_WEIGHT` if relative magnitudes shift on a new dataset.
+
+### 13.6 What's deliberately fixed (not searched)
+
+To concentrate compute on the diffusion-backbone HPs, joint mode fixes iTransformer architectural HPs at largest-capacity values: `d_model=512`, `e_layers=4`, `n_heads=8`, `d_ff=512`, `dropout=0.1`. Only the iTrans LR is searched. Diffusion backbone architectural HPs (DiT depth/embed_dim, attention_levels, etc.) are controlled by the existing CLI flags / `pipeline_config.py`, same as before.
+
+---
+
+## 14) Known pitfalls (with practical interpretation)
 
 1. `attention_levels` indexing is by down-block index, not by channel value.
    - Indices outside valid range silently do nothing.
@@ -809,3 +917,20 @@ Why include defaults in a slow walkthrough:
 
 5. iTransformer internal normalization can stack with external normalization.
    - Important when interpreting guidance channel magnitudes.
+
+6. Joint training: `encode_to_2d` is non-differentiable (clamp+floor binning).
+   - Even with `e2e_joint_training=True`, the ghost-image path is a dead gradient
+     channel for the iTransformer. The code explicitly `.detach()`es the iTrans
+     forecast before `encode_to_2d` so no surprising graph branch is retained.
+   - iTrans gets gradient only via (a) auxiliary forecast MSE and (b) cross-attn
+     token path. Option C (`joint_use_ghost_image=False`) removes the dead branch
+     entirely.
+
+7. Joint training: warmup-only epochs produce val numbers that are NOT comparable
+   to joint-phase val numbers (different loss terms). Early stopping and Optuna
+   pruning ignore warmup epochs; if you only run `warmup_epochs >= num_epochs`
+   you'll get `best_val_loss = NaN` from `train_joint_phase` (intentional — the
+   final state is still saved as a fallback). Always run at least one joint
+   epoch.
+
+8. Joint training: aux loss weight tuning matters more than it looks. See §13.5.

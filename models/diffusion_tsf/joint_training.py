@@ -29,7 +29,7 @@ import time
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -352,6 +352,148 @@ def _train_one_epoch(
             )
 
     return {k: v / max(n_batches, 1) for k, v in totals.items()}
+
+
+# ---------------------------------------------------------------------------
+# Optuna search wrapper
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class JointSearchConfig:
+    """Optuna search space and budget for joint training."""
+
+    n_trials: int = 4
+    diffusion_lr_min: float = 5e-5
+    diffusion_lr_max: float = 5e-4
+    itrans_lr_min: float = 5e-5
+    itrans_lr_max: float = 5e-4
+    num_epochs: int = 15
+    warmup_epochs: int = 1
+    patience: int = 5
+    grad_clip: float = 1.0
+    use_amp: bool = False
+    seed: int = 42
+    median_pruner_warmup: int = 2
+    state_dict_to_cpu: bool = True
+
+
+def optuna_search_joint_phase(
+    model_factory: Callable[[], nn.Module],
+    train_loader: DataLoader,
+    val_loader: Optional[DataLoader],
+    search_cfg: JointSearchConfig,
+    *,
+    device: torch.device,
+    study_name: str = "joint_phase",
+    on_trial_end: Optional[Callable[[Any, Dict[str, float]], None]] = None,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, torch.Tensor]], "optuna.Study"]:
+    """Run an Optuna study over (diffusion_lr, itrans_lr) for joint training.
+
+    Each trial:
+        * builds a fresh model from ``model_factory()``;
+        * samples ``diffusion_lr`` and ``itrans_lr`` log-uniformly;
+        * runs ``train_joint_phase`` with the sampled LRs;
+        * reports best joint-phase val loss to Optuna for pruning;
+        * if its best is the global best, captures the model state_dict for
+          downstream consumers (so we don't have to retrain).
+
+    Returns (best_params, best_state_dict, study). ``best_state_dict`` may be
+    ``None`` if no trial ever produced a joint-phase val loss (e.g. all trials
+    spent only on warmup, which would indicate a misconfiguration).
+    """
+    import optuna  # local import — keeps module importable without optuna
+    from optuna.samplers import TPESampler
+
+    if val_loader is None:
+        raise ValueError(
+            "optuna_search_joint_phase requires a val_loader (need val loss to score trials)"
+        )
+
+    shared = {
+        "best_val_loss": float("inf"),
+        "best_state_dict": None,
+        "best_params": None,
+    }
+
+    def objective(trial: "optuna.Trial") -> float:
+        diffusion_lr = trial.suggest_float(
+            "diffusion_lr", search_cfg.diffusion_lr_min, search_cfg.diffusion_lr_max, log=True,
+        )
+        itrans_lr = trial.suggest_float(
+            "itrans_lr", search_cfg.itrans_lr_min, search_cfg.itrans_lr_max, log=True,
+        )
+        logger.info(
+            "[%s] Trial %d/%d: diffusion_lr=%.2e, itrans_lr=%.2e",
+            study_name, trial.number + 1, search_cfg.n_trials, diffusion_lr, itrans_lr,
+        )
+
+        model = model_factory().to(device)
+        tcfg = JointTrainConfig(
+            diffusion_lr=diffusion_lr,
+            itrans_lr=itrans_lr,
+            num_epochs=search_cfg.num_epochs,
+            warmup_epochs=search_cfg.warmup_epochs,
+            patience=search_cfg.patience,
+            grad_clip=search_cfg.grad_clip,
+            use_amp=search_cfg.use_amp,
+        )
+
+        def _report_for_pruning(epoch_idx: int, metrics: Dict[str, float]) -> None:
+            # Report joint-phase val loss for median pruning. Warmup epochs
+            # carry no comparable signal; skip them.
+            if metrics.get("phase") == "joint" and "val_loss" in metrics:
+                trial.report(metrics["val_loss"], step=epoch_idx)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+
+        result = train_joint_phase(
+            model,
+            train_loader,
+            val_loader,
+            tcfg,
+            device=device,
+            on_epoch_end=_report_for_pruning,
+            state_dict_to_cpu=search_cfg.state_dict_to_cpu,
+        )
+
+        # Cross-trial best-state capture
+        if result.best_val_loss < shared["best_val_loss"]:
+            shared["best_val_loss"] = result.best_val_loss
+            shared["best_state_dict"] = result.best_state_dict
+            shared["best_params"] = {
+                "diffusion_lr": diffusion_lr,
+                "itrans_lr": itrans_lr,
+                "best_epoch": result.best_epoch,
+            }
+
+        if on_trial_end is not None:
+            on_trial_end(trial, {
+                "best_val_loss": result.best_val_loss,
+                "best_epoch": result.best_epoch,
+            })
+
+        # Free the trial's model before the next factory() call.
+        del model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        if result.best_val_loss == float("inf"):
+            # Trial only ran warmup (no joint-phase val numbers). Return a
+            # large penalty so Optuna can still rank it.
+            return 1e9
+        return result.best_val_loss
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(
+        study_name=study_name,
+        direction="minimize",
+        sampler=TPESampler(seed=search_cfg.seed),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=search_cfg.median_pruner_warmup),
+    )
+    study.optimize(objective, n_trials=search_cfg.n_trials, gc_after_trial=True)
+
+    return shared["best_params"] or {}, shared["best_state_dict"], study
 
 
 @torch.no_grad()

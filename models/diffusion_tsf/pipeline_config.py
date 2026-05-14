@@ -31,12 +31,12 @@ from typing import List, Optional
 
 # ---- Sequence / window lengths ---------------------------------------------------
 
-LOOKBACK_LENGTH: int = 1024
-FORECAST_LENGTH: int = 192
+LOOKBACK_LENGTH: int = 96
+FORECAST_LENGTH: int = 96
 
 # iTransformer paper benchmarks anchor at T=96 for ETTh1; we use the same lookback
 # for both the diffusion model and the iTransformer guidance.
-ITRANSFORMER_SEQ_LEN: int = 1024
+ITRANSFORMER_SEQ_LEN: int = 96
 
 # Predict the last K observed steps alongside the forecast horizon. The diffusion
 # model denoises a (K + H)-wide region; the K steps are discarded at inference.
@@ -194,6 +194,42 @@ def diffusion_probe_max_candidate(n_variates: int, smoke_test: bool) -> int:
     if hi % 2 != 0:
         hi -= 1
     return max(DIFFUSION_PROBE_MIN_BATCH, hi)
+
+
+# ---- End-to-end joint training (e2e branch) ---------------------------------------
+#
+# When ``--mode pretrain`` / ``--mode finetune`` is used on this branch, the pipeline
+# trains iTransformer + diffusion jointly (no separate Phase 1A/1B or 2A/2B). The
+# 4-phase pipeline is still available via ``--mode legacy-pretrain`` /
+# ``--mode legacy-finetune`` for A/B comparisons.
+#
+# Phase 1 (synthetic joint pretrain) Optuna search space and budget:
+N_JOINT_PRETRAIN_TRIALS: int = 4
+JOINT_PRETRAIN_MAX_EPOCHS: int = 15
+JOINT_PRETRAIN_PATIENCE: int = 5
+
+# Phase 2 (real-data joint finetune) Optuna search space and budget:
+N_JOINT_FINETUNE_TRIALS: int = 3
+JOINT_FINETUNE_MAX_EPOCHS: int = 10
+JOINT_FINETUNE_PATIENCE: int = 5
+
+# Optuna LR ranges. iTrans range is intentionally narrower / lower since the
+# iTransformer is the converging-faster component; diffusion gets the wider range.
+JOINT_DIFFUSION_LR_MIN: float = 5e-5
+JOINT_DIFFUSION_LR_MAX: float = 5e-4
+JOINT_ITRANS_LR_MIN: float = 5e-5
+JOINT_ITRANS_LR_MAX: float = 5e-4
+
+# Auxiliary forecast loss weight (not searched; tweak here based on relative magnitudes).
+JOINT_AUX_FORECAST_LOSS_WEIGHT: float = 1.0
+
+# iTrans-only warmup epochs at the start of each joint trial. Aux MSE only.
+JOINT_WARMUP_EPOCHS: int = 1
+
+# Ghost-image variant. "B" keeps the (detached) ghost channel; "C" drops it.
+# Tokens-only "C" is simpler and faster; "B" is the minimum deviation from the
+# legacy architecture.
+JOINT_GHOST_VARIANT: str = "B"
 
 
 # ---- Loss terms -------------------------------------------------------------------

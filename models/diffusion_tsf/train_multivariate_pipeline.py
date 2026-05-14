@@ -699,6 +699,19 @@ from models.diffusion_tsf.pipeline_config import (
     DIT_DROPOUT,
     GUIDANCE_PENALTY_WEIGHT,
     EVAL_NUM_SAMPLES,
+    N_JOINT_PRETRAIN_TRIALS,
+    N_JOINT_FINETUNE_TRIALS,
+    JOINT_PRETRAIN_MAX_EPOCHS,
+    JOINT_FINETUNE_MAX_EPOCHS,
+    JOINT_PRETRAIN_PATIENCE,
+    JOINT_FINETUNE_PATIENCE,
+    JOINT_DIFFUSION_LR_MIN,
+    JOINT_DIFFUSION_LR_MAX,
+    JOINT_ITRANS_LR_MIN,
+    JOINT_ITRANS_LR_MAX,
+    JOINT_AUX_FORECAST_LOSS_WEIGHT,
+    JOINT_WARMUP_EPOCHS,
+    JOINT_GHOST_VARIANT,
     resolve_pretrain_virtual_dataset_size,
     synthetic_epoch_capacity_itrans_hp,
     synthetic_epoch_capacity_diff_hp,
@@ -3171,13 +3184,13 @@ def run_finetune_mode(
 
     if not os.path.exists(diff_ckpt):
         logger.error(f"Pretrained checkpoint not found: {diff_ckpt}")
-        logger.error(f"Run --mode pretrain --n-variates {n_variates} first")
+        logger.error(f"Run --mode legacy-pretrain --n-variates {n_variates} first")
         sys.exit(1)
 
     if not smoke_test and os.path.exists(smoke_flag):
         logger.error(
             f"Pretrain checkpoints in {dim_dir} are from a smoke test. "
-            f"Run --mode pretrain --n-variates {n_variates} first to replace them."
+            f"Run --mode legacy-pretrain --n-variates {n_variates} first to replace them."
         )
         sys.exit(1)
 
@@ -3460,9 +3473,10 @@ def _finetune_and_eval_one_subset(
 # ============================================================================
 # End-to-end joint iTransformer + diffusion modes (e2e branch)
 #
-# Replaces Phase 1A+1B with a single ``joint-pretrain`` and Phase 2A+2B with a
-# single ``joint-finetune``. Both modes train the iTransformer guidance jointly
+# Replaces Phase 1A+1B with a single ``pretrain`` mode and Phase 2A+2B+2C with
+# a single ``finetune`` mode. Both modes train the iTransformer guidance jointly
 # with the diffusion backbone using ``joint_training.train_joint_phase``.
+# The legacy 4-phase pipeline is preserved under ``--mode legacy-*``.
 # ============================================================================
 
 
@@ -3544,24 +3558,28 @@ def run_joint_pretrain_mode(
     smoke_test: bool = False,
     seed: int = 42,
     *,
-    diffusion_lr: float = 2e-4,
-    itrans_lr: float = 1e-4,
+    diffusion_lr: Optional[float] = None,
+    itrans_lr: Optional[float] = None,
     num_epochs: Optional[int] = None,
-    warmup_epochs: int = 1,
+    warmup_epochs: int = JOINT_WARMUP_EPOCHS,
     joint_use_ghost_image: bool = True,
-    aux_forecast_loss_weight: float = 1.0,
+    aux_forecast_loss_weight: float = JOINT_AUX_FORECAST_LOSS_WEIGHT,
     batch_size: Optional[int] = None,
+    n_trials: Optional[int] = None,
 ):
     """Single-phase synthetic pretrain — replaces Phase 1A + 1B.
 
-    Trains iTransformer + diffusion jointly on the synthetic RealTS pool. Saves
-    one checkpoint ``joint_pretrained.pt`` under the per-dim pretrain dir; the
-    iTransformer weights inside it are recoverable via load-state-dict for any
-    downstream consumer that still expects ``itransformer.pt`` / ``diffusion.pt``
-    (see ``export_legacy_checkpoints_from_joint`` in commit 3).
+    Trains iTransformer + diffusion jointly on the synthetic RealTS pool.
+    Runs an Optuna search over ``(diffusion_lr, itrans_lr)`` when
+    ``n_trials > 1`` (the recommended path) and saves the best trial's
+    checkpoint as ``joint_pretrained.pt``. With ``n_trials == 1`` or in
+    smoke-test mode, a single run with the user-supplied LRs is used.
     """
-    from models.diffusion_tsf.dataset import get_synthetic_dataloader  # local import (heavy deps)
-    from models.diffusion_tsf.joint_training import JointTrainConfig, train_joint_phase
+    from models.diffusion_tsf.dataset import get_synthetic_dataloader  # local import
+    from models.diffusion_tsf.joint_training import (
+        JointSearchConfig, JointTrainConfig,
+        optuna_search_joint_phase, train_joint_phase,
+    )
 
     random.seed(seed)
     np.random.seed(seed)
@@ -3572,18 +3590,24 @@ def run_joint_pretrain_mode(
     dim_dir = pretrain_dir_for_dim(n_variates)
     os.makedirs(dim_dir, exist_ok=True)
     joint_ckpt = os.path.join(dim_dir, 'joint_pretrained.pt')
+    joint_hp_json = os.path.join(dim_dir, 'joint_pretrain_hp.json')
 
     if num_epochs is None:
-        num_epochs = 1 if smoke_test else max(PRETRAIN_DIFFUSION_MAX_EPOCHS, PRETRAIN_EPOCHS)
+        num_epochs = 1 if smoke_test else JOINT_PRETRAIN_MAX_EPOCHS
     if batch_size is None:
         batch_size = 4 if smoke_test else 16
+    if n_trials is None:
+        n_trials = 1 if smoke_test else N_JOINT_PRETRAIN_TRIALS
+    if diffusion_lr is None:
+        diffusion_lr = (JOINT_DIFFUSION_LR_MIN * JOINT_DIFFUSION_LR_MAX) ** 0.5
+    if itrans_lr is None:
+        itrans_lr = (JOINT_ITRANS_LR_MIN * JOINT_ITRANS_LR_MAX) ** 0.5
 
     logger.info("=" * 60)
-    logger.info("Joint pretrain (e2e): dim=%d, epochs=%d (warmup=%d)",
-                n_variates, num_epochs, warmup_epochs)
-    logger.info("LRs: diffusion=%.2e, itrans=%.2e | aux_weight=%.2f | ghost=%s",
-                diffusion_lr, itrans_lr, aux_forecast_loss_weight,
-                "B" if joint_use_ghost_image else "C")
+    logger.info("Joint pretrain (e2e): dim=%d, epochs=%d (warmup=%d), trials=%d",
+                n_variates, num_epochs, warmup_epochs, n_trials)
+    logger.info("aux_weight=%.2f | ghost=%s",
+                aux_forecast_loss_weight, "B" if joint_use_ghost_image else "C")
     logger.info("=" * 60)
 
     n_samples = resolve_pretrain_virtual_dataset_size(smoke_test)
@@ -3607,7 +3631,7 @@ def run_joint_pretrain_mode(
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset)))) if n_val > 0 else None
 
-    train_loader, train_sampler = create_dataloader_ddp(
+    train_loader, _ = create_dataloader_ddp(
         train_subset, batch_size, shuffle=True, num_workers=0 if smoke_test else 4,
     )
     val_loader = None
@@ -3616,55 +3640,73 @@ def run_joint_pretrain_mode(
             val_subset, batch_size, shuffle=False, num_workers=0,
         )
 
-    model = _build_joint_diffusion_model(
-        n_variates=n_variates,
-        joint_use_ghost_image=joint_use_ghost_image,
-        aux_forecast_loss_weight=aux_forecast_loss_weight,
-        itrans_warmup_epochs=warmup_epochs,
-        itrans_seq_len=ITRANSFORMER_SEQ_LEN,
-        itrans_pred_len=FORECAST_LENGTH,
-        device=device,
-    )
-    model = wrap_model_ddp(model)
+    def _factory() -> DiffusionTSF:
+        return _build_joint_diffusion_model(
+            n_variates=n_variates,
+            joint_use_ghost_image=joint_use_ghost_image,
+            aux_forecast_loss_weight=aux_forecast_loss_weight,
+            itrans_warmup_epochs=warmup_epochs,
+            itrans_seq_len=ITRANSFORMER_SEQ_LEN,
+            itrans_pred_len=FORECAST_LENGTH,
+            device=device,
+        )
 
-    tcfg = JointTrainConfig(
-        diffusion_lr=diffusion_lr,
-        itrans_lr=itrans_lr,
-        num_epochs=num_epochs,
-        warmup_epochs=warmup_epochs,
-        patience=DIFFUSION_HP_PATIENCE,
-        grad_clip=1.0,
-        use_amp=USE_AMP,
-    )
+    if n_trials > 1 and val_loader is not None:
+        search_cfg = JointSearchConfig(
+            n_trials=n_trials,
+            diffusion_lr_min=JOINT_DIFFUSION_LR_MIN, diffusion_lr_max=JOINT_DIFFUSION_LR_MAX,
+            itrans_lr_min=JOINT_ITRANS_LR_MIN, itrans_lr_max=JOINT_ITRANS_LR_MAX,
+            num_epochs=num_epochs, warmup_epochs=warmup_epochs,
+            patience=JOINT_PRETRAIN_PATIENCE, grad_clip=1.0, use_amp=USE_AMP, seed=seed,
+        )
+        def _trial_logger(trial, info: Dict[str, float]):
+            log_wandb({**info, 'trial': trial.number,
+                       'diffusion_lr': trial.params.get('diffusion_lr'),
+                       'itrans_lr':    trial.params.get('itrans_lr')},
+                      prefix='joint_pretrain/optuna')
+        best_params, best_state, study = optuna_search_joint_phase(
+            _factory, train_loader, val_loader, search_cfg,
+            device=device, study_name=f'joint_pretrain_dim{n_variates}',
+            on_trial_end=_trial_logger,
+        )
+        best_val_loss = study.best_value if study.best_trial else float('nan')
+        best_epoch = best_params.get('best_epoch', -1) if best_params else -1
+        result_state_dict = best_state
+        tuned_params = {**best_params, 'aux_forecast_loss_weight': aux_forecast_loss_weight,
+                        'joint_use_ghost_image': joint_use_ghost_image,
+                        'warmup_epochs': warmup_epochs}
+    else:
+        # Single-run path (smoke test or n_trials=1).
+        model = wrap_model_ddp(_factory())
+        tcfg = JointTrainConfig(
+            diffusion_lr=diffusion_lr, itrans_lr=itrans_lr,
+            num_epochs=num_epochs, warmup_epochs=warmup_epochs,
+            patience=JOINT_PRETRAIN_PATIENCE, grad_clip=1.0, use_amp=USE_AMP,
+        )
+        result = train_joint_phase(
+            unwrap_model(model), train_loader, val_loader, tcfg, device=device,
+            on_epoch_end=lambda i, m: log_wandb(m, prefix='joint_pretrain'),
+        )
+        best_val_loss, best_epoch = result.best_val_loss, result.best_epoch
+        result_state_dict = result.best_state_dict
+        tuned_params = {
+            'diffusion_lr': diffusion_lr, 'itrans_lr': itrans_lr,
+            'aux_forecast_loss_weight': aux_forecast_loss_weight,
+            'joint_use_ghost_image': joint_use_ghost_image, 'warmup_epochs': warmup_epochs,
+        }
 
-    def _on_epoch_end(epoch_idx: int, metrics: Dict[str, float]):
-        log_wandb(metrics, prefix='joint_pretrain')
-
-    result = train_joint_phase(
-        unwrap_model(model),
-        train_loader,
-        val_loader,
-        tcfg,
-        device=device,
-        on_epoch_end=_on_epoch_end,
-    )
-
-    if is_main_process() and result.best_state_dict is not None:
+    if is_main_process() and result_state_dict is not None:
+        # Stash the config dict from one fresh model build (config is identical across trials).
+        cfg_snapshot = _factory().config.__dict__
         torch.save({
-            'model_state_dict': result.best_state_dict,
-            'config': unwrap_model(model).config.__dict__,
-            'best_val_loss': result.best_val_loss,
-            'best_epoch': result.best_epoch,
-            'tuned_params': {
-                'diffusion_lr': diffusion_lr,
-                'itrans_lr': itrans_lr,
-                'aux_forecast_loss_weight': aux_forecast_loss_weight,
-                'joint_use_ghost_image': joint_use_ghost_image,
-                'warmup_epochs': warmup_epochs,
-            },
+            'model_state_dict': result_state_dict, 'config': cfg_snapshot,
+            'best_val_loss': best_val_loss, 'best_epoch': best_epoch,
+            'tuned_params': tuned_params,
         }, joint_ckpt)
-        logger.info("Joint pretrain checkpoint saved: %s (val=%.4f, epoch=%d)",
-                    joint_ckpt, result.best_val_loss, result.best_epoch)
+        with open(joint_hp_json, 'w') as f:
+            json.dump(tuned_params, f, indent=2)
+        logger.info("Joint pretrain checkpoint saved: %s (val=%.4f, epoch=%s)",
+                    joint_ckpt, best_val_loss, best_epoch)
     barrier()
     return joint_ckpt
 
@@ -3677,20 +3719,26 @@ def run_joint_finetune_mode(
     smoke_test: bool = False,
     seed: int = 42,
     *,
-    diffusion_lr: float = 5e-5,
-    itrans_lr: float = 5e-5,
+    diffusion_lr: Optional[float] = None,
+    itrans_lr: Optional[float] = None,
     num_epochs: Optional[int] = None,
-    warmup_epochs: int = 1,
+    warmup_epochs: int = JOINT_WARMUP_EPOCHS,
     joint_use_ghost_image: bool = True,
-    aux_forecast_loss_weight: float = 1.0,
+    aux_forecast_loss_weight: float = JOINT_AUX_FORECAST_LOSS_WEIGHT,
     batch_size: Optional[int] = None,
+    n_trials: Optional[int] = None,
 ):
     """Single-phase real-data finetune — replaces Phase 2A + 2B + 2C.
 
-    Loads the joint pretrain checkpoint, then continues joint training on the
-    real dataset's train split. Saves one checkpoint per subset.
+    Each Optuna trial loads a fresh copy of the joint pretrain checkpoint and
+    continues joint training on the real dataset's train split with its own
+    sampled LR pair. Best trial's checkpoint is promoted to
+    ``{subset}_joint_finetuned.pt``.
     """
-    from models.diffusion_tsf.joint_training import JointTrainConfig, train_joint_phase
+    from models.diffusion_tsf.joint_training import (
+        JointSearchConfig, JointTrainConfig,
+        optuna_search_joint_phase, train_joint_phase,
+    )
 
     random.seed(seed)
     np.random.seed(seed)
@@ -3702,7 +3750,7 @@ def run_joint_finetune_mode(
     joint_ckpt = os.path.join(dim_dir, 'joint_pretrained.pt')
     if not os.path.exists(joint_ckpt):
         logger.error("Joint pretrain checkpoint not found: %s", joint_ckpt)
-        logger.error("Run --mode joint-pretrain --n-variates %d first", n_variates)
+        logger.error("Run --mode pretrain --n-variates %d first", n_variates)
         sys.exit(1)
 
     if variate_indices is None:
@@ -3711,13 +3759,19 @@ def run_joint_finetune_mode(
         subset_id = dataset_name
 
     if num_epochs is None:
-        num_epochs = 1 if smoke_test else HP_TUNE_EPOCHS
+        num_epochs = 1 if smoke_test else JOINT_FINETUNE_MAX_EPOCHS
     if batch_size is None:
         batch_size = 4 if smoke_test else 16
+    if n_trials is None:
+        n_trials = 1 if smoke_test else N_JOINT_FINETUNE_TRIALS
+    if diffusion_lr is None:
+        diffusion_lr = (JOINT_DIFFUSION_LR_MIN * JOINT_DIFFUSION_LR_MAX) ** 0.5
+    if itrans_lr is None:
+        itrans_lr = (JOINT_ITRANS_LR_MIN * JOINT_ITRANS_LR_MAX) ** 0.5
 
     logger.info("=" * 60)
-    logger.info("Joint finetune (e2e): subset=%s, dim=%d, epochs=%d",
-                subset_id, n_variates, num_epochs)
+    logger.info("Joint finetune (e2e): subset=%s, dim=%d, epochs=%d, trials=%d",
+                subset_id, n_variates, num_epochs, n_trials)
     logger.info("Loading joint pretrain checkpoint: %s", joint_ckpt)
     logger.info("=" * 60)
 
@@ -3733,64 +3787,84 @@ def run_joint_finetune_mode(
         val_ds, batch_size, shuffle=False, num_workers=0,
     )
 
-    model = _build_joint_diffusion_model(
-        n_variates=n_variates,
-        joint_use_ghost_image=joint_use_ghost_image,
-        aux_forecast_loss_weight=aux_forecast_loss_weight,
-        itrans_warmup_epochs=warmup_epochs,
-        itrans_seq_len=ITRANSFORMER_SEQ_LEN,
-        itrans_pred_len=FORECAST_LENGTH,
-        device=device,
-    )
-    ckpt = torch.load(joint_ckpt, map_location=device, weights_only=False)
-    missing, unexpected = model.load_state_dict(ckpt['model_state_dict'], strict=False)
-    if missing or unexpected:
-        logger.warning(
-            "Joint pretrain load: %d missing / %d unexpected keys (first few: %s / %s)",
-            len(missing or []), len(unexpected or []),
-            (missing or [])[:3], (unexpected or [])[:3],
+    # Load the pretrain checkpoint once, reuse the state_dict across factory calls.
+    pretrain_ckpt = torch.load(joint_ckpt, map_location=device, weights_only=False)
+    pretrain_state = pretrain_ckpt['model_state_dict']
+
+    def _factory() -> DiffusionTSF:
+        m = _build_joint_diffusion_model(
+            n_variates=n_variates,
+            joint_use_ghost_image=joint_use_ghost_image,
+            aux_forecast_loss_weight=aux_forecast_loss_weight,
+            itrans_warmup_epochs=warmup_epochs,
+            itrans_seq_len=ITRANSFORMER_SEQ_LEN,
+            itrans_pred_len=FORECAST_LENGTH,
+            device=device,
         )
-    model = wrap_model_ddp(model)
+        missing, unexpected = m.load_state_dict(pretrain_state, strict=False)
+        if missing or unexpected:
+            logger.debug(
+                "Pretrain load: %d missing / %d unexpected keys",
+                len(missing or []), len(unexpected or []),
+            )
+        return m
 
-    tcfg = JointTrainConfig(
-        diffusion_lr=diffusion_lr,
-        itrans_lr=itrans_lr,
-        num_epochs=num_epochs,
-        warmup_epochs=warmup_epochs,
-        patience=HP_TUNE_PATIENCE,
-        grad_clip=1.0,
-        use_amp=USE_AMP,
-    )
-
-    def _on_epoch_end(epoch_idx: int, metrics: Dict[str, float]):
-        log_wandb(metrics, prefix=f'joint_finetune/{subset_id}')
-
-    result = train_joint_phase(
-        unwrap_model(model),
-        train_loader,
-        val_loader,
-        tcfg,
-        device=device,
-        on_epoch_end=_on_epoch_end,
-    )
+    if n_trials > 1:
+        search_cfg = JointSearchConfig(
+            n_trials=n_trials,
+            diffusion_lr_min=JOINT_DIFFUSION_LR_MIN, diffusion_lr_max=JOINT_DIFFUSION_LR_MAX,
+            itrans_lr_min=JOINT_ITRANS_LR_MIN, itrans_lr_max=JOINT_ITRANS_LR_MAX,
+            num_epochs=num_epochs, warmup_epochs=warmup_epochs,
+            patience=JOINT_FINETUNE_PATIENCE, grad_clip=1.0, use_amp=USE_AMP, seed=seed,
+        )
+        def _trial_logger(trial, info: Dict[str, float]):
+            log_wandb({**info, 'trial': trial.number,
+                       'diffusion_lr': trial.params.get('diffusion_lr'),
+                       'itrans_lr':    trial.params.get('itrans_lr')},
+                      prefix=f'joint_finetune/{subset_id}/optuna')
+        best_params, best_state, study = optuna_search_joint_phase(
+            _factory, train_loader, val_loader, search_cfg,
+            device=device, study_name=f'joint_finetune_{subset_id}',
+            on_trial_end=_trial_logger,
+        )
+        best_val_loss = study.best_value if study.best_trial else float('nan')
+        best_epoch = best_params.get('best_epoch', -1) if best_params else -1
+        result_state_dict = best_state
+        tuned_params = {**best_params, 'aux_forecast_loss_weight': aux_forecast_loss_weight,
+                        'joint_use_ghost_image': joint_use_ghost_image,
+                        'warmup_epochs': warmup_epochs}
+    else:
+        model = wrap_model_ddp(_factory())
+        tcfg = JointTrainConfig(
+            diffusion_lr=diffusion_lr, itrans_lr=itrans_lr,
+            num_epochs=num_epochs, warmup_epochs=warmup_epochs,
+            patience=JOINT_FINETUNE_PATIENCE, grad_clip=1.0, use_amp=USE_AMP,
+        )
+        result = train_joint_phase(
+            unwrap_model(model), train_loader, val_loader, tcfg, device=device,
+            on_epoch_end=lambda i, m: log_wandb(m, prefix=f'joint_finetune/{subset_id}'),
+        )
+        best_val_loss, best_epoch = result.best_val_loss, result.best_epoch
+        result_state_dict = result.best_state_dict
+        tuned_params = {
+            'diffusion_lr': diffusion_lr, 'itrans_lr': itrans_lr,
+            'aux_forecast_loss_weight': aux_forecast_loss_weight,
+            'joint_use_ghost_image': joint_use_ghost_image, 'warmup_epochs': warmup_epochs,
+        }
 
     ft_ckpt = os.path.join(CHECKPOINT_DIR, f'{subset_id}_joint_finetuned.pt')
-    if is_main_process() and result.best_state_dict is not None:
+    ft_hp_json = os.path.join(CHECKPOINT_DIR, f'{subset_id}_joint_ft_hp.json')
+    if is_main_process() and result_state_dict is not None:
+        cfg_snapshot = _factory().config.__dict__
         torch.save({
-            'model_state_dict': result.best_state_dict,
-            'config': unwrap_model(model).config.__dict__,
-            'best_val_loss': result.best_val_loss,
-            'best_epoch': result.best_epoch,
-            'tuned_params': {
-                'diffusion_lr': diffusion_lr,
-                'itrans_lr': itrans_lr,
-                'aux_forecast_loss_weight': aux_forecast_loss_weight,
-                'joint_use_ghost_image': joint_use_ghost_image,
-                'warmup_epochs': warmup_epochs,
-            },
+            'model_state_dict': result_state_dict, 'config': cfg_snapshot,
+            'best_val_loss': best_val_loss, 'best_epoch': best_epoch,
+            'tuned_params': tuned_params,
         }, ft_ckpt)
-        logger.info("Joint finetune checkpoint saved: %s (val=%.4f, epoch=%d)",
-                    ft_ckpt, result.best_val_loss, result.best_epoch)
+        with open(ft_hp_json, 'w') as f:
+            json.dump(tuned_params, f, indent=2)
+        logger.info("Joint finetune checkpoint saved: %s (val=%.4f, epoch=%s)",
+                    ft_ckpt, best_val_loss, best_epoch)
     barrier()
     return ft_ckpt
 
@@ -3811,12 +3885,13 @@ def main():
     global MODEL_TYPE
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
-    parser.add_argument('--mode', type=str, default='full',
-                        choices=['full', 'pretrain', 'finetune', 'baseline', 'evaluate', 'status',
-                                 'joint-pretrain', 'joint-finetune'],
-                        help='Pipeline mode (default: full = run everything). '
-                             'joint-pretrain / joint-finetune use end-to-end joint '
-                             'iTransformer + diffusion training (e2e branch).')
+    parser.add_argument('--mode', type=str, default='pretrain',
+                        choices=['pretrain', 'finetune', 'baseline', 'evaluate', 'status',
+                                 'legacy-full', 'legacy-pretrain', 'legacy-finetune'],
+                        help='Pipeline mode (default: pretrain). "pretrain"/"finetune" use '
+                             'the end-to-end joint iTransformer + diffusion training '
+                             '(e2e branch). "legacy-*" runs the original 4-phase pipeline '
+                             '(deprecated; kept for A/B comparisons).')
     parser.add_argument('--n-variates', type=int, default=None,
                         help='Override variate count (default: auto per dataset)')
     parser.add_argument('--dataset', type=str, default=None,
@@ -3859,7 +3934,7 @@ def main():
     parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH,
                         help='Override forecast length')
 
-    # ---- End-to-end joint training flags (modes: joint-pretrain, joint-finetune) ----
+    # ---- End-to-end joint training flags (modes: pretrain, finetune) ----
     parser.add_argument('--joint-diffusion-lr', type=float, default=None,
                         help='LR for diffusion params in joint modes (default 2e-4 pretrain / 5e-5 finetune)')
     parser.add_argument('--joint-itrans-lr', type=float, default=None,
@@ -3872,10 +3947,13 @@ def main():
                         help='Weight on auxiliary iTrans forecast MSE loss')
     parser.add_argument('--joint-batch-size', type=int, default=None,
                         help='Override batch size for joint modes')
-    parser.add_argument('--joint-ghost-variant', type=str, default='B',
+    parser.add_argument('--joint-ghost-variant', type=str, default=JOINT_GHOST_VARIANT,
                         choices=['B', 'C'],
                         help="Ghost-image variant: 'B' keeps detached ghost channel, "
                              "'C' drops it (tokens-only)")
+    parser.add_argument('--joint-trials', type=int, default=None,
+                        help='Optuna trial count for joint modes (default from pipeline_config). '
+                             'Set to 1 to skip Optuna and use the --joint-*-lr values directly.')
 
     args = parser.parse_args()
 
@@ -3933,10 +4011,10 @@ def main():
                 print("No manifest found")
         return
 
-    if args.mode == 'joint-pretrain':
+    if args.mode == 'pretrain':
         nv = args.n_variates
         if nv is None:
-            print("ERROR: --n-variates required for joint-pretrain mode")
+            print("ERROR: --n-variates required for pretrain mode")
             sys.exit(1)
         N_VARIATES = nv
         joint_diffusion_lr = args.joint_diffusion_lr if args.joint_diffusion_lr is not None else 2e-4
@@ -3944,11 +4022,11 @@ def main():
         try:
             if args.wandb:
                 tags = ['smoke-test'] if args.smoke_test else []
-                tags.append('mode-joint-pretrain')
+                tags.append('mode-pretrain')
                 init_wandb(
                     project=args.wandb_project,
                     config={
-                        'seed': args.seed, 'smoke_test': args.smoke_test, 'mode': 'joint-pretrain',
+                        'seed': args.seed, 'smoke_test': args.smoke_test, 'mode': 'pretrain',
                         'n_variates': nv, 'diffusion_lr': joint_diffusion_lr,
                         'itrans_lr': joint_itrans_lr, 'warmup_epochs': args.joint_warmup_epochs,
                         'aux_weight': args.joint_aux_weight, 'ghost_variant': args.joint_ghost_variant,
@@ -3962,15 +4040,16 @@ def main():
                 joint_use_ghost_image=(args.joint_ghost_variant == 'B'),
                 aux_forecast_loss_weight=args.joint_aux_weight,
                 batch_size=args.joint_batch_size,
+                n_trials=args.joint_trials,
             )
         finally:
             finish_wandb()
             cleanup_ddp()
         return
 
-    if args.mode == 'joint-finetune':
+    if args.mode == 'finetune':
         if not args.dataset:
-            print("ERROR: --dataset required for joint-finetune mode")
+            print("ERROR: --dataset required for finetune mode")
             sys.exit(1)
         variate_indices = None
         if args.variate_indices:
@@ -3982,11 +4061,11 @@ def main():
         try:
             if args.wandb:
                 tags = ['smoke-test'] if args.smoke_test else []
-                tags.append('mode-joint-finetune')
+                tags.append('mode-finetune')
                 init_wandb(
                     project=args.wandb_project,
                     config={
-                        'seed': args.seed, 'smoke_test': args.smoke_test, 'mode': 'joint-finetune',
+                        'seed': args.seed, 'smoke_test': args.smoke_test, 'mode': 'finetune',
                         'dataset': args.dataset, 'n_variates': nv,
                         'diffusion_lr': joint_diffusion_lr, 'itrans_lr': joint_itrans_lr,
                         'warmup_epochs': args.joint_warmup_epochs, 'aux_weight': args.joint_aux_weight,
@@ -4002,29 +4081,34 @@ def main():
                 joint_use_ghost_image=(args.joint_ghost_variant == 'B'),
                 aux_forecast_loss_weight=args.joint_aux_weight,
                 batch_size=args.joint_batch_size,
+                n_trials=args.joint_trials,
             )
         finally:
             finish_wandb()
             cleanup_ddp()
         return
 
-    if args.mode == 'pretrain':
+    if args.mode == 'legacy-pretrain':
+        logger.warning(
+            "Using legacy 4-phase pretrain pipeline. Prefer --mode pretrain "
+            "(joint training) for new experiments."
+        )
         nv = args.n_variates
         if nv is None:
-            print("ERROR: --n-variates required for pretrain mode")
+            print("ERROR: --n-variates required for legacy-pretrain mode")
             sys.exit(1)
         N_VARIATES = nv
         try:
             if args.wandb:
                 tags = ['smoke-test'] if args.smoke_test else []
-                tags.append('mode-pretrain')
+                tags.append('mode-legacy-pretrain')
                 init_wandb(
                     project=args.wandb_project,
                     config={
                         'seed': args.seed,
                         'smoke_test': args.smoke_test,
                         'resume': args.resume,
-                        'mode': 'pretrain',
+                        'mode': 'legacy-pretrain',
                         'n_variates': nv,
                     },
                     resume=args.resume,
@@ -4036,9 +4120,13 @@ def main():
             cleanup_ddp()
         return
 
-    if args.mode == 'finetune':
+    if args.mode == 'legacy-finetune':
+        logger.warning(
+            "Using legacy 4-phase finetune pipeline. Prefer --mode finetune "
+            "(joint training) for new experiments."
+        )
         if not args.dataset:
-            print("ERROR: --dataset required for finetune mode")
+            print("ERROR: --dataset required for legacy-finetune mode")
             sys.exit(1)
         variate_indices = None
         if args.variate_indices:
@@ -4048,14 +4136,14 @@ def main():
         try:
             if args.wandb:
                 tags = ['smoke-test'] if args.smoke_test else []
-                tags.append('mode-finetune')
+                tags.append('mode-legacy-finetune')
                 init_wandb(
                     project=args.wandb_project,
                     config={
                         'seed': args.seed,
                         'smoke_test': args.smoke_test,
                         'resume': args.resume,
-                        'mode': 'finetune',
+                        'mode': 'legacy-finetune',
                         'dataset': args.dataset,
                         'n_variates': nv,
                     },
@@ -4088,7 +4176,14 @@ def main():
         logger.info(f"Summary updated: {os.path.join(RESULTS_DIR, 'summary.csv')}")
         return
 
-    # ---- mode == 'full': legacy run-everything path ----
+    # ---- mode == 'legacy-full': original 4-phase run-everything path ----
+    if args.mode != 'legacy-full':
+        print(f"ERROR: unhandled mode {args.mode!r}")
+        sys.exit(1)
+    logger.warning(
+        "Using legacy 4-phase full pipeline. Prefer --mode pretrain / --mode "
+        "finetune (joint training) for new experiments."
+    )
     if args.fresh:
         if os.path.exists(MANIFEST_PATH):
             os.remove(MANIFEST_PATH)
