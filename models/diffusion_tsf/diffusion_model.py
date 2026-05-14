@@ -445,9 +445,17 @@ class DiffusionTSF(nn.Module):
         past: torch.Tensor,
         future: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Per-window z-score using past mean/std; future uses the same stats."""
+        """Per-window z-score using past mean/std; future uses the same stats.
+
+        ``std`` is floored at ``per_window_std_floor`` (default 1e-2). Without
+        a floor, near-constant lookback windows (which do appear in real-data
+        val splits, e.g. ETTh1's flat tail) produce ~1e-8 std and blow normalized
+        future values up to ~1e7, which is harmless for diffusion (clamped by
+        ``encode_to_2d``) but explodes the auxiliary forecast MSE on val.
+        """
         mean = past.mean(dim=-1, keepdim=True)
-        std = past.std(dim=-1, keepdim=True) + 1e-8
+        std_floor = getattr(self.config, "per_window_std_floor", 1e-2)
+        std = past.std(dim=-1, keepdim=True).clamp(min=std_floor)
         past_norm = (past - mean) / std
         if future is not None:
             future_norm = (future - mean) / std
@@ -806,6 +814,12 @@ class DiffusionTSF(nn.Module):
             K = self.config.lookback_overlap
             pred_h = guidance_forecast_norm[..., K:] if K > 0 else guidance_forecast_norm
             tgt_h  = future_norm[..., K:]            if K > 0 else future_norm
+            # Clamp to the same range diffusion uses for x0 (±max_scale) so a
+            # pathological window cannot dominate the loss. Bounded by
+            # (2*max_scale)**2 ≈ 49 at max_scale=3.5.
+            ms = self.config.max_scale
+            pred_h = pred_h.clamp(-ms, ms)
+            tgt_h  = tgt_h.clamp(-ms, ms)
             aux_forecast_loss = F.mse_loss(pred_h, tgt_h)
 
         loss = (

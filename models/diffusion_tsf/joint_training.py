@@ -134,7 +134,8 @@ def _aux_forecast_loss(
     coarse = model.guidance_model.get_forecast(past, H)  # (B, V, H)
     coarse_norm = (coarse - mean) / std
     target = future_norm[..., K:] if K > 0 else future_norm
-    return F.mse_loss(coarse_norm, target)
+    ms = cfg.max_scale
+    return F.mse_loss(coarse_norm.clamp(-ms, ms), target.clamp(-ms, ms))
 
 
 # ---------------------------------------------------------------------------

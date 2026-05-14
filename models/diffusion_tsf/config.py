@@ -62,6 +62,11 @@ class DiffusionTSFConfig:
     # 2d mapping
     image_height: int = 64  # height of 2d rep (64 is faster)
     max_scale: float = 3.5  # MS param
+    # Per-window std floor used inside DiffusionTSF._normalize_sequence to
+    # prevent near-constant lookback windows from producing pathological
+    # normalized targets (was epsilon=1e-8 → ~1e7-scale future values on
+    # ETTh1-like val splits, blowing up the auxiliary forecast MSE).
+    per_window_std_floor: float = 1e-2
     blur_kernel_size: int = 31
     blur_sigma: float = 1.0
     representation_mode: str = "cdf"  # pdf or cdf
