@@ -25,20 +25,24 @@ RUN="${RUN:-all}"    # all | pretrain | finetune
 # Environment (torch required — avoid importing train_multivariate_pipeline for discovery)
 # ---------------------------------------------------------------------------
 
-# Prefer the venv's own binary. On Alliance, `python3` in PATH after `source activate`
-# can still resolve to the Lmod interpreter if the venv only has `bin/python`.
+# Prefer the venv's own binary. On Alliance, activate scripts may set VIRTUAL_ENV
+# to a path that differs from the one we actually sourced (symlinks, relocated venv).
+# So we also track ACTIVATED_VENV_DIR (the directory we sourced bin/activate from)
+# and search both for python3 / python.
+ACTIVATED_VENV_DIR=""
+
+_pick_python_in() {
+  local d="$1"
+  [[ -z "$d" ]] && return 1
+  if [[ -x "$d/bin/python3" ]]; then printf '%s\n' "$d/bin/python3"; return 0; fi
+  if [[ -x "$d/bin/python"  ]]; then printf '%s\n' "$d/bin/python";  return 0; fi
+  return 1
+}
+
 resolve_venv_python() {
-  if [[ -z "${VIRTUAL_ENV:-}" ]]; then
-    return 1
-  fi
-  if [[ -x "${VIRTUAL_ENV}/bin/python3" ]]; then
-    printf '%s\n' "${VIRTUAL_ENV}/bin/python3"
-    return 0
-  fi
-  if [[ -x "${VIRTUAL_ENV}/bin/python" ]]; then
-    printf '%s\n' "${VIRTUAL_ENV}/bin/python"
-    return 0
-  fi
+  local py
+  if py="$(_pick_python_in "${ACTIVATED_VENV_DIR:-}")"; then printf '%s\n' "$py"; return 0; fi
+  if py="$(_pick_python_in "${VIRTUAL_ENV:-}")";        then printf '%s\n' "$py"; return 0; fi
   return 1
 }
 
@@ -52,12 +56,14 @@ activate_training_venv() {
   if [[ -n "${VENV_PATH:-}" && -f "${VENV_PATH}/bin/activate" ]]; then
     # shellcheck source=/dev/null
     source "${VENV_PATH}/bin/activate"
+    ACTIVATED_VENV_DIR="${VENV_PATH}"
     echo "Activated VENV_PATH=$VENV_PATH"
     return 0
   fi
   if [[ -f "$ROOT/.venv/bin/activate" ]]; then
     # shellcheck source=/dev/null
     source "$ROOT/.venv/bin/activate"
+    ACTIVATED_VENV_DIR="$ROOT/.venv"
     echo "Activated repo .venv"
     return 0
   fi
@@ -79,6 +85,7 @@ activate_training_venv() {
     if [[ -f "$pv/bin/activate" ]]; then
       # shellcheck source=/dev/null
       source "$pv/bin/activate"
+      ACTIVATED_VENV_DIR="$pv"
       echo "Activated cluster venv: $pv"
       return 0
     fi
@@ -103,13 +110,20 @@ fi
 
 PY="$(resolve_venv_python)" || true
 if [[ -z "${PY:-}" ]]; then
-  echo "ERROR: Active venv has no bin/python or bin/python3 under VIRTUAL_ENV=$VIRTUAL_ENV" >&2
+  echo "ERROR: Could not find a python in the activated venv." >&2
+  echo "  ACTIVATED_VENV_DIR=${ACTIVATED_VENV_DIR:-(unset)}" >&2
+  echo "  VIRTUAL_ENV=${VIRTUAL_ENV:-(unset)}" >&2
+  if [[ -n "${ACTIVATED_VENV_DIR:-}" && -d "$ACTIVATED_VENV_DIR/bin" ]]; then
+    echo "  Contents of $ACTIVATED_VENV_DIR/bin:" >&2
+    ls -la "$ACTIVATED_VENV_DIR/bin" >&2 || true
+  fi
   exit 1
 fi
 
 if ! "$PY" -c "import torch" 2>/dev/null; then
   echo "ERROR: venv interpreter cannot import torch after activation." >&2
-  echo "  VIRTUAL_ENV=$VIRTUAL_ENV" >&2
+  echo "  ACTIVATED_VENV_DIR=${ACTIVATED_VENV_DIR:-(unset)}" >&2
+  echo "  VIRTUAL_ENV=${VIRTUAL_ENV:-(unset)}" >&2
   echo "  Interpreter: $PY" >&2
   echo "  python3 from PATH (may differ): $(command -v python3 2>/dev/null || echo '(none)')" >&2
   echo "  Install torch into this venv (e.g. on a login node: source .../activate && pip install --no-index torch" >&2
