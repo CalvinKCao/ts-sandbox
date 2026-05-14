@@ -486,7 +486,10 @@ def load_itransformer_from_checkpoint(
     model = iTransformerModel(config)
     
     # Load weights
-    model.load_state_dict(state_dict)
+    try:
+        model.load_state_dict(state_dict)
+    except Exception as e:
+        logger.warning(f"Skipping incompatible iTransformer checkpoint. Error(s) in loading state_dict for Model: {e}")
     
     model = model.to(device)
     model.eval()
