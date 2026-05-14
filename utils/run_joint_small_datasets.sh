@@ -147,7 +147,6 @@ REGISTRY = {
     "ETTm2": ("ETT-small/ETTm2.csv", "date"),
     "illness": ("illness/national_illness.csv", "date"),
     "exchange_rate": ("exchange_rate/exchange_rate.csv", "date"),
-    "weather": ("weather/weather.csv", "date"),
     "electricity": ("electricity/electricity.csv", "date"),
     "traffic": ("traffic/traffic.csv", "date"),
     "PeMS": ("PeMS/PeMS.csv", "Time"),
