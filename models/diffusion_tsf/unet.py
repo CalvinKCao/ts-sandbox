@@ -278,17 +278,26 @@ class SpatialTransformerBlock(nn.Module):
             dropout: Dropout rate
         """
         super().__init__()
-        
+        self._num_heads = num_heads
+        self._head_dim = channels // num_heads
+
         # Input normalization (operates on 2D spatial data)
         self.norm = nn.GroupNorm(num_groups, channels)
         
         # Project channels to a consistent dimension for attention
         self.proj_in = nn.Conv2d(channels, channels, kernel_size=1)
         
-        # Self-attention
-        self.self_attn = nn.MultiheadAttention(channels, num_heads, dropout=dropout, batch_first=True)
+        # Self-attention: manual Q/K/V + F.scaled_dot_product_attention rather than
+        # nn.MultiheadAttention, which can silently fall back to the O(N²) naive math
+        # kernel even with need_weights=False depending on the torch build. Direct SDPA
+        # is always O(N) on CUDA (flash or mem-efficient backend).
         self.self_attn_norm = nn.LayerNorm(channels)
-        
+        self.sa_q = nn.Linear(channels, channels, bias=False)
+        self.sa_k = nn.Linear(channels, channels, bias=False)
+        self.sa_v = nn.Linear(channels, channels, bias=False)
+        self.sa_out = nn.Linear(channels, channels, bias=False)
+        self.sa_drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+
         # Cross-attention with context
         self.cross_attn = CrossAttentionBlock(
             query_dim=channels,
@@ -334,10 +343,17 @@ class SpatialTransformerBlock(nn.Module):
         # Flatten spatial dimensions: (batch, channels, height, width) -> (batch, height*width, channels)
         x = x.view(batch, channels, height * width).permute(0, 2, 1)
         
-        # Self-attention — need_weights=False forces the memory-efficient SDPA path
-        # (flash attention / math-efficient kernel); no O(N²) attention matrix is stored.
+        # Self-attention via direct SDPA — always dispatches to flash/mem-efficient
+        # kernel on CUDA, never materialises the O(N²) attention weight matrix.
         x_norm = self.self_attn_norm(x)
-        attn_out, _ = self.self_attn(x_norm, x_norm, x_norm, need_weights=False)
+        B, N, C = x_norm.shape
+        h, d = self._num_heads, self._head_dim
+        q = self.sa_q(x_norm).view(B, N, h, d).transpose(1, 2)
+        k = self.sa_k(x_norm).view(B, N, h, d).transpose(1, 2)
+        v = self.sa_v(x_norm).view(B, N, h, d).transpose(1, 2)
+        attn_out = F.scaled_dot_product_attention(q, k, v)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, N, C)
+        attn_out = self.sa_drop(self.sa_out(attn_out))
         x = x + attn_out
         
         # Cross-attention with context (if provided)
