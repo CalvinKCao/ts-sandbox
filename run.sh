@@ -483,8 +483,10 @@ registry = {
     'exchange_rate': 'datasets/exchange_rate/exchange_rate.csv',
     'weather': 'datasets/weather/weather.csv',
     'electricity': 'datasets/electricity/electricity.csv',
-    'traffic': 'datasets/traffic/traffic.csv',
-}
+    'traffic': 'datasets/traffic/traffic_part1.csv',
+    'PeMS': 'datasets/PeMS/PeMS.csv',
+    'solar_Alabama': 'datasets/solar_Alabama/solar_Alabama.csv',
+    }
 
 min_rows = $LOOKBACK_LENGTH + $FORECAST_LENGTH + $LOOKBACK_OVERLAP
 

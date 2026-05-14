@@ -720,6 +720,8 @@ DATASET_REGISTRY = {
     'weather': ('weather/weather.csv', 'date', 144),
     'electricity': ('electricity/electricity.csv', 'date', 96),
     'traffic': ('traffic/traffic.csv', 'date', 24),
+    'PeMS': ('PeMS/PeMS.csv', 'Time', 24),
+    'solar_Alabama': ('solar_Alabama/solar_Alabama.csv', 'Unnamed: 0', 96),
 }
 
 

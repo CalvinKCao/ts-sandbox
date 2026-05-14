@@ -31,7 +31,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SB_ERR='results/bootstrap/%x-%j.err'
 
     SMALL_DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "weather" "exchange_rate")
-    LARGE_DATASETS=("electricity" "traffic")
+    LARGE_DATASETS=("electricity" "traffic" "PeMS" "solar_Alabama")
 
     walltime_for_dataset() {
         local ds="$1" small="$2" large="$3" x
@@ -221,6 +221,8 @@ if [ "$DATASET" = "exchange_rate" ]; then TARGET_DIM=8; fi
 if [ "$DATASET" = "ETTm1" ] || [ "$DATASET" = "ETTh1" ] || [ "$DATASET" = "ETTh2" ] || [ "$DATASET" = "ETTm2" ]; then TARGET_DIM=7; fi
 if [ "$DATASET" = "electricity" ]; then TARGET_DIM=321; fi
 if [ "$DATASET" = "traffic" ]; then TARGET_DIM=862; fi
+if [ "$DATASET" = "PeMS" ]; then TARGET_DIM=862; fi
+if [ "$DATASET" = "solar_Alabama" ]; then TARGET_DIM=137; fi
 
 echo "Running Phase 1 (Pretrain)..."
 python3 models/diffusion_tsf/train_multivariate_pipeline.py \
