@@ -2,8 +2,9 @@
 # Batch joint pretrain + finetune for datasets with native dimensionality < 32.
 #
 # Alliance / Killarney: run from repo root on scratch (not /home for GPU jobs).
-# This script activates a venv with PyTorch before calling the pipeline — same
-# idea as run.sh (PROJECT venv) and visualize_locally.sh (.venv).
+# From a login node this script **submits one Slurm GPU job** (like run.sh) and
+# exits — check `sacct -j <jobid>` or `squeue -u $USER`. Logs: ./results/logs/
+# Inside the job: modules + venv + pipeline (same idea as run.sh).
 #
 # Usage (repo root):
 #   ./utils/run_joint_small_datasets.sh
@@ -11,15 +12,85 @@
 #   RUN=finetune ./utils/run_joint_small_datasets.sh
 #   VENV_PATH=/path/to/venv ./utils/run_joint_small_datasets.sh
 #
+# Run on the login node without Slurm (debug only):
+#   JOINT_SMALL_LOCAL=1 ./utils/run_joint_small_datasets.sh --smoke-test
+#
 # Extra args are forwarded to every python invocation.
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
-cd "$ROOT"
+# Repo root: inside Slurm, trust submit directory (BASH_SOURCE points at spool copy).
+if [[ -n "${SLURM_SUBMIT_DIR:-}" && -n "${SLURM_JOB_ID:-}" ]]; then
+  ROOT="$SLURM_SUBMIT_DIR"
+  cd "$ROOT"
+else
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+  cd "$ROOT"
+fi
 
 MAX_V="${MAX_V:-31}" # native dim < 32  =>  d <= 31
 RUN="${RUN:-all}"    # all | pretrain | finetune
+
+_SELF="$ROOT/utils/run_joint_small_datasets.sh"
+
+# ---------------------------------------------------------------------------
+# Login node: submit one GPU job (default). sacct only sees Slurm jobs.
+# ---------------------------------------------------------------------------
+if [[ -z "${SLURM_JOB_ID:-}" && "${JOINT_SMALL_LOCAL:-0}" != "1" ]] && command -v sbatch >/dev/null 2>&1; then
+  IS_SMOKE=0
+  for _a in "$@"; do [[ "$_a" == "--smoke-test" ]] && IS_SMOKE=1; done
+  ACCT="${SBATCH_ACCOUNT:-${SLURM_ACCOUNT:-aip-boyuwang}}"
+  mkdir -p "$ROOT/results/logs" "$ROOT/results/bootstrap"
+  if [[ "$IS_SMOKE" -eq 1 ]]; then
+    echo "Submitting Slurm smoke job (L40S, ~45 min) account=$ACCT ..."
+    jid="$(sbatch --parsable \
+      --job-name=joint-small-smoke \
+      --account="$ACCT" \
+      --time=0:45:00 \
+      --nodes=1 \
+      --gres=gpu:l40s:1 \
+      --cpus-per-task=4 \
+      --mem=16G \
+      --chdir="$ROOT" \
+      --output=/dev/null \
+      --error=/dev/null \
+      --export=ALL \
+      "$_SELF" "$@")"
+  else
+    echo "Submitting Slurm batch job (L40S, 2 d wall) account=$ACCT ..."
+    jid="$(sbatch --parsable \
+      --job-name=joint-small-datasets \
+      --account="$ACCT" \
+      --time=2-00:00:00 \
+      --nodes=1 \
+      --gres=gpu:l40s:1 \
+      --cpus-per-task=8 \
+      --mem=50G \
+      --chdir="$ROOT" \
+      --output=/dev/null \
+      --error=/dev/null \
+      --export=ALL \
+      "$_SELF" "$@")"
+  fi
+  echo "Submitted job id: $jid"
+  echo "  sacct -j $jid --format=JobID,State,Elapsed,MaxRSS,ExitCode"
+  echo "  Main log (after start): ./results/logs/MM-DD-<jobid-last4>-joint-small-datasets.log"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Inside Slurm (or JOINT_SMALL_LOCAL): one combined log under results/logs/
+# ---------------------------------------------------------------------------
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-joint-small-datasets"
+  mkdir -p "$ROOT/results/logs"
+  touch "$ROOT/results/logs/${STEM}.log"
+  exec >>"$ROOT/results/logs/${STEM}.log" 2>&1
+  echo "=========================================="
+  echo "Job ID: $SLURM_JOB_ID  log: ./results/logs/${STEM}.log"
+  echo "Node: ${SLURMD_NODENAME:-?}  started: $(date -Is)"
+  echo "=========================================="
+fi
 
 # ---------------------------------------------------------------------------
 # Environment (torch required — avoid importing train_multivariate_pipeline for discovery)
