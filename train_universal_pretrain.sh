@@ -236,12 +236,16 @@ fi
 # =============================================================================
 
 declare -A DATASET_CONFIGS=(
+  ["ETTh1"]="ETT-small|ETTh1.csv|24|ETTh1"
   ["ETTh2"]="ETT-small|ETTh2.csv|24|ETTh2"
   ["ETTm1"]="ETT-small|ETTm1.csv|96|ETTm1"
+  ["ETTm2"]="ETT-small|ETTm2.csv|96|ETTm2"
   ["illness"]="illness|national_illness.csv|52|custom"
   ["exchange_rate"]="exchange_rate|exchange_rate.csv|5|custom"
   ["traffic"]="traffic|traffic.csv|24|custom"
   ["weather"]="weather|weather.csv|144|custom"
+  ["solar_Alabama"]="solar_Alabama|solar_Alabama.csv|144|custom"
+  ["PeMS"]="PeMS|PeMS.csv|288|custom"
 )
 
 # Function to get a random column from a dataset using Python
@@ -256,7 +260,7 @@ random.seed($seed)
 
 df = pd.read_csv('$data_path', nrows=5)
 numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-numeric_cols = [c for c in numeric_cols if c.lower() != 'date']
+numeric_cols = [c for c in numeric_cols if c.lower() != 'date' and not str(c).startswith('Unnamed')]
 
 if numeric_cols:
     col = random.choice(numeric_cols)
@@ -311,7 +315,7 @@ log ""
 if [[ -n "${SINGLE_DATASET}" ]]; then
   DATASETS=("${SINGLE_DATASET}")
 else
-  DATASETS=("ETTh2" "ETTm1" "illness" "exchange_rate" "traffic" "weather")
+  DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "illness" "exchange_rate" "solar_Alabama" "PeMS")
 fi
 
 # ------------------------------------------------------------------
@@ -358,7 +362,7 @@ if [[ "${DRY_RUN}" == "true" ]]; then
     
     # Get deterministic seed for this dataset
     DATASET_IDX=0
-    for d in "ETTh2" "ETTm1" "illness" "exchange_rate" "traffic" "weather"; do
+    for d in "ETTh1" "ETTh2" "ETTm1" "ETTm2" "illness" "exchange_rate" "solar_Alabama" "PeMS"; do
       if [[ "$d" == "$DATASET" ]]; then break; fi
       DATASET_IDX=$((DATASET_IDX + 1))
     done
@@ -587,7 +591,7 @@ for DATASET in "${DATASETS[@]}"; do
   
   # Get deterministic seed for this dataset
   DATASET_IDX=0
-  for d in "ETTh2" "ETTm1" "illness" "exchange_rate" "traffic" "weather"; do
+  for d in "ETTh1" "ETTh2" "ETTm1" "ETTm2" "illness" "exchange_rate" "solar_Alabama" "PeMS"; do
     if [[ "$d" == "$DATASET" ]]; then break; fi
     DATASET_IDX=$((DATASET_IDX + 1))
   done

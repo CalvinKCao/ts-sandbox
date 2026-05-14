@@ -83,6 +83,8 @@ DATASET_REGISTRY = {
     'illness': ('illness/national_illness.csv', 'OT', 52),
     'traffic': ('traffic/traffic.csv', 'OT', 24),
     'weather': ('weather/weather.csv', 'OT', 144),
+    'solar_Alabama': ('solar_Alabama/solar_Alabama.csv', 'PV001', 144),
+    'PeMS': ('PeMS/PeMS.csv', 'Sensor000', 288),
 }
 
 # Fixed parameters (aligned with ViTime paper)
@@ -686,6 +688,76 @@ class ElectricityDataset(Dataset):
         return past, future
 
 
+def _paper_split_borders(dataset_name: str, n: int, seq_len: int) -> Tuple[List[int], List[int]]:
+    """iTransformer / TimesNet split borders.
+
+    Returns (border1s, border2s) where each split's window-construction array is
+    ``data[border1s[i]:border2s[i]]``. val/test b1 reaches back ``seq_len`` into
+    the previous split (the standard overlap trick) so the first lookback window
+    can fully reach the end of the previous slice. ETT* uses fixed month-based
+    boundaries; everything else uses 70/10/20.
+    """
+    if dataset_name in ('ETTh1', 'ETTh2'):
+        b2 = [12 * 30 * 24, 12 * 30 * 24 + 4 * 30 * 24, 12 * 30 * 24 + 8 * 30 * 24]
+    elif dataset_name in ('ETTm1', 'ETTm2'):
+        b2 = [12 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 8 * 30 * 24 * 4]
+    else:
+        n_train = int(n * 0.7)
+        n_test = int(n * 0.2)
+        n_val = n - n_train - n_test
+        b2 = [n_train, n_train + n_val, n_train + n_val + n_test]
+    b1 = [0, b2[0] - seq_len, b2[1] - seq_len]
+    return b1, b2
+
+
+def _load_full_series(
+    data_path: str,
+    column: Optional[str],
+    columns: Optional[List[str]],
+    use_all_columns: bool,
+) -> Tuple[torch.Tensor, List[str]]:
+    """Read CSV and return (data_tensor, column_names).
+
+    Univariate: shape (T,). Multivariate: shape (V, T)."""
+    df = pd.read_csv(data_path)
+    if use_all_columns:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        arr = torch.tensor(df[numeric_cols].values, dtype=torch.float32)
+        return arr.T, numeric_cols
+    if columns is not None:
+        for col in columns:
+            if col not in df.columns:
+                raise ValueError(f"Column '{col}' not found in dataset")
+        arr = torch.tensor(df[columns].values, dtype=torch.float32)
+        return arr.T, list(columns)
+    target = column
+    if target not in df.columns:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        target = numeric_cols[0]
+        logger.warning(f"Column '{column}' not found, using '{target}' instead")
+    return torch.tensor(df[target].values, dtype=torch.float32), [target]
+
+
+def _paper_split_tensor(
+    full: torch.Tensor,
+    dataset_name: str,
+    lookback: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Z-score with train-slice stats, then slice train/val/test using paper borders."""
+    # Time is the last axis in both univariate (T,) and multivariate (V, T).
+    n = full.shape[-1]
+    b1, b2 = _paper_split_borders(dataset_name, n, lookback)
+    train_slice = full[..., b1[0]:b2[0]]
+    mean = train_slice.mean(dim=-1, keepdim=True)
+    std = train_slice.std(dim=-1, keepdim=True) + 1e-8
+    full_norm = (full - mean) / std
+    return (
+        full_norm[..., b1[0]:b2[0]].contiguous(),
+        full_norm[..., b1[1]:b2[1]].contiguous(),
+        full_norm[..., b1[2]:b2[2]].contiguous(),
+    )
+
+
 def get_dataloaders(
     batch_size: int,
     val_split: float = 0.1,
@@ -695,8 +767,10 @@ def get_dataloaders(
     use_all_columns: bool = False,
     columns: Optional[List[str]] = None,
     column: Optional[str] = None,  # Target column for univariate (None = use global TARGET_COLUMN)
-    use_chronological_split: bool = True  # MUST be True for time series to avoid data leakage
-) -> Tuple[DataLoader, DataLoader, int]:
+    use_chronological_split: bool = True,
+    dataset_name: Optional[str] = None,
+    return_test: bool = False,
+):
     """Create train and validation dataloaders for REAL data.
     
     NOTE: For synthetic pre-training, use get_synthetic_dataloader() from dataset.py.
@@ -716,138 +790,63 @@ def get_dataloaders(
     Returns:
         (train_loader, val_loader, num_variables)
     """
-    # Use provided column, else fall back to global TARGET_COLUMN
     target_column = column if column is not None else TARGET_COLUMN
-    # CRITICAL: Warn if someone tries to use random split
-    if not use_chronological_split:
-        logger.warning(
-            "⚠️  RANDOM SPLIT ENABLED - THIS CAUSES SEVERE DATA LEAKAGE FOR TIME SERIES!\n"
-            "   With sliding windows (stride=24, window=608), adjacent samples share 584 timesteps.\n"
-            "   Random shuffle means train/val samples are interleaved temporally.\n"
-            "   Your validation metrics will be MEANINGLESS. Use use_chronological_split=True."
+    ds_name = dataset_name if dataset_name is not None else SELECTED_DATASET
+
+    # Paper-aligned splitting (iTransformer / TimesNet protocol):
+    # ETT* uses fixed month boundaries; everything else 70/10/20. val/test slices
+    # reach back `lookback` steps into the previous split, and all splits use
+    # stride=1. Z-score uses train-slice stats only.
+    full, col_names = _load_full_series(DATA_PATH, target_column, columns, use_all_columns)
+    train_data, val_data, test_data = _paper_split_tensor(full, ds_name, lookback)
+    multivariate = full.dim() == 2
+    num_variables = full.shape[0] if multivariate else 1
+
+    def _make_ds(data_slice: torch.Tensor, augment: bool) -> ElectricityDataset:
+        return ElectricityDataset(
+            DATA_PATH,
+            lookback=lookback,
+            forecast=forecast,
+            stride=1,
+            max_samples=None,
+            augment=augment,
+            data_tensor=data_slice,
         )
-    
-    # Base dataset (no augmentation) to derive indices and reuse tensor
-    base_dataset = ElectricityDataset(
-        DATA_PATH,
-        lookback=lookback,
-        forecast=forecast,
-        column=target_column,
-        max_samples=max_samples,
-        augment=False,
-        use_all_columns=use_all_columns,
-        columns=columns
+
+    train_dataset = _make_ds(train_data, augment=True)
+    val_dataset = _make_ds(val_data, augment=False)
+    test_dataset = _make_ds(test_data, augment=False)
+    if max_samples:
+        train_dataset.indices = train_dataset.indices[:max_samples]
+
+    logger.info(
+        f"Paper split for {ds_name}: train={len(train_dataset)} "
+        f"val={len(val_dataset)} test={len(test_dataset)} "
+        f"vars={num_variables} lookback={lookback} forecast={forecast} stride=1"
     )
-    
-    total_samples = len(base_dataset)
-    
-    if use_chronological_split:
-        # CHRONOLOGICAL SPLIT WITH GAPS to prevent window overlap
-        # 
-        # Problem: With stride=24 and window=608, adjacent samples share data:
-        #   Sample i covers timesteps [i*stride, i*stride + window)
-        #   Sample i+1 covers timesteps [(i+1)*stride, (i+1)*stride + window)
-        #   Overlap = window - stride = 608 - 24 = 584 timesteps!
-        #
-        # Solution: Insert a GAP of ceil(window/stride) indices between splits
-        # This ensures the last window of train doesn't overlap with first window of val.
-        
-        window_size = lookback + forecast  # Total timesteps per sample
-        stride = DATASET_STRIDE  # Configurable stride from CLI/global
-        gap_indices = (window_size + stride - 1) // stride  # Ceiling division
-        
-        # Target proportions: ~70% train, ~10% val, ~20% test
-        # But we need gaps, so effective sizes are smaller
-        raw_train_end = int(total_samples * 0.7)
-        raw_val_end = int(total_samples * 0.8)
-        
-        train_end = raw_train_end
-        val_start = train_end + gap_indices  # Gap after train
-        val_end = raw_val_end
-        test_start = val_end + gap_indices   # Gap after val
-        
-        # Ensure we have valid ranges
-        if val_start >= val_end:
-            logger.warning(f"Gap too large for val split! Reducing gap.")
-            val_start = train_end + 1
-        if test_start >= total_samples:
-            test_start = val_end + 1
-        
-        train_indices = list(range(0, train_end))
-        val_indices = list(range(val_start, val_end))
-        # test_indices would be range(test_start, total_samples) if needed
-        
-        # Calculate actual timestep ranges for logging
-        train_ts_end = (train_end - 1) * stride + window_size if train_end > 0 else 0
-        val_ts_start = val_start * stride
-        val_ts_end = (val_end - 1) * stride + window_size if val_end > val_start else val_ts_start
-        
-        logger.info(f"Using CHRONOLOGICAL split with gaps (no window overlap):")
-        logger.info(f"  Window size: {window_size} timesteps, stride: {stride}, gap: {gap_indices} indices")
-        logger.info(f"  Train: indices 0-{train_end-1} ({len(train_indices)} samples)")
-        logger.info(f"         timesteps 0-{train_ts_end}")
-        logger.info(f"  [GAP]: {gap_indices} indices ({gap_indices * stride} timesteps)")
-        logger.info(f"  Val:   indices {val_start}-{val_end-1} ({len(val_indices)} samples)")
-        logger.info(f"         timesteps {val_ts_start}-{val_ts_end}")
-        logger.info(f"  [GAP]: {gap_indices} indices")
-        logger.info(f"  Test:  indices {test_start}-{total_samples-1} (held out)")
-    else:
-        # RANDOM SPLIT: original behavior
-        val_size = int(total_samples * val_split)
-        train_size = total_samples - val_size
-        
-        train_subset, val_subset = random_split(
-            base_dataset, 
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(42)
-        )
-        
-        train_indices = list(train_subset.indices)
-        val_indices = list(val_subset.indices)
-        
-        logger.info(f"Using RANDOM split (seed=42):")
-        logger.info(f"  Train: {len(train_indices)} samples ({100-val_split*100:.0f}%)")
-        logger.info(f"  Val:   {len(val_indices)} samples ({val_split*100:.0f}%)")
-    
-    train_dataset = ElectricityDataset(
-        DATA_PATH,
-        lookback=lookback,
-        forecast=forecast,
-        max_samples=max_samples,
-        augment=True,
-        data_tensor=base_dataset.data,
-        indices=train_indices
-    )
-    
-    val_dataset = ElectricityDataset(
-        DATA_PATH,
-        lookback=lookback,
-        forecast=forecast,
-        max_samples=max_samples,
-        augment=False,
-        data_tensor=base_dataset.data,
-        indices=val_indices
-    )
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=True
-    )
-    
-    logger.info(f"Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples, Variables: {base_dataset.num_variables}")
-    
-    return train_loader, val_loader, base_dataset.num_variables
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                              num_workers=0, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                            num_workers=0, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
+                             num_workers=0, pin_memory=True)
+
+    if return_test:
+        return train_loader, val_loader, test_loader, num_variables
+    return train_loader, val_loader, num_variables
+
+
+def _legacy_split_removed():  # noqa: D401
+    """Placeholder: legacy chronological-with-gap split removed in paper-split fix.
+
+    The old implementation built a single sliding-window index list at
+    ``DATASET_STRIDE`` and partitioned indices 70/10/20 with a gap, which (a)
+    used stride=24 instead of paper stride=1 for val/test averaging and (b)
+    skewed the val/test slices vs. iTransformer's own loaders. Replaced by
+    :func:`_paper_split_borders` + :func:`_paper_split_tensor`.
+    """
+    return None
 
 
 # ============================================================================

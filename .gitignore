@@ -145,3 +145,7 @@ models/Time-Series-Library-main/dataset/
 !datasets/illness/*.csv
 !datasets/traffic/traffic_part*.csv
 datasets/traffic/traffic.csv
+
+# Large benchmark CSVs (fetch separately or merge locally; avoid bloating git)
+datasets/PeMS/PeMS.csv
+datasets/solar_Alabama/solar_Alabama.csv
