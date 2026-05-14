@@ -25,10 +25,29 @@ RUN="${RUN:-all}"    # all | pretrain | finetune
 # Environment (torch required — avoid importing train_multivariate_pipeline for discovery)
 # ---------------------------------------------------------------------------
 
-activate_training_venv() {
-  if [[ -n "${VIRTUAL_ENV:-}" ]] && python3 -c "import torch" 2>/dev/null; then
-    echo "Using already-active venv: $VIRTUAL_ENV"
+# Prefer the venv's own binary. On Alliance, `python3` in PATH after `source activate`
+# can still resolve to the Lmod interpreter if the venv only has `bin/python`.
+resolve_venv_python() {
+  if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+    return 1
+  fi
+  if [[ -x "${VIRTUAL_ENV}/bin/python3" ]]; then
+    printf '%s\n' "${VIRTUAL_ENV}/bin/python3"
     return 0
+  fi
+  if [[ -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    printf '%s\n' "${VIRTUAL_ENV}/bin/python"
+    return 0
+  fi
+  return 1
+}
+
+activate_training_venv() {
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    if py="$(resolve_venv_python)" && [[ -n "$py" ]] && "$py" -c "import torch" 2>/dev/null; then
+      echo "Using already-active venv: $VIRTUAL_ENV"
+      return 0
+    fi
   fi
   if [[ -n "${VENV_PATH:-}" && -f "${VENV_PATH}/bin/activate" ]]; then
     # shellcheck source=/dev/null
@@ -82,9 +101,19 @@ if ! activate_training_venv; then
   exit 1
 fi
 
-if ! python3 -c "import torch" 2>/dev/null; then
-  echo "ERROR: python3 in PATH cannot import torch after venv activation." >&2
-  echo "  Fix the active environment, then re-run." >&2
+PY="$(resolve_venv_python)" || true
+if [[ -z "${PY:-}" ]]; then
+  echo "ERROR: Active venv has no bin/python or bin/python3 under VIRTUAL_ENV=$VIRTUAL_ENV" >&2
+  exit 1
+fi
+
+if ! "$PY" -c "import torch" 2>/dev/null; then
+  echo "ERROR: venv interpreter cannot import torch after activation." >&2
+  echo "  VIRTUAL_ENV=$VIRTUAL_ENV" >&2
+  echo "  Interpreter: $PY" >&2
+  echo "  python3 from PATH (may differ): $(command -v python3 2>/dev/null || echo '(none)')" >&2
+  echo "  Install torch into this venv (e.g. on a login node: source .../activate && pip install --no-index torch" >&2
+  echo "    with python/3.11 loaded, or pip install torch), then re-run." >&2
   exit 1
 fi
 
@@ -93,7 +122,7 @@ fi
 # in models/diffusion_tsf/train_multivariate_pipeline.py: path + date column).
 # ---------------------------------------------------------------------------
 
-mapfile -t ROWS < <(MAX_V="$MAX_V" ROOT="$ROOT" python3 <<'PY'
+mapfile -t ROWS < <(MAX_V="$MAX_V" ROOT="$ROOT" "$PY" <<'PY'
 import csv, os, sys
 
 # (relative_path_under_datasets/, date_column_name)
@@ -146,7 +175,7 @@ echo ""
 dims=$(printf '%s\n' "${ROWS[@]}" | cut -f2 | sort -u)
 
 run_py() {
-  python3 -u -m models.diffusion_tsf.train_multivariate_pipeline "$@"
+  "$PY" -u -m models.diffusion_tsf.train_multivariate_pipeline "$@"
 }
 
 if [[ "$RUN" == all || "$RUN" == pretrain ]]; then
