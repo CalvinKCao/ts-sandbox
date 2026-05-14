@@ -21,6 +21,36 @@ from typing import List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+class _SDPASelfAttention2D(nn.Module):
+    """Drop-in replacement for ``nn.MultiheadAttention`` on (B, N, C) tokens.
+
+    Uses ``F.scaled_dot_product_attention`` directly so CUDA always dispatches to
+    flash / mem-efficient kernels — ``nn.MultiheadAttention`` can silently fall
+    back to the O(N²) naive math kernel on some torch builds, which OOMs at the
+    H×W resolutions used here (e.g. ~5k tokens at level 2).
+    """
+
+    def __init__(self, channels: int, num_heads: int = 4):
+        super().__init__()
+        assert channels % num_heads == 0
+        self.num_heads = num_heads
+        self.head_dim = channels // num_heads
+        self.q = nn.Linear(channels, channels, bias=True)
+        self.k = nn.Linear(channels, channels, bias=True)
+        self.v = nn.Linear(channels, channels, bias=True)
+        self.out = nn.Linear(channels, channels, bias=True)
+
+    def forward(self, x_norm: torch.Tensor) -> torch.Tensor:
+        B, N, C = x_norm.shape
+        h, d = self.num_heads, self.head_dim
+        q = self.q(x_norm).view(B, N, h, d).transpose(1, 2)
+        k = self.k(x_norm).view(B, N, h, d).transpose(1, 2)
+        v = self.v(x_norm).view(B, N, h, d).transpose(1, 2)
+        attn = F.scaled_dot_product_attention(q, k, v)
+        attn = attn.transpose(1, 2).contiguous().view(B, N, C)
+        return self.out(attn)
+
+
 class SinusoidalPositionalEncoding(nn.Module):
     """Sinusoidal positional encoding for sequence models.
     
@@ -499,7 +529,7 @@ class DownBlock(nn.Module):
         # Simple self-attention (optional) - legacy mode without cross-attention
         self.use_attention = use_attention and not use_cross_attention
         if self.use_attention:
-            self.attention = nn.MultiheadAttention(out_channels, num_heads=4, batch_first=True)
+            self.attention = _SDPASelfAttention2D(out_channels, num_heads=4)
             self.attn_norm = nn.GroupNorm(num_groups, out_channels)
         
         # Spatial Transformer with cross-attention (for hybrid conditioning)
@@ -541,7 +571,7 @@ class DownBlock(nn.Module):
             # Reshape for attention: (batch, h*w, channels)
             x_flat = x.view(b, c, h * w).permute(0, 2, 1)
             x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
-            attn_out, _ = self.attention(x_norm, x_norm, x_norm)
+            attn_out = self.attention(x_norm)
             x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
         
         if self.use_cross_attention:
@@ -588,7 +618,7 @@ class UpBlock(nn.Module):
         # Simple self-attention (optional) - legacy mode without cross-attention
         self.use_attention = use_attention and not use_cross_attention
         if self.use_attention:
-            self.attention = nn.MultiheadAttention(out_channels, num_heads=4, batch_first=True)
+            self.attention = _SDPASelfAttention2D(out_channels, num_heads=4)
             self.attn_norm = nn.GroupNorm(num_groups, out_channels)
         
         # Spatial Transformer with cross-attention (for hybrid conditioning)
@@ -635,7 +665,7 @@ class UpBlock(nn.Module):
             b, c, h, w = x.shape
             x_flat = x.view(b, c, h * w).permute(0, 2, 1)
             x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
-            attn_out, _ = self.attention(x_norm, x_norm, x_norm)
+            attn_out = self.attention(x_norm)
             x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
         
         if self.use_cross_attention:
@@ -736,7 +766,7 @@ class DilatedMiddleBlock(nn.Module):
         
         # Self-attention for global context (if not using cross-attention)
         if not use_cross_attention:
-            self.attention = nn.MultiheadAttention(channels, num_heads=4, batch_first=True)
+            self.attention = _SDPASelfAttention2D(channels, num_heads=4)
             self.attn_norm = nn.GroupNorm(num_groups, channels)
         else:
             # Spatial Transformer with cross-attention
@@ -784,7 +814,7 @@ class DilatedMiddleBlock(nn.Module):
             b, c, h, w = x.shape
             x_flat = x.view(b, c, h * w).permute(0, 2, 1)
             x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
-            attn_out, _ = self.attention(x_norm, x_norm, x_norm)
+            attn_out = self.attention(x_norm)
             x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
         
         # Final transformation
@@ -814,7 +844,7 @@ class MiddleBlock(nn.Module):
         self.res1 = ResidualBlock(channels, channels, time_emb_dim, num_groups, kernel_size=kernel_size)
         
         if not use_cross_attention:
-            self.attention = nn.MultiheadAttention(channels, num_heads=4, batch_first=True)
+            self.attention = _SDPASelfAttention2D(channels, num_heads=4)
             self.attn_norm = nn.GroupNorm(num_groups, channels)
         else:
             # Spatial Transformer with cross-attention
@@ -851,7 +881,7 @@ class MiddleBlock(nn.Module):
             b, c, h, w = x.shape
             x_flat = x.view(b, c, h * w).permute(0, 2, 1)
             x_norm = self.attn_norm(x.view(b, c, -1)).view(b, c, h * w).permute(0, 2, 1)
-            attn_out, _ = self.attention(x_norm, x_norm, x_norm)
+            attn_out = self.attention(x_norm)
             x = x + attn_out.permute(0, 2, 1).view(b, c, h, w)
         
         x = self.res2(x, t_emb)
