@@ -3,7 +3,7 @@ config for the diffusion tsf model.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -156,7 +156,50 @@ class DiffusionTSFConfig:
     # train
     learning_rate: float = 2e-4
     batch_size: int = 8
-    
+
+    # ---- End-to-end joint iTransformer + diffusion training -----------------
+    # When True, the iTransformer guidance model is trained jointly with the
+    # diffusion backbone. Gradients flow back through the cross-attention
+    # encoder-token path (always) and through the ghost-image path (only when
+    # joint_use_ghost_image=True; even then the encode_to_2d's clamp+floor is
+    # non-differentiable so the practical contribution there is limited).
+    # An auxiliary forecast MSE loss anchors the iTransformer as a real
+    # forecaster rather than letting it drift into a denoising-helper role.
+    e2e_joint_training: bool = False
+
+    # Whether to freeze the guidance model. Independent of e2e_joint_training
+    # so that "old behavior" (e2e=False, frozen=True) is preserved by default.
+    # Setting e2e_joint_training=True automatically implies freeze_guidance_model=False
+    # via __post_init__ unless the user explicitly overrides it.
+    freeze_guidance_model: bool = True
+
+    # Auxiliary forecast loss weight (active only when e2e_joint_training=True).
+    # Loss term = aux_forecast_loss_weight * MSE(itrans_forecast_norm, future_norm).
+    # Should be ~1-2x the typical noise loss magnitude after a few hundred steps.
+    aux_forecast_loss_weight: float = 1.0
+
+    # Joint-training ghost-image variant toggle:
+    #   True  (Option B): keep the ghost-image channel; .detach() guidance forecast
+    #                     in the ghost-image branch so iTrans does NOT receive
+    #                     gradient through encode_to_2d. Gradient still flows
+    #                     via cross-attn tokens + aux forecast loss.
+    #   False (Option C): drop the ghost-image channel entirely. Tokens-only.
+    #                     Saves one U-Net input channel; cleanest gradient story.
+    # Only takes effect when e2e_joint_training=True (otherwise legacy
+    # use_guidance_channel logic governs the ghost-image channel).
+    joint_use_ghost_image: bool = True
+
+    # Number of iTrans-only warmup epochs at the start of joint training.
+    # During warmup the diffusion loss is masked out and only aux_forecast_loss
+    # is back-propagated, giving the cross-attention tokens meaningful structure
+    # before the DiT starts learning to use them.
+    itrans_warmup_epochs: int = 1
+
+    # Separate learning rate for iTransformer params when e2e_joint_training=True.
+    # Diffusion backbone uses ``learning_rate``. None -> use ``learning_rate``
+    # for both param groups.
+    itrans_lr: Optional[float] = 1e-4
+
     def __post_init__(self):
         """check if config is okay."""
         assert self.image_height > 0
@@ -170,6 +213,9 @@ class DiffusionTSFConfig:
             raise ValueError("variate_factorized=False is no longer supported; use the factorized path.")
         if self.model_type not in ("unet", "dit"):
             raise ValueError(f"model_type must be 'unet' or 'dit', got {self.model_type!r}")
+        if self.e2e_joint_training:
+            # Joint training is meaningless if iTrans is frozen.
+            self.freeze_guidance_model = False
         
     @property
     def bin_width(self) -> float:
@@ -195,10 +241,23 @@ class DiffusionTSFConfig:
         return count
     
     @property
+    def emits_ghost_image(self) -> bool:
+        """Whether a guidance ghost image is actually emitted as a U-Net input channel.
+
+        In joint-training mode with joint_use_ghost_image=False (Option C, tokens-only)
+        the ghost image is suppressed even if use_guidance_channel is True.
+        """
+        if not self.use_guidance_channel:
+            return False
+        if self.e2e_joint_training and not self.joint_use_ghost_image:
+            return False
+        return True
+
+    @property
     def backbone_in_channels(self) -> int:
         """total input channels for the backbone."""
         # per-variate: 1 data ch + aux + optional 1 guidance ch
-        return 1 + self.num_aux_channels + (1 if self.use_guidance_channel else 0)
+        return 1 + self.num_aux_channels + (1 if self.emits_ghost_image else 0)
 
     @property
     def visual_cond_channels(self) -> int:
@@ -207,10 +266,8 @@ class DiffusionTSFConfig:
 
     @property
     def guidance_channels(self) -> int:
-        """guidance channels."""
-        if not self.use_guidance_channel:
-            return 0
-        return 1
+        """guidance channels actually concatenated to the backbone input."""
+        return 1 if self.emits_ghost_image else 0
     
 @dataclass
 class LatentDiffusionConfig(DiffusionTSFConfig):

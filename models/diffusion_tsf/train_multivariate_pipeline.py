@@ -3054,14 +3054,15 @@ def run_pretrain_mode(n_variates: int, smoke_test: bool = False, seed: int = 42)
 
     # Try to reuse an existing V=n_variates iTransformer from previous runs
     # (searches slurm storage roots and the project tree — see find_existing_itrans_checkpoint)
-    if not os.path.exists(itrans_ckpt) and not smoke_test:
-        found = find_existing_itrans_checkpoint(n_variates)
-        if found:
-            import shutil
-            logger.info(f"  Found existing iTransformer checkpoint: {found}")
-            logger.info(f"  Copying to {itrans_ckpt} — skipping iTransformer pretrain")
-            os.makedirs(os.path.dirname(itrans_ckpt), exist_ok=True)
-            shutil.copy2(found, itrans_ckpt)
+    # Disabled per user request to always retrain from scratch
+    # if not os.path.exists(itrans_ckpt) and not smoke_test:
+    #     found = find_existing_itrans_checkpoint(n_variates)
+    #     if found:
+    #         import shutil
+    #         logger.info(f"  Found existing iTransformer checkpoint: {found}")
+    #         logger.info(f"  Copying to {itrans_ckpt} — skipping iTransformer pretrain")
+    #         os.makedirs(os.path.dirname(itrans_ckpt), exist_ok=True)
+    #         shutil.copy2(found, itrans_ckpt)
 
     # Phase 1A: iTransformer HP tuning — cached to disk so reruns skip it
     itrans_tune_ckpt = os.path.join(dim_dir, 'itrans_hp_best.pt')
@@ -3456,6 +3457,344 @@ def _finetune_and_eval_one_subset(
         traceback.print_exc()
         raise
 
+# ============================================================================
+# End-to-end joint iTransformer + diffusion modes (e2e branch)
+#
+# Replaces Phase 1A+1B with a single ``joint-pretrain`` and Phase 2A+2B with a
+# single ``joint-finetune``. Both modes train the iTransformer guidance jointly
+# with the diffusion backbone using ``joint_training.train_joint_phase``.
+# ============================================================================
+
+
+def _build_joint_diffusion_model(
+    n_variates: int,
+    joint_use_ghost_image: bool,
+    aux_forecast_loss_weight: float,
+    itrans_warmup_epochs: int,
+    itrans_seq_len: int,
+    itrans_pred_len: int,
+    itrans_dropout: float = 0.1,
+    itrans_checkpoint: Optional[str] = None,
+    device: Optional[torch.device] = None,
+) -> DiffusionTSF:
+    """Construct a DiffusionTSF wired for end-to-end joint training.
+
+    The iTransformer is created fresh (or loaded from ``itrans_checkpoint`` for
+    finetune warm-start) and wrapped in ``iTransformerGuidance(freeze=False)``
+    so gradients flow back into it.
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    if itrans_checkpoint is not None and os.path.exists(itrans_checkpoint):
+        itrans = load_itransformer_from_checkpoint(
+            itrans_checkpoint, n_variates, device, dropout=itrans_dropout,
+        )
+    else:
+        itrans = create_itransformer(
+            seq_len=itrans_seq_len, pred_len=itrans_pred_len,
+            num_vars=n_variates, dropout=itrans_dropout,
+        ).to(device)
+
+    guidance = iTransformerGuidance(itrans, freeze=False)
+
+    # Build the diffusion config with joint-training flags BEFORE constructing
+    # the backbone so the input-conv channel count is correct from the start.
+    # (In Option C we drop the ghost-image channel; backbone_in_channels reflects this.)
+    cfg = DiffusionTSFConfig(
+        num_variables=n_variates,
+        lookback_length=LOOKBACK_LENGTH,
+        forecast_length=FORECAST_LENGTH + LOOKBACK_OVERLAP,
+        lookback_overlap=LOOKBACK_OVERLAP,
+        past_loss_weight=PAST_LOSS_WEIGHT,
+        image_height=IMAGE_HEIGHT,
+        use_coordinate_channel=True,
+        use_guidance_channel=True,
+        guidance_penalty_weight=GUIDANCE_PENALTY_WEIGHT,
+        num_diffusion_steps=1000,
+        model_type=MODEL_TYPE,
+        unet_channels=UNET_CHANNELS,
+        attention_levels=ATTENTION_LEVELS,
+        disable_cross_attention=DISABLE_CROSS_ATTENTION,
+        num_res_blocks=2,
+        dit_patch_size=DIT_PATCH_SIZE,
+        dit_embed_dim=DIT_EMBED_DIM,
+        dit_depth=DIT_DEPTH,
+        dit_num_heads=DIT_NUM_HEADS,
+        dit_mlp_ratio=DIT_MLP_RATIO,
+        dit_dropout=DIT_DROPOUT,
+        use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
+        unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
+        use_amp=USE_AMP,
+        # Joint-training switches:
+        e2e_joint_training=True,
+        joint_use_ghost_image=joint_use_ghost_image,
+        aux_forecast_loss_weight=aux_forecast_loss_weight,
+        itrans_warmup_epochs=itrans_warmup_epochs,
+    )
+    logger.info(
+        "Joint diffusion model: backbone_in_channels=%d (ghost=%s)",
+        cfg.backbone_in_channels, "B" if joint_use_ghost_image else "C",
+    )
+    return DiffusionTSF(cfg, guidance_model=guidance).to(device)
+
+
+def run_joint_pretrain_mode(
+    n_variates: int,
+    smoke_test: bool = False,
+    seed: int = 42,
+    *,
+    diffusion_lr: float = 2e-4,
+    itrans_lr: float = 1e-4,
+    num_epochs: Optional[int] = None,
+    warmup_epochs: int = 1,
+    joint_use_ghost_image: bool = True,
+    aux_forecast_loss_weight: float = 1.0,
+    batch_size: Optional[int] = None,
+):
+    """Single-phase synthetic pretrain — replaces Phase 1A + 1B.
+
+    Trains iTransformer + diffusion jointly on the synthetic RealTS pool. Saves
+    one checkpoint ``joint_pretrained.pt`` under the per-dim pretrain dir; the
+    iTransformer weights inside it are recoverable via load-state-dict for any
+    downstream consumer that still expects ``itransformer.pt`` / ``diffusion.pt``
+    (see ``export_legacy_checkpoints_from_joint`` in commit 3).
+    """
+    from models.diffusion_tsf.dataset import get_synthetic_dataloader  # local import (heavy deps)
+    from models.diffusion_tsf.joint_training import JointTrainConfig, train_joint_phase
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    recombine_traffic_data()
+
+    device = get_device()
+    dim_dir = pretrain_dir_for_dim(n_variates)
+    os.makedirs(dim_dir, exist_ok=True)
+    joint_ckpt = os.path.join(dim_dir, 'joint_pretrained.pt')
+
+    if num_epochs is None:
+        num_epochs = 1 if smoke_test else max(PRETRAIN_DIFFUSION_MAX_EPOCHS, PRETRAIN_EPOCHS)
+    if batch_size is None:
+        batch_size = 4 if smoke_test else 16
+
+    logger.info("=" * 60)
+    logger.info("Joint pretrain (e2e): dim=%d, epochs=%d (warmup=%d)",
+                n_variates, num_epochs, warmup_epochs)
+    logger.info("LRs: diffusion=%.2e, itrans=%.2e | aux_weight=%.2f | ghost=%s",
+                diffusion_lr, itrans_lr, aux_forecast_loss_weight,
+                "B" if joint_use_ghost_image else "C")
+    logger.info("=" * 60)
+
+    n_samples = resolve_pretrain_virtual_dataset_size(smoke_test)
+    n_val = 0 if smoke_test else min(n_samples // 10, 5000)
+    synth_cache = get_synth_cache_dir(checkpoint_dir=dim_dir, smoke_test=smoke_test)
+
+    synthetic_loader = get_synthetic_dataloader(
+        batch_size=batch_size,
+        lookback_length=LOOKBACK_LENGTH,
+        forecast_length=FORECAST_LENGTH,
+        num_variables=n_variates,
+        num_samples=n_samples,
+        num_workers=0 if smoke_test else 4,
+        lookback_overlap=LOOKBACK_OVERLAP,
+        cache_dir=synth_cache,
+        skip_cross_var_aug=(n_variates > 32),
+        val_tail_n=n_val,
+        synthetic_epoch_capacity=1 if smoke_test else num_epochs,
+    )
+    dataset = synthetic_loader.dataset
+    train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
+    val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset)))) if n_val > 0 else None
+
+    train_loader, train_sampler = create_dataloader_ddp(
+        train_subset, batch_size, shuffle=True, num_workers=0 if smoke_test else 4,
+    )
+    val_loader = None
+    if val_subset is not None:
+        val_loader, _ = create_dataloader_ddp(
+            val_subset, batch_size, shuffle=False, num_workers=0,
+        )
+
+    model = _build_joint_diffusion_model(
+        n_variates=n_variates,
+        joint_use_ghost_image=joint_use_ghost_image,
+        aux_forecast_loss_weight=aux_forecast_loss_weight,
+        itrans_warmup_epochs=warmup_epochs,
+        itrans_seq_len=ITRANSFORMER_SEQ_LEN,
+        itrans_pred_len=FORECAST_LENGTH,
+        device=device,
+    )
+    model = wrap_model_ddp(model)
+
+    tcfg = JointTrainConfig(
+        diffusion_lr=diffusion_lr,
+        itrans_lr=itrans_lr,
+        num_epochs=num_epochs,
+        warmup_epochs=warmup_epochs,
+        patience=DIFFUSION_HP_PATIENCE,
+        grad_clip=1.0,
+        use_amp=USE_AMP,
+    )
+
+    def _on_epoch_end(epoch_idx: int, metrics: Dict[str, float]):
+        log_wandb(metrics, prefix='joint_pretrain')
+
+    result = train_joint_phase(
+        unwrap_model(model),
+        train_loader,
+        val_loader,
+        tcfg,
+        device=device,
+        on_epoch_end=_on_epoch_end,
+    )
+
+    if is_main_process() and result.best_state_dict is not None:
+        torch.save({
+            'model_state_dict': result.best_state_dict,
+            'config': unwrap_model(model).config.__dict__,
+            'best_val_loss': result.best_val_loss,
+            'best_epoch': result.best_epoch,
+            'tuned_params': {
+                'diffusion_lr': diffusion_lr,
+                'itrans_lr': itrans_lr,
+                'aux_forecast_loss_weight': aux_forecast_loss_weight,
+                'joint_use_ghost_image': joint_use_ghost_image,
+                'warmup_epochs': warmup_epochs,
+            },
+        }, joint_ckpt)
+        logger.info("Joint pretrain checkpoint saved: %s (val=%.4f, epoch=%d)",
+                    joint_ckpt, result.best_val_loss, result.best_epoch)
+    barrier()
+    return joint_ckpt
+
+
+def run_joint_finetune_mode(
+    dataset_name: str,
+    n_variates: int,
+    variate_indices: Optional[List[int]] = None,
+    subset_id: Optional[str] = None,
+    smoke_test: bool = False,
+    seed: int = 42,
+    *,
+    diffusion_lr: float = 5e-5,
+    itrans_lr: float = 5e-5,
+    num_epochs: Optional[int] = None,
+    warmup_epochs: int = 1,
+    joint_use_ghost_image: bool = True,
+    aux_forecast_loss_weight: float = 1.0,
+    batch_size: Optional[int] = None,
+):
+    """Single-phase real-data finetune — replaces Phase 2A + 2B + 2C.
+
+    Loads the joint pretrain checkpoint, then continues joint training on the
+    real dataset's train split. Saves one checkpoint per subset.
+    """
+    from models.diffusion_tsf.joint_training import JointTrainConfig, train_joint_phase
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    recombine_traffic_data()
+
+    device = get_device()
+    dim_dir = pretrain_dir_for_dim(n_variates)
+    joint_ckpt = os.path.join(dim_dir, 'joint_pretrained.pt')
+    if not os.path.exists(joint_ckpt):
+        logger.error("Joint pretrain checkpoint not found: %s", joint_ckpt)
+        logger.error("Run --mode joint-pretrain --n-variates %d first", n_variates)
+        sys.exit(1)
+
+    if variate_indices is None:
+        variate_indices = generate_dataset_job(dataset_name)['variate_indices']
+    if not subset_id:
+        subset_id = dataset_name
+
+    if num_epochs is None:
+        num_epochs = 1 if smoke_test else HP_TUNE_EPOCHS
+    if batch_size is None:
+        batch_size = 4 if smoke_test else 16
+
+    logger.info("=" * 60)
+    logger.info("Joint finetune (e2e): subset=%s, dim=%d, epochs=%d",
+                subset_id, n_variates, num_epochs)
+    logger.info("Loading joint pretrain checkpoint: %s", joint_ckpt)
+    logger.info("=" * 60)
+
+    train_ds, val_ds, _, _ = load_dataset(dataset_name, variate_indices, stride=1)
+    if smoke_test:
+        train_ds = Subset(train_ds, list(range(min(4, len(train_ds)))))
+        val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
+
+    train_loader, _ = create_dataloader_ddp(
+        train_ds, batch_size, shuffle=True, num_workers=0,
+    )
+    val_loader, _ = create_dataloader_ddp(
+        val_ds, batch_size, shuffle=False, num_workers=0,
+    )
+
+    model = _build_joint_diffusion_model(
+        n_variates=n_variates,
+        joint_use_ghost_image=joint_use_ghost_image,
+        aux_forecast_loss_weight=aux_forecast_loss_weight,
+        itrans_warmup_epochs=warmup_epochs,
+        itrans_seq_len=ITRANSFORMER_SEQ_LEN,
+        itrans_pred_len=FORECAST_LENGTH,
+        device=device,
+    )
+    ckpt = torch.load(joint_ckpt, map_location=device, weights_only=False)
+    missing, unexpected = model.load_state_dict(ckpt['model_state_dict'], strict=False)
+    if missing or unexpected:
+        logger.warning(
+            "Joint pretrain load: %d missing / %d unexpected keys (first few: %s / %s)",
+            len(missing or []), len(unexpected or []),
+            (missing or [])[:3], (unexpected or [])[:3],
+        )
+    model = wrap_model_ddp(model)
+
+    tcfg = JointTrainConfig(
+        diffusion_lr=diffusion_lr,
+        itrans_lr=itrans_lr,
+        num_epochs=num_epochs,
+        warmup_epochs=warmup_epochs,
+        patience=HP_TUNE_PATIENCE,
+        grad_clip=1.0,
+        use_amp=USE_AMP,
+    )
+
+    def _on_epoch_end(epoch_idx: int, metrics: Dict[str, float]):
+        log_wandb(metrics, prefix=f'joint_finetune/{subset_id}')
+
+    result = train_joint_phase(
+        unwrap_model(model),
+        train_loader,
+        val_loader,
+        tcfg,
+        device=device,
+        on_epoch_end=_on_epoch_end,
+    )
+
+    ft_ckpt = os.path.join(CHECKPOINT_DIR, f'{subset_id}_joint_finetuned.pt')
+    if is_main_process() and result.best_state_dict is not None:
+        torch.save({
+            'model_state_dict': result.best_state_dict,
+            'config': unwrap_model(model).config.__dict__,
+            'best_val_loss': result.best_val_loss,
+            'best_epoch': result.best_epoch,
+            'tuned_params': {
+                'diffusion_lr': diffusion_lr,
+                'itrans_lr': itrans_lr,
+                'aux_forecast_loss_weight': aux_forecast_loss_weight,
+                'joint_use_ghost_image': joint_use_ghost_image,
+                'warmup_epochs': warmup_epochs,
+            },
+        }, ft_ckpt)
+        logger.info("Joint finetune checkpoint saved: %s (val=%.4f, epoch=%d)",
+                    ft_ckpt, result.best_val_loss, result.best_epoch)
+    barrier()
+    return ft_ckpt
+
+
 def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
     """Train full-dimensionality iTransformer baseline for a high-variate dataset."""
     recombine_traffic_data()
@@ -3473,8 +3812,11 @@ def main():
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
-                        choices=['full', 'pretrain', 'finetune', 'baseline', 'evaluate', 'status'],
-                        help='Pipeline mode (default: full = run everything)')
+                        choices=['full', 'pretrain', 'finetune', 'baseline', 'evaluate', 'status',
+                                 'joint-pretrain', 'joint-finetune'],
+                        help='Pipeline mode (default: full = run everything). '
+                             'joint-pretrain / joint-finetune use end-to-end joint '
+                             'iTransformer + diffusion training (e2e branch).')
     parser.add_argument('--n-variates', type=int, default=None,
                         help='Override variate count (default: auto per dataset)')
     parser.add_argument('--dataset', type=str, default=None,
@@ -3516,6 +3858,24 @@ def main():
                         help='Override lookback length')
     parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH,
                         help='Override forecast length')
+
+    # ---- End-to-end joint training flags (modes: joint-pretrain, joint-finetune) ----
+    parser.add_argument('--joint-diffusion-lr', type=float, default=None,
+                        help='LR for diffusion params in joint modes (default 2e-4 pretrain / 5e-5 finetune)')
+    parser.add_argument('--joint-itrans-lr', type=float, default=None,
+                        help='LR for iTransformer params in joint modes')
+    parser.add_argument('--joint-epochs', type=int, default=None,
+                        help='Total epochs for joint modes (warmup included)')
+    parser.add_argument('--joint-warmup-epochs', type=int, default=1,
+                        help='iTrans-only warmup epochs at the start of joint training')
+    parser.add_argument('--joint-aux-weight', type=float, default=1.0,
+                        help='Weight on auxiliary iTrans forecast MSE loss')
+    parser.add_argument('--joint-batch-size', type=int, default=None,
+                        help='Override batch size for joint modes')
+    parser.add_argument('--joint-ghost-variant', type=str, default='B',
+                        choices=['B', 'C'],
+                        help="Ghost-image variant: 'B' keeps detached ghost channel, "
+                             "'C' drops it (tokens-only)")
 
     args = parser.parse_args()
 
@@ -3571,6 +3931,81 @@ def main():
                 print(f"Pretrain complete: {m.pretrain_complete}")
             else:
                 print("No manifest found")
+        return
+
+    if args.mode == 'joint-pretrain':
+        nv = args.n_variates
+        if nv is None:
+            print("ERROR: --n-variates required for joint-pretrain mode")
+            sys.exit(1)
+        N_VARIATES = nv
+        joint_diffusion_lr = args.joint_diffusion_lr if args.joint_diffusion_lr is not None else 2e-4
+        joint_itrans_lr = args.joint_itrans_lr if args.joint_itrans_lr is not None else 1e-4
+        try:
+            if args.wandb:
+                tags = ['smoke-test'] if args.smoke_test else []
+                tags.append('mode-joint-pretrain')
+                init_wandb(
+                    project=args.wandb_project,
+                    config={
+                        'seed': args.seed, 'smoke_test': args.smoke_test, 'mode': 'joint-pretrain',
+                        'n_variates': nv, 'diffusion_lr': joint_diffusion_lr,
+                        'itrans_lr': joint_itrans_lr, 'warmup_epochs': args.joint_warmup_epochs,
+                        'aux_weight': args.joint_aux_weight, 'ghost_variant': args.joint_ghost_variant,
+                    },
+                    resume=args.resume, tags=tags,
+                )
+            run_joint_pretrain_mode(
+                nv, smoke_test=args.smoke_test, seed=args.seed,
+                diffusion_lr=joint_diffusion_lr, itrans_lr=joint_itrans_lr,
+                num_epochs=args.joint_epochs, warmup_epochs=args.joint_warmup_epochs,
+                joint_use_ghost_image=(args.joint_ghost_variant == 'B'),
+                aux_forecast_loss_weight=args.joint_aux_weight,
+                batch_size=args.joint_batch_size,
+            )
+        finally:
+            finish_wandb()
+            cleanup_ddp()
+        return
+
+    if args.mode == 'joint-finetune':
+        if not args.dataset:
+            print("ERROR: --dataset required for joint-finetune mode")
+            sys.exit(1)
+        variate_indices = None
+        if args.variate_indices:
+            variate_indices = [int(x.strip()) for x in args.variate_indices.split(',') if x.strip()]
+        nv = args.n_variates or (len(variate_indices) if variate_indices else get_dim_for_dataset(args.dataset))
+        N_VARIATES = nv
+        joint_diffusion_lr = args.joint_diffusion_lr if args.joint_diffusion_lr is not None else 5e-5
+        joint_itrans_lr = args.joint_itrans_lr if args.joint_itrans_lr is not None else 5e-5
+        try:
+            if args.wandb:
+                tags = ['smoke-test'] if args.smoke_test else []
+                tags.append('mode-joint-finetune')
+                init_wandb(
+                    project=args.wandb_project,
+                    config={
+                        'seed': args.seed, 'smoke_test': args.smoke_test, 'mode': 'joint-finetune',
+                        'dataset': args.dataset, 'n_variates': nv,
+                        'diffusion_lr': joint_diffusion_lr, 'itrans_lr': joint_itrans_lr,
+                        'warmup_epochs': args.joint_warmup_epochs, 'aux_weight': args.joint_aux_weight,
+                        'ghost_variant': args.joint_ghost_variant,
+                    },
+                    resume=args.resume, tags=tags,
+                )
+            run_joint_finetune_mode(
+                args.dataset, nv, variate_indices=variate_indices, subset_id=args.subset_id,
+                smoke_test=args.smoke_test, seed=args.seed,
+                diffusion_lr=joint_diffusion_lr, itrans_lr=joint_itrans_lr,
+                num_epochs=args.joint_epochs, warmup_epochs=args.joint_warmup_epochs,
+                joint_use_ghost_image=(args.joint_ghost_variant == 'B'),
+                aux_forecast_loss_weight=args.joint_aux_weight,
+                batch_size=args.joint_batch_size,
+            )
+        finally:
+            finish_wandb()
+            cleanup_ddp()
         return
 
     if args.mode == 'pretrain':

@@ -31,12 +31,12 @@ from typing import List, Optional
 
 # ---- Sequence / window lengths ---------------------------------------------------
 
-LOOKBACK_LENGTH: int = 96
-FORECAST_LENGTH: int = 96
+LOOKBACK_LENGTH: int = 1024
+FORECAST_LENGTH: int = 192
 
 # iTransformer paper benchmarks anchor at T=96 for ETTh1; we use the same lookback
 # for both the diffusion model and the iTransformer guidance.
-ITRANSFORMER_SEQ_LEN: int = 96
+ITRANSFORMER_SEQ_LEN: int = 1024
 
 # Predict the last K observed steps alongside the forecast horizon. The diffusion
 # model denoises a (K + H)-wide region; the K steps are discarded at inference.

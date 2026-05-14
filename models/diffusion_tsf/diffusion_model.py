@@ -418,8 +418,10 @@ class DiffusionTSF(nn.Module):
         mean, std = stats
         K = self.config.lookback_overlap
         H = forecast_length - K
-        with torch.no_grad():
-            coarse = self.guidance_model.get_forecast(past, H)
+        # Gradient flow is controlled inside the guidance model itself
+        # (iTransformerGuidance.freeze): legacy frozen path wraps this in no_grad
+        # internally, joint-training path lets gradients flow back through iTrans.
+        coarse = self.guidance_model.get_forecast(past, H)
         coarse_norm = (coarse - mean) / std
         if K > 0:
             coarse_norm = torch.cat([past_norm[..., -K:], coarse_norm], dim=-1)
@@ -702,7 +704,12 @@ class DiffusionTSF(nn.Module):
         guidance_2d = None
         if self.config.use_guidance_channel:
             guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
-            guidance_2d = self.encode_to_2d(guidance_forecast_norm, scale_for_diffusion=True)
+            if self.config.emits_ghost_image:
+                # encode_to_2d uses clamp+floor which is non-differentiable. Detach
+                # for clarity and to avoid retaining an unused graph branch during
+                # joint training. iTrans gradient flows via cross-attn tokens + aux loss.
+                ghost_input = guidance_forecast_norm.detach() if self.config.e2e_joint_training else guidance_forecast_norm
+                guidance_2d = self.encode_to_2d(ghost_input, scale_for_diffusion=True)
 
         ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
         # ctx: (B, V, ctx_dim) or None
@@ -785,16 +792,34 @@ class DiffusionTSF(nn.Module):
         if guidance_2d is not None and self.config.guidance_penalty_weight > 0:
             guidance_loss = F.mse_loss(x0_pred, guidance_2d)
 
+        # Auxiliary iTransformer forecast MSE — only active during joint training.
+        # Computed on the H predicted steps (not the K-overlap past-tail we
+        # prepended as known context). Anchors iTrans as a real forecaster so it
+        # does not drift into a pure "denoising helper" representation.
+        aux_forecast_loss = torch.tensor(0.0, device=device)
+        if (
+            self.config.e2e_joint_training
+            and guidance_forecast_norm is not None
+            and self.config.aux_forecast_loss_weight > 0.0
+            and future_norm is not None
+        ):
+            K = self.config.lookback_overlap
+            pred_h = guidance_forecast_norm[..., K:] if K > 0 else guidance_forecast_norm
+            tgt_h  = future_norm[..., K:]            if K > 0 else future_norm
+            aux_forecast_loss = F.mse_loss(pred_h, tgt_h)
+
         loss = (
-            noise_loss + 
-            self.config.emd_lambda * emd_loss + 
+            noise_loss +
+            self.config.emd_lambda * emd_loss +
             self.config.monotonicity_weight * mono_loss +
-            self.config.guidance_penalty_weight * guidance_loss
+            self.config.guidance_penalty_weight * guidance_loss +
+            self.config.aux_forecast_loss_weight * aux_forecast_loss
         )
 
         result = {
             'loss': loss, 'noise_loss': noise_loss, 'emd_loss': emd_loss,
             'guidance_loss': guidance_loss,
+            'aux_forecast_loss': aux_forecast_loss,
             'noise_pred': noise_pred, 't': t,
         }
         if guidance_2d is not None:
@@ -828,11 +853,14 @@ class DiffusionTSF(nn.Module):
         cond_flat     = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
         null_cond     = torch.zeros_like(cond_flat) if cfg_scale > 1.0 else None
 
-        # guidance: compute once before loop
+        # guidance: compute once before loop. In tokens-only joint mode
+        # (emits_ghost_image=False) we still want guidance_forecast_norm for
+        # cross-attn tokens via _get_cross_variate_context, but skip the
+        # ghost-image channel emission.
         guidance_forecast_norm = None
         guidance_2d = None
         guide_flat  = None
-        if self.config.use_guidance_channel:
+        if self.config.emits_ghost_image:
             guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
             guidance_2d = self.encode_to_2d(guidance_forecast_norm, scale_for_diffusion=True)
             guide_flat  = guidance_2d.reshape(BV, 1, H, W_fut)

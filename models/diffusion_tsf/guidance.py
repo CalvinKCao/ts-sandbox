@@ -217,7 +217,8 @@ class iTransformerGuidance(BaseGuidance):
         model: nn.Module,
         use_norm: bool = True,
         seq_len: Optional[int] = None,
-        pred_len: Optional[int] = None
+        pred_len: Optional[int] = None,
+        freeze: bool = True,
     ):
         """
         Args:
@@ -225,46 +226,48 @@ class iTransformerGuidance(BaseGuidance):
             use_norm: Whether the model uses internal normalization.
             seq_len: If set, validates/slices past to this length; otherwise uses ``model.seq_len``.
             pred_len: If set, validates forecast_length against this; otherwise uses ``model.pred_len``.
+            freeze: If True (default), keep iTransformer frozen and in eval mode at all
+                times (legacy "Stage 1 frozen guidance" behavior). If False, the
+                iTransformer is jointly trained with the diffusion backbone — its
+                params remain trainable and it follows the parent module's train/eval
+                state. Used by the end-to-end joint training path.
         """
         super().__init__()
         self.model = model
         self.use_norm = use_norm
         self.seq_len = seq_len
         self.pred_len = pred_len
+        self.freeze = freeze
 
-        # Freeze the model - we're using it for inference only
-        for param in self.model.parameters():
-            param.requires_grad = False
-        
-        # Force eval mode: both self.training and wrapped model
-        self.training = False
-        self.model.eval()
-    
+        if self.freeze:
+            for param in self.model.parameters():
+                param.requires_grad = False
+            self.training = False
+            self.model.eval()
+
     def train(self, mode: bool = True):
-        """Override train() to keep iTransformer ALWAYS in eval mode.
-        
-        The guidance model is pre-trained and frozen. It should not be affected
-        by the parent model's training state. This prevents dropout and batch norm
-        layers in the iTransformer from switching to training mode when
-        model.train() is called on the parent DiffusionTSF model.
-        
-        Args:
-            mode: Ignored - the model always stays in eval mode.
-            
-        Returns:
-            self
+        """Override train() so the frozen variant stays in eval mode.
+
+        When ``freeze=True`` (default) the guidance model is pre-trained Stage-1
+        and must not be affected by the parent DiffusionTSF's train/eval flips
+        (prevents dropout / batch norm from switching modes).
+
+        When ``freeze=False`` (joint training) we delegate to the normal
+        ``nn.Module.train`` so the iTransformer participates in training.
         """
-        # Set self.training for consistency with nn.Module API
-        # but keep the actual model in eval mode
-        self.training = False
-        self.model.eval()
-        return self
-    
+        if self.freeze:
+            self.training = False
+            self.model.eval()
+            return self
+        return super().train(mode)
+
     def eval(self):
-        """Set the module to evaluation mode (always the case for guidance)."""
-        self.training = False
-        self.model.eval()
-        return self
+        """Set the module to evaluation mode."""
+        if self.freeze:
+            self.training = False
+            self.model.eval()
+            return self
+        return super().eval()
 
     def _past_seq_len(self) -> Optional[int]:
         if self.seq_len is not None:
@@ -299,12 +302,15 @@ class iTransformerGuidance(BaseGuidance):
             return past[..., -Lwant:]
         return past
     
-    @torch.no_grad()
     def get_encoder_tokens(self, past: torch.Tensor) -> torch.Tensor:
         """Return iTransformer encoder output before the linear projector.
 
         Mirrors the normalization inside iTransformer.forecast() so the
         tokens are consistent with what the model uses internally.
+
+        When ``freeze=True`` (legacy), the call runs under ``torch.no_grad()``.
+        When ``freeze=False`` (joint training), gradients flow into the
+        iTransformer encoder.
 
         Args:
             past: (B, V, L) raw (un-normalized) past sequence
@@ -312,6 +318,12 @@ class iTransformerGuidance(BaseGuidance):
         Returns:
             (B, V, d_model) — cross-variate-aware variate tokens
         """
+        if self.freeze:
+            with torch.no_grad():
+                return self._encoder_tokens_impl(past)
+        return self._encoder_tokens_impl(past)
+
+    def _encoder_tokens_impl(self, past: torch.Tensor) -> torch.Tensor:
         past = self._slice_past_to_model_len(past)
         is_univariate = past.dim() == 2
         if is_univariate:
@@ -329,21 +341,30 @@ class iTransformerGuidance(BaseGuidance):
         enc_out, _ = self.model.encoder(enc_out, attn_mask=None)  # (B, V, d_model)
         return enc_out
 
-    @torch.no_grad()
     def get_forecast(
         self,
         past: torch.Tensor,
         forecast_length: int
     ) -> torch.Tensor:
         """Generate forecast using iTransformer.
-        
+
+        When ``freeze=True`` (legacy), the call runs under ``torch.no_grad()``.
+        When ``freeze=False`` (joint training), gradients flow back into the
+        iTransformer parameters.
+
         Args:
             past: Past sequence of shape (batch, [num_vars,] past_len)
             forecast_length: Number of future steps to predict (must match model's pred_len)
-            
+
         Returns:
             Predicted future of shape (batch, [num_vars,] forecast_length)
         """
+        if self.freeze:
+            with torch.no_grad():
+                return self._forecast_impl(past, forecast_length)
+        return self._forecast_impl(past, forecast_length)
+
+    def _forecast_impl(self, past: torch.Tensor, forecast_length: int) -> torch.Tensor:
         pred_expect = self._past_pred_len()
         if pred_expect is not None and forecast_length != pred_expect:
             raise ValueError(

@@ -24,7 +24,15 @@ from models.diffusion_tsf.train_multivariate_pipeline import create_itransformer
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
 
-def build_model(model_type: str, num_variables: int, lookback: int, forecast: int) -> DiffusionTSF:
+def build_model(
+    model_type: str,
+    num_variables: int,
+    lookback: int,
+    forecast: int,
+    *,
+    e2e_joint_training: bool = False,
+    joint_use_ghost_image: bool = True,
+) -> DiffusionTSF:
     cfg = DiffusionTSFConfig(
         lookback_length=lookback,
         forecast_length=forecast,
@@ -45,19 +53,33 @@ def build_model(model_type: str, num_variables: int, lookback: int, forecast: in
         unet_channels=[32, 64],
         attention_levels=[1],
         model_type=model_type,
+        e2e_joint_training=e2e_joint_training,
+        joint_use_ghost_image=joint_use_ghost_image,
     )
 
     itrans = create_itransformer(seq_len=lookback, pred_len=forecast, num_vars=num_variables, dropout=0.0)
-    guidance = iTransformerGuidance(itrans)
+    guidance = iTransformerGuidance(itrans, freeze=not e2e_joint_training)
     model = DiffusionTSF(cfg, guidance_model=guidance)
     return model
 
 
-def smoke_one(model_type: str) -> None:
-    print(f"\n--- smoke: {model_type} ---")
+def smoke_one(
+    model_type: str,
+    *,
+    e2e_joint_training: bool = False,
+    joint_use_ghost_image: bool = True,
+) -> None:
+    tag = model_type
+    if e2e_joint_training:
+        tag += f" joint(ghost={'B' if joint_use_ghost_image else 'C'})"
+    print(f"\n--- smoke: {tag} ---")
     torch.manual_seed(0)
     B, V, L, F_ = 2, 3, 48, 16
-    model = build_model(model_type, V, L, F_).cpu()
+    model = build_model(
+        model_type, V, L, F_,
+        e2e_joint_training=e2e_joint_training,
+        joint_use_ghost_image=joint_use_ghost_image,
+    ).cpu()
 
     n_params = sum(p.numel() for p in model.noise_predictor.parameters())
     print(f"  backbone params: {n_params/1e6:.2f}M")
@@ -70,10 +92,24 @@ def smoke_one(model_type: str) -> None:
     assert out["loss"].dim() == 0
     print(f"  forward OK: loss={out['loss'].item():.4f}, noise_pred shape={tuple(out['noise_pred'].shape)}")
 
+    if e2e_joint_training:
+        assert "aux_forecast_loss" in out
+        assert out["aux_forecast_loss"].item() > 0.0, "aux_forecast_loss should be nonzero"
+        print(f"  aux_forecast_loss={out['aux_forecast_loss'].item():.4f}")
+
     out["loss"].backward()
     grad_norms = [p.grad.norm().item() for p in model.noise_predictor.parameters() if p.grad is not None]
     assert grad_norms, "no grads flowed to backbone"
     print(f"  grads flowed through {len(grad_norms)} backbone tensors; max grad norm={max(grad_norms):.4f}")
+
+    itrans_params_with_grad = [p for p in model.guidance_model.model.parameters() if p.grad is not None]
+    itrans_grad_norms = [p.grad.norm().item() for p in itrans_params_with_grad]
+    if e2e_joint_training:
+        assert itrans_grad_norms, "iTrans should receive gradient in joint mode"
+        print(f"  iTrans grads: {len(itrans_grad_norms)} tensors, max norm={max(itrans_grad_norms):.4f}")
+    else:
+        assert not itrans_grad_norms, f"iTrans should be frozen, got {len(itrans_grad_norms)} grad tensors"
+        print("  iTrans correctly frozen (no grads)")
 
     model.eval()
     with torch.no_grad():
@@ -86,6 +122,10 @@ if __name__ == "__main__":
     try:
         smoke_one("unet")
         smoke_one("dit")
+        smoke_one("dit", e2e_joint_training=True, joint_use_ghost_image=True)   # Option B
+        smoke_one("dit", e2e_joint_training=True, joint_use_ghost_image=False)  # Option C
+        smoke_one("unet", e2e_joint_training=True, joint_use_ghost_image=True)
+        smoke_one("unet", e2e_joint_training=True, joint_use_ghost_image=False)
     except Exception as e:
         print(f"SMOKE FAILED: {type(e).__name__}: {e}")
         raise SystemExit(1)
