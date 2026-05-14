@@ -5,7 +5,8 @@
 # From a login node this script **submits many Slurm GPU jobs in parallel** (one
 # pretrain per native dim, one finetune per dataset). With RUN=all, finetune jobs
 # depend on the matching-dim pretrain (afterok). Check sacct / squeue.
-# Logs: ./results/logs/MM-DD-<jobid-last4>-joint-pre-d*.log | joint-ft-*.log
+# Logs: ./results/logs/MM-DD-<jobid-last4>-joint-pre-d*-gB.log | joint-ft-*-gB.log
+#       (suffix -gB or -gC matches --joint-ghost-variant).
 #
 # Usage (repo root):
 #   ./utils/run_joint_small_datasets.sh
@@ -28,6 +29,33 @@ else
   ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
   cd "$ROOT"
 fi
+
+# Slurm job names / per-job log stems: include ghost variant (B = image ghost, C = tokens-only).
+_parse_joint_ghost_from_argv() {
+  local _expect=
+  for _a in "$@"; do
+    if [[ -n "${_expect}" ]]; then
+      JOINT_GHOST_VARIANT="${_a}"
+      _expect=
+      continue
+    fi
+    if [[ "$_a" == "--joint-ghost-variant" ]]; then
+      _expect=1
+      continue
+    fi
+  done
+  if [[ -n "${_expect}" ]]; then
+    echo "ERROR: --joint-ghost-variant requires a value (B or C)" >&2
+    exit 1
+  fi
+}
+JOINT_GHOST_VARIANT="${JOINT_GHOST_VARIANT:-B}"
+_parse_joint_ghost_from_argv "$@"
+if [[ "${JOINT_GHOST_VARIANT}" != "B" && "${JOINT_GHOST_VARIANT}" != "C" ]]; then
+  echo "ERROR: JOINT_GHOST_VARIANT must be B or C (got ${JOINT_GHOST_VARIANT})" >&2
+  exit 1
+fi
+export JOINT_GHOST_VARIANT
 
 MAX_V="${MAX_V:-31}" # native dim < 32  =>  d <= 31
 RUN="${RUN:-all}"    # all | pretrain | finetune
@@ -83,17 +111,18 @@ if [[ -n "${JOINT_SLURM_TASK:-}" ]]; then
     echo "ERROR: JOINT_SLURM_TASK is internal (set by parallel sbatch). Unset it, or use JOINT_SMALL_LOCAL=1 for a local single task." >&2
     exit 1
   fi
+  _gv="${JOINT_GHOST_VARIANT:-B}"
   case "${JOINT_SLURM_TASK}" in
     pretrain)
       [[ -n "${JOINT_SLURM_DIM:-}" ]] || { echo "ERROR: JOINT_SLURM_DIM missing for pretrain worker" >&2; exit 1; }
-      _stem_suffix="joint-pre-d${JOINT_SLURM_DIM}"
+      _stem_suffix="joint-pre-d${JOINT_SLURM_DIM}-g${_gv}"
       ;;
     finetune)
       [[ -n "${JOINT_SLURM_DATASET:-}" && -n "${JOINT_SLURM_DIM:-}" ]] || {
         echo "ERROR: JOINT_SLURM_DATASET and JOINT_SLURM_DIM required for finetune worker" >&2
         exit 1
       }
-      _stem_suffix="joint-ft-${JOINT_SLURM_DATASET}"
+      _stem_suffix="joint-ft-${JOINT_SLURM_DATASET}-g${_gv}"
       ;;
     *)
       echo "ERROR: JOINT_SLURM_TASK must be pretrain or finetune" >&2
@@ -107,7 +136,7 @@ if [[ -n "${JOINT_SLURM_TASK:-}" ]]; then
     touch "$ROOT/results/logs/${STEM}.log"
     exec >>"$ROOT/results/logs/${STEM}.log" 2>&1
     echo "=========================================="
-    echo "Job ID: $SLURM_JOB_ID  task=${JOINT_SLURM_TASK}  log: ./results/logs/${STEM}.log"
+    echo "Job ID: $SLURM_JOB_ID  task=${JOINT_SLURM_TASK}  ghost=g${_gv}  log: ./results/logs/${STEM}.log"
     echo "Node: ${SLURMD_NODENAME:-?}  started: $(date -Is)"
     echo "=========================================="
   fi
@@ -243,7 +272,7 @@ if [[ -z "${SLURM_JOB_ID:-}" && "${JOINT_SMALL_LOCAL:-0}" != "1" ]] && command -
     echo "Submitting parallel joint **pretrain** jobs (one per dim) account=$ACCT ..."
     for d in $dims; do
       jid="$(sbatch --parsable \
-        --job-name="joint-pre-d${d}" \
+        --job-name="joint-pre-d${d}-g${JOINT_GHOST_VARIANT}" \
         --account="$ACCT" \
         "${_time[@]}" \
         --nodes=1 \
@@ -253,7 +282,7 @@ if [[ -z "${SLURM_JOB_ID:-}" && "${JOINT_SMALL_LOCAL:-0}" != "1" ]] && command -
         --chdir="$ROOT" \
         --output=/dev/null \
         --error=/dev/null \
-        --export=ALL,JOINT_SLURM_TASK=pretrain,JOINT_SLURM_DIM="${d}" \
+        --export=ALL,JOINT_SLURM_TASK=pretrain,JOINT_SLURM_DIM="${d}",JOINT_GHOST_VARIANT="${JOINT_GHOST_VARIANT}" \
         "$_SELF" "$@")"
       PRETRAIN_JID[$d]="$jid"
       echo "  pretrain dim=$d -> job $jid"
@@ -271,7 +300,7 @@ if [[ -z "${SLURM_JOB_ID:-}" && "${JOINT_SMALL_LOCAL:-0}" != "1" ]] && command -
       fi
       jid="$(sbatch --parsable \
         "${_dep[@]}" \
-        --job-name="joint-ft-${name}" \
+        --job-name="joint-ft-${name}-g${JOINT_GHOST_VARIANT}" \
         --account="$ACCT" \
         "${_time[@]}" \
         --nodes=1 \
@@ -281,7 +310,7 @@ if [[ -z "${SLURM_JOB_ID:-}" && "${JOINT_SMALL_LOCAL:-0}" != "1" ]] && command -
         --chdir="$ROOT" \
         --output=/dev/null \
         --error=/dev/null \
-        --export=ALL,JOINT_SLURM_TASK=finetune,JOINT_SLURM_DATASET="${name}",JOINT_SLURM_DIM="${dim}" \
+        --export=ALL,JOINT_SLURM_TASK=finetune,JOINT_SLURM_DATASET="${name}",JOINT_SLURM_DIM="${dim}",JOINT_GHOST_VARIANT="${JOINT_GHOST_VARIANT}" \
         "$_SELF" "$@")"
       echo "  finetune $name (dim=$dim) -> job $jid${PRETRAIN_JID[$dim]:+ (after pretrain ${PRETRAIN_JID[$dim]})}"
     done
@@ -303,7 +332,7 @@ if [[ -z "${SLURM_JOB_ID:-}" && "${JOINT_SMALL_LOCAL:-0}" != "1" ]] && command -
   if [[ "$IS_SMOKE" -eq 1 ]]; then
     echo "Submitting single sequential Slurm smoke job (L40S, ~45 min) account=$ACCT ..."
     jid="$(sbatch --parsable \
-      --job-name=joint-small-seq-smoke \
+      --job-name="joint-small-seq-smoke-g${JOINT_GHOST_VARIANT}" \
       --account="$ACCT" \
       --time=0:45:00 \
       --nodes=1 \
@@ -318,7 +347,7 @@ if [[ -z "${SLURM_JOB_ID:-}" && "${JOINT_SMALL_LOCAL:-0}" != "1" ]] && command -
   else
     echo "Submitting single sequential Slurm job (L40S, 2 d wall) account=$ACCT ..."
     jid="$(sbatch --parsable \
-      --job-name=joint-small-seq \
+      --job-name="joint-small-seq-g${JOINT_GHOST_VARIANT}" \
       --account="$ACCT" \
       --time=2-00:00:00 \
       --nodes=1 \
@@ -340,7 +369,7 @@ fi
 # One sequential Slurm job (JOINT_SMALL_SEQUENTIAL=1) or local / no sbatch
 # ---------------------------------------------------------------------------
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
-  STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-joint-small-datasets"
+  STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-joint-small-g${JOINT_GHOST_VARIANT}-datasets"
   mkdir -p "$ROOT/results/logs"
   touch "$ROOT/results/logs/${STEM}.log"
   exec >>"$ROOT/results/logs/${STEM}.log" 2>&1

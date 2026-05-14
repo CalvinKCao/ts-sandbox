@@ -68,11 +68,11 @@ The default pipeline collapses to **two phases**, each a single Optuna search ov
            │   search space: diffusion_lr ∈ [5e-5, 5e-4]   log-uniform
            │                  itrans_lr    ∈ [5e-5, 5e-4]  log-uniform
            │   each trial: optional iTrans-only warmup (aux MSE only) then joint
-           │   best trial state_dict → joint_pretrained.pt + joint_pretrain_hp.json
+           │   best trial state_dict → joint_pretrained_gB.pt|gC.pt + joint_pretrain_hp_gB.json|gC.json
 ── FINETUNE (per dataset/subset) ────────────────────────────────────────────
   Phase 2  │ Joint HP finetune on real data (Optuna, N=N_JOINT_FINETUNE_TRIALS)
-           │   warm-start each trial from joint_pretrained.pt
-           │   same search space; best state_dict → {subset}_joint_finetuned.pt
+           │   warm-start each trial from the matching-variant joint pretrain ckpt
+           │   same search space; best state_dict → {subset}_joint_finetuned_gB.pt|gC.pt
   Eval     │ Diffusion eval + iTrans baseline (iTrans head inside the joint model)
 ─────────────────────────────────────────────────────────────────────────────
 ```
@@ -87,16 +87,16 @@ The four-phase pipeline (Phase 1A/1B iTrans-then-diffusion HP search, Phase 2A/2
 - **Fixed iTrans HPs:** d_model, e_layers, n_heads, d_ff, dropout are NOT searched — the iTransformer is fixed at its largest-capacity preset (`itrans_d_model=512`, `e_layers=4`, `n_heads=8`, `d_ff=512`, `dropout=0.1`) so search compute is concentrated on the diffusion backbone (which dominates total params and is the active research target).
 - **Per-trial training:** `JOINT_PRETRAIN_MAX_EPOCHS = 15` total, including `JOINT_WARMUP_EPOCHS = 1` iTrans-only warmup at the start; early-stop patience `JOINT_PRETRAIN_PATIENCE = 5`.
 - **Best-state tracking:** cross-trial best `state_dict` is captured to CPU whenever a trial improves the global best (`optuna_search_joint_phase` in `joint_training.py`).
-- **Output:** `joint_pretrained.pt` (full DiffusionTSF state) + `joint_pretrain_hp.json` (best LR pair + ghost variant + warmup epochs).
+- **Output:** `joint_pretrained_gB.pt` / `joint_pretrained_gC.pt` (full DiffusionTSF state) + matching `joint_pretrain_hp_gB.json` / `joint_pretrain_hp_gC.json` (best LR pair + ghost variant + warmup epochs). Variant B may still load a legacy unsuffixed `joint_pretrained.pt` if the suffixed file is absent.
 
 ### Phase 2 — Joint real-data finetune (`run_joint_finetune_mode`)
 
 - **Entry:** `run_joint_finetune_mode()`, dispatched by `--mode finetune`.
 - **Trials:** `N_JOINT_FINETUNE_TRIALS = 3`.
 - **Search space:** identical to Phase 1 (same LR pair, log-uniform).
-- **Warm start:** every trial loads `joint_pretrained.pt` into a fresh DiffusionTSF before training. Both iTrans and diffusion backbone weights restart from the pretrain best.
+- **Warm start:** every trial loads the matching ghost-variant pretrain checkpoint (`joint_pretrained_gB.pt` or `joint_pretrained_gC.pt`) into a fresh DiffusionTSF before training. Both iTrans and diffusion backbone weights restart from the pretrain best.
 - **Per-trial training:** `JOINT_FINETUNE_MAX_EPOCHS = 10`, patience `JOINT_FINETUNE_PATIENCE = 5`, warmup `JOINT_WARMUP_EPOCHS = 1`.
-- **Output:** `{subset}_joint_finetuned.pt` + `{subset}_joint_ft_hp.json`.
+- **Output:** `{subset}_joint_finetuned_gB.pt` / `{subset}_joint_finetuned_gC.pt` + matching `{subset}_joint_ft_hp_gB.json` / `{subset}_joint_ft_hp_gC.json`.
 
 ### Evaluation (unchanged from legacy)
 
@@ -836,7 +836,7 @@ This section walks the joint-training implementation that backs `--mode pretrain
 | Ghost-image gradient path | dead | dead by design (`encode_to_2d` is non-differentiable); ghost input is `.detach()`ed |
 | Auxiliary forecast loss | absent | `aux_forecast_loss_weight * MSE(coarse_norm, future_norm)` always added |
 | HP search | 4 separate Optuna studies (1A, 1B, 2A, 2B/2C) | 2 joint Optuna studies (Phase 1 pretrain, Phase 2 finetune) |
-| Output checkpoints | `itransformer.pt` + `diffusion.pt` + `*_itransformer_finetuned.pt` + `{subset}/best.pt` | `joint_pretrained.pt` + `{subset}_joint_finetuned.pt` (full DiffusionTSF state in one file each) |
+| Output checkpoints | `itransformer.pt` + `diffusion.pt` + `*_itransformer_finetuned.pt` + `{subset}/best.pt` | `joint_pretrained_gB.pt` / `joint_pretrained_gC.pt` + `{subset}_joint_finetuned_gB.pt` / `..._gC.pt` (full DiffusionTSF state; filenames encode ghost variant) |
 
 ### 13.2 Gradient flow paths in joint mode
 
@@ -882,7 +882,7 @@ A thin wrapper that:
 2. Samples `diffusion_lr` and `itrans_lr` log-uniformly from `JointSearchConfig.{diffusion,itrans}_lr_{min,max}`.
 3. Runs `train_joint_phase` with those LRs, reporting joint-phase val losses back to Optuna for median pruning (warmup-phase val loss is skipped from pruner reports).
 4. Cross-trial best `state_dict` is captured (CPU-resident) whenever a trial improves the global best — no need for a retraining pass after the search.
-5. Returns `(best_params, best_state_dict, study)`. Saved by the caller as `joint_pretrained.pt` / `{subset}_joint_finetuned.pt` plus `*_hp.json`.
+5. Returns `(best_params, best_state_dict, study)`. Saved by the caller as `joint_pretrained_gB.pt` / `joint_pretrained_gC.pt` / `{subset}_joint_finetuned_gB.pt` / `..._gC.pt` plus matching `*_hp.json` (suffix matches `--joint-ghost-variant`).
 
 ### 13.5 Aux loss weighting — the most important new HP
 

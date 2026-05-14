@@ -796,6 +796,36 @@ def pretrain_dir_for_dim(dim: int, base_dir: str = None) -> str:
     return os.path.join(base, f'pretrained_dim{dim}')
 
 
+def _joint_variant_token(joint_use_ghost_image: bool) -> str:
+    """Short token for filenames, Optuna study names, and Slurm job tags (ghost-B vs tokens-only-C)."""
+    return "gB" if joint_use_ghost_image else "gC"
+
+
+def _joint_ckpt_suffix(joint_use_ghost_image: bool) -> str:
+    """Underscore-prefixed suffix for checkpoint / HP JSON filenames."""
+    return "_" + _joint_variant_token(joint_use_ghost_image)
+
+
+def _resolve_joint_pretrain_ckpt_path(dim_dir: str, joint_use_ghost_image: bool) -> str:
+    """Path to joint pretrain weights for this ghost variant.
+
+    Prefers ``joint_pretrained_gB.pt`` / ``joint_pretrained_gC.pt``. For variant B
+    only, falls back to legacy ``joint_pretrained.pt`` if the suffixed file is absent.
+    """
+    suffixed = os.path.join(dim_dir, f"joint_pretrained{_joint_ckpt_suffix(joint_use_ghost_image)}.pt")
+    if os.path.exists(suffixed):
+        return suffixed
+    legacy = os.path.join(dim_dir, "joint_pretrained.pt")
+    if joint_use_ghost_image and os.path.exists(legacy):
+        logger.warning(
+            "Using legacy pretrain checkpoint %s (re-run --mode pretrain to write %s)",
+            legacy,
+            suffixed,
+        )
+        return legacy
+    return suffixed
+
+
 # ============================================================================
 # iTransformer Model Creation
 # ============================================================================
@@ -3572,8 +3602,9 @@ def run_joint_pretrain_mode(
     Trains iTransformer + diffusion jointly on the synthetic RealTS pool.
     Runs an Optuna search over ``(diffusion_lr, itrans_lr)`` when
     ``n_trials > 1`` (the recommended path) and saves the best trial's
-    checkpoint as ``joint_pretrained.pt``. With ``n_trials == 1`` or in
-    smoke-test mode, a single run with the user-supplied LRs is used.
+    checkpoint as ``joint_pretrained_gB.pt`` or ``joint_pretrained_gC.pt``.
+    With ``n_trials == 1`` or in smoke-test mode, a single run with the
+    user-supplied LRs is used.
     """
     from models.diffusion_tsf.dataset import get_synthetic_dataloader  # local import
     from models.diffusion_tsf.joint_training import (
@@ -3589,8 +3620,9 @@ def run_joint_pretrain_mode(
     device = get_device()
     dim_dir = pretrain_dir_for_dim(n_variates)
     os.makedirs(dim_dir, exist_ok=True)
-    joint_ckpt = os.path.join(dim_dir, 'joint_pretrained.pt')
-    joint_hp_json = os.path.join(dim_dir, 'joint_pretrain_hp.json')
+    _vtag = _joint_variant_token(joint_use_ghost_image)
+    joint_ckpt = os.path.join(dim_dir, f'joint_pretrained{_joint_ckpt_suffix(joint_use_ghost_image)}.pt')
+    joint_hp_json = os.path.join(dim_dir, f'joint_pretrain_hp{_joint_ckpt_suffix(joint_use_ghost_image)}.json')
 
     if num_epochs is None:
         num_epochs = 1 if smoke_test else JOINT_PRETRAIN_MAX_EPOCHS
@@ -3663,10 +3695,10 @@ def run_joint_pretrain_mode(
             log_wandb({**info, 'trial': trial.number,
                        'diffusion_lr': trial.params.get('diffusion_lr'),
                        'itrans_lr':    trial.params.get('itrans_lr')},
-                      prefix='joint_pretrain/optuna')
+                      prefix=f'joint_pretrain/dim{n_variates}_{_vtag}/optuna')
         best_params, best_state, study = optuna_search_joint_phase(
             _factory, train_loader, val_loader, search_cfg,
-            device=device, study_name=f'joint_pretrain_dim{n_variates}',
+            device=device, study_name=f'joint_pretrain_dim{n_variates}_{_vtag}',
             on_trial_end=_trial_logger,
         )
         best_val_loss = study.best_value if study.best_trial else float('nan')
@@ -3685,7 +3717,7 @@ def run_joint_pretrain_mode(
         )
         result = train_joint_phase(
             unwrap_model(model), train_loader, val_loader, tcfg, device=device,
-            on_epoch_end=lambda i, m: log_wandb(m, prefix='joint_pretrain'),
+            on_epoch_end=lambda i, m: log_wandb(m, prefix=f'joint_pretrain/dim{n_variates}_{_vtag}'),
         )
         best_val_loss, best_epoch = result.best_val_loss, result.best_epoch
         result_state_dict = result.best_state_dict
@@ -3733,7 +3765,8 @@ def run_joint_finetune_mode(
     Each Optuna trial loads a fresh copy of the joint pretrain checkpoint and
     continues joint training on the real dataset's train split with its own
     sampled LR pair. Best trial's checkpoint is promoted to
-    ``{subset}_joint_finetuned.pt``.
+    ``{subset}_joint_finetuned_gB.pt`` or ``{subset}_joint_finetuned_gC.pt`` matching
+    the ghost variant.
     """
     from models.diffusion_tsf.joint_training import (
         JointSearchConfig, JointTrainConfig,
@@ -3747,10 +3780,15 @@ def run_joint_finetune_mode(
 
     device = get_device()
     dim_dir = pretrain_dir_for_dim(n_variates)
-    joint_ckpt = os.path.join(dim_dir, 'joint_pretrained.pt')
+    _vtag = _joint_variant_token(joint_use_ghost_image)
+    joint_ckpt = _resolve_joint_pretrain_ckpt_path(dim_dir, joint_use_ghost_image)
     if not os.path.exists(joint_ckpt):
         logger.error("Joint pretrain checkpoint not found: %s", joint_ckpt)
-        logger.error("Run --mode pretrain --n-variates %d first", n_variates)
+        logger.error(
+            "Run --mode pretrain --n-variates %d --joint-ghost-variant %s first",
+            n_variates,
+            "B" if joint_use_ghost_image else "C",
+        )
         sys.exit(1)
 
     if variate_indices is None:
@@ -3821,10 +3859,10 @@ def run_joint_finetune_mode(
             log_wandb({**info, 'trial': trial.number,
                        'diffusion_lr': trial.params.get('diffusion_lr'),
                        'itrans_lr':    trial.params.get('itrans_lr')},
-                      prefix=f'joint_finetune/{subset_id}/optuna')
+                      prefix=f'joint_finetune/{subset_id}_{_vtag}/optuna')
         best_params, best_state, study = optuna_search_joint_phase(
             _factory, train_loader, val_loader, search_cfg,
-            device=device, study_name=f'joint_finetune_{subset_id}',
+            device=device, study_name=f'joint_finetune_{subset_id}_{_vtag}',
             on_trial_end=_trial_logger,
         )
         best_val_loss = study.best_value if study.best_trial else float('nan')
@@ -3842,7 +3880,7 @@ def run_joint_finetune_mode(
         )
         result = train_joint_phase(
             unwrap_model(model), train_loader, val_loader, tcfg, device=device,
-            on_epoch_end=lambda i, m: log_wandb(m, prefix=f'joint_finetune/{subset_id}'),
+            on_epoch_end=lambda i, m: log_wandb(m, prefix=f'joint_finetune/{subset_id}_{_vtag}'),
         )
         best_val_loss, best_epoch = result.best_val_loss, result.best_epoch
         result_state_dict = result.best_state_dict
@@ -3852,8 +3890,9 @@ def run_joint_finetune_mode(
             'joint_use_ghost_image': joint_use_ghost_image, 'warmup_epochs': warmup_epochs,
         }
 
-    ft_ckpt = os.path.join(CHECKPOINT_DIR, f'{subset_id}_joint_finetuned.pt')
-    ft_hp_json = os.path.join(CHECKPOINT_DIR, f'{subset_id}_joint_ft_hp.json')
+    _ft_suf = _joint_ckpt_suffix(joint_use_ghost_image)
+    ft_ckpt = os.path.join(CHECKPOINT_DIR, f'{subset_id}_joint_finetuned{_ft_suf}.pt')
+    ft_hp_json = os.path.join(CHECKPOINT_DIR, f'{subset_id}_joint_ft_hp{_ft_suf}.json')
     if is_main_process() and result_state_dict is not None:
         cfg_snapshot = _factory().config.__dict__
         torch.save({
@@ -4023,6 +4062,10 @@ def main():
             if args.wandb:
                 tags = ['smoke-test'] if args.smoke_test else []
                 tags.append('mode-pretrain')
+                tags.append(f'ghost-{args.joint_ghost_variant}')
+                _wname = f"pretrain-g{args.joint_ghost_variant}-dim{nv}"
+                if args.smoke_test:
+                    _wname = f"smoke-{_wname}"
                 init_wandb(
                     project=args.wandb_project,
                     config={
@@ -4031,7 +4074,7 @@ def main():
                         'itrans_lr': joint_itrans_lr, 'warmup_epochs': args.joint_warmup_epochs,
                         'aux_weight': args.joint_aux_weight, 'ghost_variant': args.joint_ghost_variant,
                     },
-                    resume=args.resume, tags=tags,
+                    resume=args.resume, tags=tags, name=_wname,
                 )
             run_joint_pretrain_mode(
                 nv, smoke_test=args.smoke_test, seed=args.seed,
@@ -4062,6 +4105,10 @@ def main():
             if args.wandb:
                 tags = ['smoke-test'] if args.smoke_test else []
                 tags.append('mode-finetune')
+                tags.append(f'ghost-{args.joint_ghost_variant}')
+                _wname = f"ft-g{args.joint_ghost_variant}-{args.dataset}"
+                if args.smoke_test:
+                    _wname = f"smoke-{_wname}"
                 init_wandb(
                     project=args.wandb_project,
                     config={
@@ -4071,7 +4118,7 @@ def main():
                         'warmup_epochs': args.joint_warmup_epochs, 'aux_weight': args.joint_aux_weight,
                         'ghost_variant': args.joint_ghost_variant,
                     },
-                    resume=args.resume, tags=tags,
+                    resume=args.resume, tags=tags, name=_wname,
                 )
             run_joint_finetune_mode(
                 args.dataset, nv, variate_indices=variate_indices, subset_id=args.subset_id,
