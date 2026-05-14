@@ -2,38 +2,57 @@
 # Throwaway: submit pretrain + per-dataset finetune jobs for the old pipeline.
 # All datasets w/ fewer variates than weather, plus solar_Alabama and PeMS.
 # Walltime: 24h L40S on Killarney.
-set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$ROOT"
 
 ACCOUNT=aip-boyuwang
 MAIL=ccao87@uwo.ca
 TIME_MIN=$((24 * 60))
-LOG_DIR="$ROOT/results/slurm_logs"
-mkdir -p "$LOG_DIR"
 
 DATASETS=(ETTh1 ETTh2 ETTm1 ETTm2 illness exchange_rate solar_Alabama PeMS)
 
 # --------- shared body run inside a Slurm job -----------------------------
-if [ "${1:-}" = "__inner_pretrain" ]; then
-    set -x
+# SLURM_SUBMIT_DIR is set by Slurm to the directory sbatch was run from.
+# BASH_SOURCE[0] points at the spool copy under /cm/local/.../spool/, not
+# the repo — do not use it to anchor paths inside the job body.
+if [ "${1:-}" = "__inner_pretrain" ] || [ "${1:-}" = "__inner_finetune" ]; then
+    set -euo pipefail
+    ROOT="${SLURM_SUBMIT_DIR:?SLURM_SUBMIT_DIR not set}"
     cd "$ROOT"
-    [ -f .venv/bin/activate ] && source .venv/bin/activate || source venv/bin/activate
-    exec ./train_universal_pretrain.sh --seed 42
-elif [ "${1:-}" = "__inner_finetune" ]; then
-    DS="$2"
-    set -x
-    cd "$ROOT"
-    [ -f .venv/bin/activate ] && source .venv/bin/activate || source venv/bin/activate
-    exec ./train_universal_pretrain.sh \
-        --seed 42 \
-        --skip-synthetic-search \
-        --skip-universal-pretrain \
-        --dataset "$DS"
+    LOG_DIR="$ROOT/results/slurm_logs"
+    mkdir -p "$LOG_DIR"
+
+    module purge || true
+    module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9 || true
+
+    # Rebuild venv on fast local NVMe — avoids Lustre import latency
+    virtualenv --no-download "$SLURM_TMPDIR/env"
+    source "$SLURM_TMPDIR/env/bin/activate"
+    pip install --no-index --upgrade pip
+    pip install --no-index torch numpy pandas scikit-learn optuna
+    pip install --no-index wandb
+
+    # Install repo packages if setup.py / pyproject exists
+    [ -f setup.py ] || [ -f pyproject.toml ] && pip install --no-index -e . --no-build-isolation || true
+
+    if [ "${1:-}" = "__inner_pretrain" ]; then
+        set -x
+        exec ./train_universal_pretrain.sh --seed 42
+    else
+        DS="$2"
+        set -x
+        exec ./train_universal_pretrain.sh \
+            --seed 42 \
+            --skip-synthetic-search \
+            --skip-universal-pretrain \
+            --dataset "$DS"
+    fi
 fi
 
 # --------- login-side: submit jobs ----------------------------------------
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="$ROOT/results/slurm_logs"
+mkdir -p "$LOG_DIR"
+
 SBATCH_COMMON=(
     --account="$ACCOUNT"
     --nodes=1 --gres=gpu:l40s:1 --cpus-per-task=8 --mem=50G
