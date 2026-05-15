@@ -18,29 +18,38 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ===========================================================================
 if [ -z "${SLURM_JOB_ID:-}" ]; then
     mkdir -p "$SCRIPT_DIR/results/bootstrap"
-    SB_OUT='results/bootstrap/mse-ablation-%j.out'
-    SB_ERR='results/bootstrap/mse-ablation-%j.err'
 
     IS_SMOKE=0
     WALLTIME="12:00:00"
     [ "${1:-}" = "--smoke-test" ] && IS_SMOKE=1 && WALLTIME="00:20:00"
 
-    echo "Submitting MSE ablation sweep (Job Name: mse-ablation)..."
-    sbatch \
-        --job-name="mse-ablation" \
-        --account=aip-boyuwang \
-        --time="$WALLTIME" \
-        --nodes=1 \
-        --gres=gpu:l40s:1 \
-        --cpus-per-task=8 \
-        --mem=50G \
-        --chdir="$SCRIPT_DIR" \
-        --output="$SB_OUT" \
-        --error="$SB_ERR" \
-        --mail-type=END,FAIL \
-        --mail-user=ccao87@uwo.ca \
-        --export="ALL,IS_MSE_EXP=1" \
-        "$SCRIPT_DIR/run_mse_variants.sh" "$@"
+    DATASETS=("ETTh1" "ETTm1" "exchange_rate")
+    WEIGHTS=(0.05 0.2 0.5)
+
+    echo "Submitting MSE ablation sweep (Parallel jobs)..."
+    for ds in "${DATASETS[@]}"; do
+        for w in "${WEIGHTS[@]}"; do
+            tag="${ds}_mse${w}"
+            echo "  Submitting: $tag"
+            
+            sbatch \
+                --job-name="mse-${tag}" \
+                --account=aip-boyuwang \
+                --time="$WALLTIME" \
+                --nodes=1 \
+                --gres=gpu:l40s:1 \
+                --cpus-per-task=8 \
+                --mem=50G \
+                --chdir="$SCRIPT_DIR" \
+                --output="results/bootstrap/mse-${tag}-%j.out" \
+                --error="results/bootstrap/mse-${tag}-%j.err" \
+                --mail-type=END,FAIL \
+                --mail-user=ccao87@uwo.ca \
+                --export="ALL,IS_MSE_EXP=1,RUN_DS=$ds,RUN_WEIGHT=$w" \
+                "$SCRIPT_DIR/run_mse_variants.sh" "$@"
+        done
+    done
+    echo "All jobs submitted!"
     exit 0
 fi
 
@@ -94,7 +103,7 @@ if [ "${1:-}" = "--smoke-test" ]; then
 fi
 
 # Setup results directory
-ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID}-mse-ablation"
+ALLIANCE_RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID}-${SLURM_JOB_NAME:-mse-ablation}"
 RUN_RESULTS_ROOT="$PROJECT_ROOT/results/$ALLIANCE_RUN_STEM"
 RUN_LOG_DIR="$RUN_RESULTS_ROOT/logs"
 RUN_CKPT_DIR="$RUN_RESULTS_ROOT/ckpts"
@@ -115,8 +124,13 @@ echo "=========================================="
 PYTHON="python -u -m models.diffusion_tsf.train_multivariate_pipeline"
 
 # ---- Experiment matrix ----
-DATASETS=("ETTh1" "ETTm1" "exchange_rate")
-WEIGHTS=(0.05 0.2 0.5)
+if [ -n "${RUN_DS:-}" ] && [ -n "${RUN_WEIGHT:-}" ]; then
+    DATASETS=("$RUN_DS")
+    WEIGHTS=("$RUN_WEIGHT")
+else
+    DATASETS=("ETTh1" "ETTm1" "exchange_rate")
+    WEIGHTS=(0.05 0.2 0.5)
+fi
 
 declare -A DIM_MAP
 DIM_MAP["ETTh1"]=7
