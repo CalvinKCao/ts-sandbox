@@ -4,10 +4,12 @@
 # Submit from anywhere; the job cwd must be the repo (same layout as training).
 #
 #   export TS="$SCRATCH/ts-sandbox"   # or /scratch/ccao87/ts-sandbox
-#   export PROJECT=...   # optional; else same auto-detect as run.sh (~/projects/def-*|aip-*)
+#   export PROJECT=/abs/path/to/projects/def-...   # optional absolute path (not CCDB slug)
 #   export VENV=...   # optional; else $PROJECT/$USER/diffusion-tsf/venv (or -fullvar)
 #   mkdir -p "$TS/results/logs"
-#   sbatch --chdir="$TS" --export=ALL,TS,R="${TS}/results" utils/slurm_array_joint_testset_eval.sh
+#   sbatch --chdir="$TS" --export=TS,R="${TS}/results" utils/slurm_array_joint_testset_eval.sh
+#   Avoid --export=ALL here: some shells set PROJECT to the Slurm account slug (e.g.
+#   aip-boyuwang), which is not the ~/projects/... path this script needs for venvs.
 #
 # Tune concurrency: --array=0-11%4  (example: max 4 GPUs at once)
 
@@ -53,23 +55,32 @@ stem="${stems[$SLURM_ARRAY_TASK_ID]:?bad SLURM_ARRAY_TASK_ID}"
 
 cd "$TS"
 
-# Auto-detect PROJECT (same logic as run.sh: first ~/projects/def-* or aip-*)
-if [ -z "${PROJECT:-}" ] && [ -d "$HOME/projects" ]; then
+# Filesystem root for venvs (run.sh calls this PROJECT). --export=ALL often injects
+# PROJECT=aip-boyuwang (CCDB group / Slurm account), which is not a path — ignore it.
+project_fs=""
+if [ -n "${PROJECT:-}" ] && [ "${PROJECT#/}" != "${PROJECT}" ] && [ -d "$PROJECT" ]; then
+  project_fs=$(readlink -f "$PROJECT")
+fi
+if [ -z "$project_fs" ] && [ -d "$HOME/projects" ]; then
   shopt -s nullglob
   _m=("$HOME"/projects/def-* "$HOME"/projects/aip-*)
   shopt -u nullglob
   if [ "${#_m[@]}" -gt 0 ]; then
-    PROJECT=$(readlink -f "${_m[0]}")
-    export PROJECT
+    project_fs=$(readlink -f "${_m[0]}")
   fi
 fi
 
+# Explicit VENV wins only if it is a real venv (survives wrong paths from ALL).
+if [ -n "${VENV:-}" ] && [ ! -f "${VENV}/bin/activate" ]; then
+  VENV=""
+fi
 if [ -z "${VENV:-}" ]; then
-  if [ -z "${PROJECT:-}" ]; then
-    echo "ERROR: PROJECT not found"
+  if [ -z "$project_fs" ]; then
+    echo "ERROR: could not resolve project space under ~/projects (def-*|aip-*)."
+    echo "Raw PROJECT=${PROJECT:-unset} (ignored unless absolute directory)."
     exit 1
   fi
-  for v in "$PROJECT/$USER/diffusion-tsf/venv" "$PROJECT/$USER/diffusion-tsf-fullvar/venv"; do
+  for v in "$project_fs/$USER/diffusion-tsf/venv" "$project_fs/$USER/diffusion-tsf-fullvar/venv"; do
     if [ -f "$v/bin/activate" ]; then
       VENV="$v"
       break
@@ -78,12 +89,12 @@ if [ -z "${VENV:-}" ]; then
 fi
 
 if [ ! -f "${VENV:-}/bin/activate" ]; then
-  echo "ERROR: no venv found. Set VENV to your activate path (see run.sh)."
-  echo "Tried PROJECT=${PROJECT:-unset}"
+  echo "ERROR: no venv found. Set VENV to the venv root (directory containing bin/activate)."
+  echo "project_fs=${project_fs:-none} raw_PROJECT=${PROJECT:-unset}"
   exit 2
 fi
 
-module purge
+module purge || true
 module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
 
 # shellcheck disable=SC1090
