@@ -4,8 +4,8 @@
 # Submit from anywhere; the job cwd must be the repo (same layout as training).
 #
 #   export TS="$SCRATCH/ts-sandbox"   # or /scratch/ccao87/ts-sandbox
-#   export PROJECT=/path/from/projects   # optional; venv discovery
-#   export VENV="$PROJECT/$USER/diffusion-tsf/venv"   # optional override
+#   export PROJECT=...   # optional; else same auto-detect as run.sh (~/projects/def-*|aip-*)
+#   export VENV=...   # optional; else $PROJECT/$USER/diffusion-tsf/venv (or -fullvar)
 #   mkdir -p "$TS/results/logs"
 #   sbatch --chdir="$TS" --export=ALL,TS,R="${TS}/results" utils/slurm_array_joint_testset_eval.sh
 #
@@ -48,12 +48,23 @@ stem="${stems[$SLURM_ARRAY_TASK_ID]:?bad SLURM_ARRAY_TASK_ID}"
 
 cd "$TS"
 
+# Auto-detect PROJECT (same logic as run.sh: first ~/projects/def-* or aip-*)
+if [ -z "${PROJECT:-}" ] && [ -d "$HOME/projects" ]; then
+  shopt -s nullglob
+  _m=("$HOME"/projects/def-* "$HOME"/projects/aip-*)
+  shopt -u nullglob
+  if [ "${#_m[@]}" -gt 0 ]; then
+    PROJECT=$(readlink -f "${_m[0]}")
+    export PROJECT
+  fi
+fi
+
 if [ -z "${VENV:-}" ]; then
-  _candidates=()
-  [ -n "${PROJECT:-}" ] && _candidates+=("$PROJECT/$USER/diffusion-tsf/venv")
-  [ -n "${PROJECT:-}" ] && _candidates+=("$PROJECT/$USER/diffusion-tsf-fullvar/venv")
-  _candidates+=("$HOME/projects/$USER/diffusion-tsf/venv")
-  for v in "${_candidates[@]}"; do
+  if [ -z "${PROJECT:-}" ]; then
+    echo "ERROR: PROJECT not found"
+    exit 1
+  fi
+  for v in "$PROJECT/$USER/diffusion-tsf/venv" "$PROJECT/$USER/diffusion-tsf-fullvar/venv"; do
     if [ -f "$v/bin/activate" ]; then
       VENV="$v"
       break
