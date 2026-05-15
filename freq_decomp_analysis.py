@@ -22,6 +22,9 @@ def remove_high_freqs(signal, num_to_remove):
     return np.fft.irfft(fft_coeffs, n=n)
 
 def analyze_datasets(base_dir='datasets', output_dir='temp/freq_decomp_plots'):
+    if os.path.exists(output_dir):
+        import shutil
+        shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     
     csv_files = []
@@ -30,9 +33,10 @@ def analyze_datasets(base_dir='datasets', output_dir='temp/freq_decomp_plots'):
             if file.endswith('.csv'):
                 csv_files.append(os.path.join(root, file))
     
-    # Filtering levels
-    removal_levels = [0, 50, 100, 200, 400, 800, 1600, 3200, 6400]
-    window_size = 16384
+    # Filtering levels (adjusted for 1000-pt window)
+    # 1000 pts -> 501 rfft coeffs
+    removal_levels = [0, 25, 50, 100, 200, 300, 400]
+    window_size = 1000
     all_mses = {}
     
     for csv_path in csv_files:
