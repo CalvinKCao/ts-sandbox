@@ -31,8 +31,8 @@ def analyze_datasets(base_dir='datasets', output_dir='temp/freq_decomp_plots'):
                 csv_files.append(os.path.join(root, file))
     
     # Filtering levels
-    removal_levels = [0, 10, 20, 50, 100, 200]
-    window_size = 512
+    removal_levels = [0, 50, 100, 200, 400, 800, 1600, 3200, 6400]
+    window_size = 16384
     all_mses = {}
     
     for csv_path in csv_files:
@@ -67,7 +67,7 @@ def analyze_datasets(base_dir='datasets', output_dir='temp/freq_decomp_plots'):
             # Normalize signal for fair MSE comparison across datasets
             signal_norm = (signal - signal.mean()) / (signal.std() + 1e-8)
             
-            plt.figure(figsize=(15, 12))
+            plt.figure(figsize=(15, 18))
             plt.subplot(len(removal_levels), 1, 1)
             plt.plot(signal, label='Original', color='black', alpha=0.7)
             plt.title(f"Dataset: {dataset_name} | Column: {col} | Start: {start_idx}")
