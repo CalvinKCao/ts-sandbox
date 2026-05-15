@@ -23,6 +23,11 @@
 #SBATCH --output=results/logs/joint-testset-eval_%A_%a.out
 #SBATCH --error=results/logs/joint-testset-eval_%A_%a.err
 
+# Slurm often runs batch scripts with /bin/sh (dash), which rejects bash arrays.
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec /bin/bash "$0" "$@"
+fi
+
 set -euo pipefail
 set -x
 
