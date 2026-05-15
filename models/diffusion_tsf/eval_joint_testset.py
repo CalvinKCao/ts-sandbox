@@ -73,6 +73,8 @@ _JOINT_FT_RE = re.compile(
     r"^(?P<subset>.+)_joint_finetuned(?P<variant>_gB|_gC)?\.pt$",
     re.IGNORECASE,
 )
+# Slurm run stem: 05-14-1306-joint-ft-ETTm2-gB → dataset ETTm2, ghost B
+_SLURM_STEM_TAIL_RE = re.compile(r"-joint-ft-(.+)-g([bc])$", re.IGNORECASE)
 
 
 def _parse_joint_finetune_filename(path: str) -> Tuple[str, Optional[bool]]:
@@ -144,6 +146,85 @@ def discover_joint_finetune_checkpoints(checkpoint_dir: str) -> List[str]:
         if _JOINT_FT_RE.match(fn):
             out.append(os.path.join(checkpoint_dir, fn))
     return out
+
+
+def _infer_dataset_and_ghost_from_results_dir(results_dir: str) -> Tuple[Optional[str], Optional[bool]]:
+    """Parse Slurm stem …/05-14-1306-joint-ft-ETTm2-gB/eval_test → (ETTm2, True)."""
+    rd = os.path.abspath(results_dir)
+    if os.path.basename(rd) != "eval_test":
+        return None, None
+    stem = os.path.basename(os.path.dirname(rd))
+    m = _SLURM_STEM_TAIL_RE.search(stem)
+    if not m:
+        return None, None
+    return m.group(1), m.group(2).upper() == "B"
+
+
+def resolve_joint_checkpoint_paths(
+    checkpoint_dir: Optional[str],
+    results_dir: str,
+    project_root: str,
+    *,
+    dataset_cli: Optional[str],
+) -> Tuple[List[str], str]:
+    """Find ``*_joint_finetuned*.pt`` paths when per-run ``ckpts/`` is missing.
+
+    Training may write to ``results/<stem>/ckpts`` (Alliance ``run.sh``) or, if
+    args were different, under ``<repo>/checkpoints_7var`` (legacy) /
+    ``checkpoints_multivariate``. We try per-run ``../ckpts`` next to ``eval_test``,
+    then repo checkpoint roots, filtering by dataset (and gB/gC) parsed from the
+    Slurm stem when ``…/<stem>/eval_test`` is used.
+    """
+    ds_hint, ghost_hint = _infer_dataset_and_ghost_from_results_dir(results_dir)
+    ds_filter = ds_hint or dataset_cli
+
+    candidates: List[str] = []
+    if checkpoint_dir:
+        candidates.append(os.path.abspath(checkpoint_dir))
+    rd = os.path.abspath(results_dir)
+    if os.path.basename(rd) == "eval_test":
+        candidates.append(os.path.join(os.path.dirname(rd), "ckpts"))
+    for name in ("checkpoints_multivariate", "checkpoints_7var"):
+        root = os.path.join(project_root, name)
+        if os.path.isdir(root):
+            candidates.append(root)
+
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for c in candidates:
+        if c in seen:
+            continue
+        seen.add(c)
+        ordered.append(c)
+
+    legacy_names = {"checkpoints_7var", "checkpoints_multivariate"}
+
+    for d in ordered:
+        if not os.path.isdir(d):
+            continue
+        paths = discover_joint_finetune_checkpoints(d)
+        if ds_filter:
+            filtered: List[str] = []
+            for p in paths:
+                sid, gh = _parse_joint_finetune_filename(p)
+                if sid != ds_filter:
+                    continue
+                if ghost_hint is not None and gh is not None and gh != ghost_hint:
+                    continue
+                filtered.append(p)
+            paths = filtered
+        elif os.path.basename(d) in legacy_names and len(paths) > 1:
+            # Avoid evaluating every dataset in a shared legacy dir without a hint.
+            continue
+        if paths:
+            return paths, d
+
+    raise FileNotFoundError(
+        "No joint finetuned checkpoints found. Tried: "
+        + ", ".join(ordered)
+        + f". dataset_hint={ds_hint!r} ghost_hint={ghost_hint!r} "
+        + "--dataset may be required if results-dir is not …/<stem>/eval_test."
+    )
 
 
 def run_one(
@@ -267,12 +348,19 @@ def main() -> None:
 
     if args.checkpoint:
         paths = [args.checkpoint]
+        logger.info("Single checkpoint mode: %s", args.checkpoint)
     else:
-        paths = discover_joint_finetune_checkpoints(args.checkpoint_dir)
-        if not paths:
-            logger.error("No *_joint_finetuned*.pt files in %s", args.checkpoint_dir)
+        try:
+            paths, resolved_dir = resolve_joint_checkpoint_paths(
+                args.checkpoint_dir,
+                args.results_dir,
+                _project_root,
+                dataset_cli=args.dataset,
+            )
+        except FileNotFoundError as e:
+            logger.error("%s", e)
             sys.exit(1)
-        logger.info("Found %d checkpoint(s) under %s", len(paths), args.checkpoint_dir)
+        logger.info("Found %d checkpoint(s); resolved from %s", len(paths), resolved_dir)
 
     for ck in paths:
         if not os.path.isfile(ck):
