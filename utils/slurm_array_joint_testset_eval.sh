@@ -33,7 +33,7 @@ fi
 set -euo pipefail
 set -x
 
-: "${TS:?Pass TS (repo root), e.g. sbatch --export=ALL,TS=\$SCRATCH/ts-sandbox}"
+: "${TS:?Pass TS (repo root), e.g. sbatch --export=TS,R=\$SCRATCH/ts-sandbox/results}"
 : "${R:=${TS}/results}"
 
 stems=(
@@ -70,35 +70,46 @@ if [ -z "$project_fs" ] && [ -d "$HOME/projects" ]; then
   fi
 fi
 
-# Explicit VENV wins only if it is a real venv (survives wrong paths from ALL).
-if [ -n "${VENV:-}" ] && [ ! -f "${VENV}/bin/activate" ]; then
-  VENV=""
-fi
-if [ -z "${VENV:-}" ]; then
-  if [ -z "$project_fs" ]; then
-    echo "ERROR: could not resolve project space under ~/projects (def-*|aip-*)."
-    echo "Raw PROJECT=${PROJECT:-unset} (ignored unless absolute directory)."
-    exit 1
-  fi
-  for v in "$project_fs/$USER/diffusion-tsf/venv" "$project_fs/$USER/diffusion-tsf-fullvar/venv"; do
-    if [ -f "$v/bin/activate" ]; then
-      VENV="$v"
-      break
-    fi
-  done
-fi
-
-if [ ! -f "${VENV:-}/bin/activate" ]; then
-  echo "ERROR: no venv found. Set VENV to the venv root (directory containing bin/activate)."
-  echo "project_fs=${project_fs:-none} raw_PROJECT=${PROJECT:-unset}"
-  exit 2
+if [ -z "$project_fs" ]; then
+  echo "ERROR: could not resolve project space under ~/projects (def-*|aip-*)."
+  echo "Raw PROJECT=${PROJECT:-unset} (ignored unless absolute directory)."
+  exit 1
 fi
 
 module purge || true
 module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
 
-# shellcheck disable=SC1090
-source "$VENV/bin/activate"
+# Do not `source .../activate`: some venvs symlink from $USER/.../venv but activate
+# hardcodes a different VIRTUAL_ENV (e.g. drops $USER), prepending the wrong bin/ to PATH
+# and breaking torch. Pick a tree whose bin/python imports torch, then prepend PATH only.
+venv_candidates=()
+if [ -n "${VENV:-}" ] && [ -x "${VENV}/bin/python" ]; then
+  venv_candidates+=("$VENV")
+fi
+venv_candidates+=(
+  "$project_fs/$USER/diffusion-tsf/venv"
+  "$project_fs/$USER/diffusion-tsf-fullvar/venv"
+)
+
+VENV_ROOT=""
+for v in "${venv_candidates[@]}"; do
+  [ -n "$v" ] || continue
+  [ -x "$v/bin/python" ] || continue
+  if "$v/bin/python" -c "import torch" 2>/dev/null; then
+    VENV_ROOT="$v"
+    break
+  fi
+done
+
+if [ -z "$VENV_ROOT" ]; then
+  echo "ERROR: no venv with importable torch. Tried: ${venv_candidates[*]}"
+  echo "project_fs=$project_fs raw_PROJECT=${PROJECT:-unset}"
+  exit 2
+fi
+
+export PATH="$VENV_ROOT/bin:$PATH"
+export VIRTUAL_ENV="$VENV_ROOT"
+hash -r
 
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 

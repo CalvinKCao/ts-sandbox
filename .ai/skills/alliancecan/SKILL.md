@@ -164,6 +164,8 @@ fi
 
 Then set storage, e.g. `STORAGE_ROOT="$PROJECT/$USER/drc-sokoban-ma"` for checkpoints, wandb, venv.
 
+If `$PROJECT` is **already set** but is **not** an absolute directory (e.g. it equals the Slurm `--account` string), treat it as invalid and run the same `~/projects` discovery above, or require an explicit absolute `PROJECT` in `sbatch --export=...`.
+
 ## Killarney — hardware reference (verify with `sinfo`)
 
 This cluster is common for this repo. **Verify live** with `sinfo -o "%P %G %l"` and `scontrol show node | grep -i gres`—names and partitions change.
@@ -265,6 +267,7 @@ from the wheel cache takes 3–5 min; after that imports are <1 min.
 - **`sbatch --wrap` uses `/bin/sh`, not bash:** `--wrap="source ..."` fails with `source: not found` because `/bin/sh` on Alliance nodes is `dash`, which uses `.` not `source`. **Always write a proper `#!/bin/bash` script** and pass it to `sbatch` — never use `--wrap` for anything involving `source`, bash arrays, or `[[ ]]`.
 - **`sbatch` from scripts:** Do not submit thousands of jobs at once; prefer **arrays** or spacing submissions—Alliance warns this can harm Slurm.
 - **`sbatch` stdin vs script file:** Prefer **`sbatch /path/to/job.sh`** (real file on disk, `#!/bin/bash`) over piping a heredoc into `sbatch`. Some sites log or handle stdin batch scripts inconsistently; file-based submission matches working patterns in this repo (e.g. self-submit scripts).
+- **`sbatch --export=ALL` poisons `PROJECT` (ts-sandbox / venv jobs):** On login nodes, people often `export SLURM_ACCOUNT=aip-boyuwang` or confuse the CCDB **group name** with the filesystem **`$PROJECT`** used in `run.sh` (`~/projects/def-*` → absolute path). **`--export=ALL`** then injects `PROJECT=aip-boyuwang` into the job; scripts that build `$PROJECT/$USER/diffusion-tsf/venv` silently point at nonsense paths like `aip-boyuwang/ccao87/.../venv`. **Fix:** use **`sbatch --export=TS,R=...`** (list only needed vars), or in the batch script **ignore `PROJECT` unless it is an absolute path and a directory**, then fall back to the `~/projects/def-*` / `aip-*` glob discovery (see “Resolving `$PROJECT`” above).
 - **Stale script on cluster:** If `squeue` still shows H100/64G after switching to L40S, **`git pull`** on the cluster clone and **resubmit** — old `#SBATCH` lines are baked in at submit time.
 
 ## Official docs
