@@ -5,7 +5,7 @@
 
 ACCOUNT=aip-boyuwang
 MAIL=ccao87@uwo.ca
-TIME_MIN=$((24 * 60))
+TIME_LIMIT="3-00:00:00"
 
 DATASETS=(ETTh1 ETTh2 ETTm1 ETTm2 illness exchange_rate solar_Alabama PeMS)
 
@@ -65,7 +65,7 @@ mkdir -p "$LOG_DIR"
 SBATCH_COMMON=(
     --account="$ACCOUNT"
     --nodes=1 --gres=gpu:h100:1 --cpus-per-task=8 --mem=50G
-    --time="$TIME_MIN"
+    --time="$TIME_LIMIT"
     --mail-type=END,FAIL --mail-user="$MAIL"
     --output="$LOG_DIR/%x-%j.out" --error="$LOG_DIR/%x-%j.err"
     --chdir="$ROOT"
