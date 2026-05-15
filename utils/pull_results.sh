@@ -1,6 +1,11 @@
 #!/bin/bash
 # Pull Slurm run artifacts from Killarney.
 #
+# 1) Mirrors remote ``.../<project>/results/`` into ``./results/`` (filtered).
+# 2) Mirrors remote ``.../<project>/models/diffusion_tsf/checkpoints_{multivariate,7var}/``
+#    into ``./models/diffusion_tsf/`` so joint finetune ``*_joint_finetuned*.pt`` files
+#    exist locally (they often live outside ``results/`` on the cluster).
+#
 # Alliance Best Practices:
 # 1. Use Data Transfer Nodes (DTNs) if available (e.g. dtn.killarney.alliancecan.ca).
 # 2. Use --no-g and --no-p to avoid permission/quota issues on /project.
@@ -60,8 +65,12 @@ RSYNC_OPTS=(
 )
 
 mkdir -p "$LOCAL_PATH"
+mkdir -p "./models/diffusion_tsf/checkpoints_multivariate" "./models/diffusion_tsf/checkpoints_7var"
 
 SOURCES=()
+
+# Unique project roots: parent directory of each remote ``.../results`` path.
+declare -A _PULL_SEEN_PROOT=()
 
 if [ "$1" = "--recent" ]; then
     HOURS="${2:-24}"
@@ -111,5 +120,24 @@ fi
 # We use --ignore-missing-args to prevent errors if a specifically requested folder 
 # only exists in one of the multiple remote paths.
 rsync -e "ssh ${SSH_OPTS[*]}" "${RSYNC_OPTS[@]}" --ignore-missing-args "${SOURCES[@]}" "${LOCAL_PATH}/"
+
+# ---- Checkpoints under repo (joint + legacy diffusion trees) -----------------
+CKPT_NAMES=(checkpoints_multivariate checkpoints_7var)
+for RP in "${REMOTE_PATHS[@]}"; do
+    [ -n "$RP" ] || continue
+    case "$RP" in
+        */results) PROOT="${RP%/results}" ;;
+        *)         continue ;;
+    esac
+    [ -n "${_PULL_SEEN_PROOT[$PROOT]:-}" ] && continue
+    _PULL_SEEN_PROOT[$PROOT]=1
+
+    for ck in "${CKPT_NAMES[@]}"; do
+        RCK="${PROOT}/models/diffusion_tsf/${ck}/"
+        echo "Syncing checkpoints: ${RCK}"
+        rsync -e "ssh ${SSH_OPTS[*]}" "${RSYNC_OPTS[@]}" --ignore-missing-args \
+            "${REMOTE_USER}@${REMOTE_HOST}:${RCK}" "./models/diffusion_tsf/${ck}/"
+    done
+done
 
 echo "Done."
