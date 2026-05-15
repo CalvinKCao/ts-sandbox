@@ -184,10 +184,14 @@ def resolve_joint_checkpoint_paths(
     rd = os.path.abspath(results_dir)
     if os.path.basename(rd) == "eval_test":
         candidates.append(os.path.join(os.path.dirname(rd), "ckpts"))
-    for name in ("checkpoints_multivariate", "checkpoints_7var"):
-        root = os.path.join(project_root, name)
-        if os.path.isdir(root):
-            candidates.append(root)
+    # Training may write checkpoints under <repo>/checkpoints_* (if --checkpoint-dir
+    # was passed) or under <repo>/models/diffusion_tsf/checkpoints_* (the pipeline's
+    # default when no --checkpoint-dir is given, e.g. run_joint_small_datasets.sh).
+    for prefix in ("", os.path.join("models", "diffusion_tsf")):
+        for name in ("checkpoints_multivariate", "checkpoints_7var"):
+            root = os.path.join(project_root, prefix, name) if prefix else os.path.join(project_root, name)
+            if os.path.isdir(root):
+                candidates.append(root)
 
     seen: set[str] = set()
     ordered: List[str] = []
