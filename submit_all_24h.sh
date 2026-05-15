@@ -5,9 +5,10 @@
 
 ACCOUNT=aip-boyuwang
 MAIL=ccao87@uwo.ca
-TIME_LIMIT="3-00:00:00"
+TIME_LIMIT_PRETRAIN="3-00:00:00"
+TIME_LIMIT_FINETUNE="1-00:00:00"
 
-DATASETS=(ETTh1 ETTh2 ETTm1 ETTm2 illness exchange_rate solar_Alabama PeMS)
+DATASETS=(ETTh1 ETTh2 ETTm1 exchange_rate)
 
 # --------- shared body run inside a Slurm job -----------------------------
 # SLURM_SUBMIT_DIR is set by Slurm to the directory sbatch was run from.
@@ -65,7 +66,6 @@ mkdir -p "$LOG_DIR"
 SBATCH_COMMON=(
     "--account=$ACCOUNT"
     --nodes=1 --gres=gpu:h100:1 --cpus-per-task=8 --mem=50G
-    "--time=$TIME_LIMIT"
     --mail-type=END,FAIL "--mail-user=$MAIL"
     "--output=$LOG_DIR/%x-%j.out" "--error=$LOG_DIR/%x-%j.err"
     "--chdir=$ROOT"
@@ -74,6 +74,7 @@ SBATCH_COMMON=(
 echo ">>> submitting stage0+1 pretrain (universal)"
 PRETRAIN_JID=$(sbatch --parsable \
     --job-name=oldpipe-pretrain \
+    "--time=$TIME_LIMIT_PRETRAIN" \
     "${SBATCH_COMMON[@]}" \
     "$0" __inner_pretrain)
 echo "    pretrain job id: $PRETRAIN_JID"
@@ -84,6 +85,7 @@ for DS in "${DATASETS[@]}"; do
     sbatch --parsable \
         --job-name="oldpipe-ft-$DS_TAG" \
         --dependency="afterok:$PRETRAIN_JID" \
+        "--time=$TIME_LIMIT_FINETUNE" \
         "${SBATCH_COMMON[@]}" \
         "$0" __inner_finetune "$DS"
 done
