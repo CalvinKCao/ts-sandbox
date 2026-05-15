@@ -10,18 +10,28 @@ REMOTE_HOST="${REMOTE_HOST:-killarney.alliancecan.ca}"
 REMOTE_USER="ccao87"
 LOCAL_PATH="./results"
 
-# Multiple remote paths to check
-REMOTE_PATHS=(
-    "/scratch/ccao87/ts-sandbox/results"
-    "/scratch/ccao87/ts-sandbox-dit-parallel/results"
-)
-
 # Regular SSH options
 SSH_OPTS=(
     -o ConnectTimeout=12
     -o ConnectionAttempts=1
     -o StrictHostKeyChecking=accept-new
 )
+
+# Dynamically find all results directories under /scratch/ccao87, excluding archive.
+# This ensures we pull from all current and future projects.
+echo "Discovering project results on $REMOTE_HOST..."
+mapfile -t REMOTE_PATHS < <(
+    ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" \
+        "find /scratch/${REMOTE_USER} -maxdepth 2 -mindepth 2 -name results -type d ! -path '/scratch/${REMOTE_USER}/archive/*' 2>/dev/null"
+)
+
+# Fallback: if no 'results' folders found, use all top-level subfolders (excluding archive)
+if [ ${#REMOTE_PATHS[@]} -eq 0 ]; then
+    mapfile -t REMOTE_PATHS < <(
+        ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" \
+            "find /scratch/${REMOTE_USER} -maxdepth 1 -mindepth 1 -type d ! -name archive 2>/dev/null"
+    )
+fi
 
 RSYNC_OPTS=(
     -avz
