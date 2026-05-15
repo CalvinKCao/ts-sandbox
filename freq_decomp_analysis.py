@@ -33,10 +33,10 @@ def analyze_datasets(base_dir='datasets', output_dir='temp/freq_decomp_plots'):
             if file.endswith('.csv'):
                 csv_files.append(os.path.join(root, file))
     
-    # Filtering levels (adjusted for 1000-pt window)
-    # 1000 pts -> 501 rfft coeffs
-    removal_levels = [0, 25, 50, 100, 200, 300, 400]
-    window_size = 1000
+    # Filtering levels (adjusted for 16384-pt window to support up to 6400)
+    removal_levels = [0, 50, 100, 200, 400, 800, 1600, 3200, 6400]
+    window_size = 16384
+    plot_limit = 1000 # Only plot first 1000 steps for readability
     all_mses = {}
     
     for csv_path in csv_files:
@@ -71,10 +71,10 @@ def analyze_datasets(base_dir='datasets', output_dir='temp/freq_decomp_plots'):
             # Normalize signal for fair MSE comparison across datasets
             signal_norm = (signal - signal.mean()) / (signal.std() + 1e-8)
             
-            plt.figure(figsize=(15, 18))
+            plt.figure(figsize=(15, 20))
             plt.subplot(len(removal_levels), 1, 1)
-            plt.plot(signal, label='Original', color='black', alpha=0.7)
-            plt.title(f"Dataset: {dataset_name} | Column: {col} | Start: {start_idx}")
+            plt.plot(signal[:plot_limit], label=f'Original (first {plot_limit} steps)', color='black', alpha=0.7)
+            plt.title(f"Dataset: {dataset_name} | Column: {col} | Start: {start_idx} (Showing first {plot_limit} steps)")
             plt.legend()
             
             for i, k in enumerate(removal_levels[1:], 1):
@@ -91,8 +91,8 @@ def analyze_datasets(base_dir='datasets', output_dir='temp/freq_decomp_plots'):
                 all_mses[k].append(mse)
                 
                 plt.subplot(len(removal_levels), 1, i + 1)
-                plt.plot(signal, color='gray', alpha=0.3, label='Original')
-                plt.plot(filtered, label=f'Removed Top {k} Freqs (MSE: {mse:.4f})', color='tab:blue')
+                plt.plot(signal[:plot_limit], color='gray', alpha=0.3, label='Original')
+                plt.plot(filtered[:plot_limit], label=f'Removed Top {k} Freqs (MSE: {mse:.4f})', color='tab:blue')
                 plt.legend(loc='upper right')
             
             plt.tight_layout()
