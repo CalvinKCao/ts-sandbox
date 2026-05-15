@@ -61,10 +61,31 @@ fi
 export PROJECT_ROOT
 cd "$PROJECT_ROOT"
 
-# Source cluster preamble if available
-if [ -n "${STORE:-}" ] && [ -f "$STORE/job_preamble.sh" ]; then
-    echo "Sourcing $STORE/job_preamble.sh"
-    source "$STORE/job_preamble.sh"
+module purge || true
+module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
+
+if [ -z "${PROJECT:-}" ] && [ -d "$HOME/projects" ]; then
+    shopt -s nullglob
+    _m=("$HOME"/projects/def-* "$HOME"/projects/aip-*)
+    shopt -u nullglob
+    if [ "${#_m[@]}" -gt 0 ]; then
+        export PROJECT=$(readlink -f "${_m[0]}")
+    fi
+fi
+
+if [ -n "${PROJECT:-}" ]; then
+    VENV_PATH="$PROJECT/$USER/diffusion-tsf/venv"
+    if [ ! -d "$VENV_PATH" ]; then
+        VENV_PATH="$PROJECT/$USER/diffusion-tsf-fullvar/venv"
+    fi
+    if [ -d "$VENV_PATH" ]; then
+        export PATH="$VENV_PATH/bin:$PATH"
+        echo "Reusing existing venv: $VENV_PATH"
+    else
+        source .venv/bin/activate
+    fi
+else
+    source .venv/bin/activate
 fi
 
 SMOKE_FLAG=""
