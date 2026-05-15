@@ -29,6 +29,7 @@ if [ "${1:-}" = "__inner_pretrain" ] || [ "${1:-}" = "__inner_finetune" ]; then
     pip install --no-index --upgrade pip
     pip install --no-index torch numpy pandas scikit-learn optuna
     pip install --no-index wandb
+    pip install reformer-pytorch matplotlib
 
     # Install repo packages if setup.py / pyproject exists
     [ -f setup.py ] || [ -f pyproject.toml ] && pip install --no-index -e . --no-build-isolation || true
