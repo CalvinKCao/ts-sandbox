@@ -2479,17 +2479,23 @@ def evaluate_itransformer_baseline(
     results_dir: str,
     device: torch.device,
     smoke_test: bool = False,
+    test_loader: Optional[DataLoader] = None,
 ) -> Dict:
     """Run iTransformer-only forecast on test set and save to itransformer_baseline.json.
 
     Reuses the same test split as diffusion eval so the numbers are directly
     comparable. Results are merged into a single baseline file so summarize_results.py
     can produce the comparison table automatically.
+
+    If ``test_loader`` is provided (e.g. same Subset as diffusion ``evaluate_model``),
+    it is used as-is; otherwise the full test split is loaded (or 2 windows when
+    ``smoke_test``).
     """
-    _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=1)
-    if smoke_test:
-        test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
-    test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
+    if test_loader is None:
+        _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=1)
+        if smoke_test:
+            test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
+        test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
 
     n_iv = len(variate_indices)
     itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
@@ -2937,6 +2943,7 @@ def run_pipeline(
                     evaluate_itransformer_baseline(
                         dataset_name, dataset_name, variate_indices,
                         itrans_ckpt, RESULTS_DIR, device, smoke_test=smoke_test,
+                        test_loader=test_loader,
                     )
                 except Exception as be:
                     logger.warning(f"iTransformer baseline eval failed for {dataset_name}: {be}")
@@ -3487,6 +3494,7 @@ def _finetune_and_eval_one_subset(
             evaluate_itransformer_baseline(
                 subset_id, dataset_name, variate_indices,
                 ft_itrans_ckpt, RESULTS_DIR, device, smoke_test=smoke_test,
+                test_loader=test_loader,
             )
         except Exception as be:
             logger.warning(f"iTransformer baseline eval failed for {subset_id}: {be}")
