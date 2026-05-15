@@ -35,7 +35,14 @@ if [ "${1:-}" = "__inner_pretrain" ] || [ "${1:-}" = "__inner_finetune" ]; then
 
     if [ "${1:-}" = "__inner_pretrain" ]; then
         set -x
-        exec ./train_universal_pretrain.sh --seed 42
+        # Check if universal model already exists to potentially skip
+        UNIVERSAL_MODEL="$ROOT/models/diffusion_tsf/checkpoints/universal_synthetic_pretrain/best_model.pt"
+        SKIP_FLAGS=""
+        if [ -f "$UNIVERSAL_MODEL" ]; then
+            echo ">>> Universal model found at $UNIVERSAL_MODEL. Will resume/skip stages as needed."
+            # The script itself handles resume if --resume is passed inside it (which it is)
+        fi
+        exec ./train_universal_pretrain.sh --seed 42 --patience 10
     else
         DS="$2"
         set -x
@@ -43,7 +50,8 @@ if [ "${1:-}" = "__inner_pretrain" ] || [ "${1:-}" = "__inner_finetune" ]; then
             --seed 42 \
             --skip-synthetic-search \
             --skip-universal-pretrain \
-            --dataset "$DS"
+            --dataset "$DS" \
+            --patience 25
     fi
 fi
 
@@ -55,7 +63,7 @@ mkdir -p "$LOG_DIR"
 
 SBATCH_COMMON=(
     --account="$ACCOUNT"
-    --nodes=1 --gres=gpu:l40s:1 --cpus-per-task=8 --mem=50G
+    --nodes=1 --gres=gpu:h100:1 --cpus-per-task=8 --mem=50G
     --time="$TIME_MIN"
     --mail-type=END,FAIL --mail-user="$MAIL"
     --output="$LOG_DIR/%x-%j.out" --error="$LOG_DIR/%x-%j.err"

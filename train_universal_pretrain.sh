@@ -70,6 +70,7 @@ SINGLE_DATASET=""
 STRIDE=1
 USE_MONO=false
 MONO_WEIGHT=10.0
+PATIENCE=25
 
 # Stage 0: Synthetic HP search settings
 SYNTHETIC_SEARCH_TRIALS=8
@@ -156,6 +157,14 @@ while [[ $# -gt 0 ]]; do
       FINETUNE_TRIALS="$2"
       shift 2
       ;;
+    --patience)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --patience requires an integer argument"
+        exit 1
+      fi
+      PATIENCE="$2"
+      shift 2
+      ;;
     --use-mono|--use-monotonicity-loss)
       USE_MONO=true
       shift
@@ -185,6 +194,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --universal-pretrain-epochs N  Epochs for universal pre-training (default: 100)"
       echo "  --universal-pretrain-size N    Samples for universal pre-training (default: 100000)"
       echo "  --finetune-trials N            Optuna trials per dataset (default: 10)"
+      echo "  --patience N                   Early stopping patience (default: 25)"
       echo "  --use-mono                     Enable monotonicity loss"
       echo "  --mono-weight F                Weight for monotonicity loss (default: 10.0)"
       exit 1
@@ -297,6 +307,7 @@ log "📊 Configuration:"
 log "   Log file: ${LOG_FILE}"
 log "   Random seed: ${RANDOM_SEED}"
 log "   Stride: ${STRIDE}"
+log "   Patience: ${PATIENCE}"
 log "   Skip synthetic search: ${SKIP_SYNTHETIC_SEARCH}"
 log "   Skip universal pretrain: ${SKIP_UNIVERSAL_PRETRAIN}"
 log "   Skip iTransformer: ${SKIP_ITRANSFORMER}"
@@ -430,6 +441,7 @@ else
     --resume
     --dataset ETTh2
     --trials "${SYNTHETIC_SEARCH_TRIALS}"
+    --patience "${PATIENCE}"
     --synthetic-only
     --synthetic-size "${SYNTHETIC_SEARCH_SIZE}"
     --force-high-end-search
@@ -506,6 +518,12 @@ if [[ "${SKIP_UNIVERSAL_PRETRAIN}" == "true" ]]; then
     exit 1
   fi
   log "Using existing universal model: ${UNIVERSAL_MODEL}"
+elif [[ -f "${UNIVERSAL_MODEL}" ]]; then
+  log ""
+  log "============================================================================="
+  log "  STAGE 1: ALREADY COMPLETED"
+  log "============================================================================="
+  log "Using existing universal model: ${UNIVERSAL_MODEL}"
 else
   log ""
   log "============================================================================="
@@ -521,8 +539,10 @@ else
   # Build command for Stage 1
   STAGE1_CMD=(
     python3 models/diffusion_tsf/train_electricity.py
+    --resume
     --dataset ETTh2
     --params-file "${BEST_PARAMS_FILE}"
+    --patience "${PATIENCE}"
     --synthetic-only
     --synthetic-size "${UNIVERSAL_PRETRAIN_SIZE}"
     --repr-mode cdf
@@ -617,6 +637,12 @@ for DATASET in "${DATASETS[@]}"; do
   log "   Selected variable: ${TARGET_COLUMN}"
   log "   Checkpoint dir: ${DATASET_CKPT_DIR}"
   log ""
+  
+  if [[ -f "${DATASET_CKPT_DIR}/best_model.pt" ]]; then
+    log "   ✅ Final model already exists for ${DATASET_VAR}. Skipping fine-tuning."
+    SELECTED_VARS[$DATASET]="$TARGET_COLUMN"
+    continue
+  fi
   
   # ------------------------------------------------------------------
   # Stage 2a: Train iTransformer (unless skipped)
@@ -714,6 +740,7 @@ for DATASET in "${DATASETS[@]}"; do
     --dataset "${DATASET}"
     --target "${TARGET_COLUMN}"
     --trials "${FINETUNE_TRIALS}"
+    --patience "${PATIENCE}"
     --pretrained-checkpoint "${UNIVERSAL_MODEL}"
     --finetune-mode
     --repr-mode cdf

@@ -148,6 +148,7 @@ class TrainingConfig:
     # Training
     run_name: Optional[str] = None
     num_trials: int = 10
+    patience: int = 25
     
     def __post_init__(self):
         """Set derived fields."""
@@ -196,6 +197,7 @@ class TrainingConfig:
             force_high_end_search=args.force_high_end_search,
             run_name=args.run_name,
             num_trials=args.trials,
+            patience=args.patience,
         )
 
 
@@ -304,7 +306,7 @@ def _sync_globals_from_config(cfg: TrainingConfig) -> None:
     global USE_GUIDANCE_CHANNEL, GUIDANCE_TYPE, GUIDANCE_CHECKPOINT
     global SYNTHETIC_PRETRAIN_EPOCHS, SYNTHETIC_SIZE, SYNTHETIC_ONLY_MODE
     global PRETRAINED_CHECKPOINT_PATH, FORCE_HIGH_END_SEARCH, CUSTOM_RUN_NAME
-    global FINETUNE_MODE, DATASET_STRIDE, SEARCH_SPACE, _config
+    global FINETUNE_MODE, DATASET_STRIDE, SEARCH_SPACE, PATIENCE, _config
     
     _config = cfg
     SELECTED_DATASET = cfg.dataset
@@ -338,6 +340,7 @@ def _sync_globals_from_config(cfg: TrainingConfig) -> None:
     CUSTOM_RUN_NAME = cfg.run_name
     FINETUNE_MODE = cfg.finetune_mode
     DATASET_STRIDE = cfg.stride
+    PATIENCE = cfg.patience
     
     # Initialize search space
     SEARCH_SPACE = get_hardware_config(cfg)
@@ -1765,6 +1768,7 @@ def main():
     parser.add_argument('--run-name', type=str, default=None, metavar='NAME',
                         help='Name for the training run (used with --use-defaults or --params-file)')
     parser.add_argument('--trials', type=int, default=NUM_OPTUNA_TRIALS, help='Number of Optuna trials')
+    parser.add_argument('--patience', type=int, default=25, help='Early stopping patience (default: 25)')
     parser.add_argument('--quick', action='store_true', help='Quick test with fewer samples')
     parser.add_argument('--model-type', choices=['unet', 'transformer'], default='unet', help='Backbone: unet (default) or transformer (DiT-style)')
     parser.add_argument('--blur-sigma', type=float, default=BLUR_SIGMA, help='Vertical blur sigma for preprocessing (label smoothing)')
