@@ -63,12 +63,12 @@ LOG_DIR="$ROOT/results/slurm_logs"
 mkdir -p "$LOG_DIR"
 
 SBATCH_COMMON=(
-    --account="$ACCOUNT"
+    "--account=$ACCOUNT"
     --nodes=1 --gres=gpu:h100:1 --cpus-per-task=8 --mem=50G
-    --time="$TIME_LIMIT"
-    --mail-type=END,FAIL --mail-user="$MAIL"
-    --output="$LOG_DIR/%x-%j.out" --error="$LOG_DIR/%x-%j.err"
-    --chdir="$ROOT"
+    "--time=$TIME_LIMIT"
+    --mail-type=END,FAIL "--mail-user=$MAIL"
+    "--output=$LOG_DIR/%x-%j.out" "--error=$LOG_DIR/%x-%j.err"
+    "--chdir=$ROOT"
 )
 
 echo ">>> submitting stage0+1 pretrain (universal)"
