@@ -118,6 +118,11 @@ class DiffusionTSFConfig:
     # penalty for deviating from itransformer guidance ghost image
     guidance_penalty_weight: float = 0.0
 
+    # optional 1D MSE loss on the decoded x0 prediction vs future_norm.
+    # keeps the diffusion model honest about the actual 1D forecast quality
+    # in addition to the standard noise-prediction + EMD objectives.
+    mse_loss_weight: float = 0.0
+
     # which backbone: "unet" (ConditionalUNet2D) or "dit" (FactorizedDiT)
     model_type: str = "unet"
 

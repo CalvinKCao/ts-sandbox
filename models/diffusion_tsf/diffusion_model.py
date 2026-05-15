@@ -785,16 +785,31 @@ class DiffusionTSF(nn.Module):
         if guidance_2d is not None and self.config.guidance_penalty_weight > 0:
             guidance_loss = F.mse_loss(x0_pred, guidance_2d)
 
+        # optional 1D MSE: decode x0 prediction back to time series and compare
+        # against the normalized 1D target so both losses live on the same scale.
+        mse_1d_loss = torch.tensor(0.0, device=device)
+        if self.config.mse_loss_weight > 0:
+            decoded_1d = self.decode_from_2d(
+                x0_pred, from_diffusion=True,
+                decoder_method=getattr(self.config, 'cdf_decoder', 'mean'),
+            )
+            # decode_from_2d squeezes variate dim when V=1 → (B, L).
+            # future_norm is always (B, V, L), so restore the dim to match.
+            if decoded_1d.dim() == 2 and future_norm.dim() == 3:
+                decoded_1d = decoded_1d.unsqueeze(1)
+            mse_1d_loss = F.mse_loss(decoded_1d, future_norm)
+
         loss = (
             noise_loss + 
             self.config.emd_lambda * emd_loss + 
             self.config.monotonicity_weight * mono_loss +
-            self.config.guidance_penalty_weight * guidance_loss
+            self.config.guidance_penalty_weight * guidance_loss +
+            self.config.mse_loss_weight * mse_1d_loss
         )
 
         result = {
             'loss': loss, 'noise_loss': noise_loss, 'emd_loss': emd_loss,
-            'guidance_loss': guidance_loss,
+            'guidance_loss': guidance_loss, 'mse_1d_loss': mse_1d_loss,
             'noise_pred': noise_pred, 't': t,
         }
         if guidance_2d is not None:

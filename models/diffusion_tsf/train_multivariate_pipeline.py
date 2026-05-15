@@ -698,6 +698,7 @@ from models.diffusion_tsf.pipeline_config import (
     DIT_MLP_RATIO,
     DIT_DROPOUT,
     GUIDANCE_PENALTY_WEIGHT,
+    MSE_LOSS_WEIGHT,
     EVAL_NUM_SAMPLES,
     resolve_pretrain_virtual_dataset_size,
     synthetic_epoch_capacity_itrans_hp,
@@ -932,14 +933,17 @@ def create_diffusion_model(
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
     guidance_penalty_weight: Optional[float] = None,
+    mse_loss_weight: Optional[float] = None,
 ) -> DiffusionTSF:
     """Create DiffusionTSF model with iTransformer guidance channel enabled."""
     if n_variates is None:
         n_variates = N_VARIATES
     if guidance_penalty_weight is None:
         guidance_penalty_weight = GUIDANCE_PENALTY_WEIGHT
+    if mse_loss_weight is None:
+        mse_loss_weight = MSE_LOSS_WEIGHT
 
-    logger.info(f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}")
+    logger.info(f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, mse_loss_weight={mse_loss_weight}")
 
     config = DiffusionTSFConfig(
         num_variables=n_variates,
@@ -951,6 +955,7 @@ def create_diffusion_model(
         use_coordinate_channel=True,
         use_guidance_channel=True,
         guidance_penalty_weight=guidance_penalty_weight,
+        mse_loss_weight=mse_loss_weight,
         num_diffusion_steps=1000,
         model_type=MODEL_TYPE,
         unet_channels=UNET_CHANNELS,
@@ -3469,7 +3474,7 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
     global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION, LOOKBACK_LENGTH, FORECAST_LENGTH
-    global MODEL_TYPE
+    global MODEL_TYPE, MSE_LOSS_WEIGHT
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3502,6 +3507,8 @@ def main():
                         help='Wipe manifest and checkpoints, start from scratch')
     parser.add_argument('--guidance-penalty-weight', type=float, default=GUIDANCE_PENALTY_WEIGHT,
                         help='Weight for guidance penalty loss (default from pipeline_config)')
+    parser.add_argument('--mse-loss-weight', type=float, default=MSE_LOSS_WEIGHT,
+                        help='Weight for 1D MSE loss on decoded x0 vs future_norm (0 = off)')
     parser.add_argument('--image-height', type=int, default=IMAGE_HEIGHT,
                         help='Override image height')
     parser.add_argument('--unet-channels', type=str, default=None,
@@ -3536,6 +3543,7 @@ def main():
     
     # Global overrides from CLI
     GUIDANCE_PENALTY_WEIGHT = args.guidance_penalty_weight
+    MSE_LOSS_WEIGHT = args.mse_loss_weight
     IMAGE_HEIGHT = args.image_height
     if args.unet_channels:
         UNET_CHANNELS = [int(x.strip()) for x in args.unet_channels.split(',') if x.strip()]
