@@ -131,11 +131,33 @@ for ds in "${DATASETS[@]}"; do
         # Set descriptive wandb name for each run in the matrix
         export WANDB_NAME="mse-ablation-${tag}"
         
+        # Isolate checkpoint and result dirs per variant so pretraining doesn't overwrite
+        VARIANT_CKPT_DIR="$RUN_CKPT_DIR/$tag"
+        VARIANT_RES_DIR="$RUN_DATA_DIR/$tag"
+        mkdir -p "$VARIANT_CKPT_DIR" "$VARIANT_RES_DIR"
+
         echo ""
         echo "============================================================"
         echo "  RUN: $tag  (mse_loss_weight=$w)"
         echo "============================================================"
 
+        echo "Phase 1: Pretrain"
+        $PYTHON \
+            --mode pretrain \
+            --dataset "$ds" \
+            --n-variates "$dim" \
+            --mse-loss-weight "$w" \
+            --model-type dit \
+            --guidance-penalty-weight 0.2 \
+            --checkpoint-dir "$VARIANT_CKPT_DIR" \
+            --results-dir "$VARIANT_RES_DIR" \
+            --subset-id "$tag" \
+            --fresh \
+            --wandb \
+            $SMOKE_FLAG \
+            || echo "[WARN] $tag pretrain failed with exit code $?"
+
+        echo "Phase 2: Finetune"
         $PYTHON \
             --mode finetune \
             --dataset "$ds" \
@@ -143,13 +165,12 @@ for ds in "${DATASETS[@]}"; do
             --mse-loss-weight "$w" \
             --model-type dit \
             --guidance-penalty-weight 0.2 \
-            --checkpoint-dir "$RUN_CKPT_DIR" \
-            --results-dir "$RUN_DATA_DIR" \
+            --checkpoint-dir "$VARIANT_CKPT_DIR" \
+            --results-dir "$VARIANT_RES_DIR" \
             --subset-id "$tag" \
-            --fresh \
             --wandb \
             $SMOKE_FLAG \
-            || echo "[WARN] $tag failed with exit code $?"
+            || echo "[WARN] $tag finetune failed with exit code $?"
     done
 done
 
