@@ -1,4 +1,5 @@
 import os
+import argparse
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -21,7 +22,7 @@ def remove_high_freqs(signal, num_to_remove):
         
     return np.fft.irfft(fft_coeffs, n=n)
 
-def analyze_datasets(base_dir='datasets', output_dir='temp/freq_decomp_plots'):
+def analyze_datasets(mode='absolute', base_dir='datasets', output_dir='temp/freq_decomp_plots'):
     if os.path.exists(output_dir):
         import shutil
         shutil.rmtree(output_dir)
@@ -33,11 +34,19 @@ def analyze_datasets(base_dir='datasets', output_dir='temp/freq_decomp_plots'):
             if file.endswith('.csv'):
                 csv_files.append(os.path.join(root, file))
     
-    # Filtering levels (adjusted for 16384-pt window to support up to 6400)
-    removal_levels = [0, 50, 100, 200, 400, 800, 1600, 3200, 6400]
-    window_size = 16384
+    window_size = 131072
     plot_limit = 1000 # Only plot first 1000 steps for readability
     all_mses = {}
+    
+    if mode == 'absolute':
+        # Filtering levels (increased to support higher frequency removals)
+        levels = [0, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200]
+    elif mode == 'percent':
+        # Percentage of frequencies to keep (lowest frequencies)
+        levels = [100.0, 64.0, 32.0, 16.0, 8.0, 4.0, 2.0, 1.0, 0.5]
+    else:
+        # Granular percentage mode: 28% to 12% with 4% intervals
+        levels = [100.0, 28.0, 24.0, 20.0, 16.0, 12.0]
     
     for csv_path in csv_files:
         print(f"Processing {csv_path}...")
@@ -70,29 +79,40 @@ def analyze_datasets(base_dir='datasets', output_dir='temp/freq_decomp_plots'):
             
             # Normalize signal for fair MSE comparison across datasets
             signal_norm = (signal - signal.mean()) / (signal.std() + 1e-8)
+            num_coeffs = len(np.fft.rfft(signal))
             
             plt.figure(figsize=(15, 20))
-            plt.subplot(len(removal_levels), 1, 1)
+            plt.subplot(len(levels), 1, 1)
             plt.plot(signal[:plot_limit], label=f'Original (first {plot_limit} steps)', color='black', alpha=0.7)
             plt.title(f"Dataset: {dataset_name} | Column: {col} | Start: {start_idx} (Showing first {plot_limit} steps)")
             plt.legend()
             
-            for i, k in enumerate(removal_levels[1:], 1):
-                if k >= len(np.fft.rfft(signal)):
+            for i, val in enumerate(levels[1:], 1):
+                if mode == 'absolute':
+                    k = int(val)
+                    label = f'Removed Top {k} Freqs'
+                else:
+                    # Calculate how many to remove to keep `val` percentage of frequencies
+                    keep_count = max(1, int(num_coeffs * (val / 100.0)))
+                    k = num_coeffs - keep_count
+                    label = f'Kept Lowest {val}% Freqs'
+                
+                if k >= num_coeffs:
                     continue
+                    
                 filtered = remove_high_freqs(signal, k)
                 
                 # Calculate MSE on normalized signal
                 filtered_norm = (filtered - filtered.mean()) / (filtered.std() + 1e-8)
                 mse = np.mean((signal_norm - filtered_norm)**2)
                 
-                if k not in all_mses:
-                    all_mses[k] = []
-                all_mses[k].append(mse)
+                if val not in all_mses:
+                    all_mses[val] = []
+                all_mses[val].append(mse)
                 
-                plt.subplot(len(removal_levels), 1, i + 1)
+                plt.subplot(len(levels), 1, i + 1)
                 plt.plot(signal[:plot_limit], color='gray', alpha=0.3, label='Original')
-                plt.plot(filtered[:plot_limit], label=f'Removed Top {k} Freqs (MSE: {mse:.4f})', color='tab:blue')
+                plt.plot(filtered[:plot_limit], label=f'{label} (MSE: {mse:.4f})', color='tab:blue')
                 plt.legend(loc='upper right')
             
             plt.tight_layout()
@@ -101,12 +121,32 @@ def analyze_datasets(base_dir='datasets', output_dir='temp/freq_decomp_plots'):
             plt.close()
 
     print("\n" + "="*50)
-    print(f"{'Removed Freqs':<15} | {'Avg MSE (Normalized)':<20}")
+    if mode == 'absolute':
+        print(f"{'Removed Freqs':<15} | {'Avg MSE (Normalized)':<20}")
+        sort_reverse = False
+    else:
+        print(f"{'Kept % Freqs':<15} | {'Avg MSE (Normalized)':<20}")
+        sort_reverse = True # For percentages, decreasing is more intuitive
+
     print("-" * 50)
-    for k in sorted(all_mses.keys()):
+    for k in sorted(all_mses.keys(), reverse=sort_reverse):
         avg_mse = np.mean(all_mses[k])
         print(f"{k:<15} | {avg_mse:<20.6f}")
     print("="*50)
 
 if __name__ == "__main__":
-    analyze_datasets()
+    parser = argparse.ArgumentParser(description="Frequency Decomposition Analysis")
+    parser.add_argument("--mode", type=str, choices=['absolute', 'percent', 'granular'], default='absolute', help="Filtering mode (absolute, percent, or granular)")
+    parser.add_argument("--output_dir", type=str, default=None, help="Output directory for plots")
+    args = parser.parse_args()
+    
+    out_dir = args.output_dir
+    if out_dir is None:
+        if args.mode == 'percent':
+            out_dir = 'temp/freq_decomp_plots_percent'
+        elif args.mode == 'granular':
+            out_dir = 'temp/freq_decomp_plots_granular'
+        else:
+            out_dir = 'temp/freq_decomp_plots'
+        
+    analyze_datasets(mode=args.mode, output_dir=out_dir)

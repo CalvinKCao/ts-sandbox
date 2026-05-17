@@ -364,7 +364,7 @@ class DiffusionScheduler:
         # Create timestep schedule (evenly spaced, including the max timestep)
         # We want num_steps timesteps from T-1 down to 0, evenly spaced
         # E.g., for T=1000 and num_steps=50: [999, 979, 959, ..., 19]
-        timesteps = torch.linspace(self.num_steps - 1, 0, num_steps, dtype=torch.long).tolist()
+        timesteps = torch.linspace(self.num_steps - 1, 0, int(num_steps), dtype=torch.long).tolist()
         
         # Start from pure noise
         x = torch.randn(shape, device=device)
@@ -478,7 +478,7 @@ class DiffusionScheduler:
         # Create timestep schedule (evenly spaced, including the max timestep)
         # We want num_steps timesteps from T-1 down to 0, evenly spaced
         # E.g., for T=1000 and num_steps=50: [999, 979, 959, ..., 19]
-        timesteps = torch.linspace(self.num_steps - 1, 0, num_steps, dtype=torch.long).tolist()
+        timesteps = torch.linspace(self.num_steps - 1, 0, int(num_steps), dtype=torch.long).tolist()
         
         # Start from pure noise
         x = torch.randn(shape, device=device)

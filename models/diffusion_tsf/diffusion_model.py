@@ -281,7 +281,7 @@ class DiffusionTSF(nn.Module):
         dtype: torch.dtype = torch.float32
     ) -> torch.Tensor:
         """Create a vertical coordinate gradient map."""
-        y_coords = torch.linspace(1.0, -1.0, height, device=device, dtype=dtype)
+        y_coords = torch.linspace(1.0, -1.0, int(height), device=device, dtype=dtype)
         coord_grid = y_coords.view(1, 1, height, 1).expand(batch_size, 1, height, width)
         return coord_grid
     
@@ -307,7 +307,7 @@ class DiffusionTSF(nn.Module):
         dtype: torch.dtype = torch.float32
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Create horizontal time-aware coordinate channels."""
-        ramp = torch.linspace(-1.0, 1.0, width, device=device, dtype=dtype)
+        ramp = torch.linspace(-1.0, 1.0, int(width), device=device, dtype=dtype)
         ramp = ramp.view(1, 1, 1, width).expand(batch_size, 1, height, width)
         t_idx = torch.arange(width, device=device, dtype=dtype)
         sine = torch.sin(2 * math.pi * t_idx / self.config.seasonal_period)
