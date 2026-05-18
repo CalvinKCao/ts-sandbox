@@ -31,7 +31,8 @@ def train_itransformer(model, train_loader, val_loader, epochs=5, lr=1e-3, devic
     for epoch in range(epochs):
         model.train()
         train_loss = []
-        for batch_x, batch_y in train_loader:
+        pbar = tqdm(train_loader, desc=f"iTransformer Epoch {epoch+1}/{epochs}")
+        for batch_x, batch_y in pbar:
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)
             # Permute for iTransformer: (B, Seq, V)
             batch_x = batch_x.permute(0, 2, 1)
@@ -49,6 +50,7 @@ def train_itransformer(model, train_loader, val_loader, epochs=5, lr=1e-3, devic
             loss.backward()
             optimizer.step()
             train_loss.append(loss.item())
+            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
             
         model.eval()
         val_loss = []
@@ -129,7 +131,8 @@ def train_diffusion(model, train_loader, val_loader, epochs=10, lr=1e-4, device=
     for epoch in range(epochs):
         model.train()
         train_loss = []
-        for past, future in train_loader:
+        pbar = tqdm(train_loader, desc=f"Diffusion Epoch {epoch+1}/{epochs}")
+        for past, future in pbar:
             past, future = past.to(device), future.to(device)
             optimizer.zero_grad()
             out = model(past, future)
@@ -137,6 +140,7 @@ def train_diffusion(model, train_loader, val_loader, epochs=10, lr=1e-4, device=
             loss.backward()
             optimizer.step()
             train_loss.append(loss.item())
+            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
             
         val_mse = evaluate_diffusion(model, val_loader, device)
         print(f"Diffusion Epoch {epoch+1}/{epochs} - Train Loss: {np.mean(train_loss):.4f}, Val MSE: {val_mse:.4f}")
