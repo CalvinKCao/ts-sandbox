@@ -646,6 +646,8 @@ def finish_wandb():
 # Edit that file to change defaults; nothing here overrides those values.
 # ============================================================================
 
+EXPERIMENT = 'baseline'
+
 from models.diffusion_tsf.pipeline_config import (
     LOOKBACK_LENGTH,
     FORECAST_LENGTH,
@@ -932,42 +934,71 @@ def create_diffusion_model(
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
     guidance_penalty_weight: Optional[float] = None,
-) -> DiffusionTSF:
+):
     """Create DiffusionTSF model with iTransformer guidance channel enabled."""
     if n_variates is None:
         n_variates = N_VARIATES
     if guidance_penalty_weight is None:
         guidance_penalty_weight = GUIDANCE_PENALTY_WEIGHT
 
-    logger.info(f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}")
+    logger.info(f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, experiment={EXPERIMENT}")
 
-    config = DiffusionTSFConfig(
-        num_variables=n_variates,
-        lookback_length=lookback,
-        forecast_length=horizon + lookback_overlap,
-        lookback_overlap=lookback_overlap,
-        past_loss_weight=past_loss_weight,
-        image_height=IMAGE_HEIGHT,
-        use_coordinate_channel=True,
-        use_guidance_channel=True,
-        guidance_penalty_weight=guidance_penalty_weight,
-        num_diffusion_steps=1000,
-        model_type=MODEL_TYPE,
-        unet_channels=UNET_CHANNELS,
-        attention_levels=ATTENTION_LEVELS,
-        disable_cross_attention=DISABLE_CROSS_ATTENTION,
-        num_res_blocks=2,
-        dit_patch_size=DIT_PATCH_SIZE,
-        dit_embed_dim=DIT_EMBED_DIM,
-        dit_depth=DIT_DEPTH,
-        dit_num_heads=DIT_NUM_HEADS,
-        dit_mlp_ratio=DIT_MLP_RATIO,
-        dit_dropout=DIT_DROPOUT,
-        use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
-        unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
-        use_amp=USE_AMP,
-    )
-    return DiffusionTSF(config)
+    if EXPERIMENT == 'baseline':
+        config = DiffusionTSFConfig(
+            num_variables=n_variates,
+            lookback_length=lookback,
+            forecast_length=horizon + lookback_overlap,
+            lookback_overlap=lookback_overlap,
+            past_loss_weight=past_loss_weight,
+            image_height=IMAGE_HEIGHT,
+            use_coordinate_channel=True,
+            use_guidance_channel=True,
+            guidance_penalty_weight=guidance_penalty_weight,
+            num_diffusion_steps=1000,
+            model_type=MODEL_TYPE,
+            unet_channels=UNET_CHANNELS,
+            attention_levels=ATTENTION_LEVELS,
+            disable_cross_attention=DISABLE_CROSS_ATTENTION,
+            num_res_blocks=2,
+            dit_patch_size=DIT_PATCH_SIZE,
+            dit_embed_dim=DIT_EMBED_DIM,
+            dit_depth=DIT_DEPTH,
+            dit_num_heads=DIT_NUM_HEADS,
+            dit_mlp_ratio=DIT_MLP_RATIO,
+            dit_dropout=DIT_DROPOUT,
+            use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
+            unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
+            use_amp=USE_AMP,
+        )
+        return DiffusionTSF(config)
+    else:
+        from models.diffusion_tsf.experimental_diffusion_model import ExperimentalDiffusionTSF, ExperimentalDiffusionTSFConfig
+        use_residual = (EXPERIMENT in ["A", "A+B"])
+        independent_norm = (EXPERIMENT in ["B", "A+B"])
+        
+        config = ExperimentalDiffusionTSFConfig(
+            num_variables=n_variates,
+            lookback_length=lookback,
+            forecast_length=horizon + lookback_overlap,
+            lookback_overlap=lookback_overlap,
+            past_loss_weight=past_loss_weight,
+            image_height=IMAGE_HEIGHT,
+            use_coordinate_channel=True,
+            use_guidance_channel=True,
+            guidance_penalty_weight=guidance_penalty_weight,
+            num_diffusion_steps=1000,
+            model_type=MODEL_TYPE,
+            unet_channels=UNET_CHANNELS,
+            attention_levels=ATTENTION_LEVELS,
+            disable_cross_attention=DISABLE_CROSS_ATTENTION,
+            num_res_blocks=2,
+            use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
+            unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
+            use_amp=USE_AMP,
+            use_residual_diffusion=use_residual,
+            independent_norm=independent_norm,
+        )
+        return ExperimentalDiffusionTSF(config)
 
 
 # ============================================================================
@@ -3516,8 +3547,14 @@ def main():
                         help='Override lookback length')
     parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH,
                         help='Override forecast length')
+    parser.add_argument('--experiment', type=str, default='baseline',
+                        choices=['baseline', 'A', 'B', 'A+B'],
+                        help='Run an experimental model variant (A=residual, B=independent norm)')
 
     args = parser.parse_args()
+
+    global EXPERIMENT
+    EXPERIMENT = args.experiment
 
     # Legacy flag compat
     if args.status:
