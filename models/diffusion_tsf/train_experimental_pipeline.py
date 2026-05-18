@@ -177,6 +177,12 @@ def main():
         from models.diffusion_tsf.train_multivariate_pipeline import get_dataset_n_cols
         n_vars = get_dataset_n_cols(dataset_name)
         
+        # Dynamically adjust batch size to avoid OOM for high-variate datasets
+        # Target effective batch size (B * V) of ~256 (e.g. 32 * 8 = 256)
+        target_bv = 256
+        effective_batch_size = max(1, min(args.batch_size, target_bv // n_vars))
+        print(f"Using effective batch size {effective_batch_size} (n_vars={n_vars}) to prevent OOM.")
+        
         train_ds, val_ds, test_ds, stats = load_dataset(dataset_name, lookback=512, horizon=96)
         
         if args.smoke_test:
@@ -186,9 +192,9 @@ def main():
             val_ds = Subset(val_ds, range(min(2, len(val_ds))))
             test_ds = Subset(test_ds, range(min(2, len(test_ds))))
             
-        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-        val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
-        test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
+        train_loader = DataLoader(train_ds, batch_size=effective_batch_size, shuffle=True)
+        val_loader = DataLoader(val_ds, batch_size=effective_batch_size, shuffle=False)
+        test_loader = DataLoader(test_ds, batch_size=effective_batch_size, shuffle=False)
         
         # 2. Train iTransformer
         print("\\n--- Training iTransformer ---")
@@ -213,7 +219,8 @@ def main():
                 use_residual_diffusion=use_residual,
                 independent_norm=independent_norm,
                 num_diffusion_steps=1000,
-                model_type="unet" # fallback to fast unet
+                model_type="unet", # fallback to fast unet
+                use_gradient_checkpointing=(n_vars >= 10)
             )
             
             diff_model = ExperimentalDiffusionTSF(config, guidance_model=guidance)
