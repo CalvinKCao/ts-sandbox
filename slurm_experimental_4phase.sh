@@ -26,8 +26,8 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "weather" "exchange_rate")
     fi
 
-    # The experiments requested: A, B, A+B (and baseline)
-    SCENARIOS=("baseline" "A" "B" "A+B")
+    # The experiments requested: A, B, A+B
+    SCENARIOS=("A" "B" "A+B")
 
     for ds in "${DATASETS[@]}"; do
         DS_TAG="${ds//_/-}"
