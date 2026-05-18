@@ -125,14 +125,21 @@ if [ -n "$SMOKE_FLAG" ]; then
     COMMON_ARGS+=("$SMOKE_FLAG")
 fi
 
+TARGET_DIM=7
+if [ "$DATASET" = "weather" ]; then TARGET_DIM=21; fi
+if [ "$DATASET" = "exchange_rate" ]; then TARGET_DIM=8; fi
+if [ "$DATASET" = "ETTm1" ] || [ "$DATASET" = "ETTh1" ] || [ "$DATASET" = "ETTh2" ] || [ "$DATASET" = "ETTm2" ]; then TARGET_DIM=7; fi
+
 echo "Running Phase 1 (Pretrain)..."
 python models/diffusion_tsf/train_multivariate_pipeline.py \
     --mode pretrain \
+    --n-variates "$TARGET_DIM" \
     "${COMMON_ARGS[@]}"
 
 echo "Running Phase 2 (Finetune)..."
 python models/diffusion_tsf/train_multivariate_pipeline.py \
     --mode finetune \
+    --n-variates "$TARGET_DIM" \
     "${COMMON_ARGS[@]}"
 
 echo "Pipeline complete."
