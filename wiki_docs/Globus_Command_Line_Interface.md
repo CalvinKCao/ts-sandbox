@@ -1,2 +1,0 @@
-# Globus Command Line Interface
-
