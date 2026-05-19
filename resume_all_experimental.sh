@@ -5,12 +5,18 @@
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNS_DIR="$SCRIPT_DIR/results_experimental/runs"
 
-if [ ! -d "$RUNS_DIR" ]; then
-    echo "No runs directory found at $RUNS_DIR"
+# Try both common locations for runs folders
+if [ -d "$SCRIPT_DIR/results_experimental/runs" ]; then
+    RUNS_DIR="$SCRIPT_DIR/results_experimental/runs"
+elif [ -d "$SCRIPT_DIR/results/runs" ]; then
+    RUNS_DIR="$SCRIPT_DIR/results/runs"
+else
+    echo "No runs directory found in results_experimental/runs or results/runs"
     exit 1
 fi
+
+echo "Scanning $RUNS_DIR for folders to resume..."
 
 for RUN_PATH in "$RUNS_DIR"/*; do
     if [ ! -d "$RUN_PATH" ]; then
@@ -21,12 +27,8 @@ for RUN_PATH in "$RUNS_DIR"/*; do
     
     # Parse scenario and dataset from folder name. 
     # Example format: 05-18-3650640-exp_A_ETTh1
-    # We can extract everything after "exp_"
-    
-    # Remove the date and job id prefix (e.g. 05-18-3650640-)
     REMAINDER="${RUN_FOLDER#*-*-*-}"
     
-    # Now we have exp_A_ETTh1 or exp_A_B_ETTh1
     if [[ "$REMAINDER" == exp_A_B_* ]]; then
         SCENARIO="A+B"
         DATASET="${REMAINDER#exp_A_B_}"
@@ -41,11 +43,19 @@ for RUN_PATH in "$RUNS_DIR"/*; do
         continue
     fi
     
+    TARGET_DIM=7
+    if [ "$DATASET" = "weather" ]; then TARGET_DIM=21; fi
+    if [ "$DATASET" = "exchange_rate" ]; then TARGET_DIM=8; fi
+    if [ "$DATASET" = "ETTm1" ] || [ "$DATASET" = "ETTh1" ] || [ "$DATASET" = "ETTh2" ] || [ "$DATASET" = "ETTm2" ]; then TARGET_DIM=7; fi
+
     DS_TAG="${DATASET//_/-}"
-    JOB_NAME="resume_${SCENARIO//+/_}_${DS_TAG}"
+    JOB_NAME="res_${SCENARIO//+/_}_${DS_TAG}"
     
-    echo "Resuming $RUN_FOLDER (Scenario: $SCENARIO, Dataset: $DATASET)"
+    echo "Submitting resume job for $RUN_FOLDER (Scenario: $SCENARIO, Dataset: $DATASET, Dim: $TARGET_DIM)"
     
+    # Construction of the full argument string to avoid array expansion issues
+    COMMON_ARGS="--dataset $DATASET --model-type unet --checkpoint-dir ${RUN_PATH}/ckpts --results-dir ${RUN_PATH}/datasets --synth-cache-dir $SCRIPT_DIR/synth_data --experiment $SCENARIO --subset-id exp_$SCENARIO --resume"
+
     sbatch \
         --job-name="$JOB_NAME" \
         --account=aip-boyuwang \
@@ -62,7 +72,6 @@ module purge || true
 module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
 
 if [ -n \"\${SLURM_TMPDIR:-}\" ]; then
-    echo \"Building fast venv on \\\$SLURM_TMPDIR...\"
     python -m venv \"\$SLURM_TMPDIR/env\"
     source \"\$SLURM_TMPDIR/env/bin/activate\"
     pip install --no-index --upgrade pip
@@ -72,42 +81,19 @@ else
     source .venv/bin/activate
 fi
 
-TARGET_DIM=7
-if [ \"$DATASET\" = \"weather\" ]; then TARGET_DIM=21; fi
-if [ \"$DATASET\" = \"exchange_rate\" ]; then TARGET_DIM=8; fi
-if [ \"$DATASET\" = \"ETTm1\" ] || [ \"$DATASET\" = \"ETTh1\" ] || [ \"$DATASET\" = \"ETTh2\" ] || [ \"$DATASET\" = \"ETTm2\" ]; then TARGET_DIM=7; fi
-
-SYNTH_CACHE_ROOT=\"$SCRIPT_DIR/synth_data\"
-
-COMMON_ARGS=(
-    \"--dataset\" \"$DATASET\"
-    \"--model-type\" \"unet\"
-    \"--checkpoint-dir\" \"${RUN_PATH}/ckpts\"
-    \"--results-dir\" \"${RUN_PATH}/datasets\"
-    \"--synth-cache-dir\" \"\$SYNTH_CACHE_ROOT\"
-    \"--experiment\" \"$SCENARIO\"
-    \"--subset-id\" \"exp_$SCENARIO\"
-    \"--resume\"
-)
-
-# Append to the original log file
+# Append to original log
 exec >>\"${RUN_PATH}/logs/${RUN_FOLDER}.log\" 2>&1
 
 echo \"==========================================\"
-echo \"RESUMING Job ID: \$SLURM_JOB_ID\"
+echo \"RESUMING AT: \$(date)\"
+echo \"Job ID: \$SLURM_JOB_ID\"
 echo \"==========================================\"
 
 echo \"Running Phase 1 (Pretrain)...\"
-python models/diffusion_tsf/train_multivariate_pipeline.py \\
-    --mode pretrain \\
-    --n-variates \"\$TARGET_DIM\" \\
-    \"\${COMMON_ARGS[@]}\"
+python models/diffusion_tsf/train_multivariate_pipeline.py --mode pretrain --n-variates $TARGET_DIM $COMMON_ARGS
 
 echo \"Running Phase 2 (Finetune)...\"
-python models/diffusion_tsf/train_multivariate_pipeline.py \\
-    --mode finetune \\
-    --n-variates \"\$TARGET_DIM\" \\
-    \"\${COMMON_ARGS[@]}\"
+python models/diffusion_tsf/train_multivariate_pipeline.py --mode finetune --n-variates $TARGET_DIM $COMMON_ARGS
 
 echo \"Pipeline complete.\"
 "

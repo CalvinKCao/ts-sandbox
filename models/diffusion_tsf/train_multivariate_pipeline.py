@@ -2307,16 +2307,16 @@ def evaluate_model(
 
             torch.manual_seed(42 + batch_idx)
             result = model.generate(past, **gen_kwargs)
-            all_preds_single.append(result['prediction'].cpu())
+            all_preds_single.append(result.get('prediction', result.get('forecast')).cpu())
 
             if smoke_test:
-                all_preds_avg.append(result['prediction'].cpu())
+                all_preds_avg.append(result.get('prediction', result.get('forecast')).cpu())
             else:
                 samples = []
                 for s_idx in range(n_samples):
                     torch.manual_seed(1000 + s_idx * 17 + batch_idx)
                     result = model.generate(past, **gen_kwargs)
-                    samples.append(result['prediction'].cpu())
+                    samples.append(result.get('prediction', result.get('forecast')).cpu())
                 all_preds_avg.append(torch.stack(samples).mean(dim=0))
 
             if K > 0:
