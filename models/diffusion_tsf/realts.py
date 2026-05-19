@@ -595,21 +595,19 @@ class RealTS(Dataset):
 
             existing_data = None
             if os.path.exists(cache_path):
-                existing_data = np.load(cache_path, mmap_mode='r')
-                existing_n = existing_data.shape[0]
-                if existing_n >= self.pool_size:
-                    logger.info(
-                        f"Reusing existing synthetic pool {cache_path} "
-                        f"(has {existing_n} samples, need {self.pool_size})"
-                    )
+                # [Gemini CLI] Avoid mmap for small files to prevent Bus Errors on Lustre
+                file_size = os.path.getsize(cache_path)
+                if file_size < 2 * 1024 * 1024 * 1024: # 2GB
+                    logger.info(f"Loading existing synthetic pool {cache_path} into RAM ({file_size/1e6:.1f} MB)")
+                    existing_data = np.load(cache_path)
                     self.data_cache = existing_data
-                    self.pool_size = existing_n
+                    self.pool_size = existing_data.shape[0]
+                    self.use_disk_cache = False
                 else:
-                    logger.info(
-                        f"Existing pool {cache_path} has {existing_n} samples, "
-                        f"need {self.pool_size}. Generating "
-                        f"{self.pool_size - existing_n} more..."
-                    )
+                    logger.info(f"Mmap-ing existing synthetic pool {cache_path} ({file_size/1e9:.1f} GB)")
+                    existing_data = np.load(cache_path, mmap_mode='r')
+                    self.data_cache = existing_data
+                    self.pool_size = existing_data.shape[0]
 
             if self.data_cache is None:
                 needed = (
@@ -720,7 +718,15 @@ class RealTS(Dataset):
                             except OSError:
                                 pass
 
-                self.data_cache = np.load(cache_path, mmap_mode='r')
+                # [Gemini CLI] Final load: avoid mmap if small
+                file_size = os.path.getsize(cache_path)
+                if file_size < 2 * 1024 * 1024 * 1024:
+                    logger.info(f"Loading synthetic pool {cache_path} into RAM ({file_size/1e6:.1f} MB)")
+                    self.data_cache = np.load(cache_path)
+                    self.use_disk_cache = False
+                else:
+                    logger.info(f"Mmap-ing synthetic pool {cache_path} ({file_size/1e9:.1f} GB)")
+                    self.data_cache = np.load(cache_path, mmap_mode='r')
                 self.pool_size = int(self.data_cache.shape[0])
                 
         elif self.pregenerate and self.num_variables > 1:
