@@ -127,7 +127,7 @@ fi
 
 TARGET_DIM=7
 if [ "$DATASET" = "weather" ]; then TARGET_DIM=21; fi
-if [ "$DATASET" = "exchange_rate" ]; then TARGET_DIM=8; fi
+if [ "$DATASET" = "exchange_rate" ] || [ "$DATASET" = "exchange-rate" ]; then TARGET_DIM=8; fi
 if [ "$DATASET" = "ETTm1" ] || [ "$DATASET" = "ETTh1" ] || [ "$DATASET" = "ETTh2" ] || [ "$DATASET" = "ETTm2" ]; then TARGET_DIM=7; fi
 
 echo "Running Phase 1 (Pretrain)..."
