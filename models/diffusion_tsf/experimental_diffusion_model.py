@@ -379,12 +379,12 @@ class ExperimentalDiffusionTSF(DiffusionTSF):
             final_pred = trend + residual_pred
             
             return {
-                "forecast": final_pred,
+                "prediction": final_pred,
                 "residual": residual_pred,
                 "trend": trend
             }
         else:
             final_pred = decoded * past_std + past_mean
             return {
-                "forecast": final_pred
+                "prediction": final_pred
             }
