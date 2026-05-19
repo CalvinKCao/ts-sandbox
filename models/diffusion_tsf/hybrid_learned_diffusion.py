@@ -32,12 +32,11 @@ class VerticalAttentionReadout(nn.Module):
 @dataclass
 class HybridLearnedDiffusionConfig(DiffusionTSFConfig):
     one_d_loss_weight: float = 1.0
-    pixel_loss_weight: float = 1.0
     cdf_loss_weight: float = 1.0
 
 
 class HybridLearnedDiffusionTSF(DiffusionTSF):
-    """1D DDPM state with soft-rendered U-Net canvas and tri-partite training loss."""
+    """1D DDPM state with soft-rendered U-Net canvas; L1d + soft-render EMD."""
 
     def __init__(
         self,
@@ -66,60 +65,43 @@ class HybridLearnedDiffusionTSF(DiffusionTSF):
             return self.config.past_loss_weight * nl_past + nl_fut
         return F.mse_loss(pred, target)
 
-    def _unet_predict(
+    def _predict_eps_1d_from_canvas(
         self,
         canvas: torch.Tensor,
         t_flat: torch.Tensor,
         cond_for_unet: torch.Tensor,
         ctx_flat: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         chunk_size = self.config.unet_max_chunk_size
         BV = canvas.shape[0]
         predictor = self.noise_predictor
-        use_features = isinstance(predictor, ConditionalUNet2D)
+        if not isinstance(predictor, ConditionalUNet2D):
+            raise RuntimeError("Hybrid learned_render requires ConditionalUNet2D backbone")
 
         if chunk_size > 0 and BV > chunk_size:
-            eps_list, feat_list = [], []
+            feat_list = []
             for i in range(0, BV, chunk_size):
                 end = min(i + chunk_size, BV)
-                if use_features:
-                    eps_c, feat_c = predictor(
-                        canvas[i:end],
-                        t_flat[i:end],
-                        cond_for_unet[i:end],
-                        encoder_hidden_states=ctx_flat[i:end] if ctx_flat is not None else None,
-                        return_features=True,
-                    )
-                    feat_list.append(feat_c)
-                else:
-                    eps_c = predictor(
-                        canvas[i:end],
-                        t_flat[i:end],
-                        cond_for_unet[i:end],
-                        encoder_hidden_states=ctx_flat[i:end] if ctx_flat is not None else None,
-                    )
-                    feat_c = None
-                eps_list.append(eps_c)
-            eps_2d = torch.cat(eps_list, dim=0)
-            if use_features:
-                feats = torch.cat(feat_list, dim=0)
-            else:
-                raise RuntimeError("Hybrid learned_render requires ConditionalUNet2D backbone")
-        else:
-            if use_features:
-                eps_2d, feats = predictor(
-                    canvas,
-                    t_flat,
-                    cond_for_unet,
-                    encoder_hidden_states=ctx_flat,
+                _, feat_c = predictor(
+                    canvas[i:end],
+                    t_flat[i:end],
+                    cond_for_unet[i:end],
+                    encoder_hidden_states=ctx_flat[i:end] if ctx_flat is not None else None,
                     return_features=True,
                 )
-            else:
-                raise RuntimeError("Hybrid learned_render requires ConditionalUNet2D backbone")
+                feat_list.append(feat_c)
+            feats = torch.cat(feat_list, dim=0)
+        else:
+            _, feats = predictor(
+                canvas,
+                t_flat,
+                cond_for_unet,
+                encoder_hidden_states=ctx_flat,
+                return_features=True,
+            )
 
         pooled = self.vertical_readout(feats)
-        noise_1d = self.noise_1d_head(pooled).squeeze(1)
-        return eps_2d, noise_1d
+        return self.noise_1d_head(pooled).squeeze(1)
 
     def _build_training_context(
         self,
@@ -218,7 +200,6 @@ class HybridLearnedDiffusionTSF(DiffusionTSF):
         if t is None:
             t = torch.randint(0, self.config.num_diffusion_steps, (B,), device=device)
 
-        noisy_2d, noise_2d = self.scheduler.add_noise(future_2d, t)
         noisy_1d, noise_1d = self.scheduler.add_noise(future_norm, t)
 
         cond_for_unet, ctx_flat, guidance_2d = self._build_training_context(
@@ -234,14 +215,12 @@ class HybridLearnedDiffusionTSF(DiffusionTSF):
             B, V, BV, device, canvas, cond_for_unet, ctx_flat, guidance_2d, H, W_fut
         )
 
-        noise_pred_2d_flat, noise_pred_1d_flat = self._unet_predict(
+        noise_pred_1d_flat = self._predict_eps_1d_from_canvas(
             canvas, t_flat, cond_for_unet, ctx_flat
         )
-        noise_pred_2d = noise_pred_2d_flat.reshape(B, V, H, W_fut)
         noise_pred_1d = noise_pred_1d_flat.reshape(B, V, W_fut)
 
         noise_loss_1d = self._noise_loss_weighted(noise_pred_1d, noise_1d)
-        noise_loss_2d = self._noise_loss_weighted(noise_pred_2d, noise_2d)
 
         x0_1d = self.scheduler.predict_x0_from_noise(noisy_1d, t, noise_pred_1d)
         x0_1d = torch.clamp(x0_1d, -3.5, 3.5)
@@ -249,20 +228,14 @@ class HybridLearnedDiffusionTSF(DiffusionTSF):
         emd_loss = self._compute_emd_loss(soft_x0, future_2d)
 
         cfg = self.hybrid_config
-        loss = (
-            cfg.one_d_loss_weight * noise_loss_1d
-            + cfg.pixel_loss_weight * noise_loss_2d
-            + cfg.cdf_loss_weight * emd_loss
-        )
+        loss = cfg.one_d_loss_weight * noise_loss_1d + cfg.cdf_loss_weight * emd_loss
 
         return {
             "loss": loss,
             "noise_loss": noise_loss_1d,
             "noise_loss_1d": noise_loss_1d,
-            "noise_loss_2d": noise_loss_2d,
             "emd_loss": emd_loss,
             "noise_pred": noise_pred_1d,
-            "noise_pred_2d": noise_pred_2d,
             "t": t,
             "learned_sigma": self.soft_renderer.sigma.detach(),
         }
@@ -322,8 +295,7 @@ class HybridLearnedDiffusionTSF(DiffusionTSF):
 
         def _predict_eps_1d(x_1d_flat: torch.Tensor, t_batch: torch.Tensor) -> torch.Tensor:
             canvas = _build_canvas_from_1d(x_1d_flat)
-            _, eps_1d = self._unet_predict(canvas, t_batch, cond_flat, ctx_flat)
-            return eps_1d
+            return self._predict_eps_1d_from_canvas(canvas, t_batch, cond_flat, ctx_flat)
 
         def model_fn(x_1d: torch.Tensor, t_batch: torch.Tensor, cond_arg) -> torch.Tensor:
             del cond_arg
@@ -331,7 +303,7 @@ class HybridLearnedDiffusionTSF(DiffusionTSF):
                 return _predict_eps_1d(x_1d, t_batch)
             eps_c = _predict_eps_1d(x_1d, t_batch)
             canvas_u = _build_canvas_from_1d(x_1d, use_null=True)
-            _, eps_u = self._unet_predict(canvas_u, t_batch, null_cond, null_ctx_flat)
+            eps_u = self._predict_eps_1d_from_canvas(canvas_u, t_batch, null_cond, null_ctx_flat)
             return eps_u + cfg_scale * (eps_c - eps_u)
 
         noise_shape = (BV, W_fut)
