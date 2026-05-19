@@ -666,6 +666,7 @@ from models.diffusion_tsf.pipeline_config import (
     SYNTHETIC_SAMPLES_MIN,
     SYNTHETIC_SAMPLES_CAP,
     resolve_synthetic_params,
+    EMD_LAMBDA,
     PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE,
     HP_TUNE_EPOCHS,
     HP_TUNE_PATIENCE,
@@ -934,14 +935,17 @@ def create_diffusion_model(
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
     guidance_penalty_weight: Optional[float] = None,
+    emd_lambda: Optional[float] = None,
 ):
     """Create DiffusionTSF model with iTransformer guidance channel enabled."""
     if n_variates is None:
         n_variates = N_VARIATES
     if guidance_penalty_weight is None:
         guidance_penalty_weight = GUIDANCE_PENALTY_WEIGHT
+    if emd_lambda is None:
+        emd_lambda = EMD_LAMBDA
 
-    logger.info(f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, experiment={EXPERIMENT}")
+    logger.info(f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, emd_lambda={emd_lambda}, experiment={EXPERIMENT}")
 
     if EXPERIMENT == 'baseline':
         config = DiffusionTSFConfig(
@@ -954,6 +958,7 @@ def create_diffusion_model(
             use_coordinate_channel=True,
             use_guidance_channel=True,
             guidance_penalty_weight=guidance_penalty_weight,
+            emd_lambda=emd_lambda,
             num_diffusion_steps=1000,
             model_type=MODEL_TYPE,
             unet_channels=UNET_CHANNELS,
@@ -986,6 +991,7 @@ def create_diffusion_model(
             use_coordinate_channel=True,
             use_guidance_channel=True,
             guidance_penalty_weight=guidance_penalty_weight,
+            emd_lambda=emd_lambda,
             num_diffusion_steps=1000,
             model_type=MODEL_TYPE,
             unet_channels=UNET_CHANNELS,
@@ -3498,7 +3504,7 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 # ============================================================================
 
 def main():
-    global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
+    global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT, EMD_LAMBDA
     global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION, LOOKBACK_LENGTH, FORECAST_LENGTH
     global MODEL_TYPE
 
@@ -3533,6 +3539,8 @@ def main():
                         help='Wipe manifest and checkpoints, start from scratch')
     parser.add_argument('--guidance-penalty-weight', type=float, default=GUIDANCE_PENALTY_WEIGHT,
                         help='Weight for guidance penalty loss (default from pipeline_config)')
+    parser.add_argument('--emd-lambda', type=float, default=EMD_LAMBDA,
+                        help='Weight for EMD loss (default from pipeline_config)')
     parser.add_argument('--image-height', type=int, default=IMAGE_HEIGHT,
                         help='Override image height')
     parser.add_argument('--unet-channels', type=str, default=None,
@@ -3573,6 +3581,7 @@ def main():
     
     # Global overrides from CLI
     GUIDANCE_PENALTY_WEIGHT = args.guidance_penalty_weight
+    EMD_LAMBDA = args.emd_lambda
     IMAGE_HEIGHT = args.image_height
     if args.unet_channels:
         UNET_CHANNELS = [int(x.strip()) for x in args.unet_channels.split(',') if x.strip()]
