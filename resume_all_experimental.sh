@@ -42,6 +42,9 @@ for RUN_PATH in "$RUNS_DIR"/*; do
         echo "Could not parse scenario from $RUN_FOLDER, skipping."
         continue
     fi
+
+    # Fix dataset naming (registry uses underscores, folder names have hyphens)
+    if [ "$DATASET" = "exchange-rate" ]; then DATASET="exchange_rate"; fi
     
     TARGET_DIM=7
     if [ "$DATASET" = "weather" ]; then TARGET_DIM=21; fi
