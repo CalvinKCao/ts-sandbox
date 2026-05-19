@@ -45,21 +45,16 @@ for RUN_PATH in "$RUNS_DIR"/*; do
     
     TARGET_DIM=7
     if [ "$DATASET" = "weather" ]; then TARGET_DIM=21; fi
-    if [ "$DATASET" = "exchange-rate" ] || [ "$DATASET" = "exchange_rate" ]; then 
-        TARGET_DIM=8
-        DATASET="exchange_rate" # normalize for python arg
-    fi
+    if [ "$DATASET" = "exchange_rate" ]; then TARGET_DIM=8; fi
     if [ "$DATASET" = "ETTm1" ] || [ "$DATASET" = "ETTh1" ] || [ "$DATASET" = "ETTh2" ] || [ "$DATASET" = "ETTm2" ]; then TARGET_DIM=7; fi
 
     DS_TAG="${DATASET//_/-}"
     JOB_NAME="res_${SCENARIO//+/_}_${DS_TAG}"
     
-    LOG_FILE="${RUN_PATH}/logs/${RUN_FOLDER}.log"
-    RESUME_SCRIPT="${RUN_PATH}/logs/resume_script.sh"
+    echo "Submitting resume job for $RUN_FOLDER (Scenario: $SCENARIO, Dataset: $DATASET, Dim: $TARGET_DIM)"
     
-    echo "Creating resume script for $RUN_FOLDER..."
-    
-    cat << EOF > "$RESUME_SCRIPT"
+    # We use a heredoc to sbatch to avoid the quoting/escaping hell of --wrap
+    sbatch <<EOS
 #!/bin/bash
 #SBATCH --job-name=$JOB_NAME
 #SBATCH --account=aip-boyuwang
@@ -68,37 +63,41 @@ for RUN_PATH in "$RUNS_DIR"/*; do
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=50G
+#SBATCH --chdir=$SCRIPT_DIR
 #SBATCH --output=${RUN_PATH}/logs/resume-%j.out
 #SBATCH --error=${RUN_PATH}/logs/resume-%j.err
 
 set -euo pipefail
 
-# Redirect all output to the main log file
-exec >>"$LOG_FILE" 2>&1
-
-echo "=========================================="
-echo "RESUMING AT: \$(date)"
-echo "Job ID: \$SLURM_JOB_ID"
-echo "Node: \$SLURMD_NODENAME"
-echo "=========================================="
-
 module purge || true
-module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
+module load StdEnv/2023
+module load python/3.11
+module load cuda/12.2
+module load cudnn/8.9
 
 # Alliance CA best practice is to rebuild venv on \$SLURM_TMPDIR for speed
 if [ -n "\${SLURM_TMPDIR:-}" ]; then
     echo "Building fast venv on \$SLURM_TMPDIR..."
-    python -m venv "\$SLURM_TMPDIR/env"
+    python3 -m venv "\$SLURM_TMPDIR/env"
     source "\$SLURM_TMPDIR/env/bin/activate"
     pip install --no-index --upgrade pip
     pip install --no-index torch numpy scipy pandas scikit-learn wandb optuna tqdm matplotlib einops
     pip install reformer-pytorch --index-url https://pypi.org/simple
 else
+    echo "Warning: SLURM_TMPDIR not set, using local venv"
     source .venv/bin/activate
 fi
 
+# Append to original log
+exec >>"${RUN_PATH}/logs/${RUN_FOLDER}.log" 2>&1
+
+echo "=========================================="
+echo "RESUMING AT: \$(date)"
+echo "Job ID: \$SLURM_JOB_ID"
+echo "=========================================="
+
 echo "Running Phase 1 (Pretrain)..."
-python models/diffusion_tsf/train_multivariate_pipeline.py \\
+python3 models/diffusion_tsf/train_multivariate_pipeline.py \\
     --mode pretrain \\
     --n-variates $TARGET_DIM \\
     --dataset $DATASET \\
@@ -111,7 +110,7 @@ python models/diffusion_tsf/train_multivariate_pipeline.py \\
     --resume
 
 echo "Running Phase 2 (Finetune)..."
-python models/diffusion_tsf/train_multivariate_pipeline.py \\
+python3 models/diffusion_tsf/train_multivariate_pipeline.py \\
     --mode finetune \\
     --n-variates $TARGET_DIM \\
     --dataset $DATASET \\
@@ -124,10 +123,6 @@ python models/diffusion_tsf/train_multivariate_pipeline.py \\
     --resume
 
 echo "Pipeline complete."
-EOF
-
-    echo "Submitting resume job for $RUN_FOLDER..."
-    sbatch "$RESUME_SCRIPT"
+EOS
 done
-
 echo "All resume jobs submitted!"
