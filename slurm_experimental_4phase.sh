@@ -122,7 +122,8 @@ COMMON_ARGS=(
     "--synth-cache-dir" "$SYNTH_CACHE_ROOT"
     "--experiment" "$SCENARIO"
     "--subset-id" "exp_$SCENARIO"
-    "--guidance-penalty-weight" "${GUIDANCE_WEIGHT:-0.2}"
+    "--lookback-length" "104"
+    "--forecast-length" "96"
     "--fresh"
 )
 if [ -n "$SMOKE_FLAG" ]; then

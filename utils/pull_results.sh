@@ -14,6 +14,7 @@ LOCAL_PATH="./results"
 REMOTE_PATHS=(
     "/scratch/ccao87/ts-sandbox/results"
     "/scratch/ccao87/ts-sandbox-dit-parallel/results"
+    "/scratch/ccao87/ts-sandbox/results_experimental"
 )
 
 # Regular SSH options
