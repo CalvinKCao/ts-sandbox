@@ -81,7 +81,7 @@ def evaluate_diffusion(model, val_loader, device):
         for past, future in val_loader:
             past, future = past.to(device), future.to(device)
             out = model.generate(past, num_ddim_steps=20)
-            forecast = out['forecast']
+            forecast = out['prediction']
             # future includes lookback_overlap, take only the true horizon
             true_future = future[:, :, -forecast.shape[-1]:] if future.shape[-1] > forecast.shape[-1] else future
             # MSE computation
@@ -99,7 +99,7 @@ def evaluate_detailed(model, loader, device, return_detailed=False):
         for past, future in loader:
             past, future = past.to(device), future.to(device)
             out = model.generate(past, num_ddim_steps=20)
-            forecast = out['forecast']
+            forecast = out['prediction']
             true_future = future[:, :, -forecast.shape[-1]:] if future.shape[-1] > forecast.shape[-1] else future
             mse = F.mse_loss(forecast, true_future).item()
             mae = F.l1_loss(forecast, true_future).item()
