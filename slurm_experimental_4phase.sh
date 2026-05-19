@@ -88,12 +88,15 @@ echo "Started: $(date '+%m-%d %H:%M:%S')"
 echo "=========================================="
 
 module purge || true
-module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
+module load StdEnv/2023
+module load python/3.11
+module load cuda/12.2
+module load cudnn/8.9
 
-# Assuming fast venv is preferred
+# Alliance CA best practice is to rebuild venv on $SLURM_TMPDIR for speed
 if [ -n "${SLURM_TMPDIR:-}" ]; then
     echo "Building fast venv on \$SLURM_TMPDIR..."
-    python -m venv "$SLURM_TMPDIR/env"
+    python3 -m venv "$SLURM_TMPDIR/env"
     source "$SLURM_TMPDIR/env/bin/activate"
     pip install --no-index --upgrade pip
     pip install --no-index torch numpy scipy pandas scikit-learn wandb optuna tqdm matplotlib einops
@@ -127,17 +130,17 @@ fi
 
 TARGET_DIM=7
 if [ "$DATASET" = "weather" ]; then TARGET_DIM=21; fi
-if [ "$DATASET" = "exchange_rate" ] || [ "$DATASET" = "exchange-rate" ]; then TARGET_DIM=8; fi
+if [ "$DATASET" = "exchange_rate" ]; then TARGET_DIM=8; fi
 if [ "$DATASET" = "ETTm1" ] || [ "$DATASET" = "ETTh1" ] || [ "$DATASET" = "ETTh2" ] || [ "$DATASET" = "ETTm2" ]; then TARGET_DIM=7; fi
 
 echo "Running Phase 1 (Pretrain)..."
-python models/diffusion_tsf/train_multivariate_pipeline.py \
+python3 models/diffusion_tsf/train_multivariate_pipeline.py \
     --mode pretrain \
     --n-variates "$TARGET_DIM" \
     "${COMMON_ARGS[@]}"
 
 echo "Running Phase 2 (Finetune)..."
-python models/diffusion_tsf/train_multivariate_pipeline.py \
+python3 models/diffusion_tsf/train_multivariate_pipeline.py \
     --mode finetune \
     --n-variates "$TARGET_DIM" \
     "${COMMON_ARGS[@]}"
