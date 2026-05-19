@@ -150,6 +150,7 @@ datasets/traffic/traffic.csv
 datasets/PeMS/PeMS.csv
 datasets/solar_Alabama/solar_Alabama.csv
 
+wiki_docs/
 # lnai-generated
 .agents/skills/alliancecan
 .agents/skills/audio_math_explainer
