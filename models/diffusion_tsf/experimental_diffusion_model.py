@@ -378,13 +378,24 @@ class ExperimentalDiffusionTSF(DiffusionTSF):
             residual_pred = decoded * true_past_res_std
             final_pred = trend + residual_pred
             
-            return {
+            result = {
                 "prediction": final_pred,
                 "residual": residual_pred,
-                "trend": trend
+                "trend": trend,
+                "future_2d": x_2d,
+                "past_2d": past_2d,
+                "past_noise_2d": past_noise_2d if 'past_noise_2d' in locals() else None
             }
+            if guidance_2d is not None:
+                result['guidance_2d'] = guidance_2d
+            return result
         else:
             final_pred = decoded * past_std + past_mean
-            return {
-                "prediction": final_pred
+            result = {
+                "prediction": final_pred,
+                "future_2d": x_2d,
+                "past_2d": past_2d
             }
+            if guidance_2d is not None:
+                result['guidance_2d'] = guidance_2d
+            return result
