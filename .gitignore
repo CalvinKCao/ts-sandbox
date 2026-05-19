@@ -12,9 +12,10 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 slides/
-# AI tooling directories (dot-prefixed)
+# AI tooling directories (dot-prefixed; local-only via ~/.ai + lnai)
 .ai/
 .agents/
+*:Zone.Identifier
 docs.alliancecan.ca_mediawiki-20260319-wikidump/
 .claude/
 # .cursor/ mostly local; un-ignore skill symlinks lnai manages (parent must not be fully excluded)
