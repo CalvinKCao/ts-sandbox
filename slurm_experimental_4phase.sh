@@ -15,10 +15,22 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SB_ERR='results_experimental/bootstrap/%x-%j.err'
 
     IS_SMOKE=0
-    if [ "${1:-}" = "--smoke-test" ]; then
-        IS_SMOKE=1
-        shift
-    fi
+    IMAGE_HEIGHT="${IMAGE_HEIGHT:-}"
+    while [ $# -gt 0 ]; do
+        case "${1:-}" in
+            --smoke-test)
+                IS_SMOKE=1
+                shift
+                ;;
+            --image-height)
+                IMAGE_HEIGHT="${2:?--image-height requires a value (e.g. 64)}"
+                shift 2
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
 
     if [ "$#" -gt 0 ]; then
         DATASETS=("$@")
@@ -39,6 +51,14 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
             SAFE_SCENARIO="${scenario//+/_}"
             JOB_NAME="exp_${SAFE_SCENARIO}_${DS_TAG}"
             [ "$IS_SMOKE" -eq 1 ] && JOB_NAME="${JOB_NAME}_smoke"
+            if [ -n "$IMAGE_HEIGHT" ]; then
+                JOB_NAME="${JOB_NAME}_h${IMAGE_HEIGHT}"
+            fi
+
+            EXPORT_VARS="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE"
+            if [ -n "$IMAGE_HEIGHT" ]; then
+                EXPORT_VARS="${EXPORT_VARS},IMAGE_HEIGHT=$IMAGE_HEIGHT"
+            fi
 
             echo "Submitting $JOB_NAME ..."
             sbatch \
@@ -52,7 +72,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
                 --chdir="$SCRIPT_DIR" \
                 --output="$SB_OUT" \
                 --error="$SB_ERR" \
-                --export="ALL,SCENARIO=$scenario,DATASET=$ds,SMOKE=$IS_SMOKE" \
+                --export="$EXPORT_VARS" \
                 "$SCRIPT_DIR/slurm_experimental_4phase.sh"
         done
     done
@@ -84,6 +104,7 @@ echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
 echo "Experiment: $SCENARIO"
 echo "Dataset: $DATASET"
+echo "Image height: ${IMAGE_HEIGHT:-32 (pipeline default)}"
 echo "Started: $(date '+%m-%d %H:%M:%S')"
 echo "=========================================="
 
@@ -128,6 +149,9 @@ COMMON_ARGS=(
 )
 if [ -n "$SMOKE_FLAG" ]; then
     COMMON_ARGS+=("$SMOKE_FLAG")
+fi
+if [ -n "${IMAGE_HEIGHT:-}" ]; then
+    COMMON_ARGS+=("--image-height" "$IMAGE_HEIGHT")
 fi
 
 TARGET_DIM=7
