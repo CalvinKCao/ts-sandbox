@@ -197,6 +197,7 @@ runs/
 data_cache/
 assets/
 final_report/
+wiki_docs/
 wikidump_to_markdown.py
 scripts/
 
