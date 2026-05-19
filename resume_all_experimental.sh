@@ -45,35 +45,51 @@ for RUN_PATH in "$RUNS_DIR"/*; do
     
     TARGET_DIM=7
     if [ "$DATASET" = "weather" ]; then TARGET_DIM=21; fi
-    if [ "$DATASET" = "exchange_rate" ]; then TARGET_DIM=8; fi
+    if [ "$DATASET" = "exchange-rate" ] || [ "$DATASET" = "exchange_rate" ]; then 
+        TARGET_DIM=8
+        DATASET="exchange_rate" # normalize for python arg
+    fi
     if [ "$DATASET" = "ETTm1" ] || [ "$DATASET" = "ETTh1" ] || [ "$DATASET" = "ETTh2" ] || [ "$DATASET" = "ETTm2" ]; then TARGET_DIM=7; fi
 
     DS_TAG="${DATASET//_/-}"
     JOB_NAME="res_${SCENARIO//+/_}_${DS_TAG}"
     
-    echo "Submitting resume job for $RUN_FOLDER (Scenario: $SCENARIO, Dataset: $DATASET, Dim: $TARGET_DIM)"
+    LOG_FILE="${RUN_PATH}/logs/${RUN_FOLDER}.log"
+    RESUME_SCRIPT="${RUN_PATH}/logs/resume_script.sh"
     
-    # Construction of the full argument string to avoid array expansion issues
-    COMMON_ARGS="--dataset $DATASET --model-type unet --checkpoint-dir ${RUN_PATH}/ckpts --results-dir ${RUN_PATH}/datasets --synth-cache-dir $SCRIPT_DIR/synth_data --experiment $SCENARIO --subset-id exp_$SCENARIO --resume"
+    echo "Creating resume script for $RUN_FOLDER..."
+    
+    cat << EOF > "$RESUME_SCRIPT"
+#!/bin/bash
+#SBATCH --job-name=$JOB_NAME
+#SBATCH --account=aip-boyuwang
+#SBATCH --time=12:00:00
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:l40s:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=50G
+#SBATCH --output=${RUN_PATH}/logs/resume-%j.out
+#SBATCH --error=${RUN_PATH}/logs/resume-%j.err
 
-    sbatch \
-        --job-name="$JOB_NAME" \
-        --account=aip-boyuwang \
-        --time="12:00:00" \
-        --nodes=1 \
-        --gres=gpu:l40s:1 \
-        --cpus-per-task=8 \
-        --mem=50G \
-        --chdir="$SCRIPT_DIR" \
-        --output="${RUN_PATH}/logs/resume-%j.out" \
-        --error="${RUN_PATH}/logs/resume-%j.err" \
-        --wrap="
+set -euo pipefail
+
+# Redirect all output to the main log file
+exec >>"$LOG_FILE" 2>&1
+
+echo "=========================================="
+echo "RESUMING AT: \$(date)"
+echo "Job ID: \$SLURM_JOB_ID"
+echo "Node: \$SLURMD_NODENAME"
+echo "=========================================="
+
 module purge || true
 module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
 
-if [ -n \"\${SLURM_TMPDIR:-}\" ]; then
-    python -m venv \"\$SLURM_TMPDIR/env\"
-    source \"\$SLURM_TMPDIR/env/bin/activate\"
+# Alliance CA best practice is to rebuild venv on \$SLURM_TMPDIR for speed
+if [ -n "\${SLURM_TMPDIR:-}" ]; then
+    echo "Building fast venv on \$SLURM_TMPDIR..."
+    python -m venv "\$SLURM_TMPDIR/env"
+    source "\$SLURM_TMPDIR/env/bin/activate"
     pip install --no-index --upgrade pip
     pip install --no-index torch numpy scipy pandas scikit-learn wandb optuna tqdm matplotlib einops
     pip install reformer-pytorch --index-url https://pypi.org/simple
@@ -81,21 +97,37 @@ else
     source .venv/bin/activate
 fi
 
-# Append to original log
-exec >>\"${RUN_PATH}/logs/${RUN_FOLDER}.log\" 2>&1
+echo "Running Phase 1 (Pretrain)..."
+python models/diffusion_tsf/train_multivariate_pipeline.py \\
+    --mode pretrain \\
+    --n-variates $TARGET_DIM \\
+    --dataset $DATASET \\
+    --model-type unet \\
+    --checkpoint-dir ${RUN_PATH}/ckpts \\
+    --results-dir ${RUN_PATH}/datasets \\
+    --synth-cache-dir $SCRIPT_DIR/synth_data \\
+    --experiment $SCENARIO \\
+    --subset-id exp_$SCENARIO \\
+    --resume
 
-echo \"==========================================\"
-echo \"RESUMING AT: \$(date)\"
-echo \"Job ID: \$SLURM_JOB_ID\"
-echo \"==========================================\"
+echo "Running Phase 2 (Finetune)..."
+python models/diffusion_tsf/train_multivariate_pipeline.py \\
+    --mode finetune \\
+    --n-variates $TARGET_DIM \\
+    --dataset $DATASET \\
+    --model-type unet \\
+    --checkpoint-dir ${RUN_PATH}/ckpts \\
+    --results-dir ${RUN_PATH}/datasets \\
+    --synth-cache-dir $SCRIPT_DIR/synth_data \\
+    --experiment $SCENARIO \\
+    --subset-id exp_$SCENARIO \\
+    --resume
 
-echo \"Running Phase 1 (Pretrain)...\"
-python models/diffusion_tsf/train_multivariate_pipeline.py --mode pretrain --n-variates $TARGET_DIM $COMMON_ARGS
+echo "Pipeline complete."
+EOF
 
-echo \"Running Phase 2 (Finetune)...\"
-python models/diffusion_tsf/train_multivariate_pipeline.py --mode finetune --n-variates $TARGET_DIM $COMMON_ARGS
-
-echo \"Pipeline complete.\"
-"
+    echo "Submitting resume job for $RUN_FOLDER..."
+    sbatch "$RESUME_SCRIPT"
 done
+
 echo "All resume jobs submitted!"
