@@ -2,6 +2,11 @@
 # Git Ignore for Time Series Sandbox
 # =============================================================================
 results/synced_results/
+results_simdiff/
+SimDiff/checkpoints/
+SimDiff/test_results/
+SimDiff/results/
+SimDiff/result_long_term_forecast.txt
 notes/
 synth_data/
 *.lock
@@ -277,3 +282,4 @@ opencode.json
 # end lnai-generated
 accuracy_summary.csv
 results_experimental/
+results_learned_render/

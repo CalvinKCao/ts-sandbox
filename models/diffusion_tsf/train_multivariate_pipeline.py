@@ -943,7 +943,33 @@ def create_diffusion_model(
 
     logger.info(f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, experiment={EXPERIMENT}")
 
-    if EXPERIMENT == 'baseline':
+    if EXPERIMENT == 'learned_render':
+        from models.diffusion_tsf.hybrid_learned_diffusion import (
+            HybridLearnedDiffusionConfig,
+            HybridLearnedDiffusionTSF,
+        )
+        config = HybridLearnedDiffusionConfig(
+            num_variables=n_variates,
+            lookback_length=lookback,
+            forecast_length=horizon + lookback_overlap,
+            lookback_overlap=lookback_overlap,
+            past_loss_weight=past_loss_weight,
+            image_height=IMAGE_HEIGHT,
+            use_coordinate_channel=True,
+            use_guidance_channel=True,
+            guidance_penalty_weight=guidance_penalty_weight,
+            num_diffusion_steps=1000,
+            model_type=MODEL_TYPE,
+            unet_channels=UNET_CHANNELS,
+            attention_levels=ATTENTION_LEVELS,
+            disable_cross_attention=DISABLE_CROSS_ATTENTION,
+            num_res_blocks=2,
+            use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
+            unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
+            use_amp=USE_AMP,
+        )
+        return HybridLearnedDiffusionTSF(config)
+    elif EXPERIMENT == 'baseline':
         config = DiffusionTSFConfig(
             num_variables=n_variates,
             lookback_length=lookback,
@@ -3548,8 +3574,8 @@ def main():
     parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH,
                         help='Override forecast length')
     parser.add_argument('--experiment', type=str, default='baseline',
-                        choices=['baseline', 'A', 'B', 'A+B'],
-                        help='Run an experimental model variant (A=residual, B=independent norm)')
+                        choices=['baseline', 'A', 'B', 'A+B', 'learned_render'],
+                        help='Model variant (A=residual, B=independent norm, learned_render=hybrid soft renderer)')
 
     args = parser.parse_args()
 

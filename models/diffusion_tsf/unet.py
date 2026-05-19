@@ -727,7 +727,8 @@ class ConditionalUNet2D(nn.Module):
         x: torch.Tensor,
         t: torch.Tensor,
         cond: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor] = None
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        return_features: bool = False,
     ) -> torch.Tensor:
         """
         Args:
@@ -737,9 +738,11 @@ class ConditionalUNet2D(nn.Module):
                   already cropped/interpolated to target width by the caller.
             encoder_hidden_states: Optional per-variate context tokens from iTransformerTokenAdapter,
                                    shape (batch, seq_len, context_dim). Cross-attn skipped when None.
-            
+            return_features: If True, return (eps_2d, pre-head features) for hybrid readout heads.
+
         Returns:
-            Predicted noise of shape (batch, out_channels, height, future_len)
+            Predicted noise of shape (batch, out_channels, height, future_len), or
+            (noise, features) when return_features is True.
         """
         with _unet_prof.section("time_embed"):
             t_emb = get_timestep_embedding(t, self.time_mlp[0].in_features)
@@ -780,9 +783,11 @@ class ConditionalUNet2D(nn.Module):
                     x = up_block(x, skip, t_emb, encoder_hidden_states)
 
         with _unet_prof.section("final_norm_act"):
-            x = self.final_norm(x)
-            x = F.silu(x)
+            features = self.final_norm(x)
+            features = F.silu(features)
         with _unet_prof.section("final_conv"):
-            x = self.final_conv(x)
-        return x
+            eps = self.final_conv(features)
+        if return_features:
+            return eps, features
+        return eps
 
