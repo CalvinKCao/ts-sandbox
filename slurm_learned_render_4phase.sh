@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Slurm: 4-phase pipeline for learned-render hybrid (ETTh1 + exchange_rate)
+# Slurm: 4-phase pipeline for learned-render hybrid (ETTh1/2, ETTm1/2, exchange, weather)
 # L=96, H=96, image_height=64, K=8 overlap
 # =============================================================================
 
@@ -28,7 +28,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     if [ "$#" -gt 0 ]; then
         DATASETS=("$@")
     else
-        DATASETS=("ETTh1" "exchange_rate")
+        DATASETS=("ETTh1" "ETTh2" "ETTm1" "ETTm2" "exchange_rate" "weather")
     fi
 
     for ds in "${DATASETS[@]}"; do
@@ -94,11 +94,15 @@ if [ -n "${SLURM_TMPDIR:-}" ]; then
     python3 -m venv "$SLURM_TMPDIR/env"
     source "$SLURM_TMPDIR/env/bin/activate"
     pip install --no-index --upgrade pip
-    pip install --no-index torch numpy scipy pandas scikit-learn wandb optuna tqdm matplotlib einops
+    # Pin torch 2.11 (cvmfs wheel). Unpinned torch pulls 2.12+ which fails CUDA init on Killarney L40S.
+    pip install --no-index \
+        'torch==2.11.0+computecanada' \
+        numpy scipy pandas scikit-learn wandb optuna tqdm matplotlib einops
     pip install reformer-pytorch --index-url https://pypi.org/simple
-    pip install -r "$SLURM_SUBMIT_DIR/requirements.txt" || true
+    python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available — aborting'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
 else
     source "$SLURM_SUBMIT_DIR/.venv/bin/activate"
+    python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available — aborting'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
 fi
 
 SYNTH_CACHE_ROOT="$SLURM_SUBMIT_DIR/synth_data"
@@ -127,7 +131,11 @@ if [ -n "$SMOKE_FLAG" ]; then
 fi
 
 TARGET_DIM=7
+if [ "$DATASET" = "weather" ]; then TARGET_DIM=21; fi
 if [ "$DATASET" = "exchange_rate" ]; then TARGET_DIM=8; fi
+if [ "$DATASET" = "ETTm1" ] || [ "$DATASET" = "ETTh1" ] || [ "$DATASET" = "ETTh2" ] || [ "$DATASET" = "ETTm2" ]; then
+    TARGET_DIM=7
+fi
 
 echo "Running Phase 1 (Pretrain)..."
 python3 -m models.diffusion_tsf.train_multivariate_pipeline \
