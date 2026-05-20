@@ -236,7 +236,8 @@ class DiffusionScheduler:
         t_prev: torch.Tensor,
         noise_pred: torch.Tensor,
         eta: float = 0.0,
-        is_final_step: bool = False
+        is_final_step: bool = False,
+        x0_clamp: Optional[float] = None,
     ) -> torch.Tensor:
         """Single DDIM reverse step with accelerated sampling.
         
@@ -270,13 +271,12 @@ class DiffusionScheduler:
         sqrt_one_minus_alpha_bar_t = torch.sqrt(1 - alpha_bar_t)
         pred_x0 = (x_t - sqrt_one_minus_alpha_bar_t * noise_pred) / sqrt_alpha_bar_t
         
-        # Clip predicted x_0 for stability
-        # Use dynamic clipping: wider range at high noise (early steps), tighter at low noise
-        # This prevents destroying signal at high noise levels while still constraining final output
-        # alpha_bar goes from ~1 (t=0) to ~0 (t=T), so we use it to scale clamp range
-        # At t=0: clamp to [-1, 1]; at high t: clamp to [-2, 2]
-        clamp_scale = 1.0 + (1.0 - alpha_bar_t.mean().item())  # 1.0 to 2.0
-        pred_x0 = torch.clamp(pred_x0, -clamp_scale, clamp_scale)
+        if x0_clamp is not None:
+            pred_x0 = torch.clamp(pred_x0, -x0_clamp, x0_clamp)
+        else:
+            # Wider at high noise (early steps), tighter at low noise — tuned for 2D occupancy.
+            clamp_scale = 1.0 + (1.0 - alpha_bar_t.mean().item())
+            pred_x0 = torch.clamp(pred_x0, -clamp_scale, clamp_scale)
         
         # Compute variance
         sigma = eta * torch.sqrt(
@@ -455,7 +455,8 @@ class DiffusionScheduler:
         num_steps: int = 50,
         eta: float = 0.0,
         device: str = "cpu",
-        verbose: bool = True
+        verbose: bool = True,
+        x0_clamp: Optional[float] = None,
     ) -> torch.Tensor:
         """Accelerated DDIM sampling with Classifier-Free Guidance.
         
@@ -504,7 +505,9 @@ class DiffusionScheduler:
                 noise_pred = model(x, t_batch, cond)
             
             # DDIM step
-            x = self.ddim_step(x, t_batch, t_prev_batch, noise_pred, eta, is_final_step)
+            x = self.ddim_step(
+                x, t_batch, t_prev_batch, noise_pred, eta, is_final_step, x0_clamp=x0_clamp
+            )
             
             if verbose and i % 10 == 0:
                 logger.debug(f"  Step {i + 1}/{num_steps} (t={t})")
@@ -520,6 +523,7 @@ class DiffusionScheduler:
         num_steps: int = 20,
         device: str = "cpu",
         verbose: bool = False,
+        x0_clamp: Optional[float] = 2.0,
     ) -> torch.Tensor:
         """DPM-Solver++(2M) multistep sampler in data-prediction form.
 
@@ -555,8 +559,8 @@ class DiffusionScheduler:
 
             a_t, s_t = _alpha_sigma(t)
             x0 = (x - s_t * eps) / a_t
-            # mild stability clamp (matches existing DDIM clipping convention)
-            x0 = torch.clamp(x0, -2.0, 2.0)
+            if x0_clamp is not None:
+                x0 = torch.clamp(x0, -x0_clamp, x0_clamp)
 
             lam_t = _lam(t)
             if i == len(timesteps) - 1:

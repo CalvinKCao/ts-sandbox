@@ -32,7 +32,8 @@ class VerticalAttentionReadout(nn.Module):
 @dataclass
 class HybridLearnedDiffusionConfig(DiffusionTSFConfig):
     one_d_loss_weight: float = 1.0
-    cdf_loss_weight: float = 1.0
+    x0_loss_weight: float = 1.0
+    cdf_loss_weight: float = 0.2
 
 
 class HybridLearnedDiffusionTSF(DiffusionTSF):
@@ -51,7 +52,11 @@ class HybridLearnedDiffusionTSF(DiffusionTSF):
             max_scale=config.max_scale,
         )
         self.vertical_readout = VerticalAttentionReadout(feat_dim)
-        self.noise_1d_head = nn.Conv1d(feat_dim, 1, kernel_size=1)
+        self.noise_1d_head = nn.Sequential(
+            nn.Conv1d(feat_dim, feat_dim, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv1d(feat_dim, 1, kernel_size=1),
+        )
 
     def _soft_encode(self, x_1d: torch.Tensor) -> torch.Tensor:
         cdf = self.soft_renderer(x_1d)
@@ -223,17 +228,25 @@ class HybridLearnedDiffusionTSF(DiffusionTSF):
         noise_loss_1d = self._noise_loss_weighted(noise_pred_1d, noise_1d)
 
         x0_1d = self.scheduler.predict_x0_from_noise(noisy_1d, t, noise_pred_1d)
-        x0_1d = torch.clamp(x0_1d, -3.5, 3.5)
+        x0_clamp = self.config.max_scale
+        x0_1d = torch.clamp(x0_1d, -x0_clamp, x0_clamp)
+        x0_loss = self._noise_loss_weighted(x0_1d, future_norm)
+
         soft_x0 = self._soft_encode(x0_1d)
         emd_loss = self._compute_emd_loss(soft_x0, future_2d)
 
         cfg = self.hybrid_config
-        loss = cfg.one_d_loss_weight * noise_loss_1d + cfg.cdf_loss_weight * emd_loss
+        loss = (
+            cfg.one_d_loss_weight * noise_loss_1d
+            + cfg.x0_loss_weight * x0_loss
+            + cfg.cdf_loss_weight * emd_loss
+        )
 
         return {
             "loss": loss,
             "noise_loss": noise_loss_1d,
             "noise_loss_1d": noise_loss_1d,
+            "x0_loss": x0_loss,
             "emd_loss": emd_loss,
             "noise_pred": noise_pred_1d,
             "t": t,
@@ -308,6 +321,8 @@ class HybridLearnedDiffusionTSF(DiffusionTSF):
 
         noise_shape = (BV, W_fut)
 
+        x0_clamp = self.config.max_scale
+
         if sampler == "dpmpp":
             steps = num_inference_steps if num_inference_steps is not None else 20
             future_1d_flat = self.scheduler.sample_dpmpp(
@@ -317,6 +332,7 @@ class HybridLearnedDiffusionTSF(DiffusionTSF):
                 num_steps=steps,
                 device=device,
                 verbose=verbose,
+                x0_clamp=x0_clamp,
             )
         elif use_ddim:
             steps = num_inference_steps if num_inference_steps is not None else num_ddim_steps
@@ -330,6 +346,7 @@ class HybridLearnedDiffusionTSF(DiffusionTSF):
                 eta=eta,
                 device=device,
                 verbose=verbose,
+                x0_clamp=x0_clamp,
             )
         else:
             future_1d_flat = self.scheduler.sample_ddpm_cfg(
