@@ -695,6 +695,7 @@ from models.diffusion_tsf.pipeline_config import (
     FINETUNE_BATCH_SIZES,
     FINETUNE_HP_LR_MIN,
     FINETUNE_HP_LR_MAX,
+    HP_LOSS_DIAGNOSTICS,
     diffusion_probe_max_candidate,
     USE_AMP,
     USE_GRADIENT_CHECKPOINTING,
@@ -1145,22 +1146,140 @@ def _summarize_hp_study_trials(study, subset_dir: Optional[str] = None) -> str:
     lines = []
     for trial in study.trials:
         val = _format_optuna_trial_loss(trial.value)
+        best_attr = trial.user_attrs.get('best_val_loss', 'n/a')
         ckpt = "n/a"
-        if subset_dir is not None and trial.state == optuna.trial.TrialState.COMPLETE:
+        if subset_dir is not None:
             ckpt = "yes" if os.path.isfile(_diff_ft_trial_ckpt_path(subset_dir, trial.number)) else "no"
-        lines.append(f"  trial {trial.number}: state={trial.state.name}, val={val}, ckpt={ckpt}")
+        lines.append(
+            f"  trial {trial.number}: state={trial.state.name}, val={val}, "
+            f"best_attr={best_attr}, ckpt={ckpt}"
+        )
     return "\n".join(lines) if lines else "  (no trials)"
+
+
+def _hp_loss_diagnostics_enabled() -> bool:
+    env = os.environ.get('HP_LOSS_DIAGNOSTICS', '').strip().lower()
+    if env in ('0', 'false', 'no', 'off'):
+        return False
+    if env in ('1', 'true', 'yes', 'on'):
+        return True
+    return HP_LOSS_DIAGNOSTICS
+
+
+def _tensor_stats(name: str, t: torch.Tensor) -> str:
+    if t.numel() == 0:
+        return f"{name}: empty"
+    td = t.detach()
+    finite = torch.isfinite(td)
+    n_bad = int((~finite).sum().item())
+    if n_bad == td.numel():
+        return f"{name}: all non-finite ({td.dtype}, shape={tuple(td.shape)})"
+    tf = td[finite]
+    return (
+        f"{name}: shape={tuple(td.shape)} dtype={td.dtype} "
+        f"min={tf.min().item():.4g} max={tf.max().item():.4g} "
+        f"mean={tf.mean().item():.4g} std={tf.std().item():.4g} "
+        f"nonfinite={n_bad}/{td.numel()}"
+    )
+
+
+def _log_hp_loss_diagnostics(
+    model: DiffusionTSF,
+    past: torch.Tensor,
+    future: torch.Tensor,
+    tag: str,
+    loss_params: Optional[Dict] = None,
+    run_backward: bool = False,
+) -> Dict[str, float]:
+    """Log loss breakdown and optional grad norms (one batch, train mode if backward)."""
+    if not _hp_loss_diagnostics_enabled():
+        return {}
+
+    was_training = model.training
+    model.train(run_backward)
+    lines = [f"[HP loss diag] {tag}"]
+    if loss_params:
+        lines.append(
+            f"  loss_params: mse_w={loss_params.get('forecast_mse_weight')} "
+            f"dtw_w={loss_params.get('soft_dtw_weight')} gamma={loss_params.get('soft_dtw_gamma')} "
+            f"band={loss_params.get('soft_dtw_bandwidth')} time_w={loss_params.get('soft_dtw_time_weight')} "
+            f"cum_w={loss_params.get('soft_dtw_cumsum_weight')}"
+        )
+    lines.append(_tensor_stats('past', past))
+    lines.append(_tensor_stats('future', future))
+
+    metrics: Dict[str, float] = {}
+    try:
+        with amp_context():
+            out = model.forward(past, future)
+        for key in ('loss', 'noise_loss', 'forecast_mse_loss', 'soft_dtw_loss', 'guidance_loss'):
+            if key not in out:
+                continue
+            t = out[key]
+            lines.append(_tensor_stats(key, t if t.dim() > 0 else t.reshape(1)))
+            if t.numel() == 1:
+                metrics[key] = float(t.item())
+        if 'pred_1d' in out:
+            lines.append(_tensor_stats('pred_1d', out['pred_1d']))
+        if 'noise_pred' in out:
+            lines.append(_tensor_stats('noise_pred', out['noise_pred']))
+        if 'x0_pred' in out:
+            lines.append(_tensor_stats('x0_pred', out['x0_pred']))
+        if model.config.soft_dtw_weight > 0 and 'pred_1d' in out:
+            feats = model._soft_dtw_features(out['pred_1d'])
+            lines.append(_tensor_stats('sdtw_features(pred)', feats))
+
+        if run_backward and torch.isfinite(out['loss']).all():
+            model.zero_grad(set_to_none=True)
+            out['loss'].backward()
+            grad_sq = 0.0
+            max_g = 0.0
+            n_grad = 0
+            for name, p in model.named_parameters():
+                if p.grad is None:
+                    continue
+                g = p.grad.detach()
+                if not torch.isfinite(g).all():
+                    lines.append(f"  grad NONFINITE: {name}")
+                    continue
+                gn = g.norm().item()
+                max_g = max(max_g, gn)
+                grad_sq += gn * gn
+                n_grad += 1
+            metrics['grad_norm_l2'] = math.sqrt(grad_sq)
+            metrics['grad_norm_max'] = max_g
+            lines.append(
+                f"  grads: n_tensors={n_grad} l2={metrics['grad_norm_l2']:.4g} max={max_g:.4g}"
+            )
+    except Exception as exc:
+        lines.append(f"  forward/backward FAILED: {type(exc).__name__}: {exc}")
+    finally:
+        model.train(was_training)
+        model.zero_grad(set_to_none=True)
+
+    logger.warning("\n".join(lines))
+    return metrics
+
+
+def _trial_recorded_best_val_loss(trial) -> float:
+    stored = trial.user_attrs.get('best_val_loss')
+    if stored is not None and _is_valid_hp_val_loss(float(stored)):
+        return float(stored)
+    return _trial_final_val_loss(trial)
 
 
 def _pick_finetune_promotion_trial(study, subset_dir: str) -> Tuple[int, float]:
     """Pick the best finetune trial with a checkpoint and finite val loss."""
     ranked: List[Tuple[float, int]] = []
     for trial in study.trials:
-        if trial.state != optuna.trial.TrialState.COMPLETE:
+        if trial.state not in (
+            optuna.trial.TrialState.COMPLETE,
+            optuna.trial.TrialState.PRUNED,
+        ):
             continue
         if not os.path.isfile(_diff_ft_trial_ckpt_path(subset_dir, trial.number)):
             continue
-        value = _trial_final_val_loss(trial)
+        value = _trial_recorded_best_val_loss(trial)
         if not _is_valid_hp_val_loss(value):
             continue
         ranked.append((value, trial.number))
@@ -1184,9 +1303,7 @@ def _stop_study_if_no_valid_trials(study, trial, subset_dir: Optional[str], labe
     if not finished or any(t.state == optuna.trial.TrialState.RUNNING for t in study.trials):
         return
     for t in finished:
-        if t.state != optuna.trial.TrialState.COMPLETE:
-            continue
-        if not _is_valid_hp_val_loss(_trial_final_val_loss(t)):
+        if not _is_valid_hp_val_loss(_trial_recorded_best_val_loss(t)):
             continue
         if subset_dir and not os.path.isfile(_diff_ft_trial_ckpt_path(subset_dir, t.number)):
             continue
@@ -1872,11 +1989,22 @@ def diffusion_hp_objective(
 
         val_loss = _trial_report_val_loss(trial, val_loss, epoch)
         if not _is_valid_hp_val_loss(val_loss):
+            if _is_valid_hp_val_loss(best_val_loss):
+                return best_val_loss
+            if epoch == 0:
+                vb = next(iter(val_loader))
+                _log_hp_loss_diagnostics(
+                    model, vb[0].to(device), vb[1].to(device),
+                    f"diffusion HP trial {trial.number} prune ep0",
+                    loss_params=loss_params,
+                )
             raise optuna.TrialPruned(
                 f"non-finite val_loss after epoch {epoch} "
                 f"(cum_w={loss_params.get('soft_dtw_cumsum_weight')})"
             )
         if trial.should_prune():
+            if _is_valid_hp_val_loss(best_val_loss):
+                return best_val_loss
             raise optuna.TrialPruned()
 
         if val_loss < best_val_loss:
@@ -2353,46 +2481,114 @@ def finetune_hp_objective(
         os.makedirs(trial_ckpt_dir, exist_ok=True)
         trial_ckpt_path = _diff_ft_trial_ckpt_path(trial_ckpt_dir, trial.number)
 
+    logger.info(
+        f"[Diff FT HP] Trial {trial.number} start: lr={lr:.2e} bs={batch_size} "
+        f"train_batches={len(train_loader)} val_batches={len(val_loader)}"
+    )
+    init_past, init_future = next(iter(val_loader))
+    _log_hp_loss_diagnostics(
+        model,
+        init_past.to(device),
+        init_future.to(device),
+        f"trial {trial.number} init-val-batch",
+        loss_params=loss_params,
+        run_backward=False,
+    )
+
     for epoch in range(epochs):
         model.train()
+        n_train_steps = 0
+        n_train_skipped = 0
         for past, future in train_loader:
             past, future = past.to(device), future.to(device)
             optimizer.zero_grad()
             with amp_context():
                 loss = model.get_loss(past, future)
             if not torch.isfinite(loss):
+                n_train_skipped += 1
+                if n_train_skipped == 1 and epoch == 0:
+                    _log_hp_loss_diagnostics(
+                        model, past, future,
+                        f"trial {trial.number} train ep{epoch} bad-loss",
+                        loss_params=loss_params,
+                        run_backward=False,
+                    )
                 continue
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            if epoch == 0 and n_train_steps == 0 and _hp_loss_diagnostics_enabled():
+                gn = float(grad_norm) if torch.isfinite(grad_norm) else float('nan')
+                logger.warning(
+                    f"[HP loss diag] trial {trial.number} train ep0 step0: "
+                    f"loss={float(loss.item()):.4g} grad_norm_post_clip={gn:.4g}"
+                )
             optimizer.step()
-        
+            n_train_steps += 1
+
         model.eval()
         val_loss = 0.0
-        n_batches = 0
+        n_val_finite = 0
+        n_val_total = 0
+        diag_logged = False
         with torch.no_grad():
             for past, future in val_loader:
                 past, future = past.to(device), future.to(device)
+                n_val_total += 1
                 with amp_context():
                     loss = model.get_loss(past, future)
                 batch_loss = float(loss.item())
                 if math.isfinite(batch_loss):
                     val_loss += batch_loss
-                    n_batches += 1
-        val_loss = val_loss / max(n_batches, 1) if n_batches > 0 else float('inf')
-        
+                    n_val_finite += 1
+                elif not diag_logged:
+                    _log_hp_loss_diagnostics(
+                        model, past, future,
+                        f"trial {trial.number} val ep{epoch} bad-batch",
+                        loss_params=loss_params,
+                        run_backward=False,
+                    )
+                    diag_logged = True
+        val_loss = val_loss / n_val_finite if n_val_finite > 0 else float('inf')
+
+        logger.info(
+            f"[Diff FT HP] Trial {trial.number} epoch {epoch}: "
+            f"val_loss={val_loss:.4f} ({n_val_finite}/{n_val_total} finite val batches), "
+            f"train_steps={n_train_steps} skipped={n_train_skipped}"
+        )
+
         val_loss = _trial_report_val_loss(trial, val_loss, epoch)
         if not _is_valid_hp_val_loss(val_loss):
+            if _is_valid_hp_val_loss(best_val_loss):
+                trial.set_user_attr('best_val_loss', best_val_loss)
+                logger.warning(
+                    f"[Diff FT HP] Trial {trial.number}: bad val at epoch {epoch} "
+                    f"(val={val_loss}); keeping earlier best={best_val_loss:.4f}"
+                )
+                return best_val_loss
+            _log_hp_loss_diagnostics(
+                model,
+                init_past.to(device),
+                init_future.to(device),
+                f"trial {trial.number} prune ep{epoch} (no prior best)",
+                loss_params=loss_params,
+                run_backward=True,
+            )
             raise optuna.TrialPruned(
                 f"non-finite val_loss after epoch {epoch} "
-                f"(mse_w={loss_params.get('forecast_mse_weight')}, "
+                f"({n_val_finite}/{n_val_total} finite val batches; "
+                f"mse_w={loss_params.get('forecast_mse_weight')}, "
                 f"dtw_w={loss_params.get('soft_dtw_weight')}, "
                 f"cum_w={loss_params.get('soft_dtw_cumsum_weight')})"
             )
         if trial.should_prune():
+            if _is_valid_hp_val_loss(best_val_loss):
+                trial.set_user_attr('best_val_loss', best_val_loss)
+                return best_val_loss
             raise optuna.TrialPruned()
-        
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            trial.set_user_attr('best_val_loss', best_val_loss)
             best_state_dict = {
                 k: v.detach().cpu().clone()
                 for k, v in unwrap_model(model).state_dict().items()
@@ -2415,11 +2611,19 @@ def finetune_hp_objective(
             break
 
     if not _is_valid_hp_val_loss(best_val_loss):
+        _log_hp_loss_diagnostics(
+            model,
+            init_past.to(device),
+            init_future.to(device),
+            f"trial {trial.number} final prune (never finite)",
+            loss_params=loss_params,
+            run_backward=True,
+        )
         raise optuna.TrialPruned(
-            f"no finite val_loss across {epochs} epoch(s) "
-            f"(final={best_val_loss})"
+            f"no finite val_loss across {epochs} epoch(s) (final={best_val_loss})"
         )
 
+    trial.set_user_attr('best_val_loss', best_val_loss)
     return best_val_loss
 
 

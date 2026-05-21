@@ -152,6 +152,8 @@ HP_TUNE_PATIENCE: int = 5
 # Optuna log-uniform bounds for Phase 2B only (finetune_hp_objective).
 FINETUNE_HP_LR_MIN: float = 3e-6
 FINETUNE_HP_LR_MAX: float = 2e-4
+# Log per-component loss / activation / grad stats when HP trials hit non-finite loss.
+HP_LOSS_DIAGNOSTICS: bool = True
 
 
 # ---- Batch-size search grids ------------------------------------------------------

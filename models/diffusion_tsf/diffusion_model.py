@@ -517,8 +517,10 @@ class DiffusionTSF(nn.Module):
             cumulative = centered.cumsum(dim=-1)
             # Scale by horizon length so large cumsum_weight does not blow up SDTW features.
             cumulative = cumulative / math.sqrt(max(width, 1))
-            features.append(cumulative * float(self.config.soft_dtw_cumsum_weight))
-        return torch.stack(features, dim=-1)
+            cumulative = cumulative * float(self.config.soft_dtw_cumsum_weight)
+            features.append(torch.clamp(cumulative, -8.0, 8.0))
+        feats = torch.stack(features, dim=-1)
+        return torch.clamp(feats, -16.0, 16.0)
 
     def _compute_forecast_losses(
         self,
@@ -840,31 +842,34 @@ class DiffusionTSF(nn.Module):
             noise_loss = self.config.past_loss_weight * nl_past + nl_fut
         else:
             noise_loss = F.mse_loss(noise_pred, noise)
+        noise_loss = noise_loss.float()
 
-        x0_pred  = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
-        
-        # Clamp x0_pred for numerical stability at high t
-        # Matches ddim_step logic: range [-2, 2] provides slack beyond [-1, 1]
-        x0_pred = torch.clamp(x0_pred, -2.0, 2.0)
-        
-        pred_1d, forecast_mse_loss, soft_dtw_loss = self._compute_forecast_losses(x0_pred, future_norm)
+        # Auxiliary trajectory losses in fp32 (bf16 AMP on the backbone can NaN x0_pred).
+        with torch.amp.autocast('cuda', enabled=False):
+            x0_pred = self.scheduler.predict_x0_from_noise(
+                noisy_future.float(), t, noise_pred.float(),
+            )
+            x0_pred = torch.clamp(x0_pred, -2.0, 2.0)
+            pred_1d, forecast_mse_loss, soft_dtw_loss = self._compute_forecast_losses(
+                x0_pred, future_norm.float(),
+            )
 
-        mono_loss = torch.tensor(0.0, device=device)
-        if self.config.use_monotonicity_loss and self.config.representation_mode == "cdf":
-            cdf_pred  = torch.clamp((x0_pred + 1.0) / 2.0, 0.0, 1.0)
-            mono_loss = monotonicity_loss(cdf_pred)
+            mono_loss = torch.tensor(0.0, device=device)
+            if self.config.use_monotonicity_loss and self.config.representation_mode == "cdf":
+                cdf_pred = torch.clamp((x0_pred + 1.0) / 2.0, 0.0, 1.0)
+                mono_loss = monotonicity_loss(cdf_pred)
 
-        guidance_loss = torch.tensor(0.0, device=device)
-        if guidance_2d is not None and self.config.guidance_penalty_weight > 0:
-            guidance_loss = F.mse_loss(x0_pred, guidance_2d)
+            guidance_loss = torch.tensor(0.0, device=device)
+            if guidance_2d is not None and self.config.guidance_penalty_weight > 0:
+                guidance_loss = F.mse_loss(x0_pred, guidance_2d.float())
 
-        loss = (
-            noise_loss + 
-            self.config.forecast_mse_weight * forecast_mse_loss +
-            self.config.soft_dtw_weight * soft_dtw_loss +
-            self.config.monotonicity_weight * mono_loss +
-            self.config.guidance_penalty_weight * guidance_loss
-        )
+            loss = (
+                noise_loss
+                + self.config.forecast_mse_weight * forecast_mse_loss
+                + self.config.soft_dtw_weight * soft_dtw_loss
+                + self.config.monotonicity_weight * mono_loss
+                + self.config.guidance_penalty_weight * guidance_loss
+            )
 
         result = {
             'loss': loss, 'noise_loss': noise_loss,
@@ -873,6 +878,7 @@ class DiffusionTSF(nn.Module):
             'pred_1d': pred_1d,
             'guidance_loss': guidance_loss,
             'noise_pred': noise_pred, 't': t,
+            'x0_pred': x0_pred,
         }
         if guidance_2d is not None:
             result['guidance_2d'] = guidance_2d
