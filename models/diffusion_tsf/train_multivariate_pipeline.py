@@ -1131,30 +1131,71 @@ def _diff_ft_trial_ckpt_path(trial_ckpt_dir: str, trial_number: int) -> str:
     return os.path.join(trial_ckpt_dir, f'_diff_ft_trial_{trial_number}_best.pt')
 
 
+def _is_valid_hp_val_loss(val_loss: float) -> bool:
+    return math.isfinite(float(val_loss))
+
+
+def _trial_final_val_loss(trial) -> float:
+    if trial.value is None:
+        return float('inf')
+    return float(trial.value)
+
+
+def _summarize_hp_study_trials(study, subset_dir: Optional[str] = None) -> str:
+    lines = []
+    for trial in study.trials:
+        val = _format_optuna_trial_loss(trial.value)
+        ckpt = "n/a"
+        if subset_dir is not None and trial.state == optuna.trial.TrialState.COMPLETE:
+            ckpt = "yes" if os.path.isfile(_diff_ft_trial_ckpt_path(subset_dir, trial.number)) else "no"
+        lines.append(f"  trial {trial.number}: state={trial.state.name}, val={val}, ckpt={ckpt}")
+    return "\n".join(lines) if lines else "  (no trials)"
+
+
 def _pick_finetune_promotion_trial(study, subset_dir: str) -> Tuple[int, float]:
-    """Pick a finetune trial that has a saved checkpoint and finite val loss."""
+    """Pick the best finetune trial with a checkpoint and finite val loss."""
     ranked: List[Tuple[float, int]] = []
     for trial in study.trials:
         if trial.state != optuna.trial.TrialState.COMPLETE:
             continue
-        ckpt = _diff_ft_trial_ckpt_path(subset_dir, trial.number)
-        if not os.path.isfile(ckpt):
+        if not os.path.isfile(_diff_ft_trial_ckpt_path(subset_dir, trial.number)):
             continue
-        value = float(trial.value) if trial.value is not None else float('inf')
-        if not math.isfinite(value):
-            value = float('inf')
+        value = _trial_final_val_loss(trial)
+        if not _is_valid_hp_val_loss(value):
+            continue
         ranked.append((value, trial.number))
     if not ranked:
-        available = sorted(
-            fn for fn in os.listdir(subset_dir)
-            if fn.startswith('_diff_ft_trial_') and fn.endswith('_best.pt')
-        ) if os.path.isdir(subset_dir) else []
         raise RuntimeError(
-            f"No finetune trial checkpoints under {subset_dir}; "
-            f"found files: {available or '(none)'}"
+            "No valid finetune HP trials (need finite val loss and saved checkpoint).\n"
+            f"{_summarize_hp_study_trials(study, subset_dir)}"
         )
     ranked.sort(key=lambda x: (x[0], x[1]))
     return ranked[0][1], ranked[0][0]
+
+
+def _stop_study_if_no_valid_trials(study, trial, subset_dir: Optional[str], label: str) -> None:
+    """Stop Optuna early once every finished trial is invalid (saves GPU time)."""
+    terminal = (
+        optuna.trial.TrialState.COMPLETE,
+        optuna.trial.TrialState.PRUNED,
+        optuna.trial.TrialState.FAIL,
+    )
+    finished = [t for t in study.trials if t.state in terminal]
+    if not finished or any(t.state == optuna.trial.TrialState.RUNNING for t in study.trials):
+        return
+    for t in finished:
+        if t.state != optuna.trial.TrialState.COMPLETE:
+            continue
+        if not _is_valid_hp_val_loss(_trial_final_val_loss(t)):
+            continue
+        if subset_dir and not os.path.isfile(_diff_ft_trial_ckpt_path(subset_dir, t.number)):
+            continue
+        return
+    study.stop()
+    logger.error(
+        f"[{label}] All {len(finished)} finished trials lack a valid result; stopping HP search.\n"
+        f"{_summarize_hp_study_trials(study, subset_dir)}"
+    )
 
 
 # ============================================================================
@@ -1809,6 +1850,8 @@ def diffusion_hp_objective(
             optimizer.zero_grad()
             with amp_context():
                 loss = model.get_loss(past, future)
+            if not torch.isfinite(loss):
+                continue
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -1821,11 +1864,18 @@ def diffusion_hp_objective(
                 past, future = past.to(device), future.to(device)
                 with amp_context():
                     loss = model.get_loss(past, future)
-                val_loss += loss.item()
-                n_batches += 1
-        val_loss /= max(n_batches, 1)
+                batch_loss = float(loss.item())
+                if math.isfinite(batch_loss):
+                    val_loss += batch_loss
+                    n_batches += 1
+        val_loss = val_loss / max(n_batches, 1) if n_batches > 0 else float('inf')
 
         val_loss = _trial_report_val_loss(trial, val_loss, epoch)
+        if not _is_valid_hp_val_loss(val_loss):
+            raise optuna.TrialPruned(
+                f"non-finite val_loss after epoch {epoch} "
+                f"(cum_w={loss_params.get('soft_dtw_cumsum_weight')})"
+            )
         if trial.should_prune():
             raise optuna.TrialPruned()
 
@@ -1837,6 +1887,9 @@ def diffusion_hp_objective(
 
         if early_stop(val_loss):
             break
+
+    if not _is_valid_hp_val_loss(best_val_loss):
+        raise optuna.TrialPruned(f"no finite val_loss across {epochs} epoch(s)")
 
     return best_val_loss
 
@@ -1920,6 +1973,10 @@ def run_diffusion_hp_tuning(
     
     _best_state: dict = {'model_state': None, 'val_loss': float('inf')}
 
+    def _maybe_stop_diffusion_study(st, trial):
+        log_trial(st, trial)
+        _stop_study_if_no_valid_trials(st, trial, None, "Diffusion HP")
+
     study.optimize(
         lambda trial: diffusion_hp_objective(
             trial, train_loader, val_loader, itrans_guidance, device, smoke_test,
@@ -1927,8 +1984,14 @@ def run_diffusion_hp_tuning(
         ),
         n_trials=n_trials,
         show_progress_bar=True,
-        callbacks=[log_trial],
+        callbacks=[_maybe_stop_diffusion_study],
     )
+
+    if _best_state.get('model_state') is None:
+        raise RuntimeError(
+            "Diffusion HP produced no valid trial (all non-finite val loss).\n"
+            f"{_summarize_hp_study_trials(study)}"
+        )
 
     best_params = study.best_params
     best_params['batch_size'] = train_bs
@@ -2297,6 +2360,8 @@ def finetune_hp_objective(
             optimizer.zero_grad()
             with amp_context():
                 loss = model.get_loss(past, future)
+            if not torch.isfinite(loss):
+                continue
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -2316,6 +2381,13 @@ def finetune_hp_objective(
         val_loss = val_loss / max(n_batches, 1) if n_batches > 0 else float('inf')
         
         val_loss = _trial_report_val_loss(trial, val_loss, epoch)
+        if not _is_valid_hp_val_loss(val_loss):
+            raise optuna.TrialPruned(
+                f"non-finite val_loss after epoch {epoch} "
+                f"(mse_w={loss_params.get('forecast_mse_weight')}, "
+                f"dtw_w={loss_params.get('soft_dtw_weight')}, "
+                f"cum_w={loss_params.get('soft_dtw_cumsum_weight')})"
+            )
         if trial.should_prune():
             raise optuna.TrialPruned()
         
@@ -2342,46 +2414,10 @@ def finetune_hp_objective(
         if early_stop(val_loss):
             break
 
-    if (
-        trial_ckpt_path is not None
-        and is_main_process()
-        and not os.path.isfile(trial_ckpt_path)
-    ):
-        if best_state_dict is not None:
-            torch.save(
-                {
-                    'model_state_dict': best_state_dict,
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'epoch': epochs - 1,
-                    'train_loss': float('nan'),
-                    'val_loss': best_val_loss,
-                    'metadata': {
-                        'tuned_params': {
-                            'learning_rate': lr,
-                            'batch_size': batch_size,
-                            **loss_params,
-                        },
-                        'trial_number': trial.number,
-                    },
-                },
-                trial_ckpt_path,
-            )
-        else:
-            save_checkpoint(
-                unwrap_model(model), optimizer, epochs - 1, float('nan'), best_val_loss,
-                {
-                    'tuned_params': {
-                        'learning_rate': lr,
-                        'batch_size': batch_size,
-                        **loss_params,
-                    },
-                    'trial_number': trial.number,
-                },
-                trial_ckpt_path,
-            )
-        logger.warning(
-            f"[Diff FT HP] Trial {trial.number}: no on-disk best during training "
-            f"(best_val_loss={best_val_loss:.4f}); saved fallback checkpoint."
+    if not _is_valid_hp_val_loss(best_val_loss):
+        raise optuna.TrialPruned(
+            f"no finite val_loss across {epochs} epoch(s) "
+            f"(final={best_val_loss})"
         )
 
     return best_val_loss
@@ -3746,6 +3782,10 @@ def _finetune_and_eval_one_subset(
                     f"cum_w={trial.params.get('soft_dtw_cumsum_weight')}, bs={ft_diff_bs}"
                 )
 
+            def _maybe_stop_finetune_study(st, trial):
+                _log_finetune_trial(st, trial)
+                _stop_study_if_no_valid_trials(st, trial, subset_dir, f"Diff FT HP {subset_id}")
+
             study.optimize(
                 lambda trial: finetune_hp_objective(
                     trial, dataset_name, variate_indices, diff_ckpt, ft_itrans_ckpt, device, smoke_test,
@@ -3753,16 +3793,21 @@ def _finetune_and_eval_one_subset(
                 ),
                 n_trials=n_finetune_trials,
                 show_progress_bar=False,
-                callbacks=[_log_finetune_trial],
+                callbacks=[_maybe_stop_finetune_study],
                 catch=(ValueError, RuntimeError),
             )
-            if study.best_trial is None:
-                logger.warning(f"All diffusion HP trials failed for {subset_id} — skipping")
-                return
-            promote_num, _ = _pick_finetune_promotion_trial(study, subset_dir)
+            try:
+                promote_num, promote_val = _pick_finetune_promotion_trial(study, subset_dir)
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"Diffusion finetune HP failed for {subset_id}: {exc}"
+                ) from exc
             tuned_params = dict(study.trials[promote_num].params)
             tuned_params['batch_size'] = ft_diff_bs
-            logger.info(f"Best diffusion params for {subset_id}: {tuned_params}")
+            logger.info(
+                f"Best diffusion params for {subset_id}: {tuned_params} "
+                f"(trial {promote_num}, val_loss={promote_val:.4f})"
+            )
 
             _, _, _, norm_stats = load_dataset(dataset_name, variate_indices, stride=1)
             ckpt_path, train_metrics = _promote_best_trial_to_final(
