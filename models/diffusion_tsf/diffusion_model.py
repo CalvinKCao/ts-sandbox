@@ -515,6 +515,8 @@ class DiffusionTSF(nn.Module):
         if self.config.soft_dtw_cumsum_weight > 0:
             centered = series - series.mean(dim=-1, keepdim=True)
             cumulative = centered.cumsum(dim=-1)
+            # Scale by horizon length so large cumsum_weight does not blow up SDTW features.
+            cumulative = cumulative / math.sqrt(max(width, 1))
             features.append(cumulative * float(self.config.soft_dtw_cumsum_weight))
         return torch.stack(features, dim=-1)
 
@@ -543,6 +545,8 @@ class DiffusionTSF(nn.Module):
             dtw_xx = soft_dtw(pred_seq, pred_seq)
             dtw_yy = soft_dtw(target_seq, target_seq)
             dtw_loss = (dtw_xy - 0.5 * (dtw_xx + dtw_yy)).mean()
+            if not torch.isfinite(dtw_loss):
+                dtw_loss = torch.zeros((), device=x0_pred.device, dtype=pred_1d.dtype)
         return pred_1d, mse_loss, dtw_loss
 
     def _load_from_state_dict(
