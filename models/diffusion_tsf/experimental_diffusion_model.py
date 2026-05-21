@@ -250,12 +250,20 @@ class ExperimentalDiffusionTSF(DiffusionTSF):
         x0_pred = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
         x0_pred = torch.clamp(x0_pred, -2.0, 2.0)
         
-        emd_loss = self._compute_emd_loss(x0_pred, future_2d)
+        pred_1d, forecast_mse_loss, soft_dtw_loss = self._compute_forecast_losses(x0_pred, future_norm)
 
-        loss = noise_loss + self.config.emd_lambda * emd_loss
+        loss = (
+            noise_loss
+            + self.config.forecast_mse_weight * forecast_mse_loss
+            + self.config.soft_dtw_weight * soft_dtw_loss
+        )
 
         return {
-            'loss': loss, 'noise_loss': noise_loss, 'emd_loss': emd_loss,
+            'loss': loss,
+            'noise_loss': noise_loss,
+            'forecast_mse_loss': forecast_mse_loss,
+            'soft_dtw_loss': soft_dtw_loss,
+            'pred_1d': pred_1d,
             'noise_pred': noise_pred, 't': t,
         }
 

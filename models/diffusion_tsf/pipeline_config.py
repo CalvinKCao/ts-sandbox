@@ -124,8 +124,8 @@ PRETRAIN_EPOCHS: int = 10
 
 # Phase 1B: Diffusion HP tuning on synthetic data. Best HP-tuning model is saved
 # directly as `diffusion.pt` (no separate "full" pretrain step).
-N_DIFFUSION_HP_TRIALS: int = 3
-DIFFUSION_HP_MAX_EPOCHS: int = 15
+N_DIFFUSION_HP_TRIALS: int = 6
+DIFFUSION_HP_MAX_EPOCHS: int = 18
 DIFFUSION_HP_PATIENCE: int = 10
 
 # Fallback diffusion pretrain (only runs if HP cache is missing).
@@ -146,8 +146,8 @@ ITRANS_REAL_COLD_START: bool = True
 # Phase 2B: Diffusion HP tuning on real data (LR-only search; batch size auto-probed).
 # The best trial's checkpoint is reused as the final fine-tuned model — there is no
 # separate "Phase 2C" full retrain.
-N_FINETUNE_HP_TRIALS: int = 3
-HP_TUNE_EPOCHS: int = 10
+N_FINETUNE_HP_TRIALS: int = 8
+HP_TUNE_EPOCHS: int = 15
 HP_TUNE_PATIENCE: int = 5
 # Optuna log-uniform bounds for Phase 2B only (finetune_hp_objective).
 FINETUNE_HP_LR_MIN: float = 3e-6
@@ -198,7 +198,13 @@ def diffusion_probe_max_candidate(n_variates: int, smoke_test: bool) -> int:
 
 # ---- Loss terms -------------------------------------------------------------------
 
-EMD_LAMBDA: float = 0.2
+FORECAST_MSE_WEIGHT: float = 0.1
+SOFT_DTW_WEIGHT: float = 0.001
+SOFT_DTW_GAMMA: float = 0.1
+SOFT_DTW_BANDWIDTH: Optional[int] = 16
+SOFT_DTW_TIME_WEIGHT: float = 1.0
+SOFT_DTW_CUMSUM_WEIGHT: float = 1.0
+SOFT_DTW_EVAL_SERIES_CAP: int = 512
 GUIDANCE_PENALTY_WEIGHT: float = 0.0  # small penalty for deviating from iTransformer guidance
 
 # ---- Evaluation -------------------------------------------------------------------

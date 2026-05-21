@@ -108,8 +108,13 @@ class DiffusionTSFConfig:
     # decoding
     decode_temperature: float = 0.5  # lower = sharper
     
-    # emd loss weight
-    emd_lambda: float = 0.2
+    # 1D losses decoded from the CDF columns.
+    forecast_mse_weight: float = 0.1
+    soft_dtw_weight: float = 0.001
+    soft_dtw_gamma: float = 0.1
+    soft_dtw_bandwidth: int | None = 16
+    soft_dtw_time_weight: float = 1.0
+    soft_dtw_cumsum_weight: float = 1.0
 
     # monotonicity regulariztion (cdf mode)
     use_monotonicity_loss: bool = False

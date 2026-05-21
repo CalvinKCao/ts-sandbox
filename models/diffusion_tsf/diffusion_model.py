@@ -462,19 +462,88 @@ class DiffusionTSF(nn.Module):
         mean, std = stats
         return x * std + mean
     
-    def _compute_emd_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute column-wise Wasserstein-1 distance via CDF trick."""
-        if self.config.representation_mode == "pdf":
-            temperature = self.config.decode_temperature
-            prob_pred = F.softmax(pred / temperature, dim=2)
-            prob_target = F.softmax(target / temperature, dim=2)
-            cdf_pred = prob_pred.cumsum(dim=2)
-            cdf_target = prob_target.cumsum(dim=2)
+    def _decode_columns_to_1d(self, image: torch.Tensor, from_diffusion: bool = True) -> torch.Tensor:
+        """Decode CDF occupancy columns by summing along the value axis."""
+        if image.dim() == 3:
+            image = image.unsqueeze(1)
+        occupancy = (image + 1.0) / 2.0 if from_diffusion else image
+        column_sum = occupancy.sum(dim=2)
+        normalized = column_sum / float(self.config.image_height)
+        return normalized * (2 * self.config.max_scale) - self.config.max_scale
+
+    def _target_for_forecast_loss(self, future_norm: torch.Tensor, width: int) -> torch.Tensor:
+        if future_norm.dim() == 2:
+            future_norm = future_norm.unsqueeze(1)
+        if future_norm.shape[-1] != width:
+            future_norm = future_norm[..., -width:]
+        return future_norm
+
+    def _get_soft_dtw(self, device: torch.device):
+        try:
+            import pysdtw  # type: ignore[import-not-found]
+        except ImportError as exc:
+            raise ImportError(
+                "Soft-DTW training requires pysdtw. Install it with `pip install pysdtw`."
+            ) from exc
+
+        bandwidth = self.config.soft_dtw_bandwidth
+        if bandwidth is not None:
+            bandwidth = int(bandwidth)
+        key = (float(self.config.soft_dtw_gamma), bandwidth, device.type == "cuda")
+        cached = getattr(self, "_soft_dtw_cache", None)
+        if cached is None or cached[0] != key:
+            self._soft_dtw_cache = (
+                key,
+                pysdtw.SoftDTW(
+                    gamma=key[0],
+                    dist_func=pysdtw.distance.pairwise_l2_squared,
+                    use_cuda=key[2],
+                    bandwidth=bandwidth,
+                ),
+            )
+        return self._soft_dtw_cache[1]
+
+    def _soft_dtw_features(self, series: torch.Tensor) -> torch.Tensor:
+        features = []
+        width = series.shape[-1]
+        if self.config.soft_dtw_time_weight > 0:
+            denom = max(width - 1, 1)
+            t = torch.arange(width, device=series.device, dtype=series.dtype) / float(denom)
+            t = t.view(1, 1, width).expand(series.shape[0], series.shape[1], width)
+            features.append(t * float(self.config.soft_dtw_time_weight))
+        features.append(series)
+        if self.config.soft_dtw_cumsum_weight > 0:
+            centered = series - series.mean(dim=-1, keepdim=True)
+            cumulative = centered.cumsum(dim=-1)
+            features.append(cumulative * float(self.config.soft_dtw_cumsum_weight))
+        return torch.stack(features, dim=-1)
+
+    def _compute_forecast_losses(
+        self,
+        x0_pred: torch.Tensor,
+        future_norm: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Decode x0 to 1D and compute differentiable trajectory losses."""
+        pred_1d = self._decode_columns_to_1d(x0_pred, from_diffusion=True)
+        target_1d = self._target_for_forecast_loss(future_norm, pred_1d.shape[-1])
+        pred_1d = pred_1d.float()
+        target_1d = target_1d.float()
+
+        mse_loss = F.mse_loss(pred_1d, target_1d)
+        if self.config.soft_dtw_weight <= 0:
+            dtw_loss = torch.zeros((), device=x0_pred.device, dtype=pred_1d.dtype)
         else:
-            cdf_pred = (pred + 1.0) / 2.0
-            cdf_target = (target + 1.0) / 2.0
-        emd = (cdf_pred - cdf_target).abs().mean()
-        return emd
+            pred_seq = self._soft_dtw_features(pred_1d)
+            target_seq = self._soft_dtw_features(target_1d)
+            dim = pred_seq.shape[-1]
+            pred_seq = pred_seq.reshape(-1, pred_1d.shape[-1], dim)
+            target_seq = target_seq.reshape(-1, target_1d.shape[-1], dim)
+            soft_dtw = self._get_soft_dtw(x0_pred.device)
+            dtw_xy = soft_dtw(pred_seq, target_seq)
+            dtw_xx = soft_dtw(pred_seq, pred_seq)
+            dtw_yy = soft_dtw(target_seq, target_seq)
+            dtw_loss = (dtw_xy - 0.5 * (dtw_xx + dtw_yy)).mean()
+        return pred_1d, mse_loss, dtw_loss
 
     def _load_from_state_dict(
         self,
@@ -774,7 +843,7 @@ class DiffusionTSF(nn.Module):
         # Matches ddim_step logic: range [-2, 2] provides slack beyond [-1, 1]
         x0_pred = torch.clamp(x0_pred, -2.0, 2.0)
         
-        emd_loss = self._compute_emd_loss(x0_pred, future_2d)
+        pred_1d, forecast_mse_loss, soft_dtw_loss = self._compute_forecast_losses(x0_pred, future_norm)
 
         mono_loss = torch.tensor(0.0, device=device)
         if self.config.use_monotonicity_loss and self.config.representation_mode == "cdf":
@@ -787,13 +856,17 @@ class DiffusionTSF(nn.Module):
 
         loss = (
             noise_loss + 
-            self.config.emd_lambda * emd_loss + 
+            self.config.forecast_mse_weight * forecast_mse_loss +
+            self.config.soft_dtw_weight * soft_dtw_loss +
             self.config.monotonicity_weight * mono_loss +
             self.config.guidance_penalty_weight * guidance_loss
         )
 
         result = {
-            'loss': loss, 'noise_loss': noise_loss, 'emd_loss': emd_loss,
+            'loss': loss, 'noise_loss': noise_loss,
+            'forecast_mse_loss': forecast_mse_loss,
+            'soft_dtw_loss': soft_dtw_loss,
+            'pred_1d': pred_1d,
             'guidance_loss': guidance_loss,
             'noise_pred': noise_pred, 't': t,
         }

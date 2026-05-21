@@ -453,6 +453,12 @@ def init_wandb(
         'diffusion_probe_target_effective_batch': DIFFUSION_PROBE_TARGET_EFFECTIVE_BATCH,
         'diffusion_probe_max_batch_cap': DIFFUSION_PROBE_MAX_BATCH_CAP,
         'diffusion_probe_max_candidate_default_v': diffusion_probe_max_candidate(N_VARIATES, False),
+        'forecast_mse_weight_default': FORECAST_MSE_WEIGHT,
+        'soft_dtw_weight_default': SOFT_DTW_WEIGHT,
+        'soft_dtw_gamma_default': SOFT_DTW_GAMMA,
+        'soft_dtw_bandwidth_default': SOFT_DTW_BANDWIDTH,
+        'soft_dtw_time_weight_default': SOFT_DTW_TIME_WEIGHT,
+        'soft_dtw_cumsum_weight_default': SOFT_DTW_CUMSUM_WEIGHT,
         # DDP info
         'ddp_enabled': _ddp_enabled,
         'world_size': get_world_size(),
@@ -598,9 +604,11 @@ def log_wandb_eval_results(subset_id: str, eval_results: dict, train_metrics: di
     flat_metrics = {
         f'eval/{subset_id}/single_mse': eval_results['single']['mse'],
         f'eval/{subset_id}/single_mae': eval_results['single']['mae'],
+        f'eval/{subset_id}/single_soft_dtw': eval_results['single'].get('soft_dtw'),
         f'eval/{subset_id}/single_trend_acc': eval_results['single']['trend_accuracy'],
         f'eval/{subset_id}/avg_mse': eval_results['averaged']['mse'],
         f'eval/{subset_id}/avg_mae': eval_results['averaged']['mae'],
+        f'eval/{subset_id}/avg_soft_dtw': eval_results['averaged'].get('soft_dtw'),
         f'eval/{subset_id}/avg_trend_acc': eval_results['averaged']['trend_accuracy'],
         f'eval/{subset_id}/best_val_loss': train_metrics.get('best_val_loss', 0),
         f'eval/{subset_id}/final_epoch': train_metrics.get('final_epoch', 0),
@@ -615,10 +623,11 @@ def log_wandb_eval_results(subset_id: str, eval_results: dict, train_metrics: di
             eval_results['single']['mae'],
             eval_results['averaged']['mse'],
             eval_results['averaged']['mae'],
+            eval_results['averaged'].get('soft_dtw'),
             train_metrics.get('best_val_loss', 0),
         ]]
         table = wandb.Table(
-            columns=['subset', 'single_mse', 'single_mae', 'avg_mse', 'avg_mae', 'val_loss'],
+            columns=['subset', 'single_mse', 'single_mae', 'avg_mse', 'avg_mae', 'avg_soft_dtw', 'val_loss'],
             data=table_data
         )
         log_wandb({f'eval_table/{subset_id}': table})
@@ -699,6 +708,13 @@ from models.diffusion_tsf.pipeline_config import (
     DIT_NUM_HEADS,
     DIT_MLP_RATIO,
     DIT_DROPOUT,
+    FORECAST_MSE_WEIGHT,
+    SOFT_DTW_WEIGHT,
+    SOFT_DTW_GAMMA,
+    SOFT_DTW_BANDWIDTH,
+    SOFT_DTW_TIME_WEIGHT,
+    SOFT_DTW_CUMSUM_WEIGHT,
+    SOFT_DTW_EVAL_SERIES_CAP,
     GUIDANCE_PENALTY_WEIGHT,
     EVAL_NUM_SAMPLES,
     resolve_pretrain_virtual_dataset_size,
@@ -927,6 +943,8 @@ def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Di
 # Diffusion Model Creation (with guidance support)
 # ============================================================================
 
+_DEFAULT_SOFT_DTW_BANDWIDTH = object()
+
 def create_diffusion_model(
     n_variates: int = None,
     lookback: int = LOOKBACK_LENGTH,
@@ -934,14 +952,45 @@ def create_diffusion_model(
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
     guidance_penalty_weight: Optional[float] = None,
+    forecast_mse_weight: Optional[float] = None,
+    soft_dtw_weight: Optional[float] = None,
+    soft_dtw_gamma: Optional[float] = None,
+    soft_dtw_bandwidth=_DEFAULT_SOFT_DTW_BANDWIDTH,
+    soft_dtw_time_weight: Optional[float] = None,
+    soft_dtw_cumsum_weight: Optional[float] = None,
 ):
     """Create DiffusionTSF model with iTransformer guidance channel enabled."""
     if n_variates is None:
         n_variates = N_VARIATES
     if guidance_penalty_weight is None:
         guidance_penalty_weight = GUIDANCE_PENALTY_WEIGHT
+    if forecast_mse_weight is None:
+        forecast_mse_weight = FORECAST_MSE_WEIGHT
+    if soft_dtw_weight is None:
+        soft_dtw_weight = SOFT_DTW_WEIGHT
+    if soft_dtw_gamma is None:
+        soft_dtw_gamma = SOFT_DTW_GAMMA
+    if soft_dtw_bandwidth is _DEFAULT_SOFT_DTW_BANDWIDTH:
+        soft_dtw_bandwidth = SOFT_DTW_BANDWIDTH
+    if soft_dtw_time_weight is None:
+        soft_dtw_time_weight = SOFT_DTW_TIME_WEIGHT
+    if soft_dtw_cumsum_weight is None:
+        soft_dtw_cumsum_weight = SOFT_DTW_CUMSUM_WEIGHT
 
-    logger.info(f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, experiment={EXPERIMENT}")
+    logger.info(
+        "Creating diffusion model: guidance_penalty_weight=%s, "
+        "forecast_mse_weight=%s, soft_dtw_weight=%s, soft_dtw_gamma=%s, "
+        "soft_dtw_bandwidth=%s, soft_dtw_time_weight=%s, "
+        "soft_dtw_cumsum_weight=%s, experiment=%s",
+        guidance_penalty_weight,
+        forecast_mse_weight,
+        soft_dtw_weight,
+        soft_dtw_gamma,
+        soft_dtw_bandwidth,
+        soft_dtw_time_weight,
+        soft_dtw_cumsum_weight,
+        EXPERIMENT,
+    )
 
     if EXPERIMENT == 'baseline':
         config = DiffusionTSFConfig(
@@ -954,6 +1003,12 @@ def create_diffusion_model(
             use_coordinate_channel=True,
             use_guidance_channel=True,
             guidance_penalty_weight=guidance_penalty_weight,
+            forecast_mse_weight=forecast_mse_weight,
+            soft_dtw_weight=soft_dtw_weight,
+            soft_dtw_gamma=soft_dtw_gamma,
+            soft_dtw_bandwidth=soft_dtw_bandwidth,
+            soft_dtw_time_weight=soft_dtw_time_weight,
+            soft_dtw_cumsum_weight=soft_dtw_cumsum_weight,
             num_diffusion_steps=1000,
             model_type=MODEL_TYPE,
             unet_channels=UNET_CHANNELS,
@@ -986,6 +1041,12 @@ def create_diffusion_model(
             use_coordinate_channel=True,
             use_guidance_channel=True,
             guidance_penalty_weight=guidance_penalty_weight,
+            forecast_mse_weight=forecast_mse_weight,
+            soft_dtw_weight=soft_dtw_weight,
+            soft_dtw_gamma=soft_dtw_gamma,
+            soft_dtw_bandwidth=soft_dtw_bandwidth,
+            soft_dtw_time_weight=soft_dtw_time_weight,
+            soft_dtw_cumsum_weight=soft_dtw_cumsum_weight,
             num_diffusion_steps=1000,
             model_type=MODEL_TYPE,
             unet_channels=UNET_CHANNELS,
@@ -999,6 +1060,46 @@ def create_diffusion_model(
             independent_norm=independent_norm,
         )
         return ExperimentalDiffusionTSF(config)
+
+
+def _decode_soft_dtw_bandwidth(value):
+    if value in (None, "none", "None", 0, "0", -1, "-1"):
+        return None
+    return int(value)
+
+
+def _loss_params_from_dict(params: Dict) -> Dict:
+    keys = (
+        "forecast_mse_weight",
+        "soft_dtw_weight",
+        "soft_dtw_gamma",
+        "soft_dtw_time_weight",
+        "soft_dtw_cumsum_weight",
+    )
+    loss_params = {k: params[k] for k in keys if k in params}
+    if "soft_dtw_bandwidth" in params:
+        loss_params["soft_dtw_bandwidth"] = _decode_soft_dtw_bandwidth(params["soft_dtw_bandwidth"])
+    return loss_params
+
+
+def _apply_loss_params_to_model(model: DiffusionTSF, params: Dict) -> None:
+    for key, value in _loss_params_from_dict(params).items():
+        setattr(model.config, key, value)
+
+
+def _suggest_diffusion_loss_params(trial) -> Dict:
+    bandwidth = trial.suggest_categorical(
+        "soft_dtw_bandwidth",
+        ["none", 3, 8, 16, 32],
+    )
+    return {
+        "forecast_mse_weight": trial.suggest_float("forecast_mse_weight", 1e-3, 1.0, log=True),
+        "soft_dtw_weight": trial.suggest_float("soft_dtw_weight", 1e-5, 5e-2, log=True),
+        "soft_dtw_gamma": trial.suggest_float("soft_dtw_gamma", 1e-2, 1.0, log=True),
+        "soft_dtw_bandwidth": _decode_soft_dtw_bandwidth(bandwidth),
+        "soft_dtw_time_weight": trial.suggest_float("soft_dtw_time_weight", 0.1, 5.0, log=True),
+        "soft_dtw_cumsum_weight": trial.suggest_float("soft_dtw_cumsum_weight", 0.1, 5.0, log=True),
+    }
 
 
 # ============================================================================
@@ -1631,8 +1732,9 @@ def diffusion_hp_objective(
         batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else DIFFUSION_BATCH_SIZES)
     else:
         batch_size = fixed_batch_size
+    loss_params = _suggest_diffusion_loss_params(trial)
 
-    model = create_diffusion_model().to(device)
+    model = create_diffusion_model(**loss_params).to(device)
     model.set_guidance_model(itrans_guidance)
 
     train_loader = DataLoader(synthetic_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -1740,15 +1842,26 @@ def run_diffusion_hp_tuning(
     
     # Run Optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
+    study = optuna.create_study(
+        direction='minimize',
+        sampler=TPESampler(seed=42),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+    )
     
     logger.info(f"Starting Diffusion HP search: {n_trials} trials")
     
     def log_trial(study, trial):
         bs = trial.params.get('batch_size', train_bs)
-        logger.info(f"[Diffusion HP] Trial {trial.number}/{n_trials}: "
-                   f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                   f"bs={bs}")
+        logger.info(
+            f"[Diffusion HP] Trial {trial.number}/{n_trials}: "
+            f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+            f"mse_w={trial.params.get('forecast_mse_weight')}, "
+            f"dtw_w={trial.params.get('soft_dtw_weight')}, "
+            f"gamma={trial.params.get('soft_dtw_gamma')}, "
+            f"band={trial.params.get('soft_dtw_bandwidth')}, "
+            f"time_w={trial.params.get('soft_dtw_time_weight')}, "
+            f"cum_w={trial.params.get('soft_dtw_cumsum_weight')}, bs={bs}"
+        )
     
     _best_state: dict = {'model_state': None, 'val_loss': float('inf')}
 
@@ -1964,7 +2077,7 @@ def pretrain_diffusion(
     )
     
     # Create model with guidance and wrap with DDP
-    model = create_diffusion_model()
+    model = create_diffusion_model(**_loss_params_from_dict(best_params))
     model.set_guidance_model(itrans_guidance)
     model = wrap_model_ddp(model)
     
@@ -2083,6 +2196,7 @@ def finetune_hp_objective(
         batch_size = fixed_batch_size
     else:
         batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else FINETUNE_BATCH_SIZES)
+    loss_params = _suggest_diffusion_loss_params(trial)
     
     # Load data
     train_ds, val_ds, _, _ = load_dataset(
@@ -2103,7 +2217,7 @@ def finetune_hp_objective(
     itrans_guidance = iTransformerGuidance(itrans_model)
     
     # Load pretrained diffusion (skip guidance keys — keep the attached one)
-    model = create_diffusion_model().to(device)
+    model = create_diffusion_model(**loss_params).to(device)
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
     load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
@@ -2153,7 +2267,11 @@ def finetune_hp_objective(
                 save_checkpoint(
                     unwrap_model(model), optimizer, epoch, float('nan'), val_loss,
                     {
-                        'tuned_params': {'learning_rate': lr, 'batch_size': batch_size},
+                        'tuned_params': {
+                            'learning_rate': lr,
+                            'batch_size': batch_size,
+                            **loss_params,
+                        },
                         'trial_number': trial.number,
                     },
                     trial_ckpt_path,
@@ -2218,7 +2336,11 @@ def _promote_best_trial_to_final(
                     pass
     barrier()
 
-    return dst, {'best_val_loss': best_val_loss, 'best_trial': best_num}
+    return dst, {
+        'best_val_loss': best_val_loss,
+        'best_trial': best_num,
+        'tuned_params': tuned_params,
+    }
 
 
 def finetune_on_dataset(*args, **kwargs):
@@ -2234,6 +2356,67 @@ def finetune_on_dataset(*args, **kwargs):
 # ============================================================================
 # Evaluation
 # ============================================================================
+
+def _soft_dtw_eval_metric(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    device: torch.device,
+    gamma: float = SOFT_DTW_GAMMA,
+    bandwidth=SOFT_DTW_BANDWIDTH,
+    time_weight: float = SOFT_DTW_TIME_WEIGHT,
+    cumsum_weight: float = SOFT_DTW_CUMSUM_WEIGHT,
+    max_series: int = SOFT_DTW_EVAL_SERIES_CAP,
+) -> float:
+    try:
+        import pysdtw  # type: ignore[import-not-found]
+    except ImportError:
+        logger.warning("pysdtw unavailable; skipping Soft-DTW eval metric")
+        return float('nan')
+
+    pred_seq = pred.reshape(-1, pred.shape[-1])
+    target_seq = target.reshape(-1, target.shape[-1])
+    n_series = pred_seq.shape[0]
+    if max_series > 0 and n_series > max_series:
+        idx = torch.linspace(0, n_series - 1, steps=max_series).long()
+        pred_seq = pred_seq[idx]
+        target_seq = target_seq[idx]
+
+    metric_device = device if device.type == 'cuda' else torch.device('cpu')
+    bandwidth = _decode_soft_dtw_bandwidth(bandwidth)
+    sdtw = pysdtw.SoftDTW(
+        gamma=float(gamma),
+        dist_func=pysdtw.distance.pairwise_l2_squared,
+        use_cuda=(metric_device.type == 'cuda'),
+        bandwidth=bandwidth,
+    )
+
+    vals = []
+    chunk = 64 if metric_device.type == 'cuda' else 16
+    for start in range(0, pred_seq.shape[0], chunk):
+        end = min(start + chunk, pred_seq.shape[0])
+        x_val = pred_seq[start:end].to(metric_device).float()
+        y_val = target_seq[start:end].to(metric_device).float()
+        features = []
+        if time_weight > 0:
+            width = x_val.shape[-1]
+            denom = max(width - 1, 1)
+            t = torch.arange(width, device=metric_device, dtype=x_val.dtype) / float(denom)
+            t = (t * float(time_weight)).view(1, width, 1)
+            features.append((t.expand(x_val.shape[0], -1, -1), t.expand(y_val.shape[0], -1, -1)))
+        features.append((x_val.unsqueeze(-1), y_val.unsqueeze(-1)))
+        if cumsum_weight > 0:
+            x_cum = (x_val - x_val.mean(dim=-1, keepdim=True)).cumsum(dim=-1)
+            y_cum = (y_val - y_val.mean(dim=-1, keepdim=True)).cumsum(dim=-1)
+            features.append((x_cum.mul(float(cumsum_weight)).unsqueeze(-1),
+                             y_cum.mul(float(cumsum_weight)).unsqueeze(-1)))
+        x = torch.cat([pair[0] for pair in features], dim=-1)
+        y = torch.cat([pair[1] for pair in features], dim=-1)
+        d_xy = sdtw(x, y)
+        d_xx = sdtw(x, x)
+        d_yy = sdtw(y, y)
+        vals.append((d_xy - 0.5 * (d_xx + d_yy)).detach().cpu())
+    return torch.cat(vals).mean().item()
+
 
 def evaluate_model(
     model: DiffusionTSF,
@@ -2367,13 +2550,22 @@ def evaluate_model(
     def compute_metrics(pred, target):
         mse = torch.nn.functional.mse_loss(pred, target).item()
         mae = torch.nn.functional.l1_loss(pred, target).item()
+        soft_dtw = _soft_dtw_eval_metric(
+            pred,
+            target,
+            device,
+            gamma=getattr(model.config, 'soft_dtw_gamma', SOFT_DTW_GAMMA),
+            bandwidth=getattr(model.config, 'soft_dtw_bandwidth', SOFT_DTW_BANDWIDTH),
+            time_weight=getattr(model.config, 'soft_dtw_time_weight', SOFT_DTW_TIME_WEIGHT),
+            cumsum_weight=getattr(model.config, 'soft_dtw_cumsum_weight', SOFT_DTW_CUMSUM_WEIGHT),
+        )
         
         # Trend accuracy
         pred_diff = pred[:, :, 1:] - pred[:, :, :-1]
         target_diff = target[:, :, 1:] - target[:, :, :-1]
         trend_acc = ((pred_diff > 0) == (target_diff > 0)).float().mean().item()
         
-        return {'mse': mse, 'mae': mae, 'trend_accuracy': trend_acc}
+        return {'mse': mse, 'mae': mae, 'soft_dtw': soft_dtw, 'trend_accuracy': trend_acc}
     
     return {
         'single': compute_metrics(preds_single, targets),
@@ -2439,8 +2631,10 @@ def update_summary_csv(results_dir):
                 'best_val_loss': data.get('train_metrics', {}).get('best_val_loss'),
                 'single_mse': m['single']['mse'],
                 'single_mae': m['single']['mae'],
+                'single_soft_dtw': m['single'].get('soft_dtw'),
                 'avg_mse': m['averaged']['mse'],
                 'avg_mae': m['averaged']['mae'],
+                'avg_soft_dtw': m['averaged'].get('soft_dtw'),
                 'avg_trend_acc': m['averaged'].get('trend_accuracy'),
                 'itrans_mse': itrans.get('mse'),
                 'itrans_mae': itrans.get('mae'),
@@ -2834,6 +3028,7 @@ def run_pipeline(
                 train_metrics = {
                     'best_val_loss': md.get('best_val_loss', float('nan')),
                     'best_trial': md.get('best_trial', -1),
+                    'tuned_params': tuned_params,
                 }
                 logger.info(
                     f"[Resume] Found existing fine-tuned checkpoint for {dataset_name} "
@@ -2862,11 +3057,22 @@ def run_pipeline(
                 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
                 def log_finetune_trial(study, trial):
-                    logger.info(f"[{dataset_name} HP] Trial {trial.number}/{n_finetune_trials}: "
-                                f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                                f"bs={ft_diff_bs}")
+                    logger.info(
+                        f"[{dataset_name} HP] Trial {trial.number}/{n_finetune_trials}: "
+                        f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+                        f"mse_w={trial.params.get('forecast_mse_weight')}, "
+                        f"dtw_w={trial.params.get('soft_dtw_weight')}, "
+                        f"gamma={trial.params.get('soft_dtw_gamma')}, "
+                        f"band={trial.params.get('soft_dtw_bandwidth')}, "
+                        f"time_w={trial.params.get('soft_dtw_time_weight')}, "
+                        f"cum_w={trial.params.get('soft_dtw_cumsum_weight')}, bs={ft_diff_bs}"
+                    )
 
-                study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
+                study = optuna.create_study(
+                    direction='minimize',
+                    sampler=TPESampler(seed=42),
+                    pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+                )
                 study.optimize(
                     lambda trial: finetune_hp_objective(
                         trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test,
@@ -2899,6 +3105,7 @@ def run_pipeline(
                 model.set_guidance_model(itrans_guidance)
                 ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
                 load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
+                _apply_loss_params_to_model(model, tuned_params)
 
                 _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=1)
                 if smoke_test:
@@ -2914,8 +3121,8 @@ def run_pipeline(
 
                 eval_results = evaluate_model(model, test_loader, device, n_samples=3, smoke_test=smoke_test)
                 
-                logger.info(f"[{dataset_name}] Single: MSE={eval_results['single']['mse']:.4f}, MAE={eval_results['single']['mae']:.4f}")
-                logger.info(f"[{dataset_name}] Avg: MSE={eval_results['averaged']['mse']:.4f}, MAE={eval_results['averaged']['mae']:.4f}")
+                logger.info(f"[{dataset_name}] Single: MSE={eval_results['single']['mse']:.4f}, MAE={eval_results['single']['mae']:.4f}, SoftDTW={eval_results['single'].get('soft_dtw', float('nan')):.4f}")
+                logger.info(f"[{dataset_name}] Avg: MSE={eval_results['averaged']['mse']:.4f}, MAE={eval_results['averaged']['mae']:.4f}, SoftDTW={eval_results['averaged'].get('soft_dtw', float('nan')):.4f}")
                 
                 save_eval_results(dataset_name, dataset_name, variate_indices,
                                 {**train_metrics, 'tuned_params': tuned_params}, eval_results, RESULTS_DIR)
@@ -3382,6 +3589,7 @@ def _finetune_and_eval_one_subset(
             train_metrics = {
                 'best_val_loss': md.get('best_val_loss', float('nan')),
                 'best_trial': md.get('best_trial', -1),
+                'tuned_params': tuned_params,
             }
             logger.info(
                 f"[Resume] Found existing fine-tuned checkpoint for {subset_id} "
@@ -3447,6 +3655,7 @@ def _finetune_and_eval_one_subset(
         model.set_guidance_model(itrans_guidance)
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
+        _apply_loss_params_to_model(model, tuned_params)
 
         _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=1)
         if smoke_test:
@@ -3462,7 +3671,8 @@ def _finetune_and_eval_one_subset(
 
         eval_results = evaluate_model(model, test_loader, device, n_samples=3, smoke_test=smoke_test)
         logger.info(f"[{subset_id}] Avg: MSE={eval_results['averaged']['mse']:.4f}, "
-                     f"MAE={eval_results['averaged']['mae']:.4f}")
+                     f"MAE={eval_results['averaged']['mae']:.4f}, "
+                     f"SoftDTW={eval_results['averaged'].get('soft_dtw', float('nan')):.4f}")
 
         save_eval_results(
             subset_id, dataset_name, variate_indices,
@@ -3500,6 +3710,8 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
     global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION, LOOKBACK_LENGTH, FORECAST_LENGTH
+    global FORECAST_MSE_WEIGHT, SOFT_DTW_WEIGHT, SOFT_DTW_GAMMA, SOFT_DTW_BANDWIDTH
+    global SOFT_DTW_TIME_WEIGHT, SOFT_DTW_CUMSUM_WEIGHT
     global MODEL_TYPE
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
@@ -3533,6 +3745,19 @@ def main():
                         help='Wipe manifest and checkpoints, start from scratch')
     parser.add_argument('--guidance-penalty-weight', type=float, default=GUIDANCE_PENALTY_WEIGHT,
                         help='Weight for guidance penalty loss (default from pipeline_config)')
+    parser.add_argument('--forecast-mse-weight', type=float, default=FORECAST_MSE_WEIGHT,
+                        help='Default decoded 1D forecast MSE weight before Optuna tuning')
+    parser.add_argument('--soft-dtw-weight', type=float, default=SOFT_DTW_WEIGHT,
+                        help='Default Soft-DTW weight before Optuna tuning')
+    parser.add_argument('--soft-dtw-gamma', type=float, default=SOFT_DTW_GAMMA,
+                        help='Default Soft-DTW smoothing gamma before Optuna tuning')
+    parser.add_argument('--soft-dtw-bandwidth', type=str,
+                        default='none' if SOFT_DTW_BANDWIDTH is None else str(SOFT_DTW_BANDWIDTH),
+                        help='Default Sakoe-Chiba bandwidth before Optuna tuning; use none for unrestricted')
+    parser.add_argument('--soft-dtw-time-weight', type=float, default=SOFT_DTW_TIME_WEIGHT,
+                        help='Default weight on the explicit time channel for Soft-DTW')
+    parser.add_argument('--soft-dtw-cumsum-weight', type=float, default=SOFT_DTW_CUMSUM_WEIGHT,
+                        help='Default weight on the centered cumulative channel for Soft-DTW')
     parser.add_argument('--image-height', type=int, default=IMAGE_HEIGHT,
                         help='Override image height')
     parser.add_argument('--unet-channels', type=str, default=None,
@@ -3573,6 +3798,12 @@ def main():
     
     # Global overrides from CLI
     GUIDANCE_PENALTY_WEIGHT = args.guidance_penalty_weight
+    FORECAST_MSE_WEIGHT = args.forecast_mse_weight
+    SOFT_DTW_WEIGHT = args.soft_dtw_weight
+    SOFT_DTW_GAMMA = args.soft_dtw_gamma
+    SOFT_DTW_BANDWIDTH = _decode_soft_dtw_bandwidth(args.soft_dtw_bandwidth)
+    SOFT_DTW_TIME_WEIGHT = args.soft_dtw_time_weight
+    SOFT_DTW_CUMSUM_WEIGHT = args.soft_dtw_cumsum_weight
     IMAGE_HEIGHT = args.image_height
     if args.unet_channels:
         UNET_CHANNELS = [int(x.strip()) for x in args.unet_channels.split(',') if x.strip()]

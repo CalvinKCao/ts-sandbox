@@ -398,15 +398,17 @@ Step-by-step:
 
 Loss components:
 - `noise_loss`: MSE between predicted epsilon and true epsilon.
-- `emd_loss`: mean absolute CDF difference between predicted `x0` and target future CDF image.
+- `forecast_mse_loss`: MSE between the decoded 1D `x0` forecast and normalized target.
+- `soft_dtw_loss`: Soft-DTW divergence on decoded 1D trajectories, using value plus time/cumulative-shape features.
 - Optional `monotonicity_loss`: penalizes violations of CDF monotonic structure.
 - Total:
-  - `loss = noise_loss + emd_lambda * emd_loss + monotonicity_weight * mono_loss`.
-  - Defaults include `emd_lambda=0.2`, monotonicity disabled unless configured.
+  - `loss = noise_loss + forecast_mse_weight * forecast_mse_loss + soft_dtw_weight * soft_dtw_loss + monotonicity_weight * mono_loss`.
+  - Defaults include `forecast_mse_weight=0.1`, `soft_dtw_weight=0.001`, monotonicity disabled unless configured.
 
 Why multi-term loss:
 - Pure epsilon MSE is standard diffusion training.
-- CDF/EMD-like term biases toward occupancy-geometry faithfulness.
+- Decoded 1D MSE anchors the column-sum forecast directly.
+- Soft-DTW divergence adds timing-aware trajectory pressure without full image OT.
 - Monotonicity term protects representation validity when enabled.
 
 ---
@@ -770,7 +772,12 @@ These are default values from `DiffusionTSFConfig` referenced in the original wa
 - plus `cutout_*` augmentation controls.
 
 ### 12.6 Loss terms
-- `emd_lambda=0.2`
+- `forecast_mse_weight=0.1`
+- `soft_dtw_weight=0.001`
+- `soft_dtw_gamma=0.1`
+- `soft_dtw_bandwidth=16`
+- `soft_dtw_time_weight=1.0`
+- `soft_dtw_cumsum_weight=1.0`
 - `use_monotonicity_loss=False`
 - `monotonicity_weight=1.0`
 
