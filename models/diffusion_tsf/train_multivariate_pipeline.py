@@ -28,6 +28,7 @@ import gc
 import importlib.util
 import json
 import logging
+import math
 import os
 import random
 import sys
@@ -1068,6 +1069,30 @@ def _decode_soft_dtw_bandwidth(value):
     return int(value)
 
 
+def _format_optuna_trial_loss(value) -> str:
+    return f"{value:.4f}" if value is not None else "pruned"
+
+
+def _sanitize_trial_metric(value: float) -> float:
+    """Optuna MedianPruner breaks on NaN intermediates (all-NaN slice)."""
+    value = float(value)
+    return value if math.isfinite(value) else float('inf')
+
+
+def _trial_report_val_loss(trial, val_loss: float, step: int) -> float:
+    metric = _sanitize_trial_metric(val_loss)
+    trial.report(metric, step)
+    return metric
+
+
+def _hp_median_pruner() -> optuna.pruners.MedianPruner:
+    return optuna.pruners.MedianPruner(
+        n_startup_trials=2,
+        n_warmup_steps=2,
+        interval_steps=1,
+    )
+
+
 def _loss_params_from_dict(params: Dict) -> Dict:
     keys = (
         "forecast_mse_weight",
@@ -1595,7 +1620,7 @@ def itrans_hp_objective(
             train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
             val_loss = validate_itransformer(model, val_loader_local, criterion, device)
 
-            trial.report(val_loss, epoch)
+            val_loss = _trial_report_val_loss(trial, val_loss, epoch)
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
@@ -1669,14 +1694,14 @@ def run_itransformer_hp_tuning(
     study = optuna.create_study(
         direction='minimize',
         sampler=TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+        pruner=_hp_median_pruner(),
     )
 
     logger.info(f"Starting iTransformer HP search: {n_trials} trials")
 
     def log_trial(study, trial):
         logger.info(f"[iTransformer HP] Trial {trial.number}/{n_trials}: "
-                   f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+                   f"loss={_format_optuna_trial_loss(trial.value)}, lr={trial.params['learning_rate']:.2e}, "
                    f"bs={train_bs}, dropout={ITRANS_PAPER_DROPOUT}")
 
     study.optimize(
@@ -1770,7 +1795,7 @@ def diffusion_hp_objective(
                 n_batches += 1
         val_loss /= max(n_batches, 1)
 
-        trial.report(val_loss, epoch)
+        val_loss = _trial_report_val_loss(trial, val_loss, epoch)
         if trial.should_prune():
             raise optuna.TrialPruned()
 
@@ -1845,7 +1870,7 @@ def run_diffusion_hp_tuning(
     study = optuna.create_study(
         direction='minimize',
         sampler=TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+        pruner=_hp_median_pruner(),
     )
     
     logger.info(f"Starting Diffusion HP search: {n_trials} trials")
@@ -1854,7 +1879,7 @@ def run_diffusion_hp_tuning(
         bs = trial.params.get('batch_size', train_bs)
         logger.info(
             f"[Diffusion HP] Trial {trial.number}/{n_trials}: "
-            f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+            f"loss={_format_optuna_trial_loss(trial.value)}, lr={trial.params['learning_rate']:.2e}, "
             f"mse_w={trial.params.get('forecast_mse_weight')}, "
             f"dtw_w={trial.params.get('soft_dtw_weight')}, "
             f"gamma={trial.params.get('soft_dtw_gamma')}, "
@@ -2257,7 +2282,7 @@ def finetune_hp_objective(
                 n_batches += 1
         val_loss /= max(n_batches, 1)
         
-        trial.report(val_loss, epoch)
+        val_loss = _trial_report_val_loss(trial, val_loss, epoch)
         if trial.should_prune():
             raise optuna.TrialPruned()
         
@@ -3059,7 +3084,7 @@ def run_pipeline(
                 def log_finetune_trial(study, trial):
                     logger.info(
                         f"[{dataset_name} HP] Trial {trial.number}/{n_finetune_trials}: "
-                        f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+                        f"loss={_format_optuna_trial_loss(trial.value)}, lr={trial.params['learning_rate']:.2e}, "
                         f"mse_w={trial.params.get('forecast_mse_weight')}, "
                         f"dtw_w={trial.params.get('soft_dtw_weight')}, "
                         f"gamma={trial.params.get('soft_dtw_gamma')}, "
@@ -3071,7 +3096,7 @@ def run_pipeline(
                 study = optuna.create_study(
                     direction='minimize',
                     sampler=TPESampler(seed=42),
-                    pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+                    pruner=_hp_median_pruner(),
                 )
                 study.optimize(
                     lambda trial: finetune_hp_objective(
@@ -3476,12 +3501,12 @@ def run_itransformer_finetune_hp_tuning(
     study = optuna.create_study(
         direction='minimize',
         sampler=TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+        pruner=_hp_median_pruner(),
     )
 
     def log_trial(study, trial):
         logger.info(f"[iTrans FT HP {label}] Trial {trial.number}/{n_trials}: "
-                   f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+                   f"loss={_format_optuna_trial_loss(trial.value)}, lr={trial.params['learning_rate']:.2e}, "
                    f"dropout={ITRANS_PAPER_DROPOUT}")
 
     study.optimize(
@@ -3623,7 +3648,7 @@ def _finetune_and_eval_one_subset(
             study = optuna.create_study(
                 direction='minimize',
                 sampler=TPESampler(seed=42),
-                pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+                pruner=_hp_median_pruner(),
             )
             study.optimize(
                 lambda trial: finetune_hp_objective(
