@@ -79,7 +79,10 @@ class ExperimentalDiffusionTSF(DiffusionTSF):
             
         # Independent norm: past is normalized by past stats
         past_mean = past.mean(dim=-1, keepdim=True)
-        past_std = past.std(dim=-1, keepdim=True) + 1e-8
+        past_std = torch.clamp(
+            past.std(dim=-1, keepdim=True),
+            min=float(self.config.normalization_std_floor),
+        )
         past_norm = (past - past_mean) / past_std
         
         # Apply learnable affine transform to past_norm
@@ -94,7 +97,10 @@ class ExperimentalDiffusionTSF(DiffusionTSF):
             # The prompt says: "lookback noise representation, horizon prediction noise, and 
             # lookback noise+trend and horizon noise+trend should all be independently normalized"
             future_mean = future.mean(dim=-1, keepdim=True)
-            future_std = future.std(dim=-1, keepdim=True) + 1e-8
+            future_std = torch.clamp(
+                future.std(dim=-1, keepdim=True),
+                min=float(self.config.normalization_std_floor),
+            )
             future_norm = (future - future_mean) / future_std
             
         # At inference, denormalization uses PAST stats

@@ -717,6 +717,7 @@ from models.diffusion_tsf.pipeline_config import (
     SOFT_DTW_TIME_WEIGHT,
     SOFT_DTW_CUMSUM_WEIGHT,
     SOFT_DTW_EVAL_SERIES_CAP,
+    NORMALIZATION_STD_FLOOR,
     GUIDANCE_PENALTY_WEIGHT,
     EVAL_NUM_SAMPLES,
     resolve_pretrain_virtual_dataset_size,
@@ -1002,6 +1003,7 @@ def create_diffusion_model(
             lookback_overlap=lookback_overlap,
             past_loss_weight=past_loss_weight,
             image_height=IMAGE_HEIGHT,
+            normalization_std_floor=NORMALIZATION_STD_FLOOR,
             use_coordinate_channel=True,
             use_guidance_channel=True,
             guidance_penalty_weight=guidance_penalty_weight,
@@ -1040,6 +1042,7 @@ def create_diffusion_model(
             lookback_overlap=lookback_overlap,
             past_loss_weight=past_loss_weight,
             image_height=IMAGE_HEIGHT,
+            normalization_std_floor=NORMALIZATION_STD_FLOOR,
             use_coordinate_channel=True,
             use_guidance_channel=True,
             guidance_penalty_weight=guidance_penalty_weight,
@@ -1178,7 +1181,7 @@ def _tensor_stats(name: str, t: torch.Tensor) -> str:
     return (
         f"{name}: shape={tuple(td.shape)} dtype={td.dtype} "
         f"min={tf.min().item():.4g} max={tf.max().item():.4g} "
-        f"mean={tf.mean().item():.4g} std={tf.std().item():.4g} "
+        f"mean={tf.mean().item():.4g} std={tf.std(unbiased=False).item():.4g} "
         f"nonfinite={n_bad}/{td.numel()}"
     )
 
@@ -1207,6 +1210,12 @@ def _log_hp_loss_diagnostics(
         )
     lines.append(_tensor_stats('past', past))
     lines.append(_tensor_stats('future', future))
+    with torch.no_grad():
+        past_norm, future_norm, (_, norm_std) = model._normalize_sequence(past, future)
+        target_1d = model._target_for_forecast_loss(future_norm, future_norm.shape[-1])
+    lines.append(_tensor_stats('norm_std', norm_std))
+    lines.append(_tensor_stats('past_norm', past_norm))
+    lines.append(_tensor_stats('target_1d_clamped', target_1d))
 
     metrics: Dict[str, float] = {}
     try:
@@ -2520,7 +2529,7 @@ def finetune_hp_objective(
                 gn = float(grad_norm) if torch.isfinite(grad_norm) else float('nan')
                 logger.warning(
                     f"[HP loss diag] trial {trial.number} train ep0 step0: "
-                    f"loss={float(loss.item()):.4g} grad_norm_post_clip={gn:.4g}"
+                    f"loss={float(loss.item()):.4g} grad_norm_pre_clip={gn:.4g}"
                 )
             optimizer.step()
             n_train_steps += 1

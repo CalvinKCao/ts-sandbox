@@ -207,6 +207,7 @@ SOFT_DTW_BANDWIDTH: Optional[int] = 16
 SOFT_DTW_TIME_WEIGHT: float = 1.0
 SOFT_DTW_CUMSUM_WEIGHT: float = 1.0
 SOFT_DTW_EVAL_SERIES_CAP: int = 512
+NORMALIZATION_STD_FLOOR: float = 0.1
 GUIDANCE_PENALTY_WEIGHT: float = 0.0  # small penalty for deviating from iTransformer guidance
 
 # ---- Evaluation -------------------------------------------------------------------

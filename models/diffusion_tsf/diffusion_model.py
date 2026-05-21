@@ -445,7 +445,8 @@ class DiffusionTSF(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Per-window z-score using past mean/std; future uses the same stats."""
         mean = past.mean(dim=-1, keepdim=True)
-        std = past.std(dim=-1, keepdim=True) + 1e-8
+        raw_std = past.std(dim=-1, keepdim=True)
+        std = torch.clamp(raw_std, min=float(self.config.normalization_std_floor))
         past_norm = (past - mean) / std
         if future is not None:
             future_norm = (future - mean) / std
@@ -476,7 +477,7 @@ class DiffusionTSF(nn.Module):
             future_norm = future_norm.unsqueeze(1)
         if future_norm.shape[-1] != width:
             future_norm = future_norm[..., -width:]
-        return future_norm
+        return torch.clamp(future_norm, -self.config.max_scale, self.config.max_scale)
 
     def _get_soft_dtw(self, device: torch.device):
         try:

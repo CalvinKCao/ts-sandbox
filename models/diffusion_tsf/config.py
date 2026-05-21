@@ -62,6 +62,7 @@ class DiffusionTSFConfig:
     # 2d mapping
     image_height: int = 32  # height of 2d rep (64 is faster)
     max_scale: float = 3.5  # MS param
+    normalization_std_floor: float = 0.1
     blur_kernel_size: int = 31
     blur_sigma: float = 1.0
     representation_mode: str = "cdf"  # pdf or cdf
