@@ -6,6 +6,9 @@
 #   WORKERS=12 MAX_CONCURRENT=12 bash slurm_signature_tune.sh
 #   SMOKE_TEST=1 bash slurm_signature_tune.sh
 #
+# After the array finishes, run test eval + MSE baseline comparison (one job per dataset):
+#   FINALIZE_ONLY=1 DATASET=ETTh1 STUDY_NAME=signature_mse_ETTh1_job<JOBID> bash slurm_signature_tune.sh
+#
 # Array task id maps to dataset (ETTh1, ETTh2, exchange_rate) round-robin.
 # Workers sharing a dataset join the same Optuna study via sqlite storage.
 
@@ -125,8 +128,14 @@ LOOKBACK_LENGTH="${LOOKBACK_LENGTH:-96}"
 FORECAST_LENGTH="${FORECAST_LENGTH:-96}"
 LOOKBACK_OVERLAP="${LOOKBACK_OVERLAP:-8}"
 OPTUNA_STORAGE="${OPTUNA_STORAGE:-sqlite:///$RUN_ROOT/signature_tuning.db}"
+RESULTS_DIR="${RESULTS_DIR:-$RUN_ROOT}"
 
-STUDY_NAME="signature_mse_${DATASET}_v1"
+# Fresh Optuna study per sbatch submission (shared across array tasks via ARRAY_JOB_ID).
+if [ "${RESUME_STUDY:-0}" = "1" ]; then
+    STUDY_NAME="${RESUME_STUDY_NAME:-signature_mse_${DATASET}_v1}"
+else
+    STUDY_NAME="${STUDY_NAME:-signature_mse_${DATASET}_job${SLURM_ARRAY_JOB_ID:-local}}"
+fi
 
 PY_ARGS=(
     -m models.diffusion_tsf.train_signature_tuning
@@ -141,10 +150,19 @@ PY_ARGS=(
     --max-train-batches "$MAX_TRAIN_BATCHES"
     --max-val-batches "$MAX_VAL_BATCHES"
     --checkpoint-dir "$CKPT_DIR"
+    --results-dir "$RESULTS_DIR"
     --storage "$OPTUNA_STORAGE"
     --study-name "$STUDY_NAME"
     --seed "$((42 + ARRAY_ID))"
 )
+
+if [ "${RESUME_STUDY:-0}" = "1" ] || [ "${FINALIZE_ONLY:-0}" = "1" ]; then
+    PY_ARGS+=(--resume-study)
+fi
+
+if [ "${FINALIZE_ONLY:-0}" = "1" ]; then
+    PY_ARGS+=(--finalize-only)
+fi
 
 if [ "$DATASET" = "exchange_rate" ]; then
     PY_ARGS+=(--n-variates 8)
