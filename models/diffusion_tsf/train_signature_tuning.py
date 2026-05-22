@@ -80,7 +80,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--resume-study",
         action="store_true",
-        help="append to an existing Optuna study (load_if_exists=True); default starts fresh",
+        help="alias for joining an existing study (tuning already uses load_if_exists=True)",
+    )
+    parser.add_argument(
+        "--new-study",
+        action="store_true",
+        help="force create-only; fails if study name already exists (not for Slurm arrays)",
     )
     parser.add_argument(
         "--finalize-only",
@@ -654,7 +659,8 @@ def main() -> None:
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     study_name = default_study_name(args.dataset, args.study_name)
-    load_if_exists = bool(args.resume_study)
+    # Slurm array workers for the same dataset share one study name; they must join, not recreate.
+    load_if_exists = not args.new_study
     ensure_sqlite_parent(args.storage)
 
     LOGGER.info(
@@ -668,8 +674,6 @@ def main() -> None:
     )
 
     if args.finalize_only:
-        if not load_if_exists:
-            raise ValueError("--finalize-only requires --resume-study and an existing study name")
         _, _, test_ds = load_data(args, include_test=True)
         num_variates = infer_num_variates(test_ds)
         study = optuna.load_study(study_name=study_name, storage=args.storage)

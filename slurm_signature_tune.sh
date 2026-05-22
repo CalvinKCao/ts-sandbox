@@ -183,7 +183,7 @@ LOOKBACK_OVERLAP="${LOOKBACK_OVERLAP:-8}"
 OPTUNA_STORAGE="${OPTUNA_STORAGE:-sqlite:///$RUN_ROOT/signature_tuning.db}"
 RESULTS_DIR="${RESULTS_DIR:-$RUN_ROOT}"
 
-# Fresh Optuna study per sbatch submission (shared across array tasks via ARRAY_JOB_ID).
+# One Optuna study per dataset per sbatch submission; array workers join via load_if_exists=True.
 if [ "${RESUME_STUDY:-0}" = "1" ]; then
     STUDY_NAME="${RESUME_STUDY_NAME:-signature_mse_${DATASET}_v1}"
 else
@@ -208,10 +208,6 @@ PY_ARGS=(
     --study-name "$STUDY_NAME"
     --seed "$((42 + ARRAY_ID))"
 )
-
-if [ "${RESUME_STUDY:-0}" = "1" ]; then
-    PY_ARGS+=(--resume-study)
-fi
 
 if [ "$DATASET" = "exchange_rate" ]; then
     PY_ARGS+=(--n-variates 8)

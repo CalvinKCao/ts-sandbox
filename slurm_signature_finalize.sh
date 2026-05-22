@@ -102,7 +102,6 @@ PY_ARGS=(
     -m models.diffusion_tsf.train_signature_tuning
     --dataset "$DATASET"
     --finalize-only
-    --resume-study
     --study-name "$STUDY_NAME"
     --storage "$OPTUNA_STORAGE"
     --checkpoint-dir "$CKPT_DIR"
