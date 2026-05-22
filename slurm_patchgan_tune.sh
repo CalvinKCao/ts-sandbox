@@ -102,14 +102,18 @@ else
     virtualenv --no-download "$SLURM_TMPDIR/env"
     source "$SLURM_TMPDIR/env/bin/activate"
     pip install --no-index --upgrade pip -q
-    pip install --no-index 'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm -q
+    pip install --no-index 'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm matplotlib einops -q
     pip install --no-index optuna -q || pip install optuna -q
+    # iTransformer attention layers import reformer_pytorch at module load time
+    pip install reformer-pytorch -q
 fi
 
 python - <<'PY'
 import torch
+from reformer_pytorch import LSHSelfAttention
 assert torch.cuda.is_available(), "CUDA is required for this Slurm job"
 print("torch", torch.__version__, "gpu", torch.cuda.get_device_name(0))
+print("reformer_pytorch ok")
 PY
 
 cd "$PROJECT_ROOT"
