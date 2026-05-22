@@ -15,7 +15,7 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=50G
-#SBATCH --time=1-00:00:00
+#SBATCH --time=10:00:00
 #SBATCH --array=1-12%12
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
