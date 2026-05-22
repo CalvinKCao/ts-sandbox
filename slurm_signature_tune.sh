@@ -6,8 +6,9 @@
 #   WORKERS=12 MAX_CONCURRENT=12 bash slurm_signature_tune.sh
 #   SMOKE_TEST=1 bash slurm_signature_tune.sh
 #
-# After the array finishes, run test eval + MSE baseline comparison (one job per dataset):
-#   FINALIZE_ONLY=1 DATASET=ETTh1 STUDY_NAME=signature_mse_ETTh1_job<JOBID> bash slurm_signature_tune.sh
+# After the array finishes, run full test-split eval on BEST trial only (one job per dataset):
+#   bash slurm_signature_finalize.sh
+#   # or: ARRAY_JOB_ID=<id from last_submission.json> bash slurm_signature_finalize.sh
 #
 # Array task id maps to dataset (ETTh1, ETTh2, exchange_rate) round-robin.
 # Workers sharing a dataset join the same Optuna study via sqlite storage.
@@ -34,11 +35,31 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     MAX_CONCURRENT="${MAX_CONCURRENT:-$WORKERS}"
     mkdir -p "$SCRIPT_DIR/results/signature_tune/logs"
     echo "Submitting signature+MSE Optuna array: workers=$WORKERS max_concurrent=$MAX_CONCURRENT"
-    sbatch \
+    ARRAY_JOB_ID="$(sbatch --parsable \
         --array="1-${WORKERS}%${MAX_CONCURRENT}" \
         --output=/dev/null \
         --error=/dev/null \
-        "$SCRIPT_DIR/slurm_signature_tune.sh"
+        "$SCRIPT_DIR/slurm_signature_tune.sh")"
+    MANIFEST="$SCRIPT_DIR/results/signature_tune/last_submission.json"
+    python - <<PY
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+manifest = {
+    "array_job_id": int("${ARRAY_JOB_ID}"),
+    "workers": int("${WORKERS}"),
+    "submitted_at": datetime.now(timezone.utc).isoformat(),
+    "study_name_pattern": "signature_mse_{dataset}_job${ARRAY_JOB_ID}",
+    "datasets": ["ETTh1", "ETTh2", "exchange_rate"],
+    "finalize_cmd": "ARRAY_JOB_ID=${ARRAY_JOB_ID} bash slurm_signature_finalize.sh",
+}
+path = Path("${MANIFEST}")
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(manifest, indent=2) + "\n")
+print(f"Wrote {path}")
+print(f"After tuning completes: ARRAY_JOB_ID=${ARRAY_JOB_ID} bash slurm_signature_finalize.sh")
+PY
     exit 0
 fi
 
@@ -156,12 +177,8 @@ PY_ARGS=(
     --seed "$((42 + ARRAY_ID))"
 )
 
-if [ "${RESUME_STUDY:-0}" = "1" ] || [ "${FINALIZE_ONLY:-0}" = "1" ]; then
+if [ "${RESUME_STUDY:-0}" = "1" ]; then
     PY_ARGS+=(--resume-study)
-fi
-
-if [ "${FINALIZE_ONLY:-0}" = "1" ]; then
-    PY_ARGS+=(--finalize-only)
 fi
 
 if [ "$DATASET" = "exchange_rate" ]; then
