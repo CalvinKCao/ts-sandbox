@@ -460,6 +460,8 @@ def init_wandb(
         'soft_dtw_bandwidth_default': SOFT_DTW_BANDWIDTH,
         'soft_dtw_time_weight_default': SOFT_DTW_TIME_WEIGHT,
         'soft_dtw_cumsum_weight_default': SOFT_DTW_CUMSUM_WEIGHT,
+        'itrans_target_mode': _normalize_itrans_target_mode(),
+        'residual_cutoff_freq': RESIDUAL_CUTOFF_FREQ,
         # DDP info
         'ddp_enabled': _ddp_enabled,
         'world_size': get_world_size(),
@@ -719,6 +721,8 @@ from models.diffusion_tsf.pipeline_config import (
     SOFT_DTW_EVAL_SERIES_CAP,
     NORMALIZATION_STD_FLOOR,
     GUIDANCE_PENALTY_WEIGHT,
+    ITRANS_TARGET_MODE,
+    RESIDUAL_CUTOFF_FREQ,
     EVAL_NUM_SAMPLES,
     resolve_pretrain_virtual_dataset_size,
     synthetic_epoch_capacity_itrans_hp,
@@ -961,6 +965,7 @@ def create_diffusion_model(
     soft_dtw_bandwidth=_DEFAULT_SOFT_DTW_BANDWIDTH,
     soft_dtw_time_weight: Optional[float] = None,
     soft_dtw_cumsum_weight: Optional[float] = None,
+    residual_cutoff_freq: Optional[float] = None,
 ):
     """Create DiffusionTSF model with iTransformer guidance channel enabled."""
     if n_variates is None:
@@ -979,12 +984,14 @@ def create_diffusion_model(
         soft_dtw_time_weight = SOFT_DTW_TIME_WEIGHT
     if soft_dtw_cumsum_weight is None:
         soft_dtw_cumsum_weight = SOFT_DTW_CUMSUM_WEIGHT
+    if residual_cutoff_freq is None:
+        residual_cutoff_freq = RESIDUAL_CUTOFF_FREQ
 
     logger.info(
         "Creating diffusion model: guidance_penalty_weight=%s, "
         "forecast_mse_weight=%s, soft_dtw_weight=%s, soft_dtw_gamma=%s, "
         "soft_dtw_bandwidth=%s, soft_dtw_time_weight=%s, "
-        "soft_dtw_cumsum_weight=%s, experiment=%s",
+        "soft_dtw_cumsum_weight=%s, experiment=%s, itrans_target=%s, residual_cutoff=%s",
         guidance_penalty_weight,
         forecast_mse_weight,
         soft_dtw_weight,
@@ -993,6 +1000,8 @@ def create_diffusion_model(
         soft_dtw_time_weight,
         soft_dtw_cumsum_weight,
         EXPERIMENT,
+        _normalize_itrans_target_mode(),
+        residual_cutoff_freq,
     )
 
     if EXPERIMENT == 'baseline':
@@ -1063,6 +1072,8 @@ def create_diffusion_model(
             use_amp=USE_AMP,
             use_residual_diffusion=use_residual,
             independent_norm=independent_norm,
+            residual_cutoff_freq=residual_cutoff_freq,
+            guidance_forecast_is_lowpass=(_normalize_itrans_target_mode() == "lowpass"),
         )
         return ExperimentalDiffusionTSF(config)
 
@@ -1097,6 +1108,34 @@ def _hp_median_pruner() -> optuna.pruners.MedianPruner:
     )
 
 
+def _normalize_itrans_target_mode(target_mode: Optional[str] = None) -> str:
+    mode = (target_mode or ITRANS_TARGET_MODE or "full").lower()
+    if mode not in {"full", "lowpass"}:
+        raise ValueError(f"Unsupported iTransformer target mode: {target_mode!r}")
+    return mode
+
+
+def _prepare_itransformer_target(
+    future: torch.Tensor,
+    target_mode: Optional[str] = None,
+) -> torch.Tensor:
+    """Return iTransformer target as (B, T, C), using plain MSE downstream."""
+    target = future
+    if LOOKBACK_OVERLAP > 0:
+        target = target[..., LOOKBACK_OVERLAP:]
+
+    mode = _normalize_itrans_target_mode(target_mode)
+    if mode == "lowpass":
+        from models.diffusion_tsf.experimental_diffusion_model import apply_zero_phase_lowpass
+
+        target = apply_zero_phase_lowpass(target.float(), RESIDUAL_CUTOFF_FREQ).to(
+            device=target.device,
+            dtype=future.dtype,
+        )
+
+    return target.permute(0, 2, 1)
+
+
 def _loss_params_from_dict(params: Dict) -> Dict:
     keys = (
         "forecast_mse_weight",
@@ -1117,10 +1156,18 @@ def _apply_loss_params_to_model(model: DiffusionTSF, params: Dict) -> None:
 
 
 def _suggest_diffusion_loss_params(trial) -> Dict:
-    bandwidth = trial.suggest_categorical(
-        "soft_dtw_bandwidth",
-        ["none", 3, 8, 16, 32],
-    )
+    highfreq_residual = EXPERIMENT in {"A", "A+B"} and _normalize_itrans_target_mode() == "lowpass"
+    bandwidth_choices = ["none", 3, 8, 16] if highfreq_residual else ["none", 3, 8, 16, 32]
+    bandwidth = trial.suggest_categorical("soft_dtw_bandwidth", bandwidth_choices)
+    if highfreq_residual:
+        return {
+            "forecast_mse_weight": trial.suggest_float("forecast_mse_weight", 5e-4, 1e-1, log=True),
+            "soft_dtw_weight": trial.suggest_float("soft_dtw_weight", 1e-5, 1e-3, log=True),
+            "soft_dtw_gamma": trial.suggest_float("soft_dtw_gamma", 2e-2, 2e-1, log=True),
+            "soft_dtw_bandwidth": _decode_soft_dtw_bandwidth(bandwidth),
+            "soft_dtw_time_weight": trial.suggest_float("soft_dtw_time_weight", 0.1, 5.0, log=True),
+            "soft_dtw_cumsum_weight": trial.suggest_float("soft_dtw_cumsum_weight", 0.0, 0.5),
+        }
     return {
         "forecast_mse_weight": trial.suggest_float("forecast_mse_weight", 1e-3, 1.0, log=True),
         "soft_dtw_weight": trial.suggest_float("soft_dtw_weight", 1e-5, 5e-2, log=True),
@@ -1580,10 +1627,7 @@ def train_itransformer_epoch(model, loader, optimizer, criterion, device, schedu
         seq_sl = getattr(model, 'seq_len', x_enc.shape[1])
         if x_enc.shape[1] > seq_sl:
             x_enc = x_enc[:, -seq_sl:, :]
-        y_true = future.permute(0, 2, 1).to(device)
-        # iTransformer predicts H steps; strip the K overlap from target
-        if LOOKBACK_OVERLAP > 0:
-            y_true = y_true[:, LOOKBACK_OVERLAP:, :]
+        y_true = _prepare_itransformer_target(future.to(device))
         
         optimizer.zero_grad()
         y_pred = model(x_enc, None, None, None)
@@ -1611,9 +1655,7 @@ def validate_itransformer(model, loader, criterion, device):
             seq_sl = getattr(model, 'seq_len', x_enc.shape[1])
             if x_enc.shape[1] > seq_sl:
                 x_enc = x_enc[:, -seq_sl:, :]
-            y_true = future.permute(0, 2, 1).to(device)
-            if LOOKBACK_OVERLAP > 0:
-                y_true = y_true[:, LOOKBACK_OVERLAP:, :]
+            y_true = _prepare_itransformer_target(future.to(device))
             y_pred = model(x_enc, None, None, None)
             loss = criterion(y_pred, y_true)
             total_loss += loss.item()
@@ -1703,9 +1745,7 @@ def select_itrans_batch_size(
             seq_sl = getattr(model, 'seq_len', x_enc.shape[1])
             if x_enc.shape[1] > seq_sl:
                 x_enc = x_enc[:, -seq_sl:, :]
-            y_true = future.permute(0, 2, 1)
-            if LOOKBACK_OVERLAP > 0:
-                y_true = y_true[:, LOOKBACK_OVERLAP:, :]
+            y_true = _prepare_itransformer_target(future)
             y_pred = model(x_enc, None, None, None)
             loss = nn.functional.mse_loss(y_pred, y_true)
             loss.backward()
@@ -1852,6 +1892,10 @@ def run_itransformer_hp_tuning(
     logger.info(
         f"iTransformer seq_len={ITRANSFORMER_SEQ_LEN} (diffusion lookback={LOOKBACK_LENGTH})"
     )
+    logger.info(
+        f"iTransformer target={_normalize_itrans_target_mode()} "
+        f"(loss=MSE only, residual_cutoff={RESIDUAL_CUTOFF_FREQ})"
+    )
     logger.info("=" * 60)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -1877,7 +1921,7 @@ def run_itransformer_hp_tuning(
     )
 
     dataset = synthetic_loader.dataset
-    n_val = min(len(dataset) // 10, 1000)
+    n_val = max(1, min(len(dataset) // 10, 1000)) if len(dataset) > 1 else 0
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset   = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
 
@@ -1915,6 +1959,8 @@ def run_itransformer_hp_tuning(
     best_params = study.best_params
     best_params['batch_size'] = train_bs
     best_params['dropout'] = ITRANS_PAPER_DROPOUT
+    best_params['target_mode'] = _normalize_itrans_target_mode()
+    best_params['residual_cutoff_freq'] = RESIDUAL_CUTOFF_FREQ
     logger.info(f"Best iTransformer params: lr={best_params['learning_rate']:.2e}, "
                f"bs={best_params['batch_size']}, dropout={best_params['dropout']:.3f}")
     logger.info(f"Best val loss: {study.best_value:.4f}")
@@ -2071,7 +2117,7 @@ def run_diffusion_hp_tuning(
     )
     
     dataset = synthetic_loader.dataset
-    n_val = min(len(dataset) // 10, 500)
+    n_val = max(1, min(len(dataset) // 10, 500)) if len(dataset) > 1 else 0
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
     
@@ -2684,6 +2730,9 @@ def _promote_best_trial_to_final(
                 'tuned_params': tuned_params,
                 'best_trial': best_num,
                 'best_val_loss': best_val_loss,
+                'experiment': EXPERIMENT,
+                'itrans_target_mode': _normalize_itrans_target_mode(),
+                'residual_cutoff_freq': RESIDUAL_CUTOFF_FREQ,
             }, f, indent=2)
         for fn in os.listdir(subset_dir):
             if fn.startswith('_diff_ft_trial_') and fn.endswith('_best.pt'):
@@ -3047,10 +3096,8 @@ def evaluate_itransformer_baseline(
             if isinstance(output, tuple):
                 output = output[0]
             all_preds.append(output.permute(0, 2, 1).cpu())
-            # Strip overlap from target to match H-step prediction
-            if LOOKBACK_OVERLAP > 0:
-                future = future[..., LOOKBACK_OVERLAP:]
-            all_targets.append(future)
+            target = _prepare_itransformer_target(future.to(device))
+            all_targets.append(target.permute(0, 2, 1).cpu())
 
     preds = torch.cat(all_preds, dim=0)
     targets = torch.cat(all_targets, dim=0)
@@ -3061,8 +3108,16 @@ def evaluate_itransformer_baseline(
     tgt_diff = targets[:, :, 1:] - targets[:, :, :-1]
     trend_acc = ((pred_diff > 0) == (tgt_diff > 0)).float().mean().item()
 
-    metrics = {'mse': mse, 'mae': mae, 'trend_accuracy': trend_acc}
-    logger.info(f"[{subset_id}] iTransformer baseline: MSE={mse:.4f}, MAE={mae:.4f}, trend={trend_acc:.3f}")
+    metrics = {
+        'mse': mse,
+        'mae': mae,
+        'trend_accuracy': trend_acc,
+        'target_mode': _normalize_itrans_target_mode(),
+    }
+    logger.info(
+        f"[{subset_id}] iTransformer baseline ({_normalize_itrans_target_mode()} target): "
+        f"MSE={mse:.4f}, MAE={mae:.4f}, trend={trend_acc:.3f}"
+    )
 
     # Merge into the per-subset results.json (same file as diffusion eval)
     data = _load_subset_results(results_dir, subset_id)
@@ -3814,6 +3869,10 @@ def run_itransformer_finetune_hp_tuning(
         f"{ITRANS_HP_FINETUNE_MAX_EPOCHS} epochs per trial (no early stopping), "
         f"warm_start={'no (cold start)' if warm is None else os.path.basename(warm)}"
     )
+    logger.info(
+        f"iTransformer finetune target={_normalize_itrans_target_mode()} "
+        f"(loss=MSE only, residual_cutoff={RESIDUAL_CUTOFF_FREQ})"
+    )
     logger.info("=" * 60)
 
     train_ds, val_ds, _, _ = load_dataset(
@@ -3856,6 +3915,8 @@ def run_itransformer_finetune_hp_tuning(
     best_params = study.best_params
     best_params['batch_size'] = train_bs
     best_params['dropout'] = ITRANS_PAPER_DROPOUT
+    best_params['target_mode'] = _normalize_itrans_target_mode()
+    best_params['residual_cutoff_freq'] = RESIDUAL_CUTOFF_FREQ
     logger.info(f"Best iTrans FT params for {label}: lr={best_params['learning_rate']:.2e}, "
                f"dropout={best_params['dropout']:.3f} → val_loss={_best_state.get('val_loss', float('inf')):.4f}")
 
@@ -4093,6 +4154,7 @@ def main():
     global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION, LOOKBACK_LENGTH, FORECAST_LENGTH
     global FORECAST_MSE_WEIGHT, SOFT_DTW_WEIGHT, SOFT_DTW_GAMMA, SOFT_DTW_BANDWIDTH
     global SOFT_DTW_TIME_WEIGHT, SOFT_DTW_CUMSUM_WEIGHT
+    global ITRANS_TARGET_MODE, RESIDUAL_CUTOFF_FREQ
     global MODEL_TYPE
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
@@ -4156,6 +4218,11 @@ def main():
     parser.add_argument('--experiment', type=str, default='baseline',
                         choices=['baseline', 'A', 'B', 'A+B'],
                         help='Run an experimental model variant (A=residual, B=independent norm)')
+    parser.add_argument('--itrans-target', type=str, default=ITRANS_TARGET_MODE,
+                        choices=['full', 'lowpass'],
+                        help='iTransformer MSE target: full future or low-pass trend only')
+    parser.add_argument('--residual-cutoff-freq', type=float, default=RESIDUAL_CUTOFF_FREQ,
+                        help='Low-pass cutoff used for residual experiments')
 
     args = parser.parse_args()
 
@@ -4185,6 +4252,8 @@ def main():
     SOFT_DTW_BANDWIDTH = _decode_soft_dtw_bandwidth(args.soft_dtw_bandwidth)
     SOFT_DTW_TIME_WEIGHT = args.soft_dtw_time_weight
     SOFT_DTW_CUMSUM_WEIGHT = args.soft_dtw_cumsum_weight
+    ITRANS_TARGET_MODE = args.itrans_target
+    RESIDUAL_CUTOFF_FREQ = args.residual_cutoff_freq
     IMAGE_HEIGHT = args.image_height
     if args.unet_channels:
         UNET_CHANNELS = [int(x.strip()) for x in args.unet_channels.split(',') if x.strip()]

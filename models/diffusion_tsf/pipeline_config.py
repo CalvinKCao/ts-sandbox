@@ -146,9 +146,9 @@ ITRANS_REAL_COLD_START: bool = True
 # Phase 2B: Diffusion HP tuning on real data (LR-only search; batch size auto-probed).
 # The best trial's checkpoint is reused as the final fine-tuned model — there is no
 # separate "Phase 2C" full retrain.
-N_FINETUNE_HP_TRIALS: int = 8
-HP_TUNE_EPOCHS: int = 15
-HP_TUNE_PATIENCE: int = 5
+N_FINETUNE_HP_TRIALS: int = 25
+HP_TUNE_EPOCHS: int = 30
+HP_TUNE_PATIENCE: int = 8
 # Optuna log-uniform bounds for Phase 2B only (finetune_hp_objective).
 FINETUNE_HP_LR_MIN: float = 3e-6
 FINETUNE_HP_LR_MAX: float = 2e-4
@@ -209,6 +209,11 @@ SOFT_DTW_CUMSUM_WEIGHT: float = 1.0
 SOFT_DTW_EVAL_SERIES_CAP: int = 512
 NORMALIZATION_STD_FLOOR: float = 0.1
 GUIDANCE_PENALTY_WEIGHT: float = 0.0  # small penalty for deviating from iTransformer guidance
+
+# ``full`` is the standard benchmark target. ``lowpass`` trains iTransformer to
+# predict only the low-frequency trend; residual diffusion then learns the rest.
+ITRANS_TARGET_MODE: str = "full"
+RESIDUAL_CUTOFF_FREQ: float = 0.12
 
 # ---- Evaluation -------------------------------------------------------------------
 

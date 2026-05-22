@@ -39,6 +39,7 @@ class ExperimentalDiffusionTSFConfig(DiffusionTSFConfig):
     # Experiment A: Deterministic Trend Residual Diffusion
     use_residual_diffusion: bool = False
     residual_cutoff_freq: float = 0.12  # Keeping lowest 12% frequencies
+    guidance_forecast_is_lowpass: bool = False
     
     # Experiment B: Normalization Independence
     independent_norm: bool = False
@@ -154,7 +155,10 @@ class ExperimentalDiffusionTSF(DiffusionTSF):
         # Independent normalization for horizon residual
         # "horizon prediction noise ... should all be independently normalized"
         res_mean = residual.mean(dim=-1, keepdim=True)
-        res_std = residual.std(dim=-1, keepdim=True) + 1e-8
+        res_std = torch.clamp(
+            residual.std(dim=-1, keepdim=True),
+            min=float(self.config.normalization_std_floor),
+        )
         future_norm = (residual - res_mean) / res_std
 
         # Lookback noise extraction
@@ -164,7 +168,10 @@ class ExperimentalDiffusionTSF(DiffusionTSF):
         # Independent normalization for lookback noise
         # "lookback noise representation ... should all be independently normalized"
         lb_noise_mean = lookback_noise.mean(dim=-1, keepdim=True)
-        lb_noise_std = lookback_noise.std(dim=-1, keepdim=True) + 1e-8
+        lb_noise_std = torch.clamp(
+            lookback_noise.std(dim=-1, keepdim=True),
+            min=float(self.config.normalization_std_floor),
+        )
         lookback_noise_norm = (lookback_noise - lb_noise_mean) / lb_noise_std
 
         # Encode all to 2D
@@ -311,7 +318,10 @@ class ExperimentalDiffusionTSF(DiffusionTSF):
             lookback_trend = apply_zero_phase_lowpass(past_norm, self.config.residual_cutoff_freq)
             lookback_noise = past_norm - lookback_trend
             lb_noise_mean = lookback_noise.mean(dim=-1, keepdim=True)
-            lb_noise_std = lookback_noise.std(dim=-1, keepdim=True) + 1e-8
+            lb_noise_std = torch.clamp(
+                lookback_noise.std(dim=-1, keepdim=True),
+                min=float(self.config.normalization_std_floor),
+            )
             lookback_noise_norm = (lookback_noise - lb_noise_mean) / lb_noise_std
             past_noise_2d = self.encode_to_2d(lookback_noise_norm)
             past_noise_flat = past_noise_2d.reshape(BV, 1, H, W_past)
@@ -321,7 +331,10 @@ class ExperimentalDiffusionTSF(DiffusionTSF):
             if self.guidance_model is not None:
                 H_guidance = self.config.forecast_length - self.config.lookback_overlap
                 guidance_pred = self.guidance_model.get_forecast(past, H_guidance)
-                trend = apply_zero_phase_lowpass(guidance_pred, self.config.residual_cutoff_freq)
+                if getattr(self.config, 'guidance_forecast_is_lowpass', False):
+                    trend = guidance_pred
+                else:
+                    trend = apply_zero_phase_lowpass(guidance_pred, self.config.residual_cutoff_freq)
             else:
                 trend = torch.zeros(B, V, self.config.forecast_length - K, device=device)
         else:
@@ -387,7 +400,10 @@ class ExperimentalDiffusionTSF(DiffusionTSF):
             # Decoded is normalized residual. Best guess for scale is true_past_res_std.
             true_past_trend = apply_zero_phase_lowpass(past, self.config.residual_cutoff_freq)
             true_past_res = past - true_past_trend
-            true_past_res_std = true_past_res.std(dim=-1, keepdim=True) + 1e-8
+            true_past_res_std = torch.clamp(
+                true_past_res.std(dim=-1, keepdim=True),
+                min=float(self.config.normalization_std_floor),
+            )
             
             residual_pred = decoded * true_past_res_std
             final_pred = trend + residual_pred
