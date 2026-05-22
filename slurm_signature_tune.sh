@@ -6,9 +6,8 @@
 #   WORKERS=12 MAX_CONCURRENT=12 bash slurm_signature_tune.sh
 #   SMOKE_TEST=1 bash slurm_signature_tune.sh
 #
-# After the array finishes, run full test-split eval on BEST trial only (one job per dataset):
-#   bash slurm_signature_finalize.sh
-#   # or: ARRAY_JOB_ID=<id from last_submission.json> bash slurm_signature_finalize.sh
+# Finalize (full test eval on best trial + MSE baseline) is auto-submitted with
+# --dependency=afterok on the tuning array. Set SKIP_FINALIZE=1 to disable.
 #
 # Array task id maps to dataset (ETTh1, ETTh2, exchange_rate) round-robin.
 # Workers sharing a dataset join the same Optuna study via sqlite storage.
@@ -35,30 +34,63 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     MAX_CONCURRENT="${MAX_CONCURRENT:-$WORKERS}"
     mkdir -p "$SCRIPT_DIR/results/signature_tune/logs"
     echo "Submitting signature+MSE Optuna array: workers=$WORKERS max_concurrent=$MAX_CONCURRENT"
-    ARRAY_JOB_ID="$(sbatch --parsable \
-        --array="1-${WORKERS}%${MAX_CONCURRENT}" \
-        --output=/dev/null \
-        --error=/dev/null \
-        "$SCRIPT_DIR/slurm_signature_tune.sh")"
+    TUNE_SBATCH=(
+        --parsable
+        --array="1-${WORKERS}%${MAX_CONCURRENT}"
+        --output=/dev/null
+        --error=/dev/null
+    )
+    if [ "${SMOKE_TEST:-0}" = "1" ]; then
+        TUNE_SBATCH+=(--time=0:30:00 --export=ALL,SMOKE_TEST=1)
+    fi
+    ARRAY_JOB_ID="$(sbatch "${TUNE_SBATCH[@]}" "$SCRIPT_DIR/slurm_signature_tune.sh")"
+    echo "Tuning array job: $ARRAY_JOB_ID"
+
+    FINALIZE_JOB_ID=""
+    if [ "${SKIP_FINALIZE:-0}" != "1" ]; then
+        EXPORT_LIST="ALL,ARRAY_JOB_ID=${ARRAY_JOB_ID}"
+        if [ "${SMOKE_TEST:-0}" = "1" ]; then
+            EXPORT_LIST="${EXPORT_LIST},SMOKE_TEST=1"
+        fi
+        FINALIZE_SBATCH=(
+            --parsable
+            --dependency="afterok:${ARRAY_JOB_ID}"
+            --export="${EXPORT_LIST}"
+            --output=/dev/null
+            --error=/dev/null
+        )
+        if [ "${SMOKE_TEST:-0}" = "1" ]; then
+            FINALIZE_SBATCH+=(--time=0:20:00)
+        fi
+        FINALIZE_JOB_ID="$(sbatch "${FINALIZE_SBATCH[@]}" "$SCRIPT_DIR/slurm_signature_finalize.sh")"
+        echo "Finalize array job: $FINALIZE_JOB_ID  [afterok:${ARRAY_JOB_ID}]"
+    else
+        echo "SKIP_FINALIZE=1: test eval not submitted"
+    fi
+
     MANIFEST="$SCRIPT_DIR/results/signature_tune/last_submission.json"
     python - <<PY
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 manifest = {
     "array_job_id": int("${ARRAY_JOB_ID}"),
+    "finalize_job_id": int("${FINALIZE_JOB_ID}") if "${FINALIZE_JOB_ID}" else None,
     "workers": int("${WORKERS}"),
     "submitted_at": datetime.now(timezone.utc).isoformat(),
     "study_name_pattern": "signature_mse_{dataset}_job${ARRAY_JOB_ID}",
     "datasets": ["ETTh1", "ETTh2", "exchange_rate"],
-    "finalize_cmd": "ARRAY_JOB_ID=${ARRAY_JOB_ID} bash slurm_signature_finalize.sh",
+    "dependency": "afterok:${ARRAY_JOB_ID}",
 }
 path = Path("${MANIFEST}")
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(manifest, indent=2) + "\n")
 print(f"Wrote {path}")
-print(f"After tuning completes: ARRAY_JOB_ID=${ARRAY_JOB_ID} bash slurm_signature_finalize.sh")
+if manifest["finalize_job_id"]:
+    print(f"Monitor: squeue -u $USER")
+    print(f"Cancel tune+finalize: scancel {manifest['array_job_id']} {manifest['finalize_job_id']}")
 PY
     exit 0
 fi

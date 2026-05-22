@@ -1,12 +1,9 @@
 #!/bin/bash
 # Finalize signature+MSE studies: full test-split eval for best trial + MSE baseline.
 #
-# Run AFTER the tuning array completes. Requires ARRAY_JOB_ID from that submission
-# (written to results/signature_tune/last_submission.json by slurm_signature_tune.sh).
-#
-# Usage:
+# Normally submitted automatically by slurm_signature_tune.sh with afterok dependency.
+# Manual re-run:
 #   ARRAY_JOB_ID=3712500 bash slurm_signature_finalize.sh
-#   ARRAY_JOB_ID=3712500 SMOKE_TEST=1 bash slurm_signature_finalize.sh
 
 #SBATCH --job-name=sig-mse-final
 #SBATCH --account=aip-boyuwang
@@ -43,8 +40,14 @@ PY
         exit 1
     fi
     mkdir -p "$SCRIPT_DIR/results/signature_tune/logs"
-    export ARRAY_JOB_ID
-    sbatch --export=ALL,ARRAY_JOB_ID "$SCRIPT_DIR/slurm_signature_finalize.sh"
+    EXPORT_LIST="ALL,ARRAY_JOB_ID=${ARRAY_JOB_ID}"
+    SBATCH_ARGS=(--parsable --export="${EXPORT_LIST}")
+    if [ "${SMOKE_TEST:-0}" = "1" ]; then
+        EXPORT_LIST="${EXPORT_LIST},SMOKE_TEST=1"
+        SBATCH_ARGS=(--parsable --export="${EXPORT_LIST}" --time=0:20:00)
+    fi
+    FINALIZE_JOB_ID="$(sbatch "${SBATCH_ARGS[@]}" "$SCRIPT_DIR/slurm_signature_finalize.sh")"
+    echo "Submitted finalize array: $FINALIZE_JOB_ID"
     exit 0
 fi
 
