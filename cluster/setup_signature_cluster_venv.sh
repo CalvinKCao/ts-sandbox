@@ -33,7 +33,7 @@ import os
 import torch
 import signatory
 from reformer_pytorch import LSHSelfAttention
-import product_key_memory  # noqa: F401 — required by reformer-pytorch
+import product_key_memory
 
 skip = os.environ.get("SIGNATURE_SKIP_CUDA_CHECK", "0") == "1"
 if not skip:
@@ -41,7 +41,7 @@ if not skip:
 print(
     "venv ok:",
     "torch", torch.__version__,
-    "signatory", signatory.__version__,
+    "signatory", getattr(signatory, "__version__", "unknown"),
     "cuda_skip" if skip else ("gpu " + torch.cuda.get_device_name(0)),
 )
 PY
@@ -63,11 +63,11 @@ signature_cluster_venv() {
     local store="${STORE:-}"
     local shared_venv="${store}/venv"
 
-    if [ -n "$store" ] && [ -d "$shared_venv" ] && [ "${SIGNATURE_FORCE_NODE_VENV:-0}" != "1" ]; then
+    if [ "${SIGNATURE_USE_SHARED_VENV:-0}" = "1" ] && [ -n "$store" ] && [ -d "$shared_venv" ]; then
         echo "[setup] Activating shared venv: $shared_venv"
         # shellcheck source=/dev/null
         source "$shared_venv/bin/activate"
-        if ! signature_verify_venv 2>/dev/null; then
+        if ! signature_verify_venv; then
             echo "[setup] shared venv failed import check; rebuild with BUILD_SHARED_VENV=1"
             return 1
         fi

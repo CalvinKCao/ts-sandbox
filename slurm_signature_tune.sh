@@ -28,12 +28,17 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=cluster/setup_signature_cluster_venv.sh
-source "$SCRIPT_DIR/cluster/setup_signature_cluster_venv.sh"
+SCRIPT_PATH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$SCRIPT_PATH_DIR}"
+if [ ! -f "$SCRIPT_DIR/slurm_signature_tune.sh" ]; then
+    SCRIPT_DIR="$SCRIPT_PATH_DIR"
+fi
+VENV_HELPER="$SCRIPT_DIR/cluster/setup_signature_cluster_venv.sh"
 
 if [ -z "${SLURM_JOB_ID:-}" ]; then
     if [ "${BUILD_SHARED_VENV:-0}" = "1" ]; then
+        # shellcheck source=cluster/setup_signature_cluster_venv.sh
+        source "$VENV_HELPER"
         module purge || true
         module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
         if [ -z "${STORE:-}" ] && [ -d "$HOME/projects" ]; then
@@ -44,7 +49,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         fi
         export SIGNATURE_SKIP_CUDA_CHECK=1
         signature_build_shared_venv
-        echo "Done. Workers will auto-use \$STORE/venv when present."
+        echo "Done. Batch jobs still build runtime venvs on \$SLURM_TMPDIR by default."
         exit 0
     fi
     WORKERS="${WORKERS:-12}"
@@ -134,6 +139,14 @@ echo "Started: $(date)"
 echo "Submit dir: $SUBMIT_DIR"
 echo "Log: $LOG_FILE"
 echo "=========================================="
+
+if [ ! -f "$VENV_HELPER" ]; then
+    echo "ERROR: missing helper: $VENV_HELPER"
+    echo "Submit from the repo checkout, e.g. cd \$SCRATCH/ts-sandbox && bash slurm_signature_tune.sh"
+    exit 1
+fi
+# shellcheck source=cluster/setup_signature_cluster_venv.sh
+source "$VENV_HELPER"
 
 module purge || true
 module load StdEnv/2023

@@ -20,9 +20,12 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=cluster/setup_signature_cluster_venv.sh
-source "$SCRIPT_DIR/cluster/setup_signature_cluster_venv.sh"
+SCRIPT_PATH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$SCRIPT_PATH_DIR}"
+if [ ! -f "$SCRIPT_DIR/slurm_signature_finalize.sh" ]; then
+    SCRIPT_DIR="$SCRIPT_PATH_DIR"
+fi
+VENV_HELPER="$SCRIPT_DIR/cluster/setup_signature_cluster_venv.sh"
 DATASETS=(ETTh1 ETTh2 exchange_rate)
 
 if [ -z "${SLURM_JOB_ID:-}" ]; then
@@ -71,6 +74,14 @@ echo "Job: $SLURM_JOB_ID  Array: $ARRAY_ID  Dataset: $DATASET"
 echo "ARRAY_JOB_ID (tuning): ${ARRAY_JOB_ID:?set ARRAY_JOB_ID}"
 echo "Started: $(date)"
 echo "=========================================="
+
+if [ ! -f "$VENV_HELPER" ]; then
+    echo "ERROR: missing helper: $VENV_HELPER"
+    echo "Submit from the repo checkout, e.g. cd \$SCRATCH/ts-sandbox && ARRAY_JOB_ID=... bash slurm_signature_finalize.sh"
+    exit 1
+fi
+# shellcheck source=cluster/setup_signature_cluster_venv.sh
+source "$VENV_HELPER"
 
 module purge || true
 module load StdEnv/2023
