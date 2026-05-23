@@ -99,7 +99,10 @@ fi
 STORE="${STORE:-${PROJECT:-${SCRATCH:-}}/$USER/ts-sandbox-signature}"
 mkdir -p "$STORE"
 
-signature_cluster_venv
+if ! signature_cluster_venv; then
+    echo "ERROR: venv setup failed (rebuild: BUILD_SHARED_VENV=1 bash slurm_signature_tune.sh)"
+    exit 1
+fi
 
 STUDY_NAME="signature_mse_${DATASET}_job${ARRAY_JOB_ID}"
 OPTUNA_STORAGE="${OPTUNA_STORAGE:-sqlite:///$RUN_ROOT/signature_tuning.db}"

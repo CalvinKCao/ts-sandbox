@@ -42,6 +42,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
             shopt -u nullglob
             [ "${#matches[@]}" -gt 0 ] && STORE="$(readlink -f "${matches[0]}")/$USER/ts-sandbox-signature"
         fi
+        export SIGNATURE_SKIP_CUDA_CHECK=1
         signature_build_shared_venv
         echo "Done. Workers will auto-use \$STORE/venv when present."
         exit 0
@@ -168,7 +169,10 @@ fi
 STORE="${STORE:-$STORE_BASE/$USER/ts-sandbox-signature}"
 mkdir -p "$STORE"
 
-signature_cluster_venv
+if ! signature_cluster_venv; then
+    echo "ERROR: venv setup failed (rebuild: BUILD_SHARED_VENV=1 bash slurm_signature_tune.sh)"
+    exit 1
+fi
 
 cd "$PROJECT_ROOT"
 
