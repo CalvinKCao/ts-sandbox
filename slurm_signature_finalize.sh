@@ -11,7 +11,7 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=50G
-#SBATCH --time=4:00:00
+#SBATCH --time=1:00:00
 #SBATCH --array=1-3%3
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -21,6 +21,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=cluster/setup_signature_cluster_venv.sh
+source "$SCRIPT_DIR/cluster/setup_signature_cluster_venv.sh"
 DATASETS=(ETTh1 ETTh2 exchange_rate)
 
 if [ -z "${SLURM_JOB_ID:-}" ]; then
@@ -86,13 +88,18 @@ fi
 
 cd "$PROJECT_ROOT"
 
-virtualenv --no-download "$SLURM_TMPDIR/env"
-source "$SLURM_TMPDIR/env/bin/activate"
-pip install --no-index --upgrade pip -q
-pip install --no-index 'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm -q
-pip install --no-index optuna -q || pip install optuna -q
-pip install reformer-pytorch -q
-pip install signatory --no-build-isolation -q
+if [ -z "${PROJECT:-}" ] && [ -d "$HOME/projects" ]; then
+    shopt -s nullglob
+    matches=("$HOME"/projects/aip-* "$HOME"/projects/def-*)
+    shopt -u nullglob
+    if [ "${#matches[@]}" -gt 0 ]; then
+        export PROJECT="$(readlink -f "${matches[0]}")"
+    fi
+fi
+STORE="${STORE:-${PROJECT:-${SCRATCH:-}}/$USER/ts-sandbox-signature}"
+mkdir -p "$STORE"
+
+signature_cluster_venv
 
 STUDY_NAME="signature_mse_${DATASET}_job${ARRAY_JOB_ID}"
 OPTUNA_STORAGE="${OPTUNA_STORAGE:-sqlite:///$RUN_ROOT/signature_tuning.db}"

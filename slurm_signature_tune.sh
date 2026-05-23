@@ -5,9 +5,10 @@
 #   bash slurm_signature_tune.sh
 #   WORKERS=12 MAX_CONCURRENT=12 bash slurm_signature_tune.sh
 #   SMOKE_TEST=1 bash slurm_signature_tune.sh
+#   BUILD_SHARED_VENV=1 bash slurm_signature_tune.sh   # once on login node (avoids CVMFS pip flakes)
 #
 # Finalize (full test eval on best trial + MSE baseline) is auto-submitted with
-# --dependency=afterok on the tuning array. Set SKIP_FINALIZE=1 to disable.
+# --dependency=afterany on the tuning array (runs even if some workers failed). Set SKIP_FINALIZE=1 to disable.
 #
 # Array task id maps to dataset (ETTh1, ETTh2, exchange_rate) round-robin.
 # Workers sharing a dataset join the same Optuna study via sqlite storage.
@@ -18,7 +19,7 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=50G
-#SBATCH --time=10:00:00
+#SBATCH --time=1:00:00
 #SBATCH --array=1-12%12
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -28,8 +29,23 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=cluster/setup_signature_cluster_venv.sh
+source "$SCRIPT_DIR/cluster/setup_signature_cluster_venv.sh"
 
 if [ -z "${SLURM_JOB_ID:-}" ]; then
+    if [ "${BUILD_SHARED_VENV:-0}" = "1" ]; then
+        module purge || true
+        module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9
+        if [ -z "${STORE:-}" ] && [ -d "$HOME/projects" ]; then
+            shopt -s nullglob
+            matches=("$HOME"/projects/aip-* "$HOME"/projects/def-*)
+            shopt -u nullglob
+            [ "${#matches[@]}" -gt 0 ] && STORE="$(readlink -f "${matches[0]}")/$USER/ts-sandbox-signature"
+        fi
+        signature_build_shared_venv
+        echo "Done. Workers will auto-use \$STORE/venv when present."
+        exit 0
+    fi
     WORKERS="${WORKERS:-12}"
     MAX_CONCURRENT="${MAX_CONCURRENT:-$WORKERS}"
     mkdir -p "$SCRIPT_DIR/results/signature_tune/logs"
@@ -54,7 +70,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         fi
         FINALIZE_SBATCH=(
             --parsable
-            --dependency="afterok:${ARRAY_JOB_ID}"
+            --dependency="afterany:${ARRAY_JOB_ID}"
             --export="${EXPORT_LIST}"
             --output=/dev/null
             --error=/dev/null
@@ -63,7 +79,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
             FINALIZE_SBATCH+=(--time=0:20:00)
         fi
         FINALIZE_JOB_ID="$(sbatch "${FINALIZE_SBATCH[@]}" "$SCRIPT_DIR/slurm_signature_finalize.sh")"
-        echo "Finalize array job: $FINALIZE_JOB_ID  [afterok:${ARRAY_JOB_ID}]"
+        echo "Finalize array job: $FINALIZE_JOB_ID  [afterany:${ARRAY_JOB_ID}]"
     else
         echo "SKIP_FINALIZE=1: test eval not submitted"
     fi
@@ -82,7 +98,7 @@ manifest = {
     "submitted_at": datetime.now(timezone.utc).isoformat(),
     "study_name_pattern": "signature_mse_{dataset}_job${ARRAY_JOB_ID}",
     "datasets": ["ETTh1", "ETTh2", "exchange_rate"],
-    "dependency": "afterok:${ARRAY_JOB_ID}",
+    "dependency": "afterany:${ARRAY_JOB_ID}",
 }
 path = Path("${MANIFEST}")
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -152,22 +168,7 @@ fi
 STORE="${STORE:-$STORE_BASE/$USER/ts-sandbox-signature}"
 mkdir -p "$STORE"
 
-echo "[setup] Building node-local venv on $SLURM_TMPDIR"
-virtualenv --no-download "$SLURM_TMPDIR/env"
-source "$SLURM_TMPDIR/env/bin/activate"
-pip install --no-index --upgrade pip -q
-pip install --no-index 'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm matplotlib einops -q
-pip install --no-index optuna -q || pip install optuna -q
-pip install reformer-pytorch -q
-pip install signatory --no-build-isolation -q
-
-python - <<'PY'
-import torch
-import signatory
-from reformer_pytorch import LSHSelfAttention
-assert torch.cuda.is_available(), "CUDA is required for this Slurm job"
-print("torch", torch.__version__, "signatory ok", "gpu", torch.cuda.get_device_name(0))
-PY
+signature_cluster_venv
 
 cd "$PROJECT_ROOT"
 
