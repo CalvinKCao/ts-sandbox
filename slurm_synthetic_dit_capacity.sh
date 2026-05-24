@@ -49,7 +49,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     SB_ERR='results/bootstrap/%x-%j.err'
 
     if [ "$IS_SMOKE" -eq 1 ]; then
-        WALLTIME="0:30:00"
+        WALLTIME="8:00:00"
         MEM="8G"
         CPUS=4
         SUFFIX="-smoke"
@@ -155,6 +155,10 @@ pip install --no-index --upgrade pip -q
 pip install --no-index \
     'torch==2.11.0+computecanada' \
     numpy pandas scipy scikit-learn tqdm einops -q
+# iTransformer imports reformer_pytorch at module load; not in Alliance wheelhouse on Killarney.
+# Standard Model uses FullAttention only — optional import in SelfAttention_Family.py covers that.
+# Still try wheel/PyPI when available (e.g. login-built shared venv workflows).
+pip install --no-index reformer-pytorch -q 2>/dev/null || pip install reformer-pytorch -q 2>/dev/null || true
 
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA required'; print('torch', torch.__version__, torch.cuda.get_device_name(0))"
 

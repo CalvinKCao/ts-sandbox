@@ -49,6 +49,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 PATCH_SIZE_DEFAULT: Tuple[int, int] = (8, 8)
+# Effectively unlimited; training stops on success threshold or early stopping only.
+MAX_EPOCHS_UNLIMITED = 1_000_000
 
 
 @dataclass
@@ -107,8 +109,10 @@ class RunConfig:
     lr: float = 2e-4
     itrans_lr: float = 1e-3
     itrans_pretrain_epochs: int = 40
-    max_epochs: int = 150
-    patience: int = 12
+    max_epochs: int = MAX_EPOCHS_UNLIMITED
+    min_epochs: int = 10
+    patience: int = 50
+    min_delta: float = 1e-5
     samples_per_epoch: int = 512
     val_samples: int = 128
     success_mse: float = 0.04
@@ -192,18 +196,19 @@ class SyntheticTaskDataset(Dataset):
         return past, future
 
 
-def smoke_run_config() -> RunConfig:
+def fast_local_smoke_config() -> RunConfig:
+    """Tiny CPU-only shape check; cluster --smoke-test uses full RunConfig + early stopping."""
     return RunConfig(
         lookback=48,
         horizon=16,
         lookback_overlap=4,
         image_height=32,
-        max_scale=6.0,
         num_diffusion_steps=50,
         ddim_steps=8,
         batch_size=4,
         itrans_pretrain_epochs=1,
         max_epochs=3,
+        min_epochs=1,
         patience=2,
         samples_per_epoch=16,
         val_samples=8,
@@ -492,17 +497,20 @@ def train_one_variant(
         )
         combined = max(mse_lin, mse_per)
         logger.info(
-            "[%s] epoch %d/%d train_loss=%.4f linear_mse=%.5f periodic_mse=%.5f combined=%.5f",
+            "[%s] epoch %d train_loss=%.4f linear_mse=%.5f periodic_mse=%.5f combined=%.5f "
+            "(stale=%d/%d min_epochs=%d)",
             spec.name,
             epoch,
-            run_cfg.max_epochs,
             loss_sum / max(n_steps, 1),
             mse_lin,
             mse_per,
             combined,
+            stale,
+            run_cfg.patience,
+            run_cfg.min_epochs,
         )
 
-        if combined < best_combined - 1e-6:
+        if combined < best_combined - run_cfg.min_delta:
             best_combined = combined
             best_linear = mse_lin
             best_periodic = mse_per
@@ -532,7 +540,7 @@ def train_one_variant(
                 stop_reason=stop_reason,
             )
 
-        if stale >= run_cfg.patience:
+        if epoch >= run_cfg.min_epochs and stale >= run_cfg.patience:
             stop_reason = "patience"
             break
 
@@ -615,8 +623,10 @@ def main() -> None:
     parser.add_argument("--variants", type=str, default=None, help="Comma-separated variant names")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max-epochs", type=int, default=None)
+    parser.add_argument("--max-epochs", type=int, default=None, help="Cap epochs (default: effectively unlimited)")
+    parser.add_argument("--min-epochs", type=int, default=None, help="Min epochs before patience can stop")
     parser.add_argument("--patience", type=int, default=None)
+    parser.add_argument("--min-delta", type=float, default=None, help="Val MSE improvement required to reset patience")
     parser.add_argument("--samples-per-epoch", type=int, default=None)
     parser.add_argument("--val-samples", type=int, default=None)
     parser.add_argument("--itrans-pretrain-epochs", type=int, default=None)
@@ -625,11 +635,15 @@ def main() -> None:
     parser.add_argument("--success-mse", type=float, default=None)
     args = parser.parse_args()
 
-    run_cfg = smoke_run_config() if args.smoke_test else RunConfig()
+    run_cfg = RunConfig()
     if args.max_epochs is not None:
         run_cfg.max_epochs = args.max_epochs
+    if args.min_epochs is not None:
+        run_cfg.min_epochs = args.min_epochs
     if args.patience is not None:
         run_cfg.patience = args.patience
+    if args.min_delta is not None:
+        run_cfg.min_delta = args.min_delta
     if args.samples_per_epoch is not None:
         run_cfg.samples_per_epoch = args.samples_per_epoch
     if args.val_samples is not None:
@@ -649,7 +663,18 @@ def main() -> None:
         device = torch.device("cuda")
     else:
         device = torch.device("cpu")
-    logger.info("device=%s smoke=%s", device, args.smoke_test)
+
+    if args.smoke_test and device.type == "cpu":
+        run_cfg = fast_local_smoke_config()
+        logger.info("smoke-test on CPU: fast local config (max_epochs=%d)", run_cfg.max_epochs)
+    elif args.smoke_test:
+        logger.info(
+            "smoke-test on GPU: full config, max_epochs=%d patience=%d min_epochs=%d",
+            run_cfg.max_epochs,
+            run_cfg.patience,
+            run_cfg.min_epochs,
+        )
+    logger.info("device=%s", device)
 
     variant_names = parse_variants(args.variants)
     if len(variant_names) != 1:
