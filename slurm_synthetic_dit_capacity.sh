@@ -1,69 +1,114 @@
 #!/bin/bash
 # =============================================================================
-# Synthetic DiT capacity probe — self-resubmitting Killarney job (L40S default).
+# Synthetic DiT capacity probe — parallel fan-out on Killarney (L40S default).
 #
-# Trains four DiT variants on on-the-fly linear + periodic univariate series only.
-# No RealTS, no real datasets.
+# Login node: submits one independent Slurm job per variant (runs in parallel).
+# Compute node: trains a single variant passed via VARIANT=... in the environment.
 #
 # USAGE (login node, repo root):
 #   ./slurm_synthetic_dit_capacity.sh --smoke-test
 #   ./slurm_synthetic_dit_capacity.sh
+#   ./slurm_synthetic_dit_capacity.sh --variants dit_tiny_no_guidance,dit_large_no_guidance
 # =============================================================================
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+ALL_VARIANTS=(
+    dit_tiny_no_guidance
+    dit_default_no_guidance
+    dit_large_no_guidance
+    dit_default_with_guidance
+)
+
 if [ -z "${SLURM_JOB_ID:-}" ]; then
     IS_SMOKE=0
-    for arg in "$@"; do [ "$arg" = "--smoke-test" ] && IS_SMOKE=1; done
+    VARIANTS=("${ALL_VARIANTS[@]}")
+    PASS_ARGS=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --smoke-test)
+                IS_SMOKE=1
+                PASS_ARGS+=("$1")
+                shift
+                ;;
+            --variants)
+                IFS=',' read -r -a VARIANTS <<< "$2"
+                shift 2
+                ;;
+            *)
+                PASS_ARGS+=("$1")
+                shift
+                ;;
+        esac
+    done
 
     mkdir -p "$SCRIPT_DIR/results/bootstrap"
     SB_OUT='results/bootstrap/%x-%j.out'
     SB_ERR='results/bootstrap/%x-%j.err'
-    EXPORT_ARG="ALL,TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1"
 
     if [ "$IS_SMOKE" -eq 1 ]; then
-        echo "Submitting SMOKE (L40S, 8G, 30 min)..."
-        sbatch \
-            --job-name=synth-dit-cap-smoke \
+        WALLTIME="0:30:00"
+        MEM="8G"
+        CPUS=4
+        SUFFIX="-smoke"
+    else
+        WALLTIME="4:00:00"
+        MEM="50G"
+        CPUS=8
+        SUFFIX=""
+    fi
+
+    JOB_IDS=()
+    echo "Submitting ${#VARIANTS[@]} parallel job(s) (L40S, wall=$WALLTIME)..."
+    for variant in "${VARIANTS[@]}"; do
+        variant="${variant// /}"
+        [ -z "$variant" ] && continue
+        JOB_NAME="synth-dit-${variant}${SUFFIX}"
+        JOB_NAME="${JOB_NAME//_/-}"
+
+        job_id=$(sbatch --parsable \
+            --job-name="$JOB_NAME" \
             --account=aip-boyuwang \
-            --time=0:30:00 \
+            --time="$WALLTIME" \
             --nodes=1 \
             --gres=gpu:l40s:1 \
-            --cpus-per-task=4 \
-            --mem=8G \
+            --cpus-per-task="$CPUS" \
+            --mem="$MEM" \
             --chdir="$SCRIPT_DIR" \
             --output="$SB_OUT" \
             --error="$SB_ERR" \
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export="$EXPORT_ARG" \
-            "$SCRIPT_DIR/slurm_synthetic_dit_capacity.sh" "$@"
-    else
-        echo "Submitting FULL (L40S, 50G, 12h)..."
-        sbatch \
-            --job-name=synth-dit-cap \
-            --account=aip-boyuwang \
-            --time=12:00:00 \
-            --nodes=1 \
-            --gres=gpu:l40s:1 \
-            --cpus-per-task=8 \
-            --mem=50G \
-            --chdir="$SCRIPT_DIR" \
-            --output="$SB_OUT" \
-            --error="$SB_ERR" \
-            --mail-type=BEGIN,END,FAIL \
-            --mail-user=ccao87@uwo.ca \
-            --export="$EXPORT_ARG" \
-            "$SCRIPT_DIR/slurm_synthetic_dit_capacity.sh" "$@"
-    fi
+            --export="ALL,VARIANT=${variant},TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1" \
+            "$SCRIPT_DIR/slurm_synthetic_dit_capacity.sh" "${PASS_ARGS[@]}")
+        JOB_IDS+=("$job_id")
+        echo "  -> $variant: job $job_id"
+    done
+
+    echo ""
+    echo "=================================================================="
+    for i in "${!VARIANTS[@]}"; do
+        echo "  ${VARIANTS[$i]}  ${JOB_IDS[$i]}"
+    done
+    echo ""
+    echo "  Monitor:    squeue -u \$USER"
+    echo "  Cancel all: scancel ${JOB_IDS[*]}"
+    echo "=================================================================="
     exit 0
 fi
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$SCRIPT_DIR}"
 
-STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-synth-dit-capacity"
+if [ -z "${VARIANT:-}" ]; then
+    echo "ERROR: VARIANT not set inside Slurm job (login node should export VARIANT=...)"
+    exit 1
+fi
+
+VARIANT_TAG="${VARIANT//_/-}"
+STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-synth-dit-${VARIANT_TAG}"
 RUN_ROOT="$SLURM_SUBMIT_DIR/results/$STEM"
 LOG_DIR="$RUN_ROOT/logs"
 CKPT_DIR="$RUN_ROOT/ckpts"
@@ -75,6 +120,7 @@ exec >>"$LOG_FILE" 2>&1
 
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID   Node: ${SLURMD_NODENAME:-unknown}"
+echo "Variant: $VARIANT"
 echo "GPU:    $(nvidia-smi -L 2>/dev/null | head -1 || echo unknown)"
 echo "Started: $(date)"
 echo "Log: $LOG_FILE"
@@ -116,13 +162,24 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 export PYTHONUNBUFFERED=1
 
 SMOKE_FLAG=""
-PY_ARGS=()
-for arg in "$@"; do
-    if [ "$arg" = "--smoke-test" ]; then
-        SMOKE_FLAG="--smoke-test"
-    else
-        PY_ARGS+=("$arg")
-    fi
+PY_ARGS=(--variants "$VARIANT")
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --smoke-test)
+            SMOKE_FLAG="--smoke-test"
+            shift
+            ;;
+        --variants)
+            shift 2
+            ;;
+        --variants=*)
+            shift
+            ;;
+        *)
+            PY_ARGS+=("$1")
+            shift
+            ;;
+    esac
 done
 
 python -u -m models.diffusion_tsf.train_synthetic_dit_capacity \
@@ -132,6 +189,7 @@ python -u -m models.diffusion_tsf.train_synthetic_dit_capacity \
 
 echo "=========================================="
 echo "Done: $(date)"
+echo "Variant: $VARIANT"
 echo "Metrics: $LOG_DIR"
 echo "Log: $LOG_FILE"
 echo "=========================================="

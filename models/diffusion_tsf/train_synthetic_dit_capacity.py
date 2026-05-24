@@ -652,8 +652,8 @@ def main() -> None:
     logger.info("device=%s smoke=%s", device, args.smoke_test)
 
     variant_names = parse_variants(args.variants)
-    if args.smoke_test and args.variants is None:
-        variant_names = [variant_names[0]]
+    if len(variant_names) != 1:
+        logger.info("Training %d variant(s): %s", len(variant_names), ", ".join(variant_names))
 
     results: List[VariantResult] = []
     for i, vname in enumerate(variant_names):
