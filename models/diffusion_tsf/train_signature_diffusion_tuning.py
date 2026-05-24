@@ -96,7 +96,7 @@ def parse_args() -> argparse.Namespace:
         "--latent-rep",
         choices=("logsignature", "signature", "auto"),
         default="auto",
-        help="Latent type; auto tries logsignature then signature",
+        help="Latent type; auto defaults to signature (signatory logsignature can segfault)",
     )
     return p.parse_args()
 
@@ -189,10 +189,11 @@ def prepare_future_btc(future: torch.Tensor, lookback_overlap: int) -> torch.Ten
 def resolve_latent_rep(args: argparse.Namespace) -> str:
     if args.latent_rep in ("logsignature", "signature"):
         return args.latent_rep
-    if args.smoke_test:
-        # Local signatory logsignature can segfault; cluster full runs use logsignature.
-        return os.environ.get("SIGDIFF_LATENT_REP", "signature")
-    return os.environ.get("SIGDIFF_LATENT_REP", "logsignature")
+    env = os.environ.get("SIGDIFF_LATENT_REP", "").strip().lower()
+    if env in ("logsignature", "signature"):
+        return env
+    # signatory.logsignature segfaults on some builds (WSL, Killarney L40S); signature is stable.
+    return "signature"
 
 
 def build_model(
@@ -446,7 +447,7 @@ def params_from_trial(trial: optuna.trial.FrozenTrial) -> TrialParams:
         subset_size=int(bp.get("subset_size", 7)),
         subset_stride=int(bp["subset_stride"]),
         max_branches=int(bp["max_branches"]),
-        latent_rep=str(bp.get("latent_rep", "logsignature")),
+        latent_rep=str(bp.get("latent_rep", "signature")),
     )
 
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Log-signature latent diffusion Optuna tuning on Killarney (parallel array).
-# Production trials use signatory logsignature latents (not smoke-test signature fallback).
+# Latents: truncated signature (stable). Override: SIGDIFF_LATENT_REP=logsignature or --latent-rep logsignature.
 #
 # Usage from repo root on Killarney login node:
 #   bash slurm_signature_diffusion_tune.sh
@@ -200,7 +200,7 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 EPOCHS="${EPOCHS:-8}"
 MAX_TRAIN_BATCHES="${MAX_TRAIN_BATCHES:-200}"
 MAX_VAL_BATCHES="${MAX_VAL_BATCHES:-80}"
-DATALOADER_WORKERS="${DATALOADER_WORKERS:-2}"
+DATALOADER_WORKERS="${DATALOADER_WORKERS:-0}"
 LOOKBACK_LENGTH="${LOOKBACK_LENGTH:-96}"
 FORECAST_LENGTH="${FORECAST_LENGTH:-96}"
 LOOKBACK_OVERLAP="${LOOKBACK_OVERLAP:-8}"
@@ -216,6 +216,7 @@ fi
 
 PY_ARGS=(
     -m models.diffusion_tsf.train_signature_diffusion_tuning
+    --latent-rep signature
     --dataset "$DATASET"
     --lookback-length "$LOOKBACK_LENGTH"
     --forecast-length "$FORECAST_LENGTH"

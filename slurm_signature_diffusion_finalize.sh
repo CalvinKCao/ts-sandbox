@@ -122,6 +122,7 @@ RESULTS_DIR="${RESULTS_DIR:-$RUN_ROOT}"
 
 PY_ARGS=(
     -m models.diffusion_tsf.train_signature_diffusion_tuning
+    --latent-rep signature
     --dataset "$DATASET"
     --finalize-only
     --study-name "$STUDY_NAME"
@@ -130,7 +131,7 @@ PY_ARGS=(
     --results-dir "$RESULTS_DIR"
     --batch-size "${BATCH_SIZE:-32}"
     --epochs "${EPOCHS:-8}"
-    --num-workers "${DATALOADER_WORKERS:-2}"
+    --num-workers "${DATALOADER_WORKERS:-0}"
     --max-train-batches "${MAX_TRAIN_BATCHES:-200}"
     --max-val-batches "${MAX_VAL_BATCHES:-80}"
     --seed 42
