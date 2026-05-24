@@ -28,7 +28,6 @@ from models.diffusion_tsf.signature_diffusion_model import (
 from models.diffusion_tsf.signature_latent import LatentConfig, select_channels
 from models.diffusion_tsf.signature_mse_loss import SignatureMSELoss
 from models.diffusion_tsf.train_multivariate_pipeline import load_dataset
-from models.diffusion_tsf.variate_subsets import generate_variate_subsets
 
 LOGGER = logging.getLogger("signature_diffusion_tuning")
 
@@ -41,6 +40,8 @@ TEST_METRIC_KEYS = (
     "gradient_correlation",
     "sign_agreement",
     "shape_score",
+    "signature_l2_raw",
+    "signature_l2_normalized",
 )
 
 
@@ -66,7 +67,7 @@ class TrialParams:
     subset_size: int
     subset_stride: int
     max_branches: int
-    cond_mode: str
+    latent_rep: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,6 +92,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--finalize-only", action="store_true")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--smoke-test", action="store_true")
+    p.add_argument(
+        "--latent-rep",
+        choices=("logsignature", "signature", "auto"),
+        default="auto",
+        help="Latent type; auto tries logsignature then signature",
+    )
     return p.parse_args()
 
 
@@ -113,10 +120,9 @@ def default_study_name(dataset: str, explicit: Optional[str]) -> str:
     return f"signature_diffusion_{dataset}_job{run_id}"
 
 
-def parse_n_variates(args: argparse.Namespace) -> Optional[int]:
-    if args.n_variates is not None:
-        return args.n_variates
-    return None
+def effective_forecast_horizon(args: argparse.Namespace) -> int:
+    """Steps in ``prepare_future_btc`` after dropping lookback overlap (equals forecast_length)."""
+    return args.forecast_length
 
 
 def maybe_subset(dataset, max_samples: Optional[int]):
@@ -172,6 +178,7 @@ def make_loader(dataset, args: argparse.Namespace, shuffle: bool, seed: int) -> 
 
 
 def prepare_future_btc(future: torch.Tensor, lookback_overlap: int) -> torch.Tensor:
+    """``[B, C, T]`` with ``T = overlap + forecast_length`` -> ``[B, T_fc, C]``."""
     if future.dim() == 2:
         future = future.unsqueeze(0)
     if lookback_overlap > 0:
@@ -179,10 +186,13 @@ def prepare_future_btc(future: torch.Tensor, lookback_overlap: int) -> torch.Ten
     return future.permute(0, 2, 1)
 
 
-def model_n_channels(num_variates: int, params: TrialParams) -> int:
-    if params.subset_scheme == "all":
-        return num_variates
-    return min(params.subset_size, num_variates)
+def resolve_latent_rep(args: argparse.Namespace) -> str:
+    if args.latent_rep in ("logsignature", "signature"):
+        return args.latent_rep
+    if args.smoke_test:
+        # Local signatory logsignature can segfault; cluster full runs use logsignature.
+        return os.environ.get("SIGDIFF_LATENT_REP", "signature")
+    return os.environ.get("SIGDIFF_LATENT_REP", "logsignature")
 
 
 def build_model(
@@ -190,22 +200,22 @@ def build_model(
     params: TrialParams,
     num_variates: int,
     device: torch.device,
+    *,
+    latent_rep: Optional[str] = None,
 ) -> SignatureDiffusionModel:
-    n_ch = model_n_channels(num_variates, params)
-    # Local WSL signatory often segfaults on logsignature(); cluster jobs use logsignature.
-    latent_rep = "signature" if args.smoke_test else "logsignature"
+    rep = latent_rep or params.latent_rep
     latent = LatentConfig(
         depth=params.depth,
         use_cumsum=params.use_cumsum,
         patch_size=params.patch_size,
         patch_stride=params.patch_stride,
         normalize_logsig=params.normalize_logsig,
-        latent_rep=latent_rep,
+        latent_rep=rep,
     )
     cfg = SignatureDiffusionConfig(
-        n_channels=n_ch,
+        n_channels=num_variates,
         lookback=args.lookback_length,
-        horizon=args.forecast_length - args.lookback_overlap,
+        horizon=effective_forecast_horizon(args),
         diff_steps=params.diff_steps,
         d_model=params.d_model,
         n_layers=params.n_layers,
@@ -225,42 +235,32 @@ def build_model(
     return SignatureDiffusionModel(cfg).to(device)
 
 
-def sample_subset(
-    num_variates: int,
-    params: TrialParams,
-    rng: random.Random,
-) -> Tuple[int, ...]:
-    subsets = generate_variate_subsets(
-        num_variates,
-        scheme=params.subset_scheme,
-        subset_size=params.subset_size,
-        subset_stride=params.subset_stride,
-        max_branches=params.max_branches,
-        seed=rng.randint(0, 2**30),
-    )
-    n_ch = model_n_channels(num_variates, params)
-    valid = [s for s in subsets if len(s) == n_ch]
-    if not valid:
-        return tuple(range(n_ch))
-    return rng.choice(valid)
-
-
 def train_batch(
     model: SignatureDiffusionModel,
     past: torch.Tensor,
     future_btc: torch.Tensor,
-    params: TrialParams,
-    num_variates: int,
-    rng: random.Random,
 ) -> Tuple[torch.Tensor, dict]:
-    n_ch = model_n_channels(num_variates, params)
     past_btc = past.permute(0, 2, 1)
-    fut = future_btc
-    if params.subset_scheme != "all":
-        s = sample_subset(num_variates, params, rng)
-        past_btc = select_channels(past_btc, s)
-        fut = select_channels(fut, s)
-    return model.forward_branch(past_btc, fut)
+    return model.forward_branch(past_btc, future_btc)
+
+
+@torch.no_grad()
+def eval_batch(
+    model: SignatureDiffusionModel,
+    past: torch.Tensor,
+    future_btc: torch.Tensor,
+) -> Dict[str, float]:
+    """Deterministic val/test metrics on full multivariate horizon."""
+    past_btc = past.permute(0, 2, 1)
+    horizon = future_btc.size(1)
+    pred = model.sample_branch(past_btc, horizon, n_samples=1)
+    point_mse = F.mse_loss(pred, future_btc)
+    point_mae = F.l1_loss(pred, future_btc)
+    return {
+        "val_point_mse": float(point_mse.item()),
+        "val_point_mae": float(point_mae.item()),
+        "val_loss": float(point_mse.item()),
+    }
 
 
 def train_one_epoch(
@@ -269,9 +269,6 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     args: argparse.Namespace,
-    params: TrialParams,
-    num_variates: int,
-    rng: random.Random,
 ) -> Dict[str, float]:
     model.train()
     totals: Dict[str, float] = {}
@@ -282,7 +279,7 @@ def train_one_epoch(
         past = past.to(device).float()
         future_btc = prepare_future_btc(future.to(device).float(), args.lookback_overlap)
         optimizer.zero_grad(set_to_none=True)
-        loss, metrics = train_batch(model, past, future_btc, params, num_variates, rng)
+        loss, metrics = train_batch(model, past, future_btc)
         loss.backward()
         optimizer.step()
         for k, v in metrics.items():
@@ -297,9 +294,6 @@ def validate(
     loader: DataLoader,
     device: torch.device,
     args: argparse.Namespace,
-    params: TrialParams,
-    num_variates: int,
-    rng: random.Random,
 ) -> Dict[str, float]:
     model.eval()
     totals: Dict[str, float] = {}
@@ -309,9 +303,9 @@ def validate(
             break
         past = past.to(device).float()
         future_btc = prepare_future_btc(future.to(device).float(), args.lookback_overlap)
-        _, metrics = train_batch(model, past, future_btc, params, num_variates, rng)
+        metrics = eval_batch(model, past, future_btc)
         for k, v in metrics.items():
-            totals[k] = totals.get(k, 0.0) + float(v.item())
+            totals[k] = totals.get(k, 0.0) + v
         n += 1
     return {k: v / max(n, 1) for k, v in totals.items()}
 
@@ -328,12 +322,17 @@ def collect_predictions(
     model.eval()
     preds, targets = [], []
     n_win = 0
-    horizon = args.forecast_length - args.lookback_overlap
+    horizon = effective_forecast_horizon(args)
     for bi, (past, future) in enumerate(loader):
         if max_batches is not None and bi >= max_batches:
             break
         past = past.to(device).float()
         future_btc = prepare_future_btc(future.to(device).float(), args.lookback_overlap)
+        if future_btc.size(1) != horizon:
+            raise ValueError(
+                f"target horizon {future_btc.size(1)} != expected {horizon}; "
+                "check lookback_overlap and forecast_length"
+            )
         pred_btc = model.predict(past, horizon=horizon, n_variates=num_variates)
         preds.append(pred_btc.permute(0, 2, 1).cpu())
         targets.append(future_btc.permute(0, 2, 1).cpu())
@@ -341,7 +340,15 @@ def collect_predictions(
     return torch.cat(preds, 0), torch.cat(targets, 0), n_win
 
 
-def full_test_metrics(preds: torch.Tensor, targets: torch.Tensor, *, sig_depth: int, use_cumsum: bool) -> Dict[str, float]:
+def full_test_metrics(
+    preds: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    sig_depth: int,
+    use_cumsum: bool,
+) -> Dict[str, float]:
+    if preds.shape != targets.shape:
+        raise ValueError(f"pred {tuple(preds.shape)} != target {tuple(targets.shape)}")
     metrics: Dict[str, float] = {
         "mse": F.mse_loss(preds, targets).item(),
         "mae": F.l1_loss(preds, targets).item(),
@@ -358,11 +365,15 @@ def full_test_metrics(preds: torch.Tensor, targets: torch.Tensor, *, sig_depth: 
         for name, val in ch_m.items():
             if name in ("mse", "mae"):
                 continue
-            shape_accum[name] = shape_accum.get(name, 0.0) + float(val.item() if torch.is_tensor(val) else val)
+            shape_accum[name] = shape_accum.get(name, 0.0) + float(
+                val.item() if torch.is_tensor(val) else val
+            )
     for name, total in shape_accum.items():
         metrics[name] = total / n_ch
 
-    crit = SignatureMSELoss(alpha=0.0, beta=1.0, depth=sig_depth, use_cumsum=use_cumsum, normalize_sig=False)
+    crit = SignatureMSELoss(
+        alpha=0.0, beta=1.0, depth=sig_depth, use_cumsum=use_cumsum, normalize_sig=False
+    )
     y_hat = preds.permute(0, 2, 1)
     y = targets.permute(0, 2, 1)
     norm_sig, raw_sig = crit._signature_l2(y_hat, y)
@@ -371,14 +382,18 @@ def full_test_metrics(preds: torch.Tensor, targets: torch.Tensor, *, sig_depth: 
     return metrics
 
 
-def suggest_trial_params(trial: optuna.Trial, args: argparse.Namespace, num_variates: int) -> TrialParams:
+def suggest_trial_params(
+    trial: optuna.Trial,
+    args: argparse.Namespace,
+    num_variates: int,
+    latent_rep: str,
+) -> TrialParams:
     patch_size = trial.suggest_categorical("patch_size", [16, 24, 32])
-    stride_choices = [max(4, patch_size // 2), max(4, patch_size // 4)]
+    stride_choices = sorted({max(4, patch_size // 2), max(4, patch_size // 4)})
     scheme = trial.suggest_categorical("subset_scheme", ["all", "sliding", "pairs"])
-    if scheme == "all":
-        subset_size = num_variates
-    else:
-        subset_size = trial.suggest_int("subset_size", 2, min(4, num_variates))
+    subset_size = num_variates if scheme == "all" else trial.suggest_int(
+        "subset_size", 2, min(4, num_variates)
+    )
 
     return TrialParams(
         learning_rate=trial.suggest_float("learning_rate", 1e-5, 3e-4, log=True),
@@ -401,7 +416,7 @@ def suggest_trial_params(trial: optuna.Trial, args: argparse.Namespace, num_vari
         subset_size=subset_size,
         subset_stride=trial.suggest_int("subset_stride", 1, 2),
         max_branches=trial.suggest_int("max_branches", 1, 5),
-        cond_mode=trial.suggest_categorical("cond_mode", ["logsig_patches"]),
+        latent_rep=latent_rep,
     )
 
 
@@ -431,8 +446,14 @@ def params_from_trial(trial: optuna.trial.FrozenTrial) -> TrialParams:
         subset_size=int(bp.get("subset_size", 7)),
         subset_stride=int(bp["subset_stride"]),
         max_branches=int(bp["max_branches"]),
-        cond_mode=str(bp.get("cond_mode", "logsig_patches")),
+        latent_rep=str(bp.get("latent_rep", "logsignature")),
     )
+
+
+def log_test_metrics(label: str, metrics: Dict[str, float]) -> None:
+    parts = [f"{k}={metrics[k]:.6f}" for k in TEST_METRIC_KEYS if k in metrics]
+    extra = [f"n_test_windows={int(metrics.get('n_test_windows', 0))}"]
+    LOGGER.info("[%s] %s | %s", label, " ".join(parts), " ".join(extra))
 
 
 def finalize_study(
@@ -444,17 +465,20 @@ def finalize_study(
 ) -> None:
     completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
     if not completed:
-        LOGGER.warning("no completed trials")
+        LOGGER.warning("no completed trials; skipping finalize")
         return
     best = study.best_trial
     ckpt_path = best.user_attrs.get("checkpoint")
     if not ckpt_path or not Path(ckpt_path).is_file():
-        LOGGER.warning("missing checkpoint for best trial")
+        LOGGER.warning("best trial %s missing checkpoint", best.number)
         return
 
     params = params_from_trial(best)
-    model = build_model(args, params, num_variates, device)
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    latent_rep = ckpt.get("latent_rep", params.latent_rep)
+    params = TrialParams(**{**asdict(params), "latent_rep": latent_rep})
+
+    model = build_model(args, params, num_variates, device, latent_rep=latent_rep)
     model.load_state_dict(ckpt["model_state_dict"])
 
     loader = make_loader(test_ds, args, shuffle=False, seed=args.seed + 99)
@@ -465,21 +489,43 @@ def finalize_study(
         preds, targets, sig_depth=params.depth, use_cumsum=params.use_cumsum
     )
     test_metrics["n_test_windows"] = float(n_win)
+    log_test_metrics("test_signature_diffusion", test_metrics)
 
     report = {
         "dataset": args.dataset,
         "study_name": study.study_name,
         "best_trial": best.number,
         "best_val_loss": float(best.value),
+        "best_val_metric": "val_point_mse",
         "trial_params": asdict(params),
+        "latent_rep": latent_rep,
+        "forecast_horizon": effective_forecast_horizon(args),
+        "lookback_length": args.lookback_length,
+        "lookback_overlap": args.lookback_overlap,
         "checkpoint": str(ckpt_path),
+        "test_split": "held_out_test",
         "test_metrics": test_metrics,
         "finalized_at": datetime.now().isoformat(),
     }
-    out = Path(args.results_dir) / f"{args.dataset}_{study.study_name}_test_report.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2) + "\n")
-    LOGGER.info("wrote %s mse=%.6f", out, test_metrics["mse"])
+    stem = f"{args.dataset}_{study.study_name}_test_report"
+    out_json = Path(args.results_dir) / f"{stem}.json"
+    out_txt = Path(args.results_dir) / f"{stem}.txt"
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps(report, indent=2) + "\n")
+    lines = [
+        f"dataset={args.dataset}",
+        f"study={study.study_name}",
+        f"best_trial={best.number}",
+        f"best_val_point_mse={best.value:.6f}",
+        f"test_mse={test_metrics['mse']:.6f}",
+        f"test_mae={test_metrics['mae']:.6f}",
+        f"test_rmse={test_metrics['rmse']:.6f}",
+        f"test_signature_l2_raw={test_metrics.get('signature_l2_raw', float('nan')):.6f}",
+        f"latent_rep={latent_rep}",
+        f"checkpoint={ckpt_path}",
+    ]
+    out_txt.write_text("\n".join(lines) + "\n")
+    LOGGER.info("wrote %s and %s", out_json, out_txt)
 
 
 def objective(
@@ -489,11 +535,11 @@ def objective(
     val_ds,
     num_variates: int,
     device: torch.device,
+    latent_rep: str,
 ) -> float:
-    params = suggest_trial_params(trial, args, num_variates)
+    params = suggest_trial_params(trial, args, num_variates, latent_rep)
     trial_seed = args.seed + trial.number
     set_seed(trial_seed)
-    rng = random.Random(trial_seed)
 
     model = build_model(args, params, num_variates, device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=params.learning_rate)
@@ -505,18 +551,16 @@ def objective(
     best_val = float("inf")
 
     for epoch in range(args.epochs):
-        train_m = train_one_epoch(
-            model, train_loader, optimizer, device, args, params, num_variates, rng
-        )
-        val_m = validate(model, val_loader, device, args, params, num_variates, rng)
-        val_loss = val_m["loss"]
+        train_m = train_one_epoch(model, train_loader, optimizer, device, args)
+        val_m = validate(model, val_loader, device, args)
+        val_loss = val_m["val_loss"]
         LOGGER.info(
-            "trial=%s epoch=%s train_loss=%.4f val_loss=%.4f val_point=%.4f",
+            "trial=%s epoch=%s train_loss=%.4f val_point_mse=%.4f val_point_mae=%.4f",
             trial.number,
             epoch,
             train_m["loss"],
-            val_loss,
-            val_m.get("loss_point", 0.0),
+            val_m["val_point_mse"],
+            val_m["val_point_mae"],
         )
         if val_loss < best_val:
             best_val = val_loss
@@ -525,7 +569,9 @@ def objective(
                     "model_state_dict": model.state_dict(),
                     "num_variates": num_variates,
                     "trial_params": asdict(params),
+                    "latent_rep": latent_rep,
                     "val_loss": best_val,
+                    "forecast_horizon": effective_forecast_horizon(args),
                 },
                 ckpt_path,
             )
@@ -535,6 +581,7 @@ def objective(
 
     trial.set_user_attr("checkpoint", str(ckpt_path))
     trial.set_user_attr("trial_params", asdict(params))
+    trial.set_user_attr("latent_rep", latent_rep)
     del model, optimizer
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -557,18 +604,20 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     study_name = default_study_name(args.dataset, args.study_name)
     ensure_sqlite_parent(args.storage)
+    latent_rep = resolve_latent_rep(args)
+    LOGGER.info("latent_rep=%s forecast_horizon=%s", latent_rep, effective_forecast_horizon(args))
 
     if args.finalize_only:
-        train_ds, val_ds, test_ds = load_data(args)
-        del train_ds, val_ds
-        num_variates = parse_n_variates(args) or infer_num_variates(test_ds)
+        _, _, test_ds = load_data(args)
+        num_variates = args.n_variates or infer_num_variates(test_ds)
+        if args.dataset == "exchange_rate" and args.n_variates is None:
+            num_variates = 8
         study = optuna.load_study(study_name=study_name, storage=args.storage)
         finalize_study(study, args, test_ds, num_variates, device)
         return
 
-    train_ds, val_ds, test_ds = load_data(args)
-    del test_ds
-    num_variates = parse_n_variates(args) or infer_num_variates(train_ds)
+    train_ds, val_ds = load_data(args, include_test=False)
+    num_variates = args.n_variates or infer_num_variates(train_ds)
     if args.dataset == "exchange_rate" and args.n_variates is None:
         num_variates = 8
 
@@ -586,11 +635,11 @@ def main() -> None:
 
     for _ in range(args.n_trials):
         study.optimize(
-            lambda t: objective(t, args, train_ds, val_ds, num_variates, device),
+            lambda t: objective(t, args, train_ds, val_ds, num_variates, device, latent_rep),
             n_trials=1,
         )
 
-    LOGGER.info("study=%s best=%.6f", study_name, study.best_value if study.trials else float("nan"))
+    LOGGER.info("study=%s best_val_point_mse=%.6f", study_name, study.best_value)
 
 
 if __name__ == "__main__":

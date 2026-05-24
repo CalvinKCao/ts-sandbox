@@ -44,13 +44,28 @@ fi
 
 pip install -q einops beartype scikit-learn reformer-pytorch 2>/dev/null || true
 
+if [ ! -d "$SLURM_SUBMIT_DIR/SimDiff" ]; then
+    echo "ERROR: SimDiff/ not found. Clone Dear-Sloth/SimDiff into repo root on the cluster."
+    exit 1
+fi
+
 case "${DATASET:-ETTh1}" in
     ETTh1)
-        bash scripts/simdiff/etth1_96_96.sh
+        if [ -f scripts/simdiff/etth1_96_96.sh ]; then
+            bash scripts/simdiff/etth1_96_96.sh
+        else
+            echo "Train SimDiff ETTh1 via SimDiff/script/etth1.sh (see baselines/simdiff/README.md)"
+            exit 1
+        fi
         python baselines/simdiff/eval_comparable.py --dataset ETTh1 --skip-alignment-check
         ;;
     exchange|exchange_rate)
-        bash scripts/simdiff/exchange_96_96.sh
+        if [ -f scripts/simdiff/exchange_96_96.sh ]; then
+            bash scripts/simdiff/exchange_96_96.sh
+        else
+            echo "Train SimDiff exchange via SimDiff/script/exchange.sh (see baselines/simdiff/README.md)"
+            exit 1
+        fi
         python baselines/simdiff/eval_comparable.py --dataset exchange_rate --skip-alignment-check
         ;;
     *)

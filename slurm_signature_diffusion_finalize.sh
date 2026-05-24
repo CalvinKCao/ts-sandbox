@@ -1,5 +1,5 @@
 #!/bin/bash
-# Finalize signature+MSE studies: full test-split eval for best trial + MSE baseline.
+# Finalize signature diffusion studies: full held-out test eval + JSON/TXT report.
 #
 # Normally submitted automatically by slurm_signature_diffusion_tune.sh with afterok dependency.
 # Manual re-run:
@@ -116,7 +116,7 @@ if ! signature_cluster_venv; then
 fi
 
 STUDY_NAME="signature_diffusion_${DATASET}_job${ARRAY_JOB_ID}"
-OPTUNA_STORAGE="${OPTUNA_STORAGE:-sqlite:///$RUN_ROOT/signature_tuning.db}"
+OPTUNA_STORAGE="${OPTUNA_STORAGE:-sqlite:///$RUN_ROOT/signature_diffusion_tuning.db}"
 RESULTS_DIR="${RESULTS_DIR:-$RUN_ROOT}"
 
 PY_ARGS=(
@@ -141,7 +141,11 @@ fi
 if [ "${SMOKE_TEST:-0}" = "1" ]; then
     PY_ARGS+=(--smoke-test)
 fi
+if [ -n "${MAX_TEST_BATCHES:-}" ]; then
+    PY_ARGS+=(--max-test-batches "$MAX_TEST_BATCHES")
+fi
 
 echo "Study: $STUDY_NAME"
+echo "Test eval: full held-out split (unless --max-test-batches set)"
 python -u "${PY_ARGS[@]}"
 echo "Done: $(date)"

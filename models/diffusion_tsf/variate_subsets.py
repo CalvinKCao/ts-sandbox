@@ -6,6 +6,27 @@ import random
 from typing import List, Optional, Sequence, Tuple
 
 
+def channel_coverage(subsets: Sequence[Sequence[int]], n_variates: int) -> List[int]:
+    covered = set()
+    for s in subsets:
+        covered.update(s)
+    return [i for i in range(n_variates) if i not in covered]
+
+
+def ensure_channel_coverage(
+    subsets: List[Tuple[int, ...]],
+    n_variates: int,
+) -> List[Tuple[int, ...]]:
+    """Append singleton subsets so every channel appears in at least one branch."""
+    missing = channel_coverage(subsets, n_variates)
+    if not missing:
+        return subsets
+    out = list(subsets)
+    for ch in missing:
+        out.append((ch,))
+    return out
+
+
 def generate_variate_subsets(
     n_variates: int,
     *,
@@ -15,6 +36,7 @@ def generate_variate_subsets(
     n_subsets: Optional[int] = None,
     max_branches: int = 5,
     seed: int = 0,
+    ensure_coverage: bool = True,
 ) -> List[Tuple[int, ...]]:
     """Return a list of channel-index tuples (each is one branch)."""
     if n_variates < 1:
@@ -36,18 +58,16 @@ def generate_variate_subsets(
             subsets.append(tuple(range(start, start + k)))
         if not subsets:
             subsets = [all_idx]
-        return subsets[:cap]
-
-    if scheme == "pairs":
+        subsets = subsets[:cap]
+    elif scheme == "pairs":
         subsets = []
         for i in range(n_variates):
             for j in range(i + 1, n_variates):
                 subsets.append((i, j))
         if not subsets:
             subsets = [all_idx]
-        return subsets[:cap]
-
-    if scheme == "random_k":
+        subsets = subsets[:cap]
+    elif scheme == "random_k":
         rng = random.Random(seed)
         seen = set()
         subsets = []
@@ -59,6 +79,11 @@ def generate_variate_subsets(
                 continue
             seen.add(pick)
             subsets.append(pick)
-        return subsets or [all_idx]
+        if not subsets:
+            subsets = [all_idx]
+    else:
+        raise ValueError(f"unknown subset_scheme: {scheme}")
 
-    raise ValueError(f"unknown subset_scheme: {scheme}")
+    if ensure_coverage:
+        subsets = ensure_channel_coverage(subsets, n_variates)
+    return subsets

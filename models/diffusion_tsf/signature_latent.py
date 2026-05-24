@@ -121,18 +121,19 @@ def overlap_add_patches(
     acc = torch.zeros(batch, horizon, n_channels, device=device, dtype=dtype)
     weight = torch.zeros(batch, horizon, 1, device=device, dtype=dtype)
 
-    window = torch.hann_window(width, device=device, dtype=dtype).view(1, width, 1)
+    # Hann with a floor so boundary timesteps are not forced to zero.
+    window = torch.hann_window(width, periodic=False, device=device, dtype=dtype).view(1, width, 1)
+    window = window.clamp_min(0.05)
 
     for p in range(n_patches):
         start = p * stride
         end = start + width
         if end > horizon:
             break
-        w = window
-        acc[:, start:end, :] += patches[:, p, :, :] * w
-        weight[:, start:end, :] += w
+        acc[:, start:end, :] += patches[:, p, :, :] * window
+        weight[:, start:end, :] += window
 
-    return acc / weight.clamp_min(1e-8)
+    return acc / weight.clamp_min(1e-4)
 
 
 def fuse_logsig_precision(
@@ -171,7 +172,18 @@ def fuse_point_channels(
             acc[:, :, ch] += pred[:, :, local_i] * w
             wsum[:, :, ch] += w
 
-    return acc / wsum.clamp_min(1e-8)
+    out = acc / wsum.clamp_min(1e-8)
+    uncovered = (wsum.squeeze(-1) < 1e-6).any(dim=-1)
+    if uncovered.any():
+        # Last resort: fill uncovered channels from the branch with the widest subset.
+        best_idx = max(range(len(branch_preds)), key=lambda i: len(branch_preds[i][0]))
+        best_subset, best_pred = branch_preds[best_idx]
+        for ch in range(n_channels):
+            if (wsum[:, ch, 0] < 1e-6).any():
+                if ch in best_subset:
+                    local_i = list(best_subset).index(ch)
+                    out[:, :, ch] = best_pred[:, :, local_i]
+    return out
 
 
 def logsig_consistency_loss(

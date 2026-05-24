@@ -56,7 +56,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     WORKERS="${WORKERS:-12}"
     MAX_CONCURRENT="${MAX_CONCURRENT:-$WORKERS}"
     mkdir -p "$SCRIPT_DIR/results/signature_diffusion/logs"
-    echo "Submitting signature+MSE Optuna array: workers=$WORKERS max_concurrent=$MAX_CONCURRENT"
+    echo "Submitting signature diffusion Optuna array: workers=$WORKERS max_concurrent=$MAX_CONCURRENT"
     TUNE_SBATCH=(
         --parsable
         --array="1-${WORKERS}%${MAX_CONCURRENT}"
@@ -128,7 +128,7 @@ mkdir -p "$LOG_DIR" "$CKPT_DIR"
 DATASETS=(ETTh1 ETTh2 exchange_rate)
 DATASET="${DATASETS[$(( (ARRAY_ID - 1) % ${#DATASETS[@]} ))]}"
 
-STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-a${ARRAY_ID}-${DATASET}-sigmse"
+STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-a${ARRAY_ID}-${DATASET}-sigdiff"
 LOG_FILE="$LOG_DIR/${STEM}.log"
 exec >>"$LOG_FILE" 2>&1
 
@@ -199,7 +199,7 @@ DATALOADER_WORKERS="${DATALOADER_WORKERS:-2}"
 LOOKBACK_LENGTH="${LOOKBACK_LENGTH:-96}"
 FORECAST_LENGTH="${FORECAST_LENGTH:-96}"
 LOOKBACK_OVERLAP="${LOOKBACK_OVERLAP:-8}"
-OPTUNA_STORAGE="${OPTUNA_STORAGE:-sqlite:///$RUN_ROOT/signature_tuning.db}"
+OPTUNA_STORAGE="${OPTUNA_STORAGE:-sqlite:///$RUN_ROOT/signature_diffusion_tuning.db}"
 RESULTS_DIR="${RESULTS_DIR:-$RUN_ROOT}"
 
 # One Optuna study per dataset per sbatch submission; array workers join via load_if_exists=True.

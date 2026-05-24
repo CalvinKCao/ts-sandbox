@@ -19,6 +19,7 @@ from models.diffusion_tsf.signature_latent import (
     fuse_point_channels,
     latent_dim,
     logsig_consistency_loss,
+    num_patches,
     overlap_add_patches,
     select_channels,
 )
@@ -139,6 +140,21 @@ class SignatureDiffusionModel(nn.Module):
             stride=self.cfg.latent.patch_stride,
         )
 
+    def _align_cond_future(
+        self,
+        cond: torch.Tensor,
+        z0: torch.Tensor,
+    ) -> torch.Tensor:
+        """Match cond patch count to future (use trailing past patches)."""
+        if cond.size(1) == z0.size(1):
+            return cond
+        if cond.size(1) > z0.size(1):
+            return cond[:, -z0.size(1) :, :]
+        raise ValueError(
+            f"cond patches ({cond.size(1)}) < future patches ({z0.size(1)}); "
+            "increase lookback or reduce patch_size"
+        )
+
     def forward_branch(
         self,
         past_btc: torch.Tensor,
@@ -146,6 +162,7 @@ class SignatureDiffusionModel(nn.Module):
     ) -> Tuple[torch.Tensor, dict]:
         z0, _ = encode_series_logsig(future_btc, self.cfg.latent)
         cond, _ = encode_series_logsig(past_btc, self.cfg.latent)
+        cond = self._align_cond_future(cond, z0)
 
         batch = z0.size(0)
         t = torch.randint(0, self.diff_steps, (batch,), device=z0.device, dtype=torch.long)
@@ -179,6 +196,11 @@ class SignatureDiffusionModel(nn.Module):
         n_samples: int = 1,
     ) -> torch.Tensor:
         cond, _ = encode_series_logsig(past_btc, self.cfg.latent)
+        n_future_p = num_patches(
+            horizon, self.cfg.latent.patch_size, self.cfg.latent.patch_stride
+        )
+        if cond.size(1) != n_future_p:
+            cond = cond[:, -n_future_p:, :]
         batch = past_btc.size(0)
         n_patches = cond.size(1)
         d = cond.size(2)
@@ -216,28 +238,30 @@ class SignatureDiffusionModel(nn.Module):
 
     @torch.no_grad()
     def predict(self, past: torch.Tensor, horizon: Optional[int] = None, *, n_variates: int) -> torch.Tensor:
-        """Run branches that match this model's ``n_channels``; fuse in point space."""
+        """Full-horizon forecast on all variates (model trained with ``n_channels == n_variates``)."""
         past_btc = _to_btc(past)
         horizon = horizon or self.cfg.horizon
-        subsets = generate_variate_subsets(
-            n_variates,
-            scheme=self.cfg.subset_scheme,
-            subset_size=self.cfg.subset_size,
-            subset_stride=self.cfg.subset_stride,
-            max_branches=self.cfg.max_branches,
-        )
-        branches: List[Tuple[Sequence[int], torch.Tensor]] = []
-        for s in subsets:
-            if len(s) != self.n_channels:
-                continue
-            past_s = select_channels(past_btc, s)
-            pred = self.sample_branch(past_s, horizon, n_samples=1)
-            branches.append((s, pred))
-
-        if not branches:
-            return torch.zeros(past_btc.size(0), horizon, n_variates, device=past_btc.device)
-
-        if len(branches) == 1 and len(branches[0][0]) == n_variates:
-            return branches[0][1]
-
-        return fuse_point_channels(branches, n_channels=n_variates)
+        if self.n_channels != n_variates:
+            raise ValueError(
+                f"model n_channels={self.n_channels} but n_variates={n_variates}; "
+                "reload checkpoint trained on full variate count"
+            )
+        if self.cfg.subset_scheme != "all":
+            subsets = generate_variate_subsets(
+                n_variates,
+                scheme=self.cfg.subset_scheme,
+                subset_size=self.cfg.subset_size,
+                subset_stride=self.cfg.subset_stride,
+                max_branches=self.cfg.max_branches,
+                ensure_coverage=True,
+            )
+            branches: List[Tuple[Sequence[int], torch.Tensor]] = []
+            for s in subsets:
+                if len(s) != self.n_channels:
+                    continue
+                past_s = select_channels(past_btc, s)
+                pred = self.sample_branch(past_s, horizon, n_samples=1)
+                branches.append((s, pred))
+            if len(branches) > 1:
+                return fuse_point_channels(branches, n_channels=n_variates)
+        return self.sample_branch(past_btc, horizon, n_samples=1)
