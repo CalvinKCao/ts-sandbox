@@ -277,3 +277,12 @@ opencode.json
 # end lnai-generated
 accuracy_summary.csv
 results_experimental/
+
+# SimDiff vendor tree (keep code; ignore data/checkpoints)
+SimDiff/.git/
+SimDiff/checkpoints/
+SimDiff/results/
+SimDiff/dataset/
+SimDiff/assets/
+SimDiff/test_results/
+results_simdiff/

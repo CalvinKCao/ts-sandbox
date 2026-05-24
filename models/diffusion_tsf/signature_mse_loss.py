@@ -88,6 +88,29 @@ def truncated_signature(path: torch.Tensor, depth: int) -> torch.Tensor:
     return signatory.signature(path, depth, basepoint=True)
 
 
+def truncated_logsignature(
+    path: torch.Tensor,
+    depth: int,
+    *,
+    mode: str = "words",
+) -> torch.Tensor:
+    """Truncated log-signature (Lyndon/word basis) for a multivariate path."""
+    if path.size(1) < 2:
+        raise ValueError(
+            f"logsignature needs at least 2 time steps after basepoint; got length {path.size(1)}"
+        )
+    return signatory.logsignature(path, depth, basepoint=True, mode=mode)
+
+
+def logsignature_dim(n_path_channels: int, depth: int) -> int:
+    """Channel count for ``mode='words'`` log-signature."""
+    return signatory.logsignature_channels(n_path_channels, depth)
+
+
+def signature_dim(n_path_channels: int, depth: int) -> int:
+    return signatory.signature_channels(n_path_channels, depth)
+
+
 @dataclass
 class SignatureMSELossOutput:
     loss: torch.Tensor
