@@ -1,5 +1,9 @@
-# Shared venv bootstrap for signature+MSE Slurm jobs.
-# Source from slurm_signature_tune.sh / slurm_signature_finalize.sh
+# Shared venv bootstrap for signature+MSE and signature-diffusion Slurm jobs.
+# Source from slurm_signature*.sh / slurm_signature_diffusion*.sh
+#
+# SIGNATURE_VENV_PROFILE:
+#   full      — torch + signatory + reformer stack (iTransformer signature-MSE)
+#   diffusion — torch + signatory + optuna only (log-signature diffusion; no reformer)
 
 signature_pip_retry() {
     local attempt=1
@@ -15,31 +19,63 @@ signature_pip_retry() {
     return 1
 }
 
-# reformer-pytorch is not always in the wheelhouse; deps must include product-key-memory.
+signature_venv_profile() {
+    case "${SIGNATURE_VENV_PROFILE:-full}" in
+        full|diffusion) echo "${SIGNATURE_VENV_PROFILE:-full}" ;;
+        *)
+            echo "[setup] unknown SIGNATURE_VENV_PROFILE=${SIGNATURE_VENV_PROFILE}; using full" >&2
+            echo "full"
+            ;;
+    esac
+}
+
+# reformer-pytorch is not in the Alliance wheelhouse on Killarney; PyPI often blocked on compute.
 signature_install_reformer_stack() {
     local stack="reformer-pytorch==1.4.4 axial-positional-embedding local-attention product-key-memory"
-    if signature_pip_retry pip install --no-index $stack -q 2>/dev/null; then
+    if signature_pip_retry pip install --no-index $stack -q; then
         echo "[setup] reformer stack from wheelhouse"
         return 0
     fi
-    echo "[setup] wheelhouse missing reformer stack; using PyPI"
-    signature_pip_retry pip install $stack -q
+    echo "[setup] wheelhouse missing reformer stack; trying PyPI (login node / outbound nodes)"
+    if signature_pip_retry pip install $stack -q; then
+        return 0
+    fi
+    echo "[setup] ERROR: reformer stack install failed (needed for SIGNATURE_VENV_PROFILE=full)"
+    echo "[setup] Build once on login node: BUILD_SHARED_VENV=1 bash slurm_signature_tune.sh"
+    return 1
+}
+
+signature_install_signatory() {
+    if signature_pip_retry pip install --no-index signatory -q 2>/dev/null; then
+        echo "[setup] signatory from wheelhouse"
+        return 0
+    fi
+    echo "[setup] wheelhouse missing signatory; pip install --no-build-isolation"
+    signature_pip_retry pip install signatory --no-build-isolation -q
 }
 
 signature_verify_venv() {
+    local profile
+    profile="$(signature_venv_profile)"
     local skip_cuda="${SIGNATURE_SKIP_CUDA_CHECK:-0}"
-    python - <<PY
+    SIGNATURE_VENV_PROFILE="$profile" SIGNATURE_SKIP_CUDA_CHECK="$skip_cuda" python - <<PY
 import os
 import torch
 import signatory
-from reformer_pytorch import LSHSelfAttention
-import product_key_memory
 
+profile = os.environ.get("SIGNATURE_VENV_PROFILE", "full")
 skip = os.environ.get("SIGNATURE_SKIP_CUDA_CHECK", "0") == "1"
+if profile == "full":
+    from reformer_pytorch import LSHSelfAttention  # noqa: F401
+    import product_key_memory  # noqa: F401
+else:
+    import optuna  # noqa: F401
+
 if not skip:
     assert torch.cuda.is_available(), "CUDA is required for this Slurm job"
 print(
     "venv ok:",
+    "profile", profile,
     "torch", torch.__version__,
     "signatory", getattr(signatory, "__version__", "unknown"),
     "cuda_skip" if skip else ("gpu " + torch.cuda.get_device_name(0)),
@@ -48,6 +84,10 @@ PY
 }
 
 signature_install_core_packages() {
+    local profile
+    profile="$(signature_venv_profile)"
+    echo "[setup] venv profile: $profile"
+
     signature_pip_retry pip install --no-index --upgrade pip -q
     signature_pip_retry pip install --no-index \
         'torch==2.11.0+computecanada' \
@@ -55,8 +95,13 @@ signature_install_core_packages() {
         sqlalchemy colorlog alembic packaging -q
     signature_pip_retry pip install --no-index optuna -q \
         || signature_pip_retry pip install optuna -q
-    signature_install_reformer_stack
-    signature_pip_retry pip install signatory --no-build-isolation -q
+
+    if [ "$profile" = "full" ]; then
+        signature_install_reformer_stack
+    else
+        echo "[setup] skipping reformer stack (diffusion profile)"
+    fi
+    signature_install_signatory
 }
 
 signature_cluster_venv() {
@@ -97,5 +142,5 @@ signature_build_shared_venv() {
     signature_install_core_packages
     export SIGNATURE_SKIP_CUDA_CHECK=1
     signature_verify_venv
-    echo "[setup] Shared venv ready: $store/venv"
+    echo "[setup] Shared venv ready: $store/venv (profile=$(signature_venv_profile))"
 }

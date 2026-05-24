@@ -11,7 +11,7 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=50G
-#SBATCH --time=1:00:00
+#SBATCH --time=10:00:00
 #SBATCH --array=1-3%3
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -26,6 +26,7 @@ if [ ! -f "$SCRIPT_DIR/slurm_signature_diffusion_finalize.sh" ]; then
     SCRIPT_DIR="$SCRIPT_PATH_DIR"
 fi
 VENV_HELPER="$SCRIPT_DIR/cluster/setup_signature_cluster_venv.sh"
+export SIGNATURE_VENV_PROFILE=diffusion
 DATASETS=(ETTh1 ETTh2 exchange_rate)
 
 if [ -z "${SLURM_JOB_ID:-}" ]; then

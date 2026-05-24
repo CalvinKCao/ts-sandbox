@@ -20,7 +20,7 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=50G
-#SBATCH --time=1:00:00
+#SBATCH --time=10:00:00
 #SBATCH --array=1-12%12
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -35,6 +35,7 @@ if [ ! -f "$SCRIPT_DIR/slurm_signature_diffusion_tune.sh" ]; then
     SCRIPT_DIR="$SCRIPT_PATH_DIR"
 fi
 VENV_HELPER="$SCRIPT_DIR/cluster/setup_signature_cluster_venv.sh"
+export SIGNATURE_VENV_PROFILE=diffusion
 
 if [ -z "${SLURM_JOB_ID:-}" ]; then
     if [ "${BUILD_SHARED_VENV:-0}" = "1" ]; then
@@ -64,7 +65,9 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         --error=/dev/null
     )
     if [ "${SMOKE_TEST:-0}" = "1" ]; then
-        TUNE_SBATCH+=(--time=0:30:00 --export=ALL,SMOKE_TEST=1)
+        TUNE_SBATCH+=(--time=0:30:00 --export=ALL,SMOKE_TEST=1,SIGNATURE_VENV_PROFILE=diffusion)
+    else
+        TUNE_SBATCH+=(--time=10:00:00 --export=ALL,SIGNATURE_VENV_PROFILE=diffusion)
     fi
     ARRAY_JOB_ID="$(sbatch "${TUNE_SBATCH[@]}" "$SCRIPT_DIR/slurm_signature_diffusion_tune.sh")"
     echo "Tuning array job: $ARRAY_JOB_ID"
@@ -84,6 +87,8 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         )
         if [ "${SMOKE_TEST:-0}" = "1" ]; then
             FINALIZE_SBATCH+=(--time=0:20:00)
+        else
+            FINALIZE_SBATCH+=(--time=10:00:00)
         fi
         FINALIZE_JOB_ID="$(sbatch "${FINALIZE_SBATCH[@]}" "$SCRIPT_DIR/slurm_signature_diffusion_finalize.sh")"
         echo "Finalize array job: $FINALIZE_JOB_ID  [afterany:${ARRAY_JOB_ID}]"
