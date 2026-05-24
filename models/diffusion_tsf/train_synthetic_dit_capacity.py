@@ -20,15 +20,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import json
 import logging
 import math
 import os
-import random
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -43,7 +44,6 @@ if project_root not in sys.path:
 from models.diffusion_tsf.config import DiffusionTSFConfig
 from models.diffusion_tsf.diffusion_model import DiffusionTSF
 from models.diffusion_tsf.guidance import iTransformerGuidance
-from models.diffusion_tsf.train_multivariate_pipeline import create_itransformer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -100,10 +100,13 @@ class RunConfig:
     horizon: int = 96
     lookback_overlap: int = 8
     image_height: int = 64
+    max_scale: float = 6.0
     num_diffusion_steps: int = 1000
     ddim_steps: int = 30
     batch_size: int = 16
     lr: float = 2e-4
+    itrans_lr: float = 1e-3
+    itrans_pretrain_epochs: int = 40
     max_epochs: int = 150
     patience: int = 12
     samples_per_epoch: int = 512
@@ -195,9 +198,11 @@ def smoke_run_config() -> RunConfig:
         horizon=16,
         lookback_overlap=4,
         image_height=32,
+        max_scale=6.0,
         num_diffusion_steps=50,
         ddim_steps=8,
         batch_size=4,
+        itrans_pretrain_epochs=1,
         max_epochs=3,
         patience=2,
         samples_per_epoch=16,
@@ -206,6 +211,123 @@ def smoke_run_config() -> RunConfig:
         steps_per_epoch=2,
         emd_lambda=0.05,
     )
+
+
+class ZeroGuidance(nn.Module):
+    """Guidance object that preserves the default guidance channel but zeros it."""
+
+    def get_forecast(self, past: torch.Tensor, forecast_length: int) -> torch.Tensor:
+        return past.new_zeros(past.shape[0], past.shape[1], forecast_length)
+
+
+def get_itransformer_class():
+    itrans_root = os.path.join(project_root, "models", "iTransformer")
+    if itrans_root not in sys.path:
+        sys.path.insert(0, itrans_root)
+    itrans_path = os.path.join(itrans_root, "model", "iTransformer.py")
+    spec = importlib.util.spec_from_file_location("synthetic_iTransformer_module", itrans_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load iTransformer from {itrans_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.Model
+
+
+def create_itransformer(seq_len: int, pred_len: int, num_vars: int, dropout: float = 0.1) -> nn.Module:
+    cfg = SimpleNamespace(
+        seq_len=seq_len,
+        pred_len=pred_len,
+        output_attention=False,
+        use_norm=True,
+        d_model=512,
+        d_ff=512,
+        e_layers=4,
+        n_heads=8,
+        dropout=dropout,
+        activation="gelu",
+        embed="fixed",
+        freq="h",
+        factor=1,
+        enc_in=num_vars,
+        class_strategy="projection",
+    )
+    return get_itransformer_class()(cfg)
+
+
+def instance_normalize_target(past: torch.Tensor, future: torch.Tensor, overlap: int) -> torch.Tensor:
+    mean = past.mean(dim=-1, keepdim=True)
+    std = past.std(dim=-1, keepdim=True) + 1e-8
+    return (future[..., overlap:] - mean) / std
+
+
+def train_itransformer_guidance(run_cfg: RunConfig, device: torch.device, seed: int) -> iTransformerGuidance:
+    """Train the branch-default iTransformer on the same synthetic task family."""
+    itrans = create_itransformer(
+        seq_len=run_cfg.lookback,
+        pred_len=run_cfg.horizon,
+        num_vars=1,
+        dropout=0.1,
+    ).to(device)
+    itrans.train()
+    opt = torch.optim.AdamW(itrans.parameters(), lr=run_cfg.itrans_lr)
+
+    for epoch in range(1, run_cfg.itrans_pretrain_epochs + 1):
+        train_linear = SyntheticTaskDataset(
+            run_cfg.samples_per_epoch // 2,
+            run_cfg.lookback,
+            run_cfg.horizon,
+            run_cfg.lookback_overlap,
+            SyntheticTaskDataset.TASK_LINEAR,
+            seed=seed + epoch * 13,
+        )
+        train_periodic = SyntheticTaskDataset(
+            run_cfg.samples_per_epoch // 2,
+            run_cfg.lookback,
+            run_cfg.horizon,
+            run_cfg.lookback_overlap,
+            SyntheticTaskDataset.TASK_PERIODIC,
+            seed=seed + epoch * 17,
+        )
+        loader_linear = DataLoader(train_linear, batch_size=run_cfg.batch_size, shuffle=True, drop_last=True)
+        loader_periodic = DataLoader(train_periodic, batch_size=run_cfg.batch_size, shuffle=True, drop_last=True)
+        steps = max(len(loader_linear), len(loader_periodic))
+        it_lin = iter(loader_linear)
+        it_per = iter(loader_periodic)
+        loss_sum = 0.0
+        n_steps = 0
+        for _ in range(steps):
+            for loader_name in ("linear", "periodic"):
+                if loader_name == "linear":
+                    try:
+                        past, future = next(it_lin)
+                    except StopIteration:
+                        it_lin = iter(loader_linear)
+                        past, future = next(it_lin)
+                else:
+                    try:
+                        past, future = next(it_per)
+                    except StopIteration:
+                        it_per = iter(loader_periodic)
+                        past, future = next(it_per)
+                past, future = past.to(device), future.to(device)
+                target = future[..., run_cfg.lookback_overlap :]
+                pred = itrans(past.permute(0, 2, 1), None, None, None).permute(0, 2, 1)
+                mean = past.mean(dim=-1, keepdim=True)
+                std = past.std(dim=-1, keepdim=True) + 1e-8
+                loss = torch.nn.functional.mse_loss((pred - mean) / std, (target - mean) / std)
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                opt.step()
+                loss_sum += loss.item()
+                n_steps += 1
+        logger.info(
+            "[iTransformer guidance] epoch %d/%d mse=%.5f",
+            epoch,
+            run_cfg.itrans_pretrain_epochs,
+            loss_sum / max(n_steps, 1),
+        )
+
+    return iTransformerGuidance(itrans)
 
 
 def build_model(spec: VariantSpec, run_cfg: RunConfig, device: torch.device) -> DiffusionTSF:
@@ -217,6 +339,7 @@ def build_model(spec: VariantSpec, run_cfg: RunConfig, device: torch.device) -> 
         lookback_overlap=run_cfg.lookback_overlap,
         past_loss_weight=0.3,
         image_height=run_cfg.image_height,
+        max_scale=run_cfg.max_scale,
         blur_kernel_size=11 if run_cfg.image_height <= 32 else 31,
         num_diffusion_steps=run_cfg.num_diffusion_steps,
         ddim_steps=run_cfg.ddim_steps,
@@ -224,7 +347,7 @@ def build_model(spec: VariantSpec, run_cfg: RunConfig, device: torch.device) -> 
         cfg_scale=run_cfg.cfg_scale,
         emd_lambda=run_cfg.emd_lambda,
         use_coordinate_channel=True,
-        use_guidance_channel=spec.use_guidance,
+        use_guidance_channel=True,
         disable_cross_attention=not spec.use_guidance,
         model_type="dit",
         dit_patch_size=spec.dit_patch_size,
@@ -236,15 +359,7 @@ def build_model(spec: VariantSpec, run_cfg: RunConfig, device: torch.device) -> 
         use_amp=False,
         unet_max_chunk_size=0,
     )
-    guidance = None
-    if spec.use_guidance:
-        itrans = create_itransformer(
-            seq_len=run_cfg.lookback,
-            pred_len=run_cfg.horizon,
-            num_vars=1,
-            dropout=0.1,
-        )
-        guidance = iTransformerGuidance(itrans)
+    guidance = ZeroGuidance()
     model = DiffusionTSF(cfg, guidance_model=guidance)
     return model.to(device)
 
@@ -282,10 +397,12 @@ def eval_task_mse(
             num_ddim_steps=run_cfg.ddim_steps,
             cfg_scale=run_cfg.cfg_scale,
         )
-        pred = out["prediction"]
+        pred = out["prediction_norm"]
         if pred.dim() == 2:
             pred = pred.unsqueeze(1)
-        target = future[..., k : k + h]
+        target = instance_normalize_target(past, future, k)
+        if target.shape[-1] != h:
+            raise RuntimeError(f"target horizon mismatch target={target.shape} horizon={h}")
         if pred.shape != target.shape:
             raise RuntimeError(f"shape mismatch pred={pred.shape} target={target.shape}")
         total += torch.nn.functional.mse_loss(pred, target, reduction="sum").item()
@@ -301,28 +418,10 @@ def train_one_variant(
 ) -> VariantResult:
     torch.manual_seed(seed)
     model = build_model(spec, run_cfg, device)
+    if spec.use_guidance:
+        model.set_guidance_model(train_itransformer_guidance(run_cfg, device, seed + 50_000))
     n_params = sum(p.numel() for p in model.noise_predictor.parameters()) / 1e6
-
-    train_linear = SyntheticTaskDataset(
-        run_cfg.samples_per_epoch // 2,
-        run_cfg.lookback,
-        run_cfg.horizon,
-        run_cfg.lookback_overlap,
-        SyntheticTaskDataset.TASK_LINEAR,
-        seed=seed + 1,
-    )
-    train_periodic = SyntheticTaskDataset(
-        run_cfg.samples_per_epoch // 2,
-        run_cfg.lookback,
-        run_cfg.horizon,
-        run_cfg.lookback_overlap,
-        SyntheticTaskDataset.TASK_PERIODIC,
-        seed=seed + 2,
-    )
-    loader_linear = DataLoader(train_linear, batch_size=run_cfg.batch_size, shuffle=True, drop_last=True)
-    loader_periodic = DataLoader(train_periodic, batch_size=run_cfg.batch_size, shuffle=True, drop_last=True)
-
-    opt = torch.optim.AdamW(model.noise_predictor.parameters(), lr=run_cfg.lr)
+    opt = torch.optim.AdamW(model.parameters(), lr=run_cfg.lr)
 
     best_combined = float("inf")
     best_linear = float("inf")
@@ -334,6 +433,24 @@ def train_one_variant(
     val_seed = seed + 10_000
 
     for epoch in range(1, run_cfg.max_epochs + 1):
+        train_linear = SyntheticTaskDataset(
+            run_cfg.samples_per_epoch // 2,
+            run_cfg.lookback,
+            run_cfg.horizon,
+            run_cfg.lookback_overlap,
+            SyntheticTaskDataset.TASK_LINEAR,
+            seed=seed + epoch * 101,
+        )
+        train_periodic = SyntheticTaskDataset(
+            run_cfg.samples_per_epoch // 2,
+            run_cfg.lookback,
+            run_cfg.horizon,
+            run_cfg.lookback_overlap,
+            SyntheticTaskDataset.TASK_PERIODIC,
+            seed=seed + epoch * 103,
+        )
+        loader_linear = DataLoader(train_linear, batch_size=run_cfg.batch_size, shuffle=True, drop_last=True)
+        loader_periodic = DataLoader(train_periodic, batch_size=run_cfg.batch_size, shuffle=True, drop_last=True)
         model.train()
         steps = run_cfg.steps_per_epoch
         if steps is None:
@@ -500,6 +617,10 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-epochs", type=int, default=None)
     parser.add_argument("--patience", type=int, default=None)
+    parser.add_argument("--samples-per-epoch", type=int, default=None)
+    parser.add_argument("--val-samples", type=int, default=None)
+    parser.add_argument("--itrans-pretrain-epochs", type=int, default=None)
+    parser.add_argument("--max-scale", type=float, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--success-mse", type=float, default=None)
     args = parser.parse_args()
@@ -509,6 +630,14 @@ def main() -> None:
         run_cfg.max_epochs = args.max_epochs
     if args.patience is not None:
         run_cfg.patience = args.patience
+    if args.samples_per_epoch is not None:
+        run_cfg.samples_per_epoch = args.samples_per_epoch
+    if args.val_samples is not None:
+        run_cfg.val_samples = args.val_samples
+    if args.itrans_pretrain_epochs is not None:
+        run_cfg.itrans_pretrain_epochs = args.itrans_pretrain_epochs
+    if args.max_scale is not None:
+        run_cfg.max_scale = args.max_scale
     if args.batch_size is not None:
         run_cfg.batch_size = args.batch_size
     if args.success_mse is not None:

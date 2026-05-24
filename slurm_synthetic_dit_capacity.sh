@@ -17,7 +17,10 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     IS_SMOKE=0
     for arg in "$@"; do [ "$arg" = "--smoke-test" ] && IS_SMOKE=1; done
 
-    mkdir -p "$SCRIPT_DIR/results/synthetic_dit_capacity/logs"
+    mkdir -p "$SCRIPT_DIR/results/bootstrap"
+    SB_OUT='results/bootstrap/%x-%j.out'
+    SB_ERR='results/bootstrap/%x-%j.err'
+    EXPORT_ARG="ALL,TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR=1"
 
     if [ "$IS_SMOKE" -eq 1 ]; then
         echo "Submitting SMOKE (L40S, 8G, 30 min)..."
@@ -30,10 +33,11 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
             --cpus-per-task=4 \
             --mem=8G \
             --chdir="$SCRIPT_DIR" \
-            --output=/dev/null \
-            --error=/dev/null \
+            --output="$SB_OUT" \
+            --error="$SB_ERR" \
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
+            --export="$EXPORT_ARG" \
             "$SCRIPT_DIR/slurm_synthetic_dit_capacity.sh" "$@"
     else
         echo "Submitting FULL (L40S, 50G, 12h)..."
@@ -46,10 +50,11 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
             --cpus-per-task=8 \
             --mem=50G \
             --chdir="$SCRIPT_DIR" \
-            --output=/dev/null \
-            --error=/dev/null \
+            --output="$SB_OUT" \
+            --error="$SB_ERR" \
             --mail-type=BEGIN,END,FAIL \
             --mail-user=ccao87@uwo.ca \
+            --export="$EXPORT_ARG" \
             "$SCRIPT_DIR/slurm_synthetic_dit_capacity.sh" "$@"
     fi
     exit 0
@@ -59,11 +64,13 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$SCRIPT_DIR}"
 
 STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-synth-dit-capacity"
-RUN_ROOT="$SLURM_SUBMIT_DIR/results/synthetic_dit_capacity/$STEM"
+RUN_ROOT="$SLURM_SUBMIT_DIR/results/$STEM"
 LOG_DIR="$RUN_ROOT/logs"
-RES_DIR="$RUN_ROOT/metrics"
-mkdir -p "$LOG_DIR" "$RES_DIR"
+CKPT_DIR="$RUN_ROOT/ckpts"
+DATA_DIR="$RUN_ROOT/datasets"
+mkdir -p "$LOG_DIR" "$CKPT_DIR" "$DATA_DIR"
 LOG_FILE="$LOG_DIR/${STEM}.log"
+touch "$LOG_FILE"
 exec >>"$LOG_FILE" 2>&1
 
 echo "=========================================="
@@ -79,7 +86,9 @@ module load python/3.11
 module load cuda/12.2
 module load cudnn/8.9
 
-if [ -d "${SCRATCH:-}/ts-sandbox" ]; then
+if [ "${TS_SANDBOX_PROJECT_ROOT_SUBMIT_DIR:-}" = "1" ] && [ -d "$SLURM_SUBMIT_DIR/models/diffusion_tsf" ]; then
+    PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+elif [ -d "${SCRATCH:-}/ts-sandbox" ]; then
     PROJECT_ROOT="${SCRATCH}/ts-sandbox"
 elif [ -d "$SLURM_SUBMIT_DIR/models/diffusion_tsf" ]; then
     PROJECT_ROOT="$SLURM_SUBMIT_DIR"
@@ -100,8 +109,6 @@ pip install --no-index --upgrade pip -q
 pip install --no-index \
     'torch==2.11.0+computecanada' \
     numpy pandas scipy scikit-learn tqdm einops -q
-pip install --no-index wandb -q 2>/dev/null || pip install wandb -q
-[ -f "$PROJECT_ROOT/requirements.txt" ] && pip install -r "$PROJECT_ROOT/requirements.txt" -q || true
 
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA required'; print('torch', torch.__version__, torch.cuda.get_device_name(0))"
 
@@ -119,12 +126,12 @@ for arg in "$@"; do
 done
 
 python -u -m models.diffusion_tsf.train_synthetic_dit_capacity \
-    --results-dir "$RES_DIR" \
+    --results-dir "$LOG_DIR" \
     $SMOKE_FLAG \
     "${PY_ARGS[@]}"
 
 echo "=========================================="
 echo "Done: $(date)"
-echo "Metrics: $RES_DIR"
+echo "Metrics: $LOG_DIR"
 echo "Log: $LOG_FILE"
 echo "=========================================="
