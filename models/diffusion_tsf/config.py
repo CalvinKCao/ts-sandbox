@@ -88,6 +88,16 @@ class DiffusionTSFConfig:
     beta_start: float = 1e-4
     beta_end: float = 0.02
     noise_schedule: str = "linear"  
+
+    # binary diffusion: hard CDF images + XOR bit-flip noise.
+    diffusion_type: str = "gaussian"  # "gaussian" | "binary"
+    binary_num_steps: int = 1000
+    binary_sample_steps: int = 20
+    binary_beta_start: float = 1e-5
+    binary_beta_end: float = 0.5
+    binary_boundary_weight: float = 1.0
+    binary_background_weight: float = 0.1
+    binary_boundary_width: int = 8
     
     # ddim stuff
     ddim_steps: int = 50
@@ -164,6 +174,7 @@ class DiffusionTSFConfig:
         assert self.blur_kernel_size % 2 == 1
         assert self.num_diffusion_steps > 0
         assert self.noise_schedule in ["linear", "cosine", "sigmoid", "quadratic"]
+        assert self.diffusion_type in ["gaussian", "binary"]
         assert 0 <= self.cutout_prob <= 1
         assert self.representation_mode in ["pdf", "cdf"]
         if not self.variate_factorized:

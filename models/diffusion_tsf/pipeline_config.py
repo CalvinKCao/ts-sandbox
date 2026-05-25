@@ -116,7 +116,7 @@ SYNTHETIC_SAMPLES_CAP: Optional[int] = 50000  # None = no cap on TOTAL pool size
 # directly as `itransformer.pt` (no separate "full" pretrain step).
 #
 # Paper-faithful setup: fixed 10 epochs, no early stopping. Only LR is searched.
-N_ITRANS_HP_TRIALS: int = 3
+N_ITRANS_HP_TRIALS: int = 8
 ITRANS_HP_PRETRAIN_MAX_EPOCHS: int = 10
 
 # Fallback pretrain (only runs if HP cache is missing).
@@ -124,13 +124,13 @@ PRETRAIN_EPOCHS: int = 10
 
 # Phase 1B: Diffusion HP tuning on synthetic data. Best HP-tuning model is saved
 # directly as `diffusion.pt` (no separate "full" pretrain step).
-N_DIFFUSION_HP_TRIALS: int = 3
-DIFFUSION_HP_MAX_EPOCHS: int = 15
+N_DIFFUSION_HP_TRIALS: int = 8
+DIFFUSION_HP_MAX_EPOCHS: int = 10
 DIFFUSION_HP_PATIENCE: int = 10
 
-# Fallback diffusion pretrain (only runs if HP cache is missing).
-PRETRAIN_DIFFUSION_EPOCHS: int = 3
-PRETRAIN_DIFFUSION_MAX_EPOCHS: int = 15
+# Fallback/final diffusion pretrain (only runs if HP cache is missing).
+PRETRAIN_DIFFUSION_EPOCHS: int = 20
+PRETRAIN_DIFFUSION_MAX_EPOCHS: int = 20
 
 
 # ---- Phase 2 (real-data fine-tune / HP) -------------------------------------------
@@ -144,11 +144,11 @@ ITRANS_HP_FINETUNE_MAX_EPOCHS: int = 10
 ITRANS_REAL_COLD_START: bool = True
 
 # Phase 2B: Diffusion HP tuning on real data (LR-only search; batch size auto-probed).
-# The best trial's checkpoint is reused as the final fine-tuned model — there is no
-# separate "Phase 2C" full retrain.
-N_FINETUNE_HP_TRIALS: int = 3
+# The best trial selects hyperparameters; the final model then trains for 20 epochs.
+N_FINETUNE_HP_TRIALS: int = 8
 HP_TUNE_EPOCHS: int = 10
-HP_TUNE_PATIENCE: int = 5
+HP_TUNE_PATIENCE: int = 10
+FINAL_FINETUNE_EPOCHS: int = 20
 # Optuna log-uniform bounds for Phase 2B only (finetune_hp_objective).
 FINETUNE_HP_LR_MIN: float = 3e-6
 FINETUNE_HP_LR_MAX: float = 2e-4

@@ -16,10 +16,11 @@ Usage:
 import argparse
 import json
 import os
+import random
 import sys
 from pathlib import Path
 from collections import defaultdict
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import matplotlib
@@ -51,6 +52,30 @@ def denorm(x, mean, std):
     return x * s + m
 
 
+def infer_diffusion_type(ckpt: dict, override: Optional[str] = None) -> str:
+    if override:
+        return override
+    cfg = ckpt.get('config')
+    if hasattr(cfg, 'diffusion_type'):
+        return cfg.diffusion_type
+    if isinstance(cfg, dict):
+        return cfg.get('diffusion_type', 'gaussian')
+    sd = ckpt.get('model_state_dict', {})
+    for key, value in sd.items():
+        if key.endswith('noise_predictor.final_conv.weight') and value.shape[0] == 2:
+            return 'binary'
+        if key.endswith('noise_predictor.head.bias') and value.shape[0] == 2:
+            return 'binary'
+    return 'gaussian'
+
+
+def choose_extra_indices(n_test: int, n_extra: int, rng: random.Random, exclude: List[int]) -> List[int]:
+    pool = [i for i in range(n_test) if i not in exclude]
+    if not pool or n_extra <= 0:
+        return []
+    return rng.sample(pool, min(n_extra, len(pool)))
+
+
 def run_comparison(
     checkpoint_dir: Optional[str],
     output_dir: str,
@@ -59,6 +84,10 @@ def run_comparison(
     diffusion_ensemble: int = 3,
     lookback_length: int = LOOKBACK_LENGTH,
     forecast_length: int = FORECAST_LENGTH,
+    dataset_filter: Optional[str] = None,
+    num_extra_windows: int = 2,
+    diffusion_type: Optional[str] = None,
+    random_seed: int = 13,
 ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
@@ -82,6 +111,8 @@ def run_comparison(
                 continue
             with open(meta_path) as f:
                 meta = json.load(f)
+            if dataset_filter and meta['dataset_name'] != dataset_filter:
+                continue
             by_dataset[meta['dataset_name']].append({
                 'subset_id': meta['subset_id'],
                 'variate_indices': meta['variate_indices'],
@@ -163,22 +194,28 @@ def run_comparison(
             print(f"  Skipping {dataset_name}: no iTransformer for subset={subset_id}")
             continue
 
+        diff_ckpt = torch.load(sub['best_pt'], map_location=device, weights_only=False)
+        diff_type = infer_diffusion_type(diff_ckpt, diffusion_type)
+        print(f"  diffusion_type={diff_type}")
+
         # Load fine-tuned diffusion with same guidance wrapper as training
-        diff_model = create_diffusion_model(n_variates=n_vars).to(device)
+        diff_model = create_diffusion_model(n_variates=n_vars, diffusion_type=diff_type).to(device)
         itrans_guidance = iTransformerGuidance(itrans_model)
         diff_model.set_guidance_model(itrans_guidance)
-        diff_ckpt = torch.load(sub['best_pt'], map_location=device, weights_only=False)
         diff_model.load_state_dict(diff_ckpt['model_state_dict'])
         diff_model.eval()
 
-        sample_indices = np.linspace(0, n_test - 1, min(num_samples, n_test), dtype=int)
+        rng = random.Random(random_seed)
+        sample_indices = np.linspace(0, n_test - 1, min(num_samples, n_test), dtype=int).tolist()
+        extra_indices = choose_extra_indices(n_test, num_extra_windows, rng, exclude=sample_indices)
         n_vars_plot = min(variables_to_plot, len(variate_indices))
-        n_rows = len(sample_indices)
+        n_rows = len(sample_indices) + len(extra_indices)
 
         fig, axes = plt.subplots(
             n_rows, n_vars_plot,
             figsize=(5.5 * n_vars_plot, 3.2 * n_rows),
             squeeze=False,
+            constrained_layout=True,
         )
 
         for row, idx in enumerate(sample_indices):
@@ -265,15 +302,36 @@ def run_comparison(
                     ax.set_ylabel(f'Sample {row + 1}', fontsize=10)
                 ax.tick_params(labelsize=7)
 
-        handles, labels = axes[0, 0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc='upper center', ncol=3, fontsize=10,
-                   bbox_to_anchor=(0.5, 1.01))
-        mode_label = 'single sample' if diffusion_ensemble <= 1 else f'{diffusion_ensemble}-sample avg'
-        fig.suptitle(f'{dataset_name}  ({mode_label})',
-                     fontsize=14, fontweight='bold', y=1.04)
+        context_len = min(forecast_length * 2, lookback_length)
+        t_past = np.arange(-context_len, 0)
+        for row_off, idx in enumerate(extra_indices, start=len(sample_indices)):
+            past, _future = test_ds[idx]
+            past_dn = denorm(past, mean, std)
+            for col in range(n_vars_plot):
+                ax = axes[row_off, col]
+                ax.plot(
+                    t_past, past_dn[col, -context_len:].numpy(),
+                    color='#546E7A', linewidth=1.1,
+                )
+                ax.axvline(x=0, color='black', linestyle=':', alpha=0.25)
+                if col == 0:
+                    ax.set_ylabel(f'Lookback {row_off - len(sample_indices) + 1}', fontsize=9)
+                vname = var_names[col] if col < len(var_names) else f'Var {col}'
+                if row_off == len(sample_indices):
+                    ax.set_title(f'{vname} (ctx)', fontsize=9)
+                ax.grid(alpha=0.2)
 
-        plt.tight_layout()
-        out_path = os.path.join(output_dir, f'comparison_{dataset_name}.png')
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        if handles:
+            fig.legend(handles, labels, loc='upper center', ncol=3, fontsize=10,
+                       bbox_to_anchor=(0.5, 1.02))
+        mode_label = 'single sample' if diffusion_ensemble <= 1 else f'{diffusion_ensemble}-sample avg'
+        fig.suptitle(
+            f'{dataset_name} • {subset_id} • {diff_type} diffusion ({mode_label})',
+            fontsize=12, fontweight='bold',
+        )
+
+        out_path = os.path.join(output_dir, f'comparison_{dataset_name}_{subset_id}.png')
         fig.savefig(out_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f"  Saved: {out_path}")
@@ -294,12 +352,24 @@ def main():
                         help='Diffusion samples to average (1=single sample, 30=full avg)')
     parser.add_argument('--lookback-length', type=int, default=LOOKBACK_LENGTH)
     parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH)
+    parser.add_argument('--dataset', type=str, default=None,
+                        help='Plot only this dataset name (e.g. ETTh2)')
+    parser.add_argument('--num-extra-windows', type=int, default=2,
+                        help='Extra lookback-only rows beneath forecast rows')
+    parser.add_argument('--diffusion-type', type=str, default=None,
+                        choices=['gaussian', 'binary'],
+                        help='Override diffusion type inferred from checkpoint')
+    parser.add_argument('--random-seed', type=int, default=13)
     args = parser.parse_args()
 
     output_dir = args.output_dir or os.path.join(RESULTS_DIR, 'viz', 'comparison')
     run_comparison(
         args.checkpoint_dir, output_dir, args.num_samples, args.vars, args.ensemble,
-        args.lookback_length, args.forecast_length
+        args.lookback_length, args.forecast_length,
+        dataset_filter=args.dataset,
+        num_extra_windows=args.num_extra_windows,
+        diffusion_type=args.diffusion_type,
+        random_seed=args.random_seed,
     )
 
 

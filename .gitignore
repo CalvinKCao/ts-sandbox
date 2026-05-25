@@ -209,6 +209,13 @@ runs/
 .tmp_timing_full4phase_ckpt/
 .tmp_timing_full4phase_ckpt2/
 temp/
+synth_data/
+results_experimental/
+results_simdiff/
+SimDiff/
+models/diffusion_tsf/checkpoints_7var/
+models/diffusion_tsf/checkpoints_multivariate/
+models/diffusion_tsf/results_multivariate/
 data_cache/
 assets/
 final_report/

@@ -19,7 +19,7 @@ from typing import Dict, Optional, Tuple, Union
 from .config import DiffusionTSFConfig
 from .preprocessing import TimeSeriesTo2D, VerticalGaussianBlur
 from .unet import ConditionalUNet2D, iTransformerTokenAdapter
-from .diffusion import DiffusionScheduler
+from .diffusion import BinaryDiffusionScheduler, DiffusionScheduler
 from .guidance import GuidanceModel, LinearRegressionGuidance
 from .metrics import monotonicity_loss
 from .dit import FactorizedDiT
@@ -189,11 +189,13 @@ class DiffusionTSF(nn.Module):
         # Use the config property for consistent calculation
         backbone_in_channels = config.backbone_in_channels
         
+        denoiser_out_channels = 2 if config.diffusion_type == "binary" else 1
+
         if config.model_type == "dit":
             self.noise_predictor = FactorizedDiT(
                 in_channels=backbone_in_channels,
                 cond_channels=config.visual_cond_channels,
-                out_channels=1,
+                out_channels=denoiser_out_channels,
                 image_height=config.image_height,
                 patch_size=config.dit_patch_size,
                 embed_dim=config.dit_embed_dim,
@@ -207,7 +209,7 @@ class DiffusionTSF(nn.Module):
         else:
             self.noise_predictor = ConditionalUNet2D(
                 in_channels=backbone_in_channels,
-                out_channels=1,
+                out_channels=denoiser_out_channels,
                 channels=config.unet_channels,
                 num_res_blocks=config.num_res_blocks,
                 attention_levels=config.attention_levels,
@@ -237,6 +239,13 @@ class DiffusionTSF(nn.Module):
             beta_end=config.beta_end,
             schedule=config.noise_schedule
         )
+        self.binary_scheduler = None
+        if config.diffusion_type == "binary":
+            self.binary_scheduler = BinaryDiffusionScheduler(
+                num_steps=config.binary_num_steps,
+                beta_start=config.binary_beta_start,
+                beta_end=config.binary_beta_end,
+            )
 
         logger.info(f"DiffusionTSF initialized:")
         logger.info(f"  Variables: {config.num_variables} ({'multivariate' if config.num_variables > 1 else 'univariate'})")
@@ -245,12 +254,15 @@ class DiffusionTSF(nn.Module):
             f"  Image size: {config.image_height} x {config.forecast_length} "
             f"(H x W; denoised future canvas)"
         )
+        logger.info(f"  Diffusion type: {config.diffusion_type}")
 
     
     def to(self, device):
         """Move model and scheduler to device."""
         super().to(device)
         self.scheduler = self.scheduler.to(device)
+        if self.binary_scheduler is not None:
+            self.binary_scheduler = self.binary_scheduler.to(device)
         return self
     
     def set_guidance_model(self, guidance_model: Optional[Union[GuidanceModel, nn.Module]]) -> None:
@@ -512,6 +524,10 @@ class DiffusionTSF(nn.Module):
                 scaled = blurred.clamp(min=0.0, max=1.0) * 2.0 - 1.0
             return scaled
         return blurred
+
+    def encode_to_2d_binary(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode 1D series to a hard binary CDF image without blur."""
+        return self.to_2d(x)
     
     def decode_from_2d(
         self,
@@ -632,6 +648,8 @@ class DiffusionTSF(nn.Module):
         t: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (shared factorized path for unet and dit backbones)."""
+        if self.config.diffusion_type == "binary":
+            return self._forward_binary_factorized(past, future, t)
         return self._forward_factorized(past, future, t)
 
     @torch.no_grad()
@@ -658,6 +676,14 @@ class DiffusionTSF(nn.Module):
             'dpmpp'          — DPM-Solver++(2M); CFG not supported (uses cond only)
         num_inference_steps overrides num_ddim_steps when set (used by dpmpp/ddim).
         """
+        if self.config.diffusion_type == "binary":
+            steps = num_inference_steps if num_inference_steps is not None else self.config.binary_sample_steps
+            return self._generate_binary_factorized(
+                past, num_steps=steps, verbose=verbose,
+                decoder_method=decoder_method, beam_width=beam_width,
+                jump_penalty_scale=jump_penalty_scale,
+                search_radius=search_radius,
+            )
         return self._generate_factorized(
             past, use_ddim=use_ddim, num_ddim_steps=num_ddim_steps,
             eta=eta, cfg_scale=cfg_scale, verbose=verbose,
@@ -907,6 +933,229 @@ class DiffusionTSF(nn.Module):
         result = {
             'prediction': future, 'prediction_norm': future_norm,
             'future_2d': future_2d, 'past_2d': past_2d,
+        }
+        if guidance_2d is not None:
+            result['guidance_2d'] = guidance_2d
+        return result
+
+    # ====================================================================
+    # Binary diffusion — hard CDF images and XOR bit-flip noise
+    # ====================================================================
+
+    def _boundary_bce_loss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """BCE weighted toward the CDF boundary, where forecast geometry lives."""
+        H = target.shape[2]
+        bw = self.config.binary_boundary_width
+        high_w = self.config.binary_boundary_weight
+        low_w = self.config.binary_background_weight
+
+        filled_count = target.sum(dim=2, keepdim=True).long().clamp(0, H - 1)
+        row_idx = torch.arange(H, device=target.device).view(1, 1, H, 1)
+        dist = (row_idx - filled_count).abs()
+        weight = torch.where(
+            dist <= bw,
+            torch.full_like(dist, high_w, dtype=torch.float),
+            torch.full_like(dist, low_w, dtype=torch.float),
+        )
+        bce = F.binary_cross_entropy_with_logits(logits, target.float(), reduction='none')
+        return (bce * weight).mean()
+
+    def _forward_binary_factorized(
+        self,
+        past: torch.Tensor,
+        future: torch.Tensor,
+        t: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Binary training: XOR-noise hard CDF images and predict clean x0 + noise mask."""
+        assert self.binary_scheduler is not None, "binary scheduler is not initialized"
+
+        B = past.shape[0]
+        V = self.config.num_variables
+        H = self.config.image_height
+        device = past.device
+        BV = B * V
+
+        past_norm, future_norm, stats = self._normalize_sequence(past, future)
+        future_2d = self.encode_to_2d_binary(future_norm)
+        W_fut = future_2d.shape[3]
+
+        if t is None:
+            t = torch.randint(0, self.config.binary_num_steps, (B,), device=device)
+        t_flat = t.unsqueeze(1).expand(-1, V).reshape(BV)
+
+        future_flat = future_2d.reshape(BV, 1, H, W_fut)
+        xt_flat, zt_flat = self.binary_scheduler.add_noise(future_flat, t_flat)
+
+        guidance_2d = None
+        if self.config.use_guidance_channel:
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
+
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
+        ctx_flat = None
+        if ctx is not None:
+            ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
+
+        canvas = self._inject_coordinate_channel(xt_flat.float())
+        canvas = self._inject_time_channels(canvas)
+
+        past_2d = self.encode_to_2d_binary(past_norm)
+        W_past = past_2d.shape[3]
+        past_flat = past_2d.reshape(BV, 1, H, W_past)
+        cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+        cond_for_unet = self._apply_coarse_dropout(cond_for_unet)
+
+        if self.training and self.config.cfg_dropout > 0.0:
+            drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
+            drop_mask_flat = drop_mask.unsqueeze(1).expand(-1, V).reshape(BV)
+            cond_for_unet = torch.where(
+                drop_mask_flat.view(BV, 1, 1, 1),
+                torch.zeros_like(cond_for_unet),
+                cond_for_unet,
+            )
+            if ctx_flat is not None:
+                ctx_flat = torch.where(
+                    drop_mask_flat.view(BV, 1, 1),
+                    torch.zeros_like(ctx_flat),
+                    ctx_flat,
+                )
+
+            if guidance_2d is not None:
+                guide_flat = guidance_2d.reshape(BV, 1, H, W_fut)
+                guide_flat = torch.where(
+                    drop_mask_flat.view(BV, 1, 1, 1),
+                    torch.zeros_like(guide_flat),
+                    guide_flat,
+                )
+                canvas = torch.cat([canvas, guide_flat], dim=1)
+        elif guidance_2d is not None:
+            canvas = torch.cat([canvas, guidance_2d.reshape(BV, 1, H, W_fut)], dim=1)
+
+        chunk_size = self.config.unet_max_chunk_size
+        if chunk_size > 0 and BV > chunk_size:
+            out_chunks = []
+            for i in range(0, BV, chunk_size):
+                end = min(i + chunk_size, BV)
+                c_ctx = ctx_flat[i:end] if ctx_flat is not None else None
+                out_chunks.append(
+                    self.noise_predictor(
+                        canvas[i:end],
+                        t_flat[i:end],
+                        cond_for_unet[i:end],
+                        encoder_hidden_states=c_ctx,
+                    )
+                )
+            out_flat = torch.cat(out_chunks, dim=0)
+        else:
+            out_flat = self.noise_predictor(
+                canvas, t_flat, cond_for_unet, encoder_hidden_states=ctx_flat
+            )
+
+        x0_logits = out_flat[:, 0:1, :, :]
+        zt_logits = out_flat[:, 1:2, :, :]
+        loss_x0 = self._boundary_bce_loss(x0_logits, future_flat)
+        loss_zt = self._boundary_bce_loss(zt_logits, zt_flat)
+        loss = loss_x0 + loss_zt
+
+        return {
+            'loss': loss,
+            'noise_loss': loss,
+            'loss_x0': loss_x0,
+            'loss_zt': loss_zt,
+            'emd_loss': torch.tensor(0.0, device=device),
+            'guidance_loss': torch.tensor(0.0, device=device),
+            'noise_pred': torch.sigmoid(x0_logits).reshape(B, V, H, W_fut),
+            't': t,
+        }
+
+    @torch.no_grad()
+    def _generate_binary_factorized(
+        self,
+        past: torch.Tensor,
+        num_steps: int = 20,
+        verbose: bool = False,
+        decoder_method: str = "mean",
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        """Binary reverse sampling from random bits to a clean hard CDF image."""
+        assert self.binary_scheduler is not None, "binary scheduler is not initialized"
+
+        B = past.shape[0]
+        V = self.config.num_variables
+        H = self.config.image_height
+        device = past.device
+        BV = B * V
+        W_fut = self.config.forecast_length
+
+        past_norm, _, stats = self._normalize_sequence(past)
+        past_2d = self.encode_to_2d_binary(past_norm)
+        W_past = past_2d.shape[3]
+        past_flat = past_2d.reshape(BV, 1, H, W_past)
+        cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+
+        guidance_2d = None
+        guide_flat = None
+        if self.config.use_guidance_channel:
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
+            guide_flat = guidance_2d.reshape(BV, 1, H, W_fut)
+
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
+        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
+
+        def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
+            canvas = self._inject_coordinate_channel(xt)
+            canvas = self._inject_time_channels(canvas)
+            if guide_flat is not None:
+                canvas = torch.cat([canvas, guide_flat], dim=1)
+            return canvas
+
+        def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
+            canvas = _build_canvas(xt)
+            chunk_size = self.config.unet_max_chunk_size
+            if chunk_size > 0 and xt.shape[0] > chunk_size:
+                outs = []
+                for i in range(0, xt.shape[0], chunk_size):
+                    end = min(i + chunk_size, xt.shape[0])
+                    c_ctx = ctx_flat[i:end] if ctx_flat is not None else None
+                    outs.append(
+                        self.noise_predictor(
+                            canvas[i:end],
+                            t_batch[i:end],
+                            cond_for_unet[i:end],
+                            encoder_hidden_states=c_ctx,
+                        )
+                    )
+                out = torch.cat(outs, dim=0)
+            else:
+                out = self.noise_predictor(
+                    canvas, t_batch, cond_for_unet, encoder_hidden_states=ctx_flat
+                )
+            return out[:, 0:1], out[:, 1:2]
+
+        future_2d_flat = self.binary_scheduler.sample(
+            model_fn=_chunked_model_fn,
+            shape=(BV, 1, H, W_fut),
+            num_steps=num_steps,
+            device=device,
+            verbose=verbose,
+        )
+        future_2d = future_2d_flat.reshape(B, V, H, W_fut)
+        future_norm = self.decode_from_2d(
+            future_2d, from_diffusion=False, decoder_method=decoder_method, **kwargs
+        )
+        future = self._denormalize(future_norm, stats)
+
+        K = self.config.lookback_overlap
+        if K > 0:
+            future = future[..., K:]
+            future_norm = future_norm[..., K:]
+
+        result = {
+            'prediction': future,
+            'prediction_norm': future_norm,
+            'future_2d': future_2d,
+            'past_2d': past_2d,
         }
         if guidance_2d is not None:
             result['guidance_2d'] = guidance_2d

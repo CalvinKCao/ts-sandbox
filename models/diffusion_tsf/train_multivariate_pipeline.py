@@ -434,6 +434,7 @@ def init_wandb(
         'forecast_length': FORECAST_LENGTH,
         'image_height': IMAGE_HEIGHT,
         'n_variates': N_VARIATES,
+        'diffusion_type': DIFFUSION_TYPE,
         'pretrain_epochs': PRETRAIN_EPOCHS,
         'hp_tune_epochs': HP_TUNE_EPOCHS,
         'hp_tune_patience': HP_TUNE_PATIENCE,
@@ -670,6 +671,7 @@ from models.diffusion_tsf.pipeline_config import (
     N_ITRANS_HP_TRIALS,
     N_DIFFUSION_HP_TRIALS,
     N_FINETUNE_HP_TRIALS,
+    FINAL_FINETUNE_EPOCHS,
     ITRANS_HP_PRETRAIN_MAX_EPOCHS,
     ITRANS_HP_FINETUNE_MAX_EPOCHS,
     ITRANS_REAL_COLD_START,
@@ -708,6 +710,7 @@ from models.diffusion_tsf.pipeline_config import (
 
 # Per-run dispatch knob — set from --n-variates at CLI parse time.
 N_VARIATES = N_VARIATES_DEFAULT
+DIFFUSION_TYPE = "gaussian"
 
 # Dataset registry: name -> (path, date_col, seasonal_period)
 DATASET_REGISTRY = {
@@ -932,14 +935,20 @@ def create_diffusion_model(
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
     guidance_penalty_weight: Optional[float] = None,
+    diffusion_type: str = None,
 ) -> DiffusionTSF:
     """Create DiffusionTSF model with iTransformer guidance channel enabled."""
     if n_variates is None:
         n_variates = N_VARIATES
     if guidance_penalty_weight is None:
         guidance_penalty_weight = GUIDANCE_PENALTY_WEIGHT
+    if diffusion_type is None:
+        diffusion_type = DIFFUSION_TYPE
 
-    logger.info(f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}")
+    logger.info(
+        f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, "
+        f"diffusion_type={diffusion_type}"
+    )
 
     config = DiffusionTSFConfig(
         num_variables=n_variates,
@@ -966,6 +975,7 @@ def create_diffusion_model(
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
         use_amp=USE_AMP,
+        diffusion_type=diffusion_type,
     )
     return DiffusionTSF(config)
 
@@ -2072,7 +2082,7 @@ def finetune_hp_objective(
     itrans_guidance = iTransformerGuidance(itrans_model)
     
     # Load pretrained diffusion (skip guidance keys — keep the attached one)
-    model = create_diffusion_model().to(device)
+    model = create_diffusion_model(n_variates=n_iv).to(device)
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
     load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
@@ -2141,32 +2151,103 @@ def _promote_best_trial_to_final(
     dataset_name: str,
     norm_stats: Dict,
     fixed_batch_size: int,
+    pretrained_path: str,
+    itrans_checkpoint: str,
+    device: torch.device,
+    smoke_test: bool = False,
 ) -> Tuple[str, Dict]:
-    """Copy the best Optuna trial's checkpoint to ``{subset_dir}/best.pt``, write
-    metadata.json, clean up other trials' temp files, and return the final
-    checkpoint path + a small train-metrics dict.
-
-    Replaces the old "Phase 2C" full retrain — we just keep the best trial.
-    """
+    """Train a final 20-epoch fine-tuned diffusion model using the best HP trial."""
     if study.best_trial is None:
         raise RuntimeError("Optuna study has no successful trials")
 
     subset_id = subset_info['subset_id']
     variate_indices = subset_info['variate_indices']
     best_num = study.best_trial.number
-    best_val_loss = float(study.best_value)
     tuned_params = dict(study.best_params)
     tuned_params['batch_size'] = fixed_batch_size
+    lr = float(tuned_params['learning_rate'])
+    batch_size = int(tuned_params['batch_size'])
 
     src = os.path.join(subset_dir, f'_diff_ft_trial_{best_num}_best.pt')
     if not os.path.exists(src):
         raise RuntimeError(f"Best trial checkpoint missing: {src}")
 
     dst = os.path.join(subset_dir, 'best.pt')
+    logger.info(
+        f"Training final fine-tuned diffusion for {subset_id}: "
+        f"lr={lr:.2e}, batch_size={batch_size}, epochs={FINAL_FINETUNE_EPOCHS}"
+    )
+
+    train_ds, val_ds, _, _ = load_dataset(dataset_name, variate_indices, stride=1)
+    if smoke_test:
+        train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
+        val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+
+    n_iv = len(variate_indices)
+    itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
+    itrans_guidance = iTransformerGuidance(itrans_model)
+
+    model = create_diffusion_model(n_variates=n_iv).to(device)
+    model.set_guidance_model(itrans_guidance)
+    ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
+    load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    epochs = 1 if smoke_test else FINAL_FINETUNE_EPOCHS
+    best_val_loss = float('inf')
+    best_epoch = 0
+
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+        train_batches = 0
+        for past, future in train_loader:
+            past, future = past.to(device), future.to(device)
+            optimizer.zero_grad()
+            with amp_context():
+                loss = model.get_loss(past, future)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            train_loss += loss.item()
+            train_batches += 1
+        train_loss /= max(train_batches, 1)
+
+        model.eval()
+        val_loss = 0.0
+        val_batches = 0
+        with torch.no_grad():
+            for past, future in val_loader:
+                past, future = past.to(device), future.to(device)
+                with amp_context():
+                    loss = model.get_loss(past, future)
+                val_loss += loss.item()
+                val_batches += 1
+        val_loss /= max(val_batches, 1)
+        logger.info(
+            f"[{subset_id}:final_diffusion] epoch {epoch + 1}/{epochs} "
+            f"train_loss={train_loss:.4f} val_loss={val_loss:.4f}"
+        )
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch + 1
+            if is_main_process():
+                save_checkpoint(
+                    unwrap_model(model), optimizer, epoch, train_loss, val_loss,
+                    {
+                        'tuned_params': tuned_params,
+                        'best_trial': best_num,
+                        'final_finetune_epochs': epochs,
+                    },
+                    dst,
+                )
+    barrier()
+
     if is_main_process():
         os.makedirs(subset_dir, exist_ok=True)
-        import shutil
-        shutil.copy2(src, dst)
         with open(os.path.join(subset_dir, 'metadata.json'), 'w') as f:
             json.dump({
                 'subset_id': subset_id,
@@ -2177,7 +2258,11 @@ def _promote_best_trial_to_final(
                 'norm_std': norm_stats['std'].tolist(),
                 'tuned_params': tuned_params,
                 'best_trial': best_num,
+                'hp_best_val_loss': float(study.best_value),
                 'best_val_loss': best_val_loss,
+                'best_epoch': best_epoch,
+                'final_finetune_epochs': epochs,
+                'diffusion_type': DIFFUSION_TYPE,
             }, f, indent=2)
         for fn in os.listdir(subset_dir):
             if fn.startswith('_diff_ft_trial_') and fn.endswith('_best.pt'):
@@ -2187,7 +2272,12 @@ def _promote_best_trial_to_final(
                     pass
     barrier()
 
-    return dst, {'best_val_loss': best_val_loss, 'best_trial': best_num}
+    return dst, {
+        'best_val_loss': best_val_loss,
+        'best_trial': best_num,
+        'hp_best_val_loss': float(study.best_value),
+        'best_epoch': best_epoch,
+    }
 
 
 def finetune_on_dataset(*args, **kwargs):
@@ -2854,6 +2944,7 @@ def run_pipeline(
                     study, subset_dir,
                     {'subset_id': dataset_name, 'variate_indices': variate_indices},
                     dataset_name, norm_stats, ft_diff_bs,
+                    diff_ckpt, itrans_ckpt, device, smoke_test,
                 )
 
             
@@ -3405,6 +3496,7 @@ def _finetune_and_eval_one_subset(
             _, _, _, norm_stats = load_dataset(dataset_name, variate_indices, stride=1)
             ckpt_path, train_metrics = _promote_best_trial_to_final(
                 study, subset_dir, subset_info, dataset_name, norm_stats, ft_diff_bs,
+                diff_ckpt, ft_itrans_ckpt, device, smoke_test,
             )
 
         # Evaluate diffusion model
@@ -3469,7 +3561,7 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
     global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION, LOOKBACK_LENGTH, FORECAST_LENGTH
-    global MODEL_TYPE
+    global MODEL_TYPE, DIFFUSION_TYPE
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3512,6 +3604,8 @@ def main():
                         help='Disable cross-variate attention (fully univariate baseline)')
     parser.add_argument('--model-type', type=str, default=None, choices=['unet', 'dit'],
                         help="Backbone: 'unet' (default) or 'dit' (FactorizedDiT)")
+    parser.add_argument('--binary-diffusion', action='store_true',
+                        help='Use hard binary CDF images and XOR bit-flip diffusion noise.')
     parser.add_argument('--lookback-length', type=int, default=LOOKBACK_LENGTH,
                         help='Override lookback length')
     parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH,
@@ -3545,6 +3639,8 @@ def main():
         DISABLE_CROSS_ATTENTION = True
     if args.model_type is not None:
         MODEL_TYPE = args.model_type
+    if args.binary_diffusion:
+        DIFFUSION_TYPE = "binary"
     LOOKBACK_LENGTH = args.lookback_length
     FORECAST_LENGTH = args.forecast_length
     
