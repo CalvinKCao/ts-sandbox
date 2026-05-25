@@ -1,0 +1,205 @@
+#!/bin/bash
+# =============================================================================
+# Gaussian diffusion with deterministic anchor loss for the 92d3 pipeline.
+#
+# USAGE (from repo root on Killarney login node, preferably $SCRATCH/ts-sandbox):
+#   ./slurm_gaussian_anchor_92d3.sh --dataset ETTh1
+#   ./slurm_gaussian_anchor_92d3.sh --dataset exchange_rate
+#   ./slurm_gaussian_anchor_92d3.sh --dataset ETTh2 --smoke-test
+# =============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DATASET="ETTh1"
+N_VARIATES=""
+SEED="42"
+FRESH=0
+SMOKE=0
+VARS_TO_PLOT=3
+ENSEMBLE=1
+WALL="${WALL:-}"
+ANCHOR_LAMBDA="0.99"
+ANCHOR_ALPHA="0.5"
+EVAL_SAMPLER="anchor"
+WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-gaussian-anchor-92d3}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dataset)
+            case "$2" in
+                exchange) DATASET="exchange_rate" ;;
+                *) DATASET="$2" ;;
+            esac
+            shift 2
+            ;;
+        --n-variates) N_VARIATES="$2"; shift 2 ;;
+        --walltime|--time) WALL="$2"; shift 2 ;;
+        --seed) SEED="$2"; shift 2 ;;
+        --fresh) FRESH=1; shift ;;
+        --smoke-test|--smoke) SMOKE=1; shift ;;
+        --vars) VARS_TO_PLOT="$2"; shift 2 ;;
+        --ensemble) ENSEMBLE="$2"; shift 2 ;;
+        --anchor-lambda) ANCHOR_LAMBDA="$2"; shift 2 ;;
+        --anchor-alpha) ANCHOR_ALPHA="$2"; shift 2 ;;
+        --eval-sampler) EVAL_SAMPLER="$2"; shift 2 ;;
+        --wandb-project) WANDB_PROJECT="$2"; shift 2 ;;
+        *) echo "Unknown arg: $1" >&2; exit 1 ;;
+    esac
+done
+
+if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+    if [[ "$SMOKE" -eq 1 ]]; then
+        WALL="0:30:00"
+        MEM="24G"
+        CPUS=4
+        JOB_NAME="gauss-anchor-smoke"
+    else
+        [[ -z "$WALL" ]] && WALL="2-00:00:00"
+        MEM="60G"
+        CPUS=8
+        JOB_NAME="gauss-anchor-${DATASET,,}"
+    fi
+
+    echo "Submitting ${JOB_NAME} (${DATASET}) wall=${WALL} on Killarney L40S..."
+    sbatch \
+        --job-name="$JOB_NAME" \
+        --account=aip-boyuwang \
+        --time="$WALL" \
+        --nodes=1 \
+        --gres=gpu:l40s:1 \
+        --cpus-per-task="$CPUS" \
+        --mem="$MEM" \
+        --output=/dev/null \
+        --error=/dev/null \
+        --mail-type=END,FAIL \
+        --mail-user=ccao87@uwo.ca \
+        "$SCRIPT_DIR/slurm_gaussian_anchor_92d3.sh" \
+        --dataset "$DATASET" --seed "$SEED" \
+        --vars "$VARS_TO_PLOT" --ensemble "$ENSEMBLE" \
+        --anchor-lambda "$ANCHOR_LAMBDA" --anchor-alpha "$ANCHOR_ALPHA" \
+        --eval-sampler "$EVAL_SAMPLER" \
+        $([[ -n "$N_VARIATES" ]] && echo --n-variates "$N_VARIATES") \
+        $([[ -n "$WALL" && "$SMOKE" -eq 0 ]] && echo --walltime "$WALL") \
+        $([[ "$FRESH" -eq 1 ]] && echo --fresh) \
+        $([[ "$SMOKE" -eq 1 ]] && echo --smoke-test) \
+        --wandb-project "$WANDB_PROJECT"
+    exit 0
+fi
+
+cd "$SLURM_SUBMIT_DIR"
+PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+if [[ ! -f "$PROJECT_ROOT/models/diffusion_tsf/train_multivariate_pipeline.py" ]]; then
+    echo "ERROR: submit from the ts-sandbox repo root." >&2
+    exit 1
+fi
+if [[ "$PROJECT_ROOT" == /home/* ]]; then
+    echo "ERROR: Killarney GPU jobs should run from a scratch/project checkout, not /home." >&2
+    exit 1
+fi
+
+mkdir -p ./results/logs ./results/ckpts ./results/datasets
+RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-gauss-anchor-${DATASET,,}"
+LOG_FILE="./results/logs/${RUN_STEM}.log"
+CKPT_DIR="./results/ckpts/${RUN_STEM}"
+DATA_DIR="./results/datasets/${RUN_STEM}"
+mkdir -p "$CKPT_DIR" "$DATA_DIR"
+exec >>"$LOG_FILE" 2>&1
+
+echo "=========================================="
+echo "Job: $SLURM_JOB_NAME  ID: $SLURM_JOB_ID  Node: ${SLURMD_NODENAME:-unknown}"
+echo "Repo: $PROJECT_ROOT"
+echo "Checkpoints: $CKPT_DIR"
+echo "Results: $DATA_DIR"
+echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
+echo "Started: $(date)"
+echo "=========================================="
+
+module purge || true
+module load StdEnv/2023
+module load python/3.11
+module load cuda/12.2
+module load cudnn/8.9
+
+echo "[setup] Building venv on \$SLURM_TMPDIR..."
+virtualenv --no-download "$SLURM_TMPDIR/env"
+source "$SLURM_TMPDIR/env/bin/activate"
+pip install --no-index --upgrade pip -q
+pip install --no-index 'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm matplotlib optuna wandb einops -q
+[ -f "$PROJECT_ROOT/requirements.txt" ] && pip install -r "$PROJECT_ROOT/requirements.txt" -q || true
+python - <<'PY'
+import torch
+assert torch.cuda.is_available(), "CUDA required; check torch wheel/modules"
+print("torch", torch.__version__, "gpu", torch.cuda.get_device_name(0))
+PY
+
+export PYTHONUNBUFFERED=1
+export WANDB_PROJECT
+
+TRAIN_ARGS=(
+    --mode full
+    --dataset "$DATASET"
+    --checkpoint-dir "$CKPT_DIR"
+    --results-dir "$DATA_DIR"
+    --synth-cache-dir "$DATA_DIR"
+    --seed "$SEED"
+    --deterministic-anchor-loss
+    --deterministic-anchor-lambda "$ANCHOR_LAMBDA"
+    --deterministic-anchor-alpha "$ANCHOR_ALPHA"
+    --eval-sampler "$EVAL_SAMPLER"
+)
+if [[ -n "$N_VARIATES" ]]; then
+    TRAIN_ARGS+=(--n-variates "$N_VARIATES")
+fi
+if [[ "$FRESH" -eq 1 ]]; then
+    TRAIN_ARGS+=(--fresh)
+fi
+if [[ "$SMOKE" -eq 1 ]]; then
+    TRAIN_ARGS+=(--smoke-test)
+fi
+if [[ -n "${WANDB_API_KEY:-}" ]]; then
+    TRAIN_ARGS+=(--wandb --wandb-project "$WANDB_PROJECT")
+else
+    echo "[wandb] WANDB_API_KEY not set; training will run without wandb."
+fi
+
+echo "[train] Gaussian full training/eval with deterministic anchor loss..."
+python -u -m models.diffusion_tsf.train_multivariate_pipeline "${TRAIN_ARGS[@]}"
+
+echo "[viz] Rendering comparison..."
+python -u -m models.diffusion_tsf.visualize_comparison \
+    --checkpoint-dir "$CKPT_DIR" \
+    --output-dir "$DATA_DIR" \
+    --dataset "$DATASET" \
+    --num-samples 3 \
+    --vars "$VARS_TO_PLOT" \
+    --ensemble "$ENSEMBLE" \
+    --num-extra-windows 2 \
+    --diffusion-type gaussian \
+    --diffusion-sampler "$EVAL_SAMPLER"
+
+if [[ -n "${WANDB_API_KEY:-}" ]]; then
+    echo "[wandb] Uploading combined log artifact..."
+    python - <<PY
+import os
+import wandb
+
+run = wandb.init(
+    project=os.environ.get("WANDB_PROJECT", "ts-sandbox-gaussian-anchor-92d3"),
+    name="${RUN_STEM}-logs",
+    job_type="slurm-log-upload",
+    reinit=True,
+)
+artifact = wandb.Artifact("${RUN_STEM}-logs", type="logs")
+artifact.add_file("${LOG_FILE}")
+run.log_artifact(artifact)
+run.finish()
+PY
+fi
+
+echo "=========================================="
+echo "Done: $(date)"
+echo "Log: $LOG_FILE"
+echo "Checkpoints: $CKPT_DIR"
+echo "Results/Viz: $DATA_DIR"
+echo "=========================================="

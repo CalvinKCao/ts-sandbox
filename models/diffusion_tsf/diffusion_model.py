@@ -488,6 +488,41 @@ class DiffusionTSF(nn.Module):
         emd = (cdf_pred - cdf_target).abs().mean()
         return emd
 
+    def _deterministic_anchor_params(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return timestep and scale for alpha_bar closest to the configured anchor."""
+        alphas = self.scheduler.alphas_cumprod
+        target = torch.tensor(
+            self.config.deterministic_anchor_alpha,
+            device=alphas.device,
+            dtype=alphas.dtype,
+        )
+        t_anchor = torch.argmin((alphas - target).abs()).long()
+        alpha_bar = alphas[t_anchor].clamp(min=1e-8, max=1.0 - 1e-8)
+        scale = -torch.sqrt(alpha_bar) / torch.sqrt(1.0 - alpha_bar)
+        return t_anchor, scale
+
+    def _predict_noise_chunked(
+        self,
+        canvas: torch.Tensor,
+        t_flat: torch.Tensor,
+        cond_for_unet: Optional[torch.Tensor],
+        ctx_flat: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Run the denoiser with the same chunking rule used by training/eval."""
+        chunk_size = self.config.unet_max_chunk_size
+        n_items = canvas.shape[0]
+        if chunk_size > 0 and n_items > chunk_size:
+            outs = []
+            for i in range(0, n_items, chunk_size):
+                end = min(i + chunk_size, n_items)
+                c_canvas = canvas[i:end]
+                c_t = t_flat[i:end] if t_flat.shape[0] == n_items else t_flat
+                c_cond = cond_for_unet[i:end] if cond_for_unet is not None else None
+                c_ctx = ctx_flat[i:end] if ctx_flat is not None else None
+                outs.append(self.noise_predictor(c_canvas, c_t, c_cond, encoder_hidden_states=c_ctx))
+            return torch.cat(outs, dim=0)
+        return self.noise_predictor(canvas, t_flat, cond_for_unet, encoder_hidden_states=ctx_flat)
+
     def _load_from_state_dict(
         self,
         state_dict,
@@ -674,6 +709,7 @@ class DiffusionTSF(nn.Module):
             'ddim' (default) — existing DDIM(+CFG) path, ``num_ddim_steps`` steps
             'ddpm'           — full T-step DDPM(+CFG)
             'dpmpp'          — DPM-Solver++(2M); CFG not supported (uses cond only)
+            'anchor'         — one deterministic anchor pass at alpha_bar ~= 0.5
         num_inference_steps overrides num_ddim_steps when set (used by dpmpp/ddim).
         """
         if self.config.diffusion_type == "binary":
@@ -737,19 +773,24 @@ class DiffusionTSF(nn.Module):
         # t: same timestep for all V variates of each batch element
         t_flat = t.unsqueeze(1).expand(-1, V).reshape(BV)  # (BV,)
 
-        canvas = noisy_future.reshape(BV, 1, H, W_fut)
-        canvas = self._inject_coordinate_channel(canvas)
-        canvas = self._inject_time_channels(canvas)
+        base_canvas = noisy_future.reshape(BV, 1, H, W_fut)
+        base_canvas = self._inject_coordinate_channel(base_canvas)
+        base_canvas = self._inject_time_channels(base_canvas)
 
         # visual cond: per-variate past bilinearly resized to match future width
         past_flat     = past_2d.reshape(BV, 1, H, W_past)
-        cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+        base_cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
 
         # broadcast context: every one of the BV U-Net forward passes sees ALL V tokens
         ctx_flat = None
         if ctx is not None:
             # (B, V, ctx_dim) → (BV, V, ctx_dim)
             ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
+
+        canvas = base_canvas
+        cond_for_unet = base_cond_for_unet
+        ctx_for_unet = ctx_flat
+        guidance_2d_flat = guidance_2d.reshape(BV, 1, H, W_fut) if guidance_2d is not None else None
 
         # --- Apply Classifier-Free Guidance Dropout ---
         if self.training and self.config.cfg_dropout > 0.0:
@@ -758,31 +799,21 @@ class DiffusionTSF(nn.Module):
             
             cond_for_unet = torch.where(drop_mask_flat.view(BV, 1, 1, 1), torch.zeros_like(cond_for_unet), cond_for_unet)
             
-            if ctx_flat is not None:
-                ctx_flat = torch.where(drop_mask_flat.view(BV, 1, 1), torch.zeros_like(ctx_flat), ctx_flat)
+            if ctx_for_unet is not None:
+                ctx_for_unet = torch.where(drop_mask_flat.view(BV, 1, 1), torch.zeros_like(ctx_for_unet), ctx_for_unet)
                 
-            if guidance_2d is not None:
-                guidance_2d_flat = guidance_2d.reshape(BV, 1, H, W_fut)
-                guidance_2d_flat = torch.where(drop_mask_flat.view(BV, 1, 1, 1), torch.zeros_like(guidance_2d_flat), guidance_2d_flat)
+            if guidance_2d_flat is not None:
+                guide_for_unet = torch.where(
+                    drop_mask_flat.view(BV, 1, 1, 1),
+                    torch.zeros_like(guidance_2d_flat),
+                    guidance_2d_flat,
+                )
+                canvas = torch.cat([canvas, guide_for_unet], dim=1)
+        else:
+            if guidance_2d_flat is not None:
                 canvas = torch.cat([canvas, guidance_2d_flat], dim=1)
-        else:
-            if guidance_2d is not None:
-                canvas = torch.cat([canvas, guidance_2d.reshape(BV, 1, H, W_fut)], dim=1)
 
-        chunk_size = self.config.unet_max_chunk_size
-        if chunk_size > 0 and BV > chunk_size:
-            noise_pred_flat_list = []
-            for i in range(0, BV, chunk_size):
-                end = min(i + chunk_size, BV)
-                c_canvas = canvas[i:end]
-                c_t = t_flat[i:end]
-                c_cond = cond_for_unet[i:end]
-                c_ctx = ctx_flat[i:end] if ctx_flat is not None else None
-                c_out = self.noise_predictor(c_canvas, c_t, c_cond, encoder_hidden_states=c_ctx)
-                noise_pred_flat_list.append(c_out)
-            noise_pred_flat = torch.cat(noise_pred_flat_list, dim=0)
-        else:
-            noise_pred_flat = self.noise_predictor(canvas, t_flat, cond_for_unet, encoder_hidden_states=ctx_flat)
+        noise_pred_flat = self._predict_noise_chunked(canvas, t_flat, cond_for_unet, ctx_for_unet)
             
         noise_pred = noise_pred_flat.reshape(B, V, H, W_fut)
 
@@ -793,6 +824,35 @@ class DiffusionTSF(nn.Module):
             noise_loss = self.config.past_loss_weight * nl_past + nl_fut
         else:
             noise_loss = F.mse_loss(noise_pred, noise)
+
+        anchor_loss = torch.tensor(0.0, device=device)
+        combined_mse_loss = noise_loss
+        anchor_t = None
+        anchor_scale = None
+        if self.config.use_deterministic_anchor_loss:
+            anchor_t, anchor_scale = self._deterministic_anchor_params()
+            anchor_t_flat = torch.full(
+                (BV,),
+                int(anchor_t.item()),
+                device=device,
+                dtype=t_flat.dtype,
+            )
+            anchor_canvas = torch.zeros_like(noisy_future.reshape(BV, 1, H, W_fut))
+            anchor_canvas = self._inject_coordinate_channel(anchor_canvas)
+            anchor_canvas = self._inject_time_channels(anchor_canvas)
+            if guidance_2d_flat is not None:
+                anchor_canvas = torch.cat([anchor_canvas, guidance_2d_flat], dim=1)
+            anchor_pred_flat = self._predict_noise_chunked(
+                anchor_canvas,
+                anchor_t_flat,
+                base_cond_for_unet,
+                ctx_flat,
+            )
+            anchor_pred = anchor_pred_flat.reshape(B, V, H, W_fut)
+            anchor_target = anchor_scale.to(device=device, dtype=future_2d.dtype) * future_2d
+            anchor_loss = F.mse_loss(anchor_pred, anchor_target)
+            lam = self.config.deterministic_anchor_lambda
+            combined_mse_loss = lam * noise_loss + (1.0 - lam) * anchor_loss
 
         x0_pred  = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
         
@@ -812,7 +872,7 @@ class DiffusionTSF(nn.Module):
             guidance_loss = F.mse_loss(x0_pred, guidance_2d)
 
         loss = (
-            noise_loss + 
+            combined_mse_loss +
             self.config.emd_lambda * emd_loss + 
             self.config.monotonicity_weight * mono_loss +
             self.config.guidance_penalty_weight * guidance_loss
@@ -820,9 +880,13 @@ class DiffusionTSF(nn.Module):
 
         result = {
             'loss': loss, 'noise_loss': noise_loss, 'emd_loss': emd_loss,
+            'combined_mse_loss': combined_mse_loss, 'anchor_loss': anchor_loss,
             'guidance_loss': guidance_loss,
             'noise_pred': noise_pred, 't': t,
         }
+        if anchor_t is not None:
+            result['anchor_timestep'] = anchor_t
+            result['anchor_scale'] = anchor_scale
         if guidance_2d is not None:
             result['guidance_2d'] = guidance_2d
         return result
@@ -902,7 +966,18 @@ class DiffusionTSF(nn.Module):
 
         noise_shape = (BV, 1, H, W_fut)
 
-        if sampler == "dpmpp":
+        if sampler in ("anchor", "deterministic_anchor"):
+            t_anchor, anchor_scale = self._deterministic_anchor_params()
+            t_batch = torch.full(
+                (BV,),
+                int(t_anchor.item()),
+                device=device,
+                dtype=torch.long,
+            )
+            zero_future = torch.zeros(noise_shape, device=device)
+            anchor_pred = _chunked_model_fn(_build_canvas(zero_future), t_batch, cond_flat, ctx_flat)
+            future_2d_flat = anchor_pred / anchor_scale.to(device=device, dtype=anchor_pred.dtype)
+        elif sampler == "dpmpp":
             steps = num_inference_steps if num_inference_steps is not None else 20
             future_2d_flat = self.scheduler.sample_dpmpp(
                 model=model_fn, shape=noise_shape, cond=cond_flat,

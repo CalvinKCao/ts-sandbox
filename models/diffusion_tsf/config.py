@@ -128,6 +128,11 @@ class DiffusionTSFConfig:
     # penalty for deviating from itransformer guidance ghost image
     guidance_penalty_weight: float = 0.0
 
+    # Deterministic anchor loss: a one-step denoising target at alpha_bar ~= 0.5.
+    use_deterministic_anchor_loss: bool = False
+    deterministic_anchor_lambda: float = 0.99
+    deterministic_anchor_alpha: float = 0.5
+
     # which backbone: "unet" (ConditionalUNet2D) or "dit" (FactorizedDiT)
     model_type: str = "unet"
 
@@ -176,6 +181,8 @@ class DiffusionTSFConfig:
         assert self.noise_schedule in ["linear", "cosine", "sigmoid", "quadratic"]
         assert self.diffusion_type in ["gaussian", "binary"]
         assert 0 <= self.cutout_prob <= 1
+        assert 0.0 <= self.deterministic_anchor_lambda <= 1.0
+        assert 0.0 < self.deterministic_anchor_alpha < 1.0
         assert self.representation_mode in ["pdf", "cdf"]
         if not self.variate_factorized:
             raise ValueError("variate_factorized=False is no longer supported; use the factorized path.")

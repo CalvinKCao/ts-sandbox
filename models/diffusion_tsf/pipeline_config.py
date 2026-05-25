@@ -200,10 +200,19 @@ def diffusion_probe_max_candidate(n_variates: int, smoke_test: bool) -> int:
 
 EMD_LAMBDA: float = 0.2
 GUIDANCE_PENALTY_WEIGHT: float = 0.0  # small penalty for deviating from iTransformer guidance
+DETERMINISTIC_ANCHOR_LOSS: bool = False
+DETERMINISTIC_ANCHOR_LAMBDA: float = 0.99
+DETERMINISTIC_ANCHOR_ALPHA: float = 0.5
+# Optuna bounds when --deterministic-anchor-loss is on (Phase 1B / 2B diffusion HP).
+ANCHOR_HP_LAMBDA_MIN: float = 0.90
+ANCHOR_HP_LAMBDA_MAX: float = 0.995
+ANCHOR_HP_ALPHA_MIN: float = 0.35
+ANCHOR_HP_ALPHA_MAX: float = 0.65
 
 # ---- Evaluation -------------------------------------------------------------------
 
 EVAL_NUM_SAMPLES: int = 30  # diffusion eval averages this many samples per window
+EVAL_SAMPLER: str = "dpmpp"
 
 
 # ---- Synthetic helpers (after phase constants) ------------------------------------

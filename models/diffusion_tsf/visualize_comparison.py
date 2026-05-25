@@ -87,6 +87,7 @@ def run_comparison(
     dataset_filter: Optional[str] = None,
     num_extra_windows: int = 2,
     diffusion_type: Optional[str] = None,
+    diffusion_sampler: str = "ddim",
     random_seed: int = 13,
 ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -237,12 +238,12 @@ def run_comparison(
 
                 # Diffusion prediction (single or averaged)
                 if diffusion_ensemble <= 1:
-                    result = diff_model.generate(past_t)
+                    result = diff_model.generate(past_t, sampler=diffusion_sampler)
                     diff_pred = result['prediction'].cpu()[0]  # (C, F)
                 else:
                     diff_preds = []
                     for _ in range(diffusion_ensemble):
-                        result = diff_model.generate(past_t)
+                        result = diff_model.generate(past_t, sampler=diffusion_sampler)
                         diff_preds.append(result['prediction'].cpu())
                     diff_pred = torch.stack(diff_preds).mean(0)[0]  # (C, F)
 
@@ -359,6 +360,9 @@ def main():
     parser.add_argument('--diffusion-type', type=str, default=None,
                         choices=['gaussian', 'binary'],
                         help='Override diffusion type inferred from checkpoint')
+    parser.add_argument('--diffusion-sampler', type=str, default='ddim',
+                        choices=['ddim', 'dpmpp', 'anchor', 'deterministic_anchor'],
+                        help='Sampler for diffusion plots')
     parser.add_argument('--random-seed', type=int, default=13)
     args = parser.parse_args()
 
@@ -369,6 +373,7 @@ def main():
         dataset_filter=args.dataset,
         num_extra_windows=args.num_extra_windows,
         diffusion_type=args.diffusion_type,
+        diffusion_sampler='anchor' if args.diffusion_sampler == 'deterministic_anchor' else args.diffusion_sampler,
         random_seed=args.random_seed,
     )
 

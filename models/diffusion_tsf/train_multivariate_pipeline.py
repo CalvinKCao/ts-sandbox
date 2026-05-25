@@ -207,6 +207,36 @@ def require_tuned_param(params: Dict, key: str, stage_name: str):
     return params[key]
 
 
+def suggest_deterministic_anchor_hp(trial) -> Tuple[float, float]:
+    """Optuna search for anchor loss weight and target alpha_bar (when enabled)."""
+    if not DETERMINISTIC_ANCHOR_LOSS:
+        return DETERMINISTIC_ANCHOR_LAMBDA, DETERMINISTIC_ANCHOR_ALPHA
+    anchor_lambda = trial.suggest_float(
+        'deterministic_anchor_lambda', ANCHOR_HP_LAMBDA_MIN, ANCHOR_HP_LAMBDA_MAX,
+    )
+    anchor_alpha = trial.suggest_float(
+        'deterministic_anchor_alpha', ANCHOR_HP_ALPHA_MIN, ANCHOR_HP_ALPHA_MAX,
+    )
+    return anchor_lambda, anchor_alpha
+
+
+def anchor_kwargs_from_params(params: Optional[Dict] = None) -> Dict:
+    """Kwargs for create_diffusion_model from tuned or CLI anchor settings."""
+    if not DETERMINISTIC_ANCHOR_LOSS:
+        return {}
+    kwargs = {
+        'use_deterministic_anchor_loss': True,
+        'deterministic_anchor_lambda': DETERMINISTIC_ANCHOR_LAMBDA,
+        'deterministic_anchor_alpha': DETERMINISTIC_ANCHOR_ALPHA,
+    }
+    if params:
+        if 'deterministic_anchor_lambda' in params:
+            kwargs['deterministic_anchor_lambda'] = float(params['deterministic_anchor_lambda'])
+        if 'deterministic_anchor_alpha' in params:
+            kwargs['deterministic_anchor_alpha'] = float(params['deterministic_anchor_alpha'])
+    return kwargs
+
+
 # ============================================================================
 # Parallel Optuna Workers (Multi-GPU HP Tuning)
 # ============================================================================
@@ -435,6 +465,14 @@ def init_wandb(
         'image_height': IMAGE_HEIGHT,
         'n_variates': N_VARIATES,
         'diffusion_type': DIFFUSION_TYPE,
+        'deterministic_anchor_loss': DETERMINISTIC_ANCHOR_LOSS,
+        'deterministic_anchor_lambda': DETERMINISTIC_ANCHOR_LAMBDA,
+        'deterministic_anchor_alpha': DETERMINISTIC_ANCHOR_ALPHA,
+        'anchor_hp_lambda_min': ANCHOR_HP_LAMBDA_MIN,
+        'anchor_hp_lambda_max': ANCHOR_HP_LAMBDA_MAX,
+        'anchor_hp_alpha_min': ANCHOR_HP_ALPHA_MIN,
+        'anchor_hp_alpha_max': ANCHOR_HP_ALPHA_MAX,
+        'eval_sampler': EVAL_SAMPLER,
         'pretrain_epochs': PRETRAIN_EPOCHS,
         'hp_tune_epochs': HP_TUNE_EPOCHS,
         'hp_tune_patience': HP_TUNE_PATIENCE,
@@ -700,7 +738,15 @@ from models.diffusion_tsf.pipeline_config import (
     DIT_MLP_RATIO,
     DIT_DROPOUT,
     GUIDANCE_PENALTY_WEIGHT,
+    DETERMINISTIC_ANCHOR_LOSS,
+    DETERMINISTIC_ANCHOR_LAMBDA,
+    DETERMINISTIC_ANCHOR_ALPHA,
+    ANCHOR_HP_LAMBDA_MIN,
+    ANCHOR_HP_LAMBDA_MAX,
+    ANCHOR_HP_ALPHA_MIN,
+    ANCHOR_HP_ALPHA_MAX,
     EVAL_NUM_SAMPLES,
+    EVAL_SAMPLER,
     resolve_pretrain_virtual_dataset_size,
     synthetic_epoch_capacity_itrans_hp,
     synthetic_epoch_capacity_diff_hp,
@@ -936,6 +982,9 @@ def create_diffusion_model(
     past_loss_weight: float = PAST_LOSS_WEIGHT,
     guidance_penalty_weight: Optional[float] = None,
     diffusion_type: str = None,
+    use_deterministic_anchor_loss: Optional[bool] = None,
+    deterministic_anchor_lambda: Optional[float] = None,
+    deterministic_anchor_alpha: Optional[float] = None,
 ) -> DiffusionTSF:
     """Create DiffusionTSF model with iTransformer guidance channel enabled."""
     if n_variates is None:
@@ -944,10 +993,18 @@ def create_diffusion_model(
         guidance_penalty_weight = GUIDANCE_PENALTY_WEIGHT
     if diffusion_type is None:
         diffusion_type = DIFFUSION_TYPE
+    if use_deterministic_anchor_loss is None:
+        use_deterministic_anchor_loss = DETERMINISTIC_ANCHOR_LOSS
+    if deterministic_anchor_lambda is None:
+        deterministic_anchor_lambda = DETERMINISTIC_ANCHOR_LAMBDA
+    if deterministic_anchor_alpha is None:
+        deterministic_anchor_alpha = DETERMINISTIC_ANCHOR_ALPHA
 
     logger.info(
         f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, "
-        f"diffusion_type={diffusion_type}"
+        f"diffusion_type={diffusion_type}, "
+        f"deterministic_anchor_loss={use_deterministic_anchor_loss}, "
+        f"anchor_lambda={deterministic_anchor_lambda}, anchor_alpha={deterministic_anchor_alpha}"
     )
 
     config = DiffusionTSFConfig(
@@ -976,6 +1033,9 @@ def create_diffusion_model(
         unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
         use_amp=USE_AMP,
         diffusion_type=diffusion_type,
+        use_deterministic_anchor_loss=use_deterministic_anchor_loss,
+        deterministic_anchor_lambda=deterministic_anchor_lambda,
+        deterministic_anchor_alpha=deterministic_anchor_alpha,
     )
     return DiffusionTSF(config)
 
@@ -1611,7 +1671,11 @@ def diffusion_hp_objective(
     else:
         batch_size = fixed_batch_size
 
-    model = create_diffusion_model().to(device)
+    anchor_lambda, anchor_alpha = suggest_deterministic_anchor_hp(trial)
+    model = create_diffusion_model(
+        deterministic_anchor_lambda=anchor_lambda,
+        deterministic_anchor_alpha=anchor_alpha,
+    ).to(device)
     model.set_guidance_model(itrans_guidance)
 
     train_loader = DataLoader(synthetic_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -1725,9 +1789,16 @@ def run_diffusion_hp_tuning(
     
     def log_trial(study, trial):
         bs = trial.params.get('batch_size', train_bs)
-        logger.info(f"[Diffusion HP] Trial {trial.number}/{n_trials}: "
-                   f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                   f"bs={bs}")
+        msg = (
+            f"[Diffusion HP] Trial {trial.number}/{n_trials}: "
+            f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, bs={bs}"
+        )
+        if DETERMINISTIC_ANCHOR_LOSS and 'deterministic_anchor_lambda' in trial.params:
+            msg += (
+                f", anchor_lambda={trial.params['deterministic_anchor_lambda']:.4f}, "
+                f"anchor_alpha={trial.params['deterministic_anchor_alpha']:.4f}"
+            )
+        logger.info(msg)
     
     _best_state: dict = {'model_state': None, 'val_loss': float('inf')}
 
@@ -1743,7 +1814,16 @@ def run_diffusion_hp_tuning(
 
     best_params = study.best_params
     best_params['batch_size'] = train_bs
-    logger.info(f"Best Diffusion params: lr={best_params['learning_rate']:.2e}, bs={best_params['batch_size']}")
+    msg = (
+        f"Best Diffusion params: lr={best_params['learning_rate']:.2e}, "
+        f"bs={best_params['batch_size']}"
+    )
+    if DETERMINISTIC_ANCHOR_LOSS:
+        msg += (
+            f", anchor_lambda={best_params['deterministic_anchor_lambda']:.4f}, "
+            f"anchor_alpha={best_params['deterministic_anchor_alpha']:.4f}"
+        )
+    logger.info(msg)
     logger.info(f"Best val loss: {study.best_value:.4f}")
 
     ckpt_path = None
@@ -1943,7 +2023,7 @@ def pretrain_diffusion(
     )
     
     # Create model with guidance and wrap with DDP
-    model = create_diffusion_model()
+    model = create_diffusion_model(**anchor_kwargs_from_params(best_params))
     model.set_guidance_model(itrans_guidance)
     model = wrap_model_ddp(model)
     
@@ -2062,6 +2142,8 @@ def finetune_hp_objective(
         batch_size = fixed_batch_size
     else:
         batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else FINETUNE_BATCH_SIZES)
+
+    anchor_lambda, anchor_alpha = suggest_deterministic_anchor_hp(trial)
     
     # Load data
     train_ds, val_ds, _, _ = load_dataset(
@@ -2082,7 +2164,11 @@ def finetune_hp_objective(
     itrans_guidance = iTransformerGuidance(itrans_model)
     
     # Load pretrained diffusion (skip guidance keys — keep the attached one)
-    model = create_diffusion_model(n_variates=n_iv).to(device)
+    model = create_diffusion_model(
+        n_variates=n_iv,
+        deterministic_anchor_lambda=anchor_lambda,
+        deterministic_anchor_alpha=anchor_alpha,
+    ).to(device)
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
     load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
@@ -2093,6 +2179,10 @@ def finetune_hp_objective(
     patience = HP_TUNE_PATIENCE if not smoke_test else 1
     early_stop = EarlyStopping(patience=patience)
     best_val_loss = float('inf')
+    trial_tuned_params = {'learning_rate': lr, 'batch_size': batch_size}
+    if DETERMINISTIC_ANCHOR_LOSS:
+        trial_tuned_params['deterministic_anchor_lambda'] = anchor_lambda
+        trial_tuned_params['deterministic_anchor_alpha'] = anchor_alpha
 
     trial_ckpt_path: Optional[str] = None
     if trial_ckpt_dir is not None:
@@ -2132,7 +2222,7 @@ def finetune_hp_objective(
                 save_checkpoint(
                     unwrap_model(model), optimizer, epoch, float('nan'), val_loss,
                     {
-                        'tuned_params': {'learning_rate': lr, 'batch_size': batch_size},
+                        'tuned_params': trial_tuned_params,
                         'trial_number': trial.number,
                     },
                     trial_ckpt_path,
@@ -2189,7 +2279,7 @@ def _promote_best_trial_to_final(
     itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
     itrans_guidance = iTransformerGuidance(itrans_model)
 
-    model = create_diffusion_model(n_variates=n_iv).to(device)
+    model = create_diffusion_model(n_variates=n_iv, **anchor_kwargs_from_params(tuned_params)).to(device)
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
     load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
@@ -2198,6 +2288,11 @@ def _promote_best_trial_to_final(
     epochs = 1 if smoke_test else FINAL_FINETUNE_EPOCHS
     best_val_loss = float('inf')
     best_epoch = 0
+    if DETERMINISTIC_ANCHOR_LOSS:
+        logger.info(
+            f"[{subset_id}:final_diffusion] anchor lambda={tuned_params.get('deterministic_anchor_lambda', DETERMINISTIC_ANCHOR_LAMBDA):.4f} "
+            f"alpha={tuned_params.get('deterministic_anchor_alpha', DETERMINISTIC_ANCHOR_ALPHA):.4f}"
+        )
 
     for epoch in range(epochs):
         model.train()
@@ -2320,14 +2415,21 @@ def evaluate_model(
     ds = getattr(test_loader, 'dataset', None)
     n_windows = len(ds) if ds is not None else None
 
-    if smoke_test:
+    eval_sampler = EVAL_SAMPLER
+    if eval_sampler in ("anchor", "deterministic_anchor"):
+        gen_kwargs = {'sampler': 'anchor'}
+    elif eval_sampler == "ddpm":
+        gen_kwargs = {'sampler': 'ddpm', 'use_ddim': False}
+    elif smoke_test:
         gen_kwargs = {'sampler': 'dpmpp', 'num_inference_steps': 5}
     else:
-        gen_kwargs = {'sampler': 'dpmpp', 'num_inference_steps': 20}
+        gen_kwargs = {'sampler': eval_sampler, 'num_inference_steps': 20}
 
     K = getattr(model.config, 'lookback_overlap', 0)
-    nfe_per_batch = 1 + (1 if smoke_test else n_samples)
-    nfe_total = n_batches * nfe_per_batch * gen_kwargs.get('num_inference_steps', 20)
+    effective_n_samples = 1 if (smoke_test or gen_kwargs.get('sampler') == 'anchor') else n_samples
+    steps_for_log = gen_kwargs.get('num_inference_steps', 1 if gen_kwargs.get('sampler') == 'anchor' else 20)
+    nfe_per_batch = 1 + effective_n_samples
+    nfe_total = n_batches * nfe_per_batch * steps_for_log
 
     logger.info(
         "eval: start | windows=%s batches=%d batch_size=%d n_samples=%d "
@@ -2336,9 +2438,9 @@ def evaluate_model(
         n_windows if n_windows is not None else '?',
         n_batches,
         batch_size,
-        n_samples if not smoke_test else 1,
+        effective_n_samples,
         gen_kwargs.get('sampler'),
-        gen_kwargs.get('num_inference_steps'),
+        steps_for_log,
         K,
         device,
         nfe_total,
@@ -2368,7 +2470,7 @@ def evaluate_model(
             result = model.generate(past, **gen_kwargs)
             all_preds_single.append(result['prediction'].cpu())
 
-            if smoke_test:
+            if smoke_test or gen_kwargs.get('sampler') == 'anchor':
                 all_preds_avg.append(result['prediction'].cpu())
             else:
                 samples = []
@@ -2921,9 +3023,17 @@ def run_pipeline(
                 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
                 def log_finetune_trial(study, trial):
-                    logger.info(f"[{dataset_name} HP] Trial {trial.number}/{n_finetune_trials}: "
-                                f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                                f"bs={ft_diff_bs}")
+                    msg = (
+                        f"[{dataset_name} HP] Trial {trial.number}/{n_finetune_trials}: "
+                        f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
+                        f"bs={ft_diff_bs}"
+                    )
+                    if DETERMINISTIC_ANCHOR_LOSS and 'deterministic_anchor_lambda' in trial.params:
+                        msg += (
+                            f", anchor_lambda={trial.params['deterministic_anchor_lambda']:.4f}, "
+                            f"anchor_alpha={trial.params['deterministic_anchor_alpha']:.4f}"
+                        )
+                    logger.info(msg)
 
                 study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
                 study.optimize(
@@ -2955,7 +3065,7 @@ def run_pipeline(
                 itrans_model = load_itransformer_from_checkpoint(itrans_ckpt, n_iv, device)
                 itrans_guidance = iTransformerGuidance(itrans_model)
                 
-                model = create_diffusion_model().to(device)
+                model = create_diffusion_model(**anchor_kwargs_from_params(tuned_params)).to(device)
                 model.set_guidance_model(itrans_guidance)
                 ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
                 load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
@@ -3504,7 +3614,7 @@ def _finetune_and_eval_one_subset(
         itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, len(variate_indices), device)
         itrans_guidance = iTransformerGuidance(itrans_model)
 
-        model = create_diffusion_model().to(device)
+        model = create_diffusion_model(**anchor_kwargs_from_params(tuned_params)).to(device)
         model.set_guidance_model(itrans_guidance)
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
@@ -3561,7 +3671,8 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
     global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION, LOOKBACK_LENGTH, FORECAST_LENGTH
-    global MODEL_TYPE, DIFFUSION_TYPE
+    global MODEL_TYPE, DIFFUSION_TYPE, DETERMINISTIC_ANCHOR_LOSS, DETERMINISTIC_ANCHOR_LAMBDA
+    global DETERMINISTIC_ANCHOR_ALPHA, EVAL_SAMPLER
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3594,6 +3705,15 @@ def main():
                         help='Wipe manifest and checkpoints, start from scratch')
     parser.add_argument('--guidance-penalty-weight', type=float, default=GUIDANCE_PENALTY_WEIGHT,
                         help='Weight for guidance penalty loss (default from pipeline_config)')
+    parser.add_argument('--deterministic-anchor-loss', action='store_true',
+                        help='Add deterministic anchor loss at alpha_bar closest to --deterministic-anchor-alpha')
+    parser.add_argument('--deterministic-anchor-lambda', type=float, default=DETERMINISTIC_ANCHOR_LAMBDA,
+                        help='Weight on standard diffusion MSE when anchor loss is enabled')
+    parser.add_argument('--deterministic-anchor-alpha', type=float, default=DETERMINISTIC_ANCHOR_ALPHA,
+                        help='Target alpha_bar for deterministic anchor timestep')
+    parser.add_argument('--eval-sampler', type=str, default=EVAL_SAMPLER,
+                        choices=['dpmpp', 'ddim', 'ddpm', 'anchor', 'deterministic_anchor'],
+                        help='Sampler used by diffusion eval')
     parser.add_argument('--image-height', type=int, default=IMAGE_HEIGHT,
                         help='Override image height')
     parser.add_argument('--unet-channels', type=str, default=None,
@@ -3630,6 +3750,10 @@ def main():
     
     # Global overrides from CLI
     GUIDANCE_PENALTY_WEIGHT = args.guidance_penalty_weight
+    DETERMINISTIC_ANCHOR_LOSS = args.deterministic_anchor_loss
+    DETERMINISTIC_ANCHOR_LAMBDA = args.deterministic_anchor_lambda
+    DETERMINISTIC_ANCHOR_ALPHA = args.deterministic_anchor_alpha
+    EVAL_SAMPLER = "anchor" if args.eval_sampler == "deterministic_anchor" else args.eval_sampler
     IMAGE_HEIGHT = args.image_height
     if args.unet_channels:
         UNET_CHANNELS = [int(x.strip()) for x in args.unet_channels.split(',') if x.strip()]
