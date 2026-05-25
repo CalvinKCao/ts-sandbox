@@ -112,8 +112,20 @@ virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 pip install --no-index \
-    'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm matplotlib optuna wandb einops \
+    'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm optuna wandb einops \
     -q
+VIZ_WHEELS_OK=0
+for _try in 1 2 3; do
+    if pip install --no-index matplotlib -q; then
+        VIZ_WHEELS_OK=1
+        break
+    fi
+    echo "[setup] matplotlib install attempt ${_try}/3 failed (CVMFS I/O?); sleeping 30s..."
+    sleep 30
+done
+if [[ "$VIZ_WHEELS_OK" -ne 1 ]]; then
+    echo "[setup] WARNING: matplotlib not installed; training will run, viz may be skipped."
+fi
 pip install --no-index reformer_pytorch -q 2>/dev/null \
     || pip install --no-index reformer-pytorch -q 2>/dev/null \
     || pip install reformer-pytorch -q 2>/dev/null \
@@ -155,16 +167,20 @@ fi
 echo "[train] Binary full training/eval..."
 python -u -m models.diffusion_tsf.train_multivariate_pipeline "${TRAIN_ARGS[@]}"
 
-echo "[viz] Rendering comparison..."
-python -u -m models.diffusion_tsf.visualize_comparison \
-    --checkpoint-dir "$CKPT_DIR" \
-    --output-dir "$DATA_DIR" \
-    --dataset "$DATASET" \
-    --num-samples 3 \
-    --vars "$VARS_TO_PLOT" \
-    --ensemble "$ENSEMBLE" \
-    --num-extra-windows 2 \
-    --diffusion-type binary
+if [[ "$VIZ_WHEELS_OK" -eq 1 ]] || python -c "import matplotlib" 2>/dev/null; then
+    echo "[viz] Rendering comparison..."
+    python -u -m models.diffusion_tsf.visualize_comparison \
+        --checkpoint-dir "$CKPT_DIR" \
+        --output-dir "$DATA_DIR" \
+        --dataset "$DATASET" \
+        --num-samples 3 \
+        --vars "$VARS_TO_PLOT" \
+        --ensemble "$ENSEMBLE" \
+        --num-extra-windows 2 \
+        --diffusion-type binary
+else
+    echo "[viz] Skipped (matplotlib unavailable after wheel install retries)."
+fi
 
 if [[ -n "${WANDB_API_KEY:-}" ]] && [[ "$WANDB_API_KEY" =~ ^[A-Za-z0-9_]+$ ]]; then
     echo "[wandb] Uploading combined log artifact..."
