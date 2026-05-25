@@ -12,16 +12,20 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASET="ETTh2"
+N_VARIATES=7
 SEED="42"
 FRESH=0
 SMOKE=0
 VARS_TO_PLOT=3
 ENSEMBLE=3
+WALL="${WALL:-}"
 WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-92d3}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dataset) DATASET="$2"; shift 2 ;;
+        --n-variates) N_VARIATES="$2"; shift 2 ;;
+        --walltime|--time) WALL="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         --fresh) FRESH=1; shift ;;
         --smoke-test|--smoke) SMOKE=1; shift ;;
@@ -42,10 +46,11 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         WALL="2-00:00:00"
         MEM="60G"
         CPUS=8
-        JOB_NAME="binary92d3-etth2"
+        JOB_NAME="binary92d3-${DATASET,,}"
+        [[ -z "$WALL" ]] && WALL="2-00:00:00"
     fi
 
-    echo "Submitting ${JOB_NAME} on Killarney L40S..."
+    echo "Submitting ${JOB_NAME} (${DATASET}, n=${N_VARIATES}) wall=${WALL} on Killarney L40S..."
     sbatch \
         --job-name="$JOB_NAME" \
         --account=aip-boyuwang \
@@ -59,7 +64,9 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         --mail-type=END,FAIL \
         --mail-user=ccao87@uwo.ca \
         "$SCRIPT_DIR/slurm_binary_92d3_etth2.sh" \
-        --dataset "$DATASET" --seed "$SEED" --vars "$VARS_TO_PLOT" --ensemble "$ENSEMBLE" \
+        --dataset "$DATASET" --n-variates "$N_VARIATES" --seed "$SEED" \
+        --vars "$VARS_TO_PLOT" --ensemble "$ENSEMBLE" \
+        $([[ -n "$WALL" && "$SMOKE" -eq 0 ]] && echo --walltime "$WALL") \
         $([[ "$FRESH" -eq 1 ]] && echo --fresh) \
         $([[ "$SMOKE" -eq 1 ]] && echo --smoke-test) \
         --wandb-project "$WANDB_PROJECT"
@@ -117,7 +124,7 @@ export WANDB_PROJECT
 TRAIN_ARGS=(
     --mode full
     --dataset "$DATASET"
-    --n-variates 7
+    --n-variates "$N_VARIATES"
     --binary-diffusion
     --checkpoint-dir "$CKPT_DIR"
     --results-dir "$DATA_DIR"
