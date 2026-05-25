@@ -125,8 +125,14 @@ echo "[setup] Building venv on \$SLURM_TMPDIR..."
 virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
-pip install --no-index 'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm matplotlib optuna wandb einops -q
-[ -f "$PROJECT_ROOT/requirements.txt" ] && pip install -r "$PROJECT_ROOT/requirements.txt" -q || true
+pip install --no-index \
+    'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm matplotlib optuna wandb einops \
+    -q
+# iTransformer imports reformer_pytorch only for optional ReformerLayer; install if wheelhouse has it.
+pip install --no-index reformer_pytorch -q 2>/dev/null \
+    || pip install --no-index reformer-pytorch -q 2>/dev/null \
+    || pip install reformer-pytorch -q 2>/dev/null \
+    || echo "[setup] reformer-pytorch not installed (OK unless using Reformer attention)"
 python - <<'PY'
 import torch
 assert torch.cuda.is_available(), "CUDA required; check torch wheel/modules"
@@ -157,8 +163,11 @@ fi
 if [[ "$SMOKE" -eq 1 ]]; then
     TRAIN_ARGS+=(--smoke-test)
 fi
-if [[ -n "${WANDB_API_KEY:-}" ]]; then
+if [[ -n "${WANDB_API_KEY:-}" ]] && [[ "$WANDB_API_KEY" =~ ^[A-Za-z0-9_]+$ ]]; then
     TRAIN_ARGS+=(--wandb --wandb-project "$WANDB_PROJECT")
+elif [[ -n "${WANDB_API_KEY:-}" ]]; then
+    echo "[wandb] WANDB_API_KEY has invalid characters; training without wandb."
+    unset WANDB_API_KEY
 else
     echo "[wandb] WANDB_API_KEY not set; training will run without wandb."
 fi
@@ -178,7 +187,7 @@ python -u -m models.diffusion_tsf.visualize_comparison \
     --diffusion-type gaussian \
     --diffusion-sampler "$EVAL_SAMPLER"
 
-if [[ -n "${WANDB_API_KEY:-}" ]]; then
+if [[ -n "${WANDB_API_KEY:-}" ]] && [[ "$WANDB_API_KEY" =~ ^[A-Za-z0-9_]+$ ]]; then
     echo "[wandb] Uploading combined log artifact..."
     python - <<PY
 import os

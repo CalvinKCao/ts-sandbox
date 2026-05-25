@@ -144,11 +144,11 @@ ITRANS_HP_FINETUNE_MAX_EPOCHS: int = 10
 ITRANS_REAL_COLD_START: bool = True
 
 # Phase 2B: Diffusion HP tuning on real data (LR-only search; batch size auto-probed).
-# The best trial selects hyperparameters; the final model then trains for 20 epochs.
+# The best trial checkpoint is promoted to best.pt (no separate full retrain).
 N_FINETUNE_HP_TRIALS: int = 8
 HP_TUNE_EPOCHS: int = 10
 HP_TUNE_PATIENCE: int = 10
-FINAL_FINETUNE_EPOCHS: int = 20
+FINAL_FINETUNE_EPOCHS: int = 20  # legacy constant; promotion copies the best trial ckpt
 # Optuna log-uniform bounds for Phase 2B only (finetune_hp_objective).
 FINETUNE_HP_LR_MIN: float = 3e-6
 FINETUNE_HP_LR_MAX: float = 2e-4
@@ -203,7 +203,7 @@ GUIDANCE_PENALTY_WEIGHT: float = 0.0  # small penalty for deviating from iTransf
 DETERMINISTIC_ANCHOR_LOSS: bool = False
 DETERMINISTIC_ANCHOR_LAMBDA: float = 0.99
 DETERMINISTIC_ANCHOR_ALPHA: float = 0.5
-# Optuna bounds when --deterministic-anchor-loss is on (Phase 1B / 2B diffusion HP).
+# Reserved bounds if anchor HP search is re-enabled later (not used while tuning is off).
 ANCHOR_HP_LAMBDA_MIN: float = 0.90
 ANCHOR_HP_LAMBDA_MAX: float = 0.995
 ANCHOR_HP_ALPHA_MIN: float = 0.35

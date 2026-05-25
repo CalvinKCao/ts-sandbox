@@ -207,34 +207,22 @@ def require_tuned_param(params: Dict, key: str, stage_name: str):
     return params[key]
 
 
-def suggest_deterministic_anchor_hp(trial) -> Tuple[float, float]:
-    """Optuna search for anchor loss weight and target alpha_bar (when enabled)."""
-    if not DETERMINISTIC_ANCHOR_LOSS:
-        return DETERMINISTIC_ANCHOR_LAMBDA, DETERMINISTIC_ANCHOR_ALPHA
-    anchor_lambda = trial.suggest_float(
-        'deterministic_anchor_lambda', ANCHOR_HP_LAMBDA_MIN, ANCHOR_HP_LAMBDA_MAX,
-    )
-    anchor_alpha = trial.suggest_float(
-        'deterministic_anchor_alpha', ANCHOR_HP_ALPHA_MIN, ANCHOR_HP_ALPHA_MAX,
-    )
-    return anchor_lambda, anchor_alpha
+def fixed_deterministic_anchor_hp() -> Tuple[float, float]:
+    """Fixed anchor hyperparameters (CLI / pipeline_config; not Optuna-tuned)."""
+    return DETERMINISTIC_ANCHOR_LAMBDA, DETERMINISTIC_ANCHOR_ALPHA
 
 
 def anchor_kwargs_from_params(params: Optional[Dict] = None) -> Dict:
-    """Kwargs for create_diffusion_model from tuned or CLI anchor settings."""
+    """Kwargs for create_diffusion_model from CLI anchor settings."""
+    del params  # kept for call-site compatibility; anchor HP is not tuned
     if not DETERMINISTIC_ANCHOR_LOSS:
         return {}
-    kwargs = {
+    anchor_lambda, anchor_alpha = fixed_deterministic_anchor_hp()
+    return {
         'use_deterministic_anchor_loss': True,
-        'deterministic_anchor_lambda': DETERMINISTIC_ANCHOR_LAMBDA,
-        'deterministic_anchor_alpha': DETERMINISTIC_ANCHOR_ALPHA,
+        'deterministic_anchor_lambda': anchor_lambda,
+        'deterministic_anchor_alpha': anchor_alpha,
     }
-    if params:
-        if 'deterministic_anchor_lambda' in params:
-            kwargs['deterministic_anchor_lambda'] = float(params['deterministic_anchor_lambda'])
-        if 'deterministic_anchor_alpha' in params:
-            kwargs['deterministic_anchor_alpha'] = float(params['deterministic_anchor_alpha'])
-    return kwargs
 
 
 # ============================================================================
@@ -439,6 +427,15 @@ def get_system_info() -> dict:
     return info
 
 
+def _wandb_api_key_usable() -> bool:
+    """True if WANDB_API_KEY is set and matches wandb's allowed charset."""
+    import re
+    key = os.environ.get("WANDB_API_KEY", "").strip()
+    if not key:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_]+", key))
+
+
 def init_wandb(
     project: str = "diffusion-tsf-7var",
     config: dict = None,
@@ -454,6 +451,18 @@ def init_wandb(
         return False
     
     if not is_main_process():
+        _wandb_enabled = False
+        return False
+
+    if not _wandb_api_key_usable():
+        if os.environ.get("WANDB_API_KEY", "").strip():
+            logger.warning(
+                "WANDB_API_KEY is set but invalid (wandb allows only A-Z, 0-9, _). "
+                "Skipping wandb for this run."
+            )
+        else:
+            logger.warning("WANDB_API_KEY not set; skipping wandb.")
+        os.environ.pop("WANDB_API_KEY", None)
         _wandb_enabled = False
         return False
     
@@ -709,7 +718,6 @@ from models.diffusion_tsf.pipeline_config import (
     N_ITRANS_HP_TRIALS,
     N_DIFFUSION_HP_TRIALS,
     N_FINETUNE_HP_TRIALS,
-    FINAL_FINETUNE_EPOCHS,
     ITRANS_HP_PRETRAIN_MAX_EPOCHS,
     ITRANS_HP_FINETUNE_MAX_EPOCHS,
     ITRANS_REAL_COLD_START,
@@ -999,6 +1007,10 @@ def create_diffusion_model(
         deterministic_anchor_lambda = DETERMINISTIC_ANCHOR_LAMBDA
     if deterministic_anchor_alpha is None:
         deterministic_anchor_alpha = DETERMINISTIC_ANCHOR_ALPHA
+    if diffusion_type == "binary" and use_deterministic_anchor_loss:
+        raise ValueError(
+            "Binary diffusion and deterministic anchor loss cannot be used together."
+        )
 
     logger.info(
         f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, "
@@ -1455,7 +1467,7 @@ def select_diffusion_batch_size(
         try:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            model = create_diffusion_model().to(device)
+            model = create_diffusion_model(**anchor_kwargs_from_params()).to(device)
             model.set_guidance_model(itrans_guidance)
             model.train()
             optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
@@ -1671,11 +1683,7 @@ def diffusion_hp_objective(
     else:
         batch_size = fixed_batch_size
 
-    anchor_lambda, anchor_alpha = suggest_deterministic_anchor_hp(trial)
-    model = create_diffusion_model(
-        deterministic_anchor_lambda=anchor_lambda,
-        deterministic_anchor_alpha=anchor_alpha,
-    ).to(device)
+    model = create_diffusion_model(**anchor_kwargs_from_params()).to(device)
     model.set_guidance_model(itrans_guidance)
 
     train_loader = DataLoader(synthetic_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -1793,11 +1801,9 @@ def run_diffusion_hp_tuning(
             f"[Diffusion HP] Trial {trial.number}/{n_trials}: "
             f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, bs={bs}"
         )
-        if DETERMINISTIC_ANCHOR_LOSS and 'deterministic_anchor_lambda' in trial.params:
-            msg += (
-                f", anchor_lambda={trial.params['deterministic_anchor_lambda']:.4f}, "
-                f"anchor_alpha={trial.params['deterministic_anchor_alpha']:.4f}"
-            )
+        if DETERMINISTIC_ANCHOR_LOSS:
+            lam, alpha = fixed_deterministic_anchor_hp()
+            msg += f", anchor_lambda={lam:.4f}, anchor_alpha={alpha:.4f} (fixed)"
         logger.info(msg)
     
     _best_state: dict = {'model_state': None, 'val_loss': float('inf')}
@@ -1819,10 +1825,8 @@ def run_diffusion_hp_tuning(
         f"bs={best_params['batch_size']}"
     )
     if DETERMINISTIC_ANCHOR_LOSS:
-        msg += (
-            f", anchor_lambda={best_params['deterministic_anchor_lambda']:.4f}, "
-            f"anchor_alpha={best_params['deterministic_anchor_alpha']:.4f}"
-        )
+        lam, alpha = fixed_deterministic_anchor_hp()
+        msg += f", anchor_lambda={lam:.4f}, anchor_alpha={alpha:.4f} (fixed)"
     logger.info(msg)
     logger.info(f"Best val loss: {study.best_value:.4f}")
 
@@ -2143,7 +2147,7 @@ def finetune_hp_objective(
     else:
         batch_size = trial.suggest_categorical('batch_size', [2, 4] if smoke_test else FINETUNE_BATCH_SIZES)
 
-    anchor_lambda, anchor_alpha = suggest_deterministic_anchor_hp(trial)
+    anchor_lambda, anchor_alpha = fixed_deterministic_anchor_hp()
     
     # Load data
     train_ds, val_ds, _, _ = load_dataset(
@@ -2164,11 +2168,7 @@ def finetune_hp_objective(
     itrans_guidance = iTransformerGuidance(itrans_model)
     
     # Load pretrained diffusion (skip guidance keys — keep the attached one)
-    model = create_diffusion_model(
-        n_variates=n_iv,
-        deterministic_anchor_lambda=anchor_lambda,
-        deterministic_anchor_alpha=anchor_alpha,
-    ).to(device)
+    model = create_diffusion_model(n_variates=n_iv, **anchor_kwargs_from_params()).to(device)
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
     load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
@@ -2246,7 +2246,8 @@ def _promote_best_trial_to_final(
     device: torch.device,
     smoke_test: bool = False,
 ) -> Tuple[str, Dict]:
-    """Train a final 20-epoch fine-tuned diffusion model using the best HP trial."""
+    """Copy the best Phase 2B trial checkpoint to best.pt (no extra retrain)."""
+    del pretrained_path, itrans_checkpoint, device, smoke_test  # kept for call-site compatibility
     if study.best_trial is None:
         raise RuntimeError("Optuna study has no successful trials")
 
@@ -2255,8 +2256,6 @@ def _promote_best_trial_to_final(
     best_num = study.best_trial.number
     tuned_params = dict(study.best_params)
     tuned_params['batch_size'] = fixed_batch_size
-    lr = float(tuned_params['learning_rate'])
-    batch_size = int(tuned_params['batch_size'])
 
     src = os.path.join(subset_dir, f'_diff_ft_trial_{best_num}_best.pt')
     if not os.path.exists(src):
@@ -2264,84 +2263,24 @@ def _promote_best_trial_to_final(
 
     dst = os.path.join(subset_dir, 'best.pt')
     logger.info(
-        f"Training final fine-tuned diffusion for {subset_id}: "
-        f"lr={lr:.2e}, batch_size={batch_size}, epochs={FINAL_FINETUNE_EPOCHS}"
+        f"Promoting trial {best_num} to {dst} for {subset_id} "
+        f"(lr={float(tuned_params['learning_rate']):.2e}, batch_size={int(tuned_params['batch_size'])})"
     )
 
-    train_ds, val_ds, _, _ = load_dataset(dataset_name, variate_indices, stride=1)
-    if smoke_test:
-        train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
-        val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
-
-    n_iv = len(variate_indices)
-    itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
-    itrans_guidance = iTransformerGuidance(itrans_model)
-
-    model = create_diffusion_model(n_variates=n_iv, **anchor_kwargs_from_params(tuned_params)).to(device)
-    model.set_guidance_model(itrans_guidance)
-    ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
-    load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    epochs = 1 if smoke_test else FINAL_FINETUNE_EPOCHS
-    best_val_loss = float('inf')
-    best_epoch = 0
-    if DETERMINISTIC_ANCHOR_LOSS:
-        logger.info(
-            f"[{subset_id}:final_diffusion] anchor lambda={tuned_params.get('deterministic_anchor_lambda', DETERMINISTIC_ANCHOR_LAMBDA):.4f} "
-            f"alpha={tuned_params.get('deterministic_anchor_alpha', DETERMINISTIC_ANCHOR_ALPHA):.4f}"
-        )
-
-    for epoch in range(epochs):
-        model.train()
-        train_loss = 0.0
-        train_batches = 0
-        for past, future in train_loader:
-            past, future = past.to(device), future.to(device)
-            optimizer.zero_grad()
-            with amp_context():
-                loss = model.get_loss(past, future)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            train_loss += loss.item()
-            train_batches += 1
-        train_loss /= max(train_batches, 1)
-
-        model.eval()
-        val_loss = 0.0
-        val_batches = 0
-        with torch.no_grad():
-            for past, future in val_loader:
-                past, future = past.to(device), future.to(device)
-                with amp_context():
-                    loss = model.get_loss(past, future)
-                val_loss += loss.item()
-                val_batches += 1
-        val_loss /= max(val_batches, 1)
-        logger.info(
-            f"[{subset_id}:final_diffusion] epoch {epoch + 1}/{epochs} "
-            f"train_loss={train_loss:.4f} val_loss={val_loss:.4f}"
-        )
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_epoch = epoch + 1
-            if is_main_process():
-                save_checkpoint(
-                    unwrap_model(model), optimizer, epoch, train_loss, val_loss,
-                    {
-                        'tuned_params': tuned_params,
-                        'best_trial': best_num,
-                        'final_finetune_epochs': epochs,
-                    },
-                    dst,
-                )
-    barrier()
-
+    import shutil
     if is_main_process():
+        shutil.copy2(src, dst)
+        trial_ckpt = torch.load(src, map_location='cpu', weights_only=False)
+        ckpt_config = trial_ckpt.get('config', {})
+        if isinstance(ckpt_config, dict) and 'tuned_params' in ckpt_config:
+            tuned_params = dict(ckpt_config['tuned_params'])
+            tuned_params['batch_size'] = fixed_batch_size
+        best_val_loss = float(trial_ckpt.get('val_loss', study.best_value))
+        best_epoch = int(trial_ckpt.get('epoch', 0)) + 1
+        if DETERMINISTIC_ANCHOR_LOSS:
+            lam, alpha = fixed_deterministic_anchor_hp()
+            tuned_params['deterministic_anchor_lambda'] = lam
+            tuned_params['deterministic_anchor_alpha'] = alpha
         os.makedirs(subset_dir, exist_ok=True)
         with open(os.path.join(subset_dir, 'metadata.json'), 'w') as f:
             json.dump({
@@ -2356,7 +2295,7 @@ def _promote_best_trial_to_final(
                 'hp_best_val_loss': float(study.best_value),
                 'best_val_loss': best_val_loss,
                 'best_epoch': best_epoch,
-                'final_finetune_epochs': epochs,
+                'promoted_from_trial_ckpt': True,
                 'diffusion_type': DIFFUSION_TYPE,
             }, f, indent=2)
         for fn in os.listdir(subset_dir):
@@ -2365,6 +2304,9 @@ def _promote_best_trial_to_final(
                     os.remove(os.path.join(subset_dir, fn))
                 except OSError:
                     pass
+    else:
+        best_val_loss = float(study.best_value)
+        best_epoch = 0
     barrier()
 
     return dst, {
@@ -2376,12 +2318,10 @@ def _promote_best_trial_to_final(
 
 
 def finetune_on_dataset(*args, **kwargs):
-    """Removed. The Phase 2C full-finetune step has been eliminated; the best
-    Phase 2B Optuna trial's checkpoint is now reused as the final fine-tuned
-    model. See ``_promote_best_trial_to_final``."""
+    """Removed. Phase 2B HP search plus ``_promote_best_trial_to_final`` (copy best trial ckpt)."""
     raise RuntimeError(
-        "finetune_on_dataset() was removed — Phase 2B's best trial checkpoint is "
-        "the final model. Use _promote_best_trial_to_final() after study.optimize()."
+        "finetune_on_dataset() was removed — promote the best Phase 2B trial via "
+        "_promote_best_trial_to_final() after study.optimize()."
     )
 
 
@@ -3028,11 +2968,9 @@ def run_pipeline(
                         f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
                         f"bs={ft_diff_bs}"
                     )
-                    if DETERMINISTIC_ANCHOR_LOSS and 'deterministic_anchor_lambda' in trial.params:
-                        msg += (
-                            f", anchor_lambda={trial.params['deterministic_anchor_lambda']:.4f}, "
-                            f"anchor_alpha={trial.params['deterministic_anchor_alpha']:.4f}"
-                        )
+                    if DETERMINISTIC_ANCHOR_LOSS:
+                        lam, alpha = fixed_deterministic_anchor_hp()
+                        msg += f", anchor_lambda={lam:.4f}, anchor_alpha={alpha:.4f} (fixed)"
                     logger.info(msg)
 
                 study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
@@ -3765,6 +3703,10 @@ def main():
         MODEL_TYPE = args.model_type
     if args.binary_diffusion:
         DIFFUSION_TYPE = "binary"
+    if DIFFUSION_TYPE == "binary" and DETERMINISTIC_ANCHOR_LOSS:
+        parser.error(
+            "Cannot combine --binary-diffusion with --deterministic-anchor-loss."
+        )
     LOOKBACK_LENGTH = args.lookback_length
     FORECAST_LENGTH = args.forecast_length
     

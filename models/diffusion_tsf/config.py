@@ -98,6 +98,8 @@ class DiffusionTSFConfig:
     binary_boundary_weight: float = 1.0
     binary_background_weight: float = 0.1
     binary_boundary_width: int = 8
+    # Edge CDF boundary-weighted BCE (not supported with binary yet).
+    binary_use_boundary_weighted_bce: bool = False
     
     # ddim stuff
     ddim_steps: int = 50
@@ -180,6 +182,14 @@ class DiffusionTSFConfig:
         assert self.num_diffusion_steps > 0
         assert self.noise_schedule in ["linear", "cosine", "sigmoid", "quadratic"]
         assert self.diffusion_type in ["gaussian", "binary"]
+        if self.diffusion_type == "binary" and self.use_deterministic_anchor_loss:
+            raise ValueError(
+                "Binary diffusion and deterministic anchor loss cannot be used together."
+            )
+        if self.diffusion_type == "binary" and self.binary_use_boundary_weighted_bce:
+            raise ValueError(
+                "Edge CDF boundary-weighted BCE is not supported for binary diffusion yet."
+            )
         assert 0 <= self.cutout_prob <= 1
         assert 0.0 <= self.deterministic_anchor_lambda <= 1.0
         assert 0.0 < self.deterministic_anchor_alpha < 1.0

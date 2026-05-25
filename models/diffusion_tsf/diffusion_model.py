@@ -523,6 +523,60 @@ class DiffusionTSF(nn.Module):
             return torch.cat(outs, dim=0)
         return self.noise_predictor(canvas, t_flat, cond_for_unet, encoder_hidden_states=ctx_flat)
 
+    def _build_anchor_canvas(
+        self,
+        zero_future_flat: torch.Tensor,
+        guidance_2d_flat: Optional[torch.Tensor],
+        use_null_guidance: bool,
+        null_guide: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Zero-noise canvas for the deterministic anchor forward pass."""
+        canvas = self._inject_coordinate_channel(zero_future_flat)
+        canvas = self._inject_time_channels(canvas)
+        if guidance_2d_flat is not None:
+            if use_null_guidance:
+                guide = null_guide if null_guide is not None else torch.zeros_like(guidance_2d_flat)
+            else:
+                guide = guidance_2d_flat
+            canvas = torch.cat([canvas, guide], dim=1)
+        return canvas
+
+    def _predict_anchor_noise(
+        self,
+        zero_future_flat: torch.Tensor,
+        t_flat: torch.Tensor,
+        cond: torch.Tensor,
+        ctx: Optional[torch.Tensor],
+        guidance_2d_flat: Optional[torch.Tensor],
+        cfg_scale: float,
+        null_cond: Optional[torch.Tensor] = None,
+        null_ctx: Optional[torch.Tensor] = None,
+        null_guide: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Anchor noise prediction with optional CFG (cond vs null cond/ctx/guidance)."""
+        if cfg_scale <= 1.0:
+            canvas = self._build_anchor_canvas(
+                zero_future_flat, guidance_2d_flat, use_null_guidance=False, null_guide=null_guide,
+            )
+            return self._predict_noise_chunked(canvas, t_flat, cond, ctx)
+        out_c = self._predict_noise_chunked(
+            self._build_anchor_canvas(
+                zero_future_flat, guidance_2d_flat, use_null_guidance=False, null_guide=null_guide,
+            ),
+            t_flat,
+            cond,
+            ctx,
+        )
+        out_u = self._predict_noise_chunked(
+            self._build_anchor_canvas(
+                zero_future_flat, guidance_2d_flat, use_null_guidance=True, null_guide=null_guide,
+            ),
+            t_flat,
+            null_cond,
+            null_ctx,
+        )
+        return out_u + cfg_scale * (out_c - out_u)
+
     def _load_from_state_dict(
         self,
         state_dict,
@@ -782,14 +836,14 @@ class DiffusionTSF(nn.Module):
         base_cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
 
         # broadcast context: every one of the BV U-Net forward passes sees ALL V tokens
-        ctx_flat = None
+        ctx_anchor = None
         if ctx is not None:
-            # (B, V, ctx_dim) → (BV, V, ctx_dim)
-            ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
+            # (B, V, ctx_dim) → (BV, V, ctx_dim); kept full-strength for the anchor pass
+            ctx_anchor = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
 
         canvas = base_canvas
         cond_for_unet = base_cond_for_unet
-        ctx_for_unet = ctx_flat
+        ctx_cfg_dropout = ctx_anchor
         guidance_2d_flat = guidance_2d.reshape(BV, 1, H, W_fut) if guidance_2d is not None else None
 
         # --- Apply Classifier-Free Guidance Dropout ---
@@ -799,8 +853,10 @@ class DiffusionTSF(nn.Module):
             
             cond_for_unet = torch.where(drop_mask_flat.view(BV, 1, 1, 1), torch.zeros_like(cond_for_unet), cond_for_unet)
             
-            if ctx_for_unet is not None:
-                ctx_for_unet = torch.where(drop_mask_flat.view(BV, 1, 1), torch.zeros_like(ctx_for_unet), ctx_for_unet)
+            if ctx_cfg_dropout is not None:
+                ctx_cfg_dropout = torch.where(
+                    drop_mask_flat.view(BV, 1, 1), torch.zeros_like(ctx_cfg_dropout), ctx_cfg_dropout,
+                )
                 
             if guidance_2d_flat is not None:
                 guide_for_unet = torch.where(
@@ -813,7 +869,7 @@ class DiffusionTSF(nn.Module):
             if guidance_2d_flat is not None:
                 canvas = torch.cat([canvas, guidance_2d_flat], dim=1)
 
-        noise_pred_flat = self._predict_noise_chunked(canvas, t_flat, cond_for_unet, ctx_for_unet)
+        noise_pred_flat = self._predict_noise_chunked(canvas, t_flat, cond_for_unet, ctx_cfg_dropout)
             
         noise_pred = noise_pred_flat.reshape(B, V, H, W_fut)
 
@@ -837,16 +893,29 @@ class DiffusionTSF(nn.Module):
                 device=device,
                 dtype=t_flat.dtype,
             )
-            anchor_canvas = torch.zeros_like(noisy_future.reshape(BV, 1, H, W_fut))
-            anchor_canvas = self._inject_coordinate_channel(anchor_canvas)
-            anchor_canvas = self._inject_time_channels(anchor_canvas)
-            if guidance_2d_flat is not None:
-                anchor_canvas = torch.cat([anchor_canvas, guidance_2d_flat], dim=1)
-            anchor_pred_flat = self._predict_noise_chunked(
-                anchor_canvas,
+            cfg_scale = self.config.cfg_scale
+            zero_future_flat = torch.zeros_like(noisy_future.reshape(BV, 1, H, W_fut))
+            null_cond_anchor = (
+                torch.zeros_like(base_cond_for_unet) if cfg_scale > 1.0 else None
+            )
+            null_ctx_anchor = (
+                torch.zeros_like(ctx_anchor) if (ctx_anchor is not None and cfg_scale > 1.0) else None
+            )
+            null_guide_anchor = (
+                torch.zeros_like(guidance_2d_flat)
+                if (guidance_2d_flat is not None and cfg_scale > 1.0)
+                else None
+            )
+            anchor_pred_flat = self._predict_anchor_noise(
+                zero_future_flat,
                 anchor_t_flat,
                 base_cond_for_unet,
-                ctx_flat,
+                ctx_anchor,
+                guidance_2d_flat,
+                cfg_scale,
+                null_cond_anchor,
+                null_ctx_anchor,
+                null_guide_anchor,
             )
             anchor_pred = anchor_pred_flat.reshape(B, V, H, W_fut)
             anchor_target = anchor_scale.to(device=device, dtype=future_2d.dtype) * future_2d
@@ -974,8 +1043,18 @@ class DiffusionTSF(nn.Module):
                 device=device,
                 dtype=torch.long,
             )
-            zero_future = torch.zeros(noise_shape, device=device)
-            anchor_pred = _chunked_model_fn(_build_canvas(zero_future), t_batch, cond_flat, ctx_flat)
+            zero_future_flat = torch.zeros(noise_shape, device=device)
+            anchor_pred = self._predict_anchor_noise(
+                zero_future_flat,
+                t_batch,
+                cond_flat,
+                ctx_flat,
+                guide_flat,
+                cfg_scale,
+                null_cond,
+                null_ctx_flat,
+                null_guide,
+            )
             future_2d_flat = anchor_pred / anchor_scale.to(device=device, dtype=anchor_pred.dtype)
         elif sampler == "dpmpp":
             steps = num_inference_steps if num_inference_steps is not None else 20
@@ -1017,8 +1096,16 @@ class DiffusionTSF(nn.Module):
     # Binary diffusion — hard CDF images and XOR bit-flip noise
     # ====================================================================
 
+    def _binary_plain_bce_loss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Unweighted BCE for binary CDF images."""
+        return F.binary_cross_entropy_with_logits(logits, target.float())
+
     def _boundary_bce_loss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """BCE weighted toward the CDF boundary, where forecast geometry lives."""
+        if self.config.diffusion_type == "binary":
+            raise ValueError(
+                "Edge CDF boundary-weighted BCE is not supported for binary diffusion yet."
+            )
         H = target.shape[2]
         bw = self.config.binary_boundary_width
         high_w = self.config.binary_boundary_weight
@@ -1128,8 +1215,8 @@ class DiffusionTSF(nn.Module):
 
         x0_logits = out_flat[:, 0:1, :, :]
         zt_logits = out_flat[:, 1:2, :, :]
-        loss_x0 = self._boundary_bce_loss(x0_logits, future_flat)
-        loss_zt = self._boundary_bce_loss(zt_logits, zt_flat)
+        loss_x0 = self._binary_plain_bce_loss(x0_logits, future_flat)
+        loss_zt = self._binary_plain_bce_loss(zt_logits, zt_flat)
         loss = loss_x0 + loss_zt
 
         return {
