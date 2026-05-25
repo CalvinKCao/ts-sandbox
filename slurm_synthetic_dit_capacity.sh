@@ -187,13 +187,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 python -u -m models.diffusion_tsf.train_synthetic_dit_capacity \
-    --results-dir "$LOG_DIR" \
+    --checkpoint-dir "$CKPT_DIR" \
+    --results-dir "$DATA_DIR" \
     $SMOKE_FLAG \
     "${PY_ARGS[@]}"
 
 echo "=========================================="
 echo "Done: $(date)"
 echo "Variant: $VARIANT"
-echo "Metrics: $LOG_DIR"
+echo "Results: $DATA_DIR"
 echo "Log: $LOG_FILE"
 echo "=========================================="

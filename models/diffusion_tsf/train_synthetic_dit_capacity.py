@@ -141,6 +141,35 @@ class VariantResult:
     stop_reason: str = ""
 
 
+def save_variant_checkpoint(
+    model: DiffusionTSF,
+    spec: VariantSpec,
+    run_cfg: RunConfig,
+    checkpoint_dir: Optional[Path],
+    epoch: int,
+    best_linear_mse: float,
+    best_periodic_mse: float,
+    best_combined_mse: float,
+) -> None:
+    if checkpoint_dir is None:
+        return
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "variant": spec.name,
+        "spec": asdict(spec),
+        "run_config": asdict(run_cfg),
+        "epoch": epoch,
+        "best_linear_mse": best_linear_mse,
+        "best_periodic_mse": best_periodic_mse,
+        "best_combined_mse": best_combined_mse,
+        "model_state_dict": model.state_dict(),
+    }
+    torch.save(payload, checkpoint_dir / f"{spec.name}.pt")
+    guidance = getattr(model, "guidance_model", None)
+    if spec.use_guidance and isinstance(guidance, iTransformerGuidance):
+        torch.save(guidance.model.state_dict(), checkpoint_dir / f"{spec.name}_itransformer.pt")
+
+
 class SyntheticTaskDataset(Dataset):
     """On-the-fly univariate series; returns (past, future) for diffusion training."""
 
@@ -420,6 +449,7 @@ def train_one_variant(
     run_cfg: RunConfig,
     device: torch.device,
     seed: int,
+    checkpoint_dir: Optional[Path] = None,
 ) -> VariantResult:
     torch.manual_seed(seed)
     model = build_model(spec, run_cfg, device)
@@ -515,6 +545,16 @@ def train_one_variant(
             best_linear = mse_lin
             best_periodic = mse_per
             stale = 0
+            save_variant_checkpoint(
+                model,
+                spec,
+                run_cfg,
+                checkpoint_dir,
+                epoch,
+                best_linear,
+                best_periodic,
+                best_combined,
+            )
         else:
             stale += 1
 
@@ -620,6 +660,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Synthetic DiT capacity probe (no RealTS).")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--results-dir", type=str, default="results/synthetic_dit_capacity")
+    parser.add_argument("--checkpoint-dir", type=str, default=None)
     parser.add_argument("--variants", type=str, default=None, help="Comma-separated variant names")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -681,10 +722,17 @@ def main() -> None:
         logger.info("Training %d variant(s): %s", len(variant_names), ", ".join(variant_names))
 
     results: List[VariantResult] = []
+    checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else None
     for i, vname in enumerate(variant_names):
         spec = VARIANTS[vname]
         logger.info("Training variant %s (patch=%s guidance=%s)", vname, spec.dit_patch_size, spec.use_guidance)
-        res = train_one_variant(spec, run_cfg, device, seed=args.seed + i * 1000)
+        res = train_one_variant(
+            spec,
+            run_cfg,
+            device,
+            seed=args.seed + i * 1000,
+            checkpoint_dir=checkpoint_dir,
+        )
         results.append(res)
 
     out_dir = Path(args.results_dir)
