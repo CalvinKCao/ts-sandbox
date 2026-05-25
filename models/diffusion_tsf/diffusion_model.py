@@ -255,6 +255,7 @@ class DiffusionTSF(nn.Module):
             f"(H x W; denoised future canvas)"
         )
         logger.info(f"  Diffusion type: {config.diffusion_type}")
+        logger.info(f"  Prediction mode: {config.prediction_mode}")
 
     
     def to(self, device):
@@ -487,6 +488,12 @@ class DiffusionTSF(nn.Module):
             cdf_target = (target + 1.0) / 2.0
         emd = (cdf_pred - cdf_target).abs().mean()
         return emd
+
+    def _logits_to_cdf_x0(self, logits: torch.Tensor) -> torch.Tensor:
+        """Mold unconstrained height logits into the repo's bottom-filled CDF x0."""
+        pdf = F.softmax(logits, dim=2)
+        cdf = torch.flip(torch.cumsum(torch.flip(pdf, dims=(2,)), dim=2), dims=(2,))
+        return cdf * 2.0 - 1.0
 
     def _deterministic_anchor_params(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return timestep and scale for alpha_bar closest to the configured anchor."""
@@ -869,17 +876,33 @@ class DiffusionTSF(nn.Module):
             if guidance_2d_flat is not None:
                 canvas = torch.cat([canvas, guidance_2d_flat], dim=1)
 
-        noise_pred_flat = self._predict_noise_chunked(canvas, t_flat, cond_for_unet, ctx_cfg_dropout)
+        model_out_flat = self._predict_noise_chunked(canvas, t_flat, cond_for_unet, ctx_cfg_dropout)
             
-        noise_pred = noise_pred_flat.reshape(B, V, H, W_fut)
+        model_out = model_out_flat.reshape(B, V, H, W_fut)
 
         K = self.config.lookback_overlap
-        if K > 0:
-            nl_past = F.mse_loss(noise_pred[..., :K], noise[..., :K])
-            nl_fut  = F.mse_loss(noise_pred[..., K:],  noise[..., K:])
-            noise_loss = self.config.past_loss_weight * nl_past + nl_fut
+        if self.config.prediction_mode == "x0_cumsum":
+            x0_pred = self._logits_to_cdf_x0(model_out)
+            if K > 0:
+                nl_past = F.mse_loss(x0_pred[..., :K], future_2d[..., :K])
+                nl_fut = F.mse_loss(x0_pred[..., K:], future_2d[..., K:])
+                noise_loss = self.config.past_loss_weight * nl_past + nl_fut
+            else:
+                noise_loss = F.mse_loss(x0_pred, future_2d)
+            noise_pred = torch.zeros_like(noise)
         else:
-            noise_loss = F.mse_loss(noise_pred, noise)
+            noise_pred = model_out
+            if K > 0:
+                nl_past = F.mse_loss(noise_pred[..., :K], noise[..., :K])
+                nl_fut  = F.mse_loss(noise_pred[..., K:],  noise[..., K:])
+                noise_loss = self.config.past_loss_weight * nl_past + nl_fut
+            else:
+                noise_loss = F.mse_loss(noise_pred, noise)
+            x0_pred = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
+            
+            # Clamp x0_pred for numerical stability at high t
+            # Matches ddim_step logic: range [-2, 2] provides slack beyond [-1, 1]
+            x0_pred = torch.clamp(x0_pred, -2.0, 2.0)
 
         anchor_loss = torch.tensor(0.0, device=device)
         combined_mse_loss = noise_loss
@@ -922,12 +945,6 @@ class DiffusionTSF(nn.Module):
             anchor_loss = F.mse_loss(anchor_pred, anchor_target)
             lam = self.config.deterministic_anchor_lambda
             combined_mse_loss = lam * noise_loss + (1.0 - lam) * anchor_loss
-
-        x0_pred  = self.scheduler.predict_x0_from_noise(noisy_future, t, noise_pred)
-        
-        # Clamp x0_pred for numerical stability at high t
-        # Matches ddim_step logic: range [-2, 2] provides slack beyond [-1, 1]
-        x0_pred = torch.clamp(x0_pred, -2.0, 2.0)
         
         emd_loss = self._compute_emd_loss(x0_pred, future_2d)
 
@@ -951,7 +968,7 @@ class DiffusionTSF(nn.Module):
             'loss': loss, 'noise_loss': noise_loss, 'emd_loss': emd_loss,
             'combined_mse_loss': combined_mse_loss, 'anchor_loss': anchor_loss,
             'guidance_loss': guidance_loss,
-            'noise_pred': noise_pred, 't': t,
+            'noise_pred': noise_pred, 'model_out': model_out, 'x0_pred': x0_pred, 't': t,
         }
         if anchor_t is not None:
             result['anchor_timestep'] = anchor_t
@@ -1027,15 +1044,20 @@ class DiffusionTSF(nn.Module):
 
         def model_fn(x, t_batch, cond_arg):
             if cfg_scale <= 1.0:
-                return _chunked_model_fn(_build_canvas(x), t_batch, cond_arg, ctx_flat)
+                out = _chunked_model_fn(_build_canvas(x), t_batch, cond_arg, ctx_flat)
+                return self._logits_to_cdf_x0(out) if self.config.prediction_mode == "x0_cumsum" else out
             # CFG: cond vs uncond pass
             out_c = _chunked_model_fn(_build_canvas(x, use_null=False), t_batch, cond_flat, ctx_flat)
             out_u = _chunked_model_fn(_build_canvas(x, use_null=True),  t_batch, null_cond, null_ctx_flat)
-            return out_u + cfg_scale * (out_c - out_u)
+            out = out_u + cfg_scale * (out_c - out_u)
+            return self._logits_to_cdf_x0(out) if self.config.prediction_mode == "x0_cumsum" else out
 
         noise_shape = (BV, 1, H, W_fut)
+        scheduler_prediction_mode = "x0" if self.config.prediction_mode == "x0_cumsum" else "epsilon"
 
         if sampler in ("anchor", "deterministic_anchor"):
+            if self.config.prediction_mode == "x0_cumsum":
+                raise ValueError("The anchor sampler is not supported with prediction_mode='x0_cumsum'.")
             t_anchor, anchor_scale = self._deterministic_anchor_params()
             t_batch = torch.full(
                 (BV,),
@@ -1060,19 +1082,22 @@ class DiffusionTSF(nn.Module):
             steps = num_inference_steps if num_inference_steps is not None else 20
             future_2d_flat = self.scheduler.sample_dpmpp(
                 model=model_fn, shape=noise_shape, cond=cond_flat,
-                num_steps=steps, device=device, verbose=verbose,
+                num_steps=steps, prediction_mode=scheduler_prediction_mode,
+                device=device, verbose=verbose,
             )
         elif use_ddim:
             steps = num_inference_steps if num_inference_steps is not None else num_ddim_steps
             future_2d_flat = self.scheduler.sample_ddim_cfg(
                 model=model_fn, shape=noise_shape, cond=cond_flat,
                 null_cond=null_cond, cfg_scale=1.0,
-                num_steps=steps, eta=eta, device=device, verbose=verbose,
+                num_steps=steps, eta=eta, prediction_mode=scheduler_prediction_mode,
+                device=device, verbose=verbose,
             )
         else:
             future_2d_flat = self.scheduler.sample_ddpm_cfg(
                 model=model_fn, shape=noise_shape, cond=cond_flat,
-                null_cond=null_cond, cfg_scale=1.0, device=device, verbose=verbose,
+                null_cond=null_cond, cfg_scale=1.0,
+                prediction_mode=scheduler_prediction_mode, device=device, verbose=verbose,
             )
 
         future_2d  = future_2d_flat.reshape(B, V, H, W_fut)

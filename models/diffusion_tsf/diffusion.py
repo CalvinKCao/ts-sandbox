@@ -178,6 +178,22 @@ class DiffusionScheduler:
         
         x_0 = (x_t - sqrt_one_minus_alpha_bar * noise_pred) / sqrt_alpha_bar
         return x_0
+
+    def predict_noise_from_x0(
+        self,
+        x_t: torch.Tensor,
+        t: torch.Tensor,
+        x0_pred: torch.Tensor
+    ) -> torch.Tensor:
+        """Infer epsilon from x_t and a direct x0 prediction."""
+        sqrt_alpha_bar = self.sqrt_alphas_cumprod[t]
+        sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alphas_cumprod[t]
+
+        while sqrt_alpha_bar.dim() < x_t.dim():
+            sqrt_alpha_bar = sqrt_alpha_bar.unsqueeze(-1)
+            sqrt_one_minus_alpha_bar = sqrt_one_minus_alpha_bar.unsqueeze(-1)
+
+        return (x_t - sqrt_alpha_bar * x0_pred) / sqrt_one_minus_alpha_bar.clamp(min=1e-8)
     
     @torch.no_grad()
     def ddpm_step(
@@ -228,6 +244,21 @@ class DiffusionScheduler:
             x_prev = model_mean
         
         return x_prev
+
+    @torch.no_grad()
+    def ddpm_step_x0(
+        self,
+        x_t: torch.Tensor,
+        t: torch.Tensor,
+        x0_pred: torch.Tensor
+    ) -> torch.Tensor:
+        """Single DDPM reverse step when the model predicts clean x0."""
+        if isinstance(t, int):
+            t = torch.tensor([t], device=x_t.device)
+        if t[0] == 0:
+            return x0_pred
+        noise_pred = self.predict_noise_from_x0(x_t, t, x0_pred)
+        return self.ddpm_step(x_t, t, noise_pred)
     
     @torch.no_grad()
     def ddim_step(
@@ -295,6 +326,22 @@ class DiffusionScheduler:
             x_prev = x_prev + sigma * noise
         
         return x_prev
+
+    @torch.no_grad()
+    def ddim_step_x0(
+        self,
+        x_t: torch.Tensor,
+        t: torch.Tensor,
+        t_prev: torch.Tensor,
+        x0_pred: torch.Tensor,
+        eta: float = 0.0,
+        is_final_step: bool = False
+    ) -> torch.Tensor:
+        """Single DDIM reverse step when the model predicts clean x0."""
+        if is_final_step:
+            return x0_pred
+        noise_pred = self.predict_noise_from_x0(x_t, t, x0_pred)
+        return self.ddim_step(x_t, t, t_prev, noise_pred, eta, is_final_step)
     
     @torch.no_grad()
     def sample_ddpm(
@@ -398,6 +445,7 @@ class DiffusionScheduler:
         cond: torch.Tensor,
         null_cond: Optional[torch.Tensor],
         cfg_scale: float = 1.0,
+        prediction_mode: str = "epsilon",
         device: str = "cpu",
         verbose: bool = True
     ) -> torch.Tensor:
@@ -424,6 +472,8 @@ class DiffusionScheduler:
             logger.info(f"Starting DDPM+CFG sampling with {self.num_steps} steps (scale={cfg_scale})")
         
         use_cfg = cfg_scale > 1.0 and null_cond is not None
+        if prediction_mode not in ("epsilon", "x0"):
+            raise ValueError(f"Unsupported prediction_mode for DDPM: {prediction_mode}")
         
         for t in reversed(range(self.num_steps)):
             t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
@@ -438,7 +488,10 @@ class DiffusionScheduler:
                 noise_pred = model(x, t_batch, cond)
             
             # Reverse step
-            x = self.ddpm_step(x, t_batch, noise_pred)
+            if prediction_mode == "x0":
+                x = self.ddpm_step_x0(x, t_batch, noise_pred)
+            else:
+                x = self.ddpm_step(x, t_batch, noise_pred)
             
             if verbose and t % 100 == 0:
                 logger.debug(f"  Step {self.num_steps - t}/{self.num_steps}")
@@ -455,6 +508,7 @@ class DiffusionScheduler:
         cfg_scale: float = 1.0,
         num_steps: int = 50,
         eta: float = 0.0,
+        prediction_mode: str = "epsilon",
         device: str = "cpu",
         verbose: bool = True
     ) -> torch.Tensor:
@@ -488,6 +542,8 @@ class DiffusionScheduler:
             logger.info(f"Starting DDIM+CFG sampling with {num_steps} steps (eta={eta}, scale={cfg_scale})")
         
         use_cfg = cfg_scale > 1.0 and null_cond is not None
+        if prediction_mode not in ("epsilon", "x0"):
+            raise ValueError(f"Unsupported prediction_mode for DDIM: {prediction_mode}")
         
         for i, t in enumerate(timesteps):
             t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
@@ -505,7 +561,10 @@ class DiffusionScheduler:
                 noise_pred = model(x, t_batch, cond)
             
             # DDIM step
-            x = self.ddim_step(x, t_batch, t_prev_batch, noise_pred, eta, is_final_step)
+            if prediction_mode == "x0":
+                x = self.ddim_step_x0(x, t_batch, t_prev_batch, noise_pred, eta, is_final_step)
+            else:
+                x = self.ddim_step(x, t_batch, t_prev_batch, noise_pred, eta, is_final_step)
             
             if verbose and i % 10 == 0:
                 logger.debug(f"  Step {i + 1}/{num_steps} (t={t})")
@@ -519,15 +578,18 @@ class DiffusionScheduler:
         shape: Tuple[int, ...],
         cond: torch.Tensor,
         num_steps: int = 20,
+        prediction_mode: str = "epsilon",
         device: str = "cpu",
         verbose: bool = False,
     ) -> torch.Tensor:
         """DPM-Solver++(2M) multistep sampler in data-prediction form.
 
-        The model is an epsilon-predictor; we convert each prediction to x0
-        and apply the multistep update from Lu et al. 2022.
+        The update runs in data-prediction form. Epsilon outputs are converted
+        to x0; direct x0 outputs are used as-is.
         Usually matches DDPM quality at ~15-25 NFE.
         """
+        if prediction_mode not in ("epsilon", "x0"):
+            raise ValueError(f"Unsupported prediction_mode for DPM++: {prediction_mode}")
         # uniform-in-t schedule incl. endpoints
         timesteps = torch.linspace(self.num_steps - 1, 0, num_steps, dtype=torch.long, device=device).tolist()
 
@@ -552,10 +614,13 @@ class DiffusionScheduler:
 
         for i, t in enumerate(timesteps):
             t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
-            eps = model(x, t_batch, cond)
+            model_pred = model(x, t_batch, cond)
 
             a_t, s_t = _alpha_sigma(t)
-            x0 = (x - s_t * eps) / a_t
+            if prediction_mode == "x0":
+                x0 = model_pred
+            else:
+                x0 = (x - s_t * model_pred) / a_t
             # mild stability clamp (matches existing DDIM clipping convention)
             x0 = torch.clamp(x0, -2.0, 2.0)
 

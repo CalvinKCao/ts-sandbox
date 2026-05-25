@@ -474,6 +474,7 @@ def init_wandb(
         'image_height': IMAGE_HEIGHT,
         'n_variates': N_VARIATES,
         'diffusion_type': DIFFUSION_TYPE,
+        'prediction_mode': PREDICTION_MODE,
         'deterministic_anchor_loss': DETERMINISTIC_ANCHOR_LOSS,
         'deterministic_anchor_lambda': DETERMINISTIC_ANCHOR_LAMBDA,
         'deterministic_anchor_alpha': DETERMINISTIC_ANCHOR_ALPHA,
@@ -739,6 +740,7 @@ from models.diffusion_tsf.pipeline_config import (
     ATTENTION_LEVELS,
     DISABLE_CROSS_ATTENTION,
     MODEL_TYPE,
+    PREDICTION_MODE,
     DIT_PATCH_SIZE,
     DIT_EMBED_DIM,
     DIT_DEPTH,
@@ -990,6 +992,7 @@ def create_diffusion_model(
     past_loss_weight: float = PAST_LOSS_WEIGHT,
     guidance_penalty_weight: Optional[float] = None,
     diffusion_type: str = None,
+    prediction_mode: str = None,
     use_deterministic_anchor_loss: Optional[bool] = None,
     deterministic_anchor_lambda: Optional[float] = None,
     deterministic_anchor_alpha: Optional[float] = None,
@@ -1001,6 +1004,8 @@ def create_diffusion_model(
         guidance_penalty_weight = GUIDANCE_PENALTY_WEIGHT
     if diffusion_type is None:
         diffusion_type = DIFFUSION_TYPE
+    if prediction_mode is None:
+        prediction_mode = PREDICTION_MODE
     if use_deterministic_anchor_loss is None:
         use_deterministic_anchor_loss = DETERMINISTIC_ANCHOR_LOSS
     if deterministic_anchor_lambda is None:
@@ -1011,10 +1016,17 @@ def create_diffusion_model(
         raise ValueError(
             "Binary diffusion and deterministic anchor loss cannot be used together."
         )
+    if diffusion_type == "binary" and prediction_mode == "x0_cumsum":
+        raise ValueError("x0_cumsum prediction mode is only supported for gaussian diffusion.")
+    if prediction_mode == "x0_cumsum" and use_deterministic_anchor_loss:
+        raise ValueError(
+            "x0_cumsum prediction mode cannot be combined with deterministic anchor loss."
+        )
 
     logger.info(
         f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, "
         f"diffusion_type={diffusion_type}, "
+        f"prediction_mode={prediction_mode}, "
         f"deterministic_anchor_loss={use_deterministic_anchor_loss}, "
         f"anchor_lambda={deterministic_anchor_lambda}, anchor_alpha={deterministic_anchor_alpha}"
     )
@@ -1045,6 +1057,7 @@ def create_diffusion_model(
         unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
         use_amp=USE_AMP,
         diffusion_type=diffusion_type,
+        prediction_mode=prediction_mode,
         use_deterministic_anchor_loss=use_deterministic_anchor_loss,
         deterministic_anchor_lambda=deterministic_anchor_lambda,
         deterministic_anchor_alpha=deterministic_anchor_alpha,
@@ -3610,7 +3623,7 @@ def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
     global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION, LOOKBACK_LENGTH, FORECAST_LENGTH
     global MODEL_TYPE, DIFFUSION_TYPE, DETERMINISTIC_ANCHOR_LOSS, DETERMINISTIC_ANCHOR_LAMBDA
-    global DETERMINISTIC_ANCHOR_ALPHA, EVAL_SAMPLER
+    global PREDICTION_MODE, DETERMINISTIC_ANCHOR_ALPHA, EVAL_SAMPLER
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3662,6 +3675,8 @@ def main():
                         help='Disable cross-variate attention (fully univariate baseline)')
     parser.add_argument('--model-type', type=str, default=None, choices=['unet', 'dit'],
                         help="Backbone: 'unet' (default) or 'dit' (FactorizedDiT)")
+    parser.add_argument('--prediction-mode', type=str, default=None, choices=['epsilon', 'x0_cumsum'],
+                        help="Denoising target: 'epsilon' (default) or gaussian-only 'x0_cumsum'.")
     parser.add_argument('--binary-diffusion', action='store_true',
                         help='Use hard binary CDF images and XOR bit-flip diffusion noise.')
     parser.add_argument('--lookback-length', type=int, default=LOOKBACK_LENGTH,
@@ -3701,11 +3716,19 @@ def main():
         DISABLE_CROSS_ATTENTION = True
     if args.model_type is not None:
         MODEL_TYPE = args.model_type
+    if args.prediction_mode is not None:
+        PREDICTION_MODE = args.prediction_mode
     if args.binary_diffusion:
         DIFFUSION_TYPE = "binary"
     if DIFFUSION_TYPE == "binary" and DETERMINISTIC_ANCHOR_LOSS:
         parser.error(
             "Cannot combine --binary-diffusion with --deterministic-anchor-loss."
+        )
+    if DIFFUSION_TYPE == "binary" and PREDICTION_MODE == "x0_cumsum":
+        parser.error("Cannot combine --binary-diffusion with --prediction-mode x0_cumsum.")
+    if PREDICTION_MODE == "x0_cumsum" and DETERMINISTIC_ANCHOR_LOSS:
+        parser.error(
+            "Cannot combine --prediction-mode x0_cumsum with --deterministic-anchor-loss."
         )
     LOOKBACK_LENGTH = args.lookback_length
     FORECAST_LENGTH = args.forecast_length

@@ -50,6 +50,10 @@ PAST_LOSS_WEIGHT: float = 0.3
 # Both backbones share the same factorized per-variate call site.
 MODEL_TYPE: str = "unet"
 
+# "epsilon" is the standard noise-prediction objective. "x0_cumsum" predicts
+# clean CDF logits and molds them into a valid occupancy canvas.
+PREDICTION_MODE: str = "epsilon"
+
 
 # ---- 2D map / U-Net topology ------------------------------------------------------
 

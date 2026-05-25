@@ -24,7 +24,13 @@ from models.diffusion_tsf.train_multivariate_pipeline import create_itransformer
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
 
-def build_model(model_type: str, num_variables: int, lookback: int, forecast: int) -> DiffusionTSF:
+def build_model(
+    model_type: str,
+    num_variables: int,
+    lookback: int,
+    forecast: int,
+    prediction_mode: str = "epsilon",
+) -> DiffusionTSF:
     cfg = DiffusionTSFConfig(
         lookback_length=lookback,
         forecast_length=forecast,
@@ -45,6 +51,7 @@ def build_model(model_type: str, num_variables: int, lookback: int, forecast: in
         unet_channels=[32, 64],
         attention_levels=[1],
         model_type=model_type,
+        prediction_mode=prediction_mode,
     )
 
     itrans = create_itransformer(seq_len=lookback, pred_len=forecast, num_vars=num_variables, dropout=0.0)
@@ -53,11 +60,11 @@ def build_model(model_type: str, num_variables: int, lookback: int, forecast: in
     return model
 
 
-def smoke_one(model_type: str) -> None:
-    print(f"\n--- smoke: {model_type} ---")
+def smoke_one(model_type: str, prediction_mode: str = "epsilon") -> None:
+    print(f"\n--- smoke: {model_type}, prediction_mode={prediction_mode} ---")
     torch.manual_seed(0)
     B, V, L, F_ = 2, 3, 48, 16
-    model = build_model(model_type, V, L, F_).cpu()
+    model = build_model(model_type, V, L, F_, prediction_mode=prediction_mode).cpu()
 
     n_params = sum(p.numel() for p in model.noise_predictor.parameters())
     print(f"  backbone params: {n_params/1e6:.2f}M")
@@ -67,8 +74,9 @@ def smoke_one(model_type: str) -> None:
 
     out = model(past, future)
     assert out["noise_pred"].shape == (B, V, model.config.image_height, F_), out["noise_pred"].shape
+    assert out["x0_pred"].shape == (B, V, model.config.image_height, F_), out["x0_pred"].shape
     assert out["loss"].dim() == 0
-    print(f"  forward OK: loss={out['loss'].item():.4f}, noise_pred shape={tuple(out['noise_pred'].shape)}")
+    print(f"  forward OK: loss={out['loss'].item():.4f}, x0_pred shape={tuple(out['x0_pred'].shape)}")
 
     out["loss"].backward()
     grad_norms = [p.grad.norm().item() for p in model.noise_predictor.parameters() if p.grad is not None]
@@ -86,6 +94,7 @@ if __name__ == "__main__":
     try:
         smoke_one("unet")
         smoke_one("dit")
+        smoke_one("dit", prediction_mode="x0_cumsum")
     except Exception as e:
         print(f"SMOKE FAILED: {type(e).__name__}: {e}")
         raise SystemExit(1)

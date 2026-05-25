@@ -91,6 +91,7 @@ class DiffusionTSFConfig:
 
     # binary diffusion: hard CDF images + XOR bit-flip noise.
     diffusion_type: str = "gaussian"  # "gaussian" | "binary"
+    prediction_mode: str = "epsilon"  # "epsilon" | "x0_cumsum"
     binary_num_steps: int = 1000
     binary_sample_steps: int = 20
     binary_beta_start: float = 1e-5
@@ -182,9 +183,21 @@ class DiffusionTSFConfig:
         assert self.num_diffusion_steps > 0
         assert self.noise_schedule in ["linear", "cosine", "sigmoid", "quadratic"]
         assert self.diffusion_type in ["gaussian", "binary"]
+        if self.prediction_mode not in ("epsilon", "x0_cumsum"):
+            raise ValueError(
+                f"prediction_mode must be 'epsilon' or 'x0_cumsum', got {self.prediction_mode!r}"
+            )
         if self.diffusion_type == "binary" and self.use_deterministic_anchor_loss:
             raise ValueError(
                 "Binary diffusion and deterministic anchor loss cannot be used together."
+            )
+        if self.diffusion_type == "binary" and self.prediction_mode == "x0_cumsum":
+            raise ValueError("x0_cumsum prediction mode is only supported for gaussian diffusion.")
+        if self.prediction_mode == "x0_cumsum" and self.representation_mode != "cdf":
+            raise ValueError("x0_cumsum prediction mode requires representation_mode='cdf'.")
+        if self.prediction_mode == "x0_cumsum" and self.use_deterministic_anchor_loss:
+            raise ValueError(
+                "x0_cumsum prediction mode cannot be combined with deterministic anchor loss."
             )
         if self.diffusion_type == "binary" and self.binary_use_boundary_weighted_bce:
             raise ValueError(
