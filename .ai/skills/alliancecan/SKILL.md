@@ -83,14 +83,10 @@ else
 fi
 ```
 
-Only use `$SCRATCH/$USER/<repo>` if **your site documentation** says scratch is the parent of per-user dirs (unusual on Killarney for the common case above).
-
 ## Accounts and Slurm basics
 
 - **Scheduler:** Slurm only. No compute on login nodes except tiny tasks (~≤10 CPU-minutes, ~≤4 GB RAM). Everything else: `sbatch`, `salloc`, `srun`.
 - **Minimum directives:** Always set **`#SBATCH --time=...`**. Add **`--mem`** or **`--mem-per-cpu`** on general-purpose clusters (default can be very small per core). `#SBATCH` lines must come **before** any shell commands in the script.
-- **Do not** hammer Slurm with `squeue`/`sq` in tight loops; use mail notifications or reasonable polling.
-- **Partitions:** Prefer **L40S + `--gres`** as default; only pin **`gpubase_h100_*`** when the user needs H100. Verify live with `sinfo` on the target system.
 
 ## Where to put files (storage hygiene)
 
@@ -105,46 +101,39 @@ Only use `$SCRATCH/$USER/<repo>` if **your site documentation** says scratch is 
 
 ## Repo-local `results/` on the cluster (Slurm + Python)
 
-When you add or edit **Slurm job scripts** or **Python** that runs on Alliance login/compute nodes, put **all** run outputs the job creates—logs, checkpoints, generated datasets, exports—under **`./results/`** relative to **`SLURM_SUBMIT_DIR`** (the directory you were in when you ran `sbatch`). Do **not** put those artifacts under `$SCRATCH/...` or `$HOME` unless the user explicitly overrides. Do **not** anchor paths off the spool copy of the batch script.
+When you add or edit **Slurm job scripts** or **Python** that runs on Alliance login/compute nodes, put **all** run outputs the job creates—logs, checkpoints, generated datasets, exports—under **`./results/`** relative to the **submission directory** (the directory you `cd` to before `sbatch`, i.e. **`SLURM_SUBMIT_DIR`** in the batch environment). Do **not** anchor paths off the spool copy of the script.
 
-**Allowed top-level layout under `results/` — nothing else at that level:**
+Use exactly **four** buckets at the top level of `results/`—**no extra subdirectories** unless the user explicitly asks:
 
 | Path | Use |
 |------|-----|
-| `./results/logs/` | Job logs, traces, wandb offline roots, text/CSV that behave like logs, small generated helper scripts for a chain |
-| `./results/ckpts/` | Checkpoints; use a **per-run subdirectory** when the training code expects multiple canonical filenames in one dir |
-| `./results/datasets/` | Generated or copied data (symlinks to repo data are OK here) |
+| `./results/{descriptive-run-name}/logs/` | Job/Slurm logs, traces, text or CSV that behave like logs |
+| `./results/{descriptive-run-name}/ckpts/` | Model checkpoints (`.pt`, `.ckpt`, `.safetensors`, …) |
+| `./results/{descriptive-run-name}/datasets/` | Generated or copied data files |
 
-Do **not** create sibling trees like `./checkpoints/`, `./slurm_logs/`, or a separate `$STORE` root on scratch for repo jobs unless the user asks.
-
-**Run stem (directory or file basename inside a bucket):**
+**Naming (one file per artifact, flat inside each bucket):**
 
 ```text
-{MM-DD}-{last-4-characters-of-$SLURM_JOB_ID}-{short-descriptive-slug}
+./results/{logs|ckpts|datasets}/{MM-DD}-{last-3-chars-of-$SLURM_JOB_ID}-{short-descriptive-slug}.{ext}
 ```
 
-Use the **last four characters** of `SLURM_JOB_ID` (e.g. job `3249152` → `9152`). Pick a **short slug** that says what the job does (`gauss-pretrain`, `unet-fullvar-smoke`, `profile-1epoch`, …).
+Example: `./results/logs/05-02-847-etth1-train.log`, `./results/ckpts/05-02-847-best.pt`
 
-Examples:
-
-- Single log file: `./results/logs/05-02-9152-gauss-pretrain.log`
-- Pipeline checkpoint dir: `./results/ckpts/05-02-9152-gauss-pretrain/` (contains `pretrained_diffusion.pt`, etc.)
-
-After `cd "$SLURM_SUBMIT_DIR"`, compute the stem **inside the batch job** (so `SLURM_JOB_ID` is known), then export it or pass to Python:
+After `cd "$SLURM_SUBMIT_DIR"` (or equivalent), compute a stem and pass it into Python/CLI via env or flags:
 
 ```bash
+STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-etth1-latent"
 mkdir -p ./results/logs ./results/ckpts ./results/datasets
-STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-gauss-pretrain"
-CKPT_DIR="./results/ckpts/${STEM}"
-mkdir -p "$CKPT_DIR"
+# e.g. export RUN_STEM="$STEM" and read in Python; write ckpts to ./results/ckpts/${STEM}.pt
 ```
 
-**Git:** keep `results/` **gitignored** (whole tree or per-bucket).
+**Git:** keep `results/logs/`, `results/ckpts/`, and `results/datasets/` **gitignored** in the repo (nested submit dirs: ignore `**/results/logs/`, etc., or the whole `results/` tree).
 
-**Slurm: one combined log (stdout + stderr).** Never rely on separate `*.out` and `*.err` for the main job log.
+**Slurm: one combined log file (stdout + stderr).** Do not leave the default split of `*.out` and `*.err` if you can avoid it.
 
-- **Preferred:** at the top of the batch body (after `cd "$SLURM_SUBMIT_DIR"`), set `LOG=./results/logs/${STEM}.log`, `mkdir -p "$(dirname "$LOG")"`, then **`exec >>"$LOG" 2>&1`**, and in `#SBATCH` use **`--output=/dev/null`** and **`--error=/dev/null`** so Slurm does not also write split files.  
-- **Alternative:** set **`#SBATCH --output`** and **`#SBATCH --error`** to the **identical** path under `./results/logs/` (Slurm merges when both are the same file). `#SBATCH` does not expand bash parameter expansion, so the `MM-DD-…-last4-…` shape usually needs the `exec` pattern or a path using only Slurm replacements (`%j`, `%x`, …).
+- **Preferred:** set **`#SBATCH --output`** and **`#SBATCH --error`** to the **same file path** under `./results/logs/`—Slurm merges both streams into that file. Slurm expands `%j`, `%x`, etc. in those paths; it does **not** run shell, so for the `MM-DD-…-${SLURM_JOB_ID: -3}-…` pattern either:
+  - use **`exec >>"$LOG" 2>&1`** early in the script (right after `mkdir` and `LOG=…`), with **`#SBATCH --output=/dev/null`** and **`#SBATCH --error=/dev/null`** so only that file receives output, or
+  - use identical `-o`/`-e` with `%j` / `%x` if a simpler name is enough.
 
 ## Resolving `$PROJECT` in job scripts (ts-sandbox pattern)
 
@@ -240,6 +229,26 @@ If a job script does `pip install wandb` or `pip install "wandb>=…"` **without
 
 **Related:** In bash **unquoted heredocs** used to write job bodies on the login node, **backticks** in comments still run **command substitution** (e.g. `` `import torch` `` can invoke ImageMagick’s `import`), and **`$SLURM_TMPDIR`** in comments still **expands** under `set -u` on the login node. Escape as `\$(…)` / `\$VAR` or avoid backticks in those heredocs.
 
+### Pin PyTorch on Killarney (`pip install --no-index torch` unpinned)
+
+After `module load cuda/12.2 cudnn/8.9`, **`pip install --no-index torch`** (no version pin) may pull **torch 2.12+** from the Alliance wheelhouse. On Killarney L40S this often **fails CUDA init**:
+
+```text
+CUDA initialization: The NVIDIA driver on your system is too old (found version 12080)
+```
+
+Then **`torch.cuda.is_available()` is `False`**. Training code that does `device = cuda if torch.cuda.is_available() else cpu` runs on **CPU** while Slurm still allocated an **L40S** — `nvidia-smi` shows **0 MiB / 0% GPU**, the Python process shows **high CPU** (e.g. 400%+), and logs look **stuck** for hours (e.g. no lines between “Starting Diffusion HP search” and “Trial 0/3” because Optuna only logs when a trial finishes).
+
+**Fix — pin 2.11 and fail fast:**
+
+```bash
+module load cuda/12.2 cudnn/8.9
+pip install --no-index 'torch==2.11.0+computecanada' numpy scipy pandas scikit-learn wandb ...
+python -c "import torch; assert torch.cuda.is_available(), 'CUDA required'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
+```
+
+If the assert fails, **do not** let the job train — fix the wheel pin or modules, then resubmit. **`scancel`** long-running jobs that passed setup but never use the GPU.
+
 **Symptom of the slow-import bug:** job output has only the first few `echo` lines, then
 `TIMEOUT` in `sacct`. No Python output. Venv is on `/scratch`.
 
@@ -257,7 +266,7 @@ from the wheel cache takes 3–5 min; after that imports are <1 min.
 ## Gotchas (see also `AGENTS.md` — Notes space / repo context — and `.ai/cluster-paths.md`)
 
 - **`ls ~/projects/def-*` under `set -euo pipefail` (silent job death):** Many job scripts use `set -euo pipefail` and then `FIRST=$(ls -d "$HOME"/projects/def-* ... 2>/dev/null | head -1)`. If **`~/projects` exists** but **no** `def-*` / `aip-*` match, **`ls` exits with status 2**. With **`pipefail`**, the pipeline fails → **`set -e` aborts the entire batch** in a few seconds. **`sacct`** shows `State=FAILED`, **`ExitCode=2:0`**, `.err` may only show `module purge` noise, `.out` stays nearly empty. **Fix:** use `shopt -s nullglob` and a bash array over the globs (see snippet above), or append `|| true` to the assignment in a way that cannot still fail the pipeline—**do not** rely on `ls` with possibly unmatched globs in a piped command.
-- **`BASH_SOURCE[0]` inside `sbatch` scripts:** Slurm copies the submitted script to a spool path like `/cm/local/apps/slurm/var/spool/job<ID>/slurm_script`, so `BASH_SOURCE[0]` points at the spool copy, not the repo checkout. Sourcing helper files relative to it will fail. **Use `SLURM_SUBMIT_DIR`** when you need repo-local helper scripts or data, and add a guard that errors out if the submit directory is missing the file.
+- **`BASH_SOURCE[0]` / `SCRIPT_DIR` in `sbatch` scripts (instant `FAILED`, ~0s, empty log):** Slurm runs a **spool copy** (`/cm/local/apps/slurm/var/spool/job<ID>/slurm_script`), not the file under `$SCRATCH/...`. If you set `SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"` once at the top and later `source "$SCRIPT_DIR/slurm/helper.sh"` (or similar) in the **batch body**, that path is the spool dir → **file not found** → `set -e` exits before `exec >>"$LOG"`. **`sacct` shows `ExitCode=1:0` and ~0 elapsed**; with `#SBATCH --output=/dev/null` there is often **no Slurm `.out`/`.err` and no repo log** — looks like an “instafail” with nothing to tail. **Fix:** after `cd "$SLURM_SUBMIT_DIR"`, set **`SCRIPT_DIR="$SLURM_SUBMIT_DIR"`** (or `REPO_ROOT="$SLURM_SUBMIT_DIR"`) before sourcing helpers or resolving repo data; keep the login-node `BASH_SOURCE` path only for the **submit** branch (`[[ -z "${SLURM_JOB_ID:-}" ]]`) when calling `sbatch /path/to/repo/script.sh`. Guard: `[[ -f "$SCRIPT_DIR/slurm/helper.sh" ]] || { echo "missing helper"; exit 1; }`.
 - **Empty/broken venv on cluster:** If jobs fail with missing `torch`, recreate or repair **`$PROJECT/$USER/.../venv`** (or delete and let the Slurm script reinstall).
 - **Imports:** Run Python as **`python -m package.module`** from the repo root.
 - **Slurm output buffering** can make logs look “stuck”; use unbuffered Python or interactive `salloc` to debug.
@@ -266,6 +275,9 @@ from the wheel cache takes 3–5 min; after that imports are <1 min.
 - **`sbatch` from scripts:** Do not submit thousands of jobs at once; prefer **arrays** or spacing submissions—Alliance warns this can harm Slurm.
 - **`sbatch` stdin vs script file:** Prefer **`sbatch /path/to/job.sh`** (real file on disk, `#!/bin/bash`) over piping a heredoc into `sbatch`. Some sites log or handle stdin batch scripts inconsistently; file-based submission matches working patterns in this repo (e.g. self-submit scripts).
 - **Stale script on cluster:** If `squeue` still shows H100/64G after switching to L40S, **`git pull`** on the cluster clone and **resubmit** — old `#SBATCH` lines are baked in at submit time.
+- **Unpinned `torch` on Killarney → silent CPU training:** `pip install --no-index torch` may install **2.12+**; CUDA init fails, `cuda.is_available()` is false, GPU idle while training hammers CPU for hours. Pin **`torch==2.11.0+computecanada`** and **`assert torch.cuda.is_available()`** right after venv setup (see Python venv section).
+- **`signatory.logsignature` segfault on Killarney (training dies mid-epoch):** After venv setup, logs show `latent_rep=logsignature` then `Segmentation fault` from Python (often epoch 1–2). **Truncated `signature` latents are stable** on the same nodes. Slurm sets **`--latent-rep signature`** and `DATALOADER_WORKERS=0` in `slurm_signature_diffusion_tune.sh`. Opt-in logsignature only with `SIGDIFF_LATENT_REP=logsignature` once you have verified it on an interactive GPU (`salloc` + one batch). Do not resume mixed studies: use a new `--study-name` or Optuna DB if you switched latent type.
+- **`reformer-pytorch` not in wheelhouse (signature venv dies at setup):** `cluster/setup_signature_cluster_venv.sh` used to always `pip install --no-index reformer-pytorch==1.4.4 …`. On Killarney that package is **not** in the Alliance wheel cache; four retries then **`set -e` kills the job** before Python runs. Logs show only `[setup] pip failed … reformer-pytorch` and **no training output**. **Log-signature diffusion does not import reformer** — set **`export SIGNATURE_VENV_PROFILE=diffusion`** in `slurm_signature_diffusion_*.sh` (installs torch + signatory + optuna only). **iTransformer signature-MSE** still needs **`SIGNATURE_VENV_PROFILE=full`** (default): build reformer on the **login node** with `BUILD_SHARED_VENV=1` (PyPI allowed) or `SIGNATURE_USE_SHARED_VENV=1`, because compute nodes often **block outbound PyPI**. Check profile in verify line: `venv ok: profile diffusion …`.
 
 ## Official docs
 

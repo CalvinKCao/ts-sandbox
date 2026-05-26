@@ -120,7 +120,7 @@ SYNTHETIC_SAMPLES_CAP: Optional[int] = 50000  # None = no cap on TOTAL pool size
 # directly as `itransformer.pt` (no separate "full" pretrain step).
 #
 # Paper-faithful setup: fixed 10 epochs, no early stopping. Only LR is searched.
-N_ITRANS_HP_TRIALS: int = 8
+N_ITRANS_HP_TRIALS: int = 10
 ITRANS_HP_PRETRAIN_MAX_EPOCHS: int = 10
 
 # Fallback pretrain (only runs if HP cache is missing).
@@ -149,9 +149,9 @@ ITRANS_REAL_COLD_START: bool = True
 
 # Phase 2B: Diffusion HP tuning on real data (LR-only search; batch size auto-probed).
 # The best trial checkpoint is promoted to best.pt (no separate full retrain).
-N_FINETUNE_HP_TRIALS: int = 8
-HP_TUNE_EPOCHS: int = 10
-HP_TUNE_PATIENCE: int = 10
+N_FINETUNE_HP_TRIALS: int = 6
+HP_TUNE_EPOCHS: int = 20
+HP_TUNE_PATIENCE: int = 15
 FINAL_FINETUNE_EPOCHS: int = 20  # legacy constant; promotion copies the best trial ckpt
 # Optuna log-uniform bounds for Phase 2B only (finetune_hp_objective).
 FINETUNE_HP_LR_MIN: float = 3e-6

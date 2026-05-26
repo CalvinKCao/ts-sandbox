@@ -175,6 +175,7 @@ TRAIN_ARGS=(
     --deterministic-anchor-lambda "$ANCHOR_LAMBDA"
     --deterministic-anchor-alpha "$ANCHOR_ALPHA"
     --eval-sampler "$EVAL_SAMPLER"
+    --pretrained-diff-ckpt "$CKPT_DIR/diff_hp_best.pt"
 )
 if [[ -n "$N_VARIATES" ]]; then
     TRAIN_ARGS+=(--n-variates "$N_VARIATES")

@@ -48,7 +48,7 @@
     "cursor": {
       "version": 1,
       "tool": "cursor",
-      "generatedAt": "2026-05-07T19:30:15.582Z",
+      "generatedAt": "2026-05-26T14:09:29.283Z",
       "files": [
         {
           "path": "AGENTS.md",
@@ -104,13 +104,23 @@
           "path": ".cursor/skills/slurm-killarney",
           "type": "symlink",
           "target": "../../.ai/skills/slurm-killarney"
+        },
+        {
+          "path": ".cursor/skills/slurm-test",
+          "type": "symlink",
+          "target": "../../.ai/skills/slurm-test"
+        },
+        {
+          "path": ".cursor/skills/summarize-paper",
+          "type": "symlink",
+          "target": "../../.ai/skills/summarize-paper"
         }
       ]
     },
     "copilot": {
       "version": 1,
       "tool": "copilot",
-      "generatedAt": "2026-05-07T19:30:15.589Z",
+      "generatedAt": "2026-05-26T14:09:29.286Z",
       "files": [
         {
           "path": "AGENTS.md",
@@ -166,13 +176,23 @@
           "path": ".github/skills/slurm-killarney",
           "type": "symlink",
           "target": "../../.ai/skills/slurm-killarney"
+        },
+        {
+          "path": ".github/skills/slurm-test",
+          "type": "symlink",
+          "target": "../../.ai/skills/slurm-test"
+        },
+        {
+          "path": ".github/skills/summarize-paper",
+          "type": "symlink",
+          "target": "../../.ai/skills/summarize-paper"
         }
       ]
     },
     "windsurf": {
       "version": 1,
       "tool": "windsurf",
-      "generatedAt": "2026-05-07T19:30:15.591Z",
+      "generatedAt": "2026-03-27T19:16:52.403Z",
       "files": [
         {
           "path": "AGENTS.md",
@@ -183,26 +203,6 @@
           "path": ".windsurf/skills/alliancecan",
           "type": "symlink",
           "target": "../../.ai/skills/alliancecan"
-        },
-        {
-          "path": ".windsurf/skills/audio_math_explainer",
-          "type": "symlink",
-          "target": "../../.ai/skills/audio_math_explainer"
-        },
-        {
-          "path": ".windsurf/skills/git",
-          "type": "symlink",
-          "target": "../../.ai/skills/git"
-        },
-        {
-          "path": ".windsurf/skills/lnai",
-          "type": "symlink",
-          "target": "../../.ai/skills/lnai"
-        },
-        {
-          "path": ".windsurf/skills/lnai-master-sync",
-          "type": "symlink",
-          "target": "../../.ai/skills/lnai-master-sync"
         },
         {
           "path": ".windsurf/skills/messy",
@@ -223,18 +223,13 @@
           "path": ".windsurf/skills/slidev",
           "type": "symlink",
           "target": "../../.ai/skills/slidev"
-        },
-        {
-          "path": ".windsurf/skills/slurm-killarney",
-          "type": "symlink",
-          "target": "../../.ai/skills/slurm-killarney"
         }
       ]
     },
     "gemini": {
       "version": 1,
       "tool": "gemini",
-      "generatedAt": "2026-05-07T19:30:15.598Z",
+      "generatedAt": "2026-05-26T14:09:29.269Z",
       "files": [
         {
           "path": "AGENTS.md",
@@ -292,6 +287,16 @@
           "target": "../../.ai/skills/slurm-killarney"
         },
         {
+          "path": ".gemini/skills/slurm-test",
+          "type": "symlink",
+          "target": "../../.ai/skills/slurm-test"
+        },
+        {
+          "path": ".gemini/skills/summarize-paper",
+          "type": "symlink",
+          "target": "../../.ai/skills/summarize-paper"
+        },
+        {
           "path": ".gemini/settings.json",
           "type": "json",
           "hash": "7b8b6ffcbc620569ad9c0df7dc278d3e41c5dafb9065a8578827241defd4e886"
@@ -301,7 +306,7 @@
     "codex": {
       "version": 1,
       "tool": "codex",
-      "generatedAt": "2026-05-07T19:30:15.601Z",
+      "generatedAt": "2026-03-27T19:16:52.414Z",
       "files": [
         {
           "path": "AGENTS.md",
@@ -312,26 +317,6 @@
           "path": ".agents/skills/alliancecan",
           "type": "symlink",
           "target": "../../.ai/skills/alliancecan"
-        },
-        {
-          "path": ".agents/skills/audio_math_explainer",
-          "type": "symlink",
-          "target": "../../.ai/skills/audio_math_explainer"
-        },
-        {
-          "path": ".agents/skills/git",
-          "type": "symlink",
-          "target": "../../.ai/skills/git"
-        },
-        {
-          "path": ".agents/skills/lnai",
-          "type": "symlink",
-          "target": "../../.ai/skills/lnai"
-        },
-        {
-          "path": ".agents/skills/lnai-master-sync",
-          "type": "symlink",
-          "target": "../../.ai/skills/lnai-master-sync"
         },
         {
           "path": ".agents/skills/messy",
@@ -352,11 +337,6 @@
           "path": ".agents/skills/slidev",
           "type": "symlink",
           "target": "../../.ai/skills/slidev"
-        },
-        {
-          "path": ".agents/skills/slurm-killarney",
-          "type": "symlink",
-          "target": "../../.ai/skills/slurm-killarney"
         }
       ]
     }

@@ -2796,33 +2796,30 @@ def recombine_traffic_data():
 # ============================================================================
 
 def run_pipeline(
-    resume: bool = False, 
-    smoke_test: bool = False, 
+    resume: bool = False,
+    smoke_test: bool = False,
     seed: int = 42,
     use_wandb: bool = False,
     wandb_project: str = "diffusion-tsf-7var",
     datasets: Optional[List[str]] = None,
+    pretrained_diff_ckpt: Optional[str] = None,
 ):
-    """Run the full training pipeline."""
+    """Run the per-dataset fine-tune pipeline (Phase 2A + 2B + eval).
+
+    If ``pretrained_diff_ckpt`` is provided and the file exists, Phase 1 (synthetic
+    pretrain) is skipped entirely and that checkpoint is used to warm-start the
+    diffusion finetune.  iTransformer Phase 2A always trains cold-start on real data
+    (ITRANS_REAL_COLD_START=True), so no synthetic iTrans checkpoint is needed.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    
+
     recombine_traffic_data()
-    
-    # Load or create manifest
-    if resume and os.path.exists(MANIFEST_PATH):
-        manifest = TrainingManifest.load()
-        logger.info(f"Resuming from manifest (created: {manifest.created_at})")
-    else:
-        manifest = TrainingManifest(seed=seed, created_at=datetime.now().isoformat())
-    
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    
     device = get_device()
     logger.info(f"Using device: {device}")
-    
-    # Initialize wandb
+
     if use_wandb:
         tags = ['smoke-test'] if smoke_test else []
         init_wandb(
@@ -2831,94 +2828,92 @@ def run_pipeline(
             resume=resume,
             tags=tags,
         )
-    
-    # Smoke test config
-    if smoke_test:
-        n_itrans_trials = 1
-        n_diff_trials = 1
-        n_finetune_trials = 1
-        pretrain_samples = 4  # Ultra minimal
-        itrans_pretrain_epochs = 1
-        pretrain_patience = 1  # diffusion fallback path still uses this
-    else:
-        n_itrans_trials = N_ITRANS_HP_TRIALS
-        n_diff_trials = N_DIFFUSION_HP_TRIALS
-        n_finetune_trials = N_FINETUNE_HP_TRIALS
-        pretrain_samples = resolve_pretrain_virtual_dataset_size(False)
-        itrans_pretrain_epochs = PRETRAIN_EPOCHS
-        pretrain_patience = DIFFUSION_HP_PATIENCE  # used by diffusion fallback only
-    
-    # =========== PHASE 1A: iTransformer HP Tuning (best model saved directly) ===========
-    itrans_tune_ckpt = os.path.join(CHECKPOINT_DIR, 'itrans_hp_best.pt')
-    if not manifest.itrans_hp_done:
-        manifest.itrans_best_params, _ = run_itransformer_hp_tuning(
-            n_itrans_trials, smoke_test, checkpoint_dir=CHECKPOINT_DIR,
-        )
-        manifest.itrans_hp_done = True
-        manifest.save()
-        log_wandb_hp_search('itransformer', manifest.itrans_best_params,
-                           manifest.itrans_best_params.get('best_val_loss', 0), n_itrans_trials)
-    else:
-        logger.info(f"Using cached iTransformer params: {manifest.itrans_best_params}")
 
-    # Phase 1B eliminated: use best HP model directly as itransformer checkpoint
-    itrans_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_itransformer.pt')
-    if not manifest.itrans_checkpoint or not os.path.exists(itrans_ckpt):
-        if os.path.exists(itrans_tune_ckpt):
-            import shutil
-            shutil.copy2(itrans_tune_ckpt, itrans_ckpt)
-            logger.info(f"Using best HP tuning model as iTransformer checkpoint: {itrans_ckpt}")
-        else:
-            itrans_ckpt = pretrain_itransformer(
-                manifest.itrans_best_params,
-                n_samples=pretrain_samples,
-                epochs=itrans_pretrain_epochs,
-                checkpoint_dir=CHECKPOINT_DIR,
-                smoke_test=smoke_test,
-            )
-        manifest.itrans_checkpoint = itrans_ckpt
-        manifest.save()
-    else:
-        logger.info(f"Using existing iTransformer checkpoint: {itrans_ckpt}")
-    
-    # =========== PHASE 1C: Diffusion HP tuning (best ckpt saved under CHECKPOINT_DIR) ===========
-    diff_tune_ckpt = os.path.join(CHECKPOINT_DIR, 'diff_hp_best.pt')
-    if not manifest.diffusion_hp_done:
-        manifest.diffusion_best_params, _ = run_diffusion_hp_tuning(
-            itrans_ckpt, n_diff_trials, smoke_test, checkpoint_dir=CHECKPOINT_DIR,
-        )
-        manifest.diffusion_hp_done = True
-        manifest.save()
-        log_wandb_hp_search('diffusion', manifest.diffusion_best_params,
-                           manifest.diffusion_best_params.get('best_val_loss', 0), n_diff_trials)
-    else:
-        logger.info(f"Using cached Diffusion params: {manifest.diffusion_best_params}")
+    n_finetune_trials = 1 if smoke_test else N_FINETUNE_HP_TRIALS
 
-    # =========== Diffusion checkpoint: best from HP only (no separate full synthetic pretrain) ===========
-    diff_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_diffusion.pt')
-    if not manifest.pretrain_complete or not os.path.exists(diff_ckpt):
-        if os.path.exists(diff_tune_ckpt):
-            import shutil
-            shutil.copy2(diff_tune_ckpt, diff_ckpt)
-            logger.info(f"Using best diffusion HP model as pretrained checkpoint: {diff_ckpt}")
+    # =========== Diffusion pretrain checkpoint ===========
+    # Use the provided 1B checkpoint if it exists, otherwise fall back to running
+    # Phase 1 so the script still works on a fresh directory.
+    diff_ckpt_candidates = [
+        pretrained_diff_ckpt,
+        os.path.join(CHECKPOINT_DIR, 'diff_hp_best.pt'),
+        os.path.join(CHECKPOINT_DIR, 'pretrained_diffusion.pt'),
+    ]
+    diff_ckpt = next((p for p in diff_ckpt_candidates if p and os.path.exists(p)), None)
+
+    if diff_ckpt is None:
+        logger.info("No pretrained diffusion checkpoint found — running Phase 1 (synthetic pretrain).")
+        manifest_path = os.path.join(CHECKPOINT_DIR, 'training_manifest.json')
+        if resume and os.path.exists(manifest_path):
+            manifest = TrainingManifest.load()
         else:
-            fallback_epochs = 1 if smoke_test else PRETRAIN_DIFFUSION_MAX_EPOCHS
-            diff_ckpt = pretrain_diffusion(
-                manifest.diffusion_best_params,
-                itrans_ckpt,
-                n_samples=pretrain_samples,
-                epochs=fallback_epochs,
-                patience=pretrain_patience,
-                checkpoint_dir=CHECKPOINT_DIR,
-                smoke_test=smoke_test,
+            manifest = TrainingManifest(seed=seed, created_at=datetime.now().isoformat())
+
+        n_itrans_trials = 1 if smoke_test else N_ITRANS_HP_TRIALS
+        n_diff_trials = 1 if smoke_test else N_DIFFUSION_HP_TRIALS
+        pretrain_samples = resolve_pretrain_virtual_dataset_size(smoke_test)
+
+        itrans_tune_ckpt = os.path.join(CHECKPOINT_DIR, 'itrans_hp_best.pt')
+        if not manifest.itrans_hp_done:
+            manifest.itrans_best_params, _ = run_itransformer_hp_tuning(
+                n_itrans_trials, smoke_test, checkpoint_dir=CHECKPOINT_DIR,
             )
-        manifest.pretrain_checkpoint = diff_ckpt
-        manifest.pretrain_complete = True
-        manifest.save()
+            manifest.itrans_hp_done = True
+            manifest.save()
+        else:
+            logger.info(f"Cached iTransformer HP: {manifest.itrans_best_params}")
+
+        itrans_ckpt_p1 = os.path.join(CHECKPOINT_DIR, 'pretrained_itransformer.pt')
+        if not manifest.itrans_checkpoint or not os.path.exists(itrans_ckpt_p1):
+            if os.path.exists(itrans_tune_ckpt):
+                import shutil
+                shutil.copy2(itrans_tune_ckpt, itrans_ckpt_p1)
+            else:
+                pretrain_itransformer(
+                    manifest.itrans_best_params, n_samples=pretrain_samples,
+                    epochs=1 if smoke_test else PRETRAIN_EPOCHS,
+                    checkpoint_dir=CHECKPOINT_DIR, smoke_test=smoke_test,
+                )
+                saved = os.path.join(CHECKPOINT_DIR, 'pretrained_itransformer.pt')
+                if saved != itrans_ckpt_p1 and os.path.exists(saved):
+                    import shutil; shutil.copy2(saved, itrans_ckpt_p1)
+            manifest.itrans_checkpoint = itrans_ckpt_p1
+            manifest.save()
+
+        diff_tune_ckpt = os.path.join(CHECKPOINT_DIR, 'diff_hp_best.pt')
+        if not manifest.diffusion_hp_done:
+            manifest.diffusion_best_params, _ = run_diffusion_hp_tuning(
+                itrans_ckpt_p1, n_diff_trials, smoke_test, checkpoint_dir=CHECKPOINT_DIR,
+            )
+            manifest.diffusion_hp_done = True
+            manifest.save()
+        else:
+            logger.info(f"Cached Diffusion HP: {manifest.diffusion_best_params}")
+
+        diff_ckpt = os.path.join(CHECKPOINT_DIR, 'pretrained_diffusion.pt')
+        if not manifest.pretrain_complete or not os.path.exists(diff_ckpt):
+            if os.path.exists(diff_tune_ckpt):
+                import shutil
+                shutil.copy2(diff_tune_ckpt, diff_ckpt)
+            else:
+                pretrain_diffusion(
+                    manifest.diffusion_best_params, itrans_ckpt_p1,
+                    n_samples=pretrain_samples,
+                    epochs=1 if smoke_test else PRETRAIN_DIFFUSION_MAX_EPOCHS,
+                    patience=1 if smoke_test else DIFFUSION_HP_PATIENCE,
+                    checkpoint_dir=CHECKPOINT_DIR, smoke_test=smoke_test,
+                )
+                saved = os.path.join(CHECKPOINT_DIR, 'pretrained_diffusion.pt')
+                if saved != diff_ckpt and os.path.exists(saved):
+                    import shutil; shutil.copy2(saved, diff_ckpt)
+            manifest.pretrain_complete = True
+            manifest.save()
+        else:
+            logger.info(f"Using existing diffusion checkpoint: {diff_ckpt}")
     else:
-        logger.info(f"Using existing Diffusion checkpoint: {diff_ckpt}")
-    
-    # =========== PHASE 2: Fine-tuning per Dataset (full variates only) ===========
+        logger.info(f"Skipping Phase 1 — using pretrained diffusion checkpoint: {diff_ckpt}")
+
+    # =========== PHASE 2: per-dataset iTrans finetune (2A) + diffusion finetune (2B) + eval ===========
     all_jobs = generate_all_dataset_jobs(seed=seed)
     if datasets:
         want = set(datasets)
@@ -2926,7 +2921,7 @@ def run_pipeline(
         missing = want - set(all_jobs)
         if missing:
             logger.warning(
-                f"--dataset filter {sorted(missing)} not in {N_VARIATES}-variate job list "
+                f"--dataset filter {sorted(missing)} not found in {N_VARIATES}-variate job list "
                 f"(available: {sorted(all_jobs)})"
             )
         if not all_jobs:
@@ -2935,149 +2930,37 @@ def run_pipeline(
             )
     job_list = list(all_jobs.values())
     if smoke_test:
-        job_list = job_list[:1]  # Just 1 dataset for ultra-fast smoke test
+        job_list = job_list[:1]
 
     for job in job_list:
         dataset_name = job['dataset_id']
         variate_indices = job['variate_indices']
+        subset_info = {'subset_id': dataset_name, 'variate_indices': variate_indices}
+
+        prior_results = _load_subset_results(RESULTS_DIR, dataset_name)
+        if resume and prior_results.get('eval_metrics'):
+            logger.info(
+                f"[Resume] Skipping {dataset_name}: eval_metrics already present in "
+                f"{_subset_results_path(RESULTS_DIR, dataset_name)}"
+            )
+            continue
 
         try:
-            n_iv = len(variate_indices)
-            subset_dir = os.path.join(CHECKPOINT_DIR, dataset_name)
-            os.makedirs(subset_dir, exist_ok=True)
-
-            prior_results = _load_subset_results(RESULTS_DIR, dataset_name)
-            if resume and prior_results.get('eval_metrics'):
-                logger.info(
-                    f"[Resume] Skipping {dataset_name}: eval_metrics already in "
-                    f"{_subset_results_path(RESULTS_DIR, dataset_name)}"
-                )
-                continue
-
-            # ---- Eval-resume: if best.pt + metadata.json exist and results.json
-            # has no eval_metrics yet, skip HP search and jump straight into eval.
-            existing_best = os.path.join(subset_dir, 'best.pt')
-            existing_meta = os.path.join(subset_dir, 'metadata.json')
-            can_resume_eval = (
-                os.path.exists(existing_best)
-                and os.path.exists(existing_meta)
-                and 'eval_metrics' not in prior_results
+            # _finetune_and_eval_one_subset handles:
+            #   Phase 2A — iTrans HP tune + promote best (cold start on real data)
+            #   Phase 2B — Diffusion HP tune using finetuned iTrans + promote best
+            #   Eval + iTransformer baseline eval + results save
+            _finetune_and_eval_one_subset(
+                subset_info, dataset_name, diff_ckpt,
+                itrans_ckpt="",  # cold start (ITRANS_REAL_COLD_START=True) — path unused
+                n_finetune_trials=n_finetune_trials,
+                device=device,
+                smoke_test=smoke_test,
             )
-            if can_resume_eval:
-                with open(existing_meta) as f:
-                    md = json.load(f)
-                tuned_params = md.get('tuned_params', {})
-                ft_diff_bs = int(tuned_params.get('batch_size', 8))
-                ckpt_path = existing_best
-                train_metrics = {
-                    'best_val_loss': md.get('best_val_loss', float('nan')),
-                    'best_trial': md.get('best_trial', -1),
-                }
-                logger.info(
-                    f"[Resume] Found existing fine-tuned checkpoint for {dataset_name} "
-                    f"at {ckpt_path}; skipping Phase 2 HP and going straight to eval."
-                )
-            else:
-                _p_itrans = load_itransformer_from_checkpoint(itrans_ckpt, n_iv, device)
-                _p_guidance = iTransformerGuidance(_p_itrans)
-                _p_ds, _, _, _ = load_dataset(dataset_name, variate_indices, stride=1)
-                ft_diff_bs = select_diffusion_batch_size(
-                    phase_name=f'Diff FT HP ({dataset_name})',
-                    dataset=_p_ds,
-                    device=device,
-                    itrans_guidance=_p_guidance,
-                    max_candidate=diffusion_probe_max_candidate(len(variate_indices), smoke_test),
-                )
-                del _p_itrans, _p_guidance, _p_ds
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-                logger.info(
-                    f"Phase 2B — diffusion finetune HP ({dataset_name}): "
-                    f"{n_finetune_trials} Optuna trials (N_FINETUNE_HP_TRIALS), bs={ft_diff_bs}, "
-                    f"epochs<={HP_TUNE_EPOCHS} patience={HP_TUNE_PATIENCE}; best trial → final ckpt..."
-                )
-                optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-                def log_finetune_trial(study, trial):
-                    msg = (
-                        f"[{dataset_name} HP] Trial {trial.number}/{n_finetune_trials}: "
-                        f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
-                        f"bs={ft_diff_bs}"
-                    )
-                    if DETERMINISTIC_ANCHOR_LOSS:
-                        lam, alpha = fixed_deterministic_anchor_hp()
-                        msg += f", anchor_lambda={lam:.4f}, anchor_alpha={alpha:.4f} (fixed)"
-                    logger.info(msg)
-
-                study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
-                study.optimize(
-                    lambda trial: finetune_hp_objective(
-                        trial, dataset_name, variate_indices, diff_ckpt, itrans_ckpt, device, smoke_test,
-                        fixed_batch_size=ft_diff_bs, trial_ckpt_dir=subset_dir,
-                    ),
-                    n_trials=n_finetune_trials,
-                    show_progress_bar=True,
-                    callbacks=[log_finetune_trial],
-                )
-                tuned_params = study.best_params
-                tuned_params['batch_size'] = ft_diff_bs
-                logger.info(f"Best params for {dataset_name}: {tuned_params}")
-
-                _, _, _, norm_stats = load_dataset(dataset_name, variate_indices, stride=1)
-                ckpt_path, train_metrics = _promote_best_trial_to_final(
-                    study, subset_dir,
-                    {'subset_id': dataset_name, 'variate_indices': variate_indices},
-                    dataset_name, norm_stats, ft_diff_bs,
-                    diff_ckpt, itrans_ckpt, device, smoke_test,
-                )
-
-            
-            # Evaluation
-            if True:
-                logger.info(f"Evaluating {dataset_name}...")
-                n_iv = len(variate_indices)
-                itrans_model = load_itransformer_from_checkpoint(itrans_ckpt, n_iv, device)
-                itrans_guidance = iTransformerGuidance(itrans_model)
-                
-                model = create_diffusion_model(**anchor_kwargs_from_params(tuned_params)).to(device)
-                model.set_guidance_model(itrans_guidance)
-                ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-                load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
-
-                _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=1)
-                if smoke_test:
-                    test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
-                else:
-                    n_full = len(test_ds)
-                    n_eval = max(1, n_full // 2)
-                    rng = np.random.default_rng(seed)
-                    eval_idx = sorted(rng.choice(n_full, size=n_eval, replace=False).tolist())
-                    test_ds = Subset(test_ds, eval_idx)
-                    logger.info(f"[{dataset_name}] eval subset: {n_eval}/{n_full} windows (seeded random half)")
-                test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
-
-                eval_results = evaluate_model(model, test_loader, device, n_samples=3, smoke_test=smoke_test)
-                
-                logger.info(f"[{dataset_name}] Single: MSE={eval_results['single']['mse']:.4f}, MAE={eval_results['single']['mae']:.4f}")
-                logger.info(f"[{dataset_name}] Avg: MSE={eval_results['averaged']['mse']:.4f}, MAE={eval_results['averaged']['mae']:.4f}")
-                
-                save_eval_results(dataset_name, dataset_name, variate_indices,
-                                {**train_metrics, 'tuned_params': tuned_params}, eval_results, RESULTS_DIR)
-                
-                # iTransformer-only baseline (for comparison table in summarize_results.py)
-                try:
-                    evaluate_itransformer_baseline(
-                        dataset_name, dataset_name, variate_indices,
-                        itrans_ckpt, RESULTS_DIR, device, smoke_test=smoke_test,
-                    )
-                except Exception as be:
-                    logger.warning(f"iTransformer baseline eval failed for {dataset_name}: {be}")
-                
-                # Log to wandb
-                log_wandb_eval_results(dataset_name, eval_results, train_metrics)
-                log_wandb_model_checkpoint(ckpt_path, dataset_name)
-            
+            if use_wandb:
+                _r = _load_subset_results(RESULTS_DIR, dataset_name)
+                if _r.get('eval_metrics'):
+                    log_wandb_eval_results(dataset_name, _r['eval_metrics'], _r.get('train_metrics', {}))
         except KeyboardInterrupt:
             logger.info(f"\nInterrupted during {dataset_name}.")
             return
@@ -3085,7 +2968,7 @@ def run_pipeline(
             logger.error(f"Error with {dataset_name}: {e}")
             import traceback
             traceback.print_exc()
-    
+
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETE")
     logger.info(f"Trained {len(job_list)} models")
@@ -3674,8 +3557,9 @@ def main():
                         help='Override results directory')
     parser.add_argument('--synth-cache-dir', type=str, default=None,
                         help='Shared synthetic pool cache directory for reuse across runs')
-    parser.add_argument('--parallel-worker', type=int, default=None,
-                        help='Parallel worker ID for multi-GPU Optuna (0-N)')
+    parser.add_argument('--pretrained-diff-ckpt', type=str, default=None,
+                        help='Path to a pretrained (Phase 1B) diffusion checkpoint. '
+                             'When provided, Phase 1 synthetic pretrain is skipped entirely.')
     parser.add_argument('--fresh', action='store_true',
                         help='Wipe manifest and checkpoints, start from scratch')
     parser.add_argument('--guidance-penalty-weight', type=float, default=GUIDANCE_PENALTY_WEIGHT,
@@ -3762,9 +3646,6 @@ def main():
         if not setup_ddp():
             print("ERROR: --ddp flag set but DDP init failed.")
             sys.exit(1)
-    
-    if args.parallel_worker is not None:
-        setup_parallel_worker(args.parallel_worker)
     
     logger = setup_logging()
     
@@ -3876,12 +3757,13 @@ def main():
     
     try:
         run_pipeline(
-            resume=args.resume, 
-            smoke_test=args.smoke_test, 
+            resume=args.resume,
+            smoke_test=args.smoke_test,
             seed=args.seed,
             use_wandb=args.wandb,
             wandb_project=args.wandb_project,
             datasets=[args.dataset] if args.dataset else None,
+            pretrained_diff_ckpt=args.pretrained_diff_ckpt,
         )
     finally:
         finish_wandb()

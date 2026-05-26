@@ -29,19 +29,19 @@ RSYNC_OPTS=(
     --no-g    # Best practice: avoid group preservation issues on /project
     --no-p    # Best practice: avoid permission preservation issues on /project
     --partial # Best practice: allow resuming large .pt file transfers
-    --include='*/'
-    --include='best.pt'
-    --include='metadata.json'
-    --include='results.json'
-    --include='itransformer.pt'
-    --include='pretrained_itransformer.pt'
-    --include='*_itransformer_finetuned.pt'
-    --include='*_itrans_ft_hp_best.pt'
-    --include='*_itrans_ft_hp.json'
-    --include='*.log'
-    --exclude='archive/'
-    --exclude='*'
+    --include=*/
 )
+    # --include='best.pt'
+    # --include='metadata.json'
+    # --include='results.json'
+    # --include='itransformer.pt'
+    # --include='pretrained_itransformer.pt'
+    # --include='*_itransformer_finetuned.pt'
+    # --include='*_itrans_ft_hp_best.pt'
+    # --include='*_itrans_ft_hp.json'
+    # --include='*.log'
+    # --exclude='archive/'
+    # --exclude='*'
 
 mkdir -p "$LOCAL_PATH"
 

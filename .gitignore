@@ -223,17 +223,14 @@ wiki_docs/
 wikidump_to_markdown.py
 scripts/
 
+accuracy_summary.csv
+
 # lnai-generated
 .agents/skills/alliancecan
-.agents/skills/audio_math_explainer
-.agents/skills/git
-.agents/skills/lnai
-.agents/skills/lnai-master-sync
 .agents/skills/messy
 .agents/skills/natural
 .agents/skills/quick
 .agents/skills/slidev
-.agents/skills/slurm-killarney
 .ai/.lnai-manifest.json
 .claude/CLAUDE.md
 .claude/skills/slidev
@@ -247,6 +244,8 @@ scripts/
 .cursor/skills/quick
 .cursor/skills/slidev
 .cursor/skills/slurm-killarney
+.cursor/skills/slurm-test
+.cursor/skills/summarize-paper
 .gemini/settings.json
 .gemini/skills/alliancecan
 .gemini/skills/audio_math_explainer
@@ -258,6 +257,8 @@ scripts/
 .gemini/skills/quick
 .gemini/skills/slidev
 .gemini/skills/slurm-killarney
+.gemini/skills/slurm-test
+.gemini/skills/summarize-paper
 .github/skills/alliancecan
 .github/skills/audio_math_explainer
 .github/skills/git
@@ -268,17 +269,13 @@ scripts/
 .github/skills/quick
 .github/skills/slidev
 .github/skills/slurm-killarney
+.github/skills/slurm-test
+.github/skills/summarize-paper
 .windsurf/skills/alliancecan
-.windsurf/skills/audio_math_explainer
-.windsurf/skills/git
-.windsurf/skills/lnai
-.windsurf/skills/lnai-master-sync
 .windsurf/skills/messy
 .windsurf/skills/natural
 .windsurf/skills/quick
 .windsurf/skills/slidev
-.windsurf/skills/slurm-killarney
 AGENTS.md
 opencode.json
 # end lnai-generated
-accuracy_summary.csv

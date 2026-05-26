@@ -157,6 +157,7 @@ TRAIN_ARGS=(
     --results-dir "$DATA_DIR"
     --synth-cache-dir "$DATA_DIR"
     --seed "$SEED"
+    --pretrained-diff-ckpt "$CKPT_DIR/diff_hp_best.pt"
 )
 if [[ "$FRESH" -eq 1 ]]; then
     TRAIN_ARGS+=(--fresh)

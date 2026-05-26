@@ -170,6 +170,7 @@ TRAIN_ARGS=(
     --model-type dit
     --prediction-mode x0_cumsum
     --eval-sampler "$EVAL_SAMPLER"
+    --pretrained-diff-ckpt "$CKPT_DIR/diff_hp_best.pt"
 )
 if [[ -n "$N_VARIATES" ]]; then
     TRAIN_ARGS+=(--n-variates "$N_VARIATES")
