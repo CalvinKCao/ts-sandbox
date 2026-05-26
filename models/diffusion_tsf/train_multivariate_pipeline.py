@@ -1470,8 +1470,15 @@ def select_diffusion_batch_size(
     device: torch.device,
     itrans_guidance: iTransformerGuidance,
     max_candidate: int,
+    smoke_test: bool = False,
 ) -> int:
     """Probe diffusion memory with one train step and pick largest safe even batch."""
+    if smoke_test:
+        hi = max(DIFFUSION_PROBE_MIN_BATCH, int(max_candidate))
+        if hi % 2 != 0:
+            hi -= 1
+        return min(4, hi)
+
     sample_past, sample_future = dataset[0]
 
     def _try(bs: int) -> bool:
@@ -1605,7 +1612,7 @@ def run_itransformer_hp_tuning(
     n_samples, epoch_cap = resolve_synthetic_params(requested_n, requested_cap, smoke_test)
 
     n_val = 0 if smoke_test else min(n_samples // 10, 1000)
-    synth_cache = get_synth_cache_dir()
+    synth_cache = get_synth_cache_dir(smoke_test=smoke_test)
     synthetic_loader = get_synthetic_dataloader(
         batch_size=64,
         lookback_length=LOOKBACK_LENGTH,
@@ -1621,7 +1628,10 @@ def run_itransformer_hp_tuning(
     )
 
     dataset = synthetic_loader.dataset
-    n_val = min(len(dataset) // 10, 1000)
+    if smoke_test:
+        n_val = max(1, min(len(dataset) // 4, len(dataset) - 1))
+    else:
+        n_val = min(len(dataset) // 10, 1000)
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset   = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
 
@@ -1652,7 +1662,7 @@ def run_itransformer_hp_tuning(
             max_epochs=ITRANS_HP_PRETRAIN_MAX_EPOCHS,
         ),
         n_trials=n_trials,
-        show_progress_bar=True,
+        show_progress_bar=not smoke_test,
         callbacks=[log_trial],
     )
 
@@ -1775,7 +1785,7 @@ def run_diffusion_hp_tuning(
     n_samples, epoch_cap = resolve_synthetic_params(requested_n, requested_cap, smoke_test)
 
     n_val = 0 if smoke_test else min(n_samples // 10, 500)
-    synth_cache = get_synth_cache_dir()
+    synth_cache = get_synth_cache_dir(smoke_test=smoke_test)
     synthetic_loader = get_synthetic_dataloader(
         batch_size=32,
         lookback_length=LOOKBACK_LENGTH,
@@ -1791,7 +1801,10 @@ def run_diffusion_hp_tuning(
     )
     
     dataset = synthetic_loader.dataset
-    n_val = min(len(dataset) // 10, 500)
+    if smoke_test:
+        n_val = max(1, min(len(dataset) // 4, len(dataset) - 1))
+    else:
+        n_val = min(len(dataset) // 10, 500)
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
     
@@ -1801,6 +1814,7 @@ def run_diffusion_hp_tuning(
         device=device,
         itrans_guidance=itrans_guidance,
         max_candidate=diffusion_probe_max_candidate(N_VARIATES, smoke_test),
+        smoke_test=smoke_test,
     )
     train_loader = DataLoader(train_subset, batch_size=train_bs, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_subset, batch_size=min(train_bs, 16), shuffle=False, num_workers=0)
@@ -1830,7 +1844,7 @@ def run_diffusion_hp_tuning(
             fixed_batch_size=train_bs, best_state=_best_state,
         ),
         n_trials=n_trials,
-        show_progress_bar=True,
+        show_progress_bar=not smoke_test,
         callbacks=[log_trial],
     )
 
@@ -2029,6 +2043,7 @@ def pretrain_diffusion(
                 tuned_batch_size,
                 diffusion_probe_max_candidate(N_VARIATES, smoke_test),
             ),
+            smoke_test=smoke_test,
         )
     effective_batch_size = batch_size // get_world_size() if _ddp_enabled else batch_size
     effective_batch_size = max(1, effective_batch_size)
@@ -3428,6 +3443,7 @@ def _finetune_and_eval_one_subset(
                 device=device,
                 itrans_guidance=_ft_itrans_guidance,
                 max_candidate=diffusion_probe_max_candidate(len(variate_indices), smoke_test),
+                smoke_test=smoke_test,
             )
             del _ft_itrans_model, _ft_itrans_guidance, _probe_ds
             if torch.cuda.is_available():

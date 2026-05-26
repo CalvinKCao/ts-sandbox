@@ -60,7 +60,7 @@ class DiffusionTSFConfig:
     disable_cross_attention: bool = False
     
     # 2d mapping
-    image_height: int = 64  # height of 2d rep (64 is faster)
+    image_height: int = 64  # height of 2d rep (must be divisible by 4; match Phase 1B ckpts)
     max_scale: float = 3.5  # MS param
     blur_kernel_size: int = 31
     blur_sigma: float = 1.0
