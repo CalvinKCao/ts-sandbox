@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Binary CDF diffusion on ETTh2 from the 92d3 pipeline.
+# Binary CDF DiT diffusion on ETTh2 from the 92d3 pipeline.
 #
 # USAGE (from repo root on Killarney login node, preferably $SCRATCH/ts-sandbox):
 #   ./slurm_binary_92d3_etth2.sh
@@ -16,8 +16,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASET="ETTh2"
 N_VARIATES=7
 SEED="42"
-FRESH=0
-RESUME=1
+FRESH=1
+RESUME=0
 RUN_STEM=""
 SMOKE=0
 VARS_TO_PLOT=3
@@ -32,7 +32,7 @@ while [[ $# -gt 0 ]]; do
         --walltime|--time) WALL="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         --fresh) FRESH=1; RESUME=0; shift ;;
-        --resume) RESUME=1; shift ;;
+        --resume) RESUME=1; FRESH=0; shift ;;
         --no-resume) RESUME=0; shift ;;
         --run-stem) RUN_STEM="$2"; shift 2 ;;
         --smoke-test|--smoke) SMOKE=1; shift ;;
@@ -152,11 +152,12 @@ TRAIN_ARGS=(
     --dataset "$DATASET"
     --n-variates "$N_VARIATES"
     --binary-diffusion
+    --model-type dit
+    --disable-cross-attention
     --checkpoint-dir "$CKPT_DIR"
     --results-dir "$DATA_DIR"
     --synth-cache-dir "$DATA_DIR"
     --seed "$SEED"
-    --pretrained-diff-ckpt "$CKPT_DIR/diff_hp_best.pt"
 )
 if [[ "$FRESH" -eq 1 ]]; then
     TRAIN_ARGS+=(--fresh)
@@ -175,7 +176,7 @@ else
     echo "[wandb] WANDB_API_KEY not set; training will run without wandb."
 fi
 
-echo "[train] Binary full training/eval..."
+echo "[train] Binary DiT fresh training/eval..."
 python -u -m models.diffusion_tsf.train_multivariate_pipeline "${TRAIN_ARGS[@]}"
 
 if [[ "$VIZ_WHEELS_OK" -eq 1 ]] || python -c "import matplotlib" 2>/dev/null; then
@@ -188,7 +189,8 @@ if [[ "$VIZ_WHEELS_OK" -eq 1 ]] || python -c "import matplotlib" 2>/dev/null; th
         --vars "$VARS_TO_PLOT" \
         --ensemble "$ENSEMBLE" \
         --num-extra-windows 2 \
-        --diffusion-type binary
+        --diffusion-type binary \
+        --model-type dit
 else
     echo "[viz] Skipped (matplotlib unavailable after wheel install retries)."
 fi

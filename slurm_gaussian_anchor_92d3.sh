@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Gaussian diffusion with deterministic anchor loss for the 92d3 pipeline.
+# Gaussian DiT diffusion with deterministic anchor loss for the 92d3 pipeline.
 #
 # USAGE (from repo root on Killarney login node, preferably $SCRATCH/ts-sandbox):
 #   ./slurm_gaussian_anchor_92d3.sh --dataset ETTh1
@@ -16,8 +16,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASET="ETTh1"
 N_VARIATES=""
 SEED="42"
-FRESH=0
-RESUME=1
+FRESH=1
+RESUME=0
 RUN_STEM=""
 SMOKE=0
 VARS_TO_PLOT=3
@@ -41,7 +41,7 @@ while [[ $# -gt 0 ]]; do
         --walltime|--time) WALL="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         --fresh) FRESH=1; RESUME=0; shift ;;
-        --resume) RESUME=1; shift ;;
+        --resume) RESUME=1; FRESH=0; shift ;;
         --no-resume) RESUME=0; shift ;;
         --run-stem) RUN_STEM="$2"; shift 2 ;;
         --smoke-test|--smoke) SMOKE=1; shift ;;
@@ -174,8 +174,9 @@ TRAIN_ARGS=(
     --deterministic-anchor-loss
     --deterministic-anchor-lambda "$ANCHOR_LAMBDA"
     --deterministic-anchor-alpha "$ANCHOR_ALPHA"
+    --model-type dit
+    --disable-cross-attention
     --eval-sampler "$EVAL_SAMPLER"
-    --pretrained-diff-ckpt "$CKPT_DIR/diff_hp_best.pt"
 )
 if [[ -n "$N_VARIATES" ]]; then
     TRAIN_ARGS+=(--n-variates "$N_VARIATES")
@@ -197,7 +198,7 @@ else
     echo "[wandb] WANDB_API_KEY not set; training will run without wandb."
 fi
 
-echo "[train] Gaussian full training/eval with deterministic anchor loss..."
+echo "[train] Gaussian DiT fresh training/eval with deterministic anchor loss..."
 python -u -m models.diffusion_tsf.train_multivariate_pipeline "${TRAIN_ARGS[@]}"
 
 if [[ "$VIZ_WHEELS_OK" -eq 1 ]] || python -c "import matplotlib" 2>/dev/null; then
@@ -211,6 +212,7 @@ if [[ "$VIZ_WHEELS_OK" -eq 1 ]] || python -c "import matplotlib" 2>/dev/null; th
         --ensemble "$ENSEMBLE" \
         --num-extra-windows 2 \
         --diffusion-type gaussian \
+        --model-type dit \
         --diffusion-sampler "$EVAL_SAMPLER"
 else
     echo "[viz] Skipped (matplotlib unavailable after wheel install retries)."

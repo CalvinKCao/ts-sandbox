@@ -17,8 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASET="ETTh1"
 N_VARIATES=""
 SEED="42"
-FRESH=0
-RESUME=1
+FRESH=1
+RESUME=0
 RUN_STEM=""
 SMOKE=0
 VARS_TO_PLOT=3
@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
         --walltime|--time) WALL="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         --fresh) FRESH=1; RESUME=0; shift ;;
-        --resume) RESUME=1; shift ;;
+        --resume) RESUME=1; FRESH=0; shift ;;
         --no-resume) RESUME=0; shift ;;
         --run-stem) RUN_STEM="$2"; shift 2 ;;
         --smoke-test|--smoke) SMOKE=1; shift ;;
@@ -169,8 +169,8 @@ TRAIN_ARGS=(
     --seed "$SEED"
     --model-type dit
     --prediction-mode x0_cumsum
+    --disable-cross-attention
     --eval-sampler "$EVAL_SAMPLER"
-    --pretrained-diff-ckpt "$CKPT_DIR/diff_hp_best.pt"
 )
 if [[ -n "$N_VARIATES" ]]; then
     TRAIN_ARGS+=(--n-variates "$N_VARIATES")
