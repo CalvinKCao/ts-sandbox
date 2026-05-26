@@ -83,6 +83,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 fi
 
 cd "$SLURM_SUBMIT_DIR"
+# BASH_SOURCE points at Slurm spool copy; repo paths must use submit dir.
+SCRIPT_DIR="$SLURM_SUBMIT_DIR"
 PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 if [[ ! -f "$PROJECT_ROOT/models/diffusion_tsf/train_multivariate_pipeline.py" ]]; then
     echo "ERROR: submit from the ts-sandbox repo root." >&2
