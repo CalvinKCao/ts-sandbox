@@ -12,20 +12,50 @@ resolve_92d3_run_dirs() {
         :
     elif [[ "$FRESH" -eq 0 ]]; then
         local candidate=""
+        _92d3_pick_resume_stem() {
+            local ckpt_marker="$1"
+            shift
+            local best="" best_mtime=0 d m
+            for d in "$@"; do
+                [[ -f "${d}/${ckpt_marker}" ]] || continue
+                m=$(stat -c %Y "${d}/${ckpt_marker}" 2>/dev/null || echo 0)
+                if [[ "$m" -gt "$best_mtime" ]]; then
+                    best_mtime="$m"
+                    best="$(basename "$d")"
+                fi
+            done
+            echo "$best"
+        }
+
         if [[ "$layout" == "ckpts_flat" ]]; then
             shopt -s nullglob
             local dirs=(./results/ckpts/*-"${slug}")
             shopt -u nullglob
-            for d in "${dirs[@]}"; do
-                [[ -f "${d}/training_manifest.json" ]] && candidate="$(basename "$d")"
-            done
+            candidate="$(_92d3_pick_resume_stem diff_hp_best.pt "${dirs[@]}")"
+            if [[ -z "$candidate" ]]; then
+                candidate="$(_92d3_pick_resume_stem training_manifest.json "${dirs[@]}")"
+            fi
         else
             shopt -s nullglob
             local dirs=(./results/*-binary-92d3-"${dataset_lower}")
             shopt -u nullglob
+            local ckpt_dirs=()
             for d in "${dirs[@]}"; do
-                [[ -f "${d}/ckpts/training_manifest.json" ]] && candidate="$(basename "$d")"
+                ckpt_dirs+=("${d}/ckpts")
             done
+            candidate="$(_92d3_pick_resume_stem diff_hp_best.pt "${ckpt_dirs[@]}")"
+            if [[ -n "$candidate" ]]; then
+                candidate="$(basename "$(dirname "$candidate")")"
+            fi
+            if [[ -z "$candidate" ]] && [[ "$dataset_lower" != "etth1" ]] && [[ "$dataset_lower" != "etth2" ]]; then
+                shopt -s nullglob
+                local any_dirs=(./results/*-binary-92d3-*/ckpts)
+                shopt -u nullglob
+                candidate="$(_92d3_pick_resume_stem diff_hp_best.pt "${any_dirs[@]}")"
+                if [[ -n "$candidate" ]]; then
+                    candidate="$(basename "$(dirname "$candidate")")"
+                fi
+            fi
         fi
         if [[ -n "$candidate" ]]; then
             RUN_STEM="$candidate"
