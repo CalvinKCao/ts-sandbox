@@ -15,7 +15,7 @@ class DiffusionTSFConfig:
         forecast_length: forecast horizon (default: 96)
         
     2D mapping:
-        image_height: height of the 2D thing (default: 128)
+        image_height: height of the 2D thing (default: 32)
         max_scale: for truncating values (default: 3.5)
         blur_kernel_size: gaussian blur kernel size (default: 31)
         blur_sigma: sigma for blur (default: 1.0)
@@ -60,7 +60,7 @@ class DiffusionTSFConfig:
     disable_cross_attention: bool = False
     
     # 2d mapping
-    image_height: int = 64  # height of 2d rep (must be divisible by 4; match Phase 1B ckpts)
+    image_height: int = 32  # height of 2d rep (must be divisible by 4)
     max_scale: float = 3.5  # MS param
     blur_kernel_size: int = 31
     blur_sigma: float = 1.0
@@ -261,7 +261,7 @@ class LatentDiffusionConfig(DiffusionTSFConfig):
     kl_weight: float = 1e-4
     vae_lr: float = 1e-4
     vae_epochs: int = 50
-    image_height: int = 128
+    image_height: int = 32
 
     def __post_init__(self):
         super().__post_init__()

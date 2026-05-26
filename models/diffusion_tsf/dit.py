@@ -174,7 +174,7 @@ class FactorizedDiT(nn.Module):
         in_channels: int,
         cond_channels: int,
         out_channels: int = 1,
-        image_height: int = 64,
+        image_height: int = 32,
         patch_size: Tuple[int, int] = (8, 8),
         embed_dim: int = 384,
         depth: int = 8,

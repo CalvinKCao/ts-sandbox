@@ -25,7 +25,7 @@ class TimeSeriesTo2D(nn.Module):
     up to that bin — a soft cumulative / bar-stack view (not a one-hot stripe).
     """
 
-    def __init__(self, height: int = 128, max_scale: float = 3.5):
+    def __init__(self, height: int = 32, max_scale: float = 3.5):
         """
         Args:
             height: Height H of the 2D representation (number of bins)

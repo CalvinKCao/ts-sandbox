@@ -57,7 +57,7 @@ PREDICTION_MODE: str = "epsilon"
 
 # ---- 2D map / U-Net topology ------------------------------------------------------
 
-IMAGE_HEIGHT: int = 64
+IMAGE_HEIGHT: int = 32
 UNET_CHANNELS: List[int] = [64, 128, 256]
 ATTENTION_LEVELS: List[int] = [2]
 DISABLE_CROSS_ATTENTION: bool = False

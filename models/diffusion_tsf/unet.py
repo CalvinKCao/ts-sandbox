@@ -622,7 +622,7 @@ class ConditionalUNet2D(nn.Module):
         attention_levels: List[int] = [1, 2, 3],
         time_emb_dim: int = 256,
         num_groups: int = 8,
-        image_height: int = 128,
+        image_height: int = 32,
         kernel_size: Tuple[int, int] = (3, 3),
         use_dilated_middle: bool = False,
         context_dim: int = 128,
