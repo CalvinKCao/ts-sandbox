@@ -129,8 +129,8 @@ PRETRAIN_EPOCHS: int = 10
 # Phase 1B: Diffusion HP tuning on synthetic data. Best HP-tuning model is saved
 # directly as `diffusion.pt` (no separate "full" pretrain step).
 N_DIFFUSION_HP_TRIALS: int = 8
-DIFFUSION_HP_MAX_EPOCHS: int = 10
-DIFFUSION_HP_PATIENCE: int = 10
+DIFFUSION_HP_MAX_EPOCHS: int = 5
+DIFFUSION_HP_PATIENCE: int = 4
 
 # Fallback/final diffusion pretrain (only runs if HP cache is missing).
 PRETRAIN_DIFFUSION_EPOCHS: int = 20
