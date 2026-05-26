@@ -14,7 +14,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASET="ETTh2"
-N_VARIATES=7
+N_VARIATES=""
 SEED="42"
 FRESH=1
 RESUME=0
@@ -42,6 +42,13 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+if [[ -z "$N_VARIATES" ]]; then
+    if [[ "$DATASET" == "exchange_rate" ]]; then N_VARIATES=8
+    elif [[ "$DATASET" == "weather" ]]; then N_VARIATES=21
+    else N_VARIATES=7
+    fi
+fi
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     if [[ "$SMOKE" -eq 1 ]]; then

@@ -51,6 +51,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -z "$N_VARIATES" ]]; then
+    if [[ "$DATASET" == "exchange_rate" ]]; then N_VARIATES=8
+    elif [[ "$DATASET" == "weather" ]]; then N_VARIATES=21
+    else N_VARIATES=7
+    fi
+fi
+
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     if [[ "$SMOKE" -eq 1 ]]; then
         WALL="0:30:00"
