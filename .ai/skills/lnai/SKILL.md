@@ -18,7 +18,7 @@ Use `lnai` as the source-of-truth workflow for AI tooling config.
 - Apply sync: `lnai sync --tools gemini cursor copilot`
 
 ## Rules
-- Keep `.ai/` committed; treat it as source of truth.
+- Keep `~/.ai/` as source of truth; repo `.ai/` is gitignored (sync with lnai, do not commit).
 - Prefer `--dry-run` before writing files when changing rules/settings.
 - Use `--verbose` when diagnosing unexpected generated output.
 - Do not sync unrelated tools unless user asks.

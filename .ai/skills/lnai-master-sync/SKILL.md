@@ -1,10 +1,6 @@
 ---
 name: lnai-master-sync
-description: >-
-  Updates the canonical ~/.ai tree, copies it into the repo root, and runs
-  lnai validate/sync (default gemini, cursor, copilot). Use when editing
-  master AI config under ~/.ai or when refreshing repo-local .ai and tool
-  symlinks from that master copy.
+description: Terse flow to update master .ai, copy to repo, and sync with lnai.
 ---
 
 # Master .ai Sync (Terse)
