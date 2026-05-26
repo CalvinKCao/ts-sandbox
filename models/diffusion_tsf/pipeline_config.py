@@ -149,7 +149,7 @@ ITRANS_REAL_COLD_START: bool = True
 
 # Phase 2B: Diffusion HP tuning on real data (LR-only search; batch size auto-probed).
 # The best trial checkpoint is promoted to best.pt (no separate full retrain).
-N_FINETUNE_HP_TRIALS: int = 6
+N_FINETUNE_HP_TRIALS: int = 5
 HP_TUNE_EPOCHS: int = 20
 HP_TUNE_PATIENCE: int = 15
 FINAL_FINETUNE_EPOCHS: int = 20  # legacy constant; promotion copies the best trial ckpt
