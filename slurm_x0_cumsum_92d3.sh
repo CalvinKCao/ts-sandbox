@@ -7,6 +7,8 @@
 #   ./slurm_x0_cumsum_92d3.sh --dataset ETTh2
 #   ./slurm_x0_cumsum_92d3.sh --dataset exchange_rate
 #   ./slurm_x0_cumsum_92d3.sh --dataset ETTh1 --smoke-test
+#   ./slurm_x0_cumsum_92d3.sh --dataset ETTh1 --resume
+#   ./slurm_x0_cumsum_92d3.sh --dataset ETTh1 --run-stem 05-25-4211-x0cumsum-etth1
 # =============================================================================
 
 set -euo pipefail
@@ -16,6 +18,8 @@ DATASET="ETTh1"
 N_VARIATES=""
 SEED="42"
 FRESH=0
+RESUME=1
+RUN_STEM=""
 SMOKE=0
 VARS_TO_PLOT=3
 ENSEMBLE=1
@@ -35,7 +39,10 @@ while [[ $# -gt 0 ]]; do
         --n-variates) N_VARIATES="$2"; shift 2 ;;
         --walltime|--time) WALL="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
-        --fresh) FRESH=1; shift ;;
+        --fresh) FRESH=1; RESUME=0; shift ;;
+        --resume) RESUME=1; shift ;;
+        --no-resume) RESUME=0; shift ;;
+        --run-stem) RUN_STEM="$2"; shift 2 ;;
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --vars) VARS_TO_PLOT="$2"; shift 2 ;;
         --ensemble) ENSEMBLE="$2"; shift 2 ;;
@@ -78,6 +85,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         $([[ -n "$N_VARIATES" ]] && echo --n-variates "$N_VARIATES") \
         $([[ -n "$WALL" && "$SMOKE" -eq 0 ]] && echo --walltime "$WALL") \
         $([[ "$FRESH" -eq 1 ]] && echo --fresh) \
+        $([[ "$RESUME" -eq 1 ]] && echo --resume) \
+        $([[ -n "$RUN_STEM" ]] && echo --run-stem "$RUN_STEM") \
         $([[ "$SMOKE" -eq 1 ]] && echo --smoke-test) \
         --wandb-project "$WANDB_PROJECT"
     exit 0
@@ -94,12 +103,11 @@ if [[ "$PROJECT_ROOT" == /home/* ]]; then
     exit 1
 fi
 
+# shellcheck source=slurm/lib_92d3_resume.sh
+source "$SCRIPT_DIR/slurm/lib_92d3_resume.sh"
 mkdir -p ./results/logs ./results/ckpts ./results/datasets
-RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-x0cumsum-${DATASET,,}"
-LOG_FILE="./results/logs/${RUN_STEM}.log"
-CKPT_DIR="./results/ckpts/${RUN_STEM}"
-DATA_DIR="./results/datasets/${RUN_STEM}"
-mkdir -p "$CKPT_DIR" "$DATA_DIR"
+resolve_92d3_run_dirs ckpts_flat "x0cumsum-${DATASET,,}" "${DATASET,,}" 4
+mkdir -p "$(dirname "$LOG_FILE")" "$CKPT_DIR" "$DATA_DIR"
 exec >>"$LOG_FILE" 2>&1
 
 echo "=========================================="
@@ -166,6 +174,8 @@ if [[ -n "$N_VARIATES" ]]; then
 fi
 if [[ "$FRESH" -eq 1 ]]; then
     TRAIN_ARGS+=(--fresh)
+elif [[ "$RESUME" -eq 1 ]]; then
+    TRAIN_ARGS+=(--resume)
 fi
 if [[ "$SMOKE" -eq 1 ]]; then
     TRAIN_ARGS+=(--smoke-test)
@@ -193,6 +203,8 @@ if [[ "$VIZ_WHEELS_OK" -eq 1 ]] || python -c "import matplotlib" 2>/dev/null; th
         --ensemble "$ENSEMBLE" \
         --num-extra-windows 2 \
         --diffusion-type gaussian \
+        --model-type dit \
+        --prediction-mode x0_cumsum \
         --diffusion-sampler "$EVAL_SAMPLER"
 else
     echo "[viz] Skipped (matplotlib unavailable after wheel install retries)."

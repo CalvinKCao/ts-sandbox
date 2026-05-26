@@ -69,6 +69,34 @@ def infer_diffusion_type(ckpt: dict, override: Optional[str] = None) -> str:
     return 'gaussian'
 
 
+def infer_model_type(ckpt: dict, override: Optional[str] = None) -> str:
+    if override:
+        return override
+    cfg = ckpt.get('config')
+    if hasattr(cfg, 'model_type'):
+        return cfg.model_type
+    if isinstance(cfg, dict) and cfg.get('model_type'):
+        return cfg['model_type']
+    sd = ckpt.get('model_state_dict', {})
+    for key in sd:
+        if 'noise_predictor.blocks.' in key:
+            return 'dit'
+        if 'noise_predictor.down_blocks.' in key:
+            return 'unet'
+    return 'unet'
+
+
+def infer_prediction_mode(ckpt: dict, override: Optional[str] = None) -> str:
+    if override:
+        return override
+    cfg = ckpt.get('config')
+    if hasattr(cfg, 'prediction_mode'):
+        return cfg.prediction_mode
+    if isinstance(cfg, dict) and cfg.get('prediction_mode'):
+        return cfg['prediction_mode']
+    return 'epsilon'
+
+
 def choose_extra_indices(n_test: int, n_extra: int, rng: random.Random, exclude: List[int]) -> List[int]:
     pool = [i for i in range(n_test) if i not in exclude]
     if not pool or n_extra <= 0:
@@ -87,6 +115,8 @@ def run_comparison(
     dataset_filter: Optional[str] = None,
     num_extra_windows: int = 2,
     diffusion_type: Optional[str] = None,
+    model_type: Optional[str] = None,
+    prediction_mode: Optional[str] = None,
     diffusion_sampler: str = "ddim",
     random_seed: int = 13,
 ):
@@ -197,10 +227,17 @@ def run_comparison(
 
         diff_ckpt = torch.load(sub['best_pt'], map_location=device, weights_only=False)
         diff_type = infer_diffusion_type(diff_ckpt, diffusion_type)
-        print(f"  diffusion_type={diff_type}")
+        backbone = infer_model_type(diff_ckpt, model_type)
+        pred_mode = infer_prediction_mode(diff_ckpt, prediction_mode)
+        print(f"  diffusion_type={diff_type} model_type={backbone} prediction_mode={pred_mode}")
 
         # Load fine-tuned diffusion with same guidance wrapper as training
-        diff_model = create_diffusion_model(n_variates=n_vars, diffusion_type=diff_type).to(device)
+        diff_model = create_diffusion_model(
+            n_variates=n_vars,
+            diffusion_type=diff_type,
+            model_type=backbone,
+            prediction_mode=pred_mode,
+        ).to(device)
         itrans_guidance = iTransformerGuidance(itrans_model)
         diff_model.set_guidance_model(itrans_guidance)
         diff_model.load_state_dict(diff_ckpt['model_state_dict'])
@@ -360,6 +397,11 @@ def main():
     parser.add_argument('--diffusion-type', type=str, default=None,
                         choices=['gaussian', 'binary'],
                         help='Override diffusion type inferred from checkpoint')
+    parser.add_argument('--model-type', type=str, default=None, choices=['unet', 'dit'],
+                        help='Override backbone inferred from checkpoint (required for DiT if config missing)')
+    parser.add_argument('--prediction-mode', type=str, default=None,
+                        choices=['epsilon', 'x0_cumsum'],
+                        help='Override prediction mode inferred from checkpoint')
     parser.add_argument('--diffusion-sampler', type=str, default='ddim',
                         choices=['ddim', 'dpmpp', 'anchor', 'deterministic_anchor'],
                         help='Sampler for diffusion plots')
@@ -373,6 +415,8 @@ def main():
         dataset_filter=args.dataset,
         num_extra_windows=args.num_extra_windows,
         diffusion_type=args.diffusion_type,
+        model_type=args.model_type,
+        prediction_mode=args.prediction_mode,
         diffusion_sampler='anchor' if args.diffusion_sampler == 'deterministic_anchor' else args.diffusion_sampler,
         random_seed=args.random_seed,
     )

@@ -993,6 +993,7 @@ def create_diffusion_model(
     guidance_penalty_weight: Optional[float] = None,
     diffusion_type: str = None,
     prediction_mode: str = None,
+    model_type: str = None,
     use_deterministic_anchor_loss: Optional[bool] = None,
     deterministic_anchor_lambda: Optional[float] = None,
     deterministic_anchor_alpha: Optional[float] = None,
@@ -1006,6 +1007,8 @@ def create_diffusion_model(
         diffusion_type = DIFFUSION_TYPE
     if prediction_mode is None:
         prediction_mode = PREDICTION_MODE
+    if model_type is None:
+        model_type = MODEL_TYPE
     if use_deterministic_anchor_loss is None:
         use_deterministic_anchor_loss = DETERMINISTIC_ANCHOR_LOSS
     if deterministic_anchor_lambda is None:
@@ -1042,7 +1045,7 @@ def create_diffusion_model(
         use_guidance_channel=True,
         guidance_penalty_weight=guidance_penalty_weight,
         num_diffusion_steps=1000,
-        model_type=MODEL_TYPE,
+        model_type=model_type,
         unet_channels=UNET_CHANNELS,
         attention_levels=ATTENTION_LEVELS,
         disable_cross_attention=DISABLE_CROSS_ATTENTION,
@@ -2798,6 +2801,7 @@ def run_pipeline(
     seed: int = 42,
     use_wandb: bool = False,
     wandb_project: str = "diffusion-tsf-7var",
+    datasets: Optional[List[str]] = None,
 ):
     """Run the full training pipeline."""
     random.seed(seed)
@@ -2916,6 +2920,19 @@ def run_pipeline(
     
     # =========== PHASE 2: Fine-tuning per Dataset (full variates only) ===========
     all_jobs = generate_all_dataset_jobs(seed=seed)
+    if datasets:
+        want = set(datasets)
+        all_jobs = {k: v for k, v in all_jobs.items() if k in want}
+        missing = want - set(all_jobs)
+        if missing:
+            logger.warning(
+                f"--dataset filter {sorted(missing)} not in {N_VARIATES}-variate job list "
+                f"(available: {sorted(all_jobs)})"
+            )
+        if not all_jobs:
+            raise ValueError(
+                f"No finetune jobs for datasets={sorted(want)} with n_variates={N_VARIATES}"
+            )
     job_list = list(all_jobs.values())
     if smoke_test:
         job_list = job_list[:1]  # Just 1 dataset for ultra-fast smoke test
@@ -2929,11 +2946,18 @@ def run_pipeline(
             subset_dir = os.path.join(CHECKPOINT_DIR, dataset_name)
             os.makedirs(subset_dir, exist_ok=True)
 
+            prior_results = _load_subset_results(RESULTS_DIR, dataset_name)
+            if resume and prior_results.get('eval_metrics'):
+                logger.info(
+                    f"[Resume] Skipping {dataset_name}: eval_metrics already in "
+                    f"{_subset_results_path(RESULTS_DIR, dataset_name)}"
+                )
+                continue
+
             # ---- Eval-resume: if best.pt + metadata.json exist and results.json
             # has no eval_metrics yet, skip HP search and jump straight into eval.
             existing_best = os.path.join(subset_dir, 'best.pt')
             existing_meta = os.path.join(subset_dir, 'metadata.json')
-            prior_results = _load_subset_results(RESULTS_DIR, dataset_name)
             can_resume_eval = (
                 os.path.exists(existing_best)
                 and os.path.exists(existing_meta)
@@ -3857,6 +3881,7 @@ def main():
             seed=args.seed,
             use_wandb=args.wandb,
             wandb_project=args.wandb_project,
+            datasets=[args.dataset] if args.dataset else None,
         )
     finally:
         finish_wandb()

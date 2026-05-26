@@ -6,6 +6,8 @@
 #   ./slurm_binary_92d3_etth2.sh
 #   ./slurm_binary_92d3_etth2.sh --smoke-test
 #   ./slurm_binary_92d3_etth2.sh --fresh --seed 23
+#   ./slurm_binary_92d3_etth2.sh --dataset ETTh2 --resume
+#   ./slurm_binary_92d3_etth2.sh --dataset ETTh2 --run-stem 05-25-172-binary-92d3-etth2
 # =============================================================================
 
 set -euo pipefail
@@ -15,6 +17,8 @@ DATASET="ETTh2"
 N_VARIATES=7
 SEED="42"
 FRESH=0
+RESUME=1
+RUN_STEM=""
 SMOKE=0
 VARS_TO_PLOT=3
 ENSEMBLE=3
@@ -27,7 +31,10 @@ while [[ $# -gt 0 ]]; do
         --n-variates) N_VARIATES="$2"; shift 2 ;;
         --walltime|--time) WALL="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
-        --fresh) FRESH=1; shift ;;
+        --fresh) FRESH=1; RESUME=0; shift ;;
+        --resume) RESUME=1; shift ;;
+        --no-resume) RESUME=0; shift ;;
+        --run-stem) RUN_STEM="$2"; shift 2 ;;
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --vars) VARS_TO_PLOT="$2"; shift 2 ;;
         --ensemble) ENSEMBLE="$2"; shift 2 ;;
@@ -68,6 +75,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         --vars "$VARS_TO_PLOT" --ensemble "$ENSEMBLE" \
         $([[ -n "$WALL" && "$SMOKE" -eq 0 ]] && echo --walltime "$WALL") \
         $([[ "$FRESH" -eq 1 ]] && echo --fresh) \
+        $([[ "$RESUME" -eq 1 ]] && echo --resume) \
+        $([[ -n "$RUN_STEM" ]] && echo --run-stem "$RUN_STEM") \
         $([[ "$SMOKE" -eq 1 ]] && echo --smoke-test) \
         --wandb-project "$WANDB_PROJECT"
     exit 0
@@ -84,13 +93,11 @@ if [[ "$PROJECT_ROOT" == /home/* ]]; then
     exit 1
 fi
 
-RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-binary-92d3-${DATASET,,}"
-RUN_DIR="./results/${RUN_STEM}"
-LOG_DIR="${RUN_DIR}/logs"
-CKPT_DIR="${RUN_DIR}/ckpts"
-DATA_DIR="${RUN_DIR}/datasets"
+# shellcheck source=slurm/lib_92d3_resume.sh
+source "$SCRIPT_DIR/slurm/lib_92d3_resume.sh"
+mkdir -p ./results
+resolve_92d3_run_dirs run_bundle "binary-92d3-${DATASET,,}" "${DATASET,,}" 3
 mkdir -p "$LOG_DIR" "$CKPT_DIR" "$DATA_DIR"
-LOG_FILE="${LOG_DIR}/${RUN_STEM}.log"
 exec >>"$LOG_FILE" 2>&1
 
 echo "=========================================="
@@ -151,6 +158,8 @@ TRAIN_ARGS=(
 )
 if [[ "$FRESH" -eq 1 ]]; then
     TRAIN_ARGS+=(--fresh)
+elif [[ "$RESUME" -eq 1 ]]; then
+    TRAIN_ARGS+=(--resume)
 fi
 if [[ "$SMOKE" -eq 1 ]]; then
     TRAIN_ARGS+=(--smoke-test)
