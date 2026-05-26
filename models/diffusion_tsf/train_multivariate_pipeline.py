@@ -2953,10 +2953,11 @@ def run_pipeline(
         subset_info = {'subset_id': dataset_name, 'variate_indices': variate_indices}
 
         prior_results = _load_subset_results(RESULTS_DIR, dataset_name)
-        if resume and prior_results.get('eval_metrics'):
+        ft_itrans_ckpt = os.path.join(CHECKPOINT_DIR, f'{dataset_name}_itransformer_finetuned.pt')
+        if resume and prior_results.get('eval_metrics') and os.path.exists(ft_itrans_ckpt):
             logger.info(
                 f"[Resume] Skipping {dataset_name}: eval_metrics already present in "
-                f"{_subset_results_path(RESULTS_DIR, dataset_name)}"
+                f"{_subset_results_path(RESULTS_DIR, dataset_name)} and Phase 2A checkpoint exists"
             )
             continue
 

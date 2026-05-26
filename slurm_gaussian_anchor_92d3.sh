@@ -62,7 +62,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         CPUS=4
         JOB_NAME="gauss-anchor-smoke"
     else
-        [[ -z "$WALL" ]] && WALL="1:00:00"
+        [[ -z "$WALL" ]] && WALL="1-00:00:00"
         MEM="60G"
         CPUS=8
         JOB_NAME="gauss-anchor-${DATASET,,}"

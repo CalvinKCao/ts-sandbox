@@ -50,11 +50,10 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         CPUS=4
         JOB_NAME="binary92d3-smoke"
     else
-        WALL="1:00:00"
         MEM="60G"
         CPUS=8
         JOB_NAME="binary92d3-${DATASET,,}"
-        [[ -z "$WALL" ]] && WALL="1:00:00"
+        [[ -z "$WALL" ]] && WALL="1-00:00:00"
     fi
 
     echo "Submitting ${JOB_NAME} (${DATASET}, n=${N_VARIATES}) wall=${WALL} on Killarney L40S..."
