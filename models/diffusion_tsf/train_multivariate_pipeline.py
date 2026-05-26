@@ -1696,12 +1696,17 @@ def diffusion_hp_objective(
     smoke_test=False,
     fixed_batch_size: Optional[int] = None,
     best_state: Optional[dict] = None,
+    disable_anchor_loss: bool = False,
 ):
     """Optuna objective for Diffusion HP search.
 
     best_state is a shared mutable dict; when provided, updates
     best_state['model_state'] and best_state['val_loss'] whenever this
     trial achieves a new cross-trial best (used to skip a separate pretrain).
+
+    disable_anchor_loss: skip the anchor forward pass during HP search to
+        halve per-step cost. The anchor regularizer doesn't help rank LR
+        candidates on synthetic data.
     """
     lr = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
     if fixed_batch_size is None:
@@ -1709,7 +1714,10 @@ def diffusion_hp_objective(
     else:
         batch_size = fixed_batch_size
 
-    model = create_diffusion_model(**anchor_kwargs_from_params()).to(device)
+    anchor_kw = anchor_kwargs_from_params()
+    if disable_anchor_loss:
+        anchor_kw = {'use_deterministic_anchor_loss': False}
+    model = create_diffusion_model(**anchor_kw).to(device)
     model.set_guidance_model(itrans_guidance)
 
     train_loader = DataLoader(synthetic_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -1823,6 +1831,12 @@ def run_diffusion_hp_tuning(
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(direction='minimize', sampler=TPESampler(seed=42))
     
+    # Anchor loss doubles per-step compute (extra DiT fwd+bwd). Disable it
+    # during Phase 1B since the regularizer doesn't help rank LR candidates.
+    skip_anchor = DETERMINISTIC_ANCHOR_LOSS
+    if skip_anchor:
+        logger.info("Phase 1B: anchor loss disabled for HP search (2× speedup)")
+
     logger.info(f"Starting Diffusion HP search: {n_trials} trials")
     
     def log_trial(study, trial):
@@ -1831,7 +1845,7 @@ def run_diffusion_hp_tuning(
             f"[Diffusion HP] Trial {trial.number}/{n_trials}: "
             f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, bs={bs}"
         )
-        if DETERMINISTIC_ANCHOR_LOSS:
+        if DETERMINISTIC_ANCHOR_LOSS and not skip_anchor:
             lam, alpha = fixed_deterministic_anchor_hp()
             msg += f", anchor_lambda={lam:.4f}, anchor_alpha={alpha:.4f} (fixed)"
         logger.info(msg)
@@ -1842,6 +1856,7 @@ def run_diffusion_hp_tuning(
         lambda trial: diffusion_hp_objective(
             trial, train_loader, val_loader, itrans_guidance, device, smoke_test,
             fixed_batch_size=train_bs, best_state=_best_state,
+            disable_anchor_loss=skip_anchor,
         ),
         n_trials=n_trials,
         show_progress_bar=not smoke_test,
