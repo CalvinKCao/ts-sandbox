@@ -63,6 +63,18 @@ fi
 cd "$SLURM_SUBMIT_DIR"
 SCRIPT_DIR="$SLURM_SUBMIT_DIR"
 PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+
+# Build RUN_STEM without a failing command substitution under `set -e`.
+# (Bash: `x="$([[ false ]] && echo y)"` exits 1 with set -e, killing the job
+# before any log is opened; matches alliancecan "instant FAILED, no log" gotcha.)
+SMOKE_SUFFIX=""
+if [[ "$SMOKE" -eq 1 ]]; then SMOKE_SUFFIX="-smoke"; fi
+RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-mmpd-anchor-eval${SMOKE_SUFFIX}"
+LOG_FILE="./results/logs/${RUN_STEM}.log"
+OUTPUT_DIR="./results/datasets/${RUN_STEM}"
+mkdir -p "$(dirname "$LOG_FILE")" "$OUTPUT_DIR"
+exec >>"$LOG_FILE" 2>&1
+
 if [[ ! -f "$PROJECT_ROOT/utils/eval_mmpd_gaussian_anchor.py" ]]; then
     echo "ERROR: submit from the ts-sandbox repo root." >&2
     exit 1
@@ -71,12 +83,6 @@ if [[ "$PROJECT_ROOT" == /home/* ]]; then
     echo "ERROR: Killarney GPU jobs should run from a scratch/project checkout, not /home." >&2
     exit 1
 fi
-
-RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-mmpd-anchor-eval$([[ "$SMOKE" -eq 1 ]] && echo -smoke)"
-LOG_FILE="./results/logs/${RUN_STEM}.log"
-OUTPUT_DIR="./results/datasets/${RUN_STEM}"
-mkdir -p "$(dirname "$LOG_FILE")" "$OUTPUT_DIR"
-exec >>"$LOG_FILE" 2>&1
 
 echo "=========================================="
 echo "Job: $SLURM_JOB_NAME  ID: $SLURM_JOB_ID  Node: ${SLURMD_NODENAME:-unknown}"
