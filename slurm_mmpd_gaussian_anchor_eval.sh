@@ -183,7 +183,8 @@ PREAMBLE
     <<ENDSCRIPT
 #!/bin/bash
 source "$PREAMBLE_FILE"
-python -u "${EVAL_BASE[@]}" \
+# Quoted "${EVAL_BASE[@]}" inside heredocs collapses to one argv; use unquoted.
+python -u ${EVAL_BASE[@]} \
   --phase init \
   --datasets ${DATASETS[*]}
 echo "[init] done: \$(date)"
@@ -204,7 +205,7 @@ ENDSCRIPT
       <<ENDSCRIPT
 #!/bin/bash
 source "$PREAMBLE_FILE"
-python -u "${EVAL_BASE[@]}" \
+python -u ${EVAL_BASE[@]} \
   --phase mmpd \
   --datasets "$ds"
 echo "[mmpd-${ds}] done: \$(date)"
@@ -224,7 +225,7 @@ ENDSCRIPT
       <<ENDSCRIPT
 #!/bin/bash
 source "$PREAMBLE_FILE"
-python -u "${EVAL_BASE[@]}" \
+python -u ${EVAL_BASE[@]} \
   --phase anchor \
   --anchor-variant gaussian \
   --datasets "$ds"
@@ -245,7 +246,7 @@ ENDSCRIPT
       <<ENDSCRIPT
 #!/bin/bash
 source "$PREAMBLE_FILE"
-python -u "${EVAL_BASE[@]}" \
+python -u ${EVAL_BASE[@]} \
   --phase anchor \
   --anchor-variant binary \
   --datasets "$ds"
@@ -282,7 +283,7 @@ module --force purge || module purge || true
 module load StdEnv/2023
 module load python/3.11
 cd "$REPO"
-python -u "${EVAL_BASE[@]}" \
+python -u ${EVAL_BASE[@]} \
   --phase merge \
   --datasets ${DATASETS[*]} \
   --cpu
