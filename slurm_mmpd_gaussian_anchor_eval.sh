@@ -101,6 +101,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
       --mmpd-batch-size 32
       --mmpd-eval-batch-size 16
       --anchor-batch-size 16
+      --texture-per-sample
     )
   fi
 

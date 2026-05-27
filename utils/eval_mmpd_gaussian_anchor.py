@@ -1048,6 +1048,25 @@ def texture_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     return {key: float(np.mean(value)) for key, value in vals.items()}
 
 
+def texture_metrics_per_sample(
+    y_true: np.ndarray,
+    samples: np.ndarray,
+) -> Dict[str, float]:
+    """Texture metrics on each probabilistic draw, then mean over draws."""
+    sample_count = samples.shape[2]
+    if sample_count == 0:
+        return {}
+    per_draw: Dict[str, List[float]] = {}
+    for draw_idx in range(sample_count):
+        draw_metrics = texture_metrics(y_true, samples[:, :, draw_idx, :])
+        for key, value in draw_metrics.items():
+            per_draw.setdefault(key, []).append(value)
+    return {
+        f"per_sample_mean_{key}": float(np.mean(values))
+        for key, values in per_draw.items()
+    }
+
+
 def summarize_prob_core_metrics(
     pack: Dict[str, np.ndarray],
     gmm_components: int = 9,
@@ -1082,6 +1101,7 @@ def summarize_prediction_pack(
     gmm_components: int = 10,
     seed: int = 0,
     topk_max: int = 5,
+    texture_per_sample: bool = False,
 ) -> Dict[str, float]:
     y_true = pack["y_true"]
     det = pack["deterministic"]
@@ -1103,6 +1123,8 @@ def summarize_prediction_pack(
     sample_mean = samples.mean(axis=2)
     for key, value in texture_metrics(y_true, sample_mean).items():
         metrics[f"sample_mean_{key}"] = value
+    if texture_per_sample:
+        metrics.update(texture_metrics_per_sample(y_true, samples))
     metrics["n_windows"] = float(y_true.shape[0])
     metrics["n_variates"] = float(y_true.shape[1])
     metrics["n_samples"] = float(samples.shape[2])
@@ -1139,6 +1161,7 @@ def summarize_for_profile(
         gmm_components=args.gmm_components,
         seed=seed,
         topk_max=args.topk_max,
+        texture_per_sample=args.texture_per_sample,
     )
 
 
@@ -1468,6 +1491,11 @@ def parse_args() -> argparse.Namespace:
         choices=["full", "prob-core"],
         default="full",
         help="prob-core: mean-of-samples MSE/MAE, CRPS, top-k only (no texture/det).",
+    )
+    parser.add_argument(
+        "--texture-per-sample",
+        action="store_true",
+        help="Full profile only: texture metrics on each draw, averaged (per_sample_mean_*).",
     )
     parser.add_argument("--lookback", type=int, default=96)
     parser.add_argument("--horizon", type=int, default=96)
