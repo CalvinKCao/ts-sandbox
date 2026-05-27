@@ -30,6 +30,8 @@ def build_model(
     lookback: int,
     forecast: int,
     prediction_mode: str = "epsilon",
+    diffusion_type: str = "gaussian",
+    use_deterministic_anchor_loss: bool = False,
 ) -> DiffusionTSF:
     cfg = DiffusionTSFConfig(
         lookback_length=lookback,
@@ -52,6 +54,12 @@ def build_model(
         attention_levels=[1],
         model_type=model_type,
         prediction_mode=prediction_mode,
+        diffusion_type=diffusion_type,
+        binary_num_steps=32,
+        binary_sample_steps=4,
+        use_deterministic_anchor_loss=use_deterministic_anchor_loss,
+        deterministic_anchor_lambda=0.9,
+        deterministic_anchor_alpha=0.5,
     )
 
     itrans = create_itransformer(seq_len=lookback, pred_len=forecast, num_vars=num_variables, dropout=0.0)
@@ -90,11 +98,50 @@ def smoke_one(model_type: str, prediction_mode: str = "epsilon") -> None:
     print(f"  generate OK: prediction shape={tuple(gen['prediction'].shape)}")
 
 
+def smoke_binary_anchor() -> None:
+    print("\n--- smoke: dit, binary diffusion + anchor ---")
+    torch.manual_seed(0)
+    B, V, L, F_ = 2, 3, 48, 16
+    model = build_model(
+        "dit",
+        V,
+        L,
+        F_,
+        diffusion_type="binary",
+        use_deterministic_anchor_loss=True,
+    ).cpu()
+
+    past = torch.randn(B, V, L)
+    future = torch.randn(B, V, F_)
+
+    out = model(past, future)
+    assert out["noise_pred"].shape == (B, V, model.config.image_height, F_), out["noise_pred"].shape
+    assert out["x0_pred"].shape == (B, V, model.config.image_height, F_), out["x0_pred"].shape
+    assert out["anchor_loss"].dim() == 0
+    assert out["loss"].dim() == 0
+    print(
+        "  forward OK: "
+        f"loss={out['loss'].item():.4f}, anchor={out['anchor_loss'].item():.4f}"
+    )
+
+    out["loss"].backward()
+    grad_norms = [p.grad.norm().item() for p in model.noise_predictor.parameters() if p.grad is not None]
+    assert grad_norms, "no grads flowed to binary anchor backbone"
+    print(f"  grads flowed through {len(grad_norms)} backbone tensors; max grad norm={max(grad_norms):.4f}")
+
+    model.eval()
+    with torch.no_grad():
+        gen = model.generate(past, sampler="anchor", cfg_scale=1.0)
+    assert gen["prediction"].shape == (B, V, F_), gen["prediction"].shape
+    print(f"  anchor generate OK: prediction shape={tuple(gen['prediction'].shape)}")
+
+
 if __name__ == "__main__":
     try:
         smoke_one("unet")
         smoke_one("dit")
         smoke_one("dit", prediction_mode="x0_cumsum")
+        smoke_binary_anchor()
     except Exception as e:
         print(f"SMOKE FAILED: {type(e).__name__}: {e}")
         raise SystemExit(1)

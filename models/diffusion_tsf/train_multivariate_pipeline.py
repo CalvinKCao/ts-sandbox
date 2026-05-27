@@ -1015,10 +1015,6 @@ def create_diffusion_model(
         deterministic_anchor_lambda = DETERMINISTIC_ANCHOR_LAMBDA
     if deterministic_anchor_alpha is None:
         deterministic_anchor_alpha = DETERMINISTIC_ANCHOR_ALPHA
-    if diffusion_type == "binary" and use_deterministic_anchor_loss:
-        raise ValueError(
-            "Binary diffusion and deterministic anchor loss cannot be used together."
-        )
     if diffusion_type == "binary" and prediction_mode == "x0_cumsum":
         raise ValueError("x0_cumsum prediction mode is only supported for gaussian diffusion.")
     if prediction_mode == "x0_cumsum" and use_deterministic_anchor_loss:
@@ -3660,10 +3656,6 @@ def main():
         PREDICTION_MODE = args.prediction_mode
     if args.binary_diffusion:
         DIFFUSION_TYPE = "binary"
-    if DIFFUSION_TYPE == "binary" and DETERMINISTIC_ANCHOR_LOSS:
-        parser.error(
-            "Cannot combine --binary-diffusion with --deterministic-anchor-loss."
-        )
     if DIFFUSION_TYPE == "binary" and PREDICTION_MODE == "x0_cumsum":
         parser.error("Cannot combine --binary-diffusion with --prediction-mode x0_cumsum.")
     if PREDICTION_MODE == "x0_cumsum" and DETERMINISTIC_ANCHOR_LOSS:

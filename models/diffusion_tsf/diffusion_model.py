@@ -780,6 +780,7 @@ class DiffusionTSF(nn.Module):
                 decoder_method=decoder_method, beam_width=beam_width,
                 jump_penalty_scale=jump_penalty_scale,
                 search_radius=search_radius,
+                sampler=sampler,
             )
         return self._generate_factorized(
             past, use_ddim=use_ddim, num_ddim_steps=num_ddim_steps,
@@ -1182,6 +1183,7 @@ class DiffusionTSF(nn.Module):
         ctx_flat = None
         if ctx is not None:
             ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
+        ctx_anchor = ctx_flat
 
         canvas = self._inject_coordinate_channel(xt_flat.float())
         canvas = self._inject_time_channels(canvas)
@@ -1191,6 +1193,8 @@ class DiffusionTSF(nn.Module):
         past_flat = past_2d.reshape(BV, 1, H, W_past)
         cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
         cond_for_unet = self._apply_coarse_dropout(cond_for_unet)
+        base_cond_for_unet = cond_for_unet
+        guidance_2d_flat = guidance_2d.reshape(BV, 1, H, W_fut) if guidance_2d is not None else None
 
         if self.training and self.config.cfg_dropout > 0.0:
             drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
@@ -1208,50 +1212,62 @@ class DiffusionTSF(nn.Module):
                 )
 
             if guidance_2d is not None:
-                guide_flat = guidance_2d.reshape(BV, 1, H, W_fut)
                 guide_flat = torch.where(
                     drop_mask_flat.view(BV, 1, 1, 1),
-                    torch.zeros_like(guide_flat),
-                    guide_flat,
+                    torch.zeros_like(guidance_2d_flat),
+                    guidance_2d_flat,
                 )
                 canvas = torch.cat([canvas, guide_flat], dim=1)
-        elif guidance_2d is not None:
-            canvas = torch.cat([canvas, guidance_2d.reshape(BV, 1, H, W_fut)], dim=1)
+        elif guidance_2d_flat is not None:
+            canvas = torch.cat([canvas, guidance_2d_flat], dim=1)
 
-        chunk_size = self.config.unet_max_chunk_size
-        if chunk_size > 0 and BV > chunk_size:
-            out_chunks = []
-            for i in range(0, BV, chunk_size):
-                end = min(i + chunk_size, BV)
-                c_ctx = ctx_flat[i:end] if ctx_flat is not None else None
-                out_chunks.append(
-                    self.noise_predictor(
-                        canvas[i:end],
-                        t_flat[i:end],
-                        cond_for_unet[i:end],
-                        encoder_hidden_states=c_ctx,
-                    )
-                )
-            out_flat = torch.cat(out_chunks, dim=0)
-        else:
-            out_flat = self.noise_predictor(
-                canvas, t_flat, cond_for_unet, encoder_hidden_states=ctx_flat
-            )
+        out_flat = self._predict_noise_chunked(canvas, t_flat, cond_for_unet, ctx_flat)
 
         x0_logits = out_flat[:, 0:1, :, :]
         zt_logits = out_flat[:, 1:2, :, :]
         loss_x0 = self._binary_plain_bce_loss(x0_logits, future_flat)
         loss_zt = self._binary_plain_bce_loss(zt_logits, zt_flat)
-        loss = loss_x0 + loss_zt
+        regular_loss = loss_x0 + loss_zt
+
+        anchor_loss = torch.tensor(0.0, device=device)
+        combined_mse_loss = regular_loss
+        if self.config.use_deterministic_anchor_loss:
+            anchor_t_flat = torch.full(
+                (BV,),
+                self.config.binary_num_steps - 1,
+                device=device,
+                dtype=t_flat.dtype,
+            )
+            neutral_future_flat = torch.full_like(future_flat, 0.5)
+            anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
+            anchor_canvas = self._inject_time_channels(anchor_canvas)
+            if guidance_2d_flat is not None:
+                anchor_canvas = torch.cat([anchor_canvas, guidance_2d_flat], dim=1)
+            anchor_out_flat = self._predict_noise_chunked(
+                anchor_canvas,
+                anchor_t_flat,
+                base_cond_for_unet,
+                ctx_anchor,
+            )
+            anchor_x0_logits = anchor_out_flat[:, 0:1, :, :]
+            anchor_loss = self._binary_plain_bce_loss(anchor_x0_logits, future_flat)
+            lam = self.config.deterministic_anchor_lambda
+            combined_mse_loss = lam * regular_loss + (1.0 - lam) * anchor_loss
+
+        loss = combined_mse_loss
+        x0_pred = torch.sigmoid(x0_logits).reshape(B, V, H, W_fut)
 
         return {
             'loss': loss,
-            'noise_loss': loss,
+            'noise_loss': regular_loss,
+            'combined_mse_loss': combined_mse_loss,
+            'anchor_loss': anchor_loss,
             'loss_x0': loss_x0,
             'loss_zt': loss_zt,
             'emd_loss': torch.tensor(0.0, device=device),
             'guidance_loss': torch.tensor(0.0, device=device),
-            'noise_pred': torch.sigmoid(x0_logits).reshape(B, V, H, W_fut),
+            'noise_pred': x0_pred,
+            'x0_pred': x0_pred,
             't': t,
         }
 
@@ -1262,6 +1278,7 @@ class DiffusionTSF(nn.Module):
         num_steps: int = 20,
         verbose: bool = False,
         decoder_method: str = "mean",
+        sampler: str = "ddim",
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         """Binary reverse sampling from random bits to a clean hard CDF image."""
@@ -1320,13 +1337,24 @@ class DiffusionTSF(nn.Module):
                 )
             return out[:, 0:1], out[:, 1:2]
 
-        future_2d_flat = self.binary_scheduler.sample(
-            model_fn=_chunked_model_fn,
-            shape=(BV, 1, H, W_fut),
-            num_steps=num_steps,
-            device=device,
-            verbose=verbose,
-        )
+        if sampler in ("anchor", "deterministic_anchor"):
+            t_batch = torch.full(
+                (BV,),
+                self.config.binary_num_steps - 1,
+                device=device,
+                dtype=torch.long,
+            )
+            neutral_future_flat = torch.full((BV, 1, H, W_fut), 0.5, device=device)
+            x0_logits, _zt_logits = _chunked_model_fn(neutral_future_flat, t_batch)
+            future_2d_flat = (torch.sigmoid(x0_logits) > 0.5).float()
+        else:
+            future_2d_flat = self.binary_scheduler.sample(
+                model_fn=_chunked_model_fn,
+                shape=(BV, 1, H, W_fut),
+                num_steps=num_steps,
+                device=device,
+                verbose=verbose,
+            )
         future_2d = future_2d_flat.reshape(B, V, H, W_fut)
         future_norm = self.decode_from_2d(
             future_2d, from_diffusion=False, decoder_method=decoder_method, **kwargs

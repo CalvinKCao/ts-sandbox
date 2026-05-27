@@ -187,10 +187,6 @@ class DiffusionTSFConfig:
             raise ValueError(
                 f"prediction_mode must be 'epsilon' or 'x0_cumsum', got {self.prediction_mode!r}"
             )
-        if self.diffusion_type == "binary" and self.use_deterministic_anchor_loss:
-            raise ValueError(
-                "Binary diffusion and deterministic anchor loss cannot be used together."
-            )
         if self.diffusion_type == "binary" and self.prediction_mode == "x0_cumsum":
             raise ValueError("x0_cumsum prediction mode is only supported for gaussian diffusion.")
         if self.prediction_mode == "x0_cumsum" and self.representation_mode != "cdf":
