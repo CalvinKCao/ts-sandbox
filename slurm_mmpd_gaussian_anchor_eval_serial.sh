@@ -26,7 +26,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         CPUS=4
         JOB_NAME="mmpd-anchor-eval-smoke"
     else
-        [[ -z "$WALL" ]] && WALL="2-00:00:00"
+        [[ -z "$WALL" ]] && WALL="4:00:00"
         MEM="60G"
         CPUS=8
         JOB_NAME="mmpd-anchor-eval"

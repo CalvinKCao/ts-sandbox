@@ -85,8 +85,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   else
     DATASETS=(ETTh1 ETTh2 ETTm1 ETTm2 illness exchange_rate)
     WALL_INIT="0:30:00"
-    WALL_MMPD="2-00:00:00"
-    WALL_ANCHOR="0-16:00:00"
+    WALL_MMPD="4:00:00"
+    WALL_ANCHOR="4:00:00"
     WALL_MERGE="0:30:00"
     MEM="60G"
     CPUS=8
