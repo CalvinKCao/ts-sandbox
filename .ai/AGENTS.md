@@ -20,6 +20,8 @@ Run `git branch --show-current` to see what branch you're on. IF THE BRANCH HAS 
 For anything Slurm/Alliance Canada related, ALWAYS use the `/alliancecan` skill first.
 If `/alliancecan` does not resolve the question, check `wiki_docs/` for cluster-specific details.
 
+When giving **pull / prep / submit** commands for Killarney (or any cluster), follow the alliancecan skill: **one copy-pastable bash block**, with optional or alternate lines **commented out** (`#`), not split across prose.
+
 ## Git hygiene
 ALWAYS use the /git skill before using git operations.
 

@@ -63,6 +63,35 @@ Match **`b1`…`b5`** partition letter to **max wall time** allowed on that queu
 - **Never** instruct anyone to run `sed` that replaces a real account with a **placeholder** like `your-ccdb-group` or `YOURGROUP` — the job will fail. Either keep a real example account in the script or tell them to set the real name from CCDB / `sbatch`’s error list.
 - Optional: `export SLURM_ACCOUNT=aip-boyuwang` and `export SBATCH_ACCOUNT=$SLURM_ACCOUNT` in `~/.bashrc`, or override per job: `sbatch --account=aip-boyuwang script.sh`.
 
+## Agent instructions: pull / prep / submit command blocks
+
+When the user asks how to run a Slurm job on Alliance (especially Killarney), give **all login-node commands in a single fenced `bash` block** they can copy-paste in one shot.
+
+**Rules:**
+- **One block** for the full workflow (e.g. `cd`, `git pull`, one-time clones, `sbatch`, monitor). Do not scatter commands across paragraphs unless the user asked for explanation only.
+- **Comment out** lines that are not required for *this* request: other datasets, `--smoke-test`, `--skip-mmpd-train`, alternate scripts, optional walltime overrides, duplicate submit examples, etc. Use `#` at line start.
+- Leave **uncommented** only what the user needs for the job they named (script path, dataset(s), full vs smoke if they specified).
+- Assume repo root is **`$SCRATCH/ts-sandbox`** on Killarney unless they gave another path; never `cd $SCRATCH/$USER`.
+- If prep is one-time (e.g. `git clone` into `temp/MMPD`), include it in the same block above `sbatch`.
+
+**Example shape** (adapt paths/flags to the actual script):
+
+```bash
+cd "$SCRATCH/ts-sandbox"
+git pull
+
+# One-time prep (skip if already done)
+mkdir -p temp
+# git clone https://github.com/Thinklab-SJTU/MMPD.git temp/MMPD
+# sed -i 's/np\.Inf/np.inf/g' temp/MMPD/utils/tools.py
+
+# ./slurm_example.sh --smoke-test
+./slurm_example.sh
+
+# squeue -u "$USER"
+# tail -f results/logs/*example*.log
+```
+
 ## `$SCRATCH` and `$USER` (second common failure mode)
 
 On **Killarney**, `$SCRATCH` is typically **already** your user scratch directory (e.g. `/scratch/ccao87`). It is **not** `/scratch` with a missing `$USER` segment that you must add by hand.
