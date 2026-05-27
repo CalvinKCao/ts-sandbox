@@ -2408,7 +2408,9 @@ def evaluate_model(
         gen_kwargs = {'sampler': eval_sampler, 'num_inference_steps': 20}
 
     K = getattr(model.config, 'lookback_overlap', 0)
-    effective_n_samples = 1 if (smoke_test or gen_kwargs.get('sampler') == 'anchor') else n_samples
+    anchor_sampler = gen_kwargs.get('sampler') == 'anchor'
+    binary_anchor_sampler = anchor_sampler and getattr(model.config, 'diffusion_type', 'gaussian') == 'binary'
+    effective_n_samples = 1 if (smoke_test or (anchor_sampler and not binary_anchor_sampler)) else n_samples
     steps_for_log = gen_kwargs.get('num_inference_steps', 1 if gen_kwargs.get('sampler') == 'anchor' else 20)
     nfe_per_batch = 1 + effective_n_samples
     nfe_total = n_batches * nfe_per_batch * steps_for_log
@@ -2452,11 +2454,11 @@ def evaluate_model(
             result = model.generate(past, **gen_kwargs)
             all_preds_single.append(result['prediction'].cpu())
 
-            if smoke_test or gen_kwargs.get('sampler') == 'anchor':
+            if smoke_test or (anchor_sampler and not binary_anchor_sampler):
                 all_preds_avg.append(result['prediction'].cpu())
             else:
                 samples = []
-                for s_idx in range(n_samples):
+                for s_idx in range(effective_n_samples):
                     torch.manual_seed(1000 + s_idx * 17 + batch_idx)
                     result = model.generate(past, **gen_kwargs)
                     samples.append(result['prediction'].cpu())
@@ -3596,8 +3598,8 @@ def main():
                         help='Add deterministic anchor loss at alpha_bar closest to --deterministic-anchor-alpha')
     parser.add_argument('--deterministic-anchor-lambda', type=float, default=DETERMINISTIC_ANCHOR_LAMBDA,
                         help='Weight on standard diffusion MSE when anchor loss is enabled')
-    parser.add_argument('--deterministic-anchor-alpha', type=float, default=DETERMINISTIC_ANCHOR_ALPHA,
-                        help='Target alpha_bar for deterministic anchor timestep')
+    parser.add_argument('--deterministic-anchor-alpha', type=float, default=None,
+                        help='Target alpha_bar for Gaussian anchor; binary clean-bit anchor uses alpha=0')
     parser.add_argument('--eval-sampler', type=str, default=EVAL_SAMPLER,
                         choices=['dpmpp', 'ddim', 'ddpm', 'anchor', 'deterministic_anchor'],
                         help='Sampler used by diffusion eval')
@@ -3641,7 +3643,6 @@ def main():
     GUIDANCE_PENALTY_WEIGHT = args.guidance_penalty_weight
     DETERMINISTIC_ANCHOR_LOSS = args.deterministic_anchor_loss
     DETERMINISTIC_ANCHOR_LAMBDA = args.deterministic_anchor_lambda
-    DETERMINISTIC_ANCHOR_ALPHA = args.deterministic_anchor_alpha
     EVAL_SAMPLER = "anchor" if args.eval_sampler == "deterministic_anchor" else args.eval_sampler
     IMAGE_HEIGHT = args.image_height
     if args.unet_channels:
@@ -3656,8 +3657,20 @@ def main():
         PREDICTION_MODE = args.prediction_mode
     if args.binary_diffusion:
         DIFFUSION_TYPE = "binary"
+    if args.deterministic_anchor_alpha is None:
+        if DIFFUSION_TYPE == "binary" and DETERMINISTIC_ANCHOR_LOSS:
+            DETERMINISTIC_ANCHOR_ALPHA = 0.0
+    else:
+        DETERMINISTIC_ANCHOR_ALPHA = args.deterministic_anchor_alpha
     if DIFFUSION_TYPE == "binary" and PREDICTION_MODE == "x0_cumsum":
         parser.error("Cannot combine --binary-diffusion with --prediction-mode x0_cumsum.")
+    if DIFFUSION_TYPE == "binary" and DETERMINISTIC_ANCHOR_LOSS and DETERMINISTIC_ANCHOR_ALPHA != 0.0:
+        parser.error(
+            "Binary anchor is a max-noise Bernoulli clean-bit anchor; use "
+            "--deterministic-anchor-alpha 0.0 or omit the flag."
+        )
+    if DIFFUSION_TYPE != "binary" and DETERMINISTIC_ANCHOR_LOSS and not (0.0 < DETERMINISTIC_ANCHOR_ALPHA < 1.0):
+        parser.error("Gaussian deterministic anchor requires 0.0 < --deterministic-anchor-alpha < 1.0.")
     if PREDICTION_MODE == "x0_cumsum" and DETERMINISTIC_ANCHOR_LOSS:
         parser.error(
             "Cannot combine --prediction-mode x0_cumsum with --deterministic-anchor-loss."

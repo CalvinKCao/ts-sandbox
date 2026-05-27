@@ -1238,7 +1238,7 @@ class DiffusionTSF(nn.Module):
                 device=device,
                 dtype=t_flat.dtype,
             )
-            neutral_future_flat = torch.full_like(future_flat, 0.5)
+            neutral_future_flat = torch.bernoulli(torch.full_like(future_flat, 0.5))
             anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
             anchor_canvas = self._inject_time_channels(anchor_canvas)
             if guidance_2d_flat is not None:
@@ -1344,7 +1344,9 @@ class DiffusionTSF(nn.Module):
                 device=device,
                 dtype=torch.long,
             )
-            neutral_future_flat = torch.full((BV, 1, H, W_fut), 0.5, device=device)
+            neutral_future_flat = torch.bernoulli(
+                torch.full((BV, 1, H, W_fut), 0.5, device=device)
+            )
             x0_logits, _zt_logits = _chunked_model_fn(neutral_future_flat, t_batch)
             future_2d_flat = (torch.sigmoid(x0_logits) > 0.5).float()
         else:

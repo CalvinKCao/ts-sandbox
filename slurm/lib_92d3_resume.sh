@@ -26,6 +26,21 @@ resolve_92d3_run_dirs() {
             done
             echo "$best"
         }
+        _92d3_pick_resume_bundle_stem() {
+            local ckpt_marker="$1"
+            shift
+            local best="" best_mtime=0 d marker m
+            for d in "$@"; do
+                marker="${d}/ckpts/${ckpt_marker}"
+                [[ -f "$marker" ]] || continue
+                m=$(stat -c %Y "$marker" 2>/dev/null || echo 0)
+                if [[ "$m" -gt "$best_mtime" ]]; then
+                    best_mtime="$m"
+                    best="$(basename "$d")"
+                fi
+            done
+            echo "$best"
+        }
 
         if [[ "$layout" == "ckpts_flat" ]]; then
             shopt -s nullglob
@@ -39,22 +54,12 @@ resolve_92d3_run_dirs() {
             shopt -s nullglob
             local dirs=(./results/*-binary-92d3-"${dataset_lower}")
             shopt -u nullglob
-            local ckpt_dirs=()
-            for d in "${dirs[@]}"; do
-                ckpt_dirs+=("${d}/ckpts")
-            done
-            candidate="$(_92d3_pick_resume_stem diff_hp_best.pt "${ckpt_dirs[@]}")"
-            if [[ -n "$candidate" ]]; then
-                candidate="$(basename "$(dirname "$candidate")")"
-            fi
+            candidate="$(_92d3_pick_resume_bundle_stem diff_hp_best.pt "${dirs[@]}")"
             if [[ -z "$candidate" ]] && [[ "$dataset_lower" != "etth1" ]] && [[ "$dataset_lower" != "etth2" ]]; then
                 shopt -s nullglob
-                local any_dirs=(./results/*-binary-92d3-*/ckpts)
+                local any_dirs=(./results/*-binary-92d3-*)
                 shopt -u nullglob
-                candidate="$(_92d3_pick_resume_stem diff_hp_best.pt "${any_dirs[@]}")"
-                if [[ -n "$candidate" ]]; then
-                    candidate="$(basename "$(dirname "$candidate")")"
-                fi
+                candidate="$(_92d3_pick_resume_bundle_stem diff_hp_best.pt "${any_dirs[@]}")"
             fi
         fi
         if [[ -n "$candidate" ]]; then

@@ -24,7 +24,7 @@ VARS_TO_PLOT=3
 ENSEMBLE=3
 WALL="${WALL:-}"
 ANCHOR_LAMBDA="0.99"
-ANCHOR_ALPHA="0.5"
+ANCHOR_ALPHA="0.0"
 EVAL_SAMPLER="anchor"
 WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 
@@ -70,7 +70,9 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         CPUS=4
         JOB_NAME="bin-anchor-smoke"
     else
-        [[ -z "$WALL" ]] && WALL="1-00:00:00"
+        if [[ -z "$WALL" ]]; then
+            if [[ "$DATASET" == "electricity" ]]; then WALL="2-00:00:00"; else WALL="1-00:00:00"; fi
+        fi
         MEM="60G"
         CPUS=8
         JOB_NAME="bin-anchor-${DATASET,,}"

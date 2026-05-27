@@ -59,7 +59,7 @@ def build_model(
         binary_sample_steps=4,
         use_deterministic_anchor_loss=use_deterministic_anchor_loss,
         deterministic_anchor_lambda=0.9,
-        deterministic_anchor_alpha=0.5,
+        deterministic_anchor_alpha=0.0 if diffusion_type == "binary" else 0.5,
     )
 
     itrans = create_itransformer(seq_len=lookback, pred_len=forecast, num_vars=num_variables, dropout=0.0)

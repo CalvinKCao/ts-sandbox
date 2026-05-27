@@ -97,6 +97,47 @@ def infer_prediction_mode(ckpt: dict, override: Optional[str] = None) -> str:
     return 'epsilon'
 
 
+def infer_anchor_kwargs(ckpt: dict, metadata: Optional[dict] = None) -> dict:
+    cfg = ckpt.get('config')
+    meta_params = (metadata or {}).get('tuned_params', {})
+    if cfg is None:
+        if not meta_params:
+            return {}
+        return {
+            'use_deterministic_anchor_loss': (
+                'deterministic_anchor_lambda' in meta_params
+                or 'deterministic_anchor_alpha' in meta_params
+            ),
+            'deterministic_anchor_lambda': meta_params.get('deterministic_anchor_lambda', 0.99),
+            'deterministic_anchor_alpha': meta_params.get('deterministic_anchor_alpha', 0.5),
+        }
+    if isinstance(cfg, dict):
+        params = cfg.get('tuned_params', cfg)
+        has_anchor = (
+            cfg.get('use_deterministic_anchor_loss', False)
+            or 'deterministic_anchor_lambda' in params
+            or 'deterministic_anchor_alpha' in params
+            or 'deterministic_anchor_lambda' in meta_params
+            or 'deterministic_anchor_alpha' in meta_params
+        )
+        return {
+            'use_deterministic_anchor_loss': has_anchor,
+            'deterministic_anchor_lambda': params.get(
+                'deterministic_anchor_lambda',
+                meta_params.get('deterministic_anchor_lambda', 0.99),
+            ),
+            'deterministic_anchor_alpha': params.get(
+                'deterministic_anchor_alpha',
+                meta_params.get('deterministic_anchor_alpha', 0.5),
+            ),
+        }
+    return {
+        'use_deterministic_anchor_loss': getattr(cfg, 'use_deterministic_anchor_loss', False),
+        'deterministic_anchor_lambda': getattr(cfg, 'deterministic_anchor_lambda', 0.99),
+        'deterministic_anchor_alpha': getattr(cfg, 'deterministic_anchor_alpha', 0.5),
+    }
+
+
 def choose_extra_indices(n_test: int, n_extra: int, rng: random.Random, exclude: List[int]) -> List[int]:
     pool = [i for i in range(n_test) if i not in exclude]
     if not pool or n_extra <= 0:
@@ -149,6 +190,7 @@ def run_comparison(
                 'variate_indices': meta['variate_indices'],
                 'variate_names': meta.get('variate_names', []),
                 'best_pt': str(best_path),
+                'metadata': meta,
             })
 
     if not by_dataset:
@@ -232,11 +274,13 @@ def run_comparison(
         print(f"  diffusion_type={diff_type} model_type={backbone} prediction_mode={pred_mode}")
 
         # Load fine-tuned diffusion with same guidance wrapper as training
+        anchor_kwargs = infer_anchor_kwargs(diff_ckpt, sub.get('metadata'))
         diff_model = create_diffusion_model(
             n_variates=n_vars,
             diffusion_type=diff_type,
             model_type=backbone,
             prediction_mode=pred_mode,
+            **anchor_kwargs,
         ).to(device)
         itrans_guidance = iTransformerGuidance(itrans_model)
         diff_model.set_guidance_model(itrans_guidance)

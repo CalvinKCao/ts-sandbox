@@ -56,7 +56,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$N_VARIATES" ]]; then
-    if [[ "$DATASET" == "exchange_rate" ]]; then N_VARIATES=8
+    if [[ "$DATASET" == "electricity" ]]; then N_VARIATES=321
+    elif [[ "$DATASET" == "exchange_rate" ]]; then N_VARIATES=8
     elif [[ "$DATASET" == "weather" ]]; then N_VARIATES=21
     else N_VARIATES=7
     fi
@@ -69,7 +70,9 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         CPUS=4
         JOB_NAME="gauss-anchor-smoke"
     else
-        [[ -z "$WALL" ]] && WALL="1-00:00:00"
+        if [[ -z "$WALL" ]]; then
+            if [[ "$DATASET" == "electricity" ]]; then WALL="2-00:00:00"; else WALL="1-00:00:00"; fi
+        fi
         MEM="60G"
         CPUS=8
         JOB_NAME="gauss-anchor-${DATASET,,}"
