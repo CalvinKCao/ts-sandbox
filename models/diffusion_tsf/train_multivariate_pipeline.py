@@ -2452,16 +2452,16 @@ def evaluate_model(
 
             torch.manual_seed(42 + batch_idx)
             result = model.generate(past, **gen_kwargs)
-            all_preds_single.append(result['prediction'].cpu())
+            all_preds_single.append(result.get('prediction_global_norm', result['prediction']).cpu())
 
             if smoke_test or (anchor_sampler and not binary_anchor_sampler):
-                all_preds_avg.append(result['prediction'].cpu())
+                all_preds_avg.append(result.get('prediction_global_norm', result['prediction']).cpu())
             else:
                 samples = []
                 for s_idx in range(effective_n_samples):
                     torch.manual_seed(1000 + s_idx * 17 + batch_idx)
                     result = model.generate(past, **gen_kwargs)
-                    samples.append(result['prediction'].cpu())
+                    samples.append(result.get('prediction_global_norm', result['prediction']).cpu())
                 all_preds_avg.append(torch.stack(samples).mean(dim=0))
 
             if K > 0:
@@ -2508,7 +2508,8 @@ def evaluate_model(
     preds_avg = torch.cat(all_preds_avg, dim=0)
     targets = torch.cat(all_targets, dim=0)
     
-    # Compute metrics
+    # Compute metrics in the dataset's global z-scored space. Diffusion generate()
+    # returns prediction_global_norm after undoing only the per-window model norm.
     def compute_metrics(pred, target):
         mse = torch.nn.functional.mse_loss(pred, target).item()
         mae = torch.nn.functional.l1_loss(pred, target).item()
@@ -3785,7 +3786,12 @@ def main():
         if os.path.exists(MANIFEST_PATH):
             os.remove(MANIFEST_PATH)
             logger.info(f"Removed old manifest: {MANIFEST_PATH}")
-        for ckpt_file in ['pretrained_itransformer.pt', 'pretrained_diffusion.pt']:
+        for ckpt_file in [
+            'itrans_hp_best.pt',
+            'diff_hp_best.pt',
+            'pretrained_itransformer.pt',
+            'pretrained_diffusion.pt',
+        ]:
             p = os.path.join(CHECKPOINT_DIR, ckpt_file)
             if os.path.exists(p):
                 os.remove(p)

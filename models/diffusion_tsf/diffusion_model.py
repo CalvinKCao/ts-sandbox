@@ -1112,6 +1112,7 @@ class DiffusionTSF(nn.Module):
 
         result = {
             'prediction': future, 'prediction_norm': future_norm,
+            'prediction_global_norm': future,
             'future_2d': future_2d, 'past_2d': past_2d,
         }
         if guidance_2d is not None:
@@ -1371,6 +1372,7 @@ class DiffusionTSF(nn.Module):
         result = {
             'prediction': future,
             'prediction_norm': future_norm,
+            'prediction_global_norm': future,
             'future_2d': future_2d,
             'past_2d': past_2d,
         }

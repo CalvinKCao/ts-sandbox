@@ -319,13 +319,19 @@ def run_comparison(
 
                 # Diffusion prediction (single or averaged)
                 if diffusion_ensemble <= 1:
+                    torch.manual_seed(42 + idx)
                     result = diff_model.generate(past_t, sampler=diffusion_sampler)
-                    diff_pred = result['prediction'].cpu()[0]  # (C, F)
+                    diff_pred = result.get(
+                        'prediction_global_norm', result['prediction']
+                    ).cpu()[0]  # (C, F)
                 else:
                     diff_preds = []
-                    for _ in range(diffusion_ensemble):
+                    for s_idx in range(diffusion_ensemble):
+                        torch.manual_seed(1000 + s_idx * 17 + idx)
                         result = diff_model.generate(past_t, sampler=diffusion_sampler)
-                        diff_preds.append(result['prediction'].cpu())
+                        diff_preds.append(
+                            result.get('prediction_global_norm', result['prediction']).cpu()
+                        )
                     diff_pred = torch.stack(diff_preds).mean(0)[0]  # (C, F)
 
             # Denormalize everything to original scale
