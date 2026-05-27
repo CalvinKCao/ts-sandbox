@@ -35,6 +35,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from models.diffusion_tsf.storage_paths import checkpoint_roots_ordered
+import models.diffusion_tsf.train_multivariate_pipeline as train_pipeline
 from models.diffusion_tsf.train_multivariate_pipeline import (
     RESULTS_DIR,
     LOOKBACK_LENGTH, FORECAST_LENGTH, LOOKBACK_OVERLAP,
@@ -42,6 +43,7 @@ from models.diffusion_tsf.train_multivariate_pipeline import (
     pretrain_dir_for_dim,
     load_itransformer_from_checkpoint,
 )
+from models.diffusion_tsf.pipeline_config import IMAGE_HEIGHT as DEFAULT_IMAGE_HEIGHT
 from models.diffusion_tsf.guidance import iTransformerGuidance
 
 
@@ -84,6 +86,42 @@ def infer_model_type(ckpt: dict, override: Optional[str] = None) -> str:
         if 'noise_predictor.down_blocks.' in key:
             return 'unet'
     return 'unet'
+
+
+def infer_image_height(ckpt: dict, override: Optional[int] = None) -> int:
+    if override is not None:
+        return int(override)
+    cfg = ckpt.get('config')
+    if hasattr(cfg, 'image_height'):
+        return int(cfg.image_height)
+    if isinstance(cfg, dict) and cfg.get('image_height') is not None:
+        return int(cfg['image_height'])
+    bin_centers = ckpt.get('model_state_dict', {}).get('to_2d.bin_centers')
+    if bin_centers is not None:
+        return int(bin_centers.shape[0])
+    return DEFAULT_IMAGE_HEIGHT
+
+
+def apply_checkpoint_architecture(ckpt: dict, diffusion_type: str, image_height: Optional[int] = None) -> int:
+    """Match train_multivariate_pipeline globals to checkpoint (DiT + binary height)."""
+    height = infer_image_height(ckpt, image_height)
+    train_pipeline.IMAGE_HEIGHT = height
+    cfg = ckpt.get('config')
+    if hasattr(cfg, 'disable_cross_attention'):
+        train_pipeline.DISABLE_CROSS_ATTENTION = bool(cfg.disable_cross_attention)
+    elif isinstance(cfg, dict) and 'disable_cross_attention' in cfg:
+        train_pipeline.DISABLE_CROSS_ATTENTION = bool(cfg['disable_cross_attention'])
+    state = ckpt.get('model_state_dict', {})
+    head_weight = state.get('noise_predictor.head.weight')
+    if head_weight is not None:
+        out_features, embed_dim = map(int, head_weight.shape[:2])
+        train_pipeline.DIT_EMBED_DIM = embed_dim
+        out_channels = 2 if diffusion_type == 'binary' else 1
+        patch_area = out_features // out_channels
+        patch_side = int(round(patch_area ** 0.5))
+        if patch_side * patch_side == patch_area:
+            train_pipeline.DIT_PATCH_SIZE = (patch_side, patch_side)
+    return height
 
 
 def infer_prediction_mode(ckpt: dict, override: Optional[str] = None) -> str:
@@ -160,6 +198,7 @@ def run_comparison(
     prediction_mode: Optional[str] = None,
     diffusion_sampler: str = "ddim",
     random_seed: int = 13,
+    image_height: Optional[int] = None,
 ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
@@ -271,7 +310,11 @@ def run_comparison(
         diff_type = infer_diffusion_type(diff_ckpt, diffusion_type)
         backbone = infer_model_type(diff_ckpt, model_type)
         pred_mode = infer_prediction_mode(diff_ckpt, prediction_mode)
-        print(f"  diffusion_type={diff_type} model_type={backbone} prediction_mode={pred_mode}")
+        applied_h = apply_checkpoint_architecture(diff_ckpt, diff_type, image_height)
+        print(
+            f"  diffusion_type={diff_type} model_type={backbone} "
+            f"prediction_mode={pred_mode} image_height={applied_h}"
+        )
 
         # Load fine-tuned diffusion with same guidance wrapper as training
         anchor_kwargs = infer_anchor_kwargs(diff_ckpt, sub.get('metadata'))
@@ -456,6 +499,10 @@ def main():
                         choices=['ddim', 'dpmpp', 'anchor', 'deterministic_anchor'],
                         help='Sampler for diffusion plots')
     parser.add_argument('--random-seed', type=int, default=13)
+    parser.add_argument(
+        '--image-height', type=int, default=None,
+        help='Override 2D representation height (default: read from checkpoint)',
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir or os.path.join(RESULTS_DIR, 'viz', 'comparison')
@@ -469,6 +516,7 @@ def main():
         prediction_mode=args.prediction_mode,
         diffusion_sampler='anchor' if args.diffusion_sampler == 'deterministic_anchor' else args.diffusion_sampler,
         random_seed=args.random_seed,
+        image_height=args.image_height,
     )
 
 

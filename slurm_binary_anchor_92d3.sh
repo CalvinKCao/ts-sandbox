@@ -220,17 +220,22 @@ python -u -m models.diffusion_tsf.train_multivariate_pipeline "${TRAIN_ARGS[@]}"
 
 if [[ "$VIZ_WHEELS_OK" -eq 1 ]] || python -c "import matplotlib" 2>/dev/null; then
     echo "[viz] Rendering comparison..."
-    python -u -m models.diffusion_tsf.visualize_comparison \
-        --checkpoint-dir "$CKPT_DIR" \
-        --output-dir "$DATA_DIR" \
-        --dataset "$DATASET" \
-        --num-samples 3 \
-        --vars "$VARS_TO_PLOT" \
-        --ensemble "$ENSEMBLE" \
-        --num-extra-windows 2 \
-        --diffusion-type binary \
-        --model-type dit \
+    VIZ_ARGS=(
+        --checkpoint-dir "$CKPT_DIR"
+        --output-dir "$DATA_DIR"
+        --dataset "$DATASET"
+        --num-samples 3
+        --vars "$VARS_TO_PLOT"
+        --ensemble "$ENSEMBLE"
+        --num-extra-windows 2
+        --diffusion-type binary
+        --model-type dit
         --diffusion-sampler "$EVAL_SAMPLER"
+    )
+    [[ -n "$IMAGE_HEIGHT" ]] && VIZ_ARGS+=(--image-height "$IMAGE_HEIGHT")
+    if ! python -u -m models.diffusion_tsf.visualize_comparison "${VIZ_ARGS[@]}"; then
+        echo "[viz] WARNING: comparison plot failed; checkpoints in $CKPT_DIR are still valid."
+    fi
 else
     echo "[viz] Skipped (matplotlib unavailable after wheel install retries)."
 fi
