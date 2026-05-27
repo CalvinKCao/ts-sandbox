@@ -83,6 +83,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
       --anchor-batch-size 4
     )
   else
+    # Full matrix: no electricity (321 variates; separate training/eval path).
     DATASETS=(ETTh1 ETTh2 ETTm1 ETTm2 illness exchange_rate)
     WALL_INIT="0:30:00"
     WALL_MMPD="4:00:00"
@@ -104,10 +105,20 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
       --texture-per-sample
     )
   fi
+  if [[ -n "${MATRIX_DATASETS:-}" ]]; then
+    read -r -a DATASETS <<< "${MATRIX_DATASETS}"
+  fi
 
-  RUN_STEM="$(date +%m-%d)-$$-mmpd-anchor-matrix${SMOKE_SUFFIX}"
-  OUTPUT_DIR="$REPO/results/datasets/${RUN_STEM}"
-  LOG_DIR="$REPO/results/logs/${RUN_STEM}"
+  if [[ -n "${MATRIX_OUTPUT_DIR:-}" ]]; then
+    OUTPUT_DIR="$MATRIX_OUTPUT_DIR"
+    [[ "$OUTPUT_DIR" != /* ]] && OUTPUT_DIR="$REPO/$OUTPUT_DIR"
+    RUN_STEM="$(basename "$OUTPUT_DIR")"
+    LOG_DIR="$REPO/results/logs/${RUN_STEM}"
+  else
+    RUN_STEM="$(date +%m-%d)-$$-mmpd-anchor-matrix${SMOKE_SUFFIX}"
+    OUTPUT_DIR="$REPO/results/datasets/${RUN_STEM}"
+    LOG_DIR="$REPO/results/logs/${RUN_STEM}"
+  fi
   mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
   PREAMBLE_FILE="$REPO/results/job_preamble_mmpd_anchor_eval.sh"
@@ -169,6 +180,18 @@ PREAMBLE
   )
   if [[ "$SKIP_MMPD_TRAIN" -eq 1 ]]; then
     EVAL_BASE+=(--skip-mmpd-train)
+  fi
+  if [[ -n "${MMPD_REUSE_DIR:-}" ]]; then
+    _reuse="$MMPD_REUSE_DIR"
+    [[ "$_reuse" != /* ]] && _reuse="$REPO/$_reuse"
+    EVAL_BASE+=(--indices-dir "$_reuse" --mmpd-output-root "$_reuse")
+  fi
+  if [[ -n "${BINARY_ANCHOR_ROOTS:-}" ]]; then
+    for _br in ${BINARY_ANCHOR_ROOTS}; do
+      _br_abs="$_br"
+      [[ "$_br_abs" != /* ]] && _br_abs="$REPO/$_br_abs"
+      EVAL_BASE+=(--binary-anchor-root "$_br_abs")
+    done
   fi
 
   echo "Repo:       $REPO"

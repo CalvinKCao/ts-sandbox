@@ -26,6 +26,7 @@ WALL="${WALL:-}"
 ANCHOR_LAMBDA="0.99"
 ANCHOR_ALPHA="0.0"
 EVAL_SAMPLER="anchor"
+IMAGE_HEIGHT=""
 WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 
 while [[ $# -gt 0 ]]; do
@@ -51,6 +52,7 @@ while [[ $# -gt 0 ]]; do
         --anchor-alpha) ANCHOR_ALPHA="$2"; shift 2 ;;
         --eval-sampler) EVAL_SAMPLER="$2"; shift 2 ;;
         --wandb-project) WANDB_PROJECT="$2"; shift 2 ;;
+        --image-height) IMAGE_HEIGHT="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -100,6 +102,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         $([[ "$FRESH" -eq 1 ]] && echo --fresh) \
         $([[ "$RESUME" -eq 1 ]] && echo --resume) \
         $([[ -n "$RUN_STEM" ]] && echo --run-stem "$RUN_STEM") \
+        $([[ -n "$IMAGE_HEIGHT" ]] && echo --image-height "$IMAGE_HEIGHT") \
         $([[ "$SMOKE" -eq 1 ]] && echo --smoke-test) \
         --wandb-project "$WANDB_PROJECT"
     exit 0
@@ -121,7 +124,11 @@ fi
 # shellcheck source=slurm/lib_92d3_resume.sh
 source "$SCRIPT_DIR/slurm/lib_92d3_resume.sh"
 mkdir -p ./results/logs ./results/ckpts ./results/datasets
-resolve_92d3_run_dirs ckpts_flat "binary-anchor-${DATASET,,}" "${DATASET,,}" 4
+ANCHOR_SLUG="binary-anchor-${DATASET,,}"
+if [[ -n "$IMAGE_HEIGHT" ]]; then
+    ANCHOR_SLUG="binary-anchor-h${IMAGE_HEIGHT}-${DATASET,,}"
+fi
+resolve_92d3_run_dirs ckpts_flat "$ANCHOR_SLUG" "${DATASET,,}" 4
 mkdir -p "$(dirname "$LOG_FILE")" "$CKPT_DIR" "$DATA_DIR"
 exec >>"$LOG_FILE" 2>&1
 
@@ -195,6 +202,9 @@ elif [[ "$RESUME" -eq 1 ]]; then
 fi
 if [[ "$SMOKE" -eq 1 ]]; then
     TRAIN_ARGS+=(--smoke-test)
+fi
+if [[ -n "$IMAGE_HEIGHT" ]]; then
+    TRAIN_ARGS+=(--image-height "$IMAGE_HEIGHT")
 fi
 if [[ -n "${WANDB_API_KEY:-}" ]] && [[ "$WANDB_API_KEY" =~ ^[A-Za-z0-9_]+$ ]]; then
     TRAIN_ARGS+=(--wandb --wandb-project "$WANDB_PROJECT")
