@@ -170,33 +170,40 @@ anchor_partial_exists() {
 }
 
 submit_worker() {
-    local job_name="$1" wall="$2" dep="${3:-}" phase="$4" dataset="${5:-}" variant="${6:-}"
+  # Do not use bash variable name "phase" — conflicts with Lmod/modules on Alliance nodes.
+    local job_name="$1" wall="$2" dep="${3:-}" run_phase="$4" dataset="${5:-}" variant="${6:-}"
     local sbatch_dep=()
     [[ -n "$dep" ]] && sbatch_dep=(--dependency="$dep")
 
-    local gauss_args=() bin_args=()
+    local root_args=""
     if [[ -n "$dataset" ]]; then
         local gr="${GAUSS_ROOT[$dataset]:-}"
         local br="${BIN_ROOT[$dataset]:-}"
-        [[ -n "$gr" && -d "$REPO/results/ckpts/$gr" ]] && gauss_args=(--anchor-root "$REPO/results/ckpts/$gr")
-        [[ -n "$br" && -d "$REPO/results/ckpts/$br" ]] && bin_args=(--binary-anchor-root "$REPO/results/ckpts/$br")
+        [[ -n "$gr" && -d "$REPO/results/ckpts/$gr" ]] && root_args+=" --anchor-root $REPO/results/ckpts/$gr"
+        [[ -n "$br" && -d "$REPO/results/ckpts/$br" ]] && root_args+=" --binary-anchor-root $REPO/results/ckpts/$br"
     else
+        local ds gr br
         for ds in "${DATASETS[@]}"; do
             gr="${GAUSS_ROOT[$ds]:-}"
             br="${BIN_ROOT[$ds]:-}"
-            [[ -n "$gr" && -d "$REPO/results/ckpts/$gr" ]] && gauss_args+=(--anchor-root "$REPO/results/ckpts/$gr")
-            [[ -n "$br" && -d "$REPO/results/ckpts/$br" ]] && bin_args+=(--binary-anchor-root "$REPO/results/ckpts/$br")
+            [[ -n "$gr" && -d "$REPO/results/ckpts/$gr" ]] && root_args+=" --anchor-root $REPO/results/ckpts/$gr"
+            [[ -n "$br" && -d "$REPO/results/ckpts/$br" ]] && root_args+=" --binary-anchor-root $REPO/results/ckpts/$br"
         done
     fi
 
-    local phase_args=(--phase "$phase")
-    local dataset_args=()
-  [[ -n "$dataset" ]] && dataset_args=(--datasets "$dataset")
-
-    local variant_args=()
-    if [[ "$phase" == "anchor" && -n "$variant" ]]; then
-        variant_args=(--anchor-variant "$variant")
+    local dataset_flag=""
+    if [[ -n "$dataset" ]]; then
+        dataset_flag="--datasets $dataset"
+    else
+        dataset_flag="--datasets ${DATASETS[*]}"
     fi
+
+    local variant_flag=""
+    if [[ "$run_phase" == "anchor" && -n "$variant" ]]; then
+        variant_flag="--anchor-variant $variant"
+    fi
+
+    local extra_py="${EXTRA_PY[*]}"
 
     sbatch --parsable \
         --job-name="$job_name" \
@@ -213,25 +220,25 @@ submit_worker() {
         "${sbatch_dep[@]}" \
         <<EOF
 #!/bin/bash
+set -euo pipefail
 source "$PREAMBLE_FILE"
 cd "$REPO"
-python -u utils/eval_mmpd_gaussian_anchor.py \
-    --output-dir "$MATRIX_OUT" \
-    --mmpd-output-root "$MMPD_SHARED/mmpd_out" \
-    --mmpd-raw-dir "$MMPD_SHARED/raw" \
-    --mmpd-raw-fallback "$MMPD_SHARED/raw" \
-    --reuse-anchor-raw-from "$MMPD_SHARED/raw" \
-    --ckpt-base "$REPO/results/ckpts" \
-    --mmpd-repo "$REPO/temp/MMPD" \
-    --mmpd-data-dir "$REPO/temp/mmpd_datasets" \
-    --seed "$SEED" \
-    --no-update-mmpd \
-    "${phase_args[@]}" \
-    "${dataset_args[@]}" \
-    "${variant_args[@]}" \
-    "${gauss_args[@]}" \
-    "${bin_args[@]}" \
-    "${EXTRA_PY[@]}"
+python -u utils/eval_mmpd_gaussian_anchor.py \\
+    --output-dir "$MATRIX_OUT" \\
+    --mmpd-output-root "$MMPD_SHARED/mmpd_out" \\
+    --mmpd-raw-dir "$MMPD_SHARED/raw" \\
+    --mmpd-raw-fallback "$MMPD_SHARED/raw" \\
+    --reuse-anchor-raw-from "$MMPD_SHARED/raw" \\
+    --ckpt-base "$REPO/results/ckpts" \\
+    --mmpd-repo "$REPO/temp/MMPD" \\
+    --mmpd-data-dir "$REPO/temp/mmpd_datasets" \\
+    --seed "$SEED" \\
+    --no-update-mmpd \\
+    --phase $run_phase \\
+    $dataset_flag \\
+    $variant_flag \\
+    $root_args \\
+    $extra_py
 echo "Done: \$(date)"
 EOF
 }

@@ -742,12 +742,12 @@ def load_tsf_test_subset(
     return Subset(test_ds, list(indices))
 
 
-def anchor_prob_sample_kwargs(model: Any, args: argparse.Namespace) -> Dict[str, Any]:
-    """Match training eval: binary+anchor uses one-step anchor; Gaussian uses DPM++."""
-    if getattr(model.config, "diffusion_type", None) == "binary":
-        return {"sampler": "anchor"}
+def anchor_prob_sample_kwargs(_model: Any, args: argparse.Namespace) -> Dict[str, Any]:
+    """Same probabilistic protocol for Gaussian and binary anchor checkpoints."""
     kwargs: Dict[str, Any] = {"sampler": args.anchor_prob_sampler}
-    if args.anchor_prob_sampler != "ddpm":
+    if args.anchor_prob_sampler == "ddpm":
+        kwargs["use_ddim"] = False
+    elif args.anchor_prob_sampler != "anchor":
         kwargs["num_inference_steps"] = args.num_sampling_steps
     return kwargs
 
@@ -777,12 +777,8 @@ def evaluate_anchor(
     det: List[np.ndarray] = []
     samples: List[np.ndarray] = []
     sample_kwargs = anchor_prob_sample_kwargs(model, args)
-    if getattr(model.config, "diffusion_type", None) == "binary":
-        n_draws = args.sample_num
-    elif sample_kwargs.get("sampler") == "anchor":
-        n_draws = 1
-    else:
-        n_draws = args.sample_num
+    # Identical ensemble size for both arms (default: 100 × DPM++ with num_sampling_steps).
+    n_draws = args.sample_num
 
     with torch.no_grad():
         for batch_idx, (past, future) in enumerate(loader):
@@ -793,6 +789,7 @@ def evaluate_anchor(
                 future = future[..., K:]
             y_true.append(future.cpu().numpy())
 
+            # Reported mse/mae use this anchor decode (not DPM++ / top-k modes).
             anchor = model.generate(past, sampler="anchor")["prediction"]
             det.append(anchor.cpu().numpy())
 
@@ -1240,7 +1237,11 @@ def parse_args() -> argparse.Namespace:
         default="all",
         help="Run one stage (for parallel Slurm) or the full pipeline.",
     )
-    parser.add_argument("--datasets", nargs="+", default=["ETTh1", "ETTh2", "exchange_rate"])
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=["ETTh1", "ETTh2", "ETTm1", "ETTm2", "exchange_rate", "illness"],
+    )
     parser.add_argument(
         "--anchor-variants",
         nargs="+",
