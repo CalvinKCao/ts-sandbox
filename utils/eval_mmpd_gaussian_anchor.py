@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""MMPD vs ts-sandbox anchor evaluation (Gaussian and binary+anchor).
+"""One-off MMPD vs binary/Gaussian-anchor evaluation.
 
-Trains upstream MMPD per dataset on a shared random test subset. Metrics:
-
-- **MMPD:** deterministic + probabilistic (CRPS, top-k via in-loop GMM modes).
-- **Anchor (Gaussian / binary):** deterministic anchor decode only (MSE/MAE).
-
-Supports phased Slurm fan-out and shared MMPD caches from prior runs.
+The script keeps the upstream MMPD checkout and generated artifacts in ignored
+scratch/output folders. It trains upstream MMPD on the same datasets as the
+latest Gaussian-anchor checkpoints, then evaluates both models on a shared
+random subset of the test windows.
 """
 
 from __future__ import annotations
@@ -37,48 +35,43 @@ DEFAULT_MMPD_DATA = REPO_ROOT / "temp" / "mmpd_datasets"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results" / "mmpd_anchor_eval"
 MMPD_URL = "https://github.com/Thinklab-SJTU/MMPD.git"
 
-_ETTM_TRAIN = 12 * 30 * 24 * 4
-_ETTM_VAL = 4 * 30 * 24 * 4
-_ETTM_TEST = 4 * 30 * 24 * 4
-
 DATASET_FILES = {
     "ETTh1": REPO_ROOT / "datasets" / "ETT-small" / "ETTh1.csv",
     "ETTh2": REPO_ROOT / "datasets" / "ETT-small" / "ETTh2.csv",
     "ETTm1": REPO_ROOT / "datasets" / "ETT-small" / "ETTm1.csv",
     "ETTm2": REPO_ROOT / "datasets" / "ETT-small" / "ETTm2.csv",
-    "exchange_rate": REPO_ROOT / "datasets" / "exchange_rate" / "exchange_rate.csv",
     "illness": REPO_ROOT / "datasets" / "illness" / "national_illness.csv",
+    "exchange_rate": REPO_ROOT / "datasets" / "exchange_rate" / "exchange_rate.csv",
+    "weather": REPO_ROOT / "datasets" / "weather" / "weather.csv",
 }
 DATASET_DIMS = {
     "ETTh1": 7,
     "ETTh2": 7,
     "ETTm1": 7,
     "ETTm2": 7,
-    "exchange_rate": 8,
     "illness": 7,
+    "exchange_rate": 8,
+    "weather": 21,
 }
 DATASET_SPLITS = {
     "ETTh1": "8640,2880,2880",
     "ETTh2": "8640,2880,2880",
-    "ETTm1": f"{_ETTM_TRAIN},{_ETTM_VAL},{_ETTM_TEST}",
-    "ETTm2": f"{_ETTM_TRAIN},{_ETTM_VAL},{_ETTM_TEST}",
-    "exchange_rate": "0.7,0.1,0.2",
+    "ETTm1": "34560,11520,11520",
+    "ETTm2": "34560,11520,11520",
     "illness": "0.7,0.1,0.2",
+    "exchange_rate": "0.7,0.1,0.2",
+    "weather": "0.7,0.1,0.2",
 }
-
-ANCHOR_VARIANTS = ("gaussian", "binary")
-ANCHOR_CKPT_GLOBS = {
-    "gaussian": ("*gauss-anchor*", "*gaussian-anchor*"),
-    "binary": ("*binary-anchor*",),
-}
-MODEL_KEYS = {
-    "gaussian": "gaussian_anchor",
-    "binary": "binary_anchor",
+DEFAULT_DATASETS = ["ETTh1", "ETTh2", "ETTm1", "ETTm2", "illness", "exchange_rate", "weather"]
+ANCHOR_VARIANTS = {
+    "gaussian": {"slug": "gauss-anchor", "model_name": "gaussian_anchor"},
+    "binary": {"slug": "binary-anchor", "model_name": "binary_anchor"},
 }
 
 
 @dataclass
 class AnchorRun:
+    variant: str
     dataset: str
     root: Path
     subset_dir: Path
@@ -167,26 +160,23 @@ def stage_mmpd_datasets(data_dir: Path, datasets: Sequence[str]) -> None:
             shutil.copy2(src, dst)
 
 
-def discover_anchor_roots(
-    variant: str,
-    explicit_roots: Sequence[Path],
-    ckpt_base: Path,
-) -> List[Path]:
-    if explicit_roots:
-        return [p.resolve() for p in explicit_roots]
-    roots: List[Path] = []
-    for pattern in ANCHOR_CKPT_GLOBS[variant]:
-        roots.extend(p for p in ckpt_base.glob(pattern) if p.is_dir())
-    return sorted(roots, key=lambda p: p.stat().st_mtime, reverse=True)
-
-
 def find_anchor_runs(
     datasets: Sequence[str],
     explicit_roots: Sequence[Path],
     ckpt_base: Path,
-    variant: str = "gaussian",
+    variant: str,
 ) -> Dict[str, AnchorRun]:
-    roots = discover_anchor_roots(variant, explicit_roots, ckpt_base)
+    slug = ANCHOR_VARIANTS[variant]["slug"]
+    roots: List[Path]
+    if explicit_roots:
+        roots = [p.resolve() for p in explicit_roots]
+    else:
+        roots = sorted(
+            [p for p in ckpt_base.glob(f"*{slug}*") if p.is_dir()],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
     found: Dict[str, AnchorRun] = {}
     for root in roots:
         for meta_path in root.glob("*/metadata.json"):
@@ -201,6 +191,7 @@ def find_anchor_runs(
             itrans_pt = root / f"{subset_id}_itransformer_finetuned.pt"
             if best_pt.exists() and itrans_pt.exists():
                 found[dataset] = AnchorRun(
+                    variant=variant,
                     dataset=dataset,
                     root=root,
                     subset_dir=subset_dir,
@@ -213,97 +204,9 @@ def find_anchor_runs(
         raise RuntimeError(
             f"Could not find completed {variant} anchor runs for: "
             + ", ".join(missing)
-            + f" under {ckpt_base} (explicit roots: {len(explicit_roots)})"
+            + f" under {ckpt_base}"
         )
     return found
-
-
-def resolve_storage_paths(args: argparse.Namespace) -> None:
-    if args.mmpd_output_root is None:
-        args.mmpd_output_root = args.output_dir / "mmpd_out"
-    else:
-        args.mmpd_output_root = args.mmpd_output_root.resolve()
-    if args.mmpd_raw_dir is None:
-        args.mmpd_raw_dir = args.output_dir / "raw"
-    else:
-        args.mmpd_raw_dir = args.mmpd_raw_dir.resolve()
-    if args.reuse_anchor_raw_from is not None:
-        args.reuse_anchor_raw_from = args.reuse_anchor_raw_from.resolve()
-    if args.mmpd_raw_fallback is not None:
-        args.mmpd_raw_fallback = args.mmpd_raw_fallback.resolve()
-
-
-def mmpd_raw_path(args: argparse.Namespace, dataset: str) -> Path:
-    return args.mmpd_raw_dir / f"mmpd_{dataset}.npz"
-
-
-def resolve_mmpd_raw_read_path(args: argparse.Namespace, dataset: str) -> Path:
-    primary = mmpd_raw_path(args, dataset)
-    if primary.exists():
-        return primary
-    if args.mmpd_raw_fallback is not None:
-        fallback = args.mmpd_raw_fallback / f"mmpd_{dataset}.npz"
-        if fallback.exists():
-            return fallback
-    return primary
-
-
-def indices_path(args: argparse.Namespace, dataset: str) -> Path:
-    return args.mmpd_raw_dir / f"indices_{dataset}.json"
-
-
-def anchor_raw_path(
-    args: argparse.Namespace,
-    variant: str,
-    dataset: str,
-) -> Path:
-    primary = args.mmpd_raw_dir / f"anchor_{variant}_{dataset}.npz"
-    if primary.exists():
-        return primary
-    if variant != "gaussian":
-        return primary
-    legacy = args.mmpd_raw_dir / f"anchor_{dataset}.npz"
-    if legacy.exists():
-        return legacy
-    if args.reuse_anchor_raw_from is not None:
-        for name in (f"anchor_{variant}_{dataset}.npz", f"anchor_{dataset}.npz"):
-            candidate = args.reuse_anchor_raw_from / name
-            if candidate.exists():
-                return candidate
-    return primary
-
-
-def partial_metrics_path(args: argparse.Namespace, dataset: str, model_key: str) -> Path:
-    return args.output_dir / "metrics_partial" / f"{dataset}__{model_key}.json"
-
-
-def write_partial_metrics(
-    args: argparse.Namespace,
-    dataset: str,
-    model_key: str,
-    metrics: Dict[str, float],
-) -> None:
-    path = partial_metrics_path(args, dataset, model_key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2, sort_keys=True)
-    print(f"[partial] {path}")
-
-
-def load_partial_metrics(args: argparse.Namespace) -> Dict[str, Dict[str, Dict[str, float]]]:
-    results: Dict[str, Dict[str, Dict[str, float]]] = {}
-    partial_dir = args.output_dir / "metrics_partial"
-    if not partial_dir.exists():
-        return results
-    for path in sorted(partial_dir.glob("*.json")):
-        stem = path.stem
-        if "__" not in stem:
-            continue
-        dataset, model_key = stem.split("__", 1)
-        with path.open(encoding="utf-8") as f:
-            metrics = json.load(f)
-        results.setdefault(dataset, {})[model_key] = metrics
-    return results
 
 
 def mmpd_setting(
@@ -344,7 +247,7 @@ def build_mmpd_train_cmd(args: argparse.Namespace, dataset: str) -> List[str]:
         "--data_split",
         DATASET_SPLITS[dataset],
         "--output_root",
-        str(args.mmpd_output_root),
+        str(args.output_dir / "mmpd_out"),
         "--backbone",
         "Decoder",
         "--loss_func",
@@ -406,7 +309,8 @@ def build_mmpd_train_cmd(args: argparse.Namespace, dataset: str) -> List[str]:
 def mmpd_checkpoint_path(args: argparse.Namespace, dataset: str) -> Path:
     setting = mmpd_setting(dataset, args.lookback, args.horizon, args.patch_size)
     return (
-        args.mmpd_output_root
+        args.output_dir
+        / "mmpd_out"
         / "checkpoints"
         / "Decoder-MMPD"
         / setting
@@ -421,6 +325,9 @@ def train_mmpd(args: argparse.Namespace, datasets: Sequence[str]) -> None:
             print(f"[mmpd] Reusing checkpoint for {dataset}: {ckpt}")
             continue
         if args.skip_mmpd_train:
+            if args.skip_mmpd_eval:
+                print(f"[mmpd] Skipping train/eval for {dataset}; checkpoint not required.")
+                continue
             raise FileNotFoundError(f"--skip-mmpd-train set but missing {ckpt}")
         log_path = args.output_dir / "logs" / f"mmpd_train_{dataset}.log"
         run_cmd(build_mmpd_train_cmd(args, dataset), cwd=args.mmpd_repo, log_path=log_path)
@@ -664,37 +571,27 @@ def get_ckpt_config_value(ckpt: Dict[str, Any], key: str, default: Any = None) -
     return default
 
 
-def _dit_head_output_dim(state_dict: Dict[str, Any]) -> Optional[int]:
-    for key, tensor in state_dict.items():
-        if key.endswith("noise_predictor.head.bias"):
-            return int(tensor.shape[0])
-    return None
-
-
-def infer_diffusion_type(ckpt: Dict[str, Any]) -> str:
+def infer_diffusion_type(ckpt: Dict[str, Any], variant: Optional[str] = None) -> str:
+    if variant == "binary":
+        return "binary"
+    if variant == "gaussian":
+        return "gaussian"
     value = get_ckpt_config_value(ckpt, "diffusion_type")
-    if value in ("binary", "gaussian"):
+    if value:
         return value
-    sd = ckpt.get("model_state_dict", {})
-    for key, tensor in sd.items():
-        if key.endswith("noise_predictor.final_conv.weight") and int(tensor.shape[0]) == 2:
+    state = ckpt.get("model_state_dict", {})
+    for key, tensor in state.items():
+        if key.endswith("noise_predictor.head.weight"):
+            # DiT heads have out_features = diffusion_channels * patch_h * patch_w.
+            # The current checkpoints use 8x8 patches, so Gaussian=64 and binary=128.
+            out_features = int(getattr(tensor, "shape", [0])[0])
+            if out_features % 128 == 0:
+                return "binary"
+            if out_features % 64 == 0:
+                return "gaussian"
+        if key.endswith("noise_predictor.final_conv.weight") and getattr(tensor, "shape", [0])[0] == 2:
             return "binary"
-    head_dim = _dit_head_output_dim(sd)
-    is_dit = any("noise_predictor.blocks." in k for k in sd)
-    if is_dit and head_dim is not None:
-        # DiT: out = out_channels * patch_h * patch_w (1 ch → 64, 2 ch → 128 for 92d3 defaults)
-        if head_dim == 2:
-            return "binary"
-        if head_dim >= 4:
-            return "binary" if head_dim % 2 == 0 and head_dim > 64 else "gaussian"
     return "gaussian"
-
-
-def resolve_diffusion_type(run: AnchorRun, ckpt: Dict[str, Any]) -> str:
-    meta_type = run.metadata.get("diffusion_type")
-    if meta_type in ("binary", "gaussian"):
-        return meta_type
-    return infer_diffusion_type(ckpt)
 
 
 def infer_model_type(ckpt: Dict[str, Any]) -> str:
@@ -713,17 +610,45 @@ def infer_prediction_mode(ckpt: Dict[str, Any]) -> str:
     return get_ckpt_config_value(ckpt, "prediction_mode", "epsilon")
 
 
+def apply_ckpt_architecture_globals(pipeline: Any, ckpt: Dict[str, Any], diffusion_type: str) -> None:
+    """Set pipeline globals before create_diffusion_model so checkpoint shapes match."""
+    if get_ckpt_config_value(ckpt, "image_height") is not None:
+        pipeline.IMAGE_HEIGHT = int(get_ckpt_config_value(ckpt, "image_height"))
+    pipeline.DISABLE_CROSS_ATTENTION = bool(get_ckpt_config_value(ckpt, "disable_cross_attention", True))
+    if get_ckpt_config_value(ckpt, "dit_patch_size") is not None:
+        pipeline.DIT_PATCH_SIZE = tuple(get_ckpt_config_value(ckpt, "dit_patch_size"))
+    if get_ckpt_config_value(ckpt, "dit_embed_dim") is not None:
+        pipeline.DIT_EMBED_DIM = int(get_ckpt_config_value(ckpt, "dit_embed_dim"))
+    if get_ckpt_config_value(ckpt, "dit_depth") is not None:
+        pipeline.DIT_DEPTH = int(get_ckpt_config_value(ckpt, "dit_depth"))
+    if get_ckpt_config_value(ckpt, "dit_num_heads") is not None:
+        pipeline.DIT_NUM_HEADS = int(get_ckpt_config_value(ckpt, "dit_num_heads"))
+    if get_ckpt_config_value(ckpt, "dit_mlp_ratio") is not None:
+        pipeline.DIT_MLP_RATIO = float(get_ckpt_config_value(ckpt, "dit_mlp_ratio"))
+    if get_ckpt_config_value(ckpt, "dit_dropout") is not None:
+        pipeline.DIT_DROPOUT = float(get_ckpt_config_value(ckpt, "dit_dropout"))
+
+    state = ckpt.get("model_state_dict", {})
+    head_weight = state.get("noise_predictor.head.weight")
+    if head_weight is not None:
+        out_features, embed_dim = map(int, head_weight.shape[:2])
+        pipeline.DIT_EMBED_DIM = embed_dim
+        out_channels = 2 if diffusion_type == "binary" else 1
+        patch_area = out_features // out_channels
+        patch_side = int(round(math.sqrt(patch_area)))
+        if patch_side * patch_side == patch_area:
+            pipeline.DIT_PATCH_SIZE = (patch_side, patch_side)
+
+
 def load_anchor_model(run: AnchorRun, args: argparse.Namespace, device: torch.device):
     pipeline = load_tsf_pipeline()
     ckpt = torch.load(run.best_pt, map_location=device, weights_only=False)
     n_vars = len(run.metadata["variate_indices"])
     itrans = pipeline.load_itransformer_from_checkpoint(str(run.itrans_pt), n_vars, device)
 
-    cfg_disable = get_ckpt_config_value(ckpt, "disable_cross_attention", True)
-    pipeline.DISABLE_CROSS_ATTENTION = bool(cfg_disable)
+    diffusion_type = infer_diffusion_type(ckpt, run.variant)
+    apply_ckpt_architecture_globals(pipeline, ckpt, diffusion_type)
     tuned = run.metadata.get("tuned_params", {})
-    diffusion_type = resolve_diffusion_type(run, ckpt)
-    default_alpha = 0.0 if diffusion_type == "binary" else 0.5
     model = pipeline.create_diffusion_model(
         n_variates=n_vars,
         lookback=args.lookback,
@@ -733,9 +658,10 @@ def load_anchor_model(run: AnchorRun, args: argparse.Namespace, device: torch.de
         model_type=infer_model_type(ckpt),
         use_deterministic_anchor_loss=True,
         deterministic_anchor_lambda=float(tuned.get("deterministic_anchor_lambda", 0.99)),
-        deterministic_anchor_alpha=float(
-            tuned.get("deterministic_anchor_alpha", default_alpha)
-        ),
+        deterministic_anchor_alpha=float(tuned.get(
+            "deterministic_anchor_alpha",
+            0.0 if diffusion_type == "binary" else 0.5,
+        )),
     ).to(device)
     guidance_mod = importlib.import_module("models.diffusion_tsf.guidance")
     model.set_guidance_model(guidance_mod.iTransformerGuidance(itrans))
@@ -794,21 +720,39 @@ def evaluate_anchor(
     model = load_anchor_model(run, args, device)
     y_true: List[np.ndarray] = []
     det: List[np.ndarray] = []
+    samples: List[np.ndarray] = []
+    sample_kwargs = {
+        "sampler": args.anchor_prob_sampler,
+        "num_inference_steps": args.num_sampling_steps,
+    }
+    if args.anchor_prob_sampler == "ddpm":
+        sample_kwargs = {"sampler": "ddpm", "use_ddim": False}
 
     with torch.no_grad():
-        for past, future in loader:
+        for batch_idx, (past, future) in enumerate(loader):
             past = past.to(device)
             future = future.to(device)
             K = getattr(model.config, "lookback_overlap", 0)
             if K > 0:
                 future = future[..., K:]
             y_true.append(future.cpu().numpy())
+
             anchor = model.generate(past, sampler="anchor")["prediction"]
             det.append(anchor.cpu().numpy())
+
+            batch_samples = []
+            for sample_idx in range(args.sample_num):
+                torch.manual_seed(args.seed + batch_idx * 1009 + sample_idx * 17)
+                if device.type == "cuda":
+                    torch.cuda.manual_seed_all(args.seed + batch_idx * 1009 + sample_idx * 17)
+                pred = model.generate(past, **sample_kwargs)["prediction"]
+                batch_samples.append(pred.cpu().numpy())
+            samples.append(np.stack(batch_samples, axis=2))
 
     return {
         "y_true": np.concatenate(y_true, axis=0),
         "deterministic": np.concatenate(det, axis=0),
+        "samples": np.concatenate(samples, axis=0),
         "indices": np.array(indices, dtype=np.int64),
     }
 
@@ -818,8 +762,8 @@ def run_mmpd_eval(
     dataset: str,
     indices: Sequence[int],
 ) -> Dict[str, np.ndarray]:
-    out_npz = mmpd_raw_path(args, dataset)
-    indices_json = indices_path(args, dataset)
+    out_npz = args.output_dir / "raw" / f"mmpd_{dataset}.npz"
+    indices_json = args.output_dir / "raw" / f"indices_{dataset}.json"
     indices_json.parent.mkdir(parents=True, exist_ok=True)
     with indices_json.open("w", encoding="utf-8") as f:
         json.dump(list(indices), f)
@@ -839,7 +783,7 @@ def run_mmpd_eval(
             "--data-split",
             DATASET_SPLITS[dataset],
             "--output-root",
-            str(args.mmpd_output_root),
+            str(args.output_dir / "mmpd_out"),
             "--out-npz",
             str(out_npz),
             "--indices-json",
@@ -918,64 +862,14 @@ def topk_from_modes(
     return out
 
 
-def _fit_trajectory_gmm(
-    trajectories: np.ndarray,
-    max_components: int,
-    seed: int,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Fit a small GMM on diffusion samples; fall back when samples collapse."""
-    import warnings
-    from sklearn.exceptions import ConvergenceWarning
-    from sklearn.mixture import GaussianMixture
-
-    trajectories = np.asarray(trajectories, dtype=np.float64)
-    sample_count, _horizon = trajectories.shape
-    if sample_count == 1:
-        return trajectories[:1], np.array([1.0], dtype=np.float64)
-
-    rounded = np.round(trajectories, decimals=5)
-    _, unique_idx = np.unique(rounded, axis=0, return_index=True)
-    unique_traj = trajectories[unique_idx]
-    n_unique = len(unique_traj)
-    if n_unique == 1:
-        return unique_traj, np.array([1.0], dtype=np.float64)
-
-    n_comp = min(max_components, sample_count, n_unique)
-    fit_data = unique_traj if n_unique < sample_count else trajectories
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", ConvergenceWarning)
-        for attempt in range(5):
-            reg = 1e-6 * (10.0**attempt)
-            try:
-                gmm = GaussianMixture(
-                    n_components=n_comp,
-                    covariance_type="full",
-                    reg_covar=reg,
-                    random_state=seed,
-                    max_iter=80,
-                    n_init=1,
-                )
-                gmm.fit(fit_data)
-                means = gmm.means_
-                weights = gmm.weights_
-                weights = weights / weights.sum()
-                return means, weights
-            except ValueError:
-                n_comp = max(1, n_comp // 2)
-                if n_comp == 1:
-                    break
-
-    mean_traj = trajectories.mean(axis=0, keepdims=True)
-    return mean_traj, np.array([1.0], dtype=np.float64)
-
-
 def empirical_modes_from_samples(
     samples: np.ndarray,
     max_components: int,
     seed: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Cluster probabilistic samples into modes for top-k metrics."""
+    from sklearn.mixture import GaussianMixture
+
     batch_size, n_variates, sample_count, horizon = samples.shape
     mode_count = min(max_components, sample_count)
     centers = np.zeros((batch_size, n_variates, mode_count, horizon), dtype=np.float64)
@@ -983,14 +877,27 @@ def empirical_modes_from_samples(
 
     for b in range(batch_size):
         for v in range(n_variates):
-            means, weights = _fit_trajectory_gmm(
-                samples[b, v],
-                max_components=mode_count,
-                seed=seed + b * 131 + v,
+            trajectories = samples[b, v]
+            if sample_count == 1:
+                centers[b, v, 0] = trajectories[0]
+                probs[b, v, 0] = 1.0
+                continue
+            n_comp = min(mode_count, sample_count)
+            gmm = GaussianMixture(
+                n_components=n_comp,
+                random_state=seed + b * 131 + v,
+                covariance_type="diag",
+                reg_covar=1e-4,
+                max_iter=50,
             )
-            n_fit = means.shape[0]
-            centers[b, v, :n_fit] = means
-            probs[b, v, :n_fit] = weights
+            try:
+                gmm.fit(trajectories)
+                centers[b, v, :n_comp] = gmm.means_
+                weights = gmm.weights_
+                probs[b, v, :n_comp] = weights / weights.sum()
+            except ValueError:
+                centers[b, v, :n_comp] = trajectories[:n_comp]
+                probs[b, v, :n_comp] = 1.0 / n_comp
     return centers, probs
 
 
@@ -1141,40 +1048,29 @@ def texture_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     return {key: float(np.mean(value)) for key, value in vals.items()}
 
 
-def summarize_anchor_pack(pack: Dict[str, np.ndarray]) -> Dict[str, float]:
-    """Anchor checkpoints: one deterministic decode (sampler=anchor) → MSE/MAE only."""
-    y_true = pack["y_true"]
-    det = pack["deterministic"]
-    metrics: Dict[str, float] = {}
-    metrics.update(deterministic_metrics(y_true, det))
-    metrics.update(texture_metrics(y_true, det))
-    metrics["n_windows"] = float(y_true.shape[0])
-    metrics["n_variates"] = float(y_true.shape[1])
-    return metrics
-
-
-def summarize_mmpd_pack(
+def summarize_prediction_pack(
     pack: Dict[str, np.ndarray],
+    mode_center: Optional[np.ndarray] = None,
+    mode_prob: Optional[np.ndarray] = None,
     gmm_components: int = 10,
     seed: int = 0,
     topk_max: int = 5,
 ) -> Dict[str, float]:
-    """MMPD: probabilistic predict + in-loop GMM modes → CRPS, top-k, textures."""
     y_true = pack["y_true"]
     det = pack["deterministic"]
     samples = pack["samples"]
-    mode_center = pack.get("mode_center")
-    mode_prob = pack.get("mode_prob")
 
     metrics: Dict[str, float] = {}
     metrics.update(deterministic_metrics(y_true, det))
     metrics["crps"] = crps_gr(y_true, samples)
-    if mode_center is None or mode_prob is None:
-        mode_center, mode_prob = empirical_modes_from_samples(
-            samples,
-            max_components=gmm_components,
-            seed=seed,
-        )
+    # Use the same mode construction for all model families so top-3 is directly
+    # comparable. MMPD still runs its probabilistic path; we intentionally derive
+    # the reported top-k modes from the returned samples just like binary/Gaussian.
+    mode_center, mode_prob = empirical_modes_from_samples(
+        samples,
+        max_components=gmm_components,
+        seed=seed,
+    )
     metrics.update(topk_from_modes(y_true, mode_center, mode_prob, max_k=topk_max))
     metrics.update(texture_metrics(y_true, det))
     sample_mean = samples.mean(axis=2)
@@ -1184,22 +1080,6 @@ def summarize_mmpd_pack(
     metrics["n_variates"] = float(y_true.shape[1])
     metrics["n_samples"] = float(samples.shape[2])
     return metrics
-
-
-def summarize_prediction_pack(
-    pack: Dict[str, np.ndarray],
-    mode_center: Optional[np.ndarray] = None,
-    mode_prob: Optional[np.ndarray] = None,
-    gmm_components: int = 10,
-    seed: int = 0,
-    topk_max: int = 5,
-) -> Dict[str, float]:
-    """Backward-compatible alias for full MMPD-style metric bundles."""
-    if mode_center is not None:
-        pack = dict(pack)
-        pack["mode_center"] = mode_center
-        pack["mode_prob"] = mode_prob
-    return summarize_mmpd_pack(pack, gmm_components=gmm_components, seed=seed, topk_max=topk_max)
 
 
 def write_outputs(
@@ -1246,90 +1126,41 @@ def stable_dataset_seed(base_seed: int, dataset: str) -> int:
 
 def print_summary(results: Dict[str, Dict[str, Dict[str, float]]]) -> None:
     print("\nSummary")
-    print("dataset,model,mse,mae,crps,top3_mse,top3_mae")
+    print("dataset,model,mse,mae,crps,top3_mse,top3_mae,texture_pathsig_distance")
     for dataset in sorted(results):
         for model in sorted(results[dataset]):
             m = results[dataset][model]
-            crps = m.get("crps", float("nan"))
-            top3_mse = m.get("top3_mse", float("nan"))
-            top3_mae = m.get("top3_mae", float("nan"))
-            if model.endswith("_anchor"):
-                crps = top3_mse = top3_mae = float("nan")
             print(
                 f"{dataset},{model},"
                 f"{m.get('mse', float('nan')):.6f},"
                 f"{m.get('mae', float('nan')):.6f},"
-                f"{crps:.6f},"
-                f"{top3_mse:.6f},"
-                f"{top3_mae:.6f}"
+                f"{m.get('crps', float('nan')):.6f},"
+                f"{m.get('top3_mse', float('nan')):.6f},"
+                f"{m.get('top3_mae', float('nan')):.6f},"
+                f"{m.get('texture_pathsig_distance', float('nan')):.6f}"
             )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--phase",
-        choices=("all", "indices", "mmpd-train", "mmpd-eval", "anchor", "merge"),
-        default="all",
-        help="Run one stage (for parallel Slurm) or the full pipeline.",
-    )
-    parser.add_argument(
-        "--datasets",
-        nargs="+",
-        default=["ETTh1", "ETTh2", "ETTm1", "ETTm2", "exchange_rate", "illness"],
-    )
-    parser.add_argument(
-        "--anchor-variants",
-        nargs="+",
-        choices=ANCHOR_VARIANTS,
-        default=["gaussian"],
-        help="Anchor arms to evaluate in anchor/all phases.",
-    )
-    parser.add_argument(
-        "--anchor-variant",
-        choices=ANCHOR_VARIANTS,
-        default=None,
-        help="Single anchor arm for --phase anchor (overrides --anchor-variants).",
-    )
-    parser.add_argument("--anchor-root", action="append", type=Path, default=[])
+    parser.add_argument("--datasets", nargs="+", default=DEFAULT_DATASETS)
+    parser.add_argument("--anchor-root", action="append", type=Path, default=[],
+                        help="Legacy alias for --gaussian-anchor-root")
+    parser.add_argument("--gaussian-anchor-root", action="append", type=Path, default=[])
     parser.add_argument("--binary-anchor-root", action="append", type=Path, default=[])
     parser.add_argument("--ckpt-base", type=Path, default=REPO_ROOT / "results" / "ckpts")
     parser.add_argument("--mmpd-repo", type=Path, default=DEFAULT_MMPD_REPO)
     parser.add_argument("--mmpd-data-dir", type=Path, default=DEFAULT_MMPD_DATA)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument(
-        "--mmpd-output-root",
-        type=Path,
-        default=None,
-        help="Shared MMPD checkpoints (default: <output-dir>/mmpd_out).",
-    )
-    parser.add_argument(
-        "--mmpd-raw-dir",
-        type=Path,
-        default=None,
-        help="Directory for mmpd_*.npz and indices_*.json (default: <output-dir>/raw).",
-    )
-    parser.add_argument(
-        "--reuse-anchor-raw-from",
-        type=Path,
-        default=None,
-        help="Optional second raw/ dir for cached anchor_gaussian_* or legacy anchor_*.npz.",
-    )
-    parser.add_argument(
-        "--mmpd-raw-fallback",
-        type=Path,
-        default=None,
-        help="Optional second raw/ dir to read existing mmpd_*.npz (e.g. prior eval job).",
-    )
     parser.add_argument("--lookback", type=int, default=96)
     parser.add_argument("--horizon", type=int, default=96)
     parser.add_argument("--patch-size", type=int, default=12)
     parser.add_argument("--test-fraction", type=float, default=0.5)
     parser.add_argument("--test-max-items", type=int, default=None)
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--sample-num", type=int, default=100)
+    parser.add_argument("--sample-num", type=int, default=9)
     parser.add_argument("--num-sampling-steps", type=int, default=20)
-    parser.add_argument("--gmm-components", type=int, default=10)
+    parser.add_argument("--gmm-components", type=int, default=9)
     parser.add_argument("--gmm-iterations", type=int, default=10)
     parser.add_argument("--mmpd-train-epochs", type=int, default=20)
     parser.add_argument("--mmpd-patience", type=int, default=5)
@@ -1342,13 +1173,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--skip-mmpd-train", action="store_true")
     parser.add_argument("--skip-mmpd-eval", action="store_true")
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Reuse an existing output dir: skip MMPD training and load raw/mmpd_*.npz "
-        "when present (still runs missing MMPD eval). Anchor loads raw/anchor_*.npz unless "
-        "--force-anchor-eval.",
-    )
     parser.add_argument("--force-mmpd-train", action="store_true")
     parser.add_argument("--force-mmpd-eval", action="store_true")
     parser.add_argument("--force-anchor-eval", action="store_true")
@@ -1357,197 +1181,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_raw_pack(path: Path) -> Dict[str, np.ndarray]:
-    with np.load(path) as data:
-        return {key: data[key] for key in data.files}
-
-
-def explicit_roots_for_variant(args: argparse.Namespace, variant: str) -> List[Path]:
-    if variant == "gaussian":
-        return list(args.anchor_root)
-    return list(args.binary_anchor_root)
-
-
-def load_or_create_indices(
-    args: argparse.Namespace,
-    dataset: str,
-    variate_indices: Sequence[int],
-) -> List[int]:
-    path = indices_path(args, dataset)
-    if path.exists() and args.phase != "indices":
-        with path.open(encoding="utf-8") as f:
-            return json.load(f)
-    pipeline = load_tsf_pipeline()
-    _, _, test_ds, _ = pipeline.load_dataset(
-        dataset,
-        list(variate_indices),
-        lookback=args.lookback,
-        horizon=args.horizon,
-        stride=1,
-    )
-    indices = make_eval_indices(
-        len(test_ds),
-        args.test_fraction,
-        stable_dataset_seed(args.seed, dataset),
-        args.test_max_items,
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(indices, f)
-    print(f"[subset] {dataset}: {len(indices)}/{len(test_ds)} test windows -> {path}")
-    return indices
-
-
-def run_indices_phase(
-    args: argparse.Namespace,
-    anchors_by_variant: Dict[str, Dict[str, AnchorRun]],
-) -> Dict[str, List[int]]:
-    indices_by_dataset: Dict[str, List[int]] = {}
-    for dataset in args.datasets:
-        run = anchors_by_variant["gaussian"].get(dataset) or next(
-            (anchors_by_variant[v][dataset] for v in ANCHOR_VARIANTS if dataset in anchors_by_variant[v]),
-            None,
-        )
-        if run is None:
-            raise RuntimeError(f"No anchor checkpoint to infer variates for {dataset}")
-        indices_by_dataset[dataset] = load_or_create_indices(
-            args,
-            dataset,
-            run.metadata["variate_indices"],
-        )
-    return indices_by_dataset
-
-
-def run_mmpd_eval_phase(
-    args: argparse.Namespace,
-    indices_by_dataset: Dict[str, List[int]],
-) -> None:
-    for dataset in args.datasets:
-        indices = indices_by_dataset[dataset]
-        cached = resolve_mmpd_raw_read_path(args, dataset)
-        if cached.exists() and not args.force_mmpd_eval:
-            print(f"[mmpd] Reusing cached eval pack: {cached}")
-            mmpd_pack = load_raw_pack(cached)
-        else:
-            mmpd_pack = run_mmpd_eval(args, dataset, indices)
-        metrics = summarize_mmpd_pack(
-            mmpd_pack,
-            gmm_components=args.gmm_components,
-            seed=stable_dataset_seed(args.seed, dataset),
-            topk_max=args.topk_max,
-        )
-        write_partial_metrics(args, dataset, "mmpd", metrics)
-
-
-def run_anchor_phase(
-    args: argparse.Namespace,
-    variant: str,
-    anchors: Dict[str, AnchorRun],
-    indices_by_dataset: Dict[str, List[int]],
-    device: torch.device,
-) -> None:
-    model_key = MODEL_KEYS[variant]
-    for dataset in args.datasets:
-        indices = indices_by_dataset[dataset]
-        cache_path = anchor_raw_path(args, variant, dataset)
-        save_path = args.mmpd_raw_dir / f"anchor_{variant}_{dataset}.npz"
-        if cache_path.exists() and not args.force_anchor_eval:
-            print(f"[resume] loading cached anchor pack: {cache_path}")
-            anchor_pack = load_raw_pack(cache_path)
-        else:
-            anchor_pack = evaluate_anchor(args, anchors[dataset], indices, device)
-            np.savez_compressed(save_path, **anchor_pack)
-        metrics = summarize_anchor_pack(anchor_pack)
-        write_partial_metrics(args, dataset, model_key, metrics)
-
-
-def build_manifest(
-    args: argparse.Namespace,
-    commit: str,
-    anchors_by_variant: Dict[str, Dict[str, AnchorRun]],
-    indices_by_dataset: Dict[str, List[int]],
-) -> Dict[str, Any]:
-    anchor_runs: Dict[str, Any] = {}
-    for variant, anchors in anchors_by_variant.items():
-        for dataset, run in anchors.items():
-            anchor_runs[f"{variant}:{dataset}"] = {
-                "root": str(run.root),
-                "best_pt": str(run.best_pt),
-                "itrans_pt": str(run.itrans_pt),
-                "metadata": run.metadata,
-            }
-    return {
-        "args": jsonable_args(args),
-        "mmpd_commit": commit,
-        "anchor_runs": anchor_runs,
-        "indices_by_dataset": indices_by_dataset,
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-    }
-
-
-def load_indices_from_disk(
-    args: argparse.Namespace,
-    datasets: Sequence[str],
-) -> Dict[str, List[int]]:
-    indices_by_dataset: Dict[str, List[int]] = {}
-    for dataset in datasets:
-        path = indices_path(args, dataset)
-        if not path.exists():
-            raise FileNotFoundError(
-                f"Missing {path}; run --phase indices first (or a full all-phase job)."
-            )
-        with path.open(encoding="utf-8") as f:
-            indices_by_dataset[dataset] = json.load(f)
-        print(f"[subset] {dataset}: {len(indices_by_dataset[dataset])} cached windows")
-    return indices_by_dataset
-
-
-def expected_partial_keys(datasets: Sequence[str]) -> List[Tuple[str, str]]:
-    keys: List[Tuple[str, str]] = []
-    for dataset in datasets:
-        keys.append((dataset, "mmpd"))
-        keys.append((dataset, MODEL_KEYS["gaussian"]))
-        keys.append((dataset, MODEL_KEYS["binary"]))
-    return keys
-
-
-def run_merge_phase(
-    args: argparse.Namespace,
-    manifest: Optional[Dict[str, Any]],
-    datasets: Optional[Sequence[str]] = None,
-) -> None:
-    datasets = list(datasets or args.datasets)
-    results = load_partial_metrics(args)
-    if not results:
-        raise FileNotFoundError(
-            f"No metrics_partial/*.json under {args.output_dir}; run eval phases first."
-        )
-    missing = []
-    for dataset, model_key in expected_partial_keys(datasets):
-        if dataset not in results or model_key not in results.get(dataset, {}):
-            missing.append(f"{dataset}__{model_key}")
-    if missing:
-        print(f"[warn] merge: missing {len(missing)} partial(s): {', '.join(missing[:12])}"
-              + (" ..." if len(missing) > 12 else ""))
-    if manifest is None:
-        manifest_path = args.output_dir / "run_manifest.json"
-        if manifest_path.exists():
-            with manifest_path.open(encoding="utf-8") as f:
-                manifest = json.load(f)
-        else:
-            manifest = {"updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
-    write_outputs(args, manifest, results)
-    print_summary(results)
-    print(f"\nWrote metrics to {args.output_dir / 'metrics.json'}")
-    print(f"Wrote CSV to {args.output_dir / 'metrics.csv'}")
-
-
 def main() -> None:
     args = parse_args()
-    if args.resume:
-        args.skip_mmpd_train = True
-    if args.anchor_variant is not None:
-        args.anchor_variants = [args.anchor_variant]
     args.datasets = list(dict.fromkeys(args.datasets))
     unknown = sorted(set(args.datasets) - set(DATASET_FILES))
     if unknown:
@@ -1556,87 +1191,96 @@ def main() -> None:
     args.mmpd_repo = args.mmpd_repo.resolve()
     args.mmpd_data_dir = args.mmpd_data_dir.resolve()
     args.ckpt_base = args.ckpt_base.resolve()
-    resolve_storage_paths(args)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    args.mmpd_raw_dir.mkdir(parents=True, exist_ok=True)
-    args.mmpd_output_root.mkdir(parents=True, exist_ok=True)
+    commit = ensure_mmpd_repo(args.mmpd_repo, update=not args.no_update_mmpd)
+    stage_mmpd_datasets(args.mmpd_data_dir, args.datasets)
+    gaussian_roots = [*args.anchor_root, *args.gaussian_anchor_root]
+    anchors_by_variant = {
+        "gaussian": find_anchor_runs(args.datasets, gaussian_roots, args.ckpt_base, "gaussian"),
+        "binary": find_anchor_runs(args.datasets, args.binary_anchor_root, args.ckpt_base, "binary"),
+    }
 
-    commit = ""
-    if args.phase != "merge":
-        commit = ensure_mmpd_repo(args.mmpd_repo, update=not args.no_update_mmpd)
-        stage_mmpd_datasets(args.mmpd_data_dir, args.datasets)
+    train_mmpd(args, args.datasets)
 
-    anchors_by_variant: Dict[str, Dict[str, AnchorRun]] = {}
-    need_anchors = args.phase in ("all", "indices", "anchor")
-    if need_anchors:
-        for variant in ANCHOR_VARIANTS:
-            try:
-                anchors_by_variant[variant] = find_anchor_runs(
-                    args.datasets,
-                    explicit_roots_for_variant(args, variant),
-                    args.ckpt_base,
-                    variant=variant,
-                )
-            except RuntimeError as exc:
-                if variant in args.anchor_variants:
-                    raise
-                print(f"[warn] {exc}")
-
-    manifest: Optional[Dict[str, Any]] = None
+    pipeline = load_tsf_pipeline()
     indices_by_dataset: Dict[str, List[int]] = {}
-
-    if args.phase == "indices":
-        if not anchors_by_variant:
-            raise RuntimeError("Need at least one anchor checkpoint tree for --phase indices.")
-        indices_by_dataset = run_indices_phase(args, anchors_by_variant)
-        manifest = build_manifest(args, commit, anchors_by_variant, indices_by_dataset)
-        with (args.output_dir / "run_manifest.json").open("w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2, sort_keys=True)
-        return
-
-    if args.phase in ("all", "mmpd-eval", "anchor"):
-        if args.phase == "all":
-            if not anchors_by_variant:
-                raise RuntimeError("Need anchor checkpoints for a full run.")
-            indices_by_dataset = run_indices_phase(args, anchors_by_variant)
-        else:
-            indices_by_dataset = load_indices_from_disk(args, args.datasets)
-
-    if args.phase in ("all", "mmpd-train"):
-        train_mmpd(args, args.datasets)
-
-    if args.phase in ("all", "mmpd-eval"):
-        run_mmpd_eval_phase(args, indices_by_dataset)
-
-    if args.phase in ("all", "anchor"):
-        device = torch.device(
-            "cpu" if args.cpu or not torch.cuda.is_available() else f"cuda:{args.gpu}"
+    for dataset in args.datasets:
+        run = anchors_by_variant["gaussian"][dataset]
+        _, _, test_ds, _ = pipeline.load_dataset(
+            dataset,
+            run.metadata["variate_indices"],
+            lookback=args.lookback,
+            horizon=args.horizon,
+            stride=1,
         )
-        for variant in args.anchor_variants:
-            if variant not in anchors_by_variant:
-                anchors_by_variant[variant] = find_anchor_runs(
-                    args.datasets,
-                    explicit_roots_for_variant(args, variant),
-                    args.ckpt_base,
-                    variant=variant,
-                )
-            run_anchor_phase(args, variant, anchors_by_variant[variant], indices_by_dataset, device)
+        indices_by_dataset[dataset] = make_eval_indices(
+            len(test_ds),
+            args.test_fraction,
+            stable_dataset_seed(args.seed, dataset),
+            args.test_max_items,
+        )
+        print(
+            f"[subset] {dataset}: {len(indices_by_dataset[dataset])}/{len(test_ds)} "
+            f"test windows"
+        )
 
-    if args.phase == "merge":
-        run_merge_phase(args, manifest=None, datasets=args.datasets)
-        return
+    device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else f"cuda:{args.gpu}")
+    results: Dict[str, Dict[str, Dict[str, float]]] = {}
+    raw_dir = args.output_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.phase == "mmpd-train":
-        print("[mmpd] train phase complete.")
-        return
+    for dataset in args.datasets:
+        results[dataset] = {}
+        indices = indices_by_dataset[dataset]
 
-    manifest = build_manifest(args, commit, anchors_by_variant, indices_by_dataset)
-    with (args.output_dir / "run_manifest.json").open("w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2, sort_keys=True)
+        if not args.skip_mmpd_eval:
+            mmpd_pack = run_mmpd_eval(args, dataset, indices)
+            results[dataset]["mmpd"] = summarize_prediction_pack(
+                mmpd_pack,
+                gmm_components=args.gmm_components,
+                seed=stable_dataset_seed(args.seed, dataset),
+                topk_max=args.topk_max,
+            )
 
-    if args.phase == "all":
-        run_merge_phase(args, manifest=manifest, datasets=args.datasets)
+        for variant, anchors in anchors_by_variant.items():
+            anchor_raw_path = raw_dir / f"{variant}_anchor_{dataset}.npz"
+            if anchor_raw_path.exists() and not args.force_anchor_eval:
+                with np.load(anchor_raw_path) as data:
+                    anchor_pack = {key: data[key] for key in data.files}
+            else:
+                anchor_pack = evaluate_anchor(args, anchors[dataset], indices, device)
+                np.savez_compressed(anchor_raw_path, **anchor_pack)
+            results[dataset][ANCHOR_VARIANTS[variant]["model_name"]] = summarize_prediction_pack(
+                anchor_pack,
+                gmm_components=args.gmm_components,
+                seed=stable_dataset_seed(args.seed, dataset),
+                topk_max=args.topk_max,
+            )
+
+    manifest = {
+        "args": jsonable_args(args),
+        "mmpd_commit": commit,
+        "anchor_runs": {
+            variant: {
+                d: {
+                    "root": str(r.root),
+                    "best_pt": str(r.best_pt),
+                    "itrans_pt": str(r.itrans_pt),
+                    "metadata": r.metadata,
+                }
+                for d, r in anchors.items()
+            }
+            for variant, anchors in anchors_by_variant.items()
+        },
+        "indices_by_dataset": indices_by_dataset,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    write_outputs(args, manifest, results)
+    print_summary(results)
+
+    print(f"\nWrote metrics to {args.output_dir / 'metrics.json'}")
+    print(f"Wrote CSV to {args.output_dir / 'metrics.csv'}")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,11 @@
 #!/bin/bash
 # =============================================================================
-# MMPD vs Gaussian-anchor comparison (train MMPD, eval shared 50% test subset).
+# MMPD vs binary/Gaussian-anchor comparison (shared 50% test subset).
 #
 # USAGE (from repo root on Killarney login node, preferably $SCRATCH/ts-sandbox):
 #   ./slurm_mmpd_gaussian_anchor_eval.sh --smoke-test
 #   ./slurm_mmpd_gaussian_anchor_eval.sh
 #   ./slurm_mmpd_gaussian_anchor_eval.sh --skip-mmpd-train   # reuse trained MMPD ckpts
-#   ./slurm_mmpd_gaussian_anchor_eval.sh --continue-from ./results/datasets/05-26-0688-mmpd-anchor-eval
 # =============================================================================
 
 set -euo pipefail
@@ -14,8 +13,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMOKE=0
 SKIP_MMPD_TRAIN=0
-RESUME=0
-CONTINUE_FROM=""
 SEED=2026
 WALL="${WALL:-}"
 
@@ -23,7 +20,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --skip-mmpd-train) SKIP_MMPD_TRAIN=1; shift ;;
-        --continue-from) CONTINUE_FROM="$2"; RESUME=1; SKIP_MMPD_TRAIN=1; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         --walltime|--time) WALL="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
@@ -37,7 +33,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         CPUS=4
         JOB_NAME="mmpd-anchor-eval-smoke"
     else
-        [[ -z "$WALL" ]] && WALL="6:00:00"
+        [[ -z "$WALL" ]] && WALL="2-00:00:00"
         MEM="60G"
         CPUS=8
         JOB_NAME="mmpd-anchor-eval"
@@ -59,44 +55,14 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         "$SCRIPT_DIR/slurm_mmpd_gaussian_anchor_eval.sh" \
         $([[ "$SMOKE" -eq 1 ]] && echo --smoke-test) \
         $([[ "$SKIP_MMPD_TRAIN" -eq 1 ]] && echo --skip-mmpd-train) \
-        $([[ -n "$CONTINUE_FROM" ]] && echo --continue-from "$CONTINUE_FROM") \
         --seed "$SEED" \
         $([[ -n "$WALL" && "$SMOKE" -eq 0 ]] && echo --walltime "$WALL")
     exit 0
 fi
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --smoke-test|--smoke) SMOKE=1; shift ;;
-        --skip-mmpd-train) SKIP_MMPD_TRAIN=1; shift ;;
-        --continue-from) CONTINUE_FROM="$2"; RESUME=1; SKIP_MMPD_TRAIN=1; shift 2 ;;
-        --seed) SEED="$2"; shift 2 ;;
-        --walltime|--time) WALL="$2"; shift 2 ;;
-        *) echo "Unknown arg: $1" >&2; exit 1 ;;
-    esac
-done
-
 cd "$SLURM_SUBMIT_DIR"
 SCRIPT_DIR="$SLURM_SUBMIT_DIR"
 PROJECT_ROOT="$SLURM_SUBMIT_DIR"
-
-# Build RUN_STEM without a failing command substitution under `set -e`.
-# (Bash: `x="$([[ false ]] && echo y)"` exits 1 with set -e, killing the job
-# before any log is opened; matches alliancecan "instant FAILED, no log" gotcha.)
-SMOKE_SUFFIX=""
-if [[ "$SMOKE" -eq 1 ]]; then SMOKE_SUFFIX="-smoke"; fi
-if [[ -n "$CONTINUE_FROM" ]]; then
-    OUTPUT_DIR="$CONTINUE_FROM"
-    RUN_STEM="$(basename "$OUTPUT_DIR")"
-    LOG_FILE="./results/logs/${RUN_STEM}-resume-${SLURM_JOB_ID}.log"
-else
-    RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-mmpd-anchor-eval${SMOKE_SUFFIX}"
-    LOG_FILE="./results/logs/${RUN_STEM}.log"
-    OUTPUT_DIR="./results/datasets/${RUN_STEM}"
-fi
-mkdir -p "$(dirname "$LOG_FILE")" "$OUTPUT_DIR"
-exec >>"$LOG_FILE" 2>&1
-
 if [[ ! -f "$PROJECT_ROOT/utils/eval_mmpd_gaussian_anchor.py" ]]; then
     echo "ERROR: submit from the ts-sandbox repo root." >&2
     exit 1
@@ -106,6 +72,16 @@ if [[ "$PROJECT_ROOT" == /home/* ]]; then
     exit 1
 fi
 
+SMOKE_SUFFIX=""
+if [[ "$SMOKE" -eq 1 ]]; then
+    SMOKE_SUFFIX="-smoke"
+fi
+RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-mmpd-anchor-eval${SMOKE_SUFFIX}"
+LOG_FILE="./results/logs/${RUN_STEM}.log"
+OUTPUT_DIR="./results/datasets/${RUN_STEM}"
+mkdir -p "$(dirname "$LOG_FILE")" "$OUTPUT_DIR"
+exec >>"$LOG_FILE" 2>&1
+
 echo "=========================================="
 echo "Job: $SLURM_JOB_NAME  ID: $SLURM_JOB_ID  Node: ${SLURMD_NODENAME:-unknown}"
 echo "Repo: $PROJECT_ROOT"
@@ -114,7 +90,7 @@ echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
 echo "Started: $(date)"
 echo "=========================================="
 
-module purge || true
+module --force purge || module purge || true
 module load StdEnv/2023
 module load python/3.11
 module load cuda/12.2
@@ -125,7 +101,7 @@ virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 pip install --no-index \
-    'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm einops optuna \
+    'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm einops \
     -q
 python - <<'PY'
 import torch
@@ -135,21 +111,6 @@ PY
 
 export PYTHONUNBUFFERED=1
 
-# Latest finished Gaussian-anchor runs (auto-discovery also scans results/ckpts).
-ANCHOR_ROOTS=(
-    "./results/ckpts/05-26-3037-gauss-anchor-etth1"
-    "./results/ckpts/05-26-3038-gauss-anchor-etth2"
-    "./results/ckpts/05-26-3257-gauss-anchor-exchange_rate"
-)
-ANCHOR_ARGS=()
-for root in "${ANCHOR_ROOTS[@]}"; do
-    if [[ -d "$root" ]]; then
-        ANCHOR_ARGS+=(--anchor-root "$root")
-    else
-        echo "[warn] missing anchor run dir: $root"
-    fi
-done
-
 EVAL_ARGS=(
     --output-dir "$OUTPUT_DIR"
     --ckpt-base "$PROJECT_ROOT/results/ckpts"
@@ -157,7 +118,6 @@ EVAL_ARGS=(
     --mmpd-data-dir "$PROJECT_ROOT/temp/mmpd_datasets"
     --seed "$SEED"
     --no-update-mmpd
-    "${ANCHOR_ARGS[@]}"
 )
 
 if [[ "$SMOKE" -eq 1 ]]; then
@@ -177,13 +137,13 @@ if [[ "$SMOKE" -eq 1 ]]; then
     )
 else
     EVAL_ARGS+=(
-        --datasets ETTh1 ETTh2 exchange_rate
+        --datasets ETTh1 ETTh2 ETTm1 ETTm2 illness exchange_rate weather
         --mmpd-train-epochs 20
         --mmpd-patience 5
         --test-fraction 0.5
-        --sample-num 100
+        --sample-num 9
         --num-sampling-steps 20
-        --gmm-components 10
+        --gmm-components 9
         --gmm-iterations 10
         --mmpd-batch-size 32
         --mmpd-eval-batch-size 16
@@ -194,11 +154,8 @@ fi
 if [[ "$SKIP_MMPD_TRAIN" -eq 1 ]]; then
     EVAL_ARGS+=(--skip-mmpd-train)
 fi
-if [[ "$RESUME" -eq 1 ]]; then
-    EVAL_ARGS+=(--resume)
-fi
 
-echo "[eval] MMPD vs Gaussian-anchor comparison..."
+echo "[eval] MMPD vs binary/Gaussian-anchor comparison..."
 python -u "$PROJECT_ROOT/utils/eval_mmpd_gaussian_anchor.py" "${EVAL_ARGS[@]}"
 
 echo "=========================================="
