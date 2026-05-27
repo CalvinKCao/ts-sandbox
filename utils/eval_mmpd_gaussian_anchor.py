@@ -1082,6 +1082,232 @@ def summarize_prediction_pack(
     return metrics
 
 
+def indices_path(output_dir: Path, dataset: str) -> Path:
+    return output_dir / "raw" / f"indices_{dataset}.json"
+
+
+def save_indices(output_dir: Path, dataset: str, indices: Sequence[int]) -> None:
+    path = indices_path(output_dir, dataset)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(list(indices), f)
+
+
+def load_indices(output_dir: Path, dataset: str) -> List[int]:
+    path = indices_path(output_dir, dataset)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Missing indices file {path}; run --phase init or a worker job first."
+        )
+    with path.open(encoding="utf-8") as f:
+        return json.load(f)
+
+
+def build_indices_for_dataset(
+    args: argparse.Namespace,
+    dataset: str,
+    variate_indices: Sequence[int],
+) -> List[int]:
+    pipeline = load_tsf_pipeline()
+    _, _, test_ds, _ = pipeline.load_dataset(
+        dataset,
+        list(variate_indices),
+        lookback=args.lookback,
+        horizon=args.horizon,
+        stride=1,
+    )
+    indices = make_eval_indices(
+        len(test_ds),
+        args.test_fraction,
+        stable_dataset_seed(args.seed, dataset),
+        args.test_max_items,
+    )
+    print(
+        f"[subset] {dataset}: {len(indices)}/{len(test_ds)} test windows"
+    )
+    return indices
+
+
+def get_or_create_indices(
+    args: argparse.Namespace,
+    dataset: str,
+    variate_indices: Sequence[int],
+) -> List[int]:
+    path = indices_path(args.output_dir, dataset)
+    if path.exists() and not args.force_indices:
+        indices = load_indices(args.output_dir, dataset)
+        print(f"[subset] {dataset}: reusing {len(indices)} indices from {path}")
+        return indices
+    indices = build_indices_for_dataset(args, dataset, variate_indices)
+    save_indices(args.output_dir, dataset, indices)
+    return indices
+
+
+def partial_metrics_path(output_dir: Path, dataset: str, model: str) -> Path:
+    return output_dir / "partials" / f"{dataset}_{model}.json"
+
+
+def write_partial_metrics(
+    output_dir: Path,
+    dataset: str,
+    model: str,
+    metrics: Dict[str, float],
+) -> None:
+    path = partial_metrics_path(output_dir, dataset, model)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2, sort_keys=True)
+    print(f"[partial] {dataset}/{model} -> {path}")
+
+
+def load_partial_metrics(output_dir: Path, dataset: str, model: str) -> Optional[Dict[str, float]]:
+    path = partial_metrics_path(output_dir, dataset, model)
+    if not path.exists():
+        return None
+    with path.open(encoding="utf-8") as f:
+        return json.load(f)
+
+
+def collect_results_from_partials(
+    output_dir: Path,
+    datasets: Sequence[str],
+) -> Dict[str, Dict[str, Dict[str, float]]]:
+    model_names = ["mmpd", "gaussian_anchor", "binary_anchor"]
+    results: Dict[str, Dict[str, Dict[str, float]]] = {}
+    missing: List[str] = []
+    for dataset in datasets:
+        results[dataset] = {}
+        for model in model_names:
+            metrics = load_partial_metrics(output_dir, dataset, model)
+            if metrics is None:
+                missing.append(f"{dataset}/{model}")
+            else:
+                results[dataset][model] = metrics
+    if missing:
+        raise FileNotFoundError(
+            "Missing partial metrics (workers may still be running): "
+            + ", ".join(missing)
+        )
+    return results
+
+
+def discover_anchors_by_variant(
+    args: argparse.Namespace,
+    datasets: Sequence[str],
+) -> Dict[str, Dict[str, AnchorRun]]:
+    gaussian_roots = [*args.anchor_root, *args.gaussian_anchor_root]
+    return {
+        "gaussian": find_anchor_runs(datasets, gaussian_roots, args.ckpt_base, "gaussian"),
+        "binary": find_anchor_runs(datasets, args.binary_anchor_root, args.ckpt_base, "binary"),
+    }
+
+
+def anchors_to_manifest(anchors_by_variant: Dict[str, Dict[str, AnchorRun]]) -> Dict[str, Any]:
+    return {
+        variant: {
+            d: {
+                "root": str(r.root),
+                "best_pt": str(r.best_pt),
+                "itrans_pt": str(r.itrans_pt),
+                "metadata": r.metadata,
+            }
+            for d, r in anchors.items()
+        }
+        for variant, anchors in anchors_by_variant.items()
+    }
+
+
+def run_phase_init(args: argparse.Namespace, commit: str) -> None:
+    anchors = discover_anchors_by_variant(args, args.datasets)
+    indices_by_dataset: Dict[str, List[int]] = {}
+    for dataset in args.datasets:
+        run = anchors["gaussian"][dataset]
+        variates = run.metadata["variate_indices"]
+        indices_by_dataset[dataset] = get_or_create_indices(args, dataset, variates)
+
+    manifest = {
+        "args": jsonable_args(args),
+        "mmpd_commit": commit,
+        "anchor_runs": anchors_to_manifest(anchors),
+        "indices_by_dataset": indices_by_dataset,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    with (args.output_dir / "run_manifest.json").open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+    print(f"[init] Wrote {args.output_dir / 'run_manifest.json'}")
+
+
+def run_phase_mmpd(
+    args: argparse.Namespace,
+    dataset: str,
+    anchors_by_variant: Dict[str, Dict[str, AnchorRun]],
+) -> None:
+    gaussian_run = anchors_by_variant["gaussian"][dataset]
+    indices = get_or_create_indices(args, dataset, gaussian_run.metadata["variate_indices"])
+    train_mmpd(args, [dataset])
+    if args.skip_mmpd_eval:
+        return
+    mmpd_pack = run_mmpd_eval(args, dataset, indices)
+    metrics = summarize_prediction_pack(
+        mmpd_pack,
+        gmm_components=args.gmm_components,
+        seed=stable_dataset_seed(args.seed, dataset),
+        topk_max=args.topk_max,
+    )
+    write_partial_metrics(args.output_dir, dataset, "mmpd", metrics)
+
+
+def run_phase_anchor(
+    args: argparse.Namespace,
+    dataset: str,
+    variant: str,
+    anchors_by_variant: Dict[str, Dict[str, AnchorRun]],
+    device: torch.device,
+) -> None:
+    if variant not in ANCHOR_VARIANTS:
+        raise ValueError(f"Unknown anchor variant: {variant}")
+    run = anchors_by_variant[variant][dataset]
+    model_name = ANCHOR_VARIANTS[variant]["model_name"]
+    indices = get_or_create_indices(args, dataset, run.metadata["variate_indices"])
+    raw_dir = args.output_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    anchor_raw_path = raw_dir / f"{variant}_anchor_{dataset}.npz"
+    if anchor_raw_path.exists() and not args.force_anchor_eval:
+        with np.load(anchor_raw_path) as data:
+            anchor_pack = {key: data[key] for key in data.files}
+    else:
+        anchor_pack = evaluate_anchor(args, run, indices, device)
+        np.savez_compressed(anchor_raw_path, **anchor_pack)
+    metrics = summarize_prediction_pack(
+        anchor_pack,
+        gmm_components=args.gmm_components,
+        seed=stable_dataset_seed(args.seed, dataset),
+        topk_max=args.topk_max,
+    )
+    write_partial_metrics(args.output_dir, dataset, model_name, metrics)
+
+
+def run_phase_merge(args: argparse.Namespace, commit: str) -> None:
+    manifest_path = args.output_dir / "run_manifest.json"
+    if manifest_path.exists():
+        with manifest_path.open(encoding="utf-8") as f:
+            manifest = json.load(f)
+    else:
+        anchors = discover_anchors_by_variant(args, args.datasets)
+        manifest = {
+            "args": jsonable_args(args),
+            "mmpd_commit": commit,
+            "anchor_runs": anchors_to_manifest(anchors),
+            "indices_by_dataset": {},
+        }
+
+    results = collect_results_from_partials(args.output_dir, args.datasets)
+    manifest["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    write_outputs(args, manifest, results)
+    print_summary(results)
+
+
 def write_outputs(
     args: argparse.Namespace,
     manifest: Dict[str, Any],
@@ -1176,59 +1402,47 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-mmpd-train", action="store_true")
     parser.add_argument("--force-mmpd-eval", action="store_true")
     parser.add_argument("--force-anchor-eval", action="store_true")
+    parser.add_argument("--force-indices", action="store_true",
+                        help="Recompute shared test indices even if cached on disk.")
+    parser.add_argument(
+        "--phase",
+        choices=["all", "init", "mmpd", "anchor", "merge"],
+        default="all",
+        help="all=serial end-to-end; init=indices+manifest; mmpd/anchor=one worker; merge=aggregate partials.",
+    )
+    parser.add_argument(
+        "--anchor-variant",
+        choices=sorted(ANCHOR_VARIANTS),
+        default=None,
+        help="Required when --phase anchor.",
+    )
     parser.add_argument("--topk-max", type=int, default=5)
     parser.add_argument("--no-update-mmpd", action="store_true")
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    args.datasets = list(dict.fromkeys(args.datasets))
-    unknown = sorted(set(args.datasets) - set(DATASET_FILES))
-    if unknown:
-        raise ValueError(f"Unsupported dataset(s): {unknown}")
-    args.output_dir = args.output_dir.resolve()
-    args.mmpd_repo = args.mmpd_repo.resolve()
-    args.mmpd_data_dir = args.mmpd_data_dir.resolve()
-    args.ckpt_base = args.ckpt_base.resolve()
+def validate_phase_args(args: argparse.Namespace) -> None:
+    if args.phase in ("mmpd", "anchor") and len(args.datasets) != 1:
+        raise ValueError(f"--phase {args.phase} requires exactly one --datasets entry")
+    if args.phase == "anchor" and args.anchor_variant is None:
+        raise ValueError("--phase anchor requires --anchor-variant gaussian|binary")
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    commit = ensure_mmpd_repo(args.mmpd_repo, update=not args.no_update_mmpd)
-    stage_mmpd_datasets(args.mmpd_data_dir, args.datasets)
-    gaussian_roots = [*args.anchor_root, *args.gaussian_anchor_root]
-    anchors_by_variant = {
-        "gaussian": find_anchor_runs(args.datasets, gaussian_roots, args.ckpt_base, "gaussian"),
-        "binary": find_anchor_runs(args.datasets, args.binary_anchor_root, args.ckpt_base, "binary"),
-    }
 
+def run_phase_all(args: argparse.Namespace, commit: str) -> None:
+    anchors_by_variant = discover_anchors_by_variant(args, args.datasets)
     train_mmpd(args, args.datasets)
 
-    pipeline = load_tsf_pipeline()
     indices_by_dataset: Dict[str, List[int]] = {}
     for dataset in args.datasets:
         run = anchors_by_variant["gaussian"][dataset]
-        _, _, test_ds, _ = pipeline.load_dataset(
-            dataset,
-            run.metadata["variate_indices"],
-            lookback=args.lookback,
-            horizon=args.horizon,
-            stride=1,
-        )
-        indices_by_dataset[dataset] = make_eval_indices(
-            len(test_ds),
-            args.test_fraction,
-            stable_dataset_seed(args.seed, dataset),
-            args.test_max_items,
-        )
-        print(
-            f"[subset] {dataset}: {len(indices_by_dataset[dataset])}/{len(test_ds)} "
-            f"test windows"
+        indices_by_dataset[dataset] = get_or_create_indices(
+            args, dataset, run.metadata["variate_indices"]
         )
 
-    device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else f"cuda:{args.gpu}")
+    device = torch.device(
+        "cpu" if args.cpu or not torch.cuda.is_available() else f"cuda:{args.gpu}"
+    )
     results: Dict[str, Dict[str, Dict[str, float]]] = {}
-    raw_dir = args.output_dir / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
 
     for dataset in args.datasets:
         results[dataset] = {}
@@ -1244,6 +1458,8 @@ def main() -> None:
             )
 
         for variant, anchors in anchors_by_variant.items():
+            raw_dir = args.output_dir / "raw"
+            raw_dir.mkdir(parents=True, exist_ok=True)
             anchor_raw_path = raw_dir / f"{variant}_anchor_{dataset}.npz"
             if anchor_raw_path.exists() and not args.force_anchor_eval:
                 with np.load(anchor_raw_path) as data:
@@ -1261,26 +1477,55 @@ def main() -> None:
     manifest = {
         "args": jsonable_args(args),
         "mmpd_commit": commit,
-        "anchor_runs": {
-            variant: {
-                d: {
-                    "root": str(r.root),
-                    "best_pt": str(r.best_pt),
-                    "itrans_pt": str(r.itrans_pt),
-                    "metadata": r.metadata,
-                }
-                for d, r in anchors.items()
-            }
-            for variant, anchors in anchors_by_variant.items()
-        },
+        "anchor_runs": anchors_to_manifest(anchors_by_variant),
         "indices_by_dataset": indices_by_dataset,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     write_outputs(args, manifest, results)
     print_summary(results)
-
     print(f"\nWrote metrics to {args.output_dir / 'metrics.json'}")
     print(f"Wrote CSV to {args.output_dir / 'metrics.csv'}")
+
+
+def main() -> None:
+    args = parse_args()
+    args.datasets = list(dict.fromkeys(args.datasets))
+    unknown = sorted(set(args.datasets) - set(DATASET_FILES))
+    if unknown:
+        raise ValueError(f"Unsupported dataset(s): {unknown}")
+    validate_phase_args(args)
+    args.output_dir = args.output_dir.resolve()
+    args.mmpd_repo = args.mmpd_repo.resolve()
+    args.mmpd_data_dir = args.mmpd_data_dir.resolve()
+    args.ckpt_base = args.ckpt_base.resolve()
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    commit = ensure_mmpd_repo(args.mmpd_repo, update=not args.no_update_mmpd)
+    stage_mmpd_datasets(args.mmpd_data_dir, args.datasets)
+
+    if args.phase == "all":
+        run_phase_all(args, commit)
+        return
+
+    if args.phase == "init":
+        run_phase_init(args, commit)
+        return
+
+    if args.phase == "merge":
+        run_phase_merge(args, commit)
+        return
+
+    anchors_by_variant = discover_anchors_by_variant(args, args.datasets)
+    dataset = args.datasets[0]
+
+    if args.phase == "mmpd":
+        run_phase_mmpd(args, dataset, anchors_by_variant)
+        return
+
+    device = torch.device(
+        "cpu" if args.cpu or not torch.cuda.is_available() else f"cuda:{args.gpu}"
+    )
+    run_phase_anchor(args, dataset, args.anchor_variant, anchors_by_variant, device)
 
 
 if __name__ == "__main__":
