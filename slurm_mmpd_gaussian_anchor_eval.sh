@@ -97,7 +97,7 @@ virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 pip install --no-index \
-    'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm einops \
+    'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm einops optuna \
     -q
 python - <<'PY'
 import torch
