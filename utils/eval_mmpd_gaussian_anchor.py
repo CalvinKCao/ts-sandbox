@@ -62,7 +62,7 @@ DATASET_SPLITS = {
     "exchange_rate": "0.7,0.1,0.2",
     "weather": "0.7,0.1,0.2",
 }
-DEFAULT_DATASETS = ["ETTh1", "ETTh2", "ETTm1", "ETTm2", "illness", "exchange_rate", "weather"]
+DEFAULT_DATASETS = ["ETTh1", "ETTh2", "ETTm1", "ETTm2", "illness", "exchange_rate"]
 ANCHOR_VARIANTS = {
     "gaussian": {"slug": "gauss-anchor", "model_name": "gaussian_anchor"},
     "binary": {"slug": "binary-anchor", "model_name": "binary_anchor"},

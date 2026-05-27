@@ -137,7 +137,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
     )
 else
     EVAL_ARGS+=(
-        --datasets ETTh1 ETTh2 ETTm1 ETTm2 illness exchange_rate weather
+        --datasets ETTh1 ETTh2 ETTm1 ETTm2 illness exchange_rate
         --mmpd-train-epochs 20
         --mmpd-patience 5
         --test-fraction 0.5
