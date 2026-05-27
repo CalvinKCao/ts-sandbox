@@ -7,7 +7,7 @@ import argparse
 import csv
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODELS = ["mmpd", "gaussian_anchor", "binary_anchor"]
@@ -16,6 +16,19 @@ MODEL_LABELS = {
     "gaussian_anchor": "Gaussian anchor",
     "binary_anchor": "Binary anchor",
 }
+
+TEXTURE_METRICS = [
+    ("ordinal_jsd", "Ordinal JSD"),
+    ("rqa_distance", "RQA distance"),
+    ("variogram_distance", "Variogram distance"),
+    ("pathsig_distance", "Path signature distance"),
+]
+
+INFERENCE_MODES = [
+    ("texture", "Deterministic (anchor / point path)"),
+    ("sample_mean_texture", "Mean of probabilistic samples"),
+    ("per_sample_mean_texture", "Per-sample mean (texture on each draw, averaged)"),
+]
 
 
 def load_rows(run_dir: Path) -> List[Dict[str, Any]]:
@@ -41,26 +54,64 @@ def fnum(value: Any, digits: int = 4) -> str:
         return "—"
 
 
-def best_model(rows: List[Dict[str, Any]], dataset: str, key: str, lower: bool = True) -> str:
-    subset = [r for r in rows if r["dataset"] == dataset]
-    if not subset:
-        return "—"
+def metric_key(prefix: str, suffix: str) -> str:
+    return f"{prefix}_{suffix}"
+
+
+def row_value(row: Optional[Dict[str, Any]], key: str) -> Optional[float]:
+    if row is None or key not in row or row[key] in ("", None):
+        return None
+    try:
+        return float(row[key])
+    except (TypeError, ValueError):
+        return None
+
+
+def best_models(
+    rows: List[Dict[str, Any]],
+    dataset: str,
+    key: str,
+    lower: bool = True,
+) -> Set[str]:
     scored: List[Tuple[float, str]] = []
-    for row in subset:
-        try:
-            scored.append((float(row[key]), row["model"]))
-        except (TypeError, ValueError):
-            continue
+    for model in MODELS:
+        row = next((r for r in rows if r["dataset"] == dataset and r["model"] == model), None)
+        value = row_value(row, key)
+        if value is not None:
+            scored.append((value, model))
     if not scored:
-        return "—"
-    scored.sort(key=lambda x: x[0], reverse=not lower)
-    return MODEL_LABELS.get(scored[0][1], scored[0][1])
+        return set()
+    best_val = min(v for v, _ in scored) if lower else max(v for v, _ in scored)
+    tol = max(1e-9, abs(best_val) * 1e-6)
+    return {model for val, model in scored if abs(val - best_val) <= tol}
 
 
-def pct_delta(a: float, b: float) -> str:
-    if a == 0:
+def fmt_cell(
+    row: Optional[Dict[str, Any]],
+    key: str,
+    model: str,
+    winners: Set[str],
+) -> str:
+    text = fnum(row_value(row, key))
+    if model in winners and text != "—":
+        return f"**{text}**"
+    return text
+
+
+def best_model_label(rows: List[Dict[str, Any]], dataset: str, key: str) -> str:
+    winners = best_models(rows, dataset, key)
+    if not winners:
         return "—"
-    return f"{100.0 * (b - a) / a:+.1f}%"
+    return ", ".join(MODEL_LABELS[m] for m in MODELS if m in winners)
+
+
+def active_inference_modes(rows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    modes: List[Tuple[str, str]] = []
+    for prefix, title in INFERENCE_MODES:
+        key = metric_key(prefix, TEXTURE_METRICS[0][0])
+        if any(row_value(r, key) is not None for r in rows):
+            modes.append((prefix, title))
+    return modes
 
 
 def build_report(run_dir: Path, report_path: Path) -> None:
@@ -69,12 +120,10 @@ def build_report(run_dir: Path, report_path: Path) -> None:
     manifest = load_manifest(run_dir)
     args = manifest.get("args", {})
     datasets = sorted({r["dataset"] for r in rows})
-
-    stem = run_dir.name
-    job_hint = stem.split("-")[2] if "-" in stem else stem
+    texture_modes = active_inference_modes(rows)
 
     lines: List[str] = [
-        f"# MMPD vs Gaussian vs Binary anchor — matrix eval ({stem})",
+        f"# MMPD vs Gaussian vs Binary anchor — matrix eval ({run_dir.name})",
         "",
         "**Run directory (pulled results):**",
         f"`{run_dir.relative_to(REPO_ROOT)}`",
@@ -101,74 +150,76 @@ def build_report(run_dir: Path, report_path: Path) -> None:
         "- `mse` / `mae`: deterministic path (anchor sampler for diffusion; MMPD point forecast)",
         "- `crps`: continuous ranked probability score from all samples",
         "- `top3_mse` / `top3_mae`: best of top-3 GMM modes vs ground truth",
-        "- `texture_*`: shape metrics on deterministic forecast; `sample_mean_texture_*`: on mean of samples",
+        "- **Texture (4):** ordinal JSD, RQA distance, variogram distance, path signature distance",
+        "- **Bold** = best (lowest) among the three models for that dataset and inference mode",
         "",
-        "## Core metrics (lower is better)",
+        "## Core metrics (lower is better; bold = best per column)",
         "",
+    ]
+
+    core_cols = [
+        ("mse", "MSE (det)"),
+        ("mae", "MAE (det)"),
+        ("crps", "CRPS"),
+        ("top3_mse", "top3 MSE"),
+        ("top3_mae", "top3 MAE"),
     ]
 
     for dataset in datasets:
         lines.append(f"### {dataset}")
         lines.append("")
-        lines.append(
-            "| Model | MSE (det) | MAE (det) | CRPS | top3 MSE | top3 MAE | windows |"
-        )
-        lines.append("|-------|----------:|----------:|-----:|---------:|---------:|--------:|")
+        header = "| Model | " + " | ".join(label for _, label in core_cols) + " | windows |"
+        sep = "|-------|" + "|".join("---------:" for _ in core_cols) + "|--------:|"
+        lines.append(header)
+        lines.append(sep)
+        winners_by_col = {key: best_models(rows, dataset, key) for key, _ in core_cols}
         for model in MODELS:
             row = next((r for r in rows if r["dataset"] == dataset and r["model"] == model), None)
             if row is None:
                 continue
+            cells = [
+                fmt_cell(row, key, model, winners_by_col[key]) for key, _ in core_cols
+            ]
             lines.append(
-                f"| {MODEL_LABELS[model]} | {fnum(row['mse'])} | {fnum(row['mae'])} | "
-                f"{fnum(row['crps'])} | {fnum(row['top3_mse'])} | {fnum(row['top3_mae'])} | "
+                f"| {MODEL_LABELS[model]} | {' | '.join(cells)} | "
                 f"{int(float(row['n_windows']))} |"
             )
         lines.append("")
-        lines.append(
-            f"Best det MSE: **{best_model(rows, dataset, 'mse')}** · "
-            f"Best CRPS: **{best_model(rows, dataset, 'crps')}** · "
-            f"Best top3 MSE: **{best_model(rows, dataset, 'top3_mse')}**"
-        )
+
+    lines.extend(["## Texture metrics (lower is better; bold = best per row)", ""])
+    for suffix, metric_title in TEXTURE_METRICS:
+        lines.append(f"### {metric_title}")
         lines.append("")
+        for prefix, mode_title in texture_modes:
+            lines.append(f"**{mode_title}**")
+            lines.append("")
+            lines.append("| Dataset | MMPD | Gaussian anchor | Binary anchor |")
+            lines.append("|---------|-----:|----------------:|--------------:|")
+            col_key = metric_key(prefix, suffix)
+            for dataset in datasets:
+                winners = best_models(rows, dataset, col_key)
+                cells = []
+                for model in MODELS:
+                    row = next(
+                        (r for r in rows if r["dataset"] == dataset and r["model"] == model),
+                        None,
+                    )
+                    cells.append(fmt_cell(row, col_key, model, winners))
+                lines.append(f"| {dataset} | {' | '.join(cells)} |")
+            lines.append("")
 
-    lines.extend(["## Cross-dataset winners (det MSE)", ""])
-    lines.append("| Dataset | MMPD | Gauss anchor | Binary anchor | Best |")
-    lines.append("|---------|-----:|-------------:|--------------:|------|")
-    for dataset in datasets:
-        vals = []
-        for model in MODELS:
-            row = next((r for r in rows if r["dataset"] == dataset and r["model"] == model), None)
-            vals.append(fnum(row["mse"]) if row else "—")
-        lines.append(
-            f"| {dataset} | {vals[0]} | {vals[1]} | {vals[2]} | **{best_model(rows, dataset, 'mse')}** |"
-        )
-
-    lines.extend(["", "## Texture (path signature distance, lower is better)", ""])
-    lines.append("| Dataset | MMPD det | Gauss det | Binary det | MMPD sample-mean | Gauss sm | Binary sm |")
-    lines.append("|---------|--------:|----------:|-----------:|-----------------:|---------:|----------:|")
-    for dataset in datasets:
-        cells = []
-        for model in MODELS:
-            row = next((r for r in rows if r["dataset"] == dataset and r["model"] == model), None)
-            cells.append(fnum(row.get("texture_pathsig_distance") if row else None))
-        sm = []
-        for model in MODELS:
-            row = next((r for r in rows if r["dataset"] == dataset and r["model"] == model), None)
-            sm.append(fnum(row.get("sample_mean_texture_pathsig_distance") if row else None))
-        lines.append(f"| {dataset} | {cells[0]} | {cells[1]} | {cells[2]} | {sm[0]} | {sm[1]} | {sm[2]} |")
-
-    lines.extend(["", "## Notes", ""])
+    lines.extend(["## Notes", ""])
     lines.append(
         "1. **illness / MMPD:** Point and top-k MMPD metrics are much worse than anchors on this tiny "
         "test subset (49 windows). Treat illness MMPD numbers as suspect until spot-checked."
     )
+    if not any(p == "per_sample_mean_texture" for p, _ in texture_modes):
+        lines.append(
+            "2. **No per-sample texture** in this run (`per_sample_mean_texture_*` absent). "
+            "Re-run `slurm_mmpd_texture_per_sample.sh --reference-run ...` to add them from cached `raw/*.npz`."
+        )
     lines.append(
-        "2. **No per-sample texture** in this run (`per_sample_mean_texture_*` absent). "
-        "Re-run `slurm_mmpd_texture_per_sample.sh --reference-run ...` to add them from cached `raw/*.npz`."
-    )
-    lines.append(
-        "3. **Regenerate this report:** "
-        f"`python utils/report_mmpd_anchor_matrix.py --run-dir {run_dir.relative_to(REPO_ROOT)}`"
+        f"- **Regenerate:** `python utils/report_mmpd_anchor_matrix.py --run-dir {run_dir.relative_to(REPO_ROOT)}`"
     )
     lines.append("")
 
