@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Overlay MMPD + binary-anchor forecasts on shared test windows (matrix eval npz)."""
+"""Overlay MMPD + binary on shared test windows: one sample + GT per horizon."""
 
 from __future__ import annotations
 
@@ -24,9 +24,16 @@ if str(REPO_ROOT) not in sys.path:
 from utils.eval_mmpd_gaussian_anchor import load_tsf_pipeline  # noqa: E402
 
 
-def denorm(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+def denorm_tensor(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
     m = mean.squeeze().unsqueeze(-1)
     s = std.squeeze().unsqueeze(-1)
+    return x * s + m
+
+
+def denorm_series(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    """Denorm [V, L] arrays stored in the same z-score space as the TSF test loader."""
+    m = np.asarray(mean).reshape(-1, 1)
+    s = np.asarray(std).reshape(-1, 1)
     return x * s + m
 
 
@@ -84,8 +91,8 @@ def plot_dataset(
     dataset: str,
     output_dir: Path,
     num_forecast_windows: int = 2,
-    num_lookback_windows: int = 2,
-    num_futures: int = 5,
+    num_lookback_windows: int = 5,
+    sample_index: int = 0,
     variables_to_plot: int = 3,
     lookback: int = 96,
     horizon: int = 96,
@@ -93,13 +100,13 @@ def plot_dataset(
 ) -> Path:
     mmpd, binary, eval_indices = load_aligned_pack(matrix_dir, dataset)
     y_true = mmpd["y_true"]
-    mmpd_det = mmpd["deterministic"]
     mmpd_samples = mmpd["samples"]
-    bin_det = binary["deterministic"]
     bin_samples = binary["samples"]
 
     n_pack = y_true.shape[0]
-    n_futures = min(num_futures, mmpd_samples.shape[2], bin_samples.shape[2])
+    n_samples = mmpd_samples.shape[2]
+    if sample_index < 0 or sample_index >= n_samples:
+        raise ValueError(f"sample_index {sample_index} out of range [0, {n_samples})")
     variate_indices = load_variate_indices(matrix_dir, dataset)
 
     pipeline = load_tsf_pipeline()
@@ -110,8 +117,10 @@ def plot_dataset(
         horizon=horizon,
         stride=1,
     )
-    mean = torch.tensor(norm_stats["mean"], dtype=torch.float32)
-    std = torch.tensor(norm_stats["std"], dtype=torch.float32)
+    mean_t = torch.tensor(norm_stats["mean"], dtype=torch.float32)
+    std_t = torch.tensor(norm_stats["std"], dtype=torch.float32)
+    mean_np = np.asarray(norm_stats["mean"], dtype=np.float64)
+    std_np = np.asarray(norm_stats["std"], dtype=np.float64)
 
     rng = random.Random(seed)
     row_positions = np.linspace(0, n_pack - 1, min(num_forecast_windows, n_pack), dtype=int)
@@ -137,13 +146,11 @@ def plot_dataset(
     for row, pack_row in enumerate(forecast_rows):
         test_idx = eval_indices[pack_row]
         past, _ = test_ds[test_idx]
-        past_dn = denorm(past, mean, std)
+        past_dn = denorm_tensor(past, mean_t, std_t)
 
-        gt = y_true[pack_row]
-        m_point = mmpd_det[pack_row]
-        b_point = bin_det[pack_row]
-        m_futs = mmpd_samples[pack_row, :, :n_futures, :]
-        b_futs = bin_samples[pack_row, :, :n_futures, :]
+        gt = denorm_series(y_true[pack_row], mean_np, std_np)
+        m_sample = denorm_series(mmpd_samples[pack_row, :, sample_index, :], mean_np, std_np)
+        b_sample = denorm_series(bin_samples[pack_row, :, sample_index, :], mean_np, std_np)
 
         for col in range(n_vars_plot):
             ax = axes[row, col]
@@ -164,43 +171,26 @@ def plot_dataset(
             )
             ax.plot(
                 t_future,
-                m_point[col],
-                color="#4CAF50",
+                m_sample[col],
+                color="#E91E63",
                 linewidth=1.5,
-                linestyle="--",
-                label="MMPD point" if row == 0 and col == 0 else "",
+                alpha=0.85,
+                label="MMPD sample" if row == 0 and col == 0 else "",
             )
             ax.plot(
                 t_future,
-                b_point[col],
-                color="#FF9800",
+                b_sample[col],
+                color="#7B1FA2",
                 linewidth=1.5,
-                linestyle="-.",
-                label="Binary anchor" if row == 0 and col == 0 else "",
+                alpha=0.85,
+                label="Binary sample" if row == 0 and col == 0 else "",
             )
-            for s_idx in range(n_futures):
-                ax.plot(
-                    t_future,
-                    m_futs[col, s_idx],
-                    color="#E91E63",
-                    linewidth=0.85,
-                    alpha=0.38,
-                    label=f"MMPD futures (n={n_futures})" if row == 0 and col == 0 and s_idx == 0 else "",
-                )
-                ax.plot(
-                    t_future,
-                    b_futs[col, s_idx],
-                    color="#7B1FA2",
-                    linewidth=0.85,
-                    alpha=0.38,
-                    label=f"Binary futures (n={n_futures})" if row == 0 and col == 0 and s_idx == 0 else "",
-                )
 
             ax.axvline(x=0, color="black", linestyle=":", alpha=0.25)
             ax.grid(True, alpha=0.2)
 
-            m_mae = float(np.mean(np.abs(m_point[col] - gt[col])))
-            b_mae = float(np.mean(np.abs(b_point[col] - gt[col])))
+            m_mae = float(np.mean(np.abs(m_sample[col] - gt[col])))
+            b_mae = float(np.mean(np.abs(b_sample[col] - gt[col])))
             ax.text(
                 0.97,
                 0.97,
@@ -218,7 +208,7 @@ def plot_dataset(
 
     for row_off, test_idx in enumerate(extra_indices, start=len(forecast_rows)):
         past, _ = test_ds[test_idx]
-        past_dn = denorm(past, mean, std)
+        past_dn = denorm_tensor(past, mean_t, std_t)
         for col in range(n_vars_plot):
             ax = axes[row_off, col]
             ax.plot(
@@ -238,8 +228,9 @@ def plot_dataset(
     if handles:
         fig.legend(handles, labels, loc="upper center", ncol=3, fontsize=8, bbox_to_anchor=(0.5, 1.03))
 
+    lookback_note = f" + {len(extra_indices)} lookback" if extra_indices else ""
     fig.suptitle(
-        f"{dataset} • MMPD vs binary anchor • {len(forecast_rows)} test windows + {len(extra_indices)} lookback",
+        f"{dataset} • MMPD vs binary (1 sample + GT){lookback_note}",
         fontsize=12,
         fontweight="bold",
     )
@@ -262,8 +253,13 @@ def main() -> None:
     )
     parser.add_argument("--datasets", nargs="+", default=None)
     parser.add_argument("--num-forecast-windows", type=int, default=2)
-    parser.add_argument("--num-lookback-windows", type=int, default=2)
-    parser.add_argument("--num-futures", type=int, default=5)
+    parser.add_argument("--num-lookback-windows", type=int, default=5)
+    parser.add_argument(
+        "--sample-index",
+        type=int,
+        default=0,
+        help="Which probabilistic draw to plot (same index for MMPD and binary).",
+    )
     parser.add_argument("--vars", type=int, default=3)
     parser.add_argument("--seed", type=int, default=2026)
     args = parser.parse_args()
@@ -283,7 +279,7 @@ def main() -> None:
             args.output_dir.resolve(),
             num_forecast_windows=args.num_forecast_windows,
             num_lookback_windows=args.num_lookback_windows,
-            num_futures=args.num_futures,
+            sample_index=args.sample_index,
             variables_to_plot=args.vars,
             seed=args.seed + sum(ord(c) for c in dataset),
         )

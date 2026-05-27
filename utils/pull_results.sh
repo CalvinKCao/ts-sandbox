@@ -32,6 +32,7 @@ RSYNC_OPTS=(
     --include=*/
     --exclude='*.tmp'
     --exclude='*.npy'
+    --exclude='*.npz'
 )
     # --include='best.pt'
     # --include='metadata.json'

@@ -213,10 +213,14 @@ def build_report(run_dir: Path, report_path: Path) -> None:
         "1. **illness / MMPD:** Point and top-k MMPD metrics are much worse than anchors on this tiny "
         "test subset (49 windows). Treat illness MMPD numbers as suspect until spot-checked."
     )
-    if not any(p == "per_sample_mean_texture" for p, _ in texture_modes):
+    if any(p == "per_sample_mean_texture" for p, _ in texture_modes):
         lines.append(
-            "2. **No per-sample texture** in this run (`per_sample_mean_texture_*` absent). "
-            "Re-run `slurm_mmpd_texture_per_sample.sh --reference-run ...` to add them from cached `raw/*.npz`."
+            "2. **Per-sample texture** included (`per_sample_mean_texture_*` from `tex-*` resummarize on cached `raw/*.npz`)."
+        )
+    else:
+        lines.append(
+            "2. **No per-sample texture** in this run. "
+            "Re-run `slurm_mmpd_texture_per_sample.sh --reference-run ...` to add them."
         )
     lines.append(
         f"- **Regenerate:** `python utils/report_mmpd_anchor_matrix.py --run-dir {run_dir.relative_to(REPO_ROOT)}`"
