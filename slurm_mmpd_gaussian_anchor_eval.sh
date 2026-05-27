@@ -6,6 +6,7 @@
 #   ./slurm_mmpd_gaussian_anchor_eval.sh --smoke-test
 #   ./slurm_mmpd_gaussian_anchor_eval.sh
 #   ./slurm_mmpd_gaussian_anchor_eval.sh --skip-mmpd-train   # reuse trained MMPD ckpts
+#   ./slurm_mmpd_gaussian_anchor_eval.sh --continue-from ./results/datasets/05-26-0688-mmpd-anchor-eval
 # =============================================================================
 
 set -euo pipefail
@@ -13,6 +14,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMOKE=0
 SKIP_MMPD_TRAIN=0
+RESUME=0
+CONTINUE_FROM=""
 SEED=2026
 WALL="${WALL:-}"
 
@@ -20,6 +23,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --skip-mmpd-train) SKIP_MMPD_TRAIN=1; shift ;;
+        --continue-from) CONTINUE_FROM="$2"; RESUME=1; SKIP_MMPD_TRAIN=1; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         --walltime|--time) WALL="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
@@ -55,10 +59,22 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         "$SCRIPT_DIR/slurm_mmpd_gaussian_anchor_eval.sh" \
         $([[ "$SMOKE" -eq 1 ]] && echo --smoke-test) \
         $([[ "$SKIP_MMPD_TRAIN" -eq 1 ]] && echo --skip-mmpd-train) \
+        $([[ -n "$CONTINUE_FROM" ]] && echo --continue-from "$CONTINUE_FROM") \
         --seed "$SEED" \
         $([[ -n "$WALL" && "$SMOKE" -eq 0 ]] && echo --walltime "$WALL")
     exit 0
 fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --smoke-test|--smoke) SMOKE=1; shift ;;
+        --skip-mmpd-train) SKIP_MMPD_TRAIN=1; shift ;;
+        --continue-from) CONTINUE_FROM="$2"; RESUME=1; SKIP_MMPD_TRAIN=1; shift 2 ;;
+        --seed) SEED="$2"; shift 2 ;;
+        --walltime|--time) WALL="$2"; shift 2 ;;
+        *) echo "Unknown arg: $1" >&2; exit 1 ;;
+    esac
+done
 
 cd "$SLURM_SUBMIT_DIR"
 SCRIPT_DIR="$SLURM_SUBMIT_DIR"
@@ -69,9 +85,15 @@ PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 # before any log is opened; matches alliancecan "instant FAILED, no log" gotcha.)
 SMOKE_SUFFIX=""
 if [[ "$SMOKE" -eq 1 ]]; then SMOKE_SUFFIX="-smoke"; fi
-RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-mmpd-anchor-eval${SMOKE_SUFFIX}"
-LOG_FILE="./results/logs/${RUN_STEM}.log"
-OUTPUT_DIR="./results/datasets/${RUN_STEM}"
+if [[ -n "$CONTINUE_FROM" ]]; then
+    OUTPUT_DIR="$CONTINUE_FROM"
+    RUN_STEM="$(basename "$OUTPUT_DIR")"
+    LOG_FILE="./results/logs/${RUN_STEM}-resume-${SLURM_JOB_ID}.log"
+else
+    RUN_STEM="$(date +%m-%d)-${SLURM_JOB_ID: -4}-mmpd-anchor-eval${SMOKE_SUFFIX}"
+    LOG_FILE="./results/logs/${RUN_STEM}.log"
+    OUTPUT_DIR="./results/datasets/${RUN_STEM}"
+fi
 mkdir -p "$(dirname "$LOG_FILE")" "$OUTPUT_DIR"
 exec >>"$LOG_FILE" 2>&1
 
@@ -171,6 +193,9 @@ fi
 
 if [[ "$SKIP_MMPD_TRAIN" -eq 1 ]]; then
     EVAL_ARGS+=(--skip-mmpd-train)
+fi
+if [[ "$RESUME" -eq 1 ]]; then
+    EVAL_ARGS+=(--resume)
 fi
 
 echo "[eval] MMPD vs Gaussian-anchor comparison..."

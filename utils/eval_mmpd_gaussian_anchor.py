@@ -792,14 +792,64 @@ def topk_from_modes(
     return out
 
 
+def _fit_trajectory_gmm(
+    trajectories: np.ndarray,
+    max_components: int,
+    seed: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Fit a small GMM on diffusion samples; fall back when samples collapse."""
+    import warnings
+    from sklearn.exceptions import ConvergenceWarning
+    from sklearn.mixture import GaussianMixture
+
+    trajectories = np.asarray(trajectories, dtype=np.float64)
+    sample_count, _horizon = trajectories.shape
+    if sample_count == 1:
+        return trajectories[:1], np.array([1.0], dtype=np.float64)
+
+    rounded = np.round(trajectories, decimals=5)
+    _, unique_idx = np.unique(rounded, axis=0, return_index=True)
+    unique_traj = trajectories[unique_idx]
+    n_unique = len(unique_traj)
+    if n_unique == 1:
+        return unique_traj, np.array([1.0], dtype=np.float64)
+
+    n_comp = min(max_components, sample_count, n_unique)
+    fit_data = unique_traj if n_unique < sample_count else trajectories
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        for attempt in range(5):
+            reg = 1e-6 * (10.0**attempt)
+            try:
+                gmm = GaussianMixture(
+                    n_components=n_comp,
+                    covariance_type="full",
+                    reg_covar=reg,
+                    random_state=seed,
+                    max_iter=80,
+                    n_init=1,
+                )
+                gmm.fit(fit_data)
+                means = gmm.means_
+                weights = gmm.weights_
+                weights = weights / weights.sum()
+                return means, weights
+            except ValueError:
+                n_comp = max(1, n_comp // 2)
+                if n_comp == 1:
+                    break
+
+    mean_traj = trajectories.mean(axis=0, keepdims=True)
+    return mean_traj, np.array([1.0], dtype=np.float64)
+
+
 def empirical_modes_from_samples(
     samples: np.ndarray,
     max_components: int,
     seed: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Cluster probabilistic samples into modes for top-k metrics."""
-    from sklearn.mixture import GaussianMixture
-
     batch_size, n_variates, sample_count, horizon = samples.shape
     mode_count = min(max_components, sample_count)
     centers = np.zeros((batch_size, n_variates, mode_count, horizon), dtype=np.float64)
@@ -807,21 +857,14 @@ def empirical_modes_from_samples(
 
     for b in range(batch_size):
         for v in range(n_variates):
-            trajectories = samples[b, v]
-            if sample_count == 1:
-                centers[b, v, 0] = trajectories[0]
-                probs[b, v, 0] = 1.0
-                continue
-            n_comp = min(mode_count, sample_count)
-            gmm = GaussianMixture(
-                n_components=n_comp,
-                random_state=seed + b * 131 + v,
-                max_iter=50,
+            means, weights = _fit_trajectory_gmm(
+                samples[b, v],
+                max_components=mode_count,
+                seed=seed + b * 131 + v,
             )
-            gmm.fit(trajectories)
-            centers[b, v, :n_comp] = gmm.means_
-            weights = gmm.weights_
-            probs[b, v, :n_comp] = weights / weights.sum()
+            n_fit = means.shape[0]
+            centers[b, v, :n_fit] = means
+            probs[b, v, :n_fit] = weights
     return centers, probs
 
 
@@ -1092,6 +1135,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--skip-mmpd-train", action="store_true")
     parser.add_argument("--skip-mmpd-eval", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reuse an existing output dir: skip MMPD training and load raw/mmpd_*.npz "
+        "when present (still runs missing MMPD eval). Anchor loads raw/anchor_*.npz unless "
+        "--force-anchor-eval.",
+    )
     parser.add_argument("--force-mmpd-train", action="store_true")
     parser.add_argument("--force-mmpd-eval", action="store_true")
     parser.add_argument("--force-anchor-eval", action="store_true")
@@ -1100,8 +1150,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def load_raw_pack(path: Path) -> Dict[str, np.ndarray]:
+    with np.load(path) as data:
+        return {key: data[key] for key in data.files}
+
+
 def main() -> None:
     args = parse_args()
+    if args.resume:
+        args.skip_mmpd_train = True
     args.datasets = list(dict.fromkeys(args.datasets))
     unknown = sorted(set(args.datasets) - set(DATASET_FILES))
     if unknown:
@@ -1148,22 +1205,30 @@ def main() -> None:
     for dataset in args.datasets:
         results[dataset] = {}
         indices = indices_by_dataset[dataset]
+        mmpd_raw_path = raw_dir / f"mmpd_{dataset}.npz"
 
-        if not args.skip_mmpd_eval:
+        if args.skip_mmpd_eval:
+            if not mmpd_raw_path.exists():
+                raise FileNotFoundError(
+                    f"--skip-mmpd-eval set but missing cached pack: {mmpd_raw_path}"
+                )
+            mmpd_pack = load_raw_pack(mmpd_raw_path)
+        else:
             mmpd_pack = run_mmpd_eval(args, dataset, indices)
-            results[dataset]["mmpd"] = summarize_prediction_pack(
-                mmpd_pack,
-                mode_center=mmpd_pack["mode_center"],
-                mode_prob=mmpd_pack["mode_prob"],
-                gmm_components=args.gmm_components,
-                seed=stable_dataset_seed(args.seed, dataset),
-                topk_max=args.topk_max,
-            )
+
+        results[dataset]["mmpd"] = summarize_prediction_pack(
+            mmpd_pack,
+            mode_center=mmpd_pack.get("mode_center"),
+            mode_prob=mmpd_pack.get("mode_prob"),
+            gmm_components=args.gmm_components,
+            seed=stable_dataset_seed(args.seed, dataset),
+            topk_max=args.topk_max,
+        )
 
         anchor_raw_path = raw_dir / f"anchor_{dataset}.npz"
         if anchor_raw_path.exists() and not args.force_anchor_eval:
-            with np.load(anchor_raw_path) as data:
-                anchor_pack = {key: data[key] for key in data.files}
+            print(f"[resume] loading cached anchor pack: {anchor_raw_path}")
+            anchor_pack = load_raw_pack(anchor_raw_path)
         else:
             anchor_pack = evaluate_anchor(args, anchors[dataset], indices, device)
             np.savez_compressed(anchor_raw_path, **anchor_pack)
