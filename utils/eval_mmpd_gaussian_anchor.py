@@ -309,7 +309,7 @@ def build_mmpd_train_cmd(args: argparse.Namespace, dataset: str) -> List[str]:
 def mmpd_checkpoint_path(args: argparse.Namespace, dataset: str) -> Path:
     setting = mmpd_setting(dataset, args.lookback, args.horizon, args.patch_size)
     return (
-        args.output_dir
+        mmpd_output_root(args)
         / "mmpd_out"
         / "checkpoints"
         / "Decoder-MMPD"
@@ -783,7 +783,7 @@ def run_mmpd_eval(
             "--data-split",
             DATASET_SPLITS[dataset],
             "--output-root",
-            str(args.output_dir / "mmpd_out"),
+            str(mmpd_output_root(args) / "mmpd_out"),
             "--out-npz",
             str(out_npz),
             "--indices-json",
@@ -1048,6 +1048,33 @@ def texture_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     return {key: float(np.mean(value)) for key, value in vals.items()}
 
 
+def summarize_prob_core_metrics(
+    pack: Dict[str, np.ndarray],
+    gmm_components: int = 9,
+    seed: int = 0,
+    topk_max: int = 3,
+) -> Dict[str, float]:
+    """Probabilistic metrics only: MSE/MAE of mean-of-samples, CRPS, top-k modes."""
+    y_true = pack["y_true"]
+    samples = pack["samples"]
+    sample_mean = samples.mean(axis=2)
+    metrics: Dict[str, float] = {
+        "mse": deterministic_metrics(y_true, sample_mean)["mse"],
+        "mae": deterministic_metrics(y_true, sample_mean)["mae"],
+        "crps": crps_gr(y_true, samples),
+        "n_windows": float(y_true.shape[0]),
+        "n_variates": float(y_true.shape[1]),
+        "n_samples": float(samples.shape[2]),
+    }
+    mode_center, mode_prob = empirical_modes_from_samples(
+        samples,
+        max_components=gmm_components,
+        seed=seed,
+    )
+    metrics.update(topk_from_modes(y_true, mode_center, mode_prob, max_k=topk_max))
+    return metrics
+
+
 def summarize_prediction_pack(
     pack: Dict[str, np.ndarray],
     mode_center: Optional[np.ndarray] = None,
@@ -1082,19 +1109,48 @@ def summarize_prediction_pack(
     return metrics
 
 
-def indices_path(output_dir: Path, dataset: str) -> Path:
-    return output_dir / "raw" / f"indices_{dataset}.json"
+def mmpd_output_root(args: argparse.Namespace) -> Path:
+    return (args.mmpd_output_root or args.output_dir).resolve()
 
 
-def save_indices(output_dir: Path, dataset: str, indices: Sequence[int]) -> None:
-    path = indices_path(output_dir, dataset)
+def indices_root(args: argparse.Namespace) -> Path:
+    return (args.indices_dir or args.output_dir).resolve()
+
+
+def indices_path(indices_root_dir: Path, dataset: str) -> Path:
+    return indices_root_dir / "raw" / f"indices_{dataset}.json"
+
+
+def summarize_for_profile(
+    pack: Dict[str, np.ndarray],
+    args: argparse.Namespace,
+    dataset: str,
+) -> Dict[str, float]:
+    seed = stable_dataset_seed(args.seed, dataset)
+    if args.metrics_profile == "prob-core":
+        return summarize_prob_core_metrics(
+            pack,
+            gmm_components=args.gmm_components,
+            seed=seed,
+            topk_max=args.topk_max,
+        )
+    return summarize_prediction_pack(
+        pack,
+        gmm_components=args.gmm_components,
+        seed=seed,
+        topk_max=args.topk_max,
+    )
+
+
+def save_indices(indices_root_dir: Path, dataset: str, indices: Sequence[int]) -> None:
+    path = indices_path(indices_root_dir, dataset)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(list(indices), f)
 
 
-def load_indices(output_dir: Path, dataset: str) -> List[int]:
-    path = indices_path(output_dir, dataset)
+def load_indices(indices_root_dir: Path, dataset: str) -> List[int]:
+    path = indices_path(indices_root_dir, dataset)
     if not path.exists():
         raise FileNotFoundError(
             f"Missing indices file {path}; run --phase init or a worker job first."
@@ -1133,13 +1189,18 @@ def get_or_create_indices(
     dataset: str,
     variate_indices: Sequence[int],
 ) -> List[int]:
-    path = indices_path(args.output_dir, dataset)
+    root = indices_root(args)
+    path = indices_path(root, dataset)
+    if args.indices_dir and not path.exists():
+        raise FileNotFoundError(
+            f"--indices-dir {args.indices_dir} missing {path}; run matrix init first."
+        )
     if path.exists() and not args.force_indices:
-        indices = load_indices(args.output_dir, dataset)
+        indices = load_indices(root, dataset)
         print(f"[subset] {dataset}: reusing {len(indices)} indices from {path}")
         return indices
     indices = build_indices_for_dataset(args, dataset, variate_indices)
-    save_indices(args.output_dir, dataset, indices)
+    save_indices(root, dataset, indices)
     return indices
 
 
@@ -1245,16 +1306,18 @@ def run_phase_mmpd(
 ) -> None:
     gaussian_run = anchors_by_variant["gaussian"][dataset]
     indices = get_or_create_indices(args, dataset, gaussian_run.metadata["variate_indices"])
-    train_mmpd(args, [dataset])
+    if not args.skip_mmpd_train:
+        train_mmpd(args, [dataset])
+    elif not args.skip_mmpd_eval:
+        ckpt = mmpd_checkpoint_path(args, dataset)
+        if not ckpt.exists():
+            raise FileNotFoundError(
+                f"--skip-mmpd-train but missing MMPD checkpoint: {ckpt}"
+            )
     if args.skip_mmpd_eval:
         return
     mmpd_pack = run_mmpd_eval(args, dataset, indices)
-    metrics = summarize_prediction_pack(
-        mmpd_pack,
-        gmm_components=args.gmm_components,
-        seed=stable_dataset_seed(args.seed, dataset),
-        topk_max=args.topk_max,
-    )
+    metrics = summarize_for_profile(mmpd_pack, args, dataset)
     write_partial_metrics(args.output_dir, dataset, "mmpd", metrics)
 
 
@@ -1279,12 +1342,7 @@ def run_phase_anchor(
     else:
         anchor_pack = evaluate_anchor(args, run, indices, device)
         np.savez_compressed(anchor_raw_path, **anchor_pack)
-    metrics = summarize_prediction_pack(
-        anchor_pack,
-        gmm_components=args.gmm_components,
-        seed=stable_dataset_seed(args.seed, dataset),
-        topk_max=args.topk_max,
-    )
+    metrics = summarize_for_profile(anchor_pack, args, dataset)
     write_partial_metrics(args.output_dir, dataset, model_name, metrics)
 
 
@@ -1305,7 +1363,7 @@ def run_phase_merge(args: argparse.Namespace, commit: str) -> None:
     results = collect_results_from_partials(args.output_dir, args.datasets)
     manifest["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     write_outputs(args, manifest, results)
-    print_summary(results)
+    print_summary(results, profile=args.metrics_profile)
 
 
 def write_outputs(
@@ -1350,8 +1408,23 @@ def stable_dataset_seed(base_seed: int, dataset: str) -> int:
     return base_seed + sum((i + 1) * ord(ch) for i, ch in enumerate(dataset))
 
 
-def print_summary(results: Dict[str, Dict[str, Dict[str, float]]]) -> None:
+def print_summary(results: Dict[str, Dict[str, Dict[str, float]]], profile: str = "full") -> None:
     print("\nSummary")
+    if profile == "prob-core":
+        print("dataset,model,mse,mae,crps,top3_mse,top3_mae,n_samples")
+        for dataset in sorted(results):
+            for model in sorted(results[dataset]):
+                m = results[dataset][model]
+                print(
+                    f"{dataset},{model},"
+                    f"{m.get('mse', float('nan')):.6f},"
+                    f"{m.get('mae', float('nan')):.6f},"
+                    f"{m.get('crps', float('nan')):.6f},"
+                    f"{m.get('top3_mse', float('nan')):.6f},"
+                    f"{m.get('top3_mae', float('nan')):.6f},"
+                    f"{m.get('n_samples', float('nan')):.0f}"
+                )
+        return
     print("dataset,model,mse,mae,crps,top3_mse,top3_mae,texture_pathsig_distance")
     for dataset in sorted(results):
         for model in sorted(results[dataset]):
@@ -1378,6 +1451,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mmpd-repo", type=Path, default=DEFAULT_MMPD_REPO)
     parser.add_argument("--mmpd-data-dir", type=Path, default=DEFAULT_MMPD_DATA)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--indices-dir",
+        type=Path,
+        default=None,
+        help="Reuse raw/indices_{dataset}.json from a prior matrix run.",
+    )
+    parser.add_argument(
+        "--mmpd-output-root",
+        type=Path,
+        default=None,
+        help="Directory containing mmpd_out/ (default: --output-dir).",
+    )
+    parser.add_argument(
+        "--metrics-profile",
+        choices=["full", "prob-core"],
+        default="full",
+        help="prob-core: mean-of-samples MSE/MAE, CRPS, top-k only (no texture/det).",
+    )
     parser.add_argument("--lookback", type=int, default=96)
     parser.add_argument("--horizon", type=int, default=96)
     parser.add_argument("--patch-size", type=int, default=12)
@@ -1450,12 +1541,7 @@ def run_phase_all(args: argparse.Namespace, commit: str) -> None:
 
         if not args.skip_mmpd_eval:
             mmpd_pack = run_mmpd_eval(args, dataset, indices)
-            results[dataset]["mmpd"] = summarize_prediction_pack(
-                mmpd_pack,
-                gmm_components=args.gmm_components,
-                seed=stable_dataset_seed(args.seed, dataset),
-                topk_max=args.topk_max,
-            )
+            results[dataset]["mmpd"] = summarize_for_profile(mmpd_pack, args, dataset)
 
         for variant, anchors in anchors_by_variant.items():
             raw_dir = args.output_dir / "raw"
@@ -1467,11 +1553,8 @@ def run_phase_all(args: argparse.Namespace, commit: str) -> None:
             else:
                 anchor_pack = evaluate_anchor(args, anchors[dataset], indices, device)
                 np.savez_compressed(anchor_raw_path, **anchor_pack)
-            results[dataset][ANCHOR_VARIANTS[variant]["model_name"]] = summarize_prediction_pack(
-                anchor_pack,
-                gmm_components=args.gmm_components,
-                seed=stable_dataset_seed(args.seed, dataset),
-                topk_max=args.topk_max,
+            results[dataset][ANCHOR_VARIANTS[variant]["model_name"]] = summarize_for_profile(
+                anchor_pack, args, dataset
             )
 
     manifest = {
@@ -1482,7 +1565,7 @@ def run_phase_all(args: argparse.Namespace, commit: str) -> None:
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     write_outputs(args, manifest, results)
-    print_summary(results)
+    print_summary(results, profile=args.metrics_profile)
     print(f"\nWrote metrics to {args.output_dir / 'metrics.json'}")
     print(f"Wrote CSV to {args.output_dir / 'metrics.csv'}")
 
@@ -1498,6 +1581,10 @@ def main() -> None:
     args.mmpd_repo = args.mmpd_repo.resolve()
     args.mmpd_data_dir = args.mmpd_data_dir.resolve()
     args.ckpt_base = args.ckpt_base.resolve()
+    if args.indices_dir is not None:
+        args.indices_dir = args.indices_dir.resolve()
+    if args.mmpd_output_root is not None:
+        args.mmpd_output_root = args.mmpd_output_root.resolve()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     commit = ensure_mmpd_repo(args.mmpd_repo, update=not args.no_update_mmpd)
