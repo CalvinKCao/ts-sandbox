@@ -20,6 +20,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMOKE=0
+FORCE=0
 SEED=2026
 MATRIX_OUT="${MATRIX_OUT:-./results/datasets/05-26-mmpd-anchor-matrix}"
 MMPD_SHARED="${MMPD_SHARED:-./results/datasets/05-26-0688-mmpd-anchor-eval}"
@@ -28,6 +29,7 @@ DATASETS=(ETTh1 ETTh2 ETTm1 ETTm2 exchange_rate illness)
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --smoke-test|--smoke) SMOKE=1; shift ;;
+        --force) FORCE=1; shift ;;
         --matrix-out) MATRIX_OUT="$2"; shift 2 ;;
         --mmpd-shared) MMPD_SHARED="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
@@ -83,9 +85,9 @@ else
     WALL_IDX="0:25:00"
     WALL_MMPD_TRAIN="2:00:00"
     WALL_MMPD_EVAL="1:30:00"
-    WALL_ANCHOR_ETTH="3:00:00"
-    WALL_ANCHOR_ETTM="5:00:00"
-    WALL_ANCHOR_SMALL="2:00:00"
+    WALL_ANCHOR_ETTH="1:00:00"
+    WALL_ANCHOR_ETTM="2:00:00"
+    WALL_ANCHOR_SMALL="0:45:00"
     WALL_MERGE="0:20:00"
     MEM="60G"
     CPUS=8
@@ -162,11 +164,26 @@ mmpd_raw_exists() {
     [[ -f "$MMPD_SHARED/raw/mmpd_${1}.npz" ]] || [[ -f "$MATRIX_OUT/raw/mmpd_${1}.npz" ]]
 }
 
-anchor_partial_exists() {
+anchor_partial_ok() {
     local variant="$1" ds="$2"
     local key="gaussian_anchor"
     [[ "$variant" == "binary" ]] && key="binary_anchor"
-    [[ -f "$MATRIX_OUT/metrics_partial/${ds}__${key}.json" ]]
+    local f="$MATRIX_OUT/metrics_partial/${ds}__${key}.json"
+    [[ -f "$f" ]] || return 1
+    if grep -q '"crps"' "$f" 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+mmpd_partial_ok() {
+    local ds="$1"
+    local f="$MATRIX_OUT/metrics_partial/${ds}__mmpd.json"
+    [[ -f "$f" ]] || return 1
+    if ! grep -q '"crps"' "$f" 2>/dev/null; then
+        return 1
+    fi
+    return 0
 }
 
 submit_worker() {
@@ -204,6 +221,10 @@ submit_worker() {
     fi
 
     local extra_py="${EXTRA_PY[*]}"
+  local force_py=""
+  if [[ "$FORCE" -eq 1 ]]; then
+      force_py="--force-anchor-eval --force-mmpd-eval"
+  fi
 
     sbatch --parsable \
         --job-name="$job_name" \
@@ -238,7 +259,8 @@ python -u utils/eval_mmpd_gaussian_anchor.py \\
     $dataset_flag \\
     $variant_flag \\
     $root_args \\
-    $extra_py
+    $extra_py \\
+    $force_py
 echo "Done: \$(date)"
 EOF
 }
@@ -247,15 +269,57 @@ echo "Matrix output: $MATRIX_OUT"
 echo "Shared MMPD:   $MMPD_SHARED"
 echo "Datasets:      ${DATASETS[*]}"
 
-JOB_IDX=$(submit_worker "mmpd-mx-idx${SUFFIX}" "$WALL_IDX" "" "indices")
-echo "  indices -> $JOB_IDX"
+if [[ "$FORCE" -eq 1 ]]; then
+    echo "[force] Removing stale anchor partials (old harness wrote crps/top-k)..."
+    for ds in "${DATASETS[@]}"; do
+        for key in gaussian_anchor binary_anchor; do
+            f="$MATRIX_OUT/metrics_partial/${ds}__${key}.json"
+            if [[ -f "$f" ]] && grep -q '"crps"' "$f" 2>/dev/null; then
+                trash-put "$f" 2>/dev/null || rm -f "$f"
+            fi
+        done
+    done
+fi
 
-MERGE_DEP_IDS=("$JOB_IDX")
+echo ""
+echo "=== Status (partials + logs) ==="
+for ds in "${DATASETS[@]}"; do
+    for key in mmpd gaussian_anchor binary_anchor; do
+        f="$MATRIX_OUT/metrics_partial/${ds}__${key}.json"
+        if [[ -f "$f" ]]; then echo "  OK   $f"; else echo "  MISS $f"; fi
+    done
+done
+for f in "$LOG_DIR"/mmpd-mx-*.out; do
+    [[ -f "$f" ]] || continue
+    if grep -q "Done:" "$f" 2>/dev/null; then st=OK; else st=FAIL?; fi
+    echo "  log  $st  $(basename "$f")"
+done
+echo ""
+
+indices_ready() {
+    for ds in "${DATASETS[@]}"; do
+        [[ -f "$MMPD_SHARED/raw/indices_${ds}.json" ]] || return 1
+    done
+    return 0
+}
+
+JOB_IDX=""
+MERGE_DEP_IDS=()
+if indices_ready; then
+    echo "  [skip] indices (all indices_*.json present under $MMPD_SHARED/raw)"
+else
+    JOB_IDX=$(submit_worker "mmpd-mx-idx${SUFFIX}" "$WALL_IDX" "" "indices")
+    echo "  indices -> $JOB_IDX"
+    MERGE_DEP_IDS+=("$JOB_IDX")
+fi
 MMPD_EVAL_JOBS=()
 ANCHOR_JOBS=()
 
+dep_after_indices=""
+[[ -n "$JOB_IDX" ]] && dep_after_indices="afterok:${JOB_IDX}"
+
 for ds in "${DATASETS[@]}"; do
-    dep_train="afterok:${JOB_IDX}"
+    dep_train="$dep_after_indices"
     if ! mmpd_ckpt_exists "$ds"; then
         j=$(submit_worker "mmpd-mx-tr-${ds}${SUFFIX}" "$WALL_MMPD_TRAIN" "$dep_train" "mmpd-train" "$ds")
         echo "  mmpd-train $ds -> $j"
@@ -265,22 +329,22 @@ for ds in "${DATASETS[@]}"; do
         echo "  [skip] mmpd-train $ds (checkpoint in $MMPD_SHARED/mmpd_out)"
     fi
 
-    if ! mmpd_raw_exists "$ds"; then
+    if ! mmpd_raw_exists "$ds" || [[ "$FORCE" -eq 1 && ! mmpd_partial_ok "$ds" ]]; then
         j=$(submit_worker "mmpd-mx-ev-${ds}${SUFFIX}" "$WALL_MMPD_EVAL" "$dep_train" "mmpd-eval" "$ds")
         echo "  mmpd-eval $ds -> $j"
         MMPD_EVAL_JOBS+=("$j")
         MERGE_DEP_IDS+=("$j")
     else
-        echo "  [skip] mmpd-eval $ds (raw/mmpd_${ds}.npz exists)"
+        echo "  [skip] mmpd-eval $ds (raw/mmpd_${ds}.npz + partial OK)"
     fi
 
     aw=$(anchor_wall_for_dataset "$ds")
     for variant in gaussian binary; do
-        if anchor_partial_exists "$variant" "$ds"; then
-            echo "  [skip] anchor-$variant $ds (metrics partial exists)"
+        if [[ "$FORCE" -eq 0 ]] && anchor_partial_ok "$variant" "$ds"; then
+            echo "  [skip] anchor-$variant $ds (metrics partial OK)"
             continue
         fi
-        j=$(submit_worker "mmpd-mx-a-${variant:0:1}-${ds}${SUFFIX}" "$aw" "afterok:${JOB_IDX}" "anchor" "$ds" "$variant")
+        j=$(submit_worker "mmpd-mx-a-${variant:0:1}-${ds}${SUFFIX}" "$aw" "$dep_after_indices" "anchor" "$ds" "$variant")
         echo "  anchor-$variant $ds -> $j"
         ANCHOR_JOBS+=("$j")
         MERGE_DEP_IDS+=("$j")

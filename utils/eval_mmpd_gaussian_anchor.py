@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """MMPD vs ts-sandbox anchor evaluation (Gaussian and binary+anchor).
 
-Trains upstream MMPD per dataset, then scores MMPD and anchor checkpoints on a
-shared random test subset. Supports phased runs for parallel Slurm fan-out,
-shared MMPD caches (e.g. reuse ETTh1/2/exchange from a prior job), and binary
-diffusion anchor runs from the 92d3 matrix.
+Trains upstream MMPD per dataset on a shared random test subset. Metrics:
+
+- **MMPD:** deterministic + probabilistic (CRPS, top-k via in-loop GMM modes).
+- **Anchor (Gaussian / binary):** deterministic anchor decode only (MSE/MAE).
+
+Supports phased Slurm fan-out and shared MMPD caches from prior runs.
 """
 
 from __future__ import annotations
@@ -742,16 +744,6 @@ def load_tsf_test_subset(
     return Subset(test_ds, list(indices))
 
 
-def anchor_prob_sample_kwargs(_model: Any, args: argparse.Namespace) -> Dict[str, Any]:
-    """Same probabilistic protocol for Gaussian and binary anchor checkpoints."""
-    kwargs: Dict[str, Any] = {"sampler": args.anchor_prob_sampler}
-    if args.anchor_prob_sampler == "ddpm":
-        kwargs["use_ddim"] = False
-    elif args.anchor_prob_sampler != "anchor":
-        kwargs["num_inference_steps"] = args.num_sampling_steps
-    return kwargs
-
-
 def evaluate_anchor(
     args: argparse.Namespace,
     run: AnchorRun,
@@ -775,37 +767,21 @@ def evaluate_anchor(
     model = load_anchor_model(run, args, device)
     y_true: List[np.ndarray] = []
     det: List[np.ndarray] = []
-    samples: List[np.ndarray] = []
-    sample_kwargs = anchor_prob_sample_kwargs(model, args)
-    # Identical ensemble size for both arms (default: 100 × DPM++ with num_sampling_steps).
-    n_draws = args.sample_num
 
     with torch.no_grad():
-        for batch_idx, (past, future) in enumerate(loader):
+        for past, future in loader:
             past = past.to(device)
             future = future.to(device)
             K = getattr(model.config, "lookback_overlap", 0)
             if K > 0:
                 future = future[..., K:]
             y_true.append(future.cpu().numpy())
-
-            # Reported mse/mae use this anchor decode (not DPM++ / top-k modes).
             anchor = model.generate(past, sampler="anchor")["prediction"]
             det.append(anchor.cpu().numpy())
-
-            batch_samples = []
-            for sample_idx in range(n_draws):
-                torch.manual_seed(args.seed + batch_idx * 1009 + sample_idx * 17)
-                if device.type == "cuda":
-                    torch.cuda.manual_seed_all(args.seed + batch_idx * 1009 + sample_idx * 17)
-                pred = model.generate(past, **sample_kwargs)["prediction"]
-                batch_samples.append(pred.cpu().numpy())
-            samples.append(np.stack(batch_samples, axis=2))
 
     return {
         "y_true": np.concatenate(y_true, axis=0),
         "deterministic": np.concatenate(det, axis=0),
-        "samples": np.concatenate(samples, axis=0),
         "indices": np.array(indices, dtype=np.int64),
     }
 
@@ -1138,17 +1114,30 @@ def texture_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     return {key: float(np.mean(value)) for key, value in vals.items()}
 
 
-def summarize_prediction_pack(
+def summarize_anchor_pack(pack: Dict[str, np.ndarray]) -> Dict[str, float]:
+    """Anchor checkpoints: one deterministic decode (sampler=anchor) → MSE/MAE only."""
+    y_true = pack["y_true"]
+    det = pack["deterministic"]
+    metrics: Dict[str, float] = {}
+    metrics.update(deterministic_metrics(y_true, det))
+    metrics.update(texture_metrics(y_true, det))
+    metrics["n_windows"] = float(y_true.shape[0])
+    metrics["n_variates"] = float(y_true.shape[1])
+    return metrics
+
+
+def summarize_mmpd_pack(
     pack: Dict[str, np.ndarray],
-    mode_center: Optional[np.ndarray] = None,
-    mode_prob: Optional[np.ndarray] = None,
     gmm_components: int = 10,
     seed: int = 0,
     topk_max: int = 5,
 ) -> Dict[str, float]:
+    """MMPD: probabilistic predict + in-loop GMM modes → CRPS, top-k, textures."""
     y_true = pack["y_true"]
     det = pack["deterministic"]
     samples = pack["samples"]
+    mode_center = pack.get("mode_center")
+    mode_prob = pack.get("mode_prob")
 
     metrics: Dict[str, float] = {}
     metrics.update(deterministic_metrics(y_true, det))
@@ -1168,6 +1157,22 @@ def summarize_prediction_pack(
     metrics["n_variates"] = float(y_true.shape[1])
     metrics["n_samples"] = float(samples.shape[2])
     return metrics
+
+
+def summarize_prediction_pack(
+    pack: Dict[str, np.ndarray],
+    mode_center: Optional[np.ndarray] = None,
+    mode_prob: Optional[np.ndarray] = None,
+    gmm_components: int = 10,
+    seed: int = 0,
+    topk_max: int = 5,
+) -> Dict[str, float]:
+    """Backward-compatible alias for full MMPD-style metric bundles."""
+    if mode_center is not None:
+        pack = dict(pack)
+        pack["mode_center"] = mode_center
+        pack["mode_prob"] = mode_prob
+    return summarize_mmpd_pack(pack, gmm_components=gmm_components, seed=seed, topk_max=topk_max)
 
 
 def write_outputs(
@@ -1214,18 +1219,22 @@ def stable_dataset_seed(base_seed: int, dataset: str) -> int:
 
 def print_summary(results: Dict[str, Dict[str, Dict[str, float]]]) -> None:
     print("\nSummary")
-    print("dataset,model,mse,mae,crps,top3_mse,top3_mae,texture_pathsig_distance")
+    print("dataset,model,mse,mae,crps,top3_mse,top3_mae")
     for dataset in sorted(results):
         for model in sorted(results[dataset]):
             m = results[dataset][model]
+            crps = m.get("crps", float("nan"))
+            top3_mse = m.get("top3_mse", float("nan"))
+            top3_mae = m.get("top3_mae", float("nan"))
+            if model.endswith("_anchor"):
+                crps = top3_mse = top3_mae = float("nan")
             print(
                 f"{dataset},{model},"
                 f"{m.get('mse', float('nan')):.6f},"
                 f"{m.get('mae', float('nan')):.6f},"
-                f"{m.get('crps', float('nan')):.6f},"
-                f"{m.get('top3_mse', float('nan')):.6f},"
-                f"{m.get('top3_mae', float('nan')):.6f},"
-                f"{m.get('texture_pathsig_distance', float('nan')):.6f}"
+                f"{crps:.6f},"
+                f"{top3_mse:.6f},"
+                f"{top3_mae:.6f}"
             )
 
 
@@ -1394,10 +1403,8 @@ def run_mmpd_eval_phase(
             mmpd_pack = load_raw_pack(cached)
         else:
             mmpd_pack = run_mmpd_eval(args, dataset, indices)
-        metrics = summarize_prediction_pack(
+        metrics = summarize_mmpd_pack(
             mmpd_pack,
-            mode_center=mmpd_pack.get("mode_center"),
-            mode_prob=mmpd_pack.get("mode_prob"),
             gmm_components=args.gmm_components,
             seed=stable_dataset_seed(args.seed, dataset),
             topk_max=args.topk_max,
@@ -1423,12 +1430,7 @@ def run_anchor_phase(
         else:
             anchor_pack = evaluate_anchor(args, anchors[dataset], indices, device)
             np.savez_compressed(save_path, **anchor_pack)
-        metrics = summarize_prediction_pack(
-            anchor_pack,
-            gmm_components=args.gmm_components,
-            seed=stable_dataset_seed(args.seed, dataset),
-            topk_max=args.topk_max,
-        )
+        metrics = summarize_anchor_pack(anchor_pack)
         write_partial_metrics(args, dataset, model_key, metrics)
 
 
@@ -1473,12 +1475,33 @@ def load_indices_from_disk(
     return indices_by_dataset
 
 
-def run_merge_phase(args: argparse.Namespace, manifest: Optional[Dict[str, Any]]) -> None:
+def expected_partial_keys(datasets: Sequence[str]) -> List[Tuple[str, str]]:
+    keys: List[Tuple[str, str]] = []
+    for dataset in datasets:
+        keys.append((dataset, "mmpd"))
+        keys.append((dataset, MODEL_KEYS["gaussian"]))
+        keys.append((dataset, MODEL_KEYS["binary"]))
+    return keys
+
+
+def run_merge_phase(
+    args: argparse.Namespace,
+    manifest: Optional[Dict[str, Any]],
+    datasets: Optional[Sequence[str]] = None,
+) -> None:
+    datasets = list(datasets or args.datasets)
     results = load_partial_metrics(args)
     if not results:
         raise FileNotFoundError(
             f"No metrics_partial/*.json under {args.output_dir}; run eval phases first."
         )
+    missing = []
+    for dataset, model_key in expected_partial_keys(datasets):
+        if dataset not in results or model_key not in results.get(dataset, {}):
+            missing.append(f"{dataset}__{model_key}")
+    if missing:
+        print(f"[warn] merge: missing {len(missing)} partial(s): {', '.join(missing[:12])}"
+              + (" ..." if len(missing) > 12 else ""))
     if manifest is None:
         manifest_path = args.output_dir / "run_manifest.json"
         if manifest_path.exists():
@@ -1574,7 +1597,7 @@ def main() -> None:
             run_anchor_phase(args, variant, anchors_by_variant[variant], indices_by_dataset, device)
 
     if args.phase == "merge":
-        run_merge_phase(args, manifest=None)
+        run_merge_phase(args, manifest=None, datasets=args.datasets)
         return
 
     if args.phase == "mmpd-train":
@@ -1586,7 +1609,7 @@ def main() -> None:
         json.dump(manifest, f, indent=2, sort_keys=True)
 
     if args.phase == "all":
-        run_merge_phase(args, manifest=manifest)
+        run_merge_phase(args, manifest=manifest, datasets=args.datasets)
 
 
 if __name__ == "__main__":
