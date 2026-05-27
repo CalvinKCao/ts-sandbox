@@ -186,6 +186,17 @@ mmpd_partial_ok() {
     return 0
 }
 
+need_mmpd_eval() {
+    local ds="$1"
+    if ! mmpd_raw_exists "$ds"; then
+        return 0
+    fi
+    if [[ "$FORCE" -eq 1 ]] && ! mmpd_partial_ok "$ds"; then
+        return 0
+    fi
+    return 1
+}
+
 submit_worker() {
   # Do not use bash variable name "phase" — conflicts with Lmod/modules on Alliance nodes.
     local job_name="$1" wall="$2" dep="${3:-}" run_phase="$4" dataset="${5:-}" variant="${6:-}"
@@ -329,7 +340,7 @@ for ds in "${DATASETS[@]}"; do
         echo "  [skip] mmpd-train $ds (checkpoint in $MMPD_SHARED/mmpd_out)"
     fi
 
-    if ! mmpd_raw_exists "$ds" || [[ "$FORCE" -eq 1 && ! mmpd_partial_ok "$ds" ]]; then
+    if need_mmpd_eval "$ds"; then
         j=$(submit_worker "mmpd-mx-ev-${ds}${SUFFIX}" "$WALL_MMPD_EVAL" "$dep_train" "mmpd-eval" "$ds")
         echo "  mmpd-eval $ds -> $j"
         MMPD_EVAL_JOBS+=("$j")
