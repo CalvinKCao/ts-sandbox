@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MMPD-only matrix plots. Prefer utils/visualize_matrix_mmpd_binary.py for MMPD+binary overlays."""
+"""Overlay MMPD + binary-anchor forecasts on shared test windows (matrix eval npz)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import json
 import random
 import sys
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Sequence, Tuple
 
 import matplotlib
 
@@ -21,10 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from utils.eval_mmpd_gaussian_anchor import (  # noqa: E402
-    REPO_ROOT as _,
-    load_tsf_pipeline,
-)
+from utils.eval_mmpd_gaussian_anchor import load_tsf_pipeline  # noqa: E402
 
 
 def denorm(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
@@ -41,7 +38,6 @@ def load_variate_indices(matrix_dir: Path, dataset: str) -> List[int]:
         gauss = manifest.get("anchor_runs", {}).get("gaussian", {}).get(dataset, {})
         if gauss:
             return list(gauss["metadata"]["variate_indices"])
-    # Fallback: all channels for standard ETT
     return list(range(7))
 
 
@@ -57,11 +53,37 @@ def choose_extra_indices(
     return rng.sample(pool, min(n_extra, len(pool)))
 
 
-def plot_mmpd_comparison(
+def load_aligned_pack(matrix_dir: Path, dataset: str) -> Tuple[dict, dict, List[int]]:
+    mmpd_path = matrix_dir / "raw" / f"mmpd_{dataset}.npz"
+    bin_path = matrix_dir / "raw" / f"binary_anchor_{dataset}.npz"
+    if not mmpd_path.exists():
+        raise FileNotFoundError(f"Missing {mmpd_path}")
+    if not bin_path.exists():
+        raise FileNotFoundError(f"Missing {bin_path}")
+
+    mmpd = np.load(mmpd_path)
+    binary = np.load(bin_path)
+    mmpd_idx = [int(i) for i in mmpd["indices"].tolist()]
+    bin_idx = [int(i) for i in binary["indices"].tolist()]
+    if mmpd_idx != bin_idx:
+        raise ValueError(
+            f"Index mismatch for {dataset}: MMPD and binary_anchor used different test subsets."
+        )
+    if mmpd["y_true"].shape != binary["y_true"].shape:
+        raise ValueError(f"Shape mismatch for {dataset} between MMPD and binary packs.")
+
+    return (
+        {k: mmpd[k] for k in mmpd.files},
+        {k: binary[k] for k in binary.files},
+        mmpd_idx,
+    )
+
+
+def plot_dataset(
     matrix_dir: Path,
     dataset: str,
     output_dir: Path,
-    num_forecast_windows: int = 3,
+    num_forecast_windows: int = 2,
     num_lookback_windows: int = 2,
     num_futures: int = 5,
     variables_to_plot: int = 3,
@@ -69,18 +91,15 @@ def plot_mmpd_comparison(
     horizon: int = 96,
     seed: int = 2026,
 ) -> Path:
-    npz_path = matrix_dir / "raw" / f"mmpd_{dataset}.npz"
-    if not npz_path.exists():
-        raise FileNotFoundError(f"Missing {npz_path}")
+    mmpd, binary, eval_indices = load_aligned_pack(matrix_dir, dataset)
+    y_true = mmpd["y_true"]
+    mmpd_det = mmpd["deterministic"]
+    mmpd_samples = mmpd["samples"]
+    bin_det = binary["deterministic"]
+    bin_samples = binary["samples"]
 
-    pack = np.load(npz_path)
-    y_true = pack["y_true"]
-    det = pack["deterministic"]
-    samples = pack["samples"]
-    eval_indices = [int(i) for i in pack["indices"].tolist()]
     n_pack = y_true.shape[0]
-    n_samples_avail = samples.shape[2]
-    n_futures = min(num_futures, n_samples_avail)
+    n_futures = min(num_futures, mmpd_samples.shape[2], bin_samples.shape[2])
     variate_indices = load_variate_indices(matrix_dir, dataset)
 
     pipeline = load_tsf_pipeline()
@@ -97,7 +116,6 @@ def plot_mmpd_comparison(
     rng = random.Random(seed)
     row_positions = np.linspace(0, n_pack - 1, min(num_forecast_windows, n_pack), dtype=int)
     forecast_rows = [int(i) for i in row_positions]
-    forecast_test_indices = [eval_indices[r] for r in forecast_rows]
     extra_indices = choose_extra_indices(
         len(test_ds), num_lookback_windows, rng, exclude=eval_indices
     )
@@ -118,13 +136,14 @@ def plot_mmpd_comparison(
 
     for row, pack_row in enumerate(forecast_rows):
         test_idx = eval_indices[pack_row]
-        past, future = test_ds[test_idx]
+        past, _ = test_ds[test_idx]
         past_dn = denorm(past, mean, std)
-        future_dn = denorm(future[:, -horizon:], mean, std)
 
         gt = y_true[pack_row]
-        point = det[pack_row]
-        future_samples = samples[pack_row, :, :n_futures, :]
+        m_point = mmpd_det[pack_row]
+        b_point = bin_det[pack_row]
+        m_futs = mmpd_samples[pack_row, :, :n_futures, :]
+        b_futs = bin_samples[pack_row, :, :n_futures, :]
 
         for col in range(n_vars_plot):
             ax = axes[row, col]
@@ -134,44 +153,68 @@ def plot_mmpd_comparison(
                 color="#9E9E9E",
                 alpha=0.5,
                 linewidth=0.8,
+                label="Context" if row == 0 and col == 0 else "",
             )
-            ax.plot(t_future, gt[col], color="#2196F3", linewidth=1.6, label="Ground truth" if row == 0 and col == 0 else "")
             ax.plot(
                 t_future,
-                point[col],
+                gt[col],
+                color="#2196F3",
+                linewidth=1.8,
+                label="Ground truth" if row == 0 and col == 0 else "",
+            )
+            ax.plot(
+                t_future,
+                m_point[col],
                 color="#4CAF50",
-                linewidth=1.4,
+                linewidth=1.5,
                 linestyle="--",
                 label="MMPD point" if row == 0 and col == 0 else "",
+            )
+            ax.plot(
+                t_future,
+                b_point[col],
+                color="#FF9800",
+                linewidth=1.5,
+                linestyle="-.",
+                label="Binary anchor" if row == 0 and col == 0 else "",
             )
             for s_idx in range(n_futures):
                 ax.plot(
                     t_future,
-                    future_samples[col, s_idx],
+                    m_futs[col, s_idx],
                     color="#E91E63",
-                    linewidth=0.9,
-                    alpha=0.45,
+                    linewidth=0.85,
+                    alpha=0.38,
                     label=f"MMPD futures (n={n_futures})" if row == 0 and col == 0 and s_idx == 0 else "",
                 )
+                ax.plot(
+                    t_future,
+                    b_futs[col, s_idx],
+                    color="#7B1FA2",
+                    linewidth=0.85,
+                    alpha=0.38,
+                    label=f"Binary futures (n={n_futures})" if row == 0 and col == 0 and s_idx == 0 else "",
+                )
+
             ax.axvline(x=0, color="black", linestyle=":", alpha=0.25)
             ax.grid(True, alpha=0.2)
 
-            mae_point = float(np.mean(np.abs(point[col] - gt[col])))
-            mae_mean = float(np.mean(np.abs(future_samples[col].mean(axis=0) - gt[col])))
+            m_mae = float(np.mean(np.abs(m_point[col] - gt[col])))
+            b_mae = float(np.mean(np.abs(b_point[col] - gt[col])))
             ax.text(
                 0.97,
                 0.97,
-                f"point MAE {mae_point:.3f}\nmean MAE {mae_mean:.3f}",
+                f"MMPD {m_mae:.3f}\nBinary {b_mae:.3f}",
                 transform=ax.transAxes,
                 fontsize=7,
                 va="top",
                 ha="right",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75),
             )
             if row == 0:
                 ax.set_title(f"Var {col}", fontsize=10)
             if col == 0:
-                ax.set_ylabel(f"Test idx {test_idx}", fontsize=9)
+                ax.set_ylabel(f"idx {test_idx}", fontsize=9)
 
     for row_off, test_idx in enumerate(extra_indices, start=len(forecast_rows)):
         past, _ = test_ds[test_idx]
@@ -193,16 +236,16 @@ def plot_mmpd_comparison(
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
     if handles:
-        fig.legend(handles, labels, loc="upper center", ncol=4, fontsize=9, bbox_to_anchor=(0.5, 1.02))
+        fig.legend(handles, labels, loc="upper center", ncol=3, fontsize=8, bbox_to_anchor=(0.5, 1.03))
 
     fig.suptitle(
-        f"{dataset} • MMPD • {n_futures} stochastic futures • {len(forecast_rows)} forecast + {len(extra_indices)} lookback windows",
+        f"{dataset} • MMPD vs binary anchor • {len(forecast_rows)} test windows + {len(extra_indices)} lookback",
         fontsize=12,
         fontweight="bold",
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / f"mmpd_{dataset}_comparison.png"
+    out_path = output_dir / f"mmpd_binary_{dataset}_comparison.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {out_path}")
@@ -211,19 +254,14 @@ def plot_mmpd_comparison(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--matrix-dir",
-        type=Path,
-        required=True,
-        help="Matrix eval output (raw/mmpd_<dataset>.npz)",
-    )
+    parser.add_argument("--matrix-dir", type=Path, required=True)
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=REPO_ROOT / "results" / "viz" / "mmpd_matrix",
+        default=REPO_ROOT / "results" / "viz" / "mmpd_binary_matrix",
     )
     parser.add_argument("--datasets", nargs="+", default=None)
-    parser.add_argument("--num-forecast-windows", type=int, default=3)
+    parser.add_argument("--num-forecast-windows", type=int, default=2)
     parser.add_argument("--num-lookback-windows", type=int, default=2)
     parser.add_argument("--num-futures", type=int, default=5)
     parser.add_argument("--vars", type=int, default=3)
@@ -239,7 +277,7 @@ def main() -> None:
         )
 
     for dataset in datasets:
-        plot_mmpd_comparison(
+        plot_dataset(
             matrix_dir,
             dataset,
             args.output_dir.resolve(),
