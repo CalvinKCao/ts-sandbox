@@ -48,7 +48,7 @@
     "cursor": {
       "version": 1,
       "tool": "cursor",
-      "generatedAt": "2026-05-27T02:38:40.870Z",
+      "generatedAt": "2026-05-27T03:26:20.509Z",
       "files": [
         {
           "path": "AGENTS.md",
@@ -120,7 +120,7 @@
     "copilot": {
       "version": 1,
       "tool": "copilot",
-      "generatedAt": "2026-05-27T02:38:40.888Z",
+      "generatedAt": "2026-05-27T03:26:20.513Z",
       "files": [
         {
           "path": "AGENTS.md",
@@ -229,7 +229,7 @@
     "gemini": {
       "version": 1,
       "tool": "gemini",
-      "generatedAt": "2026-05-27T02:38:40.839Z",
+      "generatedAt": "2026-05-27T03:26:20.488Z",
       "files": [
         {
           "path": "AGENTS.md",
