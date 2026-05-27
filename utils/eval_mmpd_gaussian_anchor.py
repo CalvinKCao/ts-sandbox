@@ -664,14 +664,37 @@ def get_ckpt_config_value(ckpt: Dict[str, Any], key: str, default: Any = None) -
     return default
 
 
+def _dit_head_output_dim(state_dict: Dict[str, Any]) -> Optional[int]:
+    for key, tensor in state_dict.items():
+        if key.endswith("noise_predictor.head.bias"):
+            return int(tensor.shape[0])
+    return None
+
+
 def infer_diffusion_type(ckpt: Dict[str, Any]) -> str:
     value = get_ckpt_config_value(ckpt, "diffusion_type")
-    if value:
+    if value in ("binary", "gaussian"):
         return value
-    for key, tensor in ckpt.get("model_state_dict", {}).items():
-        if key.endswith("noise_predictor.head.bias") and getattr(tensor, "shape", [0])[0] == 2:
+    sd = ckpt.get("model_state_dict", {})
+    for key, tensor in sd.items():
+        if key.endswith("noise_predictor.final_conv.weight") and int(tensor.shape[0]) == 2:
             return "binary"
+    head_dim = _dit_head_output_dim(sd)
+    is_dit = any("noise_predictor.blocks." in k for k in sd)
+    if is_dit and head_dim is not None:
+        # DiT: out = out_channels * patch_h * patch_w (1 ch → 64, 2 ch → 128 for 92d3 defaults)
+        if head_dim == 2:
+            return "binary"
+        if head_dim >= 4:
+            return "binary" if head_dim % 2 == 0 and head_dim > 64 else "gaussian"
     return "gaussian"
+
+
+def resolve_diffusion_type(run: AnchorRun, ckpt: Dict[str, Any]) -> str:
+    meta_type = run.metadata.get("diffusion_type")
+    if meta_type in ("binary", "gaussian"):
+        return meta_type
+    return infer_diffusion_type(ckpt)
 
 
 def infer_model_type(ckpt: Dict[str, Any]) -> str:
@@ -699,16 +722,20 @@ def load_anchor_model(run: AnchorRun, args: argparse.Namespace, device: torch.de
     cfg_disable = get_ckpt_config_value(ckpt, "disable_cross_attention", True)
     pipeline.DISABLE_CROSS_ATTENTION = bool(cfg_disable)
     tuned = run.metadata.get("tuned_params", {})
+    diffusion_type = resolve_diffusion_type(run, ckpt)
+    default_alpha = 0.0 if diffusion_type == "binary" else 0.5
     model = pipeline.create_diffusion_model(
         n_variates=n_vars,
         lookback=args.lookback,
         horizon=args.horizon,
-        diffusion_type=infer_diffusion_type(ckpt),
+        diffusion_type=diffusion_type,
         prediction_mode=infer_prediction_mode(ckpt),
         model_type=infer_model_type(ckpt),
         use_deterministic_anchor_loss=True,
         deterministic_anchor_lambda=float(tuned.get("deterministic_anchor_lambda", 0.99)),
-        deterministic_anchor_alpha=float(tuned.get("deterministic_anchor_alpha", 0.5)),
+        deterministic_anchor_alpha=float(
+            tuned.get("deterministic_anchor_alpha", default_alpha)
+        ),
     ).to(device)
     guidance_mod = importlib.import_module("models.diffusion_tsf.guidance")
     model.set_guidance_model(guidance_mod.iTransformerGuidance(itrans))
