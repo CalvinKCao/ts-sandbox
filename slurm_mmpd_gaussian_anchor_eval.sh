@@ -128,6 +128,8 @@ source "\$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 pip install --no-index \\
     'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm einops -q
+pip install --no-index optuna wandb matplotlib -q 2>/dev/null || \\
+    pip install optuna wandb matplotlib -q
 python - <<'PY'
 import torch
 assert torch.cuda.is_available(), "CUDA required"
@@ -268,21 +270,17 @@ ENDSCRIPT
     --account=aip-boyuwang \
     --nodes=1 \
     --cpus-per-task=2 \
-    --mem=8G \
+    --mem=16G \
+    "${GPU_ARGS[@]}" \
     --time="$WALL_MERGE" \
     --dependency="$MERGE_DEP" \
     --output="$LOG_DIR/merge-%j.out" \
     --error="$LOG_DIR/merge-%j.err" \
-    --mail-type=END,FAIL \
+    --mail-type=FAIL \
     --mail-user=ccao87@uwo.ca \
     <<ENDSCRIPT
 #!/bin/bash
-set -euo pipefail
-echo "Merge job: \$SLURM_JOB_ID  Started: \$(date)"
-module --force purge || module purge || true
-module load StdEnv/2023
-module load python/3.11
-cd "$REPO"
+source "$PREAMBLE_FILE"
 python -u ${EVAL_BASE[@]} \
   --phase merge \
   --datasets ${DATASETS[*]} \

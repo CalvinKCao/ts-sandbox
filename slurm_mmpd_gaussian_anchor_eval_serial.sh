@@ -94,6 +94,8 @@ pip install --no-index --upgrade pip -q
 pip install --no-index \
     'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm einops \
     -q
+pip install --no-index optuna wandb matplotlib -q 2>/dev/null || \
+    pip install optuna wandb matplotlib -q
 python - <<'PY'
 import torch
 assert torch.cuda.is_available(), "CUDA required; check torch pin/modules"
