@@ -113,10 +113,18 @@ source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 pip install --no-index \
     'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm einops -q
+# train_multivariate_pipeline imports optuna at module load
+pip install --no-index optuna -q 2>/dev/null || pip install optuna -q
+pip install --no-index reformer_pytorch -q 2>/dev/null \
+    || pip install --no-index reformer-pytorch -q 2>/dev/null \
+    || pip install reformer-pytorch -q 2>/dev/null \
+    || echo "[setup] reformer-pytorch not installed (OK unless Reformer iTrans)"
 python - <<'PY'
+import optuna
 import torch
 assert torch.cuda.is_available(), "CUDA required"
-print("torch", torch.__version__, "gpu", torch.cuda.get_device_name(0))
+import models.diffusion_tsf.train_multivariate_pipeline  # noqa: F401
+print("torch", torch.__version__, "gpu", torch.cuda.get_device_name(0), "optuna", optuna.__version__)
 PY
 
 export PYTHONUNBUFFERED=1
