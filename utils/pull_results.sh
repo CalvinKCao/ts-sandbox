@@ -30,9 +30,13 @@ RSYNC_OPTS=(
     --no-p    # Best practice: avoid permission preservation issues on /project
     --partial # Best practice: allow resuming large .pt file transfers
     --include=*/
+    --include='*.log'
+    --include='*.err'
+    --include='*.out'
     --exclude='*.tmp'
     --exclude='*.npy'
     --exclude='*.npz'
+    --exclude='*'
 )
     # --include='best.pt'
     # --include='metadata.json'
