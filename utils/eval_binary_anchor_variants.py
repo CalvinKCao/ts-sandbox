@@ -97,6 +97,28 @@ def safe_model_id(label: str) -> str:
     return "binary_" + "".join(c if c.isalnum() else "_" for c in label.lower()).strip("_")
 
 
+def expected_partial_paths(
+    output_dir: Path,
+    datasets: Sequence[str],
+    variant_labels: Sequence[str],
+) -> List[Path]:
+    paths: List[Path] = []
+    for dataset in datasets:
+        for label in variant_labels:
+            paths.append(
+                base.partial_metrics_path(output_dir, dataset, safe_model_id(label))
+            )
+    return paths
+
+
+def missing_partial_paths(
+    output_dir: Path,
+    datasets: Sequence[str],
+    variant_labels: Sequence[str],
+) -> List[Path]:
+    return [p for p in expected_partial_paths(output_dir, datasets, variant_labels) if not p.exists()]
+
+
 def write_outputs(args: argparse.Namespace, results: Dict[str, Dict[str, Dict[str, float]]]) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     manifest_args = base.jsonable_args(args)
@@ -321,7 +343,7 @@ def run_merge(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phase", choices=["eval", "merge"], default="eval")
+    parser.add_argument("--phase", choices=["eval", "merge", "check-partials"], default="eval")
     parser.add_argument("--variant-root", action="append", type=parse_variant_root, required=True)
     parser.add_argument("--datasets", nargs="+", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -355,6 +377,14 @@ def main() -> None:
         args.report_path = args.report_path.resolve()
     if args.phase == "eval":
         run_eval(args)
+    elif args.phase == "check-partials":
+        variant_labels = [label for label, _ in args.variant_root]
+        missing = missing_partial_paths(args.output_dir, args.datasets, variant_labels)
+        for path in missing:
+            print(path.relative_to(args.output_dir))
+        if missing:
+            sys.exit(1)
+        print(f"ok: {len(args.datasets) * len(variant_labels)} partials present")
     else:
         run_merge(args)
 

@@ -239,64 +239,44 @@ EOF
     done
 done
 
-merge_worker="$JOB_DIR/merge-report.sh"
-variant_args=()
-for variant_spec in "${VARIANTS[@]}"; do
-    IFS='|' read -r variant _extra_flags <<< "$variant_spec"
-    # Any existing root for the label is enough for merge ordering/report labels.
-    first_spec="${DATASET_SPECS[0]}"
-    IFS='|' read -r first_dataset _subset _n _idx <<< "$first_spec"
-    variant_args+=(--variant-root "$variant=${CKPT_ROOT[$variant:$first_dataset]}")
-done
-dataset_args=()
-for spec in "${DATASET_SPECS[@]}"; do
-    IFS='|' read -r dataset _subset _n _idx <<< "$spec"
-    dataset_args+=("$dataset")
-done
-cat > "$merge_worker" <<EOF
-#!/bin/bash
-source "$PREAMBLE_FILE"
-python -u "$EVAL_SCRIPT" \\
-  --phase merge \\
-  ${variant_args[*]} \\
-  --datasets ${dataset_args[*]} \\
-  --output-dir "$EVAL_OUT" \\
-  --test-fraction 0.5 \\
-  --sample-num 9 \\
-  --num-sampling-steps 20 \\
-  --gmm-components 9 \\
-  --anchor-batch-size 16 \\
-  --texture-per-sample
-EOF
-chmod +x "$merge_worker"
+"$REPO/utils/write_crossvar_merge_invoke.sh" "$RUN_STEM" "$REPO" "$DATE_TAG"
+MERGE_INVOKE="$JOB_DIR/merge_invoke.sh"
+WAIT_SCRIPT="$REPO/utils/wait_and_merge_binary_crossvar.sh"
+chmod +x "$WAIT_SCRIPT"
 
-MERGE_DEP="afterok:${EVAL_JOBS[0]}"
+printf '%s\n' "${EVAL_JOBS[@]}" > "$JOB_DIR/eval_job_ids.txt"
+
+MERGE_DEP="afterany:${EVAL_JOBS[0]}"
 for ejid in "${EVAL_JOBS[@]:1}"; do
     MERGE_DEP+=":$ejid"
 done
 
-echo "Submitting merge/report [$MERGE_DEP]..."
+echo "Submitting merge waiter (polls partials, then merge) [$MERGE_DEP]..."
 MERGE_JOB=$(sbatch --parsable \
-    --job-name="merge-${RUN_STEM}" \
+    --job-name="merge-wait-${RUN_STEM}" \
     --account=aip-boyuwang \
     --nodes=1 \
     --cpus-per-task=2 \
     --mem=16G \
-    --time=0:30:00 \
+    --time=7-00:00:00 \
     --dependency="$MERGE_DEP" \
-    --output="$LOG_DIR/merge-%j.out" \
-    --error="$LOG_DIR/merge-%j.err" \
-    --mail-type=FAIL \
+    --output="$LOG_DIR/merge-wait-%j.out" \
+    --error="$LOG_DIR/merge-wait-%j.err" \
+    --mail-type=END,FAIL \
     --mail-user=ccao87@uwo.ca \
-    "$merge_worker")
+    --export=ALL,REPO="$REPO",EVAL_OUT="$EVAL_OUT",EVAL_SCRIPT="$EVAL_SCRIPT",MERGE_INVOKE="$MERGE_INVOKE" \
+    "$WAIT_SCRIPT")
+echo "$MERGE_JOB" > "$JOB_DIR/merge_waiter_job_id.txt"
 
 echo ""
 echo "=================================================================="
 echo "  Cross-var ablation chain submitted"
-echo "  Train jobs: ${#TRAIN_JOB[@]}   Eval jobs: ${#EVAL_JOBS[@]}   Merge: $MERGE_JOB"
+echo "  Train jobs: ${#TRAIN_JOB[@]}   Eval jobs: ${#EVAL_JOBS[@]}   Merge waiter: $MERGE_JOB"
 echo "  Checkpoints: results/ckpts/${DATE_TAG}-bin-h128-xvar-{variant}-{subset}"
 echo "  Metrics:     $EVAL_OUT/metrics.csv"
 echo "  Report:      reports/${RUN_STEM}_binary_variant_report.md"
 echo "  Logs:        $LOG_DIR/"
+echo "  Merge waiter polls partials/ then writes metrics.csv (resubmit evals OK)"
+echo "  Re-submit waiter: utils/submit_crossvar_merge_waiter.sh --run-stem $RUN_STEM"
 echo "  Monitor:     squeue -u \$USER"
 echo "=================================================================="
