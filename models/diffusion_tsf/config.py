@@ -136,6 +136,8 @@ class DiffusionTSFConfig:
     use_deterministic_anchor_loss: bool = False
     deterministic_anchor_lambda: float = 0.99
     deterministic_anchor_alpha: float = 0.5
+    use_window_normalization: bool = True
+    zero_guidance_forecast: bool = False
 
     # which backbone: "unet" (ConditionalUNet2D) or "dit" (FactorizedDiT)
     model_type: str = "unet"

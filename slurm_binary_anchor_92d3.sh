@@ -27,6 +27,12 @@ ANCHOR_LAMBDA="0.99"
 ANCHOR_ALPHA="0.0"
 EVAL_SAMPLER="anchor"
 IMAGE_HEIGHT=""
+VARIATE_INDICES=""
+SUBSET_ID=""
+DISABLE_WINDOW_NORMALIZATION=0
+ZERO_GUIDANCE_FORECAST=0
+DISABLE_CROSS_ATTENTION=0
+WINDOW_STRIDE=1
 WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 
 while [[ $# -gt 0 ]]; do
@@ -53,6 +59,12 @@ while [[ $# -gt 0 ]]; do
         --eval-sampler) EVAL_SAMPLER="$2"; shift 2 ;;
         --wandb-project) WANDB_PROJECT="$2"; shift 2 ;;
         --image-height) IMAGE_HEIGHT="$2"; shift 2 ;;
+        --variate-indices) VARIATE_INDICES="$2"; shift 2 ;;
+        --subset-id) SUBSET_ID="$2"; shift 2 ;;
+        --disable-window-normalization) DISABLE_WINDOW_NORMALIZATION=1; shift ;;
+        --zero-guidance-forecast) ZERO_GUIDANCE_FORECAST=1; shift ;;
+        --disable-cross-attention) DISABLE_CROSS_ATTENTION=1; shift ;;
+        --window-stride) WINDOW_STRIDE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -61,6 +73,7 @@ if [[ -z "$N_VARIATES" ]]; then
     if [[ "$DATASET" == "electricity" ]]; then N_VARIATES=321
     elif [[ "$DATASET" == "exchange_rate" ]]; then N_VARIATES=8
     elif [[ "$DATASET" == "weather" ]]; then N_VARIATES=21
+    elif [[ "$DATASET" == "dalia" ]]; then N_VARIATES=5
     else N_VARIATES=7
     fi
 fi
@@ -103,6 +116,11 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         $([[ "$RESUME" -eq 1 ]] && echo --resume) \
         $([[ -n "$RUN_STEM" ]] && echo --run-stem "$RUN_STEM") \
         $([[ -n "$IMAGE_HEIGHT" ]] && echo --image-height "$IMAGE_HEIGHT") \
+        $([[ -n "$VARIATE_INDICES" ]] && echo --variate-indices "$VARIATE_INDICES") \
+        $([[ -n "$SUBSET_ID" ]] && echo --subset-id "$SUBSET_ID") \
+        $([[ "$DISABLE_WINDOW_NORMALIZATION" -eq 1 ]] && echo --disable-window-normalization) \
+        $([[ "$ZERO_GUIDANCE_FORECAST" -eq 1 ]] && echo --zero-guidance-forecast) \
+        $([[ "$DISABLE_CROSS_ATTENTION" -eq 1 ]] && echo --disable-cross-attention) \
         $([[ "$SMOKE" -eq 1 ]] && echo --smoke-test) \
         --wandb-project "$WANDB_PROJECT"
     exit 0
@@ -188,7 +206,6 @@ TRAIN_ARGS=(
     --deterministic-anchor-lambda "$ANCHOR_LAMBDA"
     --deterministic-anchor-alpha "$ANCHOR_ALPHA"
     --model-type dit
-    --disable-cross-attention
     --eval-sampler "$EVAL_SAMPLER"
     --checkpoint-dir "$CKPT_DIR"
     --results-dir "$DATA_DIR"
@@ -205,6 +222,27 @@ if [[ "$SMOKE" -eq 1 ]]; then
 fi
 if [[ -n "$IMAGE_HEIGHT" ]]; then
     TRAIN_ARGS+=(--image-height "$IMAGE_HEIGHT")
+fi
+if [[ -n "$VARIATE_INDICES" ]]; then
+    TRAIN_ARGS+=(--variate-indices "$VARIATE_INDICES")
+fi
+if [[ -n "$SUBSET_ID" ]]; then
+    TRAIN_ARGS+=(--subset-id "$SUBSET_ID")
+fi
+if [[ "$DISABLE_WINDOW_NORMALIZATION" -eq 1 ]]; then
+    TRAIN_ARGS+=(--disable-window-normalization)
+fi
+if [[ "$ZERO_GUIDANCE_FORECAST" -eq 1 ]]; then
+    TRAIN_ARGS+=(--zero-guidance-forecast)
+fi
+if [[ "$DISABLE_CROSS_ATTENTION" -eq 1 ]]; then
+    TRAIN_ARGS+=(--disable-cross-attention)
+fi
+if [[ "$WINDOW_STRIDE" -gt 1 ]]; then
+    TRAIN_ARGS+=(--window-stride "$WINDOW_STRIDE")
+fi
+if [[ "$DATASET" == "dalia" ]] && [[ "$WINDOW_STRIDE" -le 1 ]]; then
+    TRAIN_ARGS+=(--window-stride 2)
 fi
 if [[ -n "${WANDB_API_KEY:-}" ]] && [[ "$WANDB_API_KEY" =~ ^[A-Za-z0-9_]+$ ]]; then
     TRAIN_ARGS+=(--wandb --wandb-project "$WANDB_PROJECT")

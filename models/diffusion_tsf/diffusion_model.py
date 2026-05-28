@@ -431,6 +431,17 @@ class DiffusionTSF(nn.Module):
         mean, std = stats
         K = self.config.lookback_overlap
         H = forecast_length - K
+        if self.config.zero_guidance_forecast:
+            coarse_norm = torch.zeros(
+                past.shape[0],
+                self.config.num_variables,
+                H,
+                device=past.device,
+                dtype=past.dtype,
+            )
+            if K > 0:
+                coarse_norm = torch.cat([torch.zeros_like(past_norm[..., -K:]), coarse_norm], dim=-1)
+            return coarse_norm
         with torch.no_grad():
             coarse = self.guidance_model.get_forecast(past, H)
         coarse_norm = (coarse - mean) / std
@@ -457,6 +468,10 @@ class DiffusionTSF(nn.Module):
         future: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Per-window z-score using past mean/std; future uses the same stats."""
+        if not self.config.use_window_normalization:
+            mean = torch.zeros_like(past[..., :1])
+            std = torch.ones_like(past[..., :1])
+            return past, future, (mean, std)
         mean = past.mean(dim=-1, keepdim=True)
         std = past.std(dim=-1, keepdim=True) + 1e-8
         past_norm = (past - mean) / std

@@ -68,6 +68,14 @@ from models.diffusion_tsf.metrics import compute_metrics
 from models.diffusion_tsf.dataset import get_synthetic_dataloader
 from models.diffusion_tsf.guidance import iTransformerGuidance
 from models.diffusion_tsf.storage_paths import resolve_checkpoint_dir, resolve_results_dir
+from models.diffusion_tsf.dalia_data import (
+    DALIA_CHANNEL_NAMES,
+    DALIA_DEFAULT_FORECAST,
+    DALIA_DEFAULT_LOOKBACK,
+    DALIA_N_VARS,
+    dalia_window_lengths,
+    load_dalia_dataset,
+)
 
 DATASETS_DIR = os.path.join(project_root, "datasets")
 CHECKPOINT_DIR = resolve_checkpoint_dir(script_dir)
@@ -222,6 +230,26 @@ def anchor_kwargs_from_params(params: Optional[Dict] = None) -> Dict:
         'use_deterministic_anchor_loss': True,
         'deterministic_anchor_lambda': anchor_lambda,
         'deterministic_anchor_alpha': anchor_alpha,
+    }
+
+
+def diffusion_arch_config_dict() -> Dict[str, Any]:
+    """Architecture/runtime flags needed to reconstruct diffusion checkpoints."""
+    return {
+        'image_height': IMAGE_HEIGHT,
+        'disable_cross_attention': DISABLE_CROSS_ATTENTION,
+        'model_type': MODEL_TYPE,
+        'prediction_mode': PREDICTION_MODE,
+        'diffusion_type': DIFFUSION_TYPE,
+        'dit_patch_size': DIT_PATCH_SIZE,
+        'dit_embed_dim': DIT_EMBED_DIM,
+        'dit_depth': DIT_DEPTH,
+        'dit_num_heads': DIT_NUM_HEADS,
+        'dit_mlp_ratio': DIT_MLP_RATIO,
+        'dit_dropout': DIT_DROPOUT,
+        'use_window_normalization': USE_WINDOW_NORMALIZATION,
+        'zero_guidance_forecast': ZERO_GUIDANCE_FORECAST,
+        'window_stride': WINDOW_STRIDE,
     }
 
 
@@ -751,6 +779,9 @@ from models.diffusion_tsf.pipeline_config import (
     DETERMINISTIC_ANCHOR_LOSS,
     DETERMINISTIC_ANCHOR_LAMBDA,
     DETERMINISTIC_ANCHOR_ALPHA,
+    USE_WINDOW_NORMALIZATION,
+    ZERO_GUIDANCE_FORECAST,
+    WINDOW_STRIDE,
     ANCHOR_HP_LAMBDA_MIN,
     ANCHOR_HP_LAMBDA_MAX,
     ANCHOR_HP_ALPHA_MIN,
@@ -781,7 +812,16 @@ DATASET_REGISTRY = {
     'traffic': ('traffic/traffic.csv', 'date', 24),
     'PeMS': ('PeMS/PeMS.csv', 'Time', 24),
     'solar_Alabama': ('solar_Alabama/solar_Alabama.csv', 'Unnamed: 0', 96),
+    # Path unused; tensors loaded from DALIA/Forecast100*.pt (see dalia_data.py).
+    'dalia': ('dalia/Forecast100.pt', '_index', 96),
 }
+
+
+def dataset_window_lengths(dataset_name: str) -> Tuple[int, int]:
+    """Per-dataset (lookback, forecast) for finetune/eval; pretrain stays on pipeline defaults."""
+    if dataset_name == 'dalia':
+        return dalia_window_lengths()
+    return LOOKBACK_LENGTH, FORECAST_LENGTH
 
 
 def set_realts_training_epoch(loader_or_subset_or_dataset, epoch: int) -> None:
@@ -813,6 +853,8 @@ def get_synth_cache_dir(checkpoint_dir: Optional[str] = None, smoke_test: bool =
 
 def get_dataset_n_cols(dataset_name: str) -> int:
     """Return the number of numeric columns in a dataset (excluding date)."""
+    if dataset_name == 'dalia':
+        return DALIA_N_VARS
     path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
     df = pd.read_csv(path, nrows=1)
     date_col = DATASET_REGISTRY[dataset_name][1]
@@ -963,9 +1005,17 @@ def load_itransformer_from_checkpoint(
             f"cannot infer seq_len."
         )
     ckpt_seq_len = int(state[weight_key].shape[1])
+    proj_key = 'projector.weight'
+    if proj_key in state:
+        ckpt_pred_len = int(state[proj_key].shape[0])
+    else:
+        ckpt_pred_len = FORECAST_LENGTH
 
     model = create_itransformer(
-        seq_len=ckpt_seq_len, num_vars=num_vars, dropout=dropout,
+        seq_len=ckpt_seq_len,
+        pred_len=ckpt_pred_len,
+        num_vars=num_vars,
+        dropout=dropout,
     ).to(device)
     try:
         model.load_state_dict(state, strict=True)
@@ -1011,8 +1061,8 @@ def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Di
 
 def create_diffusion_model(
     n_variates: int = None,
-    lookback: int = LOOKBACK_LENGTH,
-    horizon: int = FORECAST_LENGTH,
+    lookback: Optional[int] = None,
+    horizon: Optional[int] = None,
     lookback_overlap: int = LOOKBACK_OVERLAP,
     past_loss_weight: float = PAST_LOSS_WEIGHT,
     guidance_penalty_weight: Optional[float] = None,
@@ -1022,8 +1072,14 @@ def create_diffusion_model(
     use_deterministic_anchor_loss: Optional[bool] = None,
     deterministic_anchor_lambda: Optional[float] = None,
     deterministic_anchor_alpha: Optional[float] = None,
+    use_window_normalization: Optional[bool] = None,
+    zero_guidance_forecast: Optional[bool] = None,
 ) -> DiffusionTSF:
     """Create DiffusionTSF model with iTransformer guidance channel enabled."""
+    if lookback is None:
+        lookback = LOOKBACK_LENGTH
+    if horizon is None:
+        horizon = FORECAST_LENGTH
     if n_variates is None:
         n_variates = N_VARIATES
     if guidance_penalty_weight is None:
@@ -1040,6 +1096,10 @@ def create_diffusion_model(
         deterministic_anchor_lambda = DETERMINISTIC_ANCHOR_LAMBDA
     if deterministic_anchor_alpha is None:
         deterministic_anchor_alpha = DETERMINISTIC_ANCHOR_ALPHA
+    if use_window_normalization is None:
+        use_window_normalization = USE_WINDOW_NORMALIZATION
+    if zero_guidance_forecast is None:
+        zero_guidance_forecast = ZERO_GUIDANCE_FORECAST
     if diffusion_type == "binary" and prediction_mode == "x0_cumsum":
         raise ValueError("x0_cumsum prediction mode is only supported for gaussian diffusion.")
     if prediction_mode == "x0_cumsum" and use_deterministic_anchor_loss:
@@ -1085,6 +1145,8 @@ def create_diffusion_model(
         use_deterministic_anchor_loss=use_deterministic_anchor_loss,
         deterministic_anchor_lambda=deterministic_anchor_lambda,
         deterministic_anchor_alpha=deterministic_anchor_alpha,
+        use_window_normalization=use_window_normalization,
+        zero_guidance_forecast=zero_guidance_forecast,
     )
     return DiffusionTSF(config)
 
@@ -1153,9 +1215,10 @@ def _paper_split_borders(dataset_name: str, n: int, seq_len: int) -> Tuple[List[
 def load_dataset(
     dataset_name: str,
     variate_indices: List[int] = None,
-    lookback: int = LOOKBACK_LENGTH,
-    horizon: int = FORECAST_LENGTH,
+    lookback: Optional[int] = None,
+    horizon: Optional[int] = None,
     stride: int = 1,
+    test_stride: Optional[int] = None,
     lookback_overlap: int = LOOKBACK_OVERLAP,
 ) -> Tuple[Dataset, Dataset, Dataset, Dict]:
     """Load dataset and return train/val/test splits matching iTransformer paper.
@@ -1163,9 +1226,26 @@ def load_dataset(
     Splits follow the upstream iTransformer / TimesNet data loaders: fixed
     month-based boundaries for ETT* and 70/10/20 length-based otherwise, with
     the standard overlap trick (val/test windows can reach back into the
-    previous split by ``lookback`` steps). All three splits use stride=1 so
-    test MSE is averaged over the full sliding-window protocol from the paper.
+    previous split by ``lookback`` steps). Train/val use ``stride``; test uses
+    ``test_stride`` (default: same as ``stride``). Finetune jobs pass
+    ``test_stride=1`` so eval keeps the dense paper protocol while train/val
+  can use a larger stride to cut redundant overlap.
     """
+    if test_stride is None:
+        test_stride = stride
+    if lookback is None:
+        lookback = DALIA_DEFAULT_LOOKBACK if dataset_name == 'dalia' else LOOKBACK_LENGTH
+    if horizon is None:
+        horizon = DALIA_DEFAULT_FORECAST if dataset_name == 'dalia' else FORECAST_LENGTH
+    if dataset_name == 'dalia':
+        return load_dalia_dataset(
+            variate_indices=variate_indices,
+            lookback=lookback,
+            horizon=horizon,
+            stride=stride,
+            test_stride=test_stride,
+            lookback_overlap=lookback_overlap,
+        )
     path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
     date_col = DATASET_REGISTRY[dataset_name][1]
 
@@ -1202,7 +1282,7 @@ def load_dataset(
         lookback_overlap=lookback_overlap,
     )
     test_ds = TimeSeriesDataset(
-        data[border1s[2]:border2s[2]], lookback, horizon, stride,
+        data[border1s[2]:border2s[2]], lookback, horizon, test_stride,
         lookback_overlap=lookback_overlap,
     )
 
@@ -1215,6 +1295,13 @@ def load_dataset(
 
 def generate_dataset_job(dataset_name: str, n_variates: int = None, seed: int = 42) -> Dict:
     """Return one full-dataset training job (no variate partitioning)."""
+    if dataset_name == 'dalia':
+        indices = list(range(DALIA_N_VARS))
+        return {
+            'dataset_id': dataset_name,
+            'variate_indices': indices,
+            'variate_names': DALIA_CHANNEL_NAMES,
+        }
     path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
     df = pd.read_csv(path, nrows=1)
     date_col = DATASET_REGISTRY[dataset_name][1]
@@ -1443,9 +1530,15 @@ def select_itrans_batch_size(
     device: torch.device,
     dropout: float,
     max_candidate: int,
+    seq_len: Optional[int] = None,
+    pred_len: Optional[int] = None,
 ) -> int:
     """Probe iTransformer memory with one train step and pick largest safe even batch."""
     sample_past, sample_future = dataset[0]
+    if seq_len is None:
+        seq_len = int(sample_past.shape[-1])
+    if pred_len is None:
+        pred_len = int(sample_future.shape[-1]) - LOOKBACK_OVERLAP
 
     def _try(bs: int) -> bool:
         model = None
@@ -1457,7 +1550,9 @@ def select_itrans_batch_size(
         try:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            model = create_itransformer(dropout=dropout).to(device)
+            model = create_itransformer(
+                seq_len=seq_len, pred_len=pred_len, dropout=dropout,
+            ).to(device)
             model.train()
             optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
             optimizer.zero_grad(set_to_none=True)
@@ -1544,6 +1639,8 @@ def itrans_hp_objective(
     best_state: Optional[dict] = None,
     pretrained_ckpt: Optional[str] = None,
     max_epochs: int = ITRANS_HP_PRETRAIN_MAX_EPOCHS,
+    seq_len: Optional[int] = None,
+    pred_len: Optional[int] = None,
 ):
     """Optuna objective for iTransformer HP search.
 
@@ -1560,9 +1657,14 @@ def itrans_hp_objective(
     batch_size = fixed_batch_size if fixed_batch_size is not None else ITRANS_PAPER_BATCH_SIZE
     dropout = ITRANS_PAPER_DROPOUT
 
+    if seq_len is None:
+        seq_len = ITRANSFORMER_SEQ_LEN
+    if pred_len is None:
+        pred_len = FORECAST_LENGTH
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    model = create_itransformer(dropout=dropout).to(device)
+    model = create_itransformer(seq_len=seq_len, pred_len=pred_len, dropout=dropout).to(device)
     if pretrained_ckpt is not None and os.path.exists(pretrained_ckpt):
         ckpt = torch.load(pretrained_ckpt, map_location=device, weights_only=False)
         try:
@@ -2219,7 +2321,7 @@ def finetune_hp_objective(
     # Load data
     train_ds, val_ds, _, _ = load_dataset(
         dataset_name, variate_indices,
-        stride=1,
+        stride=WINDOW_STRIDE, test_stride=1,
     )
     
     if smoke_test:
@@ -2286,12 +2388,14 @@ def finetune_hp_objective(
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             if trial_ckpt_path is not None and is_main_process():
+                ckpt_config = diffusion_arch_config_dict()
+                ckpt_config.update({
+                    'tuned_params': trial_tuned_params,
+                    'trial_number': trial.number,
+                })
                 save_checkpoint(
                     unwrap_model(model), optimizer, epoch, float('nan'), val_loss,
-                    {
-                        'tuned_params': trial_tuned_params,
-                        'trial_number': trial.number,
-                    },
+                    ckpt_config,
                     trial_ckpt_path,
                 )
 
@@ -2364,6 +2468,13 @@ def _promote_best_trial_to_final(
                 'best_epoch': best_epoch,
                 'promoted_from_trial_ckpt': True,
                 'diffusion_type': DIFFUSION_TYPE,
+                'image_height': IMAGE_HEIGHT,
+                'disable_cross_attention': DISABLE_CROSS_ATTENTION,
+                'use_window_normalization': USE_WINDOW_NORMALIZATION,
+                'zero_guidance_forecast': ZERO_GUIDANCE_FORECAST,
+                'window_stride': WINDOW_STRIDE,
+                'lookback_length': LOOKBACK_LENGTH,
+                'forecast_length': FORECAST_LENGTH,
             }, f, indent=2)
         for fn in os.listdir(subset_dir):
             if fn.startswith('_diff_ft_trial_') and fn.endswith('_best.pt'):
@@ -2630,6 +2741,90 @@ def update_summary_csv(results_dir):
 # iTransformer Baseline Evaluation
 # ============================================================================
 
+def train_subset_itransformer_full_baseline(
+    dataset_name: str,
+    variate_indices: List[int],
+    subset_id: str,
+    device: torch.device,
+    smoke_test: bool = False,
+    epochs: int = None,
+    patience: int = None,
+) -> str:
+    """Train iTransformer from scratch on the full train split (no diffusion, no warm-start).
+
+    This is the fair ``iTrans-only'' comparison: same variates and train/val windows as the
+    diffusion finetune job, but a separate model not used as guidance.
+    """
+    ds_lb, ds_hz = dataset_window_lengths(dataset_name)
+    ckpt_path = os.path.join(CHECKPOINT_DIR, f'{subset_id}_itrans_full_dataset.pt')
+    if os.path.exists(ckpt_path) and not smoke_test:
+        logger.info(f"  Using cached full-dataset iTransformer baseline: {ckpt_path}")
+        return ckpt_path
+
+    global LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN
+    saved_lens = (LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN)
+    LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN = ds_lb, ds_hz, ds_lb
+    try:
+        train_ds, val_ds, _, _ = load_dataset(
+            dataset_name, variate_indices,
+            stride=WINDOW_STRIDE, test_stride=1,
+        )
+        if smoke_test:
+            train_ds = Subset(train_ds, list(range(min(4, len(train_ds)))))
+            val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
+
+        train_loader = DataLoader(
+            train_ds, batch_size=ITRANS_PAPER_BATCH_SIZE, shuffle=True, num_workers=0,
+        )
+        val_loader = DataLoader(
+            val_ds, batch_size=min(ITRANS_PAPER_BATCH_SIZE, 32), shuffle=False, num_workers=0,
+        )
+
+        n_iv = len(variate_indices)
+        model = create_itransformer(
+            seq_len=ds_lb, pred_len=ds_hz, num_vars=n_iv, dropout=ITRANS_PAPER_DROPOUT,
+        ).to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+        criterion = nn.MSELoss()
+
+        max_epochs = 1 if smoke_test else (epochs if epochs is not None else ITRANS_HP_FINETUNE_MAX_EPOCHS)
+        patience_val = 1 if smoke_test else (patience if patience is not None else 5)
+        early_stop = EarlyStopping(patience=patience_val)
+        best_val = float('inf')
+
+        logger.info(
+            f"[{subset_id}] Training full-dataset iTransformer baseline "
+            f"({max_epochs} epochs, lookback={ds_lb}, forecast={ds_hz}, n={n_iv})..."
+        )
+        for epoch in range(max_epochs):
+            train_loss = train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
+            val_loss = validate_itransformer(model, val_loader, criterion, device)
+            logger.info(
+                f"[{subset_id}] iTrans full-baseline epoch {epoch + 1}/{max_epochs} "
+                f"train={train_loss:.4f} val={val_loss:.4f}"
+            )
+            if val_loss < best_val:
+                best_val = val_loss
+                save_checkpoint(
+                    model, optimizer, epoch, train_loss, val_loss,
+                    {
+                        'subset_id': subset_id,
+                        'dataset_name': dataset_name,
+                        'variate_indices': variate_indices,
+                        'lookback_length': ds_lb,
+                        'forecast_length': ds_hz,
+                        'type': 'itrans_full_dataset_baseline',
+                    },
+                    ckpt_path,
+                )
+            if early_stop(val_loss):
+                break
+        logger.info(f"  Full-dataset iTransformer baseline saved → {ckpt_path} (val={best_val:.4f})")
+        return ckpt_path
+    finally:
+        LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN = saved_lens
+
+
 def evaluate_itransformer_baseline(
     subset_id: str,
     dataset_name: str,
@@ -2638,63 +2833,75 @@ def evaluate_itransformer_baseline(
     results_dir: str,
     device: torch.device,
     smoke_test: bool = False,
+    test_indices: Optional[List[int]] = None,
 ) -> Dict:
-    """Run iTransformer-only forecast on test set and save to itransformer_baseline.json.
+    """Run iTransformer-only forecast on the test split (same windows as diffusion eval).
 
-    Reuses the same test split as diffusion eval so the numbers are directly
-    comparable. Results are merged into a single baseline file so summarize_results.py
-    can produce the comparison table automatically.
+    Results are merged into the per-subset ``results.json`` for summary tables.
     """
-    _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=1)
-    if smoke_test:
-        test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
-    test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
+    ds_lb, ds_hz = dataset_window_lengths(dataset_name)
+    global LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN
+    saved_lens = (LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN)
+    LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN = ds_lb, ds_hz, ds_lb
+    try:
+        _, _, test_ds, _ = load_dataset(
+            dataset_name, variate_indices, stride=1, test_stride=1,
+        )
+        if test_indices is not None:
+            test_ds = Subset(test_ds, list(test_indices))
+        elif smoke_test:
+            test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
+        test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
 
-    n_iv = len(variate_indices)
-    itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
+        n_iv = len(variate_indices)
+        itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
 
-    all_preds, all_targets = [], []
-    with torch.no_grad():
-        for past, future in test_loader:
-            past = past.to(device)
-            B, C, L = past.shape
-            x_enc = past.permute(0, 2, 1)
-            seq_sl = getattr(itrans_model, 'seq_len', L)
-            if x_enc.shape[1] > seq_sl:
-                x_enc = x_enc[:, -seq_sl:, :]
-            x_dec = torch.zeros(B, FORECAST_LENGTH, C, device=device, dtype=past.dtype)
-            output = itrans_model(x_enc, None, x_dec, None)
-            if isinstance(output, tuple):
-                output = output[0]
-            all_preds.append(output.permute(0, 2, 1).cpu())
-            # Strip overlap from target to match H-step prediction
-            if LOOKBACK_OVERLAP > 0:
-                future = future[..., LOOKBACK_OVERLAP:]
-            all_targets.append(future)
+        all_preds, all_targets = [], []
+        with torch.no_grad():
+            for past, future in test_loader:
+                past = past.to(device)
+                B, C, L = past.shape
+                x_enc = past.permute(0, 2, 1)
+                seq_sl = getattr(itrans_model, 'seq_len', L)
+                if x_enc.shape[1] > seq_sl:
+                    x_enc = x_enc[:, -seq_sl:, :]
+                x_dec = torch.zeros(B, ds_hz, C, device=device, dtype=past.dtype)
+                output = itrans_model(x_enc, None, x_dec, None)
+                if isinstance(output, tuple):
+                    output = output[0]
+                all_preds.append(output.permute(0, 2, 1).cpu())
+                if LOOKBACK_OVERLAP > 0:
+                    future = future[..., LOOKBACK_OVERLAP:]
+                all_targets.append(future)
 
-    preds = torch.cat(all_preds, dim=0)
-    targets = torch.cat(all_targets, dim=0)
+        preds = torch.cat(all_preds, dim=0)
+        targets = torch.cat(all_targets, dim=0)
 
-    mse = torch.nn.functional.mse_loss(preds, targets).item()
-    mae = torch.nn.functional.l1_loss(preds, targets).item()
-    pred_diff = preds[:, :, 1:] - preds[:, :, :-1]
-    tgt_diff = targets[:, :, 1:] - targets[:, :, :-1]
-    trend_acc = ((pred_diff > 0) == (tgt_diff > 0)).float().mean().item()
+        mse = torch.nn.functional.mse_loss(preds, targets).item()
+        mae = torch.nn.functional.l1_loss(preds, targets).item()
+        pred_diff = preds[:, :, 1:] - preds[:, :, :-1]
+        tgt_diff = targets[:, :, 1:] - targets[:, :, :-1]
+        trend_acc = ((pred_diff > 0) == (tgt_diff > 0)).float().mean().item()
 
-    metrics = {'mse': mse, 'mae': mae, 'trend_accuracy': trend_acc}
-    logger.info(f"[{subset_id}] iTransformer baseline: MSE={mse:.4f}, MAE={mae:.4f}, trend={trend_acc:.3f}")
+        metrics = {'mse': mse, 'mae': mae, 'trend_accuracy': trend_acc}
+        logger.info(
+            f"[{subset_id}] iTransformer full-dataset baseline: "
+            f"MSE={mse:.4f}, MAE={mae:.4f}, trend={trend_acc:.3f}"
+        )
 
-    # Merge into the per-subset results.json (same file as diffusion eval)
-    data = _load_subset_results(results_dir, subset_id)
-    data.setdefault('subset_id', subset_id)
-    data.setdefault('dataset', dataset_name)
-    data.setdefault('variate_indices', variate_indices)
-    data['itransformer_metrics'] = metrics
-    data['itransformer_evaluated_at'] = datetime.now().isoformat()
-    _save_subset_results(results_dir, subset_id, data)
-    update_summary_csv(results_dir)
+        data = _load_subset_results(results_dir, subset_id)
+        data.setdefault('subset_id', subset_id)
+        data.setdefault('dataset', dataset_name)
+        data.setdefault('variate_indices', variate_indices)
+        data['itransformer_metrics'] = metrics
+        data['itransformer_baseline_ckpt'] = itrans_checkpoint
+        data['itransformer_evaluated_at'] = datetime.now().isoformat()
+        _save_subset_results(results_dir, subset_id, data)
+        update_summary_csv(results_dir)
 
-    return metrics
+        return metrics
+    finally:
+        LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN = saved_lens
 
 
 # ============================================================================
@@ -2724,9 +2931,12 @@ def train_full_dim_itransformer_baseline(
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    ds_lb, ds_hz = dataset_window_lengths(dataset_name)
     train_ds, val_ds, test_ds, norm_stats = load_dataset(
         dataset_name, variate_indices=None,
         stride=1,
+        lookback=ds_lb,
+        horizon=ds_hz,
     )
     if smoke_test:
         train_ds = Subset(train_ds, list(range(min(4, len(train_ds)))))
@@ -2737,7 +2947,7 @@ def train_full_dim_itransformer_baseline(
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    model = create_itransformer(num_vars=n_cols).to(device)
+    model = create_itransformer(seq_len=ds_lb, pred_len=ds_hz, num_vars=n_cols).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
     criterion = nn.MSELoss()
@@ -2774,7 +2984,7 @@ def train_full_dim_itransformer_baseline(
             break
 
     # Evaluate on test set
-    model_eval = create_itransformer(num_vars=n_cols).to(device)
+    model_eval = create_itransformer(seq_len=ds_lb, pred_len=ds_hz, num_vars=n_cols).to(device)
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model_eval.load_state_dict(ckpt['model_state_dict'])
     model_eval.eval()
@@ -2857,6 +3067,8 @@ def run_pipeline(
     wandb_project: str = "diffusion-tsf-7var",
     datasets: Optional[List[str]] = None,
     pretrained_diff_ckpt: Optional[str] = None,
+    variate_indices: Optional[List[int]] = None,
+    subset_id: Optional[str] = None,
 ):
     """Run the per-dataset fine-tune pipeline (Phase 2A + 2B + eval).
 
@@ -2968,8 +3180,25 @@ def run_pipeline(
         logger.info(f"Skipping Phase 1 — using pretrained diffusion checkpoint: {diff_ckpt}")
 
     # =========== PHASE 2: per-dataset iTrans finetune (2A) + diffusion finetune (2B) + eval ===========
-    all_jobs = generate_all_dataset_jobs(seed=seed)
-    if datasets:
+    if datasets and variate_indices is not None:
+        if len(datasets) != 1:
+            raise ValueError("--variate-indices with --mode full requires exactly one --dataset")
+        if len(variate_indices) != N_VARIATES:
+            raise ValueError(
+                f"--n-variates ({N_VARIATES}) must match --variate-indices length "
+                f"({len(variate_indices)}) in --mode full"
+            )
+        dataset_name = datasets[0]
+        all_jobs = {
+            dataset_name: {
+                'dataset_id': dataset_name,
+                'variate_indices': variate_indices,
+                'subset_id': subset_id or dataset_name,
+            }
+        }
+    else:
+        all_jobs = generate_all_dataset_jobs(seed=seed)
+    if datasets and variate_indices is None:
         want = set(datasets)
         all_jobs = {k: v for k, v in all_jobs.items() if k in want}
         missing = want - set(all_jobs)
@@ -2989,14 +3218,15 @@ def run_pipeline(
     for job in job_list:
         dataset_name = job['dataset_id']
         variate_indices = job['variate_indices']
-        subset_info = {'subset_id': dataset_name, 'variate_indices': variate_indices}
+        job_subset_id = job.get('subset_id') or dataset_name
+        subset_info = {'subset_id': job_subset_id, 'variate_indices': variate_indices}
 
-        prior_results = _load_subset_results(RESULTS_DIR, dataset_name)
-        ft_itrans_ckpt = os.path.join(CHECKPOINT_DIR, f'{dataset_name}_itransformer_finetuned.pt')
+        prior_results = _load_subset_results(RESULTS_DIR, job_subset_id)
+        ft_itrans_ckpt = os.path.join(CHECKPOINT_DIR, f'{job_subset_id}_itransformer_finetuned.pt')
         if resume and prior_results.get('eval_metrics') and os.path.exists(ft_itrans_ckpt):
             logger.info(
-                f"[Resume] Skipping {dataset_name}: eval_metrics already present in "
-                f"{_subset_results_path(RESULTS_DIR, dataset_name)} and Phase 2A checkpoint exists"
+                f"[Resume] Skipping {job_subset_id}: eval_metrics already present in "
+                f"{_subset_results_path(RESULTS_DIR, job_subset_id)} and Phase 2A checkpoint exists"
             )
             continue
 
@@ -3336,7 +3566,8 @@ def run_itransformer_finetune_hp_tuning(
     logger.info("=" * 60)
 
     train_ds, val_ds, _, _ = load_dataset(
-        dataset_name, variate_indices, stride=1,
+        dataset_name, variate_indices,
+        stride=WINDOW_STRIDE, test_stride=1,
     )
     if smoke_test:
         train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
@@ -3360,12 +3591,15 @@ def run_itransformer_finetune_hp_tuning(
                    f"loss={trial.value:.4f}, lr={trial.params['learning_rate']:.2e}, "
                    f"dropout={ITRANS_PAPER_DROPOUT}")
 
+    ds_lb, ds_hz = dataset_window_lengths(dataset_name)
     study.optimize(
         lambda trial: itrans_hp_objective(
             trial, train_loader, val_loader, device, smoke_test,
             fixed_batch_size=train_bs, best_state=_best_state,
             pretrained_ckpt=warm,
             max_epochs=ITRANS_HP_FINETUNE_MAX_EPOCHS,
+            seq_len=ds_lb,
+            pred_len=ds_hz,
         ),
         n_trials=n_trials,
         show_progress_bar=False,
@@ -3375,6 +3609,8 @@ def run_itransformer_finetune_hp_tuning(
     best_params = study.best_params
     best_params['batch_size'] = train_bs
     best_params['dropout'] = ITRANS_PAPER_DROPOUT
+    best_params['lookback_length'] = ds_lb
+    best_params['forecast_length'] = ds_hz
     logger.info(f"Best iTrans FT params for {label}: lr={best_params['learning_rate']:.2e}, "
                f"dropout={best_params['dropout']:.3f} → val_loss={_best_state.get('val_loss', float('inf')):.4f}")
 
@@ -3403,11 +3639,25 @@ def _finetune_and_eval_one_subset(
     subset_id = subset_info['subset_id']
     variate_indices = subset_info['variate_indices']
 
+    global LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN
+    ds_lb, ds_hz = dataset_window_lengths(dataset_name)
+    saved_lens = (LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN)
+    LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN = ds_lb, ds_hz, ds_lb
+    if dataset_name == 'dalia':
+        logger.info(
+            f"DALIA finetune windows: lookback={ds_lb}, forecast={ds_hz} "
+            f"(train/val stride={WINDOW_STRIDE})"
+        )
+
     # Preflight: check dataset has enough rows before wasting a trial slot
     try:
-        load_dataset(dataset_name, variate_indices, stride=1)
+        load_dataset(
+            dataset_name, variate_indices,
+            stride=WINDOW_STRIDE, test_stride=1,
+        )
     except ValueError as ve:
         logger.warning(f"Skipping {subset_id}: {ve}")
+        LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN = saved_lens
         return
 
     try:
@@ -3475,7 +3725,8 @@ def _finetune_and_eval_one_subset(
             _ft_itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, len(variate_indices), device)
             _ft_itrans_guidance = iTransformerGuidance(_ft_itrans_model)
             _probe_ds, _, _, _ = load_dataset(
-                dataset_name, variate_indices, stride=1,
+                dataset_name, variate_indices,
+                stride=WINDOW_STRIDE, test_stride=1,
             )
             ft_diff_bs = select_diffusion_batch_size(
                 phase_name=f'Diff FT HP ({subset_id})',
@@ -3517,7 +3768,10 @@ def _finetune_and_eval_one_subset(
             tuned_params['batch_size'] = ft_diff_bs
             logger.info(f"Best diffusion params for {subset_id}: {tuned_params}")
 
-            _, _, _, norm_stats = load_dataset(dataset_name, variate_indices, stride=1)
+            _, _, _, norm_stats = load_dataset(
+                dataset_name, variate_indices,
+                stride=WINDOW_STRIDE, test_stride=1,
+            )
             ckpt_path, train_metrics = _promote_best_trial_to_final(
                 study, subset_dir, subset_info, dataset_name, norm_stats, ft_diff_bs,
                 diff_ckpt, ft_itrans_ckpt, device, smoke_test,
@@ -3533,7 +3787,9 @@ def _finetune_and_eval_one_subset(
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
 
-        _, _, test_ds, _ = load_dataset(dataset_name, variate_indices, stride=1)
+        _, _, test_ds, _ = load_dataset(
+            dataset_name, variate_indices, stride=1, test_stride=1,
+        )
         if smoke_test:
             test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
         else:
@@ -3554,14 +3810,25 @@ def _finetune_and_eval_one_subset(
             {**train_metrics, 'tuned_params': tuned_params}, eval_results, RESULTS_DIR,
         )
 
-        # Finetuned iTransformer as baseline for comparison
+        # iTransformer-only baseline (trained on full train split, not the guidance ckpt)
         try:
+            full_itrans_ckpt = os.path.join(
+                CHECKPOINT_DIR, f'{subset_id}_itrans_full_dataset.pt',
+            )
+            if not os.path.exists(full_itrans_ckpt):
+                full_itrans_ckpt = train_subset_itransformer_full_baseline(
+                    dataset_name, variate_indices, subset_id, device, smoke_test=smoke_test,
+                )
+            eval_test_indices = None
+            if not smoke_test and isinstance(test_ds, Subset):
+                eval_test_indices = list(test_ds.indices)
             evaluate_itransformer_baseline(
                 subset_id, dataset_name, variate_indices,
-                ft_itrans_ckpt, RESULTS_DIR, device, smoke_test=smoke_test,
+                full_itrans_ckpt, RESULTS_DIR, device, smoke_test=smoke_test,
+                test_indices=eval_test_indices,
             )
         except Exception as be:
-            logger.warning(f"iTransformer baseline eval failed for {subset_id}: {be}")
+            logger.warning(f"iTransformer full-dataset baseline failed for {subset_id}: {be}")
 
     except KeyboardInterrupt:
         logger.info(f"\nInterrupted during {subset_id}.")
@@ -3571,6 +3838,9 @@ def _finetune_and_eval_one_subset(
         import traceback
         traceback.print_exc()
         raise
+    finally:
+        LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN = saved_lens
+
 
 def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
     """Train full-dimensionality iTransformer baseline for a high-variate dataset."""
@@ -3584,9 +3854,11 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
-    global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION, LOOKBACK_LENGTH, FORECAST_LENGTH
+    global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION
+    global LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN
     global MODEL_TYPE, DIFFUSION_TYPE, DETERMINISTIC_ANCHOR_LOSS, DETERMINISTIC_ANCHOR_LAMBDA
     global PREDICTION_MODE, DETERMINISTIC_ANCHOR_ALPHA, EVAL_SAMPLER
+    global USE_WINDOW_NORMALIZATION, ZERO_GUIDANCE_FORECAST, WINDOW_STRIDE
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
     parser.add_argument('--mode', type=str, default='full',
@@ -3637,6 +3909,10 @@ def main():
                         help='Comma-separated attention levels (e.g. 1,2)')
     parser.add_argument('--disable-cross-attention', action='store_true',
                         help='Disable cross-variate attention (fully univariate baseline)')
+    parser.add_argument('--disable-window-normalization', action='store_true',
+                        help='Use only dataset-level normalization from load_dataset; skip per-window z-score in DiffusionTSF')
+    parser.add_argument('--zero-guidance-forecast', action='store_true',
+                        help='Zero the iTransformer forecast ghost image while keeping encoder tokens for cross attention')
     parser.add_argument('--model-type', type=str, default=None, choices=['unet', 'dit'],
                         help="Backbone: 'unet' (default) or 'dit' (FactorizedDiT)")
     parser.add_argument('--prediction-mode', type=str, default=None, choices=['epsilon', 'x0_cumsum'],
@@ -3647,6 +3923,8 @@ def main():
                         help='Override lookback length')
     parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH,
                         help='Override forecast length')
+    parser.add_argument('--window-stride', type=int, default=WINDOW_STRIDE,
+                        help='Train/val sliding-window stride (test stays stride=1)')
 
     args = parser.parse_args()
 
@@ -3677,6 +3955,10 @@ def main():
         ATTENTION_LEVELS = [int(x.strip()) for x in args.attention_levels.split(',') if x.strip()]
     if args.disable_cross_attention:
         DISABLE_CROSS_ATTENTION = True
+    if args.disable_window_normalization:
+        USE_WINDOW_NORMALIZATION = False
+    if args.zero_guidance_forecast:
+        ZERO_GUIDANCE_FORECAST = True
     if args.model_type is not None:
         MODEL_TYPE = args.model_type
     if args.prediction_mode is not None:
@@ -3701,8 +3983,14 @@ def main():
         parser.error(
             "Cannot combine --prediction-mode x0_cumsum with --deterministic-anchor-loss."
         )
+    _cfg_lookback = LOOKBACK_LENGTH
     LOOKBACK_LENGTH = args.lookback_length
     FORECAST_LENGTH = args.forecast_length
+    if args.lookback_length != _cfg_lookback:
+        ITRANSFORMER_SEQ_LEN = args.lookback_length
+    if args.window_stride < 1:
+        parser.error('--window-stride must be >= 1')
+    WINDOW_STRIDE = args.window_stride
     
     # DDP setup
     if args.ddp:
@@ -3807,6 +4095,9 @@ def main():
         return
 
     # ---- mode == 'full': legacy run-everything path ----
+    variate_indices = None
+    if args.variate_indices:
+        variate_indices = [int(x.strip()) for x in args.variate_indices.split(',') if x.strip()]
     if args.fresh:
         if os.path.exists(MANIFEST_PATH):
             os.remove(MANIFEST_PATH)
@@ -3832,6 +4123,8 @@ def main():
             wandb_project=args.wandb_project,
             datasets=[args.dataset] if args.dataset else None,
             pretrained_diff_ckpt=args.pretrained_diff_ckpt,
+            variate_indices=variate_indices,
+            subset_id=args.subset_id,
         )
     finally:
         finish_wandb()

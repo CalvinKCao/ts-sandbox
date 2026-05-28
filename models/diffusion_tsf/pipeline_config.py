@@ -207,6 +207,10 @@ GUIDANCE_PENALTY_WEIGHT: float = 0.0  # small penalty for deviating from iTransf
 DETERMINISTIC_ANCHOR_LOSS: bool = False
 DETERMINISTIC_ANCHOR_LAMBDA: float = 0.99
 DETERMINISTIC_ANCHOR_ALPHA: float = 0.5
+USE_WINDOW_NORMALIZATION: bool = True
+ZERO_GUIDANCE_FORECAST: bool = False
+# Sliding-window stride for train/val (test defaults to 1 for paper eval protocol).
+WINDOW_STRIDE: int = 1
 # Reserved bounds if anchor HP search is re-enabled later (not used while tuning is off).
 ANCHOR_HP_LAMBDA_MIN: float = 0.90
 ANCHOR_HP_LAMBDA_MAX: float = 0.995

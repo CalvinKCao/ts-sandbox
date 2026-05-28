@@ -111,6 +111,14 @@ def apply_checkpoint_architecture(ckpt: dict, diffusion_type: str, image_height:
         train_pipeline.DISABLE_CROSS_ATTENTION = bool(cfg.disable_cross_attention)
     elif isinstance(cfg, dict) and 'disable_cross_attention' in cfg:
         train_pipeline.DISABLE_CROSS_ATTENTION = bool(cfg['disable_cross_attention'])
+    if hasattr(cfg, 'use_window_normalization'):
+        train_pipeline.USE_WINDOW_NORMALIZATION = bool(cfg.use_window_normalization)
+    elif isinstance(cfg, dict) and 'use_window_normalization' in cfg:
+        train_pipeline.USE_WINDOW_NORMALIZATION = bool(cfg['use_window_normalization'])
+    if hasattr(cfg, 'zero_guidance_forecast'):
+        train_pipeline.ZERO_GUIDANCE_FORECAST = bool(cfg.zero_guidance_forecast)
+    elif isinstance(cfg, dict) and 'zero_guidance_forecast' in cfg:
+        train_pipeline.ZERO_GUIDANCE_FORECAST = bool(cfg['zero_guidance_forecast'])
     state = ckpt.get('model_state_dict', {})
     head_weight = state.get('noise_predictor.head.weight')
     if head_weight is not None:

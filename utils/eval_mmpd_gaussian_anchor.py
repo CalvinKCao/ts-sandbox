@@ -627,6 +627,8 @@ def apply_ckpt_architecture_globals(pipeline: Any, ckpt: Dict[str, Any], diffusi
     if image_height is not None:
         pipeline.IMAGE_HEIGHT = image_height
     pipeline.DISABLE_CROSS_ATTENTION = bool(get_ckpt_config_value(ckpt, "disable_cross_attention", True))
+    pipeline.USE_WINDOW_NORMALIZATION = bool(get_ckpt_config_value(ckpt, "use_window_normalization", True))
+    pipeline.ZERO_GUIDANCE_FORECAST = bool(get_ckpt_config_value(ckpt, "zero_guidance_forecast", False))
     if get_ckpt_config_value(ckpt, "dit_patch_size") is not None:
         pipeline.DIT_PATCH_SIZE = tuple(get_ckpt_config_value(ckpt, "dit_patch_size"))
     if get_ckpt_config_value(ckpt, "dit_embed_dim") is not None:
