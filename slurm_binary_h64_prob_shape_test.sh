@@ -1,10 +1,11 @@
 #!/bin/bash
 # =============================================================================
-# Slurm: one-window probabilistic (dpmpp) shape test for completed bin-h64 ckpts.
+# Slurm: probabilistic (dpmpp, non-anchor) shape or texture test for bin-h64/h128 ckpts.
 # Skips datasets without best.pt unless --require-all.
 #
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
 #   ./slurm_binary_h64_prob_shape_test.sh
+#   ./slurm_binary_h64_prob_shape_test.sh --mode texture --heights 64 128
 #   ./slurm_binary_h64_prob_shape_test.sh --date-tag 05-27 --height 64
 #   ./slurm_binary_h64_prob_shape_test.sh --num-sampling-steps 20
 # =============================================================================
@@ -14,15 +15,32 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATE_TAG="$(date +%m-%d)"
 HEIGHT=64
+HEIGHTS=()
+MODE="shape"
 NUM_STEPS=5
 REQUIRE_ALL=0
+TEST_MAX_ITEMS=""
+INDICES_DIR=""
+OUTPUT=""
 EXTRA_DATASETS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --date-tag) DATE_TAG="$2"; shift 2 ;;
         --height) HEIGHT="$2"; shift 2 ;;
+        --heights)
+            shift
+            HEIGHTS=()
+            while [[ $# -gt 0 && "$1" != --* ]]; do
+                HEIGHTS+=("$1")
+                shift
+            done
+            ;;
+        --mode) MODE="$2"; shift 2 ;;
         --num-sampling-steps) NUM_STEPS="$2"; shift 2 ;;
+        --test-max-items) TEST_MAX_ITEMS="$2"; shift 2 ;;
+        --indices-dir) INDICES_DIR="$2"; shift 2 ;;
+        --output) OUTPUT="$2"; shift 2 ;;
         --require-all) REQUIRE_ALL=1; shift ;;
         --datasets)
             shift
@@ -51,22 +69,33 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 
     LOG_DIR="$REPO/results/logs"
     mkdir -p "$LOG_DIR"
-    LOG_FILE="$LOG_DIR/${DATE_TAG}-bin-h${HEIGHT}-prob-shape-test.log"
-    JOB_NAME="bin-h${HEIGHT}-prob-shape"
+    [[ ${#HEIGHTS[@]} -eq 0 ]] && HEIGHTS=("$HEIGHT")
+    HEIGHT_TAG="${HEIGHTS[*]}"
+    HEIGHT_TAG="${HEIGHT_TAG// /-}"
+    LOG_SUFFIX="prob-${MODE}-h${HEIGHT_TAG}"
+    LOG_FILE="$LOG_DIR/${DATE_TAG}-${LOG_SUFFIX}.log"
+    JOB_NAME="bin-${LOG_SUFFIX}"
 
     SUBMIT_ARGS=(
         --date-tag "$DATE_TAG"
-        --height "$HEIGHT"
+        --mode "$MODE"
+        --heights "${HEIGHTS[@]}"
         --num-sampling-steps "$NUM_STEPS"
     )
     [[ "$REQUIRE_ALL" -eq 1 ]] && SUBMIT_ARGS+=(--require-all)
+    [[ -n "$TEST_MAX_ITEMS" ]] && SUBMIT_ARGS+=(--test-max-items "$TEST_MAX_ITEMS")
+    [[ -n "$INDICES_DIR" ]] && SUBMIT_ARGS+=(--indices-dir "$INDICES_DIR")
+    [[ -n "$OUTPUT" ]] && SUBMIT_ARGS+=(--output "$OUTPUT")
     [[ ${#EXTRA_DATASETS[@]} -gt 0 ]] && SUBMIT_ARGS+=(--datasets "${EXTRA_DATASETS[@]}")
 
-    echo "Submitting ${JOB_NAME} (wall=0:30:00, L40S) log=${LOG_FILE}"
+    WALL="0:30:00"
+    [[ "$MODE" == "texture" ]] && WALL="2:00:00"
+
+    echo "Submitting ${JOB_NAME} (wall=${WALL}, L40S) log=${LOG_FILE}"
     JID=$(sbatch --parsable \
         --job-name="$JOB_NAME" \
         --account=aip-boyuwang \
-        --time=0:30:00 \
+        --time="$WALL" \
         --nodes=1 \
         --gres=gpu:l40s:1 \
         --cpus-per-task=4 \
@@ -90,7 +119,11 @@ if [[ ! -f "$PROJECT_ROOT/utils/shape_test_binary_prob.py" ]]; then
     exit 1
 fi
 
-LOG_FILE="$PROJECT_ROOT/results/logs/${DATE_TAG}-bin-h${HEIGHT}-prob-shape-test.log"
+[[ ${#HEIGHTS[@]} -eq 0 ]] && HEIGHTS=("$HEIGHT")
+HEIGHT_TAG="${HEIGHTS[*]}"
+HEIGHT_TAG="${HEIGHT_TAG// /-}"
+LOG_SUFFIX="prob-${MODE}-h${HEIGHT_TAG}"
+LOG_FILE="$PROJECT_ROOT/results/logs/${DATE_TAG}-${LOG_SUFFIX}.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 exec >>"$LOG_FILE" 2>&1
 
@@ -157,15 +190,19 @@ PY
 
 SHAPE_ARGS=(
     --date-tag "$DATE_TAG"
-    --height "$HEIGHT"
+    --mode "$MODE"
+    --heights "${HEIGHTS[@]}"
     --num-sampling-steps "$NUM_STEPS"
 )
 [[ "$REQUIRE_ALL" -eq 1 ]] && SHAPE_ARGS+=(--require-all)
+[[ -n "$TEST_MAX_ITEMS" ]] && SHAPE_ARGS+=(--test-max-items "$TEST_MAX_ITEMS")
+[[ -n "$INDICES_DIR" ]] && SHAPE_ARGS+=(--indices-dir "$INDICES_DIR")
+[[ -n "$OUTPUT" ]] && SHAPE_ARGS+=(--output "$OUTPUT")
 if [[ ${#EXTRA_DATASETS[@]} -gt 0 ]]; then
     SHAPE_ARGS+=(--datasets "${EXTRA_DATASETS[@]}")
 fi
 
-echo "[shape-test] python utils/shape_test_binary_prob.py ${SHAPE_ARGS[*]}"
+echo "[prob-test] python utils/shape_test_binary_prob.py ${SHAPE_ARGS[*]}"
 python -u utils/shape_test_binary_prob.py "${SHAPE_ARGS[@]}"
 RC=$?
 echo "Done: $(date)  exit=$RC"
