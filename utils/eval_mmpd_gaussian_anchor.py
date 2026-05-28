@@ -610,10 +610,22 @@ def infer_prediction_mode(ckpt: Dict[str, Any]) -> str:
     return get_ckpt_config_value(ckpt, "prediction_mode", "epsilon")
 
 
+def infer_image_height_from_ckpt(ckpt: Dict[str, Any]) -> Optional[int]:
+    """Config may omit image_height; bin_centers length matches occupancy height."""
+    value = get_ckpt_config_value(ckpt, "image_height")
+    if value is not None:
+        return int(value)
+    bin_centers = ckpt.get("model_state_dict", {}).get("to_2d.bin_centers")
+    if bin_centers is not None:
+        return int(bin_centers.shape[0])
+    return None
+
+
 def apply_ckpt_architecture_globals(pipeline: Any, ckpt: Dict[str, Any], diffusion_type: str) -> None:
     """Set pipeline globals before create_diffusion_model so checkpoint shapes match."""
-    if get_ckpt_config_value(ckpt, "image_height") is not None:
-        pipeline.IMAGE_HEIGHT = int(get_ckpt_config_value(ckpt, "image_height"))
+    image_height = infer_image_height_from_ckpt(ckpt)
+    if image_height is not None:
+        pipeline.IMAGE_HEIGHT = image_height
     pipeline.DISABLE_CROSS_ATTENTION = bool(get_ckpt_config_value(ckpt, "disable_cross_attention", True))
     if get_ckpt_config_value(ckpt, "dit_patch_size") is not None:
         pipeline.DIT_PATCH_SIZE = tuple(get_ckpt_config_value(ckpt, "dit_patch_size"))

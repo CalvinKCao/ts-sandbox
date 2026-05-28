@@ -94,9 +94,16 @@ LOG_FILE="$PROJECT_ROOT/results/logs/${DATE_TAG}-bin-h${HEIGHT}-prob-shape-test.
 mkdir -p "$(dirname "$LOG_FILE")"
 exec >>"$LOG_FILE" 2>&1
 
+export PYTHONUNBUFFERED=1
+export PROJECT_ROOT
+PROJECT_ROOT="$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+cd "$PROJECT_ROOT"
+
 echo "=========================================="
 echo "Job: $SLURM_JOB_NAME  ID: $SLURM_JOB_ID  Node: ${SLURMD_NODENAME:-unknown}"
 echo "Repo: $PROJECT_ROOT"
+echo "PWD: $(pwd)"
 echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
 echo "Started: $(date)"
 echo "=========================================="
@@ -122,55 +129,31 @@ pip install --no-index reformer_pytorch -q 2>/dev/null \
     || pip install --no-index reformer-pytorch -q 2>/dev/null \
     || pip install reformer-pytorch -q 2>/dev/null \
     || echo "[setup] reformer-pytorch not installed (OK unless Reformer iTrans)"
+
+# Minimal import smoke (repo on PYTHONPATH; no utils.* importlib)
 python - <<'PY'
+import os
+import sys
+
+repo = os.environ["PROJECT_ROOT"]
+assert os.path.isdir(repo), repo
+assert repo in sys.path or sys.path[0] in ("", repo), (sys.path[:3], repo)
+
 import optuna
 import torch
-from torch.utils.data import DataLoader
 
 assert torch.cuda.is_available(), "CUDA required"
-import models.diffusion_tsf.train_multivariate_pipeline as pipe
+from models.diffusion_tsf.train_multivariate_pipeline import get_itransformer_class
 
-pipe.get_itransformer_class()
-print("torch", torch.__version__, "gpu", torch.cuda.get_device_name(0), "optuna", optuna.__version__)
-print("itransformer import OK")
-
-# Full path smoke: load one h64 ckpt if present
-from argparse import Namespace
-from pathlib import Path
-
-REPO = Path(".").resolve()
-CKPT = REPO / "results/ckpts"
-stems = sorted(CKPT.glob("05-27-bin-h64-*"))
-if stems:
-    import importlib
-    eval_mod = importlib.import_module("utils.eval_mmpd_gaussian_anchor")
-    roots = [p for p in stems if list(p.glob("*/best.pt"))]
-    if roots:
-        ds_list = [p.name.split("-")[-1] for p in roots]
-        name_map = {
-            "etth1": "ETTh1", "etth2": "ETTh2", "ettm1": "ETTm1", "ettm2": "ETTm2",
-            "illness": "illness", "exchange_rate": "exchange_rate",
-        }
-        datasets = [name_map.get(s, s) for s in ds_list]
-        anchors = eval_mod.find_anchor_runs(datasets[:1], roots[:1], CKPT, "binary")
-        ds = datasets[0]
-        run = anchors[ds]
-        device = torch.device("cuda:0")
-        args = Namespace(
-            lookback=96, horizon=96, anchor_batch_size=1,
-            anchor_prob_sampler="dpmpp", num_sampling_steps=2, seed=2026, gpu=0, cpu=False,
-        )
-        subset = eval_mod.load_tsf_test_subset(ds, run.metadata["variate_indices"], [0], 96, 96)
-        past, future = next(iter(DataLoader(subset, batch_size=1)))
-        future = future[..., 8:]
-        model = eval_mod.load_anchor_model(run, args, device)
-        pred = model.generate(past.to(device), sampler="dpmpp", num_inference_steps=2)["prediction"]
-        assert tuple(pred.shape) == tuple(future.shape), (pred.shape, future.shape)
-        print("checkpoint generate OK", ds, tuple(pred.shape))
+get_itransformer_class()
+print(
+    "setup OK:",
+    "torch", torch.__version__,
+    "gpu", torch.cuda.get_device_name(0),
+    "optuna", optuna.__version__,
+    "cwd", os.getcwd(),
+)
 PY
-
-export PYTHONUNBUFFERED=1
-cd "$PROJECT_ROOT"
 
 SHAPE_ARGS=(
     --date-tag "$DATE_TAG"
