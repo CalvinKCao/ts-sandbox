@@ -846,6 +846,30 @@ def pretrain_dir_for_dim(dim: int, base_dir: str = None) -> str:
 # iTransformer Model Creation
 # ============================================================================
 
+def _purge_repo_utils_for_itransformer() -> None:
+    """Repo ``utils/`` (eval scripts) shadows iTransformer's ``utils.masking`` imports."""
+    repo_utils = Path(__file__).resolve().parents[2] / "utils"
+    drop: List[str] = []
+    for name, mod in list(sys.modules.items()):
+        if name != "utils" and not name.startswith("utils."):
+            continue
+        mod_file = getattr(mod, "__file__", None)
+        if mod_file is None:
+            if name == "utils":
+                drop.append(name)
+            continue
+        try:
+            mod_path = Path(mod_file).resolve()
+        except OSError:
+            continue
+        if "iTransformer" in mod_path.parts:
+            continue
+        if mod_path == repo_utils or repo_utils in mod_path.parents:
+            drop.append(name)
+    for name in drop:
+        sys.modules.pop(name, None)
+
+
 def get_itransformer_class():
     """Dynamically load iTransformer model class."""
     itrans_path = os.path.join(script_dir, '..', 'iTransformer', 'model', 'iTransformer.py')
@@ -854,8 +878,9 @@ def get_itransformer_class():
     # Add iTransformer directory to path for internal imports
     itrans_dir = os.path.join(script_dir, '..', 'iTransformer')
     itrans_dir = os.path.abspath(itrans_dir)
-    if itrans_dir not in sys.path:
-        sys.path.insert(0, itrans_dir)
+    _purge_repo_utils_for_itransformer()
+    sys.path = [p for p in sys.path if os.path.abspath(p) != itrans_dir]
+    sys.path.insert(0, itrans_dir)
     
     spec = importlib.util.spec_from_file_location("iTransformer_module", itrans_path)
     itrans_module = importlib.util.module_from_spec(spec)
