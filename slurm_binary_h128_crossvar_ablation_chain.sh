@@ -110,17 +110,13 @@ for spec in "${DATASET_SPECS[@]}"; do
         stem="${DATE_TAG}-bin-h128-xvar-${variant}-${subset_id,,}${SMOKE_SUFFIX}"
         CKPT_ROOT["${variant}:${dataset}"]="$REPO/results/ckpts/${stem}"
 
-        wall="1-00:00:00"
+        wall="4:00:00"
         mem="60G"
         cpus=8
         if [[ "$SMOKE" -eq 1 ]]; then
             wall="0:30:00"; mem="24G"; cpus=4
         elif [[ "$nvars" -ge 16 ]]; then
-            wall="2-00:00:00"; mem="72G"; cpus=8
-        elif [[ "$dataset" == ETTm* ]]; then
-            wall="1-12:00:00"; mem="60G"; cpus=8
-        elif [[ "$dataset" == dalia ]]; then
-            wall="1-12:00:00"; mem="60G"; cpus=8
+            wall="4:00:00"; mem="72G"; cpus=8
         fi
 
         train_args=(

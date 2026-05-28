@@ -86,7 +86,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         JOB_NAME="bin-anchor-smoke"
     else
         if [[ -z "$WALL" ]]; then
-            if [[ "$DATASET" == "electricity" ]]; then WALL="2-00:00:00"; else WALL="1-00:00:00"; fi
+            WALL="4:00:00"
         fi
         MEM="60G"
         CPUS=8
