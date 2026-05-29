@@ -25,7 +25,8 @@ while [[ $# -gt 0 ]]; do
         --smoke|--smoke-test) SMOKE=1; shift ;;
         --dependency) DEPENDENCY="$2"; shift 2 ;;
         --wandb-project) WANDB_PROJECT="$2"; shift 2 ;;
-        *) echo "Unknown arg: $1" >&2; exit 1 ;;
+        -*) echo "Unknown flag: $1" >&2; exit 1 ;;
+        *) CONFIGS="$1"; shift ;;
     esac
 done
 
