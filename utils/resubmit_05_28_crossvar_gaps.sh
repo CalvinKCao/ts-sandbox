@@ -163,9 +163,9 @@ submit_train() {
         args+=("${vextra[@]}")
     fi
 
-    echo "TRAIN ${variant}/${subset} stem=${stem} wall=${TRAIN_WALL}"
+    echo "TRAIN ${variant}/${subset} stem=${stem} wall=${TRAIN_WALL}" >&2
     if [[ "$DRY" -eq 1 ]]; then
-        echo "  -> sbatch ... $TRAIN_SCRIPT ${args[*]}"
+        echo "  -> sbatch ... $TRAIN_SCRIPT ${args[*]}" >&2
         echo "__DRY_TRAIN__"
         return 0
     fi
@@ -185,6 +185,7 @@ submit_train() {
     )
     [[ -n "$EXCLUDE_NODES" ]] && sbatch_args+=(--exclude="$EXCLUDE_NODES")
     sbatch "${sbatch_args[@]}" "$TRAIN_SCRIPT" "${args[@]}"
+    # stdout only: job id for tid=$(submit_train ...)
 }
 
 submit_eval() {
@@ -214,11 +215,18 @@ EOF
     chmod +x "$worker"
 
     local dep=""
-    [[ -n "$train_jid" && "$train_jid" != "__DRY_TRAIN__" ]] && dep="afterok:${train_jid}"
+    train_jid="${train_jid//$'\n'/}"
+    if [[ "$train_jid" == "__DRY_TRAIN__" ]]; then
+        dep="afterok:__DRY_TRAIN__"
+    elif [[ "$train_jid" =~ ^[0-9]+$ ]]; then
+        dep="afterok:${train_jid}"
+    elif [[ -n "$train_jid" ]]; then
+        echo "WARN: invalid train job id '${train_jid}'; eval has no dependency" >&2
+    fi
 
-    echo "EVAL  ${variant}/${subset} dep=${dep:-none} wall=${EVAL_WALL}"
+    echo "EVAL  ${variant}/${subset} dep=${dep:-none} wall=${EVAL_WALL}" >&2
     if [[ "$DRY" -eq 1 ]]; then
-        echo "  -> sbatch $worker"
+        echo "  -> sbatch $worker" >&2
         return 0
     fi
     local -a sbatch_args=(
@@ -236,7 +244,9 @@ EOF
         --mail-user=ccao87@uwo.ca
     )
     [[ -n "$EXCLUDE_NODES" ]] && sbatch_args+=(--exclude="$EXCLUDE_NODES")
-    [[ -n "$dep" ]] && sbatch_args+=(--dependency="$dep")
+    if [[ -n "$dep" && "$dep" != "afterok:__DRY_TRAIN__" ]]; then
+        sbatch_args+=(--dependency="$dep")
+    fi
     sbatch "${sbatch_args[@]}" "$worker"
 }
 
@@ -264,14 +274,14 @@ if [[ "$AUTO" -eq 1 ]]; then
         echo "All 40 partials present; nothing to resubmit."
         exit 0
     fi
-    echo "Auto-detected ${#missing[@]} missing partial(s) (bash file check, no python):"
+    echo "Auto-detected ${#missing[@]} missing partial(s) (bash file check, no python):" >&2
     for base in "${missing[@]}"; do
         [[ -z "$base" ]] && continue
         if ! read -r dataset variant < <(parse_partial_basename "$base"); then
             echo "WARN: skip unparseable partial: $base" >&2
             continue
         fi
-        echo "  - ${dataset} / ${variant}"
+        echo "  - ${dataset} / ${variant}" >&2
         CELLS+=("${dataset}|${variant}")
     done
 else
@@ -283,18 +293,18 @@ else
     )
 fi
 
-echo "Repo: $REPO"
-echo "Train wall: $TRAIN_WALL   Eval wall: $EVAL_WALL"
-echo "Exclude nodes: ${EXCLUDE_NODES:-none}"
+echo "Repo: $REPO" >&2
+echo "Train wall: $TRAIN_WALL   Eval wall: $EVAL_WALL" >&2
+echo "Exclude nodes: ${EXCLUDE_NODES:-none}" >&2
 present=$(find "$EVAL_OUT/partials" -maxdepth 1 -name '*_binary_*.json' 2>/dev/null | wc -l)
-echo "Partials now: ${present:-0} / 40"
-echo ""
+echo "Partials now: ${present:-0} / 40" >&2
+echo "" >&2
 
 for row in "${CELLS[@]}"; do
     IFS='|' read -r dataset variant <<< "$row"
     submit_cell "$dataset" "$variant"
 done
 
-echo ""
-echo "Verify: ls $EVAL_OUT/partials/*_binary_*.json 2>/dev/null | wc -l  # expect 40"
-echo "Then: ./utils/submit_crossvar_merge_waiter.sh --run-stem $RUN_STEM --cancel-pending"
+echo "" >&2
+echo "Verify: ls $EVAL_OUT/partials/*_binary_*.json 2>/dev/null | wc -l  # expect 40" >&2
+echo "Then: ./utils/submit_crossvar_merge_waiter.sh --run-stem $RUN_STEM --cancel-pending" >&2
