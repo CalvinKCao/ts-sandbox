@@ -130,8 +130,16 @@ parse_partial_basename() {
 }
 
 train_ready() {
-    local ckpt_dir="$1"
-    [[ -f "${ckpt_dir}/diff_hp_best.pt" ]] || [[ -f "${ckpt_dir}/training_manifest.json" ]]
+    # Eval needs a subset dir with metadata.json + best.pt (not just a root manifest).
+    local ckpt_dir="$1" meta subdir
+    [[ -d "$ckpt_dir" ]] || return 1
+    shopt -s nullglob
+    for meta in "${ckpt_dir}"/*/metadata.json; do
+        subdir="${meta%/*}"
+        [[ -f "${subdir}/best.pt" ]] && { shopt -u nullglob; return 0; }
+    done
+    shopt -u nullglob
+    return 1
 }
 
 submit_train() {
@@ -247,6 +255,7 @@ EOF
     if [[ -n "$dep" && "$dep" != "afterok:__DRY_TRAIN__" ]]; then
         sbatch_args+=(--dependency="$dep")
     fi
+    sbatch_args+=(--export=ALL,REPO="$REPO")
     sbatch "${sbatch_args[@]}" "$worker"
 }
 
