@@ -162,33 +162,7 @@ for spec in "${DATASET_SPECS[@]}"; do
 done
 
 PREAMBLE_FILE="$JOB_DIR/eval_preamble.sh"
-cat > "$PREAMBLE_FILE" <<'PREAMBLE'
-set -euo pipefail
-echo "Job: $SLURM_JOB_NAME  ID: $SLURM_JOB_ID  Node: ${SLURMD_NODENAME:-unknown}"
-echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
-echo "Started: $(date)"
-
-module purge || true
-module load StdEnv/2023
-module load python/3.11
-module load cuda/12.2
-module load cudnn/8.9
-
-echo "[setup] Building venv on $SLURM_TMPDIR..."
-virtualenv --no-download "$SLURM_TMPDIR/env"
-source "$SLURM_TMPDIR/env/bin/activate"
-pip install --no-index --upgrade pip -q
-pip install --no-index \
-    'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm optuna wandb einops \
-    -q
-export PYTHONUNBUFFERED=1
-cd "$REPO"
-python - <<'PY'
-import torch
-assert torch.cuda.is_available(), "CUDA required"
-print("torch", torch.__version__, "gpu", torch.cuda.get_device_name(0))
-PY
-PREAMBLE
+"$REPO/utils/write_crossvar_eval_preamble.sh" "$JOB_DIR"
 
 export REPO
 for spec in "${DATASET_SPECS[@]}"; do
