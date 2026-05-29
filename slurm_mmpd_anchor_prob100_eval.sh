@@ -6,6 +6,8 @@
 #
 # USAGE (from $SCRATCH/ts-sandbox on Killarney login node):
 #   ./slurm_mmpd_anchor_prob100_eval.sh --reference-run results/datasets/05-27-XXXX-mmpd-anchor-matrix
+#   ./slurm_mmpd_anchor_prob100_eval.sh --continue-run results/datasets/05-27-2166397-mmpd-prob100 \
+#       --reference-run results/datasets/05-27-804460-mmpd-anchor-matrix --wall-worker 12:00:00
 #   ./slurm_mmpd_anchor_prob100_eval.sh --smoke-test --reference-run ...
 # =============================================================================
 
@@ -15,12 +17,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMOKE=0
 SEED=2026
 REFERENCE_RUN=""
+CONTINUE_RUN=""
+WALL_WORKER_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --seed) SEED="$2"; shift 2 ;;
         --reference-run) REFERENCE_RUN="$2"; shift 2 ;;
+        --continue-run) CONTINUE_RUN="$2"; shift 2 ;;
+        --wall-worker) WALL_WORKER_OVERRIDE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -46,6 +52,21 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     if [[ ! -d "$REFERENCE_RUN/raw" ]]; then
       echo "ERROR: --reference-run must contain raw/indices_*.json (matrix init output)." >&2
       exit 1
+    fi
+  fi
+
+  CONTINUE_MODE=0
+  if [[ -n "$CONTINUE_RUN" ]]; then
+    CONTINUE_MODE=1
+    if [[ "$CONTINUE_RUN" != /* ]]; then
+      CONTINUE_RUN="$REPO/$CONTINUE_RUN"
+    fi
+    if [[ ! -d "$CONTINUE_RUN/partials" ]]; then
+      echo "ERROR: --continue-run must be an existing prob100 output dir with partials/." >&2
+      exit 1
+    fi
+    if [[ -z "$REFERENCE_RUN" ]]; then
+      REFERENCE_RUN="$REPO/results/datasets/05-27-804460-mmpd-anchor-matrix"
     fi
   fi
 
@@ -79,6 +100,12 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     WALL_INIT="0:30:00"
     WALL_WORKER="4:00:00"
     WALL_MERGE="0:30:00"
+    if [[ -n "$WALL_WORKER_OVERRIDE" ]]; then
+      WALL_WORKER="$WALL_WORKER_OVERRIDE"
+    fi
+    if [[ "$CONTINUE_MODE" -eq 1 ]]; then
+      WALL_WORKER="${WALL_WORKER_OVERRIDE:-12:00:00}"
+    fi
     MEM="60G"
     CPUS=8
     EVAL_EXTRA=(
@@ -102,10 +129,18 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     EVAL_EXTRA+=(--indices-dir "$REFERENCE_RUN" --mmpd-output-root "$REFERENCE_RUN")
   fi
 
-  RUN_STEM="$(date +%m-%d)-$$-mmpd-prob100${SMOKE_SUFFIX}"
-  OUTPUT_DIR="$REPO/results/datasets/${RUN_STEM}"
-  LOG_DIR="$REPO/results/logs/${RUN_STEM}"
-  mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
+  if [[ "$CONTINUE_MODE" -eq 1 ]]; then
+    OUTPUT_DIR="$CONTINUE_RUN"
+    RUN_STEM="$(basename "$OUTPUT_DIR")"
+    LOG_DIR="$REPO/results/logs/${RUN_STEM}-continue-$$"
+    SKIP_INIT=1
+    SMOKE_SUFFIX="-continue"
+  else
+    RUN_STEM="$(date +%m-%d)-$$-mmpd-prob100${SMOKE_SUFFIX}"
+    OUTPUT_DIR="$REPO/results/datasets/${RUN_STEM}"
+    LOG_DIR="$REPO/results/logs/${RUN_STEM}"
+  fi
+  mkdir -p "$OUTPUT_DIR" "$LOG_DIR" "$OUTPUT_DIR/partials"
 
   PREAMBLE_FILE="$REPO/results/job_preamble_mmpd_anchor_eval.sh"
   cat > "$PREAMBLE_FILE" << PREAMBLE
@@ -191,11 +226,18 @@ ENDSCRIPT
     WORKER_DEP="afterok:$JOB_INIT"
   fi
 
+  partial_exists() {
+    [[ -f "$OUTPUT_DIR/partials/${1}_${2}.json" ]]
+  }
+
   WORKER_IDS=()
   for ds in "${DATASETS[@]}"; do
     DEP_ARGS=()
     [[ -n "$WORKER_DEP" ]] && DEP_ARGS=(--dependency="$WORKER_DEP")
 
+    if [[ "$CONTINUE_MODE" -eq 1 ]] && partial_exists "$ds" "mmpd"; then
+      echo "Skip mmpd-${ds} (partial exists)"
+    else
     echo "Submitting mmpd-${ds} ${WORKER_DEP:+(after init)}..."
     JOB_MMPD=$(sbatch --parsable \
       --job-name="prob100-mmpd-${ds}${SMOKE_SUFFIX}" \
@@ -215,7 +257,11 @@ ENDSCRIPT
     )
     echo "  -> mmpd-${ds}: $JOB_MMPD"
     WORKER_IDS+=("$JOB_MMPD")
+    fi
 
+    if [[ "$CONTINUE_MODE" -eq 1 ]] && partial_exists "$ds" "gaussian_anchor"; then
+      echo "Skip gauss-${ds} (partial exists)"
+    else
     echo "Submitting gauss-${ds}..."
     JOB_G=$(sbatch --parsable \
       --job-name="prob100-g-${ds}${SMOKE_SUFFIX}" \
@@ -236,7 +282,11 @@ ENDSCRIPT
     )
     echo "  -> gauss-${ds}: $JOB_G"
     WORKER_IDS+=("$JOB_G")
+    fi
 
+    if [[ "$CONTINUE_MODE" -eq 1 ]] && partial_exists "$ds" "binary_anchor"; then
+      echo "Skip bin-${ds} (partial exists)"
+    else
     echo "Submitting bin-${ds}..."
     JOB_B=$(sbatch --parsable \
       --job-name="prob100-b-${ds}${SMOKE_SUFFIX}" \
@@ -257,14 +307,23 @@ ENDSCRIPT
     )
     echo "  -> bin-${ds}: $JOB_B"
     WORKER_IDS+=("$JOB_B")
+    fi
   done
 
-  MERGE_DEP="afterok:${WORKER_IDS[0]}"
-  for wid in "${WORKER_IDS[@]:1}"; do
-    MERGE_DEP+=":$wid"
-  done
+  if [[ ${#WORKER_IDS[@]} -eq 0 ]]; then
+    MERGE_DEP=""
+    echo "No new workers; submitting merge only..."
+  else
+    MERGE_DEP="afterok:${WORKER_IDS[0]}"
+    for wid in "${WORKER_IDS[@]:1}"; do
+      MERGE_DEP+=":$wid"
+    done
+    echo "Submitting merge after new workers [$MERGE_DEP]..."
+  fi
 
-  echo "Submitting merge [$MERGE_DEP]..."
+  MERGE_DEP_ARGS=()
+  [[ -n "$MERGE_DEP" ]] && MERGE_DEP_ARGS=(--dependency="$MERGE_DEP")
+
   JOB_MERGE=$(sbatch --parsable \
     --job-name="prob100-merge${SMOKE_SUFFIX}" \
     --account=aip-boyuwang \
@@ -273,7 +332,7 @@ ENDSCRIPT
     --mem=16G \
     "${GPU_ARGS[@]}" \
     --time="$WALL_MERGE" \
-    --dependency="$MERGE_DEP" \
+    "${MERGE_DEP_ARGS[@]}" \
     --output="$LOG_DIR/merge-%j.out" \
     --error="$LOG_DIR/merge-%j.err" \
     --mail-type=END,FAIL \
