@@ -41,7 +41,9 @@ from models.diffusion_tsf.train_multivariate_pipeline import (
 )
 from models.diffusion_tsf.guidance import iTransformerGuidance
 from models.diffusion_tsf.visualize_comparison import (
+    apply_checkpoint_architecture,
     denorm,
+    infer_anchor_kwargs,
     infer_diffusion_type,
     infer_model_type,
     infer_prediction_mode,
@@ -58,6 +60,7 @@ def run_probabilistic_visualization(
     num_inference_steps: int = 20,
     sample_index: Optional[int] = None,
     random_seed: int = 42,
+    name_suffix: str = "",
 ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -117,19 +120,26 @@ def run_probabilistic_visualization(
     print(f"Loading finetuned iTransformer baseline from: {ft_path}")
     itrans_model = load_itransformer_from_checkpoint(str(ft_path), n_vars, device)
 
-    # Load diffusion model checkpoint
+    # Load diffusion model checkpoint (match train arch: binary + image_height from ckpt)
     best_pt = sub / 'best.pt'
     diff_ckpt = torch.load(best_pt, map_location=device, weights_only=False)
-    diff_type = infer_diffusion_type(diff_ckpt)
+    meta_diffusion = meta.get('diffusion_type')
+    diff_type = infer_diffusion_type(diff_ckpt, meta_diffusion)
     backbone = infer_model_type(diff_ckpt)
     pred_mode = infer_prediction_mode(diff_ckpt)
-    print(f"Diffusion architecture: type={diff_type}, backbone={backbone}, prediction_mode={pred_mode}")
+    applied_h = apply_checkpoint_architecture(diff_ckpt, diff_type)
+    anchor_kwargs = infer_anchor_kwargs(diff_ckpt, meta)
+    print(
+        f"Diffusion architecture: type={diff_type}, backbone={backbone}, "
+        f"prediction_mode={pred_mode}, image_height={applied_h}"
+    )
 
     diff_model = create_diffusion_model(
         n_variates=n_vars,
         diffusion_type=diff_type,
         model_type=backbone,
         prediction_mode=pred_mode,
+        **anchor_kwargs,
     ).to(device)
     
     itrans_guidance = iTransformerGuidance(itrans_model)
@@ -239,7 +249,11 @@ def run_probabilistic_visualization(
     )
 
     os.makedirs(output_dir, exist_ok=True)
-    out_path = os.path.join(output_dir, f'probabilistic_forecast_{dataset_name}_{subset_id}.png')
+    suffix = f"_{name_suffix}" if name_suffix else ""
+    out_path = os.path.join(
+        output_dir,
+        f"probabilistic_forecast_{dataset_name}_{subset_id}_{diffusion_sampler}{suffix}.png",
+    )
     fig.savefig(out_path, dpi=200, bbox_inches='tight')
     plt.close(fig)
     print(f"Saved probabilistic forecast plot to: {out_path}")
@@ -254,7 +268,7 @@ def main():
     parser.add_argument('--num-futures', type=int, default=5,
                         help='Number of stochastic futures to generate')
     parser.add_argument('--sampler', type=str, default='dpmpp',
-                        choices=['ddim', 'dpmpp', 'ddpm'],
+                        choices=['ddim', 'dpmpp', 'ddpm', 'anchor'],
                         help='Stochastic sampler to generate futures')
     parser.add_argument('--steps', type=int, default=20,
                         help='Number of inference steps')
@@ -262,6 +276,12 @@ def main():
                         help='Specific test sample index (randomly selected if not provided)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility')
+    parser.add_argument(
+        '--name-suffix',
+        type=str,
+        default='',
+        help='Extra token before .png (e.g. h128) to avoid overwriting other heights.',
+    )
     args = parser.parse_args()
 
     run_probabilistic_visualization(
@@ -272,6 +292,7 @@ def main():
         num_inference_steps=args.steps,
         sample_index=args.index,
         random_seed=args.seed,
+        name_suffix=args.name_suffix,
     )
 
 

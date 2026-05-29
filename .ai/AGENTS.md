@@ -9,7 +9,6 @@ Run `git branch --show-current` to see what branch you're on. IF THE BRANCH HAS 
 3. This is a WSL folder; activate the root venv before running commands.
 
 ## Security
-- Stay inside this project by default.
 - Outside-project reads/edits are allowed only when either:
   - the file/path is explicitly attached as context, or
   - the user explicitly grants permission in chat.
@@ -19,8 +18,6 @@ Run `git branch --show-current` to see what branch you're on. IF THE BRANCH HAS 
 ## Alliance Canada / Slurm
 For anything Slurm/Alliance Canada related, ALWAYS use the `/alliancecan` skill first.
 If `/alliancecan` does not resolve the question, check `wiki_docs/` for cluster-specific details.
-
-When giving **pull / prep / submit** commands for Killarney (or any cluster), follow the alliancecan skill: **one copy-pastable bash block**, with optional or alternate lines **commented out** (`#`), not split across prose.
 
 ## Git hygiene
 ALWAYS use the /git skill before using git operations.

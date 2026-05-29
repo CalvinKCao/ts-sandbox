@@ -2513,6 +2513,7 @@ def evaluate_model(
     device: torch.device,
     n_samples: int = 3,
     smoke_test: bool = False,
+    residual_model: Optional['DiffusionTSF'] = None,
 ) -> Dict:
     """Evaluate model on test set.
 
@@ -2588,16 +2589,26 @@ def evaluate_model(
 
             torch.manual_seed(42 + batch_idx)
             result = model.generate(past, **gen_kwargs)
-            all_preds_single.append(result.get('prediction_global_norm', result['prediction']).cpu())
+            pred_single = result.get('prediction_global_norm', result['prediction']).cpu()
+            if residual_model is not None:
+                torch.manual_seed(42 + batch_idx + 1000)
+                res_result = residual_model.generate(past, **gen_kwargs)
+                pred_single += res_result.get('prediction_global_norm', res_result['prediction']).cpu()
+            all_preds_single.append(pred_single)
 
             if smoke_test or (anchor_sampler and not binary_anchor_sampler):
-                all_preds_avg.append(result.get('prediction_global_norm', result['prediction']).cpu())
+                all_preds_avg.append(pred_single)
             else:
                 samples = []
                 for s_idx in range(effective_n_samples):
                     torch.manual_seed(1000 + s_idx * 17 + batch_idx)
                     result = model.generate(past, **gen_kwargs)
-                    samples.append(result.get('prediction_global_norm', result['prediction']).cpu())
+                    pred_s = result.get('prediction_global_norm', result['prediction']).cpu()
+                    if residual_model is not None:
+                        torch.manual_seed(1000 + s_idx * 17 + batch_idx + 1000)
+                        res_result = residual_model.generate(past, **gen_kwargs)
+                        pred_s += res_result.get('prediction_global_norm', res_result['prediction']).cpu()
+                    samples.append(pred_s)
                 all_preds_avg.append(torch.stack(samples).mean(dim=0))
 
             if K > 0:
@@ -3861,6 +3872,8 @@ def main():
     global USE_WINDOW_NORMALIZATION, ZERO_GUIDANCE_FORECAST, WINDOW_STRIDE
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
+    parser.add_argument('--config', type=str, default=None,
+                        help='Path to YAML experiment config (new modular pipeline)')
     parser.add_argument('--mode', type=str, default='full',
                         choices=['full', 'pretrain', 'finetune', 'baseline', 'evaluate', 'status'],
                         help='Pipeline mode (default: full = run everything)')
@@ -3903,22 +3916,12 @@ def main():
                         help='Sampler used by diffusion eval')
     parser.add_argument('--image-height', type=int, default=IMAGE_HEIGHT,
                         help='Override image height')
-    parser.add_argument('--unet-channels', type=str, default=None,
-                        help='Comma-separated UNet channels (e.g. 64,128,256)')
-    parser.add_argument('--attention-levels', type=str, default=None,
-                        help='Comma-separated attention levels (e.g. 1,2)')
     parser.add_argument('--disable-cross-attention', action='store_true',
                         help='Disable cross-variate attention (fully univariate baseline)')
     parser.add_argument('--disable-window-normalization', action='store_true',
                         help='Use only dataset-level normalization from load_dataset; skip per-window z-score in DiffusionTSF')
     parser.add_argument('--zero-guidance-forecast', action='store_true',
                         help='Zero the iTransformer forecast ghost image while keeping encoder tokens for cross attention')
-    parser.add_argument('--model-type', type=str, default=None, choices=['unet', 'dit'],
-                        help="Backbone: 'unet' (default) or 'dit' (FactorizedDiT)")
-    parser.add_argument('--prediction-mode', type=str, default=None, choices=['epsilon', 'x0_cumsum'],
-                        help="Denoising target: 'epsilon' (default) or gaussian-only 'x0_cumsum'.")
-    parser.add_argument('--binary-diffusion', action='store_true',
-                        help='Use hard binary CDF images and XOR bit-flip diffusion noise.')
     parser.add_argument('--lookback-length', type=int, default=LOOKBACK_LENGTH,
                         help='Override lookback length')
     parser.add_argument('--forecast-length', type=int, default=FORECAST_LENGTH,
@@ -3949,39 +3952,28 @@ def main():
     DETERMINISTIC_ANCHOR_LAMBDA = args.deterministic_anchor_lambda
     EVAL_SAMPLER = "anchor" if args.eval_sampler == "deterministic_anchor" else args.eval_sampler
     IMAGE_HEIGHT = args.image_height
-    if args.unet_channels:
-        UNET_CHANNELS = [int(x.strip()) for x in args.unet_channels.split(',') if x.strip()]
-    if args.attention_levels is not None:
-        ATTENTION_LEVELS = [int(x.strip()) for x in args.attention_levels.split(',') if x.strip()]
     if args.disable_cross_attention:
         DISABLE_CROSS_ATTENTION = True
     if args.disable_window_normalization:
         USE_WINDOW_NORMALIZATION = False
     if args.zero_guidance_forecast:
         ZERO_GUIDANCE_FORECAST = True
-    if args.model_type is not None:
-        MODEL_TYPE = args.model_type
-    if args.prediction_mode is not None:
-        PREDICTION_MODE = args.prediction_mode
-    if args.binary_diffusion:
-        DIFFUSION_TYPE = "binary"
+    
+    # We enforce Binary DiT only since user asked to remove others
+    MODEL_TYPE = "dit"
+    DIFFUSION_TYPE = "binary"
+    PREDICTION_MODE = "epsilon"
+    
     if args.deterministic_anchor_alpha is None:
-        if DIFFUSION_TYPE == "binary" and DETERMINISTIC_ANCHOR_LOSS:
+        if DETERMINISTIC_ANCHOR_LOSS:
             DETERMINISTIC_ANCHOR_ALPHA = 0.0
     else:
         DETERMINISTIC_ANCHOR_ALPHA = args.deterministic_anchor_alpha
-    if DIFFUSION_TYPE == "binary" and PREDICTION_MODE == "x0_cumsum":
-        parser.error("Cannot combine --binary-diffusion with --prediction-mode x0_cumsum.")
-    if DIFFUSION_TYPE == "binary" and DETERMINISTIC_ANCHOR_LOSS and DETERMINISTIC_ANCHOR_ALPHA != 0.0:
+        
+    if DETERMINISTIC_ANCHOR_LOSS and DETERMINISTIC_ANCHOR_ALPHA != 0.0:
         parser.error(
             "Binary anchor is a max-noise Bernoulli clean-bit anchor; use "
             "--deterministic-anchor-alpha 0.0 or omit the flag."
-        )
-    if DIFFUSION_TYPE != "binary" and DETERMINISTIC_ANCHOR_LOSS and not (0.0 < DETERMINISTIC_ANCHOR_ALPHA < 1.0):
-        parser.error("Gaussian deterministic anchor requires 0.0 < --deterministic-anchor-alpha < 1.0.")
-    if PREDICTION_MODE == "x0_cumsum" and DETERMINISTIC_ANCHOR_LOSS:
-        parser.error(
-            "Cannot combine --prediction-mode x0_cumsum with --deterministic-anchor-loss."
         )
     _cfg_lookback = LOOKBACK_LENGTH
     LOOKBACK_LENGTH = args.lookback_length
@@ -4000,7 +3992,47 @@ def main():
     
     logger = setup_logging()
     
-    # ---- Mode dispatch ----
+    # ---- New Pipeline Path ----
+    if args.config:
+        from models.diffusion_tsf.pipeline import load_experiment_config, PipelineState, Pipeline
+        from models.diffusion_tsf.pipeline.phases import PHASE_REGISTRY
+        
+        cli_overrides = {}
+        if args.dataset: cli_overrides["dataset"] = args.dataset
+        if args.n_variates: cli_overrides["n_variates"] = args.n_variates
+        if args.seed != 42: cli_overrides["seed"] = args.seed
+        if args.smoke_test: cli_overrides["smoke_test"] = True
+        if args.checkpoint_dir: cli_overrides["checkpoint_dir"] = args.checkpoint_dir
+        if args.results_dir: cli_overrides["results_dir"] = args.results_dir
+        if args.synth_cache_dir: cli_overrides["synth_cache_dir"] = args.synth_cache_dir
+        if args.wandb: cli_overrides["wandb_enabled"] = True
+        if args.wandb_project: cli_overrides["wandb_project"] = args.wandb_project
+        if args.fresh: cli_overrides["fresh"] = True
+        if args.resume: cli_overrides["resume"] = True
+        if args.variate_indices: cli_overrides["variate_indices"] = [int(x.strip()) for x in args.variate_indices.split(',') if x.strip()]
+        if args.subset_id: cli_overrides["subset_id"] = args.subset_id
+
+        cfg = load_experiment_config(args.config, cli_overrides)
+        state = PipelineState.from_config(cfg)
+        
+        phases = []
+        for p in cfg.get("phases", []):
+            p_class = PHASE_REGISTRY.get(p["phase"])
+            if not p_class:
+                logger.error(f"Unknown phase: {p['phase']}")
+                sys.exit(1)
+            phases.append(p_class(**p))
+            
+        try:
+            Pipeline(phases, state).run()
+        finally:
+            if args.wandb:
+                from models.diffusion_tsf.pipeline import wandb_utils
+                wandb_utils.finish_phase_run()
+            cleanup_ddp()
+        return
+
+    # ---- Legacy Mode dispatch ----
     
     if args.mode == 'status':
         if is_main_process():

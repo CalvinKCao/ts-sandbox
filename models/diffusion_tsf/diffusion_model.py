@@ -476,7 +476,12 @@ class DiffusionTSF(nn.Module):
         std = past.std(dim=-1, keepdim=True) + 1e-8
         past_norm = (past - mean) / std
         if future is not None:
-            future_norm = (future - mean) / std
+            if getattr(self.config, 'is_residual_model', False):
+                # For residual targets, the target is already mean-zero (ground truth - Phase 2 prediction).
+                # Shifting it by past_mean would break it, but scaling by std keeps magnitude consistent.
+                future_norm = future / std
+            else:
+                future_norm = (future - mean) / std
         else:
             future_norm = None
         return past_norm, future_norm, (mean, std)
@@ -778,6 +783,7 @@ class DiffusionTSF(nn.Module):
         search_radius: int = 10,
         sampler: str = "ddim",
         num_inference_steps: Optional[int] = None,
+        yield_intermediates: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions (shared factorized path for unet and dit backbones).
 
@@ -796,6 +802,7 @@ class DiffusionTSF(nn.Module):
                 jump_penalty_scale=jump_penalty_scale,
                 search_radius=search_radius,
                 sampler=sampler,
+                yield_intermediates=yield_intermediates,
             )
         return self._generate_factorized(
             past, use_ddim=use_ddim, num_ddim_steps=num_ddim_steps,
@@ -1295,6 +1302,7 @@ class DiffusionTSF(nn.Module):
         verbose: bool = False,
         decoder_method: str = "mean",
         sampler: str = "ddim",
+        yield_intermediates: bool = False,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         """Binary reverse sampling from random bits to a clean hard CDF image."""
@@ -1353,6 +1361,7 @@ class DiffusionTSF(nn.Module):
                 )
             return out[:, 0:1], out[:, 1:2]
 
+        intermediates = None
         if sampler in ("anchor", "deterministic_anchor"):
             t_batch = torch.full(
                 (BV,),
@@ -1365,14 +1374,26 @@ class DiffusionTSF(nn.Module):
             )
             x0_logits, _zt_logits = _chunked_model_fn(neutral_future_flat, t_batch)
             future_2d_flat = (torch.sigmoid(x0_logits) > 0.5).float()
+            if yield_intermediates:
+                intermediates = [(999, neutral_future_flat.clone()), (0, future_2d_flat.clone())]
         else:
-            future_2d_flat = self.binary_scheduler.sample(
-                model_fn=_chunked_model_fn,
-                shape=(BV, 1, H, W_fut),
-                num_steps=num_steps,
-                device=device,
-                verbose=verbose,
-            )
+            if yield_intermediates:
+                future_2d_flat, intermediates = self.binary_scheduler.sample(
+                    model_fn=_chunked_model_fn,
+                    shape=(BV, 1, H, W_fut),
+                    num_steps=num_steps,
+                    device=device,
+                    verbose=verbose,
+                    yield_intermediates=True,
+                )
+            else:
+                future_2d_flat = self.binary_scheduler.sample(
+                    model_fn=_chunked_model_fn,
+                    shape=(BV, 1, H, W_fut),
+                    num_steps=num_steps,
+                    device=device,
+                    verbose=verbose,
+                )
         future_2d = future_2d_flat.reshape(B, V, H, W_fut)
         future_norm = self.decode_from_2d(
             future_2d, from_diffusion=False, decoder_method=decoder_method, **kwargs
@@ -1393,6 +1414,13 @@ class DiffusionTSF(nn.Module):
         }
         if guidance_2d is not None:
             result['guidance_2d'] = guidance_2d
+        if intermediates is not None:
+            # Reshape intermediate lists from (BV, ...) to (B, V, ...)
+            reshaped_intermediates = []
+            for (t_idx, i_tensor) in intermediates:
+                reshaped_intermediates.append((t_idx, i_tensor.reshape(B, V, H, W_fut)))
+            result['intermediates'] = reshaped_intermediates
+            
         return result
 
     def get_loss(
