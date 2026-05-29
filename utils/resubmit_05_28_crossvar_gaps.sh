@@ -75,6 +75,24 @@ VARIANT_EXTRA[exp2-tokens-only]="--zero-guidance-forecast"
 VARIANT_EXTRA[exp3-datasetnorm-tokens-only]="--disable-window-normalization --zero-guidance-forecast"
 VARIANT_EXTRA[exp4-baseline-xvar]=""
 
+ALL_DATASETS=(ETTh1 ETTh2 exchange_rate illness weather ETTm1 ETTm2 electricity traffic dalia)
+ALL_VARIANTS=(
+    exp1-datasetnorm
+    exp2-tokens-only
+    exp3-datasetnorm-tokens-only
+    exp4-baseline-xvar
+)
+
+variant_to_model_id() {
+    case "$1" in
+        exp1-datasetnorm) echo "binary_exp1_datasetnorm" ;;
+        exp2-tokens-only) echo "binary_exp2_tokens_only" ;;
+        exp3-datasetnorm-tokens-only) echo "binary_exp3_datasetnorm_tokens_only" ;;
+        exp4-baseline-xvar) echo "binary_exp4_baseline_xvar" ;;
+        *) return 1 ;;
+    esac
+}
+
 model_id_to_variant() {
     case "$1" in
         binary_exp1_datasetnorm) echo "exp1-datasetnorm" ;;
@@ -83,6 +101,18 @@ model_id_to_variant() {
         binary_exp4_baseline_xvar) echo "exp4-baseline-xvar" ;;
         *) return 1 ;;
     esac
+}
+
+# Login nodes often lack torch; mirror eval_binary_anchor_variants check-partials in bash.
+list_missing_partial_basenames() {
+    local dataset variant model_id path
+    for dataset in "${ALL_DATASETS[@]}"; do
+        for variant in "${ALL_VARIANTS[@]}"; do
+            model_id=$(variant_to_model_id "$variant") || continue
+            path="${EVAL_OUT}/partials/${dataset}_${model_id}.json"
+            [[ -f "$path" ]] || echo "${dataset}_${model_id}"
+        done
+    done
 }
 
 parse_partial_basename() {
@@ -219,7 +249,7 @@ submit_cell() {
     local stem="${DATE_TAG}-bin-h128-xvar-${variant}-${subset,,}"
     local ckpt_dir="$REPO/results/ckpts/${stem}"
 
-  if train_ready "$ckpt_dir"; then
+    if train_ready "$ckpt_dir"; then
         submit_eval "$variant" "$subset" "$dataset" ""
     else
         tid=$(submit_train "$variant" "$subset" "$dataset" "$nvars" "$indices" "" "$stride")
@@ -229,29 +259,12 @@ submit_cell() {
 
 CELLS=()
 if [[ "$AUTO" -eq 1 ]]; then
-    if [[ ! -f "$MERGE_INVOKE" ]]; then
-        echo "ERROR: missing $MERGE_INVOKE" >&2
-        exit 1
-    fi
-    # shellcheck source=/dev/null
-    source "$MERGE_INVOKE"
-    missing_file="$(mktemp)"
-    set +e
-    python -u "$EVAL_SCRIPT" --phase check-partials "${CHECK_ARGS[@]}" >"$missing_file" 2>/dev/null
-    check_st=$?
-    set -e
-    if [[ "$check_st" -eq 0 ]]; then
-        rm -f "$missing_file"
+    mapfile -t missing < <(list_missing_partial_basenames)
+    if [[ "${#missing[@]}" -eq 0 ]]; then
         echo "All 40 partials present; nothing to resubmit."
         exit 0
     fi
-    mapfile -t missing < <(sed 's|^partials/||; s|\.json$||' "$missing_file")
-    rm -f "$missing_file"
-    if [[ "${#missing[@]}" -eq 0 ]]; then
-        echo "ERROR: check-partials failed but listed no paths" >&2
-        exit 1
-    fi
-    echo "Auto-detected ${#missing[@]} missing partial(s):"
+    echo "Auto-detected ${#missing[@]} missing partial(s) (bash file check, no python):"
     for base in "${missing[@]}"; do
         [[ -z "$base" ]] && continue
         if ! read -r dataset variant < <(parse_partial_basename "$base"); then
