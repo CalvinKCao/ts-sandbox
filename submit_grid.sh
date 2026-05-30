@@ -23,8 +23,6 @@ DEPENDENCY=""
 WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 WALL_OVERRIDE=""
 
-HEAVY_DATASETS="electricity traffic weather PeMS solar_Alabama"
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --configs) CONFIGS="$2"; shift 2 ;;
@@ -47,8 +45,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
     JOB_PREFIX="smoke"
 else
     CONFIGS="${CONFIGS:-configs/binary_anchor.yaml}"
-    WALL_DEFAULT="1-00:00:00"
-    WALL_HEAVY="3-00:00:00"
+    WALL_DEFAULT="5:00:00"
     MEM="60G"
     CPUS=8
     JOB_PREFIX="grid"
@@ -64,14 +61,6 @@ LOG_DIR="$STORE/logs"
 CKPT_ROOT="$STORE/ckpts"
 DATA_ROOT="$STORE/datasets"
 mkdir -p "$LOG_DIR" "$CKPT_ROOT" "$DATA_ROOT"
-
-is_heavy_dataset() {
-    local ds="$1"
-    case " $HEAVY_DATASETS " in
-        *" $ds "*) return 0 ;;
-    esac
-    return 1
-}
 
 pick_resume_stem() {
     local ds="$1" cfg="$2"
@@ -109,10 +98,6 @@ for CFG in "${CONF_ARR[@]}"; do
 
             if [[ -n "$WALL_OVERRIDE" ]]; then
                 WALL="$WALL_OVERRIDE"
-            elif [[ "$SMOKE" -eq 1 ]]; then
-                WALL="$WALL_DEFAULT"
-            elif is_heavy_dataset "$DS"; then
-                WALL="$WALL_HEAVY"
             else
                 WALL="$WALL_DEFAULT"
             fi
