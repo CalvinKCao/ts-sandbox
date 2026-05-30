@@ -92,7 +92,6 @@ def _patch_globals(mod: Any, state: PipelineState) -> None:
     mod.DUAL_SCALE_INDEPENDENT_TIMESTEPS = state.dual_scale_independent_timesteps
     mod.MODEL_TYPE = state.model_type
     mod.DIFFUSION_TYPE = state.diffusion_type
-    mod.PREDICTION_MODE = state.prediction_mode
     mod.DETERMINISTIC_ANCHOR_LOSS = state.deterministic_anchor_loss
     mod.DETERMINISTIC_ANCHOR_LAMBDA = state.deterministic_anchor_lambda
     mod.DETERMINISTIC_ANCHOR_ALPHA = state.deterministic_anchor_alpha

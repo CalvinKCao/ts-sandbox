@@ -1,7 +1,6 @@
 """Factorized Diffusion Transformer (DiT) backbone for time-series occupancy maps.
 
-Drop-in replacement for ConditionalUNet2D in the factorized multivariate path
-(`_forward_factorized` / `_generate_factorized`). Same call signature:
+Factorized per-variate DiT denoiser for binary CDF images. Call signature:
 
     forward(x, t, cond, encoder_hidden_states=None) -> (BV, out_channels, H, W)
 
@@ -193,7 +192,7 @@ class _DiTCrossAttnBlock(nn.Module):
 class FactorizedDiT(nn.Module):
     """Per-variate DiT backbone with bottleneck cross-attention to iTrans tokens.
 
-    Inputs (matches ConditionalUNet2D contract used in _forward_factorized):
+    Inputs:
         x: (BV, in_channels, H, W_fut) noisy future canvas + aux + guidance ghost
         t: (BV,) diffusion timestep
         cond: (BV, cond_channels, H, W_fut) visual conditioning (past 2D resized)
@@ -220,6 +219,8 @@ class FactorizedDiT(nn.Module):
         gradient_checkpointing: bool = False,
         use_scale_embedding: bool = False,
         enable_cross_scale_attention: bool = False,
+        use_variate_embedding: bool = False,
+        max_variates: int = 512,
     ):
         super().__init__()
         pH, pW = patch_size
@@ -233,6 +234,7 @@ class FactorizedDiT(nn.Module):
         self.gradient_checkpointing = gradient_checkpointing
         self.use_scale_embedding = use_scale_embedding
         self.enable_cross_scale_attention = enable_cross_scale_attention
+        self.use_variate_embedding = use_variate_embedding
 
         self.x_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
         self.cond_embed = nn.Conv2d(cond_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
@@ -253,6 +255,10 @@ class FactorizedDiT(nn.Module):
             self.scale_embed = nn.Embedding(2, embed_dim)
         else:
             self.scale_embed = None
+        if use_variate_embedding:
+            self.variate_embed = nn.Embedding(max_variates, embed_dim)
+        else:
+            self.variate_embed = None
 
         self.ctx_proj = nn.Linear(context_dim, embed_dim)
         self.ctx_norm = nn.LayerNorm(embed_dim, eps=1e-6)
@@ -313,6 +319,7 @@ class FactorizedDiT(nn.Module):
         cond: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor] = None,
         scale_indices: Optional[torch.Tensor] = None,
+        variate_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         BV, _, H, W = x.shape
 
@@ -331,6 +338,14 @@ class FactorizedDiT(nn.Module):
         x_tok = x_tok + self.pos_x[:, :Nx]
         c_tok = c_tok + self.pos_cond[:, :Nc]
         tokens = torch.cat([c_tok, x_tok], dim=1)  # (BV, Nc + Nx, D)
+
+        if self.variate_embed is not None:
+            if variate_indices is None:
+                raise ValueError("variate_indices are required when variate embeddings are enabled.")
+            if variate_indices.shape[0] != BV:
+                raise ValueError(f"variate_indices batch {variate_indices.shape[0]} != BV {BV}")
+            v_emb = self.variate_embed(variate_indices.long()).unsqueeze(1)
+            tokens = tokens + v_emb
 
         if t.shape[0] != BV:
             raise ValueError(f"timestep batch {t.shape[0]} != BV {BV}")

@@ -61,14 +61,14 @@ def infer_diffusion_type(ckpt: dict, override: Optional[str] = None) -> str:
     if hasattr(cfg, 'diffusion_type'):
         return cfg.diffusion_type
     if isinstance(cfg, dict):
-        return cfg.get('diffusion_type', 'gaussian')
+        return cfg.get('diffusion_type', 'binary')
     sd = ckpt.get('model_state_dict', {})
     for key, value in sd.items():
         if key.endswith('noise_predictor.final_conv.weight') and value.shape[0] == 2:
             return 'binary'
         if key.endswith('noise_predictor.head.bias') and value.shape[0] == 2:
             return 'binary'
-    return 'gaussian'
+    return 'binary'
 
 
 def infer_model_type(ckpt: dict, override: Optional[str] = None) -> str:
@@ -83,9 +83,7 @@ def infer_model_type(ckpt: dict, override: Optional[str] = None) -> str:
     for key in sd:
         if 'noise_predictor.blocks.' in key:
             return 'dit'
-        if 'noise_predictor.down_blocks.' in key:
-            return 'unet'
-    return 'unet'
+    return 'dit'
 
 
 def infer_image_height(ckpt: dict, override: Optional[int] = None) -> int:
@@ -119,6 +117,14 @@ def apply_checkpoint_architecture(ckpt: dict, diffusion_type: str, image_height:
         train_pipeline.ZERO_GUIDANCE_FORECAST = bool(cfg.zero_guidance_forecast)
     elif isinstance(cfg, dict) and 'zero_guidance_forecast' in cfg:
         train_pipeline.ZERO_GUIDANCE_FORECAST = bool(cfg['zero_guidance_forecast'])
+    if hasattr(cfg, 'use_dual_scale'):
+        train_pipeline.USE_DUAL_SCALE = bool(cfg.use_dual_scale)
+    elif isinstance(cfg, dict) and 'use_dual_scale' in cfg:
+        train_pipeline.USE_DUAL_SCALE = bool(cfg['use_dual_scale'])
+    if hasattr(cfg, 'dual_scale_fine_weight'):
+        train_pipeline.DUAL_SCALE_FINE_WEIGHT = float(cfg.dual_scale_fine_weight)
+    elif isinstance(cfg, dict) and 'dual_scale_fine_weight' in cfg:
+        train_pipeline.DUAL_SCALE_FINE_WEIGHT = float(cfg['dual_scale_fine_weight'])
     state = ckpt.get('model_state_dict', {})
     head_weight = state.get('noise_predictor.head.weight')
     if head_weight is not None:
@@ -317,11 +323,9 @@ def run_comparison(
         diff_ckpt = torch.load(sub['best_pt'], map_location=device, weights_only=False)
         diff_type = infer_diffusion_type(diff_ckpt, diffusion_type)
         backbone = infer_model_type(diff_ckpt, model_type)
-        pred_mode = infer_prediction_mode(diff_ckpt, prediction_mode)
         applied_h = apply_checkpoint_architecture(diff_ckpt, diff_type, image_height)
         print(
-            f"  diffusion_type={diff_type} model_type={backbone} "
-            f"prediction_mode={pred_mode} image_height={applied_h}"
+            f"  diffusion_type={diff_type} model_type={backbone} image_height={applied_h}"
         )
 
         # Load fine-tuned diffusion with same guidance wrapper as training
@@ -330,7 +334,6 @@ def run_comparison(
             n_variates=n_vars,
             diffusion_type=diff_type,
             model_type=backbone,
-            prediction_mode=pred_mode,
             **anchor_kwargs,
         ).to(device)
         itrans_guidance = iTransformerGuidance(itrans_model)

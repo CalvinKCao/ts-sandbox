@@ -1,8 +1,10 @@
-# Hyper-detailed walkthrough: FactorizedDiT multivariate diffusion (ts-sandbox)
+# Hyper-detailed walkthrough: dual-scale FactorizedDiT multivariate diffusion (ts-sandbox)
 
-This document is **implementation-first**: it traces tensors, names every major submodule down to layer lists, walks the **FactorizedDiT** backbone block-by-block, and records defaults from `DiffusionTSFConfig` / `pipeline_config.py` as of the repo state when this file was written.
+This document is **implementation-first**: it traces tensors, names every major submodule down to layer lists, walks the **FactorizedDiT** backbone block-by-block, and records defaults aligned with **`configs/binary_dual_scale.yaml`** (canonical experiment config).
 
-**Scope:** Variate-factorized **FactorizedDiT** with **hard binary CDF images** and **XOR bit-flip diffusion**, including **deterministic anchor loss** and anchor inference. Production Slurm jobs (`slurm_binary_anchor_92d3.sh`, height-matrix runs) pass `--binary-diffusion` and `--model-type dit`. The legacy Gaussian + vertical-blur path (`encode_to_2d` + `DiffusionScheduler`) and convolutional U-Net backbone (`model_type="unet"`) remain in code for old checkpoints only and are not documented here.
+**Scope:** Variate-factorized **FactorizedDiT** with **two-scale hard binary CDF images** (coarse full-range + fine within-bin residual), **XOR bit-flip diffusion** on both scales, **cross-scale attention** at the DiT bottleneck, **deterministic anchor loss** (`deterministic_anchor_lambda: 0.99`), and **anchor** eval sampling. YAML-driven runs set `use_dual_scale: true`, `image_height: 16`, `dual_scale_fine_weight: 0.75`, `dual_scale_independent_timesteps: true`, `lookback_length` / `forecast_length: 96`, and `use_window_normalization: true`.
+
+When `use_dual_scale=False`, the model falls back to a **single** full-range CDF map at `image_height` (typically 32) — same XOR/anchor machinery, no scale embedding or cross-scale block. The legacy Gaussian + vertical-blur path and `model_type="unet"` remain for old checkpoints only and are not documented here.
 
 ---
 
@@ -19,6 +21,7 @@ This document is **implementation-first**: it traces tensors, names every major 
 | Binary bit-flip schedule + reverse sampler | `models/diffusion_tsf/diffusion.py` (`BinaryDiffusionScheduler`) |
 | 2D CDF encode/decode (no blur) | `models/diffusion_tsf/preprocessing.py` (`TimeSeriesTo2D`) |
 | Hyperparameter dataclass | `models/diffusion_tsf/config.py` |
+| Experiment YAML | `configs/binary_dual_scale.yaml`, loader in `models/diffusion_tsf/pipeline/config.py` |
 | iTransformer wrapper | `models/diffusion_tsf/guidance.py` |
 | iTransformer baseline | `models/iTransformer/model/iTransformer.py`, `layers/Transformer_EncDec.py`, `layers/SelfAttention_Family.py`, `layers/Embed.py` |
 | Synthetic pretrain | `models/diffusion_tsf/dataset.py`, `realts.py`, `augmentation.py` |
@@ -68,19 +71,20 @@ Each batch job sources a generated preamble that:
 
 **Synthetic pretrain** (`run_pretrain_mode`, Slurm `run.sh`, or manifest `--mode full` before dataset loops) is two Optuna phases whose **best checkpoints are promoted directly**—there is no extra multi-epoch “full synthetic pretrain” after either HP search unless a legacy cache has JSON params without the paired `*_hp_best.pt` file.
 
-**Per-dataset finetune** (`--mode finetune`, `_finetune_and_eval_one_subset`, or the finetune stage inside `run.sh`) runs **four phases** on real data (iTrans HP → iTrans full finetune → diffusion HP → diffusion full finetune), then eval.
+**Per-dataset finetune** (`--mode finetune`, pipeline phases, or `run.sh`) runs the YAML `phases` list. For **`binary_dual_scale.yaml`**:
 
 ```
-── PRETRAIN (synthetic, Slurm dim dir & manifest CHECKPOINT_DIR) ───────────────
-  Phase 1A │ iTransformer HP tuning       │ best trial weights → itrans_hp_best.pt → itransformer.pt (no extra full-pretrain epoch block)
-  Phase 1B │ Diffusion HP tuning          │ N_DIFFUSION_HP_TRIALS trials → diff_hp_best.pt → diffusion.pt (no extra full synthetic pretrain)
-── FINETUNE (per dataset/subset) ────────────────────────────────────────────
-  Phase 2A │ iTransformer HP finetune     │ real data (warm-start from Phase 1A ckpt) -> best trial weights promoted
-  Phase 2B │ Diffusion HP finetune        │ real data; N_FINETUNE_HP_TRIALS Optuna trials; batch size auto-probed once
-  Phase 2C │ Diffusion full finetune      │ real data (guidance = finetuned iTrans from 2A)
-  Eval     │ Diffusion eval + iTrans baseline (finetuned iTrans for both)
+── PRETRAIN (synthetic) ─────────────────────────────────────────────────────
+  itrans_hp_pretrain      │ 10 trials, max 10 epochs → itrans_hp_best.pt
+  diffusion_hp_pretrain   │ 8 trials, max 5 epochs, patience 4 → diff_hp_best.pt
+── FINETUNE (per dataset/subset, capped to ~ETTh1 size when data_subset on) ─
+  itrans_finetune_hp      │ 10 trials, max 10 epochs, cold_start: true
+  diffusion_finetune_hp   │ 5 trials, max 20 epochs, patience 15
+  eval                    │ n_samples: 30 (anchor sampler from experiment.eval_sampler)
 ─────────────────────────────────────────────────────────────────────────────
 ```
+
+Legacy monolithic names (Phase 1A/1B/2A/2B/2C) map to the same logic in `train_multivariate_pipeline.py`; new work should register phases in `models/diffusion_tsf/pipeline/phases/` and drive them from YAML.
 
 ### Phase 1A — iTransformer HP tuning on synthetic data
 
@@ -170,12 +174,12 @@ When clearing a Slurm smoke run (`.smoke_test` flag), **`run_pretrain_mode`** al
 
 ### 3.2 `_normalize_sequence` inside `DiffusionTSF`
 
-For each batch, **past** (and **future** during training) is normalized again using **per-sequence** statistics computed from the **past** window only:
+When `use_window_normalization: true` (default in `binary_dual_scale.yaml`), each batch **past** (and **future** during training) is normalized using **per-window** statistics from the **past** only:
 
 - `mean = past.mean(dim=-1, keepdim=True)`, `std = past.std(dim=-1, keepdim=True) + 1e-8`
 - `past_norm`, `future_norm = (past - mean)/std`, `(future - mean)/std`
 
-So the model sees **locally standardized** windows even after dataset-level z-scoring. That is intentional (non-stationary handling) but means two normalization layers stack; ablations should be aware of it.
+With `use_window_normalization: false`, mean=0 and std=1 (identity). Dual-scale runs keep window norm on so coarse/fine binning sees locally stationary values even after dataset z-score.
 
 ### 3.3 Synthetic pretrain
 
@@ -188,9 +192,9 @@ So the model sees **locally standardized** windows even after dataset-level z-sc
 
 Binary diffusion uses **sharp occupancy maps** — no vertical Gaussian blur, no scaling to `[-1, 1]`.
 
-### 4.1 CDF occupancy map (`TimeSeriesTo2D`)
+### 4.1 Single-scale CDF occupancy map (`TimeSeriesTo2D.forward`)
 
-**Parameters (defaults):** `height` = `config.image_height` (default **64**), `max_scale` = **3.5**.
+Used when `use_dual_scale=False`. **Parameters:** `height` = `config.image_height` (often **32**), `max_scale` = **3.5**.
 
 **Forward (`encode_to_2d_binary` → `to_2d`):**
 
@@ -210,7 +214,28 @@ Binary diffusion uses **sharp occupancy maps** — no vertical Gaussian blur, no
 
 Registered buffer `bin_centers` supports median/mode/beam decoders and diagnostics.
 
-### 4.2 What we removed from the old Gaussian path
+### 4.2 Dual-scale decomposition (`encode_dual` / `decode_dual`)
+
+**Enabled when** `use_dual_scale=True` (requires `image_height=16` per `DiffusionTSFConfig.__post_init__`). Each normalized value becomes **two** binary CDF maps at the same `H×W` resolution; effective value precision is finer than a single 16-bin ladder over `[-max_scale, max_scale]`.
+
+**Coarse map** — full-range binning (same rule as §4.1):
+
+1. Clip to `[-max_scale, max_scale]`, assign `coarse_bin ∈ [0, H-1]`.
+2. Fill rows `0..coarse_bin` → **coarse** occupancy in `{0,1}`.
+
+**Fine map** — residual **within** the coarse bin:
+
+1. `coarse_center` = center of the coarse bin in value space; `residual = x - coarse_center`.
+2. Clip residual to `±(max_scale / H)` (one coarse bin width).
+3. Re-bin residual into `H` sub-bins → **fine** occupancy map (another CDF staircase, but over the local range only).
+
+**Decode (`decode_dual`):** decode coarse with range `max_scale`, decode fine with range `max_scale / H`, **add** the two scalar fields, clamp to `[-max_scale, max_scale]`. Inference uses this after both scales are denoised.
+
+**Diffusion targets:** XOR noise and BCE apply **separately** to coarse and fine maps. Combined training loss:
+
+`regular_loss = (1 - w) * L_coarse + w * L_fine` with `w = dual_scale_fine_weight` (**0.75** in `binary_dual_scale.yaml`).
+
+### 4.3 What we removed from the old Gaussian path
 
 The legacy `encode_to_2d` path still exists in `diffusion_model.py`: `to_2d` → `VerticalGaussianBlur` → clamp/scale to `[-1, 1]` for continuous DDPM. **Current production binary runs skip blur entirely** via `encode_to_2d_binary`.
 
@@ -233,11 +258,11 @@ For clean binary image `x0 ∈ {0,1}` and timestep `t`:
 
 Returns `(x_t, z_t)`. Each pixel flips independently with probability `beta_t`; at `t → T−1`, `beta_t` is large so the image is nearly random bits.
 
-**Training targets (FactorizedDiT, `out_channels=2`):**
+**Training targets (FactorizedDiT, `out_channels=2` per forward row):**
 
-- Channel 0: logits for **clean** `x0` (future CDF bits).
+- Channel 0: logits for **clean** `x0` (CDF bits at that scale).
 - Channel 1: logits for **flip mask** `z_t`.
-- Loss = `BCE(x0_logits, x0) + BCE(zt_logits, z_t)` (plain unweighted BCE; boundary-weighted BCE is not wired for binary yet).
+- Per scale: `BCE(x0) + BCE(zt)`. Dual-scale combines coarse and fine with `dual_scale_fine_weight` (§4.2).
 
 **Reverse process (inference) — `sample()`:**
 
@@ -255,24 +280,28 @@ Classifier-free guidance uses the same `cfg_dropout` training mask on cond / ctx
 
 
 
-## 6) `DiffusionTSF` assembly (factorized DiT path), slowly
+## 6) `DiffusionTSF` assembly (dual-scale factorized DiT path), slowly
 
-This section explains how the main model object is assembled for **binary** image diffusion with `model_type="dit"` (`FactorizedDiT`). Training/inference entry is `_forward_binary_factorized` / `_generate_binary_factorized` when `diffusion_type="binary"`.
+This section explains how the main model object is assembled for **binary** image diffusion with `model_type="dit"` (`FactorizedDiT`). With `use_dual_scale=True` (production default per `binary_dual_scale.yaml`), training/inference route to `_forward_binary_dual_scale` / `_generate_binary_dual_scale`. Otherwise: `_forward_binary_factorized` / `_generate_binary_factorized` (single CDF map).
 
 Important current behavior:
 - We do **not** stack all variates as extra input channels on one forward pass.
-- In factorized multivariate mode, the denoiser runs on `(BV, C_in, H, W)` — one occupancy map per variate, **shared weights** across the `BV = B·V` batch.
-- The DiT backbone has **no internal cross-variate mixing**. Cross-variate coupling is **only** via (a) the frozen iTransformer guidance stack and (b) a **single bottleneck cross-attention** block that reads `V` context tokens per forward pass.
+- In factorized multivariate mode, the denoiser runs on `(BV, C_in, H, W)` per scale — **shared weights** across variates and across coarse/fine.
+- **Dual-scale batch layout:** coarse and fine maps for each `(b, v)` are **interleaved** as adjacent batch rows: `BV*2` items with ordering `[coarse₀, fine₀, coarse₁, fine₁, …]` via `_stack_dual_scale_flat`. `scale_indices` is `[0,1,0,1,…]` so `FactorizedDiT` knows which scale each row represents.
+- The DiT backbone has **no internal cross-variate mixing**. Cross-variate coupling is via (a) frozen iTransformer guidance, (b) bottleneck **cross-attention** to `V` context tokens, and (c) when dual-scale is on, bottleneck **cross-scale attention** between the paired coarse/fine token sequences.
 
 ### 6.0 Multivariate context: what mixes, what does not
 
 | Mechanism | Attention / mixing axis | Cross-variate? |
 |-----------|-------------------------|----------------|
 | **DiT self-attention** | Patch tokens on one variate’s `(H, W_fut)` canvas (`cond` patches ∥ `x` patches) | **No** — only spatial patches for the **target** variate in this forward |
-| **DiT bottleneck cross-attention** | Spatial patch queries → `V` iTransformer context tokens | **Yes** — each of the `BV` forwards sees all `V` keys/values |
+| **DiT bottleneck cross-attention** | Spatial patch queries → `V` iTransformer context tokens | **Yes** — each forward sees all `V` keys/values |
+| **DiT bottleneck cross-scale attention** | Patch queries on one scale → keys/values from **paired** other scale (coarse↔fine) | **Yes** — only when `use_dual_scale=True`; requires adjacent `[coarse, fine]` batch pairs |
+| **Scale embedding** | Added to timestep AdaLN input `t_emb` | **Yes** — `nn.Embedding(2, embed_dim)` distinguishes coarse (0) vs fine (1) |
+| **Variate embedding** | Added to **all** cond+x patch tokens from layer 0 | **Yes** — `variate_embed(variate_indices)` when `use_variate_embedding` and `V>1` |
 | **iTransformer (guidance)** | Self-attention over `V` variate tokens on lookback | **Yes** — happens **before** DiT, inside frozen `get_encoder_tokens` / `get_forecast` |
-| **Guidance ghost channel** | Extra input channel: that variate’s forecast CDF image | **No** — per-variate pixel conditioning only |
-| **Visual cond (`cond`)** | Past-tail occupancy map for **same** variate, patchified into the token sequence | **No** |
+| **Guidance ghost channel(s)** | Extra `canvas` channels: iTrans forecast CDF(s) | **No** cross-variate pixels — dual-scale: **both** coarse+fine ghosts on every row |
+| **Visual cond (`cond`)** | Past-tail CDF map(s), patchified into token prefix | **No** cross-variate — dual-scale: **both** coarse+fine past channels on every row |
 
 So: there is **no** “multivariate self-attention” inside DiT (no attention over a variate index). Multivariate structure enters as **(1)** iTransformer’s variate-token encoder, projected to `(B, V, ctx_dim)` and consumed at **one** cross-attention site, and **(2)** optional per-variate ghost images on the input canvas.
 
@@ -285,7 +314,7 @@ Set `disable_cross_attention=True` in config to drop (1); guidance pixels in (2)
 | Setting | Value |
 |---------|--------|
 | Class | `FactorizedDiT` (`models/diffusion_tsf/dit.py`) |
-| CLI / Slurm | `--model-type dit` on all 92d3 anchor and binary-height matrix scripts |
+| Config / CLI | `configs/binary_dual_scale.yaml` or `--config configs/binary_dual_scale.yaml`; `model_type: dit` |
 | `pipeline_config.py` | `MODEL_TYPE = "unet"` is a **stale default** for untouched local imports; override with CLI |
 
 A legacy **`ConditionalUNet2D`** path (`model_type="unet"`) still exists in `unet.py` for old checkpoints. New work should not use it.
@@ -301,13 +330,13 @@ Core config flags:
 Now define channel counts carefully:
 
 1. `backbone_in_channels`  
-   Formula: `1 + num_aux_channels + (1 if use_guidance_channel else 0)`.
-   - Base `1`: the noisy future occupancy map for one variate.
+   Formula: `1 + num_aux_channels + guidance_channels`.
+   - Base `1`: the noisy future occupancy map for one variate (still **one** scale per row when dual-scale).
    - `num_aux_channels`: optional helper channels (coordinate ramp, time ramp, value hints, etc.).
-   - Optional `+1`: iTransformer guidance ghost channel, if enabled.
+   - `guidance_channels`: `2` when `use_dual_scale` + guidance (coarse+fine ghosts); else `1` or `0`.
 
 2. `visual_cond_channels` → DiT `cond_channels`  
-   Usually `1` for the past-tail occupancy map (optional +1 for value-channel variants). Guidance ghost is **not** in `cond`; it is concatenated onto `x` / `canvas` before the denoiser.
+   `1` per scale (optional +1 value channel); **`×2` when `use_dual_scale`** so each row’s `cond` is `[past_coarse, past_fine]`. Guidance is **not** in `cond`; it is concatenated onto `canvas`.
 
 3. `out_channels`  
    **2** for binary diffusion: clean-bit logits + flip-mask logits per variate map.
@@ -329,29 +358,33 @@ Why this exists:
 - Bottleneck cross-attention injects iTransformer’s **already cross-mixed** lookback summaries (one token per variate).
 - Complements the ghost image, which carries **forecast** geometry for the target variate only.
 
-### 6.4 `_forward_binary_factorized`: full tensor trail
+### 6.4 `_forward_binary_dual_scale`: full tensor trail (production)
 
-Symbols: `B` batch, `V` variates, `H` = `image_height`, `W_fut` future width in 2D, `T` = `binary_num_steps`.
+Symbols: `B` batch, `V` variates, `H` = **16** (`image_height`), `W_fut` = `forecast_length` (96 in yaml), `T` = `binary_num_steps`, `BV = B·V`, `BVS = BV·2`.
 
-1. **`_normalize_sequence(past, future)`** → per-window z-score from past stats; `future_norm` for targets.
+1. **`_normalize_sequence(past, future)`** → per-window z-score when `use_window_normalization=True`.
 
-2. **`future_2d = encode_to_2d_binary(future_norm)`** → `(B, V, H, W_fut)` in `{0,1}`.
+2. **`encode_dual_to_2d_binary(future_norm)`** → `future_coarse`, `future_fine` each `(B, V, H, W_fut)`.
 
-3. **Sample `t ~ Uniform(0, T−1)`**, expand to `t_flat` over `BV = B·V`.
+3. **Timesteps:** sample `t` per batch item for **coarse**; if `dual_scale_independent_timesteps=True` (yaml default), sample a **second** `t_fine` for the fine scale. Flatten to `t_bvs` of shape `(BVS,)`.
 
-4. **XOR noise:** `xt_flat, zt_flat = binary_scheduler.add_noise(future_flat, t_flat)` on `(BV, 1, H, W_fut)`.
+4. **XOR noise** independently on coarse and fine flats; stack with `_stack_dual_scale_flat` → `xt_flat` `(BVS, 1, H, W_fut)`.
 
-5. **Guidance ghost:** iTransformer forecast → `encode_to_2d_binary` → concat on `canvas` (not on `cond`).
+5. **Guidance:** iTransformer forecast → dual encode → `_merge_dual_scale_channels` → **2** ghost channels on **every** coarse/fine row (same coarse+fine pair per `(b,v)`).
 
-6. **`ctx_flat`:** `(BV, V, context_dim)` from `iTransformerTokenAdapter` when cross-attn enabled.
+6. **`ctx_flat`:** `(B, V, ctx_dim)` → `_expand_ctx_to_dual_scale` → `(BVS, V, ctx_dim)` (same cross-variate memory for both scales).
 
-7. **Canvas:** `xt_flat` + coordinate/time aux channels + optional ghost → `FactorizedDiT` input.
+7. **Visual cond:** past tail dual-encoded → `_merge_dual_scale_channels` → **2** cond channels on every row, bilinear-resized to `(H, W_fut)`; CFG dropout masks `BV*2` rows together per batch item.
 
-8. **Visual cond:** full past encoded to binary 2D, bilinear-resized to `(H, W_fut)` → DiT `cond` prefix (CFG may zero it).
+8. **DiT forward** with `scale_indices` + `variate_indices`; noisy `xt` still interleaved one scale per row via `_stack_dual_scale_flat`; output reshaped to separate coarse/fine `x0` and `zt` logits.
 
-9. **DiT forward:** `out_flat` shape `(BV, 2, H, W_fut)` — split into `x0_logits`, `zt_logits`.
+9. **Loss:** per-scale `BCE(x0)+BCE(zt)`, then `(1-w)*coarse + w*fine` with `w=dual_scale_fine_weight` (**0.75**); optional anchor (§11) on both scales’ x₀ heads.
 
-10. **Loss:** `regular_loss = BCE(x0, future) + BCE(zt, z_t)`; optional anchor term (§11).
+Chunking: `unet_max_chunk_size` is rounded to an **even** number so coarse/fine pairs stay in the same chunk.
+
+### 6.5 `_forward_binary_factorized` (single-scale fallback)
+
+Same as the dual path but one `encode_to_2d_binary` map, batch `BV` (not `BVS`), no `scale_indices`, no cross-scale block. See git history or `diffusion_model.py` for the full single-scale tensor trail.
 
 EMD / monotonicity / Gaussian ε-MSE are **not** used on the binary path (`emd_loss` is logged as 0).
 
@@ -362,10 +395,10 @@ EMD / monotonicity / Gaussian ε-MSE are **not** used on the binary path (`emd_l
 `FactorizedDiT` (`dit.py`) is the production patchified Diffusion Transformer (DiT-style AdaLN-Zero) behind `DiffusionTSF._predict_noise_chunked`. Contract:
 
 ```python
-noise_pred = FactorizedDiT(x, t, cond, encoder_hidden_states=ctx_flat)
-# x: (BV, in_channels, H, W_fut)
-# cond: (BV, cond_channels, H, W_fut)
-# ctx_flat: (BV, V, context_dim) or None
+out = FactorizedDiT(x, t, cond, encoder_hidden_states=ctx_flat,
+                    scale_indices=scale_indices, variate_indices=variate_indices)
+# Dual-scale: x (BVS, C_in, H, W), cond (BVS, 2, H, W), scale_indices + variate_indices (BVS,)
+# Single-scale: scale_indices=None, batch (B*V, ...)
 ```
 
 ### 7.1 Constructor defaults (`pipeline_config.py` / `DiffusionTSFConfig`)
@@ -389,7 +422,8 @@ noise_pred = FactorizedDiT(x, t, cond, encoder_hidden_states=ctx_flat)
 2. **Patch embed:** separate `Conv2d` stems `x_embed`, `cond_embed` → tokens `(BV, Nx, D)` and `(BV, Nc, D)` with `Nx = gh·gw`, `Nc` from cond grid.
 3. **Positional embeddings:** learned `pos_x`, `pos_cond` (trunc-normal init) so cond vs noisy slots are distinguishable on the shared sequence axis.
 4. **Concatenate sequence:** `tokens = [c_tok | x_tok]` along length `Nc + Nx`. Self-attention mixes **past cond patches and noisy future patches** for this variate only.
-5. **Timestep:** sinusoidal embedding → MLP `t_embed` → vector `c` `(BV, D)` used in **AdaLN-Zero** in every block and the final head.
+5. **Variate embedding (optional):** `tokens += variate_embed(variate_indices).unsqueeze(1)` on all slots when enabled.
+6. **Timestep:** sinusoidal embedding → MLP `t_embed` → vector `c` `(BV, D)` used in **AdaLN-Zero** in every block and the final head.
 
 AdaLN-Zero (standard DiT block): for each sublayer, `shift, scale, gate = adaLN(c)` modulate LayerNorm’d tokens; `gate` is zero-init so blocks start as identity.
 
@@ -409,12 +443,15 @@ Self-attention is multi-head over the **patch sequence** (length `Nc+Nx`), not o
 ```
 x ← x + g1 · SelfAttn(...)
 x ← x + gx · CrossAttn(queries=x, keys/values=ctx_proj)   # skipped if ctx is None
+x ← x + gs · CrossScaleAttn(queries=x, keys/values=other_scale)  # dual-scale only
 x ← x + g2 · MLP(...)
 ```
 
-- `ctx_proj = LayerNorm(Linear(encoder_hidden_states))` → `(BV, V, D)`.
-- Cross-attention: **queries** from spatial tokens, **keys/values** from the `V` iTransformer tokens. This is the **only** place DiT reads other variates.
-- Nine AdaLN gates (self, cross, MLP) are zero-init so cross-attn starts inactive.
+- `ctx_proj = LayerNorm(Linear(encoder_hidden_states))` → `(BV, V, D)` (or `BVS` in dual-scale).
+- Cross-attention: **queries** from spatial tokens, **keys/values** from the `V` iTransformer tokens — cross-**variate** coupling.
+- **Cross-scale attention** (`enable_cross_scale_attention=True`): reshape batch as pairs `(coarse, fine)`; each scale’s tokens attend to the **other** scale’s tokens from the same `(b,v)`. Requires `scale_indices` ordering `[0,1,0,1,…]`.
+- Timestep embedding adds **`scale_embed(scale_indices)`** when dual-scale is enabled.
+- Twelve AdaLN gates when cross-scale is on (self, cross-variate, cross-scale, MLP); all zero-init.
 
 ### 7.4 Output head
 
@@ -434,6 +471,9 @@ DiT keeps conditioning roles separate (no early-fusion conv stack):
 | Past visual cond | `cond` → `cond_embed` → **prefix** of token sequence |
 | Diffusion step | AdaLN vector `c` from `t` |
 | Cross-variate lookback | `encoder_hidden_states` → bottleneck cross-attn only |
+| Coarse vs fine identity | `scale_indices` → `scale_embed` on `t_emb`; cross-scale attn at bottleneck |
+| Which variate this row is | `variate_indices` → `variate_embed` on all patch tokens (Plan A) |
+| Both scales’ past / guidance | Dual-scale: `cond` has 2 ch; `canvas` guidance has 2 ch — **same** pair on coarse and fine rows |
 
 Guidance ghost is **not** passed in `cond`; `DiffusionTSF` concatenates it onto `canvas` channels before calling `FactorizedDiT`.
 
@@ -519,7 +559,7 @@ With guidance enabled, iTransformer output is used in **two separate places**:
 
 **Place 1 — extra channel on the noisy canvas ("ghost image")**
 
-The coarse forecast `(B, V, forecast_length)` is normalized with the same per-sequence stats as the diffusion target, then `encode_to_2d_binary`. In factorized mode this is `(BV, 1, H, W_fut)` concatenated onto `canvas` (not onto `cond`):
+The coarse forecast `(B, V, forecast_length)` is normalized with the same per-window stats as the diffusion target. **Dual-scale:** `encode_dual_to_2d_binary` → stacked coarse/fine ghosts on `canvas` `(BVS, 1, H, W_fut)`. **Single-scale:** one `encode_to_2d_binary` map per `(BV, …)` row. Ghost is always on `canvas`, not `cond`:
 
 ```python
 if guidance_2d is not None:
@@ -566,48 +606,48 @@ Current pipeline behavior:
 
 ---
 
-## 10) Inference path (`_generate_binary_factorized`)
+## 10) Inference path (`_generate_binary_dual_scale`)
 
-At inference, **`FactorizedDiT`** predicts `(x0_logits, zt_logits)` each step; `BinaryDiffusionScheduler.sample` drives the XOR reverse chain.
+Dual-scale generation denoises **both** coarse and fine maps in **lock-step** on a batch of size `BVS = BV·2` (interleaved coarse/fine). `BinaryDiffusionScheduler.sample` calls the model on all `BVS` rows each step; `scale_indices` and cross-scale attention stay active throughout.
 
 | Sampler | Behavior |
 |---------|----------|
-| default / `ddim` label | Iterative binary reverse (`binary_sample_steps`, default **20**): random bits → repeated x0 predict + XOR re-noise |
-| `anchor` / `deterministic_anchor` | **One-shot** at `t = T−1` from **Bernoulli(0.5)** canvas (§11); Slurm `--eval-sampler anchor` |
+| `eval_sampler: anchor` (yaml) | **One-shot** at `t = T−1` from **Bernoulli(0.5)** on **both** scales; decode with `decode_dual_from_2d` |
+| default / `ddim` label | Iterative XOR reverse on `BVS` maps (`binary_sample_steps`, default **20**) |
 
-**Iterative flow:**
-1. Normalize past; `encode_to_2d_binary` for `cond` and ghost.
-2. `ctx_flat` built once, reused every reverse step.
-3. Start `x_T ~ Bernoulli(0.5)`; loop subsampled timesteps with `binary_scheduler.sample`.
-4. `decode_from_2d(..., from_diffusion=False)` → denormalize to 1D futures.
+**Anchor flow (production eval):**
+1. Window-normalize past; dual-encode past tail → `cond`; dual-encode guidance forecast → ghost channels.
+2. `ctx_flat` via `_expand_ctx_to_dual_scale`, built once.
+3. Single forward from random bits at max noise; threshold x₀ logits per scale.
+4. **`decode_dual_from_2d(coarse, fine)`** → `future_norm` → denormalize.
 
-Gaussian-only samplers (`dpmpp`, full DDPM on continuous latents) apply only when `diffusion_type="gaussian"`.
+Single-scale inference (`_generate_binary_factorized`) uses `decode_from_2d` on one map instead.
 
 ---
 
 ## 11) Deterministic anchor loss and anchor sampler (binary)
 
-Deterministic anchor loss is an **auxiliary training term** that forces **FactorizedDiT** to decode a clean future CDF from a **maximally noisy** binary canvas in one forward pass. The same forward defines the **`anchor` inference sampler** (no iterative XOR chain). Enabled on production runs via `--deterministic-anchor-loss` (`slurm_binary_anchor_92d3.sh`).
+Deterministic anchor loss forces **FactorizedDiT** to predict clean **x₀** bits from a **maximally noisy** canvas (`Bernoulli(0.5)` at `t = T−1`) in one forward. The same forward is the **`anchor` eval sampler** (`eval_sampler: anchor` in yaml). Enabled via `deterministic_anchor_loss: true` in experiment config.
 
-| Field | Role | Typical Slurm values |
-|-------|------|----------------------|
-| `use_deterministic_anchor_loss` | Turn anchor term on | `True` on anchor Slurm scripts |
+| Field | Role | `binary_dual_scale.yaml` |
+|-------|------|--------------------------|
+| `deterministic_anchor_loss` | Turn anchor term on | `true` |
 | `deterministic_anchor_lambda` (`λ`) | `combined = λ·L_reg + (1−λ)·L_anchor` | **0.99** |
-| `deterministic_anchor_alpha` (`α`) | Legacy Gaussian knob; **ignored for binary** (anchor always uses `t = T−1`) | CLI may pass **0.0** |
+| `deterministic_anchor_alpha` (`α`) | Legacy Gaussian knob; **ignored for binary** | **0.0** |
 
 `λ` is fixed from CLI / config — not Optuna-tuned. Diffusion HP phases may set `disable_anchor_loss=True` to skip the extra forward.
 
-### 11.1 Training (`_forward_binary_factorized`)
+### 11.1 Training (`_forward_binary_dual_scale`)
 
-1. **Regular term** — sample `t`, XOR-flip future bits, predict **x₀** and **zₜ** logits; `regular_loss = BCE(x0) + BCE(zt)`.
-2. **Anchor forward** — fixed `t_anchor = T−1` (highest flip rate); canvas = **Bernoulli(0.5)** per pixel (analogous to “fully noised” bits, not zeros).
-3. Same `cond`, ghost, `ctx_flat` as the main pass (CFG dropout applies only in training on the main path; anchor uses un-dropped `base_cond` / `ctx_anchor`).
-4. **Anchor loss** — BCE on **x₀ logits only** vs true future bits.
-5. **Combined** — `λ·regular_loss + (1−λ)·anchor_loss`.
+1. **Regular term** — dual-scale XOR + weighted coarse/fine BCE (§6.4).
+2. **Anchor forward** — `t_anchor = T−1` for all `BVS` rows; canvas = **Bernoulli(0.5)** per pixel on both scales.
+3. Same `base_cond_for_unet`, dual ghost, `ctx_anchor` (no CFG dropout on anchor path).
+4. **Anchor loss** — BCE on **x₀ logits only** for coarse **and** fine vs respective targets (sum of both).
+5. **Combined** — `λ·regular_loss + (1−λ)·anchor_loss` with λ=**0.99** (anchor term is small but non-zero).
 
-### 11.2 Inference (`sampler="anchor"`)
+### 11.2 Inference (`eval_sampler: anchor`)
 
-One forward at `t = T−1` from **Bernoulli(0.5)** canvas; `future_2d = 1[σ(x0_logits) > 0.5]`; decode to 1D. Eval uses **one sample** per window (no multi-draw CRPS loop) because the map is deterministic given cond/ghost/ctx.
+One forward at `t = T−1` on interleaved coarse/fine random bits; threshold both x₀ heads; **`decode_dual_from_2d`**. Eval uses **one sample** per window (deterministic given cond/ghost/ctx).
 
 ### 11.3 Relation to guidance and DiT
 
@@ -616,23 +656,31 @@ One forward at `t = T−1` from **Bernoulli(0.5)** canvas; `future_2d = 1[σ(x0_
 
 ---
 
-## 12) Hyperparameter reference (defaults + what each group controls)
+## 12) Hyperparameter reference (`configs/binary_dual_scale.yaml` + `DiffusionTSFConfig`)
 
-These are default values from `DiffusionTSFConfig` referenced in the original walkthrough; CLI often overrides some.
+Experiment YAML merges over `pipeline/config.py` defaults; CLI overrides win last.
+
+### 12.0 Experiment block (yaml)
+- `name: binary-dual-scale`, `dataset: ETTh1` (driver overrides per grid job; subset policy scales large sets down to ~ETTh1).
+- `diffusion_type: binary`, `model_type: dit`.
+- `use_dual_scale: true`, `image_height: 16`, `dual_scale_fine_weight: 0.75`, `dual_scale_independent_timesteps: true`.
+- `deterministic_anchor_loss: true`, `deterministic_anchor_lambda: 0.99`, `eval_sampler: anchor`.
+- `use_window_normalization: true`, `disable_cross_attention: false`.
+- `data_subset`: `target_dataset: ETTh1`, max 7 variates, auto stride so dense size ≤ ETTh1; smaller sets unchanged.
 
 ### 12.1 Sequence and multivariate geometry
-- `lookback_length=512`: past context length in 1D samples.
-- `forecast_length=96`: target horizon length.
+- `lookback_length=96`, `forecast_length=96` (yaml; code default 512/96 if unset).
 - `lookback_overlap=8`: overlap handling for lookback/future boundaries.
 - `past_loss_weight=0.3`: weighting for overlap-related loss partition logic.
 - `num_variables=1` default baseline; multivariate runs override it.
 - `variate_factorized=True`: process variates via factorized route.
 
-### 12.2 2D representation (binary)
-- `image_height=64`: number of vertical value bins in the hard CDF map.
-- `max_scale=3.5`: clipping range for normalized values before binning.
-- `diffusion_type="binary"`: hard `{0,1}` maps via `encode_to_2d_binary` (no blur).
-- `unified_time_axis=False` default: separate width handling mode.
+### 12.2 2D representation (binary, dual-scale)
+- `use_dual_scale=True` → **requires** `image_height=16` (coarse + fine maps at same H).
+- `dual_scale_fine_weight=0.75`: fine-scale share of combined diffusion BCE.
+- `dual_scale_independent_timesteps=True`: separate `t` for coarse vs fine during training.
+- `max_scale=3.5`: clipping range before binning; fine residual range is `max_scale / H`.
+- `diffusion_type="binary"`: hard `{0,1}` maps via `encode_dual_to_2d_binary` / `encode_to_2d_binary`.
 
 ### 12.3 FactorizedDiT backbone (production default, `model_type="dit"`)
 - `model_type="dit"` → `FactorizedDiT` in `dit.py` (pass `--model-type dit` on CLI; do not rely on `pipeline_config.MODEL_TYPE` alone)
@@ -655,9 +703,9 @@ These are default values from `DiffusionTSFConfig` referenced in the original wa
 - `decode_temperature=0.5`
 - plus `cutout_*` augmentation controls.
 
-### 12.6 Loss terms (binary)
-- Primary: dual **BCE** on x₀ and zₜ logits (`_binary_plain_bce_loss`).
-- **Deterministic anchor** (§11): `use_deterministic_anchor_loss` (on in `slurm_binary_anchor_92d3.sh`); `deterministic_anchor_lambda=0.99`
+### 12.6 Loss terms (binary, dual-scale)
+- Primary: per-scale **BCE** on x₀ and zₜ, combined with `dual_scale_fine_weight`.
+- **Deterministic anchor** (§11): on in yaml; `deterministic_anchor_lambda=0.99`; anchor BCE on both scales’ x₀ heads.
 - Legacy Gaussian knobs (`emd_lambda`, `num_diffusion_steps`, blur sizes) remain in `DiffusionTSFConfig` but are inactive when `diffusion_type="binary"`.
 
 ### 12.7 Conditioning and context
@@ -679,7 +727,7 @@ Why include defaults in a slow walkthrough:
 
 ## 13) Known pitfalls (with practical interpretation)
 
-1. DiT patch grid: `image_height` must divide `dit_patch_size[0]`; time width is reflect-padded to patch width. If `Nx` or `Nc` exceeds `max_pos_tokens`, forward fails — increase the table or shrink resolution.
+1. Dual-scale requires `image_height=16` and even chunk sizes when `unet_max_chunk_size > 0` (coarse/fine pairs). DiT patch grid: `image_height` must divide `dit_patch_size[0]`; time width is reflect-padded. If `Nx` or `Nc` exceeds `max_pos_tokens`, forward fails.
 
 2. Double normalization exists by design.
    - Dataset-level z-score and per-window past-stat normalization both operate.

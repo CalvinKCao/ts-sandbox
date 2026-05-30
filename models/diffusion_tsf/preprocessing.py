@@ -1,11 +1,7 @@
 """
 Preprocessing utilities for Diffusion TSF.
 
-This module handles:
-1. Standardization (z-score normalization)
-2. 2D Encoding (the "Stripe" method)
-3. Vertical Gaussian blur
-4. Inverse mapping (2D back to 1D)
+2D encoding (stripe / hard CDF maps) and inverse mapping back to 1D.
 """
 
 import torch
@@ -240,70 +236,5 @@ class TimeSeriesTo2D(nn.Module):
         
         logger.debug(f"TimeSeriesTo2D.inverse: input {image.shape} -> output {x.shape}")
         return x
-
-
-class VerticalGaussianBlur(nn.Module):
-    """Applies 1D Gaussian blur ONLY along the height (value) axis.
-    
-    This creates a probability density without smearing temporal patterns.
-    The blur kernel is strictly vertical (H x 1).
-    
-    From ViTime Section 3.4.2: Gaussian blur significantly reduces sparsity
-    and increases local information density.
-    """
-    
-    def __init__(self, kernel_size: int = 31, sigma: float = 6.0):
-        """
-        Args:
-            kernel_size: Size of the Gaussian kernel (must be odd)
-            sigma: Standard deviation of the Gaussian
-        """
-        super().__init__()
-        assert kernel_size % 2 == 1, "kernel_size must be odd"
-        
-        self.kernel_size = kernel_size
-        self.sigma = sigma
-        
-        # Create 1D Gaussian kernel
-        # Shape: (kernel_size,)
-        x = torch.arange(kernel_size).float() - kernel_size // 2
-        gaussian_1d = torch.exp(-x**2 / (2 * sigma**2))
-        gaussian_1d = gaussian_1d / gaussian_1d.sum()  # Normalize
-        
-        # Reshape to 2D vertical kernel: (1, 1, kernel_size, 1)
-        # This applies convolution only along height (dim 2)
-        kernel = gaussian_1d.view(1, 1, kernel_size, 1)
-        self.register_buffer('kernel', kernel)
-        
-        # Padding only along height dimension
-        self.padding = (0, 0, kernel_size // 2, kernel_size // 2)
-        
-        logger.info(f"VerticalGaussianBlur initialized: kernel_size={kernel_size}, sigma={sigma}")
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply vertical Gaussian blur.
-        
-        Args:
-            x: Image tensor of shape (batch, channels, height, width)
-            
-        Returns:
-            Blurred image of same shape
-        """
-        batch, channels, height, width = x.shape
-        
-        # Pad along height dimension only
-        x_padded = F.pad(x, self.padding, mode='reflect')
-        
-        # Apply convolution with vertical kernel
-        # Process each channel separately (groups=channels)
-        kernel = self.kernel.expand(channels, 1, self.kernel_size, 1)
-        
-        # Custom convolution for non-square kernel
-        # We use conv2d with the vertical kernel
-        blurred = F.conv2d(x_padded, kernel, groups=channels)
-        
-        logger.debug(f"VerticalGaussianBlur: input {x.shape} -> output {blurred.shape}")
-        return blurred
-
 
 

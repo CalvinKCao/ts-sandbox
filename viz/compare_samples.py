@@ -21,7 +21,7 @@ import os
 import random
 import sys
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import numpy as np
 import matplotlib
@@ -47,8 +47,30 @@ from models.diffusion_tsf.visualize_comparison import (
     infer_anchor_kwargs,
     infer_diffusion_type,
     infer_model_type,
-    infer_prediction_mode,
 )
+import models.diffusion_tsf.train_multivariate_pipeline as train_pipeline
+
+
+def find_run_bundle(ckpt_root: Path) -> Tuple[Path, Path, Path]:
+    """Locate (subset_dir, metadata.json, best.pt) under a Slurm run stem."""
+    if (ckpt_root / "metadata.json").exists() and (ckpt_root / "best.pt").exists():
+        return ckpt_root, ckpt_root / "metadata.json", ckpt_root / "best.pt"
+
+    candidates = []
+    for d in ckpt_root.iterdir():
+        if not d.is_dir():
+            continue
+        meta = d / "metadata.json"
+        best = d / "best.pt"
+        if meta.exists() and best.exists():
+            candidates.append((d, meta, best))
+    if not candidates:
+        raise FileNotFoundError(
+            f"No metadata.json + best.pt under {ckpt_root} "
+            f"(expected subset subdir from pipeline finetune HP)."
+        )
+    candidates.sort(key=lambda t: t[0].name)
+    return candidates[0]
 
 
 def run_probabilistic_visualization(
@@ -58,11 +80,12 @@ def run_probabilistic_visualization(
     num_random_lookbacks: int = 3,
     lookback_length: int = LOOKBACK_LENGTH,
     forecast_length: int = FORECAST_LENGTH,
-    diffusion_sampler: str = "dpmpp",
+    diffusion_sampler: str = "ddim",
     num_inference_steps: int = 20,
     sample_index: Optional[int] = None,
     random_seed: int = 42,
     name_suffix: str = "",
+    plot_all_variates: bool = True,
 ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -71,14 +94,10 @@ def run_probabilistic_visualization(
     if not ckpt_root.is_dir():
         raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_root}")
 
-    subfolders = [d for d in ckpt_root.iterdir() if d.is_dir() and (d / 'metadata.json').exists() and (d / 'best.pt').exists()]
-    if not subfolders:
-        raise FileNotFoundError(f"Could not find any subdirectory with metadata.json and best.pt under {ckpt_root}")
-    
-    sub = subfolders[0]
+    sub, meta_path, best_pt = find_run_bundle(ckpt_root)
     print(f"Using model subdirectory: {sub.name}")
-    
-    with open(sub / 'metadata.json') as f:
+
+    with open(meta_path) as f:
         meta = json.load(f)
 
     dataset_name = meta['dataset_name']
@@ -86,12 +105,20 @@ def run_probabilistic_visualization(
     variate_indices = meta['variate_indices']
     var_names = meta.get('variate_names', [])
     n_vars = len(variate_indices)
+    subset_meta = meta.get("data_subset") or {}
+    train_stride = int(subset_meta.get("train_stride", meta.get("window_stride", 1)))
+    test_stride = int(subset_meta.get("test_stride", 1))
+    if meta.get("lookback_length"):
+        lookback_length = int(meta["lookback_length"])
+    if meta.get("forecast_length"):
+        forecast_length = int(meta["forecast_length"])
 
-    print(f"Dataset: {dataset_name} ({n_vars} variables)")
+    print(f"Dataset: {dataset_name} ({n_vars} variables, subset={subset_id})")
 
     _, _, test_ds, norm_stats = load_dataset(
-        dataset_name, variate_indices, stride=1,
-        lookback=lookback_length, horizon=forecast_length
+        dataset_name, variate_indices,
+        stride=train_stride, test_stride=test_stride,
+        lookback=lookback_length, horizon=forecast_length,
     )
 
     n_test = len(test_ds)
@@ -126,22 +153,26 @@ def run_probabilistic_visualization(
         print(f"Warning: Baseline iTransformer checkpoint not found at {base_path}. Proceeding without it.")
 
     # 3. Load diffusion model
-    best_pt = sub / 'best.pt'
     diff_ckpt = torch.load(best_pt, map_location=device, weights_only=False)
     diff_type = infer_diffusion_type(diff_ckpt, meta.get('diffusion_type'))
     backbone = infer_model_type(diff_ckpt)
-    pred_mode = infer_prediction_mode(diff_ckpt)
     applied_h = apply_checkpoint_architecture(diff_ckpt, diff_type)
+    if meta.get("use_dual_scale"):
+        train_pipeline.USE_DUAL_SCALE = True
+        train_pipeline.IMAGE_HEIGHT = int(meta.get("image_height", applied_h))
+    if meta.get("disable_cross_attention") is not None:
+        train_pipeline.DISABLE_CROSS_ATTENTION = bool(meta["disable_cross_attention"])
+    if meta.get("use_window_normalization") is not None:
+        train_pipeline.USE_WINDOW_NORMALIZATION = bool(meta["use_window_normalization"])
     anchor_kwargs = infer_anchor_kwargs(diff_ckpt, meta)
-    print(f"Diffusion architecture: type={diff_type}, backbone={backbone}, prediction_mode={pred_mode}, image_height={applied_h}")
+    print(f"Diffusion architecture: type={diff_type}, backbone={backbone}, image_height={applied_h}")
 
+    itrans_guidance = iTransformerGuidance(itrans_guidance_model)
     diff_model = create_diffusion_model(
         n_variates=n_vars, diffusion_type=diff_type, model_type=backbone,
-        prediction_mode=pred_mode, **anchor_kwargs,
+        guidance_model=itrans_guidance,
+        **anchor_kwargs,
     ).to(device)
-    
-    itrans_guidance = iTransformerGuidance(itrans_guidance_model)
-    diff_model.set_guidance_model(itrans_guidance)
     load_diffusion_state_keep_attached_guidance(diff_model, diff_ckpt['model_state_dict'])
     diff_model.eval()
 
@@ -173,11 +204,19 @@ def run_probabilistic_visualization(
     itrans_guidance_pred = run_itrans(itrans_guidance_model, past_t)
     itrans_baseline_pred = run_itrans(itrans_baseline_model, past_t) if itrans_baseline_model else None
 
-    print(f"Sampling {num_futures} futures using {diffusion_sampler} sampler...")
+    print(
+        f"Sampling {num_futures} stochastic futures "
+        f"({diffusion_sampler}, steps={num_inference_steps})..."
+    )
     sampled_futures = []
     for f_idx in range(num_futures):
         with torch.no_grad():
-            res = diff_model.generate(past_t, sampler=diffusion_sampler, num_inference_steps=num_inference_steps)
+            torch.manual_seed(random_seed + f_idx * 9973 + sample_index)
+            res = diff_model.generate(
+                past_t,
+                sampler=diffusion_sampler,
+                num_inference_steps=num_inference_steps,
+            )
             # Use global norm prediction if available (denormalized at the window level, needs global denorm)
             pred = res.get('prediction_global_norm', res['prediction']).cpu()[0]
             sampled_futures.append(pred)
@@ -193,9 +232,10 @@ def run_probabilistic_visualization(
         f_sliced = f_pred[:, -forecast_length:] if f_pred.shape[-1] > forecast_length else f_pred
         diff_dns.append(denorm(f_sliced, mean, std))
 
-    # Plot
-    n_cols = min(4, n_vars)
-    n_rows = (n_vars + n_cols - 1) // n_cols
+    # Plot (all variates in the subset unless capped)
+    n_plot = n_vars if plot_all_variates else min(4, n_vars)
+    n_cols = min(4, n_plot)
+    n_rows = (n_plot + n_cols - 1) // n_cols
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.0 * n_cols, 3.5 * n_rows), constrained_layout=True)
     axes = axes.flatten() if n_vars > 1 else np.array([axes])
 
@@ -203,7 +243,7 @@ def run_probabilistic_visualization(
     t_past = np.arange(-context_len, 0)
     t_future = np.arange(0, forecast_length)
 
-    for col in range(n_vars):
+    for col in range(n_plot):
         ax = axes[col]
         gt = future_dn[col].numpy()
         guide = guidance_dn[col].numpy()
@@ -238,7 +278,7 @@ def run_probabilistic_visualization(
         ax.set_title(vname, fontsize=11, fontweight='semibold')
         ax.tick_params(labelsize=8)
 
-    for col in range(n_vars, len(axes)):
+    for col in range(n_plot, len(axes)):
         fig.delaxes(axes[col])
 
     handles, labels = axes[0].get_legend_handles_labels()
@@ -258,20 +298,64 @@ def run_probabilistic_visualization(
 
 def main():
     parser = argparse.ArgumentParser(description='Visualize probabilistic diffusion futures vs baselines')
-    parser.add_argument('--checkpoint-dir', type=str, required=True)
-    parser.add_argument('--output-dir', type=str, default='results')
+    parser.add_argument('--checkpoint-dir', type=str, default=None,
+                        help='Run stem, e.g. results/ckpts/05-30-3819110-ETTm1-binary_dual_scale')
+    parser.add_argument('--scan-ckpts-root', type=str, default=None,
+                        help='Plot every run under this dir that has subset/best.pt (e.g. results/ckpts)')
+    parser.add_argument('--run-glob', type=str, default='05-30-38191*-binary_dual_scale',
+                        help='With --scan-ckpts-root, only matching run folder names')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Output directory (default: reports/<report_stem>/)')
+    parser.add_argument('--report-stem', type=str, default='3819108_binary_dual_scale_7v_grid',
+                        help='Subfolder under reports/ for figures when --output-dir omitted')
     parser.add_argument('--num-futures', type=int, default=5)
-    parser.add_argument('--num-random-lookbacks', type=int, default=3)
-    parser.add_argument('--sampler', type=str, default='dpmpp')
+    parser.add_argument('--num-random-lookbacks', type=int, default=2)
+    parser.add_argument('--sampler', type=str, default='ddim',
+                        choices=['ddim', 'dpmpp', 'ddpm', 'anchor'],
+                        help='Stochastic paths: prefer ddim/dpmpp (anchor is near-deterministic)')
     parser.add_argument('--steps', type=int, default=20)
     parser.add_argument('--index', type=int, default=None)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--name-suffix', type=str, default='')
+    parser.add_argument('--max-vars', type=int, default=0,
+                        help='Cap variate panels (0 = all variates in subset)')
     args = parser.parse_args()
+
+    out_base = args.output_dir or os.path.join(project_root, 'reports', args.report_stem)
+
+    if args.scan_ckpts_root:
+        root = Path(args.scan_ckpts_root)
+        runs = sorted(root.glob(args.run_glob))
+        if not runs:
+            raise SystemExit(f"No runs match {args.run_glob} under {root}")
+        for run_dir in runs:
+            try:
+                find_run_bundle(run_dir)
+            except FileNotFoundError as exc:
+                print(f"Skip {run_dir.name}: {exc}")
+                continue
+            print(f"\n=== {run_dir.name} ===")
+            run_probabilistic_visualization(
+                checkpoint_dir=str(run_dir),
+                output_dir=out_base,
+                num_futures=args.num_futures,
+                num_random_lookbacks=args.num_random_lookbacks,
+                diffusion_sampler=args.sampler,
+                num_inference_steps=args.steps,
+                sample_index=args.index,
+                random_seed=args.seed,
+                name_suffix=args.name_suffix,
+                plot_all_variates=(args.max_vars <= 0),
+            )
+        print(f"\nBatch done. Figures in {out_base}")
+        return
+
+    if not args.checkpoint_dir:
+        parser.error('Provide --checkpoint-dir or --scan-ckpts-root')
 
     run_probabilistic_visualization(
         checkpoint_dir=args.checkpoint_dir,
-        output_dir=args.output_dir,
+        output_dir=out_base,
         num_futures=args.num_futures,
         num_random_lookbacks=args.num_random_lookbacks,
         diffusion_sampler=args.sampler,
@@ -279,6 +363,7 @@ def main():
         sample_index=args.index,
         random_seed=args.seed,
         name_suffix=args.name_suffix,
+        plot_all_variates=(args.max_vars <= 0),
     )
 
 

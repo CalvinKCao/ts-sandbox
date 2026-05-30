@@ -28,9 +28,8 @@ class PipelineState:
     smoke_test: bool = False
 
     # -- Model / diffusion knobs --
-    diffusion_type: str = "gaussian"
+    diffusion_type: str = "binary"
     model_type: str = "dit"
-    prediction_mode: str = "epsilon"
     image_height: int = 32
     use_dual_scale: bool = False
     dual_scale_fine_weight: float = 0.5

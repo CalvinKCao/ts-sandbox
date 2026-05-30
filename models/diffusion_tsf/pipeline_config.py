@@ -44,22 +44,15 @@ LOOKBACK_OVERLAP: int = 8
 PAST_LOSS_WEIGHT: float = 0.3
 
 
-# ---- Backbone selection ------------------------------------------------------------
+# ---- Backbone / diffusion ----------------------------------------------------------
 
-# "unet" -> ConditionalUNet2D (default), "dit" -> FactorizedDiT.
-# Both backbones share the same factorized per-variate call site.
-MODEL_TYPE: str = "unet"
-
-# "epsilon" is the standard noise-prediction objective. "x0_cumsum" predicts
-# clean CDF logits and molds them into a valid occupancy canvas.
-PREDICTION_MODE: str = "epsilon"
+MODEL_TYPE: str = "dit"
+DIFFUSION_TYPE: str = "binary"
 
 
-# ---- 2D map / U-Net topology ------------------------------------------------------
+# ---- 2D map -----------------------------------------------------------------------
 
 IMAGE_HEIGHT: int = 32
-UNET_CHANNELS: List[int] = [64, 128, 256]
-ATTENTION_LEVELS: List[int] = [2]
 DISABLE_CROSS_ATTENTION: bool = False
 USE_DUAL_SCALE: bool = False
 DUAL_SCALE_FINE_WEIGHT: float = 0.5
@@ -77,7 +70,7 @@ DIT_DROPOUT: float = 0.0
 
 USE_AMP: bool = True               # bfloat16 mixed precision
 USE_GRADIENT_CHECKPOINTING: bool = True
-UNET_MAX_CHUNK_SIZE: int = 128     # To prevent OOM by chunking variates through U-Net
+UNET_MAX_CHUNK_SIZE: int = 128     # Chunk BV through FactorizedDiT to limit memory
 
 
 # ---- Default variate count (only used when --n-variates is not supplied) ----------

@@ -245,7 +245,6 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
         'disable_cross_attention': DISABLE_CROSS_ATTENTION,
         'model_type': MODEL_TYPE,
-        'prediction_mode': PREDICTION_MODE,
         'diffusion_type': DIFFUSION_TYPE,
         'dit_patch_size': DIT_PATCH_SIZE,
         'dit_embed_dim': DIT_EMBED_DIM,
@@ -511,7 +510,6 @@ def init_wandb(
         'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
         'n_variates': N_VARIATES,
         'diffusion_type': DIFFUSION_TYPE,
-        'prediction_mode': PREDICTION_MODE,
         'deterministic_anchor_loss': DETERMINISTIC_ANCHOR_LOSS,
         'deterministic_anchor_lambda': DETERMINISTIC_ANCHOR_LAMBDA,
         'deterministic_anchor_alpha': DETERMINISTIC_ANCHOR_ALPHA,
@@ -773,14 +771,12 @@ from models.diffusion_tsf.pipeline_config import (
     USE_AMP,
     USE_GRADIENT_CHECKPOINTING,
     UNET_MAX_CHUNK_SIZE,
-    UNET_CHANNELS,
-    ATTENTION_LEVELS,
     DISABLE_CROSS_ATTENTION,
     USE_DUAL_SCALE,
     DUAL_SCALE_FINE_WEIGHT,
     DUAL_SCALE_INDEPENDENT_TIMESTEPS,
     MODEL_TYPE,
-    PREDICTION_MODE,
+    DIFFUSION_TYPE,
     DIT_PATCH_SIZE,
     DIT_EMBED_DIM,
     DIT_DEPTH,
@@ -809,7 +805,6 @@ from models.diffusion_tsf.pipeline_config import (
 
 # Per-run dispatch knob — set from --n-variates at CLI parse time.
 N_VARIATES = N_VARIATES_DEFAULT
-DIFFUSION_TYPE = "gaussian"
 
 # Dataset registry: name -> (path, date_col, seasonal_period)
 DATASET_REGISTRY = {
@@ -1252,13 +1247,13 @@ def create_diffusion_model(
     past_loss_weight: float = PAST_LOSS_WEIGHT,
     guidance_penalty_weight: Optional[float] = None,
     diffusion_type: str = None,
-    prediction_mode: str = None,
     model_type: str = None,
     use_deterministic_anchor_loss: Optional[bool] = None,
     deterministic_anchor_lambda: Optional[float] = None,
     deterministic_anchor_alpha: Optional[float] = None,
     use_window_normalization: Optional[bool] = None,
     zero_guidance_forecast: Optional[bool] = None,
+    guidance_model=None,
 ) -> DiffusionTSF:
     """Create DiffusionTSF model with iTransformer guidance channel enabled."""
     if lookback is None:
@@ -1271,8 +1266,6 @@ def create_diffusion_model(
         guidance_penalty_weight = GUIDANCE_PENALTY_WEIGHT
     if diffusion_type is None:
         diffusion_type = DIFFUSION_TYPE
-    if prediction_mode is None:
-        prediction_mode = PREDICTION_MODE
     if model_type is None:
         model_type = MODEL_TYPE
     if use_deterministic_anchor_loss is None:
@@ -1285,17 +1278,9 @@ def create_diffusion_model(
         use_window_normalization = USE_WINDOW_NORMALIZATION
     if zero_guidance_forecast is None:
         zero_guidance_forecast = ZERO_GUIDANCE_FORECAST
-    if diffusion_type == "binary" and prediction_mode == "x0_cumsum":
-        raise ValueError("x0_cumsum prediction mode is only supported for gaussian diffusion.")
-    if prediction_mode == "x0_cumsum" and use_deterministic_anchor_loss:
-        raise ValueError(
-            "x0_cumsum prediction mode cannot be combined with deterministic anchor loss."
-        )
-
     logger.info(
         f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, "
         f"diffusion_type={diffusion_type}, "
-        f"prediction_mode={prediction_mode}, "
         f"deterministic_anchor_loss={use_deterministic_anchor_loss}, "
         f"anchor_lambda={deterministic_anchor_lambda}, anchor_alpha={deterministic_anchor_alpha}"
     )
@@ -1310,15 +1295,11 @@ def create_diffusion_model(
         use_coordinate_channel=True,
         use_guidance_channel=True,
         guidance_penalty_weight=guidance_penalty_weight,
-        num_diffusion_steps=1000,
         model_type=model_type,
-        unet_channels=UNET_CHANNELS,
-        attention_levels=ATTENTION_LEVELS,
         disable_cross_attention=DISABLE_CROSS_ATTENTION,
         use_dual_scale=USE_DUAL_SCALE,
         dual_scale_fine_weight=DUAL_SCALE_FINE_WEIGHT,
         dual_scale_independent_timesteps=DUAL_SCALE_INDEPENDENT_TIMESTEPS,
-        num_res_blocks=2,
         dit_patch_size=DIT_PATCH_SIZE,
         dit_embed_dim=DIT_EMBED_DIM,
         dit_depth=DIT_DEPTH,
@@ -1329,14 +1310,13 @@ def create_diffusion_model(
         unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
         use_amp=USE_AMP,
         diffusion_type=diffusion_type,
-        prediction_mode=prediction_mode,
         use_deterministic_anchor_loss=use_deterministic_anchor_loss,
         deterministic_anchor_lambda=deterministic_anchor_lambda,
         deterministic_anchor_alpha=deterministic_anchor_alpha,
         use_window_normalization=use_window_normalization,
         zero_guidance_forecast=zero_guidance_forecast,
     )
-    return DiffusionTSF(config)
+    return DiffusionTSF(config, guidance_model=guidance_model)
 
 
 # ============================================================================
@@ -2742,7 +2722,7 @@ def evaluate_model(
 
     K = getattr(model.config, 'lookback_overlap', 0)
     anchor_sampler = gen_kwargs.get('sampler') == 'anchor'
-    binary_anchor_sampler = anchor_sampler and getattr(model.config, 'diffusion_type', 'gaussian') == 'binary'
+    binary_anchor_sampler = anchor_sampler
     effective_n_samples = 1 if (smoke_test or (anchor_sampler and not binary_anchor_sampler)) else n_samples
     steps_for_log = gen_kwargs.get('num_inference_steps', 1 if gen_kwargs.get('sampler') == 'anchor' else 20)
     nfe_per_batch = 1 + effective_n_samples
@@ -4093,11 +4073,11 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
-    global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION
+    global IMAGE_HEIGHT, DISABLE_CROSS_ATTENTION
     global USE_DUAL_SCALE, DUAL_SCALE_FINE_WEIGHT, DUAL_SCALE_INDEPENDENT_TIMESTEPS
     global LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN
     global MODEL_TYPE, DIFFUSION_TYPE, DETERMINISTIC_ANCHOR_LOSS, DETERMINISTIC_ANCHOR_LAMBDA
-    global PREDICTION_MODE, DETERMINISTIC_ANCHOR_ALPHA, EVAL_SAMPLER
+    global DETERMINISTIC_ANCHOR_ALPHA, EVAL_SAMPLER
     global USE_WINDOW_NORMALIZATION, ZERO_GUIDANCE_FORECAST, WINDOW_STRIDE
 
     parser = argparse.ArgumentParser(description='Diffusion TSF Training Pipeline')
@@ -4201,8 +4181,7 @@ def main():
     # We enforce Binary DiT only since user asked to remove others
     MODEL_TYPE = "dit"
     DIFFUSION_TYPE = "binary"
-    PREDICTION_MODE = "epsilon"
-    
+
     if args.deterministic_anchor_alpha is None:
         if DETERMINISTIC_ANCHOR_LOSS:
             DETERMINISTIC_ANCHOR_ALPHA = 0.0

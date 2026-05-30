@@ -21,7 +21,6 @@ _DEFAULTS: Dict[str, Any] = {
         "seed": 42,
         "diffusion_type": "binary",
         "model_type": "dit",
-        "prediction_mode": "epsilon",
         "image_height": 32,
         "use_dual_scale": False,
         "dual_scale_fine_weight": 0.5,
