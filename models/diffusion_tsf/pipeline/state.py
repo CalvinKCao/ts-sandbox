@@ -32,6 +32,8 @@ class PipelineState:
     model_type: str = "dit"
     prediction_mode: str = "epsilon"
     image_height: int = 32
+    use_dual_scale: bool = False
+    dual_scale_fine_weight: float = 0.5
     deterministic_anchor_loss: bool = False
     deterministic_anchor_lambda: float = 0.99
     deterministic_anchor_alpha: float = 0.5

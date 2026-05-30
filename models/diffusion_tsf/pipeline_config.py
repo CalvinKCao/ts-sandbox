@@ -61,6 +61,8 @@ IMAGE_HEIGHT: int = 32
 UNET_CHANNELS: List[int] = [64, 128, 256]
 ATTENTION_LEVELS: List[int] = [2]
 DISABLE_CROSS_ATTENTION: bool = False
+USE_DUAL_SCALE: bool = False
+DUAL_SCALE_FINE_WEIGHT: float = 0.5
 
 
 # ---- DiT topology (used when MODEL_TYPE == "dit") ----------------------------------

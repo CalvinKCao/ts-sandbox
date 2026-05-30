@@ -87,6 +87,8 @@ def _patch_globals(mod: Any, state: PipelineState) -> None:
     mod.FORECAST_LENGTH = state.forecast_length
     mod.ITRANSFORMER_SEQ_LEN = state.lookback_length
     mod.IMAGE_HEIGHT = state.image_height
+    mod.USE_DUAL_SCALE = state.use_dual_scale
+    mod.DUAL_SCALE_FINE_WEIGHT = state.dual_scale_fine_weight
     mod.MODEL_TYPE = state.model_type
     mod.DIFFUSION_TYPE = state.diffusion_type
     mod.PREDICTION_MODE = state.prediction_mode

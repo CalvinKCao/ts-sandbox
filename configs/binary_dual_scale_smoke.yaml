@@ -1,0 +1,34 @@
+experiment:
+  name: binary-dual-scale-smoke
+  dataset: ETTh1
+  diffusion_type: binary
+  model_type: dit
+  image_height: 16
+  use_dual_scale: true
+  dual_scale_fine_weight: 0.5
+  deterministic_anchor_loss: true
+  deterministic_anchor_lambda: 0.99
+  deterministic_anchor_alpha: 0.0
+  eval_sampler: anchor
+  smoke_test: true
+
+phases:
+  - phase: itrans_hp_pretrain
+    n_trials: 1
+    max_epochs: 1
+
+  - phase: diffusion_hp_pretrain
+    n_trials: 1
+    max_epochs: 1
+
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 1
+    cold_start: true
+
+  - phase: diffusion_finetune_hp
+    n_trials: 1
+    max_epochs: 1
+
+  - phase: eval
+    n_samples: 1

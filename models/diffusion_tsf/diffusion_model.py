@@ -205,6 +205,8 @@ class DiffusionTSF(nn.Module):
                 dropout=config.dit_dropout,
                 context_dim=config.context_embedding_dim,
                 gradient_checkpointing=config.use_gradient_checkpointing,
+                use_scale_embedding=config.use_dual_scale,
+                enable_cross_scale_attention=config.use_dual_scale,
             )
         else:
             self.noise_predictor = ConditionalUNet2D(
@@ -529,10 +531,13 @@ class DiffusionTSF(nn.Module):
         t_flat: torch.Tensor,
         cond_for_unet: Optional[torch.Tensor],
         ctx_flat: Optional[torch.Tensor],
+        scale_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run the denoiser with the same chunking rule used by training/eval."""
         chunk_size = self.config.unet_max_chunk_size
         n_items = canvas.shape[0]
+        if self.config.use_dual_scale and chunk_size > 0:
+            chunk_size = max(2, (chunk_size // 2) * 2)
         if chunk_size > 0 and n_items > chunk_size:
             outs = []
             for i in range(0, n_items, chunk_size):
@@ -541,9 +546,16 @@ class DiffusionTSF(nn.Module):
                 c_t = t_flat[i:end] if t_flat.shape[0] == n_items else t_flat
                 c_cond = cond_for_unet[i:end] if cond_for_unet is not None else None
                 c_ctx = ctx_flat[i:end] if ctx_flat is not None else None
-                outs.append(self.noise_predictor(c_canvas, c_t, c_cond, encoder_hidden_states=c_ctx))
+                c_scale = scale_indices[i:end] if scale_indices is not None else None
+                kwargs = {"encoder_hidden_states": c_ctx}
+                if c_scale is not None:
+                    kwargs["scale_indices"] = c_scale
+                outs.append(self.noise_predictor(c_canvas, c_t, c_cond, **kwargs))
             return torch.cat(outs, dim=0)
-        return self.noise_predictor(canvas, t_flat, cond_for_unet, encoder_hidden_states=ctx_flat)
+        kwargs = {"encoder_hidden_states": ctx_flat}
+        if scale_indices is not None:
+            kwargs["scale_indices"] = scale_indices
+        return self.noise_predictor(canvas, t_flat, cond_for_unet, **kwargs)
 
     def _build_anchor_canvas(
         self,
@@ -639,6 +651,31 @@ class DiffusionTSF(nn.Module):
     def encode_to_2d_binary(self, x: torch.Tensor) -> torch.Tensor:
         """Encode 1D series to a hard binary CDF image without blur."""
         return self.to_2d(x)
+
+    def encode_dual_to_2d_binary(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode 1D series to coarse and residual hard binary CDF images."""
+        return self.to_2d.encode_dual(x)
+
+    def decode_dual_from_2d(
+        self,
+        coarse_map: torch.Tensor,
+        fine_map: torch.Tensor,
+        from_diffusion: bool = False,
+        decoder_method: str = "mean",
+    ) -> torch.Tensor:
+        """Decode dual-scale CDF maps to normalized 1D values."""
+        if from_diffusion:
+            coarse_map = (coarse_map + 1.0) / 2.0
+            fine_map = (fine_map + 1.0) / 2.0
+        cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
+        temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
+        return self.to_2d.decode_dual(
+            coarse_map,
+            fine_map,
+            cdf_decoder=cdf_decoder,
+            expectation_sharpen_temp=temperature,
+            squeeze_univariate=(coarse_map.shape[1] == 1),
+        )
     
     def decode_from_2d(
         self,
@@ -760,6 +797,8 @@ class DiffusionTSF(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (shared factorized path for unet and dit backbones)."""
         if self.config.diffusion_type == "binary":
+            if self.config.use_dual_scale:
+                return self._forward_binary_dual_scale(past, future, t)
             return self._forward_binary_factorized(past, future, t)
         return self._forward_factorized(past, future, t)
 
@@ -791,6 +830,15 @@ class DiffusionTSF(nn.Module):
         """
         if self.config.diffusion_type == "binary":
             steps = num_inference_steps if num_inference_steps is not None else self.config.binary_sample_steps
+            if self.config.use_dual_scale:
+                return self._generate_binary_dual_scale(
+                    past, num_steps=steps, verbose=verbose,
+                    decoder_method=decoder_method, beam_width=beam_width,
+                    jump_penalty_scale=jump_penalty_scale,
+                    search_radius=search_radius,
+                    sampler=sampler,
+                    yield_intermediates=yield_intermediates,
+                )
             return self._generate_binary_factorized(
                 past, num_steps=steps, verbose=verbose,
                 decoder_method=decoder_method, beam_width=beam_width,
@@ -1165,6 +1213,329 @@ class DiffusionTSF(nn.Module):
         )
         bce = F.binary_cross_entropy_with_logits(logits, target.float(), reduction='none')
         return (bce * weight).mean()
+
+    def _stack_dual_scale_flat(self, coarse: torch.Tensor, fine: torch.Tensor) -> torch.Tensor:
+        """Interleave coarse/fine tensors so each (B,V) pair is adjacent in batch."""
+        if coarse.shape != fine.shape:
+            raise ValueError(f"coarse/fine shapes differ: {coarse.shape} vs {fine.shape}")
+        return torch.stack((coarse, fine), dim=1).reshape(coarse.shape[0] * 2, *coarse.shape[1:])
+
+    def _dual_scale_indices(self, bv: int, device: torch.device) -> torch.Tensor:
+        return torch.arange(2, device=device, dtype=torch.long).view(1, 2).expand(bv, -1).reshape(bv * 2)
+
+    def _expand_ctx_to_dual_scale(
+        self,
+        ctx: Optional[torch.Tensor],
+        B: int,
+        V: int,
+    ) -> Optional[torch.Tensor]:
+        if ctx is None:
+            return None
+        return ctx.unsqueeze(1).unsqueeze(2).expand(-1, V, 2, -1, -1).reshape(B * V * 2, V, -1)
+
+    def _forward_binary_dual_scale(
+        self,
+        past: torch.Tensor,
+        future: torch.Tensor,
+        t: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Binary training with full-range coarse CDF plus residual fine CDF."""
+        assert self.binary_scheduler is not None, "binary scheduler is not initialized"
+
+        B = past.shape[0]
+        V = self.config.num_variables
+        device = past.device
+        BV = B * V
+
+        past_norm, future_norm, stats = self._normalize_sequence(past, future)
+        future_coarse, future_fine = self.encode_dual_to_2d_binary(future_norm)
+        H = future_coarse.shape[2]
+        W_fut = future_coarse.shape[3]
+
+        if t is None:
+            t = torch.randint(0, self.config.binary_num_steps, (B,), device=device)
+        t_bv = t.unsqueeze(1).expand(-1, V).reshape(BV)
+        t_bvs = t_bv.unsqueeze(1).expand(-1, 2).reshape(BV * 2)
+        scale_indices = self._dual_scale_indices(BV, device)
+
+        future_coarse_flat = future_coarse.reshape(BV, 1, H, W_fut)
+        future_fine_flat = future_fine.reshape(BV, 1, H, W_fut)
+        xt_coarse, zt_coarse = self.binary_scheduler.add_noise(future_coarse_flat, t_bv)
+        xt_fine, zt_fine = self.binary_scheduler.add_noise(future_fine_flat, t_bv)
+        xt_flat = self._stack_dual_scale_flat(xt_coarse, xt_fine)
+        future_flat = self._stack_dual_scale_flat(future_coarse_flat, future_fine_flat)
+
+        guidance_flat = None
+        guidance_coarse = None
+        guidance_fine = None
+        if self.config.use_guidance_channel:
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            guidance_coarse, guidance_fine = self.encode_dual_to_2d_binary(guidance_forecast_norm)
+            guidance_flat = self._stack_dual_scale_flat(
+                guidance_coarse.reshape(BV, 1, H, W_fut),
+                guidance_fine.reshape(BV, 1, H, W_fut),
+            )
+
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
+        ctx_flat = self._expand_ctx_to_dual_scale(ctx, B, V)
+        ctx_anchor = ctx_flat
+
+        canvas = self._inject_coordinate_channel(xt_flat.float())
+        canvas = self._inject_time_channels(canvas)
+
+        past_tail_len = min(past_norm.shape[-1], W_fut)
+        past_tail_norm = past_norm[..., -past_tail_len:]
+        past_coarse, past_fine = self.encode_dual_to_2d_binary(past_tail_norm)
+        past_flat = self._stack_dual_scale_flat(
+            past_coarse.reshape(BV, 1, H, past_tail_len),
+            past_fine.reshape(BV, 1, H, past_tail_len),
+        )
+        cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+        cond_for_unet = self._apply_coarse_dropout(cond_for_unet)
+        base_cond_for_unet = cond_for_unet
+
+        if self.training and self.config.cfg_dropout > 0.0:
+            drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
+            drop_mask_flat = drop_mask.view(B, 1, 1).expand(-1, V, 2).reshape(BV * 2)
+            cond_for_unet = torch.where(
+                drop_mask_flat.view(BV * 2, 1, 1, 1),
+                torch.zeros_like(cond_for_unet),
+                cond_for_unet,
+            )
+            if ctx_flat is not None:
+                ctx_flat = torch.where(
+                    drop_mask_flat.view(BV * 2, 1, 1),
+                    torch.zeros_like(ctx_flat),
+                    ctx_flat,
+                )
+            if guidance_flat is not None:
+                guidance_for_unet = torch.where(
+                    drop_mask_flat.view(BV * 2, 1, 1, 1),
+                    torch.zeros_like(guidance_flat),
+                    guidance_flat,
+                )
+                canvas = torch.cat([canvas, guidance_for_unet], dim=1)
+        elif guidance_flat is not None:
+            canvas = torch.cat([canvas, guidance_flat], dim=1)
+
+        out_flat = self._predict_noise_chunked(
+            canvas,
+            t_bvs,
+            cond_for_unet,
+            ctx_flat,
+            scale_indices=scale_indices,
+        )
+        out = out_flat.reshape(BV, 2, 2, H, W_fut)
+        coarse_out = out[:, 0]
+        fine_out = out[:, 1]
+        x0_logits_coarse, zt_logits_coarse = coarse_out[:, 0:1], coarse_out[:, 1:2]
+        x0_logits_fine, zt_logits_fine = fine_out[:, 0:1], fine_out[:, 1:2]
+
+        loss_x0_coarse = self._binary_plain_bce_loss(x0_logits_coarse, future_coarse_flat)
+        loss_zt_coarse = self._binary_plain_bce_loss(zt_logits_coarse, zt_coarse)
+        loss_x0_fine = self._binary_plain_bce_loss(x0_logits_fine, future_fine_flat)
+        loss_zt_fine = self._binary_plain_bce_loss(zt_logits_fine, zt_fine)
+        coarse_loss = loss_x0_coarse + loss_zt_coarse
+        fine_loss = loss_x0_fine + loss_zt_fine
+        fine_weight = self.config.dual_scale_fine_weight
+        regular_loss = (1.0 - fine_weight) * coarse_loss + fine_weight * fine_loss
+
+        anchor_loss = torch.tensor(0.0, device=device)
+        combined_mse_loss = regular_loss
+        if self.config.use_deterministic_anchor_loss:
+            anchor_t_flat = torch.full(
+                (BV * 2,),
+                self.config.binary_num_steps - 1,
+                device=device,
+                dtype=t_bvs.dtype,
+            )
+            neutral_future_flat = torch.bernoulli(torch.full_like(future_flat, 0.5))
+            anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
+            anchor_canvas = self._inject_time_channels(anchor_canvas)
+            if guidance_flat is not None:
+                anchor_canvas = torch.cat([anchor_canvas, guidance_flat], dim=1)
+            anchor_out_flat = self._predict_noise_chunked(
+                anchor_canvas,
+                anchor_t_flat,
+                base_cond_for_unet,
+                ctx_anchor,
+                scale_indices=scale_indices,
+            )
+            anchor_out = anchor_out_flat.reshape(BV, 2, 2, H, W_fut)
+            anchor_loss = (
+                self._binary_plain_bce_loss(anchor_out[:, 0, 0:1], future_coarse_flat)
+                + self._binary_plain_bce_loss(anchor_out[:, 1, 0:1], future_fine_flat)
+            )
+            lam = self.config.deterministic_anchor_lambda
+            combined_mse_loss = lam * regular_loss + (1.0 - lam) * anchor_loss
+
+        x0_pred_coarse = torch.sigmoid(x0_logits_coarse).reshape(B, V, H, W_fut)
+        x0_pred_fine = torch.sigmoid(x0_logits_fine).reshape(B, V, H, W_fut)
+
+        result = {
+            'loss': combined_mse_loss,
+            'noise_loss': regular_loss,
+            'combined_mse_loss': combined_mse_loss,
+            'anchor_loss': anchor_loss,
+            'loss_x0': (1.0 - fine_weight) * loss_x0_coarse + fine_weight * loss_x0_fine,
+            'loss_zt': (1.0 - fine_weight) * loss_zt_coarse + fine_weight * loss_zt_fine,
+            'loss_x0_coarse': loss_x0_coarse,
+            'loss_zt_coarse': loss_zt_coarse,
+            'loss_x0_fine': loss_x0_fine,
+            'loss_zt_fine': loss_zt_fine,
+            'coarse_loss': coarse_loss,
+            'fine_loss': fine_loss,
+            'emd_loss': torch.tensor(0.0, device=device),
+            'guidance_loss': torch.tensor(0.0, device=device),
+            'noise_pred': x0_pred_coarse,
+            'x0_pred': x0_pred_coarse,
+            'x0_pred_coarse': x0_pred_coarse,
+            'x0_pred_fine': x0_pred_fine,
+            'future_2d': future_coarse,
+            'future_2d_coarse': future_coarse,
+            'future_2d_fine': future_fine,
+            't': t,
+        }
+        if guidance_coarse is not None and guidance_fine is not None:
+            result['guidance_2d_coarse'] = guidance_coarse
+            result['guidance_2d_fine'] = guidance_fine
+        return result
+
+    @torch.no_grad()
+    def _generate_binary_dual_scale(
+        self,
+        past: torch.Tensor,
+        num_steps: int = 20,
+        verbose: bool = False,
+        decoder_method: str = "mean",
+        sampler: str = "ddim",
+        yield_intermediates: bool = False,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        """Binary reverse sampling in lock-step over coarse and residual scales."""
+        assert self.binary_scheduler is not None, "binary scheduler is not initialized"
+
+        B = past.shape[0]
+        V = self.config.num_variables
+        H = self.config.image_height
+        device = past.device
+        BV = B * V
+        BVS = BV * 2
+        W_fut = self.config.forecast_length
+        scale_indices = self._dual_scale_indices(BV, device)
+
+        past_norm, _, stats = self._normalize_sequence(past)
+        past_tail_len = min(past_norm.shape[-1], W_fut)
+        past_tail_norm = past_norm[..., -past_tail_len:]
+        past_coarse, past_fine = self.encode_dual_to_2d_binary(past_tail_norm)
+        past_flat = self._stack_dual_scale_flat(
+            past_coarse.reshape(BV, 1, H, past_tail_len),
+            past_fine.reshape(BV, 1, H, past_tail_len),
+        )
+        cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+
+        guidance_coarse = None
+        guidance_fine = None
+        guide_flat = None
+        if self.config.use_guidance_channel:
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            guidance_coarse, guidance_fine = self.encode_dual_to_2d_binary(guidance_forecast_norm)
+            guide_flat = self._stack_dual_scale_flat(
+                guidance_coarse.reshape(BV, 1, H, W_fut),
+                guidance_fine.reshape(BV, 1, H, W_fut),
+            )
+
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
+        ctx_flat = self._expand_ctx_to_dual_scale(ctx, B, V)
+
+        def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
+            canvas = self._inject_coordinate_channel(xt)
+            canvas = self._inject_time_channels(canvas)
+            if guide_flat is not None:
+                canvas = torch.cat([canvas, guide_flat], dim=1)
+            return canvas
+
+        def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
+            canvas = _build_canvas(xt)
+            out = self._predict_noise_chunked(
+                canvas,
+                t_batch,
+                cond_for_unet,
+                ctx_flat,
+                scale_indices=scale_indices,
+            )
+            return out[:, 0:1], out[:, 1:2]
+
+        intermediates = None
+        if sampler in ("anchor", "deterministic_anchor"):
+            t_batch = torch.full(
+                (BVS,),
+                self.config.binary_num_steps - 1,
+                device=device,
+                dtype=torch.long,
+            )
+            neutral_future_flat = torch.bernoulli(
+                torch.full((BVS, 1, H, W_fut), 0.5, device=device)
+            )
+            x0_logits, _zt_logits = _chunked_model_fn(neutral_future_flat, t_batch)
+            future_2d_flat = (torch.sigmoid(x0_logits) > 0.5).float()
+            if yield_intermediates:
+                intermediates = [(999, neutral_future_flat.clone()), (0, future_2d_flat.clone())]
+        else:
+            if yield_intermediates:
+                future_2d_flat, intermediates = self.binary_scheduler.sample(
+                    model_fn=_chunked_model_fn,
+                    shape=(BVS, 1, H, W_fut),
+                    num_steps=num_steps,
+                    device=device,
+                    verbose=verbose,
+                    yield_intermediates=True,
+                )
+            else:
+                future_2d_flat = self.binary_scheduler.sample(
+                    model_fn=_chunked_model_fn,
+                    shape=(BVS, 1, H, W_fut),
+                    num_steps=num_steps,
+                    device=device,
+                    verbose=verbose,
+                )
+
+        future_by_scale = future_2d_flat.reshape(BV, 2, 1, H, W_fut)
+        future_2d_coarse = future_by_scale[:, 0, 0].reshape(B, V, H, W_fut)
+        future_2d_fine = future_by_scale[:, 1, 0].reshape(B, V, H, W_fut)
+        future_norm = self.decode_dual_from_2d(
+            future_2d_coarse,
+            future_2d_fine,
+            from_diffusion=False,
+            decoder_method=decoder_method,
+        )
+        future = self._denormalize(future_norm, stats)
+
+        K = self.config.lookback_overlap
+        if K > 0:
+            future = future[..., K:]
+            future_norm = future_norm[..., K:]
+
+        result = {
+            'prediction': future,
+            'prediction_norm': future_norm,
+            'prediction_global_norm': future,
+            'future_2d': future_2d_coarse,
+            'future_2d_coarse': future_2d_coarse,
+            'future_2d_fine': future_2d_fine,
+            'past_2d': past_coarse,
+            'past_2d_coarse': past_coarse,
+            'past_2d_fine': past_fine,
+        }
+        if guidance_coarse is not None and guidance_fine is not None:
+            result['guidance_2d_coarse'] = guidance_coarse
+            result['guidance_2d_fine'] = guidance_fine
+        if intermediates is not None:
+            reshaped_intermediates = []
+            for (t_idx, i_tensor) in intermediates:
+                reshaped_intermediates.append((t_idx, i_tensor.reshape(B, V, 2, H, W_fut)))
+            result['intermediates'] = reshaped_intermediates
+        return result
 
     def _forward_binary_factorized(
         self,

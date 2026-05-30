@@ -133,25 +133,59 @@ class _DiTCrossAttnBlock(nn.Module):
     no-op at init and the network can choose how much to lean on it.
     """
 
-    def __init__(self, dim: int, num_heads: int, mlp_ratio: float, drop: float):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float,
+        drop: float,
+        enable_cross_scale_attention: bool = False,
+    ):
         super().__init__()
+        self.enable_cross_scale_attention = enable_cross_scale_attention
         self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.self_attn = _SelfAttention(dim, num_heads, drop=drop)
         self.norm_x = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.cross_attn = _CrossAttention(dim, num_heads, drop=drop)
+        if enable_cross_scale_attention:
+            self.norm_s = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+            self.scale_attn = _CrossAttention(dim, num_heads, drop=drop)
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.mlp = _MLP(dim, int(dim * mlp_ratio), drop=drop)
-        # 9 mod vectors: (shift, scale, gate) x (self_attn, cross_attn, mlp)
-        self.adaLN = nn.Sequential(nn.SiLU(), nn.Linear(dim, 9 * dim))
+        num_mods = 12 if enable_cross_scale_attention else 9
+        self.adaLN = nn.Sequential(nn.SiLU(), nn.Linear(dim, num_mods * dim))
         nn.init.zeros_(self.adaLN[-1].weight)
         nn.init.zeros_(self.adaLN[-1].bias)
 
-    def forward(self, x: torch.Tensor, c: torch.Tensor, ctx: Optional[torch.Tensor]) -> torch.Tensor:
-        mods = self.adaLN(c).chunk(9, dim=-1)
-        s1, sc1, g1, sx, scx, gx, s2, sc2, g2 = mods
+    def forward(
+        self,
+        x: torch.Tensor,
+        c: torch.Tensor,
+        ctx: Optional[torch.Tensor],
+        scale_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        mods = self.adaLN(c).chunk(12 if self.enable_cross_scale_attention else 9, dim=-1)
+        if self.enable_cross_scale_attention:
+            s1, sc1, g1, sx, scx, gx, ss, scs, gs, s2, sc2, g2 = mods
+        else:
+            s1, sc1, g1, sx, scx, gx, s2, sc2, g2 = mods
         x = x + g1.unsqueeze(1) * self.self_attn(_modulate(self.norm1(x), s1, sc1))
         if ctx is not None:
             x = x + gx.unsqueeze(1) * self.cross_attn(_modulate(self.norm_x(x), sx, scx), ctx)
+        if self.enable_cross_scale_attention:
+            if scale_indices is None:
+                raise ValueError("scale_indices are required for cross-scale attention.")
+            if x.shape[0] % 2 != 0:
+                raise ValueError("cross-scale attention expects paired coarse/fine batch items.")
+            expected = torch.tensor([0, 1], device=scale_indices.device, dtype=scale_indices.dtype)
+            if not torch.equal(scale_indices.reshape(-1, 2), expected.view(1, 2).expand(x.shape[0] // 2, -1)):
+                raise ValueError("cross-scale attention expects adjacent [coarse, fine] scale ordering.")
+            grouped = x.reshape(-1, 2, x.shape[1], x.shape[2])
+            other_scale = grouped.flip(1).reshape_as(x)
+            x = x + gs.unsqueeze(1) * self.scale_attn(
+                _modulate(self.norm_s(x), ss, scs),
+                other_scale,
+            )
         x = x + g2.unsqueeze(1) * self.mlp(_modulate(self.norm2(x), s2, sc2))
         return x
 
@@ -184,6 +218,8 @@ class FactorizedDiT(nn.Module):
         context_dim: int = 256,
         max_pos_tokens: int = 8192,
         gradient_checkpointing: bool = False,
+        use_scale_embedding: bool = False,
+        enable_cross_scale_attention: bool = False,
     ):
         super().__init__()
         pH, pW = patch_size
@@ -195,6 +231,8 @@ class FactorizedDiT(nn.Module):
         self.depth = depth
         self.out_channels = out_channels
         self.gradient_checkpointing = gradient_checkpointing
+        self.use_scale_embedding = use_scale_embedding
+        self.enable_cross_scale_attention = enable_cross_scale_attention
 
         self.x_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
         self.cond_embed = nn.Conv2d(cond_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
@@ -211,6 +249,10 @@ class FactorizedDiT(nn.Module):
             nn.SiLU(),
             nn.Linear(4 * embed_dim, embed_dim),
         )
+        if use_scale_embedding:
+            self.scale_embed = nn.Embedding(2, embed_dim)
+        else:
+            self.scale_embed = None
 
         self.ctx_proj = nn.Linear(context_dim, embed_dim)
         self.ctx_norm = nn.LayerNorm(embed_dim, eps=1e-6)
@@ -220,7 +262,15 @@ class FactorizedDiT(nn.Module):
         self.blocks = nn.ModuleList()
         for i in range(depth):
             if i == self.bottleneck_idx:
-                self.blocks.append(_DiTCrossAttnBlock(embed_dim, num_heads, mlp_ratio, dropout))
+                self.blocks.append(
+                    _DiTCrossAttnBlock(
+                        embed_dim,
+                        num_heads,
+                        mlp_ratio,
+                        dropout,
+                        enable_cross_scale_attention=enable_cross_scale_attention,
+                    )
+                )
             else:
                 self.blocks.append(_DiTBlock(embed_dim, num_heads, mlp_ratio, dropout))
 
@@ -262,6 +312,7 @@ class FactorizedDiT(nn.Module):
         t: torch.Tensor,
         cond: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor] = None,
+        scale_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         BV, _, H, W = x.shape
 
@@ -284,6 +335,12 @@ class FactorizedDiT(nn.Module):
         if t.shape[0] != BV:
             raise ValueError(f"timestep batch {t.shape[0]} != BV {BV}")
         t_emb = self.t_embed(_timestep_embedding(t, self.embed_dim))  # (BV, D)
+        if self.scale_embed is not None:
+            if scale_indices is None:
+                raise ValueError("scale_indices are required when scale embeddings are enabled.")
+            if scale_indices.shape[0] != BV:
+                raise ValueError(f"scale_indices batch {scale_indices.shape[0]} != BV {BV}")
+            t_emb = t_emb + self.scale_embed(scale_indices.long())
 
         ctx_proj: Optional[torch.Tensor] = None
         if encoder_hidden_states is not None:
@@ -295,7 +352,12 @@ class FactorizedDiT(nn.Module):
 
         for i, block in enumerate(self.blocks):
             if i == self.bottleneck_idx:
-                if self.gradient_checkpointing and self.training:
+                if self.enable_cross_scale_attention:
+                    if self.gradient_checkpointing and self.training:
+                        tokens = checkpoint(block, tokens, t_emb, ctx_proj, scale_indices, use_reentrant=False)
+                    else:
+                        tokens = block(tokens, t_emb, ctx_proj, scale_indices)
+                elif self.gradient_checkpointing and self.training:
                     tokens = checkpoint(block, tokens, t_emb, ctx_proj, use_reentrant=False)
                 else:
                     tokens = block(tokens, t_emb, ctx_proj)

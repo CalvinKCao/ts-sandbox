@@ -101,6 +101,8 @@ class DiffusionTSFConfig:
     binary_boundary_width: int = 8
     # Edge CDF boundary-weighted BCE (not supported with binary yet).
     binary_use_boundary_weighted_bce: bool = False
+    use_dual_scale: bool = False
+    dual_scale_fine_weight: float = 0.5
     
     # ddim stuff
     ddim_steps: int = 50
@@ -202,6 +204,17 @@ class DiffusionTSFConfig:
             raise ValueError(
                 "Edge CDF boundary-weighted BCE is not supported for binary diffusion yet."
             )
+        if self.use_dual_scale:
+            if self.diffusion_type != "binary":
+                raise ValueError("use_dual_scale=True requires binary diffusion.")
+            if self.model_type != "dit":
+                raise ValueError("use_dual_scale=True requires model_type='dit'.")
+            if self.image_height != 16:
+                raise ValueError("use_dual_scale=True expects image_height=16.")
+            if self.image_height % self.dit_patch_size[0] != 0:
+                raise ValueError("dual-scale image_height must divide dit_patch_size[0].")
+        if not 0.0 <= self.dual_scale_fine_weight <= 1.0:
+            raise ValueError("dual_scale_fine_weight must be in [0, 1].")
         assert 0 <= self.cutout_prob <= 1
         assert 0.0 <= self.deterministic_anchor_lambda <= 1.0
         assert 0.0 <= self.deterministic_anchor_alpha < 1.0
