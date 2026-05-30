@@ -820,11 +820,112 @@ DATASET_REGISTRY = {
     'weather': ('weather/weather.csv', 'date', 144),
     'electricity': ('electricity/electricity.csv', 'date', 96),
     'traffic': ('traffic/traffic.csv', 'date', 24),
-    'PeMS': ('PeMS/PeMS.csv', 'Time', 24),
+    # PeMS benchmarks ship as NPZ (iTransformer Dataset_PEMS); see scripts/fetch_pems_solar.sh
+    'PeMS': ('PeMS/PEMS04.npz', None, 24),
     'solar_Alabama': ('solar_Alabama/solar_Alabama.csv', 'Unnamed: 0', 96),
     # Path unused; tensors loaded from DALIA/Forecast100*.pt (see dalia_data.py).
     'dalia': ('dalia/Forecast100.pt', '_index', 96),
 }
+
+# First existing path wins (under DATASETS_DIR).
+PEMS_DATA_CANDIDATES = (
+    'PeMS/PEMS04.npz',
+    'PeMS/PEMS08.npz',
+    'PeMS/PEMS03.npz',
+    'PeMS/PEMS07.npz',
+    'PeMS/PeMS.csv',
+)
+
+SOLAR_DATA_CANDIDATES = (
+    'solar_Alabama/solar_Alabama.csv',
+    'solar_Alabama/solar_AL.csv',
+    'Solar/solar_AL.csv',
+)
+
+
+def _datasets_root() -> str:
+    return DATASETS_DIR
+
+
+def _resolve_registry_path(dataset_name: str) -> Tuple[str, Optional[str]]:
+    """Return (absolute path, date_col or None for NPZ/headerless)."""
+    if dataset_name == 'PeMS':
+        for rel in PEMS_DATA_CANDIDATES:
+            path = os.path.join(_datasets_root(), rel)
+            if os.path.isfile(path):
+                date_col = None if rel.endswith('.npz') else DATASET_REGISTRY['PeMS'][1]
+                return path, date_col
+        raise FileNotFoundError(
+            f"No PeMS file under {_datasets_root()}/PeMS/. "
+            f"Run setup/fetch_pems_solar.sh from the repo root (login node)."
+        )
+    if dataset_name == 'solar_Alabama':
+        for rel in SOLAR_DATA_CANDIDATES:
+            path = os.path.join(_datasets_root(), rel)
+            if os.path.isfile(path):
+                return path, DATASET_REGISTRY['solar_Alabama'][1]
+        raise FileNotFoundError(
+            f"No solar file under {_datasets_root()}/. "
+            f"Run setup/fetch_pems_solar.sh from the repo root (login node)."
+        )
+    rel, date_col, _ = DATASET_REGISTRY[dataset_name]
+    path = os.path.join(_datasets_root(), rel)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Dataset file not found: {path}")
+    return path, date_col
+
+
+def _load_pems_npz(path: str) -> np.ndarray:
+    raw = np.load(path, allow_pickle=True)
+    data = raw['data']
+    if data.ndim == 3:
+        data = data[:, :, 0]
+    return np.asarray(data, dtype=np.float32)
+
+
+def _load_solar_lines(path: str) -> np.ndarray:
+    rows = []
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append([float(x) for x in line.split(',')])
+    if not rows:
+        raise ValueError(f"Empty solar dataset: {path}")
+    return np.stack(rows, axis=0).astype(np.float32)
+
+
+def _load_dataset_array(path: str, date_col: Optional[str]) -> np.ndarray:
+    if path.endswith('.npz'):
+        return _load_pems_npz(path)
+    try:
+        df_head = pd.read_csv(path, nrows=1)
+    except Exception:
+        df_head = None
+    if df_head is not None and date_col and date_col in df_head.columns:
+        df = pd.read_csv(path)
+        cols = [c for c in df.columns if c != date_col]
+        return df[cols].values.astype(np.float32)
+    if df_head is not None and len(df_head.columns) > 1:
+        df = pd.read_csv(path)
+        cols = list(df.columns)
+        if date_col and date_col in cols:
+            cols = [c for c in cols if c != date_col]
+        return df[cols].values.astype(np.float32)
+    return _load_solar_lines(path)
+
+
+def _dataset_variate_names(path: str, date_col: Optional[str], n_cols: int) -> List[str]:
+    if path.endswith('.npz'):
+        return [f"var_{i}" for i in range(n_cols)]
+    try:
+        df = pd.read_csv(path, nrows=1)
+        if date_col and date_col in df.columns:
+            return [c for c in df.columns if c != date_col]
+        return list(df.columns)
+    except Exception:
+        return [f"var_{i}" for i in range(n_cols)]
 
 
 def dataset_window_lengths(dataset_name: str) -> Tuple[int, int]:
@@ -865,10 +966,17 @@ def get_dataset_n_cols(dataset_name: str) -> int:
     """Return the number of numeric columns in a dataset (excluding date)."""
     if dataset_name == 'dalia':
         return DALIA_N_VARS
-    path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
-    df = pd.read_csv(path, nrows=1)
-    date_col = DATASET_REGISTRY[dataset_name][1]
-    return sum(1 for c in df.columns if c != date_col)
+    path, date_col = _resolve_registry_path(dataset_name)
+    if path.endswith('.npz'):
+        data = _load_pems_npz(path)
+        return int(data.shape[1])
+    try:
+        df = pd.read_csv(path, nrows=1)
+        if date_col and date_col in df.columns:
+            return sum(1 for c in df.columns if c != date_col)
+        return len(df.columns)
+    except Exception:
+        return int(_load_solar_lines(path).shape[1])
 
 
 _DATASET_SHAPE_CACHE: Dict[Tuple[str, str], Tuple[int, int]] = {}
@@ -882,12 +990,9 @@ def get_dataset_shape(dataset_name: str) -> Tuple[int, int]:
     if dataset_name == 'dalia':
         shape = (0, DALIA_N_VARS)
     else:
-        path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
-        date_col = DATASET_REGISTRY[dataset_name][1]
-        df = pd.read_csv(path, usecols=lambda c: c == date_col)
-        n_rows = len(df)
-        n_cols = get_dataset_n_cols(dataset_name)
-        shape = (n_rows, n_cols)
+        path, date_col = _resolve_registry_path(dataset_name)
+        data = _load_dataset_array(path, date_col)
+        shape = (int(data.shape[0]), int(data.shape[1]))
     _DATASET_SHAPE_CACHE[key] = shape
     return shape
 
@@ -1279,6 +1384,11 @@ def _paper_split_borders(dataset_name: str, n: int, seq_len: int) -> Tuple[List[
         b2 = [12 * 30 * 24, 12 * 30 * 24 + 4 * 30 * 24, 12 * 30 * 24 + 8 * 30 * 24]
     elif dataset_name in ('ETTm1', 'ETTm2'):
         b2 = [12 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 8 * 30 * 24 * 4]
+    elif dataset_name == 'PeMS':
+        n_train = int(n * 0.6)
+        n_val = int(n * 0.2)
+        n_test = n - n_train - n_val
+        b2 = [n_train, n_train + n_val, n_train + n_val + n_test]
     else:
         n_train = int(n * 0.7)
         n_test = int(n * 0.2)
@@ -1322,12 +1432,8 @@ def load_dataset(
             test_stride=test_stride,
             lookback_overlap=lookback_overlap,
         )
-    path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
-    date_col = DATASET_REGISTRY[dataset_name][1]
-
-    df = pd.read_csv(path)
-    data_cols = [c for c in df.columns if c != date_col]
-    data = df[data_cols].values.astype(np.float32)
+    path, date_col = _resolve_registry_path(dataset_name)
+    data = _load_dataset_array(path, date_col)
 
     if variate_indices is not None:
         data = data[:, variate_indices]
@@ -1378,10 +1484,9 @@ def generate_dataset_job(dataset_name: str, n_variates: int = None, seed: int = 
             'variate_indices': indices,
             'variate_names': DALIA_CHANNEL_NAMES,
         }
-    path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
-    df = pd.read_csv(path, nrows=1)
-    date_col = DATASET_REGISTRY[dataset_name][1]
-    all_cols = [c for c in df.columns if c != date_col]
+    path, date_col = _resolve_registry_path(dataset_name)
+    n_cols = get_dataset_n_cols(dataset_name)
+    all_cols = _dataset_variate_names(path, date_col, n_cols)
     indices = list(range(len(all_cols)))
     return {'dataset_id': dataset_name, 'variate_indices': indices, 'variate_names': all_cols}
 

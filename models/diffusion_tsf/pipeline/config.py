@@ -91,6 +91,7 @@ def _dataset_n_variates(dataset: str) -> int:
     _MAP = {
         "ETTh1": 7, "ETTh2": 7, "ETTm1": 7, "ETTm2": 7,
         "illness": 7, "exchange_rate": 8, "weather": 21,
-        "electricity": 321, "traffic": 862, "dalia": 5,
+        "electricity": 321, "traffic": 862, "PeMS": 307, "solar_Alabama": 137,
+        "dalia": 5,
     }
     return _MAP.get(dataset, 7)
