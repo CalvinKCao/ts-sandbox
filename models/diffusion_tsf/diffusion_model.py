@@ -1255,13 +1255,22 @@ class DiffusionTSF(nn.Module):
         if t is None:
             t = torch.randint(0, self.config.binary_num_steps, (B,), device=device)
         t_bv = t.unsqueeze(1).expand(-1, V).reshape(BV)
-        t_bvs = t_bv.unsqueeze(1).expand(-1, 2).reshape(BV * 2)
+        if self.config.dual_scale_independent_timesteps:
+            # Independent timestep for fine scale so each scale's denoising
+            # difficulty varies independently during training
+            t_fine = torch.randint(0, self.config.binary_num_steps, (B,), device=device)
+            t_fine_bv = t_fine.unsqueeze(1).expand(-1, V).reshape(BV)
+            t_bvs = torch.stack([t_bv, t_fine_bv], dim=1).reshape(BV * 2)
+        else:
+            t_fine_bv = t_bv
+            t_bvs = t_bv.unsqueeze(1).expand(-1, 2).reshape(BV * 2)
         scale_indices = self._dual_scale_indices(BV, device)
 
         future_coarse_flat = future_coarse.reshape(BV, 1, H, W_fut)
         future_fine_flat = future_fine.reshape(BV, 1, H, W_fut)
         xt_coarse, zt_coarse = self.binary_scheduler.add_noise(future_coarse_flat, t_bv)
-        xt_fine, zt_fine = self.binary_scheduler.add_noise(future_fine_flat, t_bv)
+        xt_fine, zt_fine = self.binary_scheduler.add_noise(future_fine_flat, t_fine_bv)
+
         xt_flat = self._stack_dual_scale_flat(xt_coarse, xt_fine)
         future_flat = self._stack_dual_scale_flat(future_coarse_flat, future_fine_flat)
 

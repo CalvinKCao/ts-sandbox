@@ -34,6 +34,7 @@ class PipelineState:
     image_height: int = 32
     use_dual_scale: bool = False
     dual_scale_fine_weight: float = 0.5
+    dual_scale_independent_timesteps: bool = True
     deterministic_anchor_loss: bool = False
     deterministic_anchor_lambda: float = 0.99
     deterministic_anchor_alpha: float = 0.5

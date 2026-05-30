@@ -25,6 +25,7 @@ _DEFAULTS: Dict[str, Any] = {
         "image_height": 32,
         "use_dual_scale": False,
         "dual_scale_fine_weight": 0.5,
+        "dual_scale_independent_timesteps": True,
         "deterministic_anchor_loss": True,
         "deterministic_anchor_lambda": 0.99,
         "deterministic_anchor_alpha": 0.0,

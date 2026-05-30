@@ -103,6 +103,7 @@ class DiffusionTSFConfig:
     binary_use_boundary_weighted_bce: bool = False
     use_dual_scale: bool = False
     dual_scale_fine_weight: float = 0.5
+    dual_scale_independent_timesteps: bool = True
     
     # ddim stuff
     ddim_steps: int = 50

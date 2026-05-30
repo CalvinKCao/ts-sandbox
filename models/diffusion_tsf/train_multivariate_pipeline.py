@@ -240,6 +240,7 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'image_height': IMAGE_HEIGHT,
         'use_dual_scale': USE_DUAL_SCALE,
         'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
+        'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
         'disable_cross_attention': DISABLE_CROSS_ATTENTION,
         'model_type': MODEL_TYPE,
         'prediction_mode': PREDICTION_MODE,
@@ -505,6 +506,7 @@ def init_wandb(
         'image_height': IMAGE_HEIGHT,
         'use_dual_scale': USE_DUAL_SCALE,
         'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
+        'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
         'n_variates': N_VARIATES,
         'diffusion_type': DIFFUSION_TYPE,
         'prediction_mode': PREDICTION_MODE,
@@ -774,6 +776,7 @@ from models.diffusion_tsf.pipeline_config import (
     DISABLE_CROSS_ATTENTION,
     USE_DUAL_SCALE,
     DUAL_SCALE_FINE_WEIGHT,
+    DUAL_SCALE_INDEPENDENT_TIMESTEPS,
     MODEL_TYPE,
     PREDICTION_MODE,
     DIT_PATCH_SIZE,
@@ -1202,6 +1205,7 @@ def create_diffusion_model(
         disable_cross_attention=DISABLE_CROSS_ATTENTION,
         use_dual_scale=USE_DUAL_SCALE,
         dual_scale_fine_weight=DUAL_SCALE_FINE_WEIGHT,
+        dual_scale_independent_timesteps=DUAL_SCALE_INDEPENDENT_TIMESTEPS,
         num_res_blocks=2,
         dit_patch_size=DIT_PATCH_SIZE,
         dit_embed_dim=DIT_EMBED_DIM,
@@ -2547,6 +2551,7 @@ def _promote_best_trial_to_final(
                 'image_height': IMAGE_HEIGHT,
                 'use_dual_scale': USE_DUAL_SCALE,
                 'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
+                'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
                 'disable_cross_attention': DISABLE_CROSS_ATTENTION,
                 'use_window_normalization': USE_WINDOW_NORMALIZATION,
                 'zero_guidance_forecast': ZERO_GUIDANCE_FORECAST,
@@ -3976,7 +3981,7 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
     global IMAGE_HEIGHT, UNET_CHANNELS, ATTENTION_LEVELS, DISABLE_CROSS_ATTENTION
-    global USE_DUAL_SCALE, DUAL_SCALE_FINE_WEIGHT
+    global USE_DUAL_SCALE, DUAL_SCALE_FINE_WEIGHT, DUAL_SCALE_INDEPENDENT_TIMESTEPS
     global LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN
     global MODEL_TYPE, DIFFUSION_TYPE, DETERMINISTIC_ANCHOR_LOSS, DETERMINISTIC_ANCHOR_LAMBDA
     global PREDICTION_MODE, DETERMINISTIC_ANCHOR_ALPHA, EVAL_SAMPLER
@@ -4031,6 +4036,9 @@ def main():
                         help='Use paired 16-bin coarse/residual binary CDF maps')
     parser.add_argument('--dual-scale-fine-weight', type=float, default=DUAL_SCALE_FINE_WEIGHT,
                         help='Weight on fine residual BCE in dual-scale binary diffusion')
+    parser.add_argument('--dual-scale-independent-timesteps', action='store_true',
+                        default=DUAL_SCALE_INDEPENDENT_TIMESTEPS,
+                        help='Draw independent diffusion timesteps for coarse and fine scales')
     parser.add_argument('--disable-cross-attention', action='store_true',
                         help='Disable cross-variate attention (fully univariate baseline)')
     parser.add_argument('--disable-window-normalization', action='store_true',
@@ -4068,6 +4076,7 @@ def main():
     EVAL_SAMPLER = "anchor" if args.eval_sampler == "deterministic_anchor" else args.eval_sampler
     USE_DUAL_SCALE = args.dual_scale
     DUAL_SCALE_FINE_WEIGHT = args.dual_scale_fine_weight
+    DUAL_SCALE_INDEPENDENT_TIMESTEPS = args.dual_scale_independent_timesteps
     IMAGE_HEIGHT = 16 if USE_DUAL_SCALE and args.image_height == parser.get_default('image_height') else args.image_height
     if args.disable_cross_attention:
         DISABLE_CROSS_ATTENTION = True
