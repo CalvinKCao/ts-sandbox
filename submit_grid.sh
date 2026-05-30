@@ -14,6 +14,7 @@ CONFIGS=""
 DATASETS="ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,electricity,traffic,PeMS,solar_Alabama,dalia"
 SEEDS="42"
 SMOKE=0
+RESUME=0
 DEPENDENCY=""
 WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 
@@ -23,6 +24,7 @@ while [[ $# -gt 0 ]]; do
         --datasets) DATASETS="$2"; shift 2 ;;
         --seeds) SEEDS="$2"; shift 2 ;;
         --smoke|--smoke-test) SMOKE=1; shift ;;
+        --resume) RESUME=1; shift ;;
         --dependency) DEPENDENCY="$2"; shift 2 ;;
         --wandb-project) WANDB_PROJECT="$2"; shift 2 ;;
         -*) echo "Unknown flag: $1" >&2; exit 1 ;;
@@ -107,6 +109,10 @@ for CFG in "${CONF_ARR[@]}"; do
             
             if [[ "$SMOKE" -eq 1 ]]; then
                 PY_ARGS+=(--smoke-test)
+            fi
+
+            if [[ "$RESUME" -eq 1 ]]; then
+                PY_ARGS+=(--resume)
             fi
 
             JOB_ID=$(sbatch "${S_ARGS[@]}" slurm_worker.sh "${PY_ARGS[@]}")

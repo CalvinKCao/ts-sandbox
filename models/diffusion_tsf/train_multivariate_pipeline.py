@@ -3999,7 +3999,22 @@ def main():
         
         cli_overrides = {}
         if args.dataset: cli_overrides["dataset"] = args.dataset
-        if args.n_variates: cli_overrides["n_variates"] = args.n_variates
+        
+        nv = args.n_variates
+        variate_indices = None
+        if args.variate_indices:
+            variate_indices = [int(x.strip()) for x in args.variate_indices.split(',') if x.strip()]
+            cli_overrides["variate_indices"] = variate_indices
+            if not nv: nv = len(variate_indices)
+            
+        if not nv and args.dataset:
+            try:
+                nv = get_dim_for_dataset(args.dataset)
+            except Exception:
+                pass
+                
+        if nv: cli_overrides["n_variates"] = nv
+        
         if args.seed != 42: cli_overrides["seed"] = args.seed
         if args.smoke_test: cli_overrides["smoke_test"] = True
         if args.checkpoint_dir: cli_overrides["checkpoint_dir"] = args.checkpoint_dir
@@ -4009,7 +4024,6 @@ def main():
         if args.wandb_project: cli_overrides["wandb_project"] = args.wandb_project
         if args.fresh: cli_overrides["fresh"] = True
         if args.resume: cli_overrides["resume"] = True
-        if args.variate_indices: cli_overrides["variate_indices"] = [int(x.strip()) for x in args.variate_indices.split(',') if x.strip()]
         if args.subset_id: cli_overrides["subset_id"] = args.subset_id
 
         cfg = load_experiment_config(args.config, cli_overrides)
