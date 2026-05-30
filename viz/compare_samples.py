@@ -38,6 +38,7 @@ from models.diffusion_tsf.train_multivariate_pipeline import (
     LOOKBACK_LENGTH, FORECAST_LENGTH,
     create_diffusion_model, load_dataset,
     load_itransformer_from_checkpoint,
+    load_diffusion_state_keep_attached_guidance,
 )
 from models.diffusion_tsf.guidance import iTransformerGuidance
 from models.diffusion_tsf.visualize_comparison import (
@@ -141,7 +142,7 @@ def run_probabilistic_visualization(
     
     itrans_guidance = iTransformerGuidance(itrans_guidance_model)
     diff_model.set_guidance_model(itrans_guidance)
-    diff_model.load_state_dict(diff_ckpt['model_state_dict'])
+    load_diffusion_state_keep_attached_guidance(diff_model, diff_ckpt['model_state_dict'])
     diff_model.eval()
 
     past, future = test_ds[sample_index]
