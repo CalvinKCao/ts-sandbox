@@ -44,6 +44,9 @@ class ITransFinetuneHPPhase(PipelinePhase):
         variate_indices = state.variate_indices
         if variate_indices is None:
             variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+        subset_meta = state.data_subset_resolved or {}
+        train_stride = int(subset_meta.get("train_stride", state.window_stride))
+        test_stride = int(subset_meta.get("test_stride", 1))
 
         n_trials = self.get("n_trials", 10)
         if state.smoke_test:
@@ -61,6 +64,8 @@ class ITransFinetuneHPPhase(PipelinePhase):
             smoke_test=state.smoke_test,
             checkpoint_dir=state.checkpoint_dir,
             subset_id=subset_id,
+            train_stride=train_stride,
+            test_stride=test_stride,
         )
 
         # Promote to canonical finetuned name

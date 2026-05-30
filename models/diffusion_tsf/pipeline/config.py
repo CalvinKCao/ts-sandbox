@@ -36,6 +36,9 @@ _DEFAULTS: Dict[str, Any] = {
         "forecast_length": 96,
         "lookback_overlap": 8,
         "window_stride": 1,
+        "data_subset": {
+            "enabled": False,
+        },
     },
     "phases": [
         {"phase": "itrans_hp_pretrain", "n_trials": 10, "max_epochs": 10},

@@ -14,6 +14,15 @@ experiment:
   forecast_length: 96
   disable_cross_attention: false
   use_window_normalization: true
+  data_subset:
+    enabled: true
+    target_dataset: weather
+    reduce_if_larger_than_target: true
+    max_variates: 32
+    variate_strategy: first
+    sample_stride: auto
+    apply_stride_to_test: true
+    subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
 
 phases:
   - phase: itrans_hp_pretrain

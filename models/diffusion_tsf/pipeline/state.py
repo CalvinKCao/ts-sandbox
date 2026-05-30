@@ -57,6 +57,8 @@ class PipelineState:
     # -- Variate selection --
     variate_indices: Optional[List[int]] = None
     subset_id: Optional[str] = None
+    data_subset: Dict[str, Any] = field(default_factory=dict)
+    data_subset_resolved: Dict[str, Any] = field(default_factory=dict)
 
     # -- Device --
     device: Optional[torch.device] = None

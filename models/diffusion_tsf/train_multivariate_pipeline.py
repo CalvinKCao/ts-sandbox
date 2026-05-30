@@ -76,6 +76,7 @@ from models.diffusion_tsf.dalia_data import (
     dalia_window_lengths,
     load_dalia_dataset,
 )
+from models.diffusion_tsf.pipeline.data_subset import resolve_data_subset
 
 DATASETS_DIR = os.path.join(project_root, "datasets")
 CHECKPOINT_DIR = resolve_checkpoint_dir(script_dir)
@@ -865,6 +866,60 @@ def get_dataset_n_cols(dataset_name: str) -> int:
     df = pd.read_csv(path, nrows=1)
     date_col = DATASET_REGISTRY[dataset_name][1]
     return sum(1 for c in df.columns if c != date_col)
+
+
+_DATASET_SHAPE_CACHE: Dict[Tuple[str, str], Tuple[int, int]] = {}
+
+
+def get_dataset_shape(dataset_name: str) -> Tuple[int, int]:
+    """Return raw row/variate counts without materializing the full numeric array."""
+    key = (DATASETS_DIR, dataset_name)
+    if key in _DATASET_SHAPE_CACHE:
+        return _DATASET_SHAPE_CACHE[key]
+    if dataset_name == 'dalia':
+        shape = (0, DALIA_N_VARS)
+    else:
+        path = os.path.join(DATASETS_DIR, DATASET_REGISTRY[dataset_name][0])
+        date_col = DATASET_REGISTRY[dataset_name][1]
+        df = pd.read_csv(path, usecols=lambda c: c == date_col)
+        n_rows = len(df)
+        n_cols = get_dataset_n_cols(dataset_name)
+        shape = (n_rows, n_cols)
+    _DATASET_SHAPE_CACHE[key] = shape
+    return shape
+
+
+def resolve_pipeline_data_subset(state) -> Dict[str, Any]:
+    """Resolve state.data_subset and write concrete variates/strides to state."""
+    base_indices = state.variate_indices
+    if base_indices is None:
+        base_indices = generate_dataset_job(state.dataset)["variate_indices"]
+    raw_rows, raw_variates = get_dataset_shape(state.dataset)
+    policy = dict(state.data_subset or {})
+    target_dataset = policy.get("target_dataset")
+    target_rows = target_variates = None
+    if target_dataset:
+        try:
+            target_rows, target_variates = get_dataset_shape(str(target_dataset))
+        except Exception as exc:
+            raise ValueError(f"Could not resolve data_subset target_dataset={target_dataset!r}: {exc}") from exc
+    resolved = resolve_data_subset(
+        dataset_name=state.dataset,
+        raw_rows=raw_rows,
+        raw_variates=raw_variates,
+        base_variate_indices=list(base_indices),
+        default_subset_id=state.subset_id,
+        default_window_stride=state.window_stride,
+        seed=state.seed,
+        policy=policy,
+        target_rows=target_rows,
+        target_variates=target_variates,
+    )
+    state.variate_indices = list(resolved["variate_indices"])
+    state.n_variates = int(resolved["n_variates"])
+    state.subset_id = str(resolved["subset_id"])
+    state.data_subset_resolved = resolved
+    return resolved
 
 
 def get_dim_for_dataset(dataset_name: str) -> int:
@@ -2308,6 +2363,8 @@ def finetune_hp_objective(
     smoke_test: bool = False,
     fixed_batch_size: Optional[int] = None,
     trial_ckpt_dir: Optional[str] = None,
+    train_stride: Optional[int] = None,
+    test_stride: Optional[int] = None,
 ) -> float:
     """Optuna objective for fine-tuning HP search (lr only; batch_size auto-probed or fixed).
 
@@ -2329,7 +2386,8 @@ def finetune_hp_objective(
     # Load data
     train_ds, val_ds, _, _ = load_dataset(
         dataset_name, variate_indices,
-        stride=WINDOW_STRIDE, test_stride=1,
+        stride=train_stride or WINDOW_STRIDE,
+        test_stride=1 if test_stride is None else test_stride,
     )
     
     if smoke_test:
@@ -2466,6 +2524,7 @@ def _promote_best_trial_to_final(
                 'subset_id': subset_id,
                 'dataset_name': dataset_name,
                 'variate_indices': variate_indices,
+                'data_subset': subset_info.get('data_subset', {}),
                 'variate_names': subset_info.get('variate_names', []),
                 'norm_mean': norm_stats['mean'].tolist(),
                 'norm_std': norm_stats['std'].tolist(),
@@ -2693,13 +2752,22 @@ def _save_subset_results(results_dir: str, subset_id: str, data: dict):
         json.dump(data, f, indent=2)
 
 
-def save_eval_results(subset_id, dataset_name, variate_indices, train_metrics, eval_results, results_dir):
+def save_eval_results(
+    subset_id,
+    dataset_name,
+    variate_indices,
+    train_metrics,
+    eval_results,
+    results_dir,
+    data_subset: Optional[Dict] = None,
+):
     """Save diffusion evaluation results to per-subset subdirectory."""
     data = _load_subset_results(results_dir, subset_id)
     data.update({
         'subset_id': subset_id,
         'dataset': dataset_name,
         'variate_indices': variate_indices,
+        'data_subset': data_subset or {},
         'train_metrics': train_metrics,
         'eval_metrics': eval_results,
         'evaluated_at': datetime.now().isoformat(),
@@ -2759,6 +2827,9 @@ def train_subset_itransformer_full_baseline(
     smoke_test: bool = False,
     epochs: int = None,
     patience: int = None,
+    train_stride: Optional[int] = None,
+    test_stride: Optional[int] = None,
+    data_subset: Optional[Dict] = None,
 ) -> str:
     """Train iTransformer from scratch on the full train split (no diffusion, no warm-start).
 
@@ -2777,7 +2848,8 @@ def train_subset_itransformer_full_baseline(
     try:
         train_ds, val_ds, _, _ = load_dataset(
             dataset_name, variate_indices,
-            stride=WINDOW_STRIDE, test_stride=1,
+            stride=train_stride or WINDOW_STRIDE,
+            test_stride=1 if test_stride is None else test_stride,
         )
         if smoke_test:
             train_ds = Subset(train_ds, list(range(min(4, len(train_ds)))))
@@ -2821,6 +2893,7 @@ def train_subset_itransformer_full_baseline(
                         'subset_id': subset_id,
                         'dataset_name': dataset_name,
                         'variate_indices': variate_indices,
+                        'data_subset': data_subset or {},
                         'lookback_length': ds_lb,
                         'forecast_length': ds_hz,
                         'type': 'itrans_full_dataset_baseline',
@@ -2844,6 +2917,8 @@ def evaluate_itransformer_baseline(
     device: torch.device,
     smoke_test: bool = False,
     test_indices: Optional[List[int]] = None,
+    test_stride: Optional[int] = None,
+    data_subset: Optional[Dict] = None,
 ) -> Dict:
     """Run iTransformer-only forecast on the test split (same windows as diffusion eval).
 
@@ -2855,7 +2930,9 @@ def evaluate_itransformer_baseline(
     LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN = ds_lb, ds_hz, ds_lb
     try:
         _, _, test_ds, _ = load_dataset(
-            dataset_name, variate_indices, stride=1, test_stride=1,
+            dataset_name, variate_indices,
+            stride=1,
+            test_stride=1 if test_stride is None else test_stride,
         )
         if test_indices is not None:
             test_ds = Subset(test_ds, list(test_indices))
@@ -2903,6 +2980,7 @@ def evaluate_itransformer_baseline(
         data.setdefault('subset_id', subset_id)
         data.setdefault('dataset', dataset_name)
         data.setdefault('variate_indices', variate_indices)
+        data.setdefault('data_subset', data_subset or {})
         data['itransformer_metrics'] = metrics
         data['itransformer_baseline_ckpt'] = itrans_checkpoint
         data['itransformer_evaluated_at'] = datetime.now().isoformat()
@@ -3557,6 +3635,8 @@ def run_itransformer_finetune_hp_tuning(
     smoke_test: bool = False,
     checkpoint_dir: Optional[str] = None,
     subset_id: Optional[str] = None,
+    train_stride: Optional[int] = None,
+    test_stride: Optional[int] = None,
 ) -> Tuple[Dict, Optional[str]]:
     """HP tune iTransformer on real data.
 
@@ -3577,7 +3657,8 @@ def run_itransformer_finetune_hp_tuning(
 
     train_ds, val_ds, _, _ = load_dataset(
         dataset_name, variate_indices,
-        stride=WINDOW_STRIDE, test_stride=1,
+        stride=train_stride or WINDOW_STRIDE,
+        test_stride=1 if test_stride is None else test_stride,
     )
     if smoke_test:
         train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
@@ -4034,6 +4115,18 @@ def main():
 
         cfg = load_experiment_config(args.config, cli_overrides)
         state = PipelineState.from_config(cfg)
+        subset_meta = resolve_pipeline_data_subset(state)
+        if subset_meta.get("enabled"):
+            logger.info(
+                "Data subset resolved: %s -> %s vars, train_stride=%s, test_stride=%s, "
+                "raw=%.2f MiB, reduced≈%.2f MiB",
+                state.subset_id,
+                subset_meta.get("n_variates"),
+                subset_meta.get("train_stride"),
+                subset_meta.get("test_stride"),
+                float(subset_meta.get("raw_size_mb") or 0.0),
+                float(subset_meta.get("reduced_size_mb") or 0.0),
+            )
         
         phases = []
         for p in cfg.get("phases", []):

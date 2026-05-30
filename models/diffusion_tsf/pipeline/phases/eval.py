@@ -57,6 +57,9 @@ class EvalPhase(PipelinePhase):
         variate_indices = state.variate_indices
         if variate_indices is None:
             variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+        subset_meta = state.data_subset_resolved or {}
+        train_stride = int(subset_meta.get("train_stride", state.window_stride))
+        test_stride = int(subset_meta.get("test_stride", 1))
 
         device = state.resolve_device()
         n_iv = len(variate_indices)
@@ -82,19 +85,24 @@ class EvalPhase(PipelinePhase):
 
         # Load test data
         _, _, test_ds, _ = load_dataset(
-            state.dataset, variate_indices, stride=1, test_stride=1,
+            state.dataset, variate_indices, stride=train_stride, test_stride=test_stride,
         )
         n_samples = self.get("n_samples", 30)
         if state.smoke_test:
             test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
             n_samples = 1
-        else:
+        elif not subset_meta.get("enabled"):
             n_full = len(test_ds)
             n_eval = max(1, n_full // 2)
             rng = np.random.default_rng(42)
             eval_idx = sorted(rng.choice(n_full, size=n_eval, replace=False).tolist())
             test_ds = Subset(test_ds, eval_idx)
             logger.info(f"[{subset_id}] eval subset: {n_eval}/{n_full} windows")
+        else:
+            logger.info(
+                f"[{subset_id}] eval uses configured test stride "
+                f"{test_stride}: {len(test_ds)} windows"
+            )
 
         test_loader = DataLoader(test_ds, batch_size=8 if not state.smoke_test else 2, shuffle=False)
         eval_results = evaluate_model(model, test_loader, device, n_samples=n_samples, smoke_test=state.smoke_test)
@@ -108,6 +116,7 @@ class EvalPhase(PipelinePhase):
         save_eval_results(
             subset_id, state.dataset, variate_indices,
             train_metrics, eval_results, state.results_dir,
+            data_subset=subset_meta,
         )
 
         # wandb
@@ -128,6 +137,9 @@ class EvalPhase(PipelinePhase):
                 full_itrans_ckpt = train_subset_itransformer_full_baseline(
                     state.dataset, variate_indices, subset_id, device,
                     smoke_test=state.smoke_test,
+                    train_stride=train_stride,
+                    test_stride=test_stride,
+                    data_subset=subset_meta,
                 )
             eval_test_indices = None
             if not state.smoke_test and isinstance(test_ds, Subset):
@@ -137,6 +149,8 @@ class EvalPhase(PipelinePhase):
                 full_itrans_ckpt, state.results_dir, device,
                 smoke_test=state.smoke_test,
                 test_indices=eval_test_indices,
+                test_stride=test_stride,
+                data_subset=subset_meta,
             )
             wandb_utils.log_summary({
                 "eval/itrans_baseline/mse": baseline_metrics.get("mse"),
@@ -156,7 +170,8 @@ class EvalPhase(PipelinePhase):
             # The test_ds contains windows, we can pass it down. 
             # We already have stats (from load_dataset), wait, we need stats.
             _, _, _, norm_stats = load_dataset(
-                state.dataset, variate_indices, stride=1, test_stride=1,
+                state.dataset, variate_indices,
+                stride=train_stride, test_stride=test_stride,
             )
             stats = (norm_stats['mean'], norm_stats['std'])
             

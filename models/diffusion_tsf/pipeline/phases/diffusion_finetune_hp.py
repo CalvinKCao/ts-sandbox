@@ -54,6 +54,9 @@ class DiffusionFinetuneHPPhase(PipelinePhase):
         variate_indices = state.variate_indices
         if variate_indices is None:
             variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+        subset_meta = state.data_subset_resolved or {}
+        train_stride = int(subset_meta.get("train_stride", state.window_stride))
+        test_stride = int(subset_meta.get("test_stride", 1))
 
         device = state.resolve_device()
 
@@ -78,7 +81,7 @@ class DiffusionFinetuneHPPhase(PipelinePhase):
         ft_itrans_guidance = iTransformerGuidance(ft_itrans_model)
         probe_ds, _, _, _ = load_dataset(
             state.dataset, variate_indices,
-            stride=state.window_stride, test_stride=1,
+            stride=train_stride, test_stride=test_stride,
         )
         ft_diff_bs = select_diffusion_batch_size(
             phase_name=f"Diff FT HP ({subset_id})",
@@ -110,6 +113,7 @@ class DiffusionFinetuneHPPhase(PipelinePhase):
                 trial, state.dataset, variate_indices, diff_ckpt, ft_itrans_ckpt,
                 device, state.smoke_test,
                 fixed_batch_size=ft_diff_bs, trial_ckpt_dir=subset_dir,
+                train_stride=train_stride, test_stride=test_stride,
             ),
             n_trials=n_trials,
             show_progress_bar=False,
@@ -124,9 +128,13 @@ class DiffusionFinetuneHPPhase(PipelinePhase):
 
         _, _, _, norm_stats = load_dataset(
             state.dataset, variate_indices,
-            stride=state.window_stride, test_stride=1,
+            stride=train_stride, test_stride=test_stride,
         )
-        subset_info = {"subset_id": subset_id, "variate_indices": variate_indices}
+        subset_info = {
+            "subset_id": subset_id,
+            "variate_indices": variate_indices,
+            "data_subset": subset_meta,
+        }
         ckpt_path, train_metrics = _promote_best_trial_to_final(
             study, subset_dir, subset_info, state.dataset, norm_stats,
             ft_diff_bs, diff_ckpt, ft_itrans_ckpt, device, state.smoke_test,
