@@ -15,13 +15,13 @@ experiment:
   forecast_length: 96
   disable_cross_attention: false
   use_window_normalization: true
+  # All submit_grid datasets (PeMS, solar_Alabama, dalia, traffic, …): cap to ~ETTh1 size.
   data_subset:
     enabled: true
-    target_dataset: weather
+    target_dataset: ETTh1
     reduce_if_larger_than_target: true
-    max_variates: 16
+    max_variates: 7
     variate_strategy: first
-    sample_stride: 3
     subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
 
 phases:
