@@ -37,11 +37,21 @@ def main() -> None:
     p.add_argument(
         "--pt-dir",
         default=None,
-        help="Folder with Forecast100X.pt / Forecast100Y.pt (default: search dalia + legacy DALIA/)",
+        help="Folder with Forecast100X.pt / Forecast100Y.pt (repo-relative or absolute)",
     )
+    p.add_argument("--x-path", default=None, help="Explicit path to Forecast100X.pt")
+    p.add_argument("--y-path", default=None, help="Explicit path to Forecast100Y.pt")
     args = p.parse_args()
+    if (args.x_path is None) ^ (args.y_path is None):
+        p.error("--x-path and --y-path must be given together")
     out = dalia_csv_path(args.datasets_dir)
-    convert_dalia_pt_to_csv(out, pt_dir=args.pt_dir, datasets_dir=args.datasets_dir)
+    convert_dalia_pt_to_csv(
+        out,
+        pt_dir=args.pt_dir,
+        datasets_dir=args.datasets_dir,
+        x_path=args.x_path,
+        y_path=args.y_path,
+    )
     print(f"Wrote {out}")
     print(f"Data dir: {resolve_dalia_dir(args.datasets_dir)}")
     print("You can remove legacy repo-root DALIA/ or datasets/DALIA/ after verifying.")

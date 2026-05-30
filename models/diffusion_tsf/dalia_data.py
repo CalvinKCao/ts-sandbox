@@ -61,6 +61,33 @@ def _load_tensors_from_pt(x_path: str, y_path: str) -> Tuple[np.ndarray, np.ndar
     return x.astype(np.float32), y.astype(np.float32)
 
 
+def _normalize_search_dir(path: str) -> str:
+    path = os.path.expanduser(path)
+    if not os.path.isabs(path):
+        path = os.path.join(_repo_root(), path)
+    return os.path.abspath(path)
+
+
+def _dalia_pt_search_dirs(
+    pt_dir: Optional[str] = None,
+    datasets_dir: Optional[str] = None,
+) -> List[str]:
+    root = _repo_root()
+    candidates = [resolve_dalia_dir(datasets_dir)]
+    if pt_dir:
+        candidates.append(_normalize_search_dir(pt_dir))
+    for leg in _LEGACY_DALIA_DIRS:
+        candidates.append(os.path.join(root, leg))
+    seen: set = set()
+    out: List[str] = []
+    for d in candidates:
+        d = os.path.abspath(d)
+        if d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
 def _find_pt_pair(search_dirs: List[str]) -> Optional[Tuple[str, str]]:
     for base in search_dirs:
         x_path = os.path.join(base, DALIA_PT_X)
@@ -70,20 +97,40 @@ def _find_pt_pair(search_dirs: List[str]) -> Optional[Tuple[str, str]]:
     return None
 
 
+def _pt_not_found_error(search_dirs: List[str]) -> FileNotFoundError:
+    lines = [f"Could not find {DALIA_PT_X} and {DALIA_PT_Y}."]
+    lines.append("Searched:")
+    for base in search_dirs:
+        xp = os.path.join(base, DALIA_PT_X)
+        yp = os.path.join(base, DALIA_PT_Y)
+        lines.append(
+            f"  {base}: X={'yes' if os.path.isfile(xp) else 'no'} "
+            f"Y={'yes' if os.path.isfile(yp) else 'no'}"
+        )
+    lines.append(
+        f"Hint: find {_repo_root()} -name '{DALIA_PT_X}'  "
+        "(or scp from a machine that still has DALIA/)"
+    )
+    return FileNotFoundError("\n".join(lines))
+
+
 def convert_dalia_pt_to_csv(
     csv_path: str,
     pt_dir: Optional[str] = None,
     datasets_dir: Optional[str] = None,
+    x_path: Optional[str] = None,
+    y_path: Optional[str] = None,
 ) -> str:
     """Write ``dalia.csv`` from Forecast100 ``*.pt`` tensors. Returns ``csv_path``."""
-    dalia_dir = resolve_dalia_dir(datasets_dir)
-    search = [dalia_dir, pt_dir] if pt_dir else [dalia_dir]
-    search += [os.path.join(_repo_root(), leg) for leg in _LEGACY_DALIA_DIRS]
-    pair = _find_pt_pair([d for d in search if d])
-    if pair is None:
-        raise FileNotFoundError(
-            f"Could not find {DALIA_PT_X} and {DALIA_PT_Y} under {search!r}"
-        )
+    if x_path and y_path:
+        pair = (os.path.abspath(x_path), os.path.abspath(y_path))
+        if not (os.path.isfile(pair[0]) and os.path.isfile(pair[1])):
+            raise FileNotFoundError(f"Missing tensor file(s): {pair[0]!r}, {pair[1]!r}")
+    else:
+        search_dirs = _dalia_pt_search_dirs(pt_dir, datasets_dir)
+        pair = _find_pt_pair(search_dirs)
+        if pair is None:
+            raise _pt_not_found_error(search_dirs)
     x, y = _load_tensors_from_pt(*pair)
     n = len(x)
     steps = DALIA_INPUT_STEPS + DALIA_FORECAST_STEPS

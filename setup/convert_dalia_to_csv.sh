@@ -45,4 +45,13 @@ _activate_if_needed() {
 }
 
 _activate_if_needed
+
+if [[ $# -eq 0 || "$1" != --help && "$1" != -h ]]; then
+  if ! find "$ROOT" -maxdepth 3 \( -name Forecast100X.pt -o -name Forecast100Y.pt \) 2>/dev/null | grep -q .; then
+    echo "WARN: no Forecast100*.pt under $ROOT (maxdepth 3)." >&2
+    echo "  If you removed DALIA/, copy tensors back, e.g. from WSL:" >&2
+    echo "    scp datasets/DALIA/Forecast100*.pt killarney:$ROOT/DALIA/" >&2
+  fi
+fi
+
 exec python "$ROOT/setup/convert_dalia_to_csv.py" "$@"
