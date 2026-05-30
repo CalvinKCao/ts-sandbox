@@ -1,8 +1,8 @@
 # Hyper-detailed walkthrough: FactorizedDiT multivariate diffusion (ts-sandbox)
 
-Companion to `gaussian_pipeline_extreme_walkthrough.md`. This document is **implementation-first**: it traces tensors, names every major submodule down to layer lists, walks the **FactorizedDiT** backbone block-by-block, and records defaults from `DiffusionTSFConfig` / `pipeline_config.py` as of the repo state when this file was written.
+This document is **implementation-first**: it traces tensors, names every major submodule down to layer lists, walks the **FactorizedDiT** backbone block-by-block, and records defaults from `DiffusionTSFConfig` / `pipeline_config.py` as of the repo state when this file was written.
 
-**Scope:** Variate-factorized **FactorizedDiT** diffusion (Gaussian CDF and binary bit-flip), including **deterministic anchor loss** and anchor inference. Production Slurm jobs (`slurm_gaussian_anchor_92d3.sh`, `slurm_binary_anchor_92d3.sh`, height-matrix runs) pass `--model-type dit`. The legacy convolutional U-Net backbone (`model_type="unet"`) remains in code for old checkpoints only and is not documented here.
+**Scope:** Variate-factorized **FactorizedDiT** with **hard binary CDF images** and **XOR bit-flip diffusion**, including **deterministic anchor loss** and anchor inference. Production Slurm jobs (`slurm_binary_anchor_92d3.sh`, height-matrix runs) pass `--binary-diffusion` and `--model-type dit`. The legacy Gaussian + vertical-blur path (`encode_to_2d` + `DiffusionScheduler`) and convolutional U-Net backbone (`model_type="unet"`) remain in code for old checkpoints only and are not documented here.
 
 ---
 
@@ -16,8 +16,8 @@ Companion to `gaussian_pipeline_extreme_walkthrough.md`. This document is **impl
 | DiT backbone | `models/diffusion_tsf/dit.py` |
 | Anchor loss / anchor sampler | `models/diffusion_tsf/diffusion_model.py` (§11) |
 | Context tokens | `models/diffusion_tsf/unet.py` — **only** `iTransformerTokenAdapter` (filename is historical; not the U-Net denoiser) |
-| Noise schedule + DDIM sampler | `models/diffusion_tsf/diffusion.py` |
-| 2D CDF + blur + inverse | `models/diffusion_tsf/preprocessing.py` |
+| Binary bit-flip schedule + reverse sampler | `models/diffusion_tsf/diffusion.py` (`BinaryDiffusionScheduler`) |
+| 2D CDF encode/decode (no blur) | `models/diffusion_tsf/preprocessing.py` (`TimeSeriesTo2D`) |
 | Hyperparameter dataclass | `models/diffusion_tsf/config.py` |
 | iTransformer wrapper | `models/diffusion_tsf/guidance.py` |
 | iTransformer baseline | `models/iTransformer/model/iTransformer.py`, `layers/Transformer_EncDec.py`, `layers/SelfAttention_Family.py`, `layers/Embed.py` |
@@ -58,7 +58,13 @@ Each batch job sources a generated preamble that:
 
 ---
 
-## 2) Pipeline stages overview
+## 2) Modular Pipeline Interface and Stages
+
+**Important Design Note for Developers:** The codebase uses an extensible, object-oriented pipeline design located in `models/diffusion_tsf/pipeline/`.
+- **`PipelineState`**: A single dataclass (`state.py`) that acts as the source of truth for the entire run, holding device info, datasets, variates, and all checkpoint paths produced by phases.
+- **`PipelinePhase`**: An abstract base class (`phase.py`) that all training or evaluation steps inherit from. Each phase implements `execute(state: PipelineState) -> PipelineState` and `should_skip(state: PipelineState) -> bool`.
+- **Registry**: Phases are registered in `phases/__init__.py`. The `Pipeline` orchestrator (`orchestrator.py`) instantiates and runs them sequentially.
+- **Adding new features**: To insert a new step (e.g., a new residual forecasting layer, a new data augmentation pass, or a specific evaluation), create a new file in `pipeline/phases/` inheriting from `PipelinePhase`, register it in `phases/__init__.py`, and add the phase name to the execution YAML configuration. Do **not** build monolithic shell scripts or chain arguments manually.
 
 **Synthetic pretrain** (`run_pretrain_mode`, Slurm `run.sh`, or manifest `--mode full` before dataset loops) is two Optuna phases whose **best checkpoints are promoted directly**—there is no extra multi-epoch “full synthetic pretrain” after either HP search unless a legacy cache has JSON params without the paired `*_hp_best.pt` file.
 
@@ -178,72 +184,72 @@ So the model sees **locally standardized** windows even after dataset-level z-sc
 
 ---
 
-## 4) Representation: `TimeSeriesTo2D` and `VerticalGaussianBlur`
+## 4) Representation: hard binary CDF (`TimeSeriesTo2D`)
+
+Binary diffusion uses **sharp occupancy maps** — no vertical Gaussian blur, no scaling to `[-1, 1]`.
 
 ### 4.1 CDF occupancy map (`TimeSeriesTo2D`)
 
 **Parameters (defaults):** `height` = `config.image_height` (default **64**), `max_scale` = **3.5**.
 
-**Forward (per paper implementation in code):**
+**Forward (`encode_to_2d_binary` → `to_2d`):**
 
 1. Input `x`: `(B, V, L)` or `(B, L)` → promoted to `(B, V, L)`.
 2. Clip values to `[-max_scale, max_scale]`.
 3. Bin index per value:  
    `bin = clamp(floor((x + max_scale) / (2*max_scale) * height), 0, height-1)`.
-4. For each column (time step), set rows `0..bin` to 1 and rows above to 0: monotone “filled from bottom” CDF staircase in value dimension.
+4. For each column (time step), set rows `0..bin` to **1** and rows above to **0**: monotone “filled from bottom” CDF staircase in the value dimension.
 
-**Output:** `(B, V, height, L)` with values in `{0,1}` before blur.
+**Output:** `(B, V, height, L)` with values in **`{0, 1}`** — the diffusion state space.
 
-**Inverse (`inverse`):**
+**Inverse (`inverse` / `decode_from_2d`):**
 
 - `cdf_decoder="mean"` (default): column sum → normalized height → map back to approximately `[-max_scale, max_scale]`.
-- `cdf_decoder="pdf_expectation"`: discrete PDF from finite differences of CDF, optional `decode_temperature` sharpening, expectation over bin indices.
+- `cdf_decoder="expectation"` / `"pdf_expectation"`: discrete PDF from vertical finite differences of the occupancy map, optional temperature sharpening, expectation over bin indices.
+- Binary inference passes `from_diffusion=False` so decoded maps are treated as hard `{0,1}` occupancy, not remapped from `[-1,1]`.
 
-Registered buffer `bin_centers` exists for diagnostics / compatibility; forward uses the floor-bin rule above.
+Registered buffer `bin_centers` supports median/mode/beam decoders and diagnostics.
 
-### 4.2 Vertical Gaussian blur (`VerticalGaussianBlur`)
+### 4.2 What we removed from the old Gaussian path
 
-- **Defaults:** `kernel_size=31`, `sigma=1.0` in config (constructor in `DiffusionTSF` passes `config.blur_kernel_size`, `config.blur_sigma`).
-- **Kernel shape:** `(1, 1, kernel_size, 1)` — convolved with `groups=channels`, **reflect** pad on height only.
-- Effect: smooths **across value bins**; **time axis stays sharp** at this stage.
-
-### 4.3 `encode_to_2d`
-
-1. `image = to_2d(x)`
-2. `blurred = blur(image)`
-3. If `scale_for_diffusion`: clamp to `[0,1]`, then `* 2 - 1` → **Gaussian diffusion works in [-1, 1]**.
+The legacy `encode_to_2d` path still exists in `diffusion_model.py`: `to_2d` → `VerticalGaussianBlur` → clamp/scale to `[-1, 1]` for continuous DDPM. **Current production binary runs skip blur entirely** via `encode_to_2d_binary`.
 
 ---
 
-## 5) Diffusion scheduler (`DiffusionScheduler`)
+## 5) Binary diffusion scheduler (`BinaryDiffusionScheduler`)
 
-**Construction (`__init__`):**
+**Construction:**
 
-- `num_steps` = `config.num_diffusion_steps` (default **1000**).
-- `beta_start`, `beta_end` (defaults **1e-4**, **0.02**) for linear schedule.
-- `schedule`: `"linear"` | `"cosine"` | `"sigmoid"` | `"quadratic"`.
-- Tensors on device: `betas`, `alphas = 1 - betas`, `alphas_cumprod`, `alphas_cumprod_prev` (padded with 1 at t=0), `sqrt_*` caches.
+- `num_steps` = `config.binary_num_steps` (default **1000**).
+- Per-step flip probabilities `beta_t` on a **sqrt-linear** ramp from `binary_beta_start` (default **1e-5**) to `binary_beta_end` (default **0.5**):  
+  `betas = (sqrt(beta_start) + t·(sqrt(beta_end) - sqrt(beta_start)))^2` for `t ∈ [0,1]`.
 
-**Training (DDPM ε-prediction objective):**
+**Forward process (training) — XOR bit-flip:**
 
-- `add_noise(x0, t, noise?)`:  
-  `x_t = sqrt(ᾱ_t) x0 + sqrt(1-ᾱ_t) ε`.
-- Loss = `MSE(ε_θ(x_t, t, cond), ε)` — standard Ho et al. noise-prediction. DDIM is not used during training.
+For clean binary image `x0 ∈ {0,1}` and timestep `t`:
 
-**From predicted noise:**
+1. Sample flip mask `z_t ~ Bernoulli(beta_t)` (same shape as `x0`, broadcast per batch item).
+2. Corrupted state: **`x_t = x0 ⊕ z_t`** (boolean XOR, stored as float).
 
-- `predict_x0_from_noise(x_t, t, noise_pred)` inverts the above.
+Returns `(x_t, z_t)`. Each pixel flips independently with probability `beta_t`; at `t → T−1`, `beta_t` is large so the image is nearly random bits.
 
-**DDIM step (`ddim_step`) — inference only:**
+**Training targets (FactorizedDiT, `out_channels=2`):**
 
-- DDIM is a drop-in sampler; compatible with any ε-prediction model regardless of training sampler.
-- Predicts `x0` from `x_t`, **clamps `x0`** with a dynamic range tied to `alpha_bar` (widens at noisy steps).
-- Computes `sigma` from `eta` (DDIM stochasticity); if `eta=0`, deterministic path.
-- Updates `x_{t-1}` per standard DDIM.
+- Channel 0: logits for **clean** `x0` (future CDF bits).
+- Channel 1: logits for **flip mask** `z_t`.
+- Loss = `BCE(x0_logits, x0) + BCE(zt_logits, z_t)` (plain unweighted BCE; boundary-weighted BCE is not wired for binary yet).
 
-**Sampling helper:** `sample_ddim_cfg` builds a subsequence of timesteps linearly from `T-1` down to `0` with length `num_steps` (e.g. 50), supports **classifier-free guidance** on the **noise prediction** when `cfg_scale > 1` and `null_cond` is provided.
+**Reverse process (inference) — `sample()`:**
 
-**Config knobs:** `ddim_steps`, `ddim_eta`, `cfg_dropout`, `cfg_scale`.
+1. Start from **`x_T ~ Bernoulli(0.5)`** (uniform random bits).
+2. Subsample timesteps linearly from `T−1` down to `0` (`binary_sample_steps`, default **20**).
+3. At each step: model predicts `x0_hat = 1[σ(x0_logits) > 0.5]`.
+4. Re-noise toward the next lower `t` with fresh Bernoulli flips at `beta_{t_next}`: `x_{t_next} = x0_hat ⊕ z_new`.
+5. Last step: output `x0_hat` as the clean binary CDF image.
+
+Classifier-free guidance uses the same `cfg_dropout` training mask on cond / ctx / ghost; iterative binary sampling calls the model through `_chunked_model_fn` without a separate DDIM schedule.
+
+**Config knobs:** `binary_num_steps`, `binary_sample_steps`, `binary_beta_start`, `binary_beta_end`, `cfg_dropout`, `cfg_scale`.
 
 ---
 
@@ -251,7 +257,7 @@ Registered buffer `bin_centers` exists for diagnostics / compatibility; forward 
 
 ## 6) `DiffusionTSF` assembly (factorized DiT path), slowly
 
-This section explains how the main model object is assembled for Gaussian (or binary) image diffusion with `model_type="dit"` (`FactorizedDiT`).
+This section explains how the main model object is assembled for **binary** image diffusion with `model_type="dit"` (`FactorizedDiT`). Training/inference entry is `_forward_binary_factorized` / `_generate_binary_factorized` when `diffusion_type="binary"`.
 
 Important current behavior:
 - We do **not** stack all variates as extra input channels on one forward pass.
@@ -304,7 +310,7 @@ Now define channel counts carefully:
    Usually `1` for the past-tail occupancy map (optional +1 for value-channel variants). Guidance ghost is **not** in `cond`; it is concatenated onto `x` / `canvas` before the denoiser.
 
 3. `out_channels`  
-   For Gaussian diffusion this is `1` (predicted ε per variate map). Binary diffusion uses `2` (logits).
+   **2** for binary diffusion: clean-bit logits + flip-mask logits per variate map.
 
 Why so much bookkeeping:
 - In diffusion models, a wrong channel count usually does not fail immediately in a readable way; it often appears later as shape mismatch.
@@ -323,93 +329,31 @@ Why this exists:
 - Bottleneck cross-attention injects iTransformer’s **already cross-mixed** lookback summaries (one token per variate).
 - Complements the ghost image, which carries **forecast** geometry for the target variate only.
 
-### 6.4 `_forward_factorized`: full tensor trail and why each object exists
+### 6.4 `_forward_binary_factorized`: full tensor trail
 
-We now walk one training forward pass in factorized mode.
+Symbols: `B` batch, `V` variates, `H` = `image_height`, `W_fut` future width in 2D, `T` = `binary_num_steps`.
 
-Symbols used:
-- `B`: batch size.
-- `V`: number of variates.
-- `H`: image height (`config.image_height`, value-bin axis).
-- `W_fut`: future width in 2D image space (usually forecast length, adjusted by overlap/unified axis logic).
-- `T`: total diffusion steps (`config.num_diffusion_steps`).
+1. **`_normalize_sequence(past, future)`** → per-window z-score from past stats; `future_norm` for targets.
 
-Step-by-step:
+2. **`future_2d = encode_to_2d_binary(future_norm)`** → `(B, V, H, W_fut)` in `{0,1}`.
 
-1. Normalize sequences with `_normalize_sequence(past, future)`.
-   - Input `past`: `(B, V, L_past)`.
-   - Input `future`: `(B, V, L_fut)`.
-   - Output:
-     - `past_norm`: `(B, V, L_past)`.
-     - `future_norm`: `(B, V, L_fut)`.
-     - `stats`: mean/std stats used later for denormalization.
-   Why:
-   - Keeps per-window scale stable.
-   - Makes diffusion training less sensitive to absolute amplitude drift across windows.
+3. **Sample `t ~ Uniform(0, T−1)`**, expand to `t_flat` over `BV = B·V`.
 
-2. Convert future target to 2D occupancy.
-   - `future_2d = encode_to_2d(future_norm)` -> `(B, V, H, W_fut)` in `[-1, 1]`.
-   Why:
-   - The denoiser expects image-like inputs; the occupancy map is the bridge from 1D series to 2D.
+4. **XOR noise:** `xt_flat, zt_flat = binary_scheduler.add_noise(future_flat, t_flat)` on `(BV, 1, H, W_fut)`.
 
-3. Sample diffusion timestep.
-   - `t ~ Uniform({0, ..., T-1})`, shape `(B,)`.
-   Why:
-   - DDPM training draws random noise levels so one network learns denoising across all stages.
+5. **Guidance ghost:** iTransformer forecast → `encode_to_2d_binary` → concat on `canvas` (not on `cond`).
 
-4. Add noise with scheduler.
-   - `noisy_future, noise = scheduler.add_noise(future_2d, t)`.
-   - Both shaped `(B, V, H, W_fut)`.
-   Meanings:
-   - `noisy_future`: `x_t`, the corrupted image at timestep `t`.
-   - `noise`: actual sampled epsilon used to create `x_t`, and the target for noise-prediction loss.
+6. **`ctx_flat`:** `(BV, V, context_dim)` from `iTransformerTokenAdapter` when cross-attn enabled.
 
-5. Guidance from iTransformer.
-   - iTransformer forecasts 1D future.
-   - Forecast is normalized and encoded into `guidance_2d`.
-   Why:
-   - Gives the diffusion model a coarse trajectory prior, while diffusion refines sharp/local geometry.
+7. **Canvas:** `xt_flat` + coordinate/time aux channels + optional ghost → `FactorizedDiT` input.
 
-6. Build cross-variate context tokens.
-   - `ctx = _get_cross_variate_context(...)` -> `(B, V, context_dim)` or `None`.
-   Why:
-   - Lets each per-variate denoising path attend to summary tokens from all variates.
+8. **Visual cond:** full past encoded to binary 2D, bilinear-resized to `(H, W_fut)` → DiT `cond` prefix (CFG may zero it).
 
-7. Flatten `(B, V)` into one dimension for the denoiser batch.
-   - `BV = B * V`.
-   - `canvas = noisy_future.reshape(BV, 1, H, W_fut)`.
-   - Inject aux channels (coordinate ramp, optional time ramps) and optional guidance ghost → `backbone_in_channels`.
-   Why:
-   - One shared DiT over `BV` items is simpler and memory-efficient than `V` separate models.
+9. **DiT forward:** `out_flat` shape `(BV, 2, H, W_fut)` — split into `x0_logits`, `zt_logits`.
 
-8. Prepare visual conditioning map.
-   - `past_tail = past_norm[..., -W_fut:]`.
-   - `past_2d_cond = encode_to_2d(past_tail)`.
-   - reshape to `(BV, 1, H, W_fut)`, with dropout rules.
-   Why:
-   - The model conditions on recent past geometry aligned to future width.
+10. **Loss:** `regular_loss = BCE(x0, future) + BCE(zt, z_t)`; optional anchor term (§11).
 
-9. Broadcast cross-attention tokens when present.
-   - `ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, context_dim)`.
-   - Each of the `BV` denoising items gets the **full** `(V, ctx_dim)` memory (not a single variate slice).
-
-10. DiT forward and reshape back.
-    - `noise_pred_flat = self._predict_noise_chunked(canvas, t_flat, cond, encoder_hidden_states=ctx_flat)`.
-    - Chunking uses `unet_max_chunk_size` (name is legacy; applies to DiT too).
-    - Reshape to `(B, V, H, W_fut)` → predicted ε (or x0 logits in `x0_cumsum` mode).
-
-Loss components:
-- `noise_loss`: MSE between predicted epsilon and true epsilon.
-- `emd_loss`: mean absolute CDF difference between predicted `x0` and target future CDF image.
-- Optional `monotonicity_loss`: penalizes violations of CDF monotonic structure.
-- Total:
-  - `loss = noise_loss + emd_lambda * emd_loss + monotonicity_weight * mono_loss`.
-  - Defaults include `emd_lambda=0.2`, monotonicity disabled unless configured.
-
-Why multi-term loss:
-- Pure epsilon MSE is standard diffusion training.
-- CDF/EMD-like term biases toward occupancy-geometry faithfulness.
-- Monotonicity term protects representation validity when enabled.
+EMD / monotonicity / Gaussian ε-MSE are **not** used on the binary path (`emd_loss` is logged as 0).
 
 ---
 
@@ -478,7 +422,7 @@ After all blocks, **drop cond tokens**: `x_out = tokens[:, Nc:]` (noisy-future s
 
 Final AdaLN on `x_out`, then linear `head` → patch pixels → `_unpatchify` → `(BV, out_channels, H, W_fut)`.
 
-Head weights are **zero-init** so training starts near “predict input noise structure” without a large random jump.
+Head weights are **zero-init** so training starts near a neutral prediction without a large random jump.
 
 ### 7.5 How conditioning enters (no channel concat inside DiT)
 
@@ -548,7 +492,7 @@ ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
 Patch tokens (after self-attn in the bottleneck block) are queries; `ctx_proj` supplies keys/values.
 
 **When `get_encoder_tokens` is called.**
-Training and inference call `_get_cross_variate_context(past)` once before the denoising loop; `ctx_flat` is reused for every DDIM step.
+Training and inference call `_get_cross_variate_context(past)` once before the reverse loop; `ctx_flat` is reused for every binary sampling step (or the single anchor forward).
 
 ### 8.2 Summary: what the tokens actually represent
 
@@ -575,7 +519,7 @@ With guidance enabled, iTransformer output is used in **two separate places**:
 
 **Place 1 — extra channel on the noisy canvas ("ghost image")**
 
-The coarse forecast `(B, V, forecast_length)` is normalized with the same per-sequence stats as the diffusion target, then `encode_to_2d`. In factorized mode this is `(BV, 1, H, W_fut)` concatenated onto `canvas` (not onto `cond`):
+The coarse forecast `(B, V, forecast_length)` is normalized with the same per-sequence stats as the diffusion target, then `encode_to_2d_binary`. In factorized mode this is `(BV, 1, H, W_fut)` concatenated onto `canvas` (not onto `cond`):
 
 ```python
 if guidance_2d is not None:
@@ -607,7 +551,7 @@ Internally, the iTransformer uses an **inverted embedding**: instead of treating
 
 ### 9.4 At inference
 
-The same two-place injection happens at inference. Both the forecast (for the ghost image) and `get_encoder_tokens` (for context tokens) are computed **once before the DDIM loop** — `_get_cross_variate_context` is called a single time and `ctx_flat` is captured by closure and reused across all 50 denoising steps.
+The same two-place injection happens at inference. Both the forecast (for the ghost image) and `get_encoder_tokens` (for context tokens) are computed **once before sampling** — `_get_cross_variate_context` is called a single time and `ctx_flat` is captured by closure and reused across all `binary_sample_steps` reverse steps (or the one anchor step).
 
 ### 9.5 Summary
 
@@ -622,72 +566,53 @@ Current pipeline behavior:
 
 ---
 
-## 10) Inference path (`generate` in factorized mode)
+## 10) Inference path (`_generate_binary_factorized`)
 
-At inference we use **`FactorizedDiT`** via `_predict_noise_chunked`. Samplers:
+At inference, **`FactorizedDiT`** predicts `(x0_logits, zt_logits)` each step; `BinaryDiffusionScheduler.sample` drives the XOR reverse chain.
 
 | Sampler | Behavior |
 |---------|----------|
-| `ddim` | Default iterative DDIM (`ddim_steps`, typically 50) |
-| `dpmpp` | DPM-Solver++ (`num_inference_steps`, e.g. 20 in matrix eval) |
-| `ddpm` | Full-step DDPM |
-| `anchor` / `deterministic_anchor` | **One-shot** deterministic decode (§11); Slurm `EVAL_SAMPLER=anchor` on 92d3 anchor scripts |
+| default / `ddim` label | Iterative binary reverse (`binary_sample_steps`, default **20**): random bits → repeated x0 predict + XOR re-noise |
+| `anchor` / `deterministic_anchor` | **One-shot** at `t = T−1` from **Bernoulli(0.5)** canvas (§11); Slurm `--eval-sampler anchor` |
 
-**Iterative flow (DDIM / DPM++ / DDPM):**
-1. Normalize past; build `cond` (past-tail 2D), optional `ctx_flat`, optional CFG nulls.
-2. Initialize noise `(BV, 1, H, W_fut)`; keep `ctx_flat` `(BV, V, ctx_dim)` fixed for all steps.
-3. Denoise loop: rebuild `canvas` (noisy state + aux + ghost) → `_predict_noise_chunked` → `FactorizedDiT`; scheduler updates the latent.
-4. Reshape `(BV, …)` → `(B, V, H, W_fut)`; `decode_from_2d` to 1D futures.
+**Iterative flow:**
+1. Normalize past; `encode_to_2d_binary` for `cond` and ghost.
+2. `ctx_flat` built once, reused every reverse step.
+3. Start `x_T ~ Bernoulli(0.5)`; loop subsampled timesteps with `binary_scheduler.sample`.
+4. `decode_from_2d(..., from_diffusion=False)` → denormalize to 1D futures.
 
-**Classifier-free guidance:** training uses `cfg_dropout`; inference mixes conditional vs null cond/ctx/guidance with `cfg_scale` (default `2.0`).
+Gaussian-only samplers (`dpmpp`, full DDPM on continuous latents) apply only when `diffusion_type="gaussian"`.
 
 ---
 
-## 11) Deterministic anchor loss and anchor sampler
+## 11) Deterministic anchor loss and anchor sampler (binary)
 
-Deterministic anchor loss is an **auxiliary training term** that forces the **FactorizedDiT** denoiser to perform a good **single forward pass** from a neutral future canvas. The same forward defines the **`anchor` inference sampler** (one step, no DDIM loop). Enabled on production runs via `--deterministic-anchor-loss` (`slurm_gaussian_anchor_92d3.sh`, `slurm_binary_anchor_92d3.sh`).
-
-Config fields (`DiffusionTSFConfig` / CLI):
+Deterministic anchor loss is an **auxiliary training term** that forces **FactorizedDiT** to decode a clean future CDF from a **maximally noisy** binary canvas in one forward pass. The same forward defines the **`anchor` inference sampler** (no iterative XOR chain). Enabled on production runs via `--deterministic-anchor-loss` (`slurm_binary_anchor_92d3.sh`).
 
 | Field | Role | Typical Slurm values |
 |-------|------|----------------------|
 | `use_deterministic_anchor_loss` | Turn anchor term on | `True` on anchor Slurm scripts |
-| `deterministic_anchor_lambda` (`λ`) | `combined = λ·L_diff + (1−λ)·L_anchor` | **0.99** (Gaussian and binary) |
-| `deterministic_anchor_alpha` (`α`) | Pick noise level for anchor timestep | **0.5** Gaussian, **0.0** binary |
+| `deterministic_anchor_lambda` (`λ`) | `combined = λ·L_reg + (1−λ)·L_anchor` | **0.99** |
+| `deterministic_anchor_alpha` (`α`) | Legacy Gaussian knob; **ignored for binary** (anchor always uses `t = T−1`) | CLI may pass **0.0** |
 
-`λ` and `α` are **fixed** from `pipeline_config.py` / CLI — not Optuna-tuned. Diffusion HP phases optionally set `disable_anchor_loss=True` to skip the extra forward (~2× cheaper per step).
+`λ` is fixed from CLI / config — not Optuna-tuned. Diffusion HP phases may set `disable_anchor_loss=True` to skip the extra forward.
 
-### 11.1 Gaussian CDF path (`diffusion_type="gaussian"`, `prediction_mode="epsilon"`)
+### 11.1 Training (`_forward_binary_factorized`)
 
-**Training (each factorized forward, `compute_loss_factorized`):**
+1. **Regular term** — sample `t`, XOR-flip future bits, predict **x₀** and **zₜ** logits; `regular_loss = BCE(x0) + BCE(zt)`.
+2. **Anchor forward** — fixed `t_anchor = T−1` (highest flip rate); canvas = **Bernoulli(0.5)** per pixel (analogous to “fully noised” bits, not zeros).
+3. Same `cond`, ghost, `ctx_flat` as the main pass (CFG dropout applies only in training on the main path; anchor uses un-dropped `base_cond` / `ctx_anchor`).
+4. **Anchor loss** — BCE on **x₀ logits only** vs true future bits.
+5. **Combined** — `λ·regular_loss + (1−λ)·anchor_loss`.
 
-1. **Diffusion term** — sample timestep `t`, build noisy future `x_t`, predict noise `ε_θ`; `noise_loss` = MSE(`ε_θ`, `ε`) (with optional overlap weighting on the time axis).
-2. **Anchor timestep** — `t_anchor = argmin_t |ᾱ_t − α|` on the training schedule (`_deterministic_anchor_params`).
-3. **Anchor canvas** — future occupancy channel set to **zeros** (not random noise); keep past `cond`, ghost guidance channel, aux channels, and `ctx_flat` as in the main forward (`_build_anchor_canvas`).
-4. **Anchor prediction** — one `FactorizedDiT` forward at `t_anchor`; optional **CFG** on cond/ctx/guidance identical to the main path when `cfg_scale > 1` (`_predict_anchor_noise`).
-5. **Anchor target** — in noise space:  
-   `scale = −√(ᾱ_{t_anchor}) / √(1−ᾱ_{t_anchor})`,  
-   `anchor_target = scale · future_2d` (clean 2D CDF image).
-6. **Anchor loss** — `anchor_loss = MSE(ε_anchor, anchor_target)`.
-7. **Combined** — `combined_mse_loss = λ·noise_loss + (1−λ)·anchor_loss`; EMD / monotonicity / guidance penalty add on top as before.
+### 11.2 Inference (`sampler="anchor"`)
 
-**Inference (`sampler="anchor"`):** single forward at `t_anchor` from zero future canvas; recover clean map as `future_2d = ε_pred / scale`. Not supported with `prediction_mode="x0_cumsum"`.
-
-### 11.2 Binary bit-flip path (`diffusion_type="binary"`)
-
-**Training (`_forward_binary_factorized`):**
-
-1. **Regular term** — BCE on predicted **x₀** and **zₜ** logits vs flipped future bits (`loss_x0 + loss_zt`).
-2. **Anchor term** (if enabled) — timestep **`T−1`** (last schedule step); neutral future = **Bernoulli(0.5)** per pixel (not zeros); same `cond` / ghost / `ctx`; predict **x₀ logits** only.
-3. **Anchor loss** — BCE between anchor x₀ logits and true future bits.
-4. **Combined** — same λ mixture: `λ·regular_loss + (1−λ)·anchor_loss`.
-
-**Inference (`sampler="anchor"`):** one forward at `t = T−1` from a 0.5 canvas; `future = 1[σ(x₀ logits) > 0.5]`.
+One forward at `t = T−1` from **Bernoulli(0.5)** canvas; `future_2d = 1[σ(x0_logits) > 0.5]`; decode to 1D. Eval uses **one sample** per window (no multi-draw CRPS loop) because the map is deterministic given cond/ghost/ctx.
 
 ### 11.3 Relation to guidance and DiT
 
-- Anchor loss does **not** replace iTransformer guidance: ghost channel and `ctx_flat` are still present on the anchor forward.
-- Only **FactorizedDiT** is trained/evaluated in current anchor matrix work (`--model-type dit`). The anchor forward uses the same `_predict_noise_chunked` entry point as DDIM steps.
+- Anchor does **not** replace iTransformer guidance: ghost and `ctx_flat` stay on the anchor forward.
+- Uses the same `_predict_noise_chunked` / **FactorizedDiT** entry as iterative binary sampling.
 
 ---
 
@@ -703,10 +628,10 @@ These are default values from `DiffusionTSFConfig` referenced in the original wa
 - `num_variables=1` default baseline; multivariate runs override it.
 - `variate_factorized=True`: process variates via factorized route.
 
-### 12.2 2D representation
-- `image_height=64`: number of vertical value bins in occupancy map.
+### 12.2 2D representation (binary)
+- `image_height=64`: number of vertical value bins in the hard CDF map.
 - `max_scale=3.5`: clipping range for normalized values before binning.
-- `blur_kernel_size=31`, `blur_sigma=1.0`: vertical Gaussian blur parameters.
+- `diffusion_type="binary"`: hard `{0,1}` maps via `encode_to_2d_binary` (no blur).
 - `unified_time_axis=False` default: separate width handling mode.
 
 ### 12.3 FactorizedDiT backbone (production default, `model_type="dit"`)
@@ -720,25 +645,20 @@ These are default values from `DiffusionTSFConfig` referenced in the original wa
 - `use_gradient_checkpointing` / `use_amp` — often `True` on cluster (`pipeline_config.py`)
 - `unet_max_chunk_size=128` — chunks `BV` through **FactorizedDiT** (config name is legacy)
 
-### 12.4 Diffusion process and sampling
-- `num_diffusion_steps=1000`
-- `beta_start=1e-4`
-- `beta_end=0.02`
-- `noise_schedule="linear"`
-- `ddim_steps=50`
-- `ddim_eta=0`
-- `cfg_dropout=0.1`
-- `cfg_scale=2.0`
+### 12.4 Binary diffusion and sampling
+- `binary_num_steps=1000`
+- `binary_sample_steps=20` (reverse chain length at inference)
+- `binary_beta_start=1e-5`, `binary_beta_end=0.5` (per-step XOR flip probability ramp)
+- `cfg_dropout=0.1`, `cfg_scale=2.0`
 
 ### 12.5 Decode and augmentation behavior
 - `decode_temperature=0.5`
 - plus `cutout_*` augmentation controls.
 
-### 12.6 Loss terms
-- `emd_lambda=0.2` (Gaussian)
-- `use_monotonicity_loss=False`
-- `monotonicity_weight=1.0`
-- **Deterministic anchor** (§11): `use_deterministic_anchor_loss` (off in bare `pipeline_config`, on in anchor Slurm); `deterministic_anchor_lambda=0.99`; `deterministic_anchor_alpha=0.5` (Gaussian) or `0.0` (binary Slurm default)
+### 12.6 Loss terms (binary)
+- Primary: dual **BCE** on x₀ and zₜ logits (`_binary_plain_bce_loss`).
+- **Deterministic anchor** (§11): `use_deterministic_anchor_loss` (on in `slurm_binary_anchor_92d3.sh`); `deterministic_anchor_lambda=0.99`
+- Legacy Gaussian knobs (`emd_lambda`, `num_diffusion_steps`, blur sizes) remain in `DiffusionTSFConfig` but are inactive when `diffusion_type="binary"`.
 
 ### 12.7 Conditioning and context
 - `model_type="dit"` for current FactorizedDiT runs (`"unet"` = legacy checkpoints only)

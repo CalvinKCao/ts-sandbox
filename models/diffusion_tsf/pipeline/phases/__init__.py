@@ -4,7 +4,6 @@ from models.diffusion_tsf.pipeline.phases.itrans_hp_pretrain import ITransHPPret
 from models.diffusion_tsf.pipeline.phases.diffusion_hp_pretrain import DiffusionHPPretrainPhase
 from models.diffusion_tsf.pipeline.phases.itrans_finetune_hp import ITransFinetuneHPPhase
 from models.diffusion_tsf.pipeline.phases.diffusion_finetune_hp import DiffusionFinetuneHPPhase
-from models.diffusion_tsf.pipeline.phases.residual_diffusion_finetune_hp import ResidualDiffusionFinetuneHPPhase
 from models.diffusion_tsf.pipeline.phases.eval import EvalPhase
 
 PHASE_REGISTRY = {
@@ -12,7 +11,6 @@ PHASE_REGISTRY = {
     "diffusion_hp_pretrain": DiffusionHPPretrainPhase,
     "itrans_finetune_hp": ITransFinetuneHPPhase,
     "diffusion_finetune_hp": DiffusionFinetuneHPPhase,
-    "residual_diffusion_finetune_hp": ResidualDiffusionFinetuneHPPhase,
     "eval": EvalPhase,
 }
 

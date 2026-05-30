@@ -39,7 +39,6 @@ class PipelineState:
     disable_cross_attention: bool = False
     use_window_normalization: bool = True
     zero_guidance_forecast: bool = False
-    is_residual_model: bool = False
 
     # -- Sequence geometry --
     lookback_length: int = 96
@@ -74,12 +73,10 @@ class PipelineState:
     diffusion_pretrain_ckpt: Optional[str] = None
     itrans_finetune_ckpt: Optional[str] = None
     diffusion_finetune_ckpt: Optional[str] = None
-    diffusion_residual_finetune_ckpt: Optional[str] = None
 
     itrans_best_params: Optional[Dict[str, Any]] = None
     diffusion_best_params: Optional[Dict[str, Any]] = None
     finetune_best_params: Optional[Dict[str, Any]] = None
-    residual_finetune_best_params: Optional[Dict[str, Any]] = None
 
     # Phase-level overrides from YAML (list of dicts)
     phase_configs: List[Dict[str, Any]] = field(default_factory=list)

@@ -80,21 +80,6 @@ class EvalPhase(PipelinePhase):
         ckpt = torch.load(diff_ckpt, map_location=device, weights_only=False)
         load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
 
-        # Conditionally load Phase 3 residual model
-        res_ckpt = state.diffusion_residual_finetune_ckpt
-        residual_model = None
-        if res_ckpt and os.path.exists(res_ckpt):
-            logger.info(f"[{subset_id}] Loading Phase 3 residual model: {res_ckpt}")
-            res_params = state.residual_finetune_best_params or {}
-            residual_model = create_diffusion_model(
-                n_variates=n_iv, **anchor_kwargs_from_params(res_params),
-            ).to(device)
-            residual_model.set_guidance_model(itrans_guidance)
-            residual_model.config.is_residual_model = True
-            r_ckpt = torch.load(res_ckpt, map_location=device, weights_only=False)
-            load_diffusion_state_keep_attached_guidance(residual_model, r_ckpt["model_state_dict"])
-            residual_model.eval()
-
         # Load test data
         _, _, test_ds, _ = load_dataset(
             state.dataset, variate_indices, stride=1, test_stride=1,
@@ -112,7 +97,7 @@ class EvalPhase(PipelinePhase):
             logger.info(f"[{subset_id}] eval subset: {n_eval}/{n_full} windows")
 
         test_loader = DataLoader(test_ds, batch_size=8 if not state.smoke_test else 2, shuffle=False)
-        eval_results = evaluate_model(model, test_loader, device, n_samples=n_samples, smoke_test=state.smoke_test, residual_model=residual_model)
+        eval_results = evaluate_model(model, test_loader, device, n_samples=n_samples, smoke_test=state.smoke_test)
 
         logger.info(
             f"[{subset_id}] Avg MSE={eval_results['averaged']['mse']:.4f}, "

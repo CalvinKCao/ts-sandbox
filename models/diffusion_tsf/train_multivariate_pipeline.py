@@ -2513,7 +2513,6 @@ def evaluate_model(
     device: torch.device,
     n_samples: int = 3,
     smoke_test: bool = False,
-    residual_model: Optional['DiffusionTSF'] = None,
 ) -> Dict:
     """Evaluate model on test set.
 
@@ -2589,26 +2588,16 @@ def evaluate_model(
 
             torch.manual_seed(42 + batch_idx)
             result = model.generate(past, **gen_kwargs)
-            pred_single = result.get('prediction_global_norm', result['prediction']).cpu()
-            if residual_model is not None:
-                torch.manual_seed(42 + batch_idx + 1000)
-                res_result = residual_model.generate(past, **gen_kwargs)
-                pred_single += res_result.get('prediction_global_norm', res_result['prediction']).cpu()
-            all_preds_single.append(pred_single)
+            all_preds_single.append(result.get('prediction_global_norm', result['prediction']).cpu())
 
             if smoke_test or (anchor_sampler and not binary_anchor_sampler):
-                all_preds_avg.append(pred_single)
+                all_preds_avg.append(result.get('prediction_global_norm', result['prediction']).cpu())
             else:
                 samples = []
                 for s_idx in range(effective_n_samples):
                     torch.manual_seed(1000 + s_idx * 17 + batch_idx)
                     result = model.generate(past, **gen_kwargs)
-                    pred_s = result.get('prediction_global_norm', result['prediction']).cpu()
-                    if residual_model is not None:
-                        torch.manual_seed(1000 + s_idx * 17 + batch_idx + 1000)
-                        res_result = residual_model.generate(past, **gen_kwargs)
-                        pred_s += res_result.get('prediction_global_norm', res_result['prediction']).cpu()
-                    samples.append(pred_s)
+                    samples.append(result.get('prediction_global_norm', result['prediction']).cpu())
                 all_preds_avg.append(torch.stack(samples).mean(dim=0))
 
             if K > 0:

@@ -476,12 +476,7 @@ class DiffusionTSF(nn.Module):
         std = past.std(dim=-1, keepdim=True) + 1e-8
         past_norm = (past - mean) / std
         if future is not None:
-            if getattr(self.config, 'is_residual_model', False):
-                # For residual targets, the target is already mean-zero (ground truth - Phase 2 prediction).
-                # Shifting it by past_mean would break it, but scaling by std keeps magnitude consistent.
-                future_norm = future / std
-            else:
-                future_norm = (future - mean) / std
+            future_norm = (future - mean) / std
         else:
             future_norm = None
         return past_norm, future_norm, (mean, std)
