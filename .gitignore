@@ -195,6 +195,9 @@ models/Time-Series-Library-main/dataset/
 !datasets/illness/*.csv
 !datasets/traffic/traffic_part*.csv
 datasets/traffic/traffic.csv
+datasets/dalia/
+DALIA/
+datasets/DALIA/
 
 
 docs.alliancecan.ca_mediawiki-20260319-wikidump/docs.alliancecan.ca_mediawiki-20260325-current.xml

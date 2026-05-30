@@ -73,7 +73,9 @@ from models.diffusion_tsf.dalia_data import (
     DALIA_DEFAULT_FORECAST,
     DALIA_DEFAULT_LOOKBACK,
     DALIA_N_VARS,
+    dalia_window_count,
     dalia_window_lengths,
+    ensure_dalia_csv,
     load_dalia_dataset,
 )
 from models.diffusion_tsf.pipeline.data_subset import resolve_data_subset
@@ -823,8 +825,7 @@ DATASET_REGISTRY = {
     # PeMS benchmarks ship as NPZ (iTransformer Dataset_PEMS); see scripts/fetch_pems_solar.sh
     'PeMS': ('PeMS/PEMS04.npz', None, 24),
     'solar_Alabama': ('solar_Alabama/solar_Alabama.csv', 'Unnamed: 0', 96),
-    # Path unused; tensors loaded from DALIA/Forecast100*.pt (see dalia_data.py).
-    'dalia': ('dalia/Forecast100.pt', '_index', 96),
+    'dalia': ('dalia/dalia.csv', 'window_id', 96),
 }
 
 # First existing path wins (under DATASETS_DIR).
@@ -868,6 +869,9 @@ def _resolve_registry_path(dataset_name: str) -> Tuple[str, Optional[str]]:
             f"No solar file under {_datasets_root()}/. "
             f"Run setup/fetch_pems_solar.sh from the repo root (login node)."
         )
+    if dataset_name == 'dalia':
+        path = ensure_dalia_csv(_datasets_root())
+        return path, DATASET_REGISTRY['dalia'][1]
     rel, date_col, _ = DATASET_REGISTRY[dataset_name]
     path = os.path.join(_datasets_root(), rel)
     if not os.path.isfile(path):
@@ -965,6 +969,7 @@ def get_synth_cache_dir(checkpoint_dir: Optional[str] = None, smoke_test: bool =
 def get_dataset_n_cols(dataset_name: str) -> int:
     """Return the number of numeric columns in a dataset (excluding date)."""
     if dataset_name == 'dalia':
+        ensure_dalia_csv(DATASETS_DIR)
         return DALIA_N_VARS
     path, date_col = _resolve_registry_path(dataset_name)
     if path.endswith('.npz'):
@@ -988,7 +993,9 @@ def get_dataset_shape(dataset_name: str) -> Tuple[int, int]:
     if key in _DATASET_SHAPE_CACHE:
         return _DATASET_SHAPE_CACHE[key]
     if dataset_name == 'dalia':
-        shape = (0, DALIA_N_VARS)
+        ensure_dalia_csv(DATASETS_DIR)
+        n_win = dalia_window_count(DATASETS_DIR)
+        shape = (n_win, DALIA_N_VARS)
     else:
         path, date_col = _resolve_registry_path(dataset_name)
         data = _load_dataset_array(path, date_col)
@@ -1431,6 +1438,7 @@ def load_dataset(
             stride=stride,
             test_stride=test_stride,
             lookback_overlap=lookback_overlap,
+            datasets_dir=DATASETS_DIR,
         )
     path, date_col = _resolve_registry_path(dataset_name)
     data = _load_dataset_array(path, date_col)

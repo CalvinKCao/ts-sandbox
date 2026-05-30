@@ -1,4 +1,4 @@
-"""DALIA Forecast100 tensors: multivariate ECG, PPG, and 3D accelerometer windows."""
+"""DALIA Forecast100: ECG, PPG, and 3D accelerometer windows under datasets/dalia/."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
@@ -14,36 +15,41 @@ DALIA_N_VARS: int = 5
 DALIA_INPUT_STEPS: int = 100
 DALIA_FORECAST_STEPS: int = 20
 DALIA_CHANNEL_NAMES: List[str] = ["ecg", "ppg", "acc_x", "acc_y", "acc_z"]
+DALIA_CSV_NAME: str = "dalia.csv"
+DALIA_PT_X: str = "Forecast100X.pt"
+DALIA_PT_Y: str = "Forecast100Y.pt"
 
-# Forecast100 layout: X is (N, 5, 100) input, Y is (N, 5, 20) target (flattened on disk).
 DALIA_DEFAULT_LOOKBACK: int = 80
 DALIA_DEFAULT_FORECAST: int = 20
+
+# Legacy repo-root folder (scratch layout); also datasets/DALIA from an earlier commit.
+_LEGACY_DALIA_DIRS = ("DALIA", os.path.join("datasets", "DALIA"))
 
 
 def dalia_window_lengths() -> Tuple[int, int]:
     return DALIA_DEFAULT_LOOKBACK, DALIA_DEFAULT_FORECAST
 
 
-def resolve_dalia_pt_dir() -> str:
-    env = os.environ.get("DALIA_PT_DIR")
+def _repo_root() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(os.path.join(here, "..", ".."))
+
+
+def resolve_dalia_dir(datasets_dir: Optional[str] = None) -> str:
+    """Canonical data dir: ``<datasets>/dalia`` (lowercase, like other benchmarks)."""
+    env = os.environ.get("DALIA_DATA_DIR")
     if env:
         return os.path.abspath(env)
-    here = os.path.dirname(os.path.abspath(__file__))
-    root = os.path.abspath(os.path.join(here, "..", ".."))
-    return os.path.join(root, "DALIA")
+    if datasets_dir:
+        return os.path.join(os.path.abspath(datasets_dir), "dalia")
+    return os.path.join(_repo_root(), "datasets", "dalia")
 
 
-@lru_cache(maxsize=1)
-def load_dalia_tensors(pt_dir: Optional[str] = None) -> Tuple[np.ndarray, np.ndarray]:
-    """Return ``X`` (N, T_in, V) and ``Y`` (N, T_out, V) float32 arrays."""
-    base = pt_dir or resolve_dalia_pt_dir()
-    x_path = os.path.join(base, "Forecast100X.pt")
-    y_path = os.path.join(base, "Forecast100Y.pt")
-    if not os.path.isfile(x_path) or not os.path.isfile(y_path):
-        raise FileNotFoundError(
-            f"DALIA tensors not found under {base!r} "
-            f"(expected Forecast100X.pt and Forecast100Y.pt; set DALIA_PT_DIR if needed)"
-        )
+def dalia_csv_path(datasets_dir: Optional[str] = None) -> str:
+    return os.path.join(resolve_dalia_dir(datasets_dir), DALIA_CSV_NAME)
+
+
+def _load_tensors_from_pt(x_path: str, y_path: str) -> Tuple[np.ndarray, np.ndarray]:
     x_flat = torch.load(x_path, map_location="cpu", weights_only=False).numpy()
     y_flat = torch.load(y_path, map_location="cpu", weights_only=False).numpy()
     if x_flat.ndim != 2 or x_flat.shape[1] != DALIA_N_VARS * DALIA_INPUT_STEPS:
@@ -53,6 +59,90 @@ def load_dalia_tensors(pt_dir: Optional[str] = None) -> Tuple[np.ndarray, np.nda
     x = x_flat.reshape(-1, DALIA_N_VARS, DALIA_INPUT_STEPS).transpose(0, 2, 1)
     y = y_flat.reshape(-1, DALIA_N_VARS, DALIA_FORECAST_STEPS).transpose(0, 2, 1)
     return x.astype(np.float32), y.astype(np.float32)
+
+
+def _find_pt_pair(search_dirs: List[str]) -> Optional[Tuple[str, str]]:
+    for base in search_dirs:
+        x_path = os.path.join(base, DALIA_PT_X)
+        y_path = os.path.join(base, DALIA_PT_Y)
+        if os.path.isfile(x_path) and os.path.isfile(y_path):
+            return x_path, y_path
+    return None
+
+
+def convert_dalia_pt_to_csv(
+    csv_path: str,
+    pt_dir: Optional[str] = None,
+    datasets_dir: Optional[str] = None,
+) -> str:
+    """Write ``dalia.csv`` from Forecast100 ``*.pt`` tensors. Returns ``csv_path``."""
+    dalia_dir = resolve_dalia_dir(datasets_dir)
+    search = [dalia_dir, pt_dir] if pt_dir else [dalia_dir]
+    search += [os.path.join(_repo_root(), leg) for leg in _LEGACY_DALIA_DIRS]
+    pair = _find_pt_pair([d for d in search if d])
+    if pair is None:
+        raise FileNotFoundError(
+            f"Could not find {DALIA_PT_X} and {DALIA_PT_Y} under {search!r}"
+        )
+    x, y = _load_tensors_from_pt(*pair)
+    n = len(x)
+    steps = DALIA_INPUT_STEPS + DALIA_FORECAST_STEPS
+    rows = np.zeros((n * steps, 2 + DALIA_N_VARS), dtype=np.float64)
+    off = 0
+    for wid in range(n):
+        block = np.concatenate([x[wid], y[wid]], axis=0)
+        for step in range(steps):
+            rows[off] = [wid, step, *block[step]]
+            off += 1
+    cols = ["window_id", "step", *DALIA_CHANNEL_NAMES]
+    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+    pd.DataFrame(rows, columns=cols).to_csv(csv_path, index=False)
+    return csv_path
+
+
+def ensure_dalia_csv(datasets_dir: Optional[str] = None) -> str:
+    """Ensure ``datasets/dalia/dalia.csv`` exists; convert from ``*.pt`` if needed."""
+    csv_path = dalia_csv_path(datasets_dir)
+    if os.path.isfile(csv_path):
+        return csv_path
+    convert_dalia_pt_to_csv(csv_path, datasets_dir=datasets_dir)
+    return csv_path
+
+
+@lru_cache(maxsize=4)
+def _load_dalia_csv_cached(csv_path: str) -> Tuple[np.ndarray, np.ndarray]:
+    df = pd.read_csv(csv_path)
+    required = {"window_id", "step", *DALIA_CHANNEL_NAMES}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"{csv_path} missing columns: {sorted(missing)}")
+    n_windows = int(df["window_id"].max()) + 1
+    x = np.zeros((n_windows, DALIA_INPUT_STEPS, DALIA_N_VARS), dtype=np.float32)
+    y = np.zeros((n_windows, DALIA_FORECAST_STEPS, DALIA_N_VARS), dtype=np.float32)
+    for wid in range(n_windows):
+        w = df[df["window_id"] == wid].sort_values("step")
+        data = w[DALIA_CHANNEL_NAMES].to_numpy(dtype=np.float32)
+        if data.shape[0] != DALIA_INPUT_STEPS + DALIA_FORECAST_STEPS:
+            raise ValueError(
+                f"window {wid}: expected {DALIA_INPUT_STEPS + DALIA_FORECAST_STEPS} "
+                f"steps, got {data.shape[0]}"
+            )
+        x[wid] = data[:DALIA_INPUT_STEPS]
+        y[wid] = data[DALIA_INPUT_STEPS:]
+    return x, y
+
+
+def dalia_window_count(datasets_dir: Optional[str] = None) -> int:
+    csv_path = ensure_dalia_csv(datasets_dir)
+    df = pd.read_csv(csv_path, usecols=["window_id"])
+    return int(df["window_id"].max()) + 1
+
+
+@lru_cache(maxsize=1)
+def load_dalia_tensors(datasets_dir: Optional[str] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """Return ``X`` (N, T_in, V) and ``Y`` (N, T_out, V) float32 arrays from ``dalia.csv``."""
+    csv_path = ensure_dalia_csv(datasets_dir)
+    return _load_dalia_csv_cached(csv_path)
 
 
 class DaliaPrewindowedDataset(Dataset):
@@ -114,12 +204,14 @@ def load_dalia_dataset(
     stride: int = 1,
     test_stride: int = 1,
     lookback_overlap: int = 0,
+    datasets_dir: Optional[str] = None,
     pt_dir: Optional[str] = None,
 ) -> Tuple[Dataset, Dataset, Dataset, Dict]:
-    """Load DALIA Forecast100 with 70/10/20 sample splits and optional index stride."""
+    """Load DALIA from ``datasets/dalia/dalia.csv`` (70/10/20 sample splits)."""
+    del pt_dir  # legacy kwarg; tensors live in CSV now
     if variate_indices is None:
         variate_indices = list(range(DALIA_N_VARS))
-    x, y = load_dalia_tensors(pt_dir)
+    x, y = load_dalia_tensors(datasets_dir=datasets_dir)
     n = len(x)
     train_idx, val_idx, test_idx = _split_sample_indices(n)
 
