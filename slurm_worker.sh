@@ -20,7 +20,7 @@ module load cuda/12.2
 module load cudnn/8.9
 
 USER="${USER:-$(whoami)}"
-STORE="${GRID_STORE:-/scratch/$USER/results}"
+STORE="${GRID_STORE:-${SLURM_SUBMIT_DIR:-$PWD}/results}"
 STORE_VENV="$STORE/venv"
 
 pip_retry() {

@@ -3,7 +3,7 @@
 # Submits a grid of experiments using the new YAML pipeline configs.
 #
 # Each job gets isolated checkpoint/results dirs:
-#   /scratch/$USER/results/ckpts/MM-DD-<jobid>-<dataset>-<config>/
+#   ./results/ckpts/MM-DD-<jobid>-<dataset>-<config>/
 #
 # USAGE (run from login node):
 #   ./submit_grid.sh --configs configs/binary_anchor.yaml --datasets ETTh1,exchange_rate
@@ -59,7 +59,7 @@ IFS=',' read -ra DATA_ARR <<< "$DATASETS"
 IFS=',' read -ra SEED_ARR <<< "$SEEDS"
 
 USER=$(whoami)
-STORE="/scratch/$USER/results"
+STORE="${RESULTS_ROOT:-$SCRIPT_DIR/results}"
 LOG_DIR="$STORE/logs"
 CKPT_ROOT="$STORE/ckpts"
 DATA_ROOT="$STORE/datasets"
