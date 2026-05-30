@@ -6,6 +6,7 @@ Runs Optuna HP search and promotes the best trial checkpoint to best.pt
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -31,6 +32,13 @@ class DiffusionFinetuneHPPhase(PipelinePhase):
         if os.path.exists(best_pt) and os.path.exists(meta):
             logger.info(f"  [{self.name}] cached: {best_pt}")
             state.diffusion_finetune_ckpt = best_pt
+            try:
+                with open(meta) as f:
+                    data = json.load(f)
+                    if "tuned_params" in data:
+                        state.finetune_best_params = data["tuned_params"]
+            except Exception as e:
+                logger.warning(f"Failed to load tuned_params from metadata.json: {e}")
             return True
         return False
 

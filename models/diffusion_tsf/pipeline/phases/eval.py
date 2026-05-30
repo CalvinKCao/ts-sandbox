@@ -30,8 +30,8 @@ class EvalPhase(PipelinePhase):
         subset_id = state.subset_id or state.dataset
         from models.diffusion_tsf.train_multivariate_pipeline import _load_subset_results
         prior = _load_subset_results(state.results_dir, subset_id)
-        if prior.get("eval_metrics"):
-            logger.info(f"  [{self.name}] already evaluated: {subset_id}")
+        if prior.get("eval_metrics") and "texture_pathsig_distance" in prior["eval_metrics"].get("averaged", {}):
+            logger.info(f"  [{self.name}] already evaluated with texture metrics: {subset_id}")
             return True
         return False
 

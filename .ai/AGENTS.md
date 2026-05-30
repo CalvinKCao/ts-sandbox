@@ -45,6 +45,10 @@ Use `wandb` for training/eval runs tied to this repo.
 - Attach visualization artifacts to the same run (for example with `wandb.Image`), and compress/downscale images before upload.
 - At run end, log the ENTIRE stdout and stderr output files to wandb as artifacts/files.
 
+## Reports & Visualizations
+- From now on, put visualizations in the same directory as their corresponding reports (e.g. within `reports/`).
+- Create a subfolder with the folder name equal to the report markdown filename (without the `.md` extension).
+
 ## General style
 - Keep writing terse and detailed; avoid context pollution.
 - Comments should sound natural, not AI-generated.

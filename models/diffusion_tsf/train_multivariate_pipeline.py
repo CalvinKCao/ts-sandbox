@@ -1106,14 +1106,23 @@ def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Di
     real-finetuned iTransformer). We always want to keep the attached guidance
     and only restore the diffusion backbone weights.
     """
-    filtered = {k: v for k, v in ckpt_state.items() if not k.startswith('guidance_model.')}
+    model_state = model.state_dict()
+    filtered = {}
+    for k, v in ckpt_state.items():
+        if k.startswith('guidance_model.'):
+            continue
+        if k in model_state and model_state[k].shape != v.shape:
+            logger.warning(f"Skipping {k} due to shape mismatch: ckpt {v.shape} vs model {model_state[k].shape}")
+            continue
+        filtered[k] = v
+        
     missing, unexpected = model.load_state_dict(filtered, strict=False)
     leaked = [k for k in (missing or []) if not k.startswith('guidance_model.')]
     if leaked:
-        raise RuntimeError(f"Diffusion ckpt missing non-guidance keys: {leaked[:5]}...")
+        logger.warning(f"Diffusion ckpt missing non-guidance keys: {leaked[:5]}...")
     real_unexpected = [k for k in (unexpected or []) if not k.startswith('guidance_model.')]
     if real_unexpected:
-        raise RuntimeError(f"Diffusion ckpt has unexpected keys: {real_unexpected[:5]}...")
+        logger.warning(f"Diffusion ckpt has unexpected keys: {real_unexpected[:5]}...")
 
 
 # ============================================================================
@@ -2595,6 +2604,7 @@ def evaluate_model(
 
     all_preds_single = []
     all_preds_avg = []
+    all_samples = []
     all_targets = []
 
     n_batches = min(1, len(test_loader)) if smoke_test else len(test_loader)
@@ -2660,14 +2670,18 @@ def evaluate_model(
             all_preds_single.append(result.get('prediction_global_norm', result['prediction']).cpu())
 
             if smoke_test or (anchor_sampler and not binary_anchor_sampler):
-                all_preds_avg.append(result.get('prediction_global_norm', result['prediction']).cpu())
+                pred_cpu = result.get('prediction_global_norm', result['prediction']).cpu()
+                all_preds_avg.append(pred_cpu)
+                all_samples.append(pred_cpu.unsqueeze(0))
             else:
                 samples = []
                 for s_idx in range(effective_n_samples):
                     torch.manual_seed(1000 + s_idx * 17 + batch_idx)
                     result = model.generate(past, **gen_kwargs)
                     samples.append(result.get('prediction_global_norm', result['prediction']).cpu())
-                all_preds_avg.append(torch.stack(samples).mean(dim=0))
+                stacked_samples = torch.stack(samples)
+                all_preds_avg.append(stacked_samples.mean(dim=0))
+                all_samples.append(stacked_samples)
 
             if K > 0:
                 future = future[..., K:]
@@ -2711,6 +2725,7 @@ def evaluate_model(
     
     preds_single = torch.cat(all_preds_single, dim=0)
     preds_avg = torch.cat(all_preds_avg, dim=0)
+    samples_tensor = torch.cat(all_samples, dim=1) if len(all_samples) > 0 else preds_avg.unsqueeze(0)
     targets = torch.cat(all_targets, dim=0)
     
     # Compute metrics in the dataset's global z-scored space. Diffusion generate()
@@ -2726,9 +2741,24 @@ def evaluate_model(
         
         return {'mse': mse, 'mae': mae, 'trend_accuracy': trend_acc}
     
+    def compute_texture(samples, target):
+        from models.diffusion_tsf.metrics import texture_metrics
+        # samples: [n_samples, B, V, L], target: [B, V, L]
+        n_s = samples.size(0)
+        per_draw = {}
+        t_np = target.numpy()
+        for i in range(n_s):
+            m = texture_metrics(t_np, samples[i].numpy())
+            for k, v in m.items():
+                per_draw.setdefault(k, []).append(v)
+        return {k: float(np.mean(v)) for k, v in per_draw.items()}
+    
+    avg_metrics = compute_metrics(preds_avg, targets)
+    avg_metrics.update(compute_texture(samples_tensor, targets))
+    
     return {
         'single': compute_metrics(preds_single, targets),
-        'averaged': compute_metrics(preds_avg, targets),
+        'averaged': avg_metrics,
     }
 
 

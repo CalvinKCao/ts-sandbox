@@ -6,10 +6,12 @@ Includes:
 - Shape-Preservation Metric: Compares first-order derivatives
 """
 
+import math
 import torch
 import torch.nn.functional as F
 import logging
-from typing import Dict
+import numpy as np
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -177,4 +179,155 @@ def log_metrics(metrics: Dict[str, torch.Tensor], prefix: str = "") -> str:
         parts.append(f"{full_name}={value:.4f}")
     
     return " | ".join(parts)
+
+
+# ============================================================================
+# Texture Metrics
+# ============================================================================
+
+def zscore_1d(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float64)
+    return (x - x.mean()) / (x.std() + 1e-8)
+
+
+def ordinal_jsd(a: np.ndarray, b: np.ndarray, order: int = 4) -> float:
+    from itertools import permutations
+
+    perms = list(permutations(range(order)))
+    lookup = {p: i for i, p in enumerate(perms)}
+
+    def dist(x: np.ndarray) -> np.ndarray:
+        counts = np.zeros(len(perms), dtype=np.float64)
+        if len(x) < order:
+            counts += 1.0
+        else:
+            for i in range(len(x) - order + 1):
+                ranks = tuple(np.argsort(np.argsort(x[i : i + order], kind="mergesort"), kind="mergesort"))
+                counts[lookup[ranks]] += 1.0
+        counts += 1e-12
+        return counts / counts.sum()
+
+    p = dist(a)
+    q = dist(b)
+    m = 0.5 * (p + q)
+    jsd = 0.5 * np.sum(p * np.log(p / m)) + 0.5 * np.sum(q * np.log(q / m))
+    return float(jsd)
+
+
+def _line_lengths_bool(arr: np.ndarray) -> List[int]:
+    lengths: List[int] = []
+    run = 0
+    for value in arr:
+        if value:
+            run += 1
+        elif run:
+            lengths.append(run)
+            run = 0
+    if run:
+        lengths.append(run)
+    return lengths
+
+
+def rqa_features(x: np.ndarray, eps: float = 0.2, min_len: int = 2) -> np.ndarray:
+    x = zscore_1d(x)
+    R = np.abs(x[:, None] - x[None, :]) < eps
+    np.fill_diagonal(R, False)
+    recurrence = R.sum() + 1e-8
+
+    diag_points = 0
+    for offset in range(-len(x) + 1, len(x)):
+        if offset == 0:
+            continue
+        for length in _line_lengths_bool(np.diagonal(R, offset=offset)):
+            if length >= min_len:
+                diag_points += length
+
+    vert_points = 0
+    for col in range(R.shape[1]):
+        for length in _line_lengths_bool(R[:, col]):
+            if length >= min_len:
+                vert_points += length
+
+    det = diag_points / recurrence
+    lam = vert_points / recurrence
+    return np.array([lam, det], dtype=np.float64)
+
+
+def variogram(x: np.ndarray, max_lag: int = 24) -> np.ndarray:
+    x = zscore_1d(x)
+    lags = []
+    for lag in range(1, min(max_lag, len(x) - 1) + 1):
+        diff = x[lag:] - x[:-lag]
+        lags.append(0.5 * np.mean(diff * diff))
+    return np.asarray(lags, dtype=np.float64)
+
+
+def _fallback_signature_features(path: np.ndarray) -> np.ndarray:
+    t = path[:, 0]
+    x = path[:, 1]
+    dx = np.diff(x)
+    dt = np.diff(t)
+    if hasattr(np, "trapezoid"):
+        area = np.trapezoid(x, t)
+    else:
+        area = np.sum((x[1:] + x[:-1]) * 0.5 * dt) if len(dt) else 0.0
+    return np.array(
+        [
+            x[-1] - x[0],
+            np.sum(np.abs(dx)),
+            np.mean(dx) if len(dx) else 0.0,
+            np.std(dx) if len(dx) else 0.0,
+            area,
+            np.sum(dt * dx) if len(dx) else 0.0,
+        ],
+        dtype=np.float64,
+    )
+
+
+def path_signature_distance(a: np.ndarray, b: np.ndarray, window: int = 12, depth: int = 3) -> float:
+    try:
+        import iisignature  # type: ignore
+    except Exception:
+        iisignature = None
+
+    a = zscore_1d(a)
+    b = zscore_1d(b)
+    distances = []
+    for start in range(0, len(a) - window + 1, window):
+        aa = a[start : start + window]
+        bb = b[start : start + window]
+        t = np.linspace(0.0, 1.0, window)
+        pa = np.column_stack([t, aa])
+        pb = np.column_stack([t, bb])
+        if iisignature is not None:
+            fa = np.asarray(iisignature.sig(pa, depth), dtype=np.float64)
+            fb = np.asarray(iisignature.sig(pb, depth), dtype=np.float64)
+        else:
+            fa = _fallback_signature_features(pa)
+            fb = _fallback_signature_features(pb)
+        distances.append(np.linalg.norm(fa - fb) / math.sqrt(max(1, fa.size)))
+    if not distances:
+        return 0.0
+    return float(np.mean(distances))
+
+
+def texture_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    vals = {
+        "texture_ordinal_jsd": [],
+        "texture_rqa_distance": [],
+        "texture_variogram_distance": [],
+        "texture_pathsig_distance": [],
+    }
+    flat_true = y_true.reshape(-1, y_true.shape[-1])
+    flat_pred = y_pred.reshape(-1, y_pred.shape[-1])
+    for gt, pred in zip(flat_true, flat_pred):
+        gt_z = zscore_1d(gt)
+        pred_z = zscore_1d(pred)
+        vals["texture_ordinal_jsd"].append(ordinal_jsd(gt_z, pred_z))
+        vals["texture_rqa_distance"].append(float(np.linalg.norm(rqa_features(gt_z) - rqa_features(pred_z))))
+        va = variogram(gt_z)
+        vb = variogram(pred_z)
+        vals["texture_variogram_distance"].append(float(np.linalg.norm(va - vb) / math.sqrt(max(1, va.size))))
+        vals["texture_pathsig_distance"].append(path_signature_distance(gt_z, pred_z))
+    return {key: float(np.mean(value)) for key, value in vals.items()}
 
