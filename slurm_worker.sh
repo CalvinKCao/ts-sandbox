@@ -39,11 +39,39 @@ pip_retry() {
     return 1
 }
 
+install_pipeline_deps() {
+    pip_retry pip install --no-index --upgrade pip -q 2>/dev/null || pip_retry pip install -U pip -q
+
+    if ! python -c "import torch" 2>/dev/null; then
+        if ! pip_retry pip install --no-index torch torchvision numpy pandas scipy scikit-learn tqdm -q 2>/dev/null; then
+            pip_retry pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
+            pip_retry pip install numpy pandas scipy scikit-learn tqdm -q
+        fi
+    fi
+
+    # Idempotent: persistent venv may exist with only torch from an older partial setup.
+    pip_retry pip install optuna wandb einops pyyaml -q
+
+    if ! pip_retry pip install --no-index matplotlib -q 2>/dev/null; then
+        pip_retry pip install matplotlib -q 2>/dev/null || {
+            echo "[setup] WARN: matplotlib install failed; continuing without viz wheels."
+            export DIFFUSION_TSF_SKIP_VIZ=1
+        }
+    fi
+
+    python -c "import optuna, wandb, einops, yaml" || {
+        echo "[setup] ERROR: pipeline deps missing after pip reconcile." >&2
+        return 1
+    }
+}
+
 activate_venv() {
     if [[ -x "$STORE_VENV/bin/python" ]]; then
         echo "[setup] Using persistent venv: $STORE_VENV"
         # shellcheck source=/dev/null
         source "$STORE_VENV/bin/activate"
+        echo "[setup] Reconciling packages in persistent venv..."
+        install_pipeline_deps
         return 0
     fi
 
@@ -51,20 +79,7 @@ activate_venv() {
     virtualenv --no-download "$SLURM_TMPDIR/env"
     # shellcheck source=/dev/null
     source "$SLURM_TMPDIR/env/bin/activate"
-
-    pip_retry pip install --no-index --upgrade pip -q
-
-    if ! pip_retry pip install --no-index torch torchvision numpy pandas scipy scikit-learn tqdm -q 2>/dev/null; then
-        pip_retry pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
-        pip_retry pip install numpy pandas scipy scikit-learn tqdm -q
-    fi
-
-    pip_retry pip install optuna wandb einops pyyaml -q
-
-    if ! pip_retry pip install --no-index matplotlib -q; then
-        echo "[setup] WARN: matplotlib install failed; continuing without viz wheels."
-        export DIFFUSION_TSF_SKIP_VIZ=1
-    fi
+    install_pipeline_deps
 }
 
 activate_venv
