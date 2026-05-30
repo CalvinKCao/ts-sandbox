@@ -49,5 +49,5 @@ echo "OK: $PEMS_DIR/PEMS04.npz and $SOLAR_DIR/solar_Alabama.csv"
 if [[ -f "$ROOT/DALIA/Forecast100X.pt" || -f "$ROOT/datasets/DALIA/Forecast100X.pt" ]]; then
     echo ""
     echo "DALIA: converting Forecast100 tensors -> datasets/dalia/dalia.csv"
-    python "$ROOT/setup/convert_dalia_to_csv.py" --datasets-dir "$DEST"
+    bash "$ROOT/setup/convert_dalia_to_csv.sh" --datasets-dir "$DEST"
 fi

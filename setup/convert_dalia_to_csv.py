@@ -9,6 +9,21 @@ import sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(ROOT, "models", "diffusion_tsf"))
 
+try:
+    import numpy  # noqa: F401
+    import pandas  # noqa: F401
+    import torch  # noqa: F401
+except ImportError as exc:
+    print(
+        "Missing dependency for convert_dalia_to_csv.py.\n"
+        "On Killarney, run the shell wrapper (picks results/venv from grid jobs):\n"
+        f"  {os.path.join(ROOT, 'setup', 'convert_dalia_to_csv.sh')} --pt-dir DALIA\n"
+        f"Or: source {os.path.join(ROOT, 'results', 'venv', 'bin', 'activate')}\n"
+        f"Original error: {exc}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 from dalia_data import convert_dalia_pt_to_csv, dalia_csv_path, resolve_dalia_dir  # noqa: E402
 
 
