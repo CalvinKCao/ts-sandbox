@@ -39,7 +39,7 @@ class DiffusionHPPretrainPhase(PipelinePhase):
         )
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
-        _patch_globals(pipeline_mod, state)
+        _patch_globals(pipeline_mod, state, honor_dataset_windows=False)
 
         if not state.itrans_pretrain_ckpt or not os.path.exists(state.itrans_pretrain_ckpt):
             raise RuntimeError(

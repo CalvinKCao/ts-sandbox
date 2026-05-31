@@ -2509,7 +2509,13 @@ def finetune_hp_objective(
     itrans_guidance = iTransformerGuidance(itrans_model)
     
     # Load pretrained diffusion (skip guidance keys — keep the attached one)
-    model = create_diffusion_model(n_variates=n_iv, **anchor_kwargs_from_params()).to(device)
+    ds_lb, ds_hz = dataset_window_lengths(dataset_name)
+    model = create_diffusion_model(
+        n_variates=n_iv,
+        lookback=ds_lb,
+        horizon=ds_hz,
+        **anchor_kwargs_from_params(),
+    ).to(device)
     model.set_guidance_model(itrans_guidance)
     ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
     load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])

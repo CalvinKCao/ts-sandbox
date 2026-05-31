@@ -43,7 +43,7 @@ class ITransHPPretrainPhase(PipelinePhase):
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
         # Temporarily set the module-level globals the old code reads
-        _patch_globals(pipeline_mod, state)
+        _patch_globals(pipeline_mod, state, honor_dataset_windows=False)
 
         n_trials = self.get("n_trials", 10)
         if state.smoke_test:
@@ -76,16 +76,29 @@ class ITransHPPretrainPhase(PipelinePhase):
         return state
 
 
-def _patch_globals(mod: Any, state: PipelineState) -> None:
+def _patch_globals(
+    mod: Any,
+    state: PipelineState,
+    *,
+    honor_dataset_windows: bool = True,
+) -> None:
     """Temporarily set module-level globals that old training code reads.
 
     This is the bridge between the new PipelineState and the existing
     global-based code. Will shrink as we migrate more code.
+
+    Pretrain phases pass ``honor_dataset_windows=False`` so synthetic pretrain
+    keeps YAML lengths; finetune/eval use per-dataset windows (e.g. DALIA 80/20).
     """
     mod.N_VARIATES = state.n_variates
-    mod.LOOKBACK_LENGTH = state.lookback_length
-    mod.FORECAST_LENGTH = state.forecast_length
-    mod.ITRANSFORMER_SEQ_LEN = state.lookback_length
+    lookback = state.lookback_length
+    forecast = state.forecast_length
+    if honor_dataset_windows:
+        from models.diffusion_tsf.train_multivariate_pipeline import dataset_window_lengths
+        lookback, forecast = dataset_window_lengths(state.dataset)
+    mod.LOOKBACK_LENGTH = lookback
+    mod.FORECAST_LENGTH = forecast
+    mod.ITRANSFORMER_SEQ_LEN = lookback
     mod.IMAGE_HEIGHT = state.image_height
     mod.USE_DUAL_SCALE = state.use_dual_scale
     mod.DUAL_SCALE_FINE_WEIGHT = state.dual_scale_fine_weight

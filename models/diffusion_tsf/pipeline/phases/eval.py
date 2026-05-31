@@ -76,8 +76,12 @@ class EvalPhase(PipelinePhase):
         itrans_guidance = iTransformerGuidance(itrans_model)
 
         tuned_params = state.finetune_best_params or {}
+        ds_lb, ds_hz = pipeline_mod.dataset_window_lengths(state.dataset)
         model = create_diffusion_model(
-            n_variates=n_iv, **anchor_kwargs_from_params(tuned_params),
+            n_variates=n_iv,
+            lookback=ds_lb,
+            horizon=ds_hz,
+            **anchor_kwargs_from_params(tuned_params),
         ).to(device)
         model.set_guidance_model(itrans_guidance)
         ckpt = torch.load(diff_ckpt, map_location=device, weights_only=False)

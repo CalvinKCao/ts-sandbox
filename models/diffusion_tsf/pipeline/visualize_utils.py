@@ -77,13 +77,22 @@ def generate_pipeline_visualizations(
         # 1. Plot Intermediate 2D Heatmaps (only for first sample to save space)
         if row == 0 and intermediates:
             for i, (t_step, img_tensor) in enumerate(intermediates):
-                # img_tensor shape: (B, V, H, W)
-                img = img_tensor[0, 0].cpu().numpy()  # Plot first variate
-                fig, ax = plt.subplots(figsize=(4, 3))
-                ax.imshow(img, aspect='auto', cmap='viridis')
-                ax.set_title(f"Denoising Step {t_step}")
-                ax.axis('off')
-                
+                # Single-scale: (B, V, H, W). Dual-scale: (B, V, 2, H, W).
+                img = img_tensor[0, 0].cpu().numpy()
+                if img.ndim == 3 and img.shape[0] == 2:
+                    fig, axes = plt.subplots(1, 2, figsize=(7, 3))
+                    for si, ax in enumerate(axes):
+                        ax.imshow(img[si], aspect='auto', cmap='viridis')
+                        ax.set_title(f"{'coarse' if si == 0 else 'fine'} t={t_step}")
+                        ax.axis('off')
+                else:
+                    if img.ndim == 3:
+                        img = img[0]
+                    fig, ax = plt.subplots(figsize=(4, 3))
+                    ax.imshow(img, aspect='auto', cmap='viridis')
+                    ax.set_title(f"Denoising Step {t_step}")
+                    ax.axis('off')
+
                 path = os.path.join(output_dir, f"{file_idx:03d}_2D_denoising_sample{row}_var0_step{t_step:04d}.jpg")
                 fig.savefig(path, dpi=100, format='jpg', bbox_inches='tight')
                 plt.close(fig)
