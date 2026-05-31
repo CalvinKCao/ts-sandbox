@@ -2723,10 +2723,16 @@ def evaluate_model(
 ) -> Dict:
     """Evaluate model on test set.
 
-    Uses DPM-Solver++ (20 steps) and ``n_samples`` averaged samples per window.
+    Uses DPM-Solver++ (20 steps) and ``n_samples`` stochastic draws per window.
     Logs periodic progress (batch index, throughput, ETA) for Slurm logs.
     Note: ``test_loader`` should already be subsetted by the caller if a
     half-test sweep is desired (see eval call site).
+
+    Returns:
+        ``single``: MSE/MAE/trend + texture on the first draw (anchor pred when
+            ``eval_sampler`` is anchor).
+        ``averaged``: MSE/MAE/trend on the mean forecast across draws; texture_*
+            keys are the mean of per-draw texture metrics (not texture of the mean).
     """
     from tqdm import tqdm
     model.eval()
@@ -2851,7 +2857,7 @@ def evaluate_model(
         time.perf_counter() - t0,
         n_batches,
     )
-    
+
     preds_single = torch.cat(all_preds_single, dim=0)
     preds_avg = torch.cat(all_preds_avg, dim=0)
     samples_tensor = torch.cat(all_samples, dim=1) if len(all_samples) > 0 else preds_avg.unsqueeze(0)
@@ -2870,23 +2876,37 @@ def evaluate_model(
         
         return {'mse': mse, 'mae': mae, 'trend_accuracy': trend_acc}
     
-    def compute_texture(samples, target):
-        from models.diffusion_tsf.metrics import texture_metrics
-        # samples: [n_samples, B, V, L], target: [B, V, L]
-        n_s = samples.size(0)
-        per_draw = {}
-        t_np = target.numpy()
-        for i in range(n_s):
-            m = texture_metrics(t_np, samples[i].numpy())
-            for k, v in m.items():
-                per_draw.setdefault(k, []).append(v)
-        return {k: float(np.mean(v)) for k, v in per_draw.items()}
-    
+    from models.diffusion_tsf.metrics import aggregate_texture_per_sample, texture_metrics
+
+    n_series = int(targets.shape[0] * targets.shape[1])
+    n_draws = int(samples_tensor.shape[0]) if samples_tensor.ndim > 3 else 1
+    logger.info(
+        "eval: computing MSE/MAE/trend + texture on %d windows, %d variate-series, "
+        "%d stochastic draw(s) for averaged texture (CPU, no batch logs — can take a long time on ETTm-scale data)",
+        int(targets.shape[0]),
+        n_series,
+        n_draws,
+    )
+    t_metrics = time.perf_counter()
+
+    t_np = targets.numpy()
+    single_metrics = compute_metrics(preds_single, targets)
+    # First draw (anchor when eval_sampler=anchor, else one stochastic sample).
+    single_metrics.update(texture_metrics(t_np, preds_single.numpy()))
+
     avg_metrics = compute_metrics(preds_avg, targets)
-    avg_metrics.update(compute_texture(samples_tensor, targets))
-    
+    # Mean of per-draw texture metrics, not texture(mean(samples)).
+    avg_metrics.update(
+        aggregate_texture_per_sample(t_np, samples_tensor.numpy())
+    )
+
+    logger.info(
+        "eval: metrics done | wall=%.1fs (includes texture)",
+        time.perf_counter() - t_metrics,
+    )
+
     return {
-        'single': compute_metrics(preds_single, targets),
+        'single': single_metrics,
         'averaged': avg_metrics,
     }
 
@@ -2965,6 +2985,10 @@ def update_summary_csv(results_dir):
                 'itrans_mae': itrans.get('mae'),
                 'itrans_trend_acc': itrans.get('trend_accuracy'),
             }
+            for src, pfx in ((m['single'], 'single'), (m['averaged'], 'avg')):
+                for key, val in src.items():
+                    if key.startswith('texture_'):
+                        row[f'{pfx}_{key}'] = val
             rows.append(row)
         except Exception:
             continue

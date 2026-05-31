@@ -30,7 +30,10 @@ class EvalPhase(PipelinePhase):
         subset_id = state.subset_id or state.dataset
         from models.diffusion_tsf.train_multivariate_pipeline import _load_subset_results
         prior = _load_subset_results(state.results_dir, subset_id)
-        if prior.get("eval_metrics") and "texture_pathsig_distance" in prior["eval_metrics"].get("averaged", {}):
+        em = prior.get("eval_metrics") or {}
+        avg_ok = "texture_pathsig_distance" in em.get("averaged", {})
+        single_ok = "texture_pathsig_distance" in em.get("single", {})
+        if em and avg_ok and single_ok:
             logger.info(f"  [{self.name}] already evaluated with texture metrics: {subset_id}")
             return True
         return False
@@ -124,13 +127,18 @@ class EvalPhase(PipelinePhase):
         )
 
         # wandb
-        wandb_utils.log_summary({
+        summary = {
             "eval/mse": eval_results["averaged"]["mse"],
             "eval/mae": eval_results["averaged"]["mae"],
             "eval/trend_accuracy": eval_results["averaged"].get("trend_accuracy"),
             "eval/single_mse": eval_results["single"]["mse"],
             "eval/single_mae": eval_results["single"]["mae"],
-        })
+        }
+        for prefix, block in (("eval", eval_results["averaged"]), ("eval/single", eval_results["single"])):
+            for key, val in block.items():
+                if key.startswith("texture_"):
+                    summary[f"{prefix}/{key}"] = val
+        wandb_utils.log_summary(summary)
 
         # iTransformer-only baseline
         try:

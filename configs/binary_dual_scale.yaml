@@ -7,6 +7,8 @@ experiment:
   use_dual_scale: true
   dual_scale_fine_weight: 0.75
   dual_scale_independent_timesteps: true
+  use_variate_embedding: true
+  variate_factorized: true
   deterministic_anchor_loss: true
   deterministic_anchor_lambda: 0.99
   deterministic_anchor_alpha: 0.0

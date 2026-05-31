@@ -311,6 +311,24 @@ def path_signature_distance(a: np.ndarray, b: np.ndarray, window: int = 12, dept
     return float(np.mean(distances))
 
 
+def aggregate_texture_per_sample(
+    y_true: np.ndarray,
+    samples: np.ndarray,
+) -> Dict[str, float]:
+    """Mean texture over stochastic draws (not texture of the sample mean).
+
+    Args:
+        y_true: ``[batch, variates, length]`` (or compatible).
+        samples: ``[n_draws, batch, variates, length]``.
+    """
+    per_draw: Dict[str, List[float]] = {}
+    for i in range(samples.shape[0]):
+        m = texture_metrics(y_true, samples[i])
+        for k, v in m.items():
+            per_draw.setdefault(k, []).append(v)
+    return {k: float(np.mean(v)) for k, v in per_draw.items()}
+
+
 def texture_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     vals = {
         "texture_ordinal_jsd": [],

@@ -112,6 +112,8 @@ def run_probabilistic_visualization(
         lookback_length = int(meta["lookback_length"])
     if meta.get("forecast_length"):
         forecast_length = int(meta["forecast_length"])
+    train_pipeline.LOOKBACK_LENGTH = lookback_length
+    train_pipeline.FORECAST_LENGTH = forecast_length
 
     print(f"Dataset: {dataset_name} ({n_vars} variables, subset={subset_id})")
 
@@ -302,12 +304,14 @@ def main():
                         help='Run stem, e.g. results/ckpts/05-30-3819110-ETTm1-binary_dual_scale')
     parser.add_argument('--scan-ckpts-root', type=str, default=None,
                         help='Plot every run under this dir that has subset/best.pt (e.g. results/ckpts)')
-    parser.add_argument('--run-glob', type=str, default='05-30-38191*-binary_dual_scale',
+    parser.add_argument('--run-glob', type=str, default='05-30-38216*-binary_anchor',
                         help='With --scan-ckpts-root, only matching run folder names')
     parser.add_argument('--output-dir', type=str, default=None,
                         help='Output directory (default: reports/<report_stem>/)')
-    parser.add_argument('--report-stem', type=str, default='3819108_binary_dual_scale_7v_grid',
+    parser.add_argument('--report-stem', type=str, default='3821627_binary_anchor_grid',
                         help='Subfolder under reports/ for figures when --output-dir omitted')
+    parser.add_argument('--require-results-json', action='store_true',
+                        help='Skip runs without results/datasets/<stem>/*/results.json')
     parser.add_argument('--num-futures', type=int, default=5)
     parser.add_argument('--num-random-lookbacks', type=int, default=2)
     parser.add_argument('--sampler', type=str, default='ddim',
@@ -334,6 +338,13 @@ def main():
             except FileNotFoundError as exc:
                 print(f"Skip {run_dir.name}: {exc}")
                 continue
+            if args.require_results_json:
+                rj = list(
+                    (project_root / "results" / "datasets").glob(f"{run_dir.name}/*/results.json")
+                )
+                if not rj:
+                    print(f"Skip {run_dir.name}: no results.json (incomplete eval)")
+                    continue
             print(f"\n=== {run_dir.name} ===")
             run_probabilistic_visualization(
                 checkpoint_dir=str(run_dir),
