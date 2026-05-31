@@ -330,14 +330,14 @@ def run_comparison(
 
         # Load fine-tuned diffusion with same guidance wrapper as training
         anchor_kwargs = infer_anchor_kwargs(diff_ckpt, sub.get('metadata'))
+        itrans_guidance = iTransformerGuidance(itrans_model)
         diff_model = create_diffusion_model(
             n_variates=n_vars,
             diffusion_type=diff_type,
             model_type=backbone,
+            guidance_model=itrans_guidance,
             **anchor_kwargs,
         ).to(device)
-        itrans_guidance = iTransformerGuidance(itrans_model)
-        diff_model.set_guidance_model(itrans_guidance)
         diff_model.load_state_dict(diff_ckpt['model_state_dict'])
         diff_model.eval()
 

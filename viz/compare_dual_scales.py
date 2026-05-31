@@ -117,13 +117,14 @@ def run_dual_scale_visualization(
 
     print(f"Diffusion architecture: type={diff_type}, backbone={backbone}, image_height={applied_h}")
 
+    itrans_guidance = iTransformerGuidance(itrans_guidance_model)
     diff_model = create_diffusion_model(
-        n_variates=n_vars, diffusion_type=diff_type, model_type=backbone,
+        n_variates=n_vars,
+        diffusion_type=diff_type,
+        model_type=backbone,
+        guidance_model=itrans_guidance,
         **anchor_kwargs,
     ).to(device)
-    
-    itrans_guidance = iTransformerGuidance(itrans_guidance_model)
-    diff_model.set_guidance_model(itrans_guidance)
     load_diffusion_state_keep_attached_guidance(diff_model, diff_ckpt['model_state_dict'])
     diff_model.eval()
 

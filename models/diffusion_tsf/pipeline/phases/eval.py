@@ -81,9 +81,9 @@ class EvalPhase(PipelinePhase):
             n_variates=n_iv,
             lookback=ds_lb,
             horizon=ds_hz,
+            guidance_model=itrans_guidance,
             **anchor_kwargs_from_params(tuned_params),
         ).to(device)
-        model.set_guidance_model(itrans_guidance)
         ckpt = torch.load(diff_ckpt, map_location=device, weights_only=False)
         load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
 
