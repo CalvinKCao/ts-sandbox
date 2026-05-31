@@ -188,17 +188,9 @@ models/Time-Series-Library-main/dataset/
 # Keep These (override ignores above)
 # -----------------------------------------------------------------------------
 !requirements.txt
-!datasets/ETT-small/*.csv
-!datasets/weather/*.csv
-!datasets/electricity/*.csv
-!datasets/exchange_rate/*.csv
-!datasets/illness/*.csv
-!datasets/traffic/traffic_part*.csv
-datasets/traffic/traffic.csv
-datasets/dalia/
-DALIA/
-datasets/DALIA/
 
+# Local datasets (download separately; never commit)
+datasets/
 
 docs.alliancecan.ca_mediawiki-20260319-wikidump/docs.alliancecan.ca_mediawiki-20260325-current.xml
 
@@ -206,6 +198,7 @@ docs.alliancecan.ca_mediawiki-20260319-wikidump/docs.alliancecan.ca_mediawiki-20
 
 # local experiment pulls
 runs/
+wandb/
 
 # Local scratch / one-off artifacts (regeneratable; keep out of git)
 .tmp_epoch_sweep_smoke/
