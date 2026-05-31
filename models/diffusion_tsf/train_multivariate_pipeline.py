@@ -1775,8 +1775,10 @@ def select_diffusion_batch_size(
         try:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            model = create_diffusion_model(**anchor_kwargs_from_params()).to(device)
-            model.set_guidance_model(itrans_guidance)
+            model = create_diffusion_model(
+                guidance_model=itrans_guidance,
+                **anchor_kwargs_from_params(),
+            ).to(device)
             model.train()
             optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
             optimizer.zero_grad(set_to_none=True)
@@ -2009,8 +2011,10 @@ def diffusion_hp_objective(
     anchor_kw = anchor_kwargs_from_params()
     if disable_anchor_loss:
         anchor_kw = {'use_deterministic_anchor_loss': False}
-    model = create_diffusion_model(**anchor_kw).to(device)
-    model.set_guidance_model(itrans_guidance)
+    model = create_diffusion_model(
+        guidance_model=itrans_guidance,
+        **anchor_kw,
+    ).to(device)
 
     train_loader = DataLoader(synthetic_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
 
@@ -2365,8 +2369,10 @@ def pretrain_diffusion(
     )
     
     # Create model with guidance and wrap with DDP
-    model = create_diffusion_model(**anchor_kwargs_from_params(best_params))
-    model.set_guidance_model(itrans_guidance)
+    model = create_diffusion_model(
+        guidance_model=itrans_guidance,
+        **anchor_kwargs_from_params(best_params),
+    )
     model = wrap_model_ddp(model)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -4007,8 +4013,10 @@ def _finetune_and_eval_one_subset(
         itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, len(variate_indices), device)
         itrans_guidance = iTransformerGuidance(itrans_model)
 
-        model = create_diffusion_model(**anchor_kwargs_from_params(tuned_params)).to(device)
-        model.set_guidance_model(itrans_guidance)
+        model = create_diffusion_model(
+            guidance_model=itrans_guidance,
+            **anchor_kwargs_from_params(tuned_params),
+        ).to(device)
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
 
