@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import errno
 import gc
 import importlib.util
 import json
@@ -840,7 +841,20 @@ SOLAR_DATA_CANDIDATES = (
 
 
 def _datasets_root() -> str:
-    return DATASETS_DIR
+    return os.path.abspath(os.path.expanduser(DATASETS_DIR))
+
+
+def _path_is_file(path: str, retries: int = 3, delay_s: float = 0.5) -> bool:
+    """os.path.isfile with brief retries for NFS stale-file-handle (errno 116)."""
+    for attempt in range(retries):
+        try:
+            return os.path.isfile(path)
+        except OSError as exc:
+            if exc.errno == errno.ESTALE and attempt + 1 < retries:
+                time.sleep(delay_s)
+                continue
+            raise
+    return False
 
 
 def _resolve_registry_path(dataset_name: str) -> Tuple[str, Optional[str]]:
@@ -848,7 +862,7 @@ def _resolve_registry_path(dataset_name: str) -> Tuple[str, Optional[str]]:
     if dataset_name == 'PeMS':
         for rel in PEMS_DATA_CANDIDATES:
             path = os.path.join(_datasets_root(), rel)
-            if os.path.isfile(path):
+            if _path_is_file(path):
                 date_col = None if rel.endswith('.npz') else DATASET_REGISTRY['PeMS'][1]
                 return path, date_col
         raise FileNotFoundError(
@@ -858,7 +872,7 @@ def _resolve_registry_path(dataset_name: str) -> Tuple[str, Optional[str]]:
     if dataset_name == 'solar_Alabama':
         for rel in SOLAR_DATA_CANDIDATES:
             path = os.path.join(_datasets_root(), rel)
-            if os.path.isfile(path):
+            if _path_is_file(path):
                 return path, DATASET_REGISTRY['solar_Alabama'][1]
         raise FileNotFoundError(
             f"No solar file under {_datasets_root()}/. "
@@ -869,7 +883,7 @@ def _resolve_registry_path(dataset_name: str) -> Tuple[str, Optional[str]]:
         return path, DATASET_REGISTRY['dalia'][1]
     rel, date_col, _ = DATASET_REGISTRY[dataset_name]
     path = os.path.join(_datasets_root(), rel)
-    if not os.path.isfile(path):
+    if not _path_is_file(path):
         raise FileNotFoundError(f"Dataset file not found: {path}")
     return path, date_col
 
@@ -2477,6 +2491,8 @@ def finetune_hp_objective(
     trial_ckpt_dir: Optional[str] = None,
     train_stride: Optional[int] = None,
     test_stride: Optional[int] = None,
+    train_ds: Any = None,
+    val_ds: Any = None,
 ) -> float:
     """Optuna objective for fine-tuning HP search (lr only; batch_size auto-probed or fixed).
 
@@ -2484,6 +2500,9 @@ def finetune_hp_objective(
     to ``{trial_ckpt_dir}/_diff_ft_trial_{trial.number}_best.pt``. The caller picks
     the best study trial and promotes its file to the final ``best.pt`` — no
     separate "Phase 2C" retrain is performed.
+
+    When ``train_ds`` / ``val_ds`` are passed (recommended), the caller loads real data
+    once before Optuna — avoids re-reading CSVs every trial and NFS stale-handle flakes.
     """
     lr = trial.suggest_float(
         'learning_rate', FINETUNE_HP_LR_MIN, FINETUNE_HP_LR_MAX, log=True,
@@ -2495,12 +2514,12 @@ def finetune_hp_objective(
 
     anchor_lambda, anchor_alpha = fixed_deterministic_anchor_hp()
     
-    # Load data
-    train_ds, val_ds, _, _ = load_dataset(
-        dataset_name, variate_indices,
-        stride=train_stride or WINDOW_STRIDE,
-        test_stride=1 if test_stride is None else test_stride,
-    )
+    if train_ds is None or val_ds is None:
+        train_ds, val_ds, _, _ = load_dataset(
+            dataset_name, variate_indices,
+            stride=train_stride or WINDOW_STRIDE,
+            test_stride=1 if test_stride is None else test_stride,
+        )
     
     if smoke_test:
         train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
@@ -4119,6 +4138,8 @@ def main():
                         help='Override checkpoint directory')
     parser.add_argument('--results-dir', type=str, default=None,
                         help='Override results directory')
+    parser.add_argument('--datasets-dir', type=str, default=None,
+                        help='Directory with benchmark CSV/NPZ trees (ETT-small, etc.)')
     parser.add_argument('--synth-cache-dir', type=str, default=None,
                         help='Shared synthetic pool cache directory for reuse across runs')
     parser.add_argument('--pretrained-diff-ckpt', type=str, default=None,
@@ -4251,6 +4272,7 @@ def main():
         if args.smoke_test: cli_overrides["smoke_test"] = True
         if args.checkpoint_dir: cli_overrides["checkpoint_dir"] = args.checkpoint_dir
         if args.results_dir: cli_overrides["results_dir"] = args.results_dir
+        if args.datasets_dir: cli_overrides["datasets_dir"] = os.path.abspath(args.datasets_dir)
         if args.synth_cache_dir: cli_overrides["synth_cache_dir"] = args.synth_cache_dir
         if args.wandb: cli_overrides["wandb_enabled"] = True
         if args.wandb_project: cli_overrides["wandb_project"] = args.wandb_project

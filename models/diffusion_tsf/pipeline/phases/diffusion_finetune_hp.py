@@ -84,22 +84,27 @@ class DiffusionFinetuneHPPhase(PipelinePhase):
 
         n_iv = len(variate_indices)
 
-        # Probe batch size
-        ft_itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, n_iv, device)
-        ft_itrans_guidance = iTransformerGuidance(ft_itrans_model)
-        probe_ds, _, _, _ = load_dataset(
+        train_ds, val_ds, _, norm_stats = load_dataset(
             state.dataset, variate_indices,
             stride=train_stride, test_stride=test_stride,
         )
+        logger.info(
+            f"  [{self.name}] loaded {len(train_ds)} train / {len(val_ds)} val windows "
+            f"from {pipeline_mod.DATASETS_DIR}"
+        )
+
+        # Probe batch size
+        ft_itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, n_iv, device)
+        ft_itrans_guidance = iTransformerGuidance(ft_itrans_model)
         ft_diff_bs = select_diffusion_batch_size(
             phase_name=f"Diff FT HP ({subset_id})",
-            dataset=probe_ds,
+            dataset=train_ds,
             device=device,
             itrans_guidance=ft_itrans_guidance,
             max_candidate=diffusion_probe_max_candidate(n_iv, state.smoke_test),
             smoke_test=state.smoke_test,
         )
-        del ft_itrans_model, ft_itrans_guidance, probe_ds
+        del ft_itrans_model, ft_itrans_guidance
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -122,10 +127,11 @@ class DiffusionFinetuneHPPhase(PipelinePhase):
                 device, state.smoke_test,
                 fixed_batch_size=ft_diff_bs, trial_ckpt_dir=subset_dir,
                 train_stride=train_stride, test_stride=test_stride,
+                train_ds=train_ds, val_ds=val_ds,
             ),
             n_trials=n_trials,
             show_progress_bar=False,
-            catch=(ValueError,),
+            catch=(ValueError, FileNotFoundError, OSError),
         )
         if study.best_trial is None:
             logger.warning(f"All HP trials failed for {subset_id}")
@@ -134,10 +140,6 @@ class DiffusionFinetuneHPPhase(PipelinePhase):
         tuned_params = study.best_params
         tuned_params["batch_size"] = ft_diff_bs
 
-        _, _, _, norm_stats = load_dataset(
-            state.dataset, variate_indices,
-            stride=train_stride, test_stride=test_stride,
-        )
         subset_info = {
             "subset_id": subset_id,
             "variate_indices": variate_indices,

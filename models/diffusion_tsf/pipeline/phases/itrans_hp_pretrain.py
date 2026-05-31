@@ -119,5 +119,6 @@ def _patch_globals(
         mod.RESULTS_DIR = state.results_dir
     if state.synth_cache_dir:
         mod.SYNTH_CACHE_DIR = state.synth_cache_dir
-    if state.datasets_dir:
-        mod.DATASETS_DIR = state.datasets_dir
+    mod.DATASETS_DIR = os.path.abspath(
+        os.path.expanduser(state.datasets_dir or mod.DATASETS_DIR)
+    )

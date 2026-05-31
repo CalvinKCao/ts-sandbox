@@ -109,19 +109,44 @@ CKPT_DIR="$STORE/ckpts/${RUN_STEM}"
 DATA_DIR="$STORE/datasets/${RUN_STEM}"
 mkdir -p "$CKPT_DIR" "$DATA_DIR"
 
+# Benchmark CSVs (shared). Not the per-job results dir under datasets/${RUN_STEM}.
+_resolve_shared_datasets() {
+    if [[ -n "${DATASETS_DIR:-}" ]]; then
+        echo "$DATASETS_DIR"
+        return
+    fi
+    local repo="${SLURM_SUBMIT_DIR:-$PWD}"
+    if [[ -f "$repo/datasets/ETT-small/ETTh1.csv" ]]; then
+        echo "$repo/datasets"
+        return
+    fi
+    if [[ -f "$STORE/datasets/ETT-small/ETTh1.csv" ]]; then
+        echo "$STORE/datasets"
+        return
+    fi
+    echo "$repo/datasets"
+}
+SHARED_DATASETS="$(_resolve_shared_datasets)"
+
 echo "Repo: $PWD"
 echo "Checkpoints: $CKPT_DIR"
 echo "Results: $DATA_DIR"
+echo "Datasets (benchmark CSVs): $SHARED_DATASETS"
 echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
 
 PY_ARGS=("$@")
 HAS_CKPT=0
+HAS_DATASETS=0
 for arg in "${PY_ARGS[@]}"; do
     [[ "$arg" == "--checkpoint-dir" ]] && HAS_CKPT=1
+    [[ "$arg" == "--datasets-dir" ]] && HAS_DATASETS=1
 done
 
 if [[ "$HAS_CKPT" -eq 0 ]]; then
     PY_ARGS+=(--checkpoint-dir "$CKPT_DIR" --results-dir "$DATA_DIR")
+fi
+if [[ "$HAS_DATASETS" -eq 0 ]]; then
+    PY_ARGS+=(--datasets-dir "$SHARED_DATASETS")
 fi
 
 if [[ "${GRID_RESUME:-0}" == "1" ]]; then
