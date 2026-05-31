@@ -1,5 +1,5 @@
 # Project Instructions
-
+never tell me to export WANDB_API_KEY = ... , i dont need the reminder.
 # BEFORE EVERY SINGLE NEW MESSAGE/PROMPT
 Run `git branch --show-current` to see what branch you're on. IF THE BRANCH HAS CHANGED SINCE YOUR LAST MESSAGE AND YOU (THE AGENT) DID NOT CHANGE THE BRANCH, SWITCH BACK TO THE ORIGINAL BRANCH, UNLESS THE USER HAS SPECIFICALLY SAID OTHERWISE.
 

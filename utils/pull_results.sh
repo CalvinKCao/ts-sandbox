@@ -15,6 +15,11 @@
 #
 # Light mode always builds the file list on the cluster with find (not rsync
 # include rules) so nothing is missed in nested dirs like logs/ or logs/run/.
+#
+# Remote find prunes heavy Phase-1 / synthetic trees (see architecture.md §2):
+#   synthetic_cache, synth_data, synth_pool*.npy*, pretrained_dim*/
+#   and promoted Phase-1 .pt names (itrans_hp_best.pt, diffusion.pt, …).
+# --all still walks Phase-1 .pt trees; both modes skip synthetic pools.
 
 set -euo pipefail
 
@@ -142,15 +147,37 @@ fi
 
 [ -d "$search" ] || exit 0
 
-args=(-type f ! -path '*/archive/*')
+# Prune paths we never need (or only want via explicit subpath / --all).
+prune=(\( -path '*/archive/*')
+prune+=(
+    -o -path '*/synthetic_cache/*'
+    -o -path '*/synth_data/*'
+    -o -name 'synth_pool*.npy'
+    -o -name 'synth_pool*.npy.*'
+)
+if [ "$pull_mode" = "light" ]; then
+  prune+=(
+      -o -path '*/pretrained_dim*'
+      -o -path '*/pretrain_dim*'
+      -o -name 'itrans_hp_best.pt'
+      -o -name 'diff_hp_best.pt'
+      -o -name 'pretrained_itransformer.pt'
+      -o -name 'pretrained_diffusion.pt'
+      -o -name 'itransformer.pt'
+      -o -name 'diffusion.pt'
+  )
+fi
+prune+=(\) -prune -o)
+
+file_args=(-type f)
 if [ "$use_recent" = "1" ]; then
-    args+=(-mmin "-$(( recent_hours * 60 ))")
+    file_args+=(-mmin "-$(( recent_hours * 60 ))")
 fi
 if [ "$pull_mode" = "light" ]; then
-    args+=(\( -name '*.log' -o -name '*.err' -o -name '*.out' -o -name '*.json' \))
+    file_args+=(\( -name '*.log' -o -name '*.err' -o -name '*.out' -o -name '*.json' \))
 fi
 
-find "$search" "${args[@]}" -print 2>/dev/null \
+find "$search" "${prune[@]}" "${file_args[@]}" -print 2>/dev/null \
     | sed "s|^${remote_root}/||" \
     | sort -u
 REMOTE_FIND
@@ -170,10 +197,12 @@ pull_via_file_list() {
 
     local scope="all files"
     [ "$PULL_MODE" = "light" ] && scope="*.log *.err *.out *.json"
+    local prune_note=""
+    [ "$PULL_MODE" = "light" ] && prune_note=", skip synth pools + phase-1 ckpts"
     if [ "$USE_RECENT" -eq 1 ]; then
-        echo "  -> ${label} (${scope}, mtime < ${RECENT_HOURS}h)"
+        echo "  -> ${label} (${scope}, mtime < ${RECENT_HOURS}h${prune_note})"
     else
-        echo "  -> ${label} (${scope})"
+        echo "  -> ${label} (${scope}${prune_note})"
     fi
 
     local file_list
