@@ -20,6 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMOKE=0
 SERIAL=0
 SKIP_MMPD_TRAIN=0
+RETRY_MMPD_ONLY=0
+FORCE_MMPD_EVAL=0
 SEED=2026
 
 while [[ $# -gt 0 ]]; do
@@ -27,10 +29,16 @@ while [[ $# -gt 0 ]]; do
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --serial) SERIAL=1; shift ;;
         --skip-mmpd-train) SKIP_MMPD_TRAIN=1; shift ;;
+        --retry-mmpd-only) RETRY_MMPD_ONLY=1; SKIP_MMPD_TRAIN=1; FORCE_MMPD_EVAL=1; shift ;;
         --seed) SEED="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+if [[ "$RETRY_MMPD_ONLY" -eq 1 && -z "${MATRIX_OUTPUT_DIR:-}" ]]; then
+    echo "ERROR: --retry-mmpd-only requires MATRIX_OUTPUT_DIR (existing matrix run)." >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Serial fallback: one self-submitting job (old behaviour)
@@ -115,6 +123,10 @@ fi
   if [[ -n "${MATRIX_DATASETS:-}" ]]; then
     read -r -a DATASETS <<< "${MATRIX_DATASETS}"
   fi
+  MERGE_DATASETS=("${DATASETS[@]}")
+  if [[ -n "${MATRIX_MERGE_DATASETS:-}" ]]; then
+    read -r -a MERGE_DATASETS <<< "${MATRIX_MERGE_DATASETS}"
+  fi
 
   if [[ -n "${MATRIX_OUTPUT_DIR:-}" ]]; then
     OUTPUT_DIR="$MATRIX_OUTPUT_DIR"
@@ -164,7 +176,7 @@ cd "\$REPO"
 PREAMBLE
 
   export REPO OUTPUT_DIR PREAMBLE_FILE SEED SKIP_MMPD_TRAIN
-  export -a EVAL_EXTRA DATASETS
+  export -a EVAL_EXTRA DATASETS MERGE_DATASETS
 
   GPU_ARGS=(--gres=gpu:l40s:1)
   SBATCH_COMMON=(
@@ -189,11 +201,17 @@ PREAMBLE
   )
   if [[ "$SKIP_MMPD_TRAIN" -eq 1 ]]; then
     EVAL_BASE+=(--skip-mmpd-train)
+    if [[ -z "${MMPD_REUSE_DIR:-}" ]]; then
+      EVAL_BASE+=(--indices-dir "$OUTPUT_DIR" --mmpd-output-root "$OUTPUT_DIR")
+    fi
   fi
   if [[ -n "${MMPD_REUSE_DIR:-}" ]]; then
     _reuse="$MMPD_REUSE_DIR"
     [[ "$_reuse" != /* ]] && _reuse="$REPO/$_reuse"
     EVAL_BASE+=(--indices-dir "$_reuse" --mmpd-output-root "$_reuse")
+  fi
+  if [[ "$FORCE_MMPD_EVAL" -eq 1 ]]; then
+    EVAL_BASE+=(--force-mmpd-eval)
   fi
   if [[ -n "${BINARY_ANCHOR_ROOTS:-}" ]]; then
     for _br in ${BINARY_ANCHOR_ROOTS}; do
@@ -207,15 +225,23 @@ PREAMBLE
   echo "Output:     $OUTPUT_DIR"
   echo "Logs:       $LOG_DIR"
   echo "Datasets:   ${DATASETS[*]}"
+  if [[ "${#MERGE_DATASETS[@]}" -ne "${#DATASETS[@]}" ]] || [[ "${MERGE_DATASETS[*]}" != "${DATASETS[*]}" ]]; then
+    echo "Merge over: ${MERGE_DATASETS[*]}"
+  fi
 
-  echo "Submitting init (shared indices + manifest)..."
-  JOB_INIT=$(sbatch --parsable \
-    --job-name="mmpd-mx-init${SMOKE_SUFFIX}" \
-    "${SBATCH_COMMON[@]}" \
-    --time="$WALL_INIT" \
-    --output="$LOG_DIR/init-%j.out" \
-    --error="$LOG_DIR/init-%j.err" \
-    <<ENDSCRIPT
+  JOB_INIT=""
+  WORKER_DEP=()
+  if [[ "$RETRY_MMPD_ONLY" -eq 1 ]]; then
+    echo "Retry mode: MMPD eval only (skip init + binary anchor workers)."
+  else
+    echo "Submitting init (shared indices + manifest)..."
+    JOB_INIT=$(sbatch --parsable \
+      --job-name="mmpd-mx-init${SMOKE_SUFFIX}" \
+      "${SBATCH_COMMON[@]}" \
+      --time="$WALL_INIT" \
+      --output="$LOG_DIR/init-%j.out" \
+      --error="$LOG_DIR/init-%j.err" \
+      <<ENDSCRIPT
 #!/bin/bash
 source "$PREAMBLE_FILE"
 # Quoted "${EVAL_BASE[@]}" inside heredocs collapses to one argv; use unquoted.
@@ -224,17 +250,19 @@ python -u ${EVAL_BASE[@]} \
   --datasets ${DATASETS[*]}
 echo "[init] done: \$(date)"
 ENDSCRIPT
-  )
-  echo "  -> init: $JOB_INIT"
+    )
+    echo "  -> init: $JOB_INIT"
+    WORKER_DEP=(--dependency="afterok:$JOB_INIT")
+  fi
 
   WORKER_IDS=()
   for ds in "${DATASETS[@]}"; do
-    echo "Submitting mmpd-${ds} [afterok:$JOB_INIT]..."
+    echo "Submitting mmpd-${ds} ${WORKER_DEP[*]}..."
     JOB_MMPD=$(sbatch --parsable \
       --job-name="mmpd-mx-${ds}${SMOKE_SUFFIX}" \
       "${SBATCH_COMMON[@]}" \
       --time="$WALL_MMPD" \
-      --dependency="afterok:$JOB_INIT" \
+      "${WORKER_DEP[@]}" \
       --output="$LOG_DIR/mmpd-${ds}-%j.out" \
       --error="$LOG_DIR/mmpd-${ds}-%j.err" \
       <<ENDSCRIPT
@@ -249,15 +277,16 @@ ENDSCRIPT
     echo "  -> mmpd-${ds}: $JOB_MMPD"
     WORKER_IDS+=("$JOB_MMPD")
 
-    echo "Submitting bin-${ds} [afterok:$JOB_INIT]..."
-    JOB_B=$(sbatch --parsable \
-      --job-name="mmpd-mx-b-${ds}${SMOKE_SUFFIX}" \
-      "${SBATCH_COMMON[@]}" \
-      --time="$WALL_ANCHOR" \
-      --dependency="afterok:$JOB_INIT" \
-      --output="$LOG_DIR/bin-${ds}-%j.out" \
-      --error="$LOG_DIR/bin-${ds}-%j.err" \
-      <<ENDSCRIPT
+    if [[ "$RETRY_MMPD_ONLY" -eq 0 ]]; then
+      echo "Submitting bin-${ds} ${WORKER_DEP[*]}..."
+      JOB_B=$(sbatch --parsable \
+        --job-name="mmpd-mx-b-${ds}${SMOKE_SUFFIX}" \
+        "${SBATCH_COMMON[@]}" \
+        --time="$WALL_ANCHOR" \
+        "${WORKER_DEP[@]}" \
+        --output="$LOG_DIR/bin-${ds}-%j.out" \
+        --error="$LOG_DIR/bin-${ds}-%j.err" \
+        <<ENDSCRIPT
 #!/bin/bash
 source "$PREAMBLE_FILE"
 python -u ${EVAL_BASE[@]} \
@@ -266,13 +295,14 @@ python -u ${EVAL_BASE[@]} \
   --datasets "$ds"
 echo "[bin-${ds}] done: \$(date)"
 ENDSCRIPT
-    )
-    echo "  -> bin-${ds}: $JOB_B"
-    WORKER_IDS+=("$JOB_B")
+      )
+      echo "  -> bin-${ds}: $JOB_B"
+      WORKER_IDS+=("$JOB_B")
+    fi
   done
 
-  MERGE_DEP="afterok:$JOB_INIT"
-  for wid in "${WORKER_IDS[@]}"; do
+  MERGE_DEP="afterok:${WORKER_IDS[0]}"
+  for wid in "${WORKER_IDS[@]:1}"; do
     MERGE_DEP+=":$wid"
   done
 
@@ -295,7 +325,7 @@ ENDSCRIPT
 source "$PREAMBLE_FILE"
 python -u ${EVAL_BASE[@]} \
   --phase merge \
-  --datasets ${DATASETS[*]} \
+  --datasets ${MERGE_DATASETS[*]} \
   --cpu
 echo "[merge] done: \$(date)"
 echo "Metrics: $OUTPUT_DIR/metrics.json"

@@ -263,6 +263,24 @@ def mmpd_train_batch_size(args: argparse.Namespace, dataset: str) -> int:
     return cap
 
 
+def mmpd_eval_batch_size(args: argparse.Namespace, dataset: str) -> int:
+    """Cap eval batch; 100-sample diffusion predict is much heavier than train."""
+    dim = DATASET_DIMS[dataset]
+    cap = args.mmpd_eval_batch_size
+    if dim >= 800:
+        cap = min(cap, 1)
+    elif dim >= 300:
+        cap = min(cap, 2)
+    elif dim >= 130:
+        cap = min(cap, 4)
+    if cap < args.mmpd_eval_batch_size:
+        print(
+            f"[mmpd-eval] {dataset}: batch_size {args.mmpd_eval_batch_size} -> {cap} "
+            f"(data_dim={dim})"
+        )
+    return cap
+
+
 def find_anchor_runs(
     datasets: Sequence[str],
     explicit_roots: Sequence[Path],
@@ -947,7 +965,7 @@ def run_mmpd_eval(
             "--gmm-iterations",
             str(args.gmm_iterations),
             "--batch-size",
-            str(args.mmpd_eval_batch_size),
+            str(mmpd_eval_batch_size(args, dataset)),
             "--num-workers",
             str(args.num_workers),
             "--gpu",
