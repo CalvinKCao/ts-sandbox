@@ -10,6 +10,11 @@
 #   ./submit_cfg_ablation.sh
 #   ./submit_cfg_ablation.sh --datasets ETTm2,ETTh1 --cfg-scales 2,4,7,10
 #
+# CFG 4/8/12 on finished binary_dual_scale ckpts (skip ETTm*, illness, electricity, solar):
+#   ./submit_cfg_ablation.sh \
+#     --datasets ETTh1,ETTh2,exchange_rate,weather,traffic,PeMS,dalia \
+#     --cfg-scales 4,8,12
+#
 # Cancel mistaken full-retrain grid jobs first:
 #   scancel -u $USER -n grid-ETTm2-binary_dual_scale_cfg   # etc.
 # =============================================================================
