@@ -156,6 +156,7 @@ print("torch", torch.__version__, "gpu", torch.cuda.get_device_name(0))
 PY
 
 export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export REPO="$REPO"
 export OUTPUT_DIR="$OUTPUT_DIR"
 cd "\$REPO"

@@ -85,6 +85,11 @@ ANCHOR_VARIANTS = {
     "gaussian": {"slug": "gauss-anchor", "model_name": "gaussian_anchor"},
     "binary": {"slug": "binary", "model_name": "binary_anchor"},
 }
+# Upstream MMPD only reads CSV; NPZ / prewindowed DALIA need conversion when staged.
+MMPD_STAGED_FILENAMES = {
+    "PeMS": "PeMS04.csv",
+    "dalia": "dalia_mmpd.csv",
+}
 
 
 @dataclass
@@ -163,19 +168,97 @@ def apply_mmpd_compatibility_patches(path: Path) -> None:
             tools_py.write_text(patched, encoding="utf-8")
 
 
+def mmpd_staged_filename(dataset: str) -> str:
+    return MMPD_STAGED_FILENAMES.get(dataset, DATASET_FILES[dataset].name)
+
+
+def _write_mmpd_csv(path: Path, values: np.ndarray, columns: Sequence[str]) -> None:
+    """Write MTS-style CSV: date column + one column per variate."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    n_rows, n_cols = values.shape
+    if len(columns) != n_cols:
+        raise ValueError(f"Expected {n_cols} columns, got {len(columns)}")
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", *columns])
+        for i in range(n_rows):
+            writer.writerow([i, *values[i].tolist()])
+
+
+def _load_pems_npz_array(path: Path) -> np.ndarray:
+    raw = np.load(path, allow_pickle=True)
+    data = raw["data"]
+    if data.ndim == 3:
+        data = data[:, :, 0]
+    return np.asarray(data, dtype=np.float32)
+
+
+def _export_pems_mmpd_csv(src_npz: Path, dst_csv: Path) -> None:
+    values = _load_pems_npz_array(src_npz)
+    columns = [f"var_{i}" for i in range(values.shape[1])]
+    _write_mmpd_csv(dst_csv, values, columns)
+    print(f"[mmpd-data] PeMS: wrote {dst_csv} ({values.shape[0]} steps, {values.shape[1]} vars)")
+
+
+def _export_dalia_mmpd_csv(dst_csv: Path) -> None:
+    from models.diffusion_tsf.dalia_data import (
+        DALIA_CHANNEL_NAMES,
+        load_dalia_tensors,
+    )
+
+    x, y = load_dalia_tensors()
+    windows = np.concatenate([x, y], axis=1)
+    values = windows.reshape(-1, windows.shape[-1])
+    _write_mmpd_csv(dst_csv, values, DALIA_CHANNEL_NAMES)
+    print(
+        f"[mmpd-data] DALIA: wrote {dst_csv} "
+        f"({len(x)} windows x {windows.shape[1]} steps, {values.shape[1]} vars)"
+    )
+
+
 def stage_mmpd_datasets(data_dir: Path, datasets: Sequence[str]) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     for dataset in datasets:
         src = DATASET_FILES[dataset]
         if not src.exists():
-            raise FileNotFoundError(f"Missing dataset CSV for {dataset}: {src}")
-        dst = data_dir / src.name
+            raise FileNotFoundError(f"Missing dataset file for {dataset}: {src}")
+        dst = data_dir / mmpd_staged_filename(dataset)
+
+        if dataset == "PeMS":
+            if dst.is_symlink():
+                dst.unlink()
+            if not dst.exists() or dst.stat().st_size == 0:
+                _export_pems_mmpd_csv(src, dst)
+            continue
+
+        if dataset == "dalia":
+            if dst.is_symlink():
+                dst.unlink()
+            if not dst.exists() or dst.stat().st_size == 0:
+                _export_dalia_mmpd_csv(dst)
+            continue
+
         if dst.exists() or dst.is_symlink():
             continue
         try:
             dst.symlink_to(src)
         except OSError:
             shutil.copy2(src, dst)
+
+
+def mmpd_train_batch_size(args: argparse.Namespace, dataset: str) -> int:
+    """Cap batch size for wide datasets to avoid L40S OOM during MMPD training."""
+    dim = DATASET_DIMS[dataset]
+    cap = args.mmpd_batch_size
+    if dim >= 800:
+        cap = min(cap, 4)
+    elif dim >= 300:
+        cap = min(cap, 8)
+    elif dim >= 150:
+        cap = min(cap, 16)
+    if cap < args.mmpd_batch_size:
+        print(f"[mmpd] {dataset}: batch_size {args.mmpd_batch_size} -> {cap} (data_dim={dim})")
+    return cap
 
 
 def find_anchor_runs(
@@ -259,8 +342,9 @@ def dataset_window_lengths(args: argparse.Namespace, dataset: str) -> Tuple[int,
 
 
 def build_mmpd_train_cmd(args: argparse.Namespace, dataset: str) -> List[str]:
-    data_path = DATASET_FILES[dataset].name
+    data_path = mmpd_staged_filename(dataset)
     lookback, horizon = dataset_window_lengths(args, dataset)
+    batch_size = mmpd_train_batch_size(args, dataset)
     cmd = [
         sys.executable,
         "-u",
@@ -310,7 +394,7 @@ def build_mmpd_train_cmd(args: argparse.Namespace, dataset: str) -> List[str]:
         "--beta_schedule",
         "linear",
         "--batch_size",
-        str(args.mmpd_batch_size),
+        str(batch_size),
         "--learning_rate",
         "1e-4",
         "--lradj",
@@ -698,10 +782,13 @@ def load_anchor_model(run: AnchorRun, args: argparse.Namespace, device: torch.de
     diffusion_type = infer_diffusion_type(ckpt, run.variant)
     apply_ckpt_architecture_globals(pipeline, ckpt, diffusion_type)
     tuned = run.metadata.get("tuned_params", {})
+    lookback, horizon = dataset_window_lengths(args, run.dataset)
+    guidance_mod = importlib.import_module("models.diffusion_tsf.guidance")
+    itrans_guidance = guidance_mod.iTransformerGuidance(itrans)
     model = pipeline.create_diffusion_model(
         n_variates=n_vars,
-        lookback=args.lookback,
-        horizon=args.horizon,
+        lookback=lookback,
+        horizon=horizon,
         diffusion_type=diffusion_type,
         model_type=infer_model_type(ckpt),
         use_deterministic_anchor_loss=True,
@@ -714,9 +801,8 @@ def load_anchor_model(run: AnchorRun, args: argparse.Namespace, device: torch.de
         cfg_dropout=float(get_ckpt_config_value(ckpt, "cfg_dropout", 0.1)),
         cfg_scale=float(get_ckpt_config_value(ckpt, "cfg_scale", 1.0)),
         use_cfg_inference=bool(get_ckpt_config_value(ckpt, "use_cfg_inference", False)),
+        guidance_model=itrans_guidance,
     ).to(device)
-    guidance_mod = importlib.import_module("models.diffusion_tsf.guidance")
-    model.set_guidance_model(guidance_mod.iTransformerGuidance(itrans))
     pipeline.load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
     model.eval()
     return model
@@ -833,7 +919,7 @@ def run_mmpd_eval(
             "--root-path",
             str(args.mmpd_data_dir),
             "--data-path",
-            DATASET_FILES[dataset].name,
+            mmpd_staged_filename(dataset),
             "--data-split",
             DATASET_SPLITS[dataset],
             "--output-root",
