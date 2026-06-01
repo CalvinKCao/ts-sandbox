@@ -1,4 +1,11 @@
 #!/bin/bash
+#SBATCH --job-name=mmpd-anchor-eval
+#SBATCH --account=aip-boyuwang
+#SBATCH --time=06:00:00
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:l40s:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=60G
 # Serial single-job fallback for slurm_mmpd_gaussian_anchor_eval.sh --serial
 
 set -euo pipefail
@@ -26,7 +33,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         CPUS=4
         JOB_NAME="mmpd-anchor-eval-smoke"
     else
-        [[ -z "$WALL" ]] && WALL="4:00:00"
+        [[ -z "$WALL" ]] && WALL="6:00:00"
         MEM="60G"
         CPUS=8
         JOB_NAME="mmpd-anchor-eval"

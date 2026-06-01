@@ -1,4 +1,10 @@
 #!/bin/bash
+#SBATCH --job-name=mmpd-prob100-launch
+#SBATCH --account=aip-boyuwang
+#SBATCH --time=06:00:00
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=2G
 # =============================================================================
 # 100-sample probabilistic eval (50% test subset): mean-pred MSE/MAE, CRPS, top-3.
 # Eval-only — reuses MMPD checkpoints from a finished matrix run when given
@@ -25,7 +31,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+if [[ "${MMPD_PROB100_WORKER:-0}" -ne 1 ]]; then
   if [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
     REPO="${SCRATCH}/ts-sandbox"
   elif [[ -d "$HOME/ts-sandbox" ]]; then
@@ -77,7 +83,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   else
     DATASETS=(ETTh1 ETTh2 ETTm1 ETTm2 illness exchange_rate weather electricity traffic PeMS solar_Alabama dalia)
     WALL_INIT="0:30:00"
-    WALL_WORKER="4:00:00"
+    WALL_WORKER="6:00:00"
     WALL_MERGE="0:30:00"
     MEM="60G"
     CPUS=8

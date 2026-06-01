@@ -1,4 +1,10 @@
 #!/bin/bash
+#SBATCH --job-name=mmpd-anchor-launch
+#SBATCH --account=aip-boyuwang
+#SBATCH --time=06:00:00
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=2G
 # =============================================================================
 # MMPD vs binary/Gaussian-anchor matrix eval — parallel fan-out (Killarney).
 #
@@ -35,7 +41,7 @@ done
 # ---------------------------------------------------------------------------
 # Serial fallback: one self-submitting job (old behaviour)
 # ---------------------------------------------------------------------------
-if [[ "$SERIAL" -eq 1 && -z "${SLURM_JOB_ID:-}" ]]; then
+if [[ "$SERIAL" -eq 1 ]]; then
     exec "$SCRIPT_DIR/slurm_mmpd_gaussian_anchor_eval_serial.sh" \
         $([[ "$SMOKE" -eq 1 ]] && echo --smoke-test) \
         $([[ "$SKIP_MMPD_TRAIN" -eq 1 ]] && echo --skip-mmpd-train) \
@@ -43,9 +49,9 @@ if [[ "$SERIAL" -eq 1 && -z "${SLURM_JOB_ID:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Login node: fan-out parallel jobs
+# Launcher: fan-out parallel jobs. Supports both direct shell and sbatch launch.
 # ---------------------------------------------------------------------------
-if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+if [[ "${MMPD_MATRIX_WORKER:-0}" -ne 1 ]]; then
   if [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
     REPO="${SCRATCH}/ts-sandbox"
   elif [[ -d "$HOME/ts-sandbox" ]]; then
@@ -86,8 +92,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   else
     DATASETS=(ETTh1 ETTh2 ETTm1 ETTm2 illness exchange_rate weather electricity traffic PeMS solar_Alabama dalia)
     WALL_INIT="0:30:00"
-    WALL_MMPD="4:00:00"
-    WALL_ANCHOR="4:00:00"
+    WALL_MMPD="6:00:00"
+    WALL_ANCHOR="6:00:00"
     WALL_MERGE="0:30:00"
     MEM="60G"
     CPUS=8
