@@ -104,7 +104,7 @@ install_pipeline_deps() {
     fi
 
     # Idempotent: persistent venv may exist with only torch from an older partial setup.
-    pip_retry pip install optuna wandb einops pyyaml -q
+    pip_retry pip install optuna wandb einops pyyaml scikit-learn -q
 
     if ! pip_retry pip install --no-index matplotlib -q 2>/dev/null; then
         pip_retry pip install matplotlib -q 2>/dev/null || {
