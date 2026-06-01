@@ -526,6 +526,10 @@ def mmpd_env_for_run(run: AnchorRun) -> Dict[str, str]:
         env["MMPD_BLOCK_LEN"] = "120"
     else:
         env.pop("MMPD_BLOCK_LEN", None)
+    repo = str(REPO_ROOT)
+    env["TS_SANDBOX_REPO"] = repo
+    prev = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = repo if not prev else f"{repo}:{prev}"
     return env
 
 
@@ -607,9 +611,24 @@ def build_mmpd_train_cmd(args: argparse.Namespace, run: AnchorRun) -> List[str]:
     return cmd
 
 
-def mmpd_checkpoint_path(args: argparse.Namespace, run: AnchorRun) -> Path:
+def mmpd_checkpoint_data_names(run: AnchorRun) -> List[str]:
+    """MMPD setting prefixes to try (subset id first, then legacy dataset name)."""
+    names: List[str] = []
+    for name in (mmpd_dataset_name(run), run.dataset):
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def mmpd_checkpoint_path(
+    args: argparse.Namespace,
+    run: AnchorRun,
+    *,
+    data_name: Optional[str] = None,
+) -> Path:
     lookback, horizon = dataset_window_lengths(args, run.dataset)
-    setting = mmpd_setting(mmpd_dataset_name(run), lookback, horizon, args.patch_size)
+    name = data_name or mmpd_dataset_name(run)
+    setting = mmpd_setting(name, lookback, horizon, args.patch_size)
     return (
         mmpd_output_root(args)
         / "mmpd_out"
@@ -620,11 +639,28 @@ def mmpd_checkpoint_path(args: argparse.Namespace, run: AnchorRun) -> Path:
     )
 
 
+def resolve_mmpd_checkpoint(
+    args: argparse.Namespace, run: AnchorRun
+) -> Tuple[Path, str]:
+    """Return existing checkpoint path and the MMPD `data` name used in its setting dir."""
+    for name in mmpd_checkpoint_data_names(run):
+        ckpt = mmpd_checkpoint_path(args, run, data_name=name)
+        if ckpt.exists():
+            if name != mmpd_dataset_name(run):
+                print(
+                    f"[mmpd] {run.dataset}: using legacy checkpoint data name {name!r} "
+                    f"(subset id {mmpd_dataset_name(run)!r})",
+                    flush=True,
+                )
+            return ckpt, name
+    return mmpd_checkpoint_path(args, run), mmpd_dataset_name(run)
+
+
 def train_mmpd(args: argparse.Namespace, runs: Sequence[AnchorRun]) -> None:
     for run in runs:
         dataset = run.dataset
         stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
-        ckpt = mmpd_checkpoint_path(args, run)
+        ckpt, _ = resolve_mmpd_checkpoint(args, run)
         if ckpt.exists() and not args.force_mmpd_train:
             print(f"[mmpd] Reusing checkpoint for {dataset}: {ckpt}")
             continue
@@ -661,8 +697,12 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
             from einops import rearrange
             from torch.utils.data import DataLoader, Subset
 
-            _repo = os.environ.get("TS_SANDBOX_REPO")
-            if _repo:
+            from pathlib import Path as _Path
+
+            _repo = os.environ.get("TS_SANDBOX_REPO") or str(
+                _Path(__file__).resolve().parents[2]
+            )
+            if _repo not in sys.path:
                 sys.path.insert(0, _repo)
             from utils.mmpd_eval_progress import EvalProgress, fmt_duration
 
@@ -1169,6 +1209,9 @@ def run_mmpd_eval(
 
     if not out_npz.exists() or args.force_mmpd_eval:
         stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
+        ckpt_path, mmpd_data = resolve_mmpd_checkpoint(args, run)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"MMPD checkpoint missing for {dataset}: {ckpt_path}")
         helper = write_mmpd_eval_helper(args.mmpd_repo)
         lookback, horizon = dataset_window_lengths(args, dataset)
         data_dim = len(run_variate_indices(run))
@@ -1178,7 +1221,7 @@ def run_mmpd_eval(
             "-u",
             str(helper),
             "--dataset",
-            mmpd_dataset_name(run),
+            mmpd_data,
             "--root-path",
             str(args.mmpd_data_dir),
             "--data-path",
@@ -1217,7 +1260,6 @@ def run_mmpd_eval(
         if args.cpu:
             cmd.append("--cpu")
         env = mmpd_env_for_run(run)
-        env["TS_SANDBOX_REPO"] = str(REPO_ROOT)
         print(
             f"[mmpd-eval] {dataset}: launching helper "
             f"(windows={len(indices)}, batch={batch_size}, variates={data_dim}, "
@@ -1771,7 +1813,7 @@ def run_phase_mmpd(
         train_mmpd(args, [binary_run])
     elif not args.skip_mmpd_eval:
         stage_mmpd_dataset_for_run(args.mmpd_data_dir, binary_run)
-        ckpt = mmpd_checkpoint_path(args, binary_run)
+        ckpt, _ = resolve_mmpd_checkpoint(args, binary_run)
         if not ckpt.exists():
             raise FileNotFoundError(
                 f"--skip-mmpd-train but missing MMPD checkpoint: {ckpt}"

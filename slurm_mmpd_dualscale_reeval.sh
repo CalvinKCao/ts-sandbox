@@ -11,6 +11,11 @@
 #   ./slurm_mmpd_dualscale_reeval.sh
 #   SOURCE_MATRIX_DIR=results/datasets/<matrix> ./slurm_mmpd_dualscale_reeval.sh
 #
+# Cancel a stuck matrix and resubmit (login node):
+#   scancel -u "$USER" -n mmpd-mx-init -n mmpd-mx-merge
+#   scancel -u "$USER" -n 'mmpd-mx-*' -n 'mmpd-mx-b-*' 2>/dev/null || true
+#   cd "$SCRATCH/ts-sandbox" && git pull && ./slurm_mmpd_dualscale_reeval.sh --reeval-only
+#
 # Retry failed datasets only (same output dir, no merge until all partials exist):
 #   MATRIX_OUTPUT_DIR=results/datasets/06-01-mmpd-binary-aligned \
 #   MATRIX_DATASETS="ETTm2 illness" \
@@ -25,7 +30,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_MATRIX_DIR="${SOURCE_MATRIX_DIR:-results/datasets/06-01-mmpd-binary-aligned}"
 RUN_STEM="${RUN_STEM:-$(date +%m-%d)-mmpd-dualscale-reeval}"
-MATRIX_OUTPUT_DIR="${MATRIX_OUTPUT_DIR:-results/datasets/${RUN_STEM}}"
+# Re-eval reuses indices/checkpoints from SOURCE unless MATRIX_OUTPUT_DIR is set.
+MATRIX_OUTPUT_DIR="${MATRIX_OUTPUT_DIR:-$SOURCE_MATRIX_DIR}"
 
 BINARY_ROOTS=(
   "results/ckpts/05-31-3828089-ETTh1-binary_dual_scale"
