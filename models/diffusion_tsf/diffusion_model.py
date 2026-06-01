@@ -170,6 +170,7 @@ class DiffusionTSF(nn.Module):
                 and config.num_variables > 1
             ),
             max_variates=max(config.num_variables, 512),
+            cross_variate_context_bias=config.cross_variate_context_bias,
         )
 
         self.context_encoder = iTransformerTokenAdapter(
@@ -718,10 +719,16 @@ class DiffusionTSF(nn.Module):
         num_inference_steps overrides binary_sample_steps when set.
         """
         steps = num_inference_steps if num_inference_steps is not None else self.config.binary_sample_steps
+        effective_cfg_scale = (
+            self.config.cfg_scale
+            if cfg_scale is None and self.config.use_cfg_inference
+            else (1.0 if cfg_scale is None else cfg_scale)
+        )
         if self.config.use_dual_scale:
             return self._generate_binary_dual_scale(
                 past,
                 num_steps=steps,
+                cfg_scale=effective_cfg_scale,
                 verbose=verbose,
                 decoder_method=decoder_method,
                 beam_width=beam_width,
@@ -733,6 +740,7 @@ class DiffusionTSF(nn.Module):
         return self._generate_binary_factorized(
             past,
             num_steps=steps,
+            cfg_scale=effective_cfg_scale,
             verbose=verbose,
             decoder_method=decoder_method,
             beam_width=beam_width,
@@ -973,6 +981,7 @@ class DiffusionTSF(nn.Module):
         verbose: bool = False,
         decoder_method: str = "mean",
         sampler: str = "ddim",
+        cfg_scale: float = 1.0,
         yield_intermediates: bool = False,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
@@ -1015,23 +1024,32 @@ class DiffusionTSF(nn.Module):
         ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
         ctx_flat = self._expand_ctx_to_dual_scale(ctx, B, V)
 
-        def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
+        def _build_canvas(xt: torch.Tensor, guide: Optional[torch.Tensor] = None) -> torch.Tensor:
             canvas = self._inject_coordinate_channel(xt)
             canvas = self._inject_time_channels(canvas)
-            if guide_flat is not None:
-                canvas = torch.cat([canvas, guide_flat], dim=1)
+            if guide is not None:
+                canvas = torch.cat([canvas, guide], dim=1)
             return canvas
 
         def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
-            canvas = _build_canvas(xt)
-            out = self._predict_noise_chunked(
-                canvas,
-                t_batch,
-                cond_for_unet,
-                ctx_flat,
-                scale_indices=scale_indices,
-                variate_indices=variate_indices,
+            canvas = _build_canvas(xt, guide_flat)
+            out_c = self._predict_noise_chunked(
+                canvas, t_batch, cond_for_unet, ctx_flat,
+                scale_indices=scale_indices, variate_indices=variate_indices,
             )
+            if cfg_scale > 1.0:
+                null_guide = torch.zeros_like(guide_flat) if guide_flat is not None else None
+                out_u = self._predict_noise_chunked(
+                    _build_canvas(xt, null_guide),
+                    t_batch,
+                    torch.zeros_like(cond_for_unet),
+                    torch.zeros_like(ctx_flat) if ctx_flat is not None else None,
+                    scale_indices=scale_indices,
+                    variate_indices=variate_indices,
+                )
+                out = out_u + cfg_scale * (out_c - out_u)
+            else:
+                out = out_c
             return out[:, 0:1], out[:, 1:2]
 
         intermediates = None
@@ -1242,6 +1260,7 @@ class DiffusionTSF(nn.Module):
         verbose: bool = False,
         decoder_method: str = "mean",
         sampler: str = "ddim",
+        cfg_scale: float = 1.0,
         yield_intermediates: bool = False,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
@@ -1274,18 +1293,30 @@ class DiffusionTSF(nn.Module):
         if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
             variate_indices = self._flat_variate_indices(BV, V, device)
 
-        def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
+        def _build_canvas(xt: torch.Tensor, guide: Optional[torch.Tensor] = None) -> torch.Tensor:
             canvas = self._inject_coordinate_channel(xt)
             canvas = self._inject_time_channels(canvas)
-            if guide_flat is not None:
-                canvas = torch.cat([canvas, guide_flat], dim=1)
+            if guide is not None:
+                canvas = torch.cat([canvas, guide], dim=1)
             return canvas
 
         def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
-            canvas = _build_canvas(xt)
-            out = self._predict_noise_chunked(
+            canvas = _build_canvas(xt, guide_flat)
+            out_c = self._predict_noise_chunked(
                 canvas, t_batch, cond_for_unet, ctx_flat, variate_indices=variate_indices,
             )
+            if cfg_scale > 1.0:
+                null_guide = torch.zeros_like(guide_flat) if guide_flat is not None else None
+                out_u = self._predict_noise_chunked(
+                    _build_canvas(xt, null_guide),
+                    t_batch,
+                    torch.zeros_like(cond_for_unet),
+                    torch.zeros_like(ctx_flat) if ctx_flat is not None else None,
+                    variate_indices=variate_indices,
+                )
+                out = out_u + cfg_scale * (out_c - out_u)
+            else:
+                out = out_c
             return out[:, 0:1], out[:, 1:2]
 
         intermediates = None

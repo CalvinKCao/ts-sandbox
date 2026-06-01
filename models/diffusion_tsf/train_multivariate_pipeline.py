@@ -244,7 +244,11 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'use_dual_scale': USE_DUAL_SCALE,
         'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
         'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
+        'cfg_dropout': CFG_DROPOUT,
+        'cfg_scale': CFG_SCALE,
+        'use_cfg_inference': USE_CFG_INFERENCE,
         'disable_cross_attention': DISABLE_CROSS_ATTENTION,
+        'cross_variate_context_bias': CROSS_VARIATE_CONTEXT_BIAS,
         'model_type': MODEL_TYPE,
         'diffusion_type': DIFFUSION_TYPE,
         'dit_patch_size': DIT_PATCH_SIZE,
@@ -509,6 +513,10 @@ def init_wandb(
         'use_dual_scale': USE_DUAL_SCALE,
         'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
         'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
+        'cfg_dropout': CFG_DROPOUT,
+        'cfg_scale': CFG_SCALE,
+        'use_cfg_inference': USE_CFG_INFERENCE,
+        'cross_variate_context_bias': CROSS_VARIATE_CONTEXT_BIAS,
         'n_variates': N_VARIATES,
         'diffusion_type': DIFFUSION_TYPE,
         'deterministic_anchor_loss': DETERMINISTIC_ANCHOR_LOSS,
@@ -776,6 +784,9 @@ from models.diffusion_tsf.pipeline_config import (
     USE_DUAL_SCALE,
     DUAL_SCALE_FINE_WEIGHT,
     DUAL_SCALE_INDEPENDENT_TIMESTEPS,
+    CFG_DROPOUT,
+    CFG_SCALE,
+    USE_CFG_INFERENCE,
     MODEL_TYPE,
     DIFFUSION_TYPE,
     DIT_PATCH_SIZE,
@@ -784,6 +795,7 @@ from models.diffusion_tsf.pipeline_config import (
     DIT_NUM_HEADS,
     DIT_MLP_RATIO,
     DIT_DROPOUT,
+    CROSS_VARIATE_CONTEXT_BIAS,
     GUIDANCE_PENALTY_WEIGHT,
     DETERMINISTIC_ANCHOR_LOSS,
     DETERMINISTIC_ANCHOR_LAMBDA,
@@ -1265,6 +1277,10 @@ def create_diffusion_model(
     use_deterministic_anchor_loss: Optional[bool] = None,
     deterministic_anchor_lambda: Optional[float] = None,
     deterministic_anchor_alpha: Optional[float] = None,
+    cross_variate_context_bias: Optional[float] = None,
+    cfg_dropout: Optional[float] = None,
+    cfg_scale: Optional[float] = None,
+    use_cfg_inference: Optional[bool] = None,
     use_window_normalization: Optional[bool] = None,
     zero_guidance_forecast: Optional[bool] = None,
     guidance_model=None,
@@ -1288,6 +1304,14 @@ def create_diffusion_model(
         deterministic_anchor_lambda = DETERMINISTIC_ANCHOR_LAMBDA
     if deterministic_anchor_alpha is None:
         deterministic_anchor_alpha = DETERMINISTIC_ANCHOR_ALPHA
+    if cross_variate_context_bias is None:
+        cross_variate_context_bias = CROSS_VARIATE_CONTEXT_BIAS
+    if cfg_dropout is None:
+        cfg_dropout = CFG_DROPOUT
+    if cfg_scale is None:
+        cfg_scale = CFG_SCALE
+    if use_cfg_inference is None:
+        use_cfg_inference = USE_CFG_INFERENCE
     if use_window_normalization is None:
         use_window_normalization = USE_WINDOW_NORMALIZATION
     if zero_guidance_forecast is None:
@@ -1327,6 +1351,10 @@ def create_diffusion_model(
         use_deterministic_anchor_loss=use_deterministic_anchor_loss,
         deterministic_anchor_lambda=deterministic_anchor_lambda,
         deterministic_anchor_alpha=deterministic_anchor_alpha,
+        cross_variate_context_bias=cross_variate_context_bias,
+        cfg_dropout=cfg_dropout,
+        cfg_scale=cfg_scale,
+        use_cfg_inference=use_cfg_inference,
         use_window_normalization=use_window_normalization,
         zero_guidance_forecast=zero_guidance_forecast,
     )
@@ -2676,7 +2704,11 @@ def _promote_best_trial_to_final(
                 'use_dual_scale': USE_DUAL_SCALE,
                 'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
                 'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
+                'cfg_dropout': CFG_DROPOUT,
+                'cfg_scale': CFG_SCALE,
+                'use_cfg_inference': USE_CFG_INFERENCE,
                 'disable_cross_attention': DISABLE_CROSS_ATTENTION,
+                'cross_variate_context_bias': CROSS_VARIATE_CONTEXT_BIAS,
                 'use_window_normalization': USE_WINDOW_NORMALIZATION,
                 'zero_guidance_forecast': ZERO_GUIDANCE_FORECAST,
                 'window_stride': WINDOW_STRIDE,
@@ -2876,7 +2908,11 @@ def evaluate_model(
         
         return {'mse': mse, 'mae': mae, 'trend_accuracy': trend_acc}
     
-    from models.diffusion_tsf.metrics import aggregate_texture_per_sample, texture_metrics
+    from models.diffusion_tsf.metrics import (
+        aggregate_texture_per_sample,
+        probabilistic_forecast_metrics,
+        texture_metrics,
+    )
 
     n_series = int(targets.shape[0] * targets.shape[1])
     n_draws = int(samples_tensor.shape[0]) if samples_tensor.ndim > 3 else 1
@@ -2899,6 +2935,17 @@ def evaluate_model(
     avg_metrics.update(
         aggregate_texture_per_sample(t_np, samples_tensor.numpy())
     )
+    samples_bvsl = np.moveaxis(samples_tensor.numpy(), 0, 2)
+    prob_metrics = dict(avg_metrics)
+    prob_metrics.update(
+        probabilistic_forecast_metrics(
+            t_np,
+            samples_bvsl,
+            gmm_components=9,
+            topk_max=3,
+            seed=42,
+        )
+    )
 
     logger.info(
         "eval: metrics done | wall=%.1fs (includes texture)",
@@ -2907,7 +2954,10 @@ def evaluate_model(
 
     return {
         'single': single_metrics,
-        'averaged': avg_metrics,
+        'averaged': prob_metrics,
+        'deterministic_anchor': single_metrics,
+        'probabilistic_avg30': prob_metrics,
+        'probabilistic': prob_metrics,
     }
 
 
@@ -4130,8 +4180,9 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
-    global IMAGE_HEIGHT, DISABLE_CROSS_ATTENTION
+    global IMAGE_HEIGHT, DISABLE_CROSS_ATTENTION, CROSS_VARIATE_CONTEXT_BIAS
     global USE_DUAL_SCALE, DUAL_SCALE_FINE_WEIGHT, DUAL_SCALE_INDEPENDENT_TIMESTEPS
+    global CFG_DROPOUT, CFG_SCALE, USE_CFG_INFERENCE
     global LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN
     global MODEL_TYPE, DIFFUSION_TYPE, DETERMINISTIC_ANCHOR_LOSS, DETERMINISTIC_ANCHOR_LAMBDA
     global DETERMINISTIC_ANCHOR_ALPHA, EVAL_SAMPLER
@@ -4191,8 +4242,16 @@ def main():
     parser.add_argument('--dual-scale-independent-timesteps', action='store_true',
                         default=DUAL_SCALE_INDEPENDENT_TIMESTEPS,
                         help='Draw independent diffusion timesteps for coarse and fine scales')
+    parser.add_argument('--cfg-dropout', type=float, default=CFG_DROPOUT,
+                        help='Classifier-free conditioning dropout during diffusion training')
+    parser.add_argument('--cfg-scale', type=float, default=CFG_SCALE,
+                        help='Classifier-free guidance scale used when inference CFG is enabled')
+    parser.add_argument('--use-cfg-inference', action='store_true', default=USE_CFG_INFERENCE,
+                        help='Blend conditional and null predictions during diffusion inference')
     parser.add_argument('--disable-cross-attention', action='store_true',
                         help='Disable cross-variate attention (fully univariate baseline)')
+    parser.add_argument('--cross-variate-context-bias', type=float, default=CROSS_VARIATE_CONTEXT_BIAS,
+                        help='Additive bottleneck cross-attention bias for the target variate token')
     parser.add_argument('--disable-window-normalization', action='store_true',
                         help='Use only dataset-level normalization from load_dataset; skip per-window z-score in DiffusionTSF')
     parser.add_argument('--zero-guidance-forecast', action='store_true',
@@ -4229,6 +4288,10 @@ def main():
     USE_DUAL_SCALE = args.dual_scale
     DUAL_SCALE_FINE_WEIGHT = args.dual_scale_fine_weight
     DUAL_SCALE_INDEPENDENT_TIMESTEPS = args.dual_scale_independent_timesteps
+    CFG_DROPOUT = args.cfg_dropout
+    CFG_SCALE = args.cfg_scale
+    USE_CFG_INFERENCE = args.use_cfg_inference
+    CROSS_VARIATE_CONTEXT_BIAS = args.cross_variate_context_bias
     IMAGE_HEIGHT = 16 if USE_DUAL_SCALE and args.image_height == parser.get_default('image_height') else args.image_height
     if args.disable_cross_attention:
         DISABLE_CROSS_ATTENTION = True
@@ -4303,6 +4366,14 @@ def main():
         if args.fresh: cli_overrides["fresh"] = True
         if args.resume: cli_overrides["resume"] = True
         if args.subset_id: cli_overrides["subset_id"] = args.subset_id
+        if args.cfg_dropout != parser.get_default('cfg_dropout'):
+            cli_overrides["cfg_dropout"] = args.cfg_dropout
+        if args.cfg_scale != parser.get_default('cfg_scale'):
+            cli_overrides["cfg_scale"] = args.cfg_scale
+        if args.use_cfg_inference != parser.get_default('use_cfg_inference'):
+            cli_overrides["use_cfg_inference"] = args.use_cfg_inference
+        if args.cross_variate_context_bias != parser.get_default('cross_variate_context_bias'):
+            cli_overrides["cross_variate_context_bias"] = args.cross_variate_context_bias
 
         cfg = load_experiment_config(args.config, cli_overrides)
         state = PipelineState.from_config(cfg)

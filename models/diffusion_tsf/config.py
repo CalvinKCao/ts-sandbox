@@ -24,6 +24,7 @@ class DiffusionTSFConfig:
     variate_factorized: bool = True
     use_variate_embedding: bool = True
     disable_cross_attention: bool = False
+    cross_variate_context_bias: float = 0.0
 
     # 2d mapping (hard binary CDF, no vertical blur)
     image_height: int = 32
@@ -50,6 +51,7 @@ class DiffusionTSFConfig:
     # classifier-free guidance
     cfg_dropout: float = 0.1
     cfg_scale: float = 2.0
+    use_cfg_inference: bool = False
 
     # 2d augs (cutout)
     cutout_prob: float = 0.5
@@ -122,6 +124,10 @@ class DiffusionTSFConfig:
                 raise ValueError("dual-scale image_height must divide dit_patch_size[0].")
         if not 0.0 <= self.dual_scale_fine_weight <= 1.0:
             raise ValueError("dual_scale_fine_weight must be in [0, 1].")
+        if not 0.0 <= self.cfg_dropout <= 1.0:
+            raise ValueError("cfg_dropout must be in [0, 1].")
+        if self.cfg_scale < 1.0:
+            raise ValueError("cfg_scale must be >= 1.0.")
         assert 0 <= self.cutout_prob <= 1
         assert 0.0 <= self.deterministic_anchor_lambda <= 1.0
         assert 0.0 <= self.deterministic_anchor_alpha < 1.0

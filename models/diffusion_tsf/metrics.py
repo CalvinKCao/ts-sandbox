@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 import logging
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +327,116 @@ def aggregate_texture_per_sample(
         for k, v in m.items():
             per_draw.setdefault(k, []).append(v)
     return {k: float(np.mean(v)) for k, v in per_draw.items()}
+
+
+def _as_float(x: np.ndarray) -> float:
+    return float(np.asarray(x, dtype=np.float64).mean())
+
+
+def crps_ensemble(y_true: np.ndarray, samples: np.ndarray) -> float:
+    """CRPS used by the MMPD eval harness.
+
+    Args:
+        y_true: ``[batch, variates, length]``.
+        samples: ``[batch, variates, n_samples, length]``.
+    """
+    expected_abs = np.abs(samples - y_true[:, :, None, :]).mean(axis=2)
+    sample_count = samples.shape[2]
+    total = np.zeros_like(y_true, dtype=np.float64)
+    chunk = max(1, 256 // max(1, sample_count))
+    for start in range(0, samples.shape[0], chunk):
+        end = min(samples.shape[0], start + chunk)
+        s = samples[start:end].astype(np.float64)
+        total[start:end] = np.abs(
+            s[:, :, :, None, :] - s[:, :, None, :, :]
+        ).mean(axis=(2, 3))
+    return _as_float(expected_abs - 0.5 * total)
+
+
+def topk_from_modes(
+    y_true: np.ndarray,
+    mode_center: np.ndarray,
+    mode_prob: np.ndarray,
+    max_k: int = 3,
+) -> Dict[str, float]:
+    """Top-k MSE/MAE from mode centers sorted by descending probability."""
+    order = np.argsort(-mode_prob, axis=2)
+    out: Dict[str, float] = {}
+    max_k = min(max_k, mode_center.shape[2])
+    for k in range(1, max_k + 1):
+        gathered = np.take_along_axis(mode_center, order[:, :, :k, None], axis=2)
+        mse_vals = ((gathered - y_true[:, :, None, :]) ** 2).mean(axis=-1).min(axis=2)
+        mae_vals = np.abs(gathered - y_true[:, :, None, :]).mean(axis=-1).min(axis=2)
+        out[f"top{k}_mse"] = _as_float(mse_vals)
+        out[f"top{k}_mae"] = _as_float(mae_vals)
+    return out
+
+
+def empirical_modes_from_samples(
+    samples: np.ndarray,
+    max_components: int = 9,
+    seed: int = 0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Cluster probabilistic trajectories into modes for MMPD-style top-k."""
+    from sklearn.mixture import GaussianMixture
+
+    batch_size, n_variates, sample_count, horizon = samples.shape
+    mode_count = min(max_components, sample_count)
+    centers = np.zeros((batch_size, n_variates, mode_count, horizon), dtype=np.float64)
+    probs = np.zeros((batch_size, n_variates, mode_count), dtype=np.float64)
+
+    for b in range(batch_size):
+        for v in range(n_variates):
+            trajectories = samples[b, v]
+            if sample_count == 1:
+                centers[b, v, 0] = trajectories[0]
+                probs[b, v, 0] = 1.0
+                continue
+            n_comp = min(mode_count, sample_count)
+            gmm = GaussianMixture(
+                n_components=n_comp,
+                random_state=seed + b * 131 + v,
+                covariance_type="diag",
+                reg_covar=1e-4,
+                max_iter=50,
+            )
+            try:
+                gmm.fit(trajectories)
+                centers[b, v, :n_comp] = gmm.means_
+                weights = gmm.weights_
+                probs[b, v, :n_comp] = weights / weights.sum()
+            except ValueError:
+                centers[b, v, :n_comp] = trajectories[:n_comp]
+                probs[b, v, :n_comp] = 1.0 / n_comp
+    return centers, probs
+
+
+def probabilistic_forecast_metrics(
+    y_true: np.ndarray,
+    samples: np.ndarray,
+    *,
+    gmm_components: int = 9,
+    topk_max: int = 3,
+    seed: int = 0,
+) -> Dict[str, float]:
+    """MMPD-compatible probabilistic metrics for ensemble forecasts.
+
+    ``samples`` must be ``[batch, variates, n_samples, length]``.
+    """
+    sample_mean = samples.mean(axis=2)
+    mode_center, mode_prob = empirical_modes_from_samples(
+        samples,
+        max_components=gmm_components,
+        seed=seed,
+    )
+    out: Dict[str, float] = {
+        "smooth_mse": _as_float((sample_mean - y_true) ** 2),
+        "smooth_mae": _as_float(np.abs(sample_mean - y_true)),
+        "crps": crps_ensemble(y_true, samples),
+        "n_samples": float(samples.shape[2]),
+    }
+    out.update(topk_from_modes(y_true, mode_center, mode_prob, max_k=topk_max))
+    return out
 
 
 def texture_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:

@@ -57,6 +57,9 @@ DISABLE_CROSS_ATTENTION: bool = False
 USE_DUAL_SCALE: bool = False
 DUAL_SCALE_FINE_WEIGHT: float = 0.5
 DUAL_SCALE_INDEPENDENT_TIMESTEPS: bool = True
+CFG_DROPOUT: float = 0.1
+CFG_SCALE: float = 2.0
+USE_CFG_INFERENCE: bool = False
 
 
 # ---- DiT topology (used when MODEL_TYPE == "dit") ----------------------------------
@@ -67,6 +70,7 @@ DIT_DEPTH: int = 8
 DIT_NUM_HEADS: int = 6
 DIT_MLP_RATIO: float = 4.0
 DIT_DROPOUT: float = 0.0
+CROSS_VARIATE_CONTEXT_BIAS: float = 0.0
 
 USE_AMP: bool = True               # bfloat16 mixed precision
 USE_GRADIENT_CHECKPOINTING: bool = True

@@ -34,11 +34,15 @@ class PipelineState:
     use_dual_scale: bool = False
     dual_scale_fine_weight: float = 0.5
     dual_scale_independent_timesteps: bool = True
+    cfg_dropout: float = 0.1
+    cfg_scale: float = 2.0
+    use_cfg_inference: bool = False
     deterministic_anchor_loss: bool = False
     deterministic_anchor_lambda: float = 0.99
     deterministic_anchor_alpha: float = 0.5
     eval_sampler: str = "dpmpp"
     disable_cross_attention: bool = False
+    cross_variate_context_bias: float = 0.0
     use_window_normalization: bool = True
     zero_guidance_forecast: bool = False
 

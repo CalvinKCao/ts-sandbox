@@ -33,7 +33,9 @@ class EvalPhase(PipelinePhase):
         em = prior.get("eval_metrics") or {}
         avg_ok = "texture_pathsig_distance" in em.get("averaged", {})
         single_ok = "texture_pathsig_distance" in em.get("single", {})
-        if em and avg_ok and single_ok:
+        prob_ok = "crps" in em.get("probabilistic", em.get("averaged", {}))
+        top3_ok = "top3_mse" in em.get("probabilistic", em.get("averaged", {}))
+        if em and avg_ok and single_ok and prob_ok and top3_ok:
             logger.info(f"  [{self.name}] already evaluated with texture metrics: {subset_id}")
             return True
         return False
@@ -137,6 +139,8 @@ class EvalPhase(PipelinePhase):
         for prefix, block in (("eval", eval_results["averaged"]), ("eval/single", eval_results["single"])):
             for key, val in block.items():
                 if key.startswith("texture_"):
+                    summary[f"{prefix}/{key}"] = val
+                elif key in {"crps", "top1_mse", "top1_mae", "top2_mse", "top2_mae", "top3_mse", "top3_mae"}:
                     summary[f"{prefix}/{key}"] = val
         wandb_utils.log_summary(summary)
 

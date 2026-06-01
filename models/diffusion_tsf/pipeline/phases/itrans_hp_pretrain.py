@@ -103,6 +103,9 @@ def _patch_globals(
     mod.USE_DUAL_SCALE = state.use_dual_scale
     mod.DUAL_SCALE_FINE_WEIGHT = state.dual_scale_fine_weight
     mod.DUAL_SCALE_INDEPENDENT_TIMESTEPS = state.dual_scale_independent_timesteps
+    mod.CFG_DROPOUT = state.cfg_dropout
+    mod.CFG_SCALE = state.cfg_scale
+    mod.USE_CFG_INFERENCE = state.use_cfg_inference
     mod.MODEL_TYPE = state.model_type
     mod.DIFFUSION_TYPE = state.diffusion_type
     mod.DETERMINISTIC_ANCHOR_LOSS = state.deterministic_anchor_loss
@@ -110,6 +113,7 @@ def _patch_globals(
     mod.DETERMINISTIC_ANCHOR_ALPHA = state.deterministic_anchor_alpha
     mod.EVAL_SAMPLER = state.eval_sampler
     mod.DISABLE_CROSS_ATTENTION = state.disable_cross_attention
+    mod.CROSS_VARIATE_CONTEXT_BIAS = state.cross_variate_context_bias
     mod.USE_WINDOW_NORMALIZATION = state.use_window_normalization
     mod.ZERO_GUIDANCE_FORECAST = state.zero_guidance_forecast
     mod.WINDOW_STRIDE = state.window_stride
