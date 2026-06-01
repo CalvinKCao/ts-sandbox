@@ -50,6 +50,7 @@ def pipeline_python() -> str:
 DEFAULT_MMPD_REPO = REPO_ROOT / "temp" / "MMPD"
 DEFAULT_MMPD_DATA = REPO_ROOT / "temp" / "mmpd_datasets"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results" / "mmpd_anchor_eval"
+PATCHED_DATASET_MTS = REPO_ROOT / "utils" / "mmpd_patches" / "dataset_mts.py"
 MMPD_URL = "https://github.com/Thinklab-SJTU/MMPD.git"
 
 DATASET_FILES = {
@@ -188,49 +189,9 @@ def apply_mmpd_compatibility_patches(path: Path) -> None:
             main_py.write_text(patched, encoding="utf-8")
 
     dataset_py = path / "data_provider" / "dataset_mts.py"
-    if dataset_py.exists():
-        text = dataset_py.read_text(encoding="utf-8")
-        patched = text
-        patched = patched.replace(
-            "        self.stride = 1\n"
-            "        if 'dynamic' in data_path and flag == 'test':\n"
-            "            self.stride = self.out_len\n"
-            "        self.__read_data__()",
-            "        env_stride = int(os.environ.get('MMPD_WINDOW_STRIDE', '1'))\n"
-            "        env_test_stride = int(os.environ.get('MMPD_TEST_STRIDE', str(env_stride)))\n"
-            "        self.stride = env_test_stride if flag == 'test' else env_stride\n"
-            "        if 'dynamic' in data_path and flag == 'test':\n"
-            "            self.stride = self.out_len\n"
-            "        self.block_len = int(os.environ.get('MMPD_BLOCK_LEN', '0'))\n"
-            "        self.__read_data__()",
-        )
-        patched = patched.replace(
-            "        border1s = [0, train_num - self.in_len, train_num + val_num - self.in_len]\n"
-            "        border2s = [train_num, train_num+val_num, train_num + val_num + test_num]",
-            "        if self.block_len > 0:\n"
-            "            border1s = [0, train_num, train_num + val_num]\n"
-            "        else:\n"
-            "            border1s = [0, train_num - self.in_len, train_num + val_num - self.in_len]\n"
-            "        border2s = [train_num, train_num+val_num, train_num + val_num + test_num]",
-        )
-        patched = patched.replace(
-            "        s_begin = index * self.stride\n"
-            "        s_end = s_begin + self.in_len",
-            "        if self.block_len > 0:\n"
-            "            s_begin = index * self.stride * self.block_len\n"
-            "        else:\n"
-            "            s_begin = index * self.stride\n"
-            "        s_end = s_begin + self.in_len",
-        )
-        patched = patched.replace(
-            "        return (len(self.data_x) - self.in_len - self.out_len) // self.stride + 1",
-            "        if self.block_len > 0:\n"
-            "            n_blocks = len(self.data_x) // self.block_len\n"
-            "            return (n_blocks - 1) // self.stride + 1\n"
-            "        return (len(self.data_x) - self.in_len - self.out_len) // self.stride + 1",
-        )
-        if patched != text:
-            dataset_py.write_text(patched, encoding="utf-8")
+    if PATCHED_DATASET_MTS.is_file():
+        dataset_py.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PATCHED_DATASET_MTS, dataset_py)
 
 
 def mmpd_staged_filename(dataset: str) -> str:
