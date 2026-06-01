@@ -2751,11 +2751,14 @@ def evaluate_model(
     test_loader: DataLoader,
     device: torch.device,
     n_samples: int = 3,
+    probabilistic_n_samples: Optional[int] = None,
     smoke_test: bool = False,
 ) -> Dict:
     """Evaluate model on test set.
 
-    Uses DPM-Solver++ (20 steps) and ``n_samples`` stochastic draws per window.
+    Uses ``n_samples`` stochastic draws per window for avg/texture metrics.
+    CRPS/top-k use ``probabilistic_n_samples`` draws so they can match the
+    MMPD paper's 100-sample protocol while keeping avg30 point metrics.
     Logs periodic progress (batch index, throughput, ETA) for Slurm logs.
     Note: ``test_loader`` should already be subsetted by the caller if a
     half-test sweep is desired (see eval call site).
@@ -2772,6 +2775,7 @@ def evaluate_model(
     all_preds_single = []
     all_preds_avg = []
     all_samples = []
+    all_prob_samples = []
     all_targets = []
 
     n_batches = min(1, len(test_loader)) if smoke_test else len(test_loader)
@@ -2792,19 +2796,24 @@ def evaluate_model(
     K = getattr(model.config, 'lookback_overlap', 0)
     anchor_sampler = gen_kwargs.get('sampler') == 'anchor'
     binary_anchor_sampler = anchor_sampler
-    effective_n_samples = 1 if (smoke_test or (anchor_sampler and not binary_anchor_sampler)) else n_samples
+    if probabilistic_n_samples is None:
+        probabilistic_n_samples = n_samples
+    effective_avg_samples = 1 if (smoke_test or (anchor_sampler and not binary_anchor_sampler)) else n_samples
+    effective_prob_samples = 1 if (smoke_test or (anchor_sampler and not binary_anchor_sampler)) else probabilistic_n_samples
+    effective_n_samples = max(effective_avg_samples, effective_prob_samples)
     steps_for_log = gen_kwargs.get('num_inference_steps', 1 if gen_kwargs.get('sampler') == 'anchor' else 20)
     nfe_per_batch = 1 + effective_n_samples
     nfe_total = n_batches * nfe_per_batch * steps_for_log
 
     logger.info(
-        "eval: start | windows=%s batches=%d batch_size=%d n_samples=%d "
+        "eval: start | windows=%s batches=%d batch_size=%d avg_samples=%d prob_samples=%d "
         "sampler=%s steps=%d lookback_overlap=%d device=%s "
         "(~%d U-Net forward passes across eval)",
         n_windows if n_windows is not None else '?',
         n_batches,
         batch_size,
-        effective_n_samples,
+        effective_avg_samples,
+        effective_prob_samples,
         gen_kwargs.get('sampler'),
         steps_for_log,
         K,
@@ -2840,6 +2849,7 @@ def evaluate_model(
                 pred_cpu = result.get('prediction_global_norm', result['prediction']).cpu()
                 all_preds_avg.append(pred_cpu)
                 all_samples.append(pred_cpu.unsqueeze(0))
+                all_prob_samples.append(pred_cpu.unsqueeze(0))
             else:
                 samples = []
                 for s_idx in range(effective_n_samples):
@@ -2847,8 +2857,9 @@ def evaluate_model(
                     result = model.generate(past, **gen_kwargs)
                     samples.append(result.get('prediction_global_norm', result['prediction']).cpu())
                 stacked_samples = torch.stack(samples)
-                all_preds_avg.append(stacked_samples.mean(dim=0))
-                all_samples.append(stacked_samples)
+                all_preds_avg.append(stacked_samples[:effective_avg_samples].mean(dim=0))
+                all_samples.append(stacked_samples[:effective_avg_samples])
+                all_prob_samples.append(stacked_samples[:effective_prob_samples])
 
             if K > 0:
                 future = future[..., K:]
@@ -2893,6 +2904,11 @@ def evaluate_model(
     preds_single = torch.cat(all_preds_single, dim=0)
     preds_avg = torch.cat(all_preds_avg, dim=0)
     samples_tensor = torch.cat(all_samples, dim=1) if len(all_samples) > 0 else preds_avg.unsqueeze(0)
+    prob_samples_tensor = (
+        torch.cat(all_prob_samples, dim=1)
+        if len(all_prob_samples) > 0
+        else samples_tensor
+    )
     targets = torch.cat(all_targets, dim=0)
     
     # Compute metrics in the dataset's global z-scored space. Diffusion generate()
@@ -2916,12 +2932,15 @@ def evaluate_model(
 
     n_series = int(targets.shape[0] * targets.shape[1])
     n_draws = int(samples_tensor.shape[0]) if samples_tensor.ndim > 3 else 1
+    n_prob_draws = int(prob_samples_tensor.shape[0]) if prob_samples_tensor.ndim > 3 else 1
     logger.info(
         "eval: computing MSE/MAE/trend + texture on %d windows, %d variate-series, "
-        "%d stochastic draw(s) for averaged texture (CPU, no batch logs — can take a long time on ETTm-scale data)",
+        "%d avg draw(s), %d paper probabilistic draw(s) "
+        "(CPU texture/CRPS; no batch logs — can take a long time on ETTm-scale data)",
         int(targets.shape[0]),
         n_series,
         n_draws,
+        n_prob_draws,
     )
     t_metrics = time.perf_counter()
 
@@ -2931,20 +2950,27 @@ def evaluate_model(
     single_metrics.update(texture_metrics(t_np, preds_single.numpy()))
 
     avg_metrics = compute_metrics(preds_avg, targets)
+    avg_metrics["smooth_mse"] = avg_metrics["mse"]
+    avg_metrics["smooth_mae"] = avg_metrics["mae"]
+    avg_metrics["n_samples"] = float(n_draws)
     # Mean of per-draw texture metrics, not texture(mean(samples)).
     avg_metrics.update(
         aggregate_texture_per_sample(t_np, samples_tensor.numpy())
     )
-    samples_bvsl = np.moveaxis(samples_tensor.numpy(), 0, 2)
-    prob_metrics = dict(avg_metrics)
+    prob_samples_np = prob_samples_tensor.numpy()
+    samples_bvsl = np.moveaxis(prob_samples_np, 0, 2)
+    prob_metrics = {}
     prob_metrics.update(
         probabilistic_forecast_metrics(
             t_np,
             samples_bvsl,
-            gmm_components=9,
+            gmm_components=10,
             topk_max=3,
             seed=42,
         )
+    )
+    prob_metrics.update(
+        aggregate_texture_per_sample(t_np, prob_samples_np)
     )
 
     logger.info(
@@ -2954,9 +2980,10 @@ def evaluate_model(
 
     return {
         'single': single_metrics,
-        'averaged': prob_metrics,
+        'averaged': avg_metrics,
         'deterministic_anchor': single_metrics,
-        'probabilistic_avg30': prob_metrics,
+        'probabilistic_averaged': avg_metrics,
+        'probabilistic_avg30': avg_metrics,
         'probabilistic': prob_metrics,
     }
 

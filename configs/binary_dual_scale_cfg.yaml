@@ -53,3 +53,4 @@ phases:
 
   - phase: eval
     n_samples: 30
+    probabilistic_n_samples: 100

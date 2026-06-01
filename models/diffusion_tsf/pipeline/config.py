@@ -49,7 +49,7 @@ _DEFAULTS: Dict[str, Any] = {
         {"phase": "diffusion_hp_pretrain", "n_trials": 8, "max_epochs": 5, "patience": 4},
         {"phase": "itrans_finetune_hp", "n_trials": 10, "max_epochs": 10, "cold_start": True},
         {"phase": "diffusion_finetune_hp", "n_trials": 5, "max_epochs": 20, "patience": 15},
-        {"phase": "eval", "n_samples": 30},
+        {"phase": "eval", "n_samples": 100, "probabilistic_n_samples": 100},
     ],
 }
 

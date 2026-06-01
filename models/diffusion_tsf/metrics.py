@@ -415,7 +415,7 @@ def probabilistic_forecast_metrics(
     y_true: np.ndarray,
     samples: np.ndarray,
     *,
-    gmm_components: int = 9,
+    gmm_components: int = 10,
     topk_max: int = 3,
     seed: int = 0,
 ) -> Dict[str, float]:

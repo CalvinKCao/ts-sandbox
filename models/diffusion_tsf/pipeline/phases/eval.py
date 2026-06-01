@@ -97,9 +97,11 @@ class EvalPhase(PipelinePhase):
             state.dataset, variate_indices, stride=train_stride, test_stride=test_stride,
         )
         n_samples = self.get("n_samples", 30)
+        probabilistic_n_samples = self.get("probabilistic_n_samples", n_samples)
         if state.smoke_test:
             test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
             n_samples = 1
+            probabilistic_n_samples = 1
         elif not subset_meta.get("enabled"):
             n_full = len(test_ds)
             n_eval = max(1, n_full // 2)
@@ -114,7 +116,14 @@ class EvalPhase(PipelinePhase):
             )
 
         test_loader = DataLoader(test_ds, batch_size=8 if not state.smoke_test else 2, shuffle=False)
-        eval_results = evaluate_model(model, test_loader, device, n_samples=n_samples, smoke_test=state.smoke_test)
+        eval_results = evaluate_model(
+            model,
+            test_loader,
+            device,
+            n_samples=n_samples,
+            probabilistic_n_samples=probabilistic_n_samples,
+            smoke_test=state.smoke_test,
+        )
 
         logger.info(
             f"[{subset_id}] Avg MSE={eval_results['averaged']['mse']:.4f}, "

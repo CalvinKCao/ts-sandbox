@@ -87,7 +87,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
       --topk-max 3
       --test-fraction 0.5
       --num-sampling-steps 20
-      --gmm-components 9
+      --gmm-components 10
       --gmm-iterations 10
       --mmpd-eval-batch-size 8
       --anchor-batch-size 8
@@ -161,6 +161,13 @@ PREAMBLE
     --no-update-mmpd
     "${EVAL_EXTRA[@]}"
   )
+  if [[ -n "${BINARY_ANCHOR_ROOTS:-}" ]]; then
+    for _br in ${BINARY_ANCHOR_ROOTS}; do
+      _br_abs="$_br"
+      [[ "$_br_abs" != /* ]] && _br_abs="$REPO/$_br_abs"
+      EVAL_BASE+=(--binary-anchor-root "$_br_abs")
+    done
+  fi
 
   echo "Repo:          $REPO"
   echo "Output:        $OUTPUT_DIR"

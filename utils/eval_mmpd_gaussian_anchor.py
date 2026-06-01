@@ -1111,7 +1111,7 @@ def texture_metrics_per_sample(
 
 def summarize_prob_core_metrics(
     pack: Dict[str, np.ndarray],
-    gmm_components: int = 9,
+    gmm_components: int = 10,
     seed: int = 0,
     topk_max: int = 3,
 ) -> Dict[str, float]:
@@ -1127,11 +1127,14 @@ def summarize_prob_core_metrics(
         "n_variates": float(y_true.shape[1]),
         "n_samples": float(samples.shape[2]),
     }
-    mode_center, mode_prob = empirical_modes_from_samples(
-        samples,
-        max_components=gmm_components,
-        seed=seed,
-    )
+    mode_center = pack.get("mode_center")
+    mode_prob = pack.get("mode_prob")
+    if mode_center is None or mode_prob is None:
+        mode_center, mode_prob = empirical_modes_from_samples(
+            samples,
+            max_components=gmm_components,
+            seed=seed,
+        )
     metrics.update(topk_from_modes(y_true, mode_center, mode_prob, max_k=topk_max))
     return metrics
 
@@ -1152,14 +1155,14 @@ def summarize_prediction_pack(
     metrics: Dict[str, float] = {}
     metrics.update(deterministic_metrics(y_true, det))
     metrics["crps"] = crps_gr(y_true, samples)
-    # Use the same mode construction for all model families so top-3 is directly
-    # comparable. MMPD still runs its probabilistic path; we intentionally derive
-    # the reported top-k modes from the returned samples just like binary/Gaussian.
-    mode_center, mode_prob = empirical_modes_from_samples(
-        samples,
-        max_components=gmm_components,
-        seed=seed,
-    )
+    if mode_center is None or mode_prob is None:
+        mode_center, mode_prob = pack.get("mode_center"), pack.get("mode_prob")
+    if mode_center is None or mode_prob is None:
+        mode_center, mode_prob = empirical_modes_from_samples(
+            samples,
+            max_components=gmm_components,
+            seed=seed,
+        )
     metrics.update(topk_from_modes(y_true, mode_center, mode_prob, max_k=topk_max))
     metrics.update(texture_metrics(y_true, det))
     sample_mean = samples.mean(axis=2)
@@ -1545,7 +1548,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--sample-num", type=int, default=9)
     parser.add_argument("--num-sampling-steps", type=int, default=20)
-    parser.add_argument("--gmm-components", type=int, default=9)
+    parser.add_argument("--gmm-components", type=int, default=10)
     parser.add_argument("--gmm-iterations", type=int, default=10)
     parser.add_argument("--mmpd-train-epochs", type=int, default=20)
     parser.add_argument("--mmpd-patience", type=int, default=5)

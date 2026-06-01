@@ -95,10 +95,10 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
       --mmpd-train-epochs 20
       --mmpd-patience 5
       --test-fraction 0.5
-      --sample-num 9
+      --sample-num 100
       --topk-max 3
       --num-sampling-steps 20
-      --gmm-components 9
+      --gmm-components 10
       --gmm-iterations 10
       --mmpd-batch-size 32
       --mmpd-eval-batch-size 16
