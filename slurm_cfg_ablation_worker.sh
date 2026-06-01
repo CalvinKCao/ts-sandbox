@@ -36,6 +36,7 @@ _resolve_store() {
 }
 
 STORE="$(_resolve_store)"
+CFG_VENV="${CFG_VENV:-$STORE/venv}"
 
 if ! nvidia-smi -L >/dev/null 2>&1; then
     echo "[setup] ERROR: Slurm allocated a GPU job, but no CUDA device is visible on ${SLURMD_NODENAME:-unknown}." >&2
@@ -85,6 +86,7 @@ install_eval_deps() {
 _find_venv() {
     local v
     for v in \
+        "$CFG_VENV" \
         "$STORE/venv" \
         "${SCRATCH:-}/${USER}/ts-sandbox/results/venv" \
         "${SCRATCH:-}/ts-sandbox/results/venv" \
@@ -99,21 +101,14 @@ _find_venv() {
 
 if venv_path="$(_find_venv)"; then
     echo "[setup] Using persistent venv: $venv_path"
-    _load_modules
     # shellcheck source=/dev/null
     source "$venv_path/bin/activate"
-    install_eval_deps
+    python -c "import torch, yaml, sklearn"
 else
-    echo "[setup] No persistent venv; building on \${SLURM_TMPDIR:-/tmp}..."
-    _load_modules
-    if ! command -v python >/dev/null 2>&1; then
-        echo "[setup] ERROR: python unavailable. Create \$SCRATCH/ts-sandbox/results/venv on login node." >&2
-        exit 1
-    fi
-    python -m venv "${SLURM_TMPDIR:-/tmp}/env"
-    # shellcheck source=/dev/null
-    source "${SLURM_TMPDIR:-/tmp}/env/bin/activate"
-    install_eval_deps
+    echo "[setup] ERROR: required persistent venv is not visible on ${SLURMD_NODENAME:-unknown}: $CFG_VENV" >&2
+    echo "[setup] Not rebuilding inside Slurm; tmp venv rebuilds have been flaky on Killarney nodes." >&2
+    echo "[setup] Resubmit with --exclude-nodes ${SLURMD_NODENAME:-bad_node}, or rebuild $CFG_VENV from the login node." >&2
+    exit 43
 fi
 
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA required'; print('torch', torch.__version__, torch.cuda.get_device_name(0))"

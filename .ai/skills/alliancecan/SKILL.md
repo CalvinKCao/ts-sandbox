@@ -250,6 +250,30 @@ pip install --no-index wandb
 wheels exposed by `module load python/3.11`. Check availability: `avail_wheels <pkg>` on a
 login node. **Do not `cp -r` an existing venv** — absolute paths in activation scripts break.
 
+### Persistent venv jobs: fail fast, don't rebuild in workers
+
+Some repo scripts intentionally reuse a prebuilt shared venv such as
+`$SCRATCH/ts-sandbox/results/venv` to avoid per-job setup. For those scripts, **do not
+silently fall back to building a new venv inside each Slurm worker** when the shared venv is
+missing. We have seen Killarney nodes where the shared venv or Lmod init was flaky
+(`Too many levels of symbolic links`), causing repeated pip retries and mixed torch versions.
+
+Pattern for these scripts:
+
+```bash
+CFG_VENV="${CFG_VENV:-$SCRATCH/ts-sandbox/results/venv}"
+[[ -x "$CFG_VENV/bin/python" ]] || {
+  echo "ERROR: required venv missing: $CFG_VENV" >&2
+  exit 1
+}
+sbatch --export=ALL,CFG_VENV="$CFG_VENV" ...
+```
+
+Inside the worker, source the requested venv and verify imports/CUDA. If it is not visible,
+exit with a clear message and resubmit excluding that node, or rebuild the venv from the login
+node. Avoid ad hoc `pip install` fallbacks in compute workers unless the script is explicitly
+designed to build a `$SLURM_TMPDIR` venv from Alliance wheels only.
+
 ### **`wandb` must use `--no-index` (PyPI sdist → Go → silent pip death)**
 
 If a job script does `pip install wandb` or `pip install "wandb>=…"` **without** `--no-index`, pip may pull a **PyPI source distribution**. Recent wandb builds run **metadata generation** that tries to compile **`wandb-core` in Go** (`Building wandb-core Go binary…`). Compute nodes typically **do not have `go`**, so pip errors with *Did not find the 'go' binary*. With **`set -e`** in the same shell, the batch script **exits immediately** after venv setup — logs look “empty”: only the first banner lines and `[setup] Building venv on $SLURM_TMPDIR`, then nothing until the job ends.

@@ -47,9 +47,9 @@ done
 case "$GPU" in
     l40s)
         GPU_SBATCH=(--gres=gpu:l40s:1)
-        # kn120 accepted L40S GRES but exposed no CUDA devices on 2026-06-01.
+        # kn120 exposed no CUDA devices; kn132 could not reliably see the shared venv.
         if [[ -z "$EXCLUDE_NODES" ]]; then
-            EXCLUDE_NODES="kn120"
+            EXCLUDE_NODES="kn120,kn132"
         fi
         ;;
     h100)
@@ -77,12 +77,19 @@ fi
 
 STORE="${RESULTS_ROOT:-$REPO/results}"
 CKPT_ROOT="$STORE/ckpts"
+CFG_VENV="${CFG_VENV:-$STORE/venv}"
 DATE_TAG="$(date +%m-%d)"
 if [[ -z "$RUN_STEM" ]]; then
     RUN_STEM="${DATE_TAG}-cfg-ablation"
 fi
 LOG_DIR="$STORE/logs/cfg_ablation"
 mkdir -p "$LOG_DIR"
+
+if [[ ! -x "$CFG_VENV/bin/python" ]]; then
+    echo "ERROR: required CFG venv missing or not executable: $CFG_VENV" >&2
+    echo "Build/fix the shared venv first; this script no longer rebuilds venvs inside Slurm jobs." >&2
+    exit 1
+fi
 
 pick_ckpt_dir() {
     local ds="$1"
@@ -185,6 +192,7 @@ fi
 
 echo "CFG ablation (eval_mmpd anchor path)"
 echo "  run_stem=$RUN_STEM  gpu=$GPU  scales=${SCALE_ARR[*]}  storage=$STORE"
+echo "  venv=$CFG_VENV"
 if [[ -n "$EXCLUDE_NODES" ]]; then
     echo "  exclude_nodes=$EXCLUDE_NODES"
 fi
@@ -230,7 +238,7 @@ for SCALE in "${SCALE_ARR[@]}"; do
             --error="$LOG_FILE" \
             --mail-type=FAIL \
             --mail-user="${USER}@uwo.ca" \
-            --export=ALL,CFG_STORE="$STORE" \
+            --export=ALL,CFG_STORE="$STORE",CFG_VENV="$CFG_VENV" \
             "$WORKER" \
             --phase anchor \
             --anchor-variant binary \
