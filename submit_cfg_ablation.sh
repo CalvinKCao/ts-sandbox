@@ -42,6 +42,13 @@ IFS=',' read -ra SCALE_ARR <<< "$CFG_SCALES"
 
 USER=$(whoami)
 STORE="${RESULTS_ROOT:-$SCRIPT_DIR/results}"
+if [[ -n "${SCRATCH:-}" ]]; then
+    if [[ -d "$SCRATCH/${USER}/ts-sandbox/results" ]]; then
+        STORE="$SCRATCH/${USER}/ts-sandbox/results"
+    elif [[ -d "$SCRATCH/ts-sandbox/results" ]]; then
+        STORE="$SCRATCH/ts-sandbox/results"
+    fi
+fi
 LOG_DIR="$STORE/logs/cfg_ablation"
 CKPT_ROOT="$STORE/ckpts"
 DATA_ROOT="$STORE/datasets"
@@ -122,6 +129,10 @@ for DS in "${DATA_ARR[@]}"; do
         fi
         PY_ARGS+=("${SMOKE_FLAG[@]}")
 
+        EXPORT_LIST="GRID_STORE=${STORE},SLURM_SUBMIT_DIR=${SCRIPT_DIR}"
+        [[ -n "${SCRATCH:-}" ]] && EXPORT_LIST+=",SCRATCH=${SCRATCH}"
+        [[ -n "${WANDB_API_KEY:-}" ]] && EXPORT_LIST+=",WANDB_API_KEY=${WANDB_API_KEY}"
+
         JOB_ID=$(sbatch --parsable \
             --job-name="$JOB_NAME" \
             --account=aip-boyuwang \
@@ -134,7 +145,7 @@ for DS in "${DATA_ARR[@]}"; do
             --error="$LOG_FILE" \
             --mail-type=FAIL \
             --mail-user="${USER}@uwo.ca" \
-            --export=ALL,GRID_STORE="$STORE" \
+            --export="$EXPORT_LIST" \
             "$SCRIPT_DIR/slurm_worker.sh" "${PY_ARGS[@]}")
 
         printf "%-10s %-12s %-8s %-6s %s\n" "$JOB_ID" "$DS" "$SCALE" "$SEED" "$LOG_FILE"

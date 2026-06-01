@@ -8,20 +8,74 @@
 
 set -euo pipefail
 
+PY_ARGS=("$@")
+
 echo "=========================================="
 echo "Job: $SLURM_JOB_NAME  ID: $SLURM_JOB_ID  Node: ${SLURMD_NODENAME:-unknown}"
 echo "Started: $(date)"
 echo "=========================================="
 
-module purge || true
-module load StdEnv/2023
-module load python/3.11
-module load cuda/12.2
-module load cudnn/8.9
-
 USER="${USER:-$(whoami)}"
-STORE="${GRID_STORE:-${SLURM_SUBMIT_DIR:-$PWD}/results}"
-STORE_VENV="$STORE/venv"
+
+_resolve_store() {
+    local cand
+    for cand in \
+        "${GRID_STORE:-}" \
+        "${SCRATCH:-}/${USER}/ts-sandbox/results" \
+        "${SCRATCH:-}/ts-sandbox/results" \
+        "${SLURM_SUBMIT_DIR:-}/results" \
+        "${PWD}/results"; do
+        if [[ -n "$cand" && -d "$cand" ]]; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    echo "${GRID_STORE:-${SLURM_SUBMIT_DIR:-$PWD}/results}"
+}
+
+STORE="$(_resolve_store)"
+
+_find_persistent_venv() {
+    local -a candidates=()
+    local ckpt_dir="" arg
+    candidates+=("$STORE/venv")
+    if [[ -n "${SCRATCH:-}" ]]; then
+        candidates+=(
+            "$SCRATCH/${USER}/ts-sandbox/results/venv"
+            "$SCRATCH/ts-sandbox/results/venv"
+        )
+    fi
+    candidates+=("${SLURM_SUBMIT_DIR:-}/results/venv")
+    for arg in "${PY_ARGS[@]}"; do
+        [[ "$arg" == --checkpoint-dir=* ]] && ckpt_dir="${arg#--checkpoint-dir=}"
+    done
+    local i=0
+    while [[ $i -lt ${#PY_ARGS[@]} ]]; do
+        if [[ "${PY_ARGS[$i]}" == "--checkpoint-dir" ]]; then
+            ckpt_dir="${PY_ARGS[$((i + 1))]:-}"
+        fi
+        i=$((i + 1))
+    done
+    if [[ -n "$ckpt_dir" ]]; then
+        candidates+=("$(dirname "$(dirname "$ckpt_dir")")/venv")
+    fi
+    local v
+    for v in "${candidates[@]}"; do
+        if [[ -x "$v/bin/python" ]]; then
+            echo "$v"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_load_modules() {
+    module purge 2>/dev/null || true
+    module load StdEnv/2023 2>/dev/null || true
+    module load python/3.11 2>/dev/null || true
+    module load cuda/12.2 2>/dev/null || true
+    module load cudnn/8.9 2>/dev/null || true
+}
 
 pip_retry() {
     local max_attempts=5 delay=20 attempt
@@ -66,17 +120,25 @@ install_pipeline_deps() {
 }
 
 activate_venv() {
-    if [[ -x "$STORE_VENV/bin/python" ]]; then
-        echo "[setup] Using persistent venv: $STORE_VENV"
+    local venv_path=""
+    if venv_path="$(_find_persistent_venv)"; then
+        echo "[setup] Using persistent venv: $venv_path (store=$STORE)"
         # shellcheck source=/dev/null
-        source "$STORE_VENV/bin/activate"
+        source "$venv_path/bin/activate"
         echo "[setup] Reconciling packages in persistent venv..."
+        _load_modules
         install_pipeline_deps
         return 0
     fi
 
-    echo "[setup] Building venv on \$SLURM_TMPDIR..."
-    virtualenv --no-download "$SLURM_TMPDIR/env"
+    echo "[setup] No persistent venv found under store=$STORE; loading modules and building on SLURM_TMPDIR..."
+    _load_modules
+    if ! command -v python >/dev/null 2>&1; then
+        echo "[setup] ERROR: python not available after module load (Lmod/cvmfs issue on this node?)." >&2
+        echo "[setup] Create \$SCRATCH/ts-sandbox/results/venv from the login node (alliance_setup_killarney.sh) and resubmit." >&2
+        exit 1
+    fi
+    python -m venv "$SLURM_TMPDIR/env"
     # shellcheck source=/dev/null
     source "$SLURM_TMPDIR/env/bin/activate"
     install_pipeline_deps
@@ -134,7 +196,6 @@ echo "Results: $DATA_DIR"
 echo "Datasets (benchmark CSVs): $SHARED_DATASETS"
 echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
 
-PY_ARGS=("$@")
 HAS_CKPT=0
 HAS_DATASETS=0
 for arg in "${PY_ARGS[@]}"; do
