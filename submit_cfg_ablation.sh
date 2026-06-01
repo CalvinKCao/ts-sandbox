@@ -202,8 +202,10 @@ for SCALE in "${SCALE_ARR[@]}"; do
         LOG_FILE="$LOG_DIR/${RUN_STEM}-cfg${SCALE}-${DS}.log"
         JOB_NAME="cfg-${DS}-w${SCALE}"
 
-        EXPORT_LIST="REPO=${REPO},STORE=${STORE},OUT_DIR=${OUT_DIR},SCALE=${SCALE}"
-        [[ -n "${SCRATCH:-}" ]] && EXPORT_LIST+=",SCRATCH=${SCRATCH}"
+        WORKER="$REPO/slurm_cfg_ablation_worker.sh"
+        if [[ ! -x "$WORKER" ]]; then
+            chmod +x "$WORKER"
+        fi
 
         JOB_ID=$(sbatch --parsable \
             --job-name="$JOB_NAME" \
@@ -213,35 +215,26 @@ for SCALE in "${SCALE_ARR[@]}"; do
             "${GPU_SBATCH[@]}" \
             --cpus-per-task="$CPUS" \
             --mem="$MEM" \
+            --chdir="$REPO" \
             --output="$LOG_FILE" \
             --error="$LOG_FILE" \
             --mail-type=FAIL \
             --mail-user="${USER}@uwo.ca" \
-            --export="$EXPORT_LIST" \
-            --wrap="$(cat <<EOF
-set -euo pipefail
-cd "\$REPO"
-source .venv/bin/activate 2>/dev/null || true
-export PYTHONUNBUFFERED=1
-DS="$DS"
-CKPT_DIR="$CKPT_DIR"
-python3 -u "\$REPO/utils/eval_mmpd_gaussian_anchor.py" \\
-  --phase anchor \\
-  --anchor-variant binary \\
-  --datasets "\$DS" \\
-  --binary-anchor-root "\$CKPT_DIR" \\
-  --ckpt-base "\$CKPT_DIR" \\
-  --output-dir "\$OUT_DIR" \\
-  --seed $SEED \\
-  --cfg-scale "\$SCALE" \\
-  ${USE_CFG_FLAG[@]} \\
-  --metrics-profile full \\
-  --force-anchor-eval \\
-  --skip-mmpd-train \\
-  ${EVAL_EXTRA[@]}
-echo "[cfg-\$DS-w\$SCALE] done"
-EOF
-)")
+            --export=ALL,CFG_STORE="$STORE" \
+            "$WORKER" \
+            --phase anchor \
+            --anchor-variant binary \
+            --datasets "$DS" \
+            --binary-anchor-root "$CKPT_DIR" \
+            --ckpt-base "$CKPT_DIR" \
+            --output-dir "$OUT_DIR" \
+            --seed "$SEED" \
+            --cfg-scale "$SCALE" \
+            "${USE_CFG_FLAG[@]}" \
+            --metrics-profile full \
+            --force-anchor-eval \
+            --skip-mmpd-train \
+            "${EVAL_EXTRA[@]}")
         printf "%-10s %-12s %-8s %-6s %s\n" "$JOB_ID" "$DS" "$SCALE" "$SEED" "$LOG_FILE"
         JOB_IDS+=("$JOB_ID")
     done
@@ -262,17 +255,22 @@ MERGE_ID=$(sbatch --parsable \
     --time="0:15:00" \
     --cpus-per-task=2 \
     --mem="4G" \
+    --chdir="$REPO" \
     --output="$MERGE_LOG" \
     --error="$MERGE_LOG" \
     ${MERGE_DEP:+--dependency="$MERGE_DEP"} \
-    --export="REPO=${REPO},STORE=${STORE},RUN_STEM=${RUN_STEM},CFG_SCALES=${CFG_SCALES}" \
-    --wrap="$(cat <<'EOF'
+    <<ENDSCRIPT
+#!/bin/bash
 set -euo pipefail
-cd "$REPO"
-IFS=',' read -ra SCALES <<< "$CFG_SCALES"
-for SCALE in "${SCALES[@]}"; do
-  OUT="$STORE/datasets/${RUN_STEM}-cfg${SCALE}"
-  python3 - <<PY "$OUT" "$SCALE"
+REPO="$REPO"
+STORE="$STORE"
+RUN_STEM="$RUN_STEM"
+CFG_SCALES="$CFG_SCALES"
+cd "\$REPO"
+IFS=',' read -ra SCALES <<< "\$CFG_SCALES"
+for SCALE in "\${SCALES[@]}"; do
+  OUT="\$STORE/datasets/\${RUN_STEM}-cfg\${SCALE}"
+  python3 - <<PY "\$OUT" "\$SCALE"
 import json, sys
 from pathlib import Path
 out_dir, scale = Path(sys.argv[1]), sys.argv[2]
@@ -291,8 +289,9 @@ for ds in sorted(results):
 print(f"[merge] {out_dir}/metrics.csv ({len(results)} datasets)", flush=True)
 PY
 done
-EOF
-)")
+echo "[merge] done: \$(date)"
+ENDSCRIPT
+)
 
 echo "--------------------------------------------------------------------------------"
 echo "Merge job: $MERGE_ID (logs: $MERGE_LOG)"
