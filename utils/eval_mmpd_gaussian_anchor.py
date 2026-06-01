@@ -250,8 +250,17 @@ def mmpd_setting(
     )
 
 
+def dataset_window_lengths(args: argparse.Namespace, dataset: str) -> Tuple[int, int]:
+    """Use repo dataset-specific lengths for prewindowed datasets like DALIA."""
+    if dataset == "dalia":
+        pipeline = load_tsf_pipeline()
+        return pipeline.dataset_window_lengths(dataset)
+    return args.lookback, args.horizon
+
+
 def build_mmpd_train_cmd(args: argparse.Namespace, dataset: str) -> List[str]:
     data_path = DATASET_FILES[dataset].name
+    lookback, horizon = dataset_window_lengths(args, dataset)
     cmd = [
         sys.executable,
         "-u",
@@ -271,9 +280,9 @@ def build_mmpd_train_cmd(args: argparse.Namespace, dataset: str) -> List[str]:
         "--loss_func",
         "MMPD",
         "--in_len",
-        str(args.lookback),
+        str(lookback),
         "--out_len",
-        str(args.horizon),
+        str(horizon),
         "--patch_size",
         str(args.patch_size),
         "--data_dim",
@@ -325,7 +334,8 @@ def build_mmpd_train_cmd(args: argparse.Namespace, dataset: str) -> List[str]:
 
 
 def mmpd_checkpoint_path(args: argparse.Namespace, dataset: str) -> Path:
-    setting = mmpd_setting(dataset, args.lookback, args.horizon, args.patch_size)
+    lookback, horizon = dataset_window_lengths(args, dataset)
+    setting = mmpd_setting(dataset, lookback, horizon, args.patch_size)
     return (
         mmpd_output_root(args)
         / "mmpd_out"
@@ -725,8 +735,8 @@ def load_tsf_test_subset(
     dataset: str,
     variate_indices: Sequence[int],
     indices: Sequence[int],
-    lookback: int,
-    horizon: int,
+    lookback: Optional[int],
+    horizon: Optional[int],
 ):
     pipeline = load_tsf_pipeline()
     _, _, test_ds, _ = pipeline.load_dataset(
@@ -745,12 +755,13 @@ def evaluate_anchor(
     indices: Sequence[int],
     device: torch.device,
 ) -> Dict[str, np.ndarray]:
+    lookback, horizon = dataset_window_lengths(args, run.dataset)
     subset = load_tsf_test_subset(
         run.dataset,
         run.metadata["variate_indices"],
         indices,
-        args.lookback,
-        args.horizon,
+        lookback,
+        horizon,
     )
     loader = DataLoader(
         subset,
@@ -812,6 +823,7 @@ def run_mmpd_eval(
 
     if not out_npz.exists() or args.force_mmpd_eval:
         helper = write_mmpd_eval_helper(args.mmpd_repo)
+        lookback, horizon = dataset_window_lengths(args, dataset)
         cmd = [
             sys.executable,
             "-u",
@@ -831,9 +843,9 @@ def run_mmpd_eval(
             "--indices-json",
             str(indices_json),
             "--lookback",
-            str(args.lookback),
+            str(lookback),
             "--horizon",
-            str(args.horizon),
+            str(horizon),
             "--patch-size",
             str(args.patch_size),
             "--data-dim",
@@ -1233,11 +1245,12 @@ def build_indices_for_dataset(
     variate_indices: Sequence[int],
 ) -> List[int]:
     pipeline = load_tsf_pipeline()
+    lookback, horizon = dataset_window_lengths(args, dataset)
     _, _, test_ds, _ = pipeline.load_dataset(
         dataset,
         list(variate_indices),
-        lookback=args.lookback,
-        horizon=args.horizon,
+        lookback=lookback,
+        horizon=horizon,
         stride=1,
     )
     indices = make_eval_indices(
