@@ -21,6 +21,7 @@ SMOKE=0
 SERIAL=0
 SKIP_MMPD_TRAIN=0
 RETRY_MMPD_ONLY=0
+RETRY_ANCHOR_ONLY=0
 FORCE_MMPD_EVAL=0
 SEED=2026
 
@@ -30,6 +31,7 @@ while [[ $# -gt 0 ]]; do
         --serial) SERIAL=1; shift ;;
         --skip-mmpd-train) SKIP_MMPD_TRAIN=1; shift ;;
         --retry-mmpd-only) RETRY_MMPD_ONLY=1; SKIP_MMPD_TRAIN=1; FORCE_MMPD_EVAL=1; shift ;;
+        --retry-anchor-only) RETRY_ANCHOR_ONLY=1; shift ;;
         --seed) SEED="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
@@ -39,6 +41,22 @@ if [[ "$RETRY_MMPD_ONLY" -eq 1 && -z "${MATRIX_OUTPUT_DIR:-}" ]]; then
     echo "ERROR: --retry-mmpd-only requires MATRIX_OUTPUT_DIR (existing matrix run)." >&2
     exit 1
 fi
+if [[ "$RETRY_ANCHOR_ONLY" -eq 1 && -z "${MATRIX_OUTPUT_DIR:-}" ]]; then
+    echo "ERROR: --retry-anchor-only requires MATRIX_OUTPUT_DIR (existing matrix run)." >&2
+    exit 1
+fi
+
+dataset_wall_mmpd() {
+  if [[ "$1" == "dalia" ]]; then
+    echo "${WALL_MMPD_DALIA:-24:00:00}"
+  else
+    echo "$WALL_MMPD"
+  fi
+}
+
+dataset_wall_anchor() {
+  echo "$WALL_ANCHOR"
+}
 
 # ---------------------------------------------------------------------------
 # Serial fallback: one self-submitting job (old behaviour)
@@ -100,8 +118,9 @@ fi
   else
     DATASETS=(ETTh1 ETTh2 ETTm1 ETTm2 illness exchange_rate weather electricity traffic PeMS solar_Alabama dalia)
     WALL_INIT="0:30:00"
-    WALL_MMPD="6:00:00"
-    WALL_ANCHOR="6:00:00"
+    WALL_MMPD="12:00:00"
+    WALL_ANCHOR="12:00:00"
+    WALL_MMPD_DALIA="24:00:00"
     WALL_MERGE="0:30:00"
     MEM="60G"
     CPUS=8
@@ -213,6 +232,9 @@ PREAMBLE
   if [[ "$FORCE_MMPD_EVAL" -eq 1 ]]; then
     EVAL_BASE+=(--force-mmpd-eval)
   fi
+  if [[ "$RETRY_ANCHOR_ONLY" -eq 1 ]]; then
+    EVAL_BASE+=(--force-anchor-eval)
+  fi
   if [[ -n "${BINARY_ANCHOR_ROOTS:-}" ]]; then
     for _br in ${BINARY_ANCHOR_ROOTS}; do
       _br_abs="$_br"
@@ -231,8 +253,9 @@ PREAMBLE
 
   JOB_INIT=""
   WORKER_DEP=()
-  if [[ "$RETRY_MMPD_ONLY" -eq 1 ]]; then
-    echo "Retry mode: MMPD eval only (skip init + binary anchor workers)."
+  if [[ "$RETRY_MMPD_ONLY" -eq 1 || "$RETRY_ANCHOR_ONLY" -eq 1 ]]; then
+    [[ "$RETRY_MMPD_ONLY" -eq 1 ]] && echo "Retry mode: MMPD eval only (skip init + binary anchor workers)."
+    [[ "$RETRY_ANCHOR_ONLY" -eq 1 ]] && echo "Retry mode: binary anchor eval only (skip init + MMPD workers)."
   else
     echo "Submitting init (shared indices + manifest)..."
     JOB_INIT=$(sbatch --parsable \
@@ -257,11 +280,12 @@ ENDSCRIPT
 
   WORKER_IDS=()
   for ds in "${DATASETS[@]}"; do
-    echo "Submitting mmpd-${ds} ${WORKER_DEP[*]}..."
+    if [[ "$RETRY_ANCHOR_ONLY" -eq 0 ]]; then
+    echo "Submitting mmpd-${ds} ${WORKER_DEP[*]} (wall=$(dataset_wall_mmpd "$ds"))..."
     JOB_MMPD=$(sbatch --parsable \
       --job-name="mmpd-mx-${ds}${SMOKE_SUFFIX}" \
       "${SBATCH_COMMON[@]}" \
-      --time="$WALL_MMPD" \
+      --time="$(dataset_wall_mmpd "$ds")" \
       "${WORKER_DEP[@]}" \
       --output="$LOG_DIR/mmpd-${ds}-%j.out" \
       --error="$LOG_DIR/mmpd-${ds}-%j.err" \
@@ -276,13 +300,14 @@ ENDSCRIPT
     )
     echo "  -> mmpd-${ds}: $JOB_MMPD"
     WORKER_IDS+=("$JOB_MMPD")
+    fi
 
     if [[ "$RETRY_MMPD_ONLY" -eq 0 ]]; then
-      echo "Submitting bin-${ds} ${WORKER_DEP[*]}..."
+      echo "Submitting bin-${ds} ${WORKER_DEP[*]} (wall=$(dataset_wall_anchor "$ds"))..."
       JOB_B=$(sbatch --parsable \
         --job-name="mmpd-mx-b-${ds}${SMOKE_SUFFIX}" \
         "${SBATCH_COMMON[@]}" \
-        --time="$WALL_ANCHOR" \
+        --time="$(dataset_wall_anchor "$ds")" \
         "${WORKER_DEP[@]}" \
         --output="$LOG_DIR/bin-${ds}-%j.out" \
         --error="$LOG_DIR/bin-${ds}-%j.err" \

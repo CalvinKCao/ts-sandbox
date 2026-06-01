@@ -202,20 +202,60 @@ def _export_pems_mmpd_csv(src_npz: Path, dst_csv: Path) -> None:
     print(f"[mmpd-data] PeMS: wrote {dst_csv} ({values.shape[0]} steps, {values.shape[1]} vars)")
 
 
-def _export_dalia_mmpd_csv(dst_csv: Path) -> None:
+def _dalia_mmpd_meta_path(data_dir: Path) -> Path:
+    return data_dir / "dalia_mmpd.meta.json"
+
+
+def _export_dalia_mmpd_csv(dst_csv: Path, data_dir: Path) -> None:
+    """Stage DALIA for MMPD as train|val|test row blocks (not one giant pseudo-series)."""
     from models.diffusion_tsf.dalia_data import (
         DALIA_CHANNEL_NAMES,
         load_dalia_tensors,
     )
+    from models.diffusion_tsf.dalia_data import _split_sample_indices
 
     x, y = load_dalia_tensors()
-    windows = np.concatenate([x, y], axis=1)
-    values = windows.reshape(-1, windows.shape[-1])
+    n = len(x)
+    train_idx, val_idx, test_idx = _split_sample_indices(n)
+    rng = np.random.default_rng(42)
+    n_train = min(400, len(train_idx))
+    n_val = min(60, len(val_idx))
+    n_test = min(120, len(test_idx))
+    train_idx = np.sort(rng.choice(train_idx, n_train, replace=False))
+    val_idx = np.sort(rng.choice(val_idx, n_val, replace=False))
+    test_idx = np.sort(rng.choice(test_idx, n_test, replace=False))
+
+    train_blocks = [np.concatenate([x[i], y[i]], axis=0) for i in train_idx]
+    val_blocks = [np.concatenate([x[i], y[i]], axis=0) for i in val_idx]
+    test_blocks = [np.concatenate([x[i], y[i]], axis=0) for i in test_idx]
+    train_rows = sum(b.shape[0] for b in train_blocks)
+    val_rows = sum(b.shape[0] for b in val_blocks)
+    test_rows = sum(b.shape[0] for b in test_blocks)
+    values = np.concatenate(train_blocks + val_blocks + test_blocks, axis=0)
     _write_mmpd_csv(dst_csv, values, DALIA_CHANNEL_NAMES)
+    meta = {
+        "data_split": [int(train_rows), int(val_rows), int(test_rows)],
+        "n_windows": {"train": int(n_train), "val": int(n_val), "test": int(n_test)},
+    }
+    with _dalia_mmpd_meta_path(data_dir).open("w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
     print(
         f"[mmpd-data] DALIA: wrote {dst_csv} "
-        f"({len(x)} windows x {windows.shape[1]} steps, {values.shape[1]} vars)"
+        f"({meta['n_windows']}, rows={meta['data_split']}, {values.shape[1]} vars)"
     )
+
+
+def mmpd_data_split(dataset: str, data_dir: Path) -> str:
+    if dataset != "dalia":
+        return DATASET_SPLITS[dataset]
+    meta_path = _dalia_mmpd_meta_path(data_dir)
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            f"Missing {meta_path}; re-run staging (delete stale dalia_mmpd.csv first)."
+        )
+    with meta_path.open(encoding="utf-8") as f:
+        parts = json.load(f)["data_split"]
+    return ",".join(str(int(x)) for x in parts)
 
 
 def stage_mmpd_datasets(data_dir: Path, datasets: Sequence[str]) -> None:
@@ -236,8 +276,15 @@ def stage_mmpd_datasets(data_dir: Path, datasets: Sequence[str]) -> None:
         if dataset == "dalia":
             if dst.is_symlink():
                 dst.unlink()
-            if not dst.exists() or dst.stat().st_size == 0:
-                _export_dalia_mmpd_csv(dst)
+            meta = _dalia_mmpd_meta_path(data_dir)
+            oversized = dst.exists() and dst.stat().st_size > 50_000_000
+            if oversized:
+                print(f"[mmpd-data] DALIA: removing oversized legacy {dst}")
+                dst.unlink()
+                if meta.exists():
+                    meta.unlink()
+            if not dst.exists() or dst.stat().st_size == 0 or not meta.exists():
+                _export_dalia_mmpd_csv(dst, data_dir)
             continue
 
         if dst.exists() or dst.is_symlink():
@@ -273,11 +320,10 @@ def mmpd_eval_batch_size(args: argparse.Namespace, dataset: str) -> int:
         cap = min(cap, 2)
     elif dim >= 130:
         cap = min(cap, 4)
-    if cap < args.mmpd_eval_batch_size:
-        print(
-            f"[mmpd-eval] {dataset}: batch_size {args.mmpd_eval_batch_size} -> {cap} "
-            f"(data_dim={dim})"
-        )
+    elif dim <= 21:
+        cap = max(cap, min(32, args.mmpd_eval_batch_size * 2))
+    if cap != args.mmpd_eval_batch_size:
+        print(f"[mmpd-eval] {dataset}: batch_size {args.mmpd_eval_batch_size} -> {cap} (data_dim={dim})")
     return cap
 
 
@@ -376,7 +422,7 @@ def build_mmpd_train_cmd(args: argparse.Namespace, dataset: str) -> List[str]:
         "--data_path",
         data_path,
         "--data_split",
-        DATASET_SPLITS[dataset],
+        mmpd_data_split(dataset, args.mmpd_data_dir),
         "--output_root",
         str(args.output_dir / "mmpd_out"),
         "--backbone",
@@ -638,8 +684,20 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                 mode_center_all = []
                 mode_prob_all = []
 
+                n_batches = len(loader)
+                print(
+                    f"[mmpd-eval] {ns.dataset}: {len(indices)} windows, "
+                    f"{n_batches} batches (size={args.batch_size})",
+                    flush=True,
+                )
+
                 with torch.no_grad():
-                    for batch_x, batch_y in loader:
+                    for batch_i, (batch_x, batch_y) in enumerate(loader):
+                        if batch_i % 5 == 0 or batch_i + 1 == n_batches:
+                            print(
+                                f"[mmpd-eval] {ns.dataset}: batch {batch_i + 1}/{n_batches}",
+                                flush=True,
+                            )
                         batch_x = batch_x.float().to(device)
                         batch_y = batch_y.float().to(device)
                         batch_x = rearrange(batch_x, "b l d -> b d l")
@@ -887,8 +945,19 @@ def evaluate_anchor(
     if args.anchor_prob_sampler == "ddpm":
         sample_kwargs = {"sampler": "ddpm", "use_ddim": False}
 
+    n_batches = len(loader)
+    print(
+        f"[anchor-eval] {run.dataset}: {len(indices)} windows, "
+        f"{n_batches} batches (size={args.anchor_batch_size})",
+        flush=True,
+    )
     with torch.no_grad():
         for batch_idx, (past, future) in enumerate(loader):
+            if batch_idx % 5 == 0 or batch_idx + 1 == n_batches:
+                print(
+                    f"[anchor-eval] {run.dataset}: batch {batch_idx + 1}/{n_batches}",
+                    flush=True,
+                )
             past = past.to(device)
             future = future.to(device)
             K = getattr(model.config, "lookback_overlap", 0)
@@ -941,7 +1010,7 @@ def run_mmpd_eval(
             "--data-path",
             mmpd_staged_filename(dataset),
             "--data-split",
-            DATASET_SPLITS[dataset],
+            mmpd_data_split(dataset, args.mmpd_data_dir),
             "--output-root",
             str(mmpd_output_root(args) / "mmpd_out"),
             "--out-npz",
