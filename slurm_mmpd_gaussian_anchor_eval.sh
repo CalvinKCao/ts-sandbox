@@ -232,9 +232,11 @@ done
 
 if [[ -n "\$VENV" ]]; then
   echo "[setup] Using persistent venv: \$VENV"
+  _load_modules
   # shellcheck source=/dev/null
   source "\$VENV/bin/activate"
-  _load_modules
+  export PATH="\$VENV/bin:\$PATH"
+  export PYTHON="\$VENV/bin/python"
   install_pipeline_deps
 else
   echo "[setup] No persistent venv; loading modules and building on \${SLURM_TMPDIR:-/tmp}..."
@@ -244,17 +246,21 @@ else
     exit 1
   fi
   python -m venv "\${SLURM_TMPDIR:-/tmp}/env"
+  VENV="\${SLURM_TMPDIR:-/tmp}/env"
   # shellcheck source=/dev/null
-  source "\${SLURM_TMPDIR:-/tmp}/env/bin/activate"
+  source "\$VENV/bin/activate"
+  export PATH="\$VENV/bin:\$PATH"
+  export PYTHON="\$VENV/bin/python"
   install_pipeline_deps
 fi
 
-python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())" || true
+"\$PYTHON" -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())" || true
 
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export REPO="$REPO"
 export OUTPUT_DIR="$OUTPUT_DIR"
+export TS_SANDBOX_REPO="\$REPO"
 export PYTHONPATH="\$REPO\${PYTHONPATH:+:\$PYTHONPATH}"
 cd "\$REPO"
 PREAMBLE
@@ -343,7 +349,7 @@ PREAMBLE
 #!/bin/bash
 source "$PREAMBLE_FILE"
 # Quoted "${EVAL_BASE[@]}" inside heredocs collapses to one argv; use unquoted.
-python -u ${EVAL_BASE[@]} \
+"\$PYTHON" -u ${EVAL_BASE[@]} \
   --phase init \
   --datasets ${DATASETS[*]}
 echo "[init] done: \$(date)"
@@ -367,7 +373,7 @@ ENDSCRIPT
       <<ENDSCRIPT
 #!/bin/bash
 source "$PREAMBLE_FILE"
-python -u ${EVAL_BASE[@]} \
+"\$PYTHON" -u ${EVAL_BASE[@]} \
   --phase mmpd \
   --datasets "$ds"
 echo "[mmpd-${ds}] done: \$(date)"
@@ -389,7 +395,7 @@ ENDSCRIPT
         <<ENDSCRIPT
 #!/bin/bash
 source "$PREAMBLE_FILE"
-python -u ${EVAL_BASE[@]} \
+"\$PYTHON" -u ${EVAL_BASE[@]} \
   --phase anchor \
   --anchor-variant binary \
   --datasets "$ds"
@@ -438,7 +444,7 @@ ENDSCRIPT
     <<ENDSCRIPT
 #!/bin/bash
 source "$PREAMBLE_FILE"
-python -u ${EVAL_BASE[@]} \
+"\$PYTHON" -u ${EVAL_BASE[@]} \
   --phase merge \
   --datasets ${MERGE_DATASETS[*]} \
   --cpu

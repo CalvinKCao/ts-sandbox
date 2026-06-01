@@ -34,6 +34,19 @@ from utils.mmpd_eval_progress import EvalProgress, fmt_duration
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+
+def pipeline_python() -> str:
+    """Venv interpreter; module load after activate can leave sys.executable on CVMFS."""
+    venv = os.environ.get("VIRTUAL_ENV")
+    if venv:
+        py = Path(venv) / "bin" / "python"
+        if py.is_file():
+            return str(py)
+    py_env = os.environ.get("PYTHON")
+    if py_env and Path(py_env).is_file():
+        return py_env
+    return sys.executable
 DEFAULT_MMPD_REPO = REPO_ROOT / "temp" / "MMPD"
 DEFAULT_MMPD_DATA = REPO_ROOT / "temp" / "mmpd_datasets"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results" / "mmpd_anchor_eval"
@@ -540,7 +553,7 @@ def build_mmpd_train_cmd(args: argparse.Namespace, run: AnchorRun) -> List[str]:
     data_dim = len(run_variate_indices(run))
     batch_size = mmpd_train_batch_size(args, dataset, data_dim=data_dim)
     cmd = [
-        sys.executable,
+        pipeline_python(),
         "-u",
         "main_mmpd.py",
         "--data",
@@ -697,14 +710,32 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
             from einops import rearrange
             from torch.utils.data import DataLoader, Subset
 
+            import importlib.util
             from pathlib import Path as _Path
 
             _repo = os.environ.get("TS_SANDBOX_REPO") or str(
                 _Path(__file__).resolve().parents[2]
             )
-            if _repo not in sys.path:
-                sys.path.insert(0, _repo)
-            from utils.mmpd_eval_progress import EvalProgress, fmt_duration
+            _mmpd = str(_Path(__file__).resolve().parent)
+            # MMPD has utils/tools.py; repo must win over script-dir utils.
+            for _p in (_repo, _mmpd):
+                while _p in sys.path:
+                    sys.path.remove(_p)
+            sys.path.insert(0, _repo)
+            sys.path.insert(1, _mmpd)
+
+            def _load_eval_progress():
+                _path = _Path(_repo) / "utils" / "mmpd_eval_progress.py"
+                _spec = importlib.util.spec_from_file_location(
+                    "_ts_mmpd_eval_progress", _path
+                )
+                if _spec is None or _spec.loader is None:
+                    raise ImportError(f"cannot load {_path}")
+                _mod = importlib.util.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                return _mod.EvalProgress, _mod.fmt_duration
+
+            EvalProgress, fmt_duration = _load_eval_progress()
 
             from data_provider.dataset_mts import Dataset_MTS
             from exp.exp_forecast import Exp_Forecast
@@ -1217,7 +1248,7 @@ def run_mmpd_eval(
         data_dim = len(run_variate_indices(run))
         batch_size = mmpd_eval_batch_size(args, dataset, data_dim=data_dim)
         cmd = [
-            sys.executable,
+            pipeline_python(),
             "-u",
             str(helper),
             "--dataset",
