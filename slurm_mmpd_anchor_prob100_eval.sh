@@ -1,16 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=mmpd-prob100-launch
-#SBATCH --account=aip-boyuwang
-#SBATCH --time=06:00:00
-#SBATCH --nodes=1
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=2G
 # =============================================================================
 # 100-sample probabilistic eval (50% test subset): mean-pred MSE/MAE, CRPS, top-3.
 # Eval-only — reuses MMPD checkpoints from a finished matrix run when given
 # --reference-run. Parallel fan-out: per dataset × (MMPD | binary) + merge.
 #
-# USAGE (from $SCRATCH/ts-sandbox on Killarney login node):
+# USAGE (from $SCRATCH/ts-sandbox on Killarney LOGIN node — do NOT sbatch this file):
 #   ./slurm_mmpd_anchor_prob100_eval.sh --reference-run results/datasets/05-27-XXXX-mmpd-anchor-matrix
 #   ./slurm_mmpd_anchor_prob100_eval.sh --smoke-test --reference-run ...
 # =============================================================================
@@ -31,7 +25,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "${MMPD_PROB100_WORKER:-0}" -ne 1 ]]; then
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  echo "ERROR: This script is a login-node launcher; sbatch cannot submit child jobs from a compute node." >&2
+  echo "  cd \"\$SCRATCH/ts-sandbox\" && ./slurm_mmpd_anchor_prob100_eval.sh $*" >&2
+  exit 1
+fi
+
+{
   if [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
     REPO="${SCRATCH}/ts-sandbox"
   elif [[ -d "$HOME/ts-sandbox" ]]; then
@@ -297,7 +297,4 @@ ENDSCRIPT
   echo "  Cancel:  scancel ${CANCEL_IDS[*]}"
   echo "=================================================================="
   exit 0
-fi
-
-echo "ERROR: run from login node only." >&2
-exit 1
+}

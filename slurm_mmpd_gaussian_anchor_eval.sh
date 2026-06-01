@@ -1,23 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=mmpd-anchor-launch
-#SBATCH --account=aip-boyuwang
-#SBATCH --time=06:00:00
-#SBATCH --nodes=1
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=2G
 # =============================================================================
-# MMPD vs binary/Gaussian-anchor matrix eval — parallel fan-out (Killarney).
+# MMPD vs binary-anchor matrix eval — parallel fan-out (Killarney).
 #
 # Dependency graph (per dataset, after init):
 #   init  -> shared indices + run_manifest.json
 #   mmpd-{ds}, bin-{ds}  (parallel)
 #   merge -> metrics.json / metrics.csv
 #
-# USAGE (from $SCRATCH/ts-sandbox on login node):
+# USAGE (from $SCRATCH/ts-sandbox on Killarney LOGIN node — do NOT sbatch this file):
 #   ./slurm_mmpd_gaussian_anchor_eval.sh --smoke-test
 #   ./slurm_mmpd_gaussian_anchor_eval.sh
 #   ./slurm_mmpd_gaussian_anchor_eval.sh --skip-mmpd-train
-#   ./slurm_mmpd_gaussian_anchor_eval.sh --serial --smoke-test   # one GPU, debug
+#   ./slurm_mmpd_gaussian_anchor_eval.sh --serial --smoke-test   # serial uses sbatch once
 # =============================================================================
 
 set -euo pipefail
@@ -49,9 +43,15 @@ if [[ "$SERIAL" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Launcher: fan-out parallel jobs. Supports both direct shell and sbatch launch.
+# Login-node launcher: fan-out parallel sbatch jobs (each has its own --time).
 # ---------------------------------------------------------------------------
-if [[ "${MMPD_MATRIX_WORKER:-0}" -ne 1 ]]; then
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  echo "ERROR: This script is a login-node launcher; sbatch cannot submit child jobs from a compute node." >&2
+  echo "  cd \"\$SCRATCH/ts-sandbox\" && ./slurm_mmpd_gaussian_anchor_eval.sh $*" >&2
+  exit 1
+fi
+
+{
   if [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
     REPO="${SCRATCH}/ts-sandbox"
   elif [[ -d "$HOME/ts-sandbox" ]]; then
@@ -313,7 +313,4 @@ ENDSCRIPT
   echo "  Cancel:  scancel $JOB_INIT ${WORKER_IDS[*]} $JOB_MERGE"
   echo "=================================================================="
   exit 0
-fi
-
-echo "ERROR: this script should only run worker bodies via sbatch heredoc." >&2
-exit 1
+}
