@@ -220,14 +220,19 @@ PREAMBLE
   )
   if [[ "$SKIP_MMPD_TRAIN" -eq 1 ]]; then
     EVAL_BASE+=(--skip-mmpd-train)
-    if [[ -z "${MMPD_REUSE_DIR:-}" ]]; then
+    if [[ -z "${MATRIX_INDICES_DIR:-}" ]]; then
       EVAL_BASE+=(--indices-dir "$OUTPUT_DIR" --mmpd-output-root "$OUTPUT_DIR")
     fi
+  fi
+  if [[ -n "${MATRIX_INDICES_DIR:-}" ]]; then
+    _indices="$MATRIX_INDICES_DIR"
+    [[ "$_indices" != /* ]] && _indices="$REPO/$_indices"
+    EVAL_BASE+=(--indices-dir "$_indices")
   fi
   if [[ -n "${MMPD_REUSE_DIR:-}" ]]; then
     _reuse="$MMPD_REUSE_DIR"
     [[ "$_reuse" != /* ]] && _reuse="$REPO/$_reuse"
-    EVAL_BASE+=(--indices-dir "$_reuse" --mmpd-output-root "$_reuse")
+    EVAL_BASE+=(--mmpd-output-root "$_reuse")
   fi
   if [[ "$FORCE_MMPD_EVAL" -eq 1 ]]; then
     EVAL_BASE+=(--force-mmpd-eval)

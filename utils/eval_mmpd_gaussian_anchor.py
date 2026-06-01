@@ -28,6 +28,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
+from utils.mmpd_eval_progress import EvalProgress, fmt_duration
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -87,13 +89,6 @@ ANCHOR_VARIANTS = {
     "gaussian": {"slug": "gauss-anchor", "model_name": "gaussian_anchor"},
     "binary": {"slug": "binary", "model_name": "binary_anchor"},
 }
-# Upstream MMPD only reads CSV; NPZ / prewindowed DALIA need conversion when staged.
-MMPD_STAGED_FILENAMES = {
-    "PeMS": "PeMS04.csv",
-    "dalia": "dalia_mmpd.csv",
-}
-
-
 @dataclass
 class AnchorRun:
     variant: str
@@ -169,9 +164,100 @@ def apply_mmpd_compatibility_patches(path: Path) -> None:
         if patched != text:
             tools_py.write_text(patched, encoding="utf-8")
 
+    main_py = path / "main_mmpd.py"
+    if main_py.exists():
+        text = main_py.read_text(encoding="utf-8")
+        patched = text.replace(
+            "if args.data in data_parser.keys():",
+            "if args.data in data_parser.keys() and os.environ.get('MMPD_KEEP_CLI_DATA_ARGS') != '1':",
+        )
+        if patched != text:
+            main_py.write_text(patched, encoding="utf-8")
+
+    dataset_py = path / "data_provider" / "dataset_mts.py"
+    if dataset_py.exists():
+        text = dataset_py.read_text(encoding="utf-8")
+        patched = text
+        patched = patched.replace(
+            "        self.stride = 1\n"
+            "        if 'dynamic' in data_path and flag == 'test':\n"
+            "            self.stride = self.out_len\n"
+            "        self.__read_data__()",
+            "        env_stride = int(os.environ.get('MMPD_WINDOW_STRIDE', '1'))\n"
+            "        env_test_stride = int(os.environ.get('MMPD_TEST_STRIDE', str(env_stride)))\n"
+            "        self.stride = env_test_stride if flag == 'test' else env_stride\n"
+            "        if 'dynamic' in data_path and flag == 'test':\n"
+            "            self.stride = self.out_len\n"
+            "        self.block_len = int(os.environ.get('MMPD_BLOCK_LEN', '0'))\n"
+            "        self.__read_data__()",
+        )
+        patched = patched.replace(
+            "        border1s = [0, train_num - self.in_len, train_num + val_num - self.in_len]\n"
+            "        border2s = [train_num, train_num+val_num, train_num + val_num + test_num]",
+            "        if self.block_len > 0:\n"
+            "            border1s = [0, train_num, train_num + val_num]\n"
+            "        else:\n"
+            "            border1s = [0, train_num - self.in_len, train_num + val_num - self.in_len]\n"
+            "        border2s = [train_num, train_num+val_num, train_num + val_num + test_num]",
+        )
+        patched = patched.replace(
+            "        s_begin = index * self.stride\n"
+            "        s_end = s_begin + self.in_len",
+            "        if self.block_len > 0:\n"
+            "            s_begin = index * self.stride * self.block_len\n"
+            "        else:\n"
+            "            s_begin = index * self.stride\n"
+            "        s_end = s_begin + self.in_len",
+        )
+        patched = patched.replace(
+            "        return (len(self.data_x) - self.in_len - self.out_len) // self.stride + 1",
+            "        if self.block_len > 0:\n"
+            "            n_blocks = len(self.data_x) // self.block_len\n"
+            "            return (n_blocks - 1) // self.stride + 1\n"
+            "        return (len(self.data_x) - self.in_len - self.out_len) // self.stride + 1",
+        )
+        if patched != text:
+            dataset_py.write_text(patched, encoding="utf-8")
+
 
 def mmpd_staged_filename(dataset: str) -> str:
-    return MMPD_STAGED_FILENAMES.get(dataset, DATASET_FILES[dataset].name)
+    return DATASET_FILES[dataset].name
+
+
+def safe_stem(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
+
+
+def run_subset_id(run: AnchorRun) -> str:
+    return str(run.metadata.get("subset_id") or run.dataset)
+
+
+def run_variate_indices(run: AnchorRun) -> List[int]:
+    return [int(i) for i in run.metadata["variate_indices"]]
+
+
+def run_data_subset(run: AnchorRun) -> Dict[str, Any]:
+    return dict(run.metadata.get("data_subset") or {})
+
+
+def run_train_stride(run: AnchorRun) -> int:
+    subset = run_data_subset(run)
+    return max(1, int(subset.get("train_stride", 1)))
+
+
+def run_test_stride(run: AnchorRun) -> int:
+    subset = run_data_subset(run)
+    return max(1, int(subset.get("test_stride", run_train_stride(run))))
+
+
+def mmpd_dataset_name(run: AnchorRun) -> str:
+    # Use the binary subset id as the MMPD data name so checkpoints cannot be
+    # accidentally reused across different variate/stride subsets.
+    return safe_stem(run_subset_id(run))
+
+
+def mmpd_staged_filename_for_run(run: AnchorRun) -> str:
+    return f"{mmpd_dataset_name(run)}.csv"
 
 
 def _write_mmpd_csv(path: Path, values: np.ndarray, columns: Sequence[str]) -> None:
@@ -195,8 +281,26 @@ def _load_pems_npz_array(path: Path) -> np.ndarray:
     return np.asarray(data, dtype=np.float32)
 
 
-def _export_pems_mmpd_csv(src_npz: Path, dst_csv: Path) -> None:
+def _export_csv_variate_subset(src_csv: Path, dst_csv: Path, variate_indices: Sequence[int]) -> None:
+    """Stage only the selected value columns, preserving the first date/index column."""
+    variate_indices = [int(i) for i in variate_indices]
+    with src_csv.open(encoding="utf-8", newline="") as src, dst_csv.open("w", encoding="utf-8", newline="") as dst:
+        reader = csv.reader(src)
+        writer = csv.writer(dst)
+        header = next(reader)
+        selected_cols = [i + 1 for i in variate_indices]
+        writer.writerow([header[0], *[header[i] for i in selected_cols]])
+        for row in reader:
+            writer.writerow([row[0], *[row[i] for i in selected_cols]])
+    print(
+        f"[mmpd-data] {src_csv.name}: wrote {dst_csv} "
+        f"({len(variate_indices)} selected variates)"
+    )
+
+
+def _export_pems_mmpd_csv(src_npz: Path, dst_csv: Path, variate_indices: Sequence[int]) -> None:
     values = _load_pems_npz_array(src_npz)
+    values = values[:, [int(i) for i in variate_indices]]
     columns = [f"var_{i}" for i in range(values.shape[1])]
     _write_mmpd_csv(dst_csv, values, columns)
     print(f"[mmpd-data] PeMS: wrote {dst_csv} ({values.shape[0]} steps, {values.shape[1]} vars)")
@@ -206,8 +310,8 @@ def _dalia_mmpd_meta_path(data_dir: Path) -> Path:
     return data_dir / "dalia_mmpd.meta.json"
 
 
-def _export_dalia_mmpd_csv(dst_csv: Path, data_dir: Path) -> None:
-    """Stage DALIA for MMPD as train|val|test row blocks (not one giant pseudo-series)."""
+def _export_dalia_mmpd_csv(dst_csv: Path, data_dir: Path, variate_indices: Sequence[int]) -> None:
+    """Stage DALIA as train|val|test row blocks for block-strided MMPD loading."""
     from models.diffusion_tsf.dalia_data import (
         DALIA_CHANNEL_NAMES,
         load_dalia_tensors,
@@ -217,13 +321,10 @@ def _export_dalia_mmpd_csv(dst_csv: Path, data_dir: Path) -> None:
     x, y = load_dalia_tensors()
     n = len(x)
     train_idx, val_idx, test_idx = _split_sample_indices(n)
-    rng = np.random.default_rng(42)
-    n_train = min(400, len(train_idx))
-    n_val = min(60, len(val_idx))
-    n_test = min(120, len(test_idx))
-    train_idx = np.sort(rng.choice(train_idx, n_train, replace=False))
-    val_idx = np.sort(rng.choice(val_idx, n_val, replace=False))
-    test_idx = np.sort(rng.choice(test_idx, n_test, replace=False))
+    variate_indices = [int(i) for i in variate_indices]
+    names = [DALIA_CHANNEL_NAMES[i] for i in variate_indices]
+    x = x[:, :, variate_indices]
+    y = y[:, :, variate_indices]
 
     train_blocks = [np.concatenate([x[i], y[i]], axis=0) for i in train_idx]
     val_blocks = [np.concatenate([x[i], y[i]], axis=0) for i in val_idx]
@@ -232,10 +333,15 @@ def _export_dalia_mmpd_csv(dst_csv: Path, data_dir: Path) -> None:
     val_rows = sum(b.shape[0] for b in val_blocks)
     test_rows = sum(b.shape[0] for b in test_blocks)
     values = np.concatenate(train_blocks + val_blocks + test_blocks, axis=0)
-    _write_mmpd_csv(dst_csv, values, DALIA_CHANNEL_NAMES)
+    _write_mmpd_csv(dst_csv, values, names)
     meta = {
         "data_split": [int(train_rows), int(val_rows), int(test_rows)],
-        "n_windows": {"train": int(n_train), "val": int(n_val), "test": int(n_test)},
+        "n_windows": {
+            "train": int(len(train_idx)),
+            "val": int(len(val_idx)),
+            "test": int(len(test_idx)),
+        },
+        "block_len": int(x.shape[1] + y.shape[1]),
     }
     with _dalia_mmpd_meta_path(data_dir).open("w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
@@ -258,46 +364,50 @@ def mmpd_data_split(dataset: str, data_dir: Path) -> str:
     return ",".join(str(int(x)) for x in parts)
 
 
-def stage_mmpd_datasets(data_dir: Path, datasets: Sequence[str]) -> None:
+def stage_mmpd_dataset_for_run(data_dir: Path, run: AnchorRun) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
-    for dataset in datasets:
-        src = DATASET_FILES[dataset]
-        if not src.exists():
-            raise FileNotFoundError(f"Missing dataset file for {dataset}: {src}")
-        dst = data_dir / mmpd_staged_filename(dataset)
+    dataset = run.dataset
+    src = DATASET_FILES[dataset]
+    if not src.exists():
+        raise FileNotFoundError(f"Missing dataset file for {dataset}: {src}")
 
-        if dataset == "PeMS":
-            if dst.is_symlink():
-                dst.unlink()
-            if not dst.exists() or dst.stat().st_size == 0:
-                _export_pems_mmpd_csv(src, dst)
-            continue
-
-        if dataset == "dalia":
-            if dst.is_symlink():
-                dst.unlink()
-            meta = _dalia_mmpd_meta_path(data_dir)
-            oversized = dst.exists() and dst.stat().st_size > 50_000_000
-            if oversized:
-                print(f"[mmpd-data] DALIA: removing oversized legacy {dst}")
-                dst.unlink()
-                if meta.exists():
-                    meta.unlink()
-            if not dst.exists() or dst.stat().st_size == 0 or not meta.exists():
-                _export_dalia_mmpd_csv(dst, data_dir)
-            continue
-
-        if dst.exists() or dst.is_symlink():
-            continue
+    dst = data_dir / mmpd_staged_filename_for_run(run)
+    meta_path = dst.with_suffix(dst.suffix + ".meta.json")
+    expected_meta = {
+        "dataset": dataset,
+        "subset_id": run_subset_id(run),
+        "variate_indices": run_variate_indices(run),
+        "train_stride": run_train_stride(run),
+        "test_stride": run_test_stride(run),
+    }
+    if dst.is_symlink():
+        dst.unlink()
+    if dst.exists() and meta_path.exists():
         try:
-            dst.symlink_to(src)
-        except OSError:
-            shutil.copy2(src, dst)
+            with meta_path.open(encoding="utf-8") as f:
+                if json.load(f) == expected_meta:
+                    return
+        except Exception:
+            pass
+    if dst.exists():
+        dst.unlink()
+    if meta_path.exists():
+        meta_path.unlink()
+
+    if dataset == "PeMS":
+        _export_pems_mmpd_csv(src, dst, expected_meta["variate_indices"])
+    elif dataset == "dalia":
+        _export_dalia_mmpd_csv(dst, data_dir, expected_meta["variate_indices"])
+        expected_meta["dalia_data_split"] = mmpd_data_split(dataset, data_dir)
+    else:
+        _export_csv_variate_subset(src, dst, expected_meta["variate_indices"])
+    with meta_path.open("w", encoding="utf-8") as f:
+        json.dump(expected_meta, f, indent=2, sort_keys=True)
 
 
-def mmpd_train_batch_size(args: argparse.Namespace, dataset: str) -> int:
+def mmpd_train_batch_size(args: argparse.Namespace, dataset: str, data_dim: Optional[int] = None) -> int:
     """Cap batch size for wide datasets to avoid L40S OOM during MMPD training."""
-    dim = DATASET_DIMS[dataset]
+    dim = int(data_dim if data_dim is not None else DATASET_DIMS[dataset])
     cap = args.mmpd_batch_size
     if dim >= 800:
         cap = min(cap, 4)
@@ -310,9 +420,9 @@ def mmpd_train_batch_size(args: argparse.Namespace, dataset: str) -> int:
     return cap
 
 
-def mmpd_eval_batch_size(args: argparse.Namespace, dataset: str) -> int:
+def mmpd_eval_batch_size(args: argparse.Namespace, dataset: str, data_dim: Optional[int] = None) -> int:
     """Cap eval batch; 100-sample diffusion predict is much heavier than train."""
-    dim = DATASET_DIMS[dataset]
+    dim = int(data_dim if data_dim is not None else DATASET_DIMS[dataset])
     cap = args.mmpd_eval_batch_size
     if dim >= 800:
         cap = min(cap, 1)
@@ -407,16 +517,30 @@ def dataset_window_lengths(args: argparse.Namespace, dataset: str) -> Tuple[int,
     return args.lookback, args.horizon
 
 
-def build_mmpd_train_cmd(args: argparse.Namespace, dataset: str) -> List[str]:
-    data_path = mmpd_staged_filename(dataset)
+def mmpd_env_for_run(run: AnchorRun) -> Dict[str, str]:
+    env = os.environ.copy()
+    env["MMPD_KEEP_CLI_DATA_ARGS"] = "1"
+    env["MMPD_WINDOW_STRIDE"] = str(run_train_stride(run))
+    env["MMPD_TEST_STRIDE"] = str(run_test_stride(run))
+    if run.dataset == "dalia":
+        env["MMPD_BLOCK_LEN"] = "120"
+    else:
+        env.pop("MMPD_BLOCK_LEN", None)
+    return env
+
+
+def build_mmpd_train_cmd(args: argparse.Namespace, run: AnchorRun) -> List[str]:
+    dataset = run.dataset
+    data_path = mmpd_staged_filename_for_run(run)
     lookback, horizon = dataset_window_lengths(args, dataset)
-    batch_size = mmpd_train_batch_size(args, dataset)
+    data_dim = len(run_variate_indices(run))
+    batch_size = mmpd_train_batch_size(args, dataset, data_dim=data_dim)
     cmd = [
         sys.executable,
         "-u",
         "main_mmpd.py",
         "--data",
-        dataset,
+        mmpd_dataset_name(run),
         "--root_path",
         str(args.mmpd_data_dir),
         "--data_path",
@@ -436,7 +560,7 @@ def build_mmpd_train_cmd(args: argparse.Namespace, dataset: str) -> List[str]:
         "--patch_size",
         str(args.patch_size),
         "--data_dim",
-        str(DATASET_DIMS[dataset]),
+        str(data_dim),
         "--d_layers",
         "2",
         "--d_model",
@@ -483,9 +607,9 @@ def build_mmpd_train_cmd(args: argparse.Namespace, dataset: str) -> List[str]:
     return cmd
 
 
-def mmpd_checkpoint_path(args: argparse.Namespace, dataset: str) -> Path:
-    lookback, horizon = dataset_window_lengths(args, dataset)
-    setting = mmpd_setting(dataset, lookback, horizon, args.patch_size)
+def mmpd_checkpoint_path(args: argparse.Namespace, run: AnchorRun) -> Path:
+    lookback, horizon = dataset_window_lengths(args, run.dataset)
+    setting = mmpd_setting(mmpd_dataset_name(run), lookback, horizon, args.patch_size)
     return (
         mmpd_output_root(args)
         / "mmpd_out"
@@ -496,9 +620,11 @@ def mmpd_checkpoint_path(args: argparse.Namespace, dataset: str) -> Path:
     )
 
 
-def train_mmpd(args: argparse.Namespace, datasets: Sequence[str]) -> None:
-    for dataset in datasets:
-        ckpt = mmpd_checkpoint_path(args, dataset)
+def train_mmpd(args: argparse.Namespace, runs: Sequence[AnchorRun]) -> None:
+    for run in runs:
+        dataset = run.dataset
+        stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
+        ckpt = mmpd_checkpoint_path(args, run)
         if ckpt.exists() and not args.force_mmpd_train:
             print(f"[mmpd] Reusing checkpoint for {dataset}: {ckpt}")
             continue
@@ -508,7 +634,12 @@ def train_mmpd(args: argparse.Namespace, datasets: Sequence[str]) -> None:
                 continue
             raise FileNotFoundError(f"--skip-mmpd-train set but missing {ckpt}")
         log_path = args.output_dir / "logs" / f"mmpd_train_{dataset}.log"
-        run_cmd(build_mmpd_train_cmd(args, dataset), cwd=args.mmpd_repo, log_path=log_path)
+        run_cmd(
+            build_mmpd_train_cmd(args, run),
+            cwd=args.mmpd_repo,
+            env=mmpd_env_for_run(run),
+            log_path=log_path,
+        )
 
 
 def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
@@ -521,12 +652,19 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
             import os
             import pickle
             import random
+            import sys
+            import time
             from types import SimpleNamespace
 
             import numpy as np
             import torch
             from einops import rearrange
             from torch.utils.data import DataLoader, Subset
+
+            _repo = os.environ.get("TS_SANDBOX_REPO")
+            if _repo:
+                sys.path.insert(0, _repo)
+            from utils.mmpd_eval_progress import EvalProgress, fmt_duration
 
             from data_provider.dataset_mts import Dataset_MTS
             from exp.exp_forecast import Exp_Forecast
@@ -685,19 +823,18 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                 mode_prob_all = []
 
                 n_batches = len(loader)
+                n_windows = len(indices)
                 print(
-                    f"[mmpd-eval] {ns.dataset}: {len(indices)} windows, "
-                    f"{n_batches} batches (size={args.batch_size})",
+                    f"[mmpd-eval] {ns.dataset}: start "
+                    f"windows={n_windows} batches={n_batches} batch_size={args.batch_size} "
+                    f"samples={args.sample_num} steps={args.num_sampling_steps}",
                     flush=True,
                 )
+                progress = EvalProgress(f"mmpd-eval/{ns.dataset}", n_batches)
 
                 with torch.no_grad():
                     for batch_i, (batch_x, batch_y) in enumerate(loader):
-                        if batch_i % 5 == 0 or batch_i + 1 == n_batches:
-                            print(
-                                f"[mmpd-eval] {ns.dataset}: batch {batch_i + 1}/{n_batches}",
-                                flush=True,
-                            )
+                        t_batch = time.time()
                         batch_x = batch_x.float().to(device)
                         batch_y = batch_y.float().to(device)
                         batch_x = rearrange(batch_x, "b l d -> b d l")
@@ -724,7 +861,16 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                             denormalize(modes["mode_center"], x_shift, x_scale).detach().cpu().numpy()
                         )
                         mode_prob_all.append(modes["mode_prob"].detach().cpu().numpy())
+                        done = batch_i + 1
+                        progress.maybe_log(
+                            done,
+                            extra=(
+                                f"last_batch={fmt_duration(time.time() - t_batch)} "
+                                f"windows~{min(done * args.batch_size, n_windows)}/{n_windows}"
+                            ),
+                        )
 
+                progress.done(extra=f"writing {ns.out_npz}")
                 os.makedirs(os.path.dirname(ns.out_npz), exist_ok=True)
                 np.savez_compressed(
                     ns.out_npz,
@@ -735,6 +881,7 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                     mode_prob=np.concatenate(mode_prob_all, axis=0),
                     indices=np.array(indices, dtype=np.int64),
                 )
+                print(f"[mmpd-eval] {ns.dataset}: saved {ns.out_npz}", flush=True)
 
 
             if __name__ == "__main__":
@@ -901,6 +1048,8 @@ def load_tsf_test_subset(
     indices: Sequence[int],
     lookback: Optional[int],
     horizon: Optional[int],
+    train_stride: int,
+    test_stride: int,
 ):
     pipeline = load_tsf_pipeline()
     _, _, test_ds, _ = pipeline.load_dataset(
@@ -908,7 +1057,8 @@ def load_tsf_test_subset(
         list(variate_indices),
         lookback=lookback,
         horizon=horizon,
-        stride=1,
+        stride=train_stride,
+        test_stride=test_stride,
     )
     return Subset(test_ds, list(indices))
 
@@ -926,6 +1076,8 @@ def evaluate_anchor(
         indices,
         lookback,
         horizon,
+        run_train_stride(run),
+        run_test_stride(run),
     )
     loader = DataLoader(
         subset,
@@ -937,27 +1089,19 @@ def evaluate_anchor(
     model = load_anchor_model(run, args, device)
     y_true: List[np.ndarray] = []
     det: List[np.ndarray] = []
-    samples: List[np.ndarray] = []
-    sample_kwargs = {
-        "sampler": args.anchor_prob_sampler,
-        "num_inference_steps": args.num_sampling_steps,
-    }
-    if args.anchor_prob_sampler == "ddpm":
-        sample_kwargs = {"sampler": "ddpm", "use_ddim": False}
 
     n_batches = len(loader)
+    n_windows = len(indices)
     print(
-        f"[anchor-eval] {run.dataset}: {len(indices)} windows, "
-        f"{n_batches} batches (size={args.anchor_batch_size})",
+        f"[anchor-eval] {run.dataset}: start "
+        f"windows={n_windows} batches={n_batches} batch_size={args.anchor_batch_size} "
+        "mode=deterministic-anchor-only",
         flush=True,
     )
+    batch_progress = EvalProgress(f"anchor-eval/{run.dataset}", n_batches)
     with torch.no_grad():
         for batch_idx, (past, future) in enumerate(loader):
-            if batch_idx % 5 == 0 or batch_idx + 1 == n_batches:
-                print(
-                    f"[anchor-eval] {run.dataset}: batch {batch_idx + 1}/{n_batches}",
-                    flush=True,
-                )
+            t_batch = time.time()
             past = past.to(device)
             future = future.to(device)
             K = getattr(model.config, "lookback_overlap", 0)
@@ -968,28 +1112,29 @@ def evaluate_anchor(
             anchor = model.generate(past, sampler="anchor")["prediction"]
             det.append(anchor.cpu().numpy())
 
-            batch_samples = []
-            for sample_idx in range(args.sample_num):
-                torch.manual_seed(args.seed + batch_idx * 1009 + sample_idx * 17)
-                if device.type == "cuda":
-                    torch.cuda.manual_seed_all(args.seed + batch_idx * 1009 + sample_idx * 17)
-                pred = model.generate(past, **sample_kwargs)["prediction"]
-                batch_samples.append(pred.cpu().numpy())
-            samples.append(np.stack(batch_samples, axis=2))
+            done = batch_idx + 1
+            batch_progress.maybe_log(
+                done,
+                extra=(
+                    f"last_batch={fmt_duration(time.time() - t_batch)} "
+                    f"windows~{min(done * args.anchor_batch_size, n_windows)}/{n_windows}"
+                ),
+            )
 
+    batch_progress.done()
     return {
         "y_true": np.concatenate(y_true, axis=0),
         "deterministic": np.concatenate(det, axis=0),
-        "samples": np.concatenate(samples, axis=0),
         "indices": np.array(indices, dtype=np.int64),
     }
 
 
 def run_mmpd_eval(
     args: argparse.Namespace,
-    dataset: str,
+    run: AnchorRun,
     indices: Sequence[int],
 ) -> Dict[str, np.ndarray]:
+    dataset = run.dataset
     out_npz = args.output_dir / "raw" / f"mmpd_{dataset}.npz"
     indices_json = args.output_dir / "raw" / f"indices_{dataset}.json"
     indices_json.parent.mkdir(parents=True, exist_ok=True)
@@ -997,18 +1142,21 @@ def run_mmpd_eval(
         json.dump(list(indices), f)
 
     if not out_npz.exists() or args.force_mmpd_eval:
+        stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
         helper = write_mmpd_eval_helper(args.mmpd_repo)
         lookback, horizon = dataset_window_lengths(args, dataset)
+        data_dim = len(run_variate_indices(run))
+        batch_size = mmpd_eval_batch_size(args, dataset, data_dim=data_dim)
         cmd = [
             sys.executable,
             "-u",
             str(helper),
             "--dataset",
-            dataset,
+            mmpd_dataset_name(run),
             "--root-path",
             str(args.mmpd_data_dir),
             "--data-path",
-            mmpd_staged_filename(dataset),
+            mmpd_staged_filename_for_run(run),
             "--data-split",
             mmpd_data_split(dataset, args.mmpd_data_dir),
             "--output-root",
@@ -1024,7 +1172,7 @@ def run_mmpd_eval(
             "--patch-size",
             str(args.patch_size),
             "--data-dim",
-            str(DATASET_DIMS[dataset]),
+            str(data_dim),
             "--sample-num",
             str(args.sample_num),
             "--num-sampling-steps",
@@ -1034,7 +1182,7 @@ def run_mmpd_eval(
             "--gmm-iterations",
             str(args.gmm_iterations),
             "--batch-size",
-            str(mmpd_eval_batch_size(args, dataset)),
+            str(batch_size),
             "--num-workers",
             str(args.num_workers),
             "--gpu",
@@ -1042,7 +1190,21 @@ def run_mmpd_eval(
         ]
         if args.cpu:
             cmd.append("--cpu")
-        run_cmd(cmd, cwd=args.mmpd_repo, log_path=args.output_dir / "logs" / f"mmpd_eval_{dataset}.log")
+        env = mmpd_env_for_run(run)
+        env["TS_SANDBOX_REPO"] = str(REPO_ROOT)
+        print(
+            f"[mmpd-eval] {dataset}: launching helper "
+            f"(windows={len(indices)}, batch={batch_size}, variates={data_dim}, "
+            f"stride={run_test_stride(run)})",
+            flush=True,
+        )
+        run_cmd(
+            cmd,
+            cwd=args.mmpd_repo,
+            env=env,
+            log_path=args.output_dir / "logs" / f"mmpd_eval_{dataset}.log",
+        )
+        print(f"[mmpd-eval] {dataset}: helper finished -> {out_npz}", flush=True)
 
     with np.load(out_npz) as data:
         return {key: data[key] for key in data.files}
@@ -1326,6 +1488,18 @@ def summarize_prob_core_metrics(
     return metrics
 
 
+def summarize_deterministic_pack(pack: Dict[str, np.ndarray], include_texture: bool = True) -> Dict[str, float]:
+    y_true = pack["y_true"]
+    det = pack["deterministic"]
+    metrics: Dict[str, float] = deterministic_metrics(y_true, det)
+    metrics["n_windows"] = float(y_true.shape[0])
+    metrics["n_variates"] = float(y_true.shape[1])
+    metrics["n_samples"] = 1.0
+    if include_texture:
+        metrics.update(texture_metrics(y_true, det))
+    return metrics
+
+
 def summarize_prediction_pack(
     pack: Dict[str, np.ndarray],
     mode_center: Optional[np.ndarray] = None,
@@ -1381,6 +1555,11 @@ def summarize_for_profile(
     dataset: str,
 ) -> Dict[str, float]:
     seed = stable_dataset_seed(args.seed, dataset)
+    if "samples" not in pack:
+        return summarize_deterministic_pack(
+            pack,
+            include_texture=args.metrics_profile != "prob-core",
+        )
     if args.metrics_profile == "prob-core":
         return summarize_prob_core_metrics(
             pack,
@@ -1416,17 +1595,18 @@ def load_indices(indices_root_dir: Path, dataset: str) -> List[int]:
 
 def build_indices_for_dataset(
     args: argparse.Namespace,
-    dataset: str,
-    variate_indices: Sequence[int],
+    run: AnchorRun,
 ) -> List[int]:
+    dataset = run.dataset
     pipeline = load_tsf_pipeline()
     lookback, horizon = dataset_window_lengths(args, dataset)
     _, _, test_ds, _ = pipeline.load_dataset(
         dataset,
-        list(variate_indices),
+        run_variate_indices(run),
         lookback=lookback,
         horizon=horizon,
-        stride=1,
+        stride=run_train_stride(run),
+        test_stride=run_test_stride(run),
     )
     indices = make_eval_indices(
         len(test_ds),
@@ -1435,16 +1615,17 @@ def build_indices_for_dataset(
         args.test_max_items,
     )
     print(
-        f"[subset] {dataset}: {len(indices)}/{len(test_ds)} test windows"
+        f"[subset] {dataset}: {len(indices)}/{len(test_ds)} test windows "
+        f"(variates={len(run_variate_indices(run))}, test_stride={run_test_stride(run)})"
     )
     return indices
 
 
 def get_or_create_indices(
     args: argparse.Namespace,
-    dataset: str,
-    variate_indices: Sequence[int],
+    run: AnchorRun,
 ) -> List[int]:
+    dataset = run.dataset
     root = indices_root(args)
     path = indices_path(root, dataset)
     if args.indices_dir and not path.exists():
@@ -1455,7 +1636,7 @@ def get_or_create_indices(
         indices = load_indices(root, dataset)
         print(f"[subset] {dataset}: reusing {len(indices)} indices from {path}")
         return indices
-    indices = build_indices_for_dataset(args, dataset, variate_indices)
+    indices = build_indices_for_dataset(args, run)
     save_indices(root, dataset, indices)
     return indices
 
@@ -1537,8 +1718,8 @@ def run_phase_init(args: argparse.Namespace, commit: str) -> None:
     indices_by_dataset: Dict[str, List[int]] = {}
     for dataset in args.datasets:
         run = anchors["binary"][dataset]
-        variates = run.metadata["variate_indices"]
-        indices_by_dataset[dataset] = get_or_create_indices(args, dataset, variates)
+        stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
+        indices_by_dataset[dataset] = get_or_create_indices(args, run)
 
     manifest = {
         "args": jsonable_args(args),
@@ -1559,18 +1740,21 @@ def run_phase_mmpd(
     anchors_by_variant: Dict[str, Dict[str, AnchorRun]],
 ) -> None:
     binary_run = anchors_by_variant["binary"][dataset]
-    indices = get_or_create_indices(args, dataset, binary_run.metadata["variate_indices"])
+    indices = get_or_create_indices(args, binary_run)
     if not args.skip_mmpd_train:
-        train_mmpd(args, [dataset])
+        train_mmpd(args, [binary_run])
     elif not args.skip_mmpd_eval:
-        ckpt = mmpd_checkpoint_path(args, dataset)
+        stage_mmpd_dataset_for_run(args.mmpd_data_dir, binary_run)
+        ckpt = mmpd_checkpoint_path(args, binary_run)
         if not ckpt.exists():
             raise FileNotFoundError(
                 f"--skip-mmpd-train but missing MMPD checkpoint: {ckpt}"
             )
     if args.skip_mmpd_eval:
         return
-    mmpd_pack = run_mmpd_eval(args, dataset, indices)
+    print(f"[mmpd] {dataset}: eval phase ({len(indices)} windows)", flush=True)
+    mmpd_pack = run_mmpd_eval(args, binary_run, indices)
+    print(f"[mmpd] {dataset}: summarizing metrics", flush=True)
     metrics = summarize_for_profile(mmpd_pack, args, dataset)
     write_partial_metrics(args.output_dir, dataset, "mmpd", metrics)
 
@@ -1586,7 +1770,8 @@ def run_phase_anchor(
         raise ValueError(f"Unknown anchor variant: {variant}")
     run = anchors_by_variant[variant][dataset]
     model_name = ANCHOR_VARIANTS[variant]["model_name"]
-    indices = get_or_create_indices(args, dataset, run.metadata["variate_indices"])
+    indices = get_or_create_indices(args, run)
+    print(f"[anchor] {dataset}: eval phase ({len(indices)} windows)", flush=True)
     raw_dir = args.output_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     anchor_raw_path = raw_dir / f"{variant}_anchor_{dataset}.npz"
@@ -1780,14 +1965,13 @@ def validate_phase_args(args: argparse.Namespace) -> None:
 
 def run_phase_all(args: argparse.Namespace, commit: str) -> None:
     anchors_by_variant = discover_anchors_by_variant(args, args.datasets)
-    train_mmpd(args, args.datasets)
+    binary_runs = [anchors_by_variant["binary"][dataset] for dataset in args.datasets]
+    train_mmpd(args, binary_runs)
 
     indices_by_dataset: Dict[str, List[int]] = {}
     for dataset in args.datasets:
         run = anchors_by_variant["binary"][dataset]
-        indices_by_dataset[dataset] = get_or_create_indices(
-            args, dataset, run.metadata["variate_indices"]
-        )
+        indices_by_dataset[dataset] = get_or_create_indices(args, run)
 
     device = torch.device(
         "cpu" if args.cpu or not torch.cuda.is_available() else f"cuda:{args.gpu}"
@@ -1799,7 +1983,7 @@ def run_phase_all(args: argparse.Namespace, commit: str) -> None:
         indices = indices_by_dataset[dataset]
 
         if not args.skip_mmpd_eval:
-            mmpd_pack = run_mmpd_eval(args, dataset, indices)
+            mmpd_pack = run_mmpd_eval(args, anchors_by_variant["binary"][dataset], indices)
             results[dataset]["mmpd"] = summarize_for_profile(mmpd_pack, args, dataset)
 
         for variant, anchors in anchors_by_variant.items():
@@ -1847,7 +2031,6 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     commit = ensure_mmpd_repo(args.mmpd_repo, update=not args.no_update_mmpd)
-    stage_mmpd_datasets(args.mmpd_data_dir, args.datasets)
 
     if args.phase == "all":
         run_phase_all(args, commit)
