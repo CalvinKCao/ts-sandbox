@@ -30,6 +30,8 @@ from torch.utils.data import DataLoader, Subset
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 DEFAULT_MMPD_REPO = REPO_ROOT / "temp" / "MMPD"
 DEFAULT_MMPD_DATA = REPO_ROOT / "temp" / "mmpd_datasets"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results" / "mmpd_anchor_eval"

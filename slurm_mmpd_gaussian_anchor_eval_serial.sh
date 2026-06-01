@@ -110,6 +110,7 @@ print("torch", torch.__version__, "gpu", torch.cuda.get_device_name(0))
 PY
 
 export PYTHONUNBUFFERED=1
+export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 EVAL_ARGS=(
     --phase all
