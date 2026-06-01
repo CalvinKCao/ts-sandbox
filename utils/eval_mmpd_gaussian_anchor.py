@@ -1194,10 +1194,9 @@ def run_mmpd_eval(
 ) -> Dict[str, np.ndarray]:
     dataset = run.dataset
     out_npz = args.output_dir / "raw" / f"mmpd_{dataset}.npz"
-    indices_json = args.output_dir / "raw" / f"indices_{dataset}.json"
+    indices_json = args.output_dir / "raw" / f"indices_{dataset}_mmpd_eval.json"
     indices_json.parent.mkdir(parents=True, exist_ok=True)
-    with indices_json.open("w", encoding="utf-8") as f:
-        json.dump(list(indices), f)
+    write_json_atomic(indices_json, list(indices))
 
     if not out_npz.exists() or args.force_mmpd_eval:
         stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
@@ -1636,11 +1635,17 @@ def summarize_for_profile(
     )
 
 
+def write_json_atomic(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)
+
+
 def save_indices(indices_root_dir: Path, dataset: str, indices: Sequence[int]) -> None:
     path = indices_path(indices_root_dir, dataset)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(list(indices), f)
+    write_json_atomic(path, list(indices))
 
 
 def load_indices(indices_root_dir: Path, dataset: str) -> List[int]:

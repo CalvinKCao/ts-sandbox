@@ -25,6 +25,7 @@ RETRY_MMPD_ONLY=0
 RETRY_ANCHOR_ONLY=0
 FORCE_MMPD_EVAL=0
 FORCE_ANCHOR_EVAL=0
+FORCE_INDICES=0
 SKIP_MERGE=0
 MERGE_ONLY=0
 SEED=2026
@@ -37,6 +38,7 @@ while [[ $# -gt 0 ]]; do
         --reeval-only) SKIP_MMPD_TRAIN=1; FORCE_MMPD_EVAL=1; FORCE_ANCHOR_EVAL=1; shift ;;
         --retry-mmpd-only) RETRY_MMPD_ONLY=1; SKIP_MMPD_TRAIN=1; FORCE_MMPD_EVAL=1; shift ;;
         --retry-anchor-only) RETRY_ANCHOR_ONLY=1; FORCE_ANCHOR_EVAL=1; shift ;;
+        --force-indices) FORCE_INDICES=1; shift ;;
         --skip-merge) SKIP_MERGE=1; shift ;;
         --merge-only) MERGE_ONLY=1; SKIP_MERGE=0; shift ;;
         --seed) SEED="$2"; shift 2 ;;
@@ -310,6 +312,9 @@ PREAMBLE
   fi
   if [[ "$FORCE_ANCHOR_EVAL" -eq 1 ]]; then
     EVAL_BASE+=(--force-anchor-eval)
+  fi
+  if [[ "$FORCE_INDICES" -eq 1 ]]; then
+    EVAL_BASE+=(--force-indices)
   fi
   if [[ -n "${BINARY_ANCHOR_ROOTS:-}" ]]; then
     for _br in ${BINARY_ANCHOR_ROOTS}; do
