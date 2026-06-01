@@ -56,11 +56,12 @@ class EvalPhase(PipelinePhase):
         from models.diffusion_tsf.train_multivariate_pipeline import _load_subset_results
         prior = _load_subset_results(state.results_dir, subset_id)
         em = prior.get("eval_metrics") or {}
-        avg_ok = "texture_pathsig_distance" in em.get("averaged", {})
         single_ok = "texture_pathsig_distance" in em.get("single", {})
-        prob_ok = "crps" in em.get("probabilistic", em.get("averaged", {}))
-        top3_ok = "top3_mse" in em.get("probabilistic", em.get("averaged", {}))
-        if em and avg_ok and single_ok and prob_ok and top3_ok:
+        prob_block = em.get("probabilistic", {})
+        prob_ok = "crps" in prob_block
+        top3_ok = "top3_mse" in prob_block
+        prob_texture_ok = "prob_texture_pathsig_distance" in prob_block
+        if em and single_ok and prob_ok and top3_ok and prob_texture_ok:
             logger.info(f"  [{self.name}] already evaluated with texture metrics: {subset_id}")
             return True
         return False
@@ -124,10 +125,13 @@ class EvalPhase(PipelinePhase):
         )
         n_samples = self.get("n_samples", 30)
         probabilistic_n_samples = self.get("probabilistic_n_samples", n_samples)
+        probabilistic_sampler = self.get("probabilistic_sampler", "dpmpp")
+        probabilistic_num_inference_steps = self.get("probabilistic_num_inference_steps", 20)
         if state.smoke_test:
             test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
             n_samples = 1
             probabilistic_n_samples = 1
+            probabilistic_num_inference_steps = 5
         elif not subset_meta.get("enabled"):
             n_full = len(test_ds)
             n_eval = max(1, n_full // 2)
@@ -148,13 +152,22 @@ class EvalPhase(PipelinePhase):
             device,
             n_samples=n_samples,
             probabilistic_n_samples=probabilistic_n_samples,
+            probabilistic_sampler=probabilistic_sampler,
+            probabilistic_num_inference_steps=probabilistic_num_inference_steps,
             smoke_test=state.smoke_test,
         )
 
-        logger.info(
-            f"[{subset_id}] Avg MSE={eval_results['averaged']['mse']:.4f}, "
-            f"MAE={eval_results['averaged']['mae']:.4f}"
-        )
+        avg_block = eval_results.get("averaged", {})
+        if "mse" in avg_block:
+            logger.info(
+                f"[{subset_id}] Avg MSE={avg_block['mse']:.4f}, "
+                f"MAE={avg_block['mae']:.4f}"
+            )
+        else:
+            logger.info(
+                f"[{subset_id}] Avg point MSE/MAE disabled; "
+                f"per-draw texture uses {avg_block.get('n_samples', 0):.0f} draw(s)"
+            )
 
         train_metrics = {"tuned_params": tuned_params}
         save_eval_results(
@@ -165,17 +178,25 @@ class EvalPhase(PipelinePhase):
 
         # wandb
         summary = {
-            "eval/mse": eval_results["averaged"]["mse"],
-            "eval/mae": eval_results["averaged"]["mae"],
-            "eval/trend_accuracy": eval_results["averaged"].get("trend_accuracy"),
             "eval/single_mse": eval_results["single"]["mse"],
             "eval/single_mae": eval_results["single"]["mae"],
         }
-        for prefix, block in (("eval", eval_results["averaged"]), ("eval/single", eval_results["single"])):
+        if "mse" in avg_block:
+            summary.update({
+                "eval/mse": avg_block["mse"],
+                "eval/mae": avg_block["mae"],
+            })
+        for prefix, block in (
+            ("eval", eval_results["averaged"]),
+            ("eval/single", eval_results["single"]),
+            ("eval/probabilistic", eval_results.get("probabilistic", {})),
+        ):
             for key, val in block.items():
                 if key.startswith("texture_"):
                     summary[f"{prefix}/{key}"] = val
-                elif key in {"crps", "top1_mse", "top1_mae", "top2_mse", "top2_mae", "top3_mse", "top3_mae"}:
+                elif key.startswith("prob_texture_"):
+                    summary[f"{prefix}/{key}"] = val
+                elif key in {"crps", "top1_mse", "top1_mae", "top3_mse", "top3_mae"}:
                     summary[f"{prefix}/{key}"] = val
         wandb_utils.log_summary(summary)
 

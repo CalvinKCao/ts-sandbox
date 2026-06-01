@@ -314,15 +314,18 @@ def path_signature_distance(a: np.ndarray, b: np.ndarray, window: int = 12, dept
 def aggregate_texture_per_sample(
     y_true: np.ndarray,
     samples: np.ndarray,
+    max_draws: Optional[int] = None,
 ) -> Dict[str, float]:
     """Mean texture over stochastic draws (not texture of the sample mean).
 
     Args:
         y_true: ``[batch, variates, length]`` (or compatible).
         samples: ``[n_draws, batch, variates, length]``.
+        max_draws: If set, use only the first ``max_draws`` draws.
     """
     per_draw: Dict[str, List[float]] = {}
-    for i in range(samples.shape[0]):
+    n_draws = samples.shape[0] if max_draws is None else min(samples.shape[0], max_draws)
+    for i in range(n_draws):
         m = texture_metrics(y_true, samples[i])
         for k, v in m.items():
             per_draw.setdefault(k, []).append(v)
@@ -359,11 +362,16 @@ def topk_from_modes(
     mode_prob: np.ndarray,
     max_k: int = 3,
 ) -> Dict[str, float]:
-    """Top-k MSE/MAE from mode centers sorted by descending probability."""
+    """Top-k MSE/MAE from mode centers sorted by descending probability.
+
+    Report only top-1 and top-3 for parity with the MMPD matrix.
+    """
     order = np.argsort(-mode_prob, axis=2)
     out: Dict[str, float] = {}
     max_k = min(max_k, mode_center.shape[2])
-    for k in range(1, max_k + 1):
+    for k in sorted({1, max_k}):
+        if k < 1 or k > max_k:
+            continue
         gathered = np.take_along_axis(mode_center, order[:, :, :k, None], axis=2)
         mse_vals = ((gathered - y_true[:, :, None, :]) ** 2).mean(axis=-1).min(axis=2)
         mae_vals = np.abs(gathered - y_true[:, :, None, :]).mean(axis=-1).min(axis=2)
@@ -423,15 +431,12 @@ def probabilistic_forecast_metrics(
 
     ``samples`` must be ``[batch, variates, n_samples, length]``.
     """
-    sample_mean = samples.mean(axis=2)
     mode_center, mode_prob = empirical_modes_from_samples(
         samples,
         max_components=gmm_components,
         seed=seed,
     )
     out: Dict[str, float] = {
-        "smooth_mse": _as_float((sample_mean - y_true) ** 2),
-        "smooth_mae": _as_float(np.abs(sample_mean - y_true)),
         "crps": crps_ensemble(y_true, samples),
         "n_samples": float(samples.shape[2]),
     }

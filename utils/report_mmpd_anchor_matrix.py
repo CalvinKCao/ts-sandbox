@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MODELS = ["mmpd", "gaussian_anchor", "binary_anchor"]
+MODELS = ["mmpd", "binary_anchor"]
 MODEL_LABELS = {
     "mmpd": "MMPD",
     "gaussian_anchor": "Gaussian anchor",
-    "binary_anchor": "Binary anchor",
+    "binary_anchor": "Binary dual-scale",
 }
 
 TEXTURE_METRICS = [
@@ -26,8 +26,7 @@ TEXTURE_METRICS = [
 
 INFERENCE_MODES = [
     ("texture", "Deterministic (anchor / point path)"),
-    ("sample_mean_texture", "Mean of probabilistic samples"),
-    ("per_sample_mean_texture", "Per-sample mean (texture on each draw, averaged)"),
+    ("prob_texture", "Probabilistic (first 3 draws, averaged)"),
 ]
 
 
@@ -123,7 +122,7 @@ def build_report(run_dir: Path, report_path: Path) -> None:
     texture_modes = active_inference_modes(rows)
 
     lines: List[str] = [
-        f"# MMPD vs Gaussian vs Binary anchor — matrix eval ({run_dir.name})",
+        f"# MMPD vs Binary dual-scale — matrix eval ({run_dir.name})",
         "",
         "**Run directory (pulled results):**",
         f"`{run_dir.relative_to(REPO_ROOT)}`",
@@ -149,9 +148,9 @@ def build_report(run_dir: Path, report_path: Path) -> None:
         "**Metric definitions:**",
         "- `mse` / `mae`: deterministic path (anchor sampler for diffusion; MMPD point forecast)",
         "- `crps`: continuous ranked probability score from all samples",
-        "- `top3_mse` / `top3_mae`: best of top-3 GMM modes vs ground truth",
+        "- `top1_*` / `top3_*`: top-k GMM mode metrics vs ground truth (top2 omitted)",
         "- **Texture (4):** ordinal JSD, RQA distance, variogram distance, path signature distance",
-        "- **Bold** = best (lowest) among the three models for that dataset and inference mode",
+        "- **Bold** = best (lowest) between MMPD and binary dual-scale for that dataset and inference mode",
         "",
         "## Core metrics (lower is better; bold = best per column)",
         "",
@@ -161,6 +160,8 @@ def build_report(run_dir: Path, report_path: Path) -> None:
         ("mse", "MSE (det)"),
         ("mae", "MAE (det)"),
         ("crps", "CRPS"),
+        ("top1_mse", "top1 MSE"),
+        ("top1_mae", "top1 MAE"),
         ("top3_mse", "top3 MSE"),
         ("top3_mae", "top3 MAE"),
     ]
@@ -193,8 +194,8 @@ def build_report(run_dir: Path, report_path: Path) -> None:
         for prefix, mode_title in texture_modes:
             lines.append(f"**{mode_title}**")
             lines.append("")
-            lines.append("| Dataset | MMPD | Gaussian anchor | Binary anchor |")
-            lines.append("|---------|-----:|----------------:|--------------:|")
+            lines.append("| Dataset | MMPD | Binary anchor |")
+            lines.append("|---------|-----:|--------------:|")
             col_key = metric_key(prefix, suffix)
             for dataset in datasets:
                 winners = best_models(rows, dataset, col_key)
@@ -213,9 +214,9 @@ def build_report(run_dir: Path, report_path: Path) -> None:
         "1. **illness / MMPD:** Point and top-k MMPD metrics are much worse than anchors on this tiny "
         "test subset (49 windows). Treat illness MMPD numbers as suspect until spot-checked."
     )
-    if any(p == "per_sample_mean_texture" for p, _ in texture_modes):
+    if any(p == "prob_texture" for p, _ in texture_modes):
         lines.append(
-            "2. **Per-sample texture** included (`per_sample_mean_texture_*` from `tex-*` resummarize on cached `raw/*.npz`)."
+            "2. **Probabilistic texture** included (`prob_texture_*` = first 3 probabilistic draws vs ground truth, averaged)."
         )
     else:
         lines.append(

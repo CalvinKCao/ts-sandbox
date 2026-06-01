@@ -687,27 +687,29 @@ def log_wandb_eval_results(subset_id: str, eval_results: dict, train_metrics: di
     """Log evaluation results for a subset."""
     if not _wandb_enabled or not is_main_process():
         return
-    
+
     flat_metrics = {
         f'eval/{subset_id}/single_mse': eval_results['single']['mse'],
         f'eval/{subset_id}/single_mae': eval_results['single']['mae'],
-        f'eval/{subset_id}/single_trend_acc': eval_results['single']['trend_accuracy'],
-        f'eval/{subset_id}/avg_mse': eval_results['averaged']['mse'],
-        f'eval/{subset_id}/avg_mae': eval_results['averaged']['mae'],
-        f'eval/{subset_id}/avg_trend_acc': eval_results['averaged']['trend_accuracy'],
         f'eval/{subset_id}/best_val_loss': train_metrics.get('best_val_loss', 0),
         f'eval/{subset_id}/final_epoch': train_metrics.get('final_epoch', 0),
     }
+    if 'mse' in eval_results.get('averaged', {}):
+        flat_metrics.update({
+            f'eval/{subset_id}/avg_mse': eval_results['averaged']['mse'],
+            f'eval/{subset_id}/avg_mae': eval_results['averaged']['mae'],
+        })
     log_wandb(flat_metrics)
-    
+
     # Table for comparison
     if hasattr(wandb, 'Table'):
+        avg = eval_results.get('averaged', {})
         table_data = [[
             subset_id,
             eval_results['single']['mse'],
             eval_results['single']['mae'],
-            eval_results['averaged']['mse'],
-            eval_results['averaged']['mae'],
+            avg.get('mse'),
+            avg.get('mae'),
             train_metrics.get('best_val_loss', 0),
         ]]
         table = wandb.Table(
@@ -2752,13 +2754,15 @@ def evaluate_model(
     device: torch.device,
     n_samples: int = 3,
     probabilistic_n_samples: Optional[int] = None,
+    probabilistic_sampler: Optional[str] = None,
+    probabilistic_num_inference_steps: Optional[int] = None,
     smoke_test: bool = False,
 ) -> Dict:
     """Evaluate model on test set.
 
-    Uses ``n_samples`` stochastic draws per window for avg/texture metrics.
-    CRPS/top-k use ``probabilistic_n_samples`` draws so they can match the
-    MMPD paper's 100-sample protocol while keeping avg30 point metrics.
+    Uses a single deterministic anchor decode for deterministic metrics when
+    EVAL_SAMPLER is anchor / deterministic_anchor. Probabilistic CRPS/top-k and
+    sample texture always come from a non-anchor stochastic sampler.
     Logs periodic progress (batch index, throughput, ETA) for Slurm logs.
     Note: ``test_loader`` should already be subsetted by the caller if a
     half-test sweep is desired (see eval call site).
@@ -2766,8 +2770,10 @@ def evaluate_model(
     Returns:
         ``single``: MSE/MAE/trend + texture on the first draw (anchor pred when
             ``eval_sampler`` is anchor).
-        ``averaged``: MSE/MAE/trend on the mean forecast across draws; texture_*
-            keys are the mean of per-draw texture metrics (not texture of the mean).
+        ``averaged``: texture_* keys are the mean of per-draw texture metrics
+            (not texture of the mean). Mean-forecast MSE/MAE is intentionally
+            omitted for now because the current MMPD matrix reports
+            deterministic-output MSE/MAE in its full profile.
     """
     from tqdm import tqdm
     model.eval()
@@ -2783,27 +2789,37 @@ def evaluate_model(
     ds = getattr(test_loader, 'dataset', None)
     n_windows = len(ds) if ds is not None else None
 
+    def _gen_kwargs_for_sampler(sampler_name: str, *, default_steps: int) -> Dict[str, Any]:
+        if sampler_name in ("anchor", "deterministic_anchor"):
+            return {'sampler': 'anchor'}
+        if sampler_name == "ddpm":
+            return {'sampler': 'ddpm', 'use_ddim': False}
+        return {'sampler': sampler_name, 'num_inference_steps': default_steps}
+
     eval_sampler = EVAL_SAMPLER
-    if eval_sampler in ("anchor", "deterministic_anchor"):
-        gen_kwargs = {'sampler': 'anchor'}
-    elif eval_sampler == "ddpm":
-        gen_kwargs = {'sampler': 'ddpm', 'use_ddim': False}
-    elif smoke_test:
-        gen_kwargs = {'sampler': 'dpmpp', 'num_inference_steps': 5}
-    else:
-        gen_kwargs = {'sampler': eval_sampler, 'num_inference_steps': 20}
+    det_steps = 1 if eval_sampler in ("anchor", "deterministic_anchor") else (5 if smoke_test else 20)
+    det_gen_kwargs = _gen_kwargs_for_sampler(eval_sampler, default_steps=det_steps)
+    anchor_sampler = det_gen_kwargs.get('sampler') == 'anchor'
+    prob_sampler = probabilistic_sampler or ("dpmpp" if anchor_sampler else eval_sampler)
+    prob_steps = probabilistic_num_inference_steps or (5 if smoke_test else 20)
+    prob_gen_kwargs = _gen_kwargs_for_sampler(prob_sampler, default_steps=prob_steps)
+    if prob_gen_kwargs.get('sampler') == 'anchor':
+        raise ValueError("probabilistic_sampler must not be anchor/deterministic_anchor")
 
     K = getattr(model.config, 'lookback_overlap', 0)
-    anchor_sampler = gen_kwargs.get('sampler') == 'anchor'
-    binary_anchor_sampler = anchor_sampler
     if probabilistic_n_samples is None:
         probabilistic_n_samples = n_samples
-    effective_avg_samples = 1 if (smoke_test or (anchor_sampler and not binary_anchor_sampler)) else n_samples
-    effective_prob_samples = 1 if (smoke_test or (anchor_sampler and not binary_anchor_sampler)) else probabilistic_n_samples
+    effective_avg_samples = 1 if (smoke_test or anchor_sampler) else n_samples
+    effective_prob_samples = 1 if (smoke_test or anchor_sampler) else probabilistic_n_samples
+    if anchor_sampler and not smoke_test:
+        effective_prob_samples = probabilistic_n_samples
     effective_n_samples = max(effective_avg_samples, effective_prob_samples)
-    steps_for_log = gen_kwargs.get('num_inference_steps', 1 if gen_kwargs.get('sampler') == 'anchor' else 20)
-    nfe_per_batch = 1 + effective_n_samples
-    nfe_total = n_batches * nfe_per_batch * steps_for_log
+    det_steps_for_log = det_gen_kwargs.get('num_inference_steps', 1 if anchor_sampler else 20)
+    prob_steps_for_log = prob_gen_kwargs.get(
+        'num_inference_steps',
+        1 if prob_gen_kwargs.get('sampler') == 'anchor' else 20,
+    )
+    nfe_total = n_batches * (det_steps_for_log + effective_prob_samples * prob_steps_for_log)
 
     logger.info(
         "eval: start | windows=%s batches=%d batch_size=%d avg_samples=%d prob_samples=%d "
@@ -2814,8 +2830,8 @@ def evaluate_model(
         batch_size,
         effective_avg_samples,
         effective_prob_samples,
-        gen_kwargs.get('sampler'),
-        steps_for_log,
+        f"{det_gen_kwargs.get('sampler')}+prob:{prob_gen_kwargs.get('sampler')}",
+        prob_steps_for_log,
         K,
         device,
         nfe_total,
@@ -2842,10 +2858,10 @@ def evaluate_model(
             t_batch = time.perf_counter()
 
             torch.manual_seed(42 + batch_idx)
-            result = model.generate(past, **gen_kwargs)
+            result = model.generate(past, **det_gen_kwargs)
             all_preds_single.append(result.get('prediction_global_norm', result['prediction']).cpu())
 
-            if smoke_test or (anchor_sampler and not binary_anchor_sampler):
+            if smoke_test:
                 pred_cpu = result.get('prediction_global_norm', result['prediction']).cpu()
                 all_preds_avg.append(pred_cpu)
                 all_samples.append(pred_cpu.unsqueeze(0))
@@ -2854,7 +2870,7 @@ def evaluate_model(
                 samples = []
                 for s_idx in range(effective_n_samples):
                     torch.manual_seed(1000 + s_idx * 17 + batch_idx)
-                    result = model.generate(past, **gen_kwargs)
+                    result = model.generate(past, **prob_gen_kwargs)
                     samples.append(result.get('prediction_global_norm', result['prediction']).cpu())
                 stacked_samples = torch.stack(samples)
                 all_preds_avg.append(stacked_samples[:effective_avg_samples].mean(dim=0))
@@ -2917,12 +2933,7 @@ def evaluate_model(
         mse = torch.nn.functional.mse_loss(pred, target).item()
         mae = torch.nn.functional.l1_loss(pred, target).item()
         
-        # Trend accuracy
-        pred_diff = pred[:, :, 1:] - pred[:, :, :-1]
-        target_diff = target[:, :, 1:] - target[:, :, :-1]
-        trend_acc = ((pred_diff > 0) == (target_diff > 0)).float().mean().item()
-        
-        return {'mse': mse, 'mae': mae, 'trend_accuracy': trend_acc}
+        return {'mse': mse, 'mae': mae}
     
     from models.diffusion_tsf.metrics import (
         aggregate_texture_per_sample,
@@ -2949,14 +2960,14 @@ def evaluate_model(
     # First draw (anchor when eval_sampler=anchor, else one stochastic sample).
     single_metrics.update(texture_metrics(t_np, preds_single.numpy()))
 
-    avg_metrics = compute_metrics(preds_avg, targets)
-    avg_metrics["smooth_mse"] = avg_metrics["mse"]
-    avg_metrics["smooth_mae"] = avg_metrics["mae"]
-    avg_metrics["n_samples"] = float(n_draws)
-    # Mean of per-draw texture metrics, not texture(mean(samples)).
-    avg_metrics.update(
-        aggregate_texture_per_sample(t_np, samples_tensor.numpy())
-    )
+    avg_metrics = {
+        "n_samples": float(n_draws),
+        "point_metrics_disabled": True,
+        "point_metrics_note": (
+            "Mean-sample MSE/MAE disabled; MMPD full-profile mse/mae are "
+            "deterministic-output metrics, not sample-mean metrics."
+        ),
+    }
     prob_samples_np = prob_samples_tensor.numpy()
     samples_bvsl = np.moveaxis(prob_samples_np, 0, 2)
     prob_metrics = {}
@@ -2969,9 +2980,9 @@ def evaluate_model(
             seed=42,
         )
     )
-    prob_metrics.update(
-        aggregate_texture_per_sample(t_np, prob_samples_np)
-    )
+    prob_texture = aggregate_texture_per_sample(t_np, prob_samples_np, max_draws=3)
+    for key, val in prob_texture.items():
+        prob_metrics[f"prob_{key}"] = val
 
     logger.info(
         "eval: metrics done | wall=%.1fs (includes texture)",
@@ -3055,14 +3066,12 @@ def update_summary_csv(results_dir):
                 'best_val_loss': data.get('train_metrics', {}).get('best_val_loss'),
                 'single_mse': m['single']['mse'],
                 'single_mae': m['single']['mae'],
-                'avg_mse': m['averaged']['mse'],
-                'avg_mae': m['averaged']['mae'],
-                'avg_trend_acc': m['averaged'].get('trend_accuracy'),
+                'avg_mse': m.get('averaged', {}).get('mse'),
+                'avg_mae': m.get('averaged', {}).get('mae'),
                 'itrans_mse': itrans.get('mse'),
                 'itrans_mae': itrans.get('mae'),
-                'itrans_trend_acc': itrans.get('trend_accuracy'),
             }
-            for src, pfx in ((m['single'], 'single'), (m['averaged'], 'avg')):
+            for src, pfx in ((m['single'], 'single'), (m.get('averaged', {}), 'avg')):
                 for key, val in src.items():
                     if key.startswith('texture_'):
                         row[f'{pfx}_{key}'] = val
@@ -4155,8 +4164,12 @@ def _finetune_and_eval_one_subset(
         test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
 
         eval_results = evaluate_model(model, test_loader, device, n_samples=3, smoke_test=smoke_test)
-        logger.info(f"[{subset_id}] Avg: MSE={eval_results['averaged']['mse']:.4f}, "
-                     f"MAE={eval_results['averaged']['mae']:.4f}")
+        avg_block = eval_results.get('averaged', {})
+        if 'mse' in avg_block:
+            logger.info(f"[{subset_id}] Avg: MSE={avg_block['mse']:.4f}, "
+                        f"MAE={avg_block['mae']:.4f}")
+        else:
+            logger.info(f"[{subset_id}] Avg point MSE/MAE disabled")
 
         save_eval_results(
             subset_id, dataset_name, variate_indices,

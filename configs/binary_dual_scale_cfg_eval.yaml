@@ -36,5 +36,9 @@ experiment:
 
 phases:
   - phase: eval
-    n_samples: 30
+    # Deterministic metrics use eval_sampler=anchor once; probabilistic metrics
+    # use a separate non-anchor stochastic sampler.
+    n_samples: 1
     probabilistic_n_samples: 100
+    probabilistic_sampler: dpmpp
+    probabilistic_num_inference_steps: 20

@@ -11,6 +11,7 @@
 #   ./slurm_mmpd_gaussian_anchor_eval.sh --smoke-test
 #   ./slurm_mmpd_gaussian_anchor_eval.sh
 #   ./slurm_mmpd_gaussian_anchor_eval.sh --skip-mmpd-train
+#   ./slurm_mmpd_gaussian_anchor_eval.sh --reeval-only
 #   ./slurm_mmpd_gaussian_anchor_eval.sh --serial --smoke-test   # serial uses sbatch once
 # =============================================================================
 
@@ -23,6 +24,7 @@ SKIP_MMPD_TRAIN=0
 RETRY_MMPD_ONLY=0
 RETRY_ANCHOR_ONLY=0
 FORCE_MMPD_EVAL=0
+FORCE_ANCHOR_EVAL=0
 SEED=2026
 
 while [[ $# -gt 0 ]]; do
@@ -30,8 +32,9 @@ while [[ $# -gt 0 ]]; do
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --serial) SERIAL=1; shift ;;
         --skip-mmpd-train) SKIP_MMPD_TRAIN=1; shift ;;
+        --reeval-only) SKIP_MMPD_TRAIN=1; FORCE_MMPD_EVAL=1; FORCE_ANCHOR_EVAL=1; shift ;;
         --retry-mmpd-only) RETRY_MMPD_ONLY=1; SKIP_MMPD_TRAIN=1; FORCE_MMPD_EVAL=1; shift ;;
-        --retry-anchor-only) RETRY_ANCHOR_ONLY=1; shift ;;
+        --retry-anchor-only) RETRY_ANCHOR_ONLY=1; FORCE_ANCHOR_EVAL=1; shift ;;
         --seed) SEED="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
@@ -173,7 +176,7 @@ module load cuda/12.2
 module load cudnn/8.9
 
 echo "[setup] Building venv on \$SLURM_TMPDIR..."
-virtualenv --no-download "\$SLURM_TMPDIR/env"
+python -m venv "\$SLURM_TMPDIR/env"
 source "\$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 pip install --no-index \\
@@ -237,7 +240,7 @@ PREAMBLE
   if [[ "$FORCE_MMPD_EVAL" -eq 1 ]]; then
     EVAL_BASE+=(--force-mmpd-eval)
   fi
-  if [[ "$RETRY_ANCHOR_ONLY" -eq 1 ]]; then
+  if [[ "$FORCE_ANCHOR_EVAL" -eq 1 ]]; then
     EVAL_BASE+=(--force-anchor-eval)
   fi
   if [[ -n "${BINARY_ANCHOR_ROOTS:-}" ]]; then
@@ -365,7 +368,7 @@ ENDSCRIPT
 
   echo ""
   echo "=================================================================="
-  echo "  Matrix eval submitted (${#DATASETS[@]} datasets × 3 workers + init + merge)"
+  echo "  Matrix eval submitted (${#DATASETS[@]} datasets × 2 workers + init + merge)"
   echo "  init:  $JOB_INIT"
   echo "  merge: $JOB_MERGE  ($MERGE_DEP)"
   echo "  Output: $OUTPUT_DIR"

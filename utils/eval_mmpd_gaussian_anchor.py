@@ -1063,6 +1063,15 @@ def load_tsf_test_subset(
     return Subset(test_ds, list(indices))
 
 
+def anchor_prob_generate_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
+    if args.anchor_prob_sampler == "ddpm":
+        return {"sampler": "ddpm", "use_ddim": False}
+    return {
+        "sampler": args.anchor_prob_sampler,
+        "num_inference_steps": args.num_sampling_steps,
+    }
+
+
 def evaluate_anchor(
     args: argparse.Namespace,
     run: AnchorRun,
@@ -1089,13 +1098,20 @@ def evaluate_anchor(
     model = load_anchor_model(run, args, device)
     y_true: List[np.ndarray] = []
     det: List[np.ndarray] = []
+    samples_all: List[np.ndarray] = []
+    collect_prob_samples = run.variant == "binary" and args.sample_num > 0
+    prob_kwargs = anchor_prob_generate_kwargs(args)
 
     n_batches = len(loader)
     n_windows = len(indices)
     print(
         f"[anchor-eval] {run.dataset}: start "
         f"windows={n_windows} batches={n_batches} batch_size={args.anchor_batch_size} "
-        "mode=deterministic-anchor-only",
+        f"mode=deterministic-anchor"
+        + (
+            f" + probabilistic-{prob_kwargs.get('sampler')} samples={args.sample_num}"
+            if collect_prob_samples else ""
+        ),
         flush=True,
     )
     batch_progress = EvalProgress(f"anchor-eval/{run.dataset}", n_batches)
@@ -1111,6 +1127,13 @@ def evaluate_anchor(
 
             anchor = model.generate(past, sampler="anchor")["prediction"]
             det.append(anchor.cpu().numpy())
+            if collect_prob_samples:
+                batch_samples = []
+                for sample_idx in range(args.sample_num):
+                    torch.manual_seed(args.seed + batch_idx * 1009 + sample_idx * 17)
+                    sample = model.generate(past, **prob_kwargs)["prediction"]
+                    batch_samples.append(sample.detach().cpu())
+                samples_all.append(torch.stack(batch_samples, dim=2).numpy())
 
             done = batch_idx + 1
             batch_progress.maybe_log(
@@ -1122,11 +1145,14 @@ def evaluate_anchor(
             )
 
     batch_progress.done()
-    return {
+    out = {
         "y_true": np.concatenate(y_true, axis=0),
         "deterministic": np.concatenate(det, axis=0),
         "indices": np.array(indices, dtype=np.int64),
     }
+    if samples_all:
+        out["samples"] = np.concatenate(samples_all, axis=0)
+    return out
 
 
 def run_mmpd_eval(
@@ -1244,7 +1270,9 @@ def topk_from_modes(
     order = np.argsort(-mode_prob, axis=2)
     out: Dict[str, float] = {}
     max_k = min(max_k, mode_center.shape[2])
-    for k in range(1, max_k + 1):
+    for k in sorted({1, max_k}):
+        if k < 1 or k > max_k:
+            continue
         gathered = np.take_along_axis(mode_center, order[:, :, :k, None], axis=2)
         mse = ((gathered - y_true[:, :, None, :]) ** 2).mean(axis=-1).min(axis=2)
         mae = np.abs(gathered - y_true[:, :, None, :]).mean(axis=-1).min(axis=2)
@@ -1442,9 +1470,10 @@ def texture_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
 def texture_metrics_per_sample(
     y_true: np.ndarray,
     samples: np.ndarray,
+    max_draws: int = 3,
 ) -> Dict[str, float]:
-    """Texture metrics on each probabilistic draw, then mean over draws."""
-    sample_count = samples.shape[2]
+    """Texture metrics on the first few probabilistic draws, then mean."""
+    sample_count = min(samples.shape[2], max_draws)
     if sample_count == 0:
         return {}
     per_draw: Dict[str, List[float]] = {}
@@ -1453,7 +1482,7 @@ def texture_metrics_per_sample(
         for key, value in draw_metrics.items():
             per_draw.setdefault(key, []).append(value)
     return {
-        f"per_sample_mean_{key}": float(np.mean(values))
+        f"prob_{key}": float(np.mean(values))
         for key, values in per_draw.items()
     }
 
@@ -1526,9 +1555,6 @@ def summarize_prediction_pack(
         )
     metrics.update(topk_from_modes(y_true, mode_center, mode_prob, max_k=topk_max))
     metrics.update(texture_metrics(y_true, det))
-    sample_mean = samples.mean(axis=2)
-    for key, value in texture_metrics(y_true, sample_mean).items():
-        metrics[f"sample_mean_{key}"] = value
     if texture_per_sample:
         metrics.update(texture_metrics_per_sample(y_true, samples))
     metrics["n_windows"] = float(y_true.shape[0])
@@ -1850,7 +1876,7 @@ def stable_dataset_seed(base_seed: int, dataset: str) -> int:
 def print_summary(results: Dict[str, Dict[str, Dict[str, float]]], profile: str = "full") -> None:
     print("\nSummary")
     if profile == "prob-core":
-        print("dataset,model,mse,mae,crps,top3_mse,top3_mae,n_samples")
+        print("dataset,model,mse,mae,crps,top1_mse,top1_mae,top3_mse,top3_mae,n_samples")
         for dataset in sorted(results):
             for model in sorted(results[dataset]):
                 m = results[dataset][model]
@@ -1859,12 +1885,14 @@ def print_summary(results: Dict[str, Dict[str, Dict[str, float]]], profile: str 
                     f"{m.get('mse', float('nan')):.6f},"
                     f"{m.get('mae', float('nan')):.6f},"
                     f"{m.get('crps', float('nan')):.6f},"
+                    f"{m.get('top1_mse', float('nan')):.6f},"
+                    f"{m.get('top1_mae', float('nan')):.6f},"
                     f"{m.get('top3_mse', float('nan')):.6f},"
                     f"{m.get('top3_mae', float('nan')):.6f},"
                     f"{m.get('n_samples', float('nan')):.0f}"
                 )
         return
-    print("dataset,model,mse,mae,crps,top3_mse,top3_mae,texture_pathsig_distance")
+    print("dataset,model,mse,mae,crps,top1_mse,top1_mae,top3_mse,top3_mae,texture_pathsig_distance")
     for dataset in sorted(results):
         for model in sorted(results[dataset]):
             m = results[dataset][model]
@@ -1873,6 +1901,8 @@ def print_summary(results: Dict[str, Dict[str, Dict[str, float]]], profile: str 
                 f"{m.get('mse', float('nan')):.6f},"
                 f"{m.get('mae', float('nan')):.6f},"
                 f"{m.get('crps', float('nan')):.6f},"
+                f"{m.get('top1_mse', float('nan')):.6f},"
+                f"{m.get('top1_mae', float('nan')):.6f},"
                 f"{m.get('top3_mse', float('nan')):.6f},"
                 f"{m.get('top3_mae', float('nan')):.6f},"
                 f"{m.get('texture_pathsig_distance', float('nan')):.6f}"
@@ -1911,7 +1941,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--texture-per-sample",
         action="store_true",
-        help="Full profile only: texture metrics on each draw, averaged (per_sample_mean_*).",
+        help="Full profile only: texture on the first 3 probabilistic draws, averaged (prob_texture_*).",
     )
     parser.add_argument("--lookback", type=int, default=96)
     parser.add_argument("--horizon", type=int, default=96)
@@ -1951,7 +1981,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Required when --phase anchor.",
     )
-    parser.add_argument("--topk-max", type=int, default=3)
+    parser.add_argument("--topk-max", type=int, default=3,
+                        help="Report top1 and topK only; default K=3 (top2 is intentionally omitted).")
     parser.add_argument("--no-update-mmpd", action="store_true")
     return parser.parse_args()
 
