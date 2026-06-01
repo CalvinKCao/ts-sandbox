@@ -1030,6 +1030,20 @@ def apply_ckpt_architecture_globals(pipeline: Any, ckpt: Dict[str, Any], diffusi
             pipeline.DIT_PATCH_SIZE = (patch_side, patch_side)
 
 
+def resolve_inference_cfg(
+    ckpt: Dict[str, Any],
+    args: argparse.Namespace,
+) -> tuple[float, bool]:
+    """CFG scale / inference flag: CLI overrides checkpoint when set."""
+    cfg_scale = float(get_ckpt_config_value(ckpt, "cfg_scale", 1.0))
+    use_cfg = bool(get_ckpt_config_value(ckpt, "use_cfg_inference", False))
+    if getattr(args, "cfg_scale", None) is not None:
+        cfg_scale = float(args.cfg_scale)
+    if getattr(args, "use_cfg_inference", None) is not None:
+        use_cfg = bool(args.use_cfg_inference)
+    return cfg_scale, use_cfg
+
+
 def load_anchor_model(run: AnchorRun, args: argparse.Namespace, device: torch.device):
     pipeline = load_tsf_pipeline()
     ckpt = torch.load(run.best_pt, map_location=device, weights_only=False)
@@ -1038,6 +1052,9 @@ def load_anchor_model(run: AnchorRun, args: argparse.Namespace, device: torch.de
 
     diffusion_type = infer_diffusion_type(ckpt, run.variant)
     apply_ckpt_architecture_globals(pipeline, ckpt, diffusion_type)
+    cfg_scale, use_cfg = resolve_inference_cfg(ckpt, args)
+    pipeline.CFG_SCALE = cfg_scale
+    pipeline.USE_CFG_INFERENCE = use_cfg
     tuned = run.metadata.get("tuned_params", {})
     lookback, horizon = dataset_window_lengths(args, run.dataset)
     guidance_mod = importlib.import_module("models.diffusion_tsf.guidance")
@@ -1056,8 +1073,8 @@ def load_anchor_model(run: AnchorRun, args: argparse.Namespace, device: torch.de
         )),
         cross_variate_context_bias=float(get_ckpt_config_value(ckpt, "cross_variate_context_bias", 0.0)),
         cfg_dropout=float(get_ckpt_config_value(ckpt, "cfg_dropout", 0.1)),
-        cfg_scale=float(get_ckpt_config_value(ckpt, "cfg_scale", 1.0)),
-        use_cfg_inference=bool(get_ckpt_config_value(ckpt, "use_cfg_inference", False)),
+        cfg_scale=cfg_scale,
+        use_cfg_inference=use_cfg,
         guidance_model=itrans_guidance,
     ).to(device)
     pipeline.load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
@@ -1592,7 +1609,9 @@ def summarize_prediction_pack(
         metrics.update(texture_metrics_per_sample(y_true, samples))
     metrics["n_windows"] = float(y_true.shape[0])
     metrics["n_variates"] = float(y_true.shape[1])
-    metrics["n_samples"] = float(samples.shape[2])
+    metrics["det_n_samples"] = 1.0
+    metrics["prob_n_samples"] = float(samples.shape[2])
+    metrics["n_samples"] = metrics["prob_n_samples"]
     return metrics
 
 
@@ -2022,6 +2041,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--topk-max", type=int, default=3,
                         help="Report top1 and topK only; default K=3 (top2 is intentionally omitted).")
+    parser.add_argument(
+        "--cfg-scale",
+        type=float,
+        default=None,
+        help="Override checkpoint cfg_scale at inference (CFG ablation sweeps).",
+    )
+    parser.add_argument(
+        "--use-cfg-inference",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override checkpoint use_cfg_inference (default: on when cfg_scale>1).",
+    )
     parser.add_argument("--no-update-mmpd", action="store_true")
     return parser.parse_args()
 

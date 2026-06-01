@@ -1,5 +1,6 @@
-# Eval-only: CFG inference sweep on existing binary_dual_scale checkpoints.
-# Submit with submit_cfg_ablation.sh (reuses ckpts/*-{dataset}-binary_dual_scale).
+# Legacy pipeline eval config (slow: full test stride + iTrans baseline + viz).
+# Prefer ./submit_cfg_ablation.sh — uses eval_mmpd_gaussian_anchor.py anchor path
+# (50% test windows, same det/prob metric split as MMPD matrix).
 # Do NOT use submit_grid.sh with this file unless you pass explicit --checkpoint-dir.
 
 experiment:
@@ -34,10 +35,15 @@ experiment:
     variate_strategy: first
     subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
 
+  eval_test_fraction: 0.5
+  skip_itrans_baseline: true
+  skip_eval_visualizations: true
+
 phases:
   - phase: eval
-    # Deterministic metrics use eval_sampler=anchor once; probabilistic metrics
-    # use a separate non-anchor stochastic sampler.
+    eval_test_fraction: 0.5
+    skip_itrans_baseline: true
+    skip_eval_visualizations: true
     n_samples: 1
     probabilistic_n_samples: 100
     probabilistic_sampler: dpmpp

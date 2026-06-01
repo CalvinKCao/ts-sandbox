@@ -132,18 +132,32 @@ class EvalPhase(PipelinePhase):
             n_samples = 1
             probabilistic_n_samples = 1
             probabilistic_num_inference_steps = 5
-        elif not subset_meta.get("enabled"):
-            n_full = len(test_ds)
-            n_eval = max(1, n_full // 2)
-            rng = np.random.default_rng(42)
-            eval_idx = sorted(rng.choice(n_full, size=n_eval, replace=False).tolist())
-            test_ds = Subset(test_ds, eval_idx)
-            logger.info(f"[{subset_id}] eval subset: {n_eval}/{n_full} windows")
         else:
-            logger.info(
-                f"[{subset_id}] eval uses configured test stride "
-                f"{test_stride}: {len(test_ds)} windows"
-            )
+            eval_fraction = self.get("eval_test_fraction", None)
+            if eval_fraction is None:
+                eval_fraction = state.extra.get("eval_test_fraction")
+            if eval_fraction is not None and not state.smoke_test:
+                n_full = len(test_ds)
+                n_eval = max(1, int(round(n_full * float(eval_fraction))))
+                rng = np.random.default_rng(42)
+                eval_idx = sorted(rng.choice(n_full, size=n_eval, replace=False).tolist())
+                test_ds = Subset(test_ds, eval_idx)
+                logger.info(
+                    f"[{subset_id}] eval subset: {n_eval}/{n_full} windows "
+                    f"(eval_test_fraction={eval_fraction})"
+                )
+            elif not subset_meta.get("enabled"):
+                n_full = len(test_ds)
+                n_eval = max(1, n_full // 2)
+                rng = np.random.default_rng(42)
+                eval_idx = sorted(rng.choice(n_full, size=n_eval, replace=False).tolist())
+                test_ds = Subset(test_ds, eval_idx)
+                logger.info(f"[{subset_id}] eval subset: {n_eval}/{n_full} windows")
+            else:
+                logger.info(
+                    f"[{subset_id}] eval uses configured test stride "
+                    f"{test_stride}: {len(test_ds)} windows"
+                )
 
         test_loader = DataLoader(test_ds, batch_size=8 if not state.smoke_test else 2, shuffle=False)
         eval_results = evaluate_model(
@@ -200,41 +214,55 @@ class EvalPhase(PipelinePhase):
                     summary[f"{prefix}/{key}"] = val
         wandb_utils.log_summary(summary)
 
+        skip_itrans = bool(
+            self.get("skip_itrans_baseline", False)
+            or state.extra.get("skip_itrans_baseline", False)
+        )
+        skip_viz = bool(
+            self.get("skip_eval_visualizations", False)
+            or state.extra.get("skip_eval_visualizations", False)
+        )
+
         # iTransformer-only baseline
-        try:
-            full_itrans_ckpt = os.path.join(
-                state.checkpoint_dir, f"{subset_id}_itrans_full_dataset.pt",
-            )
-            if not os.path.exists(full_itrans_ckpt):
-                full_itrans_ckpt = train_subset_itransformer_full_baseline(
-                    state.dataset, variate_indices, subset_id, device,
+        if not skip_itrans:
+            try:
+                full_itrans_ckpt = os.path.join(
+                    state.checkpoint_dir, f"{subset_id}_itrans_full_dataset.pt",
+                )
+                if not os.path.exists(full_itrans_ckpt):
+                    full_itrans_ckpt = train_subset_itransformer_full_baseline(
+                        state.dataset, variate_indices, subset_id, device,
+                        smoke_test=state.smoke_test,
+                        train_stride=train_stride,
+                        test_stride=test_stride,
+                        data_subset=subset_meta,
+                    )
+                eval_test_indices = None
+                if not state.smoke_test and isinstance(test_ds, Subset):
+                    eval_test_indices = list(test_ds.indices)
+                baseline_metrics = evaluate_itransformer_baseline(
+                    subset_id, state.dataset, variate_indices,
+                    full_itrans_ckpt, state.results_dir, device,
                     smoke_test=state.smoke_test,
-                    train_stride=train_stride,
+                    test_indices=eval_test_indices,
                     test_stride=test_stride,
                     data_subset=subset_meta,
                 )
-            eval_test_indices = None
-            if not state.smoke_test and isinstance(test_ds, Subset):
-                eval_test_indices = list(test_ds.indices)
-            baseline_metrics = evaluate_itransformer_baseline(
-                subset_id, state.dataset, variate_indices,
-                full_itrans_ckpt, state.results_dir, device,
-                smoke_test=state.smoke_test,
-                test_indices=eval_test_indices,
-                test_stride=test_stride,
-                data_subset=subset_meta,
-            )
-            wandb_utils.log_summary({
-                "eval/itrans_baseline/mse": baseline_metrics.get("mse"),
-                "eval/itrans_baseline/mae": baseline_metrics.get("mae"),
-            })
-        except Exception as e:
-            logger.warning(f"iTransformer baseline failed for {subset_id}: {e}")
+                wandb_utils.log_summary({
+                    "eval/itrans_baseline/mse": baseline_metrics.get("mse"),
+                    "eval/itrans_baseline/mae": baseline_metrics.get("mae"),
+                })
+            except Exception as e:
+                logger.warning(f"iTransformer baseline failed for {subset_id}: {e}")
 
         # ---------------------------------------------------------
         # Pipeline Visualizations
         # ---------------------------------------------------------
-        if wandb_utils._WANDB_AVAILABLE and wandb_utils.wandb.run is not None:
+        if (
+            not skip_viz
+            and wandb_utils._WANDB_AVAILABLE
+            and wandb_utils.wandb.run is not None
+        ):
             wandb = wandb_utils.wandb
             logger.info(f"[{subset_id}] Generating and logging pipeline visualizations...")
             viz_output_dir = os.path.join(state.results_dir, "viz", subset_id)

@@ -2,148 +2,215 @@
 # =============================================================================
 # CFG scale ablation — eval-only on finished binary_dual_scale checkpoints.
 #
-# Reuses training artifacts from submit_grid + configs/binary_dual_scale.yaml
-# (e.g. Killarney jobs 3828089–3828100). Does NOT retrain.
+# Uses utils/eval_mmpd_gaussian_anchor.py (same path as MMPD matrix binary eval):
+#   - 50% seeded test windows (not full stride-1 test set)
+#   - 1× anchor decode → deterministic MSE/MAE + texture
+#   - 100× dpmpp stochastic draws → CRPS, top1/top3, prob_texture (first 3)
+#   - No MMPD, no iTrans retrain, no pipeline viz
 #
 # USAGE (login node, $SCRATCH/ts-sandbox):
 #   ./submit_cfg_ablation.sh --smoke-test
-#   ./submit_cfg_ablation.sh
-#   ./submit_cfg_ablation.sh --datasets ETTm2,ETTh1 --cfg-scales 2,4,7,10
-#
-# CFG 4/8/12 on finished binary_dual_scale ckpts (skip ETTm*, illness, electricity, solar):
+#   GPU=l40s ./submit_cfg_ablation.sh   # or GPU=h100
 #   ./submit_cfg_ablation.sh \
 #     --datasets ETTh1,ETTh2,exchange_rate,weather,traffic,PeMS,dalia \
-#     --cfg-scales 4,8,12
+#     --cfg-scales 4,10
 #
-# Cancel mistaken full-retrain grid jobs first:
-#   scancel -u $USER -n grid-ETTm2-binary_dual_scale_cfg   # etc.
+# Cancel slow pipeline-based cfg jobs (if any):
+#   scancel -u $USER -n cfg-
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG="${CONFIG:-configs/binary_dual_scale_cfg_eval.yaml}"
-CKPT_CONFIG="${CKPT_CONFIG:-binary_dual_scale}"
-CFG_SCALES="${CFG_SCALES:-1,2,4,7,10,15}"
-DATASETS="${DATASETS:-ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,electricity,traffic,PeMS,solar_Alabama,dalia}"
+CFG_SCALES="${CFG_SCALES:-4,10}"
+DATASETS="${DATASETS:-ETTh1,ETTh2,exchange_rate,weather,traffic,PeMS,dalia}"
+GPU="${GPU:-l40s}"
 SEED=42
 SMOKE=0
-WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
+RUN_STEM=""
+MERGE_ONLY=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --datasets) DATASETS="$2"; shift 2 ;;
         --cfg-scales) CFG_SCALES="$2"; shift 2 ;;
-        --ckpt-config) CKPT_CONFIG="$2"; shift 2 ;;
-        --config) CONFIG="$2"; shift 2 ;;
-        --wandb-project) WANDB_PROJECT="$2"; shift 2 ;;
+        --gpu) GPU="$2"; shift 2 ;;
+        --run-stem) RUN_STEM="$2"; shift 2 ;;
+        --merge-only) MERGE_ONLY=1; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+case "$GPU" in
+    l40s)
+        GPU_SBATCH=(--gres=gpu:l40s:1)
+        ;;
+    h100)
+        GPU_SBATCH=(--partition=gpubase_h100_b4 --gpus-per-node=h100:1)
+        ;;
+    *)
+        echo "ERROR: --gpu must be l40s or h100 (got $GPU)" >&2
+        exit 1
+        ;;
+esac
 
 IFS=',' read -ra DATA_ARR <<< "$DATASETS"
 IFS=',' read -ra SCALE_ARR <<< "$CFG_SCALES"
 
 USER=$(whoami)
-STORE="${RESULTS_ROOT:-$SCRIPT_DIR/results}"
-if [[ -n "${SCRATCH:-}" ]]; then
-    if [[ -d "$SCRATCH/${USER}/ts-sandbox/results" ]]; then
-        STORE="$SCRATCH/${USER}/ts-sandbox/results"
-    elif [[ -d "$SCRATCH/ts-sandbox/results" ]]; then
-        STORE="$SCRATCH/ts-sandbox/results"
-    fi
+REPO="$SCRIPT_DIR"
+if [[ -n "${SCRATCH:-}" && -d "${SCRATCH}/${USER}/ts-sandbox" ]]; then
+    REPO="${SCRATCH}/${USER}/ts-sandbox"
+elif [[ -n "${SCRATCH:-}" && -d "${SCRATCH}/ts-sandbox" ]]; then
+    REPO="${SCRATCH}/ts-sandbox"
+fi
+if [[ "$REPO" == /home/* ]]; then
+    echo "WARN: submitting from /home; prefer \$SCRATCH/ts-sandbox on Killarney" >&2
+fi
+
+STORE="${RESULTS_ROOT:-$REPO/results}"
+CKPT_ROOT="$STORE/ckpts"
+DATE_TAG="$(date +%m-%d)"
+if [[ -z "$RUN_STEM" ]]; then
+    RUN_STEM="${DATE_TAG}-cfg-ablation"
 fi
 LOG_DIR="$STORE/logs/cfg_ablation"
-CKPT_ROOT="$STORE/ckpts"
-DATA_ROOT="$STORE/datasets"
 mkdir -p "$LOG_DIR"
 
-pick_ckpt_stem() {
+pick_ckpt_dir() {
     local ds="$1"
-    if [[ -f "$CKPT_ROOT/${ds}/metadata.json" ]]; then
-        echo "$ds"
+    if [[ -d "$CKPT_ROOT/${ds}" && -f "$CKPT_ROOT/${ds}/metadata.json" ]]; then
+        echo "$CKPT_ROOT/${ds}"
         return
     fi
     local best="" best_mtime=0 d m
     shopt -s nullglob
-    for d in "$CKPT_ROOT"/*-"${ds}"-"${CKPT_CONFIG}"; do
+    for d in "$CKPT_ROOT"/*-"${ds}"-binary_dual_scale; do
         [[ -d "$d" ]] || continue
         m=$(stat -c %Y "$d" 2>/dev/null || echo 0)
         if [[ "$m" -gt "$best_mtime" ]]; then
             best_mtime="$m"
-            best="$(basename "$d")"
+            best="$d"
         fi
     done
     shopt -u nullglob
     echo "$best"
 }
 
+merge_cfg_scale() {
+    local out_dir="$1"
+    local scale="$2"
+    python3 - <<'PY' "$out_dir" "$scale"
+import json
+import sys
+from pathlib import Path
+
+out_dir = Path(sys.argv[1])
+scale = sys.argv[2]
+partials = sorted((out_dir / "partials").glob("*.json"))
+if not partials:
+    print(f"[merge] no partials under {out_dir}/partials", flush=True)
+    sys.exit(1)
+results = {}
+for path in partials:
+    dataset = path.name.split("_", 1)[0]
+    with path.open() as f:
+        results[dataset] = {"binary_anchor": json.load(f)}
+manifest = {
+    "cfg_scale": float(scale),
+    "partials": [str(p) for p in partials],
+}
+(out_dir / "metrics.json").write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")
+(out_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+rows = ["dataset,cfg_scale,mse,mae,crps,top1_mse,top1_mae,top3_mse,top3_mae,det_n_samples,prob_n_samples"]
+for ds in sorted(results):
+    m = results[ds]["binary_anchor"]
+    rows.append(
+        f"{ds},{scale},"
+        f"{m.get('mse', '')},{m.get('mae', '')},{m.get('crps', '')},"
+        f"{m.get('top1_mse', '')},{m.get('top1_mae', '')},"
+        f"{m.get('top3_mse', '')},{m.get('top3_mae', '')},"
+        f"{m.get('det_n_samples', 1)},{m.get('prob_n_samples', m.get('n_samples', ''))}"
+    )
+(out_dir / "metrics.csv").write_text("\n".join(rows) + "\n")
+print(f"[merge] wrote {out_dir}/metrics.csv ({len(results)} datasets)", flush=True)
+PY
+}
+
+if [[ "$MERGE_ONLY" -eq 1 ]]; then
+    for SCALE in "${SCALE_ARR[@]}"; do
+        OUT="$STORE/datasets/${RUN_STEM}-cfg${SCALE}"
+        merge_cfg_scale "$OUT" "$SCALE"
+    done
+    exit 0
+fi
+
 if [[ "$SMOKE" -eq 1 ]]; then
     DATA_ARR=(ETTh1)
-    SCALE_ARR=(2)
+    SCALE_ARR=(4)
     WALL="0:45:00"
     MEM="24G"
     CPUS=4
-    SMOKE_FLAG=(--smoke-test)
+    EVAL_EXTRA=(
+        --test-fraction 0.05
+        --test-max-items 16
+        --sample-num 5
+        --num-sampling-steps 5
+        --anchor-batch-size 4
+        --gmm-components 5
+        --gmm-iterations 3
+    )
 else
-    WALL="2:30:00"
+    WALL="3:00:00"
     MEM="60G"
     CPUS=8
-    SMOKE_FLAG=()
+    EVAL_EXTRA=(
+        --test-fraction 0.5
+        --sample-num 100
+        --num-sampling-steps 20
+        --anchor-batch-size 16
+        --gmm-components 10
+        --gmm-iterations 10
+        --texture-per-sample
+        --topk-max 3
+    )
 fi
 
-CFG_NAME=$(basename "$CONFIG" .yaml)
-echo "CFG ablation (eval-only)"
-echo "  config=$CONFIG  ckpt_config=$CKPT_CONFIG  scales=${SCALE_ARR[*]}"
-echo "  storage=$STORE"
+echo "CFG ablation (eval_mmpd anchor path)"
+echo "  run_stem=$RUN_STEM  gpu=$GPU  scales=${SCALE_ARR[*]}  storage=$STORE"
 printf "%-10s %-12s %-8s %-6s %s\n" "JOB" "DATASET" "CFG" "SEED" "LOG"
 echo "--------------------------------------------------------------------------------"
 
-for DS in "${DATA_ARR[@]}"; do
-    RUN_STEM=$(pick_ckpt_stem "$DS")
-    if [[ -z "$RUN_STEM" ]]; then
-        echo "ERROR: no checkpoint dir *-${DS}-${CKPT_CONFIG} under $CKPT_ROOT" >&2
-        exit 1
-    fi
-    CKPT_DIR="$CKPT_ROOT/$RUN_STEM"
-    if ! compgen -G "$CKPT_DIR"/*/best.pt >/dev/null; then
-        echo "ERROR: missing */best.pt under $CKPT_DIR (need finished binary_dual_scale train)" >&2
-        exit 1
+JOB_IDS=()
+for SCALE in "${SCALE_ARR[@]}"; do
+    OUT_DIR="$STORE/datasets/${RUN_STEM}-cfg${SCALE}"
+    mkdir -p "$OUT_DIR/partials"
+    USE_CFG_FLAG=()
+    if python3 -c "exit(0 if float('$SCALE') > 1.0 else 1)"; then
+        USE_CFG_FLAG=(--use-cfg-inference)
+    else
+        USE_CFG_FLAG=(--no-cfg-inference)
     fi
 
-    for SCALE in "${SCALE_ARR[@]}"; do
-        RESULTS_STEM="${RUN_STEM}-cfg${SCALE}"
-        RESULTS_DIR="$DATA_ROOT/$RESULTS_STEM"
-        LOG_FILE="$LOG_DIR/${RESULTS_STEM}.log"
+    for DS in "${DATA_ARR[@]}"; do
+        CKPT_DIR=$(pick_ckpt_dir "$DS")
+        if [[ -z "$CKPT_DIR" || ! -d "$CKPT_DIR" ]]; then
+            echo "ERROR: no binary_dual_scale ckpt for $DS under $CKPT_ROOT" >&2
+            exit 1
+        fi
+        LOG_FILE="$LOG_DIR/${RUN_STEM}-cfg${SCALE}-${DS}.log"
         JOB_NAME="cfg-${DS}-w${SCALE}"
 
-        PY_ARGS=(
-            --config "$CONFIG"
-            --dataset "$DS"
-            --seed "$SEED"
-            --checkpoint-dir "$CKPT_DIR"
-            --results-dir "$RESULTS_DIR"
-            --cfg-scale "$SCALE"
-        )
-        if [[ "$(python3 -c "print(float('$SCALE') > 1.0)")" == "True" ]]; then
-            PY_ARGS+=(--use-cfg-inference)
-        fi
-        if [[ -n "${WANDB_API_KEY:-}" ]]; then
-            PY_ARGS+=(--wandb --wandb-project "$WANDB_PROJECT")
-        fi
-        PY_ARGS+=("${SMOKE_FLAG[@]}")
-
-        EXPORT_LIST="GRID_STORE=${STORE},SLURM_SUBMIT_DIR=${SCRIPT_DIR}"
+        EXPORT_LIST="REPO=${REPO},STORE=${STORE},OUT_DIR=${OUT_DIR},SCALE=${SCALE}"
         [[ -n "${SCRATCH:-}" ]] && EXPORT_LIST+=",SCRATCH=${SCRATCH}"
-        [[ -n "${WANDB_API_KEY:-}" ]] && EXPORT_LIST+=",WANDB_API_KEY=${WANDB_API_KEY}"
 
         JOB_ID=$(sbatch --parsable \
             --job-name="$JOB_NAME" \
             --account=aip-boyuwang \
             --time="$WALL" \
             --nodes=1 \
-            --gres=gpu:l40s:1 \
+            "${GPU_SBATCH[@]}" \
             --cpus-per-task="$CPUS" \
             --mem="$MEM" \
             --output="$LOG_FILE" \
@@ -151,11 +218,83 @@ for DS in "${DATA_ARR[@]}"; do
             --mail-type=FAIL \
             --mail-user="${USER}@uwo.ca" \
             --export="$EXPORT_LIST" \
-            "$SCRIPT_DIR/slurm_worker.sh" "${PY_ARGS[@]}")
-
+            --wrap="$(cat <<EOF
+set -euo pipefail
+cd "\$REPO"
+source .venv/bin/activate 2>/dev/null || true
+export PYTHONUNBUFFERED=1
+DS="$DS"
+CKPT_DIR="$CKPT_DIR"
+python3 -u "\$REPO/utils/eval_mmpd_gaussian_anchor.py" \\
+  --phase anchor \\
+  --anchor-variant binary \\
+  --datasets "\$DS" \\
+  --binary-anchor-root "\$CKPT_DIR" \\
+  --ckpt-base "\$CKPT_DIR" \\
+  --output-dir "\$OUT_DIR" \\
+  --seed $SEED \\
+  --cfg-scale "\$SCALE" \\
+  ${USE_CFG_FLAG[@]} \\
+  --metrics-profile full \\
+  --force-anchor-eval \\
+  --skip-mmpd-train \\
+  ${EVAL_EXTRA[@]}
+echo "[cfg-\$DS-w\$SCALE] done"
+EOF
+)")
         printf "%-10s %-12s %-8s %-6s %s\n" "$JOB_ID" "$DS" "$SCALE" "$SEED" "$LOG_FILE"
+        JOB_IDS+=("$JOB_ID")
     done
 done
 
+MERGE_DEP=""
+if [[ "${#JOB_IDS[@]}" -gt 0 ]]; then
+    MERGE_DEP="afterok:${JOB_IDS[0]}"
+    for jid in "${JOB_IDS[@]:1}"; do
+        MERGE_DEP="${MERGE_DEP}:${jid}"
+    done
+fi
+
+MERGE_LOG="$LOG_DIR/${RUN_STEM}-merge.log"
+MERGE_ID=$(sbatch --parsable \
+    --job-name="${RUN_STEM}-merge" \
+    --account=aip-boyuwang \
+    --time="0:15:00" \
+    --cpus-per-task=2 \
+    --mem="4G" \
+    --output="$MERGE_LOG" \
+    --error="$MERGE_LOG" \
+    ${MERGE_DEP:+--dependency="$MERGE_DEP"} \
+    --export="REPO=${REPO},STORE=${STORE},RUN_STEM=${RUN_STEM},CFG_SCALES=${CFG_SCALES}" \
+    --wrap="$(cat <<'EOF'
+set -euo pipefail
+cd "$REPO"
+IFS=',' read -ra SCALES <<< "$CFG_SCALES"
+for SCALE in "${SCALES[@]}"; do
+  OUT="$STORE/datasets/${RUN_STEM}-cfg${SCALE}"
+  python3 - <<PY "$OUT" "$SCALE"
+import json, sys
+from pathlib import Path
+out_dir, scale = Path(sys.argv[1]), sys.argv[2]
+partials = sorted((out_dir / "partials").glob("*.json"))
+results = {}
+for path in partials:
+    dataset = path.name.split("_", 1)[0]
+    with path.open() as f:
+        results[dataset] = {"binary_anchor": json.load(f)}
+(out_dir / "metrics.json").write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")
+rows = ["dataset,cfg_scale,mse,mae,crps,top1_mse,top1_mae,top3_mse,top3_mae,det_n_samples,prob_n_samples"]
+for ds in sorted(results):
+    m = results[ds]["binary_anchor"]
+    rows.append(f"{ds},{scale},{m.get('mse','')},{m.get('mae','')},{m.get('crps','')},{m.get('top1_mse','')},{m.get('top1_mae','')},{m.get('top3_mse','')},{m.get('top3_mae','')},{m.get('det_n_samples',1)},{m.get('prob_n_samples', m.get('n_samples',''))}")
+(out_dir / "metrics.csv").write_text("\n".join(rows) + "\n")
+print(f"[merge] {out_dir}/metrics.csv ({len(results)} datasets)", flush=True)
+PY
+done
+EOF
+)")
+
 echo "--------------------------------------------------------------------------------"
+echo "Merge job: $MERGE_ID (logs: $MERGE_LOG)"
 echo "Monitor: squeue -u $USER | grep '^cfg-'"
+echo "Results: $STORE/datasets/${RUN_STEM}-cfg{scale}/metrics.csv"
