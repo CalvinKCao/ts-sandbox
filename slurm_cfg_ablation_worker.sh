@@ -37,6 +37,12 @@ _resolve_store() {
 
 STORE="$(_resolve_store)"
 
+if ! nvidia-smi -L >/dev/null 2>&1; then
+    echo "[setup] ERROR: Slurm allocated a GPU job, but no CUDA device is visible on ${SLURMD_NODENAME:-unknown}." >&2
+    echo "[setup] Resubmit with submit_cfg_ablation.sh --exclude-nodes ${SLURMD_NODENAME:-bad_node}" >&2
+    exit 42
+fi
+
 _load_modules() {
     module purge 2>/dev/null || true
     module load StdEnv/2023 2>/dev/null || true

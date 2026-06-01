@@ -25,6 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG_SCALES="${CFG_SCALES:-4,10}"
 DATASETS="${DATASETS:-ETTh1,ETTh2,exchange_rate,weather,traffic,PeMS,dalia}"
 GPU="${GPU:-l40s}"
+EXCLUDE_NODES="${CFG_EXCLUDE_NODES:-}"
 SEED=42
 SMOKE=0
 RUN_STEM=""
@@ -36,6 +37,7 @@ while [[ $# -gt 0 ]]; do
         --datasets) DATASETS="$2"; shift 2 ;;
         --cfg-scales) CFG_SCALES="$2"; shift 2 ;;
         --gpu) GPU="$2"; shift 2 ;;
+        --exclude-nodes) EXCLUDE_NODES="$2"; shift 2 ;;
         --run-stem) RUN_STEM="$2"; shift 2 ;;
         --merge-only) MERGE_ONLY=1; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
@@ -45,6 +47,10 @@ done
 case "$GPU" in
     l40s)
         GPU_SBATCH=(--gres=gpu:l40s:1)
+        # kn120 accepted L40S GRES but exposed no CUDA devices on 2026-06-01.
+        if [[ -z "$EXCLUDE_NODES" ]]; then
+            EXCLUDE_NODES="kn120"
+        fi
         ;;
     h100)
         GPU_SBATCH=(--partition=gpubase_h100_b4 --gpus-per-node=h100:1)
@@ -179,6 +185,9 @@ fi
 
 echo "CFG ablation (eval_mmpd anchor path)"
 echo "  run_stem=$RUN_STEM  gpu=$GPU  scales=${SCALE_ARR[*]}  storage=$STORE"
+if [[ -n "$EXCLUDE_NODES" ]]; then
+    echo "  exclude_nodes=$EXCLUDE_NODES"
+fi
 printf "%-10s %-12s %-8s %-6s %s\n" "JOB" "DATASET" "CFG" "SEED" "LOG"
 echo "--------------------------------------------------------------------------------"
 
@@ -213,6 +222,7 @@ for SCALE in "${SCALE_ARR[@]}"; do
             --time="$WALL" \
             --nodes=1 \
             "${GPU_SBATCH[@]}" \
+            ${EXCLUDE_NODES:+--exclude="$EXCLUDE_NODES"} \
             --cpus-per-task="$CPUS" \
             --mem="$MEM" \
             --chdir="$REPO" \
