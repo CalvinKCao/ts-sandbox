@@ -304,11 +304,11 @@ def main():
                         help='Run stem, e.g. results/ckpts/05-30-3819110-ETTm1-binary_dual_scale')
     parser.add_argument('--scan-ckpts-root', type=str, default=None,
                         help='Plot every run under this dir that has subset/best.pt (e.g. results/ckpts)')
-    parser.add_argument('--run-glob', type=str, default='05-30-38216*-binary_anchor',
+    parser.add_argument('--run-glob', type=str, default='05-31-3828*-binary_dual_scale',
                         help='With --scan-ckpts-root, only matching run folder names')
     parser.add_argument('--output-dir', type=str, default=None,
                         help='Output directory (default: reports/<report_stem>/)')
-    parser.add_argument('--report-stem', type=str, default='3821627_binary_anchor_grid',
+    parser.add_argument('--report-stem', type=str, default='3828089_binary_dual_scale_full_cond_variembed',
                         help='Subfolder under reports/ for figures when --output-dir omitted')
     parser.add_argument('--require-results-json', action='store_true',
                         help='Skip runs without results/datasets/<stem>/*/results.json')

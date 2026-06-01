@@ -81,13 +81,26 @@ class _CrossAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.drop = drop
 
-    def forward(self, x: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        ctx: torch.Tensor,
+        attn_bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         B, N, C = x.shape
         _, M, _ = ctx.shape
         q = self.q(x).reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         kv = self.kv(ctx).reshape(B, M, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         k, v = kv.unbind(0)
-        out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.drop if self.training else 0.0)
+        if attn_bias is not None:
+            attn_bias = attn_bias[:, None, None, :].to(dtype=q.dtype)
+        out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_bias,
+            dropout_p=self.drop if self.training else 0.0,
+        )
         out = out.transpose(1, 2).reshape(B, N, C)
         return self.proj(out)
 
@@ -139,9 +152,11 @@ class _DiTCrossAttnBlock(nn.Module):
         mlp_ratio: float,
         drop: float,
         enable_cross_scale_attention: bool = False,
+        target_context_bias: float = 0.0,
     ):
         super().__init__()
         self.enable_cross_scale_attention = enable_cross_scale_attention
+        self.target_context_bias = float(target_context_bias)
         self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.self_attn = _SelfAttention(dim, num_heads, drop=drop)
         self.norm_x = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
@@ -162,6 +177,7 @@ class _DiTCrossAttnBlock(nn.Module):
         c: torch.Tensor,
         ctx: Optional[torch.Tensor],
         scale_indices: Optional[torch.Tensor] = None,
+        variate_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         mods = self.adaLN(c).chunk(12 if self.enable_cross_scale_attention else 9, dim=-1)
         if self.enable_cross_scale_attention:
@@ -170,7 +186,31 @@ class _DiTCrossAttnBlock(nn.Module):
             s1, sc1, g1, sx, scx, gx, s2, sc2, g2 = mods
         x = x + g1.unsqueeze(1) * self.self_attn(_modulate(self.norm1(x), s1, sc1))
         if ctx is not None:
-            x = x + gx.unsqueeze(1) * self.cross_attn(_modulate(self.norm_x(x), sx, scx), ctx)
+            attn_bias = None
+            if self.target_context_bias != 0.0 and ctx.shape[1] > 1:
+                if variate_indices is None:
+                    raise ValueError("variate_indices are required for target-context attention bias.")
+                if variate_indices.shape[0] != x.shape[0]:
+                    raise ValueError(
+                        f"variate_indices batch {variate_indices.shape[0]} != x batch {x.shape[0]}"
+                    )
+                target_ids = variate_indices.long()
+                if target_ids.min() < 0 or target_ids.max() >= ctx.shape[1]:
+                    raise ValueError(
+                        f"variate_indices must be in [0, {ctx.shape[1] - 1}] for ctx tokens."
+                    )
+                attn_bias = torch.zeros(
+                    x.shape[0],
+                    ctx.shape[1],
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                attn_bias.scatter_(1, target_ids.unsqueeze(1), self.target_context_bias)
+            x = x + gx.unsqueeze(1) * self.cross_attn(
+                _modulate(self.norm_x(x), sx, scx),
+                ctx,
+                attn_bias=attn_bias,
+            )
         if self.enable_cross_scale_attention:
             if scale_indices is None:
                 raise ValueError("scale_indices are required for cross-scale attention.")
@@ -221,6 +261,7 @@ class FactorizedDiT(nn.Module):
         enable_cross_scale_attention: bool = False,
         use_variate_embedding: bool = False,
         max_variates: int = 512,
+        cross_variate_context_bias: float = 0.0,
     ):
         super().__init__()
         pH, pW = patch_size
@@ -275,6 +316,7 @@ class FactorizedDiT(nn.Module):
                         mlp_ratio,
                         dropout,
                         enable_cross_scale_attention=enable_cross_scale_attention,
+                        target_context_bias=cross_variate_context_bias,
                     )
                 )
             else:
@@ -367,15 +409,18 @@ class FactorizedDiT(nn.Module):
 
         for i, block in enumerate(self.blocks):
             if i == self.bottleneck_idx:
-                if self.enable_cross_scale_attention:
-                    if self.gradient_checkpointing and self.training:
-                        tokens = checkpoint(block, tokens, t_emb, ctx_proj, scale_indices, use_reentrant=False)
-                    else:
-                        tokens = block(tokens, t_emb, ctx_proj, scale_indices)
-                elif self.gradient_checkpointing and self.training:
-                    tokens = checkpoint(block, tokens, t_emb, ctx_proj, use_reentrant=False)
+                if self.gradient_checkpointing and self.training:
+                    tokens = checkpoint(
+                        block,
+                        tokens,
+                        t_emb,
+                        ctx_proj,
+                        scale_indices,
+                        variate_indices,
+                        use_reentrant=False,
+                    )
                 else:
-                    tokens = block(tokens, t_emb, ctx_proj)
+                    tokens = block(tokens, t_emb, ctx_proj, scale_indices, variate_indices)
             else:
                 if self.gradient_checkpointing and self.training:
                     tokens = checkpoint(block, tokens, t_emb, use_reentrant=False)

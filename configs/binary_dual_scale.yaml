@@ -16,6 +16,7 @@ experiment:
   lookback_length: 96
   forecast_length: 96
   disable_cross_attention: false
+  cross_variate_context_bias: 0.0
   use_window_normalization: true
   # All submit_grid datasets (PeMS, solar_Alabama, dalia, traffic, …): cap to ~ETTh1 size.
   data_subset:

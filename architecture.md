@@ -2,7 +2,7 @@
 
 This document is **implementation-first**: it traces tensors, names every major submodule down to layer lists, walks the **FactorizedDiT** backbone block-by-block, and records defaults aligned with **`configs/binary_dual_scale.yaml`** (canonical experiment config).
 
-**Scope:** Variate-factorized **FactorizedDiT** with **two-scale hard binary CDF images** (coarse full-range + fine within-bin residual), **XOR bit-flip diffusion** on both scales, **cross-scale attention** at the DiT bottleneck, **deterministic anchor loss** (`deterministic_anchor_lambda: 0.99`), and **anchor** eval sampling. YAML-driven runs set `use_dual_scale: true`, `image_height: 16`, `dual_scale_fine_weight: 0.75`, `dual_scale_independent_timesteps: true`, `lookback_length` / `forecast_length: 96`, and `use_window_normalization: true`.
+**Scope:** Variate-factorized **FactorizedDiT** with **two-scale hard binary CDF images** (coarse full-range + fine within-bin residual), **XOR bit-flip diffusion** on both scales, **cross-scale attention** at the DiT bottleneck, **deterministic anchor loss** (`deterministic_anchor_lambda: 0.99`), and **anchor** eval sampling. YAML-driven runs set `use_dual_scale: true`, `image_height: 16`, `dual_scale_fine_weight: 0.75`, `dual_scale_independent_timesteps: true`, `cross_variate_context_bias: 0.0`, `lookback_length` / `forecast_length: 96`, and `use_window_normalization: true`.
 
 When `use_dual_scale=False`, the model falls back to a **single** full-range CDF map at `image_height` (typically 32) — same XOR/anchor machinery, no scale embedding or cross-scale block. The legacy Gaussian + vertical-blur path and `model_type="unet"` remain for old checkpoints only and are not documented here.
 
@@ -448,7 +448,7 @@ x ← x + g2 · MLP(...)
 ```
 
 - `ctx_proj = LayerNorm(Linear(encoder_hidden_states))` → `(BV, V, D)` (or `BVS` in dual-scale).
-- Cross-attention: **queries** from spatial tokens, **keys/values** from the `V` iTransformer tokens — cross-**variate** coupling.
+- Cross-attention: **queries** from spatial tokens, **keys/values** from the `V` iTransformer tokens — cross-**variate** coupling. When `cross_variate_context_bias > 0`, the target variate token receives an additive attention-logit bias from `variate_indices`.
 - **Cross-scale attention** (`enable_cross_scale_attention=True`): reshape batch as pairs `(coarse, fine)`; each scale’s tokens attend to the **other** scale’s tokens from the same `(b,v)`. Requires `scale_indices` ordering `[0,1,0,1,…]`.
 - Timestep embedding adds **`scale_embed(scale_indices)`** when dual-scale is enabled.
 - Twelve AdaLN gates when cross-scale is on (self, cross-variate, cross-scale, MLP); all zero-init.
@@ -664,6 +664,7 @@ Experiment YAML merges over `pipeline/config.py` defaults; CLI overrides win las
 - `name: binary-dual-scale`, `dataset: ETTh1` (driver overrides per grid job; subset policy scales large sets down to ~ETTh1).
 - `diffusion_type: binary`, `model_type: dit`.
 - `use_dual_scale: true`, `image_height: 16`, `dual_scale_fine_weight: 0.75`, `dual_scale_independent_timesteps: true`.
+- `cross_variate_context_bias: 0.0` — no weighted cross-attention by default; set positive to bias toward the target context token.
 - `deterministic_anchor_loss: true`, `deterministic_anchor_lambda: 0.99`, `eval_sampler: anchor`.
 - `use_window_normalization: true`, `disable_cross_attention: false`.
 - `data_subset`: `target_dataset: ETTh1`, max 7 variates, auto stride so dense size ≤ ETTh1; smaller sets unchanged.
@@ -711,6 +712,7 @@ Experiment YAML merges over `pipeline/config.py` defaults; CLI overrides win las
 ### 12.7 Conditioning and context
 - `model_type="dit"` for current FactorizedDiT runs (`"unet"` = legacy checkpoints only)
 - `disable_cross_attention=False` — set `True` to remove bottleneck cross-variate tokens
+- `cross_variate_context_bias=0.0` in `binary_dual_scale.yaml` — set positive to favor the target token while keeping other context tokens visible
 - `use_guidance_channel=True` in the current training pipeline path (hard-enabled there)
 - `context_embedding_dim=256`
 - `use_coordinate_channel=True` and related aux-channel toggles.

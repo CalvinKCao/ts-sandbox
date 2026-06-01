@@ -109,6 +109,10 @@ def apply_checkpoint_architecture(ckpt: dict, diffusion_type: str, image_height:
         train_pipeline.DISABLE_CROSS_ATTENTION = bool(cfg.disable_cross_attention)
     elif isinstance(cfg, dict) and 'disable_cross_attention' in cfg:
         train_pipeline.DISABLE_CROSS_ATTENTION = bool(cfg['disable_cross_attention'])
+    if hasattr(cfg, 'cross_variate_context_bias'):
+        train_pipeline.CROSS_VARIATE_CONTEXT_BIAS = float(cfg.cross_variate_context_bias)
+    elif isinstance(cfg, dict) and 'cross_variate_context_bias' in cfg:
+        train_pipeline.CROSS_VARIATE_CONTEXT_BIAS = float(cfg['cross_variate_context_bias'])
     if hasattr(cfg, 'use_window_normalization'):
         train_pipeline.USE_WINDOW_NORMALIZATION = bool(cfg.use_window_normalization)
     elif isinstance(cfg, dict) and 'use_window_normalization' in cfg:
