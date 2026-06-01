@@ -25,6 +25,8 @@ RETRY_MMPD_ONLY=0
 RETRY_ANCHOR_ONLY=0
 FORCE_MMPD_EVAL=0
 FORCE_ANCHOR_EVAL=0
+SKIP_MERGE=0
+MERGE_ONLY=0
 SEED=2026
 
 while [[ $# -gt 0 ]]; do
@@ -35,10 +37,17 @@ while [[ $# -gt 0 ]]; do
         --reeval-only) SKIP_MMPD_TRAIN=1; FORCE_MMPD_EVAL=1; FORCE_ANCHOR_EVAL=1; shift ;;
         --retry-mmpd-only) RETRY_MMPD_ONLY=1; SKIP_MMPD_TRAIN=1; FORCE_MMPD_EVAL=1; shift ;;
         --retry-anchor-only) RETRY_ANCHOR_ONLY=1; FORCE_ANCHOR_EVAL=1; shift ;;
+        --skip-merge) SKIP_MERGE=1; shift ;;
+        --merge-only) MERGE_ONLY=1; SKIP_MERGE=0; shift ;;
         --seed) SEED="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+if [[ "$MERGE_ONLY" -eq 1 && -z "${MATRIX_OUTPUT_DIR:-}" ]]; then
+    echo "ERROR: --merge-only requires MATRIX_OUTPUT_DIR (existing matrix run)." >&2
+    exit 1
+fi
 
 if [[ "$RETRY_MMPD_ONLY" -eq 1 && -z "${MATRIX_OUTPUT_DIR:-}" ]]; then
     echo "ERROR: --retry-mmpd-only requires MATRIX_OUTPUT_DIR (existing matrix run)." >&2
@@ -169,25 +178,78 @@ echo "Job: \$SLURM_JOB_NAME  ID: \$SLURM_JOB_ID  Node: \${SLURMD_NODENAME:-unkno
 echo "GPU: \$(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
 echo "Started: \$(date)"
 
-module --force purge || module purge || true
-module load StdEnv/2023
-module load python/3.11
-module load cuda/12.2
-module load cudnn/8.9
+USER="\${USER:-\$(whoami)}"
+STORE="$REPO/results"
 
-echo "[setup] Building venv on \$SLURM_TMPDIR..."
-python -m venv "\$SLURM_TMPDIR/env"
-source "\$SLURM_TMPDIR/env/bin/activate"
-pip install --no-index --upgrade pip -q
-pip install --no-index \\
-    'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm einops -q
-pip install --no-index optuna wandb matplotlib -q 2>/dev/null || \\
-    pip install optuna wandb matplotlib -q
-python - <<'PY'
-import torch
-assert torch.cuda.is_available(), "CUDA required"
-print("torch", torch.__version__, "gpu", torch.cuda.get_device_name(0))
-PY
+pip_retry() {
+  local max_attempts=5 delay=20 attempt
+  for attempt in \$(seq 1 "\$max_attempts"); do
+    if "\$@"; then return 0; fi
+    if [[ "\$attempt" -lt "\$max_attempts" ]]; then
+      echo "[setup] pip failed (attempt \${attempt}/\${max_attempts}), retry in \${delay}s..."
+      sleep "\$delay"
+      delay=\$((delay + 2))
+    fi
+  done
+  echo "[setup] pip failed after \${max_attempts} attempts: \$*" >&2
+  return 1
+}
+
+install_pipeline_deps() {
+  pip_retry pip install --no-index --upgrade pip -q 2>/dev/null || pip_retry pip install -U pip -q
+  if ! python -c "import torch" 2>/dev/null; then
+    if ! pip_retry pip install --no-index torch torchvision numpy pandas scipy scikit-learn tqdm -q 2>/dev/null; then
+      pip_retry pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
+      pip_retry pip install numpy pandas scipy scikit-learn tqdm -q
+    fi
+  fi
+  pip_retry pip install optuna wandb einops pyyaml scikit-learn -q
+  if ! pip_retry pip install --no-index matplotlib -q 2>/dev/null; then
+    pip_retry pip install matplotlib -q 2>/dev/null || export DIFFUSION_TSF_SKIP_VIZ=1
+  fi
+  python -c "import optuna, wandb, einops, yaml"
+}
+
+_load_modules() {
+  module purge 2>/dev/null || true
+  module load StdEnv/2023 2>/dev/null || true
+  module load python/3.11 2>/dev/null || true
+  module load cuda/12.2 2>/dev/null || true
+  module load cudnn/8.9 2>/dev/null || true
+}
+
+VENV=""
+for cand in \\
+  "\$STORE/venv" \\
+  "\${SCRATCH:-}/\${USER}/ts-sandbox/results/venv" \\
+  "\${SCRATCH:-}/ts-sandbox/results/venv" \\
+  "$REPO/results/venv"; do
+  if [[ -x "\${cand}/bin/python" ]]; then
+    VENV="\$cand"
+    break
+  fi
+done
+
+if [[ -n "\$VENV" ]]; then
+  echo "[setup] Using persistent venv: \$VENV"
+  # shellcheck source=/dev/null
+  source "\$VENV/bin/activate"
+  _load_modules
+  install_pipeline_deps
+else
+  echo "[setup] No persistent venv; loading modules and building on \${SLURM_TMPDIR:-/tmp}..."
+  _load_modules
+  if ! command -v python >/dev/null 2>&1; then
+    echo "[setup] ERROR: python unavailable (Lmod/cvmfs issue?). Create \$SCRATCH/ts-sandbox/results/venv on login and resubmit." >&2
+    exit 1
+  fi
+  python -m venv "\${SLURM_TMPDIR:-/tmp}/env"
+  # shellcheck source=/dev/null
+  source "\${SLURM_TMPDIR:-/tmp}/env/bin/activate"
+  install_pipeline_deps
+fi
+
+python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())" || true
 
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -261,9 +323,14 @@ PREAMBLE
 
   JOB_INIT=""
   WORKER_DEP=()
-  if [[ "$RETRY_MMPD_ONLY" -eq 1 || "$RETRY_ANCHOR_ONLY" -eq 1 ]]; then
+  WORKER_IDS=()
+  if [[ "$MERGE_ONLY" -eq 1 ]]; then
+    echo "Merge-only mode (skip init + per-dataset workers)."
+  elif [[ "$RETRY_MMPD_ONLY" -eq 1 || "$RETRY_ANCHOR_ONLY" -eq 1 ]]; then
     [[ "$RETRY_MMPD_ONLY" -eq 1 ]] && echo "Retry mode: MMPD eval only (skip init + binary anchor workers)."
     [[ "$RETRY_ANCHOR_ONLY" -eq 1 ]] && echo "Retry mode: binary anchor eval only (skip init + MMPD workers)."
+  elif [[ "$SKIP_MMPD_TRAIN" -eq 1 && ( -n "${MATRIX_OUTPUT_DIR:-}" || -n "${MATRIX_INDICES_DIR:-}" ) ]]; then
+    echo "Re-eval mode: skip init (reuse existing indices/output)."
   else
     echo "Submitting init (shared indices + manifest)..."
     JOB_INIT=$(sbatch --parsable \
@@ -286,7 +353,7 @@ ENDSCRIPT
     WORKER_DEP=(--dependency="afterok:$JOB_INIT")
   fi
 
-  WORKER_IDS=()
+  if [[ "$MERGE_ONLY" -eq 0 ]]; then
   for ds in "${DATASETS[@]}"; do
     if [[ "$RETRY_ANCHOR_ONLY" -eq 0 ]]; then
     echo "Submitting mmpd-${ds} ${WORKER_DEP[*]} (wall=$(dataset_wall_mmpd "$ds"))..."
@@ -333,13 +400,28 @@ ENDSCRIPT
       WORKER_IDS+=("$JOB_B")
     fi
   done
+  fi
 
-  MERGE_DEP="afterok:${WORKER_IDS[0]}"
-  for wid in "${WORKER_IDS[@]:1}"; do
-    MERGE_DEP+=":$wid"
-  done
+  if [[ "$SKIP_MERGE" -eq 1 ]]; then
+    echo ""
+    echo "=================================================================="
+    echo "  Workers submitted (--skip-merge); run --merge-only when all partials exist."
+    echo "  Output: $OUTPUT_DIR"
+    echo "  Logs:   $LOG_DIR/"
+    echo "=================================================================="
+    exit 0
+  fi
 
-  echo "Submitting merge [$MERGE_DEP]..."
+  MERGE_DEP_ARGS=()
+  if [[ "${#WORKER_IDS[@]}" -gt 0 ]]; then
+    MERGE_DEP="afterok:${WORKER_IDS[0]}"
+    for wid in "${WORKER_IDS[@]:1}"; do
+      MERGE_DEP+=":$wid"
+    done
+    MERGE_DEP_ARGS=(--dependency="$MERGE_DEP")
+  fi
+
+  echo "Submitting merge ${MERGE_DEP_ARGS[*]}..."
   JOB_MERGE=$(sbatch --parsable \
     --job-name="mmpd-mx-merge${SMOKE_SUFFIX}" \
     --account=aip-boyuwang \
@@ -348,7 +430,7 @@ ENDSCRIPT
     --mem=16G \
     "${GPU_ARGS[@]}" \
     --time="$WALL_MERGE" \
-    --dependency="$MERGE_DEP" \
+    "${MERGE_DEP_ARGS[@]}" \
     --output="$LOG_DIR/merge-%j.out" \
     --error="$LOG_DIR/merge-%j.err" \
     --mail-type=FAIL \
@@ -370,7 +452,7 @@ ENDSCRIPT
   echo "=================================================================="
   echo "  Matrix eval submitted (${#DATASETS[@]} datasets × 2 workers + init + merge)"
   echo "  init:  $JOB_INIT"
-  echo "  merge: $JOB_MERGE  ($MERGE_DEP)"
+  echo "  merge: $JOB_MERGE  (${MERGE_DEP:-no worker deps})"
   echo "  Output: $OUTPUT_DIR"
   echo "  Logs:   $LOG_DIR/"
   echo "  Monitor: squeue -u \$USER"

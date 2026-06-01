@@ -10,6 +10,14 @@
 # Usage:
 #   ./slurm_mmpd_dualscale_reeval.sh
 #   SOURCE_MATRIX_DIR=results/datasets/<matrix> ./slurm_mmpd_dualscale_reeval.sh
+#
+# Retry failed datasets only (same output dir, no merge until all partials exist):
+#   MATRIX_OUTPUT_DIR=results/datasets/06-01-mmpd-binary-aligned \
+#   MATRIX_DATASETS="ETTm2 illness" \
+#   ./slurm_mmpd_dualscale_reeval.sh --reeval-only --skip-merge
+# Then merge all 12:
+#   MATRIX_OUTPUT_DIR=results/datasets/06-01-mmpd-binary-aligned \
+#   ./slurm_mmpd_dualscale_reeval.sh --merge-only
 # =============================================================================
 
 set -euo pipefail
@@ -39,5 +47,10 @@ export MATRIX_OUTPUT_DIR
 export MATRIX_INDICES_DIR="${MATRIX_INDICES_DIR:-$SOURCE_MATRIX_DIR}"
 export MMPD_REUSE_DIR="${MMPD_REUSE_DIR:-$SOURCE_MATRIX_DIR}"
 export BINARY_ANCHOR_ROOTS="${BINARY_ANCHOR_ROOTS:-${BINARY_ROOTS[*]}}"
+export MATRIX_DATASETS="${MATRIX_DATASETS:-}"
+export MATRIX_MERGE_DATASETS="${MATRIX_MERGE_DATASETS:-ETTh1 ETTh2 ETTm1 ETTm2 illness exchange_rate weather electricity traffic PeMS solar_Alabama dalia}"
 
-exec "$SCRIPT_DIR/slurm_mmpd_gaussian_anchor_eval.sh" --reeval-only "$@"
+if [[ $# -gt 0 ]]; then
+  exec "$SCRIPT_DIR/slurm_mmpd_gaussian_anchor_eval.sh" "$@"
+fi
+exec "$SCRIPT_DIR/slurm_mmpd_gaussian_anchor_eval.sh" --reeval-only
