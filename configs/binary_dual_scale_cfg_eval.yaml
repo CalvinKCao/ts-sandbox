@@ -1,10 +1,10 @@
-# DEPRECATED for grid submit: full train phases below retrain from scratch.
-# For CFG sweeps on job 3828089 weights use configs/binary_dual_scale_cfg_eval.yaml
-# and ./submit_cfg_ablation.sh (eval-only, reuses binary_dual_scale ckpts).
+# Eval-only: CFG inference sweep on existing binary_dual_scale checkpoints.
+# Submit with submit_cfg_ablation.sh (reuses ckpts/*-{dataset}-binary_dual_scale).
+# Do NOT use submit_grid.sh with this file unless you pass explicit --checkpoint-dir.
 
 experiment:
-  name: binary-dual-scale-cfg
-  experiment_name: binary-dual-scale-cfg
+  name: binary-dual-scale-cfg-eval
+  experiment_name: binary-dual-scale-cfg-eval
   dataset: ETTh1
   diffusion_type: binary
   model_type: dit
@@ -26,7 +26,6 @@ experiment:
   disable_cross_attention: false
   cross_variate_context_bias: 0.0
   use_window_normalization: true
-  # All submit_grid datasets (PeMS, solar_Alabama, dalia, traffic, ...): cap to ~ETTh1 size.
   data_subset:
     enabled: true
     target_dataset: ETTh1
@@ -36,25 +35,6 @@ experiment:
     subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
 
 phases:
-  - phase: itrans_hp_pretrain
-    n_trials: 10
-    max_epochs: 10
-
-  - phase: diffusion_hp_pretrain
-    n_trials: 8
-    max_epochs: 5
-    patience: 4
-
-  - phase: itrans_finetune_hp
-    n_trials: 10
-    max_epochs: 10
-    cold_start: true
-
-  - phase: diffusion_finetune_hp
-    n_trials: 5
-    max_epochs: 20
-    patience: 15
-
   - phase: eval
     n_samples: 30
     probabilistic_n_samples: 100

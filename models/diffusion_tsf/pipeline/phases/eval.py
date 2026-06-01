@@ -23,6 +23,31 @@ from models.diffusion_tsf.pipeline.visualize_utils import generate_pipeline_visu
 logger = logging.getLogger(__name__)
 
 
+def _bootstrap_finetune_ckpts(state: PipelineState) -> None:
+    """Resolve finetuned checkpoint paths when eval runs without prior phases."""
+    subset_id = state.subset_id or state.dataset
+    if not state.itrans_finetune_ckpt:
+        itrans_path = os.path.join(
+            state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt",
+        )
+        if os.path.exists(itrans_path):
+            state.itrans_finetune_ckpt = itrans_path
+    if not state.diffusion_finetune_ckpt:
+        diff_path = os.path.join(state.checkpoint_dir, subset_id, "best.pt")
+        if os.path.exists(diff_path):
+            state.diffusion_finetune_ckpt = diff_path
+    if state.finetune_best_params is None:
+        meta_path = os.path.join(state.checkpoint_dir, subset_id, "metadata.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    data = json.load(f)
+                if "tuned_params" in data:
+                    state.finetune_best_params = data["tuned_params"]
+            except Exception as e:
+                logger.warning(f"Failed to load tuned_params from {meta_path}: {e}")
+
+
 class EvalPhase(PipelinePhase):
     name = "eval"
 
@@ -57,6 +82,7 @@ class EvalPhase(PipelinePhase):
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
         _patch_globals(pipeline_mod, state)
+        _bootstrap_finetune_ckpts(state)
 
         subset_id = state.subset_id or state.dataset
         variate_indices = state.variate_indices

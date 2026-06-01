@@ -19,6 +19,7 @@ DATASETS="ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,electricity,traf
 SEEDS="42"
 SMOKE=0
 RESUME=0
+CKPT_CONFIG=""
 DEPENDENCY=""
 WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 WALL_OVERRIDE=""
@@ -30,6 +31,7 @@ while [[ $# -gt 0 ]]; do
         --seeds) SEEDS="$2"; shift 2 ;;
         --smoke|--smoke-test) SMOKE=1; shift ;;
         --resume) RESUME=1; shift ;;
+        --ckpt-config) CKPT_CONFIG="$2"; shift 2 ;;
         --dependency) DEPENDENCY="$2"; shift 2 ;;
         --wandb-project) WANDB_PROJECT="$2"; shift 2 ;;
         --time) WALL_OVERRIDE="$2"; shift 2 ;;
@@ -85,6 +87,7 @@ pick_resume_stem() {
 
 echo "Submitting grid... (Storage: $STORE)"
 [[ "$RESUME" -eq 1 ]] && echo "Resume: reusing newest *-<dataset>-<config> checkpoint dir when present."
+[[ -n "$CKPT_CONFIG" ]] && echo "Checkpoint stem matcher: *-<dataset>-${CKPT_CONFIG}"
 printf "%-10s %-15s %-25s %-8s %s\n" "JOB ID" "DATASET" "CONFIG" "SEED" "LOG"
 echo "--------------------------------------------------------------------------------"
 
@@ -103,8 +106,9 @@ for CFG in "${CONF_ARR[@]}"; do
             fi
 
             RUN_STEM=""
+            CKPT_MATCH="${CKPT_CONFIG:-$CFG_NAME}"
             if [[ "$RESUME" -eq 1 ]]; then
-                RUN_STEM=$(pick_resume_stem "$DS" "$CFG_NAME")
+                RUN_STEM=$(pick_resume_stem "$DS" "$CKPT_MATCH")
                 if [[ -z "$RUN_STEM" ]]; then
                     echo "WARN: no prior run for ${DS}/${CFG_NAME}; new isolated dir after submit." >&2
                 fi
