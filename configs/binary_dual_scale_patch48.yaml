@@ -1,5 +1,6 @@
 # Binary dual-scale with 4×4 DiT patches (dit_patch_size = [H, W]).
-# Train via ./submit_patch48_sampler_study.sh --train-only
+# Train-only (no pipeline eval). Metrics: ./submit_patch48_sampler_study.sh --eval-only
+# (same path as submit_cfg_ablation.sh → eval_mmpd_gaussian_anchor.py).
 
 experiment:
   name: binary-dual-scale-patch48
@@ -50,9 +51,3 @@ phases:
     n_trials: 5
     max_epochs: 20
     patience: 15
-
-  - phase: eval
-    n_samples: 1
-    probabilistic_n_samples: 100
-    probabilistic_sampler: dpmpp
-    probabilistic_num_inference_steps: 20

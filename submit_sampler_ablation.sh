@@ -17,6 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SAMPLERS="${SAMPLERS:-dpmpp,ddim}"
 DATASETS="${DATASETS:-ETTm1,ETTm2,dalia,electricity,exchange_rate,solar_Alabama,traffic,weather}"
 CKPT_SUFFIX="${CKPT_SUFFIX:-binary_dual_scale_patch48}"
+# Optional: only match stems containing this substring (e.g. 06-02-384445 for patch48 grid).
+CKPT_STEM_PREFIX="${CKPT_STEM_PREFIX:-}"
 GPU="${GPU:-l40s}"
 EXCLUDE_NODES="${SAMPLER_EXCLUDE_NODES:-kn120,kn132}"
 SEED=42
@@ -30,6 +32,7 @@ while [[ $# -gt 0 ]]; do
         --datasets) DATASETS="$2"; shift 2 ;;
         --samplers) SAMPLERS="$2"; shift 2 ;;
         --ckpt-suffix) CKPT_SUFFIX="$2"; shift 2 ;;
+        --ckpt-stem-prefix) CKPT_STEM_PREFIX="$2"; shift 2 ;;
         --gpu) GPU="$2"; shift 2 ;;
         --exclude-nodes) EXCLUDE_NODES="$2"; shift 2 ;;
         --run-stem) RUN_STEM="$2"; shift 2 ;;
@@ -74,6 +77,12 @@ pick_ckpt_dir() {
     shopt -s nullglob
     for d in "$CKPT_ROOT"/*-"${ds}"-"${CKPT_SUFFIX}"; do
         [[ -d "$d" ]] || continue
+        if [[ -n "$CKPT_STEM_PREFIX" && "$(basename "$d")" != *"${CKPT_STEM_PREFIX}"* ]]; then
+            continue
+        fi
+        if ! compgen -G "${d}"/*/best.pt >/dev/null; then
+            continue
+        fi
         m=$(stat -c %Y "$d" 2>/dev/null || echo 0)
         if [[ "$m" -gt "$best_mtime" ]]; then
             best_mtime="$m"
@@ -160,8 +169,9 @@ fi
 WORKER="$REPO/slurm_cfg_ablation_worker.sh"
 [[ -x "$WORKER" ]] || chmod +x "$WORKER"
 
-echo "Sampler ablation (eval-only)"
+echo "Sampler ablation (eval_mmpd_gaussian_anchor — CFG-ablation metrics)"
 echo "  run_stem=$RUN_STEM  ckpt_suffix=$CKPT_SUFFIX  samplers=${SAMPLER_ARR[*]}"
+[[ -n "$CKPT_STEM_PREFIX" ]] && echo "  ckpt_stem_prefix=$CKPT_STEM_PREFIX"
 printf "%-10s %-12s %-8s %-6s %s\n" "JOB" "DATASET" "SAMPLER" "SEED" "LOG"
 echo "--------------------------------------------------------------------------------"
 
