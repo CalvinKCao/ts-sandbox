@@ -212,7 +212,7 @@ for SAMPLER in "${SAMPLER_ARR[@]}"; do
             --ckpt-base "$CKPT_DIR" \
             --output-dir "$OUT_DIR" \
             --seed "$SEED" \
-            --no-cfg-inference \
+            --no-use-cfg-inference \
             --metrics-profile full \
             --force-anchor-eval \
             --skip-mmpd-train \

@@ -207,7 +207,7 @@ for SCALE in "${SCALE_ARR[@]}"; do
     if python3 -c "import sys; s=float('$SCALE'); sys.exit(0 if abs(s-1.0)>1e-6 else 1)"; then
         USE_CFG_FLAG=(--use-cfg-inference)
     else
-        USE_CFG_FLAG=(--no-cfg-inference)
+        USE_CFG_FLAG=(--no-use-cfg-inference)
     fi
 
     for DS in "${DATA_ARR[@]}"; do
