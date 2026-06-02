@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+REPORT_STEM = "06-01_cfg_ablation_mmpd_matrix_combined"
 
 # (model_key, column label, default results dir under results/datasets/)
 CFG_INFERENCE_COLUMNS: List[Tuple[str, str, str]] = [
@@ -18,12 +19,49 @@ CFG_INFERENCE_COLUMNS: List[Tuple[str, str, str]] = [
     ("binary_w10", "Binary (CFG w=10)", "06-01-cfg-ablation-l40s-cfg10"),
 ]
 
-MODEL_ORDER = ["mmpd", "binary_cfg_off"] + [k for k, _, _ in CFG_INFERENCE_COLUMNS]
+PATCH48_KEY = "patch48_4x4"
+DEFAULT_PATCH48_DIR = "06-02-patch48-redo-dpmpp"
+
+STAGED_KEY = "binary_2stage"
+DEFAULT_STAGED_DIR = "06-02-staged-grid-dpmpp"
+
+MODEL_ORDER = ["mmpd", "binary_cfg_off", PATCH48_KEY, STAGED_KEY] + [
+    k for k, _, _ in CFG_INFERENCE_COLUMNS
+]
 MODEL_LABELS: Dict[str, str] = {
     "mmpd": "MMPD",
     "binary_cfg_off": "Binary (CFG off)",
+    PATCH48_KEY: "4x4 patch",
+    STAGED_KEY: "2-stage",
     **{k: label for k, label, _ in CFG_INFERENCE_COLUMNS},
 }
+
+CFG_OFF_REDO_JOBS: List[Tuple[str, str]] = [
+    ("3848045", "ETTh1"),
+    ("3848046", "ETTh2"),
+    ("3848047", "PeMS"),
+]
+
+PATCH48_JOBS: List[Tuple[str, str]] = [
+    ("3848019", "ETTm1"),
+    ("3848020", "ETTm2"),
+    ("3848021", "dalia"),
+    ("3848022", "electricity"),
+    ("3848023", "exchange_rate"),
+    ("3848024", "solar_Alabama"),
+    ("3848025", "traffic"),
+    ("3848026", "weather"),
+    ("3848027", "merge"),
+]
+
+STAGED_GRID_JOBS: List[Tuple[str, str]] = [
+    ("3849018", "ETTh1"),
+    ("3849019", "ETTh2"),
+    ("3849020", "PeMS"),
+    ("3849021", "dalia"),
+    ("3849022", "exchange_rate"),
+    ("3849023", "traffic"),
+]
 
 CORE_METRICS = [
     ("mse", "MSE (deterministic / anchor)"),
@@ -154,9 +192,46 @@ def resolve_cfg_dirs(
     return out
 
 
+def load_binary_partials(
+    table: Dict[str, Dict[str, Dict[str, float]]],
+    partials_dir: Path,
+    model_key: str,
+) -> None:
+    if not partials_dir.is_dir():
+        return
+    for path in sorted(partials_dir.glob("*_binary_anchor.json")):
+        ds = path.name.replace("_binary_anchor.json", "")
+        table.setdefault(ds, {})[model_key] = load_partial(path)
+
+
+def load_staged_partials(
+    table: Dict[str, Dict[str, Dict[str, float]]],
+    datasets_root: Path,
+    staged_dir: Optional[Path] = None,
+) -> None:
+    """Load coarse→fine staged eval metrics (*_staged_anchor.json)."""
+    if staged_dir is not None and (staged_dir / "partials").is_dir():
+        sources = [staged_dir]
+    else:
+        sources = []
+        for job_id, _ in STAGED_GRID_JOBS:
+            sources.extend(sorted(datasets_root.glob(f"06-02-{job_id}-*")))
+
+    for run_dir in sources:
+        partials = run_dir / "partials"
+        if not partials.is_dir():
+            continue
+        for path in sorted(partials.glob("*_staged_anchor.json")):
+            ds = path.name.replace("_staged_anchor.json", "")
+            table.setdefault(ds, {})[STAGED_KEY] = load_partial(path)
+
+
 def load_combined(
     matrix_dir: Path,
     cfg_dirs: Dict[str, Path],
+    patch48_dir: Optional[Path] = None,
+    staged_dir: Optional[Path] = None,
+    datasets_root: Optional[Path] = None,
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
     table: Dict[str, Dict[str, Dict[str, float]]] = {}
     partials = matrix_dir / "partials"
@@ -165,17 +240,16 @@ def load_combined(
         ds = path.name.replace("_mmpd.json", "")
         table.setdefault(ds, {})["mmpd"] = load_partial(path)
 
-    for path in sorted(partials.glob("*_binary_anchor.json")):
-        ds = path.name.replace("_binary_anchor.json", "")
-        table.setdefault(ds, {})["binary_cfg_off"] = load_partial(path)
+    load_binary_partials(table, partials, "binary_cfg_off")
+
+    if patch48_dir is not None:
+        load_binary_partials(table, patch48_dir / "partials", PATCH48_KEY)
+
+    root = datasets_root if datasets_root is not None else matrix_dir.parent
+    load_staged_partials(table, root, staged_dir)
 
     for model_key, cfg_dir in cfg_dirs.items():
-        cdir = cfg_dir / "partials"
-        if not cdir.is_dir():
-            continue
-        for path in sorted(cdir.glob("*_binary_anchor.json")):
-            ds = path.name.replace("_binary_anchor.json", "")
-            table.setdefault(ds, {})[model_key] = load_partial(path)
+        load_binary_partials(table, cfg_dir / "partials", model_key)
 
     return table
 
@@ -208,13 +282,41 @@ def metric_table_markdown(
     return lines
 
 
+def count_datasets_with_model(
+    table: Dict[str, Dict[str, Dict[str, float]]],
+    model_key: str,
+) -> int:
+    return sum(1 for ds in table if table[ds].get(model_key))
+
+
 def build_report(
     table: Dict[str, Dict[str, Dict[str, float]]],
     matrix_dir: Path,
     cfg_dirs: Dict[str, Path],
     report_path: Path,
+    patch48_dir: Optional[Path] = None,
+    staged_dir: Optional[Path] = None,
+    staged_pending: Optional[List[str]] = None,
 ) -> None:
     datasets = sorted(table.keys())
+    n_cfg_off = count_datasets_with_model(table, "binary_cfg_off")
+    n_patch48 = count_datasets_with_model(table, PATCH48_KEY)
+    n_staged = count_datasets_with_model(table, STAGED_KEY)
+    patch48_rel = (
+        patch48_dir.relative_to(REPO_ROOT)
+        if patch48_dir is not None
+        else Path("results/datasets") / DEFAULT_PATCH48_DIR
+    )
+    if staged_dir is not None:
+        staged_note = (
+            f"`{staged_dir.relative_to(REPO_ROOT)}` — merged partials `*_staged_anchor.json`"
+        )
+    else:
+        staged_note = (
+            "per-job `results/datasets/06-02-3849018-*-binary_dual_scale_staged/partials/` "
+            "(auto-discovered by job id)"
+        )
+
     lines: List[str] = [
         "# CFG ablation + MMPD matrix — combined eval (Jun 1, 2026)",
         "",
@@ -225,9 +327,12 @@ def build_report(
         "",
         "| Component | Path / jobs |",
         "|-----------|-------------|",
-        f"| **Binary (CFG off)** — jobs 3828089–3828100, matrix re-eval 3838179+ | "
+        f"| **Binary (CFG off)** — jobs 3828089–3828100, matrix re-eval 3838179+; ETTh1/ETTh2/PeMS redo 3848045–3848047 | "
         f"`{matrix_dir.relative_to(REPO_ROOT)}` — `configs/binary_dual_scale.yaml` (no CFG train/infer); partials `*_binary_anchor.json` |",
         f"| MMPD (same matrix) | `{matrix_dir.relative_to(REPO_ROOT)}` — partials `*_mmpd.json` |",
+        f"| **4x4 patch** — jobs 3848019–3848026, merge 3848027 | "
+        f"`{patch48_rel}` — patch-48 binary ckpts, aligned `dpmpp` eval; partials `*_binary_anchor.json` |",
+        f"| **2-stage** — jobs 3849018–3849023 (coarse→fine grid) | {staged_note} |",
     ]
     for model_key, label, default_name in CFG_INFERENCE_COLUMNS:
         cfg_dir = cfg_dirs[model_key]
@@ -240,8 +345,14 @@ def build_report(
         [
             "",
             "**Coverage notes:**",
-            "- **CFG off:** 3828089 weights, no inference CFG. 9/12 datasets in matrix partials "
-            "(missing ETTh1, ETTh2, PeMS binary at merge time).",
+            f"- **CFG off:** 3828089 weights, no inference CFG. {n_cfg_off}/12 datasets in matrix partials "
+            "(ETTh1, ETTh2, PeMS from jobs 3848045–3848047).",
+            f"- **4x4 patch:** patch-48 binary weights; {n_patch48}/12 datasets "
+            "(ETTm1/2, dalia, electricity, exchange_rate, solar_Alabama, traffic, weather).",
+            f"- **2-stage:** coarse→fine staged binary; {n_staged}/6 grid jobs with eval partials "
+            f"(ETTh1, ETTh2, dalia, exchange_rate, traffic"
+            + ("" if not staged_pending else f"; pending: {', '.join(staged_pending)}")
+            + ").",
             "- **CFG w=1.1 / 1.5 / 4 / 10:** inference-only on 3828089 ckpts, 7 ablation datasets each.",
             "- **MMPD:** all 12 datasets in matrix partials.",
             "",
@@ -260,6 +371,52 @@ def build_report(
                 continue
             seen.add(key)
             lines.append(f"| {job_id} | {ds} | {scale_label} |")
+
+    lines.extend(
+        [
+            "",
+            "## Slurm — CFG off binary redo (completed)",
+            "",
+            "| Job | Dataset | CFG w |",
+            "|-----|---------|------:|",
+        ]
+    )
+    for job_id, ds in CFG_OFF_REDO_JOBS:
+        lines.append(f"| {job_id} | {ds} | 1 (off) |")
+
+    lines.extend(
+        [
+            "",
+            "## Slurm — 4x4 patch sampler redo (completed)",
+            "",
+            "| Job | Dataset | Notes |",
+            "|-----|---------|-------|",
+        ]
+    )
+    for job_id, ds in PATCH48_JOBS:
+        note = "merge" if ds == "merge" else "dpmpp eval"
+        lines.append(f"| {job_id} | {ds} | {note} |")
+
+    lines.extend(
+        [
+            "",
+            "## Slurm — 2-stage grid (binary_dual_scale_staged)",
+            "",
+            "| Job | Dataset | Status |",
+            "|-----|---------|--------|",
+        ]
+    )
+    staged_done = {
+        ds for ds in table if table[ds].get(STAGED_KEY)
+    }
+    for job_id, ds in STAGED_GRID_JOBS:
+        if ds in staged_done:
+            status = "completed"
+        elif staged_pending and ds in staged_pending:
+            status = "pending"
+        else:
+            status = "—"
+        lines.append(f"| {job_id} | {ds} | {status} |")
 
     lines.extend(
         [
@@ -299,7 +456,8 @@ def build_report(
 
     regen_lines = [
         "python utils/report_cfg_ablation_combined.py \\",
-        f"  --matrix-dir {matrix_dir.relative_to(REPO_ROOT)}",
+        f"  --matrix-dir {matrix_dir.relative_to(REPO_ROOT)} \\",
+        f"  --patch48-dir {patch48_rel} \\",
     ]
     for model_key, _, default_name in CFG_INFERENCE_COLUMNS:
         regen_lines.append(
@@ -312,10 +470,15 @@ def build_report(
             "",
             "## Visualizations",
             "",
-            "CFG-off: `viz/`. CFG inference: `viz_cfg1.1/`, `viz_cfg1.5/`, `viz_cfg4/`, `viz_cfg10/` "
+            "Forecast panels (GT, iTrans guidance/baseline, anchor, 5× dpmpp, extra lookbacks): "
+            f"`{REPORT_STEM}/viz_cfg_off/`, `{REPORT_STEM}/viz_4x4_patch/`, `{REPORT_STEM}/viz_2stage/` "
+            "(see `utils/visualize_report_cfg_ablation_combined.py`). "
+            "CFG inference 2D denoise: `viz_cfg1.1/`, `viz_cfg1.5/`, `viz_cfg4/`, `viz_cfg10/` "
             "(see `utils/visualize_report_binary_dual_scale.py --cfg-ablation`).",
             "",
             "## Regenerate tables",
+            "",
+            "2-stage loads from `06-02-3849018-*` job dirs unless `--staged-dir` is set.",
             "",
             "```bash",
             *regen_lines,
@@ -350,6 +513,21 @@ def main() -> None:
             help=f"Override default {default_name}",
         )
     parser.add_argument(
+        "--patch48-dir",
+        type=Path,
+        default=None,
+        help=f"4x4 patch eval partials (default: datasets/{DEFAULT_PATCH48_DIR})",
+    )
+    parser.add_argument(
+        "--staged-dir",
+        type=Path,
+        default=None,
+        help=(
+            f"2-stage merged partials (default: datasets/{DEFAULT_STAGED_DIR} if present, "
+            "else auto-discover 06-02-3849018-* job dirs)"
+        ),
+    )
+    parser.add_argument(
         "--report-path",
         type=Path,
         default=REPO_ROOT / "reports/06-01_cfg_ablation_mmpd_matrix_combined.md",
@@ -363,9 +541,42 @@ def main() -> None:
         if val is not None:
             overrides[model_key] = val
 
+    patch48_dir = (
+        args.patch48_dir.resolve()
+        if args.patch48_dir is not None
+        else (args.datasets_root / DEFAULT_PATCH48_DIR).resolve()
+    )
+    if not (patch48_dir / "partials").is_dir():
+        patch48_dir = None
+
+    staged_dir: Optional[Path] = None
+    if args.staged_dir is not None:
+        staged_dir = args.staged_dir.resolve()
+    else:
+        default_staged = (args.datasets_root / DEFAULT_STAGED_DIR).resolve()
+        if (default_staged / "partials").is_dir():
+            staged_dir = default_staged
+
     cfg_dirs = resolve_cfg_dirs(args.datasets_root, overrides)
-    table = load_combined(args.matrix_dir.resolve(), cfg_dirs)
-    build_report(table, args.matrix_dir.resolve(), cfg_dirs, args.report_path.resolve())
+    table = load_combined(
+        args.matrix_dir.resolve(),
+        cfg_dirs,
+        patch48_dir,
+        staged_dir,
+        args.datasets_root.resolve(),
+    )
+    staged_pending = [
+        ds for _, ds in STAGED_GRID_JOBS if STAGED_KEY not in table.get(ds, {})
+    ]
+    build_report(
+        table,
+        args.matrix_dir.resolve(),
+        cfg_dirs,
+        args.report_path.resolve(),
+        patch48_dir,
+        staged_dir,
+        staged_pending,
+    )
 
 
 if __name__ == "__main__":

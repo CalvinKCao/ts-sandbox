@@ -1,0 +1,81 @@
+# 4×4 DiT patches + coarse→fine 2-stage pipeline in one grid job.
+#
+# Phase 1 (same run): joint dual-scale HP pretrain at dit_patch_size [4,4].
+# Phase 2+: staged coarse/fine pretrain, finetune, and staged_eval (all DiTs use [4,4]).
+#
+# Submit all datasets:
+#   ./submit_staged_patch48_grid.sh
+#   ./submit_staged_patch48_grid.sh --smoke-test
+
+experiment:
+  name: binary-dual-scale-staged-patch48
+  experiment_name: binary-dual-scale-staged-patch48
+  dataset: ETTh1
+  diffusion_type: binary
+  model_type: dit
+  image_height: 16
+  dit_patch_size: [4, 4]
+  use_dual_scale: true
+  dual_scale_fine_weight: 0.75
+  dual_scale_independent_timesteps: true
+  use_variate_embedding: true
+  variate_factorized: true
+  diffusion_stage: joint
+  use_guidance_channel: false
+  cfg_dropout: 0.0
+  cfg_scale: 1.0
+  use_cfg_inference: false
+  deterministic_anchor_loss: true
+  deterministic_anchor_lambda: 0.99
+  deterministic_anchor_alpha: 0.0
+  eval_sampler: anchor
+  lookback_length: 96
+  forecast_length: 96
+  disable_cross_attention: false
+  cross_variate_context_bias: 0.0
+  use_window_normalization: true
+  data_subset:
+    enabled: true
+    target_dataset: ETTh1
+    reduce_if_larger_than_target: true
+    max_variates: 7
+    variate_strategy: first
+    subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
+
+phases:
+  # Phase-1 HP (writes diff_hp.json + itransformer.pt into this job's ckpt dir).
+  - phase: itrans_hp_pretrain
+    n_trials: 10
+    max_epochs: 10
+
+  - phase: diffusion_hp_pretrain
+    n_trials: 8
+    max_epochs: 5
+    patience: 4
+
+  # Staged coarse/fine synthetic pretrain (4×4 DiTs; reads Phase-1 from same run).
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged_patch48
+
+  - phase: itrans_finetune_hp
+    n_trials: 10
+    max_epochs: 10
+    cold_start: true
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 5
+    max_epochs: 20
+    patience: 15
+
+  - phase: diffusion_fine_finetune_hp
+    n_trials: 5
+    max_epochs: 20
+    patience: 15
+
+  - phase: staged_eval
+    eval_test_fraction: 0.5
+    n_samples: 1
+    probabilistic_n_samples: 100
+    probabilistic_sampler: dpmpp
+    probabilistic_num_inference_steps: 20
+    skip_eval_visualizations: true
