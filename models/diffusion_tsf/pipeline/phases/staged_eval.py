@@ -21,6 +21,26 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch
 logger = logging.getLogger(__name__)
 
 
+def _import_summarize_prediction_pack():
+    """Import repo eval helper after iTransformer hijacks ``utils`` on sys.path."""
+    import os
+    import sys
+    from pathlib import Path
+
+    repo_root = str(Path(__file__).resolve().parents[4])
+    itrans_dir = str(Path(__file__).resolve().parents[3] / "iTransformer")
+    for name in list(sys.modules):
+        if name == "utils" or name.startswith("utils."):
+            sys.modules.pop(name, None)
+    sys.path = [p for p in sys.path if os.path.abspath(p) != os.path.abspath(itrans_dir)]
+    if repo_root in sys.path:
+        sys.path.remove(repo_root)
+    sys.path.insert(0, repo_root)
+    from utils.eval_mmpd_gaussian_anchor import summarize_prediction_pack
+
+    return summarize_prediction_pack
+
+
 def _load_stage_metadata(state: PipelineState, stage: str) -> Dict:
     meta = os.path.join(os.path.dirname(_stage_best_ckpt(state, stage)), "metadata.json")
     if not os.path.exists(meta):
@@ -89,7 +109,7 @@ class StagedEvalPhase(PipelinePhase):
             load_itransformer_from_checkpoint,
         )
         from models.diffusion_tsf.guidance import iTransformerGuidance
-        from utils.eval_mmpd_gaussian_anchor import summarize_prediction_pack
+        summarize_prediction_pack = _import_summarize_prediction_pack()
 
         device = state.resolve_device()
         subset_id = state.subset_id or state.dataset
