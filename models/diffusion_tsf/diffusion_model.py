@@ -138,17 +138,18 @@ class DiffusionTSF(nn.Module):
         super().__init__()
         self.config = config
 
-        if config.use_guidance_channel and guidance_model is None:
+        needs_guidance_model = config.use_guidance_channel or not config.disable_cross_attention
+        if needs_guidance_model and guidance_model is None:
             raise ValueError(
-                "use_guidance_channel=True requires an external guidance model "
-                "(e.g. iTransformerGuidance); none was provided."
+                "A guidance model is required for forecast channels or cross-variate "
+                "encoder tokens; none was provided."
             )
 
         self.to_2d = TimeSeriesTo2D(
             height=config.image_height,
             max_scale=config.max_scale,
         )
-        self.guidance_model = guidance_model if config.use_guidance_channel else None
+        self.guidance_model = guidance_model if needs_guidance_model else None
 
         backbone_in_channels = config.backbone_in_channels
         self.noise_predictor = FactorizedDiT(
@@ -216,10 +217,12 @@ class DiffusionTSF(nn.Module):
             guidance_model: Stage 1 predictor model. Set to None to disable
                            guidance (requires config.use_guidance_channel=False).
         """
-        if guidance_model is None and self.config.use_guidance_channel:
+        if guidance_model is None and (
+            self.config.use_guidance_channel or not self.config.disable_cross_attention
+        ):
             raise ValueError(
-                "Cannot set guidance_model to None when use_guidance_channel=True. "
-                "Either provide a guidance model or set config.use_guidance_channel=False."
+                "Cannot set guidance_model to None while forecast channels or "
+                "cross-variate encoder tokens are enabled."
             )
         self.guidance_model = guidance_model
         if guidance_model is not None:
@@ -694,6 +697,8 @@ class DiffusionTSF(nn.Module):
         t: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (binary factorized DiT path)."""
+        if self.config.diffusion_stage in {"coarse", "fine"}:
+            return self._forward_binary_staged(past, future, t)
         if self.config.use_dual_scale:
             return self._forward_binary_dual_scale(past, future, t)
         return self._forward_binary_factorized(past, future, t)
@@ -716,6 +721,7 @@ class DiffusionTSF(nn.Module):
         yield_intermediates: bool = False,
         reverse_step_indices: Optional[torch.Tensor] = None,
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
+        future_coarse_2d: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions via binary reverse sampling.
 
@@ -740,7 +746,10 @@ class DiffusionTSF(nn.Module):
             yield_intermediates=yield_intermediates,
             reverse_step_indices=reverse_step_indices,
             snapshot_timesteps=snapshot_timesteps,
+            future_coarse_2d=future_coarse_2d,
         )
+        if self.config.diffusion_stage in {"coarse", "fine"}:
+            return self._generate_binary_staged(past, **gen_common)
         if self.config.use_dual_scale:
             return self._generate_binary_dual_scale(past, **gen_common)
         return self._generate_binary_factorized(past, **gen_common)
@@ -785,6 +794,287 @@ class DiffusionTSF(nn.Module):
         if ctx is None:
             return None
         return ctx.unsqueeze(1).unsqueeze(2).expand(-1, V, 2, -1, -1).reshape(B * V * 2, V, -1)
+
+    def _staged_past_condition(
+        self,
+        past_norm: torch.Tensor,
+        target_width: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build GT lookback coarse+fine conditioning for staged denoisers."""
+        B, V = past_norm.shape[:2]
+        H = self.config.image_height
+        BV = B * V
+        past_tail_len = min(past_norm.shape[-1], target_width)
+        past_tail_norm = past_norm[..., -past_tail_len:]
+        past_coarse, past_fine = self.encode_dual_to_2d_binary(past_tail_norm)
+        cond = torch.cat(
+            (
+                past_coarse.reshape(BV, 1, H, past_tail_len),
+                past_fine.reshape(BV, 1, H, past_tail_len),
+            ),
+            dim=1,
+        )
+        cond = F.interpolate(cond, size=(H, target_width), mode='bilinear', align_corners=False)
+        return cond, past_coarse, past_fine
+
+    def _forward_binary_staged(
+        self,
+        past: torch.Tensor,
+        future: torch.Tensor,
+        t: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Train one staged denoiser: future coarse or future fine residual."""
+        assert self.binary_scheduler is not None, "binary scheduler is not initialized"
+        stage = self.config.diffusion_stage
+        if stage not in {"coarse", "fine"}:
+            raise ValueError(f"_forward_binary_staged called for stage={stage!r}")
+
+        B = past.shape[0]
+        V = self.config.num_variables
+        H = self.config.image_height
+        device = past.device
+        BV = B * V
+
+        past_norm, future_norm, _stats = self._normalize_sequence(past, future)
+        future_coarse, future_fine = self.encode_dual_to_2d_binary(future_norm)
+        target_2d = future_coarse if stage == "coarse" else future_fine
+        W_fut = target_2d.shape[3]
+
+        if t is None:
+            t = torch.randint(0, self.config.binary_num_steps, (B,), device=device)
+        t_flat = t.unsqueeze(1).expand(-1, V).reshape(BV)
+        variate_indices = None
+        if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
+            variate_indices = self._flat_variate_indices(BV, V, device)
+
+        target_flat = target_2d.reshape(BV, 1, H, W_fut)
+        xt_flat, zt_flat = self.binary_scheduler.add_noise(target_flat, t_flat)
+
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
+        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
+
+        cond_for_unet, past_coarse, past_fine = self._staged_past_condition(past_norm, W_fut)
+        future_coarse_flat = future_coarse.reshape(BV, 1, H, W_fut)
+        if stage == "fine":
+            cond_for_unet = torch.cat((cond_for_unet, future_coarse_flat), dim=1)
+        base_cond_for_unet = cond_for_unet
+
+        canvas = self._inject_coordinate_channel(xt_flat.float())
+        canvas = self._inject_time_channels(canvas)
+
+        # Staged visual conditioning is always GT during training. CFG dropout is
+        # restricted to context tokens so the fine stage never sees predicted coarse.
+        if self.training and self.config.cfg_dropout > 0.0 and ctx_flat is not None:
+            drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
+            drop_mask_flat = drop_mask.unsqueeze(1).expand(-1, V).reshape(BV)
+            ctx_flat = torch.where(
+                drop_mask_flat.view(BV, 1, 1),
+                torch.zeros_like(ctx_flat),
+                ctx_flat,
+            )
+
+        out_flat = self._predict_noise_chunked(
+            canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices,
+        )
+        x0_logits = out_flat[:, 0:1, :, :]
+        zt_logits = out_flat[:, 1:2, :, :]
+        loss_x0 = self._binary_plain_bce_loss(x0_logits, target_flat)
+        loss_zt = self._binary_plain_bce_loss(zt_logits, zt_flat)
+        regular_loss = loss_x0 + loss_zt
+
+        anchor_loss = torch.tensor(0.0, device=device)
+        combined_loss = regular_loss
+        if self.config.use_deterministic_anchor_loss:
+            anchor_t_flat = torch.full(
+                (BV,),
+                self.config.binary_num_steps - 1,
+                device=device,
+                dtype=t_flat.dtype,
+            )
+            neutral_future_flat = torch.full_like(target_flat, 0.5)
+            anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
+            anchor_canvas = self._inject_time_channels(anchor_canvas)
+            anchor_out_flat = self._predict_noise_chunked(
+                anchor_canvas,
+                anchor_t_flat,
+                base_cond_for_unet,
+                ctx_flat,
+                variate_indices=variate_indices,
+            )
+            anchor_loss = self._binary_plain_bce_loss(anchor_out_flat[:, 0:1], target_flat)
+            lam = self.config.deterministic_anchor_lambda
+            combined_loss = lam * regular_loss + (1.0 - lam) * anchor_loss
+
+        x0_pred = torch.sigmoid(x0_logits).reshape(B, V, H, W_fut)
+        result = {
+            'loss': combined_loss,
+            'noise_loss': regular_loss,
+            'combined_mse_loss': combined_loss,
+            'anchor_loss': anchor_loss,
+            'loss_x0': loss_x0,
+            'loss_zt': loss_zt,
+            'emd_loss': torch.tensor(0.0, device=device),
+            'guidance_loss': torch.tensor(0.0, device=device),
+            'noise_pred': x0_pred,
+            'x0_pred': x0_pred,
+            'future_2d': target_2d,
+            'future_2d_coarse': future_coarse,
+            'future_2d_fine': future_fine,
+            'past_2d_coarse': past_coarse,
+            'past_2d_fine': past_fine,
+            't': t,
+            'diffusion_stage': stage,
+        }
+        if stage == "coarse":
+            result['x0_pred_coarse'] = x0_pred
+        else:
+            result['x0_pred_fine'] = x0_pred
+        return result
+
+    @torch.no_grad()
+    def _generate_binary_staged(
+        self,
+        past: torch.Tensor,
+        num_steps: int = 20,
+        verbose: bool = False,
+        decoder_method: str = "mean",
+        sampler: str = "ddim",
+        cfg_scale: float = 1.0,
+        yield_intermediates: bool = False,
+        reverse_step_indices: Optional[torch.Tensor] = None,
+        snapshot_timesteps: Optional[Tuple[int, ...]] = None,
+        future_coarse_2d: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        """Generate one staged output, chaining coarse maps into the fine stage."""
+        assert self.binary_scheduler is not None, "binary scheduler is not initialized"
+        stage = self.config.diffusion_stage
+        if stage not in {"coarse", "fine"}:
+            raise ValueError(f"_generate_binary_staged called for stage={stage!r}")
+
+        B = past.shape[0]
+        V = self.config.num_variables
+        H = self.config.image_height
+        device = past.device
+        BV = B * V
+        W_fut = self.config.forecast_length
+
+        past_norm, _, stats = self._normalize_sequence(past)
+        cond_for_unet, past_coarse, past_fine = self._staged_past_condition(past_norm, W_fut)
+        coarse_for_decode = future_coarse_2d
+        if stage == "fine":
+            if future_coarse_2d is None:
+                raise ValueError("fine-stage generation requires future_coarse_2d from the coarse model.")
+            if future_coarse_2d.shape != (B, V, H, W_fut):
+                raise ValueError(
+                    "future_coarse_2d must have shape "
+                    f"{(B, V, H, W_fut)}, got {tuple(future_coarse_2d.shape)}"
+                )
+            cond_for_unet = torch.cat(
+                (cond_for_unet, future_coarse_2d.reshape(BV, 1, H, W_fut).to(device)),
+                dim=1,
+            )
+
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
+        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
+        variate_indices = None
+        if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
+            variate_indices = self._flat_variate_indices(BV, V, device)
+
+        def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
+            canvas = self._inject_coordinate_channel(xt)
+            return self._inject_time_channels(canvas)
+
+        def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
+            out_c = self._predict_noise_chunked(
+                _build_canvas(xt), t_batch, cond_for_unet, ctx_flat,
+                variate_indices=variate_indices,
+            )
+            if cfg_mix_applies(cfg_scale):
+                out_u = self._predict_noise_chunked(
+                    _build_canvas(xt),
+                    t_batch,
+                    torch.zeros_like(cond_for_unet),
+                    torch.zeros_like(ctx_flat) if ctx_flat is not None else None,
+                    variate_indices=variate_indices,
+                )
+                out = out_u + cfg_scale * (out_c - out_u)
+            else:
+                out = out_c
+            return out[:, 0:1], out[:, 1:2]
+
+        intermediates = None
+        if sampler in ("anchor", "deterministic_anchor"):
+            t_batch = torch.full(
+                (BV,),
+                self.config.binary_num_steps - 1,
+                device=device,
+                dtype=torch.long,
+            )
+            neutral_future_flat = torch.full((BV, 1, H, W_fut), 0.5, device=device)
+            x0_logits, _zt_logits = _chunked_model_fn(neutral_future_flat, t_batch)
+            future_2d_flat = (torch.sigmoid(x0_logits) > 0.5).float()
+            if yield_intermediates:
+                intermediates = [(999, neutral_future_flat.clone()), (0, future_2d_flat.clone())]
+        else:
+            sample_kwargs = dict(
+                model_fn=_chunked_model_fn,
+                shape=(BV, 1, H, W_fut),
+                num_steps=num_steps,
+                device=device,
+                verbose=verbose,
+                reverse_step_indices=reverse_step_indices,
+                snapshot_timesteps=snapshot_timesteps,
+            )
+            if yield_intermediates:
+                future_2d_flat, intermediates = self.binary_scheduler.sample(
+                    yield_intermediates=True,
+                    **sample_kwargs,
+                )
+            else:
+                future_2d_flat = self.binary_scheduler.sample(**sample_kwargs)
+
+        generated_2d = future_2d_flat.reshape(B, V, H, W_fut)
+        if stage == "coarse":
+            future_2d_coarse = generated_2d
+            future_norm = self.decode_from_2d(
+                future_2d_coarse, from_diffusion=False, decoder_method=decoder_method, **kwargs
+            )
+            future_2d_fine = None
+        else:
+            future_2d_coarse = coarse_for_decode.to(device)
+            future_2d_fine = generated_2d
+            future_norm = self.decode_dual_from_2d(
+                future_2d_coarse,
+                future_2d_fine,
+                from_diffusion=False,
+                decoder_method=decoder_method,
+            )
+        future = self._denormalize(future_norm, stats)
+
+        K = self.config.lookback_overlap
+        if K > 0:
+            future = future[..., K:]
+            future_norm = future_norm[..., K:]
+
+        result = {
+            'prediction': future,
+            'prediction_norm': future_norm,
+            'prediction_global_norm': future,
+            'future_2d': generated_2d,
+            'future_2d_coarse': future_2d_coarse,
+            'past_2d_coarse': past_coarse,
+            'past_2d_fine': past_fine,
+            'diffusion_stage': stage,
+        }
+        if future_2d_fine is not None:
+            result['future_2d_fine'] = future_2d_fine
+        if intermediates is not None:
+            reshaped_intermediates = []
+            for (t_idx, i_tensor) in intermediates:
+                reshaped_intermediates.append((t_idx, i_tensor.reshape(B, V, H, W_fut)))
+            result['intermediates'] = reshaped_intermediates
+        return result
 
     def _forward_binary_dual_scale(
         self,

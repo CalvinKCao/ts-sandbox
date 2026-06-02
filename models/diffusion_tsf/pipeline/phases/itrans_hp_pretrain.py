@@ -102,8 +102,10 @@ def _patch_globals(
     mod.IMAGE_HEIGHT = state.image_height
     mod.DIT_PATCH_SIZE = tuple(state.dit_patch_size)
     mod.USE_DUAL_SCALE = state.use_dual_scale
+    mod.DIFFUSION_STAGE = state.diffusion_stage
     mod.DUAL_SCALE_FINE_WEIGHT = state.dual_scale_fine_weight
     mod.DUAL_SCALE_INDEPENDENT_TIMESTEPS = state.dual_scale_independent_timesteps
+    mod.USE_GUIDANCE_CHANNEL = state.use_guidance_channel
     mod.CFG_DROPOUT = state.cfg_dropout
     mod.CFG_SCALE = state.cfg_scale
     mod.USE_CFG_INFERENCE = state.use_cfg_inference

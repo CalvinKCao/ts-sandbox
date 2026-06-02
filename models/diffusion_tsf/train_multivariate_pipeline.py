@@ -242,8 +242,10 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
     return {
         'image_height': IMAGE_HEIGHT,
         'use_dual_scale': USE_DUAL_SCALE,
+        'diffusion_stage': DIFFUSION_STAGE,
         'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
         'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
+        'use_guidance_channel': USE_GUIDANCE_CHANNEL,
         'cfg_dropout': CFG_DROPOUT,
         'cfg_scale': CFG_SCALE,
         'use_cfg_inference': USE_CFG_INFERENCE,
@@ -784,8 +786,10 @@ from models.diffusion_tsf.pipeline_config import (
     UNET_MAX_CHUNK_SIZE,
     DISABLE_CROSS_ATTENTION,
     USE_DUAL_SCALE,
+    DIFFUSION_STAGE,
     DUAL_SCALE_FINE_WEIGHT,
     DUAL_SCALE_INDEPENDENT_TIMESTEPS,
+    USE_GUIDANCE_CHANNEL,
     CFG_DROPOUT,
     CFG_SCALE,
     USE_CFG_INFERENCE,
@@ -1280,6 +1284,8 @@ def create_diffusion_model(
     deterministic_anchor_lambda: Optional[float] = None,
     deterministic_anchor_alpha: Optional[float] = None,
     cross_variate_context_bias: Optional[float] = None,
+    diffusion_stage: Optional[str] = None,
+    use_guidance_channel: Optional[bool] = None,
     cfg_dropout: Optional[float] = None,
     cfg_scale: Optional[float] = None,
     use_cfg_inference: Optional[bool] = None,
@@ -1308,6 +1314,10 @@ def create_diffusion_model(
         deterministic_anchor_alpha = DETERMINISTIC_ANCHOR_ALPHA
     if cross_variate_context_bias is None:
         cross_variate_context_bias = CROSS_VARIATE_CONTEXT_BIAS
+    if diffusion_stage is None:
+        diffusion_stage = DIFFUSION_STAGE
+    if use_guidance_channel is None:
+        use_guidance_channel = USE_GUIDANCE_CHANNEL
     if cfg_dropout is None:
         cfg_dropout = CFG_DROPOUT
     if cfg_scale is None:
@@ -1333,10 +1343,11 @@ def create_diffusion_model(
         past_loss_weight=past_loss_weight,
         image_height=IMAGE_HEIGHT,
         use_coordinate_channel=True,
-        use_guidance_channel=True,
+        use_guidance_channel=use_guidance_channel,
         guidance_penalty_weight=guidance_penalty_weight,
         model_type=model_type,
         disable_cross_attention=DISABLE_CROSS_ATTENTION,
+        diffusion_stage=diffusion_stage,
         use_dual_scale=USE_DUAL_SCALE,
         dual_scale_fine_weight=DUAL_SCALE_FINE_WEIGHT,
         dual_scale_independent_timesteps=DUAL_SCALE_INDEPENDENT_TIMESTEPS,
@@ -2704,8 +2715,10 @@ def _promote_best_trial_to_final(
                 'diffusion_type': DIFFUSION_TYPE,
                 'image_height': IMAGE_HEIGHT,
                 'use_dual_scale': USE_DUAL_SCALE,
+                'diffusion_stage': DIFFUSION_STAGE,
                 'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
                 'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
+                'use_guidance_channel': USE_GUIDANCE_CHANNEL,
                 'cfg_dropout': CFG_DROPOUT,
                 'cfg_scale': CFG_SCALE,
                 'use_cfg_inference': USE_CFG_INFERENCE,
@@ -4222,7 +4235,8 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
     global IMAGE_HEIGHT, DISABLE_CROSS_ATTENTION, CROSS_VARIATE_CONTEXT_BIAS
-    global USE_DUAL_SCALE, DUAL_SCALE_FINE_WEIGHT, DUAL_SCALE_INDEPENDENT_TIMESTEPS
+    global USE_DUAL_SCALE, DIFFUSION_STAGE, DUAL_SCALE_FINE_WEIGHT, DUAL_SCALE_INDEPENDENT_TIMESTEPS
+    global USE_GUIDANCE_CHANNEL
     global CFG_DROPOUT, CFG_SCALE, USE_CFG_INFERENCE
     global LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN
     global MODEL_TYPE, DIFFUSION_TYPE, DETERMINISTIC_ANCHOR_LOSS, DETERMINISTIC_ANCHOR_LAMBDA
@@ -4278,6 +4292,11 @@ def main():
                         help='Override image height')
     parser.add_argument('--dual-scale', action='store_true',
                         help='Use paired 16-bin coarse/residual binary CDF maps')
+    parser.add_argument('--diffusion-stage', type=str, default=DIFFUSION_STAGE,
+                        choices=['joint', 'coarse', 'fine'],
+                        help='Joint dual-scale, staged coarse, or staged fine diffusion model')
+    parser.add_argument('--disable-guidance-channel', action='store_true',
+                        help='Disable iTransformer forecast ghost channel while keeping encoder tokens if cross-attention is on')
     parser.add_argument('--dual-scale-fine-weight', type=float, default=DUAL_SCALE_FINE_WEIGHT,
                         help='Weight on fine residual BCE in dual-scale binary diffusion')
     parser.add_argument('--dual-scale-independent-timesteps', action='store_true',
@@ -4327,13 +4346,16 @@ def main():
     DETERMINISTIC_ANCHOR_LAMBDA = args.deterministic_anchor_lambda
     EVAL_SAMPLER = "anchor" if args.eval_sampler == "deterministic_anchor" else args.eval_sampler
     USE_DUAL_SCALE = args.dual_scale
+    DIFFUSION_STAGE = args.diffusion_stage
     DUAL_SCALE_FINE_WEIGHT = args.dual_scale_fine_weight
     DUAL_SCALE_INDEPENDENT_TIMESTEPS = args.dual_scale_independent_timesteps
+    USE_GUIDANCE_CHANNEL = not args.disable_guidance_channel
     CFG_DROPOUT = args.cfg_dropout
     CFG_SCALE = args.cfg_scale
     USE_CFG_INFERENCE = args.use_cfg_inference
     CROSS_VARIATE_CONTEXT_BIAS = args.cross_variate_context_bias
-    IMAGE_HEIGHT = 16 if USE_DUAL_SCALE and args.image_height == parser.get_default('image_height') else args.image_height
+    staged_model = DIFFUSION_STAGE in {"coarse", "fine"}
+    IMAGE_HEIGHT = 16 if (USE_DUAL_SCALE or staged_model) and args.image_height == parser.get_default('image_height') else args.image_height
     if args.disable_cross_attention:
         DISABLE_CROSS_ATTENTION = True
     if args.disable_window_normalization:

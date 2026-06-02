@@ -44,6 +44,7 @@ class DiffusionTSFConfig:
     binary_background_weight: float = 0.1
     binary_boundary_width: int = 8
     binary_use_boundary_weighted_bce: bool = False
+    diffusion_stage: str = "joint"  # joint, coarse, fine
     use_dual_scale: bool = False
     dual_scale_fine_weight: float = 0.5
     dual_scale_independent_timesteps: bool = True
@@ -117,6 +118,18 @@ class DiffusionTSFConfig:
             raise ValueError(
                 "Edge CDF boundary-weighted BCE is not supported for binary diffusion yet."
             )
+        if self.diffusion_stage not in {"joint", "coarse", "fine"}:
+            raise ValueError(
+                "diffusion_stage must be one of {'joint', 'coarse', 'fine'}, "
+                f"got {self.diffusion_stage!r}."
+            )
+        if self.diffusion_stage in {"coarse", "fine"}:
+            if self.use_dual_scale:
+                raise ValueError("staged coarse/fine models expect use_dual_scale=False.")
+            if self.image_height != 16:
+                raise ValueError("staged coarse/fine models expect image_height=16.")
+            if self.image_height % self.dit_patch_size[0] != 0:
+                raise ValueError("staged image_height must divide dit_patch_size[0].")
         if self.use_dual_scale:
             if self.image_height != 16:
                 raise ValueError("use_dual_scale=True expects image_height=16.")
@@ -168,6 +181,10 @@ class DiffusionTSFConfig:
     @property
     def visual_cond_channels(self) -> int:
         per_scale = 1 + (1 if self.use_value_channel else 0)
+        if self.diffusion_stage == "coarse":
+            return per_scale * 2
+        if self.diffusion_stage == "fine":
+            return per_scale * 3
         if self.use_dual_scale:
             return per_scale * 2
         return per_scale

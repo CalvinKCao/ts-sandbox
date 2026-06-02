@@ -235,6 +235,23 @@ Registered buffer `bin_centers` supports median/mode/beam decoders and diagnosti
 
 `regular_loss = (1 - w) * L_coarse + w * L_fine` with `w = dual_scale_fine_weight` (**0.75** in `binary_dual_scale.yaml`).
 
+### 4.2.1 Staged coarse/fine alternative
+
+The staged variant keeps the same dual representation but trains two separate
+single-scale denoisers instead of one joint coarse+fine denoiser:
+
+1. **Coarse stage:** GT lookback coarse+fine maps → future coarse CDF map.
+2. **Fine stage:** GT lookback coarse+fine maps + GT future coarse CDF map →
+   future fine residual CDF map.
+
+During training, every conditioning tensor is encoded from ground truth. The fine
+stage is never conditioned on the coarse model's prediction while it is being
+trained. At inference/eval, the stages are chained: sample one future coarse map
+with the coarse model, feed that sampled coarse map into the fine model, then
+decode with `decode_dual(coarse_hat, fine_hat)` and score the final summed
+forecast. Probabilistic eval pairs draw `i` from the coarse stage with draw `i`
+from the fine stage; it does not take a coarse×fine cross-product.
+
 ### 4.3 What we removed from the old Gaussian path
 
 The legacy `encode_to_2d` path still exists in `diffusion_model.py`: `to_2d` → `VerticalGaussianBlur` → clamp/scale to `[-1, 1]` for continuous DDPM. **Current production binary runs skip blur entirely** via `encode_to_2d_binary`.

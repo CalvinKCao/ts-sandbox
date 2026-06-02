@@ -33,8 +33,10 @@ class PipelineState:
     image_height: int = 32
     dit_patch_size: Tuple[int, int] = (8, 8)
     use_dual_scale: bool = False
+    diffusion_stage: str = "joint"
     dual_scale_fine_weight: float = 0.5
     dual_scale_independent_timesteps: bool = True
+    use_guidance_channel: bool = True
     cfg_dropout: float = 0.1
     cfg_scale: float = 2.0
     use_cfg_inference: bool = False
@@ -80,12 +82,18 @@ class PipelineState:
     # -- Mutable: populated by phases as they produce artifacts --
     itrans_pretrain_ckpt: Optional[str] = None
     diffusion_pretrain_ckpt: Optional[str] = None
+    diffusion_coarse_pretrain_ckpt: Optional[str] = None
+    diffusion_fine_pretrain_ckpt: Optional[str] = None
     itrans_finetune_ckpt: Optional[str] = None
     diffusion_finetune_ckpt: Optional[str] = None
+    diffusion_coarse_finetune_ckpt: Optional[str] = None
+    diffusion_fine_finetune_ckpt: Optional[str] = None
 
     itrans_best_params: Optional[Dict[str, Any]] = None
     diffusion_best_params: Optional[Dict[str, Any]] = None
     finetune_best_params: Optional[Dict[str, Any]] = None
+    coarse_finetune_best_params: Optional[Dict[str, Any]] = None
+    fine_finetune_best_params: Optional[Dict[str, Any]] = None
 
     # Phase-level overrides from YAML (list of dicts)
     phase_configs: List[Dict[str, Any]] = field(default_factory=list)
