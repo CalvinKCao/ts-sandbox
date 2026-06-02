@@ -30,11 +30,19 @@ def _phase1_ckpt_root(state: PipelineState) -> str:
     return os.path.dirname(ckpt_dir)
 
 
-def _discover_phase1_source_dir(state: PipelineState) -> Optional[str]:
-    """Newest *-<dataset>-binary_dual_scale dir under ckpts/ with diff_hp.json."""
+def _phase1_config_suffix(state: PipelineState, config_name: str = "binary_dual_scale") -> str:
+    """Grid checkpoint stems use raw --dataset, not data_subset subset_id."""
+    return f"-{state.dataset}-{config_name}"
+
+
+def _discover_phase1_source_dir(
+    state: PipelineState,
+    *,
+    config_name: str = "binary_dual_scale",
+) -> Optional[str]:
+    """Newest *-<dataset>-<config_name> dir under ckpts/ with diff_hp.json."""
     ckpt_root = _phase1_ckpt_root(state)
-    dataset = state.subset_id or state.dataset
-    suffix = f"-{dataset}-binary_dual_scale"
+    suffix = _phase1_config_suffix(state, config_name)
     best_dir: Optional[str] = None
     best_mtime = 0.0
     try:
@@ -55,16 +63,32 @@ def _discover_phase1_source_dir(state: PipelineState) -> Optional[str]:
     return best_dir
 
 
-def _phase1_source_dir(state: PipelineState, override: Optional[str] = None) -> Optional[str]:
+def _resolve_phase1_path(state: PipelineState, value: str) -> str:
+    raw = value.format(
+        dataset=state.dataset,
+        subset_id=state.subset_id or state.dataset,
+    )
+    expanded = os.path.abspath(os.path.expanduser(raw))
+    if os.path.isdir(expanded):
+        return expanded
+    # Relative to ckpts/ (same layout as submit_grid: $STORE/ckpts/<stem>/)
+    under_ckpts = os.path.join(_phase1_ckpt_root(state), raw)
+    return os.path.abspath(under_ckpts)
+
+
+def _phase1_source_dir(
+    state: PipelineState,
+    override: Optional[str] = None,
+    *,
+    config_name: str = "binary_dual_scale",
+) -> Optional[str]:
     value = override or state.extra.get("phase1_source_dir")
     if value:
-        dataset = state.subset_id or state.dataset
-        value = value.format(dataset=dataset, subset_id=dataset)
-        path = os.path.abspath(os.path.expanduser(value))
+        path = _resolve_phase1_path(state, str(value))
         if os.path.isdir(path):
             return path
         logger.warning("phase1_source_dir missing (%s); auto-discovering", path)
-    discovered = _discover_phase1_source_dir(state)
+    discovered = _discover_phase1_source_dir(state, config_name=config_name)
     if discovered:
         logger.info("Using auto-discovered Phase 1 source: %s", discovered)
         return discovered
@@ -87,10 +111,10 @@ def _resolve_diff_hp(state: PipelineState, source_dir: Optional[str]) -> Dict[st
             params = _read_json(path)
             state.diffusion_best_params = params
             return params
+    suffix = _phase1_config_suffix(state)
     raise FileNotFoundError(
         f"Staged pretrain requires Phase 1 diff_hp.json for {state.dataset!r}. "
-        f"Expected *-{state.subset_id or state.dataset}-binary_dual_scale under "
-        f"{_phase1_ckpt_root(state)} or set phase1_source_dir."
+        f"Expected *{suffix} under {_phase1_ckpt_root(state)} or set phase1_source_dir."
     )
 
 
@@ -148,7 +172,16 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         )
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
-        source_dir = _phase1_source_dir(state, self.get("phase1_source_dir"))
+        config_name = str(
+            self.get("phase1_config_name")
+            or state.extra.get("phase1_config_name")
+            or "binary_dual_scale"
+        )
+        source_dir = _phase1_source_dir(
+            state,
+            self.get("phase1_source_dir"),
+            config_name=config_name,
+        )
         best_params = _resolve_diff_hp(state, source_dir)
         itrans_ckpt = _resolve_itrans_pretrain(state, source_dir)
 

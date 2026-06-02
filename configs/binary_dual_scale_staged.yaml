@@ -30,8 +30,9 @@ experiment:
     subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
 
 phases:
-  # Phase 1 HP: auto *-{dataset}-binary_dual_scale under results/ckpts/ (05-31 grid).
+  # Phase 1 HP: newest *-<dataset>-binary_dual_scale under $STORE/ckpts (05-31 grid).
   - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale
 
   - phase: itrans_finetune_hp
     n_trials: 10
