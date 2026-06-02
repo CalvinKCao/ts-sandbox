@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Patch 4×4 train + dpmpp vs ddim eval (CFG-ablation metrics, no CFG at inference).
+# Patch 4×4 train + dpmpp eval (CFG-ablation metrics, no CFG at inference).
 #
 # Train: configs/binary_dual_scale_patch48.yaml (NO pipeline eval phase).
 # Eval:  submit_sampler_ablation.sh / submit_patch48_eval_redo.sh
@@ -60,7 +60,7 @@ run_eval() {
     echo "=== Eval (CFG-ablation path, ckpt *-${CKPT_SUFFIX}) ==="
     export CKPT_SUFFIX RUN_STEM
     export DATASETS="$TRAIN_DATASETS"
-    export SAMPLERS="${SAMPLERS:-dpmpp,ddim}"
+    export SAMPLERS="${SAMPLERS:-dpmpp}"
     "$SCRIPT_DIR/submit_sampler_ablation.sh" \
         --ckpt-suffix "$CKPT_SUFFIX" \
         --ckpt-stem-prefix "$CKPT_STEM_PREFIX" \

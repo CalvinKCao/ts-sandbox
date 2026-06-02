@@ -9,7 +9,7 @@
 #
 # USAGE ($SCRATCH/ts-sandbox):
 #   ./submit_patch48_eval_redo.sh
-#   SAMPLERS=dpmpp ./submit_patch48_eval_redo.sh          # dpmpp only (8 jobs)
+#   SAMPLERS=ddim ./submit_patch48_eval_redo.sh           # optional ablation only
 #   EVAL_WALL=8:00:00 ./submit_patch48_eval_redo.sh       # if 6h still tight on ETTm
 #   DATASETS=ETTm1,ETTm2 ./submit_patch48_eval_redo.sh    # resubmit subset only
 #
@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export CKPT_SUFFIX="${CKPT_SUFFIX:-binary_dual_scale_patch48}"
 export CKPT_STEM_PREFIX="${CKPT_STEM_PREFIX:-06-02-384445}"
 export DATASETS="${DATASETS:-ETTm1,ETTm2,dalia,electricity,exchange_rate,solar_Alabama,traffic,weather}"
-export SAMPLERS="${SAMPLERS:-dpmpp,ddim}"
+export SAMPLERS="${SAMPLERS:-dpmpp}"
 export RUN_STEM="${RUN_STEM:-$(date +%m-%d)-patch48-redo}"
 
 echo "Patch48 eval redo → submit_sampler_ablation.sh"

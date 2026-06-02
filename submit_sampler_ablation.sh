@@ -7,14 +7,14 @@
 #
 # USAGE (login node, $SCRATCH/ts-sandbox):
 #   CKPT_SUFFIX=binary_dual_scale_patch48 ./submit_sampler_ablation.sh
-#   CKPT_SUFFIX=binary_dual_scale_patch48 SAMPLERS=dpmpp,ddim ./submit_sampler_ablation.sh
+#   CKPT_SUFFIX=binary_dual_scale_patch48 SAMPLERS=ddim ./submit_sampler_ablation.sh  # optional
 #   ./submit_sampler_ablation.sh --merge-only
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SAMPLERS="${SAMPLERS:-dpmpp,ddim}"
+SAMPLERS="${SAMPLERS:-dpmpp}"
 DATASETS="${DATASETS:-ETTm1,ETTm2,dalia,electricity,exchange_rate,solar_Alabama,traffic,weather}"
 CKPT_SUFFIX="${CKPT_SUFFIX:-binary_dual_scale_patch48}"
 # Optional: only match stems containing this substring (e.g. 06-02-384445 for patch48 grid).
@@ -274,4 +274,4 @@ ENDSCRIPT
 
 echo "--------------------------------------------------------------------------------"
 echo "Merge: $MERGE_ID  logs: $MERGE_LOG"
-echo "Results: $STORE/datasets/${RUN_STEM}-{dpmpp,ddim}/metrics.csv"
+echo "Results: $STORE/datasets/${RUN_STEM}-{sampler}/metrics.csv"
