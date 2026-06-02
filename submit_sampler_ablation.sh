@@ -151,7 +151,8 @@ if [[ "$SMOKE" -eq 1 ]]; then
         --gmm-iterations 3
     )
 else
-    WALL="3:00:00"
+    # ETTm-scale 50%×100 prob draws need ~4h+; 3h wall caused timeouts on patch48 redo.
+    WALL="${EVAL_WALL:-6:00:00}"
     MEM="60G"
     CPUS=8
     EVAL_EXTRA=(

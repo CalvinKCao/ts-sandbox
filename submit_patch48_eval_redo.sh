@@ -9,8 +9,11 @@
 #
 # USAGE ($SCRATCH/ts-sandbox):
 #   ./submit_patch48_eval_redo.sh
-#   SAMPLERS=dpmpp ./submit_patch48_eval_redo.sh          # det metrics only, faster
-#   RUN_STEM=06-02-patch48-redo ./submit_patch48_eval_redo.sh
+#   SAMPLERS=dpmpp ./submit_patch48_eval_redo.sh          # dpmpp only (8 jobs)
+#   EVAL_WALL=8:00:00 ./submit_patch48_eval_redo.sh       # if 6h still tight on ETTm
+#   DATASETS=ETTm1,ETTm2 ./submit_patch48_eval_redo.sh    # resubmit subset only
+#
+# If a prior wave is still in squeue: scancel -u $USER -n smp-
 # =============================================================================
 
 set -euo pipefail
