@@ -204,7 +204,7 @@ for SCALE in "${SCALE_ARR[@]}"; do
     OUT_DIR="$STORE/datasets/${RUN_STEM}-cfg${SCALE}"
     mkdir -p "$OUT_DIR/partials"
     USE_CFG_FLAG=()
-    if python3 -c "exit(0 if float('$SCALE') > 1.0 else 1)"; then
+    if python3 -c "import sys; s=float('$SCALE'); sys.exit(0 if abs(s-1.0)>1e-6 else 1)"; then
         USE_CFG_FLAG=(--use-cfg-inference)
     else
         USE_CFG_FLAG=(--no-cfg-inference)

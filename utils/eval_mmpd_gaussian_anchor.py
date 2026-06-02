@@ -1035,10 +1035,14 @@ def resolve_inference_cfg(
     args: argparse.Namespace,
 ) -> tuple[float, bool]:
     """CFG scale / inference flag: CLI overrides checkpoint when set."""
+    from models.diffusion_tsf.cfg_inference import cfg_mix_applies
+
     cfg_scale = float(get_ckpt_config_value(ckpt, "cfg_scale", 1.0))
     use_cfg = bool(get_ckpt_config_value(ckpt, "use_cfg_inference", False))
     if getattr(args, "cfg_scale", None) is not None:
         cfg_scale = float(args.cfg_scale)
+        if getattr(args, "use_cfg_inference", None) is None and cfg_mix_applies(cfg_scale):
+            use_cfg = True
     if getattr(args, "use_cfg_inference", None) is not None:
         use_cfg = bool(args.use_cfg_inference)
     return cfg_scale, use_cfg
@@ -2051,7 +2055,7 @@ def parse_args() -> argparse.Namespace:
         "--use-cfg-inference",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Override checkpoint use_cfg_inference (default: on when cfg_scale>1).",
+        help="Override checkpoint use_cfg_inference (default: on when cfg_scale != 1).",
     )
     parser.add_argument("--no-update-mmpd", action="store_true")
     return parser.parse_args()

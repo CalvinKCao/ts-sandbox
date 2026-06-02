@@ -12,6 +12,8 @@ import torch.nn.functional as F
 import logging
 from typing import Dict, Optional, Tuple, Union
 
+from models.diffusion_tsf.cfg_inference import cfg_mix_applies, resolve_effective_cfg_scale
+
 from .config import DiffusionTSFConfig
 from .preprocessing import TimeSeriesTo2D
 from .unet import iTransformerTokenAdapter
@@ -497,7 +499,7 @@ class DiffusionTSF(nn.Module):
         null_guide: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Anchor noise prediction with optional CFG (cond vs null cond/ctx/guidance)."""
-        if cfg_scale <= 1.0:
+        if not cfg_mix_applies(cfg_scale):
             canvas = self._build_anchor_canvas(
                 zero_future_flat, guidance_2d_flat, use_null_guidance=False, null_guide=null_guide,
             )
@@ -712,6 +714,8 @@ class DiffusionTSF(nn.Module):
         sampler: str = "ddim",
         num_inference_steps: Optional[int] = None,
         yield_intermediates: bool = False,
+        reverse_step_indices: Optional[torch.Tensor] = None,
+        snapshot_timesteps: Optional[Tuple[int, ...]] = None,
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions via binary reverse sampling.
 
@@ -719,26 +723,12 @@ class DiffusionTSF(nn.Module):
         num_inference_steps overrides binary_sample_steps when set.
         """
         steps = num_inference_steps if num_inference_steps is not None else self.config.binary_sample_steps
-        effective_cfg_scale = (
-            self.config.cfg_scale
-            if cfg_scale is None and self.config.use_cfg_inference
-            else (1.0 if cfg_scale is None else cfg_scale)
+        effective_cfg_scale = resolve_effective_cfg_scale(
+            cfg_scale,
+            self.config.cfg_scale,
+            self.config.use_cfg_inference,
         )
-        if self.config.use_dual_scale:
-            return self._generate_binary_dual_scale(
-                past,
-                num_steps=steps,
-                cfg_scale=effective_cfg_scale,
-                verbose=verbose,
-                decoder_method=decoder_method,
-                beam_width=beam_width,
-                jump_penalty_scale=jump_penalty_scale,
-                search_radius=search_radius,
-                sampler=sampler,
-                yield_intermediates=yield_intermediates,
-            )
-        return self._generate_binary_factorized(
-            past,
+        gen_common = dict(
             num_steps=steps,
             cfg_scale=effective_cfg_scale,
             verbose=verbose,
@@ -748,7 +738,12 @@ class DiffusionTSF(nn.Module):
             search_radius=search_radius,
             sampler=sampler,
             yield_intermediates=yield_intermediates,
+            reverse_step_indices=reverse_step_indices,
+            snapshot_timesteps=snapshot_timesteps,
         )
+        if self.config.use_dual_scale:
+            return self._generate_binary_dual_scale(past, **gen_common)
+        return self._generate_binary_factorized(past, **gen_common)
 
 
     def _binary_plain_bce_loss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -983,6 +978,8 @@ class DiffusionTSF(nn.Module):
         sampler: str = "ddim",
         cfg_scale: float = 1.0,
         yield_intermediates: bool = False,
+        reverse_step_indices: Optional[torch.Tensor] = None,
+        snapshot_timesteps: Optional[Tuple[int, ...]] = None,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         """Binary reverse sampling in lock-step over coarse and residual scales."""
@@ -1037,7 +1034,7 @@ class DiffusionTSF(nn.Module):
                 canvas, t_batch, cond_for_unet, ctx_flat,
                 scale_indices=scale_indices, variate_indices=variate_indices,
             )
-            if cfg_scale > 1.0:
+            if cfg_mix_applies(cfg_scale):
                 null_guide = torch.zeros_like(guide_flat) if guide_flat is not None else None
                 out_u = self._predict_noise_chunked(
                     _build_canvas(xt, null_guide),
@@ -1066,23 +1063,22 @@ class DiffusionTSF(nn.Module):
             if yield_intermediates:
                 intermediates = [(999, neutral_future_flat.clone()), (0, future_2d_flat.clone())]
         else:
+            sample_kwargs = dict(
+                model_fn=_chunked_model_fn,
+                shape=(BVS, 1, H, W_fut),
+                num_steps=num_steps,
+                device=device,
+                verbose=verbose,
+                reverse_step_indices=reverse_step_indices,
+                snapshot_timesteps=snapshot_timesteps,
+            )
             if yield_intermediates:
                 future_2d_flat, intermediates = self.binary_scheduler.sample(
-                    model_fn=_chunked_model_fn,
-                    shape=(BVS, 1, H, W_fut),
-                    num_steps=num_steps,
-                    device=device,
-                    verbose=verbose,
                     yield_intermediates=True,
+                    **sample_kwargs,
                 )
             else:
-                future_2d_flat = self.binary_scheduler.sample(
-                    model_fn=_chunked_model_fn,
-                    shape=(BVS, 1, H, W_fut),
-                    num_steps=num_steps,
-                    device=device,
-                    verbose=verbose,
-                )
+                future_2d_flat = self.binary_scheduler.sample(**sample_kwargs)
 
         future_by_scale = future_2d_flat.reshape(BV, 2, 1, H, W_fut)
         future_2d_coarse = future_by_scale[:, 0, 0].reshape(B, V, H, W_fut)
@@ -1303,7 +1299,7 @@ class DiffusionTSF(nn.Module):
             out_c = self._predict_noise_chunked(
                 canvas, t_batch, cond_for_unet, ctx_flat, variate_indices=variate_indices,
             )
-            if cfg_scale > 1.0:
+            if cfg_mix_applies(cfg_scale):
                 null_guide = torch.zeros_like(guide_flat) if guide_flat is not None else None
                 out_u = self._predict_noise_chunked(
                     _build_canvas(xt, null_guide),

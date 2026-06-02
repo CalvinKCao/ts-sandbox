@@ -126,8 +126,8 @@ class DiffusionTSFConfig:
             raise ValueError("dual_scale_fine_weight must be in [0, 1].")
         if not 0.0 <= self.cfg_dropout <= 1.0:
             raise ValueError("cfg_dropout must be in [0, 1].")
-        if self.cfg_scale < 1.0:
-            raise ValueError("cfg_scale must be >= 1.0.")
+        if self.cfg_scale < 0.0:
+            raise ValueError("cfg_scale must be >= 0.0.")
         assert 0 <= self.cutout_prob <= 1
         assert 0.0 <= self.deterministic_anchor_lambda <= 1.0
         assert 0.0 <= self.deterministic_anchor_alpha < 1.0

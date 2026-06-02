@@ -1,5 +1,5 @@
 # Project Instructions
-
+never tell me to export WANDB_API_KEY = ... , i dont need the reminder.
 # BEFORE EVERY SINGLE NEW MESSAGE/PROMPT
 Run `git branch --show-current` to see what branch you're on. IF THE BRANCH HAS CHANGED SINCE YOUR LAST MESSAGE AND YOU (THE AGENT) DID NOT CHANGE THE BRANCH, SWITCH BACK TO THE ORIGINAL BRANCH, UNLESS THE USER HAS SPECIFICALLY SAID OTHERWISE.
 
@@ -9,7 +9,6 @@ Run `git branch --show-current` to see what branch you're on. IF THE BRANCH HAS 
 3. This is a WSL folder; activate the root venv before running commands.
 
 ## Security
-- Stay inside this project by default.
 - Outside-project reads/edits are allowed only when either:
   - the file/path is explicitly attached as context, or
   - the user explicitly grants permission in chat.
@@ -19,8 +18,6 @@ Run `git branch --show-current` to see what branch you're on. IF THE BRANCH HAS 
 ## Alliance Canada / Slurm
 For anything Slurm/Alliance Canada related, ALWAYS use the `/alliancecan` skill first.
 If `/alliancecan` does not resolve the question, check `wiki_docs/` for cluster-specific details.
-
-When giving **pull / prep / submit** commands for Killarney (or any cluster), follow the alliancecan skill: **one copy-pastable bash block**, with optional or alternate lines **commented out** (`#`), not split across prose.
 
 ## Git hygiene
 ALWAYS use the /git skill before using git operations.
@@ -48,9 +45,16 @@ Use `wandb` for training/eval runs tied to this repo.
 - Attach visualization artifacts to the same run (for example with `wandb.Image`), and compress/downscale images before upload.
 - At run end, log the ENTIRE stdout and stderr output files to wandb as artifacts/files.
 
+## Reports & Visualizations
+- From now on, put visualizations in the same directory as their corresponding reports (e.g. within `reports/`).
+- Create a subfolder with the folder name equal to the report markdown filename (without the `.md` extension).
+
 ## General style
 - Keep writing terse and detailed; avoid context pollution.
 - Comments should sound natural, not AI-generated.
 - Do not use flashy/fancy formatting in comments (for example `# ---HEADER---` or `// == PIPELINE PT A ==`).
-- Flashy formatting in print statements is okay for clarity, but only use separators when denoting major log subdivisions.
+- Flashy formatting in print statements is okay for clarity, but only use separators when denoting major log subdivisions.sq
 - Never leave wording that makes AI authorship obvious.
+
+## General code style
+Always fail fast over adding a million compatability/fallback paths.

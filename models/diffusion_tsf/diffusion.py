@@ -2,7 +2,7 @@
 
 import math
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -59,18 +59,28 @@ class BinaryDiffusionScheduler:
         device: str = "cpu",
         verbose: bool = False,
         yield_intermediates: bool = False,
+        reverse_step_indices: Optional[torch.Tensor] = None,
+        snapshot_timesteps: Optional[Tuple[int, ...]] = None,
     ):
         """Sample a clean binary image with a reduced set of reverse steps."""
-        step_indices = torch.linspace(self.num_steps - 1, 0, num_steps, dtype=torch.long)
+        if reverse_step_indices is not None:
+            step_indices = reverse_step_indices.to(device=device, dtype=torch.long)
+        else:
+            step_indices = torch.linspace(self.num_steps - 1, 0, num_steps, dtype=torch.long)
+        snapshot_set = None
+        if snapshot_timesteps is not None:
+            snapshot_set = {int(min(max(0, t), self.num_steps - 1)) for t in snapshot_timesteps}
         xt = torch.bernoulli(torch.full(shape, 0.5, device=device))
 
         intermediates = []
 
         for i, t_val in enumerate(step_indices):
-            if yield_intermediates:
-                intermediates.append((int(t_val.item()), xt.clone()))
-
             t_idx = int(t_val.item())
+            if yield_intermediates and (
+                snapshot_set is None or t_idx in snapshot_set
+            ):
+                intermediates.append((t_idx, xt.clone()))
+
             t_batch = torch.full((shape[0],), t_idx, device=device, dtype=torch.long)
             x0_logits, _zt_logits = model_fn(xt, t_batch)
             x0_hat = (torch.sigmoid(x0_logits) > 0.5).float()
@@ -87,6 +97,7 @@ class BinaryDiffusionScheduler:
                 logger.debug(f"  binary step {i + 1}/{num_steps} (t={t_idx})")
 
         if yield_intermediates:
-            intermediates.append((0, xt.clone()))
+            if snapshot_set is None or 0 in snapshot_set:
+                intermediates.append((0, xt.clone()))
             return xt, intermediates
         return xt
