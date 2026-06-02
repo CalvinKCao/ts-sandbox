@@ -173,7 +173,7 @@ class StagedEvalPhase(PipelinePhase):
                     seed = state.seed + batch_idx * 1009 + sample_idx * 17
                     torch.manual_seed(seed)
                     coarse_sample = coarse_model.generate(past, **prob_kwargs)
-                    torch.manual_seed(seed + 1)
+                    torch.manual_seed(seed)
                     fine_sample = fine_model.generate(
                         past,
                         future_coarse_2d=coarse_sample["future_2d_coarse"],

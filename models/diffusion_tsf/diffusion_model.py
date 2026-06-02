@@ -864,6 +864,7 @@ class DiffusionTSF(nn.Module):
 
         # Staged visual conditioning is always GT during training. CFG dropout is
         # restricted to context tokens so the fine stage never sees predicted coarse.
+        ctx_anchor = ctx_flat
         if self.training and self.config.cfg_dropout > 0.0 and ctx_flat is not None:
             drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
             drop_mask_flat = drop_mask.unsqueeze(1).expand(-1, V).reshape(BV)
@@ -898,7 +899,7 @@ class DiffusionTSF(nn.Module):
                 anchor_canvas,
                 anchor_t_flat,
                 base_cond_for_unet,
-                ctx_flat,
+                ctx_anchor,
                 variate_indices=variate_indices,
             )
             anchor_loss = self._binary_plain_bce_loss(anchor_out_flat[:, 0:1], target_flat)
