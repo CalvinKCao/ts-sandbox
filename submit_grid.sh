@@ -85,6 +85,14 @@ pick_resume_stem() {
     echo "$best"
 }
 
+for CFG in "${CONF_ARR[@]}"; do
+    if [[ ! -f "$SCRIPT_DIR/$CFG" ]]; then
+        echo "ERROR: config not found: $SCRIPT_DIR/$CFG" >&2
+        echo "  On cluster: cd \$SCRATCH/ts-sandbox && git pull, then resubmit." >&2
+        exit 1
+    fi
+done
+
 echo "Submitting grid... (Storage: $STORE)"
 [[ "$RESUME" -eq 1 ]] && echo "Resume: reusing newest *-<dataset>-<config> checkpoint dir when present."
 [[ -n "$CKPT_CONFIG" ]] && echo "Checkpoint stem matcher: *-<dataset>-${CKPT_CONFIG}"

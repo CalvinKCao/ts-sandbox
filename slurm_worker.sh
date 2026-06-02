@@ -218,6 +218,20 @@ if [[ "${GRID_RESUME:-0}" == "1" ]]; then
   [[ "$has_resume" -eq 0 ]] && PY_ARGS+=(--resume)
 fi
 
+REPO="${SLURM_SUBMIT_DIR:-$PWD}"
+for ((i = 0; i < ${#PY_ARGS[@]}; i++)); do
+    if [[ "${PY_ARGS[i]}" == "--config" ]]; then
+        cfg="${PY_ARGS[i + 1]}"
+        [[ "$cfg" == /* ]] || cfg="$REPO/$cfg"
+        if [[ ! -f "$cfg" ]]; then
+            echo "ERROR: config not found: $cfg" >&2
+            echo "  Sync repo (git pull in $REPO) and resubmit." >&2
+            exit 1
+        fi
+        break
+    fi
+done
+
 echo "[train] Starting pipeline: ${PY_ARGS[*]}"
 python -u -m models.diffusion_tsf.train_multivariate_pipeline "${PY_ARGS[@]}"
 

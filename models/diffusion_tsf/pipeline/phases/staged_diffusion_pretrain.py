@@ -22,17 +22,53 @@ def _stage_pretrain_ckpt(state: PipelineState, stage: str) -> str:
     return os.path.join(_stage_pretrain_dir(state, stage), "pretrained_diffusion.pt")
 
 
+def _phase1_ckpt_root(state: PipelineState) -> str:
+    """Directory that holds per-run checkpoint folders (*-<dataset>-<config>)."""
+    ckpt_dir = os.path.abspath(state.checkpoint_dir)
+    if os.path.basename(ckpt_dir) == "ckpts":
+        return ckpt_dir
+    return os.path.dirname(ckpt_dir)
+
+
+def _discover_phase1_source_dir(state: PipelineState) -> Optional[str]:
+    """Newest *-<dataset>-binary_dual_scale dir under ckpts/ with diff_hp.json."""
+    ckpt_root = _phase1_ckpt_root(state)
+    dataset = state.subset_id or state.dataset
+    suffix = f"-{dataset}-binary_dual_scale"
+    best_dir: Optional[str] = None
+    best_mtime = 0.0
+    try:
+        for name in os.listdir(ckpt_root):
+            if not name.endswith(suffix):
+                continue
+            path = os.path.join(ckpt_root, name)
+            if not os.path.isdir(path):
+                continue
+            if not os.path.isfile(os.path.join(path, "diff_hp.json")):
+                continue
+            mtime = os.path.getmtime(path)
+            if mtime > best_mtime:
+                best_mtime = mtime
+                best_dir = path
+    except OSError:
+        return None
+    return best_dir
+
+
 def _phase1_source_dir(state: PipelineState, override: Optional[str] = None) -> Optional[str]:
     value = override or state.extra.get("phase1_source_dir")
     if value:
-        return os.path.abspath(os.path.expanduser(value))
-    default = os.path.join(
-        state.checkpoint_dir,
-        "..",
-        "05-31-3828089-ETTh1-binary_dual_scale",
-    )
-    default = os.path.abspath(default)
-    return default if os.path.isdir(default) else None
+        dataset = state.subset_id or state.dataset
+        value = value.format(dataset=dataset, subset_id=dataset)
+        path = os.path.abspath(os.path.expanduser(value))
+        if os.path.isdir(path):
+            return path
+        logger.warning("phase1_source_dir missing (%s); auto-discovering", path)
+    discovered = _discover_phase1_source_dir(state)
+    if discovered:
+        logger.info("Using auto-discovered Phase 1 source: %s", discovered)
+        return discovered
+    return None
 
 
 def _read_json(path: str) -> Dict[str, Any]:
@@ -52,8 +88,9 @@ def _resolve_diff_hp(state: PipelineState, source_dir: Optional[str]) -> Dict[st
             state.diffusion_best_params = params
             return params
     raise FileNotFoundError(
-        "Staged pretrain requires prior Phase 1 diffusion HP JSON. "
-        "Set phase1_source_dir to a 3828089-style checkpoint root containing diff_hp.json."
+        f"Staged pretrain requires Phase 1 diff_hp.json for {state.dataset!r}. "
+        f"Expected *-{state.subset_id or state.dataset}-binary_dual_scale under "
+        f"{_phase1_ckpt_root(state)} or set phase1_source_dir."
     )
 
 
@@ -73,8 +110,8 @@ def _resolve_itrans_pretrain(state: PipelineState, source_dir: Optional[str]) ->
             state.itrans_pretrain_ckpt = path
             return path
     raise FileNotFoundError(
-        "Staged pretrain requires an iTransformer pretrain checkpoint for lookback tokens. "
-        "Set phase1_source_dir to a checkpoint root containing pretrained_itransformer.pt."
+        "Staged pretrain requires an iTransformer pretrain checkpoint for lookback tokens "
+        f"(tried itransformer.pt / itrans_hp_best.pt / pretrained_itransformer.pt under {source_dir!r})."
     )
 
 
