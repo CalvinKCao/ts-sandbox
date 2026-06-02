@@ -34,7 +34,10 @@ done
 run_train() {
     local wall="10:00:00"
     local smoke_flag=()
-    [[ "$1" == smoke ]] && smoke_flag=(--smoke-test) && wall="0:45:00"
+    if [[ "${1:-}" == smoke ]]; then
+        smoke_flag=(--smoke-test)
+        wall="0:45:00"
+    fi
     echo "=== Train patch48 (${TRAIN_DATASETS}) ==="
     "$SCRIPT_DIR/submit_grid.sh" \
         --configs "$CFG" \
