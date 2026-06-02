@@ -30,12 +30,15 @@ SEED=42
 SMOKE=0
 RUN_STEM=""
 MERGE_ONLY=0
+# Optional: ETTh1=05-31-3828089-ETTh1-binary_dual_scale,ETTh2=05-31-3828090-...
+CFG_CKPT_MAP="${CFG_CKPT_MAP:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --datasets) DATASETS="$2"; shift 2 ;;
         --cfg-scales) CFG_SCALES="$2"; shift 2 ;;
+        --ckpt-map) CFG_CKPT_MAP="$2"; shift 2 ;;
         --gpu) GPU="$2"; shift 2 ;;
         --exclude-nodes) EXCLUDE_NODES="$2"; shift 2 ;;
         --run-stem) RUN_STEM="$2"; shift 2 ;;
@@ -43,6 +46,17 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+declare -A CFG_CKPT_OVERRIDE=()
+if [[ -n "$CFG_CKPT_MAP" ]]; then
+    IFS=',' read -ra _CKPT_PAIRS <<< "$CFG_CKPT_MAP"
+    for pair in "${_CKPT_PAIRS[@]}"; do
+        ds="${pair%%=*}"
+        stem="${pair#*=}"
+        [[ -n "$ds" && -n "$stem" ]] || continue
+        CFG_CKPT_OVERRIDE["$ds"]="$stem"
+    done
+fi
 
 case "$GPU" in
     l40s)
@@ -93,6 +107,21 @@ fi
 
 pick_ckpt_dir() {
     local ds="$1"
+    local stem="${CFG_CKPT_OVERRIDE[$ds]:-}"
+    if [[ -n "$stem" ]]; then
+        local cand=""
+        if [[ -d "$stem" ]]; then
+            cand="$stem"
+        elif [[ -d "$CKPT_ROOT/$stem" ]]; then
+            cand="$CKPT_ROOT/$stem"
+        fi
+        if [[ -n "$cand" ]] && compgen -G "${cand}"/*/best.pt >/dev/null; then
+            echo "$cand"
+            return
+        fi
+        echo "ERROR: CFG_CKPT_MAP for $ds → $stem (no */best.pt under $cand)" >&2
+        return 1
+    fi
     if [[ -d "$CKPT_ROOT/${ds}" && -f "$CKPT_ROOT/${ds}/metadata.json" ]]; then
         echo "$CKPT_ROOT/${ds}"
         return
@@ -101,6 +130,9 @@ pick_ckpt_dir() {
     shopt -s nullglob
     for d in "$CKPT_ROOT"/*-"${ds}"-binary_dual_scale; do
         [[ -d "$d" ]] || continue
+        if ! compgen -G "${d}"/*/best.pt >/dev/null; then
+            continue
+        fi
         m=$(stat -c %Y "$d" 2>/dev/null || echo 0)
         if [[ "$m" -gt "$best_mtime" ]]; then
             best_mtime="$m"
@@ -175,7 +207,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
         --gmm-iterations 3
     )
 else
-    WALL="3:00:00"
+    WALL="${EVAL_WALL:-3:00:00}"
     MEM="60G"
     CPUS=8
     EVAL_EXTRA=(
@@ -191,7 +223,8 @@ else
 fi
 
 echo "CFG ablation (eval_mmpd anchor path)"
-echo "  run_stem=$RUN_STEM  gpu=$GPU  scales=${SCALE_ARR[*]}  storage=$STORE"
+echo "  run_stem=$RUN_STEM  gpu=$GPU  scales=${SCALE_ARR[*]}  wall=$WALL  storage=$STORE"
+[[ -n "$CFG_CKPT_MAP" ]] && echo "  ckpt_map=$CFG_CKPT_MAP"
 echo "  venv=$CFG_VENV"
 if [[ -n "$EXCLUDE_NODES" ]]; then
     echo "  exclude_nodes=$EXCLUDE_NODES"
