@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --serial) SERIAL=1; shift ;;
         --skip-mmpd-train) SKIP_MMPD_TRAIN=1; shift ;;
-        --reeval-only) SKIP_MMPD_TRAIN=1; FORCE_MMPD_EVAL=1; FORCE_ANCHOR_EVAL=1; shift ;;
+        --reeval-only|--reeval) SKIP_MMPD_TRAIN=1; FORCE_MMPD_EVAL=1; FORCE_ANCHOR_EVAL=1; shift ;;
         --retry-mmpd-only) RETRY_MMPD_ONLY=1; SKIP_MMPD_TRAIN=1; FORCE_MMPD_EVAL=1; shift ;;
         --retry-anchor-only) RETRY_ANCHOR_ONLY=1; FORCE_ANCHOR_EVAL=1; shift ;;
         --force-indices) FORCE_INDICES=1; shift ;;

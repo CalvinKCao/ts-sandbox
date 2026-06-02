@@ -100,6 +100,7 @@ def _patch_globals(
     mod.FORECAST_LENGTH = forecast
     mod.ITRANSFORMER_SEQ_LEN = lookback
     mod.IMAGE_HEIGHT = state.image_height
+    mod.DIT_PATCH_SIZE = tuple(state.dit_patch_size)
     mod.USE_DUAL_SCALE = state.use_dual_scale
     mod.DUAL_SCALE_FINE_WEIGHT = state.dual_scale_fine_weight
     mod.DUAL_SCALE_INDEPENDENT_TIMESTEPS = state.dual_scale_independent_timesteps

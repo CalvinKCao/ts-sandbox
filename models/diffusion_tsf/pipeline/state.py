@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import random
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -31,6 +31,7 @@ class PipelineState:
     diffusion_type: str = "binary"
     model_type: str = "dit"
     image_height: int = 32
+    dit_patch_size: Tuple[int, int] = (8, 8)
     use_dual_scale: bool = False
     dual_scale_fine_weight: float = 0.5
     dual_scale_independent_timesteps: bool = True
@@ -123,6 +124,9 @@ class PipelineState:
                 init_kwargs[k] = v
             else:
                 extra[k] = v
+
+        if "dit_patch_size" in init_kwargs:
+            init_kwargs["dit_patch_size"] = tuple(int(x) for x in init_kwargs["dit_patch_size"])
 
         init_kwargs["extra"] = extra
         init_kwargs["phase_configs"] = cfg.get("phases", [])

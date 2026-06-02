@@ -2716,6 +2716,7 @@ def _promote_best_trial_to_final(
                 'window_stride': WINDOW_STRIDE,
                 'lookback_length': LOOKBACK_LENGTH,
                 'forecast_length': FORECAST_LENGTH,
+                'dit_patch_size': list(DIT_PATCH_SIZE),
             }, f, indent=2)
         for fn in os.listdir(subset_dir):
             if fn.startswith('_diff_ft_trial_') and fn.endswith('_best.pt'):
