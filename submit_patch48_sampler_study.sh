@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Patch (4×8) train + dpmpp vs ddim eval (CFG-ablation metrics, no CFG at inference).
+# Patch (8×4) train + dpmpp vs ddim eval (CFG-ablation metrics, no CFG at inference).
 #
 # Train: ETTm1, ETTm2, dalia, electricity, exchange_rate, solar_Alabama, traffic, weather
 # Eval:  same 8 datasets × {dpmpp, ddim} on finished *-binary_dual_scale_patch48 ckpts

@@ -1,4 +1,4 @@
-# Binary dual-scale with asymmetric DiT patches: 4 rows (H) × 8 cols (W).
+# Binary dual-scale with asymmetric DiT patches: 8 rows (H) × 4 cols (W).
 # Train via ./submit_patch48_sampler_study.sh --train-only
 
 experiment:
@@ -8,7 +8,7 @@ experiment:
   diffusion_type: binary
   model_type: dit
   image_height: 16
-  dit_patch_size: [4, 8]
+  dit_patch_size: [8, 4]
   use_dual_scale: true
   dual_scale_fine_weight: 0.75
   dual_scale_independent_timesteps: true
