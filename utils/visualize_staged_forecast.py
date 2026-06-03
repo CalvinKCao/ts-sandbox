@@ -10,6 +10,13 @@ Example:
     --checkpoint-dir results/ckpts/06-02-3849018-ETTh1-binary_dual_scale_staged \\
     --dataset ETTh1 \\
     --output-dir reports/06-01_cfg_ablation_mmpd_matrix_combined/viz_2stage/ETTh1
+
+  # q99.5 norm-cal grid (auto-pick job 3852944–3852955 ckpt):
+  python utils/visualize_staged_forecast.py --staged-norm --dataset ETTh1 \\
+    --output-dir reports/06-01_cfg_ablation_mmpd_matrix_combined/viz_2stage_q995/ETTh1
+
+  # All 12 datasets:
+  python utils/visualize_report_staged_norm_grid.py
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -30,6 +38,11 @@ import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STAGED_CONFIG = REPO_ROOT / "configs" / "binary_dual_scale_staged.yaml"
+
+# Jobs 3852944–3852955: q99.5 max_scale_by_dataset + window_norm_std_floor retrain
+STAGED_NORM_JOB_RE = re.compile(
+    r"06-02-(385294[4-9]|385295[0-5])-(.+)-binary_dual_scale_staged$"
+)
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -150,6 +163,48 @@ def _resolve_itrans_paths(root: Path, subset_id: str) -> Tuple[Optional[Path], O
     )
 
 
+def ensure_full_dataset_itrans_baseline(
+    checkpoint_dir: Path,
+    dataset: str,
+    subset_id: str,
+    variate_indices: List[int],
+    device: torch.device,
+    *,
+    data_subset: Optional[Dict[str, Any]] = None,
+    test_stride: int = 1,
+) -> Path:
+    """Train or reuse standalone iTrans baseline (not the diffusion guidance ckpt)."""
+    ckpt_path = checkpoint_dir / f"{subset_id}_itrans_full_dataset.pt"
+    if ckpt_path.is_file():
+        return ckpt_path
+
+    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        train_subset_itransformer_full_baseline,
+    )
+
+    old_ckpt_dir = pipeline_mod.CHECKPOINT_DIR
+    pipeline_mod.CHECKPOINT_DIR = str(checkpoint_dir.resolve())
+    try:
+        train_subset_itransformer_full_baseline(
+            dataset,
+            variate_indices,
+            subset_id,
+            device,
+            train_stride=(data_subset or {}).get("train_stride"),
+            test_stride=test_stride,
+            data_subset=data_subset,
+        )
+    finally:
+        pipeline_mod.CHECKPOINT_DIR = old_ckpt_dir
+
+    if not ckpt_path.is_file():
+        raise FileNotFoundError(
+            f"Full-dataset iTrans baseline not created at {ckpt_path}"
+        )
+    return ckpt_path
+
+
 def _staged_anchor_and_samples(
     coarse_model: torch.nn.Module,
     fine_model: torch.nn.Module,
@@ -202,6 +257,9 @@ def plot_staged_forecast_panel(
     prob_steps: int,
     seed: int,
     device: torch.device,
+    *,
+    ensure_full_baseline: bool = False,
+    model_label: str = "2-stage",
 ) -> Path:
     sub = _load_staged_bundle(checkpoint_dir, dataset)
     subset_id = sub["subset_id"]
@@ -232,10 +290,23 @@ def plot_staged_forecast_panel(
     mean = torch.tensor(norm_stats["mean"], dtype=torch.float32)
     std = torch.tensor(norm_stats["std"], dtype=torch.float32)
 
+    data_subset = sub["fine_metadata"].get("data_subset") or {}
+    test_stride = int(data_subset.get("test_stride", 1))
+
     guidance_path, full_path = _resolve_itrans_paths(checkpoint_dir, subset_id)
     if guidance_path is None:
         raise FileNotFoundError(
             f"Missing guidance checkpoint: {subset_id}_itransformer_finetuned.pt under {checkpoint_dir}"
+        )
+    if ensure_full_baseline and full_path is None:
+        full_path = ensure_full_dataset_itrans_baseline(
+            checkpoint_dir,
+            dataset,
+            subset_id,
+            variate_indices,
+            device,
+            data_subset=data_subset,
+            test_stride=test_stride,
         )
     guidance_model = load_itransformer_from_checkpoint(
         str(guidance_path), n_vars, device
@@ -330,7 +401,7 @@ def plot_staged_forecast_panel(
             adn,
             color="#E91E63",
             lw=1.4,
-            label="2-stage anchor (coarse→fine)",
+            label=f"{model_label} anchor (coarse→fine)",
         )
         for k, pp in enumerate(prob_preds):
             pdn = denorm(_forecast_tail(pp), mean, std)[v].numpy()
@@ -366,7 +437,7 @@ def plot_staged_forecast_panel(
 
     fig.suptitle(
         f"{dataset} / {subset_id} — test idx {test_index} | "
-        f"2-stage anchor + {prob_sampler}×{prob_samples} (steps={prob_steps})",
+        f"{model_label} anchor + {prob_sampler}×{prob_samples} (steps={prob_steps})",
         fontsize=11,
         fontweight="bold",
     )
@@ -396,9 +467,40 @@ def pick_staged_ckpt_dir(ckpt_root: Path, dataset: str) -> Path:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def pick_staged_norm_ckpt_dir(ckpt_root: Path, dataset: str) -> Path:
+    """Newest q99.5 norm-cal staged run (jobs 3852944–3852955) for *dataset*."""
+    candidates: List[Path] = []
+    for d in ckpt_root.iterdir():
+        if not d.is_dir():
+            continue
+        m = STAGED_NORM_JOB_RE.match(d.name)
+        if not m or m.group(2) != dataset:
+            continue
+        try:
+            _load_staged_bundle(d, dataset)
+            candidates.append(d)
+        except FileNotFoundError:
+            continue
+    if not candidates:
+        raise FileNotFoundError(
+            f"No q99.5 staged ckpt (3852944–3852955) for {dataset} under {ckpt_root}"
+        )
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint-dir", type=Path, required=True)
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=None,
+        help="Staged run ckpt dir (default: auto-pick under --ckpt-root)",
+    )
+    parser.add_argument(
+        "--ckpt-root",
+        type=Path,
+        default=REPO_ROOT / "results" / "ckpts",
+    )
     parser.add_argument("--dataset", type=str, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--test-index", type=int, default=None)
@@ -407,11 +509,27 @@ def main() -> None:
     parser.add_argument("--prob-sampler", type=str, default="dpmpp")
     parser.add_argument("--prob-steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--ensure-full-baseline",
+        action="store_true",
+        help="Train full-dataset iTrans baseline if missing (slow first run)",
+    )
+    parser.add_argument(
+        "--staged-norm",
+        action="store_true",
+        help="Pick q99.5 norm-cal ckpt (3852944–3852955) instead of newest staged dir",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.checkpoint_dir is not None:
+        ckpt_dir = args.checkpoint_dir.resolve()
+    elif args.staged_norm:
+        ckpt_dir = pick_staged_norm_ckpt_dir(args.ckpt_root.resolve(), args.dataset)
+    else:
+        ckpt_dir = pick_staged_ckpt_dir(args.ckpt_root.resolve(), args.dataset)
     out = plot_staged_forecast_panel(
-        args.checkpoint_dir.resolve(),
+        ckpt_dir,
         args.dataset,
         args.output_dir.resolve(),
         args.test_index,
@@ -421,6 +539,8 @@ def main() -> None:
         args.prob_steps,
         args.seed,
         device,
+        ensure_full_baseline=args.ensure_full_baseline,
+        model_label="2-stage (q99.5 MS)" if args.staged_norm else "2-stage",
     )
     print(f"Wrote {out}")
 

@@ -39,7 +39,11 @@ from utils.visualize_report_binary_dual_scale import (
     REPORT_DATASETS,
     pick_ckpt_dir,
 )
-from utils.visualize_staged_forecast import pick_staged_ckpt_dir, plot_staged_forecast_panel
+from utils.visualize_staged_forecast import (
+    pick_staged_ckpt_dir,
+    pick_staged_norm_ckpt_dir,
+    plot_staged_forecast_panel,
+)
 
 REPORT_STEM = "06-01_cfg_ablation_mmpd_matrix_combined"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "reports" / REPORT_STEM
@@ -119,6 +123,27 @@ VARIANTS: Dict[str, Dict[str, object]] = {
         "slurm_note": "same ckpts as 2-stage (binary_dual_scale_staged grid)",
         "plot_fn": "staged",
     },
+    "2stage_q995": {
+        "label": "2-stage (q99.5 MS)",
+        "subdir": "viz_2stage_q995",
+        "pick_ckpt": pick_staged_norm_ckpt_dir,
+        "datasets": [
+            "ETTh1",
+            "ETTh2",
+            "ETTm1",
+            "ETTm2",
+            "illness",
+            "exchange_rate",
+            "weather",
+            "electricity",
+            "traffic",
+            "PeMS",
+            "solar_Alabama",
+            "dalia",
+        ],
+        "slurm_note": "jobs 3852944–3852955",
+        "plot_fn": "staged_norm",
+    },
 }
 
 
@@ -171,9 +196,10 @@ def run_variant(
             seed=ds_seed,
             device=device,
         )
-        if meta.get("plot_fn") == "staged":
+        if meta.get("plot_fn") in ("staged", "staged_norm"):
             out_path = plot_staged_forecast_panel(
                 prob_sampler="dpmpp",
+                model_label=str(meta["label"]),
                 **plot_kwargs,
             )
         else:
@@ -206,7 +232,7 @@ def main() -> None:
         "--variants",
         type=str,
         default="cfg_off",
-        help="Comma-separated: cfg_off, 4x4_patch, 2stage, coarse_fine_multiphase",
+        help="Comma-separated: cfg_off, 4x4_patch, 2stage, 2stage_q995, coarse_fine_multiphase",
     )
     parser.add_argument(
         "--datasets",

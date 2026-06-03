@@ -23,16 +23,22 @@ PATCH48_KEY = "patch48_4x4"
 DEFAULT_PATCH48_DIR = "06-02-patch48-redo-dpmpp"
 
 STAGED_KEY = "binary_2stage"
+STAGED_NORM_KEY = "binary_2stage_norm"
 DEFAULT_STAGED_DIR = "06-02-staged-grid-dpmpp"
 
-MODEL_ORDER = ["mmpd", "binary_cfg_off", PATCH48_KEY, STAGED_KEY] + [
-    k for k, _, _ in CFG_INFERENCE_COLUMNS
-]
+MODEL_ORDER = [
+    "mmpd",
+    "binary_cfg_off",
+    PATCH48_KEY,
+    STAGED_KEY,
+    STAGED_NORM_KEY,
+] + [k for k, _, _ in CFG_INFERENCE_COLUMNS]
 MODEL_LABELS: Dict[str, str] = {
     "mmpd": "MMPD",
     "binary_cfg_off": "Binary (CFG off)",
     PATCH48_KEY: "4x4 patch",
     STAGED_KEY: "2-stage",
+    STAGED_NORM_KEY: "2-stage (q99.5 MS)",
     **{k: label for k, label, _ in CFG_INFERENCE_COLUMNS},
 }
 
@@ -61,6 +67,22 @@ STAGED_GRID_JOBS: List[Tuple[str, str]] = [
     ("3849021", "dalia"),
     ("3849022", "exchange_rate"),
     ("3849023", "traffic"),
+]
+
+# q99.5 max_scale_by_dataset + window_norm_std_floor=0.1 retrain (Jun 2–3, 2026)
+STAGED_NORM_GRID_JOBS: List[Tuple[str, str]] = [
+    ("3852944", "ETTh1"),
+    ("3852945", "ETTh2"),
+    ("3852946", "ETTm1"),
+    ("3852947", "ETTm2"),
+    ("3852948", "illness"),
+    ("3852949", "exchange_rate"),
+    ("3852950", "weather"),
+    ("3852951", "electricity"),
+    ("3852952", "traffic"),
+    ("3852953", "PeMS"),
+    ("3852954", "solar_Alabama"),
+    ("3852955", "dalia"),
 ]
 
 CORE_METRICS = [
@@ -204,26 +226,46 @@ def load_binary_partials(
         table.setdefault(ds, {})[model_key] = load_partial(path)
 
 
+def _staged_sources(
+    datasets_root: Path,
+    job_ids: List[Tuple[str, str]],
+    staged_dir: Optional[Path],
+) -> List[Path]:
+    if staged_dir is not None and (staged_dir / "partials").is_dir():
+        return [staged_dir]
+    sources: List[Path] = []
+    for job_id, _ in job_ids:
+        sources.extend(sorted(datasets_root.glob(f"06-02-{job_id}-*")))
+    return sources
+
+
 def load_staged_partials(
     table: Dict[str, Dict[str, Dict[str, float]]],
     datasets_root: Path,
     staged_dir: Optional[Path] = None,
 ) -> None:
     """Load coarse→fine staged eval metrics (*_staged_anchor.json)."""
-    if staged_dir is not None and (staged_dir / "partials").is_dir():
-        sources = [staged_dir]
-    else:
-        sources = []
-        for job_id, _ in STAGED_GRID_JOBS:
-            sources.extend(sorted(datasets_root.glob(f"06-02-{job_id}-*")))
-
-    for run_dir in sources:
+    for run_dir in _staged_sources(datasets_root, STAGED_GRID_JOBS, staged_dir):
         partials = run_dir / "partials"
         if not partials.is_dir():
             continue
         for path in sorted(partials.glob("*_staged_anchor.json")):
             ds = path.name.replace("_staged_anchor.json", "")
             table.setdefault(ds, {})[STAGED_KEY] = load_partial(path)
+
+
+def load_staged_norm_partials(
+    table: Dict[str, Dict[str, Dict[str, float]]],
+    datasets_root: Path,
+) -> None:
+    """Load q99.5 max_scale + std-floor staged retrain (jobs 3852944–3852955)."""
+    for run_dir in _staged_sources(datasets_root, STAGED_NORM_GRID_JOBS, None):
+        partials = run_dir / "partials"
+        if not partials.is_dir():
+            continue
+        for path in sorted(partials.glob("*_staged_anchor.json")):
+            ds = path.name.replace("_staged_anchor.json", "")
+            table.setdefault(ds, {})[STAGED_NORM_KEY] = load_partial(path)
 
 
 def load_combined(
@@ -247,6 +289,7 @@ def load_combined(
 
     root = datasets_root if datasets_root is not None else matrix_dir.parent
     load_staged_partials(table, root, staged_dir)
+    load_staged_norm_partials(table, root)
 
     for model_key, cfg_dir in cfg_dirs.items():
         load_binary_partials(table, cfg_dir / "partials", model_key)
@@ -302,6 +345,7 @@ def build_report(
     n_cfg_off = count_datasets_with_model(table, "binary_cfg_off")
     n_patch48 = count_datasets_with_model(table, PATCH48_KEY)
     n_staged = count_datasets_with_model(table, STAGED_KEY)
+    n_staged_norm = count_datasets_with_model(table, STAGED_NORM_KEY)
     patch48_rel = (
         patch48_dir.relative_to(REPO_ROOT)
         if patch48_dir is not None
@@ -333,6 +377,9 @@ def build_report(
         f"| **4x4 patch** — jobs 3848019–3848026, merge 3848027 | "
         f"`{patch48_rel}` — patch-48 binary ckpts, aligned `dpmpp` eval; partials `*_binary_anchor.json` |",
         f"| **2-stage** — jobs 3849018–3849023 (coarse→fine grid) | {staged_note} |",
+        "| **2-stage (q99.5 MS)** — jobs 3852944–3852955 | "
+        "per-job `results/datasets/06-02-3852944-*-binary_dual_scale_staged/partials/` "
+        "(`max_scale_by_dataset` + `window_norm_std_floor: 0.1`) |",
     ]
     for model_key, label, default_name in CFG_INFERENCE_COLUMNS:
         cfg_dir = cfg_dirs[model_key]
@@ -353,6 +400,8 @@ def build_report(
             f"(ETTh1, ETTh2, dalia, exchange_rate, traffic"
             + ("" if not staged_pending else f"; pending: {', '.join(staged_pending)}")
             + ").",
+            f"- **2-stage (q99.5 MS):** full 12-dataset retrain with calibrated per-dataset "
+            f"`max_scale` and `window_norm_std_floor: 0.1`; {n_staged_norm}/12 eval partials.",
             "- **CFG w=1.1 / 1.5 / 4 / 10:** inference-only on 3828089 ckpts, 7 ablation datasets each.",
             "- **MMPD:** all 12 datasets in matrix partials.",
             "",
@@ -418,6 +467,20 @@ def build_report(
             status = "—"
         lines.append(f"| {job_id} | {ds} | {status} |")
 
+    staged_norm_done = {ds for ds in table if table[ds].get(STAGED_NORM_KEY)}
+    lines.extend(
+        [
+            "",
+            "## Slurm — 2-stage norm-cal grid (binary_dual_scale_staged, jobs 3852944–3852955)",
+            "",
+            "| Job | Dataset | Status |",
+            "|-----|---------|--------|",
+        ]
+    )
+    for job_id, ds in STAGED_NORM_GRID_JOBS:
+        status = "completed" if ds in staged_norm_done else "—"
+        lines.append(f"| {job_id} | {ds} | {status} |")
+
     lines.extend(
         [
             "",
@@ -478,7 +541,8 @@ def build_report(
             "",
             "## Regenerate tables",
             "",
-            "2-stage loads from `06-02-3849018-*` job dirs unless `--staged-dir` is set.",
+            "2-stage loads from `06-02-3849018-*` job dirs unless `--staged-dir` is set. "
+            "2-stage (q99.5 MS) auto-discovers `06-02-3852944-*` / `06-02-385295*`.",
             "",
             "```bash",
             *regen_lines,
