@@ -155,9 +155,8 @@ def evaluate_itrans_guidance(
                 future = future[..., overlap_k:]
             y_true_all.append(future.cpu().numpy())
 
+            # iTrans predicts `horizon` steps; dataset future is horizon+K and we trim K above.
             pred = _itrans_batch_forward(guidance, past, horizon, device)
-            if overlap_k > 0:
-                pred = pred[..., overlap_k:]
             det_all.append(pred.cpu().numpy())
 
             progress.maybe_log(
@@ -170,8 +169,14 @@ def evaluate_itrans_guidance(
     progress.done(extra=f"writing {raw_path}")
 
     deterministic = np.concatenate(det_all, axis=0)
+    y_true = np.concatenate(y_true_all, axis=0)
+    if y_true.shape != deterministic.shape:
+        raise ValueError(
+            f"shape mismatch for {run.dataset}: y_true={y_true.shape} pred={deterministic.shape} "
+            f"(horizon={horizon}, overlap_k={overlap_k})"
+        )
     pack = {
-        "y_true": np.concatenate(y_true_all, axis=0),
+        "y_true": y_true,
         "deterministic": deterministic,
         "samples": deterministic[:, :, np.newaxis, :],
         "indices": np.asarray(indices, dtype=np.int64),
