@@ -24,6 +24,7 @@ _DEFAULTS: Dict[str, Any] = {
         "image_height": 16,
         "max_scale": 3.5,
         "max_scale_by_dataset": {},
+        "window_norm_std_floor": 1e-8,
         "dit_patch_size": [8, 8],
         "use_dual_scale": True,
         "diffusion_stage": "joint",

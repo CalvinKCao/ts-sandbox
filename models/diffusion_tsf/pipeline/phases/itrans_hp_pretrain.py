@@ -119,6 +119,7 @@ def _patch_globals(
     mod.DISABLE_CROSS_ATTENTION = state.disable_cross_attention
     mod.CROSS_VARIATE_CONTEXT_BIAS = state.cross_variate_context_bias
     mod.USE_WINDOW_NORMALIZATION = state.use_window_normalization
+    mod.WINDOW_NORM_STD_FLOOR = state.window_norm_std_floor
     mod.ZERO_GUIDANCE_FORECAST = state.zero_guidance_forecast
     mod.WINDOW_STRIDE = state.window_stride
     if state.checkpoint_dir:

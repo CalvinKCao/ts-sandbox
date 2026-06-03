@@ -416,7 +416,7 @@ class DiffusionTSF(nn.Module):
             std = torch.ones_like(past[..., :1])
             return past, future, (mean, std)
         mean = past.mean(dim=-1, keepdim=True)
-        std = past.std(dim=-1, keepdim=True) + 1e-8
+        std = past.std(dim=-1, keepdim=True).clamp_min(self.config.window_norm_std_floor)
         past_norm = (past - mean) / std
         if future is not None:
             future_norm = (future - mean) / std

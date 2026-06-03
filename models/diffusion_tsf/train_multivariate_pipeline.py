@@ -242,6 +242,7 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
     return {
         'image_height': IMAGE_HEIGHT,
         'max_scale': MAX_SCALE,
+        'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
         'use_dual_scale': USE_DUAL_SCALE,
         'diffusion_stage': DIFFUSION_STAGE,
         'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
@@ -514,6 +515,7 @@ def init_wandb(
         'forecast_length': FORECAST_LENGTH,
         'image_height': IMAGE_HEIGHT,
         'max_scale': MAX_SCALE,
+        'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
         'use_dual_scale': USE_DUAL_SCALE,
         'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
         'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
@@ -751,6 +753,7 @@ from models.diffusion_tsf.pipeline_config import (
     ITRANSFORMER_SEQ_LEN,
     IMAGE_HEIGHT,
     MAX_SCALE,
+    WINDOW_NORM_STD_FLOOR,
     LOOKBACK_OVERLAP,
     PAST_LOSS_WEIGHT,
     N_VARIATES_DEFAULT,
@@ -1290,6 +1293,7 @@ def create_diffusion_model(
     diffusion_stage: Optional[str] = None,
     use_guidance_channel: Optional[bool] = None,
     max_scale: Optional[float] = None,
+    window_norm_std_floor: Optional[float] = None,
     cfg_dropout: Optional[float] = None,
     cfg_scale: Optional[float] = None,
     use_cfg_inference: Optional[bool] = None,
@@ -1324,6 +1328,8 @@ def create_diffusion_model(
         use_guidance_channel = USE_GUIDANCE_CHANNEL
     if max_scale is None:
         max_scale = MAX_SCALE
+    if window_norm_std_floor is None:
+        window_norm_std_floor = WINDOW_NORM_STD_FLOOR
     if cfg_dropout is None:
         cfg_dropout = CFG_DROPOUT
     if cfg_scale is None:
@@ -1376,6 +1382,7 @@ def create_diffusion_model(
         cfg_scale=cfg_scale,
         use_cfg_inference=use_cfg_inference,
         use_window_normalization=use_window_normalization,
+        window_norm_std_floor=window_norm_std_floor,
         zero_guidance_forecast=zero_guidance_forecast,
     )
     return DiffusionTSF(config, guidance_model=guidance_model)
@@ -2722,6 +2729,7 @@ def _promote_best_trial_to_final(
                 'diffusion_type': DIFFUSION_TYPE,
                 'image_height': IMAGE_HEIGHT,
                 'max_scale': MAX_SCALE,
+                'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
                 'use_dual_scale': USE_DUAL_SCALE,
                 'diffusion_stage': DIFFUSION_STAGE,
                 'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
@@ -4242,7 +4250,7 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
-    global IMAGE_HEIGHT, MAX_SCALE, DISABLE_CROSS_ATTENTION, CROSS_VARIATE_CONTEXT_BIAS
+    global IMAGE_HEIGHT, MAX_SCALE, WINDOW_NORM_STD_FLOOR, DISABLE_CROSS_ATTENTION, CROSS_VARIATE_CONTEXT_BIAS
     global USE_DUAL_SCALE, DIFFUSION_STAGE, DUAL_SCALE_FINE_WEIGHT, DUAL_SCALE_INDEPENDENT_TIMESTEPS
     global USE_GUIDANCE_CHANNEL
     global CFG_DROPOUT, CFG_SCALE, USE_CFG_INFERENCE
@@ -4300,6 +4308,8 @@ def main():
                         help='Override image height')
     parser.add_argument('--max-scale', type=float, default=MAX_SCALE,
                         help='Representation range in per-window normalized units')
+    parser.add_argument('--window-norm-std-floor', type=float, default=WINDOW_NORM_STD_FLOOR,
+                        help='Minimum per-window std for diffusion normalization')
     parser.add_argument('--dual-scale', action='store_true',
                         help='Use paired 16-bin coarse/residual binary CDF maps')
     parser.add_argument('--diffusion-stage', type=str, default=DIFFUSION_STAGE,
@@ -4367,6 +4377,7 @@ def main():
     staged_model = DIFFUSION_STAGE in {"coarse", "fine"}
     IMAGE_HEIGHT = 16 if (USE_DUAL_SCALE or staged_model) and args.image_height == parser.get_default('image_height') else args.image_height
     MAX_SCALE = args.max_scale
+    WINDOW_NORM_STD_FLOOR = args.window_norm_std_floor
     if args.disable_cross_attention:
         DISABLE_CROSS_ATTENTION = True
     if args.disable_window_normalization:
@@ -4450,6 +4461,8 @@ def main():
             cli_overrides["cross_variate_context_bias"] = args.cross_variate_context_bias
         if args.max_scale != parser.get_default('max_scale'):
             cli_overrides["max_scale"] = args.max_scale
+        if args.window_norm_std_floor != parser.get_default('window_norm_std_floor'):
+            cli_overrides["window_norm_std_floor"] = args.window_norm_std_floor
 
         cfg = load_experiment_config(args.config, cli_overrides)
         state = PipelineState.from_config(cfg)

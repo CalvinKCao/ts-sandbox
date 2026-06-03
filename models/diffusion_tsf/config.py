@@ -75,6 +75,7 @@ class DiffusionTSFConfig:
     deterministic_anchor_lambda: float = 0.99
     deterministic_anchor_alpha: float = 0.5
     use_window_normalization: bool = True
+    window_norm_std_floor: float = 1e-8
     zero_guidance_forecast: bool = False
 
     model_type: str = "dit"
@@ -144,6 +145,7 @@ class DiffusionTSFConfig:
         assert 0 <= self.cutout_prob <= 1
         assert 0.0 <= self.deterministic_anchor_lambda <= 1.0
         assert 0.0 <= self.deterministic_anchor_alpha < 1.0
+        assert self.window_norm_std_floor > 0
         assert self.representation_mode in ["pdf", "cdf"]
         if not self.variate_factorized:
             raise ValueError("variate_factorized=False is no longer supported.")

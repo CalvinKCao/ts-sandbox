@@ -49,6 +49,7 @@ class PipelineState:
     disable_cross_attention: bool = False
     cross_variate_context_bias: float = 0.0
     use_window_normalization: bool = True
+    window_norm_std_floor: float = 1e-8
     zero_guidance_forecast: bool = False
 
     # -- Sequence geometry --
@@ -143,6 +144,8 @@ class PipelineState:
             init_kwargs["max_scale_by_dataset"] = {
                 str(k): float(v) for k, v in init_kwargs["max_scale_by_dataset"].items()
             }
+        if "window_norm_std_floor" in init_kwargs:
+            init_kwargs["window_norm_std_floor"] = float(init_kwargs["window_norm_std_floor"])
 
         init_kwargs["extra"] = extra
         init_kwargs["phase_configs"] = cfg.get("phases", [])

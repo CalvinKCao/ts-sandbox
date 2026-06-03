@@ -6,19 +6,20 @@ experiment:
   model_type: dit
   image_height: 16
   max_scale: 3.5
-  # Per-dataset q99.5 of |(future - past_window_mean) / past_window_std| on train windows.
+  window_norm_std_floor: 0.1
+  # Per-dataset q99.5 of |(future - past_window_mean) / max(past_window_std, 0.1)| on train windows.
   max_scale_by_dataset:
     ETTh1: 5.2
-    ETTh2: 24.0
-    ETTm1: 11.5
-    ETTm2: 48.0
+    ETTh2: 9.0
+    ETTm1: 7.7
+    ETTm2: 9.0
     illness: 6.3
-    exchange_rate: 17.0
-    weather: 13.5
-    electricity: 6.1
+    exchange_rate: 10.6
+    weather: 9.3
+    electricity: 5.4
     traffic: 6.0
-    PeMS: 12.5
-    solar_Alabama: 15.0
+    PeMS: 11.8
+    solar_Alabama: 13.0
     dalia: 6.0
   dit_patch_size: [8, 8]
   use_dual_scale: false
