@@ -190,6 +190,185 @@ def zscore_1d(x: np.ndarray) -> np.ndarray:
     return (x - x.mean()) / (x.std() + 1e-8)
 
 
+def _safe_prob(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float64)
+    x = np.maximum(x, 0.0) + 1e-12
+    return x / x.sum()
+
+
+def _js_divergence(p: np.ndarray, q: np.ndarray) -> float:
+    p = _safe_prob(p)
+    q = _safe_prob(q)
+    m = 0.5 * (p + q)
+    return float(0.5 * np.sum(p * np.log(p / m)) + 0.5 * np.sum(q * np.log(q / m)))
+
+
+def _robust_scale(x: np.ndarray) -> float:
+    x = np.asarray(x, dtype=np.float64)
+    if x.size == 0:
+        return 1.0
+    med = float(np.median(x))
+    mad = float(np.median(np.abs(x - med))) * 1.4826
+    if mad > 1e-8:
+        return mad
+    q25, q75 = np.percentile(x, [25, 75])
+    iqr = float(q75 - q25) / 1.349
+    if iqr > 1e-8:
+        return iqr
+    std = float(np.std(x))
+    if std > 1e-8:
+        return std
+    return 1.0
+
+
+def _robust_centered(values: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return values
+    return (values - np.median(values)) / (_robust_scale(reference) + 1e-8)
+
+
+def _quantile_wasserstein_1d(a: np.ndarray, b: np.ndarray, n_quantiles: int = 128) -> float:
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    if a.size == 0 and b.size == 0:
+        return 0.0
+    if a.size == 0 or b.size == 0:
+        return float("nan")
+    n = max(8, min(n_quantiles, max(a.size, b.size)))
+    grid = np.linspace(0.0, 1.0, n)
+    return float(np.mean(np.abs(np.quantile(a, grid) - np.quantile(b, grid))))
+
+
+def increment_distribution_distance(a: np.ndarray, b: np.ndarray) -> float:
+    da = np.diff(np.asarray(a, dtype=np.float64))
+    db = np.diff(np.asarray(b, dtype=np.float64))
+    if da.size == 0 and db.size == 0:
+        return 0.0
+    return _quantile_wasserstein_1d(
+        _robust_centered(da, da),
+        _robust_centered(db, da),
+    )
+
+
+def curvature_distribution_distance(a: np.ndarray, b: np.ndarray) -> float:
+    ca = np.diff(np.asarray(a, dtype=np.float64), n=2)
+    cb = np.diff(np.asarray(b, dtype=np.float64), n=2)
+    if ca.size == 0 and cb.size == 0:
+        return 0.0
+    return _quantile_wasserstein_1d(
+        _robust_centered(ca, ca),
+        _robust_centered(cb, ca),
+    )
+
+
+def _haar_detail_energies(x: np.ndarray, drop_coarsest: int = 1) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float64)
+    if x.size < 2:
+        return np.zeros(1, dtype=np.float64)
+    n = 1 << int(math.ceil(math.log2(x.size)))
+    if n != x.size:
+        x = np.pad(x, (0, n - x.size), mode="constant")
+    details = []
+    cur = x
+    while cur.size >= 2:
+        even = cur[0::2]
+        odd = cur[1::2]
+        detail = (even - odd) / math.sqrt(2.0)
+        details.append(float(np.sum(detail * detail)))
+        cur = (even + odd) / math.sqrt(2.0)
+    if drop_coarsest > 0 and len(details) > drop_coarsest:
+        details = details[:-drop_coarsest]
+    return np.asarray(details, dtype=np.float64)
+
+
+def haar_detail_jsd(a: np.ndarray, b: np.ndarray) -> float:
+    da = np.diff(np.asarray(a, dtype=np.float64))
+    db = np.diff(np.asarray(b, dtype=np.float64))
+    ref = da if da.size else np.asarray(a, dtype=np.float64)
+    za = _robust_centered(da, ref)
+    zb = _robust_centered(db, ref)
+    ea = _haar_detail_energies(za)
+    eb = _haar_detail_energies(zb)
+    n = max(ea.size, eb.size)
+    ea = np.pad(ea, (0, n - ea.size), mode="constant")
+    eb = np.pad(eb, (0, n - eb.size), mode="constant")
+    # Add a quiet-texture bin so flat-vs-noisy is not hidden by normalization.
+    pa = np.r_[ea, 1.0] / (float(ea.sum()) + 1.0)
+    pb = np.r_[eb, 1.0] / (float(eb.sum()) + 1.0)
+    return _js_divergence(pa, pb)
+
+
+def _longest_run(mask: np.ndarray) -> int:
+    best = 0
+    run = 0
+    for value in mask:
+        if bool(value):
+            run += 1
+            best = max(best, run)
+        else:
+            run = 0
+    return best
+
+
+def _jump_plateau_features(x: np.ndarray, reference_delta: np.ndarray) -> np.ndarray:
+    d = np.diff(np.asarray(x, dtype=np.float64))
+    if d.size == 0:
+        return np.zeros(5, dtype=np.float64)
+    z = _robust_centered(d, reference_delta)
+    flat = np.abs(z) <= 0.25
+    jump = np.abs(z) >= 2.5
+    if np.any(jump):
+        jump_amp = float(np.mean(np.minimum(np.abs(z[jump]), 10.0)) / 10.0)
+        sign_balance = float(abs(np.mean(np.sign(z[jump]))))
+    else:
+        jump_amp = 0.0
+        sign_balance = 0.0
+    return np.array(
+        [
+            float(np.mean(flat)),
+            float(_longest_run(flat) / max(1, flat.size)),
+            float(np.mean(jump)),
+            jump_amp,
+            sign_balance,
+        ],
+        dtype=np.float64,
+    )
+
+
+def jump_plateau_distance(a: np.ndarray, b: np.ndarray) -> float:
+    ref = np.diff(np.asarray(a, dtype=np.float64))
+    fa = _jump_plateau_features(a, ref)
+    fb = _jump_plateau_features(b, ref)
+    return float(np.linalg.norm(fa - fb) / math.sqrt(fa.size))
+
+
+def derivative_motif_jsd(a: np.ndarray, b: np.ndarray, ngram: int = 4) -> float:
+    def motif_dist(x: np.ndarray, ref_delta: np.ndarray) -> np.ndarray:
+        d = np.diff(np.asarray(x, dtype=np.float64))
+        counts = np.zeros(5 ** ngram, dtype=np.float64)
+        if d.size == 0:
+            counts[0] = 1.0
+            return _safe_prob(counts)
+        z = _robust_centered(d, ref_delta)
+        symbols = np.digitize(z, [-1.5, -0.25, 0.25, 1.5]).astype(np.int64)
+        if symbols.size < ngram:
+            code = 0
+            for value in symbols:
+                code = code * 5 + int(value)
+            counts[code] += 1.0
+        else:
+            for start in range(symbols.size - ngram + 1):
+                code = 0
+                for value in symbols[start : start + ngram]:
+                    code = code * 5 + int(value)
+                counts[code] += 1.0
+        return _safe_prob(counts)
+
+    ref = np.diff(np.asarray(a, dtype=np.float64))
+    return _js_divergence(motif_dist(a, ref), motif_dist(b, ref))
+
+
 def ordinal_jsd(a: np.ndarray, b: np.ndarray, order: int = 4) -> float:
     from itertools import permutations
 
@@ -209,9 +388,7 @@ def ordinal_jsd(a: np.ndarray, b: np.ndarray, order: int = 4) -> float:
 
     p = dist(a)
     q = dist(b)
-    m = 0.5 * (p + q)
-    jsd = 0.5 * np.sum(p * np.log(p / m)) + 0.5 * np.sum(q * np.log(q / m))
-    return float(jsd)
+    return _js_divergence(p, q)
 
 
 def _line_lengths_bool(arr: np.ndarray) -> List[int]:
@@ -450,6 +627,11 @@ def texture_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
         "texture_rqa_distance": [],
         "texture_variogram_distance": [],
         "texture_pathsig_distance": [],
+        "texture_increment_wasserstein": [],
+        "texture_curvature_wasserstein": [],
+        "texture_haar_detail_jsd": [],
+        "texture_jump_plateau_distance": [],
+        "texture_derivative_motif_jsd": [],
     }
     flat_true = y_true.reshape(-1, y_true.shape[-1])
     flat_pred = y_pred.reshape(-1, y_pred.shape[-1])
@@ -462,5 +644,10 @@ def texture_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
         vb = variogram(pred_z)
         vals["texture_variogram_distance"].append(float(np.linalg.norm(va - vb) / math.sqrt(max(1, va.size))))
         vals["texture_pathsig_distance"].append(path_signature_distance(gt_z, pred_z))
+        vals["texture_increment_wasserstein"].append(increment_distribution_distance(gt, pred))
+        vals["texture_curvature_wasserstein"].append(curvature_distribution_distance(gt, pred))
+        vals["texture_haar_detail_jsd"].append(haar_detail_jsd(gt, pred))
+        vals["texture_jump_plateau_distance"].append(jump_plateau_distance(gt, pred))
+        vals["texture_derivative_motif_jsd"].append(derivative_motif_jsd(gt, pred))
     return {key: float(np.mean(value)) for key, value in vals.items()}
 

@@ -66,7 +66,8 @@ phases:
     patience: 15
 
   - phase: staged_eval
-    eval_test_fraction: 0.5
+    eval_test_fraction: 1.0
+    test_stride: 2
     n_samples: 1
     probabilistic_n_samples: 100
     probabilistic_sampler: dpmpp

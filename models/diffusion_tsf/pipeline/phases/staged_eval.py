@@ -71,8 +71,18 @@ class StagedEvalPhase(PipelinePhase):
         partial = os.path.join(state.results_dir, "partials", f"{state.dataset}_staged_anchor.json")
         nested = os.path.join(state.results_dir, subset_id, "staged_results.json")
         if os.path.exists(partial) and os.path.exists(nested):
-            logger.info("  [%s] already evaluated: %s", self.name, partial)
-            return True
+            try:
+                with open(partial) as f:
+                    metrics = json.load(f)
+                robust_ok = "texture_derivative_motif_jsd" in metrics
+                prob_robust_ok = "prob_texture_derivative_motif_jsd" in metrics
+            except Exception:
+                robust_ok = False
+                prob_robust_ok = False
+            if robust_ok and prob_robust_ok:
+                logger.info("  [%s] already evaluated with robust texture metrics: %s", self.name, partial)
+                return True
+            logger.info("  [%s] re-evaluating to add robust texture metrics: %s", self.name, partial)
         return False
 
     def _load_model(self, state: PipelineState, stage: str, itrans_guidance, n_iv: int, device: torch.device):
@@ -118,7 +128,7 @@ class StagedEvalPhase(PipelinePhase):
             variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
         subset_meta = state.data_subset_resolved or {}
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
-        test_stride = int(subset_meta.get("test_stride", 1))
+        test_stride = int(self.get("test_stride", subset_meta.get("test_stride", 1)))
         n_iv = len(variate_indices)
 
         ft_itrans_ckpt = state.itrans_finetune_ckpt

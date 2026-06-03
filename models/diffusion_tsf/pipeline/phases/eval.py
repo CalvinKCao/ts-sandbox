@@ -56,13 +56,13 @@ class EvalPhase(PipelinePhase):
         from models.diffusion_tsf.train_multivariate_pipeline import _load_subset_results
         prior = _load_subset_results(state.results_dir, subset_id)
         em = prior.get("eval_metrics") or {}
-        single_ok = "texture_pathsig_distance" in em.get("single", {})
+        single_ok = "texture_derivative_motif_jsd" in em.get("single", {})
         prob_block = em.get("probabilistic", {})
         prob_ok = "crps" in prob_block
         top3_ok = "top3_mse" in prob_block
-        prob_texture_ok = "prob_texture_pathsig_distance" in prob_block
+        prob_texture_ok = "prob_texture_derivative_motif_jsd" in prob_block
         if em and single_ok and prob_ok and top3_ok and prob_texture_ok:
-            logger.info(f"  [{self.name}] already evaluated with texture metrics: {subset_id}")
+            logger.info(f"  [{self.name}] already evaluated with robust texture metrics: {subset_id}")
             return True
         return False
 

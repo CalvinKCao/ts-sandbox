@@ -1501,24 +1501,9 @@ def path_signature_distance(a: np.ndarray, b: np.ndarray, window: int = 12, dept
 
 
 def texture_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    vals = {
-        "texture_ordinal_jsd": [],
-        "texture_rqa_distance": [],
-        "texture_variogram_distance": [],
-        "texture_pathsig_distance": [],
-    }
-    flat_true = y_true.reshape(-1, y_true.shape[-1])
-    flat_pred = y_pred.reshape(-1, y_pred.shape[-1])
-    for gt, pred in zip(flat_true, flat_pred):
-        gt_z = zscore_1d(gt)
-        pred_z = zscore_1d(pred)
-        vals["texture_ordinal_jsd"].append(ordinal_jsd(gt_z, pred_z))
-        vals["texture_rqa_distance"].append(float(np.linalg.norm(rqa_features(gt_z) - rqa_features(pred_z))))
-        va = variogram(gt_z)
-        vb = variogram(pred_z)
-        vals["texture_variogram_distance"].append(float(np.linalg.norm(va - vb) / math.sqrt(max(1, va.size))))
-        vals["texture_pathsig_distance"].append(path_signature_distance(gt_z, pred_z))
-    return {key: float(np.mean(value)) for key, value in vals.items()}
+    from models.diffusion_tsf.metrics import texture_metrics as shared_texture_metrics
+
+    return shared_texture_metrics(y_true, y_pred)
 
 
 def texture_metrics_per_sample(
@@ -1954,7 +1939,12 @@ def print_summary(results: Dict[str, Dict[str, Dict[str, float]]], profile: str 
                     f"{m.get('n_samples', float('nan')):.0f}"
                 )
         return
-    print("dataset,model,mse,mae,crps,top1_mse,top1_mae,top3_mse,top3_mae,texture_pathsig_distance")
+    print(
+        "dataset,model,mse,mae,crps,top1_mse,top1_mae,top3_mse,top3_mae,"
+        "texture_increment_wasserstein,texture_curvature_wasserstein,"
+        "texture_haar_detail_jsd,texture_jump_plateau_distance,"
+        "texture_derivative_motif_jsd"
+    )
     for dataset in sorted(results):
         for model in sorted(results[dataset]):
             m = results[dataset][model]
@@ -1967,7 +1957,11 @@ def print_summary(results: Dict[str, Dict[str, Dict[str, float]]], profile: str 
                 f"{m.get('top1_mae', float('nan')):.6f},"
                 f"{m.get('top3_mse', float('nan')):.6f},"
                 f"{m.get('top3_mae', float('nan')):.6f},"
-                f"{m.get('texture_pathsig_distance', float('nan')):.6f}"
+                f"{m.get('texture_increment_wasserstein', float('nan')):.6f},"
+                f"{m.get('texture_curvature_wasserstein', float('nan')):.6f},"
+                f"{m.get('texture_haar_detail_jsd', float('nan')):.6f},"
+                f"{m.get('texture_jump_plateau_distance', float('nan')):.6f},"
+                f"{m.get('texture_derivative_motif_jsd', float('nan')):.6f}"
             )
 
 
