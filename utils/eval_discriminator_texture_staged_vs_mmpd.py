@@ -666,6 +666,12 @@ def write_outputs(args: argparse.Namespace, results: Dict[str, Dict[str, Dict[st
     write_json(args.output_dir / "run_manifest.json", manifest)
 
 
+def valid_slice_lengths(horizon: int, requested: Sequence[int]) -> Tuple[List[int], List[int]]:
+    valid = [int(length) for length in requested if int(length) <= horizon]
+    skipped = [int(length) for length in requested if int(length) > horizon]
+    return valid, skipped
+
+
 def run_eval(args: argparse.Namespace) -> None:
     unknown = [dataset for dataset in args.datasets if dataset not in DEFAULT_STAGED_CKPTS]
     if unknown:
@@ -689,9 +695,19 @@ def run_eval(args: argparse.Namespace) -> None:
             flush=True,
         )
         results.setdefault(dataset, {})
+        horizon = int(bundle.y_true.shape[-1])
+        valid_lens, skipped_lens = valid_slice_lengths(horizon, args.slice_lengths)
+        if skipped_lens:
+            print(
+                f"[{dataset}] skipping slice lengths {skipped_lens} (horizon={horizon})",
+                flush=True,
+            )
+        if not valid_lens:
+            print(f"[{dataset}] no valid slice lengths for horizon={horizon}; skipping", flush=True)
+            continue
         for fake_source in args.fake_sources:
             results[dataset].setdefault(fake_source, {})
-            for slice_len in args.slice_lengths:
+            for slice_len in valid_lens:
                 if not args.force_train:
                     existing = existing_combo(args.output_dir, dataset, fake_source, int(slice_len))
                     if existing is not None:
