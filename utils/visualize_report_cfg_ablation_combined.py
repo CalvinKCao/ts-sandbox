@@ -10,6 +10,7 @@ Output defaults to the report folder (same basename as the .md file):
   reports/06-01_cfg_ablation_mmpd_matrix_combined/viz_cfg_off/{dataset}/...
   reports/06-01_cfg_ablation_mmpd_matrix_combined/viz_4x4_patch/{dataset}/...
   reports/06-01_cfg_ablation_mmpd_matrix_combined/viz_2stage/{dataset}/...
+  reports/06-01_cfg_ablation_mmpd_matrix_combined/viz_coarse-fine-multiphase-models/{dataset}/...
 
 Example:
   python utils/visualize_report_cfg_ablation_combined.py --smoke-test
@@ -58,6 +59,15 @@ PATCH48_JOB_RE = re.compile(
     rf"06-02-384445[0-7]-(.+)-{re.escape(PATCH48_CKPT_SUFFIX)}$"
 )
 
+_STAGED_DATASETS = [
+    "ETTh1",
+    "ETTh2",
+    "PeMS",
+    "dalia",
+    "exchange_rate",
+    "traffic",
+]
+
 
 def pick_patch48_ckpt_dir(ckpt_root: Path, dataset: str) -> Path:
     candidates: List[Path] = []
@@ -97,15 +107,16 @@ VARIANTS: Dict[str, Dict[str, object]] = {
         "label": "2-stage",
         "subdir": "viz_2stage",
         "pick_ckpt": pick_staged_ckpt_dir,
-        "datasets": [
-            "ETTh1",
-            "ETTh2",
-            "PeMS",
-            "dalia",
-            "exchange_rate",
-            "traffic",
-        ],
+        "datasets": _STAGED_DATASETS,
         "slurm_note": "grid train/eval 3849018–3849023",
+        "plot_fn": "staged",
+    },
+    "coarse_fine_multiphase": {
+        "label": "coarse-fine multiphase",
+        "subdir": "viz_coarse-fine-multiphase-models",
+        "pick_ckpt": pick_staged_ckpt_dir,
+        "datasets": _STAGED_DATASETS,
+        "slurm_note": "same ckpts as 2-stage (binary_dual_scale_staged grid)",
         "plot_fn": "staged",
     },
 }
@@ -195,7 +206,7 @@ def main() -> None:
         "--variants",
         type=str,
         default="cfg_off",
-        help="Comma-separated: cfg_off, 4x4_patch, 2stage",
+        help="Comma-separated: cfg_off, 4x4_patch, 2stage, coarse_fine_multiphase",
     )
     parser.add_argument(
         "--datasets",

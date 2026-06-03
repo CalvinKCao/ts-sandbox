@@ -38,10 +38,10 @@ from models.diffusion_tsf.guidance import iTransformerGuidance
 from models.diffusion_tsf.pipeline.config import load_experiment_config
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch_stage_globals
 from models.diffusion_tsf.pipeline.state import PipelineState
+from models.diffusion_tsf.dalia_data import dalia_window_lengths
 from models.diffusion_tsf.train_multivariate_pipeline import (
     anchor_kwargs_from_params,
     create_diffusion_model,
-    dataset_window_lengths,
     load_dataset,
     load_diffusion_state_keep_attached_guidance,
     load_itransformer_from_checkpoint,
@@ -89,6 +89,13 @@ def _load_staged_bundle(checkpoint_dir: Path, dataset: str) -> Dict[str, Any]:
     return candidates[0]
 
 
+def _window_lengths(dataset: str, state: PipelineState) -> Tuple[int, int]:
+    """Per-dataset windows; do not use train_multivariate_pipeline globals (staged load mutates them)."""
+    if dataset == "dalia":
+        return dalia_window_lengths()
+    return state.lookback_length, state.forecast_length
+
+
 def _build_pipeline_state(checkpoint_dir: Path, dataset: str, subset_id: str) -> PipelineState:
     cfg = load_experiment_config(
         str(STAGED_CONFIG),
@@ -112,7 +119,7 @@ def _load_staged_diffusion(
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
     patch_stage_globals(pipeline_mod, state, stage, honor_dataset_windows=True)
-    lookback, horizon = dataset_window_lengths(state.dataset)
+    lookback, horizon = _window_lengths(state.dataset, state)
     meta_path = ckpt_path.parent / "metadata.json"
     tuned: Dict[str, Any] = {}
     if meta_path.is_file():
@@ -200,9 +207,8 @@ def plot_staged_forecast_panel(
     subset_id = sub["subset_id"]
     variate_indices = sub["variate_indices"]
     n_vars = len(variate_indices)
-    lookback, horizon = dataset_window_lengths(dataset)
-
     state = _build_pipeline_state(checkpoint_dir, dataset, subset_id)
+    lookback, horizon = _window_lengths(dataset, state)
 
     _, _, test_ds, norm_stats = load_dataset(
         dataset,
@@ -268,13 +274,18 @@ def plot_staged_forecast_panel(
         test_index=test_index,
     )
 
-    K = getattr(coarse_model.config, "lookback_overlap", 0)
+    K = int(getattr(coarse_model.config, "lookback_overlap", 0) or 0)
     context_len = min(horizon * 2, lookback)
     t_past = np.arange(-context_len, 0)
-    t_future = np.arange(0, horizon)
     future_slice = future[:, -horizon:]
     if K > 0:
         future_slice = future_slice[..., K:]
+    t_fut_len = int(future_slice.shape[-1])
+    t_future = np.arange(0, t_fut_len)
+
+    def _forecast_tail(pred: torch.Tensor) -> torch.Tensor:
+        tail = pred[:, -horizon:]
+        return tail[..., K:] if K > 0 else tail
 
     fig, axes = plt.subplots(
         n_vars + num_extra_lookbacks,
@@ -290,8 +301,9 @@ def plot_staged_forecast_panel(
         ax = axes[v, 0]
         past_dn = denorm(past, mean, std)[v].numpy()
         gt = denorm(future_slice, mean, std)[v].numpy()
-        gdn = denorm(guidance_pred, mean, std)[v].numpy()
-        adn = denorm(anchor_pred[:, -horizon:], mean, std)[v].numpy()
+        g_pred = guidance_pred[0] if guidance_pred.dim() == 3 else guidance_pred
+        gdn = denorm(_forecast_tail(g_pred), mean, std)[v].numpy()
+        adn = denorm(_forecast_tail(anchor_pred), mean, std)[v].numpy()
 
         ax.plot(t_past, past_dn[-context_len:], color="#9E9E9E", lw=0.9, alpha=0.6)
         ax.plot(t_future, gt, color="#2196F3", lw=1.8, label="Ground truth")
@@ -304,7 +316,7 @@ def plot_staged_forecast_panel(
             label="iTrans guidance (finetuned)",
         )
         if full_pred is not None:
-            fdn = denorm(full_pred[:, -horizon:], mean, std)[v].numpy()
+            fdn = denorm(_forecast_tail(full_pred), mean, std)[v].numpy()
             ax.plot(
                 t_future,
                 fdn,
@@ -321,7 +333,7 @@ def plot_staged_forecast_panel(
             label="2-stage anchor (coarse→fine)",
         )
         for k, pp in enumerate(prob_preds):
-            pdn = denorm(pp[:, -horizon:], mean, std)[v].numpy()
+            pdn = denorm(_forecast_tail(pp), mean, std)[v].numpy()
             ax.plot(
                 t_future,
                 pdn,
