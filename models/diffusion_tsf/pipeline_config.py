@@ -53,6 +53,7 @@ DIFFUSION_TYPE: str = "binary"
 # ---- 2D map -----------------------------------------------------------------------
 
 IMAGE_HEIGHT: int = 32
+MAX_SCALE: float = 3.5
 DISABLE_CROSS_ATTENTION: bool = False
 USE_DUAL_SCALE: bool = False
 DIFFUSION_STAGE: str = "joint"

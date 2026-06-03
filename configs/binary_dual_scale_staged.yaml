@@ -5,6 +5,21 @@ experiment:
   diffusion_type: binary
   model_type: dit
   image_height: 16
+  max_scale: 3.5
+  # Per-dataset q99.5 of |(future - past_window_mean) / past_window_std| on train windows.
+  max_scale_by_dataset:
+    ETTh1: 5.2
+    ETTh2: 24.0
+    ETTm1: 11.5
+    ETTm2: 48.0
+    illness: 6.3
+    exchange_rate: 17.0
+    weather: 13.5
+    electricity: 6.1
+    traffic: 6.0
+    PeMS: 12.5
+    solar_Alabama: 15.0
+    dalia: 6.0
   dit_patch_size: [8, 8]
   use_dual_scale: false
   diffusion_stage: joint

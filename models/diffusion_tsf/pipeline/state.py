@@ -31,6 +31,8 @@ class PipelineState:
     diffusion_type: str = "binary"
     model_type: str = "dit"
     image_height: int = 32
+    max_scale: float = 3.5
+    max_scale_by_dataset: Dict[str, float] = field(default_factory=dict)
     dit_patch_size: Tuple[int, int] = (8, 8)
     use_dual_scale: bool = False
     diffusion_stage: str = "joint"
@@ -135,6 +137,12 @@ class PipelineState:
 
         if "dit_patch_size" in init_kwargs:
             init_kwargs["dit_patch_size"] = tuple(int(x) for x in init_kwargs["dit_patch_size"])
+        if "max_scale" in init_kwargs:
+            init_kwargs["max_scale"] = float(init_kwargs["max_scale"])
+        if "max_scale_by_dataset" in init_kwargs:
+            init_kwargs["max_scale_by_dataset"] = {
+                str(k): float(v) for k, v in init_kwargs["max_scale_by_dataset"].items()
+            }
 
         init_kwargs["extra"] = extra
         init_kwargs["phase_configs"] = cfg.get("phases", [])

@@ -22,6 +22,8 @@ _DEFAULTS: Dict[str, Any] = {
         "diffusion_type": "binary",
         "model_type": "dit",
         "image_height": 16,
+        "max_scale": 3.5,
+        "max_scale_by_dataset": {},
         "dit_patch_size": [8, 8],
         "use_dual_scale": True,
         "diffusion_stage": "joint",
