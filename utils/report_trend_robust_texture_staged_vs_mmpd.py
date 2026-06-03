@@ -73,9 +73,10 @@ LEGACY_TEXTURE_PROB = [
 ]
 
 DISC_METRICS = [
-    ("disc_bce", "Discriminator BCE"),
-    ("disc_acc", "Discriminator accuracy"),
-    ("disc_auroc", "Discriminator AUROC"),
+    ("log2_bce_gap", "Discriminator |BCE−log2| (higher is better)"),
+    ("disc_bce", "Discriminator BCE (0.6931 = chance)"),
+    ("disc_acc", "Discriminator accuracy (0.5 = chance)"),
+    ("disc_auroc", "Discriminator AUROC (0.5 = chance)"),
 ]
 
 
@@ -175,12 +176,16 @@ def disc_metric_value(
 ) -> Optional[float]:
     if model == "itrans_guidance":
         return None
-    return as_float(
-        disc.get(dataset, {})
-        .get(model, {})
-        .get(str(slice_len), {})
-        .get(metric)
-    )
+    row = disc.get(dataset, {}).get(model, {}).get(str(slice_len), {})
+    if metric == "log2_bce_gap":
+        gap = as_float(row.get("log2_bce_gap"))
+        if gap is not None:
+            return gap
+        bce = as_float(row.get("disc_bce"))
+        if bce is None:
+            return None
+        return abs(bce - LOG2)
+    return as_float(row.get(metric))
 
 
 def best_disc_models(
@@ -194,7 +199,9 @@ def best_disc_models(
         val = disc_metric_value(disc, dataset, model, slice_len, metric)
         if val is None:
             continue
-        if metric == "disc_bce":
+        if metric == "log2_bce_gap":
+            score = val
+        elif metric == "disc_bce":
             score = -abs(val - LOG2)
         else:
             score = -abs(val - 0.5)
@@ -317,10 +324,13 @@ def build_report(
             [
                 "---",
                 "",
-                "## Discriminator texture metrics (closer to chance is better)",
+                "## Discriminator texture metrics",
                 "",
-                "Per-dataset classifiers trained on real vs stochastic horizon slices. "
-                "iTrans guidance has no discriminator eval.",
+                "Per-dataset classifiers on real vs stochastic horizon slices (separate disc per model). "
+                "iTrans guidance has no discriminator eval. **Important:** most BCE values here are far "
+                f"below chance (`log(2)={LOG2:.4f}`), meaning both generators are still easy to distinguish "
+                "from GT — MMPD is usually *less* distinguishable, not indistinguishable. "
+                "Use `|BCE−log2|` (higher is better) for ranking.",
                 "",
             ]
         )
@@ -344,6 +354,10 @@ def build_report(
         disc_counts = disc_win_counts(disc, datasets, slice_lengths)
         parts = [f"{MODEL_LABELS[m]}: {disc_counts[m]}" for m in MODEL_ORDER]
         lines.append(f"- **Discriminator texture** closest-to-chance wins — " + ", ".join(parts))
+        lines.append(
+            "- **Note:** MMPD discriminators must use MMPD-pack GT (not binary-pack GT) for the real class; "
+            "re-run with `--force-train` after the y_true fix if numbers predate it."
+        )
 
     lines.append("")
     return "\n".join(lines)

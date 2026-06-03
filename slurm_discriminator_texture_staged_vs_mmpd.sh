@@ -2,16 +2,19 @@
 # =============================================================================
 # Learned discriminator texture eval: staged binary vs MMPD (Killarney L40S).
 #
-# Default login-node behavior submits one independent 4h job per dataset so the
-# five dataset evals run in parallel. Each job trains L=8,16,32 discriminators
-# for GT vs binary_staged and GT vs MMPD using stochastic sample0.
+# Default login-node behavior submits one independent job per (dataset, fake
+# source) so binary and MMPD discriminators train in parallel (10 jobs for 5
+# datasets). A lightweight CPU merge job rebuilds metrics.json when all shards
+# finish.
 #
 # USAGE (login node, from $SCRATCH/ts-sandbox):
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --smoke-test
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --dataset traffic
+#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --dataset ETTh1 --fake-source mmpd
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --slice-length 16
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --force-raw-eval
+#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --merge-partials-only
 # =============================================================================
 
 set -euo pipefail
@@ -21,7 +24,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMOKE=0
 FORCE_RAW=0
 FORCE_TRAIN=0
+MERGE_PARTIALS=0
 DATASET=""
+FAKE_SOURCE=""
 SLICE_LENGTH=""
 
 while [[ $# -gt 0 ]]; do
@@ -29,13 +34,16 @@ while [[ $# -gt 0 ]]; do
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --force-raw-eval) FORCE_RAW=1; shift ;;
         --force-train) FORCE_TRAIN=1; shift ;;
+        --merge-partials-only) MERGE_PARTIALS=1; shift ;;
         --dataset) DATASET="$2"; shift 2 ;;
+        --fake-source) FAKE_SOURCE="$2"; shift 2 ;;
         --slice-length) SLICE_LENGTH="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
 
 DATASETS=(ETTh1 dalia traffic exchange_rate PeMS)
+FAKE_SOURCES=(binary_staged mmpd)
 
 # ---------------------------------------------------------------------------
 # Login node: submit
@@ -53,6 +61,29 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         exit 1
     fi
 
+    if [[ "$MERGE_PARTIALS" -eq 1 ]]; then
+        SMOKE_SUFFIX=""
+        [[ "$SMOKE" -eq 1 ]] && SMOKE_SUFFIX="-smoke"
+        RUN_STEM="$(date +%m-%d)-disc-texture-staged-vs-mmpd${SMOKE_SUFFIX}"
+        LOG_DIR="$REPO/results/logs/${RUN_STEM}"
+        mkdir -p "$LOG_DIR"
+        echo "Submitting merge-only job..."
+        sbatch \
+            --job-name="disc-tex-merge${SMOKE_SUFFIX}" \
+            --account=aip-boyuwang \
+            --nodes=1 \
+            --cpus-per-task=2 \
+            --mem=4G \
+            --time=0:15:00 \
+            --output="$LOG_DIR/disc-tex-merge-${SMOKE_SUFFIX}-%j.log" \
+            --error="$LOG_DIR/disc-tex-merge-${SMOKE_SUFFIX}-%j.log" \
+            --mail-type=FAIL \
+            --mail-user=ccao87@uwo.ca \
+            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE" \
+            "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh"
+        exit 0
+    fi
+
     SMOKE_SUFFIX=""
     if [[ "$SMOKE" -eq 1 ]]; then
         SMOKE_SUFFIX="-smoke"
@@ -60,7 +91,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         MEM="24G"
         CPUS=4
     else
-        WALL="4:00:00"
+        WALL="3:00:00"
         MEM="50G"
         CPUS=8
     fi
@@ -68,11 +99,6 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     RUN_STEM="$(date +%m-%d)-disc-texture-staged-vs-mmpd${SMOKE_SUFFIX}"
     LOG_DIR="$REPO/results/logs/${RUN_STEM}"
     mkdir -p "$LOG_DIR"
-    if [[ ! -d "$REPO/temp/MMPD/.git" ]]; then
-        echo "Preparing temp/MMPD checkout before parallel submissions..."
-        mkdir -p "$REPO/temp"
-        git clone https://github.com/Thinklab-SJTU/MMPD.git "$REPO/temp/MMPD"
-    fi
 
     SUBMIT_DATASETS=("${DATASETS[@]}")
     if [[ -n "$DATASET" ]]; then
@@ -82,30 +108,72 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         SUBMIT_DATASETS=(ETTh1)
     fi
 
-    for ds in "${SUBMIT_DATASETS[@]}"; do
-        JOB_NAME="disc-tex-${ds}${SMOKE_SUFFIX}"
-        SUBMIT_ARGS=(--dataset "$ds")
-        [[ "$SMOKE" -eq 1 ]] && SUBMIT_ARGS+=(--smoke-test)
-        [[ "$FORCE_RAW" -eq 1 ]] && SUBMIT_ARGS+=(--force-raw-eval)
-        [[ "$FORCE_TRAIN" -eq 1 ]] && SUBMIT_ARGS+=(--force-train)
-        [[ -n "$SLICE_LENGTH" ]] && SUBMIT_ARGS+=(--slice-length "$SLICE_LENGTH")
+    SUBMIT_SOURCES=("${FAKE_SOURCES[@]}")
+    if [[ -n "$FAKE_SOURCE" ]]; then
+        SUBMIT_SOURCES=("$FAKE_SOURCE")
+    fi
+    if [[ "$SMOKE" -eq 1 && -z "$FAKE_SOURCE" ]]; then
+        SUBMIT_SOURCES=(binary_staged)
+    fi
 
-        echo "Submitting discriminator texture eval for $ds (L40S, wall=$WALL)..."
+    NEED_MMPD=0
+    for src in "${SUBMIT_SOURCES[@]}"; do
+        [[ "$src" == "mmpd" ]] && NEED_MMPD=1
+    done
+    if [[ "$NEED_MMPD" -eq 1 && ! -d "$REPO/temp/MMPD/.git" ]]; then
+        echo "Preparing temp/MMPD checkout before parallel submissions..."
+        mkdir -p "$REPO/temp"
+        git clone https://github.com/Thinklab-SJTU/MMPD.git "$REPO/temp/MMPD"
+    fi
+
+    JOB_IDS=()
+    for ds in "${SUBMIT_DATASETS[@]}"; do
+        for src in "${SUBMIT_SOURCES[@]}"; do
+            JOB_NAME="disc-tex-${ds}-${src}${SMOKE_SUFFIX}"
+            SUBMIT_ARGS=(--dataset "$ds" --fake-source "$src")
+            [[ "$SMOKE" -eq 1 ]] && SUBMIT_ARGS+=(--smoke-test)
+            [[ "$FORCE_RAW" -eq 1 ]] && SUBMIT_ARGS+=(--force-raw-eval)
+            [[ "$FORCE_TRAIN" -eq 1 ]] && SUBMIT_ARGS+=(--force-train)
+            [[ -n "$SLICE_LENGTH" ]] && SUBMIT_ARGS+=(--slice-length "$SLICE_LENGTH")
+
+            echo "Submitting discriminator texture eval for $ds / $src (L40S, wall=$WALL)..."
+            job_id="$(sbatch --parsable \
+                --job-name="$JOB_NAME" \
+                --account=aip-boyuwang \
+                --nodes=1 \
+                --gres=gpu:l40s:1 \
+                --cpus-per-task="$CPUS" \
+                --mem="$MEM" \
+                --time="$WALL" \
+                --output="$LOG_DIR/${JOB_NAME}-%j.log" \
+                --error="$LOG_DIR/${JOB_NAME}-%j.log" \
+                --mail-type=FAIL \
+                --mail-user=ccao87@uwo.ca \
+                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",SLICE_LENGTH="$SLICE_LENGTH",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN" \
+                "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh" \
+                "${SUBMIT_ARGS[@]}")"
+            JOB_IDS+=("$job_id")
+        done
+    done
+
+    if [[ "${#JOB_IDS[@]}" -gt 0 ]]; then
+        dep="afterok:$(IFS=:; echo "${JOB_IDS[*]}")"
+        echo "Submitting merge job (depends on ${#JOB_IDS[@]} shard job(s))..."
         sbatch \
-            --job-name="$JOB_NAME" \
+            --dependency="$dep" \
+            --job-name="disc-tex-merge${SMOKE_SUFFIX}" \
             --account=aip-boyuwang \
             --nodes=1 \
-            --gres=gpu:l40s:1 \
-            --cpus-per-task="$CPUS" \
-            --mem="$MEM" \
-            --time="$WALL" \
-            --output="$LOG_DIR/${JOB_NAME}-%j.log" \
-            --error="$LOG_DIR/${JOB_NAME}-%j.log" \
+            --cpus-per-task=2 \
+            --mem=4G \
+            --time=0:15:00 \
+            --output="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}-%j.log" \
+            --error="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}-%j.log" \
             --mail-type=FAIL \
             --mail-user=ccao87@uwo.ca \
-            "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh" \
-            "${SUBMIT_ARGS[@]}"
-    done
+            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE" \
+            "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh"
+    fi
     exit 0
 fi
 
@@ -114,7 +182,12 @@ fi
 # ---------------------------------------------------------------------------
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID   Node: ${SLURMD_NODENAME:-unknown}"
-echo "GPU:    $(nvidia-smi -L 2>/dev/null | head -1 || echo unknown)"
+if [[ "${MERGE_PARTIALS:-0}" -eq 1 ]]; then
+    echo "Mode:   merge partials only"
+else
+    echo "GPU:    $(nvidia-smi -L 2>/dev/null | head -1 || echo unknown)"
+    echo "Shard:  dataset=${DATASET:-?} fake_source=${FAKE_SOURCE:-?}"
+fi
 echo "Started: $(date)"
 echo "=========================================="
 
@@ -159,8 +232,10 @@ _load_modules() {
     module purge 2>/dev/null || true
     module load StdEnv/2023 2>/dev/null || true
     module load python/3.11 2>/dev/null || true
-    module load cuda/12.2 2>/dev/null || true
-    module load cudnn/8.9 2>/dev/null || true
+    if [[ "${MERGE_PARTIALS:-0}" -ne 1 ]]; then
+        module load cuda/12.2 2>/dev/null || true
+        module load cudnn/8.9 2>/dev/null || true
+    fi
 }
 
 VENV=""
@@ -193,8 +268,6 @@ else
     install_pipeline_deps
 fi
 
-"$PYTHON" -c "import torch; assert torch.cuda.is_available(), 'CUDA required'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
-
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TS_SANDBOX_REPO="$REPO"
@@ -205,6 +278,36 @@ RAW_EVAL_DIR="$REPO/results/datasets/06-03-trend-robust-texture-staged-vs-mmpd"
 MMPD_ROOT="$REPO/results/datasets/06-01-mmpd-binary-aligned"
 MMPD_REPO="$REPO/temp/MMPD"
 MMPD_DATA="$REPO/temp/mmpd_datasets"
+
+if [[ "${MERGE_PARTIALS:-0}" -eq 1 ]]; then
+    echo "[merge] output=$OUTPUT_DIR"
+    "$PYTHON" -u "$REPO/utils/eval_discriminator_texture_staged_vs_mmpd.py" \
+        --merge-partials-only \
+        --output-dir "$OUTPUT_DIR" \
+        --raw-eval-dir "$RAW_EVAL_DIR"
+
+    echo "[report] regenerating discriminator report"
+    "$PYTHON" -u "$REPO/utils/report_discriminator_texture_staged_vs_mmpd.py" \
+        --metrics "$OUTPUT_DIR/metrics.json" \
+        --manifest "$OUTPUT_DIR/run_manifest.json" \
+        --output "$REPO/reports/06-03_discriminator_texture_staged_vs_mmpd.md" || true
+
+    "$PYTHON" -u "$REPO/utils/report_trend_robust_texture_staged_vs_mmpd.py" || true
+
+    echo "=========================================="
+    echo "Merge complete: $(date)"
+    echo "Metrics: $OUTPUT_DIR/metrics.json"
+    echo "Report:  $REPO/reports/06-03_discriminator_texture_staged_vs_mmpd.md"
+    echo "=========================================="
+    exit 0
+fi
+
+if [[ -z "${DATASET:-}" || -z "${FAKE_SOURCE:-}" ]]; then
+    echo "ERROR: shard jobs require DATASET and FAKE_SOURCE (via --export from login submit)." >&2
+    exit 1
+fi
+
+"$PYTHON" -c "import torch; assert torch.cuda.is_available(), 'CUDA required'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
 
 EVAL_ARGS=(
     --output-dir "$OUTPUT_DIR"
@@ -218,14 +321,16 @@ EVAL_ARGS=(
     --probabilistic-sampler dpmpp
     --gmm-components 1
     --datasets "$DATASET"
+    --fake-sources "$FAKE_SOURCE"
+    --no-merge-metrics
     --no-update-mmpd
 )
 
-if [[ -n "$SLICE_LENGTH" ]]; then
+if [[ -n "${SLICE_LENGTH:-}" ]]; then
     EVAL_ARGS+=(--slice-lengths "$SLICE_LENGTH")
 fi
 
-if [[ "$SMOKE" -eq 1 ]]; then
+if [[ "${SMOKE:-0}" -eq 1 ]]; then
     EVAL_ARGS+=(
         --smoke-test
         --raw-binary-batch-size 2
@@ -240,26 +345,18 @@ else
     )
 fi
 
-if [[ "$FORCE_RAW" -eq 1 ]]; then
+if [[ "${FORCE_RAW:-0}" -eq 1 ]]; then
     EVAL_ARGS+=(--force-raw-eval)
 fi
 
-if [[ "$FORCE_TRAIN" -eq 1 ]]; then
+if [[ "${FORCE_TRAIN:-0}" -eq 1 ]]; then
     EVAL_ARGS+=(--force-train)
 fi
 
-echo "[eval] output=$OUTPUT_DIR raw=$RAW_EVAL_DIR dataset=$DATASET"
+echo "[eval] output=$OUTPUT_DIR raw=$RAW_EVAL_DIR dataset=$DATASET fake=$FAKE_SOURCE"
 "$PYTHON" -u "$REPO/utils/eval_discriminator_texture_staged_vs_mmpd.py" "${EVAL_ARGS[@]}"
 
-echo "[report] regenerating if combined metrics are present"
-"$PYTHON" -u "$REPO/utils/report_discriminator_texture_staged_vs_mmpd.py" \
-    --metrics "$OUTPUT_DIR/metrics.json" \
-    --manifest "$OUTPUT_DIR/run_manifest.json" \
-    --output "$REPO/reports/06-03_discriminator_texture_staged_vs_mmpd.md" || true
-
 echo "=========================================="
-echo "Job complete: $(date)"
-echo "Metrics: $OUTPUT_DIR/metrics.json"
-echo "CSV:     $OUTPUT_DIR/metrics.csv"
-echo "Report:  $REPO/reports/06-03_discriminator_texture_staged_vs_mmpd.md"
+echo "Shard complete: $(date)"
+echo "Partial: $OUTPUT_DIR/partials/${DATASET}__${FAKE_SOURCE}.json"
 echo "=========================================="

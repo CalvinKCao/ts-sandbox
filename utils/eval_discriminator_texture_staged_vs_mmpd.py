@@ -55,7 +55,7 @@ class RawBundle:
     sub: Dict[str, Any]
     indices: List[int]
     past: np.ndarray
-    y_true: np.ndarray
+    y_true_by_source: Dict[str, np.ndarray]
     fakes: Dict[str, np.ndarray]
 
 
@@ -194,25 +194,45 @@ def build_raw_bundle(
 ) -> RawBundle:
     run, sub, indices, packs = ensure_raw_packs(args, dataset, device)
     past = load_past_windows(args, run, indices, device)
-    first_pack = packs[args.fake_sources[0]]
-    y_true = first_pack["y_true"].astype(np.float32)
-    if past.shape[0] != y_true.shape[0]:
-        raise ValueError(f"{dataset}: past/y_true window mismatch {past.shape[0]} vs {y_true.shape[0]}")
-
+    y_true_by_source: Dict[str, np.ndarray] = {}
     fakes: Dict[str, np.ndarray] = {}
+    ref_shape: Optional[Tuple[int, ...]] = None
     for fake_source, pack in packs.items():
-        if pack["y_true"].shape != y_true.shape:
+        y_true = pack["y_true"].astype(np.float32)
+        fake = pack["samples"][:, :, 0, :].astype(np.float32)
+        if ref_shape is None:
+            ref_shape = y_true.shape
+        elif y_true.shape != ref_shape:
             raise ValueError(f"{dataset}/{fake_source}: y_true shape differs from first pack")
+        if fake.shape != ref_shape:
+            raise ValueError(f"{dataset}/{fake_source}: fake shape differs from y_true")
         if not np.array_equal(pack["indices"], np.asarray(indices, dtype=pack["indices"].dtype)):
             raise ValueError(f"{dataset}/{fake_source}: raw pack indices do not match discriminator indices")
-        fakes[fake_source] = pack["samples"][:, :, 0, :].astype(np.float32)
+        y_true_by_source[fake_source] = y_true
+        fakes[fake_source] = fake
+
+    if past.shape[0] != ref_shape[0]:
+        raise ValueError(f"{dataset}: past/y_true window mismatch {past.shape[0]} vs {ref_shape[0]}")
+
+    if len(y_true_by_source) > 1:
+        sources = list(y_true_by_source)
+        ref = y_true_by_source[sources[0]]
+        for src in sources[1:]:
+            other = y_true_by_source[src]
+            mse = float(np.mean((ref - other) ** 2))
+            if mse > 1e-6:
+                print(
+                    f"[warn] {dataset}: y_true differs between {sources[0]} and {src} "
+                    f"(mse={mse:.6f}); each discriminator uses its own pack GT.",
+                    flush=True,
+                )
 
     return RawBundle(
         run=run,
         sub=sub,
         indices=[int(i) for i in indices],
         past=past.astype(np.float32),
-        y_true=y_true,
+        y_true_by_source=y_true_by_source,
         fakes=fakes,
     )
 
@@ -414,11 +434,12 @@ def train_classifier(
     device: torch.device,
 ) -> Dict[str, float]:
     fake = bundle.fakes[fake_source]
-    max_offset = bundle.y_true.shape[-1] - slice_len
+    y_true = bundle.y_true_by_source[fake_source]
+    max_offset = y_true.shape[-1] - slice_len
     seed_base = args.seed + stable_hash(f"{dataset}:{fake_source}:{slice_len}")
     ds_train = HorizonSliceDataset(
         bundle.past,
-        bundle.y_true,
+        y_true,
         fake,
         splits["train"],
         slice_len,
@@ -428,7 +449,7 @@ def train_classifier(
     )
     ds_val = HorizonSliceDataset(
         bundle.past,
-        bundle.y_true,
+        y_true,
         fake,
         splits["val"],
         slice_len,
@@ -438,7 +459,7 @@ def train_classifier(
     )
     ds_test = HorizonSliceDataset(
         bundle.past,
-        bundle.y_true,
+        y_true,
         fake,
         splits["test"],
         slice_len,
@@ -563,31 +584,28 @@ def train_classifier(
         "n_windows_val": float(len(splits["val"])),
         "n_windows_test": float(len(splits["test"])),
         "slice_len": float(slice_len),
-        "horizon": float(bundle.y_true.shape[-1]),
-        "n_variates": float(bundle.y_true.shape[1]),
+        "horizon": float(y_true.shape[-1]),
+        "n_variates": float(y_true.shape[1]),
         "log2_bce_gap": float(abs(test_metrics["disc_bce"] - LOG2)),
     }
     return out
 
 
-def partial_path(output_dir: Path, dataset: str) -> Path:
+def partial_path(output_dir: Path, dataset: str, fake_source: str) -> Path:
+    return output_dir / "partials" / f"{dataset}__{fake_source}.json"
+
+
+def legacy_partial_path(output_dir: Path, dataset: str) -> Path:
     return output_dir / "partials" / f"{dataset}.json"
 
 
-def load_partial_metrics(output_dir: Path, dataset: str) -> Dict[str, Dict[str, Dict[str, float]]]:
-    path = partial_path(output_dir, dataset)
-    if not path.is_file():
-        return {}
-    return load_json(path)
-
-
-def write_partial_metrics(
+def write_source_partial(
     output_dir: Path,
     dataset: str,
-    metrics: Dict[str, Dict[str, Dict[str, float]]],
+    fake_source: str,
+    by_len: Mapping[str, Mapping[str, float]],
 ) -> None:
-    path = partial_path(output_dir, dataset)
-    write_json(path, metrics)
+    write_json(partial_path(output_dir, dataset, fake_source), dict(by_len))
 
 
 def collect_partials(output_dir: Path) -> Dict[str, Dict[str, Dict[str, Dict[str, float]]]]:
@@ -596,7 +614,16 @@ def collect_partials(output_dir: Path) -> Dict[str, Dict[str, Dict[str, Dict[str
     if not partial_dir.is_dir():
         return merged
     for path in sorted(partial_dir.glob("*.json")):
-        merged[path.stem] = load_json(path)
+        stem = path.stem
+        data = load_json(path)
+        if "__" in stem:
+            dataset, fake_source = stem.split("__", 1)
+            merged.setdefault(dataset, {})[fake_source] = data
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data and all(key in FAKE_SOURCES for key in data):
+            merged[stem] = data
     return merged
 
 
@@ -606,22 +633,21 @@ def existing_combo(
     fake_source: str,
     slice_len: int,
 ) -> Optional[Dict[str, float]]:
-    partial = load_partial_metrics(output_dir, dataset)
-    metrics = partial.get(fake_source, {}).get(str(slice_len))
-    return metrics if isinstance(metrics, dict) else None
+    path = partial_path(output_dir, dataset, fake_source)
+    if path.is_file():
+        metrics = load_json(path).get(str(slice_len))
+        return metrics if isinstance(metrics, dict) else None
+    legacy = legacy_partial_path(output_dir, dataset)
+    if legacy.is_file():
+        metrics = load_json(legacy).get(fake_source, {}).get(str(slice_len))
+        return metrics if isinstance(metrics, dict) else None
+    return None
 
 
-def write_outputs(args: argparse.Namespace, results: Dict[str, Dict[str, Dict[str, Dict[str, float]]]]) -> None:
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    for dataset, dataset_results in results.items():
-        partial = load_partial_metrics(args.output_dir, dataset)
-        for fake_source, by_len in dataset_results.items():
-            partial.setdefault(fake_source, {}).update(by_len)
-        write_partial_metrics(args.output_dir, dataset, partial)
-
+def merge_partial_metrics(args: argparse.Namespace) -> Dict[str, Dict[str, Dict[str, Dict[str, float]]]]:
     merged = collect_partials(args.output_dir)
     if not merged:
-        merged = results
+        return {}
     write_json(args.output_dir / "metrics.json", merged)
     fields = [
         "dataset",
@@ -653,10 +679,11 @@ def write_outputs(args: argparse.Namespace, results: Dict[str, Dict[str, Dict[st
                     row.update({key: metrics.get(key) for key in fields if key not in row})
                     writer.writerow(row)
 
-    merged_datasets = sorted(merged.keys()) or args.datasets
+    merged_datasets = sorted(merged.keys()) or list(args.datasets)
+    merged_sources = sorted({src for by_source in merged.values() for src in by_source})
     manifest = {
         "datasets": merged_datasets,
-        "fake_sources": args.fake_sources,
+        "fake_sources": merged_sources or list(args.fake_sources),
         "slice_lengths": args.slice_lengths,
         "raw_eval_dir": str(args.raw_eval_dir),
         "test_fraction": args.test_fraction,
@@ -664,6 +691,32 @@ def write_outputs(args: argparse.Namespace, results: Dict[str, Dict[str, Dict[st
         "staged_ckpts": {d: str(getattr(args, f"{d}_ckpt")) for d in merged_datasets if hasattr(args, f"{d}_ckpt")},
     }
     write_json(args.output_dir / "run_manifest.json", manifest)
+    print(
+        f"[merge] wrote metrics for datasets={merged_datasets} fake_sources={manifest['fake_sources']}",
+        flush=True,
+    )
+    return merged
+
+
+def write_outputs(args: argparse.Namespace, results: Dict[str, Dict[str, Dict[str, Dict[str, float]]]]) -> None:
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    for dataset, dataset_results in results.items():
+        for fake_source, by_len in dataset_results.items():
+            if not by_len:
+                continue
+            path = partial_path(args.output_dir, dataset, fake_source)
+            existing = load_json(path) if path.is_file() else {}
+            existing.update(by_len)
+            write_source_partial(args.output_dir, dataset, fake_source, existing)
+    if args.merge_metrics:
+        merge_partial_metrics(args)
+
+
+def run_merge_only(args: argparse.Namespace) -> None:
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    merged = merge_partial_metrics(args)
+    if not merged:
+        raise FileNotFoundError(f"No partial metrics found under {args.output_dir / 'partials'}")
 
 
 def valid_slice_lengths(horizon: int, requested: Sequence[int]) -> Tuple[List[int], List[int]]:
@@ -685,17 +738,18 @@ def run_eval(args: argparse.Namespace) -> None:
     for dataset in args.datasets:
         print(f"\n[{dataset}] loading/materializing raw packs", flush=True)
         bundle = build_raw_bundle(args, dataset, device)
-        n = bundle.y_true.shape[0]
+        n = next(iter(bundle.y_true_by_source.values())).shape[0]
         splits = split_windows(n, args, dataset)
+        ref_y = next(iter(bundle.y_true_by_source.values()))
         print(
             f"[{dataset}] windows={n} train/val/test="
             f"{len(splits['train'])}/{len(splits['val'])}/{len(splits['test'])} "
-            f"variates={bundle.y_true.shape[1]} horizon={bundle.y_true.shape[-1]} "
+            f"variates={ref_y.shape[1]} horizon={ref_y.shape[-1]} "
             f"subset={run_subset_id(bundle.run)}",
             flush=True,
         )
         results.setdefault(dataset, {})
-        horizon = int(bundle.y_true.shape[-1])
+        horizon = int(ref_y.shape[-1])
         valid_lens, skipped_lens = valid_slice_lengths(horizon, args.slice_lengths)
         if skipped_lens:
             print(
@@ -713,12 +767,11 @@ def run_eval(args: argparse.Namespace) -> None:
                     if existing is not None:
                         print(f"[skip] existing metrics dataset={dataset} fake={fake_source} L={slice_len}", flush=True)
                         results[dataset][fake_source][str(slice_len)] = existing
-                        write_outputs(args, results)
                         continue
                 print(f"[train] dataset={dataset} fake={fake_source} L={slice_len}", flush=True)
                 metrics = train_classifier(args, dataset, fake_source, int(slice_len), bundle, splits, device)
                 results[dataset][fake_source][str(slice_len)] = metrics
-                write_outputs(args, results)
+            write_outputs(args, {dataset: {fake_source: results[dataset][fake_source]}})
 
 
 def run_self_test(args: argparse.Namespace) -> None:
@@ -732,7 +785,7 @@ def run_self_test(args: argparse.Namespace) -> None:
         sub={},
         indices=list(range(n)),
         past=past,
-        y_true=y,
+        y_true_by_source={"binary_staged": y},
         fakes={"binary_staged": fake},
     )
     args.datasets = ["selftest"]
@@ -807,6 +860,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-batches-per-epoch", type=int, default=None)
     parser.add_argument("--save-checkpoints", action="store_true")
     parser.add_argument("--force-train", action="store_true")
+    parser.add_argument(
+        "--merge-metrics",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="After training, merge partials into metrics.json (disable for parallel shard jobs).",
+    )
+    parser.add_argument(
+        "--merge-partials-only",
+        action="store_true",
+        help="Only merge partials/ into metrics.json + CSV + manifest.",
+    )
 
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=2026)
@@ -840,6 +904,8 @@ def main() -> None:
     np.random.seed(args.seed)
     if args.self_test:
         run_self_test(args)
+    elif args.merge_partials_only:
+        run_merge_only(args)
     else:
         run_eval(args)
 
