@@ -12,10 +12,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 REPORT_STEM = "06-03_trend_robust_texture_staged_vs_mmpd"
 DEFAULT_METRICS = REPO_ROOT / "results/datasets/06-03-trend-robust-texture-staged-vs-mmpd/metrics.json"
 DEFAULT_MANIFEST = REPO_ROOT / "results/datasets/06-03-trend-robust-texture-staged-vs-mmpd/run_manifest.json"
+DEFAULT_ITRANS_METRICS = (
+    REPO_ROOT / "results/datasets/06-03-trend-robust-texture-staged-itrans-guidance/metrics.json"
+)
+DEFAULT_ITRANS_MANIFEST = (
+    REPO_ROOT / "results/datasets/06-03-trend-robust-texture-staged-itrans-guidance/run_manifest.json"
+)
 
-MODEL_ORDER = ["binary_staged", "mmpd"]
+MODEL_ORDER = ["binary_staged", "itrans_guidance", "mmpd"]
 MODEL_LABELS = {
     "binary_staged": "2-stage binary",
+    "itrans_guidance": "iTrans guidance",
     "mmpd": "MMPD",
 }
 
@@ -137,22 +144,33 @@ def win_counts(
     return counts
 
 
+def merge_itrans_metrics(
+    table: Dict[str, Dict[str, Dict[str, float]]],
+    itrans: Dict[str, Dict[str, float]],
+) -> None:
+    for dataset, metrics in itrans.items():
+        table.setdefault(dataset, {})["itrans_guidance"] = metrics
+
+
 def build_report(
     table: Dict[str, Dict[str, Dict[str, float]]],
     manifest: Dict[str, Any],
+    itrans_manifest: Dict[str, Any],
 ) -> str:
     datasets = list(manifest.get("datasets") or sorted(table.keys()))
     lines = [
         "# Trend-robust texture eval — 2-stage binary vs MMPD (Jun 3, 2026)",
         "",
-        "Full test set (`test_fraction=1.0`), `test_stride=2`, 1× `dpmpp` sample per window. "
+        "Full test set (`test_fraction=1.0`), `test_stride=2`, 1× `dpmpp` sample per window "
+        "(binary/MMPD). **iTrans guidance** = finetuned guidance ckpt only (deterministic). "
         "**Bold** = lowest value in that row.",
         "",
         "## Protocol",
         "",
         f"- **Metrics dir:** `results/datasets/06-03-trend-robust-texture-staged-vs-mmpd/`",
+        f"- **iTrans metrics dir:** `results/datasets/06-03-trend-robust-texture-staged-itrans-guidance/`",
         f"- **MMPD ckpts:** `{manifest.get('mmpd_output_root', '06-01-mmpd-binary-aligned')}`",
-        f"- **Samples:** {manifest.get('sample_num', 1)} stochastic draw(s)",
+        f"- **Samples:** {manifest.get('sample_num', 1)} stochastic draw(s) (binary/MMPD)",
         "",
         "### 2-stage binary checkpoints",
         "",
@@ -162,7 +180,23 @@ def build_report(
     ckpts = manifest.get("staged_ckpts") or {}
     for ds in datasets:
         ckpt = ckpts.get(ds, "—")
+        if isinstance(ckpt, dict):
+            ckpt = ckpt.get("checkpoint_dir", "—")
         lines.append(f"| {ds} | `{ckpt}` |")
+    lines.extend(
+        [
+            "",
+            "### Guidance iTransformer checkpoints",
+            "",
+            "| Dataset | Guidance ckpt |",
+            "|---------|---------------|",
+        ]
+    )
+    itrans_ckpts = itrans_manifest.get("staged_ckpts") or {}
+    for ds in datasets:
+        entry = itrans_ckpts.get(ds, {})
+        itrans_pt = entry.get("itrans_pt", "—") if isinstance(entry, dict) else "—"
+        lines.append(f"| {ds} | `{itrans_pt}` |")
     lines.extend(["", "---", "", "## Core metrics (lower is better)", ""])
     for key, title in CORE_METRICS:
         lines.extend(metric_table(table, key, title, datasets))
@@ -199,6 +233,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--metrics", type=Path, default=DEFAULT_METRICS)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--itrans-metrics", type=Path, default=DEFAULT_ITRANS_METRICS)
+    parser.add_argument("--itrans-manifest", type=Path, default=DEFAULT_ITRANS_MANIFEST)
     parser.add_argument(
         "--output",
         type=Path,
@@ -213,7 +249,15 @@ def main() -> None:
         with args.manifest.open(encoding="utf-8") as f:
             manifest = json.load(f)
 
-    report = build_report(table, manifest)
+    itrans_manifest: Dict[str, Any] = {}
+    if args.itrans_metrics.is_file():
+        with args.itrans_metrics.open(encoding="utf-8") as f:
+            merge_itrans_metrics(table, json.load(f))
+    if args.itrans_manifest.is_file():
+        with args.itrans_manifest.open(encoding="utf-8") as f:
+            itrans_manifest = json.load(f)
+
+    report = build_report(table, manifest, itrans_manifest)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report, encoding="utf-8")
     print(f"Wrote {args.output}")
