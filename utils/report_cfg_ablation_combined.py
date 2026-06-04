@@ -24,7 +24,31 @@ DEFAULT_PATCH48_DIR = "06-02-patch48-redo-dpmpp"
 
 STAGED_KEY = "binary_2stage"
 STAGED_NORM_KEY = "binary_2stage_norm"
+BEST_SCALE_KEY = "binary_best_scale"
 DEFAULT_STAGED_DIR = "06-02-staged-grid-dpmpp"
+
+# Per-dataset best-scale policy: (policy_ms, trained_ms_if_approx, std_floor, job_id, reuse_key)
+BestScaleSpec = Tuple[float, Optional[float], str, str, Optional[str]]
+BEST_SCALE_BY_DATASET: Dict[str, BestScaleSpec] = {
+    "ETTh1": (3.5, None, "1e-8 (legacy 2-stage)", "3849018", STAGED_KEY),
+    "ETTh2": (3.5, None, "0.1", "3849019", STAGED_KEY),
+    "ETTm1": (3.5, None, "0.1", "", None),
+    "ETTm2": (3.5, None, "0.1", "", None),
+    "illness": (3.5, None, "0.1", "", None),
+    "solar_Alabama": (6.0, None, "0.1", "", None),
+    "electricity": (3.5, None, "0.1", "", None),
+    "weather": (7.9, None, "0.1", "", None),
+    "dalia": (3.5, None, "1e-8 (legacy 2-stage)", "3849021", STAGED_KEY),
+    "traffic": (3.5, None, "1e-8 (legacy 2-stage)", "3849023", STAGED_KEY),
+    "exchange_rate": (8.0, 10.6, "0.1", "3852949", STAGED_NORM_KEY),
+    "PeMS": (8.0, 11.8, "0.1", "3852953", STAGED_NORM_KEY),
+}
+
+BEST_SCALE_RETRAIN_CONFIG_SUFFIX = "binary_dual_scale_staged_best_scale"
+# Datasets to load from newest *-<ds>-binary_dual_scale_staged_best_scale partials when present.
+BEST_SCALE_POLICY_RETRAIN_DATASETS = frozenset(
+    {"ETTh2", "ETTm1", "ETTm2", "illness", "solar_Alabama", "weather", "electricity"}
+)
 
 MODEL_ORDER = [
     "mmpd",
@@ -32,6 +56,7 @@ MODEL_ORDER = [
     PATCH48_KEY,
     STAGED_KEY,
     STAGED_NORM_KEY,
+    BEST_SCALE_KEY,
 ] + [k for k, _, _ in CFG_INFERENCE_COLUMNS]
 MODEL_LABELS: Dict[str, str] = {
     "mmpd": "MMPD",
@@ -39,6 +64,7 @@ MODEL_LABELS: Dict[str, str] = {
     PATCH48_KEY: "4x4 patch",
     STAGED_KEY: "2-stage",
     STAGED_NORM_KEY: "2-stage (q99.5 MS)",
+    BEST_SCALE_KEY: "Best-scale",
     **{k: label for k, label, _ in CFG_INFERENCE_COLUMNS},
 }
 
@@ -268,6 +294,120 @@ def load_staged_norm_partials(
             table.setdefault(ds, {})[STAGED_NORM_KEY] = load_partial(path)
 
 
+def _newest_staged_partial(datasets_root: Path, dataset: str, config_suffix: str) -> Optional[Path]:
+    candidates: List[Tuple[float, Path]] = []
+    for run_dir in datasets_root.glob(f"*-{dataset}-{config_suffix}"):
+        path = run_dir / "partials" / f"{dataset}_staged_anchor.json"
+        if path.is_file():
+            candidates.append((path.stat().st_mtime, path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda x: x[0])[1]
+
+
+def populate_best_scale(
+    table: Dict[str, Dict[str, Dict[str, float]]],
+    datasets_root: Path,
+) -> None:
+    """Pick staged eval partials per cap-rate decision tree (closest existing run)."""
+    for ds, (_policy_ms, _trained_ms, _std_floor, job_id, reuse_key) in BEST_SCALE_BY_DATASET.items():
+        if ds in BEST_SCALE_POLICY_RETRAIN_DATASETS:
+            policy_path = _newest_staged_partial(
+                datasets_root, ds, BEST_SCALE_RETRAIN_CONFIG_SUFFIX
+            )
+            if policy_path is not None:
+                table.setdefault(ds, {})[BEST_SCALE_KEY] = load_partial(policy_path)
+                continue
+        if reuse_key is not None:
+            existing = table.get(ds, {}).get(reuse_key)
+            if existing is not None:
+                table.setdefault(ds, {})[BEST_SCALE_KEY] = existing
+            continue
+        if not job_id:
+            continue
+        candidates: List[Tuple[float, Path]] = []
+        for run_dir in datasets_root.glob(f"*-{job_id}-*"):
+            path = run_dir / "partials" / f"{ds}_staged_anchor.json"
+            if path.is_file():
+                candidates.append((path.stat().st_mtime, path))
+        if candidates:
+            _, best_path = max(candidates, key=lambda x: x[0])
+            table.setdefault(ds, {})[BEST_SCALE_KEY] = load_partial(best_path)
+
+
+def _metrics_equal(
+    a: Optional[Dict[str, float]],
+    b: Optional[Dict[str, float]],
+) -> bool:
+    if a is None or b is None:
+        return False
+    return a == b
+
+
+def best_scale_q995_duplicate_warnings(
+    table: Dict[str, Dict[str, Dict[str, float]]],
+) -> List[str]:
+    """Flag policy-retrain rows that still duplicate q99.5 (wrong config or not pulled)."""
+    lines: List[str] = []
+    for ds in sorted(BEST_SCALE_POLICY_RETRAIN_DATASETS):
+        best = table.get(ds, {}).get(BEST_SCALE_KEY)
+        q995 = table.get(ds, {}).get(STAGED_NORM_KEY)
+        if not _metrics_equal(best, q995):
+            continue
+        policy_ms, _, _, _, reuse_key = BEST_SCALE_BY_DATASET[ds]
+        if reuse_key == STAGED_KEY:
+            lines.append(
+                f"- **{ds}:** no `{BEST_SCALE_RETRAIN_CONFIG_SUFFIX}` partial yet; "
+                f"using legacy 2-stage fallback (policy MS {policy_ms})."
+            )
+        else:
+            lines.append(
+                f"- **{ds}:** Best-scale still matches q99.5 grid (policy MS {policy_ms}) — "
+                f"run `./submit_best_scale_retrain.sh` or pull new partials."
+            )
+    if not lines:
+        return []
+    return [
+        "",
+        "**⚠️ Best-scale policy retrains:**",
+        "",
+        *lines,
+        "",
+    ]
+
+
+def best_scale_policy_markdown(datasets_root: Path) -> List[str]:
+    lines = [
+        "## Best-scale column — norm calibration per dataset",
+        "",
+        "Staged binary with **per-dataset `max_scale`** from the train-window cap-rate rule "
+        "(cap35 = fraction of train futures with |z| > 3.5 using `std = max(past_std, 0.1)`): "
+        "≥10% → `min(8, ceil0.1 q99)`; ≥5% → `min(6, ceil0.1 q98)`; else **3.5**. "
+        "Column metrics are from the **closest existing run** per row (not one global YAML grid).",
+        "",
+        "| Dataset | Policy `max_scale` | Trained MS (job log / YAML) | `std` floor | Eval job |",
+        "|---------|-------------------:|----------------------------:|-------------|----------|",
+    ]
+    for ds in sorted(BEST_SCALE_BY_DATASET.keys()):
+        policy_ms, trained_ms, std_floor, job_id, reuse_key = BEST_SCALE_BY_DATASET[ds]
+        if ds in BEST_SCALE_POLICY_RETRAIN_DATASETS:
+            policy_path = _newest_staged_partial(
+                datasets_root, ds, BEST_SCALE_RETRAIN_CONFIG_SUFFIX
+            )
+            trained_col = (
+                str(policy_ms)
+                if policy_path is not None
+                else f"{policy_ms} (pending `{BEST_SCALE_RETRAIN_CONFIG_SUFFIX}`)"
+            )
+        elif trained_ms is not None:
+            trained_col = str(trained_ms)
+        else:
+            trained_col = "—"
+        lines.append(f"| {ds} | {policy_ms} | {trained_col} | {std_floor} | {job_id} |")
+    lines.append("")
+    return lines
+
+
 def load_combined(
     matrix_dir: Path,
     cfg_dirs: Dict[str, Path],
@@ -294,6 +434,7 @@ def load_combined(
     for model_key, cfg_dir in cfg_dirs.items():
         load_binary_partials(table, cfg_dir / "partials", model_key)
 
+    populate_best_scale(table, root)
     return table
 
 
@@ -340,12 +481,15 @@ def build_report(
     patch48_dir: Optional[Path] = None,
     staged_dir: Optional[Path] = None,
     staged_pending: Optional[List[str]] = None,
+    datasets_root: Optional[Path] = None,
 ) -> None:
     datasets = sorted(table.keys())
+    ds_root = datasets_root if datasets_root is not None else matrix_dir.parent
     n_cfg_off = count_datasets_with_model(table, "binary_cfg_off")
     n_patch48 = count_datasets_with_model(table, PATCH48_KEY)
     n_staged = count_datasets_with_model(table, STAGED_KEY)
     n_staged_norm = count_datasets_with_model(table, STAGED_NORM_KEY)
+    n_best_scale = count_datasets_with_model(table, BEST_SCALE_KEY)
     patch48_rel = (
         patch48_dir.relative_to(REPO_ROOT)
         if patch48_dir is not None
@@ -367,6 +511,8 @@ def build_report(
         "Aligned eval: 50% seeded test windows, 100× `dpmpp` (20 steps) for probabilistic metrics, "
         "1× anchor for deterministic MSE/MAE/texture. **Bold** = lowest value in that row.",
         "",
+        *best_scale_policy_markdown(ds_root),
+        *best_scale_q995_duplicate_warnings(table),
         "## Sources",
         "",
         "| Component | Path / jobs |",
@@ -380,6 +526,9 @@ def build_report(
         "| **2-stage (q99.5 MS)** — jobs 3852944–3852955 | "
         "per-job `results/datasets/06-02-3852944-*-binary_dual_scale_staged/partials/` "
         "(`max_scale_by_dataset` + `window_norm_std_floor: 0.1`) |",
+        "| **Best-scale** — rule-based MS per dataset | "
+        "legacy 2-stage (3849018–3849023), q99.5 approx (3852949/3852953), "
+        f"policy retrains (`*-{BEST_SCALE_RETRAIN_CONFIG_SUFFIX}`); see table above |",
     ]
     for model_key, label, default_name in CFG_INFERENCE_COLUMNS:
         cfg_dir = cfg_dirs[model_key]
@@ -402,6 +551,7 @@ def build_report(
             + ").",
             f"- **2-stage (q99.5 MS):** full 12-dataset retrain with calibrated per-dataset "
             f"`max_scale` and `window_norm_std_floor: 0.1`; {n_staged_norm}/12 eval partials.",
+            f"- **Best-scale:** cap-rate policy picks per-dataset MS + run; {n_best_scale}/12 eval partials.",
             "- **CFG w=1.1 / 1.5 / 4 / 10:** inference-only on 3828089 ckpts, 7 ablation datasets each.",
             "- **MMPD:** all 12 datasets in matrix partials.",
             "",
@@ -484,6 +634,28 @@ def build_report(
     lines.extend(
         [
             "",
+            "## Slurm — Best-scale policy retrains "
+            f"(`{BEST_SCALE_RETRAIN_CONFIG_SUFFIX}`, `./submit_best_scale_retrain.sh`)",
+            "",
+            "| Dataset | Status |",
+            "|---------|--------|",
+        ]
+    )
+    for ds in sorted(BEST_SCALE_POLICY_RETRAIN_DATASETS):
+        policy_path = _newest_staged_partial(ds_root, ds, BEST_SCALE_RETRAIN_CONFIG_SUFFIX)
+        if policy_path is not None:
+            run_dir = policy_path.parent.parent.name
+            job_tag = run_dir.split("-")[2] if run_dir.count("-") >= 2 else "—"
+            status = f"completed (job {job_tag})"
+        elif ds in table and table[ds].get(BEST_SCALE_KEY) and BEST_SCALE_BY_DATASET[ds][4] == STAGED_KEY:
+            status = "fallback legacy 2-stage"
+        else:
+            status = "pending"
+        lines.append(f"| {ds} | {status} |")
+
+    lines.extend(
+        [
+            "",
             "## Metric glossary",
             "",
             "| Metric | Path |",
@@ -542,7 +714,8 @@ def build_report(
             "## Regenerate tables",
             "",
             "2-stage loads from `06-02-3849018-*` job dirs unless `--staged-dir` is set. "
-            "2-stage (q99.5 MS) auto-discovers `06-02-3852944-*` / `06-02-385295*`.",
+            "2-stage (q99.5 MS) auto-discovers `06-02-3852944-*` / `06-02-385295*`. "
+            "Best-scale auto-loads newest `*-<dataset>-binary_dual_scale_staged_best_scale` partials when present.",
             "",
             "```bash",
             *regen_lines,
@@ -640,6 +813,7 @@ def main() -> None:
         patch48_dir,
         staged_dir,
         staged_pending,
+        args.datasets_root.resolve(),
     )
 
 
