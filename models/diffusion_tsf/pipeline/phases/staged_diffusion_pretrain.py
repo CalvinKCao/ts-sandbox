@@ -170,6 +170,35 @@ def _phase1_ckpt_root(state: PipelineState) -> str:
     return os.path.dirname(ckpt_dir)
 
 
+def discover_dataset_run_ckpt_dir(state: PipelineState, config_suffix: str) -> str:
+    """Newest isolated run dir ``*-<dataset>-<config_suffix>`` under the ckpt root."""
+    ckpt_root = _phase1_ckpt_root(state)
+    suffix = f"-{state.dataset}-{config_suffix}"
+    best_dir: Optional[str] = None
+    best_mtime = 0.0
+    try:
+        for name in os.listdir(ckpt_root):
+            if not name.endswith(suffix):
+                continue
+            path = os.path.join(ckpt_root, name)
+            if not os.path.isdir(path):
+                continue
+            mtime = os.path.getmtime(path)
+            if mtime > best_mtime:
+                best_mtime = mtime
+                best_dir = path
+    except OSError as e:
+        raise FileNotFoundError(
+            f"Cannot list checkpoint root {ckpt_root!r} for {state.dataset!r}: {e}"
+        ) from e
+    if not best_dir:
+        raise FileNotFoundError(
+            f"No prior run *-{state.dataset}-{config_suffix} under {ckpt_root}. "
+            "Complete the exhaustive staged grid first."
+        )
+    return best_dir
+
+
 def _phase1_config_suffix(state: PipelineState, config_name: str = "binary_dual_scale") -> str:
     """Grid checkpoint stems use raw --dataset, not data_subset subset_id."""
     return f"-{state.dataset}-{config_name}"

@@ -19,6 +19,7 @@ from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     _stage_pretrain_ckpt,
+    discover_dataset_run_ckpt_dir,
     patch_stage_globals,
 )
 
@@ -47,6 +48,32 @@ def _model_kwargs_from_tuned(params: Optional[Dict[str, Any]]) -> Dict[str, Any]
     if not params:
         return {}
     return {key: params[key] for key in TUNED_MODEL_KEYS if key in params}
+
+
+def _load_reused_stage_params(
+    state: PipelineState,
+    *,
+    stage: str,
+    subset_id: str,
+    source_config: str,
+) -> Tuple[Dict[str, Any], str, Dict[str, Any]]:
+    source_dir = discover_dataset_run_ckpt_dir(state, source_config)
+    meta_path = os.path.join(source_dir, subset_id, stage, "metadata.json")
+    if not os.path.exists(meta_path):
+        raise FileNotFoundError(
+            f"Missing {stage} metadata for reuse: {meta_path} "
+            f"(from *-{state.dataset}-{source_config})"
+        )
+    with open(meta_path, encoding="utf-8") as f:
+        source_meta = json.load(f)
+    params = dict(source_meta.get("tuned_params") or {})
+    if not params:
+        raise ValueError(f"No tuned_params in {meta_path}")
+    policy_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
+    old_ms = params.get("max_scale")
+    params["max_scale"] = policy_ms
+    params.setdefault("min_snr_gamma", 5.0)
+    return params, source_dir, {**source_meta, "reused_max_scale_previous": old_ms}
 
 
 def _fraction_subset(ds, fraction: float, seed: int) -> Subset:
@@ -365,11 +392,12 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             len(tune_val_ds),
         )
 
+        batch_probe_ds = train_ds if self.get("reuse_tuned_params_from") else tune_train_ds
         ft_itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, n_iv, device)
         ft_itrans_guidance = iTransformerGuidance(ft_itrans_model)
         max_batch = select_diffusion_batch_size(
-            phase_name=f"{self.stage.title()} Diff FT HP ({subset_id})",
-            dataset=tune_train_ds,
+            phase_name=f"{self.stage.title()} Diff FT ({subset_id})",
+            dataset=batch_probe_ds,
             device=device,
             itrans_guidance=ft_itrans_guidance,
             max_candidate=diffusion_probe_max_candidate(n_iv, state.smoke_test),
@@ -392,48 +420,86 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         subset_dir = _stage_subset_dir(state, self.stage)
         os.makedirs(subset_dir, exist_ok=True)
 
-        study = create_study(
-            direction="minimize",
-            sampler=TPESampler(seed=state.seed, multivariate=True, group=True),
-            pruner=HyperbandPruner(min_resource=1, max_resource=hp_epochs, reduction_factor=3),
-        )
+        reuse_from = self.get("reuse_tuned_params_from")
+        reuse_meta: Dict[str, Any] = {}
+        hp_best_val_loss: Optional[float] = None
+        best_trial_num = -1
 
-        def objective(trial):
-            params = _suggest_staged_params(trial, state, max_batch, state.smoke_test)
-            trial.set_user_attr("full_params", dict(params))
-            trial_ckpt = os.path.join(subset_dir, f"_diff_ft_trial_{trial.number}_best.pt")
+        if reuse_from:
+            best_params, source_dir, reuse_meta = _load_reused_stage_params(
+                state,
+                stage=self.stage,
+                subset_id=subset_id,
+                source_config=str(reuse_from),
+            )
+            tuned_bs = int(best_params.get("batch_size", max_batch))
+            best_params["batch_size"] = min(tuned_bs, max_batch)
+            hp_best_val_loss = float(
+                reuse_meta.get("best_val_loss")
+                or reuse_meta.get("hp_best_val_loss")
+                or float("nan")
+            )
+            logger.info(
+                "  [%s] reuse tuned_params from %s (%s); policy max_scale=%.4g (was %.4g)",
+                self.name,
+                source_dir,
+                self.stage,
+                best_params["max_scale"],
+                reuse_meta.get("reused_max_scale_previous"),
+            )
+        else:
+            study = create_study(
+                direction="minimize",
+                sampler=TPESampler(seed=state.seed, multivariate=True, group=True),
+                pruner=HyperbandPruner(min_resource=1, max_resource=hp_epochs, reduction_factor=3),
+            )
+
+            def objective(trial):
+                params = _suggest_staged_params(trial, state, max_batch, state.smoke_test)
+                trial.set_user_attr("full_params", dict(params))
+                trial_ckpt = os.path.join(subset_dir, f"_diff_ft_trial_{trial.number}_best.pt")
+                try:
+                    best_val, _best_epoch = self._train_once(
+                        state=state,
+                        train_ds=tune_train_ds,
+                        val_ds=tune_val_ds,
+                        params=params,
+                        pretrained_path=diff_ckpt,
+                        itrans_checkpoint=ft_itrans_ckpt,
+                        device=device,
+                        variate_indices=variate_indices,
+                        ckpt_path=trial_ckpt,
+                        max_epochs=hp_epochs,
+                        patience=hp_patience,
+                        trial=trial,
+                    )
+                except torch.cuda.OutOfMemoryError:
+                    logger.warning(
+                        "  [%s] trial %d OOM (batch=%s), pruning",
+                        self.name,
+                        trial.number,
+                        params.get("batch_size"),
+                    )
+                    raise TrialPruned() from None
+                return best_val
+
+            study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
             try:
-                best_val, _best_epoch = self._train_once(
-                    state=state,
-                    train_ds=tune_train_ds,
-                    val_ds=tune_val_ds,
-                    params=params,
-                    pretrained_path=diff_ckpt,
-                    itrans_checkpoint=ft_itrans_ckpt,
-                    device=device,
-                    variate_indices=variate_indices,
-                    ckpt_path=trial_ckpt,
-                    max_epochs=hp_epochs,
-                    patience=hp_patience,
-                    trial=trial,
-                )
-            except torch.cuda.OutOfMemoryError:
-                logger.warning("  [%s] trial %d OOM (batch=%s), pruning", self.name, trial.number, params.get("batch_size"))
-                raise TrialPruned() from None
-            return best_val
+                best_trial = study.best_trial
+            except ValueError as e:
+                raise RuntimeError(
+                    f"All {self.stage} diffusion HP trials failed for {subset_id} "
+                    f"({len(study.trials)} trials, none completed)"
+                ) from e
 
-        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
-        try:
-            best_trial = study.best_trial
-        except ValueError as e:
-            raise RuntimeError(
-                f"All {self.stage} diffusion HP trials failed for {subset_id} "
-                f"({len(study.trials)} trials, none completed)"
-            ) from e
-
-        best_params = dict(best_trial.user_attrs.get("full_params") or best_trial.params)
-        best_params.setdefault("min_snr_gamma", 5.0)
-        best_params.setdefault("max_scale", float(state.max_scale_by_dataset.get(state.dataset, state.max_scale)))
+            best_params = dict(best_trial.user_attrs.get("full_params") or best_trial.params)
+            best_params.setdefault("min_snr_gamma", 5.0)
+            best_params.setdefault(
+                "max_scale",
+                float(state.max_scale_by_dataset.get(state.dataset, state.max_scale)),
+            )
+            hp_best_val_loss = float(study.best_value)
+            best_trial_num = int(best_trial.number)
         final_ckpt = _stage_best_ckpt(state, self.stage)
         final_val, final_epoch = self._train_once(
             state=state,
@@ -450,34 +516,37 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             trial=None,
         )
 
+        meta_out: Dict[str, Any] = {
+            "subset_id": subset_id,
+            "dataset_name": state.dataset,
+            "variate_indices": variate_indices,
+            "data_subset": subset_meta,
+            "norm_mean": norm_stats["mean"].tolist(),
+            "norm_std": norm_stats["std"].tolist(),
+            "tuned_params": best_params,
+            "best_trial": best_trial_num,
+            "hp_best_val_loss": hp_best_val_loss,
+            "best_val_loss": float(final_val),
+            "best_epoch": int(final_epoch),
+            "final_full_data_retrain": True,
+            "tune_data_fraction": tune_fraction,
+            "diffusion_stage": self.stage,
+        }
+        if reuse_from:
+            meta_out.update({
+                "reuse_tuned_params_from": str(reuse_from),
+                "reused_max_scale_policy": best_params.get("max_scale"),
+                "reused_max_scale_previous": reuse_meta.get("reused_max_scale_previous"),
+            })
         with open(os.path.join(subset_dir, "metadata.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "subset_id": subset_id,
-                    "dataset_name": state.dataset,
-                    "variate_indices": variate_indices,
-                    "data_subset": subset_meta,
-                    "norm_mean": norm_stats["mean"].tolist(),
-                    "norm_std": norm_stats["std"].tolist(),
-                    "tuned_params": best_params,
-                    "best_trial": int(best_trial.number),
-                    "hp_best_val_loss": float(study.best_value),
-                    "best_val_loss": float(final_val),
-                    "best_epoch": int(final_epoch),
-                    "final_full_data_retrain": True,
-                    "tune_data_fraction": tune_fraction,
-                    "diffusion_stage": self.stage,
-                },
-                f,
-                indent=2,
-                sort_keys=True,
-            )
-        for fn in os.listdir(subset_dir):
-            if fn.startswith("_diff_ft_trial_") and fn.endswith("_best.pt"):
-                try:
-                    os.remove(os.path.join(subset_dir, fn))
-                except OSError:
-                    pass
+            json.dump(meta_out, f, indent=2, sort_keys=True)
+        if not reuse_from:
+            for fn in os.listdir(subset_dir):
+                if fn.startswith("_diff_ft_trial_") and fn.endswith("_best.pt"):
+                    try:
+                        os.remove(os.path.join(subset_dir, fn))
+                    except OSError:
+                        pass
 
         if self.stage == "coarse":
             state.diffusion_coarse_finetune_ckpt = final_ckpt
@@ -488,8 +557,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
         wandb_utils.log_summary({
             f"hp/{self.stage}_diff_ft_best_val_loss": final_val,
-            f"hp/{self.stage}_diff_ft_hp_best_val_loss": study.best_value,
-            f"hp/{self.stage}_diff_ft_best_trial": best_trial.number,
+            f"hp/{self.stage}_diff_ft_hp_best_val_loss": hp_best_val_loss,
+            f"hp/{self.stage}_diff_ft_best_trial": best_trial_num,
             f"hp/{self.stage}_diff_ft_best_lr": best_params.get("learning_rate"),
             f"hp/{self.stage}_diff_ft_batch_size": best_params.get("batch_size"),
             f"hp/{self.stage}_diff_ft_max_scale": best_params.get("max_scale"),

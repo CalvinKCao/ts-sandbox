@@ -14,6 +14,9 @@ import shutil
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline.phases.itrans_hp_pretrain import _patch_globals
+from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
+    discover_dataset_run_ckpt_dir,
+)
 from models.diffusion_tsf.pipeline import wandb_utils
 
 logger = logging.getLogger(__name__)
@@ -41,6 +44,23 @@ class ITransFinetuneHPPhase(PipelinePhase):
         _patch_globals(pipeline_mod, state)
 
         subset_id = state.subset_id or state.dataset
+        ft_ckpt = os.path.join(state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
+
+        reuse_from = self.get("reuse_checkpoint_from_config")
+        if reuse_from:
+            source_dir = discover_dataset_run_ckpt_dir(state, str(reuse_from))
+            src_ckpt = os.path.join(source_dir, f"{subset_id}_itransformer_finetuned.pt")
+            if not os.path.exists(src_ckpt):
+                raise FileNotFoundError(
+                    f"Missing iTransformer finetune to reuse: {src_ckpt} "
+                    f"(from *-{state.dataset}-{reuse_from})"
+                )
+            if not os.path.exists(ft_ckpt):
+                shutil.copy2(src_ckpt, ft_ckpt)
+            state.itrans_finetune_ckpt = ft_ckpt
+            logger.info("  [%s] reused finetuned iTransformer from %s", self.name, source_dir)
+            return state
+
         variate_indices = state.variate_indices
         if variate_indices is None:
             variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
@@ -68,8 +88,6 @@ class ITransFinetuneHPPhase(PipelinePhase):
             test_stride=test_stride,
         )
 
-        # Promote to canonical finetuned name
-        ft_ckpt = os.path.join(state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
         hp_best = os.path.join(state.checkpoint_dir, f"{subset_id}_itrans_ft_hp_best.pt")
         if os.path.exists(hp_best) and not os.path.exists(ft_ckpt):
             shutil.copy2(hp_best, ft_ckpt)
