@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 from optuna import create_study
+from optuna.exceptions import TrialPruned
 from optuna.pruners import HyperbandPruner
 from optuna.samplers import TPESampler
 from torch.utils.data import DataLoader, Subset
@@ -239,77 +240,79 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             device=device,
             params=params,
         )
-        ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
-        load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
+        try:
+            ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
+            load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
 
-        optimizer = torch.optim.AdamW(model.parameters(), lr=float(params["learning_rate"]))
-        early_stop = EarlyStopping(patience=patience)
-        ema = _Ema(model, float(params.get("ema_decay", 0.0))) if params.get("ema_decay", 0.0) else None
-        best_val = float("inf")
-        best_epoch = 0
+            optimizer = torch.optim.AdamW(model.parameters(), lr=float(params["learning_rate"]))
+            early_stop = EarlyStopping(patience=patience)
+            ema = _Ema(model, float(params.get("ema_decay", 0.0))) if params.get("ema_decay", 0.0) else None
+            best_val = float("inf")
+            best_epoch = 0
 
-        for epoch in range(max_epochs):
-            model.train()
-            train_loss = 0.0
-            n_train = 0
-            for past, future in train_loader:
-                past, future = past.to(device), future.to(device)
-                optimizer.zero_grad(set_to_none=True)
-                with amp_context():
-                    loss = model.get_loss(past, future)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                if ema is not None:
-                    ema.update(model)
-                train_loss += float(loss.item())
-                n_train += 1
-
-            backup = ema.swap_in(model) if ema is not None else None
-            model.eval()
-            val_loss = 0.0
-            n_val = 0
-            with torch.no_grad():
-                for past, future in val_loader:
+            for epoch in range(max_epochs):
+                model.train()
+                train_loss = 0.0
+                n_train = 0
+                for past, future in train_loader:
                     past, future = past.to(device), future.to(device)
+                    optimizer.zero_grad(set_to_none=True)
                     with amp_context():
                         loss = model.get_loss(past, future)
-                    val_loss += float(loss.item())
-                    n_val += 1
-            val_loss /= max(n_val, 1)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    if ema is not None:
+                        ema.update(model)
+                    train_loss += float(loss.item())
+                    n_train += 1
 
-            if val_loss < best_val:
-                best_val = val_loss
-                best_epoch = epoch + 1
-                config = {
-                    "tuned_params": dict(params),
-                    "diffusion_stage": self.stage,
-                    "best_epoch": best_epoch,
-                    "final_full_data_retrain": trial is None,
-                }
-                save_checkpoint(
-                    unwrap_model(model),
-                    optimizer,
-                    epoch,
-                    train_loss / max(n_train, 1),
-                    val_loss,
-                    config,
-                    ckpt_path,
-                )
-            if backup is not None:
-                ema.restore(model, backup)
+                backup = ema.swap_in(model) if ema is not None else None
+                model.eval()
+                val_loss = 0.0
+                n_val = 0
+                with torch.no_grad():
+                    for past, future in val_loader:
+                        past, future = past.to(device), future.to(device)
+                        with amp_context():
+                            loss = model.get_loss(past, future)
+                        val_loss += float(loss.item())
+                        n_val += 1
+                val_loss /= max(n_val, 1)
 
-            if trial is not None:
-                trial.report(val_loss, epoch)
-                if trial.should_prune():
-                    raise __import__("optuna").TrialPruned()
-            if early_stop(val_loss):
-                break
+                if val_loss < best_val:
+                    best_val = val_loss
+                    best_epoch = epoch + 1
+                    config = {
+                        "tuned_params": dict(params),
+                        "diffusion_stage": self.stage,
+                        "best_epoch": best_epoch,
+                        "final_full_data_retrain": trial is None,
+                    }
+                    save_checkpoint(
+                        unwrap_model(model),
+                        optimizer,
+                        epoch,
+                        train_loss / max(n_train, 1),
+                        val_loss,
+                        config,
+                        ckpt_path,
+                    )
+                if backup is not None:
+                    ema.restore(model, backup)
 
-        del model, itrans_model, itrans_guidance
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        return best_val, best_epoch
+                if trial is not None:
+                    trial.report(val_loss, epoch)
+                    if trial.should_prune():
+                        raise TrialPruned()
+                if early_stop(val_loss):
+                    break
+
+            return best_val, best_epoch
+        finally:
+            del model, itrans_model, itrans_guidance
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def execute(self, state: PipelineState) -> PipelineState:
         from models.diffusion_tsf.train_multivariate_pipeline import (
@@ -399,32 +402,36 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             params = _suggest_staged_params(trial, state, max_batch, state.smoke_test)
             trial.set_user_attr("full_params", dict(params))
             trial_ckpt = os.path.join(subset_dir, f"_diff_ft_trial_{trial.number}_best.pt")
-            best_val, _best_epoch = self._train_once(
-                state=state,
-                train_ds=tune_train_ds,
-                val_ds=tune_val_ds,
-                params=params,
-                pretrained_path=diff_ckpt,
-                itrans_checkpoint=ft_itrans_ckpt,
-                device=device,
-                variate_indices=variate_indices,
-                ckpt_path=trial_ckpt,
-                max_epochs=hp_epochs,
-                patience=hp_patience,
-                trial=trial,
-            )
+            try:
+                best_val, _best_epoch = self._train_once(
+                    state=state,
+                    train_ds=tune_train_ds,
+                    val_ds=tune_val_ds,
+                    params=params,
+                    pretrained_path=diff_ckpt,
+                    itrans_checkpoint=ft_itrans_ckpt,
+                    device=device,
+                    variate_indices=variate_indices,
+                    ckpt_path=trial_ckpt,
+                    max_epochs=hp_epochs,
+                    patience=hp_patience,
+                    trial=trial,
+                )
+            except torch.cuda.OutOfMemoryError:
+                logger.warning("  [%s] trial %d OOM (batch=%s), pruning", self.name, trial.number, params.get("batch_size"))
+                raise TrialPruned() from None
             return best_val
 
-        study.optimize(
-            objective,
-            n_trials=n_trials,
-            show_progress_bar=False,
-            catch=(ValueError, FileNotFoundError, OSError, RuntimeError),
-        )
-        if study.best_trial is None:
-            raise RuntimeError(f"All {self.stage} diffusion HP trials failed for {subset_id}")
+        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+        try:
+            best_trial = study.best_trial
+        except ValueError as e:
+            raise RuntimeError(
+                f"All {self.stage} diffusion HP trials failed for {subset_id} "
+                f"({len(study.trials)} trials, none completed)"
+            ) from e
 
-        best_params = dict(study.best_trial.user_attrs.get("full_params") or study.best_trial.params)
+        best_params = dict(best_trial.user_attrs.get("full_params") or best_trial.params)
         best_params.setdefault("min_snr_gamma", 5.0)
         best_params.setdefault("max_scale", float(state.max_scale_by_dataset.get(state.dataset, state.max_scale)))
         final_ckpt = _stage_best_ckpt(state, self.stage)
@@ -453,7 +460,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     "norm_mean": norm_stats["mean"].tolist(),
                     "norm_std": norm_stats["std"].tolist(),
                     "tuned_params": best_params,
-                    "best_trial": int(study.best_trial.number),
+                    "best_trial": int(best_trial.number),
                     "hp_best_val_loss": float(study.best_value),
                     "best_val_loss": float(final_val),
                     "best_epoch": int(final_epoch),
@@ -482,7 +489,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         wandb_utils.log_summary({
             f"hp/{self.stage}_diff_ft_best_val_loss": final_val,
             f"hp/{self.stage}_diff_ft_hp_best_val_loss": study.best_value,
-            f"hp/{self.stage}_diff_ft_best_trial": study.best_trial.number,
+            f"hp/{self.stage}_diff_ft_best_trial": best_trial.number,
             f"hp/{self.stage}_diff_ft_best_lr": best_params.get("learning_rate"),
             f"hp/{self.stage}_diff_ft_batch_size": best_params.get("batch_size"),
             f"hp/{self.stage}_diff_ft_max_scale": best_params.get("max_scale"),
