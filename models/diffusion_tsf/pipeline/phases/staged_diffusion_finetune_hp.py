@@ -439,13 +439,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 or reuse_meta.get("hp_best_val_loss")
                 or float("nan")
             )
+            previous_ms = reuse_meta.get("reused_max_scale_previous")
+            previous_ms_str = f"{float(previous_ms):.4g}" if previous_ms is not None else "unknown"
             logger.info(
-                "  [%s] reuse tuned_params from %s (%s); policy max_scale=%.4g (was %.4g)",
+                "  [%s] reuse tuned_params from %s (%s); policy max_scale=%.4g (was %s)",
                 self.name,
                 source_dir,
                 self.stage,
                 best_params["max_scale"],
-                reuse_meta.get("reused_max_scale_previous"),
+                previous_ms_str,
             )
         else:
             study = create_study(

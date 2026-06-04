@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import time
-from typing import Dict
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import torch
@@ -24,8 +24,8 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch
 logger = logging.getLogger(__name__)
 
 
-def _import_summarize_prediction_pack():
-    """Import repo eval helper after iTransformer hijacks ``utils`` on sys.path."""
+def _import_eval_metric_helpers():
+    """Import repo eval helpers after iTransformer hijacks ``utils`` on sys.path."""
     import os
     import sys
     from pathlib import Path
@@ -39,9 +39,51 @@ def _import_summarize_prediction_pack():
     if repo_root in sys.path:
         sys.path.remove(repo_root)
     sys.path.insert(0, repo_root)
-    from utils.eval_mmpd_gaussian_anchor import summarize_prediction_pack
+    from utils.eval_mmpd_gaussian_anchor import (
+        deterministic_metrics,
+        summarize_prob_core_metrics,
+    )
 
-    return summarize_prediction_pack
+    return summarize_prob_core_metrics, deterministic_metrics
+
+
+def _staged_anchor_global_norm(
+    fine_model,
+    coarse_out: Dict[str, Any],
+    fine_out: Dict[str, Any],
+) -> np.ndarray:
+    """Anchor forecast = decode_dual(coarse_hat, fine_hat) in global norm space."""
+    pred = fine_out.get("prediction_global_norm", fine_out.get("prediction"))
+    if pred is None:
+        coarse_2d = coarse_out["future_2d_coarse"]
+        fine_2d = fine_out["future_2d_fine"]
+        pred = fine_model.decode_dual_from_2d(coarse_2d, fine_2d, from_diffusion=False)
+        k = int(getattr(fine_model.config, "lookback_overlap", 0))
+        if k > 0:
+            pred = pred[..., k:]
+    return pred.detach().cpu().numpy()
+
+
+def _summarize_staged_eval_metrics(
+  pack: Dict[str, np.ndarray],
+  *,
+  gmm_components: int,
+  seed: int,
+  topk_max: int,
+) -> Dict[str, float]:
+    summarize_prob_core_metrics, deterministic_metrics = _import_eval_metric_helpers()
+    metrics = summarize_prob_core_metrics(
+        pack,
+        gmm_components=gmm_components,
+        seed=seed,
+        topk_max=topk_max,
+    )
+    anchor = deterministic_metrics(pack["y_true"], pack["deterministic"])
+    metrics["anchor_mse"] = anchor["mse"]
+    metrics["anchor_mae"] = anchor["mae"]
+    metrics["anchor_n_samples"] = 1.0
+    metrics["metrics_profile"] = "prob_core_plus_anchor"
+    return metrics
 
 
 def _load_stage_metadata(state: PipelineState, stage: str) -> Dict:
@@ -85,15 +127,14 @@ class StagedEvalPhase(PipelinePhase):
             try:
                 with open(partial) as f:
                     metrics = json.load(f)
-                texture_required = not bool(self.get("skip_texture_metrics", False))
-                robust_ok = (not texture_required) or "texture_derivative_motif_jsd" in metrics
-                prob_robust_ok = (not texture_required) or "prob_texture_derivative_motif_jsd" in metrics
+                core_ok = "crps" in metrics and "top3_mse" in metrics
+                anchor_ok = "anchor_mse" in metrics and "anchor_mae" in metrics
                 sampler_ok = (not self.get("tune_sampler", True)) or metrics.get("sampler_tuned")
             except Exception:
-                robust_ok = False
-                prob_robust_ok = False
+                core_ok = False
+                anchor_ok = False
                 sampler_ok = False
-            if robust_ok and prob_robust_ok and sampler_ok:
+            if core_ok and anchor_ok and sampler_ok:
                 logger.info("  [%s] already evaluated: %s", self.name, partial)
                 return True
             logger.info("  [%s] re-evaluating to add missing metrics: %s", self.name, partial)
@@ -140,8 +181,9 @@ class StagedEvalPhase(PipelinePhase):
         prob_sampler: str,
         prob_steps: int,
         prob_samples: int,
-        summarize_prediction_pack,
-    ):
+        gmm_components: int,
+        topk_max: int,
+    ) -> Tuple[Dict[str, float], Dict[str, np.ndarray]]:
         prob_kwargs = {"sampler": prob_sampler, "num_inference_steps": prob_steps}
         y_true_all = []
         det_all = []
@@ -172,7 +214,7 @@ class StagedEvalPhase(PipelinePhase):
                     sampler="anchor",
                     future_coarse_2d=coarse_det["future_2d_coarse"],
                 )
-                det_all.append(fine_det["prediction_global_norm"].cpu().numpy())
+                det_all.append(_staged_anchor_global_norm(fine_model, coarse_det, fine_det))
 
                 batch_samples = []
                 for sample_idx in range(prob_samples):
@@ -202,13 +244,11 @@ class StagedEvalPhase(PipelinePhase):
             "deterministic": np.concatenate(det_all, axis=0),
             "samples": np.concatenate(sample_all, axis=0),
         }
-        metrics = summarize_prediction_pack(
+        metrics = _summarize_staged_eval_metrics(
             pack,
-            gmm_components=int(self.get("gmm_components", 10)),
+            gmm_components=gmm_components,
             seed=state.seed,
-            topk_max=int(self.get("topk_max", 3)),
-            include_texture=not bool(self.get("skip_texture_metrics", False)),
-            texture_per_sample=not bool(self.get("skip_texture_metrics", False)),
+            topk_max=topk_max,
         )
         return metrics, pack
 
@@ -219,9 +259,10 @@ class StagedEvalPhase(PipelinePhase):
             load_itransformer_from_checkpoint,
         )
         from models.diffusion_tsf.guidance import iTransformerGuidance
-        summarize_prediction_pack = _import_summarize_prediction_pack()
 
         device = state.resolve_device()
+        gmm_components = int(self.get("gmm_components", 10))
+        topk_max = int(self.get("topk_max", 3))
         subset_id = state.subset_id or state.dataset
         variate_indices = state.variate_indices
         if variate_indices is None:
@@ -283,7 +324,8 @@ class StagedEvalPhase(PipelinePhase):
                         prob_sampler=sampler,
                         prob_steps=steps,
                         prob_samples=tune_samples,
-                        summarize_prediction_pack=summarize_prediction_pack,
+                        gmm_components=gmm_components,
+                        topk_max=topk_max,
                     )
                     score = float(metrics_i.get(score_metric, metrics_i.get("crps", metrics_i.get("mse"))))
                     sampler_tuning.append({
@@ -328,7 +370,8 @@ class StagedEvalPhase(PipelinePhase):
             prob_sampler=selected_sampler,
             prob_steps=selected_steps,
             prob_samples=prob_samples,
-            summarize_prediction_pack=summarize_prediction_pack,
+            gmm_components=gmm_components,
+            topk_max=topk_max,
         )
         metrics.update({
             "sampler_tuned": bool(sampler_tuning),
@@ -356,8 +399,10 @@ class StagedEvalPhase(PipelinePhase):
             }, f, indent=2, sort_keys=True)
 
         wandb_utils.log_summary({
-            "eval/staged_mse": metrics.get("mse"),
-            "eval/staged_mae": metrics.get("mae"),
+            "eval/staged_prob_mse": metrics.get("mse"),
+            "eval/staged_prob_mae": metrics.get("mae"),
+            "eval/staged_anchor_mse": metrics.get("anchor_mse"),
+            "eval/staged_anchor_mae": metrics.get("anchor_mae"),
             "eval/staged_crps": metrics.get("crps"),
             "eval/staged_top1_mse": metrics.get("top1_mse"),
             "eval/staged_top3_mse": metrics.get("top3_mse"),
@@ -365,12 +410,15 @@ class StagedEvalPhase(PipelinePhase):
             "eval/selected_steps": selected_steps,
         })
         logger.info(
-            "[%s] staged eval done: sampler=%s steps=%d mse=%.4f mae=%.4f crps=%.4f",
+            "[%s] staged eval done: sampler=%s steps=%d "
+            "prob_mse=%.4f prob_mae=%.4f anchor_mse=%.4f anchor_mae=%.4f crps=%.4f",
             subset_id,
             selected_sampler,
             selected_steps,
             metrics.get("mse", float("nan")),
             metrics.get("mae", float("nan")),
+            metrics.get("anchor_mse", float("nan")),
+            metrics.get("anchor_mae", float("nan")),
             metrics.get("crps", float("nan")),
         )
         return state
