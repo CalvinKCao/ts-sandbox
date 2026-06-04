@@ -20,10 +20,10 @@ DEFAULT_ITRANS_MANIFEST = (
     REPO_ROOT / "results/datasets/06-03-trend-robust-texture-staged-itrans-guidance/run_manifest.json"
 )
 DEFAULT_DISC_METRICS = (
-    REPO_ROOT / "results/datasets/06-03-discriminator-texture-staged-vs-mmpd/metrics.json"
+    REPO_ROOT / "results/datasets/06-03-discriminator-texture-staged-vs-mmpd-binmatch-all/metrics.json"
 )
 DEFAULT_DISC_MANIFEST = (
-    REPO_ROOT / "results/datasets/06-03-discriminator-texture-staged-vs-mmpd/run_manifest.json"
+    REPO_ROOT / "results/datasets/06-03-discriminator-texture-staged-vs-mmpd-binmatch-all/run_manifest.json"
 )
 LOG2 = math.log(2.0)
 
@@ -253,15 +253,38 @@ def disc_win_counts(
     return counts
 
 
+def disc_results_dir(disc_metrics_path: Optional[Path]) -> str:
+    if disc_metrics_path is None:
+        return "results/datasets/06-03-discriminator-texture-staged-vs-mmpd/"
+    try:
+        return f"results/datasets/{disc_metrics_path.parent.name}/"
+    except Exception:
+        return str(disc_metrics_path.parent)
+
+
+def infer_bin_match_filter(
+    disc_metrics_path: Optional[Path],
+    disc_manifest: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    if disc_manifest and disc_manifest.get("bin_match_filter"):
+        return str(disc_manifest["bin_match_filter"])
+    if disc_metrics_path and "-binmatch-" in disc_metrics_path.parent.name:
+        return disc_metrics_path.parent.name.split("-binmatch-", 1)[1]
+    return None
+
+
 def build_report(
     table: Dict[str, Dict[str, Dict[str, float]]],
     manifest: Dict[str, Any],
     itrans_manifest: Dict[str, Any],
     disc: Optional[Mapping[str, Any]] = None,
     disc_manifest: Optional[Mapping[str, Any]] = None,
+    disc_metrics_path: Optional[Path] = None,
 ) -> str:
     datasets = list(manifest.get("datasets") or sorted(table.keys()))
     slice_lengths = [int(x) for x in (disc_manifest or {}).get("slice_lengths") or [8, 16, 32]]
+    disc_dir = disc_results_dir(disc_metrics_path)
+    bin_match = infer_bin_match_filter(disc_metrics_path, disc_manifest)
     lines = [
         "# Trend-robust texture eval — 2-stage binary vs MMPD (Jun 3, 2026)",
         "",
@@ -274,15 +297,24 @@ def build_report(
         "",
         f"- **Metrics dir:** `results/datasets/06-03-trend-robust-texture-staged-vs-mmpd/`",
         f"- **iTrans metrics dir:** `results/datasets/06-03-trend-robust-texture-staged-itrans-guidance/`",
-        f"- **Discriminator dir:** `results/datasets/06-03-discriminator-texture-staged-vs-mmpd/`",
+        f"- **Discriminator dir:** `{disc_dir}`",
         f"- **MMPD ckpts:** `{manifest.get('mmpd_output_root', '06-01-mmpd-binary-aligned')}`",
         f"- **Samples:** {manifest.get('sample_num', 1)} stochastic draw(s) (binary/MMPD)",
-        "",
-        "### 2-stage binary checkpoints",
-        "",
-        "| Dataset | Checkpoint |",
-        "|---------|------------|",
     ]
+    if bin_match:
+        lines.append(
+            f"- **Discriminator bin-match:** `{bin_match}` — dual-scale 16×16 occupancy round-trip "
+            "on GT + fakes before training (per-window norm, max_scale=3.5)."
+        )
+    lines.extend(
+        [
+            "",
+            "### 2-stage binary checkpoints",
+            "",
+            "| Dataset | Checkpoint |",
+            "|---------|------------|",
+        ]
+    )
     ckpts = manifest.get("staged_ckpts") or {}
     for ds in datasets:
         ckpt = ckpts.get(ds, "—")
@@ -327,7 +359,14 @@ def build_report(
                 "## Discriminator texture metrics",
                 "",
                 "Per-dataset classifiers on real vs stochastic horizon slices (separate disc per model). "
-                "iTrans guidance has no discriminator eval. **Important:** most BCE values here are far "
+                "iTrans guidance has no discriminator eval."
+                + (
+                    f" **Bin-match `{bin_match}`:** GT and fakes passed through staged dual-scale "
+                    "encode/decode round-trip before slicing."
+                    if bin_match
+                    else ""
+                )
+                + " **Important:** most BCE values here are far "
                 f"below chance (`log(2)={LOG2:.4f}`), meaning both generators are still easy to distinguish "
                 "from GT — MMPD is usually *less* distinguishable, not indistinguishable. "
                 "Use `|BCE−log2|` (higher is better) for ranking.",
@@ -404,6 +443,7 @@ def main() -> None:
         itrans_manifest,
         disc=disc or None,
         disc_manifest=disc_manifest or None,
+        disc_metrics_path=args.disc_metrics if args.disc_metrics.is_file() else None,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report, encoding="utf-8")

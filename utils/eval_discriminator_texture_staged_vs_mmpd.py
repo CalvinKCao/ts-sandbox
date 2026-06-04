@@ -900,15 +900,44 @@ def run_eval(args: argparse.Namespace) -> None:
         for fake_source in args.fake_sources:
             results[dataset].setdefault(fake_source, {})
             for slice_len in valid_lens:
+                trained = False
                 if not args.force_train:
                     existing = existing_combo(args.output_dir, dataset, fake_source, int(slice_len))
                     if existing is not None:
                         print(f"[skip] existing metrics dataset={dataset} fake={fake_source} L={slice_len}", flush=True)
                         results[dataset][fake_source][str(slice_len)] = existing
-                        continue
-                print(f"[train] dataset={dataset} fake={fake_source} L={slice_len}", flush=True)
-                metrics = train_classifier(args, dataset, fake_source, int(slice_len), bundle, splits, device)
-                results[dataset][fake_source][str(slice_len)] = metrics
+                    else:
+                        print(f"[train] dataset={dataset} fake={fake_source} L={slice_len}", flush=True)
+                        metrics = train_classifier(
+                            args, dataset, fake_source, int(slice_len), bundle, splits, device
+                        )
+                        results[dataset][fake_source][str(slice_len)] = metrics
+                        trained = True
+                else:
+                    print(f"[train] dataset={dataset} fake={fake_source} L={slice_len}", flush=True)
+                    metrics = train_classifier(
+                        args, dataset, fake_source, int(slice_len), bundle, splits, device
+                    )
+                    results[dataset][fake_source][str(slice_len)] = metrics
+                    trained = True
+
+                if args.visualize_confusions:
+                    from utils.visualize_discriminator_texture_confusions import visualize_combo
+
+                    try:
+                        visualize_combo(
+                            args,
+                            dataset,
+                            fake_source,
+                            int(slice_len),
+                            bundle,
+                            splits,
+                            device,
+                        )
+                    except FileNotFoundError as exc:
+                        if trained:
+                            raise
+                        print(f"[viz] skip {dataset}/{fake_source}/L{slice_len}: {exc}", flush=True)
             write_outputs(args, {dataset: {fake_source: results[dataset][fake_source]}})
 
 
@@ -1022,6 +1051,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-eval-examples", type=int, default=None)
     parser.add_argument("--max-batches-per-epoch", type=int, default=None)
     parser.add_argument("--save-checkpoints", action="store_true")
+    parser.add_argument(
+        "--visualize-confusions",
+        action="store_true",
+        help="After each combo, save TP/TN/FP/FN PNGs under output-dir/disc_confusions/.",
+    )
+    parser.add_argument("--viz-per-bucket", type=int, default=2)
+    parser.add_argument("--viz-variate", type=int, default=0)
+    parser.add_argument("--viz-lookback-tail", type=int, default=32)
+    parser.add_argument(
+        "--viz-plot-dir",
+        type=Path,
+        default=None,
+        help="Override confusion plot root (default: <output-dir>/disc_confusions).",
+    )
     parser.add_argument("--force-train", action="store_true")
     parser.add_argument(
         "--merge-metrics",
@@ -1068,6 +1111,8 @@ def main() -> None:
     default_out = REPO_ROOT / "results" / "datasets" / "06-03-discriminator-texture-staged-vs-mmpd"
     if args.bin_match_filter and args.output_dir == default_out:
         args.output_dir = default_out.parent / f"{default_out.name}-binmatch-{args.bin_match_filter}"
+    if args.visualize_confusions:
+        args.save_checkpoints = True
     apply_smoke_defaults(args)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)

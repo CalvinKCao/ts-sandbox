@@ -17,6 +17,8 @@
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --merge-partials-only
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --bin-match-filter mmpd
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --bin-match-filter all --force-train
+# Resubmit with purged split + checkpoints + confusion PNGs:
+#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --bin-match-filter all --force-train
 # =============================================================================
 
 set -euo pipefail
@@ -248,7 +250,7 @@ install_pipeline_deps() {
             pip_retry pip install numpy pandas scipy scikit-learn tqdm -q
         fi
     fi
-    pip_retry pip install optuna einops pyyaml scikit-learn -q
+    pip_retry pip install optuna einops pyyaml scikit-learn matplotlib -q
 }
 
 _load_modules() {
@@ -320,6 +322,8 @@ if [[ "${MERGE_PARTIALS:-0}" -eq 1 ]]; then
     echo "=========================================="
     echo "Merge complete: $(date)"
     echo "Metrics: $OUTPUT_DIR/metrics.json"
+    echo "Plots:   $OUTPUT_DIR/disc_confusions/"
+    echo "Ckpts:   $OUTPUT_DIR/checkpoints/"
     echo "Report:  $REPO/reports/06-03_discriminator_texture_staged_vs_mmpd.md"
     echo "=========================================="
     exit 0
@@ -365,6 +369,9 @@ else
         --batch-size 512
         --raw-binary-batch-size 8
         --raw-mmpd-batch-size 16
+        --save-checkpoints
+        --visualize-confusions
+        --viz-per-bucket 2
     )
 fi
 
@@ -386,4 +393,6 @@ echo "[eval] output=$OUTPUT_DIR raw=$RAW_EVAL_DIR dataset=$DATASET fake=$FAKE_SO
 echo "=========================================="
 echo "Shard complete: $(date)"
 echo "Partial: $OUTPUT_DIR/partials/${DATASET}__${FAKE_SOURCE}.json"
+echo "Ckpts:   $OUTPUT_DIR/checkpoints/${DATASET}_${FAKE_SOURCE}_L*.pt"
+echo "Plots:   $OUTPUT_DIR/disc_confusions/${DATASET}_${FAKE_SOURCE}_L*/"
 echo "=========================================="
