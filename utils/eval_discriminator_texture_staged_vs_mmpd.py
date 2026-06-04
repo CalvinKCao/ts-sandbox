@@ -101,6 +101,51 @@ def validate_stochastic_pack(path: Path, pack: Mapping[str, np.ndarray]) -> None
         )
 
 
+def validate_variate_alignment(
+    dataset: str,
+    run: Any,
+    sub: Mapping[str, Any],
+    past: np.ndarray,
+    y_true_by_source: Mapping[str, np.ndarray],
+    fakes: Mapping[str, np.ndarray],
+) -> None:
+    expected = [int(i) for i in run_variate_indices(run)]
+    if not expected:
+        raise ValueError(f"{dataset}: staged metadata has no variate_indices")
+
+    for name, value in (
+        ("bundle", sub.get("variate_indices")),
+        ("fine metadata", (sub.get("fine_metadata") or {}).get("variate_indices")),
+        ("coarse metadata", (sub.get("coarse_metadata") or {}).get("variate_indices")),
+    ):
+        if value is None:
+            continue
+        observed = [int(i) for i in value]
+        if observed != expected:
+            raise ValueError(
+                f"{dataset}: {name} variate_indices {observed} do not match staged run {expected}"
+            )
+
+    n_vars = len(expected)
+    if past.shape[1] != n_vars:
+        raise ValueError(
+            f"{dataset}: past has {past.shape[1]} variates but staged subset has "
+            f"{n_vars}: {expected}"
+        )
+    for fake_source, y_true in y_true_by_source.items():
+        fake = fakes[fake_source]
+        if y_true.shape[1] != n_vars:
+            raise ValueError(
+                f"{dataset}/{fake_source}: y_true has {y_true.shape[1]} variates "
+                f"but staged subset has {n_vars}: {expected}"
+            )
+        if fake.shape[1] != n_vars:
+            raise ValueError(
+                f"{dataset}/{fake_source}: fake has {fake.shape[1]} variates "
+                f"but staged subset has {n_vars}: {expected}"
+            )
+
+
 def saved_indices(raw_eval_dir: Path, dataset: str) -> Optional[List[int]]:
     for fake_source in FAKE_SOURCES:
         path = pack_path(raw_eval_dir, fake_source, dataset)
@@ -217,6 +262,7 @@ def build_raw_bundle(
 
     if past.shape[0] != ref_shape[0]:
         raise ValueError(f"{dataset}: past/y_true window mismatch {past.shape[0]} vs {ref_shape[0]}")
+    validate_variate_alignment(dataset, run, sub, past, y_true_by_source, fakes)
 
     if len(y_true_by_source) > 1:
         sources = list(y_true_by_source)
@@ -249,6 +295,12 @@ def build_raw_bundle(
             device=device,
         )
 
+    expected_variates = [int(i) for i in run_variate_indices(run)]
+    print(
+        f"[{dataset}] staged subset={run_subset_id(run)} variates={expected_variates}",
+        flush=True,
+    )
+
     return RawBundle(
         run=run,
         sub=sub,
@@ -259,22 +311,73 @@ def build_raw_bundle(
     )
 
 
-def split_windows(n_windows: int, args: argparse.Namespace, dataset: str) -> Dict[str, np.ndarray]:
+def window_time_bounds(
+    dataset: str,
+    indices: Sequence[int],
+    lookback: int,
+    horizon: int,
+    test_stride: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    raw = np.asarray(indices, dtype=np.int64)
+    if dataset == "dalia":
+        starts = raw
+        span = 1
+    else:
+        starts = raw * max(1, int(test_stride))
+        span = int(lookback) + int(horizon)
+    ends = starts + span
+    return starts, ends
+
+
+def split_windows(
+    n_windows: int,
+    args: argparse.Namespace,
+    dataset: str,
+    *,
+    indices: Optional[Sequence[int]] = None,
+    lookback: Optional[int] = None,
+    horizon: Optional[int] = None,
+    test_stride: Optional[int] = None,
+) -> Dict[str, np.ndarray]:
     if args.max_windows is not None:
         n_windows = min(n_windows, int(args.max_windows))
-    rng = np.random.default_rng(args.seed + stable_hash(dataset))
-    perm = rng.permutation(n_windows)
-    n_train = max(1, int(round(len(perm) * args.train_fraction)))
-    n_val = max(1, int(round(len(perm) * args.val_fraction)))
-    if n_train + n_val >= len(perm):
-        n_val = max(1, len(perm) - n_train - 1)
-    n_test = len(perm) - n_train - n_val
+    if indices is None or lookback is None or horizon is None or test_stride is None:
+        raise ValueError("split_windows requires indices, lookback, horizon, and test_stride")
+    raw_indices = [int(i) for i in list(indices)[:n_windows]]
+    if len(raw_indices) != n_windows:
+        raise ValueError(f"{dataset}: got {len(raw_indices)} split indices for {n_windows} windows")
+
+    starts, ends = window_time_bounds(dataset, raw_indices, int(lookback), int(horizon), int(test_stride))
+    order = np.argsort(starts, kind="mergesort")
+    n_train_target = max(1, int(round(len(order) * args.train_fraction)))
+    n_val_target = max(1, int(round(len(order) * args.val_fraction)))
+    if n_train_target + n_val_target >= len(order):
+        n_val_target = max(1, len(order) - n_train_target - 1)
+    n_test = len(order) - n_train_target - n_val_target
     if n_test < 1:
-        raise ValueError(f"not enough windows for train/val/test split: {len(perm)}")
+        raise ValueError(f"not enough windows for train/val/test split: {len(order)}")
+
+    test = order[-n_test:]
+    test_start = starts[test].min()
+    train_val_pool = order[:-n_test]
+    train_val_pool = np.asarray([idx for idx in train_val_pool if ends[idx] <= test_start], dtype=np.int64)
+    if len(train_val_pool) < 2:
+        raise ValueError(
+            f"{dataset}: not enough non-overlapping train/val windows before test split "
+            f"(windows={len(order)}, test={n_test}, lookback={lookback}, horizon={horizon}, "
+            f"test_stride={test_stride})"
+        )
+
+    val_ratio = args.val_fraction / max(args.train_fraction + args.val_fraction, 1e-8)
+    n_val = max(1, int(round(len(train_val_pool) * val_ratio)))
+    if n_val >= len(train_val_pool):
+        n_val = len(train_val_pool) - 1
+    train = train_val_pool[:-n_val]
+    val = train_val_pool[-n_val:]
     return {
-        "train": np.sort(perm[:n_train]),
-        "val": np.sort(perm[n_train : n_train + n_val]),
-        "test": np.sort(perm[n_train + n_val :]),
+        "train": np.sort(train),
+        "val": np.sort(val),
+        "test": np.sort(test),
     }
 
 
@@ -766,8 +869,16 @@ def run_eval(args: argparse.Namespace) -> None:
         print(f"\n[{dataset}] loading/materializing raw packs", flush=True)
         bundle = build_raw_bundle(args, dataset, device)
         n = next(iter(bundle.y_true_by_source.values())).shape[0]
-        splits = split_windows(n, args, dataset)
         ref_y = next(iter(bundle.y_true_by_source.values()))
+        splits = split_windows(
+            n,
+            args,
+            dataset,
+            indices=bundle.indices,
+            lookback=bundle.past.shape[-1],
+            horizon=ref_y.shape[-1],
+            test_stride=run_test_stride(bundle.run),
+        )
         print(
             f"[{dataset}] windows={n} train/val/test="
             f"{len(splits['train'])}/{len(splits['val'])}/{len(splits['test'])} "
@@ -804,13 +915,14 @@ def run_eval(args: argparse.Namespace) -> None:
 def run_self_test(args: argparse.Namespace) -> None:
     rng = np.random.default_rng(args.seed)
     n, c, lookback, horizon = 18, 3, 32, 32
+    indices = [i * (lookback + horizon) for i in range(n)]
     past = rng.normal(size=(n, c, lookback)).astype(np.float32)
     y = rng.normal(size=(n, c, horizon)).astype(np.float32)
     fake = (0.7 * y + 0.3 * rng.normal(size=(n, c, horizon))).astype(np.float32)
     bundle = RawBundle(
         run=None,
         sub={},
-        indices=list(range(n)),
+        indices=indices,
         past=past,
         y_true_by_source={"binary_staged": y},
         fakes={"binary_staged": fake},
@@ -825,7 +937,15 @@ def run_self_test(args: argparse.Namespace) -> None:
     args.batch_size = min(args.batch_size, 32)
     args.max_batches_per_epoch = 2
     device = torch.device("cpu")
-    splits = split_windows(n, args, "selftest")
+    splits = split_windows(
+        n,
+        args,
+        "selftest",
+        indices=bundle.indices,
+        lookback=lookback,
+        horizon=horizon,
+        test_stride=1,
+    )
     metrics = train_classifier(args, "selftest", "binary_staged", 8, bundle, splits, device)
     print(json.dumps(metrics, indent=2, sort_keys=True))
 
