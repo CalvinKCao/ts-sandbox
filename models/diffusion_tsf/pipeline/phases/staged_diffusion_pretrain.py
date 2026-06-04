@@ -57,6 +57,19 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
     )
 
 
+def _stage_max_scale_for_dataset(state: PipelineState, dataset: str) -> float:
+    return float(state.max_scale_by_dataset.get(dataset, state.max_scale))
+
+
+def _current_run_config_suffix(state: PipelineState) -> str:
+    """Infer the submit_grid config suffix from the isolated checkpoint dir name."""
+    name = os.path.basename(os.path.abspath(state.checkpoint_dir))
+    token = f"-{state.dataset}-"
+    if token in name:
+        return name.split(token, 1)[1]
+    return state.experiment_name.replace("-", "_")
+
+
 def _shared_stage_pretrain_dir(state: PipelineState, config_name: str, stage: str) -> str:
     key = _stage_pretrain_signature(state, config_name)
     return os.path.join(_phase1_ckpt_root(state), "_shared_staged_pretrain", key, stage)
@@ -112,6 +125,41 @@ def _release_shared_lock(shared_ckpt: str) -> None:
         return
     except OSError as e:
         logger.warning("Failed to release shared pretrain lock %s: %s", lock_dir, e)
+
+
+def _discover_existing_stage_pretrain(state: PipelineState, stage: str) -> Optional[str]:
+    """Find a prior isolated run's staged pretrain that matches this run's geometry.
+
+    Old runs did not write shared metadata, so keep the match conservative:
+    same submit config suffix, same derived max_scale, same variate count implied by
+    the current config, and the expected staged checkpoint path exists.
+    """
+    ckpt_root = _phase1_ckpt_root(state)
+    config_suffix = _current_run_config_suffix(state)
+    current_ms = _stage_max_scale_for_dataset(state, state.dataset)
+    current_name = os.path.basename(os.path.abspath(state.checkpoint_dir))
+    candidates = []
+    try:
+        for name in os.listdir(ckpt_root):
+            if name == current_name or not name.endswith(f"-{config_suffix}"):
+                continue
+            prefix = name[: -len(f"-{config_suffix}")]
+            source_dataset = prefix.rsplit("-", 1)[-1]
+            if _stage_max_scale_for_dataset(state, source_dataset) != current_ms:
+                continue
+            ckpt = os.path.join(
+                ckpt_root,
+                name,
+                f"pretrained_{stage}",
+                "pretrained_diffusion.pt",
+            )
+            if os.path.exists(ckpt):
+                candidates.append((os.path.getmtime(ckpt), ckpt))
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    return max(candidates, key=lambda x: x[0])[1]
 
 
 def _phase1_ckpt_root(state: PipelineState) -> str:
@@ -262,6 +310,10 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             if os.path.exists(shared_ckpt):
                 logger.info("  [%s] %s shared cached: %s", self.name, stage, shared_ckpt)
                 return shared_ckpt
+            discovered = _discover_existing_stage_pretrain(state, stage)
+            if discovered:
+                logger.info("  [%s] %s discovered cached: %s", self.name, stage, discovered)
+                return discovered
         return None
 
     def should_skip(self, state: PipelineState) -> bool:
