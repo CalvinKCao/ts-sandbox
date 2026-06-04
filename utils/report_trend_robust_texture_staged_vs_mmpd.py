@@ -354,10 +354,6 @@ def build_report(
         disc_counts = disc_win_counts(disc, datasets, slice_lengths)
         parts = [f"{MODEL_LABELS[m]}: {disc_counts[m]}" for m in MODEL_ORDER]
         lines.append(f"- **Discriminator texture** closest-to-chance wins — " + ", ".join(parts))
-        lines.append(
-            "- **Note:** MMPD discriminators must use MMPD-pack GT (not binary-pack GT) for the real class; "
-            "re-run with `--force-train` after the y_true fix if numbers predate it."
-        )
 
     lines.append("")
     return "\n".join(lines)

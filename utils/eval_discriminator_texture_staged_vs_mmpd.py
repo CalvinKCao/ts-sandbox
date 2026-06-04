@@ -24,6 +24,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from utils.dual_scale_bin_filter import (
+    BIN_MATCH_CHOICES,
+    apply_bin_match_to_bundle,
+)
 from utils.eval_mmpd_gaussian_anchor import (
     DEFAULT_MMPD_DATA,
     DEFAULT_MMPD_REPO,
@@ -226,6 +230,24 @@ def build_raw_bundle(
                     f"(mse={mse:.6f}); each discriminator uses its own pack GT.",
                     flush=True,
                 )
+
+    if args.bin_match_filter:
+        print(
+            f"[{dataset}] applying dual-scale bin-match filter={args.bin_match_filter} "
+            f"(H={args.bin_image_height}, max_scale={args.bin_max_scale}, decoder={args.bin_decoder})",
+            flush=True,
+        )
+        y_true_by_source, fakes = apply_bin_match_to_bundle(
+            mode=args.bin_match_filter,
+            past=past.astype(np.float32),
+            y_true_by_source=y_true_by_source,
+            fakes=fakes,
+            image_height=args.bin_image_height,
+            max_scale=args.bin_max_scale,
+            std_floor=args.bin_std_floor,
+            decoder=args.bin_decoder,
+            device=device,
+        )
 
     return RawBundle(
         run=run,
@@ -690,6 +712,11 @@ def merge_partial_metrics(args: argparse.Namespace) -> Dict[str, Dict[str, Dict[
         "test_stride": args.test_stride,
         "staged_ckpts": {d: str(getattr(args, f"{d}_ckpt")) for d in merged_datasets if hasattr(args, f"{d}_ckpt")},
     }
+    if getattr(args, "bin_match_filter", None):
+        manifest["bin_match_filter"] = args.bin_match_filter
+        manifest["bin_image_height"] = args.bin_image_height
+        manifest["bin_max_scale"] = args.bin_max_scale
+        manifest["bin_decoder"] = args.bin_decoder
     write_json(args.output_dir / "run_manifest.json", manifest)
     print(
         f"[merge] wrote metrics for datasets={merged_datasets} fake_sources={manifest['fake_sources']}",
@@ -839,6 +866,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-load-batch-size", type=int, default=64)
     parser.add_argument("--force-raw-eval", action="store_true")
     parser.add_argument("--no-update-mmpd", action="store_true")
+    parser.add_argument(
+        "--bin-match-filter",
+        choices=list(BIN_MATCH_CHOICES),
+        default=None,
+        help="Round-trip horizons through staged binary 16x16 occupancy lattice. "
+        "mmpd=fakes only; both=both fakes; all=GT+fakes.",
+    )
+    parser.add_argument("--bin-image-height", type=int, default=16)
+    parser.add_argument("--bin-max-scale", type=float, default=3.5)
+    parser.add_argument("--bin-std-floor", type=float, default=1e-8)
+    parser.add_argument(
+        "--bin-decoder",
+        choices=["mean", "expectation", "pdf_expectation"],
+        default="mean",
+        help="decode_dual mode for round-trip filter (match staged eval decoder).",
+    )
 
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--patience", type=int, default=5)
@@ -884,6 +927,9 @@ def parse_args() -> argparse.Namespace:
 def apply_smoke_defaults(args: argparse.Namespace) -> None:
     if not args.smoke_test:
         return
+    default_out = REPO_ROOT / "results" / "datasets" / "06-03-discriminator-texture-staged-vs-mmpd"
+    if args.bin_match_filter and args.output_dir == default_out:
+        args.output_dir = default_out.parent / f"{default_out.name}-binmatch-{args.bin_match_filter}"
     args.datasets = args.datasets[:1]
     args.fake_sources = args.fake_sources[:1]
     args.slice_lengths = args.slice_lengths[:1]
@@ -899,6 +945,9 @@ def apply_smoke_defaults(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    default_out = REPO_ROOT / "results" / "datasets" / "06-03-discriminator-texture-staged-vs-mmpd"
+    if args.bin_match_filter and args.output_dir == default_out:
+        args.output_dir = default_out.parent / f"{default_out.name}-binmatch-{args.bin_match_filter}"
     apply_smoke_defaults(args)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)

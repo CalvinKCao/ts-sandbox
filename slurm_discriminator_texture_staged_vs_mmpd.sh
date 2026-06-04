@@ -15,6 +15,8 @@
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --slice-length 16
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --force-raw-eval
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --merge-partials-only
+#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --bin-match-filter mmpd
+#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --bin-match-filter all --force-train
 # =============================================================================
 
 set -euo pipefail
@@ -28,6 +30,17 @@ MERGE_PARTIALS=0
 DATASET=""
 FAKE_SOURCE=""
 SLICE_LENGTH=""
+BIN_MATCH_FILTER=""
+
+resolve_output_dir() {
+    local repo_root="$1"
+    local base="${repo_root}/results/datasets/06-03-discriminator-texture-staged-vs-mmpd"
+    if [[ -n "$BIN_MATCH_FILTER" ]]; then
+        echo "${base}-binmatch-${BIN_MATCH_FILTER}"
+    else
+        echo "$base"
+    fi
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -38,9 +51,15 @@ while [[ $# -gt 0 ]]; do
         --dataset) DATASET="$2"; shift 2 ;;
         --fake-source) FAKE_SOURCE="$2"; shift 2 ;;
         --slice-length) SLICE_LENGTH="$2"; shift 2 ;;
+        --bin-match-filter) BIN_MATCH_FILTER="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+if [[ -n "$BIN_MATCH_FILTER" && "$BIN_MATCH_FILTER" != "mmpd" && "$BIN_MATCH_FILTER" != "both" && "$BIN_MATCH_FILTER" != "all" ]]; then
+    echo "ERROR: --bin-match-filter must be one of: mmpd, both, all" >&2
+    exit 1
+fi
 
 DATASETS=(ETTh1 dalia traffic exchange_rate PeMS)
 FAKE_SOURCES=(binary_staged mmpd)
@@ -61,25 +80,28 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         exit 1
     fi
 
+    BIN_SUFFIX=""
+    [[ -n "$BIN_MATCH_FILTER" ]] && BIN_SUFFIX="-binmatch-${BIN_MATCH_FILTER}"
+
     if [[ "$MERGE_PARTIALS" -eq 1 ]]; then
         SMOKE_SUFFIX=""
         [[ "$SMOKE" -eq 1 ]] && SMOKE_SUFFIX="-smoke"
-        RUN_STEM="$(date +%m-%d)-disc-texture-staged-vs-mmpd${SMOKE_SUFFIX}"
+        RUN_STEM="$(date +%m-%d)-disc-texture-staged-vs-mmpd${SMOKE_SUFFIX}${BIN_SUFFIX}"
         LOG_DIR="$REPO/results/logs/${RUN_STEM}"
         mkdir -p "$LOG_DIR"
         echo "Submitting merge-only job..."
         sbatch \
-            --job-name="disc-tex-merge${SMOKE_SUFFIX}" \
+            --job-name="disc-tex-merge${SMOKE_SUFFIX}${BIN_SUFFIX}" \
             --account=aip-boyuwang \
             --nodes=1 \
             --cpus-per-task=2 \
             --mem=4G \
             --time=0:15:00 \
-            --output="$LOG_DIR/disc-tex-merge-${SMOKE_SUFFIX}-%j.log" \
-            --error="$LOG_DIR/disc-tex-merge-${SMOKE_SUFFIX}-%j.log" \
+            --output="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}${BIN_SUFFIX}-%j.log" \
+            --error="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}${BIN_SUFFIX}-%j.log" \
             --mail-type=FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE" \
+            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER" \
             "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh"
         exit 0
     fi
@@ -96,7 +118,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         CPUS=8
     fi
 
-    RUN_STEM="$(date +%m-%d)-disc-texture-staged-vs-mmpd${SMOKE_SUFFIX}"
+    RUN_STEM="$(date +%m-%d)-disc-texture-staged-vs-mmpd${SMOKE_SUFFIX}${BIN_SUFFIX}"
     LOG_DIR="$REPO/results/logs/${RUN_STEM}"
     mkdir -p "$LOG_DIR"
 
@@ -135,6 +157,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             [[ "$FORCE_RAW" -eq 1 ]] && SUBMIT_ARGS+=(--force-raw-eval)
             [[ "$FORCE_TRAIN" -eq 1 ]] && SUBMIT_ARGS+=(--force-train)
             [[ -n "$SLICE_LENGTH" ]] && SUBMIT_ARGS+=(--slice-length "$SLICE_LENGTH")
+            [[ -n "$BIN_MATCH_FILTER" ]] && SUBMIT_ARGS+=(--bin-match-filter "$BIN_MATCH_FILTER")
 
             echo "Submitting discriminator texture eval for $ds / $src (L40S, wall=$WALL)..."
             job_id="$(sbatch --parsable \
@@ -149,7 +172,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
                 --error="$LOG_DIR/${JOB_NAME}-%j.log" \
                 --mail-type=FAIL \
                 --mail-user=ccao87@uwo.ca \
-                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",SLICE_LENGTH="$SLICE_LENGTH",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN" \
+                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",SLICE_LENGTH="$SLICE_LENGTH",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",BIN_MATCH_FILTER="$BIN_MATCH_FILTER" \
                 "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh" \
                 "${SUBMIT_ARGS[@]}")"
             JOB_IDS+=("$job_id")
@@ -171,7 +194,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --error="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}-%j.log" \
             --mail-type=FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE" \
+            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER" \
             "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh"
     fi
     exit 0
@@ -186,7 +209,7 @@ if [[ "${MERGE_PARTIALS:-0}" -eq 1 ]]; then
     echo "Mode:   merge partials only"
 else
     echo "GPU:    $(nvidia-smi -L 2>/dev/null | head -1 || echo unknown)"
-    echo "Shard:  dataset=${DATASET:-?} fake_source=${FAKE_SOURCE:-?}"
+    echo "Shard:  dataset=${DATASET:-?} fake_source=${FAKE_SOURCE:-?} bin_match=${BIN_MATCH_FILTER:-off}"
 fi
 echo "Started: $(date)"
 echo "=========================================="
@@ -273,7 +296,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TS_SANDBOX_REPO="$REPO"
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 
-OUTPUT_DIR="$REPO/results/datasets/06-03-discriminator-texture-staged-vs-mmpd"
+OUTPUT_DIR="$(resolve_output_dir "$REPO")"
 RAW_EVAL_DIR="$REPO/results/datasets/06-03-trend-robust-texture-staged-vs-mmpd"
 MMPD_ROOT="$REPO/results/datasets/06-01-mmpd-binary-aligned"
 MMPD_REPO="$REPO/temp/MMPD"
@@ -353,7 +376,11 @@ if [[ "${FORCE_TRAIN:-0}" -eq 1 ]]; then
     EVAL_ARGS+=(--force-train)
 fi
 
-echo "[eval] output=$OUTPUT_DIR raw=$RAW_EVAL_DIR dataset=$DATASET fake=$FAKE_SOURCE"
+if [[ -n "${BIN_MATCH_FILTER:-}" ]]; then
+    EVAL_ARGS+=(--bin-match-filter "$BIN_MATCH_FILTER")
+fi
+
+echo "[eval] output=$OUTPUT_DIR raw=$RAW_EVAL_DIR dataset=$DATASET fake=$FAKE_SOURCE bin_match=${BIN_MATCH_FILTER:-off}"
 "$PYTHON" -u "$REPO/utils/eval_discriminator_texture_staged_vs_mmpd.py" "${EVAL_ARGS[@]}"
 
 echo "=========================================="
