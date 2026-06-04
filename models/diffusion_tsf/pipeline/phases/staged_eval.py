@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import time
-from typing import Dict, Optional
+from typing import Dict
 
 import numpy as np
 import torch
@@ -15,7 +15,10 @@ from torch.utils.data import DataLoader, Subset
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
-from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import _stage_best_ckpt
+from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
+    _model_kwargs_from_tuned,
+    _stage_best_ckpt,
+)
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch_stage_globals
 
 logger = logging.getLogger(__name__)
@@ -63,6 +66,14 @@ def _stage_finetune_ckpt(state: PipelineState, stage: str) -> str:
     raise FileNotFoundError(f"Missing staged {stage} checkpoint: {path}")
 
 
+def _fraction_subset(ds, fraction: float, seed: int):
+    n = len(ds)
+    keep = max(1, int(round(n * float(fraction))))
+    rng = np.random.default_rng(seed)
+    idx = sorted(rng.choice(n, size=keep, replace=False).tolist())
+    return Subset(ds, idx)
+
+
 class StagedEvalPhase(PipelinePhase):
     name = "staged_eval"
 
@@ -76,13 +87,15 @@ class StagedEvalPhase(PipelinePhase):
                     metrics = json.load(f)
                 robust_ok = "texture_derivative_motif_jsd" in metrics
                 prob_robust_ok = "prob_texture_derivative_motif_jsd" in metrics
+                sampler_ok = (not self.get("tune_sampler", True)) or metrics.get("sampler_tuned")
             except Exception:
                 robust_ok = False
                 prob_robust_ok = False
-            if robust_ok and prob_robust_ok:
-                logger.info("  [%s] already evaluated with robust texture metrics: %s", self.name, partial)
+                sampler_ok = False
+            if robust_ok and prob_robust_ok and sampler_ok:
+                logger.info("  [%s] already evaluated with tuned sampler + robust texture metrics: %s", self.name, partial)
                 return True
-            logger.info("  [%s] re-evaluating to add robust texture metrics: %s", self.name, partial)
+            logger.info("  [%s] re-evaluating to add tuned sampler/robust metrics: %s", self.name, partial)
         return False
 
     def _load_model(self, state: PipelineState, stage: str, itrans_guidance, n_iv: int, device: torch.device):
@@ -98,6 +111,8 @@ class StagedEvalPhase(PipelinePhase):
         ds_lb, ds_hz = dataset_window_lengths(state.dataset)
         meta = _load_stage_metadata(state, stage)
         tuned = meta.get("tuned_params") or {}
+        model_kwargs = anchor_kwargs_from_params(tuned)
+        model_kwargs.update(_model_kwargs_from_tuned(tuned))
         model = create_diffusion_model(
             n_variates=n_iv,
             lookback=ds_lb,
@@ -105,68 +120,28 @@ class StagedEvalPhase(PipelinePhase):
             guidance_model=itrans_guidance,
             diffusion_stage=stage,
             use_guidance_channel=state.use_guidance_channel,
-            **anchor_kwargs_from_params(tuned),
+            **model_kwargs,
         ).to(device)
         ckpt = torch.load(_stage_finetune_ckpt(state, stage), map_location=device, weights_only=False)
         load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
         model.eval()
         return model
 
-    def execute(self, state: PipelineState) -> PipelineState:
-        from models.diffusion_tsf.train_multivariate_pipeline import (
-            generate_dataset_job,
-            load_dataset,
-            load_itransformer_from_checkpoint,
-        )
-        from models.diffusion_tsf.guidance import iTransformerGuidance
-        summarize_prediction_pack = _import_summarize_prediction_pack()
-
-        device = state.resolve_device()
-        subset_id = state.subset_id or state.dataset
-        variate_indices = state.variate_indices
-        if variate_indices is None:
-            variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
-        subset_meta = state.data_subset_resolved or {}
-        train_stride = int(subset_meta.get("train_stride", state.window_stride))
-        test_stride = int(self.get("test_stride", subset_meta.get("test_stride", 1)))
-        n_iv = len(variate_indices)
-
-        ft_itrans_ckpt = state.itrans_finetune_ckpt
-        if not ft_itrans_ckpt or not os.path.exists(ft_itrans_ckpt):
-            ft_itrans_ckpt = os.path.join(state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
-        if not os.path.exists(ft_itrans_ckpt):
-            raise FileNotFoundError(f"Missing finetuned iTransformer checkpoint: {ft_itrans_ckpt}")
-
-        itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, n_iv, device)
-        itrans_guidance = iTransformerGuidance(itrans_model)
-        coarse_model = self._load_model(state, "coarse", itrans_guidance, n_iv, device)
-        fine_model = self._load_model(state, "fine", itrans_guidance, n_iv, device)
-
-        _, _, test_ds, _ = load_dataset(
-            state.dataset,
-            variate_indices,
-            stride=train_stride,
-            test_stride=test_stride,
-        )
-        if state.smoke_test:
-            test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
-            prob_samples = 1
-            prob_steps = 5
-        else:
-            eval_fraction = self.get("eval_test_fraction", 0.5)
-            n_full = len(test_ds)
-            n_eval = max(1, int(round(n_full * float(eval_fraction))))
-            rng = np.random.default_rng(state.seed)
-            eval_idx = sorted(rng.choice(n_full, size=n_eval, replace=False).tolist())
-            test_ds = Subset(test_ds, eval_idx)
-            prob_samples = int(self.get("probabilistic_n_samples", 100))
-            prob_steps = int(self.get("probabilistic_num_inference_steps", 20))
-
-        batch_size = int(self.get("batch_size", 8 if not state.smoke_test else 2))
-        loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
-        prob_sampler = self.get("probabilistic_sampler", "dpmpp")
+    def _run_eval(
+        self,
+        *,
+        state: PipelineState,
+        subset_id: str,
+        loader: DataLoader,
+        device: torch.device,
+        coarse_model,
+        fine_model,
+        prob_sampler: str,
+        prob_steps: int,
+        prob_samples: int,
+        summarize_prediction_pack,
+    ):
         prob_kwargs = {"sampler": prob_sampler, "num_inference_steps": prob_steps}
-
         y_true_all = []
         det_all = []
         sample_all = []
@@ -174,7 +149,7 @@ class StagedEvalPhase(PipelinePhase):
         logger.info(
             "[%s] staged eval start: windows=%d batches=%d prob_samples=%d sampler=%s steps=%d",
             subset_id,
-            len(test_ds),
+            len(loader.dataset),
             len(loader),
             prob_samples,
             prob_sampler,
@@ -233,6 +208,131 @@ class StagedEvalPhase(PipelinePhase):
             topk_max=int(self.get("topk_max", 3)),
             texture_per_sample=True,
         )
+        return metrics, pack
+
+    def execute(self, state: PipelineState) -> PipelineState:
+        from models.diffusion_tsf.train_multivariate_pipeline import (
+            generate_dataset_job,
+            load_dataset,
+            load_itransformer_from_checkpoint,
+        )
+        from models.diffusion_tsf.guidance import iTransformerGuidance
+        summarize_prediction_pack = _import_summarize_prediction_pack()
+
+        device = state.resolve_device()
+        subset_id = state.subset_id or state.dataset
+        variate_indices = state.variate_indices
+        if variate_indices is None:
+            variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+        subset_meta = state.data_subset_resolved or {}
+        train_stride = int(subset_meta.get("train_stride", state.window_stride))
+        test_stride = int(self.get("test_stride", subset_meta.get("test_stride", 1)))
+        n_iv = len(variate_indices)
+
+        ft_itrans_ckpt = state.itrans_finetune_ckpt
+        if not ft_itrans_ckpt or not os.path.exists(ft_itrans_ckpt):
+            ft_itrans_ckpt = os.path.join(state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
+        if not os.path.exists(ft_itrans_ckpt):
+            raise FileNotFoundError(f"Missing finetuned iTransformer checkpoint: {ft_itrans_ckpt}")
+
+        itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, n_iv, device)
+        itrans_guidance = iTransformerGuidance(itrans_model)
+        coarse_model = self._load_model(state, "coarse", itrans_guidance, n_iv, device)
+        fine_model = self._load_model(state, "fine", itrans_guidance, n_iv, device)
+
+        _, _, full_test_ds, _ = load_dataset(
+            state.dataset,
+            variate_indices,
+            stride=train_stride,
+            test_stride=test_stride,
+        )
+        batch_size = int(self.get("batch_size", 8 if not state.smoke_test else 2))
+        if state.smoke_test:
+            final_ds = Subset(full_test_ds, list(range(min(2, len(full_test_ds)))))
+            prob_samples = 1
+            default_steps = 5
+        else:
+            eval_fraction = float(self.get("eval_test_fraction", 1.0))
+            final_ds = _fraction_subset(full_test_ds, eval_fraction, state.seed) if eval_fraction < 1.0 else full_test_ds
+            prob_samples = int(self.get("probabilistic_n_samples", 100))
+            default_steps = int(self.get("probabilistic_num_inference_steps", 20))
+
+        sampler_tuning = []
+        selected_sampler = self.get("probabilistic_sampler", "dpmpp")
+        selected_steps = default_steps
+        if self.get("tune_sampler", True) and not state.smoke_test:
+            tune_fraction = float(self.get("sampler_tune_fraction", 0.25))
+            tune_samples = int(self.get("sampler_tune_probabilistic_n_samples", min(8, prob_samples)))
+            candidate_samplers = list(self.get("sampler_tune_candidates", ["ddim", "dpmpp"]))
+            candidate_steps = [int(x) for x in self.get("sampler_tune_steps", [10, 20, 40])]
+            tune_ds = _fraction_subset(full_test_ds, tune_fraction, state.seed + 7919)
+            tune_loader = DataLoader(tune_ds, batch_size=batch_size, shuffle=False)
+            score_metric = str(self.get("sampler_tune_metric", "top3_mse"))
+            best_score = float("inf")
+            for sampler in candidate_samplers:
+                for steps in candidate_steps:
+                    metrics_i, _pack_i = self._run_eval(
+                        state=state,
+                        subset_id=f"{subset_id}-sampler-tune",
+                        loader=tune_loader,
+                        device=device,
+                        coarse_model=coarse_model,
+                        fine_model=fine_model,
+                        prob_sampler=sampler,
+                        prob_steps=steps,
+                        prob_samples=tune_samples,
+                        summarize_prediction_pack=summarize_prediction_pack,
+                    )
+                    score = float(metrics_i.get(score_metric, metrics_i.get("crps", metrics_i.get("mse"))))
+                    sampler_tuning.append({
+                        "sampler": sampler,
+                        "steps": steps,
+                        "metric": score_metric,
+                        "score": score,
+                        "mse": metrics_i.get("mse"),
+                        "crps": metrics_i.get("crps"),
+                        "top3_mse": metrics_i.get("top3_mse"),
+                    })
+                    logger.info(
+                        "[%s] sampler tune: sampler=%s steps=%d %s=%.6f",
+                        subset_id,
+                        sampler,
+                        steps,
+                        score_metric,
+                        score,
+                    )
+                    if score < best_score:
+                        best_score = score
+                        selected_sampler = sampler
+                        selected_steps = steps
+            logger.info(
+                "[%s] selected sampler=%s steps=%d (%s=%.6f on %.0f%% eval subset)",
+                subset_id,
+                selected_sampler,
+                selected_steps,
+                score_metric,
+                best_score,
+                100 * tune_fraction,
+            )
+
+        loader = DataLoader(final_ds, batch_size=batch_size, shuffle=False)
+        metrics, pack = self._run_eval(
+            state=state,
+            subset_id=subset_id,
+            loader=loader,
+            device=device,
+            coarse_model=coarse_model,
+            fine_model=fine_model,
+            prob_sampler=selected_sampler,
+            prob_steps=selected_steps,
+            prob_samples=prob_samples,
+            summarize_prediction_pack=summarize_prediction_pack,
+        )
+        metrics.update({
+            "sampler_tuned": bool(sampler_tuning),
+            "selected_probabilistic_sampler": selected_sampler,
+            "selected_probabilistic_num_inference_steps": selected_steps,
+        })
 
         partial_dir = os.path.join(state.results_dir, "partials")
         raw_dir = os.path.join(state.results_dir, "raw")
@@ -249,6 +349,7 @@ class StagedEvalPhase(PipelinePhase):
                 "subset_id": subset_id,
                 "variate_indices": variate_indices,
                 "data_subset": subset_meta,
+                "sampler_tuning": sampler_tuning,
                 "eval_metrics": {"staged_anchor": metrics},
             }, f, indent=2, sort_keys=True)
 
@@ -258,10 +359,14 @@ class StagedEvalPhase(PipelinePhase):
             "eval/staged_crps": metrics.get("crps"),
             "eval/staged_top1_mse": metrics.get("top1_mse"),
             "eval/staged_top3_mse": metrics.get("top3_mse"),
+            "eval/selected_sampler": selected_sampler,
+            "eval/selected_steps": selected_steps,
         })
         logger.info(
-            "[%s] staged eval done: mse=%.4f mae=%.4f crps=%.4f",
+            "[%s] staged eval done: sampler=%s steps=%d mse=%.4f mae=%.4f crps=%.4f",
             subset_id,
+            selected_sampler,
+            selected_steps,
             metrics.get("mse", float("nan")),
             metrics.get("mae", float("nan")),
             metrics.get("crps", float("nan")),

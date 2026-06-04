@@ -22,18 +22,28 @@ class BinaryDiffusionScheduler:
         num_steps: int = 1000,
         beta_start: float = 1e-5,
         beta_end: float = 0.5,
+        schedule_type: str = "sqrt_linear",
         device: str = "cpu",
     ):
         self.num_steps = num_steps
         self.device = device
 
         t = torch.linspace(0.0, 1.0, num_steps, device=device)
-        sq_s = math.sqrt(beta_start)
-        sq_e = math.sqrt(beta_end)
-        self.betas = (sq_s + t * (sq_e - sq_s)) ** 2
+        if schedule_type == "linear":
+            self.betas = beta_start + t * (beta_end - beta_start)
+        elif schedule_type == "cosine":
+            eased = 0.5 * (1.0 - torch.cos(math.pi * t))
+            self.betas = beta_start + eased * (beta_end - beta_start)
+        elif schedule_type == "sqrt_linear":
+            sq_s = math.sqrt(beta_start)
+            sq_e = math.sqrt(beta_end)
+            self.betas = (sq_s + t * (sq_e - sq_s)) ** 2
+        else:
+            raise ValueError(f"Unknown binary noise schedule: {schedule_type!r}")
+        self.schedule_type = schedule_type
         logger.info(
             f"BinaryDiffusionScheduler initialized: T={num_steps}, "
-            f"beta=[{self.betas[0]:.2e}, {self.betas[-1]:.3f}]"
+            f"schedule={schedule_type}, beta=[{self.betas[0]:.2e}, {self.betas[-1]:.3f}]"
         )
 
     def to(self, device: str) -> "BinaryDiffusionScheduler":
@@ -58,6 +68,7 @@ class BinaryDiffusionScheduler:
         num_steps: int = 20,
         device: str = "cpu",
         verbose: bool = False,
+        sampler: str = "ddim",
         yield_intermediates: bool = False,
         reverse_step_indices: Optional[torch.Tensor] = None,
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
@@ -66,7 +77,18 @@ class BinaryDiffusionScheduler:
         if reverse_step_indices is not None:
             step_indices = reverse_step_indices.to(device=device, dtype=torch.long)
         else:
-            step_indices = torch.linspace(self.num_steps - 1, 0, num_steps, dtype=torch.long)
+            if sampler == "dpmpp":
+                # Karras-style spacing: more denoise evaluations near low-noise timesteps.
+                ramp = torch.linspace(1.0, 0.0, num_steps, device=device)
+                step_indices = torch.round((ramp ** 2) * (self.num_steps - 1)).long()
+            else:
+                step_indices = torch.linspace(
+                    self.num_steps - 1,
+                    0,
+                    num_steps,
+                    device=device,
+                    dtype=torch.long,
+                )
         snapshot_set = None
         if snapshot_timesteps is not None:
             snapshot_set = {int(min(max(0, t), self.num_steps - 1)) for t in snapshot_timesteps}

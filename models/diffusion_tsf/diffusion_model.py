@@ -187,6 +187,7 @@ class DiffusionTSF(nn.Module):
             num_steps=config.binary_num_steps,
             beta_start=config.binary_beta_start,
             beta_end=config.binary_beta_end,
+            schedule_type=config.binary_noise_schedule,
         )
 
         logger.info("DiffusionTSF initialized:")
@@ -759,6 +760,31 @@ class DiffusionTSF(nn.Module):
         """Unweighted BCE for binary CDF images."""
         return F.binary_cross_entropy_with_logits(logits, target.float())
 
+    def _binary_weighted_bce_loss(
+        self,
+        logits: torch.Tensor,
+        target: torch.Tensor,
+        t_flat: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """BCE with optional min-SNR timestep weighting."""
+        per_elem = F.binary_cross_entropy_with_logits(logits, target.float(), reduction="none")
+        if t_flat is None or self.config.loss_weighting == "none":
+            return per_elem.mean()
+        beta_t = self.binary_scheduler.betas[t_flat].clamp(1e-5, 1.0 - 1e-5)
+        snr = ((1.0 - beta_t) ** 2) / (beta_t ** 2)
+        weight = torch.minimum(snr, torch.full_like(snr, self.config.min_snr_gamma)) / snr
+        view_shape = (-1,) + (1,) * (per_elem.dim() - 1)
+        return (per_elem * weight.view(view_shape)).mean()
+
+    def _x0_logits_from_prediction(
+        self,
+        primary_logits: torch.Tensor,
+        xt: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.config.prediction_target == "epsilon":
+            return torch.where(xt > 0.5, -primary_logits, primary_logits)
+        return primary_logits
+
     def _stack_dual_scale_flat(self, coarse: torch.Tensor, fine: torch.Tensor) -> torch.Tensor:
         """Interleave coarse/fine tensors so each (B,V) pair is adjacent in batch."""
         if coarse.shape != fine.shape:
@@ -877,10 +903,15 @@ class DiffusionTSF(nn.Module):
         out_flat = self._predict_noise_chunked(
             canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices,
         )
-        x0_logits = out_flat[:, 0:1, :, :]
+        primary_logits = out_flat[:, 0:1, :, :]
+        x0_logits = self._x0_logits_from_prediction(primary_logits, xt_flat)
         zt_logits = out_flat[:, 1:2, :, :]
-        loss_x0 = self._binary_plain_bce_loss(x0_logits, target_flat)
-        loss_zt = self._binary_plain_bce_loss(zt_logits, zt_flat)
+        if self.config.prediction_target == "epsilon":
+            loss_x0 = self._binary_weighted_bce_loss(primary_logits, zt_flat, t_flat)
+            loss_zt = self._binary_weighted_bce_loss(zt_logits, target_flat, t_flat)
+        else:
+            loss_x0 = self._binary_weighted_bce_loss(primary_logits, target_flat, t_flat)
+            loss_zt = self._binary_weighted_bce_loss(zt_logits, zt_flat, t_flat)
         regular_loss = loss_x0 + loss_zt
 
         anchor_loss = torch.tensor(0.0, device=device)
@@ -902,7 +933,9 @@ class DiffusionTSF(nn.Module):
                 ctx_anchor,
                 variate_indices=variate_indices,
             )
-            anchor_loss = self._binary_plain_bce_loss(anchor_out_flat[:, 0:1], target_flat)
+            anchor_primary = anchor_out_flat[:, 0:1]
+            anchor_x0_logits = self._x0_logits_from_prediction(anchor_primary, neutral_future_flat)
+            anchor_loss = self._binary_plain_bce_loss(anchor_x0_logits, target_flat)
             lam = self.config.deterministic_anchor_lambda
             combined_loss = lam * regular_loss + (1.0 - lam) * anchor_loss
 
@@ -1002,7 +1035,8 @@ class DiffusionTSF(nn.Module):
                 out = out_u + cfg_scale * (out_c - out_u)
             else:
                 out = out_c
-            return out[:, 0:1], out[:, 1:2]
+            x0_logits = self._x0_logits_from_prediction(out[:, 0:1], xt)
+            return x0_logits, out[:, 1:2]
 
         intermediates = None
         if sampler in ("anchor", "deterministic_anchor"):
@@ -1024,6 +1058,7 @@ class DiffusionTSF(nn.Module):
                 num_steps=num_steps,
                 device=device,
                 verbose=verbose,
+                sampler=sampler,
                 reverse_step_indices=reverse_step_indices,
                 snapshot_timesteps=snapshot_timesteps,
             )

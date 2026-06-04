@@ -6,9 +6,7 @@
 #   Isolated ckpt/results stems: *-<dataset>-binary_dual_scale_staged_best_scale
 #   (does NOT resume q99.5 binary_dual_scale_staged runs)
 #
-# Default datasets (policy MS differs from q99.5 grid): ETTh2, ETTm1/2, illness,
-# solar_Alabama, weather, electricity. Skip ETTh1/dalia/traffic (legacy 2-stage)
-# and exchange_rate/PeMS (reuse q99.5 grid in report).
+# Default datasets: all datasets in the repo grid.
 #
 # USAGE (Killarney login node, repo root):
 #   ./submit_best_scale_retrain.sh
@@ -20,7 +18,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG="${CFG:-configs/binary_dual_scale_staged_best_scale.yaml}"
-DATASETS="${DATASETS:-ETTh2,ETTm1,ETTm2,illness,solar_Alabama,weather,electricity}"
+DATASETS="${DATASETS:-ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,electricity,traffic,PeMS,solar_Alabama,dalia}"
 WALL="${WALL:-4:00:00}"
 
 EXTRA=()

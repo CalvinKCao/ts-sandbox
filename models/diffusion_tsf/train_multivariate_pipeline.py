@@ -1294,6 +1294,10 @@ def create_diffusion_model(
     use_guidance_channel: Optional[bool] = None,
     max_scale: Optional[float] = None,
     window_norm_std_floor: Optional[float] = None,
+    binary_noise_schedule: Optional[str] = None,
+    prediction_target: Optional[str] = None,
+    loss_weighting: Optional[str] = None,
+    min_snr_gamma: Optional[float] = None,
     cfg_dropout: Optional[float] = None,
     cfg_scale: Optional[float] = None,
     use_cfg_inference: Optional[bool] = None,
@@ -1330,6 +1334,14 @@ def create_diffusion_model(
         max_scale = MAX_SCALE
     if window_norm_std_floor is None:
         window_norm_std_floor = WINDOW_NORM_STD_FLOOR
+    if binary_noise_schedule is None:
+        binary_noise_schedule = "sqrt_linear"
+    if prediction_target is None:
+        prediction_target = "x0"
+    if loss_weighting is None:
+        loss_weighting = "none"
+    if min_snr_gamma is None:
+        min_snr_gamma = 5.0
     if cfg_dropout is None:
         cfg_dropout = CFG_DROPOUT
     if cfg_scale is None:
@@ -1355,6 +1367,10 @@ def create_diffusion_model(
         past_loss_weight=past_loss_weight,
         image_height=IMAGE_HEIGHT,
         max_scale=max_scale,
+        binary_noise_schedule=binary_noise_schedule,
+        prediction_target=prediction_target,
+        loss_weighting=loss_weighting,
+        min_snr_gamma=min_snr_gamma,
         use_coordinate_channel=True,
         use_guidance_channel=use_guidance_channel,
         guidance_penalty_weight=guidance_penalty_weight,

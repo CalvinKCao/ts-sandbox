@@ -40,6 +40,7 @@ class DiffusionTSFConfig:
     binary_sample_steps: int = 20
     binary_beta_start: float = 1e-5
     binary_beta_end: float = 0.5
+    binary_noise_schedule: str = "sqrt_linear"  # sqrt_linear, linear, cosine
     binary_boundary_weight: float = 1.0
     binary_background_weight: float = 0.1
     binary_boundary_width: int = 8
@@ -77,6 +78,9 @@ class DiffusionTSFConfig:
     use_window_normalization: bool = True
     window_norm_std_floor: float = 1e-8
     zero_guidance_forecast: bool = False
+    prediction_target: str = "x0"  # x0 or epsilon (bit-flip mask)
+    loss_weighting: str = "none"  # none or min_snr
+    min_snr_gamma: float = 5.0
 
     model_type: str = "dit"
 
@@ -146,6 +150,17 @@ class DiffusionTSFConfig:
         assert 0.0 <= self.deterministic_anchor_lambda <= 1.0
         assert 0.0 <= self.deterministic_anchor_alpha < 1.0
         assert self.window_norm_std_floor > 0
+        if self.binary_noise_schedule not in {"sqrt_linear", "linear", "cosine"}:
+            raise ValueError(
+                "binary_noise_schedule must be one of {'sqrt_linear', 'linear', 'cosine'}, "
+                f"got {self.binary_noise_schedule!r}."
+            )
+        if self.prediction_target not in {"x0", "epsilon"}:
+            raise ValueError("prediction_target must be 'x0' or 'epsilon'.")
+        if self.loss_weighting not in {"none", "min_snr"}:
+            raise ValueError("loss_weighting must be 'none' or 'min_snr'.")
+        if self.min_snr_gamma <= 0:
+            raise ValueError("min_snr_gamma must be > 0.")
         assert self.representation_mode in ["pdf", "cdf"]
         if not self.variate_factorized:
             raise ValueError("variate_factorized=False is no longer supported.")

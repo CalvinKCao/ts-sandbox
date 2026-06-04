@@ -56,20 +56,32 @@ phases:
     cold_start: true
 
   - phase: diffusion_coarse_finetune_hp
-    n_trials: 5
-    max_epochs: 20
-    patience: 15
+    n_trials: 20
+    tune_data_fraction: 0.5
+    hp_max_epochs: 12
+    hp_patience: 4
+    final_max_epochs: 20
+    final_patience: 8
 
   - phase: diffusion_fine_finetune_hp
-    n_trials: 5
-    max_epochs: 20
-    patience: 15
+    n_trials: 20
+    tune_data_fraction: 0.5
+    hp_max_epochs: 12
+    hp_patience: 4
+    final_max_epochs: 20
+    final_patience: 8
 
   - phase: staged_eval
     eval_test_fraction: 1.0
     test_stride: 2
     n_samples: 1
     probabilistic_n_samples: 100
+    tune_sampler: true
+    sampler_tune_fraction: 0.25
+    sampler_tune_probabilistic_n_samples: 8
+    sampler_tune_candidates: [ddim, dpmpp]
+    sampler_tune_steps: [10, 20, 40]
+    sampler_tune_metric: top3_mse
     probabilistic_sampler: dpmpp
     probabilistic_num_inference_steps: 20
     skip_eval_visualizations: true
