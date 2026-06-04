@@ -68,6 +68,7 @@ phases:
     test_stride: 2
     n_samples: 1
     probabilistic_n_samples: 100
+    skip_texture_metrics: true
     tune_sampler: false
     probabilistic_sampler: dpmpp
     probabilistic_num_inference_steps: 20

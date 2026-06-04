@@ -85,17 +85,18 @@ class StagedEvalPhase(PipelinePhase):
             try:
                 with open(partial) as f:
                     metrics = json.load(f)
-                robust_ok = "texture_derivative_motif_jsd" in metrics
-                prob_robust_ok = "prob_texture_derivative_motif_jsd" in metrics
+                texture_required = not bool(self.get("skip_texture_metrics", False))
+                robust_ok = (not texture_required) or "texture_derivative_motif_jsd" in metrics
+                prob_robust_ok = (not texture_required) or "prob_texture_derivative_motif_jsd" in metrics
                 sampler_ok = (not self.get("tune_sampler", True)) or metrics.get("sampler_tuned")
             except Exception:
                 robust_ok = False
                 prob_robust_ok = False
                 sampler_ok = False
             if robust_ok and prob_robust_ok and sampler_ok:
-                logger.info("  [%s] already evaluated with tuned sampler + robust texture metrics: %s", self.name, partial)
+                logger.info("  [%s] already evaluated: %s", self.name, partial)
                 return True
-            logger.info("  [%s] re-evaluating to add tuned sampler/robust metrics: %s", self.name, partial)
+            logger.info("  [%s] re-evaluating to add missing metrics: %s", self.name, partial)
         return False
 
     def _load_model(self, state: PipelineState, stage: str, itrans_guidance, n_iv: int, device: torch.device):
@@ -206,7 +207,8 @@ class StagedEvalPhase(PipelinePhase):
             gmm_components=int(self.get("gmm_components", 10)),
             seed=state.seed,
             topk_max=int(self.get("topk_max", 3)),
-            texture_per_sample=True,
+            include_texture=not bool(self.get("skip_texture_metrics", False)),
+            texture_per_sample=not bool(self.get("skip_texture_metrics", False)),
         )
         return metrics, pack
 

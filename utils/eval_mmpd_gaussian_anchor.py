@@ -1575,6 +1575,7 @@ def summarize_prediction_pack(
     gmm_components: int = 10,
     seed: int = 0,
     topk_max: int = 5,
+    include_texture: bool = True,
     texture_per_sample: bool = False,
 ) -> Dict[str, float]:
     y_true = pack["y_true"]
@@ -1593,8 +1594,9 @@ def summarize_prediction_pack(
             seed=seed,
         )
     metrics.update(topk_from_modes(y_true, mode_center, mode_prob, max_k=topk_max))
-    metrics.update(texture_metrics(y_true, det))
-    if texture_per_sample:
+    if include_texture:
+        metrics.update(texture_metrics(y_true, det))
+    if include_texture and texture_per_sample:
         metrics.update(texture_metrics_per_sample(y_true, samples))
     metrics["n_windows"] = float(y_true.shape[0])
     metrics["n_variates"] = float(y_true.shape[1])
