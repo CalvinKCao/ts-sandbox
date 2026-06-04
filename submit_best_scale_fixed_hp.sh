@@ -34,7 +34,7 @@ done
 echo "=== Best-scale fixed-HP retrain (${DATASETS}) ==="
 echo "  config: $CFG"
 echo "  wall:   $WALL"
-echo "  reuse HP from: *-<dataset>-binary_dual_scale_staged"
+echo "  reuse pretrain + HP from: *-<dataset>-binary_dual_scale_staged (no synthetic phase 1)"
 echo "  policy max_scale: configs/binary_dual_scale_staged_best_scale_fixed_hp.yaml"
 echo ""
 

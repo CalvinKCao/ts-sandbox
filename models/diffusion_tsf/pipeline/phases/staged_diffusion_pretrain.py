@@ -25,6 +25,8 @@ def _stage_pretrain_ckpt(state: PipelineState, stage: str) -> str:
 
 
 def _stage_pretrain_cache_enabled(phase: PipelinePhase, state: PipelineState) -> bool:
+    if phase.get("reuse_pretrain_from_config"):
+        return False
     if state.smoke_test:
         return False
     value = phase.get("shared_cache", state.extra.get("staged_pretrain_shared_cache", True))
@@ -168,6 +170,22 @@ def _phase1_ckpt_root(state: PipelineState) -> str:
     if os.path.basename(ckpt_dir) == "ckpts":
         return ckpt_dir
     return os.path.dirname(ckpt_dir)
+
+
+def source_run_stage_pretrain_ckpt(
+    state: PipelineState,
+    source_config: str,
+    stage: str,
+) -> Optional[str]:
+    """``pretrained_{stage}/pretrained_diffusion.pt`` from a prior grid run."""
+    try:
+        source_dir = discover_dataset_run_ckpt_dir(state, source_config)
+    except FileNotFoundError:
+        return None
+    ckpt = os.path.join(source_dir, f"pretrained_{stage}", "pretrained_diffusion.pt")
+    if os.path.exists(ckpt):
+        return ckpt
+    return None
 
 
 def discover_dataset_run_ckpt_dir(state: PipelineState, config_suffix: str) -> str:
@@ -330,6 +348,21 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         )
 
     def _cached_stage_ckpt(self, state: PipelineState, config_name: str, stage: str) -> Optional[str]:
+        reuse_from = self.get("reuse_pretrain_from_config")
+        if reuse_from:
+            reused = source_run_stage_pretrain_ckpt(state, str(reuse_from), stage)
+            if reused:
+                logger.info(
+                    "  [%s] %s reused pretrain from *-%s-%s: %s",
+                    self.name,
+                    stage,
+                    state.dataset,
+                    reuse_from,
+                    reused,
+                )
+                return reused
+            return None
+
         local_ckpt = _stage_pretrain_ckpt(state, stage)
         if os.path.exists(local_ckpt):
             logger.info("  [%s] %s local cached: %s", self.name, stage, local_ckpt)
@@ -365,6 +398,25 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
         config_name = self._config_name(state)
+        reuse_from = self.get("reuse_pretrain_from_config")
+        if reuse_from:
+            missing = []
+            for stage in ("coarse", "fine"):
+                ckpt = self._cached_stage_ckpt(state, config_name, stage)
+                if ckpt:
+                    if stage == "coarse":
+                        state.diffusion_coarse_pretrain_ckpt = ckpt
+                    else:
+                        state.diffusion_fine_pretrain_ckpt = ckpt
+                else:
+                    missing.append(stage)
+            if missing:
+                raise FileNotFoundError(
+                    f"{self.name}: reuse_pretrain_from_config={reuse_from!r} missing "
+                    f"pretrained_{'/pretrained_'.join(missing)} under "
+                    f"*-{state.dataset}-{reuse_from}"
+                )
+            return state
         source_dir = _phase1_source_dir(
             state,
             self.get("phase1_source_dir"),

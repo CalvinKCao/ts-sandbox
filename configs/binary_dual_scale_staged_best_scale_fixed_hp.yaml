@@ -48,7 +48,7 @@ experiment:
 
 phases:
   - phase: staged_diffusion_pretrain
-    phase1_config_name: binary_dual_scale
+    reuse_pretrain_from_config: binary_dual_scale_staged
 
   - phase: itrans_finetune_hp
     reuse_checkpoint_from_config: binary_dual_scale_staged
