@@ -53,6 +53,8 @@ DIFFUSION_TYPE: str = "binary"
 # ---- 2D map -----------------------------------------------------------------------
 
 IMAGE_HEIGHT: int = 32
+COARSE_IMAGE_HEIGHT: int = 16
+FINE_IMAGE_HEIGHT: int = 16
 MAX_SCALE: float = 3.5
 WINDOW_NORM_STD_FLOOR: float = 1e-8
 DISABLE_CROSS_ATTENTION: bool = False

@@ -119,6 +119,7 @@ def _suggest_staged_params(
     state: PipelineState,
     max_batch_size: int,
     smoke_test: bool,
+    search_space: str = "default",
 ) -> Dict[str, Any]:
     base_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
     if smoke_test:
@@ -126,7 +127,19 @@ def _suggest_staged_params(
             "learning_rate": trial.suggest_float("learning_rate", 1e-5, 3e-4, log=True),
             "batch_size": min(max(1, max_batch_size), 2),
             "ema_decay": 0.0,
-            "binary_noise_schedule": "linear",
+            "binary_noise_schedule": "sqrt_linear",
+            "loss_weighting": "none",
+            "min_snr_gamma": 5.0,
+            "prediction_target": "x0",
+            "max_scale": base_ms,
+        }
+
+    if search_space == "lr_only":
+        return {
+            "learning_rate": trial.suggest_float("learning_rate", 3e-6, 8e-4, log=True),
+            "batch_size": max(1, max_batch_size),
+            "ema_decay": 0.0,
+            "binary_noise_schedule": "sqrt_linear",
             "loss_weighting": "none",
             "min_snr_gamma": 5.0,
             "prediction_target": "x0",
@@ -414,6 +427,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         hp_patience = int(self.get("hp_patience", self.get("patience", 4)))
         final_epochs = int(self.get("final_max_epochs", self.get("max_epochs", 20)))
         final_patience = int(self.get("final_patience", self.get("patience", 8)))
+        search_space = str(self.get("search_space", "default")).lower()
+        if search_space not in {"default", "lr_only"}:
+            raise ValueError(f"Unknown staged diffusion search_space={search_space!r}")
         if state.smoke_test:
             hp_epochs = final_epochs = hp_patience = final_patience = 1
 
@@ -457,7 +473,13 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             )
 
             def objective(trial):
-                params = _suggest_staged_params(trial, state, max_batch, state.smoke_test)
+                params = _suggest_staged_params(
+                    trial,
+                    state,
+                    max_batch,
+                    state.smoke_test,
+                    search_space=search_space,
+                )
                 trial.set_user_attr("full_params", dict(params))
                 trial_ckpt = os.path.join(subset_dir, f"_diff_ft_trial_{trial.number}_best.pt")
                 try:
@@ -533,6 +555,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "final_full_data_retrain": True,
             "tune_data_fraction": tune_fraction,
             "diffusion_stage": self.stage,
+            "search_space": search_space,
         }
         if reuse_from:
             meta_out.update({

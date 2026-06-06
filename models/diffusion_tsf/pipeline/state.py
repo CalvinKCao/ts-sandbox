@@ -31,9 +31,16 @@ class PipelineState:
     diffusion_type: str = "binary"
     model_type: str = "dit"
     image_height: int = 32
+    coarse_image_height: int = 16
+    fine_image_height: int = 16
     max_scale: float = 3.5
     max_scale_by_dataset: Dict[str, float] = field(default_factory=dict)
     dit_patch_size: Tuple[int, int] = (8, 8)
+    dit_embed_dim: int = 384
+    dit_depth: int = 8
+    dit_num_heads: int = 6
+    dit_mlp_ratio: float = 4.0
+    dit_dropout: float = 0.0
     use_dual_scale: bool = False
     diffusion_stage: str = "joint"
     dual_scale_fine_weight: float = 0.5
@@ -138,6 +145,15 @@ class PipelineState:
 
         if "dit_patch_size" in init_kwargs:
             init_kwargs["dit_patch_size"] = tuple(int(x) for x in init_kwargs["dit_patch_size"])
+        for key in ("image_height", "coarse_image_height", "fine_image_height"):
+            if key in init_kwargs:
+                init_kwargs[key] = int(init_kwargs[key])
+        for key in ("dit_embed_dim", "dit_depth", "dit_num_heads"):
+            if key in init_kwargs:
+                init_kwargs[key] = int(init_kwargs[key])
+        for key in ("dit_mlp_ratio", "dit_dropout"):
+            if key in init_kwargs:
+                init_kwargs[key] = float(init_kwargs[key])
         if "max_scale" in init_kwargs:
             init_kwargs["max_scale"] = float(init_kwargs["max_scale"])
         if "max_scale_by_dataset" in init_kwargs:

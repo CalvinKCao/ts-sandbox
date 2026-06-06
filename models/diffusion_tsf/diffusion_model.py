@@ -556,7 +556,44 @@ class DiffusionTSF(nn.Module):
 
     def encode_dual_to_2d_binary(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encode 1D series to coarse and residual hard binary CDF images."""
+        if self.config.diffusion_stage in {"coarse", "fine"}:
+            return self._encode_staged_dual_to_2d_binary(x)
         return self.to_2d.encode_dual(x)
+
+    def _staged_image_heights(self) -> Tuple[int, int]:
+        return (
+            int(getattr(self.config, "coarse_image_height", self.config.image_height)),
+            int(getattr(self.config, "fine_image_height", self.config.image_height)),
+        )
+
+    def _encode_staged_dual_to_2d_binary(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        coarse_h, fine_h = self._staged_image_heights()
+        return self.to_2d.encode_dual_heights(
+            x,
+            coarse_height=coarse_h,
+            fine_height=fine_h,
+        )
+
+    def _resize_cdf_height(self, image: torch.Tensor, target_height: int) -> torch.Tensor:
+        if image.shape[2] == target_height:
+            return image
+        flat = image.reshape(-1, 1, image.shape[2], image.shape[3])
+        resized = F.interpolate(flat, size=(target_height, image.shape[3]), mode="bilinear", align_corners=False)
+        return resized.reshape(image.shape[0], image.shape[1], target_height, image.shape[3])
+
+    def _coarse_cdf_to_height(self, coarse_map: torch.Tensor, target_height: int) -> torch.Tensor:
+        if coarse_map.shape[2] == target_height:
+            return coarse_map
+        coarse_value = self.to_2d._decode_occupancy_in_range(
+            coarse_map,
+            value_range=self.config.max_scale,
+            cdf_decoder="mean",
+        )
+        return self.to_2d._encode_values_in_range(
+            coarse_value,
+            value_range=self.config.max_scale,
+            height=target_height,
+        )
 
     def decode_dual_from_2d(
         self,
@@ -832,11 +869,17 @@ class DiffusionTSF(nn.Module):
         BV = B * V
         past_tail_len = min(past_norm.shape[-1], target_width)
         past_tail_norm = past_norm[..., -past_tail_len:]
-        past_coarse, past_fine = self.encode_dual_to_2d_binary(past_tail_norm)
+        past_coarse, past_fine = self._encode_staged_dual_to_2d_binary(past_tail_norm)
+        if self.config.diffusion_stage == "fine":
+            past_coarse_cond = self._coarse_cdf_to_height(past_coarse, H)
+            past_fine_cond = self._resize_cdf_height(past_fine, H)
+        else:
+            past_coarse_cond = self._resize_cdf_height(past_coarse, H)
+            past_fine_cond = self._resize_cdf_height(past_fine, H)
         cond = torch.cat(
             (
-                past_coarse.reshape(BV, 1, H, past_tail_len),
-                past_fine.reshape(BV, 1, H, past_tail_len),
+                past_coarse_cond.reshape(BV, 1, H, past_tail_len),
+                past_fine_cond.reshape(BV, 1, H, past_tail_len),
             ),
             dim=1,
         )
@@ -862,9 +905,10 @@ class DiffusionTSF(nn.Module):
         BV = B * V
 
         past_norm, future_norm, _stats = self._normalize_sequence(past, future)
-        future_coarse, future_fine = self.encode_dual_to_2d_binary(future_norm)
+        future_coarse, future_fine = self._encode_staged_dual_to_2d_binary(future_norm)
         target_2d = future_coarse if stage == "coarse" else future_fine
         W_fut = target_2d.shape[3]
+        H = target_2d.shape[2]
 
         if t is None:
             t = torch.randint(0, self.config.binary_num_steps, (B,), device=device)
@@ -880,8 +924,9 @@ class DiffusionTSF(nn.Module):
         ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
 
         cond_for_unet, past_coarse, past_fine = self._staged_past_condition(past_norm, W_fut)
-        future_coarse_flat = future_coarse.reshape(BV, 1, H, W_fut)
         if stage == "fine":
+            future_coarse_cond = self._coarse_cdf_to_height(future_coarse, H)
+            future_coarse_flat = future_coarse_cond.reshape(BV, 1, H, W_fut)
             cond_for_unet = torch.cat((cond_for_unet, future_coarse_flat), dim=1)
         base_cond_for_unet = cond_for_unet
 
@@ -999,13 +1044,14 @@ class DiffusionTSF(nn.Module):
         if stage == "fine":
             if future_coarse_2d is None:
                 raise ValueError("fine-stage generation requires future_coarse_2d from the coarse model.")
-            if future_coarse_2d.shape != (B, V, H, W_fut):
+            if future_coarse_2d.shape[:2] != (B, V) or future_coarse_2d.shape[3] != W_fut:
                 raise ValueError(
                     "future_coarse_2d must have shape "
-                    f"{(B, V, H, W_fut)}, got {tuple(future_coarse_2d.shape)}"
+                    f"(B={B}, V={V}, Hc, W={W_fut}), got {tuple(future_coarse_2d.shape)}"
                 )
+            future_coarse_cond = self._coarse_cdf_to_height(future_coarse_2d.to(device), H)
             cond_for_unet = torch.cat(
-                (cond_for_unet, future_coarse_2d.reshape(BV, 1, H, W_fut).to(device)),
+                (cond_for_unet, future_coarse_cond.reshape(BV, 1, H, W_fut)),
                 dim=1,
             )
 

@@ -28,6 +28,8 @@ class DiffusionTSFConfig:
 
     # 2d mapping (hard binary CDF, no vertical blur)
     image_height: int = 32
+    coarse_image_height: int = 16
+    fine_image_height: int = 16
     max_scale: float = 3.5
     representation_mode: str = "cdf"  # pdf or cdf
 
@@ -131,10 +133,24 @@ class DiffusionTSFConfig:
         if self.diffusion_stage in {"coarse", "fine"}:
             if self.use_dual_scale:
                 raise ValueError("staged coarse/fine models expect use_dual_scale=False.")
-            if self.image_height != 16:
-                raise ValueError("staged coarse/fine models expect image_height=16.")
+            expected_height = (
+                self.coarse_image_height
+                if self.diffusion_stage == "coarse"
+                else self.fine_image_height
+            )
+            if self.image_height != expected_height:
+                raise ValueError(
+                    f"staged {self.diffusion_stage} model expects image_height={expected_height}, "
+                    f"got {self.image_height}."
+                )
             if self.image_height % self.dit_patch_size[0] != 0:
                 raise ValueError("staged image_height must divide dit_patch_size[0].")
+            if self.coarse_image_height <= 0 or self.fine_image_height <= 0:
+                raise ValueError("coarse/fine image heights must be positive.")
+            if self.coarse_image_height % self.dit_patch_size[0] != 0:
+                raise ValueError("coarse_image_height must divide dit_patch_size[0].")
+            if self.fine_image_height % self.dit_patch_size[0] != 0:
+                raise ValueError("fine_image_height must divide dit_patch_size[0].")
         if self.use_dual_scale:
             if self.image_height != 16:
                 raise ValueError("use_dual_scale=True expects image_height=16.")

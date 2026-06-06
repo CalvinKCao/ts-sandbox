@@ -68,28 +68,51 @@ class TimeSeriesTo2D(nn.Module):
         logger.debug(f"TimeSeriesTo2D: input {x.shape} -> output {image.shape}")
         return image
 
-    def _cdf_from_bin_indices(self, bin_indices: torch.Tensor) -> torch.Tensor:
-        height_range = torch.arange(self.height, device=bin_indices.device).view(1, 1, self.height, 1)
+    def _cdf_from_bin_indices(self, bin_indices: torch.Tensor, height: Optional[int] = None) -> torch.Tensor:
+        height = int(height or self.height)
+        height_range = torch.arange(height, device=bin_indices.device).view(1, 1, height, 1)
         return (height_range <= bin_indices.unsqueeze(2)).float()
+
+    def _encode_values_in_range(
+        self,
+        x: torch.Tensor,
+        *,
+        value_range: float,
+        height: int,
+    ) -> torch.Tensor:
+        x_clipped = torch.clamp(x, -value_range, value_range)
+        pos = (x_clipped + value_range) / (2 * value_range) * height
+        bin_indices = torch.clamp(pos.long(), 0, height - 1)
+        return self._cdf_from_bin_indices(bin_indices, height=height)
 
     def encode_dual(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encode values as full-range coarse CDF plus within-bin residual CDF."""
+        return self.encode_dual_heights(x, coarse_height=self.height, fine_height=self.height)
+
+    def encode_dual_heights(
+        self,
+        x: torch.Tensor,
+        *,
+        coarse_height: int,
+        fine_height: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode full-range coarse and within-bin residual CDFs with independent heights."""
         if x.dim() == 2:
             x = x.unsqueeze(1)
 
         x_clipped = torch.clamp(x, -self.max_scale, self.max_scale)
-        coarse_pos = (x_clipped + self.max_scale) / (2 * self.max_scale) * self.height
-        coarse_bin = torch.clamp(coarse_pos.long(), 0, self.height - 1)
-        coarse = self._cdf_from_bin_indices(coarse_bin)
+        coarse_pos = (x_clipped + self.max_scale) / (2 * self.max_scale) * coarse_height
+        coarse_bin = torch.clamp(coarse_pos.long(), 0, coarse_height - 1)
+        coarse = self._cdf_from_bin_indices(coarse_bin, height=coarse_height)
 
-        coarse_width = (2 * self.max_scale) / self.height
+        coarse_width = (2 * self.max_scale) / coarse_height
         coarse_center = (coarse_bin.to(x_clipped.dtype) + 0.5) * coarse_width - self.max_scale
         residual = x_clipped - coarse_center
-        residual_range = self.max_scale / self.height
+        residual_range = self.max_scale / coarse_height
         residual = torch.clamp(residual, -residual_range, residual_range)
-        fine_pos = (residual + residual_range) / (2 * residual_range) * self.height
-        fine_bin = torch.clamp(fine_pos.long(), 0, self.height - 1)
-        fine = self._cdf_from_bin_indices(fine_bin)
+        fine_pos = (residual + residual_range) / (2 * residual_range) * fine_height
+        fine_bin = torch.clamp(fine_pos.long(), 0, fine_height - 1)
+        fine = self._cdf_from_bin_indices(fine_bin, height=fine_height)
         return coarse, fine
     
     def _decode_expectation_from_occupancy(
@@ -121,13 +144,14 @@ class TimeSeriesTo2D(nn.Module):
         pdf_sum = pdf.sum(dim=2, keepdim=True).clamp(min=eps)
         pdf = pdf / pdf_sum
         
+        height = cdf_map.shape[2]
         # Expectation over pixel indices (0 .. H-1)
-        indices = torch.arange(self.height, device=cdf_map.device, dtype=cdf_map.dtype)
+        indices = torch.arange(height, device=cdf_map.device, dtype=cdf_map.dtype)
         indices = indices.view(1, 1, -1, 1)
         expected_idx = (pdf * indices).sum(dim=2)  # -> (batch, num_vars, seq_len)
         
         # Map back to normalized value space using existing scalar logic
-        denom = float(self.height)
+        denom = float(height)
         normalized = expected_idx / max(denom, eps)
         x = normalized * (2 * self.max_scale) - self.max_scale
         return x
@@ -141,10 +165,11 @@ class TimeSeriesTo2D(nn.Module):
         eps: float = 1e-8,
     ) -> torch.Tensor:
         cdf_map = torch.clamp(cdf_map, 0.0, 1.0)
+        height = cdf_map.shape[2]
         centers = torch.linspace(
-            -value_range + value_range / self.height,
-            value_range - value_range / self.height,
-            self.height,
+            -value_range + value_range / height,
+            value_range - value_range / height,
+            height,
             device=cdf_map.device,
             dtype=cdf_map.dtype,
         ).view(1, 1, -1, 1)
@@ -164,9 +189,9 @@ class TimeSeriesTo2D(nn.Module):
         if cdf_decoder != "mean":
             raise ValueError(f"Unknown dual CDF decoder '{cdf_decoder}'")
 
-        column_sum = cdf_map.sum(dim=2).clamp(1.0, float(self.height))
-        bin_idx = (column_sum - 1.0).clamp(0.0, float(self.height - 1))
-        return ((bin_idx + 0.5) / float(self.height) * (2 * value_range)) - value_range
+        column_sum = cdf_map.sum(dim=2).clamp(1.0, float(height))
+        bin_idx = (column_sum - 1.0).clamp(0.0, float(height - 1))
+        return ((bin_idx + 0.5) / float(height) * (2 * value_range)) - value_range
 
     def decode_dual(
         self,
@@ -177,11 +202,9 @@ class TimeSeriesTo2D(nn.Module):
         squeeze_univariate: bool = True,
     ) -> torch.Tensor:
         """Decode full-range coarse CDF plus residual CDF back to normalized values."""
-        if coarse_map.shape != fine_map.shape:
+        if coarse_map.shape[:2] != fine_map.shape[:2] or coarse_map.shape[3] != fine_map.shape[3]:
             raise ValueError(f"coarse/fine shapes differ: {coarse_map.shape} vs {fine_map.shape}")
-        batch_size, num_vars, height, seq_len = coarse_map.shape
-        if height != self.height:
-            raise ValueError(f"dual map height {height} != encoder height {self.height}")
+        batch_size, num_vars, coarse_height, seq_len = coarse_map.shape
 
         coarse_value = self._decode_occupancy_in_range(
             coarse_map,
@@ -191,7 +214,7 @@ class TimeSeriesTo2D(nn.Module):
         )
         fine_value = self._decode_occupancy_in_range(
             fine_map,
-            value_range=self.max_scale / self.height,
+            value_range=self.max_scale / coarse_height,
             cdf_decoder=cdf_decoder,
             expectation_sharpen_temp=expectation_sharpen_temp,
         )
@@ -227,8 +250,8 @@ class TimeSeriesTo2D(nn.Module):
         else:
             occupancy = torch.clamp(image, min=0.0, max=1.0)
             column_sum = occupancy.sum(dim=2)
-            column_sum = torch.clamp(column_sum, 0.0, float(self.height))
-            normalized = column_sum / float(self.height)
+            column_sum = torch.clamp(column_sum, 0.0, float(height))
+            normalized = column_sum / float(height)
             x = normalized * (2 * self.max_scale) - self.max_scale
 
         if squeeze_output:

@@ -41,8 +41,15 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "model_type": state.model_type,
         "diffusion_type": state.diffusion_type,
         "image_height": int(state.image_height),
+        "coarse_image_height": int(state.coarse_image_height),
+        "fine_image_height": int(state.fine_image_height),
         "max_scale": max_scale,
         "dit_patch_size": list(state.dit_patch_size),
+        "dit_embed_dim": int(state.dit_embed_dim),
+        "dit_depth": int(state.dit_depth),
+        "dit_num_heads": int(state.dit_num_heads),
+        "dit_mlp_ratio": float(state.dit_mlp_ratio),
+        "dit_dropout": float(state.dit_dropout),
         "use_guidance_channel": bool(state.use_guidance_channel),
         "deterministic_anchor_loss": bool(state.deterministic_anchor_loss),
         "deterministic_anchor_lambda": float(state.deterministic_anchor_lambda),
@@ -333,7 +340,13 @@ def patch_stage_globals(mod: Any, state: PipelineState, stage: str, *, honor_dat
     _patch_globals(mod, state, honor_dataset_windows=honor_dataset_windows)
     mod.USE_DUAL_SCALE = False
     mod.DIFFUSION_STAGE = stage
-    mod.IMAGE_HEIGHT = 16
+    mod.IMAGE_HEIGHT = (
+        int(state.coarse_image_height)
+        if stage == "coarse"
+        else int(state.fine_image_height)
+    )
+    mod.COARSE_IMAGE_HEIGHT = int(state.coarse_image_height)
+    mod.FINE_IMAGE_HEIGHT = int(state.fine_image_height)
     mod.USE_GUIDANCE_CHANNEL = state.use_guidance_channel
 
 

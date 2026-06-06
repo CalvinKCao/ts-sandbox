@@ -100,8 +100,15 @@ def _patch_globals(
     mod.FORECAST_LENGTH = forecast
     mod.ITRANSFORMER_SEQ_LEN = lookback
     mod.IMAGE_HEIGHT = state.image_height
+    mod.COARSE_IMAGE_HEIGHT = state.coarse_image_height
+    mod.FINE_IMAGE_HEIGHT = state.fine_image_height
     mod.MAX_SCALE = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
     mod.DIT_PATCH_SIZE = tuple(state.dit_patch_size)
+    mod.DIT_EMBED_DIM = state.dit_embed_dim
+    mod.DIT_DEPTH = state.dit_depth
+    mod.DIT_NUM_HEADS = state.dit_num_heads
+    mod.DIT_MLP_RATIO = state.dit_mlp_ratio
+    mod.DIT_DROPOUT = state.dit_dropout
     mod.USE_DUAL_SCALE = state.use_dual_scale
     mod.DIFFUSION_STAGE = state.diffusion_stage
     mod.DUAL_SCALE_FINE_WEIGHT = state.dual_scale_fine_weight

@@ -1,0 +1,91 @@
+experiment:
+  name: binary-dual-scale-staged-arch-width-up
+  experiment_name: binary-dual-scale-staged-arch-width-up
+  dataset: ETTh1
+  diffusion_type: binary
+  model_type: dit
+  image_height: 16
+  coarse_image_height: 16
+  fine_image_height: 16
+  max_scale: 3.5
+  window_norm_std_floor: 0.1
+  dit_patch_size: [8, 8]
+  dit_embed_dim: 448
+  dit_depth: 8
+  dit_num_heads: 7
+  dit_mlp_ratio: 4.0
+  dit_dropout: 0.0
+  use_dual_scale: false
+  diffusion_stage: joint
+  use_guidance_channel: false
+  cfg_dropout: 0.0
+  cfg_scale: 1.0
+  use_cfg_inference: false
+  deterministic_anchor_loss: true
+  deterministic_anchor_lambda: 0.99
+  deterministic_anchor_alpha: 0.0
+  eval_sampler: anchor
+  lookback_length: 96
+  forecast_length: 96
+  disable_cross_attention: false
+  cross_variate_context_bias: 0.0
+  use_window_normalization: true
+  max_scale_by_dataset:
+    ETTh1: 3.5
+    ETTm1: 3.5
+    exchange_rate: 8.0
+    electricity: 3.5
+    PeMS: 8.0
+    dalia: 3.5
+  data_subset:
+    enabled: true
+    target_dataset: ETTh1
+    reduce_if_larger_than_target: true
+    max_variates: 7
+    variate_strategy: first
+    subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
+
+phases:
+  - phase: itrans_hp_pretrain
+    n_trials: 10
+    max_epochs: 10
+
+  - phase: diffusion_hp_pretrain
+    n_trials: 8
+    max_epochs: 5
+    patience: 4
+
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged_arch_width_up
+
+  - phase: itrans_finetune_hp
+    n_trials: 10
+    max_epochs: 10
+    cold_start: true
+
+  - phase: diffusion_coarse_finetune_hp
+    search_space: lr_only
+    n_trials: 20
+    tune_data_fraction: 0.5
+    hp_max_epochs: 12
+    hp_patience: 4
+    final_max_epochs: 20
+    final_patience: 8
+
+  - phase: diffusion_fine_finetune_hp
+    search_space: lr_only
+    n_trials: 20
+    tune_data_fraction: 0.5
+    hp_max_epochs: 12
+    hp_patience: 4
+    final_max_epochs: 20
+    final_patience: 8
+
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 2
+    probabilistic_n_samples: 100
+    tune_sampler: false
+    probabilistic_sampler: dpmpp
+    probabilistic_num_inference_steps: 20
+    skip_eval_visualizations: true

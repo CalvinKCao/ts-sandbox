@@ -753,6 +753,8 @@ from models.diffusion_tsf.pipeline_config import (
     FORECAST_LENGTH,
     ITRANSFORMER_SEQ_LEN,
     IMAGE_HEIGHT,
+    COARSE_IMAGE_HEIGHT,
+    FINE_IMAGE_HEIGHT,
     MAX_SCALE,
     WINDOW_NORM_STD_FLOOR,
     LOOKBACK_OVERLAP,
@@ -1304,6 +1306,9 @@ def create_diffusion_model(
     use_cfg_inference: Optional[bool] = None,
     use_window_normalization: Optional[bool] = None,
     zero_guidance_forecast: Optional[bool] = None,
+    image_height: Optional[int] = None,
+    coarse_image_height: Optional[int] = None,
+    fine_image_height: Optional[int] = None,
     guidance_model=None,
 ) -> DiffusionTSF:
     """Create DiffusionTSF model with iTransformer guidance channel enabled."""
@@ -1353,6 +1358,12 @@ def create_diffusion_model(
         use_window_normalization = USE_WINDOW_NORMALIZATION
     if zero_guidance_forecast is None:
         zero_guidance_forecast = ZERO_GUIDANCE_FORECAST
+    if image_height is None:
+        image_height = IMAGE_HEIGHT
+    if coarse_image_height is None:
+        coarse_image_height = COARSE_IMAGE_HEIGHT
+    if fine_image_height is None:
+        fine_image_height = FINE_IMAGE_HEIGHT
     logger.info(
         f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, "
         f"diffusion_type={diffusion_type}, "
@@ -1366,7 +1377,9 @@ def create_diffusion_model(
         forecast_length=horizon + lookback_overlap,
         lookback_overlap=lookback_overlap,
         past_loss_weight=past_loss_weight,
-        image_height=IMAGE_HEIGHT,
+        image_height=image_height,
+        coarse_image_height=coarse_image_height,
+        fine_image_height=fine_image_height,
         max_scale=max_scale,
         binary_noise_schedule=binary_noise_schedule,
         prediction_target=prediction_target,
