@@ -15,25 +15,7 @@ echo "Job: $SLURM_JOB_NAME  ID: $SLURM_JOB_ID  Node: ${SLURMD_NODENAME:-unknown}
 echo "Started: $(date)"
 echo "=========================================="
 
-USER="${USER:-$(whoami)}"
-
-_resolve_store() {
-    local cand
-    for cand in \
-        "${GRID_STORE:-}" \
-        "${SCRATCH:-}/${USER}/ts-sandbox/results" \
-        "${SCRATCH:-}/ts-sandbox/results" \
-        "${SLURM_SUBMIT_DIR:-}/results" \
-        "${PWD}/results"; do
-        if [[ -n "$cand" && -d "$cand" ]]; then
-            echo "$cand"
-            return 0
-        fi
-    done
-    echo "${GRID_STORE:-${SLURM_SUBMIT_DIR:-$PWD}/results}"
-}
-
-STORE="$(_resolve_store)"
+STORE="${SCRATCH:-}/${USER}/ts-sandbox/results"
 
 _find_persistent_venv() {
     local -a candidates=()
@@ -160,12 +142,6 @@ DS="${GRID_DATASET:-unknown}"
 CFG_NAME="${GRID_CFG_NAME:-run}"
 RUN_STEM="${GRID_RUN_STEM:-${DATE_STR}-${SLURM_JOB_ID}-${DS}-${CFG_NAME}}"
 
-# Legacy flat layout: results/ckpts/ETTh1/ (pre per-job dirs fix)
-if [[ "${GRID_RESUME:-0}" == "1" && -z "${GRID_RUN_STEM:-}" ]]; then
-    if [[ -f "$STORE/ckpts/${DS}/metadata.json" ]]; then
-        RUN_STEM="$DS"
-    fi
-fi
 
 CKPT_DIR="$STORE/ckpts/${RUN_STEM}"
 DATA_DIR="$STORE/datasets/${RUN_STEM}"

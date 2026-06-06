@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Submits a grid of experiments using the new YAML pipeline configs.
+# Submits a grid of experiments using the new YAML pipeline configs. *
 #
 # Each job gets isolated checkpoint/results dirs:
 #   ./results/ckpts/MM-DD-<jobid>-<dataset>-<config>/
@@ -23,7 +23,7 @@ CKPT_CONFIG=""
 DEPENDENCY=""
 WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 WALL_OVERRIDE=""
-
+ACCOUNT="aip-boyuwang"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --configs) CONFIGS="$2"; shift 2 ;;
@@ -66,11 +66,6 @@ mkdir -p "$LOG_DIR" "$CKPT_ROOT" "$DATA_ROOT"
 
 pick_resume_stem() {
     local ds="$1" cfg="$2"
-    # Legacy shared-dir layout (one dataset folder directly under ckpts/)
-    if [[ -f "$CKPT_ROOT/${ds}/metadata.json" ]]; then
-        echo "$ds"
-        return
-    fi
     local best="" best_mtime=0 d m
     shopt -s nullglob
     for d in "$CKPT_ROOT"/*-"${ds}"-"${cfg}"; do
@@ -87,8 +82,7 @@ pick_resume_stem() {
 
 for CFG in "${CONF_ARR[@]}"; do
     if [[ ! -f "$SCRIPT_DIR/$CFG" ]]; then
-        echo "ERROR: config not found: $SCRIPT_DIR/$CFG" >&2
-        echo "  On cluster: cd \$SCRATCH/ts-sandbox && git pull, then resubmit." >&2
+        echo "ERROR: config yml file that was specified was not found: $SCRIPT_DIR/$CFG" >&2
         exit 1
     fi
 done
@@ -118,7 +112,7 @@ for CFG in "${CONF_ARR[@]}"; do
             if [[ "$RESUME" -eq 1 ]]; then
                 RUN_STEM=$(pick_resume_stem "$DS" "$CKPT_MATCH")
                 if [[ -z "$RUN_STEM" ]]; then
-                    echo "WARN: no prior run for ${DS}/${CFG_NAME}; new isolated dir after submit." >&2
+                    echo "WARN: no prior run for ${DS}/${CFG_NAME} to resume; new directory with complete retrain will be created after submit." >&2
                 fi
             fi
 
@@ -131,7 +125,7 @@ for CFG in "${CONF_ARR[@]}"; do
             S_ARGS=(
                 --parsable
                 --job-name="$JOB_NAME"
-                --account=aip-boyuwang
+                --account="$ACCOUNT"
                 --time="$WALL"
                 --nodes=1
                 --gres=gpu:l40s:1
