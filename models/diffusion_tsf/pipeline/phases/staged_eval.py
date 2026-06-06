@@ -24,27 +24,12 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch
 logger = logging.getLogger(__name__)
 
 
-def _import_eval_metric_helpers():
-    """Import repo eval helpers after iTransformer hijacks ``utils`` on sys.path."""
-    import os
-    import sys
-    from pathlib import Path
-
-    repo_root = str(Path(__file__).resolve().parents[4])
-    itrans_dir = str(Path(__file__).resolve().parents[3] / "iTransformer")
-    for name in list(sys.modules):
-        if name == "utils" or name.startswith("utils."):
-            sys.modules.pop(name, None)
-    sys.path = [p for p in sys.path if os.path.abspath(p) != os.path.abspath(itrans_dir)]
-    if repo_root in sys.path:
-        sys.path.remove(repo_root)
-    sys.path.insert(0, repo_root)
-    from utils.eval_mmpd_gaussian_anchor import (
-        deterministic_metrics,
-        summarize_prob_core_metrics,
-    )
-
-    return summarize_prob_core_metrics, deterministic_metrics
+def _deterministic_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    err = y_pred - y_true
+    return {
+        "mse": float(np.mean(err ** 2)),
+        "mae": float(np.mean(np.abs(err))),
+    }
 
 
 def _staged_anchor_global_norm(
@@ -71,18 +56,30 @@ def _summarize_staged_eval_metrics(
   seed: int,
   topk_max: int,
 ) -> Dict[str, float]:
-    summarize_prob_core_metrics, deterministic_metrics = _import_eval_metric_helpers()
-    metrics = summarize_prob_core_metrics(
-        pack,
+    from models.diffusion_tsf.metrics import probabilistic_forecast_metrics
+
+    y_true = pack["y_true"]
+    samples = pack["samples"]
+    sample_mean = samples.mean(axis=2)
+    metrics = probabilistic_forecast_metrics(
+        y_true,
+        samples,
         gmm_components=gmm_components,
-        seed=seed,
         topk_max=topk_max,
+        seed=seed,
     )
-    anchor = deterministic_metrics(pack["y_true"], pack["deterministic"])
+    sample_mean_metrics = _deterministic_metrics(y_true, sample_mean)
+    metrics["sample_mean_mse"] = sample_mean_metrics["mse"]
+    metrics["sample_mean_mae"] = sample_mean_metrics["mae"]
+    # Keep legacy top-level names pointed at the 100-sample mean forecast.
+    metrics["mse"] = sample_mean_metrics["mse"]
+    metrics["mae"] = sample_mean_metrics["mae"]
+
+    anchor = _deterministic_metrics(y_true, pack["deterministic"])
     metrics["anchor_mse"] = anchor["mse"]
     metrics["anchor_mae"] = anchor["mae"]
     metrics["anchor_n_samples"] = 1.0
-    metrics["metrics_profile"] = "prob_core_plus_anchor"
+    metrics["metrics_profile"] = "dpmpp_prob_core_plus_anchor"
     return metrics
 
 
@@ -123,18 +120,25 @@ class StagedEvalPhase(PipelinePhase):
         subset_id = state.subset_id or state.dataset
         partial = os.path.join(state.results_dir, "partials", f"{state.dataset}_staged_anchor.json")
         nested = os.path.join(state.results_dir, subset_id, "staged_results.json")
+        raw_dir = os.path.join(state.results_dir, "raw")
+        anchor_npz = os.path.join(raw_dir, f"staged_anchor_samples_{state.dataset}.npz")
+        samples_npz = os.path.join(raw_dir, f"staged_dpmpp_samples_{state.dataset}.npz")
         if os.path.exists(partial) and os.path.exists(nested):
             try:
                 with open(partial) as f:
                     metrics = json.load(f)
                 core_ok = "crps" in metrics and "top3_mse" in metrics
                 anchor_ok = "anchor_mse" in metrics and "anchor_mae" in metrics
+                sample_mean_ok = "sample_mean_mse" in metrics and "sample_mean_mae" in metrics
+                raw_ok = os.path.exists(anchor_npz) and os.path.exists(samples_npz)
                 sampler_ok = (not self.get("tune_sampler", True)) or metrics.get("sampler_tuned")
             except Exception:
                 core_ok = False
                 anchor_ok = False
+                sample_mean_ok = False
+                raw_ok = False
                 sampler_ok = False
-            if core_ok and anchor_ok and sampler_ok:
+            if core_ok and anchor_ok and sample_mean_ok and raw_ok and sampler_ok:
                 logger.info("  [%s] already evaluated: %s", self.name, partial)
                 return True
             logger.info("  [%s] re-evaluating to add missing metrics: %s", self.name, partial)
@@ -184,6 +188,8 @@ class StagedEvalPhase(PipelinePhase):
         gmm_components: int,
         topk_max: int,
     ) -> Tuple[Dict[str, float], Dict[str, np.ndarray]]:
+        if prob_sampler in {"anchor", "deterministic_anchor"}:
+            raise ValueError("staged probabilistic eval must use a regular sampler, not anchor.")
         prob_kwargs = {"sampler": prob_sampler, "num_inference_steps": prob_steps}
         y_true_all = []
         det_all = []
@@ -244,6 +250,7 @@ class StagedEvalPhase(PipelinePhase):
             "deterministic": np.concatenate(det_all, axis=0),
             "samples": np.concatenate(sample_all, axis=0),
         }
+        pack["sample_mean"] = pack["samples"].mean(axis=2)
         metrics = _summarize_staged_eval_metrics(
             pack,
             gmm_components=gmm_components,
@@ -302,6 +309,8 @@ class StagedEvalPhase(PipelinePhase):
 
         sampler_tuning = []
         selected_sampler = self.get("probabilistic_sampler", "dpmpp")
+        if selected_sampler in {"anchor", "deterministic_anchor"}:
+            raise ValueError("staged probabilistic_sampler must be ddim or dpmpp, not anchor.")
         selected_steps = default_steps
         if self.get("tune_sampler", True) and not state.smoke_test:
             tune_fraction = float(self.get("sampler_tune_fraction", 0.25))
@@ -388,6 +397,17 @@ class StagedEvalPhase(PipelinePhase):
         with open(os.path.join(partial_dir, f"{state.dataset}_staged_anchor.json"), "w") as f:
             json.dump(metrics, f, indent=2, sort_keys=True)
         np.savez_compressed(os.path.join(raw_dir, f"staged_anchor_{state.dataset}.npz"), **pack)
+        np.savez_compressed(
+            os.path.join(raw_dir, f"staged_anchor_samples_{state.dataset}.npz"),
+            y_true=pack["y_true"],
+            anchor=pack["deterministic"],
+        )
+        np.savez_compressed(
+            os.path.join(raw_dir, f"staged_dpmpp_samples_{state.dataset}.npz"),
+            y_true=pack["y_true"],
+            samples=pack["samples"],
+            sample_mean=pack["sample_mean"],
+        )
         with open(os.path.join(nested_dir, "staged_results.json"), "w") as f:
             json.dump({
                 "dataset": state.dataset,
@@ -401,6 +421,8 @@ class StagedEvalPhase(PipelinePhase):
         wandb_utils.log_summary({
             "eval/staged_prob_mse": metrics.get("mse"),
             "eval/staged_prob_mae": metrics.get("mae"),
+            "eval/staged_sample_mean_mse": metrics.get("sample_mean_mse"),
+            "eval/staged_sample_mean_mae": metrics.get("sample_mean_mae"),
             "eval/staged_anchor_mse": metrics.get("anchor_mse"),
             "eval/staged_anchor_mae": metrics.get("anchor_mae"),
             "eval/staged_crps": metrics.get("crps"),
