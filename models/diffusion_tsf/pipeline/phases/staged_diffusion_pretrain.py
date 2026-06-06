@@ -180,6 +180,38 @@ def _phase1_ckpt_root(state: PipelineState) -> str:
     return os.path.dirname(ckpt_dir)
 
 
+def _candidate_phase1_ckpt_roots(state: PipelineState) -> list[str]:
+    """Likely checkpoint roots, including the old Killarney double-user path fixup."""
+    roots = []
+
+    def add(path: Optional[str]) -> None:
+        if path:
+            path = os.path.abspath(os.path.expanduser(path))
+            if path not in roots:
+                roots.append(path)
+
+    root = _phase1_ckpt_root(state)
+    add(root)
+
+    user = os.environ.get("USER")
+    if user:
+        doubled = f"{os.sep}{user}{os.sep}{user}{os.sep}"
+        if doubled in root:
+            add(root.replace(doubled, f"{os.sep}{user}{os.sep}", 1))
+
+    scratch = os.environ.get("SCRATCH")
+    if scratch:
+        add(os.path.join(scratch, "ts-sandbox", "results", "ckpts"))
+        if user and os.path.basename(os.path.abspath(scratch)) != user:
+            add(os.path.join(scratch, user, "ts-sandbox", "results", "ckpts"))
+
+    submit_dir = os.environ.get("SLURM_SUBMIT_DIR")
+    if submit_dir:
+        add(os.path.join(submit_dir, "results", "ckpts"))
+
+    return roots
+
+
 def source_run_stage_pretrain_ckpt(
     state: PipelineState,
     source_config: str,
@@ -198,12 +230,16 @@ def source_run_stage_pretrain_ckpt(
 
 def discover_dataset_run_ckpt_dir(state: PipelineState, config_suffix: str) -> str:
     """Newest isolated run dir ``*-<dataset>-<config_suffix>`` under the ckpt root."""
-    ckpt_root = _phase1_ckpt_root(state)
     suffix = f"-{state.dataset}-{config_suffix}"
     best_dir: Optional[str] = None
     best_mtime = 0.0
-    try:
-        for name in os.listdir(ckpt_root):
+    roots = _candidate_phase1_ckpt_roots(state)
+    for ckpt_root in roots:
+        try:
+            names = os.listdir(ckpt_root)
+        except OSError:
+            continue
+        for name in names:
             if not name.endswith(suffix):
                 continue
             path = os.path.join(ckpt_root, name)
@@ -213,13 +249,9 @@ def discover_dataset_run_ckpt_dir(state: PipelineState, config_suffix: str) -> s
             if mtime > best_mtime:
                 best_mtime = mtime
                 best_dir = path
-    except OSError as e:
-        raise FileNotFoundError(
-            f"Cannot list checkpoint root {ckpt_root!r} for {state.dataset!r}: {e}"
-        ) from e
     if not best_dir:
         raise FileNotFoundError(
-            f"No prior run *-{state.dataset}-{config_suffix} under {ckpt_root}. "
+            f"No prior run *-{state.dataset}-{config_suffix} under any of {roots}. "
             "Complete the exhaustive staged grid first."
         )
     return best_dir
@@ -236,12 +268,15 @@ def _discover_phase1_source_dir(
     config_name: str = "binary_dual_scale",
 ) -> Optional[str]:
     """Newest *-<dataset>-<config_name> dir under ckpts/ with diff_hp.json."""
-    ckpt_root = _phase1_ckpt_root(state)
     suffix = _phase1_config_suffix(state, config_name)
     best_dir: Optional[str] = None
     best_mtime = 0.0
-    try:
-        for name in os.listdir(ckpt_root):
+    for ckpt_root in _candidate_phase1_ckpt_roots(state):
+        try:
+            names = os.listdir(ckpt_root)
+        except OSError:
+            continue
+        for name in names:
             if not name.endswith(suffix):
                 continue
             path = os.path.join(ckpt_root, name)
@@ -253,8 +288,6 @@ def _discover_phase1_source_dir(
             if mtime > best_mtime:
                 best_mtime = mtime
                 best_dir = path
-    except OSError:
-        return None
     return best_dir
 
 
@@ -309,7 +342,8 @@ def _resolve_diff_hp(state: PipelineState, source_dir: Optional[str]) -> Dict[st
     suffix = _phase1_config_suffix(state)
     raise FileNotFoundError(
         f"Staged pretrain requires Phase 1 diff_hp.json for {state.dataset!r}. "
-        f"Expected *{suffix} under {_phase1_ckpt_root(state)} or set phase1_source_dir."
+        f"Expected *{suffix} under one of {_candidate_phase1_ckpt_roots(state)} "
+        "or set phase1_source_dir."
     )
 
 

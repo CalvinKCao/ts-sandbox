@@ -15,7 +15,17 @@ echo "Job: $SLURM_JOB_NAME  ID: $SLURM_JOB_ID  Node: ${SLURMD_NODENAME:-unknown}
 echo "Started: $(date)"
 echo "=========================================="
 
-STORE="${SCRATCH:-}/${USER}/ts-sandbox/results"
+if [[ -n "${GRID_STORE:-}" ]]; then
+    STORE="$GRID_STORE"
+elif [[ -n "${SCRATCH:-}" ]]; then
+    if [[ "$(basename "$SCRATCH")" == "$USER" ]]; then
+        STORE="$SCRATCH/ts-sandbox/results"
+    else
+        STORE="$SCRATCH/${USER}/ts-sandbox/results"
+    fi
+else
+    STORE="${SLURM_SUBMIT_DIR:-$PWD}/results"
+fi
 
 _find_persistent_venv() {
     local -a candidates=()
