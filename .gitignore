@@ -22,12 +22,9 @@ docs.alliancecan.ca_mediawiki-20260319-wikidump/
 !.cursor/skills/
 .cursor/skills/*
 !.cursor/skills/alliancecan
-!.cursor/skills/audio_math_explainer
 !.cursor/skills/git
 !.cursor/skills/lnai
 !.cursor/skills/lnai-master-sync
-!.cursor/skills/messy
-!.cursor/skills/natural
 !.cursor/skills/quick
 !.cursor/skills/slidev
 !.cursor/skills/slurm-killarney
@@ -223,6 +220,7 @@ accuracy_summary.csv
 
 # lnai-generated
 .agents/skills/alliancecan
+.agents/skills/audio_math_explainer
 .agents/skills/messy
 .agents/skills/natural
 .agents/skills/quick
