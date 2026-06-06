@@ -58,6 +58,7 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "forecast_length": int(state.forecast_length),
         "use_window_normalization": bool(state.use_window_normalization),
         "window_norm_std_floor": float(state.window_norm_std_floor),
+        "cross_variate_context_bias": float(state.cross_variate_context_bias),
     }
     digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
     return (
