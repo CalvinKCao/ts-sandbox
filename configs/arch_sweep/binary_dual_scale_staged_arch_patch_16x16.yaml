@@ -32,11 +32,9 @@ experiment:
   use_window_normalization: true
   max_scale_by_dataset:
     ETTh1: 3.5
-    ETTm1: 3.5
+    ETTh2: 3.5
     exchange_rate: 8.0
-    electricity: 3.5
-    PeMS: 8.0
-    dalia: 3.5
+    weather: 7.9
   data_subset:
     enabled: true
     target_dataset: ETTh1
@@ -46,17 +44,8 @@ experiment:
     subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
 
 phases:
-  - phase: itrans_hp_pretrain
-    n_trials: 10
-    max_epochs: 10
-
-  - phase: diffusion_hp_pretrain
-    n_trials: 8
-    max_epochs: 5
-    patience: 4
-
   - phase: staged_diffusion_pretrain
-    phase1_config_name: binary_dual_scale_staged_arch_patch_16x16
+    phase1_config_name: binary_dual_scale
 
   - phase: itrans_finetune_hp
     n_trials: 10
