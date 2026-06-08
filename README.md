@@ -9,7 +9,10 @@ Some code in this repo was written with help from an AI coding agent (Claude/Gem
 
 ## Probabilistic forecasts
 
-![Forecast comparison: our model vs iTransformer vs MMPD](viz_comparison.png)
+![Forecast comparison: our model vs iTransformer vs MMPD](viz1.png)
+![Forecast comparison: our model vs iTransformer vs MMPD](viz2.png)
+![Forecast comparison: our model vs iTransformer vs MMPD](viz3.png)
+
 
 Left: **our model** · Center: **deterministic iTransformer** · Right: **baseline diffusion model from MMPD** (ICLR 2026).
 

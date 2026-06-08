@@ -251,7 +251,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         itrans_checkpoint: str,
         device: torch.device,
         variate_indices,
-        ckpt_path: str,
+        ckpt_path: Optional[str],
         max_epochs: int,
         patience: int,
         trial=None,
@@ -329,15 +329,16 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         "best_epoch": best_epoch,
                         "final_full_data_retrain": trial is None,
                     }
-                    save_checkpoint(
-                        unwrap_model(model),
-                        optimizer,
-                        epoch,
-                        train_loss / max(n_train, 1),
-                        val_loss,
-                        config,
-                        ckpt_path,
-                    )
+                    if ckpt_path:
+                        save_checkpoint(
+                            unwrap_model(model),
+                            optimizer,
+                            epoch,
+                            train_loss / max(n_train, 1),
+                            val_loss,
+                            config,
+                            ckpt_path,
+                        )
                 if backup is not None:
                     ema.restore(model, backup)
 
@@ -481,7 +482,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     search_space=search_space,
                 )
                 trial.set_user_attr("full_params", dict(params))
-                trial_ckpt = os.path.join(subset_dir, f"_diff_ft_trial_{trial.number}_best.pt")
                 try:
                     best_val, _best_epoch = self._train_once(
                         state=state,
@@ -492,7 +492,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         itrans_checkpoint=ft_itrans_ckpt,
                         device=device,
                         variate_indices=variate_indices,
-                        ckpt_path=trial_ckpt,
+                        ckpt_path=None,
                         max_epochs=hp_epochs,
                         patience=hp_patience,
                         trial=trial,
