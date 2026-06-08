@@ -15,6 +15,7 @@ from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline.phases.itrans_hp_pretrain import _patch_globals
 from models.diffusion_tsf.pipeline import wandb_utils
+from models.diffusion_tsf.pipeline.visualize_utils import run_pretrain_diffusion_visualizations
 
 logger = logging.getLogger(__name__)
 
@@ -74,5 +75,19 @@ class DiffusionHPPretrainPhase(PipelinePhase):
             "hp/best_val_loss": best_params.get("best_val_loss", None),
             "hp/best_lr": best_params.get("learning_rate", None),
         })
+
+        try:
+            viz_paths = run_pretrain_diffusion_visualizations(
+                state,
+                diff_ckpt_path=diff_ckpt,
+                itrans_ckpt_path=state.itrans_pretrain_ckpt,
+                tuned_params=best_params,
+                tag="diffusion_synthetic_pretrain",
+            )
+            wandb_utils.log_visualization_paths(
+                viz_paths, wandb_key="viz/diffusion_synthetic_pretrain",
+            )
+        except Exception as e:
+            logger.warning("Synthetic-pretrain diffusion viz failed: %s", e, exc_info=True)
 
         return state

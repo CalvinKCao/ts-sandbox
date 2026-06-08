@@ -4,6 +4,9 @@
 #
 # USAGE (do not call directly; use submit_grid.sh):
 #   sbatch slurm_worker.sh --config configs/binary_anchor.yaml --dataset ETTh1
+#
+# Venv: node-local fast path — rebuilds on $SLURM_TMPDIR from
+# setup/requirements-killarney.txt (generate via setup/killarney_freeze_requirements.sh).
 # =============================================================================
 
 set -euo pipefail
@@ -15,51 +18,9 @@ echo "Job: $SLURM_JOB_NAME  ID: $SLURM_JOB_ID  Node: ${SLURMD_NODENAME:-unknown}
 echo "Started: $(date)"
 echo "=========================================="
 
-if [[ -n "${GRID_STORE:-}" ]]; then
-    STORE="$GRID_STORE"
-elif [[ -n "${SCRATCH:-}" ]]; then
-    if [[ "$(basename "$SCRATCH")" == "$USER" ]]; then
-        STORE="$SCRATCH/ts-sandbox/results"
-    else
-        STORE="$SCRATCH/${USER}/ts-sandbox/results"
-    fi
-else
-    STORE="${SLURM_SUBMIT_DIR:-$PWD}/results"
-fi
-
-_find_persistent_venv() {
-    local -a candidates=()
-    local ckpt_dir="" arg
-    candidates+=("$STORE/venv")
-    if [[ -n "${SCRATCH:-}" ]]; then
-        candidates+=(
-            "$SCRATCH/${USER}/ts-sandbox/results/venv"
-            "$SCRATCH/ts-sandbox/results/venv"
-        )
-    fi
-    candidates+=("${SLURM_SUBMIT_DIR:-}/results/venv")
-    for arg in "${PY_ARGS[@]}"; do
-        [[ "$arg" == --checkpoint-dir=* ]] && ckpt_dir="${arg#--checkpoint-dir=}"
-    done
-    local i=0
-    while [[ $i -lt ${#PY_ARGS[@]} ]]; do
-        if [[ "${PY_ARGS[$i]}" == "--checkpoint-dir" ]]; then
-            ckpt_dir="${PY_ARGS[$((i + 1))]:-}"
-        fi
-        i=$((i + 1))
-    done
-    if [[ -n "$ckpt_dir" ]]; then
-        candidates+=("$(dirname "$(dirname "$ckpt_dir")")/venv")
-    fi
-    local v
-    for v in "${candidates[@]}"; do
-        if [[ -x "$v/bin/python" ]]; then
-            echo "$v"
-            return 0
-        fi
-    done
-    return 1
-}
+STORE="${GRID_STORE:-$SCRATCH/ts-sandbox/results}"
+REPO="${SLURM_SUBMIT_DIR:-$PWD}"
+REQ="$REPO/setup/requirements-killarney.txt"
 
 _load_modules() {
     module purge 2>/dev/null || true
@@ -85,63 +46,42 @@ pip_retry() {
     return 1
 }
 
-install_pipeline_deps() {
-    pip_retry pip install --no-index --upgrade pip -q 2>/dev/null || pip_retry pip install -U pip -q
-
-    if ! python -c "import torch" 2>/dev/null; then
-        if ! pip_retry pip install --no-index torch torchvision numpy pandas scipy scikit-learn tqdm -q 2>/dev/null; then
-            pip_retry pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
-            pip_retry pip install numpy pandas scipy scikit-learn tqdm -q
-        fi
+setup_job_venv() {
+    if [[ ! -f "$REQ" ]]; then
+        echo "ERROR: missing $REQ" >&2
+        echo "  On a Killarney login node run: ./setup/killarney_freeze_requirements.sh" >&2
+        exit 1
+    fi
+    if [[ -z "${SLURM_TMPDIR:-}" ]]; then
+        echo "ERROR: SLURM_TMPDIR is not set." >&2
+        exit 1
     fi
 
-    # Idempotent: persistent venv may exist with only torch from an older partial setup.
-    pip_retry pip install optuna wandb einops pyyaml scikit-learn -q
-
-    if ! pip_retry pip install --no-index matplotlib -q 2>/dev/null; then
-        pip_retry pip install matplotlib -q 2>/dev/null || {
-            echo "[setup] WARN: matplotlib install failed; continuing without viz wheels."
-            export DIFFUSION_TSF_SKIP_VIZ=1
-        }
+    _load_modules
+    if ! command -v virtualenv >/dev/null 2>&1; then
+        echo "ERROR: virtualenv not available after module load." >&2
+        exit 1
     fi
 
-    python -c "import optuna, wandb, einops, yaml" || {
-        echo "[setup] ERROR: pipeline deps missing after pip reconcile." >&2
-        return 1
+    echo "[setup] Building node-local venv on \$SLURM_TMPDIR from $REQ"
+    virtualenv --no-download "$SLURM_TMPDIR/env"
+    # shellcheck source=/dev/null
+    source "$SLURM_TMPDIR/env/bin/activate"
+    pip_retry pip install --no-index --upgrade pip -q
+    pip_retry pip install --no-index -r "$REQ" -q
+
+    python -c "import torch, optuna, wandb, einops, yaml" || {
+        echo "[setup] ERROR: pipeline deps missing after install from $REQ" >&2
+        exit 1
     }
 }
 
-activate_venv() {
-    local venv_path=""
-    if venv_path="$(_find_persistent_venv)"; then
-        echo "[setup] Using persistent venv: $venv_path (store=$STORE)"
-        # shellcheck source=/dev/null
-        source "$venv_path/bin/activate"
-        echo "[setup] Reconciling packages in persistent venv..."
-        _load_modules
-        install_pipeline_deps
-        return 0
-    fi
-
-    echo "[setup] No persistent venv found under store=$STORE; loading modules and building on SLURM_TMPDIR..."
-    _load_modules
-    if ! command -v python >/dev/null 2>&1; then
-        echo "[setup] ERROR: python not available after module load (Lmod/cvmfs issue on this node?)." >&2
-        echo "[setup] Create \$SCRATCH/ts-sandbox/results/venv from the login node (alliance_setup_killarney.sh) and resubmit." >&2
-        exit 1
-    fi
-    python -m venv "$SLURM_TMPDIR/env"
-    # shellcheck source=/dev/null
-    source "$SLURM_TMPDIR/env/bin/activate"
-    install_pipeline_deps
-}
-
-activate_venv
+setup_job_venv
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())" || true
 
 export PYTHONUNBUFFERED=1
 
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
+cd "$REPO"
 if [[ ! -f "models/diffusion_tsf/train_multivariate_pipeline.py" ]]; then
     echo "ERROR: slurm_worker.sh must be submitted from repo root." >&2
     exit 1
@@ -163,16 +103,15 @@ _resolve_shared_datasets() {
         echo "$DATASETS_DIR"
         return
     fi
-    local repo="${SLURM_SUBMIT_DIR:-$PWD}"
-    if [[ -f "$repo/datasets/ETT-small/ETTh1.csv" ]]; then
-        echo "$repo/datasets"
+    if [[ -f "$REPO/datasets/ETT-small/ETTh1.csv" ]]; then
+        echo "$REPO/datasets"
         return
     fi
     if [[ -f "$STORE/datasets/ETT-small/ETTh1.csv" ]]; then
         echo "$STORE/datasets"
         return
     fi
-    echo "$repo/datasets"
+    echo "$REPO/datasets"
 }
 SHARED_DATASETS="$(_resolve_shared_datasets)"
 
@@ -204,7 +143,6 @@ if [[ "${GRID_RESUME:-0}" == "1" ]]; then
   [[ "$has_resume" -eq 0 ]] && PY_ARGS+=(--resume)
 fi
 
-REPO="${SLURM_SUBMIT_DIR:-$PWD}"
 for ((i = 0; i < ${#PY_ARGS[@]}; i++)); do
     if [[ "${PY_ARGS[i]}" == "--config" ]]; then
         cfg="${PY_ARGS[i + 1]}"

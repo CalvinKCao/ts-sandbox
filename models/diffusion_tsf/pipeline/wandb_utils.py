@@ -41,6 +41,7 @@ def init_phase_run(
     job_type: str,
     config: Dict[str, Any],
     tags: Optional[list] = None,
+    yaml_path: Optional[str] = None,
 ) -> Optional[Any]:
     """Start a new wandb run for one pipeline phase.
 
@@ -60,6 +61,10 @@ def init_phase_run(
             reinit=True,
             tags=tags or [],
         )
+        if yaml_path and os.path.isfile(yaml_path):
+            artifact = wandb.Artifact("experiment-yaml", type="config")
+            artifact.add_file(yaml_path)
+            run.log_artifact(artifact)
         logger.info(f"wandb run started: {run.url}")
         return run
     except Exception as e:
@@ -88,3 +93,36 @@ def log_summary(metrics: Dict[str, Any]) -> None:
         return
     for k, v in metrics.items():
         wandb.run.summary[k] = v
+
+
+def log_eval_metrics(metrics: Dict[str, Any], step: int = 0) -> None:
+    """Log eval metrics to the run history and summary (eval phase)."""
+    if not _WANDB_AVAILABLE or wandb.run is None:
+        return
+    clean = {k: v for k, v in metrics.items() if v is not None}
+    if not clean:
+        return
+    wandb.log(clean, step=step)
+    log_summary(clean)
+
+
+def log_visualization_paths(
+    paths: list,
+    wandb_key: str = "visualizations",
+    caption_prefix: str = "",
+) -> None:
+    """Log JPEG/PNG artifacts to wandb and print a line per file."""
+    if not paths:
+        return
+    if not _WANDB_AVAILABLE or wandb.run is None:
+        for p in paths:
+            logger.info("visualization %s generated!", p)
+        return
+    images = []
+    for p in sorted(paths):
+        logger.info("visualization %s generated!", p)
+        cap = os.path.basename(p)
+        if caption_prefix:
+            cap = f"{caption_prefix}/{cap}"
+        images.append(wandb.Image(p, caption=cap))
+    wandb.log({wandb_key: images})

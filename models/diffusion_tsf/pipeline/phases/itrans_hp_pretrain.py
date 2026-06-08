@@ -14,7 +14,9 @@ from typing import Any
 
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
+from models.diffusion_tsf.pipeline.config import apply_training_config_to_module
 from models.diffusion_tsf.pipeline import wandb_utils
+from models.diffusion_tsf.pipeline.visualize_utils import run_itrans_checkpoint_visualizations
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,16 @@ class ITransHPPretrainPhase(PipelinePhase):
             "hp/best_val_loss": best_params.get("best_val_loss", None),
             "hp/best_lr": best_params.get("learning_rate", None),
         })
+
+        try:
+            viz_paths = run_itrans_checkpoint_visualizations(
+                state, itrans_ckpt, tag="itrans_synthetic_pretrain",
+            )
+            wandb_utils.log_visualization_paths(
+                viz_paths, wandb_key="viz/itrans_synthetic_pretrain",
+            )
+        except Exception as e:
+            logger.warning("iTransformer synthetic-pretrain viz failed: %s", e, exc_info=True)
 
         return state
 
@@ -140,3 +152,4 @@ def _patch_globals(
     mod.DATASETS_DIR = os.path.abspath(
         os.path.expanduser(state.datasets_dir or mod.DATASETS_DIR)
     )
+    apply_training_config_to_module(mod, state.merged_config, state)

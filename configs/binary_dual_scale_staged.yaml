@@ -84,4 +84,10 @@ phases:
     sampler_tune_metric: top3_mse
     probabilistic_sampler: dpmpp
     probabilistic_num_inference_steps: 20
-    skip_eval_visualizations: true
+    skip_eval_visualizations: false
+
+visualization:
+  enabled: true
+  n_samples: 3
+  n_dual_scale_vars: 3
+  jpeg_dpi: 100

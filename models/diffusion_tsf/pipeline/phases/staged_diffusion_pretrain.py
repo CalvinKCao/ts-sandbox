@@ -11,6 +11,8 @@ from typing import Any, Dict, Optional
 
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
+from models.diffusion_tsf.pipeline import wandb_utils
+from models.diffusion_tsf.pipeline.visualize_utils import run_pretrain_diffusion_visualizations
 from models.diffusion_tsf.pipeline.phases.itrans_hp_pretrain import _patch_globals
 
 logger = logging.getLogger(__name__)
@@ -562,5 +564,21 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                 state.diffusion_fine_pretrain_ckpt = ckpt
             else:
                 state.diffusion_finer_pretrain_ckpt = ckpt
+
+        viz_ckpt = state.diffusion_fine_pretrain_ckpt or state.diffusion_coarse_pretrain_ckpt
+        if viz_ckpt and itrans_ckpt:
+            try:
+                viz_paths = run_pretrain_diffusion_visualizations(
+                    state,
+                    diff_ckpt_path=viz_ckpt,
+                    itrans_ckpt_path=itrans_ckpt,
+                    tuned_params=best_params,
+                    tag="staged_diffusion_synthetic_pretrain",
+                )
+                wandb_utils.log_visualization_paths(
+                    viz_paths, wandb_key="viz/staged_diffusion_synthetic_pretrain",
+                )
+            except Exception as e:
+                logger.warning("Staged synthetic-pretrain viz failed: %s", e, exc_info=True)
 
         return state

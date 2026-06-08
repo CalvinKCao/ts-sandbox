@@ -18,6 +18,7 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     discover_dataset_run_ckpt_dir,
 )
 from models.diffusion_tsf.pipeline import wandb_utils
+from models.diffusion_tsf.pipeline.visualize_utils import run_itrans_checkpoint_visualizations
 
 logger = logging.getLogger(__name__)
 
@@ -97,5 +98,15 @@ class ITransFinetuneHPPhase(PipelinePhase):
         wandb_utils.log_summary({
             "hp/itrans_ft_best_lr": best_params.get("learning_rate", None),
         })
+
+        try:
+            viz_paths = run_itrans_checkpoint_visualizations(
+                state, ft_ckpt, tag="itrans_finetuned",
+            )
+            wandb_utils.log_visualization_paths(
+                viz_paths, wandb_key="viz/itrans_finetuned",
+            )
+        except Exception as e:
+            logger.warning("Finetuned iTransformer viz failed: %s", e, exc_info=True)
 
         return state

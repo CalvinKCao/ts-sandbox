@@ -113,6 +113,9 @@ class PipelineState:
     # Phase-level overrides from YAML (list of dicts)
     phase_configs: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Full merged YAML (experiment + phases + training + visualization)
+    merged_config: Optional[Dict[str, Any]] = None
+
     # Extra kwargs that don't map to a field (forwarded to phases)
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -170,4 +173,5 @@ class PipelineState:
 
         init_kwargs["extra"] = extra
         init_kwargs["phase_configs"] = cfg.get("phases", [])
+        init_kwargs["merged_config"] = cfg
         return cls(**init_kwargs)

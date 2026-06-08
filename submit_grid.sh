@@ -64,6 +64,7 @@ CKPT_ROOT="$STORE/ckpts"
 DATA_ROOT="$STORE/datasets"
 mkdir -p "$LOG_DIR" "$CKPT_ROOT" "$DATA_ROOT"
 
+# Resume: find newest ckpts/*-<dataset>-<config> dir; stem is reused for logs/ckpts/datasets.
 pick_resume_stem() {
     local ds="$1" cfg="$2"
     local best="" best_mtime=0 d m
@@ -88,7 +89,7 @@ for CFG in "${CONF_ARR[@]}"; do
 done
 
 echo "Submitting grid... (Storage: $STORE)"
-[[ "$RESUME" -eq 1 ]] && echo "Resume: reusing newest *-<dataset>-<config> checkpoint dir when present."
+[[ "$RESUME" -eq 1 ]] && echo "Resume: requires existing *-<dataset>-<config> checkpoint dir (newest mtime wins)."
 [[ -n "$CKPT_CONFIG" ]] && echo "Checkpoint stem matcher: *-<dataset>-${CKPT_CONFIG}"
 printf "%-10s %-15s %-25s %-8s %s\n" "JOB ID" "DATASET" "CONFIG" "SEED" "LOG"
 echo "--------------------------------------------------------------------------------"
@@ -112,7 +113,8 @@ for CFG in "${CONF_ARR[@]}"; do
             if [[ "$RESUME" -eq 1 ]]; then
                 RUN_STEM=$(pick_resume_stem "$DS" "$CKPT_MATCH")
                 if [[ -z "$RUN_STEM" ]]; then
-                    echo "WARN: no prior run for ${DS}/${CFG_NAME} to resume; new directory with complete retrain will be created after submit." >&2
+                    echo "ERROR: --resume but no checkpoint dir matching ${CKPT_ROOT}/*-${DS}-${CKPT_MATCH}" >&2
+                    exit 1
                 fi
             fi
 

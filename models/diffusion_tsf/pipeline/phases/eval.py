@@ -18,7 +18,11 @@ from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline.phases.itrans_hp_pretrain import _patch_globals
 from models.diffusion_tsf.pipeline import wandb_utils
-from models.diffusion_tsf.pipeline.visualize_utils import generate_pipeline_visualizations
+from models.diffusion_tsf.pipeline.config import visualization_settings
+from models.diffusion_tsf.pipeline.visualize_utils import (
+    generate_dual_scale_comparisons,
+    generate_pipeline_visualizations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +216,7 @@ class EvalPhase(PipelinePhase):
                     summary[f"{prefix}/{key}"] = val
                 elif key in {"crps", "top1_mse", "top1_mae", "top3_mse", "top3_mae"}:
                     summary[f"{prefix}/{key}"] = val
-        wandb_utils.log_summary(summary)
+        wandb_utils.log_eval_metrics(summary)
 
         skip_itrans = bool(
             self.get("skip_itrans_baseline", False)
@@ -248,7 +252,7 @@ class EvalPhase(PipelinePhase):
                     test_stride=test_stride,
                     data_subset=subset_meta,
                 )
-                wandb_utils.log_summary({
+                wandb_utils.log_eval_metrics({
                     "eval/itrans_baseline/mse": baseline_metrics.get("mse"),
                     "eval/itrans_baseline/mae": baseline_metrics.get("mae"),
                 })
@@ -258,25 +262,49 @@ class EvalPhase(PipelinePhase):
         # ---------------------------------------------------------
         # Pipeline Visualizations
         # ---------------------------------------------------------
-        if (
-            not skip_viz
-            and wandb_utils._WANDB_AVAILABLE
-            and wandb_utils.wandb.run is not None
-        ):
-            wandb = wandb_utils.wandb
+        viz_cfg = visualization_settings(state.merged_config)
+        if not skip_viz and viz_cfg.get("enabled", True):
             logger.info(f"[{subset_id}] Generating and logging pipeline visualizations...")
             viz_output_dir = os.path.join(state.results_dir, "viz", subset_id)
-            
-            # The test_ds contains windows, we can pass it down. 
-            # We already have stats (from load_dataset), wait, we need stats.
+            n_viz = 1 if state.smoke_test else int(viz_cfg.get("n_samples", 3))
+            jpeg_dpi = int(viz_cfg.get("jpeg_dpi", 100))
+
             _, _, _, norm_stats = load_dataset(
                 state.dataset, variate_indices,
                 stride=train_stride, test_stride=test_stride,
             )
-            stats = (norm_stats['mean'], norm_stats['std'])
-            
+            stats = (norm_stats["mean"], norm_stats["std"])
+            all_viz_paths: list = []
+
             try:
-                viz_paths = generate_pipeline_visualizations(
+                if state.use_dual_scale and diff_ckpt:
+                    dual_paths = generate_dual_scale_comparisons(
+                        diff_ckpt_path=diff_ckpt,
+                        itrans_ckpt_path=ft_itrans_ckpt,
+                        dataset_name=state.dataset,
+                        variate_indices=variate_indices,
+                        output_dir=os.path.join(viz_output_dir, "dual_scale"),
+                        device=device,
+                        tuned_params=tuned_params,
+                        lookback_length=pipeline_mod.LOOKBACK_LENGTH,
+                        forecast_length=pipeline_mod.FORECAST_LENGTH,
+                        diffusion_sampler=viz_cfg.get("dual_scale_sampler", state.eval_sampler),
+                        num_inference_steps=int(viz_cfg.get("dual_scale_inference_steps", 20)),
+                        variables_to_plot=int(viz_cfg.get("n_dual_scale_vars", 3)),
+                        n_samples=n_viz,
+                        random_seed=state.seed,
+                        jpeg_dpi=jpeg_dpi,
+                        tag="eval_dual_scale",
+                    )
+                    all_viz_paths.extend(dual_paths)
+                    wandb_utils.log_visualization_paths(
+                        dual_paths, wandb_key="eval/dual_scale_visualizations",
+                    )
+            except Exception as e:
+                logger.warning(f"Dual-scale eval visualizations failed: {e}", exc_info=True)
+
+            try:
+                pipe_paths = generate_pipeline_visualizations(
                     model=model,
                     itrans_model=itrans_model,
                     dataset=test_ds,
@@ -284,18 +312,20 @@ class EvalPhase(PipelinePhase):
                     device=device,
                     output_dir=viz_output_dir,
                     subset_id=subset_id,
-                    n_samples=2 if not state.smoke_test else 1,
+                    n_samples=n_viz,
                     forecast_length=pipeline_mod.FORECAST_LENGTH,
                     lookback_length=pipeline_mod.LOOKBACK_LENGTH,
+                    jpeg_dpi=jpeg_dpi,
+                    seed=state.seed,
                 )
-                
-                # Log to wandb with alphanumeric sorting logic natively maintained by the sequential file naming 
-                # (e.g., 001_..., 002_...)
-                viz_paths.sort()
-                wandb_images = [wandb.Image(p, caption=os.path.basename(p)) for p in viz_paths]
-                wandb.log({"eval/visualizations": wandb_images})
-                logger.info(f"[{subset_id}] Successfully logged {len(viz_paths)} visualizations to W&B.")
+                all_viz_paths.extend(pipe_paths)
+                wandb_utils.log_visualization_paths(
+                    pipe_paths, wandb_key="eval/visualizations",
+                )
             except Exception as e:
                 logger.warning(f"Failed to generate pipeline visualizations: {e}", exc_info=True)
+
+            if all_viz_paths:
+                logger.info(f"[{subset_id}] logged {len(all_viz_paths)} visualization(s) to wandb")
 
         return state

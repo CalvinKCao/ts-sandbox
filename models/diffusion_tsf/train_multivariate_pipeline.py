@@ -513,68 +513,19 @@ def init_wandb(
         _wandb_enabled = False
         return False
     
-    # Build comprehensive config
-    full_config = {
-        # Training constants
-        'lookback_length': LOOKBACK_LENGTH,
-        'forecast_length': FORECAST_LENGTH,
-        'image_height': IMAGE_HEIGHT,
-        'max_scale': MAX_SCALE,
-        'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
-        'use_dual_scale': USE_DUAL_SCALE,
-        'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
-        'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
-        'cfg_dropout': CFG_DROPOUT,
-        'cfg_scale': CFG_SCALE,
-        'use_cfg_inference': USE_CFG_INFERENCE,
-        'cross_variate_context_bias': CROSS_VARIATE_CONTEXT_BIAS,
-        'n_variates': N_VARIATES,
-        'diffusion_type': DIFFUSION_TYPE,
-        'deterministic_anchor_loss': DETERMINISTIC_ANCHOR_LOSS,
-        'deterministic_anchor_lambda': DETERMINISTIC_ANCHOR_LAMBDA,
-        'deterministic_anchor_alpha': DETERMINISTIC_ANCHOR_ALPHA,
-        'anchor_hp_lambda_min': ANCHOR_HP_LAMBDA_MIN,
-        'anchor_hp_lambda_max': ANCHOR_HP_LAMBDA_MAX,
-        'anchor_hp_alpha_min': ANCHOR_HP_ALPHA_MIN,
-        'anchor_hp_alpha_max': ANCHOR_HP_ALPHA_MAX,
-        'eval_sampler': EVAL_SAMPLER,
-        'pretrain_epochs': PRETRAIN_EPOCHS,
-        'hp_tune_epochs': HP_TUNE_EPOCHS,
-        'hp_tune_patience': HP_TUNE_PATIENCE,
-        'pretrain_virtual_samples': resolve_pretrain_virtual_dataset_size(False),
-        'pretrain_synthetic_override': PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE,
-        'synthetic_samples_full_cap': SYNTHETIC_SAMPLES_CAP,
-        'synthetic_samples_hp_tune': SYNTHETIC_SAMPLES_HP_TUNE,
-        'synthetic_samples_diff_tune': SYNTHETIC_SAMPLES_DIFF_TUNE,
-        'n_itrans_hp_trials': N_ITRANS_HP_TRIALS,
-        'n_diffusion_hp_trials': N_DIFFUSION_HP_TRIALS,
-        'n_finetune_hp_trials': N_FINETUNE_HP_TRIALS,
-        'itrans_paper_batch_size': ITRANS_PAPER_BATCH_SIZE,
-        'itrans_paper_lr_grid': ITRANS_PAPER_LR_GRID,
-        'itrans_paper_dropout': ITRANS_PAPER_DROPOUT,
-        'diffusion_batch_sizes': DIFFUSION_BATCH_SIZES,
-        'finetune_batch_sizes': FINETUNE_BATCH_SIZES,
-        'diffusion_probe_target_effective_batch': DIFFUSION_PROBE_TARGET_EFFECTIVE_BATCH,
-        'diffusion_probe_max_batch_cap': DIFFUSION_PROBE_MAX_BATCH_CAP,
-        'diffusion_probe_max_candidate_default_v': diffusion_probe_max_candidate(N_VARIATES, False),
-        # DDP info
-        'ddp_enabled': _ddp_enabled,
-        'world_size': get_world_size(),
-        # Directories
-        'checkpoint_dir': CHECKPOINT_DIR,
-        'results_dir': RESULTS_DIR,
-        'datasets_dir': DATASETS_DIR,
-    }
-    
-    # Add user config
-    if config:
-        full_config.update(config)
-    
-    # Add git info
-    full_config.update(get_git_info())
-    
-    # Add system info
-    full_config.update(get_system_info())
+    from models.diffusion_tsf.pipeline.config import (
+        WandbStateShim,
+        build_wandb_config,
+        sync_globals_to_merged_config,
+    )
+
+    user_cfg = dict(config or {})
+    yaml_path = user_cfg.pop("_yaml_path", None)
+    merged = sync_globals_to_merged_config(sys.modules[__name__], yaml_path=yaml_path)
+    if user_cfg:
+        merged.setdefault("experiment", {}).update(user_cfg)
+    shim = WandbStateShim(sys.modules[__name__], **user_cfg)
+    full_config = build_wandb_config(merged, shim)
     
     # Handle resume
     run_id = None
@@ -4532,7 +4483,7 @@ def main():
             phases.append(p_class(**p))
             
         try:
-            Pipeline(phases, state).run()
+            Pipeline(phases, state, merged_config=cfg).run()
         finally:
             if args.wandb:
                 from models.diffusion_tsf.pipeline import wandb_utils

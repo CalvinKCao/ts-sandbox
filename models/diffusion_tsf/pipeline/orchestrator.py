@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
-from typing import Dict, List
+from typing import List, Optional
 
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
+from models.diffusion_tsf.pipeline.config import build_wandb_config
 from models.diffusion_tsf.pipeline import wandb_utils
 
 logger = logging.getLogger(__name__)
@@ -16,9 +16,15 @@ logger = logging.getLogger(__name__)
 class Pipeline:
     """Runs phases sequentially, managing wandb groups and error handling."""
 
-    def __init__(self, phases: List[PipelinePhase], state: PipelineState):
+    def __init__(
+        self,
+        phases: List[PipelinePhase],
+        state: PipelineState,
+        merged_config: Optional[dict] = None,
+    ):
         self.phases = phases
         self.state = state
+        self.merged_config = merged_config or state.merged_config or {}
 
     def run(self) -> PipelineState:
         self.state.seed_everything()
@@ -55,9 +61,12 @@ class Pipeline:
             # Per-phase wandb run
             run = None
             if self.state.wandb_enabled:
-                # Build a flat config dict for this phase
-                phase_config = _state_as_config(self.state)
-                phase_config.update(phase.overrides)
+                phase_config = build_wandb_config(
+                    self.merged_config,
+                    self.state,
+                    phase_name=phase.name,
+                    phase_overrides=phase.overrides,
+                )
                 run = wandb_utils.init_phase_run(
                     phase_name=phase.wandb_run_name,
                     group=self.state.wandb_group or "",
@@ -65,6 +74,7 @@ class Pipeline:
                     job_type=phase.wandb_job_type,
                     config=phase_config,
                     tags=[self.state.dataset, self.state.diffusion_type],
+                    yaml_path=self.merged_config.get("_yaml_path"),
                 )
 
             try:
@@ -84,15 +94,3 @@ class Pipeline:
         logger.info("PIPELINE COMPLETE")
         logger.info("=" * 60)
         return self.state
-
-
-def _state_as_config(state: PipelineState) -> Dict:
-    """Flatten state into a serializable dict for wandb config."""
-    d = {}
-    for k, v in asdict(state).items():
-        # Skip non-serializable / large fields
-        if k in ("device", "phase_configs", "extra"):
-            continue
-        if v is not None:
-            d[k] = v
-    return d

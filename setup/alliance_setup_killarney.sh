@@ -6,6 +6,10 @@
 # Run this ONCE when first setting up on Killarney.
 # Creates persistent storage in $PROJECT space.
 #
+# For the current submit_grid / slurm_worker fast path, prefer:
+#   ./setup/killarney_freeze_requirements.sh
+# (freezes wheels to setup/requirements-killarney.txt for node-local job venvs)
+#
 # Usage:
 #   ./alliance_setup_killarney.sh
 #

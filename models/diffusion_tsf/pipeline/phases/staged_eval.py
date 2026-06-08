@@ -444,7 +444,7 @@ class StagedEvalPhase(PipelinePhase):
                 "eval_metrics": {"staged_anchor": metrics},
             }, f, indent=2, sort_keys=True)
 
-        wandb_utils.log_summary({
+        wandb_utils.log_eval_metrics({
             "eval/staged_prob_mse": metrics.get("mse"),
             "eval/staged_prob_mae": metrics.get("mae"),
             "eval/staged_sample_mean_mse": metrics.get("sample_mean_mse"),
