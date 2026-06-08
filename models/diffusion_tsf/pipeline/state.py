@@ -33,6 +33,7 @@ class PipelineState:
     image_height: int = 32
     coarse_image_height: int = 16
     fine_image_height: int = 16
+    finer_image_height: int = 16
     max_scale: float = 3.5
     max_scale_by_dataset: Dict[str, float] = field(default_factory=dict)
     dit_patch_size: Tuple[int, int] = (8, 8)
@@ -42,6 +43,7 @@ class PipelineState:
     dit_mlp_ratio: float = 4.0
     dit_dropout: float = 0.0
     use_dual_scale: bool = False
+    use_triple_scale: bool = False
     diffusion_stage: str = "joint"
     dual_scale_fine_weight: float = 0.5
     dual_scale_independent_timesteps: bool = True
@@ -94,16 +96,19 @@ class PipelineState:
     diffusion_pretrain_ckpt: Optional[str] = None
     diffusion_coarse_pretrain_ckpt: Optional[str] = None
     diffusion_fine_pretrain_ckpt: Optional[str] = None
+    diffusion_finer_pretrain_ckpt: Optional[str] = None
     itrans_finetune_ckpt: Optional[str] = None
     diffusion_finetune_ckpt: Optional[str] = None
     diffusion_coarse_finetune_ckpt: Optional[str] = None
     diffusion_fine_finetune_ckpt: Optional[str] = None
+    diffusion_finer_finetune_ckpt: Optional[str] = None
 
     itrans_best_params: Optional[Dict[str, Any]] = None
     diffusion_best_params: Optional[Dict[str, Any]] = None
     finetune_best_params: Optional[Dict[str, Any]] = None
     coarse_finetune_best_params: Optional[Dict[str, Any]] = None
     fine_finetune_best_params: Optional[Dict[str, Any]] = None
+    finer_finetune_best_params: Optional[Dict[str, Any]] = None
 
     # Phase-level overrides from YAML (list of dicts)
     phase_configs: List[Dict[str, Any]] = field(default_factory=list)
@@ -145,7 +150,7 @@ class PipelineState:
 
         if "dit_patch_size" in init_kwargs:
             init_kwargs["dit_patch_size"] = tuple(int(x) for x in init_kwargs["dit_patch_size"])
-        for key in ("image_height", "coarse_image_height", "fine_image_height"):
+        for key in ("image_height", "coarse_image_height", "fine_image_height", "finer_image_height"):
             if key in init_kwargs:
                 init_kwargs[key] = int(init_kwargs[key])
         for key in ("dit_embed_dim", "dit_depth", "dit_num_heads"):

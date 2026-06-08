@@ -9,6 +9,7 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import Stage
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     CoarseDiffusionFinetuneHPPhase,
     FineDiffusionFinetuneHPPhase,
+    FinerDiffusionFinetuneHPPhase,
 )
 from models.diffusion_tsf.pipeline.phases.staged_eval import StagedEvalPhase
 
@@ -20,6 +21,7 @@ PHASE_REGISTRY = {
     "staged_diffusion_pretrain": StagedDiffusionPretrainPhase,
     "diffusion_coarse_finetune_hp": CoarseDiffusionFinetuneHPPhase,
     "diffusion_fine_finetune_hp": FineDiffusionFinetuneHPPhase,
+    "diffusion_finer_finetune_hp": FinerDiffusionFinetuneHPPhase,
     "staged_eval": StagedEvalPhase,
     "eval": EvalPhase,
 }
@@ -33,6 +35,7 @@ __all__ = [
     "StagedDiffusionPretrainPhase",
     "CoarseDiffusionFinetuneHPPhase",
     "FineDiffusionFinetuneHPPhase",
+    "FinerDiffusionFinetuneHPPhase",
     "StagedEvalPhase",
     "EvalPhase",
 ]

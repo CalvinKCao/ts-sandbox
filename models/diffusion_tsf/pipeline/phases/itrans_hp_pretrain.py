@@ -102,6 +102,7 @@ def _patch_globals(
     mod.IMAGE_HEIGHT = state.image_height
     mod.COARSE_IMAGE_HEIGHT = state.coarse_image_height
     mod.FINE_IMAGE_HEIGHT = state.fine_image_height
+    mod.FINER_IMAGE_HEIGHT = state.finer_image_height
     mod.MAX_SCALE = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
     mod.DIT_PATCH_SIZE = tuple(state.dit_patch_size)
     mod.DIT_EMBED_DIM = state.dit_embed_dim
@@ -110,6 +111,7 @@ def _patch_globals(
     mod.DIT_MLP_RATIO = state.dit_mlp_ratio
     mod.DIT_DROPOUT = state.dit_dropout
     mod.USE_DUAL_SCALE = state.use_dual_scale
+    mod.USE_TRIPLE_SCALE = state.use_triple_scale
     mod.DIFFUSION_STAGE = state.diffusion_stage
     mod.DUAL_SCALE_FINE_WEIGHT = state.dual_scale_fine_weight
     mod.DUAL_SCALE_INDEPENDENT_TIMESTEPS = state.dual_scale_independent_timesteps

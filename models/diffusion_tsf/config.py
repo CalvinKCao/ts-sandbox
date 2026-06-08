@@ -30,6 +30,7 @@ class DiffusionTSFConfig:
     image_height: int = 32
     coarse_image_height: int = 16
     fine_image_height: int = 16
+    finer_image_height: int = 16
     max_scale: float = 3.5
     representation_mode: str = "cdf"  # pdf or cdf
 
@@ -47,8 +48,9 @@ class DiffusionTSFConfig:
     binary_background_weight: float = 0.1
     binary_boundary_width: int = 8
     binary_use_boundary_weighted_bce: bool = False
-    diffusion_stage: str = "joint"  # joint, coarse, fine
+    diffusion_stage: str = "joint"  # joint, coarse, fine, finer
     use_dual_scale: bool = False
+    use_triple_scale: bool = False
     dual_scale_fine_weight: float = 0.5
     dual_scale_independent_timesteps: bool = True
 
@@ -125,19 +127,28 @@ class DiffusionTSFConfig:
             raise ValueError(
                 "Edge CDF boundary-weighted BCE is not supported for binary diffusion yet."
             )
-        if self.diffusion_stage not in {"joint", "coarse", "fine"}:
+        valid_stages = {"joint", "coarse", "fine", "finer"}
+        if self.diffusion_stage not in valid_stages:
             raise ValueError(
-                "diffusion_stage must be one of {'joint', 'coarse', 'fine'}, "
+                "diffusion_stage must be one of {'joint', 'coarse', 'fine', 'finer'}, "
                 f"got {self.diffusion_stage!r}."
             )
-        if self.diffusion_stage in {"coarse", "fine"}:
-            if self.use_dual_scale:
-                raise ValueError("staged coarse/fine models expect use_dual_scale=False.")
-            expected_height = (
-                self.coarse_image_height
-                if self.diffusion_stage == "coarse"
-                else self.fine_image_height
+        if self.diffusion_stage == "finer" and not self.use_triple_scale:
+            raise ValueError("diffusion_stage='finer' requires use_triple_scale=True.")
+        if self.use_triple_scale and self.diffusion_stage == "joint":
+            raise ValueError(
+                "use_triple_scale has no joint forward path; use staged coarse/fine/finer."
             )
+        if self.use_triple_scale and self.use_dual_scale:
+            raise ValueError("use_dual_scale and use_triple_scale are mutually exclusive.")
+        if self.diffusion_stage in {"coarse", "fine", "finer"}:
+            if self.use_dual_scale:
+                raise ValueError("staged models expect use_dual_scale=False.")
+            expected_height = {
+                "coarse": self.coarse_image_height,
+                "fine": self.fine_image_height,
+                "finer": self.finer_image_height,
+            }[self.diffusion_stage]
             if self.image_height != expected_height:
                 raise ValueError(
                     f"staged {self.diffusion_stage} model expects image_height={expected_height}, "
@@ -145,12 +156,14 @@ class DiffusionTSFConfig:
                 )
             if self.image_height % self.dit_patch_size[0] != 0:
                 raise ValueError("staged image_height must divide dit_patch_size[0].")
-            if self.coarse_image_height <= 0 or self.fine_image_height <= 0:
-                raise ValueError("coarse/fine image heights must be positive.")
+            if self.coarse_image_height <= 0 or self.fine_image_height <= 0 or self.finer_image_height <= 0:
+                raise ValueError("coarse/fine/finer image heights must be positive.")
             if self.coarse_image_height % self.dit_patch_size[0] != 0:
                 raise ValueError("coarse_image_height must divide dit_patch_size[0].")
             if self.fine_image_height % self.dit_patch_size[0] != 0:
                 raise ValueError("fine_image_height must divide dit_patch_size[0].")
+            if self.use_triple_scale and self.finer_image_height % self.dit_patch_size[0] != 0:
+                raise ValueError("finer_image_height must divide dit_patch_size[0].")
         if self.use_dual_scale:
             if self.image_height != 16:
                 raise ValueError("use_dual_scale=True expects image_height=16.")
@@ -215,11 +228,15 @@ class DiffusionTSFConfig:
     def visual_cond_channels(self) -> int:
         per_scale = 1 + (1 if self.use_value_channel else 0)
         if self.diffusion_stage == "coarse":
-            return per_scale * 2
+            return per_scale * (3 if self.use_triple_scale else 2)
         if self.diffusion_stage == "fine":
-            return per_scale * 3
+            return per_scale * (4 if self.use_triple_scale else 3)
+        if self.diffusion_stage == "finer":
+            return per_scale * 5
         if self.use_dual_scale:
             return per_scale * 2
+        if self.use_triple_scale:
+            return per_scale * 3
         return per_scale
 
     @property

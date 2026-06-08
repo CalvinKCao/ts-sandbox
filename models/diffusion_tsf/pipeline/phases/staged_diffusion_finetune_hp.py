@@ -187,18 +187,21 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             if self.stage == "coarse":
                 state.diffusion_coarse_finetune_ckpt = best_pt
                 state.coarse_finetune_best_params = params
-            else:
+            elif self.stage == "fine":
                 state.diffusion_fine_finetune_ckpt = best_pt
                 state.fine_finetune_best_params = params
+            else:
+                state.diffusion_finer_finetune_ckpt = best_pt
+                state.finer_finetune_best_params = params
             return True
         return False
 
     def _pretrained_ckpt(self, state: PipelineState) -> str:
-        attr = (
-            state.diffusion_coarse_pretrain_ckpt
-            if self.stage == "coarse"
-            else state.diffusion_fine_pretrain_ckpt
-        )
+        attr = {
+            "coarse": state.diffusion_coarse_pretrain_ckpt,
+            "fine": state.diffusion_fine_pretrain_ckpt,
+            "finer": state.diffusion_finer_pretrain_ckpt,
+        }[self.stage]
         candidates = [
             self.get("pretrained_ckpt"),
             attr,
@@ -381,6 +384,11 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             raise RuntimeError(f"{self.name} requires finetuned iTransformer, got: {ft_itrans_ckpt}")
         if self.stage == "fine" and not state.diffusion_coarse_finetune_ckpt:
             raise RuntimeError("fine staged tuning requires completed coarse best model first")
+        if self.stage == "finer":
+            if not state.use_triple_scale:
+                raise RuntimeError("finer staged tuning requires use_triple_scale=True")
+            if not state.diffusion_fine_finetune_ckpt:
+                raise RuntimeError("finer staged tuning requires completed fine best model first")
         diff_ckpt = self._pretrained_ckpt(state)
 
         device = state.resolve_device()
@@ -395,8 +403,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             train_ds = Subset(train_ds, list(range(min(4, len(train_ds)))))
             val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
         tune_fraction = float(self.get("tune_data_fraction", 0.5))
-        tune_train_ds = _fraction_subset(train_ds, tune_fraction, state.seed + (11 if self.stage == "coarse" else 17))
-        tune_val_ds = _fraction_subset(val_ds, tune_fraction, state.seed + (23 if self.stage == "coarse" else 29))
+        train_seed_offset = {"coarse": 11, "fine": 17, "finer": 19}[self.stage]
+        val_seed_offset = {"coarse": 23, "fine": 29, "finer": 31}[self.stage]
+        tune_train_ds = _fraction_subset(train_ds, tune_fraction, state.seed + train_seed_offset)
+        tune_val_ds = _fraction_subset(val_ds, tune_fraction, state.seed + val_seed_offset)
         logger.info(
             "  [%s] train/val full=%d/%d tune=%d/%d",
             self.name,
@@ -576,9 +586,12 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         if self.stage == "coarse":
             state.diffusion_coarse_finetune_ckpt = final_ckpt
             state.coarse_finetune_best_params = best_params
-        else:
+        elif self.stage == "fine":
             state.diffusion_fine_finetune_ckpt = final_ckpt
             state.fine_finetune_best_params = best_params
+        else:
+            state.diffusion_finer_finetune_ckpt = final_ckpt
+            state.finer_finetune_best_params = best_params
 
         wandb_utils.log_summary({
             f"hp/{self.stage}_diff_ft_best_val_loss": final_val,
@@ -599,3 +612,8 @@ class CoarseDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
 class FineDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
     name = "diffusion_fine_finetune_hp"
     stage = "fine"
+
+
+class FinerDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
+    name = "diffusion_finer_finetune_hp"
+    stage = "finer"

@@ -556,23 +556,41 @@ class DiffusionTSF(nn.Module):
 
     def encode_dual_to_2d_binary(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encode 1D series to coarse and residual hard binary CDF images."""
-        if self.config.diffusion_stage in {"coarse", "fine"}:
+        if self.config.diffusion_stage in {"coarse", "fine", "finer"}:
             return self._encode_staged_dual_to_2d_binary(x)
         return self.to_2d.encode_dual(x)
 
-    def _staged_image_heights(self) -> Tuple[int, int]:
+    def _staged_image_heights(self) -> Tuple[int, int, int]:
         return (
             int(getattr(self.config, "coarse_image_height", self.config.image_height)),
             int(getattr(self.config, "fine_image_height", self.config.image_height)),
+            int(getattr(self.config, "finer_image_height", self.config.image_height)),
         )
 
     def _encode_staged_dual_to_2d_binary(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        coarse_h, fine_h = self._staged_image_heights()
+        coarse_h, fine_h, _finer_h = self._staged_image_heights()
         return self.to_2d.encode_dual_heights(
             x,
             coarse_height=coarse_h,
             fine_height=fine_h,
         )
+
+    def _encode_staged_maps(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        coarse_h, fine_h, finer_h = self._staged_image_heights()
+        if getattr(self.config, "use_triple_scale", False):
+            coarse, fine, finer = self.to_2d.encode_triple_heights(
+                x,
+                coarse_height=coarse_h,
+                fine_height=fine_h,
+                finer_height=finer_h,
+            )
+            return {"coarse": coarse, "fine": fine, "finer": finer}
+        coarse, fine = self.to_2d.encode_dual_heights(
+            x,
+            coarse_height=coarse_h,
+            fine_height=fine_h,
+        )
+        return {"coarse": coarse, "fine": fine}
 
     def _resize_cdf_height(self, image: torch.Tensor, target_height: int) -> torch.Tensor:
         if image.shape[2] == target_height:
@@ -611,6 +629,30 @@ class DiffusionTSF(nn.Module):
         return self.to_2d.decode_dual(
             coarse_map,
             fine_map,
+            cdf_decoder=cdf_decoder,
+            expectation_sharpen_temp=temperature,
+            squeeze_univariate=(coarse_map.shape[1] == 1),
+        )
+
+    def decode_triple_from_2d(
+        self,
+        coarse_map: torch.Tensor,
+        fine_map: torch.Tensor,
+        finer_map: torch.Tensor,
+        from_diffusion: bool = False,
+        decoder_method: str = "mean",
+    ) -> torch.Tensor:
+        """Decode triple-scale CDF maps to normalized 1D values."""
+        if from_diffusion:
+            coarse_map = (coarse_map + 1.0) / 2.0
+            fine_map = (fine_map + 1.0) / 2.0
+            finer_map = (finer_map + 1.0) / 2.0
+        cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
+        temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
+        return self.to_2d.decode_triple(
+            coarse_map,
+            fine_map,
+            finer_map,
             cdf_decoder=cdf_decoder,
             expectation_sharpen_temp=temperature,
             squeeze_univariate=(coarse_map.shape[1] == 1),
@@ -735,7 +777,7 @@ class DiffusionTSF(nn.Module):
         t: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (binary factorized DiT path)."""
-        if self.config.diffusion_stage in {"coarse", "fine"}:
+        if self.config.diffusion_stage in {"coarse", "fine", "finer"}:
             return self._forward_binary_staged(past, future, t)
         if self.config.use_dual_scale:
             return self._forward_binary_dual_scale(past, future, t)
@@ -760,6 +802,7 @@ class DiffusionTSF(nn.Module):
         reverse_step_indices: Optional[torch.Tensor] = None,
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
         future_coarse_2d: Optional[torch.Tensor] = None,
+        future_fine_2d: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions via binary reverse sampling.
 
@@ -785,8 +828,9 @@ class DiffusionTSF(nn.Module):
             reverse_step_indices=reverse_step_indices,
             snapshot_timesteps=snapshot_timesteps,
             future_coarse_2d=future_coarse_2d,
+            future_fine_2d=future_fine_2d,
         )
-        if self.config.diffusion_stage in {"coarse", "fine"}:
+        if self.config.diffusion_stage in {"coarse", "fine", "finer"}:
             return self._generate_binary_staged(past, **gen_common)
         if self.config.use_dual_scale:
             return self._generate_binary_dual_scale(past, **gen_common)
@@ -862,29 +906,28 @@ class DiffusionTSF(nn.Module):
         self,
         past_norm: torch.Tensor,
         target_width: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Build GT lookback coarse+fine conditioning for staged denoisers."""
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Build GT lookback conditioning maps for staged denoisers."""
         B, V = past_norm.shape[:2]
         H = self.config.image_height
         BV = B * V
         past_tail_len = min(past_norm.shape[-1], target_width)
         past_tail_norm = past_norm[..., -past_tail_len:]
-        past_coarse, past_fine = self._encode_staged_dual_to_2d_binary(past_tail_norm)
-        if self.config.diffusion_stage == "fine":
-            past_coarse_cond = self._coarse_cdf_to_height(past_coarse, H)
-            past_fine_cond = self._resize_cdf_height(past_fine, H)
+        past_maps = self._encode_staged_maps(past_tail_norm)
+        cond_maps = []
+        if self.config.diffusion_stage == "coarse":
+            cond_maps.append(self._resize_cdf_height(past_maps["coarse"], H))
         else:
-            past_coarse_cond = self._resize_cdf_height(past_coarse, H)
-            past_fine_cond = self._resize_cdf_height(past_fine, H)
+            cond_maps.append(self._coarse_cdf_to_height(past_maps["coarse"], H))
+        cond_maps.append(self._resize_cdf_height(past_maps["fine"], H))
+        if getattr(self.config, "use_triple_scale", False):
+            cond_maps.append(self._resize_cdf_height(past_maps["finer"], H))
         cond = torch.cat(
-            (
-                past_coarse_cond.reshape(BV, 1, H, past_tail_len),
-                past_fine_cond.reshape(BV, 1, H, past_tail_len),
-            ),
+            [m.reshape(BV, 1, H, past_tail_len) for m in cond_maps],
             dim=1,
         )
         cond = F.interpolate(cond, size=(H, target_width), mode='bilinear', align_corners=False)
-        return cond, past_coarse, past_fine
+        return cond, past_maps
 
     def _forward_binary_staged(
         self,
@@ -892,10 +935,10 @@ class DiffusionTSF(nn.Module):
         future: torch.Tensor,
         t: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Train one staged denoiser: future coarse or future fine residual."""
+        """Train one staged denoiser: future coarse, fine residual, or finer residual."""
         assert self.binary_scheduler is not None, "binary scheduler is not initialized"
         stage = self.config.diffusion_stage
-        if stage not in {"coarse", "fine"}:
+        if stage not in {"coarse", "fine", "finer"}:
             raise ValueError(f"_forward_binary_staged called for stage={stage!r}")
 
         B = past.shape[0]
@@ -905,8 +948,8 @@ class DiffusionTSF(nn.Module):
         BV = B * V
 
         past_norm, future_norm, _stats = self._normalize_sequence(past, future)
-        future_coarse, future_fine = self._encode_staged_dual_to_2d_binary(future_norm)
-        target_2d = future_coarse if stage == "coarse" else future_fine
+        future_maps = self._encode_staged_maps(future_norm)
+        target_2d = future_maps[stage]
         W_fut = target_2d.shape[3]
         H = target_2d.shape[2]
 
@@ -923,11 +966,15 @@ class DiffusionTSF(nn.Module):
         ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
         ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
 
-        cond_for_unet, past_coarse, past_fine = self._staged_past_condition(past_norm, W_fut)
-        if stage == "fine":
-            future_coarse_cond = self._coarse_cdf_to_height(future_coarse, H)
+        cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut)
+        if stage in {"fine", "finer"}:
+            future_coarse_cond = self._coarse_cdf_to_height(future_maps["coarse"], H)
             future_coarse_flat = future_coarse_cond.reshape(BV, 1, H, W_fut)
             cond_for_unet = torch.cat((cond_for_unet, future_coarse_flat), dim=1)
+        if stage == "finer":
+            future_fine_cond = self._resize_cdf_height(future_maps["fine"], H)
+            future_fine_flat = future_fine_cond.reshape(BV, 1, H, W_fut)
+            cond_for_unet = torch.cat((cond_for_unet, future_fine_flat), dim=1)
         base_cond_for_unet = cond_for_unet
 
         canvas = self._inject_coordinate_channel(xt_flat.float())
@@ -997,17 +1044,22 @@ class DiffusionTSF(nn.Module):
             'noise_pred': x0_pred,
             'x0_pred': x0_pred,
             'future_2d': target_2d,
-            'future_2d_coarse': future_coarse,
-            'future_2d_fine': future_fine,
-            'past_2d_coarse': past_coarse,
-            'past_2d_fine': past_fine,
+            'future_2d_coarse': future_maps["coarse"],
+            'future_2d_fine': future_maps["fine"],
+            'past_2d_coarse': past_maps["coarse"],
+            'past_2d_fine': past_maps["fine"],
             't': t,
             'diffusion_stage': stage,
         }
+        if "finer" in future_maps:
+            result['future_2d_finer'] = future_maps["finer"]
+            result['past_2d_finer'] = past_maps["finer"]
         if stage == "coarse":
             result['x0_pred_coarse'] = x0_pred
-        else:
+        elif stage == "fine":
             result['x0_pred_fine'] = x0_pred
+        else:
+            result['x0_pred_finer'] = x0_pred
         return result
 
     @torch.no_grad()
@@ -1023,12 +1075,13 @@ class DiffusionTSF(nn.Module):
         reverse_step_indices: Optional[torch.Tensor] = None,
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
         future_coarse_2d: Optional[torch.Tensor] = None,
+        future_fine_2d: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
-        """Generate one staged output, chaining coarse maps into the fine stage."""
+        """Generate one staged output, chaining coarse/fine maps into later stages."""
         assert self.binary_scheduler is not None, "binary scheduler is not initialized"
         stage = self.config.diffusion_stage
-        if stage not in {"coarse", "fine"}:
+        if stage not in {"coarse", "fine", "finer"}:
             raise ValueError(f"_generate_binary_staged called for stage={stage!r}")
 
         B = past.shape[0]
@@ -1039,11 +1092,12 @@ class DiffusionTSF(nn.Module):
         W_fut = self.config.forecast_length
 
         past_norm, _, stats = self._normalize_sequence(past)
-        cond_for_unet, past_coarse, past_fine = self._staged_past_condition(past_norm, W_fut)
+        cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut)
         coarse_for_decode = future_coarse_2d
-        if stage == "fine":
+        fine_for_decode = future_fine_2d
+        if stage in {"fine", "finer"}:
             if future_coarse_2d is None:
-                raise ValueError("fine-stage generation requires future_coarse_2d from the coarse model.")
+                raise ValueError(f"{stage}-stage generation requires future_coarse_2d from the coarse model.")
             if future_coarse_2d.shape[:2] != (B, V) or future_coarse_2d.shape[3] != W_fut:
                 raise ValueError(
                     "future_coarse_2d must have shape "
@@ -1052,6 +1106,19 @@ class DiffusionTSF(nn.Module):
             future_coarse_cond = self._coarse_cdf_to_height(future_coarse_2d.to(device), H)
             cond_for_unet = torch.cat(
                 (cond_for_unet, future_coarse_cond.reshape(BV, 1, H, W_fut)),
+                dim=1,
+            )
+        if stage == "finer":
+            if future_fine_2d is None:
+                raise ValueError("finer-stage generation requires future_fine_2d from the fine model.")
+            if future_fine_2d.shape[:2] != (B, V) or future_fine_2d.shape[3] != W_fut:
+                raise ValueError(
+                    "future_fine_2d must have shape "
+                    f"(B={B}, V={V}, Hf, W={W_fut}), got {tuple(future_fine_2d.shape)}"
+                )
+            future_fine_cond = self._resize_cdf_height(future_fine_2d.to(device), H)
+            cond_for_unet = torch.cat(
+                (cond_for_unet, future_fine_cond.reshape(BV, 1, H, W_fut)),
                 dim=1,
             )
 
@@ -1123,12 +1190,25 @@ class DiffusionTSF(nn.Module):
                 future_2d_coarse, from_diffusion=False, decoder_method=decoder_method, **kwargs
             )
             future_2d_fine = None
-        else:
+            future_2d_finer = None
+        elif stage == "fine":
             future_2d_coarse = coarse_for_decode.to(device)
             future_2d_fine = generated_2d
+            future_2d_finer = None
             future_norm = self.decode_dual_from_2d(
                 future_2d_coarse,
                 future_2d_fine,
+                from_diffusion=False,
+                decoder_method=decoder_method,
+            )
+        else:
+            future_2d_coarse = coarse_for_decode.to(device)
+            future_2d_fine = fine_for_decode.to(device)
+            future_2d_finer = generated_2d
+            future_norm = self.decode_triple_from_2d(
+                future_2d_coarse,
+                future_2d_fine,
+                future_2d_finer,
                 from_diffusion=False,
                 decoder_method=decoder_method,
             )
@@ -1145,12 +1225,16 @@ class DiffusionTSF(nn.Module):
             'prediction_global_norm': future,
             'future_2d': generated_2d,
             'future_2d_coarse': future_2d_coarse,
-            'past_2d_coarse': past_coarse,
-            'past_2d_fine': past_fine,
+            'past_2d_coarse': past_maps["coarse"],
+            'past_2d_fine': past_maps["fine"],
             'diffusion_stage': stage,
         }
         if future_2d_fine is not None:
             result['future_2d_fine'] = future_2d_fine
+        if future_2d_finer is not None:
+            result['future_2d_finer'] = future_2d_finer
+        if "finer" in past_maps:
+            result['past_2d_finer'] = past_maps["finer"]
         if intermediates is not None:
             reshaped_intermediates = []
             for (t_idx, i_tensor) in intermediates:

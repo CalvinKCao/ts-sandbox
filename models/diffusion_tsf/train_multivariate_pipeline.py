@@ -242,9 +242,13 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
     """Architecture/runtime flags needed to reconstruct diffusion checkpoints."""
     return {
         'image_height': IMAGE_HEIGHT,
+        'coarse_image_height': COARSE_IMAGE_HEIGHT,
+        'fine_image_height': FINE_IMAGE_HEIGHT,
+        'finer_image_height': FINER_IMAGE_HEIGHT,
         'max_scale': MAX_SCALE,
         'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
         'use_dual_scale': USE_DUAL_SCALE,
+        'use_triple_scale': USE_TRIPLE_SCALE,
         'diffusion_stage': DIFFUSION_STAGE,
         'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
         'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
@@ -755,6 +759,7 @@ from models.diffusion_tsf.pipeline_config import (
     IMAGE_HEIGHT,
     COARSE_IMAGE_HEIGHT,
     FINE_IMAGE_HEIGHT,
+    FINER_IMAGE_HEIGHT,
     MAX_SCALE,
     WINDOW_NORM_STD_FLOOR,
     LOOKBACK_OVERLAP,
@@ -795,6 +800,7 @@ from models.diffusion_tsf.pipeline_config import (
     UNET_MAX_CHUNK_SIZE,
     DISABLE_CROSS_ATTENTION,
     USE_DUAL_SCALE,
+    USE_TRIPLE_SCALE,
     DIFFUSION_STAGE,
     DUAL_SCALE_FINE_WEIGHT,
     DUAL_SCALE_INDEPENDENT_TIMESTEPS,
@@ -1309,6 +1315,7 @@ def create_diffusion_model(
     image_height: Optional[int] = None,
     coarse_image_height: Optional[int] = None,
     fine_image_height: Optional[int] = None,
+    finer_image_height: Optional[int] = None,
     guidance_model=None,
 ) -> DiffusionTSF:
     """Create DiffusionTSF model with iTransformer guidance channel enabled."""
@@ -1364,6 +1371,8 @@ def create_diffusion_model(
         coarse_image_height = COARSE_IMAGE_HEIGHT
     if fine_image_height is None:
         fine_image_height = FINE_IMAGE_HEIGHT
+    if finer_image_height is None:
+        finer_image_height = FINER_IMAGE_HEIGHT
     logger.info(
         f"Creating diffusion model: guidance_penalty_weight={guidance_penalty_weight}, "
         f"diffusion_type={diffusion_type}, "
@@ -1380,6 +1389,7 @@ def create_diffusion_model(
         image_height=image_height,
         coarse_image_height=coarse_image_height,
         fine_image_height=fine_image_height,
+        finer_image_height=finer_image_height,
         max_scale=max_scale,
         binary_noise_schedule=binary_noise_schedule,
         prediction_target=prediction_target,
@@ -1392,6 +1402,7 @@ def create_diffusion_model(
         disable_cross_attention=DISABLE_CROSS_ATTENTION,
         diffusion_stage=diffusion_stage,
         use_dual_scale=USE_DUAL_SCALE,
+        use_triple_scale=USE_TRIPLE_SCALE,
         dual_scale_fine_weight=DUAL_SCALE_FINE_WEIGHT,
         dual_scale_independent_timesteps=DUAL_SCALE_INDEPENDENT_TIMESTEPS,
         dit_patch_size=DIT_PATCH_SIZE,
@@ -4281,7 +4292,7 @@ def run_baseline_mode(dataset_name: str, smoke_test: bool = False):
 def main():
     global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, MANIFEST_PATH, SYNTH_CACHE_DIR, GUIDANCE_PENALTY_WEIGHT
     global IMAGE_HEIGHT, MAX_SCALE, WINDOW_NORM_STD_FLOOR, DISABLE_CROSS_ATTENTION, CROSS_VARIATE_CONTEXT_BIAS
-    global USE_DUAL_SCALE, DIFFUSION_STAGE, DUAL_SCALE_FINE_WEIGHT, DUAL_SCALE_INDEPENDENT_TIMESTEPS
+    global USE_DUAL_SCALE, USE_TRIPLE_SCALE, DIFFUSION_STAGE, DUAL_SCALE_FINE_WEIGHT, DUAL_SCALE_INDEPENDENT_TIMESTEPS
     global USE_GUIDANCE_CHANNEL
     global CFG_DROPOUT, CFG_SCALE, USE_CFG_INFERENCE
     global LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN
@@ -4342,9 +4353,11 @@ def main():
                         help='Minimum per-window std for diffusion normalization')
     parser.add_argument('--dual-scale', action='store_true',
                         help='Use paired 16-bin coarse/residual binary CDF maps')
+    parser.add_argument('--triple-scale', action='store_true',
+                        help='Use staged coarse/fine/finer residual binary CDF maps')
     parser.add_argument('--diffusion-stage', type=str, default=DIFFUSION_STAGE,
-                        choices=['joint', 'coarse', 'fine'],
-                        help='Joint dual-scale, staged coarse, or staged fine diffusion model')
+                        choices=['joint', 'coarse', 'fine', 'finer'],
+                        help='Joint dual-scale, staged coarse, staged fine, or staged finer diffusion model')
     parser.add_argument('--disable-guidance-channel', action='store_true',
                         help='Disable iTransformer forecast ghost channel while keeping encoder tokens if cross-attention is on')
     parser.add_argument('--dual-scale-fine-weight', type=float, default=DUAL_SCALE_FINE_WEIGHT,
@@ -4396,6 +4409,7 @@ def main():
     DETERMINISTIC_ANCHOR_LAMBDA = args.deterministic_anchor_lambda
     EVAL_SAMPLER = "anchor" if args.eval_sampler == "deterministic_anchor" else args.eval_sampler
     USE_DUAL_SCALE = args.dual_scale
+    USE_TRIPLE_SCALE = args.triple_scale
     DIFFUSION_STAGE = args.diffusion_stage
     DUAL_SCALE_FINE_WEIGHT = args.dual_scale_fine_weight
     DUAL_SCALE_INDEPENDENT_TIMESTEPS = args.dual_scale_independent_timesteps
@@ -4404,7 +4418,7 @@ def main():
     CFG_SCALE = args.cfg_scale
     USE_CFG_INFERENCE = args.use_cfg_inference
     CROSS_VARIATE_CONTEXT_BIAS = args.cross_variate_context_bias
-    staged_model = DIFFUSION_STAGE in {"coarse", "fine"}
+    staged_model = DIFFUSION_STAGE in {"coarse", "fine", "finer"}
     IMAGE_HEIGHT = 16 if (USE_DUAL_SCALE or staged_model) and args.image_height == parser.get_default('image_height') else args.image_height
     MAX_SCALE = args.max_scale
     WINDOW_NORM_STD_FLOOR = args.window_norm_std_floor

@@ -92,11 +92,11 @@ def _load_stage_metadata(state: PipelineState, stage: str) -> Dict:
 
 
 def _stage_finetune_ckpt(state: PipelineState, stage: str) -> str:
-    value = (
-        state.diffusion_coarse_finetune_ckpt
-        if stage == "coarse"
-        else state.diffusion_fine_finetune_ckpt
-    )
+    value = {
+        "coarse": state.diffusion_coarse_finetune_ckpt,
+        "fine": state.diffusion_fine_finetune_ckpt,
+        "finer": state.diffusion_finer_finetune_ckpt,
+    }[stage]
     if value and os.path.exists(value):
         return value
     path = _stage_best_ckpt(state, stage)
@@ -182,6 +182,7 @@ class StagedEvalPhase(PipelinePhase):
         device: torch.device,
         coarse_model,
         fine_model,
+        finer_model=None,
         prob_sampler: str,
         prob_steps: int,
         prob_samples: int,
@@ -220,7 +221,16 @@ class StagedEvalPhase(PipelinePhase):
                     sampler="anchor",
                     future_coarse_2d=coarse_det["future_2d_coarse"],
                 )
-                det_all.append(_staged_anchor_global_norm(fine_model, coarse_det, fine_det))
+                if finer_model is not None:
+                    finer_det = finer_model.generate(
+                        past,
+                        sampler="anchor",
+                        future_coarse_2d=coarse_det["future_2d_coarse"],
+                        future_fine_2d=fine_det["future_2d_fine"],
+                    )
+                    det_all.append(finer_det["prediction_global_norm"].detach().cpu().numpy())
+                else:
+                    det_all.append(_staged_anchor_global_norm(fine_model, coarse_det, fine_det))
 
                 batch_samples = []
                 for sample_idx in range(prob_samples):
@@ -233,7 +243,16 @@ class StagedEvalPhase(PipelinePhase):
                         future_coarse_2d=coarse_sample["future_2d_coarse"],
                         **prob_kwargs,
                     )
-                    batch_samples.append(fine_sample["prediction_global_norm"].cpu().numpy())
+                    if finer_model is not None:
+                        finer_sample = finer_model.generate(
+                            past,
+                            future_coarse_2d=coarse_sample["future_2d_coarse"],
+                            future_fine_2d=fine_sample["future_2d_fine"],
+                            **prob_kwargs,
+                        )
+                        batch_samples.append(finer_sample["prediction_global_norm"].cpu().numpy())
+                    else:
+                        batch_samples.append(fine_sample["prediction_global_norm"].cpu().numpy())
                 sample_all.append(np.stack(batch_samples, axis=2))
 
                 if batch_idx < 3 or batch_idx == len(loader) - 1:
@@ -289,6 +308,11 @@ class StagedEvalPhase(PipelinePhase):
         itrans_guidance = iTransformerGuidance(itrans_model)
         coarse_model = self._load_model(state, "coarse", itrans_guidance, n_iv, device)
         fine_model = self._load_model(state, "fine", itrans_guidance, n_iv, device)
+        finer_model = (
+            self._load_model(state, "finer", itrans_guidance, n_iv, device)
+            if state.use_triple_scale
+            else None
+        )
 
         _, _, full_test_ds, _ = load_dataset(
             state.dataset,
@@ -330,6 +354,7 @@ class StagedEvalPhase(PipelinePhase):
                         device=device,
                         coarse_model=coarse_model,
                         fine_model=fine_model,
+                        finer_model=finer_model,
                         prob_sampler=sampler,
                         prob_steps=steps,
                         prob_samples=tune_samples,
@@ -376,6 +401,7 @@ class StagedEvalPhase(PipelinePhase):
             device=device,
             coarse_model=coarse_model,
             fine_model=fine_model,
+            finer_model=finer_model,
             prob_sampler=selected_sampler,
             prob_steps=selected_steps,
             prob_samples=prob_samples,

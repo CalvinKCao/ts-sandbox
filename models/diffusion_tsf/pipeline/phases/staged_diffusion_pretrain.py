@@ -24,6 +24,10 @@ def _stage_pretrain_ckpt(state: PipelineState, stage: str) -> str:
     return os.path.join(_stage_pretrain_dir(state, stage), "pretrained_diffusion.pt")
 
 
+def staged_diffusion_stages(state: PipelineState) -> tuple[str, ...]:
+    return ("coarse", "fine", "finer") if state.use_triple_scale else ("coarse", "fine")
+
+
 def _stage_pretrain_cache_enabled(phase: PipelinePhase, state: PipelineState) -> bool:
     if phase.get("reuse_pretrain_from_config"):
         return False
@@ -43,6 +47,8 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "image_height": int(state.image_height),
         "coarse_image_height": int(state.coarse_image_height),
         "fine_image_height": int(state.fine_image_height),
+        "finer_image_height": int(state.finer_image_height),
+        "use_triple_scale": bool(state.use_triple_scale),
         "max_scale": max_scale,
         "dit_patch_size": list(state.dit_patch_size),
         "dit_embed_dim": int(state.dit_embed_dim),
@@ -370,18 +376,22 @@ def _resolve_itrans_pretrain(state: PipelineState, source_dir: Optional[str]) ->
 
 def patch_stage_globals(mod: Any, state: PipelineState, stage: str, *, honor_dataset_windows: bool) -> None:
     """Patch legacy train module globals for a single staged model."""
-    if stage not in {"coarse", "fine"}:
+    if stage not in {"coarse", "fine", "finer"}:
         raise ValueError(f"Unknown staged diffusion stage: {stage!r}")
+    if stage == "finer" and not state.use_triple_scale:
+        raise ValueError("finer staged diffusion requires state.use_triple_scale=True")
     _patch_globals(mod, state, honor_dataset_windows=honor_dataset_windows)
     mod.USE_DUAL_SCALE = False
+    mod.USE_TRIPLE_SCALE = bool(state.use_triple_scale)
     mod.DIFFUSION_STAGE = stage
-    mod.IMAGE_HEIGHT = (
-        int(state.coarse_image_height)
-        if stage == "coarse"
-        else int(state.fine_image_height)
-    )
+    mod.IMAGE_HEIGHT = {
+        "coarse": int(state.coarse_image_height),
+        "fine": int(state.fine_image_height),
+        "finer": int(state.finer_image_height),
+    }[stage]
     mod.COARSE_IMAGE_HEIGHT = int(state.coarse_image_height)
     mod.FINE_IMAGE_HEIGHT = int(state.fine_image_height)
+    mod.FINER_IMAGE_HEIGHT = int(state.finer_image_height)
     mod.USE_GUIDANCE_CHANNEL = state.use_guidance_channel
 
 
@@ -428,11 +438,15 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
 
     def should_skip(self, state: PipelineState) -> bool:
         config_name = self._config_name(state)
-        coarse = self._cached_stage_ckpt(state, config_name, "coarse")
-        fine = self._cached_stage_ckpt(state, config_name, "fine")
-        if coarse and fine:
-            state.diffusion_coarse_pretrain_ckpt = coarse
-            state.diffusion_fine_pretrain_ckpt = fine
+        ckpts = {
+            stage: self._cached_stage_ckpt(state, config_name, stage)
+            for stage in staged_diffusion_stages(state)
+        }
+        if all(ckpts.values()):
+            state.diffusion_coarse_pretrain_ckpt = ckpts["coarse"]
+            state.diffusion_fine_pretrain_ckpt = ckpts["fine"]
+            if state.use_triple_scale:
+                state.diffusion_finer_pretrain_ckpt = ckpts["finer"]
             return True
         return False
 
@@ -449,13 +463,15 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         reuse_from = self.get("reuse_pretrain_from_config")
         if reuse_from:
             missing = []
-            for stage in ("coarse", "fine"):
+            for stage in staged_diffusion_stages(state):
                 ckpt = self._cached_stage_ckpt(state, config_name, stage)
                 if ckpt:
                     if stage == "coarse":
                         state.diffusion_coarse_pretrain_ckpt = ckpt
-                    else:
+                    elif stage == "fine":
                         state.diffusion_fine_pretrain_ckpt = ckpt
+                    else:
+                        state.diffusion_finer_pretrain_ckpt = ckpt
                 else:
                     missing.append(stage)
             if missing:
@@ -483,7 +499,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         shared_cache = _stage_pretrain_cache_enabled(self, state)
         shared_wait_seconds = float(self.get("shared_cache_wait_seconds", 6 * 60 * 60))
 
-        for stage in ("coarse", "fine"):
+        for stage in staged_diffusion_stages(state):
             ckpt = self._cached_stage_ckpt(state, config_name, stage)
             if ckpt is None and shared_cache:
                 shared_ckpt = _wait_for_shared_stage_ckpt(
@@ -542,7 +558,9 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                 )
             if stage == "coarse":
                 state.diffusion_coarse_pretrain_ckpt = ckpt
-            else:
+            elif stage == "fine":
                 state.diffusion_fine_pretrain_ckpt = ckpt
+            else:
+                state.diffusion_finer_pretrain_ckpt = ckpt
 
         return state
