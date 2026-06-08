@@ -150,11 +150,11 @@ optuna_study.db
 # Images and Visualizations (regeneratable)
 # -----------------------------------------------------------------------------
 *.png
-!diagram.png
+!diagrams/diagram.png
+!diagrams/viz_comparison.png
 !viz1.png
 !viz2.png
 !viz3.png
-!viz_comparison.png
 *.jpg
 *.jpeg
 *.gif

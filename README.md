@@ -3,13 +3,13 @@ Some code in this repo was written with help from an AI coding agent (Claude/Gem
 
 ## Architecture
 
-![Architectural diagram](diagram.png)
+![Architectural diagram](diagrams/diagram.png)
 
 *Architectural diagram*
 
 ## Probabilistic forecasts
 
-![Forecast comparison: our model vs iTransformer vs MMPD](viz_comparison.png)
+![Forecast comparison: our model vs iTransformer vs MMPD](diagrams/viz_comparison.png)
 
 Top: **our model** · Middle: **deterministic iTransformer** · Bottom: **baseline diffusion model from MMPD** (ICLR 2026).
 
