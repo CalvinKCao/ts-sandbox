@@ -11,7 +11,7 @@ Some code in this repo was written with help from an AI coding agent (Claude/Gem
 
 ![Forecast comparison: our model vs iTransformer vs MMPD](viz_comparison.png)
 
-Top: **our model** · Middle: **deterministic iTransformer** · Bottom: **baseline diffusion model from MMPD** (ICLR 2026).
+Left: **our model** · Center: **deterministic iTransformer** · Right: **baseline diffusion model from MMPD** (ICLR 2026).
 
 Blue is ground truth, other colors are possible futures sampled from each model. Our model captures step functions and flatlines more faithfully than baselines.
 
