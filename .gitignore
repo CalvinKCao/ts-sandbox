@@ -92,9 +92,7 @@ env/
 # All results folders (regeneratable, often huge)
 **/results/
 **/results_multivariate/
-**/results_7var/
 **/checkpoints_multivariate/
-**/checkpoints_7var/
 # Alliance Slurm/Python artifacts (see .ai/skills/alliancecan); flat buckets per job
 **/results/logs/
 **/results/ckpts/
@@ -171,6 +169,9 @@ desktop.ini
 # NTFS / downloaded-file alternate stream junk (often appears as *:Zone.Identifier on WSL)
 *Zone.Identifier*
 
+# Archived / deprecated content (any folder named archive)
+**/archive/
+
 # -----------------------------------------------------------------------------
 # Temporary Files
 # -----------------------------------------------------------------------------
@@ -211,7 +212,6 @@ synth_data/
 results_experimental/
 results_simdiff/
 SimDiff/
-models/diffusion_tsf/checkpoints_7var/
 models/diffusion_tsf/checkpoints_multivariate/
 models/diffusion_tsf/results_multivariate/
 data_cache/
