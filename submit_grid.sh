@@ -150,7 +150,7 @@ for CFG in "${CONF_ARR[@]}"; do
                 LOG_FILE="$LOG_DIR/${DATE_STR}-%j-${DS}-${CFG_NAME}.log"
             fi
 
-            if [[ "$GPU_TYPE" == "a100" || "$GPU_TYPE" == "h100" ]]; then
+            if [[ "$GPU_TYPE" == a100* || "$GPU_TYPE" == h100* ]]; then
                 GPU_ARG="--gpus=${GPU_TYPE}:${GPUS}"
             else
                 GPU_ARG="--gres=gpu:${GPU_TYPE}:${GPUS}"
