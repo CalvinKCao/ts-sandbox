@@ -11,6 +11,7 @@ training:
 phases:
   - phase: staged_diffusion_pretrain
     phase1_config_name: binary_dual_scale
+    use_hardcoded_synthetic_hp: true
     n_samples: 10000
     epochs: 20
     patience: 4
