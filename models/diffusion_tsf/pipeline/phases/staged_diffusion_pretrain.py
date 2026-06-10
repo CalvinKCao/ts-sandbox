@@ -389,7 +389,7 @@ def _resolve_itrans_pretrain(state: PipelineState, source_dir: Optional[str]) ->
     
     skip_tuning = state.extra.get("skip_synthetic_tuning", True)
     
-    n_trials = state.n_itrans_hp_trials
+    n_trials = getattr(state, "n_itrans_hp_trials", 1)
     if state.smoke_test:
         n_trials = 1
         logger.warning("Smoke test: Training a dummy 1-epoch iTransformer as fallback.")
