@@ -2,6 +2,7 @@ extends: base/binary_staged.yaml
 
 experiment:
   dataset: illness
+  use_hardcoded_synthetic_hp: true
 
 training:
   itrans_paper_lr_grid: [0.001]
@@ -11,7 +12,6 @@ training:
 phases:
   - phase: staged_diffusion_pretrain
     phase1_config_name: binary_dual_scale
-    use_hardcoded_synthetic_hp: true
     n_samples: 10000
     epochs: 20
     patience: 4
