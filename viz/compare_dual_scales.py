@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import sys
+import torch
 from pathlib import Path
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -21,6 +22,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from models.diffusion_tsf.pipeline.visualize_utils import generate_dual_scale_comparisons
+from models.diffusion_tsf.train_multivariate_pipeline import LOOKBACK_LENGTH, FORECAST_LENGTH
 
 
 def run_dual_scale_visualization(
@@ -35,9 +37,6 @@ def run_dual_scale_visualization(
     n_samples: int = 1,
     random_seed: int = 42,
 ):
-    import torch
-    from models.diffusion_tsf.train_multivariate_pipeline import LOOKBACK_LENGTH, FORECAST_LENGTH
-
     lookback_length = lookback_length or LOOKBACK_LENGTH
     forecast_length = forecast_length or FORECAST_LENGTH
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

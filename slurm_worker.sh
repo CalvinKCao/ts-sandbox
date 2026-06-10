@@ -22,62 +22,20 @@ STORE="${GRID_STORE:-$SCRATCH/ts-sandbox/results}"
 REPO="${SLURM_SUBMIT_DIR:-$PWD}"
 REQ="$REPO/setup/requirements-killarney.txt"
 
-_load_modules() {
-    module purge 2>/dev/null || true
-    module load StdEnv/2023 2>/dev/null || true
-    module load python/3.11 2>/dev/null || true
-    module load cuda/12.2 2>/dev/null || true
-    module load cudnn/8.9 2>/dev/null || true
-}
+[[ -f "$REQ" ]] || { echo "ERROR: missing $REQ — run ./setup/killarney_freeze_requirements.sh on login node" >&2; exit 1; }
+[[ -n "${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR is not set." >&2; exit 1; }
 
-pip_retry() {
-    local max_attempts=5 delay=20 attempt
-    for attempt in $(seq 1 "$max_attempts"); do
-        if "$@"; then
-            return 0
-        fi
-        if [[ "$attempt" -lt "$max_attempts" ]]; then
-            echo "[setup] pip failed (attempt ${attempt}/${max_attempts}), retry in ${delay}s..."
-            sleep "$delay"
-            delay=$((delay + 2))
-        fi
-    done
-    echo "[setup] pip failed after ${max_attempts} attempts: $*" >&2
-    return 1
-}
+module purge 2>/dev/null || true
+module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9 2>/dev/null || true
+command -v virtualenv >/dev/null || { echo "ERROR: virtualenv not available after module load." >&2; exit 1; }
 
-setup_job_venv() {
-    if [[ ! -f "$REQ" ]]; then
-        echo "ERROR: missing $REQ" >&2
-        echo "  On a Killarney login node run: ./setup/killarney_freeze_requirements.sh" >&2
-        exit 1
-    fi
-    if [[ -z "${SLURM_TMPDIR:-}" ]]; then
-        echo "ERROR: SLURM_TMPDIR is not set." >&2
-        exit 1
-    fi
-
-    _load_modules
-    if ! command -v virtualenv >/dev/null 2>&1; then
-        echo "ERROR: virtualenv not available after module load." >&2
-        exit 1
-    fi
-
-    echo "[setup] Building node-local venv on \$SLURM_TMPDIR from $REQ"
-    virtualenv --no-download "$SLURM_TMPDIR/env"
-    # shellcheck source=/dev/null
-    source "$SLURM_TMPDIR/env/bin/activate"
-    pip_retry pip install --no-index --upgrade pip -q
-    pip_retry pip install --no-index -r "$REQ" -q
-
-    python -c "import torch, optuna, wandb, einops, yaml" || {
-        echo "[setup] ERROR: pipeline deps missing after install from $REQ" >&2
-        exit 1
-    }
-}
-
-setup_job_venv
-python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())" || true
+echo "[setup] Building node-local venv on \$SLURM_TMPDIR from $REQ"
+virtualenv --no-download "$SLURM_TMPDIR/env"
+# shellcheck source=/dev/null
+source "$SLURM_TMPDIR/env/bin/activate"
+pip install --no-index --upgrade pip -q
+pip install --no-index -r "$REQ" -q
+python -c "import torch, optuna, wandb, einops, yaml; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 
 export PYTHONUNBUFFERED=1
 
@@ -97,64 +55,24 @@ CKPT_DIR="$STORE/ckpts/${RUN_STEM}"
 DATA_DIR="$STORE/datasets/${RUN_STEM}"
 mkdir -p "$CKPT_DIR" "$DATA_DIR"
 
-# Benchmark CSVs (shared). Not the per-job results dir under datasets/${RUN_STEM}.
-_resolve_shared_datasets() {
-    if [[ -n "${DATASETS_DIR:-}" ]]; then
-        echo "$DATASETS_DIR"
-        return
-    fi
-    if [[ -f "$REPO/datasets/ETT-small/ETTh1.csv" ]]; then
-        echo "$REPO/datasets"
-        return
-    fi
-    if [[ -f "$STORE/datasets/ETT-small/ETTh1.csv" ]]; then
-        echo "$STORE/datasets"
-        return
-    fi
-    echo "$REPO/datasets"
+# Benchmark CSVs live in the repo clone ($SCRATCH/ts-sandbox/datasets), not under $STORE/datasets.
+BENCHMARK_DATASETS="${DATASETS_DIR:-$REPO/datasets}"
+[[ -d "$BENCHMARK_DATASETS" ]] || {
+    echo "ERROR: benchmark data directory not found at $BENCHMARK_DATASETS" >&2
+    exit 1
 }
-SHARED_DATASETS="$(_resolve_shared_datasets)"
 
 echo "Repo: $PWD"
 echo "Checkpoints: $CKPT_DIR"
 echo "Results: $DATA_DIR"
-echo "Datasets (benchmark CSVs): $SHARED_DATASETS"
-echo "GPU: $(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
+echo "Benchmark CSVs: $BENCHMARK_DATASETS"
+echo "GPUs: $(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ') ($(nvidia-smi -L 2>/dev/null | head -1 || echo none))"
 
-HAS_CKPT=0
-HAS_DATASETS=0
-for arg in "${PY_ARGS[@]}"; do
-    [[ "$arg" == "--checkpoint-dir" ]] && HAS_CKPT=1
-    [[ "$arg" == "--datasets-dir" ]] && HAS_DATASETS=1
-done
-
-if [[ "$HAS_CKPT" -eq 0 ]]; then
-    PY_ARGS+=(--checkpoint-dir "$CKPT_DIR" --results-dir "$DATA_DIR")
-fi
-if [[ "$HAS_DATASETS" -eq 0 ]]; then
-    PY_ARGS+=(--datasets-dir "$SHARED_DATASETS")
-fi
-
-if [[ "${GRID_RESUME:-0}" == "1" ]]; then
-  has_resume=0
-  for arg in "${PY_ARGS[@]}"; do
-    [[ "$arg" == "--resume" ]] && has_resume=1
-  done
-  [[ "$has_resume" -eq 0 ]] && PY_ARGS+=(--resume)
-fi
-
-for ((i = 0; i < ${#PY_ARGS[@]}; i++)); do
-    if [[ "${PY_ARGS[i]}" == "--config" ]]; then
-        cfg="${PY_ARGS[i + 1]}"
-        [[ "$cfg" == /* ]] || cfg="$REPO/$cfg"
-        if [[ ! -f "$cfg" ]]; then
-            echo "ERROR: config not found: $cfg" >&2
-            echo "  Sync repo (git pull in $REPO) and resubmit." >&2
-            exit 1
-        fi
-        break
-    fi
-done
+PY_ARGS+=(
+    --checkpoint-dir "$CKPT_DIR"
+    --results-dir "$DATA_DIR"
+    --datasets-dir "$BENCHMARK_DATASETS"
+)
 
 echo "[train] Starting pipeline: ${PY_ARGS[*]}"
 python -u -m models.diffusion_tsf.train_multivariate_pipeline "${PY_ARGS[@]}"

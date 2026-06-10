@@ -166,15 +166,26 @@ class iTransformerGuidance(BaseGuidance):
         return output
 
 
-def create_guidance_model(
-    guidance_type: str = "itransformer",
-    **kwargs,
-) -> BaseGuidance:
-    """Factory for guidance models (iTransformer only)."""
-    if guidance_type != "itransformer":
-        raise ValueError(
-            f"Unsupported guidance_type={guidance_type!r}; only 'itransformer' is available."
-        )
-    if "model" not in kwargs:
-        raise ValueError("iTransformerGuidance requires 'model' kwarg")
-    return iTransformerGuidance(**kwargs)
+class iTransformerTokenAdapter(nn.Module):
+    """Projects frozen iTransformer encoder tokens to context_dim for DiT cross-attention."""
+
+    def __init__(
+        self,
+        d_model: int,
+        context_dim: int,
+        max_variates: int = 512,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.proj = nn.Linear(d_model, context_dim)
+        self.variate_embed = nn.Embedding(max_variates, context_dim)
+        self.drop = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(context_dim)
+
+    def forward(self, enc_tokens: torch.Tensor) -> torch.Tensor:
+        """enc_tokens: (B, V, d_model) -> (B, V, context_dim)"""
+        B, V, _ = enc_tokens.shape
+        x = self.proj(enc_tokens)
+        ids = torch.arange(V, device=enc_tokens.device)
+        x = x + self.variate_embed(ids)
+        return self.norm(self.drop(x))

@@ -12,13 +12,10 @@ import torch.nn.functional as F
 import logging
 from typing import Dict, Optional, Tuple, Union
 
-from models.diffusion_tsf.cfg_inference import cfg_mix_applies, resolve_effective_cfg_scale
-
 from .config import DiffusionTSFConfig
 from .preprocessing import TimeSeriesTo2D
-from .unet import iTransformerTokenAdapter
 from .diffusion import BinaryDiffusionScheduler
-from .guidance import GuidanceModel
+from .guidance import GuidanceModel, iTransformerTokenAdapter
 from .dit import FactorizedDiT
 
 logger = logging.getLogger(__name__)
@@ -190,16 +187,21 @@ class DiffusionTSF(nn.Module):
             schedule_type=config.binary_noise_schedule,
         )
 
-        logger.info("DiffusionTSF initialized:")
-        logger.info(
-            f"  Variables: {config.num_variables} "
-            f"({'multivariate' if config.num_variables > 1 else 'univariate'})"
+        logger.debug("DiffusionTSF initialized:")
+        logger.debug(
+            "  Variables: %d (%s)",
+            config.num_variables,
+            "multivariate" if config.num_variables > 1 else "univariate",
         )
-        logger.info(
-            f"  Lookback: {config.lookback_length}, Forecast: {config.forecast_length}"
+        logger.debug(
+            "  Lookback: %d, Forecast: %d",
+            config.lookback_length,
+            config.forecast_length,
         )
-        logger.info(
-            f"  Image size: {config.image_height} x {config.forecast_length} (H x W)"
+        logger.debug(
+            "  Image size: %d x %d (H x W)",
+            config.image_height,
+            config.forecast_length,
         )
 
     def to(self, device):
@@ -207,27 +209,6 @@ class DiffusionTSF(nn.Module):
         super().to(device)
         self.binary_scheduler = self.binary_scheduler.to(device)
         return self
-    
-    def set_guidance_model(self, guidance_model: Optional[Union[GuidanceModel, nn.Module]]) -> None:
-        """Set or replace the guidance model for hybrid forecasting.
-        
-        This allows swapping the Stage 1 predictor after model initialization,
-        e.g., to plug in a pre-trained iTransformer checkpoint.
-        
-        Args:
-            guidance_model: Stage 1 predictor model. Set to None to disable
-                           guidance (requires config.use_guidance_channel=False).
-        """
-        if guidance_model is None and (
-            self.config.use_guidance_channel or not self.config.disable_cross_attention
-        ):
-            raise ValueError(
-                "Cannot set guidance_model to None while forecast channels or "
-                "cross-variate encoder tokens are enabled."
-            )
-        self.guidance_model = guidance_model
-        if guidance_model is not None:
-            logger.info(f"Guidance model set: {type(guidance_model).__name__}")
 
     def _get_coordinate_grid(
         self,
@@ -288,76 +269,7 @@ class DiffusionTSF(nn.Module):
         if self.config.use_time_sine:
             channels_to_add.append(sine)
         return torch.cat(channels_to_add, dim=1)
-    
-    def _get_value_channel(
-        self,
-        values_norm: torch.Tensor,
-        height: int
-    ) -> torch.Tensor:
-        """Create a 2D channel containing the normalized values broadcast across height."""
-        if values_norm.dim() == 3:
-            batch_size, num_vars, seq_len = values_norm.shape
-            value_channel = values_norm.unsqueeze(2).expand(-1, -1, height, -1)
-        else:
-            batch_size, seq_len = values_norm.shape
-            value_channel = values_norm.unsqueeze(1).unsqueeze(2).expand(-1, -1, height, -1)
-        value_channel = value_channel.clamp(-self.config.max_scale, self.config.max_scale)
-        value_channel = value_channel / self.config.max_scale
-        return value_channel
-    
-    def _inject_value_channel(
-        self,
-        x: torch.Tensor,
-        values_norm: torch.Tensor
-    ) -> torch.Tensor:
-        """Concatenate value channel to input tensor."""
-        if not self.config.use_value_channel:
-            return x
-        _, _, height, _ = x.shape
-        value_channel = self._get_value_channel(values_norm, height)
-        if value_channel.shape[1] > 1:
-            value_channel = value_channel[:, 0:1, :, :]
-        return torch.cat([x, value_channel], dim=1)
-    
-    def _generate_guidance_2d(
-        self,
-        past: torch.Tensor,
-        past_norm: torch.Tensor,
-        stats: Tuple[torch.Tensor, torch.Tensor],
-        forecast_length: int
-    ) -> torch.Tensor:
-        """Generate 2D "ghost image" from Stage 1 guidance model."""
-        coarse_norm = self._get_guidance_forecast_norm(past, past_norm, stats, forecast_length)
-        return self.encode_to_2d_binary(coarse_norm)
-    
-    def _inject_guidance_channel(
-        self,
-        x: torch.Tensor,
-        guidance_2d: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        """Concatenate guidance 2D image to input tensor."""
-        if not self.config.use_guidance_channel or guidance_2d is None:
-            return x
-        return torch.cat([x, guidance_2d], dim=1)
-    
-    def _prepare_visual_conditioning(
-        self,
-        past_2d: torch.Tensor,
-        target_width: int
-    ) -> torch.Tensor:
-        """Prepare past 2D image for visual concatenation conditioning."""
-        _, _, height, past_len = past_2d.shape
-        if past_len >= target_width:
-            visual_cond = past_2d[:, :, :, -target_width:]
-        else:
-            visual_cond = F.interpolate(
-                past_2d, 
-                size=(height, target_width), 
-                mode='bilinear', 
-                align_corners=False
-            )
-        return visual_cond
-    
+
     def _get_guidance_forecast_norm(
         self,
         past: torch.Tensor,
@@ -365,11 +277,7 @@ class DiffusionTSF(nn.Module):
         stats: Tuple[torch.Tensor, torch.Tensor],
         forecast_length: int,
     ) -> torch.Tensor:
-        """run the guidance model and return normalized forecast (B, V, forecast_length).
-
-        separating this from _generate_guidance_2d so we can reuse the raw forecast
-        as cross-variate context without calling get_forecast() twice.
-        """
+        """Run the guidance model and return normalized forecast (B, V, forecast_length)."""
         if self.guidance_model is None:
             raise ValueError("guidance model is None but guidance channel requested")
         mean, std = stats
@@ -471,60 +379,6 @@ class DiffusionTSF(nn.Module):
         if variate_indices is not None:
             kwargs["variate_indices"] = variate_indices
         return self.noise_predictor(canvas, t_flat, cond_for_unet, **kwargs)
-
-    def _build_anchor_canvas(
-        self,
-        zero_future_flat: torch.Tensor,
-        guidance_2d_flat: Optional[torch.Tensor],
-        use_null_guidance: bool,
-        null_guide: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        """Zero-noise canvas for the deterministic anchor forward pass."""
-        canvas = self._inject_coordinate_channel(zero_future_flat)
-        canvas = self._inject_time_channels(canvas)
-        if guidance_2d_flat is not None:
-            if use_null_guidance:
-                guide = null_guide if null_guide is not None else torch.zeros_like(guidance_2d_flat)
-            else:
-                guide = guidance_2d_flat
-            canvas = torch.cat([canvas, guide], dim=1)
-        return canvas
-
-    def _predict_anchor_noise(
-        self,
-        zero_future_flat: torch.Tensor,
-        t_flat: torch.Tensor,
-        cond: torch.Tensor,
-        ctx: Optional[torch.Tensor],
-        guidance_2d_flat: Optional[torch.Tensor],
-        cfg_scale: float,
-        null_cond: Optional[torch.Tensor] = None,
-        null_ctx: Optional[torch.Tensor] = None,
-        null_guide: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Anchor noise prediction with optional CFG (cond vs null cond/ctx/guidance)."""
-        if not cfg_mix_applies(cfg_scale):
-            canvas = self._build_anchor_canvas(
-                zero_future_flat, guidance_2d_flat, use_null_guidance=False, null_guide=null_guide,
-            )
-            return self._predict_noise_chunked(canvas, t_flat, cond, ctx)
-        out_c = self._predict_noise_chunked(
-            self._build_anchor_canvas(
-                zero_future_flat, guidance_2d_flat, use_null_guidance=False, null_guide=null_guide,
-            ),
-            t_flat,
-            cond,
-            ctx,
-        )
-        out_u = self._predict_noise_chunked(
-            self._build_anchor_canvas(
-                zero_future_flat, guidance_2d_flat, use_null_guidance=True, null_guide=null_guide,
-            ),
-            t_flat,
-            null_cond,
-            null_ctx,
-        )
-        return out_u + cfg_scale * (out_c - out_u)
 
     def _load_from_state_dict(
         self,
@@ -751,24 +605,6 @@ class DiffusionTSF(nn.Module):
             left = torch.randint(0, left_max, (1,), device=image.device).item()
             image[:, :, top:top + mask_h, left:left + mask_w] = -1.0
         return image
-    
-    def _pad_to_window(
-        self,
-        tensor: torch.Tensor,
-        mode: str,
-        total_length: int
-    ) -> torch.Tensor:
-        """Pad tensor to total window length (Lookback + Forecast)."""
-        batch, channels, height, length = tensor.shape
-        if length >= total_length:
-            return tensor[..., :total_length]
-        padding_len = total_length - length
-        if mode == 'past':
-            return F.pad(tensor, (0, padding_len, 0, 0))
-        elif mode == 'future':
-            return F.pad(tensor, (padding_len, 0, 0, 0))
-        else:
-            raise ValueError(f"Unknown padding mode: {mode}")
 
     def forward(
         self,
@@ -790,7 +626,6 @@ class DiffusionTSF(nn.Module):
         use_ddim: bool = True,
         num_ddim_steps: int = 50,
         eta: float = 0.0,
-        cfg_scale: Optional[float] = None,
         verbose: bool = False,
         decoder_method: str = "mean",
         beam_width: int = 5,
@@ -810,14 +645,8 @@ class DiffusionTSF(nn.Module):
         num_inference_steps overrides binary_sample_steps when set.
         """
         steps = num_inference_steps if num_inference_steps is not None else self.config.binary_sample_steps
-        effective_cfg_scale = resolve_effective_cfg_scale(
-            cfg_scale,
-            self.config.cfg_scale,
-            self.config.use_cfg_inference,
-        )
         gen_common = dict(
             num_steps=steps,
-            cfg_scale=effective_cfg_scale,
             verbose=verbose,
             decoder_method=decoder_method,
             beam_width=beam_width,
@@ -1070,7 +899,6 @@ class DiffusionTSF(nn.Module):
         verbose: bool = False,
         decoder_method: str = "mean",
         sampler: str = "ddim",
-        cfg_scale: float = 1.0,
         yield_intermediates: bool = False,
         reverse_step_indices: Optional[torch.Tensor] = None,
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
@@ -1133,21 +961,10 @@ class DiffusionTSF(nn.Module):
             return self._inject_time_channels(canvas)
 
         def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
-            out_c = self._predict_noise_chunked(
+            out = self._predict_noise_chunked(
                 _build_canvas(xt), t_batch, cond_for_unet, ctx_flat,
                 variate_indices=variate_indices,
             )
-            if cfg_mix_applies(cfg_scale):
-                out_u = self._predict_noise_chunked(
-                    _build_canvas(xt),
-                    t_batch,
-                    torch.zeros_like(cond_for_unet),
-                    torch.zeros_like(ctx_flat) if ctx_flat is not None else None,
-                    variate_indices=variate_indices,
-                )
-                out = out_u + cfg_scale * (out_c - out_u)
-            else:
-                out = out_c
             x0_logits = self._x0_logits_from_prediction(out[:, 0:1], xt)
             return x0_logits, out[:, 1:2]
 
@@ -1432,7 +1249,6 @@ class DiffusionTSF(nn.Module):
         verbose: bool = False,
         decoder_method: str = "mean",
         sampler: str = "ddim",
-        cfg_scale: float = 1.0,
         yield_intermediates: bool = False,
         reverse_step_indices: Optional[torch.Tensor] = None,
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
@@ -1486,23 +1302,10 @@ class DiffusionTSF(nn.Module):
 
         def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
             canvas = _build_canvas(xt, guide_flat)
-            out_c = self._predict_noise_chunked(
+            out = self._predict_noise_chunked(
                 canvas, t_batch, cond_for_unet, ctx_flat,
                 scale_indices=scale_indices, variate_indices=variate_indices,
             )
-            if cfg_mix_applies(cfg_scale):
-                null_guide = torch.zeros_like(guide_flat) if guide_flat is not None else None
-                out_u = self._predict_noise_chunked(
-                    _build_canvas(xt, null_guide),
-                    t_batch,
-                    torch.zeros_like(cond_for_unet),
-                    torch.zeros_like(ctx_flat) if ctx_flat is not None else None,
-                    scale_indices=scale_indices,
-                    variate_indices=variate_indices,
-                )
-                out = out_u + cfg_scale * (out_c - out_u)
-            else:
-                out = out_c
             return out[:, 0:1], out[:, 1:2]
 
         intermediates = None
@@ -1710,7 +1513,6 @@ class DiffusionTSF(nn.Module):
         verbose: bool = False,
         decoder_method: str = "mean",
         sampler: str = "ddim",
-        cfg_scale: float = 1.0,
         yield_intermediates: bool = False,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
@@ -1752,21 +1554,9 @@ class DiffusionTSF(nn.Module):
 
         def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
             canvas = _build_canvas(xt, guide_flat)
-            out_c = self._predict_noise_chunked(
+            out = self._predict_noise_chunked(
                 canvas, t_batch, cond_for_unet, ctx_flat, variate_indices=variate_indices,
             )
-            if cfg_mix_applies(cfg_scale):
-                null_guide = torch.zeros_like(guide_flat) if guide_flat is not None else None
-                out_u = self._predict_noise_chunked(
-                    _build_canvas(xt, null_guide),
-                    t_batch,
-                    torch.zeros_like(cond_for_unet),
-                    torch.zeros_like(ctx_flat) if ctx_flat is not None else None,
-                    variate_indices=variate_indices,
-                )
-                out = out_u + cfg_scale * (out_c - out_u)
-            else:
-                out = out_c
             return out[:, 0:1], out[:, 1:2]
 
         intermediates = None

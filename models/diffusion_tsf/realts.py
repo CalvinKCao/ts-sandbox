@@ -20,11 +20,10 @@ Reference: ViTime Paper - "Foundation Model for Time Series Forecasting
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 from typing import Optional, Tuple
 import logging
 import os
-import time
 import uuid
 import fcntl
 from contextlib import contextmanager
@@ -548,13 +547,10 @@ class RealTS(Dataset):
             
             # [Gemini CLI] Enforce global sample cap to prevent massive disk/RAM allocations
             try:
-                from .pipeline_config import SYNTHETIC_SAMPLES_CAP
-            except (ImportError, ValueError):
-                try:
-                    from pipeline_config import SYNTHETIC_SAMPLES_CAP
-                except ImportError:
-                    SYNTHETIC_SAMPLES_CAP = None
-                    
+                from models.diffusion_tsf.train_multivariate_pipeline import SYNTHETIC_SAMPLES_CAP
+            except ImportError:
+                SYNTHETIC_SAMPLES_CAP = None
+
             if SYNTHETIC_SAMPLES_CAP is not None and self.pool_size > SYNTHETIC_SAMPLES_CAP:
                 logger.warning(
                     f"RealTS: calculated pool_size {self.pool_size} exceeds "
@@ -849,4 +845,52 @@ class RealTS(Dataset):
         return past_tensor, future_tensor
 
 
+def get_synthetic_dataloader(
+    num_samples: int = 10000,
+    lookback_length: int = 512,
+    forecast_length: int = 96,
+    batch_size: int = 8,
+    shuffle: bool = True,
+    num_workers: int = 0,
+    seed: Optional[int] = None,
+    num_variables: int = 1,
+    pool_size: Optional[int] = None,
+    cache_dir: Optional[str] = None,
+    lookback_overlap: int = 0,
+    skip_cross_var_aug: bool = False,
+    synthetic_epoch_capacity: int = 1,
+    val_tail_n: Optional[int] = None,
+) -> DataLoader:
+    """DataLoader over synthetic RealTS data for pretraining."""
+    synthetic_dataset = RealTS(
+        num_samples=num_samples,
+        lookback_length=lookback_length,
+        forecast_length=forecast_length,
+        seed=seed,
+        num_variables=num_variables,
+        pool_size=pool_size,
+        cache_dir=cache_dir,
+        lookback_overlap=lookback_overlap,
+        skip_cross_var_aug=skip_cross_var_aug,
+        synthetic_epoch_capacity=synthetic_epoch_capacity,
+        val_tail_n=val_tail_n,
+    )
+
+    logger.info(
+        "Created synthetic-only dataloader: %d samples/epoch (pool: %s), "
+        "lookback=%d, forecast=%d, variables=%d",
+        num_samples,
+        pool_size or num_samples,
+        lookback_length,
+        forecast_length,
+        num_variables,
+    )
+
+    return DataLoader(
+        synthetic_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
 

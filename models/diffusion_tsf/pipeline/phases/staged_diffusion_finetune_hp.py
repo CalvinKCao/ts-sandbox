@@ -1,4 +1,4 @@
-"""HP tuning + final full-data training for staged coarse/fine diffusion models."""
+"""HP tuning for staged coarse/fine diffusion models; best trial checkpoint is final."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
-from optuna import create_study
 from optuna.exceptions import TrialPruned
 from optuna.pruners import HyperbandPruner
 from optuna.samplers import TPESampler
@@ -74,14 +73,6 @@ def _load_reused_stage_params(
     params["max_scale"] = policy_ms
     params.setdefault("min_snr_gamma", 5.0)
     return params, source_dir, {**source_meta, "reused_max_scale_previous": old_ms}
-
-
-def _fraction_subset(ds, fraction: float, seed: int) -> Subset:
-    n = len(ds)
-    keep = max(1, int(round(n * float(fraction))))
-    gen = torch.Generator().manual_seed(seed)
-    idx = torch.randperm(n, generator=gen)[:keep].sort().values.tolist()
-    return Subset(ds, idx)
 
 
 class _Ema:
@@ -330,7 +321,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         "tuned_params": dict(params),
                         "diffusion_stage": self.stage,
                         "best_epoch": best_epoch,
-                        "final_full_data_retrain": trial is None,
                     }
                     if ckpt_path:
                         save_checkpoint(
@@ -402,21 +392,12 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         if state.smoke_test:
             train_ds = Subset(train_ds, list(range(min(4, len(train_ds)))))
             val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
-        tune_fraction = float(self.get("tune_data_fraction", 0.5))
-        train_seed_offset = {"coarse": 11, "fine": 17, "finer": 19}[self.stage]
-        val_seed_offset = {"coarse": 23, "fine": 29, "finer": 31}[self.stage]
-        tune_train_ds = _fraction_subset(train_ds, tune_fraction, state.seed + train_seed_offset)
-        tune_val_ds = _fraction_subset(val_ds, tune_fraction, state.seed + val_seed_offset)
         logger.info(
-            "  [%s] train/val full=%d/%d tune=%d/%d",
-            self.name,
-            len(train_ds),
-            len(val_ds),
-            len(tune_train_ds),
-            len(tune_val_ds),
+            "  [%s] train/val windows=%d/%d",
+            self.name, len(train_ds), len(val_ds),
         )
 
-        batch_probe_ds = train_ds if self.get("reuse_tuned_params_from") else tune_train_ds
+        batch_probe_ds = train_ds
         ft_itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, n_iv, device)
         ft_itrans_guidance = iTransformerGuidance(ft_itrans_model)
         max_batch = select_diffusion_batch_size(
@@ -431,33 +412,42 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        n_trials = int(self.get("n_trials", 20))
+        n_trials = int(self.require("n_trials"))
         if state.smoke_test:
             n_trials = 1
-        hp_epochs = int(self.get("hp_max_epochs", self.get("max_epochs", 12)))
-        hp_patience = int(self.get("hp_patience", self.get("patience", 4)))
-        final_epochs = int(self.get("final_max_epochs", self.get("max_epochs", 20)))
-        final_patience = int(self.get("final_patience", self.get("patience", 8)))
-        search_space = str(self.get("search_space", "default")).lower()
+        max_epochs = int(self.require("max_epochs"))
+        patience = int(self.require("patience"))
+        search_space = str(self.require("search_space")).lower()
         if search_space not in {"default", "lr_only"}:
             raise ValueError(f"Unknown staged diffusion search_space={search_space!r}")
         if state.smoke_test:
-            hp_epochs = final_epochs = hp_patience = final_patience = 1
+            max_epochs = patience = 1
 
         subset_dir = _stage_subset_dir(state, self.stage)
         os.makedirs(subset_dir, exist_ok=True)
+        final_ckpt = _stage_best_ckpt(state, self.stage)
 
         reuse_from = self.get("reuse_tuned_params_from")
         reuse_meta: Dict[str, Any] = {}
         hp_best_val_loss: Optional[float] = None
         best_trial_num = -1
+        final_val = float("nan")
+        final_epoch = 0
 
         if reuse_from:
-            best_params, source_dir, reuse_meta = _load_reused_stage_params(
-                state,
-                stage=self.stage,
-                subset_id=subset_id,
-                source_config=str(reuse_from),
+            source_dir = discover_dataset_run_ckpt_dir(state, str(reuse_from))
+            src_best = os.path.join(source_dir, subset_id, self.stage, "best.pt")
+            src_meta = os.path.join(source_dir, subset_id, self.stage, "metadata.json")
+            if not os.path.exists(src_best):
+                raise FileNotFoundError(f"Missing reused staged checkpoint: {src_best}")
+            if not os.path.exists(final_ckpt):
+                import shutil
+                shutil.copy2(src_best, final_ckpt)
+            if os.path.exists(src_meta):
+                with open(src_meta, encoding="utf-8") as f:
+                    reuse_meta = json.load(f)
+            best_params, _, reuse_meta = _load_reused_stage_params(
+                state, stage=self.stage, subset_id=subset_id, source_config=str(reuse_from),
             )
             tuned_bs = int(best_params.get("batch_size", max_batch))
             best_params["batch_size"] = min(tuned_bs, max_batch)
@@ -466,64 +456,69 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 or reuse_meta.get("hp_best_val_loss")
                 or float("nan")
             )
-            previous_ms = reuse_meta.get("reused_max_scale_previous")
-            previous_ms_str = f"{float(previous_ms):.4g}" if previous_ms is not None else "unknown"
-            logger.info(
-                "  [%s] reuse tuned_params from %s (%s); policy max_scale=%.4g (was %s)",
-                self.name,
-                source_dir,
-                self.stage,
-                best_params["max_scale"],
-                previous_ms_str,
-            )
+            final_val = hp_best_val_loss
+            final_epoch = int(reuse_meta.get("best_epoch", 0))
+            logger.info("  [%s] reused %s from %s", self.name, self.stage, source_dir)
         else:
-            study = create_study(
+            from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
+
+            phase = self
+
+            def objective_builder(_worker_id: int):
+                dev = state.resolve_device()
+
+                def objective(trial):
+                    params = _suggest_staged_params(
+                        trial, state, max_batch, state.smoke_test, search_space=search_space,
+                    )
+                    trial.set_user_attr("full_params", dict(params))
+                    trial_ckpt = os.path.join(
+                        subset_dir, f"_diff_ft_trial_{trial.number}_best.pt",
+                    )
+                    try:
+                        best_val, best_ep = phase._train_once(
+                            state=state,
+                            train_ds=train_ds,
+                            val_ds=val_ds,
+                            params=params,
+                            pretrained_path=diff_ckpt,
+                            itrans_checkpoint=ft_itrans_ckpt,
+                            device=dev,
+                            variate_indices=variate_indices,
+                            ckpt_path=trial_ckpt,
+                            max_epochs=max_epochs,
+                            patience=patience,
+                            trial=trial,
+                        )
+                    except torch.cuda.OutOfMemoryError:
+                        logger.warning(
+                            "  [%s] trial %d OOM (batch=%s), pruning",
+                            phase.name, trial.number, params.get("batch_size"),
+                        )
+                        raise TrialPruned() from None
+                    trial.set_user_attr("best_epoch", best_ep)
+                    return best_val
+
+                return objective
+
+            study = run_optuna_study(
+                study_name=f"{state.experiment_name}-{self.stage}-hp",
+                checkpoint_dir=subset_dir,
+                n_trials=n_trials,
+                parallel_workers=state.parallel_optuna_workers,
                 direction="minimize",
+                objective_builder=objective_builder,
                 sampler=TPESampler(seed=state.seed, multivariate=True, group=True),
-                pruner=HyperbandPruner(min_resource=1, max_resource=hp_epochs, reduction_factor=3),
+                pruner=HyperbandPruner(
+                    min_resource=1, max_resource=max_epochs, reduction_factor=3,
+                ),
+                sampler_seed=state.seed,
             )
-
-            def objective(trial):
-                params = _suggest_staged_params(
-                    trial,
-                    state,
-                    max_batch,
-                    state.smoke_test,
-                    search_space=search_space,
-                )
-                trial.set_user_attr("full_params", dict(params))
-                try:
-                    best_val, _best_epoch = self._train_once(
-                        state=state,
-                        train_ds=tune_train_ds,
-                        val_ds=tune_val_ds,
-                        params=params,
-                        pretrained_path=diff_ckpt,
-                        itrans_checkpoint=ft_itrans_ckpt,
-                        device=device,
-                        variate_indices=variate_indices,
-                        ckpt_path=None,
-                        max_epochs=hp_epochs,
-                        patience=hp_patience,
-                        trial=trial,
-                    )
-                except torch.cuda.OutOfMemoryError:
-                    logger.warning(
-                        "  [%s] trial %d OOM (batch=%s), pruning",
-                        self.name,
-                        trial.number,
-                        params.get("batch_size"),
-                    )
-                    raise TrialPruned() from None
-                return best_val
-
-            study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
             try:
                 best_trial = study.best_trial
             except ValueError as e:
                 raise RuntimeError(
-                    f"All {self.stage} diffusion HP trials failed for {subset_id} "
-                    f"({len(study.trials)} trials, none completed)"
+                    f"All {self.stage} diffusion HP trials failed for {subset_id}"
                 ) from e
 
             best_params = dict(best_trial.user_attrs.get("full_params") or best_trial.params)
@@ -534,21 +529,21 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             )
             hp_best_val_loss = float(study.best_value)
             best_trial_num = int(best_trial.number)
-        final_ckpt = _stage_best_ckpt(state, self.stage)
-        final_val, final_epoch = self._train_once(
-            state=state,
-            train_ds=train_ds,
-            val_ds=val_ds,
-            params=best_params,
-            pretrained_path=diff_ckpt,
-            itrans_checkpoint=ft_itrans_ckpt,
-            device=device,
-            variate_indices=variate_indices,
-            ckpt_path=final_ckpt,
-            max_epochs=final_epochs,
-            patience=final_patience,
-            trial=None,
-        )
+            final_epoch = int(best_trial.user_attrs.get("best_epoch", 0))
+
+            import shutil
+            src = os.path.join(subset_dir, f"_diff_ft_trial_{best_trial_num}_best.pt")
+            if not os.path.exists(src):
+                raise RuntimeError(f"Best trial checkpoint missing: {src}")
+            shutil.copy2(src, final_ckpt)
+            final_val = hp_best_val_loss
+
+            for fn in os.listdir(subset_dir):
+                if fn.startswith("_diff_ft_trial_") and fn.endswith("_best.pt"):
+                    try:
+                        os.remove(os.path.join(subset_dir, fn))
+                    except OSError:
+                        pass
 
         meta_out: Dict[str, Any] = {
             "subset_id": subset_id,
@@ -562,10 +557,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "hp_best_val_loss": hp_best_val_loss,
             "best_val_loss": float(final_val),
             "best_epoch": int(final_epoch),
-            "final_full_data_retrain": True,
-            "tune_data_fraction": tune_fraction,
             "diffusion_stage": self.stage,
             "search_space": search_space,
+            "max_epochs": max_epochs,
+            "patience": patience,
         }
         if reuse_from:
             meta_out.update({
@@ -575,13 +570,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             })
         with open(os.path.join(subset_dir, "metadata.json"), "w", encoding="utf-8") as f:
             json.dump(meta_out, f, indent=2, sort_keys=True)
-        if not reuse_from:
-            for fn in os.listdir(subset_dir):
-                if fn.startswith("_diff_ft_trial_") and fn.endswith("_best.pt"):
-                    try:
-                        os.remove(os.path.join(subset_dir, fn))
-                    except OSError:
-                        pass
 
         if self.stage == "coarse":
             state.diffusion_coarse_finetune_ckpt = final_ckpt

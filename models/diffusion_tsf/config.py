@@ -54,10 +54,8 @@ class DiffusionTSFConfig:
     dual_scale_fine_weight: float = 0.5
     dual_scale_independent_timesteps: bool = True
 
-    # classifier-free guidance
+    # classifier-free guidance (training dropout only; inference is always conditional)
     cfg_dropout: float = 0.1
-    cfg_scale: float = 2.0
-    use_cfg_inference: bool = False
 
     # 2d augs (cutout)
     cutout_prob: float = 0.5
@@ -173,8 +171,6 @@ class DiffusionTSFConfig:
             raise ValueError("dual_scale_fine_weight must be in [0, 1].")
         if not 0.0 <= self.cfg_dropout <= 1.0:
             raise ValueError("cfg_dropout must be in [0, 1].")
-        if self.cfg_scale < 0.0:
-            raise ValueError("cfg_scale must be >= 0.0.")
         assert 0 <= self.cutout_prob <= 1
         assert 0.0 <= self.deterministic_anchor_lambda <= 1.0
         assert 0.0 <= self.deterministic_anchor_alpha < 1.0

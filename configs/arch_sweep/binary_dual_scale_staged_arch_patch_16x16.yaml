@@ -1,3 +1,5 @@
+# Auto-thinned: extends binary_dual_scale_staged.yaml
+extends: ../binary_dual_scale_staged.yaml
 experiment:
   name: binary-dual-scale-staged-arch-patch-16x16
   experiment_name: binary-dual-scale-staged-arch-patch-16x16
@@ -9,7 +11,9 @@ experiment:
   fine_image_height: 16
   max_scale: 3.5
   window_norm_std_floor: 0.1
-  dit_patch_size: [16, 16]
+  dit_patch_size:
+  - 16
+  - 16
   dit_embed_dim: 384
   dit_depth: 8
   dit_num_heads: 6
@@ -19,8 +23,6 @@ experiment:
   diffusion_stage: joint
   use_guidance_channel: false
   cfg_dropout: 0.0
-  cfg_scale: 1.0
-  use_cfg_inference: false
   deterministic_anchor_loss: true
   deterministic_anchor_lambda: 0.99
   deterministic_anchor_alpha: 0.0
@@ -41,41 +43,30 @@ experiment:
     reduce_if_larger_than_target: true
     max_variates: 7
     variate_strategy: first
-    subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
-
+    subset_id_template: '{dataset}_{n_variates}v_s{sample_stride}'
 phases:
-  - phase: staged_diffusion_pretrain
-    phase1_config_name: binary_dual_scale
-
-  - phase: itrans_finetune_hp
-    n_trials: 10
-    max_epochs: 10
-    cold_start: true
-
-  - phase: diffusion_coarse_finetune_hp
-    search_space: lr_only
-    n_trials: 20
-    tune_data_fraction: 0.5
-    hp_max_epochs: 12
-    hp_patience: 4
-    final_max_epochs: 20
-    final_patience: 8
-
-  - phase: diffusion_fine_finetune_hp
-    search_space: lr_only
-    n_trials: 20
-    tune_data_fraction: 0.5
-    hp_max_epochs: 12
-    hp_patience: 4
-    final_max_epochs: 20
-    final_patience: 8
-
-  - phase: staged_eval
-    eval_test_fraction: 1.0
-    n_samples: 1
-    test_stride: 2
-    probabilistic_n_samples: 100
-    tune_sampler: false
-    probabilistic_sampler: dpmpp
-    probabilistic_num_inference_steps: 20
-    skip_eval_visualizations: true
+- phase: staged_diffusion_pretrain
+  phase1_config_name: binary_dual_scale
+- phase: itrans_finetune_hp
+  n_trials: 10
+  max_epochs: 10
+  cold_start: true
+- phase: diffusion_coarse_finetune_hp
+  search_space: lr_only
+  n_trials: 20
+  max_epochs: 20
+  patience: 8
+- phase: diffusion_fine_finetune_hp
+  search_space: lr_only
+  n_trials: 20
+  max_epochs: 20
+  patience: 8
+- phase: staged_eval
+  eval_test_fraction: 1.0
+  n_samples: 1
+  test_stride: 2
+  probabilistic_n_samples: 100
+  tune_sampler: false
+  probabilistic_sampler: dpmpp
+  probabilistic_num_inference_steps: 20
+  skip_eval_visualizations: true

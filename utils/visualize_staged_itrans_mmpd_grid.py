@@ -112,7 +112,7 @@ def discover_staged_run(
         if any(x in name for x in ("smoke", "patch48", "best_scale")):
             continue
         try:
-            bundle = _load_staged_bundle(ckpt_dir, dataset)
+            _load_staged_bundle(ckpt_dir, dataset)
         except FileNotFoundError:
             continue
         has_partial = _staged_run_basename(ckpt_dir) in partials

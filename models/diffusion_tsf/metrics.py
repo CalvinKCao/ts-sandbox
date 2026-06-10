@@ -42,22 +42,6 @@ def mae(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return F.l1_loss(pred, target)
 
 
-def monotonicity_loss(pred_x0: torch.Tensor) -> torch.Tensor:
-    """Penalize monotonicity violations along the height axis of a CDF map.
-    
-    Args:
-        pred_x0: Tensor of shape (batch, channels, height, width) representing
-                 a denoised occupancy/CDF map.
-                 
-    Returns:
-        Scalar loss = mean positive increase between consecutive height rows.
-    """
-    # diff[y] = value[y+1] - value[y]; positive values are violations
-    diff = pred_x0[:, :, 1:, :] - pred_x0[:, :, :-1, :]
-    violations = F.relu(diff)
-    return violations.mean()
-
-
 def first_order_gradient(x: torch.Tensor) -> torch.Tensor:
     """Compute first-order differences (discrete derivative).
     
@@ -159,26 +143,6 @@ def compute_metrics(
     metrics.update(shape_metrics)
     
     return metrics
-
-
-def log_metrics(metrics: Dict[str, torch.Tensor], prefix: str = "") -> str:
-    """Format metrics for logging.
-    
-    Args:
-        metrics: Dictionary of metric name -> value
-        prefix: Optional prefix for metric names
-        
-    Returns:
-        Formatted string
-    """
-    parts = []
-    for name, value in metrics.items():
-        if isinstance(value, torch.Tensor):
-            value = value.item()
-        full_name = f"{prefix}{name}" if prefix else name
-        parts.append(f"{full_name}={value:.4f}")
-    
-    return " | ".join(parts)
 
 
 # ============================================================================

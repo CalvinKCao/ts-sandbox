@@ -4,7 +4,7 @@ Usage:
     from models.diffusion_tsf.pipeline import Pipeline, PipelineState, load_experiment_config
     from models.diffusion_tsf.pipeline.phases import PHASE_REGISTRY
 
-    cfg = load_experiment_config("configs/binary_anchor.yaml", cli_overrides={...})
+    cfg = load_experiment_config("configs/binary_dual_scale_staged.yaml", cli_overrides={...})
     state = PipelineState.from_config(cfg)
     phases = [PHASE_REGISTRY[p["phase"]](**p) for p in cfg["phases"]]
     Pipeline(phases, state).run()

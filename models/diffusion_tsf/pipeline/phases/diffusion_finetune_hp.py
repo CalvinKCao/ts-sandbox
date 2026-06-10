@@ -11,12 +11,12 @@ import logging
 import os
 
 import torch
-from optuna import create_study
 from optuna.samplers import TPESampler
 
+from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
-from models.diffusion_tsf.pipeline.phases.itrans_hp_pretrain import _patch_globals
+from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline import wandb_utils
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,6 @@ class DiffusionFinetuneHPPhase(PipelinePhase):
     def execute(self, state: PipelineState) -> PipelineState:
         import optuna
         from models.diffusion_tsf.train_multivariate_pipeline import (
-            finetune_hp_objective,
             _promote_best_trial_to_final,
             load_dataset,
             load_itransformer_from_checkpoint,
@@ -56,7 +55,7 @@ class DiffusionFinetuneHPPhase(PipelinePhase):
         from models.diffusion_tsf.guidance import iTransformerGuidance
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
-        _patch_globals(pipeline_mod, state)
+        patch_globals(pipeline_mod, state)
 
         subset_id = state.subset_id or state.dataset
         variate_indices = state.variate_indices
@@ -108,7 +107,7 @@ class DiffusionFinetuneHPPhase(PipelinePhase):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        n_trials = self.get("n_trials", 5)
+        n_trials = int(self.require("n_trials"))
         if state.smoke_test:
             n_trials = 1
 
@@ -116,22 +115,31 @@ class DiffusionFinetuneHPPhase(PipelinePhase):
         os.makedirs(subset_dir, exist_ok=True)
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
-        study = create_study(
+
+        def objective_builder(_worker_id: int):
+            from models.diffusion_tsf.train_multivariate_pipeline import finetune_hp_objective
+            dev = state.resolve_device()
+            def objective(trial):
+                return finetune_hp_objective(
+                    trial, state.dataset, variate_indices, diff_ckpt, ft_itrans_ckpt,
+                    dev, state.smoke_test,
+                    fixed_batch_size=ft_diff_bs, trial_ckpt_dir=subset_dir,
+                    train_stride=train_stride, test_stride=test_stride,
+                    train_ds=train_ds, val_ds=val_ds,
+                )
+            return objective
+
+        study = run_optuna_study(
+            study_name=f"{state.experiment_name}-diffusion-finetune-hp",
+            checkpoint_dir=subset_dir,
+            n_trials=n_trials,
+            parallel_workers=state.parallel_optuna_workers,
             direction="minimize",
+            objective_builder=objective_builder,
             sampler=TPESampler(seed=42),
             pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
-        )
-        study.optimize(
-            lambda trial: finetune_hp_objective(
-                trial, state.dataset, variate_indices, diff_ckpt, ft_itrans_ckpt,
-                device, state.smoke_test,
-                fixed_batch_size=ft_diff_bs, trial_ckpt_dir=subset_dir,
-                train_stride=train_stride, test_stride=test_stride,
-                train_ds=train_ds, val_ds=val_ds,
-            ),
-            n_trials=n_trials,
-            show_progress_bar=False,
             catch=(ValueError, FileNotFoundError, OSError),
+            sampler_seed=42,
         )
         if study.best_trial is None:
             logger.warning(f"All HP trials failed for {subset_id}")

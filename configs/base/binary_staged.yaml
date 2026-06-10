@@ -1,0 +1,163 @@
+# Shared defaults for staged binary DiT pipeline runs.
+# Leaf configs: `extends: base/binary_staged.yaml` then override name / arch knobs only.
+
+training:
+  pretrain_epochs: 10
+  pretrain_diffusion_epochs: 20
+  pretrain_diffusion_max_epochs: 20
+  force_retrain_synthetic: true
+  skip_synthetic_tuning: true
+  use_hardcoded_synthetic_hp: true
+  pretrain_synthetic_override: null
+  synthetic_samples_full_cap: 50000
+  synthetic_samples_hp_tune: 20000
+  synthetic_samples_diff_tune: 10000
+  synthetic_samples_min: 4096
+  n_itrans_hp_trials: 10
+  n_diffusion_hp_trials: 8
+  n_finetune_hp_trials: 5
+  itrans_hp_pretrain_max_epochs: 10
+  itrans_hp_finetune_max_epochs: 10
+  diffusion_hp_patience: 4
+  hp_tune_epochs: 20
+  hp_tune_patience: 15
+  itrans_real_cold_start: true
+  itrans_paper_batch_size: 32
+  itrans_paper_lr_grid: [0.001, 0.0005, 0.0001]
+  itrans_paper_dropout: 0.1
+  diffusion_batch_size: 32
+  diffusion_batch_sizes: [16]
+  finetune_batch_sizes: [4, 8, 16]
+  diffusion_probe_target_effective_batch: 512
+  diffusion_probe_max_batch_cap: 128
+  diffusion_probe_min_batch: 1
+  finetune_hp_lr_min: 0.000003
+  finetune_hp_lr_max: 0.0002
+  use_amp: true
+  use_gradient_checkpointing: true
+  unet_max_chunk_size: 128
+  eval_num_samples: 30
+  emd_lambda: 0.2
+  guidance_penalty_weight: 0.0
+  past_loss_weight: 0.3
+  anchor_hp_lambda_min: 0.90
+  anchor_hp_lambda_max: 0.995
+  anchor_hp_alpha_min: 0.35
+  anchor_hp_alpha_max: 0.65
+
+visualization:
+  enabled: true
+  n_samples: 3
+  n_dual_scale_vars: 3
+  jpeg_dpi: 100
+  dual_scale_sampler: anchor
+  dual_scale_inference_steps: 20
+
+experiment:
+  dataset: ETTh1
+  n_variates: 7
+  seed: 42
+  diffusion_type: binary
+  model_type: dit
+  image_height: 16
+  coarse_image_height: 16
+  fine_image_height: 16
+  finer_image_height: 16
+  max_scale: 3.5
+  max_scale_by_dataset:
+    ETTh1: 5.2
+    ETTh2: 9.0
+    ETTm1: 7.7
+    ETTm2: 9.0
+    illness: 6.3
+    exchange_rate: 10.6
+    weather: 9.3
+    electricity: 5.4
+    traffic: 6.0
+    PeMS: 11.8
+    solar_Alabama: 13.0
+    dalia: 6.0
+  window_norm_std_floor: 0.1
+  dit_patch_size: [8, 8]
+  dit_embed_dim: 384
+  dit_depth: 8
+  dit_num_heads: 6
+  dit_mlp_ratio: 4.0
+  dit_dropout: 0.0
+  use_dual_scale: false
+  use_triple_scale: false
+  diffusion_stage: joint
+  dual_scale_fine_weight: 0.5
+  dual_scale_independent_timesteps: true
+  use_guidance_channel: false
+  cfg_dropout: 0.0
+  deterministic_anchor_loss: true
+  deterministic_anchor_lambda: 0.99
+  deterministic_anchor_alpha: 0.0
+  eval_sampler: anchor
+  disable_cross_attention: false
+  cross_variate_context_bias: 0.0
+  use_window_normalization: true
+  zero_guidance_forecast: false
+  lookback_length: 96
+  forecast_length: 96
+  lookback_overlap: 8
+  itrans_d_model: 512
+  itrans_d_ff: 512
+  itrans_e_layers: 4
+  itrans_n_heads: 8
+  binary_noise_schedule: sqrt_linear
+  prediction_target: x0
+  loss_weighting: none
+  min_snr_gamma: 5.0
+  use_coordinate_channel: true
+  window_stride: 1
+  data_subset:
+    enabled: true
+    target_dataset: ETTh1
+    reduce_if_larger_than_target: true
+    max_variates: 7
+    variate_strategy: first
+    subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale
+    n_samples: 10000
+    epochs: 20
+    patience: 4
+
+  - phase: itrans_finetune_hp
+    n_trials: 10
+    max_epochs: 10
+    cold_start: true
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 20
+    max_epochs: 20
+    patience: 8
+    search_space: default
+
+  - phase: diffusion_fine_finetune_hp
+    n_trials: 20
+    max_epochs: 20
+    patience: 8
+    search_space: default
+
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 2
+    n_samples: 1
+    probabilistic_n_samples: 100
+    tune_sampler: true
+    sampler_tune_fraction: 0.25
+    sampler_tune_probabilistic_n_samples: 8
+    sampler_tune_candidates: [ddim, dpmpp]
+    sampler_tune_steps: [10, 20, 40]
+    sampler_tune_metric: top3_mse
+    probabilistic_sampler: dpmpp
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: false

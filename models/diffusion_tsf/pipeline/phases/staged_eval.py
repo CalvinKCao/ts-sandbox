@@ -287,15 +287,15 @@ class StagedEvalPhase(PipelinePhase):
         from models.diffusion_tsf.guidance import iTransformerGuidance
 
         device = state.resolve_device()
-        gmm_components = int(self.get("gmm_components", 10))
-        topk_max = int(self.get("topk_max", 3))
+        gmm_components = int(self.require("gmm_components"))
+        topk_max = int(self.require("topk_max"))
         subset_id = state.subset_id or state.dataset
         variate_indices = state.variate_indices
         if variate_indices is None:
             variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
         subset_meta = state.data_subset_resolved or {}
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
-        test_stride = int(self.get("test_stride", subset_meta.get("test_stride", 1)))
+        test_stride = int(self.require("test_stride"))
         n_iv = len(variate_indices)
 
         ft_itrans_ckpt = state.itrans_finetune_ckpt
@@ -320,30 +320,30 @@ class StagedEvalPhase(PipelinePhase):
             stride=train_stride,
             test_stride=test_stride,
         )
-        batch_size = int(self.get("batch_size", 8 if not state.smoke_test else 2))
+        batch_size = int(self.require("batch_size"))
         if state.smoke_test:
             final_ds = Subset(full_test_ds, list(range(min(2, len(full_test_ds)))))
             prob_samples = 1
             default_steps = 5
         else:
-            eval_fraction = float(self.get("eval_test_fraction", 1.0))
+            eval_fraction = float(self.require("eval_test_fraction"))
             final_ds = _fraction_subset(full_test_ds, eval_fraction, state.seed) if eval_fraction < 1.0 else full_test_ds
-            prob_samples = int(self.get("probabilistic_n_samples", 100))
-            default_steps = int(self.get("probabilistic_num_inference_steps", 20))
+            prob_samples = int(self.require("probabilistic_n_samples"))
+            default_steps = int(self.require("probabilistic_num_inference_steps"))
 
         sampler_tuning = []
-        selected_sampler = self.get("probabilistic_sampler", "dpmpp")
+        selected_sampler = str(self.require("probabilistic_sampler"))
         if selected_sampler in {"anchor", "deterministic_anchor"}:
             raise ValueError("staged probabilistic_sampler must be ddim or dpmpp, not anchor.")
         selected_steps = default_steps
-        if self.get("tune_sampler", True) and not state.smoke_test:
-            tune_fraction = float(self.get("sampler_tune_fraction", 0.25))
-            tune_samples = int(self.get("sampler_tune_probabilistic_n_samples", min(8, prob_samples)))
-            candidate_samplers = list(self.get("sampler_tune_candidates", ["ddim", "dpmpp"]))
-            candidate_steps = [int(x) for x in self.get("sampler_tune_steps", [10, 20, 40])]
+        if bool(self.require("tune_sampler")) and not state.smoke_test:
+            tune_fraction = float(self.require("sampler_tune_fraction"))
+            tune_samples = int(self.require("sampler_tune_probabilistic_n_samples"))
+            candidate_samplers = list(self.require("sampler_tune_candidates"))
+            candidate_steps = [int(x) for x in self.require("sampler_tune_steps")]
             tune_ds = _fraction_subset(full_test_ds, tune_fraction, state.seed + 7919)
             tune_loader = DataLoader(tune_ds, batch_size=batch_size, shuffle=False)
-            score_metric = str(self.get("sampler_tune_metric", "top3_mse"))
+            score_metric = str(self.require("sampler_tune_metric"))
             best_score = float("inf")
             for sampler in candidate_samplers:
                 for steps in candidate_steps:

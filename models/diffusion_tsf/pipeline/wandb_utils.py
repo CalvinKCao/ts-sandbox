@@ -78,15 +78,6 @@ def finish_phase_run() -> None:
         wandb.finish()
 
 
-def log_metrics(metrics: Dict[str, Any], step: Optional[int] = None, prefix: Optional[str] = None) -> None:
-    """Log metrics to current wandb run."""
-    if not _WANDB_AVAILABLE or wandb.run is None:
-        return
-    if prefix:
-        metrics = {f"{prefix}/{k}": v for k, v in metrics.items()}
-    wandb.log(metrics, step=step)
-
-
 def log_summary(metrics: Dict[str, Any]) -> None:
     """Set summary metrics on the current run."""
     if not _WANDB_AVAILABLE or wandb.run is None:

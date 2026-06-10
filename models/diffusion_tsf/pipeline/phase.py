@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any
 
 from models.diffusion_tsf.pipeline.state import PipelineState
 
@@ -23,9 +23,19 @@ class PipelinePhase(ABC):
     def __init__(self, **overrides: Any):
         self.overrides = overrides
 
-    def get(self, key: str, default: Any = None) -> Any:
-        """Read a per-phase override, falling back to *default*."""
+    def require(self, key: str) -> Any:
+        """Read a required per-phase override from YAML."""
+        if key not in self.overrides:
+            raise KeyError(f"phase {self.name!r} missing required key {key!r}")
+        return self.overrides[key]
+
+    def optional(self, key: str, default: Any = None) -> Any:
+        """Read an optional per-phase override."""
         return self.overrides.get(key, default)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Optional override (compat alias for optional)."""
+        return self.optional(key, default)
 
     # -- hooks --
 

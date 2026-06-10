@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
+from models.diffusion_tsf.pipeline.config import REQUIRED_EXPERIMENT_KEYS
+
 
 @dataclass
 class PipelineState:
@@ -26,6 +28,7 @@ class PipelineState:
     n_variates: int = 7
     seed: int = 42
     smoke_test: bool = False
+    parallel_optuna_workers: int = 1
 
     # -- Model / diffusion knobs --
     diffusion_type: str = "binary"
@@ -49,8 +52,6 @@ class PipelineState:
     dual_scale_independent_timesteps: bool = True
     use_guidance_channel: bool = True
     cfg_dropout: float = 0.1
-    cfg_scale: float = 2.0
-    use_cfg_inference: bool = False
     deterministic_anchor_loss: bool = False
     deterministic_anchor_lambda: float = 0.99
     deterministic_anchor_alpha: float = 0.5
@@ -65,6 +66,15 @@ class PipelineState:
     lookback_length: int = 96
     forecast_length: int = 96
     lookback_overlap: int = 8
+    itrans_d_model: int = 512
+    itrans_d_ff: int = 512
+    itrans_e_layers: int = 4
+    itrans_n_heads: int = 8
+    binary_noise_schedule: str = "sqrt_linear"
+    prediction_target: str = "x0"
+    loss_weighting: str = "none"
+    min_snr_gamma: float = 5.0
+    use_coordinate_channel: bool = True
     window_stride: int = 1
 
     # -- Paths --
@@ -140,7 +150,13 @@ class PipelineState:
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "PipelineState":
         """Build state from a merged experiment config dict."""
-        exp = cfg.get("experiment", {})
+        exp = dict(cfg["experiment"])
+        if "experiment_name" not in exp and "name" in exp:
+            exp["experiment_name"] = exp["name"]
+        missing = [k for k in REQUIRED_EXPERIMENT_KEYS if k not in exp]
+        if missing:
+            raise ValueError(f"experiment missing required key(s): {missing}")
+
         known_fields = {f.name for f in cls.__dataclass_fields__.values()}
 
         init_kwargs: Dict[str, Any] = {}
@@ -148,15 +164,17 @@ class PipelineState:
         for k, v in exp.items():
             if k in known_fields:
                 init_kwargs[k] = v
-            else:
+            elif k != "name":
                 extra[k] = v
+        if "name" in exp and "experiment_name" not in init_kwargs:
+            init_kwargs["experiment_name"] = exp["name"]
 
         if "dit_patch_size" in init_kwargs:
             init_kwargs["dit_patch_size"] = tuple(int(x) for x in init_kwargs["dit_patch_size"])
         for key in ("image_height", "coarse_image_height", "fine_image_height", "finer_image_height"):
             if key in init_kwargs:
                 init_kwargs[key] = int(init_kwargs[key])
-        for key in ("dit_embed_dim", "dit_depth", "dit_num_heads"):
+        for key in ("dit_embed_dim", "dit_depth", "dit_num_heads", "itrans_d_model", "itrans_d_ff", "itrans_e_layers", "itrans_n_heads"):
             if key in init_kwargs:
                 init_kwargs[key] = int(init_kwargs[key])
         for key in ("dit_mlp_ratio", "dit_dropout"):
@@ -170,6 +188,10 @@ class PipelineState:
             }
         if "window_norm_std_floor" in init_kwargs:
             init_kwargs["window_norm_std_floor"] = float(init_kwargs["window_norm_std_floor"])
+        if "min_snr_gamma" in init_kwargs:
+            init_kwargs["min_snr_gamma"] = float(init_kwargs["min_snr_gamma"])
+        if "use_coordinate_channel" in init_kwargs:
+            init_kwargs["use_coordinate_channel"] = bool(init_kwargs["use_coordinate_channel"])
 
         init_kwargs["extra"] = extra
         init_kwargs["phase_configs"] = cfg.get("phases", [])

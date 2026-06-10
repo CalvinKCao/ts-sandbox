@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader, Subset
 
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
-from models.diffusion_tsf.pipeline.phases.itrans_hp_pretrain import _patch_globals
+from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.config import visualization_settings
 from models.diffusion_tsf.pipeline.visualize_utils import (
@@ -86,7 +86,7 @@ class EvalPhase(PipelinePhase):
         from models.diffusion_tsf.guidance import iTransformerGuidance
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
-        _patch_globals(pipeline_mod, state)
+        patch_globals(pipeline_mod, state)
         _bootstrap_finetune_ckpts(state)
 
         subset_id = state.subset_id or state.dataset
@@ -127,10 +127,10 @@ class EvalPhase(PipelinePhase):
         _, _, test_ds, _ = load_dataset(
             state.dataset, variate_indices, stride=train_stride, test_stride=test_stride,
         )
-        n_samples = self.get("n_samples", 30)
-        probabilistic_n_samples = self.get("probabilistic_n_samples", n_samples)
-        probabilistic_sampler = self.get("probabilistic_sampler", "dpmpp")
-        probabilistic_num_inference_steps = self.get("probabilistic_num_inference_steps", 20)
+        n_samples = int(self.require("n_samples"))
+        probabilistic_n_samples = int(self.require("probabilistic_n_samples"))
+        probabilistic_sampler = str(self.require("probabilistic_sampler"))
+        probabilistic_num_inference_steps = int(self.require("probabilistic_num_inference_steps"))
         if state.smoke_test:
             test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
             n_samples = 1

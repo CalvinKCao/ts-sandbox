@@ -27,23 +27,21 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import torch
-from torch.utils.data import DataLoader
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from models.diffusion_tsf.storage_paths import checkpoint_roots_ordered
+from models.diffusion_tsf.storage_paths import resolve_checkpoint_dir
 import models.diffusion_tsf.train_multivariate_pipeline as train_pipeline
 from models.diffusion_tsf.train_multivariate_pipeline import (
     RESULTS_DIR,
-    LOOKBACK_LENGTH, FORECAST_LENGTH, LOOKBACK_OVERLAP,
-    create_diffusion_model, load_dataset,
+    LOOKBACK_LENGTH, FORECAST_LENGTH, create_diffusion_model, load_dataset,
     pretrain_dir_for_dim,
     load_itransformer_from_checkpoint,
 )
-from models.diffusion_tsf.pipeline_config import IMAGE_HEIGHT as DEFAULT_IMAGE_HEIGHT
+DEFAULT_IMAGE_HEIGHT = 16
 from models.diffusion_tsf.guidance import iTransformerGuidance
 
 
@@ -142,17 +140,6 @@ def apply_checkpoint_architecture(ckpt: dict, diffusion_type: str, image_height:
     return height
 
 
-def infer_prediction_mode(ckpt: dict, override: Optional[str] = None) -> str:
-    if override:
-        return override
-    cfg = ckpt.get('config')
-    if hasattr(cfg, 'prediction_mode'):
-        return cfg.prediction_mode
-    if isinstance(cfg, dict) and cfg.get('prediction_mode'):
-        return cfg['prediction_mode']
-    return 'epsilon'
-
-
 def infer_anchor_kwargs(ckpt: dict, metadata: Optional[dict] = None) -> dict:
     cfg = ckpt.get('config')
     meta_params = (metadata or {}).get('tuned_params', {})
@@ -222,8 +209,8 @@ def run_comparison(
     print(f"Device: {device}")
 
     if checkpoint_dir is None:
-        roots = [Path(p) for p in checkpoint_roots_ordered(script_dir)]
-        print(f"Checkpoint roots: {', '.join(str(r) for r in roots)}")
+        roots = [Path(resolve_checkpoint_dir(script_dir))]
+        print(f"Checkpoint root: {roots[0]}")
     else:
         roots = [Path(checkpoint_dir)]
 
@@ -489,7 +476,7 @@ def main():
     parser = argparse.ArgumentParser(description='Diffusion vs iTransformer comparison plots')
     parser.add_argument(
         '--checkpoint-dir', type=str, default=None,
-        help='Single checkpoint root; default: scan checkpoints_multivariate and legacy checkpoints_7var if present',
+        help='Checkpoint root; default: checkpoints_multivariate under the package',
     )
     parser.add_argument('--output-dir', type=str, default=None)
     parser.add_argument('--num-samples', type=int, default=3, help='Samples per dataset')

@@ -1,4 +1,4 @@
-extends: base/binary_staged.yaml
+extends: base/illness_fixed_hp_base.yaml
 
 experiment:
   name: binary-dual-scale-staged-arch-h32-16

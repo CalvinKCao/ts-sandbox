@@ -1,0 +1,51 @@
+extends: base/binary_staged.yaml
+
+experiment:
+  dataset: illness
+
+training:
+  itrans_paper_lr_grid: [0.001]
+  finetune_hp_lr_min: 0.00003
+  finetune_hp_lr_max: 0.00003
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale
+    n_samples: 10000
+    epochs: 20
+    patience: 4
+
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+    cold_start: true
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 1
+    max_epochs: 20
+    patience: 8
+    search_space: default
+
+  - phase: diffusion_fine_finetune_hp
+    n_trials: 1
+    max_epochs: 20
+    patience: 8
+    search_space: default
+
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 2
+    n_samples: 1
+    probabilistic_n_samples: 100
+    tune_sampler: true
+    sampler_tune_fraction: 0.25
+    sampler_tune_probabilistic_n_samples: 8
+    sampler_tune_candidates: [ddim, dpmpp]
+    sampler_tune_steps: [10, 20, 40]
+    sampler_tune_metric: top3_mse
+    probabilistic_sampler: dpmpp
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: false

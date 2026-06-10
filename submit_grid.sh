@@ -9,6 +9,7 @@
 #   ./submit_grid.sh --configs configs/binary_anchor.yaml --datasets ETTh1,exchange_rate
 #   ./submit_grid.sh --smoke
 #   ./submit_grid.sh --resume --configs configs/binary_dual_scale.yaml --datasets ETTh1
+#   ./submit_grid.sh --parallel-optuna 4 --configs configs/binary_dual_scale_staged.yaml --datasets ETTh1
 # =============================================================================
 
 set -euo pipefail
@@ -23,11 +24,14 @@ CKPT_CONFIG=""
 DEPENDENCY=""
 WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 WALL_OVERRIDE=""
+PARALLEL_OPTUNA=""
 ACCOUNT="aip-boyuwang"
+GPU_TYPE="l40s"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --configs) CONFIGS="$2"; shift 2 ;;
         --datasets) DATASETS="$2"; shift 2 ;;
+        --n-variates) N_VARIATES="$2"; shift 2 ;;
         --seeds) SEEDS="$2"; shift 2 ;;
         --smoke|--smoke-test) SMOKE=1; shift ;;
         --resume) RESUME=1; shift ;;
@@ -35,6 +39,8 @@ while [[ $# -gt 0 ]]; do
         --dependency) DEPENDENCY="$2"; shift 2 ;;
         --wandb-project) WANDB_PROJECT="$2"; shift 2 ;;
         --time) WALL_OVERRIDE="$2"; shift 2 ;;
+        --parallel-optuna) PARALLEL_OPTUNA="$2"; shift 2 ;;
+        --gpu) GPU_TYPE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -44,13 +50,29 @@ if [[ "$SMOKE" -eq 1 ]]; then
     WALL_DEFAULT="0:30:00"
     MEM="24G"
     CPUS=4
+    GPUS=1
     JOB_PREFIX="smoke"
 else
-    CONFIGS="${CONFIGS:-configs/binary_anchor.yaml}"
+    CONFIGS="${CONFIGS:-configs/binary_dual_scale_staged.yaml}"
     WALL_DEFAULT="5:00:00"
     MEM="60G"
     CPUS=8
+    GPUS=1
     JOB_PREFIX="grid"
+fi
+
+if [[ -n "$PARALLEL_OPTUNA" ]]; then
+    if [[ "$SMOKE" -eq 1 ]]; then
+        echo "ERROR: --parallel-optuna is not supported with --smoke" >&2
+        exit 1
+    fi
+    if ! [[ "$PARALLEL_OPTUNA" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: --parallel-optuna requires a positive integer (got: $PARALLEL_OPTUNA)" >&2
+        exit 1
+    fi
+    GPUS="$PARALLEL_OPTUNA"
+    MEM="$((PARALLEL_OPTUNA * 20))G"
+    CPUS="$((PARALLEL_OPTUNA * 2))"
 fi
 
 IFS=',' read -ra CONF_ARR <<< "$CONFIGS"
@@ -124,13 +146,19 @@ for CFG in "${CONF_ARR[@]}"; do
                 LOG_FILE="$LOG_DIR/${DATE_STR}-%j-${DS}-${CFG_NAME}.log"
             fi
 
+            if [[ "$GPU_TYPE" == "a100" || "$GPU_TYPE" == "h100" ]]; then
+                GPU_ARG="--gpus=${GPU_TYPE}:${GPUS}"
+            else
+                GPU_ARG="--gres=gpu:${GPU_TYPE}:${GPUS}"
+            fi
+
             S_ARGS=(
                 --parsable
                 --job-name="$JOB_NAME"
                 --account="$ACCOUNT"
                 --time="$WALL"
                 --nodes=1
-                --gres=gpu:l40s:1
+                "$GPU_ARG"
                 --cpus-per-task="$CPUS"
                 --mem="$MEM"
                 --output="$LOG_FILE"
@@ -150,6 +178,10 @@ for CFG in "${CONF_ARR[@]}"; do
                 --seed "$SD"
             )
 
+            if [[ -n "${N_VARIATES:-}" ]]; then
+                PY_ARGS+=(--n-variates "$N_VARIATES")
+            fi
+
             if [[ -n "${WANDB_API_KEY:-}" ]]; then
                 PY_ARGS+=(--wandb --wandb-project "$WANDB_PROJECT")
             fi
@@ -160,6 +192,10 @@ for CFG in "${CONF_ARR[@]}"; do
 
             if [[ "$RESUME" -eq 1 && -n "$RUN_STEM" ]]; then
                 PY_ARGS+=(--resume)
+            fi
+
+            if [[ -n "$PARALLEL_OPTUNA" ]]; then
+                PY_ARGS+=(--parallel-optuna-workers "$PARALLEL_OPTUNA")
             fi
 
             JOB_ID=$(sbatch "${S_ARGS[@]}" "$SCRIPT_DIR/slurm_worker.sh" "${PY_ARGS[@]}")

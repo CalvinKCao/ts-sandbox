@@ -6,14 +6,13 @@ pretrain on RealTS tends to converge near a unit-variance mean predictor.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
 
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
-from models.diffusion_tsf.pipeline.phases.itrans_hp_pretrain import _patch_globals
+from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     discover_dataset_run_ckpt_dir,
 )
@@ -42,7 +41,7 @@ class ITransFinetuneHPPhase(PipelinePhase):
         )
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
-        _patch_globals(pipeline_mod, state)
+        patch_globals(pipeline_mod, state)
 
         subset_id = state.subset_id or state.dataset
         ft_ckpt = os.path.join(state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
@@ -69,12 +68,12 @@ class ITransFinetuneHPPhase(PipelinePhase):
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
         test_stride = int(subset_meta.get("test_stride", 1))
 
-        n_trials = self.get("n_trials", 10)
+        n_trials = int(self.require("n_trials"))
         if state.smoke_test:
             n_trials = 1
 
         pretrained_ckpt = state.itrans_pretrain_ckpt or ""
-        cold_start = self.get("cold_start", True)
+        cold_start = bool(self.require("cold_start"))
 
         best_params, tune_ckpt_path = run_itransformer_finetune_hp_tuning(
             dataset_name=state.dataset,
@@ -87,6 +86,7 @@ class ITransFinetuneHPPhase(PipelinePhase):
             subset_id=subset_id,
             train_stride=train_stride,
             test_stride=test_stride,
+            parallel_workers=state.parallel_optuna_workers,
         )
 
         hp_best = os.path.join(state.checkpoint_dir, f"{subset_id}_itrans_ft_hp_best.pt")

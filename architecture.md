@@ -86,6 +86,35 @@ Each batch job sources a generated preamble that:
 
 Legacy monolithic names (Phase 1A/1B/2A/2B/2C) map to the same logic in `train_multivariate_pipeline.py`; new work should register phases in `models/diffusion_tsf/pipeline/phases/` and drive them from YAML.
 
+### Phase codes and log format
+
+Pipeline logs use `[LEVEL] MM-DD HH:MM:SS [TAG] message` (no year, no milliseconds). The orchestrator sets a phase tag for every line emitted during that phase.
+
+**Staged pipeline** (e.g. `binary_dual_scale_staged*.yaml`):
+
+| Tag | YAML `phase` | Role |
+|-----|--------------|------|
+| `P0` | `staged_diffusion_pretrain` | Synthetic coarse/fine pretrain |
+| `P1` | `itrans_finetune_hp` | iTransformer finetune HP |
+| `P2A` | `diffusion_coarse_finetune_hp` | Coarse diffusion finetune HP |
+| `P2B` | `diffusion_fine_finetune_hp` | Fine diffusion finetune HP |
+| `P2C` | `diffusion_finer_finetune_hp` | Finer stage (triple-scale only) |
+| `P3` | `staged_eval` | Chained staged eval |
+
+**Classic pipeline**:
+
+| Tag | YAML `phase` |
+|-----|--------------|
+| `P0A` | `itrans_hp_pretrain` |
+| `P0B` | `diffusion_hp_pretrain` |
+| `P1A` | `itrans_finetune_hp` |
+| `P1B` | `diffusion_finetune_hp` |
+| `P2` | `eval` |
+
+Implementation: `models/diffusion_tsf/pipeline/logging_utils.py` (`PHASE_CODES`, `phase_context`).
+
+Diffusion training batch size defaults to **32** (`DIFFUSION_BATCH_SIZE` in `pipeline_config.py`); override per phase via YAML `batch_size:`.
+
 ### Phase 1A — iTransformer HP tuning on synthetic data
 
 - **Entry:** `run_itransformer_hp_tuning()`, called from `run_pretrain_mode` / manifest `run_pipeline`
@@ -99,7 +128,7 @@ Legacy monolithic names (Phase 1A/1B/2A/2B/2C) map to the same logic in `train_m
 
 - **Entry:** `run_diffusion_hp_tuning()`, called from `run_pretrain_mode` and `run_pipeline`
 - **Trials:** `N_DIFFUSION_HP_TRIALS = 3`, same Optuna setup as iTrans HP
-- **Search space:** `learning_rate` (log-uniform 1e-5–5e-4), `batch_size` (fixed after auto probe inside `run_diffusion_hp_tuning`)
+- **Search space:** `learning_rate` (log-uniform 1e-5–5e-4); `batch_size` fixed at 32 (`DIFFUSION_BATCH_SIZE`)
 - **Per-trial training:** up to `PRETRAIN_DIFFUSION_MAX_EPOCHS = 15` epochs (early stop)
 - **Guidance:** frozen Phase **1A** iTransformer checkpoint (promoted from HP best)
 - **Best-state tracking:** cross-trial clone → `diff_hp_best.pt`
@@ -120,7 +149,7 @@ Legacy monolithic names (Phase 1A/1B/2A/2B/2C) map to the same logic in `train_m
 
 - **Entry:** `finetune_hp_objective` via Optuna in `_finetune_and_eval_one_subset` (and equivalent loop in `run_pipeline`)
 - **Trials:** `N_FINETUNE_HP_TRIALS` (defaults to **3** in code — distinct from pretrain diffusion HP trials); logs explicitly label this as finetune-phase tuning so it is not confused with `N_DIFFUSION_HP_TRIALS`
-- **Search space:** `learning_rate` only (log-uniform on `[FINETUNE_HP_LR_MIN, FINETUNE_HP_LR_MAX]` in `pipeline_config.py`, currently **3e‑6–2e‑4**) — batch size is **auto-probed once** (`select_diffusion_batch_size`) before trials and fixed for all trials
+- **Search space:** `learning_rate` only (log-uniform on `[FINETUNE_HP_LR_MIN, FINETUNE_HP_LR_MAX]` in `pipeline_config.py`, currently **3e‑6–2e‑4**) — batch size fixed at 32 (`DIFFUSION_BATCH_SIZE`)
 - **Starting model:** pretrained `diffusion.pt` from Phase **1B**
 - **Guidance:** `{subset_id}_itransformer_finetuned.pt` from Phase 2A (not the pretrained one)
 - **Per-trial training:** `HP_TUNE_EPOCHS` with early stop

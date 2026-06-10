@@ -41,9 +41,12 @@ class BinaryDiffusionScheduler:
         else:
             raise ValueError(f"Unknown binary noise schedule: {schedule_type!r}")
         self.schedule_type = schedule_type
-        logger.info(
-            f"BinaryDiffusionScheduler initialized: T={num_steps}, "
-            f"schedule={schedule_type}, beta=[{self.betas[0]:.2e}, {self.betas[-1]:.3f}]"
+        logger.debug(
+            "BinaryDiffusionScheduler initialized: T=%d, schedule=%s, beta=[%.2e, %.3f]",
+            num_steps,
+            schedule_type,
+            self.betas[0].item(),
+            self.betas[-1].item(),
         )
 
     def to(self, device: str) -> "BinaryDiffusionScheduler":

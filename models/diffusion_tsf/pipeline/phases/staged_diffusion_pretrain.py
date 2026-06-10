@@ -13,7 +13,7 @@ from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.visualize_utils import run_pretrain_diffusion_visualizations
-from models.diffusion_tsf.pipeline.phases.itrans_hp_pretrain import _patch_globals
+from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,8 @@ def staged_diffusion_stages(state: PipelineState) -> tuple[str, ...]:
 
 
 def _stage_pretrain_cache_enabled(phase: PipelinePhase, state: PipelineState) -> bool:
+    if state.extra.get("force_retrain_synthetic", False):
+        return False
     if phase.get("reuse_pretrain_from_config"):
         return False
     if state.smoke_test:
@@ -337,6 +339,12 @@ def _read_json(path: str) -> Dict[str, Any]:
 
 
 def _resolve_diff_hp(state: PipelineState, source_dir: Optional[str]) -> Dict[str, Any]:
+    if state.extra.get("use_hardcoded_synthetic_hp", False):
+        logger.info("Using hardcoded Phase 1 diffusion HP (use_hardcoded_synthetic_hp=True)")
+        params = {"learning_rate": 0.0005, "batch_size": getattr(state, "diffusion_batch_size", 32)}
+        state.diffusion_best_params = params
+        return params
+
     candidates = []
     if source_dir:
         candidates.append(os.path.join(source_dir, "diff_hp.json"))
@@ -351,7 +359,7 @@ def _resolve_diff_hp(state: PipelineState, source_dir: Optional[str]) -> Dict[st
     raise FileNotFoundError(
         f"Staged pretrain requires Phase 1 diff_hp.json for {state.dataset!r}. "
         f"Expected *{suffix} under one of {_candidate_phase1_ckpt_roots(state)} "
-        "or set phase1_source_dir."
+        "or set phase1_source_dir or set use_hardcoded_synthetic_hp=True."
     )
 
 
@@ -370,10 +378,40 @@ def _resolve_itrans_pretrain(state: PipelineState, source_dir: Optional[str]) ->
         if path and os.path.exists(path):
             state.itrans_pretrain_ckpt = path
             return path
-    raise FileNotFoundError(
-        "Staged pretrain requires an iTransformer pretrain checkpoint for lookback tokens "
-        f"(tried itransformer.pt / itrans_hp_best.pt / pretrained_itransformer.pt under {source_dir!r})."
+    logger.warning("No iTransformer pretrain checkpoint found.")
+    from models.diffusion_tsf.train_multivariate_pipeline import run_itransformer_hp_tuning
+    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+    from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
+    import shutil
+    
+    # Patch globals before running dummy tuning
+    patch_globals(pipeline_mod, state, honor_dataset_windows=False)
+    
+    skip_tuning = state.extra.get("skip_synthetic_tuning", True)
+    
+    n_trials = state.n_itrans_hp_trials
+    if state.smoke_test:
+        n_trials = 1
+        logger.warning("Smoke test: Training a dummy 1-epoch iTransformer as fallback.")
+    elif skip_tuning:
+        n_trials = 1
+        logger.info("skip_synthetic_tuning=True: Training a 1-trial iTransformer pretrain as fallback (bypassing full Optuna sweep).")
+    else:
+        logger.info(f"Training iTransformer from scratch with {n_trials} trials.")
+
+    best_params, tune_ckpt_path = run_itransformer_hp_tuning(
+        n_trials=n_trials,
+        smoke_test=state.smoke_test,
+        checkpoint_dir=state.checkpoint_dir,
+        parallel_workers=state.parallel_optuna_workers if not skip_tuning else 1,
     )
+    
+    itrans_ckpt = os.path.join(state.checkpoint_dir, "itransformer.pt")
+    if tune_ckpt_path and os.path.exists(tune_ckpt_path) and not os.path.exists(itrans_ckpt):
+        shutil.copy2(tune_ckpt_path, itrans_ckpt)
+        
+    state.itrans_pretrain_ckpt = itrans_ckpt
+    return itrans_ckpt
 
 
 def patch_stage_globals(mod: Any, state: PipelineState, stage: str, *, honor_dataset_windows: bool) -> None:
@@ -382,7 +420,7 @@ def patch_stage_globals(mod: Any, state: PipelineState, stage: str, *, honor_dat
         raise ValueError(f"Unknown staged diffusion stage: {stage!r}")
     if stage == "finer" and not state.use_triple_scale:
         raise ValueError("finer staged diffusion requires state.use_triple_scale=True")
-    _patch_globals(mod, state, honor_dataset_windows=honor_dataset_windows)
+    patch_globals(mod, state, honor_dataset_windows=honor_dataset_windows)
     mod.USE_DUAL_SCALE = False
     mod.USE_TRIPLE_SCALE = bool(state.use_triple_scale)
     mod.DIFFUSION_STAGE = stage
@@ -401,11 +439,11 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
     name = "staged_diffusion_pretrain"
 
     def _config_name(self, state: PipelineState) -> str:
-        return str(
-            self.get("phase1_config_name")
-            or state.extra.get("phase1_config_name")
-            or "binary_dual_scale"
-        )
+        if "phase1_config_name" in self.overrides:
+            return str(self.require("phase1_config_name"))
+        if state.extra.get("phase1_config_name"):
+            return str(state.extra["phase1_config_name"])
+        raise KeyError(f"phase {self.name!r} missing required key 'phase1_config_name'")
 
     def _cached_stage_ckpt(self, state: PipelineState, config_name: str, stage: str) -> Optional[str]:
         reuse_from = self.get("reuse_pretrain_from_config")
@@ -453,12 +491,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         return False
 
     def execute(self, state: PipelineState) -> PipelineState:
-        from models.diffusion_tsf.train_multivariate_pipeline import (
-            DIFFUSION_HP_PATIENCE,
-            PRETRAIN_DIFFUSION_EPOCHS,
-            SYNTHETIC_SAMPLES_DIFF_TUNE,
-            pretrain_diffusion,
-        )
+        from models.diffusion_tsf.train_multivariate_pipeline import pretrain_diffusion
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
         config_name = self._config_name(state)
@@ -491,9 +524,9 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         best_params = _resolve_diff_hp(state, source_dir)
         itrans_ckpt = _resolve_itrans_pretrain(state, source_dir)
 
-        n_samples = int(self.get("n_samples", SYNTHETIC_SAMPLES_DIFF_TUNE))
-        epochs = int(self.get("epochs", PRETRAIN_DIFFUSION_EPOCHS))
-        patience = int(self.get("patience", DIFFUSION_HP_PATIENCE))
+        n_samples = int(self.require("n_samples"))
+        epochs = int(self.require("epochs"))
+        patience = int(self.require("patience"))
         if state.smoke_test:
             n_samples = min(n_samples, 32)
             epochs = 1

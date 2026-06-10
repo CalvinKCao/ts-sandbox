@@ -13,7 +13,7 @@ import shutil
 
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
-from models.diffusion_tsf.pipeline.phases.itrans_hp_pretrain import _patch_globals
+from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.visualize_utils import run_pretrain_diffusion_visualizations
 
@@ -40,7 +40,7 @@ class DiffusionHPPretrainPhase(PipelinePhase):
         )
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
-        _patch_globals(pipeline_mod, state, honor_dataset_windows=False)
+        patch_globals(pipeline_mod, state, honor_dataset_windows=False)
 
         if not state.itrans_pretrain_ckpt or not os.path.exists(state.itrans_pretrain_ckpt):
             raise RuntimeError(
@@ -48,7 +48,7 @@ class DiffusionHPPretrainPhase(PipelinePhase):
                 f"but got: {state.itrans_pretrain_ckpt}"
             )
 
-        n_trials = self.get("n_trials", 8)
+        n_trials = int(self.require("n_trials"))
         if state.smoke_test:
             n_trials = 1
 
@@ -57,6 +57,7 @@ class DiffusionHPPretrainPhase(PipelinePhase):
             n_trials=n_trials,
             smoke_test=state.smoke_test,
             checkpoint_dir=state.checkpoint_dir,
+            parallel_workers=state.parallel_optuna_workers,
         )
 
         hp_json = os.path.join(state.checkpoint_dir, "diff_hp.json")

@@ -39,7 +39,7 @@ class TimeSeriesTo2D(nn.Module):
         ])
         self.register_buffer('bin_centers', bin_centers)
         
-        logger.info(f"TimeSeriesTo2D initialized: H={height}, MS={max_scale}")
+        logger.debug("TimeSeriesTo2D initialized: H=%s, MS=%s", height, max_scale)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """1D normalized series → 2D occupancy map (values in [0, 1] per column).

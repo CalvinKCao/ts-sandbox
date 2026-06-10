@@ -1,8 +1,7 @@
 
 import numpy as np
-import torch
 import logging
-from typing import List, Optional, Callable, Dict, Any, Union, Tuple
+from typing import List, Optional, Callable, Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -175,75 +174,6 @@ def sample_impact_function(
         
     return f_callable
 
-
-# ============================================================================
-# Synthetic Covariate Generation
-# ============================================================================
-
-def generate_synthetic_covariate(
-    T: int, 
-    hyperparams: Dict[str, Any],
-    rng: np.random.Generator
-) -> np.ndarray:
-    """
-    Algorithm 3: Synthetic Covariates Generation.
-    """
-    cmax_e = hyperparams.get('cmax_e', 20)
-    cmax_cp = hyperparams.get('cmax_cp', 8)
-    sigma_cp = hyperparams.get('sigma_cp', 2.0)
-    
-    # 1. Sample event count
-    ce = rng.integers(1, cmax_e + 1)
-    
-    # 2. Sample event positions
-    Pe = rng.integers(0, T, size=ce)
-    
-    # 3. Sample type
-    event_type = rng.choice(['step', 'gauss'])
-    
-    # 4. Build xe (events)
-    xe = np.zeros(T)
-    for pos in Pe:
-        amplitude = rng.normal(0, 1) # sample_amplitude
-        
-        if event_type == 'gauss':
-            sigma = rng.uniform(1.0, 50.0) # sample_width
-            
-            # Gaussian kernel
-            # G(t) = exp(-0.5 * ((t-pos)/sigma)^2)
-            t_indices = np.arange(T)
-            kernel = np.exp(-0.5 * ((t_indices - pos) / sigma)**2)
-            xe += amplitude * kernel
-            
-        else: # step
-            # Alternating step
-            # The paper says "step alternates at each event position".
-            # We implement a cumulative step function.
-            # Here we just add a step starting at pos.
-            xe[pos:] += amplitude
-            # To "alternate", we could flip the sign of amplitude for subsequent events,
-            # but random amplitude sign is sufficient.
-            
-    # 5. Sample change-point count
-    ccp = rng.integers(0, cmax_cp + 1)
-    
-    # 6. Sample change-points
-    if ccp > 0:
-        pi = np.sort(rng.integers(0, T, size=ccp))
-        # 7. Sample amplitudes
-        # points: 0, pi_1, ..., pi_ccp, T-1
-        # values: a_0, ..., a_{ccp+1}
-        points = np.concatenate(([0], pi, [T-1]))
-        values = rng.normal(0, sigma_cp, size=len(points))
-        
-        # Interpolate
-        xtrend = np.interp(np.arange(T), points, values)
-    else:
-        # Just a linear trend from start to end
-        values = rng.normal(0, sigma_cp, size=2)
-        xtrend = np.linspace(values[0], values[1], T)
-        
-    return xe + xtrend
 
 # ============================================================================
 # API
