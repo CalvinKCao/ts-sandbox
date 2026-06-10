@@ -25,7 +25,11 @@ DEPENDENCY=""
 WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 WALL_OVERRIDE=""
 PARALLEL_OPTUNA=""
-ACCOUNT="aip-boyuwang"
+if [[ "$(hostname)" == *"narval"* ]]; then
+    ACCOUNT="def-boyuwang"
+else
+    ACCOUNT="aip-boyuwang"
+fi
 GPU_TYPE="l40s"
 while [[ $# -gt 0 ]]; do
     case "$1" in
