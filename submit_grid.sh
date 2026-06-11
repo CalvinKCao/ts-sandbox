@@ -83,6 +83,28 @@ IFS=',' read -ra CONF_ARR <<< "$CONFIGS"
 IFS=',' read -ra DATA_ARR <<< "$DATASETS"
 IFS=',' read -ra SEED_ARR <<< "$SEEDS"
 
+expand_config_globs() {
+    local expanded=() CFG matches
+    for CFG in "${CONF_ARR[@]}"; do
+        if [[ "$CFG" == *"*"* || "$CFG" == *"?"* || "$CFG" == *"["* ]]; then
+            shopt -s nullglob
+            matches=( "$SCRIPT_DIR"/$CFG )
+            shopt -u nullglob
+            if [[ ${#matches[@]} -eq 0 ]]; then
+                echo "ERROR: no config yml files matched glob: $CFG" >&2
+                exit 1
+            fi
+            for m in "${matches[@]}"; do
+                expanded+=( "${m#$SCRIPT_DIR/}" )
+            done
+        else
+            expanded+=( "$CFG" )
+        fi
+    done
+    CONF_ARR=( "${expanded[@]}" )
+}
+expand_config_globs
+
 USER=$(whoami)
 STORE="${RESULTS_ROOT:-$SCRIPT_DIR/results}"
 LOG_DIR="$STORE/logs"
