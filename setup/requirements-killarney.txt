@@ -45,7 +45,6 @@ sqlalchemy==2.0.49+computecanada
 sympy==1.14.0+computecanada
 threadpoolctl==3.6.0+computecanada
 torch==2.11.0+computecanada
-torchvision==0.16.1+computecanada
 tqdm==4.68.1+computecanada
 typing_extensions==4.15.0+computecanada
 typing_inspection==0.4.2+computecanada

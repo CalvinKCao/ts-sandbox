@@ -83,6 +83,9 @@ class PipelineState:
     lr_warmup_epochs: int = 0
     max_scale_tuning: bool = False
     max_scale_tuning_range: List[float] = field(default_factory=lambda: [2.5, 14.0])
+    n_itrans_hp_trials: int = 10
+    n_diffusion_hp_trials: int = 10
+    n_finetune_hp_trials: int = 10
 
     # -- Paths --
     checkpoint_dir: str = "./results/ckpts"
@@ -199,6 +202,11 @@ class PipelineState:
             init_kwargs["min_snr_gamma"] = float(init_kwargs["min_snr_gamma"])
         if "use_coordinate_channel" in init_kwargs:
             init_kwargs["use_coordinate_channel"] = bool(init_kwargs["use_coordinate_channel"])
+
+        training = cfg.get("training", {})
+        for k in ("n_itrans_hp_trials", "n_diffusion_hp_trials", "n_finetune_hp_trials"):
+            if k in training:
+                init_kwargs[k] = int(training[k])
 
         init_kwargs["extra"] = extra
         init_kwargs["phase_configs"] = cfg.get("phases", [])

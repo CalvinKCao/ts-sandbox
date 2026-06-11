@@ -59,12 +59,12 @@ source "$BOOTSTRAP/bin/activate"
 pip install --no-index --upgrade pip -q 2>/dev/null || pip install -U pip -q
 
 echo "[2/4] Installing pipeline packages (wheel cache first)..."
-_core=(torch torchvision numpy pandas scipy scikit-learn tqdm)
+_core=(torch numpy pandas scipy scikit-learn tqdm)
 _pipeline=(optuna wandb einops pyyaml matplotlib)
 if ! pip install --no-index "${_core[@]}" "${_pipeline[@]}" -q; then
     echo "  Wheel cache miss; falling back to PyTorch cu121 index..."
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
-    pip install "${_core[@]:2}" "${_pipeline[@]}" -q
+    pip install torch --index-url https://download.pytorch.org/whl/cu121 -q
+    pip install "${_core[@]:1}" "${_pipeline[@]}" -q
 fi
 
 echo "[3/4] Sanity check..."
