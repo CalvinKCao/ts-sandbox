@@ -99,7 +99,12 @@ def resolve_data_subset(
             "policy": policy,
         }
 
-    max_variates = int(policy.get("max_variates", len(base_variate_indices)))
+    mv_by_dataset = policy.get("max_variates_by_dataset", {})
+    if dataset_name in mv_by_dataset:
+        max_variates = int(mv_by_dataset[dataset_name])
+    else:
+        max_variates = int(policy.get("max_variates", len(base_variate_indices)))
+        
     n_variates = max(1, min(len(base_variate_indices), max_variates))
     strategy = str(policy.get("variate_strategy", "first"))
     variate_indices = _pick_variate_indices(base_variate_indices, n_variates, strategy, seed)

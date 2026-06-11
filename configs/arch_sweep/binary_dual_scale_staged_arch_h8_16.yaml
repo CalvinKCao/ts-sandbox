@@ -42,6 +42,10 @@ experiment:
     target_dataset: ETTh1
     reduce_if_larger_than_target: true
     max_variates: 7
+    max_variates_by_dataset:
+      ETTm1: 4
+      weather: 4
+      solar_Alabama: 2
     variate_strategy: first
     subset_id_template: '{dataset}_{n_variates}v_s{sample_stride}'
 phases:
