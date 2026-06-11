@@ -35,7 +35,7 @@ virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 pip install --no-index -r "$REQ" -q
-python -c "import torch, optuna, wandb, einops, yaml; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+python -c "import torch, optuna, wandb, einops, yaml; assert torch.cuda.is_available(), 'CUDA is not available (check driver compatibility)!'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
 
 export PYTHONUNBUFFERED=1
 
