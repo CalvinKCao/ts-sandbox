@@ -66,6 +66,13 @@ def patch_globals(
     mod.WINDOW_NORM_STD_FLOOR = state.window_norm_std_floor
     mod.ZERO_GUIDANCE_FORECAST = state.zero_guidance_forecast
     mod.WINDOW_STRIDE = state.window_stride
+    mod.BINARY_NUM_STEPS = state.binary_num_steps
+    mod.BINARY_BETA_START = state.binary_beta_start
+    mod.BINARY_BETA_END = state.binary_beta_end
+    mod.LR_SCHEDULER_TYPE = getattr(state, "lr_scheduler_type", "none")
+    mod.LR_WARMUP_EPOCHS = getattr(state, "lr_warmup_epochs", 0)
+    mod.MAX_SCALE_TUNING = getattr(state, "max_scale_tuning", False)
+    mod.MAX_SCALE_TUNING_RANGE = getattr(state, "max_scale_tuning_range", [2.5, 14.0])
     if state.checkpoint_dir:
         mod.CHECKPOINT_DIR = state.checkpoint_dir
     if state.results_dir:

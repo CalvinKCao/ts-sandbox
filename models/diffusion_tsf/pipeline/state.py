@@ -76,6 +76,13 @@ class PipelineState:
     min_snr_gamma: float = 5.0
     use_coordinate_channel: bool = True
     window_stride: int = 1
+    binary_num_steps: int = 1000
+    binary_beta_start: float = 1e-5
+    binary_beta_end: float = 0.5
+    lr_scheduler_type: str = "none"
+    lr_warmup_epochs: int = 0
+    max_scale_tuning: bool = False
+    max_scale_tuning_range: List[float] = field(default_factory=lambda: [2.5, 14.0])
 
     # -- Paths --
     checkpoint_dir: str = "./results/ckpts"

@@ -44,6 +44,10 @@ training:
   anchor_hp_lambda_max: 0.995
   anchor_hp_alpha_min: 0.35
   anchor_hp_alpha_max: 0.65
+  lr_scheduler_type: none
+  lr_warmup_epochs: 0
+  max_scale_tuning: false
+  max_scale_tuning_range: [2.5, 14.0]
 
 visualization:
   enabled: true
@@ -107,6 +111,9 @@ experiment:
   itrans_e_layers: 4
   itrans_n_heads: 8
   binary_noise_schedule: sqrt_linear
+  binary_num_steps: 1000
+  binary_beta_start: 1.0e-5
+  binary_beta_end: 0.5
   prediction_target: x0
   loss_weighting: none
   min_snr_gamma: 5.0

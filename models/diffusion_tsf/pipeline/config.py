@@ -57,6 +57,9 @@ REQUIRED_EXPERIMENT_KEYS = (
     "itrans_e_layers",
     "itrans_n_heads",
     "binary_noise_schedule",
+    "binary_num_steps",
+    "binary_beta_start",
+    "binary_beta_end",
     "prediction_target",
     "loss_weighting",
     "min_snr_gamma",
@@ -105,6 +108,10 @@ REQUIRED_TRAINING_KEYS = (
     "anchor_hp_lambda_max",
     "anchor_hp_alpha_min",
     "anchor_hp_alpha_max",
+    "lr_scheduler_type",
+    "lr_warmup_epochs",
+    "max_scale_tuning",
+    "max_scale_tuning_range",
 )
 
 REQUIRED_VISUALIZATION_KEYS = (
@@ -157,6 +164,10 @@ _TRAINING_GLOBAL_MAP: Dict[str, str] = {
     "anchor_hp_lambda_max": "ANCHOR_HP_LAMBDA_MAX",
     "anchor_hp_alpha_min": "ANCHOR_HP_ALPHA_MIN",
     "anchor_hp_alpha_max": "ANCHOR_HP_ALPHA_MAX",
+    "lr_scheduler_type": "LR_SCHEDULER_TYPE",
+    "lr_warmup_epochs": "LR_WARMUP_EPOCHS",
+    "max_scale_tuning": "MAX_SCALE_TUNING",
+    "max_scale_tuning_range": "MAX_SCALE_TUNING_RANGE",
 }
 
 
