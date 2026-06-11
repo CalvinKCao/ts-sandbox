@@ -2622,6 +2622,8 @@ def main():
     cli_overrides["parallel_optuna_workers"] = parallel_workers
 
     cfg = load_experiment_config(args.config, cli_overrides)
+    if args.n_variates and "data_subset" in cfg.get("experiment", {}):
+        cfg["experiment"]["data_subset"]["max_variates"] = args.n_variates
     state = PipelineState.from_config(cfg)
 
     if args.checkpoint_dir:

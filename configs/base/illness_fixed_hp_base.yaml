@@ -41,9 +41,9 @@ phases:
 
   - phase: staged_eval
     eval_test_fraction: 1.0
-    test_stride: 2
+    test_stride: 4
     n_samples: 1
-    probabilistic_n_samples: 100
+    probabilistic_n_samples: 20
     tune_sampler: false
     probabilistic_sampler: dpmpp
     probabilistic_num_inference_steps: 20
