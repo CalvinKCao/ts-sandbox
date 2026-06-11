@@ -1,0 +1,4 @@
+extends: base/binary_staged.yaml
+experiment:
+  deterministic_anchor_lambda: 0.9
+  name: hp_anchor_lambda_090

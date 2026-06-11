@@ -1,0 +1,6 @@
+extends: base/binary_staged.yaml
+experiment:
+  name: hp_lr_linear
+training:
+  lr_scheduler_type: linear
+  lr_warmup_epochs: 2

@@ -1,0 +1,4 @@
+extends: base/binary_staged.yaml
+experiment:
+  dit_dropout: 0.1
+  name: hp_dit_dropout_01

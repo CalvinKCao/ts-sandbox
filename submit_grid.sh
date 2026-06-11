@@ -58,7 +58,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
     JOB_PREFIX="smoke"
 else
     CONFIGS="${CONFIGS:-configs/binary_dual_scale_staged.yaml}"
-    WALL_DEFAULT="5:00:00"
+    WALL_DEFAULT="3:00:00"
     MEM="60G"
     CPUS=8
     GPUS=1
