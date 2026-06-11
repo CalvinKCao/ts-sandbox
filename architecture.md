@@ -744,7 +744,7 @@ Experiment YAML merges over `pipeline/config.py` defaults; CLI overrides win las
 - `binary_num_steps=1000`
 - `binary_sample_steps=20` (reverse chain length at inference)
 - `binary_beta_start=1e-5`, `binary_beta_end=0.5` (per-step XOR flip probability ramp)
-- `cfg_dropout=0.1`, `cfg_scale=2.0`
+- `cfg_dropout=0.0`, `cfg_scale=2.0`
 
 ### 12.5 Decode and augmentation behavior
 - `decode_temperature=0.5`
