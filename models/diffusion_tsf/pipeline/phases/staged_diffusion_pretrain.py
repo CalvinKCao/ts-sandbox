@@ -387,7 +387,9 @@ def _resolve_itrans_pretrain(state: PipelineState, source_dir: Optional[str]) ->
     # Patch globals before running dummy tuning
     patch_globals(pipeline_mod, state, honor_dataset_windows=False)
     
-    skip_tuning = state.extra.get("skip_synthetic_tuning", True)
+    # By default, do NOT skip tuning if n_itrans_hp_trials > 1.
+    # The pipeline yaml can explicitly set extra: skip_synthetic_tuning: true to bypass.
+    skip_tuning = state.extra.get("skip_synthetic_tuning", False)
     
     n_trials = getattr(state, "n_itrans_hp_trials", 1)
     if state.smoke_test:

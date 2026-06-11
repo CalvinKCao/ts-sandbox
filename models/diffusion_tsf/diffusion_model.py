@@ -806,20 +806,41 @@ class DiffusionTSF(nn.Module):
             cond_for_unet = torch.cat((cond_for_unet, future_fine_flat), dim=1)
         base_cond_for_unet = cond_for_unet
 
+        guidance_flat = None
+        if self.config.use_guidance_channel:
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, _stats, W_fut)
+            guidance_maps = self._encode_staged_maps(guidance_forecast_norm)
+            if stage == "coarse":
+                guidance_flat = self._resize_cdf_height(guidance_maps["coarse"], H).reshape(BV, 1, H, W_fut)
+            elif stage == "fine":
+                guidance_flat = self._resize_cdf_height(guidance_maps["fine"], H).reshape(BV, 1, H, W_fut)
+            elif stage == "finer":
+                guidance_flat = self._resize_cdf_height(guidance_maps["finer"], H).reshape(BV, 1, H, W_fut)
+
         canvas = self._inject_coordinate_channel(xt_flat.float())
         canvas = self._inject_time_channels(canvas)
 
         # Staged visual conditioning is always GT during training. CFG dropout is
         # restricted to context tokens so the fine stage never sees predicted coarse.
         ctx_anchor = ctx_flat
-        if self.training and self.config.cfg_dropout > 0.0 and ctx_flat is not None:
+        if self.training and self.config.cfg_dropout > 0.0:
             drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
             drop_mask_flat = drop_mask.unsqueeze(1).expand(-1, V).reshape(BV)
-            ctx_flat = torch.where(
-                drop_mask_flat.view(BV, 1, 1),
-                torch.zeros_like(ctx_flat),
-                ctx_flat,
-            )
+            if ctx_flat is not None:
+                ctx_flat = torch.where(
+                    drop_mask_flat.view(BV, 1, 1),
+                    torch.zeros_like(ctx_flat),
+                    ctx_flat,
+                )
+            if guidance_flat is not None:
+                guidance_for_unet = torch.where(
+                    drop_mask_flat.view(BV, 1, 1, 1),
+                    torch.zeros_like(guidance_flat),
+                    guidance_flat,
+                )
+                canvas = torch.cat([canvas, guidance_for_unet], dim=1)
+        elif guidance_flat is not None:
+            canvas = torch.cat([canvas, guidance_flat], dim=1)
 
         out_flat = self._predict_noise_chunked(
             canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices,
@@ -847,6 +868,8 @@ class DiffusionTSF(nn.Module):
             neutral_future_flat = torch.full_like(target_flat, 0.5)
             anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
             anchor_canvas = self._inject_time_channels(anchor_canvas)
+            if guidance_flat is not None:
+                anchor_canvas = torch.cat([anchor_canvas, guidance_flat], dim=1)
             anchor_out_flat = self._predict_noise_chunked(
                 anchor_canvas,
                 anchor_t_flat,
@@ -956,9 +979,23 @@ class DiffusionTSF(nn.Module):
         if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
             variate_indices = self._flat_variate_indices(BV, V, device)
 
+        guidance_flat = None
+        if self.config.use_guidance_channel:
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            guidance_maps = self._encode_staged_maps(guidance_forecast_norm)
+            if stage == "coarse":
+                guidance_flat = self._resize_cdf_height(guidance_maps["coarse"], H).reshape(BV, 1, H, W_fut)
+            elif stage == "fine":
+                guidance_flat = self._resize_cdf_height(guidance_maps["fine"], H).reshape(BV, 1, H, W_fut)
+            elif stage == "finer":
+                guidance_flat = self._resize_cdf_height(guidance_maps["finer"], H).reshape(BV, 1, H, W_fut)
+
         def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
             canvas = self._inject_coordinate_channel(xt)
-            return self._inject_time_channels(canvas)
+            canvas = self._inject_time_channels(canvas)
+            if guidance_flat is not None:
+                canvas = torch.cat([canvas, guidance_flat], dim=1)
+            return canvas
 
         def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
             out = self._predict_noise_chunked(
