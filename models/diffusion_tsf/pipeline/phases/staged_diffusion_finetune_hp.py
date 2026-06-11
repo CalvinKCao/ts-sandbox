@@ -113,6 +113,12 @@ def _suggest_staged_params(
     search_space: str = "default",
 ) -> Dict[str, Any]:
     base_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
+    if getattr(state, "max_scale_tuning", False):
+        rng = getattr(state, "max_scale_tuning_range", [2.5, 14.0])
+        ms = trial.suggest_float("max_scale", float(rng[0]), float(rng[1]))
+    else:
+        ms = base_ms
+
     if smoke_test:
         return {
             "learning_rate": trial.suggest_float("learning_rate", 1e-5, 3e-4, log=True),
@@ -122,7 +128,7 @@ def _suggest_staged_params(
             "loss_weighting": "none",
             "min_snr_gamma": 5.0,
             "prediction_target": "x0",
-            "max_scale": base_ms,
+            "max_scale": ms,
         }
 
     if search_space == "lr_only":
@@ -134,14 +140,12 @@ def _suggest_staged_params(
             "loss_weighting": "none",
             "min_snr_gamma": 5.0,
             "prediction_target": "x0",
-            "max_scale": base_ms,
+            "max_scale": ms,
         }
 
     batch_grid = [b for b in (4, 8, 16, 32, 48, 64, 96, 128) if b <= max_batch_size]
     if not batch_grid:
         batch_grid = [max(1, max_batch_size)]
-    scale_low = max(2.5, base_ms * 0.8)
-    scale_high = min(14.0, base_ms * 1.25)
     params: Dict[str, Any] = {
         "learning_rate": trial.suggest_float("learning_rate", 3e-6, 8e-4, log=True),
         "batch_size": trial.suggest_categorical("batch_size", batch_grid),
@@ -151,7 +155,7 @@ def _suggest_staged_params(
         ),
         "loss_weighting": trial.suggest_categorical("loss_weighting", ["none", "min_snr"]),
         "prediction_target": trial.suggest_categorical("prediction_target", ["x0", "epsilon"]),
-        "max_scale": trial.suggest_float("max_scale", scale_low, scale_high),
+        "max_scale": ms,
     }
     params["min_snr_gamma"] = (
         trial.suggest_float("min_snr_gamma", 1.0, 10.0, log=True)
@@ -282,6 +286,37 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
 
             optimizer = torch.optim.AdamW(model.parameters(), lr=float(params["learning_rate"]))
+            
+            lr_scheduler_type = getattr(state, "lr_scheduler_type", "none")
+            warmup_epochs = getattr(state, "lr_warmup_epochs", 0)
+            warmup_epochs = min(warmup_epochs, max(0, max_epochs - 1))
+            
+            scheduler = None
+            if lr_scheduler_type == "cosine":
+                if warmup_epochs > 0:
+                    scheduler = torch.optim.lr_scheduler.SequentialLR(
+                        optimizer,
+                        schedulers=[
+                            torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs),
+                            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs - warmup_epochs, eta_min=float(params["learning_rate"]) * 0.01)
+                        ],
+                        milestones=[warmup_epochs]
+                    )
+                else:
+                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=float(params["learning_rate"]) * 0.01)
+            elif lr_scheduler_type == "linear":
+                if warmup_epochs > 0:
+                    scheduler = torch.optim.lr_scheduler.SequentialLR(
+                        optimizer,
+                        schedulers=[
+                            torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs),
+                            torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.01, total_iters=max_epochs - warmup_epochs)
+                        ],
+                        milestones=[warmup_epochs]
+                    )
+                else:
+                    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.01, total_iters=max_epochs)
+
             early_stop = EarlyStopping(patience=patience)
             ema = _Ema(model, float(params.get("ema_decay", 0.0))) if params.get("ema_decay", 0.0) else None
             best_val = float("inf")
@@ -303,6 +338,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         ema.update(model)
                     train_loss += float(loss.item())
                     n_train += 1
+
+                if scheduler is not None:
+                    scheduler.step()
 
                 backup = ema.swap_in(model) if ema is not None else None
                 model.eval()
