@@ -156,12 +156,7 @@ phases:
     test_stride: 2
     n_samples: 1
     probabilistic_n_samples: 100
-    tune_sampler: true
-    sampler_tune_fraction: 0.25
-    sampler_tune_probabilistic_n_samples: 8
-    sampler_tune_candidates: [ddim, dpmpp]
-    sampler_tune_steps: [10, 20, 40]
-    sampler_tune_metric: top3_mse
+    tune_sampler: false
     probabilistic_sampler: dpmpp
     probabilistic_num_inference_steps: 20
     batch_size: 8
