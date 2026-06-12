@@ -186,89 +186,29 @@ echo "Job: \$SLURM_JOB_NAME  ID: \$SLURM_JOB_ID  Node: \${SLURMD_NODENAME:-unkno
 echo "GPU: \$(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
 echo "Started: \$(date)"
 
-USER="\${USER:-\$(whoami)}"
-STORE="$REPO/results"
+REPO="$REPO"
+REQ="\$REPO/setup/requirements-killarney.txt"
+[[ -f "\$REQ" ]] || { echo "ERROR: missing \$REQ — run ./setup/killarney_freeze_requirements.sh on login node" >&2; exit 1; }
+[[ -n "\${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR is not set." >&2; exit 1; }
 
-pip_retry() {
-  local max_attempts=5 delay=20 attempt
-  for attempt in \$(seq 1 "\$max_attempts"); do
-    if "\$@"; then return 0; fi
-    if [[ "\$attempt" -lt "\$max_attempts" ]]; then
-      echo "[setup] pip failed (attempt \${attempt}/\${max_attempts}), retry in \${delay}s..."
-      sleep "\$delay"
-      delay=\$((delay + 2))
-    fi
-  done
-  echo "[setup] pip failed after \${max_attempts} attempts: \$*" >&2
-  return 1
-}
+module purge 2>/dev/null || true
+module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9 2>/dev/null || true
+command -v virtualenv >/dev/null || { echo "ERROR: virtualenv not available after module load." >&2; exit 1; }
 
-install_pipeline_deps() {
-  pip_retry pip install --no-index --upgrade pip -q 2>/dev/null || pip_retry pip install -U pip -q
-  if ! python -c "import torch" 2>/dev/null; then
-    if ! pip_retry pip install --no-index torch torchvision numpy pandas scipy scikit-learn tqdm -q 2>/dev/null; then
-      pip_retry pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
-      pip_retry pip install numpy pandas scipy scikit-learn tqdm -q
-    fi
-  fi
-  pip_retry pip install optuna wandb einops pyyaml scikit-learn -q
-  if ! pip_retry pip install --no-index matplotlib -q 2>/dev/null; then
-    pip_retry pip install matplotlib -q 2>/dev/null || export DIFFUSION_TSF_SKIP_VIZ=1
-  fi
-  python -c "import optuna, wandb, einops, yaml"
-}
-
-_load_modules() {
-  module purge 2>/dev/null || true
-  module load StdEnv/2023 2>/dev/null || true
-  module load python/3.11 2>/dev/null || true
-  module load cuda/12.2 2>/dev/null || true
-  module load cudnn/8.9 2>/dev/null || true
-}
-
-VENV=""
-for cand in \\
-  "\$STORE/venv" \\
-  "\${SCRATCH:-}/\${USER}/ts-sandbox/results/venv" \\
-  "\${SCRATCH:-}/ts-sandbox/results/venv" \\
-  "$REPO/results/venv"; do
-  if [[ -x "\${cand}/bin/python" ]]; then
-    VENV="\$cand"
-    break
-  fi
-done
-
-if [[ -n "\$VENV" ]]; then
-  echo "[setup] Using persistent venv: \$VENV"
-  _load_modules
-  # shellcheck source=/dev/null
-  source "\$VENV/bin/activate"
-  export PATH="\$VENV/bin:\$PATH"
-  export PYTHON="\$VENV/bin/python"
-  install_pipeline_deps
-else
-  echo "[setup] No persistent venv; loading modules and building on \${SLURM_TMPDIR:-/tmp}..."
-  _load_modules
-  if ! command -v python >/dev/null 2>&1; then
-    echo "[setup] ERROR: python unavailable. Create \$SCRATCH/ts-sandbox/results/venv on login and resubmit." >&2
-    exit 1
-  fi
-  python -m venv "\${SLURM_TMPDIR:-/tmp}/env"
-  VENV="\${SLURM_TMPDIR:-/tmp}/env"
-  # shellcheck source=/dev/null
-  source "\$VENV/bin/activate"
-  export PATH="\$VENV/bin:\$PATH"
-  export PYTHON="\$VENV/bin/python"
-  install_pipeline_deps
-fi
-
-"\$PYTHON" -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())" || true
+echo "[setup] Building node-local venv on \$SLURM_TMPDIR from \$REQ"
+virtualenv --no-download "\$SLURM_TMPDIR/env"
+# shellcheck source=/dev/null
+source "\$SLURM_TMPDIR/env/bin/activate"
+export PYTHON="\$SLURM_TMPDIR/env/bin/python"
+pip install --no-index --upgrade pip -q
+pip install --no-index -r "\$REQ" -q
+"\$PYTHON" -c "import torch, optuna, wandb, einops, yaml; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export TS_SANDBOX_REPO="$REPO"
-export PYTHONPATH="$REPO\${PYTHONPATH:+:\$PYTHONPATH}"
-cd "$REPO"
+export TS_SANDBOX_REPO="\$REPO"
+export PYTHONPATH="\$REPO\${PYTHONPATH:+:\$PYTHONPATH}"
+cd "\$REPO"
 PREAMBLE
 
 write_worker_script() {
