@@ -411,6 +411,42 @@ def mmpd_eval_batch_size(args: argparse.Namespace, dataset: str, data_dim: Optio
     return cap
 
 
+STAGED_ANCHOR_STAGES = ("finer", "fine", "coarse")
+
+
+def _anchor_run_from_metadata(
+    root: Path,
+    meta_path: Path,
+    meta: Dict[str, Any],
+    variant: str,
+) -> Optional[AnchorRun]:
+    dataset = meta.get("dataset_name") or meta.get("dataset")
+    if not dataset:
+        return None
+    subset_id = meta.get("subset_id", dataset)
+    subset_dir = meta_path.parent
+    best_pt = subset_dir / "best.pt"
+    itrans_pt = root / f"{subset_id}_itransformer_finetuned.pt"
+    if not best_pt.exists() or not itrans_pt.exists():
+        return None
+    return AnchorRun(
+        variant=variant,
+        dataset=dataset,
+        root=root,
+        subset_dir=subset_dir,
+        best_pt=best_pt,
+        itrans_pt=itrans_pt,
+        metadata=meta,
+    )
+
+
+def _anchor_metadata_rank(meta_path: Path) -> int:
+    stage = meta_path.parent.name
+    if stage not in STAGED_ANCHOR_STAGES:
+        return len(STAGED_ANCHOR_STAGES)
+    return STAGED_ANCHOR_STAGES.index(stage)
+
+
 def find_anchor_runs(
     datasets: Sequence[str],
     explicit_roots: Sequence[Path],
@@ -429,33 +465,32 @@ def find_anchor_runs(
         )
 
     found: Dict[str, AnchorRun] = {}
+    best_rank: Dict[str, int] = {}
     for root in roots:
-        for meta_path in root.glob("*/metadata.json"):
+        meta_paths = list(root.glob("*/metadata.json"))
+        for stage in STAGED_ANCHOR_STAGES:
+            meta_paths.extend(root.glob(f"*/{stage}/metadata.json"))
+        for meta_path in meta_paths:
             with meta_path.open(encoding="utf-8") as f:
                 meta = json.load(f)
             dataset = meta.get("dataset_name") or meta.get("dataset")
-            if dataset not in datasets or dataset in found:
+            if dataset not in datasets:
                 continue
-            subset_id = meta.get("subset_id", dataset)
-            subset_dir = meta_path.parent
-            best_pt = subset_dir / "best.pt"
-            itrans_pt = root / f"{subset_id}_itransformer_finetuned.pt"
-            if best_pt.exists() and itrans_pt.exists():
-                found[dataset] = AnchorRun(
-                    variant=variant,
-                    dataset=dataset,
-                    root=root,
-                    subset_dir=subset_dir,
-                    best_pt=best_pt,
-                    itrans_pt=itrans_pt,
-                    metadata=meta,
-                )
+            rank = _anchor_metadata_rank(meta_path)
+            if dataset in found and rank <= best_rank[dataset]:
+                continue
+            run = _anchor_run_from_metadata(root, meta_path, meta, variant)
+            if run is None:
+                continue
+            found[dataset] = run
+            best_rank[dataset] = rank
     missing = [d for d in datasets if d not in found]
     if missing:
+        searched = ", ".join(str(p) for p in roots) if roots else str(ckpt_base)
         raise RuntimeError(
             f"Could not find completed {variant} anchor runs for: "
             + ", ".join(missing)
-            + f" under {ckpt_base}"
+            + f" under {searched}"
         )
     return found
 

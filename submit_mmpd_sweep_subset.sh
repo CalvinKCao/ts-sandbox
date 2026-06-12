@@ -6,6 +6,7 @@
 #   ./submit_mmpd_sweep_subset.sh
 #   ./submit_mmpd_sweep_subset.sh --smoke-test
 #   ./submit_mmpd_sweep_subset.sh --output-dir results/datasets/06-12-sweep-subset-mmpd
+#   ./submit_mmpd_sweep_subset.sh --resume --output-dir results/datasets/06-12-sweep-subset-mmpd
 #
 # MMPD-only: does not submit binary-anchor re-eval workers.
 
@@ -13,16 +14,20 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMOKE=0
+RESUME=0
+FORCE=0
 OUTPUT_DIR=""
 ANCHOR_CONFIG="sweep_baseline"
 SEED=2026
 WALL_MMPD="12:00:00"
-WALL_INIT="0:30:00"
+WALL_INIT="0:45:00"
 WALL_MERGE="0:30:00"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --smoke-test|--smoke) SMOKE=1; shift ;;
+        --resume) RESUME=1; shift ;;
+        --force) FORCE=1; shift ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --anchor-config) ANCHOR_CONFIG="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
@@ -57,26 +62,6 @@ cd "$REPO"
 
 DATASETS=(ETTh1 ETTm1 exchange_rate weather)
 
-promote_staged_for_mmpd() {
-    local root="$1" sub stage
-    for sub in "$root"/*/; do
-        [[ -d "$sub" ]] || continue
-        base=$(basename "$sub")
-        [[ "$base" == .* ]] && continue
-        if [[ -f "${sub}metadata.json" && -f "${sub}best.pt" ]]; then
-            continue
-        fi
-        for stage in finer fine coarse; do
-            if [[ -f "${sub}${stage}/best.pt" ]]; then
-                ln -sfn "${stage}/best.pt" "${sub}best.pt"
-                cp -f "${sub}${stage}/metadata.json" "${sub}metadata.json"
-                echo "[promote] ${root##*/}/${base}/${stage} -> flat metadata+best.pt"
-                break
-            fi
-        done
-    done
-}
-
 pick_anchor_root() {
     local ds="$1"
     local matches=()
@@ -90,20 +75,34 @@ pick_anchor_root() {
     printf '%s\n' "${matches[@]}" | sort | tail -1
 }
 
+pick_resume_output_dir() {
+    local matches=()
+    shopt -s nullglob
+    matches=( "$REPO/results/datasets"/*-sweep-subset-mmpd "$REPO/results/datasets"/*-sweep-subset-mmpd-smoke )
+    shopt -u nullglob
+    if [[ ${#matches[@]} -eq 0 ]]; then
+        echo "ERROR: --resume but no results/datasets/*-sweep-subset-mmpd found; pass --output-dir" >&2
+        exit 1
+    fi
+    printf '%s\n' "${matches[@]}" | sort | tail -1
+}
+
 ANCHOR_ROOTS=()
 for ds in "${DATASETS[@]}"; do
-    root=$(pick_anchor_root "$ds")
-    promote_staged_for_mmpd "$root"
-    ANCHOR_ROOTS+=( "$root" )
+    ANCHOR_ROOTS+=( "$(pick_anchor_root "$ds")" )
 done
 
 if [[ -z "$OUTPUT_DIR" ]]; then
-    RUN_STEM="$(date +%m-%d)-$$-sweep-subset-mmpd$([[ "$SMOKE" -eq 1 ]] && echo -smoke)"
-    OUTPUT_DIR="$REPO/results/datasets/${RUN_STEM}"
+    if [[ "$RESUME" -eq 1 ]]; then
+        OUTPUT_DIR="$(pick_resume_output_dir)"
+    else
+        RUN_STEM="$(date +%m-%d)-$$-sweep-subset-mmpd$([[ "$SMOKE" -eq 1 ]] && echo -smoke)"
+        OUTPUT_DIR="$REPO/results/datasets/${RUN_STEM}"
+    fi
 else
     [[ "$OUTPUT_DIR" != /* ]] && OUTPUT_DIR="$REPO/$OUTPUT_DIR"
-    RUN_STEM="$(basename "$OUTPUT_DIR")"
 fi
+RUN_STEM="$(basename "$OUTPUT_DIR")"
 LOG_DIR="$REPO/results/logs/${RUN_STEM}"
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
@@ -115,10 +114,13 @@ EVAL_BASE=(
     --mmpd-data-dir "$REPO/temp/mmpd_datasets"
     --seed "$SEED"
     --no-update-mmpd
-    --force-mmpd-train
     --force-mmpd-eval
     --force-indices
 )
+
+if [[ "$FORCE" -eq 1 || "$RESUME" -eq 0 ]]; then
+    EVAL_BASE+=(--force-mmpd-train)
+fi
 
 for root in "${ANCHOR_ROOTS[@]}"; do
     EVAL_BASE+=(--binary-anchor-root "$root")
@@ -126,7 +128,7 @@ done
 
 if [[ "$SMOKE" -eq 1 ]]; then
     WALL_MMPD="0:45:00"
-    WALL_INIT="0:20:00"
+    WALL_INIT="0:25:00"
     WALL_MERGE="0:15:00"
     MEM="24G"
     CPUS=4
@@ -153,11 +155,13 @@ if [[ "$SMOKE" -eq 1 ]]; then
         --mmpd-data-dir "$REPO/temp/mmpd_datasets"
         --seed "$SEED"
         --no-update-mmpd
-        --force-mmpd-train
         --force-mmpd-eval
         --force-indices
         --binary-anchor-root "${ANCHOR_ROOTS[0]}"
     )
+    if [[ "$FORCE" -eq 1 || "$RESUME" -eq 0 ]]; then
+        EVAL_BASE+=(--force-mmpd-train)
+    fi
 else
     MEM="60G"
     CPUS=8
@@ -179,10 +183,49 @@ PREAMBLE_FILE="$REPO/results/job_preamble_mmpd_sweep_subset.sh"
 cat > "$PREAMBLE_FILE" << PREAMBLE
 set -euo pipefail
 echo "Job: \$SLURM_JOB_NAME  ID: \$SLURM_JOB_ID  Node: \${SLURMD_NODENAME:-unknown}"
+echo "GPU: \$(nvidia-smi -L 2>/dev/null | head -1 || echo none)"
 echo "Started: \$(date)"
 
 USER="\${USER:-\$(whoami)}"
 STORE="$REPO/results"
+
+pip_retry() {
+  local max_attempts=5 delay=20 attempt
+  for attempt in \$(seq 1 "\$max_attempts"); do
+    if "\$@"; then return 0; fi
+    if [[ "\$attempt" -lt "\$max_attempts" ]]; then
+      echo "[setup] pip failed (attempt \${attempt}/\${max_attempts}), retry in \${delay}s..."
+      sleep "\$delay"
+      delay=\$((delay + 2))
+    fi
+  done
+  echo "[setup] pip failed after \${max_attempts} attempts: \$*" >&2
+  return 1
+}
+
+install_pipeline_deps() {
+  pip_retry pip install --no-index --upgrade pip -q 2>/dev/null || pip_retry pip install -U pip -q
+  if ! python -c "import torch" 2>/dev/null; then
+    if ! pip_retry pip install --no-index torch torchvision numpy pandas scipy scikit-learn tqdm -q 2>/dev/null; then
+      pip_retry pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
+      pip_retry pip install numpy pandas scipy scikit-learn tqdm -q
+    fi
+  fi
+  pip_retry pip install optuna wandb einops pyyaml scikit-learn -q
+  if ! pip_retry pip install --no-index matplotlib -q 2>/dev/null; then
+    pip_retry pip install matplotlib -q 2>/dev/null || export DIFFUSION_TSF_SKIP_VIZ=1
+  fi
+  python -c "import optuna, wandb, einops, yaml"
+}
+
+_load_modules() {
+  module purge 2>/dev/null || true
+  module load StdEnv/2023 2>/dev/null || true
+  module load python/3.11 2>/dev/null || true
+  module load cuda/12.2 2>/dev/null || true
+  module load cudnn/8.9 2>/dev/null || true
+}
+
 VENV=""
 for cand in \\
   "\$STORE/venv" \\
@@ -194,20 +237,50 @@ for cand in \\
     break
   fi
 done
-if [[ -z "\$VENV" ]]; then
-  echo "ERROR: no results/venv found; create one on the login node first." >&2
-  exit 1
+
+if [[ -n "\$VENV" ]]; then
+  echo "[setup] Using persistent venv: \$VENV"
+  _load_modules
+  # shellcheck source=/dev/null
+  source "\$VENV/bin/activate"
+  export PATH="\$VENV/bin:\$PATH"
+  export PYTHON="\$VENV/bin/python"
+  install_pipeline_deps
+else
+  echo "[setup] No persistent venv; loading modules and building on \${SLURM_TMPDIR:-/tmp}..."
+  _load_modules
+  if ! command -v python >/dev/null 2>&1; then
+    echo "[setup] ERROR: python unavailable. Create \$SCRATCH/ts-sandbox/results/venv on login and resubmit." >&2
+    exit 1
+  fi
+  python -m venv "\${SLURM_TMPDIR:-/tmp}/env"
+  VENV="\${SLURM_TMPDIR:-/tmp}/env"
+  # shellcheck source=/dev/null
+  source "\$VENV/bin/activate"
+  export PATH="\$VENV/bin:\$PATH"
+  export PYTHON="\$VENV/bin/python"
+  install_pipeline_deps
 fi
-# shellcheck source=/dev/null
-source "\$VENV/bin/activate"
-export PATH="\$VENV/bin:\$PATH"
-export PYTHON="\$VENV/bin/python"
+
+"\$PYTHON" -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())" || true
+
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TS_SANDBOX_REPO="$REPO"
 export PYTHONPATH="$REPO\${PYTHONPATH:+:\$PYTHONPATH}"
 cd "$REPO"
 PREAMBLE
+
+write_worker_script() {
+    local path="$1"
+    shift
+    cat > "$path" << SCRIPT
+#!/bin/bash
+source "$PREAMBLE_FILE"
+exec "\$PYTHON" -u $(printf '%q ' "$@")
+SCRIPT
+    chmod +x "$path"
+}
 
 SBATCH_COMMON=(
     --account="$ACCOUNT"
@@ -222,56 +295,81 @@ SBATCH_COMMON=(
 echo "Repo:          $REPO"
 echo "Output:        $OUTPUT_DIR"
 echo "Anchor config: $ANCHOR_CONFIG"
+echo "Resume:        $RESUME  Force: $FORCE"
 echo "Datasets:      ${DATASETS[*]}"
 for i in "${!DATASETS[@]}"; do
     echo "  ${DATASETS[$i]} <- ${ANCHOR_ROOTS[$i]}"
 done
 
-echo "Submitting init..."
-JOB_INIT=$(sbatch --parsable \
-    --job-name="mmpd-sw-init$([[ "$SMOKE" -eq 1 ]] && echo -smoke)" \
-    "${SBATCH_COMMON[@]}" \
-    --time="$WALL_INIT" \
-    --output="$LOG_DIR/init-%j.out" \
-    --error="$LOG_DIR/init-%j.err" \
-    <<ENDSCRIPT
-#!/bin/bash
-source "$PREAMBLE_FILE"
-"\$PYTHON" -u ${EVAL_BASE[@]} ${EVAL_EXTRA[@]} \
-  --phase init \
-  --datasets ${DATASETS[*]}
-ENDSCRIPT
-)
-echo "  -> init: $JOB_INIT"
+SKIP_INIT=0
+if [[ "$RESUME" -eq 1 && -f "$OUTPUT_DIR/run_manifest.json" ]]; then
+    SKIP_INIT=1
+    echo "Resume: reusing $OUTPUT_DIR/run_manifest.json"
+fi
+
+JOB_INIT=""
+WORKER_DEP=()
+if [[ "$SKIP_INIT" -eq 0 ]]; then
+    INIT_SCRIPT="$LOG_DIR/submit-init.sh"
+    write_worker_script "$INIT_SCRIPT" "${EVAL_BASE[@]}" "${EVAL_EXTRA[@]}" \
+        --phase init --datasets "${DATASETS[@]}"
+    echo "Submitting init..."
+    JOB_INIT=$(sbatch --parsable \
+        --job-name="mmpd-sw-init$([[ "$SMOKE" -eq 1 ]] && echo -smoke)" \
+        "${SBATCH_COMMON[@]}" \
+        --time="$WALL_INIT" \
+        --output="$LOG_DIR/init-%j.out" \
+        --error="$LOG_DIR/init-%j.err" \
+        "$INIT_SCRIPT")
+    echo "  -> init: $JOB_INIT"
+    WORKER_DEP=(--dependency="afterok:$JOB_INIT")
+fi
 
 WORKER_IDS=()
+PENDING_DATASETS=()
 for ds in "${DATASETS[@]}"; do
-    echo "Submitting mmpd-${ds} (after init)..."
+    partial="$OUTPUT_DIR/partials/${ds}_mmpd.json"
+    if [[ "$RESUME" -eq 1 && "$FORCE" -eq 0 && -f "$partial" ]]; then
+        echo "Skip mmpd-${ds}: partial exists ($partial)"
+        continue
+    fi
+    PENDING_DATASETS+=("$ds")
+
+    WORKER_SCRIPT="$LOG_DIR/submit-mmpd-${ds}.sh"
+    write_worker_script "$WORKER_SCRIPT" "${EVAL_BASE[@]}" "${EVAL_EXTRA[@]}" \
+        --phase mmpd --datasets "$ds"
+    echo "Submitting mmpd-${ds} ${WORKER_DEP[*]}..."
     JOB_MMPD=$(sbatch --parsable \
         --job-name="mmpd-sw-${ds}$([[ "$SMOKE" -eq 1 ]] && echo -smoke)" \
         "${SBATCH_COMMON[@]}" \
         --time="$WALL_MMPD" \
-        --dependency="afterok:$JOB_INIT" \
+        "${WORKER_DEP[@]}" \
         --output="$LOG_DIR/mmpd-${ds}-%j.out" \
         --error="$LOG_DIR/mmpd-${ds}-%j.err" \
-        <<ENDSCRIPT
-#!/bin/bash
-source "$PREAMBLE_FILE"
-"\$PYTHON" -u ${EVAL_BASE[@]} ${EVAL_EXTRA[@]} \
-  --phase mmpd \
-  --datasets "$ds"
-ENDSCRIPT
-    )
+        "$WORKER_SCRIPT")
     echo "  -> mmpd-${ds}: $JOB_MMPD"
     WORKER_IDS+=("$JOB_MMPD")
 done
 
-MERGE_DEP="afterok:${WORKER_IDS[0]}"
-for wid in "${WORKER_IDS[@]:1}"; do
-    MERGE_DEP+=":$wid"
-done
+if [[ ${#WORKER_IDS[@]} -eq 0 && ${#PENDING_DATASETS[@]} -eq 0 ]]; then
+    echo "All dataset partials present; submitting merge only."
+    MERGE_DEP_ARGS=()
+elif [[ ${#WORKER_IDS[@]} -eq 0 ]]; then
+    echo "ERROR: nothing to submit (no pending datasets and no workers)." >&2
+    exit 1
+else
+    MERGE_DEP="afterok:${WORKER_IDS[0]}"
+    for wid in "${WORKER_IDS[@]:1}"; do
+        MERGE_DEP+=":$wid"
+    done
+    MERGE_DEP_ARGS=(--dependency="$MERGE_DEP")
+fi
 
-echo "Submitting merge..."
+MERGE_SCRIPT="$LOG_DIR/submit-merge.sh"
+write_worker_script "$MERGE_SCRIPT" "${EVAL_BASE[@]}" "${EVAL_EXTRA[@]}" \
+    --phase merge --datasets "${DATASETS[@]}" --cpu
+
+echo "Submitting merge ${MERGE_DEP_ARGS[*]}..."
 JOB_MERGE=$(sbatch --parsable \
     --job-name="mmpd-sw-merge$([[ "$SMOKE" -eq 1 ]] && echo -smoke)" \
     --account="$ACCOUNT" \
@@ -280,25 +378,20 @@ JOB_MERGE=$(sbatch --parsable \
     --mem=16G \
     --gres=gpu:l40s:1 \
     --time="$WALL_MERGE" \
-    --dependency="$MERGE_DEP" \
+    "${MERGE_DEP_ARGS[@]}" \
     --output="$LOG_DIR/merge-%j.out" \
     --error="$LOG_DIR/merge-%j.err" \
     --mail-type=FAIL \
     --mail-user=ccao87@uwo.ca \
-    <<ENDSCRIPT
-#!/bin/bash
-source "$PREAMBLE_FILE"
-"\$PYTHON" -u ${EVAL_BASE[@]} ${EVAL_EXTRA[@]} \
-  --phase merge \
-  --datasets ${DATASETS[*]} \
-  --cpu
-ENDSCRIPT
-)
+    "$MERGE_SCRIPT")
 echo "  -> merge: $JOB_MERGE"
 
 echo ""
 echo "=================================================================="
-echo "  MMPD sweep-subset matrix submitted (init + ${#DATASETS[@]} mmpd + merge)"
+echo "  MMPD sweep-subset submitted"
+if [[ -n "$JOB_INIT" ]]; then echo "  init:  $JOB_INIT"; fi
+echo "  workers: ${#WORKER_IDS[@]} pending dataset(s): ${PENDING_DATASETS[*]:-none}"
+echo "  merge: $JOB_MERGE"
 echo "  Output: $OUTPUT_DIR"
 echo "  Logs:   $LOG_DIR/"
 echo "  Monitor: squeue -u \$USER"
