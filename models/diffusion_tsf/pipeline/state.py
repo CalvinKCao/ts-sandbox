@@ -207,6 +207,9 @@ class PipelineState:
         for k in ("n_itrans_hp_trials", "n_diffusion_hp_trials", "n_finetune_hp_trials"):
             if k in training:
                 init_kwargs[k] = int(training[k])
+        for k in ("use_hardcoded_synthetic_hp", "skip_synthetic_tuning", "force_retrain_synthetic"):
+            if k in training:
+                extra[k] = training[k]
 
         init_kwargs["extra"] = extra
         init_kwargs["phase_configs"] = cfg.get("phases", [])

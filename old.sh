@@ -167,9 +167,7 @@ for CFG in "${CONF_ARR[@]}"; do
             fi
 
             if [[ -n "$RUN_STEM" ]]; then
-                OLD_ID=$(echo "$RUN_STEM" | cut -d'-' -f3)
-                JOB_NAME="${JOB_NAME}_res${OLD_ID}"
-                LOG_FILE="$LOG_DIR/${DATE_STR}-%j-${DS}-${CFG_NAME}_res${OLD_ID}.log"
+                LOG_FILE="$LOG_DIR/${RUN_STEM}.log"
             else
                 LOG_FILE="$LOG_DIR/${DATE_STR}-%j-${DS}-${CFG_NAME}.log"
             fi
