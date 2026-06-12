@@ -6,6 +6,9 @@ experiment:
 phases:
 - phase: staged_diffusion_pretrain
   phase1_config_name: binary_dual_scale
+  n_samples: 10000
+  epochs: 20
+  patience: 4
 - phase: itrans_finetune_hp
   n_trials: 10
   max_epochs: 10
