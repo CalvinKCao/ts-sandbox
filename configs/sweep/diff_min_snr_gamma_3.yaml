@@ -1,0 +1,5 @@
+extends: base/fixed_lr_pipeline_base.yaml
+experiment:
+  loss_weighting: min_snr
+  min_snr_gamma: 3.0
+  name: diff_min_snr_gamma_3

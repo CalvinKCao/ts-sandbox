@@ -1,4 +1,0 @@
-extends: base/binary_staged.yaml
-experiment:
-  binary_beta_end: 0.4
-  name: hp_beta_end_04

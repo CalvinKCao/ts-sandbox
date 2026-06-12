@@ -1,8 +1,0 @@
-extends: base/illness_fixed_hp_base.yaml
-
-experiment:
-  name: binary-dual-scale-staged-arch-h32-32
-  experiment_name: binary-dual-scale-staged-arch-h32-32
-  coarse_image_height: 32
-  fine_image_height: 32
-  finer_image_height: 32

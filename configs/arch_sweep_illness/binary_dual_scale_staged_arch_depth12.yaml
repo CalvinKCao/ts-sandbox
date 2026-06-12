@@ -1,6 +1,0 @@
-extends: base/illness_fixed_hp_base.yaml
-
-experiment:
-  name: binary-dual-scale-staged-arch-depth12
-  experiment_name: binary-dual-scale-staged-arch-depth12
-  dit_depth: 12

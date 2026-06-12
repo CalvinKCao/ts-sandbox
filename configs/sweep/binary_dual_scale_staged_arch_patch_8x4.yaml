@@ -1,0 +1,7 @@
+extends: base/fixed_lr_pipeline_base.yaml
+experiment:
+  name: binary-dual-scale-staged-arch-patch-8x4
+  experiment_name: binary-dual-scale-staged-arch-patch-8x4
+  dit_patch_size:
+  - 8
+  - 4

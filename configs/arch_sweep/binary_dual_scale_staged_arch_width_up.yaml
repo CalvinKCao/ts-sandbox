@@ -1,7 +1,0 @@
-extends: base/binary_staged.yaml
-
-experiment:
-  name: binary-dual-scale-staged-arch-width-up
-  experiment_name: binary-dual-scale-staged-arch-width-up
-  dit_embed_dim: 448
-  dit_num_heads: 7

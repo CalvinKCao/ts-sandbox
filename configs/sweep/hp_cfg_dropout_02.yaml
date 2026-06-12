@@ -1,0 +1,5 @@
+extends: base/fixed_lr_pipeline_base.yaml
+experiment:
+  use_guidance_channel: true
+  cfg_dropout: 0.2
+  name: hp_cfg_dropout_02

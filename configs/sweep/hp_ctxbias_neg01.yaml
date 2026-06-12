@@ -1,0 +1,4 @@
+extends: base/fixed_lr_pipeline_base.yaml
+experiment:
+  cross_variate_context_bias: -0.1
+  name: hp_ctxbias_neg01

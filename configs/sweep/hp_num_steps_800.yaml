@@ -1,0 +1,4 @@
+extends: base/fixed_lr_pipeline_base.yaml
+experiment:
+  binary_num_steps: 800
+  name: hp_num_steps_800

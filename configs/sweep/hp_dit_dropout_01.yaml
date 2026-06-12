@@ -1,0 +1,4 @@
+extends: base/fixed_lr_pipeline_base.yaml
+experiment:
+  dit_dropout: 0.1
+  name: hp_dit_dropout_01

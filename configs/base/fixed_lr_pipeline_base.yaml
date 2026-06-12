@@ -1,7 +1,10 @@
-extends: base/fixed_lr_pipeline_base.yaml
+extends: base/binary_staged.yaml
 
-experiment:
-  dataset: illness
+training:
+  itrans_paper_lr_grid: [0.001]
+  finetune_hp_lr_min: 0.00003
+  finetune_hp_lr_max: 0.00003
+  diffusion_ema_decay: 0.0
 
 phases:
   - phase: staged_diffusion_pretrain
@@ -44,4 +47,4 @@ phases:
     batch_size: 8
     gmm_components: 10
     topk_max: 3
-    skip_eval_visualizations: false
+    skip_eval_visualizations: true

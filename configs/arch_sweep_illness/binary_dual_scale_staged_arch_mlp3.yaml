@@ -1,6 +1,0 @@
-extends: base/illness_fixed_hp_base.yaml
-
-experiment:
-  name: binary-dual-scale-staged-arch-mlp3
-  experiment_name: binary-dual-scale-staged-arch-mlp3
-  dit_mlp_ratio: 3.0

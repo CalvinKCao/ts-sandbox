@@ -1,0 +1,4 @@
+extends: base/fixed_lr_pipeline_base.yaml
+experiment:
+  binary_noise_schedule: cosine
+  name: diff_noise_cosine

@@ -119,27 +119,38 @@ def _suggest_staged_params(
     else:
         ms = base_ms
 
+    if search_space == "lr_only":
+        from models.diffusion_tsf.train_multivariate_pipeline import (
+            FINETUNE_HP_LR_MAX,
+            FINETUNE_HP_LR_MIN,
+        )
+
+        if FINETUNE_HP_LR_MIN == FINETUNE_HP_LR_MAX:
+            lr = float(FINETUNE_HP_LR_MIN)
+        else:
+            lr = trial.suggest_float(
+                "learning_rate", FINETUNE_HP_LR_MIN, FINETUNE_HP_LR_MAX, log=True
+            )
+        return {
+            "learning_rate": lr,
+            "batch_size": max(1, max_batch_size),
+            "ema_decay": float(state.extra.get("diffusion_ema_decay", 0.0)),
+            "binary_noise_schedule": state.binary_noise_schedule,
+            "loss_weighting": state.loss_weighting,
+            "min_snr_gamma": float(state.min_snr_gamma),
+            "prediction_target": state.prediction_target,
+            "max_scale": ms,
+        }
+
     if smoke_test:
         return {
             "learning_rate": trial.suggest_float("learning_rate", 1e-5, 3e-4, log=True),
             "batch_size": min(max(1, max_batch_size), 2),
             "ema_decay": 0.0,
-            "binary_noise_schedule": "sqrt_linear",
-            "loss_weighting": "none",
-            "min_snr_gamma": 5.0,
-            "prediction_target": "x0",
-            "max_scale": ms,
-        }
-
-    if search_space == "lr_only":
-        return {
-            "learning_rate": trial.suggest_float("learning_rate", 3e-6, 8e-4, log=True),
-            "batch_size": max(1, max_batch_size),
-            "ema_decay": 0.0,
-            "binary_noise_schedule": "sqrt_linear",
-            "loss_weighting": "none",
-            "min_snr_gamma": 5.0,
-            "prediction_target": "x0",
+            "binary_noise_schedule": state.binary_noise_schedule,
+            "loss_weighting": state.loss_weighting,
+            "min_snr_gamma": float(state.min_snr_gamma),
+            "prediction_target": state.prediction_target,
             "max_scale": ms,
         }
 

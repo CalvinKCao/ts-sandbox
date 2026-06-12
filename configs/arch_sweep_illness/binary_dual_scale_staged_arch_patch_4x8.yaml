@@ -1,6 +1,0 @@
-extends: base/illness_fixed_hp_base.yaml
-
-experiment:
-  name: binary-dual-scale-staged-arch-patch-4x8
-  experiment_name: binary-dual-scale-staged-arch-patch-4x8
-  dit_patch_size: [4, 8]

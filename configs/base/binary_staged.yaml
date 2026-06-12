@@ -110,11 +110,11 @@ experiment:
   itrans_d_ff: 512
   itrans_e_layers: 4
   itrans_n_heads: 8
-  binary_noise_schedule: sqrt_linear
+  binary_noise_schedule: linear
   binary_num_steps: 1000
   binary_beta_start: 1.0e-5
   binary_beta_end: 0.5
-  prediction_target: x0
+  prediction_target: epsilon
   loss_weighting: none
   min_snr_gamma: 5.0
   use_coordinate_channel: true

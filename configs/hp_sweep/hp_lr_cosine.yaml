@@ -1,6 +1,0 @@
-extends: base/binary_staged.yaml
-experiment:
-  name: hp_lr_cosine
-training:
-  lr_scheduler_type: cosine
-  lr_warmup_epochs: 2

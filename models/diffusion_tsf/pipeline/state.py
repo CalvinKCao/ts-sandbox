@@ -70,8 +70,8 @@ class PipelineState:
     itrans_d_ff: int = 512
     itrans_e_layers: int = 4
     itrans_n_heads: int = 8
-    binary_noise_schedule: str = "sqrt_linear"
-    prediction_target: str = "x0"
+    binary_noise_schedule: str = "linear"
+    prediction_target: str = "epsilon"
     loss_weighting: str = "none"
     min_snr_gamma: float = 5.0
     use_coordinate_channel: bool = True
@@ -207,7 +207,12 @@ class PipelineState:
         for k in ("n_itrans_hp_trials", "n_diffusion_hp_trials", "n_finetune_hp_trials"):
             if k in training:
                 init_kwargs[k] = int(training[k])
-        for k in ("use_hardcoded_synthetic_hp", "skip_synthetic_tuning", "force_retrain_synthetic"):
+        for k in (
+            "use_hardcoded_synthetic_hp",
+            "skip_synthetic_tuning",
+            "force_retrain_synthetic",
+            "diffusion_ema_decay",
+        ):
             if k in training:
                 extra[k] = training[k]
 

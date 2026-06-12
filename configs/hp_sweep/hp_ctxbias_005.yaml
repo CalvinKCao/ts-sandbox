@@ -1,4 +1,0 @@
-extends: base/binary_staged.yaml
-experiment:
-  cross_variate_context_bias: 0.05
-  name: hp_ctxbias_005
