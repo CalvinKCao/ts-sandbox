@@ -1,5 +1,0 @@
-extends: base/fixed_lr_pipeline_base.yaml
-experiment:
-  name: hp_lr_linear
-training:
-  lr_scheduler_type: linear
