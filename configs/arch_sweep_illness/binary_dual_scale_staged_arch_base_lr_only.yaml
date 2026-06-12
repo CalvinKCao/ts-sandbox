@@ -77,4 +77,7 @@ phases:
   tune_sampler: false
   probabilistic_sampler: dpmpp
   probabilistic_num_inference_steps: 20
+  batch_size: 8
+  gmm_components: 10
+  topk_max: 3
   skip_eval_visualizations: true

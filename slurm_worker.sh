@@ -13,10 +13,11 @@ set -euo pipefail
 
 PY_ARGS=("$@")
 
-echo "=========================================="
-echo "Job: $SLURM_JOB_NAME  ID: $SLURM_JOB_ID  Node: ${SLURMD_NODENAME:-unknown}"
-echo "Started: $(date)"
-echo "=========================================="
+ts() { date +'%d-%H:%M:%S'; }
+
+echo "$(ts) =========================================="
+echo "$(ts) Job: $SLURM_JOB_NAME  ID: $SLURM_JOB_ID  Node: ${SLURMD_NODENAME:-unknown}"
+echo "$(ts) =========================================="
 
 STORE="${GRID_STORE:-$SCRATCH/ts-sandbox/results}"
 REPO="${SLURM_SUBMIT_DIR:-$PWD}"
@@ -29,7 +30,7 @@ module purge 2>/dev/null || true
 module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9 2>/dev/null || true
 command -v virtualenv >/dev/null || { echo "ERROR: virtualenv not available after module load." >&2; exit 1; }
 
-echo "[setup] Building node-local venv on \$SLURM_TMPDIR from $REQ"
+echo "$(ts) [setup] Building node-local venv on \$SLURM_TMPDIR from $REQ"
 virtualenv --no-download "$SLURM_TMPDIR/env"
 # shellcheck source=/dev/null
 source "$SLURM_TMPDIR/env/bin/activate"
@@ -62,11 +63,11 @@ BENCHMARK_DATASETS="${DATASETS_DIR:-$REPO/datasets}"
     exit 1
 }
 
-echo "Repo: $PWD"
-echo "Checkpoints: $CKPT_DIR"
-echo "Results: $DATA_DIR"
-echo "Benchmark CSVs: $BENCHMARK_DATASETS"
-echo "GPUs: $(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ') ($(nvidia-smi -L 2>/dev/null | head -1 || echo none))"
+echo "$(ts) Repo: $PWD"
+echo "$(ts) Checkpoints: $CKPT_DIR"
+echo "$(ts) Results: $DATA_DIR"
+echo "$(ts) Benchmark CSVs: $BENCHMARK_DATASETS"
+echo "$(ts) GPUs: $(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ') ($(nvidia-smi -L 2>/dev/null | head -1 || echo none))"
 
 PY_ARGS+=(
     --checkpoint-dir "$CKPT_DIR"
@@ -74,9 +75,9 @@ PY_ARGS+=(
     --datasets-dir "$BENCHMARK_DATASETS"
 )
 
-echo "[train] Starting pipeline: ${PY_ARGS[*]}"
+echo "$(ts) [train] Starting pipeline: ${PY_ARGS[*]}"
 python -u -m models.diffusion_tsf.train_multivariate_pipeline "${PY_ARGS[@]}"
 
-echo "=========================================="
-echo "Done: $(date)"
-echo "=========================================="
+echo "$(ts) =========================================="
+echo "$(ts) Done"
+echo "$(ts) =========================================="
