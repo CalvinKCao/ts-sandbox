@@ -171,10 +171,43 @@ _TRAINING_GLOBAL_MAP: Dict[str, str] = {
 }
 
 
+def _is_phase_list(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    return all(isinstance(item, dict) and "phase" in item for item in value)
+
+
+def _merge_phase_lists(base: list, override: list) -> list:
+    """Merge phase override entries into base by ``phase`` name."""
+    if not _is_phase_list(base):
+        return list(override)
+    if not _is_phase_list(override):
+        return list(override)
+
+    merged: Dict[str, Dict[str, Any]] = {}
+    order: list[str] = []
+    for entry in base:
+        name = str(entry["phase"])
+        merged[name] = dict(entry)
+        order.append(name)
+
+    for entry in override:
+        name = str(entry["phase"])
+        if name in merged:
+            merged[name] = _deep_merge(merged[name], entry)
+        else:
+            merged[name] = dict(entry)
+            order.append(name)
+
+    return [merged[name] for name in order]
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     out = dict(base)
     for k, v in override.items():
-        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+        if k == "phases" and _is_phase_list(out.get(k)) and _is_phase_list(v):
+            out[k] = _merge_phase_lists(out[k], v)
+        elif k in out and isinstance(out[k], dict) and isinstance(v, dict):
             out[k] = _deep_merge(out[k], v)
         else:
             out[k] = v
