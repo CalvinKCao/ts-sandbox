@@ -31,6 +31,8 @@ TUNED_MODEL_KEYS = (
     "prediction_target",
     "loss_weighting",
     "min_snr_gamma",
+    "d3pm_transition_max",
+    "dit_dropout",
 )
 
 
@@ -174,6 +176,26 @@ def _suggest_staged_params(
         else 5.0
     )
     return params
+
+
+def _suggest_ordinal_d3pm_params(
+    trial,
+    state: PipelineState,
+    max_batch_size: int,
+    smoke_test: bool,
+) -> Dict[str, Any]:
+    base_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
+    batch_size = min(max(1, max_batch_size), 2) if smoke_test else max(1, max_batch_size)
+    return {
+        "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
+        "d3pm_transition_max": trial.suggest_float("d3pm_transition_max", 0.1, 0.4),
+        "dit_dropout": trial.suggest_categorical("dit_dropout", [0.0, 0.1]),
+        "batch_size": batch_size,
+        "max_scale": base_ms,
+        "prediction_target": "x0",
+        "loss_weighting": "none",
+        "min_snr_gamma": float(state.min_snr_gamma),
+    }
 
 
 class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
@@ -470,7 +492,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         max_epochs = int(self.require("max_epochs"))
         patience = int(self.require("patience"))
         search_space = str(self.require("search_space")).lower()
-        if search_space not in {"default", "lr_only"}:
+        if search_space not in {"default", "lr_only", "ordinal_d3pm"}:
             raise ValueError(f"Unknown staged diffusion search_space={search_space!r}")
         if state.smoke_test:
             max_epochs = patience = 1
@@ -520,9 +542,14 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 dev = state.resolve_device()
 
                 def objective(trial):
-                    params = _suggest_staged_params(
-                        trial, state, max_batch, state.smoke_test, search_space=search_space,
-                    )
+                    if search_space == "ordinal_d3pm":
+                        params = _suggest_ordinal_d3pm_params(
+                            trial, state, max_batch, state.smoke_test,
+                        )
+                    else:
+                        params = _suggest_staged_params(
+                            trial, state, max_batch, state.smoke_test, search_space=search_space,
+                        )
                     trial.set_user_attr("full_params", dict(params))
                     trial_ckpt = os.path.join(
                         subset_dir, f"_diff_ft_trial_{trial.number}_best.pt",

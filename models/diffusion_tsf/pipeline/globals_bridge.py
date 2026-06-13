@@ -56,6 +56,10 @@ def patch_globals(
     mod.CFG_DROPOUT = state.cfg_dropout
     mod.MODEL_TYPE = state.model_type
     mod.DIFFUSION_TYPE = state.diffusion_type
+    mod.D3PM_TRANSITION_MAX = state.d3pm_transition_max
+    mod.D3PM_TRANSITION_MIN = state.d3pm_transition_min
+    mod.D3PM_NEIGHBOR_KERNEL = state.d3pm_neighbor_kernel
+    mod.D3PM_NOISE_SCHEDULE = state.d3pm_noise_schedule
     mod.DETERMINISTIC_ANCHOR_LOSS = state.deterministic_anchor_loss
     mod.DETERMINISTIC_ANCHOR_LAMBDA = state.deterministic_anchor_lambda
     mod.DETERMINISTIC_ANCHOR_ALPHA = state.deterministic_anchor_alpha

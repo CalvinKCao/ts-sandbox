@@ -61,6 +61,13 @@ def infer_diffusion_type(ckpt: dict, override: Optional[str] = None) -> str:
     if isinstance(cfg, dict):
         return cfg.get('diffusion_type', 'binary')
     sd = ckpt.get('model_state_dict', {})
+    head_bias = sd.get('noise_predictor.head.bias')
+    if head_bias is not None:
+        patch_area = int(train_pipeline.DIT_PATCH_SIZE[0] * train_pipeline.DIT_PATCH_SIZE[1])
+        if int(head_bias.shape[0]) == patch_area:
+            return 'ordinal_d3pm'
+        if int(head_bias.shape[0]) == 2 * patch_area:
+            return 'binary'
     for key, value in sd.items():
         if key.endswith('noise_predictor.final_conv.weight') and value.shape[0] == 2:
             return 'binary'

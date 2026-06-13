@@ -117,6 +117,10 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'cross_variate_context_bias': CROSS_VARIATE_CONTEXT_BIAS,
         'model_type': MODEL_TYPE,
         'diffusion_type': DIFFUSION_TYPE,
+        'd3pm_transition_max': D3PM_TRANSITION_MAX,
+        'd3pm_transition_min': D3PM_TRANSITION_MIN,
+        'd3pm_neighbor_kernel': D3PM_NEIGHBOR_KERNEL,
+        'd3pm_noise_schedule': D3PM_NOISE_SCHEDULE,
         'dit_patch_size': DIT_PATCH_SIZE,
         'dit_embed_dim': DIT_EMBED_DIM,
         'dit_depth': DIT_DEPTH,
@@ -290,6 +294,10 @@ USE_GUIDANCE_CHANNEL = True
 CFG_DROPOUT = 0.1
 MODEL_TYPE = "dit"
 DIFFUSION_TYPE = "binary"
+D3PM_TRANSITION_MAX = 0.3
+D3PM_TRANSITION_MIN = 1e-5
+D3PM_NEIGHBOR_KERNEL = "gaussian"
+D3PM_NOISE_SCHEDULE = "sqrt_linear"
 DIT_PATCH_SIZE = (8, 8)
 DIT_EMBED_DIM = 384
 DIT_DEPTH = 8
@@ -785,8 +793,14 @@ def create_diffusion_model(
         finer_image_height=FINER_IMAGE_HEIGHT,
         max_scale=o("max_scale", MAX_SCALE),
         binary_noise_schedule=o("binary_noise_schedule", BINARY_NOISE_SCHEDULE),
-        prediction_target=o("prediction_target", PREDICTION_TARGET),
-        loss_weighting=o("loss_weighting", LOSS_WEIGHTING),
+        prediction_target=o(
+            "prediction_target",
+            "x0" if DIFFUSION_TYPE == "ordinal_d3pm" else PREDICTION_TARGET,
+        ),
+        loss_weighting=o(
+            "loss_weighting",
+            "none" if DIFFUSION_TYPE == "ordinal_d3pm" else LOSS_WEIGHTING,
+        ),
         min_snr_gamma=o("min_snr_gamma", MIN_SNR_GAMMA),
         use_coordinate_channel=USE_COORDINATE_CHANNEL,
         use_guidance_channel=o("use_guidance_channel", USE_GUIDANCE_CHANNEL),
@@ -803,11 +817,15 @@ def create_diffusion_model(
         dit_depth=DIT_DEPTH,
         dit_num_heads=DIT_NUM_HEADS,
         dit_mlp_ratio=DIT_MLP_RATIO,
-        dit_dropout=DIT_DROPOUT,
+        dit_dropout=o("dit_dropout", DIT_DROPOUT),
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
         use_amp=USE_AMP,
         diffusion_type=o("diffusion_type", DIFFUSION_TYPE),
+        d3pm_transition_max=o("d3pm_transition_max", D3PM_TRANSITION_MAX),
+        d3pm_transition_min=o("d3pm_transition_min", D3PM_TRANSITION_MIN),
+        d3pm_neighbor_kernel=o("d3pm_neighbor_kernel", D3PM_NEIGHBOR_KERNEL),
+        d3pm_noise_schedule=o("d3pm_noise_schedule", D3PM_NOISE_SCHEDULE),
         use_deterministic_anchor_loss=o("use_deterministic_anchor_loss", DETERMINISTIC_ANCHOR_LOSS),
         deterministic_anchor_lambda=o("deterministic_anchor_lambda", DETERMINISTIC_ANCHOR_LAMBDA),
         deterministic_anchor_alpha=o("deterministic_anchor_alpha", DETERMINISTIC_ANCHOR_ALPHA),
@@ -1731,9 +1749,20 @@ def pretrain_diffusion(
     )
     val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=0)
 
+    model_kwargs = anchor_kwargs_from_params(best_params)
+    for key in (
+        "max_scale",
+        "d3pm_transition_max",
+        "d3pm_transition_min",
+        "dit_dropout",
+        "prediction_target",
+        "loss_weighting",
+    ):
+        if key in best_params:
+            model_kwargs[key] = best_params[key]
     model = create_diffusion_model(
         guidance_model=itrans_guidance,
-        **anchor_kwargs_from_params(best_params),
+        **model_kwargs,
     ).to(device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)

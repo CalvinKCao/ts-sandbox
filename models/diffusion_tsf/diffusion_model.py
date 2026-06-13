@@ -14,7 +14,7 @@ from typing import Dict, Optional, Tuple, Union
 
 from .config import DiffusionTSFConfig
 from .preprocessing import TimeSeriesTo2D
-from .diffusion import BinaryDiffusionScheduler
+from .diffusion import BinaryDiffusionScheduler, OrdinalD3PMScheduler
 from .guidance import GuidanceModel, iTransformerTokenAdapter
 from .dit import FactorizedDiT
 
@@ -152,7 +152,7 @@ class DiffusionTSF(nn.Module):
         self.noise_predictor = FactorizedDiT(
             in_channels=backbone_in_channels,
             cond_channels=config.visual_cond_channels,
-            out_channels=2,
+            out_channels=config.dit_out_channels,
             image_height=config.image_height,
             patch_size=config.dit_patch_size,
             embed_dim=config.dit_embed_dim,
@@ -180,12 +180,23 @@ class DiffusionTSF(nn.Module):
             dropout=0.1,
         )
 
-        self.binary_scheduler = BinaryDiffusionScheduler(
-            num_steps=config.binary_num_steps,
-            beta_start=config.binary_beta_start,
-            beta_end=config.binary_beta_end,
-            schedule_type=config.binary_noise_schedule,
-        )
+        self.binary_scheduler = None
+        self.ordinal_scheduler = None
+        if config.diffusion_type == "binary":
+            self.binary_scheduler = BinaryDiffusionScheduler(
+                num_steps=config.binary_num_steps,
+                beta_start=config.binary_beta_start,
+                beta_end=config.binary_beta_end,
+                schedule_type=config.binary_noise_schedule,
+            )
+        elif config.diffusion_type == "ordinal_d3pm":
+            self.ordinal_scheduler = OrdinalD3PMScheduler(
+                num_steps=config.binary_num_steps,
+                num_classes=config.image_height,
+                transition_min=config.d3pm_transition_min,
+                transition_max=config.d3pm_transition_max,
+                schedule_type=config.d3pm_noise_schedule,
+            )
 
         logger.debug("DiffusionTSF initialized:")
         logger.debug(
@@ -207,7 +218,10 @@ class DiffusionTSF(nn.Module):
     def to(self, device):
         """Move model and scheduler to device."""
         super().to(device)
-        self.binary_scheduler = self.binary_scheduler.to(device)
+        if self.binary_scheduler is not None:
+            self.binary_scheduler = self.binary_scheduler.to(device)
+        if self.ordinal_scheduler is not None:
+            self.ordinal_scheduler = self.ordinal_scheduler.to(device)
         return self
 
     def _get_coordinate_grid(
@@ -446,6 +460,91 @@ class DiffusionTSF(nn.Module):
         )
         return {"coarse": coarse, "fine": fine}
 
+    def _encode_staged_maps_skyline(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        coarse_h, fine_h, _finer_h = self._staged_image_heights()
+        coarse, fine, coarse_bins, fine_bins = self.to_2d.encode_dual_skyline_heights(
+            x,
+            coarse_height=coarse_h,
+            fine_height=fine_h,
+        )
+        return {
+            "coarse": coarse,
+            "fine": fine,
+            "coarse_bins": coarse_bins,
+            "fine_bins": fine_bins,
+        }
+
+    def _resize_skyline_height(self, image: torch.Tensor, target_height: int) -> torch.Tensor:
+        if image.shape[2] == target_height:
+            return image
+        flat = image.reshape(-1, 1, image.shape[2], image.shape[3])
+        resized = F.interpolate(
+            flat,
+            size=(target_height, image.shape[3]),
+            mode="nearest",
+        )
+        return resized.reshape(image.shape[0], image.shape[1], target_height, image.shape[3])
+
+    def _coarse_skyline_to_height(self, coarse_map: torch.Tensor, target_height: int) -> torch.Tensor:
+        if coarse_map.shape[2] == target_height:
+            return coarse_map
+        coarse_value = self.to_2d.decode_skyline(
+            coarse_map,
+            value_range=self.config.max_scale,
+            squeeze_univariate=False,
+        )
+        skyline, _ = self.to_2d.encode_skyline(
+            coarse_value,
+            height=target_height,
+            value_range=self.config.max_scale,
+        )
+        return skyline
+
+    def decode_dual_from_skyline(
+        self,
+        coarse_map: torch.Tensor,
+        fine_map: torch.Tensor,
+        squeeze_univariate: bool = True,
+    ) -> torch.Tensor:
+        return self.to_2d.decode_dual_skyline(
+            coarse_map,
+            fine_map,
+            squeeze_univariate=squeeze_univariate,
+        )
+
+    def _random_uniform_skyline(
+        self,
+        shape: Tuple[int, int, int, int],
+        device: torch.device,
+    ) -> torch.Tensor:
+        n, _c, h, w = shape
+        bins = torch.randint(0, h, (n, w), device=device)
+        return self.ordinal_scheduler._skyline_from_bins(bins)
+
+    def _staged_past_condition_skyline(
+        self,
+        past_norm: torch.Tensor,
+        target_width: int,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        B, V = past_norm.shape[:2]
+        H = self.config.image_height
+        BV = B * V
+        past_tail_len = min(past_norm.shape[-1], target_width)
+        past_tail_norm = past_norm[..., -past_tail_len:]
+        past_maps = self._encode_staged_maps_skyline(past_tail_norm)
+        cond_maps = []
+        if self.config.diffusion_stage == "coarse":
+            cond_maps.append(self._resize_skyline_height(past_maps["coarse"], H))
+        else:
+            cond_maps.append(self._coarse_skyline_to_height(past_maps["coarse"], H))
+        cond_maps.append(self._resize_skyline_height(past_maps["fine"], H))
+        cond = torch.cat(
+            [m.reshape(BV, 1, H, past_tail_len) for m in cond_maps],
+            dim=1,
+        )
+        cond = F.interpolate(cond, size=(H, target_width), mode="nearest")
+        return cond, past_maps
+
     def _resize_cdf_height(self, image: torch.Tensor, target_height: int) -> torch.Tensor:
         if image.shape[2] == target_height:
             return image
@@ -613,6 +712,10 @@ class DiffusionTSF(nn.Module):
         t: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (binary factorized DiT path)."""
+        if self.config.diffusion_type == "ordinal_d3pm":
+            if self.config.diffusion_stage in {"coarse", "fine", "finer"}:
+                return self._forward_ordinal_d3pm_staged(past, future, t)
+            raise ValueError("ordinal_d3pm requires staged diffusion_stage 'coarse' or 'fine'.")
         if self.config.diffusion_stage in {"coarse", "fine", "finer"}:
             return self._forward_binary_staged(past, future, t)
         if self.config.use_dual_scale:
@@ -659,6 +762,10 @@ class DiffusionTSF(nn.Module):
             future_coarse_2d=future_coarse_2d,
             future_fine_2d=future_fine_2d,
         )
+        if self.config.diffusion_type == "ordinal_d3pm":
+            if self.config.diffusion_stage in {"coarse", "fine", "finer"}:
+                return self._generate_ordinal_d3pm_staged(past, **gen_common)
+            raise ValueError("ordinal_d3pm requires staged diffusion_stage 'coarse' or 'fine'.")
         if self.config.diffusion_stage in {"coarse", "fine", "finer"}:
             return self._generate_binary_staged(past, **gen_common)
         if self.config.use_dual_scale:
@@ -757,6 +864,9 @@ class DiffusionTSF(nn.Module):
         )
         cond = F.interpolate(cond, size=(H, target_width), mode='bilinear', align_corners=False)
         return cond, past_maps
+
+    def _ordinal_ce_loss(self, logits: torch.Tensor, target_bins: torch.Tensor) -> torch.Tensor:
+        return F.cross_entropy(logits, target_bins.long())
 
     def _forward_binary_staged(
         self,
@@ -912,6 +1022,285 @@ class DiffusionTSF(nn.Module):
             result['x0_pred_fine'] = x0_pred
         else:
             result['x0_pred_finer'] = x0_pred
+        return result
+
+    def _forward_ordinal_d3pm_staged(
+        self,
+        past: torch.Tensor,
+        future: torch.Tensor,
+        t: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Staged ordinal D3PM training with skyline maps and cross-entropy loss."""
+        assert self.ordinal_scheduler is not None, "ordinal scheduler is not initialized"
+        stage = self.config.diffusion_stage
+        if stage not in {"coarse", "fine"}:
+            raise ValueError(f"ordinal_d3pm staged forward does not support stage={stage!r}")
+
+        B = past.shape[0]
+        V = self.config.num_variables
+        device = past.device
+        BV = B * V
+
+        past_norm, future_norm, _stats = self._normalize_sequence(past, future)
+        future_maps = self._encode_staged_maps_skyline(future_norm)
+        target_skyline = future_maps[stage]
+        target_bins = future_maps[f"{stage}_bins"]
+        W_fut = target_skyline.shape[3]
+        H = target_skyline.shape[2]
+
+        if t is None:
+            t = torch.randint(0, self.config.binary_num_steps, (B,), device=device)
+        t_flat = t.unsqueeze(1).expand(-1, V).reshape(BV)
+        variate_indices = None
+        if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
+            variate_indices = self._flat_variate_indices(BV, V, device)
+
+        target_flat = target_skyline.reshape(BV, 1, H, W_fut)
+        target_bins_flat = target_bins.reshape(BV, W_fut)
+        xt_flat, _xt_bins = self.ordinal_scheduler.add_noise(target_flat, t_flat)
+
+        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past)
+        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
+
+        cond_for_unet, past_maps = self._staged_past_condition_skyline(past_norm, W_fut)
+        if stage == "fine":
+            future_coarse_cond = self._coarse_skyline_to_height(future_maps["coarse"], H)
+            cond_for_unet = torch.cat(
+                (cond_for_unet, future_coarse_cond.reshape(BV, 1, H, W_fut)),
+                dim=1,
+            )
+        base_cond_for_unet = cond_for_unet
+
+        guidance_flat = None
+        if self.config.use_guidance_channel:
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, _stats, W_fut)
+            guidance_maps = self._encode_staged_maps_skyline(guidance_forecast_norm)
+            guidance_flat = self._resize_skyline_height(guidance_maps[stage], H).reshape(BV, 1, H, W_fut)
+
+        canvas = self._inject_coordinate_channel(xt_flat.float())
+        canvas = self._inject_time_channels(canvas)
+        ctx_anchor = ctx_flat
+
+        if self.training and self.config.cfg_dropout > 0.0:
+            drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
+            drop_mask_flat = drop_mask.unsqueeze(1).expand(-1, V).reshape(BV)
+            if ctx_flat is not None:
+                ctx_flat = torch.where(
+                    drop_mask_flat.view(BV, 1, 1),
+                    torch.zeros_like(ctx_flat),
+                    ctx_flat,
+                )
+            if guidance_flat is not None:
+                guidance_for_unet = torch.where(
+                    drop_mask_flat.view(BV, 1, 1, 1),
+                    torch.zeros_like(guidance_flat),
+                    guidance_flat,
+                )
+                canvas = torch.cat([canvas, guidance_for_unet], dim=1)
+        elif guidance_flat is not None:
+            canvas = torch.cat([canvas, guidance_flat], dim=1)
+
+        out_flat = self._predict_noise_chunked(
+            canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices,
+        )
+        logits = out_flat[:, 0]
+        regular_loss = self._ordinal_ce_loss(logits, target_bins_flat)
+
+        anchor_loss = torch.tensor(0.0, device=device)
+        combined_loss = regular_loss
+        if self.config.use_deterministic_anchor_loss:
+            anchor_t_flat = torch.full(
+                (BV,),
+                self.config.binary_num_steps - 1,
+                device=device,
+                dtype=t_flat.dtype,
+            )
+            neutral_future_flat = self._random_uniform_skyline(
+                (BV, 1, H, W_fut),
+                device,
+            )
+            anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
+            anchor_canvas = self._inject_time_channels(anchor_canvas)
+            if guidance_flat is not None:
+                anchor_canvas = torch.cat([anchor_canvas, guidance_flat], dim=1)
+            anchor_out_flat = self._predict_noise_chunked(
+                anchor_canvas,
+                anchor_t_flat,
+                base_cond_for_unet,
+                ctx_anchor,
+                variate_indices=variate_indices,
+            )
+            anchor_logits = anchor_out_flat[:, 0]
+            anchor_loss = self._ordinal_ce_loss(anchor_logits, target_bins_flat)
+            lam = self.config.deterministic_anchor_lambda
+            combined_loss = lam * regular_loss + (1.0 - lam) * anchor_loss
+
+        x0_pred = F.softmax(logits, dim=1).reshape(B, V, H, W_fut)
+
+        result = {
+            "loss": combined_loss,
+            "noise_loss": regular_loss,
+            "combined_mse_loss": combined_loss,
+            "anchor_loss": anchor_loss,
+            "loss_x0": regular_loss,
+            "loss_zt": torch.tensor(0.0, device=device),
+            "emd_loss": torch.tensor(0.0, device=device),
+            "guidance_loss": torch.tensor(0.0, device=device),
+            "noise_pred": x0_pred,
+            "x0_pred": x0_pred,
+            "future_2d": target_skyline,
+            "future_2d_coarse": future_maps["coarse"],
+            "future_2d_fine": future_maps["fine"],
+            "past_2d_coarse": past_maps["coarse"],
+            "past_2d_fine": past_maps["fine"],
+            "t": t,
+            "diffusion_stage": stage,
+        }
+        if stage == "coarse":
+            result["x0_pred_coarse"] = x0_pred
+        else:
+            result["x0_pred_fine"] = x0_pred
+        return result
+
+    @torch.no_grad()
+    def _generate_ordinal_d3pm_staged(
+        self,
+        past: torch.Tensor,
+        num_steps: int = 20,
+        verbose: bool = False,
+        decoder_method: str = "mean",
+        sampler: str = "ddim",
+        yield_intermediates: bool = False,
+        reverse_step_indices: Optional[torch.Tensor] = None,
+        snapshot_timesteps: Optional[Tuple[int, ...]] = None,
+        future_coarse_2d: Optional[torch.Tensor] = None,
+        future_fine_2d: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        """Generate staged ordinal skylines and decode to 1D forecasts."""
+        assert self.ordinal_scheduler is not None, "ordinal scheduler is not initialized"
+        stage = self.config.diffusion_stage
+        if stage not in {"coarse", "fine"}:
+            raise ValueError(f"ordinal_d3pm staged generate does not support stage={stage!r}")
+
+        B = past.shape[0]
+        V = self.config.num_variables
+        H = self.config.image_height
+        device = past.device
+        BV = B * V
+        W_fut = self.config.forecast_length
+
+        past_norm, _, stats = self._normalize_sequence(past)
+        cond_for_unet, past_maps = self._staged_past_condition_skyline(past_norm, W_fut)
+        coarse_for_decode = future_coarse_2d
+        if stage == "fine":
+            if future_coarse_2d is None:
+                raise ValueError("fine-stage generation requires future_coarse_2d from the coarse model.")
+            future_coarse_cond = self._coarse_skyline_to_height(future_coarse_2d.to(device), H)
+            cond_for_unet = torch.cat(
+                (cond_for_unet, future_coarse_cond.reshape(BV, 1, H, W_fut)),
+                dim=1,
+            )
+
+        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past)
+        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
+        variate_indices = None
+        if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
+            variate_indices = self._flat_variate_indices(BV, V, device)
+
+        guidance_flat = None
+        if self.config.use_guidance_channel:
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            guidance_maps = self._encode_staged_maps_skyline(guidance_forecast_norm)
+            guidance_flat = self._resize_skyline_height(guidance_maps[stage], H).reshape(BV, 1, H, W_fut)
+
+        def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
+            canvas = self._inject_coordinate_channel(xt)
+            canvas = self._inject_time_channels(canvas)
+            if guidance_flat is not None:
+                canvas = torch.cat([canvas, guidance_flat], dim=1)
+            return canvas
+
+        def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
+            out = self._predict_noise_chunked(
+                _build_canvas(xt), t_batch, cond_for_unet, ctx_flat,
+                variate_indices=variate_indices,
+            )
+            return out[:, 0:1]
+
+        intermediates = None
+        if sampler in ("anchor", "deterministic_anchor"):
+            t_batch = torch.full(
+                (BV,),
+                self.config.binary_num_steps - 1,
+                device=device,
+                dtype=torch.long,
+            )
+            neutral_future_flat = self._random_uniform_skyline((BV, 1, H, W_fut), device)
+            logits = _chunked_model_fn(neutral_future_flat, t_batch)[:, 0]
+            future_2d_flat = self.ordinal_scheduler._skyline_from_bins(logits.argmax(dim=1))
+            if yield_intermediates:
+                intermediates = [(999, neutral_future_flat.clone()), (0, future_2d_flat.clone())]
+        else:
+            sample_kwargs = dict(
+                model_fn=_chunked_model_fn,
+                shape=(BV, 1, H, W_fut),
+                num_steps=num_steps,
+                device=device,
+                verbose=verbose,
+                sampler=sampler,
+                reverse_step_indices=reverse_step_indices,
+                snapshot_timesteps=snapshot_timesteps,
+            )
+            if yield_intermediates:
+                future_2d_flat, intermediates = self.ordinal_scheduler.sample(
+                    yield_intermediates=True,
+                    **sample_kwargs,
+                )
+            else:
+                future_2d_flat = self.ordinal_scheduler.sample(**sample_kwargs)
+
+        generated_2d = future_2d_flat.reshape(B, V, H, W_fut)
+        if stage == "coarse":
+            future_2d_coarse = generated_2d
+            future_norm = self.to_2d.decode_skyline(
+                future_2d_coarse,
+                value_range=self.config.max_scale,
+                squeeze_univariate=(V == 1),
+            )
+            future_2d_fine = None
+        else:
+            future_2d_coarse = coarse_for_decode.to(device)
+            future_2d_fine = generated_2d
+            future_norm = self.decode_dual_from_skyline(
+                future_2d_coarse,
+                future_2d_fine,
+                squeeze_univariate=(V == 1),
+            )
+        future = self._denormalize(future_norm, stats)
+
+        K = self.config.lookback_overlap
+        if K > 0:
+            future = future[..., K:]
+            future_norm = future_norm[..., K:]
+
+        result = {
+            "prediction": future,
+            "prediction_norm": future_norm,
+            "prediction_global_norm": future,
+            "future_2d": generated_2d,
+            "future_2d_coarse": future_2d_coarse,
+            "past_2d_coarse": past_maps["coarse"],
+            "past_2d_fine": past_maps["fine"],
+            "diffusion_stage": stage,
+        }
+        if future_2d_fine is not None:
+            result["future_2d_fine"] = future_2d_fine
+        if intermediates is not None:
+            reshaped_intermediates = []
+            for (t_idx, i_tensor) in intermediates:
+                reshaped_intermediates.append((t_idx, i_tensor.reshape(B, V, H, W_fut)))
+            result["intermediates"] = reshaped_intermediates
         return result
 
     @torch.no_grad()

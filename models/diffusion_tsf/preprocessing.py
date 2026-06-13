@@ -73,6 +73,100 @@ class TimeSeriesTo2D(nn.Module):
         height_range = torch.arange(height, device=bin_indices.device).view(1, 1, height, 1)
         return (height_range <= bin_indices.unsqueeze(2)).float()
 
+    def _skyline_from_bin_indices(self, bin_indices: torch.Tensor, height: Optional[int] = None) -> torch.Tensor:
+        height = int(height or self.height)
+        bins = torch.clamp(bin_indices.long(), 0, height - 1)
+        return F.one_hot(bins, num_classes=height).permute(0, 1, 3, 2).to(dtype=torch.float32)
+
+    def encode_skyline(
+        self,
+        x: torch.Tensor,
+        *,
+        height: Optional[int] = None,
+        value_range: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """1D series → one-hot skyline and integer bin indices per column."""
+        height = int(height or self.height)
+        value_range = float(value_range if value_range is not None else self.max_scale)
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+
+        x_clipped = torch.clamp(x, -value_range, value_range)
+        pos = (x_clipped + value_range) / (2 * value_range) * height
+        bin_indices = torch.clamp(pos.long(), 0, height - 1)
+        skyline = self._skyline_from_bin_indices(bin_indices, height=height)
+        return skyline, bin_indices
+
+    def encode_dual_skyline_heights(
+        self,
+        x: torch.Tensor,
+        *,
+        coarse_height: int,
+        fine_height: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Full-range coarse skyline plus within-bin residual skyline and bin indices."""
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+
+        x_clipped = torch.clamp(x, -self.max_scale, self.max_scale)
+        coarse_pos = (x_clipped + self.max_scale) / (2 * self.max_scale) * coarse_height
+        coarse_bin = torch.clamp(coarse_pos.long(), 0, coarse_height - 1)
+        coarse = self._skyline_from_bin_indices(coarse_bin, height=coarse_height)
+
+        coarse_width = (2 * self.max_scale) / coarse_height
+        coarse_center = (coarse_bin.to(x_clipped.dtype) + 0.5) * coarse_width - self.max_scale
+        residual = x_clipped - coarse_center
+        residual_range = self.max_scale / coarse_height
+        residual = torch.clamp(residual, -residual_range, residual_range)
+        fine_pos = (residual + residual_range) / (2 * residual_range) * fine_height
+        fine_bin = torch.clamp(fine_pos.long(), 0, fine_height - 1)
+        fine = self._skyline_from_bin_indices(fine_bin, height=fine_height)
+        return coarse, fine, coarse_bin, fine_bin
+
+    def decode_skyline(
+        self,
+        skyline: torch.Tensor,
+        *,
+        value_range: Optional[float] = None,
+        squeeze_univariate: bool = True,
+    ) -> torch.Tensor:
+        """One-hot skyline → 1D values via argmax bin centers."""
+        value_range = float(value_range if value_range is not None else self.max_scale)
+        height = skyline.shape[2]
+        bin_indices = skyline.argmax(dim=2)
+        bin_width = (2 * value_range) / height
+        x = (bin_indices.to(skyline.dtype) + 0.5) * bin_width - value_range
+        if squeeze_univariate and skyline.shape[1] == 1:
+            x = x.squeeze(1)
+        return x
+
+    def decode_dual_skyline(
+        self,
+        coarse_sky: torch.Tensor,
+        fine_sky: torch.Tensor,
+        *,
+        squeeze_univariate: bool = True,
+    ) -> torch.Tensor:
+        """Decode coarse + fine skylines by summing decoded residual values."""
+        if coarse_sky.shape[:2] != fine_sky.shape[:2] or coarse_sky.shape[3] != fine_sky.shape[3]:
+            raise ValueError(f"coarse/fine shapes differ: {coarse_sky.shape} vs {fine_sky.shape}")
+        coarse_height = coarse_sky.shape[2]
+        coarse_value = self.decode_skyline(
+            coarse_sky,
+            value_range=self.max_scale,
+            squeeze_univariate=False,
+        )
+        fine_value = self.decode_skyline(
+            fine_sky,
+            value_range=self.max_scale / coarse_height,
+            squeeze_univariate=False,
+        )
+        x = coarse_value + fine_value
+        x = torch.clamp(x, -self.max_scale, self.max_scale)
+        if squeeze_univariate and coarse_sky.shape[1] == 1:
+            x = x.squeeze(1)
+        return x
+
     def _encode_values_in_range(
         self,
         x: torch.Tensor,
