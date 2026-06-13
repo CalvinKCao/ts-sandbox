@@ -43,6 +43,7 @@ class DiffusionTSFConfig:
     d3pm_transition_min: float = 1e-5
     d3pm_neighbor_kernel: str = "gaussian"
     d3pm_noise_schedule: str = "sqrt_linear"  # sqrt_linear, linear, cosine
+    d3pm_loss_type: str = "cross_entropy"  # cross_entropy or expectation_mae
     binary_num_steps: int = 1000
     binary_sample_steps: int = 20
     binary_beta_start: float = 1e-5
@@ -142,6 +143,11 @@ class DiffusionTSFConfig:
             if self.d3pm_neighbor_kernel not in {"gaussian"}:
                 raise ValueError(
                     f"Unknown d3pm_neighbor_kernel {self.d3pm_neighbor_kernel!r}"
+                )
+            if self.d3pm_loss_type not in {"cross_entropy", "expectation_mae"}:
+                raise ValueError(
+                    "d3pm_loss_type must be 'cross_entropy' or 'expectation_mae', "
+                    f"got {self.d3pm_loss_type!r}."
                 )
             if self.d3pm_noise_schedule not in {"sqrt_linear", "linear", "cosine"}:
                 raise ValueError(

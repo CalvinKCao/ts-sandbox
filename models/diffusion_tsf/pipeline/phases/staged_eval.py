@@ -42,7 +42,22 @@ def _staged_anchor_global_norm(
     if pred is None:
         coarse_2d = coarse_out["future_2d_coarse"]
         fine_2d = fine_out["future_2d_fine"]
-        pred = fine_model.decode_dual_from_2d(coarse_2d, fine_2d, from_diffusion=False)
+        if getattr(fine_model.config, "d3pm_loss_type", "") == "expectation_mae":
+            bv = coarse_2d.shape[0] * coarse_2d.shape[1]
+            h = coarse_2d.shape[2]
+            w = coarse_2d.shape[3]
+            coarse_logits = torch.log(coarse_2d.reshape(bv, h, w).clamp_min(1e-8))
+            fine_logits = torch.log(fine_2d.reshape(bv, h, w).clamp_min(1e-8))
+            pred = fine_model._decode_ordinal_logits_to_norm(
+                fine_logits,
+                batch_size=coarse_2d.shape[0],
+                num_vars=coarse_2d.shape[1],
+                stage="fine",
+                squeeze_univariate=(coarse_2d.shape[1] == 1),
+                coarse_logits=coarse_logits,
+            )
+        else:
+            pred = fine_model.decode_dual_from_2d(coarse_2d, fine_2d, from_diffusion=False)
         k = int(getattr(fine_model.config, "lookback_overlap", 0))
         if k > 0:
             pred = pred[..., k:]

@@ -71,6 +71,7 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "cross_variate_context_bias": float(state.cross_variate_context_bias),
         "d3pm_transition_max": float(state.d3pm_transition_max),
         "d3pm_transition_min": float(state.d3pm_transition_min),
+        "d3pm_loss_type": str(state.d3pm_loss_type),
     }
     digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
     return (
@@ -539,7 +540,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         epochs = int(self.require("epochs"))
         patience = int(self.require("patience"))
         if state.smoke_test:
-            n_samples = min(n_samples, 32)
+            n_samples = min(n_samples, 4)
             epochs = 1
             patience = 1
         shared_cache = _stage_pretrain_cache_enabled(self, state)
@@ -610,7 +611,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                 state.diffusion_finer_pretrain_ckpt = ckpt
 
         viz_ckpt = state.diffusion_fine_pretrain_ckpt or state.diffusion_coarse_pretrain_ckpt
-        if viz_ckpt and itrans_ckpt:
+        if viz_ckpt and itrans_ckpt and not state.smoke_test:
             try:
                 viz_paths = run_pretrain_diffusion_visualizations(
                     state,

@@ -485,6 +485,18 @@ class DiffusionTSF(nn.Module):
         )
         return resized.reshape(image.shape[0], image.shape[1], target_height, image.shape[3])
 
+    def _resize_prob_height(self, image: torch.Tensor, target_height: int) -> torch.Tensor:
+        if image.shape[2] == target_height:
+            return image
+        flat = image.reshape(-1, 1, image.shape[2], image.shape[3])
+        resized = F.interpolate(
+            flat,
+            size=(target_height, image.shape[3]),
+            mode="bilinear",
+            align_corners=False,
+        )
+        return resized.reshape(image.shape[0], image.shape[1], target_height, image.shape[3])
+
     def _coarse_skyline_to_height(self, coarse_map: torch.Tensor, target_height: int) -> torch.Tensor:
         if coarse_map.shape[2] == target_height:
             return coarse_map
@@ -520,6 +532,84 @@ class DiffusionTSF(nn.Module):
         n, _c, h, w = shape
         bins = torch.randint(0, h, (n, w), device=device)
         return self.ordinal_scheduler._skyline_from_bins(bins)
+
+    def _uniform_stationary_canvas(
+        self,
+        shape: Tuple[int, int, int, int],
+        height: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Max-noise stationary distribution: uniform 1/H over all bins."""
+        return torch.full(shape, 1.0 / float(height), device=device, dtype=dtype)
+
+    def _ordinal_expected_bins(self, logits: torch.Tensor) -> torch.Tensor:
+        """Softmax logits (BV,H,W) -> expected bin index (BV,W)."""
+        probs = F.softmax(logits, dim=1)
+        height = logits.shape[1]
+        coords = torch.arange(height, device=logits.device, dtype=logits.dtype).view(1, height, 1)
+        return (probs * coords).sum(dim=1)
+
+    def _ordinal_d3pm_loss(self, logits: torch.Tensor, target_bins: torch.Tensor) -> torch.Tensor:
+        if self.config.d3pm_loss_type == "expectation_mae":
+            pred_bins = self._ordinal_expected_bins(logits)
+            return F.l1_loss(pred_bins, target_bins.float())
+        return F.cross_entropy(logits, target_bins.long())
+
+    def _decode_ordinal_logits_to_norm(
+        self,
+        logits: torch.Tensor,
+        *,
+        batch_size: int,
+        num_vars: int,
+        stage: str,
+        squeeze_univariate: bool,
+        coarse_logits: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Decode ordinal logits via expectation (MAE path) or skyline argmax (CE path)."""
+        _bv, height, width = logits.shape
+        if self.config.d3pm_loss_type == "expectation_mae":
+            pred_bins = self._ordinal_expected_bins(logits).reshape(batch_size, num_vars, width)
+            if stage == "coarse":
+                return self.to_2d.decode_continuous_bins(
+                    pred_bins,
+                    value_range=self.config.max_scale,
+                    height=height,
+                    squeeze_univariate=squeeze_univariate,
+                )
+            if coarse_logits is None:
+                raise ValueError("fine-stage decode requires coarse_logits")
+            coarse_bins = self._ordinal_expected_bins(coarse_logits).reshape(batch_size, num_vars, width)
+            return self.to_2d.decode_dual_continuous_bins(
+                coarse_bins,
+                pred_bins,
+                coarse_height=self.config.coarse_image_height,
+                fine_height=self.config.fine_image_height,
+                squeeze_univariate=squeeze_univariate,
+            )
+        skyline = self.ordinal_scheduler._skyline_from_bins(logits.argmax(dim=1))
+        skyline = skyline.reshape(batch_size, num_vars, height, width)
+        if stage == "coarse":
+            return self.to_2d.decode_skyline(
+                skyline,
+                value_range=self.config.max_scale,
+                squeeze_univariate=squeeze_univariate,
+            )
+        raise ValueError("CE fine decode uses decode_dual_from_skyline on generated maps")
+
+    def decode_dual_from_continuous_bins(
+        self,
+        coarse_bins: torch.Tensor,
+        fine_bins: torch.Tensor,
+        squeeze_univariate: bool = True,
+    ) -> torch.Tensor:
+        return self.to_2d.decode_dual_continuous_bins(
+            coarse_bins,
+            fine_bins,
+            coarse_height=self.config.coarse_image_height,
+            fine_height=self.config.fine_image_height,
+            squeeze_univariate=squeeze_univariate,
+        )
 
     def _staged_past_condition_skyline(
         self,
@@ -866,7 +956,7 @@ class DiffusionTSF(nn.Module):
         return cond, past_maps
 
     def _ordinal_ce_loss(self, logits: torch.Tensor, target_bins: torch.Tensor) -> torch.Tensor:
-        return F.cross_entropy(logits, target_bins.long())
+        return self._ordinal_d3pm_loss(logits, target_bins)
 
     def _forward_binary_staged(
         self,
@@ -1030,7 +1120,7 @@ class DiffusionTSF(nn.Module):
         future: torch.Tensor,
         t: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Staged ordinal D3PM training with skyline maps and cross-entropy loss."""
+        """Staged ordinal D3PM training with skyline maps and ordinal loss."""
         assert self.ordinal_scheduler is not None, "ordinal scheduler is not initialized"
         stage = self.config.diffusion_stage
         if stage not in {"coarse", "fine"}:
@@ -1104,7 +1194,7 @@ class DiffusionTSF(nn.Module):
             canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices,
         )
         logits = out_flat[:, 0]
-        regular_loss = self._ordinal_ce_loss(logits, target_bins_flat)
+        regular_loss = self._ordinal_d3pm_loss(logits, target_bins_flat)
 
         anchor_loss = torch.tensor(0.0, device=device)
         combined_loss = regular_loss
@@ -1115,10 +1205,18 @@ class DiffusionTSF(nn.Module):
                 device=device,
                 dtype=t_flat.dtype,
             )
-            neutral_future_flat = self._random_uniform_skyline(
-                (BV, 1, H, W_fut),
-                device,
-            )
+            if self.config.d3pm_loss_type == "expectation_mae":
+                neutral_future_flat = self._uniform_stationary_canvas(
+                    (BV, 1, H, W_fut),
+                    H,
+                    device,
+                    xt_flat.dtype,
+                )
+            else:
+                neutral_future_flat = self._random_uniform_skyline(
+                    (BV, 1, H, W_fut),
+                    device,
+                )
             anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
             anchor_canvas = self._inject_time_channels(anchor_canvas)
             if guidance_flat is not None:
@@ -1131,7 +1229,7 @@ class DiffusionTSF(nn.Module):
                 variate_indices=variate_indices,
             )
             anchor_logits = anchor_out_flat[:, 0]
-            anchor_loss = self._ordinal_ce_loss(anchor_logits, target_bins_flat)
+            anchor_loss = self._ordinal_d3pm_loss(anchor_logits, target_bins_flat)
             lam = self.config.deterministic_anchor_lambda
             combined_loss = lam * regular_loss + (1.0 - lam) * anchor_loss
 
@@ -1196,9 +1294,13 @@ class DiffusionTSF(nn.Module):
         if stage == "fine":
             if future_coarse_2d is None:
                 raise ValueError("fine-stage generation requires future_coarse_2d from the coarse model.")
-            future_coarse_cond = self._coarse_skyline_to_height(future_coarse_2d.to(device), H)
+            coarse_map = future_coarse_2d.to(device)
+            if self.config.d3pm_loss_type == "expectation_mae":
+                future_coarse_cond = self._resize_prob_height(coarse_map, H).reshape(BV, 1, H, W_fut)
+            else:
+                future_coarse_cond = self._coarse_skyline_to_height(coarse_map, H).reshape(BV, 1, H, W_fut)
             cond_for_unet = torch.cat(
-                (cond_for_unet, future_coarse_cond.reshape(BV, 1, H, W_fut)),
+                (cond_for_unet, future_coarse_cond),
                 dim=1,
             )
 
@@ -1229,6 +1331,7 @@ class DiffusionTSF(nn.Module):
             return out[:, 0:1]
 
         intermediates = None
+        coarse_anchor_logits = None
         if sampler in ("anchor", "deterministic_anchor"):
             t_batch = torch.full(
                 (BV,),
@@ -1236,9 +1339,23 @@ class DiffusionTSF(nn.Module):
                 device=device,
                 dtype=torch.long,
             )
-            neutral_future_flat = self._random_uniform_skyline((BV, 1, H, W_fut), device)
+            if self.config.d3pm_loss_type == "expectation_mae":
+                neutral_future_flat = self._uniform_stationary_canvas(
+                    (BV, 1, H, W_fut),
+                    H,
+                    device,
+                    past.dtype,
+                )
+            else:
+                neutral_future_flat = self._random_uniform_skyline((BV, 1, H, W_fut), device)
             logits = _chunked_model_fn(neutral_future_flat, t_batch)[:, 0]
-            future_2d_flat = self.ordinal_scheduler._skyline_from_bins(logits.argmax(dim=1))
+            if self.config.d3pm_loss_type == "expectation_mae":
+                probs = F.softmax(logits, dim=1)
+                future_2d_flat = probs.unsqueeze(1)
+                if stage == "coarse":
+                    coarse_anchor_logits = logits
+            else:
+                future_2d_flat = self.ordinal_scheduler._skyline_from_bins(logits.argmax(dim=1))
             if yield_intermediates:
                 intermediates = [(999, neutral_future_flat.clone()), (0, future_2d_flat.clone())]
         else:
@@ -1260,8 +1377,40 @@ class DiffusionTSF(nn.Module):
             else:
                 future_2d_flat = self.ordinal_scheduler.sample(**sample_kwargs)
 
-        generated_2d = future_2d_flat.reshape(B, V, H, W_fut)
-        if stage == "coarse":
+        if future_2d_flat.dim() == 4 and future_2d_flat.shape[1] == 1:
+            generated_2d = future_2d_flat.reshape(B, V, H, W_fut)
+        else:
+            generated_2d = future_2d_flat.reshape(B, V, H, W_fut)
+
+        if self.config.d3pm_loss_type == "expectation_mae" and sampler in ("anchor", "deterministic_anchor"):
+            if stage == "coarse":
+                future_2d_coarse = generated_2d
+                future_norm = self._decode_ordinal_logits_to_norm(
+                    logits,
+                    batch_size=B,
+                    num_vars=V,
+                    stage="coarse",
+                    squeeze_univariate=(V == 1),
+                )
+                future_2d_fine = None
+            else:
+                future_2d_coarse = coarse_for_decode.to(device) if coarse_for_decode is not None else None
+                future_2d_fine = generated_2d
+                if future_2d_coarse is not None:
+                    coarse_logits_from_chain = torch.log(
+                        future_2d_coarse.reshape(BV, H, W_fut).to(device).clamp_min(1e-8)
+                    )
+                else:
+                    coarse_logits_from_chain = None
+                future_norm = self._decode_ordinal_logits_to_norm(
+                    logits,
+                    batch_size=B,
+                    num_vars=V,
+                    stage="fine",
+                    squeeze_univariate=(V == 1),
+                    coarse_logits=coarse_logits_from_chain,
+                )
+        elif stage == "coarse":
             future_2d_coarse = generated_2d
             future_norm = self.to_2d.decode_skyline(
                 future_2d_coarse,

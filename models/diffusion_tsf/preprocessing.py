@@ -167,6 +167,49 @@ class TimeSeriesTo2D(nn.Module):
             x = x.squeeze(1)
         return x
 
+    def decode_continuous_bins(
+        self,
+        bin_indices: torch.Tensor,
+        *,
+        value_range: float,
+        height: int,
+        squeeze_univariate: bool = True,
+    ) -> torch.Tensor:
+        """Map continuous bin indices (incl. fractional) to normalized 1D values."""
+        bin_width = (2 * float(value_range)) / int(height)
+        x = (bin_indices.to(torch.float32) + 0.5) * bin_width - float(value_range)
+        if squeeze_univariate and x.dim() >= 2 and x.shape[1] == 1:
+            x = x.squeeze(1)
+        return x
+
+    def decode_dual_continuous_bins(
+        self,
+        coarse_bins: torch.Tensor,
+        fine_bins: torch.Tensor,
+        *,
+        coarse_height: int,
+        fine_height: int,
+        squeeze_univariate: bool = True,
+    ) -> torch.Tensor:
+        """Decode summed coarse/fine continuous bin indices to normalized values."""
+        coarse_value = self.decode_continuous_bins(
+            coarse_bins,
+            value_range=self.max_scale,
+            height=coarse_height,
+            squeeze_univariate=False,
+        )
+        fine_value = self.decode_continuous_bins(
+            fine_bins,
+            value_range=self.max_scale / coarse_height,
+            height=fine_height,
+            squeeze_univariate=False,
+        )
+        x = coarse_value + fine_value
+        x = torch.clamp(x, -self.max_scale, self.max_scale)
+        if squeeze_univariate and coarse_bins.dim() >= 2 and coarse_bins.shape[1] == 1:
+            x = x.squeeze(1)
+        return x
+
     def _encode_values_in_range(
         self,
         x: torch.Tensor,

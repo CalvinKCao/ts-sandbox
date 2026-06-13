@@ -60,6 +60,7 @@ def patch_globals(
     mod.D3PM_TRANSITION_MIN = state.d3pm_transition_min
     mod.D3PM_NEIGHBOR_KERNEL = state.d3pm_neighbor_kernel
     mod.D3PM_NOISE_SCHEDULE = state.d3pm_noise_schedule
+    mod.D3PM_LOSS_TYPE = state.d3pm_loss_type
     mod.DETERMINISTIC_ANCHOR_LOSS = state.deterministic_anchor_loss
     mod.DETERMINISTIC_ANCHOR_LAMBDA = state.deterministic_anchor_lambda
     mod.DETERMINISTIC_ANCHOR_ALPHA = state.deterministic_anchor_alpha

@@ -121,6 +121,7 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'd3pm_transition_min': D3PM_TRANSITION_MIN,
         'd3pm_neighbor_kernel': D3PM_NEIGHBOR_KERNEL,
         'd3pm_noise_schedule': D3PM_NOISE_SCHEDULE,
+        'd3pm_loss_type': D3PM_LOSS_TYPE,
         'dit_patch_size': DIT_PATCH_SIZE,
         'dit_embed_dim': DIT_EMBED_DIM,
         'dit_depth': DIT_DEPTH,
@@ -298,6 +299,7 @@ D3PM_TRANSITION_MAX = 0.3
 D3PM_TRANSITION_MIN = 1e-5
 D3PM_NEIGHBOR_KERNEL = "gaussian"
 D3PM_NOISE_SCHEDULE = "sqrt_linear"
+D3PM_LOSS_TYPE = "cross_entropy"
 DIT_PATCH_SIZE = (8, 8)
 DIT_EMBED_DIM = 384
 DIT_DEPTH = 8
@@ -826,6 +828,7 @@ def create_diffusion_model(
         d3pm_transition_min=o("d3pm_transition_min", D3PM_TRANSITION_MIN),
         d3pm_neighbor_kernel=o("d3pm_neighbor_kernel", D3PM_NEIGHBOR_KERNEL),
         d3pm_noise_schedule=o("d3pm_noise_schedule", D3PM_NOISE_SCHEDULE),
+        d3pm_loss_type=o("d3pm_loss_type", D3PM_LOSS_TYPE),
         use_deterministic_anchor_loss=o("use_deterministic_anchor_loss", DETERMINISTIC_ANCHOR_LOSS),
         deterministic_anchor_lambda=o("deterministic_anchor_lambda", DETERMINISTIC_ANCHOR_LAMBDA),
         deterministic_anchor_alpha=o("deterministic_anchor_alpha", DETERMINISTIC_ANCHOR_ALPHA),
