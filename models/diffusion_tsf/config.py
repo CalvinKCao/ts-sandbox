@@ -78,10 +78,11 @@ class DiffusionTSFConfig:
     monotonicity_weight: float = 1.0
     guidance_penalty_weight: float = 0.0
 
-    # Deterministic anchor loss at max-noise Bernoulli clean-bit anchor.
+    # Deterministic anchor loss at max-noise stationary Bernoulli(0.5) state.
     use_deterministic_anchor_loss: bool = False
     deterministic_anchor_lambda: float = 0.99
     deterministic_anchor_alpha: float = 0.5
+    binary_anchor_input_mode: str = "stationary_flat"  # stationary_flat or random_bits
     use_window_normalization: bool = True
     window_norm_std_floor: float = 1e-8
     zero_guidance_forecast: bool = False
@@ -156,6 +157,11 @@ class DiffusionTSFConfig:
         if self.binary_use_boundary_weighted_bce:
             raise ValueError(
                 "Edge CDF boundary-weighted BCE is not supported for binary diffusion yet."
+            )
+        if self.binary_anchor_input_mode not in {"stationary_flat", "random_bits"}:
+            raise ValueError(
+                "binary_anchor_input_mode must be 'stationary_flat' or 'random_bits', "
+                f"got {self.binary_anchor_input_mode!r}."
             )
         valid_stages = {"joint", "coarse", "fine", "finer"}
         if self.diffusion_stage not in valid_stages:

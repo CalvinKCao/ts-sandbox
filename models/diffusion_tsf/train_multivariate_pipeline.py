@@ -122,6 +122,7 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'd3pm_neighbor_kernel': D3PM_NEIGHBOR_KERNEL,
         'd3pm_noise_schedule': D3PM_NOISE_SCHEDULE,
         'd3pm_loss_type': D3PM_LOSS_TYPE,
+        'binary_anchor_input_mode': BINARY_ANCHOR_INPUT_MODE,
         'dit_patch_size': DIT_PATCH_SIZE,
         'dit_embed_dim': DIT_EMBED_DIM,
         'dit_depth': DIT_DEPTH,
@@ -312,6 +313,7 @@ EMD_LAMBDA = 0.2
 DETERMINISTIC_ANCHOR_LOSS = False
 DETERMINISTIC_ANCHOR_LAMBDA = 0.99
 DETERMINISTIC_ANCHOR_ALPHA = 0.5
+BINARY_ANCHOR_INPUT_MODE = "stationary_flat"
 USE_WINDOW_NORMALIZATION = True
 ZERO_GUIDANCE_FORECAST = False
 WINDOW_STRIDE = 1
@@ -832,6 +834,7 @@ def create_diffusion_model(
         use_deterministic_anchor_loss=o("use_deterministic_anchor_loss", DETERMINISTIC_ANCHOR_LOSS),
         deterministic_anchor_lambda=o("deterministic_anchor_lambda", DETERMINISTIC_ANCHOR_LAMBDA),
         deterministic_anchor_alpha=o("deterministic_anchor_alpha", DETERMINISTIC_ANCHOR_ALPHA),
+        binary_anchor_input_mode=o("binary_anchor_input_mode", BINARY_ANCHOR_INPUT_MODE),
         cross_variate_context_bias=CROSS_VARIATE_CONTEXT_BIAS,
         cfg_dropout=CFG_DROPOUT,
         binary_num_steps=o("binary_num_steps", BINARY_NUM_STEPS),

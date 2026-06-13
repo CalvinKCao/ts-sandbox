@@ -64,6 +64,7 @@ def patch_globals(
     mod.DETERMINISTIC_ANCHOR_LOSS = state.deterministic_anchor_loss
     mod.DETERMINISTIC_ANCHOR_LAMBDA = state.deterministic_anchor_lambda
     mod.DETERMINISTIC_ANCHOR_ALPHA = state.deterministic_anchor_alpha
+    mod.BINARY_ANCHOR_INPUT_MODE = state.binary_anchor_input_mode
     mod.EVAL_SAMPLER = state.eval_sampler
     mod.DISABLE_CROSS_ATTENTION = state.disable_cross_attention
     mod.CROSS_VARIATE_CONTEXT_BIAS = state.cross_variate_context_bias

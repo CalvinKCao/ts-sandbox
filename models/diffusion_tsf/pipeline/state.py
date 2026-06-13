@@ -60,6 +60,7 @@ class PipelineState:
     deterministic_anchor_loss: bool = False
     deterministic_anchor_lambda: float = 0.99
     deterministic_anchor_alpha: float = 0.5
+    binary_anchor_input_mode: str = "stationary_flat"
     eval_sampler: str = "dpmpp"
     disable_cross_attention: bool = False
     cross_variate_context_bias: float = 0.0

@@ -72,6 +72,7 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "d3pm_transition_max": float(state.d3pm_transition_max),
         "d3pm_transition_min": float(state.d3pm_transition_min),
         "d3pm_loss_type": str(state.d3pm_loss_type),
+        "binary_anchor_input_mode": str(state.binary_anchor_input_mode),
     }
     digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
     return (

@@ -1,0 +1,6 @@
+extends: base/fixed_lr_pipeline_base.yaml
+
+experiment:
+  name: binary-anchor-stationary-flat
+  experiment_name: binary-anchor-stationary-flat
+  binary_anchor_input_mode: stationary_flat

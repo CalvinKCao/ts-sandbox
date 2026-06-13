@@ -543,6 +543,21 @@ class DiffusionTSF(nn.Module):
         """Max-noise stationary distribution: uniform 1/H over all bins."""
         return torch.full(shape, 1.0 / float(height), device=device, dtype=dtype)
 
+    def _binary_anchor_canvas_like(self, like: torch.Tensor) -> torch.Tensor:
+        """Bernoulli(0.5) stationary anchor: flat 0.5 mean or random bits."""
+        if self.config.binary_anchor_input_mode == "random_bits":
+            return torch.bernoulli(torch.full_like(like, 0.5))
+        return torch.full_like(like, 0.5)
+
+    def _binary_anchor_canvas_shape(
+        self,
+        shape: Tuple[int, ...],
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        template = torch.empty(shape, device=device, dtype=dtype)
+        return self._binary_anchor_canvas_like(template)
+
     def _ordinal_expected_bins(self, logits: torch.Tensor) -> torch.Tensor:
         """Softmax logits (BV,H,W) -> expected bin index (BV,W)."""
         probs = F.softmax(logits, dim=1)
@@ -1065,7 +1080,7 @@ class DiffusionTSF(nn.Module):
                 device=device,
                 dtype=t_flat.dtype,
             )
-            neutral_future_flat = torch.full_like(target_flat, 0.5)
+            neutral_future_flat = self._binary_anchor_canvas_like(target_flat)
             anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
             anchor_canvas = self._inject_time_channels(anchor_canvas)
             if guidance_flat is not None:
@@ -1551,7 +1566,9 @@ class DiffusionTSF(nn.Module):
                 device=device,
                 dtype=torch.long,
             )
-            neutral_future_flat = torch.full((BV, 1, H, W_fut), 0.5, device=device)
+            neutral_future_flat = self._binary_anchor_canvas_shape(
+                (BV, 1, H, W_fut), device=device,
+            )
             x0_logits, _zt_logits = _chunked_model_fn(neutral_future_flat, t_batch)
             future_2d_flat = (torch.sigmoid(x0_logits) > 0.5).float()
             if yield_intermediates:
@@ -1763,7 +1780,7 @@ class DiffusionTSF(nn.Module):
                 device=device,
                 dtype=t_bvs.dtype,
             )
-            neutral_future_flat = torch.full_like(future_flat, 0.5)
+            neutral_future_flat = self._binary_anchor_canvas_like(future_flat)
             anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
             anchor_canvas = self._inject_time_channels(anchor_canvas)
             if guidance_flat is not None:
@@ -1891,7 +1908,9 @@ class DiffusionTSF(nn.Module):
                 device=device,
                 dtype=torch.long,
             )
-            neutral_future_flat = torch.full((BVS, 1, H, W_fut), 0.5, device=device)
+            neutral_future_flat = self._binary_anchor_canvas_shape(
+                (BVS, 1, H, W_fut), device=device,
+            )
             x0_logits, _zt_logits = _chunked_model_fn(neutral_future_flat, t_batch)
             future_2d_flat = (torch.sigmoid(x0_logits) > 0.5).float()
             if yield_intermediates:
@@ -2046,7 +2065,7 @@ class DiffusionTSF(nn.Module):
                 device=device,
                 dtype=t_flat.dtype,
             )
-            neutral_future_flat = torch.full_like(future_flat, 0.5)
+            neutral_future_flat = self._binary_anchor_canvas_like(future_flat)
             anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
             anchor_canvas = self._inject_time_channels(anchor_canvas)
             if guidance_2d_flat is not None:
@@ -2142,7 +2161,9 @@ class DiffusionTSF(nn.Module):
                 device=device,
                 dtype=torch.long,
             )
-            neutral_future_flat = torch.full((BV, 1, H, W_fut), 0.5, device=device)
+            neutral_future_flat = self._binary_anchor_canvas_shape(
+                (BV, 1, H, W_fut), device=device,
+            )
             x0_logits, _zt_logits = _chunked_model_fn(neutral_future_flat, t_batch)
             future_2d_flat = (torch.sigmoid(x0_logits) > 0.5).float()
             if yield_intermediates:
