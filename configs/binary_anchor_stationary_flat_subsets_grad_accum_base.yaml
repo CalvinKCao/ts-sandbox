@@ -1,5 +1,8 @@
 extends: binary_anchor_stationary_flat_subsets_ema_sweep_base.yaml
 
+wandb:
+  project: ts-sandbox-flat-subsets-grad-accum-lr-tune
+
 # Reuse synthetic pretrain + iTrans; Optuna-tune diffusion LR per stage (lr_only).
 # Leaf configs set finetune_hp_lr_{min,max} band + diffusion_effective_batch_multiplier.
 phases:

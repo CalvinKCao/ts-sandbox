@@ -1,5 +1,9 @@
 extends: binary_anchor_stationary_flat_subsets.yaml
 
+wandb:
+  enabled: true
+  project: ts-sandbox-flat-subsets-ema-sweep
+
 # Reuse synthetic pretrain + iTransformer from completed flat-subset runs;
 # diffusion coarse/fine/finer HP finetune re-runs with training.diffusion_ema_decay.
 phases:

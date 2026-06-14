@@ -15,11 +15,26 @@ MMPD_DIR_LEGACY = os.path.join(RESULTS, "06-12-sweep-subset-mmpd", "partials")
 MMPD_DIR_SUBSET = os.path.join(RESULTS, "06-13-binary-mmpd-subset-compare", "partials")
 MMPD_SOURCE_LEGACY = "06-12-sweep-subset-mmpd"
 MMPD_SOURCE_SUBSET = "06-13-binary-mmpd-subset-compare"
+LOGS = os.path.join(REPO, "results", "logs")
 RUN_GLOBS = [
     os.path.join(RESULTS, "06-12-*"),
     os.path.join(RESULTS, "06-13-*"),
-    os.path.join(RESULTS, "06-14-*-binary_anchor_stationary_flat_subsets*"),
+    os.path.join(RESULTS, "06-14-*"),
+    os.path.join(RESULTS, "06-15-*"),
+    os.path.join(RESULTS, "06-16-*"),
 ]
+LOG_GLOBS = [
+    os.path.join(LOGS, "06-12-*.log"),
+    os.path.join(LOGS, "06-13-*.log"),
+    os.path.join(LOGS, "06-14-*.log"),
+    os.path.join(LOGS, "06-15-*.log"),
+    os.path.join(LOGS, "06-16-*.log"),
+]
+EVAL_DONE_RE = re.compile(
+    r"staged eval done: .*?prob_mse=([\d.]+).*?anchor_mse=([\d.]+) "
+    r"anchor_mae=([\d.]+) crps=([\d.]+)"
+)
+MAX_SCALE_RE = re.compile(r"hp/(?:coarse|fine)_diff_ft_max_scale ([\d.]+)")
 
 BASELINE = "sweep_baseline"
 REPORT_DIR = os.path.join(REPO, "reports", "sweep_grid_report")
@@ -139,6 +154,67 @@ def parse_run_dir(path: str) -> Optional[Tuple[str, str, str]]:
     return m.group(1), m.group(2), m.group(3)
 
 
+def parse_log_name(path: str) -> Optional[Tuple[str, str, str]]:
+    base = os.path.basename(path)
+    if not base.endswith(".log"):
+        return None
+    stem = base[:-4]
+    m = re.match(r"\d{2}-\d{2}-(\d+)-([^-]+)-(.+)$", stem)
+    if not m:
+        return None
+    job_id, dataset, rest = m.group(1), m.group(2), m.group(3)
+    res = re.match(r"(.+)_res(\d+)$", rest)
+    if res:
+        return res.group(2), dataset, res.group(1)
+    return job_id, dataset, rest
+
+
+def load_log_metrics(path: str) -> Optional[Dict[str, Any]]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    if "PIPELINE COMPLETE" not in text and "staged eval done" not in text:
+        return None
+    anchor_mse = anchor_mae = crps = sample_mean_mse = None
+    tuned_max_scale = None
+    for line in text.splitlines():
+        m = EVAL_DONE_RE.search(line)
+        if m:
+            sample_mean_mse = float(m.group(1))
+            anchor_mse = float(m.group(2))
+            anchor_mae = float(m.group(3))
+            crps = float(m.group(4))
+        ms = MAX_SCALE_RE.search(line)
+        if ms:
+            tuned_max_scale = float(ms.group(1))
+    if anchor_mse is None:
+        return None
+    out: Dict[str, Any] = {
+        "anchor_mse": anchor_mse,
+        "anchor_mae": anchor_mae,
+        "crps": crps,
+        "sample_mean_mse": sample_mean_mse,
+    }
+    if tuned_max_scale is not None:
+        out["tuned_max_scale"] = tuned_max_scale
+    return out
+
+
+def _merge_row(
+    best_rows: Dict[Tuple[str, str], Dict[str, Any]],
+    row: Dict[str, Any],
+) -> None:
+    if row.get("raw_config") != "hp_max_scale_tuning":
+        row.pop("tuned_max_scale", None)
+    key = (row["dataset"], row["config"])
+    prev = best_rows.get(key)
+    if prev is not None and int(prev["job_id"]) >= int(row["job_id"]):
+        return
+    best_rows[key] = row
+
+
 def load_partial(path: str) -> Dict[str, Any]:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
@@ -184,9 +260,32 @@ def mmpd_config_label(dataset: str, mmpd: Dict[str, Any]) -> str:
     return "**MMPD**"
 
 
+def enrich_rows_from_logs(best_rows: Dict[Tuple[str, str], Dict[str, Any]]) -> None:
+    for log_glob in LOG_GLOBS:
+        for log_path in glob.glob(log_glob):
+            parsed = parse_log_name(log_path)
+            if not parsed:
+                continue
+            job_id, dataset, raw_config = parsed
+            if raw_config != "hp_max_scale_tuning":
+                continue
+            metrics = load_log_metrics(log_path)
+            if not metrics:
+                continue
+            config = display_config(raw_config)
+            row = best_rows.get((dataset, config))
+            if row is None:
+                continue
+            if int(row["job_id"]) != int(job_id):
+                continue
+            if metrics.get("tuned_max_scale") is not None:
+                row["tuned_max_scale"] = metrics["tuned_max_scale"]
+
+
 def collect_runs() -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
     best_rows: Dict[Tuple[str, str], Dict[str, Any]] = {}
     seen_dirs: set[str] = set()
+    seen_logs: set[str] = set()
 
     for run_glob in RUN_GLOBS:
         for run_dir in sorted(glob.glob(run_glob)):
@@ -213,13 +312,42 @@ def collect_runs() -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]
                 "anchor_mae": metrics.get("anchor_mae"),
                 "crps": metrics.get("crps"),
                 "sample_mean_mse": metrics.get("sample_mean_mse"),
+                "tuned_max_scale": metrics.get("tuned_max_scale"),
                 "status": run_status(raw_config, job_id),
             }
-            key = (dataset, config)
-            prev = best_rows.get(key)
-            if prev is not None and int(prev["job_id"]) >= int(job_id):
+            _merge_row(best_rows, row)
+
+    for log_glob in LOG_GLOBS:
+        for log_path in sorted(glob.glob(log_glob)):
+            if log_path in seen_logs:
                 continue
-            best_rows[key] = row
+            seen_logs.add(log_path)
+            parsed = parse_log_name(log_path)
+            if not parsed:
+                continue
+            job_id, dataset, raw_config = parsed
+            metrics = load_log_metrics(log_path)
+            if not metrics:
+                continue
+            config = display_config(raw_config)
+            key = (dataset, config)
+            if key in best_rows and int(best_rows[key]["job_id"]) >= int(job_id):
+                continue
+            row = {
+                "dataset": dataset,
+                "config": config,
+                "raw_config": raw_config,
+                "job_id": job_id,
+                "anchor_mse": metrics.get("anchor_mse"),
+                "anchor_mae": metrics.get("anchor_mae"),
+                "crps": metrics.get("crps"),
+                "sample_mean_mse": metrics.get("sample_mean_mse"),
+                "tuned_max_scale": metrics.get("tuned_max_scale"),
+                "status": run_status(raw_config, job_id),
+            }
+            _merge_row(best_rows, row)
+
+    enrich_rows_from_logs(best_rows)
 
     grid_rows = list(best_rows.values())
     by_dataset: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
@@ -375,8 +503,8 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
 
             ms_job = str(ms["job_id"]) if ms else HP_MS_TUNE_JOBS_PREFIX.get(dataset, "—")
             ms_scale = "—"
-            if ms and ms.get("status") != "pre-fix invalid":
-                ms_scale = "see ckpt metadata"
+            if ms and ms.get("tuned_max_scale") is not None:
+                ms_scale = fmt(ms["tuned_max_scale"])
             elif ms and ms.get("status") == "pre-fix invalid":
                 ms_scale = "policy (not tuned)"
             f.write(
@@ -433,11 +561,12 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
             ms = subset_row(grid_rows, ms_cfg, dataset)
             if not ms:
                 continue
-            scale_disp = (
-                "policy (not tuned)"
-                if ms.get("status") == "pre-fix invalid"
-                else "—"
-            )
+            if ms.get("tuned_max_scale") is not None:
+                scale_disp = fmt(ms["tuned_max_scale"])
+            elif ms.get("status") == "pre-fix invalid":
+                scale_disp = "policy (not tuned)"
+            else:
+                scale_disp = "—"
             f.write(
                 "| "
                 + " | ".join(

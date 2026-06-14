@@ -31,12 +31,10 @@ class Pipeline:
         self.state.resolve_device()
         self.state.ensure_dirs()
 
-        # Generate wandb group if enabled
-        if self.state.wandb_enabled and not self.state.wandb_group:
-            self.state.wandb_group = wandb_utils.make_group_name(
-                self.state.experiment_name,
-                self.state.dataset,
-                self.state.seed,
+        wandb_manifest: dict = {}
+        if self.state.wandb_enabled:
+            wandb_manifest = wandb_utils.resolve_wandb_settings(
+                self.state, self.merged_config,
             )
 
         logger.info("=" * 60)
@@ -46,6 +44,8 @@ class Pipeline:
         logger.info(f"Device: {self.state.device}")
         if self.state.wandb_group:
             logger.info(f"wandb group: {self.state.wandb_group}")
+        if self.state.wandb_enabled:
+            logger.info(f"wandb project: {self.state.wandb_project}")
         logger.info("=" * 60)
 
         for i, phase in enumerate(self.phases):
@@ -67,15 +67,28 @@ class Pipeline:
                     phase_name=phase.name,
                     phase_overrides=phase.overrides,
                 )
+                run_id = self.state.wandb_phase_run_ids.get(phase.name)
                 run = wandb_utils.init_phase_run(
                     phase_name=phase.wandb_run_name,
                     group=self.state.wandb_group or "",
                     project=self.state.wandb_project,
                     job_type=phase.wandb_job_type,
                     config=phase_config,
-                    tags=[self.state.dataset, self.state.diffusion_type],
+                    tags=wandb_utils.build_run_tags(
+                        dataset=self.state.dataset,
+                        phase_name=phase.name,
+                        extra_tags=self.state.wandb_tags,
+                    ),
                     yaml_path=self.merged_config.get("_yaml_path"),
+                    run_id=run_id,
                 )
+                if run is not None and getattr(run, "id", None):
+                    wandb_utils.record_phase_run_id(
+                        self.state.checkpoint_dir,
+                        phase.name,
+                        run.id,
+                        wandb_manifest,
+                    )
 
             try:
                 self.state = phase.execute(self.state)

@@ -15,6 +15,8 @@ from torch.utils.data import DataLoader, Subset
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
+from models.diffusion_tsf.pipeline.config import visualization_settings
+from models.diffusion_tsf.pipeline.visualize_utils import run_staged_finetune_visualizations
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     _model_kwargs_from_tuned,
     _stage_best_ckpt,
@@ -472,6 +474,31 @@ class StagedEvalPhase(PipelinePhase):
             "eval/selected_sampler": selected_sampler,
             "eval/selected_steps": selected_steps,
         })
+
+        skip_viz = bool(
+            self.get("skip_eval_visualizations", False)
+            or state.extra.get("skip_eval_visualizations", False)
+        )
+        viz_cfg = visualization_settings(state.merged_config)
+        coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_finetune_ckpt(state, "coarse")
+        fine_ft = state.diffusion_fine_finetune_ckpt or _stage_finetune_ckpt(state, "fine")
+        if not skip_viz and viz_cfg.get("enabled", True) and not state.smoke_test:
+            try:
+                tuned = state.fine_finetune_best_params or state.coarse_finetune_best_params
+                viz_paths = run_staged_finetune_visualizations(
+                    state,
+                    coarse_ckpt_path=coarse_ft,
+                    fine_ckpt_path=fine_ft,
+                    itrans_ckpt_path=ft_itrans_ckpt,
+                    tuned_params=tuned,
+                    tag="eval_staged_dual_scale",
+                )
+                wandb_utils.log_visualization_paths(
+                    viz_paths, wandb_key="eval/dual_scale_visualizations",
+                )
+            except Exception as e:
+                logger.warning("Staged eval visualizations failed: %s", e, exc_info=True)
+
         logger.info(
             "[%s] staged eval done: sampler=%s steps=%d "
             "prob_mse=%.4f prob_mae=%.4f anchor_mse=%.4f anchor_mae=%.4f crps=%.4f",

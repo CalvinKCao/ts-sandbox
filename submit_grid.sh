@@ -23,7 +23,6 @@ RESUME=0
 CKPT_CONFIG=""
 DEPENDENCY=""
 JOB_IDS_OUT=""
-WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 WALL_OVERRIDE=""
 PARALLEL_OPTUNA=""
 if [[ "$(hostname)" == *"narval"* ]]; then
@@ -43,7 +42,6 @@ while [[ $# -gt 0 ]]; do
         --ckpt-config) CKPT_CONFIG="$2"; shift 2 ;;
         --dependency) DEPENDENCY="$2"; shift 2 ;;
         --job-ids-out) JOB_IDS_OUT="$2"; shift 2 ;;
-        --wandb-project) WANDB_PROJECT="$2"; shift 2 ;;
         --time) WALL_OVERRIDE="$2"; shift 2 ;;
         --parallel-optuna) PARALLEL_OPTUNA="$2"; shift 2 ;;
         --gpu) GPU_TYPE="$2"; shift 2 ;;
@@ -210,10 +208,6 @@ for CFG in "${CONF_ARR[@]}"; do
 
             if [[ -n "${N_VARIATES:-}" ]]; then
                 PY_ARGS+=(--n-variates "$N_VARIATES")
-            fi
-
-            if [[ -n "${WANDB_API_KEY:-}" ]]; then
-                PY_ARGS+=(--wandb --wandb-project "$WANDB_PROJECT")
             fi
 
             if [[ "$SMOKE" -eq 1 ]]; then

@@ -119,6 +119,258 @@ def generate_itrans_prediction_viz(
     return saved
 
 
+def _load_staged_diffusion_from_ckpt(
+    *,
+    ckpt_path: str,
+    stage: str,
+    itrans_ckpt_path: str,
+    n_vars: int,
+    device: torch.device,
+    tuned_params: Optional[Dict[str, Any]] = None,
+):
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        create_diffusion_model,
+        load_itransformer_from_checkpoint,
+        load_diffusion_state_keep_attached_guidance,
+    )
+    from models.diffusion_tsf.guidance import iTransformerGuidance
+    from models.diffusion_tsf.visualize_comparison import (
+        apply_checkpoint_architecture,
+        infer_anchor_kwargs,
+        infer_diffusion_type,
+        infer_model_type,
+    )
+
+    itrans_guidance_model = load_itransformer_from_checkpoint(str(itrans_ckpt_path), n_vars, device)
+    diff_ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    meta = diff_ckpt.get("config") or tuned_params or {}
+    if isinstance(meta, dict) and "diffusion_params" in meta:
+        meta = {**meta, **(meta.get("diffusion_params") or {})}
+    diff_type = infer_diffusion_type(diff_ckpt, meta.get("diffusion_type"))
+    backbone = infer_model_type(diff_ckpt)
+    apply_checkpoint_architecture(diff_ckpt, diff_type)
+    anchor_kwargs = infer_anchor_kwargs(diff_ckpt, meta if isinstance(meta, dict) else {})
+
+    itrans_guidance = iTransformerGuidance(itrans_guidance_model)
+    model = create_diffusion_model(
+        n_variates=n_vars,
+        diffusion_type=diff_type,
+        model_type=backbone,
+        diffusion_stage=stage,
+        guidance_model=itrans_guidance,
+        **anchor_kwargs,
+    ).to(device)
+    load_diffusion_state_keep_attached_guidance(model, diff_ckpt["model_state_dict"])
+    model.eval()
+    return model, diff_ckpt
+
+
+def _plot_dual_scale_sample(
+    *,
+    res: Dict[str, torch.Tensor],
+    diff_model,
+    past: torch.Tensor,
+    future: torch.Tensor,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    dataset_name: str,
+    sample_index: int,
+    output_dir: str,
+    tag: str,
+    variables_to_plot: int,
+    applied_h: int,
+    jpeg_dpi: int,
+) -> str:
+    from models.diffusion_tsf.visualize_comparison import denorm as denorm_cmp
+
+    past_coarse = res["past_2d_coarse"].cpu()
+    past_fine = res["past_2d_fine"].cpu()
+    future_coarse = res["future_2d_coarse"].cpu()
+    future_fine = res["future_2d_fine"].cpu()
+
+    coarse_map_full = torch.cat([past_coarse, future_coarse], dim=-1)
+    fine_map_full = torch.cat([past_fine, future_fine], dim=-1)
+
+    to_2d = diff_model.to_2d
+    coarse_1d = to_2d._decode_occupancy_in_range(
+        coarse_map_full, value_range=to_2d.max_scale, cdf_decoder="mean"
+    ).cpu()
+    fine_1d = to_2d._decode_occupancy_in_range(
+        fine_map_full, value_range=to_2d.max_scale / to_2d.height, cdf_decoder="mean"
+    ).cpu()
+    combined_1d = coarse_1d + fine_1d
+
+    W_past = past_coarse.shape[-1]
+    W_fut = future_coarse.shape[-1]
+    t_axis = np.arange(-W_past, W_fut)
+    gt_full_norm = torch.cat([past, future[:, -W_fut:]], dim=-1)
+
+    gt_full_dn = denorm_cmp(gt_full_norm, mean, std)
+    coarse_dn = denorm_cmp(coarse_1d[0], mean, std)
+    fine_dn = fine_1d[0] * std.view(-1, 1)
+    combined_dn = denorm_cmp(combined_1d[0], mean, std)
+
+    n_vars = past.shape[0]
+    n_vars_to_plot = min(variables_to_plot, n_vars)
+    fig, axes = plt.subplots(
+        4, n_vars_to_plot,
+        figsize=(4.0 * n_vars_to_plot, 8.5),
+        sharex="row",
+        constrained_layout=True,
+    )
+    if n_vars_to_plot == 1:
+        axes = axes.reshape(4, 1)
+
+    for col in range(n_vars_to_plot):
+        ax1 = axes[0, col]
+        ax1.plot(t_axis, gt_full_dn[col].numpy(), color="#2196F3", linewidth=1.6, label="GT")
+        ax1.plot(t_axis, coarse_dn[col].numpy(), color="#FF9800", linewidth=1.2, drawstyle="steps-mid", alpha=0.85, label="Coarse")
+        ax1.plot(t_axis, combined_dn[col].numpy(), color="#E91E63", linewidth=1.2, label="Combined")
+        ax1.axvline(x=0, color="black", linestyle=":", alpha=0.3)
+        ax1.grid(True, alpha=0.12)
+        ax1.set_title(f"Var {col} 1D", fontsize=9)
+        if col == 0:
+            ax1.legend(loc="lower left", fontsize=6)
+
+        ax2 = axes[1, col]
+        ax2.plot(t_axis, fine_dn[col].numpy(), color="#4CAF50", linewidth=1.2)
+        ax2.axhline(y=0, color="grey", linestyle="--", alpha=0.4)
+        ax2.axvline(x=0, color="black", linestyle=":", alpha=0.3)
+        ax2.grid(True, alpha=0.12)
+        ax2.set_title("Fine residual", fontsize=9)
+
+        ax3 = axes[2, col]
+        im3 = ax3.imshow(
+            coarse_map_full[0, col].numpy(), aspect="auto", origin="lower",
+            extent=[-W_past, W_fut, 0, applied_h], cmap="plasma",
+        )
+        ax3.axvline(x=0, color="white", linestyle="--", alpha=0.5)
+        ax3.set_title("Coarse 2D", fontsize=9)
+        fig.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
+
+        ax4 = axes[3, col]
+        im4 = ax4.imshow(
+            fine_map_full[0, col].numpy(), aspect="auto", origin="lower",
+            extent=[-W_past, W_fut, 0, applied_h], cmap="plasma",
+        )
+        ax4.axvline(x=0, color="white", linestyle="--", alpha=0.5)
+        ax4.set_title("Fine 2D", fontsize=9)
+        ax4.set_xlabel("t")
+        fig.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
+
+    fig.suptitle(
+        f"{dataset_name} sample {sample_index} | {tag}",
+        fontsize=11, fontweight="bold",
+    )
+    out_path = os.path.join(
+        output_dir, f"{tag}_{dataset_name}_sample{sample_index}.jpg"
+    )
+    return save_figure_jpg(fig, out_path, dpi=jpeg_dpi)
+
+
+def generate_staged_dual_scale_comparisons(
+    *,
+    coarse_ckpt_path: str,
+    fine_ckpt_path: str,
+    itrans_ckpt_path: str,
+    dataset_name: str,
+    variate_indices: Sequence[int],
+    output_dir: str,
+    device: torch.device,
+    tuned_params: Optional[Dict[str, Any]] = None,
+    lookback_length: int = 96,
+    forecast_length: int = 96,
+    diffusion_sampler: str = "anchor",
+    num_inference_steps: int = 20,
+    variables_to_plot: int = 3,
+    sample_indices: Optional[Sequence[int]] = None,
+    n_samples: int = 3,
+    random_seed: int = 42,
+    jpeg_dpi: int = 100,
+    tag: str = "staged_dual_scale",
+) -> List[str]:
+    """Dual-scale viz for separate coarse/fine staged checkpoints (chains generation)."""
+    from models.diffusion_tsf.train_multivariate_pipeline import load_dataset
+    from models.diffusion_tsf.visualize_comparison import apply_checkpoint_architecture, infer_diffusion_type
+
+    n_vars = len(variate_indices)
+    _, _, test_ds, norm_stats = load_dataset(
+        dataset_name, list(variate_indices), stride=1,
+        lookback=lookback_length, horizon=forecast_length,
+    )
+    if len(test_ds) == 0:
+        raise ValueError(f"No test samples for {dataset_name}")
+
+    if sample_indices is None:
+        sample_indices = pick_sample_indices(len(test_ds), n_samples, seed=random_seed)
+
+    mean = torch.tensor(norm_stats["mean"], dtype=torch.float32)
+    std = torch.tensor(norm_stats["std"], dtype=torch.float32)
+
+    coarse_model, coarse_ckpt = _load_staged_diffusion_from_ckpt(
+        ckpt_path=coarse_ckpt_path,
+        stage="coarse",
+        itrans_ckpt_path=itrans_ckpt_path,
+        n_vars=n_vars,
+        device=device,
+        tuned_params=tuned_params,
+    )
+    fine_model, fine_ckpt = _load_staged_diffusion_from_ckpt(
+        ckpt_path=fine_ckpt_path,
+        stage="fine",
+        itrans_ckpt_path=itrans_ckpt_path,
+        n_vars=n_vars,
+        device=device,
+        tuned_params=tuned_params,
+    )
+    diff_type = infer_diffusion_type(fine_ckpt, None)
+    applied_h = apply_checkpoint_architecture(fine_ckpt, diff_type)
+
+    os.makedirs(output_dir, exist_ok=True)
+    saved: List[str] = []
+
+    for sample_index in sample_indices:
+        past, future = test_ds[sample_index]
+        past_t = past.unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            coarse_res = coarse_model.generate(
+                past_t,
+                sampler=diffusion_sampler,
+                num_inference_steps=num_inference_steps,
+            )
+            fine_res = fine_model.generate(
+                past_t,
+                sampler=diffusion_sampler,
+                num_inference_steps=num_inference_steps,
+                future_coarse_2d=coarse_res["future_2d_coarse"],
+            )
+
+        res = {
+            "past_2d_coarse": coarse_res["past_2d_coarse"],
+            "future_2d_coarse": coarse_res["future_2d_coarse"],
+            "past_2d_fine": fine_res["past_2d_fine"],
+            "future_2d_fine": fine_res["future_2d_fine"],
+        }
+        saved.append(_plot_dual_scale_sample(
+            res=res,
+            diff_model=fine_model,
+            past=past,
+            future=future,
+            mean=mean,
+            std=std,
+            dataset_name=dataset_name,
+            sample_index=sample_index,
+            output_dir=output_dir,
+            tag=tag,
+            variables_to_plot=variables_to_plot,
+            applied_h=applied_h,
+            jpeg_dpi=jpeg_dpi,
+        ))
+
+    return saved
+
+
 def generate_dual_scale_comparisons(
     *,
     diff_ckpt_path: str,
@@ -149,7 +401,6 @@ def generate_dual_scale_comparisons(
     from models.diffusion_tsf.guidance import iTransformerGuidance
     from models.diffusion_tsf.visualize_comparison import (
         apply_checkpoint_architecture,
-        denorm as denorm_cmp,
         infer_anchor_kwargs,
         infer_diffusion_type,
         infer_model_type,
@@ -206,88 +457,21 @@ def generate_dual_scale_comparisons(
             logger.warning("Model is not dual-scale; skipping dual-scale viz for sample %s", sample_index)
             continue
 
-        past_coarse = res["past_2d_coarse"].cpu()
-        past_fine = res["past_2d_fine"].cpu()
-        future_coarse = res["future_2d_coarse"].cpu()
-        future_fine = res["future_2d_fine"].cpu()
-
-        coarse_map_full = torch.cat([past_coarse, future_coarse], dim=-1)
-        fine_map_full = torch.cat([past_fine, future_fine], dim=-1)
-
-        to_2d = diff_model.to_2d
-        coarse_1d = to_2d._decode_occupancy_in_range(
-            coarse_map_full, value_range=to_2d.max_scale, cdf_decoder="mean"
-        ).cpu()
-        fine_1d = to_2d._decode_occupancy_in_range(
-            fine_map_full, value_range=to_2d.max_scale / to_2d.height, cdf_decoder="mean"
-        ).cpu()
-        combined_1d = coarse_1d + fine_1d
-
-        W_past = past_coarse.shape[-1]
-        W_fut = future_coarse.shape[-1]
-        t_axis = np.arange(-W_past, W_fut)
-        gt_full_norm = torch.cat([past, future[:, -W_fut:]], dim=-1)
-
-        gt_full_dn = denorm_cmp(gt_full_norm, mean, std)
-        coarse_dn = denorm_cmp(coarse_1d[0], mean, std)
-        fine_dn = fine_1d[0] * std.view(-1, 1)
-        combined_dn = denorm_cmp(combined_1d[0], mean, std)
-
-        n_vars_to_plot = min(variables_to_plot, n_vars)
-        fig, axes = plt.subplots(
-            4, n_vars_to_plot,
-            figsize=(4.0 * n_vars_to_plot, 8.5),
-            sharex="row",
-            constrained_layout=True,
-        )
-        if n_vars_to_plot == 1:
-            axes = axes.reshape(4, 1)
-
-        for col in range(n_vars_to_plot):
-            ax1 = axes[0, col]
-            ax1.plot(t_axis, gt_full_dn[col].numpy(), color="#2196F3", linewidth=1.6, label="GT")
-            ax1.plot(t_axis, coarse_dn[col].numpy(), color="#FF9800", linewidth=1.2, drawstyle="steps-mid", alpha=0.85, label="Coarse")
-            ax1.plot(t_axis, combined_dn[col].numpy(), color="#E91E63", linewidth=1.2, label="Combined")
-            ax1.axvline(x=0, color="black", linestyle=":", alpha=0.3)
-            ax1.grid(True, alpha=0.12)
-            ax1.set_title(f"Var {col} 1D", fontsize=9)
-            if col == 0:
-                ax1.legend(loc="lower left", fontsize=6)
-
-            ax2 = axes[1, col]
-            ax2.plot(t_axis, fine_dn[col].numpy(), color="#4CAF50", linewidth=1.2)
-            ax2.axhline(y=0, color="grey", linestyle="--", alpha=0.4)
-            ax2.axvline(x=0, color="black", linestyle=":", alpha=0.3)
-            ax2.grid(True, alpha=0.12)
-            ax2.set_title("Fine residual", fontsize=9)
-
-            ax3 = axes[2, col]
-            im3 = ax3.imshow(
-                coarse_map_full[0, col].numpy(), aspect="auto", origin="lower",
-                extent=[-W_past, W_fut, 0, applied_h], cmap="plasma",
-            )
-            ax3.axvline(x=0, color="white", linestyle="--", alpha=0.5)
-            ax3.set_title("Coarse 2D", fontsize=9)
-            fig.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
-
-            ax4 = axes[3, col]
-            im4 = ax4.imshow(
-                fine_map_full[0, col].numpy(), aspect="auto", origin="lower",
-                extent=[-W_past, W_fut, 0, applied_h], cmap="plasma",
-            )
-            ax4.axvline(x=0, color="white", linestyle="--", alpha=0.5)
-            ax4.set_title("Fine 2D", fontsize=9)
-            ax4.set_xlabel("t")
-            fig.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
-
-        fig.suptitle(
-            f"{dataset_name} sample {sample_index} | {tag}",
-            fontsize=11, fontweight="bold",
-        )
-        out_path = os.path.join(
-            output_dir, f"{tag}_{dataset_name}_sample{sample_index}.jpg"
-        )
-        saved.append(save_figure_jpg(fig, out_path, dpi=jpeg_dpi))
+        saved.append(_plot_dual_scale_sample(
+            res=res,
+            diff_model=diff_model,
+            past=past,
+            future=future,
+            mean=mean,
+            std=std,
+            dataset_name=dataset_name,
+            sample_index=sample_index,
+            output_dir=output_dir,
+            tag=tag,
+            variables_to_plot=variables_to_plot,
+            applied_h=applied_h,
+            jpeg_dpi=jpeg_dpi,
+        ))
 
     return saved
 
@@ -406,7 +590,9 @@ def generate_pipeline_visualizations(
 def run_pretrain_diffusion_visualizations(
     state: Any,
     *,
-    diff_ckpt_path: str,
+    diff_ckpt_path: Optional[str] = None,
+    coarse_ckpt_path: Optional[str] = None,
+    fine_ckpt_path: Optional[str] = None,
     itrans_ckpt_path: str,
     tuned_params: Optional[Dict[str, Any]] = None,
     tag: str = "pretrain_synthetic",
@@ -425,8 +611,77 @@ def run_pretrain_diffusion_visualizations(
     output_dir = os.path.join(state.results_dir, "viz", tag)
     device = state.resolve_device()
 
+    coarse_ckpt = coarse_ckpt_path or getattr(state, "diffusion_coarse_pretrain_ckpt", None)
+    fine_ckpt = fine_ckpt_path or diff_ckpt_path or getattr(state, "diffusion_fine_pretrain_ckpt", None)
+    if coarse_ckpt and fine_ckpt:
+        return generate_staged_dual_scale_comparisons(
+            coarse_ckpt_path=coarse_ckpt,
+            fine_ckpt_path=fine_ckpt,
+            itrans_ckpt_path=itrans_ckpt_path,
+            dataset_name=state.dataset,
+            variate_indices=variate_indices,
+            output_dir=output_dir,
+            device=device,
+            tuned_params=tuned_params,
+            lookback_length=state.lookback_length,
+            forecast_length=state.forecast_length,
+            diffusion_sampler=viz.get("dual_scale_sampler", "anchor"),
+            num_inference_steps=int(viz.get("dual_scale_inference_steps", 20)),
+            variables_to_plot=int(viz.get("n_dual_scale_vars", 3)),
+            n_samples=1 if state.smoke_test else int(viz.get("n_samples", 3)),
+            random_seed=state.seed,
+            jpeg_dpi=int(viz.get("jpeg_dpi", 100)),
+            tag=tag,
+        )
+
+    if not diff_ckpt_path and not fine_ckpt:
+        return []
+
     return generate_dual_scale_comparisons(
-        diff_ckpt_path=diff_ckpt_path,
+        diff_ckpt_path=diff_ckpt_path or fine_ckpt,
+        itrans_ckpt_path=itrans_ckpt_path,
+        dataset_name=state.dataset,
+        variate_indices=variate_indices,
+        output_dir=output_dir,
+        device=device,
+        tuned_params=tuned_params,
+        lookback_length=state.lookback_length,
+        forecast_length=state.forecast_length,
+        diffusion_sampler=viz.get("dual_scale_sampler", "anchor"),
+        num_inference_steps=int(viz.get("dual_scale_inference_steps", 20)),
+        variables_to_plot=int(viz.get("n_dual_scale_vars", 3)),
+        n_samples=1 if state.smoke_test else int(viz.get("n_samples", 3)),
+        random_seed=state.seed,
+        jpeg_dpi=int(viz.get("jpeg_dpi", 100)),
+        tag=tag,
+    )
+
+
+def run_staged_finetune_visualizations(
+    state: Any,
+    *,
+    coarse_ckpt_path: str,
+    fine_ckpt_path: str,
+    itrans_ckpt_path: str,
+    tuned_params: Optional[Dict[str, Any]] = None,
+    tag: str = "staged_diffusion_finetuned",
+) -> List[str]:
+    """Dual-scale viz for finetuned coarse/fine checkpoints."""
+    from models.diffusion_tsf.train_multivariate_pipeline import generate_dataset_job
+
+    viz = _viz_cfg(state)
+    if not viz.get("enabled", True):
+        return []
+
+    variate_indices = state.variate_indices
+    if variate_indices is None:
+        variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+
+    output_dir = os.path.join(state.results_dir, "viz", tag)
+    device = state.resolve_device()
+    return generate_staged_dual_scale_comparisons(
+        coarse_ckpt_path=coarse_ckpt_path,
+        fine_ckpt_path=fine_ckpt_path,
         itrans_ckpt_path=itrans_ckpt_path,
         dataset_name=state.dataset,
         variate_indices=variate_indices,

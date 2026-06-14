@@ -757,6 +757,29 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             f"hp/{self.stage}_diff_ft_batch_size": best_params.get("batch_size"),
             f"hp/{self.stage}_diff_ft_max_scale": best_params.get("max_scale"),
         })
+
+        if self.stage == "fine" and not state.smoke_test:
+            coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_best_ckpt(state, "coarse")
+            itrans_ckpt = state.itrans_finetune_ckpt or os.path.join(
+                state.checkpoint_dir, f"{state.subset_id or state.dataset}_itransformer_finetuned.pt",
+            )
+            if coarse_ft and final_ckpt and itrans_ckpt and os.path.exists(itrans_ckpt):
+                from models.diffusion_tsf.pipeline.visualize_utils import run_staged_finetune_visualizations
+                try:
+                    viz_paths = run_staged_finetune_visualizations(
+                        state,
+                        coarse_ckpt_path=coarse_ft,
+                        fine_ckpt_path=final_ckpt,
+                        itrans_ckpt_path=itrans_ckpt,
+                        tuned_params=best_params,
+                        tag="staged_diffusion_finetuned",
+                    )
+                    wandb_utils.log_visualization_paths(
+                        viz_paths, wandb_key="viz/staged_diffusion_finetuned",
+                    )
+                except Exception as e:
+                    logger.warning("Staged finetune viz failed: %s", e, exc_info=True)
+
         return state
 
 

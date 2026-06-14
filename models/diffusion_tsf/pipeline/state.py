@@ -18,6 +18,7 @@ import torch
 from models.diffusion_tsf.pipeline.config import (
     REQUIRED_EXPERIMENT_KEYS,
     apply_training_section_to_state,
+    apply_wandb_section_to_state,
 )
 
 
@@ -115,6 +116,8 @@ class PipelineState:
     wandb_enabled: bool = False
     wandb_project: str = "diffusion-tsf"
     wandb_group: Optional[str] = None
+    wandb_tags: Optional[List[str]] = None
+    wandb_phase_run_ids: Dict[str, str] = field(default_factory=dict)
 
     # -- Resume / fresh --
     resume: bool = False
@@ -216,6 +219,7 @@ class PipelineState:
         if not isinstance(training, dict):
             training = {}
         apply_training_section_to_state(training, init_kwargs, extra)
+        apply_wandb_section_to_state(cfg.get("wandb"), init_kwargs)
 
         init_kwargs["extra"] = extra
         init_kwargs["phase_configs"] = cfg.get("phases", [])

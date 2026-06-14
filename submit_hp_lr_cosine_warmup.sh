@@ -12,17 +12,14 @@ cd "$SCRIPT_DIR"
 
 CONFIGS="configs/sweep/hp_lr_cosine_warmup2.yaml,configs/sweep/hp_lr_cosine_warmup5.yaml"
 DATASETS="ETTh1,ETTm1,exchange_rate,weather"
-WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 
 if [[ "${1:-}" == "--smoke" ]]; then
     ./submit_grid.sh --smoke \
         --configs configs/sweep/hp_lr_cosine_warmup2.yaml \
-        --datasets ETTh1 \
-        --wandb-project "${WANDB_PROJECT}-cosine-warmup-smoke"
+        --datasets ETTh1
     exit 0
 fi
 
 ./submit_grid.sh \
     --configs "$CONFIGS" \
-    --datasets "$DATASETS" \
-    --wandb-project "$WANDB_PROJECT"
+    --datasets "$DATASETS"

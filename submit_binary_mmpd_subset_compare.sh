@@ -17,7 +17,6 @@ cd "$SCRIPT_DIR"
 CONFIG="configs/binary_anchor_stationary_flat_subsets.yaml"
 ANCHOR_CONFIG="binary_anchor_stationary_flat_subsets"
 DATASETS="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
-WANDB_PROJECT="ts-sandbox-binary-mmpd-subset-compare"
 MMPD_OUTPUT="results/datasets/$(date +%m-%d)-binary-mmpd-subset-compare"
 
 usage() {
@@ -44,7 +43,6 @@ case "$1" in
         ./submit_grid.sh \
             --configs "$CONFIG" \
             --datasets "$DATASETS" \
-            --wandb-project "$WANDB_PROJECT" \
             --job-ids-out "$IDS_FILE"
         DEP="$(build_binary_dependency "$IDS_FILE")"
         ./submit_mmpd_sweep_subset.sh \
@@ -56,8 +54,7 @@ case "$1" in
     binary)
         ./submit_grid.sh \
             --configs "$CONFIG" \
-            --datasets "$DATASETS" \
-            --wandb-project "$WANDB_PROJECT"
+            --datasets "$DATASETS"
         ;;
     mmpd)
         ./submit_mmpd_sweep_subset.sh \
@@ -71,7 +68,6 @@ case "$1" in
         ./submit_grid.sh --smoke \
             --configs "$CONFIG" \
             --datasets ETTh1 \
-            --wandb-project "${WANDB_PROJECT}-smoke" \
             --job-ids-out "$IDS_FILE"
         DEP="$(build_binary_dependency "$IDS_FILE")"
         ./submit_mmpd_sweep_subset.sh --smoke \
@@ -82,8 +78,7 @@ case "$1" in
     smoke-binary)
         ./submit_grid.sh --smoke \
             --configs "$CONFIG" \
-            --datasets ETTh1 \
-            --wandb-project "${WANDB_PROJECT}-smoke"
+            --datasets ETTh1
         ;;
     smoke-mmpd)
         ./submit_mmpd_sweep_subset.sh --smoke \

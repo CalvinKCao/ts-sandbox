@@ -1,5 +1,8 @@
 extends: base/fixed_lr_pipeline_base.yaml
 
+wandb:
+  project: ts-sandbox-binary-anchor-flat
+
 experiment:
   name: binary-anchor-stationary-flat
   experiment_name: binary-anchor-stationary-flat

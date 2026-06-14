@@ -123,6 +123,33 @@ REQUIRED_VISUALIZATION_KEYS = (
     "dual_scale_inference_steps",
 )
 
+WANDB_DEFAULTS: Dict[str, Any] = {
+    "enabled": False,
+    "project": "diffusion-tsf",
+    "group": None,
+    "tags": None,
+}
+
+# CLI keys merged into experiment vs applied directly to PipelineState.
+CLI_EXPERIMENT_KEYS = frozenset({
+    "dataset",
+    "n_variates",
+    "variate_indices",
+    "seed",
+    "subset_id",
+})
+
+CLI_STATE_KEYS = frozenset({
+    "checkpoint_dir",
+    "results_dir",
+    "datasets_dir",
+    "synth_cache_dir",
+    "smoke_test",
+    "resume",
+    "fresh",
+    "parallel_optuna_workers",
+})
+
 # Maps YAML training keys -> train_multivariate_pipeline module attribute names.
 _TRAINING_GLOBAL_MAP: Dict[str, str] = {
     "pretrain_epochs": "PRETRAIN_EPOCHS",
@@ -204,6 +231,30 @@ def training_value(state: Any, key: str, default: Any = None) -> Any:
     if key in training:
         return training[key]
     return getattr(state, key, default)
+
+
+def apply_wandb_section_to_state(
+    wandb_section: Optional[Dict[str, Any]],
+    init_kwargs: Dict[str, Any],
+) -> None:
+    merged = dict(WANDB_DEFAULTS)
+    if isinstance(wandb_section, dict):
+        merged.update(wandb_section)
+
+    init_kwargs["wandb_enabled"] = bool(merged["enabled"])
+    init_kwargs["wandb_project"] = str(merged["project"])
+    group = merged.get("group")
+    init_kwargs["wandb_group"] = str(group) if group else None
+    tags = merged.get("tags")
+    init_kwargs["wandb_tags"] = list(tags) if tags else None
+
+
+def wandb_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(WANDB_DEFAULTS)
+    section = cfg.get("wandb")
+    if isinstance(section, dict):
+        merged.update(section)
+    return merged
 
 
 def apply_training_section_to_state(
@@ -354,11 +405,34 @@ def load_experiment_config(
 
     if cli_overrides:
         exp = dict(cfg.get("experiment", {}))
-        exp.update(cli_overrides)
+        state_overrides: Dict[str, Any] = {}
+        for key, value in cli_overrides.items():
+            if key in CLI_EXPERIMENT_KEYS:
+                exp[key] = value
+            elif key in CLI_STATE_KEYS:
+                state_overrides[key] = value
+            else:
+                raise ValueError(
+                    f"unsupported CLI override {key!r}; wandb settings belong in the YAML wandb: section"
+                )
         cfg["experiment"] = exp
+        if state_overrides:
+            cfg["_cli_state_overrides"] = state_overrides
 
     validate_config(cfg)
     return cfg
+
+
+def apply_cli_state_overrides(state: Any, cfg: Dict[str, Any]) -> None:
+    """Apply runtime CLI flags onto PipelineState after YAML load."""
+    from dataclasses import fields
+
+    overrides = cfg.get("_cli_state_overrides") or {}
+    known_fields = {f.name for f in fields(state)}
+    for key, value in overrides.items():
+        if key not in known_fields:
+            raise ValueError(f"unsupported CLI state override: {key!r}")
+        setattr(state, key, value)
 
 
 def apply_training_config_to_module(mod: Any, cfg: Optional[Dict[str, Any]], state: Any = None) -> None:

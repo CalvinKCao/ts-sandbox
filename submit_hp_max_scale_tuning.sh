@@ -12,17 +12,14 @@ cd "$SCRIPT_DIR"
 
 CONFIG="configs/tuning_sweep/hp_max_scale_tuning.yaml"
 DATASETS="ETTh1,ETTm1,exchange_rate,weather"
-WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 
 if [[ "${1:-}" == "--smoke" ]]; then
     ./submit_grid.sh --smoke \
         --configs "$CONFIG" \
-        --datasets ETTh1 \
-        --wandb-project "${WANDB_PROJECT}-ms-tune-smoke"
+        --datasets ETTh1
     exit 0
 fi
 
 ./submit_grid.sh \
     --configs "$CONFIG" \
-    --datasets "$DATASETS" \
-    --wandb-project "$WANDB_PROJECT"
+    --datasets "$DATASETS"

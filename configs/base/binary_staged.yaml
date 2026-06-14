@@ -58,6 +58,12 @@ visualization:
   dual_scale_sampler: anchor
   dual_scale_inference_steps: 20
 
+wandb:
+  enabled: true
+  project: ts-sandbox
+  group: null
+  tags: []
+
 experiment:
   dataset: ETTh1
   n_variates: 7

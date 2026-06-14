@@ -616,7 +616,8 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             try:
                 viz_paths = run_pretrain_diffusion_visualizations(
                     state,
-                    diff_ckpt_path=viz_ckpt,
+                    coarse_ckpt_path=state.diffusion_coarse_pretrain_ckpt,
+                    fine_ckpt_path=state.diffusion_fine_pretrain_ckpt,
                     itrans_ckpt_path=itrans_ckpt,
                     tuned_params=best_params,
                     tag="staged_diffusion_synthetic_pretrain",

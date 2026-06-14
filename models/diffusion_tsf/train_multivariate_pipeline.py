@@ -2596,8 +2596,6 @@ def main():
     parser.add_argument("--smoke-test", action="store_true", help="Quick validation run")
     parser.add_argument("--seed", type=int, default=None, help="Override random seed from YAML")
     parser.add_argument("--parallel-optuna-workers", type=int, default=1, help="Parallel Optuna workers")
-    parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
-    parser.add_argument("--wandb-project", type=str, default=None, help="Override wandb project from YAML")
     parser.add_argument("--checkpoint-dir", type=str, default=None, help="Override checkpoint directory")
     parser.add_argument("--results-dir", type=str, default=None, help="Override results directory")
     parser.add_argument("--datasets-dir", type=str, default=None, help="Benchmark CSV/NPZ root")
@@ -2607,6 +2605,7 @@ def main():
 
     logger = setup_logging()
 
+    from models.diffusion_tsf.pipeline.config import apply_cli_state_overrides
     from models.diffusion_tsf.pipeline import load_experiment_config, PipelineState, Pipeline
     from models.diffusion_tsf.pipeline.phases import PHASE_REGISTRY
 
@@ -2642,10 +2641,6 @@ def main():
         cli_overrides["datasets_dir"] = os.path.abspath(args.datasets_dir)
     if args.synth_cache_dir:
         cli_overrides["synth_cache_dir"] = args.synth_cache_dir
-    if args.wandb:
-        cli_overrides["wandb_enabled"] = True
-    if args.wandb_project:
-        cli_overrides["wandb_project"] = args.wandb_project
     if args.fresh:
         cli_overrides["fresh"] = True
     if args.resume:
@@ -2658,6 +2653,7 @@ def main():
 
     cfg = load_experiment_config(args.config, cli_overrides)
     state = PipelineState.from_config(cfg)
+    apply_cli_state_overrides(state, cfg)
 
     if args.checkpoint_dir:
         CHECKPOINT_DIR = args.checkpoint_dir
@@ -2692,7 +2688,7 @@ def main():
     try:
         Pipeline(phases, state, merged_config=cfg).run()
     finally:
-        if args.wandb:
+        if state.wandb_enabled:
             from models.diffusion_tsf.pipeline import wandb_utils
             wandb_utils.finish_phase_run()
 

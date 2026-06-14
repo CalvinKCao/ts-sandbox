@@ -1,5 +1,8 @@
 extends: base/fixed_lr_pipeline_base.yaml
 
+wandb:
+  project: ts-sandbox-binary-anchor-92d3
+
 experiment:
   name: hp_lr_cosine_warmup5
 
