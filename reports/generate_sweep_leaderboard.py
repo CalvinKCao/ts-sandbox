@@ -73,6 +73,10 @@ CONFIG_ALIASES = {
     "binary_anchor_stationary_flat_subsets_grad_accum_125": "**Flat subsets accum1.25x**",
     "binary_anchor_stationary_flat_subsets_grad_accum_150": "**Flat subsets accum1.5x**",
     "binary_anchor_stationary_flat_subsets_grad_accum_200": "**Flat subsets accum2.0x**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo": "**Flat subsets accum1.5x LR-lo**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_hi": "**Flat subsets accum1.5x LR-hi**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo": "**Flat subsets accum2.0x LR-lo**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_200_lr_hi": "**Flat subsets accum2.0x LR-hi**",
     "hp_max_scale_tuning": "**MS tune**",
 }
 
