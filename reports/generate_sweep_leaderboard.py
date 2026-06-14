@@ -19,6 +19,8 @@ RUN_GLOBS = [
     os.path.join(RESULTS, "06-12-*"),
     os.path.join(RESULTS, "06-13-395119*-binary_anchor_stationary_flat_subsets"),
     os.path.join(RESULTS, "06-14-39515*-binary_anchor_stationary_flat_subsets_ema099"),
+    os.path.join(RESULTS, "06-14-*-binary_anchor_stationary_flat_subsets_ema_sweep_*"),
+    os.path.join(RESULTS, "06-14-*-binary_anchor_stationary_flat_subsets_grad_accum_*"),
 ]
 
 BASELINE = "sweep_baseline"
@@ -65,6 +67,14 @@ CONFIG_ALIASES = {
     "binary_anchor_stationary_flat": "**Binary flat**",
     "binary_anchor_stationary_flat_subsets": "**Flat subsets**",
     "binary_anchor_stationary_flat_subsets_ema099": "**Flat subsets EMA0.99**",
+    "binary_anchor_stationary_flat_subsets_ema_sweep_090": "**Flat subsets EMA0.90**",
+    "binary_anchor_stationary_flat_subsets_ema_sweep_095": "**Flat subsets EMA0.95**",
+    "binary_anchor_stationary_flat_subsets_ema_sweep_098": "**Flat subsets EMA0.98**",
+    "binary_anchor_stationary_flat_subsets_ema_sweep_0995": "**Flat subsets EMA0.995**",
+    "binary_anchor_stationary_flat_subsets_ema_sweep_0999": "**Flat subsets EMA0.999**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_125": "**Flat subsets accum1.25x**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_150": "**Flat subsets accum1.5x**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_200": "**Flat subsets accum2.0x**",
     "hp_max_scale_tuning": "**MS tune**",
 }
 
@@ -461,8 +471,9 @@ def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
             "Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged runs: "
             "**Discrete** (CE, `ordinal_d3pm_staged`), **MAE Discrete** (expectation MAE + uniform `1/H` anchor, "
             "`ordinal_d3pm_mae_staged_subsets`), **Binary flat** (full variates, `binary_anchor_stationary_flat`), "
-            "**Flat subsets** / **Flat subsets EMA0.99** (ETTh1-capped subsets, jobs `3951193`–`3951199` / "
-            "`3951527`–`3951533`), **MS tune** (`hp_max_scale_tuning`), and "
+            "**Flat subsets** reuse runs: EMA sweep (`ema_sweep_{090,095,098,0995,0999}`, jobs `3953317`–`3953351`), "
+            "grad-accum sweep (`grad_accum_{125,150,200}`, jobs `3953352`–`3953373`), "
+            "**MS tune** (`hp_max_scale_tuning`), and "
             "**MMPD (subset)** (`06-13-binary-mmpd-subset-compare`, jobs `3951201`–`3951207`). "
             "Probabilistic metrics: `dpmpp` sampler, 20 steps, 20 samples.\n\n"
             f"{PREFIX_INVALID_NOTE}\n\n"
@@ -523,8 +534,9 @@ def write_leaderboard(
             "**Discrete** is ordinal D3PM CE (`ordinal_d3pm_staged`). "
             "**MAE Discrete** is expectation-MAE + uniform `1/H` anchor (`ordinal_d3pm_mae_staged_subsets`). "
             "**Binary flat** is flat `0.5` XOR anchor on full variates (`binary_anchor_stationary_flat`). "
-            "**Flat subsets** / **Flat subsets EMA0.99** use ETTh1-capped variate subsets "
-            "(`binary_anchor_stationary_flat_subsets` / `_ema099`). "
+            "**Flat subsets** family uses ETTh1-capped variate subsets (`binary_anchor_stationary_flat_subsets`). "
+            "EMA reuse sweep: `diffusion_ema_decay` ∈ {0.90, 0.95, 0.98, 0.995, 0.999}. "
+            "Grad-accum reuse sweep: effective batch {1.25×, 1.5×, 2.0×} probed max micro-batch. "
             "**MS tune** is Optuna `max_scale` search (`hp_max_scale_tuning`, baseline-fixed other HPs). "
             f"**MMPD (subset)** from `{MMPD_SOURCE_SUBSET}` (same subsets as flat runs, 20 samples, full test). "
             f"Legacy **MMPD** from `{MMPD_SOURCE_LEGACY}` where subset MMPD is unavailable.\n\n"
