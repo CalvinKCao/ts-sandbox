@@ -447,16 +447,40 @@ def _anchor_metadata_rank(meta_path: Path) -> int:
     return STAGED_ANCHOR_STAGES.index(stage)
 
 
+def _roots_for_anchor_config(
+    ckpt_base: Path,
+    datasets: Sequence[str],
+    anchor_config: str,
+) -> List[Path]:
+    roots: List[Path] = []
+    for ds in datasets:
+        matches = sorted(
+            [
+                p
+                for p in ckpt_base.iterdir()
+                if p.is_dir() and p.name.endswith(f"-{ds}-{anchor_config}")
+            ],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if matches:
+            roots.append(matches[0])
+    return roots
+
+
 def find_anchor_runs(
     datasets: Sequence[str],
     explicit_roots: Sequence[Path],
     ckpt_base: Path,
     variant: str,
+    anchor_config: Optional[str] = None,
 ) -> Dict[str, AnchorRun]:
     slug = ANCHOR_VARIANTS[variant]["slug"]
     roots: List[Path]
     if explicit_roots:
         roots = [p.resolve() for p in explicit_roots]
+    elif anchor_config:
+        roots = _roots_for_anchor_config(ckpt_base, datasets, anchor_config)
     else:
         roots = sorted(
             [p for p in ckpt_base.glob(f"*{slug}*") if p.is_dir()],
@@ -487,10 +511,13 @@ def find_anchor_runs(
     missing = [d for d in datasets if d not in found]
     if missing:
         searched = ", ".join(str(p) for p in roots) if roots else str(ckpt_base)
+        hint = ""
+        if anchor_config:
+            hint = f" (expected ckpt dirs like *-<dataset>-{anchor_config})"
         raise RuntimeError(
             f"Could not find completed {variant} anchor runs for: "
             + ", ".join(missing)
-            + f" under {searched}"
+            + f" under {searched}{hint}"
         )
     return found
 
@@ -1804,7 +1831,13 @@ def discover_anchors_by_variant(
     datasets: Sequence[str],
 ) -> Dict[str, Dict[str, AnchorRun]]:
     return {
-        "binary": find_anchor_runs(datasets, args.binary_anchor_root, args.ckpt_base, "binary"),
+        "binary": find_anchor_runs(
+            datasets,
+            args.binary_anchor_root,
+            args.ckpt_base,
+            "binary",
+            anchor_config=args.anchor_config,
+        ),
     }
 
 
@@ -2009,6 +2042,12 @@ def parse_args() -> argparse.Namespace:
                         help="Legacy alias for --gaussian-anchor-root")
     parser.add_argument("--gaussian-anchor-root", action="append", type=Path, default=[])
     parser.add_argument("--binary-anchor-root", action="append", type=Path, default=[])
+    parser.add_argument(
+        "--anchor-config",
+        type=str,
+        default=None,
+        help="Resolve binary ckpts as <ckpt-base>/*-<dataset>-<anchor-config> (newest mtime).",
+    )
     parser.add_argument("--ckpt-base", type=Path, default=REPO_ROOT / "results" / "ckpts")
     parser.add_argument("--mmpd-repo", type=Path, default=DEFAULT_MMPD_REPO)
     parser.add_argument("--mmpd-data-dir", type=Path, default=DEFAULT_MMPD_DATA)

@@ -19,6 +19,7 @@ FORCE=0
 OUTPUT_DIR=""
 ANCHOR_CONFIG="binary_anchor_stationary_flat_subsets"
 DATASETS_CSV="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
+DEPENDENCY=""
 SEED=2026
 WALL_MMPD="12:00:00"
 WALL_INIT="0:45:00"
@@ -32,6 +33,7 @@ while [[ $# -gt 0 ]]; do
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --anchor-config) ANCHOR_CONFIG="$2"; shift 2 ;;
         --datasets) DATASETS_CSV="$2"; shift 2 ;;
+        --dependency) DEPENDENCY="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         --time) WALL_MMPD="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
@@ -71,8 +73,7 @@ pick_anchor_root() {
     matches=( "$REPO/results/ckpts"/*-"${ds}"-"${ANCHOR_CONFIG}" )
     shopt -u nullglob
     if [[ ${#matches[@]} -eq 0 ]]; then
-        echo "ERROR: no ckpt dir matching results/ckpts/*-${ds}-${ANCHOR_CONFIG}" >&2
-        exit 1
+        return 1
     fi
     printf '%s\n' "${matches[@]}" | sort | tail -1
 }
@@ -91,7 +92,11 @@ pick_resume_output_dir() {
 
 ANCHOR_ROOTS=()
 for ds in "${DATASETS[@]}"; do
-    ANCHOR_ROOTS+=( "$(pick_anchor_root "$ds")" )
+    if root="$(pick_anchor_root "$ds")"; then
+        ANCHOR_ROOTS+=( "$root" )
+    else
+        ANCHOR_ROOTS+=( "(pending: *-${ds}-${ANCHOR_CONFIG})" )
+    fi
 done
 
 if [[ -z "$OUTPUT_DIR" ]]; then
@@ -112,6 +117,7 @@ EVAL_BASE=(
     "$REPO/utils/eval_mmpd_gaussian_anchor.py"
     --output-dir "$OUTPUT_DIR"
     --ckpt-base "$REPO/results/ckpts"
+    --anchor-config "$ANCHOR_CONFIG"
     --mmpd-repo "$REPO/temp/MMPD"
     --mmpd-data-dir "$REPO/temp/mmpd_datasets"
     --seed "$SEED"
@@ -123,10 +129,6 @@ EVAL_BASE=(
 if [[ "$FORCE" -eq 1 || "$RESUME" -eq 0 ]]; then
     EVAL_BASE+=(--force-mmpd-train)
 fi
-
-for root in "${ANCHOR_ROOTS[@]}"; do
-    EVAL_BASE+=(--binary-anchor-root "$root")
-done
 
 if [[ "$SMOKE" -eq 1 ]]; then
     WALL_MMPD="0:45:00"
@@ -148,18 +150,17 @@ if [[ "$SMOKE" -eq 1 ]]; then
         --mmpd-eval-batch-size 4
     )
     DATASETS=(ETTh1)
-    ANCHOR_ROOTS=( "$(pick_anchor_root ETTh1)" )
     EVAL_BASE=(
         "$REPO/utils/eval_mmpd_gaussian_anchor.py"
         --output-dir "$OUTPUT_DIR"
         --ckpt-base "$REPO/results/ckpts"
+        --anchor-config "$ANCHOR_CONFIG"
         --mmpd-repo "$REPO/temp/MMPD"
         --mmpd-data-dir "$REPO/temp/mmpd_datasets"
         --seed "$SEED"
         --no-update-mmpd
         --force-mmpd-eval
         --force-indices
-        --binary-anchor-root "${ANCHOR_ROOTS[0]}"
     )
     if [[ "$FORCE" -eq 1 || "$RESUME" -eq 0 ]]; then
         EVAL_BASE+=(--force-mmpd-train)
@@ -251,6 +252,10 @@ fi
 
 JOB_INIT=""
 WORKER_DEP=()
+INIT_SBATCH_EXTRA=()
+if [[ -n "$DEPENDENCY" ]]; then
+    INIT_SBATCH_EXTRA=(--dependency="$DEPENDENCY")
+fi
 if [[ "$SKIP_INIT" -eq 0 ]]; then
     INIT_SCRIPT="$LOG_DIR/submit-init.sh"
     write_worker_script "$INIT_SCRIPT" "${EVAL_BASE[@]}" "${EVAL_EXTRA[@]}" \
@@ -260,6 +265,7 @@ if [[ "$SKIP_INIT" -eq 0 ]]; then
         --job-name="mmpd-sw-init$([[ "$SMOKE" -eq 1 ]] && echo -smoke)" \
         "${SBATCH_COMMON[@]}" \
         --time="$WALL_INIT" \
+        "${INIT_SBATCH_EXTRA[@]}" \
         --output="$LOG_DIR/init-%j.out" \
         --error="$LOG_DIR/init-%j.err" \
         "$INIT_SCRIPT")

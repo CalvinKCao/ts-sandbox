@@ -22,6 +22,7 @@ SMOKE=0
 RESUME=0
 CKPT_CONFIG=""
 DEPENDENCY=""
+JOB_IDS_OUT=""
 WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
 WALL_OVERRIDE=""
 PARALLEL_OPTUNA=""
@@ -41,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         --resume) RESUME=1; shift ;;
         --ckpt-config) CKPT_CONFIG="$2"; shift 2 ;;
         --dependency) DEPENDENCY="$2"; shift 2 ;;
+        --job-ids-out) JOB_IDS_OUT="$2"; shift 2 ;;
         --wandb-project) WANDB_PROJECT="$2"; shift 2 ;;
         --time) WALL_OVERRIDE="$2"; shift 2 ;;
         --parallel-optuna) PARALLEL_OPTUNA="$2"; shift 2 ;;
@@ -227,6 +229,9 @@ for CFG in "${CONF_ARR[@]}"; do
             fi
 
             JOB_ID=$(sbatch "${S_ARGS[@]}" "$SCRIPT_DIR/slurm_worker.sh" "${PY_ARGS[@]}")
+            if [[ -n "$JOB_IDS_OUT" ]]; then
+                echo "$JOB_ID" >> "$JOB_IDS_OUT"
+            fi
 
             if [[ -z "$RUN_STEM" ]]; then
                 RUN_STEM="${DATE_STR}-${JOB_ID}-${DS}-${CFG_NAME}"
