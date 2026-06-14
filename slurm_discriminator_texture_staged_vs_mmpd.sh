@@ -234,69 +234,28 @@ cd "$REPO"
 STORE="$REPO/results"
 mkdir -p "$STORE/logs" "$STORE/datasets"
 
-pip_retry() {
-    local max_attempts=5 delay=20 attempt
-    for attempt in $(seq 1 "$max_attempts"); do
-        if "$@"; then return 0; fi
-        if [[ "$attempt" -lt "$max_attempts" ]]; then
-            echo "[setup] pip failed (attempt ${attempt}/${max_attempts}), retry in ${delay}s..."
-            sleep "$delay"
-            delay=$((delay + 2))
-        fi
-    done
-    echo "[setup] pip failed after ${max_attempts} attempts: $*" >&2
-    return 1
-}
+REQ="$REPO/setup/requirements-killarney.txt"
+[[ -f "$REQ" ]] || { echo "ERROR: missing $REQ — run ./setup/killarney_freeze_requirements.sh on login node" >&2; exit 1; }
+[[ -n "${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR is not set." >&2; exit 1; }
 
-install_pipeline_deps() {
-    pip_retry pip install --no-index --upgrade pip -q 2>/dev/null || pip_retry pip install -U pip -q
-    if ! python -c "import torch" 2>/dev/null; then
-        if ! pip_retry pip install --no-index 'torch==2.11.0+computecanada' numpy pandas scipy scikit-learn tqdm -q 2>/dev/null; then
-            pip_retry pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
-            pip_retry pip install numpy pandas scipy scikit-learn tqdm -q
-        fi
-    fi
-    pip_retry pip install optuna einops pyyaml scikit-learn matplotlib -q
-}
+module purge 2>/dev/null || true
+module load StdEnv/2023 python/3.11 2>/dev/null || true
+if [[ "${MERGE_PARTIALS:-0}" -ne 1 ]]; then
+    module load cuda/12.2 cudnn/8.9 2>/dev/null || true
+fi
+command -v virtualenv >/dev/null || { echo "ERROR: virtualenv not available after module load." >&2; exit 1; }
 
-_load_modules() {
-    module purge 2>/dev/null || true
-    module load StdEnv/2023 2>/dev/null || true
-    module load python/3.11 2>/dev/null || true
-    if [[ "${MERGE_PARTIALS:-0}" -ne 1 ]]; then
-        module load cuda/12.2 2>/dev/null || true
-        module load cudnn/8.9 2>/dev/null || true
-    fi
-}
-
-VENV=""
-for cand in \
-    "$STORE/venv" \
-    "${SCRATCH:-}/${USER}/ts-sandbox/results/venv" \
-    "${SCRATCH:-}/ts-sandbox/results/venv"; do
-    if [[ -x "${cand}/bin/python" ]]; then
-        VENV="$cand"
-        break
-    fi
-done
-
-_load_modules
-if [[ -n "$VENV" ]]; then
-    echo "[setup] Using persistent venv: $VENV"
-    # shellcheck source=/dev/null
-    source "$VENV/bin/activate"
-    export PATH="$VENV/bin:$PATH"
-    export PYTHON="$VENV/bin/python"
-    install_pipeline_deps
+echo "[setup] Building node-local venv on \$SLURM_TMPDIR from $REQ"
+virtualenv --no-download "$SLURM_TMPDIR/env"
+# shellcheck source=/dev/null
+source "$SLURM_TMPDIR/env/bin/activate"
+export PYTHON="$SLURM_TMPDIR/env/bin/python"
+pip install --no-index --upgrade pip -q
+pip install --no-index -r "$REQ" -q
+if [[ "${MERGE_PARTIALS:-0}" -eq 1 ]]; then
+    "$PYTHON" -c "import torch, yaml, matplotlib; print('torch', torch.__version__)"
 else
-    echo "[setup] Building venv on \${SLURM_TMPDIR:-/tmp}..."
-    python -m venv "${SLURM_TMPDIR:-/tmp}/env"
-    VENV="${SLURM_TMPDIR:-/tmp}/env"
-    # shellcheck source=/dev/null
-    source "$VENV/bin/activate"
-    export PATH="$VENV/bin:$PATH"
-    export PYTHON="$VENV/bin/python"
-    install_pipeline_deps
+    "$PYTHON" -c "import torch, yaml, matplotlib; assert torch.cuda.is_available(), 'CUDA required'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
 fi
 
 export PYTHONUNBUFFERED=1
