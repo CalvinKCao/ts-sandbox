@@ -1,24 +1,23 @@
 #!/bin/bash
 # =============================================================================
-# Learned discriminator texture eval: staged binary vs MMPD (Killarney L40S).
+# Learned discriminator texture eval: Flat subsets EMA0.99 vs MMPD (Killarney L40S).
+#
+# Uses trained checkpoints:
+#   binary: results/ckpts/*-<dataset>-binary_anchor_stationary_flat_subsets_ema099
+#   mmpd:   results/datasets/06-13-binary-mmpd-subset-compare
 #
 # Default login-node behavior submits one independent job per (dataset, fake
-# source) so binary and MMPD discriminators train in parallel (10 jobs for 5
+# source) so binary and MMPD discriminators train in parallel (14 jobs for 7
 # datasets). A lightweight CPU merge job rebuilds metrics.json when all shards
 # finish.
 #
 # USAGE (login node, from $SCRATCH/ts-sandbox):
-#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --smoke-test
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh
+#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --smoke-test
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --dataset traffic
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --dataset ETTh1 --fake-source mmpd
-#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --slice-length 16
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --force-raw-eval
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --merge-partials-only
-#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --bin-match-filter mmpd
-#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --bin-match-filter all --force-train
-# Resubmit with purged split + checkpoints + confusion PNGs:
-#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --bin-match-filter all --force-train
 # =============================================================================
 
 set -euo pipefail
@@ -34,9 +33,16 @@ FAKE_SOURCE=""
 SLICE_LENGTH=""
 BIN_MATCH_FILTER=""
 
+ANCHOR_CONFIG="binary_anchor_stationary_flat_subsets_ema099"
+CKPT_BASE_SUFFIX="results/ckpts"
+MMPD_OUTPUT_SUFFIX="results/datasets/06-13-binary-mmpd-subset-compare"
+DISC_OUTPUT_SUFFIX="results/datasets/06-14-disc-texture-flat-subsets-ema099-vs-mmpd"
+RAW_OUTPUT_SUFFIX="results/datasets/06-14-raw-texture-flat-subsets-ema099-vs-mmpd"
+REPORT_SUFFIX="reports/06-14_discriminator_texture_flat_subsets_ema099_vs_mmpd.md"
+
 resolve_output_dir() {
     local repo_root="$1"
-    local base="${repo_root}/results/datasets/06-03-discriminator-texture-staged-vs-mmpd"
+    local base="${repo_root}/${DISC_OUTPUT_SUFFIX}"
     if [[ -n "$BIN_MATCH_FILTER" ]]; then
         echo "${base}-binmatch-${BIN_MATCH_FILTER}"
     else
@@ -63,7 +69,7 @@ if [[ -n "$BIN_MATCH_FILTER" && "$BIN_MATCH_FILTER" != "mmpd" && "$BIN_MATCH_FIL
     exit 1
 fi
 
-DATASETS=(ETTh1 dalia traffic exchange_rate PeMS)
+DATASETS=(ETTh1 ETTh2 exchange_rate weather electricity traffic solar_Alabama)
 FAKE_SOURCES=(binary_staged mmpd)
 
 # ---------------------------------------------------------------------------
@@ -88,7 +94,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     if [[ "$MERGE_PARTIALS" -eq 1 ]]; then
         SMOKE_SUFFIX=""
         [[ "$SMOKE" -eq 1 ]] && SMOKE_SUFFIX="-smoke"
-        RUN_STEM="$(date +%m-%d)-disc-texture-staged-vs-mmpd${SMOKE_SUFFIX}${BIN_SUFFIX}"
+        RUN_STEM="$(date +%m-%d)-disc-texture-flat-subsets-ema099-vs-mmpd${SMOKE_SUFFIX}${BIN_SUFFIX}"
         LOG_DIR="$REPO/results/logs/${RUN_STEM}"
         mkdir -p "$LOG_DIR"
         echo "Submitting merge-only job..."
@@ -103,7 +109,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --error="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}${BIN_SUFFIX}-%j.log" \
             --mail-type=FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER" \
+            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG" \
             "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh"
         exit 0
     fi
@@ -120,7 +126,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         CPUS=8
     fi
 
-    RUN_STEM="$(date +%m-%d)-disc-texture-staged-vs-mmpd${SMOKE_SUFFIX}${BIN_SUFFIX}"
+    RUN_STEM="$(date +%m-%d)-disc-texture-flat-subsets-ema099-vs-mmpd${SMOKE_SUFFIX}${BIN_SUFFIX}"
     LOG_DIR="$REPO/results/logs/${RUN_STEM}"
     mkdir -p "$LOG_DIR"
 
@@ -174,7 +180,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
                 --error="$LOG_DIR/${JOB_NAME}-%j.log" \
                 --mail-type=FAIL \
                 --mail-user=ccao87@uwo.ca \
-                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",SLICE_LENGTH="$SLICE_LENGTH",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",BIN_MATCH_FILTER="$BIN_MATCH_FILTER" \
+                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",SLICE_LENGTH="$SLICE_LENGTH",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG" \
                 "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh" \
                 "${SUBMIT_ARGS[@]}")"
             JOB_IDS+=("$job_id")
@@ -196,7 +202,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --error="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}-%j.log" \
             --mail-type=FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER" \
+            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG" \
             "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh"
     fi
     exit 0
@@ -299,10 +305,11 @@ export TS_SANDBOX_REPO="$REPO"
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 
 OUTPUT_DIR="$(resolve_output_dir "$REPO")"
-RAW_EVAL_DIR="$REPO/results/datasets/06-03-trend-robust-texture-staged-vs-mmpd"
-MMPD_ROOT="$REPO/results/datasets/06-01-mmpd-binary-aligned"
-MMPD_REPO="$REPO/temp/MMPD"
-MMPD_DATA="$REPO/temp/mmpd_datasets"
+RAW_EVAL_DIR="$REPO/$RAW_OUTPUT_SUFFIX"
+MMPD_ROOT="$REPO/$MMPD_OUTPUT_SUFFIX"
+CKPT_BASE="$REPO/$CKPT_BASE_SUFFIX"
+REPORT_PATH="$REPO/$REPORT_SUFFIX"
+ANCHOR_CONFIG="${ANCHOR_CONFIG:-binary_anchor_stationary_flat_subsets_ema099}"
 
 if [[ "${MERGE_PARTIALS:-0}" -eq 1 ]]; then
     echo "[merge] output=$OUTPUT_DIR"
@@ -315,19 +322,20 @@ if [[ "${MERGE_PARTIALS:-0}" -eq 1 ]]; then
     "$PYTHON" -u "$REPO/utils/report_discriminator_texture_staged_vs_mmpd.py" \
         --metrics "$OUTPUT_DIR/metrics.json" \
         --manifest "$OUTPUT_DIR/run_manifest.json" \
-        --output "$REPO/reports/06-03_discriminator_texture_staged_vs_mmpd.md" || true
-
-    "$PYTHON" -u "$REPO/utils/report_trend_robust_texture_staged_vs_mmpd.py" || true
+        --output "$REPORT_PATH" || true
 
     echo "=========================================="
     echo "Merge complete: $(date)"
     echo "Metrics: $OUTPUT_DIR/metrics.json"
     echo "Plots:   $OUTPUT_DIR/disc_confusions/"
     echo "Ckpts:   $OUTPUT_DIR/checkpoints/"
-    echo "Report:  $REPO/reports/06-03_discriminator_texture_staged_vs_mmpd.md"
+    echo "Report:  $REPORT_PATH"
     echo "=========================================="
     exit 0
 fi
+
+MMPD_REPO="$REPO/temp/MMPD"
+MMPD_DATA="$REPO/temp/mmpd_datasets"
 
 if [[ -z "${DATASET:-}" || -z "${FAKE_SOURCE:-}" ]]; then
     echo "ERROR: shard jobs require DATASET and FAKE_SOURCE (via --export from login submit)." >&2
@@ -339,6 +347,8 @@ fi
 EVAL_ARGS=(
     --output-dir "$OUTPUT_DIR"
     --raw-eval-dir "$RAW_EVAL_DIR"
+    --ckpt-base "$CKPT_BASE"
+    --anchor-config "$ANCHOR_CONFIG"
     --mmpd-output-root "$MMPD_ROOT"
     --mmpd-repo "$MMPD_REPO"
     --mmpd-data-dir "$MMPD_DATA"
