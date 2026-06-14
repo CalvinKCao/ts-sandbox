@@ -65,6 +65,21 @@ CONFIG_ALIASES = {
     "binary_anchor_stationary_flat": "**Binary flat**",
     "binary_anchor_stationary_flat_subsets": "**Flat subsets**",
     "binary_anchor_stationary_flat_subsets_ema099": "**Flat subsets EMA0.99**",
+    "hp_max_scale_tuning": "**MS tune**",
+}
+
+# Optuna-tuned max_scale from hp_max_scale_tuning (jobs 3943934–3943937, Jun 12 sweep).
+HP_MS_TUNE_JOBS = {
+    "ETTh1": "3943934",
+    "ETTm1": "3943936",
+    "exchange_rate": "3943935",
+    "weather": "3943937",
+}
+HP_MS_TUNE_MAX_SCALE = {
+    "ETTh1": 5.2,
+    "ETTm1": 7.7,
+    "exchange_rate": 10.6,
+    "weather": 9.3,
 }
 
 
@@ -255,6 +270,7 @@ def subset_row(grid_rows: List[Dict[str, Any]], config: str, dataset: str) -> Op
 def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
     flat_cfg = "**Flat subsets**"
     ema_cfg = "**Flat subsets EMA0.99**"
+    ms_cfg = "**MS tune**"
     subset_ids = {
         "ETTh1": "ETTh1",
         "ETTh2": "ETTh2",
@@ -263,6 +279,7 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
         "electricity": "electricity_4v_s1",
         "traffic": "traffic_4v_s1",
         "solar_Alabama": "solar_Alabama_2v_s1",
+        "ETTm1": "ETTm1_4v_s3",
     }
 
     with open(path, "w", encoding="utf-8") as f:
@@ -270,8 +287,10 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
         f.write(
             "Apples-to-apples runs on matched variate subsets (`binary_anchor_stationary_flat_subsets`). "
             "Binary eval: `dpmpp`, 20 steps, 20 samples. MMPD: same subset indices from binary ckpt metadata, "
-            "20 samples, full test (`06-13-binary-mmpd-subset-compare`). Merge job `3951208` failed but all "
-            "dataset partials are present.\n\n"
+            "20 samples, full test (`06-13-binary-mmpd-subset-compare`). "
+            "**MS tune** = `hp_max_scale_tuning` (`configs/tuning_sweep/hp_max_scale_tuning.yaml`, jobs "
+            "`3943934`–`3943937`): Optuna searches `max_scale ∈ [2.5, 14.0]` during diffusion finetune HP "
+            "(same ETTh1-capped subsets as Jun 12 sweep). Merge job `3951208` failed but all MMPD partials exist.\n\n"
         )
 
         header = [
@@ -283,6 +302,10 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
             "Flat subsets EMA0.99 anchor_mse",
             "Flat subsets EMA0.99 crps",
             "EMA job",
+            "MS tune anchor_mse",
+            "MS tune crps",
+            "tuned max_scale",
+            "MS job",
             "MMPD (subset) anchor_mse",
             "MMPD (subset) crps",
             "MMPD job",
@@ -291,22 +314,26 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
         f.write("| " + " | ".join(header) + " |\n")
         f.write("|" + "|".join(["---"] * len(header)) + "|\n")
 
-        crps_wins = {flat_cfg: 0, ema_cfg: 0, "**MMPD (subset)**": 0}
+        crps_wins = {flat_cfg: 0, ema_cfg: 0, ms_cfg: 0, "**MMPD (subset)**": 0}
         for dataset in SUBSET_DATASETS:
             flat = subset_row(grid_rows, flat_cfg, dataset)
             ema = subset_row(grid_rows, ema_cfg, dataset)
+            ms = subset_row(grid_rows, ms_cfg, dataset)
             mmpd = load_mmpd(dataset)
             crps_vals = []
             if flat and flat["crps"] is not None:
                 crps_vals.append((flat_cfg, flat["crps"]))
             if ema and ema["crps"] is not None:
                 crps_vals.append((ema_cfg, ema["crps"]))
+            if ms and ms["crps"] is not None:
+                crps_vals.append((ms_cfg, ms["crps"]))
             if mmpd and mmpd["crps"] is not None:
                 crps_vals.append(("**MMPD (subset)**", mmpd["crps"]))
             best = min(crps_vals, key=lambda x: x[1])[0] if crps_vals else "—"
             if best in crps_wins:
                 crps_wins[best] += 1
 
+            ms_scale = HP_MS_TUNE_MAX_SCALE.get(dataset)
             f.write(
                 "| "
                 + " | ".join(
@@ -319,6 +346,10 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
                         fmt(ema["anchor_mse"] if ema else None),
                         fmt(ema["crps"] if ema else None),
                         str(ema["job_id"]) if ema else "—",
+                        fmt(ms["anchor_mse"] if ms else None),
+                        fmt(ms["crps"] if ms else None),
+                        fmt(ms_scale) if ms_scale is not None else "—",
+                        HP_MS_TUNE_JOBS.get(dataset, "—"),
                         fmt(mmpd["anchor_mse"] if mmpd else None),
                         fmt(mmpd["crps"] if mmpd else None),
                         MMPD_SUBSET_JOBS.get(dataset, "—"),
@@ -331,7 +362,47 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
         f.write("\n## CRPS win count (7 datasets)\n\n")
         f.write(f"- **Flat subsets**: {crps_wins[flat_cfg]}\n")
         f.write(f"- **Flat subsets EMA0.99**: {crps_wins[ema_cfg]}\n")
+        if crps_wins[ms_cfg]:
+            f.write(f"- **MS tune**: {crps_wins[ms_cfg]}\n")
         f.write(f"- **MMPD (subset)**: {crps_wins['**MMPD (subset)**']}\n")
+
+        f.write("\n## MS tune only (`hp_max_scale_tuning`, Jun 12 sweep)\n\n")
+        f.write(
+            "Config extends `base/binary_staged.yaml` with `max_scale_tuning: true`. "
+            "Only these four datasets were submitted in the sweep arm.\n\n"
+        )
+        ms_header = [
+            "Dataset",
+            "subset_id",
+            "tuned max_scale",
+            "anchor_mse",
+            "anchor_mae",
+            "crps",
+            "sample_mean_mse",
+            "Job",
+        ]
+        f.write("| " + " | ".join(ms_header) + " |\n")
+        f.write("|" + "|".join(["---"] * len(ms_header)) + "|\n")
+        for dataset in ["ETTh1", "ETTm1", "exchange_rate", "weather"]:
+            ms = subset_row(grid_rows, ms_cfg, dataset)
+            if not ms:
+                continue
+            f.write(
+                "| "
+                + " | ".join(
+                    [
+                        dataset,
+                        subset_ids.get(dataset, dataset),
+                        fmt(HP_MS_TUNE_MAX_SCALE.get(dataset)),
+                        fmt(ms["anchor_mse"]),
+                        fmt(ms["anchor_mae"]),
+                        fmt(ms["crps"]),
+                        fmt(ms.get("sample_mean_mse")),
+                        str(ms["job_id"]),
+                    ]
+                )
+                + " |\n"
+            )
 
 
 def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
@@ -352,7 +423,8 @@ def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
             "**Discrete** (CE, `ordinal_d3pm_staged`), **MAE Discrete** (expectation MAE + uniform `1/H` anchor, "
             "`ordinal_d3pm_mae_staged_subsets`), **Binary flat** (full variates, `binary_anchor_stationary_flat`), "
             "**Flat subsets** / **Flat subsets EMA0.99** (ETTh1-capped subsets, jobs `3951193`–`3951199` / "
-            "`3951527`–`3951533`), and **MMPD (subset)** (`06-13-binary-mmpd-subset-compare`, jobs `3951201`–`3951207`). "
+            "`3951527`–`3951533`), **MS tune** (`hp_max_scale_tuning`, jobs `3943934`–`3943937`), and "
+            "**MMPD (subset)** (`06-13-binary-mmpd-subset-compare`, jobs `3951201`–`3951207`). "
             "Probabilistic metrics: `dpmpp` sampler, 20 steps, 20 samples.\n\n"
         )
         f.write("| " + " | ".join(header) + " |\n")
@@ -406,6 +478,7 @@ def write_leaderboard(path: str, by_dataset: Dict[str, List[Dict[str, Any]]], de
             "**Binary flat** is flat `0.5` XOR anchor on full variates (`binary_anchor_stationary_flat`). "
             "**Flat subsets** / **Flat subsets EMA0.99** use ETTh1-capped variate subsets "
             "(`binary_anchor_stationary_flat_subsets` / `_ema099`). "
+            "**MS tune** is Optuna `max_scale` search (`hp_max_scale_tuning`, jobs `3943934`–`3943937`). "
             f"**MMPD (subset)** from `{MMPD_SOURCE_SUBSET}` (same subsets as flat runs, 20 samples, full test). "
             f"Legacy **MMPD** from `{MMPD_SOURCE_LEGACY}` where subset MMPD is unavailable.\n\n"
         )
