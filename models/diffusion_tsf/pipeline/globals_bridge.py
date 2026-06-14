@@ -5,7 +5,10 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from models.diffusion_tsf.pipeline.config import apply_training_config_to_module
+from models.diffusion_tsf.pipeline.config import (
+    apply_training_config_to_module,
+    training_value,
+)
 from models.diffusion_tsf.pipeline.state import PipelineState
 
 
@@ -75,10 +78,10 @@ def patch_globals(
     mod.BINARY_NUM_STEPS = state.binary_num_steps
     mod.BINARY_BETA_START = state.binary_beta_start
     mod.BINARY_BETA_END = state.binary_beta_end
-    mod.LR_SCHEDULER_TYPE = getattr(state, "lr_scheduler_type", "none")
-    mod.LR_WARMUP_EPOCHS = getattr(state, "lr_warmup_epochs", 0)
-    mod.MAX_SCALE_TUNING = getattr(state, "max_scale_tuning", False)
-    mod.MAX_SCALE_TUNING_RANGE = getattr(state, "max_scale_tuning_range", [2.5, 14.0])
+    mod.LR_SCHEDULER_TYPE = training_value(state, "lr_scheduler_type", "none")
+    mod.LR_WARMUP_EPOCHS = int(training_value(state, "lr_warmup_epochs", 0))
+    mod.MAX_SCALE_TUNING = bool(training_value(state, "max_scale_tuning", False))
+    mod.MAX_SCALE_TUNING_RANGE = training_value(state, "max_scale_tuning_range", [2.5, 14.0])
     if state.checkpoint_dir:
         mod.CHECKPOINT_DIR = state.checkpoint_dir
     if state.results_dir:

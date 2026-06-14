@@ -15,7 +15,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-from models.diffusion_tsf.pipeline.config import REQUIRED_EXPERIMENT_KEYS
+from models.diffusion_tsf.pipeline.config import (
+    REQUIRED_EXPERIMENT_KEYS,
+    apply_training_section_to_state,
+)
 
 
 @dataclass
@@ -210,18 +213,9 @@ class PipelineState:
             init_kwargs["use_coordinate_channel"] = bool(init_kwargs["use_coordinate_channel"])
 
         training = cfg.get("training", {})
-        for k in ("n_itrans_hp_trials", "n_diffusion_hp_trials", "n_finetune_hp_trials"):
-            if k in training:
-                init_kwargs[k] = int(training[k])
-        for k in (
-            "use_hardcoded_synthetic_hp",
-            "skip_synthetic_tuning",
-            "force_retrain_synthetic",
-            "diffusion_ema_decay",
-            "diffusion_effective_batch_multiplier",
-        ):
-            if k in training:
-                extra[k] = training[k]
+        if not isinstance(training, dict):
+            training = {}
+        apply_training_section_to_state(training, init_kwargs, extra)
 
         init_kwargs["extra"] = extra
         init_kwargs["phase_configs"] = cfg.get("phases", [])

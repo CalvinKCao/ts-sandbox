@@ -170,6 +170,63 @@ _TRAINING_GLOBAL_MAP: Dict[str, str] = {
     "max_scale_tuning_range": "MAX_SCALE_TUNING_RANGE",
 }
 
+# training.* keys mirrored onto PipelineState (YAML is source of truth).
+TRAINING_STATE_KEYS = (
+    "n_itrans_hp_trials",
+    "n_diffusion_hp_trials",
+    "n_finetune_hp_trials",
+    "lr_scheduler_type",
+    "lr_warmup_epochs",
+    "max_scale_tuning",
+    "max_scale_tuning_range",
+)
+
+TRAINING_EXTRA_KEYS = (
+    "use_hardcoded_synthetic_hp",
+    "skip_synthetic_tuning",
+    "force_retrain_synthetic",
+    "diffusion_ema_decay",
+    "diffusion_effective_batch_multiplier",
+)
+
+
+def training_section(state: Any) -> Dict[str, Any]:
+    cfg = getattr(state, "merged_config", None) or {}
+    training = cfg.get("training")
+    if not isinstance(training, dict):
+        return {}
+    return training
+
+
+def training_value(state: Any, key: str, default: Any = None) -> Any:
+    """Read training.<key> from merged YAML, else PipelineState field."""
+    training = training_section(state)
+    if key in training:
+        return training[key]
+    return getattr(state, key, default)
+
+
+def apply_training_section_to_state(
+    training: Dict[str, Any],
+    init_kwargs: Dict[str, Any],
+    extra: Dict[str, Any],
+) -> None:
+    for key in TRAINING_STATE_KEYS:
+        if key not in training:
+            continue
+        value = training[key]
+        if key in ("n_itrans_hp_trials", "n_diffusion_hp_trials", "n_finetune_hp_trials", "lr_warmup_epochs"):
+            init_kwargs[key] = int(value)
+        elif key == "max_scale_tuning":
+            init_kwargs[key] = bool(value)
+        elif key == "max_scale_tuning_range":
+            init_kwargs[key] = [float(x) for x in value]
+        else:
+            init_kwargs[key] = value
+    for key in TRAINING_EXTRA_KEYS:
+        if key in training:
+            extra[key] = training[key]
+
 
 def _is_phase_list(value: Any) -> bool:
     if not isinstance(value, list) or not value:

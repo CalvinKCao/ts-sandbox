@@ -68,18 +68,28 @@ CONFIG_ALIASES = {
     "hp_max_scale_tuning": "**MS tune**",
 }
 
-# Optuna-tuned max_scale from hp_max_scale_tuning (jobs 3943934–3943937, Jun 12 sweep).
-HP_MS_TUNE_JOBS = {
+# Pre-fix Jun 12 runs: training-section YAML never reached Optuna / finetune scheduler.
+PREFIX_INVALID_JOBS: Dict[str, frozenset[str]] = {
+    "hp_max_scale_tuning": frozenset({"3943934", "3943935", "3943936", "3943937"}),
+    "hp_lr_cosine_warmup2": frozenset({"3943882", "3943924", "3943883", "3943925"}),
+    "hp_lr_cosine_warmup5": frozenset({"3943884", "3943926", "3943885", "3943927"}),
+}
+
+PREFIX_INVALID_NOTE = (
+    "**Pre-fix invalid runs** (pipeline bug, fixed in main): "
+    "`hp_max_scale_tuning` jobs `3943934`–`3943937` never searched `max_scale` "
+    "(matched `max_scale_by_dataset` by accident). "
+    "`hp_lr_cosine_warmup2` / `hp_lr_cosine_warmup5` jobs `3943882`–`3943887`, `3943924`–`3943927` "
+    "never applied cosine+warmup LR scheduler (metrics ≈ `sweep_baseline`). "
+    "Re-submit: `./submit_hp_max_scale_tuning.sh`, `./submit_hp_lr_cosine_warmup.sh`."
+)
+
+# Legacy pre-fix job ids (for MS tune table footnotes only).
+HP_MS_TUNE_JOBS_PREFIX = {
     "ETTh1": "3943934",
     "ETTm1": "3943936",
     "exchange_rate": "3943935",
     "weather": "3943937",
-}
-HP_MS_TUNE_MAX_SCALE = {
-    "ETTh1": 5.2,
-    "ETTm1": 7.7,
-    "exchange_rate": 10.6,
-    "weather": 9.3,
 }
 
 
@@ -91,6 +101,22 @@ def short_config(name: str) -> str:
 
 def display_config(name: str) -> str:
     return CONFIG_ALIASES.get(name, short_config(name))
+
+
+def run_status(raw_config: str, job_id: str) -> str:
+    if job_id in PREFIX_INVALID_JOBS.get(raw_config, frozenset()):
+        return "pre-fix invalid"
+    return "OK"
+
+
+def status_by_config(grid_rows: List[Dict[str, Any]]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for row in grid_rows:
+        cfg = row["config"]
+        st = row["status"]
+        if cfg not in out or st == "pre-fix invalid":
+            out[cfg] = st
+    return out
 
 
 def parse_run_dir(path: str) -> Optional[Tuple[str, str, str]]:
@@ -169,12 +195,13 @@ def collect_runs() -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]
             row = {
                 "dataset": dataset,
                 "config": config,
+                "raw_config": raw_config,
                 "job_id": job_id,
                 "anchor_mse": metrics.get("anchor_mse"),
                 "anchor_mae": metrics.get("anchor_mae"),
                 "crps": metrics.get("crps"),
                 "sample_mean_mse": metrics.get("sample_mean_mse"),
-                "status": "**OK**",
+                "status": run_status(raw_config, job_id),
             }
             key = (dataset, config)
             prev = best_rows.get(key)
@@ -191,7 +218,7 @@ def collect_runs() -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]
                 "anchor_mse": row["anchor_mse"],
                 "anchor_mae": row["anchor_mae"],
                 "crps": row["crps"],
-                "Status": "OK",
+                "Status": row["status"],
             }
         )
 
@@ -288,9 +315,10 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
             "Apples-to-apples runs on matched variate subsets (`binary_anchor_stationary_flat_subsets`). "
             "Binary eval: `dpmpp`, 20 steps, 20 samples. MMPD: same subset indices from binary ckpt metadata, "
             "20 samples, full test (`06-13-binary-mmpd-subset-compare`). "
-            "**MS tune** = `hp_max_scale_tuning` (`configs/tuning_sweep/hp_max_scale_tuning.yaml`, jobs "
-            "`3943934`–`3943937`): Optuna searches `max_scale ∈ [2.5, 14.0]` during diffusion finetune HP "
-            "(same ETTh1-capped subsets as Jun 12 sweep). Merge job `3951208` failed but all MMPD partials exist.\n\n"
+            "**MS tune** = `hp_max_scale_tuning` (`configs/tuning_sweep/hp_max_scale_tuning.yaml`): "
+            "Optuna `max_scale ∈ [2.5, 14.0]` with other HPs fixed like `sweep_baseline`. "
+            "Merge job `3951208` failed but all MMPD partials exist.\n\n"
+            f"{PREFIX_INVALID_NOTE}\n\n"
         )
 
         header = [
@@ -333,7 +361,12 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
             if best in crps_wins:
                 crps_wins[best] += 1
 
-            ms_scale = HP_MS_TUNE_MAX_SCALE.get(dataset)
+            ms_job = str(ms["job_id"]) if ms else HP_MS_TUNE_JOBS_PREFIX.get(dataset, "—")
+            ms_scale = "—"
+            if ms and ms.get("status") != "pre-fix invalid":
+                ms_scale = "see ckpt metadata"
+            elif ms and ms.get("status") == "pre-fix invalid":
+                ms_scale = "policy (not tuned)"
             f.write(
                 "| "
                 + " | ".join(
@@ -348,8 +381,8 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
                         str(ema["job_id"]) if ema else "—",
                         fmt(ms["anchor_mse"] if ms else None),
                         fmt(ms["crps"] if ms else None),
-                        fmt(ms_scale) if ms_scale is not None else "—",
-                        HP_MS_TUNE_JOBS.get(dataset, "—"),
+                        ms_scale,
+                        ms_job,
                         fmt(mmpd["anchor_mse"] if mmpd else None),
                         fmt(mmpd["crps"] if mmpd else None),
                         MMPD_SUBSET_JOBS.get(dataset, "—"),
@@ -366,10 +399,11 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
             f.write(f"- **MS tune**: {crps_wins[ms_cfg]}\n")
         f.write(f"- **MMPD (subset)**: {crps_wins['**MMPD (subset)**']}\n")
 
-        f.write("\n## MS tune only (`hp_max_scale_tuning`, Jun 12 sweep)\n\n")
+        f.write("\n## MS tune only (`hp_max_scale_tuning`)\n\n")
+        f.write(f"{PREFIX_INVALID_NOTE}\n\n")
         f.write(
-            "Config extends `base/binary_staged.yaml` with `max_scale_tuning: true`. "
-            "Only these four datasets were submitted in the sweep arm.\n\n"
+            "Config extends `fixed_lr_pipeline_base` with `max_scale_tuning: true` and `search_space: lr_only` "
+            "(only `max_scale` is Optuna-searched). Four datasets in the sweep arm.\n\n"
         )
         ms_header = [
             "Dataset",
@@ -387,13 +421,18 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
             ms = subset_row(grid_rows, ms_cfg, dataset)
             if not ms:
                 continue
+            scale_disp = (
+                "policy (not tuned)"
+                if ms.get("status") == "pre-fix invalid"
+                else "—"
+            )
             f.write(
                 "| "
                 + " | ".join(
                     [
                         dataset,
                         subset_ids.get(dataset, dataset),
-                        fmt(HP_MS_TUNE_MAX_SCALE.get(dataset)),
+                        scale_disp,
                         fmt(ms["anchor_mse"]),
                         fmt(ms["anchor_mae"]),
                         fmt(ms["crps"]),
@@ -423,9 +462,10 @@ def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
             "**Discrete** (CE, `ordinal_d3pm_staged`), **MAE Discrete** (expectation MAE + uniform `1/H` anchor, "
             "`ordinal_d3pm_mae_staged_subsets`), **Binary flat** (full variates, `binary_anchor_stationary_flat`), "
             "**Flat subsets** / **Flat subsets EMA0.99** (ETTh1-capped subsets, jobs `3951193`–`3951199` / "
-            "`3951527`–`3951533`), **MS tune** (`hp_max_scale_tuning`, jobs `3943934`–`3943937`), and "
+            "`3951527`–`3951533`), **MS tune** (`hp_max_scale_tuning`), and "
             "**MMPD (subset)** (`06-13-binary-mmpd-subset-compare`, jobs `3951201`–`3951207`). "
             "Probabilistic metrics: `dpmpp` sampler, 20 steps, 20 samples.\n\n"
+            f"{PREFIX_INVALID_NOTE}\n\n"
         )
         f.write("| " + " | ".join(header) + " |\n")
         f.write("|" + "|".join(["---"] * len(header)) + "|\n")
@@ -438,7 +478,7 @@ def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
                     [
                         row["dataset"],
                         cfg_disp,
-                        row["status"],
+                        row["status"] if row["status"] == "pre-fix invalid" else f"**{row['status']}**",
                         fmt(row["anchor_mse"]),
                         fmt(row["anchor_mae"]),
                         fmt(row["crps"]),
@@ -450,7 +490,12 @@ def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
             )
 
 
-def write_leaderboard(path: str, by_dataset: Dict[str, List[Dict[str, Any]]], deltas: Dict[str, Dict[str, Optional[int]]]) -> None:
+def write_leaderboard(
+    path: str,
+    by_dataset: Dict[str, List[Dict[str, Any]]],
+    deltas: Dict[str, Dict[str, Optional[int]]],
+    grid_rows: List[Dict[str, Any]],
+) -> None:
     datasets_present = [d for d in DATASET_ORDER if d in by_dataset]
     configs = sorted(
         {r["Config"] for rows in by_dataset.values() for r in rows if r["Config"] not in {"**MMPD**", "**MMPD (subset)**", "**Discrete**"}},
@@ -468,6 +513,8 @@ def write_leaderboard(path: str, by_dataset: Dict[str, List[Dict[str, Any]]], de
     ):
         configs.append("**Discrete**")
 
+    st_map = status_by_config(grid_rows)
+
     with open(path, "w", encoding="utf-8") as f:
         f.write("# YAML-First Sweep Leaderboard\n\n")
         f.write(
@@ -478,9 +525,10 @@ def write_leaderboard(path: str, by_dataset: Dict[str, List[Dict[str, Any]]], de
             "**Binary flat** is flat `0.5` XOR anchor on full variates (`binary_anchor_stationary_flat`). "
             "**Flat subsets** / **Flat subsets EMA0.99** use ETTh1-capped variate subsets "
             "(`binary_anchor_stationary_flat_subsets` / `_ema099`). "
-            "**MS tune** is Optuna `max_scale` search (`hp_max_scale_tuning`, jobs `3943934`–`3943937`). "
+            "**MS tune** is Optuna `max_scale` search (`hp_max_scale_tuning`, baseline-fixed other HPs). "
             f"**MMPD (subset)** from `{MMPD_SOURCE_SUBSET}` (same subsets as flat runs, 20 samples, full test). "
             f"Legacy **MMPD** from `{MMPD_SOURCE_LEGACY}` where subset MMPD is unavailable.\n\n"
+            f"{PREFIX_INVALID_NOTE}\n\n"
         )
 
         # Cross-dataset avg Δrank
@@ -506,6 +554,8 @@ def write_leaderboard(path: str, by_dataset: Dict[str, List[Dict[str, Any]]], de
 
         for i, (avg, cfg, per_ds, _) in enumerate(avg_rows, start=1):
             ds_cells = [drank_str(v) for v in per_ds]
+            cfg_st = st_map.get(cfg, "OK")
+            st_cell = "**pre-fix invalid**" if cfg_st == "pre-fix invalid" else "**OK**"
             f.write(
                 "| "
                 + " | ".join(
@@ -514,7 +564,7 @@ def write_leaderboard(path: str, by_dataset: Dict[str, List[Dict[str, Any]]], de
                         f"`{cfg}`" if not cfg.startswith("**") else cfg,
                         f"{avg:+.2f}",
                         *ds_cells,
-                        "**OK**",
+                        st_cell,
                     ]
                 )
                 + " |\n"
@@ -575,6 +625,8 @@ def write_leaderboard(path: str, by_dataset: Dict[str, List[Dict[str, Any]]], de
                 status = r["Status"]
                 if status == "OK":
                     status = "**OK**"
+                elif status == "pre-fix invalid":
+                    status = "**pre-fix invalid**"
                 elif status == "ref":
                     status = "ref"
                 f.write(
@@ -601,7 +653,7 @@ def main() -> None:
     grid_rows = append_mmpd_grid_rows(grid_rows)
     deltas = delta_ranks(by_dataset)
     write_grid(GRID_PATH, grid_rows)
-    write_leaderboard(LEADERBOARD_PATH, by_dataset, deltas)
+    write_leaderboard(LEADERBOARD_PATH, by_dataset, deltas, grid_rows)
     write_subset_compare(SUBSET_COMPARE_PATH, grid_rows)
     print(f"Wrote {GRID_PATH}")
     print(f"Wrote {LEADERBOARD_PATH}")

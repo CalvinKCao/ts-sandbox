@@ -15,6 +15,7 @@ from optuna.samplers import TPESampler
 from torch.utils.data import DataLoader, Subset
 
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
+from models.diffusion_tsf.pipeline.config import training_value
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
@@ -163,9 +164,14 @@ def _suggest_staged_params(
     smoke_test: bool,
     search_space: str = "default",
 ) -> Dict[str, Any]:
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        FINETUNE_HP_LR_MAX,
+        FINETUNE_HP_LR_MIN,
+    )
+
     base_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
-    if getattr(state, "max_scale_tuning", False):
-        rng = getattr(state, "max_scale_tuning_range", [2.5, 14.0])
+    if training_value(state, "max_scale_tuning", False):
+        rng = training_value(state, "max_scale_tuning_range", [2.5, 14.0])
         ms = trial.suggest_float("max_scale", float(rng[0]), float(rng[1]))
     else:
         ms = base_ms
@@ -380,9 +386,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
 
             optimizer = torch.optim.AdamW(model.parameters(), lr=float(params["learning_rate"]))
-            
-            lr_scheduler_type = getattr(state, "lr_scheduler_type", "none")
-            warmup_epochs = getattr(state, "lr_warmup_epochs", 0)
+
+            lr_scheduler_type = str(training_value(state, "lr_scheduler_type", "none"))
+            warmup_epochs = int(training_value(state, "lr_warmup_epochs", 0))
             warmup_epochs = min(warmup_epochs, max(0, max_epochs - 1))
             
             scheduler = None
