@@ -1,12 +1,12 @@
 #!/bin/bash
-# Train + eval MMPD on the same variate/stride subsets as sweep_baseline
-# (ETTh1, ETTm1_4v_s3, exchange_rate, weather_4v_s2).
+# Train + eval MMPD using variate/stride subsets from binary-anchor checkpoint metadata.
 #
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
-#   ./submit_mmpd_sweep_subset.sh
+#   ./submit_mmpd_sweep_subset.sh --anchor-config binary_anchor_stationary_flat_subsets
 #   ./submit_mmpd_sweep_subset.sh --smoke-test
 #   ./submit_mmpd_sweep_subset.sh --output-dir results/datasets/06-12-sweep-subset-mmpd
 #   ./submit_mmpd_sweep_subset.sh --resume --output-dir results/datasets/06-12-sweep-subset-mmpd
+#   ./submit_mmpd_sweep_subset.sh --datasets ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama
 #
 # MMPD-only: does not submit binary-anchor re-eval workers.
 
@@ -17,7 +17,8 @@ SMOKE=0
 RESUME=0
 FORCE=0
 OUTPUT_DIR=""
-ANCHOR_CONFIG="sweep_baseline"
+ANCHOR_CONFIG="binary_anchor_stationary_flat_subsets"
+DATASETS_CSV="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
 SEED=2026
 WALL_MMPD="12:00:00"
 WALL_INIT="0:45:00"
@@ -30,6 +31,7 @@ while [[ $# -gt 0 ]]; do
         --force) FORCE=1; shift ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --anchor-config) ANCHOR_CONFIG="$2"; shift 2 ;;
+        --datasets) DATASETS_CSV="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         --time) WALL_MMPD="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
@@ -60,7 +62,7 @@ if [[ "$REPO" == /home/* ]]; then
 fi
 cd "$REPO"
 
-DATASETS=(ETTh1 ETTm1 exchange_rate weather)
+IFS=',' read -ra DATASETS <<< "$DATASETS_CSV"
 
 pick_anchor_root() {
     local ds="$1"
