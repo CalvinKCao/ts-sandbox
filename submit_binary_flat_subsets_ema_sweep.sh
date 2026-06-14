@@ -12,8 +12,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 DATASETS="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
-CONFIG_GLOB="configs/binary_anchor_stationary_flat_subsets_ema_sweep_0*.yaml"
+CONFIGS="configs/binary_anchor_stationary_flat_subsets_ema_sweep_090.yaml,configs/binary_anchor_stationary_flat_subsets_ema_sweep_095.yaml,configs/binary_anchor_stationary_flat_subsets_ema_sweep_098.yaml,configs/binary_anchor_stationary_flat_subsets_ema_sweep_0995.yaml,configs/binary_anchor_stationary_flat_subsets_ema_sweep_0999.yaml"
 WANDB_PROJECT="ts-sandbox-flat-subsets-ema-sweep"
+WALL_TIME="3:00:00"
 
 if [[ "${1:-}" == "--smoke" ]]; then
     ./submit_grid.sh --smoke \
@@ -24,6 +25,7 @@ if [[ "${1:-}" == "--smoke" ]]; then
 fi
 
 ./submit_grid.sh \
-    --configs "$CONFIG_GLOB" \
+    --configs "$CONFIGS" \
     --datasets "$DATASETS" \
-    --wandb-project "$WANDB_PROJECT"
+    --wandb-project "$WANDB_PROJECT" \
+    --time "$WALL_TIME"

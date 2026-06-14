@@ -15,6 +15,7 @@ cd "$SCRIPT_DIR"
 DATASETS="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
 CONFIGS="configs/binary_anchor_stationary_flat_subsets_grad_accum_125.yaml,configs/binary_anchor_stationary_flat_subsets_grad_accum_150.yaml,configs/binary_anchor_stationary_flat_subsets_grad_accum_200.yaml"
 WANDB_PROJECT="ts-sandbox-flat-subsets-grad-accum"
+WALL_TIME="3:00:00"
 
 if [[ "${1:-}" == "--smoke" ]]; then
     ./submit_grid.sh --smoke \
@@ -27,4 +28,5 @@ fi
 ./submit_grid.sh \
     --configs "$CONFIGS" \
     --datasets "$DATASETS" \
-    --wandb-project "$WANDB_PROJECT"
+    --wandb-project "$WANDB_PROJECT" \
+    --time "$WALL_TIME"
