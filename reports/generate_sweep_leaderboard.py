@@ -92,6 +92,8 @@ CONFIG_ALIASES = {
     "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_hi": "**Flat subsets accum1.5x LR-hi**",
     "binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo": "**Flat subsets accum2.0x LR-lo**",
     "binary_anchor_stationary_flat_subsets_grad_accum_200_lr_hi": "**Flat subsets accum2.0x LR-hi**",
+    "binary_anchor_stationary_flat_subsets_ema099_lb336_hz96": "**Flat subsets EMA0.99 LB336/H96**",
+    "binary_anchor_stationary_flat_subsets_ema099_lb96_hz720": "**Flat subsets EMA0.99 LB96/H720**",
     "hp_max_scale_tuning": "**MS tune**",
 }
 
@@ -604,7 +606,9 @@ def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
             "`ordinal_d3pm_mae_staged_subsets`), **Binary flat** (full variates, `binary_anchor_stationary_flat`), "
             "**Flat subsets** (`3951193`–`3951199`), **Flat subsets EMA0.99** (`3951527`–`3951533`), "
             "EMA reuse sweep (`ema_sweep_{090,095,098,0995,0999}`, jobs `3953317`–`3953351`), "
-            "grad-accum reuse sweep (`grad_accum_{125,150,200}`, jobs `3953944`–`3953964`), "
+            "grad-accum reuse sweep (`grad_accum_{125,150,200}`, jobs `3953944`–`3953964`; "
+            "LR-band split `grad_accum_{150,200}_lr_{lo,hi}`, jobs `3954784`–`3954810`), "
+            "EMA0.99 lookback variants (`ema099_lb336_hz96`, `ema099_lb96_hz720`, jobs `3955091`–`3955098`), "
             "**MS tune** (`hp_max_scale_tuning`), and "
             "**MMPD (subset)** (`06-13-binary-mmpd-subset-compare`, jobs `3951201`–`3951207`). "
             "Probabilistic metrics: `dpmpp` sampler, 20 steps, 20 samples.\n\n"
@@ -669,7 +673,9 @@ def write_leaderboard(
             "**Flat subsets** (`binary_anchor_stationary_flat_subsets`, jobs `3951193`–`3951199`). "
             "**Flat subsets EMA0.99** (`3951527`–`3951533`). "
             "EMA reuse sweep: `diffusion_ema_decay` ∈ {0.90, 0.95, 0.98, 0.995, 0.999} (jobs `3953317`–`3953351`). "
-            "Grad-accum reuse sweep: effective batch {1.25×, 1.5×, 2.0×} (jobs `3953944`–`3953964`). "
+            "Grad-accum reuse sweep: effective batch {1.25×, 1.5×, 2.0×} (jobs `3953944`–`3953964`); "
+            "LR-band split on 1.5×/2.0× (`3954784`–`3954810`). "
+            "EMA0.99 lookback variants: LB336/H96 and LB96/H720 (`3955091`–`3955098`). "
             "**MS tune** is Optuna `max_scale` search (`hp_max_scale_tuning`, baseline-fixed other HPs). "
             f"**MMPD (subset)** from `{MMPD_SOURCE_SUBSET}` (same subsets as flat runs, 20 samples, full test). "
             f"Legacy **MMPD** from `{MMPD_SOURCE_LEGACY}` where subset MMPD is unavailable.\n\n"
