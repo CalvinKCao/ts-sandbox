@@ -25,12 +25,49 @@ logger = logging.getLogger(__name__)
 class ITransFinetuneHPPhase(PipelinePhase):
     name = "itrans_finetune_hp"
 
-    def should_skip(self, state: PipelineState) -> bool:
+    def _try_reuse_itrans_finetune_ckpt(
+        self,
+        state: PipelineState,
+        *,
+        fail_if_missing: bool,
+    ) -> bool:
         subset_id = state.subset_id or state.dataset
-        ckpt = os.path.join(state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
-        if os.path.exists(ckpt):
-            logger.info(f"  [{self.name}] cached: {ckpt}")
-            state.itrans_finetune_ckpt = ckpt
+        ft_ckpt = os.path.join(state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
+        if os.path.exists(ft_ckpt):
+            state.itrans_finetune_ckpt = ft_ckpt
+            return True
+
+        reuse_from = self.get("reuse_checkpoint_from_config")
+        if not reuse_from:
+            return False
+
+        try:
+            source_dir = discover_dataset_run_ckpt_dir(state, str(reuse_from))
+        except FileNotFoundError:
+            if fail_if_missing:
+                raise
+            return False
+
+        src_ckpt = os.path.join(source_dir, f"{subset_id}_itransformer_finetuned.pt")
+        if not os.path.exists(src_ckpt):
+            if fail_if_missing:
+                raise FileNotFoundError(
+                    f"Missing iTransformer finetune to reuse: {src_ckpt} "
+                    f"(from *-{state.dataset}-{reuse_from})"
+                )
+            return False
+
+        os.makedirs(os.path.dirname(ft_ckpt), exist_ok=True)
+        shutil.copy2(src_ckpt, ft_ckpt)
+        state.itrans_finetune_ckpt = ft_ckpt
+        logger.info("  [%s] reused finetuned iTransformer from %s", self.name, source_dir)
+        return True
+
+    def should_skip(self, state: PipelineState) -> bool:
+        if self._try_reuse_itrans_finetune_ckpt(state, fail_if_missing=False):
+            subset_id = state.subset_id or state.dataset
+            ckpt = os.path.join(state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
+            logger.info("  [%s] cached: %s", self.name, ckpt)
             return True
         return False
 
@@ -46,19 +83,8 @@ class ITransFinetuneHPPhase(PipelinePhase):
         subset_id = state.subset_id or state.dataset
         ft_ckpt = os.path.join(state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
 
-        reuse_from = self.get("reuse_checkpoint_from_config")
-        if reuse_from:
-            source_dir = discover_dataset_run_ckpt_dir(state, str(reuse_from))
-            src_ckpt = os.path.join(source_dir, f"{subset_id}_itransformer_finetuned.pt")
-            if not os.path.exists(src_ckpt):
-                raise FileNotFoundError(
-                    f"Missing iTransformer finetune to reuse: {src_ckpt} "
-                    f"(from *-{state.dataset}-{reuse_from})"
-                )
-            if not os.path.exists(ft_ckpt):
-                shutil.copy2(src_ckpt, ft_ckpt)
-            state.itrans_finetune_ckpt = ft_ckpt
-            logger.info("  [%s] reused finetuned iTransformer from %s", self.name, source_dir)
+        if self.get("reuse_checkpoint_from_config"):
+            self._try_reuse_itrans_finetune_ckpt(state, fail_if_missing=True)
             return state
 
         variate_indices = state.variate_indices

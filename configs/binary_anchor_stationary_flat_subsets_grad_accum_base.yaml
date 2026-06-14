@@ -1,9 +1,4 @@
-extends: binary_anchor_stationary_flat_subsets.yaml
+extends: binary_anchor_stationary_flat_subsets_ema_sweep_base.yaml
 
-# Reuse synthetic pretrain + iTransformer; diffusion finetune uses probed max
-# micro-batch with optional training.diffusion_effective_batch_multiplier grad accum.
-phases:
-  - phase: staged_diffusion_pretrain
-    reuse_pretrain_from_config: binary_anchor_stationary_flat_subsets
-  - phase: itrans_finetune_hp
-    reuse_checkpoint_from_config: binary_anchor_stationary_flat_subsets
+# Same synthetic pretrain + iTrans reuse as EMA sweep; only diffusion finetune/eval re-run.
+# Leaf configs set training.diffusion_effective_batch_multiplier.
