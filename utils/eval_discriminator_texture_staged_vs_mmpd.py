@@ -928,7 +928,11 @@ def run_eval(args: argparse.Namespace) -> None:
                     trained = True
 
                 if args.visualize_confusions:
-                    from utils.visualize_discriminator_texture_confusions import visualize_combo
+                    try:
+                        from utils.visualize_discriminator_texture_confusions import visualize_combo
+                    except ModuleNotFoundError as exc:
+                        print(f"[viz] skip {dataset}/{fake_source}/L{slice_len}: {exc}", flush=True)
+                        continue
 
                     try:
                         visualize_combo(
