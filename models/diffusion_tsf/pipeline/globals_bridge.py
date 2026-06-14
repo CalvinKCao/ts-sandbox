@@ -22,10 +22,10 @@ def patch_globals(
     mod.N_VARIATES = state.n_variates
     lookback = state.lookback_length
     forecast = state.forecast_length
-    if honor_dataset_windows:
-        from models.diffusion_tsf.train_multivariate_pipeline import dataset_window_lengths
+    if honor_dataset_windows and state.dataset == "dalia":
+        from models.diffusion_tsf.train_multivariate_pipeline import dalia_window_lengths
 
-        lookback, forecast = dataset_window_lengths(state.dataset)
+        lookback, forecast = dalia_window_lengths()
     mod.LOOKBACK_LENGTH = lookback
     mod.FORECAST_LENGTH = forecast
     mod.ITRANSFORMER_SEQ_LEN = lookback
