@@ -1,4 +1,26 @@
 extends: binary_anchor_stationary_flat_subsets_ema_sweep_base.yaml
 
-# Same synthetic pretrain + iTrans reuse as EMA sweep; only diffusion finetune/eval re-run.
-# Leaf configs set training.diffusion_effective_batch_multiplier.
+# Reuse synthetic pretrain + iTrans; Optuna-tune diffusion LR per stage (lr_only)
+# with training.diffusion_effective_batch_multiplier grad accum in leaf configs.
+training:
+  finetune_hp_lr_min: 0.000003
+  finetune_hp_lr_max: 0.0002
+
+phases:
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 10
+    max_epochs: 20
+    patience: 8
+    search_space: lr_only
+
+  - phase: diffusion_fine_finetune_hp
+    n_trials: 10
+    max_epochs: 20
+    patience: 8
+    search_space: lr_only
+
+  - phase: diffusion_finer_finetune_hp
+    n_trials: 10
+    max_epochs: 20
+    patience: 8
+    search_space: lr_only
