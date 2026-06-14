@@ -48,6 +48,7 @@ training:
   lr_warmup_epochs: 0
   max_scale_tuning: false
   max_scale_tuning_range: [2.5, 14.0]
+  diffusion_ema_decay: 0.99
 
 visualization:
   enabled: true

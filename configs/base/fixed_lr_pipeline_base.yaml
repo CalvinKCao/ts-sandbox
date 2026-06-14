@@ -4,7 +4,6 @@ training:
   itrans_paper_lr_grid: [0.001]
   finetune_hp_lr_min: 0.00003
   finetune_hp_lr_max: 0.00003
-  diffusion_ema_decay: 0.0
 
 phases:
   - phase: staged_diffusion_pretrain
