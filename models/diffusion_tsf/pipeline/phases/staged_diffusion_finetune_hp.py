@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from typing import Any, Dict, Optional, Tuple
 
@@ -23,6 +24,54 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_diffusion_batch_and_accum(
+    probed_max: int,
+    multiplier: Optional[float],
+) -> Dict[str, int]:
+    """Split probed max micro-batch and grad-accum steps to hit target effective batch."""
+    probed_max = max(1, int(probed_max))
+    if multiplier is None or float(multiplier) <= 1.0:
+        return {
+            "batch_size": probed_max,
+            "gradient_accumulation_steps": 1,
+            "effective_batch_size": probed_max,
+        }
+
+    target_effective = max(probed_max, int(round(probed_max * float(multiplier))))
+    for accum in range(1, target_effective + 1):
+        if target_effective % accum != 0:
+            continue
+        micro = target_effective // accum
+        if micro <= probed_max:
+            return {
+                "batch_size": micro,
+                "gradient_accumulation_steps": accum,
+                "effective_batch_size": micro * accum,
+            }
+
+    accum = max(1, math.ceil(target_effective / probed_max))
+    micro = max(1, min(probed_max, target_effective // accum))
+    return {
+        "batch_size": micro,
+        "gradient_accumulation_steps": accum,
+        "effective_batch_size": micro * accum,
+    }
+
+
+def _apply_effective_batch_multiplier(
+    params: Dict[str, Any],
+    max_batch_size: int,
+    state: PipelineState,
+) -> Dict[str, Any]:
+    out = dict(params)
+    batch_info = resolve_diffusion_batch_and_accum(
+        max_batch_size,
+        state.extra.get("diffusion_effective_batch_multiplier"),
+    )
+    out.update(batch_info)
+    return out
 
 
 TUNED_MODEL_KEYS = (
@@ -133,28 +182,36 @@ def _suggest_staged_params(
             lr = trial.suggest_float(
                 "learning_rate", FINETUNE_HP_LR_MIN, FINETUNE_HP_LR_MAX, log=True
             )
-        return {
-            "learning_rate": lr,
-            "batch_size": max(1, max_batch_size),
-            "ema_decay": float(state.extra.get("diffusion_ema_decay", 0.0)),
-            "binary_noise_schedule": state.binary_noise_schedule,
-            "loss_weighting": state.loss_weighting,
-            "min_snr_gamma": float(state.min_snr_gamma),
-            "prediction_target": state.prediction_target,
-            "max_scale": ms,
-        }
+        return _apply_effective_batch_multiplier(
+            {
+                "learning_rate": lr,
+                "batch_size": max(1, max_batch_size),
+                "ema_decay": float(state.extra.get("diffusion_ema_decay", 0.0)),
+                "binary_noise_schedule": state.binary_noise_schedule,
+                "loss_weighting": state.loss_weighting,
+                "min_snr_gamma": float(state.min_snr_gamma),
+                "prediction_target": state.prediction_target,
+                "max_scale": ms,
+            },
+            max_batch_size,
+            state,
+        )
 
     if smoke_test:
-        return {
-            "learning_rate": trial.suggest_float("learning_rate", 1e-5, 3e-4, log=True),
-            "batch_size": min(max(1, max_batch_size), 2),
-            "ema_decay": 0.0,
-            "binary_noise_schedule": state.binary_noise_schedule,
-            "loss_weighting": state.loss_weighting,
-            "min_snr_gamma": float(state.min_snr_gamma),
-            "prediction_target": state.prediction_target,
-            "max_scale": ms,
-        }
+        return _apply_effective_batch_multiplier(
+            {
+                "learning_rate": trial.suggest_float("learning_rate", 1e-5, 3e-4, log=True),
+                "batch_size": min(max(1, max_batch_size), 2),
+                "ema_decay": 0.0,
+                "binary_noise_schedule": state.binary_noise_schedule,
+                "loss_weighting": state.loss_weighting,
+                "min_snr_gamma": float(state.min_snr_gamma),
+                "prediction_target": state.prediction_target,
+                "max_scale": ms,
+            },
+            max_batch_size,
+            state,
+        )
 
     batch_grid = [b for b in (4, 8, 16, 32, 48, 64, 96, 128) if b <= max_batch_size]
     if not batch_grid:
@@ -175,7 +232,7 @@ def _suggest_staged_params(
         if params["loss_weighting"] == "min_snr"
         else 5.0
     )
-    return params
+    return _apply_effective_batch_multiplier(params, max_batch_size, state)
 
 
 def _suggest_ordinal_d3pm_params(
@@ -186,16 +243,20 @@ def _suggest_ordinal_d3pm_params(
 ) -> Dict[str, Any]:
     base_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
     batch_size = min(max(1, max_batch_size), 2) if smoke_test else max(1, max_batch_size)
-    return {
-        "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
-        "d3pm_transition_max": trial.suggest_float("d3pm_transition_max", 0.1, 0.4),
-        "dit_dropout": trial.suggest_categorical("dit_dropout", [0.0, 0.1]),
-        "batch_size": batch_size,
-        "max_scale": base_ms,
-        "prediction_target": "x0",
-        "loss_weighting": "none",
-        "min_snr_gamma": float(state.min_snr_gamma),
-    }
+    return _apply_effective_batch_multiplier(
+        {
+            "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
+            "d3pm_transition_max": trial.suggest_float("d3pm_transition_max", 0.1, 0.4),
+            "dit_dropout": trial.suggest_categorical("dit_dropout", [0.0, 0.1]),
+            "batch_size": batch_size,
+            "max_scale": base_ms,
+            "prediction_target": "x0",
+            "loss_weighting": "none",
+            "min_snr_gamma": float(state.min_snr_gamma),
+        },
+        max_batch_size,
+        state,
+    )
 
 
 class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
@@ -352,6 +413,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
             early_stop = EarlyStopping(patience=patience)
             ema = _Ema(model, float(params.get("ema_decay", 0.0))) if params.get("ema_decay", 0.0) else None
+            accum_steps = max(1, int(params.get("gradient_accumulation_steps", 1)))
             best_val = float("inf")
             best_epoch = 0
 
@@ -359,18 +421,26 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 model.train()
                 train_loss = 0.0
                 n_train = 0
-                for past, future in train_loader:
+                optimizer.zero_grad(set_to_none=True)
+                for batch_idx, (past, future) in enumerate(train_loader):
                     past, future = past.to(device), future.to(device)
-                    optimizer.zero_grad(set_to_none=True)
                     with amp_context():
-                        loss = model.get_loss(past, future)
+                        loss = model.get_loss(past, future) / accum_steps
                     loss.backward()
+                    if (batch_idx + 1) % accum_steps == 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
+                        if ema is not None:
+                            ema.update(model)
+                    train_loss += float(loss.item()) * accum_steps
+                    n_train += 1
+                if accum_steps > 1 and len(train_loader) % accum_steps != 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
                     if ema is not None:
                         ema.update(model)
-                    train_loss += float(loss.item())
-                    n_train += 1
 
                 if scheduler is not None:
                     scheduler.step()
@@ -485,6 +555,19 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         del ft_itrans_model, ft_itrans_guidance
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+        accum_mult = state.extra.get("diffusion_effective_batch_multiplier")
+        if accum_mult is not None and float(accum_mult) > 1.0:
+            batch_plan = resolve_diffusion_batch_and_accum(max_batch, accum_mult)
+            logger.info(
+                "  [%s] grad accum: probed_max=%d multiplier=%s -> micro=%d accum=%d effective=%d",
+                self.name,
+                max_batch,
+                accum_mult,
+                batch_plan["batch_size"],
+                batch_plan["gradient_accumulation_steps"],
+                batch_plan["effective_batch_size"],
+            )
 
         n_trials = int(self.require("n_trials"))
         if state.smoke_test:

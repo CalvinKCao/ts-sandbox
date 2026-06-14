@@ -1,0 +1,8 @@
+extends: binary_anchor_stationary_flat_subsets_grad_accum_base.yaml
+
+training:
+  diffusion_effective_batch_multiplier: 1.5
+
+experiment:
+  name: binary-anchor-stationary-flat-subsets-grad-accum-150
+  experiment_name: binary_anchor_stationary_flat_subsets_grad_accum_150

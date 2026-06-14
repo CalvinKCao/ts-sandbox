@@ -218,6 +218,7 @@ class PipelineState:
             "skip_synthetic_tuning",
             "force_retrain_synthetic",
             "diffusion_ema_decay",
+            "diffusion_effective_batch_multiplier",
         ):
             if k in training:
                 extra[k] = training[k]
