@@ -3,18 +3,21 @@ extends: binary_anchor_ar.yaml
 wandb:
   project: ts-sandbox-binary-anchor-ar-grad-accum
 
-# Reuse ema099 synthetic pretrain only; tune iTrans + diffusion LR (lr_only, 5 trials/stage).
+# Reuse ema099 synthetic pretrain only; tune iTrans + diffusion LR (lr_only, 4 trials/stage).
 phases:
   - phase: staged_diffusion_pretrain
     reuse_pretrain_from_config: binary_anchor_stationary_flat_subsets_ema099
   - phase: itrans_finetune_hp
+    n_trials: 4
+    max_epochs: 10
+    cold_start: true
   - phase: diffusion_coarse_finetune_hp
-    n_trials: 5
+    n_trials: 4
     max_epochs: 20
     patience: 8
     search_space: lr_only
   - phase: diffusion_fine_finetune_hp
-    n_trials: 5
+    n_trials: 4
     max_epochs: 20
     patience: 8
     search_space: lr_only
