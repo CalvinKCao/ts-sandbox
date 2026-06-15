@@ -12,6 +12,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | ETTh1 | **Flat subsets EMA0.95** | **OK** | 0.4061 | 0.4083 | 0.3061 | 0.4117 | 3953324 |
 | ETTh1 | **Flat subsets EMA0.98** | **OK** | 0.4084 | 0.4087 | 0.3066 | 0.4133 | 3953331 |
 | ETTh1 | **Flat subsets EMA0.99 LB336/H96** | **OK** | 0.4109 | 0.4088 | 0.2951 | 0.3881 | 3955091 |
+| ETTh1 | **Flat subsets EMA0.99 LB96/H720** | **OK** | 0.7247 | 0.5637 | 0.4868 | 0.7028 | 3955095 |
 | ETTh1 | **Flat subsets EMA0.99** | **OK** | 0.3974 | 0.4040 | 0.3021 | 0.4047 | 3951527 |
 | ETTh1 | **Flat subsets EMA0.995** | **OK** | 0.4158 | 0.4111 | 0.3090 | 0.4205 | 3953338 |
 | ETTh1 | **Flat subsets EMA0.999** | **OK** | 0.4140 | 0.4097 | 0.3087 | 0.4214 | 3953345 |
@@ -111,6 +112,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | exchange_rate | **Flat subsets EMA0.95** | **OK** | 0.0875 | 0.2077 | 0.1689 | 0.0888 | 3953326 |
 | exchange_rate | **Flat subsets EMA0.98** | **OK** | 0.0878 | 0.2078 | 0.1684 | 0.0884 | 3953333 |
 | exchange_rate | **Flat subsets EMA0.99 LB336/H96** | **OK** | 0.0922 | 0.2141 | 0.1692 | 0.0896 | 3955092 |
+| exchange_rate | **Flat subsets EMA0.99 LB96/H720** | **OK** | 0.9771 | 0.7582 | 0.7219 | 1.0750 | 3955096 |
 | exchange_rate | **Flat subsets EMA0.99** | **OK** | 0.0893 | 0.2086 | 0.1684 | 0.0881 | 3951529 |
 | exchange_rate | **Flat subsets EMA0.995** | **OK** | 0.0875 | 0.2074 | 0.1667 | 0.0869 | 3953340 |
 | exchange_rate | **Flat subsets EMA0.999** | **OK** | 0.0909 | 0.2107 | 0.1703 | 0.0895 | 3953347 |
@@ -155,8 +157,10 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | solar_Alabama | **Flat subsets EMA0.995** | **OK** | 0.2129 | 0.2393 | 0.1932 | 0.2149 | 3953344 |
 | solar_Alabama | **Flat subsets EMA0.999** | **OK** | 0.2108 | 0.2369 | 0.1912 | 0.2116 | 3953351 |
 | solar_Alabama | **Flat subsets accum1.25x** | **OK** | 0.2231 | 0.2439 | 0.1977 | 0.2224 | 3953950 |
+| solar_Alabama | **Flat subsets accum1.5x LR-hi** | **OK** | 0.2078 | 0.2283 | 0.1861 | 0.2073 | 3954797 |
 | solar_Alabama | **Flat subsets accum1.5x LR-lo** | **OK** | 0.2110 | 0.2379 | 0.1916 | 0.2116 | 3954790 |
 | solar_Alabama | **Flat subsets accum1.5x** | **OK** | 0.2002 | 0.2313 | 0.1789 | 0.1902 | 3953957 |
+| solar_Alabama | **Flat subsets accum2.0x LR-hi** | **OK** | 0.2111 | 0.2321 | 0.1868 | 0.2087 | 3954811 |
 | solar_Alabama | **Flat subsets accum2.0x LR-lo** | **OK** | 0.2136 | 0.2398 | 0.1933 | 0.2147 | 3954804 |
 | solar_Alabama | **Flat subsets accum2.0x** | **OK** | 0.2158 | 0.2394 | 0.1876 | 0.2045 | 3953964 |
 | solar_Alabama | **Flat subsets** | **OK** | 0.2170 | 0.2426 | 0.1945 | 0.2172 | 3951199 |
@@ -192,6 +196,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | weather | **Flat subsets EMA0.995** | **OK** | 0.0964 | 0.2213 | 0.1752 | 0.0964 | 3953341 |
 | weather | **Flat subsets EMA0.999** | **OK** | 0.0945 | 0.2193 | 0.1759 | 0.0972 | 3953348 |
 | weather | **Flat subsets accum1.25x** | **OK** | 0.0975 | 0.2229 | 0.1777 | 0.0986 | 3953947 |
+| weather | **Flat subsets accum1.5x LR-hi** | **OK** | 0.0963 | 0.2207 | 0.1746 | 0.0955 | 3954794 |
 | weather | **Flat subsets accum1.5x LR-lo** | **OK** | 0.0973 | 0.2233 | 0.1775 | 0.0981 | 3954787 |
 | weather | **Flat subsets accum1.5x** | **OK** | 0.0994 | 0.2251 | 0.1759 | 0.0961 | 3953954 |
 | weather | **Flat subsets accum2.0x LR-hi** | **OK** | 0.0978 | 0.2226 | 0.1760 | 0.0969 | 3954808 |
