@@ -105,12 +105,10 @@ PREFIX_INVALID_JOBS: Dict[str, frozenset[str]] = {
 }
 
 PREFIX_INVALID_NOTE = (
-    "**Pre-fix invalid runs** (pipeline bug, fixed in main): "
-    "`hp_max_scale_tuning` jobs `3943934`–`3943937` never searched `max_scale` "
-    "(matched `max_scale_by_dataset` by accident). "
-    "`hp_lr_cosine_warmup2` / `hp_lr_cosine_warmup5` jobs `3943882`–`3943887`, `3943924`–`3943927` "
-    "never applied cosine+warmup LR scheduler (metrics ≈ `sweep_baseline`). "
-    "Re-submit: `./submit_hp_max_scale_tuning.sh`, `./submit_hp_lr_cosine_warmup.sh`."
+    "**Pre-fix invalid / incomplete:** Jun 12 `hp_max_scale_tuning` jobs `3943934`–`3943937` "
+    "never searched `max_scale`. Post-fix cosine+warmup `3956633`–`3956640` replaces pre-fix "
+    "`3943882`–`3943927`. Post-fix MS tune: exchange_rate `3956631` only; "
+    "ETTh1/ETTm1/weather `3956629`–`3956632` hit 3h wall before eval — still showing pre-fix rows."
 )
 
 # Legacy pre-fix job ids (for MS tune table footnotes only).
@@ -676,7 +674,7 @@ def write_leaderboard(
             "Grad-accum reuse sweep: effective batch {1.25×, 1.5×, 2.0×} (jobs `3953944`–`3953964`); "
             "LR-band split on 1.5×/2.0× (`3954784`–`3954810`). "
             "EMA0.99 lookback variants: LB336/H96 and LB96/H720 (`3955091`–`3955098`). "
-            "**MS tune** is Optuna `max_scale` search (`hp_max_scale_tuning`, baseline-fixed other HPs). "
+            "**MS tune** (`hp_max_scale_tuning`, post-fix `3956631` exchange_rate; cosine+warmup post-fix `3956633`–`3956640`). "
             f"**MMPD (subset)** from `{MMPD_SOURCE_SUBSET}` (same subsets as flat runs, 20 samples, full test). "
             f"Legacy **MMPD** from `{MMPD_SOURCE_LEGACY}` where subset MMPD is unavailable.\n\n"
             f"{PREFIX_INVALID_NOTE}\n\n"

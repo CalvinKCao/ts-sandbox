@@ -1,8 +1,8 @@
 # YAML-First Sweep Leaderboard
 
-Probabilistic metrics from `dpmpp` sampler with `20` steps. Baseline is `sweep_baseline` (fixed 3e-5 LR, linear noise, epsilon target). **Discrete** is ordinal D3PM CE (`ordinal_d3pm_staged`). **MAE Discrete** is expectation-MAE + uniform `1/H` anchor (`ordinal_d3pm_mae_staged_subsets`). **Binary flat** is flat `0.5` XOR anchor on full variates (`binary_anchor_stationary_flat`). **Flat subsets** (`binary_anchor_stationary_flat_subsets`, jobs `3951193`–`3951199`). **Flat subsets EMA0.99** (`3951527`–`3951533`). EMA reuse sweep: `diffusion_ema_decay` ∈ {0.90, 0.95, 0.98, 0.995, 0.999} (jobs `3953317`–`3953351`). Grad-accum reuse sweep: effective batch {1.25×, 1.5×, 2.0×} (jobs `3953944`–`3953964`); LR-band split on 1.5×/2.0× (`3954784`–`3954810`). EMA0.99 lookback variants: LB336/H96 and LB96/H720 (`3955091`–`3955098`). **MS tune** is Optuna `max_scale` search (`hp_max_scale_tuning`, baseline-fixed other HPs). **MMPD (subset)** from `06-13-binary-mmpd-subset-compare` (same subsets as flat runs, 20 samples, full test). Legacy **MMPD** from `06-12-sweep-subset-mmpd` where subset MMPD is unavailable.
+Probabilistic metrics from `dpmpp` sampler with `20` steps. Baseline is `sweep_baseline` (fixed 3e-5 LR, linear noise, epsilon target). **Discrete** is ordinal D3PM CE (`ordinal_d3pm_staged`). **MAE Discrete** is expectation-MAE + uniform `1/H` anchor (`ordinal_d3pm_mae_staged_subsets`). **Binary flat** is flat `0.5` XOR anchor on full variates (`binary_anchor_stationary_flat`). **Flat subsets** (`binary_anchor_stationary_flat_subsets`, jobs `3951193`–`3951199`). **Flat subsets EMA0.99** (`3951527`–`3951533`). EMA reuse sweep: `diffusion_ema_decay` ∈ {0.90, 0.95, 0.98, 0.995, 0.999} (jobs `3953317`–`3953351`). Grad-accum reuse sweep: effective batch {1.25×, 1.5×, 2.0×} (jobs `3953944`–`3953964`); LR-band split on 1.5×/2.0× (`3954784`–`3954810`). EMA0.99 lookback variants: LB336/H96 and LB96/H720 (`3955091`–`3955098`). **MS tune** (`hp_max_scale_tuning`, post-fix `3956631` exchange_rate; cosine+warmup post-fix `3956633`–`3956640`). **MMPD (subset)** from `06-13-binary-mmpd-subset-compare` (same subsets as flat runs, 20 samples, full test). Legacy **MMPD** from `06-12-sweep-subset-mmpd` where subset MMPD is unavailable.
 
-**Pre-fix invalid runs** (pipeline bug, fixed in main): `hp_max_scale_tuning` jobs `3943934`–`3943937` never searched `max_scale` (matched `max_scale_by_dataset` by accident). `hp_lr_cosine_warmup2` / `hp_lr_cosine_warmup5` jobs `3943882`–`3943887`, `3943924`–`3943927` never applied cosine+warmup LR scheduler (metrics ≈ `sweep_baseline`). Re-submit: `./submit_hp_max_scale_tuning.sh`, `./submit_hp_lr_cosine_warmup.sh`.
+**Pre-fix invalid / incomplete:** Jun 12 `hp_max_scale_tuning` jobs `3943934`–`3943937` never searched `max_scale`. Post-fix cosine+warmup `3956633`–`3956640` replaces pre-fix `3943882`–`3943927`. Post-fix MS tune: exchange_rate `3956631` only; ETTh1/ETTm1/weather `3956629`–`3956632` hit 3h wall before eval — still showing pre-fix rows.
 
 ## Average Δrank vs baseline
 
@@ -10,47 +10,47 @@ Probabilistic metrics from `dpmpp` sampler with `20` steps. Baseline is `sweep_b
 
 | Rank | Config | avg Δrank | ETTh1 Δrank | ETTh2 Δrank | ETTm1 Δrank | exchange_rate Δrank | weather Δrank | electricity Δrank | traffic Δrank | solar_Alabama Δrank | Status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | **Flat subsets EMA0.90** | -7.00 | -3 | — | — | -8 | -10 | — | — | — | **OK** |
-| 2 | **Flat subsets EMA0.95** | -3.67 | +5 | — | — | -4 | -12 | — | — | — | **OK** |
-| 3 | `diff_ema_decay_099` | -3.25 | -7 | — | -6 | +8 | -8 | — | — | — | **OK** |
-| 4 | **Flat subsets EMA0.98** | -2.33 | +7 | — | — | -3 | -11 | — | — | — | **OK** |
-| 5 | **Flat subsets accum1.5x LR-hi** | -2.33 | -8 | — | — | +15 | -14 | — | — | — | **OK** |
-| 6 | `hp_lr_cosine_warmup2` | -2.00 | -2 | — | -2 | -2 | -2 | — | — | — | **pre-fix invalid** |
-| 7 | `hp_beta_end_04` | -1.50 | +8 | — | +7 | -12 | -9 | — | — | — | **OK** |
-| 8 | **Flat subsets EMA0.99** | -1.33 | -6 | — | — | +9 | -7 | — | — | — | **OK** |
-| 9 | `hp_lr_cosine_warmup5` | -1.00 | -1 | — | -1 | -1 | -1 | — | — | — | **pre-fix invalid** |
-| 10 | **Flat subsets EMA0.995** | -0.33 | +18 | — | — | -6 | -13 | — | — | — | **OK** |
-| 11 | `sweep_baseline` | +0.00 | 0 | — | 0 | 0 | 0 | — | — | — | **OK** |
-| 12 | `hp_cfg_dropout_02` | +0.75 | +3 | — | +4 | -9 | +5 | — | — | — | **OK** |
-| 13 | **Binary flat** | +1.00 | +1 | — | — | +1 | +1 | — | — | — | **OK** |
-| 14 | **Flat subsets accum2.0x LR-hi** | +2.00 | -4 | — | — | +13 | -3 | — | — | — | **OK** |
-| 15 | **Flat subsets** | +2.00 | +2 | — | — | +2 | +2 | — | — | — | **OK** |
-| 16 | **Flat subsets accum2.0x** | +2.33 | +9 | — | — | -5 | +3 | — | — | — | **OK** |
-| 17 | **Flat subsets accum1.25x** | +3.67 | +6 | — | — | +10 | -5 | — | — | — | **OK** |
-| 18 | `hp_anchor_lambda_090` | +3.75 | +19 | — | -5 | -13 | +14 | — | — | — | **OK** |
-| 19 | **MS tune** | +4.00 | +13 | — | +3 | -7 | +7 | — | — | — | **pre-fix invalid** |
-| 20 | `h16_16_16` | +4.25 | +4 | — | +1 | +6 | +6 | — | — | — | **OK** |
-| 21 | **MAE Discrete** | +5.00 | +22 | — | — | -11 | +4 | — | — | — | **OK** |
-| 22 | `hp_ctxbias_neg01` | +5.00 | +12 | — | +5 | -10 | +13 | — | — | — | **OK** |
-| 23 | `hp_anchor_lambda_095` | +5.25 | +14 | — | -7 | +3 | +11 | — | — | — | **OK** |
-| 24 | **Flat subsets EMA0.999** | +5.33 | +15 | — | — | +18 | -17 | — | — | — | **OK** |
-| 25 | `diff_noise_cosine` | +7.25 | +23 | — | +6 | +16 | -16 | — | — | — | **OK** |
-| 26 | **Flat subsets accum2.0x LR-lo** | +7.33 | +21 | — | — | +5 | -4 | — | — | — | **OK** |
-| 27 | `hp_num_steps_1200` | +9.50 | +10 | — | +2 | +7 | +19 | — | — | — | **OK** |
-| 28 | `hp_num_steps_800` | +9.75 | +16 | — | -4 | +12 | +15 | — | — | — | **OK** |
-| 29 | `hp_dit_dropout_01` | +10.75 | -5 | — | +8 | +23 | +17 | — | — | — | **OK** |
-| 30 | **Flat subsets accum1.5x** | +11.00 | +17 | — | — | +4 | +12 | — | — | — | **OK** |
-| 31 | `hp_ctxbias_005` | +11.25 | +27 | — | -3 | +11 | +10 | — | — | — | **OK** |
-| 32 | `hp_dit_embed288_heads4` | +12.25 | +25 | — | +13 | +26 | -15 | — | — | — | **OK** |
-| 33 | `diff_min_snr_gamma_5` | +14.50 | +20 | — | +12 | +17 | +9 | — | — | — | **OK** |
-| 34 | **Flat subsets accum1.5x LR-lo** | +15.67 | +32 | — | — | +21 | -6 | — | — | — | **OK** |
-| 35 | `hp_dit_depth4` | +16.50 | +28 | — | +10 | +20 | +8 | — | — | — | **OK** |
-| 36 | **Flat subsets EMA0.99 LB336/H96** | +18.00 | +11 | — | — | +22 | +21 | — | — | — | **OK** |
-| 37 | `h8_8_8` | +18.75 | +30 | — | +11 | +14 | +20 | — | — | — | **OK** |
-| 38 | `diff_prediction_x0` | +18.75 | +24 | — | +9 | +24 | +18 | — | — | — | **OK** |
-| 39 | `hp_beta_end_03` | +18.75 | +26 | — | +14 | +19 | +16 | — | — | — | **OK** |
-| 40 | **Discrete** | +25.33 | +29 | — | — | +25 | +22 | — | — | — | **OK** |
-| 41 | **Flat subsets EMA0.99 LB96/H720** | +29.00 | +31 | — | — | +27 | — | — | — | — | **OK** |
+| 1 | **Flat subsets EMA0.90** | -5.00 | -2 | — | — | -5 | -8 | — | — | — | **OK** |
+| 2 | **Flat subsets EMA0.95** | -2.33 | +5 | — | — | -2 | -10 | — | — | — | **OK** |
+| 3 | `diff_ema_decay_099` | -2.25 | -7 | — | -4 | +8 | -6 | — | — | — | **OK** |
+| 4 | **Flat subsets EMA0.98** | -1.00 | +7 | — | — | -1 | -9 | — | — | — | **OK** |
+| 5 | **Flat subsets accum1.5x LR-hi** | -1.00 | -8 | — | — | +17 | -12 | — | — | — | **OK** |
+| 6 | **Flat subsets EMA0.99** | -0.67 | -6 | — | — | +9 | -5 | — | — | — | **OK** |
+| 7 | `sweep_baseline` | +0.00 | 0 | — | 0 | 0 | 0 | — | — | — | **OK** |
+| 8 | `hp_beta_end_04` | +0.25 | +8 | — | +9 | -9 | -7 | — | — | — | **OK** |
+| 9 | **Flat subsets EMA0.995** | +1.00 | +18 | — | — | -4 | -11 | — | — | — | **OK** |
+| 10 | **Binary flat** | +1.00 | +1 | — | — | +1 | +1 | — | — | — | **OK** |
+| 11 | `hp_cfg_dropout_02` | +1.50 | +3 | — | +4 | -6 | +5 | — | — | — | **OK** |
+| 12 | **Flat subsets** | +2.00 | +2 | — | — | +2 | +2 | — | — | — | **OK** |
+| 13 | **Flat subsets accum2.0x** | +3.00 | +9 | — | — | -3 | +3 | — | — | — | **OK** |
+| 14 | **Flat subsets accum2.0x LR-hi** | +3.33 | -4 | — | — | +15 | -1 | — | — | — | **OK** |
+| 15 | `h16_16_16` | +4.25 | +4 | — | +1 | +6 | +6 | — | — | — | **OK** |
+| 16 | **Flat subsets accum1.25x** | +4.33 | +6 | — | — | +10 | -3 | — | — | — | **OK** |
+| 17 | `hp_anchor_lambda_090` | +5.50 | +19 | — | -3 | -10 | +16 | — | — | — | **OK** |
+| 18 | `hp_anchor_lambda_095` | +5.75 | +14 | — | -5 | +3 | +11 | — | — | — | **OK** |
+| 19 | `hp_ctxbias_neg01` | +5.75 | +12 | — | +5 | -7 | +13 | — | — | — | **OK** |
+| 20 | **MAE Discrete** | +6.00 | +22 | — | — | -8 | +4 | — | — | — | **OK** |
+| 21 | **Flat subsets EMA0.999** | +6.67 | +15 | — | — | +20 | -15 | — | — | — | **OK** |
+| 22 | `hp_lr_cosine_warmup5` | +7.25 | -3 | — | +6 | +12 | +14 | — | — | — | **OK** |
+| 23 | **Flat subsets accum2.0x LR-lo** | +8.00 | +21 | — | — | +5 | -2 | — | — | — | **OK** |
+| 24 | `diff_noise_cosine` | +8.75 | +23 | — | +8 | +18 | -14 | — | — | — | **OK** |
+| 25 | `hp_lr_cosine_warmup2` | +8.75 | -1 | — | +7 | +14 | +15 | — | — | — | **OK** |
+| 26 | `hp_num_steps_1200` | +10.00 | +10 | — | +2 | +7 | +21 | — | — | — | **OK** |
+| 27 | **Flat subsets accum1.5x** | +11.00 | +17 | — | — | +4 | +12 | — | — | — | **OK** |
+| 28 | **MS tune** | +11.00 | +13 | — | +3 | +21 | +7 | — | — | — | **pre-fix invalid** |
+| 29 | `hp_num_steps_800` | +11.00 | +16 | — | -2 | +13 | +17 | — | — | — | **OK** |
+| 30 | `hp_ctxbias_005` | +11.75 | +27 | — | -1 | +11 | +10 | — | — | — | **OK** |
+| 31 | `hp_dit_dropout_01` | +12.50 | -5 | — | +10 | +26 | +19 | — | — | — | **OK** |
+| 32 | `hp_dit_embed288_heads4` | +14.00 | +25 | — | +15 | +29 | -13 | — | — | — | **OK** |
+| 33 | `diff_min_snr_gamma_5` | +15.50 | +20 | — | +14 | +19 | +9 | — | — | — | **OK** |
+| 34 | **Flat subsets accum1.5x LR-lo** | +17.33 | +32 | — | — | +24 | -4 | — | — | — | **OK** |
+| 35 | `hp_dit_depth4` | +17.75 | +28 | — | +12 | +23 | +8 | — | — | — | **OK** |
+| 36 | **Flat subsets EMA0.99 LB336/H96** | +19.67 | +11 | — | — | +25 | +23 | — | — | — | **OK** |
+| 37 | `h8_8_8` | +20.25 | +30 | — | +13 | +16 | +22 | — | — | — | **OK** |
+| 38 | `hp_beta_end_03` | +20.50 | +26 | — | +16 | +22 | +18 | — | — | — | **OK** |
+| 39 | `diff_prediction_x0` | +20.50 | +24 | — | +11 | +27 | +20 | — | — | — | **OK** |
+| 40 | **Discrete** | +27.00 | +29 | — | — | +28 | +24 | — | — | — | **OK** |
+| 41 | **Flat subsets EMA0.99 LB96/H720** | +29.00 | +31 | — | — | +30 | +26 | — | — | — | **OK** |
 | — | **MMPD (subset)** | — | — | — | — | — | — | — | — | — | ref |
 
 ### ETTh1
@@ -65,9 +65,9 @@ Baseline `sweep_baseline` rank: **10** / 42 (lower anchor MSE is better). Δrank
 | 4 | **Flat subsets EMA0.99** | 0.3974 | 0.4040 | 0.3021 | -6 | **OK** |
 | 5 | `hp_dit_dropout_01` | 0.3998 | 0.4056 | 0.3068 | -5 | **OK** |
 | 6 | **Flat subsets accum2.0x LR-hi** | 0.4004 | 0.4034 | 0.3000 | -4 | **OK** |
-| 7 | **Flat subsets EMA0.90** | 0.4052 | 0.4082 | 0.3057 | -3 | **OK** |
-| 8 | `hp_lr_cosine_warmup2` | 0.4059 | 0.4085 | 0.3060 | -2 | **pre-fix invalid** |
-| 9 | `hp_lr_cosine_warmup5` | 0.4059 | 0.4085 | 0.3060 | -1 | **pre-fix invalid** |
+| 7 | `hp_lr_cosine_warmup5` | 0.4045 | 0.4085 | 0.3064 | -3 | **OK** |
+| 8 | **Flat subsets EMA0.90** | 0.4052 | 0.4082 | 0.3057 | -2 | **OK** |
+| 9 | `hp_lr_cosine_warmup2` | 0.4054 | 0.4086 | 0.3069 | -1 | **OK** |
 | 10 | `sweep_baseline` | 0.4059 | 0.4085 | 0.3060 | 0 | **OK** |
 | 11 | **Binary flat** | 0.4059 | 0.4085 | 0.3060 | +1 | **OK** |
 | 12 | **Flat subsets** | 0.4059 | 0.4085 | 0.3060 | +2 | **OK** |
@@ -129,130 +129,131 @@ Baseline `sweep_baseline` missing. Total configs: 18
 
 ### ETTm1
 
-Baseline `sweep_baseline` rank: **9** / 23 (lower anchor MSE is better). Δrank = config rank − baseline rank (negative = improvement).
+Baseline `sweep_baseline` rank: **7** / 23 (lower anchor MSE is better). Δrank = config rank − baseline rank (negative = improvement).
 
 | Rank | Config | anchor_mse | anchor_mae | crps | Δrank | Status |
 |---|---|---|---|---|---|---|
 | 1 | **MMPD** | 0.4208 | 0.4122 | 0.3109 | — | ref |
-| 2 | `hp_anchor_lambda_095` | 0.4522 | 0.4210 | 0.3200 | -7 | **OK** |
-| 3 | `diff_ema_decay_099` | 0.4556 | 0.4231 | 0.3290 | -6 | **OK** |
-| 4 | `hp_anchor_lambda_090` | 0.4661 | 0.4317 | 0.3407 | -5 | **OK** |
-| 5 | `hp_num_steps_800` | 0.4670 | 0.4274 | 0.3382 | -4 | **OK** |
-| 6 | `hp_ctxbias_005` | 0.4681 | 0.4236 | 0.3278 | -3 | **OK** |
-| 7 | `hp_lr_cosine_warmup2` | 0.4683 | 0.4259 | 0.3268 | -2 | **pre-fix invalid** |
-| 8 | `hp_lr_cosine_warmup5` | 0.4683 | 0.4259 | 0.3268 | -1 | **pre-fix invalid** |
-| 9 | `sweep_baseline` | 0.4683 | 0.4259 | 0.3268 | 0 | **OK** |
-| 10 | `h16_16_16` | 0.4724 | 0.4307 | 0.3365 | +1 | **OK** |
-| 11 | `hp_num_steps_1200` | 0.4754 | 0.4289 | 0.3353 | +2 | **OK** |
-| 12 | **MS tune** | 0.4784 | 0.4232 | 0.3374 | +3 | **pre-fix invalid** |
-| 13 | `hp_cfg_dropout_02` | 0.4785 | 0.4341 | 0.3281 | +4 | **OK** |
-| 14 | `hp_ctxbias_neg01` | 0.4807 | 0.4288 | 0.3299 | +5 | **OK** |
-| 15 | `diff_noise_cosine` | 0.4894 | 0.4368 | 0.3287 | +6 | **OK** |
-| 16 | `hp_beta_end_04` | 0.4989 | 0.4383 | 0.5073 | +7 | **OK** |
-| 17 | `hp_dit_dropout_01` | 0.5045 | 0.4394 | 0.3410 | +8 | **OK** |
-| 18 | `diff_prediction_x0` | 0.5051 | 0.4334 | 0.3355 | +9 | **OK** |
-| 19 | `hp_dit_depth4` | 0.5066 | 0.4498 | 0.3360 | +10 | **OK** |
-| 20 | `h8_8_8` | 0.5236 | 0.4546 | 0.3306 | +11 | **OK** |
-| 21 | `diff_min_snr_gamma_5` | 0.5463 | 0.4584 | 0.4031 | +12 | **OK** |
-| 22 | `hp_dit_embed288_heads4` | 0.5516 | 0.4596 | 0.3396 | +13 | **OK** |
-| 23 | `hp_beta_end_03` | 0.6789 | 0.5006 | 0.9025 | +14 | **OK** |
+| 2 | `hp_anchor_lambda_095` | 0.4522 | 0.4210 | 0.3200 | -5 | **OK** |
+| 3 | `diff_ema_decay_099` | 0.4556 | 0.4231 | 0.3290 | -4 | **OK** |
+| 4 | `hp_anchor_lambda_090` | 0.4661 | 0.4317 | 0.3407 | -3 | **OK** |
+| 5 | `hp_num_steps_800` | 0.4670 | 0.4274 | 0.3382 | -2 | **OK** |
+| 6 | `hp_ctxbias_005` | 0.4681 | 0.4236 | 0.3278 | -1 | **OK** |
+| 7 | `sweep_baseline` | 0.4683 | 0.4259 | 0.3268 | 0 | **OK** |
+| 8 | `h16_16_16` | 0.4724 | 0.4307 | 0.3365 | +1 | **OK** |
+| 9 | `hp_num_steps_1200` | 0.4754 | 0.4289 | 0.3353 | +2 | **OK** |
+| 10 | **MS tune** | 0.4784 | 0.4232 | 0.3374 | +3 | **pre-fix invalid** |
+| 11 | `hp_cfg_dropout_02` | 0.4785 | 0.4341 | 0.3281 | +4 | **OK** |
+| 12 | `hp_ctxbias_neg01` | 0.4807 | 0.4288 | 0.3299 | +5 | **OK** |
+| 13 | `hp_lr_cosine_warmup5` | 0.4857 | 0.4361 | 0.3453 | +6 | **OK** |
+| 14 | `hp_lr_cosine_warmup2` | 0.4866 | 0.4360 | 0.3451 | +7 | **OK** |
+| 15 | `diff_noise_cosine` | 0.4894 | 0.4368 | 0.3287 | +8 | **OK** |
+| 16 | `hp_beta_end_04` | 0.4989 | 0.4383 | 0.5073 | +9 | **OK** |
+| 17 | `hp_dit_dropout_01` | 0.5045 | 0.4394 | 0.3410 | +10 | **OK** |
+| 18 | `diff_prediction_x0` | 0.5051 | 0.4334 | 0.3355 | +11 | **OK** |
+| 19 | `hp_dit_depth4` | 0.5066 | 0.4498 | 0.3360 | +12 | **OK** |
+| 20 | `h8_8_8` | 0.5236 | 0.4546 | 0.3306 | +13 | **OK** |
+| 21 | `diff_min_snr_gamma_5` | 0.5463 | 0.4584 | 0.4031 | +14 | **OK** |
+| 22 | `hp_dit_embed288_heads4` | 0.5516 | 0.4596 | 0.3396 | +15 | **OK** |
+| 23 | `hp_beta_end_03` | 0.6789 | 0.5006 | 0.9025 | +16 | **OK** |
 
 ### exchange_rate
 
-Baseline `sweep_baseline` rank: **15** / 42 (lower anchor MSE is better). Δrank = config rank − baseline rank (negative = improvement).
+Baseline `sweep_baseline` rank: **12** / 42 (lower anchor MSE is better). Δrank = config rank − baseline rank (negative = improvement).
 
 | Rank | Config | anchor_mse | anchor_mae | crps | Δrank | Status |
 |---|---|---|---|---|---|---|
 | 1 | **MMPD (subset)** | 0.0810 | 0.1987 | 0.1563 | — | ref |
-| 2 | `hp_anchor_lambda_090` | 0.0825 | 0.2014 | 0.1656 | -13 | **OK** |
-| 3 | `hp_beta_end_04` | 0.0829 | 0.2035 | 0.2460 | -12 | **OK** |
-| 4 | **MAE Discrete** | 0.0845 | 0.2039 | 0.4216 | -11 | **OK** |
-| 5 | `hp_ctxbias_neg01` | 0.0857 | 0.2042 | 0.1647 | -10 | **OK** |
-| 6 | `hp_cfg_dropout_02` | 0.0858 | 0.2053 | 0.1691 | -9 | **OK** |
-| 7 | **Flat subsets EMA0.90** | 0.0868 | 0.2071 | 0.1699 | -8 | **OK** |
-| 8 | **MS tune** | 0.0871 | 0.2067 | 0.1685 | -7 | **pre-fix invalid** |
-| 9 | **Flat subsets EMA0.995** | 0.0875 | 0.2074 | 0.1667 | -6 | **OK** |
-| 10 | **Flat subsets accum2.0x** | 0.0875 | 0.2073 | 0.1687 | -5 | **OK** |
-| 11 | **Flat subsets EMA0.95** | 0.0875 | 0.2077 | 0.1689 | -4 | **OK** |
-| 12 | **Flat subsets EMA0.98** | 0.0878 | 0.2078 | 0.1684 | -3 | **OK** |
-| 13 | `hp_lr_cosine_warmup2` | 0.0880 | 0.2078 | 0.1660 | -2 | **pre-fix invalid** |
-| 14 | `hp_lr_cosine_warmup5` | 0.0880 | 0.2078 | 0.1660 | -1 | **pre-fix invalid** |
-| 15 | `sweep_baseline` | 0.0880 | 0.2078 | 0.1660 | 0 | **OK** |
-| 16 | **Binary flat** | 0.0880 | 0.2078 | 0.1660 | +1 | **OK** |
-| 17 | **Flat subsets** | 0.0880 | 0.2078 | 0.1660 | +2 | **OK** |
-| 18 | `hp_anchor_lambda_095` | 0.0881 | 0.2096 | 0.1701 | +3 | **OK** |
-| 19 | **Flat subsets accum1.5x** | 0.0882 | 0.2071 | 0.1657 | +4 | **OK** |
-| 20 | **Flat subsets accum2.0x LR-lo** | 0.0889 | 0.2084 | 0.1655 | +5 | **OK** |
-| 21 | `h16_16_16` | 0.0892 | 0.2090 | 0.1760 | +6 | **OK** |
-| 22 | `hp_num_steps_1200` | 0.0893 | 0.2081 | 0.1686 | +7 | **OK** |
-| 23 | `diff_ema_decay_099` | 0.0893 | 0.2086 | 0.1684 | +8 | **OK** |
-| 24 | **Flat subsets EMA0.99** | 0.0893 | 0.2086 | 0.1684 | +9 | **OK** |
-| 25 | **Flat subsets accum1.25x** | 0.0895 | 0.2090 | 0.1698 | +10 | **OK** |
-| 26 | `hp_ctxbias_005` | 0.0896 | 0.2107 | 0.1684 | +11 | **OK** |
-| 27 | `hp_num_steps_800` | 0.0898 | 0.2115 | 0.1734 | +12 | **OK** |
-| 28 | **Flat subsets accum2.0x LR-hi** | 0.0900 | 0.2106 | 0.1690 | +13 | **OK** |
-| 29 | `h8_8_8` | 0.0901 | 0.2102 | 0.1614 | +14 | **OK** |
-| 30 | **Flat subsets accum1.5x LR-hi** | 0.0901 | 0.2096 | 0.1686 | +15 | **OK** |
-| 31 | `diff_noise_cosine` | 0.0905 | 0.2094 | 0.1788 | +16 | **OK** |
-| 32 | `diff_min_snr_gamma_5` | 0.0907 | 0.2125 | 0.1712 | +17 | **OK** |
-| 33 | **Flat subsets EMA0.999** | 0.0909 | 0.2107 | 0.1703 | +18 | **OK** |
-| 34 | `hp_beta_end_03` | 0.0911 | 0.2138 | 0.2791 | +19 | **OK** |
-| 35 | `hp_dit_depth4` | 0.0913 | 0.2108 | 0.1703 | +20 | **OK** |
-| 36 | **Flat subsets accum1.5x LR-lo** | 0.0913 | 0.2109 | 0.1708 | +21 | **OK** |
-| 37 | **Flat subsets EMA0.99 LB336/H96** | 0.0922 | 0.2141 | 0.1692 | +22 | **OK** |
-| 38 | `hp_dit_dropout_01` | 0.0924 | 0.2134 | 0.1754 | +23 | **OK** |
-| 39 | `diff_prediction_x0` | 0.0924 | 0.2130 | 0.1700 | +24 | **OK** |
-| 40 | **Discrete** | 0.0924 | 0.2132 | 0.3384 | +25 | **OK** |
-| 41 | `hp_dit_embed288_heads4` | 0.0925 | 0.2151 | 0.1707 | +26 | **OK** |
-| 42 | **Flat subsets EMA0.99 LB96/H720** | 0.9771 | 0.7582 | 0.7219 | +27 | **OK** |
+| 2 | `hp_anchor_lambda_090` | 0.0825 | 0.2014 | 0.1656 | -10 | **OK** |
+| 3 | `hp_beta_end_04` | 0.0829 | 0.2035 | 0.2460 | -9 | **OK** |
+| 4 | **MAE Discrete** | 0.0845 | 0.2039 | 0.4216 | -8 | **OK** |
+| 5 | `hp_ctxbias_neg01` | 0.0857 | 0.2042 | 0.1647 | -7 | **OK** |
+| 6 | `hp_cfg_dropout_02` | 0.0858 | 0.2053 | 0.1691 | -6 | **OK** |
+| 7 | **Flat subsets EMA0.90** | 0.0868 | 0.2071 | 0.1699 | -5 | **OK** |
+| 8 | **Flat subsets EMA0.995** | 0.0875 | 0.2074 | 0.1667 | -4 | **OK** |
+| 9 | **Flat subsets accum2.0x** | 0.0875 | 0.2073 | 0.1687 | -3 | **OK** |
+| 10 | **Flat subsets EMA0.95** | 0.0875 | 0.2077 | 0.1689 | -2 | **OK** |
+| 11 | **Flat subsets EMA0.98** | 0.0878 | 0.2078 | 0.1684 | -1 | **OK** |
+| 12 | `sweep_baseline` | 0.0880 | 0.2078 | 0.1660 | 0 | **OK** |
+| 13 | **Binary flat** | 0.0880 | 0.2078 | 0.1660 | +1 | **OK** |
+| 14 | **Flat subsets** | 0.0880 | 0.2078 | 0.1660 | +2 | **OK** |
+| 15 | `hp_anchor_lambda_095` | 0.0881 | 0.2096 | 0.1701 | +3 | **OK** |
+| 16 | **Flat subsets accum1.5x** | 0.0882 | 0.2071 | 0.1657 | +4 | **OK** |
+| 17 | **Flat subsets accum2.0x LR-lo** | 0.0889 | 0.2084 | 0.1655 | +5 | **OK** |
+| 18 | `h16_16_16` | 0.0892 | 0.2090 | 0.1760 | +6 | **OK** |
+| 19 | `hp_num_steps_1200` | 0.0893 | 0.2081 | 0.1686 | +7 | **OK** |
+| 20 | `diff_ema_decay_099` | 0.0893 | 0.2086 | 0.1684 | +8 | **OK** |
+| 21 | **Flat subsets EMA0.99** | 0.0893 | 0.2086 | 0.1684 | +9 | **OK** |
+| 22 | **Flat subsets accum1.25x** | 0.0895 | 0.2090 | 0.1698 | +10 | **OK** |
+| 23 | `hp_ctxbias_005` | 0.0896 | 0.2107 | 0.1684 | +11 | **OK** |
+| 24 | `hp_lr_cosine_warmup5` | 0.0898 | 0.2090 | 0.1673 | +12 | **OK** |
+| 25 | `hp_num_steps_800` | 0.0898 | 0.2115 | 0.1734 | +13 | **OK** |
+| 26 | `hp_lr_cosine_warmup2` | 0.0899 | 0.2094 | 0.1677 | +14 | **OK** |
+| 27 | **Flat subsets accum2.0x LR-hi** | 0.0900 | 0.2106 | 0.1690 | +15 | **OK** |
+| 28 | `h8_8_8` | 0.0901 | 0.2102 | 0.1614 | +16 | **OK** |
+| 29 | **Flat subsets accum1.5x LR-hi** | 0.0901 | 0.2096 | 0.1686 | +17 | **OK** |
+| 30 | `diff_noise_cosine` | 0.0905 | 0.2094 | 0.1788 | +18 | **OK** |
+| 31 | `diff_min_snr_gamma_5` | 0.0907 | 0.2125 | 0.1712 | +19 | **OK** |
+| 32 | **Flat subsets EMA0.999** | 0.0909 | 0.2107 | 0.1703 | +20 | **OK** |
+| 33 | **MS tune** | 0.0910 | 0.2114 | 0.1676 | +21 | **OK** |
+| 34 | `hp_beta_end_03` | 0.0911 | 0.2138 | 0.2791 | +22 | **OK** |
+| 35 | `hp_dit_depth4` | 0.0913 | 0.2108 | 0.1703 | +23 | **OK** |
+| 36 | **Flat subsets accum1.5x LR-lo** | 0.0913 | 0.2109 | 0.1708 | +24 | **OK** |
+| 37 | **Flat subsets EMA0.99 LB336/H96** | 0.0922 | 0.2141 | 0.1692 | +25 | **OK** |
+| 38 | `hp_dit_dropout_01` | 0.0924 | 0.2134 | 0.1754 | +26 | **OK** |
+| 39 | `diff_prediction_x0` | 0.0924 | 0.2130 | 0.1700 | +27 | **OK** |
+| 40 | **Discrete** | 0.0924 | 0.2132 | 0.3384 | +28 | **OK** |
+| 41 | `hp_dit_embed288_heads4` | 0.0925 | 0.2151 | 0.1707 | +29 | **OK** |
+| 42 | **Flat subsets EMA0.99 LB96/H720** | 0.9771 | 0.7582 | 0.7219 | +30 | **OK** |
 
 ### weather
 
-Baseline `sweep_baseline` rank: **18** / 41 (lower anchor MSE is better). Δrank = config rank − baseline rank (negative = improvement).
+Baseline `sweep_baseline` rank: **16** / 42 (lower anchor MSE is better). Δrank = config rank − baseline rank (negative = improvement).
 
 | Rank | Config | anchor_mse | anchor_mae | crps | Δrank | Status |
 |---|---|---|---|---|---|---|
-| 1 | **Flat subsets EMA0.999** | 0.0945 | 0.2193 | 0.1759 | -17 | **OK** |
-| 2 | `diff_noise_cosine` | 0.0962 | 0.2192 | 0.1794 | -16 | **OK** |
-| 3 | `hp_dit_embed288_heads4` | 0.0963 | 0.2201 | 0.1734 | -15 | **OK** |
-| 4 | **Flat subsets accum1.5x LR-hi** | 0.0963 | 0.2207 | 0.1746 | -14 | **OK** |
-| 5 | **Flat subsets EMA0.995** | 0.0964 | 0.2213 | 0.1752 | -13 | **OK** |
-| 6 | **Flat subsets EMA0.95** | 0.0964 | 0.2217 | 0.1792 | -12 | **OK** |
-| 7 | **Flat subsets EMA0.98** | 0.0966 | 0.2216 | 0.1760 | -11 | **OK** |
-| 8 | **Flat subsets EMA0.90** | 0.0968 | 0.2222 | 0.1803 | -10 | **OK** |
-| 9 | `hp_beta_end_04` | 0.0969 | 0.2203 | 0.2248 | -9 | **OK** |
-| 10 | `diff_ema_decay_099` | 0.0971 | 0.2220 | 0.1758 | -8 | **OK** |
-| 11 | **Flat subsets EMA0.99** | 0.0971 | 0.2220 | 0.1758 | -7 | **OK** |
-| 12 | **Flat subsets accum1.5x LR-lo** | 0.0973 | 0.2233 | 0.1775 | -6 | **OK** |
-| 13 | **Flat subsets accum1.25x** | 0.0975 | 0.2229 | 0.1777 | -5 | **OK** |
-| 14 | **Flat subsets accum2.0x LR-lo** | 0.0976 | 0.2234 | 0.1765 | -4 | **OK** |
-| 15 | **Flat subsets accum2.0x LR-hi** | 0.0978 | 0.2226 | 0.1760 | -3 | **OK** |
-| 16 | `hp_lr_cosine_warmup2` | 0.0978 | 0.2224 | 0.1776 | -2 | **pre-fix invalid** |
-| 17 | `hp_lr_cosine_warmup5` | 0.0978 | 0.2224 | 0.1776 | -1 | **pre-fix invalid** |
-| 18 | `sweep_baseline` | 0.0978 | 0.2224 | 0.1776 | 0 | **OK** |
-| 19 | **Binary flat** | 0.0978 | 0.2224 | 0.1776 | +1 | **OK** |
-| 20 | **Flat subsets** | 0.0978 | 0.2224 | 0.1776 | +2 | **OK** |
-| 21 | **Flat subsets accum2.0x** | 0.0979 | 0.2234 | 0.1858 | +3 | **OK** |
-| 22 | **MAE Discrete** | 0.0980 | 0.2195 | 0.4609 | +4 | **OK** |
-| 23 | `hp_cfg_dropout_02` | 0.0981 | 0.2215 | 0.1795 | +5 | **OK** |
-| 24 | `h16_16_16` | 0.0981 | 0.2216 | 0.1767 | +6 | **OK** |
-| 25 | **MS tune** | 0.0987 | 0.2185 | 0.1775 | +7 | **pre-fix invalid** |
-| 26 | `hp_dit_depth4` | 0.0989 | 0.2227 | 0.1801 | +8 | **OK** |
-| 27 | `diff_min_snr_gamma_5` | 0.0992 | 0.2243 | 0.1804 | +9 | **OK** |
-| 28 | `hp_ctxbias_005` | 0.0992 | 0.2212 | 0.1746 | +10 | **OK** |
-| 29 | `hp_anchor_lambda_095` | 0.0993 | 0.2231 | 0.1779 | +11 | **OK** |
-| 30 | **Flat subsets accum1.5x** | 0.0994 | 0.2251 | 0.1759 | +12 | **OK** |
-| 31 | `hp_ctxbias_neg01` | 0.0996 | 0.2243 | 0.1778 | +13 | **OK** |
-| 32 | `hp_anchor_lambda_090` | 0.1001 | 0.2235 | 0.1757 | +14 | **OK** |
-| 33 | `hp_num_steps_800` | 0.1009 | 0.2247 | 0.1818 | +15 | **OK** |
-| 34 | `hp_beta_end_03` | 0.1023 | 0.2277 | 0.2997 | +16 | **OK** |
-| 35 | `hp_dit_dropout_01` | 0.1031 | 0.2268 | 0.1808 | +17 | **OK** |
-| 36 | `diff_prediction_x0` | 0.1036 | 0.2276 | 0.1791 | +18 | **OK** |
-| 37 | `hp_num_steps_1200` | 0.1037 | 0.2270 | 0.1832 | +19 | **OK** |
-| 38 | `h8_8_8` | 0.1043 | 0.2282 | 0.1785 | +20 | **OK** |
-| 39 | **Flat subsets EMA0.99 LB336/H96** | 0.1053 | 0.2302 | 0.1807 | +21 | **OK** |
-| 40 | **Discrete** | 0.1079 | 0.2280 | 0.3707 | +22 | **OK** |
+| 1 | **Flat subsets EMA0.999** | 0.0945 | 0.2193 | 0.1759 | -15 | **OK** |
+| 2 | `diff_noise_cosine` | 0.0962 | 0.2192 | 0.1794 | -14 | **OK** |
+| 3 | `hp_dit_embed288_heads4` | 0.0963 | 0.2201 | 0.1734 | -13 | **OK** |
+| 4 | **Flat subsets accum1.5x LR-hi** | 0.0963 | 0.2207 | 0.1746 | -12 | **OK** |
+| 5 | **Flat subsets EMA0.995** | 0.0964 | 0.2213 | 0.1752 | -11 | **OK** |
+| 6 | **Flat subsets EMA0.95** | 0.0964 | 0.2217 | 0.1792 | -10 | **OK** |
+| 7 | **Flat subsets EMA0.98** | 0.0966 | 0.2216 | 0.1760 | -9 | **OK** |
+| 8 | **Flat subsets EMA0.90** | 0.0968 | 0.2222 | 0.1803 | -8 | **OK** |
+| 9 | `hp_beta_end_04` | 0.0969 | 0.2203 | 0.2248 | -7 | **OK** |
+| 10 | `diff_ema_decay_099` | 0.0971 | 0.2220 | 0.1758 | -6 | **OK** |
+| 11 | **Flat subsets EMA0.99** | 0.0971 | 0.2220 | 0.1758 | -5 | **OK** |
+| 12 | **Flat subsets accum1.5x LR-lo** | 0.0973 | 0.2233 | 0.1775 | -4 | **OK** |
+| 13 | **Flat subsets accum1.25x** | 0.0975 | 0.2229 | 0.1777 | -3 | **OK** |
+| 14 | **Flat subsets accum2.0x LR-lo** | 0.0976 | 0.2234 | 0.1765 | -2 | **OK** |
+| 15 | **Flat subsets accum2.0x LR-hi** | 0.0978 | 0.2226 | 0.1760 | -1 | **OK** |
+| 16 | `sweep_baseline` | 0.0978 | 0.2224 | 0.1776 | 0 | **OK** |
+| 17 | **Binary flat** | 0.0978 | 0.2224 | 0.1776 | +1 | **OK** |
+| 18 | **Flat subsets** | 0.0978 | 0.2224 | 0.1776 | +2 | **OK** |
+| 19 | **Flat subsets accum2.0x** | 0.0979 | 0.2234 | 0.1858 | +3 | **OK** |
+| 20 | **MAE Discrete** | 0.0980 | 0.2195 | 0.4609 | +4 | **OK** |
+| 21 | `hp_cfg_dropout_02` | 0.0981 | 0.2215 | 0.1795 | +5 | **OK** |
+| 22 | `h16_16_16` | 0.0981 | 0.2216 | 0.1767 | +6 | **OK** |
+| 23 | **MS tune** | 0.0987 | 0.2185 | 0.1775 | +7 | **pre-fix invalid** |
+| 24 | `hp_dit_depth4` | 0.0989 | 0.2227 | 0.1801 | +8 | **OK** |
+| 25 | `diff_min_snr_gamma_5` | 0.0992 | 0.2243 | 0.1804 | +9 | **OK** |
+| 26 | `hp_ctxbias_005` | 0.0992 | 0.2212 | 0.1746 | +10 | **OK** |
+| 27 | `hp_anchor_lambda_095` | 0.0993 | 0.2231 | 0.1779 | +11 | **OK** |
+| 28 | **Flat subsets accum1.5x** | 0.0994 | 0.2251 | 0.1759 | +12 | **OK** |
+| 29 | `hp_ctxbias_neg01` | 0.0996 | 0.2243 | 0.1778 | +13 | **OK** |
+| 30 | `hp_lr_cosine_warmup5` | 0.0998 | 0.2244 | 0.1785 | +14 | **OK** |
+| 31 | `hp_lr_cosine_warmup2` | 0.1000 | 0.2246 | 0.1784 | +15 | **OK** |
+| 32 | `hp_anchor_lambda_090` | 0.1001 | 0.2235 | 0.1757 | +16 | **OK** |
+| 33 | `hp_num_steps_800` | 0.1009 | 0.2247 | 0.1818 | +17 | **OK** |
+| 34 | `hp_beta_end_03` | 0.1023 | 0.2277 | 0.2997 | +18 | **OK** |
+| 35 | `hp_dit_dropout_01` | 0.1031 | 0.2268 | 0.1808 | +19 | **OK** |
+| 36 | `diff_prediction_x0` | 0.1036 | 0.2276 | 0.1791 | +20 | **OK** |
+| 37 | `hp_num_steps_1200` | 0.1037 | 0.2270 | 0.1832 | +21 | **OK** |
+| 38 | `h8_8_8` | 0.1043 | 0.2282 | 0.1785 | +22 | **OK** |
+| 39 | **Flat subsets EMA0.99 LB336/H96** | 0.1053 | 0.2302 | 0.1807 | +23 | **OK** |
+| 40 | **Discrete** | 0.1079 | 0.2280 | 0.3707 | +24 | **OK** |
 | 41 | **MMPD (subset)** | 0.1128 | 0.2323 | 0.1911 | — | ref |
+| 42 | **Flat subsets EMA0.99 LB96/H720** | 0.5848 | 0.5399 | 0.4771 | +26 | **OK** |
 
 ### electricity
 
