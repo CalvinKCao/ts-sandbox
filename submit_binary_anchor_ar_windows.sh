@@ -14,7 +14,7 @@ cd "$SCRIPT_DIR"
 
 DATASETS="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
 CONFIGS="configs/binary_anchor_ar_lb336_hz96_grad_accum_150.yaml,configs/binary_anchor_ar_lb336_hz96_grad_accum_200.yaml,configs/binary_anchor_ar_lb96_hz720_grad_accum_150.yaml,configs/binary_anchor_ar_lb96_hz720_grad_accum_200.yaml"
-WALL_TIME="4:00:00"
+WALL_TIME="16:00:00"
 
 if [[ "${1:-}" == "--smoke" ]]; then
     ./submit_grid.sh --smoke \
