@@ -1,5 +1,0 @@
-extends: base/fixed_lr_pipeline_base.yaml
-training:
-  diffusion_ema_decay: 0.999
-experiment:
-  name: diff_ema_decay_0999

@@ -1,5 +1,0 @@
-extends: base/fixed_lr_pipeline_base.yaml
-experiment:
-  dit_embed_dim: 288
-  dit_num_heads: 4
-  name: hp_dit_embed288_heads4

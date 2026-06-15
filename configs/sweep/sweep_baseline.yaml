@@ -1,4 +1,0 @@
-extends: base/fixed_lr_pipeline_base.yaml
-experiment:
-  name: sweep_baseline
-  experiment_name: sweep_baseline

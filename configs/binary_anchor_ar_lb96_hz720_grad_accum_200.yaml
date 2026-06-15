@@ -1,8 +1,0 @@
-extends: binary_anchor_ar_lb96_hz720_grad_accum_base.yaml
-
-training:
-  diffusion_effective_batch_multiplier: 2.0
-
-experiment:
-  name: binary-anchor-ar-lb96-hz720-grad-accum-200
-  experiment_name: binary_anchor_ar_lb96_hz720_grad_accum_200

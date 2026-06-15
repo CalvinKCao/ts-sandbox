@@ -1,5 +1,0 @@
-extends: base/fixed_lr_pipeline_base.yaml
-experiment:
-  name: binary-dual-scale-staged-arch-depth12
-  experiment_name: binary-dual-scale-staged-arch-depth12
-  dit_depth: 12

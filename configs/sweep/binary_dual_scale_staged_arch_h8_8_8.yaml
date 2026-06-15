@@ -1,9 +1,0 @@
-extends: base/fixed_lr_pipeline_base.yaml
-experiment:
-  name: binary-dual-scale-staged-arch-h8-8-8
-  experiment_name: binary-dual-scale-staged-arch-h8-8-8
-  image_height: 8
-  coarse_image_height: 8
-  fine_image_height: 8
-  finer_image_height: 8
-  use_triple_scale: true

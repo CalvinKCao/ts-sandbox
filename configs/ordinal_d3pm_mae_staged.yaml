@@ -1,9 +1,0 @@
-extends: ordinal_d3pm_staged.yaml
-
-experiment:
-  name: ordinal-d3pm-mae-staged
-  d3pm_loss_type: expectation_mae
-
-phases:
-  - phase: staged_diffusion_pretrain
-    phase1_config_name: ordinal_d3pm_mae_staged

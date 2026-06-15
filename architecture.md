@@ -69,7 +69,7 @@ Trains **separate** coarse and fine denoisers on synthetic `RealTS` windows (no 
 - **Entry:** `StagedDiffusionPretrainPhase.execute` → `pretrain_diffusion` per stage.
 - **Stages:** `coarse`, then `fine` (add `finer` when `use_triple_scale: true`).
 - **YAML defaults:** `n_samples: 10000`, `epochs: 20`, `patience: 4`, `phase1_config_name: binary_dual_scale`.
-- **Guidance:** frozen synthetic-pretrain iTransformer from Phase-1 source dir (`itrans_hp_best.pt` lineage).
+- **Guidance:** frozen synthetic-pretrain iTransformer from Phase-1 source dir (`itrans_hp_best.pt` lineage), or retrain a new iTrans on synthetic data if not available.
 - **Diffusion HP:** reuses `diff_hp.json` / hardcoded synthetic params from the same source (not re-searched here).
 - **Outputs:**
   - `pretrained_coarse/pretrained_diffusion.pt`

@@ -1,4 +1,0 @@
-extends: base/fixed_lr_pipeline_base.yaml
-experiment:
-  prediction_target: x0
-  name: diff_prediction_x0
