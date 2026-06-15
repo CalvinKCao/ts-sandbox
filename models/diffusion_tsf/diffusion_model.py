@@ -308,8 +308,17 @@ class DiffusionTSF(nn.Module):
             if K > 0:
                 coarse_norm = torch.cat([torch.zeros_like(past_norm[..., -K:]), coarse_norm], dim=-1)
             return coarse_norm
+        chunk_pred = self._chunk_horizon()
         with torch.no_grad():
-            coarse = self.guidance_model.get_forecast(past, H)
+            coarse = self.guidance_model.get_forecast(past, chunk_pred)
+        if coarse.shape[-1] > H:
+            coarse = coarse[..., :H]
+        elif coarse.shape[-1] < H:
+            pad = H - coarse.shape[-1]
+            coarse = torch.cat(
+                [coarse, coarse[..., -1:].expand(*coarse.shape[:-1], pad)],
+                dim=-1,
+            )
         coarse_norm = (coarse - mean) / std
         if K > 0:
             coarse_norm = torch.cat([past_norm[..., -K:], coarse_norm], dim=-1)

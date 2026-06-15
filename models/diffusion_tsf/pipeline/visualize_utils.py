@@ -69,6 +69,8 @@ def generate_itrans_prediction_viz(
 
     indices = pick_sample_indices(len(dataset), n_samples, seed=seed)
     saved: List[str] = []
+    pred_len = int(getattr(itrans_model, "pred_len", forecast_length))
+    plot_horizon = min(int(forecast_length), pred_len)
 
     for row, idx in enumerate(indices):
         past, future = dataset[idx]
@@ -78,7 +80,7 @@ def generate_itrans_prediction_viz(
         seq_sl = getattr(itrans_model, "seq_len", L)
         if x_enc.shape[1] > seq_sl:
             x_enc = x_enc[:, -seq_sl:, :]
-        x_dec = torch.zeros(B, forecast_length, C, device=device)
+        x_dec = torch.zeros(B, pred_len, C, device=device)
 
         with torch.no_grad():
             out = itrans_model(x_enc, None, x_dec, None)
@@ -87,7 +89,7 @@ def generate_itrans_prediction_viz(
             pred = out.permute(0, 2, 1).cpu()[0]
 
         past_dn = denorm(past, mean_t, std_t)
-        future_sliced = future[:, -forecast_length:]
+        future_sliced = future[:, -plot_horizon:]
         future_dn = denorm(future_sliced, mean_t, std_t)
         pred_dn = denorm(pred, mean_t, std_t)
 
@@ -96,7 +98,7 @@ def generate_itrans_prediction_viz(
             1, n_vars_plot, figsize=(4.5 * n_vars_plot, 3.0), squeeze=False, constrained_layout=True
         )
         t_past = np.arange(-lookback_length, 0)
-        t_future = np.arange(0, forecast_length)
+        t_future = np.arange(0, plot_horizon)
 
         for col in range(n_vars_plot):
             ax = axes[0, col]
