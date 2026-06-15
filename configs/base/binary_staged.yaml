@@ -113,6 +113,9 @@ experiment:
   lookback_length: 96
   forecast_length: 96
   lookback_overlap: 8
+  diffusion_lookback_cap: 0
+  diffusion_chunk_horizon: 0
+  itrans_lookback_length: null
   itrans_d_model: 512
   itrans_d_ff: 512
   itrans_e_layers: 4

@@ -1,0 +1,8 @@
+extends: binary_anchor_ar_grad_accum_base.yaml
+
+training:
+  diffusion_effective_batch_multiplier: 2.0
+
+experiment:
+  name: binary-anchor-ar-grad-accum-200
+  experiment_name: binary_anchor_ar_grad_accum_200

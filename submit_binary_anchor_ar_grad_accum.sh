@@ -1,0 +1,29 @@
+#!/bin/bash
+# AR SSOT grad-accum sweep: reuse binary_anchor_ar pretrain + iTrans; 5 Optuna LR trials/stage.
+# Effective batch = probed_max × {1.5, 2.0}.
+#
+# USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
+#   ./submit_binary_anchor_ar_grad_accum.sh
+#   ./submit_binary_anchor_ar_grad_accum.sh --smoke
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+DATASETS="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
+CONFIGS="configs/binary_anchor_ar_grad_accum_150.yaml,configs/binary_anchor_ar_grad_accum_200.yaml"
+WALL_TIME="4:00:00"
+
+if [[ "${1:-}" == "--smoke" ]]; then
+    ./submit_grid.sh --smoke \
+        --configs configs/binary_anchor_ar_grad_accum_150.yaml \
+        --datasets ETTh1 \
+        --time "$WALL_TIME"
+    exit 0
+fi
+
+./submit_grid.sh \
+    --configs "$CONFIGS" \
+    --datasets "$DATASETS" \
+    --time "$WALL_TIME"

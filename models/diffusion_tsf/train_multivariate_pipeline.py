@@ -231,6 +231,9 @@ from models.diffusion_tsf.pipeline import training_helpers as _training_helpers
 LOOKBACK_LENGTH = 96
 FORECAST_LENGTH = 96
 ITRANSFORMER_SEQ_LEN = 96
+DIFFUSION_LOOKBACK_CAP = 0
+DIFFUSION_CHUNK_HORIZON = 0
+ITRANS_LOOKBACK_LENGTH = None
 IMAGE_HEIGHT = 16
 COARSE_IMAGE_HEIGHT = 16
 FINE_IMAGE_HEIGHT = 16
@@ -471,6 +474,14 @@ def dataset_window_lengths(dataset_name: str) -> Tuple[int, int]:
     if dataset_name == 'dalia':
         return dalia_window_lengths()
     return LOOKBACK_LENGTH, FORECAST_LENGTH
+
+
+def itrans_model_lengths(dataset_lookback: int, dataset_horizon: int) -> Tuple[int, int]:
+    """iTrans seq_len / pred_len decoupled from diffusion AR chunk canvas."""
+    seq_len = int(ITRANSFORMER_SEQ_LEN) if ITRANSFORMER_SEQ_LEN else dataset_lookback
+    chunk_hz = int(DIFFUSION_CHUNK_HORIZON or 0)
+    pred_len = min(dataset_horizon, chunk_hz) if chunk_hz > 0 else dataset_horizon
+    return seq_len, pred_len
 
 
 def set_realts_training_epoch(loader_or_subset_or_dataset, epoch: int) -> None:
@@ -784,12 +795,21 @@ def create_diffusion_model(
     lb = LOOKBACK_LENGTH if lookback is None else lookback
     hz = FORECAST_LENGTH if horizon is None else horizon
     stage = DIFFUSION_STAGE if diffusion_stage is None else diffusion_stage
+    chunk_hz = int(DIFFUSION_CHUNK_HORIZON or 0)
+    if chunk_hz > 0 and hz > chunk_hz:
+        model_hz = chunk_hz + LOOKBACK_OVERLAP
+    else:
+        model_hz = hz + LOOKBACK_OVERLAP
 
     config = DiffusionTSFConfig(
         num_variables=N_VARIATES if n_variates is None else n_variates,
         lookback_length=lb,
-        forecast_length=hz + LOOKBACK_OVERLAP,
+        forecast_length=model_hz,
+        dataset_forecast_length=hz,
         lookback_overlap=LOOKBACK_OVERLAP,
+        diffusion_lookback_cap=int(DIFFUSION_LOOKBACK_CAP or 0),
+        diffusion_chunk_horizon=chunk_hz,
+        itrans_lookback_length=ITRANS_LOOKBACK_LENGTH,
         past_loss_weight=PAST_LOSS_WEIGHT,
         image_height=IMAGE_HEIGHT,
         coarse_image_height=COARSE_IMAGE_HEIGHT,
@@ -1448,6 +1468,7 @@ def run_itransformer_finetune_hp_tuning(
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     ds_lb, ds_hz = dataset_window_lengths(dataset_name)
+    itrans_seq, itrans_pred = itrans_model_lengths(ds_lb, ds_hz)
 
     from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
 
@@ -1460,8 +1481,8 @@ def run_itransformer_finetune_hp_tuning(
                 pretrained_ckpt=warm,
                 max_epochs=ITRANS_HP_FINETUNE_MAX_EPOCHS,
                 trial_ckpt_dir=trial_dir,
-                seq_len=ds_lb,
-                pred_len=ds_hz,
+                seq_len=itrans_seq,
+                pred_len=itrans_pred,
             )
         return objective
 
@@ -1481,8 +1502,8 @@ def run_itransformer_finetune_hp_tuning(
     best_params = dict(study.best_params)
     best_params['batch_size'] = train_bs
     best_params['dropout'] = ITRANS_PAPER_DROPOUT
-    best_params['lookback_length'] = ds_lb
-    best_params['forecast_length'] = ds_hz
+    best_params['lookback_length'] = itrans_seq
+    best_params['forecast_length'] = itrans_pred
 
     logger.info(
         "Best iTrans FT params for %s: lr=%.2e dropout=%.3f → val_loss=%.4f",
@@ -2452,7 +2473,8 @@ def train_subset_itransformer_full_baseline(
         )
 
         n_iv = len(variate_indices)
-        model = create_itransformer(seq_len=ds_lb, pred_len=ds_hz, num_vars=n_iv).to(device)
+        itrans_seq, itrans_pred = itrans_model_lengths(ds_lb, ds_hz)
+        model = create_itransformer(seq_len=itrans_seq, pred_len=itrans_pred, num_vars=n_iv).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
         criterion = nn.MSELoss()
 

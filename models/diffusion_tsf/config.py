@@ -3,7 +3,7 @@ config for the diffusion tsf model.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -13,6 +13,14 @@ class DiffusionTSFConfig:
     # seq lens
     lookback_length: int = 512
     forecast_length: int = 96
+    # YAML horizon (before overlap); used for AR when > diffusion_chunk_horizon.
+    dataset_forecast_length: int = 0
+    # Cap 2D past conditioning width; 0 = legacy min(past_len, target_width).
+    diffusion_lookback_cap: int = 0
+    # Fixed denoiser chunk width; 0 = use full dataset_forecast_length.
+    diffusion_chunk_horizon: int = 0
+    # iTransformer encoder length; None -> lookback_length.
+    itrans_lookback_length: Optional[int] = None
 
     # Lookback overlap: predict the last K observed timesteps alongside the
     # future horizon to smooth the past/future boundary.

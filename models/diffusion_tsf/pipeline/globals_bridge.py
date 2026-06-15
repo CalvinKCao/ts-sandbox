@@ -28,8 +28,12 @@ def patch_globals(
         lookback, forecast = dalia_window_lengths()
     mod.LOOKBACK_LENGTH = lookback
     mod.FORECAST_LENGTH = forecast
-    mod.ITRANSFORMER_SEQ_LEN = lookback
+    itrans_lb = state.itrans_lookback_length
+    mod.ITRANSFORMER_SEQ_LEN = int(itrans_lb if itrans_lb is not None else lookback)
+    mod.ITRANS_LOOKBACK_LENGTH = itrans_lb
     mod.LOOKBACK_OVERLAP = state.lookback_overlap
+    mod.DIFFUSION_LOOKBACK_CAP = int(state.diffusion_lookback_cap)
+    mod.DIFFUSION_CHUNK_HORIZON = int(state.diffusion_chunk_horizon)
     mod.ITRANS_D_MODEL = state.itrans_d_model
     mod.ITRANS_D_FF = state.itrans_d_ff
     mod.ITRANS_E_LAYERS = state.itrans_e_layers

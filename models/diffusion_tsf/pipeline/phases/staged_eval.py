@@ -130,6 +130,83 @@ def _fraction_subset(ds, fraction: float, seed: int):
     return Subset(ds, idx)
 
 
+def _ar_eval_enabled(model) -> bool:
+    chunk = int(getattr(model.config, "diffusion_chunk_horizon", 0) or 0)
+    if chunk <= 0:
+        return False
+    dataset_h = int(getattr(model.config, "dataset_forecast_length", 0) or 0)
+    return dataset_h > chunk
+
+
+def _staged_generate_once(
+    *,
+    coarse_model,
+    fine_model,
+    finer_model,
+    past: torch.Tensor,
+    gen_kwargs: Dict[str, Any],
+) -> Dict[str, torch.Tensor]:
+    coarse_out = coarse_model.generate(past, **gen_kwargs)
+    fine_out = fine_model.generate(
+        past,
+        future_coarse_2d=coarse_out["future_2d_coarse"],
+        **gen_kwargs,
+    )
+    if finer_model is not None:
+        finer_out = finer_model.generate(
+            past,
+            future_coarse_2d=coarse_out["future_2d_coarse"],
+            future_fine_2d=fine_out["future_2d_fine"],
+            **gen_kwargs,
+        )
+        pred = finer_out["prediction_global_norm"]
+        return {"coarse": coarse_out, "fine": fine_out, "finer": finer_out, "prediction": pred}
+    pred = _staged_anchor_global_norm(fine_model, coarse_out, fine_out)
+    pred_t = torch.from_numpy(pred).to(past.device)
+    return {"coarse": coarse_out, "fine": fine_out, "prediction": pred_t}
+
+
+def _staged_generate_autoregressive(
+    *,
+    coarse_model,
+    fine_model,
+    finer_model,
+    past: torch.Tensor,
+    gen_kwargs: Dict[str, Any],
+) -> torch.Tensor:
+    """Roll out staged coarse/fine in AR chunks; return global-norm forecast (B,V,H)."""
+    K = int(getattr(coarse_model.config, "lookback_overlap", 0))
+    dataset_h = int(getattr(coarse_model.config, "dataset_forecast_length", 0) or 0)
+    n_chunks = coarse_model._ar_num_chunks(dataset_h)
+    pieces = []
+    remaining = dataset_h
+    for c in range(n_chunks):
+        if c == 0:
+            past_c = past
+        else:
+            hist = torch.cat(pieces, dim=-1)
+            past_c = torch.cat([past, hist], dim=-1)
+        out = _staged_generate_once(
+            coarse_model=coarse_model,
+            fine_model=fine_model,
+            finer_model=finer_model,
+            past=past_c,
+            gen_kwargs=gen_kwargs,
+        )
+        chunk = out["prediction"]
+        if isinstance(chunk, np.ndarray):
+            chunk = torch.from_numpy(chunk).to(past.device)
+        if c > 0:
+            chunk = chunk[..., K:]
+        if chunk.shape[-1] > remaining:
+            chunk = chunk[..., :remaining]
+        pieces.append(chunk)
+        remaining -= chunk.shape[-1]
+        if remaining <= 0:
+            break
+    return torch.cat(pieces, dim=-1)
+
+
 class StagedEvalPhase(PipelinePhase):
     name = "staged_eval"
 
@@ -232,44 +309,64 @@ class StagedEvalPhase(PipelinePhase):
                 y_true_all.append(future.cpu().numpy())
 
                 torch.manual_seed(state.seed + batch_idx)
-                coarse_det = coarse_model.generate(past, sampler="anchor")
-                fine_det = fine_model.generate(
-                    past,
-                    sampler="anchor",
-                    future_coarse_2d=coarse_det["future_2d_coarse"],
-                )
-                if finer_model is not None:
-                    finer_det = finer_model.generate(
+                if _ar_eval_enabled(coarse_model):
+                    det_t = _staged_generate_autoregressive(
+                        coarse_model=coarse_model,
+                        fine_model=fine_model,
+                        finer_model=finer_model,
+                        past=past,
+                        gen_kwargs={"sampler": "anchor"},
+                    )
+                    det_all.append(det_t.detach().cpu().numpy())
+                else:
+                    coarse_det = coarse_model.generate(past, sampler="anchor")
+                    fine_det = fine_model.generate(
                         past,
                         sampler="anchor",
                         future_coarse_2d=coarse_det["future_2d_coarse"],
-                        future_fine_2d=fine_det["future_2d_fine"],
                     )
-                    det_all.append(finer_det["prediction_global_norm"].detach().cpu().numpy())
-                else:
-                    det_all.append(_staged_anchor_global_norm(fine_model, coarse_det, fine_det))
+                    if finer_model is not None:
+                        finer_det = finer_model.generate(
+                            past,
+                            sampler="anchor",
+                            future_coarse_2d=coarse_det["future_2d_coarse"],
+                            future_fine_2d=fine_det["future_2d_fine"],
+                        )
+                        det_all.append(finer_det["prediction_global_norm"].detach().cpu().numpy())
+                    else:
+                        det_all.append(_staged_anchor_global_norm(fine_model, coarse_det, fine_det))
 
                 batch_samples = []
                 for sample_idx in range(prob_samples):
                     seed = state.seed + batch_idx * 1009 + sample_idx * 17
                     torch.manual_seed(seed)
-                    coarse_sample = coarse_model.generate(past, **prob_kwargs)
-                    torch.manual_seed(seed)
-                    fine_sample = fine_model.generate(
-                        past,
-                        future_coarse_2d=coarse_sample["future_2d_coarse"],
-                        **prob_kwargs,
-                    )
-                    if finer_model is not None:
-                        finer_sample = finer_model.generate(
+                    if _ar_eval_enabled(coarse_model):
+                        sample_t = _staged_generate_autoregressive(
+                            coarse_model=coarse_model,
+                            fine_model=fine_model,
+                            finer_model=finer_model,
+                            past=past,
+                            gen_kwargs=prob_kwargs,
+                        )
+                        batch_samples.append(sample_t.cpu().numpy())
+                    else:
+                        coarse_sample = coarse_model.generate(past, **prob_kwargs)
+                        torch.manual_seed(seed)
+                        fine_sample = fine_model.generate(
                             past,
                             future_coarse_2d=coarse_sample["future_2d_coarse"],
-                            future_fine_2d=fine_sample["future_2d_fine"],
                             **prob_kwargs,
                         )
-                        batch_samples.append(finer_sample["prediction_global_norm"].cpu().numpy())
-                    else:
-                        batch_samples.append(fine_sample["prediction_global_norm"].cpu().numpy())
+                        if finer_model is not None:
+                            finer_sample = finer_model.generate(
+                                past,
+                                future_coarse_2d=coarse_sample["future_2d_coarse"],
+                                future_fine_2d=fine_sample["future_2d_fine"],
+                                **prob_kwargs,
+                            )
+                            batch_samples.append(finer_sample["prediction_global_norm"].cpu().numpy())
+                        else:
+                            batch_samples.append(fine_sample["prediction_global_norm"].cpu().numpy())
                 sample_all.append(np.stack(batch_samples, axis=2))
 
                 if batch_idx < 3 or batch_idx == len(loader) - 1:

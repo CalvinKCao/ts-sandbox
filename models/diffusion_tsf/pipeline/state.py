@@ -76,6 +76,9 @@ class PipelineState:
     lookback_length: int = 96
     forecast_length: int = 96
     lookback_overlap: int = 8
+    diffusion_lookback_cap: int = 0
+    diffusion_chunk_horizon: int = 0
+    itrans_lookback_length: Optional[int] = None
     itrans_d_model: int = 512
     itrans_d_ff: int = 512
     itrans_e_layers: int = 4

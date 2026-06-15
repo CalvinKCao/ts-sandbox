@@ -634,7 +634,7 @@ class DiffusionTSF(nn.Module):
         B, V = past_norm.shape[:2]
         H = self.config.image_height
         BV = B * V
-        past_tail_len = min(past_norm.shape[-1], target_width)
+        past_tail_len = self._past_cond_tail_len(past_norm.shape[-1], target_width)
         past_tail_norm = past_norm[..., -past_tail_len:]
         past_maps = self._encode_staged_maps_skyline(past_tail_norm)
         cond_maps = []
@@ -943,6 +943,78 @@ class DiffusionTSF(nn.Module):
             return None
         return ctx.unsqueeze(1).unsqueeze(2).expand(-1, V, 2, -1, -1).reshape(B * V * 2, V, -1)
 
+    def _past_cond_tail_len(self, past_len: int, target_width: int) -> int:
+        cap = int(self.config.diffusion_lookback_cap or 0)
+        if cap > 0:
+            return min(past_len, cap)
+        return min(past_len, target_width)
+
+    def _chunk_horizon(self) -> int:
+        chunk = int(self.config.diffusion_chunk_horizon or 0)
+        if chunk > 0:
+            return chunk
+        return max(1, int(self.config.dataset_forecast_length or 0) or (self.config.forecast_length - self.config.lookback_overlap))
+
+    def _ar_stride(self) -> int:
+        return self._chunk_horizon() - int(self.config.lookback_overlap)
+
+    def _ar_num_chunks(self, dataset_horizon: int) -> int:
+        K = int(self.config.lookback_overlap)
+        C = self._chunk_horizon()
+        if dataset_horizon <= C:
+            return 1
+        return int(math.ceil((dataset_horizon - K) / max(1, self._ar_stride())))
+
+    def _ar_training_enabled(self, future_len: int) -> bool:
+        chunk = int(self.config.diffusion_chunk_horizon or 0)
+        if chunk <= 0:
+            return False
+        dataset_h = future_len - int(self.config.lookback_overlap)
+        return dataset_h > chunk
+
+    def _sample_ar_training_chunk(
+        self,
+        past: torch.Tensor,
+        future: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Pick one random AR chunk per batch row (teacher-forced history)."""
+        K = int(self.config.lookback_overlap)
+        C = self._chunk_horizon()
+        dataset_h = future.shape[-1] - K
+        n_chunks = self._ar_num_chunks(dataset_h)
+        if n_chunks <= 1:
+            return past, future
+
+        device = past.device
+        B = past.shape[0]
+        past_out = []
+        future_out = []
+        for b in range(B):
+            c = int(torch.randint(0, n_chunks, (1,), device=device).item())
+            offset = c * self._ar_stride()
+            end = min(offset + K + C, future.shape[-1])
+            fut_b = future[b : b + 1, ..., offset:end]
+            if c == 0:
+                past_b = past[b : b + 1]
+            else:
+                hist = future[b : b + 1, ..., K : K + offset]
+                past_b = torch.cat([past[b : b + 1], hist], dim=-1)
+            past_out.append(past_b)
+            future_out.append(fut_b)
+        max_past = max(p.shape[-1] for p in past_out)
+        max_fut = max(f.shape[-1] for f in future_out)
+        past_pad = []
+        future_pad = []
+        for p, f in zip(past_out, future_out):
+            if p.shape[-1] < max_past:
+                pad = max_past - p.shape[-1]
+                p = F.pad(p, (pad, 0))
+            if f.shape[-1] < max_fut:
+                f = F.pad(f, (0, max_fut - f.shape[-1]))
+            past_pad.append(p)
+            future_pad.append(f)
+        return torch.cat(past_pad, dim=0), torch.cat(future_pad, dim=0)
+
     def _staged_past_condition(
         self,
         past_norm: torch.Tensor,
@@ -952,7 +1024,7 @@ class DiffusionTSF(nn.Module):
         B, V = past_norm.shape[:2]
         H = self.config.image_height
         BV = B * V
-        past_tail_len = min(past_norm.shape[-1], target_width)
+        past_tail_len = self._past_cond_tail_len(past_norm.shape[-1], target_width)
         past_tail_norm = past_norm[..., -past_tail_len:]
         past_maps = self._encode_staged_maps(past_tail_norm)
         cond_maps = []
@@ -1713,7 +1785,7 @@ class DiffusionTSF(nn.Module):
         canvas = self._inject_coordinate_channel(xt_flat.float())
         canvas = self._inject_time_channels(canvas)
 
-        past_tail_len = min(past_norm.shape[-1], W_fut)
+        past_tail_len = self._past_cond_tail_len(past_norm.shape[-1], W_fut)
         past_tail_norm = past_norm[..., -past_tail_len:]
         past_coarse, past_fine = self.encode_dual_to_2d_binary(past_tail_norm)
         past_merged = self._merge_dual_scale_channels(
@@ -1862,7 +1934,7 @@ class DiffusionTSF(nn.Module):
             variate_indices = self._dual_scale_variate_indices(BV, V, device)
 
         past_norm, _, stats = self._normalize_sequence(past)
-        past_tail_len = min(past_norm.shape[-1], W_fut)
+        past_tail_len = self._past_cond_tail_len(past_norm.shape[-1], W_fut)
         past_tail_norm = past_norm[..., -past_tail_len:]
         past_coarse, past_fine = self.encode_dual_to_2d_binary(past_tail_norm)
         past_merged = self._merge_dual_scale_channels(
@@ -2221,5 +2293,7 @@ class DiffusionTSF(nn.Module):
         future: torch.Tensor
     ) -> torch.Tensor:
         """Convenience method to get just the loss for training."""
+        if self._ar_training_enabled(future.shape[-1]):
+            past, future = self._sample_ar_training_chunk(past, future)
         outputs = self.forward(past, future)
         return outputs['loss']

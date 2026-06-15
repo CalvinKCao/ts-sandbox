@@ -1,0 +1,7 @@
+extends: binary_anchor_ar.yaml
+
+experiment:
+  name: binary-anchor-ar-lb96-hz720
+  experiment_name: binary_anchor_ar_lb96_hz720
+  lookback_length: 96
+  forecast_length: 720
