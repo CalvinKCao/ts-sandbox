@@ -1,5 +1,5 @@
 #!/bin/bash
-# AR SSOT grad-accum sweep: reuse binary_anchor_ar pretrain + iTrans; 5 Optuna LR trials/stage.
+# AR grad-accum sweep: reuse ema099 pretrain; 5 Optuna LR trials/stage on iTrans + diffusion.
 # Effective batch = probed_max × {1.5, 2.0}.
 #
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):

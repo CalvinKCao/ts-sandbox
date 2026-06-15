@@ -1,7 +1,6 @@
 #!/bin/bash
 # Window AR sweep: LB336/H96 + LB96/H720 × grad-accum {1.5, 2.0} × LR Optuna (5 trials/stage).
-# Reuses binary_anchor_ar synthetic pretrain; LB720 also reuses SSOT iTrans.
-# LB336 retrains iTrans at seq_len=336 (cannot reuse 96-seq checkpoint).
+# Reuses ema099 synthetic pretrain only; iTrans + diffusion finetune run fresh per config.
 #
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
 #   ./submit_binary_anchor_ar_windows.sh

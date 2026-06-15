@@ -3,12 +3,11 @@ extends: binary_anchor_ar_lb96_hz720.yaml
 wandb:
   project: ts-sandbox-binary-anchor-ar-windows-grad-accum
 
-# LB96/H720: reuse SSOT synthetic pretrain + iTrans (same seq_len=96); tune diffusion LR + grad accum.
+# LB96/H720: reuse ema099 pretrain; train iTrans + tune diffusion LR + grad accum.
 phases:
   - phase: staged_diffusion_pretrain
-    reuse_pretrain_from_config: binary_anchor_ar
+    reuse_pretrain_from_config: binary_anchor_stationary_flat_subsets_ema099
   - phase: itrans_finetune_hp
-    reuse_checkpoint_from_config: binary_anchor_ar
   - phase: diffusion_coarse_finetune_hp
     n_trials: 5
     max_epochs: 20
