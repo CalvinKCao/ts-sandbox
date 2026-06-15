@@ -94,6 +94,15 @@ CONFIG_ALIASES = {
     "binary_anchor_stationary_flat_subsets_grad_accum_200_lr_hi": "**Flat subsets accum2.0x LR-hi**",
     "binary_anchor_stationary_flat_subsets_ema099_lb336_hz96": "**Flat subsets EMA0.99 LB336/H96**",
     "binary_anchor_stationary_flat_subsets_ema099_lb96_hz720": "**Flat subsets EMA0.99 LB96/H720**",
+    "binary_anchor_ar_grad_accum_400": "**AR accum4x**",
+    "binary_anchor_ar_grad_accum_800": "**AR accum8x**",
+    "binary_anchor_ar_grad_accum_1600": "**AR accum16x**",
+    "binary_anchor_ar_grad_accum_150": "**AR accum1.5x**",
+    "binary_anchor_ar_grad_accum_200": "**AR accum2x**",
+    "binary_anchor_ar_lb336_hz96_grad_accum_150": "**AR LB336/H96 accum1.5x**",
+    "binary_anchor_ar_lb336_hz96_grad_accum_200": "**AR LB336/H96 accum2x**",
+    "binary_anchor_ar_lb96_hz720_grad_accum_150": "**AR LB96/H720 accum1.5x**",
+    "binary_anchor_ar_lb96_hz720_grad_accum_200": "**AR LB96/H720 accum2x**",
     "hp_max_scale_tuning": "**MS tune**",
 }
 
@@ -167,6 +176,21 @@ def parse_log_name(path: str) -> Optional[Tuple[str, str, str]]:
     if res:
         return res.group(2), dataset, res.group(1)
     return job_id, dataset, rest
+
+
+def find_run_log(job_id: str, dataset: str, raw_config: str) -> Optional[str]:
+    pattern = os.path.join(LOGS, f"*-{job_id}-{dataset}-{raw_config}.log")
+    matches = glob.glob(pattern)
+    return matches[0] if matches else None
+
+
+def is_smoke_log(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            head = f.read(8192)
+    except OSError:
+        return False
+    return "--smoke-test" in head or "Job: smoke-" in head
 
 
 def load_log_metrics(path: str) -> Optional[Dict[str, Any]]:
@@ -296,6 +320,9 @@ def collect_runs() -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]
             if not parsed:
                 continue
             job_id, dataset, raw_config = parsed
+            log_path = find_run_log(job_id, dataset, raw_config)
+            if log_path and is_smoke_log(log_path):
+                continue
             config = display_config(raw_config)
 
             partials = glob.glob(os.path.join(run_dir, "partials", "*_staged_anchor.json"))
@@ -326,6 +353,8 @@ def collect_runs() -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]
             if not parsed:
                 continue
             job_id, dataset, raw_config = parsed
+            if is_smoke_log(log_path):
+                continue
             metrics = load_log_metrics(log_path)
             if not metrics:
                 continue
@@ -607,6 +636,9 @@ def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
             "grad-accum reuse sweep (`grad_accum_{125,150,200}`, jobs `3953944`–`3953964`; "
             "LR-band split `grad_accum_{150,200}_lr_{lo,hi}`, jobs `3954784`–`3954810`), "
             "EMA0.99 lookback variants (`ema099_lb336_hz96`, `ema099_lb96_hz720`, jobs `3955091`–`3955098`), "
+            "**AR accum4x/8x** (`binary_anchor_ar_grad_accum_{400,800}`, LB96/H96 base), "
+            "**AR LB336/H96 accum1.5x** (`3961448`–`3961454`), "
+            "**AR LB96/H720 accum1.5x** (`3961455`, `3961457`, `3961460`), "
             "**MS tune** (`hp_max_scale_tuning`), and "
             "**MMPD (subset)** (`06-13-binary-mmpd-subset-compare`, jobs `3951201`–`3951207`). "
             "Probabilistic metrics: `dpmpp` sampler, 20 steps, 20 samples.\n\n"
@@ -674,6 +706,9 @@ def write_leaderboard(
             "Grad-accum reuse sweep: effective batch {1.25×, 1.5×, 2.0×} (jobs `3953944`–`3953964`); "
             "LR-band split on 1.5×/2.0× (`3954784`–`3954810`). "
             "EMA0.99 lookback variants: LB336/H96 and LB96/H720 (`3955091`–`3955098`). "
+            "**AR accum4x/8x** (`binary_anchor_ar_grad_accum_{400,800}`, LB96/H96). "
+            "**AR LB336/H96 accum1.5x** (`3961448`–`3961454`); "
+            "**AR LB96/H720 accum1.5x** (partial: `3961455`, `3961457`, `3961460`). "
             "**MS tune** (`hp_max_scale_tuning`, post-fix `3956631` exchange_rate; cosine+warmup post-fix `3956633`–`3956640`). "
             f"**MMPD (subset)** from `{MMPD_SOURCE_SUBSET}` (same subsets as flat runs, 20 samples, full test). "
             f"Legacy **MMPD** from `{MMPD_SOURCE_LEGACY}` where subset MMPD is unavailable.\n\n"

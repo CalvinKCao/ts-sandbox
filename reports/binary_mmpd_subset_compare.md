@@ -29,6 +29,6 @@ Config extends `fixed_lr_pipeline_base` with `max_scale_tuning: true` and `searc
 | Dataset | subset_id | tuned max_scale | anchor_mse | anchor_mae | crps | sample_mean_mse | Job |
 |---|---|---|---|---|---|---|---|
 | ETTh1 | ETTh1 | 5.2000 | 0.4117 | 0.4158 | 0.3114 | 0.4058 | 3943934 |
-| ETTm1 | ETTm1_4v_s3 | 7.7000 | 0.4784 | 0.4232 | 0.3374 | 0.4835 | 3943936 |
+| ETTm1 | ETTm1_4v_s3 | — | 0.4679 | 0.4246 | 0.3176 | 0.4398 | 3956630 |
 | exchange_rate | exchange_rate | 13.4332 | 0.0910 | 0.2114 | 0.1676 | 0.0871 | 3956631 |
 | weather | weather_4v_s2 | 9.3000 | 0.0987 | 0.2185 | 0.1775 | 0.0978 | 3943937 |
