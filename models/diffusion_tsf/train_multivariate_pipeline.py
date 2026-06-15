@@ -11,6 +11,7 @@ import gc
 import importlib.util
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -482,6 +483,88 @@ def itrans_model_lengths(dataset_lookback: int, dataset_horizon: int) -> Tuple[i
     chunk_hz = int(DIFFUSION_CHUNK_HORIZON or 0)
     pred_len = min(dataset_horizon, chunk_hz) if chunk_hz > 0 else dataset_horizon
     return seq_len, pred_len
+
+
+def wrap_itrans_guidance(
+    model: nn.Module,
+    *,
+    seq_len: Optional[int] = None,
+    pred_len: Optional[int] = None,
+):
+    """Attach iTransformer with explicit seq/pred lens (full LB, chunk forecast)."""
+    from models.diffusion_tsf.guidance import iTransformerGuidance
+
+    if seq_len is None:
+        seq_len = int(ITRANSFORMER_SEQ_LEN or getattr(model, "seq_len", 96))
+    if pred_len is None:
+        chunk = int(DIFFUSION_CHUNK_HORIZON or 0)
+        pred_len = chunk if chunk > 0 else int(FORECAST_LENGTH)
+    return iTransformerGuidance(model, seq_len=int(seq_len), pred_len=int(pred_len))
+
+
+def _itrans_chunk_horizon() -> int:
+    chunk = int(DIFFUSION_CHUNK_HORIZON or 0)
+    if chunk > 0:
+        return chunk
+    return int(FORECAST_LENGTH)
+
+
+def _itrans_ar_enabled(future_len: int) -> bool:
+    chunk = _itrans_chunk_horizon()
+    if chunk <= 0:
+        return False
+    dataset_h = future_len - int(LOOKBACK_OVERLAP)
+    return dataset_h > chunk
+
+
+def _itrans_ar_num_chunks(dataset_horizon: int) -> int:
+    K = int(LOOKBACK_OVERLAP)
+    C = _itrans_chunk_horizon()
+    if dataset_horizon <= C:
+        return 1
+    stride = max(1, C - K)
+    return int(math.ceil((dataset_horizon - K) / stride))
+
+
+def _sample_itrans_ar_chunk(
+    past: torch.Tensor,
+    future: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Random AR chunk for iTrans: full-seq past window, 96-step target."""
+    K = int(LOOKBACK_OVERLAP)
+    C = _itrans_chunk_horizon()
+    dataset_h = future.shape[-1] - K
+    n_chunks = _itrans_ar_num_chunks(dataset_h)
+    if n_chunks <= 1:
+        return past, future
+
+    device = past.device
+    past_out = []
+    future_out = []
+    for b in range(past.shape[0]):
+        c = int(torch.randint(0, n_chunks, (1,), device=device).item())
+        offset = c * max(1, C - K)
+        end = min(offset + K + C, future.shape[-1])
+        fut_b = future[b : b + 1, ..., offset:end]
+        if c == 0:
+            past_b = past[b : b + 1]
+        else:
+            hist = future[b : b + 1, ..., K : K + offset]
+            past_b = torch.cat([past[b : b + 1], hist], dim=-1)
+        past_out.append(past_b)
+        future_out.append(fut_b)
+    max_past = max(p.shape[-1] for p in past_out)
+    max_fut = max(f.shape[-1] for f in future_out)
+    past_pad, future_pad = [], []
+    for p, f in zip(past_out, future_out):
+        if p.shape[-1] < max_past:
+            pad = max_past - p.shape[-1]
+            p = torch.cat([p[..., :1].expand(*p.shape[:-1], pad), p], dim=-1)
+        if f.shape[-1] < max_fut:
+            f = torch.nn.functional.pad(f, (0, max_fut - f.shape[-1]))
+        past_pad.append(p)
+        future_pad.append(f)
+    return torch.cat(past_pad, dim=0), torch.cat(future_pad, dim=0)
 
 
 def set_realts_training_epoch(loader_or_subset_or_dataset, epoch: int) -> None:
@@ -1097,6 +1180,25 @@ def _itrans_targets(future: torch.Tensor, model: nn.Module, device: torch.device
     return y_true
 
 
+def _itrans_batch(
+    past: torch.Tensor,
+    future: torch.Tensor,
+    model: nn.Module,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Prepare iTrans past/target: full seq_len lookback, 96-step chunk target."""
+    if _itrans_ar_enabled(future.shape[-1]):
+        past, future = _sample_itrans_ar_chunk(past, future)
+    past = past.to(device)
+    future = future.to(device)
+    x_enc = past.permute(0, 2, 1)
+    seq_sl = int(getattr(model, "seq_len", x_enc.shape[1]) or x_enc.shape[1])
+    if x_enc.shape[1] > seq_sl:
+        x_enc = x_enc[:, -seq_sl:, :]
+    y_true = _itrans_targets(future, model, device)
+    return x_enc, y_true
+
+
 def train_itransformer_epoch(model, loader, optimizer, criterion, device, scheduler=None):
     """Train iTransformer for one epoch."""
     model.train()
@@ -1104,11 +1206,7 @@ def train_itransformer_epoch(model, loader, optimizer, criterion, device, schedu
     n_batches = 0
     
     for past, future in loader:
-        x_enc = past.permute(0, 2, 1).to(device)
-        seq_sl = getattr(model, 'seq_len', x_enc.shape[1])
-        if x_enc.shape[1] > seq_sl:
-            x_enc = x_enc[:, -seq_sl:, :]
-        y_true = _itrans_targets(future, model, device)
+        x_enc, y_true = _itrans_batch(past, future, model, device)
         
         optimizer.zero_grad()
         y_pred = model(x_enc, None, None, None)
@@ -1132,11 +1230,7 @@ def validate_itransformer(model, loader, criterion, device):
     
     with torch.no_grad():
         for past, future in loader:
-            x_enc = past.permute(0, 2, 1).to(device)
-            seq_sl = getattr(model, 'seq_len', x_enc.shape[1])
-            if x_enc.shape[1] > seq_sl:
-                x_enc = x_enc[:, -seq_sl:, :]
-            y_true = _itrans_targets(future, model, device)
+            x_enc, y_true = _itrans_batch(past, future, model, device)
             y_pred = model(x_enc, None, None, None)
             loss = criterion(y_pred, y_true)
             total_loss += loss.item()

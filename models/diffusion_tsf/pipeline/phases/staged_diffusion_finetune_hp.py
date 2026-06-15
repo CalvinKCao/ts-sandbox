@@ -357,14 +357,16 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         patience: int,
         trial=None,
     ) -> Tuple[float, int]:
-        from models.diffusion_tsf.guidance import iTransformerGuidance
         from models.diffusion_tsf.train_multivariate_pipeline import (
             EarlyStopping,
             amp_context,
+            dataset_window_lengths,
+            itrans_model_lengths,
             load_diffusion_state_keep_attached_guidance,
             load_itransformer_from_checkpoint,
             save_checkpoint,
             unwrap_model,
+            wrap_itrans_guidance,
         )
 
         n_iv = len(variate_indices)
@@ -373,7 +375,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
         itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
-        itrans_guidance = iTransformerGuidance(itrans_model)
+        ds_lb, ds_hz = dataset_window_lengths(state.dataset)
+        itrans_seq, itrans_pred = itrans_model_lengths(ds_lb, ds_hz)
+        itrans_guidance = wrap_itrans_guidance(itrans_model, seq_len=itrans_seq, pred_len=itrans_pred)
         model = self._build_model(
             state=state,
             n_iv=n_iv,
@@ -501,12 +505,14 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
     def execute(self, state: PipelineState) -> PipelineState:
         from models.diffusion_tsf.train_multivariate_pipeline import (
             diffusion_probe_max_candidate,
+            dataset_window_lengths,
             generate_dataset_job,
+            itrans_model_lengths,
             load_dataset,
             load_itransformer_from_checkpoint,
             select_diffusion_batch_size,
+            wrap_itrans_guidance,
         )
-        from models.diffusion_tsf.guidance import iTransformerGuidance
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
         patch_stage_globals(pipeline_mod, state, self.stage, honor_dataset_windows=True)
@@ -549,7 +555,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
         batch_probe_ds = train_ds
         ft_itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, n_iv, device)
-        ft_itrans_guidance = iTransformerGuidance(ft_itrans_model)
+        ds_lb, ds_hz = dataset_window_lengths(state.dataset)
+        itrans_seq, itrans_pred = itrans_model_lengths(ds_lb, ds_hz)
+        ft_itrans_guidance = wrap_itrans_guidance(ft_itrans_model, seq_len=itrans_seq, pred_len=itrans_pred)
         max_batch = select_diffusion_batch_size(
             phase_name=f"{self.stage.title()} Diff FT ({subset_id})",
             dataset=batch_probe_ds,

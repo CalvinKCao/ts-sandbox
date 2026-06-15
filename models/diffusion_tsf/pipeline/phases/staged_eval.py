@@ -397,8 +397,10 @@ class StagedEvalPhase(PipelinePhase):
             generate_dataset_job,
             load_dataset,
             load_itransformer_from_checkpoint,
+            dataset_window_lengths,
+            itrans_model_lengths,
+            wrap_itrans_guidance,
         )
-        from models.diffusion_tsf.guidance import iTransformerGuidance
 
         device = state.resolve_device()
         gmm_components = int(self.require("gmm_components"))
@@ -419,7 +421,9 @@ class StagedEvalPhase(PipelinePhase):
             raise FileNotFoundError(f"Missing finetuned iTransformer checkpoint: {ft_itrans_ckpt}")
 
         itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, n_iv, device)
-        itrans_guidance = iTransformerGuidance(itrans_model)
+        ds_lb, ds_hz = dataset_window_lengths(state.dataset)
+        itrans_seq, itrans_pred = itrans_model_lengths(ds_lb, ds_hz)
+        itrans_guidance = wrap_itrans_guidance(itrans_model, seq_len=itrans_seq, pred_len=itrans_pred)
         coarse_model = self._load_model(state, "coarse", itrans_guidance, n_iv, device)
         fine_model = self._load_model(state, "fine", itrans_guidance, n_iv, device)
         finer_model = (

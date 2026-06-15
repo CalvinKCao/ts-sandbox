@@ -12,6 +12,8 @@ experiment:
   lookback_overlap: 8
   diffusion_chunk_horizon: 96
   diffusion_lookback_cap: 96
+  use_guidance_channel: true
+  disable_cross_attention: false
   data_subset:
     enabled: true
     target_dataset: ETTh1

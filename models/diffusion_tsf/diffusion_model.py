@@ -1008,7 +1008,7 @@ class DiffusionTSF(nn.Module):
         for p, f in zip(past_out, future_out):
             if p.shape[-1] < max_past:
                 pad = max_past - p.shape[-1]
-                p = F.pad(p, (pad, 0))
+                p = torch.cat([p[..., :1].expand(*p.shape[:-1], pad), p], dim=-1)
             if f.shape[-1] < max_fut:
                 f = F.pad(f, (0, max_fut - f.shape[-1]))
             past_pad.append(p)
@@ -1020,7 +1020,11 @@ class DiffusionTSF(nn.Module):
         past_norm: torch.Tensor,
         target_width: int,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        """Build GT lookback conditioning maps for staged denoisers."""
+        """Build GT lookback conditioning maps for staged denoisers.
+
+        Uses only the trailing diffusion_lookback_cap (default 96) timesteps for 2D
+        past CDFs; iTrans cross-attn / guidance ghost use the full past separately.
+        """
         B, V = past_norm.shape[:2]
         H = self.config.image_height
         BV = B * V
