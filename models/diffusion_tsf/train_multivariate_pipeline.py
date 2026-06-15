@@ -1082,6 +1082,21 @@ def save_checkpoint(model, optimizer, epoch, train_loss, val_loss, config, path,
 # PHASE 1A: iTransformer HP Tuning
 # ============================================================================
 
+def _itrans_targets(future: torch.Tensor, model: nn.Module, device: torch.device) -> torch.Tensor:
+    """Align supervised horizon with iTransformer pred_len (AR may use H>pred_len)."""
+    y_true = future.permute(0, 2, 1).to(device)
+    if LOOKBACK_OVERLAP > 0:
+        y_true = y_true[:, LOOKBACK_OVERLAP:, :]
+    pred_len = int(getattr(model, "pred_len", 0) or 0)
+    if pred_len > 0:
+        if y_true.shape[1] < pred_len:
+            raise ValueError(
+                f"iTrans target length {y_true.shape[1]} < model pred_len {pred_len}"
+            )
+        y_true = y_true[:, :pred_len, :]
+    return y_true
+
+
 def train_itransformer_epoch(model, loader, optimizer, criterion, device, scheduler=None):
     """Train iTransformer for one epoch."""
     model.train()
@@ -1093,10 +1108,7 @@ def train_itransformer_epoch(model, loader, optimizer, criterion, device, schedu
         seq_sl = getattr(model, 'seq_len', x_enc.shape[1])
         if x_enc.shape[1] > seq_sl:
             x_enc = x_enc[:, -seq_sl:, :]
-        y_true = future.permute(0, 2, 1).to(device)
-        # iTransformer predicts H steps; strip the K overlap from target
-        if LOOKBACK_OVERLAP > 0:
-            y_true = y_true[:, LOOKBACK_OVERLAP:, :]
+        y_true = _itrans_targets(future, model, device)
         
         optimizer.zero_grad()
         y_pred = model(x_enc, None, None, None)
@@ -1124,9 +1136,7 @@ def validate_itransformer(model, loader, criterion, device):
             seq_sl = getattr(model, 'seq_len', x_enc.shape[1])
             if x_enc.shape[1] > seq_sl:
                 x_enc = x_enc[:, -seq_sl:, :]
-            y_true = future.permute(0, 2, 1).to(device)
-            if LOOKBACK_OVERLAP > 0:
-                y_true = y_true[:, LOOKBACK_OVERLAP:, :]
+            y_true = _itrans_targets(future, model, device)
             y_pred = model(x_enc, None, None, None)
             loss = criterion(y_pred, y_true)
             total_loss += loss.item()
