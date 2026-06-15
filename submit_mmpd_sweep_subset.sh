@@ -7,6 +7,8 @@
 #   ./submit_mmpd_sweep_subset.sh --output-dir results/datasets/06-12-sweep-subset-mmpd
 #   ./submit_mmpd_sweep_subset.sh --resume --output-dir results/datasets/06-12-sweep-subset-mmpd
 #   ./submit_mmpd_sweep_subset.sh --datasets ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama
+#   ./submit_mmpd_sweep_subset.sh --anchor-config binary_anchor_stationary_flat_subsets_ema099_lb336_hz96 \
+#       --lookback 336 --horizon 96 --datasets ETTh1,exchange_rate,weather,traffic
 #
 # MMPD-only: does not submit binary-anchor re-eval workers.
 
@@ -23,7 +25,7 @@ DEPENDENCY=""
 SEED=2026
 LOOKBACK=96
 HORIZON=96
-WALL_MMPD="12:00:00"
+WALL_MMPD="3:00:00"
 WALL_INIT="0:45:00"
 WALL_MERGE="0:30:00"
 
