@@ -27,8 +27,6 @@ class Dataset_MTS(Dataset):
         env_stride = int(os.environ.get('MMPD_WINDOW_STRIDE', '1'))
         env_test_stride = int(os.environ.get('MMPD_TEST_STRIDE', str(env_stride)))
         self.stride = env_test_stride if flag == 'test' else env_stride
-        if 'dynamic' in data_path and flag == 'test':
-            self.stride = self.out_len
         self.block_len = int(os.environ.get('MMPD_BLOCK_LEN', '0'))
         self.__read_data__()
 

@@ -15,6 +15,7 @@ import importlib
 import json
 import math
 import os
+from contextlib import contextmanager
 import shutil
 import subprocess
 import sys
@@ -354,6 +355,81 @@ def _export_dalia_mmpd_csv(dst_csv: Path, data_dir: Path, variate_indices: Seque
         f"[mmpd-data] DALIA: wrote {dst_csv} "
         f"({meta['n_windows']}, rows={meta['data_split']}, {values.shape[1]} vars)"
     )
+
+
+def parse_mmpd_data_split(split: str) -> List[Any]:
+    parts = [float(x.strip()) for x in str(split).split(",") if x.strip()]
+    if parts and all(x > 1 for x in parts):
+        return [int(x) for x in parts]
+    return parts
+
+
+@contextmanager
+def mmpd_stride_env(run: AnchorRun):
+    updates = {
+        "MMPD_WINDOW_STRIDE": str(run_train_stride(run)),
+        "MMPD_TEST_STRIDE": str(run_test_stride(run)),
+    }
+    if run.dataset == "dalia":
+        updates["MMPD_BLOCK_LEN"] = "120"
+    saved: Dict[str, Optional[str]] = {}
+    try:
+        for key, value in updates.items():
+            saved[key] = os.environ.get(key)
+            os.environ[key] = value
+        yield
+    finally:
+        for key, old in saved.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+
+def build_mmpd_test_dataset(args: argparse.Namespace, run: AnchorRun):
+    from utils.mmpd_patches.dataset_mts import Dataset_MTS
+
+    stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
+    lookback, horizon = dataset_window_lengths(args, run.dataset)
+    split = parse_mmpd_data_split(mmpd_data_split(run.dataset, args.mmpd_data_dir))
+    with mmpd_stride_env(run):
+        return Dataset_MTS(
+            root_path=str(args.mmpd_data_dir),
+            data_path=mmpd_staged_filename_for_run(run),
+            flag="test",
+            size=[lookback, horizon],
+            data_split=split,
+        )
+
+
+def filter_valid_mmpd_indices(
+    dataset: str,
+    test_ds,
+    indices: Sequence[int],
+) -> List[int]:
+    in_len = int(test_ds.in_len)
+    out_len = int(test_ds.out_len)
+    n = len(test_ds)
+    valid: List[int] = []
+    for raw in indices:
+        idx = int(raw)
+        if idx < 0 or idx >= n:
+            continue
+        seq_x, seq_y = test_ds[idx]
+        if len(seq_x) == in_len and len(seq_y) == out_len:
+            valid.append(idx)
+    if len(valid) < len(indices):
+        print(
+            f"[mmpd] {dataset}: dropped {len(indices) - len(valid)} invalid indices "
+            f"({len(valid)}/{len(indices)} kept, dataset_len={n})",
+            flush=True,
+        )
+    if not valid:
+        raise ValueError(
+            f"No valid MMPD eval indices for {dataset} "
+            f"(got {len(indices)} candidates, dataset_len={n})"
+        )
+    return valid
 
 
 def mmpd_data_split(dataset: str, data_dir: Path) -> str:
@@ -1504,6 +1580,8 @@ def run_mmpd_eval(
     out_npz = args.output_dir / "raw" / f"mmpd_{dataset}.npz"
     indices_json = args.output_dir / "raw" / f"indices_{dataset}_mmpd_eval.json"
     indices_json.parent.mkdir(parents=True, exist_ok=True)
+    test_ds = build_mmpd_test_dataset(args, run)
+    indices = filter_valid_mmpd_indices(dataset, test_ds, indices)
     write_json_atomic(indices_json, list(indices))
 
     if not out_npz.exists() or args.force_mmpd_eval:
@@ -1977,16 +2055,7 @@ def build_indices_for_dataset(
     run: AnchorRun,
 ) -> List[int]:
     dataset = run.dataset
-    pipeline = load_tsf_pipeline()
-    lookback, horizon = dataset_window_lengths(args, dataset)
-    _, _, test_ds, _ = pipeline.load_dataset(
-        dataset,
-        run_variate_indices(run),
-        lookback=lookback,
-        horizon=horizon,
-        stride=run_train_stride(run),
-        test_stride=run_test_stride(run),
-    )
+    test_ds = build_mmpd_test_dataset(args, run)
     indices = make_eval_indices(
         len(test_ds),
         args.test_fraction,
