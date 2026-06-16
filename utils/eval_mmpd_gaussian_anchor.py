@@ -807,11 +807,22 @@ def mmpd_checkpoint_path(
     run: AnchorRun,
     *,
     data_name: Optional[str] = None,
+    hparams: Optional[Dict[str, Any]] = None,
 ) -> Path:
+    from utils.mmpd_paper_hparams import resolved_mmpd_hparams
+
     lookback, horizon = dataset_window_lengths(args, run.dataset)
     name = data_name or mmpd_dataset_name(run)
     patch_size = dataset_mmpd_patch_size(args, run.dataset)
-    setting = mmpd_setting(name, lookback, horizon, patch_size, backbone=args.mmpd_backbone)
+    hp = resolved_mmpd_hparams(args.output_dir, run.dataset, fallback=hparams)
+    setting = mmpd_setting(
+        name,
+        lookback,
+        horizon,
+        patch_size,
+        backbone=args.mmpd_backbone,
+        point_weight=float(hp["point_weight"]),
+    )
     return (
         mmpd_output_root(args)
         / "mmpd_out"
@@ -822,12 +833,43 @@ def mmpd_checkpoint_path(
     )
 
 
+def _find_mmpd_checkpoint_dir(
+    args: argparse.Namespace,
+    run: AnchorRun,
+    data_name: str,
+) -> Optional[Path]:
+    """Fallback when setting dir name differs (e.g. legacy default point_weight)."""
+    lookback, horizon = dataset_window_lengths(args, run.dataset)
+    prefix = f"data{data_name}_il{lookback}_ol{horizon}_backbone{args.mmpd_backbone}_"
+    base = (
+        mmpd_output_root(args)
+        / "mmpd_out"
+        / "checkpoints"
+        / f"{args.mmpd_backbone}-MMPD"
+    )
+    if not base.is_dir():
+        return None
+    matches = [
+        d
+        for d in base.iterdir()
+        if d.is_dir()
+        and d.name.startswith(prefix)
+        and (d / "model_checkpoint.pth").is_file()
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda d: d.stat().st_mtime)
+
+
 def resolve_mmpd_checkpoint(
     args: argparse.Namespace, run: AnchorRun
 ) -> Tuple[Path, str]:
     """Return existing checkpoint path and the MMPD `data` name used in its setting dir."""
+    from utils.mmpd_paper_hparams import resolved_mmpd_hparams
+
+    hp = resolved_mmpd_hparams(args.output_dir, run.dataset)
     for name in mmpd_checkpoint_data_names(run):
-        ckpt = mmpd_checkpoint_path(args, run, data_name=name)
+        ckpt = mmpd_checkpoint_path(args, run, data_name=name, hparams=hp)
         if ckpt.exists():
             if name != mmpd_dataset_name(run):
                 print(
@@ -836,7 +878,15 @@ def resolve_mmpd_checkpoint(
                     flush=True,
                 )
             return ckpt, name
-    return mmpd_checkpoint_path(args, run), mmpd_dataset_name(run)
+        found = _find_mmpd_checkpoint_dir(args, run, name)
+        if found is not None:
+            ckpt = found / "model_checkpoint.pth"
+            print(
+                f"[mmpd] {run.dataset}: resolved checkpoint via glob {found.name}",
+                flush=True,
+            )
+            return ckpt, name
+    return mmpd_checkpoint_path(args, run, hparams=hp), mmpd_dataset_name(run)
 
 
 def train_mmpd(args: argparse.Namespace, runs: Sequence[AnchorRun]) -> None:
