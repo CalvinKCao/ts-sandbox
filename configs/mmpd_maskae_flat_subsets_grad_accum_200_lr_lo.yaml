@@ -42,3 +42,12 @@ mmpd:
   gmm_iterations: 10
   prior_pi_decay: 0.5
   prior_precision_shape: 100
+  tune_trials: 5
+  tune_epochs: 10
+  tune_patience: 3
+  tune_params:
+    learning_rate: [3.0e-5, 3.0e-4]   # log-uniform
+    point_weight: [0.005, 0.05]        # log-uniform; paper lambda=0.99 -> 0.01
+    dropout: [0.05, 0.35]
+    finetune_layers: [1, 3]             # MaskAE TC depth
+    neighbor_num: [5, 15]               # MaskAE channel graph kNN

@@ -191,6 +191,18 @@ def apply_mmpd_compatibility_patches(path: Path) -> None:
             "if args.data in data_parser.keys():",
             "if args.data in data_parser.keys() and os.environ.get('MMPD_KEEP_CLI_DATA_ARGS') != '1':",
         )
+        dropout_line = (
+            "parser.add_argument('--dropout', type=float, default=0.2, help='dropout')"
+        )
+        if dropout_line in patched and "finetune_layers" not in patched:
+            patched = patched.replace(
+                dropout_line,
+                dropout_line
+                + "\nparser.add_argument('--finetune_layers', type=int, default=0, "
+                + "help='MaskAE TC depth; 0 uses d_layers')"
+                + "\nparser.add_argument('--neighbor_num', type=int, default=0, "
+                + "help='MaskAE kNN neighbors; 0 uses min(10, data_dim)')",
+            )
         if patched != text:
             main_py.write_text(patched, encoding="utf-8")
 
@@ -592,13 +604,27 @@ def dataset_mmpd_patch_size(args: argparse.Namespace, dataset: str) -> int:
     return patch
 
 
-def build_mmpd_train_cmd(args: argparse.Namespace, run: AnchorRun) -> List[str]:
+def build_mmpd_train_cmd(
+    args: argparse.Namespace,
+    run: AnchorRun,
+    *,
+    hparams: Optional[Dict[str, Any]] = None,
+    output_root: Optional[Path] = None,
+    train_epochs: Optional[int] = None,
+    patience: Optional[int] = None,
+) -> List[str]:
+    from utils.mmpd_paper_hparams import resolved_mmpd_hparams
+
     dataset = run.dataset
     data_path = mmpd_staged_filename_for_run(run)
     lookback, horizon = dataset_window_lengths(args, dataset)
     patch_size = dataset_mmpd_patch_size(args, dataset)
     data_dim = len(run_variate_indices(run))
     batch_size = mmpd_train_batch_size(args, dataset, data_dim=data_dim)
+    hp = resolved_mmpd_hparams(args.output_dir, dataset, fallback=hparams)
+    epochs = int(train_epochs if train_epochs is not None else args.mmpd_train_epochs)
+    stop_patience = int(patience if patience is not None else args.mmpd_patience)
+    mmpd_out = output_root if output_root is not None else args.output_dir / "mmpd_out"
     cmd = [
         pipeline_python(),
         "-u",
@@ -612,7 +638,7 @@ def build_mmpd_train_cmd(args: argparse.Namespace, run: AnchorRun) -> List[str]:
         "--data_split",
         mmpd_data_split(dataset, args.mmpd_data_dir),
         "--output_root",
-        str(args.output_dir / "mmpd_out"),
+        str(mmpd_out),
         "--backbone",
         args.mmpd_backbone,
         "--loss_func",
@@ -633,10 +659,12 @@ def build_mmpd_train_cmd(args: argparse.Namespace, run: AnchorRun) -> List[str]:
         "512",
         "--n_heads",
         "4",
+        "--dropout",
+        str(hp["dropout"]),
         "--weighted",
         "True",
         "--point_weight",
-        "0.01",
+        str(hp["point_weight"]),
         "--d_diffusion",
         "256",
         "--diffusion_layers",
@@ -650,13 +678,13 @@ def build_mmpd_train_cmd(args: argparse.Namespace, run: AnchorRun) -> List[str]:
         "--batch_size",
         str(batch_size),
         "--learning_rate",
-        "1e-4",
+        str(hp["learning_rate"]),
         "--lradj",
         "cosine",
         "--train_epochs",
-        str(args.mmpd_train_epochs),
+        str(epochs),
         "--patience",
-        str(args.mmpd_patience),
+        str(stop_patience),
         "--training",
         "True",
         "--testing",
@@ -666,6 +694,15 @@ def build_mmpd_train_cmd(args: argparse.Namespace, run: AnchorRun) -> List[str]:
         "--gpu",
         str(args.gpu),
     ]
+    if args.mmpd_backbone == "MaskAE":
+        cmd.extend(
+            [
+                "--finetune_layers",
+                str(int(hp.get("finetune_layers", 0))),
+                "--neighbor_num",
+                str(int(hp.get("neighbor_num", 0))),
+            ]
+        )
     if not torch.cuda.is_available() or args.cpu:
         cmd.extend(["--use_gpu", "False"])
     return cmd
@@ -718,9 +755,18 @@ def resolve_mmpd_checkpoint(
 
 
 def train_mmpd(args: argparse.Namespace, runs: Sequence[AnchorRun]) -> None:
+    from utils.mmpd_paper_hparams import load_tuned_hparams, tuning_result_path
+    from utils.mmpd_subset_tune import tune_mmpd_subset
+
     for run in runs:
         dataset = run.dataset
         stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
+        if args.mmpd_tune_trials > 0:
+            tuned = load_tuned_hparams(args.output_dir, dataset)
+            if tuned is None or args.force_mmpd_tune:
+                tune_mmpd_subset(args, run)
+            else:
+                print(f"[mmpd-tune] {dataset}: reusing {tuning_result_path(args.output_dir, dataset)}")
         ckpt, _ = resolve_mmpd_checkpoint(args, run)
         if ckpt.exists() and not args.force_mmpd_train:
             print(f"[mmpd] Reusing checkpoint for {dataset}: {ckpt}")
@@ -2127,6 +2173,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gmm-iterations", type=int, default=10)
     parser.add_argument("--mmpd-train-epochs", type=int, default=20)
     parser.add_argument("--mmpd-patience", type=int, default=5)
+    parser.add_argument("--mmpd-tune-trials", type=int, default=0,
+                        help="Optuna trials per dataset before final MMPD train (0=off).")
+    parser.add_argument("--mmpd-tune-epochs", type=int, default=10,
+                        help="Max epochs per tune trial (shorter than final train).")
+    parser.add_argument("--mmpd-tune-patience", type=int, default=3,
+                        help="Early-stop patience during tune trials.")
+    parser.add_argument("--force-mmpd-tune", action="store_true",
+                        help="Re-run Optuna even if tuning/<dataset>_best.json exists.")
     parser.add_argument("--mmpd-batch-size", type=int, default=32)
     parser.add_argument("--mmpd-eval-batch-size", type=int, default=16)
     parser.add_argument("--anchor-batch-size", type=int, default=16)

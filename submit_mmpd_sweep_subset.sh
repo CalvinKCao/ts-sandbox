@@ -30,6 +30,9 @@ WALL_MMPD="3:00:00"
 WALL_INIT="0:45:00"
 WALL_MERGE="0:30:00"
 MMPD_BACKBONE="Decoder"
+MMPD_TUNE_TRIALS=0
+MMPD_TUNE_EPOCHS=10
+MMPD_TUNE_PATIENCE=3
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -45,6 +48,10 @@ while [[ $# -gt 0 ]]; do
         --seed) SEED="$2"; shift 2 ;;
         --time) WALL_MMPD="$2"; shift 2 ;;
         --mmpd-backbone) MMPD_BACKBONE="$2"; shift 2 ;;
+        --mmpd-tune-trials) MMPD_TUNE_TRIALS="$2"; shift 2 ;;
+        --mmpd-tune-epochs) MMPD_TUNE_EPOCHS="$2"; shift 2 ;;
+        --mmpd-tune-patience) MMPD_TUNE_PATIENCE="$2"; shift 2 ;;
+        --force-mmpd-tune) FORCE=1; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -197,6 +204,17 @@ else
     )
 fi
 
+if [[ "$MMPD_TUNE_TRIALS" -gt 0 ]]; then
+    EVAL_EXTRA+=(
+        --mmpd-tune-trials "$MMPD_TUNE_TRIALS"
+        --mmpd-tune-epochs "$MMPD_TUNE_EPOCHS"
+        --mmpd-tune-patience "$MMPD_TUNE_PATIENCE"
+    )
+    if [[ "$FORCE" -eq 1 ]]; then
+        EVAL_EXTRA+=(--force-mmpd-tune)
+    fi
+fi
+
 PREAMBLE_FILE="$REPO/results/job_preamble_mmpd_sweep_subset.sh"
 cat > "$PREAMBLE_FILE" << PREAMBLE
 set -euo pipefail
@@ -255,6 +273,7 @@ echo "Output:        $OUTPUT_DIR"
 echo "Anchor config: $ANCHOR_CONFIG"
 echo "Lookback/horizon: $LOOKBACK / $HORIZON"
 echo "MMPD backbone:   $MMPD_BACKBONE"
+echo "MMPD tune:       trials=$MMPD_TUNE_TRIALS epochs=$MMPD_TUNE_EPOCHS patience=$MMPD_TUNE_PATIENCE"
 echo "Resume:        $RESUME  Force: $FORCE"
 echo "Datasets:      ${DATASETS[*]}"
 for i in "${!DATASETS[@]}"; do

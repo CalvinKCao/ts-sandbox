@@ -143,9 +143,12 @@ class MaskAETransformer(nn.Module):
         self.n_heads = configs.n_heads
         self.e_layers = configs.e_layers
         self.dropout = configs.dropout
-        self.finetune_layers = int(getattr(configs, "finetune_layers", configs.d_layers))
-        self.neighbor_num = int(
-            getattr(configs, "neighbor_num", min(10, configs.data_dim))
+        self.finetune_layers = int(
+            getattr(configs, "finetune_layers", 0) or configs.d_layers
+        )
+        raw_neighbors = int(getattr(configs, "neighbor_num", 0) or 0)
+        self.neighbor_num = (
+            raw_neighbors if raw_neighbors > 0 else min(10, configs.data_dim)
         )
 
         self.patch_embedding = nn.Linear(self.patch_size, self.d_model, bias=False)
