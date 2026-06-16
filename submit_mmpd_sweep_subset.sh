@@ -16,6 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMOKE=0
 RESUME=0
 FORCE=0
+FORCE_INIT=0
 OUTPUT_DIR=""
 SUBSET_CONFIG="configs/binary_anchor_stationary_flat_subsets.yaml"
 USE_ANCHOR_CKPTS=0
@@ -37,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --resume) RESUME=1; shift ;;
+        --force-init) FORCE_INIT=1; shift ;;
         --force) FORCE=1; shift ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --subset-config) SUBSET_CONFIG="$2"; shift 2 ;;
@@ -149,6 +151,10 @@ EVAL_BASE=(
 if [[ "$USE_ANCHOR_CKPTS" -eq 1 ]]; then
     EVAL_BASE+=(--anchor-config "$ANCHOR_CONFIG")
 else
+    if ! grep -q -- '--subset-config' "$REPO/utils/eval_mmpd_gaussian_anchor.py"; then
+        echo "ERROR: eval script missing --subset-config; git pull (need ed65c6f+) on cluster." >&2
+        exit 1
+    fi
     EVAL_BASE+=(
         --subset-config "$REPO/$SUBSET_CONFIG"
         --mmpd-only
@@ -301,9 +307,13 @@ if [[ "$USE_ANCHOR_CKPTS" -eq 1 ]]; then
 fi
 
 SKIP_INIT=0
-if [[ "$RESUME" -eq 1 && -f "$OUTPUT_DIR/run_manifest.json" ]]; then
+if [[ "$FORCE_INIT" -eq 1 ]]; then
+    echo "Force-init: will rerun init (ignoring existing manifest)"
+elif [[ "$RESUME" -eq 1 && -f "$OUTPUT_DIR/run_manifest.json" ]]; then
     SKIP_INIT=1
     echo "Resume: reusing $OUTPUT_DIR/run_manifest.json"
+elif [[ "$RESUME" -eq 1 ]]; then
+    echo "Resume: no run_manifest.json — will submit init"
 fi
 
 JOB_INIT=""
@@ -316,6 +326,8 @@ if [[ "$SKIP_INIT" -eq 0 ]]; then
     INIT_SCRIPT="$LOG_DIR/submit-init.sh"
     write_worker_script "$INIT_SCRIPT" "${EVAL_BASE[@]}" "${EVAL_EXTRA[@]}" \
         --phase init --datasets "${DATASETS[@]}"
+    echo "Init script: $INIT_SCRIPT"
+    grep -E 'subset-config|anchor-config' "$INIT_SCRIPT" || true
     echo "Submitting init..."
     JOB_INIT=$(sbatch --parsable \
         --job-name="mmpd-sw-init$([[ "$SMOKE" -eq 1 ]] && echo -smoke)" \

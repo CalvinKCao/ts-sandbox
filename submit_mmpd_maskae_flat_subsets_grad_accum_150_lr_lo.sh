@@ -15,11 +15,12 @@ cd "$SCRIPT_DIR"
 
 SUBSET_CONFIG="configs/binary_anchor_stationary_flat_subsets.yaml"
 DATASETS="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
-OUTPUT_DIR="results/datasets/$(date +%m-%d)-mmpd-maskae-grad-accum-150-lr-lo-subset"
+OUTPUT_DIR=""
 DEPENDENCY=""
 TUNE_ARGS=(--mmpd-tune-trials 7 --mmpd-tune-epochs 10 --mmpd-tune-patience 3 --time 8:00:00)
 
 EXTRA=()
+RESUME=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --smoke-test|--smoke)
@@ -27,7 +28,7 @@ while [[ $# -gt 0 ]]; do
             TUNE_ARGS=(--mmpd-tune-trials 2 --mmpd-tune-epochs 1 --mmpd-tune-patience 1 --time 1:30:00)
             shift
             ;;
-        --resume) EXTRA+=(--resume); shift ;;
+        --resume) RESUME=1; EXTRA+=(--resume); shift ;;
         --force) EXTRA+=(--force); shift ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --dependency) DEPENDENCY="$2"; shift 2 ;;
@@ -37,6 +38,17 @@ while [[ $# -gt 0 ]]; do
         *) EXTRA+=("$1"); shift ;;
     esac
 done
+
+if [[ -z "$OUTPUT_DIR" ]]; then
+    OUTPUT_DIR="results/datasets/$(date +%m-%d)-mmpd-maskae-grad-accum-150-lr-lo-subset"
+fi
+if [[ "$RESUME" -eq 1 && ! -d "$OUTPUT_DIR" && "$OUTPUT_DIR" != /* ]]; then
+    OUTPUT_DIR="results/datasets/$(basename "$OUTPUT_DIR")"
+fi
+if [[ "$RESUME" -eq 1 && ! -d "$OUTPUT_DIR" ]]; then
+    echo "ERROR: --resume requires an existing --output-dir (got: $OUTPUT_DIR)" >&2
+    exit 1
+fi
 
 exec ./submit_mmpd_sweep_subset.sh \
     --mmpd-backbone MaskAE \
