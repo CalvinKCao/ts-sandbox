@@ -13,8 +13,14 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 RESULTS = os.path.join(REPO, "results", "datasets")
 MMPD_DIR_LEGACY = os.path.join(RESULTS, "06-12-sweep-subset-mmpd", "partials")
 MMPD_DIR_SUBSET = os.path.join(RESULTS, "06-13-binary-mmpd-subset-compare", "partials")
+MMPD_DIR_MASKAE = os.path.join(
+    RESULTS, "06-15-mmpd-maskae-grad-accum-200-lr-lo-tune", "partials"
+)
 MMPD_SOURCE_LEGACY = "06-12-sweep-subset-mmpd"
 MMPD_SOURCE_SUBSET = "06-13-binary-mmpd-subset-compare"
+MMPD_SOURCE_MASKAE = "06-15-mmpd-maskae-grad-accum-200-lr-lo-tune"
+MMPD_MASKAE_LABEL = "**MMPD (MaskedAE)**"
+MMPD_REF_CONFIGS = frozenset({"**MMPD**", "**MMPD (subset)**", MMPD_MASKAE_LABEL})
 LOGS = os.path.join(REPO, "results", "logs")
 RUN_GLOBS = [
     os.path.join(RESULTS, "06-12-*"),
@@ -62,6 +68,16 @@ MMPD_SUBSET_JOBS = {
     "solar_Alabama": "3951207",
 }
 
+MMPD_MASKAE_JOBS = {
+    "ETTh1": "3965321",
+    "ETTh2": "3965322",
+    "exchange_rate": "3965323",
+    "weather": "3965324",
+    "electricity": "3965325",
+    "traffic": "3965326",
+    "solar_Alabama": "3965327",
+}
+
 DATASET_ORDER = [
     "ETTh1",
     "ETTh2",
@@ -97,6 +113,7 @@ CONFIG_ALIASES = {
     "binary_anchor_stationary_flat_subsets_grad_accum_guidance_200": "**Flat subsets guidance accum2x**",
     "binary_anchor_stationary_flat_subsets_grad_accum_guidance_400": "**Flat subsets guidance accum4x**",
     "binary_anchor_stationary_flat_subsets_grad_accum_guidance_800": "**Flat subsets guidance accum8x**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_hi_guidance": "**2d-guidance**",
     "binary_anchor_stationary_flat_subsets_ema099_lb336_hz96": "**Flat subsets EMA0.99 LB336/H96**",
     "binary_anchor_stationary_flat_subsets_ema099_lb96_hz720": "**Flat subsets EMA0.99 LB96/H720**",
     "binary_anchor_ar_grad_accum_400": "**AR accum4x**",
@@ -373,22 +390,32 @@ def drank_str(drank: Optional[int]) -> str:
     return str(drank)
 
 
+def _load_mmpd_partial(mmpd_dir: str, source: str, dataset: str) -> Optional[Dict[str, Any]]:
+    path = os.path.join(mmpd_dir, f"{dataset}_mmpd.json")
+    if not os.path.isfile(path):
+        return None
+    data = load_partial(path)
+    return {
+        "anchor_mse": data.get("mse"),
+        "anchor_mae": data.get("mae"),
+        "crps": data.get("crps"),
+        "source": source,
+    }
+
+
 def load_mmpd(dataset: str) -> Optional[Dict[str, Any]]:
-    for mmpd_dir in (MMPD_DIR_SUBSET, MMPD_DIR_LEGACY):
-        path = os.path.join(mmpd_dir, f"{dataset}_mmpd.json")
-        if os.path.isfile(path):
-            data = load_partial(path)
-            return {
-                "anchor_mse": data.get("mse"),
-                "anchor_mae": data.get("mae"),
-                "crps": data.get("crps"),
-                "source": (
-                    MMPD_SOURCE_SUBSET
-                    if mmpd_dir == MMPD_DIR_SUBSET
-                    else MMPD_SOURCE_LEGACY
-                ),
-            }
+    for mmpd_dir, source in (
+        (MMPD_DIR_SUBSET, MMPD_SOURCE_SUBSET),
+        (MMPD_DIR_LEGACY, MMPD_SOURCE_LEGACY),
+    ):
+        row = _load_mmpd_partial(mmpd_dir, source, dataset)
+        if row is not None:
+            return row
     return None
+
+
+def load_mmpd_maskae(dataset: str) -> Optional[Dict[str, Any]]:
+    return _load_mmpd_partial(mmpd_dir=MMPD_DIR_MASKAE, source=MMPD_SOURCE_MASKAE, dataset=dataset)
 
 
 def mmpd_config_label(dataset: str, mmpd: Dict[str, Any]) -> str:
@@ -517,6 +544,17 @@ def collect_runs() -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]
                     "Status": "ref",
                 }
             )
+        mmpd_maskae = load_mmpd_maskae(dataset)
+        if mmpd_maskae and mmpd_maskae["anchor_mse"] is not None:
+            rows.append(
+                {
+                    "Config": MMPD_MASKAE_LABEL,
+                    "anchor_mse": mmpd_maskae["anchor_mse"],
+                    "anchor_mae": mmpd_maskae["anchor_mae"],
+                    "crps": mmpd_maskae["crps"],
+                    "Status": "ref",
+                }
+            )
 
     return grid_rows, by_dataset
 
@@ -539,6 +577,20 @@ def append_mmpd_grid_rows(grid_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
                 "status": "ref",
             }
         )
+        mmpd_maskae = load_mmpd_maskae(dataset)
+        if mmpd_maskae and mmpd_maskae["anchor_mse"] is not None:
+            rows.append(
+                {
+                    "dataset": dataset,
+                    "config": MMPD_MASKAE_LABEL,
+                    "job_id": MMPD_MASKAE_JOBS.get(dataset, "—"),
+                    "anchor_mse": mmpd_maskae["anchor_mse"],
+                    "anchor_mae": mmpd_maskae["anchor_mae"],
+                    "crps": mmpd_maskae["crps"],
+                    "sample_mean_mse": None,
+                    "status": "ref",
+                }
+            )
     return rows
 
 
@@ -563,7 +615,7 @@ def delta_ranks(by_dataset: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Dict[s
             continue
         for i, r in enumerate(ranked):
             cfg = r["Config"]
-            if cfg in {"**MMPD**", "**MMPD (subset)**"}:
+            if cfg in MMPD_REF_CONFIGS:
                 out[cfg][dataset] = None
             elif r.get("anchor_mse") is None or r.get("Status") == "incomplete":
                 out[cfg][dataset] = None
@@ -754,6 +806,7 @@ def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
             "grad-accum reuse sweep (`grad_accum_{125,150,200}`, jobs `3953944`–`3953964`; "
             "LR-band split `grad_accum_{150,200}_lr_{lo,hi}`, jobs `3954784`–`3954810`), "
             "**Flat subsets guidance accum** {1.5×, 2×, 4×, 8×} (`grad_accum_guidance_{150,200,400,800}`, jobs `3961419`–`3961447`), "
+            "**2d-guidance** (iTrans 2D ghost + guidance channel, `grad_accum_150_lr_hi_guidance`, jobs `3965290`–`3965296`), "
             "**Flat subsets accum4x** no guidance (`grad_accum_400`, jobs `3963967`–`3963973`), "
             "EMA0.99 lookback variants (`ema099_lb336_hz96`, `ema099_lb96_hz720`, jobs `3955091`–`3955098`), "
             "**AR accum4x/8x** (`binary_anchor_ar_grad_accum_{400,800}`, LB96/H96 base), "
@@ -795,7 +848,12 @@ def write_leaderboard(
 ) -> None:
     datasets_present = [d for d in DATASET_ORDER if d in by_dataset]
     configs = sorted(
-        {r["Config"] for rows in by_dataset.values() for r in rows if r["Config"] not in {"**MMPD**", "**MMPD (subset)**", "**Discrete**"}},
+        {
+            r["Config"]
+            for rows in by_dataset.values()
+            for r in rows
+            if r["Config"] not in MMPD_REF_CONFIGS | {"**Discrete**"}
+        },
         key=lambda c: (
             sum(deltas.get(c, {}).get(ds, 0) or 0 for ds in datasets_present) / max(
                 sum(1 for ds in datasets_present if ds in deltas.get(c, {}) and deltas[c][ds] is not None),
@@ -826,6 +884,7 @@ def write_leaderboard(
             "Grad-accum reuse sweep: effective batch {1.25×, 1.5×, 2.0×} (jobs `3953944`–`3953964`); "
             "LR-band split on 1.5×/2.0× (`3954784`–`3954810`). "
             "**Flat subsets guidance accum** {1.5×, 2×, 4×, 8×} (jobs `3961419`–`3961447`). "
+            "**2d-guidance** (iTrans 2D ghost + guidance channel, `grad_accum_150_lr_hi_guidance`, jobs `3965290`–`3965296`). "
             "**Flat subsets accum4x** no guidance (jobs `3963967`–`3963973`). "
             "EMA0.99 lookback variants: LB336/H96 and LB96/H720 (`3955091`–`3955098`). "
             "**AR accum4x/8x** (`binary_anchor_ar_grad_accum_{400,800}`, LB96/H96). "
@@ -833,7 +892,11 @@ def write_leaderboard(
             "**AR LB96/H720 accum1.5x** (partial: `3961455`, `3961457`, `3961460`). "
             "**MS tune** (`hp_max_scale_tuning`; post-fix `3956631` exchange_rate, `3960878` ETTm1; "
             "incomplete `3960877` ETTh1 / `3960879` weather; cosine+warmup post-fix `3956633`–`3956640`). "
-            f"**MMPD (subset)** from `{MMPD_SOURCE_SUBSET}` (same subsets as flat runs, 20 samples, full test). "
+            f"**MMPD (subset)** from `{MMPD_SOURCE_SUBSET}` (Decoder backbone, same subsets as flat runs, "
+            "20 samples, full test). "
+            f"**MMPD (MaskedAE)** from `{MMPD_SOURCE_MASKAE}` (UP2ME MaskAE backbone, "
+            "`binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo` anchor, Optuna-tuned, "
+            "jobs `3965321`–`3965327`). "
             f"Legacy **MMPD** from `{MMPD_SOURCE_LEGACY}` where subset MMPD is unavailable.\n\n"
             f"{PREFIX_INVALID_NOTE}\n\n"
         )
@@ -896,7 +959,22 @@ def write_leaderboard(
                 + " | ".join(subset_cells)
                 + " | ref |\n"
             )
-        elif any(load_mmpd(ds) for ds in datasets_present):
+        if any(load_mmpd_maskae(ds) for ds in SUBSET_DATASETS if ds in datasets_present):
+            maskae_cells = []
+            for ds in datasets_present:
+                if load_mmpd_maskae(ds):
+                    maskae_cells.append(drank_str(None))
+                else:
+                    maskae_cells.append("—")
+            f.write(
+                f"| — | {MMPD_MASKAE_LABEL} | — | "
+                + " | ".join(maskae_cells)
+                + " | ref |\n"
+            )
+        if any(
+            (m := load_mmpd(ds)) and m.get("source") == MMPD_SOURCE_LEGACY
+            for ds in datasets_present
+        ):
             f.write(
                 "| — | **MMPD** | — | "
                 + " | ".join(["—"] * len(datasets_present))
@@ -926,7 +1004,7 @@ def write_leaderboard(
             for i, r in enumerate(rows):
                 rank = i + 1
                 cfg = r["Config"]
-                if cfg in {"**MMPD**", "**MMPD (subset)**"} or base is None:
+                if cfg in MMPD_REF_CONFIGS or base is None:
                     dstr = "—"
                 else:
                     dstr = drank_str(rank - base)
