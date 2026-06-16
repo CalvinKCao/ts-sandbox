@@ -144,6 +144,7 @@ class Exp_Forecast(Exp_Basic):
         
         train_steps = len(train_loader)
         early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
+        smoke_max_batches = int(os.environ.get("MMPD_SMOKE_MAX_TRAIN_BATCHES", "0") or "0")
         
         model_optim = self._select_optimizer()
 
@@ -156,6 +157,8 @@ class Exp_Forecast(Exp_Basic):
 
             epoch_time = time.time()
             for i, (batch_x,batch_y) in enumerate(train_loader):
+                if smoke_max_batches and i >= smoke_max_batches:
+                    break
                 iter_count += 1
                 
                 model_optim.zero_grad()

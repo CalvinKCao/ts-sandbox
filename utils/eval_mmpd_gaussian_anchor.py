@@ -51,6 +51,7 @@ def pipeline_python() -> str:
 DEFAULT_MMPD_REPO = REPO_ROOT / "temp" / "MMPD"
 DEFAULT_MMPD_DATA = REPO_ROOT / "temp" / "mmpd_datasets"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results" / "mmpd_anchor_eval"
+SMOKE_OUTPUT_DIR = REPO_ROOT / "results" / "datasets" / "_smoke-mmpd-maskae-subset"
 PATCHED_DATASET_MTS = REPO_ROOT / "utils" / "mmpd_patches" / "dataset_mts.py"
 PATCHED_MASKAE_BACKBONE = (
     REPO_ROOT / "utils" / "mmpd_patches" / "models" / "backbones" / "mask_ae_transformer.py"
@@ -665,11 +666,15 @@ def dataset_window_lengths(args: argparse.Namespace, dataset: str) -> Tuple[int,
     return args.lookback, args.horizon
 
 
-def mmpd_env_for_run(run: AnchorRun) -> Dict[str, str]:
+def mmpd_env_for_run(run: AnchorRun, args: Optional[argparse.Namespace] = None) -> Dict[str, str]:
     env = os.environ.copy()
     env["MMPD_KEEP_CLI_DATA_ARGS"] = "1"
     env["MMPD_WINDOW_STRIDE"] = str(run_train_stride(run))
     env["MMPD_TEST_STRIDE"] = str(run_test_stride(run))
+    if args is not None and getattr(args, "smoke_test", False):
+        env["MMPD_SMOKE_MAX_TRAIN_BATCHES"] = "2"
+    else:
+        env.pop("MMPD_SMOKE_MAX_TRAIN_BATCHES", None)
     if run.dataset == "dalia":
         env["MMPD_BLOCK_LEN"] = "120"
     else:
@@ -915,7 +920,7 @@ def train_mmpd(args: argparse.Namespace, runs: Sequence[AnchorRun]) -> None:
         run_cmd(
             build_mmpd_train_cmd(args, run),
             cwd=args.mmpd_repo,
-            env=mmpd_env_for_run(run),
+            env=mmpd_env_for_run(run, args),
             log_path=log_path,
         )
 
@@ -986,13 +991,16 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
 
 
             def make_args(ns):
+                backbone = ns.mmpd_backbone
+                finetune_layers = int(getattr(ns, "finetune_layers", 0) or 0)
+                neighbor_num = int(getattr(ns, "neighbor_num", 0) or 0)
                 return SimpleNamespace(
                     data=ns.dataset,
                     root_path=ns.root_path,
                     data_path=ns.data_path,
                     data_split=parse_split(ns.data_split),
                     output_root=ns.output_root,
-                    backbone=ns.mmpd_backbone,
+                    backbone=backbone,
                     in_len=ns.lookback,
                     out_len=ns.horizon,
                     patch_size=ns.patch_size,
@@ -1003,8 +1011,10 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                     e_layers=2,
                     d_layers=2,
                     dropout=0.2,
+                    finetune_layers=finetune_layers,
+                    neighbor_num=neighbor_num,
                     loss_func="MMPD",
-                    point_weight=0.01,
+                    point_weight=float(ns.point_weight),
                     weighted=True,
                     d_diffusion=256,
                     diffusion_layers=1,
@@ -1078,6 +1088,9 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                 parser.add_argument("--patch-size", type=int, required=True)
                 parser.add_argument("--data-dim", type=int, required=True)
                 parser.add_argument("--mmpd-backbone", type=str, default="Decoder")
+                parser.add_argument("--point-weight", type=float, default=0.01)
+                parser.add_argument("--finetune-layers", type=int, default=0)
+                parser.add_argument("--neighbor-num", type=int, default=0)
                 parser.add_argument("--sample-num", type=int, required=True)
                 parser.add_argument("--num-sampling-steps", type=int, required=True)
                 parser.add_argument("--gmm-components", type=int, required=True)
@@ -1503,6 +1516,9 @@ def run_mmpd_eval(
         data_dim = len(run_variate_indices(run))
         batch_size = mmpd_eval_batch_size(args, dataset, data_dim=data_dim)
         patch_size = dataset_mmpd_patch_size(args, dataset)
+        from utils.mmpd_paper_hparams import resolved_mmpd_hparams
+
+        hp = resolved_mmpd_hparams(args.output_dir, dataset)
         cmd = [
             pipeline_python(),
             "-u",
@@ -1531,6 +1547,8 @@ def run_mmpd_eval(
             str(data_dim),
             "--mmpd-backbone",
             args.mmpd_backbone,
+            "--point-weight",
+            str(float(hp["point_weight"])),
             "--sample-num",
             str(args.sample_num),
             "--num-sampling-steps",
@@ -1546,9 +1564,18 @@ def run_mmpd_eval(
             "--gpu",
             str(args.gpu),
         ]
+        if args.mmpd_backbone == "MaskAE":
+            cmd.extend(
+                [
+                    "--finetune-layers",
+                    str(int(hp.get("finetune_layers", 0))),
+                    "--neighbor-num",
+                    str(int(hp.get("neighbor_num", 0))),
+                ]
+            )
         if args.cpu:
             cmd.append("--cpu")
-        env = mmpd_env_for_run(run)
+        env = mmpd_env_for_run(run, args)
         print(
             f"[mmpd-eval] {dataset}: launching helper "
             f"(windows={len(indices)}, batch={batch_size}, variates={data_dim}, "
@@ -2391,7 +2418,39 @@ def parse_args() -> argparse.Namespace:
         help="Override checkpoint use_cfg_inference (default: on when cfg_scale != 1).",
     )
     parser.add_argument("--no-update-mmpd", action="store_true")
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Minimal end-to-end run: 1 tune trial, 1 train epoch, 1 eval window.",
+    )
     return parser.parse_args()
+
+
+def apply_mmpd_smoke_defaults(args: argparse.Namespace) -> None:
+    if not args.smoke_test:
+        return
+    if args.output_dir == DEFAULT_OUTPUT_DIR:
+        args.output_dir = SMOKE_OUTPUT_DIR
+    if len(args.datasets) > 1:
+        args.datasets = [args.datasets[0]]
+    args.mmpd_tune_trials = max(1, int(args.mmpd_tune_trials))
+    args.mmpd_tune_epochs = min(int(args.mmpd_tune_epochs), 1)
+    args.mmpd_tune_patience = min(int(args.mmpd_tune_patience), 1)
+    args.mmpd_train_epochs = min(int(args.mmpd_train_epochs), 1)
+    args.mmpd_patience = min(int(args.mmpd_patience), 1)
+    args.test_max_items = 1
+    args.test_fraction = 1.0
+    args.sample_num = min(int(args.sample_num), 2)
+    args.num_sampling_steps = min(int(args.num_sampling_steps), 2)
+    args.gmm_components = min(int(args.gmm_components), 3)
+    args.gmm_iterations = min(int(args.gmm_iterations), 2)
+    args.mmpd_batch_size = min(int(args.mmpd_batch_size), 8)
+    args.mmpd_eval_batch_size = min(int(args.mmpd_eval_batch_size), 2)
+    args.force_mmpd_train = True
+    args.force_mmpd_tune = True
+    args.force_mmpd_eval = True
+    args.force_indices = True
+    args.no_update_mmpd = True
 
 
 def validate_phase_args(args: argparse.Namespace) -> None:
@@ -2453,6 +2512,7 @@ def run_phase_all(args: argparse.Namespace, commit: str) -> None:
 
 def main() -> None:
     args = parse_args()
+    apply_mmpd_smoke_defaults(args)
     args.datasets = list(dict.fromkeys(args.datasets))
     unknown = sorted(set(args.datasets) - set(DATASET_FILES))
     if unknown:

@@ -83,7 +83,7 @@ def run_mmpd_train_trial(
     run_cmd(
         cmd,
         cwd=args.mmpd_repo,
-        env=mmpd_env_for_run(run),
+        env=mmpd_env_for_run(run, args),
         log_path=log_path,
     )
     return _parse_min_vali_loss(log_path)

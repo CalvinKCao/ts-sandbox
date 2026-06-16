@@ -172,17 +172,22 @@ if [[ "$SMOKE" -eq 1 ]]; then
     MEM="24G"
     CPUS=4
     EVAL_EXTRA=(
+        --smoke-test
         --mmpd-train-epochs 1
         --mmpd-patience 1
-        --test-fraction 0.02
-        --test-max-items 32
-        --sample-num 5
-        --num-sampling-steps 5
+        --mmpd-tune-trials 1
+        --mmpd-tune-epochs 1
+        --mmpd-tune-patience 1
+        --test-fraction 1.0
+        --test-max-items 1
+        --sample-num 2
+        --num-sampling-steps 2
         --topk-max 3
-        --gmm-components 5
-        --gmm-iterations 3
-        --mmpd-batch-size 16
-        --mmpd-eval-batch-size 4
+        --gmm-components 3
+        --gmm-iterations 2
+        --mmpd-batch-size 8
+        --mmpd-eval-batch-size 2
+        --force-mmpd-tune
     )
     DATASETS=(ETTh1)
     EVAL_BASE=(
