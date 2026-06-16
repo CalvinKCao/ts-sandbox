@@ -1,6 +1,6 @@
 # YAML-First Sweep Grid Report
 
-Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged runs: **Discrete** (CE, `ordinal_d3pm_staged`), **MAE Discrete** (expectation MAE + uniform `1/H` anchor, `ordinal_d3pm_mae_staged_subsets`), **Binary flat** (full variates, `binary_anchor_stationary_flat`), **Flat subsets** (`3951193`–`3951199`), **Flat subsets EMA0.99** (`3951527`–`3951533`), EMA reuse sweep (`ema_sweep_{090,095,098,0995,0999}`, jobs `3953317`–`3953351`), grad-accum reuse sweep (`grad_accum_{125,150,200}`, jobs `3953944`–`3953964`; LR-band split `grad_accum_{150,200}_lr_{lo,hi}`, jobs `3954784`–`3954810`), **Flat subsets guidance accum** {1.5×, 2×, 4×, 8×} (`grad_accum_guidance_{150,200,400,800}`, jobs `3961419`–`3961447`), **2d-guidance** (iTrans 2D ghost + guidance channel, `grad_accum_150_lr_hi_guidance`, jobs `3965290`–`3965296`), **Flat subsets accum4x** no guidance (`grad_accum_400`, jobs `3963967`–`3963973`), EMA0.99 lookback variants (`ema099_lb336_hz96`, `ema099_lb96_hz720`, jobs `3955091`–`3955098`), **AR accum4x/8x** (`binary_anchor_ar_grad_accum_{400,800}`, LB96/H96 base), **AR LB336/H96 accum1.5x** (`3961448`–`3961454`), **AR LB96/H720 accum1.5x** (`3961455`, `3961457`, `3961460`), **MS tune** (`hp_max_scale_tuning`), and **MMPD (subset)** (`06-13-binary-mmpd-subset-compare`, jobs `3951201`–`3951207`). Probabilistic metrics: `dpmpp` sampler, 20 steps, 20 samples.
+Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged runs: **Discrete** (CE, `ordinal_d3pm_staged`), **MAE Discrete** (expectation MAE + uniform `1/H` anchor, `ordinal_d3pm_mae_staged_subsets`), **Binary flat** (full variates, `binary_anchor_stationary_flat`), **Flat subsets** (`3951193`–`3951199`), **Flat subsets EMA0.99** (`3951527`–`3951533`; Jun 16 `3967251`–`3967256`), EMA reuse sweep (`ema_sweep_{090,095,098,0995,0999}`, jobs `3953317`–`3953351`), grad-accum reuse sweep (`grad_accum_{125,150,200}`, jobs `3953944`–`3953964`; LR-band split `grad_accum_{150,200}_lr_{lo,hi}`, jobs `3954784`–`3954810`), **Flat subsets guidance accum** {1.5×, 2×, 4×, 8×} (`grad_accum_guidance_{150,200,400,800}`, jobs `3961419`–`3961447`), **2d-guidance** (iTrans 2D ghost + guidance channel, `grad_accum_150_lr_hi_guidance`, jobs `3965290`–`3965296`), **Flat subsets accum4x** no guidance (`grad_accum_400`, jobs `3963967`–`3963973`), EMA0.99 lookback variants (`ema099_lb336_hz96`, `ema099_lb96_hz720`, jobs `3955091`–`3955098`), **AR accum4x/8x** (`binary_anchor_ar_grad_accum_{400,800}`, LB96/H96 base), **AR LB336/H96 accum1.5x** (`3961448`–`3961454`), **AR LB96/H720 accum1.5x** (`3961455`, `3961457`, `3961460`), **MS tune** (`hp_max_scale_tuning`), and **MMPD (subset)** (`06-13-binary-mmpd-subset-compare`, jobs `3951201`–`3951207`). **MMPD (MaskedAE)** ETTh1-capped seven (`06-15-mmpd-maskae-grad-accum-200-lr-lo-tune`) plus Jun 16 remaining six (`06-16-mmpd-maskae-grad-accum-150-lr-lo-subset`). Probabilistic metrics: `dpmpp` sampler, 20 steps, 20 samples.
 
 **Pre-fix invalid / incomplete:** Jun 12 `hp_max_scale_tuning` jobs `3943934`–`3943937` (and resumes `3947879`–`3947881`) never searched `max_scale`. Post-fix cosine+warmup `3956633`–`3956640` replaces pre-fix `3943882`–`3943927`. Post-fix MS tune: `3956629`–`3956632` (3h wall); Jun 15 resume `3960877`–`3960879`. **OK:** exchange_rate `3956631`, ETTm1 `3960878`. **Incomplete** (tuned `max_scale≈13.43`, eval pending): ETTh1 `3960877`, weather `3960879`.
 
@@ -84,6 +84,8 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | ETTh2 | **MAE Discrete** | **OK** | 0.3183 | 0.3497 | 0.8584 | 0.5778 | 3949860 |
 | ETTh2 | **MMPD (MaskedAE)** | **ref** | 0.3185 | 0.3655 | 0.2908 | — | 3965322 |
 | ETTh2 | **MMPD (subset)** | **ref** | 0.3186 | 0.3614 | 0.2705 | — | 3951202 |
+| ETTm1 | **Flat subsets EMA0.99** | **OK** | 0.4514 | 0.4215 | 0.3273 | 0.4604 | 3967251 |
+| ETTm1 | **MMPD (MaskedAE)** | **ref** | 0.5619 | 0.4854 | 0.3383 | — | 3968154 |
 | ETTm1 | **MS tune** | **OK** | 0.4679 | 0.4246 | 0.3176 | 0.4398 | 3960878 |
 | ETTm1 | `diff_ema_decay_099` | **OK** | 0.4556 | 0.4231 | 0.3290 | 0.4673 | 3943896 |
 | ETTm1 | `diff_min_snr_gamma_5` | **OK** | 0.5463 | 0.4584 | 0.4031 | 0.6940 | 3943898 |
@@ -106,6 +108,14 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | ETTm1 | `hp_num_steps_1200` | **OK** | 0.4754 | 0.4289 | 0.3353 | 0.4862 | 3943928 |
 | ETTm1 | `hp_num_steps_800` | **OK** | 0.4670 | 0.4274 | 0.3382 | 0.4872 | 3943930 |
 | ETTm1 | `sweep_baseline` | **OK** | 0.4683 | 0.4259 | 0.3268 | 0.4642 | 3943932 |
+| ETTm2 | **Flat subsets EMA0.99** | **OK** | 0.1847 | 0.2593 | 0.2027 | 0.1795 | 3967252 |
+| ETTm2 | **MMPD (MaskedAE)** | **ref** | 0.2226 | 0.3080 | 0.2456 | — | 3968155 |
+| PeMS | **Flat subsets EMA0.99** | **OK** | 0.3160 | 0.3828 | 0.2859 | 0.3056 | 3967254 |
+| PeMS | **MMPD (MaskedAE)** | **ref** | 0.4665 | 0.4804 | 0.3620 | — | 3968537 |
+| dalia | **Flat subsets EMA0.99** | **OK** | 0.8841 | 0.4958 | 0.3914 | 0.8801 | 3967255 |
+| dalia | **MMPD (MaskedAE)** | **ref** | 1.0380 | 0.6142 | 0.4695 | — | 3968158 |
+| dynamic | **Flat subsets EMA0.99** | **OK** | 0.4210 | 0.1830 | 0.1542 | 0.3886 | 3967256 |
+| dynamic | **MMPD (MaskedAE)** | **ref** | 0.4383 | 0.2719 | 0.1937 | — | 3968538 |
 | electricity | **2d-guidance** | **OK** | 0.1675 | 0.2056 | 0.1547 | 0.1626 | 3965294 |
 | electricity | **AR LB336/H96 accum1.5x** | **OK** | 0.1638 | 0.2048 | 0.1534 | 0.1573 | 3961452 |
 | electricity | **Binary flat** | **OK** | 0.2598 | 0.2713 | 0.2080 | 0.2579 | 3949856 |
@@ -183,6 +193,9 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | exchange_rate | `hp_num_steps_1200` | **OK** | 0.0893 | 0.2081 | 0.1686 | 0.0880 | 3943887 |
 | exchange_rate | `hp_num_steps_800` | **OK** | 0.0898 | 0.2115 | 0.1734 | 0.0914 | 3943889 |
 | exchange_rate | `sweep_baseline` | **OK** | 0.0880 | 0.2078 | 0.1660 | 0.0843 | 3943891 |
+| illness | **Flat subsets EMA0.99** | **OK** | 4.3519 | 1.5247 | 1.2278 | 4.5859 | 3967253 |
+| illness | **Flat subsets accum1.5x LR-lo** | **OK** | 4.3647 | 1.5311 | 1.2399 | 4.6628 | 3967555 |
+| illness | **MMPD (MaskedAE)** | **ref** | 4.4968 | 1.5317 | 10.1291 | — | 3968156 |
 | solar_Alabama | **2d-guidance** | **OK** | 0.2121 | 0.2313 | 0.1846 | 0.2046 | 3965296 |
 | solar_Alabama | **AR LB336/H96 accum1.5x** | **OK** | 0.2041 | 0.2229 | 0.1796 | 0.2002 | 3961454 |
 | solar_Alabama | **Binary flat** | **OK** | 0.2170 | 0.2426 | 0.1945 | 0.2172 | 3949858 |

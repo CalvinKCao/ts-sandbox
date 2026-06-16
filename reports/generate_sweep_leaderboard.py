@@ -16,9 +16,13 @@ MMPD_DIR_SUBSET = os.path.join(RESULTS, "06-13-binary-mmpd-subset-compare", "par
 MMPD_DIR_MASKAE = os.path.join(
     RESULTS, "06-15-mmpd-maskae-grad-accum-200-lr-lo-tune", "partials"
 )
+MMPD_DIR_MASKAE_150 = os.path.join(
+    RESULTS, "06-16-mmpd-maskae-grad-accum-150-lr-lo-subset", "partials"
+)
 MMPD_SOURCE_LEGACY = "06-12-sweep-subset-mmpd"
 MMPD_SOURCE_SUBSET = "06-13-binary-mmpd-subset-compare"
 MMPD_SOURCE_MASKAE = "06-15-mmpd-maskae-grad-accum-200-lr-lo-tune"
+MMPD_SOURCE_MASKAE_150 = "06-16-mmpd-maskae-grad-accum-150-lr-lo-subset"
 MMPD_MASKAE_LABEL = "**MMPD (MaskedAE)**"
 MMPD_REF_CONFIGS = frozenset({"**MMPD**", "**MMPD (subset)**", MMPD_MASKAE_LABEL})
 LOGS = os.path.join(REPO, "results", "logs")
@@ -47,6 +51,7 @@ REPORT_DIR = os.path.join(REPO, "reports", "sweep_grid_report")
 GRID_PATH = os.path.join(REPO, "reports", "sweep_grid_report.md")
 LEADERBOARD_PATH = os.path.join(REPO, "reports", "sweep_grid_report_leaderboard.md")
 SUBSET_COMPARE_PATH = os.path.join(REPO, "reports", "binary_mmpd_subset_compare.md")
+EMA099_VS_MMPD_PATH = os.path.join(REPO, "reports", "flat_subsets_ema099_vs_mmpd.md")
 
 SUBSET_DATASETS = [
     "ETTh1",
@@ -78,16 +83,56 @@ MMPD_MASKAE_JOBS = {
     "solar_Alabama": "3965327",
 }
 
+MMPD_MASKAE_150_DATASETS = [
+    "ETTm1",
+    "ETTm2",
+    "illness",
+    "PeMS",
+    "dalia",
+    "dynamic",
+]
+
+MMPD_MASKAE_JOBS_150 = {
+    "ETTm1": "3968154",
+    "ETTm2": "3968155",
+    "illness": "3968156",
+    "PeMS": "3968537",
+    "dalia": "3968158",
+    "dynamic": "3968538",
+}
+
+EMA099_EXTRA_JOBS = {
+    "ETTm1": "3967251",
+    "ETTm2": "3967252",
+    "illness": "3967253",
+    "PeMS": "3967254",
+    "dalia": "3967255",
+    "dynamic": "3967256",
+}
+
+EMA099_VS_MMPD_SUBSET_IDS = {
+    "ETTm1": "ETTm1_4v_s3",
+    "ETTm2": "ETTm2_7v_s4",
+    "illness": "illness",
+    "PeMS": "PeMS_7v_s1",
+    "dalia": "dalia_5v_s2",
+    "dynamic": "dynamic_7v_s29",
+}
+
 DATASET_ORDER = [
     "ETTh1",
     "ETTh2",
     "ETTm1",
     "ETTm2",
+    "illness",
     "exchange_rate",
     "weather",
     "electricity",
     "traffic",
+    "PeMS",
     "solar_Alabama",
+    "dalia",
+    "dynamic",
 ]
 
 CONFIG_ALIASES = {
@@ -415,7 +460,17 @@ def load_mmpd(dataset: str) -> Optional[Dict[str, Any]]:
 
 
 def load_mmpd_maskae(dataset: str) -> Optional[Dict[str, Any]]:
-    return _load_mmpd_partial(mmpd_dir=MMPD_DIR_MASKAE, source=MMPD_SOURCE_MASKAE, dataset=dataset)
+    row_150 = _load_mmpd_partial(MMPD_DIR_MASKAE_150, MMPD_SOURCE_MASKAE_150, dataset)
+    row_200 = _load_mmpd_partial(MMPD_DIR_MASKAE, MMPD_SOURCE_MASKAE, dataset)
+    if dataset in MMPD_MASKAE_150_DATASETS and row_150 is not None:
+        return row_150
+    return row_200 or row_150
+
+
+def mmpd_maskae_job_id(dataset: str) -> str:
+    if os.path.isfile(os.path.join(MMPD_DIR_MASKAE_150, f"{dataset}_mmpd.json")):
+        return MMPD_MASKAE_JOBS_150.get(dataset, "—")
+    return MMPD_MASKAE_JOBS.get(dataset, "—")
 
 
 def mmpd_config_label(dataset: str, mmpd: Dict[str, Any]) -> str:
@@ -561,6 +616,7 @@ def collect_runs() -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]
 
 def append_mmpd_grid_rows(grid_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     rows = list(grid_rows)
+    maskae_datasets = list(dict.fromkeys(SUBSET_DATASETS + MMPD_MASKAE_150_DATASETS))
     for dataset in SUBSET_DATASETS:
         mmpd = load_mmpd(dataset)
         if not mmpd or mmpd.get("source") != MMPD_SOURCE_SUBSET:
@@ -577,13 +633,14 @@ def append_mmpd_grid_rows(grid_rows: List[Dict[str, Any]]) -> List[Dict[str, Any
                 "status": "ref",
             }
         )
+    for dataset in maskae_datasets:
         mmpd_maskae = load_mmpd_maskae(dataset)
         if mmpd_maskae and mmpd_maskae["anchor_mse"] is not None:
             rows.append(
                 {
                     "dataset": dataset,
                     "config": MMPD_MASKAE_LABEL,
-                    "job_id": MMPD_MASKAE_JOBS.get(dataset, "—"),
+                    "job_id": mmpd_maskae_job_id(dataset),
                     "anchor_mse": mmpd_maskae["anchor_mse"],
                     "anchor_mae": mmpd_maskae["anchor_mae"],
                     "crps": mmpd_maskae["crps"],
@@ -801,7 +858,7 @@ def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
             "Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged runs: "
             "**Discrete** (CE, `ordinal_d3pm_staged`), **MAE Discrete** (expectation MAE + uniform `1/H` anchor, "
             "`ordinal_d3pm_mae_staged_subsets`), **Binary flat** (full variates, `binary_anchor_stationary_flat`), "
-            "**Flat subsets** (`3951193`–`3951199`), **Flat subsets EMA0.99** (`3951527`–`3951533`), "
+            "**Flat subsets** (`3951193`–`3951199`), **Flat subsets EMA0.99** (`3951527`–`3951533`; Jun 16 `3967251`–`3967256`), "
             "EMA reuse sweep (`ema_sweep_{090,095,098,0995,0999}`, jobs `3953317`–`3953351`), "
             "grad-accum reuse sweep (`grad_accum_{125,150,200}`, jobs `3953944`–`3953964`; "
             "LR-band split `grad_accum_{150,200}_lr_{lo,hi}`, jobs `3954784`–`3954810`), "
@@ -814,6 +871,8 @@ def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
             "**AR LB96/H720 accum1.5x** (`3961455`, `3961457`, `3961460`), "
             "**MS tune** (`hp_max_scale_tuning`), and "
             "**MMPD (subset)** (`06-13-binary-mmpd-subset-compare`, jobs `3951201`–`3951207`). "
+            f"**MMPD (MaskedAE)** ETTh1-capped seven (`{MMPD_SOURCE_MASKAE}`) plus Jun 16 "
+            f"remaining six (`{MMPD_SOURCE_MASKAE_150}`). "
             "Probabilistic metrics: `dpmpp` sampler, 20 steps, 20 samples.\n\n"
             f"{PREFIX_INVALID_NOTE}\n\n"
         )
@@ -879,7 +938,7 @@ def write_leaderboard(
             "**MAE Discrete** is expectation-MAE + uniform `1/H` anchor (`ordinal_d3pm_mae_staged_subsets`). "
             "**Binary flat** is flat `0.5` XOR anchor on full variates (`binary_anchor_stationary_flat`). "
             "**Flat subsets** (`binary_anchor_stationary_flat_subsets`, jobs `3951193`–`3951199`). "
-            "**Flat subsets EMA0.99** (`3951527`–`3951533`). "
+            "**Flat subsets EMA0.99** (`3951527`–`3951533`; Jun 16 remaining datasets `3967251`–`3967256`). "
             "EMA reuse sweep: `diffusion_ema_decay` ∈ {0.90, 0.95, 0.98, 0.995, 0.999} (jobs `3953317`–`3953351`). "
             "Grad-accum reuse sweep: effective batch {1.25×, 1.5×, 2.0×} (jobs `3953944`–`3953964`); "
             "LR-band split on 1.5×/2.0× (`3954784`–`3954810`). "
@@ -894,9 +953,10 @@ def write_leaderboard(
             "incomplete `3960877` ETTh1 / `3960879` weather; cosine+warmup post-fix `3956633`–`3956640`). "
             f"**MMPD (subset)** from `{MMPD_SOURCE_SUBSET}` (Decoder backbone, same subsets as flat runs, "
             "20 samples, full test). "
-            f"**MMPD (MaskedAE)** from `{MMPD_SOURCE_MASKAE}` (UP2ME MaskAE backbone, "
-            "`binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo` anchor, Optuna-tuned, "
-            "jobs `3965321`–`3965327`). "
+            f"**MMPD (MaskedAE)** from `{MMPD_SOURCE_MASKAE}` (ETTh1-capped 7 datasets, "
+            "grad_accum_200_lr_lo, jobs `3965321`–`3965327`) and "
+            f"`{MMPD_SOURCE_MASKAE_150}` (remaining 6 datasets, grad_accum_150_lr_lo MaskAE, "
+            "jobs `3968154`–`3968538`). "
             f"Legacy **MMPD** from `{MMPD_SOURCE_LEGACY}` where subset MMPD is unavailable.\n\n"
             f"{PREFIX_INVALID_NOTE}\n\n"
         )
@@ -959,7 +1019,7 @@ def write_leaderboard(
                 + " | ".join(subset_cells)
                 + " | ref |\n"
             )
-        if any(load_mmpd_maskae(ds) for ds in SUBSET_DATASETS if ds in datasets_present):
+        if any(load_mmpd_maskae(ds) for ds in datasets_present):
             maskae_cells = []
             for ds in datasets_present:
                 if load_mmpd_maskae(ds):
@@ -1036,6 +1096,105 @@ def write_leaderboard(
             f.write("\n")
 
 
+def write_ema099_vs_mmpd_compare(
+    path: str,
+    grid_rows: List[Dict[str, Any]],
+) -> None:
+    ema_cfg = "**Flat subsets EMA0.99**"
+    datasets = list(EMA099_VS_MMPD_SUBSET_IDS.keys())
+    mse_wins = {ema_cfg: 0, MMPD_MASKAE_LABEL: 0}
+    crps_wins = {ema_cfg: 0, MMPD_MASKAE_LABEL: 0}
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# Flat subsets EMA0.99 vs MMPD MaskAE\n\n")
+        f.write(
+            "Head-to-head on the six **remaining** flat-subset datasets (Jun 16, 2026). "
+            "Both use the same YAML `data_subset` policy (`binary_anchor_stationary_flat_subsets`).\n\n"
+            "- **EMA0.99**: `binary_anchor_stationary_flat_subsets_ema099`, `dpmpp` 20 steps / 20 samples "
+            "(jobs `3967251`–`3967256`).\n"
+            f"- **MMPD MaskAE**: `{MMPD_SOURCE_MASKAE_150}`, UP2ME MaskAE backbone, "
+            "grad_accum_150_lr_lo, Optuna tune (7 trials), 20 diffusion samples, full test "
+            "(jobs `3968154`–`3968538`). MMPD indices come from subset-config (no binary ckpt).\n\n"
+            "Lower is better for MSE and CRPS.\n\n"
+        )
+        header = [
+            "Dataset",
+            "subset_id",
+            "EMA0.99 mse",
+            "EMA0.99 crps",
+            "EMA job",
+            "MMPD mse",
+            "MMPD crps",
+            "MMPD job",
+            "Better MSE",
+            "Better CRPS",
+        ]
+        f.write("| " + " | ".join(header) + " |\n")
+        f.write("|" + "|".join(["---"] * len(header)) + "|\n")
+
+        for dataset in datasets:
+            ema = subset_row(grid_rows, ema_cfg, dataset)
+            mmpd = subset_row(grid_rows, MMPD_MASKAE_LABEL, dataset)
+            ema_mse = ema.get("anchor_mse") if ema else None
+            ema_crps = ema.get("crps") if ema else None
+            mmpd_mse = mmpd.get("anchor_mse") if mmpd else None
+            mmpd_crps = mmpd.get("crps") if mmpd else None
+
+            better_mse = better_crps = "—"
+            if ema_mse is not None and mmpd_mse is not None:
+                if ema_mse < mmpd_mse:
+                    better_mse = "EMA0.99"
+                    mse_wins[ema_cfg] += 1
+                elif mmpd_mse < ema_mse:
+                    better_mse = "MMPD"
+                    mse_wins[MMPD_MASKAE_LABEL] += 1
+                else:
+                    better_mse = "tie"
+            if ema_crps is not None and mmpd_crps is not None:
+                if ema_crps < mmpd_crps:
+                    better_crps = "EMA0.99"
+                    crps_wins[ema_cfg] += 1
+                elif mmpd_crps < ema_crps:
+                    better_crps = "MMPD"
+                    crps_wins[MMPD_MASKAE_LABEL] += 1
+                else:
+                    better_crps = "tie"
+
+            ema_job = (
+                ema.get("job_id")
+                if ema
+                else EMA099_EXTRA_JOBS.get(dataset, "—")
+            )
+            mmpd_job = (
+                mmpd.get("job_id")
+                if mmpd
+                else MMPD_MASKAE_JOBS_150.get(dataset, "—")
+            )
+            f.write(
+                "| "
+                + " | ".join(
+                    [
+                        dataset,
+                        EMA099_VS_MMPD_SUBSET_IDS[dataset],
+                        fmt(ema_mse),
+                        fmt(ema_crps),
+                        str(ema_job),
+                        fmt(mmpd_mse),
+                        fmt(mmpd_crps),
+                        str(mmpd_job),
+                        better_mse,
+                        better_crps,
+                    ]
+                )
+                + " |\n"
+            )
+
+        n = len(datasets)
+        f.write("\n## Summary\n\n")
+        f.write(f"- **MSE**: EMA0.99 {mse_wins[ema_cfg]}/{n}, MMPD {mse_wins[MMPD_MASKAE_LABEL]}/{n}\n")
+        f.write(f"- **CRPS**: EMA0.99 {crps_wins[ema_cfg]}/{n}, MMPD {crps_wins[MMPD_MASKAE_LABEL]}/{n}\n")
+
+
 def main() -> None:
     os.makedirs(REPORT_DIR, exist_ok=True)
     grid_rows, by_dataset = collect_runs()
@@ -1044,9 +1203,11 @@ def main() -> None:
     write_grid(GRID_PATH, grid_rows)
     write_leaderboard(LEADERBOARD_PATH, by_dataset, deltas, grid_rows)
     write_subset_compare(SUBSET_COMPARE_PATH, grid_rows)
+    write_ema099_vs_mmpd_compare(EMA099_VS_MMPD_PATH, grid_rows)
     print(f"Wrote {GRID_PATH}")
     print(f"Wrote {LEADERBOARD_PATH}")
     print(f"Wrote {SUBSET_COMPARE_PATH}")
+    print(f"Wrote {EMA099_VS_MMPD_PATH}")
     print(f"Datasets: {', '.join(sorted(by_dataset))}")
     print(f"Grid rows: {len(grid_rows)}")
 
