@@ -583,14 +583,11 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 batch_plan["effective_batch_size"],
             )
 
-        n_trials = int(self.require("n_trials"))
-        if state.smoke_test:
-            n_trials = 1
+        reuse_from = self.get("reuse_tuned_params_from")
+        retrain_reused = bool(reuse_from) and bool(self.get("retrain", False))
+
         max_epochs = int(self.require("max_epochs"))
         patience = int(self.require("patience"))
-        search_space = str(self.require("search_space")).lower()
-        if search_space not in {"default", "lr_only", "ordinal_d3pm"}:
-            raise ValueError(f"Unknown staged diffusion search_space={search_space!r}")
         if state.smoke_test:
             max_epochs = patience = 1
 
@@ -598,39 +595,66 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         os.makedirs(subset_dir, exist_ok=True)
         final_ckpt = _stage_best_ckpt(state, self.stage)
 
-        reuse_from = self.get("reuse_tuned_params_from")
         reuse_meta: Dict[str, Any] = {}
         hp_best_val_loss: Optional[float] = None
         best_trial_num = -1
         final_val = float("nan")
         final_epoch = 0
+        search_space = "lr_only"
 
         if reuse_from:
-            source_dir = discover_dataset_run_ckpt_dir(state, str(reuse_from))
-            src_best = os.path.join(source_dir, subset_id, self.stage, "best.pt")
-            src_meta = os.path.join(source_dir, subset_id, self.stage, "metadata.json")
-            if not os.path.exists(src_best):
-                raise FileNotFoundError(f"Missing reused staged checkpoint: {src_best}")
-            if not os.path.exists(final_ckpt):
-                import shutil
-                shutil.copy2(src_best, final_ckpt)
-            if os.path.exists(src_meta):
-                with open(src_meta, encoding="utf-8") as f:
-                    reuse_meta = json.load(f)
-            best_params, _, reuse_meta = _load_reused_stage_params(
+            best_params, source_dir, reuse_meta = _load_reused_stage_params(
                 state, stage=self.stage, subset_id=subset_id, source_config=str(reuse_from),
             )
+            search_space = str(reuse_meta.get("search_space") or self.get("search_space") or "lr_only").lower()
             tuned_bs = int(best_params.get("batch_size", max_batch))
             best_params["batch_size"] = min(tuned_bs, max_batch)
-            hp_best_val_loss = float(
-                reuse_meta.get("best_val_loss")
-                or reuse_meta.get("hp_best_val_loss")
-                or float("nan")
-            )
-            final_val = hp_best_val_loss
-            final_epoch = int(reuse_meta.get("best_epoch", 0))
-            logger.info("  [%s] reused %s from %s", self.name, self.stage, source_dir)
+            if retrain_reused:
+                final_val, final_epoch = self._train_once(
+                    state=state,
+                    train_ds=train_ds,
+                    val_ds=val_ds,
+                    params=best_params,
+                    pretrained_path=diff_ckpt,
+                    itrans_checkpoint=ft_itrans_ckpt,
+                    device=device,
+                    variate_indices=variate_indices,
+                    ckpt_path=final_ckpt,
+                    max_epochs=max_epochs,
+                    patience=patience,
+                    trial=None,
+                )
+                hp_best_val_loss = float(final_val)
+                logger.info(
+                    "  [%s] retrained %s with reused HP from %s (lr=%s)",
+                    self.name,
+                    self.stage,
+                    source_dir,
+                    best_params.get("learning_rate"),
+                )
+            else:
+                src_best = os.path.join(source_dir, subset_id, self.stage, "best.pt")
+                if not os.path.exists(src_best):
+                    raise FileNotFoundError(f"Missing reused staged checkpoint: {src_best}")
+                if not os.path.exists(final_ckpt):
+                    import shutil
+                    shutil.copy2(src_best, final_ckpt)
+                hp_best_val_loss = float(
+                    reuse_meta.get("best_val_loss")
+                    or reuse_meta.get("hp_best_val_loss")
+                    or float("nan")
+                )
+                final_val = hp_best_val_loss
+                final_epoch = int(reuse_meta.get("best_epoch", 0))
+                logger.info("  [%s] reused %s from %s", self.name, self.stage, source_dir)
         else:
+            n_trials = int(self.require("n_trials"))
+            if state.smoke_test:
+                n_trials = 1
+            search_space = str(self.require("search_space")).lower()
+            if search_space not in {"default", "lr_only", "ordinal_d3pm"}:
+                raise ValueError(f"Unknown staged diffusion search_space={search_space!r}")
+
             from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
 
             phase = self
@@ -741,6 +765,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         if reuse_from:
             meta_out.update({
                 "reuse_tuned_params_from": str(reuse_from),
+                "retrain_reused_params": bool(self.get("retrain", False)),
                 "reused_max_scale_policy": best_params.get("max_scale"),
                 "reused_max_scale_previous": reuse_meta.get("reused_max_scale_previous"),
             })

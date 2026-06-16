@@ -1,0 +1,33 @@
+extends: binary_anchor_stationary_flat_subsets_ema099.yaml
+
+wandb:
+  project: ts-sandbox-flat-subsets-grad-accum-guidance-lr-tune
+
+experiment:
+  use_guidance_channel: true
+  disable_cross_attention: false
+  name: binary-anchor-stationary-flat-subsets-grad-accum-150-lr-hi-guidance
+  experiment_name: binary_anchor_stationary_flat_subsets_grad_accum_150_lr_hi_guidance
+
+training:
+  diffusion_effective_batch_multiplier: 1.5
+  finetune_hp_lr_min: 0.00003
+  finetune_hp_lr_max: 0.0002
+
+# Full pipeline with iTrans 2D ghost. Synthetic pretrain runs fresh (guidance on).
+# iTrans + diffusion finetune reuse accum1.5x LR-hi HP; finetune retrains once per stage.
+phases:
+  - phase: itrans_finetune_hp
+    reuse_checkpoint_from_config: binary_anchor_stationary_flat_subsets_grad_accum_150_lr_hi
+
+  - phase: diffusion_coarse_finetune_hp
+    reuse_tuned_params_from: binary_anchor_stationary_flat_subsets_grad_accum_150_lr_hi
+    retrain: true
+    max_epochs: 20
+    patience: 8
+
+  - phase: diffusion_fine_finetune_hp
+    reuse_tuned_params_from: binary_anchor_stationary_flat_subsets_grad_accum_150_lr_hi
+    retrain: true
+    max_epochs: 20
+    patience: 8
