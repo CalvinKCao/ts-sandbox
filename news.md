@@ -42,6 +42,18 @@ Updating the report generator and creating the apples-to-apples comparison table
 
 [REDACTED]
 
+
+./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh   --datasets ETTm1,ETTm2,illness,PeMS,dalia,dynamic   --output-dir results/datasets/06-16-mmpd-maskae-grad-accum-150-lr-lo-subset   --resume   # if manifest/partials already exist from the failed init
+
+
+cd $SCRATCH/ts-sandbox && git pull
+
+# Remaining 6 datasets (resubmit MMPD only if binary jobs already running):
+./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh  --datasets ETTm1,ETTm2,illness,PeMS,dalia,dynamic  --output-dir results/datasets/06-16-mmpd-maskae-grad-accum-150-lr-lo-subset  --resume   # if manifest/partials already exist from the failed init
+
+# Or fresh:
+./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh  --datasets ETTm1,ETTm2,illness,PeMS,dalia,dynamic  --output-dir results/datasets/06-16-mmpd-maskae-grad-accum-150-lr-lo-subset
+
 Updated and pushed (`1b0e870`). Three reports now include the new runs:
 
 **`reports/binary_mmpd_subset_compare.md`** — apples-to-apples side-by-side (main comparison table)
