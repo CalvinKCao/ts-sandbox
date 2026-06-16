@@ -55,12 +55,7 @@ PAPER_DATASETS: Dict[str, Dict[str, str]] = {
 DEFAULT_DATASET_ORDER = tuple(PAPER_DATASETS.keys())
 
 
-def paper_patch_size(mmpd_data: str, horizon: int) -> int:
-    if mmpd_data in ("ECL", "Traffic"):
-        return 24
-    if horizon in (336, 720):
-        return 24
-    return 12
+from utils.mmpd_paper_hparams import mmpd_patch_size as paper_patch_size
 
 
 def paper_train_batch_size(mmpd_data: str, requested: int) -> int:

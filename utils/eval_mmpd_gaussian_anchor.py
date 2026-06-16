@@ -29,6 +29,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from utils.mmpd_eval_progress import EvalProgress, fmt_duration
+from utils.mmpd_paper_hparams import resolve_mmpd_patch_size
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -583,10 +584,19 @@ def mmpd_env_for_run(run: AnchorRun) -> Dict[str, str]:
     return env
 
 
+def dataset_mmpd_patch_size(args: argparse.Namespace, dataset: str) -> int:
+    lookback, horizon = dataset_window_lengths(args, dataset)
+    patch = resolve_mmpd_patch_size(dataset, horizon, args.patch_size)
+    if args.patch_size is None:
+        print(f"[mmpd] {dataset}: patch_size={patch} (horizon={horizon})", flush=True)
+    return patch
+
+
 def build_mmpd_train_cmd(args: argparse.Namespace, run: AnchorRun) -> List[str]:
     dataset = run.dataset
     data_path = mmpd_staged_filename_for_run(run)
     lookback, horizon = dataset_window_lengths(args, dataset)
+    patch_size = dataset_mmpd_patch_size(args, dataset)
     data_dim = len(run_variate_indices(run))
     batch_size = mmpd_train_batch_size(args, dataset, data_dim=data_dim)
     cmd = [
@@ -612,7 +622,7 @@ def build_mmpd_train_cmd(args: argparse.Namespace, run: AnchorRun) -> List[str]:
         "--out_len",
         str(horizon),
         "--patch_size",
-        str(args.patch_size),
+        str(patch_size),
         "--data_dim",
         str(data_dim),
         "--d_layers",
@@ -678,7 +688,8 @@ def mmpd_checkpoint_path(
 ) -> Path:
     lookback, horizon = dataset_window_lengths(args, run.dataset)
     name = data_name or mmpd_dataset_name(run)
-    setting = mmpd_setting(name, lookback, horizon, args.patch_size, backbone=args.mmpd_backbone)
+    patch_size = dataset_mmpd_patch_size(args, run.dataset)
+    setting = mmpd_setting(name, lookback, horizon, patch_size, backbone=args.mmpd_backbone)
     return (
         mmpd_output_root(args)
         / "mmpd_out"
@@ -1305,6 +1316,7 @@ def run_mmpd_eval(
         lookback, horizon = dataset_window_lengths(args, dataset)
         data_dim = len(run_variate_indices(run))
         batch_size = mmpd_eval_batch_size(args, dataset, data_dim=data_dim)
+        patch_size = dataset_mmpd_patch_size(args, dataset)
         cmd = [
             pipeline_python(),
             "-u",
@@ -1328,7 +1340,7 @@ def run_mmpd_eval(
             "--horizon",
             str(horizon),
             "--patch-size",
-            str(args.patch_size),
+            str(patch_size),
             "--data-dim",
             str(data_dim),
             "--mmpd-backbone",
@@ -2094,7 +2106,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--lookback", type=int, default=96)
     parser.add_argument("--horizon", type=int, default=96)
-    parser.add_argument("--patch-size", type=int, default=12)
+    parser.add_argument(
+        "--patch-size",
+        type=int,
+        default=None,
+        help="Override MMPD patch size; default picks per dataset/horizon (paper D.3).",
+    )
     parser.add_argument(
         "--mmpd-backbone",
         choices=MMPD_BACKBONES,

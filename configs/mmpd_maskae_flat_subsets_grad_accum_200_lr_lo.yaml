@@ -1,0 +1,44 @@
+# MMPD MaskAE eval on the same flat variate subsets as
+# binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo.
+#
+# Subset ids / variate indices are read from binary checkpoint metadata
+# (results/ckpts/*-<dataset>-binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo).
+# Train binary ckpts for that config first if missing.
+#
+# Submit (Killarney login, $SCRATCH/ts-sandbox):
+#   ./submit_mmpd_maskae_flat_subsets_grad_accum_200_lr_lo.sh --smoke-test
+#   ./submit_mmpd_maskae_flat_subsets_grad_accum_200_lr_lo.sh
+
+extends: binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo.yaml
+
+experiment:
+  name: mmpd-maskae-flat-subsets-grad-accum-200-lr-lo
+  experiment_name: mmpd_maskae_flat_subsets_grad_accum_200_lr_lo
+
+mmpd:
+  backbone: MaskAE
+  anchor_config: binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo
+  lookback: 96
+  horizon: 96
+  datasets:
+    - ETTh1
+    - ETTh2
+    - exchange_rate
+    - weather
+    - electricity
+    - traffic
+    - solar_Alabama
+  # Patch size: auto per dataset/horizon in eval (paper D.3); electricity/traffic use P=24 at hz96.
+  patch_size_default: 12
+  patch_size_wide: 24
+  train_epochs: 20
+  patience: 5
+  learning_rate: 1.0e-4
+  point_weight: 0.01
+  batch_size: 32
+  sample_num: 100
+  num_sampling_steps: 20
+  gmm_components: 10
+  gmm_iterations: 10
+  prior_pi_decay: 0.5
+  prior_precision_shape: 100
