@@ -1,15 +1,12 @@
 #!/bin/bash
-# MMPD MaskAE on flat subsets from YAML data_subset policy (no binary ckpts required).
+# Fair MMPD MaskAE rerun: all 13 datasets, pipeline-aligned splits/test windows,
+# anchor_mse + CRPS (20 samples), Optuna 20 trials with EMA decay tuning.
 #
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
-#   ./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh --smoke-test
-#   ./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh
-#   ./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh --datasets ETTm1,illness
-#   ./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh --resume \
-#       --output-dir results/datasets/06-16-mmpd-maskae-grad-accum-150-lr-lo-subset
-#   ./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh --resume \
-#       --output-dir results/datasets/06-16-mmpd-maskae-grad-accum-150-lr-lo-subset \
-#       --datasets PeMS,dynamic --skip-mmpd-train
+#   ./submit_mmpd_maskae_fair_13d.sh --smoke-test
+#   ./submit_mmpd_maskae_fair_13d.sh
+#   ./submit_mmpd_maskae_fair_13d.sh --resume \
+#       --output-dir results/datasets/06-17-mmpd-maskae-fair-13d
 
 set -euo pipefail
 
@@ -17,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 SUBSET_CONFIG="configs/binary_anchor_stationary_flat_subsets.yaml"
-DATASETS="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
+DATASETS="ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,electricity,traffic,PeMS,solar_Alabama,dalia,dynamic"
 OUTPUT_DIR=""
 DEPENDENCY=""
 TUNE_ARGS=(--mmpd-tune-trials 20 --mmpd-tune-epochs 10 --mmpd-tune-patience 3 --time 8:00:00)
@@ -35,8 +32,8 @@ while [[ $# -gt 0 ]]; do
         --force) EXTRA+=(--force); shift ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --dependency) DEPENDENCY="$2"; shift 2 ;;
-        --datasets) DATASETS="$2"; shift 2 ;;
         --subset-config) SUBSET_CONFIG="$2"; shift 2 ;;
+        --datasets) DATASETS="$2"; shift 2 ;;
         --no-tune) TUNE_ARGS=(--time 3:00:00); shift ;;
         --skip-mmpd-train) EXTRA+=(--skip-mmpd-train); shift ;;
         *) EXTRA+=("$1"); shift ;;
@@ -44,7 +41,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$OUTPUT_DIR" ]]; then
-    OUTPUT_DIR="results/datasets/$(date +%m-%d)-mmpd-maskae-grad-accum-150-lr-lo-subset"
+    OUTPUT_DIR="results/datasets/$(date +%m-%d)-mmpd-maskae-fair-13d"
 fi
 if [[ "$RESUME" -eq 1 && ! -d "$OUTPUT_DIR" && "$OUTPUT_DIR" != /* ]]; then
     OUTPUT_DIR="results/datasets/$(basename "$OUTPUT_DIR")"

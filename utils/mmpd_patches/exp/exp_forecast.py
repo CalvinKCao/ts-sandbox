@@ -23,6 +23,36 @@ import pickle
 import warnings
 warnings.filterwarnings('ignore')
 
+class _Ema:
+    def __init__(self, model: nn.Module, decay: float):
+        self.decay = float(decay)
+        self.shadow = {
+            k: v.detach().clone()
+            for k, v in model.state_dict().items()
+            if torch.is_floating_point(v)
+        }
+
+    @torch.no_grad()
+    def update(self, model: nn.Module) -> None:
+        state = model.state_dict()
+        for key, avg in self.shadow.items():
+            avg.mul_(self.decay).add_(state[key].detach(), alpha=1.0 - self.decay)
+
+    @torch.no_grad()
+    def swap_in(self, model: nn.Module) -> dict:
+        state = model.state_dict()
+        backup = {key: state[key].detach().clone() for key in self.shadow}
+        for key, avg in self.shadow.items():
+            state[key].copy_(avg)
+        return backup
+
+    @torch.no_grad()
+    def restore(self, model: nn.Module, backup: dict) -> None:
+        state = model.state_dict()
+        for key, value in backup.items():
+            state[key].copy_(value)
+
+
 from models.backbone_loss_model import BackboneLossModel
 from models.backbones.decoder_only_transformer import DecoderOnlyTransformer
 from models.loss_funcs.mmpd.mmpd_loss import MMPD_Loss
@@ -138,15 +168,18 @@ class Exp_Forecast(Exp_Basic):
             os.makedirs(path)
         with open(os.path.join(path, "args.json"), 'w') as f:
             json.dump(vars(self.args), f, indent=True)
-        scale_statistic = {'mean': train_data.scaler.mean_.tolist(), 'std': train_data.scaler.scale_.tolist()}
-        with open(os.path.join(path, "scale_statistic.pkl"), 'wb') as f:
-            pickle.dump(scale_statistic, f)
+        if getattr(train_data, "scaler", None) is not None:
+            scale_statistic = {'mean': train_data.scaler.mean_.tolist(), 'std': train_data.scaler.scale_.tolist()}
+            with open(os.path.join(path, "scale_statistic.pkl"), 'wb') as f:
+                pickle.dump(scale_statistic, f)
         
         train_steps = len(train_loader)
         early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
         smoke_max_batches = int(os.environ.get("MMPD_SMOKE_MAX_TRAIN_BATCHES", "0") or "0")
         
         model_optim = self._select_optimizer()
+        ema_decay = float(getattr(self.args, "ema_decay", 0.0) or 0.0)
+        ema = _Ema(self.model, ema_decay) if ema_decay > 0.0 else None
 
         for epoch in range(self.args.train_epochs):
             time_now = time.time()
@@ -175,14 +208,24 @@ class Exp_Forecast(Exp_Basic):
                 
                 loss.backward()
                 model_optim.step()
+                if ema is not None:
+                    ema.update(self.model)
             
             print("Epoch: {} cost time: {}".format(epoch+1, time.time()-epoch_time))
             train_loss = np.average(train_loss)
+            ema_backup = ema.swap_in(self.model) if ema is not None else None
             vali_loss = self.vali(vali_data, vali_loader)
+            if ema_backup is not None:
+                ema.restore(self.model, ema_backup)
 
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f}".format(
                 epoch + 1, train_steps, train_loss, vali_loss))
-            early_stopping(vali_loss, self.model, path)
+            if ema is not None:
+                ema_backup = ema.swap_in(self.model)
+                early_stopping(vali_loss, self.model, path)
+                ema.restore(self.model, ema_backup)
+            else:
+                early_stopping(vali_loss, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")
                 break

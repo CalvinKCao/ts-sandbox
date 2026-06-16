@@ -226,8 +226,11 @@ else
         --mmpd-train-epochs 20
         --mmpd-patience 5
         --test-fraction 1.0
+        --eval-test-stride 4
         --sample-num 20
         --num-sampling-steps 20
+        --metrics-profile anchor-compat
+        --mmpd-instance-norm
         --topk-max 3
         --gmm-components 10
         --gmm-iterations 10

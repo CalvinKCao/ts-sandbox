@@ -208,6 +208,19 @@ def apply_mmpd_compatibility_patches(path: Path) -> None:
                 + "\nparser.add_argument('--neighbor_num', type=int, default=0, "
                 + "help='MaskAE kNN neighbors; 0 uses min(10, data_dim)')",
             )
+        if "ema_decay" not in patched:
+            neighbor_line = (
+                "parser.add_argument('--neighbor_num', type=int, default=0, "
+                + "help='MaskAE kNN neighbors; 0 uses min(10, data_dim)')"
+            )
+            ema_line = (
+                "\nparser.add_argument('--ema_decay', type=float, default=0.0, "
+                + "help='EMA decay for training checkpoints; 0 disables EMA')"
+            )
+            if neighbor_line in patched:
+                patched = patched.replace(neighbor_line, neighbor_line + ema_line)
+            elif dropout_line in patched:
+                patched = patched.replace(dropout_line, dropout_line + ema_line)
         if patched != text:
             main_py.write_text(patched, encoding="utf-8")
 
@@ -254,6 +267,14 @@ def run_train_stride(run: AnchorRun) -> int:
 def run_test_stride(run: AnchorRun) -> int:
     subset = run_data_subset(run)
     return max(1, int(subset.get("test_stride", run_train_stride(run))))
+
+
+def eval_test_stride(args: argparse.Namespace, run: AnchorRun) -> int:
+    """Test stride for eval indices / MMPD eval helper (binary staged_eval uses 4)."""
+    override = getattr(args, "eval_test_stride", None)
+    if override is not None:
+        return max(1, int(override))
+    return run_test_stride(run)
 
 
 def mmpd_dataset_name(run: AnchorRun) -> str:
@@ -316,6 +337,27 @@ def _dalia_mmpd_meta_path(data_dir: Path) -> Path:
     return data_dir / "dalia_mmpd.meta.json"
 
 
+def _staged_meta_path(data_dir: Path, run: AnchorRun) -> Path:
+    staged = data_dir / mmpd_staged_filename_for_run(run)
+    return staged.with_suffix(staged.suffix + ".meta.json")
+
+
+def _count_csv_rows(csv_path: Path) -> int:
+    with csv_path.open(encoding="utf-8", newline="") as f:
+        return max(0, sum(1 for _ in f) - 1)
+
+
+def pipeline_mmpd_row_split(dataset: str, n_rows: int, lookback: int) -> List[int]:
+    """Absolute train/val/test row counts aligned with load_dataset / iTransformer splits."""
+    from models.diffusion_tsf.train_multivariate_pipeline import _paper_split_borders
+
+    _, border2s = _paper_split_borders(dataset, n_rows, lookback)
+    train_num = int(border2s[0])
+    val_num = int(border2s[1] - border2s[0])
+    test_num = int(border2s[2] - border2s[1])
+    return [train_num, val_num, test_num]
+
+
 def _export_dalia_mmpd_csv(dst_csv: Path, data_dir: Path, variate_indices: Sequence[int]) -> None:
     """Stage DALIA as train|val|test row blocks for block-strided MMPD loading."""
     from models.diffusion_tsf.dalia_data import (
@@ -365,10 +407,10 @@ def parse_mmpd_data_split(split: str) -> List[Any]:
 
 
 @contextmanager
-def mmpd_stride_env(run: AnchorRun):
+def mmpd_stride_env(run: AnchorRun, *, test_stride: Optional[int] = None):
     updates = {
         "MMPD_WINDOW_STRIDE": str(run_train_stride(run)),
-        "MMPD_TEST_STRIDE": str(run_test_stride(run)),
+        "MMPD_TEST_STRIDE": str(test_stride if test_stride is not None else run_test_stride(run)),
     }
     if run.dataset == "dalia":
         updates["MMPD_BLOCK_LEN"] = "120"
@@ -386,13 +428,29 @@ def mmpd_stride_env(run: AnchorRun):
                 os.environ[key] = old
 
 
+def build_pipeline_test_dataset(args: argparse.Namespace, run: AnchorRun):
+    """Test windows from the same load_dataset path as binary anchor eval."""
+    pipeline = load_tsf_pipeline()
+    lookback, horizon = dataset_window_lengths(args, run.dataset)
+    _, _, test_ds, _ = pipeline.load_dataset(
+        run.dataset,
+        run_variate_indices(run),
+        lookback=lookback,
+        horizon=horizon,
+        stride=run_train_stride(run),
+        test_stride=eval_test_stride(args, run),
+    )
+    return test_ds
+
+
 def build_mmpd_test_dataset(args: argparse.Namespace, run: AnchorRun):
     from utils.mmpd_patches.dataset_mts import Dataset_MTS
 
     stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
     lookback, horizon = dataset_window_lengths(args, run.dataset)
-    split = parse_mmpd_data_split(mmpd_data_split(run.dataset, args.mmpd_data_dir))
-    with mmpd_stride_env(run):
+    split = parse_mmpd_data_split(mmpd_data_split(run, args.mmpd_data_dir))
+    eval_stride = eval_test_stride(args, run)
+    with mmpd_stride_env(run, test_stride=eval_stride):
         return Dataset_MTS(
             root_path=str(args.mmpd_data_dir),
             data_path=mmpd_staged_filename_for_run(run),
@@ -432,17 +490,37 @@ def filter_valid_mmpd_indices(
     return valid
 
 
-def mmpd_data_split(dataset: str, data_dir: Path) -> str:
-    if dataset != "dalia":
-        return DATASET_SPLITS[dataset]
-    meta_path = _dalia_mmpd_meta_path(data_dir)
-    if not meta_path.exists():
-        raise FileNotFoundError(
-            f"Missing {meta_path}; re-run staging (delete stale dalia_mmpd.csv first)."
-        )
-    with meta_path.open(encoding="utf-8") as f:
-        parts = json.load(f)["data_split"]
-    return ",".join(str(int(x)) for x in parts)
+def mmpd_data_split(run_or_dataset: Any, data_dir: Path) -> str:
+    if hasattr(run_or_dataset, "dataset") and hasattr(run_or_dataset, "metadata"):
+        run = run_or_dataset
+        dataset = str(run.dataset)
+        meta_path = _staged_meta_path(data_dir, run)
+        if meta_path.is_file():
+            with meta_path.open(encoding="utf-8") as f:
+                meta = json.load(f)
+            if "data_split" in meta:
+                parts = meta["data_split"]
+                return ",".join(str(int(x)) for x in parts)
+    else:
+        dataset = str(run_or_dataset)
+        for meta_path in sorted(data_dir.glob("*.csv.meta.json")):
+            try:
+                with meta_path.open(encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                continue
+            if meta.get("dataset") == dataset and "data_split" in meta:
+                return ",".join(str(int(x)) for x in meta["data_split"])
+    if dataset == "dalia":
+        dalia_meta = _dalia_mmpd_meta_path(data_dir)
+        if not dalia_meta.exists():
+            raise FileNotFoundError(
+                f"Missing {dalia_meta}; re-run staging (delete stale dalia csv first)."
+            )
+        with dalia_meta.open(encoding="utf-8") as f:
+            parts = json.load(f)["data_split"]
+        return ",".join(str(int(x)) for x in parts)
+    return DATASET_SPLITS[dataset]
 
 
 def stage_mmpd_dataset_for_run(data_dir: Path, run: AnchorRun) -> None:
@@ -466,8 +544,11 @@ def stage_mmpd_dataset_for_run(data_dir: Path, run: AnchorRun) -> None:
     if dst.exists() and meta_path.exists():
         try:
             with meta_path.open(encoding="utf-8") as f:
-                if json.load(f) == expected_meta:
-                    return
+                stored = json.load(f)
+            if "data_split" not in stored:
+                raise KeyError("missing pipeline-aligned data_split")
+            if all(stored.get(k) == v for k, v in expected_meta.items()):
+                return
         except Exception:
             pass
     if dst.exists():
@@ -479,9 +560,19 @@ def stage_mmpd_dataset_for_run(data_dir: Path, run: AnchorRun) -> None:
         _export_pems_mmpd_csv(src, dst, expected_meta["variate_indices"])
     elif dataset == "dalia":
         _export_dalia_mmpd_csv(dst, data_dir, expected_meta["variate_indices"])
-        expected_meta["dalia_data_split"] = mmpd_data_split(dataset, data_dir)
+        with _dalia_mmpd_meta_path(data_dir).open(encoding="utf-8") as f:
+            expected_meta["data_split"] = json.load(f)["data_split"]
     else:
         _export_csv_variate_subset(src, dst, expected_meta["variate_indices"])
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        DALIA_DEFAULT_LOOKBACK,
+        LOOKBACK_LENGTH,
+    )
+
+    lookback = DALIA_DEFAULT_LOOKBACK if dataset == "dalia" else LOOKBACK_LENGTH
+    if "data_split" not in expected_meta:
+        n_rows = _count_csv_rows(dst)
+        expected_meta["data_split"] = pipeline_mmpd_row_split(dataset, n_rows, lookback)
     with meta_path.open("w", encoding="utf-8") as f:
         json.dump(expected_meta, f, indent=2, sort_keys=True)
 
@@ -742,15 +833,27 @@ def dataset_window_lengths(args: argparse.Namespace, dataset: str) -> Tuple[int,
     return args.lookback, args.horizon
 
 
-def mmpd_env_for_run(run: AnchorRun, args: Optional[argparse.Namespace] = None) -> Dict[str, str]:
+def mmpd_env_for_run(
+    run: AnchorRun,
+    args: Optional[argparse.Namespace] = None,
+    *,
+    for_eval: bool = False,
+) -> Dict[str, str]:
     env = os.environ.copy()
     env["MMPD_KEEP_CLI_DATA_ARGS"] = "1"
     env["MMPD_WINDOW_STRIDE"] = str(run_train_stride(run))
-    env["MMPD_TEST_STRIDE"] = str(run_test_stride(run))
+    if for_eval and args is not None:
+        env["MMPD_TEST_STRIDE"] = str(eval_test_stride(args, run))
+    else:
+        env["MMPD_TEST_STRIDE"] = str(run_test_stride(run))
     if args is not None and getattr(args, "smoke_test", False):
         env["MMPD_SMOKE_MAX_TRAIN_BATCHES"] = "2"
     else:
         env.pop("MMPD_SMOKE_MAX_TRAIN_BATCHES", None)
+    if args is not None and getattr(args, "mmpd_instance_norm", True):
+        env["MMPD_USE_INSTANCE_NORM"] = "1"
+    else:
+        env.pop("MMPD_USE_INSTANCE_NORM", None)
     if run.dataset == "dalia":
         env["MMPD_BLOCK_LEN"] = "120"
     else:
@@ -802,7 +905,7 @@ def build_mmpd_train_cmd(
         "--data_path",
         data_path,
         "--data_split",
-        mmpd_data_split(dataset, args.mmpd_data_dir),
+        mmpd_data_split(run, args.mmpd_data_dir),
         "--output_root",
         str(mmpd_out),
         "--backbone",
@@ -869,6 +972,9 @@ def build_mmpd_train_cmd(
                 str(int(hp.get("neighbor_num", 0))),
             ]
         )
+    ema_decay = float(hp.get("ema_decay", 0.0) or 0.0)
+    if ema_decay > 0.0:
+        cmd.extend(["--ema_decay", str(ema_decay)])
     if not torch.cuda.is_available() or args.cpu:
         cmd.extend(["--use_gpu", "False"])
     return cmd
@@ -1608,7 +1714,7 @@ def run_mmpd_eval(
             "--data-path",
             mmpd_staged_filename_for_run(run),
             "--data-split",
-            mmpd_data_split(dataset, args.mmpd_data_dir),
+            mmpd_data_split(run, args.mmpd_data_dir),
             "--output-root",
             str(mmpd_output_root(args) / "mmpd_out"),
             "--out-npz",
@@ -1653,11 +1759,11 @@ def run_mmpd_eval(
             )
         if args.cpu:
             cmd.append("--cpu")
-        env = mmpd_env_for_run(run, args)
+        env = mmpd_env_for_run(run, args, for_eval=True)
         print(
             f"[mmpd-eval] {dataset}: launching helper "
             f"(windows={len(indices)}, batch={batch_size}, variates={data_dim}, "
-            f"stride={run_test_stride(run)})",
+            f"eval_test_stride={eval_test_stride(args, run)})",
             flush=True,
         )
         run_cmd(
@@ -1908,6 +2014,46 @@ def texture_metrics_per_sample(
     }
 
 
+def summarize_anchor_prob_core_metrics(
+    pack: Dict[str, np.ndarray],
+    *,
+    gmm_components: int = 10,
+    seed: int = 0,
+    topk_max: int = 3,
+) -> Dict[str, float]:
+    """Match binary staged_eval dpmpp_prob_core_plus_anchor fields."""
+    y_true = pack["y_true"]
+    samples = pack["samples"]
+    det = pack["deterministic"]
+    sample_mean = samples.mean(axis=2)
+    metrics: Dict[str, float] = {
+        "crps": crps_gr(y_true, samples),
+        "n_windows": float(y_true.shape[0]),
+        "n_variates": float(y_true.shape[1]),
+        "n_samples": float(samples.shape[2]),
+    }
+    mode_center = pack.get("mode_center")
+    mode_prob = pack.get("mode_prob")
+    if mode_center is None or mode_prob is None:
+        mode_center, mode_prob = empirical_modes_from_samples(
+            samples,
+            max_components=gmm_components,
+            seed=seed,
+        )
+    metrics.update(topk_from_modes(y_true, mode_center, mode_prob, max_k=topk_max))
+    sample_mean_metrics = deterministic_metrics(y_true, sample_mean)
+    metrics["sample_mean_mse"] = sample_mean_metrics["mse"]
+    metrics["sample_mean_mae"] = sample_mean_metrics["mae"]
+    metrics["mse"] = sample_mean_metrics["mse"]
+    metrics["mae"] = sample_mean_metrics["mae"]
+    anchor = deterministic_metrics(y_true, det)
+    metrics["anchor_mse"] = anchor["mse"]
+    metrics["anchor_mae"] = anchor["mae"]
+    metrics["anchor_n_samples"] = 1.0
+    metrics["metrics_profile"] = "dpmpp_prob_core_plus_anchor"
+    return metrics
+
+
 def summarize_prob_core_metrics(
     pack: Dict[str, np.ndarray],
     gmm_components: int = 10,
@@ -2018,6 +2164,13 @@ def summarize_for_profile(
             seed=seed,
             topk_max=args.topk_max,
         )
+    if args.metrics_profile == "anchor-compat":
+        return summarize_anchor_prob_core_metrics(
+            pack,
+            gmm_components=args.gmm_components,
+            seed=seed,
+            topk_max=args.topk_max,
+        )
     return summarize_prediction_pack(
         pack,
         gmm_components=args.gmm_components,
@@ -2055,7 +2208,13 @@ def build_indices_for_dataset(
     run: AnchorRun,
 ) -> List[int]:
     dataset = run.dataset
-    test_ds = build_mmpd_test_dataset(args, run)
+    test_ds = build_pipeline_test_dataset(args, run)
+    mmpd_test_ds = build_mmpd_test_dataset(args, run)
+    if len(test_ds) != len(mmpd_test_ds):
+        raise RuntimeError(
+            f"{dataset}: pipeline test windows ({len(test_ds)}) != "
+            f"MMPD test windows ({len(mmpd_test_ds)}) after split alignment"
+        )
     indices = make_eval_indices(
         len(test_ds),
         args.test_fraction,
@@ -2064,7 +2223,7 @@ def build_indices_for_dataset(
     )
     print(
         f"[subset] {dataset}: {len(indices)}/{len(test_ds)} test windows "
-        f"(variates={len(run_variate_indices(run))}, test_stride={run_test_stride(run)})"
+        f"(variates={len(run_variate_indices(run))}, eval_test_stride={eval_test_stride(args, run)})"
     )
     return indices
 
@@ -2323,14 +2482,20 @@ def print_summary(results: Dict[str, Dict[str, Dict[str, float]]], profile: str 
     print("\nSummary")
     if profile == "prob-core":
         print("dataset,model,mse,mae,crps,top1_mse,top1_mae,top3_mse,top3_mae,n_samples")
+    elif profile == "anchor-compat":
+        print(
+            "dataset,model,anchor_mse,anchor_mae,crps,sample_mean_mse,"
+            "top1_mse,top1_mae,top3_mse,top3_mae,n_samples"
+        )
         for dataset in sorted(results):
             for model in sorted(results[dataset]):
                 m = results[dataset][model]
                 print(
                     f"{dataset},{model},"
-                    f"{m.get('mse', float('nan')):.6f},"
-                    f"{m.get('mae', float('nan')):.6f},"
+                    f"{m.get('anchor_mse', float('nan')):.6f},"
+                    f"{m.get('anchor_mae', float('nan')):.6f},"
                     f"{m.get('crps', float('nan')):.6f},"
+                    f"{m.get('sample_mean_mse', float('nan')):.6f},"
                     f"{m.get('top1_mse', float('nan')):.6f},"
                     f"{m.get('top1_mae', float('nan')):.6f},"
                     f"{m.get('top3_mse', float('nan')):.6f},"
@@ -2406,9 +2571,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--metrics-profile",
-        choices=["full", "prob-core"],
-        default="full",
-        help="prob-core: mean-of-samples MSE/MAE, CRPS, top-k only (no texture/det).",
+        choices=["full", "prob-core", "anchor-compat"],
+        default="anchor-compat",
+        help=(
+            "anchor-compat: binary staged_eval anchor_mse/anchor_mae/crps (20-sample CRPS); "
+            "prob-core: mean-of-samples MSE/MAE; full: det + texture."
+        ),
     )
     parser.add_argument(
         "--texture-per-sample",
@@ -2430,9 +2598,16 @@ def parse_args() -> argparse.Namespace:
         help="Upstream MMPD backbone (MaskAE = UP2ME-style masked autoencoder).",
     )
     parser.add_argument("--test-fraction", type=float, default=0.5)
+    parser.add_argument(
+        "--eval-test-stride",
+        type=int,
+        default=4,
+        help="Test stride for eval indices/MMPD eval (binary staged_eval uses 4). "
+        "Training still uses subset test_stride.",
+    )
     parser.add_argument("--test-max-items", type=int, default=None)
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--sample-num", type=int, default=9)
+    parser.add_argument("--sample-num", type=int, default=20)
     parser.add_argument("--num-sampling-steps", type=int, default=20)
     parser.add_argument("--gmm-components", type=int, default=10)
     parser.add_argument("--gmm-iterations", type=int, default=10)
@@ -2487,6 +2662,12 @@ def parse_args() -> argparse.Namespace:
         help="Override checkpoint use_cfg_inference (default: on when cfg_scale != 1).",
     )
     parser.add_argument("--no-update-mmpd", action="store_true")
+    parser.add_argument(
+        "--mmpd-instance-norm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Ensure per-window instance norm in MMPD train/eval (exp_forecast path).",
+    )
     parser.add_argument(
         "--smoke-test",
         action="store_true",

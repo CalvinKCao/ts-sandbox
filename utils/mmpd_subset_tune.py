@@ -109,6 +109,9 @@ def tune_mmpd_subset(args: Any, run: AnchorRun) -> Dict[str, Any]:
             "point_weight": trial.suggest_float(
                 "point_weight", 0.005, 0.05, log=True
             ),
+            "ema_decay": trial.suggest_categorical(
+                "ema_decay", [0.95, 0.99, 0.999]
+            ),
             "dropout": 0.2,
         }
         if args.mmpd_backbone == "MaskAE":
@@ -134,6 +137,14 @@ def tune_mmpd_subset(args: Any, run: AnchorRun) -> Dict[str, Any]:
         show_progress_bar=False,
         catch=(RuntimeError, OSError, subprocess.CalledProcessError, ValueError),
     )
+    completed = [t for t in study.trials if t.value is not None]
+    if len(completed) >= 2:
+        vals = [float(t.value) for t in completed]
+        if max(vals) - min(vals) < 1e-12:
+            raise RuntimeError(
+                f"[mmpd-tune] {dataset}: all {len(completed)} completed trials "
+                f"returned identical val loss ({vals[0]:.8f}); search is degenerate"
+            )
     if study.best_trial is None:
         raise RuntimeError(f"[mmpd-tune] {dataset}: all {n_trials} trials failed")
     best = {**DEFAULT_MMPD_HPARAMS, **study.best_params}

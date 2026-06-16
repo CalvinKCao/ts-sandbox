@@ -19,10 +19,14 @@ MMPD_DIR_MASKAE = os.path.join(
 MMPD_DIR_MASKAE_150 = os.path.join(
     RESULTS, "06-16-mmpd-maskae-grad-accum-150-lr-lo-subset", "partials"
 )
+MMPD_DIR_MASKAE_FAIR = os.path.join(
+    RESULTS, "06-17-mmpd-maskae-fair-13d", "partials"
+)
 MMPD_SOURCE_LEGACY = "06-12-sweep-subset-mmpd"
 MMPD_SOURCE_SUBSET = "06-13-binary-mmpd-subset-compare"
 MMPD_SOURCE_MASKAE = "06-15-mmpd-maskae-grad-accum-200-lr-lo-tune"
 MMPD_SOURCE_MASKAE_150 = "06-16-mmpd-maskae-grad-accum-150-lr-lo-subset"
+MMPD_SOURCE_MASKAE_FAIR = "06-17-mmpd-maskae-fair-13d"
 MMPD_MASKAE_LABEL = "**MMPD (MaskedAE)**"
 MMPD_REF_CONFIGS = frozenset({"**MMPD**", "**MMPD (subset)**", MMPD_MASKAE_LABEL})
 LOGS = os.path.join(REPO, "results", "logs")
@@ -440,9 +444,15 @@ def _load_mmpd_partial(mmpd_dir: str, source: str, dataset: str) -> Optional[Dic
     if not os.path.isfile(path):
         return None
     data = load_partial(path)
+    anchor_mse = data.get("anchor_mse")
+    if anchor_mse is None:
+        anchor_mse = data.get("mse")
+    anchor_mae = data.get("anchor_mae")
+    if anchor_mae is None:
+        anchor_mae = data.get("mae")
     return {
-        "anchor_mse": data.get("mse"),
-        "anchor_mae": data.get("mae"),
+        "anchor_mse": anchor_mse,
+        "anchor_mae": anchor_mae,
         "crps": data.get("crps"),
         "source": source,
     }
@@ -460,6 +470,9 @@ def load_mmpd(dataset: str) -> Optional[Dict[str, Any]]:
 
 
 def load_mmpd_maskae(dataset: str) -> Optional[Dict[str, Any]]:
+    row_fair = _load_mmpd_partial(MMPD_DIR_MASKAE_FAIR, MMPD_SOURCE_MASKAE_FAIR, dataset)
+    if row_fair is not None:
+        return row_fair
     row_150 = _load_mmpd_partial(MMPD_DIR_MASKAE_150, MMPD_SOURCE_MASKAE_150, dataset)
     row_200 = _load_mmpd_partial(MMPD_DIR_MASKAE, MMPD_SOURCE_MASKAE, dataset)
     if dataset in MMPD_MASKAE_150_DATASETS and row_150 is not None:

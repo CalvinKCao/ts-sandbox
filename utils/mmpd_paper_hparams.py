@@ -15,6 +15,7 @@ DEFAULT_MMPD_HPARAMS: Dict[str, Any] = {
     "dropout": 0.2,
     "finetune_layers": 0,
     "neighbor_num": 0,
+    "ema_decay": 0.99,
 }
 
 
