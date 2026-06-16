@@ -7,6 +7,7 @@
 #   ./submit_mmpd_sweep_subset.sh --datasets ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama
 #   ./submit_mmpd_sweep_subset.sh --mmpd-backbone MaskAE --output-dir results/datasets/06-15-mmpd-maskae-subset
 #   ./submit_mmpd_sweep_subset.sh --use-anchor-ckpts --anchor-config binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo
+#   ./submit_mmpd_sweep_subset.sh --resume --output-dir results/datasets/... --datasets PeMS,dynamic --skip-mmpd-train
 #
 # Default: --subset-config (no binary ckpts required). Legacy ckpt mode: --use-anchor-ckpts.
 
@@ -17,6 +18,7 @@ SMOKE=0
 RESUME=0
 FORCE=0
 FORCE_INIT=0
+SKIP_MMPD_TRAIN=0
 OUTPUT_DIR=""
 SUBSET_CONFIG="configs/binary_anchor_stationary_flat_subsets.yaml"
 USE_ANCHOR_CKPTS=0
@@ -55,6 +57,7 @@ while [[ $# -gt 0 ]]; do
         --mmpd-tune-epochs) MMPD_TUNE_EPOCHS="$2"; shift 2 ;;
         --mmpd-tune-patience) MMPD_TUNE_PATIENCE="$2"; shift 2 ;;
         --force-mmpd-tune) FORCE=1; shift ;;
+        --skip-mmpd-train) SKIP_MMPD_TRAIN=1; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -161,7 +164,9 @@ else
     )
 fi
 
-if [[ "$FORCE" -eq 1 || "$RESUME" -eq 0 ]]; then
+if [[ "$SKIP_MMPD_TRAIN" -eq 1 ]]; then
+    EVAL_BASE+=(--skip-mmpd-train)
+elif [[ "$FORCE" -eq 1 || "$RESUME" -eq 0 ]]; then
     EVAL_BASE+=(--force-mmpd-train)
 fi
 
@@ -209,7 +214,9 @@ if [[ "$SMOKE" -eq 1 ]]; then
     else
         EVAL_BASE+=(--subset-config "$REPO/$SUBSET_CONFIG" --mmpd-only)
     fi
-    if [[ "$FORCE" -eq 1 || "$RESUME" -eq 0 ]]; then
+    if [[ "$SKIP_MMPD_TRAIN" -eq 1 ]]; then
+        EVAL_BASE+=(--skip-mmpd-train)
+    elif [[ "$FORCE" -eq 1 || "$RESUME" -eq 0 ]]; then
         EVAL_BASE+=(--force-mmpd-train)
     fi
 else
@@ -303,7 +310,7 @@ fi
 echo "Lookback/horizon: $LOOKBACK / $HORIZON"
 echo "MMPD backbone:   $MMPD_BACKBONE"
 echo "MMPD tune:       trials=$MMPD_TUNE_TRIALS epochs=$MMPD_TUNE_EPOCHS patience=$MMPD_TUNE_PATIENCE"
-echo "Resume:        $RESUME  Force: $FORCE"
+echo "Resume:        $RESUME  Force: $FORCE  Skip train: $SKIP_MMPD_TRAIN"
 echo "Datasets:      ${DATASETS[*]}"
 if [[ "$USE_ANCHOR_CKPTS" -eq 1 ]]; then
     for i in "${!DATASETS[@]}"; do

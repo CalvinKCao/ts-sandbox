@@ -7,6 +7,9 @@
 #   ./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh --datasets ETTm1,illness
 #   ./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh --resume \
 #       --output-dir results/datasets/06-16-mmpd-maskae-grad-accum-150-lr-lo-subset
+#   ./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh --resume \
+#       --output-dir results/datasets/06-16-mmpd-maskae-grad-accum-150-lr-lo-subset \
+#       --datasets PeMS,dynamic --skip-mmpd-train
 
 set -euo pipefail
 
@@ -35,6 +38,7 @@ while [[ $# -gt 0 ]]; do
         --datasets) DATASETS="$2"; shift 2 ;;
         --subset-config) SUBSET_CONFIG="$2"; shift 2 ;;
         --no-tune) TUNE_ARGS=(--time 3:00:00); shift ;;
+        --skip-mmpd-train) EXTRA+=(--skip-mmpd-train); shift ;;
         *) EXTRA+=("$1"); shift ;;
     esac
 done
