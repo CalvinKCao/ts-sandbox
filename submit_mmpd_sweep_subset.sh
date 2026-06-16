@@ -9,6 +9,7 @@
 #   ./submit_mmpd_sweep_subset.sh --datasets ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama
 #   ./submit_mmpd_sweep_subset.sh --anchor-config binary_anchor_stationary_flat_subsets_ema099_lb336_hz96 \
 #       --lookback 336 --horizon 96 --datasets ETTh1,exchange_rate,weather,traffic
+#   ./submit_mmpd_sweep_subset.sh --mmpd-backbone MaskAE --output-dir results/datasets/06-15-mmpd-maskae-subset
 #
 # MMPD-only: does not submit binary-anchor re-eval workers.
 
@@ -28,6 +29,7 @@ HORIZON=96
 WALL_MMPD="3:00:00"
 WALL_INIT="0:45:00"
 WALL_MERGE="0:30:00"
+MMPD_BACKBONE="Decoder"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
         --horizon) HORIZON="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         --time) WALL_MMPD="$2"; shift 2 ;;
+        --mmpd-backbone) MMPD_BACKBONE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -129,6 +132,7 @@ EVAL_BASE=(
     --mmpd-repo "$REPO/temp/MMPD"
     --mmpd-data-dir "$REPO/temp/mmpd_datasets"
     --seed "$SEED"
+    --mmpd-backbone "$MMPD_BACKBONE"
     --no-update-mmpd
     --force-mmpd-eval
     --force-indices
@@ -168,6 +172,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
         --mmpd-repo "$REPO/temp/MMPD"
         --mmpd-data-dir "$REPO/temp/mmpd_datasets"
         --seed "$SEED"
+        --mmpd-backbone "$MMPD_BACKBONE"
         --no-update-mmpd
         --force-mmpd-eval
         --force-indices
@@ -249,6 +254,7 @@ echo "Repo:          $REPO"
 echo "Output:        $OUTPUT_DIR"
 echo "Anchor config: $ANCHOR_CONFIG"
 echo "Lookback/horizon: $LOOKBACK / $HORIZON"
+echo "MMPD backbone:   $MMPD_BACKBONE"
 echo "Resume:        $RESUME  Force: $FORCE"
 echo "Datasets:      ${DATASETS[*]}"
 for i in "${!DATASETS[@]}"; do

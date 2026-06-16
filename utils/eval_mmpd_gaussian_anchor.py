@@ -51,6 +51,11 @@ DEFAULT_MMPD_REPO = REPO_ROOT / "temp" / "MMPD"
 DEFAULT_MMPD_DATA = REPO_ROOT / "temp" / "mmpd_datasets"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results" / "mmpd_anchor_eval"
 PATCHED_DATASET_MTS = REPO_ROOT / "utils" / "mmpd_patches" / "dataset_mts.py"
+PATCHED_MASKAE_BACKBONE = (
+    REPO_ROOT / "utils" / "mmpd_patches" / "models" / "backbones" / "mask_ae_transformer.py"
+)
+PATCHED_EXP_FORECAST = REPO_ROOT / "utils" / "mmpd_patches" / "exp" / "exp_forecast.py"
+MMPD_BACKBONES = ("Decoder", "EncoderDecoder", "MaskAE")
 MMPD_URL = "https://github.com/Thinklab-SJTU/MMPD.git"
 
 DATASET_FILES = {
@@ -192,6 +197,15 @@ def apply_mmpd_compatibility_patches(path: Path) -> None:
     if PATCHED_DATASET_MTS.is_file():
         dataset_py.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(PATCHED_DATASET_MTS, dataset_py)
+
+    mask_ae_py = path / "models" / "backbones" / "mask_ae_transformer.py"
+    if PATCHED_MASKAE_BACKBONE.is_file():
+        mask_ae_py.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PATCHED_MASKAE_BACKBONE, mask_ae_py)
+
+    exp_forecast_py = path / "exp" / "exp_forecast.py"
+    if PATCHED_EXP_FORECAST.is_file():
+        shutil.copy2(PATCHED_EXP_FORECAST, exp_forecast_py)
 
 
 def mmpd_staged_filename(dataset: str) -> str:
@@ -590,7 +604,7 @@ def build_mmpd_train_cmd(args: argparse.Namespace, run: AnchorRun) -> List[str]:
         "--output_root",
         str(args.output_dir / "mmpd_out"),
         "--backbone",
-        "Decoder",
+        args.mmpd_backbone,
         "--loss_func",
         "MMPD",
         "--in_len",
@@ -664,12 +678,12 @@ def mmpd_checkpoint_path(
 ) -> Path:
     lookback, horizon = dataset_window_lengths(args, run.dataset)
     name = data_name or mmpd_dataset_name(run)
-    setting = mmpd_setting(name, lookback, horizon, args.patch_size)
+    setting = mmpd_setting(name, lookback, horizon, args.patch_size, backbone=args.mmpd_backbone)
     return (
         mmpd_output_root(args)
         / "mmpd_out"
         / "checkpoints"
-        / "Decoder-MMPD"
+        / f"{args.mmpd_backbone}-MMPD"
         / setting
         / "model_checkpoint.pth"
     )
@@ -786,7 +800,7 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                     data_path=ns.data_path,
                     data_split=parse_split(ns.data_split),
                     output_root=ns.output_root,
-                    backbone="Decoder",
+                    backbone=ns.mmpd_backbone,
                     in_len=ns.lookback,
                     out_len=ns.horizon,
                     patch_size=ns.patch_size,
@@ -871,6 +885,7 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                 parser.add_argument("--horizon", type=int, required=True)
                 parser.add_argument("--patch-size", type=int, required=True)
                 parser.add_argument("--data-dim", type=int, required=True)
+                parser.add_argument("--mmpd-backbone", type=str, default="Decoder")
                 parser.add_argument("--sample-num", type=int, required=True)
                 parser.add_argument("--num-sampling-steps", type=int, required=True)
                 parser.add_argument("--gmm-components", type=int, required=True)
@@ -1316,6 +1331,8 @@ def run_mmpd_eval(
             str(args.patch_size),
             "--data-dim",
             str(data_dim),
+            "--mmpd-backbone",
+            args.mmpd_backbone,
             "--sample-num",
             str(args.sample_num),
             "--num-sampling-steps",
@@ -2078,6 +2095,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lookback", type=int, default=96)
     parser.add_argument("--horizon", type=int, default=96)
     parser.add_argument("--patch-size", type=int, default=12)
+    parser.add_argument(
+        "--mmpd-backbone",
+        choices=MMPD_BACKBONES,
+        default="Decoder",
+        help="Upstream MMPD backbone (MaskAE = UP2ME-style masked autoencoder).",
+    )
     parser.add_argument("--test-fraction", type=float, default=0.5)
     parser.add_argument("--test-max-items", type=int, default=None)
     parser.add_argument("--seed", type=int, default=2026)
