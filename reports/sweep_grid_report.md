@@ -2,7 +2,7 @@
 
 Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged runs: **Discrete** (CE, `ordinal_d3pm_staged`), **MAE Discrete** (expectation MAE + uniform `1/H` anchor, `ordinal_d3pm_mae_staged_subsets`), **Binary flat** (full variates, `binary_anchor_stationary_flat`), **Flat subsets** (`3951193`–`3951199`), **Flat subsets EMA0.99** (`3951527`–`3951533`), EMA reuse sweep (`ema_sweep_{090,095,098,0995,0999}`, jobs `3953317`–`3953351`), grad-accum reuse sweep (`grad_accum_{125,150,200}`, jobs `3953944`–`3953964`; LR-band split `grad_accum_{150,200}_lr_{lo,hi}`, jobs `3954784`–`3954810`), **Flat subsets guidance accum** {1.5×, 2×, 4×, 8×} (`grad_accum_guidance_{150,200,400,800}`, jobs `3961419`–`3961447`), **Flat subsets accum4x** no guidance (`grad_accum_400`, jobs `3963967`–`3963973`), EMA0.99 lookback variants (`ema099_lb336_hz96`, `ema099_lb96_hz720`, jobs `3955091`–`3955098`), **AR accum4x/8x** (`binary_anchor_ar_grad_accum_{400,800}`, LB96/H96 base), **AR LB336/H96 accum1.5x** (`3961448`–`3961454`), **AR LB96/H720 accum1.5x** (`3961455`, `3961457`, `3961460`), **MS tune** (`hp_max_scale_tuning`), and **MMPD (subset)** (`06-13-binary-mmpd-subset-compare`, jobs `3951201`–`3951207`). Probabilistic metrics: `dpmpp` sampler, 20 steps, 20 samples.
 
-**Pre-fix invalid / incomplete:** Jun 12 `hp_max_scale_tuning` jobs `3943934`–`3943937` never searched `max_scale`. Post-fix cosine+warmup `3956633`–`3956640` replaces pre-fix `3943882`–`3943927`. Post-fix MS tune: exchange_rate `3956631` only; ETTh1/ETTm1/weather `3956629`–`3956632` hit 3h wall before eval — still showing pre-fix rows.
+**Pre-fix invalid / incomplete:** Jun 12 `hp_max_scale_tuning` jobs `3943934`–`3943937` (and resumes `3947879`–`3947881`) never searched `max_scale`. Post-fix cosine+warmup `3956633`–`3956640` replaces pre-fix `3943882`–`3943927`. Post-fix MS tune: `3956629`–`3956632` (3h wall); Jun 15 resume `3960877`–`3960879`. **OK:** exchange_rate `3956631`, ETTm1 `3960878`. **Incomplete** (tuned `max_scale≈13.43`, eval pending): ETTh1 `3960877`, weather `3960879`.
 
 | Dataset | Config | Status | anchor_mse | anchor_mae | crps | sample_mean_mse | Job |
 |---|---|---|---|---|---|---|---|
@@ -33,7 +33,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | ETTh1 | **Flat subsets** | **OK** | 0.4059 | 0.4085 | 0.3060 | 0.4185 | 3951193 |
 | ETTh1 | **MAE Discrete** | **OK** | 0.4204 | 0.4116 | 0.7263 | 1.0794 | 3949859 |
 | ETTh1 | **MMPD (subset)** | **ref** | 0.3762 | 0.3936 | 0.2985 | — | 3951201 |
-| ETTh1 | **MS tune** | pre-fix invalid | 0.4117 | 0.4158 | 0.3114 | 0.4058 | 3943934 |
+| ETTh1 | **MS tune** | **incomplete** | — | — | — | — | 3960877 |
 | ETTh1 | `diff_ema_decay_099` | **OK** | 0.3974 | 0.4040 | 0.3021 | 0.4047 | 3943854 |
 | ETTh1 | `diff_min_snr_gamma_5` | **OK** | 0.4176 | 0.4144 | 0.3136 | 0.4268 | 3943856 |
 | ETTh1 | `diff_noise_cosine` | **OK** | 0.4212 | 0.4196 | 0.3193 | 0.4378 | 3943858 |
@@ -56,7 +56,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | ETTh1 | `hp_num_steps_800` | **OK** | 0.4146 | 0.4151 | 0.3098 | 0.4260 | 3943888 |
 | ETTh1 | `sweep_baseline` | **OK** | 0.4059 | 0.4085 | 0.3060 | 0.4185 | 3943890 |
 | ETTh2 | **AR LB336/H96 accum1.5x** | **OK** | 0.3373 | 0.3690 | 0.2855 | 0.3281 | 3961449 |
-| ETTh2 | **AR LB96/H720 accum1.5x** | **OK** | 0.4503 | 0.4575 | 0.3846 | 0.4490 | 3961456 |
+| ETTh2 | **AR LB96/H720 accum1.5x** | **OK** | 0.4503 | 0.4575 | 0.3846 | 0.4490 | 3963347 |
 | ETTh2 | **Binary flat** | **OK** | 0.3199 | 0.3546 | 0.2705 | 0.3104 | 3949853 |
 | ETTh2 | **Discrete** | **OK** | 0.3397 | 0.3582 | 0.6547 | 0.6292 | 3948455 |
 | ETTh2 | **Flat subsets EMA0.90** | **OK** | 0.3124 | 0.3513 | 0.2684 | 0.3008 | 3953318 |
@@ -80,7 +80,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | ETTh2 | **Flat subsets** | **OK** | 0.3199 | 0.3546 | 0.2705 | 0.3104 | 3951194 |
 | ETTh2 | **MAE Discrete** | **OK** | 0.3183 | 0.3497 | 0.8584 | 0.5778 | 3949860 |
 | ETTh2 | **MMPD (subset)** | **ref** | 0.3186 | 0.3614 | 0.2705 | — | 3951202 |
-| ETTm1 | **MS tune** | **OK** | 0.4679 | 0.4246 | 0.3176 | 0.4398 | 3956630 |
+| ETTm1 | **MS tune** | **OK** | 0.4679 | 0.4246 | 0.3176 | 0.4398 | 3960878 |
 | ETTm1 | `diff_ema_decay_099` | **OK** | 0.4556 | 0.4231 | 0.3290 | 0.4673 | 3943896 |
 | ETTm1 | `diff_min_snr_gamma_5` | **OK** | 0.5463 | 0.4584 | 0.4031 | 0.6940 | 3943898 |
 | ETTm1 | `diff_noise_cosine` | **OK** | 0.4894 | 0.4368 | 0.3287 | 0.4614 | 3943900 |
@@ -252,7 +252,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | weather | **Flat subsets** | **OK** | 0.0978 | 0.2224 | 0.1776 | 0.1000 | 3951196 |
 | weather | **MAE Discrete** | **OK** | 0.0980 | 0.2195 | 0.4609 | 0.2603 | 3949862 |
 | weather | **MMPD (subset)** | **ref** | 0.1128 | 0.2323 | 0.1911 | — | 3951204 |
-| weather | **MS tune** | pre-fix invalid | 0.0987 | 0.2185 | 0.1775 | 0.0978 | 3943937 |
+| weather | **MS tune** | **incomplete** | — | — | — | — | 3960879 |
 | weather | `diff_ema_decay_099` | **OK** | 0.0971 | 0.2220 | 0.1758 | 0.0970 | 3943897 |
 | weather | `diff_min_snr_gamma_5` | **OK** | 0.0992 | 0.2243 | 0.1804 | 0.1014 | 3943899 |
 | weather | `diff_noise_cosine` | **OK** | 0.0962 | 0.2192 | 0.1794 | 0.0965 | 3943901 |

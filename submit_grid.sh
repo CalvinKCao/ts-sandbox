@@ -2,8 +2,9 @@
 # =============================================================================
 # Submits a grid of experiments using the new YAML pipeline configs. *
 #
-# Each job gets isolated checkpoint/results dirs:
-#   ./results/ckpts/MM-DD-<jobid>-<dataset>-<config>/
+# Each job gets isolated checkpoint/results dirs and a shared run stem:
+#   MM-DD-<jobid>-<dataset>-<config_stem>
+# Slurm --job-name uses the stem minus job id (id is unknown before allocation).
 #
 # USAGE (run from login node):
 #   ./submit_grid.sh --configs configs/binary_anchor.yaml --datasets ETTh1,exchange_rate
@@ -55,14 +56,12 @@ if [[ "$SMOKE" -eq 1 ]]; then
     MEM="24G"
     CPUS=4
     GPUS=1
-    JOB_PREFIX="smoke"
 else
     CONFIGS="${CONFIGS:-configs/binary_dual_scale_staged.yaml}"
     WALL_DEFAULT="11:00:00"
     MEM="60G"
     CPUS=8
     GPUS=1
-    JOB_PREFIX="grid"
 fi
 
 if [[ -n "$PARALLEL_OPTUNA" ]]; then
@@ -147,7 +146,6 @@ for CFG in "${CONF_ARR[@]}"; do
     for DS in "${DATA_ARR[@]}"; do
         for SD in "${SEED_ARR[@]}"; do
 
-            JOB_NAME="${JOB_PREFIX}-${DS}-${CFG_NAME}"
             DATE_STR=$(date +%m-%d)
 
             if [[ -n "$WALL_OVERRIDE" ]]; then
@@ -167,10 +165,10 @@ for CFG in "${CONF_ARR[@]}"; do
             fi
 
             if [[ -n "$RUN_STEM" ]]; then
-                OLD_ID=$(echo "$RUN_STEM" | cut -d'-' -f3)
-                JOB_NAME="${JOB_NAME}_res${OLD_ID}"
-                LOG_FILE="$LOG_DIR/${DATE_STR}-%j-${DS}-${CFG_NAME}_res${OLD_ID}.log"
+                JOB_NAME="$RUN_STEM"
+                LOG_FILE="$LOG_DIR/${RUN_STEM}.log"
             else
+                JOB_NAME="${DATE_STR}-${DS}-${CFG_NAME}"
                 LOG_FILE="$LOG_DIR/${DATE_STR}-%j-${DS}-${CFG_NAME}.log"
             fi
 
@@ -231,9 +229,6 @@ for CFG in "${CONF_ARR[@]}"; do
                 RUN_STEM="${DATE_STR}-${JOB_ID}-${DS}-${CFG_NAME}"
             fi
             ACTUAL_LOG="$LOG_DIR/${RUN_STEM}.log"
-            if [[ "$LOG_FILE" == *'%j'* ]]; then
-                ACTUAL_LOG="$LOG_DIR/${DATE_STR}-${JOB_ID}-${DS}-${CFG_NAME}.log"
-            fi
             printf "%-10s %-15s %-25s %-8s %s\n" "$JOB_ID" "$DS" "$CFG_NAME" "$SD" "$ACTUAL_LOG"
 
         done

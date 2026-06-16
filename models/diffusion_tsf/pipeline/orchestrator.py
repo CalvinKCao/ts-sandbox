@@ -69,7 +69,7 @@ class Pipeline:
                 )
                 run_id = self.state.wandb_phase_run_ids.get(phase.name)
                 run = wandb_utils.init_phase_run(
-                    phase_name=phase.wandb_run_name,
+                    phase_slug=phase.wandb_run_name,
                     group=self.state.wandb_group or "",
                     project=self.state.wandb_project,
                     job_type=phase.wandb_job_type,

@@ -303,14 +303,14 @@ class DiffusionTSF(nn.Module):
         stats: Tuple[torch.Tensor, torch.Tensor],
         horizon_width: int,
     ) -> torch.Tensor:
-        """Run guidance and return window-normalized 1D series aligned to the 2D canvas width.
+        """Build a window-normalized 1D series for the 2D guidance ghost channel.
 
         Output shape is (B, V, horizon_width): overlap prefix from past_norm plus a core
         forecast whose length is horizon_width - lookback_overlap, matching future_norm.
+        iTransformer instance norm is disabled; rollout stays in diffusion window-norm space.
         """
         if self.guidance_model is None:
             raise ValueError("guidance model is None but guidance channel requested")
-        mean, std = stats
         K = int(self.config.lookback_overlap)
         core_len = int(horizon_width) - K
         if core_len <= 0:
@@ -331,17 +331,17 @@ class DiffusionTSF(nn.Module):
             else:
                 out = core_norm
         else:
-            overlap = K
-            with torch.no_grad():
-                coarse = self.guidance_model.get_forecast(
-                    past, core_len, overlap=overlap,
-                )
-            coarse = self._resample_1d_time_series(coarse, core_len)
-            if coarse.shape[-1] != core_len:
+            if not hasattr(self.guidance_model, "get_forecast_window_norm"):
                 raise RuntimeError(
-                    f"guidance core length {coarse.shape[-1]} != expected {core_len}"
+                    "guidance model must implement get_forecast_window_norm() "
+                    "when use_guidance_channel is enabled"
                 )
-            core_norm = (coarse - mean) / std
+            with torch.no_grad():
+                core_norm = self.guidance_model.get_forecast_window_norm(
+                    past_norm, core_len, overlap=K,
+                )
+            if core_norm.shape[-1] != core_len:
+                core_norm = self._resample_1d_time_series(core_norm, core_len)
             if K > 0:
                 out = torch.cat([past_norm[..., -K:], core_norm], dim=-1)
             else:

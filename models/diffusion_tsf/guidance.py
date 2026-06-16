@@ -7,7 +7,8 @@ the diffusion model. Only iTransformer-backed guidance is supported.
 
 import torch
 import torch.nn as nn
-from typing import Optional, Protocol, runtime_checkable
+from contextlib import contextmanager
+from typing import Callable, Optional, Protocol, runtime_checkable
 from abc import ABC, abstractmethod
 
 
@@ -134,7 +135,7 @@ class iTransformerGuidance(BaseGuidance):
         return int(getattr(self.model, "pred_len", 1))
 
     def _forward_raw(self, past: torch.Tensor) -> torch.Tensor:
-        """One iTransformer forward at native pred_len (raw value space)."""
+        """One iTransformer forward at native pred_len."""
         past = self._slice_past_to_model_len(past)
         pred_step = self._model_pred_len()
 
@@ -163,19 +164,31 @@ class iTransformerGuidance(BaseGuidance):
 
         return output[..., :pred_step]
 
-    @torch.no_grad()
-    def get_forecast(
+    @contextmanager
+    def _instance_norm_disabled(self):
+        if not hasattr(self.model, "use_norm"):
+            yield
+            return
+        saved = bool(self.model.use_norm)
+        self.model.use_norm = False
+        try:
+            yield
+        finally:
+            self.model.use_norm = saved
+
+    def _autoregressive_rollout(
         self,
         past: torch.Tensor,
         forecast_length: int,
-        overlap: int = 0,
+        overlap: int,
+        forward_fn: Callable[[torch.Tensor], torch.Tensor],
     ) -> torch.Tensor:
         if forecast_length <= 0:
             raise ValueError(f"forecast_length must be positive, got {forecast_length}")
 
         pred_step = self._model_pred_len()
         if forecast_length <= pred_step:
-            return self._forward_raw(past)[..., :forecast_length]
+            return forward_fn(past)[..., :forecast_length]
 
         K = max(0, int(overlap))
         chunks = []
@@ -183,7 +196,7 @@ class iTransformerGuidance(BaseGuidance):
         cur_past = past
 
         while remaining > 0:
-            step_out = self._forward_raw(cur_past)
+            step_out = forward_fn(cur_past)
             take = min(remaining, pred_step)
             chunks.append(step_out[..., :take])
             remaining -= take
@@ -198,6 +211,37 @@ class iTransformerGuidance(BaseGuidance):
             cur_past = self._slice_past_to_model_len(cur_past)
 
         return torch.cat(chunks, dim=-1)
+
+    @torch.no_grad()
+    def get_forecast(
+        self,
+        past: torch.Tensor,
+        forecast_length: int,
+        overlap: int = 0,
+    ) -> torch.Tensor:
+        return self._autoregressive_rollout(
+            past, forecast_length, overlap, self._forward_raw,
+        )
+
+    @torch.no_grad()
+    def get_forecast_window_norm(
+        self,
+        past_norm: torch.Tensor,
+        forecast_length: int,
+        overlap: int = 0,
+    ) -> torch.Tensor:
+        """Forecast in diffusion per-window z-score space (same scale as future_norm).
+
+        Disables iTransformer instance normalization and autoregresses entirely in the
+        window-normalized domain so the 2D guidance ghost matches the diffused horizon.
+        """
+        def _forward_norm_space(past: torch.Tensor) -> torch.Tensor:
+            return self._forward_raw(past)
+
+        with self._instance_norm_disabled():
+            return self._autoregressive_rollout(
+                past_norm, forecast_length, overlap, _forward_norm_space,
+            )
 
 
 class iTransformerTokenAdapter(nn.Module):

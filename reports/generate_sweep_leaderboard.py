@@ -113,16 +113,24 @@ CONFIG_ALIASES = {
 
 # Pre-fix Jun 12 runs: training-section YAML never reached Optuna / finetune scheduler.
 PREFIX_INVALID_JOBS: Dict[str, frozenset[str]] = {
-    "hp_max_scale_tuning": frozenset({"3943934", "3943935", "3943936", "3943937"}),
+    "hp_max_scale_tuning": frozenset({
+        "3943934", "3943935", "3943936", "3943937",
+        "3947879", "3947880", "3947881",
+    }),
     "hp_lr_cosine_warmup2": frozenset({"3943882", "3943924", "3943883", "3943925"}),
     "hp_lr_cosine_warmup5": frozenset({"3943884", "3943926", "3943885", "3943927"}),
 }
 
+HP_MS_POSTFIX_MIN = 3956629
+MS_TUNE_DATASETS = ("ETTh1", "ETTm1", "exchange_rate", "weather")
+
 PREFIX_INVALID_NOTE = (
     "**Pre-fix invalid / incomplete:** Jun 12 `hp_max_scale_tuning` jobs `3943934`–`3943937` "
-    "never searched `max_scale`. Post-fix cosine+warmup `3956633`–`3956640` replaces pre-fix "
-    "`3943882`–`3943927`. Post-fix MS tune: exchange_rate `3956631` only; "
-    "ETTh1/ETTm1/weather `3956629`–`3956632` hit 3h wall before eval — still showing pre-fix rows."
+    "(and resumes `3947879`–`3947881`) never searched `max_scale`. Post-fix cosine+warmup "
+    "`3956633`–`3956640` replaces pre-fix `3943882`–`3943927`. Post-fix MS tune: "
+    "`3956629`–`3956632` (3h wall); Jun 15 resume `3960877`–`3960879`. "
+    "**OK:** exchange_rate `3956631`, ETTm1 `3960878`. "
+    "**Incomplete** (tuned `max_scale≈13.43`, eval pending): ETTh1 `3960877`, weather `3960879`."
 )
 
 # Legacy pre-fix job ids (for MS tune table footnotes only).
@@ -150,12 +158,24 @@ def run_status(raw_config: str, job_id: str) -> str:
     return "OK"
 
 
+def ms_tune_has_postfix_attempt(job_id: str, log_path: str) -> bool:
+    if int(job_id) >= HP_MS_POSTFIX_MIN:
+        return True
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            head = f.read(8192)
+    except OSError:
+        return False
+    return "06-14-39566" in head or "_res39566" in os.path.basename(log_path)
+
+
 def status_by_config(grid_rows: List[Dict[str, Any]]) -> Dict[str, str]:
     out: Dict[str, str] = {}
+    priority = {"OK": 3, "incomplete": 2, "pre-fix invalid": 1}
     for row in grid_rows:
         cfg = row["config"]
-        st = row["status"]
-        if cfg not in out or st == "pre-fix invalid":
+        st = row.get("status", "OK")
+        if cfg not in out or priority.get(st, 0) > priority.get(out[cfg], 0):
             out[cfg] = st
     return out
 
@@ -178,15 +198,21 @@ def parse_log_name(path: str) -> Optional[Tuple[str, str, str]]:
         return None
     job_id, dataset, rest = m.group(1), m.group(2), m.group(3)
     res = re.match(r"(.+)_res(\d+)$", rest)
-    if res:
-        return res.group(2), dataset, res.group(1)
-    return job_id, dataset, rest
+    raw_config = res.group(1) if res else rest
+    return job_id, dataset, raw_config
 
 
 def find_run_log(job_id: str, dataset: str, raw_config: str) -> Optional[str]:
-    pattern = os.path.join(LOGS, f"*-{job_id}-{dataset}-{raw_config}.log")
-    matches = glob.glob(pattern)
-    return matches[0] if matches else None
+    patterns = [
+        os.path.join(LOGS, f"*-{job_id}-{dataset}-{raw_config}.log"),
+        os.path.join(LOGS, f"*-{dataset}-{raw_config}_res{job_id}.log"),
+    ]
+    matches: List[str] = []
+    for pattern in patterns:
+        matches.extend(glob.glob(pattern))
+    if not matches:
+        return None
+    return max(matches, key=os.path.getmtime)
 
 
 def is_smoke_log(path: str) -> bool:
@@ -229,6 +255,88 @@ def load_log_metrics(path: str) -> Optional[Dict[str, Any]]:
     if tuned_max_scale is not None:
         out["tuned_max_scale"] = tuned_max_scale
     return out
+
+
+def load_log_tuned_max_scale(path: str) -> Optional[float]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    scales = [float(m.group(1)) for m in MAX_SCALE_RE.finditer(text)]
+    return max(scales) if scales else None
+
+
+def reconcile_ms_tune_rows(best_rows: Dict[Tuple[str, str], Dict[str, Any]]) -> None:
+    """Pick best hp_max_scale row per dataset; prefer post-fix eval over stale pre-fix."""
+    ms_cfg = display_config("hp_max_scale_tuning")
+    candidates: Dict[str, List[Dict[str, Any]]] = {ds: [] for ds in MS_TUNE_DATASETS}
+
+    for log_glob in LOG_GLOBS:
+        for log_path in glob.glob(log_glob):
+            parsed = parse_log_name(log_path)
+            if not parsed:
+                continue
+            job_id, dataset, raw_config = parsed
+            if raw_config != "hp_max_scale_tuning" or dataset not in MS_TUNE_DATASETS:
+                continue
+            if is_smoke_log(log_path):
+                continue
+
+            metrics = load_log_metrics(log_path)
+            tuned = (metrics or {}).get("tuned_max_scale") or load_log_tuned_max_scale(log_path)
+            has_eval = metrics is not None and metrics.get("anchor_mse") is not None
+            postfix = ms_tune_has_postfix_attempt(job_id, log_path)
+
+            if run_status(raw_config, job_id) == "pre-fix invalid":
+                status = "pre-fix invalid"
+            elif has_eval:
+                status = "OK"
+            elif postfix and tuned is not None:
+                status = "incomplete"
+            elif postfix:
+                status = "incomplete"
+            else:
+                status = "incomplete"
+
+            candidates[dataset].append(
+                {
+                    "dataset": dataset,
+                    "config": ms_cfg,
+                    "raw_config": raw_config,
+                    "job_id": job_id,
+                    "anchor_mse": metrics.get("anchor_mse") if metrics else None,
+                    "anchor_mae": metrics.get("anchor_mae") if metrics else None,
+                    "crps": metrics.get("crps") if metrics else None,
+                    "sample_mean_mse": metrics.get("sample_mean_mse") if metrics else None,
+                    "tuned_max_scale": tuned,
+                    "status": status,
+                    "has_eval": has_eval,
+                    "postfix": postfix,
+                }
+            )
+
+    for dataset, cands in candidates.items():
+        if not cands:
+            continue
+        if any(c["postfix"] for c in cands):
+            cands = [c for c in cands if c["status"] != "pre-fix invalid"]
+        cands.sort(key=lambda c: (c["has_eval"], int(c["job_id"])), reverse=True)
+        pick = cands[0]
+        tuned_vals = [c["tuned_max_scale"] for c in cands if c.get("tuned_max_scale") is not None]
+        if tuned_vals:
+            pick["tuned_max_scale"] = max(tuned_vals)
+        if pick["status"] == "incomplete":
+            pick = {
+                **pick,
+                "anchor_mse": None,
+                "anchor_mae": None,
+                "crps": None,
+                "sample_mean_mse": None,
+            }
+        pick.pop("has_eval", None)
+        pick.pop("postfix", None)
+        best_rows[(dataset, ms_cfg)] = pick
 
 
 def _merge_row(
@@ -382,6 +490,7 @@ def collect_runs() -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]
             _merge_row(best_rows, row)
 
     enrich_rows_from_logs(best_rows)
+    reconcile_ms_tune_rows(best_rows)
 
     grid_rows = list(best_rows.values())
     by_dataset: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
@@ -455,6 +564,8 @@ def delta_ranks(by_dataset: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Dict[s
         for i, r in enumerate(ranked):
             cfg = r["Config"]
             if cfg in {"**MMPD**", "**MMPD (subset)**"}:
+                out[cfg][dataset] = None
+            elif r.get("anchor_mse") is None or r.get("Status") == "incomplete":
                 out[cfg][dataset] = None
             else:
                 out[cfg][dataset] = (i + 1) - base
@@ -599,6 +710,8 @@ def write_subset_compare(path: str, grid_rows: List[Dict[str, Any]]) -> None:
                 scale_disp = fmt(ms["tuned_max_scale"])
             elif ms.get("status") == "pre-fix invalid":
                 scale_disp = "policy (not tuned)"
+            elif ms.get("status") == "incomplete":
+                scale_disp = fmt(ms.get("tuned_max_scale"))
             else:
                 scale_disp = "—"
             f.write(
@@ -718,7 +831,8 @@ def write_leaderboard(
             "**AR accum4x/8x** (`binary_anchor_ar_grad_accum_{400,800}`, LB96/H96). "
             "**AR LB336/H96 accum1.5x** (`3961448`–`3961454`); "
             "**AR LB96/H720 accum1.5x** (partial: `3961455`, `3961457`, `3961460`). "
-            "**MS tune** (`hp_max_scale_tuning`, post-fix `3956631` exchange_rate; cosine+warmup post-fix `3956633`–`3956640`). "
+            "**MS tune** (`hp_max_scale_tuning`; post-fix `3956631` exchange_rate, `3960878` ETTm1; "
+            "incomplete `3960877` ETTh1 / `3960879` weather; cosine+warmup post-fix `3956633`–`3956640`). "
             f"**MMPD (subset)** from `{MMPD_SOURCE_SUBSET}` (same subsets as flat runs, 20 samples, full test). "
             f"Legacy **MMPD** from `{MMPD_SOURCE_LEGACY}` where subset MMPD is unavailable.\n\n"
             f"{PREFIX_INVALID_NOTE}\n\n"
@@ -748,7 +862,9 @@ def write_leaderboard(
         for i, (avg, cfg, per_ds, _) in enumerate(avg_rows, start=1):
             ds_cells = [drank_str(v) for v in per_ds]
             cfg_st = st_map.get(cfg, "OK")
-            st_cell = "**pre-fix invalid**" if cfg_st == "pre-fix invalid" else "**OK**"
+            st_cell = "**pre-fix invalid**" if cfg_st == "pre-fix invalid" else (
+                "**incomplete**" if cfg_st == "incomplete" else "**OK**"
+            )
             f.write(
                 "| "
                 + " | ".join(
@@ -820,6 +936,8 @@ def write_leaderboard(
                     status = "**OK**"
                 elif status == "pre-fix invalid":
                     status = "**pre-fix invalid**"
+                elif status == "incomplete":
+                    status = "**incomplete**"
                 elif status == "ref":
                     status = "ref"
                 f.write(

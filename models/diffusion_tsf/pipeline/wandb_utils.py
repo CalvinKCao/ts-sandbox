@@ -32,21 +32,66 @@ def _api_key_usable() -> bool:
     return bool(key and re.fullmatch(r"[A-Za-z0-9_]+", key))
 
 
-def make_group_name(
-    experiment_name: str,
-    dataset: str,
+_RUN_STEM_RE = re.compile(r"^\d{2}-\d{2}-\d+-.+")
+
+WANDB_RUN_NAME_MAX_LEN = 128
+
+
+def run_stem_from_checkpoint_dir(checkpoint_dir: str) -> str:
+    """Basename of the isolated checkpoint dir (same as Slurm log/ckpt stem)."""
+    return os.path.basename(os.path.abspath(checkpoint_dir))
+
+
+def _looks_like_run_stem(stem: str) -> bool:
+    return bool(stem and _RUN_STEM_RE.match(stem))
+
+
+def make_local_group_name(
     seed: int,
     *,
     config_slug: Optional[str] = None,
+    experiment_name: str = "experiment",
 ) -> str:
-    """Auto-generate a wandb group name.
-
-    When *config_slug* is set (typically the leaf YAML stem), it is prefixed so
-    sweeps that share ``experiment_name`` still get distinct groups per config.
-    """
+    """Fallback wandb group for local runs without a Slurm-style checkpoint stem."""
     date_str = datetime.now().strftime("%m-%d")
-    prefix = f"{config_slug}-" if config_slug else ""
-    return f"{prefix}{experiment_name}-{dataset}-{date_str}-s{seed}"
+    slug = config_slug or experiment_name
+    return f"{date_str}-{slug}-s{seed}"
+
+
+def infer_wandb_group(
+    state: "PipelineState",
+    merged_config: Dict[str, Any],
+) -> str:
+    """Resolve wandb group: YAML override, else checkpoint run stem, else local fallback."""
+    if state.wandb_group:
+        return state.wandb_group
+
+    ckpt_stem = run_stem_from_checkpoint_dir(state.checkpoint_dir)
+    env_stem = os.environ.get("GRID_RUN_STEM", "").strip()
+    if env_stem and env_stem != ckpt_stem:
+        logger.warning(
+            "GRID_RUN_STEM=%r differs from checkpoint_dir stem %r; using checkpoint stem",
+            env_stem,
+            ckpt_stem,
+        )
+    if _looks_like_run_stem(ckpt_stem):
+        return ckpt_stem
+
+    yaml_path = merged_config.get("_yaml_path")
+    return make_local_group_name(
+        state.seed,
+        config_slug=config_slug_from_yaml(yaml_path),
+        experiment_name=state.experiment_name,
+    )
+
+
+def make_phase_run_name(group: str, phase_slug: str) -> str:
+    """Build wandb run title: {group}-{phase}."""
+    phase_slug = phase_slug.replace("_", "-")
+    full = f"{group}-{phase_slug}"
+    if len(full) <= WANDB_RUN_NAME_MAX_LEN:
+        return full
+    return full[:WANDB_RUN_NAME_MAX_LEN]
 
 
 def config_slug_from_yaml(yaml_path: Optional[str]) -> Optional[str]:
@@ -143,13 +188,7 @@ def resolve_wandb_settings(
         return manifest
 
     state.wandb_phase_run_ids = {}
-    if not state.wandb_group:
-        state.wandb_group = make_group_name(
-            state.experiment_name,
-            state.dataset,
-            state.seed,
-            config_slug=config_slug_from_yaml(yaml_path),
-        )
+    state.wandb_group = infer_wandb_group(state, merged_config)
 
     manifest = {
         "project": state.wandb_project,
@@ -190,7 +229,7 @@ def build_run_tags(
 
 
 def init_phase_run(
-    phase_name: str,
+    phase_slug: str,
     group: str,
     project: str,
     job_type: str,
@@ -206,7 +245,8 @@ def init_phase_run(
     if not _WANDB_AVAILABLE or not _api_key_usable():
         return None
 
-    run_name = phase_name.replace("_", "-")
+    run_name = make_phase_run_name(group, phase_slug)
+    full_name = f"{group}-{phase_slug.replace('_', '-')}"
     try:
         init_kwargs: Dict[str, Any] = {
             "project": project,
@@ -216,6 +256,8 @@ def init_phase_run(
             "reinit": True,
             "tags": tags or [],
         }
+        if run_name != full_name:
+            init_kwargs["notes"] = full_name
         if run_id:
             init_kwargs["id"] = run_id
             init_kwargs["resume"] = "allow"
@@ -231,7 +273,7 @@ def init_phase_run(
         logger.info("wandb run %s: %s", action, run.url)
         return run
     except Exception as e:
-        logger.warning(f"Failed to init wandb run for {phase_name}: {e}")
+        logger.warning(f"Failed to init wandb run for {phase_slug}: {e}")
         return None
 
 

@@ -26,3 +26,13 @@ Benchmark vs. iTransformer, a SOTA baseline architecture.
 | Traffic | **0.3577** | **0.2603** | 0.428 | 0.282 |
 | Weather | **0.1210** | **0.2334** | 0.258 | 0.278 |
 | Solar-Energy | 0.2540 | **0.2507** | **0.233** | 0.262 |
+
+## Experiment tracking
+
+Slurm grid jobs (`submit_grid.sh`) use a single **run stem** per job:
+
+`{MM-DD}-{job_id}-{dataset}-{yaml_stem}`
+
+That stem names the Slurm log, checkpoint dir, results dir, and the wandb **group**. Each entry in the YAML `phases:` list logs to its own wandb **run** titled `{group}-{phase}`.
+
+See [docs/wandb.md](docs/wandb.md) for naming tables, resume behavior, and notes on Optuna vs wandb sweeps.

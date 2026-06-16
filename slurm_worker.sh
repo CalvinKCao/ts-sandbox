@@ -51,6 +51,11 @@ DS="${GRID_DATASET:-unknown}"
 CFG_NAME="${GRID_CFG_NAME:-run}"
 RUN_STEM="${GRID_RUN_STEM:-${DATE_STR}-${SLURM_JOB_ID}-${DS}-${CFG_NAME}}"
 
+# Align Slurm display name with the full run stem once the job id is known.
+if [[ -n "${SLURM_JOB_ID:-}" && "${SLURM_JOB_NAME:-}" != "$RUN_STEM" ]]; then
+    scontrol update "JobId=${SLURM_JOB_ID}" "JobName=${RUN_STEM}" 2>/dev/null || true
+fi
+
 
 CKPT_DIR="$STORE/ckpts/${RUN_STEM}"
 DATA_DIR="$STORE/datasets/${RUN_STEM}"
