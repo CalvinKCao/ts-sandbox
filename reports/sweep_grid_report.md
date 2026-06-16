@@ -1,11 +1,12 @@
 # YAML-First Sweep Grid Report
 
-Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged runs: **Discrete** (CE, `ordinal_d3pm_staged`), **MAE Discrete** (expectation MAE + uniform `1/H` anchor, `ordinal_d3pm_mae_staged_subsets`), **Binary flat** (full variates, `binary_anchor_stationary_flat`), **Flat subsets** (`3951193`–`3951199`), **Flat subsets EMA0.99** (`3951527`–`3951533`), EMA reuse sweep (`ema_sweep_{090,095,098,0995,0999}`, jobs `3953317`–`3953351`), grad-accum reuse sweep (`grad_accum_{125,150,200}`, jobs `3953944`–`3953964`; LR-band split `grad_accum_{150,200}_lr_{lo,hi}`, jobs `3954784`–`3954810`), **Flat subsets guidance accum** {1.5×, 2×, 4×, 8×} (`grad_accum_guidance_{150,200,400,800}`, jobs `3961419`–`3961447`), **Flat subsets accum4x** no guidance (`grad_accum_400`, jobs `3963967`–`3963973`), EMA0.99 lookback variants (`ema099_lb336_hz96`, `ema099_lb96_hz720`, jobs `3955091`–`3955098`), **AR accum4x/8x** (`binary_anchor_ar_grad_accum_{400,800}`, LB96/H96 base), **AR LB336/H96 accum1.5x** (`3961448`–`3961454`), **AR LB96/H720 accum1.5x** (`3961455`, `3961457`, `3961460`), **MS tune** (`hp_max_scale_tuning`), and **MMPD (subset)** (`06-13-binary-mmpd-subset-compare`, jobs `3951201`–`3951207`). Probabilistic metrics: `dpmpp` sampler, 20 steps, 20 samples.
+Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged runs: **Discrete** (CE, `ordinal_d3pm_staged`), **MAE Discrete** (expectation MAE + uniform `1/H` anchor, `ordinal_d3pm_mae_staged_subsets`), **Binary flat** (full variates, `binary_anchor_stationary_flat`), **Flat subsets** (`3951193`–`3951199`), **Flat subsets EMA0.99** (`3951527`–`3951533`), EMA reuse sweep (`ema_sweep_{090,095,098,0995,0999}`, jobs `3953317`–`3953351`), grad-accum reuse sweep (`grad_accum_{125,150,200}`, jobs `3953944`–`3953964`; LR-band split `grad_accum_{150,200}_lr_{lo,hi}`, jobs `3954784`–`3954810`), **Flat subsets guidance accum** {1.5×, 2×, 4×, 8×} (`grad_accum_guidance_{150,200,400,800}`, jobs `3961419`–`3961447`), **2d-guidance** (iTrans 2D ghost + guidance channel, `grad_accum_150_lr_hi_guidance`, jobs `3965290`–`3965296`), **Flat subsets accum4x** no guidance (`grad_accum_400`, jobs `3963967`–`3963973`), EMA0.99 lookback variants (`ema099_lb336_hz96`, `ema099_lb96_hz720`, jobs `3955091`–`3955098`), **AR accum4x/8x** (`binary_anchor_ar_grad_accum_{400,800}`, LB96/H96 base), **AR LB336/H96 accum1.5x** (`3961448`–`3961454`), **AR LB96/H720 accum1.5x** (`3961455`, `3961457`, `3961460`), **MS tune** (`hp_max_scale_tuning`), and **MMPD (subset)** (`06-13-binary-mmpd-subset-compare`, jobs `3951201`–`3951207`). Probabilistic metrics: `dpmpp` sampler, 20 steps, 20 samples.
 
 **Pre-fix invalid / incomplete:** Jun 12 `hp_max_scale_tuning` jobs `3943934`–`3943937` (and resumes `3947879`–`3947881`) never searched `max_scale`. Post-fix cosine+warmup `3956633`–`3956640` replaces pre-fix `3943882`–`3943927`. Post-fix MS tune: `3956629`–`3956632` (3h wall); Jun 15 resume `3960877`–`3960879`. **OK:** exchange_rate `3956631`, ETTm1 `3960878`. **Incomplete** (tuned `max_scale≈13.43`, eval pending): ETTh1 `3960877`, weather `3960879`.
 
 | Dataset | Config | Status | anchor_mse | anchor_mae | crps | sample_mean_mse | Job |
 |---|---|---|---|---|---|---|---|
+| ETTh1 | **2d-guidance** | **OK** | 0.4116 | 0.4161 | 0.3114 | 0.4188 | 3965290 |
 | ETTh1 | **AR LB336/H96 accum1.5x** | **OK** | 0.4093 | 0.4158 | 0.3078 | 0.4001 | 3961448 |
 | ETTh1 | **AR LB96/H720 accum1.5x** | **OK** | 0.7242 | 0.5749 | 0.4608 | 0.7137 | 3961455 |
 | ETTh1 | **Binary flat** | **OK** | 0.4059 | 0.4085 | 0.3060 | 0.4185 | 3949852 |
@@ -32,6 +33,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | ETTh1 | **Flat subsets guidance accum8x** | **OK** | 0.4506 | 0.4376 | 0.3281 | 0.4402 | 3961441 |
 | ETTh1 | **Flat subsets** | **OK** | 0.4059 | 0.4085 | 0.3060 | 0.4185 | 3951193 |
 | ETTh1 | **MAE Discrete** | **OK** | 0.4204 | 0.4116 | 0.7263 | 1.0794 | 3949859 |
+| ETTh1 | **MMPD (MaskedAE)** | **ref** | 0.3754 | 0.3996 | 0.3006 | — | 3965321 |
 | ETTh1 | **MMPD (subset)** | **ref** | 0.3762 | 0.3936 | 0.2985 | — | 3951201 |
 | ETTh1 | **MS tune** | **incomplete** | — | — | — | — | 3960877 |
 | ETTh1 | `diff_ema_decay_099` | **OK** | 0.3974 | 0.4040 | 0.3021 | 0.4047 | 3943854 |
@@ -55,6 +57,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | ETTh1 | `hp_num_steps_1200` | **OK** | 0.4092 | 0.4121 | 0.3100 | 0.4244 | 3943886 |
 | ETTh1 | `hp_num_steps_800` | **OK** | 0.4146 | 0.4151 | 0.3098 | 0.4260 | 3943888 |
 | ETTh1 | `sweep_baseline` | **OK** | 0.4059 | 0.4085 | 0.3060 | 0.4185 | 3943890 |
+| ETTh2 | **2d-guidance** | **OK** | 0.3151 | 0.3488 | 0.2682 | 0.3027 | 3965291 |
 | ETTh2 | **AR LB336/H96 accum1.5x** | **OK** | 0.3373 | 0.3690 | 0.2855 | 0.3281 | 3961449 |
 | ETTh2 | **AR LB96/H720 accum1.5x** | **OK** | 0.4503 | 0.4575 | 0.3846 | 0.4490 | 3963347 |
 | ETTh2 | **Binary flat** | **OK** | 0.3199 | 0.3546 | 0.2705 | 0.3104 | 3949853 |
@@ -79,6 +82,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | ETTh2 | **Flat subsets guidance accum8x** | **OK** | 0.3148 | 0.3619 | 0.2941 | 0.3228 | 3961442 |
 | ETTh2 | **Flat subsets** | **OK** | 0.3199 | 0.3546 | 0.2705 | 0.3104 | 3951194 |
 | ETTh2 | **MAE Discrete** | **OK** | 0.3183 | 0.3497 | 0.8584 | 0.5778 | 3949860 |
+| ETTh2 | **MMPD (MaskedAE)** | **ref** | 0.3185 | 0.3655 | 0.2908 | — | 3965322 |
 | ETTh2 | **MMPD (subset)** | **ref** | 0.3186 | 0.3614 | 0.2705 | — | 3951202 |
 | ETTm1 | **MS tune** | **OK** | 0.4679 | 0.4246 | 0.3176 | 0.4398 | 3960878 |
 | ETTm1 | `diff_ema_decay_099` | **OK** | 0.4556 | 0.4231 | 0.3290 | 0.4673 | 3943896 |
@@ -102,6 +106,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | ETTm1 | `hp_num_steps_1200` | **OK** | 0.4754 | 0.4289 | 0.3353 | 0.4862 | 3943928 |
 | ETTm1 | `hp_num_steps_800` | **OK** | 0.4670 | 0.4274 | 0.3382 | 0.4872 | 3943930 |
 | ETTm1 | `sweep_baseline` | **OK** | 0.4683 | 0.4259 | 0.3268 | 0.4642 | 3943932 |
+| electricity | **2d-guidance** | **OK** | 0.1675 | 0.2056 | 0.1547 | 0.1626 | 3965294 |
 | electricity | **AR LB336/H96 accum1.5x** | **OK** | 0.1638 | 0.2048 | 0.1534 | 0.1573 | 3961452 |
 | electricity | **Binary flat** | **OK** | 0.2598 | 0.2713 | 0.2080 | 0.2579 | 3949856 |
 | electricity | **Discrete** | **OK** | 0.2972 | 0.2712 | 0.5994 | 0.7374 | 3948458 |
@@ -125,7 +130,9 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | electricity | **Flat subsets guidance accum8x** | **OK** | 0.2156 | 0.2554 | 0.1873 | 0.2036 | 3961445 |
 | electricity | **Flat subsets** | **OK** | 0.1735 | 0.2132 | 0.1602 | 0.1699 | 3951197 |
 | electricity | **MAE Discrete** | **OK** | 0.1714 | 0.2001 | 0.5281 | 0.5642 | 3949863 |
+| electricity | **MMPD (MaskedAE)** | **ref** | 0.1614 | 0.2123 | 0.1633 | — | 3965325 |
 | electricity | **MMPD (subset)** | **ref** | 0.1617 | 0.2088 | 0.1610 | — | 3951205 |
+| exchange_rate | **2d-guidance** | **OK** | 0.0868 | 0.2059 | 0.1646 | 0.0855 | 3965292 |
 | exchange_rate | **AR LB336/H96 accum1.5x** | **OK** | 0.1035 | 0.2224 | 0.1867 | 0.1013 | 3961450 |
 | exchange_rate | **AR LB96/H720 accum1.5x** | **OK** | 0.8445 | 0.6937 | 0.6506 | 0.9065 | 3961457 |
 | exchange_rate | **Binary flat** | **OK** | 0.0880 | 0.2078 | 0.1660 | 0.0843 | 3949854 |
@@ -152,6 +159,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | exchange_rate | **Flat subsets guidance accum8x** | **OK** | 0.1054 | 0.2328 | 0.1704 | 0.0888 | 3961443 |
 | exchange_rate | **Flat subsets** | **OK** | 0.0880 | 0.2078 | 0.1660 | 0.0843 | 3951195 |
 | exchange_rate | **MAE Discrete** | **OK** | 0.0845 | 0.2039 | 0.4216 | 0.2109 | 3949861 |
+| exchange_rate | **MMPD (MaskedAE)** | **ref** | 0.0884 | 0.2078 | 0.1602 | — | 3965323 |
 | exchange_rate | **MMPD (subset)** | **ref** | 0.0810 | 0.1987 | 0.1563 | — | 3951203 |
 | exchange_rate | **MS tune** | **OK** | 0.0910 | 0.2114 | 0.1676 | 0.0871 | 3956631 |
 | exchange_rate | `diff_ema_decay_099` | **OK** | 0.0893 | 0.2086 | 0.1684 | 0.0881 | 3943855 |
@@ -175,6 +183,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | exchange_rate | `hp_num_steps_1200` | **OK** | 0.0893 | 0.2081 | 0.1686 | 0.0880 | 3943887 |
 | exchange_rate | `hp_num_steps_800` | **OK** | 0.0898 | 0.2115 | 0.1734 | 0.0914 | 3943889 |
 | exchange_rate | `sweep_baseline` | **OK** | 0.0880 | 0.2078 | 0.1660 | 0.0843 | 3943891 |
+| solar_Alabama | **2d-guidance** | **OK** | 0.2121 | 0.2313 | 0.1846 | 0.2046 | 3965296 |
 | solar_Alabama | **AR LB336/H96 accum1.5x** | **OK** | 0.2041 | 0.2229 | 0.1796 | 0.2002 | 3961454 |
 | solar_Alabama | **Binary flat** | **OK** | 0.2170 | 0.2426 | 0.1945 | 0.2172 | 3949858 |
 | solar_Alabama | **Discrete** | **OK** | 0.2560 | 0.2472 | 1.5170 | 3.3009 | 3948460 |
@@ -198,7 +207,9 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | solar_Alabama | **Flat subsets guidance accum8x** | **OK** | 0.2246 | 0.2498 | 0.2010 | 0.2228 | 3961447 |
 | solar_Alabama | **Flat subsets** | **OK** | 0.2170 | 0.2426 | 0.1945 | 0.2172 | 3951199 |
 | solar_Alabama | **MAE Discrete** | **OK** | 0.2540 | 0.3142 | 2.4934 | 5.9180 | 3949865 |
+| solar_Alabama | **MMPD (MaskedAE)** | **ref** | 0.2218 | 0.2521 | 0.1854 | — | 3965327 |
 | solar_Alabama | **MMPD (subset)** | **ref** | 0.2360 | 0.2690 | 0.2013 | — | 3951207 |
+| traffic | **2d-guidance** | **OK** | 0.4621 | 0.2814 | 0.2139 | 0.4352 | 3965295 |
 | traffic | **AR LB336/H96 accum1.5x** | **OK** | 0.4423 | 0.2763 | 0.2092 | 0.4204 | 3961453 |
 | traffic | **AR LB96/H720 accum1.5x** | **OK** | 1.3981 | 0.7447 | 0.6410 | 1.3629 | 3961460 |
 | traffic | **Binary flat** | **OK** | 0.4184 | 0.2813 | 0.2121 | 0.4138 | 3949857 |
@@ -225,7 +236,9 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | traffic | **Flat subsets guidance accum8x** | **OK** | 0.7107 | 0.4152 | 0.3299 | 0.7121 | 3961446 |
 | traffic | **Flat subsets** | **OK** | 0.5263 | 0.3252 | 0.2430 | 0.5130 | 3951198 |
 | traffic | **MAE Discrete** | **OK** | 0.4356 | 0.2597 | 1.0900 | 2.3495 | 3949864 |
+| traffic | **MMPD (MaskedAE)** | **ref** | 0.5412 | 0.3808 | 0.2572 | — | 3965326 |
 | traffic | **MMPD (subset)** | **ref** | 0.5225 | 0.3612 | 0.2515 | — | 3951206 |
+| weather | **2d-guidance** | **OK** | 0.0960 | 0.2196 | 0.1745 | 0.0957 | 3965293 |
 | weather | **AR LB336/H96 accum1.5x** | **OK** | 0.1113 | 0.2312 | 0.1932 | 0.1086 | 3961451 |
 | weather | **Binary flat** | **OK** | 0.0978 | 0.2224 | 0.1776 | 0.1000 | 3949855 |
 | weather | **Discrete** | **OK** | 0.1079 | 0.2280 | 0.3707 | 0.2615 | 3948457 |
@@ -251,6 +264,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | weather | **Flat subsets guidance accum8x** | **OK** | 0.1007 | 0.2260 | 0.1879 | 0.1054 | 3961444 |
 | weather | **Flat subsets** | **OK** | 0.0978 | 0.2224 | 0.1776 | 0.1000 | 3951196 |
 | weather | **MAE Discrete** | **OK** | 0.0980 | 0.2195 | 0.4609 | 0.2603 | 3949862 |
+| weather | **MMPD (MaskedAE)** | **ref** | 0.0949 | 0.2167 | 0.1695 | — | 3965324 |
 | weather | **MMPD (subset)** | **ref** | 0.1128 | 0.2323 | 0.1911 | — | 3951204 |
 | weather | **MS tune** | **incomplete** | — | — | — | — | 3960879 |
 | weather | `diff_ema_decay_099` | **OK** | 0.0971 | 0.2220 | 0.1758 | 0.0970 | 3943897 |

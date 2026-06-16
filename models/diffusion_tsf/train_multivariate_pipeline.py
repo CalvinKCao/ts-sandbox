@@ -388,6 +388,8 @@ DATASET_REGISTRY = {
     'PeMS': ('PeMS/PEMS04.npz', None, 24),
     'solar_Alabama': ('solar_Alabama/solar_Alabama.csv', 'Unnamed: 0', 96),
     'dalia': ('dalia/dalia.csv', 'window_id', 96),
+    # First 500k timesteps only (see datasets/dynamic/dynamic_500K.csv).
+    'dynamic': ('dynamic/dynamic_500K.csv', 'date', 96),
 }
 
 

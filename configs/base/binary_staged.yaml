@@ -88,6 +88,7 @@ experiment:
     PeMS: 11.8
     solar_Alabama: 13.0
     dalia: 6.0
+    dynamic: 6.0
   window_norm_std_floor: 0.1
   dit_patch_size: [8, 8]
   dit_embed_dim: 384

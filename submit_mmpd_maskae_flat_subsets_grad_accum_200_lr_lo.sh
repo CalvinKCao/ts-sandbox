@@ -17,6 +17,7 @@ cd "$SCRIPT_DIR"
 ANCHOR_CONFIG="binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo"
 DATASETS="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
 OUTPUT_DIR="results/datasets/$(date +%m-%d)-mmpd-maskae-grad-accum-200-lr-lo-subset"
+DEPENDENCY=""
 TUNE_ARGS=(--mmpd-tune-trials 7 --mmpd-tune-epochs 10 --mmpd-tune-patience 3 --time 8:00:00)
 
 EXTRA=()
@@ -30,6 +31,7 @@ while [[ $# -gt 0 ]]; do
         --resume) EXTRA+=(--resume); shift ;;
         --force) EXTRA+=(--force); shift ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
+        --dependency) DEPENDENCY="$2"; shift 2 ;;
         --no-tune) TUNE_ARGS=(--time 3:00:00); shift ;;
         *) EXTRA+=("$1"); shift ;;
     esac
@@ -42,5 +44,6 @@ exec ./submit_mmpd_sweep_subset.sh \
     --lookback 96 \
     --horizon 96 \
     --output-dir "$OUTPUT_DIR" \
+    ${DEPENDENCY:+--dependency "$DEPENDENCY"} \
     "${TUNE_ARGS[@]}" \
     "${EXTRA[@]}"

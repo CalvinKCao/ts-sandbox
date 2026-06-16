@@ -72,6 +72,7 @@ DATASET_FILES = {
     "PeMS": REPO_ROOT / "datasets" / "PeMS" / "PEMS04.npz",
     "solar_Alabama": REPO_ROOT / "datasets" / "solar_Alabama" / "solar_Alabama.csv",
     "dalia": REPO_ROOT / "datasets" / "dalia" / "dalia.csv",
+    "dynamic": REPO_ROOT / "datasets" / "dynamic" / "dynamic_500K.csv",
 }
 DATASET_DIMS = {
     "ETTh1": 7,
@@ -86,6 +87,7 @@ DATASET_DIMS = {
     "PeMS": 307,
     "solar_Alabama": 137,
     "dalia": 5,
+    "dynamic": 17,
 }
 DATASET_SPLITS = {
     "ETTh1": "8640,2880,2880",
@@ -100,10 +102,11 @@ DATASET_SPLITS = {
     "PeMS": "0.7,0.1,0.2",
     "solar_Alabama": "0.7,0.1,0.2",
     "dalia": "0.7,0.1,0.2",
+    "dynamic": "0.7,0.1,0.2",
 }
 DEFAULT_DATASETS = [
     "ETTh1", "ETTh2", "ETTm1", "ETTm2", "illness", "exchange_rate",
-    "weather", "electricity", "traffic", "PeMS", "solar_Alabama", "dalia",
+    "weather", "electricity", "traffic", "PeMS", "solar_Alabama", "dalia", "dynamic",
 ]
 ANCHOR_VARIANTS = {
     "gaussian": {"slug": "gauss-anchor", "model_name": "gaussian_anchor"},
