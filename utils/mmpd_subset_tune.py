@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -28,6 +29,15 @@ from utils.mmpd_paper_hparams import (  # noqa: E402
 )
 
 _VALI_RE = re.compile(r"Vali Loss:\s*([0-9.eE+-]+)")
+
+
+def _maskae_neighbor_bounds(run: AnchorRun) -> tuple[int, int]:
+    n_variates = len(run.metadata.get("variate_indices", []))
+    if n_variates < 1:
+        raise ValueError(f"no variate_indices in anchor metadata for {run.dataset}")
+    max_k = n_variates
+    min_k = min(5, max_k)
+    return min_k, max_k
 
 
 def _trial_output_root(args: Any, dataset: str, trial_number: int) -> Path:
@@ -103,7 +113,8 @@ def tune_mmpd_subset(args: Any, run: AnchorRun) -> Dict[str, Any]:
         }
         if args.mmpd_backbone == "MaskAE":
             hparams["finetune_layers"] = trial.suggest_int("finetune_layers", 1, 3)
-            hparams["neighbor_num"] = trial.suggest_int("neighbor_num", 5, 15)
+            min_k, max_k = _maskae_neighbor_bounds(run)
+            hparams["neighbor_num"] = trial.suggest_int("neighbor_num", min_k, max_k)
         print(
             f"[mmpd-tune] {dataset} trial {trial.number}: {hparams}",
             flush=True,
@@ -117,7 +128,14 @@ def tune_mmpd_subset(args: Any, run: AnchorRun) -> Dict[str, Any]:
             patience=int(args.mmpd_tune_patience),
         )
 
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        show_progress_bar=False,
+        catch=(RuntimeError, OSError, subprocess.CalledProcessError, ValueError),
+    )
+    if study.best_trial is None:
+        raise RuntimeError(f"[mmpd-tune] {dataset}: all {n_trials} trials failed")
     best = {**DEFAULT_MMPD_HPARAMS, **study.best_params}
     out_path = tuning_result_path(args.output_dir, dataset)
     out_path.parent.mkdir(parents=True, exist_ok=True)

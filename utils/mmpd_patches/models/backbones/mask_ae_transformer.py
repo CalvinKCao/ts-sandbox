@@ -52,8 +52,13 @@ def _batch_cosine_similarity(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8
     return inner / (denom + eps)
 
 
+def _cap_graph_k(k: int, n_nodes: int) -> int:
+    return max(1, min(int(k), int(n_nodes)))
+
+
 def _k_nearest_neighbor(corr_matrix: torch.Tensor, k: int) -> torch.Tensor:
     batch_size, ts_d, _ = corr_matrix.shape
+    k = _cap_graph_k(k, ts_d)
     edges = torch.topk(corr_matrix, k, dim=-1)[1]
     knn_adj = torch.zeros(batch_size, ts_d, ts_d, device=corr_matrix.device)
     knn_adj.scatter_(-1, edges, 1.0)
@@ -62,10 +67,13 @@ def _k_nearest_neighbor(corr_matrix: torch.Tensor, k: int) -> torch.Tensor:
 
 def _graph_construct(encoded_patch: torch.Tensor, k: int) -> torch.Tensor:
     # encoded_patch: [B, D, past_patch_num, d_model]
+    ts_d = encoded_patch.shape[1]
+    k = _cap_graph_k(k, ts_d)
     channel_encode = encoded_patch.max(dim=-2).values
     corr = _batch_cosine_similarity(channel_encode, channel_encode)
     knn_adj = _k_nearest_neighbor(corr, k)
-    top_k_threshold = torch.topk(corr.reshape(encoded_patch.shape[0], -1), k * encoded_patch.shape[1], dim=-1)[
+    flat_k = min(k * ts_d, ts_d * ts_d)
+    top_k_threshold = torch.topk(corr.reshape(encoded_patch.shape[0], -1), flat_k, dim=-1)[
         0
     ][:, -1]
     top_k_adj = (corr >= top_k_threshold[:, None, None]).float()
@@ -147,8 +155,10 @@ class MaskAETransformer(nn.Module):
             getattr(configs, "finetune_layers", 0) or configs.d_layers
         )
         raw_neighbors = int(getattr(configs, "neighbor_num", 0) or 0)
-        self.neighbor_num = (
-            raw_neighbors if raw_neighbors > 0 else min(10, configs.data_dim)
+        default_k = min(10, configs.data_dim)
+        self.neighbor_num = _cap_graph_k(
+            raw_neighbors if raw_neighbors > 0 else default_k,
+            configs.data_dim,
         )
 
         self.patch_embedding = nn.Linear(self.patch_size, self.d_model, bias=False)
