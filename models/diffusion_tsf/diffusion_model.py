@@ -284,45 +284,74 @@ class DiffusionTSF(nn.Module):
             channels_to_add.append(sine)
         return torch.cat(channels_to_add, dim=1)
 
+    def _resample_1d_time_series(self, x: torch.Tensor, target_len: int) -> torch.Tensor:
+        """Linearly resample the trailing time axis to exactly target_len."""
+        if target_len <= 0:
+            raise ValueError(f"target_len must be positive, got {target_len}")
+        if x.shape[-1] == target_len:
+            return x
+        if x.shape[-1] == 1:
+            return x.expand(*x.shape[:-1], target_len)
+        flat = x.reshape(-1, 1, x.shape[-1])
+        out = F.interpolate(flat, size=target_len, mode="linear", align_corners=False)
+        return out.reshape(*x.shape[:-1], target_len)
+
     def _get_guidance_forecast_norm(
         self,
         past: torch.Tensor,
         past_norm: torch.Tensor,
         stats: Tuple[torch.Tensor, torch.Tensor],
-        forecast_length: int,
+        horizon_width: int,
     ) -> torch.Tensor:
-        """Run the guidance model and return normalized forecast (B, V, forecast_length)."""
+        """Run guidance and return window-normalized 1D series aligned to the 2D canvas width.
+
+        Output shape is (B, V, horizon_width): overlap prefix from past_norm plus a core
+        forecast whose length is horizon_width - lookback_overlap, matching future_norm.
+        """
         if self.guidance_model is None:
             raise ValueError("guidance model is None but guidance channel requested")
         mean, std = stats
-        K = self.config.lookback_overlap
-        H = forecast_length - K
+        K = int(self.config.lookback_overlap)
+        core_len = int(horizon_width) - K
+        if core_len <= 0:
+            raise ValueError(
+                f"horizon_width={horizon_width} must exceed lookback_overlap={K}"
+            )
+
         if self.config.zero_guidance_forecast:
-            coarse_norm = torch.zeros(
+            core_norm = torch.zeros(
                 past.shape[0],
                 self.config.num_variables,
-                H,
+                core_len,
                 device=past.device,
                 dtype=past.dtype,
             )
             if K > 0:
-                coarse_norm = torch.cat([torch.zeros_like(past_norm[..., -K:]), coarse_norm], dim=-1)
-            return coarse_norm
-        chunk_pred = self._chunk_horizon()
-        with torch.no_grad():
-            coarse = self.guidance_model.get_forecast(past, chunk_pred)
-        if coarse.shape[-1] > H:
-            coarse = coarse[..., :H]
-        elif coarse.shape[-1] < H:
-            pad = H - coarse.shape[-1]
-            coarse = torch.cat(
-                [coarse, coarse[..., -1:].expand(*coarse.shape[:-1], pad)],
-                dim=-1,
+                out = torch.cat([torch.zeros_like(past_norm[..., -K:]), core_norm], dim=-1)
+            else:
+                out = core_norm
+        else:
+            overlap = K
+            with torch.no_grad():
+                coarse = self.guidance_model.get_forecast(
+                    past, core_len, overlap=overlap,
+                )
+            coarse = self._resample_1d_time_series(coarse, core_len)
+            if coarse.shape[-1] != core_len:
+                raise RuntimeError(
+                    f"guidance core length {coarse.shape[-1]} != expected {core_len}"
+                )
+            core_norm = (coarse - mean) / std
+            if K > 0:
+                out = torch.cat([past_norm[..., -K:], core_norm], dim=-1)
+            else:
+                out = core_norm
+
+        if out.shape[-1] != horizon_width:
+            raise RuntimeError(
+                f"guidance width {out.shape[-1]} != horizon canvas width {horizon_width}"
             )
-        coarse_norm = (coarse - mean) / std
-        if K > 0:
-            coarse_norm = torch.cat([past_norm[..., -K:], coarse_norm], dim=-1)
-        return coarse_norm  # (B, V, forecast_length) normalized
+        return out
 
     def _get_cross_variate_context(self, past_raw: torch.Tensor) -> Optional[torch.Tensor]:
         """produce (B, V, ctx_dim) encoder_hidden_states for the bottleneck.

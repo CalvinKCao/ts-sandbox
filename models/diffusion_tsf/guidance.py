@@ -19,6 +19,7 @@ class GuidanceModel(Protocol):
         self,
         past: torch.Tensor,
         forecast_length: int,
+        overlap: int = 0,
     ) -> torch.Tensor:
         ...
 
@@ -29,6 +30,7 @@ class BaseGuidance(nn.Module, ABC):
         self,
         past: torch.Tensor,
         forecast_length: int,
+        overlap: int = 0,
     ) -> torch.Tensor:
         pass
 
@@ -36,8 +38,9 @@ class BaseGuidance(nn.Module, ABC):
         self,
         past: torch.Tensor,
         forecast_length: int,
+        overlap: int = 0,
     ) -> torch.Tensor:
-        return self.get_forecast(past, forecast_length)
+        return self.get_forecast(past, forecast_length, overlap=overlap)
 
 
 class iTransformerGuidance(BaseGuidance):
@@ -124,33 +127,28 @@ class iTransformerGuidance(BaseGuidance):
         enc_out, _ = self.model.encoder(enc_out, attn_mask=None)
         return enc_out
 
-    @torch.no_grad()
-    def get_forecast(
-        self,
-        past: torch.Tensor,
-        forecast_length: int,
-    ) -> torch.Tensor:
+    def _model_pred_len(self) -> int:
         pred_expect = self._past_pred_len()
-        if pred_expect is not None and forecast_length != pred_expect:
-            raise ValueError(
-                f"iTransformer was trained for pred_len={pred_expect}, "
-                f"but got forecast_length={forecast_length}"
-            )
+        if pred_expect is not None:
+            return int(pred_expect)
+        return int(getattr(self.model, "pred_len", 1))
 
+    def _forward_raw(self, past: torch.Tensor) -> torch.Tensor:
+        """One iTransformer forward at native pred_len (raw value space)."""
         past = self._slice_past_to_model_len(past)
+        pred_step = self._model_pred_len()
 
         is_univariate = past.dim() == 2
         if is_univariate:
-            past = past.unsqueeze(-1)
+            x_enc = past.unsqueeze(-1)
         else:
-            past = past.permute(0, 2, 1)
+            x_enc = past.permute(0, 2, 1)
 
-        batch_size, seq_len, num_vars = past.shape
-        x_enc = past
+        batch_size, _seq_len, num_vars = x_enc.shape
         x_mark_enc = None
         x_dec = torch.zeros(
-            batch_size, forecast_length, num_vars,
-            device=past.device, dtype=past.dtype,
+            batch_size, pred_step, num_vars,
+            device=x_enc.device, dtype=x_enc.dtype,
         )
         x_mark_dec = None
 
@@ -163,7 +161,43 @@ class iTransformerGuidance(BaseGuidance):
         else:
             output = output.permute(0, 2, 1)
 
-        return output
+        return output[..., :pred_step]
+
+    @torch.no_grad()
+    def get_forecast(
+        self,
+        past: torch.Tensor,
+        forecast_length: int,
+        overlap: int = 0,
+    ) -> torch.Tensor:
+        if forecast_length <= 0:
+            raise ValueError(f"forecast_length must be positive, got {forecast_length}")
+
+        pred_step = self._model_pred_len()
+        if forecast_length <= pred_step:
+            return self._forward_raw(past)[..., :forecast_length]
+
+        K = max(0, int(overlap))
+        chunks = []
+        remaining = forecast_length
+        cur_past = past
+
+        while remaining > 0:
+            step_out = self._forward_raw(cur_past)
+            take = min(remaining, pred_step)
+            chunks.append(step_out[..., :take])
+            remaining -= take
+            if remaining <= 0:
+                break
+
+            if K > 0:
+                roll = step_out[..., K:pred_step]
+                cur_past = torch.cat([cur_past[..., K:], step_out[..., :K], roll], dim=-1)
+            else:
+                cur_past = torch.cat([cur_past, step_out], dim=-1)
+            cur_past = self._slice_past_to_model_len(cur_past)
+
+        return torch.cat(chunks, dim=-1)
 
 
 class iTransformerTokenAdapter(nn.Module):
