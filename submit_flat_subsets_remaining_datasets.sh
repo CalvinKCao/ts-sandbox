@@ -17,7 +17,7 @@
 #   ./submit_flat_subsets_remaining_datasets.sh --smoke
 #   ./submit_flat_subsets_remaining_datasets.sh
 #   ./submit_flat_subsets_remaining_datasets.sh --datasets ETTm1,illness
-#   ./submit_flat_subsets_remaining_datasets.sh --skip-maskae
+#   ./submit_flat_subsets_remaining_datasets.sh --skip-ema099 --prereq-jobs-file /tmp/ema099.jobs
 #
 set -euo pipefail
 
@@ -38,6 +38,7 @@ SKIP_MASKAE=0
 SKIP_GUIDANCE=0
 SKIP_LR_LO=0
 SKIP_EMA099=0
+PREREQ_JOBS_FILE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -47,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         --skip-guidance) SKIP_GUIDANCE=1; shift ;;
         --skip-lr-lo) SKIP_LR_LO=1; shift ;;
         --skip-ema099) SKIP_EMA099=1; shift ;;
+        --prereq-jobs-file) PREREQ_JOBS_FILE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -80,13 +82,9 @@ echo ""
 
 slurm_dep_from_file() {
     local file="$1"
-    local dep=""
     [[ -s "$file" ]] || return 0
-    while read -r jid; do
-        [[ -n "$jid" ]] || continue
-        dep="${dep}:afterok:${jid}"
-    done < "$file"
-    echo "${dep#:}"
+    # Slurm: afterok:id1:id2:... (one afterok prefix, not afterok:id1:afterok:id2)
+    echo "afterok:$(paste -sd: "$file" | tr -d '[:space:]')"
 }
 
 EMA099_JOBS_FILE="$(mktemp)"
@@ -118,11 +116,16 @@ if [[ "$SKIP_EMA099" -eq 0 ]]; then
         --datasets "$DATASETS_CSV" \
         --time "$WALL_EMA099" \
         --job-ids-out "$EMA099_JOBS_FILE"
+elif [[ -n "$PREREQ_JOBS_FILE" ]]; then
+    cp "$PREREQ_JOBS_FILE" "$EMA099_JOBS_FILE"
 fi
 
 EMA_DEP="$(slurm_dep_from_file "$EMA099_JOBS_FILE")"
 DEP_ARGS=()
-[[ -n "$EMA_DEP" ]] && DEP_ARGS=(--dependency "$EMA_DEP")
+if [[ -n "$EMA_DEP" ]]; then
+    DEP_ARGS=(--dependency "$EMA_DEP")
+    echo "ema099 dependency: $EMA_DEP"
+fi
 
 if [[ "$SKIP_GUIDANCE" -eq 0 ]]; then
     echo "=== [2a/3] binary guidance accum 1.5x ==="
@@ -152,10 +155,12 @@ if [[ "$SKIP_MASKAE" -eq 0 ]]; then
             --output-dir "results/datasets/$(date +%m-%d)-mmpd-maskae-remaining-subset"
     else
         echo "=== [3/3] MMPD MaskAE (after lr_lo: ${LR_DEP:-pending}) ==="
+        MASKAE_DEP_ARGS=()
+        [[ -n "$LR_DEP" ]] && MASKAE_DEP_ARGS=(--dependency "$LR_DEP")
         ./submit_mmpd_maskae_flat_subsets_grad_accum_200_lr_lo.sh \
             --datasets "$DATASETS_CSV" \
             --output-dir "results/datasets/$(date +%m-%d)-mmpd-maskae-remaining-subset" \
-            ${LR_DEP:+--dependency "$LR_DEP"}
+            "${MASKAE_DEP_ARGS[@]}"
     fi
 fi
 
