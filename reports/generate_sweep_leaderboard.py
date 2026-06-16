@@ -88,6 +88,7 @@ CONFIG_ALIASES = {
     "binary_anchor_stationary_flat_subsets_grad_accum_125": "**Flat subsets accum1.25x**",
     "binary_anchor_stationary_flat_subsets_grad_accum_150": "**Flat subsets accum1.5x**",
     "binary_anchor_stationary_flat_subsets_grad_accum_200": "**Flat subsets accum2.0x**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_400": "**Flat subsets accum4x**",
     "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo": "**Flat subsets accum1.5x LR-lo**",
     "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_hi": "**Flat subsets accum1.5x LR-hi**",
     "binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo": "**Flat subsets accum2.0x LR-lo**",
@@ -640,6 +641,7 @@ def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
             "grad-accum reuse sweep (`grad_accum_{125,150,200}`, jobs `3953944`–`3953964`; "
             "LR-band split `grad_accum_{150,200}_lr_{lo,hi}`, jobs `3954784`–`3954810`), "
             "**Flat subsets guidance accum** {1.5×, 2×, 4×, 8×} (`grad_accum_guidance_{150,200,400,800}`, jobs `3961419`–`3961447`), "
+            "**Flat subsets accum4x** no guidance (`grad_accum_400`, jobs `3963967`–`3963973`), "
             "EMA0.99 lookback variants (`ema099_lb336_hz96`, `ema099_lb96_hz720`, jobs `3955091`–`3955098`), "
             "**AR accum4x/8x** (`binary_anchor_ar_grad_accum_{400,800}`, LB96/H96 base), "
             "**AR LB336/H96 accum1.5x** (`3961448`–`3961454`), "
@@ -711,6 +713,7 @@ def write_leaderboard(
             "Grad-accum reuse sweep: effective batch {1.25×, 1.5×, 2.0×} (jobs `3953944`–`3953964`); "
             "LR-band split on 1.5×/2.0× (`3954784`–`3954810`). "
             "**Flat subsets guidance accum** {1.5×, 2×, 4×, 8×} (jobs `3961419`–`3961447`). "
+            "**Flat subsets accum4x** no guidance (jobs `3963967`–`3963973`). "
             "EMA0.99 lookback variants: LB336/H96 and LB96/H720 (`3955091`–`3955098`). "
             "**AR accum4x/8x** (`binary_anchor_ar_grad_accum_{400,800}`, LB96/H96). "
             "**AR LB336/H96 accum1.5x** (`3961448`–`3961454`); "
