@@ -1,6 +1,6 @@
 #!/bin/bash
 # MMPD MaskAE on flat subsets aligned with grad-accum-200-lr-lo binary ckpts.
-# Runs 5 Optuna trials/dataset (lr, point_weight, dropout; + TC depth/kNN for MaskAE)
+# Runs 7 Optuna trials/dataset (lr, point_weight; + TC depth/kNN for MaskAE)
 # then full 20-epoch train with the best validation loss config.
 #
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
@@ -17,7 +17,7 @@ cd "$SCRIPT_DIR"
 ANCHOR_CONFIG="binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo"
 DATASETS="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
 OUTPUT_DIR="results/datasets/$(date +%m-%d)-mmpd-maskae-grad-accum-200-lr-lo-subset"
-TUNE_ARGS=(--mmpd-tune-trials 5 --mmpd-tune-epochs 10 --mmpd-tune-patience 3 --time 8:00:00)
+TUNE_ARGS=(--mmpd-tune-trials 7 --mmpd-tune-epochs 10 --mmpd-tune-patience 3 --time 8:00:00)
 
 EXTRA=()
 while [[ $# -gt 0 ]]; do

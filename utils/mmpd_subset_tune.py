@@ -99,7 +99,7 @@ def tune_mmpd_subset(args: Any, run: AnchorRun) -> Dict[str, Any]:
             "point_weight": trial.suggest_float(
                 "point_weight", 0.005, 0.05, log=True
             ),
-            "dropout": trial.suggest_float("dropout", 0.05, 0.35),
+            "dropout": 0.2,
         }
         if args.mmpd_backbone == "MaskAE":
             hparams["finetune_layers"] = trial.suggest_int("finetune_layers", 1, 3)
