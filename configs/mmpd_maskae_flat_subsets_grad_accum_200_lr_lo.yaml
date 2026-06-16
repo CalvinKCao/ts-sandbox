@@ -1,9 +1,7 @@
-# MMPD MaskAE eval on the same flat variate subsets as
-# binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo.
+# MMPD MaskAE eval on ETTh1-capped flat subsets (YAML data_subset policy).
 #
-# Subset ids / variate indices are read from binary checkpoint metadata
-# (results/ckpts/*-<dataset>-binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo).
-# Train binary ckpts for that config first if missing.
+# Subset ids / variate indices resolved from configs/binary_anchor_stationary_flat_subsets.yaml
+# (same ETTh1-capped policy as binary flat-subset runs). No binary ckpts required.
 #
 # Submit (Killarney login, $SCRATCH/ts-sandbox):
 #   ./submit_mmpd_maskae_flat_subsets_grad_accum_200_lr_lo.sh --smoke-test
@@ -17,7 +15,7 @@ experiment:
 
 mmpd:
   backbone: MaskAE
-  anchor_config: binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo
+  subset_config: binary_anchor_stationary_flat_subsets.yaml
   lookback: 96
   horizon: 96
   datasets:

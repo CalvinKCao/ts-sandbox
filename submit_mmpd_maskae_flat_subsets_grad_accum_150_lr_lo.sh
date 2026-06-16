@@ -2,11 +2,11 @@
 # MMPD MaskAE on flat subsets from YAML data_subset policy (no binary ckpts required).
 #
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
-#   ./submit_mmpd_maskae_flat_subsets_grad_accum_200_lr_lo.sh --smoke-test
-#   ./submit_mmpd_maskae_flat_subsets_grad_accum_200_lr_lo.sh
-#   ./submit_mmpd_maskae_flat_subsets_grad_accum_200_lr_lo.sh --datasets ETTm1,illness
-#   ./submit_mmpd_maskae_flat_subsets_grad_accum_200_lr_lo.sh --resume \
-#       --output-dir results/datasets/06-15-mmpd-maskae-grad-accum-200-lr-lo-subset
+#   ./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh --smoke-test
+#   ./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh
+#   ./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh --datasets ETTm1,illness
+#   ./submit_mmpd_maskae_flat_subsets_grad_accum_150_lr_lo.sh --resume \
+#       --output-dir results/datasets/06-16-mmpd-maskae-grad-accum-150-lr-lo-subset
 
 set -euo pipefail
 
@@ -15,7 +15,7 @@ cd "$SCRIPT_DIR"
 
 SUBSET_CONFIG="configs/binary_anchor_stationary_flat_subsets.yaml"
 DATASETS="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
-OUTPUT_DIR="results/datasets/$(date +%m-%d)-mmpd-maskae-grad-accum-200-lr-lo-subset"
+OUTPUT_DIR="results/datasets/$(date +%m-%d)-mmpd-maskae-grad-accum-150-lr-lo-subset"
 DEPENDENCY=""
 TUNE_ARGS=(--mmpd-tune-trials 7 --mmpd-tune-epochs 10 --mmpd-tune-patience 3 --time 8:00:00)
 

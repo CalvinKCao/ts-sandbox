@@ -1,17 +1,14 @@
 #!/bin/bash
-# Train + eval MMPD using variate/stride subsets from binary-anchor checkpoint metadata.
+# Train + eval MMPD on ETTh1-capped variate subsets (from YAML data_subset policy).
 #
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
-#   ./submit_mmpd_sweep_subset.sh --anchor-config binary_anchor_stationary_flat_subsets
 #   ./submit_mmpd_sweep_subset.sh --smoke-test
 #   ./submit_mmpd_sweep_subset.sh --output-dir results/datasets/06-12-sweep-subset-mmpd
-#   ./submit_mmpd_sweep_subset.sh --resume --output-dir results/datasets/06-12-sweep-subset-mmpd
 #   ./submit_mmpd_sweep_subset.sh --datasets ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama
-#   ./submit_mmpd_sweep_subset.sh --anchor-config binary_anchor_stationary_flat_subsets_ema099_lb336_hz96 \
-#       --lookback 336 --horizon 96 --datasets ETTh1,exchange_rate,weather,traffic
 #   ./submit_mmpd_sweep_subset.sh --mmpd-backbone MaskAE --output-dir results/datasets/06-15-mmpd-maskae-subset
+#   ./submit_mmpd_sweep_subset.sh --use-anchor-ckpts --anchor-config binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo
 #
-# MMPD-only: does not submit binary-anchor re-eval workers.
+# Default: --subset-config (no binary ckpts required). Legacy ckpt mode: --use-anchor-ckpts.
 
 set -euo pipefail
 
@@ -20,6 +17,8 @@ SMOKE=0
 RESUME=0
 FORCE=0
 OUTPUT_DIR=""
+SUBSET_CONFIG="configs/binary_anchor_stationary_flat_subsets.yaml"
+USE_ANCHOR_CKPTS=0
 ANCHOR_CONFIG="binary_anchor_stationary_flat_subsets"
 DATASETS_CSV="ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama"
 DEPENDENCY=""
@@ -40,7 +39,9 @@ while [[ $# -gt 0 ]]; do
         --resume) RESUME=1; shift ;;
         --force) FORCE=1; shift ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
-        --anchor-config) ANCHOR_CONFIG="$2"; shift 2 ;;
+        --subset-config) SUBSET_CONFIG="$2"; shift 2 ;;
+        --use-anchor-ckpts) USE_ANCHOR_CKPTS=1; shift ;;
+        --anchor-config) ANCHOR_CONFIG="$2"; USE_ANCHOR_CKPTS=1; shift 2 ;;
         --datasets) DATASETS_CSV="$2"; shift 2 ;;
         --dependency) DEPENDENCY="$2"; shift 2 ;;
         --lookback) LOOKBACK="$2"; shift 2 ;;
@@ -107,13 +108,15 @@ pick_resume_output_dir() {
 }
 
 ANCHOR_ROOTS=()
-for ds in "${DATASETS[@]}"; do
-    if root="$(pick_anchor_root "$ds")"; then
-        ANCHOR_ROOTS+=( "$root" )
-    else
-        ANCHOR_ROOTS+=( "(pending: *-${ds}-${ANCHOR_CONFIG})" )
-    fi
-done
+if [[ "$USE_ANCHOR_CKPTS" -eq 1 ]]; then
+    for ds in "${DATASETS[@]}"; do
+        if root="$(pick_anchor_root "$ds")"; then
+            ANCHOR_ROOTS+=( "$root" )
+        else
+            ANCHOR_ROOTS+=( "(pending: *-${ds}-${ANCHOR_CONFIG})" )
+        fi
+    done
+fi
 
 if [[ -z "$OUTPUT_DIR" ]]; then
     if [[ "$RESUME" -eq 1 ]]; then
@@ -133,7 +136,6 @@ EVAL_BASE=(
     "$REPO/utils/eval_mmpd_gaussian_anchor.py"
     --output-dir "$OUTPUT_DIR"
     --ckpt-base "$REPO/results/ckpts"
-    --anchor-config "$ANCHOR_CONFIG"
     --lookback "$LOOKBACK"
     --horizon "$HORIZON"
     --mmpd-repo "$REPO/temp/MMPD"
@@ -144,6 +146,14 @@ EVAL_BASE=(
     --force-mmpd-eval
     --force-indices
 )
+if [[ "$USE_ANCHOR_CKPTS" -eq 1 ]]; then
+    EVAL_BASE+=(--anchor-config "$ANCHOR_CONFIG")
+else
+    EVAL_BASE+=(
+        --subset-config "$REPO/$SUBSET_CONFIG"
+        --mmpd-only
+    )
+fi
 
 if [[ "$FORCE" -eq 1 || "$RESUME" -eq 0 ]]; then
     EVAL_BASE+=(--force-mmpd-train)
@@ -173,7 +183,6 @@ if [[ "$SMOKE" -eq 1 ]]; then
         "$REPO/utils/eval_mmpd_gaussian_anchor.py"
         --output-dir "$OUTPUT_DIR"
         --ckpt-base "$REPO/results/ckpts"
-        --anchor-config "$ANCHOR_CONFIG"
         --lookback "$LOOKBACK"
         --horizon "$HORIZON"
         --mmpd-repo "$REPO/temp/MMPD"
@@ -184,6 +193,11 @@ if [[ "$SMOKE" -eq 1 ]]; then
         --force-mmpd-eval
         --force-indices
     )
+    if [[ "$USE_ANCHOR_CKPTS" -eq 1 ]]; then
+        EVAL_BASE+=(--anchor-config "$ANCHOR_CONFIG")
+    else
+        EVAL_BASE+=(--subset-config "$REPO/$SUBSET_CONFIG" --mmpd-only)
+    fi
     if [[ "$FORCE" -eq 1 || "$RESUME" -eq 0 ]]; then
         EVAL_BASE+=(--force-mmpd-train)
     fi
@@ -270,15 +284,21 @@ SBATCH_COMMON=(
 
 echo "Repo:          $REPO"
 echo "Output:        $OUTPUT_DIR"
-echo "Anchor config: $ANCHOR_CONFIG"
+if [[ "$USE_ANCHOR_CKPTS" -eq 1 ]]; then
+    echo "Subset source: anchor ckpts (*-<dataset>-${ANCHOR_CONFIG})"
+else
+    echo "Subset source: $SUBSET_CONFIG (YAML data_subset)"
+fi
 echo "Lookback/horizon: $LOOKBACK / $HORIZON"
 echo "MMPD backbone:   $MMPD_BACKBONE"
 echo "MMPD tune:       trials=$MMPD_TUNE_TRIALS epochs=$MMPD_TUNE_EPOCHS patience=$MMPD_TUNE_PATIENCE"
 echo "Resume:        $RESUME  Force: $FORCE"
 echo "Datasets:      ${DATASETS[*]}"
-for i in "${!DATASETS[@]}"; do
-    echo "  ${DATASETS[$i]} <- ${ANCHOR_ROOTS[$i]}"
-done
+if [[ "$USE_ANCHOR_CKPTS" -eq 1 ]]; then
+    for i in "${!DATASETS[@]}"; do
+        echo "  ${DATASETS[$i]} <- ${ANCHOR_ROOTS[$i]}"
+    done
+fi
 
 SKIP_INIT=0
 if [[ "$RESUME" -eq 1 && -f "$OUTPUT_DIR/run_manifest.json" ]]; then

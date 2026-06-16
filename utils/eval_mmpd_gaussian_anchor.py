@@ -118,8 +118,8 @@ class AnchorRun:
     dataset: str
     root: Path
     subset_dir: Path
-    best_pt: Path
-    itrans_pt: Path
+    best_pt: Optional[Path]
+    itrans_pt: Optional[Path]
     metadata: Dict[str, Any]
 
 
@@ -475,6 +475,88 @@ def _anchor_metadata_rank(meta_path: Path) -> int:
     if stage not in STAGED_ANCHOR_STAGES:
         return len(STAGED_ANCHOR_STAGES)
     return STAGED_ANCHOR_STAGES.index(stage)
+
+
+def _load_data_subset_policy(config_path: Path) -> Dict[str, Any]:
+    from models.diffusion_tsf.pipeline.config import load_experiment_config
+
+    cfg = load_experiment_config(str(config_path.resolve()))
+    policy = cfg.get("experiment", {}).get("data_subset")
+    if not policy:
+        raise ValueError(f"{config_path} missing experiment.data_subset")
+    return dict(policy)
+
+
+def resolve_subset_meta_for_dataset(
+    dataset: str,
+    policy: Dict[str, Any],
+    seed: int,
+) -> Dict[str, Any]:
+    from models.diffusion_tsf.pipeline.data_subset import resolve_data_subset
+    from models.diffusion_tsf.train_multivariate_pipeline import get_dataset_shape
+
+    raw_rows, raw_variates = get_dataset_shape(dataset)
+    target_dataset = policy.get("target_dataset")
+    target_rows = target_variates = None
+    if target_dataset:
+        target_rows, target_variates = get_dataset_shape(str(target_dataset))
+    return resolve_data_subset(
+        dataset_name=dataset,
+        raw_rows=raw_rows,
+        raw_variates=raw_variates,
+        base_variate_indices=list(range(raw_variates)),
+        default_subset_id=None,
+        default_window_stride=1,
+        seed=seed,
+        policy=policy,
+        target_rows=target_rows,
+        target_variates=target_variates,
+    )
+
+
+def build_anchor_run_from_subset_meta(
+    dataset: str,
+    subset_meta: Dict[str, Any],
+    *,
+    variant: str = "binary",
+) -> AnchorRun:
+    subset_id = str(subset_meta["subset_id"])
+    metadata = {
+        "dataset_name": dataset,
+        "dataset": dataset,
+        "subset_id": subset_id,
+        "variate_indices": [int(i) for i in subset_meta["variate_indices"]],
+        "data_subset": subset_meta,
+    }
+    stub = REPO_ROOT / "results" / "subset_spec" / dataset
+    return AnchorRun(
+        variant=variant,
+        dataset=dataset,
+        root=stub,
+        subset_dir=stub / subset_id,
+        best_pt=None,
+        itrans_pt=None,
+        metadata=metadata,
+    )
+
+
+def build_anchor_runs_from_subset_config(
+    config_path: Path,
+    datasets: Sequence[str],
+    seed: int,
+) -> Dict[str, AnchorRun]:
+    policy = _load_data_subset_policy(config_path)
+    runs: Dict[str, AnchorRun] = {}
+    for dataset in datasets:
+        subset_meta = resolve_subset_meta_for_dataset(dataset, policy, seed)
+        runs[dataset] = build_anchor_run_from_subset_meta(dataset, subset_meta)
+        print(
+            f"[subset-config] {dataset}: {subset_meta['subset_id']} "
+            f"variates={subset_meta['n_variates']} "
+            f"stride={subset_meta['sample_stride']}",
+            flush=True,
+        )
+    return runs
 
 
 def _roots_for_anchor_config(
@@ -1186,6 +1268,11 @@ def resolve_inference_cfg(
 
 
 def load_anchor_model(run: AnchorRun, args: argparse.Namespace, device: torch.device):
+    if run.best_pt is None or run.itrans_pt is None:
+        raise ValueError(
+            f"anchor eval for {run.dataset} requires binary ckpts; "
+            "use --anchor-config instead of --subset-config."
+        )
     pipeline = load_tsf_pipeline()
     ckpt = torch.load(run.best_pt, map_location=device, weights_only=False)
     n_vars = len(run.metadata["variate_indices"])
@@ -1884,8 +1971,10 @@ def load_partial_metrics(output_dir: Path, dataset: str, model: str) -> Optional
 def collect_results_from_partials(
     output_dir: Path,
     datasets: Sequence[str],
+    *,
+    mmpd_only: bool = False,
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
-    model_names = ["mmpd", "binary_anchor"]
+    model_names = ["mmpd"] if mmpd_only else ["mmpd", "binary_anchor"]
     results: Dict[str, Dict[str, Dict[str, float]]] = {}
     missing: List[str] = []
     for dataset in datasets:
@@ -1908,6 +1997,18 @@ def discover_anchors_by_variant(
     args: argparse.Namespace,
     datasets: Sequence[str],
 ) -> Dict[str, Dict[str, AnchorRun]]:
+    if args.subset_config is not None:
+        return {
+            "binary": build_anchor_runs_from_subset_config(
+                args.subset_config,
+                datasets,
+                args.seed,
+            ),
+        }
+    if not args.anchor_config and not args.binary_anchor_root:
+        raise ValueError(
+            "Set --subset-config (recommended) or --anchor-config / --binary-anchor-root."
+        )
     return {
         "binary": find_anchor_runs(
             datasets,
@@ -1924,8 +2025,8 @@ def anchors_to_manifest(anchors_by_variant: Dict[str, Dict[str, AnchorRun]]) -> 
         variant: {
             d: {
                 "root": str(r.root),
-                "best_pt": str(r.best_pt),
-                "itrans_pt": str(r.itrans_pt),
+                "best_pt": str(r.best_pt) if r.best_pt else None,
+                "itrans_pt": str(r.itrans_pt) if r.itrans_pt else None,
                 "metadata": r.metadata,
             }
             for d, r in anchors.items()
@@ -2020,7 +2121,11 @@ def run_phase_merge(args: argparse.Namespace, commit: str) -> None:
             "indices_by_dataset": {},
         }
 
-    results = collect_results_from_partials(args.output_dir, args.datasets)
+    results = collect_results_from_partials(
+        args.output_dir,
+        args.datasets,
+        mmpd_only=args.mmpd_only,
+    )
     manifest["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     write_outputs(args, manifest, results)
     print_summary(results, profile=args.metrics_profile)
@@ -2121,10 +2226,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gaussian-anchor-root", action="append", type=Path, default=[])
     parser.add_argument("--binary-anchor-root", action="append", type=Path, default=[])
     parser.add_argument(
+        "--subset-config",
+        type=Path,
+        default=None,
+        help="YAML with experiment.data_subset; resolve variates/stride per dataset (no binary ckpts).",
+    )
+    parser.add_argument(
         "--anchor-config",
         type=str,
         default=None,
-        help="Resolve binary ckpts as <ckpt-base>/*-<dataset>-<anchor-config> (newest mtime).",
+        help="Legacy: resolve binary ckpts as <ckpt-base>/*-<dataset>-<anchor-config>.",
+    )
+    parser.add_argument(
+        "--mmpd-only",
+        action="store_true",
+        help="Train/eval MMPD only; merge expects mmpd partials (no binary_anchor).",
     )
     parser.add_argument("--ckpt-base", type=Path, default=REPO_ROOT / "results" / "ckpts")
     parser.add_argument("--mmpd-repo", type=Path, default=DEFAULT_MMPD_REPO)
@@ -2300,6 +2416,8 @@ def main() -> None:
         args.indices_dir = args.indices_dir.resolve()
     if args.mmpd_output_root is not None:
         args.mmpd_output_root = args.mmpd_output_root.resolve()
+    if args.subset_config is not None:
+        args.subset_config = args.subset_config.resolve()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     commit = ensure_mmpd_repo(args.mmpd_repo, update=not args.no_update_mmpd)
