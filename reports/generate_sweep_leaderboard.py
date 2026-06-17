@@ -20,13 +20,13 @@ MMPD_DIR_MASKAE_150 = os.path.join(
     RESULTS, "06-16-mmpd-maskae-grad-accum-150-lr-lo-subset", "partials"
 )
 MMPD_DIR_MASKAE_FAIR = os.path.join(
-    RESULTS, "06-17-mmpd-maskae-fair-13d", "partials"
+    RESULTS, "06-16-mmpd-maskae-fair-13d", "partials"
 )
 MMPD_SOURCE_LEGACY = "06-12-sweep-subset-mmpd"
 MMPD_SOURCE_SUBSET = "06-13-binary-mmpd-subset-compare"
 MMPD_SOURCE_MASKAE = "06-15-mmpd-maskae-grad-accum-200-lr-lo-tune"
 MMPD_SOURCE_MASKAE_150 = "06-16-mmpd-maskae-grad-accum-150-lr-lo-subset"
-MMPD_SOURCE_MASKAE_FAIR = "06-17-mmpd-maskae-fair-13d"
+MMPD_SOURCE_MASKAE_FAIR = "06-16-mmpd-maskae-fair-13d"
 MMPD_MASKAE_LABEL = "**MMPD (MaskedAE)**"
 MMPD_REF_CONFIGS = frozenset({"**MMPD**", "**MMPD (subset)**", MMPD_MASKAE_LABEL})
 LOGS = os.path.join(REPO, "results", "logs")
