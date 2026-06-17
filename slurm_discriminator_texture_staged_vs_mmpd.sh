@@ -44,6 +44,8 @@ DISC_OUTPUT_SUFFIX="results/datasets/06-14-disc-texture-flat-subsets-ema099-vs-m
 RAW_OUTPUT_SUFFIX="results/datasets/06-14-raw-texture-flat-subsets-ema099-vs-mmpd"
 REPORT_SUFFIX="reports/06-14_discriminator_texture_flat_subsets_ema099_vs_mmpd.md"
 DATASETS_CSV=""
+TEST_STRIDE=""
+MMPD_BACKBONE="MaskAE"
 
 resolve_output_dir() {
     local repo_root="$1"
@@ -71,6 +73,8 @@ while [[ $# -gt 0 ]]; do
         --raw-run) RAW_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
         --report) REPORT_SUFFIX="$2"; shift 2 ;;
         --datasets) DATASETS_CSV="$2"; shift 2 ;;
+        --test-stride) TEST_STRIDE="$2"; shift 2 ;;
+        --mmpd-backbone) MMPD_BACKBONE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -87,6 +91,19 @@ fi
 FAKE_SOURCES=(binary_staged mmpd)
 
 RUN_TAG="$(basename "$DISC_OUTPUT_SUFFIX")"
+
+append_run_config_args() {
+    local -n _out=$1
+    _out+=(--anchor-config "$ANCHOR_CONFIG")
+    _out+=(--mmpd-run "$(basename "$MMPD_OUTPUT_SUFFIX")")
+    _out+=(--disc-run "$(basename "$DISC_OUTPUT_SUFFIX")")
+    _out+=(--raw-run "$(basename "$RAW_OUTPUT_SUFFIX")")
+    _out+=(--report "$REPORT_SUFFIX")
+    _out+=(--mmpd-backbone MaskAE)
+    if [[ -n "${TEST_STRIDE:-}" ]]; then
+        _out+=(--test-stride "$TEST_STRIDE")
+    fi
+}
 
 # ---------------------------------------------------------------------------
 # Login node: submit
@@ -113,6 +130,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         RUN_STEM="$(date +%m-%d)-${RUN_TAG}${SMOKE_SUFFIX}${BIN_SUFFIX}"
         LOG_DIR="$REPO/results/logs/${RUN_STEM}"
         mkdir -p "$LOG_DIR"
+        MERGE_ARGS=(--merge-partials-only)
+        append_run_config_args MERGE_ARGS
         echo "Submitting merge-only job..."
         sbatch \
             --job-name="disc-tex-merge${SMOKE_SUFFIX}${BIN_SUFFIX}" \
@@ -125,8 +144,9 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --error="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}${BIN_SUFFIX}-%j.log" \
             --mail-type=FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",REPORT_SUFFIX="$REPORT_SUFFIX" \
-            "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh"
+            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER" \
+            "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh" \
+            "${MERGE_ARGS[@]}"
         exit 0
     fi
 
@@ -177,6 +197,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         for src in "${SUBMIT_SOURCES[@]}"; do
             JOB_NAME="disc-tex-${ds}-${src}${SMOKE_SUFFIX}"
             SUBMIT_ARGS=(--dataset "$ds" --fake-source "$src")
+            append_run_config_args SUBMIT_ARGS
             [[ "$SMOKE" -eq 1 ]] && SUBMIT_ARGS+=(--smoke-test)
             [[ "$FORCE_RAW" -eq 1 ]] && SUBMIT_ARGS+=(--force-raw-eval)
             [[ "$FORCE_TRAIN" -eq 1 ]] && SUBMIT_ARGS+=(--force-train)
@@ -196,7 +217,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
                 --error="$LOG_DIR/${JOB_NAME}-%j.log" \
                 --mail-type=FAIL \
                 --mail-user=ccao87@uwo.ca \
-                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",SLICE_LENGTH="$SLICE_LENGTH",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",REPORT_SUFFIX="$REPORT_SUFFIX" \
+                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",SLICE_LENGTH="$SLICE_LENGTH",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",BIN_MATCH_FILTER="$BIN_MATCH_FILTER" \
                 "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh" \
                 "${SUBMIT_ARGS[@]}")"
             JOB_IDS+=("$job_id")
@@ -206,20 +227,23 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     if [[ "${#JOB_IDS[@]}" -gt 0 ]]; then
         dep="afterok:$(IFS=:; echo "${JOB_IDS[*]}")"
         echo "Submitting merge job (depends on ${#JOB_IDS[@]} shard job(s))..."
+        MERGE_ARGS=(--merge-partials-only)
+        append_run_config_args MERGE_ARGS
         sbatch \
             --dependency="$dep" \
-            --job-name="disc-tex-merge${SMOKE_SUFFIX}" \
+            --job-name="disc-tex-merge${SMOKE_SUFFIX}${BIN_SUFFIX}" \
             --account=aip-boyuwang \
             --nodes=1 \
             --cpus-per-task=2 \
             --mem=4G \
             --time=0:15:00 \
-            --output="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}-%j.log" \
-            --error="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}-%j.log" \
+            --output="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}${BIN_SUFFIX}-%j.log" \
+            --error="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}${BIN_SUFFIX}-%j.log" \
             --mail-type=FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",REPORT_SUFFIX="$REPORT_SUFFIX" \
-            "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh"
+            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER" \
+            "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh" \
+            "${MERGE_ARGS[@]}"
     fi
     exit 0
 fi
@@ -332,10 +356,11 @@ EVAL_ARGS=(
     --ckpt-base "$CKPT_BASE"
     --anchor-config "$ANCHOR_CONFIG"
     --mmpd-output-root "$MMPD_ROOT"
+    --mmpd-backbone "${MMPD_BACKBONE:-MaskAE}"
     --mmpd-repo "$MMPD_REPO"
     --mmpd-data-dir "$MMPD_DATA"
     --test-fraction 1.0
-    --test-stride 2
+    --test-stride "${TEST_STRIDE:-2}"
     --num-sampling-steps 20
     --probabilistic-sampler dpmpp
     --gmm-components 1

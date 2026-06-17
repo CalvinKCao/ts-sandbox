@@ -28,6 +28,7 @@ from utils.dual_scale_bin_filter import (
     BIN_MATCH_CHOICES,
     apply_bin_match_to_bundle,
 )
+from utils.binary_disc_debias import debias_binary_staged_fakes, resolve_dual_scale_bin_params
 from utils.eval_mmpd_gaussian_anchor import (
     DEFAULT_MMPD_DATA,
     DEFAULT_MMPD_REPO,
@@ -166,6 +167,8 @@ def saved_indices(raw_eval_dir: Path, dataset: str) -> Optional[List[int]]:
 def raw_eval_args(args: argparse.Namespace) -> argparse.Namespace:
     out = copy.copy(args)
     out.output_dir = args.raw_eval_dir
+    out.mmpd_output_root = args.mmpd_output_root
+    out.mmpd_backbone = getattr(args, "mmpd_backbone", "MaskAE")
     out.force_binary_eval = args.force_raw_eval
     out.force_mmpd_eval = args.force_raw_eval
     out.binary_batch_size = args.raw_binary_batch_size
@@ -297,6 +300,31 @@ def build_raw_bundle(
             std_floor=args.bin_std_floor,
             decoder=args.bin_decoder,
             device=device,
+        )
+
+    if args.binary_debias_quantization and "binary_staged" in fakes:
+        max_scale, coarse_h, fine_h = resolve_dual_scale_bin_params(
+            dataset,
+            sub,
+            fallback_max_scale=args.bin_max_scale,
+            coarse_height=args.bin_coarse_height,
+            fine_height=args.bin_fine_height,
+        )
+        debiased, debias_stats = debias_binary_staged_fakes(
+            fakes["binary_staged"],
+            max_scale=max_scale,
+            coarse_height=coarse_h,
+            fine_height=fine_h,
+            seed=args.seed,
+            dataset=dataset,
+        )
+        fakes["binary_staged"] = debiased
+        print(
+            f"[{dataset}] binary debias: max_scale={max_scale} coarse_h={coarse_h} "
+            f"fine_h={fine_h} half_fine_bin={debias_stats['half_fine_bin']:.6f} "
+            f"flatline_frac={debias_stats['flatline_frac']:.3f} "
+            f"debias_frac={debias_stats['debias_frac']:.3f}",
+            flush=True,
         )
 
     expected_variates = [int(i) for i in run_variate_indices(run)]
@@ -1012,6 +1040,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_DISC_OUTPUT.parent / "06-14-raw-texture-flat-subsets-ema099-vs-mmpd",
     )
     parser.add_argument("--mmpd-output-root", type=Path, default=DEFAULT_MMPD_OUTPUT_ROOT)
+    parser.add_argument(
+        "--mmpd-backbone",
+        choices=["Decoder", "MaskAE"],
+        default="MaskAE",
+        help="MMPD backbone for checkpoint lookup (fair run uses MaskAE).",
+    )
     parser.add_argument("--mmpd-repo", type=Path, default=DEFAULT_MMPD_REPO)
     parser.add_argument("--mmpd-data-dir", type=Path, default=DEFAULT_MMPD_DATA)
     parser.add_argument("--lookback", type=int, default=96)
@@ -1038,8 +1072,16 @@ def parse_args() -> argparse.Namespace:
         "mmpd=fakes only; both=both fakes; all=GT+fakes.",
     )
     parser.add_argument("--bin-image-height", type=int, default=16)
+    parser.add_argument("--bin-coarse-height", type=int, default=16)
+    parser.add_argument("--bin-fine-height", type=int, default=16)
     parser.add_argument("--bin-max-scale", type=float, default=3.5)
     parser.add_argument("--bin-std-floor", type=float, default=1e-8)
+    parser.add_argument(
+        "--binary-debias-quantization",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Jitter non-flatline binary_staged fakes by up to ±½ fine bin (discriminator only).",
+    )
     parser.add_argument(
         "--bin-decoder",
         choices=["mean", "expectation", "pdf_expectation"],
