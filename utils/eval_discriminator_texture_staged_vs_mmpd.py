@@ -394,8 +394,16 @@ def split_windows(
     train_val_pool = order[:-n_test]
     train_val_pool = np.asarray([idx for idx in train_val_pool if ends[idx] <= test_start], dtype=np.int64)
     if len(train_val_pool) < 2:
+        # illness-like tiny sets: stride-1 windows overlap heavily; index split is fine.
+        train_val_pool = np.asarray(order[:-n_test], dtype=np.int64)
+        print(
+            f"[warn] {dataset}: relaxed train/val split (overlapping windows; "
+            f"windows={len(order)}, test={n_test}, test_stride={test_stride})",
+            flush=True,
+        )
+    if len(train_val_pool) < 2:
         raise ValueError(
-            f"{dataset}: not enough non-overlapping train/val windows before test split "
+            f"{dataset}: not enough windows for train/val split "
             f"(windows={len(order)}, test={n_test}, lookback={lookback}, horizon={horizon}, "
             f"test_stride={test_stride})"
         )

@@ -890,7 +890,7 @@ def build_mmpd_train_cmd(
     patch_size = dataset_mmpd_patch_size(args, dataset)
     data_dim = len(run_variate_indices(run))
     batch_size = mmpd_train_batch_size(args, dataset, data_dim=data_dim)
-    hp = resolved_mmpd_hparams(args.output_dir, dataset, fallback=hparams)
+    hp = resolved_mmpd_hparams(mmpd_hparams_root(args), dataset, fallback=hparams)
     epochs = int(train_epochs if train_epochs is not None else args.mmpd_train_epochs)
     stop_patience = int(patience if patience is not None else args.mmpd_patience)
     mmpd_out = output_root if output_root is not None else args.output_dir / "mmpd_out"
@@ -1001,7 +1001,7 @@ def mmpd_checkpoint_path(
     lookback, horizon = dataset_window_lengths(args, run.dataset)
     name = data_name or mmpd_dataset_name(run)
     patch_size = dataset_mmpd_patch_size(args, run.dataset)
-    hp = resolved_mmpd_hparams(args.output_dir, run.dataset, fallback=hparams)
+    hp = resolved_mmpd_hparams(mmpd_hparams_root(args), run.dataset, fallback=hparams)
     setting = mmpd_setting(
         name,
         lookback,
@@ -1054,7 +1054,7 @@ def resolve_mmpd_checkpoint(
     """Return existing checkpoint path and the MMPD `data` name used in its setting dir."""
     from utils.mmpd_paper_hparams import resolved_mmpd_hparams
 
-    hp = resolved_mmpd_hparams(args.output_dir, run.dataset)
+    hp = resolved_mmpd_hparams(mmpd_hparams_root(args), run.dataset)
     for name in mmpd_checkpoint_data_names(run):
         ckpt = mmpd_checkpoint_path(args, run, data_name=name, hparams=hp)
         if ckpt.exists():
@@ -1702,7 +1702,7 @@ def run_mmpd_eval(
         patch_size = dataset_mmpd_patch_size(args, dataset)
         from utils.mmpd_paper_hparams import resolved_mmpd_hparams
 
-        hp = resolved_mmpd_hparams(args.output_dir, dataset)
+        hp = resolved_mmpd_hparams(mmpd_hparams_root(args), dataset)
         cmd = [
             pipeline_python(),
             "-u",
@@ -2136,6 +2136,11 @@ def summarize_prediction_pack(
 
 def mmpd_output_root(args: argparse.Namespace) -> Path:
     return (args.mmpd_output_root or args.output_dir).resolve()
+
+
+def mmpd_hparams_root(args: argparse.Namespace) -> Path:
+    """Directory holding tuning/*_best.json (not raw-eval output dirs)."""
+    return mmpd_output_root(args)
 
 
 def indices_root(args: argparse.Namespace) -> Path:

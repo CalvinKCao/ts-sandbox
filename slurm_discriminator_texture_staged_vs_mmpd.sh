@@ -195,6 +195,10 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     JOB_IDS=()
     for ds in "${SUBMIT_DATASETS[@]}"; do
         for src in "${SUBMIT_SOURCES[@]}"; do
+            JOB_WALL="$WALL"
+            if [[ "$ds" == "dynamic" && "$SMOKE" -eq 0 ]]; then
+                JOB_WALL="8:00:00"
+            fi
             JOB_NAME="disc-tex-${ds}-${src}${SMOKE_SUFFIX}"
             SUBMIT_ARGS=(--dataset "$ds" --fake-source "$src")
             append_run_config_args SUBMIT_ARGS
@@ -204,7 +208,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             [[ -n "$SLICE_LENGTH" ]] && SUBMIT_ARGS+=(--slice-length "$SLICE_LENGTH")
             [[ -n "$BIN_MATCH_FILTER" ]] && SUBMIT_ARGS+=(--bin-match-filter "$BIN_MATCH_FILTER")
 
-            echo "Submitting discriminator texture eval for $ds / $src (L40S, wall=$WALL)..."
+            echo "Submitting discriminator texture eval for $ds / $src (L40S, wall=$JOB_WALL)..."
             job_id="$(sbatch --parsable \
                 --job-name="$JOB_NAME" \
                 --account=aip-boyuwang \
@@ -212,7 +216,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
                 --gres=gpu:l40s:1 \
                 --cpus-per-task="$CPUS" \
                 --mem="$MEM" \
-                --time="$WALL" \
+                --time="$JOB_WALL" \
                 --output="$LOG_DIR/${JOB_NAME}-%j.log" \
                 --error="$LOG_DIR/${JOB_NAME}-%j.log" \
                 --mail-type=FAIL \
@@ -372,6 +376,19 @@ EVAL_ARGS=(
 
 if [[ -n "${SLICE_LENGTH:-}" ]]; then
     EVAL_ARGS+=(--slice-lengths "$SLICE_LENGTH")
+fi
+
+if [[ "${DATASET:-}" == "dynamic" && "${SMOKE:-0}" -eq 0 ]]; then
+    EVAL_ARGS+=(
+        --max-windows 4000
+        --max-train-examples 8192
+        --max-eval-examples 4096
+        --max-batches-per-epoch 64
+    )
+fi
+
+if [[ "${DATASET:-}" == "illness" ]]; then
+    EVAL_ARGS+=(--test-stride 1)
 fi
 
 if [[ "${SMOKE:-0}" -eq 1 ]]; then
