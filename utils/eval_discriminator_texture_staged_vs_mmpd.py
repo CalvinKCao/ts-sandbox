@@ -169,6 +169,7 @@ def raw_eval_args(args: argparse.Namespace) -> argparse.Namespace:
     out.output_dir = args.raw_eval_dir
     out.mmpd_output_root = args.mmpd_output_root
     out.mmpd_backbone = getattr(args, "mmpd_backbone", "MaskAE")
+    out.patch_size = None  # dataset rules (e.g. electricity/traffic patch 24)
     out.force_binary_eval = args.force_raw_eval
     out.force_mmpd_eval = args.force_raw_eval
     out.binary_batch_size = args.raw_binary_batch_size
