@@ -27,6 +27,8 @@ Benchmark vs. iTransformer, a SOTA baseline architecture.
 | Weather | **0.1210** | **0.2334** | 0.258 | 0.278 |
 | Solar-Energy | 0.2540 | **0.2507** | **0.233** | 0.262 |
 
+
+
 ## Experiment tracking
 
 Slurm grid jobs (`submit_grid.sh`) use a single **run stem** per job:

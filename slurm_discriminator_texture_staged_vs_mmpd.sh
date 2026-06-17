@@ -17,7 +17,11 @@
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --dataset traffic
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --dataset ETTh1 --fake-source mmpd
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --force-raw-eval
-#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --merge-partials-only
+#   ./slurm_discriminator_texture_staged_vs_mmpd.sh --anchor-config binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo \
+#       --mmpd-run 06-16-mmpd-maskae-fair-13d --disc-run 06-17-disc-texture-fair-gradaccum-vs-mmpd \
+#       --raw-run 06-17-raw-texture-fair-gradaccum-vs-mmpd \
+#       --report reports/06-17_discriminator_texture_fair_gradaccum_vs_mmpd.md \
+#       --datasets ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,electricity,traffic,PeMS,solar_Alabama,dalia,dynamic
 # =============================================================================
 
 set -euo pipefail
@@ -39,6 +43,7 @@ MMPD_OUTPUT_SUFFIX="results/datasets/06-13-binary-mmpd-subset-compare"
 DISC_OUTPUT_SUFFIX="results/datasets/06-14-disc-texture-flat-subsets-ema099-vs-mmpd"
 RAW_OUTPUT_SUFFIX="results/datasets/06-14-raw-texture-flat-subsets-ema099-vs-mmpd"
 REPORT_SUFFIX="reports/06-14_discriminator_texture_flat_subsets_ema099_vs_mmpd.md"
+DATASETS_CSV=""
 
 resolve_output_dir() {
     local repo_root="$1"
@@ -60,6 +65,12 @@ while [[ $# -gt 0 ]]; do
         --fake-source) FAKE_SOURCE="$2"; shift 2 ;;
         --slice-length) SLICE_LENGTH="$2"; shift 2 ;;
         --bin-match-filter) BIN_MATCH_FILTER="$2"; shift 2 ;;
+        --anchor-config) ANCHOR_CONFIG="$2"; shift 2 ;;
+        --mmpd-run) MMPD_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
+        --disc-run) DISC_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
+        --raw-run) RAW_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
+        --report) REPORT_SUFFIX="$2"; shift 2 ;;
+        --datasets) DATASETS_CSV="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -70,7 +81,12 @@ if [[ -n "$BIN_MATCH_FILTER" && "$BIN_MATCH_FILTER" != "mmpd" && "$BIN_MATCH_FIL
 fi
 
 DATASETS=(ETTh1 ETTh2 exchange_rate weather electricity traffic solar_Alabama)
+if [[ -n "$DATASETS_CSV" ]]; then
+    IFS=',' read -ra DATASETS <<< "$DATASETS_CSV"
+fi
 FAKE_SOURCES=(binary_staged mmpd)
+
+RUN_TAG="$(basename "$DISC_OUTPUT_SUFFIX")"
 
 # ---------------------------------------------------------------------------
 # Login node: submit
@@ -94,7 +110,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     if [[ "$MERGE_PARTIALS" -eq 1 ]]; then
         SMOKE_SUFFIX=""
         [[ "$SMOKE" -eq 1 ]] && SMOKE_SUFFIX="-smoke"
-        RUN_STEM="$(date +%m-%d)-disc-texture-flat-subsets-ema099-vs-mmpd${SMOKE_SUFFIX}${BIN_SUFFIX}"
+        RUN_STEM="$(date +%m-%d)-${RUN_TAG}${SMOKE_SUFFIX}${BIN_SUFFIX}"
         LOG_DIR="$REPO/results/logs/${RUN_STEM}"
         mkdir -p "$LOG_DIR"
         echo "Submitting merge-only job..."
@@ -109,7 +125,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --error="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}${BIN_SUFFIX}-%j.log" \
             --mail-type=FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG" \
+            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",REPORT_SUFFIX="$REPORT_SUFFIX" \
             "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh"
         exit 0
     fi
@@ -126,7 +142,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         CPUS=8
     fi
 
-    RUN_STEM="$(date +%m-%d)-disc-texture-flat-subsets-ema099-vs-mmpd${SMOKE_SUFFIX}${BIN_SUFFIX}"
+    RUN_STEM="$(date +%m-%d)-${RUN_TAG}${SMOKE_SUFFIX}${BIN_SUFFIX}"
     LOG_DIR="$REPO/results/logs/${RUN_STEM}"
     mkdir -p "$LOG_DIR"
 
@@ -180,7 +196,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
                 --error="$LOG_DIR/${JOB_NAME}-%j.log" \
                 --mail-type=FAIL \
                 --mail-user=ccao87@uwo.ca \
-                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",SLICE_LENGTH="$SLICE_LENGTH",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG" \
+                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",SLICE_LENGTH="$SLICE_LENGTH",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",REPORT_SUFFIX="$REPORT_SUFFIX" \
                 "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh" \
                 "${SUBMIT_ARGS[@]}")"
             JOB_IDS+=("$job_id")
@@ -202,7 +218,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --error="$LOG_DIR/disc-tex-merge${SMOKE_SUFFIX}-%j.log" \
             --mail-type=FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG" \
+            --export=ALL,MERGE_PARTIALS=1,SMOKE="$SMOKE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",REPORT_SUFFIX="$REPORT_SUFFIX" \
             "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh"
     fi
     exit 0
@@ -233,6 +249,11 @@ cd "$REPO"
 
 STORE="$REPO/results"
 mkdir -p "$STORE/logs" "$STORE/datasets"
+
+MMPD_OUTPUT_SUFFIX="${MMPD_OUTPUT_SUFFIX:-results/datasets/06-13-binary-mmpd-subset-compare}"
+DISC_OUTPUT_SUFFIX="${DISC_OUTPUT_SUFFIX:-results/datasets/06-14-disc-texture-flat-subsets-ema099-vs-mmpd}"
+RAW_OUTPUT_SUFFIX="${RAW_OUTPUT_SUFFIX:-results/datasets/06-14-raw-texture-flat-subsets-ema099-vs-mmpd}"
+REPORT_SUFFIX="${REPORT_SUFFIX:-reports/06-14_discriminator_texture_flat_subsets_ema099_vs_mmpd.md}"
 
 REQ="$REPO/setup/requirements-killarney.txt"
 [[ -f "$REQ" ]] || { echo "ERROR: missing $REQ — run ./setup/killarney_freeze_requirements.sh on login node" >&2; exit 1; }
@@ -301,7 +322,9 @@ if [[ -z "${DATASET:-}" || -z "${FAKE_SOURCE:-}" ]]; then
     exit 1
 fi
 
-"$PYTHON" -c "import torch; assert torch.cuda.is_available(), 'CUDA required'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
+if [[ "${MERGE_PARTIALS:-0}" -ne 1 ]]; then
+    "$PYTHON" -c "import torch; assert torch.cuda.is_available(), 'CUDA required'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
+fi
 
 EVAL_ARGS=(
     --output-dir "$OUTPUT_DIR"
