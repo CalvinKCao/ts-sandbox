@@ -61,17 +61,8 @@ ALL_DATASETS = (
     "dalia",
     "dynamic",
 )
-# Binary grad_accum_150_lr_lo staged eval completed (Jun 16); viz defaults here.
-FINISHED_GRAD_ACCUM_DATASETS = (
-    "ETTh1",
-    "ETTh2",
-    "exchange_rate",
-    "weather",
-    "electricity",
-    "traffic",
-    "solar_Alabama",
-    "illness",
-)
+# Binary grad_accum_150_lr_lo staged eval completed for all 13 flat-subset datasets.
+FINISHED_GRAD_ACCUM_DATASETS = ALL_DATASETS
 
 
 @dataclass

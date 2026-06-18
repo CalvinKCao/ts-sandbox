@@ -135,7 +135,7 @@ def build_report(results: Dict[str, Any], manifest: Dict[str, Any]) -> str:
         "",
         "## Protocol",
         "",
-        f"- **Results dir:** `{DEFAULT_RESULTS.parent.relative_to(REPO_ROOT)}/`",
+        f"- **Results dir:** `{manifest.get('results_dir', DEFAULT_RESULTS.parent.relative_to(REPO_ROOT))}`",
         f"- **Raw eval dir:** `{manifest.get('raw_eval_dir', 'results/datasets/06-03-trend-robust-texture-staged-vs-mmpd')}`",
         f"- **Slice lengths:** {', '.join(str(x) for x in slice_lengths)}",
         f"- **Datasets:** {', '.join(datasets)}",
@@ -180,6 +180,7 @@ def main() -> None:
     if not results:
         raise FileNotFoundError(f"No discriminator metrics found: {args.metrics}")
     manifest = read_json(args.manifest)
+    manifest.setdefault("results_dir", str(args.metrics.parent.relative_to(REPO_ROOT)))
     report = build_report(results, manifest)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report, encoding="utf-8")
