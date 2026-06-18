@@ -36,6 +36,7 @@ RUN_GLOBS = [
     os.path.join(RESULTS, "06-14-*"),
     os.path.join(RESULTS, "06-15-*"),
     os.path.join(RESULTS, "06-16-*"),
+    os.path.join(RESULTS, "06-17-*"),
 ]
 LOG_GLOBS = [
     os.path.join(LOGS, "06-12-*.log"),
@@ -43,6 +44,7 @@ LOG_GLOBS = [
     os.path.join(LOGS, "06-14-*.log"),
     os.path.join(LOGS, "06-15-*.log"),
     os.path.join(LOGS, "06-16-*.log"),
+    os.path.join(LOGS, "06-17-*.log"),
 ]
 EVAL_DONE_RE = re.compile(
     r"staged eval done: .*?prob_mse=([\d.]+).*?anchor_mse=([\d.]+) "
@@ -163,6 +165,10 @@ CONFIG_ALIASES = {
     "binary_anchor_stationary_flat_subsets_grad_accum_guidance_400": "**Flat subsets guidance accum4x**",
     "binary_anchor_stationary_flat_subsets_grad_accum_guidance_800": "**Flat subsets guidance accum8x**",
     "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_hi_guidance": "**2d-guidance**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo_no_win_norm": "**Flat accum1.5x LR-lo no win-norm**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo_guidance": "**Flat accum1.5x LR-lo guidance**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo_no_cross_attn": "**Flat accum1.5x LR-lo no cross-attn**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo_max_scale_tune": "**Flat accum1.5x LR-lo MS tune**",
     "binary_anchor_stationary_flat_subsets_ema099_lb336_hz96": "**Flat subsets EMA0.99 LB336/H96**",
     "binary_anchor_stationary_flat_subsets_ema099_lb96_hz720": "**Flat subsets EMA0.99 LB96/H720**",
     "binary_anchor_ar_grad_accum_400": "**AR accum4x**",
@@ -216,6 +222,11 @@ def short_config(name: str) -> str:
 
 def display_config(name: str) -> str:
     return CONFIG_ALIASES.get(name, short_config(name))
+
+
+def leaderboard_visible(cfg: str) -> bool:
+    """Named (**alias**) configs only; drop legacy `h8_8_8` / hp-sweep rows."""
+    return cfg.startswith("**")
 
 
 def run_status(raw_config: str, job_id: str) -> str:
@@ -924,7 +935,8 @@ def write_leaderboard(
             r["Config"]
             for rows in by_dataset.values()
             for r in rows
-            if r["Config"] not in MMPD_REF_CONFIGS | {"**Discrete**"}
+            if leaderboard_visible(r["Config"])
+            and r["Config"] not in MMPD_REF_CONFIGS | {"**Discrete**"}
         },
         key=lambda c: (
             sum(deltas.get(c, {}).get(ds, 0) or 0 for ds in datasets_present) / max(
@@ -964,6 +976,8 @@ def write_leaderboard(
             "**AR LB96/H720 accum1.5x** (partial: `3961455`, `3961457`, `3961460`). "
             "**MS tune** (`hp_max_scale_tuning`; post-fix `3956631` exchange_rate, `3960878` ETTm1; "
             "incomplete `3960877` ETTh1 / `3960879` weather; cosine+warmup post-fix `3956633`–`3956640`). "
+            "**Flatline/trend ablations** off `grad_accum_150_lr_lo` (jobs `3978767`–`3978776`): "
+            "no win-norm, LR-lo guidance, no cross-attn, LR-lo MS tune. "
             f"**MMPD (subset)** from `{MMPD_SOURCE_SUBSET}` (Decoder backbone, same subsets as flat runs, "
             "20 samples, full test). "
             f"**MMPD (MaskedAE)** from `{MMPD_SOURCE_MASKAE}` (ETTh1-capped 7 datasets, "
@@ -1057,9 +1071,14 @@ def write_leaderboard(
         f.write("\n")
 
         for dataset in datasets_present:
-            rows = rank_rows(by_dataset[dataset])
-            base = baseline_rank(rows)
-            n = len(rows)
+            full_rows = rank_rows(by_dataset[dataset])
+            base = baseline_rank(full_rows)
+            visible_cfgs = {
+                r["Config"]
+                for r in full_rows
+                if leaderboard_visible(r["Config"]) or r["Config"] in MMPD_REF_CONFIGS
+            }
+            n = sum(1 for r in full_rows if r["Config"] in visible_cfgs)
             f.write(f"### {dataset}\n\n")
             if base is not None:
                 f.write(
@@ -1074,7 +1093,9 @@ def write_leaderboard(
             f.write("| " + " | ".join(header) + " |\n")
             f.write("|" + "|".join(["---"] * len(header)) + "|\n")
 
-            for i, r in enumerate(rows):
+            for i, r in enumerate(full_rows):
+                if r["Config"] not in visible_cfgs:
+                    continue
                 rank = i + 1
                 cfg = r["Config"]
                 if cfg in MMPD_REF_CONFIGS or base is None:
