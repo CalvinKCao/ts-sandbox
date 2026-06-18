@@ -166,6 +166,12 @@ phases:
     patience: 8
     search_space: default
 
+  - phase: diffusion_finer_finetune_hp
+    n_trials: 20
+    max_epochs: 20
+    patience: 8
+    search_space: default
+
   - phase: staged_eval
     eval_test_fraction: 1.0
     test_stride: 4

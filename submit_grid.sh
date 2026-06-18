@@ -26,6 +26,7 @@ DEPENDENCY=""
 JOB_IDS_OUT=""
 WALL_OVERRIDE=""
 PARALLEL_OPTUNA=""
+EXCLUDE_NODES=""
 if [[ "$(hostname)" == *"narval"* ]]; then
     ACCOUNT="def-boyuwang"
 else
@@ -45,6 +46,7 @@ while [[ $# -gt 0 ]]; do
         --job-ids-out) JOB_IDS_OUT="$2"; shift 2 ;;
         --time) WALL_OVERRIDE="$2"; shift 2 ;;
         --parallel-optuna) PARALLEL_OPTUNA="$2"; shift 2 ;;
+        --exclude-nodes) EXCLUDE_NODES="$2"; shift 2 ;;
         --gpu) GPU_TYPE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
@@ -196,6 +198,10 @@ for CFG in "${CONF_ARR[@]}"; do
 
             if [[ -n "$DEPENDENCY" ]]; then
                 S_ARGS+=(--dependency="$DEPENDENCY")
+            fi
+
+            if [[ -n "$EXCLUDE_NODES" ]]; then
+                S_ARGS+=(--exclude="$EXCLUDE_NODES")
             fi
 
             PY_ARGS=(

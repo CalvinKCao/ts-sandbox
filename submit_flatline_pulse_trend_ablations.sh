@@ -23,6 +23,7 @@ cd "$SCRIPT_DIR"
 FLATLINE_DATASETS="ETTh1,ETTm1,electricity"
 TREND_DATASETS="exchange_rate,weather"
 WALL_TIME="8:00:00"
+EXCLUDE_NODES="kn001"
 ONLY="all"
 
 while [[ $# -gt 0 ]]; do
@@ -46,9 +47,9 @@ want() {
 
 run_grid() {
     local cfg="$1" datasets="$2"
-    local args=(--configs "$cfg" --datasets "$datasets" --time "$WALL_TIME")
+    local args=(--configs "$cfg" --datasets "$datasets" --time "$WALL_TIME" --exclude-nodes "$EXCLUDE_NODES")
     if [[ "$SMOKE" -eq 1 ]]; then
-        args=(--smoke --configs "$cfg" --datasets ETTh1 --time "0:45:00")
+        args=(--smoke --configs "$cfg" --datasets ETTh1 --time "0:45:00" --exclude-nodes "$EXCLUDE_NODES")
     fi
     ./submit_grid.sh "${args[@]}"
 }
