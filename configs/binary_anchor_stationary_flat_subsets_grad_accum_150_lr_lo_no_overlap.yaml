@@ -1,0 +1,9 @@
+extends: binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo.yaml
+
+wandb:
+  project: ts-sandbox-flat-ablations
+
+experiment:
+  lookback_overlap: 0
+  name: binary-anchor-stationary-flat-subsets-grad-accum-150-lr-lo-no-overlap
+  experiment_name: binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo_no_overlap
