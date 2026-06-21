@@ -37,6 +37,8 @@ RUN_GLOBS = [
     os.path.join(RESULTS, "06-15-*"),
     os.path.join(RESULTS, "06-16-*"),
     os.path.join(RESULTS, "06-17-*"),
+    os.path.join(RESULTS, "06-18-*"),
+    os.path.join(RESULTS, "06-19-*"),
 ]
 LOG_GLOBS = [
     os.path.join(LOGS, "06-12-*.log"),
@@ -45,6 +47,8 @@ LOG_GLOBS = [
     os.path.join(LOGS, "06-15-*.log"),
     os.path.join(LOGS, "06-16-*.log"),
     os.path.join(LOGS, "06-17-*.log"),
+    os.path.join(LOGS, "06-18-*.log"),
+    os.path.join(LOGS, "06-19-*.log"),
 ]
 EVAL_DONE_RE = re.compile(
     r"staged eval done: .*?prob_mse=([\d.]+).*?anchor_mse=([\d.]+) "
@@ -169,6 +173,7 @@ CONFIG_ALIASES = {
     "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo_guidance": "**Flat accum1.5x LR-lo guidance**",
     "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo_no_cross_attn": "**Flat accum1.5x LR-lo no cross-attn**",
     "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo_max_scale_tune": "**Flat accum1.5x LR-lo MS tune**",
+    "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo_no_overlap": "**Flat accum1.5x LR-lo no overlap**",
     "binary_anchor_stationary_flat_subsets_ema099_lb336_hz96": "**Flat subsets EMA0.99 LB336/H96**",
     "binary_anchor_stationary_flat_subsets_ema099_lb96_hz720": "**Flat subsets EMA0.99 LB96/H720**",
     "binary_anchor_ar_grad_accum_400": "**AR accum4x**",
@@ -211,6 +216,41 @@ HP_MS_TUNE_JOBS_PREFIX = {
     "ETTm1": "3943936",
     "exchange_rate": "3943935",
     "weather": "3943937",
+}
+
+BASELINE_GRAD_ACCUM_LR_LO = "**Flat subsets accum1.5x LR-lo**"
+HORIZON_TREND_SUMMARY = os.path.join(
+    REPO, "reports", "forecast_horizon_trend", "horizon_trend_summary.json"
+)
+
+# Jun 17 flatline/trend ablations off grad_accum_150_lr_lo (jobs 3978767–3978776).
+FLATLINE_TREND_ABLATIONS: List[Tuple[str, str, Tuple[str, ...]]] = [
+    ("flatline", "**Flat accum1.5x LR-lo no win-norm**", ("ETTh1", "ETTm1", "electricity")),
+    ("flatline", "**Flat accum1.5x LR-lo guidance**", ("ETTh1", "ETTm1", "electricity")),
+    ("trend", "**Flat accum1.5x LR-lo no cross-attn**", ("exchange_rate", "weather")),
+    ("trend", "**Flat accum1.5x LR-lo MS tune**", ("exchange_rate", "weather")),
+]
+FLATLINE_TREND_ABLATION_JOBS: Dict[Tuple[str, str], str] = {
+    ("ETTh1", "**Flat accum1.5x LR-lo no win-norm**"): "3978767",
+    ("ETTm1", "**Flat accum1.5x LR-lo no win-norm**"): "3978768",
+    ("electricity", "**Flat accum1.5x LR-lo no win-norm**"): "3978769",
+    ("ETTh1", "**Flat accum1.5x LR-lo guidance**"): "3978770",
+    ("ETTm1", "**Flat accum1.5x LR-lo guidance**"): "3978771",
+    ("electricity", "**Flat accum1.5x LR-lo guidance**"): "3978772",
+    ("exchange_rate", "**Flat accum1.5x LR-lo no cross-attn**"): "3978773",
+    ("weather", "**Flat accum1.5x LR-lo no cross-attn**"): "3978774",
+    ("exchange_rate", "**Flat accum1.5x LR-lo MS tune**"): "3978775",
+    ("weather", "**Flat accum1.5x LR-lo MS tune**"): "3978776",
+}
+
+NO_OVERLAP_CFG = "**Flat accum1.5x LR-lo no overlap**"
+NO_OVERLAP_DATASETS = ("ETTh1", "ETTm1", "electricity", "exchange_rate", "weather")
+NO_OVERLAP_JOBS: Dict[str, str] = {
+    "ETTh1": "3987263",
+    "ETTm1": "3987264",
+    "electricity": "3987265",
+    "exchange_rate": "3987266",
+    "weather": "3987267",
 }
 
 
@@ -923,6 +963,212 @@ def write_grid(path: str, rows: List[Dict[str, Any]]) -> None:
             )
 
 
+def _grid_row(
+    grid_rows: List[Dict[str, Any]],
+    dataset: str,
+    config: str,
+) -> Optional[Dict[str, Any]]:
+    matches = [r for r in grid_rows if r["dataset"] == dataset and r["config"] == config]
+    if not matches:
+        return None
+    return max(matches, key=lambda r: int(r["job_id"]))
+
+
+def write_flatline_trend_ablation_section(
+    f,
+    grid_rows: List[Dict[str, Any]],
+) -> None:
+    rows_out: List[Dict[str, Any]] = []
+    for problem, ablation_cfg, datasets in FLATLINE_TREND_ABLATIONS:
+        for dataset in datasets:
+            base = _grid_row(grid_rows, dataset, BASELINE_GRAD_ACCUM_LR_LO)
+            abl = _grid_row(grid_rows, dataset, ablation_cfg)
+            if base is None or abl is None:
+                continue
+            base_mse = base.get("anchor_mse")
+            abl_mse = abl.get("anchor_mse")
+            delta = None
+            if base_mse is not None and abl_mse is not None:
+                delta = float(abl_mse) - float(base_mse)
+            rows_out.append(
+                {
+                    "problem": problem,
+                    "dataset": dataset,
+                    "ablation": ablation_cfg,
+                    "baseline_mse": base_mse,
+                    "ablation_mse": abl_mse,
+                    "delta_mse": delta,
+                    "job_id": FLATLINE_TREND_ABLATION_JOBS.get((dataset, ablation_cfg), abl["job_id"]),
+                }
+            )
+    if not rows_out:
+        return
+
+    f.write("## Flatline / trend ablations vs accum1.5x LR-lo\n\n")
+    f.write(
+        "Jun 17 jobs `3978767`–`3978776` off `grad_accum_150_lr_lo`. "
+        "**Flatline** probes: disable window norm, enable guidance channel. "
+        "**Trend** probes: disable cross-attn, LR-lo max-scale tune. "
+        "Δanchor_mse = ablation − baseline (negative = ablation better).\n\n"
+    )
+    header = [
+        "Problem",
+        "Dataset",
+        "Ablation",
+        "baseline anchor_mse",
+        "ablation anchor_mse",
+        "Δanchor_mse",
+        "Job",
+    ]
+    f.write("| " + " | ".join(header) + " |\n")
+    f.write("|" + "|".join(["---"] * len(header)) + "|\n")
+    for row in rows_out:
+        delta = row["delta_mse"]
+        if delta is None:
+            dstr = "—"
+        elif delta > 0:
+            dstr = f"+{delta:.4f}"
+        else:
+            dstr = f"{delta:.4f}"
+        f.write(
+            "| "
+            + " | ".join(
+                [
+                    row["problem"],
+                    row["dataset"],
+                    row["ablation"],
+                    fmt(row["baseline_mse"]),
+                    fmt(row["ablation_mse"]),
+                    dstr,
+                    str(row["job_id"]),
+                ]
+            )
+            + " |\n"
+        )
+    f.write("\n")
+
+
+def write_no_overlap_section(
+    f,
+    grid_rows: List[Dict[str, Any]],
+) -> None:
+    rows_out: List[Dict[str, Any]] = []
+    for dataset in NO_OVERLAP_DATASETS:
+        base = _grid_row(grid_rows, dataset, BASELINE_GRAD_ACCUM_LR_LO)
+        abl = _grid_row(grid_rows, dataset, NO_OVERLAP_CFG)
+        if abl is None:
+            continue
+        base_mse = base.get("anchor_mse") if base else None
+        abl_mse = abl.get("anchor_mse")
+        delta = None
+        if base_mse is not None and abl_mse is not None:
+            delta = float(abl_mse) - float(base_mse)
+        rows_out.append(
+            {
+                "dataset": dataset,
+                "overlap_mse": base_mse,
+                "no_overlap_mse": abl_mse,
+                "delta_mse": delta,
+                "job_id": NO_OVERLAP_JOBS.get(dataset, abl["job_id"]),
+            }
+        )
+    if not rows_out:
+        return
+
+    f.write("## No lookback overlap vs accum1.5x LR-lo (overlap=8)\n\n")
+    f.write(
+        "Jun 19 `lookback_overlap=0` off `grad_accum_150_lr_lo` (MMPD-style contiguous LB96→HZ96). "
+        "Baseline column is standard flat-subset LR-lo with `lookback_overlap=8`. "
+        "Δanchor_mse = no-overlap − overlap (negative = no-overlap better). "
+        "Jobs `3987263`–`3987267` (ETTh1, ETTm1, electricity, exchange_rate, weather).\n\n"
+    )
+    header = [
+        "Dataset",
+        "overlap=8 anchor_mse",
+        "overlap=0 anchor_mse",
+        "Δanchor_mse",
+        "Job",
+    ]
+    f.write("| " + " | ".join(header) + " |\n")
+    f.write("|" + "|".join(["---"] * len(header)) + "|\n")
+    for row in rows_out:
+        delta = row["delta_mse"]
+        if delta is None:
+            dstr = "—"
+        elif delta > 0:
+            dstr = f"+{delta:.4f}"
+        else:
+            dstr = f"{delta:.4f}"
+        f.write(
+            "| "
+            + " | ".join(
+                [
+                    row["dataset"],
+                    fmt(row["overlap_mse"]),
+                    fmt(row["no_overlap_mse"]),
+                    dstr,
+                    str(row["job_id"]),
+                ]
+            )
+            + " |\n"
+        )
+    f.write("\n")
+
+
+def write_horizon_trend_section(f) -> None:
+    if not os.path.isfile(HORIZON_TREND_SUMMARY):
+        return
+    with open(HORIZON_TREND_SUMMARY, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    datasets = payload.get("datasets") or []
+    if not datasets:
+        return
+
+    f.write("## Instance-norm horizon trend (forecast Δ)\n\n")
+    f.write(
+        "Per-window×variate distribution of "
+        "`instance_norm(last_horizon_step) − instance_norm(first_horizon_step)` "
+        "(not raw units). See `reports/forecast_horizon_trend/` histograms.\n\n"
+    )
+    header = [
+        "Dataset",
+        "Model",
+        "mean Δ",
+        "std",
+        "% flat",
+        "% up",
+        "% down",
+        "% super high",
+        "Histogram",
+    ]
+    f.write("| " + " | ".join(header) + " |\n")
+    f.write("|" + "|".join(["---"] * len(header)) + "|\n")
+    for ds_entry in datasets:
+        dataset = ds_entry.get("dataset", "—")
+        for model_key, meta in (ds_entry.get("models") or {}).items():
+            summary = meta.get("per_window_variate") or {}
+            hist = meta.get("histogram", "")
+            hist_link = f"[png]({hist})" if hist else "—"
+            f.write(
+                "| "
+                + " | ".join(
+                    [
+                        dataset,
+                        meta.get("label", model_key),
+                        f"{summary.get('mean', 0):+.4f}" if summary.get("mean") is not None else "—",
+                        fmt(summary.get("std")),
+                        f"{summary.get('pct_flat', 0):.1f}" if summary.get("pct_flat") is not None else "—",
+                        f"{summary.get('pct_up', 0):.1f}" if summary.get("pct_up") is not None else "—",
+                        f"{summary.get('pct_down', 0):.1f}" if summary.get("pct_down") is not None else "—",
+                        f"{summary.get('pct_super_high', 0):.1f}" if summary.get("pct_super_high") is not None else "—",
+                        hist_link,
+                    ]
+                )
+                + " |\n"
+            )
+    f.write("\n")
+
+
 def write_leaderboard(
     path: str,
     by_dataset: Dict[str, List[Dict[str, Any]]],
@@ -978,6 +1224,7 @@ def write_leaderboard(
             "incomplete `3960877` ETTh1 / `3960879` weather; cosine+warmup post-fix `3956633`–`3956640`). "
             "**Flatline/trend ablations** off `grad_accum_150_lr_lo` (jobs `3978767`–`3978776`): "
             "no win-norm, LR-lo guidance, no cross-attn, LR-lo MS tune. "
+            "**Flat accum1.5x LR-lo no overlap** (`lookback_overlap=0`, jobs `3987263`–`3987267`). "
             f"**MMPD (subset)** from `{MMPD_SOURCE_SUBSET}` (Decoder backbone, same subsets as flat runs, "
             "20 samples, full test). "
             f"**MMPD (MaskedAE)** from `{MMPD_SOURCE_MASKAE}` (ETTh1-capped 7 datasets, "
@@ -1128,6 +1375,10 @@ def write_leaderboard(
                     + " |\n"
                 )
             f.write("\n")
+
+        write_flatline_trend_ablation_section(f, grid_rows)
+        write_no_overlap_section(f, grid_rows)
+        write_horizon_trend_section(f)
 
 
 def write_ema099_vs_mmpd_compare(

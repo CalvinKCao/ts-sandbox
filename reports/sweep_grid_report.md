@@ -12,6 +12,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | ETTh1 | **Binary flat** | **OK** | 0.4059 | 0.4085 | 0.3060 | 0.4185 | 3949852 |
 | ETTh1 | **Discrete** | **OK** | 0.5468 | 0.4577 | 0.7199 | 1.0323 | 3948454 |
 | ETTh1 | **Flat accum1.5x LR-lo guidance** | **OK** | 0.4160 | 0.4221 | 0.3149 | 0.4223 | 3978770 |
+| ETTh1 | **Flat accum1.5x LR-lo no overlap** | **OK** | 0.4090 | 0.4057 | 0.3023 | 0.4123 | 3987263 |
 | ETTh1 | **Flat accum1.5x LR-lo no win-norm** | **OK** | 0.4978 | 0.4879 | 0.3536 | 0.4812 | 3978767 |
 | ETTh1 | **Flat subsets EMA0.90** | **OK** | 0.4052 | 0.4082 | 0.3057 | 0.4102 | 3953317 |
 | ETTh1 | **Flat subsets EMA0.95** | **OK** | 0.4061 | 0.4083 | 0.3061 | 0.4117 | 3953324 |
@@ -87,6 +88,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | ETTh2 | **MMPD (MaskedAE)** | **ref** | 0.3383 | 0.3783 | 0.2916 | — | 3965322 |
 | ETTh2 | **MMPD (subset)** | **ref** | 0.3186 | 0.3614 | 0.2705 | — | 3951202 |
 | ETTm1 | **Flat accum1.5x LR-lo guidance** | **OK** | 0.4887 | 0.4376 | 0.3383 | 0.4869 | 3978771 |
+| ETTm1 | **Flat accum1.5x LR-lo no overlap** | **OK** | 0.4761 | 0.4340 | 0.3394 | 0.4943 | 3987264 |
 | ETTm1 | **Flat accum1.5x LR-lo no win-norm** | **OK** | 0.4828 | 0.4551 | 0.3481 | 0.4739 | 3978768 |
 | ETTm1 | **Flat subsets EMA0.99** | **OK** | 0.4514 | 0.4215 | 0.3273 | 0.4604 | 3967251 |
 | ETTm1 | **Flat subsets accum1.5x LR-lo** | **OK** | 0.4691 | 0.4291 | 0.3371 | 0.4873 | 3967553 |
@@ -130,6 +132,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | electricity | **Binary flat** | **OK** | 0.2598 | 0.2713 | 0.2080 | 0.2579 | 3949856 |
 | electricity | **Discrete** | **OK** | 0.2972 | 0.2712 | 0.5994 | 0.7374 | 3948458 |
 | electricity | **Flat accum1.5x LR-lo guidance** | **OK** | 0.1837 | 0.2223 | 0.1639 | 0.1727 | 3978772 |
+| electricity | **Flat accum1.5x LR-lo no overlap** | **OK** | 0.1684 | 0.2032 | 0.1551 | 0.1651 | 3987265 |
 | electricity | **Flat accum1.5x LR-lo no win-norm** | **OK** | 0.2011 | 0.2477 | 0.1781 | 0.1856 | 3978769 |
 | electricity | **Flat subsets EMA0.90** | **OK** | 0.1693 | 0.2086 | 0.1561 | 0.1619 | 3953321 |
 | electricity | **Flat subsets EMA0.95** | **OK** | 0.1690 | 0.2088 | 0.1560 | 0.1615 | 3953328 |
@@ -160,6 +163,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | exchange_rate | **Discrete** | **OK** | 0.0924 | 0.2132 | 0.3384 | 0.1959 | 3948456 |
 | exchange_rate | **Flat accum1.5x LR-lo MS tune** | **OK** | 0.0909 | 0.2108 | 0.1711 | 0.0886 | 3978775 |
 | exchange_rate | **Flat accum1.5x LR-lo no cross-attn** | **OK** | 0.0882 | 0.2074 | 0.1663 | 0.0861 | 3978773 |
+| exchange_rate | **Flat accum1.5x LR-lo no overlap** | **OK** | 0.0905 | 0.2125 | 0.1704 | 0.0894 | 3987266 |
 | exchange_rate | **Flat subsets EMA0.90** | **OK** | 0.0868 | 0.2071 | 0.1699 | 0.0897 | 3953319 |
 | exchange_rate | **Flat subsets EMA0.95** | **OK** | 0.0875 | 0.2077 | 0.1689 | 0.0888 | 3953326 |
 | exchange_rate | **Flat subsets EMA0.98** | **OK** | 0.0878 | 0.2078 | 0.1684 | 0.0884 | 3953333 |
@@ -270,6 +274,7 @@ Fixed-HP binary sweep (`configs/sweep/`, Jun 12 2026) plus ordinal D3PM staged r
 | weather | **Discrete** | **OK** | 0.1079 | 0.2280 | 0.3707 | 0.2615 | 3948457 |
 | weather | **Flat accum1.5x LR-lo MS tune** | **OK** | 0.1041 | 0.2306 | 0.1854 | 0.1052 | 3978776 |
 | weather | **Flat accum1.5x LR-lo no cross-attn** | **OK** | 0.0992 | 0.2246 | 0.1798 | 0.1014 | 3978774 |
+| weather | **Flat accum1.5x LR-lo no overlap** | **OK** | 0.0979 | 0.2251 | 0.1793 | 0.0992 | 3987267 |
 | weather | **Flat subsets EMA0.90** | **OK** | 0.0968 | 0.2222 | 0.1803 | 0.1003 | 3953320 |
 | weather | **Flat subsets EMA0.95** | **OK** | 0.0964 | 0.2217 | 0.1792 | 0.0994 | 3953327 |
 | weather | **Flat subsets EMA0.98** | **OK** | 0.0966 | 0.2216 | 0.1760 | 0.0976 | 3953334 |
