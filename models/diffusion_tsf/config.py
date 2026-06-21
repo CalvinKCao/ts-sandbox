@@ -92,6 +92,8 @@ class DiffusionTSFConfig:
     deterministic_anchor_alpha: float = 0.5
     binary_anchor_input_mode: str = "stationary_flat"  # stationary_flat or random_bits
     use_window_normalization: bool = True
+    # Center for per-window norm: past mean (default) or last lookback timestep.
+    window_norm_center: str = "mean"
     window_norm_std_floor: float = 1e-8
     zero_guidance_forecast: bool = False
     prediction_target: str = "x0"  # x0 or epsilon (bit-flip mask)
@@ -221,6 +223,11 @@ class DiffusionTSFConfig:
         assert 0.0 <= self.deterministic_anchor_lambda <= 1.0
         assert 0.0 <= self.deterministic_anchor_alpha < 1.0
         assert self.window_norm_std_floor > 0
+        if self.window_norm_center not in {"mean", "last"}:
+            raise ValueError(
+                "window_norm_center must be 'mean' or 'last', "
+                f"got {self.window_norm_center!r}."
+            )
         if self.diffusion_type == "binary":
             if self.binary_noise_schedule not in {"sqrt_linear", "linear", "cosine"}:
                 raise ValueError(

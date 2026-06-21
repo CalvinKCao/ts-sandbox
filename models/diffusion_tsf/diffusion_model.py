@@ -366,24 +366,33 @@ class DiffusionTSF(nn.Module):
         enc_tokens = self.guidance_model.get_encoder_tokens(past_raw)   # (B, V, d_model)
         return self.context_encoder(enc_tokens)                          # (B, V, ctx_dim)
 
+    def _window_norm_center(self, past: torch.Tensor) -> torch.Tensor:
+        if self.config.window_norm_center == "last":
+            return past[..., -1:]
+        if self.config.window_norm_center != "mean":
+            raise ValueError(
+                f"unknown window_norm_center {self.config.window_norm_center!r}"
+            )
+        return past.mean(dim=-1, keepdim=True)
+
     def _normalize_sequence(
         self,
         past: torch.Tensor,
         future: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Per-window z-score using past mean/std; future uses the same stats."""
+        """Per-window norm: subtract center (mean or last), divide by past std."""
         if not self.config.use_window_normalization:
             mean = torch.zeros_like(past[..., :1])
             std = torch.ones_like(past[..., :1])
             return past, future, (mean, std)
-        mean = past.mean(dim=-1, keepdim=True)
+        center = self._window_norm_center(past)
         std = past.std(dim=-1, keepdim=True).clamp_min(self.config.window_norm_std_floor)
-        past_norm = (past - mean) / std
+        past_norm = (past - center) / std
         if future is not None:
-            future_norm = (future - mean) / std
+            future_norm = (future - center) / std
         else:
             future_norm = None
-        return past_norm, future_norm, (mean, std)
+        return past_norm, future_norm, (center, std)
     
     def _denormalize(
         self,

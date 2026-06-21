@@ -90,6 +90,7 @@ experiment:
     dalia: 6.0
     dynamic: 6.0
   window_norm_std_floor: 0.1
+  window_norm_center: mean
   dit_patch_size: [8, 8]
   dit_embed_dim: 384
   dit_depth: 8
@@ -110,6 +111,7 @@ experiment:
   disable_cross_attention: false
   cross_variate_context_bias: 0.0
   use_window_normalization: true
+  # window_norm_center: mean | last — subtract lookback mean (default) or last value before /std
   zero_guidance_forecast: false
   lookback_length: 96
   forecast_length: 96

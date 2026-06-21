@@ -83,11 +83,22 @@ def _load_past_batch(dataset: str, window_indices: Sequence[int]) -> np.ndarray:
     return np.stack(past_list, axis=0)
 
 
-def binary_instance_norm(past: np.ndarray, pred: np.ndarray, std_floor: float) -> np.ndarray:
-    mean = past.mean(axis=-1, keepdims=True)
+def binary_instance_norm(
+    past: np.ndarray,
+    pred: np.ndarray,
+    std_floor: float,
+    *,
+    center: str = "mean",
+) -> np.ndarray:
+    if center == "last":
+        ref = past[..., -1:]
+    elif center == "mean":
+        ref = past.mean(axis=-1, keepdims=True)
+    else:
+        raise ValueError(f"window_norm center must be 'mean' or 'last', got {center!r}")
     std = past.std(axis=-1, keepdims=True)
     std = np.maximum(std, std_floor)
-    return (pred - mean) / std
+    return (pred - ref) / std
 
 
 def mmpd_instance_norm(past: np.ndarray, pred: np.ndarray) -> np.ndarray:
@@ -201,11 +212,14 @@ def analyze_model_trends(
     pred: np.ndarray,
     past: np.ndarray,
     output_dir: Path,
+    window_norm_center: str = "mean",
 ) -> Tuple[Dict[str, object], np.ndarray]:
     if pred.shape[0] != past.shape[0]:
         raise RuntimeError(f"{dataset}/{model}: pred batch {pred.shape[0]} != past {past.shape[0]}")
     if model == "binary":
-        norm_pred = binary_instance_norm(past, pred, BINARY_STD_FLOOR)
+        norm_pred = binary_instance_norm(
+            past, pred, BINARY_STD_FLOOR, center=window_norm_center,
+        )
         label = "binary grad_accum_150_lr_lo"
     elif model == "mmpd":
         norm_pred = mmpd_instance_norm(past, pred)
@@ -230,6 +244,7 @@ def analyze_model_trends(
         "horizon": int(pred.shape[2]),
         "per_window_variate": summary,
         "per_window_mean_variate": window_summary,
+        "window_norm_center": window_norm_center,
         "histogram": str(hist_path.relative_to(REPO_ROOT)),
     }
     with (ds_out / f"{model}_horizon_trend_summary.json").open("w", encoding="utf-8") as f:
@@ -255,6 +270,7 @@ def process_dataset(
     allow_fallback_binary: bool,
     binary_only: bool,
     binary_results_dir: Optional[Path],
+    window_norm_center: str = "mean",
 ) -> Optional[Dict[str, object]]:
     ds_meta: Dict[str, object] = {"dataset": dataset, "models": {}}
     binary_trends: Optional[np.ndarray] = None
@@ -322,6 +338,7 @@ def process_dataset(
             pred=mmpd_det,
             past=past_m,
             output_dir=output_dir,
+            window_norm_center=window_norm_center,
         )
         ds_meta["models"]["mmpd"] = meta_m
 
@@ -334,6 +351,7 @@ def process_dataset(
             pred=binary_det,
             past=past_b,
             output_dir=output_dir,
+            window_norm_center=window_norm_center,
         )
         ds_meta["models"]["binary"] = meta_b
         ds_meta["binary_results_dir"] = str(binary_run.results_dir) if binary_run else None
@@ -365,6 +383,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override binary results root (must have raw/staged_anchor_<ds>.npz).",
     )
+    parser.add_argument(
+        "--window-norm-center",
+        choices=("mean", "last"),
+        default="mean",
+        help="Re-normalize binary preds for trend metric (match training center).",
+    )
     return parser.parse_args()
 
 
@@ -384,6 +408,7 @@ def main() -> None:
             allow_fallback_binary=args.allow_fallback_binary,
             binary_only=args.binary_only,
             binary_results_dir=args.binary_results_dir,
+            window_norm_center=args.window_norm_center,
         )
         if meta is not None:
             all_meta.append(meta)

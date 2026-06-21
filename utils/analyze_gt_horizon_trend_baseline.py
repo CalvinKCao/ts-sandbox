@@ -52,12 +52,14 @@ def _collate(batch: Sequence[tuple]) -> tuple[np.ndarray, np.ndarray]:
     return past, future
 
 
-def gt_trends_for_loader(loader: DataLoader, *, overlap: int) -> np.ndarray:
+def gt_trends_for_loader(loader: DataLoader, *, overlap: int, window_norm_center: str = "mean") -> np.ndarray:
     chunks: List[np.ndarray] = []
     for past, future in loader:
         if overlap > 0:
             future = future[..., overlap:]
-        norm_future = binary_instance_norm(past, future, BINARY_STD_FLOOR)
+        norm_future = binary_instance_norm(
+            past, future, BINARY_STD_FLOOR, center=window_norm_center,
+        )
         chunks.append(horizon_trend(norm_future))
     return np.concatenate(chunks, axis=0)
 
@@ -98,7 +100,13 @@ def plot_gt_histogram(
     plt.close(fig)
 
 
-def process_dataset(dataset: str, output_dir: Path, batch_size: int) -> Dict[str, object]:
+def process_dataset(
+    dataset: str,
+    output_dir: Path,
+    batch_size: int,
+    *,
+    window_norm_center: str = "mean",
+) -> Dict[str, object]:
     policy = _load_data_subset_policy(REPO_ROOT / "configs" / "binary_anchor_stationary_flat_subsets.yaml")
     subset = resolve_subset_meta_for_dataset(dataset, policy, seed=2026)
     variate_indices = [int(i) for i in subset["variate_indices"]]
@@ -135,9 +143,15 @@ def process_dataset(dataset: str, output_dir: Path, batch_size: int) -> Dict[str
     }
 
     ds_out = output_dir / dataset
-    ds_meta: Dict[str, object] = {"dataset": dataset, "splits": {}}
+    ds_meta: Dict[str, object] = {
+        "dataset": dataset,
+        "window_norm_center": window_norm_center,
+        "splits": {},
+    }
     for split, loader in loaders.items():
-        trends = gt_trends_for_loader(loader, overlap=overlap)
+        trends = gt_trends_for_loader(
+            loader, overlap=overlap, window_norm_center=window_norm_center,
+        )
         summary = trend_summary(trends)
         hist_path = ds_out / f"gt_{split}_horizon_trend_histogram.png"
         plot_gt_histogram(
@@ -166,6 +180,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--datasets", default="exchange_rate,weather")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument(
+        "--window-norm-center",
+        choices=("mean", "last"),
+        default="mean",
+        help="Subtract lookback mean (default) or last value before /std.",
+    )
     return parser.parse_args()
 
 
@@ -176,7 +196,14 @@ def main() -> None:
 
     all_meta: List[Dict[str, object]] = []
     for dataset in datasets:
-        all_meta.append(process_dataset(dataset, args.output_dir, args.batch_size))
+        all_meta.append(
+            process_dataset(
+                dataset,
+                args.output_dir,
+                args.batch_size,
+                window_norm_center=args.window_norm_center,
+            )
+        )
 
     out_path = args.output_dir / "gt_baseline_summary.json"
     with out_path.open("w", encoding="utf-8") as f:

@@ -107,6 +107,7 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'finer_image_height': FINER_IMAGE_HEIGHT,
         'max_scale': MAX_SCALE,
         'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
+        'window_norm_center': WINDOW_NORM_CENTER,
         'use_dual_scale': USE_DUAL_SCALE,
         'use_triple_scale': USE_TRIPLE_SCALE,
         'diffusion_stage': DIFFUSION_STAGE,
@@ -131,6 +132,7 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'dit_mlp_ratio': DIT_MLP_RATIO,
         'dit_dropout': DIT_DROPOUT,
         'use_window_normalization': USE_WINDOW_NORMALIZATION,
+        'window_norm_center': WINDOW_NORM_CENTER,
         'zero_guidance_forecast': ZERO_GUIDANCE_FORECAST,
         'window_stride': WINDOW_STRIDE,
         'binary_noise_schedule': BINARY_NOISE_SCHEDULE,
@@ -319,6 +321,7 @@ DETERMINISTIC_ANCHOR_LAMBDA = 0.99
 DETERMINISTIC_ANCHOR_ALPHA = 0.5
 BINARY_ANCHOR_INPUT_MODE = "stationary_flat"
 USE_WINDOW_NORMALIZATION = True
+WINDOW_NORM_CENTER = "mean"
 ZERO_GUIDANCE_FORECAST = False
 WINDOW_STRIDE = 1
 ANCHOR_HP_LAMBDA_MIN = 0.90
@@ -946,6 +949,7 @@ def create_diffusion_model(
         binary_beta_start=o("binary_beta_start", BINARY_BETA_START),
         binary_beta_end=o("binary_beta_end", BINARY_BETA_END),
         use_window_normalization=USE_WINDOW_NORMALIZATION,
+        window_norm_center=WINDOW_NORM_CENTER,
         window_norm_std_floor=WINDOW_NORM_STD_FLOOR,
         zero_guidance_forecast=ZERO_GUIDANCE_FORECAST,
         itrans_d_model=ITRANS_D_MODEL,
@@ -2159,6 +2163,7 @@ def _promote_best_trial_to_final(
                 'image_height': IMAGE_HEIGHT,
                 'max_scale': MAX_SCALE,
                 'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
+                'window_norm_center': WINDOW_NORM_CENTER,
                 'use_dual_scale': USE_DUAL_SCALE,
                 'diffusion_stage': DIFFUSION_STAGE,
                 'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
@@ -2168,6 +2173,7 @@ def _promote_best_trial_to_final(
                 'disable_cross_attention': DISABLE_CROSS_ATTENTION,
                 'cross_variate_context_bias': CROSS_VARIATE_CONTEXT_BIAS,
                 'use_window_normalization': USE_WINDOW_NORMALIZATION,
+                'window_norm_center': WINDOW_NORM_CENTER,
                 'zero_guidance_forecast': ZERO_GUIDANCE_FORECAST,
                 'window_stride': WINDOW_STRIDE,
                 'lookback_length': LOOKBACK_LENGTH,

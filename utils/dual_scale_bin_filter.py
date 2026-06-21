@@ -21,10 +21,20 @@ BinMatchMode = Literal["mmpd", "both", "all"]
 BIN_MATCH_CHOICES: Tuple[str, ...] = ("mmpd", "both", "all")
 
 
-def window_norm_stats(past: np.ndarray, std_floor: float) -> Tuple[np.ndarray, np.ndarray]:
-    mean = past.mean(axis=-1, keepdims=True)
+def window_norm_stats(
+    past: np.ndarray,
+    std_floor: float,
+    *,
+    center: str = "mean",
+) -> Tuple[np.ndarray, np.ndarray]:
+    if center == "last":
+        ref = past[..., -1:].astype(np.float32)
+    elif center == "mean":
+        ref = past.mean(axis=-1, keepdims=True).astype(np.float32)
+    else:
+        raise ValueError(f"window_norm center must be 'mean' or 'last', got {center!r}")
     std = np.maximum(past.std(axis=-1, keepdims=True), std_floor)
-    return mean.astype(np.float32), std.astype(np.float32)
+    return ref, std.astype(np.float32)
 
 
 def dual_scale_roundtrip_norm(

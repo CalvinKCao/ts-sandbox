@@ -69,6 +69,7 @@ class PipelineState:
     disable_cross_attention: bool = False
     cross_variate_context_bias: float = 0.0
     use_window_normalization: bool = True
+    window_norm_center: str = "mean"
     window_norm_std_floor: float = 1e-8
     zero_guidance_forecast: bool = False
 

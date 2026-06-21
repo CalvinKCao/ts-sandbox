@@ -28,6 +28,7 @@ REQUIRED_EXPERIMENT_KEYS = (
     "max_scale",
     "max_scale_by_dataset",
     "window_norm_std_floor",
+    "window_norm_center",
     "dit_patch_size",
     "dit_embed_dim",
     "dit_depth",

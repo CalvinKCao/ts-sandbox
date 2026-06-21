@@ -67,6 +67,7 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "lookback_length": int(state.lookback_length),
         "forecast_length": int(state.forecast_length),
         "use_window_normalization": bool(state.use_window_normalization),
+        "window_norm_center": str(state.window_norm_center),
         "window_norm_std_floor": float(state.window_norm_std_floor),
         "cross_variate_context_bias": float(state.cross_variate_context_bias),
         "d3pm_transition_max": float(state.d3pm_transition_max),
