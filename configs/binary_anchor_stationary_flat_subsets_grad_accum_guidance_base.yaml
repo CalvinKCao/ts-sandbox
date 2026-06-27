@@ -1,8 +1,5 @@
 extends: binary_anchor_stationary_flat_subsets_grad_accum_base.yaml
 
-wandb:
-  project: ts-sandbox-flat-subsets-grad-accum-guidance
-
 experiment:
   use_guidance_channel: true
   disable_cross_attention: false

@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
-"""Top test windows by per-window anchor_mse / CRPS delta (binary grad_accum − fair MMPD).
+"""Top test windows by per-window anchor_mse / CRPS delta (binary − fair MMPD).
 
-Uses saved eval npz only (no GPU inference). Skips datasets without a finished
-binary grad_accum_150_lr_lo staged eval unless --allow-fallback-binary is set.
+Uses saved eval NPZ when available; optional checkpoint inference for missing
+binary eval artifacts and for coarse/fine 2D anchor decomposition plots.
 
-Example:
-  python utils/visualize_fair_mmpd_vs_binary_delta.py
-  python utils/visualize_fair_mmpd_vs_binary_delta.py --datasets ETTh1,traffic --top-k 10
+Example (grad-accum 1.5× lr-hi vs fair MMPD, flat subsets):
+  python utils/visualize_fair_mmpd_vs_binary_delta.py \\
+    --binary-config binary_anchor_stationary_flat_subsets_grad_accum_150_lr_hi \\
+    --mmpd-run results/datasets/06-16-mmpd-maskae-fair-13d \\
+    --datasets weather,traffic,exchange_rate,solar_Alabama,electricity,ETTh2,ETTh1 \\
+    --infer-binary \\
+    --output-dir reports/fair_mmpd_vs_grad_accum_150_lr_hi
+
+Explicit paths (skip auto-discovery):
+  python utils/visualize_fair_mmpd_vs_binary_delta.py \\
+    --binary-results-dir results/datasets/06-19-...-ETTh1-..._lr_lo \\
+    --binary-ckpt-dir results/ckpts/06-14-...-ETTh1-..._lr_hi \\
+    --mmpd-run results/datasets/06-16-mmpd-maskae-fair-13d \\
+    --dataset ETTh1
 """
 
 from __future__ import annotations
@@ -15,9 +26,9 @@ import argparse
 import csv
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib
 
@@ -25,12 +36,24 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Subset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from models.diffusion_tsf.train_multivariate_pipeline import generate_dataset_job, load_dataset
+from models.diffusion_tsf.guidance import iTransformerGuidance
+from models.diffusion_tsf.pipeline.config import load_experiment_config
+from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch_stage_globals
+from models.diffusion_tsf.pipeline.state import PipelineState
+from models.diffusion_tsf.train_multivariate_pipeline import (
+    generate_dataset_job,
+    load_dataset,
+    load_diffusion_state_keep_attached_guidance,
+    load_itransformer_from_checkpoint,
+    create_diffusion_model,
+    anchor_kwargs_from_params,
+)
 from models.diffusion_tsf.visualize_comparison import denorm
 from utils.eval_mmpd_gaussian_anchor import (
     _load_data_subset_policy,
@@ -39,30 +62,22 @@ from utils.eval_mmpd_gaussian_anchor import (
 )
 
 DEFAULT_MMPD_RUN = REPO_ROOT / "results" / "datasets" / "06-16-mmpd-maskae-fair-13d"
-SUBSET_CONFIG = REPO_ROOT / "configs" / "binary_anchor_stationary_flat_subsets.yaml"
-DEFAULT_OUTPUT = REPO_ROOT / "reports" / "fair_mmpd_vs_ema099_grad_accum_150"
-BINARY_CONFIG = "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo"
-FALLBACK_BINARY_CONFIG = "binary_anchor_stationary_flat_subsets_ema099"
+DEFAULT_SUBSET_CONFIG = REPO_ROOT / "configs" / "binary_anchor_stationary_flat_subsets.yaml"
+DEFAULT_BINARY_CONFIG = "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_hi"
+FALLBACK_BINARY_CONFIG = "binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo"
+DEFAULT_OUTPUT = REPO_ROOT / "reports" / "fair_mmpd_vs_grad_accum_150_lr_hi"
 EVAL_TEST_STRIDE = 4
 TRAIN_STRIDE = 1
 PROB_COLORS = ["#E91E63", "#FF9800", "#4CAF50"]
-ALL_DATASETS = (
-    "ETTh1",
-    "ETTh2",
-    "ETTm1",
-    "ETTm2",
-    "illness",
-    "exchange_rate",
+DEFAULT_DATASETS = (
     "weather",
-    "electricity",
     "traffic",
-    "PeMS",
+    "exchange_rate",
     "solar_Alabama",
-    "dalia",
-    "dynamic",
+    "electricity",
+    "ETTh2",
+    "ETTh1",
 )
-# Binary grad_accum_150_lr_lo staged eval completed for all 13 flat-subset datasets.
-FINISHED_GRAD_ACCUM_DATASETS = ALL_DATASETS
 
 
 @dataclass
@@ -83,9 +98,175 @@ class AlignedPack:
     mmpd_samples: np.ndarray
 
 
+@dataclass
+class Anchor2DMaps:
+    """Native coarse/fine CDF occupancy maps (V, H, W) in model space [0, 1]."""
+
+    coarse: np.ndarray
+    fine: np.ndarray
+
+
+@dataclass
+class BinaryStagedInference:
+    ckpt_dir: Path
+    dataset: str
+    config_name: str
+    device: torch.device
+    subset_config: Path
+    seed: int = 2026
+    _bundle: Optional[Dict[str, Any]] = field(default=None, init=False, repr=False)
+    _coarse_model: Any = field(default=None, init=False, repr=False)
+    _fine_model: Any = field(default=None, init=False, repr=False)
+    _test_ds: Any = field(default=None, init=False, repr=False)
+    _norm_stats: Optional[Dict[str, torch.Tensor]] = field(default=None, init=False, repr=False)
+    _horizon: int = field(default=96, init=False, repr=False)
+
+    def _ensure_loaded(self) -> None:
+        if self._coarse_model is not None:
+            return
+        self._bundle = _load_staged_bundle(self.ckpt_dir, self.dataset)
+        subset_id = self._bundle["subset_id"]
+        variate_indices = self._bundle["variate_indices"]
+        n_vars = len(variate_indices)
+        state = _build_pipeline_state(
+            self.ckpt_dir, self.dataset, subset_id, self.config_name,
+        )
+        lookback, horizon = _window_lengths(self.dataset, state)
+        self._horizon = horizon
+
+        data_subset = self._bundle["fine_metadata"].get("data_subset") or {}
+        test_stride = int(data_subset.get("test_stride", EVAL_TEST_STRIDE))
+        _, _, test_ds, norm_stats = load_dataset(
+            self.dataset,
+            variate_indices,
+            stride=TRAIN_STRIDE,
+            test_stride=test_stride,
+            lookback=lookback,
+            horizon=horizon,
+        )
+        self._test_ds = test_ds
+        self._norm_stats = {
+            "mean": torch.tensor(norm_stats["mean"], dtype=torch.float32),
+            "std": torch.tensor(norm_stats["std"], dtype=torch.float32),
+        }
+
+        guidance_path = self.ckpt_dir / f"{subset_id}_itransformer_finetuned.pt"
+        if not guidance_path.is_file():
+            raise FileNotFoundError(
+                f"Missing {guidance_path.name} under {self.ckpt_dir}"
+            )
+        guidance_model = load_itransformer_from_checkpoint(
+            str(guidance_path), n_vars, self.device,
+        )
+        itrans_guidance = iTransformerGuidance(guidance_model)
+        self._coarse_model = _load_staged_diffusion(
+            state, "coarse", self._bundle["coarse_pt"], itrans_guidance, n_vars, self.device,
+        )
+        self._fine_model = _load_staged_diffusion(
+            state, "fine", self._bundle["fine_pt"], itrans_guidance, n_vars, self.device,
+        )
+
+    def norm_stats(self) -> Dict[str, torch.Tensor]:
+        self._ensure_loaded()
+        assert self._norm_stats is not None
+        return self._norm_stats
+
+    def infer_on_indices(
+        self,
+        window_indices: Sequence[int],
+        *,
+        prob_draws: int,
+        batch_size: int = 4,
+        prob_steps: int = 20,
+        prob_sampler: str = "dpmpp",
+    ) -> Dict[str, np.ndarray]:
+        """Run staged anchor + probabilistic sampling on test windows."""
+        self._ensure_loaded()
+        assert self._test_ds is not None
+        assert self._coarse_model is not None and self._fine_model is not None
+
+        idx_list = [int(i) for i in window_indices]
+        subset = Subset(self._test_ds, idx_list)
+        loader = DataLoader(subset, batch_size=batch_size, shuffle=False)
+
+        y_true_all: List[np.ndarray] = []
+        det_all: List[np.ndarray] = []
+        sample_all: List[np.ndarray] = []
+        prob_kwargs = {"sampler": prob_sampler, "num_inference_steps": prob_steps}
+
+        with torch.no_grad():
+            for batch_idx, (past, future) in enumerate(loader):
+                past = past.to(self.device)
+                future = future.to(self.device)
+                K = int(getattr(self._coarse_model.config, "lookback_overlap", 0) or 0)
+                if K > 0:
+                    future = future[..., K:]
+                y_true_all.append(future.cpu().numpy())
+
+                torch.manual_seed(self.seed + batch_idx)
+                coarse_det = self._coarse_model.generate(past, sampler="anchor")
+                fine_det = self._fine_model.generate(
+                    past,
+                    sampler="anchor",
+                    future_coarse_2d=coarse_det["future_2d_coarse"],
+                )
+                det_t = fine_det.get("prediction_global_norm", fine_det["prediction"])
+                det_all.append(det_t.detach().cpu().numpy())
+
+                batch_samples: List[np.ndarray] = []
+                for sample_idx in range(prob_draws):
+                    sample_seed = self.seed + batch_idx * 1009 + sample_idx * 17
+                    torch.manual_seed(sample_seed)
+                    coarse_s = self._coarse_model.generate(past, **prob_kwargs)
+                    torch.manual_seed(sample_seed)
+                    fine_s = self._fine_model.generate(
+                        past,
+                        future_coarse_2d=coarse_s["future_2d_coarse"],
+                        **prob_kwargs,
+                    )
+                    pred = fine_s.get("prediction_global_norm", fine_s["prediction"])
+                    batch_samples.append(pred.cpu().numpy())
+                sample_all.append(np.stack(batch_samples, axis=2))
+
+        return {
+            "y_true": np.concatenate(y_true_all, axis=0),
+            "deterministic": np.concatenate(det_all, axis=0),
+            "samples": np.concatenate(sample_all, axis=0),
+        }
+
+    def infer_anchor_2d(self, window_index: int) -> Anchor2DMaps:
+        """Return future coarse/fine CDF maps for one test window (model-native [0,1])."""
+        self._ensure_loaded()
+        assert self._test_ds is not None
+        assert self._coarse_model is not None and self._fine_model is not None
+
+        past, _ = self._test_ds[int(window_index)]
+        past_t = past.unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            torch.manual_seed(self.seed + int(window_index))
+            coarse_det = self._coarse_model.generate(past_t, sampler="anchor")
+            fine_det = self._fine_model.generate(
+                past_t,
+                sampler="anchor",
+                future_coarse_2d=coarse_det["future_2d_coarse"],
+            )
+            coarse_2d = coarse_det["future_2d_coarse"][0].detach().cpu().numpy()
+            fine_2d = fine_det["future_2d_fine"][0].detach().cpu().numpy()
+        return Anchor2DMaps(coarse=coarse_2d, fine=fine_2d)
+
+
 def _read_json(path: Path) -> Dict:
     with path.open(encoding="utf-8") as f:
         return json.load(f)
+
+
+def _newest_match(root: Path, pattern: str) -> Optional[Path]:
+    matches = sorted(
+        root.glob(pattern),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return matches[0] if matches else None
 
 
 def _finished_binary_run(
@@ -93,32 +274,32 @@ def _finished_binary_run(
     ckpt_root: Path,
     dataset: str,
     config_suffix: str,
+    *,
+    results_dir_override: Optional[Path] = None,
+    ckpt_dir_override: Optional[Path] = None,
 ) -> Optional[BinaryRun]:
-    pattern = f"*-{dataset}-{config_suffix}"
-    candidates: List[Tuple[float, Path, Dict[str, float]]] = []
-    for results_dir in datasets_root.glob(pattern):
-        if not results_dir.is_dir():
-            continue
-        partial = results_dir / "partials" / f"{dataset}_staged_anchor.json"
-        anchor_npz = results_dir / "raw" / f"staged_anchor_{dataset}.npz"
-        samples_npz = results_dir / "raw" / f"staged_dpmpp_samples_{dataset}.npz"
-        if not (partial.is_file() and anchor_npz.is_file() and samples_npz.is_file()):
-            continue
-        metrics = _read_json(partial)
-        if "anchor_mse" not in metrics or "crps" not in metrics:
-            continue
-        candidates.append((results_dir.stat().st_mtime, results_dir, metrics))
-    if not candidates:
+    results_dir = results_dir_override
+    if results_dir is None:
+        results_dir = _newest_match(datasets_root, f"*-{dataset}-{config_suffix}")
+    if results_dir is None or not results_dir.is_dir():
         return None
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    results_dir = candidates[0][1]
-    metrics = candidates[0][2]
-    ckpt_matches = sorted(
-        ckpt_root.glob(f"*-{dataset}-{config_suffix}"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    ckpt_dir = ckpt_matches[0] if ckpt_matches else results_dir
+
+    partial = results_dir / "partials" / f"{dataset}_staged_anchor.json"
+    anchor_npz = results_dir / "raw" / f"staged_anchor_{dataset}.npz"
+    samples_npz = results_dir / "raw" / f"staged_dpmpp_samples_{dataset}.npz"
+    has_npz = partial.is_file() and anchor_npz.is_file() and samples_npz.is_file()
+    metrics: Dict[str, float] = {}
+    if partial.is_file():
+        metrics = _read_json(partial)
+    elif not has_npz:
+        return None
+
+    ckpt_dir = ckpt_dir_override
+    if ckpt_dir is None:
+        ckpt_dir = _newest_match(ckpt_root, f"*-{dataset}-{config_suffix}")
+    if ckpt_dir is None:
+        ckpt_dir = results_dir
+
     return BinaryRun(
         results_dir=results_dir,
         ckpt_dir=ckpt_dir,
@@ -132,19 +313,152 @@ def discover_binary_run(
     ckpt_root: Path,
     dataset: str,
     *,
+    config_suffix: str,
     allow_fallback: bool,
+    fallback_config: str,
+    results_dir_override: Optional[Path] = None,
+    ckpt_dir_override: Optional[Path] = None,
 ) -> BinaryRun:
-    run = _finished_binary_run(datasets_root, ckpt_root, dataset, BINARY_CONFIG)
+    run = _finished_binary_run(
+        datasets_root,
+        ckpt_root,
+        dataset,
+        config_suffix,
+        results_dir_override=results_dir_override,
+        ckpt_dir_override=ckpt_dir_override,
+    )
     if run is not None:
         return run
-    if allow_fallback:
-        fb = _finished_binary_run(datasets_root, ckpt_root, dataset, FALLBACK_BINARY_CONFIG)
+    if allow_fallback and fallback_config != config_suffix:
+        fb = _finished_binary_run(
+            datasets_root,
+            ckpt_root,
+            dataset,
+            fallback_config,
+            results_dir_override=results_dir_override,
+            ckpt_dir_override=ckpt_dir_override,
+        )
         if fb is not None:
             return fb
     raise FileNotFoundError(
-        f"No finished binary staged eval for {dataset} "
-        f"({BINARY_CONFIG}); rerun with --allow-fallback-binary for ema099."
+        f"No binary run dir for {dataset} ({config_suffix}); "
+        f"set --binary-results-dir / --binary-ckpt-dir or use --allow-fallback-binary."
     )
+
+
+def discover_binary_ckpt(
+    ckpt_root: Path,
+    dataset: str,
+    config_suffix: str,
+    *,
+    ckpt_dir_override: Optional[Path] = None,
+) -> Path:
+    if ckpt_dir_override is not None:
+        if not ckpt_dir_override.is_dir():
+            raise FileNotFoundError(f"Missing --binary-ckpt-dir: {ckpt_dir_override}")
+        return ckpt_dir_override
+    match = _newest_match(ckpt_root, f"*-{dataset}-{config_suffix}")
+    if match is None:
+        raise FileNotFoundError(
+            f"No checkpoint dir matching *-{dataset}-{config_suffix} under {ckpt_root}"
+        )
+    return match
+
+
+def _load_staged_bundle(checkpoint_dir: Path, dataset: str) -> Dict[str, Any]:
+    candidates: List[Dict[str, Any]] = []
+    for sub_dir in sorted(checkpoint_dir.iterdir()):
+        if not sub_dir.is_dir():
+            continue
+        coarse_pt = sub_dir / "coarse" / "best.pt"
+        fine_pt = sub_dir / "fine" / "best.pt"
+        fine_meta_path = sub_dir / "fine" / "metadata.json"
+        if not (coarse_pt.is_file() and fine_pt.is_file() and fine_meta_path.is_file()):
+            continue
+        with fine_meta_path.open(encoding="utf-8") as f:
+            fine_meta = json.load(f)
+        if fine_meta.get("dataset_name") != dataset:
+            continue
+        coarse_meta: Dict[str, Any] = {}
+        coarse_meta_path = sub_dir / "coarse" / "metadata.json"
+        if coarse_meta_path.is_file():
+            with coarse_meta_path.open(encoding="utf-8") as f:
+                coarse_meta = json.load(f)
+        candidates.append(
+            {
+                "subset_id": fine_meta["subset_id"],
+                "variate_indices": fine_meta["variate_indices"],
+                "variate_names": fine_meta.get("variate_names", []),
+                "coarse_pt": coarse_pt,
+                "fine_pt": fine_pt,
+                "fine_metadata": fine_meta,
+                "coarse_metadata": coarse_meta,
+                "root": checkpoint_dir,
+            }
+        )
+    if not candidates:
+        raise FileNotFoundError(
+            f"No staged coarse/fine best.pt for dataset={dataset} under {checkpoint_dir}"
+        )
+    return candidates[0]
+
+
+def _build_pipeline_state(
+    checkpoint_dir: Path,
+    dataset: str,
+    subset_id: str,
+    config_name: str,
+) -> PipelineState:
+    cfg_path = REPO_ROOT / "configs" / f"{config_name}.yaml"
+    if not cfg_path.is_file():
+        raise FileNotFoundError(f"Missing experiment config: {cfg_path}")
+    cfg = load_experiment_config(str(cfg_path), cli_overrides={"dataset": dataset})
+    state = PipelineState.from_config(cfg)
+    state.checkpoint_dir = str(checkpoint_dir.resolve())
+    state.dataset = dataset
+    state.subset_id = subset_id
+    return state
+
+
+def _window_lengths(dataset: str, state: PipelineState) -> Tuple[int, int]:
+    if dataset == "dalia":
+        from models.diffusion_tsf.dalia_data import dalia_window_lengths
+
+        return dalia_window_lengths()
+    return state.lookback_length, state.forecast_length
+
+
+def _load_staged_diffusion(
+    state: PipelineState,
+    stage: str,
+    ckpt_path: Path,
+    itrans_guidance: iTransformerGuidance,
+    n_vars: int,
+    device: torch.device,
+) -> torch.nn.Module:
+    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+
+    patch_stage_globals(pipeline_mod, state, stage, honor_dataset_windows=True)
+    lookback, horizon = _window_lengths(state.dataset, state)
+    meta_path = ckpt_path.parent / "metadata.json"
+    tuned: Dict[str, Any] = {}
+    if meta_path.is_file():
+        with meta_path.open(encoding="utf-8") as f:
+            tuned = json.load(f).get("tuned_params") or {}
+
+    model = create_diffusion_model(
+        n_variates=n_vars,
+        lookback=lookback,
+        horizon=horizon,
+        guidance_model=itrans_guidance,
+        diffusion_stage=stage,
+        use_guidance_channel=state.use_guidance_channel,
+        **anchor_kwargs_from_params(tuned),
+    ).to(device)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
+    model.eval()
+    return model
 
 
 def load_mmpd_pack(mmpd_run: Path, dataset: str) -> Dict[str, np.ndarray]:
@@ -155,9 +469,11 @@ def load_mmpd_pack(mmpd_run: Path, dataset: str) -> Dict[str, np.ndarray]:
         return {k: data[k] for k in data.files}
 
 
-def load_binary_pack(binary_run: BinaryRun, dataset: str) -> Dict[str, np.ndarray]:
+def load_binary_pack(binary_run: BinaryRun, dataset: str) -> Optional[Dict[str, np.ndarray]]:
     anchor_path = binary_run.results_dir / "raw" / f"staged_anchor_{dataset}.npz"
     samples_path = binary_run.results_dir / "raw" / f"staged_dpmpp_samples_{dataset}.npz"
+    if not (anchor_path.is_file() and samples_path.is_file()):
+        return None
     with np.load(anchor_path) as anchor:
         det = anchor["deterministic"]
         y_true_anchor = anchor["y_true"]
@@ -207,6 +523,28 @@ def align_packs(
     )
 
 
+def align_mmpd_with_inferred_binary(
+    mmpd: Dict[str, np.ndarray],
+    inferred: Dict[str, np.ndarray],
+    dataset: str,
+) -> AlignedPack:
+    indices = np.asarray(mmpd["indices"], dtype=np.int64)
+    m_y = mmpd["y_true"]
+    if not np.allclose(inferred["y_true"], m_y, rtol=1e-4, atol=1e-4):
+        bad = int(np.argmax(np.abs(inferred["y_true"] - m_y).reshape(len(indices), -1).mean(axis=1)))
+        raise RuntimeError(
+            f"{dataset}: inferred y_true mismatch at row {bad} (window {int(indices[bad])})"
+        )
+    return AlignedPack(
+        indices=indices,
+        y_true=m_y,
+        binary_det=inferred["deterministic"],
+        binary_samples=inferred["samples"],
+        mmpd_det=mmpd["deterministic"],
+        mmpd_samples=mmpd["samples"],
+    )
+
+
 def per_window_anchor_mse(y_true: np.ndarray, det: np.ndarray) -> np.ndarray:
     return ((y_true - det) ** 2).mean(axis=(1, 2))
 
@@ -225,7 +563,6 @@ def per_window_crps(y_true: np.ndarray, samples: np.ndarray, *, chunk: int = 32)
 
 
 def rank_top_k(delta: np.ndarray, top_k: int) -> np.ndarray:
-    """Indices into delta array, descending delta (binary − mmpd)."""
     k = min(top_k, delta.size)
     if k <= 0:
         return np.array([], dtype=np.int64)
@@ -233,9 +570,9 @@ def rank_top_k(delta: np.ndarray, top_k: int) -> np.ndarray:
     return order[:k]
 
 
-def _variate_names(dataset: str, n_vars: int) -> List[str]:
+def _variate_names(dataset: str, n_vars: int, subset_config: Path) -> List[str]:
     job = generate_dataset_job(dataset)
-    policy = _load_data_subset_policy(SUBSET_CONFIG)
+    policy = _load_data_subset_policy(subset_config)
     subset = resolve_subset_meta_for_dataset(dataset, policy, seed=2026)
     indices = [int(i) for i in subset["variate_indices"][:n_vars]]
     all_names = job.get("variate_names") or []
@@ -247,8 +584,9 @@ def _variate_names(dataset: str, n_vars: int) -> List[str]:
 def _load_test_context(
     dataset: str,
     window_indices: Sequence[int],
+    subset_config: Path,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-    policy = _load_data_subset_policy(SUBSET_CONFIG)
+    policy = _load_data_subset_policy(subset_config)
     subset = resolve_subset_meta_for_dataset(dataset, policy, seed=2026)
     variate_indices = [int(i) for i in subset["variate_indices"]]
     _, _, test_ds, norm_stats = load_dataset(
@@ -283,6 +621,26 @@ def _plot_prob_lines(ax, t_future: np.ndarray, prob_lines: Sequence[torch.Tensor
         )
 
 
+def _plot_2d_cdf_map(ax, data: np.ndarray, *, title: str, ylabel: str = "") -> None:
+    h, w = data.shape
+    im = ax.imshow(
+        data,
+        aspect="auto",
+        origin="lower",
+        extent=[0, w, 0, h],
+        cmap="gray_r",
+        vmin=0.0,
+        vmax=1.0,
+        interpolation="nearest",
+    )
+    ax.set_title(title, fontsize=9)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=9)
+    ax.set_xlabel("forecast column", fontsize=7)
+    fig = ax.figure
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+
 def plot_window_panel(
     *,
     dataset: str,
@@ -302,11 +660,15 @@ def plot_window_panel(
     output_path: Path,
     prob_draws: int,
     context_len: int,
+    binary_label: str,
+    mmpd_label: str,
+    subset_config: Path,
+    anchor_2d: Optional[Anchor2DMaps] = None,
 ) -> None:
     mean, std = norm["mean"], norm["std"]
     n_vars = aligned.y_true.shape[1]
     horizon = aligned.y_true.shape[2]
-    var_names = _variate_names(dataset, n_vars)
+    var_names = _variate_names(dataset, n_vars, subset_config)
 
     past_dn = denorm(past, mean, std)
     gt_t = torch.from_numpy(aligned.y_true[pack_row]).to(dtype=torch.float32)
@@ -322,17 +684,19 @@ def plot_window_panel(
     ]
     mmpd_probs = [
         denorm(torch.from_numpy(aligned.mmpd_samples[pack_row, :, si, :]), mean, std)
-        for si in range(n_s)
+        for si in range(min(n_s, aligned.mmpd_samples.shape[2]))
     ]
 
     t_past = np.arange(-context_len, 0)
     t_future = np.arange(horizon)
-    row_labels = ["Binary grad_accum", "Fair MMPD"]
+    line_labels = [binary_label, mmpd_label]
+    n_2d_rows = 2 if anchor_2d is not None else 0
+    n_rows = 2 + n_2d_rows
 
     fig, axes = plt.subplots(
-        2,
+        n_rows,
         n_vars,
-        figsize=(4.8 * n_vars, 5.2),
+        figsize=(4.8 * n_vars, 2.6 * n_rows + 1.0),
         squeeze=False,
         constrained_layout=True,
     )
@@ -345,8 +709,8 @@ def plot_window_panel(
 
     for row, (label, det_dn, prob_dns) in enumerate(
         [
-            (row_labels[0], bin_det_dn, bin_probs),
-            (row_labels[1], mmpd_det_dn, mmpd_probs),
+            (line_labels[0], bin_det_dn, bin_probs),
+            (line_labels[1], mmpd_det_dn, mmpd_probs),
         ]
     ):
         for col in range(n_vars):
@@ -369,6 +733,30 @@ def plot_window_panel(
             if row == 0 and col == 0:
                 ax.legend(fontsize=7, loc="upper left")
 
+    if anchor_2d is not None:
+        for col in range(n_vars):
+            _plot_2d_cdf_map(
+                axes[2, col],
+                anchor_2d.coarse[col],
+                title=f"{var_names[col]} coarse CDF",
+                ylabel="coarse bins" if col == 0 else "",
+            )
+            _plot_2d_cdf_map(
+                axes[3, col],
+                anchor_2d.fine[col],
+                title=f"{var_names[col]} fine CDF",
+                ylabel="fine bins" if col == 0 else "",
+            )
+        fig.text(
+            0.5,
+            0.01,
+            "2D rows: binary anchor coarse/fine occupancy maps in model space [0,1] "
+            "(native H×W canvas, no extra rescale)",
+            ha="center",
+            fontsize=8,
+            color="#555555",
+        )
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=140)
     plt.close(fig)
@@ -385,13 +773,69 @@ def process_dataset(
     prob_draws: int,
     allow_fallback: bool,
     skip_plots: bool,
+    binary_config: str,
+    fallback_config: str,
+    subset_config: Path,
+    binary_label: str,
+    mmpd_label: str,
+    infer_binary: bool,
+    skip_decomposition: bool,
+    device: torch.device,
+    results_dir_override: Optional[Path],
+    ckpt_dir_override: Optional[Path],
+    infer_batch_size: int,
 ) -> Dict[str, object]:
     binary_run = discover_binary_run(
-        datasets_root, ckpt_root, dataset, allow_fallback=allow_fallback
+        datasets_root,
+        ckpt_root,
+        dataset,
+        config_suffix=binary_config,
+        allow_fallback=allow_fallback,
+        fallback_config=fallback_config,
+        results_dir_override=results_dir_override,
+        ckpt_dir_override=ckpt_dir_override,
     )
+    if ckpt_dir_override is not None:
+        ckpt_dir = ckpt_dir_override
+    elif binary_run.ckpt_dir.is_dir():
+        ckpt_dir = binary_run.ckpt_dir
+    else:
+        ckpt_dir = discover_binary_ckpt(ckpt_root, dataset, binary_run.config_suffix)
+
     mmpd = load_mmpd_pack(mmpd_run, dataset)
     binary = load_binary_pack(binary_run, dataset)
-    aligned = align_packs(mmpd, binary, dataset)
+
+    runner: Optional[BinaryStagedInference] = None
+    if binary is None:
+        if not infer_binary:
+            raise FileNotFoundError(
+                f"{dataset}: no binary eval NPZ under {binary_run.results_dir}/raw; "
+                "pass --infer-binary to run staged inference from checkpoints."
+            )
+        runner = BinaryStagedInference(
+            ckpt_dir=ckpt_dir,
+            dataset=dataset,
+            config_name=binary_run.config_suffix,
+            device=device,
+            subset_config=subset_config,
+        )
+        print(f"[{dataset}] inferring binary preds on {len(mmpd['indices'])} MMPD-aligned windows...")
+        inferred = runner.infer_on_indices(
+            mmpd["indices"],
+            prob_draws=prob_draws,
+            batch_size=infer_batch_size,
+        )
+        aligned = align_mmpd_with_inferred_binary(mmpd, inferred, dataset)
+    else:
+        aligned = align_packs(mmpd, binary, dataset)
+        if not skip_decomposition:
+            runner = BinaryStagedInference(
+                ckpt_dir=ckpt_dir,
+                dataset=dataset,
+                config_name=binary_run.config_suffix,
+                device=device,
+                subset_config=subset_config,
+            )
 
     mse_bin = per_window_anchor_mse(aligned.y_true, aligned.binary_det)
     mse_mmpd = per_window_anchor_mse(aligned.y_true, aligned.mmpd_det)
@@ -401,12 +845,11 @@ def process_dataset(
     mse_delta = mse_bin - mse_mmpd
     crps_delta = crps_bin - crps_mmpd
 
-    # Sanity: aggregate should match partials roughly.
     agg_mse_delta = float(mse_delta.mean())
     agg_crps_delta = float(crps_delta.mean())
     print(
         f"[{dataset}] windows={len(aligned.indices)} "
-        f"binary={binary_run.results_dir.name} "
+        f"binary={binary_run.results_dir.name} ckpt={ckpt_dir.name} "
         f"mean Δmse={agg_mse_delta:+.6f} mean Δcrps={agg_crps_delta:+.6f} "
         f"(partial anchor_mse bin={binary_run.metrics.get('anchor_mse')} "
         f"crps={binary_run.metrics.get('crps')})"
@@ -443,7 +886,12 @@ def process_dataset(
             rows_meta.append(row)
             if skip_plots:
                 continue
-            past_batch, future_batch, norm = _load_test_context(dataset, [win_idx])
+            past_batch, future_batch, norm = _load_test_context(
+                dataset, [win_idx], subset_config,
+            )
+            anchor_2d = None
+            if runner is not None and not skip_decomposition:
+                anchor_2d = runner.infer_anchor_2d(win_idx)
             plot_window_panel(
                 dataset=dataset,
                 window_idx=win_idx,
@@ -461,15 +909,21 @@ def process_dataset(
                 aligned=aligned,
                 output_path=ds_out / f"{metric_name}_delta_rank{rank:02d}_win{win_idx}.png",
                 prob_draws=prob_draws,
-                context_len=min(horizon := aligned.y_true.shape[2], 96 * 2),
+                context_len=min(aligned.y_true.shape[2], 96 * 2),
+                binary_label=binary_label,
+                mmpd_label=mmpd_label,
+                subset_config=subset_config,
+                anchor_2d=anchor_2d,
             )
         rankings[metric_name] = rows_meta
 
     meta = {
         "dataset": dataset,
         "binary_results_dir": str(binary_run.results_dir),
+        "binary_ckpt_dir": str(ckpt_dir),
         "binary_config": binary_run.config_suffix,
         "mmpd_run": str(mmpd_run),
+        "inferred_binary": binary is None,
         "n_windows": int(len(aligned.indices)),
         "mean_delta_anchor_mse": agg_mse_delta,
         "mean_delta_crps": agg_crps_delta,
@@ -518,18 +972,55 @@ def write_summary_csv(output_dir: Path, metas: Sequence[Dict[str, object]]) -> P
     return path
 
 
+def _config_label(config_suffix: str) -> str:
+    return config_suffix.replace("binary_anchor_stationary_flat_subsets_", "").replace("_", " ")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--datasets",
-        default=",".join(FINISHED_GRAD_ACCUM_DATASETS),
-        help="Comma-separated datasets (default: 8 with finished grad_accum eval).",
+        default=",".join(DEFAULT_DATASETS),
+        help="Comma-separated datasets.",
+    )
+    parser.add_argument(
+        "--binary-config",
+        default=DEFAULT_BINARY_CONFIG,
+        help="Experiment suffix for auto-discovery (results/datasets + results/ckpts).",
+    )
+    parser.add_argument(
+        "--binary-results-dir",
+        type=Path,
+        default=None,
+        help="Explicit binary results root (one dataset per invocation).",
+    )
+    parser.add_argument(
+        "--binary-ckpt-dir",
+        type=Path,
+        default=None,
+        help="Explicit binary checkpoint root (coarse/fine best.pt).",
+    )
+    parser.add_argument(
+        "--binary-label",
+        default=None,
+        help="Row label for binary line plots (default: derived from --binary-config).",
     )
     parser.add_argument(
         "--mmpd-run",
         type=Path,
         default=DEFAULT_MMPD_RUN,
         help="Fair MMPD results root (partials + raw/mmpd_*.npz).",
+    )
+    parser.add_argument(
+        "--mmpd-label",
+        default="Fair MMPD",
+        help="Row label for MMPD line plots.",
+    )
+    parser.add_argument(
+        "--subset-config",
+        type=Path,
+        default=DEFAULT_SUBSET_CONFIG,
+        help="YAML with flat-subset variate policy.",
     )
     parser.add_argument(
         "--datasets-root",
@@ -547,12 +1038,38 @@ def parse_args() -> argparse.Namespace:
         "--prob-draws",
         type=int,
         default=3,
-        help="Probabilistic sample lines per panel (from saved npz).",
+        help="Probabilistic sample lines per panel (also used when --infer-binary).",
     )
     parser.add_argument(
         "--allow-fallback-binary",
         action="store_true",
-        help=f"Use {FALLBACK_BINARY_CONFIG} when grad_accum eval missing.",
+        help=f"Fall back to {FALLBACK_BINARY_CONFIG} when primary config missing.",
+    )
+    parser.add_argument(
+        "--fallback-binary-config",
+        default=FALLBACK_BINARY_CONFIG,
+        help="Secondary binary config for --allow-fallback-binary.",
+    )
+    parser.add_argument(
+        "--infer-binary",
+        action="store_true",
+        help="Run staged checkpoint inference when binary eval NPZ is missing.",
+    )
+    parser.add_argument(
+        "--skip-decomposition",
+        action="store_true",
+        help="Skip coarse/fine 2D anchor map rows (line plots only).",
+    )
+    parser.add_argument(
+        "--infer-batch-size",
+        type=int,
+        default=4,
+        help="Batch size for --infer-binary.",
+    )
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Torch device for inference / 2D decomposition.",
     )
     parser.add_argument("--skip-plots", action="store_true", help="Only write rankings JSON/CSV.")
     return parser.parse_args()
@@ -562,6 +1079,8 @@ def main() -> None:
     args = parse_args()
     datasets = [d.strip() for d in args.datasets.split(",") if d.strip()]
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    device = torch.device(args.device)
+    binary_label = args.binary_label or _config_label(args.binary_config)
 
     metas: List[Dict[str, object]] = []
     skipped: List[str] = []
@@ -577,9 +1096,20 @@ def main() -> None:
                 prob_draws=args.prob_draws,
                 allow_fallback=args.allow_fallback_binary,
                 skip_plots=args.skip_plots,
+                binary_config=args.binary_config,
+                fallback_config=args.fallback_binary_config,
+                subset_config=args.subset_config,
+                binary_label=binary_label,
+                mmpd_label=args.mmpd_label,
+                infer_binary=args.infer_binary,
+                skip_decomposition=args.skip_decomposition,
+                device=device,
+                results_dir_override=args.binary_results_dir,
+                ckpt_dir_override=args.binary_ckpt_dir,
+                infer_batch_size=args.infer_batch_size,
             )
             metas.append(meta)
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, RuntimeError) as exc:
             print(f"[skip] {dataset}: {exc}")
             skipped.append(dataset)
 

@@ -1,3 +1,19 @@
+> The new phases specific logs  should all be filed under a lower priority in the logging module so I can easily disable
+
+> For all of the phases listed below, at beginning of the phase print the entire Pytorch layer by layer architecture for the model. E.g. linear layer(dimension) > whatever whatever. > Another linear later
+
+> For every diffusion stage, create visualizations for all conditioning component. Make sure they are represented exactly a they are needed to the model. This includes 2D lookback, 2D itrans pred (if enabled), and for the bottleneck cross-attn log the top other variates attended to and their attention weight
+
+> For all stages, add a quick log for what training loss is used (if there areultiple, log the weight of each)
+
+> When done implementing run a mock test for every single new visualization to demo what they might look like (then delete the mocking script)
+
+> Keep the existing visualization thing where you visualize the coarse, fine and combined prediction thing but please for that can you clarify what the x-axis on each plot means (why is there such a huge lookback window with negative t values? is this the 2d representation of the lookback? if so this should probably be made clearer)
+
+> For every single visualization you make please clarify the scale - what is the original scale/range of this data point before normalization and what is it now?
+
+> this change goes beyond simple logging or visualization: during the eval stage SAVE the coarse, fine and final predictions for each point in the dataset. while doing eval keep track of the 10 points in the eval set with the HIGHEST error for CPRS and seperately, the HIGHEST error for anchor mse. create visualizations for all of these points (GT vs actual pred). there should be a 48 minimum distance between the starting timestep of any point in the top ten so there isn't too much overlap in these max error points.
+
 # Architecture (ts-sandbox)
 
 Implementation-oriented map for the **current default** binary forecasting stack. Tensor-level detail for the legacy joint dual-scale path is summarized at the end only.
@@ -78,6 +94,10 @@ Trains **separate** coarse and fine denoisers on synthetic `RealTS` windows (no 
 - **Skip when:** both stage ckpts exist locally, in shared cache, or `reuse_pretrain_from_config` copies from a prior run config.
 - **Smoke:** `n_samples ≤ 4`, `epochs = patience = 1`.
 
+> Visualizations: 1. The 1D representation of an PRE-NORMALIZED and POST-INSTANCE-NORMALIZED random sample in the RealTS dataset 2. A 2D representation of the same sample (PRE-NORMALIZED and POST-INSTANCE-NORMALIZED), exactly how it is fed to the model (don't rescale or pad or whatever) 3. A 1D representation of the iTransformer's guidance prediction for this datapoint 4. A 2D representation of the iTransformer's prediciton, exactly how it is fed to the model (don't rescale or pad or whatever) 5. A 1D and 2D representation of the diffusion models final prediction, exactly as it sees it (don't denprmalize)
+
+> Logs: Log basic pretraining dataset stats: # variates, STD/mean per variate, min/max/quartiles. can use a subsample to calculate stats  or speed purposes)7If it doesn't exist already, log whether a pretrained iTransformer was loaded and if so its dimensions (i.e. how many variates, lookback/horizon size) and its filepath
+
 #### iTrans finetune (`itrans_finetune_hp`) — between Phase 1 and Phase 2
 
 Real-data iTransformer HP search; **cold start by default** (`cold_start: true`) — synthetic pretrain is skipped because RealTS pretrain tends toward a trivial mean predictor.
@@ -89,6 +109,11 @@ Real-data iTransformer HP search; **cold start by default** (`cold_start: true`)
 - **Outputs:** `{subset_id}_itrans_ft_hp_best.pt` promoted to `{subset_id}_itransformer_finetuned.pt`; `{subset_id}_itrans_ft_hp.json`.
 - **Skip when:** finetuned ckpt exists, or `reuse_checkpoint_from_config` copies from a sibling config.
 - **Downstream:** Phases 2–4 load this ckpt for cross-variate context tokens (guidance channel stays off in default binary flat runs).
+
+> Visualizations: 1. The 1D and 2D representation of a rabdom sample from current training dataset (PRE-NORMALIZED and POST-INSTANCE-NORMALIZED), exactly how it is fed to the model (don't rescale or pad or whatever) 3. A 1D representation of the iTransformer's prediction for this datapoint 4. A 2D representation of the iTransformer's prediciton, exactly how it will be fed to the diffusion model (don't rescale or pad or whatever) 
+
+> Logs: Log basic dataset stats for the current dataset (can use a subsample to calculate stats  or speed purposes) # variates, STD/mean per variate. 7If it doesn't exist already, log whether a pretrained diffusion  was loaded and if so its dimensions (i.e. how many variates, lookback/horizon size) and its filepath
+
 
 #### Phase 2 — Coarse diffusion finetune HP (`diffusion_coarse_finetune_hp`)
 
@@ -103,6 +128,10 @@ Optuna-tunes the **coarse** staged DiT on real data; **best trial checkpoint is 
 - **Optuna:** `TPESampler`, `HyperbandPruner`; EMA shadow weights updated during training when `ema_decay > 0`; promoted `best.pt` uses EMA weights.
 - **Outputs:** `{checkpoint_dir}/{subset_id}/coarse/best.pt` + `metadata.json` (`tuned_params`).
 - **Skip when:** `best.pt` + `metadata.json` exist, or `reuse_tuned_params_from` copies HP from another config (still retrains with current policy `max_scale`).
+
+
+
+> For phase 3 and 4 log all the exact same stuff as phase 2 for the itrans guidance and the final diffusion
 
 #### Phase 3 — Fine diffusion finetune HP (`diffusion_fine_finetune_hp`)
 
@@ -233,3 +262,4 @@ Single `FactorizedDiT` forward on interleaved coarse/fine batch rows (`BV×2`), 
 - Full FactorizedDiT AdaLN block diagram — see `dit.py`.
 - Duplicate hyperparameter tables mirroring yaml — single source: `configs/base/binary_staged.yaml`.
 - Gaussian / U-Net / ordinal paths unless you enable those `diffusion_type`s.
+

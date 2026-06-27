@@ -57,6 +57,7 @@ wheels/
 models/diffusion_tsf/local_wandb_key.py
 .env
 .env.*
+!.env.example
 
 # Virtual environments
 venv/

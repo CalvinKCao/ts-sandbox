@@ -2789,6 +2789,11 @@ def main():
     state = PipelineState.from_config(cfg)
     apply_cli_state_overrides(state, cfg)
 
+    from models.diffusion_tsf.pipeline.config import logging_settings
+    from models.diffusion_tsf.pipeline.logging_utils import configure_diagnostic_logging
+
+    configure_diagnostic_logging(bool(logging_settings(cfg).get("diagnostics_enabled", True)))
+
     if args.checkpoint_dir:
         CHECKPOINT_DIR = args.checkpoint_dir
     if args.results_dir:

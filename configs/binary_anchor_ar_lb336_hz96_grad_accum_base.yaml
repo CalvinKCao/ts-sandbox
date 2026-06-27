@@ -1,8 +1,5 @@
 extends: binary_anchor_ar_lb336_hz96.yaml
 
-wandb:
-  project: ts-sandbox-binary-anchor-ar-windows-grad-accum
-
 # LB336/H96: reuse ema099 pretrain; iTrans must train at seq_len=336.
 phases:
   - phase: staged_diffusion_pretrain

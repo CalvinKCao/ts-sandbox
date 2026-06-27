@@ -118,7 +118,7 @@ class PipelineState:
 
     # -- Wandb --
     wandb_enabled: bool = False
-    wandb_project: str = "diffusion-tsf"
+    wandb_project: str = "ts-sandbox-leaderboard"
     wandb_group: Optional[str] = None
     wandb_tags: Optional[List[str]] = None
     wandb_phase_run_ids: Dict[str, str] = field(default_factory=dict)

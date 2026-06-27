@@ -17,7 +17,10 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     discover_dataset_run_ckpt_dir,
 )
 from models.diffusion_tsf.pipeline import wandb_utils
-from models.diffusion_tsf.pipeline.visualize_utils import run_itrans_checkpoint_visualizations
+from models.diffusion_tsf.pipeline.visualize_utils import (
+    run_itrans_checkpoint_visualizations,
+    run_itrans_finetune_diagnostics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,7 @@ class ITransFinetuneHPPhase(PipelinePhase):
         from models.diffusion_tsf.train_multivariate_pipeline import (
             run_itransformer_finetune_hp_tuning,
             generate_dataset_job,
+            load_dataset,
         )
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
@@ -134,5 +138,17 @@ class ITransFinetuneHPPhase(PipelinePhase):
             )
         except Exception as e:
             logger.warning("Finetuned iTransformer viz failed: %s", e, exc_info=True)
+
+        try:
+            train_ds, _, _, _ = load_dataset(
+                state.dataset, variate_indices, stride=train_stride, test_stride=test_stride,
+            )
+            diag = run_itrans_finetune_diagnostics(state, ckpt_path=ft_ckpt, train_ds=train_ds)
+            if diag.get("summary"):
+                wandb_utils.log_summary({f"diag/{k}": v for k, v in diag["summary"].items() if isinstance(v, (int, float))})
+            for key, paths in (diag.get("viz") or {}).items():
+                wandb_utils.log_visualization_paths(paths, wandb_key=key)
+        except Exception as e:
+            logger.warning("iTrans finetune diagnostics failed: %s", e, exc_info=True)
 
         return state

@@ -1,8 +1,5 @@
 extends: binary_anchor_ar.yaml
 
-wandb:
-  project: ts-sandbox-binary-anchor-ar-grad-accum
-
 # Reuse ema099 synthetic pretrain only; tune iTrans + diffusion LR (lr_only, 4 trials/stage).
 phases:
   - phase: staged_diffusion_pretrain

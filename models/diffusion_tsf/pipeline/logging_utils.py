@@ -30,3 +30,16 @@ def configure_pipeline_logging(
 def format_trial_params(trial) -> str:
     parts = [f"{k}={v!r}" for k, v in sorted(trial.params.items())]
     return "{" + ", ".join(parts) + "}"
+
+
+DIAGNOSTIC_LOGGER_NAME = "ts_sandbox.diagnostics"
+
+
+def get_diagnostic_logger() -> logging.Logger:
+    return logging.getLogger(DIAGNOSTIC_LOGGER_NAME)
+
+
+def configure_diagnostic_logging(enabled: bool) -> None:
+    diag = get_diagnostic_logger()
+    diag.setLevel(logging.DEBUG if enabled else logging.CRITICAL + 1)
+    diag.propagate = True

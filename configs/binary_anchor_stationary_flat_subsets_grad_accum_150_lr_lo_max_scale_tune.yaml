@@ -1,8 +1,5 @@
 extends: binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo.yaml
 
-wandb:
-  project: ts-sandbox-flat-ablations
-
 experiment:
   name: binary-anchor-stationary-flat-subsets-grad-accum-150-lr-lo-max-scale-tune
   experiment_name: binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo_max_scale_tune

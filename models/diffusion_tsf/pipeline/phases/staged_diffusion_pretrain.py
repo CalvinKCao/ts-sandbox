@@ -12,7 +12,10 @@ from typing import Any, Dict, Optional
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
-from models.diffusion_tsf.pipeline.visualize_utils import run_pretrain_diffusion_visualizations
+from models.diffusion_tsf.pipeline.visualize_utils import (
+    run_pretrain_diffusion_visualizations,
+    run_staged_synthetic_pretrain_diagnostics,
+)
 from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 
 logger = logging.getLogger(__name__)
@@ -375,7 +378,10 @@ def _resolve_diff_hp(state: PipelineState, source_dir: Optional[str]) -> Dict[st
     )
 
 
-def _resolve_itrans_pretrain(state: PipelineState, source_dir: Optional[str]) -> str:
+def _resolve_itrans_pretrain(
+    state: PipelineState,
+    source_dir: Optional[str],
+) -> tuple[str, Dict[str, Any]]:
     candidates = []
     if state.itrans_pretrain_ckpt:
         candidates.append(state.itrans_pretrain_ckpt)
@@ -389,7 +395,11 @@ def _resolve_itrans_pretrain(state: PipelineState, source_dir: Optional[str]) ->
     for path in candidates:
         if path and os.path.exists(path):
             state.itrans_pretrain_ckpt = path
-            return path
+            return path, {
+                "loaded": True,
+                "path": os.path.abspath(path),
+                "source": "checkpoint",
+            }
     logger.warning("No iTransformer pretrain checkpoint found.")
     from models.diffusion_tsf.train_multivariate_pipeline import run_itransformer_hp_tuning
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
@@ -425,7 +435,37 @@ def _resolve_itrans_pretrain(state: PipelineState, source_dir: Optional[str]) ->
         shutil.copy2(tune_ckpt_path, itrans_ckpt)
         
     state.itrans_pretrain_ckpt = itrans_ckpt
-    return itrans_ckpt
+    return itrans_ckpt, {
+        "loaded": False,
+        "path": os.path.abspath(itrans_ckpt),
+        "source": "trained_fallback",
+    }
+
+
+def _log_staged_pretrain_diagnostics(
+    state: PipelineState,
+    *,
+    itrans_ckpt: str,
+    itrans_meta: Dict[str, Any],
+    best_params: Dict[str, Any],
+    n_samples: int,
+) -> None:
+    try:
+        result = run_staged_synthetic_pretrain_diagnostics(
+            state,
+            itrans_ckpt_path=itrans_ckpt,
+            itrans_meta=itrans_meta,
+            tuned_params=best_params,
+            n_samples=n_samples,
+        )
+        if result.get("summary"):
+            wandb_utils.log_summary(result["summary"])
+        if result.get("config"):
+            wandb_utils.merge_run_config(result["config"])
+        for key, paths in (result.get("viz") or {}).items():
+            wandb_utils.log_visualization_paths(paths, wandb_key=key)
+    except Exception as e:
+        logger.warning("Staged synthetic-pretrain diagnostics failed: %s", e, exc_info=True)
 
 
 def patch_stage_globals(mod: Any, state: PipelineState, stage: str, *, honor_dataset_windows: bool) -> None:
@@ -529,6 +569,23 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                     f"pretrained_{'/pretrained_'.join(missing)} under "
                     f"*-{state.dataset}-{reuse_from}"
                 )
+            source_dir = _phase1_source_dir(
+                state,
+                self.get("phase1_source_dir"),
+                config_name=config_name,
+            )
+            best_params = _resolve_diff_hp(state, source_dir)
+            itrans_ckpt, itrans_meta = _resolve_itrans_pretrain(state, source_dir)
+            n_samples = int(self.require("n_samples"))
+            if state.smoke_test:
+                n_samples = min(n_samples, 4)
+            _log_staged_pretrain_diagnostics(
+                state,
+                itrans_ckpt=itrans_ckpt,
+                itrans_meta=itrans_meta,
+                best_params=best_params,
+                n_samples=n_samples,
+            )
             return state
         source_dir = _phase1_source_dir(
             state,
@@ -536,7 +593,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             config_name=config_name,
         )
         best_params = _resolve_diff_hp(state, source_dir)
-        itrans_ckpt = _resolve_itrans_pretrain(state, source_dir)
+        itrans_ckpt, itrans_meta = _resolve_itrans_pretrain(state, source_dir)
 
         n_samples = int(self.require("n_samples"))
         epochs = int(self.require("epochs"))
@@ -545,6 +602,14 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             n_samples = min(n_samples, 4)
             epochs = 1
             patience = 1
+
+        _log_staged_pretrain_diagnostics(
+            state,
+            itrans_ckpt=itrans_ckpt,
+            itrans_meta=itrans_meta,
+            best_params=best_params,
+            n_samples=n_samples,
+        )
         shared_cache = _stage_pretrain_cache_enabled(self, state)
         shared_wait_seconds = float(self.get("shared_cache_wait_seconds", 6 * 60 * 60))
 

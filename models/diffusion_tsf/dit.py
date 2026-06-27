@@ -86,12 +86,25 @@ class _CrossAttention(nn.Module):
         x: torch.Tensor,
         ctx: torch.Tensor,
         attn_bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        return_attn_weights: bool = False,
+    ):
         B, N, C = x.shape
         _, M, _ = ctx.shape
         q = self.q(x).reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         kv = self.kv(ctx).reshape(B, M, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         k, v = kv.unbind(0)
+        if return_attn_weights:
+            scale = self.head_dim ** -0.5
+            attn_logits = torch.matmul(q, k.transpose(-2, -1)) * scale
+            if attn_bias is not None:
+                attn_logits = attn_logits + attn_bias[:, None, None, :]
+            attn_weights = torch.softmax(attn_logits, dim=-1)
+            out = torch.matmul(attn_weights, v)
+            out = out.transpose(1, 2).reshape(B, N, C)
+            out = self.proj(out)
+            # mean over heads and query tokens -> (B, M)
+            mean_weights = attn_weights.mean(dim=(1, 2))
+            return out, mean_weights
         if attn_bias is not None:
             attn_bias = attn_bias[:, None, None, :].to(dtype=q.dtype)
         out = F.scaled_dot_product_attention(
@@ -178,13 +191,15 @@ class _DiTCrossAttnBlock(nn.Module):
         ctx: Optional[torch.Tensor],
         scale_indices: Optional[torch.Tensor] = None,
         variate_indices: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        return_attn_weights: bool = False,
+    ):
         mods = self.adaLN(c).chunk(12 if self.enable_cross_scale_attention else 9, dim=-1)
         if self.enable_cross_scale_attention:
             s1, sc1, g1, sx, scx, gx, ss, scs, gs, s2, sc2, g2 = mods
         else:
             s1, sc1, g1, sx, scx, gx, s2, sc2, g2 = mods
         x = x + g1.unsqueeze(1) * self.self_attn(_modulate(self.norm1(x), s1, sc1))
+        cross_attn_weights = None
         if ctx is not None:
             attn_bias = None
             if self.target_context_bias != 0.0 and ctx.shape[1] > 1:
@@ -206,11 +221,14 @@ class _DiTCrossAttnBlock(nn.Module):
                     dtype=x.dtype,
                 )
                 attn_bias.scatter_(1, target_ids.unsqueeze(1), self.target_context_bias)
-            x = x + gx.unsqueeze(1) * self.cross_attn(
-                _modulate(self.norm_x(x), sx, scx),
-                ctx,
-                attn_bias=attn_bias,
-            )
+            cross_in = _modulate(self.norm_x(x), sx, scx)
+            if return_attn_weights:
+                cross_out, cross_attn_weights = self.cross_attn(
+                    cross_in, ctx, attn_bias=attn_bias, return_attn_weights=True,
+                )
+            else:
+                cross_out = self.cross_attn(cross_in, ctx, attn_bias=attn_bias)
+            x = x + gx.unsqueeze(1) * cross_out
         if self.enable_cross_scale_attention:
             if scale_indices is None:
                 raise ValueError("scale_indices are required for cross-scale attention.")
@@ -226,6 +244,8 @@ class _DiTCrossAttnBlock(nn.Module):
                 other_scale,
             )
         x = x + g2.unsqueeze(1) * self.mlp(_modulate(self.norm2(x), s2, sc2))
+        if return_attn_weights:
+            return x, cross_attn_weights
         return x
 
 
@@ -362,8 +382,10 @@ class FactorizedDiT(nn.Module):
         encoder_hidden_states: Optional[torch.Tensor] = None,
         scale_indices: Optional[torch.Tensor] = None,
         variate_indices: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        return_cross_attn_weights: bool = False,
+    ):
         BV, _, H, W = x.shape
+        self._diag_cross_attn_weights = None
 
         x_p, pad_h, pad_w = self._pad_to_patch(x)
         cond_p, _, _ = self._pad_to_patch(cond)
@@ -419,6 +441,12 @@ class FactorizedDiT(nn.Module):
                         variate_indices,
                         use_reentrant=False,
                     )
+                elif return_cross_attn_weights:
+                    tokens, attn_w = block(
+                        tokens, t_emb, ctx_proj, scale_indices, variate_indices,
+                        return_attn_weights=True,
+                    )
+                    self._diag_cross_attn_weights = attn_w
                 else:
                     tokens = block(tokens, t_emb, ctx_proj, scale_indices, variate_indices)
             else:

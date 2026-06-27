@@ -54,7 +54,7 @@ Base defaults live in [`configs/base/binary_staged.yaml`](../configs/base/binary
 ```yaml
 wandb:
   enabled: true
-  project: ts-sandbox
+  project: ts-sandbox-leaderboard
   group: null   # auto from run stem
   tags: []
 ```

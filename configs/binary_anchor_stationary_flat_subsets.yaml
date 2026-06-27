@@ -1,8 +1,5 @@
 extends: binary_anchor_stationary_flat.yaml
 
-wandb:
-  project: ts-sandbox-binary-anchor-flat-subsets
-
 experiment:
   name: binary-anchor-stationary-flat-subsets
   experiment_name: binary-anchor-stationary-flat-subsets

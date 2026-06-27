@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 from .config import DiffusionTSFConfig
 from .preprocessing import TimeSeriesTo2D
@@ -411,6 +411,7 @@ class DiffusionTSF(nn.Module):
         ctx_flat: Optional[torch.Tensor],
         scale_indices: Optional[torch.Tensor] = None,
         variate_indices: Optional[torch.Tensor] = None,
+        return_cross_attn_weights: bool = False,
     ) -> torch.Tensor:
         """Run the denoiser with the same chunking rule used by training/eval."""
         chunk_size = self.config.unet_max_chunk_size
@@ -427,14 +428,20 @@ class DiffusionTSF(nn.Module):
                 c_ctx = ctx_flat[i:end] if ctx_flat is not None else None
                 c_scale = scale_indices[i:end] if scale_indices is not None else None
                 c_var = variate_indices[i:end] if variate_indices is not None else None
-                kwargs = {"encoder_hidden_states": c_ctx}
+                kwargs = {
+                    "encoder_hidden_states": c_ctx,
+                    "return_cross_attn_weights": return_cross_attn_weights and i == 0,
+                }
                 if c_scale is not None:
                     kwargs["scale_indices"] = c_scale
                 if c_var is not None:
                     kwargs["variate_indices"] = c_var
                 outs.append(self.noise_predictor(c_canvas, c_t, c_cond, **kwargs))
             return torch.cat(outs, dim=0)
-        kwargs = {"encoder_hidden_states": ctx_flat}
+        kwargs = {
+            "encoder_hidden_states": ctx_flat,
+            "return_cross_attn_weights": return_cross_attn_weights,
+        }
         if scale_indices is not None:
             kwargs["scale_indices"] = scale_indices
         if variate_indices is not None:
@@ -1251,6 +1258,69 @@ class DiffusionTSF(nn.Module):
         else:
             result['x0_pred_finer'] = x0_pred
         return result
+
+    @torch.no_grad()
+    def diagnostic_capture_staged(
+        self,
+        past: torch.Tensor,
+        future: torch.Tensor,
+        *,
+        capture_cross_attn: bool = True,
+    ) -> Dict[str, Any]:
+        """One diagnostic forward: conditioning tensors + optional cross-attn weights."""
+        B = past.shape[0]
+        V = self.config.num_variables
+        device = past.device
+        BV = B * V
+        stage = self.config.diffusion_stage
+
+        past_norm, future_norm, norm_stats = self._normalize_sequence(past, future)
+        future_maps = self._encode_staged_maps(future_norm)
+        target_2d = future_maps[stage]
+        W_fut = target_2d.shape[3]
+        H = target_2d.shape[2]
+
+        cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut)
+        guidance_norm = self._get_guidance_forecast_norm(past, past_norm, norm_stats, W_fut)
+        guidance_maps = self._encode_staged_maps(guidance_norm) if guidance_norm is not None else None
+
+        t = torch.zeros(B, device=device, dtype=torch.long)
+        t_flat = t.unsqueeze(1).expand(-1, V).reshape(BV)
+        variate_indices = None
+        if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
+            variate_indices = self._flat_variate_indices(BV, V, device)
+
+        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past)
+        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
+
+        target_flat = target_2d.reshape(BV, 1, H, W_fut)
+        xt_flat, _ = self.binary_scheduler.add_noise(target_flat, t_flat)
+        canvas = self._inject_coordinate_channel(xt_flat)
+        canvas = self._inject_time_channels(canvas)
+
+        if stage in {"fine", "finer"}:
+            future_coarse_cond = self._coarse_cdf_to_height(future_maps["coarse"], H)
+            cond_for_unet = torch.cat([cond_for_unet, future_coarse_cond.reshape(BV, 1, H, W_fut)], dim=1)
+
+        base_cond = cond_for_unet
+        self._predict_noise_chunked(
+            canvas, t_flat, base_cond, ctx_flat,
+            variate_indices=variate_indices,
+            return_cross_attn_weights=capture_cross_attn,
+        )
+        cross_attn_weights = getattr(self.noise_predictor, "_diag_cross_attn_weights", None)
+
+        return {
+            "past_norm": past_norm,
+            "future_norm": future_norm,
+            "norm_stats": norm_stats,
+            "cond_for_unet": cond_for_unet,
+            "past_maps": past_maps,
+            "guidance_norm": guidance_norm,
+            "guidance_maps": guidance_maps,
+            "cross_attn_weights": cross_attn_weights,
+            "future_maps": future_maps,
+        }
 
     def _forward_ordinal_d3pm_staged(
         self,

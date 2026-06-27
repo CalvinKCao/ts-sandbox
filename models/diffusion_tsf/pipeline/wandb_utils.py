@@ -19,6 +19,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
+
+def _ensure_dotenv_loaded() -> None:
+    try:
+        from utils.load_dotenv import load_repo_dotenv
+    except ImportError:
+        return
+    load_repo_dotenv(_REPO_ROOT)
+
+
+_ensure_dotenv_loaded()
+
 try:
     import wandb
     _WANDB_AVAILABLE = True
@@ -28,6 +41,9 @@ except ImportError:
 
 
 def _api_key_usable() -> bool:
+    from utils.repo_env import load_repo_env
+
+    load_repo_env()
     key = os.environ.get("WANDB_API_KEY", "").strip()
     return bool(key and re.fullmatch(r"[A-Za-z0-9_]+", key))
 
@@ -289,6 +305,13 @@ def log_summary(metrics: Dict[str, Any]) -> None:
         return
     for k, v in metrics.items():
         wandb.run.summary[k] = v
+
+
+def merge_run_config(updates: Dict[str, Any]) -> None:
+    """Merge keys into the active wandb run config (e.g. diagnostic metadata)."""
+    if not _WANDB_AVAILABLE or wandb.run is None or not updates:
+        return
+    wandb.config.update(updates, allow_val_change=True)
 
 
 def log_eval_metrics(metrics: Dict[str, Any], step: int = 0) -> None:

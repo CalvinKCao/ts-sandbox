@@ -1,8 +1,5 @@
 extends: binary_anchor_stationary_flat_subsets_ema099.yaml
 
-wandb:
-  project: ts-sandbox-flat-subsets-grad-accum-guidance-lr-tune
-
 experiment:
   use_guidance_channel: true
   disable_cross_attention: false

@@ -1,8 +1,5 @@
 extends: binary_anchor_stationary_flat_subsets_ema099.yaml
 
-wandb:
-  project: ts-sandbox-flat-subsets-grad-accum-no-guidance
-
 experiment:
   name: binary-anchor-stationary-flat-subsets-grad-accum-400
   experiment_name: binary_anchor_stationary_flat_subsets_grad_accum_400

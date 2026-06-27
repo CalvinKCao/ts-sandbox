@@ -1,8 +1,5 @@
 extends: base/binary_staged.yaml
 
-wandb:
-  project: ts-sandbox-binary-anchor-ar
-
 experiment:
   name: binary-anchor-ar
   experiment_name: binary_anchor_ar

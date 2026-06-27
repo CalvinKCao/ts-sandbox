@@ -1,9 +1,6 @@
 # Optuna max_scale only; all other diffusion HPs match sweep_baseline (fixed_lr_pipeline_base).
 extends: base/fixed_lr_pipeline_base.yaml
 
-wandb:
-  project: ts-sandbox-binary-anchor-92d3
-
 experiment:
   name: hp_max_scale_tuning
 

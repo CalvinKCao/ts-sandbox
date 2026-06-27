@@ -1,8 +1,5 @@
 extends: binary_anchor_ar_lb96_hz720.yaml
 
-wandb:
-  project: ts-sandbox-binary-anchor-ar-windows-grad-accum
-
 # LB96/H720: reuse ema099 pretrain; train iTrans + tune diffusion LR + grad accum.
 phases:
   - phase: staged_diffusion_pretrain

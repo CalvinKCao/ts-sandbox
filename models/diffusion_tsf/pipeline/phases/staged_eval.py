@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -16,7 +16,14 @@ from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.config import visualization_settings
-from models.diffusion_tsf.pipeline.visualize_utils import run_staged_finetune_visualizations
+from models.diffusion_tsf.pipeline.visualize_utils import (
+    decode_staged_anchor_components,
+    per_window_anchor_mse,
+    per_window_crps,
+    run_eval_worst_window_visualizations,
+    run_real_dataset_phase_diagnostics,
+    run_staged_finetune_visualizations,
+)
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     _model_kwargs_from_tuned,
     _stage_best_ckpt,
@@ -122,6 +129,12 @@ def _stage_finetune_ckpt(state: PipelineState, stage: str) -> str:
     raise FileNotFoundError(f"Missing staged {stage} checkpoint: {path}")
 
 
+def _eval_window_indices(ds) -> list:
+    if isinstance(ds, Subset):
+        return [int(i) for i in ds.indices]
+    return list(range(len(ds)))
+
+
 def _fraction_subset(ds, fraction: float, seed: int):
     n = len(ds)
     keep = max(1, int(round(n * float(fraction))))
@@ -217,6 +230,8 @@ class StagedEvalPhase(PipelinePhase):
         raw_dir = os.path.join(state.results_dir, "raw")
         anchor_npz = os.path.join(raw_dir, f"staged_anchor_samples_{state.dataset}.npz")
         samples_npz = os.path.join(raw_dir, f"staged_dpmpp_samples_{state.dataset}.npz")
+        full_npz = os.path.join(raw_dir, f"staged_anchor_{state.dataset}.npz")
+        worst_json = os.path.join(state.results_dir, subset_id, "worst_windows.json")
         if os.path.exists(partial) and os.path.exists(nested):
             try:
                 with open(partial) as f:
@@ -225,14 +240,21 @@ class StagedEvalPhase(PipelinePhase):
                 anchor_ok = "anchor_mse" in metrics and "anchor_mae" in metrics
                 sample_mean_ok = "sample_mean_mse" in metrics and "sample_mean_mae" in metrics
                 raw_ok = os.path.exists(anchor_npz) and os.path.exists(samples_npz)
+                diag_ok = True
+                if os.path.exists(full_npz):
+                    with np.load(full_npz) as z:
+                        diag_ok = all(k in z.files for k in ("coarse_anchor", "window_indices"))
+                worst_ok = os.path.exists(worst_json)
                 sampler_ok = (not self.get("tune_sampler", True)) or metrics.get("sampler_tuned")
             except Exception:
                 core_ok = False
                 anchor_ok = False
                 sample_mean_ok = False
                 raw_ok = False
+                diag_ok = False
+                worst_ok = False
                 sampler_ok = False
-            if core_ok and anchor_ok and sample_mean_ok and raw_ok and sampler_ok:
+            if core_ok and anchor_ok and sample_mean_ok and raw_ok and diag_ok and worst_ok and sampler_ok:
                 logger.info("  [%s] already evaluated: %s", self.name, partial)
                 return True
             logger.info("  [%s] re-evaluating to add missing metrics: %s", self.name, partial)
@@ -282,13 +304,18 @@ class StagedEvalPhase(PipelinePhase):
         prob_samples: int,
         gmm_components: int,
         topk_max: int,
+        window_indices: Sequence[int],
+        test_stride: int,
     ) -> Tuple[Dict[str, float], Dict[str, np.ndarray]]:
         if prob_sampler in {"anchor", "deterministic_anchor"}:
             raise ValueError("staged probabilistic eval must use a regular sampler, not anchor.")
         prob_kwargs = {"sampler": prob_sampler, "num_inference_steps": prob_steps}
         y_true_all = []
         det_all = []
+        coarse_all = []
+        fine_all = []
         sample_all = []
+        window_idx_all = []
         t0 = time.perf_counter()
         logger.info(
             "[%s] staged eval start: windows=%d batches=%d prob_samples=%d sampler=%s steps=%d",
@@ -303,6 +330,10 @@ class StagedEvalPhase(PipelinePhase):
             for batch_idx, (past, future) in enumerate(loader):
                 past = past.to(device)
                 future = future.to(device)
+                batch_n = past.shape[0]
+                batch_start = batch_idx * loader.batch_size
+                batch_window_indices = window_indices[batch_start:batch_start + batch_n]
+                window_idx_all.extend(batch_window_indices)
                 K = getattr(coarse_model.config, "lookback_overlap", 0)
                 if K > 0:
                     future = future[..., K:]
@@ -318,6 +349,17 @@ class StagedEvalPhase(PipelinePhase):
                         gen_kwargs={"sampler": "anchor"},
                     )
                     det_all.append(det_t.detach().cpu().numpy())
+                    coarse_det = coarse_model.generate(past, sampler="anchor")
+                    fine_det = fine_model.generate(
+                        past,
+                        sampler="anchor",
+                        future_coarse_2d=coarse_det["future_2d_coarse"],
+                    )
+                    coarse_np, fine_np, _ = decode_staged_anchor_components(
+                        fine_model, coarse_det, fine_det,
+                    )
+                    coarse_all.append(coarse_np)
+                    fine_all.append(fine_np)
                 else:
                     coarse_det = coarse_model.generate(past, sampler="anchor")
                     fine_det = fine_model.generate(
@@ -332,9 +374,18 @@ class StagedEvalPhase(PipelinePhase):
                             future_coarse_2d=coarse_det["future_2d_coarse"],
                             future_fine_2d=fine_det["future_2d_fine"],
                         )
-                        det_all.append(finer_det["prediction_global_norm"].detach().cpu().numpy())
+                        det_t = finer_det["prediction_global_norm"]
+                        det_all.append(det_t.detach().cpu().numpy())
+                        coarse_np, fine_np, final_np = decode_staged_anchor_components(
+                            finer_model, coarse_det, finer_det,
+                        )
                     else:
-                        det_all.append(_staged_anchor_global_norm(fine_model, coarse_det, fine_det))
+                        coarse_np, fine_np, final_np = decode_staged_anchor_components(
+                            fine_model, coarse_det, fine_det,
+                        )
+                        det_all.append(final_np)
+                    coarse_all.append(coarse_np)
+                    fine_all.append(fine_np)
 
                 batch_samples = []
                 for sample_idx in range(prob_samples):
@@ -381,7 +432,12 @@ class StagedEvalPhase(PipelinePhase):
         pack = {
             "y_true": np.concatenate(y_true_all, axis=0),
             "deterministic": np.concatenate(det_all, axis=0),
+            "coarse_anchor": np.concatenate(coarse_all, axis=0),
+            "fine_anchor": np.concatenate(fine_all, axis=0),
+            "final_anchor": np.concatenate(det_all, axis=0),
             "samples": np.concatenate(sample_all, axis=0),
+            "window_indices": np.array(window_idx_all, dtype=np.int64),
+            "series_starts": np.array(window_idx_all, dtype=np.int64) * int(test_stride),
         }
         pack["sample_mean"] = pack["samples"].mean(axis=2)
         metrics = _summarize_staged_eval_metrics(
@@ -449,6 +505,60 @@ class StagedEvalPhase(PipelinePhase):
             prob_samples = int(self.require("probabilistic_n_samples"))
             default_steps = int(self.require("probabilistic_num_inference_steps"))
 
+        if isinstance(final_ds, Subset):
+            eval_window_indices = [int(i) for i in final_ds.indices]
+        else:
+            eval_window_indices = list(range(len(final_ds)))
+
+        try:
+            from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
+
+            run_phase_start_diagnostics(
+                state,
+                phase_name=self.name,
+                models=[coarse_model, fine_model],
+                model_labels=["diffusion_coarse", "diffusion_fine"],
+                ckpt_info=[
+                    {
+                        "kind": "itrans",
+                        "path": ft_itrans_ckpt,
+                        "n_variates": n_iv,
+                        "lookback": int(ds_lb),
+                        "horizon": int(ds_hz),
+                    },
+                    {
+                        "kind": "diffusion_coarse",
+                        "path": _stage_finetune_ckpt(state, "coarse"),
+                        "n_variates": n_iv,
+                        "lookback": int(ds_lb),
+                        "horizon": int(ds_hz),
+                    },
+                    {
+                        "kind": "diffusion_fine",
+                        "path": _stage_finetune_ckpt(state, "fine"),
+                        "n_variates": n_iv,
+                        "lookback": int(ds_lb),
+                        "horizon": int(ds_hz),
+                    },
+                ],
+            )
+            train_ds, _, _, _ = load_dataset(
+                state.dataset, variate_indices, stride=train_stride, test_stride=test_stride,
+            )
+            diag = run_real_dataset_phase_diagnostics(
+                state,
+                train_ds=train_ds,
+                model=fine_model,
+                itrans_ckpt_path=ft_itrans_ckpt,
+                stage="fine",
+                diffusion_ckpt_path=_stage_finetune_ckpt(state, "fine"),
+                tag="staged_eval",
+            )
+            for key, paths in (diag.get("viz") or {}).items():
+                wandb_utils.log_visualization_paths(paths, wandb_key=key)
+        except Exception as e:
+            logger.warning("[%s] eval diagnostics failed: %s", self.name, e, exc_info=True)
+
         sampler_tuning = []
         selected_sampler = str(self.require("probabilistic_sampler"))
         if selected_sampler in {"anchor", "deterministic_anchor"}:
@@ -478,6 +588,8 @@ class StagedEvalPhase(PipelinePhase):
                         prob_samples=tune_samples,
                         gmm_components=gmm_components,
                         topk_max=topk_max,
+                        window_indices=_eval_window_indices(tune_ds),
+                        test_stride=test_stride,
                     )
                     score = float(metrics_i.get(score_metric, metrics_i.get("crps", metrics_i.get("mse"))))
                     sampler_tuning.append({
@@ -525,6 +637,8 @@ class StagedEvalPhase(PipelinePhase):
             prob_samples=prob_samples,
             gmm_components=gmm_components,
             topk_max=topk_max,
+            window_indices=eval_window_indices,
+            test_stride=test_stride,
         )
         metrics.update({
             "sampler_tuned": bool(sampler_tuning),
@@ -532,12 +646,32 @@ class StagedEvalPhase(PipelinePhase):
             "selected_probabilistic_num_inference_steps": selected_steps,
         })
 
+        from models.diffusion_tsf.pipeline.phase_diagnostics import select_spaced_top_k
+
+        crps_scores = per_window_crps(pack["y_true"], pack["samples"])
+        anchor_scores = per_window_anchor_mse(pack["y_true"], pack["final_anchor"])
+        series_starts = pack["series_starts"]
+        window_indices_arr = pack["window_indices"]
+        worst_manifest: List[Dict[str, Any]] = []
+        for metric_name, scores in (("crps", crps_scores), ("anchor_mse", anchor_scores)):
+            top_idx = select_spaced_top_k(scores, series_starts, k=10, min_spacing=48)
+            for rank, wi in enumerate(top_idx, start=1):
+                worst_manifest.append({
+                    "metric": metric_name,
+                    "rank": rank,
+                    "window_index": int(window_indices_arr[wi]),
+                    "series_start": int(series_starts[wi]),
+                    "score": float(scores[wi]),
+                })
+
         partial_dir = os.path.join(state.results_dir, "partials")
         raw_dir = os.path.join(state.results_dir, "raw")
         nested_dir = os.path.join(state.results_dir, subset_id)
         os.makedirs(partial_dir, exist_ok=True)
         os.makedirs(raw_dir, exist_ok=True)
         os.makedirs(nested_dir, exist_ok=True)
+        with open(os.path.join(nested_dir, "worst_windows.json"), "w") as f:
+            json.dump(worst_manifest, f, indent=2)
         with open(os.path.join(partial_dir, f"{state.dataset}_staged_anchor.json"), "w") as f:
             json.dump(metrics, f, indent=2, sort_keys=True)
         np.savez_compressed(os.path.join(raw_dir, f"staged_anchor_{state.dataset}.npz"), **pack)
@@ -599,6 +733,17 @@ class StagedEvalPhase(PipelinePhase):
                 )
             except Exception as e:
                 logger.warning("Staged eval visualizations failed: %s", e, exc_info=True)
+
+        try:
+            worst_viz = run_eval_worst_window_visualizations(
+                state,
+                test_ds=full_test_ds,
+                pack=pack,
+                worst_manifest=worst_manifest,
+            )
+            wandb_utils.log_visualization_paths(worst_viz, wandb_key="eval/worst_windows")
+        except Exception as e:
+            logger.warning("Worst-window eval viz failed: %s", e, exc_info=True)
 
         logger.info(
             "[%s] staged eval done: sampler=%s steps=%d "

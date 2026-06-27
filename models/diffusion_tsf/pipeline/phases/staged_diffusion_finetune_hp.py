@@ -553,6 +553,49 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             self.name, len(train_ds), len(val_ds),
         )
 
+        from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
+        from models.diffusion_tsf.pipeline.visualize_utils import (
+            _load_staged_diffusion_from_ckpt,
+            run_real_dataset_phase_diagnostics,
+            run_staged_finetune_visualizations,
+        )
+
+        try:
+            probe_model, _ = _load_staged_diffusion_from_ckpt(
+                ckpt_path=diff_ckpt,
+                stage=self.stage,
+                itrans_ckpt_path=ft_itrans_ckpt,
+                n_vars=n_iv,
+                device=device,
+            )
+            run_phase_start_diagnostics(
+                state,
+                phase_name=self.name,
+                models=[probe_model],
+                model_labels=[f"diffusion_{self.stage}"],
+                datasets=[train_ds],
+                dataset_prefixes=["dataset"],
+                ckpt_info=[
+                    {
+                        "kind": "itrans",
+                        "path": ft_itrans_ckpt,
+                        "n_variates": n_iv,
+                        "lookback": int(state.lookback_length),
+                        "horizon": int(state.forecast_length),
+                    },
+                    {
+                        "kind": f"diffusion_pretrain_{self.stage}",
+                        "path": diff_ckpt,
+                        "n_variates": n_iv,
+                        "lookback": int(state.lookback_length),
+                        "horizon": int(state.forecast_length),
+                    },
+                ],
+            )
+            del probe_model
+        except Exception as e:
+            logger.warning("[%s] phase-start diagnostics failed: %s", self.name, e, exc_info=True)
+
         batch_probe_ds = train_ds
         ft_itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, n_iv, device)
         ds_lb, ds_hz = dataset_window_lengths(state.dataset)
@@ -791,27 +834,50 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             f"hp/{self.stage}_diff_ft_max_scale": best_params.get("max_scale"),
         })
 
-        if self.stage == "fine" and not state.smoke_test:
-            coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_best_ckpt(state, "coarse")
-            itrans_ckpt = state.itrans_finetune_ckpt or os.path.join(
-                state.checkpoint_dir, f"{state.subset_id or state.dataset}_itransformer_finetuned.pt",
-            )
-            if coarse_ft and final_ckpt and itrans_ckpt and os.path.exists(itrans_ckpt):
-                from models.diffusion_tsf.pipeline.visualize_utils import run_staged_finetune_visualizations
-                try:
-                    viz_paths = run_staged_finetune_visualizations(
-                        state,
-                        coarse_ckpt_path=coarse_ft,
-                        fine_ckpt_path=final_ckpt,
-                        itrans_ckpt_path=itrans_ckpt,
-                        tuned_params=best_params,
-                        tag="staged_diffusion_finetuned",
-                    )
-                    wandb_utils.log_visualization_paths(
-                        viz_paths, wandb_key="viz/staged_diffusion_finetuned",
-                    )
-                except Exception as e:
-                    logger.warning("Staged finetune viz failed: %s", e, exc_info=True)
+        coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_best_ckpt(state, "coarse")
+        itrans_ckpt = state.itrans_finetune_ckpt or os.path.join(
+            state.checkpoint_dir, f"{state.subset_id or state.dataset}_itransformer_finetuned.pt",
+        )
+        if self.stage == "fine" and coarse_ft and final_ckpt and itrans_ckpt and os.path.exists(itrans_ckpt):
+            try:
+                viz_paths = run_staged_finetune_visualizations(
+                    state,
+                    coarse_ckpt_path=coarse_ft,
+                    fine_ckpt_path=final_ckpt if self.stage == "fine" else _stage_best_ckpt(state, "fine"),
+                    itrans_ckpt_path=itrans_ckpt,
+                    tuned_params=best_params,
+                    tag="staged_diffusion_finetuned",
+                )
+                wandb_utils.log_visualization_paths(
+                    viz_paths, wandb_key="viz/staged_diffusion_finetuned",
+                )
+            except Exception as e:
+                logger.warning("Staged finetune viz failed: %s", e, exc_info=True)
+
+        if not state.smoke_test:
+            try:
+                finetuned_model, _ = _load_staged_diffusion_from_ckpt(
+                    ckpt_path=final_ckpt,
+                    stage=self.stage,
+                    itrans_ckpt_path=ft_itrans_ckpt,
+                    n_vars=n_iv,
+                    device=device,
+                    tuned_params=best_params,
+                )
+                diag = run_real_dataset_phase_diagnostics(
+                    state,
+                    train_ds=train_ds,
+                    model=finetuned_model,
+                    itrans_ckpt_path=ft_itrans_ckpt,
+                    stage=self.stage,
+                    diffusion_ckpt_path=final_ckpt,
+                    tag=f"diffusion_{self.stage}_finetune",
+                )
+                for key, paths in (diag.get("viz") or {}).items():
+                    wandb_utils.log_visualization_paths(paths, wandb_key=key)
+                del finetuned_model
+            except Exception as e:
+                logger.warning("[%s] post-finetune diagnostics failed: %s", self.name, e, exc_info=True)
 
         return state
 

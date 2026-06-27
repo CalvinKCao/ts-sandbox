@@ -129,7 +129,7 @@ REQUIRED_VISUALIZATION_KEYS = (
 
 WANDB_DEFAULTS: Dict[str, Any] = {
     "enabled": False,
-    "project": "diffusion-tsf",
+    "project": "ts-sandbox-leaderboard",
     "group": None,
     "tags": None,
 }
@@ -475,6 +475,8 @@ def build_wandb_config(
         "variate_indices": state.variate_indices,
     })
     wandb_cfg["experiment"] = exp
+    if getattr(state, "dataset", None):
+        wandb_cfg["dataset"] = state.dataset
 
     runtime: Dict[str, Any] = {
         "phase": phase_name,
@@ -491,8 +493,20 @@ def build_wandb_config(
     wandb_cfg["runtime"] = runtime
     if cfg.get("_yaml_path"):
         wandb_cfg["_yaml_path"] = cfg["_yaml_path"]
+        try:
+            from utils.leaderboard_config_nicknames import leaderboard_nickname
+
+            nick = leaderboard_nickname(yaml_path=cfg["_yaml_path"])
+            if nick:
+                wandb_cfg["config_nickname"] = nick
+        except Exception:
+            pass
     return wandb_cfg
 
 
 def visualization_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return dict(cfg["visualization"])
+
+
+def logging_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return dict(cfg.get("logging", {"diagnostics_enabled": True}))
