@@ -41,9 +41,12 @@ except ImportError:
 
 
 def _api_key_usable() -> bool:
-    from utils.repo_env import load_repo_env
-
-    load_repo_env()
+    try:
+        from utils.repo_env import load_repo_env
+    except ImportError:
+        load_repo_env = None
+    if load_repo_env is not None:
+        load_repo_env()
     key = os.environ.get("WANDB_API_KEY", "").strip()
     return bool(key and re.fullmatch(r"[A-Za-z0-9_]+", key))
 

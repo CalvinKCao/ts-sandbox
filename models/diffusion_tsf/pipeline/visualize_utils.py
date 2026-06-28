@@ -194,6 +194,13 @@ def _load_staged_diffusion_from_ckpt(
     return model, diff_ckpt
 
 
+def _staged_fine_value_range(diff_model) -> float:
+    cfg = getattr(diff_model, "config", None)
+    if getattr(cfg, "staged_representation", "value_precision") == "haar_frequency":
+        return float(getattr(cfg, "haar_fine_max_scale", 0.0) or diff_model.to_2d.max_scale)
+    return float(diff_model.to_2d.max_scale) / float(diff_model.to_2d.height)
+
+
 def _plot_dual_scale_sample(
     *,
     res: Dict[str, torch.Tensor],
@@ -225,7 +232,7 @@ def _plot_dual_scale_sample(
         coarse_map_full, value_range=to_2d.max_scale, cdf_decoder="mean"
     ).cpu()
     fine_1d = to_2d._decode_occupancy_in_range(
-        fine_map_full, value_range=to_2d.max_scale / to_2d.height, cdf_decoder="mean"
+        fine_map_full, value_range=_staged_fine_value_range(diff_model), cdf_decoder="mean"
     ).cpu()
     combined_1d = coarse_1d + fine_1d
 
@@ -1250,7 +1257,7 @@ def _plot_diffusion_model_space_prediction(
         future_coarse, value_range=to_2d.max_scale, cdf_decoder="mean",
     ).cpu()
     fine_1d = to_2d._decode_occupancy_in_range(
-        future_fine, value_range=to_2d.max_scale / to_2d.height, cdf_decoder="mean",
+        future_fine, value_range=_staged_fine_value_range(model), cdf_decoder="mean",
     ).cpu()
     combined_1d = coarse_1d + fine_1d
     W_fut = future_coarse.shape[-1]
@@ -1660,13 +1667,13 @@ def decode_staged_anchor_components(
     B, V = coarse_2d.shape[:2]
     BV = B * V
     to_2d = fine_model.to_2d
-    coarse_flat = coarse_2d.reshape(BV, coarse_2d.shape[-2], coarse_2d.shape[-1])
-    fine_flat = fine_2d.reshape(BV, fine_2d.shape[-2], fine_2d.shape[-1])
+    coarse_flat = coarse_2d.reshape(BV, 1, coarse_2d.shape[-2], coarse_2d.shape[-1])
+    fine_flat = fine_2d.reshape(BV, 1, fine_2d.shape[-2], fine_2d.shape[-1])
     coarse_1d = to_2d._decode_occupancy_in_range(
         coarse_flat, value_range=to_2d.max_scale, cdf_decoder="mean",
     )
     fine_1d = to_2d._decode_occupancy_in_range(
-        fine_flat, value_range=to_2d.max_scale / to_2d.height, cdf_decoder="mean",
+        fine_flat, value_range=_staged_fine_value_range(fine_model), cdf_decoder="mean",
     )
     coarse_np = coarse_1d.reshape(B, V, -1).detach().cpu().numpy()
     fine_np = fine_1d.reshape(B, V, -1).detach().cpu().numpy()
@@ -1712,7 +1719,17 @@ def plot_worst_window_panel(
     os.makedirs(output_dir, exist_ok=True)
     past_cf, future_cf = _as_channel_first(past, future)
     gt = future_cf.numpy()
-    H = gt.shape[-1]
+    common_len = min(
+        gt.shape[-1],
+        coarse_pred.shape[-1],
+        fine_pred.shape[-1],
+        final_pred.shape[-1],
+    )
+    gt = gt[..., -common_len:]
+    coarse_pred = coarse_pred[..., -common_len:]
+    fine_pred = fine_pred[..., -common_len:]
+    final_pred = final_pred[..., -common_len:]
+    H = common_len
     t_axis = np.arange(0, H)
     n_vars = min(3, gt.shape[0])
 

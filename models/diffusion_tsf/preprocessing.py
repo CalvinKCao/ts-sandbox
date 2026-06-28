@@ -226,6 +226,102 @@ class TimeSeriesTo2D(nn.Module):
         """Encode values as full-range coarse CDF plus within-bin residual CDF."""
         return self.encode_dual_heights(x, coarse_height=self.height, fine_height=self.height)
 
+    @staticmethod
+    def haar_detail_levels(seq_len: int) -> int:
+        """Number of dyadic Haar detail levels after padding ``seq_len`` to a power of two."""
+        if seq_len < 2:
+            return 0
+        padded = 1 << (int(seq_len) - 1).bit_length()
+        return padded.bit_length() - 1
+
+    @staticmethod
+    def _pad_time_to_pow2(x: torch.Tensor) -> Tuple[torch.Tensor, int]:
+        seq_len = int(x.shape[-1])
+        if seq_len < 1:
+            raise ValueError("Haar split requires a non-empty time axis")
+        padded_len = 1 << (seq_len - 1).bit_length()
+        pad = padded_len - seq_len
+        if pad == 0:
+            return x, seq_len
+        return F.pad(x, (0, pad), mode="replicate"), seq_len
+
+    def haar_frequency_split_values(
+        self,
+        x: torch.Tensor,
+        *,
+        high_freq_levels: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Split a series into low/high Haar reconstructions along the time axis.
+
+        ``high_freq_levels`` counts finest Haar detail levels. The low component
+        keeps the approximation plus remaining coarser details; the high
+        component keeps only the selected finest details. Components sum back to
+        the padded input up to floating point error.
+        """
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        x_pad, original_len = self._pad_time_to_pow2(x)
+        levels = self.haar_detail_levels(x_pad.shape[-1])
+        if levels == 0:
+            return x[..., :original_len], torch.zeros_like(x[..., :original_len])
+        high_freq_levels = int(max(1, min(high_freq_levels, levels)))
+
+        details = []
+        cur = x_pad
+        inv_sqrt2 = 1.0 / (2.0 ** 0.5)
+        while cur.shape[-1] >= 2:
+            even = cur[..., 0::2]
+            odd = cur[..., 1::2]
+            details.append((even - odd) * inv_sqrt2)  # finest -> coarsest
+            cur = (even + odd) * inv_sqrt2
+        approx = cur
+
+        zero_approx = torch.zeros_like(approx)
+        low_details = []
+        high_details = []
+        for level_idx, detail in enumerate(details):
+            is_high = level_idx < high_freq_levels
+            low_details.append(torch.zeros_like(detail) if is_high else detail)
+            high_details.append(detail if is_high else torch.zeros_like(detail))
+
+        def reconstruct(start: torch.Tensor, detail_stack: list[torch.Tensor]) -> torch.Tensor:
+            rec = start
+            for detail in reversed(detail_stack):
+                even = (rec + detail) * inv_sqrt2
+                odd = (rec - detail) * inv_sqrt2
+                out = torch.empty(*even.shape[:-1], even.shape[-1] * 2, device=even.device, dtype=even.dtype)
+                out[..., 0::2] = even
+                out[..., 1::2] = odd
+                rec = out
+            return rec[..., :original_len]
+
+        low = reconstruct(approx, low_details)
+        high = reconstruct(zero_approx, high_details)
+        return low, high
+
+    def encode_haar_frequency_heights(
+        self,
+        x: torch.Tensor,
+        *,
+        coarse_height: int,
+        fine_height: int,
+        high_freq_levels: int,
+        fine_value_range: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode Haar low/high reconstructions as staged hard binary CDF maps."""
+        low, high = self.haar_frequency_split_values(x, high_freq_levels=high_freq_levels)
+        coarse = self._encode_values_in_range(
+            low,
+            value_range=self.max_scale,
+            height=coarse_height,
+        )
+        fine = self._encode_values_in_range(
+            high,
+            value_range=float(fine_value_range),
+            height=fine_height,
+        )
+        return coarse, fine
+
     def encode_dual_heights(
         self,
         x: torch.Tensor,
@@ -407,6 +503,37 @@ class TimeSeriesTo2D(nn.Module):
             fine_map.shape,
             x.shape,
         )
+        return x
+
+    def decode_haar_frequency_dual(
+        self,
+        coarse_map: torch.Tensor,
+        fine_map: torch.Tensor,
+        *,
+        fine_value_range: float,
+        cdf_decoder: str = "mean",
+        expectation_sharpen_temp: Optional[float] = None,
+        squeeze_univariate: bool = True,
+    ) -> torch.Tensor:
+        """Decode Haar low/high CDF maps by summing the component values."""
+        if coarse_map.shape[:2] != fine_map.shape[:2] or coarse_map.shape[3] != fine_map.shape[3]:
+            raise ValueError(f"coarse/fine shapes differ: {coarse_map.shape} vs {fine_map.shape}")
+        _batch_size, num_vars, _coarse_height, _seq_len = coarse_map.shape
+        coarse_value = self._decode_occupancy_in_range(
+            coarse_map,
+            value_range=self.max_scale,
+            cdf_decoder=cdf_decoder,
+            expectation_sharpen_temp=expectation_sharpen_temp,
+        )
+        fine_value = self._decode_occupancy_in_range(
+            fine_map,
+            value_range=float(fine_value_range),
+            cdf_decoder=cdf_decoder,
+            expectation_sharpen_temp=expectation_sharpen_temp,
+        )
+        x = torch.clamp(coarse_value + fine_value, -self.max_scale, self.max_scale)
+        if squeeze_univariate and num_vars == 1:
+            x = x.squeeze(1)
         return x
 
     def decode_triple(

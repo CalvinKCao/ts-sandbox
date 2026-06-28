@@ -48,6 +48,14 @@ class PipelineState:
     finer_image_height: int = 16
     max_scale: float = 3.5
     max_scale_by_dataset: Dict[str, float] = field(default_factory=dict)
+    staged_representation: str = "value_precision"
+    haar_high_freq_percent: float = 0.38
+    haar_high_freq_levels: int = 0
+    haar_fine_max_scale: float = 0.0
+    haar_cutoff_heuristic: str = "auto"
+    haar_fine_scale_quantile: float = 0.95
+    haar_variance_cv_threshold: float = 1.0
+    haar_variance_log_spread_threshold: float = 2.0
     dit_patch_size: Tuple[int, int] = (8, 8)
     dit_embed_dim: int = 384
     dit_depth: int = 8
@@ -208,6 +216,17 @@ class PipelineState:
                 init_kwargs[key] = float(init_kwargs[key])
         if "max_scale" in init_kwargs:
             init_kwargs["max_scale"] = float(init_kwargs["max_scale"])
+        for key in (
+            "haar_high_freq_percent",
+            "haar_fine_max_scale",
+            "haar_fine_scale_quantile",
+            "haar_variance_cv_threshold",
+            "haar_variance_log_spread_threshold",
+        ):
+            if key in init_kwargs:
+                init_kwargs[key] = float(init_kwargs[key])
+        if "haar_high_freq_levels" in init_kwargs:
+            init_kwargs["haar_high_freq_levels"] = int(init_kwargs["haar_high_freq_levels"])
         if "max_scale_by_dataset" in init_kwargs:
             init_kwargs["max_scale_by_dataset"] = {
                 str(k): float(v) for k, v in init_kwargs["max_scale_by_dataset"].items()

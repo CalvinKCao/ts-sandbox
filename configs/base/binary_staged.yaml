@@ -77,6 +77,14 @@ experiment:
   coarse_image_height: 16
   fine_image_height: 16
   finer_image_height: 16
+  staged_representation: value_precision
+  haar_high_freq_percent: 0.38
+  haar_high_freq_levels: 0
+  haar_fine_max_scale: 0.0
+  haar_cutoff_heuristic: auto
+  haar_fine_scale_quantile: 0.95
+  haar_variance_cv_threshold: 1.0
+  haar_variance_log_spread_threshold: 2.0
   max_scale: 3.5
   max_scale_by_dataset:
     ETTh1: 5.2

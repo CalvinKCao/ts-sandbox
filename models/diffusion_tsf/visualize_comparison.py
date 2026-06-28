@@ -138,6 +138,22 @@ def apply_checkpoint_architecture(ckpt: dict, diffusion_type: str, image_height:
         train_pipeline.DUAL_SCALE_FINE_WEIGHT = float(cfg.dual_scale_fine_weight)
     elif isinstance(cfg, dict) and 'dual_scale_fine_weight' in cfg:
         train_pipeline.DUAL_SCALE_FINE_WEIGHT = float(cfg['dual_scale_fine_weight'])
+    if hasattr(cfg, 'staged_representation'):
+        train_pipeline.STAGED_REPRESENTATION = str(cfg.staged_representation)
+    elif isinstance(cfg, dict) and 'staged_representation' in cfg:
+        train_pipeline.STAGED_REPRESENTATION = str(cfg['staged_representation'])
+    if hasattr(cfg, 'haar_high_freq_percent'):
+        train_pipeline.HAAR_HIGH_FREQ_PERCENT = float(cfg.haar_high_freq_percent)
+    elif isinstance(cfg, dict) and 'haar_high_freq_percent' in cfg:
+        train_pipeline.HAAR_HIGH_FREQ_PERCENT = float(cfg['haar_high_freq_percent'])
+    if hasattr(cfg, 'haar_high_freq_levels'):
+        train_pipeline.HAAR_HIGH_FREQ_LEVELS = int(cfg.haar_high_freq_levels)
+    elif isinstance(cfg, dict) and 'haar_high_freq_levels' in cfg:
+        train_pipeline.HAAR_HIGH_FREQ_LEVELS = int(cfg['haar_high_freq_levels'])
+    if hasattr(cfg, 'haar_fine_max_scale'):
+        train_pipeline.HAAR_FINE_MAX_SCALE = float(cfg.haar_fine_max_scale)
+    elif isinstance(cfg, dict) and 'haar_fine_max_scale' in cfg:
+        train_pipeline.HAAR_FINE_MAX_SCALE = float(cfg['haar_fine_max_scale'])
     state = ckpt.get('model_state_dict', {})
     head_weight = state.get('noise_predictor.head.weight')
     if head_weight is not None:

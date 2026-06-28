@@ -17,6 +17,7 @@ from models.diffusion_tsf.pipeline.visualize_utils import (
     run_staged_synthetic_pretrain_diagnostics,
 )
 from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
+from models.diffusion_tsf.pipeline.haar_frequency_calibration import ensure_haar_frequency_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,10 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "fine_image_height": int(state.fine_image_height),
         "finer_image_height": int(state.finer_image_height),
         "use_triple_scale": bool(state.use_triple_scale),
+        "staged_representation": str(state.staged_representation),
+        "haar_high_freq_levels": int(state.haar_high_freq_levels),
+        "haar_high_freq_percent": float(state.haar_high_freq_percent),
+        "haar_fine_max_scale": float(state.haar_fine_max_scale),
         "max_scale": max_scale,
         "dit_patch_size": list(state.dit_patch_size),
         "dit_embed_dim": int(state.dit_embed_dim),
@@ -487,6 +492,10 @@ def patch_stage_globals(mod: Any, state: PipelineState, stage: str, *, honor_dat
     mod.FINE_IMAGE_HEIGHT = int(state.fine_image_height)
     mod.FINER_IMAGE_HEIGHT = int(state.finer_image_height)
     mod.USE_GUIDANCE_CHANNEL = state.use_guidance_channel
+    mod.STAGED_REPRESENTATION = state.staged_representation
+    mod.HAAR_HIGH_FREQ_PERCENT = float(state.haar_high_freq_percent)
+    mod.HAAR_HIGH_FREQ_LEVELS = int(state.haar_high_freq_levels)
+    mod.HAAR_FINE_MAX_SCALE = float(state.haar_fine_max_scale)
 
 
 class StagedDiffusionPretrainPhase(PipelinePhase):
@@ -531,6 +540,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         return None
 
     def should_skip(self, state: PipelineState) -> bool:
+        ensure_haar_frequency_calibration(state)
         config_name = self._config_name(state)
         ckpts = {
             stage: self._cached_stage_ckpt(state, config_name, stage)
@@ -549,6 +559,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
         config_name = self._config_name(state)
+        ensure_haar_frequency_calibration(state)
         reuse_from = self.get("reuse_pretrain_from_config")
         if reuse_from:
             missing = []

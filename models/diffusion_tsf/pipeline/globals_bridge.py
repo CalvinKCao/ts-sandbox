@@ -48,6 +48,10 @@ def patch_globals(
     mod.FINE_IMAGE_HEIGHT = state.fine_image_height
     mod.FINER_IMAGE_HEIGHT = state.finer_image_height
     mod.MAX_SCALE = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
+    mod.STAGED_REPRESENTATION = state.staged_representation
+    mod.HAAR_HIGH_FREQ_PERCENT = float(state.haar_high_freq_percent)
+    mod.HAAR_HIGH_FREQ_LEVELS = int(state.haar_high_freq_levels)
+    mod.HAAR_FINE_MAX_SCALE = float(state.haar_fine_max_scale)
     mod.DIT_PATCH_SIZE = tuple(state.dit_patch_size)
     mod.DIT_EMBED_DIM = state.dit_embed_dim
     mod.DIT_DEPTH = state.dit_depth

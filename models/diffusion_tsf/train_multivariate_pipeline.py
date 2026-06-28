@@ -106,6 +106,10 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'fine_image_height': FINE_IMAGE_HEIGHT,
         'finer_image_height': FINER_IMAGE_HEIGHT,
         'max_scale': MAX_SCALE,
+        'staged_representation': STAGED_REPRESENTATION,
+        'haar_high_freq_percent': HAAR_HIGH_FREQ_PERCENT,
+        'haar_high_freq_levels': HAAR_HIGH_FREQ_LEVELS,
+        'haar_fine_max_scale': HAAR_FINE_MAX_SCALE,
         'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
         'window_norm_center': WINDOW_NORM_CENTER,
         'use_dual_scale': USE_DUAL_SCALE,
@@ -242,6 +246,10 @@ COARSE_IMAGE_HEIGHT = 16
 FINE_IMAGE_HEIGHT = 16
 FINER_IMAGE_HEIGHT = 16
 MAX_SCALE = 3.5
+STAGED_REPRESENTATION = "value_precision"
+HAAR_HIGH_FREQ_PERCENT = 0.38
+HAAR_HIGH_FREQ_LEVELS = 0
+HAAR_FINE_MAX_SCALE = 0.0
 WINDOW_NORM_STD_FLOOR = 1e-8
 LOOKBACK_OVERLAP = 8
 PAST_LOSS_WEIGHT = 0.3
@@ -904,6 +912,10 @@ def create_diffusion_model(
         fine_image_height=FINE_IMAGE_HEIGHT,
         finer_image_height=FINER_IMAGE_HEIGHT,
         max_scale=o("max_scale", MAX_SCALE),
+        staged_representation=o("staged_representation", STAGED_REPRESENTATION),
+        haar_high_freq_percent=o("haar_high_freq_percent", HAAR_HIGH_FREQ_PERCENT),
+        haar_high_freq_levels=o("haar_high_freq_levels", HAAR_HIGH_FREQ_LEVELS),
+        haar_fine_max_scale=o("haar_fine_max_scale", HAAR_FINE_MAX_SCALE),
         binary_noise_schedule=o("binary_noise_schedule", BINARY_NOISE_SCHEDULE),
         prediction_target=o(
             "prediction_target",

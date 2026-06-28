@@ -16,6 +16,7 @@ from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.config import visualization_settings
+from models.diffusion_tsf.pipeline.haar_frequency_calibration import ensure_haar_frequency_calibration
 from models.diffusion_tsf.pipeline.visualize_utils import (
     decode_staged_anchor_components,
     per_window_anchor_mse,
@@ -449,6 +450,7 @@ class StagedEvalPhase(PipelinePhase):
         return metrics, pack
 
     def execute(self, state: PipelineState) -> PipelineState:
+        ensure_haar_frequency_calibration(state)
         from models.diffusion_tsf.train_multivariate_pipeline import (
             generate_dataset_job,
             load_dataset,

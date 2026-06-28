@@ -489,8 +489,33 @@ class DiffusionTSF(nn.Module):
             int(getattr(self.config, "finer_image_height", self.config.image_height)),
         )
 
+    def _uses_haar_frequency_staging(self) -> bool:
+        return getattr(self.config, "staged_representation", "value_precision") == "haar_frequency"
+
+    def _haar_high_freq_levels_for_width(self, width: int) -> int:
+        levels = self.to_2d.haar_detail_levels(width)
+        if levels <= 0:
+            return 0
+        configured = int(getattr(self.config, "haar_high_freq_levels", 0) or 0)
+        if configured > 0:
+            return max(1, min(configured, levels))
+        pct = float(getattr(self.config, "haar_high_freq_percent", 0.38))
+        return max(1, min(levels, int(math.ceil(levels * pct))))
+
+    def _haar_fine_value_range(self) -> float:
+        fine_scale = float(getattr(self.config, "haar_fine_max_scale", 0.0) or 0.0)
+        return fine_scale if fine_scale > 0.0 else float(self.config.max_scale)
+
     def _encode_staged_dual_to_2d_binary(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         coarse_h, fine_h, _finer_h = self._staged_image_heights()
+        if self._uses_haar_frequency_staging():
+            return self.to_2d.encode_haar_frequency_heights(
+                x,
+                coarse_height=coarse_h,
+                fine_height=fine_h,
+                high_freq_levels=self._haar_high_freq_levels_for_width(x.shape[-1]),
+                fine_value_range=self._haar_fine_value_range(),
+            )
         return self.to_2d.encode_dual_heights(
             x,
             coarse_height=coarse_h,
@@ -499,6 +524,17 @@ class DiffusionTSF(nn.Module):
 
     def _encode_staged_maps(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         coarse_h, fine_h, finer_h = self._staged_image_heights()
+        if self._uses_haar_frequency_staging():
+            if getattr(self.config, "use_triple_scale", False):
+                raise ValueError("haar_frequency staging supports only coarse/fine stages")
+            coarse, fine = self.to_2d.encode_haar_frequency_heights(
+                x,
+                coarse_height=coarse_h,
+                fine_height=fine_h,
+                high_freq_levels=self._haar_high_freq_levels_for_width(x.shape[-1]),
+                fine_value_range=self._haar_fine_value_range(),
+            )
+            return {"coarse": coarse, "fine": fine}
         if getattr(self.config, "use_triple_scale", False):
             coarse, fine, finer = self.to_2d.encode_triple_heights(
                 x,
@@ -738,6 +774,15 @@ class DiffusionTSF(nn.Module):
             fine_map = (fine_map + 1.0) / 2.0
         cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
         temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
+        if self._uses_haar_frequency_staging():
+            return self.to_2d.decode_haar_frequency_dual(
+                coarse_map,
+                fine_map,
+                fine_value_range=self._haar_fine_value_range(),
+                cdf_decoder=cdf_decoder,
+                expectation_sharpen_temp=temperature,
+                squeeze_univariate=(coarse_map.shape[1] == 1),
+            )
         return self.to_2d.decode_dual(
             coarse_map,
             fine_map,

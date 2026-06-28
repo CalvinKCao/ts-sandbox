@@ -18,6 +18,7 @@ from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.config import training_value
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
+from models.diffusion_tsf.pipeline.haar_frequency_calibration import ensure_haar_frequency_calibration
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     _stage_pretrain_ckpt,
     discover_dataset_run_ckpt_dir,
@@ -503,6 +504,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 torch.cuda.empty_cache()
 
     def execute(self, state: PipelineState) -> PipelineState:
+        ensure_haar_frequency_calibration(state)
         from models.diffusion_tsf.train_multivariate_pipeline import (
             diffusion_probe_max_candidate,
             dataset_window_lengths,
@@ -801,6 +803,11 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "best_val_loss": float(final_val),
             "best_epoch": int(final_epoch),
             "diffusion_stage": self.stage,
+            "staged_representation": state.staged_representation,
+            "haar_high_freq_levels": int(state.haar_high_freq_levels),
+            "haar_high_freq_percent": float(state.haar_high_freq_percent),
+            "haar_fine_max_scale": float(state.haar_fine_max_scale),
+            "haar_fine_scale_quantile": float(state.haar_fine_scale_quantile),
             "search_space": search_space,
             "max_epochs": max_epochs,
             "patience": patience,
