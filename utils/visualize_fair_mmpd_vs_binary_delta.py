@@ -100,10 +100,11 @@ class AlignedPack:
 
 @dataclass
 class Anchor2DMaps:
-    """Native coarse/fine CDF occupancy maps (V, H, W) in model space [0, 1]."""
+    """Native coarse/fine CDF maps (V, H, W) plus per-column signed fine decode (V, W)."""
 
     coarse: np.ndarray
     fine: np.ndarray
+    fine_1d: np.ndarray
 
 
 @dataclass
@@ -252,7 +253,28 @@ class BinaryStagedInference:
             )
             coarse_2d = coarse_det["future_2d_coarse"][0].detach().cpu().numpy()
             fine_2d = fine_det["future_2d_fine"][0].detach().cpu().numpy()
-        return Anchor2DMaps(coarse=coarse_2d, fine=fine_2d)
+            fine_1d = self._decode_fine_1d(fine_2d)
+        return Anchor2DMaps(coarse=coarse_2d, fine=fine_2d, fine_1d=fine_1d)
+
+    def _decode_fine_1d(self, fine_2d: np.ndarray) -> np.ndarray:
+        """Signed within-bin residual decode per column, shape (V, W)."""
+        assert self._fine_model is not None
+        to_2d = self._fine_model.to_2d
+        h = fine_2d.shape[-2]
+        fine_t = torch.from_numpy(fine_2d).to(
+            device=self.device, dtype=torch.float32,
+        )
+        if fine_t.dim() == 2:
+            fine_t = fine_t.unsqueeze(0)
+        v = fine_t.shape[0]
+        fine_flat = fine_t.reshape(v, h, fine_t.shape[-1])
+        residual_range = float(to_2d.max_scale) / float(h)
+        fine_1d = to_2d._decode_occupancy_in_range(
+            fine_flat,
+            value_range=residual_range,
+            cdf_decoder="mean",
+        )
+        return fine_1d.detach().cpu().numpy()
 
 
 def _read_json(path: Path) -> Dict:
@@ -621,6 +643,91 @@ def _plot_prob_lines(ax, t_future: np.ndarray, prob_lines: Sequence[torch.Tensor
         )
 
 
+
+def _rgb_coarse_fine_column_overlay(
+    coarse_hw: np.ndarray,
+    fine_signed: np.ndarray,
+    *,
+    residual_range: float,
+) -> np.ndarray:
+    """Grayscale coarse (H,W) with green/red column overlays from signed fine decode."""
+    h, w = coarse_hw.shape
+    gray = np.clip(coarse_hw, 0.0, 1.0)
+    rgb = np.stack([gray, gray, gray], axis=-1)
+    scale = max(residual_range, 1e-8)
+    for col in range(w):
+        fv = float(fine_signed[col])
+        strength = min(abs(fv) / scale, 1.0)
+        if strength < 0.02:
+            continue
+        if fv > 0:
+            rgb[:, col, 0] *= 1.0 - 0.65 * strength
+            rgb[:, col, 1] = np.clip(rgb[:, col, 1] + 0.55 * strength, 0, 1)
+            rgb[:, col, 2] *= 1.0 - 0.65 * strength
+        else:
+            rgb[:, col, 0] = np.clip(rgb[:, col, 0] + 0.65 * strength, 0, 1)
+            rgb[:, col, 1] *= 1.0 - 0.55 * strength
+            rgb[:, col, 2] *= 1.0 - 0.55 * strength
+    return np.clip(rgb, 0.0, 1.0)
+
+
+def _plot_coarse_fine_summary(
+    ax,
+    *,
+    coarse_map: np.ndarray,
+    fine_1d: np.ndarray,
+    gt_dn: torch.Tensor,
+    mmpd_dn: torch.Tensor,
+    var_idx: int,
+    residual_range: float,
+    title: str,
+    ylabel: str = "",
+) -> None:
+    w_map = coarse_map.shape[-1]
+    horizon = gt_dn.shape[-1]
+    if w_map > horizon:
+        coarse_map = coarse_map[..., -horizon:]
+        fine_col = fine_1d[var_idx, -horizon:]
+        w = horizon
+    elif w_map < horizon:
+        fine_col = fine_1d[var_idx]
+        w = w_map
+    else:
+        fine_col = fine_1d[var_idx]
+        w = w_map
+    h, w = coarse_map.shape
+    rgb = _rgb_coarse_fine_column_overlay(
+        coarse_map, fine_col, residual_range=residual_range,
+    )
+    ax.imshow(
+        rgb,
+        aspect="auto",
+        origin="lower",
+        extent=[0, w, 0, h],
+        interpolation="nearest",
+    )
+    ax.set_xlim(0, w)
+    ax.set_ylim(0, h)
+    ax.set_title(title, fontsize=9)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=9)
+    ax.set_xlabel("forecast column", fontsize=7)
+
+    ax_line = ax.twinx()
+    x_cols = np.arange(w) + 0.5
+    gt = gt_dn[var_idx].numpy()
+    mmpd = mmpd_dn[var_idx].numpy()
+    if len(gt) != w:
+        x_line = np.linspace(0.5, w - 0.5, len(gt))
+    else:
+        x_line = x_cols
+    ax_line.plot(x_line, gt, color="#2196F3", lw=1.8, label="GT", zorder=5)
+    ax_line.plot(x_line, mmpd, color="#FF9800", lw=1.5, ls="--", label="MMPD", zorder=5)
+    ax_line.set_ylabel("denorm value", fontsize=7)
+    if var_idx == 0:
+        ax_line.legend(fontsize=6, loc="upper right")
+
+
 def _plot_2d_cdf_map(ax, data: np.ndarray, *, title: str, ylabel: str = "") -> None:
     h, w = data.shape
     im = ax.imshow(
@@ -664,11 +771,13 @@ def plot_window_panel(
     mmpd_label: str,
     subset_config: Path,
     anchor_2d: Optional[Anchor2DMaps] = None,
+    residual_range: float = 1.0,
 ) -> None:
     mean, std = norm["mean"], norm["std"]
     n_vars = aligned.y_true.shape[1]
     horizon = aligned.y_true.shape[2]
     var_names = _variate_names(dataset, n_vars, subset_config)
+    crps_panel = metric == "crps"
 
     past_dn = denorm(past, mean, std)
     gt_t = torch.from_numpy(aligned.y_true[pack_row]).to(dtype=torch.float32)
@@ -690,18 +799,20 @@ def plot_window_panel(
     t_past = np.arange(-context_len, 0)
     t_future = np.arange(horizon)
     line_labels = [binary_label, mmpd_label]
-    n_2d_rows = 2 if anchor_2d is not None else 0
+    show_decomp = anchor_2d is not None
+    n_2d_rows = 3 if show_decomp else 0  # coarse, fine, summary
     n_rows = 2 + n_2d_rows
 
     fig, axes = plt.subplots(
         n_rows,
         n_vars,
-        figsize=(4.8 * n_vars, 2.6 * n_rows + 1.0),
+        figsize=(4.8 * n_vars, 2.5 * n_rows + 1.2),
         squeeze=False,
         constrained_layout=True,
     )
+    metric_note = "prob samples only" if crps_panel else "anchor + prob samples"
     fig.suptitle(
-        f"{dataset} | test window {window_idx} | rank {rank} by {metric} Δ\n"
+        f"{dataset} | test window {window_idx} | rank {rank} by {metric} Δ ({metric_note})\n"
         f"Δ={delta:+.5f}  anchor_mse: bin={binary_mse:.5f} mmpd={mmpd_mse:.5f}  "
         f"crps: bin={binary_crps:.5f} mmpd={mmpd_crps:.5f}",
         fontsize=11,
@@ -723,7 +834,8 @@ def plot_window_panel(
                 alpha=0.85,
             )
             ax.plot(t_future, gt_dn[col].numpy(), color="#2196F3", lw=1.8, label="GT")
-            ax.plot(t_future, det_dn[col].numpy(), color="#6A1B9A", lw=1.6, label="anchor")
+            if not crps_panel:
+                ax.plot(t_future, det_dn[col].numpy(), color="#6A1B9A", lw=1.6, label="anchor")
             _plot_prob_lines(ax, t_future, prob_dns, col)
             if row == 0:
                 ax.set_title(var_names[col], fontsize=10)
@@ -733,7 +845,7 @@ def plot_window_panel(
             if row == 0 and col == 0:
                 ax.legend(fontsize=7, loc="upper left")
 
-    if anchor_2d is not None:
+    if show_decomp:
         for col in range(n_vars):
             _plot_2d_cdf_map(
                 axes[2, col],
@@ -747,11 +859,22 @@ def plot_window_panel(
                 title=f"{var_names[col]} fine CDF",
                 ylabel="fine bins" if col == 0 else "",
             )
+            _plot_coarse_fine_summary(
+                axes[4, col],
+                coarse_map=anchor_2d.coarse[col],
+                fine_1d=anchor_2d.fine_1d,
+                gt_dn=gt_dn,
+                mmpd_dn=mmpd_det_dn,
+                var_idx=col,
+                residual_range=residual_range,
+                title=f"{var_names[col]} coarse + fine Δ",
+                ylabel="summary" if col == 0 else "",
+            )
         fig.text(
             0.5,
             0.01,
-            "2D rows: binary anchor coarse/fine occupancy maps in model space [0,1] "
-            "(native H×W canvas, no extra rescale)",
+            "Summary row: B/W coarse occupancy; green column = fine adds, red = fine subtracts; "
+            "lines = GT (blue) + MMPD (orange)",
             ha="center",
             fontsize=8,
             color="#555555",
@@ -890,8 +1013,13 @@ def process_dataset(
                 dataset, [win_idx], subset_config,
             )
             anchor_2d = None
+            residual_range = 1.0
             if runner is not None and not skip_decomposition:
                 anchor_2d = runner.infer_anchor_2d(win_idx)
+                runner._ensure_loaded()
+                assert runner._fine_model is not None
+                h = int(anchor_2d.coarse.shape[-2])
+                residual_range = float(runner._fine_model.to_2d.max_scale) / float(h)
             plot_window_panel(
                 dataset=dataset,
                 window_idx=win_idx,
@@ -914,6 +1042,7 @@ def process_dataset(
                 mmpd_label=mmpd_label,
                 subset_config=subset_config,
                 anchor_2d=anchor_2d,
+                residual_range=residual_range,
             )
         rankings[metric_name] = rows_meta
 
