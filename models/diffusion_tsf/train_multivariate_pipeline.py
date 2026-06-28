@@ -2747,6 +2747,8 @@ def main():
     parser.add_argument("--datasets-dir", type=str, default=None, help="Benchmark CSV/NPZ root")
     parser.add_argument("--synth-cache-dir", type=str, default=None, help="Shared synthetic pool cache")
     parser.add_argument("--fresh", action="store_true", help="Wipe manifest and checkpoints")
+    parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
+    parser.add_argument("--wandb-project", type=str, default=None, help="Override wandb project from YAML")
     args = parser.parse_args()
 
     logger = setup_logging()
@@ -2800,6 +2802,10 @@ def main():
     cfg = load_experiment_config(args.config, cli_overrides)
     state = PipelineState.from_config(cfg)
     apply_cli_state_overrides(state, cfg)
+    if args.wandb:
+        state.wandb_enabled = True
+    if args.wandb_project:
+        state.wandb_project = args.wandb_project
 
     from models.diffusion_tsf.pipeline.config import logging_settings
     from models.diffusion_tsf.pipeline.logging_utils import configure_diagnostic_logging
