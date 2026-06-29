@@ -110,6 +110,12 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'haar_high_freq_percent': HAAR_HIGH_FREQ_PERCENT,
         'haar_high_freq_levels': HAAR_HIGH_FREQ_LEVELS,
         'haar_fine_max_scale': HAAR_FINE_MAX_SCALE,
+        'fourier_high_freq_percent': FOURIER_HIGH_FREQ_PERCENT,
+        'fourier_high_freq_cutoff_bin': FOURIER_HIGH_FREQ_CUTOFF_BIN,
+        'fourier_fine_max_scale': FOURIER_FINE_MAX_SCALE,
+        'fourier_flatline_atol': FOURIER_FLATLINE_ATOL,
+        'fourier_high_freq_cutoff_bins_per_variate': FOURIER_HIGH_FREQ_CUTOFF_BINS_PER_VARIATE,
+        'fourier_fine_max_scale_per_variate': FOURIER_FINE_MAX_SCALE_PER_VARIATE,
         'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
         'window_norm_center': WINDOW_NORM_CENTER,
         'use_dual_scale': USE_DUAL_SCALE,
@@ -250,6 +256,12 @@ STAGED_REPRESENTATION = "value_precision"
 HAAR_HIGH_FREQ_PERCENT = 0.38
 HAAR_HIGH_FREQ_LEVELS = 0
 HAAR_FINE_MAX_SCALE = 0.0
+FOURIER_HIGH_FREQ_PERCENT = 0.85
+FOURIER_HIGH_FREQ_CUTOFF_BIN = 0
+FOURIER_FINE_MAX_SCALE = 0.0
+FOURIER_FLATLINE_ATOL = 1e-8
+FOURIER_HIGH_FREQ_CUTOFF_BINS_PER_VARIATE: Optional[List[int]] = None
+FOURIER_FINE_MAX_SCALE_PER_VARIATE: Optional[List[float]] = None
 WINDOW_NORM_STD_FLOOR = 1e-8
 LOOKBACK_OVERLAP = 8
 PAST_LOSS_WEIGHT = 0.3
@@ -916,6 +928,16 @@ def create_diffusion_model(
         haar_high_freq_percent=o("haar_high_freq_percent", HAAR_HIGH_FREQ_PERCENT),
         haar_high_freq_levels=o("haar_high_freq_levels", HAAR_HIGH_FREQ_LEVELS),
         haar_fine_max_scale=o("haar_fine_max_scale", HAAR_FINE_MAX_SCALE),
+        fourier_high_freq_percent=o("fourier_high_freq_percent", FOURIER_HIGH_FREQ_PERCENT),
+        fourier_high_freq_cutoff_bin=o("fourier_high_freq_cutoff_bin", FOURIER_HIGH_FREQ_CUTOFF_BIN),
+        fourier_fine_max_scale=o("fourier_fine_max_scale", FOURIER_FINE_MAX_SCALE),
+        fourier_flatline_atol=o("fourier_flatline_atol", FOURIER_FLATLINE_ATOL),
+        fourier_high_freq_cutoff_bins_per_variate=o(
+            "fourier_high_freq_cutoff_bins_per_variate", FOURIER_HIGH_FREQ_CUTOFF_BINS_PER_VARIATE,
+        ),
+        fourier_fine_max_scale_per_variate=o(
+            "fourier_fine_max_scale_per_variate", FOURIER_FINE_MAX_SCALE_PER_VARIATE,
+        ),
         binary_noise_schedule=o("binary_noise_schedule", BINARY_NOISE_SCHEDULE),
         prediction_target=o(
             "prediction_target",

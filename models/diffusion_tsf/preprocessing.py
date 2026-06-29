@@ -299,6 +299,75 @@ class TimeSeriesTo2D(nn.Module):
         high = reconstruct(zero_approx, high_details)
         return low, high
 
+    def fourier_frequency_split_values(
+        self,
+        x: torch.Tensor,
+        *,
+        cutoff_bin,
+        flatline_atol: float,
+        edge_mode: str = "mirror_pad",
+        mirror_pad_frac: float = 0.25,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Split a series into low/high Fourier reconstructions along the time axis."""
+        from models.diffusion_tsf.fourier_frequency import fourier_frequency_split_torch
+
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        low, high = fourier_frequency_split_torch(
+            x,
+            cutoff_bin=cutoff_bin,
+            flatline_atol=float(flatline_atol),
+            edge_mode=edge_mode,
+            mirror_pad_frac=mirror_pad_frac,
+        )
+        if low.shape[1] == 1 and x.shape[1] == 1:
+            return low.squeeze(1), high.squeeze(1)
+        return low, high
+
+    def encode_fourier_frequency_heights(
+        self,
+        x: torch.Tensor,
+        *,
+        coarse_height: int,
+        fine_height: int,
+        cutoff_bin,
+        fine_value_range,
+        flatline_atol: float,
+        edge_mode: str = "mirror_pad",
+        mirror_pad_frac: float = 0.25,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        low, high = self.fourier_frequency_split_values(
+            x,
+            cutoff_bin=cutoff_bin,
+            flatline_atol=flatline_atol,
+            edge_mode=edge_mode,
+            mirror_pad_frac=mirror_pad_frac,
+        )
+        if low.dim() == 2:
+            low = low.unsqueeze(1)
+            high = high.unsqueeze(1)
+        if isinstance(fine_value_range, (list, tuple)):
+            fine_ranges = [float(v) for v in fine_value_range]
+        else:
+            fine_ranges = [float(fine_value_range)] * int(low.shape[1])
+
+        coarse = self._encode_values_in_range(
+            low,
+            value_range=self.max_scale,
+            height=coarse_height,
+        )
+        fine_maps = []
+        for vi in range(high.shape[1]):
+            fine_maps.append(
+                self._encode_values_in_range(
+                    high[:, vi : vi + 1],
+                    value_range=fine_ranges[vi],
+                    height=fine_height,
+                )
+            )
+        fine = torch.cat(fine_maps, dim=1)
+        return coarse, fine
+
     def encode_haar_frequency_heights(
         self,
         x: torch.Tensor,
@@ -504,6 +573,25 @@ class TimeSeriesTo2D(nn.Module):
             x.shape,
         )
         return x
+
+    def decode_fourier_frequency_dual(
+        self,
+        coarse_map: torch.Tensor,
+        fine_map: torch.Tensor,
+        *,
+        fine_value_range: float,
+        cdf_decoder: str = "mean",
+        expectation_sharpen_temp: Optional[float] = None,
+        squeeze_univariate: bool = True,
+    ) -> torch.Tensor:
+        return self.decode_haar_frequency_dual(
+            coarse_map,
+            fine_map,
+            fine_value_range=fine_value_range,
+            cdf_decoder=cdf_decoder,
+            expectation_sharpen_temp=expectation_sharpen_temp,
+            squeeze_univariate=squeeze_univariate,
+        )
 
     def decode_haar_frequency_dual(
         self,

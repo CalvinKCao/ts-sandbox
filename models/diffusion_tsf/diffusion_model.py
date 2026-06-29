@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .config import DiffusionTSFConfig
 from .preprocessing import TimeSeriesTo2D
@@ -492,6 +492,12 @@ class DiffusionTSF(nn.Module):
     def _uses_haar_frequency_staging(self) -> bool:
         return getattr(self.config, "staged_representation", "value_precision") == "haar_frequency"
 
+    def _uses_fourier_frequency_staging(self) -> bool:
+        return getattr(self.config, "staged_representation", "value_precision") == "fourier_frequency"
+
+    def _uses_frequency_split_staging(self) -> bool:
+        return self._uses_haar_frequency_staging() or self._uses_fourier_frequency_staging()
+
     def _haar_high_freq_levels_for_width(self, width: int) -> int:
         levels = self.to_2d.haar_detail_levels(width)
         if levels <= 0:
@@ -506,6 +512,53 @@ class DiffusionTSF(nn.Module):
         fine_scale = float(getattr(self.config, "haar_fine_max_scale", 0.0) or 0.0)
         return fine_scale if fine_scale > 0.0 else float(self.config.max_scale)
 
+    def _fourier_cutoff_bins_for_width(self, width: int, n_vars: int) -> List[int]:
+        from models.diffusion_tsf.fourier_frequency import fft_frequency_bins, prior_cutoff_bin
+
+        per_var = getattr(self.config, "fourier_high_freq_cutoff_bins_per_variate", None)
+        n_bins = fft_frequency_bins(width)
+        if n_bins <= 1:
+            return [1] * n_vars
+        if per_var:
+            vals = [int(v) for v in per_var]
+            if len(vals) != n_vars:
+                raise ValueError(f"expected {n_vars} fourier cutoffs, got {len(vals)}")
+            return [max(1, min(v, n_bins - 1)) for v in vals]
+        configured = int(getattr(self.config, "fourier_high_freq_cutoff_bin", 0) or 0)
+        if configured > 0:
+            k = max(1, min(configured, n_bins - 1))
+            return [k] * n_vars
+        pct = float(getattr(self.config, "fourier_high_freq_percent", 0.85))
+        k = prior_cutoff_bin(n_bins, pct)
+        return [k] * n_vars
+
+    def _fourier_fine_value_ranges(self, n_vars: int) -> List[float]:
+        per_var = getattr(self.config, "fourier_fine_max_scale_per_variate", None)
+        if per_var:
+            vals = [float(v) for v in per_var]
+            if len(vals) != n_vars:
+                raise ValueError(f"expected {n_vars} fourier fine scales, got {len(vals)}")
+            return vals
+        fine_scale = float(getattr(self.config, "fourier_fine_max_scale", 0.0) or 0.0)
+        v = fine_scale if fine_scale > 0.0 else float(self.config.max_scale)
+        return [v] * n_vars
+
+    def _fourier_fine_value_range(self) -> float:
+        per_var = getattr(self.config, "fourier_fine_max_scale_per_variate", None)
+        if per_var:
+            return float(max(per_var))
+        fine_scale = float(getattr(self.config, "fourier_fine_max_scale", 0.0) or 0.0)
+        return fine_scale if fine_scale > 0.0 else float(self.config.max_scale)
+
+    def _fourier_flatline_atol(self) -> float:
+        return float(getattr(self.config, "fourier_flatline_atol", 1e-8))
+
+    def _fourier_fft_edge_mode(self) -> str:
+        return str(getattr(self.config, "fourier_fft_edge_mode", "mirror_pad"))
+
+    def _fourier_mirror_pad_frac(self) -> float:
+        return float(getattr(self.config, "fourier_mirror_pad_frac", 0.25))
+
     def _encode_staged_dual_to_2d_binary(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         coarse_h, fine_h, _finer_h = self._staged_image_heights()
         if self._uses_haar_frequency_staging():
@@ -515,6 +568,18 @@ class DiffusionTSF(nn.Module):
                 fine_height=fine_h,
                 high_freq_levels=self._haar_high_freq_levels_for_width(x.shape[-1]),
                 fine_value_range=self._haar_fine_value_range(),
+            )
+        if self._uses_fourier_frequency_staging():
+            n_vars = int(x.shape[1]) if x.dim() >= 2 else 1
+            return self.to_2d.encode_fourier_frequency_heights(
+                x,
+                coarse_height=coarse_h,
+                fine_height=fine_h,
+                cutoff_bin=self._fourier_cutoff_bins_for_width(x.shape[-1], n_vars),
+                fine_value_range=self._fourier_fine_value_ranges(n_vars),
+                flatline_atol=self._fourier_flatline_atol(),
+                edge_mode=self._fourier_fft_edge_mode(),
+                mirror_pad_frac=self._fourier_mirror_pad_frac(),
             )
         return self.to_2d.encode_dual_heights(
             x,
@@ -533,6 +598,21 @@ class DiffusionTSF(nn.Module):
                 fine_height=fine_h,
                 high_freq_levels=self._haar_high_freq_levels_for_width(x.shape[-1]),
                 fine_value_range=self._haar_fine_value_range(),
+            )
+            return {"coarse": coarse, "fine": fine}
+        if self._uses_fourier_frequency_staging():
+            if getattr(self.config, "use_triple_scale", False):
+                raise ValueError("fourier_frequency staging supports only coarse/fine stages")
+            n_vars = int(x.shape[1]) if x.dim() >= 2 else 1
+            coarse, fine = self.to_2d.encode_fourier_frequency_heights(
+                x,
+                coarse_height=coarse_h,
+                fine_height=fine_h,
+                cutoff_bin=self._fourier_cutoff_bins_for_width(x.shape[-1], n_vars),
+                fine_value_range=self._fourier_fine_value_ranges(n_vars),
+                flatline_atol=self._fourier_flatline_atol(),
+                edge_mode=self._fourier_fft_edge_mode(),
+                mirror_pad_frac=self._fourier_mirror_pad_frac(),
             )
             return {"coarse": coarse, "fine": fine}
         if getattr(self.config, "use_triple_scale", False):
@@ -779,6 +859,15 @@ class DiffusionTSF(nn.Module):
                 coarse_map,
                 fine_map,
                 fine_value_range=self._haar_fine_value_range(),
+                cdf_decoder=cdf_decoder,
+                expectation_sharpen_temp=temperature,
+                squeeze_univariate=(coarse_map.shape[1] == 1),
+            )
+        if self._uses_fourier_frequency_staging():
+            return self.to_2d.decode_fourier_frequency_dual(
+                coarse_map,
+                fine_map,
+                fine_value_range=self._fourier_fine_value_range(),
                 cdf_decoder=cdf_decoder,
                 expectation_sharpen_temp=temperature,
                 squeeze_univariate=(coarse_map.shape[1] == 1),

@@ -19,6 +19,7 @@ from models.diffusion_tsf.pipeline.config import training_value
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.haar_frequency_calibration import ensure_haar_frequency_calibration
+from models.diffusion_tsf.pipeline.fourier_frequency_calibration import ensure_fourier_frequency_calibration
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     _stage_pretrain_ckpt,
     discover_dataset_run_ckpt_dir,
@@ -505,6 +506,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
     def execute(self, state: PipelineState) -> PipelineState:
         ensure_haar_frequency_calibration(state)
+        ensure_fourier_frequency_calibration(state)
         from models.diffusion_tsf.train_multivariate_pipeline import (
             diffusion_probe_max_candidate,
             dataset_window_lengths,
@@ -808,6 +810,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "haar_high_freq_percent": float(state.haar_high_freq_percent),
             "haar_fine_max_scale": float(state.haar_fine_max_scale),
             "haar_fine_scale_quantile": float(state.haar_fine_scale_quantile),
+            "fourier_high_freq_cutoff_bin": int(state.fourier_high_freq_cutoff_bin),
+            "fourier_high_freq_percent": float(state.fourier_high_freq_percent),
+            "fourier_fine_max_scale": float(state.fourier_fine_max_scale),
+            "fourier_flatline_atol": float(state.fourier_flatline_atol),
             "search_space": search_space,
             "max_epochs": max_epochs,
             "patience": patience,

@@ -18,6 +18,7 @@ from models.diffusion_tsf.pipeline.visualize_utils import (
 )
 from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline.haar_frequency_calibration import ensure_haar_frequency_calibration
+from models.diffusion_tsf.pipeline.fourier_frequency_calibration import ensure_fourier_frequency_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,10 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "haar_high_freq_levels": int(state.haar_high_freq_levels),
         "haar_high_freq_percent": float(state.haar_high_freq_percent),
         "haar_fine_max_scale": float(state.haar_fine_max_scale),
+        "fourier_high_freq_cutoff_bin": int(state.fourier_high_freq_cutoff_bin),
+        "fourier_high_freq_percent": float(state.fourier_high_freq_percent),
+        "fourier_fine_max_scale": float(state.fourier_fine_max_scale),
+        "fourier_flatline_atol": float(state.fourier_flatline_atol),
         "max_scale": max_scale,
         "dit_patch_size": list(state.dit_patch_size),
         "dit_embed_dim": int(state.dit_embed_dim),
@@ -496,6 +501,20 @@ def patch_stage_globals(mod: Any, state: PipelineState, stage: str, *, honor_dat
     mod.HAAR_HIGH_FREQ_PERCENT = float(state.haar_high_freq_percent)
     mod.HAAR_HIGH_FREQ_LEVELS = int(state.haar_high_freq_levels)
     mod.HAAR_FINE_MAX_SCALE = float(state.haar_fine_max_scale)
+    mod.FOURIER_HIGH_FREQ_PERCENT = float(state.fourier_high_freq_percent)
+    mod.FOURIER_HIGH_FREQ_CUTOFF_BIN = int(state.fourier_high_freq_cutoff_bin)
+    mod.FOURIER_FINE_MAX_SCALE = float(state.fourier_fine_max_scale)
+    mod.FOURIER_FLATLINE_ATOL = float(state.fourier_flatline_atol)
+    mod.FOURIER_HIGH_FREQ_CUTOFF_BINS_PER_VARIATE = (
+        list(state.fourier_high_freq_cutoff_bins_per_variate)
+        if state.fourier_high_freq_cutoff_bins_per_variate
+        else None
+    )
+    mod.FOURIER_FINE_MAX_SCALE_PER_VARIATE = (
+        list(state.fourier_fine_max_scale_per_variate)
+        if state.fourier_fine_max_scale_per_variate
+        else None
+    )
 
 
 class StagedDiffusionPretrainPhase(PipelinePhase):
@@ -541,6 +560,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
 
     def should_skip(self, state: PipelineState) -> bool:
         ensure_haar_frequency_calibration(state)
+        ensure_fourier_frequency_calibration(state)
         config_name = self._config_name(state)
         ckpts = {
             stage: self._cached_stage_ckpt(state, config_name, stage)
@@ -560,6 +580,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
 
         config_name = self._config_name(state)
         ensure_haar_frequency_calibration(state)
+        ensure_fourier_frequency_calibration(state)
         reuse_from = self.get("reuse_pretrain_from_config")
         if reuse_from:
             missing = []

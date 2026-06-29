@@ -85,6 +85,10 @@ experiment:
   haar_fine_scale_quantile: 0.95
   haar_variance_cv_threshold: 1.0
   haar_variance_log_spread_threshold: 2.0
+  fourier_high_freq_percent: 0.85
+  fourier_high_freq_cutoff_bin: 0
+  fourier_fine_max_scale: 0.0
+  fourier_flatline_atol: 1.0e-8
   max_scale: 3.5
   max_scale_by_dataset:
     ETTh1: 5.2

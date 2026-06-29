@@ -56,6 +56,12 @@ class PipelineState:
     haar_fine_scale_quantile: float = 0.95
     haar_variance_cv_threshold: float = 1.0
     haar_variance_log_spread_threshold: float = 2.0
+    fourier_high_freq_percent: float = 0.85
+    fourier_high_freq_cutoff_bin: int = 0
+    fourier_fine_max_scale: float = 0.0
+    fourier_flatline_atol: float = 1e-8
+    fourier_high_freq_cutoff_bins_per_variate: Optional[List[int]] = None
+    fourier_fine_max_scale_per_variate: Optional[List[float]] = None
     dit_patch_size: Tuple[int, int] = (8, 8)
     dit_embed_dim: int = 384
     dit_depth: int = 8
@@ -227,6 +233,15 @@ class PipelineState:
                 init_kwargs[key] = float(init_kwargs[key])
         if "haar_high_freq_levels" in init_kwargs:
             init_kwargs["haar_high_freq_levels"] = int(init_kwargs["haar_high_freq_levels"])
+        for key in (
+            "fourier_high_freq_percent",
+            "fourier_fine_max_scale",
+            "fourier_flatline_atol",
+        ):
+            if key in init_kwargs:
+                init_kwargs[key] = float(init_kwargs[key])
+        if "fourier_high_freq_cutoff_bin" in init_kwargs:
+            init_kwargs["fourier_high_freq_cutoff_bin"] = int(init_kwargs["fourier_high_freq_cutoff_bin"])
         if "max_scale_by_dataset" in init_kwargs:
             init_kwargs["max_scale_by_dataset"] = {
                 str(k): float(v) for k, v in init_kwargs["max_scale_by_dataset"].items()

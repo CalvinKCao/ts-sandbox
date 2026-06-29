@@ -52,6 +52,20 @@ def patch_globals(
     mod.HAAR_HIGH_FREQ_PERCENT = float(state.haar_high_freq_percent)
     mod.HAAR_HIGH_FREQ_LEVELS = int(state.haar_high_freq_levels)
     mod.HAAR_FINE_MAX_SCALE = float(state.haar_fine_max_scale)
+    mod.FOURIER_HIGH_FREQ_PERCENT = float(state.fourier_high_freq_percent)
+    mod.FOURIER_HIGH_FREQ_CUTOFF_BIN = int(state.fourier_high_freq_cutoff_bin)
+    mod.FOURIER_FINE_MAX_SCALE = float(state.fourier_fine_max_scale)
+    mod.FOURIER_FLATLINE_ATOL = float(state.fourier_flatline_atol)
+    mod.FOURIER_HIGH_FREQ_CUTOFF_BINS_PER_VARIATE = (
+        list(state.fourier_high_freq_cutoff_bins_per_variate)
+        if state.fourier_high_freq_cutoff_bins_per_variate
+        else None
+    )
+    mod.FOURIER_FINE_MAX_SCALE_PER_VARIATE = (
+        list(state.fourier_fine_max_scale_per_variate)
+        if state.fourier_fine_max_scale_per_variate
+        else None
+    )
     mod.DIT_PATCH_SIZE = tuple(state.dit_patch_size)
     mod.DIT_EMBED_DIM = state.dit_embed_dim
     mod.DIT_DEPTH = state.dit_depth
