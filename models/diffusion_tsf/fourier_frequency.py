@@ -121,15 +121,22 @@ def cutoff_bin_for_high_percent(n_bins: int, high_percent: float) -> int:
 def fourier_frequency_split_np(
     x: np.ndarray,
     *,
-    cutoff_bin: int,
+    cutoff_bin: int | None = None,
+    high_freq_percent: float | None = None,
     flatline_atol: float,
     edge_mode: str = "mirror_pad",
     mirror_pad_frac: float = 0.25,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Split 1D series into low/high Fourier components with flatline preservation."""
     comp, lens = rle_compress_1d(x, flatline_atol)
+    if high_freq_percent is not None:
+        k = prior_cutoff_bin(fft_frequency_bins(comp.size), high_freq_percent)
+    elif cutoff_bin is not None:
+        k = int(cutoff_bin)
+    else:
+        raise ValueError("fourier_frequency_split_np requires cutoff_bin or high_freq_percent")
     low_c, high_c = fft_split_compressed(
-        comp, cutoff_bin, edge_mode=edge_mode, mirror_pad_frac=mirror_pad_frac,
+        comp, k, edge_mode=edge_mode, mirror_pad_frac=mirror_pad_frac,
     )
     low = rle_expand(low_c, lens)
     high = rle_expand(high_c, lens)
@@ -185,7 +192,8 @@ def _cutoff_per_variate(cutoff_bin: CutoffSpec, n_vars: int) -> List[int]:
 def fourier_frequency_split_torch(
     x: torch.Tensor,
     *,
-    cutoff_bin: CutoffSpec,
+    cutoff_bin: CutoffSpec | None = None,
+    high_freq_percent: float | None = None,
     flatline_atol: float,
     edge_mode: str = "mirror_pad",
     mirror_pad_frac: float = 0.25,
@@ -196,7 +204,12 @@ def fourier_frequency_split_torch(
     if x.dim() != 3:
         raise ValueError(f"expected (B,V,T) or (B,T), got {tuple(x.shape)}")
     b, v, t = x.shape
-    cutoffs = _cutoff_per_variate(cutoff_bin, v)
+    if high_freq_percent is None:
+        if cutoff_bin is None:
+            raise ValueError("fourier_frequency_split_torch requires cutoff_bin or high_freq_percent")
+        cutoffs = _cutoff_per_variate(cutoff_bin, v)
+    else:
+        cutoffs = None
     lows = []
     highs = []
     for bi in range(b):
@@ -205,8 +218,12 @@ def fourier_frequency_split_torch(
         for vi in range(v):
             series = x[bi, vi]
             comp, lens = _torch_rle_compress_1d(series, flatline_atol)
+            if cutoffs is None:
+                k = prior_cutoff_bin(fft_frequency_bins(int(comp.numel())), high_freq_percent)
+            else:
+                k = cutoffs[vi]
             low_c, high_c = _torch_fft_split_compressed(
-                comp, cutoffs[vi], edge_mode=edge_mode, mirror_pad_frac=mirror_pad_frac,
+                comp, k, edge_mode=edge_mode, mirror_pad_frac=mirror_pad_frac,
             )
             row_low.append(_torch_rle_expand(low_c, lens, t))
             row_high.append(_torch_rle_expand(high_c, lens, t))

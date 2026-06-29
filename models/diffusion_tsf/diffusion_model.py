@@ -532,6 +532,19 @@ class DiffusionTSF(nn.Module):
         k = prior_cutoff_bin(n_bins, pct)
         return [k] * n_vars
 
+    def _fourier_split_kwargs(self, x: torch.Tensor) -> Dict[str, Any]:
+        per_var = getattr(self.config, "fourier_high_freq_cutoff_bins_per_variate", None)
+        configured = int(getattr(self.config, "fourier_high_freq_cutoff_bin", 0) or 0)
+        if per_var or configured > 0:
+            n_vars = int(x.shape[1]) if x.dim() >= 2 else 1
+            return {"cutoff_bin": self._fourier_cutoff_bins_for_width(x.shape[-1], n_vars)}
+        return {"high_freq_percent": float(getattr(self.config, "fourier_high_freq_percent", 0.85))}
+
+    def _fourier_coarse_bin_value_range(self) -> float:
+        """Fine residual clip: ±one full coarse bin width."""
+        coarse_h = int(getattr(self.config, "coarse_image_height", self.config.image_height))
+        return 2.0 * float(self.config.max_scale) / float(coarse_h)
+
     def _fourier_fine_value_ranges(self, n_vars: int) -> List[float]:
         per_var = getattr(self.config, "fourier_fine_max_scale_per_variate", None)
         if per_var:
@@ -540,7 +553,7 @@ class DiffusionTSF(nn.Module):
                 raise ValueError(f"expected {n_vars} fourier fine scales, got {len(vals)}")
             return vals
         fine_scale = float(getattr(self.config, "fourier_fine_max_scale", 0.0) or 0.0)
-        v = fine_scale if fine_scale > 0.0 else float(self.config.max_scale)
+        v = fine_scale if fine_scale > 0.0 else self._fourier_coarse_bin_value_range()
         return [v] * n_vars
 
     def _fourier_fine_value_range(self) -> float:
@@ -548,7 +561,7 @@ class DiffusionTSF(nn.Module):
         if per_var:
             return float(max(per_var))
         fine_scale = float(getattr(self.config, "fourier_fine_max_scale", 0.0) or 0.0)
-        return fine_scale if fine_scale > 0.0 else float(self.config.max_scale)
+        return fine_scale if fine_scale > 0.0 else self._fourier_coarse_bin_value_range()
 
     def _fourier_flatline_atol(self) -> float:
         return float(getattr(self.config, "fourier_flatline_atol", 1e-8))
@@ -575,11 +588,11 @@ class DiffusionTSF(nn.Module):
                 x,
                 coarse_height=coarse_h,
                 fine_height=fine_h,
-                cutoff_bin=self._fourier_cutoff_bins_for_width(x.shape[-1], n_vars),
                 fine_value_range=self._fourier_fine_value_ranges(n_vars),
                 flatline_atol=self._fourier_flatline_atol(),
                 edge_mode=self._fourier_fft_edge_mode(),
                 mirror_pad_frac=self._fourier_mirror_pad_frac(),
+                **self._fourier_split_kwargs(x),
             )
         return self.to_2d.encode_dual_heights(
             x,
@@ -608,11 +621,11 @@ class DiffusionTSF(nn.Module):
                 x,
                 coarse_height=coarse_h,
                 fine_height=fine_h,
-                cutoff_bin=self._fourier_cutoff_bins_for_width(x.shape[-1], n_vars),
                 fine_value_range=self._fourier_fine_value_ranges(n_vars),
                 flatline_atol=self._fourier_flatline_atol(),
                 edge_mode=self._fourier_fft_edge_mode(),
                 mirror_pad_frac=self._fourier_mirror_pad_frac(),
+                **self._fourier_split_kwargs(x),
             )
             return {"coarse": coarse, "fine": fine}
         if getattr(self.config, "use_triple_scale", False):

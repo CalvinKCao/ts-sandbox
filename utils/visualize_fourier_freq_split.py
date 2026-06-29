@@ -118,17 +118,19 @@ def _load_state(dataset: str) -> PipelineState:
 
 
 def _split_info(state: PipelineState, width: int, n_vars: int) -> Dict:
-    n_bins = fft_frequency_bins(width)
-    k = prior_cutoff_bin(n_bins, float(state.fourier_high_freq_percent))
-    high_pct = 100.0 * (n_bins - k) / float(n_bins)
+    pct = float(state.fourier_high_freq_percent)
+    n_bins_raw = fft_frequency_bins(width)
+    k_raw = prior_cutoff_bin(n_bins_raw, pct)
+    high_pct = 100.0 * (n_bins_raw - k_raw) / float(n_bins_raw)
+    low_pct = 100.0 - high_pct
     return {
         "dataset": state.dataset,
         "fourier_flatline_atol": float(state.fourier_flatline_atol),
-        "fourier_rfft_bins": n_bins,
-        "high_freq_percent": float(state.fourier_high_freq_percent),
-        "cutoff_bin": k,
+        "fourier_rfft_bins": n_bins_raw,
+        "high_freq_percent": pct,
         "high_band_percent": high_pct,
-        "cutoffs_per_variate": [k] * n_vars,
+        "low_band_percent": low_pct,
+        "cutoffs_per_variate": "per_compressed_series",
     }
 
 
@@ -142,27 +144,32 @@ def _plot_dataset_panel(
     variate_indices: Optional[Sequence[int]] = None,
 ) -> None:
     flatline_atol = float(info["fourier_flatline_atol"])
-    cutoffs = info["cutoffs_per_variate"]
-    n_bins = int(info["fourier_rfft_bins"])
     high_pct = float(info["high_band_percent"])
+    low_pct = float(info["low_band_percent"])
+    pct = float(info["high_freq_percent"])
 
     if variate_indices is None:
-        variate_indices = list(range(min(3, len(cutoffs))))
+        max_vi = max((s.variate_idx for s in samples), default=0)
+        variate_indices = list(range(min(3, max_vi + 1)))
 
     n_rows = len(variate_indices)
     fig, axes = plt.subplots(n_rows, 1, figsize=(12, 2.8 * n_rows), sharex=True)
     if n_rows == 1:
         axes = [axes]
     fig.suptitle(
-        f"{dataset} | fixed {high_pct:.0f}% high band | {title_suffix}",
+        f"{dataset} | {high_pct:.0f}% high / {low_pct:.0f}% low (per variate) | {title_suffix}",
         fontsize=11,
     )
 
     for ax, vi in zip(axes, variate_indices):
         sample = next(s for s in samples if s.variate_idx == vi)
-        k = int(cutoffs[vi])
         x = sample.future_norm
-        low, high = fourier_frequency_split_np(x, cutoff_bin=k, flatline_atol=flatline_atol)
+        low, high = fourier_frequency_split_np(
+            x, high_freq_percent=pct, flatline_atol=flatline_atol,
+        )
+        comp, _ = rle_compress_1d(x, flatline_atol)
+        n_bins = fft_frequency_bins(comp.size)
+        k = prior_cutoff_bin(n_bins, pct)
         recon = low + high
         t = np.arange(x.size)
         high_std = float(np.std(high))
@@ -213,14 +220,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         _plot_dataset_panel(
             ds, samples, info, out_dyn,
             title_suffix="dynamic-ish window (show first 3 variates)",
-            variate_indices=[0, 1, 2] if len(info["cutoffs_per_variate"]) >= 3 else [0],
+            variate_indices=[0, 1, 2] if n_vars >= 3 else [0],
         )
 
         entry = {
             "dataset": ds,
             "dynamic_plot": str(out_dyn),
             "cutoffs_per_variate": info["cutoffs_per_variate"],
-            "high_freq_percent": info["high_freq_percent"],
         }
         if flat is not None:
             out_flat = args.output_dir / f"{ds.lower()}_per_variate_splits_flatline.png"

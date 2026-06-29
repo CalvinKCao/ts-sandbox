@@ -199,7 +199,11 @@ def _staged_fine_value_range(diff_model) -> float:
     if getattr(cfg, "staged_representation", "value_precision") == "haar_frequency":
         return float(getattr(cfg, "haar_fine_max_scale", 0.0) or diff_model.to_2d.max_scale)
     if getattr(cfg, "staged_representation", "value_precision") == "fourier_frequency":
-        return float(getattr(cfg, "fourier_fine_max_scale", 0.0) or diff_model.to_2d.max_scale)
+        fine_scale = float(getattr(cfg, "fourier_fine_max_scale", 0.0) or 0.0)
+        if fine_scale > 0.0:
+            return fine_scale
+        coarse_h = int(getattr(cfg, "coarse_image_height", diff_model.to_2d.height))
+        return 2.0 * float(cfg.max_scale) / float(coarse_h)
     return float(diff_model.to_2d.max_scale) / float(diff_model.to_2d.height)
 
 
