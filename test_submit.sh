@@ -27,10 +27,11 @@ WALL_OVERRIDE=""
 PARALLEL_OPTUNA=""
 if [[ "$(hostname)" == *"narval"* ]]; then
     ACCOUNT="def-boyuwang"
+    GPU_TYPE="a100"
 else
     ACCOUNT="aip-boyuwang"
+    GPU_TYPE="l40s"
 fi
-GPU_TYPE="l40s"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --configs) CONFIGS="$2"; shift 2 ;;
