@@ -103,6 +103,22 @@ def _model_kwargs_from_tuned(params: Optional[Dict[str, Any]]) -> Dict[str, Any]
     return {key: params[key] for key in TUNED_MODEL_KEYS if key in params}
 
 
+def _state_anchor_kwargs(state: PipelineState) -> Dict[str, Any]:
+    if not state.deterministic_anchor_loss:
+        return {"use_deterministic_anchor_loss": False}
+    return {
+        "use_deterministic_anchor_loss": True,
+        "deterministic_anchor_lambda": float(state.deterministic_anchor_lambda),
+        "deterministic_anchor_alpha": float(state.deterministic_anchor_alpha),
+    }
+
+
+def _with_state_anchor_params(params: Dict[str, Any], state: PipelineState) -> Dict[str, Any]:
+    out = dict(params)
+    out.update(_state_anchor_kwargs(state))
+    return out
+
+
 def _load_reused_stage_params(
     state: PipelineState,
     *,
@@ -332,6 +348,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
         ds_lb, ds_hz = dataset_window_lengths(state.dataset)
         model_kwargs = anchor_kwargs_from_params(params)
+        model_kwargs.update(_state_anchor_kwargs(state))
         model_kwargs.update(_model_kwargs_from_tuned(params))
         return create_diffusion_model(
             n_variates=n_iv,
@@ -371,6 +388,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             wrap_itrans_guidance,
         )
 
+        params = _with_state_anchor_params(params, state)
         n_iv = len(variate_indices)
         batch_size = int(params["batch_size"])
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -656,6 +674,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             search_space = str(reuse_meta.get("search_space") or self.get("search_space") or "lr_only").lower()
             tuned_bs = int(best_params.get("batch_size", max_batch))
             best_params["batch_size"] = min(tuned_bs, max_batch)
+            best_params = _with_state_anchor_params(best_params, state)
             if retrain_reused:
                 final_val, final_epoch = self._train_once(
                     state=state,
@@ -774,6 +793,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 "max_scale",
                 float(state.max_scale_by_dataset.get(state.dataset, state.max_scale)),
             )
+            best_params = _with_state_anchor_params(best_params, state)
             hp_best_val_loss = float(study.best_value)
             best_trial_num = int(best_trial.number)
             final_epoch = int(best_trial.user_attrs.get("best_epoch", 0))

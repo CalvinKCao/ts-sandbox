@@ -5,6 +5,10 @@ training:
   finetune_hp_lr_min: 0.000003
   finetune_hp_lr_max: 0.0002
 
+visualization:
+  dual_scale_sampler: dpmpp
+  dual_scale_inference_steps: 20
+
 experiment:
   name: binary-anchor-stationary-flat-subsets-grad-accum-150-fourier-freq
   experiment_name: binary_anchor_stationary_flat_subsets_grad_accum_150_fourier_freq
