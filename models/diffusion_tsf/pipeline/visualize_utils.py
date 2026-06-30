@@ -214,6 +214,37 @@ def _staged_fine_value_range(diff_model) -> float:
     return float(diff_model.to_2d.max_scale) / float(diff_model.to_2d.height)
 
 
+def _window_stats_for_past(diff_model, past: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Per-window center/std for dataset-global-z past (V, T)."""
+    _, _, (center, wstd) = diff_model._normalize_sequence(past.unsqueeze(0), None)
+    return center.squeeze(0), wstd.squeeze(0)
+
+
+def _staged_window_norm_to_raw(
+    x: torch.Tensor,
+    *,
+    win_center: torch.Tensor,
+    win_std: torch.Tensor,
+    global_mean: torch.Tensor,
+    global_std: torch.Tensor,
+) -> torch.Tensor:
+    """Staged 1D decode lives in window-norm space; map to dataset raw scale."""
+    from models.diffusion_tsf.visualize_comparison import denorm as denorm_cmp
+
+    global_z = x * win_std + win_center
+    return denorm_cmp(global_z, global_mean, global_std)
+
+
+def _staged_fine_residual_to_raw(
+    fine: torch.Tensor,
+    *,
+    win_std: torch.Tensor,
+    global_std: torch.Tensor,
+) -> torch.Tensor:
+    """Fine residual is additive in window-norm space (no center shift)."""
+    return fine * win_std * global_std
+
+
 def _plot_dual_scale_sample(
     *,
     res: Dict[str, torch.Tensor],
@@ -251,16 +282,22 @@ def _plot_dual_scale_sample(
 
     W_past = past_coarse.shape[-1]
     W_fut = future_coarse.shape[-1]
-    t_axis_2d = np.arange(-W_past, W_fut)
-    raw_lookback = past.shape[-1]
-    raw_horizon = future.shape[-1]
-    t_axis_raw = np.arange(-raw_lookback, raw_horizon)
-    gt_full_norm = torch.cat([past, future[:, -W_fut:]], dim=-1)
+    t_axis = np.arange(-W_past, W_fut)
+    gt_past = past[:, -W_past:]
+    gt_future = future[:, -W_fut:]
+    gt_aligned = torch.cat([gt_past, gt_future], dim=-1)
 
-    gt_full_dn = denorm_cmp(gt_full_norm, mean, std)
-    coarse_dn = denorm_cmp(coarse_1d[0], mean, std)
-    fine_dn = fine_1d[0] * std.view(-1, 1)
-    combined_dn = denorm_cmp(combined_1d[0], mean, std)
+    win_center, win_std = _window_stats_for_past(diff_model, past)
+    gt_full_dn = denorm_cmp(gt_aligned, mean, std)
+    coarse_dn = _staged_window_norm_to_raw(
+        coarse_1d[0], win_center=win_center, win_std=win_std,
+        global_mean=mean, global_std=std,
+    )
+    fine_dn = _staged_fine_residual_to_raw(fine_1d[0], win_std=win_std, global_std=std)
+    combined_dn = _staged_window_norm_to_raw(
+        combined_1d[0], win_center=win_center, win_std=win_std,
+        global_mean=mean, global_std=std,
+    )
 
     n_vars = past.shape[0]
     n_vars_to_plot = min(variables_to_plot, n_vars)
@@ -275,12 +312,12 @@ def _plot_dual_scale_sample(
 
     for col in range(n_vars_to_plot):
         ax1 = axes[0, col]
-        ax1.plot(t_axis_raw, gt_full_dn[col].numpy(), color="#2196F3", linewidth=1.6, label="GT (raw t)")
+        ax1.plot(t_axis, gt_full_dn[col].numpy(), color="#2196F3", linewidth=1.6, label="GT (dataset scale)")
         ax1.plot(
-            t_axis_2d, coarse_dn[col].numpy(), color="#FF9800", linewidth=1.2,
+            t_axis, coarse_dn[col].numpy(), color="#FF9800", linewidth=1.2,
             drawstyle="steps-mid", alpha=0.85, label="Coarse (2D cols)",
         )
-        ax1.plot(t_axis_2d, combined_dn[col].numpy(), color="#E91E63", linewidth=1.2, label="Combined (2D cols)")
+        ax1.plot(t_axis, combined_dn[col].numpy(), color="#E91E63", linewidth=1.2, label="Combined (2D cols)")
         ax1.axvline(x=0, color="black", linestyle=":", alpha=0.3)
         ax1.grid(True, alpha=0.12)
         ax1.set_title(f"Var {col} 1D", fontsize=9)
@@ -289,7 +326,7 @@ def _plot_dual_scale_sample(
             ax1.set_ylabel("denorm value")
 
         ax2 = axes[1, col]
-        ax2.plot(t_axis_2d, fine_dn[col].numpy(), color="#4CAF50", linewidth=1.2)
+        ax2.plot(t_axis, fine_dn[col].numpy(), color="#4CAF50", linewidth=1.2)
         ax2.axhline(y=0, color="grey", linestyle="--", alpha=0.4)
         ax2.axvline(x=0, color="black", linestyle=":", alpha=0.3)
         ax2.grid(True, alpha=0.12)
@@ -320,8 +357,8 @@ def _plot_dual_scale_sample(
 
     scale_note = _format_scale_banner(
         raw_range=_tensor_value_range(gt_full_dn),
-        norm_range=_tensor_value_range(gt_full_norm),
-        space_label="1D rows: dataset-denorm",
+        norm_range=_tensor_value_range(gt_aligned),
+        space_label="1D rows: dataset-denorm (model via window-norm inverse)",
         extra="2D maps: occupancy in [0,1] after max_scale binning",
     )
     fig.suptitle(

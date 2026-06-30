@@ -29,20 +29,29 @@ REMOTE_USER="ccao87"
 LOCAL_RESULTS_PATH="./results"
 LOCAL_REPORTS_PATH="./reports"
 
-REMOTE_REPO_ROOTS=(
-    "/scratch/ccao87/ts-sandbox"
-    "/scratch/ccao87/ts-sandbox-dit-parallel"
-)
+if [[ -n "${REMOTE_REPO_ROOTS:-}" ]]; then
+    IFS=',' read -ra REMOTE_REPO_ROOTS <<< "${REMOTE_REPO_ROOTS}"
+else
+    REMOTE_REPO_ROOTS=(
+        "/scratch/ccao87/ts-sandbox"
+        "/scratch/ccao87/ts-sandbox-dit-parallel"
+    )
+fi
 
 REMOTE_PATHS=()
 for _root in "${REMOTE_REPO_ROOTS[@]}"; do
     REMOTE_PATHS+=("${_root}/results")
 done
 
+SSH_CONTROL_DIR="/tmp/pull-cm-${USER}"
+mkdir -p "$SSH_CONTROL_DIR"
 SSH_OPTS=(
     -o ConnectTimeout=12
     -o ConnectionAttempts=1
     -o StrictHostKeyChecking=accept-new
+    -o ControlMaster=auto
+    -o "ControlPath=${SSH_CONTROL_DIR}/%C"
+    -o ControlPersist=600
 )
 
 RSYNC_BASE=(
@@ -233,14 +242,13 @@ REMOTE_FIND
 
 pull_via_file_list() {
     local remote_root="$1"
-    local rel_subpath="${2:-}"
-    local tree_kind="${3:-results}"
-    local local_dest="${4:-$LOCAL_RESULTS_PATH}"
-    local label="$remote_root"
-    [ -n "$rel_subpath" ] && label="${remote_root}/${rel_subpath}"
+    local tree_kind="${2:-results}"
+    local local_dest="${3:-$LOCAL_RESULTS_PATH}"
+    shift 3
+    local -a rel_subpaths=("$@")
 
     local src
-    src="$(remote_src_dir "$remote_root" "$rel_subpath")"
+    src="$(remote_src_dir "$remote_root" "")"
 
     local -a rsync_opts
     build_rsync_opts rsync_opts
@@ -255,6 +263,12 @@ pull_via_file_list() {
     fi
     local prune_note=""
     [ "$PULL_MODE" = "light" ] && [ "$tree_kind" = "results" ] && prune_note=", skip synth pools + phase-1 ckpts"
+    local label="$remote_root"
+    if [ "${#rel_subpaths[@]}" -eq 1 ]; then
+        label="${remote_root}/${rel_subpaths[0]}"
+    elif [ "${#rel_subpaths[@]}" -gt 1 ]; then
+        label="${remote_root} (${#rel_subpaths[@]} subpaths)"
+    fi
     if [ "$USE_RECENT" -eq 1 ]; then
         echo "  -> ${label} (${scope}, mtime < ${RECENT_HOURS}h${prune_note})"
     else
@@ -263,7 +277,15 @@ pull_via_file_list() {
 
     local file_list
     file_list="$(mktemp)"
-    remote_list_files "$remote_root" "$rel_subpath" "$tree_kind" >"$file_list" || true
+    if [ "${#rel_subpaths[@]}" -eq 0 ]; then
+        remote_list_files "$remote_root" "" "$tree_kind" >"$file_list" || true
+    else
+        local rel
+        for rel in "${rel_subpaths[@]}"; do
+            remote_list_files "$remote_root" "$rel" "$tree_kind" >>"$file_list" || true
+        done
+        sort -u -o "$file_list" "$file_list"
+    fi
 
     local n
     n="$(wc -l <"$file_list" | tr -d ' ')"
@@ -272,7 +294,7 @@ pull_via_file_list() {
         echo "     0 files on remote (check SSH / path / --recent window)"
         return
     fi
-    echo "     ${n} files on remote"
+    echo "     ${n} files on remote (one rsync)"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         echo "     (dry-run) newest 10 paths:"
@@ -308,14 +330,19 @@ pull_full_tree() {
 
 pull_tree() {
     local remote_root="$1"
-    local rel_subpath="${2:-}"
-    local tree_kind="${3:-results}"
-    local local_dest="${4:-$LOCAL_RESULTS_PATH}"
+    local tree_kind="${2:-results}"
+    local local_dest="${3:-$LOCAL_RESULTS_PATH}"
+    shift 3
+    local -a rel_subpaths=("$@")
 
     if [ "$PULL_MODE" = "light" ] || [ "$USE_RECENT" -eq 1 ]; then
-        pull_via_file_list "$remote_root" "$rel_subpath" "$tree_kind" "$local_dest"
+        pull_via_file_list "$remote_root" "$tree_kind" "$local_dest" "${rel_subpaths[@]}"
+    elif [ "${#rel_subpaths[@]}" -eq 0 ]; then
+        pull_full_tree "$remote_root" "" "$local_dest"
+    elif [ "${#rel_subpaths[@]}" -eq 1 ]; then
+        pull_full_tree "$remote_root" "${rel_subpaths[0]}" "$local_dest"
     else
-        pull_full_tree "$remote_root" "$rel_subpath" "$local_dest"
+        pull_via_file_list "$remote_root" "$tree_kind" "$local_dest" "${rel_subpaths[@]}"
     fi
 }
 
@@ -353,24 +380,22 @@ echo "Pulling from ${REMOTE_HOST} (${PULL_MODE} mode, dest=${LOCAL_RESULTS_PATH}
 [ "$DRY_RUN" -eq 1 ] && echo "(dry-run: no files written)"
 [ "$USE_RECENT" -eq 1 ] && echo "Only files modified in the last ${RECENT_HOURS} hours"
 
+# One SSH session (ControlMaster) for find + rsync below.
+ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" true
+
 if [ "$PULL_RESULTS" -eq 1 ]; then
     for RP in "${REMOTE_PATHS[@]}"; do
         echo "Remote: ${RP}"
-        if [ "${#SUBPATHS[@]}" -eq 0 ]; then
-            pull_tree "$RP" "" "results" "$LOCAL_RESULTS_PATH"
-        else
-            for rel in "${SUBPATHS[@]}"; do
-                pull_tree "$RP" "$rel" "results" "$LOCAL_RESULTS_PATH"
-            done
-        fi
+        pull_tree "$RP" "results" "$LOCAL_RESULTS_PATH" "${SUBPATHS[@]}"
     done
 fi
 
 if [ "$PULL_REPORTS" -eq 1 ]; then
     for RR in "${REMOTE_REPO_ROOTS[@]}"; do
         echo "Remote: ${RR}/reports"
-        pull_tree "${RR}/reports" "" "reports" "$LOCAL_REPORTS_PATH"
+        pull_tree "${RR}/reports" "reports" "$LOCAL_REPORTS_PATH"
     done
 fi
 
+ssh "${SSH_OPTS[@]}" -O exit "${REMOTE_USER}@${REMOTE_HOST}" 2>/dev/null || true
 echo "Done."
