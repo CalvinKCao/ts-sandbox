@@ -222,6 +222,14 @@ def _staged_generate_autoregressive(
     return torch.cat(pieces, dim=-1)
 
 
+def _staged_det_gen_kwargs(state: PipelineState, default_steps: int) -> Dict[str, Any]:
+    sampler = str(getattr(state, "eval_sampler", "anchor"))
+    if sampler in ("anchor", "deterministic_anchor"):
+        return {"sampler": sampler}
+    steps = 5 if state.smoke_test else int(default_steps)
+    return {"sampler": sampler, "num_inference_steps": steps}
+
+
 class StagedEvalPhase(PipelinePhase):
     name = "staged_eval"
 
@@ -312,6 +320,7 @@ class StagedEvalPhase(PipelinePhase):
         if prob_sampler in {"anchor", "deterministic_anchor"}:
             raise ValueError("staged probabilistic eval must use a regular sampler, not anchor.")
         prob_kwargs = {"sampler": prob_sampler, "num_inference_steps": prob_steps}
+        det_kwargs = _staged_det_gen_kwargs(state, prob_steps)
         y_true_all = []
         det_all = []
         coarse_all = []
@@ -348,14 +357,14 @@ class StagedEvalPhase(PipelinePhase):
                         fine_model=fine_model,
                         finer_model=finer_model,
                         past=past,
-                        gen_kwargs={"sampler": "anchor"},
+                        gen_kwargs=det_kwargs,
                     )
                     det_all.append(det_t.detach().cpu().numpy())
-                    coarse_det = coarse_model.generate(past, sampler="anchor")
+                    coarse_det = coarse_model.generate(past, **det_kwargs)
                     fine_det = fine_model.generate(
                         past,
-                        sampler="anchor",
                         future_coarse_2d=coarse_det["future_2d_coarse"],
+                        **det_kwargs,
                     )
                     coarse_np, fine_np, _ = decode_staged_anchor_components(
                         fine_model, coarse_det, fine_det,
@@ -363,18 +372,18 @@ class StagedEvalPhase(PipelinePhase):
                     coarse_all.append(coarse_np)
                     fine_all.append(fine_np)
                 else:
-                    coarse_det = coarse_model.generate(past, sampler="anchor")
+                    coarse_det = coarse_model.generate(past, **det_kwargs)
                     fine_det = fine_model.generate(
                         past,
-                        sampler="anchor",
                         future_coarse_2d=coarse_det["future_2d_coarse"],
+                        **det_kwargs,
                     )
                     if finer_model is not None:
                         finer_det = finer_model.generate(
                             past,
-                            sampler="anchor",
                             future_coarse_2d=coarse_det["future_2d_coarse"],
                             future_fine_2d=fine_det["future_2d_fine"],
+                            **det_kwargs,
                         )
                         det_t = finer_det["prediction_global_norm"]
                         det_all.append(det_t.detach().cpu().numpy())
@@ -385,7 +394,7 @@ class StagedEvalPhase(PipelinePhase):
                         coarse_np, fine_np, final_np = decode_staged_anchor_components(
                             fine_model, coarse_det, fine_det,
                         )
-                        det_all.append(final_np)
+                        det_all.append(fine_det["prediction_global_norm"].detach().cpu().numpy())
                     coarse_all.append(coarse_np)
                     fine_all.append(fine_np)
 

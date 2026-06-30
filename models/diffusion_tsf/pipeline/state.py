@@ -59,6 +59,7 @@ class PipelineState:
     fourier_high_freq_percent: float = 0.85
     fourier_high_freq_cutoff_bin: int = 0
     fourier_fine_max_scale: float = 0.0
+    fourier_fine_scale_quantile: float = 0.95
     fourier_flatline_atol: float = 1e-8
     fourier_high_freq_cutoff_bins_per_variate: Optional[List[int]] = None
     fourier_fine_max_scale_per_variate: Optional[List[float]] = None
@@ -236,6 +237,7 @@ class PipelineState:
         for key in (
             "fourier_high_freq_percent",
             "fourier_fine_max_scale",
+            "fourier_fine_scale_quantile",
             "fourier_flatline_atol",
         ):
             if key in init_kwargs:

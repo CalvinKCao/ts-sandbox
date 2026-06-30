@@ -14,9 +14,12 @@ experiment:
   fourier_high_freq_percent: 0.85
   fourier_high_freq_cutoff_bin: 0
   fourier_fine_max_scale: 0.0
+  fourier_fine_scale_quantile: 0.95
   fourier_flatline_atol: 1.0e-8
   fourier_fft_edge_mode: mirror_pad
   fourier_mirror_pad_frac: 0.25
+  fourier_calibration_max_windows: 512
+  eval_sampler: dpmpp
   window_norm_center: mean
 
 phases:

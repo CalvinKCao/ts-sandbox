@@ -553,7 +553,10 @@ class DiffusionTSF(nn.Module):
                 raise ValueError(f"expected {n_vars} fourier fine scales, got {len(vals)}")
             return vals
         fine_scale = float(getattr(self.config, "fourier_fine_max_scale", 0.0) or 0.0)
-        v = fine_scale if fine_scale > 0.0 else self._fourier_coarse_bin_value_range()
+        if fine_scale > 0.0:
+            v = fine_scale
+        else:
+            v = self._fourier_coarse_bin_value_range()
         return [v] * n_vars
 
     def _fourier_fine_value_range(self) -> float:
@@ -561,7 +564,9 @@ class DiffusionTSF(nn.Module):
         if per_var:
             return float(max(per_var))
         fine_scale = float(getattr(self.config, "fourier_fine_max_scale", 0.0) or 0.0)
-        return fine_scale if fine_scale > 0.0 else self._fourier_coarse_bin_value_range()
+        if fine_scale > 0.0:
+            return fine_scale
+        return self._fourier_coarse_bin_value_range()
 
     def _fourier_flatline_atol(self) -> float:
         return float(getattr(self.config, "fourier_flatline_atol", 1e-8))
