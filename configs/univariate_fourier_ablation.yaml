@@ -1,0 +1,65 @@
+# Univariate ablation: Fourier staged vs MMPD on a single variate (column 0).
+# Cross-variate attention is off so failures isolate the core model / freq split.
+#
+# Datasets: ETTh1, ETTm1, ETTh2, exchange_rate (first variate only).
+
+extends: binary_anchor_stationary_flat_subsets_grad_accum_150_fourier_freq.yaml
+
+experiment:
+  name: univariate-fourier-ablation
+  experiment_name: univariate_fourier_ablation
+  disable_cross_attention: true
+  data_subset:
+    enabled: true
+    reduce_if_larger_than_target: false
+    max_variates: 1
+    max_variates_by_dataset:
+      ETTh1: 1
+      ETTh2: 1
+      ETTm1: 1
+      ETTm2: 1
+      exchange_rate: 1
+    variate_strategy: first
+    subset_id_template: "{dataset}_uni1v"
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale
+    n_samples: 5000
+    epochs: 15
+    patience: 4
+
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+    cold_start: true
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 1
+    max_epochs: 15
+    patience: 6
+    search_space: lr_only
+
+  - phase: diffusion_fine_finetune_hp
+    n_trials: 1
+    max_epochs: 15
+    patience: 6
+    search_space: lr_only
+
+  - phase: diffusion_finer_finetune_hp
+    n_trials: 1
+    max_epochs: 15
+    patience: 6
+    search_space: lr_only
+
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 4
+    n_samples: 64
+    probabilistic_n_samples: 20
+    tune_sampler: false
+    probabilistic_sampler: dpmpp
+    probabilistic_num_inference_steps: 20
+    batch_size: 16
+    gmm_components: 10
+    topk_max: 3
