@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import time
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -27,6 +28,15 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _log_gpu_mem(tag: str) -> None:
+    if not torch.cuda.is_available():
+        return
+    alloc = torch.cuda.memory_allocated() / (1024 ** 2)
+    reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+    peak = torch.cuda.max_memory_allocated() / (1024 ** 2)
+    logger.info("  [%s] gpu_mem MiB: alloc=%.0f reserved=%.0f peak=%.0f", tag, alloc, reserved, peak)
 
 
 def resolve_diffusion_batch_and_accum(
@@ -393,6 +403,26 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         batch_size = int(params["batch_size"])
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+        n_train_batches = len(train_loader)
+        n_val_batches = len(val_loader)
+        trial_label = (
+            f"trial={trial.number}" if trial is not None else "trial=single"
+        )
+        logger.info(
+            "  [%s/%s] %s START epochs=%d patience=%d lr=%.2e bs=%d accum=%d "
+            "train_batches=%d val_batches=%d",
+            self.name,
+            self.stage,
+            trial_label,
+            max_epochs,
+            patience,
+            float(params["learning_rate"]),
+            batch_size,
+            int(params.get("gradient_accumulation_steps", 1)),
+            n_train_batches,
+            n_val_batches,
+        )
+        _log_gpu_mem(f"{self.stage}/{trial_label}/start")
 
         itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
         ds_lb, ds_hz = dataset_window_lengths(state.dataset)
@@ -446,13 +476,27 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             accum_steps = max(1, int(params.get("gradient_accumulation_steps", 1)))
             best_val = float("inf")
             best_epoch = 0
+            train_log_stride = max(1, n_train_batches // 4)
+            val_log_stride = max(1, n_val_batches // 2)
+            epoch_t0 = time.perf_counter()
 
             for epoch in range(max_epochs):
+                epoch_start = time.perf_counter()
+                logger.info(
+                    "  [%s/%s] %s epoch %d/%d train_start",
+                    self.name, self.stage, trial_label, epoch + 1, max_epochs,
+                )
                 model.train()
                 train_loss = 0.0
                 n_train = 0
                 optimizer.zero_grad(set_to_none=True)
                 for batch_idx, (past, future) in enumerate(train_loader):
+                    if batch_idx == 0 or (batch_idx + 1) % train_log_stride == 0 or batch_idx + 1 == n_train_batches:
+                        logger.info(
+                            "  [%s/%s] %s epoch %d/%d train_batch %d/%d",
+                            self.name, self.stage, trial_label,
+                            epoch + 1, max_epochs, batch_idx + 1, n_train_batches,
+                        )
                     past, future = past.to(device), future.to(device)
                     with amp_context():
                         loss = model.get_loss(past, future) / accum_steps
@@ -472,6 +516,14 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     if ema is not None:
                         ema.update(model)
 
+                train_loss_avg = train_loss / max(n_train, 1)
+                train_elapsed = time.perf_counter() - epoch_start
+                logger.info(
+                    "  [%s/%s] %s epoch %d/%d train_done loss=%.4f time=%.1fs",
+                    self.name, self.stage, trial_label,
+                    epoch + 1, max_epochs, train_loss_avg, train_elapsed,
+                )
+
                 if scheduler is not None:
                     scheduler.step()
 
@@ -479,16 +531,29 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 model.eval()
                 val_loss = 0.0
                 n_val = 0
+                val_start = time.perf_counter()
+                logger.info(
+                    "  [%s/%s] %s epoch %d/%d val_start",
+                    self.name, self.stage, trial_label, epoch + 1, max_epochs,
+                )
                 with torch.no_grad():
-                    for past, future in val_loader:
+                    for val_idx, (past, future) in enumerate(val_loader):
+                        if val_idx == 0 or (val_idx + 1) % val_log_stride == 0 or val_idx + 1 == n_val_batches:
+                            logger.info(
+                                "  [%s/%s] %s epoch %d/%d val_batch %d/%d",
+                                self.name, self.stage, trial_label,
+                                epoch + 1, max_epochs, val_idx + 1, n_val_batches,
+                            )
                         past, future = past.to(device), future.to(device)
                         with amp_context():
                             loss = model.get_loss(past, future)
                         val_loss += float(loss.item())
                         n_val += 1
                 val_loss /= max(n_val, 1)
-
-                if val_loss < best_val:
+                val_elapsed = time.perf_counter() - val_start
+                lr_now = float(optimizer.param_groups[0]["lr"])
+                saved = val_loss < best_val
+                if saved:
                     best_val = val_loss
                     best_epoch = epoch + 1
                     config = {
@@ -501,7 +566,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             unwrap_model(model),
                             optimizer,
                             epoch,
-                            train_loss / max(n_train, 1),
+                            train_loss_avg,
                             val_loss,
                             config,
                             ckpt_path,
@@ -509,13 +574,37 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 if backup is not None:
                     ema.restore(model, backup)
 
+                logger.info(
+                    "  [%s/%s] %s epoch %d/%d done train=%.4f val=%.4f best=%.4f "
+                    "best_ep=%d lr=%.2e saved=%s train_t=%.1fs val_t=%.1fs epoch_t=%.1fs",
+                    self.name, self.stage, trial_label,
+                    epoch + 1, max_epochs,
+                    train_loss_avg, val_loss, best_val, best_epoch, lr_now,
+                    saved, train_elapsed, val_elapsed, time.perf_counter() - epoch_start,
+                )
+                _log_gpu_mem(f"{self.stage}/{trial_label}/ep{epoch + 1}")
+
                 if trial is not None:
                     trial.report(val_loss, epoch)
                     if trial.should_prune():
+                        logger.info(
+                            "  [%s/%s] %s epoch %d/%d PRUNED val=%.4f",
+                            self.name, self.stage, trial_label, epoch + 1, max_epochs, val_loss,
+                        )
                         raise TrialPruned()
                 if early_stop(val_loss):
+                    logger.info(
+                        "  [%s/%s] %s epoch %d/%d EARLY_STOP val=%.4f best=%.4f best_ep=%d",
+                        self.name, self.stage, trial_label,
+                        epoch + 1, max_epochs, val_loss, best_val, best_epoch,
+                    )
                     break
 
+            total_elapsed = time.perf_counter() - epoch_t0
+            logger.info(
+                "  [%s/%s] %s DONE best_val=%.4f best_epoch=%d total_time=%.1fs",
+                self.name, self.stage, trial_label, best_val, best_epoch, total_elapsed,
+            )
             return best_val, best_epoch
         finally:
             del model, itrans_model, itrans_guidance
@@ -738,9 +827,18 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             trial, state, max_batch, state.smoke_test, search_space=search_space,
                         )
                     trial.set_user_attr("full_params", dict(params))
+                    logger.info(
+                        "  [%s] Optuna trial %d/%d suggested lr=%.2e bs=%d",
+                        phase.name,
+                        trial.number + 1,
+                        n_trials,
+                        float(params["learning_rate"]),
+                        int(params["batch_size"]),
+                    )
                     trial_ckpt = os.path.join(
                         subset_dir, f"_diff_ft_trial_{trial.number}_best.pt",
                     )
+                    trial_t0 = time.perf_counter()
                     try:
                         best_val, best_ep = phase._train_once(
                             state=state,
@@ -762,11 +860,30 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             phase.name, trial.number, params.get("batch_size"),
                         )
                         raise TrialPruned() from None
+                    except TrialPruned:
+                        logger.info(
+                            "  [%s] Optuna trial %d pruned after %.1fs",
+                            phase.name, trial.number, time.perf_counter() - trial_t0,
+                        )
+                        raise
                     trial.set_user_attr("best_epoch", best_ep)
+                    logger.info(
+                        "  [%s] Optuna trial %d finished best_val=%.4f best_epoch=%d time=%.1fs",
+                        phase.name,
+                        trial.number,
+                        best_val,
+                        best_ep,
+                        time.perf_counter() - trial_t0,
+                    )
                     return best_val
 
                 return objective
 
+            logger.info(
+                "  [%s] Optuna study start: n_trials=%d max_epochs=%d patience=%d",
+                self.name, n_trials, max_epochs, patience,
+            )
+            study_t0 = time.perf_counter()
             study = run_optuna_study(
                 study_name=f"{state.experiment_name}-{self.stage}-hp",
                 checkpoint_dir=subset_dir,
@@ -797,6 +914,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             hp_best_val_loss = float(study.best_value)
             best_trial_num = int(best_trial.number)
             final_epoch = int(best_trial.user_attrs.get("best_epoch", 0))
+            logger.info(
+                "  [%s] Optuna study done in %.1fs: best_trial=%d best_val=%.4f best_epoch=%d lr=%.2e",
+                self.name,
+                time.perf_counter() - study_t0,
+                best_trial_num,
+                hp_best_val_loss,
+                final_epoch,
+                float(best_params.get("learning_rate", 0.0)),
+            )
 
             import shutil
             src = os.path.join(subset_dir, f"_diff_ft_trial_{best_trial_num}_best.pt")
