@@ -67,6 +67,9 @@ class ITransFinetuneHPPhase(PipelinePhase):
         return True
 
     def should_skip(self, state: PipelineState) -> bool:
+        if state.guidance_type == "patch_decoder":
+            logger.info("  [%s] skipping: guidance_type=patch_decoder", self.name)
+            return True
         if self._try_reuse_itrans_finetune_ckpt(state, fail_if_missing=False):
             subset_id = state.subset_id or state.dataset
             ckpt = os.path.join(state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")

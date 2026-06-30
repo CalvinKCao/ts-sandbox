@@ -1161,6 +1161,17 @@ def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Di
 # Diffusion Model Creation (with guidance support)
 # ============================================================================
 
+def _resolve_guidance_type(guidance_model, override: Optional[str] = None) -> str:
+    """Match DiffusionTSF routing to the attached guidance, not YAML alone."""
+    if override is not None:
+        return str(override)
+    if isinstance(guidance_model, PatchDecoderGuidance):
+        return "patch_decoder"
+    if guidance_model is not None:
+        return "itransformer"
+    return GUIDANCE_TYPE
+
+
 def create_diffusion_model(
     *,
     guidance_model=None,
@@ -1268,7 +1279,9 @@ def create_diffusion_model(
         window_norm_std_floor=WINDOW_NORM_STD_FLOOR,
         zero_guidance_forecast=ZERO_GUIDANCE_FORECAST,
         itrans_d_model=ITRANS_D_MODEL,
-        guidance_type=GUIDANCE_TYPE,
+        guidance_type=_resolve_guidance_type(
+            guidance_model, o("guidance_type", None),
+        ),
         mmpd_patch_size=MMPD_PATCH_SIZE,
     )
     return DiffusionTSF(config, guidance_model=guidance_model)

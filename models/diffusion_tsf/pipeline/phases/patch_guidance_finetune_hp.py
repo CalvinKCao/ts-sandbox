@@ -59,6 +59,9 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
         return True
 
     def should_skip(self, state: PipelineState) -> bool:
+        if state.guidance_type != "patch_decoder":
+            logger.info("  [%s] skipping: guidance_type=%s", self.name, state.guidance_type)
+            return True
         if self._try_reuse_patch_guidance_ckpt(state, fail_if_missing=False):
             ckpt = state.default_guidance_finetune_ckpt_path()
             logger.info("  [%s] cached: %s", self.name, ckpt)

@@ -314,6 +314,37 @@ def _merge_phase_lists(base: list, override: list) -> list:
     return [merged[name] for name in order]
 
 
+def normalize_guidance_phases(phases: list, guidance_type: str) -> list:
+    """For patch_decoder configs merged from itrans YAMLs, drop itrans finetune and reorder."""
+    if guidance_type != "patch_decoder":
+        return phases
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for entry in phases:
+        name = str(entry["phase"])
+        if name == "itrans_finetune_hp":
+            continue
+        by_name[name] = dict(entry)
+    preferred = (
+        "itrans_hp_pretrain",
+        "diffusion_hp_pretrain",
+        "staged_diffusion_pretrain",
+        "patch_guidance_finetune_hp",
+        "diffusion_finetune_hp",
+        "diffusion_coarse_finetune_hp",
+        "diffusion_fine_finetune_hp",
+        "diffusion_finer_finetune_hp",
+        "staged_eval",
+        "eval",
+    )
+    ordered = [by_name[n] for n in preferred if n in by_name]
+    seen = {str(p["phase"]) for p in ordered}
+    for entry in phases:
+        name = str(entry["phase"])
+        if name not in seen and name != "itrans_finetune_hp":
+            ordered.append(dict(entry))
+    return ordered
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     out = dict(base)
     for k, v in override.items():
@@ -424,6 +455,8 @@ def load_experiment_config(
             cfg["_cli_state_overrides"] = state_overrides
 
     validate_config(cfg)
+    guidance_type = str(cfg.get("experiment", {}).get("guidance_type", "itransformer"))
+    cfg["phases"] = normalize_guidance_phases(cfg["phases"], guidance_type)
     return cfg
 
 
