@@ -191,6 +191,7 @@ class _DiTCrossAttnBlock(nn.Module):
         ctx: Optional[torch.Tensor],
         scale_indices: Optional[torch.Tensor] = None,
         variate_indices: Optional[torch.Tensor] = None,
+        token_variate_ids: Optional[torch.Tensor] = None,
         return_attn_weights: bool = False,
     ):
         mods = self.adaLN(c).chunk(12 if self.enable_cross_scale_attention else 9, dim=-1)
@@ -210,17 +211,32 @@ class _DiTCrossAttnBlock(nn.Module):
                         f"variate_indices batch {variate_indices.shape[0]} != x batch {x.shape[0]}"
                     )
                 target_ids = variate_indices.long()
-                if target_ids.min() < 0 or target_ids.max() >= ctx.shape[1]:
-                    raise ValueError(
-                        f"variate_indices must be in [0, {ctx.shape[1] - 1}] for ctx tokens."
+                if token_variate_ids is not None:
+                    if token_variate_ids.shape[0] != ctx.shape[1]:
+                        raise ValueError(
+                            f"token_variate_ids length {token_variate_ids.shape[0]} "
+                            f"!= ctx tokens {ctx.shape[1]}"
+                        )
+                    attn_bias = torch.zeros(
+                        x.shape[0],
+                        ctx.shape[1],
+                        device=x.device,
+                        dtype=x.dtype,
                     )
-                attn_bias = torch.zeros(
-                    x.shape[0],
-                    ctx.shape[1],
-                    device=x.device,
-                    dtype=x.dtype,
-                )
-                attn_bias.scatter_(1, target_ids.unsqueeze(1), self.target_context_bias)
+                    own_mask = token_variate_ids[None, :] == target_ids[:, None]
+                    attn_bias = attn_bias.masked_fill(own_mask, self.target_context_bias)
+                else:
+                    if target_ids.min() < 0 or target_ids.max() >= ctx.shape[1]:
+                        raise ValueError(
+                            f"variate_indices must be in [0, {ctx.shape[1] - 1}] for ctx tokens."
+                        )
+                    attn_bias = torch.zeros(
+                        x.shape[0],
+                        ctx.shape[1],
+                        device=x.device,
+                        dtype=x.dtype,
+                    )
+                    attn_bias.scatter_(1, target_ids.unsqueeze(1), self.target_context_bias)
             cross_in = _modulate(self.norm_x(x), sx, scx)
             if return_attn_weights:
                 cross_out, cross_attn_weights = self.cross_attn(
@@ -382,6 +398,7 @@ class FactorizedDiT(nn.Module):
         encoder_hidden_states: Optional[torch.Tensor] = None,
         scale_indices: Optional[torch.Tensor] = None,
         variate_indices: Optional[torch.Tensor] = None,
+        token_variate_ids: Optional[torch.Tensor] = None,
         return_cross_attn_weights: bool = False,
     ):
         BV, _, H, W = x.shape
@@ -444,11 +461,15 @@ class FactorizedDiT(nn.Module):
                 elif return_cross_attn_weights:
                     tokens, attn_w = block(
                         tokens, t_emb, ctx_proj, scale_indices, variate_indices,
+                        token_variate_ids=token_variate_ids,
                         return_attn_weights=True,
                     )
                     self._diag_cross_attn_weights = attn_w
                 else:
-                    tokens = block(tokens, t_emb, ctx_proj, scale_indices, variate_indices)
+                    tokens = block(
+                        tokens, t_emb, ctx_proj, scale_indices, variate_indices,
+                        token_variate_ids=token_variate_ids,
+                    )
             else:
                 if self.gradient_checkpointing and self.training:
                     tokens = checkpoint(block, tokens, t_emb, use_reentrant=False)

@@ -3,6 +3,7 @@
 from models.diffusion_tsf.pipeline.phases.itrans_hp_pretrain import ITransHPPretrainPhase
 from models.diffusion_tsf.pipeline.phases.diffusion_hp_pretrain import DiffusionHPPretrainPhase
 from models.diffusion_tsf.pipeline.phases.itrans_finetune_hp import ITransFinetuneHPPhase
+from models.diffusion_tsf.pipeline.phases.patch_guidance_finetune_hp import PatchGuidanceFinetuneHPPhase
 from models.diffusion_tsf.pipeline.phases.diffusion_finetune_hp import DiffusionFinetuneHPPhase
 from models.diffusion_tsf.pipeline.phases.eval import EvalPhase
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import StagedDiffusionPretrainPhase
@@ -17,6 +18,7 @@ PHASE_REGISTRY = {
     "itrans_hp_pretrain": ITransHPPretrainPhase,
     "diffusion_hp_pretrain": DiffusionHPPretrainPhase,
     "itrans_finetune_hp": ITransFinetuneHPPhase,
+    "patch_guidance_finetune_hp": PatchGuidanceFinetuneHPPhase,
     "diffusion_finetune_hp": DiffusionFinetuneHPPhase,
     "staged_diffusion_pretrain": StagedDiffusionPretrainPhase,
     "diffusion_coarse_finetune_hp": CoarseDiffusionFinetuneHPPhase,
@@ -31,6 +33,7 @@ __all__ = [
     "ITransHPPretrainPhase",
     "DiffusionHPPretrainPhase",
     "ITransFinetuneHPPhase",
+    "PatchGuidanceFinetuneHPPhase",
     "DiffusionFinetuneHPPhase",
     "StagedDiffusionPretrainPhase",
     "CoarseDiffusionFinetuneHPPhase",

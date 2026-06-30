@@ -173,12 +173,16 @@ class DiffusionTSF(nn.Module):
             cross_variate_context_bias=config.cross_variate_context_bias,
         )
 
-        self.context_encoder = iTransformerTokenAdapter(
-            d_model=config.itrans_d_model,
-            context_dim=config.context_embedding_dim,
-            max_variates=max(config.num_variables, 512),
-            dropout=0.1,
-        )
+        self._ctx_token_variate_ids: Optional[torch.Tensor] = None
+        if config.guidance_type == "patch_decoder":
+            self.context_encoder = None
+        else:
+            self.context_encoder = iTransformerTokenAdapter(
+                d_model=config.itrans_d_model,
+                context_dim=config.context_embedding_dim,
+                max_variates=max(config.num_variables, 512),
+                dropout=0.1,
+            )
 
         self.binary_scheduler = None
         self.ordinal_scheduler = None
@@ -353,18 +357,39 @@ class DiffusionTSF(nn.Module):
             )
         return out
 
-    def _get_cross_variate_context(self, past_raw: torch.Tensor) -> Optional[torch.Tensor]:
-        """produce (B, V, ctx_dim) encoder_hidden_states for the bottleneck.
+    def _flatten_ctx_for_factorized_dit(
+        self,
+        ctx: Optional[torch.Tensor],
+        B: int,
+        V: int,
+    ) -> Optional[torch.Tensor]:
+        if ctx is None:
+            return None
+        return ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(B * V, ctx.shape[1], -1)
 
-        feeds raw past through the frozen iTransformer encoder and projects to context_dim.
-        """
-        if self.guidance_model is None or not hasattr(self.guidance_model, 'get_encoder_tokens'):
+    def _get_cross_variate_context(
+        self,
+        past_raw: torch.Tensor,
+        past_norm: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        """Produce (B, M, ctx_dim) context tokens for DiT bottleneck cross-attention."""
+        if self.guidance_model is None or not hasattr(self.guidance_model, "get_encoder_tokens"):
             raise RuntimeError(
-                "iTransformerTokenAdapter requires a guidance model with get_encoder_tokens(). "
-                "Ensure guidance model is iTransformerGuidance."
+                "Cross-attention requires a guidance model with get_encoder_tokens()."
             )
-        enc_tokens = self.guidance_model.get_encoder_tokens(past_raw)   # (B, V, d_model)
-        return self.context_encoder(enc_tokens)                          # (B, V, ctx_dim)
+        self._ctx_token_variate_ids = None
+        if getattr(self.config, "guidance_type", "itransformer") == "patch_decoder":
+            if past_norm is None:
+                past_norm, _, _ = self._normalize_sequence(past_raw, None)
+            enc_tokens = self.guidance_model.get_encoder_tokens(past_norm)
+            self._ctx_token_variate_ids = getattr(
+                self.guidance_model, "token_variate_ids", None
+            )
+            return enc_tokens
+        enc_tokens = self.guidance_model.get_encoder_tokens(past_raw)
+        if self.context_encoder is None:
+            raise RuntimeError("itransformer guidance requires context_encoder.")
+        return self.context_encoder(enc_tokens)
 
     def _window_norm_center(self, past: torch.Tensor) -> torch.Tensor:
         if self.config.window_norm_center == "last":
@@ -411,6 +436,7 @@ class DiffusionTSF(nn.Module):
         ctx_flat: Optional[torch.Tensor],
         scale_indices: Optional[torch.Tensor] = None,
         variate_indices: Optional[torch.Tensor] = None,
+        token_variate_ids: Optional[torch.Tensor] = None,
         return_cross_attn_weights: bool = False,
     ) -> torch.Tensor:
         """Run the denoiser with the same chunking rule used by training/eval."""
@@ -430,6 +456,7 @@ class DiffusionTSF(nn.Module):
                 c_var = variate_indices[i:end] if variate_indices is not None else None
                 kwargs = {
                     "encoder_hidden_states": c_ctx,
+                    "token_variate_ids": token_variate_ids,
                     "return_cross_attn_weights": return_cross_attn_weights and i == 0,
                 }
                 if c_scale is not None:
@@ -440,6 +467,7 @@ class DiffusionTSF(nn.Module):
             return torch.cat(outs, dim=0)
         kwargs = {
             "encoder_hidden_states": ctx_flat,
+            "token_variate_ids": token_variate_ids,
             "return_cross_attn_weights": return_cross_attn_weights,
         }
         if scale_indices is not None:
@@ -1147,7 +1175,9 @@ class DiffusionTSF(nn.Module):
     ) -> Optional[torch.Tensor]:
         if ctx is None:
             return None
-        return ctx.unsqueeze(1).unsqueeze(2).expand(-1, V, 2, -1, -1).reshape(B * V * 2, V, -1)
+        return ctx.unsqueeze(1).unsqueeze(2).expand(-1, V, 2, -1, -1).reshape(
+            B * V * 2, ctx.shape[1], -1
+        )
 
     def _past_cond_tail_len(self, past_len: int, target_width: int) -> int:
         cap = int(self.config.diffusion_lookback_cap or 0)
@@ -1289,8 +1319,8 @@ class DiffusionTSF(nn.Module):
         target_flat = target_2d.reshape(BV, 1, H, W_fut)
         xt_flat, zt_flat = self.binary_scheduler.add_noise(target_flat, t_flat)
 
-        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
-        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
+        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
 
         cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut)
         if stage in {"fine", "finer"}:
@@ -1340,7 +1370,7 @@ class DiffusionTSF(nn.Module):
             canvas = torch.cat([canvas, guidance_flat], dim=1)
 
         out_flat = self._predict_noise_chunked(
-            canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices,
+            canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
         )
         primary_logits = out_flat[:, 0:1, :, :]
         x0_logits = self._x0_logits_from_prediction(primary_logits, xt_flat)
@@ -1372,7 +1402,7 @@ class DiffusionTSF(nn.Module):
                 anchor_t_flat,
                 base_cond_for_unet,
                 ctx_anchor,
-                variate_indices=variate_indices,
+                variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             )
             anchor_primary = anchor_out_flat[:, 0:1]
             anchor_x0_logits = self._x0_logits_from_prediction(anchor_primary, neutral_future_flat)
@@ -1442,8 +1472,8 @@ class DiffusionTSF(nn.Module):
         if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
             variate_indices = self._flat_variate_indices(BV, V, device)
 
-        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past)
-        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
+        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
+        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
 
         target_flat = target_2d.reshape(BV, 1, H, W_fut)
         xt_flat, _ = self.binary_scheduler.add_noise(target_flat, t_flat)
@@ -1457,7 +1487,7 @@ class DiffusionTSF(nn.Module):
         base_cond = cond_for_unet
         self._predict_noise_chunked(
             canvas, t_flat, base_cond, ctx_flat,
-            variate_indices=variate_indices,
+            variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             return_cross_attn_weights=capture_cross_attn,
         )
         cross_attn_weights = getattr(self.noise_predictor, "_diag_cross_attn_weights", None)
@@ -1509,8 +1539,8 @@ class DiffusionTSF(nn.Module):
         target_bins_flat = target_bins.reshape(BV, W_fut)
         xt_flat, _xt_bins = self.ordinal_scheduler.add_noise(target_flat, t_flat)
 
-        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past)
-        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
+        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
+        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
 
         cond_for_unet, past_maps = self._staged_past_condition_skyline(past_norm, W_fut)
         if stage == "fine":
@@ -1551,7 +1581,7 @@ class DiffusionTSF(nn.Module):
             canvas = torch.cat([canvas, guidance_flat], dim=1)
 
         out_flat = self._predict_noise_chunked(
-            canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices,
+            canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
         )
         logits = out_flat[:, 0]
         regular_loss = self._ordinal_d3pm_loss(logits, target_bins_flat)
@@ -1586,7 +1616,7 @@ class DiffusionTSF(nn.Module):
                 anchor_t_flat,
                 base_cond_for_unet,
                 ctx_anchor,
-                variate_indices=variate_indices,
+                variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             )
             anchor_logits = anchor_out_flat[:, 0]
             anchor_loss = self._ordinal_d3pm_loss(anchor_logits, target_bins_flat)
@@ -1664,8 +1694,8 @@ class DiffusionTSF(nn.Module):
                 dim=1,
             )
 
-        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past)
-        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
+        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
+        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
         variate_indices = None
         if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
             variate_indices = self._flat_variate_indices(BV, V, device)
@@ -1686,7 +1716,7 @@ class DiffusionTSF(nn.Module):
         def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
             out = self._predict_noise_chunked(
                 _build_canvas(xt), t_batch, cond_for_unet, ctx_flat,
-                variate_indices=variate_indices,
+                variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             )
             return out[:, 0:1]
 
@@ -1871,8 +1901,8 @@ class DiffusionTSF(nn.Module):
                 dim=1,
             )
 
-        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
-        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
+        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
         variate_indices = None
         if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
             variate_indices = self._flat_variate_indices(BV, V, device)
@@ -1898,7 +1928,7 @@ class DiffusionTSF(nn.Module):
         def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
             out = self._predict_noise_chunked(
                 _build_canvas(xt), t_batch, cond_for_unet, ctx_flat,
-                variate_indices=variate_indices,
+                variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             )
             x0_logits = self._x0_logits_from_prediction(out[:, 0:1], xt)
             return x0_logits, out[:, 1:2]
@@ -2051,7 +2081,7 @@ class DiffusionTSF(nn.Module):
                 guidance_fine.reshape(BV, 1, H, W_fut),
             )
 
-        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
         ctx_flat = self._expand_ctx_to_dual_scale(ctx, B, V)
         ctx_anchor = ctx_flat
 
@@ -2099,7 +2129,7 @@ class DiffusionTSF(nn.Module):
             cond_for_unet,
             ctx_flat,
             scale_indices=scale_indices,
-            variate_indices=variate_indices,
+            variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
         )
         out = out_flat.reshape(BV, 2, 2, H, W_fut)
         coarse_out = out[:, 0]
@@ -2136,7 +2166,7 @@ class DiffusionTSF(nn.Module):
                 base_cond_for_unet,
                 ctx_anchor,
                 scale_indices=scale_indices,
-                variate_indices=variate_indices,
+                variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             )
             anchor_out = anchor_out_flat.reshape(BV, 2, 2, H, W_fut)
             anchor_loss = (
@@ -2227,7 +2257,7 @@ class DiffusionTSF(nn.Module):
                 guidance_fine.reshape(BV, 1, H, W_fut),
             )
 
-        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
         ctx_flat = self._expand_ctx_to_dual_scale(ctx, B, V)
 
         def _build_canvas(xt: torch.Tensor, guide: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -2241,7 +2271,7 @@ class DiffusionTSF(nn.Module):
             canvas = _build_canvas(xt, guide_flat)
             out = self._predict_noise_chunked(
                 canvas, t_batch, cond_for_unet, ctx_flat,
-                scale_indices=scale_indices, variate_indices=variate_indices,
+                scale_indices=scale_indices, variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             )
             return out[:, 0:1], out[:, 1:2]
 
@@ -2349,10 +2379,8 @@ class DiffusionTSF(nn.Module):
             guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
             guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
 
-        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
-        ctx_flat = None
-        if ctx is not None:
-            ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1)
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
+        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
         ctx_anchor = ctx_flat
 
         canvas = self._inject_coordinate_channel(xt_flat.float())
@@ -2392,7 +2420,7 @@ class DiffusionTSF(nn.Module):
             canvas = torch.cat([canvas, guidance_2d_flat], dim=1)
 
         out_flat = self._predict_noise_chunked(
-            canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices,
+            canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
         )
 
         x0_logits = out_flat[:, 0:1, :, :]
@@ -2420,7 +2448,7 @@ class DiffusionTSF(nn.Module):
                 anchor_t_flat,
                 base_cond_for_unet,
                 ctx_anchor,
-                variate_indices=variate_indices,
+                variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             )
             anchor_x0_logits = anchor_out_flat[:, 0:1, :, :]
             anchor_loss = self._binary_plain_bce_loss(anchor_x0_logits, future_flat)
@@ -2478,8 +2506,8 @@ class DiffusionTSF(nn.Module):
             guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
             guide_flat = guidance_2d.reshape(BV, 1, H, W_fut)
 
-        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past)
-        ctx_flat = ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(BV, V, -1) if ctx is not None else None
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
+        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
         variate_indices = None
         if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
             variate_indices = self._flat_variate_indices(BV, V, device)
@@ -2494,7 +2522,7 @@ class DiffusionTSF(nn.Module):
         def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
             canvas = _build_canvas(xt, guide_flat)
             out = self._predict_noise_chunked(
-                canvas, t_batch, cond_for_unet, ctx_flat, variate_indices=variate_indices,
+                canvas, t_batch, cond_for_unet, ctx_flat, variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             )
             return out[:, 0:1], out[:, 1:2]
 

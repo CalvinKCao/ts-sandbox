@@ -75,6 +75,8 @@ class PipelineState:
     dual_scale_fine_weight: float = 0.5
     dual_scale_independent_timesteps: bool = True
     use_guidance_channel: bool = True
+    guidance_type: str = "itransformer"
+    mmpd_patch_size: int = 12
     cfg_dropout: float = 0.1
     deterministic_anchor_loss: bool = False
     deterministic_anchor_lambda: float = 0.99
@@ -149,6 +151,7 @@ class PipelineState:
     diffusion_fine_pretrain_ckpt: Optional[str] = None
     diffusion_finer_pretrain_ckpt: Optional[str] = None
     itrans_finetune_ckpt: Optional[str] = None
+    patch_guidance_finetune_ckpt: Optional[str] = None
     diffusion_finetune_ckpt: Optional[str] = None
     diffusion_coarse_finetune_ckpt: Optional[str] = None
     diffusion_fine_finetune_ckpt: Optional[str] = None
@@ -187,6 +190,18 @@ class PipelineState:
     def ensure_dirs(self) -> None:
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         os.makedirs(self.results_dir, exist_ok=True)
+
+    @property
+    def guidance_finetune_ckpt(self) -> Optional[str]:
+        if self.guidance_type == "patch_decoder":
+            return self.patch_guidance_finetune_ckpt
+        return self.itrans_finetune_ckpt
+
+    def default_guidance_finetune_ckpt_path(self) -> str:
+        subset_id = self.subset_id or self.dataset
+        if self.guidance_type == "patch_decoder":
+            return os.path.join(self.checkpoint_dir, f"{subset_id}_patch_guidance.pt")
+        return os.path.join(self.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
 
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "PipelineState":

@@ -390,12 +390,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             EarlyStopping,
             amp_context,
             dataset_window_lengths,
-            itrans_model_lengths,
             load_diffusion_state_keep_attached_guidance,
-            load_itransformer_from_checkpoint,
+            load_wrapped_guidance,
             save_checkpoint,
             unwrap_model,
-            wrap_itrans_guidance,
         )
 
         params = _with_state_anchor_params(params, state)
@@ -424,14 +422,19 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         )
         _log_gpu_mem(f"{self.stage}/{trial_label}/start")
 
-        itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
         ds_lb, ds_hz = dataset_window_lengths(state.dataset)
-        itrans_seq, itrans_pred = itrans_model_lengths(ds_lb, ds_hz)
-        itrans_guidance = wrap_itrans_guidance(itrans_model, seq_len=itrans_seq, pred_len=itrans_pred)
+        guidance = load_wrapped_guidance(
+            itrans_checkpoint,
+            n_iv,
+            device,
+            guidance_type=state.guidance_type,
+            dataset_lookback=ds_lb,
+            dataset_horizon=ds_hz,
+        )
         model = self._build_model(
             state=state,
             n_iv=n_iv,
-            itrans_guidance=itrans_guidance,
+            itrans_guidance=guidance,
             device=device,
             params=params,
         )
@@ -607,7 +610,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             )
             return best_val, best_epoch
         finally:
-            del model, itrans_model, itrans_guidance
+            del model, guidance
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -618,11 +621,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             diffusion_probe_max_candidate,
             dataset_window_lengths,
             generate_dataset_job,
-            itrans_model_lengths,
             load_dataset,
-            load_itransformer_from_checkpoint,
+            load_wrapped_guidance,
             select_diffusion_batch_size,
-            wrap_itrans_guidance,
         )
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
@@ -636,9 +637,13 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
         test_stride = int(subset_meta.get("test_stride", 1))
 
-        ft_itrans_ckpt = state.itrans_finetune_ckpt
-        if not ft_itrans_ckpt or not os.path.exists(ft_itrans_ckpt):
-            raise RuntimeError(f"{self.name} requires finetuned iTransformer, got: {ft_itrans_ckpt}")
+        ft_guidance_ckpt = state.guidance_finetune_ckpt
+        if not ft_guidance_ckpt or not os.path.exists(ft_guidance_ckpt):
+            ft_guidance_ckpt = state.default_guidance_finetune_ckpt_path()
+        if not os.path.exists(ft_guidance_ckpt):
+            raise RuntimeError(
+                f"{self.name} requires finetuned guidance ({state.guidance_type}), got: {ft_guidance_ckpt}"
+            )
         if self.stage == "fine" and not state.diffusion_coarse_finetune_ckpt:
             raise RuntimeError("fine staged tuning requires completed coarse best model first")
         if self.stage == "finer":
@@ -675,9 +680,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             probe_model, _ = _load_staged_diffusion_from_ckpt(
                 ckpt_path=diff_ckpt,
                 stage=self.stage,
-                itrans_ckpt_path=ft_itrans_ckpt,
+                itrans_ckpt_path=ft_guidance_ckpt,
                 n_vars=n_iv,
                 device=device,
+                guidance_type=state.guidance_type,
             )
             run_phase_start_diagnostics(
                 state,
@@ -688,8 +694,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 dataset_prefixes=["dataset"],
                 ckpt_info=[
                     {
-                        "kind": "itrans",
-                        "path": ft_itrans_ckpt,
+                        "kind": state.guidance_type,
+                        "path": ft_guidance_ckpt,
                         "n_variates": n_iv,
                         "lookback": int(state.lookback_length),
                         "horizon": int(state.forecast_length),
@@ -708,19 +714,24 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             logger.warning("[%s] phase-start diagnostics failed: %s", self.name, e, exc_info=True)
 
         batch_probe_ds = train_ds
-        ft_itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, n_iv, device)
         ds_lb, ds_hz = dataset_window_lengths(state.dataset)
-        itrans_seq, itrans_pred = itrans_model_lengths(ds_lb, ds_hz)
-        ft_itrans_guidance = wrap_itrans_guidance(ft_itrans_model, seq_len=itrans_seq, pred_len=itrans_pred)
+        ft_guidance = load_wrapped_guidance(
+            ft_guidance_ckpt,
+            n_iv,
+            device,
+            guidance_type=state.guidance_type,
+            dataset_lookback=ds_lb,
+            dataset_horizon=ds_hz,
+        )
         max_batch = select_diffusion_batch_size(
             phase_name=f"{self.stage.title()} Diff FT ({subset_id})",
             dataset=batch_probe_ds,
             device=device,
-            itrans_guidance=ft_itrans_guidance,
+            itrans_guidance=ft_guidance,
             max_candidate=diffusion_probe_max_candidate(n_iv, state.smoke_test),
             smoke_test=state.smoke_test,
         )
-        del ft_itrans_model, ft_itrans_guidance
+        del ft_guidance
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -771,7 +782,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     val_ds=val_ds,
                     params=best_params,
                     pretrained_path=diff_ckpt,
-                    itrans_checkpoint=ft_itrans_ckpt,
+                    itrans_checkpoint=ft_guidance_ckpt,
                     device=device,
                     variate_indices=variate_indices,
                     ckpt_path=final_ckpt,
@@ -846,7 +857,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             val_ds=val_ds,
                             params=params,
                             pretrained_path=diff_ckpt,
-                            itrans_checkpoint=ft_itrans_ckpt,
+                            itrans_checkpoint=ft_guidance_ckpt,
                             device=dev,
                             variate_indices=variate_indices,
                             ckpt_path=trial_ckpt,
@@ -994,16 +1005,14 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         })
 
         coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_best_ckpt(state, "coarse")
-        itrans_ckpt = state.itrans_finetune_ckpt or os.path.join(
-            state.checkpoint_dir, f"{state.subset_id or state.dataset}_itransformer_finetuned.pt",
-        )
-        if self.stage == "fine" and coarse_ft and final_ckpt and itrans_ckpt and os.path.exists(itrans_ckpt):
+        guidance_ckpt = state.guidance_finetune_ckpt or state.default_guidance_finetune_ckpt_path()
+        if self.stage == "fine" and coarse_ft and final_ckpt and guidance_ckpt and os.path.exists(guidance_ckpt):
             try:
                 viz_paths = run_staged_finetune_visualizations(
                     state,
                     coarse_ckpt_path=coarse_ft,
                     fine_ckpt_path=final_ckpt if self.stage == "fine" else _stage_best_ckpt(state, "fine"),
-                    itrans_ckpt_path=itrans_ckpt,
+                    itrans_ckpt_path=guidance_ckpt,
                     tuned_params=best_params,
                     tag="staged_diffusion_finetuned",
                 )
@@ -1018,7 +1027,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 finetuned_model, _ = _load_staged_diffusion_from_ckpt(
                     ckpt_path=final_ckpt,
                     stage=self.stage,
-                    itrans_ckpt_path=ft_itrans_ckpt,
+                    itrans_ckpt_path=ft_guidance_ckpt,
                     n_vars=n_iv,
                     device=device,
                     tuned_params=best_params,
@@ -1027,7 +1036,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     state,
                     train_ds=train_ds,
                     model=finetuned_model,
-                    itrans_ckpt_path=ft_itrans_ckpt,
+                    itrans_ckpt_path=ft_guidance_ckpt,
                     stage=self.stage,
                     diffusion_ckpt_path=final_ckpt,
                     tag=f"diffusion_{self.stage}_finetune",

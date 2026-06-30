@@ -156,13 +156,13 @@ def _load_staged_diffusion_from_ckpt(
     n_vars: int,
     device: torch.device,
     tuned_params: Optional[Dict[str, Any]] = None,
+    guidance_type: Optional[str] = None,
 ):
     from models.diffusion_tsf.train_multivariate_pipeline import (
         create_diffusion_model,
-        load_itransformer_from_checkpoint,
+        load_wrapped_guidance,
         load_diffusion_state_keep_attached_guidance,
     )
-    from models.diffusion_tsf.guidance import iTransformerGuidance
     from models.diffusion_tsf.visualize_comparison import (
         apply_checkpoint_architecture,
         infer_anchor_kwargs,
@@ -170,7 +170,12 @@ def _load_staged_diffusion_from_ckpt(
         infer_model_type,
     )
 
-    itrans_guidance_model = load_itransformer_from_checkpoint(str(itrans_ckpt_path), n_vars, device)
+    guidance = load_wrapped_guidance(
+        str(itrans_ckpt_path),
+        n_vars,
+        device,
+        guidance_type=guidance_type,
+    )
     diff_ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     meta = diff_ckpt.get("config") or tuned_params or {}
     if isinstance(meta, dict) and "diffusion_params" in meta:
@@ -180,13 +185,12 @@ def _load_staged_diffusion_from_ckpt(
     apply_checkpoint_architecture(diff_ckpt, diff_type)
     anchor_kwargs = infer_anchor_kwargs(diff_ckpt, meta if isinstance(meta, dict) else {})
 
-    itrans_guidance = iTransformerGuidance(itrans_guidance_model)
     model = create_diffusion_model(
         n_variates=n_vars,
         diffusion_type=diff_type,
         model_type=backbone,
         diffusion_stage=stage,
-        guidance_model=itrans_guidance,
+        guidance_model=guidance,
         **anchor_kwargs,
     ).to(device)
     load_diffusion_state_keep_attached_guidance(model, diff_ckpt["model_state_dict"])

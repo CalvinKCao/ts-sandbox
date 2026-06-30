@@ -78,6 +78,8 @@ def patch_globals(
     mod.DUAL_SCALE_FINE_WEIGHT = state.dual_scale_fine_weight
     mod.DUAL_SCALE_INDEPENDENT_TIMESTEPS = state.dual_scale_independent_timesteps
     mod.USE_GUIDANCE_CHANNEL = state.use_guidance_channel
+    mod.GUIDANCE_TYPE = state.guidance_type
+    mod.MMPD_PATCH_SIZE = int(state.mmpd_patch_size)
     mod.CFG_DROPOUT = state.cfg_dropout
     mod.MODEL_TYPE = state.model_type
     mod.DIFFUSION_TYPE = state.diffusion_type

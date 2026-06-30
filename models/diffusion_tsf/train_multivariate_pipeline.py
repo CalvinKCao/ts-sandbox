@@ -36,7 +36,8 @@ if project_root not in sys.path:
 from models.diffusion_tsf.config import DiffusionTSFConfig
 from models.diffusion_tsf.diffusion_model import DiffusionTSF
 from models.diffusion_tsf.realts import get_synthetic_dataloader
-from models.diffusion_tsf.guidance import iTransformerGuidance
+from models.diffusion_tsf.guidance import iTransformerGuidance, PatchDecoderGuidance
+from models.diffusion_tsf.patch_guidance_stack import PatchGuidanceStack, PatchGuidanceStackConfig
 from models.diffusion_tsf.storage_paths import resolve_checkpoint_dir, resolve_results_dir
 from models.diffusion_tsf.dalia_data import (
     DALIA_CHANNEL_NAMES,
@@ -289,6 +290,9 @@ ITRANS_D_MODEL = 512
 ITRANS_D_FF = 512
 ITRANS_E_LAYERS = 4
 ITRANS_N_HEADS = 8
+GUIDANCE_TYPE = "itransformer"
+MMPD_PATCH_SIZE = 12
+PATCH_GUIDANCE_HP_FINETUNE_MAX_EPOCHS = 10
 BINARY_NOISE_SCHEDULE = "sqrt_linear"
 PREDICTION_TARGET = "x0"
 LOSS_WEIGHTING = "none"
@@ -525,6 +529,283 @@ def wrap_itrans_guidance(
         chunk = int(DIFFUSION_CHUNK_HORIZON or 0)
         pred_len = chunk if chunk > 0 else int(FORECAST_LENGTH)
     return iTransformerGuidance(model, seq_len=int(seq_len), pred_len=int(pred_len))
+
+
+def _patch_guidance_pred_len() -> int:
+    chunk = int(DIFFUSION_CHUNK_HORIZON or 0)
+    return chunk if chunk > 0 else int(FORECAST_LENGTH)
+
+
+def create_patch_guidance_stack(
+    num_vars: int,
+    *,
+    in_len: Optional[int] = None,
+    out_len: Optional[int] = None,
+    patch_size: Optional[int] = None,
+) -> PatchGuidanceStack:
+    cfg = PatchGuidanceStackConfig(
+        in_len=int(in_len or LOOKBACK_LENGTH),
+        out_len=int(out_len or _patch_guidance_pred_len()),
+        patch_size=int(patch_size or MMPD_PATCH_SIZE),
+        data_dim=int(num_vars),
+    )
+    return PatchGuidanceStack(cfg)
+
+
+def wrap_patch_guidance(stack: PatchGuidanceStack) -> PatchDecoderGuidance:
+    return PatchDecoderGuidance(stack, chunk_horizon=_patch_guidance_pred_len())
+
+
+def load_patch_guidance_from_checkpoint(
+    path: str,
+    num_vars: int,
+    device: torch.device,
+) -> PatchGuidanceStack:
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    cfg_dict = dict(ckpt.get("config") or {})
+    cfg_dict.setdefault("data_dim", num_vars)
+    cfg = PatchGuidanceStackConfig(**cfg_dict)
+    stack = PatchGuidanceStack(cfg).to(device)
+    stack.load_state_dict(ckpt["model_state_dict"], strict=True)
+    stack.eval()
+    return stack
+
+
+def load_wrapped_guidance(
+    ckpt_path: str,
+    num_vars: int,
+    device: torch.device,
+    *,
+    guidance_type: Optional[str] = None,
+    dataset_lookback: Optional[int] = None,
+    dataset_horizon: Optional[int] = None,
+):
+    """Load finetuned guidance (iTransformer or patch decoder stack)."""
+    gtype = guidance_type or GUIDANCE_TYPE
+    if gtype == "patch_decoder":
+        stack = load_patch_guidance_from_checkpoint(ckpt_path, num_vars, device)
+        return wrap_patch_guidance(stack)
+    itrans_model = load_itransformer_from_checkpoint(ckpt_path, num_vars, device)
+    lb = LOOKBACK_LENGTH if dataset_lookback is None else dataset_lookback
+    hz = FORECAST_LENGTH if dataset_horizon is None else dataset_horizon
+    itrans_seq, itrans_pred = itrans_model_lengths(lb, hz)
+    return wrap_itrans_guidance(itrans_model, seq_len=itrans_seq, pred_len=itrans_pred)
+
+
+def _window_norm_past_future(
+    past: torch.Tensor,
+    future: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if not USE_WINDOW_NORMALIZATION:
+        return past, future
+    if WINDOW_NORM_CENTER == "last":
+        center = past[..., -1:]
+    elif WINDOW_NORM_CENTER == "mean":
+        center = past.mean(dim=-1, keepdim=True)
+    else:
+        raise ValueError(f"unknown window_norm_center {WINDOW_NORM_CENTER!r}")
+    std = past.std(dim=-1, keepdim=True).clamp_min(WINDOW_NORM_STD_FLOOR)
+    return (past - center) / std, (future - center) / std
+
+
+def _patch_guidance_batch(
+    past: torch.Tensor,
+    future: torch.Tensor,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if _itrans_ar_enabled(future.shape[-1]):
+        past, future = _sample_itrans_ar_chunk(past, future)
+    past = past.to(device)
+    future = future.to(device)
+    past_norm, future_norm = _window_norm_past_future(past, future)
+    pred_len = _patch_guidance_pred_len()
+    if LOOKBACK_OVERLAP > 0:
+        target = future_norm[..., LOOKBACK_OVERLAP : LOOKBACK_OVERLAP + pred_len]
+    else:
+        target = future_norm[..., :pred_len]
+    return past_norm, target
+
+
+def train_patch_guidance_epoch(stack, loader, optimizer, device, scheduler=None):
+    stack.train()
+    total_loss = 0.0
+    n_batches = 0
+    for past, future in loader:
+        past_norm, y_true = _patch_guidance_batch(past, future, device)
+        optimizer.zero_grad()
+        loss = stack.finetune_loss(past_norm, y_true)
+        loss.backward()
+        optimizer.step()
+        if scheduler:
+            scheduler.step()
+        total_loss += loss.item()
+        n_batches += 1
+    return total_loss / max(n_batches, 1)
+
+
+def validate_patch_guidance(stack, loader, device):
+    stack.eval()
+    total_loss = 0.0
+    n_batches = 0
+    with torch.no_grad():
+        for past, future in loader:
+            past_norm, y_true = _patch_guidance_batch(past, future, device)
+            loss = stack.finetune_loss(past_norm, y_true)
+            total_loss += loss.item()
+            n_batches += 1
+    return total_loss / max(n_batches, 1)
+
+
+def patch_guidance_hp_objective(
+    trial,
+    train_loader,
+    val_loader,
+    num_vars: int,
+    device,
+    smoke_test=False,
+    fixed_batch_size: Optional[int] = None,
+    max_epochs: int = PATCH_GUIDANCE_HP_FINETUNE_MAX_EPOCHS,
+    trial_ckpt_dir: Optional[str] = None,
+):
+    lr = trial.suggest_categorical("learning_rate", ITRANS_PAPER_LR_GRID)
+    batch_size = fixed_batch_size if fixed_batch_size is not None else ITRANS_PAPER_BATCH_SIZE
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    stack = create_patch_guidance_stack(num_vars).to(device)
+
+    train_loader_local = DataLoader(
+        train_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0,
+    )
+    val_bs = min(batch_size, 32)
+    val_loader_local = DataLoader(
+        val_loader.dataset, batch_size=val_bs, shuffle=False, num_workers=0,
+    )
+
+    optimizer = torch.optim.Adam(stack.parameters(), lr=lr)
+    epochs = max_epochs if not smoke_test else 1
+    best_val_loss = float("inf")
+    trial_ckpt_path = None
+    if trial_ckpt_dir is not None:
+        os.makedirs(trial_ckpt_dir, exist_ok=True)
+        trial_ckpt_path = os.path.join(
+            trial_ckpt_dir, f"patch_guidance_hp_trial_{trial.number}.pt",
+        )
+
+    try:
+        for epoch in range(epochs):
+            train_patch_guidance_epoch(stack, train_loader_local, optimizer, device)
+            val_loss = validate_patch_guidance(stack, val_loader_local, device)
+            trial.report(val_loss, epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                tuned = {"learning_rate": lr, "batch_size": batch_size}
+                if trial_ckpt_path is not None:
+                    torch.save(
+                        {
+                            "model_state_dict": stack.state_dict(),
+                            "config": stack.config.to_dict(),
+                            "best_params": tuned,
+                            "val_loss": val_loss,
+                        },
+                        trial_ckpt_path,
+                    )
+                    trial.set_user_attr("ckpt_path", trial_ckpt_path)
+    except torch.OutOfMemoryError:
+        logger.warning(
+            "[Patch guidance HP] OOM at batch_size=%s; pruning trial %s.",
+            batch_size, trial.number,
+        )
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise optuna.TrialPruned()
+    return best_val_loss
+
+
+def run_patch_guidance_finetune_hp_tuning(
+    dataset_name: str,
+    variate_indices: List[int],
+    n_trials: int,
+    device: torch.device,
+    smoke_test: bool = False,
+    checkpoint_dir: Optional[str] = None,
+    subset_id: Optional[str] = None,
+    train_stride: Optional[int] = None,
+    test_stride: Optional[int] = None,
+    parallel_workers: int = 1,
+) -> Tuple[Dict, Optional[str]]:
+    """HP tune patch decoder + mixer on real data (window-norm MSE)."""
+    label = subset_id or dataset_name
+    n_vars = len(variate_indices)
+    logger.info("=" * 60)
+    logger.info(
+        "Patch guidance finetune HP: %s (%d trials, %d workers)",
+        label, n_trials, parallel_workers,
+    )
+    logger.info("=" * 60)
+
+    train_ds, val_ds, _, _ = load_dataset(
+        dataset_name, variate_indices,
+        stride=train_stride or WINDOW_STRIDE,
+        test_stride=1 if test_stride is None else test_stride,
+    )
+    if smoke_test:
+        train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
+        val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
+
+    train_bs = ITRANS_PAPER_BATCH_SIZE
+    train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
+
+    trial_dir = checkpoint_dir or CHECKPOINT_DIR
+    os.makedirs(trial_dir, exist_ok=True)
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
+
+    def objective_builder(_worker_id: int):
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        def objective(trial):
+            return patch_guidance_hp_objective(
+                trial, train_loader, val_loader, n_vars, dev, smoke_test,
+                fixed_batch_size=train_bs,
+                max_epochs=PATCH_GUIDANCE_HP_FINETUNE_MAX_EPOCHS,
+                trial_ckpt_dir=trial_dir,
+            )
+
+        return objective
+
+    study = run_optuna_study(
+        study_name=f"patch-guidance-ft-{label}",
+        checkpoint_dir=trial_dir,
+        n_trials=n_trials,
+        parallel_workers=parallel_workers,
+        direction="minimize",
+        objective_builder=objective_builder,
+        sampler=TPESampler(seed=42),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+        show_progress_bar=not smoke_test,
+        sampler_seed=42,
+    )
+
+    best_params = dict(study.best_params)
+    best_params["batch_size"] = train_bs
+    logger.info(
+        "Best patch guidance FT params for %s: lr=%.2e → val_loss=%.4f",
+        label, best_params["learning_rate"], study.best_value,
+    )
+
+    ckpt_path = None
+    if checkpoint_dir is not None:
+        ckpt_path = os.path.join(checkpoint_dir, f"{label}_patch_guidance_hp_best.pt")
+        _promote_trial_ckpt(
+            study, trial_dir, "patch_guidance_hp_trial_{trial}.pt", ckpt_path,
+        )
+        logger.info("  Saved best patch guidance FT HP model → %s", ckpt_path)
+    return best_params, ckpt_path
 
 
 def _itrans_chunk_horizon() -> int:
@@ -987,6 +1268,8 @@ def create_diffusion_model(
         window_norm_std_floor=WINDOW_NORM_STD_FLOOR,
         zero_guidance_forecast=ZERO_GUIDANCE_FORECAST,
         itrans_d_model=ITRANS_D_MODEL,
+        guidance_type=GUIDANCE_TYPE,
+        mmpd_patch_size=MMPD_PATCH_SIZE,
     )
     return DiffusionTSF(config, guidance_model=guidance_model)
 

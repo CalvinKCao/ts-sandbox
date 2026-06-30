@@ -2,14 +2,17 @@
 Guidance models for hybrid visual-guide forecasting.
 
 Stage 1 predictors produce coarse forecasts converted to 2D ghost images for
-the diffusion model. Only iTransformer-backed guidance is supported.
+the diffusion model and cross-variate context tokens for DiT.
 """
 
 import torch
 import torch.nn as nn
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Callable, Optional, Protocol, runtime_checkable
 from abc import ABC, abstractmethod
+
+from models.diffusion_tsf.patch_guidance_stack import PatchGuidanceStack
 
 
 @runtime_checkable
@@ -242,6 +245,105 @@ class iTransformerGuidance(BaseGuidance):
             return self._autoregressive_rollout(
                 past_norm, forecast_length, overlap, _forward_norm_space,
             )
+
+
+@dataclass
+class GuidanceEncoderOutput:
+    tokens: torch.Tensor
+    token_variate_ids: Optional[torch.Tensor] = None
+
+
+class PatchDecoderGuidance(BaseGuidance):
+    """MMPD decoder patch tokens mixed across variates for DiT cross-attention."""
+
+    def __init__(self, stack: PatchGuidanceStack, *, chunk_horizon: int):
+        super().__init__()
+        self.stack = stack
+        self.chunk_horizon = int(chunk_horizon)
+        self._token_variate_ids: Optional[torch.Tensor] = None
+
+        for param in self.stack.parameters():
+            param.requires_grad = False
+        self.training = False
+        self.stack.eval()
+
+    def train(self, mode: bool = True):
+        self.training = False
+        self.stack.eval()
+        return self
+
+    def eval(self):
+        self.training = False
+        self.stack.eval()
+        return self
+
+    @property
+    def token_variate_ids(self) -> Optional[torch.Tensor]:
+        return self._token_variate_ids
+
+    @torch.no_grad()
+    def get_encoder_tokens(self, past: torch.Tensor) -> torch.Tensor:
+        """Return mixed patch context tokens (B, M, context_dim)."""
+        if past.dim() == 2:
+            past = past.unsqueeze(1)
+        mixed, var_ids = self.stack.encode_context(past)
+        self._token_variate_ids = var_ids
+        return mixed
+
+    def _forward_chunk(self, past: torch.Tensor) -> torch.Tensor:
+        return self.stack.forecast(past)
+
+    def _autoregressive_rollout(
+        self,
+        past: torch.Tensor,
+        forecast_length: int,
+        overlap: int,
+    ) -> torch.Tensor:
+        if past.dim() == 2:
+            past = past.unsqueeze(1)
+        pred_step = self.chunk_horizon
+        if forecast_length <= pred_step:
+            return self._forward_chunk(past)[..., :forecast_length]
+
+        K = max(0, int(overlap))
+        chunks = []
+        remaining = forecast_length
+        cur_past = past
+        in_len = self.stack.config.in_len
+
+        while remaining > 0:
+            step_out = self._forward_chunk(cur_past)
+            take = min(remaining, pred_step)
+            chunks.append(step_out[..., :take])
+            remaining -= take
+            if remaining <= 0:
+                break
+            if K > 0:
+                roll = step_out[..., K:pred_step]
+                cur_past = torch.cat([cur_past[..., K:], step_out[..., :K], roll], dim=-1)
+            else:
+                cur_past = torch.cat([cur_past, step_out], dim=-1)
+            if cur_past.shape[-1] > in_len:
+                cur_past = cur_past[..., -in_len:]
+        return torch.cat(chunks, dim=-1)
+
+    @torch.no_grad()
+    def get_forecast(
+        self,
+        past: torch.Tensor,
+        forecast_length: int,
+        overlap: int = 0,
+    ) -> torch.Tensor:
+        return self._autoregressive_rollout(past, forecast_length, overlap)
+
+    @torch.no_grad()
+    def get_forecast_window_norm(
+        self,
+        past_norm: torch.Tensor,
+        forecast_length: int,
+        overlap: int = 0,
+    ) -> torch.Tensor:
+        return self._autoregressive_rollout(past_norm, forecast_length, overlap)
 
 
 class iTransformerTokenAdapter(nn.Module):

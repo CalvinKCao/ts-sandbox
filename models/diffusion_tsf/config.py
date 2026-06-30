@@ -134,9 +134,11 @@ class DiffusionTSFConfig:
     use_value_channel: bool = False
     seasonal_period: int = 96
 
-    # Stage 1 guidance (iTransformer ghost image + encoder tokens)
+    # Stage 1 guidance (ghost image + encoder tokens)
     use_guidance_channel: bool = True
     context_embedding_dim: int = 256
+    guidance_type: str = "itransformer"  # itransformer | patch_decoder
+    mmpd_patch_size: int = 12
     itrans_d_model: int = 512
 
     # train

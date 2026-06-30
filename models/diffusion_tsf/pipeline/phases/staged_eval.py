@@ -465,10 +465,8 @@ class StagedEvalPhase(PipelinePhase):
         from models.diffusion_tsf.train_multivariate_pipeline import (
             generate_dataset_job,
             load_dataset,
-            load_itransformer_from_checkpoint,
+            load_wrapped_guidance,
             dataset_window_lengths,
-            itrans_model_lengths,
-            wrap_itrans_guidance,
         )
 
         device = state.resolve_device()
@@ -483,20 +481,25 @@ class StagedEvalPhase(PipelinePhase):
         test_stride = int(self.require("test_stride"))
         n_iv = len(variate_indices)
 
-        ft_itrans_ckpt = state.itrans_finetune_ckpt
-        if not ft_itrans_ckpt or not os.path.exists(ft_itrans_ckpt):
-            ft_itrans_ckpt = os.path.join(state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
-        if not os.path.exists(ft_itrans_ckpt):
-            raise FileNotFoundError(f"Missing finetuned iTransformer checkpoint: {ft_itrans_ckpt}")
+        ft_guidance_ckpt = state.guidance_finetune_ckpt
+        if not ft_guidance_ckpt or not os.path.exists(ft_guidance_ckpt):
+            ft_guidance_ckpt = state.default_guidance_finetune_ckpt_path()
+        if not os.path.exists(ft_guidance_ckpt):
+            raise FileNotFoundError(f"Missing finetuned guidance checkpoint: {ft_guidance_ckpt}")
 
-        itrans_model = load_itransformer_from_checkpoint(ft_itrans_ckpt, n_iv, device)
         ds_lb, ds_hz = dataset_window_lengths(state.dataset)
-        itrans_seq, itrans_pred = itrans_model_lengths(ds_lb, ds_hz)
-        itrans_guidance = wrap_itrans_guidance(itrans_model, seq_len=itrans_seq, pred_len=itrans_pred)
-        coarse_model = self._load_model(state, "coarse", itrans_guidance, n_iv, device)
-        fine_model = self._load_model(state, "fine", itrans_guidance, n_iv, device)
+        guidance = load_wrapped_guidance(
+            ft_guidance_ckpt,
+            n_iv,
+            device,
+            guidance_type=state.guidance_type,
+            dataset_lookback=ds_lb,
+            dataset_horizon=ds_hz,
+        )
+        coarse_model = self._load_model(state, "coarse", guidance, n_iv, device)
+        fine_model = self._load_model(state, "fine", guidance, n_iv, device)
         finer_model = (
-            self._load_model(state, "finer", itrans_guidance, n_iv, device)
+            self._load_model(state, "finer", guidance, n_iv, device)
             if state.use_triple_scale
             else None
         )
@@ -533,8 +536,8 @@ class StagedEvalPhase(PipelinePhase):
                 model_labels=["diffusion_coarse", "diffusion_fine"],
                 ckpt_info=[
                     {
-                        "kind": "itrans",
-                        "path": ft_itrans_ckpt,
+                        "kind": state.guidance_type,
+                        "path": ft_guidance_ckpt,
                         "n_variates": n_iv,
                         "lookback": int(ds_lb),
                         "horizon": int(ds_hz),
@@ -562,7 +565,7 @@ class StagedEvalPhase(PipelinePhase):
                 state,
                 train_ds=train_ds,
                 model=fine_model,
-                itrans_ckpt_path=ft_itrans_ckpt,
+                itrans_ckpt_path=ft_guidance_ckpt,
                 stage="fine",
                 diffusion_ckpt_path=_stage_finetune_ckpt(state, "fine"),
                 tag="staged_eval",
@@ -737,7 +740,7 @@ class StagedEvalPhase(PipelinePhase):
                     state,
                     coarse_ckpt_path=coarse_ft,
                     fine_ckpt_path=fine_ft,
-                    itrans_ckpt_path=ft_itrans_ckpt,
+                    itrans_ckpt_path=ft_guidance_ckpt,
                     tuned_params=tuned,
                     tag="eval_staged_dual_scale",
                 )
