@@ -1483,7 +1483,11 @@ def amp_context():
 
 
 def save_checkpoint(model, optimizer, epoch, train_loss, val_loss, config, path, extra=None):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    parent = os.path.dirname(path)
+    if parent:
+        if os.path.isfile(parent):
+            raise FileExistsError(f"checkpoint parent exists as a file, not a directory: {parent}")
+        os.makedirs(parent, exist_ok=True)
     ckpt = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),

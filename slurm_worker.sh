@@ -23,6 +23,25 @@ STORE="${GRID_STORE:-$SCRATCH/ts-sandbox/results}"
 REPO="${SLURM_SUBMIT_DIR:-$PWD}"
 REQ="$REPO/setup/requirements-killarney.txt"
 
+# Fail fast before venv build if the repo checkout is missing the requested config.
+CONFIG_REL=""
+for ((i = 0; i < $#; i++)); do
+    if [[ "${!i}" == "--config" && $((i + 1)) -le $# ]]; then
+        j=$((i + 1))
+        CONFIG_REL="${!j}"
+        break
+    fi
+done
+if [[ -n "$CONFIG_REL" ]]; then
+    CONFIG_PATH="$REPO/$CONFIG_REL"
+    if [[ ! -f "$CONFIG_PATH" ]]; then
+        BRANCH="$(git -C "$REPO" branch --show-current 2>/dev/null || echo unknown)"
+        echo "ERROR: config not found: $CONFIG_PATH" >&2
+        echo "ERROR: repo branch=$BRANCH — git checkout feat/patch-decoder-cross-variate-ctx && git pull" >&2
+        exit 1
+    fi
+fi
+
 [[ -f "$REQ" ]] || { echo "ERROR: missing $REQ — run ./setup/killarney_freeze_requirements.sh on login node" >&2; exit 1; }
 [[ -n "${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR is not set." >&2; exit 1; }
 
