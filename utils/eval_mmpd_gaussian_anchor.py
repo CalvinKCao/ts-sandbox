@@ -889,8 +889,18 @@ def build_mmpd_train_cmd(
     lookback, horizon = dataset_window_lengths(args, dataset)
     patch_size = dataset_mmpd_patch_size(args, dataset)
     data_dim = len(run_variate_indices(run))
-    batch_size = mmpd_train_batch_size(args, dataset, data_dim=data_dim)
     hp = resolved_mmpd_hparams(mmpd_hparams_root(args), dataset, fallback=hparams)
+    cap = mmpd_train_batch_size(args, dataset, data_dim=data_dim)
+    if "batch_size" in hp:
+        batch_size = min(int(hp["batch_size"]), cap)
+        if batch_size != int(hp["batch_size"]):
+            print(
+                f"[mmpd] {dataset}: tuned batch_size {hp['batch_size']} -> {batch_size} "
+                f"(cap for data_dim={data_dim})",
+                flush=True,
+            )
+    else:
+        batch_size = cap
     epochs = int(train_epochs if train_epochs is not None else args.mmpd_train_epochs)
     stop_patience = int(patience if patience is not None else args.mmpd_patience)
     mmpd_out = output_root if output_root is not None else args.output_dir / "mmpd_out"
@@ -2548,6 +2558,12 @@ def parse_args() -> argparse.Namespace:
         help="YAML with experiment.data_subset; resolve variates/stride per dataset (no binary ckpts).",
     )
     parser.add_argument(
+        "--mmpd-run-config",
+        type=Path,
+        default=None,
+        help="YAML with top-level mmpd: block (backbone, tune_*, datasets, etc.).",
+    )
+    parser.add_argument(
         "--anchor-config",
         type=str,
         default=None,
@@ -2624,6 +2640,12 @@ def parse_args() -> argparse.Namespace:
                         help="Max epochs per tune trial (shorter than final train).")
     parser.add_argument("--mmpd-tune-patience", type=int, default=3,
                         help="Early-stop patience during tune trials.")
+    parser.add_argument(
+        "--mmpd-tune-spec-file",
+        type=Path,
+        default=None,
+        help="JSON file with Optuna search spec (overrides mmpd-run-config tune_params).",
+    )
     parser.add_argument("--force-mmpd-tune", action="store_true",
                         help="Re-run Optuna even if tuning/<dataset>_best.json exists.")
     parser.add_argument("--mmpd-batch-size", type=int, default=32)
@@ -2767,6 +2789,16 @@ def run_phase_all(args: argparse.Namespace, commit: str) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.mmpd_run_config is not None:
+        from utils.mmpd_run_config import apply_mmpd_run_config, load_mmpd_run_config
+
+        mmpd_block = load_mmpd_run_config(args.mmpd_run_config.resolve())
+        apply_mmpd_run_config(args, mmpd_block)
+    if args.mmpd_tune_spec_file is not None:
+        import json
+
+        with args.mmpd_tune_spec_file.open(encoding="utf-8") as f:
+            args.mmpd_tune_params = json.load(f)
     apply_mmpd_smoke_defaults(args)
     args.datasets = list(dict.fromkeys(args.datasets))
     unknown = sorted(set(args.datasets) - set(DATASET_FILES))

@@ -30,6 +30,60 @@ from utils.mmpd_paper_hparams import (  # noqa: E402
 
 _VALI_RE = re.compile(r"Vali Loss:\s*([0-9.eE+-]+)")
 
+_DEFAULT_TUNE_SPEC: Dict[str, Any] = {
+    "learning_rate": [3e-5, 3e-4],
+    "point_weight": [0.005, 0.05],
+    "dropout": 0.2,
+    "ema_decay": [0.95, 0.99, 0.999],
+}
+
+
+def _tune_spec(args: Any) -> Dict[str, Any]:
+    spec = getattr(args, "mmpd_tune_params", None)
+    if isinstance(spec, dict) and spec:
+        return dict(spec)
+    return dict(_DEFAULT_TUNE_SPEC)
+
+
+def _suggest_tune_hparams(trial: optuna.Trial, args: Any, run: AnchorRun) -> Dict[str, Any]:
+    spec = _tune_spec(args)
+    hparams: Dict[str, Any] = {}
+
+    lr_spec = spec.get("learning_rate", _DEFAULT_TUNE_SPEC["learning_rate"])
+    lo, hi = float(lr_spec[0]), float(lr_spec[1])
+    hparams["learning_rate"] = trial.suggest_float("learning_rate", lo, hi, log=True)
+
+    pw_spec = spec.get("point_weight", _DEFAULT_TUNE_SPEC["point_weight"])
+    lo, hi = float(pw_spec[0]), float(pw_spec[1])
+    hparams["point_weight"] = trial.suggest_float("point_weight", lo, hi, log=True)
+
+    hparams["dropout"] = float(spec.get("dropout", 0.2))
+
+    if "batch_size" in spec:
+        bs_lo, bs_hi = int(spec["batch_size"][0]), int(spec["batch_size"][1])
+        hparams["batch_size"] = trial.suggest_int("batch_size", bs_lo, bs_hi)
+
+    ema_spec = spec.get("ema_decay")
+    if ema_spec is not None:
+        choices = [float(x) for x in ema_spec]
+        hparams["ema_decay"] = trial.suggest_categorical("ema_decay", choices)
+
+    if args.mmpd_backbone == "MaskAE":
+        fl_spec = spec.get("finetune_layers", [1, 3])
+        hparams["finetune_layers"] = trial.suggest_int(
+            "finetune_layers", int(fl_spec[0]), int(fl_spec[1])
+        )
+        nn_spec = spec.get("neighbor_num")
+        if nn_spec is not None:
+            hparams["neighbor_num"] = trial.suggest_int(
+                "neighbor_num", int(nn_spec[0]), int(nn_spec[1])
+            )
+        else:
+            min_k, max_k = _maskae_neighbor_bounds(run)
+            hparams["neighbor_num"] = trial.suggest_int("neighbor_num", min_k, max_k)
+
+    return hparams
+
 
 def _maskae_neighbor_bounds(run: AnchorRun) -> tuple[int, int]:
     n_variates = len(run.metadata.get("variate_indices", []))
@@ -102,22 +156,7 @@ def tune_mmpd_subset(args: Any, run: AnchorRun) -> Dict[str, Any]:
     )
 
     def objective(trial: optuna.Trial) -> float:
-        hparams: Dict[str, Any] = {
-            "learning_rate": trial.suggest_float(
-                "learning_rate", 3e-5, 3e-4, log=True
-            ),
-            "point_weight": trial.suggest_float(
-                "point_weight", 0.005, 0.05, log=True
-            ),
-            "ema_decay": trial.suggest_categorical(
-                "ema_decay", [0.95, 0.99, 0.999]
-            ),
-            "dropout": 0.2,
-        }
-        if args.mmpd_backbone == "MaskAE":
-            hparams["finetune_layers"] = trial.suggest_int("finetune_layers", 1, 3)
-            min_k, max_k = _maskae_neighbor_bounds(run)
-            hparams["neighbor_num"] = trial.suggest_int("neighbor_num", min_k, max_k)
+        hparams = _suggest_tune_hparams(trial, args, run)
         print(
             f"[mmpd-tune] {dataset} trial {trial.number}: {hparams}",
             flush=True,
