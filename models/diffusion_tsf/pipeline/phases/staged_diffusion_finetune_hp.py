@@ -757,8 +757,11 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             max_epochs = patience = 1
 
         subset_dir = _stage_subset_dir(state, self.stage)
-        os.makedirs(subset_dir, exist_ok=True)
-        final_ckpt = _stage_best_ckpt(state, self.stage)
+        from models.diffusion_tsf.train_multivariate_pipeline import ensure_checkpoint_dir
+
+        ensure_checkpoint_dir(final_ckpt := _stage_best_ckpt(state, self.stage))
+        trials_dir = os.path.join(subset_dir, "_trials")
+        ensure_checkpoint_dir(os.path.join(trials_dir, "_trial.pt"))
 
         reuse_meta: Dict[str, Any] = {}
         hp_best_val_loss: Optional[float] = None
@@ -847,7 +850,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         int(params["batch_size"]),
                     )
                     trial_ckpt = os.path.join(
-                        subset_dir, f"_diff_ft_trial_{trial.number}_best.pt",
+                        trials_dir, f"trial_{trial.number}_best.pt",
                     )
                     trial_t0 = time.perf_counter()
                     try:
@@ -936,18 +939,29 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             )
 
             import shutil
-            src = os.path.join(subset_dir, f"_diff_ft_trial_{best_trial_num}_best.pt")
+            src = os.path.join(trials_dir, f"trial_{best_trial_num}_best.pt")
+            if not os.path.exists(src):
+                legacy = os.path.join(subset_dir, f"_diff_ft_trial_{best_trial_num}_best.pt")
+                src = legacy if os.path.exists(legacy) else src
             if not os.path.exists(src):
                 raise RuntimeError(f"Best trial checkpoint missing: {src}")
             shutil.copy2(src, final_ckpt)
             final_val = hp_best_val_loss
 
-            for fn in os.listdir(subset_dir):
-                if fn.startswith("_diff_ft_trial_") and fn.endswith("_best.pt"):
-                    try:
-                        os.remove(os.path.join(subset_dir, fn))
-                    except OSError:
-                        pass
+            for trial_dir in (trials_dir, subset_dir):
+                if not os.path.isdir(trial_dir):
+                    continue
+                for fn in os.listdir(trial_dir):
+                    if fn.startswith("_diff_ft_trial_") and fn.endswith("_best.pt"):
+                        try:
+                            os.remove(os.path.join(trial_dir, fn))
+                        except OSError:
+                            pass
+                    if fn.startswith("trial_") and fn.endswith("_best.pt"):
+                        try:
+                            os.remove(os.path.join(trial_dir, fn))
+                        except OSError:
+                            pass
 
         meta_out: Dict[str, Any] = {
             "subset_id": subset_id,
@@ -1039,6 +1053,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     itrans_ckpt_path=ft_guidance_ckpt,
                     stage=self.stage,
                     diffusion_ckpt_path=final_ckpt,
+                    coarse_ckpt_path=coarse_ft if self.stage == "fine" else None,
                     tag=f"diffusion_{self.stage}_finetune",
                 )
                 for key, paths in (diag.get("viz") or {}).items():

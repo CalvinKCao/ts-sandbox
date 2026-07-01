@@ -1283,6 +1283,26 @@ def run_staged_synthetic_pretrain_diagnostics(
     return {"summary": summary, "config": config_updates, "viz": viz_paths}
 
 
+def _staged_diag_generate(
+    model,
+    past: torch.Tensor,
+    *,
+    coarse_model=None,
+    sampler: str = "anchor",
+) -> Dict[str, torch.Tensor]:
+    stage = getattr(getattr(model, "config", None), "diffusion_stage", None)
+    if stage == "fine":
+        if coarse_model is None:
+            raise ValueError("fine-stage diagnostics require coarse_model")
+        coarse_out = coarse_model.generate(past, sampler=sampler)
+        return model.generate(
+            past,
+            sampler=sampler,
+            future_coarse_2d=coarse_out["future_2d_coarse"],
+        )
+    return model.generate(past, sampler=sampler)
+
+
 def _plot_diffusion_model_space_prediction(
     *,
     gen_out: Dict[str, torch.Tensor],
@@ -1301,15 +1321,23 @@ def _plot_diffusion_model_space_prediction(
     paths: List[str] = []
 
     future_coarse = gen_out["future_2d_coarse"][0].cpu()
-    future_fine = gen_out["future_2d_fine"][0].cpu()
     to_2d = model.to_2d
     coarse_1d = to_2d._decode_occupancy_in_range(
         future_coarse, value_range=to_2d.max_scale, cdf_decoder="mean",
     ).cpu()
-    fine_1d = to_2d._decode_occupancy_in_range(
-        future_fine, value_range=_staged_fine_value_range(model), cdf_decoder="mean",
-    ).cpu()
-    combined_1d = coarse_1d + fine_1d
+    fine_raw = gen_out.get("future_2d_fine")
+    if fine_raw is not None:
+        future_fine = fine_raw[0].cpu()
+        fine_1d = to_2d._decode_occupancy_in_range(
+            future_fine, value_range=_staged_fine_value_range(model), cdf_decoder="mean",
+        ).cpu()
+        combined_1d = coarse_1d + fine_1d
+        pred_maps = {"coarse": future_coarse.unsqueeze(0), "fine": future_fine.unsqueeze(0)}
+    else:
+        future_fine = None
+        fine_1d = None
+        combined_1d = coarse_1d
+        pred_maps = {"coarse": future_coarse.unsqueeze(0)}
     W_fut = future_coarse.shape[-1]
     t_fut = np.arange(0, W_fut)
     n_cols = min(variables_to_plot, coarse_1d.shape[0])
@@ -1334,7 +1362,7 @@ def _plot_diffusion_model_space_prediction(
 
     paths.append(
         _plot_staged_2d_maps_native(
-            maps={"coarse": future_coarse.unsqueeze(0), "fine": future_fine.unsqueeze(0)},
+            maps=pred_maps,
             sample_index=sample_index,
             output_dir=output_dir,
             tag=f"{tag}_pred",
@@ -1416,6 +1444,7 @@ def run_diffusion_conditioning_diagnostics(
     sample_index: int = 0,
     variables_to_plot: int = 3,
     jpeg_dpi: int = 100,
+    coarse_model=None,
 ) -> Dict[str, List[str]]:
     """Visualize lookback 2D cond, iTrans 2D pred, and cross-attn top variates."""
     from models.diffusion_tsf.pipeline.logging_utils import get_diagnostic_logger
@@ -1467,7 +1496,7 @@ def run_diffusion_conditioning_diagnostics(
                 stage, target_v, rank + 1, vi, wt,
             )
 
-    gen_out = model.generate(past, sampler="anchor")
+    gen_out = _staged_diag_generate(model, past, coarse_model=coarse_model, sampler="anchor")
     paths.setdefault(f"viz/conditioning/{stage}/diffusion_pred", []).extend(
         _plot_diffusion_model_space_prediction(
             gen_out=gen_out,
@@ -1493,6 +1522,7 @@ def run_real_dataset_phase_diagnostics(
     itrans_ckpt_path: str,
     stage: str,
     diffusion_ckpt_path: Optional[str] = None,
+    coarse_ckpt_path: Optional[str] = None,
     tag: str = "real_dataset",
 ) -> Dict[str, Any]:
     """Shared diagnostics for iTrans / finetune / eval phases on real data."""
@@ -1549,6 +1579,15 @@ def run_real_dataset_phase_diagnostics(
     viz_paths: Dict[str, List[str]] = {}
 
     with torch.no_grad():
+        coarse_model = None
+        if stage == "fine" and coarse_ckpt_path:
+            coarse_model, _ = _load_staged_diffusion_from_ckpt(
+                ckpt_path=coarse_ckpt_path,
+                stage="coarse",
+                itrans_ckpt_path=itrans_ckpt_path,
+                n_vars=int(state.n_variates),
+                device=state.resolve_device(),
+            )
         past_norm, future_norm, norm_stats = model._normalize_sequence(past_b, future_b)
         p1 = _plot_realts_1d_pre_post_norm(
             past=past_cf, future=future_cf,
@@ -1582,6 +1621,7 @@ def run_real_dataset_phase_diagnostics(
             state=state, model=model, past=past_b, future=future_b, stage=stage,
             output_dir=os.path.join(output_dir, "conditioning"),
             sample_index=sample_index, variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
+            coarse_model=coarse_model,
         )
 
     viz_paths[f"viz/{tag}/dataset_1d"] = [p1]
