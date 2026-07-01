@@ -25,8 +25,8 @@ REQ="$REPO/setup/requirements-killarney.txt"
 
 # Fail fast before venv build if the repo checkout is missing the requested config.
 CONFIG_REL=""
-for ((i = 0; i < $#; i++)); do
-    if [[ "${!i}" == "--config" && $((i + 1)) -le $# ]]; then
+for ((i = 1; i < $#; i++)); do
+    if [[ "${!i}" == "--config" ]]; then
         j=$((i + 1))
         CONFIG_REL="${!j}"
         break
