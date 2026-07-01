@@ -9,6 +9,7 @@
 #   ./submit_mmpd_sweep_subset.sh --mmpd-run-config configs/mmpd_decoder_flat_subsets_grad_accum_200_lr_lo.yaml ...
 #
 # Cluster auto-detect: Killarney -> gpu:l40s (aip-boyuwang); Narval -> a100 (def-boyuwang).
+# Clones temp/MMPD on the login node before submit (compute nodes have no GitHub egress).
 # Override GPU: --gpu a100_1g.5gb (Narval) or --gpu l40s (Killarney).
 #   ./submit_mmpd_sweep_subset.sh --use-anchor-ckpts --anchor-config binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo
 #   ./submit_mmpd_sweep_subset.sh --resume --output-dir results/datasets/... --datasets PeMS,dynamic --skip-mmpd-train
@@ -103,6 +104,18 @@ if [[ "$REPO" == /home/* ]]; then
     exit 1
 fi
 cd "$REPO"
+
+MMPD_REPO="$REPO/temp/MMPD"
+MMPD_URL="https://github.com/Thinklab-SJTU/MMPD.git"
+mkdir -p "$REPO/temp"
+if [[ ! -d "$MMPD_REPO/.git" ]]; then
+    echo "Cloning MMPD on login node (compute nodes cannot reach GitHub)..."
+    git clone "$MMPD_URL" "$MMPD_REPO"
+fi
+MMPD_TOOLS="$MMPD_REPO/utils/tools.py"
+if [[ -f "$MMPD_TOOLS" ]] && grep -q 'np\.Inf' "$MMPD_TOOLS"; then
+    sed -i 's/np\.Inf/np.inf/g' "$MMPD_TOOLS"
+fi
 
 IFS=',' read -ra DATASETS <<< "$DATASETS_CSV"
 

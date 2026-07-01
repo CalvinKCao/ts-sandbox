@@ -162,7 +162,15 @@ def run_cmd(
 def ensure_mmpd_repo(path: Path, update: bool = True) -> str:
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        run_cmd(["git", "clone", MMPD_URL, str(path)])
+        try:
+            run_cmd(["git", "clone", MMPD_URL, str(path)])
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"Failed to clone MMPD into {path}. "
+                "Compute nodes usually cannot reach GitHub — clone on the login node "
+                "before sbatch, or run submit_mmpd_sweep_subset.sh (it clones for you):\n"
+                f"  mkdir -p {path.parent} && git clone {MMPD_URL} {path}"
+            ) from exc
     elif not (path / ".git").exists():
         raise RuntimeError(f"{path} exists but is not a git checkout")
     elif update:
