@@ -1,11 +1,15 @@
 #!/bin/bash
 # Train + eval MMPD on ETTh1-capped variate subsets (from YAML data_subset policy).
 #
-# USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
+# USAGE (Killarney or Narval login node, from $SCRATCH/ts-sandbox):
 #   ./submit_mmpd_sweep_subset.sh --smoke-test
 #   ./submit_mmpd_sweep_subset.sh --output-dir results/datasets/06-12-sweep-subset-mmpd
 #   ./submit_mmpd_sweep_subset.sh --datasets ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama
 #   ./submit_mmpd_sweep_subset.sh --mmpd-backbone MaskAE --output-dir results/datasets/06-15-mmpd-maskae-subset
+#   ./submit_mmpd_sweep_subset.sh --mmpd-run-config configs/mmpd_decoder_flat_subsets_grad_accum_200_lr_lo.yaml ...
+#
+# Cluster auto-detect: Killarney -> gpu:l40s (aip-boyuwang); Narval -> a100 (def-boyuwang).
+# Override GPU: --gpu a100_1g.5gb (Narval) or --gpu l40s (Killarney).
 #   ./submit_mmpd_sweep_subset.sh --use-anchor-ckpts --anchor-config binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo
 #   ./submit_mmpd_sweep_subset.sh --resume --output-dir results/datasets/... --datasets PeMS,dynamic --skip-mmpd-train
 #
@@ -36,6 +40,7 @@ MMPD_BACKBONE="Decoder"
 MMPD_TUNE_TRIALS=0
 MMPD_TUNE_EPOCHS=10
 MMPD_TUNE_PATIENCE=3
+GPU_TYPE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -60,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --mmpd-tune-patience) MMPD_TUNE_PATIENCE="$2"; shift 2 ;;
         --force-mmpd-tune) FORCE=1; shift ;;
         --skip-mmpd-train) SKIP_MMPD_TRAIN=1; shift ;;
+        --gpu) GPU_TYPE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -71,8 +77,18 @@ fi
 
 if [[ "$(hostname)" == *"narval"* ]]; then
     ACCOUNT="def-boyuwang"
+    CLUSTER="narval"
+    [[ -z "$GPU_TYPE" ]] && GPU_TYPE="a100"
 else
     ACCOUNT="aip-boyuwang"
+    CLUSTER="killarney"
+    [[ -z "$GPU_TYPE" ]] && GPU_TYPE="l40s"
+fi
+
+if [[ "$GPU_TYPE" == a100* || "$GPU_TYPE" == h100* ]]; then
+    GPU_SBATCH=(--gpus="${GPU_TYPE}:1")
+else
+    GPU_SBATCH=(--gres="gpu:${GPU_TYPE}:1")
 fi
 
 if [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
@@ -83,7 +99,7 @@ else
     REPO="$SCRIPT_DIR"
 fi
 if [[ "$REPO" == /home/* ]]; then
-    echo "ERROR: submit from \$SCRATCH/ts-sandbox on Killarney, not /home." >&2
+    echo "ERROR: submit from \$SCRATCH/ts-sandbox on ${CLUSTER}, not /home." >&2
     exit 1
 fi
 cd "$REPO"
@@ -331,11 +347,13 @@ SBATCH_COMMON=(
     --nodes=1
     --cpus-per-task="$CPUS"
     --mem="$MEM"
-    --gres=gpu:l40s:1
+    "${GPU_SBATCH[@]}"
     --mail-type=FAIL
     --mail-user=ccao87@uwo.ca
 )
 
+echo "Cluster:       $CLUSTER"
+echo "GPU:           $GPU_TYPE"
 echo "Repo:          $REPO"
 echo "Output:        $OUTPUT_DIR"
 if [[ "$USE_ANCHOR_CKPTS" -eq 1 ]]; then
@@ -440,7 +458,6 @@ JOB_MERGE=$(sbatch --parsable \
     --nodes=1 \
     --cpus-per-task=2 \
     --mem=16G \
-    --gres=gpu:l40s:1 \
     --time="$WALL_MERGE" \
     "${MERGE_DEP_ARGS[@]}" \
     --output="$LOG_DIR/merge-%j.out" \
