@@ -117,6 +117,10 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'fourier_flatline_atol': FOURIER_FLATLINE_ATOL,
         'fourier_high_freq_cutoff_bins_per_variate': FOURIER_HIGH_FREQ_CUTOFF_BINS_PER_VARIATE,
         'fourier_fine_max_scale_per_variate': FOURIER_FINE_MAX_SCALE_PER_VARIATE,
+        'coarse_flatline_blur_fine_target': COARSE_FLATLINE_BLUR_FINE_TARGET,
+        'coarse_flatline_blur_radius': COARSE_FLATLINE_BLUR_RADIUS,
+        'coarse_flatline_blur_kernel': COARSE_FLATLINE_BLUR_KERNEL,
+        'coarse_flatline_blur_atol': COARSE_FLATLINE_BLUR_ATOL,
         'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
         'window_norm_center': WINDOW_NORM_CENTER,
         'use_dual_scale': USE_DUAL_SCALE,
@@ -263,6 +267,10 @@ FOURIER_FINE_MAX_SCALE = 0.0
 FOURIER_FLATLINE_ATOL = 1e-8
 FOURIER_HIGH_FREQ_CUTOFF_BINS_PER_VARIATE: Optional[List[int]] = None
 FOURIER_FINE_MAX_SCALE_PER_VARIATE: Optional[List[float]] = None
+COARSE_FLATLINE_BLUR_FINE_TARGET = False
+COARSE_FLATLINE_BLUR_RADIUS = 4
+COARSE_FLATLINE_BLUR_KERNEL = "gaussian"
+COARSE_FLATLINE_BLUR_ATOL: Optional[float] = None
 WINDOW_NORM_STD_FLOOR = 1e-8
 LOOKBACK_OVERLAP = 8
 PAST_LOSS_WEIGHT = 0.3
@@ -1230,6 +1238,10 @@ def create_diffusion_model(
         fourier_fine_max_scale_per_variate=o(
             "fourier_fine_max_scale_per_variate", FOURIER_FINE_MAX_SCALE_PER_VARIATE,
         ),
+        coarse_flatline_blur_fine_target=o("coarse_flatline_blur_fine_target", COARSE_FLATLINE_BLUR_FINE_TARGET),
+        coarse_flatline_blur_radius=o("coarse_flatline_blur_radius", COARSE_FLATLINE_BLUR_RADIUS),
+        coarse_flatline_blur_kernel=o("coarse_flatline_blur_kernel", COARSE_FLATLINE_BLUR_KERNEL),
+        coarse_flatline_blur_atol=o("coarse_flatline_blur_atol", COARSE_FLATLINE_BLUR_ATOL),
         binary_noise_schedule=o("binary_noise_schedule", BINARY_NOISE_SCHEDULE),
         prediction_target=o(
             "prediction_target",

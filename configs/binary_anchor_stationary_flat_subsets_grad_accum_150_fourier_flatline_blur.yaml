@@ -1,0 +1,8 @@
+extends: binary_anchor_stationary_flat_subsets_grad_accum_150_fourier_freq.yaml
+
+experiment:
+  name: binary-anchor-stationary-flat-subsets-grad-accum-150-fourier-flatline-blur
+  experiment_name: binary_anchor_stationary_flat_subsets_grad_accum_150_fourier_flatline_blur
+  coarse_flatline_blur_fine_target: true
+  coarse_flatline_blur_radius: 4
+  coarse_flatline_blur_kernel: gaussian

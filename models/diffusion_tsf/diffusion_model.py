@@ -13,6 +13,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .config import DiffusionTSFConfig
+from .coarse_flatline_blur import flatline_preserving_blur_torch
 from .preprocessing import TimeSeriesTo2D
 from .diffusion import BinaryDiffusionScheduler, OrdinalD3PMScheduler
 from .guidance import GuidanceModel, iTransformerTokenAdapter
@@ -605,6 +606,155 @@ class DiffusionTSF(nn.Module):
     def _fourier_mirror_pad_frac(self) -> float:
         return float(getattr(self.config, "fourier_mirror_pad_frac", 0.25))
 
+    def _uses_flatline_blur_fine_target(self) -> bool:
+        return bool(getattr(self.config, "coarse_flatline_blur_fine_target", False))
+
+    def _coarse_flatline_blur_radius(self) -> int:
+        return int(getattr(self.config, "coarse_flatline_blur_radius", 4))
+
+    def _coarse_flatline_blur_atol(self) -> float:
+        blur_atol = getattr(self.config, "coarse_flatline_blur_atol", None)
+        if blur_atol is not None:
+            return float(blur_atol)
+        return self._fourier_flatline_atol()
+
+    def _coarse_flatline_blur_kernel(self) -> str:
+        return str(getattr(self.config, "coarse_flatline_blur_kernel", "gaussian"))
+
+    def _staged_fine_residual_value_range(self) -> float:
+        if self._uses_fourier_frequency_staging():
+            return self._fourier_fine_value_range()
+        coarse_h = int(getattr(self.config, "coarse_image_height", self.config.image_height))
+        return float(self.config.max_scale) / float(coarse_h)
+
+    def _decode_staged_combined_1d(
+        self,
+        coarse_map: torch.Tensor,
+        fine_map: torch.Tensor,
+        *,
+        cdf_decoder: str = "mean",
+        expectation_sharpen_temp: Optional[float] = None,
+    ) -> torch.Tensor:
+        if self._uses_fourier_frequency_staging():
+            return self.to_2d.decode_fourier_frequency_dual(
+                coarse_map,
+                fine_map,
+                fine_value_range=self._fourier_fine_value_range(),
+                cdf_decoder=cdf_decoder,
+                expectation_sharpen_temp=expectation_sharpen_temp,
+                squeeze_univariate=False,
+            )
+        return self.to_2d.decode_dual(
+            coarse_map,
+            fine_map,
+            cdf_decoder=cdf_decoder,
+            expectation_sharpen_temp=expectation_sharpen_temp,
+            squeeze_univariate=False,
+        )
+
+    def _decode_coarse_1d_from_map(
+        self,
+        coarse_map: torch.Tensor,
+        *,
+        cdf_decoder: str = "mean",
+        expectation_sharpen_temp: Optional[float] = None,
+    ) -> torch.Tensor:
+        return self.to_2d._decode_occupancy_in_range(
+            coarse_map,
+            value_range=self.config.max_scale,
+            cdf_decoder=cdf_decoder,
+            expectation_sharpen_temp=expectation_sharpen_temp,
+        )
+
+    def _decode_fine_1d_from_map(
+        self,
+        fine_map: torch.Tensor,
+        *,
+        coarse_height: int,
+        cdf_decoder: str = "mean",
+        expectation_sharpen_temp: Optional[float] = None,
+    ) -> torch.Tensor:
+        fine_range = self._staged_fine_residual_value_range()
+        return self.to_2d._decode_occupancy_in_range(
+            fine_map,
+            value_range=fine_range,
+            cdf_decoder=cdf_decoder,
+            expectation_sharpen_temp=expectation_sharpen_temp,
+        )
+
+    def _blur_coarse_1d(
+        self,
+        coarse_1d: torch.Tensor,
+        *,
+        flatline_source: torch.Tensor,
+        past_seed: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return flatline_preserving_blur_torch(
+            coarse_1d,
+            flatline_source=flatline_source,
+            past_seed=past_seed,
+            blur_radius=self._coarse_flatline_blur_radius(),
+            atol=self._coarse_flatline_blur_atol(),
+            kernel=self._coarse_flatline_blur_kernel(),  # type: ignore[arg-type]
+        )
+
+    def _encode_fine_target_flatline_blur(
+        self,
+        future_norm: torch.Tensor,
+        future_maps: Dict[str, torch.Tensor],
+        *,
+        past_seed: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        coarse_map = future_maps["coarse"]
+        fine_high_map = future_maps["fine"]
+        _, fine_h, _ = self._staged_image_heights()
+        fine_range = self._staged_fine_residual_value_range()
+
+        gt_combined = self._decode_staged_combined_1d(coarse_map, fine_high_map)
+        coarse_1d = self._decode_coarse_1d_from_map(coarse_map)
+        blurred_coarse = self._blur_coarse_1d(
+            coarse_1d,
+            flatline_source=gt_combined,
+            past_seed=past_seed,
+        )
+        residual = torch.clamp(future_norm - blurred_coarse, -fine_range, fine_range)
+        return self.to_2d._encode_values_in_range(
+            residual,
+            value_range=fine_range,
+            height=fine_h,
+        )
+
+    def _decode_blurred_coarse_plus_fine(
+        self,
+        coarse_map: torch.Tensor,
+        fine_map: torch.Tensor,
+        *,
+        past_seed: Optional[torch.Tensor] = None,
+        cdf_decoder: str = "mean",
+        expectation_sharpen_temp: Optional[float] = None,
+    ) -> torch.Tensor:
+        coarse_1d = self._decode_coarse_1d_from_map(
+            coarse_map,
+            cdf_decoder=cdf_decoder,
+            expectation_sharpen_temp=expectation_sharpen_temp,
+        )
+        fine_1d = self._decode_fine_1d_from_map(
+            fine_map,
+            coarse_height=coarse_map.shape[2],
+            cdf_decoder=cdf_decoder,
+            expectation_sharpen_temp=expectation_sharpen_temp,
+        )
+        combined = coarse_1d + fine_1d
+        blurred_coarse = self._blur_coarse_1d(
+            coarse_1d,
+            flatline_source=combined,
+            past_seed=past_seed,
+        )
+        out = blurred_coarse + fine_1d
+        if coarse_map.shape[1] == 1:
+            return out.squeeze(1)
+        return out
+
     def _encode_staged_dual_to_2d_binary(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         coarse_h, fine_h, _finer_h = self._staged_image_heights()
         if self._uses_haar_frequency_staging():
@@ -893,6 +1043,7 @@ class DiffusionTSF(nn.Module):
         fine_map: torch.Tensor,
         from_diffusion: bool = False,
         decoder_method: str = "mean",
+        past_seed: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Decode dual-scale CDF maps to normalized 1D values."""
         if from_diffusion:
@@ -900,6 +1051,14 @@ class DiffusionTSF(nn.Module):
             fine_map = (fine_map + 1.0) / 2.0
         cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
         temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
+        if self._uses_flatline_blur_fine_target():
+            return self._decode_blurred_coarse_plus_fine(
+                coarse_map,
+                fine_map,
+                past_seed=past_seed,
+                cdf_decoder=cdf_decoder,
+                expectation_sharpen_temp=temperature,
+            )
         if self._uses_haar_frequency_staging():
             return self.to_2d.decode_haar_frequency_dual(
                 coarse_map,
@@ -1305,7 +1464,19 @@ class DiffusionTSF(nn.Module):
 
         past_norm, future_norm, _stats = self._normalize_sequence(past, future)
         future_maps = self._encode_staged_maps(future_norm)
-        target_2d = future_maps[stage]
+        if stage == "fine" and self._uses_flatline_blur_fine_target():
+            k = int(self.config.lookback_overlap)
+            if k > 0:
+                past_seed = past_norm[..., k - 1]
+            else:
+                past_seed = past_norm[..., -1]
+            target_2d = self._encode_fine_target_flatline_blur(
+                future_norm,
+                future_maps,
+                past_seed=past_seed,
+            )
+        else:
+            target_2d = future_maps[stage]
         W_fut = target_2d.shape[3]
         H = target_2d.shape[2]
 
@@ -1979,11 +2150,17 @@ class DiffusionTSF(nn.Module):
             future_2d_coarse = coarse_for_decode.to(device)
             future_2d_fine = generated_2d
             future_2d_finer = None
+            k = int(self.config.lookback_overlap)
+            if k > 0:
+                past_seed = past_norm[..., k - 1]
+            else:
+                past_seed = past_norm[..., -1]
             future_norm = self.decode_dual_from_2d(
                 future_2d_coarse,
                 future_2d_fine,
                 from_diffusion=False,
                 decoder_method=decoder_method,
+                past_seed=past_seed,
             )
         else:
             future_2d_coarse = coarse_for_decode.to(device)
@@ -2311,11 +2488,14 @@ class DiffusionTSF(nn.Module):
         future_by_scale = future_2d_flat.reshape(BV, 2, 1, H, W_fut)
         future_2d_coarse = future_by_scale[:, 0, 0].reshape(B, V, H, W_fut)
         future_2d_fine = future_by_scale[:, 1, 0].reshape(B, V, H, W_fut)
+        k = int(self.config.lookback_overlap)
+        past_seed = past_norm[..., k - 1] if k > 0 else past_norm[..., -1]
         future_norm = self.decode_dual_from_2d(
             future_2d_coarse,
             future_2d_fine,
             from_diffusion=False,
             decoder_method=decoder_method,
+            past_seed=past_seed,
         )
         future = self._denormalize(future_norm, stats)
 

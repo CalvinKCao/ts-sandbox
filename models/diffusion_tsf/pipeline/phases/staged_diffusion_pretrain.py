@@ -66,6 +66,9 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "fourier_high_freq_percent": float(state.fourier_high_freq_percent),
         "fourier_fine_max_scale": float(state.fourier_fine_max_scale),
         "fourier_flatline_atol": float(state.fourier_flatline_atol),
+        "coarse_flatline_blur_fine_target": bool(state.coarse_flatline_blur_fine_target),
+        "coarse_flatline_blur_radius": int(state.coarse_flatline_blur_radius),
+        "coarse_flatline_blur_kernel": str(state.coarse_flatline_blur_kernel),
         "max_scale": max_scale,
         "dit_patch_size": list(state.dit_patch_size),
         "dit_embed_dim": int(state.dit_embed_dim),
@@ -515,6 +518,10 @@ def patch_stage_globals(mod: Any, state: PipelineState, stage: str, *, honor_dat
         if state.fourier_fine_max_scale_per_variate
         else None
     )
+    mod.COARSE_FLATLINE_BLUR_FINE_TARGET = bool(state.coarse_flatline_blur_fine_target)
+    mod.COARSE_FLATLINE_BLUR_RADIUS = int(state.coarse_flatline_blur_radius)
+    mod.COARSE_FLATLINE_BLUR_KERNEL = str(state.coarse_flatline_blur_kernel)
+    mod.COARSE_FLATLINE_BLUR_ATOL = state.coarse_flatline_blur_atol
 
 
 class StagedDiffusionPretrainPhase(PipelinePhase):

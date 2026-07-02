@@ -1858,6 +1858,11 @@ def decode_staged_anchor_components(
     )
     coarse_np = coarse_1d.reshape(B, V, -1).detach().cpu().numpy()
     fine_np = fine_1d.reshape(B, V, -1).detach().cpu().numpy()
+    if getattr(fine_model.config, "coarse_flatline_blur_fine_target", False):
+        combined = torch.from_numpy(coarse_np + fine_np).to(device=coarse_1d.device, dtype=coarse_1d.dtype)
+        coarse_t = coarse_1d.reshape(B, V, -1)
+        blurred = fine_model._blur_coarse_1d(coarse_t, flatline_source=combined)
+        coarse_np = blurred.detach().cpu().numpy()
     k = int(getattr(fine_model.config, "lookback_overlap", 0))
     if k > 0:
         coarse_np = coarse_np[..., k:]

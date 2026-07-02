@@ -63,6 +63,10 @@ class PipelineState:
     fourier_flatline_atol: float = 1e-8
     fourier_high_freq_cutoff_bins_per_variate: Optional[List[int]] = None
     fourier_fine_max_scale_per_variate: Optional[List[float]] = None
+    coarse_flatline_blur_fine_target: bool = False
+    coarse_flatline_blur_radius: int = 4
+    coarse_flatline_blur_kernel: str = "gaussian"
+    coarse_flatline_blur_atol: Optional[float] = None
     dit_patch_size: Tuple[int, int] = (8, 8)
     dit_embed_dim: int = 384
     dit_depth: int = 8
@@ -259,6 +263,12 @@ class PipelineState:
                 init_kwargs[key] = float(init_kwargs[key])
         if "fourier_high_freq_cutoff_bin" in init_kwargs:
             init_kwargs["fourier_high_freq_cutoff_bin"] = int(init_kwargs["fourier_high_freq_cutoff_bin"])
+        if "coarse_flatline_blur_radius" in init_kwargs:
+            init_kwargs["coarse_flatline_blur_radius"] = int(init_kwargs["coarse_flatline_blur_radius"])
+        if "coarse_flatline_blur_fine_target" in init_kwargs:
+            init_kwargs["coarse_flatline_blur_fine_target"] = bool(init_kwargs["coarse_flatline_blur_fine_target"])
+        if "coarse_flatline_blur_atol" in init_kwargs and init_kwargs["coarse_flatline_blur_atol"] is not None:
+            init_kwargs["coarse_flatline_blur_atol"] = float(init_kwargs["coarse_flatline_blur_atol"])
         if "max_scale_by_dataset" in init_kwargs:
             init_kwargs["max_scale_by_dataset"] = {
                 str(k): float(v) for k, v in init_kwargs["max_scale_by_dataset"].items()

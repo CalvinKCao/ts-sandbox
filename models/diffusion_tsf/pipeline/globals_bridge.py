@@ -66,6 +66,10 @@ def patch_globals(
         if state.fourier_fine_max_scale_per_variate
         else None
     )
+    mod.COARSE_FLATLINE_BLUR_FINE_TARGET = bool(state.coarse_flatline_blur_fine_target)
+    mod.COARSE_FLATLINE_BLUR_RADIUS = int(state.coarse_flatline_blur_radius)
+    mod.COARSE_FLATLINE_BLUR_KERNEL = str(state.coarse_flatline_blur_kernel)
+    mod.COARSE_FLATLINE_BLUR_ATOL = state.coarse_flatline_blur_atol
     mod.DIT_PATCH_SIZE = tuple(state.dit_patch_size)
     mod.DIT_EMBED_DIM = state.dit_embed_dim
     mod.DIT_DEPTH = state.dit_depth

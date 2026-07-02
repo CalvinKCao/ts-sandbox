@@ -53,6 +53,10 @@ class DiffusionTSFConfig:
     fourier_mirror_pad_frac: float = 0.25
     fourier_high_freq_cutoff_bins_per_variate: Optional[List[int]] = None
     fourier_fine_max_scale_per_variate: Optional[List[float]] = None
+    coarse_flatline_blur_fine_target: bool = False
+    coarse_flatline_blur_radius: int = 4
+    coarse_flatline_blur_kernel: str = "gaussian"
+    coarse_flatline_blur_atol: Optional[float] = None
 
     # unified time axis (L+F vs Future-Only)
     unified_time_axis: bool = False
