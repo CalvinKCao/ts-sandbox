@@ -104,6 +104,8 @@ if [[ "$REPO" == /home/* ]]; then
     exit 1
 fi
 cd "$REPO"
+# shellcheck source=utils/mmpd_submit_helpers.sh
+source "$REPO/utils/mmpd_submit_helpers.sh"
 
 MMPD_REPO="$REPO/temp/MMPD"
 MMPD_URL="https://github.com/Thinklab-SJTU/MMPD.git"
@@ -123,23 +125,11 @@ filter_datasets_available() {
     local ds path
     local -a available=()
     for ds in "${DATASETS[@]}"; do
-        path=$(
-            python3 - "$ds" "$REPO" <<'PY'
-import sys
-from pathlib import Path
-
-ds, repo = sys.argv[1], Path(sys.argv[2])
-sys.path.insert(0, str(repo))
-from utils.eval_mmpd_gaussian_anchor import DATASET_FILES
-
-path = DATASET_FILES.get(ds)
-print(path if path and path.is_file() else "")
-PY
-        )
-        if [[ -n "$path" ]]; then
+        path="$(mmpd_dataset_file_path "$ds" "$REPO" 2>/dev/null || true)"
+        if [[ -n "$path" && -f "$path" ]]; then
             available+=("$ds")
         else
-            echo "WARN: skipping ${ds} — dataset file missing under ${REPO}/datasets" >&2
+            echo "WARN: skipping ${ds} — dataset file missing (${path:-unknown path})" >&2
         fi
     done
     if [[ ${#available[@]} -eq 0 ]]; then

@@ -19,13 +19,11 @@ DEPENDENCY=""
 DATASET=""
 TUNE_ARGS=(--mmpd-tune-trials 7 --mmpd-tune-epochs 10 --mmpd-tune-patience 3 --time 0:45:00)
 
+# shellcheck source=utils/mmpd_submit_helpers.sh
+source "${SCRIPT_DIR}/utils/mmpd_submit_helpers.sh"
+
 read_datasets_csv() {
-    python3 - <<PY
-import yaml
-from pathlib import Path
-cfg = yaml.safe_load(Path("${SCRIPT_DIR}/${CONFIG}").read_text())
-print(",".join(cfg["mmpd"]["datasets"]))
-PY
+    read_mmpd_yaml_datasets "${SCRIPT_DIR}/${CONFIG}"
 }
 
 EXTRA=()
