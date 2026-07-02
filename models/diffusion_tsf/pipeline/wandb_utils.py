@@ -348,3 +348,43 @@ def log_visualization_paths(
             cap = f"{caption_prefix}/{cap}"
         images.append(wandb.Image(p, caption=cap))
     wandb.log({wandb_key: images})
+
+
+def _scalar_wandb_entries(data: Dict[str, Any], *, prefix: str = "") -> Dict[str, Any]:
+    """Keep only wandb-summary-safe scalar values."""
+    out: Dict[str, Any] = {}
+    for key, value in data.items():
+        if value is None:
+            continue
+        full_key = f"{prefix}{key}" if prefix else key
+        if isinstance(value, (int, float, bool)):
+            out[full_key] = value
+        elif isinstance(value, str) and len(value) <= 512:
+            out[full_key] = value
+    return out
+
+
+def log_phase_diagnostics_result(
+    result: Optional[Dict[str, Any]],
+    *,
+    summary_prefix: str = "",
+) -> None:
+    """Log summary scalars, config metadata, and viz paths from a diagnostics bundle."""
+    if not result:
+        return
+    summary = result.get("summary") or {}
+    if summary:
+        scalars = _scalar_wandb_entries(summary, prefix=summary_prefix)
+        config_text = {
+            k: v for k, v in summary.items()
+            if isinstance(v, str) and (k.startswith("architecture/") or k.startswith("loss/"))
+        }
+        if config_text:
+            merge_run_config(config_text)
+        if scalars:
+            log_summary(scalars)
+    config = result.get("config")
+    if config:
+        merge_run_config(config)
+    for key, paths in (result.get("viz") or {}).items():
+        log_visualization_paths(paths, wandb_key=key)

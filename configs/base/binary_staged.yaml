@@ -112,11 +112,8 @@ experiment:
   dit_num_heads: 6
   dit_mlp_ratio: 4.0
   dit_dropout: 0.0
-  use_dual_scale: false
   use_triple_scale: false
   diffusion_stage: joint
-  dual_scale_fine_weight: 0.5
-  dual_scale_independent_timesteps: true
   use_guidance_channel: false
   cfg_dropout: 0.0
   deterministic_anchor_loss: true
@@ -161,7 +158,7 @@ experiment:
 
 phases:
   - phase: staged_diffusion_pretrain
-    phase1_config_name: binary_dual_scale
+    phase1_config_name: binary_dual_scale_staged
     n_samples: 10000
     epochs: 20
     patience: 4

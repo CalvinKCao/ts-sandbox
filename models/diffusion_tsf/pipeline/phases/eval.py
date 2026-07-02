@@ -20,7 +20,6 @@ from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.config import visualization_settings
 from models.diffusion_tsf.pipeline.visualize_utils import (
-    generate_dual_scale_comparisons,
     generate_pipeline_visualizations,
 )
 
@@ -275,33 +274,6 @@ class EvalPhase(PipelinePhase):
             )
             stats = (norm_stats["mean"], norm_stats["std"])
             all_viz_paths: list = []
-
-            try:
-                if state.use_dual_scale and diff_ckpt:
-                    dual_paths = generate_dual_scale_comparisons(
-                        diff_ckpt_path=diff_ckpt,
-                        itrans_ckpt_path=ft_itrans_ckpt,
-                        dataset_name=state.dataset,
-                        variate_indices=variate_indices,
-                        output_dir=os.path.join(viz_output_dir, "dual_scale"),
-                        device=device,
-                        tuned_params=tuned_params,
-                        lookback_length=pipeline_mod.LOOKBACK_LENGTH,
-                        forecast_length=pipeline_mod.FORECAST_LENGTH,
-                        diffusion_sampler=viz_cfg.get("dual_scale_sampler", state.eval_sampler),
-                        num_inference_steps=int(viz_cfg.get("dual_scale_inference_steps", 20)),
-                        variables_to_plot=int(viz_cfg.get("n_dual_scale_vars", 3)),
-                        n_samples=n_viz,
-                        random_seed=state.seed,
-                        jpeg_dpi=jpeg_dpi,
-                        tag="eval_dual_scale",
-                    )
-                    all_viz_paths.extend(dual_paths)
-                    wandb_utils.log_visualization_paths(
-                        dual_paths, wandb_key="eval/dual_scale_visualizations",
-                    )
-            except Exception as e:
-                logger.warning(f"Dual-scale eval visualizations failed: {e}", exc_info=True)
 
             try:
                 pipe_paths = generate_pipeline_visualizations(

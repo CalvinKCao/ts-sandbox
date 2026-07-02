@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+from datetime import datetime
 from functools import lru_cache
 from typing import Any, Dict, Optional, Tuple
 
@@ -22,6 +23,28 @@ MMPD_MASKAE_FAIR_13D_CAMPAIGN_DATE = "06-16"
 MMPD_MASKAE_FAIR_13D_DIR = os.path.join(
     REPO, "results", "datasets", "06-16-mmpd-maskae-fair-13d"
 )
+
+MMPD_DECODER_GRAD_ACCUM_200_LR_LO_RAW = "mmpd_decoder_flat_subsets_grad_accum_200_lr_lo"
+MMPD_DECODER_GRAD_ACCUM_200_LR_LO_NICKNAME = "MMPD Decoder (subset tuned)"
+MMPD_DECODER_GRAD_ACCUM_200_LR_LO_CAMPAIGN_DATE = "07-02"
+MMPD_DECODER_GRAD_ACCUM_200_LR_LO_DIR = os.path.join(
+    REPO, "results", "datasets", "07-02-mmpd-decoder-grad-accum-200-lr-lo-subset"
+)
+MMPD_DECODER_GRAD_ACCUM_200_LR_LO_JOBS: Dict[str, str] = {
+    "ETTh1": "4037459",
+    "ETTh2": "4037460",
+    "ETTm1": "4037461",
+    "ETTm2": "4037462",
+    "illness": "4037463",
+    "exchange_rate": "4037464",
+    "weather": "4038279",
+    "electricity": "4038280",
+    "traffic": "4038281",
+    "PeMS": "4038282",
+    "solar_Alabama": "4038283",
+    "dalia": "4037470",
+    "dynamic": "4038284",
+}
 
 MMPD_MASKAE_FAIR_13D_JOBS: Dict[str, str] = {
     "ETTh1": "3969137",
@@ -95,6 +118,8 @@ def leaderboard_nickname(
         return MMPD_SUBSET_NICKNAME
     if raw_config == MMPD_MASKAE_FAIR_13D_RAW:
         return MMPD_MASKAE_FAIR_13D_NICKNAME
+    if raw_config == MMPD_DECODER_GRAD_ACCUM_200_LR_LO_RAW:
+        return MMPD_DECODER_GRAD_ACCUM_200_LR_LO_NICKNAME
     if raw_config:
         return strip_leaderboard_markdown(display_config(raw_config))
     if yaml_path:
@@ -115,9 +140,35 @@ def mmpd_subset_run_stem(dataset: str, job_id: Optional[str] = None) -> str:
     return f"{MMPD_SUBSET_CAMPAIGN_DATE}-{jid}-{dataset}-{MMPD_SUBSET_RAW}"
 
 
+def mmpd_leaderboard_run_stem(
+    dataset: str,
+    raw_config: str,
+    *,
+    job_id: str,
+    campaign_date: Optional[str] = None,
+) -> str:
+    date = campaign_date or datetime.now().strftime("%m-%d")
+    return f"{date}-{job_id}-{dataset}-{raw_config}"
+
+
 def mmpd_fair_13d_run_stem(dataset: str, job_id: Optional[str] = None) -> str:
     jid = job_id or MMPD_MASKAE_FAIR_13D_JOBS[dataset]
-    return f"{MMPD_MASKAE_FAIR_13D_CAMPAIGN_DATE}-{jid}-{dataset}-{MMPD_MASKAE_FAIR_13D_RAW}"
+    return mmpd_leaderboard_run_stem(
+        dataset,
+        MMPD_MASKAE_FAIR_13D_RAW,
+        job_id=jid,
+        campaign_date=MMPD_MASKAE_FAIR_13D_CAMPAIGN_DATE,
+    )
+
+
+def mmpd_decoder_grad_accum_200_lr_lo_run_stem(dataset: str, job_id: Optional[str] = None) -> str:
+    jid = job_id or MMPD_DECODER_GRAD_ACCUM_200_LR_LO_JOBS[dataset]
+    return mmpd_leaderboard_run_stem(
+        dataset,
+        MMPD_DECODER_GRAD_ACCUM_200_LR_LO_RAW,
+        job_id=jid,
+        campaign_date=MMPD_DECODER_GRAD_ACCUM_200_LR_LO_CAMPAIGN_DATE,
+    )
 
 
 def nickname_for_wandb_run(run: Any) -> str:
@@ -172,6 +223,46 @@ def load_mmpd_fair_13d_metrics(dataset: str) -> Optional[Dict[str, Any]]:
         "anchor_mae": anchor_mae,
         "crps": crps,
         "source": "06-16-mmpd-maskae-fair-13d",
+        "partial_path": partial,
+        "tuning_path": tuning_path if os.path.isfile(tuning_path) else None,
+        "tuned_hparams": tuned_hparams,
+        "raw": data,
+    }
+
+
+def load_mmpd_decoder_grad_accum_200_lr_lo_metrics(dataset: str) -> Optional[Dict[str, Any]]:
+    partial = os.path.join(
+        MMPD_DECODER_GRAD_ACCUM_200_LR_LO_DIR, "partials", f"{dataset}_mmpd.json"
+    )
+    if not os.path.isfile(partial):
+        return None
+    import json
+
+    with open(partial, encoding="utf-8") as f:
+        data = json.load(f)
+    anchor_mse = data.get("anchor_mse")
+    if anchor_mse is None:
+        anchor_mse = data.get("mse")
+    anchor_mae = data.get("anchor_mae")
+    if anchor_mae is None:
+        anchor_mae = data.get("mae")
+    crps = data.get("crps")
+    if anchor_mse is None or anchor_mae is None or crps is None:
+        return None
+
+    tuning_path = os.path.join(
+        MMPD_DECODER_GRAD_ACCUM_200_LR_LO_DIR, "tuning", f"{dataset}_best.json"
+    )
+    tuned_hparams = None
+    if os.path.isfile(tuning_path):
+        with open(tuning_path, encoding="utf-8") as f:
+            tuned_hparams = json.load(f).get("hparams")
+
+    return {
+        "anchor_mse": anchor_mse,
+        "anchor_mae": anchor_mae,
+        "crps": crps,
+        "source": "07-02-mmpd-decoder-grad-accum-200-lr-lo-subset",
         "partial_path": partial,
         "tuning_path": tuning_path if os.path.isfile(tuning_path) else None,
         "tuned_hparams": tuned_hparams,

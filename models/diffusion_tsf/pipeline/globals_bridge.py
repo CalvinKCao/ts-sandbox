@@ -76,11 +76,8 @@ def patch_globals(
     mod.DIT_NUM_HEADS = state.dit_num_heads
     mod.DIT_MLP_RATIO = state.dit_mlp_ratio
     mod.DIT_DROPOUT = state.dit_dropout
-    mod.USE_DUAL_SCALE = state.use_dual_scale
     mod.USE_TRIPLE_SCALE = state.use_triple_scale
     mod.DIFFUSION_STAGE = state.diffusion_stage
-    mod.DUAL_SCALE_FINE_WEIGHT = state.dual_scale_fine_weight
-    mod.DUAL_SCALE_INDEPENDENT_TIMESTEPS = state.dual_scale_independent_timesteps
     mod.USE_GUIDANCE_CHANNEL = state.use_guidance_channel
     mod.GUIDANCE_TYPE = state.guidance_type
     mod.MMPD_PATCH_SIZE = int(state.mmpd_patch_size)

@@ -40,7 +40,6 @@ def test_patch_guidance_mixer_and_dit_shapes():
         diffusion_chunk_horizon=chunk_hz,
         guidance_type="patch_decoder",
         mmpd_patch_size=patch_size,
-        use_dual_scale=False,
         diffusion_stage="joint",
         use_guidance_channel=True,
     )

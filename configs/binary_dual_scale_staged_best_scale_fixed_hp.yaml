@@ -24,7 +24,6 @@ experiment:
   dit_patch_size:
   - 8
   - 8
-  use_dual_scale: false
   diffusion_stage: joint
   use_guidance_channel: false
   cfg_dropout: 0.0

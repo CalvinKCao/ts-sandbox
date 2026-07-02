@@ -147,10 +147,7 @@ class ITransFinetuneHPPhase(PipelinePhase):
                 state.dataset, variate_indices, stride=train_stride, test_stride=test_stride,
             )
             diag = run_itrans_finetune_diagnostics(state, ckpt_path=ft_ckpt, train_ds=train_ds)
-            if diag.get("summary"):
-                wandb_utils.log_summary({f"diag/{k}": v for k, v in diag["summary"].items() if isinstance(v, (int, float))})
-            for key, paths in (diag.get("viz") or {}).items():
-                wandb_utils.log_visualization_paths(paths, wandb_key=key)
+            wandb_utils.log_phase_diagnostics_result(diag)
         except Exception as e:
             logger.warning("iTrans finetune diagnostics failed: %s", e, exc_info=True)
 

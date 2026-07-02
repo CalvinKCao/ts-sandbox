@@ -56,3 +56,4 @@ mmpd:
     point_weight: [0.005, 0.05]        # log-uniform; paper lambda=0.99 -> 0.01
     dropout: 0.2                       # fixed (paper default)
     batch_size: [8, 32]                # int; capped per-dataset in train cmd
+  leaderboard: true

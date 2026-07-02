@@ -521,111 +521,6 @@ def generate_staged_dual_scale_comparisons(
     return saved
 
 
-def generate_dual_scale_comparisons(
-    *,
-    diff_ckpt_path: str,
-    itrans_ckpt_path: str,
-    dataset_name: str,
-    variate_indices: Sequence[int],
-    output_dir: str,
-    device: torch.device,
-    tuned_params: Optional[Dict[str, Any]] = None,
-    lookback_length: int = 96,
-    forecast_length: int = 96,
-    diffusion_sampler: str = "anchor",
-    num_inference_steps: int = 20,
-    variables_to_plot: int = 3,
-    sample_indices: Optional[Sequence[int]] = None,
-    n_samples: int = 3,
-    random_seed: int = 42,
-    jpeg_dpi: int = 100,
-    tag: str = "dual_scale",
-) -> List[str]:
-    """Dual-scale CDF visualization (coarse/fine/combined + 2D maps)."""
-    from models.diffusion_tsf.train_multivariate_pipeline import (
-        create_diffusion_model,
-        load_dataset,
-        load_itransformer_from_checkpoint,
-        load_diffusion_state_keep_attached_guidance,
-    )
-    from models.diffusion_tsf.guidance import iTransformerGuidance
-    from models.diffusion_tsf.visualize_comparison import (
-        apply_checkpoint_architecture,
-        infer_anchor_kwargs,
-        infer_diffusion_type,
-        infer_model_type,
-    )
-
-    n_vars = len(variate_indices)
-    _, _, test_ds, norm_stats = load_dataset(
-        dataset_name, list(variate_indices), stride=1,
-        lookback=lookback_length, horizon=forecast_length,
-    )
-    if len(test_ds) == 0:
-        raise ValueError(f"No test samples for {dataset_name}")
-
-    if sample_indices is None:
-        sample_indices = pick_sample_indices(len(test_ds), n_samples, seed=random_seed)
-
-    mean = torch.tensor(norm_stats["mean"], dtype=torch.float32)
-    std = torch.tensor(norm_stats["std"], dtype=torch.float32)
-
-    itrans_guidance_model = load_itransformer_from_checkpoint(str(itrans_ckpt_path), n_vars, device)
-    diff_ckpt = torch.load(diff_ckpt_path, map_location=device, weights_only=False)
-    meta = diff_ckpt.get("config") or tuned_params or {}
-    diff_type = infer_diffusion_type(diff_ckpt, meta.get("diffusion_type"))
-    backbone = infer_model_type(diff_ckpt)
-    applied_h = apply_checkpoint_architecture(diff_ckpt, diff_type)
-    anchor_kwargs = infer_anchor_kwargs(diff_ckpt, meta if isinstance(meta, dict) else {})
-
-    itrans_guidance = iTransformerGuidance(itrans_guidance_model)
-    diff_model = create_diffusion_model(
-        n_variates=n_vars,
-        diffusion_type=diff_type,
-        model_type=backbone,
-        guidance_model=itrans_guidance,
-        **anchor_kwargs,
-    ).to(device)
-    load_diffusion_state_keep_attached_guidance(diff_model, diff_ckpt["model_state_dict"])
-    diff_model.eval()
-
-    os.makedirs(output_dir, exist_ok=True)
-    saved: List[str] = []
-
-    for sample_index in sample_indices:
-        past, future = test_ds[sample_index]
-        past_t = past.unsqueeze(0).to(device)
-
-        with torch.no_grad():
-            res = diff_model.generate(
-                past_t,
-                sampler=diffusion_sampler,
-                num_inference_steps=num_inference_steps,
-            )
-
-        if "past_2d_coarse" not in res:
-            logger.warning("Model is not dual-scale; skipping dual-scale viz for sample %s", sample_index)
-            continue
-
-        saved.append(_plot_dual_scale_sample(
-            res=res,
-            diff_model=diff_model,
-            past=past,
-            future=future,
-            mean=mean,
-            std=std,
-            dataset_name=dataset_name,
-            sample_index=sample_index,
-            output_dir=output_dir,
-            tag=tag,
-            variables_to_plot=variables_to_plot,
-            applied_h=applied_h,
-            jpeg_dpi=jpeg_dpi,
-        ))
-
-    return saved
-
-
 def generate_pipeline_visualizations(
     model: torch.nn.Module,
     itrans_model: torch.nn.Module,
@@ -784,27 +679,7 @@ def run_pretrain_diffusion_visualizations(
             tag=tag,
         )
 
-    if not diff_ckpt_path and not fine_ckpt:
-        return []
-
-    return generate_dual_scale_comparisons(
-        diff_ckpt_path=diff_ckpt_path or fine_ckpt,
-        itrans_ckpt_path=itrans_ckpt_path,
-        dataset_name=state.dataset,
-        variate_indices=variate_indices,
-        output_dir=output_dir,
-        device=device,
-        tuned_params=tuned_params,
-        lookback_length=state.lookback_length,
-        forecast_length=state.forecast_length,
-        diffusion_sampler=viz.get("dual_scale_sampler", "anchor"),
-        num_inference_steps=int(viz.get("dual_scale_inference_steps", 20)),
-        variables_to_plot=int(viz.get("n_dual_scale_vars", 3)),
-        n_samples=1 if state.smoke_test else int(viz.get("n_samples", 3)),
-        random_seed=state.seed,
-        jpeg_dpi=int(viz.get("jpeg_dpi", 100)),
-        tag=tag,
-    )
+    return []
 
 
 def run_staged_finetune_visualizations(
@@ -1135,6 +1010,9 @@ def run_staged_synthetic_pretrain_diagnostics(
     tuned_params: Optional[Dict[str, Any]] = None,
     n_samples: int = 10000,
     stage: str = "coarse",
+    diffusion_ckpt_path: Optional[str] = None,
+    include_dataset_stats: bool = True,
+    include_phase_start: bool = True,
 ) -> Dict[str, Any]:
     """RealTS + iTransformer diagnostics for staged synthetic pretrain (architecture.md §Phase 1)."""
     from models.diffusion_tsf.realts import get_synthetic_dataloader
@@ -1183,22 +1061,29 @@ def run_staged_synthetic_pretrain_diagnostics(
     ckpt_meta["itrans_loaded_from_checkpoint"] = bool(itrans_meta.get("loaded", True))
     ckpt_meta["itrans_source"] = str(itrans_meta.get("source", "checkpoint"))
 
-    stats = compute_synthetic_dataset_stats(
-        dataset,
-        n_probe=32 if state.smoke_test else 256,
-        seed=state.seed,
+    stats = (
+        compute_synthetic_dataset_stats(
+            dataset,
+            n_probe=32 if state.smoke_test else 256,
+            seed=state.seed,
+        )
+        if include_dataset_stats
+        else {}
     )
 
     summary = {
-        "pretrain/n_variates": stats["pretrain_n_variates"],
-        "pretrain/stats_n_probe": stats["pretrain_stats_n_probe"],
         "pretrain/itrans_loaded": int(ckpt_meta["itrans_loaded_from_checkpoint"]),
         "pretrain/itrans_seq_len": ckpt_meta["itrans_seq_len"],
         "pretrain/itrans_pred_len": ckpt_meta["itrans_pred_len"],
     }
-    for i, (m, s) in enumerate(zip(stats["pretrain_variate_means"], stats["pretrain_variate_stds"])):
-        summary[f"pretrain/variate_{i}_mean"] = m
-        summary[f"pretrain/variate_{i}_std"] = s
+    if include_dataset_stats and stats:
+        summary.update({
+            "pretrain/n_variates": stats["pretrain_n_variates"],
+            "pretrain/stats_n_probe": stats["pretrain_stats_n_probe"],
+        })
+        for i, (m, s) in enumerate(zip(stats["pretrain_variate_means"], stats["pretrain_variate_stds"])):
+            summary[f"pretrain/variate_{i}_mean"] = m
+            summary[f"pretrain/variate_{i}_std"] = s
 
     config_updates = {**stats, **ckpt_meta}
     viz_paths: Dict[str, List[str]] = {}
@@ -1211,12 +1096,22 @@ def run_staged_synthetic_pretrain_diagnostics(
     if state.smoke_test:
         return {"summary": summary, "config": config_updates, "viz": viz_paths}
 
-    model, _itrans, device = _build_staged_encoding_model(
-        state,
-        itrans_ckpt_path,
-        stage=stage,
-        tuned_params=tuned_params,
-    )
+    if diffusion_ckpt_path and os.path.exists(diffusion_ckpt_path):
+        model, _ = _load_staged_diffusion_from_ckpt(
+            ckpt_path=diffusion_ckpt_path,
+            stage=stage,
+            itrans_ckpt_path=itrans_ckpt_path,
+            n_vars=int(state.n_variates),
+            device=device,
+            tuned_params=tuned_params,
+        )
+    else:
+        model, _, device = _build_staged_encoding_model(
+            state,
+            itrans_ckpt_path,
+            stage=stage,
+            tuned_params=tuned_params,
+        )
     coarse_model = None
     if stage == "fine":
         coarse_ckpt = getattr(state, "diffusion_coarse_pretrain_ckpt", None)
@@ -1240,22 +1135,23 @@ def run_staged_synthetic_pretrain_diagnostics(
             )
     from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
 
-    run_phase_start_diagnostics(
-        state,
-        phase_name=f"staged_diffusion_pretrain/{stage}",
-        models=[model],
-        model_labels=[f"diffusion_{stage}"],
-        datasets=[dataset],
-        dataset_prefixes=["pretrain"],
-        ckpt_info=[{
-            "kind": "itrans",
-            "path": itrans_ckpt_path,
-            "n_variates": int(state.n_variates),
-            "lookback": int(state.lookback_length),
-            "horizon": int(state.forecast_length),
-            "extra": {"source": itrans_meta.get("source")},
-        }],
-    )
+    if include_phase_start:
+        run_phase_start_diagnostics(
+            state,
+            phase_name=f"staged_diffusion_pretrain/{stage}",
+            models=[model],
+            model_labels=[f"diffusion_{stage}"],
+            datasets=[dataset] if include_dataset_stats else None,
+            dataset_prefixes=["pretrain"] if include_dataset_stats else None,
+            ckpt_info=[{
+                "kind": "itrans",
+                "path": itrans_ckpt_path,
+                "n_variates": int(state.n_variates),
+                "lookback": int(state.lookback_length),
+                "horizon": int(state.forecast_length),
+                "extra": {"source": itrans_meta.get("source")},
+            }],
+        )
     variables_to_plot = int(viz.get("n_dual_scale_vars", 3))
     jpeg_dpi = int(viz.get("jpeg_dpi", 100))
     sample_index = pick_sample_indices(len(dataset), 1, seed=state.seed)[0]
@@ -1615,6 +1511,7 @@ def run_real_dataset_phase_diagnostics(
     diffusion_ckpt_path: Optional[str] = None,
     coarse_ckpt_path: Optional[str] = None,
     tag: str = "real_dataset",
+    include_phase_start: bool = True,
 ) -> Dict[str, Any]:
     """Shared diagnostics for iTrans / finetune / eval phases on real data."""
     from models.diffusion_tsf.pipeline.phase_diagnostics import (
@@ -1655,15 +1552,17 @@ def run_real_dataset_phase_diagnostics(
             "horizon": int(state.forecast_length),
         })
 
-    summary = run_phase_start_diagnostics(
-        state,
-        phase_name=f"{tag}/{stage}",
-        models=[model],
-        model_labels=[f"diffusion_{stage}"],
-        datasets=[train_ds],
-        dataset_prefixes=["dataset"],
-        ckpt_info=ckpt_info,
-    )
+    summary: Dict[str, Any] = {}
+    if include_phase_start:
+        summary = run_phase_start_diagnostics(
+            state,
+            phase_name=f"{tag}/{stage}",
+            models=[model],
+            model_labels=[f"diffusion_{stage}"],
+            datasets=[train_ds],
+            dataset_prefixes=["dataset"],
+            ckpt_info=ckpt_info,
+        )
 
     variables_to_plot = int(viz.get("n_dual_scale_vars", 3))
     jpeg_dpi = int(viz.get("jpeg_dpi", 100))
@@ -1751,7 +1650,7 @@ def run_itrans_finetune_diagnostics(
     device = state.resolve_device()
     n_iv = int(state.n_variates)
     model = load_itransformer_from_checkpoint(ckpt_path, n_iv, device)
-    run_phase_start_diagnostics(
+    phase_summary = run_phase_start_diagnostics(
         state,
         phase_name="itrans_finetune_hp",
         models=[model],
@@ -1766,6 +1665,7 @@ def run_itrans_finetune_diagnostics(
             "horizon": int(state.forecast_length),
         }],
     )
+    summary = {**stats, **phase_summary}
 
     output_dir = os.path.join(state.results_dir, "viz", "itrans_finetune_diagnostics")
     os.makedirs(output_dir, exist_ok=True)
@@ -1775,43 +1675,37 @@ def run_itrans_finetune_diagnostics(
     variables_to_plot = int(viz.get("n_dual_scale_vars", 3))
     jpeg_dpi = int(viz.get("jpeg_dpi", 100))
 
-    with torch.no_grad():
-        past_b = past_cf.unsqueeze(0).to(device)
-        B, C, L = past_b.shape
-        x_enc = past_b.permute(0, 2, 1)
-        seq_sl = getattr(model, "seq_len", L)
-        if x_enc.shape[1] > seq_sl:
-            x_enc = x_enc[:, -seq_sl:, :]
-        pred_len = int(getattr(model, "pred_len", future_cf.shape[-1]))
-        x_dec = torch.zeros(B, pred_len, C, device=device)
-        out = model(x_enc, None, x_dec, None)
-        if isinstance(out, tuple):
-            out = out[0]
-        guidance_norm = out.permute(0, 2, 1)[0].cpu()
-
-    paths = [
-        _plot_realts_1d_pre_post_norm(
-            past=past_cf, future=future_cf,
-            past_norm=past_cf, future_norm=future_cf,
-            sample_index=sample_index, output_dir=output_dir,
-            lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
-            variables_to_plot=variables_to_plot,
-        ),
-    ]
-    viz_out = {"summary": stats, "viz": {"viz/itrans_finetune/dataset_1d": paths}}
+    viz_out: Dict[str, Any] = {"summary": summary, "viz": {}}
     try:
         from models.diffusion_tsf.guidance import iTransformerGuidance
-        from models.diffusion_tsf.train_multivariate_pipeline import create_diffusion_model, anchor_kwargs_from_params
+        from models.diffusion_tsf.train_multivariate_pipeline import create_diffusion_model
         guidance = iTransformerGuidance(model)
         enc_model = create_diffusion_model(guidance_model=guidance, diffusion_stage="coarse").to(device)
         enc_model.eval()
-        past_b2 = past_cf.unsqueeze(0).to(device)
-        future_b2 = future_cf.unsqueeze(0).to(device)
+        past_b = past_cf.unsqueeze(0).to(device)
+        future_b = future_cf.unsqueeze(0).to(device)
         with torch.no_grad():
-            past_norm, future_norm, norm_stats = enc_model._normalize_sequence(past_b2, future_b2)
+            past_norm, future_norm, norm_stats = enc_model._normalize_sequence(past_b, future_b)
+            future_maps = enc_model._encode_staged_maps(future_norm)
             W_fut = future_norm.shape[-1]
-            g_norm = enc_model._get_guidance_forecast_norm(past_b2, past_norm, norm_stats, W_fut)
+            g_norm = enc_model._get_guidance_forecast_norm(past_b, past_norm, norm_stats, W_fut)
             g_maps = enc_model._encode_staged_maps(g_norm)
+        viz_out["viz"]["viz/itrans_finetune/dataset_1d"] = [
+            _plot_realts_1d_pre_post_norm(
+                past=past_cf, future=future_cf,
+                past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
+                sample_index=sample_index, output_dir=output_dir,
+                lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
+                variables_to_plot=variables_to_plot,
+            )
+        ]
+        viz_out["viz"]["viz/itrans_finetune/dataset_2d"] = [
+            _plot_staged_2d_maps_native(
+                maps={k: v.detach().cpu() for k, v in future_maps.items() if k in {"coarse", "fine"}},
+                sample_index=sample_index, output_dir=output_dir, tag="dataset_sample",
+                variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
+            )
+        ]
         viz_out["viz"]["viz/itrans_finetune/itrans_2d"] = [
             _plot_staged_2d_maps_native(
                 maps={k: v.detach().cpu() for k, v in g_maps.items() if k in {"coarse", "fine"}},
@@ -1829,7 +1723,7 @@ def run_itrans_finetune_diagnostics(
             )
         ]
     except Exception as exc:
-        logger.warning("iTrans 2D diagnostic maps skipped: %s", exc)
+        logger.warning("iTrans finetune diagnostic maps skipped: %s", exc)
 
     return viz_out
 

@@ -561,18 +561,24 @@ class StagedEvalPhase(PipelinePhase):
             train_ds, _, _, _ = load_dataset(
                 state.dataset, variate_indices, stride=train_stride, test_stride=test_stride,
             )
-            diag = run_real_dataset_phase_diagnostics(
-                state,
-                train_ds=train_ds,
-                model=fine_model,
-                itrans_ckpt_path=ft_guidance_ckpt,
-                stage="fine",
-                diffusion_ckpt_path=_stage_finetune_ckpt(state, "fine"),
-                coarse_ckpt_path=_stage_finetune_ckpt(state, "coarse"),
-                tag="staged_eval",
-            )
-            for key, paths in (diag.get("viz") or {}).items():
-                wandb_utils.log_visualization_paths(paths, wandb_key=key)
+            coarse_ft = _stage_finetune_ckpt(state, "coarse")
+            fine_ft = _stage_finetune_ckpt(state, "fine")
+            for eval_stage, eval_model, eval_ckpt, eval_coarse in (
+                ("coarse", coarse_model, coarse_ft, None),
+                ("fine", fine_model, fine_ft, coarse_ft),
+            ):
+                diag = run_real_dataset_phase_diagnostics(
+                    state,
+                    train_ds=train_ds,
+                    model=eval_model,
+                    itrans_ckpt_path=ft_guidance_ckpt,
+                    stage=eval_stage,
+                    diffusion_ckpt_path=eval_ckpt,
+                    coarse_ckpt_path=eval_coarse,
+                    tag=f"staged_eval/{eval_stage}",
+                    include_phase_start=(eval_stage == "coarse"),
+                )
+                wandb_utils.log_phase_diagnostics_result(diag)
         except Exception as e:
             logger.warning("[%s] eval diagnostics failed: %s", self.name, e, exc_info=True)
 

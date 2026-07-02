@@ -35,13 +35,32 @@ def _layer_description(module: nn.Module) -> str:
     return name
 
 
-def log_model_architecture(model: Any, *, label: str = "model") -> None:
-    """Emit a layer-by-layer description of the denoiser subtree."""
-    root = model
+def _denoiser_root(model: Any) -> nn.Module:
     if hasattr(model, "noise_predictor"):
-        root = model.noise_predictor
-    elif hasattr(model, "model"):
-        root = model.model
+        return model.noise_predictor
+    if hasattr(model, "model"):
+        return model.model
+    return model
+
+
+def architecture_summary_string(model: Any, *, max_leaf_modules: int = 40) -> str:
+    """Compact layer chain for wandb summary / config."""
+    root = _denoiser_root(model)
+    leaf_mods = [
+        m for _, m in root.named_modules()
+        if _ != "" and len(list(m.children())) == 0
+    ]
+    if not leaf_mods:
+        return root.__class__.__name__
+    chain = " > ".join(_layer_description(m) for m in leaf_mods[:max_leaf_modules])
+    if len(leaf_mods) > max_leaf_modules:
+        chain += f" ... (+{len(leaf_mods) - max_leaf_modules} more)"
+    return chain
+
+
+def log_model_architecture(model: Any, *, label: str = "model") -> str:
+    """Emit a layer-by-layer description of the denoiser subtree."""
+    root = _denoiser_root(model)
 
     lines: List[str] = []
     for mod_name, module in root.named_modules():
@@ -55,48 +74,62 @@ def log_model_architecture(model: Any, *, label: str = "model") -> None:
     logger.info("[%s] PyTorch architecture (%d leaf modules):", label, len(lines))
     for line in lines:
         logger.debug("  %s", line)
+    chain = architecture_summary_string(model)
     if lines:
-        leaf_mods = [
-            m for _, m in root.named_modules()
-            if _ != "" and len(list(m.children())) == 0
-        ]
-        chain = " > ".join(_layer_description(m) for m in leaf_mods[:40])
-        if len(leaf_mods) > 40:
-            chain += f" ... (+{len(leaf_mods) - 40} more)"
         logger.info("[%s] layer chain: %s", label, chain)
+    return chain
 
 
-def log_training_loss_config(model: Any, state: Any = None) -> None:
+def training_loss_config_dict(model: Any) -> Dict[str, Any]:
     cfg = getattr(model, "config", None)
     if cfg is None:
-        logger.info("training loss: unknown (no model.config)")
-        return
+        return {"training_loss": "unknown (no model.config)"}
 
-    parts: List[str] = []
     diffusion_type = getattr(cfg, "d3pm_loss_type", None) or getattr(cfg, "diffusion_type", "binary")
-    parts.append(f"diffusion_type={diffusion_type}")
-
     loss_weighting = getattr(cfg, "loss_weighting", "none")
-    parts.append(f"loss_weighting={loss_weighting}")
-    parts.append("regular_loss = loss_x0 + loss_zt (BCE on clean-bit + flip-mask heads)")
+    pred_target = getattr(cfg, "prediction_target", "x0")
+    stage = getattr(cfg, "diffusion_stage", None)
+
+    out: Dict[str, Any] = {
+        "diffusion_type": str(diffusion_type),
+        "loss_weighting": str(loss_weighting),
+        "prediction_target": str(pred_target),
+        "regular_loss": "loss_x0 + loss_zt (BCE on clean-bit + flip-mask heads)",
+    }
+    if stage:
+        out["diffusion_stage"] = str(stage)
 
     if getattr(cfg, "use_deterministic_anchor_loss", False):
         lam = float(getattr(cfg, "deterministic_anchor_lambda", 0.99))
-        parts.append(
-            f"combined = {lam:.4f} * regular_loss + {1.0 - lam:.4f} * anchor_BCE "
+        out["deterministic_anchor_lambda"] = lam
+        out["anchor_loss_weight"] = 1.0 - lam
+        out["combined_loss"] = (
+            f"{lam:.4f} * regular_loss + {1.0 - lam:.4f} * anchor_BCE "
             f"(stationary_flat anchor at t=T-1)"
         )
     else:
-        parts.append("combined = regular_loss (anchor disabled)")
+        out["combined_loss"] = "regular_loss (anchor disabled)"
 
-    pred_target = getattr(cfg, "prediction_target", "x0")
-    parts.append(f"prediction_target={pred_target}")
+    return out
 
-    stage = getattr(cfg, "diffusion_stage", None)
-    if stage:
-        parts.append(f"diffusion_stage={stage}")
 
+def log_training_loss_config(model: Any, state: Any = None) -> Dict[str, Any]:
+    info = training_loss_config_dict(model)
+    if info.get("training_loss"):
+        logger.info("training loss: %s", info["training_loss"])
+        return info
+
+    parts = [
+        f"diffusion_type={info['diffusion_type']}",
+        f"loss_weighting={info['loss_weighting']}",
+        info["regular_loss"],
+        f"combined = {info['combined_loss']}",
+        f"prediction_target={info['prediction_target']}",
+    ]
+    if "diffusion_stage" in info:
+        parts.append(f"diffusion_stage={info['diffusion_stage']}")
     logger.info("training loss: %s", " | ".join(parts))
+    return info
 
 
 def log_checkpoint_metadata(
@@ -220,8 +253,11 @@ def run_phase_start_diagnostics(
         labels = model_labels or [f"model_{i}" for i in range(len(models))]
         for model, label in zip(models, labels):
             if model is not None:
-                log_model_architecture(model, label=f"{phase_name}/{label}")
-                log_training_loss_config(model, state)
+                arch_key = f"architecture/{label}"
+                summary[arch_key] = log_model_architecture(model, label=f"{phase_name}/{label}")
+                loss_info = log_training_loss_config(model, state)
+                for lk, lv in loss_info.items():
+                    summary[f"loss/{label}/{lk}"] = lv
 
     if datasets:
         prefixes = dataset_prefixes or [f"dataset_{i}" for i in range(len(datasets))]

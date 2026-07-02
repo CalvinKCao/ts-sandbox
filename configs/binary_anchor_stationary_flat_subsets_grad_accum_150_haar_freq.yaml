@@ -21,7 +21,7 @@ experiment:
 
 phases:
   - phase: staged_diffusion_pretrain
-    phase1_config_name: binary_dual_scale
+    phase1_config_name: binary_dual_scale_staged
     n_samples: 10000
     epochs: 20
     patience: 4

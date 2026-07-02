@@ -685,7 +685,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 device=device,
                 guidance_type=state.guidance_type,
             )
-            run_phase_start_diagnostics(
+            phase_start = run_phase_start_diagnostics(
                 state,
                 phase_name=self.name,
                 models=[probe_model],
@@ -709,6 +709,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     },
                 ],
             )
+            wandb_utils.log_phase_diagnostics_result({"summary": phase_start})
             del probe_model
         except Exception as e:
             logger.warning("[%s] phase-start diagnostics failed: %s", self.name, e, exc_info=True)
@@ -1058,9 +1059,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     diffusion_ckpt_path=final_ckpt,
                     coarse_ckpt_path=coarse_ft if self.stage == "fine" else None,
                     tag=f"diffusion_{self.stage}_finetune",
+                    include_phase_start=False,
                 )
-                for key, paths in (diag.get("viz") or {}).items():
-                    wandb_utils.log_visualization_paths(paths, wandb_key=key)
+                wandb_utils.log_phase_diagnostics_result(diag)
                 del finetuned_model
             except Exception as e:
                 logger.warning("[%s] post-finetune diagnostics failed: %s", self.name, e, exc_info=True)

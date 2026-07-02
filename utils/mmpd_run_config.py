@@ -63,3 +63,5 @@ def apply_mmpd_run_config(args: Any, block: Dict[str, Any], *, repo_root: Path =
     tune_params = block.get("tune_params")
     if isinstance(tune_params, dict):
         args.mmpd_tune_params = dict(tune_params)
+    if block.get("leaderboard", False):
+        args.mmpd_log_leaderboard = True

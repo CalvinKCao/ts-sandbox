@@ -8,7 +8,7 @@
 # USAGE (run from login node):
 #   ./submit_grid.sh --configs configs/binary_anchor.yaml --datasets ETTh1,exchange_rate
 #   ./submit_grid.sh --smoke
-#   ./submit_grid.sh --resume --configs configs/binary_dual_scale.yaml --datasets ETTh1
+#   ./submit_grid.sh --resume --configs configs/binary_dual_scale_staged.yaml --datasets ETTh1
 #   ./submit_grid.sh --parallel-optuna 4 --configs configs/binary_dual_scale_staged.yaml --datasets ETTh1
 # =============================================================================
 
@@ -22,7 +22,8 @@ SMOKE=0
 RESUME=0
 CKPT_CONFIG=""
 DEPENDENCY=""
-WANDB_PROJECT="${WANDB_PROJECT:-ts-sandbox-binary-anchor-92d3}"
+WANDB_PROJECT=""
+WANDB_PROJECT_EXPLICIT=0
 WALL_OVERRIDE=""
 PARALLEL_OPTUNA=""
 if [[ "$(hostname)" == *"narval"* ]]; then
@@ -42,7 +43,7 @@ while [[ $# -gt 0 ]]; do
         --resume) RESUME=1; shift ;;
         --ckpt-config) CKPT_CONFIG="$2"; shift 2 ;;
         --dependency) DEPENDENCY="$2"; shift 2 ;;
-        --wandb-project) WANDB_PROJECT="$2"; shift 2 ;;
+        --wandb-project) WANDB_PROJECT="$2"; WANDB_PROJECT_EXPLICIT=1; shift 2 ;;
         --time) WALL_OVERRIDE="$2"; shift 2 ;;
         --parallel-optuna) PARALLEL_OPTUNA="$2"; shift 2 ;;
         --gpu) GPU_TYPE="$2"; shift 2 ;;
@@ -210,7 +211,10 @@ for CFG in "${CONF_ARR[@]}"; do
             fi
 
             if [[ -n "${WANDB_API_KEY:-}" ]]; then
-                PY_ARGS+=(--wandb --wandb-project "$WANDB_PROJECT")
+                PY_ARGS+=(--wandb)
+                if [[ "$WANDB_PROJECT_EXPLICIT" -eq 1 ]]; then
+                    PY_ARGS+=(--wandb-project "$WANDB_PROJECT")
+                fi
             fi
 
             if [[ "$SMOKE" -eq 1 ]]; then

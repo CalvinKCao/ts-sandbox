@@ -130,14 +130,6 @@ def apply_checkpoint_architecture(ckpt: dict, diffusion_type: str, image_height:
         train_pipeline.ZERO_GUIDANCE_FORECAST = bool(cfg.zero_guidance_forecast)
     elif isinstance(cfg, dict) and 'zero_guidance_forecast' in cfg:
         train_pipeline.ZERO_GUIDANCE_FORECAST = bool(cfg['zero_guidance_forecast'])
-    if hasattr(cfg, 'use_dual_scale'):
-        train_pipeline.USE_DUAL_SCALE = bool(cfg.use_dual_scale)
-    elif isinstance(cfg, dict) and 'use_dual_scale' in cfg:
-        train_pipeline.USE_DUAL_SCALE = bool(cfg['use_dual_scale'])
-    if hasattr(cfg, 'dual_scale_fine_weight'):
-        train_pipeline.DUAL_SCALE_FINE_WEIGHT = float(cfg.dual_scale_fine_weight)
-    elif isinstance(cfg, dict) and 'dual_scale_fine_weight' in cfg:
-        train_pipeline.DUAL_SCALE_FINE_WEIGHT = float(cfg['dual_scale_fine_weight'])
     if hasattr(cfg, 'staged_representation'):
         train_pipeline.STAGED_REPRESENTATION = str(cfg.staged_representation)
     elif isinstance(cfg, dict) and 'staged_representation' in cfg:

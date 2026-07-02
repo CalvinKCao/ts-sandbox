@@ -123,11 +123,8 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'coarse_flatline_blur_atol': COARSE_FLATLINE_BLUR_ATOL,
         'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
         'window_norm_center': WINDOW_NORM_CENTER,
-        'use_dual_scale': USE_DUAL_SCALE,
         'use_triple_scale': USE_TRIPLE_SCALE,
         'diffusion_stage': DIFFUSION_STAGE,
-        'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
-        'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
         'use_guidance_channel': USE_GUIDANCE_CHANNEL,
         'cfg_dropout': CFG_DROPOUT,
         'disable_cross_attention': DISABLE_CROSS_ATTENTION,
@@ -325,11 +322,8 @@ USE_AMP = True
 USE_GRADIENT_CHECKPOINTING = True
 UNET_MAX_CHUNK_SIZE = 128
 DISABLE_CROSS_ATTENTION = False
-USE_DUAL_SCALE = False
 USE_TRIPLE_SCALE = False
 DIFFUSION_STAGE = "joint"
-DUAL_SCALE_FINE_WEIGHT = 0.5
-DUAL_SCALE_INDEPENDENT_TIMESTEPS = True
 USE_GUIDANCE_CHANNEL = True
 CFG_DROPOUT = 0.1
 MODEL_TYPE = "dit"
@@ -1258,10 +1252,7 @@ def create_diffusion_model(
         model_type=o("model_type", MODEL_TYPE),
         disable_cross_attention=DISABLE_CROSS_ATTENTION,
         diffusion_stage=stage,
-        use_dual_scale=USE_DUAL_SCALE,
         use_triple_scale=USE_TRIPLE_SCALE,
-        dual_scale_fine_weight=DUAL_SCALE_FINE_WEIGHT,
-        dual_scale_independent_timesteps=DUAL_SCALE_INDEPENDENT_TIMESTEPS,
         dit_patch_size=DIT_PATCH_SIZE,
         dit_embed_dim=DIT_EMBED_DIM,
         dit_depth=DIT_DEPTH,
@@ -2524,10 +2515,7 @@ def _promote_best_trial_to_final(
                 'max_scale': MAX_SCALE,
                 'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
                 'window_norm_center': WINDOW_NORM_CENTER,
-                'use_dual_scale': USE_DUAL_SCALE,
                 'diffusion_stage': DIFFUSION_STAGE,
-                'dual_scale_fine_weight': DUAL_SCALE_FINE_WEIGHT,
-                'dual_scale_independent_timesteps': DUAL_SCALE_INDEPENDENT_TIMESTEPS,
                 'use_guidance_channel': USE_GUIDANCE_CHANNEL,
                 'cfg_dropout': CFG_DROPOUT,
                 'disable_cross_attention': DISABLE_CROSS_ATTENTION,

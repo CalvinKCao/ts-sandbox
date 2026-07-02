@@ -11,13 +11,18 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 from utils.leaderboard_config_nicknames import (
+    MMPD_DECODER_GRAD_ACCUM_200_LR_LO_JOBS,
+    MMPD_DECODER_GRAD_ACCUM_200_LR_LO_NICKNAME,
+    MMPD_DECODER_GRAD_ACCUM_200_LR_LO_RAW,
     MMPD_MASKAE_FAIR_13D_JOBS,
     MMPD_MASKAE_FAIR_13D_NICKNAME,
     MMPD_SUBSET_JOBS,
     MMPD_SUBSET_NICKNAME,
     leaderboard_nickname,
+    load_mmpd_decoder_grad_accum_200_lr_lo_metrics,
     load_mmpd_fair_13d_metrics,
     load_mmpd_subset_metrics,
+    mmpd_decoder_grad_accum_200_lr_lo_run_stem,
     mmpd_fair_13d_run_stem,
     mmpd_stub_wandb_metrics,
     mmpd_subset_run_stem,
@@ -117,8 +122,15 @@ def backfill_dataset_and_tags(api, *, entity: str, project: str, dry_run: bool) 
 def _existing_mmpd_groups(api, entity: str, project: str) -> set[str]:
     groups: set[str] = set()
     for run in api.runs(f"{entity}/{project}"):
-        if run.job_type == MMPD_JOB_TYPE or (run.group or "").endswith("-mmpd_subset"):
-            groups.add(run.group or "")
+        group = run.group or ""
+        if run.job_type == MMPD_JOB_TYPE:
+            groups.add(group)
+            continue
+        if group.endswith("-mmpd_subset"):
+            groups.add(group)
+            continue
+        if group.endswith(f"-{MMPD_DECODER_GRAD_ACCUM_200_LR_LO_RAW}"):
+            groups.add(group)
     return groups
 
 
@@ -245,6 +257,70 @@ def create_mmpd_fair_13d_stubs(api, *, entity: str, project: str, dry_run: bool)
     return {"created": created, "skipped": skipped}
 
 
+def create_mmpd_decoder_grad_accum_stubs(api, *, entity: str, project: str, dry_run: bool) -> dict:
+    import wandb
+
+    existing = _existing_mmpd_groups(api, entity, project)
+    created = skipped = 0
+
+    for dataset, job_id in sorted(MMPD_DECODER_GRAD_ACCUM_200_LR_LO_JOBS.items()):
+        metrics = load_mmpd_decoder_grad_accum_200_lr_lo_metrics(dataset)
+        if metrics is None:
+            print(f"[skip] no partial for {dataset}")
+            skipped += 1
+            continue
+
+        group = mmpd_decoder_grad_accum_200_lr_lo_run_stem(dataset, job_id)
+        if group in existing:
+            print(f"[skip] mmpd decoder stub exists: {group}")
+            skipped += 1
+            continue
+
+        name = make_phase_run_name(group, MMPD_JOB_TYPE)
+        summary = mmpd_stub_wandb_metrics(metrics)
+        config = {
+            "config_nickname": MMPD_DECODER_GRAD_ACCUM_200_LR_LO_NICKNAME,
+            "dataset": dataset,
+            "baseline": "mmpd_decoder_flat_subsets_grad_accum_200_lr_lo",
+            "job_id": job_id,
+            "metrics_source": metrics["source"],
+            "partial_path": metrics["partial_path"],
+            "stub": True,
+        }
+        if metrics.get("tuning_path"):
+            config["tuning_path"] = metrics["tuning_path"]
+        if metrics.get("tuned_hparams"):
+            config["mmpd_tuned_hparams"] = metrics["tuned_hparams"]
+
+        if dry_run:
+            print(f"would create mmpd decoder stub: {name} | {group} | {dataset}")
+            created += 1
+            continue
+
+        run = wandb.init(
+            project=project,
+            entity=entity,
+            name=name,
+            group=group,
+            job_type=MMPD_JOB_TYPE,
+            tags=[dataset, "eval", "mmpd", "stub", "decoder", "subset-tuned"],
+            notes="offline MMPD Decoder subset-tuned eval from JSON partial (no artifacts)",
+            config=config,
+            settings=wandb.Settings(console="off"),
+        )
+        try:
+            clean = {k: v for k, v in summary.items() if v is not None}
+            wandb.log(clean, step=0)
+            for k, v in clean.items():
+                run.summary[k] = v
+            print(f"created {_run_path(run)} | {name}")
+            created += 1
+        finally:
+            wandb.finish()
+
+    return {"created": created, "skipped": skipped}
+
+
 def patch_mmpd_stub_metrics(api, *, entity: str, project: str, dry_run: bool) -> dict:
     """Fix metric keys on existing MMPD stub runs (eval/anchor_* -> eval/staged_*)."""
     import wandb
@@ -259,7 +335,6 @@ def patch_mmpd_stub_metrics(api, *, entity: str, project: str, dry_run: bool) ->
                 dataset = tag
                 break
         if dataset is None:
-            parsed_group = (run.group or "").split("-")
             for ds in MMPD_SUBSET_JOBS:
                 if ds in (run.group or ""):
                     dataset = ds
@@ -315,6 +390,11 @@ def main() -> None:
         action="store_true",
         help="Create mmpd_eval stubs for 06-16-mmpd-maskae-fair-13d only",
     )
+    parser.add_argument(
+        "--decoder-grad-accum-only",
+        action="store_true",
+        help="Create mmpd_eval stubs for 07-02-mmpd-decoder-grad-accum-200-lr-lo-subset only",
+    )
     parser.add_argument("--patch-mmpd-metrics", action="store_true", help="Fix metric keys on existing MMPD stubs")
     parser.add_argument("--dataset-tags-only", action="store_true", help="Only backfill dataset config + tags")
     args = parser.parse_args()
@@ -330,6 +410,15 @@ def main() -> None:
             api, entity=args.entity, project=args.project, dry_run=args.dry_run
         )
         print(results["mmpd_fair_13d"])
+        print("done:", results)
+        return
+
+    if args.decoder_grad_accum_only:
+        print("Creating MMPD Decoder grad-accum stubs...")
+        results["mmpd_decoder_grad_accum"] = create_mmpd_decoder_grad_accum_stubs(
+            api, entity=args.entity, project=args.project, dry_run=args.dry_run
+        )
+        print(results["mmpd_decoder_grad_accum"])
         print("done:", results)
         return
 

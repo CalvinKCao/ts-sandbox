@@ -1,26 +1,217 @@
-> The new phases specific logs  should all be filed under a lower priority in the logging module so I can easily disable
+# Binary Staged Diffusion for Time Series Forecasting
 
-> For all of the phases listed below, at beginning of the phase print the entire Pytorch layer by layer architecture for the model. E.g. linear layer(dimension) > whatever whatever. > Another linear later
+This repo trains a probabilistic forecaster that treats future values as **2D binary images** and denoises them with diffusion. The core bet is simple: real series have sharp jumps, flat segments, and geometric structure that Gaussian MSE models smear out. By encoding values as hard cumulative-distribution (CDF) maps and diffusing in the **binary domain** (bit-flip noise, BCE loss), the model gets a much denser training signal on exactly those shapes.
 
-> For every diffusion stage, create visualizations for all conditioning component. Make sure they are represented exactly a they are needed to the model. This includes 2D lookback, 2D itrans pred (if enabled), and for the bottleneck cross-attn log the top other variates attended to and their attention weight
-
-> For all stages, add a quick log for what training loss is used (if there areultiple, log the weight of each)
-
-> When done implementing run a mock test for every single new visualization to demo what they might look like (then delete the mocking script)
-
-> Keep the existing visualization thing where you visualize the coarse, fine and combined prediction thing but please for that can you clarify what the x-axis on each plot means (why is there such a huge lookback window with negative t values? is this the 2d representation of the lookback? if so this should probably be made clearer)
-
-> For every single visualization you make please clarify the scale - what is the original scale/range of this data point before normalization and what is it now?
-
-> this change goes beyond simple logging or visualization: during the eval stage SAVE the coarse, fine and final predictions for each point in the dataset. while doing eval keep track of the 10 points in the eval set with the HIGHEST error for CPRS and seperately, the HIGHEST error for anchor mse. create visualizations for all of these points (GT vs actual pred). there should be a 48 minimum distance between the starting timestep of any point in the top ten so there isn't too much overlap in these max error points.
-
-# Architecture (ts-sandbox)
-
-Implementation-oriented map for the **current default** binary forecasting stack. Tensor-level detail for the legacy joint dual-scale path is summarized at the end only.
+The pipeline is **staged** (coarse scale, then fine residual), **factorized per variate** (one channel denoised at a time), and **cross-variate only at the bottleneck** via a finetuned iTransformer. Training runs as a YAML-driven multi-phase pipeline from synthetic pretrain through real-data finetune to evaluation.
 
 ---
 
-## Current default (production)
+## Architecture Overview
+
+### Training phases at a glance
+
+| Phase | Name | Purpose |
+|-------|------|---------|
+| **1** | Synthetic staged pretrain | Teach the denoiser to produce **valid CDF maps** on synthetic `RealTS` windows — no real dataset yet |
+| **iTrans** | iTransformer finetune | Fit cross-variate context tokens on real data (cold start; synthetic iTrans tends toward a trivial mean predictor) |
+| **2** | Coarse diffusion finetune | Optuna-tune the **coarse** DiT on real data; warm-start from Phase 1 |
+| **3** | Fine diffusion finetune | Same for the **fine** residual denoiser; conditions on GT coarse during training |
+| **4** | Staged eval | Chain coarse → fine sampling, decode, metrics (CRPS, anchor MSE/MAE, viz) |
+
+Phase 1 is deliberately narrow: it does **not** need to match real data statistics. Its job is to make the network fluent in the representation — monotone binary staircases, correct column alignment, stable BCE gradients — before real finetuning teaches domain-specific patterns.
+
+```mermaid
+flowchart LR
+    subgraph P1["Phase 1 — Synthetic pretrain"]
+        S1[RealTS synthetic windows] --> E1[Encode coarse + fine CDF]
+        E1 --> D1[Train coarse DiT]
+        E1 --> D2[Train fine DiT]
+    end
+
+    subgraph iT["iTrans finetune"]
+        R1[Real dataset windows] --> IT[iTransformer HP search]
+    end
+
+    subgraph P2["Phases 2–3 — Real finetune"]
+        R2[Real dataset] --> FC[Coarse DiT HP + train]
+        R2 --> FF[Fine DiT HP + train]
+        D1 -. warm-start .-> FC
+        D2 -. warm-start .-> FF
+    end
+
+    subgraph P4["Phase 4 — Eval"]
+        FC --> EV[Sample coarse → sample fine → decode]
+        FF --> EV
+        EV --> M[Metrics + viz]
+    end
+
+    P1 --> iT --> P2 --> P4
+    IT -. context tokens .-> FC
+    IT -. context tokens .-> FF
+```
+
+### End-to-end data flow
+
+Each training or inference step follows the same encoding path. Past and future horizons are normalized, mapped to 2D CDF images, and fed to a **FactorizedDiT** that denoises **one variate per forward pass**.
+
+```mermaid
+flowchart TB
+    subgraph Input
+        TS["Multivariate window<br/>(past ∥ future)"]
+    end
+
+    subgraph Norm["Normalization"]
+        DS[Dataset z-score per variate]
+        WN[Per-window mean/std]
+        TS --> DS --> WN
+    end
+
+    subgraph Encode["2D encoding (per variate)"]
+        WN --> CB[Coarse bin index<br/>H=16 over full range]
+        WN --> FB[Fine bin index<br/>H=16 within coarse bin]
+        CB --> CM["Coarse CDF map<br/>(H×W binary staircase)"]
+        FB --> FM["Fine CDF map<br/>(H×W binary staircase)"]
+    end
+
+    subgraph Cond["Conditioning"]
+        PM[Past CDF columns] --> COND[Visual cond patches]
+        IT[iTransformer tokens] --> XATTN[Bottleneck cross-attention]
+    end
+
+    subgraph Diff["Binary diffusion (one variate at a time)"]
+        CM --> XD["XOR noise → x_t"]
+        FM --> XD
+        COND --> DiT[FactorizedDiT]
+        XATTN --> DiT
+        XD --> DiT
+        DiT --> OUT["BCE on x̂₀ and ẑ_t heads"]
+    end
+
+    subgraph Decode["Decode"]
+        SC[Sampled coarse map] --> DD[decode_dual]
+        SF[Sampled fine map] --> DD
+        DD --> VAL[Normalized 1D forecast]
+        VAL --> DN[Denormalize]
+    end
+```
+
+**Training vs inference.** During training, the fine stage sees **ground-truth** coarse CDF columns as an extra condition channel. At inference, coarse is **sampled first**, then fine is sampled conditioned on that draw. Both stages share the same iTransformer context but use **separate checkpoints**.
+
+---
+
+### One variate at a time
+
+Multivariate series are handled with a **factorized batch layout**: each variate is one row in a `(B×V, C, H, W)` tensor. Self-attention inside the DiT runs over **spatial patches only** — there is no variate axis in the transformer.
+
+Cross-variate information enters **once**, at the bottleneck, through cross-attention to `V` iTransformer tokens (one token per variate). This design avoids the memory and compute explosion of joint denoising over `V` channels × `H` × `W` pixels simultaneously. With `unet_max_chunk_size`, large `B×V` batches are chunked through the denoiser without changing the math.
+
+---
+
+### Dual-scale decomposition
+
+A single 256-bin discretization would mean a `256`-row image — expensive to diffuse and slow to train. Instead, value precision is **factored**:
+
+1. **Coarse stage** — bin the normalized value into one of `H_c = 16` bins spanning `[-max_scale, max_scale]`. Encode as a hard binary CDF staircase (all rows from the bottom up to the bin index are `1`).
+2. **Fine stage** — within the selected coarse bin, bin the **residual** into another `H_f = 16` levels. Again a CDF staircase, but over the local residual range `±max_scale / H_c`.
+3. **Decode** — `decode_dual(coarse, fine)` decodes each map to a normalized scalar and **sums** them, then clamps to `[-max_scale, max_scale]`.
+
+Effective resolution is `H_c × H_f = 256` buckets, but each diffusion target is only **16 rows tall**. That is roughly **16× fewer pixels per denoising step** than a flat 256-row map, which is why dual-scale training empirically converges much faster while keeping fine precision.
+
+The two stages are **separate models**. Coarse and fine each get their own Phase 1 pretrain checkpoint and Phase 2/3 finetune run.
+
+---
+
+### Binary representation (BDPM-inspired)
+
+#### Why not Gaussian diffusion on raw values?
+
+Standard DDPMs assume continuous data and Gaussian noise with MSE loss. That pairing is a poor fit for **discretized** structure: quantizing intermediate Gaussians causes artifacts, and MSE trains the network to predict noise rather than exact discrete states. [Binary Diffusion Probabilistic Models (BDPM)](reference/BDPM_ref.md) sidesteps this by working natively in `{0,1}`: forward corruption is **XOR bit-flip**, the denoiser predicts both clean bits and flip masks, and optimization uses **binary cross-entropy**.
+
+We adopt that framework for time-series CDF maps rather than RGB bit-planes.
+
+#### CDF maps vs ViTime-style PDF
+
+An earlier **PDF / skyline** representation placed a one-hot activation on a single row (the value bin) — essentially a ViTime-style vertical stripe. Decoding diffuses gradient through a thin peak; most rows stay at zero, so the BCE/MSE signal is **sparse** and training is slow.
+
+The current **hard binary CDF** fills every row from the bottom up to the bin index:
+
+```
+value bin k  →  rows 0..k are 1, rows k+1..H-1 are 0
+```
+
+Each column is a monotone staircase. Neighboring bins share most of their bits, so flips propagate structured, correlated gradients — much denser supervision per timestep column.
+
+Values are clipped to `[-max_scale, max_scale]` before binning. No Gaussian blur is applied; maps are strictly `{0,1}`.
+
+#### Forward and reverse process
+
+**Schedule.** Quadratic-in-√t betas from `β_start = 10⁻⁵` to `β_end = 0.5` over `T = 1000` steps (`sqrt_linear` schedule).
+
+**Forward (training corruption).** For clean binary map `x₀` and timestep `t`, draw a Bernoulli flip mask `z_t` with per-pixel flip probability `β_t`, then:
+
+$$x_t = x_0 \oplus z_t$$
+
+**Denoiser heads.** The DiT outputs `2×` channels: the first head predicts clean bits `x̂₀` (or equivalently the flip mask under an ε-parameterization); the second predicts `ẑ_t`.
+
+**Loss.** Weighted BCE on both heads:
+
+$$\mathcal{L}_\text{reg} = \mathcal{L}_\text{BCE}(\hat{x}_0, x_0) + \mathcal{L}_\text{BCE}(\hat{z}_t, z_t)$$
+
+Optional min-SNR timestep weighting can rebalance early vs late noise levels.
+
+**Reverse (sampling).** Starting from noise, each step predicts `x̂₀`, thresholds via sigmoid, draws a new flip mask at the lower timestep, and XORs forward. Eval defaults to **DPM-Solver++** (20 steps, 20 samples for probabilistic metrics).
+
+---
+
+### Anchor mechanism (adapted from MMPD)
+
+[MMPD](reference/MMPD_methods_reference.md) (Zhang et al., ICLR 2026) adds a **deterministic anchor** to diffusion training: besides the usual noise-prediction loss at random timesteps, an extra term trains the denoiser to reconstruct the clean target from **maximum noise** in a single forward pass. The combined objective is:
+
+$$\mathcal{L} = \lambda \,\mathcal{L}_\text{reg} + (1-\lambda)\,\mathcal{L}_\text{anchor}, \quad \lambda = 0.99$$
+
+At the anchor timestep `t = T−1`, MMPD feeds **exact zeros** (Gaussian noise cancels the signal). The deterministic prediction is then one MLP pass — no iterative sampling — giving a fast point forecast.
+
+#### Our binary-flat adaptation
+
+The same **λ = 0.99** balance is used, but the anchor input is adapted to binary CDF diffusion:
+
+| MMPD (Gaussian) | This repo (binary flat) |
+|-----------------|-------------------------|
+| Anchor canvas = **0** at max noise | Anchor canvas = **constant 0.5** per pixel (`stationary_flat`) |
+| MSE on noise prediction | BCE on `x̂₀` vs ground-truth CDF map |
+| Anchor at `ᾱ_{k*} ≈ 0.5` | Anchor at `t = T−1` (max flip rate) |
+
+`stationary_flat` means every pixel is 0.5 — the **mean** of Bernoulli(0.5), not random bits. That fixed canvas is the binary analogue of "uninformative max noise": the model must infer the full CDF staircase from context (past columns + iTransformer tokens) alone.
+
+At inference, the **anchor sampler** runs this one-shot path: one forward pass at max noise → sigmoid threshold → decode. No iterative diffusion. Eval reports both anchor metrics (`anchor_mse`, `anchor_mae`) and full DPM++ sample metrics (CRPS, sample-mean MSE).
+
+---
+
+## Analysis
+
+### Where the model excels
+
+**Discontinuities and step functions.** CDF maps represent a level change as a horizontal boundary moving vertically — a coherent shape for convolution and attention. Binary BCE penalizes misplaced boundaries sharply, so jumps are preserved rather than regressed to the mean.
+
+**Flatlines and plateaus.** A constant value is a CDF column with the same cutoff row repeated across time — a flat 2D ridge. The model learns to extend these ridges without the oscillation typical of Gaussian likelihoods.
+
+**Geometric "texture".** Recurring patterns (ramps, spikes, boxcar pulses) appear as repeated motifs in the 2D layout. Dual-scale decomposition keeps coarse structure and fine detail in separate denoising problems, which helps capture both the macro shape and sharp edges.
+
+**Probabilistic spread when needed.** DPM-Solver++ multi-sample inference yields an ensemble for CRPS and top-k metrics; the anchor path remains available for cheap deterministic forecasts.
+
+### Tradeoffs to keep in mind
+
+- Very smooth, high-frequency continuous variation may be better served by more bins or longer fine stages than by coarse+fine alone.
+- Cross-variate coupling is only as strong as the iTransformer bottleneck — there is no pixel-level mixing across channels.
+- Staged inference is sequential (coarse then fine); errors in coarse propagate to fine.
+
+---
+
+## Technical Details
+
+The sections below are aimed at developers and coding assistants working in the repo.
+
+### Current default (production)
 
 **What we run:** staged coarse→fine binary diffusion on hard CDF maps, **stationary-flat anchor** (`0.5` canvas, not random bits), **EMA 0.99** on diffusion weights during finetune, **anchor** training loss (`λ=0.99`), eval with **DPM-Solver++** (20 steps, 20 samples for sweeps).
 
@@ -28,7 +219,7 @@ Implementation-oriented map for the **current default** binary forecasting stack
 |------|-------|----------------|
 | Pipeline | YAML `phases` list | `configs/base/binary_staged.yaml` |
 | Leaf experiment | `binary_anchor_stationary_flat_subsets_ema099` (or `_flat` / `_flat_subsets`) | `configs/binary_anchor_stationary_flat*.yaml` |
-| Representation | Staged coarse + fine CDF (`image_height=16` each) | `use_dual_scale: false`, separate checkpoints per stage |
+| Representation | Staged coarse + fine CDF (`image_height=16` each) | separate checkpoints per stage |
 | `binary_anchor_input_mode` | `stationary_flat` | flat `0.5` XOR anchor |
 | `diffusion_ema_decay` | `0.99` | `training:` section |
 | `deterministic_anchor_lambda` | `0.99` | anchor BCE mixed into train loss |
@@ -39,11 +230,9 @@ Implementation-oriented map for the **current default** binary forecasting stack
 | CFG / guidance channel | off | `use_guidance_channel: false`, `cfg_dropout: 0.0` |
 | Eval sampler | `dpmpp` (sweep) / `anchor` (loss) | `staged_eval` phase overrides |
 
-**Not the default:** joint `use_dual_scale: true` single model (`configs/binary_dual_scale.yaml`) — one forward interleaves coarse+fine rows; production uses **two denoisers** (`diffusion_stage: coarse` / `fine`).
-
 ---
 
-## File map
+### File map
 
 | Area | Files |
 |------|--------|
@@ -56,13 +245,13 @@ Implementation-oriented map for the **current default** binary forecasting stack
 
 ---
 
-## Pipeline (YAML-driven)
+### Pipeline (YAML-driven)
 
 `PipelineState` holds paths and knobs; `Pipeline` runs registered `PipelinePhase` classes in order (`models/diffusion_tsf/pipeline/phases/`). Add steps by subclassing `PipelinePhase`, registering in `phases/__init__.py`, and listing the phase in YAML — avoid one-off shell DAGs.
 
 Sweep / flat-subset reuse configs skip Phase 1 (+ iTrans) via `reuse_pretrain_from_config` / `reuse_checkpoint_from_config` and only re-run Phases 2–4.
 
-### Phase map (doc numbering)
+#### Phase map (doc numbering)
 
 | Doc | YAML `phase` | Implementation |
 |-----|--------------|----------------|
@@ -76,15 +265,15 @@ Default trial/epoch counts below come from `configs/base/binary_staged.yaml`. Sw
 
 ---
 
-### Phase encyclopedia
+#### Phase encyclopedia
 
-#### Phase 1 — Synthetic staged pretrain (`staged_diffusion_pretrain`)
+##### Phase 1 — Synthetic staged pretrain (`staged_diffusion_pretrain`)
 
 Trains **separate** coarse and fine denoisers on synthetic `RealTS` windows (no Optuna in this phase — fixed HP from `use_hardcoded_synthetic_hp` / Phase-1 source config).
 
 - **Entry:** `StagedDiffusionPretrainPhase.execute` → `pretrain_diffusion` per stage.
 - **Stages:** `coarse`, then `fine` (add `finer` when `use_triple_scale: true`).
-- **YAML defaults:** `n_samples: 10000`, `epochs: 20`, `patience: 4`, `phase1_config_name: binary_dual_scale`.
+- **YAML defaults:** `n_samples: 10000`, `epochs: 20`, `patience: 4`, `phase1_config_name: binary_dual_scale_staged`.
 - **Guidance:** frozen synthetic-pretrain iTransformer from Phase-1 source dir (`itrans_hp_best.pt` lineage), or retrain a new iTrans on synthetic data if not available.
 - **Diffusion HP:** reuses `diff_hp.json` / hardcoded synthetic params from the same source (not re-searched here).
 - **Outputs:**
@@ -94,11 +283,7 @@ Trains **separate** coarse and fine denoisers on synthetic `RealTS` windows (no 
 - **Skip when:** both stage ckpts exist locally, in shared cache, or `reuse_pretrain_from_config` copies from a prior run config.
 - **Smoke:** `n_samples ≤ 4`, `epochs = patience = 1`.
 
-> Visualizations: 1. The 1D representation of an PRE-NORMALIZED and POST-INSTANCE-NORMALIZED random sample in the RealTS dataset 2. A 2D representation of the same sample (PRE-NORMALIZED and POST-INSTANCE-NORMALIZED), exactly how it is fed to the model (don't rescale or pad or whatever) 3. A 1D representation of the iTransformer's guidance prediction for this datapoint 4. A 2D representation of the iTransformer's prediciton, exactly how it is fed to the model (don't rescale or pad or whatever) 5. A 1D and 2D representation of the diffusion models final prediction, exactly as it sees it (don't denprmalize)
-
-> Logs: Log basic pretraining dataset stats: # variates, STD/mean per variate, min/max/quartiles. can use a subsample to calculate stats  or speed purposes)7If it doesn't exist already, log whether a pretrained iTransformer was loaded and if so its dimensions (i.e. how many variates, lookback/horizon size) and its filepath
-
-#### iTrans finetune (`itrans_finetune_hp`) — between Phase 1 and Phase 2
+##### iTrans finetune (`itrans_finetune_hp`) — between Phase 1 and Phase 2
 
 Real-data iTransformer HP search; **cold start by default** (`cold_start: true`) — synthetic pretrain is skipped because RealTS pretrain tends toward a trivial mean predictor.
 
@@ -110,12 +295,7 @@ Real-data iTransformer HP search; **cold start by default** (`cold_start: true`)
 - **Skip when:** finetuned ckpt exists, or `reuse_checkpoint_from_config` copies from a sibling config.
 - **Downstream:** Phases 2–4 load this ckpt for cross-variate context tokens (guidance channel stays off in default binary flat runs).
 
-> Visualizations: 1. The 1D and 2D representation of a rabdom sample from current training dataset (PRE-NORMALIZED and POST-INSTANCE-NORMALIZED), exactly how it is fed to the model (don't rescale or pad or whatever) 3. A 1D representation of the iTransformer's prediction for this datapoint 4. A 2D representation of the iTransformer's prediciton, exactly how it will be fed to the diffusion model (don't rescale or pad or whatever) 
-
-> Logs: Log basic dataset stats for the current dataset (can use a subsample to calculate stats  or speed purposes) # variates, STD/mean per variate. 7If it doesn't exist already, log whether a pretrained diffusion  was loaded and if so its dimensions (i.e. how many variates, lookback/horizon size) and its filepath
-
-
-#### Phase 2 — Coarse diffusion finetune HP (`diffusion_coarse_finetune_hp`)
+##### Phase 2 — Coarse diffusion finetune HP (`diffusion_coarse_finetune_hp`)
 
 Optuna-tunes the **coarse** staged DiT on real data; **best trial checkpoint is final** (no extra full retrain after HP).
 
@@ -129,11 +309,7 @@ Optuna-tunes the **coarse** staged DiT on real data; **best trial checkpoint is 
 - **Outputs:** `{checkpoint_dir}/{subset_id}/coarse/best.pt` + `metadata.json` (`tuned_params`).
 - **Skip when:** `best.pt` + `metadata.json` exist, or `reuse_tuned_params_from` copies HP from another config (still retrains with current policy `max_scale`).
 
-
-
-> For phase 3 and 4 log all the exact same stuff as phase 2 for the itrans guidance and the final diffusion
-
-#### Phase 3 — Fine diffusion finetune HP (`diffusion_fine_finetune_hp`)
+##### Phase 3 — Fine diffusion finetune HP (`diffusion_fine_finetune_hp`)
 
 Same machinery as Phase 2 for the **fine** residual denoiser.
 
@@ -144,7 +320,7 @@ Same machinery as Phase 2 for the **fine** residual denoiser.
 - **Outputs:** `{subset_id}/fine/best.pt` + `metadata.json`.
 - **Triple-scale:** optional `diffusion_finer_finetune_hp` after Phase 3 when `use_triple_scale: true` (not in current flat-subset defaults).
 
-#### Phase 4 — Staged eval (`staged_eval`)
+##### Phase 4 — Staged eval (`staged_eval`)
 
 Loads coarse + fine `best.pt`, runs chained sampling, writes metrics and optional viz.
 
@@ -156,7 +332,7 @@ Loads coarse + fine `best.pt`, runs chained sampling, writes metrics and optiona
 - **Skip when:** partial JSON has full metric set and raw NPZ artifacts exist (re-runs if anchor or sample-mean fields missing).
 - **Baselines:** finetuned iTransformer evaluated alongside diffusion when enabled in phase.
 
-### Caching and resume
+#### Caching and resume
 
 | Artifact | Phase |
 |----------|-------|
@@ -169,7 +345,7 @@ Loads coarse + fine `best.pt`, runs chained sampling, writes metrics and optiona
 
 ---
 
-## Data normalization (two layers)
+### Data normalization (two layers)
 
 1. **Dataset z-score** — train-split mean/std per variate (`load_dataset`).
 2. **Per-window norm** — past mean/std applied to past+future when `use_window_normalization: true` (`_normalize_sequence`).
@@ -178,11 +354,11 @@ Synthetic pretrain: `RealTS` + `augmentation.py` (mixed generators, optional cac
 
 ---
 
-## Representation: hard binary CDF
+### Representation: hard binary CDF
 
 Values clipped to `[-max_scale, max_scale]`, binned into `H=16` rows; occupancy map is a monotone staircase in `{0,1}` (no Gaussian blur).
 
-**Staged (default):** same dual decomposition as joint dual-scale, but **separate models**:
+**Staged (default):** dual decomposition with **separate models**:
 
 - **Coarse:** full-range binning → coarse CDF map.
 - **Fine:** residual within coarse bin → fine CDF map.
@@ -192,7 +368,7 @@ Values clipped to `[-max_scale, max_scale]`, binned into `H=16` rows; occupancy 
 
 ---
 
-## Binary diffusion
+### Binary diffusion (implementation)
 
 - Schedule: `sqrt_linear` β from `1e-5` → `0.5`, `num_steps=1000`.
 - Forward: independent Bernoulli XOR flips per pixel (`BinaryDiffusionScheduler`).
@@ -204,7 +380,7 @@ Values clipped to `[-max_scale, max_scale]`, binned into `H=16` rows; occupancy 
 
 ---
 
-## Model: FactorizedDiT (staged path)
+### Model: FactorizedDiT (staged path)
 
 - `model_type: dit` → `FactorizedDiT` (`dit.py`), patch size `(8,8)`, `embed_dim=384`, `depth=8`, `heads=6`.
 - One variate = one batch row (`BV`); self-attention is **spatial patches only** (no variate axis in DiT).
@@ -217,13 +393,13 @@ Chunking: `unet_max_chunk_size` caps `BV` through the denoiser for memory.
 
 ---
 
-## iTransformer
+### iTransformer
 
 Frozen encoder; finetuned per dataset/subset. Provides bottleneck context tokens when cross-attention is enabled. With guidance channel off, it does **not** add a pixel ghost map. Cold-start finetune on real data (`itrans_finetune_hp`, `cold_start: true`).
 
 ---
 
-## Hyperparameters
+### Hyperparameters
 
 Read merged YAML — do not rely on stale `pipeline_config.py` module defaults.
 
@@ -236,30 +412,10 @@ Optuna LR range when tuning: `finetune_hp_lr_min/max` = **`3e-6` – `2e-4`** lo
 
 ---
 
-## Pitfalls
+### Pitfalls
 
-1. **Staged ≠ joint dual-scale** — `use_dual_scale: false` in yaml; two checkpoints, chained eval.
+1. **Staged pipeline only** — separate coarse/fine checkpoints, chained eval.
 2. **Double normalization** — dataset z-score then per-window norm.
 3. **`image_height` must divide patch size** (16 / 8 = 2 patches tall).
 4. **Training flags must reach `PipelineState`** — `training.*` keys need wiring (`training_value()` / `apply_training_section_to_state`); module globals alone are not enough for Optuna paths.
 5. **Subset ckpt paths** use `subset_id` (e.g. `weather_4v_s2`), not bare dataset name.
-
----
-
-## Legacy: joint dual-scale (`use_dual_scale: true`)
-
-Single `FactorizedDiT` forward on interleaved coarse/fine batch rows (`BV×2`), `dual_scale_fine_weight` (e.g. 0.75), `dual_scale_independent_timesteps`, cross-scale attention at DiT bottleneck, guidance ghost on canvas when `use_guidance_channel: true`. Documented in git history and `configs/binary_dual_scale.yaml`; kept for ablations, not current flat-subset sweeps.
-
-**Slurm / venv / classic Phase 0A–2C** monolithic pretrain paths still exist in `train_multivariate_pipeline.py` for old manifests; new work uses YAML phases only.
-
----
-
-## Trimmed from older versions (intentionally)
-
-- Full Slurm DAG and `$STORE/venv` preamble — see `submit_grid.sh` / cluster scripts.
-- Classic monolithic phases (1A/1B/2A/2B/2C joint model) — see Legacy section; staged pipeline above is canonical.
-- Step-by-step `iTransformerTokenAdapter` tensor algebra — see `unet.py` + `guidance.py`.
-- Full FactorizedDiT AdaLN block diagram — see `dit.py`.
-- Duplicate hyperparameter tables mirroring yaml — single source: `configs/base/binary_staged.yaml`.
-- Gaussian / U-Net / ordinal paths unless you enable those `diffusion_type`s.
-

@@ -60,7 +60,25 @@ from models.diffusion_tsf.train_multivariate_pipeline import (
     load_itransformer_from_checkpoint,
 )
 from models.diffusion_tsf.visualize_comparison import choose_extra_indices, denorm
-from utils.visualize_binary_dual_scale_forecast import _itrans_forward
+
+
+def _itrans_forward(
+    model: torch.nn.Module,
+    past: torch.Tensor,
+    forecast_length: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Past (1, C, L) -> forecast (C, F) in normalized space."""
+    B, C, L = past.shape
+    x_enc = past.permute(0, 2, 1)
+    seq_sl = getattr(model, "seq_len", L)
+    if x_enc.shape[1] > seq_sl:
+        x_enc = x_enc[:, -seq_sl:, :]
+    x_dec = torch.zeros(B, forecast_length, C, device=device)
+    out = model(x_enc, None, x_dec, None)
+    if isinstance(out, tuple):
+        out = out[0]
+    return out.permute(0, 2, 1).cpu()[0]
 
 
 def _load_staged_bundle(checkpoint_dir: Path, dataset: str) -> Dict[str, Any]:

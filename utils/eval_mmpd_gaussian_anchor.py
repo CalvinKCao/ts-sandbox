@@ -1478,11 +1478,6 @@ def apply_ckpt_architecture_globals(pipeline: Any, ckpt: Dict[str, Any], diffusi
     if image_height is not None:
         pipeline.IMAGE_HEIGHT = image_height
     pipeline.DISABLE_CROSS_ATTENTION = bool(get_ckpt_config_value(ckpt, "disable_cross_attention", True))
-    pipeline.USE_DUAL_SCALE = bool(get_ckpt_config_value(ckpt, "use_dual_scale", False))
-    pipeline.DUAL_SCALE_FINE_WEIGHT = float(get_ckpt_config_value(ckpt, "dual_scale_fine_weight", 0.5))
-    pipeline.DUAL_SCALE_INDEPENDENT_TIMESTEPS = bool(
-        get_ckpt_config_value(ckpt, "dual_scale_independent_timesteps", True)
-    )
     pipeline.CROSS_VARIATE_CONTEXT_BIAS = float(get_ckpt_config_value(ckpt, "cross_variate_context_bias", 0.0))
     pipeline.CFG_DROPOUT = float(get_ckpt_config_value(ckpt, "cfg_dropout", 0.1))
     pipeline.CFG_SCALE = float(get_ckpt_config_value(ckpt, "cfg_scale", 1.0))
@@ -2433,6 +2428,9 @@ def run_phase_mmpd(
     print(f"[mmpd] {dataset}: summarizing metrics", flush=True)
     metrics = summarize_for_profile(mmpd_pack, args, dataset)
     write_partial_metrics(args.output_dir, dataset, "mmpd", metrics)
+    from utils.log_mmpd_eval_leaderboard import maybe_log_mmpd_eval_leaderboard
+
+    maybe_log_mmpd_eval_leaderboard(args, dataset, metrics)
 
 
 def run_phase_anchor(
@@ -2596,6 +2594,21 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="YAML with top-level mmpd: block (backbone, tune_*, datasets, etc.).",
+    )
+    parser.add_argument(
+        "--mmpd-leaderboard",
+        action="store_true",
+        help="Log mmpd eval partials to ts-sandbox-leaderboard after each dataset.",
+    )
+    parser.add_argument(
+        "--no-mmpd-leaderboard",
+        action="store_true",
+        help="Disable leaderboard logging even if mmpd YAML sets leaderboard: true.",
+    )
+    parser.add_argument(
+        "--force-mmpd-leaderboard",
+        action="store_true",
+        help="Re-log leaderboard even if a prior marker exists for this dataset.",
     )
     parser.add_argument(
         "--anchor-config",
@@ -2826,11 +2839,16 @@ def run_phase_all(args: argparse.Namespace, commit: str) -> None:
 
 def main() -> None:
     args = parse_args()
+    args.mmpd_log_leaderboard = False
     if args.mmpd_run_config is not None:
         from utils.mmpd_run_config import apply_mmpd_run_config, load_mmpd_run_config
 
         mmpd_block = load_mmpd_run_config(args.mmpd_run_config.resolve())
         apply_mmpd_run_config(args, mmpd_block)
+    if args.mmpd_leaderboard:
+        args.mmpd_log_leaderboard = True
+    if args.no_mmpd_leaderboard:
+        args.mmpd_log_leaderboard = False
     if args.mmpd_tune_spec_file is not None:
         import json
 

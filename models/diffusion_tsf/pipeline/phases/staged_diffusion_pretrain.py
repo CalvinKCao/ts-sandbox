@@ -288,7 +288,7 @@ def discover_dataset_run_ckpt_dir(state: PipelineState, config_suffix: str) -> s
     return best_dir
 
 
-def _phase1_config_suffix(state: PipelineState, config_name: str = "binary_dual_scale") -> str:
+def _phase1_config_suffix(state: PipelineState, config_name: str = "binary_dual_scale_staged") -> str:
     """Grid checkpoint stems use raw --dataset, not data_subset subset_id."""
     return f"-{state.dataset}-{config_name}"
 
@@ -296,7 +296,7 @@ def _phase1_config_suffix(state: PipelineState, config_name: str = "binary_dual_
 def _discover_phase1_source_dir(
     state: PipelineState,
     *,
-    config_name: str = "binary_dual_scale",
+    config_name: str = "binary_dual_scale_staged",
 ) -> Optional[str]:
     """Newest *-<dataset>-<config_name> dir under ckpts/ with diff_hp.json."""
     suffix = _phase1_config_suffix(state, config_name)
@@ -339,7 +339,7 @@ def _phase1_source_dir(
     state: PipelineState,
     override: Optional[str] = None,
     *,
-    config_name: str = "binary_dual_scale",
+    config_name: str = "binary_dual_scale_staged",
 ) -> Optional[str]:
     value = override or state.extra.get("phase1_source_dir")
     if value:
@@ -462,21 +462,28 @@ def _log_staged_pretrain_diagnostics(
     itrans_meta: Dict[str, Any],
     best_params: Dict[str, Any],
     n_samples: int,
+    stages: Optional[list] = None,
 ) -> None:
+    stage_list = stages or list(staged_diffusion_stages(state))
     try:
-        result = run_staged_synthetic_pretrain_diagnostics(
-            state,
-            itrans_ckpt_path=itrans_ckpt,
-            itrans_meta=itrans_meta,
-            tuned_params=best_params,
-            n_samples=n_samples,
-        )
-        if result.get("summary"):
-            wandb_utils.log_summary(result["summary"])
-        if result.get("config"):
-            wandb_utils.merge_run_config(result["config"])
-        for key, paths in (result.get("viz") or {}).items():
-            wandb_utils.log_visualization_paths(paths, wandb_key=key)
+        for i, stage in enumerate(stage_list):
+            ckpt = {
+                "coarse": state.diffusion_coarse_pretrain_ckpt,
+                "fine": state.diffusion_fine_pretrain_ckpt,
+                "finer": state.diffusion_finer_pretrain_ckpt,
+            }.get(stage)
+            result = run_staged_synthetic_pretrain_diagnostics(
+                state,
+                itrans_ckpt_path=itrans_ckpt,
+                itrans_meta=itrans_meta,
+                tuned_params=best_params,
+                n_samples=n_samples,
+                stage=stage,
+                diffusion_ckpt_path=ckpt,
+                include_dataset_stats=(i == 0),
+                include_phase_start=True,
+            )
+            wandb_utils.log_phase_diagnostics_result(result)
     except Exception as e:
         logger.warning("Staged synthetic-pretrain diagnostics failed: %s", e, exc_info=True)
 
@@ -488,7 +495,6 @@ def patch_stage_globals(mod: Any, state: PipelineState, stage: str, *, honor_dat
     if stage == "finer" and not state.use_triple_scale:
         raise ValueError("finer staged diffusion requires state.use_triple_scale=True")
     patch_globals(mod, state, honor_dataset_windows=honor_dataset_windows)
-    mod.USE_DUAL_SCALE = False
     mod.USE_TRIPLE_SCALE = bool(state.use_triple_scale)
     mod.DIFFUSION_STAGE = stage
     mod.IMAGE_HEIGHT = {
@@ -642,13 +648,6 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             epochs = 1
             patience = 1
 
-        _log_staged_pretrain_diagnostics(
-            state,
-            itrans_ckpt=itrans_ckpt,
-            itrans_meta=itrans_meta,
-            best_params=best_params,
-            n_samples=n_samples,
-        )
         shared_cache = _stage_pretrain_cache_enabled(self, state)
         shared_wait_seconds = float(self.get("shared_cache_wait_seconds", 6 * 60 * 60))
 
@@ -715,6 +714,14 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                 state.diffusion_fine_pretrain_ckpt = ckpt
             else:
                 state.diffusion_finer_pretrain_ckpt = ckpt
+
+        _log_staged_pretrain_diagnostics(
+            state,
+            itrans_ckpt=itrans_ckpt,
+            itrans_meta=itrans_meta,
+            best_params=best_params,
+            n_samples=n_samples,
+        )
 
         viz_ckpt = state.diffusion_fine_pretrain_ckpt or state.diffusion_coarse_pretrain_ckpt
         if viz_ckpt and itrans_ckpt and not state.smoke_test:

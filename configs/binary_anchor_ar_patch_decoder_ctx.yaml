@@ -3,6 +3,11 @@ extends: configs/binary_anchor_ar.yaml
 training:
   diffusion_effective_batch_multiplier: 1.5
 
+wandb:
+  enabled: true
+  project: ts-sandbox-leaderboard
+  tags: [patch_decoder]
+
 experiment:
   name: binary-anchor-ar-patch-decoder-ctx
   experiment_name: binary_anchor_ar_patch_decoder_ctx
@@ -11,7 +16,7 @@ experiment:
 
 phases:
   - phase: staged_diffusion_pretrain
-    phase1_config_name: binary_dual_scale
+    phase1_config_name: binary_dual_scale_staged
     n_samples: 10000
     epochs: 20
     patience: 4

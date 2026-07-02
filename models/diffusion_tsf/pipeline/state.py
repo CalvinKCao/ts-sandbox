@@ -73,11 +73,8 @@ class PipelineState:
     dit_num_heads: int = 6
     dit_mlp_ratio: float = 4.0
     dit_dropout: float = 0.0
-    use_dual_scale: bool = False
     use_triple_scale: bool = False
     diffusion_stage: str = "joint"
-    dual_scale_fine_weight: float = 0.5
-    dual_scale_independent_timesteps: bool = True
     use_guidance_channel: bool = True
     guidance_type: str = "itransformer"
     mmpd_patch_size: int = 12

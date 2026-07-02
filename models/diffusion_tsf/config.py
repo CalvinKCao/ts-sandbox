@@ -78,10 +78,7 @@ class DiffusionTSFConfig:
     binary_boundary_width: int = 8
     binary_use_boundary_weighted_bce: bool = False
     diffusion_stage: str = "joint"  # joint, coarse, fine, finer
-    use_dual_scale: bool = False
     use_triple_scale: bool = False
-    dual_scale_fine_weight: float = 0.5
-    dual_scale_independent_timesteps: bool = True
 
     # classifier-free guidance (training dropout only; inference is always conditional)
     cfg_dropout: float = 0.1
@@ -228,11 +225,7 @@ class DiffusionTSFConfig:
             raise ValueError(
                 "use_triple_scale has no joint forward path; use staged coarse/fine/finer."
             )
-        if self.use_triple_scale and self.use_dual_scale:
-            raise ValueError("use_dual_scale and use_triple_scale are mutually exclusive.")
         if self.diffusion_stage in {"coarse", "fine", "finer"}:
-            if self.use_dual_scale:
-                raise ValueError("staged models expect use_dual_scale=False.")
             expected_height = {
                 "coarse": self.coarse_image_height,
                 "fine": self.fine_image_height,
@@ -253,13 +246,6 @@ class DiffusionTSFConfig:
                 raise ValueError("fine_image_height must divide dit_patch_size[0].")
             if self.use_triple_scale and self.finer_image_height % self.dit_patch_size[0] != 0:
                 raise ValueError("finer_image_height must divide dit_patch_size[0].")
-        if self.use_dual_scale:
-            if self.image_height != 16:
-                raise ValueError("use_dual_scale=True expects image_height=16.")
-            if self.image_height % self.dit_patch_size[0] != 0:
-                raise ValueError("dual-scale image_height must divide dit_patch_size[0].")
-        if not 0.0 <= self.dual_scale_fine_weight <= 1.0:
-            raise ValueError("dual_scale_fine_weight must be in [0, 1].")
         if not 0.0 <= self.cfg_dropout <= 1.0:
             raise ValueError("cfg_dropout must be in [0, 1].")
         assert 0 <= self.cutout_prob <= 1
@@ -330,8 +316,6 @@ class DiffusionTSFConfig:
             return per_scale * (4 if self.use_triple_scale else 3)
         if self.diffusion_stage == "finer":
             return per_scale * 5
-        if self.use_dual_scale:
-            return per_scale * 2
         if self.use_triple_scale:
             return per_scale * 3
         return per_scale
@@ -340,4 +324,4 @@ class DiffusionTSFConfig:
     def guidance_channels(self) -> int:
         if not self.use_guidance_channel:
             return 0
-        return 2 if self.use_dual_scale else 1
+        return 1
