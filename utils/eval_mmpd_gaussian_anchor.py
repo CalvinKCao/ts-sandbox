@@ -2768,6 +2768,9 @@ def run_phase_all(args: argparse.Namespace, commit: str) -> None:
             mmpd_pack = run_mmpd_eval(args, anchors_by_variant["binary"][dataset], indices)
             results[dataset]["mmpd"] = summarize_for_profile(mmpd_pack, args, dataset)
 
+        if args.mmpd_only:
+            continue
+
         for variant, anchors in anchors_by_variant.items():
             raw_dir = args.output_dir / "raw"
             raw_dir.mkdir(parents=True, exist_ok=True)

@@ -63,3 +63,6 @@ def apply_mmpd_run_config(args: Any, block: Dict[str, Any], *, repo_root: Path =
     tune_params = block.get("tune_params")
     if isinstance(tune_params, dict):
         args.mmpd_tune_params = dict(tune_params)
+    datasets = block.get("datasets")
+    if isinstance(datasets, list) and datasets:
+        args.datasets = [str(d) for d in datasets]

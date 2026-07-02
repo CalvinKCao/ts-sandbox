@@ -1,5 +1,8 @@
 extends: configs/binary_anchor_ar.yaml
 
+training:
+  diffusion_effective_batch_multiplier: 1.5
+
 experiment:
   name: binary-anchor-ar-patch-decoder-ctx
   experiment_name: binary_anchor_ar_patch_decoder_ctx

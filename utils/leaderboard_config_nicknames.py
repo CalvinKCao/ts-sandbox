@@ -16,6 +16,29 @@ MMPD_SUBSET_RAW = "mmpd_subset"
 MMPD_SUBSET_NICKNAME = "MMPD (subset)"
 MMPD_SUBSET_CAMPAIGN_DATE = "06-13"
 
+MMPD_MASKAE_FAIR_13D_RAW = "mmpd_maskae_fair_13d"
+MMPD_MASKAE_FAIR_13D_NICKNAME = "MMPD MaskedAE"
+MMPD_MASKAE_FAIR_13D_CAMPAIGN_DATE = "06-16"
+MMPD_MASKAE_FAIR_13D_DIR = os.path.join(
+    REPO, "results", "datasets", "06-16-mmpd-maskae-fair-13d"
+)
+
+MMPD_MASKAE_FAIR_13D_JOBS: Dict[str, str] = {
+    "ETTh1": "3969137",
+    "ETTh2": "3969138",
+    "ETTm1": "3969139",
+    "ETTm2": "3969140",
+    "illness": "3969141",
+    "exchange_rate": "3969142",
+    "weather": "3969143",
+    "electricity": "3969144",
+    "traffic": "3969145",
+    "PeMS": "3969146",
+    "solar_Alabama": "3969147",
+    "dalia": "3969148",
+    "dynamic": "3969149",
+}
+
 MMPD_SUBSET_JOBS: Dict[str, str] = {
     "ETTh1": "3951201",
     "ETTh2": "3951202",
@@ -70,6 +93,8 @@ def leaderboard_nickname(
         return strip_leaderboard_markdown(config_label)
     if raw_config == MMPD_SUBSET_RAW:
         return MMPD_SUBSET_NICKNAME
+    if raw_config == MMPD_MASKAE_FAIR_13D_RAW:
+        return MMPD_MASKAE_FAIR_13D_NICKNAME
     if raw_config:
         return strip_leaderboard_markdown(display_config(raw_config))
     if yaml_path:
@@ -88,6 +113,11 @@ def parse_run_stem(stem: str) -> Optional[Tuple[str, str, str]]:
 def mmpd_subset_run_stem(dataset: str, job_id: Optional[str] = None) -> str:
     jid = job_id or MMPD_SUBSET_JOBS[dataset]
     return f"{MMPD_SUBSET_CAMPAIGN_DATE}-{jid}-{dataset}-{MMPD_SUBSET_RAW}"
+
+
+def mmpd_fair_13d_run_stem(dataset: str, job_id: Optional[str] = None) -> str:
+    jid = job_id or MMPD_MASKAE_FAIR_13D_JOBS[dataset]
+    return f"{MMPD_MASKAE_FAIR_13D_CAMPAIGN_DATE}-{jid}-{dataset}-{MMPD_MASKAE_FAIR_13D_RAW}"
 
 
 def nickname_for_wandb_run(run: Any) -> str:
@@ -111,6 +141,42 @@ def nickname_for_wandb_run(run: Any) -> str:
         return leaderboard_nickname(raw_config=raw_config)
 
     return ""
+
+
+def load_mmpd_fair_13d_metrics(dataset: str) -> Optional[Dict[str, Any]]:
+    partial = os.path.join(MMPD_MASKAE_FAIR_13D_DIR, "partials", f"{dataset}_mmpd.json")
+    if not os.path.isfile(partial):
+        return None
+    import json
+
+    with open(partial, encoding="utf-8") as f:
+        data = json.load(f)
+    anchor_mse = data.get("anchor_mse")
+    if anchor_mse is None:
+        anchor_mse = data.get("mse")
+    anchor_mae = data.get("anchor_mae")
+    if anchor_mae is None:
+        anchor_mae = data.get("mae")
+    crps = data.get("crps")
+    if anchor_mse is None or anchor_mae is None or crps is None:
+        return None
+
+    tuning_path = os.path.join(MMPD_MASKAE_FAIR_13D_DIR, "tuning", f"{dataset}_best.json")
+    tuned_hparams = None
+    if os.path.isfile(tuning_path):
+        with open(tuning_path, encoding="utf-8") as f:
+            tuned_hparams = json.load(f).get("hparams")
+
+    return {
+        "anchor_mse": anchor_mse,
+        "anchor_mae": anchor_mae,
+        "crps": crps,
+        "source": "06-16-mmpd-maskae-fair-13d",
+        "partial_path": partial,
+        "tuning_path": tuning_path if os.path.isfile(tuning_path) else None,
+        "tuned_hparams": tuned_hparams,
+        "raw": data,
+    }
 
 
 def load_mmpd_subset_metrics(dataset: str) -> Optional[Dict[str, Any]]:

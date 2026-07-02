@@ -11,10 +11,14 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 from utils.leaderboard_config_nicknames import (
+    MMPD_MASKAE_FAIR_13D_JOBS,
+    MMPD_MASKAE_FAIR_13D_NICKNAME,
     MMPD_SUBSET_JOBS,
     MMPD_SUBSET_NICKNAME,
     leaderboard_nickname,
+    load_mmpd_fair_13d_metrics,
     load_mmpd_subset_metrics,
+    mmpd_fair_13d_run_stem,
     mmpd_stub_wandb_metrics,
     mmpd_subset_run_stem,
     nickname_for_wandb_run,
@@ -177,6 +181,70 @@ def create_mmpd_stubs(api, *, entity: str, project: str, dry_run: bool) -> dict:
     return {"created": created, "skipped": skipped}
 
 
+def create_mmpd_fair_13d_stubs(api, *, entity: str, project: str, dry_run: bool) -> dict:
+    import wandb
+
+    existing = _existing_mmpd_groups(api, entity, project)
+    created = skipped = 0
+
+    for dataset, job_id in sorted(MMPD_MASKAE_FAIR_13D_JOBS.items()):
+        metrics = load_mmpd_fair_13d_metrics(dataset)
+        if metrics is None:
+            print(f"[skip] no partial for {dataset}")
+            skipped += 1
+            continue
+
+        group = mmpd_fair_13d_run_stem(dataset, job_id)
+        if group in existing:
+            print(f"[skip] mmpd fair-13d stub exists: {group}")
+            skipped += 1
+            continue
+
+        name = make_phase_run_name(group, MMPD_JOB_TYPE)
+        summary = mmpd_stub_wandb_metrics(metrics)
+        config = {
+            "config_nickname": MMPD_MASKAE_FAIR_13D_NICKNAME,
+            "dataset": dataset,
+            "baseline": "mmpd_maskae_fair_13d",
+            "job_id": job_id,
+            "metrics_source": metrics["source"],
+            "partial_path": metrics["partial_path"],
+            "stub": True,
+        }
+        if metrics.get("tuning_path"):
+            config["tuning_path"] = metrics["tuning_path"]
+        if metrics.get("tuned_hparams"):
+            config["mmpd_tuned_hparams"] = metrics["tuned_hparams"]
+
+        if dry_run:
+            print(f"would create mmpd fair-13d stub: {name} | {group} | {dataset}")
+            created += 1
+            continue
+
+        run = wandb.init(
+            project=project,
+            entity=entity,
+            name=name,
+            group=group,
+            job_type=MMPD_JOB_TYPE,
+            tags=[dataset, "eval", "mmpd", "stub", "maskae", "fair-13d"],
+            notes="offline MMPD MaskAE fair-13d eval from JSON partial (no artifacts)",
+            config=config,
+            settings=wandb.Settings(console="off"),
+        )
+        try:
+            clean = {k: v for k, v in summary.items() if v is not None}
+            wandb.log(clean, step=0)
+            for k, v in clean.items():
+                run.summary[k] = v
+            print(f"created {_run_path(run)} | {name}")
+            created += 1
+        finally:
+            wandb.finish()
+
+    return {"created": created, "skipped": skipped}
+
+
 def patch_mmpd_stub_metrics(api, *, entity: str, project: str, dry_run: bool) -> dict:
     """Fix metric keys on existing MMPD stub runs (eval/anchor_* -> eval/staged_*)."""
     import wandb
@@ -242,6 +310,11 @@ def main() -> None:
     parser.add_argument("--project", default=PROJECT)
     parser.add_argument("--nicknames-only", action="store_true")
     parser.add_argument("--mmpd-only", action="store_true")
+    parser.add_argument(
+        "--fair-13d-only",
+        action="store_true",
+        help="Create mmpd_eval stubs for 06-16-mmpd-maskae-fair-13d only",
+    )
     parser.add_argument("--patch-mmpd-metrics", action="store_true", help="Fix metric keys on existing MMPD stubs")
     parser.add_argument("--dataset-tags-only", action="store_true", help="Only backfill dataset config + tags")
     args = parser.parse_args()
@@ -250,6 +323,15 @@ def main() -> None:
 
     api = wandb.Api()
     results = {}
+
+    if args.fair_13d_only:
+        print("Creating MMPD MaskAE fair-13d stubs...")
+        results["mmpd_fair_13d"] = create_mmpd_fair_13d_stubs(
+            api, entity=args.entity, project=args.project, dry_run=args.dry_run
+        )
+        print(results["mmpd_fair_13d"])
+        print("done:", results)
+        return
 
     if not args.mmpd_only and not args.dataset_tags_only:
         print("Backfilling config_nickname...")
