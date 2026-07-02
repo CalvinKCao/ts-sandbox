@@ -3,9 +3,11 @@
 # Subset ids / variate indices resolved from configs/binary_anchor_stationary_flat_subsets.yaml
 # (same ETTh1-capped policy as binary flat-subset runs). No binary ckpts required.
 #
-# Submit (Killarney login, $SCRATCH/ts-sandbox):
+# Submit (Killarney or Narval login, $SCRATCH/ts-sandbox):
 #   ./submit_mmpd_decoder_flat_subsets_grad_accum_200_lr_lo.sh --smoke-test
 #   ./submit_mmpd_decoder_flat_subsets_grad_accum_200_lr_lo.sh
+#
+# datasets/ is gitignored — submit skips any dataset CSV/NPZ missing on the cluster.
 
 extends: binary_anchor_stationary_flat_subsets_grad_accum_200_lr_lo.yaml
 

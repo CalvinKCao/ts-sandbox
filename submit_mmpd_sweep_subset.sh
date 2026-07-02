@@ -119,6 +119,39 @@ fi
 
 IFS=',' read -ra DATASETS <<< "$DATASETS_CSV"
 
+filter_datasets_available() {
+    local ds path
+    local -a available=()
+    for ds in "${DATASETS[@]}"; do
+        path=$(
+            python3 - "$ds" "$REPO" <<'PY'
+import sys
+from pathlib import Path
+
+ds, repo = sys.argv[1], Path(sys.argv[2])
+sys.path.insert(0, str(repo))
+from utils.eval_mmpd_gaussian_anchor import DATASET_FILES
+
+path = DATASET_FILES.get(ds)
+print(path if path and path.is_file() else "")
+PY
+        )
+        if [[ -n "$path" ]]; then
+            available+=("$ds")
+        else
+            echo "WARN: skipping ${ds} — dataset file missing under ${REPO}/datasets" >&2
+        fi
+    done
+    if [[ ${#available[@]} -eq 0 ]]; then
+        echo "ERROR: no datasets with local files under ${REPO}/datasets" >&2
+        exit 1
+    fi
+    DATASETS=("${available[@]}")
+    DATASETS_CSV=$(IFS=,; echo "${DATASETS[*]}")
+}
+
+filter_datasets_available
+
 pick_anchor_root() {
     local ds="$1"
     local matches=()
