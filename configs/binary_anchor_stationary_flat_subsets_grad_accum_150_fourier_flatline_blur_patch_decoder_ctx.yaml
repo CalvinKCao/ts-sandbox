@@ -1,0 +1,40 @@
+extends: binary_anchor_stationary_flat_subsets_grad_accum_150_fourier_flatline_blur.yaml
+
+wandb:
+  enabled: true
+  project: ts-sandbox-leaderboard
+  tags: [patch_decoder, fourier_flatline_blur]
+
+experiment:
+  name: binary-anchor-stationary-flat-subsets-grad-accum-150-fourier-flatline-blur-patch-decoder-ctx
+  experiment_name: binary_anchor_stationary_flat_subsets_grad_accum_150_fourier_flatline_blur_patch_decoder_ctx
+  guidance_type: patch_decoder
+  mmpd_patch_size: 12
+  use_guidance_channel: true
+  disable_cross_attention: false
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    n_samples: 10000
+    epochs: 20
+    patience: 4
+
+  - phase: patch_guidance_finetune_hp
+    n_trials: 10
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 4
+    max_epochs: 20
+    patience: 8
+    search_space: lr_only
+
+  - phase: diffusion_fine_finetune_hp
+    n_trials: 4
+    max_epochs: 20
+    patience: 8
+    search_space: lr_only
+
+  - phase: staged_eval
+    skip_eval_visualizations: false
