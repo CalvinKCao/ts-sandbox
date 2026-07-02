@@ -458,13 +458,19 @@ for ds in "${DATASETS[@]}"; do
     PENDING_DATASETS+=("$ds")
 
     WORKER_SCRIPT="$LOG_DIR/submit-mmpd-${ds}.sh"
+    DS_EXTRA=()
+    while IFS= read -r _arg; do
+        [[ -n "$_arg" ]] && DS_EXTRA+=("$_arg")
+    done < <(mmpd_dataset_worker_extra_args "$ds")
+    DS_WALL="$(mmpd_dataset_wall_time "$ds" "$WALL_MMPD")"
     write_worker_script "$WORKER_SCRIPT" "${EVAL_BASE[@]}" "${EVAL_EXTRA[@]}" \
+        "${DS_EXTRA[@]}" \
         --phase mmpd --datasets "$ds"
-    echo "Submitting mmpd-${ds} ${WORKER_DEP[*]}..."
+    echo "Submitting mmpd-${ds} wall=${DS_WALL} ${WORKER_DEP[*]}..."
     JOB_MMPD=$(sbatch --parsable \
         --job-name="mmpd-sw-${ds}$([[ "$SMOKE" -eq 1 ]] && echo -smoke)" \
         "${SBATCH_COMMON[@]}" \
-        --time="$WALL_MMPD" \
+        --time="$DS_WALL" \
         "${WORKER_DEP[@]}" \
         --output="$LOG_DIR/mmpd-${ds}-%j.out" \
         --error="$LOG_DIR/mmpd-${ds}-%j.err" \

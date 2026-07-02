@@ -1582,6 +1582,26 @@ def make_eval_indices(n: int, fraction: float, seed: int, max_items: Optional[in
     return sorted(rng.choice(n, size=count, replace=False).tolist())
 
 
+def subsample_eval_indices(
+    indices: Sequence[int],
+    max_items: Optional[int],
+    *,
+    seed: int,
+    dataset: str,
+) -> List[int]:
+    if max_items is None or len(indices) <= max_items:
+        return list(indices)
+    rng = np.random.default_rng(stable_dataset_seed(seed, dataset))
+    picked = sorted(rng.choice(len(indices), size=max_items, replace=False).tolist())
+    out = [int(indices[i]) for i in picked]
+    print(
+        f"[subset] {dataset}: subsampled eval indices {len(out)}/{len(indices)} "
+        f"(test_max_items={max_items})",
+        flush=True,
+    )
+    return out
+
+
 def load_tsf_test_subset(
     dataset: str,
     variate_indices: Sequence[int],
@@ -2391,6 +2411,12 @@ def run_phase_mmpd(
 ) -> None:
     binary_run = anchors_by_variant["binary"][dataset]
     indices = get_or_create_indices(args, binary_run)
+    indices = subsample_eval_indices(
+        indices,
+        args.test_max_items,
+        seed=args.seed,
+        dataset=dataset,
+    )
     if not args.skip_mmpd_train:
         train_mmpd(args, [binary_run])
     elif not args.skip_mmpd_eval:
