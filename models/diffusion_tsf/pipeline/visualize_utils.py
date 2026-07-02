@@ -198,6 +198,53 @@ def _load_staged_diffusion_from_ckpt(
     return model, diff_ckpt
 
 
+def _as_bv1hw_cdf(cdf_map: torch.Tensor) -> Tuple[torch.Tensor, int, int]:
+    """Reshape staged CDF maps to (B*V, 1, H, W) for occupancy decode."""
+    if cdf_map.dim() == 3:
+        cdf_map = cdf_map.unsqueeze(0)
+    if cdf_map.dim() != 4:
+        raise ValueError(f"expected 3D/4D CDF map, got shape {tuple(cdf_map.shape)}")
+    b, v, h, w = cdf_map.shape
+    return cdf_map.reshape(b * v, 1, h, w), b, v
+
+
+def _decode_staged_cdf_1d(
+    cdf_map: torch.Tensor,
+    *,
+    value_range: float,
+    to_2d,
+    cdf_decoder: str = "mean",
+) -> torch.Tensor:
+    """Decode (B,V,H,W) or (V,H,W) CDF maps to (B,V,W) normalized 1D values."""
+    flat, b, v = _as_bv1hw_cdf(cdf_map)
+    decoded = to_2d._decode_occupancy_in_range(
+        flat,
+        value_range=float(value_range),
+        cdf_decoder=cdf_decoder,
+    )
+    return decoded.reshape(b, v, -1)
+
+
+def _future_core_slice(
+    future_norm: torch.Tensor,
+    *,
+    width: int,
+    lookback_overlap: int,
+) -> torch.Tensor:
+    """Align window-norm future GT with staged map width (overlap prefix + core)."""
+    k = int(lookback_overlap)
+    total = int(future_norm.shape[-1])
+    if total == width:
+        return future_norm[..., k:] if k > 0 and width > k else future_norm
+    if total == width + k and k > 0:
+        return future_norm[..., k : k + width]
+    if total >= width:
+        return future_norm[..., -width:]
+    raise ValueError(
+        f"cannot align future_norm width {total} to map width {width} with overlap {k}"
+    )
+
+
 def _staged_fine_value_range(diff_model) -> float:
     cfg = getattr(diff_model, "config", None)
     if getattr(cfg, "staged_representation", "value_precision") == "haar_frequency":
@@ -1170,6 +1217,27 @@ def run_staged_synthetic_pretrain_diagnostics(
         stage=stage,
         tuned_params=tuned_params,
     )
+    coarse_model = None
+    if stage == "fine":
+        coarse_ckpt = getattr(state, "diffusion_coarse_pretrain_ckpt", None)
+        if not coarse_ckpt:
+            coarse_ckpt = os.path.join(
+                state.checkpoint_dir, "pretrained_coarse", "pretrained_diffusion.pt",
+            )
+        if os.path.exists(coarse_ckpt):
+            coarse_model, _ = _load_staged_diffusion_from_ckpt(
+                ckpt_path=coarse_ckpt,
+                stage="coarse",
+                itrans_ckpt_path=itrans_ckpt_path,
+                n_vars=int(state.n_variates),
+                device=device,
+                tuned_params=tuned_params,
+            )
+        else:
+            logger.warning(
+                "staged pretrain diagnostics: no coarse ckpt for fine stage at %s",
+                coarse_ckpt,
+            )
     from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
 
     run_phase_start_diagnostics(
@@ -1251,7 +1319,9 @@ def run_staged_synthetic_pretrain_diagnostics(
     viz_paths["viz/staged_synthetic_pretrain/itrans_2d"] = [sample_paths[3]]
 
     with torch.no_grad():
-        gen_out = model.generate(past_b, sampler="anchor")
+        gen_out = _staged_diag_generate(
+            model, past_b, coarse_model=coarse_model, sampler="anchor",
+        )
         diff_paths = _plot_diffusion_model_space_prediction(
             gen_out=gen_out,
             past_norm=past_norm[0].cpu(),
@@ -1276,6 +1346,7 @@ def run_staged_synthetic_pretrain_diagnostics(
             sample_index=sample_index,
             variables_to_plot=variables_to_plot,
             jpeg_dpi=jpeg_dpi,
+            coarse_model=coarse_model,
         )
         for k, v in cond_paths.items():
             viz_paths.setdefault(k, []).extend(v)
@@ -1320,42 +1391,62 @@ def _plot_diffusion_model_space_prediction(
     os.makedirs(output_dir, exist_ok=True)
     paths: List[str] = []
 
-    future_coarse = gen_out["future_2d_coarse"][0].cpu()
     to_2d = model.to_2d
-    coarse_1d = to_2d._decode_occupancy_in_range(
-        future_coarse, value_range=to_2d.max_scale, cdf_decoder="mean",
-    ).cpu()
+    future_coarse = gen_out["future_2d_coarse"].cpu()
+    coarse_1d = _decode_staged_cdf_1d(
+        future_coarse, value_range=to_2d.max_scale, to_2d=to_2d,
+    )[0]
     fine_raw = gen_out.get("future_2d_fine")
     if fine_raw is not None:
-        future_fine = fine_raw[0].cpu()
-        fine_1d = to_2d._decode_occupancy_in_range(
-            future_fine, value_range=_staged_fine_value_range(model), cdf_decoder="mean",
-        ).cpu()
+        future_fine = fine_raw.cpu()
+        fine_1d = _decode_staged_cdf_1d(
+            future_fine,
+            value_range=_staged_fine_value_range(model),
+            to_2d=to_2d,
+        )[0]
         combined_1d = coarse_1d + fine_1d
-        pred_maps = {"coarse": future_coarse.unsqueeze(0), "fine": future_fine.unsqueeze(0)}
+        pred_maps = {
+            "coarse": future_coarse if future_coarse.dim() == 4 else future_coarse.unsqueeze(0),
+            "fine": future_fine if future_fine.dim() == 4 else future_fine.unsqueeze(0),
+        }
     else:
         future_fine = None
         fine_1d = None
         combined_1d = coarse_1d
-        pred_maps = {"coarse": future_coarse.unsqueeze(0)}
-    W_fut = future_coarse.shape[-1]
-    t_fut = np.arange(0, W_fut)
-    n_cols = min(variables_to_plot, coarse_1d.shape[0])
+        pred_maps = {
+            "coarse": future_coarse if future_coarse.dim() == 4 else future_coarse.unsqueeze(0),
+        }
+    k_overlap = int(getattr(getattr(model, "config", None), "lookback_overlap", 0))
+    w_map = int(future_coarse.shape[-1])
+    if k_overlap > 0 and w_map > int(getattr(model.config, "forecast_length", w_map)):
+        plot_coarse = coarse_1d[..., k_overlap:]
+        plot_combined = combined_1d[..., k_overlap:]
+        plot_fine = fine_1d[..., k_overlap:] if fine_1d is not None else None
+        w_plot = plot_coarse.shape[-1]
+    else:
+        plot_coarse = coarse_1d
+        plot_combined = combined_1d
+        plot_fine = fine_1d
+        w_plot = w_map
+    t_fut = np.arange(0, w_plot)
+    n_cols = min(variables_to_plot, plot_coarse.shape[0])
 
     fig, axes = plt.subplots(1, n_cols, figsize=(4.2 * n_cols, 3.2), squeeze=False, constrained_layout=True)
-    gt_fut = future_norm[:, -W_fut:]
+    gt_fut = _future_core_slice(
+        future_norm, width=w_map, lookback_overlap=k_overlap,
+    )
     for col in range(n_cols):
         ax = axes[0, col]
         ax.plot(t_fut, gt_fut[col].numpy(), color="#2196F3", linewidth=1.4, label="GT fut")
-        ax.plot(t_fut, coarse_1d[col].numpy(), color="#FF9800", linewidth=1.1, label="Coarse pred")
-        ax.plot(t_fut, combined_1d[col].numpy(), color="#E91E63", linewidth=1.1, label="Combined")
+        ax.plot(t_fut, plot_coarse[col].numpy(), color="#FF9800", linewidth=1.1, label="Coarse pred")
+        ax.plot(t_fut, plot_combined[col].numpy(), color="#E91E63", linewidth=1.1, label="Combined")
         ax.grid(True, alpha=0.12)
         ax.set_title(f"var {col}", fontsize=9)
         if col == 0:
             ax.legend(fontsize=7)
     fig.suptitle(
         f"{tag} 1D model-space sample {sample_index}\n"
-        + _format_scale_banner(norm_range=_tensor_value_range(combined_1d), space_label="window-norm"),
+        + _format_scale_banner(norm_range=_tensor_value_range(plot_combined), space_label="window-norm"),
         fontsize=10,
     )
     paths.append(save_figure_jpg(fig, os.path.join(output_dir, f"{tag}_pred_1d_idx{sample_index}.jpg"), dpi=jpeg_dpi))

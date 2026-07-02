@@ -55,3 +55,6 @@ phases:
     max_epochs: 20
     patience: 8
     search_space: lr_only
+
+  - phase: staged_eval
+    skip_eval_visualizations: false

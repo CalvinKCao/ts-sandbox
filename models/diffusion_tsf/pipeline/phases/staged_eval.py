@@ -568,6 +568,7 @@ class StagedEvalPhase(PipelinePhase):
                 itrans_ckpt_path=ft_guidance_ckpt,
                 stage="fine",
                 diffusion_ckpt_path=_stage_finetune_ckpt(state, "fine"),
+                coarse_ckpt_path=_stage_finetune_ckpt(state, "coarse"),
                 tag="staged_eval",
             )
             for key, paths in (diag.get("viz") or {}).items():
