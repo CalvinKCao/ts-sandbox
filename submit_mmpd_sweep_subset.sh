@@ -80,6 +80,10 @@ if [[ "$(hostname)" == *"narval"* ]]; then
     ACCOUNT="def-boyuwang"
     CLUSTER="narval"
     [[ -z "$GPU_TYPE" ]] && GPU_TYPE="a100"
+elif [[ "$(hostname)" == *"killarney"* || "$(hostname)" == kl* ]]; then
+    ACCOUNT="aip-boyuwang"
+    CLUSTER="killarney"
+    [[ -z "$GPU_TYPE" ]] && GPU_TYPE="l40s"
 else
     ACCOUNT="aip-boyuwang"
     CLUSTER="killarney"
