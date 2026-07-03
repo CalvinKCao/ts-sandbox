@@ -33,6 +33,7 @@ if [[ -z "${PROJECT:-}" ]]; then
 fi
 
 WHEEL_DIR="$PROJECT/$USER/ts-sandbox/wheels-classical"
+PYPI_INDEX="${PYPI_INDEX:-https://pypi.org/simple}"
 
 deactivate 2>/dev/null || true
 unset VIRTUAL_ENV PYTHONHOME
@@ -85,10 +86,22 @@ _classical_pkgs=(
 )
 for pkg in "${_classical_pkgs[@]}"; do
     echo "  $pkg"
-    pip download "$pkg" -d "$WHEEL_DIR" --only-binary=:all: --no-deps -q
+    pip download \
+        --index-url "$PYPI_INDEX" \
+        --only-binary=:all: \
+        --no-deps \
+        -d "$WHEEL_DIR" \
+        "$pkg" \
+        -q
 done
 
 echo ""
 _n="$(find "$WHEEL_DIR" -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)"
 echo "Done. $_n wheels in $WHEEL_DIR"
+for pkg in "${_classical_pkgs[@]}"; do
+    if ! compgen -G "$WHEEL_DIR/$pkg"*.whl >/dev/null; then
+        echo "ERROR: missing cached wheel for $pkg in $WHEEL_DIR" >&2
+        exit 1
+    fi
+done
 echo "Submit: ./submit_classical_baselines.sh"

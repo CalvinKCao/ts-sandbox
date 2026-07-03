@@ -34,6 +34,34 @@ _classical_wheel_dir() {
     echo "$PROJECT/$USER/ts-sandbox/wheels-classical"
 }
 
+CLASSICAL_WHEELS=(
+    statsforecast
+    statsmodels
+    fugue
+    utilsforecast
+    coreforecast
+    cloudpickle
+    threadpoolctl
+    triad
+    adagio
+    narwhals
+    patsy
+    numba
+    llvmlite
+)
+
+_check_classical_wheel_cache() {
+    local wheel_dir="$1"
+    [[ -n "$wheel_dir" && -d "$wheel_dir" ]] || return 1
+    local pkg
+    for pkg in "${CLASSICAL_WHEELS[@]}"; do
+        compgen -G "$wheel_dir/$pkg"*.whl >/dev/null || {
+            echo "ERROR: missing cached wheel for $pkg in $wheel_dir" >&2
+            return 1
+        }
+    done
+}
+
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     IS_SMOKE=0
     EXTRA=()
@@ -56,8 +84,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     cd "$REPO"
 
     WHEEL_DIR="$(_classical_wheel_dir || true)"
-    if [[ -z "$WHEEL_DIR" || ! -d "$WHEEL_DIR" ]] \
-        || ! compgen -G "$WHEEL_DIR/statsforecast"*.whl >/dev/null; then
+    if ! _check_classical_wheel_cache "$WHEEL_DIR"; then
         echo "ERROR: classical wheel cache incomplete at ${WHEEL_DIR:-\$PROJECT/\$USER/ts-sandbox/wheels-classical}" >&2
         echo "Run on login node (deactivate venv first):" >&2
         echo "  deactivate 2>/dev/null; cd \"\$SCRATCH/ts-sandbox\" && ./setup/killarney_bootstrap_classical_wheels.sh" >&2
@@ -123,12 +150,8 @@ WHEEL_DIR="$(_classical_wheel_dir || true)"
     echo "ERROR: missing $REQ — run ./setup/killarney_freeze_requirements.sh on login node" >&2
     exit 1
 }
-[[ -n "$WHEEL_DIR" && -d "$WHEEL_DIR" ]] || {
-    echo "ERROR: classical wheel cache missing — run ./setup/killarney_bootstrap_classical_wheels.sh on login node" >&2
-    exit 1
-}
-if ! compgen -G "$WHEEL_DIR/statsforecast"*.whl >/dev/null; then
-    echo "ERROR: wheel cache incomplete (need statsforecast wheel)" >&2
+if ! _check_classical_wheel_cache "$WHEEL_DIR"; then
+    echo "ERROR: classical wheel cache missing/incomplete — run ./setup/killarney_bootstrap_classical_wheels.sh on login node" >&2
     exit 1
 fi
 [[ -n "${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR is not set." >&2; exit 1; }
