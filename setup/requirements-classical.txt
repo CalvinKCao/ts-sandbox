@@ -1,3 +1,4 @@
-# Classical baseline deps (not in Alliance wheelhouse). Install via pip on login/compute.
+# Classical baseline deps. Bootstrap via setup/killarney_bootstrap_classical_wheels.sh
+# (login node). pyarrow comes from `module load gcc arrow` + pip --no-index, not PyPI.
 statsforecast>=1.7.0
 statsmodels>=0.14.0

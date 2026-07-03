@@ -1,8 +1,8 @@
 #!/bin/bash
 # One-shot login-node prep for classical baseline jobs.
 #
-# Downloads statsforecast + statsmodels wheels to PROJECT (PyPI allowed on login).
-# Compute jobs install from that cache with --no-index (see submit_classical_baselines.sh).
+# statsforecast -> fugue -> pyarrow. On Alliance, pyarrow must come from the
+# Arrow module (--no-index), not PyPI (pyarrow-noinstall dummy wheel).
 #
 # Run on Killarney login node:
 #   cd "$SCRATCH/ts-sandbox"
@@ -32,18 +32,44 @@ if [[ -z "${PROJECT:-}" ]]; then
 fi
 
 WHEEL_DIR="$PROJECT/$USER/ts-sandbox/wheels-classical"
-REQ_CLASSICAL="$REPO_ROOT/setup/requirements-classical.txt"
 
-module purge 2>/dev/null || true
-module load StdEnv/2023 python/3.11 2>/dev/null || true
+_load_modules() {
+    module purge 2>/dev/null || true
+    module load StdEnv/2023 python/3.11 2>/dev/null || true
+    module load gcc arrow 2>/dev/null || {
+        echo "ERROR: could not load gcc/arrow (required for pyarrow)." >&2
+        echo "Try: module spider arrow" >&2
+        exit 1
+    }
+}
+
+_load_modules
 
 mkdir -p "$WHEEL_DIR"
 echo "Wheel cache: $WHEEL_DIR"
-echo "Packages:    $(tr '\n' ' ' < "$REQ_CLASSICAL")"
 echo ""
 
-pip download -r "$REQ_CLASSICAL" -d "$WHEEL_DIR"
+# pyarrow: Alliance wheel cache only (PyPI serves a dummy without arrow module).
+echo "[1/2] Caching pyarrow from Alliance wheelhouse..."
+pip download --no-index pyarrow -d "$WHEEL_DIR" -q
+
+# Remaining statsforecast stack: PyPI on login is fine; install with --no-deps so
+# pip does not re-resolve pyarrow from the dummy wheel.
+echo "[2/2] Caching statsforecast dependency wheels from PyPI..."
+_classical_pkgs=(
+    statsforecast
+    statsmodels
+    fugue
+    utilsforecast
+    coreforecast
+    cloudpickle
+    threadpoolctl
+)
+for pkg in "${_classical_pkgs[@]}"; do
+    echo "  $pkg"
+    pip download "$pkg" -d "$WHEEL_DIR" --no-deps -q
+done
 
 echo ""
-echo "Done. Wheels cached under $WHEEL_DIR"
+echo "Done. $(ls -1 "$WHEEL_DIR"/*.whl 2>/dev/null | wc -l) wheels in $WHEEL_DIR"
 echo "Submit: ./submit_classical_baselines.sh"

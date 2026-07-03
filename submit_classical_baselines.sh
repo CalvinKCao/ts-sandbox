@@ -128,8 +128,13 @@ WHEEL_DIR="$(_classical_wheel_dir || true)"
 }
 [[ -n "${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR is not set." >&2; exit 1; }
 
+# Arrow module must load before venv (Alliance pyarrow is not on PyPI).
 module purge 2>/dev/null || true
 module load StdEnv/2023 python/3.11 2>/dev/null || true
+module load gcc arrow 2>/dev/null || {
+    echo "ERROR: could not load gcc/arrow (required for pyarrow / statsforecast)." >&2
+    exit 1
+}
 command -v virtualenv >/dev/null || { echo "ERROR: virtualenv not available after module load." >&2; exit 1; }
 
 echo "[setup] Building node-local venv on \$SLURM_TMPDIR from $REQ"
@@ -138,7 +143,12 @@ virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 pip install --no-index -r "$REQ" -q
-pip install --no-index --find-links "$WHEEL_DIR" -r "$REPO/setup/requirements-classical.txt" -q
+echo "[setup] pyarrow from Alliance wheelhouse (arrow module loaded)..."
+pip install --no-index pyarrow -q
+echo "[setup] statsforecast stack from $WHEEL_DIR ..."
+pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
+    cloudpickle threadpoolctl coreforecast utilsforecast fugue statsmodels statsforecast -q
+pip install --no-index numba -q 2>/dev/null || true
 
 python -c "
 import statsforecast, statsmodels, torch, wandb, yaml
