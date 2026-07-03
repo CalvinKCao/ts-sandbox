@@ -57,8 +57,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 
     WHEEL_DIR="$(_classical_wheel_dir || true)"
     if [[ -z "$WHEEL_DIR" || ! -d "$WHEEL_DIR" ]] \
-        || ! compgen -G "$WHEEL_DIR/statsforecast"*.whl >/dev/null \
-        || ! compgen -G "$WHEEL_DIR/pyarrow"*.whl >/dev/null; then
+        || ! compgen -G "$WHEEL_DIR/statsforecast"*.whl >/dev/null; then
         echo "ERROR: classical wheel cache incomplete at ${WHEEL_DIR:-\$PROJECT/\$USER/ts-sandbox/wheels-classical}" >&2
         echo "Run on login node (deactivate venv first):" >&2
         echo "  deactivate 2>/dev/null; cd \"\$SCRATCH/ts-sandbox\" && ./setup/killarney_bootstrap_classical_wheels.sh" >&2
@@ -128,8 +127,8 @@ WHEEL_DIR="$(_classical_wheel_dir || true)"
     echo "ERROR: classical wheel cache missing — run ./setup/killarney_bootstrap_classical_wheels.sh on login node" >&2
     exit 1
 }
-if ! compgen -G "$WHEEL_DIR/statsforecast"*.whl >/dev/null || ! compgen -G "$WHEEL_DIR/pyarrow"*.whl >/dev/null; then
-    echo "ERROR: wheel cache incomplete (need statsforecast + pyarrow wheels)" >&2
+if ! compgen -G "$WHEEL_DIR/statsforecast"*.whl >/dev/null; then
+    echo "ERROR: wheel cache incomplete (need statsforecast wheel)" >&2
     exit 1
 fi
 [[ -n "${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR is not set." >&2; exit 1; }
@@ -148,15 +147,16 @@ virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 pip install --no-index -r "$REQ" -q
-echo "[setup] pyarrow + statsforecast stack from wheel cache..."
-pip install --no-index --find-links "$WHEEL_DIR" --no-deps pyarrow -q
+echo "[setup] Checking pyarrow from Arrow module..."
+python -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
+echo "[setup] statsforecast stack from wheel cache..."
 pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
-    cloudpickle threadpoolctl coreforecast utilsforecast fugue statsmodels statsforecast -q
-pip install --no-index numba -q 2>/dev/null || true
+    cloudpickle threadpoolctl coreforecast utilsforecast triad adagio narwhals patsy \
+    llvmlite numba fugue statsmodels statsforecast -q
 
 python -c "
-import statsforecast, statsmodels, torch, wandb, yaml
-print('venv ok: torch', torch.__version__, '| statsforecast', statsforecast.__version__)
+import pyarrow, statsforecast, statsmodels, torch, wandb, yaml
+print('venv ok: torch', torch.__version__, '| pyarrow', pyarrow.__version__, '| statsforecast', statsforecast.__version__)
 "
 
 export PYTHONUNBUFFERED=1

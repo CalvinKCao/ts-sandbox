@@ -1,7 +1,7 @@
 #!/bin/bash
 # One-shot login-node prep for classical baseline jobs.
 #
-# pyarrow: Alliance wheelhouse only (module load gcc arrow BEFORE any venv).
+# pyarrow: provided by the Arrow module (module load gcc arrow BEFORE any venv).
 # statsforecast stack: PyPI wheels cached to PROJECT (login node has network).
 #
 # Run on Killarney login node (no venv active):
@@ -48,25 +48,24 @@ if command -v avail_wheels >/dev/null 2>&1; then
 fi
 echo ""
 
-# pyarrow: install in a throwaway venv (arrow already loaded), wheel to PROJECT cache.
-echo "[1/2] pyarrow via Alliance wheelhouse (temp venv)..."
+# pyarrow is not cached: Alliance exposes a dummy wheel named
+# pyarrow-9999+dummy; the real module comes from `module load gcc arrow`.
+echo "[1/2] Verifying pyarrow from the Arrow module in a temp venv..."
 BOOTSTRAP="$(mktemp -d "$PROJECT/$USER/ts-sandbox/.bootstrap-classical-XXXX")"
 trap 'rm -rf "$BOOTSTRAP"' EXIT
 virtualenv --no-download "$BOOTSTRAP"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP/bin/activate"
 pip install --no-index --upgrade pip -q
-if ! pip install --no-index pyarrow -q; then
-    echo "ERROR: pip install --no-index pyarrow failed." >&2
-    echo "Ensure no venv was active and gcc/arrow loaded. See docs.alliancecan.ca/wiki/Arrow" >&2
+if ! python -c "import pyarrow; print('  pyarrow module:', pyarrow.__version__)"; then
+    echo "ERROR: import pyarrow failed after loading gcc/arrow." >&2
+    echo "Do not pip install pyarrow on Killarney; fix the Arrow module load first." >&2
     exit 1
 fi
-pip wheel --no-deps pyarrow -w "$WHEEL_DIR" -q
 deactivate
 unset VIRTUAL_ENV
 rm -rf "$BOOTSTRAP"
 trap - EXIT
-echo "  cached: $(ls -1 "$WHEEL_DIR"/pyarrow*.whl 2>/dev/null | tail -1 | xargs basename 2>/dev/null || echo '?')"
 
 echo "[2/2] statsforecast dependency wheels from PyPI..."
 _classical_pkgs=(
@@ -77,10 +76,16 @@ _classical_pkgs=(
     coreforecast
     cloudpickle
     threadpoolctl
+    triad
+    adagio
+    narwhals
+    patsy
+    numba
+    llvmlite
 )
 for pkg in "${_classical_pkgs[@]}"; do
     echo "  $pkg"
-    pip download "$pkg" -d "$WHEEL_DIR" --no-deps -q
+    pip download "$pkg" -d "$WHEEL_DIR" --only-binary=:all: --no-deps -q
 done
 
 echo ""
