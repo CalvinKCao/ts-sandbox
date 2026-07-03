@@ -87,6 +87,99 @@ def _apply_effective_batch_multiplier(
     return out
 
 
+def _effective_batch_tune_range(
+    probed_max: int,
+    state: PipelineState,
+) -> Tuple[int, int]:
+    lo_frac = float(training_value(state, "finetune_hp_effective_batch_min_frac", 0.25))
+    hi_frac = float(training_value(state, "finetune_hp_effective_batch_max_frac", 4.0))
+    probed_max = max(1, int(probed_max))
+    lo = max(1, int(round(probed_max * lo_frac)))
+    hi = max(lo, int(round(probed_max * hi_frac)))
+    return lo, hi
+
+
+def resolve_target_effective_batch(
+    probed_max: int,
+    target_effective: int,
+) -> Dict[str, int]:
+    """Map a target effective batch to micro-batch + grad-accum (micro <= probed_max)."""
+    probed_max = max(1, int(probed_max))
+    target_effective = max(1, int(target_effective))
+
+    for accum in range(1, target_effective + 1):
+        if target_effective % accum != 0:
+            continue
+        micro = target_effective // accum
+        if micro <= probed_max:
+            return {
+                "batch_size": micro,
+                "gradient_accumulation_steps": accum,
+                "effective_batch_size": target_effective,
+            }
+
+    best_micro, best_accum, best_effective = probed_max, 1, probed_max
+    best_dist = abs(best_effective - target_effective)
+    accum_cap = min(max(target_effective, probed_max), 64)
+    for accum in range(1, accum_cap + 1):
+        for micro in range(1, probed_max + 1):
+            effective = micro * accum
+            dist = abs(effective - target_effective)
+            if dist < best_dist:
+                best_dist = dist
+                best_micro, best_accum, best_effective = micro, accum, effective
+
+    return {
+        "batch_size": best_micro,
+        "gradient_accumulation_steps": best_accum,
+        "effective_batch_size": best_effective,
+    }
+
+
+def _suggest_full_diffusion_params(
+    trial,
+    state: PipelineState,
+    max_batch_size: int,
+    *,
+    tune_effective_batch: bool,
+) -> Dict[str, Any]:
+    base_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
+    if training_value(state, "max_scale_tuning", False):
+        rng = training_value(state, "max_scale_tuning_range", [2.5, 14.0])
+        ms = trial.suggest_float("max_scale", float(rng[0]), float(rng[1]))
+    else:
+        ms = base_ms
+
+    params: Dict[str, Any] = {
+        "learning_rate": trial.suggest_float("learning_rate", 3e-6, 8e-4, log=True),
+        "ema_decay": trial.suggest_categorical("ema_decay", [0.0, 0.99, 0.995, 0.999]),
+        "binary_noise_schedule": trial.suggest_categorical(
+            "binary_noise_schedule", ["linear", "cosine"]
+        ),
+        "loss_weighting": trial.suggest_categorical("loss_weighting", ["none", "min_snr"]),
+        "prediction_target": trial.suggest_categorical("prediction_target", ["x0", "epsilon"]),
+        "max_scale": ms,
+    }
+    params["min_snr_gamma"] = (
+        trial.suggest_float("min_snr_gamma", 1.0, 10.0, log=True)
+        if params["loss_weighting"] == "min_snr"
+        else 5.0
+    )
+
+    if tune_effective_batch:
+        lo, hi = _effective_batch_tune_range(max_batch_size, state)
+        target_eff = trial.suggest_int("effective_batch_size", lo, hi)
+        params.update(resolve_target_effective_batch(max_batch_size, target_eff))
+    else:
+        batch_grid = [b for b in (4, 8, 16, 32, 48, 64, 96, 128) if b <= max_batch_size]
+        if not batch_grid:
+            batch_grid = [max(1, max_batch_size)]
+        params["batch_size"] = trial.suggest_categorical("batch_size", batch_grid)
+        params = _apply_effective_batch_multiplier(params, max_batch_size, state)
+
+    return params
+
+
 TUNED_MODEL_KEYS = (
     "max_scale",
     "binary_noise_schedule",
@@ -197,6 +290,19 @@ def _suggest_staged_params(
         FINETUNE_HP_LR_MIN,
     )
 
+    if search_space == "full_with_batch":
+        if smoke_test:
+            lo, hi = 1, max(2, min(4, max_batch_size))
+            target_eff = trial.suggest_int("effective_batch_size", lo, hi)
+            params = _suggest_full_diffusion_params(
+                trial, state, max_batch_size, tune_effective_batch=False,
+            )
+            params.update(resolve_target_effective_batch(max_batch_size, target_eff))
+            return params
+        return _suggest_full_diffusion_params(
+            trial, state, max_batch_size, tune_effective_batch=True,
+        )
+
     base_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
     if training_value(state, "max_scale_tuning", False):
         rng = training_value(state, "max_scale_tuning_range", [2.5, 14.0])
@@ -247,26 +353,9 @@ def _suggest_staged_params(
             state,
         )
 
-    batch_grid = [b for b in (4, 8, 16, 32, 48, 64, 96, 128) if b <= max_batch_size]
-    if not batch_grid:
-        batch_grid = [max(1, max_batch_size)]
-    params: Dict[str, Any] = {
-        "learning_rate": trial.suggest_float("learning_rate", 3e-6, 8e-4, log=True),
-        "batch_size": trial.suggest_categorical("batch_size", batch_grid),
-        "ema_decay": trial.suggest_categorical("ema_decay", [0.0, 0.99, 0.995, 0.999]),
-        "binary_noise_schedule": trial.suggest_categorical(
-            "binary_noise_schedule", ["linear", "cosine"]
-        ),
-        "loss_weighting": trial.suggest_categorical("loss_weighting", ["none", "min_snr"]),
-        "prediction_target": trial.suggest_categorical("prediction_target", ["x0", "epsilon"]),
-        "max_scale": ms,
-    }
-    params["min_snr_gamma"] = (
-        trial.suggest_float("min_snr_gamma", 1.0, 10.0, log=True)
-        if params["loss_weighting"] == "min_snr"
-        else 5.0
+    return _suggest_full_diffusion_params(
+        trial, state, max_batch_size, tune_effective_batch=False,
     )
-    return _apply_effective_batch_multiplier(params, max_batch_size, state)
 
 
 def _suggest_ordinal_d3pm_params(
@@ -822,7 +911,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             if state.smoke_test:
                 n_trials = 1
             search_space = str(self.require("search_space")).lower()
-            if search_space not in {"default", "lr_only", "ordinal_d3pm"}:
+            if search_space not in {"default", "lr_only", "ordinal_d3pm", "full_with_batch"}:
                 raise ValueError(f"Unknown staged diffusion search_space={search_space!r}")
 
             from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
@@ -843,12 +932,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         )
                     trial.set_user_attr("full_params", dict(params))
                     logger.info(
-                        "  [%s] Optuna trial %d/%d suggested lr=%.2e bs=%d",
+                        "  [%s] Optuna trial %d/%d suggested lr=%.2e micro_bs=%d "
+                        "accum=%d effective_bs=%d",
                         phase.name,
                         trial.number + 1,
                         n_trials,
                         float(params["learning_rate"]),
                         int(params["batch_size"]),
+                        int(params.get("gradient_accumulation_steps", 1)),
+                        int(params.get("effective_batch_size", params["batch_size"])),
                     )
                     trial_ckpt = os.path.join(
                         trials_dir, f"trial_{trial.number}_best.pt",

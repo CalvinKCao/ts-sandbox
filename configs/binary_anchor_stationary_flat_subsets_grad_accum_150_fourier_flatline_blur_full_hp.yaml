@@ -1,0 +1,51 @@
+extends: configs/binary_anchor_stationary_flat_subsets_grad_accum_150_fourier_flatline_blur.yaml
+
+training:
+  finetune_hp_effective_batch_min_frac: 0.25
+  finetune_hp_effective_batch_max_frac: 4.0
+
+wandb:
+  enabled: true
+  project: ts-sandbox-leaderboard
+  tags: [fourier_flatline_blur, full_hp]
+
+experiment:
+  name: binary-anchor-stationary-flat-subsets-fourier-flatline-blur-full-hp
+  experiment_name: binary_anchor_stationary_flat_subsets_grad_accum_150_fourier_flatline_blur_full_hp
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    n_samples: 10000
+    epochs: 20
+    patience: 4
+
+  - phase: itrans_finetune_hp
+    n_trials: 10
+    max_epochs: 10
+    cold_start: true
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 10
+    max_epochs: 20
+    patience: 8
+    search_space: full_with_batch
+
+  - phase: diffusion_fine_finetune_hp
+    n_trials: 10
+    max_epochs: 20
+    patience: 8
+    search_space: full_with_batch
+
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 4
+    n_samples: 1
+    probabilistic_n_samples: 20
+    tune_sampler: false
+    probabilistic_sampler: dpmpp
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: false
