@@ -145,6 +145,13 @@ def _fraction_subset(ds, fraction: float, seed: int):
     return Subset(ds, idx)
 
 
+def _resolve_eval_test_fraction(phase: PipelinePhase, state: PipelineState) -> float:
+    by_dataset = phase.get("eval_test_fraction_by_dataset") or {}
+    if state.dataset in by_dataset:
+        return float(by_dataset[state.dataset])
+    return float(phase.require("eval_test_fraction"))
+
+
 def _ar_eval_enabled(model) -> bool:
     chunk = int(getattr(model.config, "diffusion_chunk_horizon", 0) or 0)
     if chunk <= 0:
@@ -516,8 +523,16 @@ class StagedEvalPhase(PipelinePhase):
             prob_samples = 1
             default_steps = 5
         else:
-            eval_fraction = float(self.require("eval_test_fraction"))
+            eval_fraction = _resolve_eval_test_fraction(self, state)
             final_ds = _fraction_subset(full_test_ds, eval_fraction, state.seed) if eval_fraction < 1.0 else full_test_ds
+            if eval_fraction < 1.0:
+                logger.info(
+                    "[%s] eval subset: %d/%d windows (eval_test_fraction=%.3f)",
+                    subset_id,
+                    len(final_ds),
+                    len(full_test_ds),
+                    eval_fraction,
+                )
             prob_samples = int(self.require("probabilistic_n_samples"))
             default_steps = int(self.require("probabilistic_num_inference_steps"))
 
