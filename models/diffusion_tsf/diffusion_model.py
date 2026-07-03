@@ -1617,6 +1617,10 @@ class DiffusionTSF(nn.Module):
             future_coarse_cond = self._coarse_cdf_to_height(future_maps["coarse"], H)
             cond_for_unet = torch.cat([cond_for_unet, future_coarse_cond.reshape(BV, 1, H, W_fut)], dim=1)
 
+        if self.config.use_guidance_channel and guidance_maps is not None:
+            guidance_flat = guidance_maps[stage].reshape(BV, 1, H, W_fut)
+            canvas = torch.cat([canvas, guidance_flat], dim=1)
+
         base_cond = cond_for_unet
         self._predict_noise_chunked(
             canvas, t_flat, base_cond, ctx_flat,

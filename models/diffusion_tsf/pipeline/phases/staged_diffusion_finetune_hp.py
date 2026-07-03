@@ -180,6 +180,58 @@ def _suggest_full_diffusion_params(
     return params
 
 
+def _resolve_best_trial_ckpt(
+    study,
+    trials_dir: str,
+    subset_dir: str,
+    best_trial_num: int,
+) -> str:
+    """Locate the best Optuna trial checkpoint on disk."""
+    candidates = [
+        os.path.join(trials_dir, f"trial_{best_trial_num}_best.pt"),
+        os.path.join(subset_dir, f"_diff_ft_trial_{best_trial_num}_best.pt"),
+    ]
+    best_trial = study.best_trial
+    if best_trial is not None and int(best_trial.number) == int(best_trial_num):
+        user_ckpt = best_trial.user_attrs.get("ckpt_path")
+        if user_ckpt:
+            candidates.insert(0, str(user_ckpt))
+
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+
+    for trial_dir in (trials_dir, subset_dir):
+        if not os.path.isdir(trial_dir):
+            continue
+        for fn in sorted(os.listdir(trial_dir)):
+            if fn == f"trial_{best_trial_num}_best.pt" or fn == f"_diff_ft_trial_{best_trial_num}_best.pt":
+                return os.path.join(trial_dir, fn)
+    raise RuntimeError(
+        f"Best trial checkpoint missing for trial {best_trial_num}; "
+        f"checked {candidates} under {trials_dir}"
+    )
+
+
+def _cleanup_trial_ckpts(trials_dir: str, subset_dir: str, *, keep: str) -> None:
+    keep_abs = os.path.abspath(keep)
+    for trial_dir in (trials_dir, subset_dir):
+        if not os.path.isdir(trial_dir):
+            continue
+        for fn in os.listdir(trial_dir):
+            if not (fn.startswith("trial_") or fn.startswith("_diff_ft_trial_")):
+                continue
+            if not fn.endswith("_best.pt"):
+                continue
+            path = os.path.abspath(os.path.join(trial_dir, fn))
+            if path == keep_abs:
+                continue
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 TUNED_MODEL_KEYS = (
     "max_scale",
     "binary_noise_schedule",
@@ -568,6 +620,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             accum_steps = max(1, int(params.get("gradient_accumulation_steps", 1)))
             best_val = float("inf")
             best_epoch = 0
+            saved_ckpt = False
             train_log_stride = max(1, n_train_batches // 4)
             val_log_stride = max(1, n_val_batches // 2)
             epoch_t0 = time.perf_counter()
@@ -663,6 +716,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             config,
                             ckpt_path,
                         )
+                        saved_ckpt = True
+                        if trial is not None:
+                            trial.set_user_attr("ckpt_path", ckpt_path)
                 if backup is not None:
                     ema.restore(model, backup)
 
@@ -693,6 +749,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     break
 
             total_elapsed = time.perf_counter() - epoch_t0
+            if ckpt_path and best_epoch > 0 and not saved_ckpt:
+                raise RuntimeError(
+                    f"{trial_label}: best_val={best_val:.4f} at epoch {best_epoch} "
+                    f"but no checkpoint was written to {ckpt_path}"
+                )
+            if ckpt_path and saved_ckpt and not os.path.isfile(ckpt_path):
+                raise RuntimeError(
+                    f"{trial_label}: expected checkpoint at {ckpt_path} after save"
+                )
             logger.info(
                 "  [%s/%s] %s DONE best_val=%.4f best_epoch=%d total_time=%.1fs",
                 self.name, self.stage, trial_label, best_val, best_epoch, total_elapsed,
@@ -1032,29 +1097,14 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             )
 
             import shutil
-            src = os.path.join(trials_dir, f"trial_{best_trial_num}_best.pt")
-            if not os.path.exists(src):
-                legacy = os.path.join(subset_dir, f"_diff_ft_trial_{best_trial_num}_best.pt")
-                src = legacy if os.path.exists(legacy) else src
-            if not os.path.exists(src):
-                raise RuntimeError(f"Best trial checkpoint missing: {src}")
+            src = _resolve_best_trial_ckpt(
+                study, trials_dir, subset_dir, best_trial_num,
+            )
             shutil.copy2(src, final_ckpt)
+            if not os.path.isfile(final_ckpt):
+                raise RuntimeError(f"Failed to promote best trial checkpoint to {final_ckpt}")
             final_val = hp_best_val_loss
-
-            for trial_dir in (trials_dir, subset_dir):
-                if not os.path.isdir(trial_dir):
-                    continue
-                for fn in os.listdir(trial_dir):
-                    if fn.startswith("_diff_ft_trial_") and fn.endswith("_best.pt"):
-                        try:
-                            os.remove(os.path.join(trial_dir, fn))
-                        except OSError:
-                            pass
-                    if fn.startswith("trial_") and fn.endswith("_best.pt"):
-                        try:
-                            os.remove(os.path.join(trial_dir, fn))
-                        except OSError:
-                            pass
+            _cleanup_trial_ckpts(trials_dir, subset_dir, keep=src)
 
         meta_out: Dict[str, Any] = {
             "subset_id": subset_id,
