@@ -1,10 +1,10 @@
 #!/bin/bash
-# Fourier flatline-blur fine target + patch-decoder guidance on Narval.
+# Fourier flatline-blur fine target + patch-decoder guidance on Killarney (L40S).
 #
-# USAGE (Narval login node, from $SCRATCH/ts-sandbox):
-#   ./submit_fourier_flatline_blur_patch_decoder_narval.sh --smoke-test
-#   ./submit_fourier_flatline_blur_patch_decoder_narval.sh
-#   ./submit_fourier_flatline_blur_patch_decoder_narval.sh --datasets ETTh1,exchange_rate
+# USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
+#   ./submit_fourier_flatline_blur_patch_decoder_killarney.sh --smoke-test
+#   ./submit_fourier_flatline_blur_patch_decoder_killarney.sh
+#   ./submit_fourier_flatline_blur_patch_decoder_killarney.sh --datasets ETTh1,exchange_rate
 #
 set -euo pipefail
 
@@ -22,23 +22,30 @@ fi
 
 CONFIG="configs/binary_anchor_stationary_flat_subsets_grad_accum_150_fourier_flatline_blur_patch_decoder_ctx.yaml"
 DATASETS="ETTh1,ETTm1,exchange_rate,weather"
-WALL_TIME="8:00:00"
+WALL_TIME="12:00:00"
 SMOKE=0
+RESUME=0
+EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --smoke-test|--smoke) SMOKE=1; shift ;;
         --datasets) DATASETS="$2"; shift 2 ;;
         --time) WALL_TIME="$2"; shift 2 ;;
+        --resume) RESUME=1; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
 
-ARGS=(--configs "$CONFIG" --gpu a100 --time "$WALL_TIME")
+ARGS=(--configs "$CONFIG" --gpu l40s --time "$WALL_TIME")
 if [[ "$SMOKE" -eq 1 ]]; then
-    ARGS=(--smoke --configs "$CONFIG" --datasets ETTh1 --gpu a100 --time "0:45:00")
+    ARGS=(--smoke --configs "$CONFIG" --datasets ETTh1 --gpu l40s --time "0:30:00")
 else
     ARGS+=(--datasets "$DATASETS")
 fi
 
-exec ./test_submit.sh "${ARGS[@]}"
+if [[ "$RESUME" -eq 1 ]]; then
+    ARGS+=(--resume)
+fi
+
+exec ./test_submit.sh "${ARGS[@]}" "${EXTRA_ARGS[@]}"
