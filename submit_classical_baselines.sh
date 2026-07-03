@@ -34,31 +34,31 @@ _classical_wheel_dir() {
     echo "$PROJECT/$USER/ts-sandbox/wheels-classical"
 }
 
-CLASSICAL_WHEELS=(
-    statsforecast
-    statsmodels
-    fugue
-    cloudpickle
-    threadpoolctl
-    triad
-    adagio
-    patsy
-    numba
-    llvmlite
-    pandas
-    pytz
-    tzdata
-    plotly
-    narwhals
+CLASSICAL_WHEEL_PATTERNS=(
+    "statsforecast-1.7.6*.whl"
+    "statsmodels*.whl"
+    "fugue*.whl"
+    "cloudpickle*.whl"
+    "threadpoolctl*.whl"
+    "triad*.whl"
+    "adagio*.whl"
+    "patsy*.whl"
+    "numba*.whl"
+    "llvmlite*.whl"
+    "pandas-2.3.3*.whl"
+    "pytz*.whl"
+    "tzdata*.whl"
+    "plotly*.whl"
+    "narwhals*.whl"
 )
 
 _check_classical_wheel_cache() {
     local wheel_dir="$1"
     [[ -n "$wheel_dir" && -d "$wheel_dir" ]] || return 1
-    local pkg
-    for pkg in "${CLASSICAL_WHEELS[@]}"; do
-        compgen -G "$wheel_dir/$pkg"*.whl >/dev/null || {
-            echo "ERROR: missing cached wheel for $pkg in $wheel_dir" >&2
+    local pattern
+    for pattern in "${CLASSICAL_WHEEL_PATTERNS[@]}"; do
+        compgen -G "$wheel_dir/$pattern" >/dev/null || {
+            echo "ERROR: missing cached wheel matching $pattern in $wheel_dir" >&2
             return 1
         }
     done
@@ -193,12 +193,13 @@ echo "[setup] statsforecast stack from wheel cache (pandas 2.x pin)..."
 pip install --no-index --find-links "$WHEEL_DIR" --force-reinstall --no-deps pandas==2.3.3 -q
 pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
     pytz tzdata cloudpickle threadpoolctl triad adagio patsy \
-    llvmlite numba plotly narwhals fugue statsmodels statsforecast==2.0.3 -q
+    llvmlite numba plotly narwhals fugue statsmodels statsforecast==1.7.6 -q
 
 python -c "
 import pandas as pd
 import pyarrow, statsforecast, statsmodels, torch, wandb, yaml
 assert pd.__version__.startswith('2.'), f'pandas must be 2.x, got {pd.__version__}'
+assert statsforecast.__version__ == '1.7.6', f'statsforecast must be 1.7.6, got {statsforecast.__version__}'
 print('venv ok: torch', torch.__version__, '| pandas', pd.__version__, '| statsforecast', statsforecast.__version__)
 "
 

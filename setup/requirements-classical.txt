@@ -1,5 +1,5 @@
 # Classical baseline deps. Bootstrap via setup/killarney_bootstrap_classical_wheels.sh
 # pandas must stay on 2.x — statsforecast breaks on pandas 3 (freq='M' removed).
 pandas==2.3.3
-statsforecast==2.0.3
+statsforecast==1.7.6
 statsmodels>=0.14.0

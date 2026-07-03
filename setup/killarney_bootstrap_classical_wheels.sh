@@ -70,7 +70,7 @@ trap - EXIT
 
 echo "[2/2] statsforecast dependency wheels from PyPI..."
 _classical_specs=(
-    statsforecast==2.0.3
+    statsforecast==1.7.6
     statsmodels
     fugue
     cloudpickle
@@ -101,7 +101,7 @@ echo ""
 _n="$(find "$WHEEL_DIR" -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)"
 echo "Done. $_n wheels in $WHEEL_DIR"
 _required_wheels=(
-    statsforecast
+    statsforecast-1.7.6
     statsmodels
     fugue
     cloudpickle
@@ -111,7 +111,7 @@ _required_wheels=(
     patsy
     numba
     llvmlite
-    pandas
+    pandas-2.3.3
     pytz
     tzdata
     plotly
@@ -119,7 +119,7 @@ _required_wheels=(
 )
 for pkg in "${_required_wheels[@]}"; do
     if ! compgen -G "$WHEEL_DIR/$pkg"*.whl >/dev/null; then
-        echo "ERROR: missing cached wheel for $pkg in $WHEEL_DIR" >&2
+        echo "ERROR: missing cached wheel matching $pkg*.whl in $WHEEL_DIR" >&2
         exit 1
     fi
 done
