@@ -52,3 +52,18 @@ def test_patch_guidance_mixer_and_dit_shapes():
         out = model(past, future)
     assert "loss" in out
     assert torch.isfinite(out["loss"])
+
+
+def test_patch_guidance_out_len_matches_short_horizon():
+    from models.diffusion_tsf import train_multivariate_pipeline as pipe
+
+    old_forecast = pipe.FORECAST_LENGTH
+    old_chunk = pipe.DIFFUSION_CHUNK_HORIZON
+    try:
+        pipe.FORECAST_LENGTH = 20
+        pipe.DIFFUSION_CHUNK_HORIZON = 96
+        stack = pipe.create_patch_guidance_stack(5)
+        assert stack.config.out_len == 20
+    finally:
+        pipe.FORECAST_LENGTH = old_forecast
+        pipe.DIFFUSION_CHUNK_HORIZON = old_chunk

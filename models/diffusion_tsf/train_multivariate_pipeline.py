@@ -533,9 +533,24 @@ def wrap_itrans_guidance(
     return iTransformerGuidance(model, seq_len=int(seq_len), pred_len=int(pred_len))
 
 
+def _patch_guidance_out_len() -> int:
+    """Native decoder forecast length (dataset horizon, not diffusion AR chunk)."""
+    return int(FORECAST_LENGTH)
+
+
 def _patch_guidance_pred_len() -> int:
     chunk = int(DIFFUSION_CHUNK_HORIZON or 0)
     return chunk if chunk > 0 else int(FORECAST_LENGTH)
+
+
+def _checkpoint_is_patch_guidance(ckpt: dict) -> bool:
+    cfg = ckpt.get("config")
+    if isinstance(cfg, dict) and cfg.get("in_len") and cfg.get("out_len") and cfg.get("patch_size"):
+        return True
+    sd = ckpt.get("model_state_dict")
+    if not isinstance(sd, dict):
+        return False
+    return any(k.startswith("decoder.") or k.startswith("mixer.") for k in sd)
 
 
 def create_patch_guidance_stack(
@@ -547,7 +562,7 @@ def create_patch_guidance_stack(
 ) -> PatchGuidanceStack:
     cfg = PatchGuidanceStackConfig(
         in_len=int(in_len or LOOKBACK_LENGTH),
-        out_len=int(out_len or _patch_guidance_pred_len()),
+        out_len=int(out_len or _patch_guidance_out_len()),
         patch_size=int(patch_size or MMPD_PATCH_SIZE),
         data_dim=int(num_vars),
     )
@@ -562,10 +577,15 @@ def load_patch_guidance_from_checkpoint(
     path: str,
     num_vars: int,
     device: torch.device,
+    ckpt: Optional[dict] = None,
 ) -> PatchGuidanceStack:
-    ckpt = torch.load(path, map_location=device, weights_only=False)
+    if ckpt is None:
+        ckpt = torch.load(path, map_location=device, weights_only=False)
     cfg_dict = dict(ckpt.get("config") or {})
     cfg_dict.setdefault("data_dim", num_vars)
+    cfg_dict.setdefault("in_len", LOOKBACK_LENGTH)
+    cfg_dict.setdefault("out_len", _patch_guidance_out_len())
+    cfg_dict.setdefault("patch_size", MMPD_PATCH_SIZE)
     cfg = PatchGuidanceStackConfig(**cfg_dict)
     stack = PatchGuidanceStack(cfg).to(device)
     stack.load_state_dict(ckpt["model_state_dict"], strict=True)
@@ -584,8 +604,13 @@ def load_wrapped_guidance(
 ):
     """Load finetuned guidance (iTransformer or patch decoder stack)."""
     gtype = guidance_type or GUIDANCE_TYPE
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    if gtype == "patch_decoder" and not _checkpoint_is_patch_guidance(ckpt):
+        gtype = "itransformer"
     if gtype == "patch_decoder":
-        stack = load_patch_guidance_from_checkpoint(ckpt_path, num_vars, device)
+        stack = load_patch_guidance_from_checkpoint(
+            ckpt_path, num_vars, device, ckpt=ckpt,
+        )
         return wrap_patch_guidance(stack)
     itrans_model = load_itransformer_from_checkpoint(ckpt_path, num_vars, device)
     lb = LOOKBACK_LENGTH if dataset_lookback is None else dataset_lookback
@@ -620,7 +645,8 @@ def _patch_guidance_batch(
     past = past.to(device)
     future = future.to(device)
     past_norm, future_norm = _window_norm_past_future(past, future)
-    pred_len = _patch_guidance_pred_len()
+    avail = future_norm.shape[-1] - LOOKBACK_OVERLAP if LOOKBACK_OVERLAP > 0 else future_norm.shape[-1]
+    pred_len = min(_patch_guidance_out_len(), avail)
     if LOOKBACK_OVERLAP > 0:
         target = future_norm[..., LOOKBACK_OVERLAP : LOOKBACK_OVERLAP + pred_len]
     else:
