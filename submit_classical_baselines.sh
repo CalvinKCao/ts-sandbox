@@ -38,16 +38,18 @@ CLASSICAL_WHEELS=(
     statsforecast
     statsmodels
     fugue
-    utilsforecast
-    coreforecast
     cloudpickle
     threadpoolctl
     triad
     adagio
-    narwhals
     patsy
     numba
     llvmlite
+    pandas
+    pytz
+    tzdata
+    plotly
+    narwhals
 )
 
 _check_classical_wheel_cache() {
@@ -174,8 +176,8 @@ echo "[setup] Checking pyarrow from Arrow module..."
 python -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
 echo "[setup] statsforecast stack from wheel cache..."
 pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
-    cloudpickle threadpoolctl coreforecast utilsforecast triad adagio narwhals patsy \
-    llvmlite numba fugue statsmodels statsforecast -q
+    pytz tzdata pandas cloudpickle threadpoolctl triad adagio patsy \
+    llvmlite numba plotly narwhals fugue statsmodels statsforecast==1.5.0 -q
 
 python -c "
 import pyarrow, statsforecast, statsmodels, torch, wandb, yaml

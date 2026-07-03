@@ -69,36 +69,55 @@ rm -rf "$BOOTSTRAP"
 trap - EXIT
 
 echo "[2/2] statsforecast dependency wheels from PyPI..."
-_classical_pkgs=(
-    statsforecast
+_classical_specs=(
+    statsforecast==1.5.0
     statsmodels
     fugue
-    utilsforecast
-    coreforecast
     cloudpickle
     threadpoolctl
     triad
     adagio
-    narwhals
     patsy
     numba
     llvmlite
+    pandas==2.3.3
+    pytz
+    tzdata
+    plotly
+    narwhals
 )
-for pkg in "${_classical_pkgs[@]}"; do
-    echo "  $pkg"
+for spec in "${_classical_specs[@]}"; do
+    echo "  $spec"
     pip download \
         --index-url "$PYPI_INDEX" \
         --only-binary=:all: \
         --no-deps \
         -d "$WHEEL_DIR" \
-        "$pkg" \
+        "$spec" \
         -q
 done
 
 echo ""
 _n="$(find "$WHEEL_DIR" -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)"
 echo "Done. $_n wheels in $WHEEL_DIR"
-for pkg in "${_classical_pkgs[@]}"; do
+_required_wheels=(
+    statsforecast
+    statsmodels
+    fugue
+    cloudpickle
+    threadpoolctl
+    triad
+    adagio
+    patsy
+    numba
+    llvmlite
+    pandas
+    pytz
+    tzdata
+    plotly
+    narwhals
+)
+for pkg in "${_required_wheels[@]}"; do
     if ! compgen -G "$WHEEL_DIR/$pkg"*.whl >/dev/null; then
         echo "ERROR: missing cached wheel for $pkg in $WHEEL_DIR" >&2
         exit 1
