@@ -1,11 +1,12 @@
 #!/bin/bash
 # One-shot login-node prep for classical baseline jobs.
 #
-# statsforecast -> fugue -> pyarrow. On Alliance, pyarrow must come from the
-# Arrow module (--no-index), not PyPI (pyarrow-noinstall dummy wheel).
+# pyarrow: Alliance wheelhouse only (module load gcc arrow BEFORE any venv).
+# statsforecast stack: PyPI wheels cached to PROJECT (login node has network).
 #
-# Run on Killarney login node:
+# Run on Killarney login node (no venv active):
 #   cd "$SCRATCH/ts-sandbox"
+#   deactivate 2>/dev/null || true
 #   ./setup/killarney_bootstrap_classical_wheels.sh
 #
 set -euo pipefail
@@ -33,29 +34,41 @@ fi
 
 WHEEL_DIR="$PROJECT/$USER/ts-sandbox/wheels-classical"
 
-_load_modules() {
-    module purge 2>/dev/null || true
-    module load StdEnv/2023 python/3.11 2>/dev/null || true
-    module load gcc arrow 2>/dev/null || {
-        echo "ERROR: could not load gcc/arrow (required for pyarrow)." >&2
-        echo "Try: module spider arrow" >&2
-        exit 1
-    }
-}
+deactivate 2>/dev/null || true
+unset VIRTUAL_ENV PYTHONHOME
 
-_load_modules
+# shellcheck source=/dev/null
+source "$REPO_ROOT/setup/killarney_classical_modules.sh"
+killarney_classical_modules
 
 mkdir -p "$WHEEL_DIR"
 echo "Wheel cache: $WHEEL_DIR"
+if command -v avail_wheels >/dev/null 2>&1; then
+    echo "avail_wheels pyarrow: $(avail_wheels pyarrow 2>/dev/null | head -3 | tr '\n' ' ')"
+fi
 echo ""
 
-# pyarrow: Alliance wheel cache only (PyPI serves a dummy without arrow module).
-echo "[1/2] Caching pyarrow from Alliance wheelhouse..."
-pip download --no-index pyarrow -d "$WHEEL_DIR" -q
+# pyarrow: install in a throwaway venv (arrow already loaded), wheel to PROJECT cache.
+echo "[1/2] pyarrow via Alliance wheelhouse (temp venv)..."
+BOOTSTRAP="$(mktemp -d "$PROJECT/$USER/ts-sandbox/.bootstrap-classical-XXXX")"
+trap 'rm -rf "$BOOTSTRAP"' EXIT
+virtualenv --no-download "$BOOTSTRAP"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP/bin/activate"
+pip install --no-index --upgrade pip -q
+if ! pip install --no-index pyarrow -q; then
+    echo "ERROR: pip install --no-index pyarrow failed." >&2
+    echo "Ensure no venv was active and gcc/arrow loaded. See docs.alliancecan.ca/wiki/Arrow" >&2
+    exit 1
+fi
+pip wheel --no-deps pyarrow -w "$WHEEL_DIR" -q
+deactivate
+unset VIRTUAL_ENV
+rm -rf "$BOOTSTRAP"
+trap - EXIT
+echo "  cached: $(ls -1 "$WHEEL_DIR"/pyarrow*.whl 2>/dev/null | tail -1 | xargs basename 2>/dev/null || echo '?')"
 
-# Remaining statsforecast stack: PyPI on login is fine; install with --no-deps so
-# pip does not re-resolve pyarrow from the dummy wheel.
-echo "[2/2] Caching statsforecast dependency wheels from PyPI..."
+echo "[2/2] statsforecast dependency wheels from PyPI..."
 _classical_pkgs=(
     statsforecast
     statsmodels
@@ -71,5 +84,6 @@ for pkg in "${_classical_pkgs[@]}"; do
 done
 
 echo ""
-echo "Done. $(ls -1 "$WHEEL_DIR"/*.whl 2>/dev/null | wc -l) wheels in $WHEEL_DIR"
+_n="$(find "$WHEEL_DIR" -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)"
+echo "Done. $_n wheels in $WHEEL_DIR"
 echo "Submit: ./submit_classical_baselines.sh"

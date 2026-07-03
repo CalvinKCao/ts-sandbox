@@ -56,10 +56,12 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     cd "$REPO"
 
     WHEEL_DIR="$(_classical_wheel_dir || true)"
-    if [[ -z "$WHEEL_DIR" || ! -d "$WHEEL_DIR" ]] || ! compgen -G "$WHEEL_DIR/*.whl" >/dev/null; then
-        echo "ERROR: classical wheel cache missing at ${WHEEL_DIR:-\$PROJECT/\$USER/ts-sandbox/wheels-classical}" >&2
-        echo "Run once on the login node:" >&2
-        echo "  cd \"\$SCRATCH/ts-sandbox\" && ./setup/killarney_bootstrap_classical_wheels.sh" >&2
+    if [[ -z "$WHEEL_DIR" || ! -d "$WHEEL_DIR" ]] \
+        || ! compgen -G "$WHEEL_DIR/statsforecast"*.whl >/dev/null \
+        || ! compgen -G "$WHEEL_DIR/pyarrow"*.whl >/dev/null; then
+        echo "ERROR: classical wheel cache incomplete at ${WHEEL_DIR:-\$PROJECT/\$USER/ts-sandbox/wheels-classical}" >&2
+        echo "Run on login node (deactivate venv first):" >&2
+        echo "  deactivate 2>/dev/null; cd \"\$SCRATCH/ts-sandbox\" && ./setup/killarney_bootstrap_classical_wheels.sh" >&2
         exit 1
     fi
 
@@ -126,15 +128,18 @@ WHEEL_DIR="$(_classical_wheel_dir || true)"
     echo "ERROR: classical wheel cache missing — run ./setup/killarney_bootstrap_classical_wheels.sh on login node" >&2
     exit 1
 }
+if ! compgen -G "$WHEEL_DIR/statsforecast"*.whl >/dev/null || ! compgen -G "$WHEEL_DIR/pyarrow"*.whl >/dev/null; then
+    echo "ERROR: wheel cache incomplete (need statsforecast + pyarrow wheels)" >&2
+    exit 1
+fi
 [[ -n "${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR is not set." >&2; exit 1; }
 
-# Arrow module must load before venv (Alliance pyarrow is not on PyPI).
-module purge 2>/dev/null || true
-module load StdEnv/2023 python/3.11 2>/dev/null || true
-module load gcc arrow 2>/dev/null || {
-    echo "ERROR: could not load gcc/arrow (required for pyarrow / statsforecast)." >&2
-    exit 1
-}
+deactivate 2>/dev/null || true
+unset VIRTUAL_ENV PYTHONHOME
+
+# shellcheck source=/dev/null
+source "$REPO/setup/killarney_classical_modules.sh"
+killarney_classical_modules || exit 1
 command -v virtualenv >/dev/null || { echo "ERROR: virtualenv not available after module load." >&2; exit 1; }
 
 echo "[setup] Building node-local venv on \$SLURM_TMPDIR from $REQ"
@@ -143,9 +148,8 @@ virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 pip install --no-index -r "$REQ" -q
-echo "[setup] pyarrow from Alliance wheelhouse (arrow module loaded)..."
-pip install --no-index pyarrow -q
-echo "[setup] statsforecast stack from $WHEEL_DIR ..."
+echo "[setup] pyarrow + statsforecast stack from wheel cache..."
+pip install --no-index --find-links "$WHEEL_DIR" --no-deps pyarrow -q
 pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
     cloudpickle threadpoolctl coreforecast utilsforecast fugue statsmodels statsforecast -q
 pip install --no-index numba -q 2>/dev/null || true
