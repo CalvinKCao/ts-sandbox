@@ -238,11 +238,11 @@ def build_run_tags(
     phase_name: str,
     extra_tags: Optional[list] = None,
 ) -> list:
-    """Dataset tag on every run; ``eval`` only on eval phases unless overridden."""
+    """Dataset tag on every run; ``eval`` on eval phases (always, even with extra_tags)."""
     tags = [dataset]
     if extra_tags:
         tags.extend(extra_tags)
-    elif phase_name in EVAL_PHASE_NAMES:
+    if phase_name in EVAL_PHASE_NAMES and "eval" not in tags:
         tags.append("eval")
     return tags
 
