@@ -36,6 +36,8 @@ _classical_wheel_dir() {
 
 CLASSICAL_WHEEL_PATTERNS=(
     "statsforecast-1.7.6*.whl"
+    "coreforecast*.whl"
+    "utilsforecast*.whl"
     "statsmodels*.whl"
     "fugue*.whl"
     "cloudpickle*.whl"
@@ -193,11 +195,12 @@ echo "[setup] statsforecast stack from wheel cache (pandas 2.x pin)..."
 pip install --no-index --find-links "$WHEEL_DIR" --force-reinstall --no-deps pandas==2.3.3 -q
 pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
     pytz tzdata cloudpickle threadpoolctl triad adagio patsy \
-    llvmlite numba plotly narwhals fugue statsmodels statsforecast==1.7.6 -q
+    llvmlite numba plotly narwhals fugue coreforecast utilsforecast \
+    statsmodels statsforecast==1.7.6 -q
 
 python -c "
 import pandas as pd
-import pyarrow, statsforecast, statsmodels, torch, wandb, yaml
+import coreforecast, pyarrow, statsforecast, statsmodels, torch, utilsforecast, wandb, yaml
 assert pd.__version__.startswith('2.'), f'pandas must be 2.x, got {pd.__version__}'
 assert statsforecast.__version__ == '1.7.6', f'statsforecast must be 1.7.6, got {statsforecast.__version__}'
 print('venv ok: torch', torch.__version__, '| pandas', pd.__version__, '| statsforecast', statsforecast.__version__)

@@ -71,6 +71,8 @@ trap - EXIT
 echo "[2/2] statsforecast dependency wheels from PyPI..."
 _classical_specs=(
     statsforecast==1.7.6
+    coreforecast
+    utilsforecast
     statsmodels
     fugue
     cloudpickle
@@ -102,6 +104,8 @@ _n="$(find "$WHEEL_DIR" -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)"
 echo "Done. $_n wheels in $WHEEL_DIR"
 _required_wheels=(
     statsforecast-1.7.6
+    coreforecast
+    utilsforecast
     statsmodels
     fugue
     cloudpickle
