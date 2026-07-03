@@ -106,9 +106,6 @@ fi
 REPO="${SLURM_SUBMIT_DIR:-$SCRIPT_DIR}"
 cd "$REPO"
 
-REQ="$REPO/setup/requirements-killarney.txt"
-WHEEL_DIR="$(_classical_wheel_dir || true)"
-
 STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-classical-baselines"
 LOG="$REPO/results/logs/${STEM}.log"
 mkdir -p "$REPO/results/logs" "$REPO/results/datasets"
@@ -116,6 +113,10 @@ exec >>"$LOG" 2>&1
 
 echo "Job $SLURM_JOB_ID on ${SLURMD_NODENAME:-?} — classical baselines"
 echo "CPUs=$SLURM_CPUS_PER_TASK mem=${SLURM_MEM_PER_NODE:-?} stem=$STEM"
+echo "Slurm log mirror: $REPO/logs/${SLURM_JOB_NAME:-classical-baselines}-${SLURM_JOB_ID}.log"
+
+REQ="$REPO/setup/requirements-killarney.txt"
+WHEEL_DIR="$(_classical_wheel_dir || true)"
 
 [[ -f "$REQ" ]] || {
     echo "ERROR: missing $REQ — run ./setup/killarney_freeze_requirements.sh on login node" >&2
