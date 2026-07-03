@@ -3,15 +3,36 @@
 # repo datasets except dalia. CPU-bound on L40S nodes; logs to ts-sandbox-leaderboard.
 #
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
-#   ./submit_classical_baselines.sh
+#   ./setup/killarney_bootstrap_classical_wheels.sh   # one-time: cache PyPI wheels on PROJECT
 #   ./submit_classical_baselines.sh --smoke-test
-#   ./submit_classical_baselines.sh --datasets ETTh1,illness
+#   ./submit_classical_baselines.sh
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ALL_DATASETS="ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,electricity,traffic,PeMS,solar_Alabama,dynamic"
+
+_resolve_project() {
+    if [[ -n "${PROJECT:-}" ]]; then
+        return 0
+    fi
+    shopt -s nullglob
+    _m=("$HOME"/projects/aip-* "$HOME"/projects/def-*)
+    shopt -u nullglob
+    if [[ "${#_m[@]}" -gt 0 ]]; then
+        export PROJECT
+        PROJECT="$(readlink -f "${_m[0]}")"
+    fi
+}
+
+_classical_wheel_dir() {
+    _resolve_project
+    if [[ -z "${PROJECT:-}" ]]; then
+        return 1
+    fi
+    echo "$PROJECT/$USER/ts-sandbox/wheels-classical"
+}
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     IS_SMOKE=0
@@ -33,6 +54,14 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         REPO="$SCRIPT_DIR"
     fi
     cd "$REPO"
+
+    WHEEL_DIR="$(_classical_wheel_dir || true)"
+    if [[ -z "$WHEEL_DIR" || ! -d "$WHEEL_DIR" ]] || ! compgen -G "$WHEEL_DIR/*.whl" >/dev/null; then
+        echo "ERROR: classical wheel cache missing at ${WHEEL_DIR:-\$PROJECT/\$USER/ts-sandbox/wheels-classical}" >&2
+        echo "Run once on the login node:" >&2
+        echo "  cd \"\$SCRATCH/ts-sandbox\" && ./setup/killarney_bootstrap_classical_wheels.sh" >&2
+        exit 1
+    fi
 
     if [[ "$IS_SMOKE" -eq 1 ]]; then
         TIME="0:45:00"
@@ -77,21 +106,8 @@ fi
 REPO="${SLURM_SUBMIT_DIR:-$SCRIPT_DIR}"
 cd "$REPO"
 
-module purge 2>/dev/null || true
-module load StdEnv/2023 python/3.11 2>/dev/null || true
-
-if [[ -f "$REPO/.venv/bin/activate" ]]; then
-    # shellcheck source=/dev/null
-    source "$REPO/.venv/bin/activate"
-elif [[ -f "${SCRATCH:-}/ts-sandbox/.venv/bin/activate" ]]; then
-    # shellcheck source=/dev/null
-    source "${SCRATCH}/ts-sandbox/.venv/bin/activate"
-fi
-
-# statsforecast / statsmodels are not in the Alliance wheelhouse — install once per job.
-pip install -q statsforecast statsmodels
-
-export PYTHONUNBUFFERED=1
+REQ="$REPO/setup/requirements-killarney.txt"
+WHEEL_DIR="$(_classical_wheel_dir || true)"
 
 STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-classical-baselines"
 LOG="$REPO/results/logs/${STEM}.log"
@@ -100,6 +116,35 @@ exec >>"$LOG" 2>&1
 
 echo "Job $SLURM_JOB_ID on ${SLURMD_NODENAME:-?} — classical baselines"
 echo "CPUs=$SLURM_CPUS_PER_TASK mem=${SLURM_MEM_PER_NODE:-?} stem=$STEM"
+
+[[ -f "$REQ" ]] || {
+    echo "ERROR: missing $REQ — run ./setup/killarney_freeze_requirements.sh on login node" >&2
+    exit 1
+}
+[[ -n "$WHEEL_DIR" && -d "$WHEEL_DIR" ]] || {
+    echo "ERROR: classical wheel cache missing — run ./setup/killarney_bootstrap_classical_wheels.sh on login node" >&2
+    exit 1
+}
+[[ -n "${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR is not set." >&2; exit 1; }
+
+module purge 2>/dev/null || true
+module load StdEnv/2023 python/3.11 2>/dev/null || true
+command -v virtualenv >/dev/null || { echo "ERROR: virtualenv not available after module load." >&2; exit 1; }
+
+echo "[setup] Building node-local venv on \$SLURM_TMPDIR from $REQ"
+virtualenv --no-download "$SLURM_TMPDIR/env"
+# shellcheck source=/dev/null
+source "$SLURM_TMPDIR/env/bin/activate"
+pip install --no-index --upgrade pip -q
+pip install --no-index -r "$REQ" -q
+pip install --no-index --find-links "$WHEEL_DIR" -r "$REPO/setup/requirements-classical.txt" -q
+
+python -c "
+import statsforecast, statsmodels, torch, wandb, yaml
+print('venv ok: torch', torch.__version__, '| statsforecast', statsforecast.__version__)
+"
+
+export PYTHONUNBUFFERED=1
 
 python -u utils/run_classical_baselines.py \
     --output-dir "$REPO/results/datasets/$STEM" \
