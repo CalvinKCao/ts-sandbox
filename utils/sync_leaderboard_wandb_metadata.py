@@ -38,7 +38,7 @@ from models.diffusion_tsf.pipeline.wandb_utils import make_phase_run_name
 PROJECT = "ts-sandbox-leaderboard"
 ENTITY = "calvincao"
 MMPD_JOB_TYPE = "mmpd_eval"
-EVAL_JOB_TYPES = frozenset({"staged_eval", "mmpd_eval"})
+EVAL_JOB_TYPES = frozenset({"staged_eval", "mmpd_eval", "classical_baseline"})
 META_TAGS = frozenset({"eval", "curated-relog", "mmpd", "stub", "binary"})
 
 

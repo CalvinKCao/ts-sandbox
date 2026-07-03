@@ -70,7 +70,7 @@ trap - EXIT
 
 echo "[2/2] statsforecast dependency wheels from PyPI..."
 _classical_specs=(
-    statsforecast==1.5.0
+    statsforecast==2.0.3
     statsmodels
     fugue
     cloudpickle

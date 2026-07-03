@@ -13,6 +13,9 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 
 RUN_STEM_RE = re.compile(r"^\d{2}-\d{2}-(\d+)-([^-]+)-(.+)$")
 
+CLASSICAL_BASELINES_RAW = "classical_baselines"
+CLASSICAL_BASELINES_NICKNAME = "Classical baselines"
+
 MMPD_SUBSET_RAW = "mmpd_subset"
 MMPD_SUBSET_NICKNAME = "MMPD (subset)"
 MMPD_SUBSET_CAMPAIGN_DATE = "06-13"
@@ -120,6 +123,8 @@ def leaderboard_nickname(
         return MMPD_MASKAE_FAIR_13D_NICKNAME
     if raw_config == MMPD_DECODER_GRAD_ACCUM_200_LR_LO_RAW:
         return MMPD_DECODER_GRAD_ACCUM_200_LR_LO_NICKNAME
+    if raw_config == CLASSICAL_BASELINES_RAW:
+        return CLASSICAL_BASELINES_NICKNAME
     if raw_config:
         return strip_leaderboard_markdown(display_config(raw_config))
     if yaml_path:
@@ -190,6 +195,11 @@ def nickname_for_wandb_run(run: Any) -> str:
     if parsed:
         _, _, raw_config = parsed
         return leaderboard_nickname(raw_config=raw_config)
+
+    if getattr(run, "job_type", None) == "classical_baseline":
+        return CLASSICAL_BASELINES_NICKNAME
+    if cfg.get("run_type") == "classical_baseline":
+        return CLASSICAL_BASELINES_NICKNAME
 
     return ""
 

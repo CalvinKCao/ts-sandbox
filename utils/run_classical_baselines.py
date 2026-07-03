@@ -48,6 +48,10 @@ from utils.eval_mmpd_gaussian_anchor import (  # noqa: E402
     _load_data_subset_policy,
     resolve_subset_meta_for_dataset,
 )
+from utils.leaderboard_config_nicknames import (  # noqa: E402
+    CLASSICAL_BASELINES_NICKNAME,
+    CLASSICAL_BASELINES_RAW,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +92,14 @@ def _wandb_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
     return out
 
 
-def _leaderboard_group(dataset: str, job_id: Optional[str] = None) -> str:
+def _leaderboard_group(
+    dataset: str,
+    config_stem: str,
+    job_id: Optional[str] = None,
+) -> str:
     jid = job_id or os.environ.get("SLURM_JOB_ID") or "local"
     date_str = datetime.now().strftime("%m-%d")
-    return f"{date_str}-{jid}-{dataset}-classical-baselines"
+    return f"{date_str}-{jid}-{dataset}-{config_stem}"
 
 
 def _load_raw_normalized(
@@ -381,35 +389,61 @@ def evaluate_dataset(
     return results
 
 
+def _wandb_api_key_usable() -> bool:
+    try:
+        from models.diffusion_tsf.pipeline import wandb_utils
+
+        return wandb_utils._api_key_usable()
+    except Exception:
+        return bool(os.environ.get("WANDB_API_KEY", "").strip())
+
+
+def leaderboard_marker_path(output_dir: Path, dataset: str, method: str) -> Path:
+    return output_dir / "partials" / f".leaderboard_{dataset}_{method}.json"
+
+
 def log_method_to_wandb(
     dataset: str,
     method: str,
     metrics: Dict[str, float],
     *,
     config: Dict[str, Any],
+    config_path: Path,
+    output_dir: Path,
+    job_id: Optional[str] = None,
     dry_run: bool = False,
+    force: bool = False,
 ) -> Optional[str]:
-    if not os.environ.get("WANDB_API_KEY", "").strip():
+    if not _wandb_api_key_usable():
         logger.warning("WANDB_API_KEY not set; skip wandb for %s/%s", dataset, method)
         return None
 
+    marker = leaderboard_marker_path(output_dir, dataset, method)
+    if not force and marker.is_file():
+        logger.info("%s/%s: wandb already logged (marker)", dataset, method)
+        return None
+
+    from models.diffusion_tsf.pipeline.wandb_utils import make_phase_run_name
+
     import wandb
 
-    group = _leaderboard_group(dataset)
-    run_name = f"{group}-{method.replace('_', '-')}"
-    if len(run_name) > 128:
-        run_name = run_name[:128]
-
-    tags = [dataset, "eval", "classical-baseline", method]
+    config_stem = config_path.stem
+    group = _leaderboard_group(dataset, config_stem, job_id=job_id)
+    phase_slug = method.replace("_", "-")
+    run_name = make_phase_run_name(group, phase_slug)
+    tags = [dataset, "eval", "classical-baseline", config_stem]
     wandb_config = {
         **config,
+        "config_nickname": CLASSICAL_BASELINES_NICKNAME,
+        "baseline": CLASSICAL_BASELINES_RAW,
         "dataset": dataset,
         "model": method,
         "run_type": JOB_TYPE,
+        "data_subset_config": str(config_path.resolve()),
     }
 
     if dry_run:
-        logger.info("dry-run wandb: %s | %s | %s", run_name, group, wandb_config)
+        logger.info("dry-run wandb: %s | group=%s | tags=%s", run_name, group, tags)
         return None
 
     run = wandb.init(
@@ -419,6 +453,7 @@ def log_method_to_wandb(
         group=group,
         job_type=JOB_TYPE,
         tags=tags,
+        notes=f"classical baseline {method} on {dataset}",
         config=wandb_config,
         settings=wandb.Settings(console="off"),
         reinit=True,
@@ -428,7 +463,12 @@ def log_method_to_wandb(
         wandb.log(payload, step=0)
         for k, v in payload.items():
             run.summary[k] = v
-        return run.url
+        url = run.url
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        with marker.open("w", encoding="utf-8") as f:
+            json.dump({"group": group, "run_id": run.id, "url": url}, f, indent=2)
+        logger.info("[leaderboard] %s/%s: %s", dataset, method, url)
+        return url
     finally:
         run.finish()
 
@@ -569,7 +609,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             if not args.no_wandb:
                 log_method_to_wandb(
-                    dataset, method, metrics, config=payload["config"], dry_run=args.dry_run,
+                    dataset,
+                    method,
+                    metrics,
+                    config=payload["config"],
+                    config_path=args.config,
+                    output_dir=output_dir,
+                    job_id=os.environ.get("SLURM_JOB_ID"),
+                    dry_run=args.dry_run,
                 )
 
     summary_path = output_dir / "summary.json"

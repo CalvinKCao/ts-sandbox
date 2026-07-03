@@ -85,6 +85,13 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     fi
     cd "$REPO"
 
+    if [[ -f "$REPO/.env" ]]; then
+        set -a
+        # shellcheck source=/dev/null
+        source "$REPO/.env"
+        set +a
+    fi
+
     WHEEL_DIR="$(_classical_wheel_dir || true)"
     if ! _check_classical_wheel_cache "$WHEEL_DIR"; then
         echo "ERROR: classical wheel cache incomplete at ${WHEEL_DIR:-\$PROJECT/\$USER/ts-sandbox/wheels-classical}" >&2
@@ -117,6 +124,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     S_ARGS=(
         --job-name="$JOB_NAME"
         --account=aip-boyuwang
+        --export=ALL
         --time="$TIME"
         --nodes=1
         --cpus-per-task="$CPUS"
@@ -135,6 +143,13 @@ fi
 # --- compute node ---
 REPO="${SLURM_SUBMIT_DIR:-$SCRIPT_DIR}"
 cd "$REPO"
+
+if [[ -f "$REPO/.env" ]]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "$REPO/.env"
+    set +a
+fi
 
 STEM="$(date +%m-%d)-${SLURM_JOB_ID: -3}-classical-baselines"
 LOG="$REPO/results/logs/${STEM}.log"
@@ -174,14 +189,17 @@ pip install --no-index --upgrade pip -q
 pip install --no-index -r "$REQ" -q
 echo "[setup] Checking pyarrow from Arrow module..."
 python -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
-echo "[setup] statsforecast stack from wheel cache..."
+echo "[setup] statsforecast stack from wheel cache (pandas 2.x pin)..."
+pip install --no-index --find-links "$WHEEL_DIR" --force-reinstall --no-deps pandas==2.3.3 -q
 pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
-    pytz tzdata pandas cloudpickle threadpoolctl triad adagio patsy \
-    llvmlite numba plotly narwhals fugue statsmodels statsforecast==1.5.0 -q
+    pytz tzdata cloudpickle threadpoolctl triad adagio patsy \
+    llvmlite numba plotly narwhals fugue statsmodels statsforecast==2.0.3 -q
 
 python -c "
+import pandas as pd
 import pyarrow, statsforecast, statsmodels, torch, wandb, yaml
-print('venv ok: torch', torch.__version__, '| pyarrow', pyarrow.__version__, '| statsforecast', statsforecast.__version__)
+assert pd.__version__.startswith('2.'), f'pandas must be 2.x, got {pd.__version__}'
+print('venv ok: torch', torch.__version__, '| pandas', pd.__version__, '| statsforecast', statsforecast.__version__)
 "
 
 export PYTHONUNBUFFERED=1
