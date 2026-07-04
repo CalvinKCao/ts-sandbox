@@ -91,6 +91,8 @@ class PipelineState:
     window_norm_std_floor: float = 1e-8
     window_norm_low_var_threshold: float = 0.0
     window_norm_low_var_unit_std: float = 1.0
+    window_norm_low_var_unit_std_by_variate: Dict[str, List[float]] = field(default_factory=dict)
+    lookback_overlap_center_shift: bool = False
     zero_guidance_forecast: bool = False
     use_raw_lookback_cond_channel: bool = False
 
@@ -278,6 +280,12 @@ class PipelineState:
         for key in ("window_norm_low_var_threshold", "window_norm_low_var_unit_std"):
             if key in init_kwargs:
                 init_kwargs[key] = float(init_kwargs[key])
+        if "window_norm_low_var_unit_std_by_variate" in init_kwargs:
+            by_ds = init_kwargs["window_norm_low_var_unit_std_by_variate"] or {}
+            init_kwargs["window_norm_low_var_unit_std_by_variate"] = {
+                str(k): [float(v) for v in vals]
+                for k, vals in by_ds.items()
+            }
         if "min_snr_gamma" in init_kwargs:
             init_kwargs["min_snr_gamma"] = float(init_kwargs["min_snr_gamma"])
         if "use_coordinate_channel" in init_kwargs:

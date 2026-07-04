@@ -124,6 +124,8 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
         'window_norm_low_var_threshold': WINDOW_NORM_LOW_VAR_THRESHOLD,
         'window_norm_low_var_unit_std': WINDOW_NORM_LOW_VAR_UNIT_STD,
+        'window_norm_low_var_unit_std_per_variate': WINDOW_NORM_LOW_VAR_UNIT_STD_PER_VARIATE,
+        'lookback_overlap_center_shift': LOOKBACK_OVERLAP_CENTER_SHIFT,
         'window_norm_center': WINDOW_NORM_CENTER,
         'use_triple_scale': USE_TRIPLE_SCALE,
         'diffusion_stage': DIFFUSION_STAGE,
@@ -274,6 +276,8 @@ COARSE_FLATLINE_BLUR_ATOL: Optional[float] = None
 WINDOW_NORM_STD_FLOOR = 1e-8
 WINDOW_NORM_LOW_VAR_THRESHOLD = 0.0
 WINDOW_NORM_LOW_VAR_UNIT_STD = 1.0
+WINDOW_NORM_LOW_VAR_UNIT_STD_PER_VARIATE: Optional[List[float]] = None
+LOOKBACK_OVERLAP_CENTER_SHIFT = False
 LOOKBACK_OVERLAP = 8
 PAST_LOSS_WEIGHT = 0.3
 PRETRAIN_EPOCHS = 10
@@ -1325,6 +1329,8 @@ def create_diffusion_model(
         window_norm_std_floor=WINDOW_NORM_STD_FLOOR,
         window_norm_low_var_threshold=WINDOW_NORM_LOW_VAR_THRESHOLD,
         window_norm_low_var_unit_std=WINDOW_NORM_LOW_VAR_UNIT_STD,
+        window_norm_low_var_unit_std_per_variate=WINDOW_NORM_LOW_VAR_UNIT_STD_PER_VARIATE,
+        lookback_overlap_center_shift=LOOKBACK_OVERLAP_CENTER_SHIFT,
         zero_guidance_forecast=ZERO_GUIDANCE_FORECAST,
         itrans_d_model=ITRANS_D_MODEL,
         guidance_type=_resolve_guidance_type(

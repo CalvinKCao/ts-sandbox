@@ -42,9 +42,9 @@ from models.diffusion_tsf.pipeline.config import load_experiment_config
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch_stage_globals
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline.visualize_utils import (
-    decode_staged_anchor_components,
     pick_sample_indices,
     save_figure_jpg,
+    _staged_fine_value_range,
 )
 from models.diffusion_tsf.train_multivariate_pipeline import (
     anchor_kwargs_from_params,
@@ -180,6 +180,34 @@ def _pick_windows(
 
 
 @torch.no_grad()
+def _decode_staged_1d_from_maps(
+    fine_model: torch.nn.Module,
+    coarse_map: np.ndarray,
+    fine_map: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Decode (V, H, W) coarse/fine maps to 1D window-norm series."""
+    coarse_t = torch.from_numpy(coarse_map).unsqueeze(0)
+    fine_t = torch.from_numpy(fine_map).unsqueeze(0)
+    b, v = coarse_t.shape[:2]
+    bv = b * v
+    to_2d = fine_model.to_2d
+    coarse_flat = coarse_t.reshape(bv, 1, coarse_t.shape[-2], coarse_t.shape[-1])
+    fine_flat = fine_t.reshape(bv, 1, fine_t.shape[-2], fine_t.shape[-1])
+    coarse_1d = to_2d._decode_occupancy_in_range(
+        coarse_flat, value_range=to_2d.max_scale, cdf_decoder="mean",
+    )
+    fine_1d = to_2d._decode_occupancy_in_range(
+        fine_flat, value_range=_staged_fine_value_range(fine_model), cdf_decoder="mean",
+    )
+    final_1d = fine_model.decode_dual_from_2d(coarse_t, fine_t, from_diffusion=False)
+    return (
+        coarse_1d.reshape(b, v, -1).detach().cpu().numpy()[0],
+        fine_1d.reshape(b, v, -1).detach().cpu().numpy()[0],
+        final_1d.detach().cpu().numpy()[0],
+    )
+
+
+@torch.no_grad()
 def _anchor_maps(
     coarse_model: torch.nn.Module,
     fine_model: torch.nn.Module,
@@ -194,16 +222,46 @@ def _anchor_maps(
         future_coarse_2d=coarse_out["future_2d_coarse"],
     )
     past_norm, future_norm, _norm_stats = fine_model._normalize_sequence(past_b, future_b)
-    gt_maps = fine_model._encode_staged_maps(future_norm)
+    past_maps_gt = fine_model._encode_staged_maps(past_norm)
+    future_maps_gt = fine_model._encode_staged_maps(future_norm)
+    past_c_gt = past_maps_gt["coarse"][0].cpu().numpy()
+    past_f_gt = past_maps_gt["fine"][0].cpu().numpy()
+    fut_c_gt = future_maps_gt["coarse"][0].cpu().numpy()
+    fut_f_gt = future_maps_gt["fine"][0].cpu().numpy()
+    past_c_pred = coarse_out["past_2d_coarse"][0].cpu().numpy()
+    past_f_pred = coarse_out["past_2d_fine"][0].cpu().numpy()
+    fut_c_pred = coarse_out["future_2d_coarse"][0].cpu().numpy()
+    fut_f_pred = fine_out["future_2d_fine"][0].cpu().numpy()
     return {
-        "gt_coarse": gt_maps["coarse"][0].cpu().numpy(),
-        "gt_fine": gt_maps["fine"][0].cpu().numpy(),
-        "pred_coarse": coarse_out["future_2d_coarse"][0].cpu().numpy(),
-        "pred_fine": fine_out["future_2d_fine"][0].cpu().numpy(),
+        "gt_coarse": np.concatenate([past_c_gt, fut_c_gt], axis=-1),
+        "gt_fine": np.concatenate([past_f_gt, fut_f_gt], axis=-1),
+        "pred_coarse": np.concatenate([past_c_pred, fut_c_pred], axis=-1),
+        "pred_fine": np.concatenate([past_f_pred, fut_f_pred], axis=-1),
+        "past_norm": past_norm[0].cpu(),
         "future_norm": future_norm[0].cpu(),
         "coarse_out": coarse_out,
         "fine_out": fine_out,
     }
+
+
+def _mark_lookback_overlap_2d(ax: plt.Axes, w_past: int, k: int) -> None:
+    """Vertical guides: lookback | overlap | horizon on a past+future 2D canvas."""
+    if k > 0:
+        overlap_start = w_past - k
+        ax.axvspan(overlap_start, w_past + k, color="white", alpha=0.14)
+        ax.axvline(x=overlap_start, color="white", linestyle=":", linewidth=0.8, alpha=0.8)
+        ax.axvline(x=w_past + k, color="white", linestyle="--", linewidth=0.9, alpha=0.85)
+    ax.axvline(x=w_past, color="white", linestyle="-", linewidth=0.9, alpha=0.85)
+
+
+def _mark_lookback_overlap_1d(ax: plt.Axes, w_past: int, k: int) -> None:
+    """Guides on 1D axis with t=0 at lookback|future boundary."""
+    ax.axvline(x=0, color="black", linestyle="-", linewidth=0.8, alpha=0.35)
+    if k <= 0:
+        return
+    ax.axvspan(-k, k, color="#FFC107", alpha=0.12)
+    ax.axvline(x=-k, color="#F57C00", linestyle=":", linewidth=0.9, alpha=0.7)
+    ax.axvline(x=k, color="black", linestyle=":", linewidth=0.8, alpha=0.35)
 
 
 def _plot_panel(
@@ -223,29 +281,22 @@ def _plot_panel(
     pr_f = maps["pred_fine"]
     n_vars = min(variables_to_plot, gt_c.shape[0])
 
-    coarse_np, fine_np, final_np = decode_staged_anchor_components(
-        fine_model, maps["coarse_out"], maps["fine_out"],
-    )
+    coarse_np, fine_np, final_np = _decode_staged_1d_from_maps(fine_model, pr_c, pr_f)
+    past_norm = maps["past_norm"].numpy()
     future_norm = maps["future_norm"].numpy()
     k = int(getattr(fine_model.config, "lookback_overlap", 0) or 0)
-    if k > 0:
-        future_norm = future_norm[..., k:]
-    if final_np.ndim == 3:
-        final_np = final_np[0]
-    coarse_np = coarse_np[0]
-    fine_np = fine_np[0]
+    lookback = int(past_norm.shape[-1])
+    fut_len = int(future_norm.shape[-1])
+    w_past = lookback
 
-    common_len = min(
-        future_norm.shape[-1],
-        coarse_np.shape[-1],
-        fine_np.shape[-1],
-        final_np.shape[-1],
-    )
-    gt_plot = future_norm[..., -common_len:]
-    coarse_plot = coarse_np[..., -common_len:]
-    fine_plot = fine_np[..., -common_len:]
-    final_plot = final_np[..., -common_len:]
-    t_axis = np.arange(common_len)
+    gt_1d = np.concatenate([past_norm, future_norm], axis=-1)
+    common_len = min(gt_1d.shape[-1], coarse_np.shape[-1], fine_np.shape[-1], final_np.shape[-1])
+    gt_1d = gt_1d[..., :common_len]
+    coarse_np = coarse_np[..., :common_len]
+    fine_np = fine_np[..., :common_len]
+    final_np = final_np[..., :common_len]
+    t_axis = np.arange(-lookback, common_len - lookback)
+    span_label = f"LB={lookback}, K={k} overlap, H={fut_len - k} horizon"
 
     fig = plt.figure(figsize=(4.2 * n_vars, 2.4 * 5), constrained_layout=True)
     gs = fig.add_gridspec(5, n_vars)
@@ -260,17 +311,19 @@ def _plot_panel(
                 ax = fig.add_subplot(gs[row_idx * 2 + sub_row, col])
                 h, w = data.shape
                 im = ax.imshow(data, aspect="auto", origin="lower", extent=[0, w, 0, h], cmap="plasma", vmin=0.0, vmax=1.0)
-                ax.set_title(f"var {col} | {label} ({h}x{w})", fontsize=8)
+                _mark_lookback_overlap_2d(ax, w_past, k)
+                ax.set_title(f"var {col} | {label} ({h}x{w}, {span_label})", fontsize=8)
                 fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     for col in range(n_vars):
         ax = fig.add_subplot(gs[4, col])
-        ax.plot(t_axis, gt_plot[col], color="#2196F3", linewidth=1.5, label="GT")
-        ax.plot(t_axis, coarse_plot[col], color="#FF9800", linewidth=1.1, label="Coarse")
-        ax.plot(t_axis, fine_plot[col], color="#4CAF50", linewidth=1.0, label="Fine")
-        ax.plot(t_axis, final_plot[col], color="#E91E63", linewidth=1.2, label="Final")
+        ax.plot(t_axis, gt_1d[col], color="#2196F3", linewidth=1.5, label="GT")
+        ax.plot(t_axis, coarse_np[col], color="#FF9800", linewidth=1.1, label="Coarse pred")
+        ax.plot(t_axis, fine_np[col], color="#4CAF50", linewidth=1.0, label="Fine pred")
+        ax.plot(t_axis, final_np[col], color="#E91E63", linewidth=1.2, label="Final pred")
+        _mark_lookback_overlap_1d(ax, w_past, k)
         ax.grid(True, alpha=0.12)
-        ax.set_title(f"var {col} forecast 1D (window-norm)", fontsize=8)
+        ax.set_title(f"var {col} 1D window-norm ({span_label})", fontsize=8)
         if col == 0:
             ax.legend(fontsize=6, loc="upper right")
 

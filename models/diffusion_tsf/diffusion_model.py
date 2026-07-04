@@ -416,10 +416,19 @@ class DiffusionTSF(nn.Module):
         threshold = float(self.config.window_norm_low_var_threshold)
         if threshold > 0.0:
             std_floor = past_std.clamp_min(self.config.window_norm_std_floor)
-            unit = torch.full_like(
-                past_std,
-                float(self.config.window_norm_low_var_unit_std),
-            )
+            per_v = self.config.window_norm_low_var_unit_std_per_variate
+            default_unit = float(self.config.window_norm_low_var_unit_std)
+            if per_v is not None:
+                if len(per_v) != past.shape[1]:
+                    raise ValueError(
+                        "window_norm_low_var_unit_std_per_variate length "
+                        f"{len(per_v)} != num_variables {past.shape[1]}"
+                    )
+                unit = torch.tensor(
+                    per_v, device=past.device, dtype=past.dtype,
+                ).view(1, -1, 1).expand_as(past_std)
+            else:
+                unit = torch.full_like(past_std, default_unit)
             low_var = past_std < threshold
             flat = past_std <= self.config.window_norm_std_floor
             std = torch.where(flat | low_var, unit, std_floor)
@@ -440,6 +449,27 @@ class DiffusionTSF(nn.Module):
         """Denormalize using stored statistics."""
         mean, std = stats
         return x * std + mean
+
+    def _denormalize_future(
+        self,
+        future_norm: torch.Tensor,
+        past: torch.Tensor,
+        stats: Tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        """Denormalize decoded future; optionally shift center from overlap vs past tail."""
+        mean, std = stats
+        K = int(self.config.lookback_overlap)
+        if (
+            K <= 0
+            or not getattr(self.config, "lookback_overlap_center_shift", False)
+            or future_norm.shape[-1] < K
+        ):
+            return self._denormalize(future_norm, stats)
+        overlap_norm = future_norm[..., :K]
+        past_tail = past[..., -K:]
+        overlap_raw = overlap_norm * std + mean
+        shift = (past_tail - overlap_raw).mean(dim=-1, keepdim=True)
+        return future_norm * std + mean + shift
     
     def _predict_noise_chunked(
         self,
@@ -2013,7 +2043,7 @@ class DiffusionTSF(nn.Module):
                 future_2d_fine,
                 squeeze_univariate=(V == 1),
             )
-        future = self._denormalize(future_norm, stats)
+        future = self._denormalize_future(future_norm, past, stats)
 
         K = self.config.lookback_overlap
         if K > 0:
@@ -2199,7 +2229,7 @@ class DiffusionTSF(nn.Module):
                 from_diffusion=False,
                 decoder_method=decoder_method,
             )
-        future = self._denormalize(future_norm, stats)
+        future = self._denormalize_future(future_norm, past, stats)
 
         K = self.config.lookback_overlap
         if K > 0:
@@ -2447,7 +2477,7 @@ class DiffusionTSF(nn.Module):
         future_norm = self.decode_from_2d(
             future_2d, from_diffusion=False, decoder_method=decoder_method, **kwargs
         )
-        future = self._denormalize(future_norm, stats)
+        future = self._denormalize_future(future_norm, past, stats)
 
         K = self.config.lookback_overlap
         if K > 0:

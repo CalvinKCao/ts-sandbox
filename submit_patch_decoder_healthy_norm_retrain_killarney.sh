@@ -10,6 +10,7 @@
 #   ./submit_patch_decoder_healthy_norm_retrain_killarney.sh --smoke-test
 #   ./submit_patch_decoder_healthy_norm_retrain_killarney.sh
 #   ./submit_patch_decoder_healthy_norm_retrain_killarney.sh --time 24:00:00
+#   ./submit_patch_decoder_healthy_norm_retrain_killarney.sh --fresh
 #
 set -euo pipefail
 
@@ -21,6 +22,7 @@ DATASETS="dynamic,electricity"
 WALL_TIME="24:00:00"
 SMOKE=0
 RESUME=0
+FRESH=0
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -29,6 +31,7 @@ while [[ $# -gt 0 ]]; do
         --datasets) DATASETS="$2"; shift 2 ;;
         --time) WALL_TIME="$2"; shift 2 ;;
         --resume) RESUME=1; shift ;;
+        --fresh) FRESH=1; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -42,6 +45,9 @@ fi
 
 if [[ "$RESUME" -eq 1 ]]; then
     ARGS+=(--resume)
+fi
+if [[ "$FRESH" -eq 1 ]]; then
+    ARGS+=(--fresh)
 fi
 
 exec ./test_submit.sh "${ARGS[@]}" "${EXTRA_ARGS[@]}"

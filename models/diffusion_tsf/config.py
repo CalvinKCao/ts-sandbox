@@ -111,6 +111,10 @@ class DiffusionTSFConfig:
     # When past_std < threshold (z-score units), divide by unit_std instead of std_floor.
     window_norm_low_var_threshold: float = 0.0
     window_norm_low_var_unit_std: float = 1.0
+    # Per local variate index (batch dim V); falls back to window_norm_low_var_unit_std.
+    window_norm_low_var_unit_std_per_variate: Optional[List[float]] = None
+    # Shift window center at decode so overlap preds align with past tail (quantization fix).
+    lookback_overlap_center_shift: bool = False
     zero_guidance_forecast: bool = False
     prediction_target: str = "x0"  # x0 or epsilon (bit-flip mask)
     loss_weighting: str = "none"  # none or min_snr
@@ -259,6 +263,12 @@ class DiffusionTSFConfig:
         assert self.window_norm_std_floor > 0
         assert self.window_norm_low_var_threshold >= 0.0
         assert self.window_norm_low_var_unit_std > 0.0
+        per_v = self.window_norm_low_var_unit_std_per_variate
+        if per_v is not None:
+            if len(per_v) < 1:
+                raise ValueError("window_norm_low_var_unit_std_per_variate must be non-empty.")
+            if any(float(u) <= 0.0 for u in per_v):
+                raise ValueError("window_norm_low_var_unit_std_per_variate values must be > 0.")
         if self.window_norm_center not in {"mean", "last"}:
             raise ValueError(
                 "window_norm_center must be 'mean' or 'last', "

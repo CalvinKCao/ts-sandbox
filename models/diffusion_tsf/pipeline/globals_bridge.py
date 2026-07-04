@@ -101,6 +101,9 @@ def patch_globals(
     mod.WINDOW_NORM_STD_FLOOR = state.window_norm_std_floor
     mod.WINDOW_NORM_LOW_VAR_THRESHOLD = state.window_norm_low_var_threshold
     mod.WINDOW_NORM_LOW_VAR_UNIT_STD = state.window_norm_low_var_unit_std
+    per_v = (state.window_norm_low_var_unit_std_by_variate or {}).get(state.dataset)
+    mod.WINDOW_NORM_LOW_VAR_UNIT_STD_PER_VARIATE = list(per_v) if per_v else None
+    mod.LOOKBACK_OVERLAP_CENTER_SHIFT = bool(state.lookback_overlap_center_shift)
     mod.ZERO_GUIDANCE_FORECAST = state.zero_guidance_forecast
     mod.USE_RAW_LOOKBACK_COND_CHANNEL = state.use_raw_lookback_cond_channel
     mod.WINDOW_STRIDE = state.window_stride

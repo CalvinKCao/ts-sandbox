@@ -13,9 +13,15 @@ experiment:
   experiment_name: binary_anchor_ar_patch_decoder_ctx_healthy_norm
   guidance_type: patch_decoder
   mmpd_patch_size: 12
-  # Low-variance past: std_eff=1.0 z-unit when past_std < threshold (see viz calibration).
+  # Low-variance past: std_eff=unit when past_std < threshold (see viz calibration).
   window_norm_low_var_threshold: 0.3
   window_norm_low_var_unit_std: 1.0
+  # Per local variate (dynamic 7v subset order: aimp, amud, arnd, asin1, asin2, adbr, adfl).
+  # Calibrated on stride-29 train windows with clip budget scaled: 300 * (12063/349809) ≈ 10.
+  # arnd also cross-checked on full stride-1 train (0.26→224, 0.25→378 @ budget 300).
+  window_norm_low_var_unit_std_by_variate:
+    dynamic: [1.0, 0.2, 0.26, 0.26, 0.26, 0.5, 1.0]
+  lookback_overlap_center_shift: true
   max_scale_by_dataset:
     dynamic: 4.24
     electricity: 2.92
