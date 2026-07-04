@@ -89,6 +89,8 @@ class PipelineState:
     use_window_normalization: bool = True
     window_norm_center: str = "mean"
     window_norm_std_floor: float = 1e-8
+    window_norm_low_var_threshold: float = 0.0
+    window_norm_low_var_unit_std: float = 1.0
     zero_guidance_forecast: bool = False
 
     # -- Sequence geometry --
@@ -272,6 +274,9 @@ class PipelineState:
             }
         if "window_norm_std_floor" in init_kwargs:
             init_kwargs["window_norm_std_floor"] = float(init_kwargs["window_norm_std_floor"])
+        for key in ("window_norm_low_var_threshold", "window_norm_low_var_unit_std"):
+            if key in init_kwargs:
+                init_kwargs[key] = float(init_kwargs[key])
         if "min_snr_gamma" in init_kwargs:
             init_kwargs["min_snr_gamma"] = float(init_kwargs["min_snr_gamma"])
         if "use_coordinate_channel" in init_kwargs:

@@ -85,6 +85,8 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "use_window_normalization": bool(state.use_window_normalization),
         "window_norm_center": str(state.window_norm_center),
         "window_norm_std_floor": float(state.window_norm_std_floor),
+        "window_norm_low_var_threshold": float(state.window_norm_low_var_threshold),
+        "window_norm_low_var_unit_std": float(state.window_norm_low_var_unit_std),
         "cross_variate_context_bias": float(state.cross_variate_context_bias),
         "d3pm_transition_max": float(state.d3pm_transition_max),
         "d3pm_transition_min": float(state.d3pm_transition_min),

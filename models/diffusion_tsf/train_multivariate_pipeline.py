@@ -122,6 +122,8 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'coarse_flatline_blur_kernel': COARSE_FLATLINE_BLUR_KERNEL,
         'coarse_flatline_blur_atol': COARSE_FLATLINE_BLUR_ATOL,
         'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
+        'window_norm_low_var_threshold': WINDOW_NORM_LOW_VAR_THRESHOLD,
+        'window_norm_low_var_unit_std': WINDOW_NORM_LOW_VAR_UNIT_STD,
         'window_norm_center': WINDOW_NORM_CENTER,
         'use_triple_scale': USE_TRIPLE_SCALE,
         'diffusion_stage': DIFFUSION_STAGE,
@@ -269,6 +271,8 @@ COARSE_FLATLINE_BLUR_RADIUS = 4
 COARSE_FLATLINE_BLUR_KERNEL = "gaussian"
 COARSE_FLATLINE_BLUR_ATOL: Optional[float] = None
 WINDOW_NORM_STD_FLOOR = 1e-8
+WINDOW_NORM_LOW_VAR_THRESHOLD = 0.0
+WINDOW_NORM_LOW_VAR_UNIT_STD = 1.0
 LOOKBACK_OVERLAP = 8
 PAST_LOSS_WEIGHT = 0.3
 PRETRAIN_EPOCHS = 10
@@ -631,7 +635,15 @@ def _window_norm_past_future(
         center = past.mean(dim=-1, keepdim=True)
     else:
         raise ValueError(f"unknown window_norm_center {WINDOW_NORM_CENTER!r}")
-    std = past.std(dim=-1, keepdim=True).clamp_min(WINDOW_NORM_STD_FLOOR)
+    past_std = past.std(dim=-1, keepdim=True)
+    if WINDOW_NORM_LOW_VAR_THRESHOLD > 0.0:
+        std_floor = past_std.clamp_min(WINDOW_NORM_STD_FLOOR)
+        unit = torch.full_like(past_std, WINDOW_NORM_LOW_VAR_UNIT_STD)
+        low_var = past_std < WINDOW_NORM_LOW_VAR_THRESHOLD
+        flat = past_std <= WINDOW_NORM_STD_FLOOR
+        std = torch.where(flat | low_var, unit, std_floor)
+    else:
+        std = past_std.clamp_min(WINDOW_NORM_STD_FLOOR)
     return (past - center) / std, (future - center) / std
 
 
@@ -1306,6 +1318,8 @@ def create_diffusion_model(
         use_window_normalization=USE_WINDOW_NORMALIZATION,
         window_norm_center=WINDOW_NORM_CENTER,
         window_norm_std_floor=WINDOW_NORM_STD_FLOOR,
+        window_norm_low_var_threshold=WINDOW_NORM_LOW_VAR_THRESHOLD,
+        window_norm_low_var_unit_std=WINDOW_NORM_LOW_VAR_UNIT_STD,
         zero_guidance_forecast=ZERO_GUIDANCE_FORECAST,
         itrans_d_model=ITRANS_D_MODEL,
         guidance_type=_resolve_guidance_type(
@@ -2540,6 +2554,8 @@ def _promote_best_trial_to_final(
                 'image_height': IMAGE_HEIGHT,
                 'max_scale': MAX_SCALE,
                 'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
+                'window_norm_low_var_threshold': WINDOW_NORM_LOW_VAR_THRESHOLD,
+                'window_norm_low_var_unit_std': WINDOW_NORM_LOW_VAR_UNIT_STD,
                 'window_norm_center': WINDOW_NORM_CENTER,
                 'diffusion_stage': DIFFUSION_STAGE,
                 'use_guidance_channel': USE_GUIDANCE_CHANNEL,

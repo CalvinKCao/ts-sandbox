@@ -991,6 +991,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             )
 
         reuse_from = self.get("reuse_tuned_params_from")
+        by_dataset = self.get("reuse_tuned_params_from_by_dataset") or {}
+        if isinstance(by_dataset, dict) and state.dataset in by_dataset:
+            reuse_from = by_dataset[state.dataset]
         retrain_reused = bool(reuse_from) and bool(self.get("retrain", False))
 
         max_epochs = int(self.require("max_epochs"))

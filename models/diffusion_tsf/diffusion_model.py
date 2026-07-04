@@ -412,7 +412,19 @@ class DiffusionTSF(nn.Module):
             std = torch.ones_like(past[..., :1])
             return past, future, (mean, std)
         center = self._window_norm_center(past)
-        std = past.std(dim=-1, keepdim=True).clamp_min(self.config.window_norm_std_floor)
+        past_std = past.std(dim=-1, keepdim=True)
+        threshold = float(self.config.window_norm_low_var_threshold)
+        if threshold > 0.0:
+            std_floor = past_std.clamp_min(self.config.window_norm_std_floor)
+            unit = torch.full_like(
+                past_std,
+                float(self.config.window_norm_low_var_unit_std),
+            )
+            low_var = past_std < threshold
+            flat = past_std <= self.config.window_norm_std_floor
+            std = torch.where(flat | low_var, unit, std_floor)
+        else:
+            std = past_std.clamp_min(self.config.window_norm_std_floor)
         past_norm = (past - center) / std
         if future is not None:
             future_norm = (future - center) / std

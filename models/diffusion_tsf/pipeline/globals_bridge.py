@@ -99,6 +99,8 @@ def patch_globals(
     mod.USE_WINDOW_NORMALIZATION = state.use_window_normalization
     mod.WINDOW_NORM_CENTER = state.window_norm_center
     mod.WINDOW_NORM_STD_FLOOR = state.window_norm_std_floor
+    mod.WINDOW_NORM_LOW_VAR_THRESHOLD = state.window_norm_low_var_threshold
+    mod.WINDOW_NORM_LOW_VAR_UNIT_STD = state.window_norm_low_var_unit_std
     mod.ZERO_GUIDANCE_FORECAST = state.zero_guidance_forecast
     mod.WINDOW_STRIDE = state.window_stride
     mod.BINARY_NUM_STEPS = state.binary_num_steps

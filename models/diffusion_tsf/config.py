@@ -108,6 +108,9 @@ class DiffusionTSFConfig:
     # Center for per-window norm: past mean (default) or last lookback timestep.
     window_norm_center: str = "mean"
     window_norm_std_floor: float = 1e-8
+    # When past_std < threshold (z-score units), divide by unit_std instead of std_floor.
+    window_norm_low_var_threshold: float = 0.0
+    window_norm_low_var_unit_std: float = 1.0
     zero_guidance_forecast: bool = False
     prediction_target: str = "x0"  # x0 or epsilon (bit-flip mask)
     loss_weighting: str = "none"  # none or min_snr
@@ -252,6 +255,8 @@ class DiffusionTSFConfig:
         assert 0.0 <= self.deterministic_anchor_lambda <= 1.0
         assert 0.0 <= self.deterministic_anchor_alpha < 1.0
         assert self.window_norm_std_floor > 0
+        assert self.window_norm_low_var_threshold >= 0.0
+        assert self.window_norm_low_var_unit_std > 0.0
         if self.window_norm_center not in {"mean", "last"}:
             raise ValueError(
                 "window_norm_center must be 'mean' or 'last', "
