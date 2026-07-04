@@ -197,6 +197,7 @@ pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
 
 python - <<'PY'
 import pandas as pd
+import numpy as np
 import pyarrow, statsforecast, statsmodels, torch, wandb, yaml
 from statsforecast import StatsForecast
 from statsforecast.models import AutoARIMA, AutoETS, AutoTheta, SeasonalNaive
@@ -212,6 +213,14 @@ _ = [
     AutoTheta(season_length=7),
     SeasonalNaive(season_length=7),
 ]
+_smoke = pd.DataFrame({
+    'unique_id': ['0'] * 32,
+    'ds': pd.to_datetime(range(32), unit='D', origin='2000-01-01'),
+    'y': np.sin(np.arange(32) / 3.0),
+})
+_sf = StatsForecast([SeasonalNaive(season_length=7)], freq='D', n_jobs=1)
+_sf.fit(_smoke)
+_sf.predict(4)
 print('venv ok: torch', torch.__version__, '| pandas', pd.__version__, '| statsforecast', statsforecast.__version__)
 PY
 

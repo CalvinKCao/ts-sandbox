@@ -143,6 +143,10 @@ def _history_cap(origin: int, max_fit_rows: int) -> int:
     return origin - max_fit_rows
 
 
+_STATSFORECAST_FREQ = "D"
+_STATSFORECAST_ORIGIN = "2000-01-01"
+
+
 def _build_long_df(
     data: np.ndarray,
     origin: int,
@@ -153,7 +157,10 @@ def _build_long_df(
     for vid in range(n_vars):
         for t in range(history_start, origin):
             rows.append({"unique_id": str(vid), "ds": t, "y": float(data[t, vid])})
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    # statsforecast 1.5.x + pandas 2.x rejects integer freq=1; use daily timestamps.
+    df["ds"] = pd.to_datetime(df["ds"], unit="D", origin=_STATSFORECAST_ORIGIN)
+    return df
 
 
 def _uni_model_factory(name: str, season_length: int):
@@ -192,13 +199,15 @@ def _fit_univariate_window(
 
     sf = StatsForecast(
         models=[_uni_model_factory(m, season_length) for m in fit_methods],
-        freq=1,
+        freq=_STATSFORECAST_FREQ,
         n_jobs=n_jobs,
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         sf.fit(train_df)
         pred_df = sf.predict(h=horizon)
+        if "unique_id" not in pred_df.columns:
+            pred_df = pred_df.reset_index()
 
     n_vars = data.shape[1]
     out: Dict[str, np.ndarray] = {}
