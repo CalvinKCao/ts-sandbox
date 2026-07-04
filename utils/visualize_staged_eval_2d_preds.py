@@ -9,6 +9,13 @@ Example:
     --dataset weather \\
     --results-dir results/datasets/07-02-4041709-weather-..._fourier_flatline_blur \\
     --n-random 2 --n-worst 3
+
+  python utils/visualize_staged_eval_2d_preds.py \\
+    --checkpoint-dir results/ckpts/07-04-4053057-dynamic-..._healthy_norm_retrain \\
+    --dataset dynamic \\
+    --config configs/binary_anchor_ar_patch_decoder_ctx_healthy_norm_retrain.yaml \\
+    --results-dir results/datasets/07-04-4053057-dynamic-..._healthy_norm_retrain \\
+    --guidance-type patch_decoder --n-random 2 --n-worst 3
 """
 
 from __future__ import annotations
@@ -31,7 +38,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from models.diffusion_tsf.guidance import iTransformerGuidance
 from models.diffusion_tsf.pipeline.config import load_experiment_config
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch_stage_globals
 from models.diffusion_tsf.pipeline.state import PipelineState
@@ -45,7 +51,7 @@ from models.diffusion_tsf.train_multivariate_pipeline import (
     create_diffusion_model,
     load_dataset,
     load_diffusion_state_keep_attached_guidance,
-    load_itransformer_from_checkpoint,
+    load_wrapped_guidance,
 )
 from utils.visualize_staged_forecast import _load_staged_bundle, _window_lengths
 
@@ -53,6 +59,17 @@ from utils.visualize_staged_forecast import _load_staged_bundle, _window_lengths
 DEFAULT_CONFIG = (
     "configs/binary_anchor_stationary_flat_subsets_grad_accum_150_fourier_flatline_blur.yaml"
 )
+
+
+def _eval_test_stride(config_path: str, dataset: str, fallback: int) -> int:
+    cfg = load_experiment_config(config_path, cli_overrides={"dataset": dataset})
+    for phase in cfg.get("phases") or []:
+        if phase.get("phase") != "staged_eval":
+            continue
+        by_dataset = phase.get("eval_test_fraction_by_dataset") or {}
+        if dataset in by_dataset or phase.get("eval_test_fraction") is not None:
+            return int(phase.get("test_stride", fallback))
+    return fallback
 
 
 def _build_state(checkpoint_dir: Path, dataset: str, subset_id: str, config_path: str) -> PipelineState:
@@ -64,11 +81,36 @@ def _build_state(checkpoint_dir: Path, dataset: str, subset_id: str, config_path
     return state
 
 
+def _resolve_guidance_ckpt(
+    checkpoint_dir: Path,
+    subset_id: str,
+    guidance_type: str,
+) -> Tuple[Path, str]:
+    patch_path = checkpoint_dir / f"{subset_id}_patch_guidance.pt"
+    itrans_path = checkpoint_dir / f"{subset_id}_itransformer_finetuned.pt"
+    if guidance_type == "patch_decoder":
+        if not patch_path.is_file():
+            raise FileNotFoundError(f"Missing patch guidance ckpt: {patch_path}")
+        return patch_path, "patch_decoder"
+    if guidance_type == "itransformer":
+        if not itrans_path.is_file():
+            raise FileNotFoundError(f"Missing iTrans guidance ckpt: {itrans_path}")
+        return itrans_path, "itransformer"
+    if patch_path.is_file():
+        return patch_path, "patch_decoder"
+    if itrans_path.is_file():
+        return itrans_path, "itransformer"
+    raise FileNotFoundError(
+        f"Missing guidance ckpt under {checkpoint_dir} "
+        f"(expected {patch_path.name} or {itrans_path.name})"
+    )
+
+
 def _load_stage_model(
     state: PipelineState,
     stage: str,
     ckpt_path: Path,
-    itrans_guidance: iTransformerGuidance,
+    guidance_model: Any,
     n_vars: int,
     device: torch.device,
 ) -> torch.nn.Module:
@@ -86,7 +128,7 @@ def _load_stage_model(
         n_variates=n_vars,
         lookback=lookback,
         horizon=horizon,
-        guidance_model=itrans_guidance,
+        guidance_model=guidance_model,
         diffusion_stage=stage,
         use_guidance_channel=state.use_guidance_channel,
         **anchor_kwargs_from_params(tuned),
@@ -188,9 +230,22 @@ def _plot_panel(
     k = int(getattr(fine_model.config, "lookback_overlap", 0) or 0)
     if k > 0:
         future_norm = future_norm[..., k:]
-        coarse_np = coarse_np[..., k:]
-        fine_np = fine_np[..., k:]
-        final_np = final_np[..., k:]
+    if final_np.ndim == 3:
+        final_np = final_np[0]
+    coarse_np = coarse_np[0]
+    fine_np = fine_np[0]
+
+    common_len = min(
+        future_norm.shape[-1],
+        coarse_np.shape[-1],
+        fine_np.shape[-1],
+        final_np.shape[-1],
+    )
+    gt_plot = future_norm[..., -common_len:]
+    coarse_plot = coarse_np[..., -common_len:]
+    fine_plot = fine_np[..., -common_len:]
+    final_plot = final_np[..., -common_len:]
+    t_axis = np.arange(common_len)
 
     fig = plt.figure(figsize=(4.2 * n_vars, 2.4 * 5), constrained_layout=True)
     gs = fig.add_gridspec(5, n_vars)
@@ -208,13 +263,12 @@ def _plot_panel(
                 ax.set_title(f"var {col} | {label} ({h}x{w})", fontsize=8)
                 fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    t_axis = np.arange(future_norm.shape[-1])
     for col in range(n_vars):
         ax = fig.add_subplot(gs[4, col])
-        ax.plot(t_axis, future_norm[col], color="#2196F3", linewidth=1.5, label="GT")
-        ax.plot(t_axis, coarse_np[0, col], color="#FF9800", linewidth=1.1, label="Coarse")
-        ax.plot(t_axis, fine_np[0, col], color="#4CAF50", linewidth=1.0, label="Fine")
-        ax.plot(t_axis, final_np[0, col], color="#E91E63", linewidth=1.2, label="Final")
+        ax.plot(t_axis, gt_plot[col], color="#2196F3", linewidth=1.5, label="GT")
+        ax.plot(t_axis, coarse_plot[col], color="#FF9800", linewidth=1.1, label="Coarse")
+        ax.plot(t_axis, fine_plot[col], color="#4CAF50", linewidth=1.0, label="Fine")
+        ax.plot(t_axis, final_plot[col], color="#E91E63", linewidth=1.2, label="Final")
         ax.grid(True, alpha=0.12)
         ax.set_title(f"var {col} forecast 1D (window-norm)", fontsize=8)
         if col == 0:
@@ -233,6 +287,8 @@ def run_viz(
     output_dir: Path,
     results_dir: Optional[Path],
     config_path: str,
+    guidance_type: str,
+    test_stride: Optional[int],
     n_random: int,
     n_worst: int,
     worst_metrics: Sequence[str],
@@ -249,26 +305,36 @@ def run_viz(
     lookback, horizon = _window_lengths(dataset, state)
 
     data_subset = bundle["fine_metadata"].get("data_subset") or {}
-    test_stride = int(data_subset.get("test_stride", 1))
+    if test_stride is None:
+        test_stride = _eval_test_stride(
+            config_path,
+            dataset,
+            int(data_subset.get("test_stride", state.window_stride)),
+        )
     _, _, test_ds, _norm_stats = load_dataset(
         dataset,
         variate_indices,
         stride=int(data_subset.get("train_stride", state.window_stride)),
-        test_stride=test_stride,
+        test_stride=int(test_stride),
         lookback=lookback,
         horizon=horizon,
     )
     if len(test_ds) == 0:
         raise ValueError(f"Empty test set for {dataset}")
 
-    guidance_path = checkpoint_dir / f"{subset_id}_itransformer_finetuned.pt"
-    if not guidance_path.is_file():
-        raise FileNotFoundError(f"Missing guidance ckpt: {guidance_path}")
-
-    guidance_model = load_itransformer_from_checkpoint(str(guidance_path), n_vars, device)
-    itrans_guidance = iTransformerGuidance(guidance_model)
-    coarse_model = _load_stage_model(state, "coarse", bundle["coarse_pt"], itrans_guidance, n_vars, device)
-    fine_model = _load_stage_model(state, "fine", bundle["fine_pt"], itrans_guidance, n_vars, device)
+    guidance_path, resolved_guidance_type = _resolve_guidance_ckpt(
+        checkpoint_dir, subset_id, guidance_type,
+    )
+    guidance_model = load_wrapped_guidance(
+        str(guidance_path),
+        n_vars,
+        device,
+        guidance_type=resolved_guidance_type,
+        dataset_lookback=lookback,
+        dataset_horizon=horizon,
+    )
+    coarse_model = _load_stage_model(state, "coarse", bundle["coarse_pt"], guidance_model, n_vars, device)
+    fine_model = _load_stage_model(state, "fine", bundle["fine_pt"], guidance_model, n_vars, device)
 
     worst = _load_worst_indices(results_dir, subset_id, worst_metrics, n_worst)
     windows = _pick_windows(len(test_ds), seed=seed, n_random=n_random, worst=worst)
@@ -303,6 +369,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--results-dir", type=Path, default=None, help="for worst_windows.json")
     p.add_argument("--output-dir", type=Path, default=None)
     p.add_argument("--config", default=DEFAULT_CONFIG)
+    p.add_argument(
+        "--guidance-type",
+        choices=("auto", "patch_decoder", "itransformer"),
+        default="auto",
+        help="Guidance ckpt to load (auto prefers patch_guidance.pt when present)",
+    )
+    p.add_argument(
+        "--test-stride",
+        type=int,
+        default=None,
+        help="Test dataloader stride (default: staged_eval.test_stride from config, else data_subset)",
+    )
     p.add_argument("--n-random", type=int, default=2)
     p.add_argument("--n-worst", type=int, default=3)
     p.add_argument("--worst-metrics", default="anchor_mse,crps")
@@ -333,6 +411,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         output_dir=output_dir,
         results_dir=results_dir,
         config_path=args.config,
+        guidance_type=args.guidance_type,
+        test_stride=args.test_stride,
         n_random=args.n_random,
         n_worst=args.n_worst,
         worst_metrics=metrics,

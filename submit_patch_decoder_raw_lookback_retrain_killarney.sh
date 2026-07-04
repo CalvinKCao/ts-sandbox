@@ -33,9 +33,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ARGS=(--configs "$CONFIG" --gpu l40s --time "$WALL_TIME")
+ARGS=(--configs "$CONFIG" --gpu l40s --time "$WALL_TIME" --wandb-project ts-sandbox-leaderboard)
 if [[ "$SMOKE" -eq 1 ]]; then
-    ARGS=(--smoke --configs "$CONFIG" --datasets ETTh1 --gpu l40s --time "0:45:00")
+    ARGS=(--smoke --configs "$CONFIG" --datasets ETTh1 --gpu l40s --time "0:45:00" --wandb-project ts-sandbox-leaderboard)
 else
     ARGS+=(--datasets "$DATASETS")
 fi
