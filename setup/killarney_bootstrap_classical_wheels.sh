@@ -126,13 +126,18 @@ done
 
 echo ""
 echo "[3/3] Verifying cached wheels in a fresh temp venv..."
+REQ="$REPO_ROOT/setup/requirements-killarney.txt"
+[[ -f "$REQ" ]] || {
+    echo "ERROR: missing $REQ — run ./setup/killarney_freeze_requirements.sh first" >&2
+    exit 1
+}
 VERIFY_ENV="$(mktemp -d "$PROJECT/$USER/ts-sandbox/.verify-classical-XXXX")"
 trap 'rm -rf "$VERIFY_ENV"' EXIT
 virtualenv --no-download "$VERIFY_ENV"
 # shellcheck source=/dev/null
 source "$VERIFY_ENV/bin/activate"
 pip install --no-index --upgrade pip -q
-pip install --no-index numpy scipy tqdm -q
+pip install --no-index -r "$REQ" -q
 pip install --no-index --find-links "$WHEEL_DIR" --force-reinstall --no-deps pandas==2.3.3 -q
 pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
     pytz tzdata cloudpickle threadpoolctl triad adagio patsy \
