@@ -70,9 +70,7 @@ trap - EXIT
 
 echo "[2/2] statsforecast dependency wheels from PyPI..."
 _classical_specs=(
-    statsforecast==1.7.6
-    coreforecast
-    utilsforecast
+    statsforecast==1.5.0
     statsmodels
     fugue
     cloudpickle
@@ -103,9 +101,7 @@ echo ""
 _n="$(find "$WHEEL_DIR" -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)"
 echo "Done. $_n wheels in $WHEEL_DIR"
 _required_wheels=(
-    statsforecast-1.7.6
-    coreforecast
-    utilsforecast
+    statsforecast-1.5.0
     statsmodels
     fugue
     cloudpickle
@@ -140,12 +136,9 @@ pip install --no-index numpy scipy tqdm -q
 pip install --no-index --find-links "$WHEEL_DIR" --force-reinstall --no-deps pandas==2.3.3 -q
 pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
     pytz tzdata cloudpickle threadpoolctl triad adagio patsy \
-    llvmlite numba plotly narwhals fugue coreforecast utilsforecast \
-    statsmodels statsforecast==1.7.6 -q
+    llvmlite numba plotly narwhals fugue statsmodels statsforecast==1.5.0 -q
 python - <<'PY'
 import pandas as pd
-import coreforecast
-import utilsforecast
 from statsforecast import StatsForecast
 from statsforecast.models import AutoARIMA, AutoETS, AutoTheta, SeasonalNaive
 from statsmodels.tsa.api import VAR
@@ -154,7 +147,7 @@ from statsmodels.tsa.vector_ar.vecm import VECM, coint_johansen
 import statsforecast
 
 assert pd.__version__ == "2.3.3", pd.__version__
-assert statsforecast.__version__ == "1.7.6", statsforecast.__version__
+assert statsforecast.__version__ == "1.5.0", statsforecast.__version__
 _ = [
     AutoARIMA(season_length=7),
     AutoETS(season_length=7),

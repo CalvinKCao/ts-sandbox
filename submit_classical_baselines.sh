@@ -35,9 +35,7 @@ _classical_wheel_dir() {
 }
 
 CLASSICAL_WHEEL_PATTERNS=(
-    "statsforecast-1.7.6*.whl"
-    "coreforecast*.whl"
-    "utilsforecast*.whl"
+    "statsforecast-1.5.0*.whl"
     "statsmodels*.whl"
     "fugue*.whl"
     "cloudpickle*.whl"
@@ -195,12 +193,11 @@ echo "[setup] statsforecast stack from wheel cache (pandas 2.x pin)..."
 pip install --no-index --find-links "$WHEEL_DIR" --force-reinstall --no-deps pandas==2.3.3 -q
 pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
     pytz tzdata cloudpickle threadpoolctl triad adagio patsy \
-    llvmlite numba plotly narwhals fugue coreforecast utilsforecast \
-    statsmodels statsforecast==1.7.6 -q
+    llvmlite numba plotly narwhals fugue statsmodels statsforecast==1.5.0 -q
 
 python - <<'PY'
 import pandas as pd
-import coreforecast, pyarrow, statsforecast, statsmodels, torch, utilsforecast, wandb, yaml
+import pyarrow, statsforecast, statsmodels, torch, wandb, yaml
 from statsforecast import StatsForecast
 from statsforecast.models import AutoARIMA, AutoETS, AutoTheta, SeasonalNaive
 from statsmodels.tsa.api import VAR
@@ -208,7 +205,7 @@ from statsmodels.tsa.statespace.dynamic_factor import DynamicFactor
 from statsmodels.tsa.vector_ar.vecm import VECM, coint_johansen
 
 assert pd.__version__.startswith('2.'), f'pandas must be 2.x, got {pd.__version__}'
-assert statsforecast.__version__ == '1.7.6', f'statsforecast must be 1.7.6, got {statsforecast.__version__}'
+assert statsforecast.__version__ == '1.5.0', f'statsforecast must be 1.5.0, got {statsforecast.__version__}'
 _ = [
     AutoARIMA(season_length=7),
     AutoETS(season_length=7),
