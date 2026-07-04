@@ -99,41 +99,122 @@ def _effective_batch_tune_range(
     return lo, hi
 
 
+def _candidate_micro_batches(probed_max: int, *, min_micro: int) -> list[int]:
+    """Micro-batch sizes that divide probed_max cleanly or sit on a power-of-2 grid."""
+    probed_max = max(1, int(probed_max))
+    min_micro = max(1, min(int(min_micro), probed_max))
+    micros: set[int] = set()
+    for div in range(min_micro, probed_max + 1):
+        if probed_max % div == 0:
+            micros.add(div)
+    power = 1
+    while power <= probed_max:
+        if power >= min_micro:
+            micros.add(power)
+        power *= 2
+    micros.add(probed_max)
+    return sorted(micros, reverse=True)
+
+
+def enumerate_nice_effective_batch_plans(
+    probed_max: int,
+    lo: int,
+    hi: int,
+    *,
+    min_micro: Optional[int] = None,
+    max_accum: int = 64,
+) -> list[Dict[str, int]]:
+    """Effective batch sizes reachable as micro*accum with micro<=probed_max (no micro=1 traps).
+
+    For each effective size keep the plan with the largest micro batch so epoch work stays low.
+    """
+    probed_max = max(1, int(probed_max))
+    lo = max(1, int(lo))
+    hi = max(lo, int(hi))
+    if min_micro is None:
+        min_micro = max(4, probed_max // 8)
+
+    best_for_effective: Dict[int, Dict[str, int]] = {}
+    for micro in _candidate_micro_batches(probed_max, min_micro=min_micro):
+        accum_hi = min(max_accum, hi // micro)
+        for accum in range(1, accum_hi + 1):
+            effective = micro * accum
+            if effective < lo or effective > hi:
+                continue
+            plan = {
+                "batch_size": micro,
+                "gradient_accumulation_steps": accum,
+                "effective_batch_size": effective,
+            }
+            prev = best_for_effective.get(effective)
+            if prev is None or micro > prev["batch_size"]:
+                best_for_effective[effective] = plan
+
+    return [best_for_effective[k] for k in sorted(best_for_effective)]
+
+
 def resolve_target_effective_batch(
     probed_max: int,
     target_effective: int,
+    *,
+    lo: Optional[int] = None,
+    hi: Optional[int] = None,
 ) -> Dict[str, int]:
     """Map a target effective batch to micro-batch + grad-accum (micro <= probed_max)."""
     probed_max = max(1, int(probed_max))
     target_effective = max(1, int(target_effective))
+    if lo is None:
+        lo = max(1, int(round(probed_max * 0.25)))
+    if hi is None:
+        hi = max(lo, int(round(probed_max * 4.0)))
 
-    for accum in range(1, target_effective + 1):
-        if target_effective % accum != 0:
-            continue
-        micro = target_effective // accum
-        if micro <= probed_max:
-            return {
-                "batch_size": micro,
-                "gradient_accumulation_steps": accum,
-                "effective_batch_size": target_effective,
-            }
+    plans = enumerate_nice_effective_batch_plans(probed_max, lo, hi)
+    if not plans:
+        return {
+            "batch_size": probed_max,
+            "gradient_accumulation_steps": 1,
+            "effective_batch_size": probed_max,
+        }
 
-    best_micro, best_accum, best_effective = probed_max, 1, probed_max
-    best_dist = abs(best_effective - target_effective)
-    accum_cap = min(max(target_effective, probed_max), 64)
-    for accum in range(1, accum_cap + 1):
-        for micro in range(1, probed_max + 1):
-            effective = micro * accum
-            dist = abs(effective - target_effective)
-            if dist < best_dist:
-                best_dist = dist
-                best_micro, best_accum, best_effective = micro, accum, effective
+    for plan in plans:
+        if plan["effective_batch_size"] == target_effective:
+            return dict(plan)
 
-    return {
-        "batch_size": best_micro,
-        "gradient_accumulation_steps": best_accum,
-        "effective_batch_size": best_effective,
-    }
+    return min(
+        plans,
+        key=lambda p: (
+            abs(p["effective_batch_size"] - target_effective),
+            -p["batch_size"],
+        ),
+    )
+
+
+def _suggest_nice_effective_batch(
+    trial,
+    probed_max: int,
+    state: PipelineState,
+    *,
+    param_name: str = "effective_batch_size",
+    lo: Optional[int] = None,
+    hi: Optional[int] = None,
+) -> Dict[str, int]:
+    if lo is None or hi is None:
+        range_lo, range_hi = _effective_batch_tune_range(probed_max, state)
+        lo = range_lo if lo is None else lo
+        hi = range_hi if hi is None else hi
+    plans = enumerate_nice_effective_batch_plans(probed_max, lo, hi)
+    if not plans:
+        return {
+            "batch_size": probed_max,
+            "gradient_accumulation_steps": 1,
+            "effective_batch_size": probed_max,
+        }
+    effectives = [p["effective_batch_size"] for p in plans]
+    chosen = trial.suggest_categorical(param_name, effectives)
+    for plan in plans:
+        if plan["effective_batch_size"] == chosen:
+            return dict(plan)
+    return dict(plans[0])
 
 
 def _suggest_full_diffusion_params(
@@ -167,9 +248,7 @@ def _suggest_full_diffusion_params(
     )
 
     if tune_effective_batch:
-        lo, hi = _effective_batch_tune_range(max_batch_size, state)
-        target_eff = trial.suggest_int("effective_batch_size", lo, hi)
-        params.update(resolve_target_effective_batch(max_batch_size, target_eff))
+        params.update(_suggest_nice_effective_batch(trial, max_batch_size, state))
     else:
         batch_grid = [b for b in (4, 8, 16, 32, 48, 64, 96, 128) if b <= max_batch_size]
         if not batch_grid:
@@ -344,12 +423,20 @@ def _suggest_staged_params(
 
     if search_space == "full_with_batch":
         if smoke_test:
-            lo, hi = 1, max(2, min(4, max_batch_size))
-            target_eff = trial.suggest_int("effective_batch_size", lo, hi)
+            smoke_hi = max(2, min(4, max_batch_size))
             params = _suggest_full_diffusion_params(
                 trial, state, max_batch_size, tune_effective_batch=False,
             )
-            params.update(resolve_target_effective_batch(max_batch_size, target_eff))
+            params.update(
+                _suggest_nice_effective_batch(
+                    trial,
+                    max_batch_size,
+                    state,
+                    param_name="effective_batch_size",
+                    lo=1,
+                    hi=smoke_hi,
+                )
+            )
             return params
         return _suggest_full_diffusion_params(
             trial, state, max_batch_size, tune_effective_batch=True,
@@ -996,6 +1083,14 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             trial, state, max_batch, state.smoke_test, search_space=search_space,
                         )
                     trial.set_user_attr("full_params", dict(params))
+                    if search_space == "full_with_batch" and not state.smoke_test:
+                        micro = int(params["batch_size"])
+                        accum = int(params.get("gradient_accumulation_steps", 1))
+                        if micro < 4 or accum > 64:
+                            raise RuntimeError(
+                                f"Degenerate batch plan micro_bs={micro} accum={accum} "
+                                f"(effective={micro * accum}); stale Optuna journal or planner bug"
+                            )
                     logger.info(
                         "  [%s] Optuna trial %d/%d suggested lr=%.2e micro_bs=%d "
                         "accum=%d effective_bs=%d",
