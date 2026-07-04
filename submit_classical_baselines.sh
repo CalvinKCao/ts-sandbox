@@ -72,6 +72,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --smoke-test|--smoke) IS_SMOKE=1; shift ;;
             --datasets) EXTRA+=(--datasets "$2"); shift 2 ;;
             --config) EXTRA+=(--config "$2"); shift 2 ;;
+            --test-stride) EXTRA+=(--test-stride "$2"); shift 2 ;;
             --dry-run) EXTRA+=(--dry-run); shift ;;
             --no-wandb) EXTRA+=(--no-wandb); shift ;;
             *) echo "Unknown arg: $1" >&2; exit 1 ;;
