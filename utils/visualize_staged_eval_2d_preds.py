@@ -265,9 +265,10 @@ def run_viz(
     if not guidance_path.is_file():
         raise FileNotFoundError(f"Missing guidance ckpt: {guidance_path}")
 
-    itrans = load_itransformer_from_checkpoint(str(guidance_path), n_vars, device)
-    coarse_model = _load_stage_model(state, "coarse", bundle["coarse_pt"], itrans, n_vars, device)
-    fine_model = _load_stage_model(state, "fine", bundle["fine_pt"], itrans, n_vars, device)
+    guidance_model = load_itransformer_from_checkpoint(str(guidance_path), n_vars, device)
+    itrans_guidance = iTransformerGuidance(guidance_model)
+    coarse_model = _load_stage_model(state, "coarse", bundle["coarse_pt"], itrans_guidance, n_vars, device)
+    fine_model = _load_stage_model(state, "fine", bundle["fine_pt"], itrans_guidance, n_vars, device)
 
     worst = _load_worst_indices(results_dir, subset_id, worst_metrics, n_worst)
     windows = _pick_windows(len(test_ds), seed=seed, n_random=n_random, worst=worst)
