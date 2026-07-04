@@ -1,8 +1,0 @@
-extends: binary_anchor_stationary_flat_subsets_ema099.yaml
-
-experiment:
-  name: binary-anchor-stationary-flat-subsets-ema099-lb96-hz720
-  experiment_name: binary-anchor-stationary-flat-subsets-ema099-lb96-hz720
-  lookback_length: 96
-  forecast_length: 720
-  lookback_overlap: 8

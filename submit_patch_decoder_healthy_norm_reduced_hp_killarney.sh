@@ -1,28 +1,25 @@
 #!/bin/bash
-# Retrain dynamic + electricity with healthy window-norm (skip pretrain/patch-guidance HP).
+# Healthy window-norm retrain + reduced diffusion HP search (LR + effective batch + EMA preset).
 #
-# Donors (under results/ckpts on Killarney):
-#   pretrain + patch guidance: binary_anchor_ar_patch_decoder_ctx
-#   coarse/fine HP — dynamic: binary_anchor_ar_patch_decoder_ctx_full_hp (4045090)
-#                       electricity: binary_anchor_ar_patch_decoder_ctx (4041150)
+# Reuses pretrain + patch-guidance from binary_anchor_ar_patch_decoder_ctx.
+# Coarse/fine HP: search_space=reduced_hp (4 trials each).
 #
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
-#   ./submit_patch_decoder_healthy_norm_retrain_killarney.sh --smoke-test
-#   ./submit_patch_decoder_healthy_norm_retrain_killarney.sh
-#   ./submit_patch_decoder_healthy_norm_retrain_killarney.sh --time 24:00:00
-#   ./submit_patch_decoder_healthy_norm_retrain_killarney.sh --fresh
+#   ./submit_patch_decoder_healthy_norm_reduced_hp_killarney.sh --smoke-test
+#   ./submit_patch_decoder_healthy_norm_reduced_hp_killarney.sh
+#   ./submit_patch_decoder_healthy_norm_reduced_hp_killarney.sh --datasets dynamic,electricity
+#   ./submit_patch_decoder_healthy_norm_reduced_hp_killarney.sh --resume
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-CONFIG="configs/binary_anchor_ar_patch_decoder_ctx_healthy_norm_retrain.yaml"
+CONFIG="configs/binary_anchor_ar_patch_decoder_ctx_healthy_norm_reduced_hp.yaml"
 DATASETS="dynamic,electricity"
 WALL_TIME="24:00:00"
 SMOKE=0
 RESUME=0
-FRESH=0
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -31,7 +28,6 @@ while [[ $# -gt 0 ]]; do
         --datasets) DATASETS="$2"; shift 2 ;;
         --time) WALL_TIME="$2"; shift 2 ;;
         --resume) RESUME=1; shift ;;
-        --fresh) FRESH=1; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -45,9 +41,6 @@ fi
 
 if [[ "$RESUME" -eq 1 ]]; then
     ARGS+=(--resume)
-fi
-if [[ "$FRESH" -eq 1 ]]; then
-    ARGS+=(--fresh)
 fi
 
 exec ./test_submit.sh "${ARGS[@]}" "${EXTRA_ARGS[@]}"

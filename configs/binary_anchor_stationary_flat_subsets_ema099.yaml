@@ -1,8 +1,0 @@
-extends: binary_anchor_stationary_flat_subsets.yaml
-
-training:
-  diffusion_ema_decay: 0.99
-
-experiment:
-  name: binary-anchor-stationary-flat-subsets-ema099
-  experiment_name: binary-anchor-stationary-flat-subsets-ema099

@@ -197,12 +197,13 @@ def _suggest_nice_effective_batch(
     param_name: str = "effective_batch_size",
     lo: Optional[int] = None,
     hi: Optional[int] = None,
+    min_micro: Optional[int] = None,
 ) -> Dict[str, int]:
     if lo is None or hi is None:
         range_lo, range_hi = _effective_batch_tune_range(probed_max, state)
         lo = range_lo if lo is None else lo
         hi = range_hi if hi is None else hi
-    plans = enumerate_nice_effective_batch_plans(probed_max, lo, hi)
+    plans = enumerate_nice_effective_batch_plans(probed_max, lo, hi, min_micro=min_micro)
     if not plans:
         return {
             "batch_size": probed_max,
@@ -409,17 +410,83 @@ class _Ema:
             state[key].copy_(value)
 
 
+def _suggest_reduced_hp_params(
+    trial,
+    state: PipelineState,
+    max_batch_size: int,
+    smoke_test: bool,
+    phase_overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    lr_min = float(phase_overrides["hp_lr_min"])
+    lr_max = float(phase_overrides["hp_lr_max"])
+    min_micro = int(phase_overrides.get("min_micro_batch", 4))
+    min_snr_gamma = float(phase_overrides.get("min_snr_gamma", 2.0))
+
+    base_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
+    if training_value(state, "max_scale_tuning", False):
+        rng = training_value(state, "max_scale_tuning_range", [2.5, 14.0])
+        ms = trial.suggest_float("max_scale", float(rng[0]), float(rng[1]))
+    else:
+        ms = base_ms
+
+    preset = trial.suggest_categorical("ema_prediction_preset", ["x0_0995", "epsilon_0999"])
+    if preset == "x0_0995":
+        ema_decay, prediction_target = 0.995, "x0"
+    else:
+        ema_decay, prediction_target = 0.999, "epsilon"
+
+    params: Dict[str, Any] = {
+        "learning_rate": trial.suggest_float("learning_rate", lr_min, lr_max, log=True),
+        "ema_decay": ema_decay,
+        "binary_noise_schedule": "linear",
+        "loss_weighting": "min_snr",
+        "min_snr_gamma": min_snr_gamma,
+        "prediction_target": prediction_target,
+        "max_scale": ms,
+    }
+
+    if smoke_test:
+        smoke_hi = max(min_micro, min(4, max_batch_size))
+        params.update(
+            _suggest_nice_effective_batch(
+                trial,
+                max_batch_size,
+                state,
+                param_name="effective_batch_size",
+                lo=1,
+                hi=smoke_hi,
+                min_micro=min_micro,
+            )
+        )
+        return params
+
+    params.update(
+        _suggest_nice_effective_batch(
+            trial, max_batch_size, state, min_micro=min_micro,
+        )
+    )
+    return params
+
+
 def _suggest_staged_params(
     trial,
     state: PipelineState,
     max_batch_size: int,
     smoke_test: bool,
     search_space: str = "default",
+    phase_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from models.diffusion_tsf.train_multivariate_pipeline import (
         FINETUNE_HP_LR_MAX,
         FINETUNE_HP_LR_MIN,
     )
+
+    overrides = phase_overrides or {}
+
+    if search_space == "reduced_hp":
+        return _suggest_reduced_hp_params(
+            trial, state, max_batch_size, smoke_test, overrides,
+        )
 
     if search_space == "full_with_batch":
         if smoke_test:
@@ -1066,8 +1133,14 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             if state.smoke_test:
                 n_trials = 1
             search_space = str(self.require("search_space")).lower()
-            if search_space not in {"default", "lr_only", "ordinal_d3pm", "full_with_batch"}:
+            if search_space not in {
+                "default", "lr_only", "ordinal_d3pm", "full_with_batch", "reduced_hp",
+            }:
                 raise ValueError(f"Unknown staged diffusion search_space={search_space!r}")
+            if search_space == "reduced_hp":
+                for key in ("hp_lr_min", "hp_lr_max"):
+                    if self.get(key) is None:
+                        raise ValueError(f"search_space=reduced_hp requires phase {key}")
 
             from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
 
@@ -1083,10 +1156,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         )
                     else:
                         params = _suggest_staged_params(
-                            trial, state, max_batch, state.smoke_test, search_space=search_space,
+                            trial,
+                            state,
+                            max_batch,
+                            state.smoke_test,
+                            search_space=search_space,
+                            phase_overrides=phase.overrides,
                         )
                     trial.set_user_attr("full_params", dict(params))
-                    if search_space == "full_with_batch" and not state.smoke_test:
+                    if search_space in {"full_with_batch", "reduced_hp"} and not state.smoke_test:
                         micro = int(params["batch_size"])
                         accum = int(params.get("gradient_accumulation_steps", 1))
                         if micro < 4 or accum > 64:
