@@ -102,6 +102,7 @@ def patch_globals(
     mod.WINDOW_NORM_LOW_VAR_THRESHOLD = state.window_norm_low_var_threshold
     mod.WINDOW_NORM_LOW_VAR_UNIT_STD = state.window_norm_low_var_unit_std
     mod.ZERO_GUIDANCE_FORECAST = state.zero_guidance_forecast
+    mod.USE_RAW_LOOKBACK_COND_CHANNEL = state.use_raw_lookback_cond_channel
     mod.WINDOW_STRIDE = state.window_stride
     mod.BINARY_NUM_STEPS = state.binary_num_steps
     mod.BINARY_BETA_START = state.binary_beta_start

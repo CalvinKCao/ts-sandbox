@@ -88,6 +88,7 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "window_norm_low_var_threshold": float(state.window_norm_low_var_threshold),
         "window_norm_low_var_unit_std": float(state.window_norm_low_var_unit_std),
         "cross_variate_context_bias": float(state.cross_variate_context_bias),
+        "use_raw_lookback_cond_channel": bool(state.use_raw_lookback_cond_channel),
         "d3pm_transition_max": float(state.d3pm_transition_max),
         "d3pm_transition_min": float(state.d3pm_transition_min),
         "d3pm_loss_type": str(state.d3pm_loss_type),

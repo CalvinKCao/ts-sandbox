@@ -92,6 +92,7 @@ class PipelineState:
     window_norm_low_var_threshold: float = 0.0
     window_norm_low_var_unit_std: float = 1.0
     zero_guidance_forecast: bool = False
+    use_raw_lookback_cond_channel: bool = False
 
     # -- Sequence geometry --
     lookback_length: int = 96
@@ -281,6 +282,8 @@ class PipelineState:
             init_kwargs["min_snr_gamma"] = float(init_kwargs["min_snr_gamma"])
         if "use_coordinate_channel" in init_kwargs:
             init_kwargs["use_coordinate_channel"] = bool(init_kwargs["use_coordinate_channel"])
+        if "use_raw_lookback_cond_channel" in init_kwargs:
+            init_kwargs["use_raw_lookback_cond_channel"] = bool(init_kwargs["use_raw_lookback_cond_channel"])
 
         training = cfg.get("training", {})
         if not isinstance(training, dict):

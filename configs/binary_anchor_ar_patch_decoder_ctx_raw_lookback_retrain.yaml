@@ -1,0 +1,55 @@
+extends: configs/binary_anchor_ar_patch_decoder_ctx.yaml
+
+training:
+  diffusion_effective_batch_multiplier: 1.5
+
+wandb:
+  enabled: true
+  project: ts-sandbox-leaderboard
+  tags: [patch_decoder, raw_lookback_cond]
+
+experiment:
+  name: binary-anchor-ar-patch-decoder-raw-lookback
+  experiment_name: binary_anchor_ar_patch_decoder_ctx_raw_lookback
+  guidance_type: patch_decoder
+  mmpd_patch_size: 12
+  use_raw_lookback_cond_channel: true
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    reuse_pretrain_from_config: binary_anchor_ar_patch_decoder_ctx
+
+  - phase: patch_guidance_finetune_hp
+    reuse_checkpoint_from_config: binary_anchor_ar_patch_decoder_ctx
+
+  - phase: diffusion_coarse_finetune_hp
+    reuse_tuned_params_from: binary_anchor_ar_patch_decoder_ctx
+    reuse_tuned_params_from_by_dataset:
+      ETTh1: binary_anchor_ar_patch_decoder_ctx_full_hp
+      electricity: binary_anchor_ar_patch_decoder_ctx
+    retrain: true
+    max_epochs: 20
+    patience: 8
+
+  - phase: diffusion_fine_finetune_hp
+    reuse_tuned_params_from: binary_anchor_ar_patch_decoder_ctx
+    reuse_tuned_params_from_by_dataset:
+      ETTh1: binary_anchor_ar_patch_decoder_ctx_full_hp
+      electricity: binary_anchor_ar_patch_decoder_ctx
+    retrain: true
+    max_epochs: 20
+    patience: 8
+
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 4
+    n_samples: 1
+    probabilistic_n_samples: 20
+    tune_sampler: false
+    probabilistic_sampler: dpmpp
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: false

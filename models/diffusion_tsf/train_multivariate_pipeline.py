@@ -154,6 +154,7 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'loss_weighting': LOSS_WEIGHTING,
         'min_snr_gamma': MIN_SNR_GAMMA,
         'use_coordinate_channel': USE_COORDINATE_CHANNEL,
+        'use_raw_lookback_cond_channel': USE_RAW_LOOKBACK_COND_CHANNEL,
         'itrans_d_model': ITRANS_D_MODEL,
     }
 
@@ -314,6 +315,7 @@ LR_WARMUP_EPOCHS = 0
 MAX_SCALE_TUNING = False
 MAX_SCALE_TUNING_RANGE = [2.5, 14.0]
 USE_COORDINATE_CHANNEL = True
+USE_RAW_LOOKBACK_COND_CHANNEL = False
 DIFFUSION_BATCH_SIZE = 32
 DIFFUSION_BATCH_SIZES = [16]
 FINETUNE_BATCH_SIZES = [4, 8, 16]
@@ -1285,6 +1287,9 @@ def create_diffusion_model(
         ),
         min_snr_gamma=o("min_snr_gamma", MIN_SNR_GAMMA),
         use_coordinate_channel=USE_COORDINATE_CHANNEL,
+        use_raw_lookback_cond_channel=o(
+            "use_raw_lookback_cond_channel", USE_RAW_LOOKBACK_COND_CHANNEL,
+        ),
         use_guidance_channel=o("use_guidance_channel", USE_GUIDANCE_CHANNEL),
         guidance_penalty_weight=GUIDANCE_PENALTY_WEIGHT,
         model_type=o("model_type", MODEL_TYPE),

@@ -1006,6 +1006,7 @@ class DiffusionTSF(nn.Module):
         self,
         past_norm: torch.Tensor,
         target_width: int,
+        past_raw: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         B, V = past_norm.shape[:2]
         H = self.config.image_height
@@ -1024,6 +1025,9 @@ class DiffusionTSF(nn.Module):
             dim=1,
         )
         cond = F.interpolate(cond, size=(H, target_width), mode="nearest")
+        cond = self._append_raw_lookback_cond_channel(
+            cond, past_raw, past_tail_len, target_width, skyline=True,
+        )
         return cond, past_maps
 
     def _resize_cdf_height(self, image: torch.Tensor, target_height: int) -> torch.Tensor:
@@ -1384,10 +1388,51 @@ class DiffusionTSF(nn.Module):
             future_pad.append(f)
         return torch.cat(past_pad, dim=0), torch.cat(future_pad, dim=0)
 
+    def _append_raw_lookback_cond_channel(
+        self,
+        cond: torch.Tensor,
+        past_raw: torch.Tensor,
+        past_tail_len: int,
+        target_width: int,
+        *,
+        skyline: bool = False,
+    ) -> torch.Tensor:
+        if not self.config.use_raw_lookback_cond_channel:
+            return cond
+        if past_raw is None:
+            raise ValueError("past_raw is required when use_raw_lookback_cond_channel=True")
+        B, V = past_raw.shape[:2]
+        H = self.config.image_height
+        BV = B * V
+        past_tail_raw = past_raw[..., -past_tail_len:]
+        if skyline:
+            raw_maps = self._encode_staged_maps_skyline(past_tail_raw)
+            if self.config.diffusion_stage == "coarse":
+                raw_coarse = self._resize_skyline_height(raw_maps["coarse"], H)
+            else:
+                raw_coarse = self._coarse_skyline_to_height(raw_maps["coarse"], H)
+        else:
+            raw_maps = self._encode_staged_maps(past_tail_raw)
+            if self.config.diffusion_stage == "coarse":
+                raw_coarse = self._resize_cdf_height(raw_maps["coarse"], H)
+            else:
+                raw_coarse = self._coarse_cdf_to_height(raw_maps["coarse"], H)
+        raw_cond = raw_coarse.reshape(BV, 1, H, past_tail_len)
+        interp_mode = "nearest" if skyline else "bilinear"
+        align = False if skyline else True
+        raw_cond = F.interpolate(
+            raw_cond,
+            size=(H, target_width),
+            mode=interp_mode,
+            align_corners=align,
+        )
+        return torch.cat([cond, raw_cond], dim=1)
+
     def _staged_past_condition(
         self,
         past_norm: torch.Tensor,
         target_width: int,
+        past_raw: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Build GT lookback conditioning maps for staged denoisers.
 
@@ -1413,6 +1458,9 @@ class DiffusionTSF(nn.Module):
             dim=1,
         )
         cond = F.interpolate(cond, size=(H, target_width), mode='bilinear', align_corners=False)
+        cond = self._append_raw_lookback_cond_channel(
+            cond, past_raw, past_tail_len, target_width, skyline=False,
+        )
         return cond, past_maps
 
     def _ordinal_ce_loss(self, logits: torch.Tensor, target_bins: torch.Tensor) -> torch.Tensor:
@@ -1467,7 +1515,7 @@ class DiffusionTSF(nn.Module):
         ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
         ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
 
-        cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut)
+        cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
         if stage in {"fine", "finer"}:
             future_coarse_cond = self._coarse_cdf_to_height(future_maps["coarse"], H)
             future_coarse_flat = future_coarse_cond.reshape(BV, 1, H, W_fut)
@@ -1607,7 +1655,7 @@ class DiffusionTSF(nn.Module):
         W_fut = target_2d.shape[3]
         H = target_2d.shape[2]
 
-        cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut)
+        cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
         guidance_norm = self._get_guidance_forecast_norm(past, past_norm, norm_stats, W_fut)
         guidance_maps = self._encode_staged_maps(guidance_norm) if guidance_norm is not None else None
 
@@ -1691,7 +1739,7 @@ class DiffusionTSF(nn.Module):
         ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
         ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
 
-        cond_for_unet, past_maps = self._staged_past_condition_skyline(past_norm, W_fut)
+        cond_for_unet, past_maps = self._staged_past_condition_skyline(past_norm, W_fut, past_raw=past)
         if stage == "fine":
             future_coarse_cond = self._coarse_skyline_to_height(future_maps["coarse"], H)
             cond_for_unet = torch.cat(
@@ -1828,7 +1876,7 @@ class DiffusionTSF(nn.Module):
         W_fut = self.config.forecast_length
 
         past_norm, _, stats = self._normalize_sequence(past)
-        cond_for_unet, past_maps = self._staged_past_condition_skyline(past_norm, W_fut)
+        cond_for_unet, past_maps = self._staged_past_condition_skyline(past_norm, W_fut, past_raw=past)
         coarse_for_decode = future_coarse_2d
         if stage == "fine":
             if future_coarse_2d is None:
@@ -2020,7 +2068,7 @@ class DiffusionTSF(nn.Module):
         W_fut = self.config.forecast_length
 
         past_norm, _, stats = self._normalize_sequence(past)
-        cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut)
+        cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
         coarse_for_decode = future_coarse_2d
         fine_for_decode = future_fine_2d
         if stage in {"fine", "finer"}:

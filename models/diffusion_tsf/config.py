@@ -137,6 +137,8 @@ class DiffusionTSFConfig:
     use_time_sine: bool = False
     use_value_channel: bool = False
     seasonal_period: int = 96
+    # Extra visual cond: coarse CDF of lookback tail in dataset z-score space.
+    use_raw_lookback_cond_channel: bool = False
 
     # Stage 1 guidance (ghost image + encoder tokens)
     use_guidance_channel: bool = True
@@ -315,15 +317,16 @@ class DiffusionTSFConfig:
     @property
     def visual_cond_channels(self) -> int:
         per_scale = 1 + (1 if self.use_value_channel else 0)
+        raw_extra = 1 if self.use_raw_lookback_cond_channel else 0
         if self.diffusion_stage == "coarse":
-            return per_scale * (3 if self.use_triple_scale else 2)
+            return per_scale * (3 if self.use_triple_scale else 2) + raw_extra
         if self.diffusion_stage == "fine":
-            return per_scale * (4 if self.use_triple_scale else 3)
+            return per_scale * (4 if self.use_triple_scale else 3) + raw_extra
         if self.diffusion_stage == "finer":
-            return per_scale * 5
+            return per_scale * 5 + raw_extra
         if self.use_triple_scale:
-            return per_scale * 3
-        return per_scale
+            return per_scale * 3 + raw_extra
+        return per_scale + raw_extra
 
     @property
     def guidance_channels(self) -> int:
