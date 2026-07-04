@@ -198,13 +198,25 @@ pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
     llvmlite numba plotly narwhals fugue coreforecast utilsforecast \
     statsmodels statsforecast==1.7.6 -q
 
-python -c "
+python - <<'PY'
 import pandas as pd
 import coreforecast, pyarrow, statsforecast, statsmodels, torch, utilsforecast, wandb, yaml
+from statsforecast import StatsForecast
+from statsforecast.models import AutoARIMA, AutoETS, AutoTheta, SeasonalNaive
+from statsmodels.tsa.api import VAR
+from statsmodels.tsa.statespace.dynamic_factor import DynamicFactor
+from statsmodels.tsa.vector_ar.vecm import VECM, coint_johansen
+
 assert pd.__version__.startswith('2.'), f'pandas must be 2.x, got {pd.__version__}'
 assert statsforecast.__version__ == '1.7.6', f'statsforecast must be 1.7.6, got {statsforecast.__version__}'
+_ = [
+    AutoARIMA(season_length=7),
+    AutoETS(season_length=7),
+    AutoTheta(season_length=7),
+    SeasonalNaive(season_length=7),
+]
 print('venv ok: torch', torch.__version__, '| pandas', pd.__version__, '| statsforecast', statsforecast.__version__)
-"
+PY
 
 export PYTHONUNBUFFERED=1
 

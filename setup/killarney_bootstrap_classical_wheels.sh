@@ -127,4 +127,45 @@ for pkg in "${_required_wheels[@]}"; do
         exit 1
     fi
 done
+
+echo ""
+echo "[3/3] Verifying cached wheels in a fresh temp venv..."
+VERIFY_ENV="$(mktemp -d "$PROJECT/$USER/ts-sandbox/.verify-classical-XXXX")"
+trap 'rm -rf "$VERIFY_ENV"' EXIT
+virtualenv --no-download "$VERIFY_ENV"
+# shellcheck source=/dev/null
+source "$VERIFY_ENV/bin/activate"
+pip install --no-index --upgrade pip -q
+pip install --no-index numpy scipy tqdm -q
+pip install --no-index --find-links "$WHEEL_DIR" --force-reinstall --no-deps pandas==2.3.3 -q
+pip install --no-index --find-links "$WHEEL_DIR" --no-deps \
+    pytz tzdata cloudpickle threadpoolctl triad adagio patsy \
+    llvmlite numba plotly narwhals fugue coreforecast utilsforecast \
+    statsmodels statsforecast==1.7.6 -q
+python - <<'PY'
+import pandas as pd
+import coreforecast
+import utilsforecast
+from statsforecast import StatsForecast
+from statsforecast.models import AutoARIMA, AutoETS, AutoTheta, SeasonalNaive
+from statsmodels.tsa.api import VAR
+from statsmodels.tsa.statespace.dynamic_factor import DynamicFactor
+from statsmodels.tsa.vector_ar.vecm import VECM, coint_johansen
+import statsforecast
+
+assert pd.__version__ == "2.3.3", pd.__version__
+assert statsforecast.__version__ == "1.7.6", statsforecast.__version__
+_ = [
+    AutoARIMA(season_length=7),
+    AutoETS(season_length=7),
+    AutoTheta(season_length=7),
+    SeasonalNaive(season_length=7),
+]
+print("  verified classical imports:", "pandas", pd.__version__, "statsforecast", statsforecast.__version__)
+PY
+deactivate
+unset VIRTUAL_ENV
+rm -rf "$VERIFY_ENV"
+trap - EXIT
+
 echo "Submit: ./submit_classical_baselines.sh"
