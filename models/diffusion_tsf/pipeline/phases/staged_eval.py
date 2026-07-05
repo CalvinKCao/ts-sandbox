@@ -69,7 +69,7 @@ def _staged_anchor_global_norm(
             )
         else:
             pred = fine_model.decode_dual_from_2d(coarse_2d, fine_2d, from_diffusion=False)
-        pred = fine_model._finalize_decoded_forecast(pred)
+        pred = fine_model._strip_overlap_and_upsample_repr(pred)
     return pred.detach().cpu().numpy()
 
 

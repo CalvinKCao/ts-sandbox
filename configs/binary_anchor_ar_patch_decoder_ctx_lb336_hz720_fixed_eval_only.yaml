@@ -1,0 +1,16 @@
+# Re-run staged_eval only (reuse checkpoints via --resume on matching stem).
+extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_fixed.yaml
+
+phases:
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 4
+    n_samples: 1
+    probabilistic_n_samples: 20
+    tune_sampler: false
+    probabilistic_sampler: dpmpp
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: false

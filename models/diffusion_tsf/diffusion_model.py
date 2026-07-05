@@ -338,7 +338,11 @@ class DiffusionTSF(nn.Module):
             return x_repr
         return self._resample_1d_time_series(x_repr, self._raw_dataset_horizon())
 
-    def _finalize_decoded_forecast(self, future_norm: torch.Tensor) -> torch.Tensor:
+    def _raw_canvas_length(self) -> int:
+        return int(self.config.lookback_overlap) + self._raw_dataset_horizon()
+
+    def _strip_overlap_and_upsample_repr(self, future_norm: torch.Tensor) -> torch.Tensor:
+        """Window-norm decode path: drop overlap prefix then upsample forecast to raw hz."""
         k = self._overlap_repr_cols()
         if k > 0:
             future_norm = future_norm[..., k:]
@@ -499,20 +503,40 @@ class DiffusionTSF(nn.Module):
         past: torch.Tensor,
         stats: Tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
-        """Denormalize decoded future; optionally shift center from overlap vs past tail."""
+        """Denormalize decoded future with optional overlap center shift, then strip overlap.
+
+        Center shift must run while the overlap prefix is still present (before strip/upsample).
+        With representation_time_stride>1, overlap lives in the first K_repr repr columns and is
+        linearly upsampled to K raw steps before comparing to past[..., -K:].
+        """
         mean, std = stats
-        K = int(self.config.lookback_overlap)
-        if (
-            K <= 0
-            or not getattr(self.config, "lookback_overlap_center_shift", False)
-            or future_norm.shape[-1] < K
-        ):
-            return self._denormalize(future_norm, stats)
-        overlap_norm = future_norm[..., :K]
-        past_tail = past[..., -K:]
-        overlap_raw = overlap_norm * std + mean
-        shift = (past_tail - overlap_raw).mean(dim=-1, keepdim=True)
-        return future_norm * std + mean + shift
+        K_raw = int(self.config.lookback_overlap)
+        K_repr = self._overlap_repr_cols()
+        center_shift = (
+            K_raw > 0
+            and getattr(self.config, "lookback_overlap_center_shift", False)
+            and future_norm.shape[-1] >= max(K_repr, 1)
+        )
+        if center_shift:
+            overlap_repr = future_norm[..., :K_repr]
+            if self._representation_time_stride() > 1 and K_repr > 0:
+                overlap_norm = self._resample_1d_time_series(overlap_repr, K_raw)
+            else:
+                overlap_norm = future_norm[..., :K_raw]
+            past_tail = past[..., -K_raw:]
+            overlap_raw = overlap_norm * std + mean
+            shift = (past_tail - overlap_raw).mean(dim=-1, keepdim=True)
+            future = future_norm * std + mean + shift
+        else:
+            future = self._denormalize(future_norm, stats)
+
+        if self._representation_time_stride() > 1:
+            future = self._resample_1d_time_series(future, self._raw_canvas_length())
+        if K_raw > 0:
+            future = future[..., K_raw:]
+        elif self._representation_time_stride() > 1:
+            future = self._upsample_repr_to_raw_horizon(future)
+        return future
     
     def _predict_noise_chunked(
         self,
@@ -2096,7 +2120,6 @@ class DiffusionTSF(nn.Module):
                 future_2d_fine,
                 squeeze_univariate=(V == 1),
             )
-        future_norm = self._finalize_decoded_forecast(future_norm)
         future = self._denormalize_future(future_norm, past, stats)
 
         result = {
@@ -2279,7 +2302,6 @@ class DiffusionTSF(nn.Module):
                 from_diffusion=False,
                 decoder_method=decoder_method,
             )
-        future_norm = self._finalize_decoded_forecast(future_norm)
         future = self._denormalize_future(future_norm, past, stats)
 
         result = {
@@ -2526,7 +2548,6 @@ class DiffusionTSF(nn.Module):
         future_norm = self.decode_from_2d(
             future_2d, from_diffusion=False, decoder_method=decoder_method, **kwargs
         )
-        future_norm = self._finalize_decoded_forecast(future_norm)
         future = self._denormalize_future(future_norm, past, stats)
 
         result = {
