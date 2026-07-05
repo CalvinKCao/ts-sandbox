@@ -873,6 +873,13 @@ def mmpd_env_for_run(
     return env
 
 
+def mmpd_run_fallback_hparams(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
+    fixed = getattr(args, "mmpd_fixed_hparams", None)
+    if isinstance(fixed, dict) and fixed:
+        return dict(fixed)
+    return None
+
+
 def dataset_mmpd_patch_size(args: argparse.Namespace, dataset: str) -> int:
     lookback, horizon = dataset_window_lengths(args, dataset)
     patch = resolve_mmpd_patch_size(dataset, horizon, args.patch_size)
@@ -897,7 +904,11 @@ def build_mmpd_train_cmd(
     lookback, horizon = dataset_window_lengths(args, dataset)
     patch_size = dataset_mmpd_patch_size(args, dataset)
     data_dim = len(run_variate_indices(run))
-    hp = resolved_mmpd_hparams(mmpd_hparams_root(args), dataset, fallback=hparams)
+    hp = resolved_mmpd_hparams(
+        mmpd_hparams_root(args),
+        dataset,
+        fallback=hparams or mmpd_run_fallback_hparams(args),
+    )
     cap = mmpd_train_batch_size(args, dataset, data_dim=data_dim)
     if "batch_size" in hp:
         batch_size = min(int(hp["batch_size"]), cap)
@@ -967,7 +978,7 @@ def build_mmpd_train_cmd(
         "--learning_rate",
         str(hp["learning_rate"]),
         "--lradj",
-        "cosine",
+        str(getattr(args, "mmpd_lradj", None) or "cosine"),
         "--train_epochs",
         str(epochs),
         "--patience",
@@ -1072,7 +1083,9 @@ def resolve_mmpd_checkpoint(
     """Return existing checkpoint path and the MMPD `data` name used in its setting dir."""
     from utils.mmpd_paper_hparams import resolved_mmpd_hparams
 
-    hp = resolved_mmpd_hparams(mmpd_hparams_root(args), run.dataset)
+    hp = resolved_mmpd_hparams(
+        mmpd_hparams_root(args), run.dataset, fallback=mmpd_run_fallback_hparams(args)
+    )
     for name in mmpd_checkpoint_data_names(run):
         ckpt = mmpd_checkpoint_path(args, run, data_name=name, hparams=hp)
         if ckpt.exists():
@@ -1735,7 +1748,9 @@ def run_mmpd_eval(
         patch_size = dataset_mmpd_patch_size(args, dataset)
         from utils.mmpd_paper_hparams import resolved_mmpd_hparams
 
-        hp = resolved_mmpd_hparams(mmpd_hparams_root(args), dataset)
+        hp = resolved_mmpd_hparams(
+            mmpd_hparams_root(args), dataset, fallback=mmpd_run_fallback_hparams(args)
+        )
         cmd = [
             pipeline_python(),
             "-u",
@@ -2757,9 +2772,11 @@ def apply_mmpd_smoke_defaults(args: argparse.Namespace) -> None:
         args.output_dir = SMOKE_OUTPUT_DIR
     if len(args.datasets) > 1:
         args.datasets = [args.datasets[0]]
-    args.mmpd_tune_trials = max(1, int(args.mmpd_tune_trials))
-    args.mmpd_tune_epochs = min(int(args.mmpd_tune_epochs), 1)
-    args.mmpd_tune_patience = min(int(args.mmpd_tune_patience), 1)
+    if int(args.mmpd_tune_trials) > 0:
+        args.mmpd_tune_trials = max(1, int(args.mmpd_tune_trials))
+        args.mmpd_tune_epochs = min(int(args.mmpd_tune_epochs), 1)
+        args.mmpd_tune_patience = min(int(args.mmpd_tune_patience), 1)
+        args.force_mmpd_tune = True
     args.mmpd_train_epochs = min(int(args.mmpd_train_epochs), 1)
     args.mmpd_patience = min(int(args.mmpd_patience), 1)
     args.test_max_items = 1
@@ -2771,7 +2788,6 @@ def apply_mmpd_smoke_defaults(args: argparse.Namespace) -> None:
     args.mmpd_batch_size = min(int(args.mmpd_batch_size), 8)
     args.mmpd_eval_batch_size = min(int(args.mmpd_eval_batch_size), 2)
     args.force_mmpd_train = True
-    args.force_mmpd_tune = True
     args.force_mmpd_eval = True
     args.force_indices = True
     args.no_update_mmpd = True

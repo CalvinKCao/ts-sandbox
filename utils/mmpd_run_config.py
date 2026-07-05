@@ -54,8 +54,8 @@ def apply_mmpd_run_config(args: Any, block: Dict[str, Any], *, repo_root: Path =
         args.gmm_components = int(gmm_components)
     if gmm_iterations := block.get("gmm_iterations"):
         args.gmm_iterations = int(gmm_iterations)
-    if tune_trials := block.get("tune_trials"):
-        args.mmpd_tune_trials = int(tune_trials)
+    if "tune_trials" in block:
+        args.mmpd_tune_trials = int(block["tune_trials"])
     if tune_epochs := block.get("tune_epochs"):
         args.mmpd_tune_epochs = int(tune_epochs)
     if tune_patience := block.get("tune_patience"):
@@ -63,5 +63,13 @@ def apply_mmpd_run_config(args: Any, block: Dict[str, Any], *, repo_root: Path =
     tune_params = block.get("tune_params")
     if isinstance(tune_params, dict):
         args.mmpd_tune_params = dict(tune_params)
+    if lradj := block.get("lradj"):
+        args.mmpd_lradj = str(lradj)
+    fixed = dict(getattr(args, "mmpd_fixed_hparams", None) or {})
+    for key in ("learning_rate", "point_weight", "dropout", "ema_decay"):
+        if key in block:
+            fixed[key] = block[key]
+    if fixed:
+        args.mmpd_fixed_hparams = fixed
     if block.get("leaderboard", False):
         args.mmpd_log_leaderboard = True

@@ -1,0 +1,64 @@
+# MMPD Decoder — paper-fixed hparams on ETTh1-capped flat subsets.
+#
+# Matches MMPD appendix D.3 / §8 defaults where applicable:
+#   T=336, tau=96, Adam lr=1e-4, point_weight=0.01 (lambda=0.99), batch=32,
+#   20 epochs / patience 5, N=100 / K_infer=20 / M=10 / EM=10, rho=0.5, u=100.
+#
+# Deliberately *not* paper-identical on data (flat subsets) or windowing (subset strides).
+# No Optuna; constant LR (no cosine schedule); no EMA.
+#
+# Parallel Slurm sweep (all datasets, Killarney login node):
+#   cd $SCRATCH/ts-sandbox && ./submit_mmpd_decoder_flat_subsets_paper_lb336_hz96.sh
+#
+# Smoke (one dataset):
+#   ./submit_mmpd_decoder_flat_subsets_paper_lb336_hz96.sh --smoke-test --dataset ETTh1
+#
+# Direct (no Slurm):
+#   source .venv/bin/activate
+#   python utils/eval_mmpd_gaussian_anchor.py \
+#     --mmpd-run-config configs/mmpd_decoder_flat_subsets_paper_lb336_hz96.yaml \
+#     --datasets ETTh1 \
+#     --output-dir results/datasets/$(date +%m-%d)-mmpd-decoder-paper-lb336-hz96-subset \
+#     --phase all
+
+experiment:
+  name: mmpd-decoder-flat-subsets-paper-lb336-hz96
+  experiment_name: mmpd_decoder_flat_subsets_paper_lb336_hz96
+
+mmpd:
+  backbone: Decoder
+  subset_config: binary_anchor_ar.yaml
+  lookback: 336
+  horizon: 96
+  datasets:
+    - ETTh1
+    - ETTh2
+    - ETTm1
+    - ETTm2
+    - illness
+    - exchange_rate
+    - weather
+    - electricity
+    - traffic
+    - PeMS
+    - solar_Alabama
+    - dalia
+    - dynamic
+  patch_size_default: 12
+  patch_size_wide: 24
+  train_epochs: 20
+  patience: 5
+  learning_rate: 1.0e-4
+  point_weight: 0.01
+  dropout: 0.2
+  ema_decay: 0
+  batch_size: 32
+  sample_num: 100
+  num_sampling_steps: 20
+  gmm_components: 10
+  gmm_iterations: 10
+  prior_pi_decay: 0.5
+  prior_precision_shape: 100
+  lradj: fixed
+  tune_trials: 0
+  leaderboard: true
