@@ -36,20 +36,22 @@ def _unique_sorted_1d(x: torch.Tensor, tie_atol: float) -> Tuple[torch.Tensor, i
 
 
 def _value_to_rank(values: torch.Tensor, x: torch.Tensor, tie_atol: float) -> torch.Tensor:
-    """Map x to integer rank using past uniquified ladder."""
+    """Map x to integer rank using past uniquified ladder (contiguous midpoints)."""
     k = values.shape[0]
     if k <= 1:
         return torch.zeros_like(x, dtype=torch.long)
     ranks = torch.zeros_like(x, dtype=torch.long)
     for j in range(k):
-        if j == k - 1:
-            mask = x >= (values[j] - tie_atol)
+        if j == 0:
+            hi = (values[0] + values[1]) * 0.5
+            mask = x < hi
+        elif j == k - 1:
+            lo = (values[k - 2] + values[k - 1]) * 0.5
+            mask = x >= lo
         else:
-            mid = (values[j] + values[j + 1]) * 0.5
-            if j == 0:
-                mask = x < mid
-            else:
-                mask = (x >= (values[j] - tie_atol)) & (x < mid)
+            lo = (values[j - 1] + values[j]) * 0.5
+            hi = (values[j] + values[j + 1]) * 0.5
+            mask = (x >= lo) & (x < hi)
         ranks = torch.where(mask, torch.full_like(ranks, j), ranks)
     return ranks.clamp(0, k - 1)
 

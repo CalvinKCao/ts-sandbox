@@ -30,3 +30,15 @@ def test_tie_atol_merges_near_duplicates():
     past = torch.tensor([[[1.0, 1.0 + 1e-8, 2.0]]])
     _, _, ladder = ordinal_encode(past, None, max_scale=1.0, tie_atol=1e-6)
     assert int(ladder.n_unique[0, 0]) == 2
+
+
+def test_no_rank_gaps_between_ladder_rungs():
+    from models.diffusion_tsf.ordinal_window_norm import _value_to_rank
+
+    past = torch.tensor([[[-1.0, 0.0, 0.5, 1.0, 3.0]]])
+    uniq = past[0, 0]
+    probe = torch.linspace(-1.0, 3.0, steps=81)
+    ranks = _value_to_rank(uniq, probe, 1e-6)
+    assert ranks.min() >= 0 and ranks.max() < len(uniq)
+    assert ranks[0] == 0
+    assert ranks[-1] == len(uniq) - 1
