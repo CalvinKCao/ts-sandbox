@@ -15,7 +15,7 @@ from utils.load_dotenv import load_repo_dotenv
 
 load_repo_dotenv(REPO)
 
-from models.diffusion_tsf.pipeline.wandb_utils import make_phase_run_name
+from models.diffusion_tsf.pipeline.wandb_utils import PIPELINE_JOB_TYPE, make_phase_run_name, make_pipeline_run_name
 
 PROJECT = "ts-sandbox-leaderboard"
 ENTITY = "calvincao"
@@ -23,6 +23,8 @@ STEM_RE = re.compile(r"^\d{2}-\d{2}-\d+-")
 
 
 def expected_name(group: str, job_type: str) -> str:
+    if job_type == PIPELINE_JOB_TYPE:
+        return make_pipeline_run_name(group)
     return make_phase_run_name(group, job_type)
 
 
@@ -50,6 +52,10 @@ def main() -> None:
         group = run.group or ""
         job_type = run.job_type or ""
         if not group or not job_type:
+            skipped += 1
+            continue
+
+        if job_type == PIPELINE_JOB_TYPE and (run.name or "") == make_pipeline_run_name(group):
             skipped += 1
             continue
 

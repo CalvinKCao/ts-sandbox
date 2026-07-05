@@ -38,6 +38,7 @@ from models.diffusion_tsf.diffusion_model import DiffusionTSF
 from models.diffusion_tsf.realts import get_synthetic_dataloader
 from models.diffusion_tsf.guidance import iTransformerGuidance, PatchDecoderGuidance
 from models.diffusion_tsf.patch_guidance_stack import PatchGuidanceStack, PatchGuidanceStackConfig
+from models.diffusion_tsf.ordinal_window_norm import ordinal_encode
 from models.diffusion_tsf.storage_paths import resolve_checkpoint_dir, resolve_results_dir
 from models.diffusion_tsf.dalia_data import (
     DALIA_CHANNEL_NAMES,
@@ -135,11 +136,8 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'cross_variate_context_bias': CROSS_VARIATE_CONTEXT_BIAS,
         'model_type': MODEL_TYPE,
         'diffusion_type': DIFFUSION_TYPE,
-        'd3pm_transition_max': D3PM_TRANSITION_MAX,
-        'd3pm_transition_min': D3PM_TRANSITION_MIN,
-        'd3pm_neighbor_kernel': D3PM_NEIGHBOR_KERNEL,
-        'd3pm_noise_schedule': D3PM_NOISE_SCHEDULE,
-        'd3pm_loss_type': D3PM_LOSS_TYPE,
+        'use_ordinal_window_norm': USE_ORDINAL_WINDOW_NORM,
+        'ordinal_tie_atol': ORDINAL_TIE_ATOL,
         'binary_anchor_input_mode': BINARY_ANCHOR_INPUT_MODE,
         'dit_patch_size': DIT_PATCH_SIZE,
         'dit_embed_dim': DIT_EMBED_DIM,
@@ -340,11 +338,8 @@ USE_GUIDANCE_CHANNEL = True
 CFG_DROPOUT = 0.1
 MODEL_TYPE = "dit"
 DIFFUSION_TYPE = "binary"
-D3PM_TRANSITION_MAX = 0.3
-D3PM_TRANSITION_MIN = 1e-5
-D3PM_NEIGHBOR_KERNEL = "gaussian"
-D3PM_NOISE_SCHEDULE = "sqrt_linear"
-D3PM_LOSS_TYPE = "cross_entropy"
+USE_ORDINAL_WINDOW_NORM = False
+ORDINAL_TIE_ATOL = 1e-6
 DIT_PATCH_SIZE = (8, 8)
 DIT_EMBED_DIM = 384
 DIT_DEPTH = 8
@@ -635,6 +630,14 @@ def _window_norm_past_future(
     past: torch.Tensor,
     future: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    if USE_ORDINAL_WINDOW_NORM:
+        past_ord, future_ord, _ladder = ordinal_encode(
+            past,
+            future,
+            max_scale=float(MAX_SCALE),
+            tie_atol=float(ORDINAL_TIE_ATOL),
+        )
+        return past_ord, future_ord
     if not USE_WINDOW_NORMALIZATION:
         return past, future
     if WINDOW_NORM_CENTER == "last":
@@ -1284,14 +1287,8 @@ def create_diffusion_model(
         coarse_flatline_blur_kernel=o("coarse_flatline_blur_kernel", COARSE_FLATLINE_BLUR_KERNEL),
         coarse_flatline_blur_atol=o("coarse_flatline_blur_atol", COARSE_FLATLINE_BLUR_ATOL),
         binary_noise_schedule=o("binary_noise_schedule", BINARY_NOISE_SCHEDULE),
-        prediction_target=o(
-            "prediction_target",
-            "x0" if DIFFUSION_TYPE == "ordinal_d3pm" else PREDICTION_TARGET,
-        ),
-        loss_weighting=o(
-            "loss_weighting",
-            "none" if DIFFUSION_TYPE == "ordinal_d3pm" else LOSS_WEIGHTING,
-        ),
+        prediction_target=o("prediction_target", PREDICTION_TARGET),
+        loss_weighting=o("loss_weighting", LOSS_WEIGHTING),
         min_snr_gamma=o("min_snr_gamma", MIN_SNR_GAMMA),
         use_coordinate_channel=USE_COORDINATE_CHANNEL,
         use_raw_lookback_cond_channel=o(
@@ -1313,11 +1310,8 @@ def create_diffusion_model(
         unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
         use_amp=USE_AMP,
         diffusion_type=o("diffusion_type", DIFFUSION_TYPE),
-        d3pm_transition_max=o("d3pm_transition_max", D3PM_TRANSITION_MAX),
-        d3pm_transition_min=o("d3pm_transition_min", D3PM_TRANSITION_MIN),
-        d3pm_neighbor_kernel=o("d3pm_neighbor_kernel", D3PM_NEIGHBOR_KERNEL),
-        d3pm_noise_schedule=o("d3pm_noise_schedule", D3PM_NOISE_SCHEDULE),
-        d3pm_loss_type=o("d3pm_loss_type", D3PM_LOSS_TYPE),
+        use_ordinal_window_norm=o("use_ordinal_window_norm", USE_ORDINAL_WINDOW_NORM),
+        ordinal_tie_atol=o("ordinal_tie_atol", ORDINAL_TIE_ATOL),
         use_deterministic_anchor_loss=o("use_deterministic_anchor_loss", DETERMINISTIC_ANCHOR_LOSS),
         deterministic_anchor_lambda=o("deterministic_anchor_lambda", DETERMINISTIC_ANCHOR_LAMBDA),
         deterministic_anchor_alpha=o("deterministic_anchor_alpha", DETERMINISTIC_ANCHOR_ALPHA),
@@ -2294,11 +2288,11 @@ def pretrain_diffusion(
     model_kwargs = anchor_kwargs_from_params(best_params)
     for key in (
         "max_scale",
-        "d3pm_transition_max",
-        "d3pm_transition_min",
         "dit_dropout",
         "prediction_target",
         "loss_weighting",
+        "use_ordinal_window_norm",
+        "ordinal_tie_atol",
     ):
         if key in best_params:
             model_kwargs[key] = best_params[key]
@@ -3239,7 +3233,7 @@ def main():
     finally:
         if state.wandb_enabled:
             from models.diffusion_tsf.pipeline import wandb_utils
-            wandb_utils.finish_phase_run()
+            wandb_utils.finish_pipeline_run()
 
 
 

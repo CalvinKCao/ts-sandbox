@@ -85,7 +85,7 @@ def training_loss_config_dict(model: Any) -> Dict[str, Any]:
     if cfg is None:
         return {"training_loss": "unknown (no model.config)"}
 
-    diffusion_type = getattr(cfg, "d3pm_loss_type", None) or getattr(cfg, "diffusion_type", "binary")
+    diffusion_type = getattr(cfg, "diffusion_type", "binary")
     loss_weighting = getattr(cfg, "loss_weighting", "none")
     pred_target = getattr(cfg, "prediction_target", "x0")
     stage = getattr(cfg, "diffusion_stage", None)

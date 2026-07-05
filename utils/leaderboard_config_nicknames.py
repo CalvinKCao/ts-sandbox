@@ -79,6 +79,50 @@ MMPD_DIR_SUBSET = os.path.join(
     REPO, "results", "datasets", "06-13-binary-mmpd-subset-compare", "partials"
 )
 
+# Short tags for wandb UI filters (e.g. "exchange" + "eval").
+DATASET_TAG_ALIASES: Dict[str, list[str]] = {
+    "exchange_rate": ["exchange"],
+    "solar_Alabama": ["solar"],
+}
+
+
+def leaderboard_dataset_tags(dataset: str) -> list[str]:
+    """Canonical dataset tag(s) for wandb filters; includes short aliases."""
+    tags = [dataset]
+    for alias in DATASET_TAG_ALIASES.get(dataset, []):
+        if alias not in tags:
+            tags.append(alias)
+    return tags
+
+
+def all_dataset_tag_tokens() -> set[str]:
+    tokens = {
+        "ETTh1", "ETTh2", "ETTm1", "ETTm2", "illness", "exchange_rate", "weather",
+        "electricity", "traffic", "PeMS", "solar_Alabama", "dalia", "dynamic",
+    }
+    for ds, aliases in DATASET_TAG_ALIASES.items():
+        tokens.add(ds)
+        tokens.update(aliases)
+    return tokens
+
+
+def leaderboard_staged_eval_tags(
+    manifest_tags: Optional[list[str]],
+    dataset: str,
+) -> list[str]:
+    """Tags for binary staged_eval rows: dataset aliases + manifest + eval/binary."""
+    tags: list[str] = []
+    for t in leaderboard_dataset_tags(dataset):
+        if t not in tags:
+            tags.append(t)
+    for t in manifest_tags or []:
+        if t not in tags:
+            tags.append(t)
+    for t in ("eval", "binary"):
+        if t not in tags:
+            tags.append(t)
+    return tags
+
 
 def strip_leaderboard_markdown(label: str) -> str:
     s = label.strip()

@@ -14,19 +14,27 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from utils.leaderboard_config_nicknames import leaderboard_nickname, parse_run_stem
+from utils.leaderboard_config_nicknames import (
+    leaderboard_dataset_tags,
+    leaderboard_nickname,
+    leaderboard_staged_eval_tags,
+    parse_run_stem,
+)
 from utils.load_dotenv import load_repo_dotenv
 
 load_repo_dotenv(REPO)
 
 from models.diffusion_tsf.pipeline.wandb_utils import (  # noqa: E402
+    PIPELINE_JOB_TYPE,
+    is_binary_eval_run,
     load_manifest,
-    make_phase_run_name,
+    make_pipeline_run_name,
+    migrate_manifest_run_id,
 )
 
 PROJECT = "ts-sandbox-leaderboard"
 ENTITY = "calvincao"
-JOB_TYPE = "staged_eval"
+BINARY_EVAL_JOB_TYPES = frozenset({"staged_eval", PIPELINE_JOB_TYPE})
 CKPT_ROOT = REPO / "results" / "ckpts"
 DATA_ROOT = REPO / "results" / "datasets"
 
@@ -110,13 +118,8 @@ def backfill_run(
 
     group = str(manifest.get("group") or run_stem)
     project = str(manifest.get("project") or PROJECT)
-    phase_runs = dict(manifest.get("phase_runs") or {})
-    run_id = phase_runs.get(JOB_TYPE)
-    tags = list(manifest.get("tags") or [])
-    if dataset not in tags:
-        tags.insert(0, dataset)
-    if "eval" not in tags:
-        tags.append("eval")
+    run_id = migrate_manifest_run_id(manifest)
+    tags = leaderboard_staged_eval_tags(manifest.get("tags"), dataset)
 
     existing = None
     if run_id:
@@ -126,7 +129,10 @@ def backfill_run(
             existing = None
     if existing is None:
         for run in api.runs(f"{ENTITY}/{project}", filters={"group": group}):
-            if run.job_type == JOB_TYPE:
+            if run.job_type in BINARY_EVAL_JOB_TYPES and is_binary_eval_run(run):
+                existing = run
+                break
+            if run.job_type == PIPELINE_JOB_TYPE and run.name == group:
                 existing = run
                 break
 
@@ -135,7 +141,7 @@ def backfill_run(
 
     config_yaml = manifest.get("config_yaml") or ""
     nick = leaderboard_nickname(raw_config=raw_config)
-    name = make_phase_run_name(group, JOB_TYPE)
+    name = make_pipeline_run_name(group)
 
     if dry_run:
         action = "update" if existing is not None else "create"
@@ -152,13 +158,14 @@ def backfill_run(
             resume="must",
             settings=wandb.Settings(console="off"),
         )
+        run.tags = tags
     else:
         init_kwargs: Dict[str, Any] = {
             "project": project,
             "entity": ENTITY,
             "name": name,
             "group": group,
-            "job_type": JOB_TYPE,
+            "job_type": PIPELINE_JOB_TYPE,
             "tags": tags + ["curated-relog"],
             "notes": f"manual eval relog from {partial_path}",
             "config": {

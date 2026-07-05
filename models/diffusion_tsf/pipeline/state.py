@@ -36,11 +36,8 @@ class PipelineState:
 
     # -- Model / diffusion knobs --
     diffusion_type: str = "binary"
-    d3pm_transition_max: float = 0.3
-    d3pm_transition_min: float = 1e-5
-    d3pm_neighbor_kernel: str = "gaussian"
-    d3pm_noise_schedule: str = "sqrt_linear"
-    d3pm_loss_type: str = "cross_entropy"
+    use_ordinal_window_norm: bool = False
+    ordinal_tie_atol: float = 1e-6
     model_type: str = "dit"
     image_height: int = 32
     coarse_image_height: int = 16
@@ -146,7 +143,7 @@ class PipelineState:
     wandb_project: str = "ts-sandbox-leaderboard"
     wandb_group: Optional[str] = None
     wandb_tags: Optional[List[str]] = None
-    wandb_phase_run_ids: Dict[str, str] = field(default_factory=dict)
+    wandb_run_id: Optional[str] = None
 
     # -- Resume / fresh --
     resume: bool = False

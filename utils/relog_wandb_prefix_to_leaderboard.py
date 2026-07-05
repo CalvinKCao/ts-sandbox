@@ -13,6 +13,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
+from models.diffusion_tsf.pipeline.wandb_utils import PIPELINE_JOB_TYPE, is_binary_eval_run
 from utils.leaderboard_config_nicknames import leaderboard_nickname, parse_run_stem
 from utils.load_dotenv import load_repo_dotenv
 
@@ -21,7 +22,7 @@ load_repo_dotenv(REPO)
 DST_PROJECT = "ts-sandbox-leaderboard"
 DST_ENTITY = "calvincao"
 STEM_GROUP_RE = re.compile(r"^\d{2}-\d{2}-\d+-")
-EVAL_JOB_TYPES = frozenset({"staged_eval", "mmpd_eval"})
+EVAL_JOB_TYPES = frozenset({"staged_eval", "mmpd_eval", PIPELINE_JOB_TYPE})
 DEFAULT_COPY_MAP = os.path.join(
     REPO, "archive", "reports", "sweep_grid_report", "curated_wandb_copy_map.json"
 )
@@ -131,6 +132,8 @@ def discover_missing_eval_runs(
             continue
         for run in runs:
             if run.job_type not in EVAL_JOB_TYPES:
+                continue
+            if run.job_type == PIPELINE_JOB_TYPE and not is_binary_eval_run(run):
                 continue
             group = run.group or ""
             if not STEM_GROUP_RE.match(group):

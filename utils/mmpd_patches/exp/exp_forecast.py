@@ -23,6 +23,75 @@ import pickle
 import warnings
 warnings.filterwarnings('ignore')
 
+from models.diffusion_tsf.ordinal_window_norm import ordinal_decode, ordinal_encode
+
+
+def _use_ordinal_norm(args) -> bool:
+    if os.environ.get("MMPD_USE_ORDINAL_NORM", "") == "1":
+        return True
+    return bool(getattr(args, "use_ordinal_window_norm", False))
+
+
+def _ordinal_max_scale(args) -> float:
+    env_val = os.environ.get("MMPD_ORDINAL_MAX_SCALE")
+    if env_val:
+        return float(env_val)
+    return float(getattr(args, "ordinal_max_scale", 3.5))
+
+
+def _ordinal_tie_atol(args) -> float:
+    env_val = os.environ.get("MMPD_ORDINAL_TIE_ATOL")
+    if env_val:
+        return float(env_val)
+    return float(getattr(args, "ordinal_tie_atol", 1e-6))
+
+
+def _prepare_normed_batch(batch_x, batch_y, args):
+    if _use_ordinal_norm(args):
+        past_ord, future_ord, ladder = ordinal_encode(
+            batch_x,
+            batch_y,
+            max_scale=_ordinal_max_scale(args),
+            tie_atol=_ordinal_tie_atol(args),
+        )
+        return past_ord, future_ord, ("ordinal", ladder)
+    x_shift, x_scale = get_statistics(batch_x)
+    normed_x = normalize(batch_x, x_shift, x_scale)
+    normed_y = normalize(batch_y, x_shift, x_scale)
+    return normed_x, normed_y, ("instance", x_shift, x_scale)
+
+
+def _denormalize_ordinal_future(future_ord: torch.Tensor, ladder) -> torch.Tensor:
+    if future_ord.dim() == 4:
+        b, d, s, length = future_ord.shape
+        chunks = []
+        for si in range(s):
+            _, fut = ordinal_decode(
+                torch.zeros(b, d, 1, device=future_ord.device, dtype=future_ord.dtype),
+                future_ord[:, :, si, :],
+                ladder,
+            )
+            chunks.append(fut)
+        return torch.stack(chunks, dim=2)
+    _, fut = ordinal_decode(
+        torch.zeros(
+            future_ord.shape[0],
+            future_ord.shape[1],
+            1,
+            device=future_ord.device,
+            dtype=future_ord.dtype,
+        ),
+        future_ord,
+        ladder,
+    )
+    return fut
+
+
+def _denormalize_predictions(preds: torch.Tensor, norm_ctx) -> torch.Tensor:
+    if norm_ctx[0] == "ordinal":
+        return _denormalize_ordinal_future(preds, norm_ctx[1])
+    return denormalize(preds, norm_ctx[1], norm_ctx[2])
+
 class _Ema:
     def __init__(self, model: nn.Module, decay: float):
         self.decay = float(decay)
@@ -130,15 +199,13 @@ class Exp_Forecast(Exp_Basic):
         batch_y = rearrange(batch_y, 'b l d -> b d l')
 
         #normalize
-        x_shift, x_scale = get_statistics(batch_x)
-        normed_x = normalize(batch_x, x_shift, x_scale)
-        normed_y = normalize(batch_y, x_shift, x_scale)
+        normed_x, normed_y, norm_ctx = _prepare_normed_batch(batch_x, batch_y, self.args)
 
         batch_loss = self.model.compute_loss(normed_x, normed_y, point_weight=self.args.point_weight) # [batch_size, data_dim]
         
         #return the loss by std, align with previous works
-        if self.args.weighted:
-            weighted_loss = (x_scale**2) * batch_loss
+        if norm_ctx[0] == "instance" and self.args.weighted:
+            weighted_loss = (norm_ctx[2] ** 2) * batch_loss
         else:
             weighted_loss = batch_loss
 
@@ -146,10 +213,13 @@ class Exp_Forecast(Exp_Basic):
 
     def vali(self, vali_data, vali_loader):
         self.model.eval()
+        smoke_max_batches = int(os.environ.get("MMPD_SMOKE_MAX_VAL_BATCHES", "0") or "0")
 
         total_loss = []
         with torch.no_grad():
             for i, (batch_x,batch_y) in enumerate(vali_loader):
+                if smoke_max_batches and i >= smoke_max_batches:
+                    break
                 loss = self._process_one_batch(vali_data, batch_x, batch_y)
                 total_loss.append(loss.detach().item())
         total_loss = np.average(total_loss)
@@ -276,9 +346,7 @@ class Exp_Forecast(Exp_Basic):
 
                 batch_x = rearrange(batch_x, 'b l d -> b d l')
                 batch_y = rearrange(batch_y, 'b l d -> b d l')
-                #normalize
-                x_shift, x_scale = get_statistics(batch_x)
-                normed_x = normalize(batch_x, x_shift, x_scale)
+                normed_x, _, norm_ctx = _prepare_normed_batch(batch_x, batch_y, self.args)
                 
                 deterministic_pred, multi_mode_pred, prob_samples = self.model.predict(normed_x, prob_pred=self.args.prob_pred, 
                         sample_num = self.args.sample_num, temperature = self.args.temperature, \
@@ -287,19 +355,19 @@ class Exp_Forecast(Exp_Basic):
                 
                 #probabilistic prediction
                 if prob_samples is not None:
-                    original_scale_pred_samples = denormalize(prob_samples, x_shift, x_scale) # [batch_size, data_dim, sample_num, seq_len]
+                    original_scale_pred_samples = _denormalize_predictions(prob_samples, norm_ctx)
                     crps = probabilistic_metrics(batch_y, original_scale_pred_samples) # [batch_size, data_dim, seq_len]
                     CRPS_agg += crps.sum().item()
 
                 if multi_mode_pred is not None:
-                    original_scale_multi_mode_pred = denormalize(multi_mode_pred['mode_center'], x_shift, x_scale) # [batch_size, data_dim, mode_num, seq_len]
+                    original_scale_multi_mode_pred = _denormalize_predictions(multi_mode_pred['mode_center'], norm_ctx)
                     multi_mode_preds = {'mode_prob': multi_mode_pred['mode_prob'], 'mode_center': original_scale_multi_mode_pred}
                     for k in range(topK):
                         topK_mse, topK_mae = multi_mode_metrics(batch_y, multi_mode_preds, K=k+1)
                         topK_mse_agg[k] += topK_mse.sum().item(); topK_mae_agg[k] += topK_mae.sum().item()
 
                 if deterministic_pred is not None:
-                    original_scale_deterministic_pred = denormalize(deterministic_pred, x_shift, x_scale)
+                    original_scale_deterministic_pred = _denormalize_predictions(deterministic_pred, norm_ctx)
                     mse, mae = deterministic_metrics(batch_y, original_scale_deterministic_pred)
                     mse_agg += mse.sum().item(); mae_agg += mae.sum().item()
                 

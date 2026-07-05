@@ -63,13 +63,9 @@ class DiffusionTSFConfig:
     # unified time axis (L+F vs Future-Only)
     unified_time_axis: bool = False
 
-    # diffusion family: binary XOR bit-flip or ordinal D3PM on skyline maps
     diffusion_type: str = "binary"
-    d3pm_transition_max: float = 0.3
-    d3pm_transition_min: float = 1e-5
-    d3pm_neighbor_kernel: str = "gaussian"
-    d3pm_noise_schedule: str = "sqrt_linear"  # sqrt_linear, linear, cosine
-    d3pm_loss_type: str = "cross_entropy"  # cross_entropy or expectation_mae
+    use_ordinal_window_norm: bool = False
+    ordinal_tie_atol: float = 1e-6
     binary_num_steps: int = 1000
     binary_sample_steps: int = 20
     binary_beta_start: float = 1e-5
@@ -160,36 +156,12 @@ class DiffusionTSFConfig:
     def __post_init__(self):
         assert self.image_height > 0
         assert self.max_scale > 0
-        if self.diffusion_type not in {"binary", "ordinal_d3pm"}:
+        if self.diffusion_type != "binary":
+            raise ValueError(f"diffusion_type must be 'binary', got {self.diffusion_type!r}")
+        if self.use_ordinal_window_norm and self.use_window_normalization:
             raise ValueError(
-                f"diffusion_type must be 'binary' or 'ordinal_d3pm', got {self.diffusion_type!r}"
+                "use_ordinal_window_norm replaces window normalization; set use_window_normalization=false"
             )
-        if self.diffusion_type == "ordinal_d3pm":
-            if self.diffusion_stage not in {"coarse", "fine"}:
-                raise ValueError(
-                    "ordinal_d3pm requires staged diffusion_stage 'coarse' or 'fine'."
-                )
-            if self.prediction_target != "x0":
-                raise ValueError("ordinal_d3pm requires prediction_target='x0'.")
-            if self.loss_weighting != "none":
-                raise ValueError("ordinal_d3pm requires loss_weighting='none'.")
-            if not 0.0 < self.d3pm_transition_min < self.d3pm_transition_max < 1.0:
-                raise ValueError(
-                    "d3pm_transition_min/max must satisfy 0 < min < max < 1."
-                )
-            if self.d3pm_neighbor_kernel not in {"gaussian"}:
-                raise ValueError(
-                    f"Unknown d3pm_neighbor_kernel {self.d3pm_neighbor_kernel!r}"
-                )
-            if self.d3pm_loss_type not in {"cross_entropy", "expectation_mae"}:
-                raise ValueError(
-                    "d3pm_loss_type must be 'cross_entropy' or 'expectation_mae', "
-                    f"got {self.d3pm_loss_type!r}."
-                )
-            if self.d3pm_noise_schedule not in {"sqrt_linear", "linear", "cosine"}:
-                raise ValueError(
-                    "d3pm_noise_schedule must be one of {'sqrt_linear', 'linear', 'cosine'}."
-                )
         if self.binary_use_boundary_weighted_bce:
             raise ValueError(
                 "Edge CDF boundary-weighted BCE is not supported for binary diffusion yet."

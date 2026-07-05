@@ -10,6 +10,7 @@ Each Slurm job submitted via [`submit_grid.sh`](../submit_grid.sh) gets one **ru
 | Checkpoints | `results/ckpts/{stem}/` |
 | Eval outputs | `results/datasets/{stem}/` |
 | wandb **group** | `{stem}` |
+| wandb **run name** | `{stem}` (same as group) |
 
 **Stem format:** `{MM-DD}-{job_id}-{dataset}-{yaml_stem}`
 
@@ -24,25 +25,23 @@ Example for [`configs/sweep/diff_noise_cosine.yaml`](../configs/sweep/diff_noise
 
 Local runs without a Slurm-style checkpoint dir fall back to `{MM-DD}-{yaml_stem}-s{seed}`.
 
-## One group per job, one run per phase
+## One run per pipeline
 
-Each YAML `phases:` entry becomes its own wandb **run** inside the job group.
+The full training pipeline (all YAML `phases:` entries) logs into a **single** wandb run.
 
 | wandb field | Value |
 |-------------|-------|
 | `group` | Run stem (above) |
-| `name` | `{group}-{phase}` (underscores in phase keys become hyphens) |
-| `job_type` | Phase key from YAML, e.g. `staged_eval` |
-| `tags` | Dataset name; `eval` tag on eval phases |
+| `name` | Run stem (same as group) |
+| `job_type` | `pipeline` |
+| `tags` | Dataset name; `eval` tag when the pipeline includes an eval phase |
 
-Example runs for the job above:
+Phases share that run and namespace metrics by prefix (`hp/*`, `eval/staged_*`, `viz/*`). At each phase boundary the orchestrator merges `runtime.phase` and `runtime.phase_overrides` into the run config.
+
+Example run for the job above:
 
 ```
-06-15-48291-traffic-diff_noise_cosine-staged-diffusion-pretrain
-06-15-48291-traffic-diff_noise_cosine-itrans-finetune-hp
-06-15-48291-traffic-diff_noise_cosine-diffusion-coarse-finetune-hp
-...
-06-15-48291-traffic-diff_noise_cosine-staged-eval
+06-15-48291-traffic-diff_noise_cosine
 ```
 
 Override `wandb.group` in YAML only when you need a fixed group name; otherwise the checkpoint stem is used automatically.
@@ -63,19 +62,21 @@ Set `WANDB_API_KEY` in the environment before running. If the key is missing or 
 
 ## Resume
 
-On first run, the pipeline writes `wandb_manifest.json` under the checkpoint dir with:
+On first run, the pipeline writes `wandb_manifest.json` (v2) under the checkpoint dir with:
 
 - `project`, `group`, `tags`
-- `phase_runs`: map of phase key → wandb run id
+- `run_id`: wandb id for the pipeline run
 
-On `--resume`, the manifest is the source of truth: each phase reopens its existing wandb run instead of creating a new one.
+On `--resume`, the manifest is the source of truth: the pipeline reopens that single run.
+
+Legacy v1 manifests with `phase_runs` are migrated on load (prefers `staged_eval`, else first phase id).
 
 ## What gets logged
 
-Per phase (via [`wandb_utils.py`](../models/diffusion_tsf/pipeline/wandb_utils.py)):
+Via [`wandb_utils.py`](../models/diffusion_tsf/pipeline/wandb_utils.py):
 
 - Full merged YAML config (and config artifact on first init)
-- Phase-specific overrides in `runtime.phase` / `runtime.phase_overrides`
+- Phase-specific overrides in `runtime.phase` / `runtime.phase_overrides` (updated each phase)
 - HP phases: best hyperparameters in run summary (e.g. `hp/itrans_ft_best_lr`)
 - Eval phases: metrics via `log_eval_metrics`; JPEG visualizations when enabled
 - Git and system info in `runtime`
@@ -98,7 +99,7 @@ We use **Optuna** for in-phase hyperparameter search (not `wandb.agent`). Import
 **Practical recommendation for this repo:**
 
 1. Keep Optuna as the optimizer inside HP phases.
-2. Use wandb **groups** (job stem) and **per-phase runs** for pipeline-level tracking (current setup).
+2. Use one wandb run per pipeline job; phases log prefixed metrics into that run.
 3. For trial-level wandb visibility later, add `optuna_integration.WeightsAndBiasesCallback(..., as_multirun=True)` inside HP objectives — each Optuna trial becomes a separate wandb run with params in `config`, which powers sweep-style panels without enrolling in the sweep controller.
 4. To seed a new Bayesian wandb sweep from prior manual runs, use the UI: select runs → Create sweep.
 

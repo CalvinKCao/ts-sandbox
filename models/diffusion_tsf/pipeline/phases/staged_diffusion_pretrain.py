@@ -89,9 +89,8 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "window_norm_low_var_unit_std": float(state.window_norm_low_var_unit_std),
         "cross_variate_context_bias": float(state.cross_variate_context_bias),
         "use_raw_lookback_cond_channel": bool(state.use_raw_lookback_cond_channel),
-        "d3pm_transition_max": float(state.d3pm_transition_max),
-        "d3pm_transition_min": float(state.d3pm_transition_min),
-        "d3pm_loss_type": str(state.d3pm_loss_type),
+        "use_ordinal_window_norm": bool(state.use_ordinal_window_norm),
+        "ordinal_tie_atol": float(state.ordinal_tie_atol),
         "binary_anchor_input_mode": str(state.binary_anchor_input_mode),
     }
     digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
@@ -366,13 +365,6 @@ def _resolve_diff_hp(state: PipelineState, source_dir: Optional[str]) -> Dict[st
     if state.extra.get("use_hardcoded_synthetic_hp", False):
         logger.info("Using hardcoded Phase 1 diffusion HP (use_hardcoded_synthetic_hp=True)")
         params = {"learning_rate": 0.0005, "batch_size": getattr(state, "diffusion_batch_size", 32)}
-        if state.diffusion_type == "ordinal_d3pm":
-            params.update({
-                "d3pm_transition_max": state.d3pm_transition_max,
-                "dit_dropout": state.dit_dropout,
-                "prediction_target": "x0",
-                "loss_weighting": "none",
-            })
         state.diffusion_best_params = params
         return params
 

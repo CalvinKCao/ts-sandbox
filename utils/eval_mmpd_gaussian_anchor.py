@@ -21,6 +21,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import yaml
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -611,7 +612,8 @@ def mmpd_eval_batch_size(args: argparse.Namespace, dataset: str, data_dim: Optio
     elif dim >= 130:
         cap = min(cap, 4)
     elif dim <= 21:
-        cap = max(cap, min(32, args.mmpd_eval_batch_size * 2))
+        if not getattr(args, "smoke_test", False):
+            cap = max(cap, min(32, args.mmpd_eval_batch_size * 2))
     if cap != args.mmpd_eval_batch_size:
         print(f"[mmpd-eval] {dataset}: batch_size {args.mmpd_eval_batch_size} -> {cap} (data_dim={dim})")
     return cap
@@ -855,13 +857,23 @@ def mmpd_env_for_run(
     else:
         env["MMPD_TEST_STRIDE"] = str(run_test_stride(run))
     if args is not None and getattr(args, "smoke_test", False):
-        env["MMPD_SMOKE_MAX_TRAIN_BATCHES"] = "2"
+        env["MMPD_SMOKE_MAX_TRAIN_BATCHES"] = "1"
+        env["MMPD_SMOKE_MAX_VAL_BATCHES"] = "1"
     else:
         env.pop("MMPD_SMOKE_MAX_TRAIN_BATCHES", None)
-    if args is not None and getattr(args, "mmpd_instance_norm", True):
+        env.pop("MMPD_SMOKE_MAX_VAL_BATCHES", None)
+    if args is not None and getattr(args, "use_ordinal_window_norm", False):
+        env["MMPD_USE_ORDINAL_NORM"] = "1"
+        env.pop("MMPD_USE_INSTANCE_NORM", None)
+        by_ds = getattr(args, "max_scale_by_dataset", None) or {}
+        ms = by_ds.get(run.dataset, getattr(args, "ordinal_max_scale", 3.5))
+        env["MMPD_ORDINAL_MAX_SCALE"] = str(ms)
+        env["MMPD_ORDINAL_TIE_ATOL"] = str(getattr(args, "ordinal_tie_atol", 1e-6))
+    elif args is not None and getattr(args, "mmpd_instance_norm", True):
         env["MMPD_USE_INSTANCE_NORM"] = "1"
     else:
         env.pop("MMPD_USE_INSTANCE_NORM", None)
+        env.pop("MMPD_USE_ORDINAL_NORM", None)
     if run.dataset == "dalia":
         env["MMPD_BLOCK_LEN"] = "120"
     else:
@@ -1184,9 +1196,21 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
 
             EvalProgress, fmt_duration = _load_eval_progress()
 
+            def _load_ordinal_norm_helpers():
+                _path = _Path(_repo) / "utils" / "mmpd_patches" / "exp" / "exp_forecast.py"
+                _spec = importlib.util.spec_from_file_location(
+                    "_ts_mmpd_exp_forecast_patches", _path
+                )
+                if _spec is None or _spec.loader is None:
+                    raise ImportError(f"cannot load {_path}")
+                _mod = importlib.util.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                return _mod._prepare_normed_batch, _mod._denormalize_predictions
+
+            _prepare_normed_batch, _denormalize_predictions = _load_ordinal_norm_helpers()
+
             from data_provider.dataset_mts import Dataset_MTS
             from exp.exp_forecast import Exp_Forecast
-            from exp.normalization import get_statistics, normalize, denormalize
 
 
             def str2bool(v):
@@ -1255,6 +1279,9 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                     gpu=ns.gpu,
                     use_multi_gpu=False,
                     devices="0,1,2,3",
+                    use_ordinal_window_norm=os.environ.get("MMPD_USE_ORDINAL_NORM") == "1",
+                    ordinal_max_scale=float(os.environ.get("MMPD_ORDINAL_MAX_SCALE", "3.5")),
+                    ordinal_tie_atol=float(os.environ.get("MMPD_ORDINAL_TIE_ATOL", "1e-6")),
                 )
 
 
@@ -1367,8 +1394,7 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                         batch_x = rearrange(batch_x, "b l d -> b d l")
                         batch_y = rearrange(batch_y, "b l d -> b d l")
 
-                        x_shift, x_scale = get_statistics(batch_x)
-                        normed_x = normalize(batch_x, x_shift, x_scale)
+                        normed_x, _, norm_ctx = _prepare_normed_batch(batch_x, batch_y, args)
                         det, modes, samples = exp.model.predict(
                             normed_x,
                             prob_pred=True,
@@ -1382,10 +1408,10 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                         )
 
                         y_true_all.append(batch_y.detach().cpu().numpy())
-                        det_all.append(denormalize(det, x_shift, x_scale).detach().cpu().numpy())
-                        samples_all.append(denormalize(samples, x_shift, x_scale).detach().cpu().numpy())
+                        det_all.append(_denormalize_predictions(det, norm_ctx).detach().cpu().numpy())
+                        samples_all.append(_denormalize_predictions(samples, norm_ctx).detach().cpu().numpy())
                         mode_center_all.append(
-                            denormalize(modes["mode_center"], x_shift, x_scale).detach().cpu().numpy()
+                            _denormalize_predictions(modes["mode_center"], norm_ctx).detach().cpu().numpy()
                         )
                         mode_prob_all.append(modes["mode_prob"].detach().cpu().numpy())
                         done = batch_i + 1
@@ -2760,7 +2786,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--smoke-test",
         action="store_true",
-        help="Minimal end-to-end run: 1 tune trial, 1 train epoch, 1 eval window.",
+        help="Minimal end-to-end run: 1 train batch, 1 val batch, 1 eval window, 1 sample/step.",
     )
     return parser.parse_args()
 
@@ -2777,16 +2803,17 @@ def apply_mmpd_smoke_defaults(args: argparse.Namespace) -> None:
         args.mmpd_tune_epochs = min(int(args.mmpd_tune_epochs), 1)
         args.mmpd_tune_patience = min(int(args.mmpd_tune_patience), 1)
         args.force_mmpd_tune = True
-    args.mmpd_train_epochs = min(int(args.mmpd_train_epochs), 1)
-    args.mmpd_patience = min(int(args.mmpd_patience), 1)
+    args.mmpd_train_epochs = 1
+    args.mmpd_patience = 1
     args.test_max_items = 1
     args.test_fraction = 1.0
-    args.sample_num = min(int(args.sample_num), 2)
-    args.num_sampling_steps = min(int(args.num_sampling_steps), 2)
-    args.gmm_components = min(int(args.gmm_components), 3)
-    args.gmm_iterations = min(int(args.gmm_iterations), 2)
-    args.mmpd_batch_size = min(int(args.mmpd_batch_size), 8)
-    args.mmpd_eval_batch_size = min(int(args.mmpd_eval_batch_size), 2)
+    args.sample_num = 1
+    args.num_sampling_steps = 2
+    args.gmm_components = 1
+    args.gmm_iterations = 1
+    args.mmpd_batch_size = 1
+    args.mmpd_eval_batch_size = 1
+    args.num_workers = 0
     args.force_mmpd_train = True
     args.force_mmpd_eval = True
     args.force_indices = True
@@ -2859,8 +2886,25 @@ def main() -> None:
     if args.mmpd_run_config is not None:
         from utils.mmpd_run_config import apply_mmpd_run_config, load_mmpd_run_config
 
-        mmpd_block = load_mmpd_run_config(args.mmpd_run_config.resolve())
+        cfg_path = args.mmpd_run_config.resolve()
+        with cfg_path.open(encoding="utf-8") as f:
+            full_cfg = yaml.safe_load(f) or {}
+        mmpd_block = full_cfg.get("mmpd")
+        if not isinstance(mmpd_block, dict):
+            raise ValueError(f"{cfg_path} missing top-level mmpd: mapping")
         apply_mmpd_run_config(args, mmpd_block)
+        exp = full_cfg.get("experiment") or {}
+        if exp.get("use_ordinal_window_norm"):
+            args.use_ordinal_window_norm = True
+            args.mmpd_instance_norm = False
+        if "ordinal_tie_atol" in exp:
+            args.ordinal_tie_atol = float(exp["ordinal_tie_atol"])
+        if "max_scale_by_dataset" in exp:
+            args.max_scale_by_dataset = {
+                str(k): float(v) for k, v in exp["max_scale_by_dataset"].items()
+            }
+        if "max_scale" in exp:
+            args.ordinal_max_scale = float(exp["max_scale"])
     if args.mmpd_leaderboard:
         args.mmpd_log_leaderboard = True
     if args.no_mmpd_leaderboard:

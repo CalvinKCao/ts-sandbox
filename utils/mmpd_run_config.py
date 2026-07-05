@@ -31,6 +31,13 @@ def resolve_subset_config_path(subset_config: str, *, repo_root: Path = REPO_ROO
 
 def apply_mmpd_run_config(args: Any, block: Dict[str, Any], *, repo_root: Path = REPO_ROOT) -> None:
     """Apply YAML ``mmpd`` fields onto eval_mmpd_gaussian_anchor argparse namespace."""
+    if block.get("use_ordinal_window_norm"):
+        args.use_ordinal_window_norm = True
+        args.mmpd_instance_norm = False
+    if "ordinal_tie_atol" in block:
+        args.ordinal_tie_atol = float(block["ordinal_tie_atol"])
+    if "ordinal_max_scale" in block:
+        args.ordinal_max_scale = float(block["ordinal_max_scale"])
     if backbone := block.get("backbone"):
         args.mmpd_backbone = str(backbone)
     if subset_config := block.get("subset_config"):

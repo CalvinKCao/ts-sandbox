@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -18,7 +19,10 @@ from utils.leaderboard_config_nicknames import (
     MMPD_MASKAE_FAIR_13D_NICKNAME,
     MMPD_SUBSET_JOBS,
     MMPD_SUBSET_NICKNAME,
+    all_dataset_tag_tokens,
+    leaderboard_dataset_tags,
     leaderboard_nickname,
+    leaderboard_staged_eval_tags,
     load_mmpd_decoder_grad_accum_200_lr_lo_metrics,
     load_mmpd_fair_13d_metrics,
     load_mmpd_subset_metrics,
@@ -33,7 +37,7 @@ from utils.load_dotenv import load_repo_dotenv
 
 load_repo_dotenv(REPO)
 
-from models.diffusion_tsf.pipeline.wandb_utils import make_phase_run_name
+from models.diffusion_tsf.pipeline.wandb_utils import make_phase_run_name, is_binary_eval_run, PIPELINE_JOB_TYPE
 
 PROJECT = "ts-sandbox-leaderboard"
 ENTITY = "calvincao"
@@ -84,6 +88,15 @@ def _dataset_for_run(run) -> str:
     return ""
 
 
+def _manifest_tags_for_group(group: str) -> list[str]:
+    path = os.path.join(REPO, "results", "ckpts", group, "wandb_manifest.json")
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return list(data.get("tags") or [])
+
+
 def backfill_dataset_and_tags(api, *, entity: str, project: str, dry_run: bool) -> dict:
     updated = skipped = 0
     for run in api.runs(f"{entity}/{project}"):
@@ -92,10 +105,24 @@ def backfill_dataset_and_tags(api, *, entity: str, project: str, dry_run: bool) 
             skipped += 1
             continue
 
-        meta = [t for t in (run.tags or []) if t in META_TAGS]
-        tags = [dataset, *meta]
-        if run.job_type in EVAL_JOB_TYPES and "eval" not in tags:
-            tags.append("eval")
+        if run.job_type == "staged_eval" or (
+            run.job_type == PIPELINE_JOB_TYPE and is_binary_eval_run(run)
+        ):
+            manifest_tags = _manifest_tags_for_group(run.group or "")
+            tags = leaderboard_staged_eval_tags(manifest_tags, dataset)
+            for t in (run.tags or []):
+                if t in ("curated-relog", "archive") and t not in tags:
+                    tags.append(t)
+        else:
+            meta = [t for t in (run.tags or []) if t in META_TAGS]
+            other = [
+                t for t in (run.tags or [])
+                if t not in META_TAGS and t not in all_dataset_tag_tokens()
+            ]
+            tags = leaderboard_dataset_tags(dataset) + meta + other
+            if run.job_type in EVAL_JOB_TYPES and "eval" not in tags:
+                tags.append("eval")
+            tags = list(dict.fromkeys(tags))
 
         needs_cfg = dict(run.config).get("dataset") != dataset
         needs_tags = set(tags) != set(run.tags or [])

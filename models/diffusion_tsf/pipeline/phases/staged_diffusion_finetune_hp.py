@@ -318,7 +318,6 @@ TUNED_MODEL_KEYS = (
     "prediction_target",
     "loss_weighting",
     "min_snr_gamma",
-    "d3pm_transition_max",
     "dit_dropout",
 )
 
@@ -586,30 +585,6 @@ def _suggest_staged_params(
 
     return _suggest_full_diffusion_params(
         trial, state, max_batch_size, tune_effective_batch=False,
-    )
-
-
-def _suggest_ordinal_d3pm_params(
-    trial,
-    state: PipelineState,
-    max_batch_size: int,
-    smoke_test: bool,
-) -> Dict[str, Any]:
-    base_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
-    batch_size = min(max(1, max_batch_size), 2) if smoke_test else max(1, max_batch_size)
-    return _apply_effective_batch_multiplier(
-        {
-            "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
-            "d3pm_transition_max": trial.suggest_float("d3pm_transition_max", 0.1, 0.4),
-            "dit_dropout": trial.suggest_categorical("dit_dropout", [0.0, 0.1]),
-            "batch_size": batch_size,
-            "max_scale": base_ms,
-            "prediction_target": "x0",
-            "loss_weighting": "none",
-            "min_snr_gamma": float(state.min_snr_gamma),
-        },
-        max_batch_size,
-        state,
     )
 
 
@@ -1159,7 +1134,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 n_trials = 1
             search_space = str(self.require("search_space")).lower()
             if search_space not in {
-                "default", "lr_only", "ordinal_d3pm", "full_with_batch", "reduced_hp", "fixed",
+                "default", "lr_only", "full_with_batch", "reduced_hp", "fixed",
             }:
                 raise ValueError(f"Unknown staged diffusion search_space={search_space!r}")
             if search_space == "reduced_hp":
@@ -1207,19 +1182,14 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     dev = state.resolve_device()
 
                     def objective(trial):
-                        if search_space == "ordinal_d3pm":
-                            params = _suggest_ordinal_d3pm_params(
-                                trial, state, max_batch, state.smoke_test,
-                            )
-                        else:
-                            params = _suggest_staged_params(
-                                trial,
-                                state,
-                                max_batch,
-                                state.smoke_test,
-                                search_space=search_space,
-                                phase_overrides=phase.overrides,
-                            )
+                        params = _suggest_staged_params(
+                            trial,
+                            state,
+                            max_batch,
+                            state.smoke_test,
+                            search_space=search_space,
+                            phase_overrides=phase.overrides,
+                        )
                         trial.set_user_attr("full_params", dict(params))
                         if search_space in {"full_with_batch", "reduced_hp"} and not state.smoke_test:
                             micro = int(params["batch_size"])

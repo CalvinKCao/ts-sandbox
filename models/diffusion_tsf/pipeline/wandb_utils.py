@@ -1,8 +1,7 @@
-"""Wandb helpers for grouped pipeline runs.
+"""Wandb helpers for pipeline runs.
 
-Each pipeline execution creates a wandb *group*. Each phase within that
-pipeline creates its own wandb *run* inside the group. This gives a clean
-dashboard where you can expand a group to see per-phase metrics.
+Each pipeline execution creates one wandb run (named after the run stem).
+Phases log into that run with prefixed metrics (hp/*, eval/*, viz/*).
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ import logging
 import os
 import re
 from datetime import datetime
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, Dict, Iterable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from models.diffusion_tsf.pipeline.state import PipelineState
@@ -20,6 +19,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
+PIPELINE_JOB_TYPE = "pipeline"
 
 
 def _ensure_dotenv_loaded() -> None:
@@ -104,8 +105,15 @@ def infer_wandb_group(
     )
 
 
+def make_pipeline_run_name(group: str) -> str:
+    """Build wandb run title for a full pipeline (same as run stem / group)."""
+    if len(group) <= WANDB_RUN_NAME_MAX_LEN:
+        return group
+    return group[:WANDB_RUN_NAME_MAX_LEN]
+
+
 def make_phase_run_name(group: str, phase_slug: str) -> str:
-    """Build wandb run title: {group}-{phase}."""
+    """Build legacy per-phase wandb run title: {group}-{phase}."""
     phase_slug = phase_slug.replace("_", "-")
     full = f"{group}-{phase_slug}"
     if len(full) <= WANDB_RUN_NAME_MAX_LEN:
@@ -121,7 +129,7 @@ def config_slug_from_yaml(yaml_path: Optional[str]) -> Optional[str]:
 
 EVAL_PHASE_NAMES = frozenset({"eval", "staged_eval"})
 
-WANDB_MANIFEST_VERSION = 1
+WANDB_MANIFEST_VERSION = 2
 WANDB_MANIFEST_FILENAME = "wandb_manifest.json"
 
 
@@ -157,6 +165,37 @@ def delete_manifest(checkpoint_dir: str) -> None:
         os.remove(path)
     except FileNotFoundError:
         return
+
+
+def migrate_manifest_run_id(manifest: Dict[str, Any]) -> Optional[str]:
+    """Resolve pipeline run_id from v2 manifest or legacy phase_runs map."""
+    run_id = manifest.get("run_id")
+    if run_id:
+        return str(run_id)
+    phase_runs = dict(manifest.get("phase_runs") or {})
+    if not phase_runs:
+        return None
+    if "staged_eval" in phase_runs:
+        return str(phase_runs["staged_eval"])
+    return str(next(iter(phase_runs.values())))
+
+
+def pipeline_has_eval_phase(phase_names: Iterable[str]) -> bool:
+    return any(name in EVAL_PHASE_NAMES for name in phase_names)
+
+
+def is_binary_eval_run(run) -> bool:
+    """True for legacy staged_eval runs or unified pipeline runs with eval metrics."""
+    job_type = getattr(run, "job_type", None)
+    if job_type == "staged_eval":
+        return True
+    if job_type == PIPELINE_JOB_TYPE:
+        summary = getattr(run, "summary", None) or {}
+        try:
+            return summary.get("eval/staged_crps") is not None
+        except Exception:
+            return False
+    return False
 
 
 def resolve_wandb_settings(
@@ -203,10 +242,15 @@ def resolve_wandb_settings(
         manifest_tags = manifest.get("tags")
         if manifest_tags is not None:
             state.wandb_tags = list(manifest_tags)
-        state.wandb_phase_run_ids = dict(manifest.get("phase_runs") or {})
+        run_id = migrate_manifest_run_id(manifest)
+        state.wandb_run_id = run_id
+        if run_id and manifest.get("run_id") != run_id:
+            manifest["run_id"] = run_id
+            manifest.pop("phase_runs", None)
+            save_manifest(state.checkpoint_dir, manifest)
         return manifest
 
-    state.wandb_phase_run_ids = {}
+    state.wandb_run_id = None
     state.wandb_group = infer_wandb_group(state, merged_config)
 
     manifest = {
@@ -214,22 +258,35 @@ def resolve_wandb_settings(
         "group": state.wandb_group,
         "tags": state.wandb_tags,
         "config_yaml": yaml_path,
-        "phase_runs": {},
+        "run_id": None,
     }
     save_manifest(state.checkpoint_dir, manifest)
     return manifest
 
 
-def record_phase_run_id(
+def record_pipeline_run_id(
     checkpoint_dir: str,
-    phase_name: str,
     run_id: str,
     manifest: Dict[str, Any],
 ) -> None:
-    phase_runs = dict(manifest.get("phase_runs") or {})
-    phase_runs[phase_name] = run_id
-    manifest["phase_runs"] = phase_runs
+    manifest["run_id"] = run_id
+    manifest.pop("phase_runs", None)
     save_manifest(checkpoint_dir, manifest)
+
+
+def build_pipeline_tags(
+    *,
+    dataset: str,
+    phase_names: Iterable[str],
+    extra_tags: Optional[list] = None,
+) -> list:
+    """Dataset tag on every run; ``eval`` when the pipeline includes an eval phase."""
+    tags = [dataset]
+    if extra_tags:
+        tags.extend(extra_tags)
+    if pipeline_has_eval_phase(phase_names) and "eval" not in tags:
+        tags.append("eval")
+    return tags
 
 
 def build_run_tags(
@@ -238,7 +295,7 @@ def build_run_tags(
     phase_name: str,
     extra_tags: Optional[list] = None,
 ) -> list:
-    """Dataset tag on every run; ``eval`` on eval phases (always, even with extra_tags)."""
+    """Legacy per-phase tag builder (stub scripts)."""
     tags = [dataset]
     if extra_tags:
         tags.extend(extra_tags)
@@ -247,36 +304,28 @@ def build_run_tags(
     return tags
 
 
-def init_phase_run(
-    phase_slug: str,
+def init_pipeline_run(
     group: str,
     project: str,
-    job_type: str,
     config: Dict[str, Any],
     tags: Optional[list] = None,
     yaml_path: Optional[str] = None,
     run_id: Optional[str] = None,
+    job_type: str = PIPELINE_JOB_TYPE,
 ) -> Optional[Any]:
-    """Start or resume a wandb run for one pipeline phase.
-
-    Returns the run object (or None if wandb is unavailable/disabled).
-    """
+    """Start or resume the single wandb run for a full pipeline."""
     if not _WANDB_AVAILABLE or not _api_key_usable():
         return None
 
-    run_name = make_phase_run_name(group, phase_slug)
-    full_name = f"{group}-{phase_slug.replace('_', '-')}"
+    run_name = make_pipeline_run_name(group)
     try:
         init_kwargs: Dict[str, Any] = {
             "project": project,
             "group": group,
             "job_type": job_type,
             "name": run_name,
-            "reinit": True,
             "tags": tags or [],
         }
-        if run_name != full_name:
-            init_kwargs["notes"] = full_name
         if run_id:
             init_kwargs["id"] = run_id
             init_kwargs["resume"] = "allow"
@@ -289,17 +338,29 @@ def init_phase_run(
             artifact.add_file(yaml_path)
             run.log_artifact(artifact)
         action = "resumed" if run_id else "started"
-        logger.info("wandb run %s: %s", action, run.url)
+        logger.info("wandb pipeline run %s: %s", action, run.url)
         return run
     except Exception as e:
-        logger.warning(f"Failed to init wandb run for {phase_slug}: {e}")
+        logger.warning("Failed to init wandb pipeline run: %s", e)
         return None
 
 
-def finish_phase_run() -> None:
-    """Finish the current wandb run (call at end of each phase)."""
+def begin_phase(phase_config: Dict[str, Any]) -> None:
+    """Merge phase-specific config into the active pipeline run."""
+    if not phase_config:
+        return
+    merge_run_config(phase_config)
+
+
+def finish_pipeline_run() -> None:
+    """Finish the pipeline wandb run."""
     if _WANDB_AVAILABLE and wandb.run is not None:
         wandb.finish()
+
+
+def finish_phase_run() -> None:
+    """Alias for finish_pipeline_run (legacy call sites)."""
+    finish_pipeline_run()
 
 
 def log_summary(metrics: Dict[str, Any]) -> None:

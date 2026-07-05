@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from utils.leaderboard_config_nicknames import (
+    leaderboard_dataset_tags,
     leaderboard_nickname,
     mmpd_leaderboard_run_stem,
     mmpd_stub_wandb_metrics,
@@ -101,12 +102,18 @@ def log_mmpd_eval_to_leaderboard(
     dataset: str,
     metrics: Dict[str, Any],
     output_dir: Path,
-    mmpd_run_config: Path,
+    mmpd_run_config: Optional[Path] = None,
+    raw_config: Optional[str] = None,
     job_id: Optional[str] = None,
     force: bool = False,
     dry_run: bool = False,
+    extra_tags: Optional[list[str]] = None,
 ) -> Optional[str]:
     """Create or skip an mmpd_eval stub in ts-sandbox-leaderboard. Returns run URL if created."""
+    if raw_config is None:
+        if mmpd_run_config is None:
+            raise ValueError("mmpd_run_config or raw_config is required for leaderboard logging")
+        raw_config = raw_config_from_run_config(mmpd_run_config)
     if not force and load_leaderboard_marker(output_dir, dataset) is not None:
         print(f"[leaderboard] {dataset}: already logged (marker)")
         return None
@@ -117,14 +124,13 @@ def log_mmpd_eval_to_leaderboard(
 
     from models.diffusion_tsf.pipeline.wandb_utils import make_phase_run_name
 
-    raw_config = raw_config_from_run_config(mmpd_run_config)
     group = _leaderboard_group(
         dataset=dataset,
         raw_config=raw_config,
         output_dir=output_dir,
         job_id=job_id,
     )
-    nickname = leaderboard_nickname(yaml_path=str(mmpd_run_config.resolve()))
+    nickname = leaderboard_nickname(yaml_path=str(mmpd_run_config.resolve())) if mmpd_run_config else leaderboard_nickname(raw_config=raw_config)
     stub_metrics = {
         "anchor_mse": metrics.get("anchor_mse", metrics.get("mse")),
         "anchor_mae": metrics.get("anchor_mae", metrics.get("mae")),
@@ -166,13 +172,19 @@ def log_mmpd_eval_to_leaderboard(
         "job_id": job_id or os.environ.get("SLURM_JOB_ID"),
         "metrics_source": str(output_dir),
         "partial_path": str(output_dir / "partials" / f"{dataset}_mmpd.json"),
-        "mmpd_run_config": str(mmpd_run_config.resolve()),
         "stub": True,
     }
+    if mmpd_run_config is not None:
+        config["mmpd_run_config"] = str(mmpd_run_config.resolve())
+        config["baseline"] = raw_config
     if tuning_path.is_file():
         config["tuning_path"] = str(tuning_path)
     if tuned_hparams:
         config["mmpd_tuned_hparams"] = tuned_hparams
+
+    tags = leaderboard_dataset_tags(dataset) + ["eval", "mmpd", "stub", raw_config]
+    if extra_tags:
+        tags.extend(t for t in extra_tags if t not in tags)
 
     run = wandb.init(
         project=PROJECT,
@@ -180,7 +192,7 @@ def log_mmpd_eval_to_leaderboard(
         name=name,
         group=group,
         job_type=JOB_TYPE,
-        tags=[dataset, "eval", "mmpd", "stub", raw_config],
+        tags=tags,
         notes=f"MMPD eval auto-log from {output_dir / 'partials' / f'{dataset}_mmpd.json'}",
         config=config,
         settings=wandb.Settings(console="off"),
