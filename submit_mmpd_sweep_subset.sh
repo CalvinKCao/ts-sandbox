@@ -42,6 +42,7 @@ MMPD_TUNE_TRIALS=0
 MMPD_TUNE_EPOCHS=10
 MMPD_TUNE_PATIENCE=3
 GPU_TYPE=""
+MMPD_INSTANCE_NORM=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -67,6 +68,8 @@ while [[ $# -gt 0 ]]; do
         --force-mmpd-tune) FORCE=1; shift ;;
         --skip-mmpd-train) SKIP_MMPD_TRAIN=1; shift ;;
         --gpu) GPU_TYPE="$2"; shift 2 ;;
+        --mmpd-instance-norm) MMPD_INSTANCE_NORM=1; shift ;;
+        --no-mmpd-instance-norm) MMPD_INSTANCE_NORM=0; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -249,6 +252,12 @@ elif [[ "$FORCE" -eq 1 || "$RESUME" -eq 0 ]]; then
     EVAL_BASE+=(--force-mmpd-train)
 fi
 
+if [[ "$MMPD_INSTANCE_NORM" -eq 1 ]]; then
+    MMPD_NORM_FLAG=(--mmpd-instance-norm)
+else
+    MMPD_NORM_FLAG=(--no-mmpd-instance-norm)
+fi
+
 if [[ "$SMOKE" -eq 1 ]]; then
     WALL_MMPD="0:45:00"
     WALL_INIT="0:25:00"
@@ -321,7 +330,7 @@ else
         EVAL_EXTRA=(
             --test-fraction 1.0
             --metrics-profile anchor-compat
-            --mmpd-instance-norm
+            "${MMPD_NORM_FLAG[@]}"
             --topk-max 3
             --mmpd-eval-batch-size 16
         )
@@ -334,7 +343,7 @@ else
             --sample-num 20
             --num-sampling-steps 20
             --metrics-profile anchor-compat
-            --mmpd-instance-norm
+            "${MMPD_NORM_FLAG[@]}"
             --topk-max 3
             --gmm-components 10
             --gmm-iterations 10

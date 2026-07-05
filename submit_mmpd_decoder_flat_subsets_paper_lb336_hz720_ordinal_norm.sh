@@ -55,6 +55,6 @@ exec ./submit_mmpd_sweep_subset.sh \
     --gpu l40s \
     --time "$WALL_TIME" \
     --mmpd-tune-trials 0 \
-    --mmpd-instance-norm false \
+    --no-mmpd-instance-norm \
     ${DEPENDENCY:+--dependency "$DEPENDENCY"} \
     "${EXTRA[@]}"
