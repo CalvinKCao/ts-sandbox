@@ -69,9 +69,7 @@ def _staged_anchor_global_norm(
             )
         else:
             pred = fine_model.decode_dual_from_2d(coarse_2d, fine_2d, from_diffusion=False)
-        k = int(getattr(fine_model.config, "lookback_overlap", 0))
-        if k > 0:
-            pred = pred[..., k:]
+        pred = fine_model._finalize_decoded_forecast(pred)
     return pred.detach().cpu().numpy()
 
 

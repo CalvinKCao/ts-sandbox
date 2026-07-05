@@ -19,6 +19,8 @@ class DiffusionTSFConfig:
     diffusion_lookback_cap: int = 0
     # Fixed denoiser chunk width; 0 = use full dataset_forecast_length.
     diffusion_chunk_horizon: int = 0
+    # Subsample timesteps before 2D encode (x[..., ::stride]); decode upsamples linearly.
+    representation_time_stride: int = 1
     # iTransformer encoder length; None -> lookback_length.
     itrans_lookback_length: Optional[int] = None
 

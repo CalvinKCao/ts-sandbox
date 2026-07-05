@@ -92,6 +92,7 @@ class PipelineState:
     window_norm_low_var_threshold: float = 0.0
     window_norm_low_var_unit_std: float = 1.0
     window_norm_low_var_unit_std_by_variate: Dict[str, List[float]] = field(default_factory=dict)
+    window_norm_low_var_unit_std_by_dataset: Dict[str, float] = field(default_factory=dict)
     lookback_overlap_center_shift: bool = False
     zero_guidance_forecast: bool = False
     use_raw_lookback_cond_channel: bool = False
@@ -102,6 +103,7 @@ class PipelineState:
     lookback_overlap: int = 8
     diffusion_lookback_cap: int = 0
     diffusion_chunk_horizon: int = 0
+    representation_time_stride: int = 1
     itrans_lookback_length: Optional[int] = None
     itrans_d_model: int = 512
     itrans_d_ff: int = 512
@@ -286,6 +288,13 @@ class PipelineState:
                 str(k): [float(v) for v in vals]
                 for k, vals in by_ds.items()
             }
+        if "window_norm_low_var_unit_std_by_dataset" in init_kwargs:
+            by_ds = init_kwargs["window_norm_low_var_unit_std_by_dataset"] or {}
+            init_kwargs["window_norm_low_var_unit_std_by_dataset"] = {
+                str(k): float(v) for k, v in by_ds.items()
+            }
+        if "representation_time_stride" in init_kwargs:
+            init_kwargs["representation_time_stride"] = int(init_kwargs["representation_time_stride"])
         if "min_snr_gamma" in init_kwargs:
             init_kwargs["min_snr_gamma"] = float(init_kwargs["min_snr_gamma"])
         if "use_coordinate_channel" in init_kwargs:

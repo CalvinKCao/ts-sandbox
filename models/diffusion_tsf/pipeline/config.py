@@ -52,6 +52,7 @@ REQUIRED_EXPERIMENT_KEYS = (
     "lookback_overlap",
     "diffusion_lookback_cap",
     "diffusion_chunk_horizon",
+    "representation_time_stride",
     "itrans_lookback_length",
     "itrans_d_model",
     "itrans_d_ff",

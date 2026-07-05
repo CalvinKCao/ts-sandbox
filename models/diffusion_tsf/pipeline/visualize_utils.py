@@ -1757,10 +1757,14 @@ def decode_staged_anchor_components(
         coarse_t = coarse_1d.reshape(B, V, -1)
         blurred = fine_model._blur_coarse_1d(coarse_t, flatline_source=combined)
         coarse_np = blurred.detach().cpu().numpy()
-    k = int(getattr(fine_model.config, "lookback_overlap", 0))
+    k = fine_model._overlap_repr_cols()
     if k > 0:
         coarse_np = coarse_np[..., k:]
         fine_np = fine_np[..., k:]
+    if int(getattr(fine_model.config, "representation_time_stride", 1)) > 1:
+        import torch
+        coarse_np = fine_model._upsample_repr_to_raw_horizon(torch.from_numpy(coarse_np)).numpy()
+        fine_np = fine_model._upsample_repr_to_raw_horizon(torch.from_numpy(fine_np)).numpy()
     return coarse_np, fine_np, final
 
 

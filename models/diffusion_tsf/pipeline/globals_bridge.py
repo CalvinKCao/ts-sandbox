@@ -34,6 +34,7 @@ def patch_globals(
     mod.LOOKBACK_OVERLAP = state.lookback_overlap
     mod.DIFFUSION_LOOKBACK_CAP = int(state.diffusion_lookback_cap)
     mod.DIFFUSION_CHUNK_HORIZON = int(state.diffusion_chunk_horizon)
+    mod.REPRESENTATION_TIME_STRIDE = int(state.representation_time_stride)
     mod.ITRANS_D_MODEL = state.itrans_d_model
     mod.ITRANS_D_FF = state.itrans_d_ff
     mod.ITRANS_E_LAYERS = state.itrans_e_layers
@@ -100,7 +101,11 @@ def patch_globals(
     mod.WINDOW_NORM_CENTER = state.window_norm_center
     mod.WINDOW_NORM_STD_FLOOR = state.window_norm_std_floor
     mod.WINDOW_NORM_LOW_VAR_THRESHOLD = state.window_norm_low_var_threshold
-    mod.WINDOW_NORM_LOW_VAR_UNIT_STD = state.window_norm_low_var_unit_std
+    unit_std = float(state.window_norm_low_var_unit_std)
+    per_ds_unit = (state.window_norm_low_var_unit_std_by_dataset or {}).get(state.dataset)
+    if per_ds_unit is not None:
+        unit_std = float(per_ds_unit)
+    mod.WINDOW_NORM_LOW_VAR_UNIT_STD = unit_std
     per_v = (state.window_norm_low_var_unit_std_by_variate or {}).get(state.dataset)
     mod.WINDOW_NORM_LOW_VAR_UNIT_STD_PER_VARIATE = list(per_v) if per_v else None
     mod.LOOKBACK_OVERLAP_CENTER_SHIFT = bool(state.lookback_overlap_center_shift)

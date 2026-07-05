@@ -468,6 +468,28 @@ def _suggest_reduced_hp_params(
     return params
 
 
+def _build_fixed_hp_params(
+    state: PipelineState,
+    max_batch_size: int,
+    smoke_test: bool,
+    phase_overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    fixed = dict(phase_overrides.get("fixed_tuned_params") or {})
+    if not fixed:
+        raise ValueError("search_space=fixed requires fixed_tuned_params in phase YAML")
+    params = dict(fixed)
+    params.setdefault(
+        "max_scale",
+        float(state.max_scale_by_dataset.get(state.dataset, state.max_scale)),
+    )
+    if smoke_test:
+        params["batch_size"] = min(int(params.get("batch_size", 1)), 2)
+        params["gradient_accumulation_steps"] = 1
+        params["effective_batch_size"] = int(params["batch_size"])
+        return params
+    return _apply_effective_batch_multiplier(params, max_batch_size, state)
+
+
 def _suggest_staged_params(
     trial,
     state: PipelineState,
@@ -487,6 +509,9 @@ def _suggest_staged_params(
         return _suggest_reduced_hp_params(
             trial, state, max_batch_size, smoke_test, overrides,
         )
+
+    if search_space == "fixed":
+        raise RuntimeError("_suggest_staged_params must not be called for search_space=fixed")
 
     if search_space == "full_with_batch":
         if smoke_test:
@@ -1134,153 +1159,185 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 n_trials = 1
             search_space = str(self.require("search_space")).lower()
             if search_space not in {
-                "default", "lr_only", "ordinal_d3pm", "full_with_batch", "reduced_hp",
+                "default", "lr_only", "ordinal_d3pm", "full_with_batch", "reduced_hp", "fixed",
             }:
                 raise ValueError(f"Unknown staged diffusion search_space={search_space!r}")
             if search_space == "reduced_hp":
                 for key in ("hp_lr_min", "hp_lr_max"):
                     if self.get(key) is None:
                         raise ValueError(f"search_space=reduced_hp requires phase {key}")
+            if search_space == "fixed" and not self.get("fixed_tuned_params"):
+                raise ValueError("search_space=fixed requires fixed_tuned_params in phase YAML")
 
-            from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
+            if search_space == "fixed":
+                best_params = _build_fixed_hp_params(
+                    state, max_batch, state.smoke_test, self.overrides,
+                )
+                best_params = _with_state_anchor_params(best_params, state)
+                final_val, final_epoch = self._train_once(
+                    state=state,
+                    train_ds=train_ds,
+                    val_ds=val_ds,
+                    params=best_params,
+                    pretrained_path=diff_ckpt,
+                    itrans_checkpoint=ft_guidance_ckpt,
+                    device=device,
+                    variate_indices=variate_indices,
+                    ckpt_path=final_ckpt,
+                    max_epochs=max_epochs,
+                    patience=patience,
+                    trial=None,
+                )
+                hp_best_val_loss = float(final_val)
+                best_trial_num = 0
+                logger.info(
+                    "  [%s] fixed HP train done: val=%.4f epoch=%d lr=%.2e micro_bs=%d",
+                    self.name,
+                    hp_best_val_loss,
+                    final_epoch,
+                    float(best_params.get("learning_rate", 0.0)),
+                    int(best_params.get("batch_size", 1)),
+                )
+            else:
+                from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
 
-            phase = self
+                phase = self
 
-            def objective_builder(_worker_id: int):
-                dev = state.resolve_device()
+                def objective_builder(_worker_id: int):
+                    dev = state.resolve_device()
 
-                def objective(trial):
-                    if search_space == "ordinal_d3pm":
-                        params = _suggest_ordinal_d3pm_params(
-                            trial, state, max_batch, state.smoke_test,
-                        )
-                    else:
-                        params = _suggest_staged_params(
-                            trial,
-                            state,
-                            max_batch,
-                            state.smoke_test,
-                            search_space=search_space,
-                            phase_overrides=phase.overrides,
-                        )
-                    trial.set_user_attr("full_params", dict(params))
-                    if search_space in {"full_with_batch", "reduced_hp"} and not state.smoke_test:
-                        micro = int(params["batch_size"])
-                        accum = int(params.get("gradient_accumulation_steps", 1))
-                        if micro < 4 or accum > 64:
-                            raise RuntimeError(
-                                f"Degenerate batch plan micro_bs={micro} accum={accum} "
-                                f"(effective={micro * accum}); stale Optuna journal or planner bug"
+                    def objective(trial):
+                        if search_space == "ordinal_d3pm":
+                            params = _suggest_ordinal_d3pm_params(
+                                trial, state, max_batch, state.smoke_test,
                             )
-                    logger.info(
-                        "  [%s] Optuna trial %d/%d suggested lr=%.2e micro_bs=%d "
-                        "accum=%d effective_bs=%d",
-                        phase.name,
-                        trial.number + 1,
-                        n_trials,
-                        float(params["learning_rate"]),
-                        int(params["batch_size"]),
-                        int(params.get("gradient_accumulation_steps", 1)),
-                        int(params.get("effective_batch_size", params["batch_size"])),
-                    )
-                    trial_ckpt = os.path.join(
-                        trials_dir, f"trial_{trial.number}_best.pt",
-                    )
-                    trial_t0 = time.perf_counter()
-                    try:
-                        best_val, best_ep = phase._train_once(
-                            state=state,
-                            train_ds=train_ds,
-                            val_ds=val_ds,
-                            params=params,
-                            pretrained_path=diff_ckpt,
-                            itrans_checkpoint=ft_guidance_ckpt,
-                            device=dev,
-                            variate_indices=variate_indices,
-                            ckpt_path=trial_ckpt,
-                            max_epochs=max_epochs,
-                            patience=patience,
-                            trial=trial,
-                        )
-                    except torch.cuda.OutOfMemoryError:
-                        logger.warning(
-                            "  [%s] trial %d OOM (batch=%s), pruning",
-                            phase.name, trial.number, params.get("batch_size"),
-                        )
-                        raise TrialPruned() from None
-                    except TrialPruned:
+                        else:
+                            params = _suggest_staged_params(
+                                trial,
+                                state,
+                                max_batch,
+                                state.smoke_test,
+                                search_space=search_space,
+                                phase_overrides=phase.overrides,
+                            )
+                        trial.set_user_attr("full_params", dict(params))
+                        if search_space in {"full_with_batch", "reduced_hp"} and not state.smoke_test:
+                            micro = int(params["batch_size"])
+                            accum = int(params.get("gradient_accumulation_steps", 1))
+                            if micro < 4 or accum > 64:
+                                raise RuntimeError(
+                                    f"Degenerate batch plan micro_bs={micro} accum={accum} "
+                                    f"(effective={micro * accum}); stale Optuna journal or planner bug"
+                                )
                         logger.info(
-                            "  [%s] Optuna trial %d pruned after %.1fs",
-                            phase.name, trial.number, time.perf_counter() - trial_t0,
+                            "  [%s] Optuna trial %d/%d suggested lr=%.2e micro_bs=%d "
+                            "accum=%d effective_bs=%d",
+                            phase.name,
+                            trial.number + 1,
+                            n_trials,
+                            float(params["learning_rate"]),
+                            int(params["batch_size"]),
+                            int(params.get("gradient_accumulation_steps", 1)),
+                            int(params.get("effective_batch_size", params["batch_size"])),
                         )
-                        raise
-                    trial.set_user_attr("best_epoch", best_ep)
-                    logger.info(
-                        "  [%s] Optuna trial %d finished best_val=%.4f best_epoch=%d time=%.1fs",
-                        phase.name,
-                        trial.number,
-                        best_val,
-                        best_ep,
-                        time.perf_counter() - trial_t0,
-                    )
-                    return best_val
+                        trial_ckpt = os.path.join(
+                            trials_dir, f"trial_{trial.number}_best.pt",
+                        )
+                        trial_t0 = time.perf_counter()
+                        try:
+                            best_val, best_ep = phase._train_once(
+                                state=state,
+                                train_ds=train_ds,
+                                val_ds=val_ds,
+                                params=params,
+                                pretrained_path=diff_ckpt,
+                                itrans_checkpoint=ft_guidance_ckpt,
+                                device=dev,
+                                variate_indices=variate_indices,
+                                ckpt_path=trial_ckpt,
+                                max_epochs=max_epochs,
+                                patience=patience,
+                                trial=trial,
+                            )
+                        except torch.cuda.OutOfMemoryError:
+                            logger.warning(
+                                "  [%s] trial %d OOM (batch=%s), pruning",
+                                phase.name, trial.number, params.get("batch_size"),
+                            )
+                            raise TrialPruned() from None
+                        except TrialPruned:
+                            logger.info(
+                                "  [%s] Optuna trial %d pruned after %.1fs",
+                                phase.name, trial.number, time.perf_counter() - trial_t0,
+                            )
+                            raise
+                        trial.set_user_attr("best_epoch", best_ep)
+                        logger.info(
+                            "  [%s] Optuna trial %d finished best_val=%.4f best_epoch=%d time=%.1fs",
+                            phase.name,
+                            trial.number,
+                            best_val,
+                            best_ep,
+                            time.perf_counter() - trial_t0,
+                        )
+                        return best_val
 
-                return objective
+                    return objective
 
-            logger.info(
-                "  [%s] Optuna study start: n_trials=%d max_epochs=%d patience=%d",
-                self.name, n_trials, max_epochs, patience,
-            )
-            study_t0 = time.perf_counter()
-            study = run_optuna_study(
-                study_name=f"{state.experiment_name}-{self.stage}-hp",
-                checkpoint_dir=subset_dir,
-                n_trials=n_trials,
-                parallel_workers=state.parallel_optuna_workers,
-                direction="minimize",
-                objective_builder=objective_builder,
-                sampler=TPESampler(seed=state.seed, multivariate=True, group=True),
-                pruner=HyperbandPruner(
-                    min_resource=1, max_resource=max_epochs, reduction_factor=3,
-                ),
-                sampler_seed=state.seed,
-            )
-            try:
-                best_trial = study.best_trial
-            except ValueError as e:
-                raise RuntimeError(
-                    f"All {self.stage} diffusion HP trials failed for {subset_id}"
-                ) from e
+                logger.info(
+                    "  [%s] Optuna study start: n_trials=%d max_epochs=%d patience=%d",
+                    self.name, n_trials, max_epochs, patience,
+                )
+                study_t0 = time.perf_counter()
+                study = run_optuna_study(
+                    study_name=f"{state.experiment_name}-{self.stage}-hp",
+                    checkpoint_dir=subset_dir,
+                    n_trials=n_trials,
+                    parallel_workers=state.parallel_optuna_workers,
+                    direction="minimize",
+                    objective_builder=objective_builder,
+                    sampler=TPESampler(seed=state.seed, multivariate=True, group=True),
+                    pruner=HyperbandPruner(
+                        min_resource=1, max_resource=max_epochs, reduction_factor=3,
+                    ),
+                    sampler_seed=state.seed,
+                )
+                try:
+                    best_trial = study.best_trial
+                except ValueError as e:
+                    raise RuntimeError(
+                        f"All {self.stage} diffusion HP trials failed for {subset_id}"
+                    ) from e
 
-            best_params = dict(best_trial.user_attrs.get("full_params") or best_trial.params)
-            best_params.setdefault("min_snr_gamma", 5.0)
-            best_params.setdefault(
-                "max_scale",
-                float(state.max_scale_by_dataset.get(state.dataset, state.max_scale)),
-            )
-            best_params = _with_state_anchor_params(best_params, state)
-            hp_best_val_loss = float(study.best_value)
-            best_trial_num = int(best_trial.number)
-            final_epoch = int(best_trial.user_attrs.get("best_epoch", 0))
-            logger.info(
-                "  [%s] Optuna study done in %.1fs: best_trial=%d best_val=%.4f best_epoch=%d lr=%.2e",
-                self.name,
-                time.perf_counter() - study_t0,
-                best_trial_num,
-                hp_best_val_loss,
-                final_epoch,
-                float(best_params.get("learning_rate", 0.0)),
-            )
+                best_params = dict(best_trial.user_attrs.get("full_params") or best_trial.params)
+                best_params.setdefault("min_snr_gamma", 5.0)
+                best_params.setdefault(
+                    "max_scale",
+                    float(state.max_scale_by_dataset.get(state.dataset, state.max_scale)),
+                )
+                best_params = _with_state_anchor_params(best_params, state)
+                hp_best_val_loss = float(study.best_value)
+                best_trial_num = int(best_trial.number)
+                final_epoch = int(best_trial.user_attrs.get("best_epoch", 0))
+                logger.info(
+                    "  [%s] Optuna study done in %.1fs: best_trial=%d best_val=%.4f best_epoch=%d lr=%.2e",
+                    self.name,
+                    time.perf_counter() - study_t0,
+                    best_trial_num,
+                    hp_best_val_loss,
+                    final_epoch,
+                    float(best_params.get("learning_rate", 0.0)),
+                )
 
-            import shutil
-            src = _resolve_best_trial_ckpt(
-                study, trials_dir, subset_dir, best_trial_num,
-            )
-            shutil.copy2(src, final_ckpt)
-            if not os.path.isfile(final_ckpt):
-                raise RuntimeError(f"Failed to promote best trial checkpoint to {final_ckpt}")
-            final_val = hp_best_val_loss
-            _cleanup_trial_ckpts(trials_dir, subset_dir, keep=src)
+                import shutil
+                src = _resolve_best_trial_ckpt(
+                    study, trials_dir, subset_dir, best_trial_num,
+                )
+                shutil.copy2(src, final_ckpt)
+                if not os.path.isfile(final_ckpt):
+                    raise RuntimeError(f"Failed to promote best trial checkpoint to {final_ckpt}")
+                final_val = hp_best_val_loss
+                _cleanup_trial_ckpts(trials_dir, subset_dir, keep=src)
 
         meta_out: Dict[str, Any] = {
             "subset_id": subset_id,

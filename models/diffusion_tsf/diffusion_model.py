@@ -301,6 +301,49 @@ class DiffusionTSF(nn.Module):
         out = F.interpolate(flat, size=target_len, mode="linear", align_corners=False)
         return out.reshape(*x.shape[:-1], target_len)
 
+    def _representation_time_stride(self) -> int:
+        return max(1, int(getattr(self.config, "representation_time_stride", 1)))
+
+    def _subsample_repr_time(self, x: torch.Tensor) -> torch.Tensor:
+        stride = self._representation_time_stride()
+        if stride <= 1:
+            return x
+        return x[..., ::stride]
+
+    def _repr_time_len(self, raw_len: int) -> int:
+        stride = self._representation_time_stride()
+        if stride <= 1:
+            return raw_len
+        return (int(raw_len) + stride - 1) // stride
+
+    def _repr_forecast_width(self, raw_horizon_width: Optional[int] = None) -> int:
+        raw = int(raw_horizon_width if raw_horizon_width is not None else self.config.forecast_length)
+        return self._repr_time_len(raw)
+
+    def _overlap_repr_cols(self) -> int:
+        k = int(self.config.lookback_overlap)
+        if k <= 0:
+            return 0
+        stride = self._representation_time_stride()
+        return k // stride if stride > 1 else k
+
+    def _raw_dataset_horizon(self) -> int:
+        dhz = int(self.config.dataset_forecast_length or 0)
+        if dhz > 0:
+            return dhz
+        return max(1, int(self.config.forecast_length) - int(self.config.lookback_overlap))
+
+    def _upsample_repr_to_raw_horizon(self, x_repr: torch.Tensor) -> torch.Tensor:
+        if self._representation_time_stride() <= 1:
+            return x_repr
+        return self._resample_1d_time_series(x_repr, self._raw_dataset_horizon())
+
+    def _finalize_decoded_forecast(self, future_norm: torch.Tensor) -> torch.Tensor:
+        k = self._overlap_repr_cols()
+        if k > 0:
+            future_norm = future_norm[..., k:]
+        return self._upsample_repr_to_raw_horizon(future_norm)
+
     def _get_guidance_forecast_norm(
         self,
         past: torch.Tensor,
@@ -543,7 +586,7 @@ class DiffusionTSF(nn.Module):
 
     def encode_to_2d_binary(self, x: torch.Tensor) -> torch.Tensor:
         """Encode 1D series to a hard binary CDF image without blur."""
-        return self.to_2d(x)
+        return self.to_2d(self._subsample_repr_time(x))
 
     def encode_dual_to_2d_binary(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encode 1D series to coarse and residual hard binary CDF images."""
@@ -824,6 +867,7 @@ class DiffusionTSF(nn.Module):
         )
 
     def _encode_staged_maps(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        x = self._subsample_repr_time(x)
         coarse_h, fine_h, finer_h = self._staged_image_heights()
         if self._uses_haar_frequency_staging():
             if getattr(self.config, "use_triple_scale", False):
@@ -867,6 +911,7 @@ class DiffusionTSF(nn.Module):
         return {"coarse": coarse, "fine": fine}
 
     def _encode_staged_maps_skyline(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        x = self._subsample_repr_time(x)
         coarse_h, fine_h, _finer_h = self._staged_image_heights()
         coarse, fine, coarse_bins, fine_bins = self.to_2d.encode_dual_skyline_heights(
             x,
@@ -1050,8 +1095,9 @@ class DiffusionTSF(nn.Module):
         else:
             cond_maps.append(self._coarse_skyline_to_height(past_maps["coarse"], H))
         cond_maps.append(self._resize_skyline_height(past_maps["fine"], H))
+        past_repr_w = past_maps["coarse"].shape[-1]
         cond = torch.cat(
-            [m.reshape(BV, 1, H, past_tail_len) for m in cond_maps],
+            [m.reshape(BV, 1, H, past_repr_w) for m in cond_maps],
             dim=1,
         )
         cond = F.interpolate(cond, size=(H, target_width), mode="nearest")
@@ -1447,7 +1493,8 @@ class DiffusionTSF(nn.Module):
                 raw_coarse = self._resize_cdf_height(raw_maps["coarse"], H)
             else:
                 raw_coarse = self._coarse_cdf_to_height(raw_maps["coarse"], H)
-        raw_cond = raw_coarse.reshape(BV, 1, H, past_tail_len)
+        past_repr_w = raw_maps["coarse"].shape[-1]
+        raw_cond = raw_coarse.reshape(BV, 1, H, past_repr_w)
         interp_mode = "nearest" if skyline else "bilinear"
         align = False if skyline else True
         raw_cond = F.interpolate(
@@ -1483,8 +1530,9 @@ class DiffusionTSF(nn.Module):
         cond_maps.append(self._resize_cdf_height(past_maps["fine"], H))
         if getattr(self.config, "use_triple_scale", False):
             cond_maps.append(self._resize_cdf_height(past_maps["finer"], H))
+        past_repr_w = past_maps["coarse"].shape[-1]
         cond = torch.cat(
-            [m.reshape(BV, 1, H, past_tail_len) for m in cond_maps],
+            [m.reshape(BV, 1, H, past_repr_w) for m in cond_maps],
             dim=1,
         )
         cond = F.interpolate(cond, size=(H, target_width), mode='bilinear', align_corners=False)
@@ -1558,7 +1606,8 @@ class DiffusionTSF(nn.Module):
 
         guidance_flat = None
         if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, _stats, W_fut)
+            raw_hz_w = int(future_norm.shape[-1])
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, _stats, raw_hz_w)
             guidance_maps = self._encode_staged_maps(guidance_forecast_norm)
             if stage == "coarse":
                 guidance_flat = self._resize_cdf_height(guidance_maps["coarse"], H).reshape(BV, 1, H, W_fut)
@@ -1686,7 +1735,9 @@ class DiffusionTSF(nn.Module):
         H = target_2d.shape[2]
 
         cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
-        guidance_norm = self._get_guidance_forecast_norm(past, past_norm, norm_stats, W_fut)
+        guidance_norm = self._get_guidance_forecast_norm(
+            past, past_norm, norm_stats, int(future_norm.shape[-1]),
+        )
         guidance_maps = self._encode_staged_maps(guidance_norm) if guidance_norm is not None else None
 
         t = torch.zeros(B, device=device, dtype=torch.long)
@@ -1780,7 +1831,8 @@ class DiffusionTSF(nn.Module):
 
         guidance_flat = None
         if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, _stats, W_fut)
+            raw_hz_w = int(future_norm.shape[-1])
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, _stats, raw_hz_w)
             guidance_maps = self._encode_staged_maps_skyline(guidance_forecast_norm)
             guidance_flat = self._resize_skyline_height(guidance_maps[stage], H).reshape(BV, 1, H, W_fut)
 
@@ -1903,7 +1955,8 @@ class DiffusionTSF(nn.Module):
         H = self.config.image_height
         device = past.device
         BV = B * V
-        W_fut = self.config.forecast_length
+        raw_hz_w = int(self.config.forecast_length)
+        W_fut = self._repr_forecast_width(raw_hz_w)
 
         past_norm, _, stats = self._normalize_sequence(past)
         cond_for_unet, past_maps = self._staged_past_condition_skyline(past_norm, W_fut, past_raw=past)
@@ -1929,7 +1982,7 @@ class DiffusionTSF(nn.Module):
 
         guidance_flat = None
         if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, raw_hz_w)
             guidance_maps = self._encode_staged_maps_skyline(guidance_forecast_norm)
             guidance_flat = self._resize_skyline_height(guidance_maps[stage], H).reshape(BV, 1, H, W_fut)
 
@@ -2043,12 +2096,8 @@ class DiffusionTSF(nn.Module):
                 future_2d_fine,
                 squeeze_univariate=(V == 1),
             )
+        future_norm = self._finalize_decoded_forecast(future_norm)
         future = self._denormalize_future(future_norm, past, stats)
-
-        K = self.config.lookback_overlap
-        if K > 0:
-            future = future[..., K:]
-            future_norm = future_norm[..., K:]
 
         result = {
             "prediction": future,
@@ -2095,7 +2144,8 @@ class DiffusionTSF(nn.Module):
         H = self.config.image_height
         device = past.device
         BV = B * V
-        W_fut = self.config.forecast_length
+        raw_hz_w = int(self.config.forecast_length)
+        W_fut = self._repr_forecast_width(raw_hz_w)
 
         past_norm, _, stats = self._normalize_sequence(past)
         cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
@@ -2136,7 +2186,7 @@ class DiffusionTSF(nn.Module):
 
         guidance_flat = None
         if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, raw_hz_w)
             guidance_maps = self._encode_staged_maps(guidance_forecast_norm)
             if stage == "coarse":
                 guidance_flat = self._resize_cdf_height(guidance_maps["coarse"], H).reshape(BV, 1, H, W_fut)
@@ -2229,12 +2279,8 @@ class DiffusionTSF(nn.Module):
                 from_diffusion=False,
                 decoder_method=decoder_method,
             )
+        future_norm = self._finalize_decoded_forecast(future_norm)
         future = self._denormalize_future(future_norm, past, stats)
-
-        K = self.config.lookback_overlap
-        if K > 0:
-            future = future[..., K:]
-            future_norm = future_norm[..., K:]
 
         result = {
             'prediction': future,
@@ -2290,7 +2336,9 @@ class DiffusionTSF(nn.Module):
 
         guidance_2d = None
         if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            guidance_forecast_norm = self._get_guidance_forecast_norm(
+                past, past_norm, stats, int(future_norm.shape[-1]),
+            )
             guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
 
         ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
@@ -2405,7 +2453,8 @@ class DiffusionTSF(nn.Module):
         H = self.config.image_height
         device = past.device
         BV = B * V
-        W_fut = self.config.forecast_length
+        raw_hz_w = int(self.config.forecast_length)
+        W_fut = self._repr_forecast_width(raw_hz_w)
 
         past_norm, _, stats = self._normalize_sequence(past)
         past_2d = self.encode_to_2d_binary(past_norm)
@@ -2416,7 +2465,7 @@ class DiffusionTSF(nn.Module):
         guidance_2d = None
         guide_flat = None
         if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, W_fut)
+            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, raw_hz_w)
             guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
             guide_flat = guidance_2d.reshape(BV, 1, H, W_fut)
 
@@ -2477,12 +2526,8 @@ class DiffusionTSF(nn.Module):
         future_norm = self.decode_from_2d(
             future_2d, from_diffusion=False, decoder_method=decoder_method, **kwargs
         )
+        future_norm = self._finalize_decoded_forecast(future_norm)
         future = self._denormalize_future(future_norm, past, stats)
-
-        K = self.config.lookback_overlap
-        if K > 0:
-            future = future[..., K:]
-            future_norm = future_norm[..., K:]
 
         result = {
             'prediction': future,
