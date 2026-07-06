@@ -483,7 +483,14 @@ def _log_staged_pretrain_diagnostics(
         logger.warning("Staged synthetic-pretrain diagnostics failed: %s", e, exc_info=True)
 
 
-def patch_stage_globals(mod: Any, state: PipelineState, stage: str, *, honor_dataset_windows: bool) -> None:
+def patch_stage_globals(
+    mod: Any,
+    state: PipelineState,
+    stage: str,
+    *,
+    honor_dataset_windows: bool,
+    for_synthetic_pretrain: bool = False,
+) -> None:
     """Patch legacy train module globals for a single staged model."""
     if stage not in {"coarse", "fine", "finer"}:
         raise ValueError(f"Unknown staged diffusion stage: {stage!r}")
@@ -523,6 +530,9 @@ def patch_stage_globals(mod: Any, state: PipelineState, stage: str, *, honor_dat
     mod.COARSE_FLATLINE_BLUR_RADIUS = int(state.coarse_flatline_blur_radius)
     mod.COARSE_FLATLINE_BLUR_KERNEL = str(state.coarse_flatline_blur_kernel)
     mod.COARSE_FLATLINE_BLUR_ATOL = state.coarse_flatline_blur_atol
+    if for_synthetic_pretrain:
+        mod.USE_ORDINAL_WINDOW_NORM = False
+        mod.GLOBAL_ORDINAL_LADDER = None
 
 
 class StagedDiffusionPretrainPhase(PipelinePhase):
@@ -662,7 +672,10 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                     stage_dir = os.path.dirname(ckpt)
                     os.makedirs(stage_dir, exist_ok=True)
                     try:
-                        patch_stage_globals(pipeline_mod, state, stage, honor_dataset_windows=False)
+                        patch_stage_globals(
+                            pipeline_mod, state, stage,
+                            honor_dataset_windows=False, for_synthetic_pretrain=True,
+                        )
                         ckpt = pretrain_diffusion(
                             best_params=best_params,
                             itrans_checkpoint=itrans_ckpt,
@@ -693,7 +706,10 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             elif ckpt is None:
                 stage_dir = _stage_pretrain_dir(state, stage)
                 os.makedirs(stage_dir, exist_ok=True)
-                patch_stage_globals(pipeline_mod, state, stage, honor_dataset_windows=False)
+                patch_stage_globals(
+                    pipeline_mod, state, stage,
+                    honor_dataset_windows=False, for_synthetic_pretrain=True,
+                )
                 ckpt = pretrain_diffusion(
                     best_params=best_params,
                     itrans_checkpoint=itrans_ckpt,

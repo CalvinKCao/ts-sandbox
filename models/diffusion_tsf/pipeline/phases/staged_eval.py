@@ -284,6 +284,7 @@ class StagedEvalPhase(PipelinePhase):
             guidance_model=itrans_guidance,
             diffusion_stage=stage,
             use_guidance_channel=state.use_guidance_channel,
+            ordinal_ladder=pipeline_mod.GLOBAL_ORDINAL_LADDER,
             **model_kwargs,
         ).to(device)
         ckpt = torch.load(_stage_finetune_ckpt(state, stage), map_location=device, weights_only=False)
@@ -468,6 +469,8 @@ class StagedEvalPhase(PipelinePhase):
             load_wrapped_guidance,
             dataset_window_lengths,
         )
+        import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+        from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 
         device = state.resolve_device()
         gmm_components = int(self.require("gmm_components"))
@@ -480,6 +483,18 @@ class StagedEvalPhase(PipelinePhase):
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
         test_stride = int(self.require("test_stride"))
         n_iv = len(variate_indices)
+
+        patch_globals(pipeline_mod, state, honor_dataset_windows=True)
+        _, _, full_test_ds, norm_stats = load_dataset(
+            state.dataset,
+            variate_indices,
+            stride=train_stride,
+            test_stride=test_stride,
+            ordinal_tie_atol=float(state.ordinal_tie_atol),
+            use_ordinal_window_norm=state.use_ordinal_window_norm,
+        )
+        if norm_stats.get("ordinal_ladder") is not None:
+            state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
 
         ft_guidance_ckpt = state.guidance_finetune_ckpt
         if not ft_guidance_ckpt or not os.path.exists(ft_guidance_ckpt):
@@ -504,12 +519,6 @@ class StagedEvalPhase(PipelinePhase):
             else None
         )
 
-        _, _, full_test_ds, _ = load_dataset(
-            state.dataset,
-            variate_indices,
-            stride=train_stride,
-            test_stride=test_stride,
-        )
         batch_size = int(self.require("batch_size"))
         if state.smoke_test:
             final_ds = Subset(full_test_ds, list(range(min(2, len(full_test_ds)))))
@@ -567,7 +576,12 @@ class StagedEvalPhase(PipelinePhase):
                 ],
             )
             train_ds, _, _, _ = load_dataset(
-                state.dataset, variate_indices, stride=train_stride, test_stride=test_stride,
+                state.dataset,
+                variate_indices,
+                stride=train_stride,
+                test_stride=test_stride,
+                ordinal_tie_atol=float(state.ordinal_tie_atol),
+                use_ordinal_window_norm=state.use_ordinal_window_norm,
             )
             coarse_ft = _stage_finetune_ckpt(state, "coarse")
             fine_ft = _stage_finetune_ckpt(state, "fine")

@@ -200,7 +200,7 @@ def encode_with_ladder(
     atol = ladder.tie_atol
     for vi in range(v):
         k = int(ladder.n_unique[0, vi].item())
-        uniq = ladder.values[0, vi, :k]
+        uniq = ladder.values[0, vi, :k].to(device=x.device, dtype=x.dtype)
         ranks = _value_to_rank(uniq, x[:, vi], atol)
         out[:, vi] = ranks.to(torch.float32)
     return out
@@ -218,7 +218,7 @@ def decode_with_ladder(
     out = ordinal.new_zeros(b, v, t)
     for vi in range(v):
         k = int(ladder.n_unique[0, vi].item())
-        uniq = ladder.values[0, vi, :k]
+        uniq = ladder.values[0, vi, :k].to(device=ordinal.device, dtype=ordinal.dtype)
         if k <= 1:
             out[:, vi] = uniq[0]
             continue

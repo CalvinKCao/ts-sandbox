@@ -973,6 +973,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             stride=train_stride,
             test_stride=test_stride,
             ordinal_tie_atol=float(state.ordinal_tie_atol),
+            use_ordinal_window_norm=state.use_ordinal_window_norm,
         )
         if norm_stats.get("ordinal_ladder") is not None:
             state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]

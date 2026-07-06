@@ -1455,6 +1455,7 @@ def load_dataset(
     test_stride: Optional[int] = None,
     lookback_overlap: Optional[int] = None,
     ordinal_tie_atol: float = 1e-6,
+    use_ordinal_window_norm: Optional[bool] = None,
 ) -> Tuple[Dataset, Dataset, Dataset, Dict]:
     """Load dataset and return train/val/test splits matching iTransformer paper.
 
@@ -1511,7 +1512,8 @@ def load_dataset(
 
     ordinal_ladder = None
     rank_full = None
-    if USE_ORDINAL_WINDOW_NORM:
+    use_ord = USE_ORDINAL_WINDOW_NORM if use_ordinal_window_norm is None else use_ordinal_window_norm
+    if use_ord:
         ordinal_ladder = build_global_ladder_from_training(
             data[border1s[0]:border2s[0]],
             tie_atol=float(ordinal_tie_atol),
