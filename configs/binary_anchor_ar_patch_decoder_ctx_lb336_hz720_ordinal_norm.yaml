@@ -10,3 +10,11 @@ experiment:
   use_window_normalization: false
   lookback_overlap_center_shift: false
   window_norm_low_var_threshold: 0.0
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    reuse_pretrain_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_fixed
+
+  - phase: patch_guidance_finetune_hp
+    reuse_checkpoint_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_fixed
