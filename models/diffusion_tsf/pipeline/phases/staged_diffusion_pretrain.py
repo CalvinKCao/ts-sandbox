@@ -22,7 +22,6 @@ from models.diffusion_tsf.pipeline.fourier_frequency_calibration import ensure_f
 
 logger = logging.getLogger(__name__)
 
-
 def _stage_pretrain_dir(state: PipelineState, stage: str) -> str:
     return os.path.join(state.checkpoint_dir, f"pretrained_{stage}")
 
