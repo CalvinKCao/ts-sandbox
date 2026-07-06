@@ -27,6 +27,9 @@ from models.diffusion_tsf.ordinal_window_norm import (
     build_global_ladder_from_training,
     ordinal_decode,
     ordinal_encode,
+    ranks_from_unit,
+    ranks_to_unit,
+    ranks_to_unit_numpy,
 )
 
 
@@ -52,14 +55,17 @@ def _ordinal_tie_atol(args) -> float:
 
 def _prepare_normed_batch(batch_x, batch_y, args, *, apply_ood_shift=False):
     if _use_ordinal_norm(args):
+        ladder = _ordinal_ladder(args)
         if getattr(args, "ordinal_train_is_ranked", False):
-            return batch_x, batch_y, ("ordinal", _ordinal_ladder(args))
+            return batch_x, batch_y, ("ordinal", ladder)
         past_ord, future_ord, ladder = ordinal_encode(
             batch_x,
             batch_y,
-            ladder=_ordinal_ladder(args),
+            ladder=ladder,
             apply_ood_shift=apply_ood_shift,
         )
+        past_ord = ranks_to_unit(past_ord, ladder)
+        future_ord = ranks_to_unit(future_ord, ladder)
         return past_ord, future_ord, ("ordinal", ladder)
     x_shift, x_scale = get_statistics(batch_x)
     normed_x = normalize(batch_x, x_shift, x_scale)
@@ -68,6 +74,8 @@ def _prepare_normed_batch(batch_x, batch_y, args, *, apply_ood_shift=False):
 
 
 def _denormalize_ordinal_future(future_ord: torch.Tensor, ladder) -> torch.Tensor:
+    future_ord = ranks_from_unit(future_ord, ladder)
+    future_ord = torch.nan_to_num(future_ord, nan=0.0, posinf=0.0, neginf=0.0)
     if future_ord.dim() == 4:
         b, d, s, length = future_ord.shape
         chunks = []
@@ -257,8 +265,9 @@ class Exp_Forecast(Exp_Basic):
                 precompute_ranks_for=train_data.data_x,
             )
             rank_np = ladder.precomputed_ranks.numpy()
-            train_data.data_x = rank_np
-            train_data.data_y = rank_np
+            rank_scaled = ranks_to_unit_numpy(rank_np, ladder)
+            train_data.data_x = rank_scaled
+            train_data.data_y = rank_scaled
             self.args.global_ordinal_ladder = ladder
             self.args.ordinal_train_is_ranked = True
         

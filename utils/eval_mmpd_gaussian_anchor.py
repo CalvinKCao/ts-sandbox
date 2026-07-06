@@ -1408,7 +1408,10 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                         batch_x = rearrange(batch_x, "b l d -> b d l")
                         batch_y = rearrange(batch_y, "b l d -> b d l")
 
-                        normed_x, _, norm_ctx = _prepare_normed_batch(batch_x, batch_y, args)
+                        normed_x, _, norm_ctx = _prepare_normed_batch(
+                            batch_x, batch_y, args,
+                            apply_ood_shift=args.use_ordinal_window_norm,
+                        )
                         det, modes, samples = exp.model.predict(
                             normed_x,
                             prob_pred=True,

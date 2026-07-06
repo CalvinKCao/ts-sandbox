@@ -187,6 +187,32 @@ def build_global_ladder_from_training(
     )
 
 
+def rank_max_broadcast(ladder: OrdinalLadder, x: torch.Tensor) -> torch.Tensor:
+    """Per-variate max rank as a broadcastable divisor/multiplier for x."""
+    rm = ladder.rank_max_per_variate().to(device=x.device, dtype=x.dtype).reshape(-1).clamp_min(1.0)
+    if x.dim() == 4:
+        return rm.view(1, -1, 1, 1)
+    if x.dim() == 3:
+        return rm.view(1, -1, 1)
+    if x.dim() == 2:
+        return rm.view(-1, 1)
+    return rm
+
+
+def ranks_to_unit(ordinal: torch.Tensor, ladder: OrdinalLadder) -> torch.Tensor:
+    return ordinal / rank_max_broadcast(ladder, ordinal)
+
+
+def ranks_from_unit(ordinal_unit: torch.Tensor, ladder: OrdinalLadder) -> torch.Tensor:
+    return ordinal_unit * rank_max_broadcast(ladder, ordinal_unit)
+
+
+def ranks_to_unit_numpy(rank_np: np.ndarray, ladder: OrdinalLadder) -> np.ndarray:
+    rm = ladder.rank_max_per_variate().numpy().astype(np.float64).reshape(-1)
+    rm = np.maximum(rm, 1.0)
+    return (rank_np / rm[np.newaxis, :]).astype(np.float32)
+
+
 def encode_with_ladder(
     x: torch.Tensor,
     ladder: OrdinalLadder,
@@ -211,8 +237,9 @@ def decode_with_ladder(
     ladder: OrdinalLadder,
 ) -> torch.Tensor:
     """Inverse ordinal map back to global z-score."""
-    if ordinal.dim() == 2:
-        ordinal = ordinal.unsqueeze(1)
+    n_variates = int(ladder.values.shape[1])
+    ordinal = _ensure_bvt(ordinal, n_variates=n_variates)
+    ordinal = torch.nan_to_num(ordinal, nan=0.0, posinf=0.0, neginf=0.0)
     b, v, t = ordinal.shape
     ladder = ladder.expand_batch(b)
     out = ordinal.new_zeros(b, v, t)
@@ -223,7 +250,7 @@ def decode_with_ladder(
             out[:, vi] = uniq[0]
             continue
         j = ordinal[:, vi].round().clamp(0, k - 1).long()
-        out[:, vi] = uniq[j]
+        out[:, vi] = uniq.gather(0, j.reshape(-1)).reshape(b, t)
     return out
 
 

@@ -9,7 +9,10 @@ from models.diffusion_tsf.ordinal_window_norm import (
     _value_to_rank_slow,
     build_global_ladder_from_training,
     encode_with_ladder,
+    decode_with_ladder,
     ordinal_encode,
+    ranks_from_unit,
+    ranks_to_unit,
     shift_window_to_ordinal_envelope,
 )
 
@@ -73,6 +76,25 @@ def test_ood_shift_btv_layout():
     past = torch.randn(4, 336, 7)
     future = torch.randn(4, 728, 7)
     shift_window_to_ordinal_envelope(past, future, ladder, margin_frac=0.05)
+
+
+def test_decode_handles_nan_predictions():
+    train = torch.randn(100, 4)
+    ladder = build_global_ladder_from_training(train.numpy(), tie_atol=1e-6)
+    unit = torch.rand(2, 4, 32)
+    unit[:, 0, 5] = float("nan")
+    ranks = ranks_from_unit(unit, ladder)
+    decoded = decode_with_ladder(ranks, ladder)
+    assert torch.isfinite(decoded).all()
+
+
+def test_mmpd_unit_rank_roundtrip():
+    z = torch.randn(500, 4)
+    ladder = build_global_ladder_from_training(z.numpy(), tie_atol=1e-6, precompute_ranks_for=z.numpy())
+    ranks = ladder.precomputed_ranks.T.unsqueeze(0)  # (1, V, T)
+    unit = ranks_to_unit(ranks, ladder)
+    restored = ranks_from_unit(unit, ladder)
+    assert torch.allclose(restored.round(), ranks.float().unsqueeze(0), atol=1.0)
 
 
 def test_weather_sized_encode_is_fast():
