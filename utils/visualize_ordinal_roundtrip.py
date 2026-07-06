@@ -63,13 +63,15 @@ def plot_roundtrip(
     tie_atol = float(exp.get("ordinal_tie_atol", 1e-6))
     max_scale = _max_scale(dataset, exp)
 
-    train_ds, _, _, _ = load_dataset(
+    train_ds, _, _, norm_stats = load_dataset(
         dataset,
         lookback=lookback,
         horizon=horizon,
         lookback_overlap=overlap,
         stride=1,
+        ordinal_tie_atol=tie_atol,
     )
+    ladder = norm_stats["ordinal_ladder"]
     if window_idx is None:
         window_idx = _pick_window(
             train_ds, prefer_ties=prefer_ties, variate=variate, tie_atol=tie_atol,
@@ -80,7 +82,7 @@ def plot_roundtrip(
     fut_b = future.unsqueeze(0)
 
     past_ord, fut_ord, ladder = ordinal_encode(
-        past_b, fut_b, max_scale=max_scale, tie_atol=tie_atol,
+        past_b, fut_b, ladder=ladder,
     )
     past_rec, fut_rec = ordinal_decode(past_ord, fut_ord, ladder)
 
@@ -105,7 +107,7 @@ def plot_roundtrip(
     fig, axes = plt.subplots(4, 1, figsize=(11, 8), sharex=True)
     fig.suptitle(
         f"{dataset} win={window_idx} var={variate} | "
-        f"global z → ordinal (K={k} past-unique, max_scale={max_scale}) → decode | MAE={mae:.4g}",
+        f"global z → ordinal (K={k} train-unique ranks [0,{int(ladder.rank_max_per_variate()[variate])}]) → decode | MAE={mae:.4g}",
         fontsize=11,
     )
 
@@ -120,8 +122,9 @@ def plot_roundtrip(
     axes[1].plot(t_fut, ord_f, color="C3", lw=1.2)
     axes[1].axvline(n_past - 0.5, color="gray", ls="--", lw=0.8, alpha=0.7)
     axes[1].set_ylabel("ordinal")
-    axes[1].set_ylim(-max_scale * 1.05, max_scale * 1.05)
-    axes[1].set_title("After ordinal encode (past-anchored ladder; ties share rank)")
+    rank_max = float(ladder.rank_max_per_variate()[variate].item())
+    axes[1].set_ylim(-0.5, max(rank_max, 1.0) + 0.5)
+    axes[1].set_title("After ordinal encode (global train ladder; ties share rank)")
 
     axes[2].plot(t_past, rec_p, color="C0", lw=1.2, ls="--", label="past recon")
     axes[2].plot(t_fut, rec_f, color="C1", lw=1.2, ls="--", label="future recon")

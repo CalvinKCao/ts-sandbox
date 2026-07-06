@@ -865,10 +865,8 @@ def mmpd_env_for_run(
     if args is not None and getattr(args, "use_ordinal_window_norm", False):
         env["MMPD_USE_ORDINAL_NORM"] = "1"
         env.pop("MMPD_USE_INSTANCE_NORM", None)
-        by_ds = getattr(args, "max_scale_by_dataset", None) or {}
-        ms = by_ds.get(run.dataset, getattr(args, "ordinal_max_scale", 3.5))
-        env["MMPD_ORDINAL_MAX_SCALE"] = str(ms)
         env["MMPD_ORDINAL_TIE_ATOL"] = str(getattr(args, "ordinal_tie_atol", 1e-6))
+        env.pop("MMPD_ORDINAL_MAX_SCALE", None)
     elif args is not None and getattr(args, "mmpd_instance_norm", True):
         env["MMPD_USE_INSTANCE_NORM"] = "1"
     else:
@@ -1280,7 +1278,6 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                     use_multi_gpu=False,
                     devices="0,1,2,3",
                     use_ordinal_window_norm=os.environ.get("MMPD_USE_ORDINAL_NORM") == "1",
-                    ordinal_max_scale=float(os.environ.get("MMPD_ORDINAL_MAX_SCALE", "3.5")),
                     ordinal_tie_atol=float(os.environ.get("MMPD_ORDINAL_TIE_ATOL", "1e-6")),
                 )
 
@@ -2899,12 +2896,6 @@ def main() -> None:
             args.mmpd_instance_norm = False
         if "ordinal_tie_atol" in exp:
             args.ordinal_tie_atol = float(exp["ordinal_tie_atol"])
-        if "max_scale_by_dataset" in exp:
-            args.max_scale_by_dataset = {
-                str(k): float(v) for k, v in exp["max_scale_by_dataset"].items()
-            }
-        if "max_scale" in exp:
-            args.ordinal_max_scale = float(exp["max_scale"])
     if args.mmpd_leaderboard:
         args.mmpd_log_leaderboard = True
     if args.no_mmpd_leaderboard:

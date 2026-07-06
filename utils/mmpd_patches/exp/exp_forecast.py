@@ -23,7 +23,11 @@ import pickle
 import warnings
 warnings.filterwarnings('ignore')
 
-from models.diffusion_tsf.ordinal_window_norm import ordinal_decode, ordinal_encode
+from models.diffusion_tsf.ordinal_window_norm import (
+    build_global_ladder_from_training,
+    ordinal_decode,
+    ordinal_encode,
+)
 
 
 def _use_ordinal_norm(args) -> bool:
@@ -32,11 +36,11 @@ def _use_ordinal_norm(args) -> bool:
     return bool(getattr(args, "use_ordinal_window_norm", False))
 
 
-def _ordinal_max_scale(args) -> float:
-    env_val = os.environ.get("MMPD_ORDINAL_MAX_SCALE")
-    if env_val:
-        return float(env_val)
-    return float(getattr(args, "ordinal_max_scale", 3.5))
+def _ordinal_ladder(args):
+    ladder = getattr(args, "global_ordinal_ladder", None)
+    if ladder is None:
+        raise ValueError("global_ordinal_ladder must be set before MMPD ordinal encoding")
+    return ladder
 
 
 def _ordinal_tie_atol(args) -> float:
@@ -46,13 +50,15 @@ def _ordinal_tie_atol(args) -> float:
     return float(getattr(args, "ordinal_tie_atol", 1e-6))
 
 
-def _prepare_normed_batch(batch_x, batch_y, args):
+def _prepare_normed_batch(batch_x, batch_y, args, *, apply_ood_shift=False):
     if _use_ordinal_norm(args):
+        if getattr(args, "ordinal_train_is_ranked", False):
+            return batch_x, batch_y, ("ordinal", _ordinal_ladder(args))
         past_ord, future_ord, ladder = ordinal_encode(
             batch_x,
             batch_y,
-            max_scale=_ordinal_max_scale(args),
-            tie_atol=_ordinal_tie_atol(args),
+            ladder=_ordinal_ladder(args),
+            apply_ood_shift=apply_ood_shift,
         )
         return past_ord, future_ord, ("ordinal", ladder)
     x_shift, x_scale = get_statistics(batch_x)
@@ -190,7 +196,7 @@ class Exp_Forecast(Exp_Basic):
 
         return model_optim
     
-    def _process_one_batch(self, dataset_object, batch_x, batch_y):
+    def _process_one_batch(self, dataset_object, batch_x, batch_y, apply_ood_shift=False):
         batch_x = batch_x.float().to(self.device)
         batch_y = batch_y.float().to(self.device)
 
@@ -199,7 +205,9 @@ class Exp_Forecast(Exp_Basic):
         batch_y = rearrange(batch_y, 'b l d -> b d l')
 
         #normalize
-        normed_x, normed_y, norm_ctx = _prepare_normed_batch(batch_x, batch_y, self.args)
+        normed_x, normed_y, norm_ctx = _prepare_normed_batch(
+            batch_x, batch_y, self.args, apply_ood_shift=apply_ood_shift,
+        )
 
         batch_loss = self.model.compute_loss(normed_x, normed_y, point_weight=self.args.point_weight) # [batch_size, data_dim]
         
@@ -220,7 +228,7 @@ class Exp_Forecast(Exp_Basic):
             for i, (batch_x,batch_y) in enumerate(vali_loader):
                 if smoke_max_batches and i >= smoke_max_batches:
                     break
-                loss = self._process_one_batch(vali_data, batch_x, batch_y)
+                loss = self._process_one_batch(vali_data, batch_x, batch_y, apply_ood_shift=_use_ordinal_norm(self.args))
                 total_loss.append(loss.detach().item())
         total_loss = np.average(total_loss)
 
@@ -242,6 +250,17 @@ class Exp_Forecast(Exp_Basic):
             scale_statistic = {'mean': train_data.scaler.mean_.tolist(), 'std': train_data.scaler.scale_.tolist()}
             with open(os.path.join(path, "scale_statistic.pkl"), 'wb') as f:
                 pickle.dump(scale_statistic, f)
+        if _use_ordinal_norm(self.args):
+            ladder = build_global_ladder_from_training(
+                train_data.data_x,
+                tie_atol=_ordinal_tie_atol(self.args),
+                precompute_ranks_for=train_data.data_x,
+            )
+            rank_np = ladder.precomputed_ranks.numpy()
+            train_data.data_x = rank_np
+            train_data.data_y = rank_np
+            self.args.global_ordinal_ladder = ladder
+            self.args.ordinal_train_is_ranked = True
         
         train_steps = len(train_loader)
         early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
@@ -322,6 +341,12 @@ class Exp_Forecast(Exp_Basic):
         self.model.eval()
 
         test_data, test_loader = self._get_data(flag='test')
+        if _use_ordinal_norm(self.args) and getattr(self.args, "global_ordinal_ladder", None) is None:
+            train_data, _ = self._get_data(flag='train')
+            self.args.global_ordinal_ladder = build_global_ladder_from_training(
+                train_data.data_x,
+                tie_atol=_ordinal_tie_atol(self.args),
+            )
 
         instance_num = 0
 
@@ -346,7 +371,9 @@ class Exp_Forecast(Exp_Basic):
 
                 batch_x = rearrange(batch_x, 'b l d -> b d l')
                 batch_y = rearrange(batch_y, 'b l d -> b d l')
-                normed_x, _, norm_ctx = _prepare_normed_batch(batch_x, batch_y, self.args)
+                normed_x, _, norm_ctx = _prepare_normed_batch(
+                    batch_x, batch_y, self.args, apply_ood_shift=_use_ordinal_norm(self.args),
+                )
                 
                 deterministic_pred, multi_mode_pred, prob_samples = self.model.predict(normed_x, prob_pred=self.args.prob_pred, 
                         sample_num = self.args.sample_num, temperature = self.args.temperature, \

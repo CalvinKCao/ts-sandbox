@@ -120,4 +120,18 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
         if tune_ckpt_path:
             logger.info("  [%s] best HP checkpoint: %s", self.name, tune_ckpt_path)
 
+        if not state.smoke_test and os.path.exists(ft_ckpt):
+            try:
+                from models.diffusion_tsf.pipeline.visualize_utils import (
+                    run_patch_guidance_finetune_visualizations,
+                )
+                viz_paths = run_patch_guidance_finetune_visualizations(
+                    state, ckpt_path=ft_ckpt,
+                )
+                wandb_utils.log_visualization_paths(
+                    viz_paths, wandb_key="viz/patch_guidance_finetuned",
+                )
+            except Exception as e:
+                logger.warning("Patch guidance finetune viz failed: %s", e, exc_info=True)
+
         return state

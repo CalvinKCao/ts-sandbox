@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib
@@ -1875,4 +1876,155 @@ def run_eval_worst_window_visualizations(
                 jpeg_dpi=int(viz.get("jpeg_dpi", 100)),
             )
         )
+    return paths
+
+
+def run_ordinal_roundtrip_visualization(
+    state: Any,
+    *,
+    split: str = "test",
+    variate: int = 0,
+    n_windows: int = 1,
+) -> list[str]:
+    """Global z → ordinal → decode roundtrip on real windows (test sanity check)."""
+    from models.diffusion_tsf.train_multivariate_pipeline import generate_dataset_job, load_dataset
+    from utils.visualize_ordinal_roundtrip import plot_roundtrip
+
+    viz = _viz_cfg(state)
+    if not viz.get("enabled", True):
+        return []
+
+    variate_indices = state.variate_indices
+    if variate_indices is None:
+        variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+    subset_meta = state.data_subset_resolved or {}
+    train_stride = int(subset_meta.get("train_stride", state.window_stride))
+    test_stride = int(subset_meta.get("test_stride", 1))
+    tie_atol = float(getattr(state, "ordinal_tie_atol", 1e-6))
+
+    train_ds, _, test_ds, _ = load_dataset(
+        state.dataset,
+        variate_indices,
+        lookback=state.lookback_length,
+        horizon=state.forecast_length,
+        lookback_overlap=state.lookback_overlap,
+        stride=train_stride,
+        test_stride=test_stride,
+        ordinal_tie_atol=tie_atol,
+    )
+    ds = test_ds if split == "test" else train_ds
+    if len(ds) == 0:
+        return []
+
+    config_path = None
+    merged = getattr(state, "merged_config", None) or {}
+    exp = merged.get("experiment", {})
+    exp_name = exp.get("experiment_name") or exp.get("name")
+    if exp_name:
+        candidate = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+            "configs",
+            f"{exp_name}.yaml",
+        )
+        if os.path.isfile(candidate):
+            config_path = candidate
+    if config_path is None:
+        config_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+            "configs",
+            "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm.yaml",
+        )
+
+    out_dir = os.path.join(state.results_dir, "viz", "ordinal_roundtrip")
+    paths: list[str] = []
+    indices = pick_sample_indices(len(ds), n_windows, seed=state.seed)
+    vi = variate_indices[variate] if variate < len(variate_indices) else variate
+    for win_idx in indices:
+        paths.append(
+            str(plot_roundtrip(
+                dataset=state.dataset,
+                config_path=Path(config_path),
+                out_dir=Path(out_dir),
+                window_idx=win_idx,
+                variate=vi,
+                prefer_ties=False,
+            ))
+        )
+    return paths
+
+
+def run_patch_guidance_finetune_visualizations(
+    state: Any,
+    *,
+    ckpt_path: str,
+    tag: str = "patch_guidance_finetuned",
+) -> list[str]:
+    """1D patch-decoder forecast plots after guidance finetune."""
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        _patch_guidance_batch,
+        generate_dataset_job,
+        load_dataset,
+        load_patch_guidance_from_checkpoint,
+    )
+
+    viz = _viz_cfg(state)
+    if not viz.get("enabled", True) or state.smoke_test:
+        return []
+
+    variate_indices = state.variate_indices
+    if variate_indices is None:
+        variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+    subset_meta = state.data_subset_resolved or {}
+    train_stride = int(subset_meta.get("train_stride", state.window_stride))
+    test_stride = int(subset_meta.get("test_stride", 1))
+
+    _, _, test_ds, _ = load_dataset(
+        state.dataset,
+        variate_indices,
+        stride=train_stride,
+        test_stride=test_stride,
+        lookback_overlap=state.lookback_overlap,
+        ordinal_tie_atol=float(getattr(state, "ordinal_tie_atol", 1e-6)),
+    )
+    device = state.resolve_device()
+    stack = load_patch_guidance_from_checkpoint(
+        ckpt_path, len(variate_indices), device,
+    )
+    output_dir = os.path.join(state.results_dir, "viz", tag)
+    os.makedirs(output_dir, exist_ok=True)
+    jpeg_dpi = int(viz.get("jpeg_dpi", 100))
+    indices = pick_sample_indices(len(test_ds), int(viz.get("n_samples", 3)), seed=state.seed)
+    paths: list[str] = []
+
+    for row, idx in enumerate(indices):
+        past, future = test_ds[idx]
+        past_b = past.unsqueeze(0).to(device)
+        future_b = future.unsqueeze(0).to(device)
+        with torch.no_grad():
+            past_norm, target = _patch_guidance_batch(
+                past_b[0],
+                future_b[0],
+                device,
+                apply_ood_shift=bool(state.use_ordinal_window_norm),
+                data_is_ranked=getattr(test_ds, "yields_ordinal_ranks", False),
+            )
+            pred = stack.forecast(past_norm.unsqueeze(0))[0].cpu()
+
+        n_vars = min(int(viz.get("n_dual_scale_vars", 3)), past.shape[0])
+        fig, axes = plt.subplots(1, n_vars, figsize=(4.5 * n_vars, 3.0), squeeze=False)
+        t_past = np.arange(-past.shape[-1], 0)
+        t_fut = np.arange(0, target.shape[-1])
+        for col in range(n_vars):
+            ax = axes[0, col]
+            ax.plot(t_past, past_norm[col].cpu().numpy(), color="#9E9E9E", alpha=0.5, lw=1.0)
+            ax.plot(t_fut, target[col].cpu().numpy(), color="#2196F3", lw=1.5, label="GT" if col == 0 else "")
+            ax.plot(t_fut, pred[col].numpy(), color="#FF9800", lw=1.2, ls="--", label="patch" if col == 0 else "")
+            ax.axvline(0, color="k", ls=":", alpha=0.25)
+            mae = float(np.mean(np.abs(pred[col].numpy() - target[col].cpu().numpy())))
+            ax.set_title(f"Var {col} | MAE {mae:.3f}", fontsize=9)
+        fig.suptitle(f"Patch guidance {tag} | sample {idx}", fontsize=11)
+        if n_vars:
+            axes[0, 0].legend(loc="upper left", fontsize=7)
+        path = os.path.join(output_dir, f"patch_guidance_{tag}_sample{row:02d}_idx{idx}.jpg")
+        paths.append(save_figure_jpg(fig, path, dpi=jpeg_dpi))
     return paths

@@ -786,6 +786,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     self.name, self.stage, trial_label, epoch + 1, max_epochs,
                 )
                 model.train()
+                from models.diffusion_tsf.train_multivariate_pipeline import _set_ordinal_loader_mode
+
+                _set_ordinal_loader_mode(model, train_loader, eval_mode=False)
                 train_loss = 0.0
                 n_train = 0
                 optimizer.zero_grad(set_to_none=True)
@@ -828,6 +831,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
                 backup = ema.swap_in(model) if ema is not None else None
                 model.eval()
+                _set_ordinal_loader_mode(model, val_loader, eval_mode=True)
                 val_loss = 0.0
                 n_val = 0
                 val_start = time.perf_counter()
@@ -968,7 +972,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             variate_indices,
             stride=train_stride,
             test_stride=test_stride,
+            ordinal_tie_atol=float(state.ordinal_tie_atol),
         )
+        if norm_stats.get("ordinal_ladder") is not None:
+            state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
         if state.smoke_test:
             train_ds = Subset(train_ds, list(range(min(4, len(train_ds)))))
             val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))

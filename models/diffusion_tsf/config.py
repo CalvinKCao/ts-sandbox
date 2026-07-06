@@ -3,7 +3,7 @@ config for the diffusion tsf model.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 
 @dataclass
@@ -66,6 +66,7 @@ class DiffusionTSFConfig:
     diffusion_type: str = "binary"
     use_ordinal_window_norm: bool = False
     ordinal_tie_atol: float = 1e-6
+    ordinal_ladder: Optional[Any] = None
     binary_num_steps: int = 1000
     binary_sample_steps: int = 20
     binary_beta_start: float = 1e-5

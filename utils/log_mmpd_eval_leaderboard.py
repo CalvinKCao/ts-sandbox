@@ -108,6 +108,7 @@ def log_mmpd_eval_to_leaderboard(
     force: bool = False,
     dry_run: bool = False,
     extra_tags: Optional[list[str]] = None,
+    viz_paths: Optional[list[str]] = None,
 ) -> Optional[str]:
     """Create or skip an mmpd_eval stub in ts-sandbox-leaderboard. Returns run URL if created."""
     if raw_config is None:
@@ -202,6 +203,9 @@ def log_mmpd_eval_to_leaderboard(
         wandb.log(clean, step=0)
         for k, v in clean.items():
             run.summary[k] = v
+        if viz_paths:
+            from models.diffusion_tsf.pipeline import wandb_utils
+            wandb_utils.log_visualization_paths(viz_paths, wandb_key="eval/mmpd_visualizations")
         url = run.url
         write_leaderboard_marker(
             output_dir,
@@ -225,6 +229,27 @@ def maybe_log_mmpd_eval_leaderboard(
         return
     if args.mmpd_run_config is None:
         return
+    viz_paths: list[str] = []
+    if getattr(args, "use_ordinal_window_norm", False):
+        try:
+            from pathlib import Path as _Path
+
+            from utils.visualize_ordinal_roundtrip import plot_roundtrip
+
+            out_dir = args.output_dir / "viz" / "ordinal_roundtrip"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            viz_paths.append(
+                str(plot_roundtrip(
+                    dataset=dataset,
+                    config_path=_Path(args.mmpd_run_config),
+                    out_dir=out_dir,
+                    window_idx=0,
+                    variate=0,
+                    prefer_ties=False,
+                ))
+            )
+        except Exception as exc:
+            print(f"[leaderboard] {dataset}: ordinal roundtrip viz skipped ({exc})")
     try:
         log_mmpd_eval_to_leaderboard(
             dataset=dataset,
@@ -232,6 +257,7 @@ def maybe_log_mmpd_eval_leaderboard(
             output_dir=args.output_dir,
             mmpd_run_config=args.mmpd_run_config,
             force=getattr(args, "force_mmpd_leaderboard", False),
+            viz_paths=viz_paths or None,
         )
     except Exception as exc:
         print(f"[leaderboard] {dataset}: failed ({exc})")

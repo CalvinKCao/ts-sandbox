@@ -421,6 +421,154 @@ class TimeSeriesTo2D(nn.Module):
         fine = self._cdf_from_bin_indices(fine_bin, height=fine_height)
         return coarse, fine
 
+    def encode_dual_heights_bounded(
+        self,
+        x: torch.Tensor,
+        *,
+        coarse_height: int,
+        fine_height: int,
+        value_min: float = 0.0,
+        value_max_per_variate: torch.Tensor | list[float] | float,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode coarse/fine CDF maps for values in [value_min, value_max] per variate."""
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        b, n_vars, seq_len = x.shape
+        if isinstance(value_max_per_variate, (int, float)):
+            vmax = torch.full((n_vars,), float(value_max_per_variate), device=x.device, dtype=x.dtype)
+        elif isinstance(value_max_per_variate, list):
+            vmax = torch.tensor(value_max_per_variate, device=x.device, dtype=x.dtype)
+        else:
+            vmax = value_max_per_variate.to(device=x.device, dtype=x.dtype).reshape(-1)
+        if vmax.numel() != n_vars:
+            raise ValueError(f"value_max_per_variate length {vmax.numel()} != num_vars {n_vars}")
+
+        coarse_maps = []
+        fine_maps = []
+        vmin = float(value_min)
+        for vi in range(n_vars):
+            span = float(vmax[vi].item()) - vmin
+            xi = x[:, vi : vi + 1]
+            if span <= 0.0:
+                coarse_bin = torch.zeros((b, 1, seq_len), device=x.device, dtype=torch.long)
+                coarse_maps.append(self._cdf_from_bin_indices(coarse_bin, height=coarse_height))
+                fine_maps.append(torch.zeros((b, 1, fine_height, seq_len), device=x.device, dtype=xi.dtype))
+                continue
+            x_clip = torch.clamp(xi, vmin, vmin + span)
+            coarse_pos = (x_clip - vmin) / span * coarse_height
+            coarse_bin = torch.clamp(coarse_pos.long(), 0, coarse_height - 1)
+            coarse = self._cdf_from_bin_indices(coarse_bin, height=coarse_height)
+
+            coarse_width = span / coarse_height
+            coarse_center = (coarse_bin.to(x_clip.dtype) + 0.5) * coarse_width + vmin
+            residual_range = coarse_width * 0.5
+            residual = torch.clamp(x_clip - coarse_center, -residual_range, residual_range)
+            fine_pos = (residual + residual_range) / (2 * residual_range) * fine_height
+            fine_bin = torch.clamp(fine_pos.long(), 0, fine_height - 1)
+            fine = self._cdf_from_bin_indices(fine_bin, height=fine_height)
+            coarse_maps.append(coarse)
+            fine_maps.append(fine)
+        return torch.cat(coarse_maps, dim=1), torch.cat(fine_maps, dim=1)
+
+    def _decode_occupancy_bounded(
+        self,
+        cdf_map: torch.Tensor,
+        *,
+        value_min: float,
+        value_max: float,
+        cdf_decoder: str = "mean",
+        expectation_sharpen_temp: Optional[float] = None,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        cdf_map = torch.clamp(cdf_map, 0.0, 1.0)
+        height = cdf_map.shape[2]
+        span = float(value_max) - float(value_min)
+        if span <= 0.0:
+            return torch.full(
+                (cdf_map.shape[0], cdf_map.shape[1], cdf_map.shape[3]),
+                float(value_min),
+                device=cdf_map.device,
+                dtype=cdf_map.dtype,
+            )
+        centers = torch.linspace(
+            float(value_min) + span / (2 * height),
+            float(value_max) - span / (2 * height),
+            height,
+            device=cdf_map.device,
+            dtype=cdf_map.dtype,
+        ).view(1, 1, -1, 1)
+
+        if cdf_decoder in ("expectation", "pdf_expectation"):
+            cdf_padded = torch.cat(
+                [cdf_map, torch.zeros_like(cdf_map[:, :, :1, :])],
+                dim=2,
+            )
+            pdf = F.relu(cdf_padded[:, :, :-1, :] - cdf_padded[:, :, 1:, :])
+            if expectation_sharpen_temp is not None and expectation_sharpen_temp != 1.0:
+                power = 1.0 / max(expectation_sharpen_temp, eps)
+                pdf = torch.pow(pdf, power)
+            pdf = pdf / pdf.sum(dim=2, keepdim=True).clamp(min=eps)
+            return (pdf * centers).sum(dim=2)
+
+        if cdf_decoder != "mean":
+            raise ValueError(f"Unknown dual CDF decoder '{cdf_decoder}'")
+
+        column_sum = cdf_map.sum(dim=2).clamp(1.0, float(height))
+        bin_idx = (column_sum - 1.0).clamp(0.0, float(height - 1))
+        return (bin_idx + 0.5) / float(height) * span + float(value_min)
+
+    def decode_dual_heights_bounded(
+        self,
+        coarse_map: torch.Tensor,
+        fine_map: torch.Tensor,
+        *,
+        value_min: float = 0.0,
+        value_max_per_variate: torch.Tensor | list[float] | float,
+        cdf_decoder: str = "mean",
+        expectation_sharpen_temp: Optional[float] = None,
+        squeeze_univariate: bool = True,
+    ) -> torch.Tensor:
+        if coarse_map.shape[:2] != fine_map.shape[:2] or coarse_map.shape[3] != fine_map.shape[3]:
+            raise ValueError(f"coarse/fine shapes differ: {coarse_map.shape} vs {fine_map.shape}")
+        _batch_size, num_vars, coarse_height, _seq_len = coarse_map.shape
+        if isinstance(value_max_per_variate, (int, float)):
+            vmax = torch.full((num_vars,), float(value_max_per_variate), device=coarse_map.device, dtype=coarse_map.dtype)
+        elif isinstance(value_max_per_variate, list):
+            vmax = torch.tensor(value_max_per_variate, device=coarse_map.device, dtype=coarse_map.dtype)
+        else:
+            vmax = value_max_per_variate.to(device=coarse_map.device, dtype=coarse_map.dtype).reshape(-1)
+
+        coarse_vals = []
+        fine_vals = []
+        vmin = float(value_min)
+        for vi in range(num_vars):
+            span = float(vmax[vi].item()) - vmin
+            fine_range = span / float(coarse_height) * 0.5 if span > 0.0 else 0.0
+            coarse_vals.append(
+                self._decode_occupancy_bounded(
+                    coarse_map[:, vi : vi + 1],
+                    value_min=vmin,
+                    value_max=vmin + span,
+                    cdf_decoder=cdf_decoder,
+                    expectation_sharpen_temp=expectation_sharpen_temp,
+                )
+            )
+            fine_vals.append(
+                self._decode_occupancy_bounded(
+                    fine_map[:, vi : vi + 1],
+                    value_min=-fine_range,
+                    value_max=fine_range,
+                    cdf_decoder=cdf_decoder,
+                    expectation_sharpen_temp=expectation_sharpen_temp,
+                )
+            )
+        coarse_value = torch.cat(coarse_vals, dim=1)
+        fine_value = torch.cat(fine_vals, dim=1)
+        x = coarse_value + fine_value
+        if squeeze_univariate and num_vars == 1:
+            x = x.squeeze(1)
+        return x
+
     def encode_triple_heights(
         self,
         x: torch.Tensor,

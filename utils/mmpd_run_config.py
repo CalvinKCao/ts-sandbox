@@ -36,8 +36,6 @@ def apply_mmpd_run_config(args: Any, block: Dict[str, Any], *, repo_root: Path =
         args.mmpd_instance_norm = False
     if "ordinal_tie_atol" in block:
         args.ordinal_tie_atol = float(block["ordinal_tie_atol"])
-    if "ordinal_max_scale" in block:
-        args.ordinal_max_scale = float(block["ordinal_max_scale"])
     if backbone := block.get("backbone"):
         args.mmpd_backbone = str(backbone)
     if subset_config := block.get("subset_config"):

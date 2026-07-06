@@ -23,6 +23,7 @@ from models.diffusion_tsf.pipeline.visualize_utils import (
     per_window_anchor_mse,
     per_window_crps,
     run_eval_worst_window_visualizations,
+    run_ordinal_roundtrip_visualization,
     run_real_dataset_phase_diagnostics,
     run_staged_finetune_visualizations,
 )
@@ -318,6 +319,14 @@ class StagedEvalPhase(PipelinePhase):
         sample_all = []
         window_idx_all = []
         t0 = time.perf_counter()
+        ranked = getattr(loader.dataset, "yields_ordinal_ranks", False)
+        if isinstance(loader.dataset, Subset):
+            ranked = getattr(loader.dataset.dataset, "yields_ordinal_ranks", False)
+        for m in (coarse_model, fine_model, finer_model):
+            if m is None:
+                continue
+            m._ordinal_input_is_ranked = ranked
+            m._ordinal_apply_ood_shift = not ranked
         logger.info(
             "[%s] staged eval start: windows=%d batches=%d prob_samples=%d sampler=%s steps=%d",
             subset_id,
@@ -755,16 +764,26 @@ class StagedEvalPhase(PipelinePhase):
             except Exception as e:
                 logger.warning("Staged eval visualizations failed: %s", e, exc_info=True)
 
-        try:
-            worst_viz = run_eval_worst_window_visualizations(
-                state,
-                test_ds=full_test_ds,
-                pack=pack,
-                worst_manifest=worst_manifest,
-            )
-            wandb_utils.log_visualization_paths(worst_viz, wandb_key="eval/worst_windows")
-        except Exception as e:
-            logger.warning("Worst-window eval viz failed: %s", e, exc_info=True)
+        if not skip_viz and viz_cfg.get("enabled", True):
+            try:
+                worst_viz = run_eval_worst_window_visualizations(
+                    state,
+                    test_ds=full_test_ds,
+                    pack=pack,
+                    worst_manifest=worst_manifest,
+                )
+                wandb_utils.log_visualization_paths(worst_viz, wandb_key="eval/worst_windows")
+            except Exception as e:
+                logger.warning("Worst-window eval viz failed: %s", e, exc_info=True)
+
+            if state.use_ordinal_window_norm:
+                try:
+                    ord_paths = run_ordinal_roundtrip_visualization(state, split="test")
+                    wandb_utils.log_visualization_paths(
+                        ord_paths, wandb_key="eval/ordinal_roundtrip",
+                    )
+                except Exception as e:
+                    logger.warning("Ordinal roundtrip viz failed: %s", e, exc_info=True)
 
         logger.info(
             "[%s] staged eval done: sampler=%s steps=%d "

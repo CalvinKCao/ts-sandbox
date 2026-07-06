@@ -38,7 +38,7 @@ from models.diffusion_tsf.diffusion_model import DiffusionTSF
 from models.diffusion_tsf.realts import get_synthetic_dataloader
 from models.diffusion_tsf.guidance import iTransformerGuidance, PatchDecoderGuidance
 from models.diffusion_tsf.patch_guidance_stack import PatchGuidanceStack, PatchGuidanceStackConfig
-from models.diffusion_tsf.ordinal_window_norm import ordinal_encode
+from models.diffusion_tsf.ordinal_window_norm import build_global_ladder_from_training, ordinal_encode
 from models.diffusion_tsf.storage_paths import resolve_checkpoint_dir, resolve_results_dir
 from models.diffusion_tsf.dalia_data import (
     DALIA_CHANNEL_NAMES,
@@ -340,6 +340,7 @@ MODEL_TYPE = "dit"
 DIFFUSION_TYPE = "binary"
 USE_ORDINAL_WINDOW_NORM = False
 ORDINAL_TIE_ATOL = 1e-6
+GLOBAL_ORDINAL_LADDER = None
 DIT_PATCH_SIZE = (8, 8)
 DIT_EMBED_DIM = 384
 DIT_DEPTH = 8
@@ -629,13 +630,20 @@ def load_wrapped_guidance(
 def _window_norm_past_future(
     past: torch.Tensor,
     future: torch.Tensor,
+    *,
+    apply_ood_shift: bool = False,
+    data_is_ranked: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if USE_ORDINAL_WINDOW_NORM:
+        if GLOBAL_ORDINAL_LADDER is None:
+            raise ValueError("GLOBAL_ORDINAL_LADDER must be set before ordinal encoding")
+        if data_is_ranked:
+            return past, future
         past_ord, future_ord, _ladder = ordinal_encode(
             past,
             future,
-            max_scale=float(MAX_SCALE),
-            tie_atol=float(ORDINAL_TIE_ATOL),
+            ladder=GLOBAL_ORDINAL_LADDER,
+            apply_ood_shift=apply_ood_shift,
         )
         return past_ord, future_ord
     if not USE_WINDOW_NORMALIZATION:
@@ -658,16 +666,33 @@ def _window_norm_past_future(
     return (past - center) / std, (future - center) / std
 
 
+def _set_ordinal_loader_mode(model, loader, *, eval_mode: bool = False) -> None:
+    """Configure per-batch ordinal flags on the diffusion model."""
+    if not USE_ORDINAL_WINDOW_NORM:
+        return
+    ranked = getattr(loader.dataset, "yields_ordinal_ranks", False)
+    model._ordinal_input_is_ranked = ranked
+    model._ordinal_apply_ood_shift = bool(eval_mode and not ranked)
+
+
 def _patch_guidance_batch(
     past: torch.Tensor,
     future: torch.Tensor,
     device: torch.device,
+    *,
+    apply_ood_shift: bool = False,
+    data_is_ranked: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if _itrans_ar_enabled(future.shape[-1]):
         past, future = _sample_itrans_ar_chunk(past, future)
     past = past.to(device)
     future = future.to(device)
-    past_norm, future_norm = _window_norm_past_future(past, future)
+    past_norm, future_norm = _window_norm_past_future(
+        past,
+        future,
+        apply_ood_shift=apply_ood_shift,
+        data_is_ranked=data_is_ranked,
+    )
     avail = future_norm.shape[-1] - LOOKBACK_OVERLAP if LOOKBACK_OVERLAP > 0 else future_norm.shape[-1]
     pred_len = min(_patch_guidance_out_len(), avail)
     if LOOKBACK_OVERLAP > 0:
@@ -681,8 +706,11 @@ def train_patch_guidance_epoch(stack, loader, optimizer, device, scheduler=None)
     stack.train()
     total_loss = 0.0
     n_batches = 0
+    data_is_ranked = getattr(loader.dataset, "yields_ordinal_ranks", False)
     for past, future in loader:
-        past_norm, y_true = _patch_guidance_batch(past, future, device)
+        past_norm, y_true = _patch_guidance_batch(
+            past, future, device, data_is_ranked=data_is_ranked,
+        )
         optimizer.zero_grad()
         loss = stack.finetune_loss(past_norm, y_true)
         loss.backward()
@@ -698,9 +726,16 @@ def validate_patch_guidance(stack, loader, device):
     stack.eval()
     total_loss = 0.0
     n_batches = 0
+    data_is_ranked = getattr(loader.dataset, "yields_ordinal_ranks", False)
     with torch.no_grad():
         for past, future in loader:
-            past_norm, y_true = _patch_guidance_batch(past, future, device)
+            past_norm, y_true = _patch_guidance_batch(
+                past,
+                future,
+                device,
+                apply_ood_shift=USE_ORDINAL_WINDOW_NORM,
+                data_is_ranked=data_is_ranked,
+            )
             loss = stack.finetune_loss(past_norm, y_true)
             total_loss += loss.item()
             n_batches += 1
@@ -1312,6 +1347,7 @@ def create_diffusion_model(
         diffusion_type=o("diffusion_type", DIFFUSION_TYPE),
         use_ordinal_window_norm=o("use_ordinal_window_norm", USE_ORDINAL_WINDOW_NORM),
         ordinal_tie_atol=o("ordinal_tie_atol", ORDINAL_TIE_ATOL),
+        ordinal_ladder=o("ordinal_ladder", GLOBAL_ORDINAL_LADDER),
         use_deterministic_anchor_loss=o("use_deterministic_anchor_loss", DETERMINISTIC_ANCHOR_LOSS),
         deterministic_anchor_lambda=o("deterministic_anchor_lambda", DETERMINISTIC_ANCHOR_LAMBDA),
         deterministic_anchor_alpha=o("deterministic_anchor_alpha", DETERMINISTIC_ANCHOR_ALPHA),
@@ -1344,7 +1380,7 @@ def create_diffusion_model(
 
 class TimeSeriesDataset(Dataset):
     """Dataset for multivariate time series forecasting."""
-    
+
     def __init__(
         self,
         data: np.ndarray,
@@ -1352,25 +1388,31 @@ class TimeSeriesDataset(Dataset):
         horizon: int,
         stride: int,
         lookback_overlap: int,
+        *,
+        rank_data: Optional[np.ndarray] = None,
     ):
         self.data = torch.tensor(data, dtype=torch.float32)
+        self.rank_data = (
+            torch.tensor(rank_data, dtype=torch.float32) if rank_data is not None else None
+        )
+        self.yields_ordinal_ranks = self.rank_data is not None
         self.lookback = lookback
         self.horizon = horizon
         self.stride = stride
         self.lookback_overlap = lookback_overlap
         total_len = lookback + horizon
         self.n_samples = max(0, (len(data) - total_len) // stride + 1)
-    
+
     def __len__(self):
         return self.n_samples
-    
+
     def __getitem__(self, idx):
         start = idx * self.stride
-        past = self.data[start:start + self.lookback].T
-        # Target includes last K observed steps + H forecast steps
+        source = self.rank_data if self.rank_data is not None else self.data
+        past = source[start:start + self.lookback].T
         target_start = start + self.lookback - self.lookback_overlap
         target_end = start + self.lookback + self.horizon
-        future = self.data[target_start:target_end].T
+        future = source[target_start:target_end].T
         return past, future
 
 
@@ -1412,6 +1454,7 @@ def load_dataset(
     stride: Optional[int] = None,
     test_stride: Optional[int] = None,
     lookback_overlap: Optional[int] = None,
+    ordinal_tie_atol: float = 1e-6,
 ) -> Tuple[Dataset, Dataset, Dataset, Dict]:
     """Load dataset and return train/val/test splits matching iTransformer paper.
 
@@ -1466,9 +1509,23 @@ def load_dataset(
     std = train_slice.std(axis=0, keepdims=True) + 1e-8
     data = (data - mean) / std
 
+    ordinal_ladder = None
+    rank_full = None
+    if USE_ORDINAL_WINDOW_NORM:
+        ordinal_ladder = build_global_ladder_from_training(
+            data[border1s[0]:border2s[0]],
+            tie_atol=float(ordinal_tie_atol),
+            precompute_ranks_for=data,
+        )
+        rank_full = ordinal_ladder.precomputed_ranks.numpy()
+        global GLOBAL_ORDINAL_LADDER
+        GLOBAL_ORDINAL_LADDER = ordinal_ladder
+
+    train_rank = rank_full[border1s[0]:border2s[0]] if rank_full is not None else None
     train_ds = TimeSeriesDataset(
         data[border1s[0]:border2s[0]], lookback, horizon, stride,
         lookback_overlap=lookback_overlap,
+        rank_data=train_rank,
     )
     val_ds = TimeSeriesDataset(
         data[border1s[1]:border2s[1]], lookback, horizon, stride,
@@ -1479,7 +1536,10 @@ def load_dataset(
         lookback_overlap=lookback_overlap,
     )
 
-    return train_ds, val_ds, test_ds, {'mean': mean, 'std': std}
+    stats: Dict = {'mean': mean, 'std': std}
+    if ordinal_ladder is not None:
+        stats['ordinal_ladder'] = ordinal_ladder
+    return train_ds, val_ds, test_ds, stats
 
 
 # ============================================================================
@@ -2313,6 +2373,7 @@ def pretrain_diffusion(
         t0 = time.time()
 
         model.train()
+        _set_ordinal_loader_mode(model, train_loader, eval_mode=False)
         total_loss = 0.0
         n_batches = 0
         for past, future in train_loader:
@@ -2328,6 +2389,7 @@ def pretrain_diffusion(
         train_loss = total_loss / max(n_batches, 1)
 
         model.eval()
+        _set_ordinal_loader_mode(model, val_loader, eval_mode=True)
         total_loss = 0.0
         n_batches = 0
         with torch.no_grad():
@@ -2450,6 +2512,7 @@ def finetune_hp_objective(
 
     for epoch in range(epochs):
         model.train()
+        _set_ordinal_loader_mode(model, train_loader, eval_mode=False)
         for past, future in train_loader:
             past, future = past.to(device), future.to(device)
             optimizer.zero_grad()
@@ -2460,6 +2523,7 @@ def finetune_hp_objective(
             optimizer.step()
         
         model.eval()
+        _set_ordinal_loader_mode(model, val_loader, eval_mode=True)
         val_loss = 0.0
         n_batches = 0
         with torch.no_grad():

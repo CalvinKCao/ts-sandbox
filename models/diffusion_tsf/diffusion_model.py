@@ -439,19 +439,35 @@ class DiffusionTSF(nn.Module):
     def _normalize_sequence(
         self,
         past: torch.Tensor,
-        future: Optional[torch.Tensor] = None
+        future: Optional[torch.Tensor] = None,
+        *,
+        apply_ood_shift: Optional[bool] = None,
+        data_is_ranked: Optional[bool] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Tuple[torch.Tensor, torch.Tensor, Optional[OrdinalLadder]]]:
         """Prepare sequences for diffusion: ordinal-only or legacy window norm."""
+        if apply_ood_shift is None:
+            apply_ood_shift = bool(getattr(self, "_ordinal_apply_ood_shift", False))
+        if data_is_ranked is None:
+            data_is_ranked = bool(getattr(self, "_ordinal_input_is_ranked", False))
         if self.config.use_ordinal_window_norm:
-            past_ord, future_ord, ladder = ordinal_encode(
+            ladder = self.config.ordinal_ladder
+            if ladder is None:
+                raise ValueError("ordinal_ladder is required when use_ordinal_window_norm=True")
+            if data_is_ranked:
+                batch_size = past.shape[0] if past.dim() == 3 else 1
+                ladder_b = ladder.expand_batch(batch_size)
+                center = torch.zeros_like(past[..., :1])
+                std = torch.ones_like(past[..., :1])
+                return past, future, (center, std, ladder_b)
+            past_ord, future_ord, ladder_b = ordinal_encode(
                 past,
                 future,
-                max_scale=float(self.config.max_scale),
-                tie_atol=float(self.config.ordinal_tie_atol),
+                ladder=ladder,
+                apply_ood_shift=apply_ood_shift,
             )
             center = torch.zeros_like(past[..., :1])
             std = torch.ones_like(past[..., :1])
-            return past_ord, future_ord, (center, std, ladder)
+            return past_ord, future_ord, (center, std, ladder_b)
 
         if not self.config.use_window_normalization:
             mean = torch.zeros_like(past[..., :1])
@@ -630,6 +646,22 @@ class DiffusionTSF(nn.Module):
             int(getattr(self.config, "finer_image_height", self.config.image_height)),
         )
 
+    def _uses_global_ordinal_encoding(self) -> bool:
+        return bool(
+            self.config.use_ordinal_window_norm
+            and self.config.ordinal_ladder is not None
+        )
+
+    def _ordinal_rank_max_tensor(
+        self,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        ladder = self.config.ordinal_ladder
+        if ladder is None:
+            raise ValueError("ordinal_ladder is required for global ordinal encoding")
+        return ladder.rank_max_per_variate().reshape(-1).to(device=device, dtype=dtype)
+
     def _uses_haar_frequency_staging(self) -> bool:
         return getattr(self.config, "staged_representation", "value_precision") == "haar_frequency"
 
@@ -734,6 +766,11 @@ class DiffusionTSF(nn.Module):
         return str(getattr(self.config, "coarse_flatline_blur_kernel", "gaussian"))
 
     def _staged_fine_residual_value_range(self) -> float:
+        if self._uses_global_ordinal_encoding():
+            coarse_h = int(getattr(self.config, "coarse_image_height", self.config.image_height))
+            vmax = float(self._ordinal_rank_max_tensor(self.to_2d.bin_centers.device).max().item())
+            span = max(vmax, 0.0)
+            return span / float(coarse_h) * 0.5 if span > 0.0 else 0.0
         if self._uses_fourier_frequency_staging():
             return self._fourier_fine_value_range()
         coarse_h = int(getattr(self.config, "coarse_image_height", self.config.image_height))
@@ -747,6 +784,17 @@ class DiffusionTSF(nn.Module):
         cdf_decoder: str = "mean",
         expectation_sharpen_temp: Optional[float] = None,
     ) -> torch.Tensor:
+        if self._uses_global_ordinal_encoding():
+            vmax = self._ordinal_rank_max_tensor(coarse_map.device, dtype=coarse_map.dtype)
+            return self.to_2d.decode_dual_heights_bounded(
+                coarse_map,
+                fine_map,
+                value_min=0.0,
+                value_max_per_variate=vmax,
+                cdf_decoder=cdf_decoder,
+                expectation_sharpen_temp=expectation_sharpen_temp,
+                squeeze_univariate=False,
+            )
         if self._uses_fourier_frequency_staging():
             return self.to_2d.decode_fourier_frequency_dual(
                 coarse_map,
@@ -771,6 +819,24 @@ class DiffusionTSF(nn.Module):
         cdf_decoder: str = "mean",
         expectation_sharpen_temp: Optional[float] = None,
     ) -> torch.Tensor:
+        if self._uses_global_ordinal_encoding():
+            vmax = self._ordinal_rank_max_tensor(coarse_map.device, dtype=coarse_map.dtype)
+            vals = []
+            for vi in range(coarse_map.shape[1]):
+                span = float(vmax[vi].item())
+                vals.append(
+                    self.to_2d._decode_occupancy_bounded(
+                        coarse_map[:, vi : vi + 1],
+                        value_min=0.0,
+                        value_max=span,
+                        cdf_decoder=cdf_decoder,
+                        expectation_sharpen_temp=expectation_sharpen_temp,
+                    )
+                )
+            out = torch.cat(vals, dim=1)
+            if coarse_map.shape[1] == 1:
+                return out.squeeze(1)
+            return out
         return self.to_2d._decode_occupancy_in_range(
             coarse_map,
             value_range=self.config.max_scale,
@@ -787,6 +853,22 @@ class DiffusionTSF(nn.Module):
         expectation_sharpen_temp: Optional[float] = None,
     ) -> torch.Tensor:
         fine_range = self._staged_fine_residual_value_range()
+        if self._uses_global_ordinal_encoding():
+            vals = []
+            for vi in range(fine_map.shape[1]):
+                vals.append(
+                    self.to_2d._decode_occupancy_bounded(
+                        fine_map[:, vi : vi + 1],
+                        value_min=-fine_range,
+                        value_max=fine_range,
+                        cdf_decoder=cdf_decoder,
+                        expectation_sharpen_temp=expectation_sharpen_temp,
+                    )
+                )
+            out = torch.cat(vals, dim=1)
+            if fine_map.shape[1] == 1:
+                return out.squeeze(1)
+            return out
         return self.to_2d._decode_occupancy_in_range(
             fine_map,
             value_range=fine_range,
@@ -869,6 +951,15 @@ class DiffusionTSF(nn.Module):
 
     def _encode_staged_dual_to_2d_binary(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         coarse_h, fine_h, _finer_h = self._staged_image_heights()
+        if self._uses_global_ordinal_encoding():
+            vmax = self._ordinal_rank_max_tensor(x.device, dtype=x.dtype)
+            return self.to_2d.encode_dual_heights_bounded(
+                x,
+                coarse_height=coarse_h,
+                fine_height=fine_h,
+                value_min=0.0,
+                value_max_per_variate=vmax,
+            )
         if self._uses_haar_frequency_staging():
             return self.to_2d.encode_haar_frequency_heights(
                 x,
@@ -898,6 +989,16 @@ class DiffusionTSF(nn.Module):
     def _encode_staged_maps(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         x = self._subsample_repr_time(x)
         coarse_h, fine_h, finer_h = self._staged_image_heights()
+        if self._uses_global_ordinal_encoding():
+            vmax = self._ordinal_rank_max_tensor(x.device, dtype=x.dtype)
+            coarse, fine = self.to_2d.encode_dual_heights_bounded(
+                x,
+                coarse_height=coarse_h,
+                fine_height=fine_h,
+                value_min=0.0,
+                value_max_per_variate=vmax,
+            )
+            return {"coarse": coarse, "fine": fine}
         if self._uses_haar_frequency_staging():
             if getattr(self.config, "use_triple_scale", False):
                 raise ValueError("haar_frequency staging supports only coarse/fine stages")

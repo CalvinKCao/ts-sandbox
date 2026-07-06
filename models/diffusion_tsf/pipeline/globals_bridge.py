@@ -87,6 +87,9 @@ def patch_globals(
     mod.DIFFUSION_TYPE = state.diffusion_type
     mod.USE_ORDINAL_WINDOW_NORM = state.use_ordinal_window_norm
     mod.ORDINAL_TIE_ATOL = state.ordinal_tie_atol
+    ladder = state.extra.get("global_ordinal_ladder")
+    if ladder is not None:
+        mod.GLOBAL_ORDINAL_LADDER = ladder
     mod.DETERMINISTIC_ANCHOR_LOSS = state.deterministic_anchor_loss
     mod.DETERMINISTIC_ANCHOR_LAMBDA = state.deterministic_anchor_lambda
     mod.DETERMINISTIC_ANCHOR_ALPHA = state.deterministic_anchor_alpha
