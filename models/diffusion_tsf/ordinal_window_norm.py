@@ -23,8 +23,12 @@ class OrdinalLadder:
     precomputed_ranks: Optional[torch.Tensor] = None  # (T, V) float32, optional
 
     def rank_max_per_variate(self) -> torch.Tensor:
-        """Inclusive max rank index per variate (0 when only one unique value)."""
-        return (self.n_unique - 1).clamp_min(0)
+        """Inclusive max rank index per variate (0 when only one unique value).
+
+        Always uses row 0 so batch-expanded ladders (expand_batch) still broadcast
+        as (V,) / (1, V, 1), not (B*V,).
+        """
+        return (self.n_unique[0] - 1).clamp_min(0)
 
     def z_envelope(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Per-variate train ladder min/max z-scores, shape (V,)."""

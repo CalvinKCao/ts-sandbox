@@ -88,6 +88,25 @@ def test_decode_handles_nan_predictions():
     assert torch.isfinite(decoded).all()
 
 
+def test_ranks_to_unit_with_expanded_ladder():
+    """Regression: ordinal_encode expands ladder; unit scaling must stay (1, V, 1)."""
+    z = torch.randn(500, 4)
+    ladder = build_global_ladder_from_training(z.numpy(), tie_atol=1e-6)
+    past = torch.randn(32, 4, 336)
+    future = torch.randn(32, 4, 720)
+    past_ord, fut_ord, ladder_b = ordinal_encode(
+        past, future, ladder=ladder, apply_ood_shift=True,
+    )
+    assert ladder_b.n_unique.shape[0] == 32
+    past_unit = ranks_to_unit(past_ord, ladder_b)
+    fut_unit = ranks_to_unit(fut_ord, ladder_b)
+    assert past_unit.shape == (32, 4, 336)
+    assert fut_unit.shape == (32, 4, 720)
+    assert torch.isfinite(past_unit).all()
+    assert torch.isfinite(fut_unit).all()
+    assert torch.allclose(ranks_from_unit(past_unit, ladder_b), past_ord, atol=1.0)
+
+
 def test_mmpd_unit_rank_roundtrip():
     z = torch.randn(500, 4)
     ladder = build_global_ladder_from_training(z.numpy(), tie_atol=1e-6, precompute_ranks_for=z.numpy())
