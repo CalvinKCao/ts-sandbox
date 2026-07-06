@@ -24,6 +24,7 @@ from models.diffusion_tsf.pipeline.visualize_utils import (
     per_window_crps,
     run_eval_worst_window_visualizations,
     run_ordinal_roundtrip_visualization,
+    run_ordinal_coarse_fine_2d_visualization,
     run_real_dataset_phase_diagnostics,
     run_staged_finetune_visualizations,
 )
@@ -784,6 +785,13 @@ class StagedEvalPhase(PipelinePhase):
                     )
                 except Exception as e:
                     logger.warning("Ordinal roundtrip viz failed: %s", e, exc_info=True)
+                try:
+                    repr_paths = run_ordinal_coarse_fine_2d_visualization(state, variate=0)
+                    wandb_utils.log_visualization_paths(
+                        repr_paths, wandb_key="eval/ordinal_coarse_fine_2d",
+                    )
+                except Exception as e:
+                    logger.warning("Ordinal coarse/fine 2D viz failed: %s", e, exc_info=True)
 
         logger.info(
             "[%s] staged eval done: sampler=%s steps=%d "

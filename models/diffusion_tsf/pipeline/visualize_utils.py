@@ -1953,6 +1953,74 @@ def run_ordinal_roundtrip_visualization(
     return paths
 
 
+def run_ordinal_coarse_fine_2d_visualization(
+    state: Any,
+    *,
+    variate: int = 0,
+    window_idx: int | None = None,
+    prefer_flatlines: bool = False,
+) -> list[str]:
+    """Full train context: raw → z → ordinal → coarse/fine 2D CDF pixels."""
+    from models.diffusion_tsf.train_multivariate_pipeline import generate_dataset_job, load_dataset
+    from utils.visualize_ordinal_coarse_fine_2d import (
+        pick_random_variate,
+        pick_window_with_flatlines,
+        plot_ordinal_coarse_fine_2d,
+    )
+
+    viz = _viz_cfg(state)
+    if not viz.get("enabled", True):
+        return []
+
+    variate_indices = state.variate_indices
+    if variate_indices is None:
+        variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+    tie_atol = float(getattr(state, "ordinal_tie_atol", 1e-6))
+
+    train_ds, _, _, _ = load_dataset(
+        state.dataset,
+        variate_indices,
+        lookback=state.lookback_length,
+        horizon=state.forecast_length,
+        lookback_overlap=state.lookback_overlap,
+        stride=1,
+        ordinal_tie_atol=tie_atol,
+    )
+    if len(train_ds) == 0:
+        return []
+
+    vi = variate_indices[variate] if variate < len(variate_indices) else variate
+    if window_idx is None:
+        window_idx = (
+            pick_window_with_flatlines(train_ds, variate=vi, tie_atol=tie_atol)
+            if prefer_flatlines
+            else pick_sample_indices(len(train_ds), 1, seed=state.seed)[0]
+        )
+
+    config_path = None
+    merged = getattr(state, "merged_config", None) or {}
+    exp = merged.get("experiment", {})
+    exp_name = exp.get("experiment_name") or exp.get("name")
+    repo = Path(__file__).resolve().parents[3]
+    if exp_name:
+        candidate = repo / "configs" / f"{exp_name}.yaml"
+        if candidate.is_file():
+            config_path = candidate
+    if config_path is None:
+        config_path = repo / "configs" / "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm.yaml"
+
+    out_dir = os.path.join(state.results_dir, "viz", "ordinal_coarse_fine_2d")
+    return [
+        str(plot_ordinal_coarse_fine_2d(
+            dataset=state.dataset,
+            config_path=config_path,
+            out_dir=Path(out_dir),
+            window_idx=int(window_idx),
+            variate=int(vi),
+        ))
+    ]
+
+
 def run_patch_guidance_finetune_visualizations(
     state: Any,
     *,

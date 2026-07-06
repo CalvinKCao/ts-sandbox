@@ -234,6 +234,7 @@ def maybe_log_mmpd_eval_leaderboard(
         try:
             from pathlib import Path as _Path
 
+            from utils.visualize_ordinal_coarse_fine_2d import plot_ordinal_coarse_fine_2d
             from utils.visualize_ordinal_roundtrip import plot_roundtrip
 
             out_dir = args.output_dir / "viz" / "ordinal_roundtrip"
@@ -248,8 +249,19 @@ def maybe_log_mmpd_eval_leaderboard(
                     prefer_ties=False,
                 ))
             )
+            repr_dir = args.output_dir / "viz" / "ordinal_coarse_fine_2d"
+            repr_dir.mkdir(parents=True, exist_ok=True)
+            viz_paths.append(
+                str(plot_ordinal_coarse_fine_2d(
+                    dataset=dataset,
+                    config_path=_Path(args.mmpd_run_config),
+                    out_dir=repr_dir,
+                    window_idx=0,
+                    variate=0,
+                ))
+            )
         except Exception as exc:
-            print(f"[leaderboard] {dataset}: ordinal roundtrip viz skipped ({exc})")
+            print(f"[leaderboard] {dataset}: ordinal viz skipped ({exc})")
     try:
         log_mmpd_eval_to_leaderboard(
             dataset=dataset,
