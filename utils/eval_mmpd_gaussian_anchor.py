@@ -1349,6 +1349,23 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                 exp = load_model(args)
                 device = exp.device
 
+                if args.use_ordinal_window_norm:
+                    from models.diffusion_tsf.ordinal_window_norm import (
+                        build_global_ladder_from_training,
+                    )
+
+                    train_data = Dataset_MTS(
+                        root_path=args.root_path,
+                        data_path=args.data_path,
+                        flag="train",
+                        size=[args.in_len, args.out_len],
+                        data_split=args.data_split,
+                    )
+                    args.global_ordinal_ladder = build_global_ladder_from_training(
+                        train_data.data_x,
+                        tie_atol=args.ordinal_tie_atol,
+                    )
+
                 test_data = Dataset_MTS(
                     root_path=args.root_path,
                     data_path=args.data_path,

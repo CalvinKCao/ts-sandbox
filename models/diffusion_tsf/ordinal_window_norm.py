@@ -227,6 +227,31 @@ def decode_with_ladder(
     return out
 
 
+def _ensure_bvt(
+    x: torch.Tensor,
+    *,
+    n_variates: Optional[int] = None,
+) -> torch.Tensor:
+    """Return (B, V, T), transposing (B, T, V) when needed."""
+    if x.dim() == 2:
+        d0, d1 = x.shape
+        if n_variates is not None:
+            if d0 == n_variates:
+                return x.unsqueeze(0)
+            if d1 == n_variates:
+                return x.transpose(0, 1).unsqueeze(0)
+        return x.unsqueeze(0) if d0 <= d1 else x.transpose(0, 1).unsqueeze(0)
+    if x.dim() != 3:
+        raise ValueError(f"expected (B,V,T) or (V,T), got {tuple(x.shape)}")
+    b, d0, d1 = x.shape
+    if n_variates is not None:
+        if d0 == n_variates:
+            return x
+        if d1 == n_variates:
+            return x.transpose(1, 2).contiguous()
+    return x if d0 <= d1 else x.transpose(1, 2).contiguous()
+
+
 def shift_window_to_ordinal_envelope(
     past: torch.Tensor,
     future: Optional[torch.Tensor],
@@ -240,6 +265,12 @@ def shift_window_to_ordinal_envelope(
   Only applies when lookback has OOD timesteps (outside train min/max).
   Target: [train_min + margin*span, train_max - margin*span] per variate.
     """
+    n_variates = int(ladder.values.shape[1])
+    single_batch = past.dim() == 2
+    past = _ensure_bvt(past, n_variates=n_variates)
+    if future is not None:
+        future = _ensure_bvt(future, n_variates=n_variates)
+
     train_min, train_max = ladder.z_envelope()
     device = past.device
     dtype = past.dtype
@@ -250,40 +281,35 @@ def shift_window_to_ordinal_envelope(
     lo = train_min + margin
     hi = train_max - margin
 
-    if past.dim() == 2:
-        past = past.unsqueeze(0)
     past_out = past.clone()
     fut_out = future.clone() if future is not None else None
 
     if future is not None:
-        if future.dim() == 2:
-            future = future.unsqueeze(0)
         combined = torch.cat([past, future], dim=-1)
     else:
         combined = past
 
-    v = combined.shape[1]
+    b, v, _ = past.shape
     for vi in range(v):
         if check_lookback_only:
             past_v = past[:, vi]
             ood = (past_v < train_min[vi]) | (past_v > train_max[vi])
             if not ood.any():
                 continue
-        win = combined[:, vi]
+        win = combined[:, vi].reshape(b, -1)
         wmin = win.min(dim=-1, keepdim=True).values
         wmax = win.max(dim=-1, keepdim=True).values
         shift = torch.zeros_like(wmin)
         shift = torch.where(wmax > hi[vi], hi[vi] - wmax, shift)
         shift = torch.where(wmin < lo[vi], lo[vi] - wmin, shift)
-        if past_out.dim() == 3:
-            past_out[:, vi] = past_out[:, vi] + shift.squeeze(-1)
-            if fut_out is not None:
-                fut_out[:, vi] = fut_out[:, vi] + shift.squeeze(-1)
+        past_out[:, vi] = past_out[:, vi] + shift
+        if fut_out is not None:
+            fut_out[:, vi] = fut_out[:, vi] + shift
 
-    if past.dim() == 2 and past_out.shape[0] == 1:
+    if single_batch:
         past_out = past_out.squeeze(0)
-    if fut_out is not None and future is not None and future.dim() == 2:
-        fut_out = fut_out.squeeze(0)
+        if fut_out is not None:
+            fut_out = fut_out.squeeze(0)
     return past_out, fut_out
 
 

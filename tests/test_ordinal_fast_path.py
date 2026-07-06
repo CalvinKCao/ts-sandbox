@@ -51,6 +51,30 @@ def test_ood_shift_skipped_when_in_envelope():
     assert torch.allclose(sf, future)
 
 
+def test_ood_shift_lb336_val_batch_with_forced_ood():
+    """Regression: val OOD shift on lb336/hz720 must not shape-mismatch."""
+    from models.diffusion_tsf.train_multivariate_pipeline import load_dataset, generate_dataset_job
+    from torch.utils.data import DataLoader
+
+    vi = generate_dataset_job("ETTh1")["variate_indices"]
+    _, val_ds, _, stats = load_dataset(
+        "ETTh1", vi, lookback=336, horizon=720, lookback_overlap=8,
+        use_ordinal_window_norm=True,
+    )
+    ladder = stats["ordinal_ladder"]
+    past, future = next(iter(DataLoader(val_ds, batch_size=8)))
+    past = past + 50.0
+    ordinal_encode(past, future, ladder=ladder, apply_ood_shift=True)
+
+
+def test_ood_shift_btv_layout():
+    train = torch.randn(100, 7)
+    ladder = build_global_ladder_from_training(train.numpy(), tie_atol=1e-6)
+    past = torch.randn(4, 336, 7)
+    future = torch.randn(4, 728, 7)
+    shift_window_to_ordinal_envelope(past, future, ladder, margin_frac=0.05)
+
+
 def test_weather_sized_encode_is_fast():
     """Weather-scale batch encode should be ms, not seconds."""
     torch.manual_seed(1)
