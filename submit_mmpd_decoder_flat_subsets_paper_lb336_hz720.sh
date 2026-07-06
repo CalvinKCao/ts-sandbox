@@ -16,7 +16,7 @@ CONFIG="configs/mmpd_decoder_flat_subsets_paper_lb336_hz720.yaml"
 OUTPUT_DIR="results/datasets/$(date +%m-%d)-mmpd-decoder-paper-lb336-hz720-subset"
 DEPENDENCY=""
 DATASET=""
-WALL_TIME="8:00:00"
+WALL_TIME="24:00:00"
 EXTRA=()
 
 # shellcheck source=utils/mmpd_submit_helpers.sh

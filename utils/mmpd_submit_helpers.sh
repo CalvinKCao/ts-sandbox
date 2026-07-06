@@ -37,9 +37,23 @@ read_mmpd_yaml_datasets() {
     ' "$config"
 }
 
-# Per-dataset Slurm wall times (tune 7x10ep + train 20ep + 100-sample eval).
+# Per-dataset Slurm wall times.
+# lb96 default: tune 7x10ep + train 20ep + 100-sample eval.
+# lb336/hz720 callers pass --time 24:00:00+; ~1h/epoch train plus heavy eval.
 mmpd_dataset_wall_time() {
     local ds="$1" default_wall="$2"
+    local long=0
+    if [[ "$default_wall" =~ ^(2[4-9]|48): ]]; then
+        long=1
+    fi
+    if [[ "$long" -eq 1 ]]; then
+        case "$ds" in
+            dynamic) echo "48:00:00" ;;
+            weather|electricity|traffic|PeMS|dalia) echo "24:00:00" ;;
+            *) echo "$default_wall" ;;
+        esac
+        return
+    fi
     case "$ds" in
         dynamic) echo "12:00:00" ;;
         weather|electricity|traffic|PeMS|dalia) echo "6:00:00" ;;
