@@ -966,7 +966,26 @@ def _plot_staged_2d_maps_native(
     return save_figure_jpg(fig, path, dpi=jpeg_dpi)
 
 
-def _plot_itrans_window_norm_1d(
+def _guidance_forecast_plot_kwargs(state: Any) -> Dict[str, str]:
+    """Labels/filenames for guidance forecast panels (patch vs iTrans)."""
+    ordinal = bool(getattr(state, "use_ordinal_window_norm", False))
+    if getattr(state, "guidance_type", "") == "patch_decoder":
+        gt_label = "GT (ordinal rank)" if ordinal else "GT (window norm)"
+        return {
+            "guidance_label": "patch decoder",
+            "gt_label": gt_label,
+            "title": None,
+            "filename_tag": "patch_pred",
+        }
+    return {
+        "guidance_label": "iTrans",
+        "gt_label": "GT (window norm)",
+        "title": None,
+        "filename_tag": "itrans_pred",
+    }
+
+
+def _plot_guidance_forecast_1d(
     *,
     past_norm: torch.Tensor,
     future_norm: torch.Tensor,
@@ -976,6 +995,10 @@ def _plot_itrans_window_norm_1d(
     lookback_length: int,
     jpeg_dpi: int,
     variables_to_plot: int,
+    guidance_label: str = "guidance",
+    gt_label: str = "GT",
+    title: str | None = None,
+    filename_tag: str = "guidance_pred",
 ) -> str:
     past_norm = past_norm[0] if past_norm.dim() == 3 else past_norm
     future_norm = future_norm[0] if future_norm.dim() == 3 else future_norm
@@ -998,14 +1021,14 @@ def _plot_itrans_window_norm_1d(
     for col in range(n_cols):
         ax = axes[0, col]
         ax.plot(t_past, past_norm[col, -lookback_length:].numpy(), color="#9E9E9E", alpha=0.6, linewidth=1.0)
-        ax.plot(t_future, future_norm[col].numpy(), color="#2196F3", linewidth=1.4, label="GT (window norm)")
+        ax.plot(t_future, future_norm[col].numpy(), color="#2196F3", linewidth=1.4, label=gt_label)
         ax.plot(
             np.arange(-K, guidance_norm.shape[-1] - K),
             guidance_norm[col].numpy(),
             color="#FF9800",
             linewidth=1.2,
             linestyle="--",
-            label="iTrans",
+            label=guidance_label,
         )
         ax.axvline(x=0, color="black", linestyle=":", alpha=0.25)
         mae = float(np.mean(np.abs(guidance_norm[col, K:].numpy() - future_norm[col].numpy())))
@@ -1013,9 +1036,37 @@ def _plot_itrans_window_norm_1d(
         if col == 0:
             ax.legend(loc="upper left", fontsize=7)
 
-    fig.suptitle(f"iTransformer prediction | sample {sample_index}", fontsize=11, fontweight="semibold")
-    path = os.path.join(output_dir, f"itrans_pred_1d_idx{sample_index}.jpg")
+    plot_title = title or f"{guidance_label} prediction | sample {sample_index}"
+    fig.suptitle(plot_title, fontsize=11, fontweight="semibold")
+    path = os.path.join(output_dir, f"{filename_tag}_1d_idx{sample_index}.jpg")
     return save_figure_jpg(fig, path, dpi=jpeg_dpi)
+
+
+def _plot_itrans_window_norm_1d(
+    *,
+    past_norm: torch.Tensor,
+    future_norm: torch.Tensor,
+    guidance_norm: torch.Tensor,
+    sample_index: int,
+    output_dir: str,
+    lookback_length: int,
+    jpeg_dpi: int,
+    variables_to_plot: int,
+) -> str:
+    return _plot_guidance_forecast_1d(
+        past_norm=past_norm,
+        future_norm=future_norm,
+        guidance_norm=guidance_norm,
+        sample_index=sample_index,
+        output_dir=output_dir,
+        lookback_length=lookback_length,
+        jpeg_dpi=jpeg_dpi,
+        variables_to_plot=variables_to_plot,
+        guidance_label="iTrans",
+        gt_label="GT (window norm)",
+        title=f"iTransformer prediction | sample {sample_index}",
+        filename_tag="itrans_pred",
+    )
 
 
 def run_staged_synthetic_pretrain_diagnostics(
@@ -1620,16 +1671,18 @@ def run_real_dataset_phase_diagnostics(
         W_fut = future_maps[stage].shape[-1]
         guidance_norm = model._get_guidance_forecast_norm(past_b, past_norm, norm_stats, W_fut)
         guidance_maps = model._encode_staged_maps(guidance_norm)
-        p3 = _plot_itrans_window_norm_1d(
+        g_plot = _guidance_forecast_plot_kwargs(state)
+        p3 = _plot_guidance_forecast_1d(
             past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
             guidance_norm=guidance_norm[0].cpu(),
             sample_index=sample_index, output_dir=output_dir,
             lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
             variables_to_plot=variables_to_plot,
+            **g_plot,
         )
         p4 = _plot_staged_2d_maps_native(
             maps={k: v.detach().cpu() for k, v in guidance_maps.items() if k in {"coarse", "fine"}},
-            sample_index=sample_index, output_dir=output_dir, tag="itrans_pred",
+            sample_index=sample_index, output_dir=output_dir, tag=g_plot["filename_tag"],
             variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
         )
         cond_paths = run_diffusion_conditioning_diagnostics(
@@ -2208,13 +2261,15 @@ def run_patch_guidance_finetune_diagnostics(
                 variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
             )
         ]
+        g_plot = _guidance_forecast_plot_kwargs(state)
         viz_out["viz"]["viz/patch_guidance_finetune/guidance_1d"] = [
-            _plot_itrans_window_norm_1d(
+            _plot_guidance_forecast_1d(
                 past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
                 guidance_norm=g_norm[0].cpu(),
                 sample_index=sample_index, output_dir=output_dir,
                 lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
                 variables_to_plot=variables_to_plot,
+                **g_plot,
             )
         ]
         # Same panels under legacy iTrans wandb keys (patch_decoder campaigns).

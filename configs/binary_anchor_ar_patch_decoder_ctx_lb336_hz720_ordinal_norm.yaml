@@ -17,4 +17,3 @@ phases:
     reuse_pretrain_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_fixed
 
   - phase: patch_guidance_finetune_hp
-    reuse_checkpoint_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_fixed

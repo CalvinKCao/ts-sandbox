@@ -145,6 +145,16 @@ def _plot_full_train_context(
     ax.legend(loc="upper right", fontsize=7, ncol=2)
 
 
+def _window_z_scores(ds, window_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Past/future from z-scored ``ds.data``, not precomputed ordinal ranks."""
+    start = window_idx * ds.stride
+    past = ds.data[start : start + ds.lookback].T
+    target_start = start + ds.lookback - ds.lookback_overlap
+    target_end = start + ds.lookback + ds.horizon
+    future = ds.data[target_start:target_end].T
+    return past, future
+
+
 def _count_ties(xs: np.ndarray, tie_atol: float) -> int:
     if xs.size == 0:
         return 0
@@ -247,7 +257,7 @@ def plot_ordinal_coarse_fine_2d(
     hl_fut_lo, hl_fut_hi = _raw_to_sub(fut_start, fut_end)
     hl_all_lo, hl_all_hi = _raw_to_sub(start, fut_end)
 
-    past, future = train_ds[window_idx]
+    past, future = _window_z_scores(train_ds, window_idx)
     past_b = past.unsqueeze(0)
     fut_b = future.unsqueeze(0)
     past_ord, fut_ord, _ = ordinal_encode(past_b, fut_b, ladder=ladder)[:3]
