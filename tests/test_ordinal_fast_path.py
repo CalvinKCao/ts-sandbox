@@ -11,6 +11,7 @@ from models.diffusion_tsf.ordinal_window_norm import (
     encode_with_ladder,
     decode_with_ladder,
     ordinal_encode,
+    ordinal_decode,
     ranks_from_unit,
     ranks_to_unit,
     shift_window_to_ordinal_envelope,
@@ -32,7 +33,7 @@ def test_ood_shift_brings_window_inside_margin():
     ladder = build_global_ladder_from_training(train, tie_atol=1e-6)
     past = torch.tensor([[[3.5, 3.6, 3.7, 3.8]]])
     future = torch.tensor([[[4.0, 4.1, 4.2]]])
-    shifted_p, shifted_f = shift_window_to_ordinal_envelope(
+    shifted_p, shifted_f, shift = shift_window_to_ordinal_envelope(
         past, future, ladder, margin_frac=0.05,
     )
     tmin, tmax = ladder.z_envelope()
@@ -49,7 +50,7 @@ def test_ood_shift_skipped_when_in_envelope():
     ladder = build_global_ladder_from_training(train, tie_atol=1e-6)
     past = torch.tensor([[[-1.0, 0.0, 0.5, 1.0]]])
     future = torch.tensor([[[0.0, 0.2, 0.4]]])
-    sp, sf = shift_window_to_ordinal_envelope(past, future, ladder)
+    sp, sf, _shift = shift_window_to_ordinal_envelope(past, future, ladder)
     assert torch.allclose(sp, past)
     assert torch.allclose(sf, future)
 
@@ -94,7 +95,7 @@ def test_ranks_to_unit_with_expanded_ladder():
     ladder = build_global_ladder_from_training(z.numpy(), tie_atol=1e-6)
     past = torch.randn(32, 4, 336)
     future = torch.randn(32, 4, 720)
-    past_ord, fut_ord, ladder_b = ordinal_encode(
+    past_ord, fut_ord, ladder_b, _ood_shift = ordinal_encode(
         past, future, ladder=ladder, apply_ood_shift=True,
     )
     assert ladder_b.n_unique.shape[0] == 32
@@ -114,6 +115,21 @@ def test_mmpd_unit_rank_roundtrip():
     unit = ranks_to_unit(ranks, ladder)
     restored = ranks_from_unit(unit, ladder)
     assert torch.allclose(restored.round(), ranks.float().unsqueeze(0), atol=1.0)
+
+
+def test_ood_shift_reversed_on_decode():
+    """Eval OOD shift must be subtracted after ordinal decode (global z GT space)."""
+    train = torch.linspace(-2.0, 2.0, steps=100).unsqueeze(1)
+    ladder = build_global_ladder_from_training(train, tie_atol=1e-6)
+    past = torch.tensor([[[3.5, 3.6, 3.7, 3.8]]])
+    future = torch.tensor([[[4.0, 4.1, 4.2, 4.3]]])
+    past_ord, fut_ord, _, ood_shift = ordinal_encode(
+        past, future, ladder=ladder, apply_ood_shift=True,
+    )
+    _, fut_raw = ordinal_decode(past_ord, fut_ord, ladder)
+    assert float((fut_raw - future).abs().max()) > 0.5
+    _, fut_dec = ordinal_decode(past_ord, fut_ord, ladder, ood_shift=ood_shift)
+    assert torch.allclose(fut_dec, future, atol=0.05)
 
 
 def test_weather_sized_encode_is_fast():

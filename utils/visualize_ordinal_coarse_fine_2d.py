@@ -250,7 +250,7 @@ def plot_ordinal_coarse_fine_2d(
     past, future = train_ds[window_idx]
     past_b = past.unsqueeze(0)
     fut_b = future.unsqueeze(0)
-    past_ord, fut_ord, _ = ordinal_encode(past_b, fut_b, ladder=ladder)
+    past_ord, fut_ord, _ = ordinal_encode(past_b, fut_b, ladder=ladder)[:3]
     seq_ord = torch.cat([past_ord, fut_ord], dim=-1)
 
     vmax = ladder.rank_max_per_variate().reshape(-1).to(dtype=seq_ord.dtype)

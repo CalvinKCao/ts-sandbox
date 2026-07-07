@@ -89,7 +89,7 @@ def plot_roundtrip(
     past_b = past.unsqueeze(0)
     fut_b = future.unsqueeze(0)
 
-    past_ord, fut_ord, ladder = ordinal_encode(
+    past_ord, fut_ord, ladder, _ood_shift = ordinal_encode(
         past_b, fut_b, ladder=ladder,
     )
     past_rec, fut_rec = ordinal_decode(past_ord, fut_ord, ladder)

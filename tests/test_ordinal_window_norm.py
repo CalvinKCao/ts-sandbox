@@ -19,7 +19,7 @@ def test_flatline_all_same_ordinal():
     ladder = _ladder_from_values(train)
     past = torch.ones(2, 1, 10)
     future = torch.ones(2, 1, 5)
-    past_ord, fut_ord, _ = ordinal_encode(past, future, ladder=ladder)
+    past_ord, fut_ord, _ = ordinal_encode(past, future, ladder=ladder)[:3]
     assert torch.allclose(past_ord, torch.zeros_like(past_ord), atol=1e-5)
     assert torch.allclose(fut_ord, torch.zeros_like(fut_ord), atol=1e-5)
     assert int(ladder.n_unique.max()) == 1
@@ -30,7 +30,7 @@ def test_three_unique_with_ties():
     ladder = _ladder_from_values(train)
     past = torch.tensor([[[-1.0, 0.0, 0.0, 0.0, 1.0]]])
     future = torch.tensor([[[0.0, 1.0, -1.0]]])
-    past_ord, fut_ord, _ = ordinal_encode(past, future, ladder=ladder)
+    past_ord, fut_ord, _ = ordinal_encode(past, future, ladder=ladder)[:3]
     assert int(ladder.n_unique[0, 0]) == 3
     assert past_ord.max() <= 2.0
     past_back, fut_back = ordinal_decode(past_ord, fut_ord, ladder)
@@ -43,8 +43,8 @@ def test_global_ladder_shared_across_windows():
     ladder = _ladder_from_values(train)
     w1_past = torch.tensor([[[-2.0, -1.0, 0.0]]])
     w2_past = torch.tensor([[[0.0, 1.0, 2.0]]])
-    w1_ord, _, _ = ordinal_encode(w1_past, None, ladder=ladder)
-    w2_ord, _, _ = ordinal_encode(w2_past, None, ladder=ladder)
+    w1_ord, _, _ = ordinal_encode(w1_past, None, ladder=ladder)[:3]
+    w2_ord, _, _ = ordinal_encode(w2_past, None, ladder=ladder)[:3]
     assert float(w1_ord[0, 0, -1]) < float(w2_ord[0, 0, -1])
 
 

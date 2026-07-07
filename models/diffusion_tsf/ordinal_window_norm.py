@@ -290,11 +290,13 @@ def shift_window_to_ordinal_envelope(
     *,
     margin_frac: float = 0.05,
     check_lookback_only: bool = True,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
     """Shift entire window (past+future) so values fit inside train ladder envelope.
 
-  Only applies when lookback has OOD timesteps (outside train min/max).
-  Target: [train_min + margin*span, train_max - margin*span] per variate.
+    Only applies when lookback has OOD timesteps (outside train min/max).
+    Target: [train_min + margin*span, train_max - margin*span] per variate.
+
+    Returns ``ood_shift`` with shape (B, V, 1) to subtract after ordinal decode.
     """
     n_variates = int(ladder.values.shape[1])
     single_batch = past.dim() == 2
@@ -321,6 +323,7 @@ def shift_window_to_ordinal_envelope(
         combined = past
 
     b, v, _ = past.shape
+    ood_shift = torch.zeros(b, v, 1, device=device, dtype=dtype)
     for vi in range(v):
         if check_lookback_only:
             past_v = past[:, vi]
@@ -333,6 +336,7 @@ def shift_window_to_ordinal_envelope(
         shift = torch.zeros_like(wmin)
         shift = torch.where(wmax > hi[vi], hi[vi] - wmax, shift)
         shift = torch.where(wmin < lo[vi], lo[vi] - wmin, shift)
+        ood_shift[:, vi, 0] = shift.squeeze(-1)
         past_out[:, vi] = past_out[:, vi] + shift
         if fut_out is not None:
             fut_out[:, vi] = fut_out[:, vi] + shift
@@ -341,7 +345,8 @@ def shift_window_to_ordinal_envelope(
         past_out = past_out.squeeze(0)
         if fut_out is not None:
             fut_out = fut_out.squeeze(0)
-    return past_out, fut_out
+        ood_shift = ood_shift.squeeze(0)
+    return past_out, fut_out, ood_shift
 
 
 def ordinal_encode(
@@ -351,9 +356,10 @@ def ordinal_encode(
     ladder: OrdinalLadder,
     apply_ood_shift: bool = False,
     margin_frac: float = 0.05,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], OrdinalLadder]:
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], OrdinalLadder, torch.Tensor]:
+    ood_shift: Optional[torch.Tensor] = None
     if apply_ood_shift:
-        past, future = shift_window_to_ordinal_envelope(
+        past, future, ood_shift = shift_window_to_ordinal_envelope(
             past, future, ladder, margin_frac=margin_frac,
         )
     if past.dim() == 2:
@@ -361,16 +367,35 @@ def ordinal_encode(
     else:
         batch_size = past.shape[0]
     ladder_b = ladder.expand_batch(batch_size)
+    if ood_shift is None:
+        device = past.device if past.dim() == 3 else ladder_b.values.device
+        dtype = past.dtype if past.dim() >= 2 else ladder_b.values.dtype
+        ood_shift = torch.zeros(
+            batch_size,
+            int(ladder_b.values.shape[1]),
+            1,
+            device=device,
+            dtype=dtype,
+        )
+        if past.dim() == 2:
+            ood_shift = ood_shift.squeeze(0)
     past_ord = encode_with_ladder(past, ladder_b)
     fut_ord = encode_with_ladder(future, ladder_b) if future is not None else None
-    return past_ord, fut_ord, ladder_b
+    return past_ord, fut_ord, ladder_b, ood_shift
 
 
 def ordinal_decode(
     past_ord: torch.Tensor,
     future_ord: Optional[torch.Tensor],
     ladder: OrdinalLadder,
+    *,
+    ood_shift: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     past_val = decode_with_ladder(past_ord, ladder)
     fut_val = decode_with_ladder(future_ord, ladder) if future_ord is not None else None
+    if ood_shift is not None and fut_val is not None:
+        shift = ood_shift
+        if shift.dim() == 2:
+            shift = shift.unsqueeze(-1)
+        fut_val = fut_val - shift.to(device=fut_val.device, dtype=fut_val.dtype)
     return past_val, fut_val

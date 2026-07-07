@@ -58,7 +58,7 @@ def _prepare_normed_batch(batch_x, batch_y, args, *, apply_ood_shift=False):
         ladder = _ordinal_ladder(args)
         if getattr(args, "ordinal_train_is_ranked", False):
             return batch_x, batch_y, ("ordinal", ladder)
-        past_ord, future_ord, ladder = ordinal_encode(
+        past_ord, future_ord, ladder, ood_shift = ordinal_encode(
             batch_x,
             batch_y,
             ladder=ladder,
@@ -66,14 +66,19 @@ def _prepare_normed_batch(batch_x, batch_y, args, *, apply_ood_shift=False):
         )
         past_ord = ranks_to_unit(past_ord, ladder)
         future_ord = ranks_to_unit(future_ord, ladder)
-        return past_ord, future_ord, ("ordinal", ladder)
+        return past_ord, future_ord, ("ordinal", ladder, ood_shift)
     x_shift, x_scale = get_statistics(batch_x)
     normed_x = normalize(batch_x, x_shift, x_scale)
     normed_y = normalize(batch_y, x_shift, x_scale)
     return normed_x, normed_y, ("instance", x_shift, x_scale)
 
 
-def _denormalize_ordinal_future(future_ord: torch.Tensor, ladder) -> torch.Tensor:
+def _denormalize_ordinal_future(
+    future_ord: torch.Tensor,
+    ladder,
+    *,
+    ood_shift: torch.Tensor | None = None,
+) -> torch.Tensor:
     future_ord = ranks_from_unit(future_ord, ladder)
     future_ord = torch.nan_to_num(future_ord, nan=0.0, posinf=0.0, neginf=0.0)
     if future_ord.dim() == 4:
@@ -84,6 +89,7 @@ def _denormalize_ordinal_future(future_ord: torch.Tensor, ladder) -> torch.Tenso
                 torch.zeros(b, d, 1, device=future_ord.device, dtype=future_ord.dtype),
                 future_ord[:, :, si, :],
                 ladder,
+                ood_shift=ood_shift,
             )
             chunks.append(fut)
         return torch.stack(chunks, dim=2)
@@ -97,13 +103,15 @@ def _denormalize_ordinal_future(future_ord: torch.Tensor, ladder) -> torch.Tenso
         ),
         future_ord,
         ladder,
+        ood_shift=ood_shift,
     )
     return fut
 
 
 def _denormalize_predictions(preds: torch.Tensor, norm_ctx) -> torch.Tensor:
     if norm_ctx[0] == "ordinal":
-        return _denormalize_ordinal_future(preds, norm_ctx[1])
+        ood_shift = norm_ctx[2] if len(norm_ctx) > 2 else None
+        return _denormalize_ordinal_future(preds, norm_ctx[1], ood_shift=ood_shift)
     return denormalize(preds, norm_ctx[1], norm_ctx[2])
 
 class _Ema:

@@ -459,7 +459,7 @@ class DiffusionTSF(nn.Module):
                 center = torch.zeros_like(past[..., :1])
                 std = torch.ones_like(past[..., :1])
                 return past, future, (center, std, ladder_b)
-            past_ord, future_ord, ladder_b = ordinal_encode(
+            past_ord, future_ord, ladder_b, ood_shift = ordinal_encode(
                 past,
                 future,
                 ladder=ladder,
@@ -467,7 +467,7 @@ class DiffusionTSF(nn.Module):
             )
             center = torch.zeros_like(past[..., :1])
             std = torch.ones_like(past[..., :1])
-            return past_ord, future_ord, (center, std, ladder_b)
+            return past_ord, future_ord, (center, std, ladder_b, ood_shift)
 
         if not self.config.use_window_normalization:
             mean = torch.zeros_like(past[..., :1])
@@ -516,15 +516,17 @@ class DiffusionTSF(nn.Module):
         self,
         future_norm: torch.Tensor,
         past: torch.Tensor,
-        stats: Tuple[torch.Tensor, torch.Tensor, Optional[OrdinalLadder]],
+        stats: Tuple[torch.Tensor, torch.Tensor, Optional[OrdinalLadder], ...],
     ) -> torch.Tensor:
         """Map decoded future back to global z-score (ordinal inverse or window denorm)."""
-        mean, std, ladder = stats
+        mean, std, ladder, *rest = stats
+        ood_shift = rest[0] if rest else None
         if ladder is not None:
             _, future_val = ordinal_decode(
                 torch.zeros_like(past[..., :1]).expand_as(past),
                 future_norm,
                 ladder,
+                ood_shift=ood_shift,
             )
             future_norm = future_val
             mean = torch.zeros_like(mean)

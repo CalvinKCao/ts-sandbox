@@ -639,7 +639,7 @@ def _window_norm_past_future(
             raise ValueError("GLOBAL_ORDINAL_LADDER must be set before ordinal encoding")
         if data_is_ranked:
             return past, future
-        past_ord, future_ord, _ladder = ordinal_encode(
+        past_ord, future_ord, _ladder, _ood_shift = ordinal_encode(
             past,
             future,
             ladder=GLOBAL_ORDINAL_LADDER,
