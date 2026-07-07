@@ -43,6 +43,22 @@ def raw_config_from_run_config(path: Optional[Path]) -> str:
     return path.stem
 
 
+def _mmpd_horizon_from_yaml(path: Optional[Path]) -> Tuple[Optional[int], Optional[int]]:
+    if path is None or not path.is_file():
+        return None, None
+    import yaml
+
+    with path.open(encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    mmpd = data.get("mmpd") or {}
+    lookback = mmpd.get("lookback")
+    horizon = mmpd.get("horizon")
+    return (
+        int(lookback) if lookback is not None else None,
+        int(horizon) if horizon is not None else None,
+    )
+
+
 def campaign_date_from_output_dir(output_dir: Path) -> str:
     m = _OUTPUT_DATE_RE.match(output_dir.name)
     if m:
@@ -178,6 +194,18 @@ def log_mmpd_eval_to_leaderboard(
     if mmpd_run_config is not None:
         config["mmpd_run_config"] = str(mmpd_run_config.resolve())
         config["baseline"] = raw_config
+        lb, hz = _mmpd_horizon_from_yaml(mmpd_run_config)
+        if lb is not None or hz is not None:
+            config["experiment"] = {
+                "value": {
+                    k: v
+                    for k, v in (
+                        ("lookback_length", lb),
+                        ("forecast_length", hz),
+                    )
+                    if v is not None
+                }
+            }
     if tuning_path.is_file():
         config["tuning_path"] = str(tuning_path)
     if tuned_hparams:
