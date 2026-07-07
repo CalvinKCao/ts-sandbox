@@ -1128,6 +1128,13 @@ class DiffusionTSF(nn.Module):
                 expectation_sharpen_temp=temperature,
                 squeeze_univariate=(coarse_map.shape[1] == 1),
             )
+        if self._uses_global_ordinal_encoding():
+            return self._decode_staged_combined_1d(
+                coarse_map,
+                fine_map,
+                cdf_decoder=cdf_decoder,
+                expectation_sharpen_temp=temperature,
+            )
         return self.to_2d.decode_dual(
             coarse_map,
             fine_map,

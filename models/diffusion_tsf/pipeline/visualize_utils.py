@@ -1740,17 +1740,17 @@ def decode_staged_anchor_components(
     final = _staged_anchor_global_norm(fine_model, coarse_out, fine_out)
     coarse_2d = coarse_out["future_2d_coarse"]
     fine_2d = fine_out["future_2d_fine"]
+    coarse_1d = fine_model._decode_coarse_1d_from_map(coarse_2d, cdf_decoder="mean")
+    fine_1d = fine_model._decode_fine_1d_from_map(
+        fine_2d,
+        coarse_height=int(coarse_2d.shape[2]),
+        cdf_decoder="mean",
+    )
+    if coarse_1d.dim() == 2:
+        coarse_1d = coarse_1d.unsqueeze(1)
+    if fine_1d.dim() == 2:
+        fine_1d = fine_1d.unsqueeze(1)
     B, V = coarse_2d.shape[:2]
-    BV = B * V
-    to_2d = fine_model.to_2d
-    coarse_flat = coarse_2d.reshape(BV, 1, coarse_2d.shape[-2], coarse_2d.shape[-1])
-    fine_flat = fine_2d.reshape(BV, 1, fine_2d.shape[-2], fine_2d.shape[-1])
-    coarse_1d = to_2d._decode_occupancy_in_range(
-        coarse_flat, value_range=to_2d.max_scale, cdf_decoder="mean",
-    )
-    fine_1d = to_2d._decode_occupancy_in_range(
-        fine_flat, value_range=_staged_fine_value_range(fine_model), cdf_decoder="mean",
-    )
     coarse_np = coarse_1d.reshape(B, V, -1).detach().cpu().numpy()
     fine_np = fine_1d.reshape(B, V, -1).detach().cpu().numpy()
     if getattr(fine_model.config, "coarse_flatline_blur_fine_target", False):
