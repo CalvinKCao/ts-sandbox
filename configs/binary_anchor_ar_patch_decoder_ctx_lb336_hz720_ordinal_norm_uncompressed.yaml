@@ -1,0 +1,22 @@
+extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm.yaml
+
+wandb:
+  tags: [patch_decoder, ordinal_norm, lb336_hz720, fixed_hp, repr_t1, uncompressed]
+
+training:
+  force_retrain_synthetic: true
+  diffusion_batch_size: 16
+  finetune_batch_sizes: [2, 4, 8]
+
+experiment:
+  name: binary-anchor-ar-patch-decoder-lb336-hz720-ordinal-norm-uncompressed
+  experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed
+  representation_time_stride: 1
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: null
+    shared_cache: false
+
+  - phase: patch_guidance_finetune_hp
+    reuse_checkpoint_from_config: null

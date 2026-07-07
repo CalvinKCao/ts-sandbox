@@ -81,6 +81,8 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "deterministic_anchor_alpha": float(state.deterministic_anchor_alpha),
         "lookback_length": int(state.lookback_length),
         "forecast_length": int(state.forecast_length),
+        "representation_time_stride": int(state.representation_time_stride),
+        "diffusion_lookback_cap": int(state.diffusion_lookback_cap),
         "use_window_normalization": bool(state.use_window_normalization),
         "window_norm_center": str(state.window_norm_center),
         "window_norm_std_floor": float(state.window_norm_std_floor),
