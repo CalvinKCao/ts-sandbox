@@ -35,11 +35,13 @@ DIR_RAW_CONFIG: Dict[str, str] = {
     "06-16-mmpd-maskae-fair-13d": MMPD_MASKAE_FAIR_13D_RAW,
     "07-02-mmpd-decoder-grad-accum-200-lr-lo-subset": MMPD_DECODER_GRAD_ACCUM_200_LR_LO_RAW,
     "07-05-mmpd-decoder-paper-lb336-hz720-subset": "mmpd_decoder_flat_subsets_paper_lb336_hz720",
+    "07-07-mmpd-decoder-ordinal-norm-lb336-hz720": "mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm",
 }
 
 DIR_CONFIG_YAML: Dict[str, str] = {
     "07-02-mmpd-decoder-grad-accum-200-lr-lo-subset": "configs/mmpd_decoder_flat_subsets_grad_accum_200_lr_lo.yaml",
     "07-05-mmpd-decoder-paper-lb336-hz720-subset": "configs/mmpd_decoder_flat_subsets_paper_lb336_hz720.yaml",
+    "07-07-mmpd-decoder-ordinal-norm-lb336-hz720": "configs/mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm.yaml",
 }
 
 KNOWN_JOB_MAPS: Dict[str, Dict[str, str]] = {

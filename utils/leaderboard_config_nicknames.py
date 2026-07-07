@@ -131,6 +131,13 @@ def strip_leaderboard_markdown(label: str) -> str:
     return s
 
 
+_DISPLAY_CONFIG_FALLBACK: Dict[str, str] = {
+    "mmpd_decoder_flat_subsets_paper_lb336_hz720": "MMPD Decoder paper lb336/hz720",
+    "mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm": "MMPD Decoder ordinal lb336/hz720",
+    "mmpd_decoder_flat_subsets_paper_lb336_hz96": "MMPD Decoder paper lb336/hz96",
+}
+
+
 @lru_cache(maxsize=1)
 def _gsl_module():
     for rel in (
@@ -145,12 +152,16 @@ def _gsl_module():
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             return mod
-    raise RuntimeError("generate_sweep_leaderboard.py not found")
+    return None
 
 
 def display_config(raw_config: str) -> str:
     gsl = _gsl_module()
-    return gsl.display_config(raw_config)
+    if gsl is not None:
+        return gsl.display_config(raw_config)
+    if raw_config in _DISPLAY_CONFIG_FALLBACK:
+        return _DISPLAY_CONFIG_FALLBACK[raw_config]
+    return raw_config.replace("_", " ")
 
 
 def leaderboard_nickname(
