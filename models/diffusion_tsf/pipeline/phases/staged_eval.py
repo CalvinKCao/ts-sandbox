@@ -786,6 +786,9 @@ class StagedEvalPhase(PipelinePhase):
                     test_ds=full_test_ds,
                     pack=pack,
                     worst_manifest=worst_manifest,
+                    coarse_model=coarse_model,
+                    fine_model=fine_model,
+                    device=device,
                 )
                 wandb_utils.log_visualization_paths(worst_viz, wandb_key="eval/worst_windows")
             except Exception as e:

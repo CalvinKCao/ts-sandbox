@@ -1786,13 +1786,46 @@ def per_window_crps(y_true: np.ndarray, samples: np.ndarray, *, chunk: int = 32)
     return out
 
 
+def _pack_row_for_window(pack: Dict[str, np.ndarray], window_index: int) -> int:
+    """Map dataset test window index to row in staged eval pack arrays."""
+    indices = pack.get("window_indices")
+    if indices is None:
+        return int(window_index)
+    matches = np.where(indices == int(window_index))[0]
+    if matches.size == 0:
+        raise KeyError(f"window {window_index} not in eval pack (n={len(indices)})")
+    return int(matches[0])
+
+
+@torch.no_grad()
+def _worst_window_pred_2d_maps(
+    coarse_model,
+    fine_model,
+    past: torch.Tensor,
+    *,
+    device: torch.device,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Anchor-sampled coarse/fine future 2D occupancy maps, shape (V, H, W)."""
+    past_b = past.unsqueeze(0).to(device)
+    coarse_out = coarse_model.generate(past_b, sampler="anchor", num_inference_steps=1)
+    fine_out = fine_model.generate(
+        past_b,
+        sampler="anchor",
+        num_inference_steps=1,
+        future_coarse_2d=coarse_out["future_2d_coarse"],
+    )
+    coarse_2d = coarse_out["future_2d_coarse"][0].detach().cpu().numpy()
+    fine_2d = fine_out["future_2d_fine"][0].detach().cpu().numpy()
+    return coarse_2d, fine_2d
+
+
 def plot_worst_window_panel(
     *,
     past: torch.Tensor,
     future: torch.Tensor,
-    coarse_pred: np.ndarray,
-    fine_pred: np.ndarray,
     final_pred: np.ndarray,
+    coarse_2d: np.ndarray,
+    fine_2d: np.ndarray,
     metric: str,
     rank: int,
     window_index: int,
@@ -1800,42 +1833,71 @@ def plot_worst_window_panel(
     output_dir: str,
     jpeg_dpi: int = 100,
     ordinal_mode: bool = False,
+    lookback_overlap: int = 0,
 ) -> str:
-    """GT vs coarse/fine/final for a worst-error eval window."""
+    """Pred coarse/fine 2D maps + GT vs combined final 1D line chart."""
     os.makedirs(output_dir, exist_ok=True)
-    past_cf, future_cf = _as_channel_first(past, future)
+    _past_cf, future_cf = _as_channel_first(past, future)
+    k = int(lookback_overlap)
     gt = future_cf.numpy()
-    common_len = min(
-        gt.shape[-1],
-        final_pred.shape[-1],
-    )
-    if not ordinal_mode:
-        common_len = min(common_len, coarse_pred.shape[-1], fine_pred.shape[-1])
+    if k > 0 and gt.shape[-1] > k:
+        gt = gt[..., k:]
+    common_len = min(gt.shape[-1], final_pred.shape[-1])
     gt = gt[..., -common_len:]
     final_pred = final_pred[..., -common_len:]
-    if not ordinal_mode:
-        coarse_pred = coarse_pred[..., -common_len:]
-        fine_pred = fine_pred[..., -common_len:]
-    H = common_len
-    t_axis = np.arange(0, H)
-    n_vars = min(3, gt.shape[0])
+    t_axis = np.arange(0, common_len)
+    n_vars = min(3, gt.shape[0], coarse_2d.shape[0], fine_2d.shape[0])
     space_label = "global z (ordinal decode)" if ordinal_mode else "window-norm"
 
-    fig, axes = plt.subplots(n_vars, 1, figsize=(6.5, 2.4 * n_vars), squeeze=False, constrained_layout=True)
-    for v in range(n_vars):
-        ax = axes[v, 0]
-        ax.plot(t_axis, gt[v], color="#2196F3", linewidth=1.5, label="GT")
-        if not ordinal_mode:
-            ax.plot(t_axis, coarse_pred[v], color="#FF9800", linewidth=1.1, alpha=0.85, label="Coarse")
-            ax.plot(t_axis, fine_pred[v], color="#4CAF50", linewidth=1.0, alpha=0.85, label="Fine")
-        ax.plot(t_axis, final_pred[v], color="#E91E63", linewidth=1.2, label="Final")
-        ax.grid(True, alpha=0.12)
-        ax.set_title(f"var {v}", fontsize=9)
-        if v == 0:
-            ax.legend(fontsize=7, loc="upper right")
+    fig = plt.figure(figsize=(4.2 * n_vars, 2.3 * 3), constrained_layout=True)
+    gs = fig.add_gridspec(3, n_vars, height_ratios=[1.0, 1.0, 1.15])
+
+    for col in range(n_vars):
+        ax_c = fig.add_subplot(gs[0, col])
+        h, w = coarse_2d[col].shape
+        im_c = ax_c.imshow(
+            coarse_2d[col],
+            aspect="auto",
+            origin="lower",
+            extent=[0, w, 0, h],
+            cmap="gray",
+            vmin=0.0,
+            vmax=1.0,
+            interpolation="nearest",
+        )
+        ax_c.set_title(f"var {col} | coarse 2D ({h}x{w})", fontsize=8)
+        fig.colorbar(im_c, ax=ax_c, fraction=0.046, pad=0.04)
+
+        ax_f = fig.add_subplot(gs[1, col])
+        h, w = fine_2d[col].shape
+        im_f = ax_f.imshow(
+            fine_2d[col],
+            aspect="auto",
+            origin="lower",
+            extent=[0, w, 0, h],
+            cmap="gray",
+            vmin=0.0,
+            vmax=1.0,
+            interpolation="nearest",
+        )
+        ax_f.set_title(f"var {col} | fine 2D ({h}x{w})", fontsize=8)
+        fig.colorbar(im_f, ax=ax_f, fraction=0.046, pad=0.04)
+
+        ax_1d = fig.add_subplot(gs[2, col])
+        ax_1d.plot(t_axis, gt[col], color="#2196F3", linewidth=1.5, label="GT")
+        ax_1d.plot(t_axis, final_pred[col], color="#E91E63", linewidth=1.2, label="Final")
+        ax_1d.grid(True, alpha=0.12)
+        ax_1d.set_title(f"var {col} | GT vs final", fontsize=8)
+        if col == 0:
+            ax_1d.legend(fontsize=7, loc="upper right")
+
     fig.suptitle(
         f"worst {metric} rank {rank} | window {window_index} | score={score:.5f}\n"
-        + _format_scale_banner(norm_range=(float(gt.min()), float(gt.max())), space_label=space_label),
+        + _format_scale_banner(
+            norm_range=(float(gt.min()), float(gt.max())),
+            space_label=space_label,
+            extra="2D: anchor occupancy [0,1]",
+        ),
         fontsize=10,
     )
     path = os.path.join(output_dir, f"{metric}_rank{rank:02d}_win{window_index}.jpg")
@@ -1848,36 +1910,49 @@ def run_eval_worst_window_visualizations(
     test_ds,
     pack: Dict[str, np.ndarray],
     worst_manifest: List[Dict[str, Any]],
+    coarse_model=None,
+    fine_model=None,
+    device: Optional[torch.device] = None,
 ) -> List[str]:
-    """Generate GT vs pred panels for worst-window manifest entries."""
+    """Generate 2D coarse/fine maps + GT vs final panels for worst windows."""
     viz = _viz_cfg(state)
     if not viz.get("enabled", True) or not worst_manifest:
+        return []
+    if coarse_model is None or fine_model is None or device is None:
+        logger.warning("worst-window viz skipped: coarse/fine models or device missing")
         return []
 
     output_dir = os.path.join(state.results_dir, "viz", "eval_worst")
     paths: List[str] = []
     ordinal_mode = bool(getattr(state, "use_ordinal_window_norm", False))
-    coarse = pack.get("coarse_anchor")
-    fine = pack.get("fine_anchor")
     final = pack.get("final_anchor", pack.get("deterministic"))
     if final is None:
         return []
-    if not ordinal_mode and (coarse is None or fine is None):
-        return []
-    if ordinal_mode:
-        coarse = coarse if coarse is not None else final
-        fine = fine if fine is not None else np.zeros_like(final)
+
+    k_overlap = int(getattr(coarse_model.config, "lookback_overlap", 0) or 0)
+    map_cache: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
     for entry in worst_manifest:
         wi = int(entry["window_index"])
+        try:
+            pack_row = _pack_row_for_window(pack, wi)
+        except KeyError as exc:
+            logger.warning("worst-window viz skip win %s: %s", wi, exc)
+            continue
+        if wi not in map_cache:
+            past, future = test_ds[wi]
+            map_cache[wi] = _worst_window_pred_2d_maps(
+                coarse_model, fine_model, past, device=device,
+            )
+        coarse_2d, fine_2d = map_cache[wi]
         past, future = test_ds[wi]
         paths.append(
             plot_worst_window_panel(
                 past=past,
                 future=future,
-                coarse_pred=coarse[wi],
-                fine_pred=fine[wi],
-                final_pred=final[wi],
+                final_pred=final[pack_row],
+                coarse_2d=coarse_2d,
+                fine_2d=fine_2d,
                 metric=str(entry["metric"]),
                 rank=int(entry["rank"]),
                 window_index=wi,
@@ -1885,6 +1960,7 @@ def run_eval_worst_window_visualizations(
                 output_dir=output_dir,
                 jpeg_dpi=int(viz.get("jpeg_dpi", 100)),
                 ordinal_mode=ordinal_mode,
+                lookback_overlap=k_overlap,
             )
         )
     return paths
