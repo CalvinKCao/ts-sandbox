@@ -617,6 +617,121 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             return True
         return False
 
+    def on_skip(self, state: PipelineState) -> PipelineState:
+        best_pt = _stage_best_ckpt(state, self.stage)
+        if not os.path.exists(best_pt):
+            return state
+        meta_path = os.path.join(_stage_subset_dir(state, self.stage), "metadata.json")
+        best_params: Dict[str, Any] = {}
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                best_params = dict(json.load(f).get("tuned_params") or {})
+        except Exception as e:
+            logger.warning("Failed to load tuned params from %s: %s", meta_path, e)
+        try:
+            self._log_post_finetune_viz_and_diagnostics(
+                state,
+                final_ckpt=best_pt,
+                best_params=best_params,
+            )
+        except Exception as e:
+            logger.warning("[%s] cached-phase viz/wandb log failed: %s", self.name, e, exc_info=True)
+        return state
+
+    def _log_post_finetune_viz_and_diagnostics(
+        self,
+        state: PipelineState,
+        *,
+        final_ckpt: str,
+        best_params: Dict[str, Any],
+        train_ds=None,
+    ) -> None:
+        from models.diffusion_tsf.train_multivariate_pipeline import (
+            generate_dataset_job,
+            load_dataset,
+        )
+        from models.diffusion_tsf.pipeline.visualize_utils import (
+            _load_staged_diffusion_from_ckpt,
+            run_real_dataset_phase_diagnostics,
+            run_staged_finetune_visualizations,
+        )
+        import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+
+        if state.smoke_test:
+            return
+
+        patch_stage_globals(pipeline_mod, state, self.stage, honor_dataset_windows=True)
+        variate_indices = state.variate_indices
+        if variate_indices is None:
+            variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+        subset_meta = state.data_subset_resolved or {}
+        train_stride = int(subset_meta.get("train_stride", state.window_stride))
+        test_stride = int(subset_meta.get("test_stride", 1))
+        if train_ds is None:
+            train_ds, _, _, norm_stats = load_dataset(
+                state.dataset,
+                variate_indices,
+                stride=train_stride,
+                test_stride=test_stride,
+                ordinal_tie_atol=float(state.ordinal_tie_atol),
+                use_ordinal_window_norm=state.use_ordinal_window_norm,
+            )
+            if norm_stats.get("ordinal_ladder") is not None:
+                state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
+
+        ft_guidance_ckpt = state.guidance_finetune_ckpt
+        if not ft_guidance_ckpt or not os.path.exists(ft_guidance_ckpt):
+            ft_guidance_ckpt = state.default_guidance_finetune_ckpt_path()
+        if not os.path.exists(ft_guidance_ckpt):
+            logger.warning("[%s] viz skipped: guidance ckpt missing (%s)", self.name, ft_guidance_ckpt)
+            return
+
+        n_iv = len(variate_indices)
+        device = state.resolve_device()
+        coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_best_ckpt(state, "coarse")
+
+        if self.stage == "fine" and coarse_ft and final_ckpt and os.path.exists(coarse_ft):
+            try:
+                viz_paths = run_staged_finetune_visualizations(
+                    state,
+                    coarse_ckpt_path=coarse_ft,
+                    fine_ckpt_path=final_ckpt,
+                    itrans_ckpt_path=ft_guidance_ckpt,
+                    tuned_params=best_params,
+                    tag="staged_diffusion_finetuned",
+                )
+                wandb_utils.log_visualization_paths(
+                    viz_paths, wandb_key="viz/staged_diffusion_finetuned",
+                )
+            except Exception as e:
+                logger.warning("Staged finetune viz failed: %s", e, exc_info=True)
+
+        try:
+            finetuned_model, _ = _load_staged_diffusion_from_ckpt(
+                ckpt_path=final_ckpt,
+                stage=self.stage,
+                itrans_ckpt_path=ft_guidance_ckpt,
+                n_vars=n_iv,
+                device=device,
+                tuned_params=best_params,
+                guidance_type=state.guidance_type,
+            )
+            diag = run_real_dataset_phase_diagnostics(
+                state,
+                train_ds=train_ds,
+                model=finetuned_model,
+                itrans_ckpt_path=ft_guidance_ckpt,
+                stage=self.stage,
+                diffusion_ckpt_path=final_ckpt,
+                coarse_ckpt_path=coarse_ft if self.stage == "fine" else None,
+                tag=f"diffusion_{self.stage}_finetune",
+                include_phase_start=False,
+            )
+            wandb_utils.log_phase_diagnostics_result(diag)
+            del finetuned_model
+        except Exception as e:
+            logger.warning("[%s] post-finetune diagnostics failed: %s", self.name, e, exc_info=True)
+
     def _pretrained_ckpt(self, state: PipelineState) -> str:
         attr = {
             "coarse": state.diffusion_coarse_pretrain_ckpt,
@@ -986,11 +1101,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         )
 
         from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
-        from models.diffusion_tsf.pipeline.visualize_utils import (
-            _load_staged_diffusion_from_ckpt,
-            run_real_dataset_phase_diagnostics,
-            run_staged_finetune_visualizations,
-        )
+        from models.diffusion_tsf.pipeline.visualize_utils import _load_staged_diffusion_from_ckpt
 
         try:
             probe_model, _ = _load_staged_diffusion_from_ckpt(
@@ -1376,48 +1487,12 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         })
 
         coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_best_ckpt(state, "coarse")
-        guidance_ckpt = state.guidance_finetune_ckpt or state.default_guidance_finetune_ckpt_path()
-        if self.stage == "fine" and coarse_ft and final_ckpt and guidance_ckpt and os.path.exists(guidance_ckpt):
-            try:
-                viz_paths = run_staged_finetune_visualizations(
-                    state,
-                    coarse_ckpt_path=coarse_ft,
-                    fine_ckpt_path=final_ckpt if self.stage == "fine" else _stage_best_ckpt(state, "fine"),
-                    itrans_ckpt_path=guidance_ckpt,
-                    tuned_params=best_params,
-                    tag="staged_diffusion_finetuned",
-                )
-                wandb_utils.log_visualization_paths(
-                    viz_paths, wandb_key="viz/staged_diffusion_finetuned",
-                )
-            except Exception as e:
-                logger.warning("Staged finetune viz failed: %s", e, exc_info=True)
-
-        if not state.smoke_test:
-            try:
-                finetuned_model, _ = _load_staged_diffusion_from_ckpt(
-                    ckpt_path=final_ckpt,
-                    stage=self.stage,
-                    itrans_ckpt_path=ft_guidance_ckpt,
-                    n_vars=n_iv,
-                    device=device,
-                    tuned_params=best_params,
-                )
-                diag = run_real_dataset_phase_diagnostics(
-                    state,
-                    train_ds=train_ds,
-                    model=finetuned_model,
-                    itrans_ckpt_path=ft_guidance_ckpt,
-                    stage=self.stage,
-                    diffusion_ckpt_path=final_ckpt,
-                    coarse_ckpt_path=coarse_ft if self.stage == "fine" else None,
-                    tag=f"diffusion_{self.stage}_finetune",
-                    include_phase_start=False,
-                )
-                wandb_utils.log_phase_diagnostics_result(diag)
-                del finetuned_model
-            except Exception as e:
-                logger.warning("[%s] post-finetune diagnostics failed: %s", self.name, e, exc_info=True)
+        self._log_post_finetune_viz_and_diagnostics(
+            state,
+            final_ckpt=final_ckpt,
+            best_params=best_params,
+            train_ds=train_ds,
+        )
 
         return state
 

@@ -575,7 +575,7 @@ class StagedEvalPhase(PipelinePhase):
                     },
                 ],
             )
-            train_ds, _, _, _ = load_dataset(
+            _, _, test_ds, _ = load_dataset(
                 state.dataset,
                 variate_indices,
                 stride=train_stride,
@@ -591,7 +591,7 @@ class StagedEvalPhase(PipelinePhase):
             ):
                 diag = run_real_dataset_phase_diagnostics(
                     state,
-                    train_ds=train_ds,
+                    train_ds=test_ds,
                     model=eval_model,
                     itrans_ckpt_path=ft_guidance_ckpt,
                     stage=eval_stage,

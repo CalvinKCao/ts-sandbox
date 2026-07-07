@@ -23,9 +23,14 @@ from models.diffusion_tsf.ordinal_window_norm import ordinal_decode, ordinal_enc
 from models.diffusion_tsf.train_multivariate_pipeline import load_dataset
 
 
-def _max_scale(dataset: str, exp: dict) -> float:
-    by_ds = exp.get("max_scale_by_dataset") or {}
-    return float(by_ds.get(dataset, exp.get("max_scale", 3.5)))
+def _window_z_scores(ds, window_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Past/future from z-scored ``ds.data``, not precomputed ordinal ranks."""
+    start = window_idx * ds.stride
+    past = ds.data[start : start + ds.lookback].T
+    target_start = start + ds.lookback - ds.lookback_overlap
+    target_end = start + ds.lookback + ds.horizon
+    future = ds.data[target_start:target_end].T
+    return past, future
 
 
 def _pick_window(ds, *, prefer_ties: bool, variate: int, tie_atol: float):
@@ -54,6 +59,7 @@ def plot_roundtrip(
     window_idx: int | None,
     variate: int,
     prefer_ties: bool,
+    split: str = "test",
 ) -> Path:
     cfg = load_experiment_config(str(config_path))
     exp = cfg["experiment"]
@@ -61,23 +67,25 @@ def plot_roundtrip(
     horizon = int(exp["forecast_length"])
     overlap = int(exp.get("lookback_overlap", 0))
     tie_atol = float(exp.get("ordinal_tie_atol", 1e-6))
-    max_scale = _max_scale(dataset, exp)
+    use_ord = bool(exp.get("use_ordinal_window_norm", True))
 
-    train_ds, _, _, norm_stats = load_dataset(
+    train_ds, _, test_ds, norm_stats = load_dataset(
         dataset,
         lookback=lookback,
         horizon=horizon,
         lookback_overlap=overlap,
         stride=1,
         ordinal_tie_atol=tie_atol,
+        use_ordinal_window_norm=use_ord,
     )
     ladder = norm_stats["ordinal_ladder"]
+    ds = test_ds if split == "test" else train_ds
     if window_idx is None:
         window_idx = _pick_window(
-            train_ds, prefer_ties=prefer_ties, variate=variate, tie_atol=tie_atol,
+            ds, prefer_ties=prefer_ties, variate=variate, tie_atol=tie_atol,
         )
 
-    past, future = train_ds[window_idx]
+    past, future = _window_z_scores(ds, window_idx)
     past_b = past.unsqueeze(0)
     fut_b = future.unsqueeze(0)
 
@@ -116,7 +124,7 @@ def plot_roundtrip(
     axes[0].axvline(n_past - 0.5, color="gray", ls="--", lw=0.8, alpha=0.7)
     axes[0].set_ylabel("global z")
     axes[0].legend(loc="upper right", fontsize=8)
-    axes[0].set_title("Before (train-split z-score)")
+    axes[0].set_title(f"Before ({split}-split global z-score)")
 
     axes[1].plot(t_past, ord_p, color="C2", lw=1.2)
     axes[1].plot(t_fut, ord_f, color="C3", lw=1.2)

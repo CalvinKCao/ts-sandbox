@@ -83,6 +83,10 @@ class Pipeline:
 
                 if phase.should_skip(self.state):
                     logger.info(f"{phase_label}: SKIPPED (cached)")
+                    try:
+                        self.state = phase.on_skip(self.state)
+                    except Exception:
+                        logger.exception(f"{phase_label}: on_skip failed (non-fatal)")
                     continue
 
                 logger.info(f"{phase_label}: STARTING")

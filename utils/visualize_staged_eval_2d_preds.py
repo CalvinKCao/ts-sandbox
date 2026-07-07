@@ -164,7 +164,7 @@ def _pick_windows(
     worst: Sequence[Tuple[int, str, int, float]],
 ) -> List[Tuple[int, str]]:
     chosen: List[Tuple[int, str]] = []
-    used: Set[int] = set()
+    used: Set[int] = set[int]()
     for wi, metric, rank, _score in worst:
         if wi in used or wi < 0 or wi >= n_test:
             continue
@@ -315,7 +315,7 @@ def _plot_panel(
                 ax.set_title(f"var {col} | {label} ({h}x{w}, {span_label})", fontsize=8)
                 fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    for col in range(n_vars):
+    for col in range(n_vars): # bruh
         ax = fig.add_subplot(gs[4, col])
         ax.plot(t_axis, gt_1d[col], color="#2196F3", linewidth=1.5, label="GT")
         ax.plot(t_axis, coarse_np[col], color="#FF9800", linewidth=1.1, label="Coarse pred")

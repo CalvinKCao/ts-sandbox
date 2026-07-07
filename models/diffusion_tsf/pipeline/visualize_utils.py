@@ -439,6 +439,7 @@ def generate_staged_dual_scale_comparisons(
     random_seed: int = 42,
     jpeg_dpi: int = 100,
     tag: str = "staged_dual_scale",
+    use_ordinal_window_norm: Optional[bool] = None,
 ) -> List[str]:
     """Dual-scale viz for separate coarse/fine staged checkpoints (chains generation)."""
     from models.diffusion_tsf.train_multivariate_pipeline import load_dataset
@@ -448,6 +449,7 @@ def generate_staged_dual_scale_comparisons(
     _, _, test_ds, norm_stats = load_dataset(
         dataset_name, list(variate_indices), stride=1,
         lookback=lookback_length, horizon=forecast_length,
+        use_ordinal_window_norm=use_ordinal_window_norm,
     )
     if len(test_ds) == 0:
         raise ValueError(f"No test samples for {dataset_name}")
@@ -723,6 +725,7 @@ def run_staged_finetune_visualizations(
         random_seed=state.seed,
         jpeg_dpi=int(viz.get("jpeg_dpi", 100)),
         tag=tag,
+        use_ordinal_window_norm=getattr(state, "use_ordinal_window_norm", None),
     )
 
 
@@ -777,6 +780,16 @@ def _as_channel_first(past: torch.Tensor, future: torch.Tensor) -> Tuple[torch.T
         past = past.unsqueeze(0)
     if future.dim() == 1:
         future = future.unsqueeze(0)
+    return past, future
+
+
+def _dataset_window_z_scores(ds, window_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Z-scored past/future from ``ds.data`` (ordinal train sets yield ranks in __getitem__)."""
+    start = window_idx * ds.stride
+    past = ds.data[start : start + ds.lookback].T
+    target_start = start + ds.lookback - ds.lookback_overlap
+    target_end = start + ds.lookback + ds.horizon
+    future = ds.data[target_start:target_end].T
     return past, future
 
 
@@ -857,6 +870,8 @@ def _plot_realts_1d_pre_post_norm(
     lookback_length: int,
     jpeg_dpi: int,
     variables_to_plot: int,
+    pre_space_label: str = "top=pre-norm (dataset z-score space)",
+    post_space_label: str = "bottom=post instance-norm (window norm)",
 ) -> str:
     past, future = _as_channel_first(past, future)
     past_norm = past_norm[0] if past_norm.dim() == 3 else past_norm
@@ -893,8 +908,8 @@ def _plot_realts_1d_pre_post_norm(
     scale_note = _format_scale_banner(
         raw_range=_tensor_value_range(full_pre),
         norm_range=_tensor_value_range(full_post),
-        space_label="top=pre-norm (dataset z-score space)",
-        extra="bottom=post instance-norm (window norm)",
+        space_label=pre_space_label,
+        extra=post_space_label,
     )
     fig.suptitle(f"RealTS sample {sample_index}\n{scale_note}", fontsize=10, fontweight="semibold")
     path = os.path.join(output_dir, f"realts_sample_1d_idx{sample_index}.jpg")
@@ -1532,7 +1547,7 @@ def run_real_dataset_phase_diagnostics(
     output_dir = os.path.join(state.results_dir, "viz", tag, stage)
     os.makedirs(output_dir, exist_ok=True)
     sample_index = pick_sample_indices(len(train_ds), 1, seed=state.seed)[0]
-    past, future = train_ds[sample_index]
+    past, future = _dataset_window_z_scores(train_ds, sample_index)
     past_cf, future_cf = _as_channel_first(past, future)
     past_b = past_cf.unsqueeze(0).to(state.resolve_device())
     future_b = future_cf.unsqueeze(0).to(state.resolve_device())
@@ -1568,6 +1583,12 @@ def run_real_dataset_phase_diagnostics(
     variables_to_plot = int(viz.get("n_dual_scale_vars", 3))
     jpeg_dpi = int(viz.get("jpeg_dpi", 100))
     viz_paths: Dict[str, List[str]] = {}
+    if getattr(state, "use_ordinal_window_norm", False):
+        pre_space = "top=global train z-score"
+        post_space = "bottom=ordinal rank (global ladder)"
+    else:
+        pre_space = "top=pre-norm (dataset z-score space)"
+        post_space = "bottom=post instance-norm (window norm)"
 
     with torch.no_grad():
         coarse_model = None
@@ -1578,6 +1599,7 @@ def run_real_dataset_phase_diagnostics(
                 itrans_ckpt_path=itrans_ckpt_path,
                 n_vars=int(state.n_variates),
                 device=state.resolve_device(),
+                guidance_type=getattr(state, "guidance_type", None),
             )
         past_norm, future_norm, norm_stats = model._normalize_sequence(past_b, future_b)
         p1 = _plot_realts_1d_pre_post_norm(
@@ -1586,6 +1608,8 @@ def run_real_dataset_phase_diagnostics(
             sample_index=sample_index, output_dir=output_dir,
             lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
             variables_to_plot=variables_to_plot,
+            pre_space_label=pre_space,
+            post_space_label=post_space,
         )
         future_maps = model._encode_staged_maps(future_norm)
         p2 = _plot_staged_2d_maps_native(
@@ -1671,7 +1695,7 @@ def run_itrans_finetune_diagnostics(
     output_dir = os.path.join(state.results_dir, "viz", "itrans_finetune_diagnostics")
     os.makedirs(output_dir, exist_ok=True)
     sample_index = pick_sample_indices(len(train_ds), 1, seed=state.seed)[0]
-    past, future = train_ds[sample_index]
+    past, future = _dataset_window_z_scores(train_ds, sample_index)
     past_cf, future_cf = _as_channel_first(past, future)
     variables_to_plot = int(viz.get("n_dual_scale_vars", 3))
     jpeg_dpi = int(viz.get("jpeg_dpi", 100))
@@ -2035,6 +2059,7 @@ def run_ordinal_roundtrip_visualization(
                 window_idx=win_idx,
                 variate=vi,
                 prefer_ties=False,
+                split=split,
             ))
         )
     return paths
@@ -2108,6 +2133,101 @@ def run_ordinal_coarse_fine_2d_visualization(
     ]
 
 
+def run_patch_guidance_finetune_diagnostics(
+    state: Any,
+    *,
+    ckpt_path: str,
+    train_ds,
+) -> Dict[str, Any]:
+    """Patch guidance finetune: dataset + guidance encoding maps (mirrors iTrans diagnostics)."""
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        create_diffusion_model,
+        load_patch_guidance_from_checkpoint,
+        wrap_patch_guidance,
+    )
+
+    viz = _viz_cfg(state)
+    if not viz.get("enabled", True):
+        return {"viz": {}}
+
+    from models.diffusion_tsf.pipeline.phase_diagnostics import compute_dataset_stats
+
+    stats = compute_dataset_stats(
+        train_ds, prefix="dataset",
+        n_probe=32 if state.smoke_test else 256,
+        seed=state.seed,
+    )
+    if state.smoke_test:
+        return {"summary": stats, "viz": {}}
+
+    device = state.resolve_device()
+    n_iv = int(state.n_variates)
+    stack = load_patch_guidance_from_checkpoint(ckpt_path, n_iv, device)
+    guidance = wrap_patch_guidance(stack)
+
+    output_dir = os.path.join(state.results_dir, "viz", "patch_guidance_finetune_diagnostics")
+    os.makedirs(output_dir, exist_ok=True)
+    sample_index = pick_sample_indices(len(train_ds), 1, seed=state.seed)[0]
+    past, future = _dataset_window_z_scores(train_ds, sample_index)
+    past_cf, future_cf = _as_channel_first(past, future)
+    variables_to_plot = int(viz.get("n_dual_scale_vars", 3))
+    jpeg_dpi = int(viz.get("jpeg_dpi", 100))
+
+    viz_out: Dict[str, Any] = {"summary": stats, "viz": {}}
+    try:
+        enc_model = create_diffusion_model(guidance_model=guidance, diffusion_stage="coarse").to(device)
+        enc_model.eval()
+        past_b = past_cf.unsqueeze(0).to(device)
+        future_b = future_cf.unsqueeze(0).to(device)
+        with torch.no_grad():
+            past_norm, future_norm, norm_stats = enc_model._normalize_sequence(past_b, future_b)
+            future_maps = enc_model._encode_staged_maps(future_norm)
+            W_fut = future_norm.shape[-1]
+            g_norm = enc_model._get_guidance_forecast_norm(past_b, past_norm, norm_stats, W_fut)
+            g_maps = enc_model._encode_staged_maps(g_norm)
+        viz_out["viz"]["viz/patch_guidance_finetune/dataset_1d"] = [
+            _plot_realts_1d_pre_post_norm(
+                past=past_cf, future=future_cf,
+                past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
+                sample_index=sample_index, output_dir=output_dir,
+                lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
+                variables_to_plot=variables_to_plot,
+            )
+        ]
+        viz_out["viz"]["viz/patch_guidance_finetune/dataset_2d"] = [
+            _plot_staged_2d_maps_native(
+                maps={k: v.detach().cpu() for k, v in future_maps.items() if k in {"coarse", "fine"}},
+                sample_index=sample_index, output_dir=output_dir, tag="dataset_sample",
+                variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
+            )
+        ]
+        viz_out["viz"]["viz/patch_guidance_finetune/guidance_2d"] = [
+            _plot_staged_2d_maps_native(
+                maps={k: v.detach().cpu() for k, v in g_maps.items() if k in {"coarse", "fine"}},
+                sample_index=sample_index, output_dir=output_dir, tag="patch_pred",
+                variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
+            )
+        ]
+        viz_out["viz"]["viz/patch_guidance_finetune/guidance_1d"] = [
+            _plot_itrans_window_norm_1d(
+                past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
+                guidance_norm=g_norm[0].cpu(),
+                sample_index=sample_index, output_dir=output_dir,
+                lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
+                variables_to_plot=variables_to_plot,
+            )
+        ]
+        # Same panels under legacy iTrans wandb keys (patch_decoder campaigns).
+        viz_out["viz"]["viz/itrans_finetune/dataset_1d"] = viz_out["viz"]["viz/patch_guidance_finetune/dataset_1d"]
+        viz_out["viz"]["viz/itrans_finetune/dataset_2d"] = viz_out["viz"]["viz/patch_guidance_finetune/dataset_2d"]
+        viz_out["viz"]["viz/itrans_finetune/itrans_1d"] = viz_out["viz"]["viz/patch_guidance_finetune/guidance_1d"]
+        viz_out["viz"]["viz/itrans_finetune/itrans_2d"] = viz_out["viz"]["viz/patch_guidance_finetune/guidance_2d"]
+    except Exception as exc:
+        logger.warning("Patch guidance finetune diagnostic maps skipped: %s", exc)
+
+    return viz_out
+
+
 def run_patch_guidance_finetune_visualizations(
     state: Any,
     *,
@@ -2140,6 +2260,7 @@ def run_patch_guidance_finetune_visualizations(
         test_stride=test_stride,
         lookback_overlap=state.lookback_overlap,
         ordinal_tie_atol=float(getattr(state, "ordinal_tie_atol", 1e-6)),
+        use_ordinal_window_norm=getattr(state, "use_ordinal_window_norm", None),
     )
     device = state.resolve_device()
     stack = load_patch_guidance_from_checkpoint(

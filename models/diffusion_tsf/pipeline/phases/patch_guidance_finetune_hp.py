@@ -68,6 +68,66 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             return True
         return False
 
+    def on_skip(self, state: PipelineState) -> PipelineState:
+        self._log_finetune_viz_and_diagnostics(state)
+        return state
+
+    def _log_finetune_viz_and_diagnostics(self, state: PipelineState) -> None:
+        if state.guidance_type != "patch_decoder":
+            return
+        if state.smoke_test:
+            return
+
+        ft_ckpt = state.patch_guidance_finetune_ckpt or state.default_guidance_finetune_ckpt_path()
+        if not os.path.exists(ft_ckpt):
+            logger.warning("  [%s] viz skipped: missing patch guidance ckpt %s", self.name, ft_ckpt)
+            return
+
+        try:
+            from models.diffusion_tsf.pipeline.visualize_utils import (
+                run_patch_guidance_finetune_diagnostics,
+                run_patch_guidance_finetune_visualizations,
+            )
+
+            viz_paths = run_patch_guidance_finetune_visualizations(state, ckpt_path=ft_ckpt)
+            wandb_utils.log_visualization_paths(
+                viz_paths, wandb_key="viz/patch_guidance_finetuned",
+            )
+            wandb_utils.log_visualization_paths(
+                viz_paths, wandb_key="viz/itrans_finetuned",
+            )
+        except Exception as e:
+            logger.warning("Patch guidance finetune viz failed: %s", e, exc_info=True)
+
+        try:
+            from models.diffusion_tsf.train_multivariate_pipeline import (
+                generate_dataset_job,
+                load_dataset,
+            )
+            import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+
+            patch_globals(pipeline_mod, state)
+            variate_indices = state.variate_indices
+            if variate_indices is None:
+                variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+            subset_meta = state.data_subset_resolved or {}
+            train_stride = int(subset_meta.get("train_stride", state.window_stride))
+            test_stride = int(subset_meta.get("test_stride", 1))
+            train_ds, _, _, _ = load_dataset(
+                state.dataset,
+                variate_indices,
+                stride=train_stride,
+                test_stride=test_stride,
+                ordinal_tie_atol=float(state.ordinal_tie_atol),
+                use_ordinal_window_norm=state.use_ordinal_window_norm,
+            )
+            diag = run_patch_guidance_finetune_diagnostics(
+                state, ckpt_path=ft_ckpt, train_ds=train_ds,
+            )
+            wandb_utils.log_phase_diagnostics_result(diag)
+        except Exception as e:
+            logger.warning("Patch guidance finetune diagnostics failed: %s", e, exc_info=True)
+
     def execute(self, state: PipelineState) -> PipelineState:
         from models.diffusion_tsf.train_multivariate_pipeline import (
             run_patch_guidance_finetune_hp_tuning,
@@ -121,17 +181,6 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             logger.info("  [%s] best HP checkpoint: %s", self.name, tune_ckpt_path)
 
         if not state.smoke_test and os.path.exists(ft_ckpt):
-            try:
-                from models.diffusion_tsf.pipeline.visualize_utils import (
-                    run_patch_guidance_finetune_visualizations,
-                )
-                viz_paths = run_patch_guidance_finetune_visualizations(
-                    state, ckpt_path=ft_ckpt,
-                )
-                wandb_utils.log_visualization_paths(
-                    viz_paths, wandb_key="viz/patch_guidance_finetuned",
-                )
-            except Exception as e:
-                logger.warning("Patch guidance finetune viz failed: %s", e, exc_info=True)
+            self._log_finetune_viz_and_diagnostics(state)
 
         return state

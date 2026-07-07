@@ -46,6 +46,10 @@ class PipelinePhase(ABC):
         """
         return False
 
+    def on_skip(self, state: PipelineState) -> PipelineState:
+        """Hook after a cached skip: regenerate viz and log to wandb when enabled."""
+        return state
+
     @abstractmethod
     def execute(self, state: PipelineState) -> PipelineState:
         """Run the phase, mutating *state* with produced artifacts.

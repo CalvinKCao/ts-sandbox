@@ -77,11 +77,64 @@ class ITransFinetuneHPPhase(PipelinePhase):
             return True
         return False
 
+    def on_skip(self, state: PipelineState) -> PipelineState:
+        self._log_finetune_viz_and_diagnostics(state)
+        return state
+
+    def _log_finetune_viz_and_diagnostics(self, state: PipelineState) -> None:
+        if state.guidance_type == "patch_decoder":
+            return
+
+        subset_id = state.subset_id or state.dataset
+        ft_ckpt = state.itrans_finetune_ckpt or os.path.join(
+            state.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt",
+        )
+        if not os.path.exists(ft_ckpt):
+            logger.warning("  [%s] viz skipped: missing finetuned iTrans ckpt %s", self.name, ft_ckpt)
+            return
+
+        try:
+            viz_paths = run_itrans_checkpoint_visualizations(
+                state, ft_ckpt, tag="itrans_finetuned",
+            )
+            wandb_utils.log_visualization_paths(
+                viz_paths, wandb_key="viz/itrans_finetuned",
+            )
+        except Exception as e:
+            logger.warning("Finetuned iTransformer viz failed: %s", e, exc_info=True)
+
+        if state.smoke_test:
+            return
+
+        try:
+            from models.diffusion_tsf.train_multivariate_pipeline import (
+                generate_dataset_job,
+                load_dataset,
+            )
+
+            variate_indices = state.variate_indices
+            if variate_indices is None:
+                variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+            subset_meta = state.data_subset_resolved or {}
+            train_stride = int(subset_meta.get("train_stride", state.window_stride))
+            test_stride = int(subset_meta.get("test_stride", 1))
+            train_ds, _, _, _ = load_dataset(
+                state.dataset,
+                variate_indices,
+                stride=train_stride,
+                test_stride=test_stride,
+                ordinal_tie_atol=float(state.ordinal_tie_atol),
+                use_ordinal_window_norm=state.use_ordinal_window_norm,
+            )
+            diag = run_itrans_finetune_diagnostics(state, ckpt_path=ft_ckpt, train_ds=train_ds)
+            wandb_utils.log_phase_diagnostics_result(diag)
+        except Exception as e:
+            logger.warning("iTrans finetune diagnostics failed: %s", e, exc_info=True)
+
     def execute(self, state: PipelineState) -> PipelineState:
         from models.diffusion_tsf.train_multivariate_pipeline import (
             run_itransformer_finetune_hp_tuning,
             generate_dataset_job,
-            load_dataset,
         )
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
@@ -132,23 +185,6 @@ class ITransFinetuneHPPhase(PipelinePhase):
             "hp/itrans_ft_best_lr": best_params.get("learning_rate", None),
         })
 
-        try:
-            viz_paths = run_itrans_checkpoint_visualizations(
-                state, ft_ckpt, tag="itrans_finetuned",
-            )
-            wandb_utils.log_visualization_paths(
-                viz_paths, wandb_key="viz/itrans_finetuned",
-            )
-        except Exception as e:
-            logger.warning("Finetuned iTransformer viz failed: %s", e, exc_info=True)
-
-        try:
-            train_ds, _, _, _ = load_dataset(
-                state.dataset, variate_indices, stride=train_stride, test_stride=test_stride,
-            )
-            diag = run_itrans_finetune_diagnostics(state, ckpt_path=ft_ckpt, train_ds=train_ds)
-            wandb_utils.log_phase_diagnostics_result(diag)
-        except Exception as e:
-            logger.warning("iTrans finetune diagnostics failed: %s", e, exc_info=True)
+        self._log_finetune_viz_and_diagnostics(state)
 
         return state

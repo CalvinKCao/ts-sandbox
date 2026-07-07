@@ -390,11 +390,15 @@ def log_eval_metrics(metrics: Dict[str, Any], step: int = 0) -> None:
 
 
 def log_visualization_paths(
-    paths: list,
+    paths: list | Dict[str, list],
     wandb_key: str = "visualizations",
     caption_prefix: str = "",
 ) -> None:
     """Log JPEG/PNG artifacts to wandb and print a line per file."""
+    if isinstance(paths, dict):
+        for key, subpaths in paths.items():
+            log_visualization_paths(subpaths, wandb_key=key, caption_prefix=caption_prefix)
+        return
     if not paths:
         return
     if not _WANDB_AVAILABLE or wandb.run is None:
