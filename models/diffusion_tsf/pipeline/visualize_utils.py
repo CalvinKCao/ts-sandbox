@@ -1799,6 +1799,7 @@ def plot_worst_window_panel(
     score: float,
     output_dir: str,
     jpeg_dpi: int = 100,
+    ordinal_mode: bool = False,
 ) -> str:
     """GT vs coarse/fine/final for a worst-error eval window."""
     os.makedirs(output_dir, exist_ok=True)
@@ -1806,24 +1807,27 @@ def plot_worst_window_panel(
     gt = future_cf.numpy()
     common_len = min(
         gt.shape[-1],
-        coarse_pred.shape[-1],
-        fine_pred.shape[-1],
         final_pred.shape[-1],
     )
+    if not ordinal_mode:
+        common_len = min(common_len, coarse_pred.shape[-1], fine_pred.shape[-1])
     gt = gt[..., -common_len:]
-    coarse_pred = coarse_pred[..., -common_len:]
-    fine_pred = fine_pred[..., -common_len:]
     final_pred = final_pred[..., -common_len:]
+    if not ordinal_mode:
+        coarse_pred = coarse_pred[..., -common_len:]
+        fine_pred = fine_pred[..., -common_len:]
     H = common_len
     t_axis = np.arange(0, H)
     n_vars = min(3, gt.shape[0])
+    space_label = "global z (ordinal decode)" if ordinal_mode else "window-norm"
 
     fig, axes = plt.subplots(n_vars, 1, figsize=(6.5, 2.4 * n_vars), squeeze=False, constrained_layout=True)
     for v in range(n_vars):
         ax = axes[v, 0]
         ax.plot(t_axis, gt[v], color="#2196F3", linewidth=1.5, label="GT")
-        ax.plot(t_axis, coarse_pred[v], color="#FF9800", linewidth=1.1, alpha=0.85, label="Coarse")
-        ax.plot(t_axis, fine_pred[v], color="#4CAF50", linewidth=1.0, alpha=0.85, label="Fine")
+        if not ordinal_mode:
+            ax.plot(t_axis, coarse_pred[v], color="#FF9800", linewidth=1.1, alpha=0.85, label="Coarse")
+            ax.plot(t_axis, fine_pred[v], color="#4CAF50", linewidth=1.0, alpha=0.85, label="Fine")
         ax.plot(t_axis, final_pred[v], color="#E91E63", linewidth=1.2, label="Final")
         ax.grid(True, alpha=0.12)
         ax.set_title(f"var {v}", fontsize=9)
@@ -1831,7 +1835,7 @@ def plot_worst_window_panel(
             ax.legend(fontsize=7, loc="upper right")
     fig.suptitle(
         f"worst {metric} rank {rank} | window {window_index} | score={score:.5f}\n"
-        + _format_scale_banner(norm_range=(float(gt.min()), float(gt.max())), space_label="window-norm"),
+        + _format_scale_banner(norm_range=(float(gt.min()), float(gt.max())), space_label=space_label),
         fontsize=10,
     )
     path = os.path.join(output_dir, f"{metric}_rank{rank:02d}_win{window_index}.jpg")
@@ -1852,11 +1856,17 @@ def run_eval_worst_window_visualizations(
 
     output_dir = os.path.join(state.results_dir, "viz", "eval_worst")
     paths: List[str] = []
+    ordinal_mode = bool(getattr(state, "use_ordinal_window_norm", False))
     coarse = pack.get("coarse_anchor")
     fine = pack.get("fine_anchor")
     final = pack.get("final_anchor", pack.get("deterministic"))
-    if coarse is None or fine is None or final is None:
+    if final is None:
         return []
+    if not ordinal_mode and (coarse is None or fine is None):
+        return []
+    if ordinal_mode:
+        coarse = coarse if coarse is not None else final
+        fine = fine if fine is not None else np.zeros_like(final)
 
     for entry in worst_manifest:
         wi = int(entry["window_index"])
@@ -1874,6 +1884,7 @@ def run_eval_worst_window_visualizations(
                 score=float(entry["score"]),
                 output_dir=output_dir,
                 jpeg_dpi=int(viz.get("jpeg_dpi", 100)),
+                ordinal_mode=ordinal_mode,
             )
         )
     return paths
