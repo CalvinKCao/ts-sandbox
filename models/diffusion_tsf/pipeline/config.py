@@ -53,6 +53,7 @@ REQUIRED_EXPERIMENT_KEYS = (
     "diffusion_lookback_cap",
     "diffusion_chunk_horizon",
     "representation_time_stride",
+    "past_cond_resize_to_horizon",
     "itrans_lookback_length",
     "itrans_d_model",
     "itrans_d_ff",

@@ -21,6 +21,10 @@ class DiffusionTSFConfig:
     diffusion_chunk_horizon: int = 0
     # Subsample timesteps before 2D encode (x[..., ::stride]); decode upsamples linearly.
     representation_time_stride: int = 1
+    # When False, past 2D cond keeps native lookback width (e.g. 336); DiT cond tokens
+    # are separate from the wider horizon canvas. Fine-stage horizon cond channels are
+    # zero-padded to horizon width before channel concat, never bilinearly stretched.
+    past_cond_resize_to_horizon: bool = True
     # iTransformer encoder length; None -> lookback_length.
     itrans_lookback_length: Optional[int] = None
 

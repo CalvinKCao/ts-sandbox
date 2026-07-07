@@ -82,6 +82,7 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "lookback_length": int(state.lookback_length),
         "forecast_length": int(state.forecast_length),
         "representation_time_stride": int(state.representation_time_stride),
+        "past_cond_resize_to_horizon": bool(state.past_cond_resize_to_horizon),
         "diffusion_lookback_cap": int(state.diffusion_lookback_cap),
         "use_window_normalization": bool(state.use_window_normalization),
         "window_norm_center": str(state.window_norm_center),

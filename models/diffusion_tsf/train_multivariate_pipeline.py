@@ -156,6 +156,7 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'use_coordinate_channel': USE_COORDINATE_CHANNEL,
         'use_raw_lookback_cond_channel': USE_RAW_LOOKBACK_COND_CHANNEL,
         'representation_time_stride': REPRESENTATION_TIME_STRIDE,
+        'past_cond_resize_to_horizon': PAST_COND_RESIZE_TO_HORIZON,
         'itrans_d_model': ITRANS_D_MODEL,
     }
 
@@ -253,6 +254,7 @@ ITRANSFORMER_SEQ_LEN = 96
 DIFFUSION_LOOKBACK_CAP = 0
 DIFFUSION_CHUNK_HORIZON = 0
 REPRESENTATION_TIME_STRIDE = 1
+PAST_COND_RESIZE_TO_HORIZON = True
 ITRANS_LOOKBACK_LENGTH = None
 IMAGE_HEIGHT = 16
 COARSE_IMAGE_HEIGHT = 16
@@ -1296,6 +1298,7 @@ def create_diffusion_model(
         diffusion_lookback_cap=int(DIFFUSION_LOOKBACK_CAP or 0),
         diffusion_chunk_horizon=chunk_hz,
         representation_time_stride=int(REPRESENTATION_TIME_STRIDE),
+        past_cond_resize_to_horizon=bool(PAST_COND_RESIZE_TO_HORIZON),
         itrans_lookback_length=ITRANS_LOOKBACK_LENGTH,
         past_loss_weight=PAST_LOSS_WEIGHT,
         image_height=IMAGE_HEIGHT,

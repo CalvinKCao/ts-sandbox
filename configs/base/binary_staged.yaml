@@ -131,6 +131,7 @@ experiment:
   diffusion_lookback_cap: 0
   diffusion_chunk_horizon: 0
   representation_time_stride: 1
+  past_cond_resize_to_horizon: true
   itrans_lookback_length: null
   itrans_d_model: 512
   itrans_d_ff: 512

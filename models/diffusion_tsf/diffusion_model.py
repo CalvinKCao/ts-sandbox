@@ -1354,11 +1354,40 @@ class DiffusionTSF(nn.Module):
         batch_size = bv // num_variates
         return torch.arange(num_variates, device=device).unsqueeze(0).expand(batch_size, -1).reshape(bv)
 
+    def _past_cond_resize_to_horizon(self) -> bool:
+        return bool(getattr(self.config, "past_cond_resize_to_horizon", True))
+
     def _past_cond_tail_len(self, past_len: int, target_width: int) -> int:
         cap = int(self.config.diffusion_lookback_cap or 0)
         if cap > 0:
             return min(past_len, cap)
+        if not self._past_cond_resize_to_horizon():
+            return past_len
         return min(past_len, target_width)
+
+    def _resize_past_cond_to_width(self, cond: torch.Tensor, width: int) -> torch.Tensor:
+        H = cond.shape[-2]
+        cur = cond.shape[-1]
+        if cur == width:
+            return cond
+        if self._past_cond_resize_to_horizon():
+            return F.interpolate(
+                cond, size=(H, width), mode="bilinear", align_corners=False,
+            )
+        if cur > width:
+            raise ValueError(
+                f"past visual cond width {cur} exceeds target {width} "
+                "with past_cond_resize_to_horizon=False"
+            )
+        return F.pad(cond, (0, width - cur))
+
+    def _cat_past_and_horizon_cond(
+        self,
+        past_cond: torch.Tensor,
+        horizon_cond: torch.Tensor,
+    ) -> torch.Tensor:
+        past_cond = self._resize_past_cond_to_width(past_cond, horizon_cond.shape[-1])
+        return torch.cat((past_cond, horizon_cond), dim=1)
 
     def _chunk_horizon(self) -> int:
         chunk = int(self.config.diffusion_chunk_horizon or 0)
@@ -1448,12 +1477,15 @@ class DiffusionTSF(nn.Module):
             raw_coarse = self._coarse_cdf_to_height(raw_maps["coarse"], H)
         past_repr_w = raw_maps["coarse"].shape[-1]
         raw_cond = raw_coarse.reshape(BV, 1, H, past_repr_w)
-        raw_cond = F.interpolate(
-            raw_cond,
-            size=(H, target_width),
-            mode="bilinear",
-            align_corners=True,
-        )
+        if self._past_cond_resize_to_horizon():
+            raw_cond = F.interpolate(
+                raw_cond,
+                size=(H, target_width),
+                mode="bilinear",
+                align_corners=True,
+            )
+        elif raw_cond.shape[-1] != cond.shape[-1]:
+            raw_cond = self._resize_past_cond_to_width(raw_cond, cond.shape[-1])
         return torch.cat([cond, raw_cond], dim=1)
 
     def _staged_past_condition(
@@ -1486,7 +1518,8 @@ class DiffusionTSF(nn.Module):
             [m.reshape(BV, 1, H, past_repr_w) for m in cond_maps],
             dim=1,
         )
-        cond = F.interpolate(cond, size=(H, target_width), mode='bilinear', align_corners=False)
+        if self._past_cond_resize_to_horizon():
+            cond = F.interpolate(cond, size=(H, target_width), mode='bilinear', align_corners=False)
         cond = self._append_raw_lookback_cond_channel(
             cond, past_raw, past_tail_len, target_width,
         )
@@ -1546,7 +1579,7 @@ class DiffusionTSF(nn.Module):
         if stage in {"fine", "finer"}:
             future_coarse_cond = self._coarse_cdf_to_height(future_maps["coarse"], H)
             future_coarse_flat = future_coarse_cond.reshape(BV, 1, H, W_fut)
-            cond_for_unet = torch.cat((cond_for_unet, future_coarse_flat), dim=1)
+            cond_for_unet = self._cat_past_and_horizon_cond(cond_for_unet, future_coarse_flat)
         if stage == "finer":
             future_fine_cond = self._resize_cdf_height(future_maps["fine"], H)
             future_fine_flat = future_fine_cond.reshape(BV, 1, H, W_fut)
@@ -1705,7 +1738,8 @@ class DiffusionTSF(nn.Module):
 
         if stage in {"fine", "finer"}:
             future_coarse_cond = self._coarse_cdf_to_height(future_maps["coarse"], H)
-            cond_for_unet = torch.cat([cond_for_unet, future_coarse_cond.reshape(BV, 1, H, W_fut)], dim=1)
+            future_coarse_flat = future_coarse_cond.reshape(BV, 1, H, W_fut)
+            cond_for_unet = self._cat_past_and_horizon_cond(cond_for_unet, future_coarse_flat)
 
         if self.config.use_guidance_channel and guidance_maps is not None:
             guidance_flat = guidance_maps[stage].reshape(BV, 1, H, W_fut)
@@ -1775,10 +1809,8 @@ class DiffusionTSF(nn.Module):
                     f"(B={B}, V={V}, Hc, W={W_fut}), got {tuple(future_coarse_2d.shape)}"
                 )
             future_coarse_cond = self._coarse_cdf_to_height(future_coarse_2d.to(device), H)
-            cond_for_unet = torch.cat(
-                (cond_for_unet, future_coarse_cond.reshape(BV, 1, H, W_fut)),
-                dim=1,
-            )
+            future_coarse_flat = future_coarse_cond.reshape(BV, 1, H, W_fut)
+            cond_for_unet = self._cat_past_and_horizon_cond(cond_for_unet, future_coarse_flat)
         if stage == "finer":
             if future_fine_2d is None:
                 raise ValueError("finer-stage generation requires future_fine_2d from the fine model.")
@@ -1965,7 +1997,10 @@ class DiffusionTSF(nn.Module):
         past_2d = self.encode_to_2d_binary(past_norm)
         W_past = past_2d.shape[3]
         past_flat = past_2d.reshape(BV, 1, H, W_past)
-        cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+        if self._past_cond_resize_to_horizon():
+            cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+        else:
+            cond_for_unet = past_flat
         cond_for_unet = self._apply_coarse_dropout(cond_for_unet)
         base_cond_for_unet = cond_for_unet
         guidance_2d_flat = guidance_2d.reshape(BV, 1, H, W_fut) if guidance_2d is not None else None
@@ -2074,7 +2109,10 @@ class DiffusionTSF(nn.Module):
         past_2d = self.encode_to_2d_binary(past_norm)
         W_past = past_2d.shape[3]
         past_flat = past_2d.reshape(BV, 1, H, W_past)
-        cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+        if self._past_cond_resize_to_horizon():
+            cond_for_unet = F.interpolate(past_flat, size=(H, W_fut), mode='bilinear', align_corners=False)
+        else:
+            cond_for_unet = past_flat
 
         guidance_2d = None
         guide_flat = None

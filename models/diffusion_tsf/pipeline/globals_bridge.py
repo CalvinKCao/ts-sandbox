@@ -35,6 +35,7 @@ def patch_globals(
     mod.DIFFUSION_LOOKBACK_CAP = int(state.diffusion_lookback_cap)
     mod.DIFFUSION_CHUNK_HORIZON = int(state.diffusion_chunk_horizon)
     mod.REPRESENTATION_TIME_STRIDE = int(state.representation_time_stride)
+    mod.PAST_COND_RESIZE_TO_HORIZON = bool(state.past_cond_resize_to_horizon)
     mod.ITRANS_D_MODEL = state.itrans_d_model
     mod.ITRANS_D_FF = state.itrans_d_ff
     mod.ITRANS_E_LAYERS = state.itrans_e_layers

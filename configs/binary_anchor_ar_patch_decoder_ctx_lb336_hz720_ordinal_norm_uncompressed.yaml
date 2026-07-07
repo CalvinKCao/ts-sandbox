@@ -12,6 +12,7 @@ experiment:
   name: binary-anchor-ar-patch-decoder-lb336-hz720-ordinal-norm-uncompressed
   experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed
   representation_time_stride: 1
+  past_cond_resize_to_horizon: false
 
 phases:
   - phase: staged_diffusion_pretrain
