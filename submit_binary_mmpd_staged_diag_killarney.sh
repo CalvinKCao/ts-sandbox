@@ -70,11 +70,12 @@ MMPD_CONFIG="configs/mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm.ya
 DATASETS="ETTh1,weather,electricity,exchange_rate,traffic"
 OUTPUT_DIR="reports/binary_vs_mmpd_ordinal_lb336_hz720"
 FORCE_EVAL=0
+SMOKE=0
 EXTRA_PY=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --smoke-test|--smoke) shift ;;
+        --smoke-test|--smoke) SMOKE=1; shift ;;
         --mmpd-dir) MMPD_DIR="$2"; shift 2 ;;
         --binary-config) BINARY_CONFIG="$2"; shift 2 ;;
         --mmpd-config) MMPD_CONFIG="$2"; shift 2 ;;
@@ -125,6 +126,7 @@ PY_ARGS=(
     --device cuda
 )
 [[ "$FORCE_EVAL" -eq 1 ]] && PY_ARGS+=(--force-eval)
+[[ "$SMOKE" -eq 1 ]] && PY_ARGS+=(--smoke-test)
 [[ ${#EXTRA_PY[@]} -gt 0 ]] && PY_ARGS+=("${EXTRA_PY[@]}")
 
 echo "[run] ${PY_ARGS[*]}"

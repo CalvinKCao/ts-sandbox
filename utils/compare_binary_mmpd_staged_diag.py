@@ -58,6 +58,7 @@ from utils.eval_mmpd_gaussian_anchor import (
     get_or_create_indices,
     load_indices,
     run_mmpd_eval,
+    subsample_eval_indices,
     summarize_anchor_prob_core_metrics,
 )
 from utils.visualize_staged_eval_2d_preds import (
@@ -105,6 +106,7 @@ def build_mmpd_args(
     mmpd_config: Path,
     repo: Path,
     force_mmpd_eval: bool,
+    smoke_test: bool = False,
 ) -> argparse.Namespace:
     args = argparse.Namespace(
         datasets=[],
@@ -156,6 +158,16 @@ def build_mmpd_args(
         args.mmpd_instance_norm = False
     if "ordinal_tie_atol" in exp:
         args.ordinal_tie_atol = float(exp["ordinal_tie_atol"])
+    if args.subset_config is None:
+        raise ValueError(
+            f"{mmpd_config}: mmpd.subset_config required (e.g. binary_anchor_ar.yaml)"
+        )
+    if smoke_test:
+        args.test_max_items = 8
+        args.sample_num = 2
+        args.num_sampling_steps = 2
+        args.mmpd_eval_batch_size = 4
+        args.force_mmpd_eval = True
     return args
 
 
@@ -244,6 +256,8 @@ def run_binary_staged_eval(
     window_indices: Sequence[int],
     test_stride: int,
     device: torch.device,
+    prob_samples: Optional[int] = None,
+    prob_steps: Optional[int] = None,
 ) -> Tuple[Dict[str, float], Dict[str, np.ndarray]]:
     overrides = _staged_eval_overrides(config_path, dataset)
     phase = StagedEvalPhase(**overrides)
@@ -300,6 +314,8 @@ def run_binary_staged_eval(
     subset = Subset(test_ds, list(window_indices))
     batch_size = int(overrides.get("batch_size", 8))
     loader = DataLoader(subset, batch_size=batch_size, shuffle=False)
+    n_prob = int(prob_samples if prob_samples is not None else overrides.get("probabilistic_n_samples", 20))
+    n_steps = int(prob_steps if prob_steps is not None else overrides.get("probabilistic_num_inference_steps", 20))
     metrics, pack = phase._run_eval(
         state=state,
         subset_id=subset_id,
@@ -309,8 +325,8 @@ def run_binary_staged_eval(
         fine_model=fine_model,
         finer_model=finer_model,
         prob_sampler=str(overrides.get("probabilistic_sampler", "dpmpp")),
-        prob_steps=int(overrides.get("probabilistic_num_inference_steps", 20)),
-        prob_samples=int(overrides.get("probabilistic_n_samples", 20)),
+        prob_steps=n_steps,
+        prob_samples=n_prob,
         gmm_components=int(overrides.get("gmm_components", 10)),
         topk_max=int(overrides.get("topk_max", 3)),
         window_indices=list(window_indices),
@@ -334,9 +350,10 @@ def run_or_load_dataset_eval(
         print(f"[cache] {dataset}: loading {cache}")
         return load_eval_cache(cache)
 
-    mmpd_config = Path(mmpd_args.mmpd_run_config)
+    if mmpd_args.subset_config is None:
+        raise ValueError("mmpd.subset_config not resolved; check mmpd run YAML")
     subset_runs = build_anchor_runs_from_subset_config(
-        mmpd_config,
+        Path(mmpd_args.subset_config),
         [dataset],
         int(mmpd_args.seed),
     )
@@ -346,7 +363,20 @@ def run_or_load_dataset_eval(
         window_indices = load_indices(mmpd_args.output_dir / "raw", dataset)
     else:
         window_indices = get_or_create_indices(mmpd_args, run)
+    if mmpd_args.test_max_items is not None:
+        window_indices = subsample_eval_indices(
+            window_indices,
+            mmpd_args.test_max_items,
+            seed=int(mmpd_args.seed),
+            dataset=dataset,
+        )
     test_stride = eval_test_stride(mmpd_args, run)
+
+    smoke_prob = None
+    smoke_steps = None
+    if mmpd_args.test_max_items is not None and mmpd_args.sample_num <= 4:
+        smoke_prob = int(mmpd_args.sample_num)
+        smoke_steps = int(mmpd_args.num_sampling_steps)
 
     print(f"[eval] {dataset}: binary staged anchor ({len(window_indices)} windows, stride={test_stride})")
     binary_metrics, binary_pack = run_binary_staged_eval(
@@ -356,6 +386,8 @@ def run_or_load_dataset_eval(
         window_indices=window_indices,
         test_stride=test_stride,
         device=device,
+        prob_samples=smoke_prob,
+        prob_steps=smoke_steps,
     )
 
     print(f"[eval] {dataset}: MMPD anchor")
@@ -622,6 +654,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     p.add_argument("--force-eval", action="store_true")
     p.add_argument("--force-mmpd-eval", action="store_true")
+    p.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="8 windows, 2 prob samples, small top-k; writes under output-dir_smoke",
+    )
+    p.add_argument("--test-max-items", type=int, default=None, help="Cap eval windows per dataset")
     p.add_argument("--plots-only", action="store_true", help="Skip eval; require eval_cache/*.npz")
     p.add_argument("--skip-plots", action="store_true")
     p.add_argument("--variables-to-plot", type=int, default=3)
@@ -634,6 +672,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     datasets = [d.strip() for d in args.datasets.split(",") if d.strip()]
     output_dir = args.output_dir.resolve()
+    if args.smoke_test:
+        if not str(output_dir).endswith("_smoke"):
+            output_dir = output_dir.parent / f"{output_dir.name}_smoke"
+        args.top_k = min(int(args.top_k), 3)
+        args.min_spacing = min(int(args.min_spacing), 48)
+        args.force_eval = True
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
 
@@ -641,8 +685,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         mmpd_dir=args.mmpd_dir.resolve(),
         mmpd_config=args.mmpd_config.resolve(),
         repo=REPO_ROOT,
-        force_mmpd_eval=args.force_mmpd_eval,
+        force_mmpd_eval=args.force_mmpd_eval or args.smoke_test,
+        smoke_test=args.smoke_test,
     )
+    if args.test_max_items is not None:
+        mmpd_args.test_max_items = int(args.test_max_items)
 
     all_top: Dict[str, List[Dict[str, Any]]] = {}
     summary_rows: List[Dict[str, Any]] = []
