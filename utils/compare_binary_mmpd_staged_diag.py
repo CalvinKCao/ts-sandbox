@@ -39,6 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from models.diffusion_tsf.pipeline.config import load_experiment_config
 from models.diffusion_tsf.pipeline.haar_frequency_calibration import ensure_haar_frequency_calibration
 from models.diffusion_tsf.pipeline.fourier_frequency_calibration import ensure_fourier_frequency_calibration
 from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
@@ -162,8 +163,8 @@ def cache_path(output_dir: Path, dataset: str) -> Path:
     return output_dir / "eval_cache" / f"{dataset}.npz"
 
 
-def summary_path(output_dir: Path, dataset: str) -> Path:
-    return output_dir / "eval_cache" / f"{dataset}_summary.json"
+def summary_path(cache_dir: Path, dataset: str) -> Path:
+    return cache_dir / f"{dataset}_summary.json"
 
 
 def load_eval_cache(path: Path) -> Dict[str, np.ndarray]:
@@ -362,14 +363,23 @@ def run_or_load_dataset_eval(
     mmpd_pack = align_mmpd_pack(mmpd_pack_raw, window_indices)
     mmpd_metrics = summarize_anchor_prob_core_metrics(mmpd_pack)
 
-    if binary_pack["y_true"].shape != mmpd_pack["y_true"].shape:
+    y_true_bin = binary_pack["y_true"]
+    y_true_mmpd = mmpd_pack["y_true"]
+    if y_true_bin.shape != y_true_mmpd.shape:
         raise RuntimeError(
-            f"{dataset}: shape mismatch binary {binary_pack['y_true'].shape} "
-            f"vs mmpd {mmpd_pack['y_true'].shape}"
+            f"{dataset}: shape mismatch binary {y_true_bin.shape} vs mmpd {y_true_mmpd.shape}"
         )
+    if not np.allclose(y_true_bin, y_true_mmpd, rtol=1e-4, atol=1e-4):
+        row = int(np.argmax(np.abs(y_true_bin - y_true_mmpd).reshape(len(y_true_bin), -1).mean(axis=1)))
+        wi = int(window_indices[row]) if row < len(window_indices) else row
+        raise RuntimeError(
+            f"{dataset}: y_true mismatch at row {row} (window {wi}); "
+            "check eval_test_stride / ordinal norm alignment"
+        )
+    y_true = y_true_mmpd
 
-    binary_mse = per_window_anchor_mse(binary_pack["y_true"], binary_pack["final_anchor"])
-    mmpd_mse = per_window_anchor_mse(mmpd_pack["y_true"], mmpd_pack["deterministic"])
+    binary_mse = per_window_anchor_mse(y_true, binary_pack["final_anchor"])
+    mmpd_mse = per_window_anchor_mse(y_true, mmpd_pack["deterministic"])
     series_starts = np.asarray(window_indices, dtype=np.int64) * int(test_stride)
     diff = binary_mse - mmpd_mse
 
@@ -456,19 +466,13 @@ def _plot_compare_panel(
     w_past = lookback
 
     gt_1d = np.concatenate([past_norm, future_norm], axis=-1)
-    common_len = min(
-        gt_1d.shape[-1],
-        coarse_np.shape[-1],
-        fine_np.shape[-1],
-        final_np.shape[-1],
-        mmpd_1d.shape[-1],
-    )
+    common_len = min(gt_1d.shape[-1], coarse_np.shape[-1], fine_np.shape[-1], final_np.shape[-1])
     gt_1d = gt_1d[..., :common_len]
     coarse_np = coarse_np[..., :common_len]
     fine_np = fine_np[..., :common_len]
     final_np = final_np[..., :common_len]
-    mmpd_1d = mmpd_1d[..., :common_len]
     t_axis = np.arange(-lookback, common_len - lookback)
+    t_future = np.arange(0, mmpd_1d.shape[-1])
     span_label = f"LB={lookback}, K={k} overlap, H={fut_len - k} horizon"
 
     fig = plt.figure(figsize=(4.2 * n_vars, 2.4 * 5), constrained_layout=True)
@@ -504,7 +508,7 @@ def _plot_compare_panel(
         ax.plot(t_axis, coarse_np[col], color="#FF9800", linewidth=1.0, label="Binary coarse")
         ax.plot(t_axis, fine_np[col], color="#4CAF50", linewidth=1.0, label="Binary fine")
         ax.plot(t_axis, final_np[col], color="#E91E63", linewidth=1.2, label="Binary final")
-        ax.plot(t_axis, mmpd_1d[col], color="#9C27B0", linewidth=1.2, linestyle="--", label="MMPD")
+        ax.plot(t_future, mmpd_1d[col], color="#9C27B0", linewidth=1.2, linestyle="--", label="MMPD (future)")
         _mark_lookback_overlap_1d(ax, w_past, k)
         ax.grid(True, alpha=0.12)
         ax.set_title(f"var {col} 1D window-norm ({span_label})", fontsize=8)

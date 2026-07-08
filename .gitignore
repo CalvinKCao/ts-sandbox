@@ -226,7 +226,6 @@ accuracy_summary.csv
 
 # lnai-generated
 .agents/skills/alliancecan
-.agents/skills/audio_math_explainer
 .agents/skills/messy
 .agents/skills/natural
 .agents/skills/quick
@@ -240,6 +239,7 @@ accuracy_summary.csv
 .cursor/skills/lnai
 .cursor/skills/lnai-master-sync
 .cursor/skills/messy
+.cursor/skills/ml-review
 .cursor/skills/natural
 .cursor/skills/quick
 .cursor/skills/slidev
@@ -253,6 +253,7 @@ accuracy_summary.csv
 .gemini/skills/lnai
 .gemini/skills/lnai-master-sync
 .gemini/skills/messy
+.gemini/skills/ml-review
 .gemini/skills/natural
 .gemini/skills/quick
 .gemini/skills/slidev
@@ -265,6 +266,7 @@ accuracy_summary.csv
 .github/skills/lnai
 .github/skills/lnai-master-sync
 .github/skills/messy
+.github/skills/ml-review
 .github/skills/natural
 .github/skills/quick
 .github/skills/slidev

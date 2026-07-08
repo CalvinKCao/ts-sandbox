@@ -48,7 +48,7 @@
     "cursor": {
       "version": 1,
       "tool": "cursor",
-      "generatedAt": "2026-06-01T18:39:04.035Z",
+      "generatedAt": "2026-07-08T20:29:05.745Z",
       "files": [
         {
           "path": "AGENTS.md",
@@ -86,6 +86,11 @@
           "target": "../../.ai/skills/messy"
         },
         {
+          "path": ".cursor/skills/ml-review",
+          "type": "symlink",
+          "target": "../../.ai/skills/ml-review"
+        },
+        {
           "path": ".cursor/skills/natural",
           "type": "symlink",
           "target": "../../.ai/skills/natural"
@@ -120,7 +125,7 @@
     "copilot": {
       "version": 1,
       "tool": "copilot",
-      "generatedAt": "2026-06-01T18:39:04.038Z",
+      "generatedAt": "2026-07-08T20:29:05.757Z",
       "files": [
         {
           "path": "AGENTS.md",
@@ -156,6 +161,11 @@
           "path": ".github/skills/messy",
           "type": "symlink",
           "target": "../../.ai/skills/messy"
+        },
+        {
+          "path": ".github/skills/ml-review",
+          "type": "symlink",
+          "target": "../../.ai/skills/ml-review"
         },
         {
           "path": ".github/skills/natural",
@@ -229,7 +239,7 @@
     "gemini": {
       "version": 1,
       "tool": "gemini",
-      "generatedAt": "2026-06-01T18:39:04.030Z",
+      "generatedAt": "2026-07-08T20:29:05.731Z",
       "files": [
         {
           "path": "AGENTS.md",
@@ -265,6 +275,11 @@
           "path": ".gemini/skills/messy",
           "type": "symlink",
           "target": "../../.ai/skills/messy"
+        },
+        {
+          "path": ".gemini/skills/ml-review",
+          "type": "symlink",
+          "target": "../../.ai/skills/ml-review"
         },
         {
           "path": ".gemini/skills/natural",

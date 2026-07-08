@@ -19,6 +19,8 @@ Run `git branch --show-current` to see what branch you're on. IF THE BRANCH HAS 
 For anything Slurm/Alliance Canada related, ALWAYS use the `/alliancecan` skill first.
 If `/alliancecan` does not resolve the question, check `wiki_docs/` for cluster-specific details.
 
+When giving **pull / prep / submit** commands for Killarney (or any cluster), follow the alliancecan skill: **one copy-pastable bash block**, with optional or alternate lines **commented out** (`#`), not split across prose.
+
 ## Git hygiene
 ALWAYS use the /git skill before using git operations.
 
@@ -57,7 +59,7 @@ Use `wandb` for training/eval runs tied to this repo.
 - Keep writing terse and detailed; avoid context pollution.
 - Comments should sound natural, not AI-generated.
 - Do not use flashy/fancy formatting in comments (for example `# ---HEADER---` or `// == PIPELINE PT A ==`).
-- Flashy formatting in print statements is okay for clarity, but only use separators when denoting major log subdivisions.sq
+- Flashy formatting in print statements is okay for clarity, but only use separators when denoting major log subdivisions.
 - Never leave wording that makes AI authorship obvious.
 
 ## General code style
