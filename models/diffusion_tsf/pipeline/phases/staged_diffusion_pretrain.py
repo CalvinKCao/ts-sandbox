@@ -253,17 +253,25 @@ def source_run_stage_pretrain_ckpt(
     stage: str,
 ) -> Optional[str]:
     """``pretrained_{stage}/pretrained_diffusion.pt`` from a prior grid run."""
+    ckpt_rel = f"pretrained_{stage}/pretrained_diffusion.pt"
     try:
-        source_dir = discover_dataset_run_ckpt_dir(state, source_config)
+        source_dir = discover_dataset_run_ckpt_dir(
+            state, source_config, required_file=ckpt_rel,
+        )
     except FileNotFoundError:
         return None
-    ckpt = os.path.join(source_dir, f"pretrained_{stage}", "pretrained_diffusion.pt")
+    ckpt = os.path.join(source_dir, ckpt_rel)
     if os.path.exists(ckpt):
         return ckpt
     return None
 
 
-def discover_dataset_run_ckpt_dir(state: PipelineState, config_suffix: str) -> str:
+def discover_dataset_run_ckpt_dir(
+    state: PipelineState,
+    config_suffix: str,
+    *,
+    required_file: Optional[str] = None,
+) -> str:
     """Newest isolated run dir ``*-<dataset>-<config_suffix>`` under the ckpt root."""
     suffix = f"-{state.dataset}-{config_suffix}"
     best_dir: Optional[str] = None
@@ -280,13 +288,16 @@ def discover_dataset_run_ckpt_dir(state: PipelineState, config_suffix: str) -> s
             path = os.path.join(ckpt_root, name)
             if not os.path.isdir(path):
                 continue
+            if required_file and not os.path.exists(os.path.join(path, required_file)):
+                continue
             mtime = os.path.getmtime(path)
             if mtime > best_mtime:
                 best_mtime = mtime
                 best_dir = path
     if not best_dir:
+        req = f" containing {required_file!r}" if required_file else ""
         raise FileNotFoundError(
-            f"No prior run *-{state.dataset}-{config_suffix} under any of {roots}. "
+            f"No prior run *-{state.dataset}-{config_suffix}{req} under any of {roots}. "
             "Complete the exhaustive staged grid first."
         )
     return best_dir
