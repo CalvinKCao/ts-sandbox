@@ -196,16 +196,14 @@ def log_mmpd_eval_to_leaderboard(
         config["baseline"] = raw_config
         lb, hz = _mmpd_horizon_from_yaml(mmpd_run_config)
         if lb is not None or hz is not None:
-            config["experiment"] = {
-                "value": {
-                    k: v
-                    for k, v in (
-                        ("lookback_length", lb),
-                        ("forecast_length", hz),
-                    )
-                    if v is not None
-                }
-            }
+            exp_block: Dict[str, Any] = {}
+            if lb is not None:
+                exp_block["lookback_length"] = lb
+                config["leaderboard_lookback"] = lb
+            if hz is not None:
+                exp_block["forecast_length"] = hz
+                config["leaderboard_horizon"] = hz
+            config["experiment"] = exp_block
     if tuning_path.is_file():
         config["tuning_path"] = str(tuning_path)
     if tuned_hparams:

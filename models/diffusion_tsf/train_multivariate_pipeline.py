@@ -38,7 +38,11 @@ from models.diffusion_tsf.diffusion_model import DiffusionTSF
 from models.diffusion_tsf.realts import get_synthetic_dataloader
 from models.diffusion_tsf.guidance import iTransformerGuidance, PatchDecoderGuidance
 from models.diffusion_tsf.patch_guidance_stack import PatchGuidanceStack, PatchGuidanceStackConfig
-from models.diffusion_tsf.ordinal_window_norm import build_global_ladder_from_training, ordinal_encode
+from models.diffusion_tsf.ordinal_window_norm import (
+    build_global_ladder_from_training,
+    ordinal_encode,
+    ranks_to_unit,
+)
 from models.diffusion_tsf.storage_paths import resolve_checkpoint_dir, resolve_results_dir
 from models.diffusion_tsf.dalia_data import (
     DALIA_CHANNEL_NAMES,
@@ -580,7 +584,12 @@ def create_patch_guidance_stack(
 
 
 def wrap_patch_guidance(stack: PatchGuidanceStack) -> PatchDecoderGuidance:
-    return PatchDecoderGuidance(stack, chunk_horizon=_patch_guidance_pred_len())
+    ordinal_ladder = GLOBAL_ORDINAL_LADDER if USE_ORDINAL_WINDOW_NORM else None
+    return PatchDecoderGuidance(
+        stack,
+        chunk_horizon=_patch_guidance_pred_len(),
+        ordinal_ladder=ordinal_ladder,
+    )
 
 
 def load_patch_guidance_from_checkpoint(
@@ -618,6 +627,16 @@ def load_wrapped_guidance(
     if gtype == "patch_decoder" and not _checkpoint_is_patch_guidance(ckpt):
         gtype = "itransformer"
     if gtype == "patch_decoder":
+        if USE_ORDINAL_WINDOW_NORM:
+            if GLOBAL_ORDINAL_LADDER is None:
+                raise ValueError(
+                    "GLOBAL_ORDINAL_LADDER must be set before loading ordinal patch guidance"
+                )
+            if not bool(ckpt.get("ordinal_patch_guidance_unit_ranks", False)):
+                raise ValueError(
+                    "Patch guidance checkpoint was not trained with unit-rank ordinal "
+                    "targets. Delete this patch guidance checkpoint and retrain it."
+                )
         stack = load_patch_guidance_from_checkpoint(
             ckpt_path, num_vars, device, ckpt=ckpt,
         )
@@ -672,9 +691,15 @@ def _set_ordinal_loader_mode(model, loader, *, eval_mode: bool = False) -> None:
     """Configure per-batch ordinal flags on the diffusion model."""
     if not USE_ORDINAL_WINDOW_NORM:
         return
-    ranked = getattr(loader.dataset, "yields_ordinal_ranks", False)
+    ranked = _dataset_yields_ordinal_ranks(loader.dataset)
     model._ordinal_input_is_ranked = ranked
     model._ordinal_apply_ood_shift = bool(eval_mode and not ranked)
+
+
+def _dataset_yields_ordinal_ranks(dataset) -> bool:
+    while isinstance(dataset, Subset):
+        dataset = dataset.dataset
+    return bool(getattr(dataset, "yields_ordinal_ranks", False))
 
 
 def _patch_guidance_batch(
@@ -701,6 +726,13 @@ def _patch_guidance_batch(
         target = future_norm[..., LOOKBACK_OVERLAP : LOOKBACK_OVERLAP + pred_len]
     else:
         target = future_norm[..., :pred_len]
+    if USE_ORDINAL_WINDOW_NORM:
+        if GLOBAL_ORDINAL_LADDER is None:
+            raise ValueError("GLOBAL_ORDINAL_LADDER must be set before ordinal patch guidance")
+        ladder_past = GLOBAL_ORDINAL_LADDER.expand_batch(past_norm.shape[0])
+        ladder_target = GLOBAL_ORDINAL_LADDER.expand_batch(target.shape[0])
+        past_norm = ranks_to_unit(past_norm, ladder_past)
+        target = ranks_to_unit(target, ladder_target)
     return past_norm, target
 
 
@@ -708,7 +740,7 @@ def train_patch_guidance_epoch(stack, loader, optimizer, device, scheduler=None)
     stack.train()
     total_loss = 0.0
     n_batches = 0
-    data_is_ranked = getattr(loader.dataset, "yields_ordinal_ranks", False)
+    data_is_ranked = _dataset_yields_ordinal_ranks(loader.dataset)
     for past, future in loader:
         past_norm, y_true = _patch_guidance_batch(
             past, future, device, data_is_ranked=data_is_ranked,
@@ -728,7 +760,7 @@ def validate_patch_guidance(stack, loader, device):
     stack.eval()
     total_loss = 0.0
     n_batches = 0
-    data_is_ranked = getattr(loader.dataset, "yields_ordinal_ranks", False)
+    data_is_ranked = _dataset_yields_ordinal_ranks(loader.dataset)
     with torch.no_grad():
         for past, future in loader:
             past_norm, y_true = _patch_guidance_batch(
@@ -797,6 +829,12 @@ def patch_guidance_hp_objective(
                             "config": stack.config.to_dict(),
                             "best_params": tuned,
                             "val_loss": val_loss,
+                            "ordinal_patch_guidance_unit_ranks": bool(USE_ORDINAL_WINDOW_NORM),
+                            "patch_guidance_target_space": (
+                                "ordinal_unit_rank"
+                                if USE_ORDINAL_WINDOW_NORM
+                                else "window_normalized"
+                            ),
                         },
                         trial_ckpt_path,
                     )

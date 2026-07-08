@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Split leaderboard report tabs by forecast horizon and prune bad ordinal_norm runs."""
+"""Split leaderboard report tabs by horizon using original filters + config fields."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import argparse
 import copy
 import json
 import os
-import re
 import secrets
 import sys
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,6 +15,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
+from utils.backfill_leaderboard_horizon_fields import backfill_runs
 from utils.load_dotenv import load_repo_dotenv
 
 load_repo_dotenv(REPO)
@@ -24,17 +24,12 @@ REPORT_ID = "VmlldzoxNzMyOTkxMw=="
 ENTITY = "calvincao"
 PROJECT = "ts-sandbox-leaderboard"
 
+HORIZON_TABS = (
+    ("96/96", 96),
+    ("336/720", 720),
+)
+
 META_TAGS = frozenset({"eval", "archive", "mmpd", "binary", "stub"})
-
-HORIZON_SPECS = (
-    ("96/96", 96, r"(lb336[_-]hz96|(?<!0)hz96)"),
-    ("336/720", 720, r"(lb336[_-]hz720|lb96[_-]hz720|hz720)"),
-)
-
-BATCH_GROUP_RE = re.compile(
-    r"^07-0[567]-.*(?:ordinal_norm|ordinal-norm)", re.IGNORECASE
-)
-PROTECT_GROUP_RE = re.compile(r"07-06-408756\d")
 
 
 def _new_runset_id() -> str:
@@ -69,116 +64,94 @@ def _dataset_from_filters(filters: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _keep_base_filter(item: Dict[str, Any]) -> bool:
+def _is_original_base_filter(item: Dict[str, Any]) -> bool:
     if "filters" in item:
         return False
     key = item.get("key") or {}
-    if key.get("section") == "run" and key.get("name") == "createdAt":
-        return not item.get("disabled", False)
-    if key.get("section") != "tags":
-        return False
+    section = key.get("section")
     name = key.get("name")
-    if name == "eval":
+    if section == "tags":
+        if name == "eval":
+            return item.get("op") == "=" and item.get("value") is True
+        if name == "archive":
+            return item.get("op") == "!=" and item.get("value") is False
+        if name in META_TAGS:
+            return False
         return item.get("op") == "=" and item.get("value") is True
-    if name == "archive":
-        return item.get("op") == "!=" and item.get("value") is False
-    if name in META_TAGS:
+    if section == "run" and name == "createdAt":
+        return not item.get("disabled", False)
+    if section == "config":
         return False
-    return item.get("op") == "=" and item.get("value") is True
+    return False
 
 
-def _horizon_filter_group(forecast_length: int, group_regex: str) -> Dict[str, Any]:
-    # Group connector must be OR: MMPD stubs match run.group regex but have no
-    # experiment.value.forecast_length in config (AND would drop them all).
+def _original_filters_from_runset(runset: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        copy.deepcopy(item)
+        for item in (runset.get("filters") or {}).get("filters") or []
+        if _is_original_base_filter(item)
+    ]
+
+
+def _horizon_config_filter(horizon: int) -> Dict[str, Any]:
     return {
-        "filters": [
-            {
-                "key": {"section": "run", "name": "group"},
-                "op": "=",
-                "value": group_regex,
-                "isRegex": True,
-            },
-            {
-                "key": {
-                    "section": "config",
-                    "name": "experiment.value.forecast_length",
-                },
-                "op": "=",
-                "value": forecast_length,
-                "connector": "OR",
-            },
-        ],
-        "connector": "OR",
+        "key": {"section": "config", "name": "experiment.forecast_length"},
+        "op": "=",
+        "value": horizon,
     }
 
 
-def _build_filters(original: Dict[str, Any], label: str) -> Dict[str, Any]:
-    _ = label
-    base_items: List[Dict[str, Any]] = []
-    for item in original.get("filters") or []:
-        if _keep_base_filter(item):
-            base_items.append(copy.deepcopy(item))
-
-    out_items = list(base_items)
-    for horizon_label, forecast_len, group_re in HORIZON_SPECS:
-        if horizon_label == label:
-            out_items.append(_horizon_filter_group(forecast_len, group_re))
-            break
-
-    return {"filterFormat": "filterV2", "filters": out_items}
+def _collapse_to_original_runsets(runsets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    by_dataset: Dict[str, Dict[str, Any]] = {}
+    for rs in runsets:
+        name = rs.get("name") or ""
+        dataset = name.split(" — ", 1)[0] if " — " in name else _dataset_from_filters(rs.get("filters") or {})
+        if not dataset:
+            continue
+        if dataset in by_dataset:
+            continue
+        base = copy.deepcopy(rs)
+        base["name"] = dataset
+        base["filters"] = {
+            "filterFormat": "filterV2",
+            "filters": _original_filters_from_runset(rs),
+        }
+        by_dataset[dataset] = base
+    return [by_dataset[k] for k in sorted(by_dataset)]
 
 
 def _split_runset(runset: Dict[str, Any]) -> List[Dict[str, Any]]:
-    dataset = _dataset_from_filters(runset.get("filters") or {})
-    if not dataset:
-        dataset = (runset.get("name") or "dataset").split()[0]
-
+    dataset = runset.get("name") or _dataset_from_filters(runset.get("filters") or {}) or "dataset"
+    base_filters = _original_filters_from_runset(runset)
     out: List[Dict[str, Any]] = []
-    for label, _, _ in HORIZON_SPECS:
+    for label, horizon in HORIZON_TABS:
         rs = copy.deepcopy(runset)
         rs["id"] = _new_runset_id()
         rs["name"] = f"{dataset} — {label}"
-        rs["filters"] = _build_filters(runset.get("filters") or {}, label)
+        rs["filters"] = {
+            "filterFormat": "filterV2",
+            "filters": base_filters + [_horizon_config_filter(horizon)],
+        }
         out.append(rs)
     return out
 
 
-def fix_horizon_filter_connectors(spec: Dict[str, Any]) -> int:
-    """Patch already-split report runsets where horizon group used AND instead of OR."""
-    fixed = 0
-    for block in spec.get("blocks") or []:
-        if block.get("type") != "panel-grid":
-            continue
-        for rs in (block.get("metadata") or {}).get("runSets") or []:
-            filters = (rs.get("filters") or {}).get("filters") or []
-            if not filters:
-                continue
-            last = filters[-1]
-            if not isinstance(last, dict) or "filters" not in last:
-                continue
-            if last.get("connector") == "OR":
-                continue
-            last["connector"] = "OR"
-            fixed += 1
-    return fixed
-
-
-def split_report_runsets(spec: Dict[str, Any]) -> Tuple[int, int]:
+def rebuild_report(spec: Dict[str, Any]) -> Tuple[int, int]:
     before = 0
     after = 0
     for block in spec.get("blocks") or []:
         if block.get("type") != "panel-grid":
             continue
         md = block.get("metadata") or {}
-        runsets = md.get("runSets") or []
-        before += len(runsets)
+        originals = _collapse_to_original_runsets(md.get("runSets") or [])
+        before = len(md.get("runSets") or [])
         new_runsets: List[Dict[str, Any]] = []
-        for rs in runsets:
+        for rs in originals:
             new_runsets.extend(_split_runset(rs))
         md["runSets"] = new_runsets
         md["openRunSet"] = 0
         block["metadata"] = md
-        after += len(new_runsets)
+        after = len(new_runsets)
     return before, after
 
 
@@ -205,124 +178,40 @@ def upsert_report_view(api: Any, view: Dict[str, Any], spec: Dict[str, Any], dry
         "spec": json.dumps(spec),
     }
     if dry_run:
-        print("[report] dry-run: would upsert_view", variables["id"], variables["displayName"])
+        print("[report] dry-run: would upsert_view", variables["id"])
         return
     execute_graphql(api, gql.upsert_view, variables)
-    print("[report] saved via upsert_view")
+    print("[report] saved")
 
 
 def report_url(view: Dict[str, Any]) -> str:
     title = (view.get("displayName") or "report").replace(" ", "-")
-    rid = view["id"]
-    return f"https://wandb.ai/{ENTITY}/{PROJECT}/reports/{title}--{rid}"
-
-
-def _is_ordinal_norm_batch_run(run: Any) -> bool:
-    group = run.group or ""
-    if BATCH_GROUP_RE.search(group):
-        return True
-    cfg = dict(run.config)
-    nick = str(cfg.get("config_nickname", ""))
-    if re.match(r"^07-0[567]-", group) and "ordinal_norm" in nick:
-        return True
-    return False
-
-
-def _should_keep_run(run: Any) -> bool:
-    group = run.group or ""
-    if run.job_type == "mmpd_eval":
-        return True
-    if PROTECT_GROUP_RE.search(group):
-        return True
-    summary = dict(run.summary)
-    if summary.get("eval/staged_anchor_mse") is not None:
-        return True
-    if run.job_type == "staged_eval" and summary.get("eval/staged_crps") is not None:
-        return True
-    return False
-
-
-def _should_delete_run(run: Any) -> bool:
-    if not _is_ordinal_norm_batch_run(run):
-        return False
-    if _should_keep_run(run):
-        return False
-    state = run.state
-    if state in ("crashed", "failed", "killed", "preempted"):
-        return True
-    if state != "finished":
-        return False
-    summary = dict(run.summary)
-    if run.job_type == "pipeline" and summary.get("eval/staged_anchor_mse") is None:
-        return True
-    if (
-        run.job_type == "staged_eval"
-        and summary.get("eval/staged_anchor_mse") is None
-        and summary.get("eval/staged_crps") is None
-    ):
-        return True
-    return False
-
-
-def _run_path(run: Any) -> str:
-    path = getattr(run, "path", None)
-    if isinstance(path, list):
-        return "/".join(str(p) for p in path)
-    return str(path).lstrip("/")
-
-
-def delete_bad_runs(api: Any, dry_run: bool) -> List[str]:
-    to_delete = [run for run in api.runs(f"{ENTITY}/{PROJECT}") if _should_delete_run(run)]
-    deleted_paths: List[str] = []
-    for run in to_delete:
-        path = _run_path(run)
-        deleted_paths.append(path)
-        msg = f"[delete] {run.state} {run.job_type} {run.group} ({path})"
-        if dry_run:
-            print(f"would {msg}")
-            continue
-        print(msg, flush=True)
-        run.delete()
-    return deleted_paths
+    return f"https://wandb.ai/{ENTITY}/{PROJECT}/reports/{title}--{view['id']}"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--report-id", default=REPORT_ID)
+    parser.add_argument("--skip-backfill", action="store_true")
     parser.add_argument("--skip-report", action="store_true")
-    parser.add_argument("--skip-delete", action="store_true")
-    parser.add_argument(
-        "--fix-horizon-only",
-        action="store_true",
-        help="Patch horizon OR connector on existing split tabs (no re-split).",
-    )
     args = parser.parse_args()
 
     import wandb
 
     api = wandb.Api()
 
-    before = after = 0
-    view: Optional[Dict[str, Any]] = None
+    if not args.skip_backfill:
+        scanned, updated = backfill_runs(api, dry_run=args.dry_run)
+        print(f"[backfill] scanned={scanned} updated={updated}")
+
     if not args.skip_report:
         view = fetch_report_view(api, args.report_id)
         spec = json.loads(view["spec"])
-        if args.fix_horizon_only:
-            fixed = fix_horizon_filter_connectors(spec)
-            print(f"[report] fixed horizon connector on {fixed} runsets")
-        else:
-            before, after = split_report_runsets(spec)
-            print(f"[report] runsets before={before} after={after}")
+        before, after = rebuild_report(spec)
+        print(f"[report] runsets {before} -> {after} (from {after // 2} datasets)")
         upsert_report_view(api, view, spec, dry_run=args.dry_run)
-        print(f"[report] url={report_url(view)}")
-
-    if not args.skip_delete:
-        paths = delete_bad_runs(api, dry_run=args.dry_run)
-        print(f"[delete] {'would delete' if args.dry_run else 'deleted'} {len(paths)} runs")
-
-    if args.dry_run:
-        print("[dry-run] no wandb mutations applied")
+        print(f"[report] {report_url(view)}")
 
 
 if __name__ == "__main__":

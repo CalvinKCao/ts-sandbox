@@ -13,6 +13,7 @@ from typing import Callable, Optional, Protocol, runtime_checkable
 from abc import ABC, abstractmethod
 
 from models.diffusion_tsf.patch_guidance_stack import PatchGuidanceStack
+from models.diffusion_tsf.ordinal_window_norm import ranks_from_unit, ranks_to_unit
 
 
 @runtime_checkable
@@ -256,10 +257,17 @@ class GuidanceEncoderOutput:
 class PatchDecoderGuidance(BaseGuidance):
     """MMPD decoder patch tokens mixed across variates for DiT cross-attention."""
 
-    def __init__(self, stack: PatchGuidanceStack, *, chunk_horizon: int):
+    def __init__(
+        self,
+        stack: PatchGuidanceStack,
+        *,
+        chunk_horizon: int,
+        ordinal_ladder=None,
+    ):
         super().__init__()
         self.stack = stack
         self.chunk_horizon = int(chunk_horizon)
+        self.ordinal_ladder = ordinal_ladder
         self._token_variate_ids: Optional[torch.Tensor] = None
 
         for param in self.stack.parameters():
@@ -281,17 +289,39 @@ class PatchDecoderGuidance(BaseGuidance):
     def token_variate_ids(self) -> Optional[torch.Tensor]:
         return self._token_variate_ids
 
+    def _ladder_for_batch(self, x: torch.Tensor):
+        if self.ordinal_ladder is None:
+            return None
+        batch_size = x.shape[0] if x.dim() >= 3 else 1
+        return self.ordinal_ladder.expand_batch(batch_size)
+
+    def _to_model_space(self, x: torch.Tensor) -> torch.Tensor:
+        ladder = self._ladder_for_batch(x)
+        if ladder is None:
+            return x
+        return ranks_to_unit(x, ladder)
+
+    def _from_model_space(self, x: torch.Tensor) -> torch.Tensor:
+        ladder = self._ladder_for_batch(x)
+        if ladder is None:
+            return x
+        return ranks_from_unit(x, ladder)
+
     @torch.no_grad()
     def get_encoder_tokens(self, past: torch.Tensor) -> torch.Tensor:
         """Return mixed patch context tokens (B, M, context_dim)."""
         if past.dim() == 2:
             past = past.unsqueeze(1)
+        past = self._to_model_space(past)
         mixed, var_ids = self.stack.encode_context(past)
         self._token_variate_ids = var_ids
         return mixed
 
     def _forward_chunk(self, past: torch.Tensor) -> torch.Tensor:
-        return self.stack.forecast(past)
+        out = self.stack.forecast(past)
+        if self.ordinal_ladder is not None:
+            out = out.clamp(0.0, 1.0)
+        return out
 
     def _autoregressive_rollout(
         self,
@@ -334,7 +364,9 @@ class PatchDecoderGuidance(BaseGuidance):
         forecast_length: int,
         overlap: int = 0,
     ) -> torch.Tensor:
-        return self._autoregressive_rollout(past, forecast_length, overlap)
+        past_model = self._to_model_space(past)
+        forecast_model = self._autoregressive_rollout(past_model, forecast_length, overlap)
+        return self._from_model_space(forecast_model)
 
     @torch.no_grad()
     def get_forecast_window_norm(
@@ -343,7 +375,9 @@ class PatchDecoderGuidance(BaseGuidance):
         forecast_length: int,
         overlap: int = 0,
     ) -> torch.Tensor:
-        return self._autoregressive_rollout(past_norm, forecast_length, overlap)
+        past_model = self._to_model_space(past_norm)
+        forecast_model = self._autoregressive_rollout(past_model, forecast_length, overlap)
+        return self._from_model_space(forecast_model)
 
 
 class iTransformerTokenAdapter(nn.Module):
