@@ -68,6 +68,8 @@ from utils.eval_mmpd_gaussian_anchor import (
     subsample_eval_indices,
     summarize_anchor_prob_core_metrics,
 )
+from models.diffusion_tsf.ordinal_window_norm import ordinal_decode
+from models.diffusion_tsf.pipeline.visualize_utils import _dataset_window_z_scores
 from utils.visualize_staged_eval_2d_preds import (
     _anchor_maps,
     _build_state,
@@ -647,8 +649,32 @@ def _upsample_past_future_1d(
     return torch.cat([past, fut], dim=-1)
 
 
+def _ensure_bvt(x: torch.Tensor) -> torch.Tensor:
+    if x.dim() == 2:
+        return x.unsqueeze(0)
+    return x
+
+
 @torch.no_grad()
-def _decode_maps_to_raw_1d(
+def _ordinal_or_window_to_global_z(
+    model: torch.nn.Module,
+    past_model: torch.Tensor,
+    future_model: Optional[torch.Tensor],
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Map model-space 1D (ordinal ranks or window-norm) to global z."""
+    past_model = _ensure_bvt(past_model)
+    if future_model is not None:
+        future_model = _ensure_bvt(future_model)
+    if model._uses_global_ordinal_encoding():
+        ladder = model.config.ordinal_ladder.expand_batch(past_model.shape[0])
+        return ordinal_decode(past_model, future_model, ladder)
+    # Window-norm path: past_model already window-normed; recover via stored stats if present.
+    # For diag plots we pass global-z GT separately; treat model space as already comparable.
+    return past_model, future_model
+
+
+@torch.no_grad()
+def _decode_maps_to_global_z_1d(
     fine_model: torch.nn.Module,
     coarse_map: np.ndarray,
     fine_map: np.ndarray,
@@ -656,31 +682,27 @@ def _decode_maps_to_raw_1d(
     lookback: int,
     horizon: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Decode past+future CDF maps with model-native ranges, upsample to raw time."""
+    """Decode past+future CDF maps → global-z coarse/final; fine = final - coarse."""
     device = next(fine_model.parameters()).device
     coarse_t = torch.from_numpy(np.asarray(coarse_map)).unsqueeze(0).to(device=device, dtype=torch.float32)
     fine_t = torch.from_numpy(np.asarray(fine_map)).unsqueeze(0).to(device=device, dtype=torch.float32)
-    coarse_1d = fine_model._decode_coarse_1d_from_map(coarse_t, cdf_decoder="mean")
-    fine_1d = fine_model._decode_fine_1d_from_map(
-        fine_t,
-        coarse_height=int(coarse_t.shape[2]),
-        cdf_decoder="mean",
-    )
-    final_1d = fine_model.decode_dual_from_2d(coarse_t, fine_t, from_diffusion=False)
-    # Ordinal single-variate path may squeeze V; restore (B, V, T).
-    if coarse_1d.dim() == 2:
-        coarse_1d = coarse_1d.unsqueeze(1)
-    if fine_1d.dim() == 2:
-        fine_1d = fine_1d.unsqueeze(1)
-    if final_1d.dim() == 2:
-        final_1d = final_1d.unsqueeze(1)
+    # Ordinal dual-height: fine map is a refinement band, not an additive residual.
+    # Always take fine as final-coarse after dual decode so twin-axis scale is truthful.
+    coarse_1d = _ensure_bvt(fine_model._decode_coarse_1d_from_map(coarse_t, cdf_decoder="mean"))
+    final_1d = _ensure_bvt(fine_model.decode_dual_from_2d(coarse_t, fine_t, from_diffusion=False))
     coarse_1d = _upsample_past_future_1d(fine_model, coarse_1d, lookback=lookback, horizon=horizon)
-    fine_1d = _upsample_past_future_1d(fine_model, fine_1d, lookback=lookback, horizon=horizon)
     final_1d = _upsample_past_future_1d(fine_model, final_1d, lookback=lookback, horizon=horizon)
+    past_c, fut_c = coarse_1d[..., :lookback], coarse_1d[..., lookback:]
+    past_f, fut_f = final_1d[..., :lookback], final_1d[..., lookback:]
+    past_c_z, fut_c_z = _ordinal_or_window_to_global_z(fine_model, past_c, fut_c)
+    past_f_z, fut_f_z = _ordinal_or_window_to_global_z(fine_model, past_f, fut_f)
+    coarse_z = torch.cat([past_c_z, fut_c_z], dim=-1)
+    final_z = torch.cat([past_f_z, fut_f_z], dim=-1)
+    fine_z = final_z - coarse_z
     return (
-        coarse_1d[0].detach().cpu().numpy(),
-        fine_1d[0].detach().cpu().numpy(),
-        final_1d[0].detach().cpu().numpy(),
+        coarse_z[0].detach().cpu().numpy(),
+        fine_z[0].detach().cpu().numpy(),
+        final_z[0].detach().cpu().numpy(),
     )
 
 
@@ -689,6 +711,8 @@ def _plot_compare_panel(
     maps: Dict[str, Any],
     fine_model: torch.nn.Module,
     mmpd_1d: np.ndarray,
+    past_z: np.ndarray,
+    future_z: np.ndarray,
     dataset: str,
     window_index: int,
     meta: Dict[str, Any],
@@ -702,24 +726,39 @@ def _plot_compare_panel(
     pr_f = maps["pred_fine"]
     n_vars = min(variables_to_plot, gt_c.shape[0])
 
-    past_norm = maps["past_norm"].numpy()
-    future_norm = maps["future_norm"].numpy()
     k = int(getattr(fine_model.config, "lookback_overlap", 0) or 0)
-    lookback = int(past_norm.shape[-1])
-    fut_len = int(future_norm.shape[-1])
+    lookback = int(past_z.shape[-1])
+    fut_len = int(future_z.shape[-1])
     w_past_map = int(fine_model._repr_time_len(lookback))
 
-    coarse_np, fine_np, final_np = _decode_maps_to_raw_1d(
+    coarse_np, fine_np, final_np = _decode_maps_to_global_z_1d(
         fine_model, pr_c, pr_f, lookback=lookback, horizon=fut_len
     )
-    gt_1d = np.concatenate([past_norm, future_norm], axis=-1)
-    common_len = min(gt_1d.shape[-1], coarse_np.shape[-1], fine_np.shape[-1], final_np.shape[-1])
+    # Also decode GT maps so lookback 1D matches 2D encode/decode (not raw z alone).
+    gt_coarse_np, gt_fine_np, gt_final_np = _decode_maps_to_global_z_1d(
+        fine_model, gt_c, gt_f, lookback=lookback, horizon=fut_len
+    )
+    gt_1d = np.concatenate([past_z, future_z], axis=-1)
+    common_len = min(
+        gt_1d.shape[-1],
+        coarse_np.shape[-1],
+        fine_np.shape[-1],
+        final_np.shape[-1],
+        gt_final_np.shape[-1],
+    )
     gt_1d = gt_1d[..., :common_len]
+    gt_final_np = gt_final_np[..., :common_len]
+    gt_coarse_np = gt_coarse_np[..., :common_len]
+    gt_fine_np = gt_fine_np[..., :common_len]
     coarse_np = coarse_np[..., :common_len]
     fine_np = fine_np[..., :common_len]
     final_np = final_np[..., :common_len]
     t_axis = np.arange(-lookback, common_len - lookback)
-    t_future = np.arange(0, mmpd_1d.shape[-1])
+    # MMPD pack is already global-z future (no lookback); align to t>=0.
+    mmpd_plot = np.asarray(mmpd_1d)
+    if mmpd_plot.shape[-1] > fut_len:
+        mmpd_plot = mmpd_plot[..., :fut_len]
+    t_future = np.arange(0, mmpd_plot.shape[-1])
     span_label = f"LB={lookback}, K={k} overlap, H={fut_len} horizon"
 
     # Wide canvas: ~720 horizon needs horizontal room or lines look like noise.
@@ -752,23 +791,50 @@ def _plot_compare_panel(
 
     for col in range(n_vars):
         ax = fig.add_subplot(gs[4, col])
-        # Coarse ~ same magnitude as GT/final; fine residual is ~1/H of that — own axis.
-        ax.plot(t_axis, gt_1d[col], color="#2196F3", linewidth=1.4, label="GT", zorder=3)
+        # All primary curves in global-z (same space as MMPD eval / binary anchor MSE).
+        ax.plot(t_axis, gt_1d[col], color="#2196F3", linewidth=1.4, label="GT (global z)", zorder=3)
+        ax.plot(
+            t_axis,
+            gt_final_np[col],
+            color="#90CAF9",
+            linewidth=1.0,
+            linestyle=":",
+            label="GT encode→decode",
+            zorder=2,
+        )
         ax.plot(t_axis, coarse_np[col], color="#FF9800", linewidth=1.0, alpha=0.95, label="Binary coarse", zorder=2)
         ax.plot(t_axis, final_np[col], color="#E91E63", linewidth=1.2, label="Binary final", zorder=2)
-        ax.plot(t_future, mmpd_1d[col], color="#9C27B0", linewidth=1.2, linestyle="--", label="MMPD (future)", zorder=2)
+        ax.plot(
+            t_future,
+            mmpd_plot[col],
+            color="#9C27B0",
+            linewidth=1.2,
+            linestyle="--",
+            label="MMPD (future)",
+            zorder=2,
+        )
+        # Fine = final - coarse in global-z; twin axis autoscales to residual magnitude.
         ax2 = ax.twinx()
-        ax2.plot(t_axis, fine_np[col], color="#4CAF50", linewidth=1.0, alpha=0.9, label="Binary fine")
+        ax2.plot(t_axis, fine_np[col], color="#4CAF50", linewidth=1.0, alpha=0.9, label="Binary fine (final−coarse)")
+        ax2.plot(
+            t_axis,
+            gt_fine_np[col],
+            color="#A5D6A7",
+            linewidth=0.9,
+            linestyle=":",
+            alpha=0.85,
+            label="GT fine (final−coarse)",
+        )
         ax2.tick_params(axis="y", labelsize=7, colors="#2E7D32")
-        ax2.set_ylabel("fine residual", fontsize=7, color="#2E7D32")
+        ax2.set_ylabel("fine residual (global z)", fontsize=7, color="#2E7D32")
         _mark_lookback_overlap_1d(ax, lookback, k)
-        ax.set_xlim(-lookback, max(fut_len, int(mmpd_1d.shape[-1])))
+        ax.set_xlim(-lookback, max(fut_len, int(mmpd_plot.shape[-1])))
         ax.grid(True, alpha=0.12)
-        ax.set_title(f"var {col} 1D window-norm ({span_label})", fontsize=8)
+        ax.set_title(f"var {col} 1D global-z ({span_label})", fontsize=8)
         if col == 0:
             h1, l1 = ax.get_legend_handles_labels()
             h2, l2 = ax2.get_legend_handles_labels()
-            ax.legend(h1 + h2, l1 + l2, fontsize=6, loc="upper right")
+            ax.legend(h1 + h2, l1 + l2, fontsize=5.5, loc="upper right")
 
     kind = str(meta.get("pick_kind", "top_diff"))
     title = (
@@ -825,6 +891,10 @@ def plot_dataset_windows(
     )
     coarse_model = _load_stage_model(state, "coarse", bundle["coarse_pt"], guidance_model, len(variate_indices), device)
     fine_model = _load_stage_model(state, "fine", bundle["fine_pt"], guidance_model, len(variate_indices), device)
+    ranked = bool(getattr(test_ds, "yields_ordinal_ranks", False))
+    for m in (coarse_model, fine_model):
+        m._ordinal_input_is_ranked = ranked
+        m._ordinal_apply_ood_shift = bool(not ranked)
 
     with np.load(mmpd_pack_path) as mmpd_data:
         mmpd_det = mmpd_data["deterministic"]
@@ -839,6 +909,10 @@ def plot_dataset_windows(
         past_b = past.unsqueeze(0).to(device)
         future_b = future.unsqueeze(0).to(device)
         maps = _anchor_maps(coarse_model, fine_model, past_b, future_b)
+        # Global-z GT from ds.data (ordinal datasets yield ranks in __getitem__).
+        past_z_t, future_z_t = _dataset_window_z_scores(test_ds, wi)
+        past_z = past_z_t.numpy()
+        future_z = future_z_t.numpy()
         del past_b, future_b
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -856,6 +930,8 @@ def plot_dataset_windows(
                 maps=maps,
                 fine_model=fine_model,
                 mmpd_1d=mmpd_1d,
+                past_z=past_z,
+                future_z=future_z,
                 dataset=dataset,
                 window_index=wi,
                 meta=entry,
