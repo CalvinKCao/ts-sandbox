@@ -2,11 +2,14 @@
 # Pull Slurm run artifacts and reports from Killarney.
 #
 # Usage:
-#   ./utils/pull_results.sh [--light|--all] [--recent [HOURS]] [--dry-run] [subpath ...]
+#   ./utils/pull_results.sh [--light|--all] [--recent [HOURS]] [--no-npy-ckpt] [--dry-run] [subpath ...]
 #
 # Modes (default: --light):
 #   --light   discover all *.log, *.err, *.out, *.json via remote find, then rsync
 #   --all     sync all files (no extension filter)
+#
+# Filters:
+#   --no-npy-ckpt  skip *.npy, *.npy.*, *.npz, *.ckpt, *.pt (useful with --all)
 #
 # Scope:
 #   No args     sync results/ + reports/ from all configured remote repo roots
@@ -21,6 +24,7 @@
 #   synthetic_cache, synth_data, synth_pool*.npy*, pretrained_dim*/
 #   and promoted Phase-1 .pt names (itrans_hp_best.pt, diffusion.pt, …).
 # --all still walks Phase-1 .pt trees; both modes skip synthetic pools.
+# --no-npy-ckpt additionally drops all npy / npz / ckpt / pt regardless of mode.
 
 set -euo pipefail
 
@@ -67,6 +71,7 @@ PULL_MODE="light"
 USE_RECENT=0
 RECENT_HOURS=24
 DRY_RUN=0
+SKIP_NPY_CKPT=0
 
 while [[ $# -gt 0 && $1 == --* ]]; do
     case "$1" in
@@ -80,10 +85,11 @@ while [[ $# -gt 0 && $1 == --* ]]; do
                 shift
             fi
             ;;
+        --no-npy-ckpt) SKIP_NPY_CKPT=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         *)
             echo "Unknown option: $1" >&2
-            echo "Usage: $0 [--light|--all] [--recent [HOURS]] [--dry-run] [subpath ...]" >&2
+            echo "Usage: $0 [--light|--all] [--recent [HOURS]] [--no-npy-ckpt] [--dry-run] [subpath ...]" >&2
             exit 1
             ;;
     esac
@@ -94,6 +100,9 @@ build_rsync_opts() {
     out=("${RSYNC_BASE[@]}")
     if [ "$DRY_RUN" -eq 1 ]; then
         out+=(--dry-run -i)
+    fi
+    if [ "$SKIP_NPY_CKPT" -eq 1 ]; then
+        out+=(--exclude '*.npy' --exclude '*.npy.*' --exclude '*.npz' --exclude '*.ckpt' --exclude '*.pt')
     fi
 }
 
@@ -147,19 +156,27 @@ remote_list_files() {
     local rel_arg="${rel_subpath:-__ROOT__}"
 
     ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" \
-        bash -s -- "$remote_root" "$rel_arg" "$PULL_MODE" "$USE_RECENT" "$RECENT_HOURS" "$tree_kind" <<'REMOTE_FIND'
+        bash -s -- "$remote_root" "$rel_arg" "$PULL_MODE" "$USE_RECENT" "$RECENT_HOURS" "$tree_kind" "$SKIP_NPY_CKPT" <<'REMOTE_FIND'
 set -euo pipefail
 remote_root=${1:?}
 pull_mode=${3:?}
 use_recent=${4:?}
 recent_hours=${5:?}
 tree_kind=${6:-results}
+skip_npy_ckpt=${7:-0}
 remote_root=${remote_root%/}
 rel=$2
 [ "$rel" = "__ROOT__" ] && rel=""
 
 search="$remote_root"
 [ -n "$rel" ] && search="${remote_root}/${rel}"
+
+is_npy_ckpt() {
+    case "$1" in
+        *.npy|*.npy.*|*.npz|*.ckpt|*.pt) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 light_ok=0
 if [ "$pull_mode" = "light" ]; then
@@ -190,6 +207,9 @@ fi
 
 if [ -f "$search" ]; then
     [ "$light_ok" -eq 1 ] || exit 0
+    if [ "$skip_npy_ckpt" = "1" ] && is_npy_ckpt "$search"; then
+        exit 0
+    fi
     printf '%s\n' "${search#"${remote_root}/"}"
     exit 0
 fi
@@ -216,6 +236,15 @@ if [ "$tree_kind" = "results" ]; then
             -o -name 'diffusion.pt'
         )
     fi
+fi
+if [ "$skip_npy_ckpt" = "1" ]; then
+    prune+=(
+        -o -name '*.npy'
+        -o -name '*.npy.*'
+        -o -name '*.npz'
+        -o -name '*.ckpt'
+        -o -name '*.pt'
+    )
 fi
 prune+=(\) -prune -o)
 
@@ -263,6 +292,7 @@ pull_via_file_list() {
     fi
     local prune_note=""
     [ "$PULL_MODE" = "light" ] && [ "$tree_kind" = "results" ] && prune_note=", skip synth pools + phase-1 ckpts"
+    [ "$SKIP_NPY_CKPT" -eq 1 ] && prune_note="${prune_note}, skip npy/npz/ckpt/pt"
     local label="$remote_root"
     if [ "${#rel_subpaths[@]}" -eq 1 ]; then
         label="${remote_root}/${rel_subpaths[0]}"
@@ -323,7 +353,9 @@ pull_full_tree() {
     local -a rsync_opts
     build_rsync_opts rsync_opts
 
-    echo "  -> ${label} (full tree)"
+    local skip_note=""
+    [ "$SKIP_NPY_CKPT" -eq 1 ] && skip_note=", skip npy/npz/ckpt/pt"
+    echo "  -> ${label} (full tree${skip_note})"
     rsync -e "ssh ${SSH_OPTS[*]}" "${rsync_opts[@]}" --ignore-missing-args \
         "${src}" "${local_dest}/"
 }
@@ -379,6 +411,7 @@ echo "Pulling from ${REMOTE_HOST} (${PULL_MODE} mode, dest=${LOCAL_RESULTS_PATH}
 [ "$PULL_REPORTS" -eq 1 ] && echo "Also syncing reports -> ${LOCAL_REPORTS_PATH}"
 [ "$DRY_RUN" -eq 1 ] && echo "(dry-run: no files written)"
 [ "$USE_RECENT" -eq 1 ] && echo "Only files modified in the last ${RECENT_HOURS} hours"
+[ "$SKIP_NPY_CKPT" -eq 1 ] && echo "Skipping *.npy / *.npz / *.ckpt / *.pt"
 
 # One SSH session (ControlMaster) for find + rsync below.
 ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" true

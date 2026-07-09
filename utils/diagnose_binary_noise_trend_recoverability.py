@@ -354,22 +354,17 @@ def _crossing_threshold(floor: float, *, absolute_cap: float = 0.25, margin: flo
     return float(floor + margin)
 
 
-def evaluate_geometry(
+def _prepare_geometry_cache(
     *,
     geometry: str,
     dataset: str,
     n_samples: int,
     seed: int,
     stage: str,
-    fractions: Sequence[float],
     acf_lags: Sequence[int],
-    length_mode: str,
-    g_cal: float,
-    scale_cal: float,
-    g_override: Optional[float],
-    scale_override: Optional[float],
     ma_window: str,
 ) -> Dict[str, Any]:
+    """Encode/decode once; reuse across g grid candidates."""
     config_path = GEOMETRY_CONFIGS[geometry]
     state = _build_state(config_path, dataset)
     windows, norm_stats = _load_val_windows(state, n_samples=n_samples, seed=seed)
@@ -377,13 +372,53 @@ def evaluate_geometry(
     model, n_vars = _make_model(state, stage=stage, ordinal_ladder=ladder)
     maps = [_encode_coarse_maps(model, past, future) for past, future in windows]
     clean_1d = [_decode_coarse_1d(model, m) for m in maps]
+    floors = _noise_floor_metrics(
+        model,
+        clean_1d,
+        tuple(maps[0].shape),
+        n_draws=max(8, min(20, n_samples)),
+        acf_lags=acf_lags,
+        seed=seed + 17,
+        ma_window=ma_window,
+    )
+    return {
+        "geometry": geometry,
+        "dataset": dataset,
+        "state": state,
+        "model": model,
+        "n_vars": n_vars,
+        "maps": maps,
+        "clean_1d": clean_1d,
+        "floors": floors,
+        "ma_window": ma_window,
+    }
+
+
+def _eval_from_cache(
+    cache: Dict[str, Any],
+    *,
+    fractions: Sequence[float],
+    acf_lags: Sequence[int],
+    length_mode: str,
+    g_cal: float,
+    scale_cal: float,
+    g_override: Optional[float],
+    scale_override: Optional[float],
+) -> Dict[str, Any]:
+    geometry = cache["geometry"]
+    state = cache["state"]
+    model = cache["model"]
+    maps = cache["maps"]
+    clean_1d = cache["clean_1d"]
+    ma_window = cache["ma_window"]
+    n_vars = cache["n_vars"]
+
     clean_trends = [_linear_trend(y) for y in clean_1d]
     clean_acfs = [_acf_at_lags(y, acf_lags) for y in clean_1d]
+    clean_mas = [_moving_average(y, ma_window=ma_window) for y in clean_1d]
     map_w = int(maps[0].shape[-1])
     ma_w = _ma_width(map_w, ma_window=ma_window)
 
-    # Keep 96/96 on the reference schedule; remap only longer geometries unless
-    # an explicit override forces a mode on everything.
     apply_mode = length_mode
     if length_mode != "none" and geometry == "96/96" and g_override is None and scale_override is None:
         apply_mode = "none"
@@ -413,7 +448,6 @@ def evaluate_geometry(
     acf_clean_ref: Dict[int, float] = {
         int(l): float(np.mean([c[int(l)] for c in clean_acfs])) for l in acf_lags
     }
-    clean_mas = [_moving_average(y, ma_window=ma_window) for y in clean_1d]
 
     for t_idx in t_idxs:
         r2s = []
@@ -438,19 +472,9 @@ def evaluate_geometry(
         for lag in acf_lags:
             acf_corrupted[int(lag)].append(float(np.mean(acf_batch[int(lag)])))
 
-    floors = _noise_floor_metrics(
-        model,
-        clean_1d,
-        tuple(maps[0].shape),
-        n_draws=max(8, min(20, n_samples)),
-        acf_lags=acf_lags,
-        seed=seed + 17,
-        ma_window=ma_window,
-    )
-
     return {
         "geometry": geometry,
-        "dataset": dataset,
+        "dataset": cache["dataset"],
         "subset_id": str(state.subset_id),
         "n_variates": n_vars,
         "lookback": int(state.lookback_length),
@@ -472,8 +496,47 @@ def evaluate_geometry(
         "ma_r": ma_r_mean,
         "acf_corrupted": {str(k): v for k, v in acf_corrupted.items()},
         "acf_clean": {str(k): v for k, v in acf_clean_ref.items()},
-        "floors": floors,
+        "floors": cache["floors"],
     }
+
+
+def evaluate_geometry(
+    *,
+    geometry: str,
+    dataset: str,
+    n_samples: int,
+    seed: int,
+    stage: str,
+    fractions: Sequence[float],
+    acf_lags: Sequence[int],
+    length_mode: str,
+    g_cal: float,
+    scale_cal: float,
+    g_override: Optional[float],
+    scale_override: Optional[float],
+    ma_window: str,
+    cache: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if cache is None:
+        cache = _prepare_geometry_cache(
+            geometry=geometry,
+            dataset=dataset,
+            n_samples=n_samples,
+            seed=seed,
+            stage=stage,
+            acf_lags=acf_lags,
+            ma_window=ma_window,
+        )
+    return _eval_from_cache(
+        cache,
+        fractions=fractions,
+        acf_lags=acf_lags,
+        length_mode=length_mode,
+        g_cal=g_cal,
+        scale_cal=scale_cal,
+        g_override=g_override,
+        scale_override=scale_override,
+    )
 
 
 def plot_curves(
@@ -484,67 +547,64 @@ def plot_curves(
     jpeg_dpi: int,
     primary_acf_lag: int = 1,
 ) -> Tuple[Path, Path, Path]:
+    # Per-geometry floors (do NOT average — long-map Bern(0.5) floor can be >> short-map)
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    floors = []
     for geometry, res in results.items():
         fr = np.asarray(res["fractions"], dtype=np.float64)
         label = f"{geometry} (W={res['map_shape'][-1]}, mode={res.get('length_mode', 'none')})"
         ax.plot(fr, res["trend_r2"], marker="o", label=label)
-        floors.append(res["floors"]["trend_r2_floor"])
-    floor = float(np.mean(floors))
-    thr = _crossing_threshold(floor)
-    ax.axhline(floor, color="gray", linestyle="--", label=f"noise floor R²={floor:.3f}")
-    ax.axhline(thr, color="gray", linestyle=":", alpha=0.7, label=f"cross thr={thr:.3f}")
+        floor = float(res["floors"]["trend_r2_floor"])
+        thr = _crossing_threshold(floor)
+        ax.axhline(floor, linestyle="--", alpha=0.55, label=f"{geometry} floor R²={floor:.3f}")
+        ax.axhline(thr, linestyle=":", alpha=0.35, label=f"{geometry} thr={thr:.3f}")
     ax.set_xlabel("t / (T-1)")
     ax.set_ylabel("trend R² (clean fit vs corrupted fit)")
     ax.set_ylim(-0.05, 1.05)
     ax.set_title(f"{dataset}: linear-trend recoverability vs bit-flip t")
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7)
     fig.tight_layout()
     p1 = out_dir / f"trend_r2_{dataset}.jpg"
     save_figure_jpg(fig, str(p1), dpi=jpeg_dpi)
     plt.close(fig)
 
     fig_ma, ax_ma = plt.subplots(figsize=(8, 4.5))
-    floors_ma = []
     for geometry, res in results.items():
         fr = np.asarray(res["fractions"], dtype=np.float64)
         label = f"{geometry} (W={res['map_shape'][-1]}, mode={res.get('length_mode', 'none')})"
         ax_ma.plot(fr, res["ma_r"], marker="o", label=label)
-        floors_ma.append(res["floors"]["ma_r_floor"])
-    floor_ma = float(np.mean(floors_ma))
-    thr_ma = _crossing_threshold(floor_ma, absolute_cap=0.35)
-    ax_ma.axhline(floor_ma, color="gray", linestyle="--", label=f"noise floor |r|={floor_ma:.3f}")
-    ax_ma.axhline(thr_ma, color="gray", linestyle=":", alpha=0.7, label=f"cross thr={thr_ma:.3f}")
+        floor_ma = float(res["floors"]["ma_r_floor"])
+        thr_ma = _crossing_threshold(floor_ma, absolute_cap=0.35)
+        ax_ma.axhline(
+            floor_ma, linestyle="--", alpha=0.55, label=f"{geometry} floor |r|={floor_ma:.3f}"
+        )
+        ax_ma.axhline(thr_ma, linestyle=":", alpha=0.35, label=f"{geometry} thr={thr_ma:.3f}")
     ax_ma.set_xlabel("t / (T-1)")
     ax_ma.set_ylabel("Pearson r (MA clean vs MA corrupted)")
     ax_ma.set_ylim(-0.05, 1.05)
     ax_ma.set_title(f"{dataset}: moving-average recoverability vs bit-flip t")
     ax_ma.grid(True, alpha=0.3)
-    ax_ma.legend(fontsize=8)
+    ax_ma.legend(fontsize=7)
     fig_ma.tight_layout()
     p_ma = out_dir / f"ma_r_{dataset}.jpg"
     save_figure_jpg(fig_ma, str(p_ma), dpi=jpeg_dpi)
     plt.close(fig_ma)
 
     fig2, ax2 = plt.subplots(figsize=(8, 4.5))
-    floors2 = []
     for geometry, res in results.items():
         fr = np.asarray(res["fractions"], dtype=np.float64)
         series = res["acf_corrupted"][str(primary_acf_lag)]
         ax2.plot(fr, series, marker="o", label=f"{geometry} ACF(lag={primary_acf_lag})")
-        floors2.append(res["floors"][f"acf_lag{primary_acf_lag}_floor"])
+        floor2 = float(res["floors"][f"acf_lag{primary_acf_lag}_floor"])
+        thr2 = _crossing_threshold(floor2, absolute_cap=0.35)
         ax2.axhline(
             res["acf_clean"][str(primary_acf_lag)],
             linestyle="--",
             alpha=0.35,
             label=f"{geometry} clean ACF",
         )
-    floor2 = float(np.mean(floors2))
-    thr2 = _crossing_threshold(floor2, absolute_cap=0.35)
-    ax2.axhline(floor2, color="gray", linestyle="--", label=f"noise |ACF| floor={floor2:.3f}")
-    ax2.axhline(thr2, color="gray", linestyle=":", alpha=0.7, label=f"cross thr={thr2:.3f}")
+        ax2.axhline(floor2, linestyle="--", alpha=0.55, label=f"{geometry} |ACF| floor={floor2:.3f}")
+        ax2.axhline(thr2, linestyle=":", alpha=0.35, label=f"{geometry} thr={thr2:.3f}")
     ax2.set_xlabel("t / (T-1)")
     ax2.set_ylabel(f"ACF lag={primary_acf_lag}")
     ax2.set_title(f"{dataset}: ACF recoverability vs bit-flip t")
