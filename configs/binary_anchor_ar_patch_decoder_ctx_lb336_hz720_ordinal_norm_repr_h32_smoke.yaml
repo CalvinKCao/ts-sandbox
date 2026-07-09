@@ -11,6 +11,8 @@ phases:
     patience: 1
 
   - phase: patch_guidance_finetune_hp
+    # Smoke stays self-contained (07-08 donor .pt often not pulled locally).
+    reuse_checkpoint_from_config: null
     max_epochs: 1
 
   - phase: diffusion_coarse_finetune_hp

@@ -1,11 +1,18 @@
-# Compressed ordinal (stride=2), coarse/fine repr height 32 — full retrain, all HP inlined.
+# Compressed ordinal (stride=2), coarse/fine repr height 32 — retrain diffusion, reuse decoder.
 #
 # Same lb336/hz720 ordinal-norm patch-decoder campaign as ordinal_norm, but 2D ladder
-# bins H=W=32 (default 16). Retrains every phase from scratch; no checkpoint reuse.
-# HP is fixed in YAML (no donor file discovery):
-#   - synthetic diffusion: fixed_synthetic_diff_hp below (from 06-02-3851278-*-binary_dual_scale_staged_patch48)
-#   - coarse/fine finetune: search_space=fixed + fixed_tuned_params from ..._fixed.yaml
-#   - patch guidance: n_trials=1 from ..._fixed.yaml
+# bins H=W=32 (default 16). Synthetic + coarse/fine diffusion are retrained; patch
+# guidance is copied from the 07-08 ordinal_norm series (same decoder geometry).
+#
+# HP (no donor-file discovery for diffusion):
+#   - synthetic diffusion: fixed_synthetic_diff_hp (06-02-3851278 ETTh1 binary_dual_scale_staged_patch48)
+#   - coarse/fine: search_space=fixed + fixed_tuned_params from ..._fixed.yaml
+# Patch guidance ckpts (from results/logs/07-08-412261{7-1}-*-ordinal_norm.log):
+#   ETTh1         → .../07-08-4122617-.../ETTh1_patch_guidance.pt
+#   weather       → .../07-08-4122618-.../weather_4v_s2_patch_guidance.pt
+#   electricity   → .../07-08-4122619-.../electricity_4v_s1_patch_guidance.pt
+#   exchange_rate → .../07-08-4122620-.../exchange_rate_patch_guidance.pt
+#   traffic       → .../07-08-4122621-.../traffic_4v_s1_patch_guidance.pt
 #
 # Submit:
 #   ./test_submit.sh --configs configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32.yaml \
@@ -15,7 +22,7 @@
 extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm.yaml
 
 wandb:
-  tags: [patch_decoder, ordinal_norm, lb336_hz720, fixed_hp, repr_h32, retrain_all]
+  tags: [patch_decoder, ordinal_norm, lb336_hz720, fixed_hp, repr_h32, reuse_decoder]
 
 experiment:
   name: binary-anchor-ar-patch-decoder-lb336-hz720-ordinal-norm-repr-h32
@@ -40,9 +47,9 @@ phases:
     retrain_synthetic_itrans: true
 
   - phase: patch_guidance_finetune_hp
-    reuse_checkpoint_from_config: null
-    n_trials: 1
-    max_epochs: 10
+    # Newest *-{dataset}-binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm
+    # (07-08-4122617..4122621 on Killarney).
+    reuse_checkpoint_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm
 
   - phase: diffusion_coarse_finetune_hp
     reuse_tuned_params_from: null

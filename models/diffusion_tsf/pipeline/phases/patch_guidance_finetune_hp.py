@@ -57,19 +57,23 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
         if not reuse_from:
             return False
 
+        ckpt_name = f"{subset_id}_patch_guidance.pt"
         try:
-            source_dir = discover_dataset_run_ckpt_dir(state, str(reuse_from))
+            source_dir = discover_dataset_run_ckpt_dir(
+                state, str(reuse_from), required_file=ckpt_name,
+            )
         except FileNotFoundError:
             if fail_if_missing:
                 raise
             return False
 
-        src_ckpt = os.path.join(source_dir, f"{subset_id}_patch_guidance.pt")
+        src_ckpt = os.path.join(source_dir, ckpt_name)
         if not self._patch_guidance_ckpt_usable(state, src_ckpt):
             if fail_if_missing:
                 raise FileNotFoundError(
                     f"Missing usable patch guidance finetune to reuse: {src_ckpt} "
-                    f"(from *-{state.dataset}-{reuse_from})"
+                    f"(from *-{state.dataset}-{reuse_from}; need "
+                    f"ordinal_patch_guidance_unit_ranks=True for ordinal runs)"
                 )
             return False
 
