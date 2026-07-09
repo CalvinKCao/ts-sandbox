@@ -661,12 +661,16 @@ def _decode_maps_to_plot_1d(
     *,
     lookback: int,
     horizon_core: int,
+    upsample_to_raw: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Decode past|future CDF maps for plotting.
 
     Returns (coarse_global_z, fine_global_z_residual, final_global_z).
     Fine residual = final_z - coarse_z after middle-bin fine decode in rank space
     (encode: mid bin = 0 residual). Twin-axis scale is then small in global-z.
+
+    If upsample_to_raw is False, time axis stays at representation resolution
+    (for painting 2D panels in value space).
     """
     device = next(fine_model.parameters()).device
     coarse_t = torch.from_numpy(np.asarray(coarse_map)).unsqueeze(0).to(device=device, dtype=torch.float32)
@@ -702,16 +706,21 @@ def _decode_maps_to_plot_1d(
     if coarse_1d.shape[-1] < w_past:
         raise ValueError(f"map width {coarse_1d.shape[-1]} < past repr {w_past}")
 
-    def _split_up(x: torch.Tensor) -> torch.Tensor:
-        past = fine_model._resample_1d_time_series(x[..., :w_past], lookback)
-        fut = fine_model._resample_1d_time_series(x[..., w_past:], horizon_core)
-        return torch.cat([past, fut], dim=-1)
+    if upsample_to_raw:
+        past_len = lookback
 
-    coarse_1d = _split_up(coarse_1d)
-    final_1d = _split_up(final_1d)
+        def _split_up(x: torch.Tensor) -> torch.Tensor:
+            past = fine_model._resample_1d_time_series(x[..., :w_past], lookback)
+            fut = fine_model._resample_1d_time_series(x[..., w_past:], horizon_core)
+            return torch.cat([past, fut], dim=-1)
 
-    past_c, fut_c = coarse_1d[..., :lookback], coarse_1d[..., lookback:]
-    past_f, fut_f = final_1d[..., :lookback], final_1d[..., lookback:]
+        coarse_1d = _split_up(coarse_1d)
+        final_1d = _split_up(final_1d)
+    else:
+        past_len = w_past
+
+    past_c, fut_c = coarse_1d[..., :past_len], coarse_1d[..., past_len:]
+    past_f, fut_f = final_1d[..., :past_len], final_1d[..., past_len:]
     past_c_z, fut_c_z = _ordinal_or_window_to_global_z(fine_model, past_c, fut_c)
     past_f_z, fut_f_z = _ordinal_or_window_to_global_z(fine_model, past_f, fut_f)
     coarse_z = torch.cat([past_c_z, fut_c_z], dim=-1)
@@ -724,12 +733,32 @@ def _decode_maps_to_plot_1d(
     )
 
 
-def _fine_cdf_to_signed_bins(fine_cdf: np.ndarray) -> np.ndarray:
-    """Map fine CDF (H,W) → signed bin offset with middle bin = 0."""
-    h = fine_cdf.shape[0]
-    col_sum = fine_cdf.sum(axis=0).clip(1.0, float(h))
-    bin_idx = col_sum - 1.0
-    return bin_idx - 0.5 * (h - 1)
+def _paint_value_ridge(
+    values: np.ndarray,
+    *,
+    y_min: float,
+    y_max: float,
+    n_rows: int = 128,
+    band: int = 2,
+) -> np.ndarray:
+    """Paint decoded 1D values as a horizontal ridge on a (n_rows, T) canvas."""
+    t = int(values.shape[-1])
+    img = np.zeros((n_rows, t), dtype=np.float32)
+    if y_max <= y_min:
+        return img
+    span = y_max - y_min
+    rows = np.rint((values - y_min) / span * (n_rows - 1)).astype(np.int64)
+    rows = np.clip(rows, 0, n_rows - 1)
+    for b in range(-band, band + 1):
+        rr = np.clip(rows + b, 0, n_rows - 1)
+        weight = 1.0 - abs(b) / max(band + 1, 1)
+        img[rr, np.arange(t)] = np.maximum(img[rr, np.arange(t)], weight)
+    return img
+
+
+def _symmetric_lim(values: np.ndarray, *, pad: float = 1.1, floor: float = 1e-3) -> float:
+    m = float(np.nanmax(np.abs(values))) if values.size else 0.0
+    return max(m * pad, floor)
 
 
 def _future_core_global_z(future_z: np.ndarray, lookback_overlap: int) -> np.ndarray:
@@ -802,6 +831,13 @@ def _plot_compare_panel(
     gt_coarse_np, gt_fine_np, gt_final_np = _decode_maps_to_plot_1d(
         fine_model, gt_c, gt_f, lookback=lookback, horizon_core=horizon_core
     )
+    # Same decode at repr resolution for 2D panels (y = global-z / Δz, 0 at center).
+    pr_c_repr, pr_f_repr, _ = _decode_maps_to_plot_1d(
+        fine_model, pr_c, pr_f, lookback=lookback, horizon_core=horizon_core, upsample_to_raw=False
+    )
+    gt_c_repr, gt_f_repr, _ = _decode_maps_to_plot_1d(
+        fine_model, gt_c, gt_f, lookback=lookback, horizon_core=horizon_core, upsample_to_raw=False
+    )
     gt_1d = np.concatenate([past_z, future_core_z], axis=-1)
     common_len = min(
         gt_1d.shape[-1],
@@ -829,66 +865,64 @@ def _plot_compare_panel(
     t_future = np.arange(0, mmpd_plot.shape[-1])
     span_label = f"LB={lookback}, K={k} overlap stripped, H={horizon_core} core"
 
-    # Fine residual twin axis in global-z (should be << coarse amplitude).
-    fine_abs = float(np.nanmax(np.abs(np.concatenate([fine_np, gt_fine_np], axis=0))))
-    coarse_abs = float(np.nanmax(np.abs(np.concatenate([coarse_np, gt_1d, final_np], axis=0))))
-    fine_lim = max(fine_abs * 1.15, 1e-3)
-    # Keep twin visually "small": cap at ~25% of coarse span if residual is tiny.
-    if coarse_abs > 0:
-        fine_lim = min(fine_lim, max(fine_lim, 0.05 * coarse_abs))
+    # Shared value-space limits: coarse/final/GT on one scale; fine residual smaller.
+    coarse_lim = _symmetric_lim(
+        np.concatenate(
+            [
+                gt_1d.reshape(-1),
+                gt_coarse_np.reshape(-1),
+                coarse_np.reshape(-1),
+                final_np.reshape(-1),
+                mmpd_plot.reshape(-1),
+            ],
+            axis=0,
+        )
+    )
+    fine_lim = _symmetric_lim(
+        np.concatenate(
+            [
+                fine_np.reshape(-1),
+                gt_fine_np.reshape(-1),
+                gt_f_repr.reshape(-1),
+                pr_f_repr.reshape(-1),
+            ],
+            axis=0,
+        )
+    )
+    # Keep fine twin visually smaller than coarse when residual is tiny.
+    fine_lim = max(fine_lim, 0.05 * coarse_lim)
+    fine_lim = min(fine_lim, 0.5 * coarse_lim)
 
     fig = plt.figure(figsize=(7.5 * n_vars, 2.6 * 5), constrained_layout=True)
     gs = fig.add_gridspec(5, n_vars)
-    row_pairs = (
-        ("GT coarse 2D", gt_c, "Binary coarse 2D", pr_c),
-        ("GT fine 2D (mid=0)", gt_f, "Binary fine 2D (mid=0)", pr_f),
+    # 2D panels: paint decoded global-z (coarse) / Δz (fine); y=0 is plot center.
+    value_panels = (
+        ("GT coarse (global z)", gt_c_repr, "Binary coarse (global z)", pr_c_repr, coarse_lim, False),
+        ("GT fine residual (Δz)", gt_f_repr, "Binary fine residual (Δz)", pr_f_repr, fine_lim, True),
     )
-    for row_idx, (_l_gt, d_gt, _l_pr, d_pr) in enumerate(row_pairs):
-        is_fine_row = row_idx == 1
+    for row_idx, (l_gt, d_gt, l_pr, d_pr, lim, is_fine) in enumerate(value_panels):
         for col in range(n_vars):
-            for sub_row, data, label in (
-                (0, d_gt[col], row_pairs[row_idx][0]),
-                (1, d_pr[col], row_pairs[row_idx][2]),
+            for sub_row, series, label in (
+                (0, d_gt[col], l_gt),
+                (1, d_pr[col], l_pr),
             ):
                 ax = fig.add_subplot(gs[row_idx * 2 + sub_row, col])
-                h, w = data.shape
-                if is_fine_row:
-                    signed = _fine_cdf_to_signed_bins(data)  # (W,), mid bin → 0
-                    lim = 0.5 * (h - 1)
-                    # Paint selected residual bin per column; y centered at 0.
-                    img = np.zeros((h, w), dtype=np.float32)
-                    mid = 0.5 * (h - 1)
-                    rows = np.clip(np.rint(signed + mid).astype(np.int64), 0, h - 1)
-                    img[rows, np.arange(w)] = signed
-                    im = ax.imshow(
-                        img,
-                        aspect="auto",
-                        origin="lower",
-                        extent=[0, w, -lim, lim],
-                        cmap="RdBu_r",
-                        vmin=-lim,
-                        vmax=lim,
-                        interpolation="nearest",
-                    )
-                    ax.axhline(0.0, color="black", linestyle="-", linewidth=0.8, alpha=0.75)
-                else:
-                    im = ax.imshow(
-                        data,
-                        aspect="auto",
-                        origin="lower",
-                        extent=[0, w, 0, h],
-                        cmap="plasma",
-                        vmin=0.0,
-                        vmax=1.0,
-                    )
-                ax.axvline(
-                    x=w_past_map,
-                    color="white" if not is_fine_row else "black",
-                    linestyle="-",
-                    linewidth=0.9,
-                    alpha=0.85,
+                ridge = _paint_value_ridge(series, y_min=-lim, y_max=lim, n_rows=96, band=2)
+                cmap = "RdBu_r" if is_fine else "plasma"
+                im = ax.imshow(
+                    ridge,
+                    aspect="auto",
+                    origin="lower",
+                    extent=[0, series.shape[-1], -lim, lim],
+                    cmap=cmap,
+                    vmin=0.0,
+                    vmax=1.0,
+                    interpolation="nearest",
                 )
-                ax.set_title(f"var {col} | {label} ({h}x{w} repr, {span_label})", fontsize=8)
+                ax.axhline(0.0, color="black", linestyle="-", linewidth=0.8, alpha=0.7)
+                ax.axvline(x=w_past_map, color="black", linestyle="-", linewidth=0.9, alpha=0.7)
+                ax.set_ylabel("global z" if not is_fine else "Δz", fontsize=7)
+                ax.set_title(f"var {col} | {label} ({span_label})", fontsize=8)
                 fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     for col in range(n_vars):
@@ -914,6 +948,8 @@ def _plot_compare_panel(
             label="MMPD (future)",
             zorder=2,
         )
+        ax.axhline(0.0, color="black", linestyle=":", linewidth=0.7, alpha=0.45)
+        ax.set_ylim(-coarse_lim, coarse_lim)
         ax2 = ax.twinx()
         ax2.plot(
             t_axis,
@@ -921,7 +957,7 @@ def _plot_compare_panel(
             color="#4CAF50",
             linewidth=1.0,
             alpha=0.9,
-            label="Binary fine (Δz, mid=0)",
+            label="Binary fine (Δz)",
         )
         ax2.plot(
             t_axis,
@@ -930,12 +966,12 @@ def _plot_compare_panel(
             linewidth=0.9,
             linestyle=":",
             alpha=0.85,
-            label="GT fine (Δz, mid=0)",
+            label="GT fine (Δz)",
         )
         ax2.axhline(0.0, color="#2E7D32", linestyle=":", linewidth=0.7, alpha=0.5)
         ax2.set_ylim(-fine_lim, fine_lim)
         ax2.tick_params(axis="y", labelsize=7, colors="#2E7D32")
-        ax2.set_ylabel("fine residual (global z)", fontsize=7, color="#2E7D32")
+        ax2.set_ylabel("fine residual (Δz)", fontsize=7, color="#2E7D32")
         ax.axvline(x=0, color="black", linestyle="-", linewidth=0.8, alpha=0.35)
         ax.set_xlim(-lookback, horizon_core)
         ax.grid(True, alpha=0.12)
