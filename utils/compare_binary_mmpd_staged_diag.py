@@ -61,6 +61,7 @@ from utils.eval_mmpd_gaussian_anchor import (
     indices_root,
     load_indices,
     make_eval_indices,
+    mmpd_checkpoint_data_names,
     run_mmpd_eval,
     stable_dataset_seed,
     subsample_eval_indices,
@@ -83,6 +84,66 @@ DEFAULT_BINARY_CONFIG = "configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_
 DEFAULT_MMPD_CONFIG = "configs/mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm.yaml"
 DEFAULT_MMPD_DIR = "results/datasets/07-08-mmpd-decoder-ordinal-norm-lb336-hz720"
 DEFAULT_BINARY_CKPT_STEM = "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm"
+# Campaign dirs from submit_mmpd_decoder_flat_subsets_paper_lb336_hz720*.sh
+MMPD_SERIES_GLOBS = (
+    "*mmpd-decoder-ordinal-norm-lb336-hz720*",
+    "*mmpd-decoder-paper-lb336-hz720*",
+)
+
+
+def discover_latest_mmpd_output_root(
+    datasets_root: Path,
+    dataset: str,
+    *,
+    data_names: Sequence[str],
+    backbone: str = "Decoder",
+    series_globs: Sequence[str] = MMPD_SERIES_GLOBS,
+) -> Path:
+    """Newest campaign dir under datasets_root that has a Decoder-MMPD ckpt for dataset."""
+    campaigns: List[Path] = []
+    for glob in series_globs:
+        campaigns.extend(
+            p for p in datasets_root.glob(glob) if p.is_dir() and not p.name.startswith("_smoke")
+        )
+    # de-dupe while preserving order
+    seen = set()
+    uniq: List[Path] = []
+    for p in campaigns:
+        key = str(p.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(p)
+
+    best: Optional[Tuple[float, Path, Path]] = None
+    prefixes = [f"data{name}_" for name in data_names]
+    for camp in uniq:
+        base = camp / "mmpd_out" / "checkpoints" / f"{backbone}-MMPD"
+        if not base.is_dir():
+            continue
+        for d in base.iterdir():
+            if not d.is_dir():
+                continue
+            if not any(d.name.startswith(pref) for pref in prefixes):
+                continue
+            ckpt = d / "model_checkpoint.pth"
+            if not ckpt.is_file():
+                continue
+            mt = ckpt.stat().st_mtime
+            if best is None or mt > best[0]:
+                best = (mt, camp.resolve(), ckpt)
+
+    if best is None:
+        raise FileNotFoundError(
+            f"No {backbone}-MMPD checkpoint for dataset={dataset} "
+            f"(tried data names {list(data_names)}) under {datasets_root} "
+            f"globs={list(series_globs)}"
+        )
+    print(
+        f"[mmpd-ckpt] {dataset}: using {best[2]} (campaign={best[1].name})",
+        flush=True,
+    )
+    return best[1]
 
 
 def _staged_eval_overrides(config_path: str, dataset: str) -> Dict[str, Any]:
@@ -353,6 +414,8 @@ def run_or_load_dataset_eval(
     device: torch.device,
     force_eval: bool,
     test_fraction: float = 1.0,
+    datasets_root: Optional[Path] = None,
+    auto_mmpd_ckpt: bool = True,
 ) -> Dict[str, np.ndarray]:
     cache = cache_path(output_dir, dataset)
     if cache.is_file() and not force_eval:
@@ -367,6 +430,14 @@ def run_or_load_dataset_eval(
         int(mmpd_args.seed),
     )
     run = subset_runs[dataset]
+    if auto_mmpd_ckpt:
+        root = (datasets_root or (REPO_ROOT / "results" / "datasets")).resolve()
+        mmpd_args.mmpd_output_root = discover_latest_mmpd_output_root(
+            root,
+            dataset,
+            data_names=mmpd_checkpoint_data_names(run),
+            backbone=str(mmpd_args.mmpd_backbone),
+        )
     idx_root = indices_root(mmpd_args)
     indices_file = indices_path(idx_root, dataset)
     if indices_file.is_file() and not mmpd_args.force_indices:
@@ -665,6 +736,18 @@ def plot_dataset_windows(
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--mmpd-dir", type=Path, default=REPO_ROOT / DEFAULT_MMPD_DIR)
+    p.add_argument(
+        "--mmpd-output-root",
+        type=Path,
+        default=None,
+        help="MMPD train output root with mmpd_out/checkpoints (default: auto-pick newest "
+        "lb336/hz720 paper/ordinal campaign ckpt per dataset).",
+    )
+    p.add_argument(
+        "--no-auto-mmpd-ckpt",
+        action="store_true",
+        help="Disable newest-campaign ckpt discovery; use --mmpd-output-root or --mmpd-dir.",
+    )
     p.add_argument("--mmpd-config", type=Path, default=REPO_ROOT / DEFAULT_MMPD_CONFIG)
     p.add_argument("--binary-config", default=DEFAULT_BINARY_CONFIG)
     p.add_argument("--binary-ckpt-base", type=Path, default=REPO_ROOT / "results" / "ckpts")
@@ -730,9 +813,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         force_mmpd_eval=args.force_mmpd_eval or args.smoke_test,
         smoke_test=args.smoke_test,
     )
-    # Always read campaign index files; write fraction MMPD packs under the diag
-    # output dir so we do not clobber the full-set campaign raw/*.npz.
+    # Indices from --mmpd-dir; ckpts from mmpd_output_root (auto or explicit).
+    # Fraction/smoke packs write under the diag output dir only.
     mmpd_args.indices_dir = mmpd_campaign_dir
+    if args.mmpd_output_root is not None:
+        mmpd_args.mmpd_output_root = args.mmpd_output_root.resolve()
+        auto_mmpd_ckpt = False
+    else:
+        mmpd_args.mmpd_output_root = mmpd_campaign_dir
+        auto_mmpd_ckpt = not bool(args.no_auto_mmpd_ckpt)
     if float(args.test_fraction) < 1.0 or args.smoke_test:
         mmpd_args.output_dir = output_dir
         (output_dir / "raw").mkdir(parents=True, exist_ok=True)
@@ -741,6 +830,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     all_top: Dict[str, List[Dict[str, Any]]] = {}
     summary_rows: List[Dict[str, Any]] = []
+    datasets_root = (REPO_ROOT / "results" / "datasets").resolve()
 
     for dataset in datasets:
         binary_ckpt = discover_binary_ckpt(args.binary_ckpt_base, dataset, args.binary_ckpt_stem)
@@ -759,6 +849,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 device=device,
                 force_eval=args.force_eval,
                 test_fraction=float(args.test_fraction),
+                datasets_root=datasets_root,
+                auto_mmpd_ckpt=auto_mmpd_ckpt,
             )
 
         top = select_top_windows(
