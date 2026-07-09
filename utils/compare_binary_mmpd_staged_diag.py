@@ -58,8 +58,11 @@ from utils.eval_mmpd_gaussian_anchor import (
     eval_test_stride,
     get_or_create_indices,
     indices_path,
+    indices_root,
     load_indices,
+    make_eval_indices,
     run_mmpd_eval,
+    stable_dataset_seed,
     subsample_eval_indices,
     summarize_anchor_prob_core_metrics,
 )
@@ -121,6 +124,8 @@ def build_mmpd_args(
         skip_mmpd_train=True,
         force_mmpd_eval=force_mmpd_eval,
         force_indices=False,
+        # Always keep MMPD campaign index files at full coverage; diag fraction
+        # is applied in-memory in run_or_load_dataset_eval.
         test_fraction=1.0,
         metrics_profile="anchor-compat",
         mmpd_instance_norm=False,
@@ -347,6 +352,7 @@ def run_or_load_dataset_eval(
     output_dir: Path,
     device: torch.device,
     force_eval: bool,
+    test_fraction: float = 1.0,
 ) -> Dict[str, np.ndarray]:
     cache = cache_path(output_dir, dataset)
     if cache.is_file() and not force_eval:
@@ -361,11 +367,27 @@ def run_or_load_dataset_eval(
         int(mmpd_args.seed),
     )
     run = subset_runs[dataset]
-    indices_file = indices_path(mmpd_args.output_dir, dataset)
+    idx_root = indices_root(mmpd_args)
+    indices_file = indices_path(idx_root, dataset)
     if indices_file.is_file() and not mmpd_args.force_indices:
-        window_indices = load_indices(mmpd_args.output_dir, dataset)
+        window_indices = load_indices(idx_root, dataset)
     else:
         window_indices = get_or_create_indices(mmpd_args, run)
+    # Fraction subsample in-memory only — do not rewrite MMPD campaign index files.
+    frac = float(test_fraction)
+    if frac < 1.0:
+        n_full = len(window_indices)
+        keep = make_eval_indices(
+            n_full,
+            frac,
+            stable_dataset_seed(int(mmpd_args.seed), dataset),
+            None,
+        )
+        window_indices = [int(window_indices[i]) for i in keep]
+        print(
+            f"[subset] {dataset}: test_fraction={frac:g} -> {len(window_indices)}/{n_full} windows",
+            flush=True,
+        )
     if mmpd_args.test_max_items is not None:
         window_indices = subsample_eval_indices(
             window_indices,
@@ -664,6 +686,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="8 windows, 2 prob samples, small top-k; writes under output-dir_smoke",
     )
+    p.add_argument(
+        "--test-fraction",
+        type=float,
+        default=0.125,
+        help="Random fraction of test windows per dataset (default 1/8). Use 1.0 for full set.",
+    )
     p.add_argument("--test-max-items", type=int, default=None, help="Cap eval windows per dataset")
     p.add_argument("--plots-only", action="store_true", help="Skip eval; require eval_cache/*.npz")
     p.add_argument("--skip-plots", action="store_true")
@@ -683,16 +711,31 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         args.top_k = min(int(args.top_k), 3)
         args.min_spacing = min(int(args.min_spacing), 48)
         args.force_eval = True
+        args.test_fraction = 1.0
+    elif float(args.test_fraction) < 1.0:
+        # Keep full-set caches separate from fraction runs.
+        frac_tag = f"_f{args.test_fraction:g}".replace(".", "p")
+        if frac_tag not in output_dir.name and not str(output_dir).endswith("_smoke"):
+            output_dir = output_dir.parent / f"{output_dir.name}{frac_tag}"
+        args.force_eval = True
+        args.force_mmpd_eval = True
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
 
+    mmpd_campaign_dir = args.mmpd_dir.resolve()
     mmpd_args = build_mmpd_args(
-        mmpd_dir=args.mmpd_dir.resolve(),
+        mmpd_dir=mmpd_campaign_dir,
         mmpd_config=args.mmpd_config.resolve(),
         repo=REPO_ROOT,
         force_mmpd_eval=args.force_mmpd_eval or args.smoke_test,
         smoke_test=args.smoke_test,
     )
+    # Always read campaign index files; write fraction MMPD packs under the diag
+    # output dir so we do not clobber the full-set campaign raw/*.npz.
+    mmpd_args.indices_dir = mmpd_campaign_dir
+    if float(args.test_fraction) < 1.0 or args.smoke_test:
+        mmpd_args.output_dir = output_dir
+        (output_dir / "raw").mkdir(parents=True, exist_ok=True)
     if args.test_max_items is not None:
         mmpd_args.test_max_items = int(args.test_max_items)
 
@@ -715,6 +758,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 output_dir=output_dir,
                 device=device,
                 force_eval=args.force_eval,
+                test_fraction=float(args.test_fraction),
             )
 
         top = select_top_windows(
@@ -746,7 +790,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if args.skip_plots:
             continue
 
-        mmpd_npz = args.mmpd_dir / "raw" / f"mmpd_{dataset}.npz"
+        mmpd_npz = Path(mmpd_args.output_dir) / "raw" / f"mmpd_{dataset}.npz"
         if not mmpd_npz.is_file():
             raise FileNotFoundError(f"Missing MMPD raw pack for plots: {mmpd_npz}")
         test_stride = int(cache["test_stride"][0]) if "test_stride" in cache else 1

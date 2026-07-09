@@ -3,8 +3,11 @@
 #
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
 #   ./submit_binary_mmpd_staged_diag_killarney.sh --smoke-test
-#   ./submit_binary_mmpd_staged_diag_killarney.sh
-#   ./submit_binary_mmpd_staged_diag_killarney.sh --datasets ETTh1,weather --force-eval
+#   ./submit_binary_mmpd_staged_diag_killarney.sh   # default: 1/8 test windows
+#   ./submit_binary_mmpd_staged_diag_killarney.sh --datasets ETTh1 --test-fraction 1.0
+#   for ds in ETTh1 weather electricity exchange_rate traffic; do
+#     ./submit_binary_mmpd_staged_diag_killarney.sh --datasets "$ds"
+#   done
 #
 set -euo pipefail
 
