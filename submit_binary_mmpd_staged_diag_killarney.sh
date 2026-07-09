@@ -35,6 +35,10 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     DATE_STR="$(date +%m-%d)"
     LOG_FILE="$LOG_DIR/${DATE_STR}-bin-mmpd-diag-%j.log"
 
+    SBATCH_ARGS=()
+    [[ "$SMOKE" -eq 1 ]] && SBATCH_ARGS+=(--smoke-test)
+    [[ ${#EXTRA[@]} -gt 0 ]] && SBATCH_ARGS+=("${EXTRA[@]}")
+
     echo "Submitting $JOB_NAME (L40S, wall=$WALL)..."
     exec sbatch \
         --parsable \
@@ -50,8 +54,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         --mail-type=FAIL \
         --mail-user="${USER}@uwo.ca" \
         "$SCRIPT_DIR/submit_binary_mmpd_staged_diag_killarney.sh" \
-        ${SMOKE:+--smoke-test} \
-        "${EXTRA[@]}"
+        "${SBATCH_ARGS[@]}"
 fi
 
 # ---------------------------------------------------------------------------
