@@ -218,6 +218,119 @@ def _suggest_nice_effective_batch(
     return dict(plans[0])
 
 
+def _n_variates_for_batch(state: PipelineState) -> int:
+    idxs = getattr(state, "variate_indices", None)
+    if idxs:
+        return max(1, len(idxs))
+    return max(1, int(getattr(state, "n_variates", 1) or 1))
+
+
+def _plan_univariate_effective_batch(
+    *,
+    probed_max_windows: int,
+    n_variates: int,
+    target_univariate: int,
+    smoke_test: bool = False,
+) -> Dict[str, int]:
+    """Map univariate effective batch U=B_windows*C to micro-window + grad-accum.
+
+    DataLoader ``batch_size`` stays multivariate windows; UNet tokens are B*C.
+    """
+    n_variates = max(1, int(n_variates))
+    probed_max_windows = max(1, int(probed_max_windows))
+    target_u = max(n_variates, int(target_univariate))
+    # Snap down to a multiple of C so U == window_eff * C exactly.
+    window_eff = max(1, target_u // n_variates)
+    actual_u = window_eff * n_variates
+    if smoke_test:
+        window_eff = min(window_eff, max(1, min(2, probed_max_windows)))
+        actual_u = window_eff * n_variates
+        return {
+            "batch_size": window_eff,
+            "gradient_accumulation_steps": 1,
+            "effective_batch_size": window_eff,
+            "effective_univariate_batch": actual_u,
+            "target_univariate_batch": int(target_univariate),
+        }
+
+    plan = resolve_target_effective_batch(
+        probed_max_windows,
+        window_eff,
+        lo=1,
+        hi=max(window_eff, probed_max_windows),
+    )
+    # If planner could not reach window_eff (rare), force accum.
+    got = int(plan["effective_batch_size"])
+    if got != window_eff:
+        micro = min(probed_max_windows, window_eff)
+        accum = max(1, math.ceil(window_eff / micro))
+        if micro * accum < window_eff:
+            accum += 1
+        # Prefer exact product when possible
+        while micro * accum > window_eff and micro > 1:
+            micro -= 1
+            accum = max(1, math.ceil(window_eff / micro))
+        if micro * accum != window_eff:
+            # Fall back to closest under target
+            accum = max(1, window_eff // max(1, micro))
+            micro = min(probed_max_windows, max(1, window_eff // accum))
+        plan = {
+            "batch_size": micro,
+            "gradient_accumulation_steps": accum,
+            "effective_batch_size": micro * accum,
+        }
+    plan["effective_univariate_batch"] = int(plan["effective_batch_size"]) * n_variates
+    plan["target_univariate_batch"] = int(target_univariate)
+    return plan
+
+
+def _suggest_lr_eff_batch_univariate(
+    trial,
+    state: PipelineState,
+    max_batch_size: int,
+    smoke_test: bool,
+    phase_overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Tune LR + effective univariate batch (U=B*C); other diffusion HP fixed."""
+    lr_min = float(phase_overrides["hp_lr_min"])
+    lr_max = float(phase_overrides["hp_lr_max"])
+    raw_grid = phase_overrides.get("effective_univariate_batch_grid")
+    if not raw_grid:
+        raise ValueError(
+            "search_space=lr_eff_batch_univariate requires "
+            "effective_univariate_batch_grid in phase YAML"
+        )
+    grid = sorted({int(x) for x in raw_grid})
+    if not grid:
+        raise ValueError("effective_univariate_batch_grid is empty")
+
+    n_vars = _n_variates_for_batch(state)
+    base_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
+    target_u = int(trial.suggest_categorical("effective_univariate_batch", grid))
+    batch_plan = _plan_univariate_effective_batch(
+        probed_max_windows=max_batch_size,
+        n_variates=n_vars,
+        target_univariate=target_u,
+        smoke_test=smoke_test,
+    )
+    lr = float(trial.suggest_float("learning_rate", lr_min, lr_max, log=True))
+
+    return {
+        "learning_rate": lr,
+        "batch_size": int(batch_plan["batch_size"]),
+        "gradient_accumulation_steps": int(batch_plan["gradient_accumulation_steps"]),
+        "effective_batch_size": int(batch_plan["effective_batch_size"]),
+        "effective_univariate_batch": int(batch_plan["effective_univariate_batch"]),
+        "target_univariate_batch": int(batch_plan["target_univariate_batch"]),
+        "ema_decay": float(phase_overrides.get("ema_decay", 0.995)),
+        "binary_noise_schedule": str(phase_overrides.get("binary_noise_schedule", "linear")),
+        "loss_weighting": str(phase_overrides.get("loss_weighting", "min_snr")),
+        "min_snr_gamma": float(phase_overrides.get("min_snr_gamma", 2.0)),
+        "prediction_target": str(phase_overrides.get("prediction_target", "x0")),
+        "max_scale": base_ms,
+    }
+
+
 def _suggest_full_diffusion_params(
     trial,
     state: PipelineState,
@@ -506,6 +619,11 @@ def _suggest_staged_params(
 
     if search_space == "reduced_hp":
         return _suggest_reduced_hp_params(
+            trial, state, max_batch_size, smoke_test, overrides,
+        )
+
+    if search_space == "lr_eff_batch_univariate":
+        return _suggest_lr_eff_batch_univariate(
             trial, state, max_batch_size, smoke_test, overrides,
         )
 
@@ -1255,13 +1373,24 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 n_trials = 1
             search_space = str(self.require("search_space")).lower()
             if search_space not in {
-                "default", "lr_only", "full_with_batch", "reduced_hp", "fixed",
+                "default",
+                "lr_only",
+                "full_with_batch",
+                "reduced_hp",
+                "lr_eff_batch_univariate",
+                "fixed",
             }:
                 raise ValueError(f"Unknown staged diffusion search_space={search_space!r}")
             if search_space == "reduced_hp":
                 for key in ("hp_lr_min", "hp_lr_max"):
                     if self.get(key) is None:
                         raise ValueError(f"search_space=reduced_hp requires phase {key}")
+            if search_space == "lr_eff_batch_univariate":
+                for key in ("hp_lr_min", "hp_lr_max", "effective_univariate_batch_grid"):
+                    if self.get(key) is None:
+                        raise ValueError(
+                            f"search_space=lr_eff_batch_univariate requires phase {key}"
+                        )
             if search_space == "fixed" and not self.get("fixed_tuned_params"):
                 raise ValueError("search_space=fixed requires fixed_tuned_params in phase YAML")
 
@@ -1312,17 +1441,24 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             phase_overrides=phase.overrides,
                         )
                         trial.set_user_attr("full_params", dict(params))
-                        if search_space in {"full_with_batch", "reduced_hp"} and not state.smoke_test:
+                        if search_space in {
+                            "full_with_batch",
+                            "reduced_hp",
+                            "lr_eff_batch_univariate",
+                        } and not state.smoke_test:
                             micro = int(params["batch_size"])
                             accum = int(params.get("gradient_accumulation_steps", 1))
-                            if micro < 4 or accum > 64:
+                            # Univariate plans may use micro=1 and large accum to hit U=B*C.
+                            min_micro = 1 if search_space == "lr_eff_batch_univariate" else 4
+                            max_accum = 2048 if search_space == "lr_eff_batch_univariate" else 512
+                            if micro < min_micro or accum > max_accum:
                                 raise RuntimeError(
                                     f"Degenerate batch plan micro_bs={micro} accum={accum} "
                                     f"(effective={micro * accum}); stale Optuna journal or planner bug"
                                 )
                         logger.info(
                             "  [%s] Optuna trial %d/%d suggested lr=%.2e micro_bs=%d "
-                            "accum=%d effective_bs=%d",
+                            "accum=%d effective_bs=%d univariate_U=%s (target_U=%s)",
                             phase.name,
                             trial.number + 1,
                             n_trials,
@@ -1330,6 +1466,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             int(params["batch_size"]),
                             int(params.get("gradient_accumulation_steps", 1)),
                             int(params.get("effective_batch_size", params["batch_size"])),
+                            params.get("effective_univariate_batch", "-"),
+                            params.get("target_univariate_batch", "-"),
                         )
                         trial_ckpt = os.path.join(
                             trials_dir, f"trial_{trial.number}_best.pt",
@@ -1485,6 +1623,12 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             f"hp/{self.stage}_diff_ft_best_trial": best_trial_num,
             f"hp/{self.stage}_diff_ft_best_lr": best_params.get("learning_rate"),
             f"hp/{self.stage}_diff_ft_batch_size": best_params.get("batch_size"),
+            f"hp/{self.stage}_diff_ft_effective_univariate_batch": best_params.get(
+                "effective_univariate_batch"
+            ),
+            f"hp/{self.stage}_diff_ft_target_univariate_batch": best_params.get(
+                "target_univariate_batch"
+            ),
             f"hp/{self.stage}_diff_ft_max_scale": best_params.get("max_scale"),
         })
 

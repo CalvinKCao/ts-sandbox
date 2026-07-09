@@ -1,0 +1,66 @@
+extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed.yaml
+
+# Job 3: large univariate effective batch U∈{4096,8192}; LR log-uniform.
+# U = B_windows * C (one variate = one batch item).
+
+wandb:
+  tags: [patch_decoder, ordinal_norm, lb336_hz720, uncompressed, lr_eff_batch_univariate, batch_xlarge]
+
+training:
+  diffusion_effective_batch_multiplier: 1.0
+  diffusion_probe_target_effective_batch: 8192
+  diffusion_probe_max_batch_cap: 2048
+  finetune_hp_lr_min: 5.0e-5
+  finetune_hp_lr_max: 1.5e-3
+
+experiment:
+  name: binary-anchor-ar-patch-decoder-lb336-hz720-ord-unc-bs-xlarge
+  experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed_bs_xlarge
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed
+
+  - phase: patch_guidance_finetune_hp
+    reuse_checkpoint_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 7
+    max_epochs: 20
+    patience: 8
+    search_space: lr_eff_batch_univariate
+    hp_lr_min: 5.0e-5
+    hp_lr_max: 1.5e-3
+    effective_univariate_batch_grid: [4096, 8192]
+    ema_decay: 0.995
+    prediction_target: x0
+    loss_weighting: min_snr
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+
+  - phase: diffusion_fine_finetune_hp
+    n_trials: 7
+    max_epochs: 20
+    patience: 8
+    search_space: lr_eff_batch_univariate
+    hp_lr_min: 5.0e-5
+    hp_lr_max: 1.5e-3
+    effective_univariate_batch_grid: [4096, 8192]
+    ema_decay: 0.995
+    prediction_target: x0
+    loss_weighting: min_snr
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 4
+    n_samples: 1
+    probabilistic_n_samples: 20
+    tune_sampler: false
+    probabilistic_sampler: dpmpp
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: false
