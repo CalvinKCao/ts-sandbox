@@ -739,11 +739,12 @@ def _paint_value_ridge(
     y_min: float,
     y_max: float,
     n_rows: int = 128,
-    band: int = 2,
+    band: int = 1,
 ) -> np.ndarray:
-    """Paint decoded 1D values as a horizontal ridge on a (n_rows, T) canvas."""
+    """Paint decoded 1D values as black filled pixels on white (n_rows, T)."""
     t = int(values.shape[-1])
-    img = np.zeros((n_rows, t), dtype=np.float32)
+    # 1 = white (empty), 0 = black (filled)
+    img = np.ones((n_rows, t), dtype=np.float32)
     if y_max <= y_min:
         return img
     span = y_max - y_min
@@ -751,8 +752,7 @@ def _paint_value_ridge(
     rows = np.clip(rows, 0, n_rows - 1)
     for b in range(-band, band + 1):
         rr = np.clip(rows + b, 0, n_rows - 1)
-        weight = 1.0 - abs(b) / max(band + 1, 1)
-        img[rr, np.arange(t)] = np.maximum(img[rr, np.arange(t)], weight)
+        img[rr, np.arange(t)] = 0.0
     return img
 
 
@@ -907,23 +907,21 @@ def _plot_compare_panel(
                 (1, d_pr[col], l_pr),
             ):
                 ax = fig.add_subplot(gs[row_idx * 2 + sub_row, col])
-                ridge = _paint_value_ridge(series, y_min=-lim, y_max=lim, n_rows=96, band=2)
-                cmap = "RdBu_r" if is_fine else "plasma"
-                im = ax.imshow(
+                ridge = _paint_value_ridge(series, y_min=-lim, y_max=lim, n_rows=96, band=1)
+                ax.imshow(
                     ridge,
                     aspect="auto",
                     origin="lower",
                     extent=[0, series.shape[-1], -lim, lim],
-                    cmap=cmap,
+                    cmap="gray",
                     vmin=0.0,
                     vmax=1.0,
                     interpolation="nearest",
                 )
-                ax.axhline(0.0, color="black", linestyle="-", linewidth=0.8, alpha=0.7)
-                ax.axvline(x=w_past_map, color="black", linestyle="-", linewidth=0.9, alpha=0.7)
+                ax.axhline(0.0, color="#888888", linestyle="-", linewidth=0.8, alpha=0.9)
+                ax.axvline(x=w_past_map, color="#888888", linestyle="-", linewidth=0.9, alpha=0.9)
                 ax.set_ylabel("global z" if not is_fine else "Δz", fontsize=7)
                 ax.set_title(f"var {col} | {label} ({span_label})", fontsize=8)
-                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     for col in range(n_vars):
         ax = fig.add_subplot(gs[4, col])
