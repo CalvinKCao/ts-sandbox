@@ -387,6 +387,13 @@ def _read_json(path: str) -> Dict[str, Any]:
 
 
 def _resolve_diff_hp(state: PipelineState, source_dir: Optional[str]) -> Dict[str, Any]:
+    yaml_fixed = state.extra.get("fixed_synthetic_diff_hp")
+    if yaml_fixed:
+        params = dict(yaml_fixed)
+        logger.info("Using YAML fixed_synthetic_diff_hp: %s", params)
+        state.diffusion_best_params = params
+        return params
+
     if state.extra.get("use_hardcoded_synthetic_hp", False):
         logger.info("Using hardcoded Phase 1 diffusion HP (use_hardcoded_synthetic_hp=True)")
         params = {"learning_rate": 0.0005, "batch_size": getattr(state, "diffusion_batch_size", 32)}

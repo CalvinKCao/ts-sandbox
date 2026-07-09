@@ -1,8 +1,11 @@
-# Compressed ordinal (stride=2), coarse/fine repr height 32 — full retrain, fixed HP donors.
+# Compressed ordinal (stride=2), coarse/fine repr height 32 — full retrain, all HP inlined.
 #
 # Same lb336/hz720 ordinal-norm patch-decoder campaign as ordinal_norm, but 2D ladder
-# bins H=W=32 (default 16). Retrains every phase from scratch; no checkpoint/pretrain reuse.
-# HP tuning is off: donors below supply fixed params only.
+# bins H=W=32 (default 16). Retrains every phase from scratch; no checkpoint reuse.
+# HP is fixed in YAML (no donor file discovery):
+#   - synthetic diffusion: fixed_synthetic_diff_hp below (from 06-02-3851278-*-binary_dual_scale_staged_patch48)
+#   - coarse/fine finetune: search_space=fixed + fixed_tuned_params from ..._fixed.yaml
+#   - patch guidance: n_trials=1 from ..._fixed.yaml
 #
 # Submit:
 #   ./test_submit.sh --configs configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32.yaml \
@@ -22,9 +25,10 @@ experiment:
   fine_image_height: 32
 
 training:
-  # Use diff_hp.json from Phase-1 donor (not the 0.0005 hardcoded fallback).
-  use_hardcoded_synthetic_hp: false
-  # Single-trial synthetic iTrans pretrain when donor ckpt is not loaded.
+  # Tuned on Killarney binary_dual_scale_staged_patch48 grid (ETTh1 donor 06-02-3851278).
+  fixed_synthetic_diff_hp:
+    learning_rate: 5.399484409787432e-4
+    batch_size: 56
   skip_synthetic_tuning: true
   n_itrans_hp_trials: 1
 
@@ -34,8 +38,6 @@ phases:
     reuse_pretrain_from_config: null
     shared_cache: false
     retrain_synthetic_itrans: true
-    # diff_hp.json: auto newest results/ckpts/*-<dataset>-binary_dual_scale_staged/
-    # (override with phase1_source_dir if you need a specific stem)
 
   - phase: patch_guidance_finetune_hp
     reuse_checkpoint_from_config: null
@@ -43,14 +45,14 @@ phases:
     max_epochs: 10
 
   - phase: diffusion_coarse_finetune_hp
-    reuse_tuned_params_from: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm
+    reuse_tuned_params_from: null
     retrain: true
     n_trials: 1
     max_epochs: 20
     patience: 8
 
   - phase: diffusion_fine_finetune_hp
-    reuse_tuned_params_from: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm
+    reuse_tuned_params_from: null
     retrain: true
     n_trials: 1
     max_epochs: 20

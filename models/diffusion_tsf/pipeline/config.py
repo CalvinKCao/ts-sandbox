@@ -213,6 +213,7 @@ TRAINING_STATE_KEYS = (
 
 TRAINING_EXTRA_KEYS = (
     "use_hardcoded_synthetic_hp",
+    "fixed_synthetic_diff_hp",
     "skip_synthetic_tuning",
     "force_retrain_synthetic",
     "diffusion_ema_decay",
