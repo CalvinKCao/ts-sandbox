@@ -283,7 +283,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--max-candidate",
         type=int,
-        default=512,
+        default=2048,
         help="Upper search bound in univariate units U=B*C. Raise if a run hits the cap.",
     )
     p.add_argument("--safety-frac", type=float, default=0.8)

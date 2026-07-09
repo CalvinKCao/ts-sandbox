@@ -5,7 +5,7 @@
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
 #   ./submit_probe_diffusion_max_batch_killarney.sh --smoke-test
 #   ./submit_probe_diffusion_max_batch_killarney.sh
-#   ./submit_probe_diffusion_max_batch_killarney.sh --datasets ETTh1,weather --max-candidate 768
+#   ./submit_probe_diffusion_max_batch_killarney.sh --datasets ETTh1,weather --max-candidate 4096
 #
 set -euo pipefail
 
@@ -69,7 +69,7 @@ REQ="$REPO/setup/requirements-killarney.txt"
 DATASETS="ETTh1,weather,electricity,exchange_rate,traffic"
 GEOMETRIES="96/96,336/720_uncompressed"
 STAGES="coarse,fine"
-MAX_CANDIDATE=512
+MAX_CANDIDATE=2048
 SMOKE=0
 EXTRA_PY=()
 

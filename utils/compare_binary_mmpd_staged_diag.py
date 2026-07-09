@@ -381,10 +381,17 @@ def run_binary_staged_eval(
     )
 
     subset = Subset(test_ds, list(window_indices))
-    batch_size = int(overrides.get("batch_size", 8))
+    # 336/720 maps are ~5.5× larger than 96/96; keep micro-batch small to avoid OOM kills.
+    batch_size = min(2, int(overrides.get("batch_size", 8)))
     loader = DataLoader(subset, batch_size=batch_size, shuffle=False)
-    n_prob = int(prob_samples if prob_samples is not None else overrides.get("probabilistic_n_samples", 20))
+    # Diag ranks on anchor MSE only — skip the 20-sample CRPS path (huge VRAM/time).
+    n_prob = int(prob_samples if prob_samples is not None else 1)
     n_steps = int(prob_steps if prob_steps is not None else overrides.get("probabilistic_num_inference_steps", 20))
+    print(
+        f"[eval] {dataset}: binary loader batch={batch_size} "
+        f"prob_samples={n_prob} windows={len(window_indices)}",
+        flush=True,
+    )
     metrics, pack = phase._run_eval(
         state=state,
         subset_id=subset_id,
@@ -711,6 +718,9 @@ def plot_dataset_windows(
         past_b = past.unsqueeze(0).to(device)
         future_b = future.unsqueeze(0).to(device)
         maps = _anchor_maps(coarse_model, fine_model, past_b, future_b)
+        del past_b, future_b
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
         mmpd_rows = np.where(mmpd_indices == wi)[0]
         if mmpd_rows.size == 0:
             mmpd_rows = np.array([row])
@@ -729,7 +739,7 @@ def plot_dataset_windows(
                 jpeg_dpi=jpeg_dpi,
             )
         )
-        print(f"[plot] {out_path}")
+        print(f"[plot] {out_path}", flush=True)
     return saved
 
 
