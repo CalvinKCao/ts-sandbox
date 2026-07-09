@@ -6,6 +6,8 @@ import logging
 import os
 import shutil
 
+import torch
+
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
@@ -20,6 +22,25 @@ logger = logging.getLogger(__name__)
 class PatchGuidanceFinetuneHPPhase(PipelinePhase):
     name = "patch_guidance_finetune_hp"
 
+    def _patch_guidance_ckpt_usable(self, state: PipelineState, ckpt_path: str) -> bool:
+        if not os.path.exists(ckpt_path):
+            return False
+        if not state.use_ordinal_window_norm:
+            return True
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        except Exception as e:
+            logger.warning("  [%s] cannot read patch guidance ckpt %s: %s", self.name, ckpt_path, e)
+            return False
+        if bool(ckpt.get("ordinal_patch_guidance_unit_ranks", False)):
+            return True
+        logger.info(
+            "  [%s] stale patch guidance (missing unit-rank ordinal targets): %s",
+            self.name,
+            ckpt_path,
+        )
+        return False
+
     def _try_reuse_patch_guidance_ckpt(
         self,
         state: PipelineState,
@@ -28,7 +49,7 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
     ) -> bool:
         subset_id = state.subset_id or state.dataset
         ft_ckpt = state.default_guidance_finetune_ckpt_path()
-        if os.path.exists(ft_ckpt):
+        if self._patch_guidance_ckpt_usable(state, ft_ckpt):
             state.patch_guidance_finetune_ckpt = ft_ckpt
             return True
 
@@ -44,10 +65,10 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             return False
 
         src_ckpt = os.path.join(source_dir, f"{subset_id}_patch_guidance.pt")
-        if not os.path.exists(src_ckpt):
+        if not self._patch_guidance_ckpt_usable(state, src_ckpt):
             if fail_if_missing:
                 raise FileNotFoundError(
-                    f"Missing patch guidance finetune to reuse: {src_ckpt} "
+                    f"Missing usable patch guidance finetune to reuse: {src_ckpt} "
                     f"(from *-{state.dataset}-{reuse_from})"
                 )
             return False

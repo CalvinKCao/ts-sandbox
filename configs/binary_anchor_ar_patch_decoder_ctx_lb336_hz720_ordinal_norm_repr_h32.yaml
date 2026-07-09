@@ -1,0 +1,57 @@
+# Compressed ordinal (stride=2), coarse/fine repr height 32 — full retrain, fixed HP donors.
+#
+# Same lb336/hz720 ordinal-norm patch-decoder campaign as ordinal_norm, but 2D ladder
+# bins H=W=32 (default 16). Retrains every phase from scratch; no checkpoint/pretrain reuse.
+# HP tuning is off: donors below supply fixed params only.
+#
+# Submit:
+#   ./test_submit.sh --configs configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32.yaml \
+#     --datasets ETTh1,weather,electricity,exchange_rate,traffic --gpu l40s --time 10:00:00 \
+#     --wandb-project ts-sandbox-leaderboard
+
+extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm.yaml
+
+wandb:
+  tags: [patch_decoder, ordinal_norm, lb336_hz720, fixed_hp, repr_h32, retrain_all]
+
+experiment:
+  name: binary-anchor-ar-patch-decoder-lb336-hz720-ordinal-norm-repr-h32
+  experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32
+  image_height: 32
+  coarse_image_height: 32
+  fine_image_height: 32
+
+training:
+  # Use diff_hp.json from Phase-1 donor (not the 0.0005 hardcoded fallback).
+  use_hardcoded_synthetic_hp: false
+  # Single-trial synthetic iTrans pretrain when donor ckpt is not loaded.
+  skip_synthetic_tuning: true
+  n_itrans_hp_trials: 1
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    reuse_pretrain_from_config: null
+    shared_cache: false
+    retrain_synthetic_itrans: true
+    # diff_hp.json: auto newest results/ckpts/*-<dataset>-binary_dual_scale_staged/
+    # (override with phase1_source_dir if you need a specific stem)
+
+  - phase: patch_guidance_finetune_hp
+    reuse_checkpoint_from_config: null
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    reuse_tuned_params_from: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm
+    retrain: true
+    n_trials: 1
+    max_epochs: 20
+    patience: 8
+
+  - phase: diffusion_fine_finetune_hp
+    reuse_tuned_params_from: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm
+    retrain: true
+    n_trials: 1
+    max_epochs: 20
+    patience: 8

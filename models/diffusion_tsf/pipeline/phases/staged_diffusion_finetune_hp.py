@@ -595,6 +595,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         if self.stage == "finer" and not getattr(state, "use_triple_scale", False):
             logger.info("  [%s] skipping: use_triple_scale=False", self.name)
             return True
+        if self.get("retrain", False):
+            return False
         best_pt = _stage_best_ckpt(state, self.stage)
         meta = os.path.join(_stage_subset_dir(state, self.stage), "metadata.json")
         if os.path.exists(best_pt) and os.path.exists(meta):

@@ -244,6 +244,10 @@ def _candidate_phase1_ckpt_roots(state: PipelineState) -> list[str]:
     if submit_dir:
         add(os.path.join(submit_dir, "results", "ckpts"))
 
+    add(os.path.join(os.getcwd(), "results", "ckpts"))
+    if state.datasets_dir:
+        add(os.path.join(os.path.dirname(os.path.abspath(state.datasets_dir)), "results", "ckpts"))
+
     return roots
 
 
@@ -266,6 +270,16 @@ def source_run_stage_pretrain_ckpt(
     return None
 
 
+def _run_dir_matches_config(name: str, dataset: str, config_suffix: str) -> bool:
+    """Match grid stems like *-{dataset}-{config} or *-{dataset}-{config}_variant."""
+    token = f"-{dataset}-{config_suffix}"
+    idx = name.find(token)
+    if idx < 0:
+        return False
+    remainder = name[idx + len(token):]
+    return not remainder or remainder.startswith("_")
+
+
 def discover_dataset_run_ckpt_dir(
     state: PipelineState,
     config_suffix: str,
@@ -273,7 +287,6 @@ def discover_dataset_run_ckpt_dir(
     required_file: Optional[str] = None,
 ) -> str:
     """Newest isolated run dir ``*-<dataset>-<config_suffix>`` under the ckpt root."""
-    suffix = f"-{state.dataset}-{config_suffix}"
     best_dir: Optional[str] = None
     best_mtime = 0.0
     roots = _candidate_phase1_ckpt_roots(state)
@@ -283,7 +296,7 @@ def discover_dataset_run_ckpt_dir(
         except OSError:
             continue
         for name in names:
-            if not name.endswith(suffix):
+            if not _run_dir_matches_config(name, state.dataset, config_suffix):
                 continue
             path = os.path.join(ckpt_root, name)
             if not os.path.isdir(path):
@@ -314,7 +327,6 @@ def _discover_phase1_source_dir(
     config_name: str = "binary_dual_scale_staged",
 ) -> Optional[str]:
     """Newest *-<dataset>-<config_name> dir under ckpts/ with diff_hp.json."""
-    suffix = _phase1_config_suffix(state, config_name)
     best_dir: Optional[str] = None
     best_mtime = 0.0
     for ckpt_root in _candidate_phase1_ckpt_roots(state):
@@ -323,7 +335,7 @@ def _discover_phase1_source_dir(
         except OSError:
             continue
         for name in names:
-            if not name.endswith(suffix):
+            if not _run_dir_matches_config(name, state.dataset, config_name):
                 continue
             path = os.path.join(ckpt_root, name)
             if not os.path.isdir(path):
@@ -402,11 +414,13 @@ def _resolve_diff_hp(state: PipelineState, source_dir: Optional[str]) -> Dict[st
 def _resolve_itrans_pretrain(
     state: PipelineState,
     source_dir: Optional[str],
+    *,
+    retrain_synthetic_itrans: bool = False,
 ) -> tuple[str, Dict[str, Any]]:
     candidates = []
     if state.itrans_pretrain_ckpt:
         candidates.append(state.itrans_pretrain_ckpt)
-    if source_dir:
+    if source_dir and not retrain_synthetic_itrans:
         candidates.extend([
             os.path.join(source_dir, "pretrained_itransformer.pt"),
             os.path.join(source_dir, "itransformer.pt"),
@@ -576,8 +590,27 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
 
         local_ckpt = _stage_pretrain_ckpt(state, stage)
         if os.path.exists(local_ckpt):
-            logger.info("  [%s] %s local cached: %s", self.name, stage, local_ckpt)
-            return local_ckpt
+            if _stage_pretrain_cache_enabled(self, state):
+                logger.info("  [%s] %s local cached: %s", self.name, stage, local_ckpt)
+                return local_ckpt
+            sig_path = os.path.join(_stage_pretrain_dir(state, stage), ".signature")
+            expected = _stage_pretrain_signature(state, config_name)
+            if os.path.isfile(sig_path):
+                with open(sig_path, encoding="utf-8") as f:
+                    if f.read().strip() == expected:
+                        logger.info(
+                            "  [%s] %s local cached (signature match): %s",
+                            self.name,
+                            stage,
+                            local_ckpt,
+                        )
+                        return local_ckpt
+            logger.info(
+                "  [%s] %s ignoring stale local pretrain (shared_cache=false): %s",
+                self.name,
+                stage,
+                local_ckpt,
+            )
         if _stage_pretrain_cache_enabled(self, state):
             shared_ckpt = _shared_stage_pretrain_ckpt(state, config_name, stage)
             if os.path.exists(shared_ckpt):
@@ -638,7 +671,11 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                 config_name=config_name,
             )
             best_params = _resolve_diff_hp(state, source_dir)
-            itrans_ckpt, itrans_meta = _resolve_itrans_pretrain(state, source_dir)
+            itrans_ckpt, itrans_meta = _resolve_itrans_pretrain(
+                state,
+                source_dir,
+                retrain_synthetic_itrans=bool(self.get("retrain_synthetic_itrans", False)),
+            )
             n_samples = int(self.require("n_samples"))
             if state.smoke_test:
                 n_samples = min(n_samples, 4)
@@ -656,7 +693,11 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             config_name=config_name,
         )
         best_params = _resolve_diff_hp(state, source_dir)
-        itrans_ckpt, itrans_meta = _resolve_itrans_pretrain(state, source_dir)
+        itrans_ckpt, itrans_meta = _resolve_itrans_pretrain(
+            state,
+            source_dir,
+            retrain_synthetic_itrans=bool(self.get("retrain_synthetic_itrans", False)),
+        )
 
         n_samples = int(self.require("n_samples"))
         epochs = int(self.require("epochs"))
@@ -732,6 +773,9 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                     checkpoint_dir=stage_dir,
                     smoke_test=state.smoke_test,
                 )
+                sig_path = os.path.join(stage_dir, ".signature")
+                with open(sig_path, "w", encoding="utf-8") as f:
+                    f.write(_stage_pretrain_signature(state, config_name))
             if stage == "coarse":
                 state.diffusion_coarse_pretrain_ckpt = ckpt
             elif stage == "fine":
