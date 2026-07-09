@@ -56,6 +56,7 @@ from utils.eval_mmpd_gaussian_anchor import (
     build_anchor_runs_from_subset_config,
     eval_test_stride,
     get_or_create_indices,
+    indices_path,
     load_indices,
     run_mmpd_eval,
     subsample_eval_indices,
@@ -358,9 +359,9 @@ def run_or_load_dataset_eval(
         int(mmpd_args.seed),
     )
     run = subset_runs[dataset]
-    indices_path = mmpd_args.output_dir / "raw" / f"indices_{dataset}.json"
-    if indices_path.is_file() and not mmpd_args.force_indices:
-        window_indices = load_indices(mmpd_args.output_dir / "raw", dataset)
+    indices_file = indices_path(mmpd_args.output_dir, dataset)
+    if indices_file.is_file() and not mmpd_args.force_indices:
+        window_indices = load_indices(mmpd_args.output_dir, dataset)
     else:
         window_indices = get_or_create_indices(mmpd_args, run)
     if mmpd_args.test_max_items is not None:
