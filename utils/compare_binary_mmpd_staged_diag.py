@@ -613,7 +613,9 @@ def plot_dataset_windows(
         wi = int(entry["window_index"])
         row = int(entry["row"])
         past, future = test_ds[wi]
-        maps = _anchor_maps(coarse_model, fine_model, past.unsqueeze(0), future.unsqueeze(0))
+        past_b = past.unsqueeze(0).to(device)
+        future_b = future.unsqueeze(0).to(device)
+        maps = _anchor_maps(coarse_model, fine_model, past_b, future_b)
         mmpd_rows = np.where(mmpd_indices == wi)[0]
         if mmpd_rows.size == 0:
             mmpd_rows = np.array([row])
