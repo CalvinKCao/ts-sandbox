@@ -18,6 +18,12 @@
 #   ./test_submit.sh --configs configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32.yaml \
 #     --datasets ETTh1,weather,electricity,exchange_rate,traffic --gpu l40s --time 10:00:00 \
 #     --wandb-project ts-sandbox-leaderboard
+#
+# Resume after quota crash (prefer the _resume overlay; see that file):
+#   ./test_submit.sh --resume \
+#     --configs configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32_resume.yaml \
+#     --datasets ETTh1,weather,exchange_rate --gpu l40s --time 6:00:00 \
+#     --wandb-project ts-sandbox-leaderboard
 
 extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm.yaml
 

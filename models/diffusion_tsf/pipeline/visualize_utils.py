@@ -264,7 +264,8 @@ def _staged_fine_value_range(diff_model) -> float:
 
 def _window_stats_for_past(diff_model, past: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Per-window center/std for dataset-global-z past (V, T)."""
-    _, _, (center, wstd) = diff_model._normalize_sequence(past.unsqueeze(0), None)
+    _, _, stats = diff_model._normalize_sequence(past.unsqueeze(0), None)
+    center, wstd = stats[0], stats[1]
     return center.squeeze(0), wstd.squeeze(0)
 
 
@@ -1031,7 +1032,11 @@ def _plot_guidance_forecast_1d(
             label=guidance_label,
         )
         ax.axvline(x=0, color="black", linestyle=":", alpha=0.25)
-        mae = float(np.mean(np.abs(guidance_norm[col, K:].numpy() - future_norm[col].numpy())))
+        # Guidance may be lookback+horizon (K>0) or horizon-only; align to future length.
+        g_fut = guidance_norm[col, K:].numpy()
+        fut = future_norm[col].numpy()
+        n = min(g_fut.shape[-1], fut.shape[-1])
+        mae = float(np.mean(np.abs(g_fut[..., :n] - fut[..., :n]))) if n > 0 else float("nan")
         ax.set_title(f"var {col} | MAE {mae:.3f}", fontsize=9)
         if col == 0:
             ax.legend(loc="upper left", fontsize=7)
@@ -2332,26 +2337,29 @@ def run_patch_guidance_finetune_visualizations(
         past_b = past.unsqueeze(0).to(device)
         future_b = future.unsqueeze(0).to(device)
         with torch.no_grad():
+            # _patch_guidance_batch expects a batch dim (B, V, T).
             past_norm, target = _patch_guidance_batch(
-                past_b[0],
-                future_b[0],
+                past_b,
+                future_b,
                 device,
                 apply_ood_shift=bool(state.use_ordinal_window_norm),
                 data_is_ranked=getattr(test_ds, "yields_ordinal_ranks", False),
             )
-            pred = stack.forecast(past_norm.unsqueeze(0))[0].cpu()
+            pred = stack.forecast(past_norm)[0].cpu()
+            past_plot = past_norm[0].cpu()
+            target_plot = target[0].cpu()
 
         n_vars = min(int(viz.get("n_dual_scale_vars", 3)), past.shape[0])
         fig, axes = plt.subplots(1, n_vars, figsize=(4.5 * n_vars, 3.0), squeeze=False)
-        t_past = np.arange(-past.shape[-1], 0)
-        t_fut = np.arange(0, target.shape[-1])
+        t_past = np.arange(-past_plot.shape[-1], 0)
+        t_fut = np.arange(0, target_plot.shape[-1])
         for col in range(n_vars):
             ax = axes[0, col]
-            ax.plot(t_past, past_norm[col].cpu().numpy(), color="#9E9E9E", alpha=0.5, lw=1.0)
-            ax.plot(t_fut, target[col].cpu().numpy(), color="#2196F3", lw=1.5, label="GT" if col == 0 else "")
+            ax.plot(t_past, past_plot[col].numpy(), color="#9E9E9E", alpha=0.5, lw=1.0)
+            ax.plot(t_fut, target_plot[col].numpy(), color="#2196F3", lw=1.5, label="GT" if col == 0 else "")
             ax.plot(t_fut, pred[col].numpy(), color="#FF9800", lw=1.2, ls="--", label="patch" if col == 0 else "")
             ax.axvline(0, color="k", ls=":", alpha=0.25)
-            mae = float(np.mean(np.abs(pred[col].numpy() - target[col].cpu().numpy())))
+            mae = float(np.mean(np.abs(pred[col].numpy() - target_plot[col].numpy())))
             ax.set_title(f"Var {col} | MAE {mae:.3f}", fontsize=9)
         fig.suptitle(f"Patch guidance {tag} | sample {idx}", fontsize=11)
         if n_vars:

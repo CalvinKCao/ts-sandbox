@@ -713,11 +713,21 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         if self.stage == "finer" and not getattr(state, "use_triple_scale", False):
             logger.info("  [%s] skipping: use_triple_scale=False", self.name)
             return True
-        if self.get("retrain", False):
+        # retrain=true forces a fresh train on a new run, but --resume must still
+        # honor local best.pt+metadata so we can finish eval after quota crashes.
+        if self.get("retrain", False) and not bool(getattr(state, "resume", False)):
             return False
         best_pt = _stage_best_ckpt(state, self.stage)
         meta = os.path.join(_stage_subset_dir(state, self.stage), "metadata.json")
         if os.path.exists(best_pt) and os.path.exists(meta):
+            try:
+                # Corrupt/truncated saves (disk quota) look like a cache hit otherwise.
+                torch.load(best_pt, map_location="cpu", weights_only=False)
+            except Exception as e:
+                logger.warning(
+                    "  [%s] ignoring unreadable cache %s: %s", self.name, best_pt, e,
+                )
+                return False
             logger.info("  [%s] cached: %s", self.name, best_pt)
             params = None
             try:

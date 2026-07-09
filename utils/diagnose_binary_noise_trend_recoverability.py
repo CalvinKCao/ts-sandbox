@@ -2,26 +2,26 @@
 """Trend / ACF recoverability under binary bit-flip noise vs sequence length.
 
 At the same beta_t, longer CDF maps (336/720) can retain more *recoverable*
-temporal structure than short ones (96/96) because autocorrelation is
-redundant across time. This script measures that.
+temporal structure than short ones (96/96) because MA/ACF average over more
+independent flips. This script measures that and optionally remaps β_t with a
+length-dependent schedule so both geometries hit the noise floor at similar
+fractions of T.
 
-For each geometry in {96/96, 336/720_uncompressed} and t in
-{0, T/8, ..., T}:
-  - bit-flip coarse CDF maps at beta_t
-  - decode to 1D
-  - compare linear-trend fit and ACF(lags) vs clean (t=0)
-  - average over validation windows
-
-Outputs trend-R^2 and ACF-lag1 curves + noise-floor crossing % of T.
+Noise floor (fixed): clean decoded series vs Bernoulli(0.5) maps — NOT
+noise-vs-noise (two long MAs both collapse to the same mean → spurious r≈1).
 
 Example:
-  python utils/diagnose_binary_noise_trend_recoverability.py --datasets ETTh1
+  python utils/diagnose_binary_noise_trend_recoverability.py --datasets traffic \\
+      --length-mode power --g-cal 1.5
+  python utils/diagnose_binary_noise_trend_recoverability.py \\
+      --recompute-crossings-from reports/noise_trend_recoverability_4146642
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -37,7 +37,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from models.diffusion_tsf.diffusion import BinaryDiffusionScheduler
+from models.diffusion_tsf.diffusion import (
+    BinaryDiffusionScheduler,
+    length_schedule_g,
+    length_schedule_scale,
+)
 from models.diffusion_tsf.pipeline.config import load_experiment_config
 from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch_stage_globals
@@ -62,6 +66,9 @@ GEOMETRY_CONFIGS = {
 DEFAULT_DATASETS = "ETTh1,weather,electricity,exchange_rate,traffic"
 DEFAULT_FRACTIONS = (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0)
 DEFAULT_ACF_LAGS = (1, 5, 10)
+# Coarse map widths used as calibration anchors for g(L) / scale(L).
+L_REF = 104.0   # 96/96 map W
+L_CAL = 728.0   # 336/720_uncompressed map W
 
 
 def _build_state(config_path: str, dataset: str) -> PipelineState:
@@ -123,13 +130,47 @@ def _make_model(state: PipelineState, stage: str = "coarse", ordinal_ladder=None
     return model, n_vars
 
 
-def _scheduler_from_state(state: PipelineState) -> BinaryDiffusionScheduler:
+def _resolve_length_params(
+    map_w: int,
+    *,
+    length_mode: str,
+    g_cal: float,
+    scale_cal: float,
+    g_override: Optional[float],
+    scale_override: Optional[float],
+) -> Tuple[str, float, float]:
+    mode = (length_mode or "none").lower()
+    if mode == "none":
+        return "none", 1.0, 1.0
+    if mode == "power":
+        g = float(g_override) if g_override is not None else length_schedule_g(
+            map_w, l_ref=L_REF, g_ref=1.0, l_cal=L_CAL, g_cal=g_cal
+        )
+        return "power", g, 1.0
+    if mode == "scale":
+        sc = float(scale_override) if scale_override is not None else length_schedule_scale(
+            map_w, l_ref=L_REF, scale_ref=1.0, l_cal=L_CAL, scale_cal=scale_cal
+        )
+        return "scale", 1.0, sc
+    raise ValueError(f"unknown length_mode {length_mode!r}")
+
+
+def _scheduler_from_state(
+    state: PipelineState,
+    *,
+    length_mode: str = "none",
+    length_g: float = 1.0,
+    length_scale: float = 1.0,
+) -> BinaryDiffusionScheduler:
     return BinaryDiffusionScheduler(
         num_steps=int(state.binary_num_steps),
         beta_start=float(state.binary_beta_start),
         beta_end=float(state.binary_beta_end),
         schedule_type=str(state.binary_noise_schedule),
         device="cpu",
+        length_mode=length_mode,
+        length_g=length_g,
+        length_scale=length_scale,
     )
 
 
@@ -155,7 +196,6 @@ def _decode_coarse_1d(model, coarse_map_vhw: torch.Tensor) -> np.ndarray:
     """(V, H, W) -> (V, W) decoded 1D values."""
     x = coarse_map_vhw.unsqueeze(0)  # (1, V, H, W)
     y = model._decode_coarse_1d_from_map(x, cdf_decoder="mean")
-    # y: (1, V, W) or (V, W)
     if y.dim() == 3:
         y = y[0]
     return y.detach().cpu().numpy()
@@ -175,16 +215,31 @@ def _linear_trend(y: np.ndarray) -> np.ndarray:
     return out
 
 
-def _moving_average(y: np.ndarray, frac: float = 0.08) -> np.ndarray:
-    """Centered MA; window ~frac of length (odd, >=3)."""
+def _ma_width(T: int, *, ma_window: str, ma_frac: float = 0.08) -> int:
+    """frac: window ~frac*T; fixed_ref: same odd width as at L_REF (length-fair)."""
+    if ma_window == "fixed_ref":
+        return max(3, int(round(ma_frac * L_REF)) | 1)
+    return max(3, int(round(ma_frac * T)) | 1)
+
+
+def _moving_average(
+    y: np.ndarray,
+    frac: float = 0.08,
+    *,
+    ma_window: str = "frac",
+) -> np.ndarray:
+    """Centered MA. ma_window=fixed_ref uses L_REF-based width for all lengths."""
     if y.ndim == 1:
         T = y.shape[0]
-        w = max(3, int(round(frac * T)) | 1)
+        w = _ma_width(T, ma_window=ma_window, ma_frac=frac)
         pad = w // 2
         yp = np.pad(y.astype(np.float64), (pad, pad), mode="edge")
         kernel = np.ones(w, dtype=np.float64) / w
         return np.convolve(yp, kernel, mode="valid")
-    return np.stack([_moving_average(y[v], frac=frac) for v in range(y.shape[0])], axis=0)
+    return np.stack(
+        [_moving_average(y[v], frac=frac, ma_window=ma_window) for v in range(y.shape[0])],
+        axis=0,
+    )
 
 
 def _pearson_r(a: np.ndarray, b: np.ndarray) -> float:
@@ -243,31 +298,38 @@ def _crossing_pct(
 
 def _noise_floor_metrics(
     model,
+    clean_1d: Sequence[np.ndarray],
     map_shape: Tuple[int, ...],
     *,
     n_draws: int,
     acf_lags: Sequence[int],
     seed: int,
+    ma_window: str,
 ) -> Dict[str, float]:
-    """Empirical floors from independent Bernoulli(0.5) maps."""
+    """Empirical floors: clean decoded series vs Bernoulli(0.5) maps.
+
+    Noise-vs-noise is wrong for long MA windows: two independent long MAs both
+    collapse toward the same constant mean, so Pearson r stays near 1.
+    """
     rng = np.random.default_rng(seed)
     trend_r2s = []
     ma_rs = []
     acf_vals: Dict[int, List[float]] = {int(l): [] for l in acf_lags}
-    for _ in range(n_draws):
-        a = torch.from_numpy(rng.binomial(1, 0.5, size=map_shape).astype(np.float32))
-        b = torch.from_numpy(rng.binomial(1, 0.5, size=map_shape).astype(np.float32))
-        ya = _decode_coarse_1d(model, a)
-        yb = _decode_coarse_1d(model, b)
-        ta = _linear_trend(ya)
-        tb = _linear_trend(yb)
-        # Near-flat trends make R² unstable; clamp using Pearson as well.
-        r2 = max(0.0, _r2_between(ta, tb))
-        if float(np.std(ta)) < 1e-6 or float(np.std(tb)) < 1e-6:
+    clean_trends = [_linear_trend(y) for y in clean_1d]
+    clean_mas = [_moving_average(y, ma_window=ma_window) for y in clean_1d]
+    n_clean = len(clean_1d)
+    for i in range(n_draws):
+        noise = torch.from_numpy(rng.binomial(1, 0.5, size=map_shape).astype(np.float32))
+        yn = _decode_coarse_1d(model, noise)
+        ct = clean_trends[i % n_clean]
+        cma = clean_mas[i % n_clean]
+        tn = _linear_trend(yn)
+        r2 = max(0.0, _r2_between(ct, tn))
+        if float(np.std(ct)) < 1e-6 or float(np.std(tn)) < 1e-6:
             r2 = 0.0
         trend_r2s.append(r2)
-        ma_rs.append(abs(_pearson_r(_moving_average(ya), _moving_average(yb))))
-        for lag, val in _acf_at_lags(ya, acf_lags).items():
+        ma_rs.append(abs(_pearson_r(cma, _moving_average(yn, ma_window=ma_window))))
+        for lag, val in _acf_at_lags(yn, acf_lags).items():
             acf_vals[lag].append(abs(val))
     out = {
         "trend_r2_floor": float(np.mean(trend_r2s)),
@@ -278,9 +340,18 @@ def _noise_floor_metrics(
     return out
 
 
-def _crossing_threshold(floor: float, *, absolute_cap: float = 0.25) -> float:
-    """1.5× noise floor, but never above absolute_cap (avoids 1.5×floor > 1)."""
-    return float(min(absolute_cap, max(0.05, 1.5 * max(0.0, floor))))
+def _crossing_threshold(floor: float, *, absolute_cap: float = 0.25, margin: float = 0.05) -> float:
+    """Threshold for 'reached noise floor'.
+
+    Prefer 1.5×floor when that stays below absolute_cap (short maps). When the
+    empirical floor itself is high (residual length structure), use floor+margin
+    so a curve that lands on the floor still counts as crossed.
+    """
+    floor = float(max(0.0, floor))
+    scaled = 1.5 * floor
+    if scaled <= absolute_cap:
+        return float(max(0.05, scaled))
+    return float(floor + margin)
 
 
 def evaluate_geometry(
@@ -292,17 +363,46 @@ def evaluate_geometry(
     stage: str,
     fractions: Sequence[float],
     acf_lags: Sequence[int],
+    length_mode: str,
+    g_cal: float,
+    scale_cal: float,
+    g_override: Optional[float],
+    scale_override: Optional[float],
+    ma_window: str,
 ) -> Dict[str, Any]:
     config_path = GEOMETRY_CONFIGS[geometry]
     state = _build_state(config_path, dataset)
     windows, norm_stats = _load_val_windows(state, n_samples=n_samples, seed=seed)
     ladder = norm_stats.get("ordinal_ladder")
     model, n_vars = _make_model(state, stage=stage, ordinal_ladder=ladder)
-    sched = _scheduler_from_state(state)
     maps = [_encode_coarse_maps(model, past, future) for past, future in windows]
     clean_1d = [_decode_coarse_1d(model, m) for m in maps]
     clean_trends = [_linear_trend(y) for y in clean_1d]
     clean_acfs = [_acf_at_lags(y, acf_lags) for y in clean_1d]
+    map_w = int(maps[0].shape[-1])
+    ma_w = _ma_width(map_w, ma_window=ma_window)
+
+    # Keep 96/96 on the reference schedule; remap only longer geometries unless
+    # an explicit override forces a mode on everything.
+    apply_mode = length_mode
+    if length_mode != "none" and geometry == "96/96" and g_override is None and scale_override is None:
+        apply_mode = "none"
+    mode, length_g, length_scale = _resolve_length_params(
+        map_w,
+        length_mode=apply_mode,
+        g_cal=g_cal,
+        scale_cal=scale_cal,
+        g_override=g_override if apply_mode != "none" else None,
+        scale_override=scale_override if apply_mode != "none" else None,
+    )
+    sched = _scheduler_from_state(
+        state, length_mode=mode, length_g=length_g, length_scale=length_scale
+    )
+    print(
+        f"  [sched] {geometry} W={map_w} ma_w={ma_w} ({ma_window}) mode={mode} "
+        f"g={length_g:.4f} scale={length_scale:.4f} β_end={float(sched.betas[-1]):.4f}",
+        flush=True,
+    )
 
     T = sched.num_steps
     t_idxs = [int(round(f * (T - 1))) for f in fractions]
@@ -313,7 +413,7 @@ def evaluate_geometry(
     acf_clean_ref: Dict[int, float] = {
         int(l): float(np.mean([c[int(l)] for c in clean_acfs])) for l in acf_lags
     }
-    clean_mas = [_moving_average(y) for y in clean_1d]
+    clean_mas = [_moving_average(y, ma_window=ma_window) for y in clean_1d]
 
     for t_idx in t_idxs:
         r2s = []
@@ -329,7 +429,7 @@ def evaluate_geometry(
                 r2 = 0.0
             r2s.append(r2)
             rs.append(_pearson_r(ct, tr))
-            ma_rs.append(_pearson_r(cma, _moving_average(y)))
+            ma_rs.append(_pearson_r(cma, _moving_average(y, ma_window=ma_window)))
             for lag, val in _acf_at_lags(y, acf_lags).items():
                 acf_batch[lag].append(val)
         trend_r2_mean.append(float(np.mean(r2s)))
@@ -340,10 +440,12 @@ def evaluate_geometry(
 
     floors = _noise_floor_metrics(
         model,
+        clean_1d,
         tuple(maps[0].shape),
         n_draws=max(8, min(20, n_samples)),
         acf_lags=acf_lags,
         seed=seed + 17,
+        ma_window=ma_window,
     )
 
     return {
@@ -354,8 +456,13 @@ def evaluate_geometry(
         "lookback": int(state.lookback_length),
         "horizon": int(state.forecast_length),
         "map_shape": list(maps[0].shape),
+        "ma_window": ma_window,
+        "ma_width": ma_w,
         "n_samples": len(maps),
         "schedule": sched.schedule_type,
+        "length_mode": mode,
+        "length_g": length_g,
+        "length_scale": length_scale,
         "num_steps": T,
         "fractions": list(fractions),
         "t_idxs": t_idxs,
@@ -377,12 +484,12 @@ def plot_curves(
     jpeg_dpi: int,
     primary_acf_lag: int = 1,
 ) -> Tuple[Path, Path, Path]:
-    # Plot 1: linear-trend R²
     fig, ax = plt.subplots(figsize=(8, 4.5))
     floors = []
     for geometry, res in results.items():
         fr = np.asarray(res["fractions"], dtype=np.float64)
-        ax.plot(fr, res["trend_r2"], marker="o", label=f"{geometry} (W={res['map_shape'][-1]})")
+        label = f"{geometry} (W={res['map_shape'][-1]}, mode={res.get('length_mode', 'none')})"
+        ax.plot(fr, res["trend_r2"], marker="o", label=label)
         floors.append(res["floors"]["trend_r2_floor"])
     floor = float(np.mean(floors))
     thr = _crossing_threshold(floor)
@@ -399,12 +506,12 @@ def plot_curves(
     save_figure_jpg(fig, str(p1), dpi=jpeg_dpi)
     plt.close(fig)
 
-    # Plot 1b: MA Pearson r (more stable shape recoverability)
     fig_ma, ax_ma = plt.subplots(figsize=(8, 4.5))
     floors_ma = []
     for geometry, res in results.items():
         fr = np.asarray(res["fractions"], dtype=np.float64)
-        ax_ma.plot(fr, res["ma_r"], marker="o", label=f"{geometry} (W={res['map_shape'][-1]})")
+        label = f"{geometry} (W={res['map_shape'][-1]}, mode={res.get('length_mode', 'none')})"
+        ax_ma.plot(fr, res["ma_r"], marker="o", label=label)
         floors_ma.append(res["floors"]["ma_r_floor"])
     floor_ma = float(np.mean(floors_ma))
     thr_ma = _crossing_threshold(floor_ma, absolute_cap=0.35)
@@ -453,6 +560,7 @@ def plot_curves(
 def print_crossings(results: Dict[str, Dict[str, Any]], *, primary_acf_lag: int = 1) -> List[Dict[str, Any]]:
     rows = []
     print("\n=== effective full-corruption points (first t where metric < cross thr) ===")
+    print("  note: ma_r = Pearson(MA_clean, MA_corrupted); acf_lag* = ACF of corrupted series")
     for geometry, res in results.items():
         fr = res["fractions"]
         tr_thr = _crossing_threshold(res["floors"]["trend_r2_floor"])
@@ -461,24 +569,41 @@ def print_crossings(results: Dict[str, Dict[str, Any]], *, primary_acf_lag: int 
         tr_cross = _crossing_pct(fr, res["trend_r2"], tr_thr)
         ma_cross = _crossing_pct(fr, res["ma_r"], ma_thr)
         ac_cross = _crossing_pct(fr, res["acf_corrupted"][str(primary_acf_lag)], ac_thr)
+
         def _fmt(x):
             return "never" if x is None else f"{100 * x:.1f}% of T"
+
         print(
             f"  {geometry:24s}  trend_R² @ {_fmt(tr_cross):14s}  "
             f"MA_r @ {_fmt(ma_cross):14s}  "
             f"ACF(lag={primary_acf_lag}) @ {_fmt(ac_cross)}  "
-            f"(thr trend={tr_thr:.3f}, ma={ma_thr:.3f}, acf={ac_thr:.3f})"
+            f"(thr trend={tr_thr:.3f}, ma={ma_thr:.3f}, acf={ac_thr:.3f}; "
+            f"floors trend={res['floors']['trend_r2_floor']:.3f}, "
+            f"ma={res['floors']['ma_r_floor']:.3f})"
+        )
+        # Endpoint check: did MA/ACF actually reach near floor by t=T?
+        ma_end = float(res["ma_r"][-1])
+        ac_end = float(res["acf_corrupted"][str(primary_acf_lag)][-1])
+        print(
+            f"    endpoint frac=1.0: ma_r={ma_end:.3f} (floor={res['floors']['ma_r_floor']:.3f})  "
+            f"acf={ac_end:.3f} (floor={res['floors'][f'acf_lag{primary_acf_lag}_floor']:.3f})  "
+            f"mode={res.get('length_mode')} g={res.get('length_g')} scale={res.get('length_scale')}"
         )
         rows.append({
             "geometry": geometry,
             "subset_id": res["subset_id"],
+            "length_mode": res.get("length_mode", "none"),
+            "length_g": res.get("length_g", 1.0),
+            "length_scale": res.get("length_scale", 1.0),
             "trend_r2_floor": res["floors"]["trend_r2_floor"],
             "trend_cross_frac": tr_cross if tr_cross is not None else "",
             "ma_r_floor": res["floors"]["ma_r_floor"],
             "ma_cross_frac": ma_cross if ma_cross is not None else "",
+            "ma_endpoint": ma_end,
             "acf_lag": primary_acf_lag,
             "acf_floor": res["floors"][f"acf_lag{primary_acf_lag}_floor"],
             "acf_cross_frac": ac_cross if ac_cross is not None else "",
+            "acf_endpoint": ac_end,
             "map_W": res["map_shape"][-1],
         })
     geos = list(results.keys())
@@ -495,18 +620,127 @@ def print_crossings(results: Dict[str, Dict[str, Any]], *, primary_acf_lag: int 
             _crossing_threshold(results[b]["floors"]["ma_r_floor"], absolute_cap=0.35),
         )
         if ca is not None and cb is not None:
-            if abs(ca - cb) <= 0.05:
-                print("[flag] MA recoverability crosses at similar %T — schedule looks length-invariant.")
+            if abs(ca - cb) <= 0.1:
+                print("[flag] MA recoverability crosses at similar %T — length remap looks ok.")
             else:
                 later = a if ca > cb else b
                 print(
                     f"[flag] {later} retains recoverable MA structure longer "
-                    f"({100 * max(ca, cb):.1f}% vs {100 * min(ca, cb):.1f}% of T) — "
-                    "consider length-dependent beta shift."
+                    f"({100 * max(ca, cb):.1f}% vs {100 * min(ca, cb):.1f}% of T)."
                 )
         else:
             print("[flag] at least one geometry never crossed MA threshold within the grid.")
     return rows
+
+
+def _crossings_from_metrics_rows(
+    rows: List[Dict[str, str]],
+    *,
+    primary_acf_lag: int,
+) -> List[Dict[str, Any]]:
+    """Recompute crossings from an existing metrics_*.csv (no re-corruption)."""
+    by_geo: Dict[str, List[Dict[str, str]]] = {}
+    for r in rows:
+        by_geo.setdefault(r["geometry"], []).append(r)
+    out = []
+    for geometry, grows in by_geo.items():
+        grows = sorted(grows, key=lambda r: float(r["frac"]))
+        fr = [float(r["frac"]) for r in grows]
+        floors = {
+            "trend_r2_floor": float(grows[0]["floor_trend_r2_floor"]),
+            "ma_r_floor": float(grows[0]["floor_ma_r_floor"]),
+            f"acf_lag{primary_acf_lag}_floor": float(
+                grows[0][f"floor_acf_lag{primary_acf_lag}_floor"]
+            ),
+        }
+        tr_thr = _crossing_threshold(floors["trend_r2_floor"])
+        ma_thr = _crossing_threshold(floors["ma_r_floor"], absolute_cap=0.35)
+        ac_thr = _crossing_threshold(floors[f"acf_lag{primary_acf_lag}_floor"], absolute_cap=0.35)
+        tr_cross = _crossing_pct(fr, [float(r["trend_r2"]) for r in grows], tr_thr)
+        ma_cross = _crossing_pct(fr, [float(r["ma_r"]) for r in grows], ma_thr)
+        ac_cross = _crossing_pct(fr, [float(r[f"acf_lag{primary_acf_lag}"]) for r in grows], ac_thr)
+        out.append({
+            "geometry": geometry,
+            "subset_id": grows[0].get("subset_id", ""),
+            "trend_r2_floor": floors["trend_r2_floor"],
+            "trend_cross_frac": tr_cross if tr_cross is not None else "",
+            "ma_r_floor": floors["ma_r_floor"],
+            "ma_cross_frac": ma_cross if ma_cross is not None else "",
+            "acf_lag": primary_acf_lag,
+            "acf_floor": floors[f"acf_lag{primary_acf_lag}_floor"],
+            "acf_cross_frac": ac_cross if ac_cross is not None else "",
+            "map_W": grows[0].get("map_W", ""),
+            "note": (
+                "floors from CSV as-is; if ma_r_floor≈1 on long maps, "
+                "re-run eval (noise-vs-noise floor bug)"
+            ),
+        })
+        print(
+            f"  {geometry}: ma_floor={floors['ma_r_floor']:.4f} thr={ma_thr:.4f} "
+            f"ma_cross={ma_cross}  "
+            f"curve ma_r={[round(float(r['ma_r']), 3) for r in grows]}"
+        )
+    return out
+
+
+def recompute_crossings_from_dir(root: Path, *, primary_acf_lag: int) -> None:
+    root = root.resolve()
+    print(f"[recompute] scanning {root}")
+    for metrics_path in sorted(root.rglob("metrics_*.csv")):
+        ds_dir = metrics_path.parent
+        dataset = metrics_path.stem.replace("metrics_", "", 1)
+        rows = list(csv.DictReader(metrics_path.open(encoding="utf-8")))
+        print(f"\n=== {dataset} ({metrics_path}) ===")
+        # Clarify common misread: acf_lag1 at frac=0.5 is NOT ma_r
+        for geo in sorted({r["geometry"] for r in rows}):
+            g = [r for r in rows if r["geometry"] == geo]
+            r05 = next((r for r in g if abs(float(r["frac"]) - 0.5) < 1e-9), None)
+            if r05 is not None:
+                print(
+                    f"  [readout] {geo} frac=0.5: ma_r={float(r05['ma_r']):.4f}  "
+                    f"acf_lag1={float(r05['acf_lag1']):.4f}  "
+                    f"(ma_cross uses ma_r column, not acf)"
+                )
+        cross_rows = _crossings_from_metrics_rows(rows, primary_acf_lag=primary_acf_lag)
+        out = ds_dir / f"crossings_{dataset}_recomputed.csv"
+        with out.open("w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(cross_rows[0].keys()))
+            w.writeheader()
+            w.writerows(cross_rows)
+        print(f"[csv] {out}")
+
+
+def compare_old_new_crossings(
+    *,
+    old_root: Optional[Path],
+    new_rows: List[Dict[str, Any]],
+    dataset: str,
+) -> None:
+    if old_root is None:
+        return
+    old_path = old_root / dataset / f"crossings_{dataset}.csv"
+    if not old_path.is_file():
+        print(f"[compare] no old crossings at {old_path}")
+        return
+    old = {r["geometry"]: r for r in csv.DictReader(old_path.open(encoding="utf-8"))}
+    print(f"\n=== OLD vs NEW crossings ({dataset}) ===")
+    for row in new_rows:
+        geo = row["geometry"]
+        o = old.get(geo, {})
+
+        def _f(x):
+            if x is None or x == "":
+                return "never"
+            return f"{float(x):.3f}"
+
+        print(
+            f"  {geo}:\n"
+            f"    trend  old={_f(o.get('trend_cross_frac'))}  new={_f(row.get('trend_cross_frac'))}\n"
+            f"    ma_r   old={_f(o.get('ma_cross_frac'))}  new={_f(row.get('ma_cross_frac'))}  "
+            f"endpoint={row.get('ma_endpoint')}\n"
+            f"    acf    old={_f(o.get('acf_cross_frac'))}  new={_f(row.get('acf_cross_frac'))}  "
+            f"endpoint={row.get('acf_endpoint')}"
+        )
 
 
 def run_dataset(
@@ -520,6 +754,13 @@ def run_dataset(
     jpeg_dpi: int,
     acf_lags: Sequence[int],
     primary_acf_lag: int,
+    length_mode: str,
+    g_cal: float,
+    scale_cal: float,
+    g_override: Optional[float],
+    scale_override: Optional[float],
+    ma_window: str,
+    compare_old_dir: Optional[Path],
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     results: Dict[str, Dict[str, Any]] = {}
@@ -533,13 +774,43 @@ def run_dataset(
             stage=stage,
             fractions=DEFAULT_FRACTIONS,
             acf_lags=acf_lags,
+            length_mode=length_mode,
+            g_cal=g_cal,
+            scale_cal=scale_cal,
+            g_override=g_override,
+            scale_override=scale_override,
+            ma_window=ma_window,
         )
         res = results[geometry]
         print(
             f"  map={res['map_shape']} β_grid={[round(b, 3) for b in res['betas']]} "
-            f"trend_r2={[round(v, 3) for v in res['trend_r2']]}",
+            f"trend_r2={[round(v, 3) for v in res['trend_r2']]} "
+            f"ma_r={[round(v, 3) for v in res['ma_r']]}",
             flush=True,
         )
+
+    meta = {
+        "length_mode": length_mode,
+        "g_cal": g_cal,
+        "scale_cal": scale_cal,
+        "g_override": g_override,
+        "scale_override": scale_override,
+        "ma_window": ma_window,
+        "l_ref": L_REF,
+        "l_cal": L_CAL,
+        "per_geometry": {
+            g: {
+                "length_mode": results[g]["length_mode"],
+                "length_g": results[g]["length_g"],
+                "length_scale": results[g]["length_scale"],
+                "ma_width": results[g]["ma_width"],
+                "betas": results[g]["betas"],
+                "floors": results[g]["floors"],
+            }
+            for g in results
+        },
+    }
+    (out_dir / "schedule_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     p1, p_ma, p2 = plot_curves(
         results,
@@ -552,8 +823,8 @@ def run_dataset(
     print(f"[plot] {p_ma}")
     print(f"[plot] {p2}")
     cross_rows = print_crossings(results, primary_acf_lag=primary_acf_lag)
+    compare_old_new_crossings(old_root=compare_old_dir, new_rows=cross_rows, dataset=dataset)
 
-    # per-t CSV
     csv_path = out_dir / f"metrics_{dataset}.csv"
     rows = []
     for geometry, res in results.items():
@@ -562,6 +833,11 @@ def run_dataset(
                 "dataset": dataset,
                 "geometry": geometry,
                 "subset_id": res["subset_id"],
+                "length_mode": res["length_mode"],
+                "length_g": res["length_g"],
+                "length_scale": res["length_scale"],
+                "ma_window": res["ma_window"],
+                "ma_width": res["ma_width"],
                 "frac": f,
                 "t": res["t_idxs"][i],
                 "beta": res["betas"][i],
@@ -603,11 +879,79 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=REPO_ROOT / "reports" / "noise_trend_recoverability",
     )
     p.add_argument("--jpeg-dpi", type=int, default=110)
+    p.add_argument(
+        "--length-mode",
+        default="none",
+        choices=("none", "power", "scale"),
+        help="none=reference linear; power=β∝u^(1/g); scale=clip(β*scale, 0.5)",
+    )
+    p.add_argument(
+        "--g-cal",
+        type=float,
+        default=1.5,
+        help="g(L_cal) for power mode (g>1 front-loads high β). Calibrate on 336/720.",
+    )
+    p.add_argument(
+        "--scale-cal",
+        type=float,
+        default=1.5,
+        help="scale(L_cal) for scale mode (scale>1 hits β=0.5 earlier).",
+    )
+    p.add_argument("--g-override", type=float, default=None, help="Force g for all remapped geos")
+    p.add_argument("--scale-override", type=float, default=None, help="Force scale for remapped geos")
+    p.add_argument(
+        "--ma-window",
+        default="fixed_ref",
+        choices=("frac", "fixed_ref"),
+        help="frac=0.08*T (old, length-biased); fixed_ref=same width as 96/96 (length-fair)",
+    )
+    p.add_argument(
+        "--compare-old-dir",
+        type=Path,
+        default=None,
+        help="Prior report dir (e.g. reports/noise_trend_recoverability_4146642) for OLD vs NEW printout",
+    )
+    p.add_argument(
+        "--recompute-crossings-from",
+        type=Path,
+        default=None,
+        help="Only recompute crossings_*.csv from existing metrics_*.csv under this dir",
+    )
+    p.add_argument(
+        "--calibrate-g-grid",
+        default="",
+        help="Comma list of g values to try on 336/720 only (prints schedule β grids; no full eval)",
+    )
     return p.parse_args(argv)
+
+
+def _print_g_grid(g_values: Sequence[float]) -> None:
+    from models.diffusion_tsf.diffusion import _build_transition_schedule
+
+    print("=== β schedule grid at frac points (linear base, β_end=0.5) ===")
+    fracs = DEFAULT_FRACTIONS
+    T = 1000
+    t_idxs = [int(round(f * (T - 1))) for f in fracs]
+    for g in g_values:
+        betas = _build_transition_schedule(
+            T, 1e-5, 0.5, "linear", "cpu", length_mode="power", length_g=g
+        )
+        vals = [float(betas[t]) for t in t_idxs]
+        print(f"  g={g:.3f}: β={[round(v, 3) for v in vals]}")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
+    if args.recompute_crossings_from is not None:
+        recompute_crossings_from_dir(
+            args.recompute_crossings_from, primary_acf_lag=int(args.primary_acf_lag)
+        )
+        return
+    if args.calibrate_g_grid.strip():
+        gs = [float(x) for x in args.calibrate_g_grid.split(",") if x.strip()]
+        _print_g_grid(gs)
+        return
+
     datasets = [d.strip() for d in args.datasets.split(",") if d.strip()]
     geometries = [g.strip() for g in args.geometries.split(",") if g.strip()]
     for g in geometries:
@@ -616,6 +960,28 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     acf_lags = tuple(int(x) for x in args.acf_lags.split(",") if x.strip())
     out_root = args.output_dir.resolve()
     out_root.mkdir(parents=True, exist_ok=True)
+    compare_old = args.compare_old_dir.resolve() if args.compare_old_dir else None
+
+    print(
+        f"[cfg] length_mode={args.length_mode} g_cal={args.g_cal} scale_cal={args.scale_cal} "
+        f"ma_window={args.ma_window} g_override={args.g_override} "
+        f"scale_override={args.scale_override}",
+        flush=True,
+    )
+    if args.length_mode == "power":
+        print(
+            f"[cfg] g(W={int(L_REF)})={length_schedule_g(int(L_REF), g_cal=args.g_cal):.4f}  "
+            f"g(W={int(L_CAL)})={length_schedule_g(int(L_CAL), g_cal=args.g_cal):.4f}",
+            flush=True,
+        )
+    elif args.length_mode == "scale":
+        print(
+            f"[cfg] scale(W={int(L_REF)})="
+            f"{length_schedule_scale(int(L_REF), scale_cal=args.scale_cal):.4f}  "
+            f"scale(W={int(L_CAL)})="
+            f"{length_schedule_scale(int(L_CAL), scale_cal=args.scale_cal):.4f}",
+            flush=True,
+        )
 
     for dataset in datasets:
         ds_dir = out_root / dataset
@@ -630,6 +996,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             jpeg_dpi=int(args.jpeg_dpi),
             acf_lags=acf_lags,
             primary_acf_lag=int(args.primary_acf_lag),
+            length_mode=str(args.length_mode),
+            g_cal=float(args.g_cal),
+            scale_cal=float(args.scale_cal),
+            g_override=args.g_override,
+            scale_override=args.scale_override,
+            ma_window=str(args.ma_window),
+            compare_old_dir=compare_old,
         )
     print(f"[done] {out_root}", flush=True)
 
