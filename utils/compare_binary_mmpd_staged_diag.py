@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Compare binary staged anchor vs MMPD per-window, plot worst gaps, cache eval.
 
-Ranks test windows by anchor MSE gap (default: binary - mmpd, i.e. where binary is
-worse). Picks top-K with minimum spacing on series start (default 360 steps). For
-each pick, saves binary coarse/fine 2D maps + 1D reps vs GT with MMPD overlay.
+Ranks test windows by |anchor MSE gap| (largest disagreement). Picks top-K with
+optional min spacing on series start, then adds N random windows from the rest.
+For each pick, saves binary coarse/fine 2D maps + 1D reps vs GT with MMPD overlay.
 
 Caches per-dataset npz under --output-dir/eval_cache/ so plots can be regenerated
 without re-running eval.
@@ -23,6 +23,7 @@ import argparse
 import csv
 import json
 import sys
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -70,7 +71,6 @@ from utils.eval_mmpd_gaussian_anchor import (
 from utils.visualize_staged_eval_2d_preds import (
     _anchor_maps,
     _build_state,
-    _decode_staged_1d_from_maps,
     _load_stage_model,
     _load_staged_bundle,
     _mark_lookback_overlap_1d,
@@ -161,9 +161,20 @@ def discover_binary_ckpt(ckpt_base: Path, dataset: str, config_stem: str) -> Pat
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
-    if not matches:
-        raise FileNotFoundError(f"No checkpoint dir *{suffix} under {ckpt_base}")
-    return matches[0]
+    usable: List[Path] = []
+    for p in matches:
+        # Prefer dirs that actually have staged coarse/fine weights (skip empty cluster stubs).
+        try:
+            _load_staged_bundle(p, dataset)
+        except FileNotFoundError:
+            continue
+        usable.append(p)
+    if not usable:
+        raise FileNotFoundError(
+            f"No usable checkpoint dir *{suffix} under {ckpt_base} "
+            f"(need {{subset}}/coarse|fine/best.pt)"
+        )
+    return usable[0]
 
 
 def build_mmpd_args(
@@ -540,38 +551,137 @@ def rank_scores(cache: Dict[str, np.ndarray], diff_mode: str) -> np.ndarray:
         return cache["mmpd_anchor_mse"] - cache["binary_anchor_mse"]
     if diff_mode == "binary_minus_mmpd":
         return cache["binary_anchor_mse"] - cache["mmpd_anchor_mse"]
+    if diff_mode == "abs_diff":
+        return np.abs(cache["binary_anchor_mse"] - cache["mmpd_anchor_mse"])
     raise ValueError(f"unknown diff_mode: {diff_mode}")
+
+
+def _window_manifest_entry(
+    cache: Dict[str, np.ndarray],
+    *,
+    row: int,
+    rank: int,
+    pick_kind: str,
+    scores: np.ndarray,
+) -> Dict[str, Any]:
+    wi = int(cache["window_indices"][row])
+    return {
+        "rank": rank,
+        "pick_kind": pick_kind,
+        "row": int(row),
+        "window_index": wi,
+        "series_start": int(cache["series_starts"][row]),
+        "binary_anchor_mse": float(cache["binary_anchor_mse"][row]),
+        "mmpd_anchor_mse": float(cache["mmpd_anchor_mse"][row]),
+        "error_diff_mmpd_minus_binary": float(
+            cache["mmpd_anchor_mse"][row] - cache["binary_anchor_mse"][row]
+        ),
+        "error_diff_binary_minus_mmpd": float(
+            cache["binary_anchor_mse"][row] - cache["mmpd_anchor_mse"][row]
+        ),
+        "rank_score": float(scores[row]),
+    }
 
 
 def select_top_windows(
     cache: Dict[str, np.ndarray],
     *,
     top_k: int,
+    random_k: int,
     min_spacing: int,
     diff_mode: str,
+    seed: int = 2026,
 ) -> List[Dict[str, Any]]:
     scores = rank_scores(cache, diff_mode)
-    picks = select_spaced_top_k(
+    n = int(len(scores))
+    top_rows = select_spaced_top_k(
         scores,
         cache["series_starts"],
-        k=top_k,
+        k=min(top_k, n),
         min_spacing=min_spacing,
     )
+    used = set(top_rows)
+    remaining = [i for i in range(n) if i not in used]
+    rng = np.random.default_rng(seed)
+    n_rand = min(int(random_k), len(remaining))
+    rand_rows: List[int] = []
+    if n_rand > 0:
+        chosen = rng.choice(np.asarray(remaining, dtype=np.int64), size=n_rand, replace=False)
+        rand_rows = [int(i) for i in chosen]
+
     manifest: List[Dict[str, Any]] = []
-    for rank, row in enumerate(picks, start=1):
-        wi = int(cache["window_indices"][row])
-        manifest.append({
-            "rank": rank,
-            "row": int(row),
-            "window_index": wi,
-            "series_start": int(cache["series_starts"][row]),
-            "binary_anchor_mse": float(cache["binary_anchor_mse"][row]),
-            "mmpd_anchor_mse": float(cache["mmpd_anchor_mse"][row]),
-            "error_diff_mmpd_minus_binary": float(cache["mmpd_anchor_mse"][row] - cache["binary_anchor_mse"][row]),
-            "error_diff_binary_minus_mmpd": float(cache["binary_anchor_mse"][row] - cache["mmpd_anchor_mse"][row]),
-            "rank_score": float(scores[row]),
-        })
+    for rank, row in enumerate(top_rows, start=1):
+        manifest.append(
+            _window_manifest_entry(
+                cache, row=row, rank=rank, pick_kind="top_diff", scores=scores
+            )
+        )
+    for j, row in enumerate(rand_rows, start=1):
+        manifest.append(
+            _window_manifest_entry(
+                cache,
+                row=row,
+                rank=len(top_rows) + j,
+                pick_kind="random",
+                scores=scores,
+            )
+        )
     return manifest
+
+
+def _upsample_past_future_1d(
+    model: torch.nn.Module,
+    x_repr: torch.Tensor,
+    *,
+    lookback: int,
+    horizon: int,
+) -> torch.Tensor:
+    """Resample stride-compressed past|future 1D back to raw lookback+horizon."""
+    w_past = int(model._repr_time_len(lookback))
+    if x_repr.shape[-1] < w_past:
+        raise ValueError(
+            f"repr width {x_repr.shape[-1]} shorter than past repr cols {w_past}"
+        )
+    past = model._resample_1d_time_series(x_repr[..., :w_past], lookback)
+    fut = model._resample_1d_time_series(x_repr[..., w_past:], horizon)
+    return torch.cat([past, fut], dim=-1)
+
+
+@torch.no_grad()
+def _decode_maps_to_raw_1d(
+    fine_model: torch.nn.Module,
+    coarse_map: np.ndarray,
+    fine_map: np.ndarray,
+    *,
+    lookback: int,
+    horizon: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Decode past+future CDF maps with model-native ranges, upsample to raw time."""
+    device = next(fine_model.parameters()).device
+    coarse_t = torch.from_numpy(np.asarray(coarse_map)).unsqueeze(0).to(device=device, dtype=torch.float32)
+    fine_t = torch.from_numpy(np.asarray(fine_map)).unsqueeze(0).to(device=device, dtype=torch.float32)
+    coarse_1d = fine_model._decode_coarse_1d_from_map(coarse_t, cdf_decoder="mean")
+    fine_1d = fine_model._decode_fine_1d_from_map(
+        fine_t,
+        coarse_height=int(coarse_t.shape[2]),
+        cdf_decoder="mean",
+    )
+    final_1d = fine_model.decode_dual_from_2d(coarse_t, fine_t, from_diffusion=False)
+    # Ordinal single-variate path may squeeze V; restore (B, V, T).
+    if coarse_1d.dim() == 2:
+        coarse_1d = coarse_1d.unsqueeze(1)
+    if fine_1d.dim() == 2:
+        fine_1d = fine_1d.unsqueeze(1)
+    if final_1d.dim() == 2:
+        final_1d = final_1d.unsqueeze(1)
+    coarse_1d = _upsample_past_future_1d(fine_model, coarse_1d, lookback=lookback, horizon=horizon)
+    fine_1d = _upsample_past_future_1d(fine_model, fine_1d, lookback=lookback, horizon=horizon)
+    final_1d = _upsample_past_future_1d(fine_model, final_1d, lookback=lookback, horizon=horizon)
+    return (
+        coarse_1d[0].detach().cpu().numpy(),
+        fine_1d[0].detach().cpu().numpy(),
+        final_1d[0].detach().cpu().numpy(),
+    )
 
 
 def _plot_compare_panel(
@@ -592,14 +702,16 @@ def _plot_compare_panel(
     pr_f = maps["pred_fine"]
     n_vars = min(variables_to_plot, gt_c.shape[0])
 
-    coarse_np, fine_np, final_np = _decode_staged_1d_from_maps(fine_model, pr_c, pr_f)
     past_norm = maps["past_norm"].numpy()
     future_norm = maps["future_norm"].numpy()
     k = int(getattr(fine_model.config, "lookback_overlap", 0) or 0)
     lookback = int(past_norm.shape[-1])
     fut_len = int(future_norm.shape[-1])
-    w_past = lookback
+    w_past_map = int(fine_model._repr_time_len(lookback))
 
+    coarse_np, fine_np, final_np = _decode_maps_to_raw_1d(
+        fine_model, pr_c, pr_f, lookback=lookback, horizon=fut_len
+    )
     gt_1d = np.concatenate([past_norm, future_norm], axis=-1)
     common_len = min(gt_1d.shape[-1], coarse_np.shape[-1], fine_np.shape[-1], final_np.shape[-1])
     gt_1d = gt_1d[..., :common_len]
@@ -608,9 +720,10 @@ def _plot_compare_panel(
     final_np = final_np[..., :common_len]
     t_axis = np.arange(-lookback, common_len - lookback)
     t_future = np.arange(0, mmpd_1d.shape[-1])
-    span_label = f"LB={lookback}, K={k} overlap, H={fut_len - k} horizon"
+    span_label = f"LB={lookback}, K={k} overlap, H={fut_len} horizon"
 
-    fig = plt.figure(figsize=(4.2 * n_vars, 2.4 * 5), constrained_layout=True)
+    # Wide canvas: ~720 horizon needs horizontal room or lines look like noise.
+    fig = plt.figure(figsize=(7.5 * n_vars, 2.6 * 5), constrained_layout=True)
     gs = fig.add_gridspec(5, n_vars)
     row_pairs = (
         ("GT coarse 2D", gt_c, "Binary coarse 2D", pr_c),
@@ -633,25 +746,33 @@ def _plot_compare_panel(
                     vmin=0.0,
                     vmax=1.0,
                 )
-                _mark_lookback_overlap_2d(ax, w_past, k)
-                ax.set_title(f"var {col} | {label} ({h}x{w}, {span_label})", fontsize=8)
+                _mark_lookback_overlap_2d(ax, w_past_map, fine_model._overlap_repr_cols())
+                ax.set_title(f"var {col} | {label} ({h}x{w} repr, {span_label})", fontsize=8)
                 fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     for col in range(n_vars):
         ax = fig.add_subplot(gs[4, col])
-        ax.plot(t_axis, gt_1d[col], color="#2196F3", linewidth=1.5, label="GT")
-        ax.plot(t_axis, coarse_np[col], color="#FF9800", linewidth=1.0, label="Binary coarse")
-        ax.plot(t_axis, fine_np[col], color="#4CAF50", linewidth=1.0, label="Binary fine")
-        ax.plot(t_axis, final_np[col], color="#E91E63", linewidth=1.2, label="Binary final")
-        ax.plot(t_future, mmpd_1d[col], color="#9C27B0", linewidth=1.2, linestyle="--", label="MMPD (future)")
-        _mark_lookback_overlap_1d(ax, w_past, k)
+        # Coarse ~ same magnitude as GT/final; fine residual is ~1/H of that — own axis.
+        ax.plot(t_axis, gt_1d[col], color="#2196F3", linewidth=1.4, label="GT", zorder=3)
+        ax.plot(t_axis, coarse_np[col], color="#FF9800", linewidth=1.0, alpha=0.95, label="Binary coarse", zorder=2)
+        ax.plot(t_axis, final_np[col], color="#E91E63", linewidth=1.2, label="Binary final", zorder=2)
+        ax.plot(t_future, mmpd_1d[col], color="#9C27B0", linewidth=1.2, linestyle="--", label="MMPD (future)", zorder=2)
+        ax2 = ax.twinx()
+        ax2.plot(t_axis, fine_np[col], color="#4CAF50", linewidth=1.0, alpha=0.9, label="Binary fine")
+        ax2.tick_params(axis="y", labelsize=7, colors="#2E7D32")
+        ax2.set_ylabel("fine residual", fontsize=7, color="#2E7D32")
+        _mark_lookback_overlap_1d(ax, lookback, k)
+        ax.set_xlim(-lookback, max(fut_len, int(mmpd_1d.shape[-1])))
         ax.grid(True, alpha=0.12)
         ax.set_title(f"var {col} 1D window-norm ({span_label})", fontsize=8)
         if col == 0:
-            ax.legend(fontsize=6, loc="upper right")
+            h1, l1 = ax.get_legend_handles_labels()
+            h2, l2 = ax2.get_legend_handles_labels()
+            ax.legend(h1 + h2, l1 + l2, fontsize=6, loc="upper right")
 
+    kind = str(meta.get("pick_kind", "top_diff"))
     title = (
-        f"{dataset} win {window_index} | rank {meta['rank']:02d} | "
+        f"{dataset} win {window_index} | {kind} #{meta['rank']:02d} | "
         f"bin_mse={meta['binary_anchor_mse']:.4f} mmpd_mse={meta['mmpd_anchor_mse']:.4f} "
         f"(mmpd-bin)={meta['error_diff_mmpd_minus_binary']:.4f}"
     )
@@ -725,7 +846,11 @@ def plot_dataset_windows(
         if mmpd_rows.size == 0:
             mmpd_rows = np.array([row])
         mmpd_1d = mmpd_det[int(mmpd_rows[0])]
-        out_path = plot_dir / f"rank{entry['rank']:02d}_win{wi}_mmpd_minus_bin{entry['error_diff_mmpd_minus_binary']:+.4f}.jpg"
+        kind = str(entry.get("pick_kind", "top_diff"))
+        out_path = (
+            plot_dir
+            / f"{kind}_r{entry['rank']:02d}_win{wi}_mmpd_minus_bin{entry['error_diff_mmpd_minus_binary']:+.4f}.jpg"
+        )
         saved.append(
             _plot_compare_panel(
                 maps=maps,
@@ -764,13 +889,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--binary-ckpt-stem", default=DEFAULT_BINARY_CKPT_STEM)
     p.add_argument("--datasets", default="ETTh1,weather,electricity,exchange_rate,traffic")
     p.add_argument("--output-dir", type=Path, default=REPO_ROOT / "reports" / "binary_vs_mmpd_ordinal_lb336_hz720")
-    p.add_argument("--top-k", type=int, default=20)
-    p.add_argument("--min-spacing", type=int, default=360)
+    p.add_argument("--top-k", type=int, default=10, help="Largest |error-diff| windows to plot")
+    p.add_argument("--random-k", type=int, default=10, help="Extra random windows (any error)")
+    p.add_argument(
+        "--min-spacing",
+        type=int,
+        default=48,
+        help="Min series-start spacing among top-diff picks (not applied to random)",
+    )
     p.add_argument(
         "--diff-mode",
-        choices=("binary_minus_mmpd", "mmpd_minus_binary"),
-        default="binary_minus_mmpd",
-        help="Rank score: binary-mmpd highlights windows where binary is worse (default).",
+        choices=("abs_diff", "binary_minus_mmpd", "mmpd_minus_binary"),
+        default="abs_diff",
+        help="Top-k rank score (default: |binary-mmpd| disagreement).",
     )
     p.add_argument("--force-eval", action="store_true")
     p.add_argument("--force-mmpd-eval", action="store_true")
@@ -801,7 +932,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if args.smoke_test:
         if not str(output_dir).endswith("_smoke"):
             output_dir = output_dir.parent / f"{output_dir.name}_smoke"
-        args.top_k = min(int(args.top_k), 3)
+        args.top_k = min(int(args.top_k), 2)
+        args.random_k = min(int(args.random_k), 2)
         args.min_spacing = min(int(args.min_spacing), 48)
         args.force_eval = True
         args.test_fraction = 1.0
@@ -866,8 +998,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         top = select_top_windows(
             cache,
             top_k=args.top_k,
+            random_k=args.random_k,
             min_spacing=args.min_spacing,
             diff_mode=args.diff_mode,
+            seed=int(mmpd_args.seed) + 17 * (zlib.crc32(dataset.encode("utf-8")) % 10_000),
         )
         all_top[dataset] = top
         top_json = output_dir / "top_windows" / f"{dataset}.json"
