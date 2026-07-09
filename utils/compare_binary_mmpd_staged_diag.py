@@ -51,6 +51,7 @@ from models.diffusion_tsf.train_multivariate_pipeline import (
     generate_dataset_job,
     load_dataset,
     load_wrapped_guidance,
+    resolve_pipeline_data_subset,
 )
 from utils.eval_mmpd_gaussian_anchor import (
     build_anchor_runs_from_subset_config,
@@ -266,6 +267,7 @@ def run_binary_staged_eval(
     state = PipelineState.from_config(cfg)
     state.checkpoint_dir = str(checkpoint_dir.resolve())
     state.dataset = dataset
+    resolve_pipeline_data_subset(state)
     subset_id = state.subset_id or dataset
     state.subset_id = subset_id
 
