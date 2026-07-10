@@ -175,8 +175,15 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
         ft_ckpt = state.default_guidance_finetune_ckpt_path()
 
         if self.get("reuse_checkpoint_from_config"):
-            self._try_reuse_patch_guidance_ckpt(state, fail_if_missing=True)
-            return state
+            if self._try_reuse_patch_guidance_ckpt(state, fail_if_missing=False):
+                return state
+            logger.warning(
+                "  [%s] reuse_checkpoint_from_config=%r missing usable ckpt; "
+                "training patch guidance instead",
+                self.name,
+                self.get("reuse_checkpoint_from_config"),
+            )
+            # fall through to train
 
         variate_indices = state.variate_indices
         if variate_indices is None:

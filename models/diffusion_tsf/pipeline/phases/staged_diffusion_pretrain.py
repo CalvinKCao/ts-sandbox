@@ -256,14 +256,33 @@ def source_run_stage_pretrain_ckpt(
     source_config: str,
     stage: str,
 ) -> Optional[str]:
-    """``pretrained_{stage}/pretrained_diffusion.pt`` from a prior grid run."""
+    """``pretrained_{stage}/pretrained_diffusion.pt`` from a prior grid run.
+
+    Prefer same-dataset donor. If missing (e.g. quota deleted electricity's
+    pretrained_* while ETTh1's copy remains), fall back to any dataset's run
+    of the same config stem — synthetic pretrain is geometry-keyed, not
+    dataset-keyed.
+    """
     ckpt_rel = f"pretrained_{stage}/pretrained_diffusion.pt"
     try:
         source_dir = discover_dataset_run_ckpt_dir(
             state, source_config, required_file=ckpt_rel,
         )
     except FileNotFoundError:
-        return None
+        source_dir = discover_any_dataset_run_ckpt_dir(
+            state, source_config, required_file=ckpt_rel,
+        )
+        if source_dir is None:
+            return None
+        logger.warning(
+            "  [staged_diffusion_pretrain] %s: no *-%s-%s pretrain; "
+            "falling back to cross-dataset donor %s (synthetic pretrain is "
+            "geometry-shared)",
+            stage,
+            state.dataset,
+            source_config,
+            source_dir,
+        )
     ckpt = os.path.join(source_dir, ckpt_rel)
     if os.path.exists(ckpt):
         return ckpt
@@ -281,6 +300,16 @@ def _run_dir_matches_config(name: str, dataset: str, config_suffix: str) -> bool
     if idx < 0:
         return False
     return name[idx + len(token):] == ""
+
+
+def _run_dir_matches_config_any_dataset(name: str, config_suffix: str) -> bool:
+    """Exact stem match: ``*-<any_dataset>-{config_suffix}`` (nothing after suffix)."""
+    token = f"-{config_suffix}"
+    if not name.endswith(token):
+        return False
+    # Require a dataset segment: MM-DD-jobid-DATASET-config
+    body = name[: -len(token)]
+    return body.count("-") >= 3
 
 
 def discover_dataset_run_ckpt_dir(
@@ -316,6 +345,36 @@ def discover_dataset_run_ckpt_dir(
             f"No prior run *-{state.dataset}-{config_suffix}{req} under any of {roots}. "
             "Complete the exhaustive staged grid first."
         )
+    return best_dir
+
+
+def discover_any_dataset_run_ckpt_dir(
+    state: PipelineState,
+    config_suffix: str,
+    *,
+    required_file: Optional[str] = None,
+) -> Optional[str]:
+    """Newest ``*-<any_dataset>-<config_suffix>`` dir with optional required file."""
+    best_dir: Optional[str] = None
+    best_mtime = 0.0
+    roots = _candidate_phase1_ckpt_roots(state)
+    for ckpt_root in roots:
+        try:
+            names = os.listdir(ckpt_root)
+        except OSError:
+            continue
+        for name in names:
+            if not _run_dir_matches_config_any_dataset(name, config_suffix):
+                continue
+            path = os.path.join(ckpt_root, name)
+            if not os.path.isdir(path):
+                continue
+            if required_file and not os.path.exists(os.path.join(path, required_file)):
+                continue
+            mtime = os.path.getmtime(path)
+            if mtime > best_mtime:
+                best_mtime = mtime
+                best_dir = path
     return best_dir
 
 
