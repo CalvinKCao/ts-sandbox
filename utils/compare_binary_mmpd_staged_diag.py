@@ -838,13 +838,12 @@ def _plot_compare_panel(
     output_path: Path,
     variables_to_plot: int,
     jpeg_dpi: int,
-) -> Path:
-    """Plot GT / binary / MMPD on one shared raw-time axis t ∈ [-LB, H).
+) -> List[Path]:
+    """Plot GT / binary / MMPD — one wide figure per variate.
 
-    Lookback|horizon split is always t=0. Overlap K is decoded with the future
-    half, then stripped in *raw* time (not repr-map cols then re-upsample), so
-    2D ridges and 1D lines share the same time base.
-    Horizon binary curves come from generate()'s prediction_global_norm.
+    Shared raw-time axis t ∈ [-LB, H) on every panel. Overlap K is decoded with
+    the future half, then stripped in raw time. Horizon binary curves come from
+    generate()'s prediction_global_norm.
     """
     k = int(getattr(fine_model.config, "lookback_overlap", 0) or 0)
     lookback = int(past_z.shape[-1])
@@ -863,8 +862,6 @@ def _plot_compare_panel(
     if canvas_len != lookback + horizon_core:
         raise ValueError(f"gt canvas {canvas_len} != LB+H {lookback + horizon_core}")
 
-    # Decode full past|future(with K) maps, then strip overlap in raw time so
-    # lookback and horizon share one continuous resampled canvas.
     gt_c_full, gt_f_full, gt_final_full = _decode_maps_to_plot_1d(
         fine_model,
         maps["gt_coarse"],
@@ -879,13 +876,12 @@ def _plot_compare_panel(
         lookback=lookback,
         future_raw_len=future_raw_len,
     )
-    del pr_c_full, pr_f_full  # horizon 1D/ridges use generate(); this decode is for phase assert
+    del pr_c_full, pr_f_full
     gt_coarse_np = _strip_overlap_raw(gt_c_full, lookback=lookback, lookback_overlap=k)
     gt_fine_np = _strip_overlap_raw(gt_f_full, lookback=lookback, lookback_overlap=k)
     gt_final_np = _strip_overlap_raw(gt_final_full, lookback=lookback, lookback_overlap=k)
     pr_final_map = _strip_overlap_raw(pr_final_full, lookback=lookback, lookback_overlap=k)
 
-    # Horizon preds from generate (same tensor staged_eval / binary cache uses).
     fine_out = maps["fine_out"]
     coarse_out = maps["coarse_out"]
     bin_final_h = fine_out["prediction_global_norm"][0].detach().cpu().numpy()
@@ -896,8 +892,6 @@ def _plot_compare_panel(
             f"coarse={bin_coarse_h.shape[-1]} != horizon_core {horizon_core}"
         )
 
-    # Fine map-decode (upsample full canvas then strip K) must be phase-aligned with
-    # generate()'s strip-k_repr-then-upsample path.
     _assert_horizon_aligned(
         f"{dataset} win {window_index}: map-decode final vs prediction_global_norm",
         pr_final_map[..., lookback:],
@@ -912,16 +906,27 @@ def _plot_compare_panel(
     )
 
     mmpd_plot = np.asarray(mmpd_1d)
+    if mmpd_plot.ndim != 2:
+        raise ValueError(f"MMPD expected (V,H), got {mmpd_plot.shape}")
     if mmpd_plot.shape[-1] != horizon_core:
         raise ValueError(
             f"MMPD future width {mmpd_plot.shape[-1]} != horizon_core {horizon_core} "
             f"(lookback_overlap={k}, raw_future={future_raw_len})"
         )
+    if mmpd_plot.shape[0] != gt_1d.shape[0]:
+        raise ValueError(
+            f"MMPD V={mmpd_plot.shape[0]} != GT V={gt_1d.shape[0]} "
+            "(variate subset mismatch — wrong pack or ckpt)"
+        )
+    # Time base must match GT horizon exactly (length already checked). Fail if
+    # someone accidentally passed y_true instead of deterministic with a shift.
+    if mmpd_plot.shape != future_core_z.shape:
+        raise ValueError(
+            f"MMPD shape {mmpd_plot.shape} != future_core_z {future_core_z.shape}"
+        )
 
-    # 1D / 2D share one raw axis: lookback context + horizon preds.
     coarse_np = np.concatenate([gt_coarse_np[..., :lookback], bin_coarse_h], axis=-1)
     final_np = np.concatenate([gt_final_np[..., :lookback], bin_final_h], axis=-1)
-    # Fine residual over canvas: GT residual in lookback; pred residual = final-coarse on horizon.
     fine_np = np.concatenate(
         [gt_fine_np[..., :lookback], bin_final_h - bin_coarse_h],
         axis=-1,
@@ -931,120 +936,126 @@ def _plot_compare_panel(
     t_axis = np.arange(-lookback, horizon_core, dtype=np.float64)
     if t_axis.shape[0] != canvas_len:
         raise ValueError(f"t_axis len {t_axis.shape[0]} != canvas {canvas_len}")
-    span_label = f"LB={lookback}, K={k}, H={horizon_core} | shared raw t"
+    t_h = t_axis[lookback:]
+    span_label = f"LB={lookback}, K={k}, H={horizon_core}"
 
-    coarse_lim = _symmetric_lim(
-        np.concatenate(
-            [
-                gt_1d.reshape(-1),
-                gt_coarse_np.reshape(-1),
-                coarse_np.reshape(-1),
-                final_np.reshape(-1),
-                mmpd_plot.reshape(-1),
-            ],
-            axis=0,
-        )
-    )
-    fine_lim = _symmetric_lim(
-        np.concatenate([gt_fine_np.reshape(-1), fine_np.reshape(-1)], axis=0)
-    )
-    fine_lim = max(fine_lim, 0.05 * coarse_lim)
-    fine_lim = min(fine_lim, 0.5 * coarse_lim)
-
-    # Wide canvas so H=720 + LB=336 is readable; dpi default ~160.
-    fig = plt.figure(figsize=(16.0 * n_vars, 3.4 * 5), constrained_layout=True)
-    gs = fig.add_gridspec(5, n_vars)
-    # Ridges painted on the same raw canvas as the 1D row (extent uses t_axis).
-    value_panels = (
-        ("GT coarse (global z)", gt_coarse_np, "Binary coarse (global z)", coarse_np, coarse_lim, False),
-        ("GT fine residual (Δz)", gt_fine_np, "Binary fine residual (Δz)", fine_np, fine_lim, True),
-    )
-    for row_idx, (l_gt, d_gt, l_pr, d_pr, lim, is_fine) in enumerate(value_panels):
-        for col in range(n_vars):
-            for sub_row, series, label in (
-                (0, d_gt[col], l_gt),
-                (1, d_pr[col], l_pr),
-            ):
-                if series.shape[-1] != canvas_len:
-                    raise ValueError(
-                        f"{label} ridge T={series.shape[-1]} != canvas {canvas_len}"
-                    )
-                ax = fig.add_subplot(gs[row_idx * 2 + sub_row, col])
-                ridge = _paint_value_ridge(series, y_min=-lim, y_max=lim, n_rows=96, band=1)
-                ax.imshow(
-                    ridge,
-                    aspect="auto",
-                    origin="lower",
-                    extent=[-lookback, horizon_core, -lim, lim],
-                    cmap="gray",
-                    vmin=0.0,
-                    vmax=1.0,
-                    interpolation="nearest",
-                )
-                ax.axhline(0.0, color="#888888", linestyle="-", linewidth=0.8, alpha=0.9)
-                ax.axvline(x=0.0, color="#888888", linestyle="-", linewidth=0.9, alpha=0.9)
-                ax.set_xlim(-lookback, horizon_core)
-                ax.set_ylabel("global z" if not is_fine else "Δz", fontsize=7)
-                ax.set_title(f"var {col} | {label} ({span_label})", fontsize=8)
+    kind = str(meta.get("pick_kind", "top_diff"))
+    stem = output_path.stem
+    suffix = output_path.suffix or ".jpg"
+    out_dir = output_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    saved: List[Path] = []
 
     for col in range(n_vars):
-        ax = fig.add_subplot(gs[4, col])
-        ax.plot(t_axis, gt_1d[col], color="#2196F3", linewidth=1.8, label="GT (global z)", zorder=3)
+        # Per-variate y-limits so one bad channel doesn't squash the rest.
+        coarse_lim = _symmetric_lim(
+            np.concatenate(
+                [
+                    gt_1d[col],
+                    gt_coarse_np[col],
+                    coarse_np[col],
+                    final_np[col],
+                    mmpd_plot[col],
+                ],
+                axis=0,
+            )
+        )
+        fine_lim = _symmetric_lim(np.concatenate([gt_fine_np[col], fine_np[col]], axis=0))
+        fine_lim = max(fine_lim, 0.05 * coarse_lim)
+        fine_lim = min(fine_lim, 0.5 * coarse_lim)
+
+        # One variate per file: very wide + tall so H=720 is readable.
+        fig = plt.figure(figsize=(28.0, 18.0), constrained_layout=True)
+        gs = fig.add_gridspec(5, 1, height_ratios=[1.0, 1.0, 0.85, 0.85, 1.8])
+
+        ridge_rows = (
+            (0, "GT coarse (global z)", gt_coarse_np[col], coarse_lim, False),
+            (1, "Binary coarse (global z)", coarse_np[col], coarse_lim, False),
+            (2, "GT fine residual (Δz)", gt_fine_np[col], fine_lim, True),
+            (3, "Binary fine residual (Δz)", fine_np[col], fine_lim, True),
+        )
+        for row, label, series, lim, is_fine in ridge_rows:
+            if series.shape[-1] != canvas_len:
+                raise ValueError(f"{label} ridge T={series.shape[-1]} != canvas {canvas_len}")
+            ax = fig.add_subplot(gs[row, 0])
+            ridge = _paint_value_ridge(series, y_min=-lim, y_max=lim, n_rows=128, band=1)
+            ax.imshow(
+                ridge,
+                aspect="auto",
+                origin="lower",
+                extent=[-lookback, horizon_core, -lim, lim],
+                cmap="gray",
+                vmin=0.0,
+                vmax=1.0,
+                interpolation="nearest",
+            )
+            ax.axhline(0.0, color="#888888", linestyle="-", linewidth=0.9, alpha=0.9)
+            ax.axvline(x=0.0, color="#888888", linestyle="-", linewidth=1.1, alpha=0.95)
+            ax.set_xlim(-lookback, horizon_core)
+            ax.set_ylabel("global z" if not is_fine else "Δz", fontsize=11)
+            ax.set_title(f"{label} | {span_label}", fontsize=12)
+            ax.tick_params(labelsize=10)
+
+        ax = fig.add_subplot(gs[4, 0])
+        ax.plot(t_axis, gt_1d[col], color="#1565C0", linewidth=2.2, label="GT (global z)", zorder=4)
         ax.plot(
             t_axis,
             gt_final_np[col],
             color="#90CAF9",
-            linewidth=1.3,
+            linewidth=1.4,
             linestyle=":",
+            alpha=0.9,
             label="GT encode→decode",
             zorder=2,
         )
-        # Horizon-only curves (lookback would be GT context noise).
         ax.plot(
-            t_axis[lookback:],
+            t_h,
             coarse_np[col, lookback:],
-            color="#FF9800",
-            linewidth=1.5,
+            color="#EF6C00",
+            linewidth=2.0,
             alpha=0.95,
             label="Binary coarse (H)",
-            zorder=2,
+            zorder=3,
         )
         ax.plot(
-            t_axis[lookback:],
+            t_h,
             final_np[col, lookback:],
-            color="#E91E63",
-            linewidth=1.7,
+            color="#C2185B",
+            linewidth=2.2,
             label="Binary final (H)",
-            zorder=2,
+            zorder=3,
         )
         ax.plot(
-            t_axis[lookback:],
+            t_h,
             mmpd_plot[col],
-            color="#9C27B0",
-            linewidth=1.7,
+            color="#6A1B9A",
+            linewidth=2.2,
             linestyle="--",
             label="MMPD (H)",
-            zorder=2,
+            zorder=3,
         )
-        ax.axhline(0.0, color="black", linestyle=":", linewidth=0.7, alpha=0.45)
+        ax.axhline(0.0, color="black", linestyle=":", linewidth=0.8, alpha=0.45)
+        ax.axvline(x=0, color="black", linestyle="-", linewidth=1.2, alpha=0.45)
         ax.set_ylim(-coarse_lim, coarse_lim)
-        ax.axvline(x=0, color="black", linestyle="-", linewidth=0.8, alpha=0.35)
         ax.set_xlim(-lookback, horizon_core)
-        ax.grid(True, alpha=0.12)
-        ax.set_title(f"var {col} 1D global-z ({span_label})", fontsize=8)
-        if col == 0:
-            ax.legend(fontsize=7, loc="upper right")
+        ax.set_xlabel("t (0 = forecast start)", fontsize=11)
+        ax.set_ylabel("global z", fontsize=11)
+        ax.grid(True, alpha=0.18)
+        ax.tick_params(labelsize=10)
+        ax.set_title(f"1D global-z | {span_label}", fontsize=12)
+        ax.legend(fontsize=10, loc="upper right", framealpha=0.92)
 
-    kind = str(meta.get("pick_kind", "top_diff"))
-    title = (
-        f"{dataset} win {window_index} | {kind} #{meta['rank']:02d} | "
-        f"bin_mse={meta['binary_anchor_mse']:.4f} mmpd_mse={meta['mmpd_anchor_mse']:.4f} "
-        f"(mmpd-bin)={meta['error_diff_mmpd_minus_binary']:.4f}"
-    )
-    fig.suptitle(title, fontsize=10, fontweight="bold")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    save_figure_jpg(fig, str(output_path), dpi=jpeg_dpi)
-    return output_path
+        title = (
+            f"{dataset} win {window_index} var {col} | {kind} #{meta['rank']:02d} | "
+            f"bin_mse={meta['binary_anchor_mse']:.4f} mmpd_mse={meta['mmpd_anchor_mse']:.4f} "
+            f"(mmpd-bin)={meta['error_diff_mmpd_minus_binary']:.4f}"
+        )
+        fig.suptitle(title, fontsize=14, fontweight="bold")
+        var_path = out_dir / f"{stem}_var{col}{suffix}"
+        save_figure_jpg(fig, str(var_path), dpi=jpeg_dpi)
+        saved.append(var_path)
+
+    return saved
 
 
 @torch.no_grad()
@@ -1127,7 +1138,7 @@ def plot_dataset_windows(
             plot_dir
             / f"{kind}_r{entry['rank']:02d}_win{wi}_mmpd_minus_bin{entry['error_diff_mmpd_minus_binary']:+.4f}.jpg"
         )
-        saved.append(
+        saved.extend(
             _plot_compare_panel(
                 maps=maps,
                 fine_model=fine_model,
@@ -1142,7 +1153,7 @@ def plot_dataset_windows(
                 jpeg_dpi=jpeg_dpi,
             )
         )
-        print(f"[plot] {out_path}", flush=True)
+        print(f"[plot] {dataset} win {wi} -> {variables_to_plot} variate figs under {plot_dir}", flush=True)
     return saved
 
 
@@ -1198,7 +1209,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--plots-only", action="store_true", help="Skip eval; require eval_cache/*.npz")
     p.add_argument("--skip-plots", action="store_true")
     p.add_argument("--variables-to-plot", type=int, default=3)
-    p.add_argument("--jpeg-dpi", type=int, default=160)
+    p.add_argument("--jpeg-dpi", type=int, default=180)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args(argv)
 

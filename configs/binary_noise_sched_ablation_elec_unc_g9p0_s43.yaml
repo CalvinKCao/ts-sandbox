@@ -1,0 +1,10 @@
+# Confirmation seed (seed=43) at g9p0 — sanity check vs seed=42 at final recommended g.
+extends: configs/binary_noise_sched_ablation_elec_unc_g9p0.yaml
+
+wandb:
+  tags: [noise_sched_ablation, uncompressed, g9p0, confirm_seed, s43]
+
+experiment:
+  name: binary-noise-sched-ablation-elec-unc-g9p0-s43
+  experiment_name: binary_noise_sched_ablation_elec_unc_g9p0_s43
+  seed: 43
