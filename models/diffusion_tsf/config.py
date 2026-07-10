@@ -76,6 +76,10 @@ class DiffusionTSFConfig:
     binary_beta_start: float = 1e-5
     binary_beta_end: float = 0.5
     binary_noise_schedule: str = "sqrt_linear"  # sqrt_linear, linear, cosine
+    # Length-dependent β remap (diag / ablation). Default none = identity schedule.
+    binary_length_mode: str = "none"  # none | power | scale
+    binary_length_g: float = 1.0
+    binary_length_scale: float = 1.0
     binary_boundary_weight: float = 1.0
     binary_background_weight: float = 0.1
     binary_boundary_width: int = 8
@@ -259,6 +263,15 @@ class DiffusionTSFConfig:
                     "binary_noise_schedule must be one of {'sqrt_linear', 'linear', 'cosine'}, "
                     f"got {self.binary_noise_schedule!r}."
                 )
+            if self.binary_length_mode not in {"none", "power", "scale"}:
+                raise ValueError(
+                    "binary_length_mode must be one of {'none', 'power', 'scale'}, "
+                    f"got {self.binary_length_mode!r}."
+                )
+            if float(self.binary_length_g) <= 0:
+                raise ValueError("binary_length_g must be > 0.")
+            if float(self.binary_length_scale) <= 0:
+                raise ValueError("binary_length_scale must be > 0.")
             if self.prediction_target not in {"x0", "epsilon"}:
                 raise ValueError("prediction_target must be 'x0' or 'epsilon'.")
             if self.loss_weighting not in {"none", "min_snr"}:

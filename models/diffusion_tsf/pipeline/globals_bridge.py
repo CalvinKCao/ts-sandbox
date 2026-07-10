@@ -41,6 +41,9 @@ def patch_globals(
     mod.ITRANS_E_LAYERS = state.itrans_e_layers
     mod.ITRANS_N_HEADS = state.itrans_n_heads
     mod.BINARY_NOISE_SCHEDULE = state.binary_noise_schedule
+    mod.BINARY_LENGTH_MODE = getattr(state, "binary_length_mode", "none")
+    mod.BINARY_LENGTH_G = float(getattr(state, "binary_length_g", 1.0))
+    mod.BINARY_LENGTH_SCALE = float(getattr(state, "binary_length_scale", 1.0))
     mod.PREDICTION_TARGET = state.prediction_target
     mod.LOSS_WEIGHTING = state.loss_weighting
     mod.MIN_SNR_GAMMA = state.min_snr_gamma

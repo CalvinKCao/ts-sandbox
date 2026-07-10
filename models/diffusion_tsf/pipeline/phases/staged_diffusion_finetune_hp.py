@@ -428,6 +428,9 @@ def _cleanup_trial_ckpts(trials_dir: str, subset_dir: str, *, keep: str) -> None
 TUNED_MODEL_KEYS = (
     "max_scale",
     "binary_noise_schedule",
+    "binary_length_mode",
+    "binary_length_g",
+    "binary_length_scale",
     "prediction_target",
     "loss_weighting",
     "min_snr_gamma",
@@ -1023,6 +1026,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             train_log_stride = max(1, n_train_batches // 4)
             val_log_stride = max(1, n_val_batches // 2)
             epoch_t0 = time.perf_counter()
+            epoch_history: list[Dict[str, Any]] = []
 
             for epoch in range(max_epochs):
                 epoch_start = time.perf_counter()
@@ -1125,6 +1129,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 if backup is not None:
                     ema.restore(model, backup)
 
+                epoch_history.append({
+                    "epoch": epoch + 1,
+                    "train_loss": float(train_loss_avg),
+                    "val_loss": float(val_loss),
+                    "best_val": float(best_val),
+                    "lr": lr_now,
+                    "saved": bool(saved),
+                })
+
                 logger.info(
                     "  [%s/%s] %s epoch %d/%d done train=%.4f val=%.4f best=%.4f "
                     "best_ep=%d lr=%.2e saved=%s train_t=%.1fs val_t=%.1fs epoch_t=%.1fs",
@@ -1161,6 +1174,24 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 raise RuntimeError(
                     f"{trial_label}: expected checkpoint at {ckpt_path} after save"
                 )
+            if ckpt_path:
+                hist_path = os.path.join(os.path.dirname(ckpt_path), "val_loss_history.json")
+                with open(hist_path, "w", encoding="utf-8") as hf:
+                    json.dump(
+                        {
+                            "stage": self.stage,
+                            "trial_label": trial_label,
+                            "length_mode": params.get("binary_length_mode", "none"),
+                            "length_g": params.get("binary_length_g", 1.0),
+                            "length_scale": params.get("binary_length_scale", 1.0),
+                            "binary_noise_schedule": params.get("binary_noise_schedule"),
+                            "best_val": float(best_val),
+                            "best_epoch": int(best_epoch),
+                            "epochs": epoch_history,
+                        },
+                        hf,
+                        indent=2,
+                    )
             logger.info(
                 "  [%s/%s] %s DONE best_val=%.4f best_epoch=%d total_time=%.1fs",
                 self.name, self.stage, trial_label, best_val, best_epoch, total_elapsed,

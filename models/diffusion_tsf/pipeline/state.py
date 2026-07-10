@@ -108,6 +108,9 @@ class PipelineState:
     itrans_e_layers: int = 4
     itrans_n_heads: int = 8
     binary_noise_schedule: str = "linear"
+    binary_length_mode: str = "none"
+    binary_length_g: float = 1.0
+    binary_length_scale: float = 1.0
     prediction_target: str = "epsilon"
     loss_weighting: str = "none"
     min_snr_gamma: float = 5.0

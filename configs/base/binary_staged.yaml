@@ -138,6 +138,10 @@ experiment:
   itrans_e_layers: 4
   itrans_n_heads: 8
   binary_noise_schedule: linear
+  # Length-dependent β remap for long maps (none = identity; power uses length_g).
+  binary_length_mode: none
+  binary_length_g: 1.0
+  binary_length_scale: 1.0
   binary_num_steps: 1000
   binary_beta_start: 1.0e-5
   binary_beta_end: 0.5

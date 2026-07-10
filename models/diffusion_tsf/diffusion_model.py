@@ -191,6 +191,9 @@ class DiffusionTSF(nn.Module):
             beta_start=config.binary_beta_start,
             beta_end=config.binary_beta_end,
             schedule_type=config.binary_noise_schedule,
+            length_mode=getattr(config, "binary_length_mode", "none"),
+            length_g=float(getattr(config, "binary_length_g", 1.0)),
+            length_scale=float(getattr(config, "binary_length_scale", 1.0)),
         )
 
         logger.debug("DiffusionTSF initialized:")

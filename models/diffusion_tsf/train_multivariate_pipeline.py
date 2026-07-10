@@ -314,6 +314,9 @@ GUIDANCE_TYPE = "itransformer"
 MMPD_PATCH_SIZE = 12
 PATCH_GUIDANCE_HP_FINETUNE_MAX_EPOCHS = 10
 BINARY_NOISE_SCHEDULE = "sqrt_linear"
+BINARY_LENGTH_MODE = "none"
+BINARY_LENGTH_G = 1.0
+BINARY_LENGTH_SCALE = 1.0
 PREDICTION_TARGET = "x0"
 LOSS_WEIGHTING = "none"
 MIN_SNR_GAMMA = 5.0
@@ -1363,6 +1366,16 @@ def create_diffusion_model(
         coarse_flatline_blur_kernel=o("coarse_flatline_blur_kernel", COARSE_FLATLINE_BLUR_KERNEL),
         coarse_flatline_blur_atol=o("coarse_flatline_blur_atol", COARSE_FLATLINE_BLUR_ATOL),
         binary_noise_schedule=o("binary_noise_schedule", BINARY_NOISE_SCHEDULE),
+        binary_length_mode=o(
+            "binary_length_mode",
+            globals().get("BINARY_LENGTH_MODE", "none"),
+        ),
+        binary_length_g=float(
+            o("binary_length_g", globals().get("BINARY_LENGTH_G", 1.0))
+        ),
+        binary_length_scale=float(
+            o("binary_length_scale", globals().get("BINARY_LENGTH_SCALE", 1.0))
+        ),
         prediction_target=o("prediction_target", PREDICTION_TARGET),
         loss_weighting=o("loss_weighting", LOSS_WEIGHTING),
         min_snr_gamma=o("min_snr_gamma", MIN_SNR_GAMMA),
