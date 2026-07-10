@@ -1554,6 +1554,21 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
                     return objective
 
+                def _prune_non_best_trial_ckpts(study, _trial) -> None:
+                    # Keep only the current best trial weight to avoid scratch quota blowups
+                    # across 7 trials × ~400MB each × many concurrent jobs.
+                    try:
+                        best = study.best_trial
+                    except ValueError:
+                        return
+                    keep = os.path.join(trials_dir, f"trial_{best.number}_best.pt")
+                    if not os.path.isfile(keep):
+                        keep = os.path.join(
+                            subset_dir, f"_diff_ft_trial_{best.number}_best.pt",
+                        )
+                    if os.path.isfile(keep):
+                        _cleanup_trial_ckpts(trials_dir, subset_dir, keep=keep)
+
                 logger.info(
                     "  [%s] Optuna study start: n_trials=%d max_epochs=%d patience=%d",
                     self.name, n_trials, max_epochs, patience,
@@ -1571,6 +1586,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         min_resource=1, max_resource=max_epochs, reduction_factor=3,
                     ),
                     sampler_seed=state.seed,
+                    callbacks=[_prune_non_best_trial_ckpts],
                 )
                 try:
                     best_trial = study.best_trial

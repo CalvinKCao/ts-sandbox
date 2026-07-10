@@ -40,6 +40,7 @@ def _run_worker(
     sampler_seed: Optional[int],
     objective_builder: Callable[[int], Callable[[optuna.Trial], float]],
     catch: Sequence[type[BaseException]],
+    callbacks: Optional[List[Callable]] = None,
 ) -> None:
     os.environ[_worker_env_flag] = "1"
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -72,6 +73,7 @@ def _run_worker(
     study.optimize(
         objective,
         n_trials=n_trials,
+        callbacks=callbacks,
         show_progress_bar=False,
         catch=tuple(catch) if catch else (),
     )
@@ -154,6 +156,7 @@ def run_optuna_study(
                 sampler_seed,
                 objective_builder,
                 catch,
+                callbacks,
             ),
         )
         proc.start()

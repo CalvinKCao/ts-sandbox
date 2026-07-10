@@ -1679,7 +1679,36 @@ def save_checkpoint(model, optimizer, epoch, train_loss, val_loss, config, path,
     }
     if extra:
         ckpt.update(extra)
-    torch.save(ckpt, path)
+    # Atomic write so a quota kill mid-save does not leave a corrupt best.pt.
+    tmp_path = f"{path}.tmp"
+    try:
+        torch.save(ckpt, tmp_path)
+        os.replace(tmp_path, path)
+    except OSError as e:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        err = getattr(e, "errno", None)
+        if err in (28, 122) or "quota" in str(e).lower() or "no space" in str(e).lower():
+            raise RuntimeError(
+                f"Disk quota/space exhausted while saving {path}. "
+                "Free scratch (old results/ckpts, wandb, trial_*.pt) then --resume."
+            ) from e
+        raise
+    except RuntimeError as e:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        if "quota" in str(e).lower() or "no space" in str(e).lower():
+            raise RuntimeError(
+                f"Disk quota/space exhausted while saving {path}. "
+                "Free scratch (old results/ckpts, wandb, trial_*.pt) then --resume."
+            ) from e
+        raise
 
 
 # ============================================================================

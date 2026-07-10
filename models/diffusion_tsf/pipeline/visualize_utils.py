@@ -1397,19 +1397,24 @@ def _plot_diffusion_model_space_prediction(
         plot_coarse = coarse_1d[..., k_overlap:]
         plot_combined = combined_1d[..., k_overlap:]
         plot_fine = fine_1d[..., k_overlap:] if fine_1d is not None else None
-        w_plot = plot_coarse.shape[-1]
     else:
         plot_coarse = coarse_1d
         plot_combined = combined_1d
         plot_fine = fine_1d
-        w_plot = w_map
-    t_fut = np.arange(0, w_plot)
-    n_cols = min(variables_to_plot, plot_coarse.shape[0])
-
-    fig, axes = plt.subplots(1, n_cols, figsize=(4.2 * n_cols, 3.2), squeeze=False, constrained_layout=True)
     gt_fut = _future_core_slice(
         future_norm, width=w_map, lookback_overlap=k_overlap,
     )
+    # Overlap / forecast_length mismatches can leave GT at 720 and preds at 728.
+    common = min(gt_fut.shape[-1], plot_coarse.shape[-1], plot_combined.shape[-1])
+    gt_fut = gt_fut[..., -common:]
+    plot_coarse = plot_coarse[..., -common:]
+    plot_combined = plot_combined[..., -common:]
+    if plot_fine is not None:
+        plot_fine = plot_fine[..., -common:]
+    t_fut = np.arange(0, common)
+    n_cols = min(variables_to_plot, plot_coarse.shape[0])
+
+    fig, axes = plt.subplots(1, n_cols, figsize=(4.2 * n_cols, 3.2), squeeze=False, constrained_layout=True)
     for col in range(n_cols):
         ax = axes[0, col]
         ax.plot(t_fut, gt_fut[col].numpy(), color="#2196F3", linewidth=1.4, label="GT fut")
