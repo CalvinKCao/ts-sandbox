@@ -108,6 +108,11 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             logger.warning("  [%s] viz skipped: missing patch guidance ckpt %s", self.name, ft_ckpt)
             return
 
+        import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+
+        # Needed on skip/resume paths where execute() never ran this phase.
+        patch_globals(pipeline_mod, state)
+
         try:
             from models.diffusion_tsf.pipeline.visualize_utils import (
                 run_patch_guidance_finetune_diagnostics,
@@ -129,9 +134,10 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
                 generate_dataset_job,
                 load_dataset,
             )
-            import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+            from models.diffusion_tsf.pipeline.visualize_utils import (
+                run_patch_guidance_finetune_diagnostics,
+            )
 
-            patch_globals(pipeline_mod, state)
             variate_indices = state.variate_indices
             if variate_indices is None:
                 variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
@@ -141,6 +147,9 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             train_ds, _, _, _ = load_dataset(
                 state.dataset,
                 variate_indices,
+                lookback=state.lookback_length,
+                horizon=state.forecast_length,
+                lookback_overlap=state.lookback_overlap,
                 stride=train_stride,
                 test_stride=test_stride,
                 ordinal_tie_atol=float(state.ordinal_tie_atol),

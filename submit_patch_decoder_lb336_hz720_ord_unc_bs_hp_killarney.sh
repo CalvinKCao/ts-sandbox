@@ -14,7 +14,7 @@ cd "$SCRIPT_DIR"
 
 TIER=""
 DATASETS="ETTh1,exchange_rate,traffic"
-WALL_TIME="12:00:00"
+WALL_TIME="1-00:00:00"
 SMOKE=0
 RESUME=0
 

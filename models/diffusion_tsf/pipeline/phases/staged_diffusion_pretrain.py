@@ -271,13 +271,16 @@ def source_run_stage_pretrain_ckpt(
 
 
 def _run_dir_matches_config(name: str, dataset: str, config_suffix: str) -> bool:
-    """Match grid stems like *-{dataset}-{config} or *-{dataset}-{config}_variant."""
+    """Exact stem match: ``*-{dataset}-{config_suffix}`` with nothing after the suffix.
+
+    Do not treat ``{config}_bs_small`` / ``{config}_smoke`` as the same config — that
+    silently reuses the newest sibling HP/smoke run instead of the named donor.
+    """
     token = f"-{dataset}-{config_suffix}"
     idx = name.find(token)
     if idx < 0:
         return False
-    remainder = name[idx + len(token):]
-    return not remainder or remainder.startswith("_")
+    return name[idx + len(token):] == ""
 
 
 def discover_dataset_run_ckpt_dir(

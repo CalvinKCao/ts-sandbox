@@ -754,7 +754,14 @@ def run_itrans_checkpoint_visualizations(
     test_stride = int(subset_meta.get("test_stride", 1))
 
     _, _, test_ds, norm_stats = load_dataset(
-        state.dataset, variate_indices, stride=train_stride, test_stride=test_stride,
+        state.dataset,
+        variate_indices,
+        lookback=state.lookback_length,
+        horizon=state.forecast_length,
+        stride=train_stride,
+        test_stride=test_stride,
+        lookback_overlap=state.lookback_overlap,
+        use_ordinal_window_norm=getattr(state, "use_ordinal_window_norm", None),
     )
     device = state.resolve_device()
     n_iv = len(variate_indices)
@@ -2316,6 +2323,8 @@ def run_patch_guidance_finetune_visualizations(
     _, _, test_ds, _ = load_dataset(
         state.dataset,
         variate_indices,
+        lookback=state.lookback_length,
+        horizon=state.forecast_length,
         stride=train_stride,
         test_stride=test_stride,
         lookback_overlap=state.lookback_overlap,
