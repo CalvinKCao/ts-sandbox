@@ -19,11 +19,11 @@ experiment:
 
 phases:
   - phase: staged_diffusion_pretrain
-    # Train pretrain + patch from scratch (do not reuse sibling _bs_* / smoke dirs).
-    reuse_pretrain_from_config: null
+    # Exact-stem match only (no _bs_* / _smoke siblings).
+    reuse_pretrain_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed
 
   - phase: patch_guidance_finetune_hp
-    reuse_checkpoint_from_config: null
+    reuse_checkpoint_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed
 
   - phase: diffusion_coarse_finetune_hp
     n_trials: 7
