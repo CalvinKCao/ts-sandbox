@@ -718,7 +718,11 @@ class StagedEvalPhase(PipelinePhase):
         with open(os.path.join(nested_dir, "worst_windows.json"), "w") as f:
             json.dump(worst_manifest, f, indent=2)
         with open(os.path.join(partial_dir, f"{state.dataset}_staged_anchor.json"), "w") as f:
-            json.dump(metrics, f, indent=2, sort_keys=True)
+            payload = dict(metrics)
+            payload["seed"] = int(state.seed)
+            payload["binary_length_mode"] = getattr(state, "binary_length_mode", "none")
+            payload["binary_length_g"] = float(getattr(state, "binary_length_g", 1.0))
+            json.dump(payload, f, indent=2, sort_keys=True)
         np.savez_compressed(os.path.join(raw_dir, f"staged_anchor_{state.dataset}.npz"), **pack)
         np.savez_compressed(
             os.path.join(raw_dir, f"staged_anchor_samples_{state.dataset}.npz"),
@@ -735,6 +739,9 @@ class StagedEvalPhase(PipelinePhase):
             json.dump({
                 "dataset": state.dataset,
                 "subset_id": subset_id,
+                "seed": int(state.seed),
+                "binary_length_mode": getattr(state, "binary_length_mode", "none"),
+                "binary_length_g": float(getattr(state, "binary_length_g", 1.0)),
                 "variate_indices": variate_indices,
                 "data_subset": subset_meta,
                 "sampler_tuning": sampler_tuning,

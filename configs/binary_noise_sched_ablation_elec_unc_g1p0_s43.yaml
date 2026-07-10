@@ -1,0 +1,13 @@
+# g=1.0 baseline seed replicate (seed=43) for CRPS noise-floor estimate.
+extends: configs/binary_noise_sched_ablation_elec_unc_g1p0.yaml
+
+wandb:
+  tags: [noise_sched_ablation, uncompressed, g1p0, seed_replicate, s43]
+
+experiment:
+  name: binary-noise-sched-ablation-elec-unc-g1p0-s43
+  experiment_name: binary_noise_sched_ablation_elec_unc_g1p0_s43
+  seed: 43
+  binary_length_mode: none
+  binary_length_g: 1.0
+  binary_length_scale: 1.0

@@ -1181,6 +1181,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         {
                             "stage": self.stage,
                             "trial_label": trial_label,
+                            "dataset": state.dataset,
+                            "seed": int(state.seed),
                             "length_mode": params.get("binary_length_mode", "none"),
                             "length_g": params.get("binary_length_g", 1.0),
                             "length_scale": params.get("binary_length_scale", 1.0),
@@ -1188,6 +1190,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             "best_val": float(best_val),
                             "best_epoch": int(best_epoch),
                             "epochs": epoch_history,
+                            # Val/BCE is not comparable across length_g (different forward process).
+                            "val_loss_note": "not_comparable_across_schedules",
                         },
                         hf,
                         indent=2,
