@@ -803,6 +803,410 @@ def compare_old_new_crossings(
         )
 
 
+
+DEFAULT_G_GRID = (1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0)
+LONG_GEO = "336/720_uncompressed"
+REF_GEO = "96/96"
+
+
+def _curve_mean_abs_gap(a: Sequence[float], b: Sequence[float]) -> float:
+    aa = np.asarray(a, dtype=np.float64)
+    bb = np.asarray(b, dtype=np.float64)
+    return float(np.mean(np.abs(aa - bb)))
+
+
+def _crossing_or_nan(res: Dict[str, Any], metric: str, *, primary_acf_lag: int) -> Optional[float]:
+    fr = res["fractions"]
+    if metric == "trend_r2":
+        thr = _crossing_threshold(res["floors"]["trend_r2_floor"])
+        return _crossing_pct(fr, res["trend_r2"], thr)
+    if metric == "ma_r":
+        thr = _crossing_threshold(res["floors"]["ma_r_floor"], absolute_cap=0.35)
+        return _crossing_pct(fr, res["ma_r"], thr)
+    if metric == "acf":
+        thr = _crossing_threshold(
+            res["floors"][f"acf_lag{primary_acf_lag}_floor"], absolute_cap=0.35
+        )
+        return _crossing_pct(fr, res["acf_corrupted"][str(primary_acf_lag)], thr)
+    raise ValueError(metric)
+
+
+def calibrate_dataset_g(
+    *,
+    dataset: str,
+    n_samples: int,
+    seed: int,
+    stage: str,
+    out_dir: Path,
+    jpeg_dpi: int,
+    acf_lags: Sequence[int],
+    primary_acf_lag: int,
+    length_mode: str,
+    ma_window: str,
+    g_grid: Sequence[float],
+    refine: bool,
+    ma_fail_mult: float,
+    compare_old_dir: Optional[Path],
+) -> Dict[str, Any]:
+    """Grid-search g for LONG_GEO; 96/96 stays on reference schedule.
+
+    Primary objective (logged): |MA-r(t=T) - ma_r_floor|.
+    Because β_end is fixed at 0.5, that endpoint gap is often flat across g
+    (endpoint already ~floor). Selection therefore prefers candidates that
+    also shrink mid-curve MA gap vs the 96/96 reference when endpoint gaps
+    are within 1e-3 of each other.
+    """
+    if length_mode not in {"power", "scale"}:
+        raise ValueError(f"--calibrate-g requires length_mode power|scale, got {length_mode}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[calibrate] {dataset} grid={list(g_grid)} mode={length_mode}", flush=True)
+
+    ref_cache = _prepare_geometry_cache(
+        geometry=REF_GEO,
+        dataset=dataset,
+        n_samples=n_samples,
+        seed=seed,
+        stage=stage,
+        acf_lags=acf_lags,
+        ma_window=ma_window,
+    )
+    long_cache = _prepare_geometry_cache(
+        geometry=LONG_GEO,
+        dataset=dataset,
+        n_samples=n_samples,
+        seed=seed,
+        stage=stage,
+        acf_lags=acf_lags,
+        ma_window=ma_window,
+    )
+    ref_res = _eval_from_cache(
+        ref_cache,
+        fractions=DEFAULT_FRACTIONS,
+        acf_lags=acf_lags,
+        length_mode="none",
+        g_cal=1.0,
+        scale_cal=1.0,
+        g_override=None,
+        scale_override=None,
+    )
+    ref_tr_cross = _crossing_or_nan(ref_res, "trend_r2", primary_acf_lag=primary_acf_lag)
+    ref_ma_cross = _crossing_or_nan(ref_res, "ma_r", primary_acf_lag=primary_acf_lag)
+    ref_ac_cross = _crossing_or_nan(ref_res, "acf", primary_acf_lag=primary_acf_lag)
+
+    grid_rows: List[Dict[str, Any]] = []
+    best = None
+    for g in g_grid:
+        g = float(g)
+        print(f"[calibrate] {dataset} try g={g}", flush=True)
+        if length_mode == "power":
+            long_res = _eval_from_cache(
+                long_cache,
+                fractions=DEFAULT_FRACTIONS,
+                acf_lags=acf_lags,
+                length_mode="power",
+                g_cal=g,
+                scale_cal=1.0,
+                g_override=g,
+                scale_override=None,
+            )
+        else:
+            long_res = _eval_from_cache(
+                long_cache,
+                fractions=DEFAULT_FRACTIONS,
+                acf_lags=acf_lags,
+                length_mode="scale",
+                g_cal=1.0,
+                scale_cal=g,
+                g_override=None,
+                scale_override=g,
+            )
+        ma_end = float(long_res["ma_r"][-1])
+        ma_floor = float(long_res["floors"]["ma_r_floor"])
+        endpoint_gap = abs(ma_end - ma_floor)
+        mid_gap = _curve_mean_abs_gap(long_res["ma_r"], ref_res["ma_r"])
+        tr_cross = _crossing_or_nan(long_res, "trend_r2", primary_acf_lag=primary_acf_lag)
+        ma_cross = _crossing_or_nan(long_res, "ma_r", primary_acf_lag=primary_acf_lag)
+        ac_cross = _crossing_or_nan(long_res, "acf", primary_acf_lag=primary_acf_lag)
+        tr_delta = None
+        if tr_cross is not None and ref_tr_cross is not None:
+            tr_delta = abs(tr_cross - ref_tr_cross)
+        row = {
+            "g": g,
+            "ma_endpoint": ma_end,
+            "ma_r_floor": ma_floor,
+            "endpoint_gap": endpoint_gap,
+            "mid_curve_ma_gap_vs_96": mid_gap,
+            "trend_r2_endpoint": float(long_res["trend_r2"][-1]),
+            "trend_cross_frac_336": tr_cross if tr_cross is not None else "",
+            "trend_cross_frac_96": ref_tr_cross if ref_tr_cross is not None else "",
+            "trend_cross_delta": tr_delta if tr_delta is not None else "",
+            "ma_cross_frac_336": ma_cross if ma_cross is not None else "",
+            "ma_cross_frac_96": ref_ma_cross if ref_ma_cross is not None else "",
+            "acf_cross_frac_336": ac_cross if ac_cross is not None else "",
+            "acf_cross_frac_96": ref_ac_cross if ref_ac_cross is not None else "",
+            "ma_r_curve": [round(x, 4) for x in long_res["ma_r"]],
+            "trend_r2_curve": [round(x, 4) for x in long_res["trend_r2"]],
+        }
+        grid_rows.append(row)
+        print(
+            f"  g={g:.3f} endpoint_gap={endpoint_gap:.4f} mid_ma_gap={mid_gap:.4f} "
+            f"ma_end={ma_end:.3f} floor={ma_floor:.3f} "
+            f"tr_cross_336={tr_cross} tr_cross_96={ref_tr_cross}",
+            flush=True,
+        )
+        # Endpoint gap is usually ~flat (β_end fixed at 0.5). Bin to 0.02 so sampling
+        # noise doesn't dominate; then minimize mid-curve MA gap vs 96/96, with a soft
+        # penalty when trend crossing drifts >0.1 from the reference.
+        ep_bin = round(endpoint_gap, 2)
+        trend_pen = 0.0
+        if tr_delta is not None and tr_delta > 0.1:
+            trend_pen = 0.15 * (tr_delta - 0.1)
+        key = (ep_bin, mid_gap + trend_pen, g)
+        if best is None or key < best["key"]:
+            best = {"key": key, "g": g, "row": row, "long_res": long_res}
+
+    assert best is not None
+    g_star = float(best["g"])
+
+    # Optional refine around grid winner when mid-curve objective is informative.
+    if refine:
+        try:
+            from scipy.optimize import minimize_scalar
+        except ImportError:
+            minimize_scalar = None
+            print("[calibrate] scipy unavailable; skipping refine", flush=True)
+        if minimize_scalar is not None:
+            lo = max(1.0, g_star - 0.35)
+            hi = g_star + 0.75
+
+            def _obj(gv: float) -> float:
+                gv = float(gv)
+                if length_mode == "power":
+                    r = _eval_from_cache(
+                        long_cache,
+                        fractions=DEFAULT_FRACTIONS,
+                        acf_lags=acf_lags,
+                        length_mode="power",
+                        g_cal=gv,
+                        scale_cal=1.0,
+                        g_override=gv,
+                        scale_override=None,
+                    )
+                else:
+                    r = _eval_from_cache(
+                        long_cache,
+                        fractions=DEFAULT_FRACTIONS,
+                        acf_lags=acf_lags,
+                        length_mode="scale",
+                        g_cal=1.0,
+                        scale_cal=gv,
+                        g_override=None,
+                        scale_override=gv,
+                    )
+                eg = abs(float(r["ma_r"][-1]) - float(r["floors"]["ma_r_floor"]))
+                mg = _curve_mean_abs_gap(r["ma_r"], ref_res["ma_r"])
+                return eg + 0.25 * mg
+
+            opt = minimize_scalar(_obj, bounds=(lo, hi), method="bounded", options={"xatol": 0.05})
+            if bool(opt.success):
+                g_ref = float(opt.x)
+                print(f"[calibrate] refine g_star {g_star:.3f} -> {g_ref:.3f} (obj={float(opt.fun):.4f})")
+                g_star = g_ref
+                if length_mode == "power":
+                    best["long_res"] = _eval_from_cache(
+                        long_cache,
+                        fractions=DEFAULT_FRACTIONS,
+                        acf_lags=acf_lags,
+                        length_mode="power",
+                        g_cal=g_star,
+                        scale_cal=1.0,
+                        g_override=g_star,
+                        scale_override=None,
+                    )
+                else:
+                    best["long_res"] = _eval_from_cache(
+                        long_cache,
+                        fractions=DEFAULT_FRACTIONS,
+                        acf_lags=acf_lags,
+                        length_mode="scale",
+                        g_cal=1.0,
+                        scale_cal=g_star,
+                        g_override=None,
+                        scale_override=g_star,
+                    )
+                ma_end = float(best["long_res"]["ma_r"][-1])
+                ma_floor = float(best["long_res"]["floors"]["ma_r_floor"])
+                best["row"] = {
+                    **best["row"],
+                    "g": g_star,
+                    "refined": True,
+                    "ma_endpoint": ma_end,
+                    "ma_r_floor": ma_floor,
+                    "endpoint_gap": abs(ma_end - ma_floor),
+                    "mid_curve_ma_gap_vs_96": _curve_mean_abs_gap(
+                        best["long_res"]["ma_r"], ref_res["ma_r"]
+                    ),
+                    "trend_cross_frac_336": _crossing_or_nan(
+                        best["long_res"], "trend_r2", primary_acf_lag=primary_acf_lag
+                    )
+                    or "",
+                    "acf_cross_frac_336": _crossing_or_nan(
+                        best["long_res"], "acf", primary_acf_lag=primary_acf_lag
+                    )
+                    or "",
+                }
+
+    long_res = best["long_res"]
+    tr_cross = _crossing_or_nan(long_res, "trend_r2", primary_acf_lag=primary_acf_lag)
+    tr_delta = None
+    if tr_cross is not None and ref_tr_cross is not None:
+        tr_delta = abs(tr_cross - ref_tr_cross)
+    trend_tradeoff = bool(tr_delta is not None and tr_delta > 0.1)
+    ma_end = float(long_res["ma_r"][-1])
+    ma_floor = float(long_res["floors"]["ma_r_floor"])
+    fail_param = ma_end > ma_fail_mult * max(ma_floor, 1e-6) and abs(ma_end - ma_floor) > 0.05
+    # Also fail if max-grid still leaves mid-curve gap large AND endpoint cannot move
+    max_g = max(float(x) for x in g_grid)
+    endpoint_gaps = [float(r["endpoint_gap"]) for r in grid_rows]
+    endpoint_flat = max(endpoint_gaps) - min(endpoint_gaps) < 1e-3
+    if endpoint_flat and g_star >= max_g - 1e-9 and float(best["row"]["mid_curve_ma_gap_vs_96"]) > 0.15:
+        fail_param = True
+
+    if trend_tradeoff:
+        print(
+            f"[flag] MA-optimal g={g_star:.3f} moves trend_R² cross by {tr_delta:.3f} "
+            f"(>0.1) vs 96/96 — trade-off, not silent.",
+            flush=True,
+        )
+    if fail_param:
+        print(
+            f"[flag] {dataset}: power/scale g grid may be insufficient — "
+            f"ma_end={ma_end:.3f} floor={ma_floor:.3f} "
+            f"(endpoint_flat={endpoint_flat}). Consider different schedule shape.",
+            flush=True,
+        )
+
+    results = {REF_GEO: ref_res, LONG_GEO: long_res}
+    # Write artifacts via shared path
+    meta = {
+        "length_mode": length_mode,
+        "ma_window": ma_window,
+        "calibration": {
+            "objective": "|MA-r(t=T)-ma_r_floor| then mid-curve MA gap vs 96/96",
+            "g_grid": list(map(float, g_grid)),
+            "g_cal_per_dataset": g_star,
+            "trend_tradeoff": trend_tradeoff,
+            "trend_cross_delta": tr_delta,
+            "parametrization_insufficient": fail_param,
+            "endpoint_gap_flat_across_grid": endpoint_flat,
+            "grid_rows": grid_rows,
+            "selected": best["row"],
+        },
+        "g_cal": g_star,
+        "scale_cal": g_star if length_mode == "scale" else 1.5,
+        "g_override": g_star if length_mode == "power" else None,
+        "scale_override": g_star if length_mode == "scale" else None,
+        "l_ref": L_REF,
+        "l_cal": L_CAL,
+        "per_geometry": {
+            g: {
+                "length_mode": results[g]["length_mode"],
+                "length_g": results[g]["length_g"],
+                "length_scale": results[g]["length_scale"],
+                "ma_width": results[g]["ma_width"],
+                "betas": results[g]["betas"],
+                "floors": results[g]["floors"],
+                "g_cal_per_dataset": g_star if g == LONG_GEO else 1.0,
+            }
+            for g in results
+        },
+    }
+    (out_dir / "schedule_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    grid_csv = out_dir / f"g_calibration_{dataset}.csv"
+    with grid_csv.open("w", encoding="utf-8", newline="") as f:
+        fields = [
+            "g",
+            "endpoint_gap",
+            "mid_curve_ma_gap_vs_96",
+            "ma_endpoint",
+            "ma_r_floor",
+            "trend_r2_endpoint",
+            "trend_cross_frac_336",
+            "trend_cross_frac_96",
+            "trend_cross_delta",
+            "ma_cross_frac_336",
+            "ma_cross_frac_96",
+            "acf_cross_frac_336",
+            "acf_cross_frac_96",
+        ]
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        w.writeheader()
+        for r in grid_rows:
+            w.writerow(r)
+    print(f"[csv] {grid_csv}")
+
+    p1, p_ma, p2 = plot_curves(
+        results, dataset=dataset, out_dir=out_dir, jpeg_dpi=jpeg_dpi, primary_acf_lag=primary_acf_lag
+    )
+    print(f"[plot] {p1}\n[plot] {p_ma}\n[plot] {p2}")
+    cross_rows = print_crossings(results, primary_acf_lag=primary_acf_lag)
+    compare_old_new_crossings(old_root=compare_old_dir, new_rows=cross_rows, dataset=dataset)
+
+    csv_path = out_dir / f"metrics_{dataset}.csv"
+    rows = []
+    for geometry, res in results.items():
+        for i, f in enumerate(res["fractions"]):
+            row = {
+                "dataset": dataset,
+                "geometry": geometry,
+                "subset_id": res["subset_id"],
+                "length_mode": res["length_mode"],
+                "length_g": res["length_g"],
+                "length_scale": res["length_scale"],
+                "g_cal_per_dataset": g_star if geometry == LONG_GEO else 1.0,
+                "ma_window": res["ma_window"],
+                "ma_width": res["ma_width"],
+                "frac": f,
+                "t": res["t_idxs"][i],
+                "beta": res["betas"][i],
+                "trend_r2": res["trend_r2"][i],
+                "trend_r": res["trend_r"][i],
+                "ma_r": res["ma_r"][i],
+            }
+            for lag in acf_lags:
+                row[f"acf_lag{lag}"] = res["acf_corrupted"][str(lag)][i]
+                row[f"acf_lag{lag}_clean"] = res["acf_clean"][str(lag)]
+            row.update({f"floor_{k}": v for k, v in res["floors"].items()})
+            rows.append(row)
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        w.writerows(rows)
+    cross_path = out_dir / f"crossings_{dataset}.csv"
+    with cross_path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(cross_rows[0].keys()))
+        w.writeheader()
+        w.writerows(cross_rows)
+    print(f"[csv] {csv_path}\n[csv] {cross_path}")
+
+    summary = {
+        "dataset": dataset,
+        "calibrated_g": g_star,
+        "ma_endpoint": ma_end,
+        "ma_r_floor": ma_floor,
+        "endpoint_gap": abs(ma_end - ma_floor),
+        "mid_curve_ma_gap_vs_96": float(best["row"]["mid_curve_ma_gap_vs_96"]),
+        "trend_cross_frac_336": tr_cross if tr_cross is not None else "",
+        "trend_cross_frac_96": ref_tr_cross if ref_tr_cross is not None else "",
+        "acf_cross_frac_336": _crossing_or_nan(long_res, "acf", primary_acf_lag=primary_acf_lag)
+        or "",
+        "acf_cross_frac_96": ref_ac_cross if ref_ac_cross is not None else "",
+        "trend_tradeoff": trend_tradeoff,
+        "parametrization_insufficient": fail_param,
+    }
+    return summary
+
+
 def run_dataset(
     *,
     dataset: str,
@@ -982,6 +1386,27 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="",
         help="Comma list of g values to try on 336/720 only (prints schedule β grids; no full eval)",
     )
+    p.add_argument(
+        "--calibrate-g",
+        action="store_true",
+        help="Per-dataset grid search for g on 336/720 (MA-r objective); then write plots/CSV",
+    )
+    p.add_argument(
+        "--g-grid",
+        default="1.0,1.25,1.5,1.75,2.0,2.5,3.0",
+        help="Comma list of g candidates for --calibrate-g",
+    )
+    p.add_argument(
+        "--calibrate-refine",
+        action="store_true",
+        help="After grid, refine g with scipy.optimize.minimize_scalar around the winner",
+    )
+    p.add_argument(
+        "--ma-fail-mult",
+        type=float,
+        default=2.0,
+        help="Flag parametrization-insufficient if ma_end > this * ma_r_floor (and gap>0.05)",
+    )
     return p.parse_args(argv)
 
 
@@ -1021,6 +1446,55 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     out_root = args.output_dir.resolve()
     out_root.mkdir(parents=True, exist_ok=True)
     compare_old = args.compare_old_dir.resolve() if args.compare_old_dir else None
+
+    if args.calibrate_g:
+        if args.length_mode == "none":
+            args.length_mode = "power"
+        g_grid = tuple(float(x) for x in args.g_grid.split(",") if x.strip()) or DEFAULT_G_GRID
+        print(
+            f"[cfg] CALIBRATE length_mode={args.length_mode} g_grid={list(g_grid)} "
+            f"ma_window={args.ma_window} refine={args.calibrate_refine}",
+            flush=True,
+        )
+        summaries = []
+        for dataset in datasets:
+            ds_dir = out_root / dataset
+            print(f"==== calibrate {dataset} -> {ds_dir} ====", flush=True)
+            summaries.append(
+                calibrate_dataset_g(
+                    dataset=dataset,
+                    n_samples=int(args.n_samples),
+                    seed=int(args.seed),
+                    stage=str(args.stage),
+                    out_dir=ds_dir,
+                    jpeg_dpi=int(args.jpeg_dpi),
+                    acf_lags=acf_lags,
+                    primary_acf_lag=int(args.primary_acf_lag),
+                    length_mode=str(args.length_mode),
+                    ma_window=str(args.ma_window),
+                    g_grid=g_grid,
+                    refine=bool(args.calibrate_refine),
+                    ma_fail_mult=float(args.ma_fail_mult),
+                    compare_old_dir=compare_old,
+                )
+            )
+        summary_path = out_root / "calibration_summary.csv"
+        with summary_path.open("w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(summaries[0].keys()))
+            w.writeheader()
+            w.writerows(summaries)
+        print("\n=== calibration summary ===")
+        for s in summaries:
+            print(
+                f"  {s['dataset']:16s} g={float(s['calibrated_g']):.3f}  "
+                f"ma_end={float(s['ma_endpoint']):.3f} floor={float(s['ma_r_floor']):.3f}  "
+                f"tr336={s['trend_cross_frac_336']} tr96={s['trend_cross_frac_96']}  "
+                f"acf336={s['acf_cross_frac_336']} acf96={s['acf_cross_frac_96']}  "
+                f"tradeoff={s['trend_tradeoff']} insufficient={s['parametrization_insufficient']}"
+            )
+        print(f"[csv] {summary_path}")
+        print(f"[done] {out_root}", flush=True)
+        return
 
     print(
         f"[cfg] length_mode={args.length_mode} g_cal={args.g_cal} scale_cal={args.scale_cal} "

@@ -1,17 +1,15 @@
 #!/bin/bash
 # Trend/ACF recoverability under bit-flip noise: 96/96 vs 336/720_uncompressed.
-# Supports length-dependent β remap (--length-mode power|scale) and length-fair MA.
+# Supports length-dependent β remap (--length-mode power|scale), length-fair MA,
+# and per-dataset g calibration (--calibrate-g).
 #
 # USAGE (Killarney login, from $SCRATCH/ts-sandbox):
-#   # baseline (fixed_ref MA, no β remap) — confirms floor fix
-#   ./submit_diagnose_noise_trend_recoverability_killarney.sh --datasets traffic
-#   # length-dependent power schedule on 336/720
-#   ./submit_diagnose_noise_trend_recoverability_killarney.sh --datasets traffic \
-#       --length-mode power --g-cal 1.5 \
-#       --compare-old-dir reports/noise_trend_recoverability_4146642
-#   for ds in ETTh1 weather electricity exchange_rate traffic; do
+#   # per-dataset g search (MA-r objective) then full plots
+#   ./submit_diagnose_noise_trend_recoverability_killarney.sh --datasets electricity \
+#       --calibrate-g --length-mode power --ma-window fixed_ref
+#   for ds in exchange_rate electricity weather ETTh1 traffic; do
 #     ./submit_diagnose_noise_trend_recoverability_killarney.sh --datasets "$ds" \
-#         --length-mode power --g-cal 1.5
+#         --calibrate-g --length-mode power --ma-window fixed_ref --time 1:00:00
 #   done
 #
 set -euo pipefail
@@ -24,6 +22,10 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --time) WALL="$2"; shift 2 ;;
+            --calibrate-g)
+                # grid over ~7 g values needs more wall than a single eval
+                if [[ "$WALL" == "0:20:00" ]]; then WALL="1:00:00"; fi
+                EXTRA+=("$1"); shift ;;
             *) EXTRA+=("$1"); shift ;;
         esac
     done
@@ -32,6 +34,12 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     for ((i = 0; i < ${#EXTRA[@]}; i++)); do
         if [[ "${EXTRA[$i]}" == "--datasets" && $((i + 1)) -lt ${#EXTRA[@]} ]]; then
             JOB_NAME="noise-trend-${EXTRA[$((i + 1))]%%,*}"
+            break
+        fi
+    done
+    for ((i = 0; i < ${#EXTRA[@]}; i++)); do
+        if [[ "${EXTRA[$i]}" == "--calibrate-g" ]]; then
+            JOB_NAME="${JOB_NAME}-calg"
             break
         fi
     done
@@ -80,6 +88,9 @@ G_CAL="1.5"
 SCALE_CAL="1.5"
 MA_WINDOW="fixed_ref"
 COMPARE_OLD=""
+CALIBRATE_G=0
+G_GRID="1.0,1.25,1.5,1.75,2.0,2.5,3.0"
+CALIBRATE_REFINE=0
 EXTRA_PY=()
 
 while [[ $# -gt 0 ]]; do
@@ -93,6 +104,9 @@ while [[ $# -gt 0 ]]; do
         --scale-cal) SCALE_CAL="$2"; shift 2 ;;
         --ma-window) MA_WINDOW="$2"; shift 2 ;;
         --compare-old-dir) COMPARE_OLD="$2"; shift 2 ;;
+        --calibrate-g) CALIBRATE_G=1; shift ;;
+        --g-grid) G_GRID="$2"; shift 2 ;;
+        --calibrate-refine) CALIBRATE_REFINE=1; shift ;;
         *) EXTRA_PY+=("$1"); shift ;;
     esac
 done
@@ -103,6 +117,7 @@ echo "GPU:    $(nvidia-smi -L 2>/dev/null | head -1 || echo unknown)"
 echo "Started: $(date)"
 echo "Repo:   $REPO"
 echo "length_mode=$LENGTH_MODE g_cal=$G_CAL scale_cal=$SCALE_CAL ma_window=$MA_WINDOW"
+echo "calibrate_g=$CALIBRATE_G g_grid=$G_GRID refine=$CALIBRATE_REFINE"
 echo "=========================================="
 
 module purge 2>/dev/null || true
@@ -135,6 +150,10 @@ PY_ARGS=(
     --ma-window "$MA_WINDOW"
     --output-dir "$OUT_DIR"
 )
+if [[ "$CALIBRATE_G" -eq 1 ]]; then
+    PY_ARGS+=(--calibrate-g --g-grid "$G_GRID")
+    [[ "$CALIBRATE_REFINE" -eq 1 ]] && PY_ARGS+=(--calibrate-refine)
+fi
 [[ -n "$COMPARE_OLD" ]] && PY_ARGS+=(--compare-old-dir "$COMPARE_OLD")
 [[ ${#EXTRA_PY[@]} -gt 0 ]] && PY_ARGS+=("${EXTRA_PY[@]}")
 
