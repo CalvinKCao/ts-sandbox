@@ -34,8 +34,9 @@ SUMMARY_JSON="${SCRIPT_DIR}/reports/noise_sched_crps_grid/summary.json"
 
 # Datasets already through CRPS/anchor calibration
 DONE_DS="ETTh1,traffic,exchange_rate,electricity"
-# Repo datasets minus done + dalia. weather had proxy-only diagnosis → treat as untouched.
-REMAINING_DS="ETTh2,ETTm1,ETTm2,illness,weather,PeMS,solar_Alabama"
+# Untouched for this campaign: no other ETT, no illness, no dalia.
+# weather had proxy-only diagnosis → treat as untouched for CRPS/anchor.
+REMAINING_DS="weather,PeMS,solar_Alabama"
 
 G_BASE=(
     configs/binary_noise_sched_ablation_elec_unc_g1p0.yaml
