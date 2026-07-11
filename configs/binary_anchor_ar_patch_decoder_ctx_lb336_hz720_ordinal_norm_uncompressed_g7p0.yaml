@@ -1,0 +1,45 @@
+# Full 336/720_uncompressed train+eval with CRPS-calibrated length shift g=7.0.
+# Optimal for: ETTh1, exchange_rate (from noise_sched_crps_grid).
+extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed.yaml
+
+wandb:
+  tags: [patch_decoder, ordinal_norm, lb336_hz720, uncompressed, crps_g7p0]
+
+experiment:
+  name: binary-anchor-ar-patch-decoder-lb336-hz720-unc-g7p0
+  experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed_g7p0
+  binary_length_mode: power
+  binary_length_g: 7.0
+  binary_length_scale: 1.0
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed
+
+  - phase: patch_guidance_finetune_hp
+    # Patch guidance is schedule-independent; reuse donor if present, else train.
+    reuse_checkpoint_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed
+
+  - phase: diffusion_coarse_finetune_hp
+    fixed_tuned_params:
+      learning_rate: 2.41e-4
+      ema_decay: 0.995
+      prediction_target: x0
+      loss_weighting: min_snr
+      min_snr_gamma: 2.0
+      binary_noise_schedule: linear
+      binary_length_mode: power
+      binary_length_g: 7.0
+      binary_length_scale: 1.0
+
+  - phase: diffusion_fine_finetune_hp
+    fixed_tuned_params:
+      learning_rate: 2.41e-4
+      ema_decay: 0.995
+      prediction_target: x0
+      loss_weighting: min_snr
+      min_snr_gamma: 2.0
+      binary_noise_schedule: linear
+      binary_length_mode: power
+      binary_length_g: 7.0
+      binary_length_scale: 1.0
