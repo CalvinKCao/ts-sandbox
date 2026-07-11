@@ -36,7 +36,7 @@ SUMMARY_JSON="${SCRIPT_DIR}/reports/noise_sched_crps_grid/summary.json"
 DONE_DS="ETTh1,traffic,exchange_rate,electricity"
 # Untouched for this campaign: no other ETT, no illness, no dalia.
 # weather had proxy-only diagnosis → treat as untouched for CRPS/anchor.
-REMAINING_DS="weather,PeMS,solar_Alabama"
+REMAINING_DS="weather,PeMS,solar_Alabama,dynamic"
 
 G_BASE=(
     configs/binary_noise_sched_ablation_elec_unc_g1p0.yaml
