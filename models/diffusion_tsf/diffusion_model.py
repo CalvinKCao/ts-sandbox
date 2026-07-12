@@ -13,7 +13,6 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .config import DiffusionTSFConfig
-from .coarse_flatline_blur import flatline_preserving_blur_torch
 from .preprocessing import TimeSeriesTo2D
 from .diffusion import BinaryDiffusionScheduler
 from .ordinal_window_norm import OrdinalLadder, ordinal_decode, ordinal_encode
@@ -638,12 +637,6 @@ class DiffusionTSF(nn.Module):
         """Encode 1D series to a hard binary CDF image without blur."""
         return self.to_2d(self._subsample_repr_time(x))
 
-    def encode_dual_to_2d_binary(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Encode 1D series to coarse and residual hard binary CDF images."""
-        if self.config.diffusion_stage in {"coarse", "fine", "finer"}:
-            return self._encode_staged_dual_to_2d_binary(x)
-        return self.to_2d.encode_dual(x)
-
     def _staged_image_heights(self) -> Tuple[int, int, int]:
         return (
             int(getattr(self.config, "coarse_image_height", self.config.image_height)),
@@ -667,117 +660,12 @@ class DiffusionTSF(nn.Module):
             raise ValueError("ordinal_ladder is required for global ordinal encoding")
         return ladder.rank_max_per_variate().reshape(-1).to(device=device, dtype=dtype)
 
-    def _uses_haar_frequency_staging(self) -> bool:
-        return getattr(self.config, "staged_representation", "value_precision") == "haar_frequency"
-
-    def _uses_fourier_frequency_staging(self) -> bool:
-        return getattr(self.config, "staged_representation", "value_precision") == "fourier_frequency"
-
-    def _uses_frequency_split_staging(self) -> bool:
-        return self._uses_haar_frequency_staging() or self._uses_fourier_frequency_staging()
-
-    def _haar_high_freq_levels_for_width(self, width: int) -> int:
-        levels = self.to_2d.haar_detail_levels(width)
-        if levels <= 0:
-            return 0
-        configured = int(getattr(self.config, "haar_high_freq_levels", 0) or 0)
-        if configured > 0:
-            return max(1, min(configured, levels))
-        pct = float(getattr(self.config, "haar_high_freq_percent", 0.38))
-        return max(1, min(levels, int(math.ceil(levels * pct))))
-
-    def _haar_fine_value_range(self) -> float:
-        fine_scale = float(getattr(self.config, "haar_fine_max_scale", 0.0) or 0.0)
-        return fine_scale if fine_scale > 0.0 else float(self.config.max_scale)
-
-    def _fourier_cutoff_bins_for_width(self, width: int, n_vars: int) -> List[int]:
-        from models.diffusion_tsf.fourier_frequency import fft_frequency_bins, prior_cutoff_bin
-
-        per_var = getattr(self.config, "fourier_high_freq_cutoff_bins_per_variate", None)
-        n_bins = fft_frequency_bins(width)
-        if n_bins <= 1:
-            return [1] * n_vars
-        if per_var:
-            vals = [int(v) for v in per_var]
-            if len(vals) != n_vars:
-                raise ValueError(f"expected {n_vars} fourier cutoffs, got {len(vals)}")
-            return [max(1, min(v, n_bins - 1)) for v in vals]
-        configured = int(getattr(self.config, "fourier_high_freq_cutoff_bin", 0) or 0)
-        if configured > 0:
-            k = max(1, min(configured, n_bins - 1))
-            return [k] * n_vars
-        pct = float(getattr(self.config, "fourier_high_freq_percent", 0.85))
-        k = prior_cutoff_bin(n_bins, pct)
-        return [k] * n_vars
-
-    def _fourier_split_kwargs(self, x: torch.Tensor) -> Dict[str, Any]:
-        per_var = getattr(self.config, "fourier_high_freq_cutoff_bins_per_variate", None)
-        configured = int(getattr(self.config, "fourier_high_freq_cutoff_bin", 0) or 0)
-        if per_var or configured > 0:
-            n_vars = int(x.shape[1]) if x.dim() >= 2 else 1
-            return {"cutoff_bin": self._fourier_cutoff_bins_for_width(x.shape[-1], n_vars)}
-        return {"high_freq_percent": float(getattr(self.config, "fourier_high_freq_percent", 0.85))}
-
-    def _fourier_coarse_bin_value_range(self) -> float:
-        """Fine residual clip: ±one full coarse bin width."""
-        coarse_h = int(getattr(self.config, "coarse_image_height", self.config.image_height))
-        return 2.0 * float(self.config.max_scale) / float(coarse_h)
-
-    def _fourier_fine_value_ranges(self, n_vars: int) -> List[float]:
-        per_var = getattr(self.config, "fourier_fine_max_scale_per_variate", None)
-        if per_var:
-            vals = [float(v) for v in per_var]
-            if len(vals) != n_vars:
-                raise ValueError(f"expected {n_vars} fourier fine scales, got {len(vals)}")
-            return vals
-        fine_scale = float(getattr(self.config, "fourier_fine_max_scale", 0.0) or 0.0)
-        if fine_scale > 0.0:
-            v = fine_scale
-        else:
-            v = self._fourier_coarse_bin_value_range()
-        return [v] * n_vars
-
-    def _fourier_fine_value_range(self) -> float:
-        per_var = getattr(self.config, "fourier_fine_max_scale_per_variate", None)
-        if per_var:
-            return float(max(per_var))
-        fine_scale = float(getattr(self.config, "fourier_fine_max_scale", 0.0) or 0.0)
-        if fine_scale > 0.0:
-            return fine_scale
-        return self._fourier_coarse_bin_value_range()
-
-    def _fourier_flatline_atol(self) -> float:
-        return float(getattr(self.config, "fourier_flatline_atol", 1e-8))
-
-    def _fourier_fft_edge_mode(self) -> str:
-        return str(getattr(self.config, "fourier_fft_edge_mode", "mirror_pad"))
-
-    def _fourier_mirror_pad_frac(self) -> float:
-        return float(getattr(self.config, "fourier_mirror_pad_frac", 0.25))
-
-    def _uses_flatline_blur_fine_target(self) -> bool:
-        return bool(getattr(self.config, "coarse_flatline_blur_fine_target", False))
-
-    def _coarse_flatline_blur_radius(self) -> int:
-        return int(getattr(self.config, "coarse_flatline_blur_radius", 4))
-
-    def _coarse_flatline_blur_atol(self) -> float:
-        blur_atol = getattr(self.config, "coarse_flatline_blur_atol", None)
-        if blur_atol is not None:
-            return float(blur_atol)
-        return self._fourier_flatline_atol()
-
-    def _coarse_flatline_blur_kernel(self) -> str:
-        return str(getattr(self.config, "coarse_flatline_blur_kernel", "gaussian"))
-
     def _staged_fine_residual_value_range(self) -> float:
         if self._uses_global_ordinal_encoding():
             coarse_h = int(getattr(self.config, "coarse_image_height", self.config.image_height))
             vmax = float(self._ordinal_rank_max_tensor(self.to_2d.bin_centers.device).max().item())
             span = max(vmax, 0.0)
             return span / float(coarse_h) * 0.5 if span > 0.0 else 0.0
-        if self._uses_fourier_frequency_staging():
-            return self._fourier_fine_value_range()
         coarse_h = int(getattr(self.config, "coarse_image_height", self.config.image_height))
         return float(self.config.max_scale) / float(coarse_h)
 
@@ -796,15 +684,6 @@ class DiffusionTSF(nn.Module):
                 fine_map,
                 value_min=0.0,
                 value_max_per_variate=vmax,
-                cdf_decoder=cdf_decoder,
-                expectation_sharpen_temp=expectation_sharpen_temp,
-                squeeze_univariate=False,
-            )
-        if self._uses_fourier_frequency_staging():
-            return self.to_2d.decode_fourier_frequency_dual(
-                coarse_map,
-                fine_map,
-                fine_value_range=self._fourier_fine_value_range(),
                 cdf_decoder=cdf_decoder,
                 expectation_sharpen_temp=expectation_sharpen_temp,
                 squeeze_univariate=False,
@@ -881,116 +760,6 @@ class DiffusionTSF(nn.Module):
             expectation_sharpen_temp=expectation_sharpen_temp,
         )
 
-    def _blur_coarse_1d(
-        self,
-        coarse_1d: torch.Tensor,
-        *,
-        flatline_source: torch.Tensor,
-        past_seed: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        return flatline_preserving_blur_torch(
-            coarse_1d,
-            flatline_source=flatline_source,
-            past_seed=past_seed,
-            blur_radius=self._coarse_flatline_blur_radius(),
-            atol=self._coarse_flatline_blur_atol(),
-            kernel=self._coarse_flatline_blur_kernel(),  # type: ignore[arg-type]
-        )
-
-    def _encode_fine_target_flatline_blur(
-        self,
-        future_norm: torch.Tensor,
-        future_maps: Dict[str, torch.Tensor],
-        *,
-        past_seed: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        coarse_map = future_maps["coarse"]
-        fine_high_map = future_maps["fine"]
-        _, fine_h, _ = self._staged_image_heights()
-        fine_range = self._staged_fine_residual_value_range()
-
-        gt_combined = self._decode_staged_combined_1d(coarse_map, fine_high_map)
-        coarse_1d = self._decode_coarse_1d_from_map(coarse_map)
-        blurred_coarse = self._blur_coarse_1d(
-            coarse_1d,
-            flatline_source=gt_combined,
-            past_seed=past_seed,
-        )
-        residual = torch.clamp(future_norm - blurred_coarse, -fine_range, fine_range)
-        return self.to_2d._encode_values_in_range(
-            residual,
-            value_range=fine_range,
-            height=fine_h,
-        )
-
-    def _decode_blurred_coarse_plus_fine(
-        self,
-        coarse_map: torch.Tensor,
-        fine_map: torch.Tensor,
-        *,
-        past_seed: Optional[torch.Tensor] = None,
-        cdf_decoder: str = "mean",
-        expectation_sharpen_temp: Optional[float] = None,
-    ) -> torch.Tensor:
-        coarse_1d = self._decode_coarse_1d_from_map(
-            coarse_map,
-            cdf_decoder=cdf_decoder,
-            expectation_sharpen_temp=expectation_sharpen_temp,
-        )
-        fine_1d = self._decode_fine_1d_from_map(
-            fine_map,
-            coarse_height=coarse_map.shape[2],
-            cdf_decoder=cdf_decoder,
-            expectation_sharpen_temp=expectation_sharpen_temp,
-        )
-        combined = coarse_1d + fine_1d
-        blurred_coarse = self._blur_coarse_1d(
-            coarse_1d,
-            flatline_source=combined,
-            past_seed=past_seed,
-        )
-        out = blurred_coarse + fine_1d
-        if coarse_map.shape[1] == 1:
-            return out.squeeze(1)
-        return out
-
-    def _encode_staged_dual_to_2d_binary(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        coarse_h, fine_h, _finer_h = self._staged_image_heights()
-        if self._uses_global_ordinal_encoding():
-            vmax = self._ordinal_rank_max_tensor(x.device, dtype=x.dtype)
-            return self.to_2d.encode_dual_heights_bounded(
-                x,
-                coarse_height=coarse_h,
-                fine_height=fine_h,
-                value_min=0.0,
-                value_max_per_variate=vmax,
-            )
-        if self._uses_haar_frequency_staging():
-            return self.to_2d.encode_haar_frequency_heights(
-                x,
-                coarse_height=coarse_h,
-                fine_height=fine_h,
-                high_freq_levels=self._haar_high_freq_levels_for_width(x.shape[-1]),
-                fine_value_range=self._haar_fine_value_range(),
-            )
-        if self._uses_fourier_frequency_staging():
-            n_vars = int(x.shape[1]) if x.dim() >= 2 else 1
-            return self.to_2d.encode_fourier_frequency_heights(
-                x,
-                coarse_height=coarse_h,
-                fine_height=fine_h,
-                fine_value_range=self._fourier_fine_value_ranges(n_vars),
-                flatline_atol=self._fourier_flatline_atol(),
-                edge_mode=self._fourier_fft_edge_mode(),
-                mirror_pad_frac=self._fourier_mirror_pad_frac(),
-                **self._fourier_split_kwargs(x),
-            )
-        return self.to_2d.encode_dual_heights(
-            x,
-            coarse_height=coarse_h,
-            fine_height=fine_h,
-        )
-
     def _encode_staged_maps(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         x = self._subsample_repr_time(x)
         coarse_h, fine_h, finer_h = self._staged_image_heights()
@@ -1002,32 +771,6 @@ class DiffusionTSF(nn.Module):
                 fine_height=fine_h,
                 value_min=0.0,
                 value_max_per_variate=vmax,
-            )
-            return {"coarse": coarse, "fine": fine}
-        if self._uses_haar_frequency_staging():
-            if getattr(self.config, "use_triple_scale", False):
-                raise ValueError("haar_frequency staging supports only coarse/fine stages")
-            coarse, fine = self.to_2d.encode_haar_frequency_heights(
-                x,
-                coarse_height=coarse_h,
-                fine_height=fine_h,
-                high_freq_levels=self._haar_high_freq_levels_for_width(x.shape[-1]),
-                fine_value_range=self._haar_fine_value_range(),
-            )
-            return {"coarse": coarse, "fine": fine}
-        if self._uses_fourier_frequency_staging():
-            if getattr(self.config, "use_triple_scale", False):
-                raise ValueError("fourier_frequency staging supports only coarse/fine stages")
-            n_vars = int(x.shape[1]) if x.dim() >= 2 else 1
-            coarse, fine = self.to_2d.encode_fourier_frequency_heights(
-                x,
-                coarse_height=coarse_h,
-                fine_height=fine_h,
-                fine_value_range=self._fourier_fine_value_ranges(n_vars),
-                flatline_atol=self._fourier_flatline_atol(),
-                edge_mode=self._fourier_fft_edge_mode(),
-                mirror_pad_frac=self._fourier_mirror_pad_frac(),
-                **self._fourier_split_kwargs(x),
             )
             return {"coarse": coarse, "fine": fine}
         if getattr(self.config, "use_triple_scale", False):
@@ -1107,32 +850,6 @@ class DiffusionTSF(nn.Module):
             fine_map = (fine_map + 1.0) / 2.0
         cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
         temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
-        if self._uses_flatline_blur_fine_target():
-            return self._decode_blurred_coarse_plus_fine(
-                coarse_map,
-                fine_map,
-                past_seed=past_seed,
-                cdf_decoder=cdf_decoder,
-                expectation_sharpen_temp=temperature,
-            )
-        if self._uses_haar_frequency_staging():
-            return self.to_2d.decode_haar_frequency_dual(
-                coarse_map,
-                fine_map,
-                fine_value_range=self._haar_fine_value_range(),
-                cdf_decoder=cdf_decoder,
-                expectation_sharpen_temp=temperature,
-                squeeze_univariate=(coarse_map.shape[1] == 1),
-            )
-        if self._uses_fourier_frequency_staging():
-            return self.to_2d.decode_fourier_frequency_dual(
-                coarse_map,
-                fine_map,
-                fine_value_range=self._fourier_fine_value_range(),
-                cdf_decoder=cdf_decoder,
-                expectation_sharpen_temp=temperature,
-                squeeze_univariate=(coarse_map.shape[1] == 1),
-            )
         if self._uses_global_ordinal_encoding():
             return self._decode_staged_combined_1d(
                 coarse_map,
@@ -1549,19 +1266,7 @@ class DiffusionTSF(nn.Module):
 
         past_norm, future_norm, _stats = self._normalize_sequence(past, future)
         future_maps = self._encode_staged_maps(future_norm)
-        if stage == "fine" and self._uses_flatline_blur_fine_target():
-            k = int(self.config.lookback_overlap)
-            if k > 0:
-                past_seed = past_norm[..., k - 1]
-            else:
-                past_seed = past_norm[..., -1]
-            target_2d = self._encode_fine_target_flatline_blur(
-                future_norm,
-                future_maps,
-                past_seed=past_seed,
-            )
-        else:
-            target_2d = future_maps[stage]
+        target_2d = future_maps[stage]
         W_fut = target_2d.shape[3]
         H = target_2d.shape[2]
 

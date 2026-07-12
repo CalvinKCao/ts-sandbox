@@ -248,18 +248,13 @@ def _future_core_slice(
 
 def _staged_fine_value_range(diff_model) -> float:
     cfg = getattr(diff_model, "config", None)
-    if getattr(cfg, "staged_representation", "value_precision") == "haar_frequency":
-        return float(getattr(cfg, "haar_fine_max_scale", 0.0) or diff_model.to_2d.max_scale)
-    if getattr(cfg, "staged_representation", "value_precision") == "fourier_frequency":
-        per_var = getattr(cfg, "fourier_fine_max_scale_per_variate", None)
-        if per_var:
-            return float(max(per_var))
-        fine_scale = float(getattr(cfg, "fourier_fine_max_scale", 0.0) or 0.0)
-        if fine_scale > 0.0:
-            return fine_scale
+    if getattr(cfg, "use_ordinal_window_norm", False) and getattr(cfg, "ordinal_ladder", None) is not None:
         coarse_h = int(getattr(cfg, "coarse_image_height", diff_model.to_2d.height))
-        return 2.0 * float(cfg.max_scale) / float(coarse_h)
-    return float(diff_model.to_2d.max_scale) / float(diff_model.to_2d.height)
+        vmax = float(diff_model._ordinal_rank_max_tensor(diff_model.to_2d.bin_centers.device).max().item())
+        span = max(vmax, 0.0)
+        return span / float(coarse_h) * 0.5 if span > 0.0 else 0.0
+    coarse_h = int(getattr(cfg, "coarse_image_height", diff_model.to_2d.height))
+    return float(cfg.max_scale) / float(coarse_h)
 
 
 def _window_stats_for_past(diff_model, past: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1847,11 +1842,6 @@ def decode_staged_anchor_components(
     B, V = coarse_2d.shape[:2]
     coarse_np = coarse_1d.reshape(B, V, -1).detach().cpu().numpy()
     fine_np = fine_1d.reshape(B, V, -1).detach().cpu().numpy()
-    if getattr(fine_model.config, "coarse_flatline_blur_fine_target", False):
-        combined = torch.from_numpy(coarse_np + fine_np).to(device=coarse_1d.device, dtype=coarse_1d.dtype)
-        coarse_t = coarse_1d.reshape(B, V, -1)
-        blurred = fine_model._blur_coarse_1d(coarse_t, flatline_source=combined)
-        coarse_np = blurred.detach().cpu().numpy()
     k = fine_model._overlap_repr_cols()
     if k > 0:
         coarse_np = coarse_np[..., k:]

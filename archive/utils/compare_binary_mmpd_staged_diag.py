@@ -36,13 +36,14 @@ import torch
 import yaml
 from torch.utils.data import DataLoader, Subset
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
+_ARCHIVE_UTILS = Path(__file__).resolve().parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if str(_ARCHIVE_UTILS) not in sys.path:
+    sys.path.insert(0, str(_ARCHIVE_UTILS))
 
 from models.diffusion_tsf.pipeline.config import load_experiment_config
-from models.diffusion_tsf.pipeline.haar_frequency_calibration import ensure_haar_frequency_calibration
-from models.diffusion_tsf.pipeline.fourier_frequency_calibration import ensure_fourier_frequency_calibration
 from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline.phase_diagnostics import select_spaced_top_k
 from models.diffusion_tsf.pipeline.phases.staged_eval import StagedEvalPhase
@@ -70,21 +71,21 @@ from utils.eval_mmpd_gaussian_anchor import (
 )
 from models.diffusion_tsf.ordinal_window_norm import ordinal_decode
 from models.diffusion_tsf.pipeline.visualize_utils import _dataset_window_z_scores
-from utils.visualize_staged_eval_2d_preds import (
-    _anchor_maps,
-    _build_state,
-    _load_stage_model,
-    _load_staged_bundle,
-    _resolve_guidance_ckpt,
+from staged_eval_ckpt import (
+    anchor_maps as _anchor_maps,
+    build_state as _build_state,
+    load_staged_bundle as _load_staged_bundle,
+    load_stage_model as _load_stage_model,
+    resolve_guidance_ckpt as _resolve_guidance_ckpt,
+    window_lengths as _window_lengths,
 )
-from utils.visualize_staged_forecast import _window_lengths
 
 
 DEFAULT_BINARY_CONFIG = "configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm.yaml"
 DEFAULT_MMPD_CONFIG = "configs/mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm.yaml"
 DEFAULT_MMPD_DIR = "results/datasets/07-08-mmpd-decoder-ordinal-norm-lb336-hz720"
 DEFAULT_BINARY_CKPT_STEM = "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm"
-# Campaign dirs from submit_mmpd_decoder_flat_subsets_paper_lb336_hz720*.sh
+# Campaign dirs from submit_mmpd.sh --mmpd-run-config mmpd_decoder_flat_subsets_paper_lb336_hz720*
 MMPD_SERIES_GLOBS = (
     "*mmpd-decoder-ordinal-norm-lb336-hz720*",
     "*mmpd-decoder-paper-lb336-hz720*",
@@ -348,8 +349,6 @@ def run_binary_staged_eval(
     subset_id = state.subset_id or dataset
     state.subset_id = subset_id
 
-    ensure_haar_frequency_calibration(state)
-    ensure_fourier_frequency_calibration(state)
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
     patch_globals(pipeline_mod, state, honor_dataset_windows=True)

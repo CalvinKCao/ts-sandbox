@@ -63,9 +63,7 @@ VAR_MAX_VARIATES = 20
 DFM_MIN_VARIATES = 10
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "binary_anchor_stationary_flat_subsets.yaml"
 
-ALL_DATASETS = [
-    name for name in DATASET_REGISTRY if name != "dalia"
-]
+ALL_DATASETS = list(DATASET_REGISTRY.keys())
 
 UNIVARIATE_METHODS = ("AutoARIMA", "AutoETS", "AutoTheta", "SeasonalNaive", "classical_ensemble")
 MULTIVARIATE_METHODS = ("VAR", "VECM", "DFM")
@@ -440,7 +438,7 @@ def log_method_to_wandb(
     group = _leaderboard_group(dataset, config_stem, job_id=job_id)
     phase_slug = method.replace("_", "-")
     run_name = make_phase_run_name(group, phase_slug)
-    tags = [dataset, "eval", "classical-baseline", config_stem]
+    tags = [dataset, "classical-baseline", config_stem]
     wandb_config = {
         **config,
         "config_nickname": CLASSICAL_BASELINES_NICKNAME,
@@ -535,7 +533,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.methods = "SeasonalNaive,VAR"
 
     datasets = [d.strip() for d in args.datasets.split(",") if d.strip()]
-    unknown = [d for d in datasets if d not in DATASET_REGISTRY or d == "dalia"]
+    unknown = [d for d in datasets if d not in DATASET_REGISTRY]
     if unknown:
         raise SystemExit(f"Unknown or excluded datasets: {unknown}")
 

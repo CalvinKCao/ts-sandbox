@@ -119,7 +119,7 @@ def main() -> None:
             name=name,
             group=group,
             job_type=JOB_TYPE,
-            tags=[dataset, "eval", "curated-relog", "binary"],
+            tags=[dataset, "curated-relog", "binary"],
             notes=(
                 f"manual eval relog from {log_path}; "
                 "original wandb project ts-sandbox-binary-anchor-92d3"

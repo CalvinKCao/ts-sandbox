@@ -19,8 +19,6 @@ from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.config import training_value
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
-from models.diffusion_tsf.pipeline.haar_frequency_calibration import ensure_haar_frequency_calibration
-from models.diffusion_tsf.pipeline.fourier_frequency_calibration import ensure_fourier_frequency_calibration
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     _stage_pretrain_ckpt,
     discover_dataset_run_ckpt_dir,
@@ -476,6 +474,25 @@ def _load_reused_stage_params(
     subset_id: str,
     source_config: str,
 ) -> Tuple[Dict[str, Any], str, Dict[str, Any]]:
+    from models.diffusion_tsf.pipeline.reused_paths import (
+        find_reused_tuned_params_meta,
+        reused_root,
+        reused_stage_best_ckpt,
+    )
+
+    reused_meta = find_reused_tuned_params_meta(source_config, subset_id, stage)
+    if reused_meta:
+        with open(reused_meta, encoding="utf-8") as f:
+            source_meta = json.load(f)
+        params = dict(source_meta.get("tuned_params") or {})
+        if not params:
+            raise ValueError(f"No tuned_params in {reused_meta}")
+        policy_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
+        old_ms = params.get("max_scale")
+        params["max_scale"] = policy_ms
+        params.setdefault("min_snr_gamma", 5.0)
+        return params, reused_root(), {**source_meta, "reused_max_scale_previous": old_ms}
+
     source_dir = discover_dataset_run_ckpt_dir(state, source_config)
     meta_path = os.path.join(source_dir, subset_id, stage, "metadata.json")
     if not os.path.exists(meta_path):
@@ -921,13 +938,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         val_ds,
         params: Dict[str, Any],
         pretrained_path: str,
-        itrans_checkpoint: str,
+        guidance_checkpoint: str,
         device: torch.device,
         variate_indices,
         ckpt_path: Optional[str],
         max_epochs: int,
         patience: int,
         trial=None,
+        guidance=None,
+        pretrained_state_dict: Optional[Dict[str, Any]] = None,
     ) -> Tuple[float, int]:
         from models.diffusion_tsf.train_multivariate_pipeline import (
             EarlyStopping,
@@ -966,14 +985,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         _log_gpu_mem(f"{self.stage}/{trial_label}/start")
 
         ds_lb, ds_hz = dataset_window_lengths(state.dataset)
-        guidance = load_wrapped_guidance(
-            itrans_checkpoint,
-            n_iv,
-            device,
-            guidance_type=state.guidance_type,
-            dataset_lookback=ds_lb,
-            dataset_horizon=ds_hz,
-        )
+        if guidance is None:
+            guidance = load_wrapped_guidance(
+                guidance_checkpoint,
+                n_iv,
+                device,
+                guidance_type=state.guidance_type,
+                dataset_lookback=ds_lb,
+                dataset_horizon=ds_hz,
+            )
         model = self._build_model(
             state=state,
             n_iv=n_iv,
@@ -982,8 +1002,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             params=params,
         )
         try:
-            ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
-            load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
+            if pretrained_state_dict is None:
+                ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
+                pretrained_state_dict = ckpt["model_state_dict"]
+            load_diffusion_state_keep_attached_guidance(model, pretrained_state_dict)
 
             optimizer = torch.optim.AdamW(model.parameters(), lr=float(params["learning_rate"]))
 
@@ -1207,15 +1229,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 torch.cuda.empty_cache()
 
     def execute(self, state: PipelineState) -> PipelineState:
-        ensure_haar_frequency_calibration(state)
-        ensure_fourier_frequency_calibration(state)
         from models.diffusion_tsf.train_multivariate_pipeline import (
-            diffusion_probe_max_candidate,
             dataset_window_lengths,
             generate_dataset_job,
             load_dataset,
             load_wrapped_guidance,
-            select_diffusion_batch_size,
+        )
+        from models.diffusion_tsf.pipeline.train.batch_config import (
+            configured_finetune_micro_batch,
+            configured_max_diffusion_batch,
         )
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
@@ -1306,35 +1328,23 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         except Exception as e:
             logger.warning("[%s] phase-start diagnostics failed: %s", self.name, e, exc_info=True)
 
-        batch_probe_ds = train_ds
         ds_lb, ds_hz = dataset_window_lengths(state.dataset)
-        ft_guidance = load_wrapped_guidance(
-            ft_guidance_ckpt,
-            n_iv,
-            device,
-            guidance_type=state.guidance_type,
-            dataset_lookback=ds_lb,
-            dataset_horizon=ds_hz,
+        micro_ceiling = configured_max_diffusion_batch(state, state.smoke_test)
+        default_micro = configured_finetune_micro_batch(state, state.smoke_test)
+        logger.info(
+            "  [%s] finetune micro-batch default=%d ceiling=%d (YAML; no GPU probe)",
+            self.name,
+            default_micro,
+            micro_ceiling,
         )
-        max_batch = select_diffusion_batch_size(
-            phase_name=f"{self.stage.title()} Diff FT ({subset_id})",
-            dataset=batch_probe_ds,
-            device=device,
-            itrans_guidance=ft_guidance,
-            max_candidate=diffusion_probe_max_candidate(n_iv, state.smoke_test),
-            smoke_test=state.smoke_test,
-        )
-        del ft_guidance
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
         accum_mult = state.extra.get("diffusion_effective_batch_multiplier")
         if accum_mult is not None and float(accum_mult) > 1.0:
-            batch_plan = resolve_diffusion_batch_and_accum(max_batch, accum_mult)
+            batch_plan = resolve_diffusion_batch_and_accum(default_micro, accum_mult)
             logger.info(
-                "  [%s] grad accum: probed_max=%d multiplier=%s -> micro=%d accum=%d effective=%d",
+                "  [%s] grad accum: base_micro=%d multiplier=%s -> micro=%d accum=%d effective=%d",
                 self.name,
-                max_batch,
+                default_micro,
                 accum_mult,
                 batch_plan["batch_size"],
                 batch_plan["gradient_accumulation_steps"],
@@ -1371,8 +1381,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 state, stage=self.stage, subset_id=subset_id, source_config=str(reuse_from),
             )
             search_space = str(reuse_meta.get("search_space") or self.get("search_space") or "lr_only").lower()
-            tuned_bs = int(best_params.get("batch_size", max_batch))
-            best_params["batch_size"] = min(tuned_bs, max_batch)
+            tuned_bs = int(best_params.get("batch_size", default_micro))
+            best_params["batch_size"] = min(tuned_bs, micro_ceiling)
             best_params = _with_state_anchor_params(best_params, state)
             if retrain_reused:
                 final_val, final_epoch = self._train_once(
@@ -1381,7 +1391,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     val_ds=val_ds,
                     params=best_params,
                     pretrained_path=diff_ckpt,
-                    itrans_checkpoint=ft_guidance_ckpt,
+                    guidance_checkpoint=ft_guidance_ckpt,
                     device=device,
                     variate_indices=variate_indices,
                     ckpt_path=final_ckpt,
@@ -1441,7 +1451,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
             if search_space == "fixed":
                 best_params = _build_fixed_hp_params(
-                    state, max_batch, state.smoke_test, self.overrides,
+                    state, default_micro, state.smoke_test, self.overrides,
                 )
                 best_params = _with_state_anchor_params(best_params, state)
                 final_val, final_epoch = self._train_once(
@@ -1450,7 +1460,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     val_ds=val_ds,
                     params=best_params,
                     pretrained_path=diff_ckpt,
-                    itrans_checkpoint=ft_guidance_ckpt,
+                    guidance_checkpoint=ft_guidance_ckpt,
                     device=device,
                     variate_indices=variate_indices,
                     ckpt_path=final_ckpt,
@@ -1475,12 +1485,26 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
                 def objective_builder(_worker_id: int):
                     dev = state.resolve_device()
+                    worker_guidance = load_wrapped_guidance(
+                        ft_guidance_ckpt,
+                        n_iv,
+                        dev,
+                        guidance_type=state.guidance_type,
+                        dataset_lookback=ds_lb,
+                        dataset_horizon=ds_hz,
+                    )
+                    worker_pretrained = torch.load(
+                        diff_ckpt, map_location=dev, weights_only=False,
+                    )["model_state_dict"]
 
                     def objective(trial):
+                        plan_batch = (
+                            default_micro if search_space == "lr_only" else micro_ceiling
+                        )
                         params = _suggest_staged_params(
                             trial,
                             state,
-                            max_batch,
+                            plan_batch,
                             state.smoke_test,
                             search_space=search_space,
                             phase_overrides=phase.overrides,
@@ -1525,13 +1549,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                                 val_ds=val_ds,
                                 params=params,
                                 pretrained_path=diff_ckpt,
-                                itrans_checkpoint=ft_guidance_ckpt,
+                                guidance_checkpoint=ft_guidance_ckpt,
                                 device=dev,
                                 variate_indices=variate_indices,
                                 ckpt_path=trial_ckpt,
                                 max_epochs=max_epochs,
                                 patience=patience,
                                 trial=trial,
+                                guidance=worker_guidance,
+                                pretrained_state_dict=worker_pretrained,
                             )
                         except torch.cuda.OutOfMemoryError:
                             logger.warning(
@@ -1643,17 +1669,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "best_epoch": int(final_epoch),
             "diffusion_stage": self.stage,
             "staged_representation": state.staged_representation,
-            "haar_high_freq_levels": int(state.haar_high_freq_levels),
-            "haar_high_freq_percent": float(state.haar_high_freq_percent),
-            "haar_fine_max_scale": float(state.haar_fine_max_scale),
-            "haar_fine_scale_quantile": float(state.haar_fine_scale_quantile),
-            "fourier_high_freq_cutoff_bin": int(state.fourier_high_freq_cutoff_bin),
-            "fourier_high_freq_percent": float(state.fourier_high_freq_percent),
-            "fourier_fine_max_scale": float(state.fourier_fine_max_scale),
-            "fourier_flatline_atol": float(state.fourier_flatline_atol),
-            "coarse_flatline_blur_fine_target": bool(state.coarse_flatline_blur_fine_target),
-            "coarse_flatline_blur_radius": int(state.coarse_flatline_blur_radius),
-            "coarse_flatline_blur_kernel": str(state.coarse_flatline_blur_kernel),
             "search_space": search_space,
             "max_epochs": max_epochs,
             "patience": patience,

@@ -1,13 +1,10 @@
 #!/bin/bash
-# Binary vs MMPD staged diag — per-window eval + top-gap plots (lb336/hz720 ordinal).
+# Binary vs MMPD staged diag — per-window eval + top-gap plots (lb336/hz96 paper subset).
 #
 # USAGE (Killarney login node, from $SCRATCH/ts-sandbox):
 #   ./submit_binary_mmpd_staged_diag_killarney.sh --smoke-test
-#   ./submit_binary_mmpd_staged_diag_killarney.sh   # default: 1/8 test windows
+#   ./submit_binary_mmpd_staged_diag_killarney.sh
 #   ./submit_binary_mmpd_staged_diag_killarney.sh --datasets ETTh1 --test-fraction 1.0
-#   for ds in ETTh1 weather electricity exchange_rate traffic; do
-#     ./submit_binary_mmpd_staged_diag_killarney.sh --datasets "$ds"
-#   done
 #
 set -euo pipefail
 
@@ -70,11 +67,13 @@ STORE="${RESULTS_ROOT:-$SCRATCH/ts-sandbox/results}"
 [[ -f "$REQ" ]] || { echo "ERROR: missing $REQ — run ./setup/killarney_freeze_requirements.sh" >&2; exit 1; }
 [[ -n "${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR unset" >&2; exit 1; }
 
-MMPD_DIR="results/datasets/07-08-mmpd-decoder-ordinal-norm-lb336-hz720"
-BINARY_CONFIG="configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm.yaml"
-MMPD_CONFIG="configs/mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm.yaml"
-DATASETS="ETTh1,weather,electricity,exchange_rate,traffic"
-OUTPUT_DIR="reports/binary_vs_mmpd_ordinal_lb336_hz720"
+MMPD_DIR="results/datasets"
+BINARY_CONFIG="configs/archive/binary_anchor_ar_lb336_hz96_grad_accum_150.yaml"
+MMPD_CONFIG="configs/mmpd_decoder_flat_subsets_paper_lb336_hz96.yaml"
+MMPD_CONFIG_SUFFIX="mmpd_decoder_flat_subsets_paper_lb336_hz96"
+BINARY_CKPT_STEM="binary_anchor_ar_lb336_hz96_grad_accum_150"
+DATASETS="ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,electricity,traffic,PeMS,solar_Alabama,dynamic"
+OUTPUT_DIR="reports/binary_vs_mmpd_lb336_hz96"
 FORCE_EVAL=0
 SMOKE=0
 EXTRA_PY=()
@@ -85,6 +84,8 @@ while [[ $# -gt 0 ]]; do
         --mmpd-dir) MMPD_DIR="$2"; shift 2 ;;
         --binary-config) BINARY_CONFIG="$2"; shift 2 ;;
         --mmpd-config) MMPD_CONFIG="$2"; shift 2 ;;
+        --mmpd-config-suffix) MMPD_CONFIG_SUFFIX="$2"; shift 2 ;;
+        --binary-ckpt-stem) BINARY_CKPT_STEM="$2"; shift 2 ;;
         --datasets) DATASETS="$2"; shift 2 ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --force-eval) FORCE_EVAL=1; shift ;;
@@ -118,14 +119,15 @@ export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 cd "$REPO"
 
 MMPD_ABS="$REPO/$MMPD_DIR"
-[[ -d "$MMPD_ABS" ]] || { echo "ERROR: mmpd dir missing: $MMPD_ABS" >&2; exit 1; }
 [[ -d "$REPO/temp/MMPD" ]] || { echo "ERROR: MMPD repo missing at $REPO/temp/MMPD" >&2; exit 1; }
 
 PY_ARGS=(
     utils/compare_binary_mmpd_staged_diag.py
     --mmpd-dir "$MMPD_ABS"
-    --binary-config "$BINARY_CONFIG"
     --mmpd-config "$MMPD_CONFIG"
+    --mmpd-config-suffix "$MMPD_CONFIG_SUFFIX"
+    --binary-config "$BINARY_CONFIG"
+    --binary-ckpt-stem "$BINARY_CKPT_STEM"
     --binary-ckpt-base "$STORE/ckpts"
     --datasets "$DATASETS"
     --output-dir "$REPO/$OUTPUT_DIR"

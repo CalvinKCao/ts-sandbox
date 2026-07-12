@@ -46,24 +46,6 @@ class PipelineState:
     max_scale: float = 3.5
     max_scale_by_dataset: Dict[str, float] = field(default_factory=dict)
     staged_representation: str = "value_precision"
-    haar_high_freq_percent: float = 0.38
-    haar_high_freq_levels: int = 0
-    haar_fine_max_scale: float = 0.0
-    haar_cutoff_heuristic: str = "auto"
-    haar_fine_scale_quantile: float = 0.95
-    haar_variance_cv_threshold: float = 1.0
-    haar_variance_log_spread_threshold: float = 2.0
-    fourier_high_freq_percent: float = 0.85
-    fourier_high_freq_cutoff_bin: int = 0
-    fourier_fine_max_scale: float = 0.0
-    fourier_fine_scale_quantile: float = 0.95
-    fourier_flatline_atol: float = 1e-8
-    fourier_high_freq_cutoff_bins_per_variate: Optional[List[int]] = None
-    fourier_fine_max_scale_per_variate: Optional[List[float]] = None
-    coarse_flatline_blur_fine_target: bool = False
-    coarse_flatline_blur_radius: int = 4
-    coarse_flatline_blur_kernel: str = "gaussian"
-    coarse_flatline_blur_atol: Optional[float] = None
     dit_patch_size: Tuple[int, int] = (8, 8)
     dit_embed_dim: int = 384
     dit_depth: int = 8
@@ -73,7 +55,7 @@ class PipelineState:
     use_triple_scale: bool = False
     diffusion_stage: str = "joint"
     use_guidance_channel: bool = True
-    guidance_type: str = "itransformer"
+    guidance_type: str = "patch_decoder"
     mmpd_patch_size: int = 12
     cfg_dropout: float = 0.1
     deterministic_anchor_loss: bool = False
@@ -247,33 +229,6 @@ class PipelineState:
                 init_kwargs[key] = float(init_kwargs[key])
         if "max_scale" in init_kwargs:
             init_kwargs["max_scale"] = float(init_kwargs["max_scale"])
-        for key in (
-            "haar_high_freq_percent",
-            "haar_fine_max_scale",
-            "haar_fine_scale_quantile",
-            "haar_variance_cv_threshold",
-            "haar_variance_log_spread_threshold",
-        ):
-            if key in init_kwargs:
-                init_kwargs[key] = float(init_kwargs[key])
-        if "haar_high_freq_levels" in init_kwargs:
-            init_kwargs["haar_high_freq_levels"] = int(init_kwargs["haar_high_freq_levels"])
-        for key in (
-            "fourier_high_freq_percent",
-            "fourier_fine_max_scale",
-            "fourier_fine_scale_quantile",
-            "fourier_flatline_atol",
-        ):
-            if key in init_kwargs:
-                init_kwargs[key] = float(init_kwargs[key])
-        if "fourier_high_freq_cutoff_bin" in init_kwargs:
-            init_kwargs["fourier_high_freq_cutoff_bin"] = int(init_kwargs["fourier_high_freq_cutoff_bin"])
-        if "coarse_flatline_blur_radius" in init_kwargs:
-            init_kwargs["coarse_flatline_blur_radius"] = int(init_kwargs["coarse_flatline_blur_radius"])
-        if "coarse_flatline_blur_fine_target" in init_kwargs:
-            init_kwargs["coarse_flatline_blur_fine_target"] = bool(init_kwargs["coarse_flatline_blur_fine_target"])
-        if "coarse_flatline_blur_atol" in init_kwargs and init_kwargs["coarse_flatline_blur_atol"] is not None:
-            init_kwargs["coarse_flatline_blur_atol"] = float(init_kwargs["coarse_flatline_blur_atol"])
         if "max_scale_by_dataset" in init_kwargs:
             init_kwargs["max_scale_by_dataset"] = {
                 str(k): float(v) for k, v in init_kwargs["max_scale_by_dataset"].items()

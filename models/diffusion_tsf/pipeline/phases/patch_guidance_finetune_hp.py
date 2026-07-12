@@ -14,6 +14,7 @@ from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     discover_dataset_run_ckpt_dir,
 )
+from models.diffusion_tsf.pipeline.reused_paths import find_reused_guidance_ckpt
 from models.diffusion_tsf.pipeline import wandb_utils
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,14 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
         reuse_from = self.get("reuse_checkpoint_from_config")
         if not reuse_from:
             return False
+
+        reused = find_reused_guidance_ckpt(str(reuse_from), subset_id)
+        if reused and self._patch_guidance_ckpt_usable(state, reused):
+            os.makedirs(os.path.dirname(ft_ckpt), exist_ok=True)
+            shutil.copy2(reused, ft_ckpt)
+            state.patch_guidance_finetune_ckpt = ft_ckpt
+            logger.info("  [%s] reused finetuned patch guidance from %s", self.name, reused)
+            return True
 
         ckpt_name = f"{subset_id}_patch_guidance.pt"
         try:

@@ -8,8 +8,7 @@ wandb:
 
 training:
   diffusion_effective_batch_multiplier: 1.0
-  diffusion_probe_target_effective_batch: 8192
-  diffusion_probe_max_batch_cap: 2048
+  finetune_max_micro_batch: 2048
   finetune_hp_lr_min: 5.0e-5
   finetune_hp_lr_max: 1.5e-3
 

@@ -15,15 +15,13 @@
 #   traffic       → .../07-08-4122621-.../traffic_4v_s1_patch_guidance.pt
 #
 # Submit:
-#   ./test_submit.sh --configs configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32.yaml \
-#     --datasets ETTh1,weather,electricity,exchange_rate,traffic --gpu l40s --time 10:00:00 \
-#     --wandb-project ts-sandbox-leaderboard
+#   ./submit_binary.sh --configs binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32 \
+#     --datasets ETTh1,weather,electricity,exchange_rate,traffic --time 10:00:00
 #
 # Resume after quota crash (prefer the _resume overlay; see that file):
-#   ./test_submit.sh --resume \
-#     --configs configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32_resume.yaml \
-#     --datasets ETTh1,weather,exchange_rate --gpu l40s --time 6:00:00 \
-#     --wandb-project ts-sandbox-leaderboard
+#   ./submit_binary.sh --resume \
+#     --configs binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32_resume \
+#     --datasets ETTh1,weather,exchange_rate --time 6:00:00
 
 extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm.yaml
 

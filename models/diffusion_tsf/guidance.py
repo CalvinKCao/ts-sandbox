@@ -8,7 +8,6 @@ the diffusion model and cross-variate context tokens for DiT.
 import torch
 import torch.nn as nn
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Callable, Optional, Protocol, runtime_checkable
 from abc import ABC, abstractmethod
 
@@ -246,12 +245,6 @@ class iTransformerGuidance(BaseGuidance):
             return self._autoregressive_rollout(
                 past_norm, forecast_length, overlap, _forward_norm_space,
             )
-
-
-@dataclass
-class GuidanceEncoderOutput:
-    tokens: torch.Tensor
-    token_variate_ids: Optional[torch.Tensor] = None
 
 
 class PatchDecoderGuidance(BaseGuidance):

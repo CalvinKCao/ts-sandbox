@@ -47,22 +47,7 @@ class DiffusionTSFConfig:
     finer_image_height: int = 16
     max_scale: float = 3.5
     representation_mode: str = "cdf"  # pdf or cdf
-    staged_representation: str = "value_precision"  # value_precision, haar_frequency, or fourier_frequency
-    haar_high_freq_percent: float = 0.38
-    haar_high_freq_levels: int = 0
-    haar_fine_max_scale: float = 0.0
-    fourier_high_freq_percent: float = 0.85
-    fourier_high_freq_cutoff_bin: int = 0
-    fourier_fine_max_scale: float = 0.0
-    fourier_flatline_atol: float = 1e-8
-    fourier_fft_edge_mode: str = "mirror_pad"
-    fourier_mirror_pad_frac: float = 0.25
-    fourier_high_freq_cutoff_bins_per_variate: Optional[List[int]] = None
-    fourier_fine_max_scale_per_variate: Optional[List[float]] = None
-    coarse_flatline_blur_fine_target: bool = False
-    coarse_flatline_blur_radius: int = 4
-    coarse_flatline_blur_kernel: str = "gaussian"
-    coarse_flatline_blur_atol: Optional[float] = None
+    staged_representation: str = "value_precision"
 
     # unified time axis (L+F vs Future-Only)
     unified_time_axis: bool = False
@@ -188,31 +173,11 @@ class DiffusionTSFConfig:
             )
         if self.diffusion_stage == "finer" and not self.use_triple_scale:
             raise ValueError("diffusion_stage='finer' requires use_triple_scale=True.")
-        if self.staged_representation not in {"value_precision", "haar_frequency", "fourier_frequency"}:
+        if self.staged_representation != "value_precision":
             raise ValueError(
-                "staged_representation must be 'value_precision', 'haar_frequency', or "
-                f"'fourier_frequency', got {self.staged_representation!r}."
+                "staged_representation must be 'value_precision', "
+                f"got {self.staged_representation!r}."
             )
-        if self.staged_representation == "haar_frequency":
-            if self.use_triple_scale:
-                raise ValueError("haar_frequency staged representation supports only coarse/fine stages.")
-            if not 0.0 < float(self.haar_high_freq_percent) <= 1.0:
-                raise ValueError("haar_high_freq_percent must be in (0, 1].")
-            if int(self.haar_high_freq_levels) < 0:
-                raise ValueError("haar_high_freq_levels must be >= 0.")
-            if float(self.haar_fine_max_scale) < 0.0:
-                raise ValueError("haar_fine_max_scale must be >= 0.")
-        if self.staged_representation == "fourier_frequency":
-            if self.use_triple_scale:
-                raise ValueError("fourier_frequency staged representation supports only coarse/fine stages.")
-            if not 0.0 < float(self.fourier_high_freq_percent) <= 1.0:
-                raise ValueError("fourier_high_freq_percent must be in (0, 1].")
-            if int(self.fourier_high_freq_cutoff_bin) < 0:
-                raise ValueError("fourier_high_freq_cutoff_bin must be >= 0.")
-            if float(self.fourier_fine_max_scale) < 0.0:
-                raise ValueError("fourier_fine_max_scale must be >= 0.")
-            if float(self.fourier_flatline_atol) < 0.0:
-                raise ValueError("fourier_flatline_atol must be >= 0.")
         if self.use_triple_scale and self.diffusion_stage == "joint":
             raise ValueError(
                 "use_triple_scale has no joint forward path; use staged coarse/fine/finer."

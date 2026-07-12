@@ -22,10 +22,6 @@ def patch_globals(
     mod.N_VARIATES = state.n_variates
     lookback = state.lookback_length
     forecast = state.forecast_length
-    if honor_dataset_windows and state.dataset == "dalia":
-        from models.diffusion_tsf.train_multivariate_pipeline import dalia_window_lengths
-
-        lookback, forecast = dalia_window_lengths()
     mod.LOOKBACK_LENGTH = lookback
     mod.FORECAST_LENGTH = forecast
     itrans_lb = state.itrans_lookback_length
@@ -54,27 +50,6 @@ def patch_globals(
     mod.FINER_IMAGE_HEIGHT = state.finer_image_height
     mod.MAX_SCALE = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
     mod.STAGED_REPRESENTATION = state.staged_representation
-    mod.HAAR_HIGH_FREQ_PERCENT = float(state.haar_high_freq_percent)
-    mod.HAAR_HIGH_FREQ_LEVELS = int(state.haar_high_freq_levels)
-    mod.HAAR_FINE_MAX_SCALE = float(state.haar_fine_max_scale)
-    mod.FOURIER_HIGH_FREQ_PERCENT = float(state.fourier_high_freq_percent)
-    mod.FOURIER_HIGH_FREQ_CUTOFF_BIN = int(state.fourier_high_freq_cutoff_bin)
-    mod.FOURIER_FINE_MAX_SCALE = float(state.fourier_fine_max_scale)
-    mod.FOURIER_FLATLINE_ATOL = float(state.fourier_flatline_atol)
-    mod.FOURIER_HIGH_FREQ_CUTOFF_BINS_PER_VARIATE = (
-        list(state.fourier_high_freq_cutoff_bins_per_variate)
-        if state.fourier_high_freq_cutoff_bins_per_variate
-        else None
-    )
-    mod.FOURIER_FINE_MAX_SCALE_PER_VARIATE = (
-        list(state.fourier_fine_max_scale_per_variate)
-        if state.fourier_fine_max_scale_per_variate
-        else None
-    )
-    mod.COARSE_FLATLINE_BLUR_FINE_TARGET = bool(state.coarse_flatline_blur_fine_target)
-    mod.COARSE_FLATLINE_BLUR_RADIUS = int(state.coarse_flatline_blur_radius)
-    mod.COARSE_FLATLINE_BLUR_KERNEL = str(state.coarse_flatline_blur_kernel)
-    mod.COARSE_FLATLINE_BLUR_ATOL = state.coarse_flatline_blur_atol
     mod.DIT_PATCH_SIZE = tuple(state.dit_patch_size)
     mod.DIT_EMBED_DIM = state.dit_embed_dim
     mod.DIT_DEPTH = state.dit_depth

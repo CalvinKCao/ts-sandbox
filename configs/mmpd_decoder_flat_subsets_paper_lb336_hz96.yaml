@@ -8,10 +8,11 @@
 # No Optuna; constant LR (no cosine schedule); no EMA.
 #
 # Parallel Slurm sweep (all datasets, Killarney login node):
-#   cd $SCRATCH/ts-sandbox && ./submit_mmpd_decoder_flat_subsets_paper_lb336_hz96.sh
+#   cd $SCRATCH/ts-sandbox && ./submit_mmpd.sh --mmpd-run-config mmpd_decoder_flat_subsets_paper_lb336_hz96 \
+#     --output-dir results/datasets/$(date +%m-%d)-mmpd-decoder-paper-lb336-hz96-subset --mmpd-tune-trials 0
 #
 # Smoke (one dataset):
-#   ./submit_mmpd_decoder_flat_subsets_paper_lb336_hz96.sh --smoke-test --dataset ETTh1
+#   ./submit_mmpd.sh --mmpd-run-config mmpd_decoder_flat_subsets_paper_lb336_hz96 --smoke-test --datasets ETTh1
 #
 # Direct (no Slurm):
 #   source .venv/bin/activate
@@ -42,7 +43,6 @@ mmpd:
     - traffic
     - PeMS
     - solar_Alabama
-    - dalia
     - dynamic
   patch_size_default: 12
   patch_size_wide: 24
@@ -62,3 +62,4 @@ mmpd:
   lradj: fixed
   tune_trials: 0
   leaderboard: true
+  leaderboard_nickname: "MMPD Subset Recent"

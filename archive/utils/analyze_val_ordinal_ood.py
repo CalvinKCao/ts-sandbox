@@ -25,9 +25,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
+_ARCHIVE_UTILS = Path(__file__).resolve().parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
+if str(_ARCHIVE_UTILS) not in sys.path:
+    sys.path.insert(0, str(_ARCHIVE_UTILS))
 
 from models.diffusion_tsf.train_multivariate_pipeline import (  # noqa: E402
     DATASET_REGISTRY,
@@ -35,7 +38,7 @@ from models.diffusion_tsf.train_multivariate_pipeline import (  # noqa: E402
     _paper_split_borders,
     _resolve_registry_path,
 )
-from utils.visualize_val_ordinal_ood import (  # noqa: E402
+from visualize_val_ordinal_ood import (  # noqa: E402
     NormBinCfg,
     _bin_indices,
     _load_cfg,
@@ -212,7 +215,6 @@ def analyze_dataset(
     config_path: Path,
     output_dir: Path,
     max_plots: int,
-    val_window_stride: int,
 ) -> Dict[str, Any]:
     cfg = _load_cfg(config_path)
     ms = _max_scale_for(dataset, cfg, config_path)
@@ -385,7 +387,6 @@ def main() -> None:
                     config_path=args.config,
                     output_dir=args.output_dir,
                     max_plots=args.max_plots,
-                    val_window_stride=1,
                 )
             )
         except Exception as exc:

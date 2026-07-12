@@ -1,22 +1,28 @@
 #!/bin/bash
 # =============================================================================
-# Submits a grid of experiments using the new YAML pipeline configs. *
+# Login-node submitter for binary / patch-decoder diffusion pipeline jobs.
+# Compute worker: slurm_worker.sh → models.diffusion_tsf.train_multivariate_pipeline
 #
 # Each job gets isolated checkpoint/results dirs:
 #   ./results/ckpts/MM-DD-<jobid>-<dataset>-<config>/
 #
-# USAGE (run from login node):
-#   ./submit_grid.sh --configs configs/binary_anchor.yaml --datasets ETTh1,exchange_rate
-#   ./submit_grid.sh --smoke
-#   ./submit_grid.sh --resume --configs configs/binary_dual_scale_staged.yaml --datasets ETTh1
-#   ./submit_grid.sh --parallel-optuna 4 --configs configs/binary_dual_scale_staged.yaml --datasets ETTh1
+# USAGE (run from login node, repo root / $SCRATCH/ts-sandbox):
+#   ./submit_binary.sh --configs binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm \
+#       --datasets ETTh1,traffic --time 10:00:00
+#   ./submit_binary.sh --configs configs/binary_anchor.yaml --datasets ETTh1,exchange_rate
+#   ./submit_binary.sh --smoke
+#   ./submit_binary.sh --resume --configs binary_dual_scale_staged --datasets ETTh1
+#   ./submit_binary.sh --parallel-optuna 4 --configs binary_dual_scale_staged --datasets ETTh1
+#
+# --configs accepts comma-separated paths, globs, or bare stems under configs/*.yaml.
+# Do NOT add new submit_*.sh wrappers for minor YAML variants — use this script.
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIGS=""
-DATASETS="ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,electricity,traffic,PeMS,solar_Alabama,dalia"
+DATASETS="ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,electricity,traffic,PeMS,solar_Alabama"
 SEEDS="42"
 SMOKE=0
 RESUME=0
@@ -35,7 +41,7 @@ else
 fi
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --configs) CONFIGS="$2"; shift 2 ;;
+        --configs|--config) CONFIGS="$2"; shift 2 ;;
         --datasets) DATASETS="$2"; shift 2 ;;
         --n-variates) N_VARIATES="$2"; shift 2 ;;
         --seeds) SEEDS="$2"; shift 2 ;;
@@ -67,6 +73,12 @@ else
     JOB_PREFIX="grid"
 fi
 
+# Leaderboard default when wandb is enabled and caller did not pass --wandb-project.
+if [[ -n "${WANDB_API_KEY:-}" && "$WANDB_PROJECT_EXPLICIT" -eq 0 ]]; then
+    WANDB_PROJECT="ts-sandbox-leaderboard"
+    WANDB_PROJECT_EXPLICIT=1
+fi
+
 if [[ -n "$PARALLEL_OPTUNA" ]]; then
     if [[ "$SMOKE" -eq 1 ]]; then
         echo "ERROR: --parallel-optuna is not supported with --smoke" >&2
@@ -85,12 +97,41 @@ IFS=',' read -ra CONF_ARR <<< "$CONFIGS"
 IFS=',' read -ra DATA_ARR <<< "$DATASETS"
 IFS=',' read -ra SEED_ARR <<< "$SEEDS"
 
+# Resolve a single config token to a repo-relative path under configs/.
+resolve_config_token() {
+    local raw="$1" cand
+    raw="${raw#./}"
+    if [[ -f "$SCRIPT_DIR/$raw" ]]; then
+        echo "$raw"
+        return 0
+    fi
+    if [[ "$raw" != configs/* && -f "$SCRIPT_DIR/configs/$raw" ]]; then
+        echo "configs/$raw"
+        return 0
+    fi
+    cand="${raw%.yaml}"
+    cand="${cand%.yml}"
+    if [[ -f "$SCRIPT_DIR/configs/${cand}.yaml" ]]; then
+        echo "configs/${cand}.yaml"
+        return 0
+    fi
+    if [[ -f "$SCRIPT_DIR/${cand}.yaml" ]]; then
+        echo "${cand}.yaml"
+        return 0
+    fi
+    echo "ERROR: config not found for token: $1 (tried path and configs/${cand}.yaml)" >&2
+    return 1
+}
+
 expand_config_globs() {
-    local expanded=() CFG matches
+    local expanded=() CFG matches m rel
     for CFG in "${CONF_ARR[@]}"; do
         if [[ "$CFG" == *"*"* || "$CFG" == *"?"* || "$CFG" == *"["* ]]; then
             shopt -s nullglob
             matches=( "$SCRIPT_DIR"/$CFG )
+            if [[ ${#matches[@]} -eq 0 && "$CFG" != configs/* ]]; then
+                matches=( "$SCRIPT_DIR"/configs/$CFG )
+            fi
             shopt -u nullglob
             if [[ ${#matches[@]} -eq 0 ]]; then
                 echo "ERROR: no config yml files matched glob: $CFG" >&2
@@ -100,7 +141,8 @@ expand_config_globs() {
                 expanded+=( "${m#$SCRIPT_DIR/}" )
             done
         else
-            expanded+=( "$CFG" )
+            rel="$(resolve_config_token "$CFG")" || exit 1
+            expanded+=( "$rel" )
         fi
     done
     CONF_ARR=( "${expanded[@]}" )

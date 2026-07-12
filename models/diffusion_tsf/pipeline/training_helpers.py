@@ -1,4 +1,4 @@
-"""Pure helpers for synthetic pool sizing and diffusion batch probing."""
+"""Pure helpers for synthetic pool sizing."""
 
 from __future__ import annotations
 
@@ -27,24 +27,6 @@ def resolve_synthetic_params(
                 cap = max(1, samples_cap // n)
 
     return int(n), int(cap)
-
-
-def diffusion_probe_max_candidate(
-    n_variates: int,
-    smoke_test: bool,
-    *,
-    target_effective_batch: int,
-    max_batch_cap: int,
-    min_batch: int,
-) -> int:
-    if smoke_test:
-        return 8
-    v = max(int(n_variates), 1)
-    raw = target_effective_batch // v
-    hi = min(max_batch_cap, max(min_batch, raw))
-    if hi % 2 != 0:
-        hi -= 1
-    return max(min_batch, hi)
 
 
 def resolve_pretrain_virtual_dataset_size(

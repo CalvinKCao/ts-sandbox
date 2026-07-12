@@ -4,10 +4,12 @@
 # Full-resolution windows (no diffusion-style repr subsampling).
 #
 # Parallel Slurm sweep (Killarney login node):
-#   cd $SCRATCH/ts-sandbox && ./submit_mmpd_decoder_flat_subsets_paper_lb336_hz720.sh
+#   cd $SCRATCH/ts-sandbox && ./submit_mmpd.sh --mmpd-run-config mmpd_decoder_flat_subsets_paper_lb336_hz720 \
+#     --output-dir results/datasets/$(date +%m-%d)-mmpd-decoder-paper-lb336-hz720-subset \
+#     --time 24:00:00 --mmpd-tune-trials 0
 #
 # Smoke:
-#   ./submit_mmpd_decoder_flat_subsets_paper_lb336_hz720.sh --smoke-test --dataset ETTh1
+#   ./submit_mmpd.sh --mmpd-run-config mmpd_decoder_flat_subsets_paper_lb336_hz720 --smoke-test --datasets ETTh1
 
 experiment:
   name: mmpd-decoder-flat-subsets-paper-lb336-hz720
@@ -48,3 +50,4 @@ mmpd:
   lradj: fixed
   tune_trials: 0
   leaderboard: true
+  leaderboard_nickname: "MMPD Subset Recent"

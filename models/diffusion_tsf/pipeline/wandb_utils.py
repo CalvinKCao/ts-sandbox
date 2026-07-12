@@ -280,12 +280,12 @@ def build_pipeline_tags(
     phase_names: Iterable[str],
     extra_tags: Optional[list] = None,
 ) -> list:
-    """Dataset tag on every run; ``eval`` when the pipeline includes an eval phase."""
+    """Dataset tag on every pipeline run; ``binary`` when the pipeline includes eval."""
     tags = [dataset]
     if extra_tags:
         tags.extend(extra_tags)
-    if pipeline_has_eval_phase(phase_names) and "eval" not in tags:
-        tags.append("eval")
+    if pipeline_has_eval_phase(phase_names) and "binary" not in tags:
+        tags.append("binary")
     return tags
 
 
@@ -299,8 +299,6 @@ def build_run_tags(
     tags = [dataset]
     if extra_tags:
         tags.extend(extra_tags)
-    if phase_name in EVAL_PHASE_NAMES and "eval" not in tags:
-        tags.append("eval")
     return tags
 
 
@@ -355,7 +353,32 @@ def begin_phase(phase_config: Dict[str, Any]) -> None:
 def finish_pipeline_run() -> None:
     """Finish the pipeline wandb run."""
     if _WANDB_AVAILABLE and wandb.run is not None:
+        _ensure_leaderboard_horizon_config()
         wandb.finish()
+
+
+def _ensure_leaderboard_horizon_config() -> None:
+    """Keep experiment.lookback/forecast on the run for leaderboard report filters."""
+    if not _WANDB_AVAILABLE or wandb.run is None:
+        return
+    cfg = dict(wandb.run.config)
+    exp = dict(cfg.get("experiment") or {})
+    lb = exp.get("lookback_length") or cfg.get("leaderboard_lookback")
+    hz = exp.get("forecast_length") or cfg.get("leaderboard_horizon")
+    if lb is None or hz is None:
+        return
+    lb, hz = int(lb), int(hz)
+    updates: Dict[str, Any] = {}
+    if cfg.get("leaderboard_lookback") != lb:
+        updates["leaderboard_lookback"] = lb
+    if cfg.get("leaderboard_horizon") != hz:
+        updates["leaderboard_horizon"] = hz
+    if exp.get("lookback_length") != lb or exp.get("forecast_length") != hz:
+        exp["lookback_length"] = lb
+        exp["forecast_length"] = hz
+        updates["experiment"] = exp
+    if updates:
+        merge_run_config(updates)
 
 
 def finish_phase_run() -> None:

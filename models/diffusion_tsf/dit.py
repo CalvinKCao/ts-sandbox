@@ -484,6 +484,3 @@ class FactorizedDiT(nn.Module):
         if pad_h or pad_w:
             out = out[:, :, :H, :W]
         return out
-
-    def num_parameters(self) -> int:
-        return sum(p.numel() for p in self.parameters())

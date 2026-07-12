@@ -208,7 +208,9 @@ wandb/
 .tmp_epoch_sweep_smoke/
 .tmp_timing_full4phase_ckpt/
 .tmp_timing_full4phase_ckpt2/
-temp/
+temp/*
+!temp/submit_*.sh
+!temp/README.md
 synth_data/
 results_experimental/
 results_simdiff/

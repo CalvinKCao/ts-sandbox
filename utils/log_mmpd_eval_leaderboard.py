@@ -7,7 +7,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from utils.leaderboard_config_nicknames import (
     leaderboard_dataset_tags,
@@ -125,6 +125,7 @@ def log_mmpd_eval_to_leaderboard(
     dry_run: bool = False,
     extra_tags: Optional[list[str]] = None,
     viz_paths: Optional[list[str]] = None,
+    config_nickname: Optional[str] = None,
 ) -> Optional[str]:
     """Create or skip an mmpd_eval stub in ts-sandbox-leaderboard. Returns run URL if created."""
     if raw_config is None:
@@ -147,7 +148,12 @@ def log_mmpd_eval_to_leaderboard(
         output_dir=output_dir,
         job_id=job_id,
     )
-    nickname = leaderboard_nickname(yaml_path=str(mmpd_run_config.resolve())) if mmpd_run_config else leaderboard_nickname(raw_config=raw_config)
+    if config_nickname and str(config_nickname).strip():
+        nickname = str(config_nickname).strip()
+    elif mmpd_run_config is not None:
+        nickname = leaderboard_nickname(yaml_path=str(mmpd_run_config.resolve()))
+    else:
+        nickname = leaderboard_nickname(raw_config=raw_config)
     stub_metrics = {
         "anchor_mse": metrics.get("anchor_mse", metrics.get("mse")),
         "anchor_mae": metrics.get("anchor_mae", metrics.get("mae")),
@@ -209,7 +215,7 @@ def log_mmpd_eval_to_leaderboard(
     if tuned_hparams:
         config["mmpd_tuned_hparams"] = tuned_hparams
 
-    tags = leaderboard_dataset_tags(dataset) + ["eval", "mmpd", "stub", raw_config]
+    tags = leaderboard_dataset_tags(dataset) + ["mmpd", "stub", raw_config]
     if extra_tags:
         tags.extend(t for t in extra_tags if t not in tags)
 
@@ -296,6 +302,7 @@ def maybe_log_mmpd_eval_leaderboard(
             mmpd_run_config=args.mmpd_run_config,
             force=getattr(args, "force_mmpd_leaderboard", False),
             viz_paths=viz_paths or None,
+            config_nickname=getattr(args, "mmpd_leaderboard_nickname", None),
         )
     except Exception as exc:
         print(f"[leaderboard] {dataset}: failed ({exc})")

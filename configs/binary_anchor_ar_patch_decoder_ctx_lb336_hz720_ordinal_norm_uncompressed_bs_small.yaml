@@ -8,9 +8,7 @@ wandb:
 
 training:
   diffusion_effective_batch_multiplier: 1.0
-  # Probe ceiling in window units: target_U // C, capped here.
-  diffusion_probe_target_effective_batch: 8192
-  diffusion_probe_max_batch_cap: 2048
+  finetune_max_micro_batch: 2048
   finetune_hp_lr_min: 1.0e-7
   finetune_hp_lr_max: 3.0e-4
 

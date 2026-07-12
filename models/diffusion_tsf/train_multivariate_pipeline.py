@@ -15,7 +15,6 @@ import math
 import os
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -44,16 +43,6 @@ from models.diffusion_tsf.ordinal_window_norm import (
     ranks_to_unit,
 )
 from models.diffusion_tsf.storage_paths import resolve_checkpoint_dir, resolve_results_dir
-from models.diffusion_tsf.dalia_data import (
-    DALIA_CHANNEL_NAMES,
-    DALIA_DEFAULT_FORECAST,
-    DALIA_DEFAULT_LOOKBACK,
-    DALIA_N_VARS,
-    dalia_window_count,
-    dalia_window_lengths,
-    ensure_dalia_csv,
-    load_dalia_dataset,
-)
 from models.diffusion_tsf.pipeline.data_subset import resolve_data_subset
 
 DATASETS_DIR = os.path.join(project_root, "datasets")
@@ -113,19 +102,6 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'finer_image_height': FINER_IMAGE_HEIGHT,
         'max_scale': MAX_SCALE,
         'staged_representation': STAGED_REPRESENTATION,
-        'haar_high_freq_percent': HAAR_HIGH_FREQ_PERCENT,
-        'haar_high_freq_levels': HAAR_HIGH_FREQ_LEVELS,
-        'haar_fine_max_scale': HAAR_FINE_MAX_SCALE,
-        'fourier_high_freq_percent': FOURIER_HIGH_FREQ_PERCENT,
-        'fourier_high_freq_cutoff_bin': FOURIER_HIGH_FREQ_CUTOFF_BIN,
-        'fourier_fine_max_scale': FOURIER_FINE_MAX_SCALE,
-        'fourier_flatline_atol': FOURIER_FLATLINE_ATOL,
-        'fourier_high_freq_cutoff_bins_per_variate': FOURIER_HIGH_FREQ_CUTOFF_BINS_PER_VARIATE,
-        'fourier_fine_max_scale_per_variate': FOURIER_FINE_MAX_SCALE_PER_VARIATE,
-        'coarse_flatline_blur_fine_target': COARSE_FLATLINE_BLUR_FINE_TARGET,
-        'coarse_flatline_blur_radius': COARSE_FLATLINE_BLUR_RADIUS,
-        'coarse_flatline_blur_kernel': COARSE_FLATLINE_BLUR_KERNEL,
-        'coarse_flatline_blur_atol': COARSE_FLATLINE_BLUR_ATOL,
         'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
         'window_norm_low_var_threshold': WINDOW_NORM_LOW_VAR_THRESHOLD,
         'window_norm_low_var_unit_std': WINDOW_NORM_LOW_VAR_UNIT_STD,
@@ -266,19 +242,6 @@ FINE_IMAGE_HEIGHT = 16
 FINER_IMAGE_HEIGHT = 16
 MAX_SCALE = 3.5
 STAGED_REPRESENTATION = "value_precision"
-HAAR_HIGH_FREQ_PERCENT = 0.38
-HAAR_HIGH_FREQ_LEVELS = 0
-HAAR_FINE_MAX_SCALE = 0.0
-FOURIER_HIGH_FREQ_PERCENT = 0.85
-FOURIER_HIGH_FREQ_CUTOFF_BIN = 0
-FOURIER_FINE_MAX_SCALE = 0.0
-FOURIER_FLATLINE_ATOL = 1e-8
-FOURIER_HIGH_FREQ_CUTOFF_BINS_PER_VARIATE: Optional[List[int]] = None
-FOURIER_FINE_MAX_SCALE_PER_VARIATE: Optional[List[float]] = None
-COARSE_FLATLINE_BLUR_FINE_TARGET = False
-COARSE_FLATLINE_BLUR_RADIUS = 4
-COARSE_FLATLINE_BLUR_KERNEL = "gaussian"
-COARSE_FLATLINE_BLUR_ATOL: Optional[float] = None
 WINDOW_NORM_STD_FLOOR = 1e-8
 WINDOW_NORM_LOW_VAR_THRESHOLD = 0.0
 WINDOW_NORM_LOW_VAR_UNIT_STD = 1.0
@@ -310,10 +273,10 @@ ITRANS_D_MODEL = 512
 ITRANS_D_FF = 512
 ITRANS_E_LAYERS = 4
 ITRANS_N_HEADS = 8
-GUIDANCE_TYPE = "itransformer"
+GUIDANCE_TYPE = "patch_decoder"
 MMPD_PATCH_SIZE = 12
 PATCH_GUIDANCE_HP_FINETUNE_MAX_EPOCHS = 10
-BINARY_NOISE_SCHEDULE = "sqrt_linear"
+BINARY_NOISE_SCHEDULE = "linear"
 BINARY_LENGTH_MODE = "none"
 BINARY_LENGTH_G = 1.0
 BINARY_LENGTH_SCALE = 1.0
@@ -332,9 +295,6 @@ USE_RAW_LOOKBACK_COND_CHANNEL = False
 DIFFUSION_BATCH_SIZE = 32
 DIFFUSION_BATCH_SIZES = [16]
 FINETUNE_BATCH_SIZES = [4, 8, 16]
-DIFFUSION_PROBE_TARGET_EFFECTIVE_BATCH = 512
-DIFFUSION_PROBE_MAX_BATCH_CAP = 128
-DIFFUSION_PROBE_MIN_BATCH = 1
 FINETUNE_HP_LR_MIN = 3e-6
 FINETUNE_HP_LR_MAX = 2e-4
 USE_AMP = True
@@ -342,9 +302,9 @@ USE_GRADIENT_CHECKPOINTING = True
 UNET_MAX_CHUNK_SIZE = 128
 DISABLE_CROSS_ATTENTION = False
 USE_TRIPLE_SCALE = False
-DIFFUSION_STAGE = "joint"
-USE_GUIDANCE_CHANNEL = True
-CFG_DROPOUT = 0.1
+DIFFUSION_STAGE = "coarse"
+USE_GUIDANCE_CHANNEL = False
+CFG_DROPOUT = 0.0
 MODEL_TYPE = "dit"
 DIFFUSION_TYPE = "binary"
 USE_ORDINAL_WINDOW_NORM = False
@@ -357,9 +317,7 @@ DIT_NUM_HEADS = 6
 DIT_MLP_RATIO = 4.0
 DIT_DROPOUT = 0.0
 CROSS_VARIATE_CONTEXT_BIAS = 0.0
-GUIDANCE_PENALTY_WEIGHT = 0.0
-EMD_LAMBDA = 0.2
-DETERMINISTIC_ANCHOR_LOSS = False
+DETERMINISTIC_ANCHOR_LOSS = True
 DETERMINISTIC_ANCHOR_LAMBDA = 0.99
 DETERMINISTIC_ANCHOR_ALPHA = 0.5
 BINARY_ANCHOR_INPUT_MODE = "stationary_flat"
@@ -367,10 +325,6 @@ USE_WINDOW_NORMALIZATION = True
 WINDOW_NORM_CENTER = "mean"
 ZERO_GUIDANCE_FORECAST = False
 WINDOW_STRIDE = 1
-ANCHOR_HP_LAMBDA_MIN = 0.90
-ANCHOR_HP_LAMBDA_MAX = 0.995
-ANCHOR_HP_ALPHA_MIN = 0.35
-ANCHOR_HP_ALPHA_MAX = 0.65
 EVAL_NUM_SAMPLES = 30
 EVAL_SAMPLER = "dpmpp"
 
@@ -384,16 +338,6 @@ def resolve_synthetic_params(requested_n: int, requested_cap: int, smoke_test: b
         smoke_test,
         samples_cap=SYNTHETIC_SAMPLES_CAP,
         samples_min=SYNTHETIC_SAMPLES_MIN,
-    )
-
-
-def diffusion_probe_max_candidate(n_variates: int, smoke_test: bool) -> int:
-    return _training_helpers.diffusion_probe_max_candidate(
-        n_variates,
-        smoke_test,
-        target_effective_batch=DIFFUSION_PROBE_TARGET_EFFECTIVE_BATCH,
-        max_batch_cap=DIFFUSION_PROBE_MAX_BATCH_CAP,
-        min_batch=DIFFUSION_PROBE_MIN_BATCH,
     )
 
 
@@ -433,7 +377,6 @@ DATASET_REGISTRY = {
     # PeMS benchmarks ship as NPZ (iTransformer Dataset_PEMS); see scripts/fetch_pems_solar.sh
     'PeMS': ('PeMS/PEMS04.npz', None, 24),
     'solar_Alabama': ('solar_Alabama/solar_Alabama.csv', 'Unnamed: 0', 96),
-    'dalia': ('dalia/dalia.csv', 'window_id', 96),
     # First 500k timesteps only (see datasets/dynamic/dynamic_500K.csv).
     'dynamic': ('dynamic/dynamic_500K.csv', 'date', 96),
 }
@@ -520,8 +463,6 @@ def _dataset_variate_names(path: str, date_col: Optional[str], n_cols: int) -> L
 
 def dataset_window_lengths(dataset_name: str) -> Tuple[int, int]:
     """Per-dataset (lookback, forecast) for finetune/eval; pretrain stays on pipeline defaults."""
-    if dataset_name == 'dalia':
-        return dalia_window_lengths()
     return LOOKBACK_LENGTH, FORECAST_LENGTH
 
 
@@ -624,31 +565,29 @@ def load_wrapped_guidance(
     dataset_lookback: Optional[int] = None,
     dataset_horizon: Optional[int] = None,
 ):
-    """Load finetuned guidance (iTransformer or patch decoder stack)."""
+    """Load finetuned patch_decoder guidance."""
     gtype = guidance_type or GUIDANCE_TYPE
+    if gtype != "patch_decoder":
+        raise ValueError(f"Only patch_decoder guidance is supported; got {gtype!r}")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    if gtype == "patch_decoder" and not _checkpoint_is_patch_guidance(ckpt):
-        gtype = "itransformer"
-    if gtype == "patch_decoder":
-        if USE_ORDINAL_WINDOW_NORM:
-            if GLOBAL_ORDINAL_LADDER is None:
-                raise ValueError(
-                    "GLOBAL_ORDINAL_LADDER must be set before loading ordinal patch guidance"
-                )
-            if not bool(ckpt.get("ordinal_patch_guidance_unit_ranks", False)):
-                raise ValueError(
-                    "Patch guidance checkpoint was not trained with unit-rank ordinal "
-                    "targets. Delete this patch guidance checkpoint and retrain it."
-                )
-        stack = load_patch_guidance_from_checkpoint(
-            ckpt_path, num_vars, device, ckpt=ckpt,
+    if not _checkpoint_is_patch_guidance(ckpt):
+        raise ValueError(
+            f"guidance_type=patch_decoder but checkpoint is not patch guidance: {ckpt_path}"
         )
-        return wrap_patch_guidance(stack)
-    itrans_model = load_itransformer_from_checkpoint(ckpt_path, num_vars, device)
-    lb = LOOKBACK_LENGTH if dataset_lookback is None else dataset_lookback
-    hz = FORECAST_LENGTH if dataset_horizon is None else dataset_horizon
-    itrans_seq, itrans_pred = itrans_model_lengths(lb, hz)
-    return wrap_itrans_guidance(itrans_model, seq_len=itrans_seq, pred_len=itrans_pred)
+    if USE_ORDINAL_WINDOW_NORM:
+        if GLOBAL_ORDINAL_LADDER is None:
+            raise ValueError(
+                "GLOBAL_ORDINAL_LADDER must be set before loading ordinal patch guidance"
+            )
+        if not bool(ckpt.get("ordinal_patch_guidance_unit_ranks", False)):
+            raise ValueError(
+                "Patch guidance checkpoint was not trained with unit-rank ordinal "
+                "targets. Delete this patch guidance checkpoint and retrain it."
+            )
+    stack = load_patch_guidance_from_checkpoint(
+        ckpt_path, num_vars, device, ckpt=ckpt,
+    )
+    return wrap_patch_guidance(stack)
 
 
 def _window_norm_past_future(
@@ -1031,9 +970,6 @@ def get_synth_cache_dir(checkpoint_dir: Optional[str] = None, smoke_test: bool =
 
 def get_dataset_n_cols(dataset_name: str) -> int:
     """Return the number of numeric columns in a dataset (excluding date)."""
-    if dataset_name == 'dalia':
-        ensure_dalia_csv(DATASETS_DIR)
-        return DALIA_N_VARS
     path, date_col = _resolve_registry_path(dataset_name)
     if path.endswith('.npz'):
         data = _load_pems_npz(path)
@@ -1055,14 +991,9 @@ def get_dataset_shape(dataset_name: str) -> Tuple[int, int]:
     key = (DATASETS_DIR, dataset_name)
     if key in _DATASET_SHAPE_CACHE:
         return _DATASET_SHAPE_CACHE[key]
-    if dataset_name == 'dalia':
-        ensure_dalia_csv(DATASETS_DIR)
-        n_win = dalia_window_count(DATASETS_DIR)
-        shape = (n_win, DALIA_N_VARS)
-    else:
-        path, date_col = _resolve_registry_path(dataset_name)
-        data = _load_dataset_array(path, date_col)
-        shape = (int(data.shape[0]), int(data.shape[1]))
+    path, date_col = _resolve_registry_path(dataset_name)
+    data = _load_dataset_array(path, date_col)
+    shape = (int(data.shape[0]), int(data.shape[1]))
     _DATASET_SHAPE_CACHE[key] = shape
     return shape
 
@@ -1348,23 +1279,6 @@ def create_diffusion_model(
         finer_image_height=FINER_IMAGE_HEIGHT,
         max_scale=o("max_scale", MAX_SCALE),
         staged_representation=o("staged_representation", STAGED_REPRESENTATION),
-        haar_high_freq_percent=o("haar_high_freq_percent", HAAR_HIGH_FREQ_PERCENT),
-        haar_high_freq_levels=o("haar_high_freq_levels", HAAR_HIGH_FREQ_LEVELS),
-        haar_fine_max_scale=o("haar_fine_max_scale", HAAR_FINE_MAX_SCALE),
-        fourier_high_freq_percent=o("fourier_high_freq_percent", FOURIER_HIGH_FREQ_PERCENT),
-        fourier_high_freq_cutoff_bin=o("fourier_high_freq_cutoff_bin", FOURIER_HIGH_FREQ_CUTOFF_BIN),
-        fourier_fine_max_scale=o("fourier_fine_max_scale", FOURIER_FINE_MAX_SCALE),
-        fourier_flatline_atol=o("fourier_flatline_atol", FOURIER_FLATLINE_ATOL),
-        fourier_high_freq_cutoff_bins_per_variate=o(
-            "fourier_high_freq_cutoff_bins_per_variate", FOURIER_HIGH_FREQ_CUTOFF_BINS_PER_VARIATE,
-        ),
-        fourier_fine_max_scale_per_variate=o(
-            "fourier_fine_max_scale_per_variate", FOURIER_FINE_MAX_SCALE_PER_VARIATE,
-        ),
-        coarse_flatline_blur_fine_target=o("coarse_flatline_blur_fine_target", COARSE_FLATLINE_BLUR_FINE_TARGET),
-        coarse_flatline_blur_radius=o("coarse_flatline_blur_radius", COARSE_FLATLINE_BLUR_RADIUS),
-        coarse_flatline_blur_kernel=o("coarse_flatline_blur_kernel", COARSE_FLATLINE_BLUR_KERNEL),
-        coarse_flatline_blur_atol=o("coarse_flatline_blur_atol", COARSE_FLATLINE_BLUR_ATOL),
         binary_noise_schedule=o("binary_noise_schedule", BINARY_NOISE_SCHEDULE),
         binary_length_mode=o(
             "binary_length_mode",
@@ -1384,7 +1298,7 @@ def create_diffusion_model(
             "use_raw_lookback_cond_channel", USE_RAW_LOOKBACK_COND_CHANNEL,
         ),
         use_guidance_channel=o("use_guidance_channel", USE_GUIDANCE_CHANNEL),
-        guidance_penalty_weight=GUIDANCE_PENALTY_WEIGHT,
+        guidance_penalty_weight=0.0,
         model_type=o("model_type", MODEL_TYPE),
         disable_cross_attention=DISABLE_CROSS_ATTENTION,
         diffusion_stage=stage,
@@ -1528,19 +1442,9 @@ def load_dataset(
     if lookback_overlap is None:
         lookback_overlap = LOOKBACK_OVERLAP
     if lookback is None:
-        lookback = DALIA_DEFAULT_LOOKBACK if dataset_name == 'dalia' else LOOKBACK_LENGTH
+        lookback = LOOKBACK_LENGTH
     if horizon is None:
-        horizon = DALIA_DEFAULT_FORECAST if dataset_name == 'dalia' else FORECAST_LENGTH
-    if dataset_name == 'dalia':
-        return load_dalia_dataset(
-            variate_indices=variate_indices,
-            lookback=lookback,
-            horizon=horizon,
-            stride=stride,
-            test_stride=test_stride,
-            lookback_overlap=lookback_overlap,
-            datasets_dir=DATASETS_DIR,
-        )
+        horizon = FORECAST_LENGTH
     path, date_col = _resolve_registry_path(dataset_name)
     data = _load_dataset_array(path, date_col)
 
@@ -1604,13 +1508,6 @@ def load_dataset(
 
 def generate_dataset_job(dataset_name: str, n_variates: int = None, seed: int = 42) -> Dict:
     """Return one full-dataset training job (no variate partitioning)."""
-    if dataset_name == 'dalia':
-        indices = list(range(DALIA_N_VARS))
-        return {
-            'dataset_id': dataset_name,
-            'variate_indices': indices,
-            'variate_names': DALIA_CHANNEL_NAMES,
-        }
     path, date_col = _resolve_registry_path(dataset_name)
     n_cols = get_dataset_n_cols(dataset_name)
     all_cols = _dataset_variate_names(path, date_col, n_cols)
@@ -1622,94 +1519,16 @@ def generate_dataset_job(dataset_name: str, n_variates: int = None, seed: int = 
 # Early Stopping & Checkpointing
 # ============================================================================
 
-class EarlyStopping:
-    def __init__(self, patience: int = 25, min_delta: float = 1e-4):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_loss = float('inf')
-        self.should_stop = False
-    
-    def __call__(self, val_loss: float) -> bool:
-        if val_loss < self.best_loss - self.min_delta:
-            self.best_loss = val_loss
-            self.counter = 0
-        else:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.should_stop = True
-        return self.should_stop
-
-
-def amp_context():
-    """Return the appropriate autocast context for mixed precision."""
-    if USE_AMP and torch.cuda.is_available():
-        return torch.amp.autocast('cuda', dtype=torch.bfloat16)
-    from contextlib import nullcontext
-    return nullcontext()
-
-
-def ensure_checkpoint_dir(path: str) -> None:
-    """Create the parent directory for a checkpoint file path."""
-    parent = os.path.dirname(path)
-    if not parent:
-        return
-    if os.path.isdir(parent):
-        return
-    if os.path.isfile(parent):
-        raise FileExistsError(
-            f"checkpoint parent exists as a file, not a directory: {parent}"
-        )
-    try:
-        os.makedirs(parent, exist_ok=True)
-    except FileExistsError:
-        if not os.path.isdir(parent):
-            raise
-
-
-def save_checkpoint(model, optimizer, epoch, train_loss, val_loss, config, path, extra=None):
-    ensure_checkpoint_dir(path)
-    ckpt = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'train_loss': train_loss,
-        'val_loss': val_loss,
-        'config': config,
-    }
-    if extra:
-        ckpt.update(extra)
-    # Atomic write so a quota kill mid-save does not leave a corrupt best.pt.
-    tmp_path = f"{path}.tmp"
-    try:
-        torch.save(ckpt, tmp_path)
-        os.replace(tmp_path, path)
-    except OSError as e:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except OSError:
-            pass
-        err = getattr(e, "errno", None)
-        if err in (28, 122) or "quota" in str(e).lower() or "no space" in str(e).lower():
-            raise RuntimeError(
-                f"Disk quota/space exhausted while saving {path}. "
-                "Free scratch (old results/ckpts, wandb, trial_*.pt) then --resume."
-            ) from e
-        raise
-    except RuntimeError as e:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except OSError:
-            pass
-        if "quota" in str(e).lower() or "no space" in str(e).lower():
-            raise RuntimeError(
-                f"Disk quota/space exhausted while saving {path}. "
-                "Free scratch (old results/ckpts, wandb, trial_*.pt) then --resume."
-            ) from e
-        raise
-
+from models.diffusion_tsf.pipeline.train.checkpointing import (
+    EarlyStopping,
+    amp_context,
+    ensure_checkpoint_dir,
+    save_checkpoint,
+)
+from models.diffusion_tsf.pipeline.train.diffusion_loop import (
+    train_diffusion_epoch,
+    validate_diffusion_epoch,
+)
 
 # ============================================================================
 # PHASE 1A: iTransformer HP Tuning
@@ -1787,92 +1606,6 @@ def validate_itransformer(model, loader, criterion, device):
             n_batches += 1
     
     return total_loss / max(n_batches, 1)
-
-
-def _even_batch_size(n: int, *, floor: int = 1) -> int:
-    n = max(floor, int(n))
-    if n > 1 and n % 2:
-        n -= 1
-    return n
-
-
-def _probe_step_ok(try_step_fn, batch_size: int) -> bool:
-    try:
-        return bool(try_step_fn(batch_size))
-    except torch.OutOfMemoryError:
-        return False
-    except RuntimeError as exc:
-        if "out of memory" in str(exc).lower():
-            return False
-        raise
-
-
-def auto_select_max_even_batch_size(
-    phase_name: str,
-    max_candidate: int,
-    try_step_fn,
-    min_candidate: int = 2,
-) -> int:
-    """Pick the largest even batch size that passes ``try_step_fn`` without OOM."""
-    min_bs = max(1, min_candidate)
-    lo = min_bs
-    hi = probe_max = _even_batch_size(max_candidate, floor=min_bs)
-    best = min_bs
-
-    while lo <= hi:
-        mid = _even_batch_size((lo + hi) // 2, floor=min_bs)
-        if _probe_step_ok(try_step_fn, mid):
-            best = mid
-            lo = mid + (1 if mid == 1 else 2)
-        else:
-            hi = mid - (1 if mid == 1 else 2)
-
-    safe = _even_batch_size(int(best * 0.8), floor=min_bs)
-    logger.info(
-        "[AutoBS] %s: selected batch_size=%s (probe_max=%s, tested_max=%s)",
-        phase_name, safe, best, probe_max,
-    )
-    return safe
-
-
-def select_diffusion_batch_size(
-    phase_name: str,
-    dataset,
-    device: torch.device,
-    itrans_guidance: iTransformerGuidance,
-    max_candidate: int,
-    smoke_test: bool = False,
-) -> int:
-    """Probe diffusion memory with one train step and pick largest safe even batch."""
-    if smoke_test:
-        return min(4, _even_batch_size(max_candidate, floor=DIFFUSION_PROBE_MIN_BATCH))
-
-    sample_past, sample_future = dataset[0]
-
-    def _try(batch_size: int) -> bool:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        model = create_diffusion_model(guidance_model=itrans_guidance).to(device)
-        try:
-            model.train()
-            optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-            past = sample_past.unsqueeze(0).repeat(batch_size, 1, 1).to(device)
-            future = sample_future.unsqueeze(0).repeat(batch_size, 1, 1).to(device)
-            optimizer.zero_grad(set_to_none=True)
-            with amp_context():
-                loss = model.get_loss(past, future)
-            loss.backward()
-            optimizer.step()
-            return True
-        finally:
-            del model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
-
-    return auto_select_max_even_batch_size(
-        phase_name, max_candidate, _try, min_candidate=DIFFUSION_PROBE_MIN_BATCH,
-    )
 
 
 def itrans_hp_objective(
@@ -2080,6 +1813,100 @@ def run_itransformer_hp_tuning(
     return best_params, ckpt_path
 
 
+def run_patch_guidance_synthetic_tuning(
+    n_trials: int,
+    smoke_test: bool = False,
+    checkpoint_dir: Optional[str] = None,
+    parallel_workers: int = 1,
+) -> Tuple[Dict, Optional[str]]:
+    """Optuna HP search for patch guidance on synthetic data (staged pretrain fallback)."""
+    logger.info("=" * 60)
+    logger.info("Patch guidance synthetic HP tuning")
+    logger.info("Trials: %s", n_trials)
+    logger.info("=" * 60)
+
+    requested_n = SYNTHETIC_SAMPLES_HP_TUNE
+    requested_cap = synthetic_epoch_capacity_itrans_hp()
+    n_samples, epoch_cap = resolve_synthetic_params(requested_n, requested_cap, smoke_test)
+
+    n_val = 0 if smoke_test else min(n_samples // 10, 1000)
+    synth_cache = get_synth_cache_dir(smoke_test=smoke_test)
+    synthetic_loader = get_synthetic_dataloader(
+        batch_size=64,
+        lookback_length=LOOKBACK_LENGTH,
+        forecast_length=FORECAST_LENGTH,
+        num_variables=N_VARIATES,
+        num_samples=n_samples,
+        num_workers=0,
+        lookback_overlap=LOOKBACK_OVERLAP,
+        cache_dir=synth_cache,
+        skip_cross_var_aug=(N_VARIATES > 32),
+        val_tail_n=n_val,
+        synthetic_epoch_capacity=epoch_cap,
+    )
+
+    dataset = synthetic_loader.dataset
+    if smoke_test:
+        n_val = max(1, min(len(dataset) // 4, len(dataset) - 1))
+    else:
+        n_val = min(len(dataset) // 10, 1000)
+    train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
+    val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
+
+    train_bs = ITRANS_PAPER_BATCH_SIZE
+    train_loader = DataLoader(train_subset, batch_size=train_bs, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_subset, batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
+
+    trial_dir = checkpoint_dir or CHECKPOINT_DIR
+    os.makedirs(trial_dir, exist_ok=True)
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
+
+    def objective_builder(_worker_id: int):
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        def objective(trial):
+            return patch_guidance_hp_objective(
+                trial, train_loader, val_loader, N_VARIATES, dev, smoke_test,
+                fixed_batch_size=train_bs,
+                max_epochs=ITRANS_HP_PRETRAIN_MAX_EPOCHS,
+                trial_ckpt_dir=trial_dir,
+            )
+
+        return objective
+
+    study = run_optuna_study(
+        study_name="patch-guidance-synthetic-pretrain",
+        checkpoint_dir=trial_dir,
+        n_trials=n_trials,
+        parallel_workers=parallel_workers,
+        direction="minimize",
+        objective_builder=objective_builder,
+        sampler=TPESampler(seed=42),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=2),
+        show_progress_bar=not smoke_test,
+        sampler_seed=42,
+    )
+
+    best_params = dict(study.best_params)
+    best_params["batch_size"] = train_bs
+    logger.info(
+        "Best patch guidance synthetic params: lr=%.2e bs=%s val=%.4f",
+        best_params["learning_rate"], best_params["batch_size"], study.best_value,
+    )
+
+    ckpt_path = None
+    if checkpoint_dir is not None:
+        ckpt_path = os.path.join(checkpoint_dir, "patch_guidance_synthetic_hp_best.pt")
+        _promote_trial_ckpt(
+            study, trial_dir, "patch_guidance_hp_trial_{trial}.pt", ckpt_path,
+        )
+        logger.info("  Saved best patch guidance synthetic HP model → %s", ckpt_path)
+
+    return best_params, ckpt_path
+
+
 def run_itransformer_finetune_hp_tuning(
     dataset_name: str,
     variate_indices: List[int],
@@ -2174,1218 +2001,8 @@ def run_itransformer_finetune_hp_tuning(
 
 
 
-# ============================================================================
-# PHASE 1B: Diffusion HP Tuning (with iTransformer guidance)
-# ============================================================================
+from models.diffusion_tsf.pipeline.train.pretrain import pretrain_diffusion
+from models.diffusion_tsf.pipeline.train.cli import main
 
-def diffusion_hp_objective(
-    trial,
-    synthetic_loader,
-    val_loader,
-    itrans_guidance: iTransformerGuidance,
-    device,
-    smoke_test=False,
-    fixed_batch_size: Optional[int] = None,
-    best_state: Optional[dict] = None,
-    disable_anchor_loss: bool = False,
-    trial_ckpt_dir: Optional[str] = None,
-):
-    """Optuna objective for Diffusion HP search.
-
-    disable_anchor_loss: skip the anchor forward pass during HP search to
-        halve per-step cost. The anchor regularizer doesn't help rank LR
-        candidates on synthetic data.
-    """
-    lr = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-    if fixed_batch_size is None:
-        batch_size = min(4, DIFFUSION_BATCH_SIZE) if smoke_test else DIFFUSION_BATCH_SIZE
-    else:
-        batch_size = fixed_batch_size
-
-    diff_kw: Dict[str, Any] = {}
-    if disable_anchor_loss:
-        diff_kw["use_deterministic_anchor_loss"] = False
-    model = create_diffusion_model(guidance_model=itrans_guidance, **diff_kw).to(device)
-
-    train_loader = DataLoader(synthetic_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-
-    epochs = PRETRAIN_DIFFUSION_MAX_EPOCHS if not smoke_test else 1
-    patience = DIFFUSION_HP_PATIENCE if not smoke_test else 1
-    early_stop = EarlyStopping(patience=patience)
-    best_val_loss = float('inf')
-    trial_ckpt_path = None
-    if trial_ckpt_dir is not None:
-        os.makedirs(trial_ckpt_dir, exist_ok=True)
-        trial_ckpt_path = os.path.join(trial_ckpt_dir, f"diff_hp_trial_{trial.number}.pt")
-
-    for epoch in range(epochs):
-        set_realts_training_epoch(synthetic_loader, epoch)
-        model.train()
-        for past, future in train_loader:
-            past, future = past.to(device), future.to(device)
-            optimizer.zero_grad()
-            with amp_context():
-                loss = model.get_loss(past, future)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-
-        model.eval()
-        val_loss = 0.0
-        n_batches = 0
-        with torch.no_grad():
-            for past, future in val_loader:
-                past, future = past.to(device), future.to(device)
-                with amp_context():
-                    loss = model.get_loss(past, future)
-                val_loss += loss.item()
-                n_batches += 1
-        val_loss /= max(n_batches, 1)
-
-        trial.report(val_loss, epoch)
-        if trial.should_prune():
-            raise optuna.TrialPruned()
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            tuned = {'learning_rate': lr, 'batch_size': batch_size}
-            if trial_ckpt_path is not None:
-                torch.save(
-                    {'model_state_dict': model.state_dict(), 'best_params': tuned, 'val_loss': val_loss},
-                    trial_ckpt_path,
-                )
-                trial.set_user_attr('ckpt_path', trial_ckpt_path)
-            elif best_state is not None and val_loss < best_state.get('val_loss', float('inf')):
-                best_state['model_state'] = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-                best_state['val_loss'] = val_loss
-
-        if early_stop(val_loss):
-            break
-
-    return best_val_loss
-
-
-def run_diffusion_hp_tuning(
-    itrans_checkpoint: str,
-    n_trials: int,
-    smoke_test: bool = False,
-    checkpoint_dir: Optional[str] = None,
-    parallel_workers: int = 1,
-) -> Tuple[Dict, Optional[str]]:
-    """Run Optuna HP search for Diffusion model."""
-    logger.info("=" * 60)
-    logger.info("PHASE 1B: Diffusion HP Tuning (with iTransformer guidance)")
-    logger.info(f"Trials: {n_trials}")
-    logger.info("=" * 60)
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Load iTransformer as guidance (supports legacy 512-wide and current shorter seq checkpoints)
-    itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, N_VARIATES, device)
-    itrans_guidance = iTransformerGuidance(itrans_model)
-    
-    # Create small synthetic dataset for fast iteration
-    requested_n = SYNTHETIC_SAMPLES_DIFF_TUNE
-    requested_cap = synthetic_epoch_capacity_diff_hp()
-    n_samples, epoch_cap = resolve_synthetic_params(requested_n, requested_cap, smoke_test)
-
-    n_val = 0 if smoke_test else min(n_samples // 10, 500)
-    synth_cache = get_synth_cache_dir(smoke_test=smoke_test)
-    synthetic_loader = get_synthetic_dataloader(
-        batch_size=32,
-        lookback_length=LOOKBACK_LENGTH,
-        forecast_length=FORECAST_LENGTH,
-        num_variables=N_VARIATES,
-        num_samples=n_samples,
-        num_workers=0,
-        lookback_overlap=LOOKBACK_OVERLAP,
-        cache_dir=synth_cache,
-        skip_cross_var_aug=(N_VARIATES > 32),
-        val_tail_n=n_val,
-        synthetic_epoch_capacity=epoch_cap,
-    )
-    
-    dataset = synthetic_loader.dataset
-    if smoke_test:
-        n_val = max(1, min(len(dataset) // 4, len(dataset) - 1))
-    else:
-        n_val = min(len(dataset) // 10, 500)
-    train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
-    val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
-    
-    train_bs = min(4, DIFFUSION_BATCH_SIZE) if smoke_test else DIFFUSION_BATCH_SIZE
-    train_loader = DataLoader(train_subset, batch_size=train_bs, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_subset, batch_size=min(train_bs, 16), shuffle=False, num_workers=0)
-    
-    trial_dir = checkpoint_dir or CHECKPOINT_DIR
-    os.makedirs(trial_dir, exist_ok=True)
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-    skip_anchor = DETERMINISTIC_ANCHOR_LOSS
-    if skip_anchor:
-        logger.info("Phase 1B: anchor loss disabled for HP search (2× speedup)")
-
-    from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
-
-    def objective_builder(_worker_id: int):
-        dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        def objective(trial):
-            return diffusion_hp_objective(
-                trial, train_loader, val_loader, itrans_guidance, dev, smoke_test,
-                fixed_batch_size=train_bs,
-                disable_anchor_loss=skip_anchor,
-                trial_ckpt_dir=trial_dir,
-            )
-        return objective
-
-    logger.info(
-        "Starting Diffusion HP search: %d trials (%d workers)",
-        n_trials, parallel_workers,
-    )
-    study = run_optuna_study(
-        study_name="diffusion-hp-pretrain",
-        checkpoint_dir=trial_dir,
-        n_trials=n_trials,
-        parallel_workers=parallel_workers,
-        direction="minimize",
-        objective_builder=objective_builder,
-        sampler=TPESampler(seed=42),
-        show_progress_bar=not smoke_test,
-        sampler_seed=42,
-    )
-
-    best_params = dict(study.best_params)
-    best_params['batch_size'] = train_bs
-    logger.info(
-        "Best Diffusion params: lr=%.2e bs=%s val=%.4f",
-        best_params['learning_rate'], best_params['batch_size'], study.best_value,
-    )
-
-    ckpt_path = None
-    if checkpoint_dir is not None:
-        ckpt_path = os.path.join(checkpoint_dir, 'diff_hp_best.pt')
-        _promote_trial_ckpt(study, trial_dir, "diff_hp_trial_{trial}.pt", ckpt_path)
-        logger.info("  Saved best diffusion HP model → %s", ckpt_path)
-
-    return best_params, ckpt_path
-
-
-# ============================================================================
-# Staged synthetic diffusion pretrain (coarse/fine checkpoints)
-# ============================================================================
-
-def pretrain_diffusion(
-    best_params: Dict,
-    itrans_checkpoint: str,
-    n_samples: int,
-    epochs: int,
-    patience: int,
-    checkpoint_dir: str,
-    smoke_test: bool = False,
-) -> str:
-    """Train one staged diffusion checkpoint on synthetic data (not post-HP retrain)."""
-    logger.info("=" * 60)
-    logger.info("Staged synthetic diffusion pretrain (with iTransformer guidance)")
-    logger.info(f"Samples: {n_samples}, Epochs: {epochs}, Patience: {patience}")
-    logger.info(f"Params: {best_params}")
-    logger.info("=" * 60)
-    
-    device = get_device()
-    
-    lr = require_tuned_param(best_params, 'learning_rate', 'Diffusion pretraining')
-    tuned_batch_size = require_tuned_param(best_params, 'batch_size', 'Diffusion pretraining')
-    batch_size = tuned_batch_size
-    
-    # Load iTransformer as guidance (not wrapped in DDP - used in eval mode only)
-    itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, N_VARIATES, device)
-    itrans_guidance = iTransformerGuidance(itrans_model)
-    
-    # Create data
-    synth_cache = get_synth_cache_dir(checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
-    n_val = 0 if smoke_test else min(n_samples // 10, 5000)
-    epoch_cap = 1 if smoke_test else synthetic_epoch_capacity_pretrain_diffusion()
-    synthetic_loader = get_synthetic_dataloader(
-        batch_size=min(16, max(2, tuned_batch_size)),
-        lookback_length=LOOKBACK_LENGTH,
-        forecast_length=FORECAST_LENGTH,
-        num_variables=N_VARIATES,
-        num_samples=n_samples,
-        num_workers=0 if smoke_test else 4,
-        lookback_overlap=LOOKBACK_OVERLAP,
-        cache_dir=synth_cache,
-        skip_cross_var_aug=(N_VARIATES > 32),
-        val_tail_n=n_val,
-        synthetic_epoch_capacity=epoch_cap,
-    )
-    
-    dataset = synthetic_loader.dataset
-    train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
-    val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
-    batch_size = tuned_batch_size or (min(4, DIFFUSION_BATCH_SIZE) if smoke_test else DIFFUSION_BATCH_SIZE)
-    train_loader = DataLoader(
-        train_subset, batch_size=batch_size, shuffle=True,
-        num_workers=0 if smoke_test else 4,
-    )
-    val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=0)
-
-    model_kwargs = anchor_kwargs_from_params(best_params)
-    for key in (
-        "max_scale",
-        "dit_dropout",
-        "prediction_target",
-        "loss_weighting",
-        "use_ordinal_window_norm",
-        "ordinal_tie_atol",
-    ):
-        if key in best_params:
-            model_kwargs[key] = best_params[key]
-    model = create_diffusion_model(
-        guidance_model=itrans_guidance,
-        **model_kwargs,
-    ).to(device)
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
-    
-    early_stop = EarlyStopping(patience=patience)
-    best_val_loss = float('inf')
-    ckpt_path = os.path.join(checkpoint_dir, 'pretrained_diffusion.pt')
-    
-    for epoch in range(epochs):
-        set_realts_training_epoch(train_loader, epoch)
-        t0 = time.time()
-
-        model.train()
-        _set_ordinal_loader_mode(model, train_loader, eval_mode=False)
-        total_loss = 0.0
-        n_batches = 0
-        for past, future in train_loader:
-            past, future = past.to(device), future.to(device)
-            optimizer.zero_grad()
-            with amp_context():
-                loss = model.get_loss(past, future)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            total_loss += loss.item()
-            n_batches += 1
-        train_loss = total_loss / max(n_batches, 1)
-
-        model.eval()
-        _set_ordinal_loader_mode(model, val_loader, eval_mode=True)
-        total_loss = 0.0
-        n_batches = 0
-        with torch.no_grad():
-            for past, future in val_loader:
-                past, future = past.to(device), future.to(device)
-                with amp_context():
-                    loss = model.get_loss(past, future)
-                total_loss += loss.item()
-                n_batches += 1
-        val_loss = total_loss / max(n_batches, 1)
-
-        scheduler.step()
-        logger.info(
-            "[Diffusion] Epoch %d/%d | Train: %.4f | Val: %.4f | LR: %.2e | Time: %.1fs",
-            epoch + 1, epochs, train_loss, val_loss, scheduler.get_last_lr()[0], time.time() - t0,
-        )
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            save_checkpoint(
-                model, optimizer, epoch, train_loss, val_loss,
-                {'diffusion_params': best_params, 'itrans_checkpoint': itrans_checkpoint},
-                ckpt_path,
-            )
-            logger.info("  -> New best! Saved to %s", ckpt_path)
-
-        if early_stop(val_loss):
-            logger.info("Early stopping at epoch %d", epoch + 1)
-            break
-
-    logger.info(f"Diffusion pretraining complete. Best val loss: {best_val_loss:.4f}")
-    return ckpt_path
-
-
-# ============================================================================
-# PHASE 2: Fine-tuning HP Search & Training
-# ============================================================================
-
-def finetune_hp_objective(
-    trial,
-    dataset_name: str,
-    variate_indices: List[int],
-    pretrained_path: str,
-    itrans_checkpoint: str,
-    device: torch.device,
-    smoke_test: bool = False,
-    fixed_batch_size: Optional[int] = None,
-    trial_ckpt_dir: Optional[str] = None,
-    train_stride: Optional[int] = None,
-    test_stride: Optional[int] = None,
-    train_ds: Any = None,
-    val_ds: Any = None,
-) -> float:
-    """Optuna objective for fine-tuning HP search (lr only; batch_size auto-probed or fixed).
-
-    If ``trial_ckpt_dir`` is provided, this trial's best-epoch model state is saved
-    to ``{trial_ckpt_dir}/_diff_ft_trial_{trial.number}_best.pt``. The caller picks
-    the best study trial and promotes its file to the final ``best.pt`` — no
-    separate "Phase 2C" retrain is performed.
-
-    When ``train_ds`` / ``val_ds`` are passed (recommended), the caller loads real data
-    once before Optuna — avoids re-reading CSVs every trial and NFS stale-handle flakes.
-    """
-    lr = trial.suggest_float(
-        'learning_rate', FINETUNE_HP_LR_MIN, FINETUNE_HP_LR_MAX, log=True,
-    )
-    if fixed_batch_size is not None:
-        batch_size = fixed_batch_size
-    else:
-        batch_size = min(4, DIFFUSION_BATCH_SIZE) if smoke_test else DIFFUSION_BATCH_SIZE
-
-    anchor_lambda, anchor_alpha = fixed_deterministic_anchor_hp()
-    
-    if train_ds is None or val_ds is None:
-        train_ds, val_ds, _, _ = load_dataset(
-            dataset_name, variate_indices,
-            stride=train_stride or WINDOW_STRIDE,
-            test_stride=1 if test_stride is None else test_stride,
-        )
-    
-    if smoke_test:
-        train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
-        val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
-    
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
-    
-    # Load iTransformer guidance
-    n_iv = len(variate_indices)
-    itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
-    itrans_guidance = iTransformerGuidance(itrans_model)
-    
-    # Load pretrained diffusion (skip guidance keys — keep the attached one)
-    ds_lb, ds_hz = dataset_window_lengths(dataset_name)
-    model = create_diffusion_model(
-        n_variates=n_iv,
-        lookback=ds_lb,
-        horizon=ds_hz,
-        guidance_model=itrans_guidance,
-        **anchor_kwargs_from_params(),
-    ).to(device)
-    ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
-    load_diffusion_state_keep_attached_guidance(model, ckpt['model_state_dict'])
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    
-    epochs = HP_TUNE_EPOCHS if not smoke_test else 1
-    patience = HP_TUNE_PATIENCE if not smoke_test else 1
-    early_stop = EarlyStopping(patience=patience)
-    best_val_loss = float('inf')
-    trial_tuned_params = {'learning_rate': lr, 'batch_size': batch_size}
-    if DETERMINISTIC_ANCHOR_LOSS:
-        trial_tuned_params['deterministic_anchor_lambda'] = anchor_lambda
-        trial_tuned_params['deterministic_anchor_alpha'] = anchor_alpha
-
-    trial_ckpt_path: Optional[str] = None
-    if trial_ckpt_dir is not None:
-        os.makedirs(trial_ckpt_dir, exist_ok=True)
-        trial_ckpt_path = os.path.join(trial_ckpt_dir, f'_diff_ft_trial_{trial.number}_best.pt')
-
-    for epoch in range(epochs):
-        model.train()
-        _set_ordinal_loader_mode(model, train_loader, eval_mode=False)
-        for past, future in train_loader:
-            past, future = past.to(device), future.to(device)
-            optimizer.zero_grad()
-            with amp_context():
-                loss = model.get_loss(past, future)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-        
-        model.eval()
-        _set_ordinal_loader_mode(model, val_loader, eval_mode=True)
-        val_loss = 0.0
-        n_batches = 0
-        with torch.no_grad():
-            for past, future in val_loader:
-                past, future = past.to(device), future.to(device)
-                with amp_context():
-                    loss = model.get_loss(past, future)
-                val_loss += loss.item()
-                n_batches += 1
-        val_loss /= max(n_batches, 1)
-        
-        trial.report(val_loss, epoch)
-        if trial.should_prune():
-            raise optuna.TrialPruned()
-        
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            if trial_ckpt_path is not None and is_main_process():
-                ckpt_config = diffusion_arch_config_dict()
-                ckpt_config.update({
-                    'tuned_params': trial_tuned_params,
-                    'trial_number': trial.number,
-                })
-                save_checkpoint(
-                    unwrap_model(model), optimizer, epoch, float('nan'), val_loss,
-                    ckpt_config,
-                    trial_ckpt_path,
-                )
-
-        if early_stop(val_loss):
-            break
-
-    return best_val_loss
-
-
-def _promote_best_trial_to_final(
-    study,
-    subset_dir: str,
-    subset_info: Dict,
-    dataset_name: str,
-    norm_stats: Dict,
-    fixed_batch_size: int,
-    pretrained_path: str,
-    itrans_checkpoint: str,
-    device: torch.device,
-    smoke_test: bool = False,
-) -> Tuple[str, Dict]:
-    """Copy the best Phase 2B trial checkpoint to best.pt (no extra retrain)."""
-    del pretrained_path, itrans_checkpoint, device, smoke_test  # kept for call-site compatibility
-    if study.best_trial is None:
-        raise RuntimeError("Optuna study has no successful trials")
-
-    subset_id = subset_info['subset_id']
-    variate_indices = subset_info['variate_indices']
-    best_num = study.best_trial.number
-    tuned_params = dict(study.best_params)
-    tuned_params['batch_size'] = fixed_batch_size
-
-    src = os.path.join(subset_dir, f'_diff_ft_trial_{best_num}_best.pt')
-    if not os.path.exists(src):
-        raise RuntimeError(f"Best trial checkpoint missing: {src}")
-
-    dst = os.path.join(subset_dir, 'best.pt')
-    logger.info(
-        f"Promoting trial {best_num} to {dst} for {subset_id} "
-        f"(lr={float(tuned_params['learning_rate']):.2e}, batch_size={int(tuned_params['batch_size'])})"
-    )
-
-    import shutil
-    if is_main_process():
-        shutil.copy2(src, dst)
-        trial_ckpt = torch.load(src, map_location='cpu', weights_only=False)
-        ckpt_config = trial_ckpt.get('config', {})
-        if isinstance(ckpt_config, dict) and 'tuned_params' in ckpt_config:
-            tuned_params = dict(ckpt_config['tuned_params'])
-            tuned_params['batch_size'] = fixed_batch_size
-        best_val_loss = float(trial_ckpt.get('val_loss', study.best_value))
-        best_epoch = int(trial_ckpt.get('epoch', 0)) + 1
-        if DETERMINISTIC_ANCHOR_LOSS:
-            lam, alpha = fixed_deterministic_anchor_hp()
-            tuned_params['deterministic_anchor_lambda'] = lam
-            tuned_params['deterministic_anchor_alpha'] = alpha
-        os.makedirs(subset_dir, exist_ok=True)
-        with open(os.path.join(subset_dir, 'metadata.json'), 'w') as f:
-            json.dump({
-                'subset_id': subset_id,
-                'dataset_name': dataset_name,
-                'variate_indices': variate_indices,
-                'data_subset': subset_info.get('data_subset', {}),
-                'variate_names': subset_info.get('variate_names', []),
-                'norm_mean': norm_stats['mean'].tolist(),
-                'norm_std': norm_stats['std'].tolist(),
-                'tuned_params': tuned_params,
-                'best_trial': best_num,
-                'hp_best_val_loss': float(study.best_value),
-                'best_val_loss': best_val_loss,
-                'best_epoch': best_epoch,
-                'promoted_from_trial_ckpt': True,
-                'diffusion_type': DIFFUSION_TYPE,
-                'image_height': IMAGE_HEIGHT,
-                'max_scale': MAX_SCALE,
-                'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
-                'window_norm_low_var_threshold': WINDOW_NORM_LOW_VAR_THRESHOLD,
-                'window_norm_low_var_unit_std': WINDOW_NORM_LOW_VAR_UNIT_STD,
-                'window_norm_center': WINDOW_NORM_CENTER,
-                'diffusion_stage': DIFFUSION_STAGE,
-                'use_guidance_channel': USE_GUIDANCE_CHANNEL,
-                'cfg_dropout': CFG_DROPOUT,
-                'disable_cross_attention': DISABLE_CROSS_ATTENTION,
-                'cross_variate_context_bias': CROSS_VARIATE_CONTEXT_BIAS,
-                'use_window_normalization': USE_WINDOW_NORMALIZATION,
-                'window_norm_center': WINDOW_NORM_CENTER,
-                'zero_guidance_forecast': ZERO_GUIDANCE_FORECAST,
-                'window_stride': WINDOW_STRIDE,
-                'lookback_length': LOOKBACK_LENGTH,
-                'forecast_length': FORECAST_LENGTH,
-                'dit_patch_size': list(DIT_PATCH_SIZE),
-            }, f, indent=2)
-        for fn in os.listdir(subset_dir):
-            if fn.startswith('_diff_ft_trial_') and fn.endswith('_best.pt'):
-                try:
-                    os.remove(os.path.join(subset_dir, fn))
-                except OSError:
-                    pass
-    else:
-        best_val_loss = float(study.best_value)
-        best_epoch = 0
-
-    return dst, {
-        'best_val_loss': best_val_loss,
-        'best_trial': best_num,
-        'hp_best_val_loss': float(study.best_value),
-        'best_epoch': best_epoch,
-    }
-
-# ============================================================================
-# Evaluation
-# ============================================================================
-
-def evaluate_model(
-    model: DiffusionTSF,
-    test_loader: DataLoader,
-    device: torch.device,
-    n_samples: int = 3,
-    probabilistic_n_samples: Optional[int] = None,
-    probabilistic_sampler: Optional[str] = None,
-    probabilistic_num_inference_steps: Optional[int] = None,
-    smoke_test: bool = False,
-) -> Dict:
-    """Evaluate model on test set.
-
-    Uses a single deterministic anchor decode for deterministic metrics when
-    EVAL_SAMPLER is anchor / deterministic_anchor. Probabilistic CRPS/top-k and
-    sample texture always come from a non-anchor stochastic sampler.
-    Logs periodic progress (batch index, throughput, ETA) for Slurm logs.
-    Note: ``test_loader`` should already be subsetted by the caller if a
-    half-test sweep is desired (see eval call site).
-
-    Returns:
-        ``single``: MSE/MAE/trend + texture on the first draw (anchor pred when
-            ``eval_sampler`` is anchor).
-        ``averaged``: texture_* keys are the mean of per-draw texture metrics
-            (not texture of the mean). Mean-forecast MSE/MAE is intentionally
-            omitted for now because the current MMPD matrix reports
-            deterministic-output MSE/MAE in its full profile.
-    """
-    from tqdm import tqdm
-    model.eval()
-
-    all_preds_single = []
-    all_preds_avg = []
-    all_samples = []
-    all_prob_samples = []
-    all_targets = []
-
-    n_batches = min(1, len(test_loader)) if smoke_test else len(test_loader)
-    batch_size = getattr(test_loader, 'batch_size', None) or 1
-    ds = getattr(test_loader, 'dataset', None)
-    n_windows = len(ds) if ds is not None else None
-
-    def _gen_kwargs_for_sampler(sampler_name: str, *, default_steps: int) -> Dict[str, Any]:
-        if sampler_name in ("anchor", "deterministic_anchor"):
-            return {'sampler': 'anchor'}
-        if sampler_name == "ddpm":
-            return {'sampler': 'ddpm', 'use_ddim': False}
-        return {'sampler': sampler_name, 'num_inference_steps': default_steps}
-
-    eval_sampler = EVAL_SAMPLER
-    det_steps = 1 if eval_sampler in ("anchor", "deterministic_anchor") else (5 if smoke_test else 20)
-    det_gen_kwargs = _gen_kwargs_for_sampler(eval_sampler, default_steps=det_steps)
-    anchor_sampler = det_gen_kwargs.get('sampler') == 'anchor'
-    prob_sampler = probabilistic_sampler or ("dpmpp" if anchor_sampler else eval_sampler)
-    prob_steps = probabilistic_num_inference_steps or (5 if smoke_test else 20)
-    prob_gen_kwargs = _gen_kwargs_for_sampler(prob_sampler, default_steps=prob_steps)
-    if prob_gen_kwargs.get('sampler') == 'anchor':
-        raise ValueError("probabilistic_sampler must not be anchor/deterministic_anchor")
-
-    K = getattr(model.config, 'lookback_overlap', 0)
-    if probabilistic_n_samples is None:
-        probabilistic_n_samples = n_samples
-    effective_avg_samples = 1 if (smoke_test or anchor_sampler) else n_samples
-    effective_prob_samples = 1 if (smoke_test or anchor_sampler) else probabilistic_n_samples
-    if anchor_sampler and not smoke_test:
-        effective_prob_samples = probabilistic_n_samples
-    effective_n_samples = max(effective_avg_samples, effective_prob_samples)
-    det_steps_for_log = det_gen_kwargs.get('num_inference_steps', 1 if anchor_sampler else 20)
-    prob_steps_for_log = prob_gen_kwargs.get(
-        'num_inference_steps',
-        1 if prob_gen_kwargs.get('sampler') == 'anchor' else 20,
-    )
-    nfe_total = n_batches * (det_steps_for_log + effective_prob_samples * prob_steps_for_log)
-
-    logger.info(
-        "eval: start | windows=%s batches=%d batch_size=%d avg_samples=%d prob_samples=%d "
-        "sampler=%s steps=%d lookback_overlap=%d device=%s "
-        "(~%d U-Net forward passes across eval)",
-        n_windows if n_windows is not None else '?',
-        n_batches,
-        batch_size,
-        effective_avg_samples,
-        effective_prob_samples,
-        f"{det_gen_kwargs.get('sampler')}+prob:{prob_gen_kwargs.get('sampler')}",
-        prob_steps_for_log,
-        K,
-        device,
-        nfe_total,
-    )
-
-    use_tqdm = sys.stdout.isatty()
-    pbar = tqdm(
-        enumerate(test_loader),
-        total=n_batches,
-        desc='eval',
-        mininterval=2.0,
-        disable=not use_tqdm,
-        file=sys.stdout,
-    )
-    log_every = max(1, min(50, n_batches // 40 or 1))
-    t0 = time.perf_counter()
-
-    with torch.no_grad():
-        for batch_idx, (past, future) in pbar:
-            if batch_idx >= n_batches:
-                break
-
-            past = past.to(device)
-            t_batch = time.perf_counter()
-
-            torch.manual_seed(42 + batch_idx)
-            result = model.generate(past, **det_gen_kwargs)
-            all_preds_single.append(result.get('prediction_global_norm', result['prediction']).cpu())
-
-            if smoke_test:
-                pred_cpu = result.get('prediction_global_norm', result['prediction']).cpu()
-                all_preds_avg.append(pred_cpu)
-                all_samples.append(pred_cpu.unsqueeze(0))
-                all_prob_samples.append(pred_cpu.unsqueeze(0))
-            else:
-                samples = []
-                for s_idx in range(effective_n_samples):
-                    torch.manual_seed(1000 + s_idx * 17 + batch_idx)
-                    result = model.generate(past, **prob_gen_kwargs)
-                    samples.append(result.get('prediction_global_norm', result['prediction']).cpu())
-                stacked_samples = torch.stack(samples)
-                all_preds_avg.append(stacked_samples[:effective_avg_samples].mean(dim=0))
-                all_samples.append(stacked_samples[:effective_avg_samples])
-                all_prob_samples.append(stacked_samples[:effective_prob_samples])
-
-            if K > 0:
-                future = future[..., K:]
-            all_targets.append(future)
-
-            done = batch_idx + 1
-            elapsed = time.perf_counter() - t0
-            batch_wall = time.perf_counter() - t_batch
-            rate = done / elapsed if elapsed > 1e-6 else 0.0
-            eta = (n_batches - done) / rate if rate > 1e-9 else float('nan')
-            mem_mb = ''
-            if torch.cuda.is_available() and device.type == 'cuda':
-                try:
-                    mem_mb = f" cuda_alloc_MiB={torch.cuda.memory_allocated() / (1024 ** 2):.0f}"
-                except Exception:
-                    mem_mb = ''
-
-            if (
-                batch_idx < 3
-                or batch_idx % log_every == 0
-                or done == n_batches
-            ):
-                logger.info(
-                    "eval: batch %d/%d (%.1f%%) | last_batch_wall=%.2fs | "
-                    "avg_rate=%.3f batch/s | elapsed=%.1fs | eta=%.1fs%s",
-                    done,
-                    n_batches,
-                    100.0 * done / n_batches,
-                    batch_wall,
-                    rate,
-                    elapsed,
-                    eta,
-                    mem_mb,
-                )
-
-    logger.info(
-        "eval: done | total_wall=%.1fs | batches=%d",
-        time.perf_counter() - t0,
-        n_batches,
-    )
-
-    preds_single = torch.cat(all_preds_single, dim=0)
-    preds_avg = torch.cat(all_preds_avg, dim=0)
-    samples_tensor = torch.cat(all_samples, dim=1) if len(all_samples) > 0 else preds_avg.unsqueeze(0)
-    prob_samples_tensor = (
-        torch.cat(all_prob_samples, dim=1)
-        if len(all_prob_samples) > 0
-        else samples_tensor
-    )
-    targets = torch.cat(all_targets, dim=0)
-    
-    # Compute metrics in the dataset's global z-scored space. Diffusion generate()
-    # returns prediction_global_norm after undoing only the per-window model norm.
-    def compute_metrics(pred, target):
-        mse = torch.nn.functional.mse_loss(pred, target).item()
-        mae = torch.nn.functional.l1_loss(pred, target).item()
-        
-        return {'mse': mse, 'mae': mae}
-    
-    from models.diffusion_tsf.metrics import (
-        aggregate_texture_per_sample,
-        probabilistic_forecast_metrics,
-        texture_metrics,
-    )
-
-    n_series = int(targets.shape[0] * targets.shape[1])
-    n_draws = int(samples_tensor.shape[0]) if samples_tensor.ndim > 3 else 1
-    n_prob_draws = int(prob_samples_tensor.shape[0]) if prob_samples_tensor.ndim > 3 else 1
-    logger.info(
-        "eval: computing MSE/MAE/trend + texture on %d windows, %d variate-series, "
-        "%d avg draw(s), %d paper probabilistic draw(s) "
-        "(CPU texture/CRPS; no batch logs — can take a long time on ETTm-scale data)",
-        int(targets.shape[0]),
-        n_series,
-        n_draws,
-        n_prob_draws,
-    )
-    t_metrics = time.perf_counter()
-
-    t_np = targets.numpy()
-    single_metrics = compute_metrics(preds_single, targets)
-    # First draw (anchor when eval_sampler=anchor, else one stochastic sample).
-    single_metrics.update(texture_metrics(t_np, preds_single.numpy()))
-
-    avg_metrics = {
-        "n_samples": float(n_draws),
-        "point_metrics_disabled": True,
-        "point_metrics_note": (
-            "Mean-sample MSE/MAE disabled; MMPD full-profile mse/mae are "
-            "deterministic-output metrics, not sample-mean metrics."
-        ),
-    }
-    prob_samples_np = prob_samples_tensor.numpy()
-    samples_bvsl = np.moveaxis(prob_samples_np, 0, 2)
-    prob_metrics = {}
-    prob_metrics.update(
-        probabilistic_forecast_metrics(
-            t_np,
-            samples_bvsl,
-            gmm_components=10,
-            topk_max=3,
-            seed=42,
-        )
-    )
-    prob_texture = aggregate_texture_per_sample(t_np, prob_samples_np, max_draws=3)
-    for key, val in prob_texture.items():
-        prob_metrics[f"prob_{key}"] = val
-
-    logger.info(
-        "eval: metrics done | wall=%.1fs (includes texture)",
-        time.perf_counter() - t_metrics,
-    )
-
-    return {
-        'single': single_metrics,
-        'averaged': avg_metrics,
-        'deterministic_anchor': single_metrics,
-        'probabilistic_averaged': avg_metrics,
-        'probabilistic_avg30': avg_metrics,
-        'probabilistic': prob_metrics,
-    }
-
-
-def _subset_results_path(results_dir: str, subset_id: str) -> str:
-    """Return path to the canonical results.json for a subset."""
-    return os.path.join(results_dir, subset_id, 'results.json')
-
-
-def _load_subset_results(results_dir: str, subset_id: str) -> dict:
-    path = _subset_results_path(results_dir, subset_id)
-    if os.path.exists(path):
-        with open(path) as f:
-            return json.load(f)
-    return {}
-
-
-def _save_subset_results(results_dir: str, subset_id: str, data: dict):
-    subset_dir = os.path.join(results_dir, subset_id)
-    os.makedirs(subset_dir, exist_ok=True)
-    with open(os.path.join(subset_dir, 'results.json'), 'w') as f:
-        json.dump(data, f, indent=2)
-
-
-def save_eval_results(
-    subset_id,
-    dataset_name,
-    variate_indices,
-    train_metrics,
-    eval_results,
-    results_dir,
-    data_subset: Optional[Dict] = None,
-):
-    """Save diffusion evaluation results to per-subset subdirectory."""
-    data = _load_subset_results(results_dir, subset_id)
-    data.update({
-        'subset_id': subset_id,
-        'dataset': dataset_name,
-        'variate_indices': variate_indices,
-        'data_subset': data_subset or {},
-        'train_metrics': train_metrics,
-        'eval_metrics': eval_results,
-        'evaluated_at': datetime.now().isoformat(),
-    })
-    _save_subset_results(results_dir, subset_id, data)
-    update_summary_csv(results_dir)
-
-
-def update_summary_csv(results_dir):
-    """Rebuild summary CSV by walking per-subset subdirectories."""
-    rows = []
-    results_path = Path(results_dir)
-    for subset_dir in sorted(results_path.iterdir()):
-        if not subset_dir.is_dir():
-            continue
-        rfile = subset_dir / 'results.json'
-        if not rfile.exists():
-            continue
-        try:
-            with open(rfile) as f:
-                data = json.load(f)
-            if 'eval_metrics' not in data:
-                continue
-            m = data['eval_metrics']
-            itrans = data.get('itransformer_metrics', {})
-            row = {
-                'subset_id': data['subset_id'],
-                'dataset': data['dataset'],
-                'best_val_loss': data.get('train_metrics', {}).get('best_val_loss'),
-                'single_mse': m['single']['mse'],
-                'single_mae': m['single']['mae'],
-                'avg_mse': m.get('averaged', {}).get('mse'),
-                'avg_mae': m.get('averaged', {}).get('mae'),
-                'itrans_mse': itrans.get('mse'),
-                'itrans_mae': itrans.get('mae'),
-            }
-            for src, pfx in ((m['single'], 'single'), (m.get('averaged', {}), 'avg')):
-                for key, val in src.items():
-                    if key.startswith('texture_'):
-                        row[f'{pfx}_{key}'] = val
-            rows.append(row)
-        except Exception:
-            continue
-
-    if rows:
-        df = pd.DataFrame(rows).sort_values(['dataset', 'subset_id'])
-        df.to_csv(os.path.join(results_dir, 'summary.csv'), index=False)
-
-
-# ============================================================================
-# iTransformer Baseline Evaluation
-# ============================================================================
-
-def train_subset_itransformer_full_baseline(
-    dataset_name: str,
-    variate_indices: List[int],
-    subset_id: str,
-    device: torch.device,
-    smoke_test: bool = False,
-    epochs: int = None,
-    patience: int = None,
-    train_stride: Optional[int] = None,
-    test_stride: Optional[int] = None,
-    data_subset: Optional[Dict] = None,
-) -> str:
-    """Train iTransformer from scratch on the full train split (no diffusion, no warm-start).
-
-    This is the fair ``iTrans-only'' comparison: same variates and train/val windows as the
-    diffusion finetune job, but a separate model not used as guidance.
-    """
-    ds_lb, ds_hz = dataset_window_lengths(dataset_name)
-    ckpt_path = os.path.join(CHECKPOINT_DIR, f'{subset_id}_itrans_full_dataset.pt')
-    if os.path.exists(ckpt_path) and not smoke_test:
-        logger.info(f"  Using cached full-dataset iTransformer baseline: {ckpt_path}")
-        return ckpt_path
-
-    global LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN
-    saved_lens = (LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN)
-    LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN = ds_lb, ds_hz, ds_lb
-    try:
-        train_ds, val_ds, _, _ = load_dataset(
-            dataset_name, variate_indices,
-            stride=train_stride or WINDOW_STRIDE,
-            test_stride=1 if test_stride is None else test_stride,
-        )
-        if smoke_test:
-            train_ds = Subset(train_ds, list(range(min(4, len(train_ds)))))
-            val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
-
-        train_loader = DataLoader(
-            train_ds, batch_size=ITRANS_PAPER_BATCH_SIZE, shuffle=True, num_workers=0,
-        )
-        val_loader = DataLoader(
-            val_ds, batch_size=min(ITRANS_PAPER_BATCH_SIZE, 32), shuffle=False, num_workers=0,
-        )
-
-        n_iv = len(variate_indices)
-        itrans_seq, itrans_pred = itrans_model_lengths(ds_lb, ds_hz)
-        model = create_itransformer(seq_len=itrans_seq, pred_len=itrans_pred, num_vars=n_iv).to(device)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-        criterion = nn.MSELoss()
-
-        max_epochs = 1 if smoke_test else (epochs if epochs is not None else ITRANS_HP_FINETUNE_MAX_EPOCHS)
-        patience_val = 1 if smoke_test else (patience if patience is not None else 5)
-        early_stop = EarlyStopping(patience=patience_val)
-        best_val = float('inf')
-
-        logger.info(
-            f"[{subset_id}] Training full-dataset iTransformer baseline "
-            f"({max_epochs} epochs, lookback={ds_lb}, forecast={ds_hz}, n={n_iv})..."
-        )
-        for epoch in range(max_epochs):
-            train_loss = train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
-            val_loss = validate_itransformer(model, val_loader, criterion, device)
-            logger.info(
-                f"[{subset_id}] iTrans full-baseline epoch {epoch + 1}/{max_epochs} "
-                f"train={train_loss:.4f} val={val_loss:.4f}"
-            )
-            if val_loss < best_val:
-                best_val = val_loss
-                save_checkpoint(
-                    model, optimizer, epoch, train_loss, val_loss,
-                    {
-                        'subset_id': subset_id,
-                        'dataset_name': dataset_name,
-                        'variate_indices': variate_indices,
-                        'data_subset': data_subset or {},
-                        'lookback_length': ds_lb,
-                        'forecast_length': ds_hz,
-                        'type': 'itrans_full_dataset_baseline',
-                    },
-                    ckpt_path,
-                )
-            if early_stop(val_loss):
-                break
-        logger.info(f"  Full-dataset iTransformer baseline saved → {ckpt_path} (val={best_val:.4f})")
-        return ckpt_path
-    finally:
-        LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN = saved_lens
-
-
-def evaluate_itransformer_baseline(
-    subset_id: str,
-    dataset_name: str,
-    variate_indices: List[int],
-    itrans_checkpoint: str,
-    results_dir: str,
-    device: torch.device,
-    smoke_test: bool = False,
-    test_indices: Optional[List[int]] = None,
-    test_stride: Optional[int] = None,
-    data_subset: Optional[Dict] = None,
-) -> Dict:
-    """Run iTransformer-only forecast on the test split (same windows as diffusion eval).
-
-    Results are merged into the per-subset ``results.json`` for summary tables.
-    """
-    ds_lb, ds_hz = dataset_window_lengths(dataset_name)
-    global LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN
-    saved_lens = (LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN)
-    LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN = ds_lb, ds_hz, ds_lb
-    try:
-        _, _, test_ds, _ = load_dataset(
-            dataset_name, variate_indices,
-            stride=1,
-            test_stride=1 if test_stride is None else test_stride,
-        )
-        if test_indices is not None:
-            test_ds = Subset(test_ds, list(test_indices))
-        elif smoke_test:
-            test_ds = Subset(test_ds, list(range(min(2, len(test_ds)))))
-        test_loader = DataLoader(test_ds, batch_size=8 if not smoke_test else 2, shuffle=False)
-
-        n_iv = len(variate_indices)
-        itrans_model = load_itransformer_from_checkpoint(itrans_checkpoint, n_iv, device)
-
-        all_preds, all_targets = [], []
-        with torch.no_grad():
-            for past, future in test_loader:
-                past = past.to(device)
-                B, C, L = past.shape
-                x_enc = past.permute(0, 2, 1)
-                seq_sl = getattr(itrans_model, 'seq_len', L)
-                if x_enc.shape[1] > seq_sl:
-                    x_enc = x_enc[:, -seq_sl:, :]
-                x_dec = torch.zeros(B, ds_hz, C, device=device, dtype=past.dtype)
-                output = itrans_model(x_enc, None, x_dec, None)
-                if isinstance(output, tuple):
-                    output = output[0]
-                all_preds.append(output.permute(0, 2, 1).cpu())
-                if LOOKBACK_OVERLAP > 0:
-                    future = future[..., LOOKBACK_OVERLAP:]
-                all_targets.append(future)
-
-        preds = torch.cat(all_preds, dim=0)
-        targets = torch.cat(all_targets, dim=0)
-
-        mse = torch.nn.functional.mse_loss(preds, targets).item()
-        mae = torch.nn.functional.l1_loss(preds, targets).item()
-        pred_diff = preds[:, :, 1:] - preds[:, :, :-1]
-        tgt_diff = targets[:, :, 1:] - targets[:, :, :-1]
-        trend_acc = ((pred_diff > 0) == (tgt_diff > 0)).float().mean().item()
-
-        metrics = {'mse': mse, 'mae': mae, 'trend_accuracy': trend_acc}
-        logger.info(
-            f"[{subset_id}] iTransformer full-dataset baseline: "
-            f"MSE={mse:.4f}, MAE={mae:.4f}, trend={trend_acc:.3f}"
-        )
-
-        data = _load_subset_results(results_dir, subset_id)
-        data.setdefault('subset_id', subset_id)
-        data.setdefault('dataset', dataset_name)
-        data.setdefault('variate_indices', variate_indices)
-        data.setdefault('data_subset', data_subset or {})
-        data['itransformer_metrics'] = metrics
-        data['itransformer_baseline_ckpt'] = itrans_checkpoint
-        data['itransformer_evaluated_at'] = datetime.now().isoformat()
-        _save_subset_results(results_dir, subset_id, data)
-        update_summary_csv(results_dir)
-
-        return metrics
-    finally:
-        LOOKBACK_LENGTH, FORECAST_LENGTH, ITRANSFORMER_SEQ_LEN = saved_lens
-
-
-# ============================================================================
-# CLI
-# ============================================================================
-
-def main():
-    global logger, N_VARIATES, CHECKPOINT_DIR, RESULTS_DIR, SYNTH_CACHE_DIR, DATASETS_DIR
-
-    parser = argparse.ArgumentParser(description="Diffusion TSF Training Pipeline")
-    parser.add_argument("--config", type=str, required=True, help="YAML experiment config")
-    parser.add_argument("--dataset", type=str, default=None, help="Override dataset from YAML")
-    parser.add_argument("--n-variates", type=int, default=None, help="Override variate count")
-    parser.add_argument("--variate-indices", type=str, default=None, help="Comma-separated variate indices")
-    parser.add_argument("--subset-id", type=str, default=None, help="Optional subset id label")
-    parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
-    parser.add_argument("--smoke-test", action="store_true", help="Quick validation run")
-    parser.add_argument("--seed", type=int, default=None, help="Override random seed from YAML")
-    parser.add_argument("--parallel-optuna-workers", type=int, default=1, help="Parallel Optuna workers")
-    parser.add_argument("--checkpoint-dir", type=str, default=None, help="Override checkpoint directory")
-    parser.add_argument("--results-dir", type=str, default=None, help="Override results directory")
-    parser.add_argument("--datasets-dir", type=str, default=None, help="Benchmark CSV/NPZ root")
-    parser.add_argument("--synth-cache-dir", type=str, default=None, help="Shared synthetic pool cache")
-    parser.add_argument("--fresh", action="store_true", help="Wipe manifest and checkpoints")
-    parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
-    parser.add_argument("--wandb-project", type=str, default=None, help="Override wandb project from YAML")
-    args = parser.parse_args()
-
-    logger = setup_logging()
-
-    from models.diffusion_tsf.pipeline.config import apply_cli_state_overrides
-    from models.diffusion_tsf.pipeline import load_experiment_config, PipelineState, Pipeline
-    from models.diffusion_tsf.pipeline.phases import PHASE_REGISTRY
-
-    cli_overrides = {}
-    if args.dataset:
-        cli_overrides["dataset"] = args.dataset
-
-    nv = args.n_variates
-    variate_indices = None
-    if args.variate_indices:
-        variate_indices = [int(x.strip()) for x in args.variate_indices.split(",") if x.strip()]
-        cli_overrides["variate_indices"] = variate_indices
-        if not nv:
-            nv = len(variate_indices)
-
-    if not nv and args.dataset:
-        try:
-            nv = get_dim_for_dataset(args.dataset)
-        except Exception:
-            pass
-    if nv:
-        cli_overrides["n_variates"] = nv
-
-    if args.seed is not None:
-        cli_overrides["seed"] = args.seed
-    if args.smoke_test:
-        cli_overrides["smoke_test"] = True
-    if args.checkpoint_dir:
-        cli_overrides["checkpoint_dir"] = args.checkpoint_dir
-    if args.results_dir:
-        cli_overrides["results_dir"] = args.results_dir
-    if args.datasets_dir:
-        cli_overrides["datasets_dir"] = os.path.abspath(args.datasets_dir)
-    if args.synth_cache_dir:
-        cli_overrides["synth_cache_dir"] = args.synth_cache_dir
-    if args.fresh:
-        cli_overrides["fresh"] = True
-    if args.resume:
-        cli_overrides["resume"] = True
-    if args.subset_id:
-        cli_overrides["subset_id"] = args.subset_id
-
-    parallel_workers = 1 if args.smoke_test else max(1, int(args.parallel_optuna_workers))
-    cli_overrides["parallel_optuna_workers"] = parallel_workers
-
-    cfg = load_experiment_config(args.config, cli_overrides)
-    state = PipelineState.from_config(cfg)
-    apply_cli_state_overrides(state, cfg)
-    if args.wandb:
-        state.wandb_enabled = True
-    if args.wandb_project:
-        state.wandb_project = args.wandb_project
-
-    from models.diffusion_tsf.pipeline.config import logging_settings
-    from models.diffusion_tsf.pipeline.logging_utils import configure_diagnostic_logging
-
-    configure_diagnostic_logging(bool(logging_settings(cfg).get("diagnostics_enabled", True)))
-
-    if args.checkpoint_dir:
-        CHECKPOINT_DIR = args.checkpoint_dir
-    if args.results_dir:
-        RESULTS_DIR = args.results_dir
-    if args.synth_cache_dir:
-        SYNTH_CACHE_DIR = args.synth_cache_dir
-    if nv:
-        N_VARIATES = nv
-
-    subset_meta = resolve_pipeline_data_subset(state)
-    if subset_meta.get("enabled"):
-        logger.info(
-            "Data subset resolved: %s -> %s vars, train_stride=%s, test_stride=%s, "
-            "raw=%.2f MiB, reduced≈%.2f MiB",
-            state.subset_id,
-            subset_meta.get("n_variates"),
-            subset_meta.get("train_stride"),
-            subset_meta.get("test_stride"),
-            float(subset_meta.get("raw_size_mb") or 0.0),
-            float(subset_meta.get("reduced_size_mb") or 0.0),
-        )
-
-    phases = []
-    for p in cfg["phases"]:
-        p_class = PHASE_REGISTRY.get(p["phase"])
-        if not p_class:
-            logger.error("Unknown phase: %s", p["phase"])
-            sys.exit(1)
-        phases.append(p_class(**p))
-
-    try:
-        Pipeline(phases, state, merged_config=cfg).run()
-    finally:
-        if state.wandb_enabled:
-            from models.diffusion_tsf.pipeline import wandb_utils
-            wandb_utils.finish_pipeline_run()
-
-
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -7,18 +7,18 @@ import logging
 import os
 import hashlib
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, Optional
 
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
+from models.diffusion_tsf.pipeline.reused_paths import find_reused_pretrain_ckpt
 from models.diffusion_tsf.pipeline.visualize_utils import (
     run_pretrain_diffusion_visualizations,
     run_staged_synthetic_pretrain_diagnostics,
 )
 from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
-from models.diffusion_tsf.pipeline.haar_frequency_calibration import ensure_haar_frequency_calibration
-from models.diffusion_tsf.pipeline.fourier_frequency_calibration import ensure_fourier_frequency_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -58,16 +58,6 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "finer_image_height": int(state.finer_image_height),
         "use_triple_scale": bool(state.use_triple_scale),
         "staged_representation": str(state.staged_representation),
-        "haar_high_freq_levels": int(state.haar_high_freq_levels),
-        "haar_high_freq_percent": float(state.haar_high_freq_percent),
-        "haar_fine_max_scale": float(state.haar_fine_max_scale),
-        "fourier_high_freq_cutoff_bin": int(state.fourier_high_freq_cutoff_bin),
-        "fourier_high_freq_percent": float(state.fourier_high_freq_percent),
-        "fourier_fine_max_scale": float(state.fourier_fine_max_scale),
-        "fourier_flatline_atol": float(state.fourier_flatline_atol),
-        "coarse_flatline_blur_fine_target": bool(state.coarse_flatline_blur_fine_target),
-        "coarse_flatline_blur_radius": int(state.coarse_flatline_blur_radius),
-        "coarse_flatline_blur_kernel": str(state.coarse_flatline_blur_kernel),
         "max_scale": max_scale,
         "dit_patch_size": list(state.dit_patch_size),
         "dit_embed_dim": int(state.dit_embed_dim),
@@ -107,7 +97,7 @@ def _stage_max_scale_for_dataset(state: PipelineState, dataset: str) -> float:
 
 
 def _current_run_config_suffix(state: PipelineState) -> str:
-    """Infer the submit_grid config suffix from the isolated checkpoint dir name."""
+    """Infer the submit_binary config suffix from the isolated checkpoint dir name."""
     name = os.path.basename(os.path.abspath(state.checkpoint_dir))
     token = f"-{state.dataset}-"
     if token in name:
@@ -256,13 +246,16 @@ def source_run_stage_pretrain_ckpt(
     source_config: str,
     stage: str,
 ) -> Optional[str]:
-    """``pretrained_{stage}/pretrained_diffusion.pt`` from a prior grid run.
+    """``pretrained_{stage}/pretrained_diffusion.pt`` from reused store or a prior grid run."""
+    reused = find_reused_pretrain_ckpt(source_config, stage)
+    if reused:
+        logger.info(
+            "  [staged_diffusion_pretrain] %s reused pretrain from %s",
+            stage,
+            reused,
+        )
+        return reused
 
-    Prefer same-dataset donor. If missing (e.g. quota deleted electricity's
-    pretrained_* while ETTh1's copy remains), fall back to any dataset's run
-    of the same config stem — synthetic pretrain is geometry-keyed, not
-    dataset-keyed.
-    """
     ckpt_rel = f"pretrained_{stage}/pretrained_diffusion.pt"
     try:
         source_dir = discover_dataset_run_ckpt_dir(
@@ -419,7 +412,7 @@ def _resolve_phase1_path(state: PipelineState, value: str) -> str:
     expanded = os.path.abspath(os.path.expanduser(raw))
     if os.path.isdir(expanded):
         return expanded
-    # Relative to ckpts/ (same layout as submit_grid: $STORE/ckpts/<stem>/)
+    # Relative to ckpts/ (same layout as submit_binary: $STORE/ckpts/<stem>/)
     under_ckpts = os.path.join(_phase1_ckpt_root(state), raw)
     return os.path.abspath(under_ckpts)
 
@@ -480,77 +473,81 @@ def _resolve_diff_hp(state: PipelineState, source_dir: Optional[str]) -> Dict[st
     )
 
 
-def _resolve_itrans_pretrain(
+def _resolve_synthetic_patch_guidance(
     state: PipelineState,
     source_dir: Optional[str],
     *,
-    retrain_synthetic_itrans: bool = False,
+    retrain_synthetic_patch_guidance: bool = False,
 ) -> tuple[str, Dict[str, Any]]:
+    ckpt_names = ("pretrained_patch_guidance.pt", "patch_guidance_synthetic.pt")
     candidates = []
-    if state.itrans_pretrain_ckpt:
-        candidates.append(state.itrans_pretrain_ckpt)
-    if source_dir and not retrain_synthetic_itrans:
-        candidates.extend([
-            os.path.join(source_dir, "pretrained_itransformer.pt"),
-            os.path.join(source_dir, "itransformer.pt"),
-            os.path.join(source_dir, "itrans_hp_best.pt"),
-        ])
-    candidates.append(os.path.join(state.checkpoint_dir, "itransformer.pt"))
+    pretrain_override = state.extra.get("patch_guidance_pretrain_ckpt")
+    if pretrain_override:
+        candidates.append(str(pretrain_override))
+    if source_dir and not retrain_synthetic_patch_guidance:
+        for name in ckpt_names:
+            candidates.append(os.path.join(source_dir, name))
+    for name in ckpt_names:
+        candidates.append(os.path.join(state.checkpoint_dir, name))
     for path in candidates:
         if path and os.path.exists(path):
-            state.itrans_pretrain_ckpt = path
             return path, {
                 "loaded": True,
                 "path": os.path.abspath(path),
                 "source": "checkpoint",
             }
-    logger.warning("No iTransformer pretrain checkpoint found.")
-    from models.diffusion_tsf.train_multivariate_pipeline import run_itransformer_hp_tuning
+    logger.warning("No patch guidance pretrain checkpoint found.")
+    from models.diffusion_tsf.train_multivariate_pipeline import run_patch_guidance_synthetic_tuning
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
     from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
     import shutil
-    
-    # Patch globals before running dummy tuning
+
     patch_globals(pipeline_mod, state, honor_dataset_windows=False)
-    
-    # By default, do NOT skip tuning if n_itrans_hp_trials > 1.
-    # The pipeline yaml can explicitly set extra: skip_synthetic_tuning: true to bypass.
+    saved_ordinal = (pipeline_mod.USE_ORDINAL_WINDOW_NORM, pipeline_mod.GLOBAL_ORDINAL_LADDER)
+    pipeline_mod.USE_ORDINAL_WINDOW_NORM = False
+    pipeline_mod.GLOBAL_ORDINAL_LADDER = None
+
     skip_tuning = state.extra.get("skip_synthetic_tuning", False)
-    
+
     n_trials = getattr(state, "n_itrans_hp_trials", 1)
     if state.smoke_test:
         n_trials = 1
-        logger.warning("Smoke test: Training a dummy 1-epoch iTransformer as fallback.")
+        logger.warning("Smoke test: training a dummy 1-epoch patch guidance as fallback.")
     elif skip_tuning:
         n_trials = 1
-        logger.info("skip_synthetic_tuning=True: Training a 1-trial iTransformer pretrain as fallback (bypassing full Optuna sweep).")
+        logger.info(
+            "skip_synthetic_tuning=True: training 1-trial patch guidance pretrain as fallback.",
+        )
     else:
-        logger.info(f"Training iTransformer from scratch with {n_trials} trials.")
+        logger.info("Training patch guidance from scratch with %s trials.", n_trials)
 
-    best_params, tune_ckpt_path = run_itransformer_hp_tuning(
-        n_trials=n_trials,
-        smoke_test=state.smoke_test,
-        checkpoint_dir=state.checkpoint_dir,
-        parallel_workers=state.parallel_optuna_workers if not skip_tuning else 1,
-    )
-    
-    itrans_ckpt = os.path.join(state.checkpoint_dir, "itransformer.pt")
-    if tune_ckpt_path and os.path.exists(tune_ckpt_path) and not os.path.exists(itrans_ckpt):
-        shutil.copy2(tune_ckpt_path, itrans_ckpt)
-        
-    state.itrans_pretrain_ckpt = itrans_ckpt
-    return itrans_ckpt, {
+    try:
+        best_params, tune_ckpt_path = run_patch_guidance_synthetic_tuning(
+            n_trials=n_trials,
+            smoke_test=state.smoke_test,
+            checkpoint_dir=state.checkpoint_dir,
+            parallel_workers=state.parallel_optuna_workers if not skip_tuning else 1,
+        )
+    finally:
+        pipeline_mod.USE_ORDINAL_WINDOW_NORM, pipeline_mod.GLOBAL_ORDINAL_LADDER = saved_ordinal
+
+    guidance_ckpt = os.path.join(state.checkpoint_dir, "patch_guidance_synthetic.pt")
+    if tune_ckpt_path and os.path.exists(tune_ckpt_path) and not os.path.exists(guidance_ckpt):
+        shutil.copy2(tune_ckpt_path, guidance_ckpt)
+
+    return guidance_ckpt, {
         "loaded": False,
-        "path": os.path.abspath(itrans_ckpt),
+        "path": os.path.abspath(guidance_ckpt),
         "source": "trained_fallback",
+        "best_params": best_params,
     }
 
 
 def _log_staged_pretrain_diagnostics(
     state: PipelineState,
     *,
-    itrans_ckpt: str,
-    itrans_meta: Dict[str, Any],
+    guidance_ckpt: str,
+    guidance_meta: Dict[str, Any],
     best_params: Dict[str, Any],
     n_samples: int,
     stages: Optional[list] = None,
@@ -565,8 +562,8 @@ def _log_staged_pretrain_diagnostics(
             }.get(stage)
             result = run_staged_synthetic_pretrain_diagnostics(
                 state,
-                itrans_ckpt_path=itrans_ckpt,
-                itrans_meta=itrans_meta,
+                itrans_ckpt_path=guidance_ckpt,
+                itrans_meta=guidance_meta,
                 tuned_params=best_params,
                 n_samples=n_samples,
                 stage=stage,
@@ -605,30 +602,22 @@ def patch_stage_globals(
     mod.FINER_IMAGE_HEIGHT = int(state.finer_image_height)
     mod.USE_GUIDANCE_CHANNEL = state.use_guidance_channel
     mod.STAGED_REPRESENTATION = state.staged_representation
-    mod.HAAR_HIGH_FREQ_PERCENT = float(state.haar_high_freq_percent)
-    mod.HAAR_HIGH_FREQ_LEVELS = int(state.haar_high_freq_levels)
-    mod.HAAR_FINE_MAX_SCALE = float(state.haar_fine_max_scale)
-    mod.FOURIER_HIGH_FREQ_PERCENT = float(state.fourier_high_freq_percent)
-    mod.FOURIER_HIGH_FREQ_CUTOFF_BIN = int(state.fourier_high_freq_cutoff_bin)
-    mod.FOURIER_FINE_MAX_SCALE = float(state.fourier_fine_max_scale)
-    mod.FOURIER_FLATLINE_ATOL = float(state.fourier_flatline_atol)
-    mod.FOURIER_HIGH_FREQ_CUTOFF_BINS_PER_VARIATE = (
-        list(state.fourier_high_freq_cutoff_bins_per_variate)
-        if state.fourier_high_freq_cutoff_bins_per_variate
-        else None
-    )
-    mod.FOURIER_FINE_MAX_SCALE_PER_VARIATE = (
-        list(state.fourier_fine_max_scale_per_variate)
-        if state.fourier_fine_max_scale_per_variate
-        else None
-    )
-    mod.COARSE_FLATLINE_BLUR_FINE_TARGET = bool(state.coarse_flatline_blur_fine_target)
-    mod.COARSE_FLATLINE_BLUR_RADIUS = int(state.coarse_flatline_blur_radius)
-    mod.COARSE_FLATLINE_BLUR_KERNEL = str(state.coarse_flatline_blur_kernel)
-    mod.COARSE_FLATLINE_BLUR_ATOL = state.coarse_flatline_blur_atol
     if for_synthetic_pretrain:
         mod.USE_ORDINAL_WINDOW_NORM = False
         mod.GLOBAL_ORDINAL_LADDER = None
+
+
+@contextmanager
+def _synthetic_pretrain_globals(mod: Any, state: PipelineState, stage: str):
+    """Isolate synthetic-pretrain window-norm policy from the rest of the pipeline."""
+    saved = (mod.USE_ORDINAL_WINDOW_NORM, mod.GLOBAL_ORDINAL_LADDER)
+    patch_stage_globals(
+        mod, state, stage, honor_dataset_windows=False, for_synthetic_pretrain=True,
+    )
+    try:
+        yield
+    finally:
+        mod.USE_ORDINAL_WINDOW_NORM, mod.GLOBAL_ORDINAL_LADDER = saved
 
 
 class StagedDiffusionPretrainPhase(PipelinePhase):
@@ -692,8 +681,6 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         return None
 
     def should_skip(self, state: PipelineState) -> bool:
-        ensure_haar_frequency_calibration(state)
-        ensure_fourier_frequency_calibration(state)
         config_name = self._config_name(state)
         ckpts = {
             stage: self._cached_stage_ckpt(state, config_name, stage)
@@ -712,8 +699,6 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
         config_name = self._config_name(state)
-        ensure_haar_frequency_calibration(state)
-        ensure_fourier_frequency_calibration(state)
         reuse_from = self.get("reuse_pretrain_from_config")
         if reuse_from:
             missing = []
@@ -735,18 +720,21 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                     config_name=config_name,
                 )
                 best_params = _resolve_diff_hp(state, source_dir)
-                itrans_ckpt, itrans_meta = _resolve_itrans_pretrain(
+                guidance_ckpt, guidance_meta = _resolve_synthetic_patch_guidance(
                     state,
                     source_dir,
-                    retrain_synthetic_itrans=bool(self.get("retrain_synthetic_itrans", False)),
+                    retrain_synthetic_patch_guidance=bool(
+                        self.get("retrain_synthetic_patch_guidance")
+                        or self.get("retrain_synthetic_itrans", False)
+                    ),
                 )
                 n_samples = int(self.require("n_samples"))
                 if state.smoke_test:
                     n_samples = min(n_samples, 4)
                 _log_staged_pretrain_diagnostics(
                     state,
-                    itrans_ckpt=itrans_ckpt,
-                    itrans_meta=itrans_meta,
+                    guidance_ckpt=guidance_ckpt,
+                    guidance_meta=guidance_meta,
                     best_params=best_params,
                     n_samples=n_samples,
                 )
@@ -767,10 +755,13 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             config_name=config_name,
         )
         best_params = _resolve_diff_hp(state, source_dir)
-        itrans_ckpt, itrans_meta = _resolve_itrans_pretrain(
+        guidance_ckpt, guidance_meta = _resolve_synthetic_patch_guidance(
             state,
             source_dir,
-            retrain_synthetic_itrans=bool(self.get("retrain_synthetic_itrans", False)),
+            retrain_synthetic_patch_guidance=bool(
+                self.get("retrain_synthetic_patch_guidance")
+                or self.get("retrain_synthetic_itrans", False)
+            ),
         )
 
         n_samples = int(self.require("n_samples"))
@@ -800,19 +791,16 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                     stage_dir = os.path.dirname(ckpt)
                     os.makedirs(stage_dir, exist_ok=True)
                     try:
-                        patch_stage_globals(
-                            pipeline_mod, state, stage,
-                            honor_dataset_windows=False, for_synthetic_pretrain=True,
-                        )
-                        ckpt = pretrain_diffusion(
-                            best_params=best_params,
-                            itrans_checkpoint=itrans_ckpt,
-                            n_samples=n_samples,
-                            epochs=epochs,
-                            patience=patience,
-                            checkpoint_dir=stage_dir,
-                            smoke_test=state.smoke_test,
-                        )
+                        with _synthetic_pretrain_globals(pipeline_mod, state, stage):
+                            ckpt = pretrain_diffusion(
+                                best_params=best_params,
+                                guidance_checkpoint=guidance_ckpt,
+                                n_samples=n_samples,
+                                epochs=epochs,
+                                patience=patience,
+                                checkpoint_dir=stage_dir,
+                                smoke_test=state.smoke_test,
+                            )
                     finally:
                         _release_shared_lock(ckpt)
 
@@ -834,19 +822,16 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             elif ckpt is None:
                 stage_dir = _stage_pretrain_dir(state, stage)
                 os.makedirs(stage_dir, exist_ok=True)
-                patch_stage_globals(
-                    pipeline_mod, state, stage,
-                    honor_dataset_windows=False, for_synthetic_pretrain=True,
-                )
-                ckpt = pretrain_diffusion(
-                    best_params=best_params,
-                    itrans_checkpoint=itrans_ckpt,
-                    n_samples=n_samples,
-                    epochs=epochs,
-                    patience=patience,
-                    checkpoint_dir=stage_dir,
-                    smoke_test=state.smoke_test,
-                )
+                with _synthetic_pretrain_globals(pipeline_mod, state, stage):
+                    ckpt = pretrain_diffusion(
+                        best_params=best_params,
+                        guidance_checkpoint=guidance_ckpt,
+                        n_samples=n_samples,
+                        epochs=epochs,
+                        patience=patience,
+                        checkpoint_dir=stage_dir,
+                        smoke_test=state.smoke_test,
+                    )
                 sig_path = os.path.join(stage_dir, ".signature")
                 with open(sig_path, "w", encoding="utf-8") as f:
                     f.write(_stage_pretrain_signature(state, config_name))
@@ -859,20 +844,20 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
 
         _log_staged_pretrain_diagnostics(
             state,
-            itrans_ckpt=itrans_ckpt,
-            itrans_meta=itrans_meta,
+            guidance_ckpt=guidance_ckpt,
+            guidance_meta=guidance_meta,
             best_params=best_params,
             n_samples=n_samples,
         )
 
         viz_ckpt = state.diffusion_fine_pretrain_ckpt or state.diffusion_coarse_pretrain_ckpt
-        if viz_ckpt and itrans_ckpt and not state.smoke_test:
+        if viz_ckpt and guidance_ckpt and not state.smoke_test:
             try:
                 viz_paths = run_pretrain_diffusion_visualizations(
                     state,
                     coarse_ckpt_path=state.diffusion_coarse_pretrain_ckpt,
                     fine_ckpt_path=state.diffusion_fine_pretrain_ckpt,
-                    itrans_ckpt_path=itrans_ckpt,
+                    itrans_ckpt_path=guidance_ckpt,
                     tuned_params=best_params,
                     tag="staged_diffusion_synthetic_pretrain",
                 )

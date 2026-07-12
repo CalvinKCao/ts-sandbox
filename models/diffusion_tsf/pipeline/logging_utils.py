@@ -27,11 +27,6 @@ def configure_pipeline_logging(
     root.setLevel(level)
 
 
-def format_trial_params(trial) -> str:
-    parts = [f"{k}={v!r}" for k, v in sorted(trial.params.items())]
-    return "{" + ", ".join(parts) + "}"
-
-
 DIAGNOSTIC_LOGGER_NAME = "ts_sandbox.diagnostics"
 
 

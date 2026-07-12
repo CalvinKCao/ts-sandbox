@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
@@ -139,7 +139,6 @@ def backfill_run(
     if existing is not None and _run_has_eval_metrics(existing) and not force:
         return "skipped", existing.url
 
-    config_yaml = manifest.get("config_yaml") or ""
     nick = leaderboard_nickname(raw_config=raw_config)
     name = make_pipeline_run_name(group)
 

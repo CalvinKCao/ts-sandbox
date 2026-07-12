@@ -65,7 +65,6 @@ GEOMETRY_CONFIGS = {
 
 DEFAULT_DATASETS = "ETTh1,weather,electricity,exchange_rate,traffic"
 DEFAULT_FRACTIONS = (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0)
-DEFAULT_ACF_LAGS = (1, 5, 10)
 # Coarse map widths used as calibration anchors for g(L) / scale(L).
 L_REF = 104.0   # 96/96 map W
 L_CAL = 728.0   # 336/720_uncompressed map W

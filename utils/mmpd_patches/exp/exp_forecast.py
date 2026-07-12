@@ -212,7 +212,7 @@ class Exp_Forecast(Exp_Basic):
 
         return model_optim
     
-    def _process_one_batch(self, dataset_object, batch_x, batch_y, apply_ood_shift=False):
+    def _process_one_batch(self, _dataset_object, batch_x, batch_y, apply_ood_shift=False):
         batch_x = batch_x.float().to(self.device)
         batch_y = batch_y.float().to(self.device)
 

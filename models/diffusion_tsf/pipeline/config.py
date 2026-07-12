@@ -14,6 +14,18 @@ _REPO_ROOT = os.path.abspath(
 
 REQUIRED_TOP_LEVEL = ("experiment", "phases", "training", "visualization")
 
+GEOMETRY_KEYS = (
+    "lookback_length",
+    "forecast_length",
+    "lookback_overlap",
+    "diffusion_lookback_cap",
+    "diffusion_chunk_horizon",
+    "representation_time_stride",
+    "past_cond_resize_to_horizon",
+    "itrans_lookback_length",
+    "mmpd_patch_size",
+)
+
 REQUIRED_EXPERIMENT_KEYS = (
     "name",
     "dataset",
@@ -98,22 +110,14 @@ REQUIRED_TRAINING_KEYS = (
     "diffusion_batch_size",
     "diffusion_batch_sizes",
     "finetune_batch_sizes",
-    "diffusion_probe_target_effective_batch",
-    "diffusion_probe_max_batch_cap",
-    "diffusion_probe_min_batch",
+    "finetune_max_micro_batch",
     "finetune_hp_lr_min",
     "finetune_hp_lr_max",
     "use_amp",
     "use_gradient_checkpointing",
     "unet_max_chunk_size",
     "eval_num_samples",
-    "emd_lambda",
-    "guidance_penalty_weight",
     "past_loss_weight",
-    "anchor_hp_lambda_min",
-    "anchor_hp_lambda_max",
-    "anchor_hp_alpha_min",
-    "anchor_hp_alpha_max",
     "lr_scheduler_type",
     "lr_warmup_epochs",
     "max_scale_tuning",
@@ -181,22 +185,13 @@ _TRAINING_GLOBAL_MAP: Dict[str, str] = {
     "diffusion_batch_size": "DIFFUSION_BATCH_SIZE",
     "diffusion_batch_sizes": "DIFFUSION_BATCH_SIZES",
     "finetune_batch_sizes": "FINETUNE_BATCH_SIZES",
-    "diffusion_probe_target_effective_batch": "DIFFUSION_PROBE_TARGET_EFFECTIVE_BATCH",
-    "diffusion_probe_max_batch_cap": "DIFFUSION_PROBE_MAX_BATCH_CAP",
-    "diffusion_probe_min_batch": "DIFFUSION_PROBE_MIN_BATCH",
     "finetune_hp_lr_min": "FINETUNE_HP_LR_MIN",
     "finetune_hp_lr_max": "FINETUNE_HP_LR_MAX",
     "use_amp": "USE_AMP",
     "use_gradient_checkpointing": "USE_GRADIENT_CHECKPOINTING",
     "unet_max_chunk_size": "UNET_MAX_CHUNK_SIZE",
     "eval_num_samples": "EVAL_NUM_SAMPLES",
-    "emd_lambda": "EMD_LAMBDA",
-    "guidance_penalty_weight": "GUIDANCE_PENALTY_WEIGHT",
     "past_loss_weight": "PAST_LOSS_WEIGHT",
-    "anchor_hp_lambda_min": "ANCHOR_HP_LAMBDA_MIN",
-    "anchor_hp_lambda_max": "ANCHOR_HP_LAMBDA_MAX",
-    "anchor_hp_alpha_min": "ANCHOR_HP_ALPHA_MIN",
-    "anchor_hp_alpha_max": "ANCHOR_HP_ALPHA_MAX",
     "lr_scheduler_type": "LR_SCHEDULER_TYPE",
     "lr_warmup_epochs": "LR_WARMUP_EPOCHS",
     "max_scale_tuning": "MAX_SCALE_TUNING",
@@ -328,16 +323,12 @@ def normalize_guidance_phases(phases: list, guidance_type: str) -> list:
             continue
         by_name[name] = dict(entry)
     preferred = (
-        "itrans_hp_pretrain",
-        "diffusion_hp_pretrain",
         "staged_diffusion_pretrain",
         "patch_guidance_finetune_hp",
-        "diffusion_finetune_hp",
         "diffusion_coarse_finetune_hp",
         "diffusion_fine_finetune_hp",
         "diffusion_finer_finetune_hp",
         "staged_eval",
-        "eval",
     )
     ordered = [by_name[n] for n in preferred if n in by_name]
     seen = {str(p["phase"]) for p in ordered}
@@ -393,7 +384,25 @@ def _load_yaml_tree(path: str, seen: Optional[Set[str]] = None) -> Dict[str, Any
         ext_path = _resolve_config_path(str(ext), path)
         merged = _deep_merge(merged, _load_yaml_tree(ext_path, seen))
     merged = _deep_merge(merged, raw)
-    return merged
+    return _apply_geometry_block(merged)
+
+
+def _apply_geometry_block(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge optional ``geometry:`` into ``experiment`` (geometry wins for its keys)."""
+    geom = cfg.get("geometry")
+    if geom is None:
+        return cfg
+    if not isinstance(geom, dict):
+        raise ValueError("geometry must be a mapping")
+    unknown = set(geom) - set(GEOMETRY_KEYS)
+    if unknown:
+        raise ValueError(f"unknown geometry key(s): {sorted(unknown)}")
+    exp = dict(cfg.get("experiment") or {})
+    for key in GEOMETRY_KEYS:
+        if key in geom:
+            exp[key] = geom[key]
+    cfg["experiment"] = exp
+    return cfg
 
 
 def validate_config(cfg: Dict[str, Any]) -> None:
@@ -458,7 +467,7 @@ def load_experiment_config(
             cfg["_cli_state_overrides"] = state_overrides
 
     validate_config(cfg)
-    guidance_type = str(cfg.get("experiment", {}).get("guidance_type", "itransformer"))
+    guidance_type = str(cfg.get("experiment", {}).get("guidance_type", "patch_decoder"))
     cfg["phases"] = normalize_guidance_phases(cfg["phases"], guidance_type)
     return cfg
 
@@ -484,10 +493,6 @@ def apply_training_config_to_module(mod: Any, cfg: Optional[Dict[str, Any]], sta
         if yaml_key not in training:
             raise KeyError(f"training.{yaml_key} required")
         setattr(mod, attr, training[yaml_key])
-    if state is not None and hasattr(mod, "diffusion_probe_max_candidate"):
-        n_v = getattr(state, "n_variates", getattr(mod, "N_VARIATES", 7))
-        smoke = getattr(state, "smoke_test", False)
-        mod._yaml_diffusion_probe_max_candidate = mod.diffusion_probe_max_candidate(n_v, smoke)
 
 
 def build_wandb_config(
@@ -509,10 +514,14 @@ def build_wandb_config(
         "resume": state.resume,
         "subset_id": state.subset_id,
         "variate_indices": state.variate_indices,
+        "lookback_length": state.lookback_length,
+        "forecast_length": state.forecast_length,
     })
     wandb_cfg["experiment"] = exp
     if getattr(state, "dataset", None):
         wandb_cfg["dataset"] = state.dataset
+    wandb_cfg["leaderboard_lookback"] = state.lookback_length
+    wandb_cfg["leaderboard_horizon"] = state.forecast_length
 
     runtime: Dict[str, Any] = {
         "phase": phase_name,
@@ -522,10 +531,6 @@ def build_wandb_config(
         runtime["phase_overrides"] = copy.deepcopy(phase_overrides)
     runtime.update(get_git_info())
     runtime.update(get_system_info())
-    n_v = getattr(state, "n_variates", 7)
-    smoke = getattr(state, "smoke_test", False)
-    from models.diffusion_tsf.train_multivariate_pipeline import diffusion_probe_max_candidate
-    runtime["diffusion_probe_max_candidate_default_v"] = diffusion_probe_max_candidate(n_v, smoke)
     wandb_cfg["runtime"] = runtime
     if cfg.get("_yaml_path"):
         wandb_cfg["_yaml_path"] = cfg["_yaml_path"]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Backward-compatible wrapper for dynamic-only plots."""
 
-from utils.plot_subset_variate_scaling import main
+from plot_subset_variate_scaling import main
 
 if __name__ == "__main__":
     import sys

@@ -45,7 +45,6 @@ MMPD_DECODER_GRAD_ACCUM_200_LR_LO_JOBS: Dict[str, str] = {
     "traffic": "4038281",
     "PeMS": "4038282",
     "solar_Alabama": "4038283",
-    "dalia": "4037470",
     "dynamic": "4038284",
 }
 
@@ -61,7 +60,6 @@ MMPD_MASKAE_FAIR_13D_JOBS: Dict[str, str] = {
     "traffic": "3969145",
     "PeMS": "3969146",
     "solar_Alabama": "3969147",
-    "dalia": "3969148",
     "dynamic": "3969149",
 }
 
@@ -79,7 +77,7 @@ MMPD_DIR_SUBSET = os.path.join(
     REPO, "results", "datasets", "06-13-binary-mmpd-subset-compare", "partials"
 )
 
-# Short tags for wandb UI filters (e.g. "exchange" + "eval").
+# Short tags for wandb UI filters (e.g. "exchange" + dataset).
 DATASET_TAG_ALIASES: Dict[str, list[str]] = {
     "exchange_rate": ["exchange"],
     "solar_Alabama": ["solar"],
@@ -98,7 +96,7 @@ def leaderboard_dataset_tags(dataset: str) -> list[str]:
 def all_dataset_tag_tokens() -> set[str]:
     tokens = {
         "ETTh1", "ETTh2", "ETTm1", "ETTm2", "illness", "exchange_rate", "weather",
-        "electricity", "traffic", "PeMS", "solar_Alabama", "dalia", "dynamic",
+        "electricity", "traffic", "PeMS", "solar_Alabama", "dynamic",
     }
     for ds, aliases in DATASET_TAG_ALIASES.items():
         tokens.add(ds)
@@ -110,7 +108,7 @@ def leaderboard_staged_eval_tags(
     manifest_tags: Optional[list[str]],
     dataset: str,
 ) -> list[str]:
-    """Tags for binary staged_eval rows: dataset aliases + manifest + eval/binary."""
+    """Tags for binary staged_eval rows: dataset aliases + manifest + binary."""
     tags: list[str] = []
     for t in leaderboard_dataset_tags(dataset):
         if t not in tags:
@@ -118,9 +116,8 @@ def leaderboard_staged_eval_tags(
     for t in manifest_tags or []:
         if t not in tags:
             tags.append(t)
-    for t in ("eval", "binary"):
-        if t not in tags:
-            tags.append(t)
+    if "binary" not in tags:
+        tags.append("binary")
     return tags
 
 
@@ -132,7 +129,7 @@ def strip_leaderboard_markdown(label: str) -> str:
 
 
 _DISPLAY_CONFIG_FALLBACK: Dict[str, str] = {
-    "mmpd_decoder_flat_subsets_paper_lb336_hz720": "MMPD Decoder paper lb336/hz720",
+    "mmpd_decoder_flat_subsets_paper_lb336_hz720": "MMPD Subset Recent",
     "mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm": "MMPD Decoder ordinal lb336/hz720",
     "mmpd_decoder_flat_subsets_paper_lb336_hz96": "MMPD Decoder paper lb336/hz96",
 }

@@ -30,7 +30,7 @@ REPO = Path(__file__).resolve().parents[1]
 CKPT_ROOT = REPO / "results" / "ckpts"
 RES_ROOT = REPO / "results" / "datasets"
 
-# All repo datasets from test_submit.sh except dalia (explicitly excluded).
+# All repo datasets from submit_binary.sh.
 ALL_DATASETS = (
     "ETTh1",
     "ETTh2",
@@ -71,7 +71,6 @@ RUN_RE = re.compile(
 )
 
 # Coarse grid used before fine refinement
-COARSE_G = {1.0, 1.5, 3.0, 4.0, 5.0, 7.0, 10.0}
 FINE_G = {6.0, 8.0, 9.0}
 
 CRPS_IMPROVE_FLOOR = 0.02

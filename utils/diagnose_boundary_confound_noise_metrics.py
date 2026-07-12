@@ -43,7 +43,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from models.diffusion_tsf.pipeline.visualize_utils import save_figure_jpg
 from utils.diagnose_binary_noise_trend_recoverability import (
-    DEFAULT_ACF_LAGS,
     DEFAULT_FRACTIONS,
     GEOMETRY_CONFIGS,
     LONG_GEO,

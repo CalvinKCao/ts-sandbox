@@ -2,7 +2,7 @@
 # =============================================================================
 # Pure compute-node worker script for diffusion pipeline.
 #
-# USAGE (do not call directly; use submit_grid.sh):
+# USAGE (do not call directly; use submit_binary.sh):
 #   sbatch slurm_worker.sh --config configs/binary_anchor.yaml --dataset ETTh1
 #
 # Venv: node-local fast path — rebuilds on $SLURM_TMPDIR from

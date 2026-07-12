@@ -14,7 +14,6 @@ mmpd_dataset_file_path() {
         traffic) echo "$repo/datasets/traffic/traffic.csv" ;;
         PeMS) echo "$repo/datasets/PeMS/PEMS04.npz" ;;
         solar_Alabama) echo "$repo/datasets/solar_Alabama/solar_Alabama.csv" ;;
-        dalia) echo "$repo/datasets/dalia/dalia.csv" ;;
         dynamic) echo "$repo/datasets/dynamic/dynamic_500K.csv" ;;
         *) return 1 ;;
     esac
@@ -49,14 +48,14 @@ mmpd_dataset_wall_time() {
     if [[ "$long" -eq 1 ]]; then
         case "$ds" in
             dynamic) echo "48:00:00" ;;
-            weather|electricity|traffic|PeMS|dalia) echo "24:00:00" ;;
+            weather|electricity|traffic|PeMS) echo "24:00:00" ;;
             *) echo "$default_wall" ;;
         esac
         return
     fi
     case "$ds" in
         dynamic) echo "12:00:00" ;;
-        weather|electricity|traffic|PeMS|dalia) echo "6:00:00" ;;
+        weather|electricity|traffic|PeMS) echo "6:00:00" ;;
         *) echo "$default_wall" ;;
     esac
 }

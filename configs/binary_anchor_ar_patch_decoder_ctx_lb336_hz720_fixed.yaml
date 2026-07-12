@@ -10,11 +10,7 @@ wandb:
   project: ts-sandbox-leaderboard
   tags: [patch_decoder, healthy_norm, lb336_hz720, fixed_hp]
 
-experiment:
-  name: binary-anchor-ar-patch-decoder-lb336-hz720-fixed
-  experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_fixed
-  guidance_type: patch_decoder
-  mmpd_patch_size: 12
+geometry:
   lookback_length: 336
   forecast_length: 720
   lookback_overlap: 8
@@ -22,6 +18,12 @@ experiment:
   diffusion_chunk_horizon: 0
   representation_time_stride: 2
   itrans_lookback_length: 336
+  mmpd_patch_size: 12
+
+experiment:
+  name: binary-anchor-ar-patch-decoder-lb336-hz720-fixed
+  experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_fixed
+  guidance_type: patch_decoder
   window_norm_low_var_threshold: 0.3
   window_norm_low_var_unit_std: 1.0
   window_norm_low_var_unit_std_by_dataset:

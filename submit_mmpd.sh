@@ -1,19 +1,21 @@
 #!/bin/bash
-# Train + eval MMPD on ETTh1-capped variate subsets (from YAML data_subset policy).
+# Login-node submitter for MMPD train+eval campaigns (flat subsets / paper Decoder).
 #
 # USAGE (Killarney or Narval login node, from $SCRATCH/ts-sandbox):
-#   ./submit_mmpd_sweep_subset.sh --smoke-test
-#   ./submit_mmpd_sweep_subset.sh --output-dir results/datasets/06-12-sweep-subset-mmpd
-#   ./submit_mmpd_sweep_subset.sh --datasets ETTh1,ETTh2,exchange_rate,weather,electricity,traffic,solar_Alabama
-#   ./submit_mmpd_sweep_subset.sh --mmpd-backbone MaskAE --output-dir results/datasets/06-15-mmpd-maskae-subset
-#   ./submit_mmpd_sweep_subset.sh --mmpd-run-config configs/mmpd_decoder_flat_subsets_grad_accum_200_lr_lo.yaml ...
+#   ./submit_mmpd.sh --smoke-test
+#   ./submit_mmpd.sh --mmpd-run-config mmpd_decoder_flat_subsets_paper_lb336_hz720 \
+#       --output-dir results/datasets/$(date +%m-%d)-mmpd-paper-lb336-hz720 --time 24:00:00
+#   ./submit_mmpd.sh --datasets ETTh1,traffic --mmpd-run-config configs/mmpd_decoder_flat_subsets_paper_lb336_hz720.yaml
+#   ./submit_mmpd.sh --mmpd-backbone MaskAE --output-dir results/datasets/06-15-mmpd-maskae-subset
 #
 # Cluster auto-detect: Killarney -> gpu:l40s (aip-boyuwang); Narval -> a100 (def-boyuwang).
 # Clones temp/MMPD on the login node before submit (compute nodes have no GitHub egress).
 # Override GPU: --gpu a100_1g.5gb (Narval) or --gpu l40s (Killarney).
-#   ./submit_mmpd_sweep_subset.sh --use-anchor-ckpts --anchor-config binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo
-#   ./submit_mmpd_sweep_subset.sh --resume --output-dir results/datasets/... --datasets PeMS,dynamic --skip-mmpd-train
+#   ./submit_mmpd.sh --use-anchor-ckpts --anchor-config binary_anchor_stationary_flat_subsets_grad_accum_150_lr_lo
+#   ./submit_mmpd.sh --resume --output-dir results/datasets/... --datasets PeMS,dynamic --skip-mmpd-train
 #
+# --mmpd-run-config accepts a path or bare stem under configs/*.yaml.
+# Do NOT add new submit_*.sh wrappers for minor YAML variants — use this script.
 # Default: --subset-config (no binary ckpts required). Legacy ckpt mode: --use-anchor-ckpts.
 
 set -euo pipefail
@@ -203,8 +205,33 @@ RUN_STEM="$(basename "$OUTPUT_DIR")"
 LOG_DIR="$REPO/results/logs/${RUN_STEM}"
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
+resolve_repo_yaml() {
+    local raw="$1" cand
+    raw="${raw#./}"
+    if [[ "$raw" == /* && -f "$raw" ]]; then
+        echo "$raw"
+        return 0
+    fi
+    if [[ -f "$REPO/$raw" ]]; then
+        echo "$REPO/$raw"
+        return 0
+    fi
+    if [[ "$raw" != configs/* && -f "$REPO/configs/$raw" ]]; then
+        echo "$REPO/configs/$raw"
+        return 0
+    fi
+    cand="${raw%.yaml}"
+    cand="${cand%.yml}"
+    if [[ -f "$REPO/configs/${cand}.yaml" ]]; then
+        echo "$REPO/configs/${cand}.yaml"
+        return 0
+    fi
+    echo "ERROR: YAML not found for: $1" >&2
+    return 1
+}
+
 if [[ -n "$MMPD_RUN_CONFIG" ]]; then
-    [[ "$MMPD_RUN_CONFIG" != /* ]] && MMPD_RUN_CONFIG="$REPO/$MMPD_RUN_CONFIG"
+    MMPD_RUN_CONFIG="$(resolve_repo_yaml "$MMPD_RUN_CONFIG")" || exit 1
     EVAL_BASE=(
         "$REPO/utils/eval_mmpd_gaussian_anchor.py"
         --mmpd-run-config "$MMPD_RUN_CONFIG"
@@ -281,6 +308,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
         --mmpd-batch-size 8
         --mmpd-eval-batch-size 2
         --force-mmpd-tune
+        "${MMPD_NORM_FLAG[@]}"
     )
     DATASETS=(ETTh1)
     if [[ -n "$MMPD_RUN_CONFIG" ]]; then

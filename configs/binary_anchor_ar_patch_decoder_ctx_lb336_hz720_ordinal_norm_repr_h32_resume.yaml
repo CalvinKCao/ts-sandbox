@@ -1,17 +1,15 @@
 # Resume overlay for repr_h32 after disk-quota crashes.
 #
 # Prefer resuming the *original* config (same stem) after the should_skip fix:
-#   ./test_submit.sh --resume \
-#     --configs configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32.yaml \
-#     --datasets ETTh1,weather,exchange_rate --gpu l40s --time 6:00:00 \
-#     --wandb-project ts-sandbox-leaderboard
+#   ./submit_binary.sh --resume \
+#     --configs binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32 \
+#     --datasets ETTh1,weather,exchange_rate --time 6:00:00
 #
 # If you use this overlay file instead, pass --ckpt-config so the stem matches:
-#   ./test_submit.sh --resume \
-#     --configs configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32_resume.yaml \
+#   ./submit_binary.sh --resume \
+#     --configs binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32_resume \
 #     --ckpt-config binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_repr_h32 \
-#     --datasets ETTh1,weather,exchange_rate --gpu l40s --time 6:00:00 \
-#     --wandb-project ts-sandbox-leaderboard
+#     --datasets ETTh1,weather,exchange_rate --time 6:00:00
 #
 # Cached best.pt+metadata are reused; missing/corrupt fine ckpts retrain fine only.
 

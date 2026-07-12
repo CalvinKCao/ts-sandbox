@@ -43,7 +43,7 @@ PROJECT = "ts-sandbox-leaderboard"
 ENTITY = "calvincao"
 MMPD_JOB_TYPE = "mmpd_eval"
 EVAL_JOB_TYPES = frozenset({"staged_eval", "mmpd_eval", "classical_baseline"})
-META_TAGS = frozenset({"eval", "curated-relog", "mmpd", "stub", "binary"})
+META_TAGS = frozenset({"curated-relog", "mmpd", "stub", "binary"})
 
 
 def _run_path(run) -> str:
@@ -120,8 +120,6 @@ def backfill_dataset_and_tags(api, *, entity: str, project: str, dry_run: bool) 
                 if t not in META_TAGS and t not in all_dataset_tag_tokens()
             ]
             tags = leaderboard_dataset_tags(dataset) + meta + other
-            if run.job_type in EVAL_JOB_TYPES and "eval" not in tags:
-                tags.append("eval")
             tags = list(dict.fromkeys(tags))
 
         needs_cfg = dict(run.config).get("dataset") != dataset
@@ -194,7 +192,7 @@ def create_mmpd_stubs(api, *, entity: str, project: str, dry_run: bool) -> dict:
             name=name,
             group=group,
             job_type=MMPD_JOB_TYPE,
-            tags=[dataset, "eval", "mmpd", "stub"],
+            tags=[dataset, "mmpd", "stub"],
             notes="offline MMPD subset eval stub from JSON partial",
             config={
                 "config_nickname": MMPD_SUBSET_NICKNAME,
@@ -266,7 +264,7 @@ def create_mmpd_fair_13d_stubs(api, *, entity: str, project: str, dry_run: bool)
             name=name,
             group=group,
             job_type=MMPD_JOB_TYPE,
-            tags=[dataset, "eval", "mmpd", "stub", "maskae", "fair-13d"],
+            tags=[dataset, "mmpd", "stub", "maskae", "fair-13d"],
             notes="offline MMPD MaskAE fair-13d eval from JSON partial (no artifacts)",
             config=config,
             settings=wandb.Settings(console="off"),
@@ -330,7 +328,7 @@ def create_mmpd_decoder_grad_accum_stubs(api, *, entity: str, project: str, dry_
             name=name,
             group=group,
             job_type=MMPD_JOB_TYPE,
-            tags=[dataset, "eval", "mmpd", "stub", "decoder", "subset-tuned"],
+            tags=[dataset, "mmpd", "stub", "decoder", "subset-tuned"],
             notes="offline MMPD Decoder subset-tuned eval from JSON partial (no artifacts)",
             config=config,
             settings=wandb.Settings(console="off"),

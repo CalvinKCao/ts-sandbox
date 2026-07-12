@@ -2,7 +2,7 @@
 
 ## Run stem (logs, checkpoints, wandb group)
 
-Each Slurm job submitted via [`submit_grid.sh`](../submit_grid.sh) gets one **run stem** shared across:
+Each Slurm job submitted via [`submit_binary.sh`](../submit_binary.sh) gets one **run stem** shared across:
 
 | Artifact | Path |
 |----------|------|
@@ -34,7 +34,7 @@ The full training pipeline (all YAML `phases:` entries) logs into a **single** w
 | `group` | Run stem (above) |
 | `name` | Run stem (same as group) |
 | `job_type` | `pipeline` |
-| `tags` | Dataset name; `eval` tag when the pipeline includes an eval phase |
+| `tags` | Dataset name |
 
 Phases share that run and namespace metrics by prefix (`hp/*`, `eval/staged_*`, `viz/*`). At each phase boundary the orchestrator merges `runtime.phase` and `runtime.phase_overrides` into the run config.
 

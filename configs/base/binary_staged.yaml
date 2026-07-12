@@ -28,22 +28,14 @@ training:
   diffusion_batch_size: 32
   diffusion_batch_sizes: [16]
   finetune_batch_sizes: [4, 8, 16]
-  diffusion_probe_target_effective_batch: 512
-  diffusion_probe_max_batch_cap: 128
-  diffusion_probe_min_batch: 1
+  finetune_max_micro_batch: 2048
   finetune_hp_lr_min: 0.000003
   finetune_hp_lr_max: 0.0002
   use_amp: true
   use_gradient_checkpointing: true
   unet_max_chunk_size: 128
   eval_num_samples: 30
-  emd_lambda: 0.2
-  guidance_penalty_weight: 0.0
   past_loss_weight: 0.3
-  anchor_hp_lambda_min: 0.90
-  anchor_hp_lambda_max: 0.995
-  anchor_hp_alpha_min: 0.35
-  anchor_hp_alpha_max: 0.65
   lr_scheduler_type: none
   lr_warmup_epochs: 0
   max_scale_tuning: false
@@ -78,17 +70,6 @@ experiment:
   fine_image_height: 16
   finer_image_height: 16
   staged_representation: value_precision
-  haar_high_freq_percent: 0.38
-  haar_high_freq_levels: 0
-  haar_fine_max_scale: 0.0
-  haar_cutoff_heuristic: auto
-  haar_fine_scale_quantile: 0.95
-  haar_variance_cv_threshold: 1.0
-  haar_variance_log_spread_threshold: 2.0
-  fourier_high_freq_percent: 0.85
-  fourier_high_freq_cutoff_bin: 0
-  fourier_fine_max_scale: 0.0
-  fourier_flatline_atol: 1.0e-8
   max_scale: 3.5
   max_scale_by_dataset:
     ETTh1: 5.2
@@ -102,7 +83,6 @@ experiment:
     traffic: 6.0
     PeMS: 11.8
     solar_Alabama: 13.0
-    dalia: 6.0
     dynamic: 6.0
   window_norm_std_floor: 0.1
   window_norm_center: mean
@@ -169,10 +149,8 @@ phases:
     epochs: 20
     patience: 4
 
-  - phase: itrans_finetune_hp
+  - phase: patch_guidance_finetune_hp
     n_trials: 10
-    max_epochs: 10
-    cold_start: true
 
   - phase: diffusion_coarse_finetune_hp
     n_trials: 20

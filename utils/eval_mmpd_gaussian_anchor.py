@@ -74,7 +74,6 @@ DATASET_FILES = {
     "traffic": REPO_ROOT / "datasets" / "traffic" / "traffic.csv",
     "PeMS": REPO_ROOT / "datasets" / "PeMS" / "PEMS04.npz",
     "solar_Alabama": REPO_ROOT / "datasets" / "solar_Alabama" / "solar_Alabama.csv",
-    "dalia": REPO_ROOT / "datasets" / "dalia" / "dalia.csv",
     "dynamic": REPO_ROOT / "datasets" / "dynamic" / "dynamic_500K.csv",
 }
 DATASET_DIMS = {
@@ -89,7 +88,6 @@ DATASET_DIMS = {
     "traffic": 862,
     "PeMS": 307,
     "solar_Alabama": 137,
-    "dalia": 5,
     "dynamic": 17,
 }
 DATASET_SPLITS = {
@@ -104,12 +102,11 @@ DATASET_SPLITS = {
     "traffic": "0.7,0.1,0.2",
     "PeMS": "0.7,0.1,0.2",
     "solar_Alabama": "0.7,0.1,0.2",
-    "dalia": "0.7,0.1,0.2",
     "dynamic": "0.7,0.1,0.2",
 }
 DEFAULT_DATASETS = [
     "ETTh1", "ETTh2", "ETTm1", "ETTm2", "illness", "exchange_rate",
-    "weather", "electricity", "traffic", "PeMS", "solar_Alabama", "dalia", "dynamic",
+    "weather", "electricity", "traffic", "PeMS", "solar_Alabama", "dynamic",
 ]
 ANCHOR_VARIANTS = {
     "gaussian": {"slug": "gauss-anchor", "model_name": "gaussian_anchor"},
@@ -169,7 +166,7 @@ def ensure_mmpd_repo(path: Path, update: bool = True) -> str:
             raise RuntimeError(
                 f"Failed to clone MMPD into {path}. "
                 "Compute nodes usually cannot reach GitHub — clone on the login node "
-                "before sbatch, or run submit_mmpd_sweep_subset.sh (it clones for you):\n"
+                "before sbatch, or run submit_mmpd.sh (it clones for you):\n"
                 f"  mkdir -p {path.parent} && git clone {MMPD_URL} {path}"
             ) from exc
     elif not (path / ".git").exists():
@@ -246,10 +243,6 @@ def apply_mmpd_compatibility_patches(path: Path) -> None:
     exp_forecast_py = path / "exp" / "exp_forecast.py"
     if PATCHED_EXP_FORECAST.is_file():
         shutil.copy2(PATCHED_EXP_FORECAST, exp_forecast_py)
-
-
-def mmpd_staged_filename(dataset: str) -> str:
-    return DATASET_FILES[dataset].name
 
 
 def safe_stem(value: str) -> str:
@@ -342,10 +335,6 @@ def _export_pems_mmpd_csv(src_npz: Path, dst_csv: Path, variate_indices: Sequenc
     print(f"[mmpd-data] PeMS: wrote {dst_csv} ({values.shape[0]} steps, {values.shape[1]} vars)")
 
 
-def _dalia_mmpd_meta_path(data_dir: Path) -> Path:
-    return data_dir / "dalia_mmpd.meta.json"
-
-
 def _staged_meta_path(data_dir: Path, run: AnchorRun) -> Path:
     staged = data_dir / mmpd_staged_filename_for_run(run)
     return staged.with_suffix(staged.suffix + ".meta.json")
@@ -367,47 +356,6 @@ def pipeline_mmpd_row_split(dataset: str, n_rows: int, lookback: int) -> List[in
     return [train_num, val_num, test_num]
 
 
-def _export_dalia_mmpd_csv(dst_csv: Path, data_dir: Path, variate_indices: Sequence[int]) -> None:
-    """Stage DALIA as train|val|test row blocks for block-strided MMPD loading."""
-    from models.diffusion_tsf.dalia_data import (
-        DALIA_CHANNEL_NAMES,
-        load_dalia_tensors,
-    )
-    from models.diffusion_tsf.dalia_data import _split_sample_indices
-
-    x, y = load_dalia_tensors()
-    n = len(x)
-    train_idx, val_idx, test_idx = _split_sample_indices(n)
-    variate_indices = [int(i) for i in variate_indices]
-    names = [DALIA_CHANNEL_NAMES[i] for i in variate_indices]
-    x = x[:, :, variate_indices]
-    y = y[:, :, variate_indices]
-
-    train_blocks = [np.concatenate([x[i], y[i]], axis=0) for i in train_idx]
-    val_blocks = [np.concatenate([x[i], y[i]], axis=0) for i in val_idx]
-    test_blocks = [np.concatenate([x[i], y[i]], axis=0) for i in test_idx]
-    train_rows = sum(b.shape[0] for b in train_blocks)
-    val_rows = sum(b.shape[0] for b in val_blocks)
-    test_rows = sum(b.shape[0] for b in test_blocks)
-    values = np.concatenate(train_blocks + val_blocks + test_blocks, axis=0)
-    _write_mmpd_csv(dst_csv, values, names)
-    meta = {
-        "data_split": [int(train_rows), int(val_rows), int(test_rows)],
-        "n_windows": {
-            "train": int(len(train_idx)),
-            "val": int(len(val_idx)),
-            "test": int(len(test_idx)),
-        },
-        "block_len": int(x.shape[1] + y.shape[1]),
-    }
-    with _dalia_mmpd_meta_path(data_dir).open("w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
-    print(
-        f"[mmpd-data] DALIA: wrote {dst_csv} "
-        f"({meta['n_windows']}, rows={meta['data_split']}, {values.shape[1]} vars)"
-    )
-
-
 def parse_mmpd_data_split(split: str) -> List[Any]:
     parts = [float(x.strip()) for x in str(split).split(",") if x.strip()]
     if parts and all(x > 1 for x in parts):
@@ -421,8 +369,6 @@ def mmpd_stride_env(run: AnchorRun, *, test_stride: Optional[int] = None):
         "MMPD_WINDOW_STRIDE": str(run_train_stride(run)),
         "MMPD_TEST_STRIDE": str(test_stride if test_stride is not None else run_test_stride(run)),
     }
-    if run.dataset == "dalia":
-        updates["MMPD_BLOCK_LEN"] = "120"
     saved: Dict[str, Optional[str]] = {}
     try:
         for key, value in updates.items():
@@ -520,15 +466,6 @@ def mmpd_data_split(run_or_dataset: Any, data_dir: Path) -> str:
                 continue
             if meta.get("dataset") == dataset and "data_split" in meta:
                 return ",".join(str(int(x)) for x in meta["data_split"])
-    if dataset == "dalia":
-        dalia_meta = _dalia_mmpd_meta_path(data_dir)
-        if not dalia_meta.exists():
-            raise FileNotFoundError(
-                f"Missing {dalia_meta}; re-run staging (delete stale dalia csv first)."
-            )
-        with dalia_meta.open(encoding="utf-8") as f:
-            parts = json.load(f)["data_split"]
-        return ",".join(str(int(x)) for x in parts)
     return DATASET_SPLITS[dataset]
 
 
@@ -567,18 +504,11 @@ def stage_mmpd_dataset_for_run(data_dir: Path, run: AnchorRun) -> None:
 
     if dataset == "PeMS":
         _export_pems_mmpd_csv(src, dst, expected_meta["variate_indices"])
-    elif dataset == "dalia":
-        _export_dalia_mmpd_csv(dst, data_dir, expected_meta["variate_indices"])
-        with _dalia_mmpd_meta_path(data_dir).open(encoding="utf-8") as f:
-            expected_meta["data_split"] = json.load(f)["data_split"]
     else:
         _export_csv_variate_subset(src, dst, expected_meta["variate_indices"])
-    from models.diffusion_tsf.train_multivariate_pipeline import (
-        DALIA_DEFAULT_LOOKBACK,
-        LOOKBACK_LENGTH,
-    )
+    from models.diffusion_tsf.train_multivariate_pipeline import LOOKBACK_LENGTH
 
-    lookback = DALIA_DEFAULT_LOOKBACK if dataset == "dalia" else LOOKBACK_LENGTH
+    lookback = LOOKBACK_LENGTH
     if "data_split" not in expected_meta:
         n_rows = _count_csv_rows(dst)
         expected_meta["data_split"] = pipeline_mmpd_row_split(dataset, n_rows, lookback)
@@ -836,10 +766,6 @@ def mmpd_setting(
 
 
 def dataset_window_lengths(args: argparse.Namespace, dataset: str) -> Tuple[int, int]:
-    """Use repo dataset-specific lengths for prewindowed datasets like DALIA."""
-    if dataset == "dalia":
-        pipeline = load_tsf_pipeline()
-        return pipeline.dataset_window_lengths(dataset)
     return args.lookback, args.horizon
 
 
@@ -872,10 +798,6 @@ def mmpd_env_for_run(
     else:
         env.pop("MMPD_USE_INSTANCE_NORM", None)
         env.pop("MMPD_USE_ORDINAL_NORM", None)
-    if run.dataset == "dalia":
-        env["MMPD_BLOCK_LEN"] = "120"
-    else:
-        env.pop("MMPD_BLOCK_LEN", None)
     repo = str(REPO_ROOT)
     env["TS_SANDBOX_REPO"] = repo
     prev = env.get("PYTHONPATH", "")
@@ -1091,7 +1013,18 @@ def resolve_mmpd_checkpoint(
     args: argparse.Namespace, run: AnchorRun
 ) -> Tuple[Path, str]:
     """Return existing checkpoint path and the MMPD `data` name used in its setting dir."""
+    from models.diffusion_tsf.pipeline.reused_paths import find_reused_mmpd_campaign_root
     from utils.mmpd_paper_hparams import resolved_mmpd_hparams
+
+    suffix = getattr(args, "mmpd_config_suffix", None)
+    if suffix:
+        reused = find_reused_mmpd_campaign_root(
+            suffix,
+            data_names=mmpd_checkpoint_data_names(run),
+            backbone=str(args.mmpd_backbone),
+        )
+        if reused:
+            args.mmpd_output_root = Path(reused)
 
     hp = resolved_mmpd_hparams(
         mmpd_hparams_root(args), run.dataset, fallback=mmpd_run_fallback_hparams(args)
@@ -1511,10 +1444,6 @@ def infer_model_type(ckpt: Dict[str, Any]) -> str:
         if "noise_predictor.down_blocks." in key:
             return "unet"
     return "unet"
-
-
-def infer_prediction_mode(ckpt: Dict[str, Any]) -> str:
-    return get_ckpt_config_value(ckpt, "prediction_mode", "epsilon")
 
 
 def infer_image_height_from_ckpt(ckpt: Dict[str, Any]) -> Optional[int]:
@@ -2901,7 +2830,7 @@ def main() -> None:
     args = parse_args()
     args.mmpd_log_leaderboard = False
     if args.mmpd_run_config is not None:
-        from utils.mmpd_run_config import apply_mmpd_run_config, load_mmpd_run_config
+        from utils.mmpd_run_config import apply_mmpd_run_config
 
         cfg_path = args.mmpd_run_config.resolve()
         with cfg_path.open(encoding="utf-8") as f:
@@ -2911,6 +2840,10 @@ def main() -> None:
             raise ValueError(f"{cfg_path} missing top-level mmpd: mapping")
         apply_mmpd_run_config(args, mmpd_block)
         exp = full_cfg.get("experiment") or {}
+        if exp.get("experiment_name"):
+            args.mmpd_config_suffix = str(exp["experiment_name"])
+        elif exp.get("name"):
+            args.mmpd_config_suffix = str(exp["name"]).replace("-", "_")
         if exp.get("use_ordinal_window_norm"):
             args.use_ordinal_window_norm = True
             args.mmpd_instance_norm = False

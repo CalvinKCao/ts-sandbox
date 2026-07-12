@@ -4,8 +4,10 @@
 # (same ETTh1-capped policy as binary flat-subset runs). No binary ckpts required.
 #
 # Submit (Killarney or Narval login, $SCRATCH/ts-sandbox):
-#   ./submit_mmpd_decoder_flat_subsets_grad_accum_200_lr_lo.sh --smoke-test
-#   ./submit_mmpd_decoder_flat_subsets_grad_accum_200_lr_lo.sh
+#   ./submit_mmpd.sh --mmpd-run-config mmpd_decoder_flat_subsets_grad_accum_200_lr_lo --smoke-test
+#   ./submit_mmpd.sh --mmpd-run-config mmpd_decoder_flat_subsets_grad_accum_200_lr_lo \
+#     --output-dir results/datasets/$(date +%m-%d)-mmpd-decoder-grad-accum-200-lr-lo-subset \
+#     --time 3:00:00 --mmpd-tune-trials 7
 #
 # datasets/ is gitignored — submit skips any dataset CSV/NPZ missing on the cluster.
 
@@ -32,7 +34,6 @@ mmpd:
     - traffic
     - PeMS
     - solar_Alabama
-    - dalia
     - dynamic
   # Patch size: auto per dataset/horizon in eval (paper D.3); electricity/traffic use P=24 at hz96.
   patch_size_default: 12

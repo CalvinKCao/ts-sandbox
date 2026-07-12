@@ -36,7 +36,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGED_CONFIG = REPO_ROOT / "configs" / "binary_dual_scale_staged.yaml"
 
 # Jobs 3852944–3852955: q99.5 max_scale_by_dataset + window_norm_std_floor retrain

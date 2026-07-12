@@ -11,10 +11,8 @@ phases:
     epochs: 1
     patience: 1
 
-  - phase: itrans_finetune_hp
+  - phase: patch_guidance_finetune_hp
     n_trials: 1
-    max_epochs: 1
-    cold_start: true
 
   - phase: diffusion_coarse_finetune_hp
     n_trials: 1

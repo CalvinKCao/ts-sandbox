@@ -4,13 +4,13 @@
 Random test windows plus worst-window picks from worst_windows.json when present.
 
 Example:
-  python utils/visualize_staged_eval_2d_preds.py \\
+  python archive/utils/visualize_staged_eval_2d_preds.py \\
     --checkpoint-dir results/ckpts/07-02-4041709-weather-..._fourier_flatline_blur \\
     --dataset weather \\
     --results-dir results/datasets/07-02-4041709-weather-..._fourier_flatline_blur \\
     --n-random 2 --n-worst 3
 
-  python utils/visualize_staged_eval_2d_preds.py \\
+  python archive/utils/visualize_staged_eval_2d_preds.py \\
     --checkpoint-dir results/ckpts/07-04-4053057-dynamic-..._healthy_norm_retrain \\
     --dataset dynamic \\
     --config configs/binary_anchor_ar_patch_decoder_ctx_healthy_norm_retrain.yaml \\
@@ -34,31 +34,28 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from models.diffusion_tsf.pipeline.config import load_experiment_config
-from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch_stage_globals
-from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline.visualize_utils import (
     pick_sample_indices,
     save_figure_jpg,
     _staged_fine_value_range,
 )
-from models.diffusion_tsf.train_multivariate_pipeline import (
-    anchor_kwargs_from_params,
-    create_diffusion_model,
-    load_dataset,
-    load_diffusion_state_keep_attached_guidance,
-    load_wrapped_guidance,
+from models.diffusion_tsf.train_multivariate_pipeline import load_dataset, load_wrapped_guidance
+from utils.staged_eval_ckpt import (
+    anchor_maps as _anchor_maps,
+    build_state as _build_state,
+    load_staged_bundle as _load_staged_bundle,
+    load_stage_model as _load_stage_model,
+    resolve_guidance_ckpt as _resolve_guidance_ckpt,
+    window_lengths as _window_lengths,
 )
-from utils.visualize_staged_forecast import _load_staged_bundle, _window_lengths
 
 
-DEFAULT_CONFIG = (
-    "configs/binary_anchor_stationary_flat_subsets_grad_accum_150_fourier_flatline_blur.yaml"
-)
+DEFAULT_CONFIG = "configs/base/binary_staged.yaml"
 
 
 def _eval_test_stride(config_path: str, dataset: str, fallback: int) -> int:
@@ -70,73 +67,6 @@ def _eval_test_stride(config_path: str, dataset: str, fallback: int) -> int:
         if dataset in by_dataset or phase.get("eval_test_fraction") is not None:
             return int(phase.get("test_stride", fallback))
     return fallback
-
-
-def _build_state(checkpoint_dir: Path, dataset: str, subset_id: str, config_path: str) -> PipelineState:
-    cfg = load_experiment_config(config_path, cli_overrides={"dataset": dataset})
-    state = PipelineState.from_config(cfg)
-    state.checkpoint_dir = str(checkpoint_dir.resolve())
-    state.dataset = dataset
-    state.subset_id = subset_id
-    return state
-
-
-def _resolve_guidance_ckpt(
-    checkpoint_dir: Path,
-    subset_id: str,
-    guidance_type: str,
-) -> Tuple[Path, str]:
-    patch_path = checkpoint_dir / f"{subset_id}_patch_guidance.pt"
-    itrans_path = checkpoint_dir / f"{subset_id}_itransformer_finetuned.pt"
-    if guidance_type == "patch_decoder":
-        if not patch_path.is_file():
-            raise FileNotFoundError(f"Missing patch guidance ckpt: {patch_path}")
-        return patch_path, "patch_decoder"
-    if guidance_type == "itransformer":
-        if not itrans_path.is_file():
-            raise FileNotFoundError(f"Missing iTrans guidance ckpt: {itrans_path}")
-        return itrans_path, "itransformer"
-    if patch_path.is_file():
-        return patch_path, "patch_decoder"
-    if itrans_path.is_file():
-        return itrans_path, "itransformer"
-    raise FileNotFoundError(
-        f"Missing guidance ckpt under {checkpoint_dir} "
-        f"(expected {patch_path.name} or {itrans_path.name})"
-    )
-
-
-def _load_stage_model(
-    state: PipelineState,
-    stage: str,
-    ckpt_path: Path,
-    guidance_model: Any,
-    n_vars: int,
-    device: torch.device,
-) -> torch.nn.Module:
-    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
-
-    patch_stage_globals(pipeline_mod, state, stage, honor_dataset_windows=True)
-    lookback, horizon = _window_lengths(state.dataset, state)
-    meta_path = ckpt_path.parent / "metadata.json"
-    tuned: Dict[str, Any] = {}
-    if meta_path.is_file():
-        with meta_path.open(encoding="utf-8") as f:
-            tuned = json.load(f).get("tuned_params") or {}
-
-    model = create_diffusion_model(
-        n_variates=n_vars,
-        lookback=lookback,
-        horizon=horizon,
-        guidance_model=guidance_model,
-        diffusion_stage=stage,
-        use_guidance_channel=state.use_guidance_channel,
-        **anchor_kwargs_from_params(tuned),
-    ).to(device)
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
-    model.eval()
-    return model
 
 
 def _load_worst_indices(results_dir: Optional[Path], subset_id: str, metrics: Sequence[str], top_k: int) -> List[Tuple[int, str, int, float]]:
@@ -205,43 +135,6 @@ def _decode_staged_1d_from_maps(
         fine_1d.reshape(b, v, -1).detach().cpu().numpy()[0],
         final_1d.detach().cpu().numpy()[0],
     )
-
-
-@torch.no_grad()
-def _anchor_maps(
-    coarse_model: torch.nn.Module,
-    fine_model: torch.nn.Module,
-    past_b: torch.Tensor,
-    future_b: torch.Tensor,
-) -> Dict[str, torch.Tensor]:
-    coarse_out = coarse_model.generate(past_b, sampler="anchor", num_inference_steps=1)
-    fine_out = fine_model.generate(
-        past_b,
-        sampler="anchor",
-        num_inference_steps=1,
-        future_coarse_2d=coarse_out["future_2d_coarse"],
-    )
-    past_norm, future_norm, _norm_stats = fine_model._normalize_sequence(past_b, future_b)
-    past_maps_gt = fine_model._encode_staged_maps(past_norm)
-    future_maps_gt = fine_model._encode_staged_maps(future_norm)
-    past_c_gt = past_maps_gt["coarse"][0].cpu().numpy()
-    past_f_gt = past_maps_gt["fine"][0].cpu().numpy()
-    fut_c_gt = future_maps_gt["coarse"][0].cpu().numpy()
-    fut_f_gt = future_maps_gt["fine"][0].cpu().numpy()
-    past_c_pred = coarse_out["past_2d_coarse"][0].cpu().numpy()
-    past_f_pred = coarse_out["past_2d_fine"][0].cpu().numpy()
-    fut_c_pred = coarse_out["future_2d_coarse"][0].cpu().numpy()
-    fut_f_pred = fine_out["future_2d_fine"][0].cpu().numpy()
-    return {
-        "gt_coarse": np.concatenate([past_c_gt, fut_c_gt], axis=-1),
-        "gt_fine": np.concatenate([past_f_gt, fut_f_gt], axis=-1),
-        "pred_coarse": np.concatenate([past_c_pred, fut_c_pred], axis=-1),
-        "pred_fine": np.concatenate([past_f_pred, fut_f_pred], axis=-1),
-        "past_norm": past_norm[0].cpu(),
-        "future_norm": future_norm[0].cpu(),
-        "coarse_out": coarse_out,
-        "fine_out": fine_out,
-    }
 
 
 def _mark_lookback_overlap_2d(ax: plt.Axes, w_past: int, k: int) -> None:

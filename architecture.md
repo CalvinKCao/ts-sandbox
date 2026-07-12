@@ -240,8 +240,15 @@ The sections below are aimed at developers and coding assistants working in the 
 | CLI entry | `models/diffusion_tsf/train_multivariate_pipeline.py` |
 | Model | `models/diffusion_tsf/diffusion_model.py`, `dit.py`, `diffusion.py`, `preprocessing.py` |
 | Config | `models/diffusion_tsf/pipeline/config.py`, `configs/base/binary_staged.yaml` |
-| Submit | `submit_grid.sh`, leaf YAML under `configs/` |
+| Submit | `submit_binary.sh` (diffusion) / `submit_mmpd.sh` (MMPD); leaf YAML under `configs/`. See `legacy.md` for removed wrappers. |
 | iTransformer | `models/diffusion_tsf/guidance.py`, `models/iTransformer/` |
+
+#### Submit conventions
+
+- Login node: **`./submit_binary.sh`** or **`./submit_mmpd.sh` only** for training/eval campaigns. Compute worker for binary is `slurm_worker.sh` (do not sbatch it by hand for normal runs).
+- Experiment variants are **leaf YAMLs** under `configs/`, not new shell wrappers. `--configs` / `--mmpd-run-config` accept bare stems (`foo` → `configs/foo.yaml`), paths, or globs.
+- Geometry (lookback / horizon) and HPs live in YAML. Prefer a new leaf config over CLI sprawl.
+- Removed thin wrappers and their equivalents: `legacy.md`.
 
 ---
 

@@ -56,19 +56,6 @@ class OrdinalLadder:
         )
 
 
-def _unique_sorted_1d(x: torch.Tensor, tie_atol: float) -> Tuple[torch.Tensor, int]:
-    """Sorted unique values with atol tie merge. x: (T,)"""
-    if x.numel() == 0:
-        return x.new_zeros(0), 0
-    xs, _ = torch.sort(x.reshape(-1))
-    groups = [xs[0].item()]
-    for v in xs[1:].tolist():
-        if abs(v - groups[-1]) > tie_atol:
-            groups.append(v)
-    uniq = x.new_tensor(groups)
-    return uniq, int(uniq.numel())
-
-
 def _unique_sorted_1d_np(x: np.ndarray, tie_atol: float) -> Tuple[np.ndarray, int]:
     if x.size == 0:
         return np.zeros(0, dtype=np.float64), 0

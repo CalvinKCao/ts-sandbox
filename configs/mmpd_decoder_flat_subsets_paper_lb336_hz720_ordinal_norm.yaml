@@ -1,13 +1,19 @@
 # MMPD Decoder — ordinal window norm (no instance/window norm), lb336/hz720.
 #
-# Datasets: ETTh1, traffic, weather, dynamic, exchange_rate (ordinal norm sweep).
+# Datasets: ETTh1, traffic, weather, dynamic, exchange_rate, electricity (ordinal norm sweep).
 #
 # Smoke:
-#   ./submit_mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm.sh --smoke-test --dataset ETTh1
+#   ./submit_mmpd.sh --mmpd-run-config mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm \
+#     --smoke-test --datasets ETTh1 --mmpd-tune-trials 0 --no-mmpd-instance-norm
+# Full:
+#   ./submit_mmpd.sh --mmpd-run-config mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm \
+#     --output-dir results/datasets/$(date +%m-%d)-mmpd-decoder-ordinal-norm-lb336-hz720 \
+#     --time 24:00:00 --mmpd-tune-trials 0 --no-mmpd-instance-norm
 
 experiment:
   use_ordinal_window_norm: true
   use_window_normalization: false
+  experiment_name: mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm
   ordinal_tie_atol: 1.0e-6
   max_scale_by_dataset:
     ETTh1: 5.2
@@ -28,6 +34,7 @@ mmpd:
     - weather
     - dynamic
     - exchange_rate
+    - electricity
   patch_size_default: 12
   patch_size_wide: 24
   train_epochs: 20

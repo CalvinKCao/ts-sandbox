@@ -5,18 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import yaml
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def load_mmpd_run_config(path: Path) -> Dict[str, Any]:
-    with path.open(encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
-    block = cfg.get("mmpd")
-    if not isinstance(block, dict):
-        raise ValueError(f"{path} missing top-level mmpd: mapping")
-    return dict(block)
 
 
 def resolve_subset_config_path(subset_config: str, *, repo_root: Path = REPO_ROOT) -> Path:
@@ -78,3 +67,5 @@ def apply_mmpd_run_config(args: Any, block: Dict[str, Any], *, repo_root: Path =
         args.mmpd_fixed_hparams = fixed
     if block.get("leaderboard", False):
         args.mmpd_log_leaderboard = True
+    if nick := block.get("leaderboard_nickname"):
+        args.mmpd_leaderboard_nickname = str(nick).strip()

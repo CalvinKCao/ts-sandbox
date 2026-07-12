@@ -20,7 +20,7 @@ import pandas as pd
 import yaml
 from numpy.lib.stride_tricks import sliding_window_view
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
