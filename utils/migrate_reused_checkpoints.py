@@ -65,6 +65,18 @@ GRID_LB336_HZ720_ORDINAL_FOUR_DATASETS = (
     "electricity",
     "exchange_rate",
 )
+# Jobs 4208596–4208599 (past-native stride-2 + per-dataset CRPS g).
+GRID_LB336_HZ720_PAST_NATIVE_FOUR_BINARY_STEMS = {
+    "ETTh1": "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native",
+    "traffic": "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_g1p5",
+    "electricity": "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_g4p0",
+    "exchange_rate": "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_g6p0",
+}
+MMPD_GRID_LB336_HZ720_ORDINAL_FOUR_GLOBS = (
+    "*mmpd-decoder-ordinal-norm-lb336-hz720*",
+    "*mmpd-decoder-paper-lb336-hz720-subset*",
+    "*mmpd-decoder-paper-lb336-hz720*",
+)
 
 
 def _repo_root() -> Path:
@@ -242,6 +254,12 @@ def migrate_binary_config(
         if os.path.isfile(guidance_src):
             dst_guidance = os.path.join(reused_binary_staged_root(config_suffix), guidance_name)
             _copy_file(guidance_src, dst_guidance, dry_run=dry_run)
+    elif not dry_run:
+        logger.warning(
+            "  [binary] %s: no staged coarse/fine ckpt for config %s",
+            dataset,
+            config_suffix,
+        )
 
 
 def migrate_mmpd_campaign(
@@ -333,8 +351,9 @@ def migrate_mmpd_campaign(
 def migrate_grid_lb336_hz720_ordinal_four(*, dry_run: bool) -> None:
     """Binary grid jobs 4208596–4208599 + matching MMPD ordinal-norm lb336/hz720 ckpts."""
     for dataset in GRID_LB336_HZ720_ORDINAL_FOUR_DATASETS:
+        config_suffix = GRID_LB336_HZ720_PAST_NATIVE_FOUR_BINARY_STEMS[dataset]
         migrate_binary_config(
-            config_suffix=BINARY_GRID_LB336_HZ720_ORDINAL_NORM,
+            config_suffix=config_suffix,
             dataset=dataset,
             subset_id=None,
             stages=["coarse", "fine"],
@@ -344,6 +363,7 @@ def migrate_grid_lb336_hz720_ordinal_four(*, dry_run: bool) -> None:
         config_suffix=MMPD_GRID_LB336_HZ720_ORDINAL_NORM,
         datasets=GRID_LB336_HZ720_ORDINAL_FOUR_DATASETS,
         dry_run=dry_run,
+        campaign_globs=MMPD_GRID_LB336_HZ720_ORDINAL_FOUR_GLOBS,
     )
 
 

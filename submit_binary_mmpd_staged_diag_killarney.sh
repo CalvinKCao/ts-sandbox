@@ -72,6 +72,8 @@ BINARY_CONFIG="configs/archive/binary_anchor_ar_lb336_hz96_grad_accum_150.yaml"
 MMPD_CONFIG="configs/mmpd_decoder_flat_subsets_paper_lb336_hz96.yaml"
 MMPD_CONFIG_SUFFIX="mmpd_decoder_flat_subsets_paper_lb336_hz96"
 BINARY_CKPT_STEM="binary_anchor_ar_lb336_hz96_grad_accum_150"
+BINARY_CONFIG_BY_DATASET=""
+BINARY_CKPT_STEM_BY_DATASET=""
 DATASETS="ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,electricity,traffic,PeMS,solar_Alabama,dynamic"
 OUTPUT_DIR="reports/binary_vs_mmpd_lb336_hz96"
 FORCE_EVAL=0
@@ -86,6 +88,8 @@ while [[ $# -gt 0 ]]; do
         --mmpd-config) MMPD_CONFIG="$2"; shift 2 ;;
         --mmpd-config-suffix) MMPD_CONFIG_SUFFIX="$2"; shift 2 ;;
         --binary-ckpt-stem) BINARY_CKPT_STEM="$2"; shift 2 ;;
+        --binary-config-by-dataset) BINARY_CONFIG_BY_DATASET="$2"; shift 2 ;;
+        --binary-ckpt-stem-by-dataset) BINARY_CKPT_STEM_BY_DATASET="$2"; shift 2 ;;
         --datasets) DATASETS="$2"; shift 2 ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --force-eval) FORCE_EVAL=1; shift ;;
@@ -133,6 +137,8 @@ PY_ARGS=(
     --output-dir "$REPO/$OUTPUT_DIR"
     --device cuda
 )
+[[ -n "$BINARY_CONFIG_BY_DATASET" ]] && PY_ARGS+=(--binary-config-by-dataset "$BINARY_CONFIG_BY_DATASET")
+[[ -n "$BINARY_CKPT_STEM_BY_DATASET" ]] && PY_ARGS+=(--binary-ckpt-stem-by-dataset "$BINARY_CKPT_STEM_BY_DATASET")
 [[ "$FORCE_EVAL" -eq 1 ]] && PY_ARGS+=(--force-eval)
 [[ "$SMOKE" -eq 1 ]] && PY_ARGS+=(--smoke-test)
 [[ ${#EXTRA_PY[@]} -gt 0 ]] && PY_ARGS+=("${EXTRA_PY[@]}")

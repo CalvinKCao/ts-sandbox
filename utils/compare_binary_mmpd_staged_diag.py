@@ -91,6 +91,12 @@ DEFAULT_DATASETS = (
     "ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,"
     "electricity,traffic,PeMS,solar_Alabama,dynamic"
 )
+GRID_LB336_HZ720_PAST_NATIVE_FOUR_BINARY_CONFIGS = {
+    "ETTh1": "configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native.yaml",
+    "traffic": "configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_g1p5.yaml",
+    "electricity": "configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_g4p0.yaml",
+    "exchange_rate": "configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_g6p0.yaml",
+}
 MMPD_SERIES_GLOBS = (
     "*mmpd-decoder-paper-lb336-hz96-subset*",
     "*mmpd-subset-lb336-hz96*",
@@ -174,6 +180,21 @@ def _staged_eval_overrides(config_path: str, dataset: str) -> Dict[str, Any]:
         if phase.get("phase") == "staged_eval":
             return {k: v for k, v in phase.items() if k != "phase"}
     raise KeyError(f"No staged_eval phase in {config_path}")
+
+
+def _parse_dataset_map(spec: Optional[str]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    if not spec:
+        return out
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise ValueError(f"expected dataset:value pairs, got {part!r}")
+        dataset, value = part.split(":", 1)
+        out[dataset.strip()] = value.strip()
+    return out
 
 
 def discover_binary_ckpt(ckpt_base: Path, dataset: str, config_stem: str) -> Path:
@@ -1210,8 +1231,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="MMPD experiment stem for $SCRATCH/ts-sandbox/reused/mmpd/<suffix>/",
     )
     p.add_argument("--binary-config", default=DEFAULT_BINARY_CONFIG)
+    p.add_argument(
+        "--binary-config-by-dataset",
+        default=None,
+        help="Per-dataset YAML overrides, e.g. ETTh1:configs/foo.yaml,traffic:configs/bar.yaml",
+    )
     p.add_argument("--binary-ckpt-base", type=Path, default=REPO_ROOT / "results" / "ckpts")
     p.add_argument("--binary-ckpt-stem", default=DEFAULT_BINARY_CKPT_STEM)
+    p.add_argument(
+        "--binary-ckpt-stem-by-dataset",
+        default=None,
+        help="Per-dataset ckpt config stems, e.g. ETTh1:binary_anchor_ar_...,traffic:binary_anchor_ar_...",
+    )
     p.add_argument("--datasets", default=DEFAULT_DATASETS)
     p.add_argument(
         "--output-dir",
@@ -1304,9 +1335,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     all_top: Dict[str, List[Dict[str, Any]]] = {}
     summary_rows: List[Dict[str, Any]] = []
     datasets_root = (REPO_ROOT / "results" / "datasets").resolve()
+    binary_configs = _parse_dataset_map(args.binary_config_by_dataset)
+    binary_ckpt_stems = _parse_dataset_map(args.binary_ckpt_stem_by_dataset)
 
     for dataset in datasets:
-        binary_ckpt = discover_binary_ckpt(args.binary_ckpt_base, dataset, args.binary_ckpt_stem)
+        binary_config = binary_configs.get(dataset, args.binary_config)
+        ckpt_stem = binary_ckpt_stems.get(dataset, args.binary_ckpt_stem)
+        binary_ckpt = discover_binary_ckpt(args.binary_ckpt_base, dataset, ckpt_stem)
         if args.plots_only:
             cache_file = cache_path(output_dir, dataset)
             if not cache_file.is_file():
@@ -1317,7 +1352,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 dataset=dataset,
                 mmpd_args=mmpd_args,
                 binary_ckpt=binary_ckpt,
-                binary_config=args.binary_config,
+                binary_config=binary_config,
                 output_dir=output_dir,
                 device=device,
                 force_eval=args.force_eval,
