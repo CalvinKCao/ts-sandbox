@@ -613,9 +613,9 @@ def main() -> None:
             md.append("\nConfirmation / extra seeds at recommended g:\n\n")
             md.append("| g | seed | CRPS | anchor MSE |\n|---:|---:|---:|---:|\n")
             for r in sorted(extra, key=lambda x: x.seed):
+                anc = f"{r.anchor_mse:.4f}" if r.anchor_mse is not None else "nan"
                 md.append(
-                    f"| {r.g:g} | {r.seed} | {r.crps:.4f} | "
-                    f"{r.anchor_mse:.4f if r.anchor_mse is not None else float('nan')} |\n"
+                    f"| {r.g:g} | {r.seed} | {r.crps:.4f} | {anc} |\n"
                 )
 
         md.append("\n\\*fine val not comparable across schedules\n\n")
