@@ -94,8 +94,9 @@ REQ="$REPO/setup/requirements-killarney.txt"
 [[ -f "$REQ" ]] || { echo "ERROR: missing $REQ" >&2; exit 1; }
 
 cd "$REPO"
-module purge
-module load StdEnv/2023 gcc python/3.12 scipy-stack/2025a
+module purge 2>/dev/null || true
+module load StdEnv/2023 python/3.11 2>/dev/null || true
+# shellcheck source=/dev/null
 source setup/activate_killarney_venv.sh
 
 APPLY=0
