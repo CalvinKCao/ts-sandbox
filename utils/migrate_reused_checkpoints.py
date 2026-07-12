@@ -18,6 +18,7 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     _run_dir_matches_config,
     _run_dir_matches_config_any_dataset,
 )
+from models.diffusion_tsf.pipeline.config import load_experiment_config
 from models.diffusion_tsf.pipeline.reused_paths import (
     reused_binary_staged_root,
     reused_guidance_ckpt,
@@ -28,6 +29,7 @@ from models.diffusion_tsf.pipeline.reused_paths import (
     reused_tuned_params_meta,
 )
 from models.diffusion_tsf.pipeline.state import PipelineState
+from models.diffusion_tsf.train_multivariate_pipeline import resolve_pipeline_data_subset
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +200,19 @@ def _load_mmpd_datasets(config_suffix: str) -> List[str]:
     return [str(d) for d in datasets]
 
 
+def _resolve_binary_subset_id(config_suffix: str, dataset: str) -> str:
+    """Match pipeline subset_id (e.g. traffic_4v_s1) from YAML data_subset policy."""
+    cfg_path = _repo_root() / "configs" / f"{config_suffix}.yaml"
+    if not cfg_path.is_file():
+        return dataset
+    state = PipelineState.from_config(
+        load_experiment_config(str(cfg_path), cli_overrides={"dataset": dataset})
+    )
+    state.dataset = dataset
+    resolve_pipeline_data_subset(state)
+    return str(state.subset_id or dataset)
+
+
 def migrate_binary_config(
     *,
     config_suffix: str,
@@ -208,7 +223,9 @@ def migrate_binary_config(
 ) -> None:
     state = PipelineState(dataset=dataset, checkpoint_dir="./results/ckpts")
     roots = _candidate_phase1_ckpt_roots(state)
-    sid = subset_id or dataset
+    sid = subset_id or _resolve_binary_subset_id(config_suffix, dataset)
+    if sid != dataset:
+        logger.info("  [binary] %s: subset_id=%s", dataset, sid)
 
     for stage in stages:
         rel = f"pretrained_{stage}/pretrained_diffusion.pt"
