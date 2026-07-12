@@ -728,34 +728,39 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                         state.diffusion_finer_pretrain_ckpt = ckpt
                 else:
                     missing.append(stage)
-            if missing:
-                raise FileNotFoundError(
-                    f"{self.name}: reuse_pretrain_from_config={reuse_from!r} missing "
-                    f"pretrained_{'/pretrained_'.join(missing)} under "
-                    f"*-{state.dataset}-{reuse_from}"
+            if not missing:
+                source_dir = _phase1_source_dir(
+                    state,
+                    self.get("phase1_source_dir"),
+                    config_name=config_name,
                 )
-            source_dir = _phase1_source_dir(
-                state,
-                self.get("phase1_source_dir"),
-                config_name=config_name,
+                best_params = _resolve_diff_hp(state, source_dir)
+                itrans_ckpt, itrans_meta = _resolve_itrans_pretrain(
+                    state,
+                    source_dir,
+                    retrain_synthetic_itrans=bool(self.get("retrain_synthetic_itrans", False)),
+                )
+                n_samples = int(self.require("n_samples"))
+                if state.smoke_test:
+                    n_samples = min(n_samples, 4)
+                _log_staged_pretrain_diagnostics(
+                    state,
+                    itrans_ckpt=itrans_ckpt,
+                    itrans_meta=itrans_meta,
+                    best_params=best_params,
+                    n_samples=n_samples,
+                )
+                return state
+            # Soft-fail like patch_guidance: quota may have deleted the donor.
+            logger.warning(
+                "  [%s] reuse_pretrain_from_config=%r missing pretrained_%s under "
+                "*-%s-%s (incl. cross-dataset fallback); training synthetic pretrain instead",
+                self.name,
+                reuse_from,
+                "/pretrained_".join(missing),
+                state.dataset,
+                reuse_from,
             )
-            best_params = _resolve_diff_hp(state, source_dir)
-            itrans_ckpt, itrans_meta = _resolve_itrans_pretrain(
-                state,
-                source_dir,
-                retrain_synthetic_itrans=bool(self.get("retrain_synthetic_itrans", False)),
-            )
-            n_samples = int(self.require("n_samples"))
-            if state.smoke_test:
-                n_samples = min(n_samples, 4)
-            _log_staged_pretrain_diagnostics(
-                state,
-                itrans_ckpt=itrans_ckpt,
-                itrans_meta=itrans_meta,
-                best_params=best_params,
-                n_samples=n_samples,
-            )
-            return state
         source_dir = _phase1_source_dir(
             state,
             self.get("phase1_source_dir"),

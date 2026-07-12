@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 MODE="grid"
-WALL_TIME="3:00:00"
+WALL_TIME="4:00:00"
 SMOKE=0
 RESUME=0
 DATASETS="ETTh1,traffic,exchange_rate,electricity"

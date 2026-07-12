@@ -17,8 +17,8 @@ experiment:
 
 phases:
   - phase: staged_diffusion_pretrain
-    # Same stride=2 geometry as ordinal_norm/fixed; past-cond semantics differ at finetune.
-    reuse_pretrain_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm
+    # Same donor ordinal_norm uses: stride-2 synthetic lives under ..._fixed, not ..._ordinal_norm.
+    reuse_pretrain_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_fixed
 
   - phase: patch_guidance_finetune_hp
     reuse_checkpoint_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm
