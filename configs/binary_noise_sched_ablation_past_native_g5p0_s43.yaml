@@ -1,0 +1,10 @@
+# Confirmation / seed-floor replicate (seed=43) at g5p0.
+extends: configs/binary_noise_sched_ablation_past_native_g5p0.yaml
+
+wandb:
+  tags: [noise_sched_ablation, past_native, g5p0, seed_replicate, s43]
+
+experiment:
+  name: binary-noise-sched-ablation-past-native-g5p0-s43
+  experiment_name: binary_noise_sched_ablation_past_native_g5p0_s43
+  seed: 43

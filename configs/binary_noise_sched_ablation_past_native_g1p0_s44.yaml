@@ -1,0 +1,13 @@
+# g=1.0 seed replicate (seed=44) for CRPS noise-floor estimate.
+extends: configs/binary_noise_sched_ablation_past_native_g1p0.yaml
+
+wandb:
+  tags: [noise_sched_ablation, past_native, g1p0, seed_replicate, s44]
+
+experiment:
+  name: binary-noise-sched-ablation-past-native-g1p0-s44
+  experiment_name: binary_noise_sched_ablation_past_native_g1p0_s44
+  seed: 44
+  binary_length_mode: none
+  binary_length_g: 1.0
+  binary_length_scale: 1.0

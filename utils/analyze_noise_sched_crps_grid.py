@@ -60,12 +60,14 @@ _G_TAG = {
     "g10p0": 10.0,
 }
 
+# Supports uncompressed elec_unc ablations and past-native stride-2 ablations.
 STEM_RE = re.compile(
-    r"^binary_noise_sched_ablation_elec_unc_(g\d+p\d+)(?:_s(\d+))?$"
+    r"^binary_noise_sched_ablation_(?:elec_unc|past_native)_(g\d+p\d+)(?:_s(\d+))?$"
 )
 DS_ALT = "|".join(re.escape(d) for d in ALL_DATASETS)
 RUN_RE = re.compile(
-    rf"^(\d{{2}}-\d{{2}})-(\d+)-({DS_ALT})-(binary_noise_sched_ablation_elec_unc_.+)$"
+    rf"^(\d{{2}}-\d{{2}})-(\d+)-({DS_ALT})-"
+    r"(binary_noise_sched_ablation_(?:elec_unc|past_native)_.+)$"
 )
 
 # Coarse grid used before fine refinement
