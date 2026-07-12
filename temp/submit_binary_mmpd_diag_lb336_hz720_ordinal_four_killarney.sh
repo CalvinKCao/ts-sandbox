@@ -21,7 +21,7 @@ exec "$REPO_ROOT/submit_binary_mmpd_staged_diag_killarney.sh" \
     --binary-ckpt-stem-by-dataset "$BINARY_STEMS" \
     --mmpd-config configs/mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm.yaml \
     --mmpd-config-suffix mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm \
-    --mmpd-dir results/datasets/07-08-mmpd-decoder-ordinal-norm-lb336-hz720 \
+    --mmpd-dir results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset \
     --datasets ETTh1,traffic,electricity,exchange_rate \
     --output-dir reports/binary_vs_mmpd_lb336_hz720_ordinal_four \
     --time 4:00:00 \

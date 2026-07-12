@@ -71,6 +71,7 @@ from models.diffusion_tsf.pipeline.visualize_utils import _dataset_window_z_scor
 from models.diffusion_tsf.pipeline.reused_paths import (
     find_reused_binary_staged_root,
     find_reused_mmpd_campaign_root,
+    reused_mmpd_campaign_root,
 )
 from utils.visualize_staged_eval_2d_preds import (
     _anchor_maps,
@@ -195,6 +196,18 @@ def _parse_dataset_map(spec: Optional[str]) -> Dict[str, str]:
         dataset, value = part.split(":", 1)
         out[dataset.strip()] = value.strip()
     return out
+
+
+def _resolve_mmpd_indices_dir(
+    mmpd_campaign_dir: Path,
+    mmpd_config_suffix: Optional[str],
+) -> Path:
+    """Prefer raw/indices_* under reused/mmpd/<suffix> when migrate copied them."""
+    if mmpd_config_suffix:
+        reused = Path(reused_mmpd_campaign_root(str(mmpd_config_suffix)))
+        if (reused / "raw").is_dir():
+            return reused
+    return mmpd_campaign_dir
 
 
 def discover_binary_ckpt(ckpt_base: Path, dataset: str, config_stem: str) -> Path:
@@ -510,6 +523,12 @@ def run_or_load_dataset_eval(
         )
     idx_root = indices_root(mmpd_args)
     indices_file = indices_path(idx_root, dataset)
+    if not indices_file.is_file() and mmpd_args.mmpd_output_root is not None:
+        alt_root = Path(mmpd_args.mmpd_output_root).resolve()
+        alt_file = indices_path(alt_root, dataset)
+        if alt_file.is_file():
+            idx_root = alt_root
+            indices_file = alt_file
     if indices_file.is_file() and not mmpd_args.force_indices:
         window_indices = load_indices(idx_root, dataset)
     else:
@@ -1317,9 +1336,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     if args.mmpd_config_suffix:
         mmpd_args.mmpd_config_suffix = str(args.mmpd_config_suffix)
-    # Indices from --mmpd-dir; ckpts from mmpd_output_root (auto or explicit).
+    # Indices: prefer reused/mmpd/<suffix>/raw; ckpts from mmpd_output_root (auto or explicit).
+    mmpd_args.indices_dir = _resolve_mmpd_indices_dir(mmpd_campaign_dir, args.mmpd_config_suffix)
+    if mmpd_args.indices_dir != mmpd_campaign_dir:
+        print(
+            f"[mmpd-indices] using {mmpd_args.indices_dir} (reused campaign raw/)",
+            flush=True,
+        )
     # Fraction/smoke packs write under the diag output dir only.
-    mmpd_args.indices_dir = mmpd_campaign_dir
     if args.mmpd_output_root is not None:
         mmpd_args.mmpd_output_root = args.mmpd_output_root.resolve()
         auto_mmpd_ckpt = False
