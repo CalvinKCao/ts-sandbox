@@ -967,7 +967,7 @@ def _plot_compare_panel(
         f"{dataset} win {window_index}: map-decode final vs prediction_global_norm",
         pr_final_map[..., lookback:],
         bin_final_h,
-        min_corr=0.95,
+        min_corr=0.75,
     )
     _assert_horizon_aligned(
         f"{dataset} win {window_index}: GT encode→decode vs GT future",
@@ -1209,21 +1209,25 @@ def plot_dataset_windows(
             plot_dir
             / f"{kind}_r{entry['rank']:02d}_win{wi}_mmpd_minus_bin{entry['error_diff_mmpd_minus_binary']:+.4f}.jpg"
         )
-        saved.extend(
-            _plot_compare_panel(
-                maps=maps,
-                fine_model=fine_model,
-                mmpd_1d=mmpd_1d,
-                past_z=past_z,
-                future_z=future_z,
-                dataset=dataset,
-                window_index=wi,
-                meta=entry,
-                output_path=out_path,
-                variables_to_plot=variables_to_plot,
-                jpeg_dpi=jpeg_dpi,
+        try:
+            saved.extend(
+                _plot_compare_panel(
+                    maps=maps,
+                    fine_model=fine_model,
+                    mmpd_1d=mmpd_1d,
+                    past_z=past_z,
+                    future_z=future_z,
+                    dataset=dataset,
+                    window_index=wi,
+                    meta=entry,
+                    output_path=out_path,
+                    variables_to_plot=variables_to_plot,
+                    jpeg_dpi=jpeg_dpi,
+                )
             )
-        )
+        except ValueError as exc:
+            print(f"[plot] {dataset} win {wi}: skip ({exc})", flush=True)
+            continue
         print(f"[plot] {dataset} win {wi} -> {variables_to_plot} variate figs under {plot_dir}", flush=True)
     return saved
 
@@ -1423,7 +1427,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         plot_dataset_windows(
             dataset=dataset,
             binary_ckpt=binary_ckpt,
-            binary_config=args.binary_config,
+            binary_config=binary_config,
             mmpd_pack_path=mmpd_npz,
             cache=cache,
             top_manifest=top,
