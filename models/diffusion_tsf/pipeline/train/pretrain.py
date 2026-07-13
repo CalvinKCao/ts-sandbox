@@ -16,7 +16,6 @@ from models.diffusion_tsf.pipeline.train.diffusion_loop import (
     validate_diffusion_epoch,
 )
 from models.diffusion_tsf.realts import get_synthetic_dataloader
-from models.diffusion_tsf import train_multivariate_pipeline as m
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +30,9 @@ def pretrain_diffusion(
     smoke_test: bool = False,
 ) -> str:
     """Train one staged diffusion checkpoint on synthetic data (not post-HP retrain)."""
+    # Lazy: train_multivariate_pipeline re-exports this module at import time.
+    from models.diffusion_tsf import train_multivariate_pipeline as m
+
     logger.info("=" * 60)
     logger.info("Staged synthetic diffusion pretrain (with patch_decoder guidance)")
     logger.info("Samples: %s, Epochs: %s, Patience: %s", n_samples, epochs, patience)
