@@ -53,7 +53,7 @@ def _ordinal_tie_atol(args) -> float:
     return float(getattr(args, "ordinal_tie_atol", 1e-6))
 
 
-def _prepare_normed_batch(batch_x, batch_y, args, *, apply_ood_shift=False):
+def _prepare_normed_batch(batch_x, batch_y, args, *, apply_ood_shift=False, causal_only=False):
     if _use_ordinal_norm(args):
         ladder = _ordinal_ladder(args)
         if getattr(args, "ordinal_train_is_ranked", False):
@@ -63,6 +63,7 @@ def _prepare_normed_batch(batch_x, batch_y, args, *, apply_ood_shift=False):
             batch_y,
             ladder=ladder,
             apply_ood_shift=apply_ood_shift,
+            causal_only=causal_only,
         )
         past_ord = ranks_to_unit(past_ord, ladder)
         future_ord = ranks_to_unit(future_ord, ladder)
@@ -389,7 +390,9 @@ class Exp_Forecast(Exp_Basic):
                 batch_x = rearrange(batch_x, 'b l d -> b d l')
                 batch_y = rearrange(batch_y, 'b l d -> b d l')
                 normed_x, _, norm_ctx = _prepare_normed_batch(
-                    batch_x, batch_y, self.args, apply_ood_shift=_use_ordinal_norm(self.args),
+                    batch_x, batch_y, self.args,
+                    apply_ood_shift=_use_ordinal_norm(self.args),
+                    causal_only=True,
                 )
                 
                 deterministic_pred, multi_mode_pred, prob_samples = self.model.predict(normed_x, prob_pred=self.args.prob_pred, 

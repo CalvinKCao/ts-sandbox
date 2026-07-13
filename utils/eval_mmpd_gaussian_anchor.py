@@ -1344,6 +1344,7 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                         normed_x, _, norm_ctx = _prepare_normed_batch(
                             batch_x, batch_y, args,
                             apply_ood_shift=args.use_ordinal_window_norm,
+                            causal_only=True,
                         )
                         det, modes, samples = exp.model.predict(
                             normed_x,

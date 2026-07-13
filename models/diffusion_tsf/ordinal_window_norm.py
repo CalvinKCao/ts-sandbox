@@ -277,11 +277,18 @@ def shift_window_to_ordinal_envelope(
     *,
     margin_frac: float = 0.05,
     check_lookback_only: bool = True,
+    causal_only: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
     """Shift entire window (past+future) so values fit inside train ladder envelope.
 
     Only applies when lookback has OOD timesteps (outside train min/max).
     Target: [train_min + margin*span, train_max - margin*span] per variate.
+
+    ``causal_only=True`` computes the shift magnitude from ``past`` alone, so the
+    true future can never leak into the shift a model's prediction gets
+    de-shifted by at eval time. Use this whenever ``future`` is the ground
+    truth and the shift will later be applied to (or subtracted from) a
+    model-generated value rather than the ground truth itself.
 
     Returns ``ood_shift`` with shape (B, V, 1) to subtract after ordinal decode.
     """
@@ -304,10 +311,12 @@ def shift_window_to_ordinal_envelope(
     past_out = past.clone()
     fut_out = future.clone() if future is not None else None
 
-    if future is not None:
-        combined = torch.cat([past, future], dim=-1)
+    if causal_only:
+        shift_source = past
+    elif future is not None:
+        shift_source = torch.cat([past, future], dim=-1)
     else:
-        combined = past
+        shift_source = past
 
     b, v, _ = past.shape
     ood_shift = torch.zeros(b, v, 1, device=device, dtype=dtype)
@@ -317,7 +326,7 @@ def shift_window_to_ordinal_envelope(
             ood = (past_v < train_min[vi]) | (past_v > train_max[vi])
             if not ood.any():
                 continue
-        win = combined[:, vi].reshape(b, -1)
+        win = shift_source[:, vi].reshape(b, -1)
         wmin = win.min(dim=-1, keepdim=True).values
         wmax = win.max(dim=-1, keepdim=True).values
         shift = torch.zeros_like(wmin)
@@ -343,11 +352,12 @@ def ordinal_encode(
     ladder: OrdinalLadder,
     apply_ood_shift: bool = False,
     margin_frac: float = 0.05,
+    causal_only: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], OrdinalLadder, torch.Tensor]:
     ood_shift: Optional[torch.Tensor] = None
     if apply_ood_shift:
         past, future, ood_shift = shift_window_to_ordinal_envelope(
-            past, future, ladder, margin_frac=margin_frac,
+            past, future, ladder, margin_frac=margin_frac, causal_only=causal_only,
         )
     if past.dim() == 2:
         batch_size = 1
