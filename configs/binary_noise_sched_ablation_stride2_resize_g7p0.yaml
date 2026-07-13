@@ -1,14 +1,14 @@
-# Jul 6-8 ordinal_norm geometry + power g=4.0 (6-epoch coarse/fine).
+# Jul 6-8 ordinal_norm geometry + power g=7.0 (6-epoch coarse/fine).
 extends: configs/binary_noise_sched_ablation_stride2_resize_g1p0.yaml
 
 wandb:
-  tags: [noise_sched_ablation, stride2_resize, g4p0, jul68_geometry]
+  tags: [noise_sched_ablation, stride2_resize, g7p0, jul68_geometry]
 
 experiment:
-  name: binary-noise-sched-ablation-stride2-resize-g4p0
-  experiment_name: binary_noise_sched_ablation_stride2_resize_g4p0
+  name: binary-noise-sched-ablation-stride2-resize-g7p0
+  experiment_name: binary_noise_sched_ablation_stride2_resize_g7p0
   binary_length_mode: power
-  binary_length_g: 4.0
+  binary_length_g: 7.0
   binary_length_scale: 1.0
 
 phases:
@@ -21,7 +21,7 @@ phases:
       min_snr_gamma: 2.0
       binary_noise_schedule: linear
       binary_length_mode: power
-      binary_length_g: 4.0
+      binary_length_g: 7.0
       binary_length_scale: 1.0
 
   - phase: diffusion_fine_finetune_hp
@@ -33,5 +33,5 @@ phases:
       min_snr_gamma: 2.0
       binary_noise_schedule: linear
       binary_length_mode: power
-      binary_length_g: 4.0
+      binary_length_g: 7.0
       binary_length_scale: 1.0

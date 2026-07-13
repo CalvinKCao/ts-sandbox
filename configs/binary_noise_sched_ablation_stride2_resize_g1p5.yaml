@@ -1,8 +1,8 @@
-# Short stride-2 ordinal_norm ablation: power g=1.5 on resize=true geometry (traffic isolate).
+# Jul 6-8 ordinal_norm geometry + power g=1.5 (6-epoch coarse/fine).
 extends: configs/binary_noise_sched_ablation_stride2_resize_g1p0.yaml
 
 wandb:
-  tags: [noise_sched_ablation, stride2_resize, g1p5, isolate_regression, traffic]
+  tags: [noise_sched_ablation, stride2_resize, g1p5, jul68_geometry]
 
 experiment:
   name: binary-noise-sched-ablation-stride2-resize-g1p5

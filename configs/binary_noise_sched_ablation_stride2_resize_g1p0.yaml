@@ -1,9 +1,9 @@
-# Short stride-2 ordinal_norm ablation (past_cond_resize=true): g=1.0 baseline.
-# Isolates length-shift g on the *old* Jul-08 geometry without past_native.
+# Jul 6-8 ordinal_norm geometry (stride-2, past_cond_resize=true), short g ablation.
+# Only differs from full ordinal_norm by: binary_length g + max_epochs=6 on coarse/fine.
 extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm.yaml
 
 wandb:
-  tags: [noise_sched_ablation, stride2_resize, g1p0, isolate_regression]
+  tags: [noise_sched_ablation, stride2_resize, g1p0, jul68_geometry]
 
 experiment:
   name: binary-noise-sched-ablation-stride2-resize-g1p0
@@ -21,8 +21,8 @@ phases:
 
   - phase: diffusion_coarse_finetune_hp
     n_trials: 1
-    max_epochs: 4
-    patience: 4
+    max_epochs: 6
+    patience: 6
     search_space: fixed
     fixed_tuned_params:
       learning_rate: 2.41e-4
@@ -37,8 +37,8 @@ phases:
 
   - phase: diffusion_fine_finetune_hp
     n_trials: 1
-    max_epochs: 4
-    patience: 4
+    max_epochs: 6
+    patience: 6
     search_space: fixed
     fixed_tuned_params:
       learning_rate: 2.41e-4
@@ -52,7 +52,7 @@ phases:
       binary_length_scale: 1.0
 
   - phase: staged_eval
-    eval_test_fraction: 0.25
+    eval_test_fraction: 1.0
     test_stride: 4
     n_samples: 1
     probabilistic_n_samples: 20
