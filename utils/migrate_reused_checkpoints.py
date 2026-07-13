@@ -58,9 +58,7 @@ DEFAULT_MMPD_LB336_HZ96_DATASETS = (
 BINARY_GRID_LB336_HZ720_ORDINAL_NORM = (
     "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm"
 )
-MMPD_GRID_LB336_HZ720_ORDINAL_NORM = (
-    "mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm"
-)
+MMPD_GRID_LB336_HZ720_PAPER = "mmpd_decoder_flat_subsets_paper_lb336_hz720"
 GRID_LB336_HZ720_ORDINAL_FOUR_DATASETS = (
     "ETTh1",
     "traffic",
@@ -74,8 +72,7 @@ GRID_LB336_HZ720_PAST_NATIVE_FOUR_BINARY_STEMS = {
     "electricity": "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_g4p0",
     "exchange_rate": "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_g6p0",
 }
-MMPD_GRID_LB336_HZ720_ORDINAL_FOUR_GLOBS = (
-    "*mmpd-decoder-ordinal-norm-lb336-hz720*",
+MMPD_GRID_LB336_HZ720_PAPER_FOUR_GLOBS = (
     "*mmpd-decoder-paper-lb336-hz720-subset*",
     "*mmpd-decoder-paper-lb336-hz720*",
 )
@@ -366,7 +363,7 @@ def migrate_mmpd_campaign(
 
 
 def migrate_grid_lb336_hz720_ordinal_four(*, dry_run: bool) -> None:
-    """Binary grid jobs 4208596–4208599 + matching MMPD ordinal-norm lb336/hz720 ckpts."""
+    """Binary grid jobs 4208596–4208599 + paper (non-ordinal) MMPD lb336/hz720 ckpts."""
     for dataset in GRID_LB336_HZ720_ORDINAL_FOUR_DATASETS:
         config_suffix = GRID_LB336_HZ720_PAST_NATIVE_FOUR_BINARY_STEMS[dataset]
         migrate_binary_config(
@@ -377,10 +374,10 @@ def migrate_grid_lb336_hz720_ordinal_four(*, dry_run: bool) -> None:
             dry_run=dry_run,
         )
     migrate_mmpd_campaign(
-        config_suffix=MMPD_GRID_LB336_HZ720_ORDINAL_NORM,
+        config_suffix=MMPD_GRID_LB336_HZ720_PAPER,
         datasets=GRID_LB336_HZ720_ORDINAL_FOUR_DATASETS,
         dry_run=dry_run,
-        campaign_globs=MMPD_GRID_LB336_HZ720_ORDINAL_FOUR_GLOBS,
+        campaign_globs=MMPD_GRID_LB336_HZ720_PAPER_FOUR_GLOBS,
     )
 
 
@@ -415,8 +412,7 @@ def main() -> None:
         "--migrate-grid-lb336-hz720-ordinal-four",
         action="store_true",
         help="Migrate binary+ MMPD ckpts for ETTh1,traffic,electricity,exchange_rate "
-        f"(binary={BINARY_GRID_LB336_HZ720_ORDINAL_NORM}, "
-        f"mmpd={MMPD_GRID_LB336_HZ720_ORDINAL_NORM})",
+        f"(binary past_native stems, mmpd={MMPD_GRID_LB336_HZ720_PAPER})",
     )
     parser.add_argument(
         "--datasets",
