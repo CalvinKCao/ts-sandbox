@@ -1,0 +1,13 @@
+# past_native + g=1.5 but train patch guidance in-run (no reuse from ordinal_norm donor).
+extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_g1p5.yaml
+
+wandb:
+  tags: [patch_decoder, ordinal_norm, lb336_hz720, past_native, crps_g1p5, fresh_guidance, isolate_regression]
+
+experiment:
+  name: binary-anchor-ar-patch-decoder-lb336-hz720-past-native-g1p5-fresh-guidance
+  experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_g1p5_fresh_guidance
+
+phases:
+  - phase: patch_guidance_finetune_hp
+    reuse_checkpoint_from_config: null

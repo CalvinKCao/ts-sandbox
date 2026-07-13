@@ -1,0 +1,9 @@
+extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_g1p5.yaml
+
+wandb:
+  tags: [patch_decoder, ordinal_norm, lb336_hz720, past_native, crps_g1p5, resize_horizon]
+
+experiment:
+  name: binary-anchor-ar-patch-decoder-lb336-hz720-past-native-resize-g1p5
+  experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_resize_g1p5
+  past_cond_resize_to_horizon: true

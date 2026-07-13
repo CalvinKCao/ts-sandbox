@@ -1,0 +1,11 @@
+# past_native stride-2 + CRPS g grid, but past cond is bilinearly resized to horizon width
+# (same as ordinal_norm baseline geometry). Isolates resize vs pad holding g fixed.
+extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native.yaml
+
+wandb:
+  tags: [patch_decoder, ordinal_norm, lb336_hz720, past_native, stride2, resize_horizon]
+
+experiment:
+  name: binary-anchor-ar-patch-decoder-lb336-hz720-ordinal-norm-past-native-resize
+  experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_past_native_resize
+  past_cond_resize_to_horizon: true

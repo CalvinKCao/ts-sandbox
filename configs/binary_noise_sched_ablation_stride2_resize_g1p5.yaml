@@ -1,0 +1,37 @@
+# Short stride-2 ordinal_norm ablation: power g=1.5 on resize=true geometry (traffic isolate).
+extends: configs/binary_noise_sched_ablation_stride2_resize_g1p0.yaml
+
+wandb:
+  tags: [noise_sched_ablation, stride2_resize, g1p5, isolate_regression, traffic]
+
+experiment:
+  name: binary-noise-sched-ablation-stride2-resize-g1p5
+  experiment_name: binary_noise_sched_ablation_stride2_resize_g1p5
+  binary_length_mode: power
+  binary_length_g: 1.5
+  binary_length_scale: 1.0
+
+phases:
+  - phase: diffusion_coarse_finetune_hp
+    fixed_tuned_params:
+      learning_rate: 2.41e-4
+      ema_decay: 0.995
+      prediction_target: x0
+      loss_weighting: min_snr
+      min_snr_gamma: 2.0
+      binary_noise_schedule: linear
+      binary_length_mode: power
+      binary_length_g: 1.5
+      binary_length_scale: 1.0
+
+  - phase: diffusion_fine_finetune_hp
+    fixed_tuned_params:
+      learning_rate: 2.41e-4
+      ema_decay: 0.995
+      prediction_target: x0
+      loss_weighting: min_snr
+      min_snr_gamma: 2.0
+      binary_noise_schedule: linear
+      binary_length_mode: power
+      binary_length_g: 1.5
+      binary_length_scale: 1.0
