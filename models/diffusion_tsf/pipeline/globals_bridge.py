@@ -57,6 +57,7 @@ def patch_globals(
     mod.DIT_MLP_RATIO = state.dit_mlp_ratio
     mod.DIT_DROPOUT = state.dit_dropout
     mod.USE_TRIPLE_SCALE = state.use_triple_scale
+    mod.USE_VERTICAL_DUAL_CONCAT = state.use_vertical_dual_concat
     mod.DIFFUSION_STAGE = state.diffusion_stage
     mod.USE_GUIDANCE_CHANNEL = state.use_guidance_channel
     mod.GUIDANCE_TYPE = state.guidance_type
@@ -73,6 +74,9 @@ def patch_globals(
     mod.DETERMINISTIC_ANCHOR_LAMBDA = state.deterministic_anchor_lambda
     mod.DETERMINISTIC_ANCHOR_ALPHA = state.deterministic_anchor_alpha
     mod.BINARY_ANCHOR_INPUT_MODE = state.binary_anchor_input_mode
+    mod.BINARY_USE_BOUNDARY_WEIGHTED_BCE = state.binary_use_boundary_weighted_bce
+    mod.BINARY_CDF_DISTANCE_ALPHA = state.binary_cdf_distance_alpha
+    mod.ANCHOR_MSE_PROXY_LAMBDA = state.anchor_mse_proxy_lambda
     mod.EVAL_SAMPLER = state.eval_sampler
     mod.DISABLE_CROSS_ATTENTION = state.disable_cross_attention
     mod.CROSS_VARIATE_CONTEXT_BIAS = state.cross_variate_context_bias

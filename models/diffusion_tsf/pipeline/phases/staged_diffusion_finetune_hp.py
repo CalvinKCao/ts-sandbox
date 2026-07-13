@@ -761,6 +761,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             elif self.stage == "fine":
                 state.diffusion_fine_finetune_ckpt = best_pt
                 state.fine_finetune_best_params = params
+            elif self.stage == "vertical_dual":
+                state.diffusion_vertical_dual_finetune_ckpt = best_pt
+                state.vertical_dual_finetune_best_params = params
             else:
                 state.diffusion_finer_finetune_ckpt = best_pt
                 state.finer_finetune_best_params = params
@@ -838,7 +841,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
         n_iv = len(variate_indices)
         device = state.resolve_device()
-        coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_best_ckpt(state, "coarse")
+        coarse_ft = None
+        if self.stage != "vertical_dual":
+            coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_best_ckpt(state, "coarse")
 
         if self.stage == "fine" and coarse_ft and final_ckpt and os.path.exists(coarse_ft):
             try:
@@ -887,6 +892,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "coarse": state.diffusion_coarse_pretrain_ckpt,
             "fine": state.diffusion_fine_pretrain_ckpt,
             "finer": state.diffusion_finer_pretrain_ckpt,
+            "vertical_dual": state.diffusion_vertical_dual_pretrain_ckpt,
         }[self.stage]
         candidates = [
             self.get("pretrained_ckpt"),
@@ -1689,6 +1695,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         elif self.stage == "fine":
             state.diffusion_fine_finetune_ckpt = final_ckpt
             state.fine_finetune_best_params = best_params
+        elif self.stage == "vertical_dual":
+            state.diffusion_vertical_dual_finetune_ckpt = final_ckpt
+            state.vertical_dual_finetune_best_params = best_params
         else:
             state.diffusion_finer_finetune_ckpt = final_ckpt
             state.finer_finetune_best_params = best_params
@@ -1708,7 +1717,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             f"hp/{self.stage}_diff_ft_max_scale": best_params.get("max_scale"),
         })
 
-        coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_best_ckpt(state, "coarse")
         self._log_post_finetune_viz_and_diagnostics(
             state,
             final_ckpt=final_ckpt,
@@ -1732,3 +1740,8 @@ class FineDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
 class FinerDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
     name = "diffusion_finer_finetune_hp"
     stage = "finer"
+
+
+class VerticalDualDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
+    name = "diffusion_vertical_dual_finetune_hp"
+    stage = "vertical_dual"

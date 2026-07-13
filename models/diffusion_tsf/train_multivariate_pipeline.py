@@ -321,6 +321,10 @@ DETERMINISTIC_ANCHOR_LOSS = True
 DETERMINISTIC_ANCHOR_LAMBDA = 0.99
 DETERMINISTIC_ANCHOR_ALPHA = 0.5
 BINARY_ANCHOR_INPUT_MODE = "stationary_flat"
+BINARY_USE_BOUNDARY_WEIGHTED_BCE = False
+BINARY_CDF_DISTANCE_ALPHA = 1.0
+ANCHOR_MSE_PROXY_LAMBDA = 0.5
+USE_VERTICAL_DUAL_CONCAT = False
 USE_WINDOW_NORMALIZATION = True
 WINDOW_NORM_CENTER = "mean"
 ZERO_GUIDANCE_FORECAST = False
@@ -1320,6 +1324,15 @@ def create_diffusion_model(
         deterministic_anchor_lambda=o("deterministic_anchor_lambda", DETERMINISTIC_ANCHOR_LAMBDA),
         deterministic_anchor_alpha=o("deterministic_anchor_alpha", DETERMINISTIC_ANCHOR_ALPHA),
         binary_anchor_input_mode=o("binary_anchor_input_mode", BINARY_ANCHOR_INPUT_MODE),
+        binary_use_boundary_weighted_bce=o(
+            "binary_use_boundary_weighted_bce", BINARY_USE_BOUNDARY_WEIGHTED_BCE,
+        ),
+        binary_cdf_distance_alpha=float(
+            o("binary_cdf_distance_alpha", BINARY_CDF_DISTANCE_ALPHA)
+        ),
+        anchor_mse_proxy_lambda=float(
+            o("anchor_mse_proxy_lambda", ANCHOR_MSE_PROXY_LAMBDA)
+        ),
         cross_variate_context_bias=CROSS_VARIATE_CONTEXT_BIAS,
         cfg_dropout=CFG_DROPOUT,
         binary_num_steps=o("binary_num_steps", BINARY_NUM_STEPS),

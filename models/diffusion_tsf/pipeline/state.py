@@ -53,6 +53,7 @@ class PipelineState:
     dit_mlp_ratio: float = 4.0
     dit_dropout: float = 0.0
     use_triple_scale: bool = False
+    use_vertical_dual_concat: bool = False
     diffusion_stage: str = "joint"
     use_guidance_channel: bool = True
     guidance_type: str = "patch_decoder"
@@ -62,6 +63,9 @@ class PipelineState:
     deterministic_anchor_lambda: float = 0.99
     deterministic_anchor_alpha: float = 0.5
     binary_anchor_input_mode: str = "stationary_flat"
+    binary_use_boundary_weighted_bce: bool = False
+    binary_cdf_distance_alpha: float = 1.0
+    anchor_mse_proxy_lambda: float = 0.5
     eval_sampler: str = "dpmpp"
     disable_cross_attention: bool = False
     cross_variate_context_bias: float = 0.0
@@ -141,12 +145,14 @@ class PipelineState:
     diffusion_coarse_pretrain_ckpt: Optional[str] = None
     diffusion_fine_pretrain_ckpt: Optional[str] = None
     diffusion_finer_pretrain_ckpt: Optional[str] = None
+    diffusion_vertical_dual_pretrain_ckpt: Optional[str] = None
     itrans_finetune_ckpt: Optional[str] = None
     patch_guidance_finetune_ckpt: Optional[str] = None
     diffusion_finetune_ckpt: Optional[str] = None
     diffusion_coarse_finetune_ckpt: Optional[str] = None
     diffusion_fine_finetune_ckpt: Optional[str] = None
     diffusion_finer_finetune_ckpt: Optional[str] = None
+    diffusion_vertical_dual_finetune_ckpt: Optional[str] = None
 
     itrans_best_params: Optional[Dict[str, Any]] = None
     diffusion_best_params: Optional[Dict[str, Any]] = None
@@ -154,6 +160,7 @@ class PipelineState:
     coarse_finetune_best_params: Optional[Dict[str, Any]] = None
     fine_finetune_best_params: Optional[Dict[str, Any]] = None
     finer_finetune_best_params: Optional[Dict[str, Any]] = None
+    vertical_dual_finetune_best_params: Optional[Dict[str, Any]] = None
 
     # Phase-level overrides from YAML (list of dicts)
     phase_configs: List[Dict[str, Any]] = field(default_factory=list)

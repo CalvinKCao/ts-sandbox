@@ -68,9 +68,13 @@ class DiffusionTSFConfig:
     binary_boundary_weight: float = 1.0
     binary_background_weight: float = 0.1
     binary_boundary_width: int = 8
+    # Distance-weighted BCE: W=1+α|r−k| (quadratic miss penalty in BCE space).
     binary_use_boundary_weighted_bce: bool = False
-    diffusion_stage: str = "joint"  # joint, coarse, fine, finer
+    binary_cdf_distance_alpha: float = 1.0
+    diffusion_stage: str = "joint"  # joint, coarse, fine, finer, vertical_dual
     use_triple_scale: bool = False
+    # Soft-decode MSE mix inside deterministic anchor: λ*BCE + (1-λ)*MSE.
+    anchor_mse_proxy_lambda: float = 0.5
 
     # classifier-free guidance (training dropout only; inference is always conditional)
     cfg_dropout: float = 0.1
@@ -156,19 +160,20 @@ class DiffusionTSFConfig:
             raise ValueError(
                 "use_ordinal_window_norm replaces window normalization; set use_window_normalization=false"
             )
-        if self.binary_use_boundary_weighted_bce:
+        if self.binary_cdf_distance_alpha < 0.0:
             raise ValueError(
-                "Edge CDF boundary-weighted BCE is not supported for binary diffusion yet."
+                f"binary_cdf_distance_alpha must be >= 0, got {self.binary_cdf_distance_alpha}"
             )
         if self.binary_anchor_input_mode not in {"stationary_flat", "random_bits"}:
             raise ValueError(
                 "binary_anchor_input_mode must be 'stationary_flat' or 'random_bits', "
                 f"got {self.binary_anchor_input_mode!r}."
             )
-        valid_stages = {"joint", "coarse", "fine", "finer"}
+        valid_stages = {"joint", "coarse", "fine", "finer", "vertical_dual"}
         if self.diffusion_stage not in valid_stages:
             raise ValueError(
-                "diffusion_stage must be one of {'joint', 'coarse', 'fine', 'finer'}, "
+                "diffusion_stage must be one of "
+                "{'joint', 'coarse', 'fine', 'finer', 'vertical_dual'}, "
                 f"got {self.diffusion_stage!r}."
             )
         if self.diffusion_stage == "finer" and not self.use_triple_scale:
@@ -178,10 +183,26 @@ class DiffusionTSFConfig:
                 "staged_representation must be 'value_precision', "
                 f"got {self.staged_representation!r}."
             )
-        if self.use_triple_scale and self.diffusion_stage == "joint":
+        if self.use_triple_scale and self.diffusion_stage in {"joint", "vertical_dual"}:
             raise ValueError(
-                "use_triple_scale has no joint forward path; use staged coarse/fine/finer."
+                "use_triple_scale has no joint/vertical_dual forward path; "
+                "use staged coarse/fine/finer."
             )
+        if self.diffusion_stage == "vertical_dual":
+            expected = int(self.coarse_image_height) + int(self.fine_image_height)
+            if self.image_height != expected:
+                raise ValueError(
+                    f"vertical_dual expects image_height={expected} "
+                    f"(coarse+fine), got {self.image_height}."
+                )
+            if self.image_height % self.dit_patch_size[0] != 0:
+                raise ValueError("vertical_dual image_height must divide dit_patch_size[0].")
+            if self.coarse_image_height <= 0 or self.fine_image_height <= 0:
+                raise ValueError("coarse/fine image heights must be positive.")
+            if self.coarse_image_height % self.dit_patch_size[0] != 0:
+                raise ValueError("coarse_image_height must divide dit_patch_size[0].")
+            if self.fine_image_height % self.dit_patch_size[0] != 0:
+                raise ValueError("fine_image_height must divide dit_patch_size[0].")
         if self.diffusion_stage in {"coarse", "fine", "finer"}:
             expected_height = {
                 "coarse": self.coarse_image_height,
@@ -208,6 +229,7 @@ class DiffusionTSFConfig:
         assert 0 <= self.cutout_prob <= 1
         assert 0.0 <= self.deterministic_anchor_lambda <= 1.0
         assert 0.0 <= self.deterministic_anchor_alpha < 1.0
+        assert 0.0 <= self.anchor_mse_proxy_lambda <= 1.0
         assert self.window_norm_std_floor > 0
         assert self.window_norm_low_var_threshold >= 0.0
         assert self.window_norm_low_var_unit_std > 0.0
@@ -285,6 +307,9 @@ class DiffusionTSFConfig:
     def visual_cond_channels(self) -> int:
         per_scale = 1 + (1 if self.use_value_channel else 0)
         raw_extra = 1 if self.use_raw_lookback_cond_channel else 0
+        # Stacked past coarse∥fine as one H=Hc+Hf channel; no horizon GT coarse.
+        if self.diffusion_stage == "vertical_dual":
+            return per_scale + raw_extra
         if self.diffusion_stage == "coarse":
             return per_scale * (3 if self.use_triple_scale else 2) + raw_extra
         if self.diffusion_stage == "fine":

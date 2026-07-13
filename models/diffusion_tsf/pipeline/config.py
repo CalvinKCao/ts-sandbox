@@ -322,9 +322,15 @@ def normalize_guidance_phases(phases: list, guidance_type: str) -> list:
         if name == "itrans_finetune_hp":
             continue
         by_name[name] = dict(entry)
+    # Vertical-dual replaces separate coarse/fine finetune phases when both appear via extends.
+    if "diffusion_vertical_dual_finetune_hp" in by_name:
+        by_name.pop("diffusion_coarse_finetune_hp", None)
+        by_name.pop("diffusion_fine_finetune_hp", None)
+        by_name.pop("diffusion_finer_finetune_hp", None)
     preferred = (
         "staged_diffusion_pretrain",
         "patch_guidance_finetune_hp",
+        "diffusion_vertical_dual_finetune_hp",
         "diffusion_coarse_finetune_hp",
         "diffusion_fine_finetune_hp",
         "diffusion_finer_finetune_hp",
@@ -334,8 +340,9 @@ def normalize_guidance_phases(phases: list, guidance_type: str) -> list:
     seen = {str(p["phase"]) for p in ordered}
     for entry in phases:
         name = str(entry["phase"])
-        if name not in seen and name != "itrans_finetune_hp":
-            ordered.append(dict(entry))
+        if name not in seen and name != "itrans_finetune_hp" and name in by_name:
+            ordered.append(dict(by_name[name]))
+            seen.add(name)
     return ordered
 
 

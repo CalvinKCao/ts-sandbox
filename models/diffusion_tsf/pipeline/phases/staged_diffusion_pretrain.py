@@ -31,6 +31,8 @@ def _stage_pretrain_ckpt(state: PipelineState, stage: str) -> str:
 
 
 def staged_diffusion_stages(state: PipelineState) -> tuple[str, ...]:
+    if getattr(state, "use_vertical_dual_concat", False):
+        return ("vertical_dual",)
     return ("coarse", "fine", "finer") if state.use_triple_scale else ("coarse", "fine")
 
 
@@ -57,6 +59,7 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "fine_image_height": int(state.fine_image_height),
         "finer_image_height": int(state.finer_image_height),
         "use_triple_scale": bool(state.use_triple_scale),
+        "use_vertical_dual_concat": bool(state.use_vertical_dual_concat),
         "staged_representation": str(state.staged_representation),
         "max_scale": max_scale,
         "dit_patch_size": list(state.dit_patch_size),
@@ -84,6 +87,7 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "use_ordinal_window_norm": bool(state.use_ordinal_window_norm),
         "ordinal_tie_atol": float(state.ordinal_tie_atol),
         "binary_anchor_input_mode": str(state.binary_anchor_input_mode),
+        "binary_cdf_distance_alpha": float(state.binary_cdf_distance_alpha),
     }
     digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
     return (
@@ -559,6 +563,7 @@ def _log_staged_pretrain_diagnostics(
                 "coarse": state.diffusion_coarse_pretrain_ckpt,
                 "fine": state.diffusion_fine_pretrain_ckpt,
                 "finer": state.diffusion_finer_pretrain_ckpt,
+                "vertical_dual": state.diffusion_vertical_dual_pretrain_ckpt,
             }.get(stage)
             result = run_staged_synthetic_pretrain_diagnostics(
                 state,
@@ -585,7 +590,7 @@ def patch_stage_globals(
     for_synthetic_pretrain: bool = False,
 ) -> None:
     """Patch legacy train module globals for a single staged model."""
-    if stage not in {"coarse", "fine", "finer"}:
+    if stage not in {"coarse", "fine", "finer", "vertical_dual"}:
         raise ValueError(f"Unknown staged diffusion stage: {stage!r}")
     if stage == "finer" and not state.use_triple_scale:
         raise ValueError("finer staged diffusion requires state.use_triple_scale=True")
@@ -596,6 +601,7 @@ def patch_stage_globals(
         "coarse": int(state.coarse_image_height),
         "fine": int(state.fine_image_height),
         "finer": int(state.finer_image_height),
+        "vertical_dual": int(state.coarse_image_height) + int(state.fine_image_height),
     }[stage]
     mod.COARSE_IMAGE_HEIGHT = int(state.coarse_image_height)
     mod.FINE_IMAGE_HEIGHT = int(state.fine_image_height)
@@ -687,9 +693,12 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             for stage in staged_diffusion_stages(state)
         }
         if all(ckpts.values()):
-            state.diffusion_coarse_pretrain_ckpt = ckpts["coarse"]
-            state.diffusion_fine_pretrain_ckpt = ckpts["fine"]
-            if state.use_triple_scale:
+            if "vertical_dual" in ckpts:
+                state.diffusion_vertical_dual_pretrain_ckpt = ckpts["vertical_dual"]
+            else:
+                state.diffusion_coarse_pretrain_ckpt = ckpts["coarse"]
+                state.diffusion_fine_pretrain_ckpt = ckpts["fine"]
+            if state.use_triple_scale and "finer" in ckpts:
                 state.diffusion_finer_pretrain_ckpt = ckpts["finer"]
             return True
         return False
@@ -709,6 +718,8 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                         state.diffusion_coarse_pretrain_ckpt = ckpt
                     elif stage == "fine":
                         state.diffusion_fine_pretrain_ckpt = ckpt
+                    elif stage == "vertical_dual":
+                        state.diffusion_vertical_dual_pretrain_ckpt = ckpt
                     else:
                         state.diffusion_finer_pretrain_ckpt = ckpt
                 else:
@@ -839,6 +850,8 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                 state.diffusion_coarse_pretrain_ckpt = ckpt
             elif stage == "fine":
                 state.diffusion_fine_pretrain_ckpt = ckpt
+            elif stage == "vertical_dual":
+                state.diffusion_vertical_dual_pretrain_ckpt = ckpt
             else:
                 state.diffusion_finer_pretrain_ckpt = ckpt
 
@@ -851,7 +864,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         )
 
         viz_ckpt = state.diffusion_fine_pretrain_ckpt or state.diffusion_coarse_pretrain_ckpt
-        if viz_ckpt and guidance_ckpt and not state.smoke_test:
+        if viz_ckpt and guidance_ckpt and not state.smoke_test and not state.use_vertical_dual_concat:
             try:
                 viz_paths = run_pretrain_diffusion_visualizations(
                     state,

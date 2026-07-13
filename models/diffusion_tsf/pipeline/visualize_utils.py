@@ -2125,6 +2125,159 @@ def run_ordinal_roundtrip_visualization(
     return paths
 
 
+def run_vertical_dual_repr_visualization(
+    state: Any,
+    *,
+    model=None,
+    device: Optional[torch.device] = None,
+    variate: int = 0,
+    window_idx: int | None = None,
+    tag: str = "vertical_dual_repr",
+) -> list[str]:
+    """Panels: raw → ordinal → stacked 32-row canvas → soft/hard decode.
+
+    Always writes local JPEGs (including smoke). Logs nothing by itself — caller
+    passes paths to wandb_utils.log_visualization_paths.
+    """
+    from models.diffusion_tsf.preprocessing import TimeSeriesTo2D
+    from models.diffusion_tsf.train_multivariate_pipeline import generate_dataset_job, load_dataset
+
+    variate_indices = state.variate_indices
+    if variate_indices is None:
+        variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+    tie_atol = float(getattr(state, "ordinal_tie_atol", 1e-6))
+    train_ds, _, _, norm_stats = load_dataset(
+        state.dataset,
+        variate_indices,
+        lookback=state.lookback_length,
+        horizon=state.forecast_length,
+        lookback_overlap=state.lookback_overlap,
+        stride=1,
+        ordinal_tie_atol=tie_atol,
+        use_ordinal_window_norm=bool(getattr(state, "use_ordinal_window_norm", False)),
+    )
+    if len(train_ds) == 0:
+        return []
+    if window_idx is None:
+        window_idx = pick_sample_indices(len(train_ds), 1, seed=state.seed)[0]
+    window_idx = int(window_idx)
+    vi_local = int(variate) % len(variate_indices)
+
+    past, future = train_ds[window_idx]
+    if not torch.is_tensor(past):
+        past = torch.as_tensor(past, dtype=torch.float32)
+    if not torch.is_tensor(future):
+        future = torch.as_tensor(future, dtype=torch.float32)
+    if past.dim() == 2 and past.shape[0] != len(variate_indices) and past.shape[1] == len(variate_indices):
+        past = past.T
+        future = future.T
+
+    # Raw z-scored series from underlying array (not ordinal ranks).
+    start = window_idx * int(getattr(train_ds, "stride", 1))
+    lb = int(train_ds.lookback)
+    hz = int(train_ds.horizon)
+    ov = int(getattr(train_ds, "lookback_overlap", 0))
+    z_src = train_ds.data
+    if torch.is_tensor(z_src):
+        raw_past = z_src[start : start + lb, vi_local].detach().cpu().numpy()
+        raw_fut = z_src[start + lb - ov : start + lb + hz, vi_local].detach().cpu().numpy()
+    else:
+        raw_past = np.asarray(z_src[start : start + lb, vi_local])
+        raw_fut = np.asarray(z_src[start + lb - ov : start + lb + hz, vi_local])
+
+    if model is not None:
+        dev = device or next(model.parameters()).device
+        with torch.no_grad():
+            past_n, future_n, _stats = model._normalize_sequence(
+                past.unsqueeze(0).to(dev), future.unsqueeze(0).to(dev),
+            )
+            past_n = past_n[0].detach().cpu()
+            future_n = future_n[0].detach().cpu()
+    else:
+        past_n, future_n = past.float(), future.float()
+
+    ord_past = past_n[vi_local].numpy()
+    ord_fut = future_n[vi_local].numpy()
+
+    Hc = int(state.coarse_image_height)
+    Hf = int(state.fine_image_height)
+    max_scale = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
+    to_2d = TimeSeriesTo2D(height=Hc, max_scale=max_scale)
+    fut_1v = future_n[vi_local : vi_local + 1].unsqueeze(0)
+
+    use_ord = bool(getattr(state, "use_ordinal_window_norm", False))
+    ladder = None if model is None else getattr(model.config, "ordinal_ladder", None)
+    if use_ord and ladder is not None:
+        vmax = ladder.rank_max_per_variate().reshape(-1)
+        canvas = to_2d.encode_vertical_dual_heights_bounded(
+            fut_1v,
+            coarse_height=Hc,
+            fine_height=Hf,
+            value_min=0.0,
+            value_max_per_variate=vmax[vi_local : vi_local + 1],
+        )[0, 0]
+        decoded = to_2d.decode_dual_heights_bounded(
+            canvas[:Hc].unsqueeze(0).unsqueeze(0),
+            canvas[Hc:].unsqueeze(0).unsqueeze(0),
+            value_min=0.0,
+            value_max_per_variate=vmax[vi_local : vi_local + 1],
+            squeeze_univariate=True,
+        ).reshape(-1).detach().cpu().numpy()
+    else:
+        canvas = to_2d.encode_vertical_dual_heights(
+            fut_1v, coarse_height=Hc, fine_height=Hf,
+        )[0, 0]
+        decoded = to_2d.decode_vertical_dual(
+            canvas.unsqueeze(0).unsqueeze(0),
+            coarse_height=Hc,
+            squeeze_univariate=True,
+        ).reshape(-1).detach().cpu().numpy()
+
+    soft_decoded = None
+    if model is not None:
+        dev = device or next(model.parameters()).device
+        with torch.no_grad():
+            out = model.generate(past.unsqueeze(0).to(dev), sampler="anchor")
+            key = "prediction_norm" if "prediction_norm" in out else "prediction"
+            soft_decoded = out[key][0, vi_local].detach().cpu().numpy()
+
+    fig, axes = plt.subplots(4, 1, figsize=(12, 10), constrained_layout=True)
+    axes[0].plot(np.arange(len(raw_past)), raw_past, color="C2", label="past")
+    axes[0].plot(np.arange(len(raw_past), len(raw_past) + len(raw_fut)), raw_fut, color="C3", label="future")
+    axes[0].set_title("1) original (dataset z-score window)")
+    axes[0].legend(fontsize=7)
+
+    axes[1].plot(np.arange(len(ord_past)), ord_past, color="C2", label="past")
+    axes[1].plot(np.arange(len(ord_past), len(ord_past) + len(ord_fut)), ord_fut, color="C3", label="future")
+    axes[1].set_title("2) after ordinal / window norm")
+    axes[1].legend(fontsize=7)
+
+    im = axes[2].imshow(
+        canvas.detach().cpu().numpy(), aspect="auto", origin="lower",
+        cmap="viridis", vmin=0, vmax=1,
+    )
+    axes[2].axhline(Hc - 0.5, color="w", linestyle="--", linewidth=1.0)
+    axes[2].set_title(f"3) stacked vertical dual canvas (Hc={Hc}, Hf={Hf})")
+    axes[2].set_ylabel("row")
+    fig.colorbar(im, ax=axes[2], fraction=0.02)
+
+    axes[3].plot(ord_fut, color="C0", label="GT (norm space)", linewidth=1.2)
+    axes[3].plot(decoded[: len(ord_fut)], color="C1", linestyle="--", label="hard decode from GT canvas", linewidth=1.0)
+    if soft_decoded is not None:
+        axes[3].plot(soft_decoded[: len(ord_fut)], color="C3", label="model anchor decode", linewidth=1.0)
+    axes[3].set_title("4) decode after ordinal norm")
+    axes[3].legend(fontsize=7)
+
+    out_dir = os.path.join(state.results_dir, "viz", "vertical_dual_repr")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"{tag}_w{window_idx}_v{variate_indices[vi_local]}.jpg")
+    save_figure_jpg(fig, path, dpi=int(_viz_cfg(state).get("jpeg_dpi", 100)))
+    plt.close(fig)
+    logger.info("vertical_dual repr viz → %s", path)
+    return [path]
+
+
+
 def run_ordinal_coarse_fine_2d_visualization(
     state: Any,
     *,

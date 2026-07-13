@@ -420,6 +420,120 @@ class TimeSeriesTo2D(nn.Module):
         )
         return x
 
+    @staticmethod
+    def stack_vertical_dual(coarse: torch.Tensor, fine: torch.Tensor) -> torch.Tensor:
+        """Stack coarse/fine CDF maps on the height axis → (..., Hc+Hf, W)."""
+        if coarse.shape[:-2] != fine.shape[:-2] or coarse.shape[-1] != fine.shape[-1]:
+            raise ValueError(f"coarse/fine shapes differ: {coarse.shape} vs {fine.shape}")
+        return torch.cat([coarse, fine], dim=-2)
+
+    @staticmethod
+    def split_vertical_dual(
+        canvas: torch.Tensor,
+        coarse_height: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Split stacked canvas into coarse [:Hc] and fine [Hc:]."""
+        if canvas.shape[-2] <= int(coarse_height):
+            raise ValueError(
+                f"canvas height {canvas.shape[-2]} must exceed coarse_height={coarse_height}"
+            )
+        return canvas[..., :coarse_height, :], canvas[..., coarse_height:, :]
+
+    @staticmethod
+    def bin_indices_from_cdf(cdf_map: torch.Tensor) -> torch.Tensor:
+        """Hard/soft CDF → per-column bin index k (column_sum - 1), shape (*batch, W)."""
+        height = int(cdf_map.shape[-2])
+        column_sum = cdf_map.sum(dim=-2).clamp(1.0, float(height))
+        return (column_sum - 1.0).clamp(0.0, float(height - 1))
+
+    @staticmethod
+    def cdf_distance_weights(
+        target_cdf: torch.Tensor,
+        alpha: float = 1.0,
+        *,
+        coarse_height: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Pixel weights W=1+α|r−k| for distance-weighted BCE.
+
+        For a stacked vertical_dual canvas, pass coarse_height so each half
+        gets its own staircase distance (fine uses local row index).
+        target_cdf: (..., 1 or V, H, W) or (..., H, W) — weight matches shape.
+        """
+        if target_cdf.dim() < 2:
+            raise ValueError(f"target_cdf must be at least 2D, got {target_cdf.shape}")
+        H = int(target_cdf.shape[-2])
+        W = int(target_cdf.shape[-1])
+        device = target_cdf.device
+        dtype = target_cdf.dtype
+        alpha = float(alpha)
+
+        def _weights_one(cdf: torch.Tensor) -> torch.Tensor:
+            h = int(cdf.shape[-2])
+            rows = torch.arange(h, device=device, dtype=dtype).view(
+                *([1] * (cdf.dim() - 2)), h, 1
+            )
+            gt_k = TimeSeriesTo2D.bin_indices_from_cdf(cdf).to(dtype=dtype)
+            gt_k = gt_k.unsqueeze(-2)  # (..., 1, W)
+            return 1.0 + alpha * (rows - gt_k).abs()
+
+        if coarse_height is None or int(coarse_height) <= 0 or int(coarse_height) >= H:
+            return _weights_one(target_cdf)
+
+        hc = int(coarse_height)
+        coarse = target_cdf[..., :hc, :]
+        fine = target_cdf[..., hc:, :]
+        return torch.cat([_weights_one(coarse), _weights_one(fine)], dim=-2)
+
+    def encode_vertical_dual_heights(
+        self,
+        x: torch.Tensor,
+        *,
+        coarse_height: int,
+        fine_height: int,
+    ) -> torch.Tensor:
+        """Encode dual-scale CDFs and stack to (B, V, Hc+Hf, W)."""
+        coarse, fine = self.encode_dual_heights(
+            x, coarse_height=coarse_height, fine_height=fine_height,
+        )
+        return self.stack_vertical_dual(coarse, fine)
+
+    def encode_vertical_dual_heights_bounded(
+        self,
+        x: torch.Tensor,
+        *,
+        coarse_height: int,
+        fine_height: int,
+        value_min: float = 0.0,
+        value_max_per_variate: torch.Tensor,
+    ) -> torch.Tensor:
+        coarse, fine = self.encode_dual_heights_bounded(
+            x,
+            coarse_height=coarse_height,
+            fine_height=fine_height,
+            value_min=value_min,
+            value_max_per_variate=value_max_per_variate,
+        )
+        return self.stack_vertical_dual(coarse, fine)
+
+    def decode_vertical_dual(
+        self,
+        canvas: torch.Tensor,
+        *,
+        coarse_height: int,
+        cdf_decoder: str = "mean",
+        expectation_sharpen_temp: Optional[float] = None,
+        squeeze_univariate: bool = True,
+    ) -> torch.Tensor:
+        """Split stacked canvas and decode_dual."""
+        coarse, fine = self.split_vertical_dual(canvas, coarse_height)
+        return self.decode_dual(
+            coarse,
+            fine,
+            cdf_decoder=cdf_decoder,
+            expectation_sharpen_temp=expectation_sharpen_temp,
+            squeeze_univariate=squeeze_univariate,
+        )
+
     def decode_triple(
         self,
         coarse_map: torch.Tensor,
