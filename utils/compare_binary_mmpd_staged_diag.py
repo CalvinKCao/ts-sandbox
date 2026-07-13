@@ -947,10 +947,11 @@ def _plot_compare_panel(
         lookback=lookback,
         future_raw_len=future_raw_len,
     )
-    del pr_c_full, pr_f_full
+    del pr_f_full
     gt_coarse_np = _strip_overlap_raw(gt_c_full, lookback=lookback, lookback_overlap=k)
     gt_fine_np = _strip_overlap_raw(gt_f_full, lookback=lookback, lookback_overlap=k)
     gt_final_np = _strip_overlap_raw(gt_final_full, lookback=lookback, lookback_overlap=k)
+    pr_coarse_map = _strip_overlap_raw(pr_c_full, lookback=lookback, lookback_overlap=k)
     pr_final_map = _strip_overlap_raw(pr_final_full, lookback=lookback, lookback_overlap=k)
 
     fine_out = maps["fine_out"]
@@ -963,6 +964,12 @@ def _plot_compare_panel(
             f"coarse={bin_coarse_h.shape[-1]} != horizon_core {horizon_core}"
         )
 
+    _assert_horizon_aligned(
+        f"{dataset} win {window_index}: map-decode coarse vs prediction_global_norm",
+        pr_coarse_map[..., lookback:],
+        bin_coarse_h,
+        min_corr=0.75,
+    )
     _assert_horizon_aligned(
         f"{dataset} win {window_index}: map-decode final vs prediction_global_norm",
         pr_final_map[..., lookback:],

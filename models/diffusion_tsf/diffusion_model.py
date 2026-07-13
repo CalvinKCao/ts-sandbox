@@ -1602,8 +1602,14 @@ class DiffusionTSF(nn.Module):
         generated_2d = future_2d_flat.reshape(B, V, H, W_fut)
         if stage == "coarse":
             future_2d_coarse = generated_2d
-            future_norm = self.decode_from_2d(
-                future_2d_coarse, from_diffusion=False, decoder_method=decoder_method, **kwargs
+            # Must use staged coarse decode: ordinal maps live in [0, rank_max], not
+            # legacy [-max_scale, max_scale] (to_2d.inverse → garbage after ordinal_decode).
+            cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
+            temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
+            future_norm = self._decode_coarse_1d_from_map(
+                future_2d_coarse,
+                cdf_decoder=cdf_decoder,
+                expectation_sharpen_temp=temperature,
             )
             future_2d_fine = None
             future_2d_finer = None
