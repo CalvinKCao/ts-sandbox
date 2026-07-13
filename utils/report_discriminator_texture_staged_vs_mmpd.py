@@ -63,7 +63,7 @@ def metric_value(
 def metric_score(metric: str, value: float) -> float:
     if metric == "disc_bce":
         return -abs(value - LOG2)
-    if metric in {"disc_acc", "disc_auroc"}:
+    if metric in {"disc_acc", "disc_auroc", "disc_acc_window", "disc_auroc_window"}:
         return -abs(value - 0.5)
     return -value
 
@@ -84,6 +84,20 @@ def best_models(
     best = max(score for score, _model in scored)
     tol = max(1e-9, abs(best) * 1e-6)
     return [model for score, model in scored if abs(score - best) <= tol]
+
+
+def win_counts(
+    results: Mapping[str, Any],
+    datasets: List[str],
+    slice_lengths: List[int],
+    metric: str,
+) -> Dict[str, int]:
+    counts = {model: 0 for model in MODEL_ORDER}
+    for slice_len in slice_lengths:
+        for dataset in datasets:
+            for model in best_models(results, dataset, slice_len, metric):
+                counts[model] += 1
+    return counts
 
 
 def metric_table(
@@ -109,23 +123,15 @@ def metric_table(
     return lines
 
 
-def win_counts(
-    results: Mapping[str, Any],
-    datasets: List[str],
-    slice_lengths: List[int],
-    metric: str,
-) -> Dict[str, int]:
-    counts = {model: 0 for model in MODEL_ORDER}
-    for slice_len in slice_lengths:
-        for dataset in datasets:
-            for model in best_models(results, dataset, slice_len, metric):
-                counts[model] += 1
-    return counts
-
-
 def build_report(results: Dict[str, Any], manifest: Dict[str, Any]) -> str:
     datasets = list(manifest.get("datasets") or results.keys())
     slice_lengths = [int(x) for x in manifest.get("slice_lengths") or [8, 16, 32]]
+    has_window = any(
+        metric_value(results, ds, model, sl, "disc_auroc_window") is not None
+        for ds in datasets
+        for model in MODEL_ORDER
+        for sl in slice_lengths
+    )
     lines = [
         "# Discriminator texture eval — 2-stage binary vs MMPD",
         "",
@@ -139,29 +145,59 @@ def build_report(results: Dict[str, Any], manifest: Dict[str, Any]) -> str:
         f"- **Raw eval dir:** `{manifest.get('raw_eval_dir', 'results/datasets/06-03-trend-robust-texture-staged-vs-mmpd')}`",
         f"- **Slice lengths:** {', '.join(str(x) for x in slice_lengths)}",
         f"- **Datasets:** {', '.join(datasets)}",
+        f"- **Pack splits:** `{manifest.get('pack_splits', 'test')}`",
+        f"- **Pack fraction:** `{manifest.get('pack_fraction', manifest.get('test_fraction', '-'))}`",
+        f"- **Candidate-only:** `{manifest.get('candidate_only', False)}`",
+        f"- **Nonoverlapping patches:** `{manifest.get('nonoverlapping_patches', False)}`",
+        f"- **No offset embedding:** `{manifest.get('no_offset_embedding', False)}`",
+        f"- **Native repr stride:** `{manifest.get('native_repr_stride', 1)}`",
+        "",
+        "Headline metrics are **window-level** when present (one decision per parent window); "
+        "slice-level numbers are secondary and can be inflated by overlapping offsets.",
         "",
         "---",
         "",
-        "## BCE Loss",
-        "",
     ]
+    if has_window:
+        lines.extend(["## Window-level AUROC (headline)", ""])
+        for slice_len in slice_lengths:
+            lines.extend(
+                metric_table(results, datasets, slice_len, "disc_auroc_window", "Held-out window AUROC")
+            )
+        lines.extend(["---", "", "## Window-level accuracy", ""])
+        for slice_len in slice_lengths:
+            lines.extend(
+                metric_table(results, datasets, slice_len, "disc_acc_window", "Held-out window accuracy")
+            )
+        lines.extend(["---", ""])
+
+    lines.extend(["## BCE Loss", ""])
     for slice_len in slice_lengths:
         lines.extend(metric_table(results, datasets, slice_len, "disc_bce", "Held-out BCE"))
 
-    lines.extend(["---", "", "## Accuracy", ""])
+    lines.extend(["---", "", "## Slice-level Accuracy", ""])
     for slice_len in slice_lengths:
-        lines.extend(metric_table(results, datasets, slice_len, "disc_acc", "Held-out accuracy"))
+        lines.extend(metric_table(results, datasets, slice_len, "disc_acc", "Held-out slice accuracy"))
 
-    lines.extend(["---", "", "## AUROC", ""])
+    lines.extend(["---", "", "## Slice-level AUROC", ""])
     for slice_len in slice_lengths:
-        lines.extend(metric_table(results, datasets, slice_len, "disc_auroc", "Held-out AUROC"))
+        lines.extend(metric_table(results, datasets, slice_len, "disc_auroc", "Held-out slice AUROC"))
 
     lines.extend(["---", "", "## Headlines", ""])
-    for metric, label in [
-        ("disc_bce", "BCE closest to chance"),
-        ("disc_acc", "Accuracy closest to 0.5"),
-        ("disc_auroc", "AUROC closest to 0.5"),
-    ]:
+    headline_metrics = (
+        [
+            ("disc_auroc_window", "Window AUROC closest to 0.5"),
+            ("disc_acc_window", "Window accuracy closest to 0.5"),
+            ("disc_bce", "BCE closest to chance"),
+        ]
+        if has_window
+        else [
+            ("disc_bce", "BCE closest to chance"),
+            ("disc_acc", "Accuracy closest to 0.5"),
+            ("disc_auroc", "AUROC closest to 0.5"),
+        ]
+    )
+    for metric, label in headline_metrics:
         counts = win_counts(results, datasets, slice_lengths, metric)
         parts = [f"{MODEL_LABELS[m]}: {counts[m]}" for m in MODEL_ORDER]
         lines.append(f"- **{label}** — " + ", ".join(parts))

@@ -41,6 +41,8 @@ LOOKBACK=""
 HORIZON=""
 MMPD_BACKBONE="Decoder"
 WALL_OVERRIDE=""
+PACK_SPLITS=""
+PACK_FRACTION=""
 
 resolve_output_dir() {
     local repo_root="$1"
@@ -78,6 +80,8 @@ while [[ $# -gt 0 ]]; do
         --horizon) HORIZON="$2"; shift 2 ;;
         --mmpd-backbone) MMPD_BACKBONE="$2"; shift 2 ;;
         --time) WALL_OVERRIDE="$2"; shift 2 ;;
+        --pack-splits) PACK_SPLITS="$2"; shift 2 ;;
+        --pack-fraction) PACK_FRACTION="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -112,6 +116,8 @@ append_run_config_args() {
     [[ -n "${LOOKBACK:-}" ]] && _out+=(--lookback "$LOOKBACK")
     [[ -n "${HORIZON:-}" ]] && _out+=(--horizon "$HORIZON")
     [[ -n "${WALL_OVERRIDE:-}" ]] && _out+=(--time "$WALL_OVERRIDE")
+    [[ -n "${PACK_SPLITS:-}" ]] && _out+=(--pack-splits "$PACK_SPLITS")
+    [[ -n "${PACK_FRACTION:-}" ]] && _out+=(--pack-fraction "$PACK_FRACTION")
 }
 
 # ---------------------------------------------------------------------------
@@ -228,7 +234,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
                 --error="$LOG_DIR/${JOB_NAME}-%j.log" \
                 --mail-type=FAIL \
                 --mail-user=ccao87@uwo.ca \
-                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",SLICE_LENGTH="$SLICE_LENGTH",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$ANCHOR_CONFIG_BY_DATASET",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$BINARY_CONFIG_BY_DATASET",IMPORT_MMPD_PACKS_FROM="$IMPORT_MMPD_PACKS_FROM",MMPD_BACKBONE="$MMPD_BACKBONE",TEST_STRIDE="$TEST_STRIDE",TEST_FRACTION="$TEST_FRACTION",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",REPORT_SUFFIX="$REPORT_SUFFIX" \
+                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",SLICE_LENGTH="$SLICE_LENGTH",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$ANCHOR_CONFIG_BY_DATASET",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$BINARY_CONFIG_BY_DATASET",IMPORT_MMPD_PACKS_FROM="$IMPORT_MMPD_PACKS_FROM",MMPD_BACKBONE="$MMPD_BACKBONE",TEST_STRIDE="$TEST_STRIDE",TEST_FRACTION="$TEST_FRACTION",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",REPORT_SUFFIX="$REPORT_SUFFIX",PACK_SPLITS="$PACK_SPLITS",PACK_FRACTION="$PACK_FRACTION" \
                 "$SCRIPT_DIR/slurm_discriminator_texture_staged_vs_mmpd.sh" \
                 "${SUBMIT_ARGS[@]}")"
             JOB_IDS+=("$job_id")
@@ -423,6 +429,21 @@ if [[ "${DISC_NO_MMPD_ORDINAL_QUANTIZE:-0}" == "1" ]]; then
 fi
 if [[ "${DISC_CANDIDATE_ONLY:-0}" == "1" ]]; then
     EVAL_ARGS+=(--candidate-only)
+fi
+if [[ "${DISC_NONOVERLAPPING_PATCHES:-0}" == "1" ]]; then
+    EVAL_ARGS+=(--nonoverlapping-patches)
+fi
+if [[ "${DISC_NO_OFFSET_EMBEDDING:-0}" == "1" ]]; then
+    EVAL_ARGS+=(--no-offset-embedding)
+fi
+if [[ -n "${DISC_NATIVE_REPR_STRIDE:-}" ]]; then
+    EVAL_ARGS+=(--native-repr-stride "$DISC_NATIVE_REPR_STRIDE")
+fi
+if [[ -n "${PACK_SPLITS:-}" ]]; then
+    EVAL_ARGS+=(--pack-splits "$PACK_SPLITS")
+fi
+if [[ -n "${PACK_FRACTION:-}" ]]; then
+    EVAL_ARGS+=(--pack-fraction "$PACK_FRACTION")
 fi
 
 if [[ "${FORCE_RAW:-0}" -eq 1 ]]; then

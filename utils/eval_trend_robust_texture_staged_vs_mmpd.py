@@ -31,8 +31,11 @@ from utils.eval_mmpd_gaussian_anchor import (
     DEFAULT_MMPD_DATA,
     DEFAULT_MMPD_REPO,
     ensure_mmpd_repo,
+    load_tsf_pack_pool,
     load_tsf_test_subset,
     make_eval_indices,
+    make_pack_pool_indices,
+    parse_pack_splits,
     run_mmpd_eval,
     run_subset_id,
     run_test_stride,
@@ -189,22 +192,34 @@ def staged_anchor_run(dataset: str, checkpoint_dir: Path, test_stride: int) -> T
 
 def make_indices(args: argparse.Namespace, run: AnchorRun) -> List[int]:
     lookback, horizon = dataset_window_lengths_for_run(args, run)
-    subset = load_tsf_test_subset(
+    pack_splits = parse_pack_splits(getattr(args, "pack_splits", None))
+    pool, series_starts, splits, part_lengths, _stats = load_tsf_pack_pool(
         run.dataset,
         run_variate_indices(run),
-        [],
-        lookback,
-        horizon,
-        run_train_stride(run),
-        run_test_stride(run),
+        lookback=lookback,
+        horizon=horizon,
+        train_stride=run_train_stride(run),
+        test_stride=run_test_stride(run),
+        pack_splits=pack_splits,
     )
-    n_test = len(subset.dataset) if hasattr(subset, "dataset") else len(subset)
-    return make_eval_indices(
-        n_test,
-        args.test_fraction,
-        stable_dataset_seed(args.seed, run.dataset),
-        args.test_max_items,
+    fraction = float(getattr(args, "pack_fraction", None) or args.test_fraction)
+    indices = make_pack_pool_indices(
+        len(pool),
+        fraction=fraction,
+        seed=stable_dataset_seed(args.seed, run.dataset),
+        max_items=args.test_max_items,
     )
+    selected_starts = series_starts[np.asarray(indices, dtype=np.int64)]
+    print(
+        f"[pack-pool] {run.dataset}: splits={splits} part_lengths={part_lengths} "
+        f"pool={len(pool)} kept={len(indices)} fraction={fraction:g} "
+        f"abs_start_range=[{int(selected_starts.min())},{int(selected_starts.max())}]",
+        flush=True,
+    )
+    # Stash for callers that materialize packs in the same process.
+    args._pack_series_starts_full = series_starts
+    args._pack_splits_resolved = splits
+    return indices
 
 
 def dataset_window_lengths_for_run(args: argparse.Namespace, run: AnchorRun) -> Tuple[int, int]:
@@ -222,21 +237,27 @@ def evaluate_staged_binary(
     indices: Sequence[int],
     device: torch.device,
 ) -> Dict[str, np.ndarray]:
+    from torch.utils.data import Subset
+
     raw_path = args.output_dir / "raw" / f"binary_staged_{run.dataset}.npz"
     if raw_path.exists() and not args.force_binary_eval:
         with np.load(raw_path) as data:
             return {key: data[key] for key in data.files}
 
     lookback, horizon = dataset_window_lengths_for_run(args, run)
-    subset = load_tsf_test_subset(
+    pack_splits = parse_pack_splits(getattr(args, "pack_splits", None))
+    pool, series_starts_full, splits, _part_lengths, norm_stats = load_tsf_pack_pool(
         run.dataset,
         run_variate_indices(run),
-        indices,
-        lookback,
-        horizon,
-        run_train_stride(run),
-        run_test_stride(run),
+        lookback=lookback,
+        horizon=horizon,
+        train_stride=run_train_stride(run),
+        test_stride=run_test_stride(run),
+        pack_splits=pack_splits,
+        ordinal_tie_atol=1e-6,
+        use_ordinal_window_norm=None,
     )
+    subset = Subset(pool, list(indices))
     # Keep micro-batches small for lb336/hz720 maps.
     batch_size = min(int(args.binary_batch_size), 2)
     loader = DataLoader(
@@ -254,7 +275,8 @@ def evaluate_staged_binary(
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
     patch_globals(pipeline_mod, state, honor_dataset_windows=True)
-    _, _, test_ds, norm_stats = load_dataset(
+    # Rebuild ladder under the same binary config knobs as training.
+    _, _, _test_ds, norm_stats = load_dataset(
         run.dataset,
         run_variate_indices(run),
         stride=run_train_stride(run),
@@ -284,10 +306,10 @@ def evaluate_staged_binary(
     fine_model = _load_stage_model(
         state, "fine", Path(sub["fine_pt"]), guidance_model, len(run_variate_indices(run)), device,
     )
-    ranked = bool(getattr(test_ds, "yields_ordinal_ranks", False))
+    # Pool windows are z-score series (not pre-ranked) even under ordinal configs.
     for m in (coarse_model, fine_model):
-        m._ordinal_input_is_ranked = ranked
-        m._ordinal_apply_ood_shift = bool(not ranked)
+        m._ordinal_input_is_ranked = False
+        m._ordinal_apply_ood_shift = bool(state.use_ordinal_window_norm)
 
     prob_kwargs = {"sampler": args.probabilistic_sampler, "num_inference_steps": args.num_sampling_steps}
     y_true_all: List[np.ndarray] = []
@@ -296,7 +318,8 @@ def evaluate_staged_binary(
     progress = EvalProgress(f"binary-staged/{run.dataset}", len(loader))
     print(
         f"[binary-staged] {run.dataset}: windows={len(indices)} batches={len(loader)} "
-        f"samples={args.sample_num} stride={run_test_stride(run)} config={config_path}",
+        f"samples={args.sample_num} pack_splits={splits} stride_train={run_train_stride(run)} "
+        f"config={config_path}",
         flush=True,
     )
     t0 = time.time()
@@ -342,11 +365,14 @@ def evaluate_staged_binary(
             )
     progress.done(extra=f"writing {raw_path}")
 
+    idx_arr = np.asarray(indices, dtype=np.int64)
     pack = {
         "y_true": np.concatenate(y_true_all, axis=0),
         "deterministic": np.concatenate(det_all, axis=0),
         "samples": np.concatenate(samples_all, axis=0),
-        "indices": np.asarray(indices, dtype=np.int64),
+        "indices": idx_arr,
+        "series_starts": series_starts_full[idx_arr],
+        "pack_splits": np.asarray(splits),
     }
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(raw_path, **pack)

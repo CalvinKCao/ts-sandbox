@@ -38,7 +38,9 @@ from utils.eval_mmpd_gaussian_anchor import (
     DEFAULT_MMPD_DATA,
     DEFAULT_MMPD_REPO,
     ensure_mmpd_repo,
+    load_tsf_pack_pool,
     load_tsf_test_subset,
+    parse_pack_splits,
     run_mmpd_eval,
     run_subset_id,
     run_test_stride,
@@ -72,6 +74,8 @@ class RawBundle:
     past: np.ndarray
     y_true_by_source: Dict[str, np.ndarray]
     fakes: Dict[str, np.ndarray]
+    series_starts: np.ndarray
+    pack_splits: List[str]
 
 
 def load_json(path: Path) -> Any:
@@ -301,6 +305,8 @@ def raw_eval_args(args: argparse.Namespace, dataset: str) -> argparse.Namespace:
         dataset: out.binary_config,
         **dict(getattr(args, "binary_config_by_dataset", None) or {}),
     }
+    out.pack_splits = getattr(args, "pack_splits", "test")
+    out.pack_fraction = getattr(args, "pack_fraction", None)
     return out
 
 
@@ -308,7 +314,7 @@ def ensure_raw_packs(
     args: argparse.Namespace,
     dataset: str,
     device: torch.device,
-) -> Tuple[Any, Dict[str, Any], List[int], Dict[str, Dict[str, np.ndarray]]]:
+) -> Tuple[Any, Dict[str, Any], List[int], Dict[str, Dict[str, np.ndarray]], np.ndarray, List[str]]:
     anchor_config = _anchor_config_for(args, dataset)
     ckpt_dir = resolve_staged_ckpt_dir(args.ckpt_base, dataset, anchor_config)
     run, sub = staged_anchor_run(dataset, ckpt_dir, args.test_stride)
@@ -339,7 +345,54 @@ def ensure_raw_packs(
         validate_stochastic_pack(path, pack)
         packs[fake_source] = pack
 
-    return run, sub, indices, packs
+    series_starts, pack_splits = _resolve_pack_series_meta(args, run, indices, packs)
+    # Persist meta onto MMPD packs that predate series_starts.
+    for fake_source, pack in packs.items():
+        if "series_starts" not in pack or "pack_splits" not in pack:
+            path = pack_path(args.raw_eval_dir, fake_source, dataset)
+            merged = dict(pack)
+            merged["series_starts"] = series_starts
+            merged["pack_splits"] = np.asarray(pack_splits)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(path, **merged)
+            packs[fake_source] = merged
+
+    return run, sub, indices, packs, series_starts, pack_splits
+
+
+def _resolve_pack_series_meta(
+    args: argparse.Namespace,
+    run: Any,
+    indices: Sequence[int],
+    packs: Mapping[str, Mapping[str, np.ndarray]],
+) -> Tuple[np.ndarray, List[str]]:
+    for pack in packs.values():
+        if "series_starts" in pack:
+            starts = np.asarray(pack["series_starts"], dtype=np.int64)
+            if starts.shape[0] != len(indices):
+                raise ValueError(
+                    f"{run.dataset}: series_starts length {starts.shape[0]} != n_indices {len(indices)}"
+                )
+            splits = (
+                [str(x) for x in np.asarray(pack["pack_splits"]).tolist()]
+                if "pack_splits" in pack
+                else parse_pack_splits(getattr(args, "pack_splits", None))
+            )
+            return starts, splits
+
+    lookback, horizon = dataset_window_lengths_for_run(args, run)
+    pack_splits = parse_pack_splits(getattr(args, "pack_splits", None))
+    _pool, series_starts_full, splits, _lens, _stats = load_tsf_pack_pool(
+        run.dataset,
+        run_variate_indices(run),
+        lookback=lookback,
+        horizon=horizon,
+        train_stride=run_train_stride(run),
+        test_stride=run_test_stride(run),
+        pack_splits=pack_splits,
+    )
+    idx_arr = np.asarray(indices, dtype=np.int64)
+    return series_starts_full[idx_arr], splits
 
 
 def load_past_windows(
@@ -348,16 +401,20 @@ def load_past_windows(
     indices: Sequence[int],
     device: torch.device,
 ) -> np.ndarray:
+    from torch.utils.data import Subset
+
     lookback, horizon = dataset_window_lengths_for_run(args, run)
-    subset = load_tsf_test_subset(
+    pack_splits = parse_pack_splits(getattr(args, "pack_splits", None))
+    pool, _starts, _splits, _lens, _stats = load_tsf_pack_pool(
         run.dataset,
         run_variate_indices(run),
-        indices,
-        lookback,
-        horizon,
-        run_train_stride(run),
-        run_test_stride(run),
+        lookback=lookback,
+        horizon=horizon,
+        train_stride=run_train_stride(run),
+        test_stride=run_test_stride(run),
+        pack_splits=pack_splits,
     )
+    subset = Subset(pool, list(indices))
     loader = DataLoader(
         subset,
         batch_size=args.raw_load_batch_size,
@@ -376,7 +433,7 @@ def build_raw_bundle(
     dataset: str,
     device: torch.device,
 ) -> RawBundle:
-    run, sub, indices, packs = ensure_raw_packs(args, dataset, device)
+    run, sub, indices, packs, series_starts, pack_splits = ensure_raw_packs(args, dataset, device)
     past = load_past_windows(args, run, indices, device)
     y_true_by_source: Dict[str, np.ndarray] = {}
     fakes: Dict[str, np.ndarray] = {}
@@ -460,8 +517,8 @@ def build_raw_bundle(
         )
 
     if getattr(args, "mmpd_ordinal_quantize", False):
-        # Snap MMPD fakes AND all GT horizons onto the binary global ordinal ladder.
-        # (Previously only MMPD fakes were quantized, leaving a continuous-vs-ladder tell.)
+        # Snap ALL horizons (GT, MMPD fakes, binary fakes) onto the global ordinal ladder.
+        # Binary preds are post stride-2 linear upsample and are mostly off-ladder otherwise.
         if "mmpd" in fakes:
             binary_pack_file = pack_path(args.raw_eval_dir, "binary_staged", dataset)
             if binary_pack_file.is_file():
@@ -479,11 +536,11 @@ def build_raw_bundle(
                         "refusing --mmpd-ordinal-quantize onto a mismatched coordinate space"
                     )
         ladder = load_ordinal_ladder_for_run(args, run)
-        if "mmpd" in fakes:
-            quantized, q_stats = quantize_to_ordinal_ladder(fakes["mmpd"], ladder)
-            fakes["mmpd"] = quantized
+        for src in list(fakes):
+            quantized, q_stats = quantize_to_ordinal_ladder(fakes[src], ladder)
+            fakes[src] = quantized
             print(
-                f"[{dataset}] mmpd fake ordinal-quantize: changed_frac={q_stats['changed_frac']:.4f} "
+                f"[{dataset}] {src} fake ordinal-quantize: changed_frac={q_stats['changed_frac']:.4f} "
                 f"mean_abs_delta={q_stats['mean_abs_delta']:.6f} "
                 f"max_abs_delta={q_stats['max_abs_delta']:.6f} "
                 f"n_unique_max={int(q_stats['n_unique_max'])}",
@@ -499,9 +556,23 @@ def build_raw_bundle(
                 flush=True,
             )
 
+    native_stride = int(getattr(args, "native_repr_stride", 1) or 1)
+    if native_stride > 1:
+        print(
+            f"[{dataset}] native-repr downsample stride={native_stride} "
+            f"(aligned [::{native_stride}] on GT+fakes)",
+            flush=True,
+        )
+        for src in list(y_true_by_source):
+            y_true_by_source[src] = np.ascontiguousarray(y_true_by_source[src][..., ::native_stride])
+        for src in list(fakes):
+            fakes[src] = np.ascontiguousarray(fakes[src][..., ::native_stride])
+        ref_shape = next(iter(y_true_by_source.values())).shape
+
     expected_variates = [int(i) for i in run_variate_indices(run)]
     print(
-        f"[{dataset}] staged subset={run_subset_id(run)} variates={expected_variates}",
+        f"[{dataset}] staged subset={run_subset_id(run)} variates={expected_variates} "
+        f"pack_splits={pack_splits} n_windows={len(indices)}",
         flush=True,
     )
 
@@ -512,6 +583,8 @@ def build_raw_bundle(
         past=past.astype(np.float32),
         y_true_by_source=y_true_by_source,
         fakes=fakes,
+        series_starts=np.asarray(series_starts, dtype=np.int64),
+        pack_splits=list(pack_splits),
     )
 
 
@@ -521,7 +594,18 @@ def window_time_bounds(
     lookback: int,
     horizon: int,
     test_stride: int,
+    *,
+    series_starts: Optional[Sequence[int]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    if series_starts is not None:
+        starts = np.asarray(series_starts, dtype=np.int64)
+        if starts.shape[0] != len(indices):
+            raise ValueError(
+                f"{dataset}: series_starts length {starts.shape[0]} != n_indices {len(indices)}"
+            )
+        span = int(lookback) + int(horizon)
+        ends = starts + span
+        return starts, ends
     raw = np.asarray(indices, dtype=np.int64)
     if dataset == "dalia":
         starts = raw
@@ -533,6 +617,27 @@ def window_time_bounds(
     return starts, ends
 
 
+def _purge_nonoverlapping(
+    order: np.ndarray,
+    starts: np.ndarray,
+    ends: np.ndarray,
+    *,
+    blocked_start: Optional[int] = None,
+) -> np.ndarray:
+    """Keep windows in `order` that end before blocked_start and do not overlap earlier kept ones."""
+    kept: List[int] = []
+    last_end = None
+    for idx in order:
+        idx = int(idx)
+        if blocked_start is not None and int(ends[idx]) > int(blocked_start):
+            continue
+        if last_end is not None and int(starts[idx]) < int(last_end):
+            continue
+        kept.append(idx)
+        last_end = int(ends[idx])
+    return np.asarray(kept, dtype=np.int64)
+
+
 def split_windows(
     n_windows: int,
     args: argparse.Namespace,
@@ -542,6 +647,7 @@ def split_windows(
     lookback: Optional[int] = None,
     horizon: Optional[int] = None,
     test_stride: Optional[int] = None,
+    series_starts: Optional[Sequence[int]] = None,
 ) -> Dict[str, np.ndarray]:
     if args.max_windows is not None:
         n_windows = min(n_windows, int(args.max_windows))
@@ -550,8 +656,16 @@ def split_windows(
     raw_indices = [int(i) for i in list(indices)[:n_windows]]
     if len(raw_indices) != n_windows:
         raise ValueError(f"{dataset}: got {len(raw_indices)} split indices for {n_windows} windows")
+    starts_all = None if series_starts is None else list(series_starts)[:n_windows]
 
-    starts, ends = window_time_bounds(dataset, raw_indices, int(lookback), int(horizon), int(test_stride))
+    starts, ends = window_time_bounds(
+        dataset,
+        raw_indices,
+        int(lookback),
+        int(horizon),
+        int(test_stride),
+        series_starts=starts_all,
+    )
     order = np.argsort(starts, kind="mergesort")
     n_train_target = max(1, int(round(len(order) * args.train_fraction)))
     n_val_target = max(1, int(round(len(order) * args.val_fraction)))
@@ -562,30 +676,38 @@ def split_windows(
         raise ValueError(f"not enough windows for train/val/test split: {len(order)}")
 
     test = order[-n_test:]
-    test_start = starts[test].min()
-    train_val_pool = order[:-n_test]
-    train_val_pool = np.asarray([idx for idx in train_val_pool if ends[idx] <= test_start], dtype=np.int64)
-    if len(train_val_pool) < 2:
-        # illness-like tiny sets: stride-1 windows overlap heavily; index split is fine.
-        train_val_pool = np.asarray(order[:-n_test], dtype=np.int64)
-        print(
-            f"[warn] {dataset}: relaxed train/val split (overlapping windows; "
-            f"windows={len(order)}, test={n_test}, test_stride={test_stride})",
-            flush=True,
-        )
+    test_start = int(starts[test].min())
+    # Hold out anything whose span reaches into the test region. No silent fallback.
+    train_val_pool = np.asarray(
+        [idx for idx in order[:-n_test] if int(ends[idx]) <= test_start],
+        dtype=np.int64,
+    )
     if len(train_val_pool) < 2:
         raise ValueError(
-            f"{dataset}: not enough windows for train/val split "
-            f"(windows={len(order)}, test={n_test}, lookback={lookback}, horizon={horizon}, "
-            f"test_stride={test_stride})"
+            f"{dataset}: hard temporal purge left {len(train_val_pool)} train/val windows "
+            f"(need >=2) before test_start={test_start}. "
+            f"windows={len(order)} test={n_test} lookback={lookback} horizon={horizon}. "
+            f"Raise --pack-fraction / enlarge pack_splits — overlapping fallback is disabled."
         )
 
+    # Allow overlap *within* train and within val (needed at lb336/hz720). The leak we
+    # kill is train/val ↔ test absolute-time overlap, not within-split density.
     val_ratio = args.val_fraction / max(args.train_fraction + args.val_fraction, 1e-8)
     n_val = max(1, int(round(len(train_val_pool) * val_ratio)))
     if n_val >= len(train_val_pool):
         n_val = len(train_val_pool) - 1
-    train = train_val_pool[:-n_val]
-    val = train_val_pool[-n_val:]
+    # Chronological train then val within the purged pool.
+    tv_order = train_val_pool[np.argsort(starts[train_val_pool], kind="mergesort")]
+    train = tv_order[:-n_val]
+    val = tv_order[-n_val:]
+
+    print(
+        f"[split] {dataset}: pack={len(order)} -> train/val/test="
+        f"{len(train)}/{len(val)}/{len(test)} "
+        f"(raw targets {n_train_target}/{n_val_target}/{n_test}; "
+        f"test_start={test_start}; train/val purged vs test only)",
+        flush=True,
+    )
     return {
         "train": np.sort(train),
         "val": np.sort(val),
@@ -649,7 +771,7 @@ class HorizonSliceDataset(Dataset):
     def __len__(self) -> int:
         return len(self.items)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         window, offset, label = self.items[idx]
         candidate_src = self.fake if label == 1 else self.real
         candidate = candidate_src[window, :, offset : offset + self.slice_len]
@@ -663,6 +785,7 @@ class HorizonSliceDataset(Dataset):
             torch.from_numpy(x),
             torch.tensor(offset, dtype=torch.long),
             torch.tensor(float(label), dtype=torch.float32),
+            torch.tensor(int(window), dtype=torch.long),
         )
 
 
@@ -676,10 +799,15 @@ class InvertedSliceDiscriminator(nn.Module):
         depth: int,
         d_ff: int,
         dropout: float,
+        *,
+        use_offset_embedding: bool = True,
     ) -> None:
         super().__init__()
+        self.use_offset_embedding = bool(use_offset_embedding)
         self.value_embedding = nn.Linear(seq_len, d_model)
-        self.offset_embedding = nn.Embedding(max_offset + 1, d_model)
+        self.offset_embedding = (
+            nn.Embedding(max_offset + 1, d_model) if self.use_offset_embedding else None
+        )
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
@@ -701,7 +829,8 @@ class InvertedSliceDiscriminator(nn.Module):
     def forward(self, x: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
         # x: [B, C, T]. Like iTransformer, variates are tokens and time is embedded.
         tokens = self.value_embedding(x)
-        tokens = tokens + self.offset_embedding(offsets).unsqueeze(1)
+        if self.offset_embedding is not None:
+            tokens = tokens + self.offset_embedding(offsets).unsqueeze(1)
         tokens = self.encoder(tokens)
         pooled = self.norm(tokens).mean(dim=1)
         return self.head(pooled).squeeze(-1)
@@ -732,6 +861,33 @@ def binary_auroc(labels: np.ndarray, scores: np.ndarray) -> float:
     return float((rank_sum_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
 
 
+def window_level_metrics(windows: np.ndarray, labels: np.ndarray, probs: np.ndarray) -> Dict[str, float]:
+    """One decision per (window, label) via mean prob(fake) over slices."""
+    keys = {}
+    for w, y, p in zip(windows.tolist(), labels.tolist(), probs.tolist()):
+        key = (int(w), int(y))
+        keys.setdefault(key, []).append(float(p))
+    if not keys:
+        return {
+            "disc_acc_window": float("nan"),
+            "disc_auroc_window": float("nan"),
+            "n_windows_scored": 0.0,
+        }
+    y_win = []
+    p_win = []
+    for (w, y), vals in keys.items():
+        y_win.append(float(y))
+        p_win.append(float(np.mean(vals)))
+    y_arr = np.asarray(y_win, dtype=np.float64)
+    p_arr = np.asarray(p_win, dtype=np.float64)
+    preds = (p_arr >= 0.5).astype(np.float64)
+    return {
+        "disc_acc_window": float((preds == y_arr).mean()),
+        "disc_auroc_window": binary_auroc(y_arr, p_arr),
+        "n_windows_scored": float(len(y_win)),
+    }
+
+
 @torch.no_grad()
 def evaluate_classifier(
     model: nn.Module,
@@ -743,7 +899,13 @@ def evaluate_classifier(
     total_count = 0
     logits_all: List[np.ndarray] = []
     labels_all: List[np.ndarray] = []
-    for x, offsets, labels in loader:
+    windows_all: List[np.ndarray] = []
+    for batch in loader:
+        if len(batch) == 4:
+            x, offsets, labels, windows = batch
+        else:
+            x, offsets, labels = batch
+            windows = torch.zeros_like(labels, dtype=torch.long)
         x = x.to(device)
         offsets = offsets.to(device)
         labels = labels.to(device)
@@ -753,18 +915,22 @@ def evaluate_classifier(
         total_count += int(labels.numel())
         logits_all.append(logits.detach().cpu().numpy())
         labels_all.append(labels.detach().cpu().numpy())
+        windows_all.append(windows.detach().cpu().numpy())
 
     logits_np = np.concatenate(logits_all)
     labels_np = np.concatenate(labels_all)
+    windows_np = np.concatenate(windows_all)
     probs = 1.0 / (1.0 + np.exp(-logits_np))
     preds = (logits_np >= 0.0).astype(np.float32)
-    return {
+    out = {
         "disc_bce": total_loss / max(1, total_count),
         "disc_acc": float((preds == labels_np).mean()),
         "disc_auroc": binary_auroc(labels_np, probs),
         "n_examples": float(total_count),
         "positive_rate": float(labels_np.mean()),
     }
+    out.update(window_level_metrics(windows_np, labels_np, probs))
+    return out
 
 
 def train_classifier(
@@ -781,8 +947,12 @@ def train_classifier(
     max_offset = y_true.shape[-1] - slice_len
     seed_base = args.seed + stable_hash(f"{dataset}:{fake_source}:{slice_len}")
     include_past = not bool(getattr(args, "candidate_only", False))
+    offset_stride = int(getattr(args, "offset_stride", 1) or 1)
+    if bool(getattr(args, "nonoverlapping_patches", False)):
+        offset_stride = int(slice_len)
+    use_offset_embedding = not bool(getattr(args, "no_offset_embedding", False))
     ds_kwargs = dict(
-        offset_stride=args.offset_stride,
+        offset_stride=offset_stride,
         include_past=include_past,
     )
     ds_train = HorizonSliceDataset(
@@ -841,12 +1011,12 @@ def train_classifier(
     )
 
     seq_len = int(slice_len if not include_past else bundle.past.shape[-1] + slice_len)
-    if not include_past:
-        print(
-            f"[disc] {dataset}/{fake_source}/L{slice_len}: candidate-only "
-            f"(no past; seq_len={seq_len})",
-            flush=True,
-        )
+    print(
+        f"[disc] {dataset}/{fake_source}/L{slice_len}: "
+        f"candidate_only={not include_past} offset_stride={offset_stride} "
+        f"offset_emb={use_offset_embedding} seq_len={seq_len}",
+        flush=True,
+    )
     model = InvertedSliceDiscriminator(
         seq_len=seq_len,
         max_offset=max_offset,
@@ -855,6 +1025,7 @@ def train_classifier(
         depth=args.depth,
         d_ff=args.d_ff,
         dropout=args.dropout,
+        use_offset_embedding=use_offset_embedding,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -868,7 +1039,8 @@ def train_classifier(
         model.train()
         train_loss = 0.0
         train_count = 0
-        for batch_idx, (x, offsets, labels) in enumerate(train_loader):
+        for batch_idx, batch in enumerate(train_loader):
+            x, offsets, labels = batch[0], batch[1], batch[2]
             x = x.to(device)
             offsets = offsets.to(device)
             labels = labels.to(device)
@@ -897,7 +1069,9 @@ def train_classifier(
             epoch + 1,
             extra=(
                 f"train_bce={train_bce:.4f} val_bce={val_metrics['disc_bce']:.4f} "
-                f"val_auc={val_metrics['disc_auroc']:.3f} elapsed={fmt_duration(time.time() - t0)}"
+                f"val_auc={val_metrics['disc_auroc']:.3f} "
+                f"val_auc_win={val_metrics.get('disc_auroc_window', float('nan')):.3f} "
+                f"elapsed={fmt_duration(time.time() - t0)}"
             ),
         )
         if stale >= args.patience:
@@ -942,6 +1116,9 @@ def train_classifier(
         "n_variates": float(y_true.shape[1]),
         "log2_bce_gap": float(abs(test_metrics["disc_bce"] - LOG2)),
         "candidate_only": float(1.0 if not include_past else 0.0),
+        "offset_stride": float(offset_stride),
+        "no_offset_embedding": float(0.0 if use_offset_embedding else 1.0),
+        "native_repr_stride": float(getattr(args, "native_repr_stride", 1) or 1),
     }
     return out
 
@@ -1012,6 +1189,9 @@ def merge_partial_metrics(args: argparse.Namespace) -> Dict[str, Dict[str, Dict[
         "log2_bce_gap",
         "disc_acc",
         "disc_auroc",
+        "disc_acc_window",
+        "disc_auroc_window",
+        "n_windows_scored",
         "best_val_bce",
         "best_epoch",
         "epochs_run",
@@ -1023,6 +1203,10 @@ def merge_partial_metrics(args: argparse.Namespace) -> Dict[str, Dict[str, Dict[
         "n_windows_test",
         "n_variates",
         "horizon",
+        "offset_stride",
+        "no_offset_embedding",
+        "native_repr_stride",
+        "candidate_only",
     ]
     with (args.output_dir / "metrics.csv").open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -1054,6 +1238,11 @@ def merge_partial_metrics(args: argparse.Namespace) -> Dict[str, Dict[str, Dict[
         "binary_debias_quantization": bool(getattr(args, "binary_debias_quantization", False)),
         "mmpd_ordinal_quantize": bool(getattr(args, "mmpd_ordinal_quantize", False)),
         "candidate_only": bool(getattr(args, "candidate_only", False)),
+        "pack_splits": getattr(args, "pack_splits", "test"),
+        "pack_fraction": getattr(args, "pack_fraction", None),
+        "nonoverlapping_patches": bool(getattr(args, "nonoverlapping_patches", False)),
+        "no_offset_embedding": bool(getattr(args, "no_offset_embedding", False)),
+        "native_repr_stride": int(getattr(args, "native_repr_stride", 1) or 1),
         "mmpd_output_root": str(args.mmpd_output_root),
     }
     if getattr(args, "bin_match_filter", None):
@@ -1117,12 +1306,13 @@ def run_eval(args: argparse.Namespace) -> None:
             lookback=bundle.past.shape[-1],
             horizon=ref_y.shape[-1],
             test_stride=run_test_stride(bundle.run),
+            series_starts=bundle.series_starts,
         )
         print(
             f"[{dataset}] windows={n} train/val/test="
             f"{len(splits['train'])}/{len(splits['val'])}/{len(splits['test'])} "
             f"variates={ref_y.shape[1]} horizon={ref_y.shape[-1]} "
-            f"subset={run_subset_id(bundle.run)}",
+            f"subset={run_subset_id(bundle.run)} pack_splits={bundle.pack_splits}",
             flush=True,
         )
         results.setdefault(dataset, {})
@@ -1198,6 +1388,8 @@ def run_self_test(args: argparse.Namespace) -> None:
         past=past,
         y_true_by_source={"binary_staged": y},
         fakes={"binary_staged": fake},
+        series_starts=np.asarray([i * (lookback + horizon) for i in range(n)], dtype=np.int64),
+        pack_splits=["test"],
     )
     args.datasets = ["selftest"]
     args.fake_sources = ["binary_staged"]
@@ -1217,6 +1409,7 @@ def run_self_test(args: argparse.Namespace) -> None:
         lookback=lookback,
         horizon=horizon,
         test_stride=1,
+        series_starts=bundle.series_starts,
     )
     metrics = train_classifier(args, "selftest", "binary_staged", 8, bundle, splits, device)
     print(json.dumps(metrics, indent=2, sort_keys=True))
@@ -1315,14 +1508,44 @@ def parse_args() -> argparse.Namespace:
         "--mmpd-ordinal-quantize",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Snap MMPD fakes AND GT horizons to nearest global ordinal ladder rung "
-        "(same bins as binary decode). Removes continuous-vs-ladder tells.",
+        help="Snap GT + all fakes (MMPD and binary_staged) to the global ordinal ladder. "
+        "Needed after stride-2 linear upsample so binary is not left off-ladder.",
     )
     parser.add_argument(
         "--candidate-only",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Feed only the z-scored horizon patch (no lookback). Isolates local texture from past-continuity cues.",
+    )
+    parser.add_argument(
+        "--pack-splits",
+        type=str,
+        default="test",
+        help="Comma list of TSF splits forming the generation/disc pool (e.g. train,val or test).",
+    )
+    parser.add_argument(
+        "--pack-fraction",
+        type=float,
+        default=None,
+        help="Fraction of pack-pool windows to keep for inference (default: --test-fraction).",
+    )
+    parser.add_argument(
+        "--nonoverlapping-patches",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Force offset_stride=slice_len (non-overlapping L-blocks).",
+    )
+    parser.add_argument(
+        "--no-offset-embedding",
+        action="store_true",
+        default=False,
+        help="Disable horizon-offset embedding in the discriminator.",
+    )
+    parser.add_argument(
+        "--native-repr-stride",
+        type=int,
+        default=1,
+        help="If >1, downsample GT+fakes with [::stride] before slicing (native stride-2 grid).",
     )
     parser.add_argument(
         "--bin-decoder",

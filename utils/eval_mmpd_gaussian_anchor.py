@@ -415,13 +415,44 @@ def build_mmpd_test_dataset(args: argparse.Namespace, run: AnchorRun):
         )
 
 
+def build_mmpd_pack_pool(
+    args: argparse.Namespace,
+    run: AnchorRun,
+    pack_splits: Sequence[str],
+):
+    """Concatenated MMPD Dataset_MTS pool matching TSF pack_splits order."""
+    from torch.utils.data import ConcatDataset
+    from utils.mmpd_patches.dataset_mts import Dataset_MTS
+
+    stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
+    lookback, horizon = dataset_window_lengths(args, run.dataset)
+    split = parse_mmpd_data_split(mmpd_data_split(run, args.mmpd_data_dir))
+    eval_stride = eval_test_stride(args, run)
+    with mmpd_stride_env(run, test_stride=eval_stride):
+        parts = [
+            Dataset_MTS(
+                root_path=str(args.mmpd_data_dir),
+                data_path=mmpd_staged_filename_for_run(run),
+                flag=flag,
+                size=[lookback, horizon],
+                data_split=split,
+            )
+            for flag in pack_splits
+        ]
+    return parts[0] if len(parts) == 1 else ConcatDataset(parts)
+
+
 def filter_valid_mmpd_indices(
     dataset: str,
     test_ds,
     indices: Sequence[int],
 ) -> List[int]:
-    in_len = int(test_ds.in_len)
-    out_len = int(test_ds.out_len)
+    # ConcatDataset has no in_len; fall back to first constituent dataset.
+    probe = test_ds
+    while hasattr(probe, "datasets"):
+        probe = probe.datasets[0]
+    in_len = int(probe.in_len)
+    out_len = int(probe.out_len)
     n = len(test_ds)
     valid: List[int] = []
     for raw in indices:
@@ -1253,6 +1284,13 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                 parser.add_argument("--output-root", required=True)
                 parser.add_argument("--out-npz", required=True)
                 parser.add_argument("--indices-json", required=True)
+                parser.add_argument(
+                    "--eval-splits",
+                    type=str,
+                    default="test",
+                    help="Comma list of Dataset_MTS flags to concat as the eval pool "
+                    "(order must match indices into that concat).",
+                )
                 parser.add_argument("--lookback", type=int, required=True)
                 parser.add_argument("--horizon", type=int, required=True)
                 parser.add_argument("--patch-size", type=int, required=True)
@@ -1299,16 +1337,32 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                         tie_atol=args.ordinal_tie_atol,
                     )
 
-                test_data = Dataset_MTS(
-                    root_path=args.root_path,
-                    data_path=args.data_path,
-                    flag="test",
-                    size=[args.in_len, args.out_len],
-                    data_split=args.data_split,
-                )
+                from torch.utils.data import ConcatDataset
+
+                eval_splits = [
+                    part.strip()
+                    for part in str(ns.eval_splits).split(",")
+                    if part.strip()
+                ]
+                if not eval_splits:
+                    eval_splits = ["test"]
+                for flag in eval_splits:
+                    if flag not in ("train", "val", "test"):
+                        raise ValueError(f"invalid --eval-splits entry: {flag!r}")
+                parts = [
+                    Dataset_MTS(
+                        root_path=args.root_path,
+                        data_path=args.data_path,
+                        flag=flag,
+                        size=[args.in_len, args.out_len],
+                        data_split=args.data_split,
+                    )
+                    for flag in eval_splits
+                ]
+                eval_data = parts[0] if len(parts) == 1 else ConcatDataset(parts)
                 with open(ns.indices_json, "r", encoding="utf-8") as f:
                     indices = json.load(f)
-                subset = Subset(test_data, indices)
+                subset = Subset(eval_data, indices)
                 loader = DataLoader(
                     subset,
                     batch_size=args.batch_size,
@@ -1604,6 +1658,110 @@ def load_tsf_test_subset(
     return Subset(test_ds, list(indices))
 
 
+def parse_pack_splits(raw: Optional[str]) -> List[str]:
+    """Comma list of TSF splits used as the disc/generation window pool."""
+    text = (raw or "test").strip() or "test"
+    splits = [part.strip() for part in text.split(",") if part.strip()]
+    allowed = {"train", "val", "test"}
+    bad = [s for s in splits if s not in allowed]
+    if bad:
+        raise ValueError(f"pack splits must be in {sorted(allowed)}, got {bad}")
+    if not splits:
+        raise ValueError("pack splits must be non-empty")
+    return splits
+
+
+def _absolute_series_starts_for_splits(
+    dataset: str,
+    splits: Sequence[str],
+    part_lengths: Sequence[int],
+    *,
+    lookback: int,
+    train_stride: int,
+    test_stride: int,
+) -> np.ndarray:
+    """Absolute timeline starts (row index in full CSV) for ConcatDataset(order=splits)."""
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        _load_dataset_array,
+        _paper_split_borders,
+        _resolve_registry_path,
+    )
+
+    path, date_col = _resolve_registry_path(dataset)
+    n_rows = len(_load_dataset_array(path, date_col))
+    border1s, _border2s = _paper_split_borders(dataset, n_rows, lookback)
+    split_to_border = {"train": 0, "val": 1, "test": 2}
+    starts: List[int] = []
+    for split, n_part in zip(splits, part_lengths):
+        border = int(border1s[split_to_border[split]])
+        stride = int(test_stride if split == "test" else train_stride)
+        starts.extend(border + i * stride for i in range(int(n_part)))
+    return np.asarray(starts, dtype=np.int64)
+
+
+def load_tsf_pack_pool(
+    dataset: str,
+    variate_indices: Sequence[int],
+    *,
+    lookback: Optional[int],
+    horizon: Optional[int],
+    train_stride: int,
+    test_stride: int,
+    pack_splits: Sequence[str],
+    ordinal_tie_atol: float = 1e-6,
+    use_ordinal_window_norm: Optional[bool] = None,
+):
+    """Concatenated TSF window pool (train/val/test) + absolute series starts.
+
+    Pack pools always load **z-score** series (`use_ordinal_window_norm=False`) so
+    train/val/test stay in the same coordinate space. Ordinal ladder snapping for
+    the discriminator is applied later in `build_raw_bundle`.
+    """
+    from torch.utils.data import ConcatDataset
+
+    pipeline = load_tsf_pipeline()
+    # Force z-score windows: train-split rank tensors must not mix with val/test z.
+    _ = use_ordinal_window_norm  # callers may pass this; pack pool ignores it on purpose
+    train_ds, val_ds, test_ds, stats = pipeline.load_dataset(
+        dataset,
+        list(variate_indices),
+        lookback=lookback,
+        horizon=horizon,
+        stride=train_stride,
+        test_stride=test_stride,
+        ordinal_tie_atol=float(ordinal_tie_atol),
+        use_ordinal_window_norm=False,
+    )
+    mapping = {"train": train_ds, "val": val_ds, "test": test_ds}
+    parts = [mapping[name] for name in pack_splits]
+    part_lengths = [len(part) for part in parts]
+    pool: Any = parts[0] if len(parts) == 1 else ConcatDataset(parts)
+    series_starts = _absolute_series_starts_for_splits(
+        dataset,
+        pack_splits,
+        part_lengths,
+        lookback=int(lookback or 0),
+        train_stride=int(train_stride),
+        test_stride=int(test_stride),
+    )
+    if len(series_starts) != len(pool):
+        raise RuntimeError(
+            f"{dataset}: series_starts length {len(series_starts)} != pool length {len(pool)}"
+        )
+    return pool, series_starts, list(pack_splits), part_lengths, stats
+
+
+def make_pack_pool_indices(
+    n_pool: int,
+    *,
+    fraction: float,
+    seed: int,
+    max_items: Optional[int] = None,
+) -> List[int]:
+    """Sample at least max(1, round(n*fraction)) windows from a pack pool."""
+    return make_eval_indices(n_pool, fraction, seed, max_items)
+
+
 def anchor_prob_generate_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
     if args.anchor_prob_sampler == "ddpm":
         return {"sampler": "ddpm", "use_ddim": False}
@@ -1705,8 +1863,9 @@ def run_mmpd_eval(
     out_npz = args.output_dir / "raw" / f"mmpd_{dataset}.npz"
     indices_json = args.output_dir / "raw" / f"indices_{dataset}_mmpd_eval.json"
     indices_json.parent.mkdir(parents=True, exist_ok=True)
-    test_ds = build_mmpd_test_dataset(args, run)
-    indices = filter_valid_mmpd_indices(dataset, test_ds, indices)
+    pack_splits = parse_pack_splits(getattr(args, "pack_splits", None))
+    eval_ds = build_mmpd_pack_pool(args, run, pack_splits)
+    indices = filter_valid_mmpd_indices(dataset, eval_ds, indices)
     write_json_atomic(indices_json, list(indices))
 
     if not out_npz.exists() or args.force_mmpd_eval:
@@ -1742,6 +1901,8 @@ def run_mmpd_eval(
             str(out_npz),
             "--indices-json",
             str(indices_json),
+            "--eval-splits",
+            ",".join(pack_splits),
             "--lookback",
             str(lookback),
             "--horizon",
@@ -1784,6 +1945,7 @@ def run_mmpd_eval(
         print(
             f"[mmpd-eval] {dataset}: launching helper "
             f"(windows={len(indices)}, batch={batch_size}, variates={data_dim}, "
+            f"pack_splits={pack_splits}, "
             f"eval_test_stride={eval_test_stride(args, run)})",
             flush=True,
         )

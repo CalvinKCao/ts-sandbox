@@ -45,6 +45,7 @@ def load_checkpoint(
     d_ff = int(ckpt_args.get("d_ff", 256))
     dropout = float(ckpt_args.get("dropout", 0.1))
     candidate_only = bool(ckpt_args.get("candidate_only", False))
+    use_offset_embedding = not bool(ckpt_args.get("no_offset_embedding", False))
     seq_len = int(slice_len if candidate_only else lookback + slice_len)
     max_offset = horizon - slice_len
 
@@ -56,6 +57,7 @@ def load_checkpoint(
         depth=depth,
         d_ff=d_ff,
         dropout=dropout,
+        use_offset_embedding=use_offset_embedding,
     ).to(device)
     model.load_state_dict(payload["model_state_dict"])
     model.eval()
@@ -87,7 +89,11 @@ def build_test_dataset(
         splits["test"],
         slice_len,
         seed=seed_base + 2,
-        offset_stride=args.offset_stride,
+        offset_stride=(
+            int(slice_len)
+            if bool(getattr(args, "nonoverlapping_patches", False))
+            else args.offset_stride
+        ),
         max_examples=args.max_eval_examples,
         include_past=not bool(getattr(args, "candidate_only", False)),
     )
@@ -103,7 +109,8 @@ def collect_test_records(
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
     records: List[Dict[str, Any]] = []
     cursor = 0
-    for x, offsets, labels in loader:
+    for batch in loader:
+        x, offsets, labels = batch[0], batch[1], batch[2]
         x = x.to(device)
         offsets = offsets.to(device)
         logits = model(x, offsets)
@@ -381,6 +388,7 @@ def main() -> None:
             lookback=bundle.past.shape[-1],
             horizon=y_true.shape[-1],
             test_stride=run_test_stride(bundle.run),
+            series_starts=bundle.series_starts,
         )
         train_classifier(
             disc_args,
@@ -405,6 +413,7 @@ def main() -> None:
         lookback=bundle.past.shape[-1],
         horizon=y_true.shape[-1],
         test_stride=run_test_stride(bundle.run),
+        series_starts=bundle.series_starts,
     )
     visualize_combo(
         disc_args,
