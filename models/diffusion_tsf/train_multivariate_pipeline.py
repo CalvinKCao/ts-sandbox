@@ -2002,7 +2002,9 @@ def run_itransformer_finetune_hp_tuning(
 
 
 from models.diffusion_tsf.pipeline.train.pretrain import pretrain_diffusion
-from models.diffusion_tsf.pipeline.train.cli import main
 
 if __name__ == "__main__":
+    # Import here: cli imports this module, so a module-level import cycles.
+    from models.diffusion_tsf.pipeline.train.cli import main
+
     main()

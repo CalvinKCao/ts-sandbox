@@ -17,10 +17,12 @@ from models.diffusion_tsf.pipeline.orchestrator import Pipeline
 from models.diffusion_tsf.pipeline.phases import PHASE_REGISTRY
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
-from models.diffusion_tsf import train_multivariate_pipeline as pipeline_mod
 
 
 def main():
+    # Lazy: this module is imported from train_multivariate_pipeline under __main__.
+    from models.diffusion_tsf import train_multivariate_pipeline as pipeline_mod
+
     parser = argparse.ArgumentParser(description="Diffusion TSF Training Pipeline")
     parser.add_argument("--config", type=str, required=True, help="YAML experiment config")
     parser.add_argument("--dataset", type=str, default=None, help="Override dataset from YAML")
