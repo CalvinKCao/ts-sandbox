@@ -607,6 +607,7 @@ class HorizonSliceDataset(Dataset):
         seed: int,
         offset_stride: int = 1,
         max_examples: Optional[int] = None,
+        include_past: bool = True,
     ) -> None:
         if real.shape != fake.shape:
             raise ValueError(f"real/fake shape mismatch: {real.shape} vs {fake.shape}")
@@ -619,6 +620,7 @@ class HorizonSliceDataset(Dataset):
         self.real = real
         self.fake = fake
         self.slice_len = int(slice_len)
+        self.include_past = bool(include_past)
         offsets = list(range(0, real.shape[-1] - slice_len + 1, max(1, int(offset_stride))))
         real_items = [(int(w), int(o), 0) for w in windows for o in offsets]
         fake_items = [(int(w), int(o), 1) for w in windows for o in offsets]
@@ -640,8 +642,12 @@ class HorizonSliceDataset(Dataset):
         window, offset, label = self.items[idx]
         candidate_src = self.fake if label == 1 else self.real
         candidate = candidate_src[window, :, offset : offset + self.slice_len]
-        past = self.past[window]
-        x = np.concatenate([zscore_time(past), zscore_time(candidate)], axis=-1).astype(np.float32)
+        if self.include_past:
+            past = self.past[window]
+            x = np.concatenate([zscore_time(past), zscore_time(candidate)], axis=-1).astype(np.float32)
+        else:
+            # Local texture only: no lookback continuity cue.
+            x = zscore_time(candidate).astype(np.float32)
         return (
             torch.from_numpy(x),
             torch.tensor(offset, dtype=torch.long),
@@ -763,6 +769,11 @@ def train_classifier(
     y_true = bundle.y_true_by_source[fake_source]
     max_offset = y_true.shape[-1] - slice_len
     seed_base = args.seed + stable_hash(f"{dataset}:{fake_source}:{slice_len}")
+    include_past = not bool(getattr(args, "candidate_only", False))
+    ds_kwargs = dict(
+        offset_stride=args.offset_stride,
+        include_past=include_past,
+    )
     ds_train = HorizonSliceDataset(
         bundle.past,
         y_true,
@@ -770,8 +781,8 @@ def train_classifier(
         splits["train"],
         slice_len,
         seed=seed_base,
-        offset_stride=args.offset_stride,
         max_examples=args.max_train_examples,
+        **ds_kwargs,
     )
     ds_val = HorizonSliceDataset(
         bundle.past,
@@ -780,8 +791,8 @@ def train_classifier(
         splits["val"],
         slice_len,
         seed=seed_base + 1,
-        offset_stride=args.offset_stride,
         max_examples=args.max_eval_examples,
+        **ds_kwargs,
     )
     ds_test = HorizonSliceDataset(
         bundle.past,
@@ -790,8 +801,8 @@ def train_classifier(
         splits["test"],
         slice_len,
         seed=seed_base + 2,
-        offset_stride=args.offset_stride,
         max_examples=args.max_eval_examples,
+        **ds_kwargs,
     )
     generator = torch.Generator()
     generator.manual_seed(seed_base)
@@ -818,7 +829,13 @@ def train_classifier(
         pin_memory=(device.type == "cuda"),
     )
 
-    seq_len = int(bundle.past.shape[-1] + slice_len)
+    seq_len = int(slice_len if not include_past else bundle.past.shape[-1] + slice_len)
+    if not include_past:
+        print(
+            f"[disc] {dataset}/{fake_source}/L{slice_len}: candidate-only "
+            f"(no past; seq_len={seq_len})",
+            flush=True,
+        )
     model = InvertedSliceDiscriminator(
         seq_len=seq_len,
         max_offset=max_offset,
@@ -913,6 +930,7 @@ def train_classifier(
         "horizon": float(y_true.shape[-1]),
         "n_variates": float(y_true.shape[1]),
         "log2_bce_gap": float(abs(test_metrics["disc_bce"] - LOG2)),
+        "candidate_only": float(1.0 if not include_past else 0.0),
     }
     return out
 
@@ -1024,6 +1042,7 @@ def merge_partial_metrics(args: argparse.Namespace) -> Dict[str, Dict[str, Dict[
         "binary_config_by_dataset": dict(getattr(args, "binary_config_by_dataset", None) or {}),
         "binary_debias_quantization": bool(getattr(args, "binary_debias_quantization", False)),
         "mmpd_ordinal_quantize": bool(getattr(args, "mmpd_ordinal_quantize", False)),
+        "candidate_only": bool(getattr(args, "candidate_only", False)),
         "mmpd_output_root": str(args.mmpd_output_root),
     }
     if getattr(args, "bin_match_filter", None):
@@ -1286,6 +1305,12 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Snap MMPD fake horizons to nearest global ordinal ladder rung (same bins as binary decode).",
+    )
+    parser.add_argument(
+        "--candidate-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Feed only the z-scored horizon patch (no lookback). Isolates local texture from past-continuity cues.",
     )
     parser.add_argument(
         "--bin-decoder",

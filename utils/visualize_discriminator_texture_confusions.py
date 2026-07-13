@@ -44,7 +44,8 @@ def load_checkpoint(
     depth = int(ckpt_args.get("depth", 2))
     d_ff = int(ckpt_args.get("d_ff", 256))
     dropout = float(ckpt_args.get("dropout", 0.1))
-    seq_len = lookback + slice_len
+    candidate_only = bool(ckpt_args.get("candidate_only", False))
+    seq_len = int(slice_len if candidate_only else lookback + slice_len)
     max_offset = horizon - slice_len
 
     model = InvertedSliceDiscriminator(
@@ -64,6 +65,7 @@ def load_checkpoint(
         "slice_len": slice_len,
         "seq_len": seq_len,
         "max_offset": max_offset,
+        "candidate_only": candidate_only,
     }
     return model, meta
 
@@ -87,6 +89,7 @@ def build_test_dataset(
         seed=seed_base + 2,
         offset_stride=args.offset_stride,
         max_examples=args.max_eval_examples,
+        include_past=not bool(getattr(args, "candidate_only", False)),
     )
 
 

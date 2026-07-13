@@ -421,6 +421,9 @@ fi
 if [[ "${DISC_NO_MMPD_ORDINAL_QUANTIZE:-0}" == "1" ]]; then
     EVAL_ARGS+=(--no-mmpd-ordinal-quantize)
 fi
+if [[ "${DISC_CANDIDATE_ONLY:-0}" == "1" ]]; then
+    EVAL_ARGS+=(--candidate-only)
+fi
 
 if [[ "${FORCE_RAW:-0}" -eq 1 ]]; then
     EVAL_ARGS+=(--force-raw-eval)
