@@ -47,15 +47,15 @@ for _root in "${REMOTE_REPO_ROOTS[@]}"; do
     REMOTE_PATHS+=("${_root}/results")
 done
 
-SSH_CONTROL_DIR="/tmp/pull-cm-${USER}"
+# Match ~/.ssh/config ControlPath so pull/rsync reuse an interactive ssh master.
+SSH_CONTROL_DIR="${HOME}/.ssh/sockets"
 mkdir -p "$SSH_CONTROL_DIR"
 SSH_OPTS=(
     -o ConnectTimeout=12
     -o ConnectionAttempts=1
     -o StrictHostKeyChecking=accept-new
     -o ControlMaster=auto
-    -o "ControlPath=${SSH_CONTROL_DIR}/%C"
-    -o ControlPersist=600
+    -o "ControlPath=${SSH_CONTROL_DIR}/%r@%h:%p"
 )
 
 RSYNC_BASE=(
@@ -413,7 +413,7 @@ echo "Pulling from ${REMOTE_HOST} (${PULL_MODE} mode, dest=${LOCAL_RESULTS_PATH}
 [ "$USE_RECENT" -eq 1 ] && echo "Only files modified in the last ${RECENT_HOURS} hours"
 [ "$SKIP_NPY_CKPT" -eq 1 ] && echo "Skipping *.npy / *.npz / *.ckpt / *.pt"
 
-# One SSH session (ControlMaster) for find + rsync below.
+# One SSH session (shared ControlMaster socket) for find + rsync below.
 ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" true
 
 if [ "$PULL_RESULTS" -eq 1 ]; then

@@ -1,6 +1,7 @@
 #!/bin/bash
-# Pull Slurm artifacts from Narval in one SSH session (one Duo prompt).
-# Passes extra args to pull_results.sh (--all, --recent 6, subpaths, etc.).
+# Pull Slurm artifacts from Narval. Uses the same ~/.ssh/sockets multiplex
+# socket as pull_results.sh (add a Host narval block in ~/.ssh/config to share
+# with interactive ssh). Passes extra args (--all, --recent 6, subpaths, etc.).
 
 export REMOTE_HOST="narval.alliancecan.ca"
 export REMOTE_REPO_ROOTS="/scratch/ccao87/ts-sandbox"
