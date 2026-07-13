@@ -29,7 +29,11 @@ from utils.dual_scale_bin_filter import (
     BIN_MATCH_CHOICES,
     apply_bin_match_to_bundle,
 )
-from utils.binary_disc_debias import debias_binary_staged_fakes, resolve_dual_scale_bin_params
+from utils.binary_disc_debias import (
+    debias_binary_staged_fakes,
+    quantize_to_ordinal_ladder,
+    resolve_dual_scale_bin_params,
+)
 from utils.eval_mmpd_gaussian_anchor import (
     DEFAULT_MMPD_DATA,
     DEFAULT_MMPD_REPO,
@@ -48,6 +52,7 @@ from utils.eval_trend_robust_texture_staged_vs_mmpd import (
     DEFAULT_SUBSET_DATASETS,
     dataset_window_lengths_for_run,
     evaluate_staged_binary,
+    load_ordinal_ladder_for_run,
     make_indices,
     resolve_staged_ckpt_dir,
     staged_anchor_run,
@@ -401,11 +406,15 @@ def build_raw_bundle(
             other = y_true_by_source[src]
             mse = float(np.mean((ref - other) ** 2))
             if mse > 1e-6:
-                print(
-                    f"[warn] {dataset}: y_true differs between {sources[0]} and {src} "
-                    f"(mse={mse:.6f}); each discriminator uses its own pack GT.",
-                    flush=True,
+                msg = (
+                    f"{dataset}: y_true differs between {sources[0]} and {src} "
+                    f"(mse={mse:.6f}); packs are not in the same coordinate space"
                 )
+                if getattr(args, "mmpd_ordinal_quantize", False) and "mmpd" in fakes:
+                    raise ValueError(
+                        msg + "; refusing --mmpd-ordinal-quantize onto a mismatched ladder"
+                    )
+                print(f"[warn] {msg}; each discriminator uses its own pack GT.", flush=True)
 
     if args.bin_match_filter:
         print(
@@ -447,6 +456,35 @@ def build_raw_bundle(
             f"fine_h={fine_h} half_fine_bin={debias_stats['half_fine_bin']:.6f} "
             f"flatline_frac={debias_stats['flatline_frac']:.3f} "
             f"debias_frac={debias_stats['debias_frac']:.3f}",
+            flush=True,
+        )
+
+    if getattr(args, "mmpd_ordinal_quantize", False) and "mmpd" in fakes:
+        # Cross-check coordinate space against binary pack when available (shards
+        # often load only one fake source, so the multi-source check above may not run).
+        binary_pack_file = pack_path(args.raw_eval_dir, "binary_staged", dataset)
+        if binary_pack_file.is_file():
+            bin_yt = load_npz(binary_pack_file)["y_true"].astype(np.float32)
+            mmpd_yt = y_true_by_source["mmpd"]
+            if bin_yt.shape != mmpd_yt.shape:
+                raise ValueError(
+                    f"{dataset}: binary/mmpd y_true shape mismatch {bin_yt.shape} vs {mmpd_yt.shape} "
+                    "before --mmpd-ordinal-quantize"
+                )
+            mse = float(np.mean((bin_yt - mmpd_yt) ** 2))
+            if mse > 1e-6:
+                raise ValueError(
+                    f"{dataset}: binary vs mmpd y_true mse={mse:.6f}; "
+                    "refusing --mmpd-ordinal-quantize onto a mismatched coordinate space"
+                )
+        ladder = load_ordinal_ladder_for_run(args, run)
+        quantized, q_stats = quantize_to_ordinal_ladder(fakes["mmpd"], ladder)
+        fakes["mmpd"] = quantized
+        print(
+            f"[{dataset}] mmpd ordinal-quantize: changed_frac={q_stats['changed_frac']:.4f} "
+            f"mean_abs_delta={q_stats['mean_abs_delta']:.6f} "
+            f"max_abs_delta={q_stats['max_abs_delta']:.6f} "
+            f"n_unique_max={int(q_stats['n_unique_max'])}",
             flush=True,
         )
 
@@ -984,6 +1022,8 @@ def merge_partial_metrics(args: argparse.Namespace) -> Dict[str, Dict[str, Dict[
         "anchor_config_by_dataset": dict(getattr(args, "anchor_config_by_dataset", None) or {}),
         "binary_config": getattr(args, "binary_config", None),
         "binary_config_by_dataset": dict(getattr(args, "binary_config_by_dataset", None) or {}),
+        "binary_debias_quantization": bool(getattr(args, "binary_debias_quantization", False)),
+        "mmpd_ordinal_quantize": bool(getattr(args, "mmpd_ordinal_quantize", False)),
         "mmpd_output_root": str(args.mmpd_output_root),
     }
     if getattr(args, "bin_match_filter", None):
@@ -1238,8 +1278,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--binary-debias-quantization",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Jitter non-flatline binary_staged fakes by up to ±½ fine bin (discriminator only).",
+    )
+    parser.add_argument(
+        "--mmpd-ordinal-quantize",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Snap MMPD fake horizons to nearest global ordinal ladder rung (same bins as binary decode).",
     )
     parser.add_argument(
         "--bin-decoder",

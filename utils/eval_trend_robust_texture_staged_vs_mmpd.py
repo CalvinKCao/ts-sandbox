@@ -116,6 +116,40 @@ def _binary_config_path(args: argparse.Namespace, dataset: str) -> str:
     return str(REPO_ROOT / "configs" / "binary_dual_scale_staged.yaml")
 
 
+def load_ordinal_ladder_for_run(
+    args: argparse.Namespace,
+    run: AnchorRun,
+) -> Any:
+    """Build the train-split global ordinal ladder used by binary ordinal decode."""
+    lookback, horizon = dataset_window_lengths_for_run(args, run)
+    config_path = _binary_config_path(args, run.dataset)
+    subset_id = run_subset_id(run)
+    state = _build_state(run.root, run.dataset, subset_id, config_path)
+    resolve_pipeline_data_subset(state)
+    if not bool(state.use_ordinal_window_norm):
+        raise ValueError(
+            f"{run.dataset}: binary config {config_path} does not enable ordinal_window_norm; "
+            "cannot quantize MMPD onto ordinal bins"
+        )
+    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+
+    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
+    _train_ds, _val_ds, _test_ds, norm_stats = load_dataset(
+        run.dataset,
+        run_variate_indices(run),
+        stride=run_train_stride(run),
+        test_stride=run_test_stride(run),
+        lookback=lookback,
+        horizon=horizon,
+        ordinal_tie_atol=float(state.ordinal_tie_atol),
+        use_ordinal_window_norm=True,
+    )
+    ladder = norm_stats.get("ordinal_ladder")
+    if ladder is None:
+        raise RuntimeError(f"{run.dataset}: load_dataset did not return ordinal_ladder")
+    return ladder
+
+
 # Legacy checkpoints kept for old one-off scripts.
 DEFAULT_STAGED_CKPTS: Mapping[str, str] = {
     "ETTh1": "/scratch/ccao87/ts-sandbox/results/ckpts/06-02-3849018-ETTh1-binary_dual_scale_staged",
