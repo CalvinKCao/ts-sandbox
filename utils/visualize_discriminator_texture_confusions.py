@@ -110,6 +110,8 @@ def collect_test_records(
         for i in range(len(labels_np)):
             window, offset, label = ds.items[cursor]
             past = ds.past[window]
+            gt = ds.real[window, :, offset : offset + ds.slice_len]
+            fake = ds.fake[window, :, offset : offset + ds.slice_len]
             candidate_src = ds.fake if label == 1 else ds.real
             candidate = candidate_src[window, :, offset : offset + ds.slice_len]
             records.append(
@@ -120,6 +122,8 @@ def collect_test_records(
                     "pred": int(preds[i]),
                     "prob_fake": float(probs[i]),
                     "past": past.copy(),
+                    "gt": gt.copy(),
+                    "fake": fake.copy(),
                     "candidate": candidate.copy(),
                 }
             )
@@ -183,12 +187,14 @@ def plot_example(
     import matplotlib.pyplot as plt
 
     past = row["past"][variate, -lookback_tail:]
-    cand = row["candidate"][variate]
+    gt = row.get("gt", row["candidate"])[variate]
+    fake = row.get("fake", row["candidate"])[variate]
     t_past = np.arange(-len(past), 0)
-    t_cand = np.arange(0, len(cand))
-    fig, ax = plt.subplots(figsize=(8, 3))
-    ax.plot(t_past, past, color="#444444", lw=1.5, label="lookback")
-    ax.plot(t_cand, cand, color="#d62728" if row["label"] == 1 else "#1f77b4", lw=2, label="candidate")
+    t_h = np.arange(0, len(gt))
+    fig, ax = plt.subplots(figsize=(9, 3.2))
+    ax.plot(t_past, past, color="#444444", lw=1.4, label="lookback")
+    ax.plot(t_h, gt, color="#1f77b4", lw=2.0, label="GT")
+    ax.plot(t_h, fake, color="#d62728", lw=2.0, alpha=0.9, label="model pred")
     ax.axvline(0, color="black", ls="--", lw=0.8, alpha=0.5)
     ax.set_title(title)
     ax.set_xlabel("time (steps; 0 = horizon start)")
@@ -210,10 +216,10 @@ def plot_bucket_grid(
 ) -> None:
     for bucket, rows in examples.items():
         for i, row in enumerate(rows):
-            label_name = "fake" if row["label"] == 1 else "real"
             title = (
-                f"{bucket} | true={label_name} prob(fake)={row['prob_fake']:.3f} "
-                f"win={row['window']} off={row['offset']} v={variate}"
+                f"{bucket} | shown_to_disc={'fake' if row['label'] == 1 else 'real'} "
+                f"pred={'fake' if row['pred'] == 1 else 'real'} "
+                f"p(fake)={row['prob_fake']:.3f} win={row['window']} off={row['offset']} v={variate}"
             )
             plot_example(
                 row,

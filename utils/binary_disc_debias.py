@@ -1,8 +1,9 @@
-"""De-bias staged binary fakes for discriminator texture eval.
+"""De-bias / quantize helpers for discriminator texture eval.
 
-Staged binary decode lands on a dual-scale occupancy lattice. Flat plateaus are
-left alone; other timesteps get sub-fine-bin jitter so the discriminator cannot
-trivially separate real vs fake from quantization alone.
+Staged binary decode lands on a dual-scale occupancy lattice. Optional jitter
+(disabled by default for ordinal campaigns) was used to blunt trivial lattice
+cues. MMPD continuous preds can be snapped to the same global ordinal ladder
+rungs binary uses after decode.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Tuple
 
 import numpy as np
+import torch
 
 REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
 DEFAULT_COARSE_HEIGHT = 16
@@ -71,13 +73,12 @@ def debias_binary_staged_fakes(
     dataset: str = "",
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """Add clipped Gaussian jitter on non-flatline timesteps (±½ fine bin)."""
+    import zlib
+
     src = np.asarray(fakes, dtype=np.float32)
     half = fine_bin_half_width(max_scale, coarse_height, fine_height)
     plateau = flatline_mask(src, atol=0.0)
     debias = ~plateau
-
-    # Stable per-window noise; dataset string spreads seeds across runs.
-    import zlib
 
     ds_tag = zlib.crc32(str(dataset).encode("utf-8")) & 0xFFFFFFFF
     seed_u = int(np.uint32(seed) ^ np.uint32(ds_tag))
@@ -94,3 +95,56 @@ def debias_binary_staged_fakes(
         "flatline_frac": float(plateau.mean()),
         "debias_frac": float(debias.mean()),
     }
+
+
+def quantize_to_ordinal_ladder(
+    values: np.ndarray,
+    ladder: Any,
+    *,
+    batch_chunk: int = 64,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """Snap continuous values to nearest global-ordinal ladder rung (binary decode bins).
+
+    Accepts ``(N, V, T)`` or ``(N, V, S, T)``. Returns float32 array in the same
+    shape plus stats (fraction of timesteps that moved, mean |delta|).
+    """
+    from models.diffusion_tsf.ordinal_window_norm import decode_with_ladder, encode_with_ladder
+
+    src = np.asarray(values, dtype=np.float32)
+    if src.ndim == 3:
+        n, v, t = src.shape
+        flat = src
+        sample_axis = False
+    elif src.ndim == 4:
+        n, v, s, t = src.shape
+        flat = src.transpose(0, 2, 1, 3).reshape(n * s, v, t)
+        sample_axis = True
+    else:
+        raise ValueError(f"expected (N,V,T) or (N,V,S,T), got {src.shape}")
+
+    if int(ladder.values.shape[1]) != int(flat.shape[1]):
+        raise ValueError(
+            f"ladder variates {int(ladder.values.shape[1])} != array variates {flat.shape[1]}"
+        )
+
+    chunks = []
+    for start in range(0, flat.shape[0], max(1, int(batch_chunk))):
+        end = min(flat.shape[0], start + max(1, int(batch_chunk)))
+        x = torch.from_numpy(flat[start:end])
+        ranks = encode_with_ladder(x, ladder)
+        snapped = decode_with_ladder(ranks, ladder)
+        chunks.append(snapped.detach().cpu().numpy().astype(np.float32))
+    out_flat = np.concatenate(chunks, axis=0)
+    delta = np.abs(out_flat - flat)
+    changed = delta > 0
+    stats = {
+        "changed_frac": float(changed.mean()),
+        "mean_abs_delta": float(delta.mean()),
+        "max_abs_delta": float(delta.max()) if delta.size else 0.0,
+        "n_unique_max": float(int(ladder.n_unique[0].max().item())),
+    }
+    if sample_axis:
+        out = out_flat.reshape(n, s, v, t).transpose(0, 2, 1, 3)
+    else:
+        out = out_flat
+    return out.astype(np.float32, copy=False), stats

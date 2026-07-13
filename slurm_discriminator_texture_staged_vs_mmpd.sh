@@ -404,7 +404,22 @@ else
         --save-checkpoints
         --visualize-confusions
         --viz-per-bucket 2
+        --viz-lookback-tail 64
     )
+fi
+
+# Opt-in flags from campaign wrappers (avoid breaking non-ordinal disc runs).
+if [[ "${DISC_NO_BINARY_DEBIAS:-0}" == "1" ]]; then
+    EVAL_ARGS+=(--no-binary-debias-quantization)
+fi
+if [[ "${DISC_MMPD_ORDINAL_QUANTIZE:-0}" == "1" ]]; then
+    EVAL_ARGS+=(--mmpd-ordinal-quantize)
+fi
+if [[ "${DISC_BINARY_DEBIAS:-0}" == "1" ]]; then
+    EVAL_ARGS+=(--binary-debias-quantization)
+fi
+if [[ "${DISC_NO_MMPD_ORDINAL_QUANTIZE:-0}" == "1" ]]; then
+    EVAL_ARGS+=(--no-mmpd-ordinal-quantize)
 fi
 
 if [[ "${FORCE_RAW:-0}" -eq 1 ]]; then
