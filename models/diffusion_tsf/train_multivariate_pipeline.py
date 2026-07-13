@@ -2000,9 +2000,6 @@ def run_itransformer_finetune_hp_tuning(
     return best_params, ckpt_path
 
 
-
-from models.diffusion_tsf.pipeline.train.pretrain import pretrain_diffusion
-
 if __name__ == "__main__":
     # Import here: cli imports this module, so a module-level import cycles.
     from models.diffusion_tsf.pipeline.train.cli import main

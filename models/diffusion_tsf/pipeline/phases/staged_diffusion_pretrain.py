@@ -695,7 +695,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         return False
 
     def execute(self, state: PipelineState) -> PipelineState:
-        from models.diffusion_tsf.train_multivariate_pipeline import pretrain_diffusion
+        from models.diffusion_tsf.pipeline.train.pretrain import pretrain_diffusion
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
         config_name = self._config_name(state)
