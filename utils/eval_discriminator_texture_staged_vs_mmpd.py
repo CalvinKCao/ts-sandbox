@@ -459,34 +459,45 @@ def build_raw_bundle(
             flush=True,
         )
 
-    if getattr(args, "mmpd_ordinal_quantize", False) and "mmpd" in fakes:
-        # Cross-check coordinate space against binary pack when available (shards
-        # often load only one fake source, so the multi-source check above may not run).
-        binary_pack_file = pack_path(args.raw_eval_dir, "binary_staged", dataset)
-        if binary_pack_file.is_file():
-            bin_yt = load_npz(binary_pack_file)["y_true"].astype(np.float32)
-            mmpd_yt = y_true_by_source["mmpd"]
-            if bin_yt.shape != mmpd_yt.shape:
-                raise ValueError(
-                    f"{dataset}: binary/mmpd y_true shape mismatch {bin_yt.shape} vs {mmpd_yt.shape} "
-                    "before --mmpd-ordinal-quantize"
-                )
-            mse = float(np.mean((bin_yt - mmpd_yt) ** 2))
-            if mse > 1e-6:
-                raise ValueError(
-                    f"{dataset}: binary vs mmpd y_true mse={mse:.6f}; "
-                    "refusing --mmpd-ordinal-quantize onto a mismatched coordinate space"
-                )
+    if getattr(args, "mmpd_ordinal_quantize", False):
+        # Snap MMPD fakes AND all GT horizons onto the binary global ordinal ladder.
+        # (Previously only MMPD fakes were quantized, leaving a continuous-vs-ladder tell.)
+        if "mmpd" in fakes:
+            binary_pack_file = pack_path(args.raw_eval_dir, "binary_staged", dataset)
+            if binary_pack_file.is_file():
+                bin_yt = load_npz(binary_pack_file)["y_true"].astype(np.float32)
+                mmpd_yt = y_true_by_source["mmpd"]
+                if bin_yt.shape != mmpd_yt.shape:
+                    raise ValueError(
+                        f"{dataset}: binary/mmpd y_true shape mismatch {bin_yt.shape} vs {mmpd_yt.shape} "
+                        "before --mmpd-ordinal-quantize"
+                    )
+                mse = float(np.mean((bin_yt - mmpd_yt) ** 2))
+                if mse > 1e-6:
+                    raise ValueError(
+                        f"{dataset}: binary vs mmpd y_true mse={mse:.6f}; "
+                        "refusing --mmpd-ordinal-quantize onto a mismatched coordinate space"
+                    )
         ladder = load_ordinal_ladder_for_run(args, run)
-        quantized, q_stats = quantize_to_ordinal_ladder(fakes["mmpd"], ladder)
-        fakes["mmpd"] = quantized
-        print(
-            f"[{dataset}] mmpd ordinal-quantize: changed_frac={q_stats['changed_frac']:.4f} "
-            f"mean_abs_delta={q_stats['mean_abs_delta']:.6f} "
-            f"max_abs_delta={q_stats['max_abs_delta']:.6f} "
-            f"n_unique_max={int(q_stats['n_unique_max'])}",
-            flush=True,
-        )
+        if "mmpd" in fakes:
+            quantized, q_stats = quantize_to_ordinal_ladder(fakes["mmpd"], ladder)
+            fakes["mmpd"] = quantized
+            print(
+                f"[{dataset}] mmpd fake ordinal-quantize: changed_frac={q_stats['changed_frac']:.4f} "
+                f"mean_abs_delta={q_stats['mean_abs_delta']:.6f} "
+                f"max_abs_delta={q_stats['max_abs_delta']:.6f} "
+                f"n_unique_max={int(q_stats['n_unique_max'])}",
+                flush=True,
+            )
+        for src in list(y_true_by_source):
+            quantized_gt, gt_stats = quantize_to_ordinal_ladder(y_true_by_source[src], ladder)
+            y_true_by_source[src] = quantized_gt
+            print(
+                f"[{dataset}] {src} GT ordinal-quantize: changed_frac={gt_stats['changed_frac']:.4f} "
+                f"mean_abs_delta={gt_stats['mean_abs_delta']:.6f} "
+                f"max_abs_delta={gt_stats['max_abs_delta']:.6f}",
+                flush=True,
+            )
 
     expected_variates = [int(i) for i in run_variate_indices(run)]
     print(
@@ -1304,7 +1315,8 @@ def parse_args() -> argparse.Namespace:
         "--mmpd-ordinal-quantize",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Snap MMPD fake horizons to nearest global ordinal ladder rung (same bins as binary decode).",
+        help="Snap MMPD fakes AND GT horizons to nearest global ordinal ladder rung "
+        "(same bins as binary decode). Removes continuous-vs-ladder tells.",
     )
     parser.add_argument(
         "--candidate-only",
