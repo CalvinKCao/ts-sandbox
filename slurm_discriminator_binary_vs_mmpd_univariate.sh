@@ -1,23 +1,24 @@
 #!/bin/bash
-# Univariate binary-vs-MMPD discriminator shards (one model per dataset).
+# Univariate real-vs-fake discriminator shards (binary vs GT, MMPD vs GT).
 #
-# Same fair protocol as the texture disc campaign, but each example is a
-# single-variate L-patch and the label is binary_staged vs mmpd.
+# Same fair protocol as the multivariate texture disc, but each example is a
+# single-variate L-patch. Shards are dataset × fake_source (like the original).
 #
 # Login-node usage:
-#   ./slurm_discriminator_binary_vs_mmpd_univariate.sh --datasets ETTh1,traffic,electricity,exchange_rate ...
+#   ./slurm_discriminator_binary_vs_mmpd_univariate.sh --datasets ETTh1,traffic,... ...
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---------------------------------------------------------------------------
-# Login node: parse CLI, submit shards. Do NOT run this block's defaults on
-# compute nodes — that would clobber --export=ALL env (DATASET, ANCHOR_*, …).
+# Login node: parse CLI, submit shards. Do NOT clobber --export on compute.
 # ---------------------------------------------------------------------------
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     DATASETS=(ETTh1 traffic electricity exchange_rate)
+    FAKE_SOURCES=(binary_staged mmpd)
     DATASET=""
+    FAKE_SOURCE=""
     SMOKE=0
     FORCE_RAW=0
     FORCE_TRAIN=0
@@ -30,7 +31,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     BINARY_CONFIG=""
     BINARY_CONFIG_BY_DATASET=""
     MMPD_OUTPUT_SUFFIX="results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset"
-    DISC_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-binary-vs-mmpd-univariate"
+    DISC_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-patch-only-fair-univariate"
     RAW_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-raw-trainval25"
     LOOKBACK=336
     HORIZON=720
@@ -44,7 +45,12 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
                 IFS=',' read -r -a DATASETS <<< "$2"
                 shift 2
                 ;;
+            --fake-sources)
+                IFS=',' read -r -a FAKE_SOURCES <<< "$2"
+                shift 2
+                ;;
             --dataset) DATASET="$2"; shift 2 ;;
+            --fake-source) FAKE_SOURCE="$2"; shift 2 ;;
             --smoke-test) SMOKE=1; shift ;;
             --force-raw-eval) FORCE_RAW=1; shift ;;
             --force-train) FORCE_TRAIN=1; shift ;;
@@ -85,6 +91,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     cd "$REPO"
     mkdir -p results/logs
 
+    slurm_encode() { printf '%s' "${1//,/;}" ; }
+
     if [[ "$MERGE_PARTIALS" -eq 1 ]]; then
         sbatch \
             --job-name=disc-uni-merge \
@@ -98,7 +106,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         exit 0
     fi
 
-    WALL="1:00:00"
+    # Univariate expands examples by n_variates (~4–8×); give headroom.
+    WALL="2:00:00"
     [[ "$SMOKE" -eq 1 ]] && WALL="0:30:00"
     [[ -n "$WALL_OVERRIDE" ]] && WALL="$WALL_OVERRIDE"
 
@@ -106,28 +115,31 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     [[ -n "$DATASET" ]] && SUBMIT_DATASETS=("$DATASET")
     [[ "$SMOKE" -eq 1 && -z "$DATASET" ]] && SUBMIT_DATASETS=(ETTh1)
 
-    # Slurm --export splits on commas, so encode CSV payloads with ';'.
-    slurm_encode() { printf '%s' "${1//,/;}" ; }
+    SUBMIT_SOURCES=("${FAKE_SOURCES[@]}")
+    [[ -n "$FAKE_SOURCE" ]] && SUBMIT_SOURCES=("$FAKE_SOURCE")
+    [[ "$SMOKE" -eq 1 && -z "$FAKE_SOURCE" ]] && SUBMIT_SOURCES=(binary_staged)
 
     JOB_IDS=()
     for ds in "${SUBMIT_DATASETS[@]}"; do
-        echo "Submitting univariate binary-vs-mmpd disc for $ds (L40S, wall=$WALL)..."
-        job_id="$(sbatch --parsable \
-            --job-name="disc-uni-${ds}" \
-            --account=aip-boyuwang \
-            --nodes=1 \
-            --gres=gpu:l40s:1 \
-            --cpus-per-task=8 \
-            --mem=50G \
-            --time="$WALL" \
-            --output="results/logs/disc-uni-${ds}-%j.log" \
-            --error="results/logs/disc-uni-${ds}-%j.log" \
-            --mail-type=END,FAIL \
-            --mail-user=ccao87@uwo.ca \
-            --export=ALL,DATASET="$ds",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$(slurm_encode "$SLICE_LENGTHS")",PACK_SPLITS="$(slurm_encode "$PACK_SPLITS")",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$(slurm_encode "$ANCHOR_CONFIG_BY_DATASET")",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$(slurm_encode "$BINARY_CONFIG_BY_DATASET")",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE",MERGE_PARTIALS=0 \
-            "$SCRIPT_DIR/slurm_discriminator_binary_vs_mmpd_univariate.sh")"
-        JOB_IDS+=("$job_id")
-        echo "  -> job $job_id"
+        for src in "${SUBMIT_SOURCES[@]}"; do
+            echo "Submitting univariate real-vs-fake disc for $ds / $src (L40S, wall=$WALL)..."
+            job_id="$(sbatch --parsable \
+                --job-name="disc-uni-${ds}-${src}" \
+                --account=aip-boyuwang \
+                --nodes=1 \
+                --gres=gpu:l40s:1 \
+                --cpus-per-task=8 \
+                --mem=50G \
+                --time="$WALL" \
+                --output="results/logs/disc-uni-${ds}-${src}-%j.log" \
+                --error="results/logs/disc-uni-${ds}-${src}-%j.log" \
+                --mail-type=END,FAIL \
+                --mail-user=ccao87@uwo.ca \
+                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$(slurm_encode "$SLICE_LENGTHS")",PACK_SPLITS="$(slurm_encode "$PACK_SPLITS")",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$(slurm_encode "$ANCHOR_CONFIG_BY_DATASET")",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$(slurm_encode "$BINARY_CONFIG_BY_DATASET")",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE",MERGE_PARTIALS=0 \
+                "$SCRIPT_DIR/slurm_discriminator_binary_vs_mmpd_univariate.sh")"
+            JOB_IDS+=("$job_id")
+            echo "  -> job $job_id"
+        done
     done
 
     dep=$(IFS=:; echo "${JOB_IDS[*]}")
@@ -146,7 +158,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Inside the job — trust --export env; do not reset DATASET/ANCHOR_*/etc.
+# Inside the job
 # ---------------------------------------------------------------------------
 if [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
     REPO="${SCRATCH}/ts-sandbox"
@@ -157,14 +169,13 @@ else
 fi
 cd "$REPO"
 
-# Decode ';' back to ',' (Slurm --export cannot carry literal commas).
 slurm_decode() { printf '%s' "${1//;/,}" ; }
 ANCHOR_CONFIG_BY_DATASET="$(slurm_decode "${ANCHOR_CONFIG_BY_DATASET:-}")"
 BINARY_CONFIG_BY_DATASET="$(slurm_decode "${BINARY_CONFIG_BY_DATASET:-}")"
 PACK_SPLITS="$(slurm_decode "${PACK_SPLITS:-}")"
 SLICE_LENGTHS="$(slurm_decode "${SLICE_LENGTHS:-8;16;32}")"
 
-DISC_OUTPUT_SUFFIX="${DISC_OUTPUT_SUFFIX:-results/datasets/disc-lb336-hz720-ordinal-four-binary-vs-mmpd-univariate}"
+DISC_OUTPUT_SUFFIX="${DISC_OUTPUT_SUFFIX:-results/datasets/disc-lb336-hz720-ordinal-four-patch-only-fair-univariate}"
 RAW_OUTPUT_SUFFIX="${RAW_OUTPUT_SUFFIX:-results/datasets/disc-lb336-hz720-ordinal-four-raw-trainval25}"
 MMPD_OUTPUT_SUFFIX="${MMPD_OUTPUT_SUFFIX:-results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset}"
 OUTPUT_DIR="$REPO/$DISC_OUTPUT_SUFFIX"
@@ -201,8 +212,8 @@ if [[ "${MERGE_PARTIALS:-0}" -eq 1 ]]; then
     exit 0
 fi
 
-if [[ -z "${DATASET:-}" ]]; then
-    echo "ERROR: DATASET env empty inside GPU job (login submit clobber bug?)." >&2
+if [[ -z "${DATASET:-}" || -z "${FAKE_SOURCE:-}" ]]; then
+    echo "ERROR: DATASET/FAKE_SOURCE env empty inside GPU job." >&2
     exit 1
 fi
 if [[ -z "${ANCHOR_CONFIG:-}" && -z "${ANCHOR_CONFIG_BY_DATASET:-}" ]]; then
@@ -214,7 +225,7 @@ fi
 
 EVAL_ARGS=(
     --datasets "$DATASET"
-    --fake-sources binary_staged mmpd
+    --fake-sources "$FAKE_SOURCE"
     --slice-lengths "${SLICE_ARR[@]}"
     --output-dir "$OUTPUT_DIR"
     --raw-eval-dir "$RAW_EVAL_DIR"
@@ -244,10 +255,8 @@ if [[ -n "${DISC_NATIVE_REPR_STRIDE:-}" ]]; then
     EVAL_ARGS+=(--native-repr-stride "$DISC_NATIVE_REPR_STRIDE")
 fi
 
-echo "[env] DATASET=$DATASET SMOKE=${SMOKE:-0} FORCE_TRAIN=${FORCE_TRAIN:-0}"
-echo "[env] ANCHOR_CONFIG=${ANCHOR_CONFIG:-}"
+echo "[env] DATASET=$DATASET FAKE_SOURCE=$FAKE_SOURCE SMOKE=${SMOKE:-0} FORCE_TRAIN=${FORCE_TRAIN:-0}"
 echo "[env] ANCHOR_CONFIG_BY_DATASET=${ANCHOR_CONFIG_BY_DATASET:-}"
-echo "[env] BINARY_CONFIG_BY_DATASET=${BINARY_CONFIG_BY_DATASET:-}"
 echo "[env] PACK_SPLITS=${PACK_SPLITS:-} PACK_FRACTION=${PACK_FRACTION:-}"
 echo "[env] SLICE_LENGTHS=${SLICE_ARR[*]}"
 echo "[run] ${EVAL_ARGS[*]}"
