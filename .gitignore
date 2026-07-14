@@ -210,6 +210,7 @@ wandb/
 .tmp_timing_full4phase_ckpt2/
 temp/*
 !temp/submit_*.sh
+!temp/*.py
 !temp/README.md
 synth_data/
 results_experimental/
