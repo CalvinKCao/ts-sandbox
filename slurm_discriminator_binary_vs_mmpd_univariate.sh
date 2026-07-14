@@ -106,6 +106,9 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     [[ -n "$DATASET" ]] && SUBMIT_DATASETS=("$DATASET")
     [[ "$SMOKE" -eq 1 && -z "$DATASET" ]] && SUBMIT_DATASETS=(ETTh1)
 
+    # Slurm --export splits on commas, so encode CSV payloads with ';'.
+    slurm_encode() { printf '%s' "${1//,/;}" ; }
+
     JOB_IDS=()
     for ds in "${SUBMIT_DATASETS[@]}"; do
         echo "Submitting univariate binary-vs-mmpd disc for $ds (L40S, wall=$WALL)..."
@@ -121,7 +124,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --error="results/logs/disc-uni-${ds}-%j.log" \
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export=ALL,DATASET="$ds",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$SLICE_LENGTHS",PACK_SPLITS="$PACK_SPLITS",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$ANCHOR_CONFIG_BY_DATASET",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$BINARY_CONFIG_BY_DATASET",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE",MERGE_PARTIALS=0 \
+            --export=ALL,DATASET="$ds",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$(slurm_encode "$SLICE_LENGTHS")",PACK_SPLITS="$(slurm_encode "$PACK_SPLITS")",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$(slurm_encode "$ANCHOR_CONFIG_BY_DATASET")",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$(slurm_encode "$BINARY_CONFIG_BY_DATASET")",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE",MERGE_PARTIALS=0 \
             "$SCRIPT_DIR/slurm_discriminator_binary_vs_mmpd_univariate.sh")"
         JOB_IDS+=("$job_id")
         echo "  -> job $job_id"
@@ -154,15 +157,22 @@ else
 fi
 cd "$REPO"
 
+# Decode ';' back to ',' (Slurm --export cannot carry literal commas).
+slurm_decode() { printf '%s' "${1//;/,}" ; }
+ANCHOR_CONFIG_BY_DATASET="$(slurm_decode "${ANCHOR_CONFIG_BY_DATASET:-}")"
+BINARY_CONFIG_BY_DATASET="$(slurm_decode "${BINARY_CONFIG_BY_DATASET:-}")"
+PACK_SPLITS="$(slurm_decode "${PACK_SPLITS:-}")"
+SLICE_LENGTHS="$(slurm_decode "${SLICE_LENGTHS:-8;16;32}")"
+
 DISC_OUTPUT_SUFFIX="${DISC_OUTPUT_SUFFIX:-results/datasets/disc-lb336-hz720-ordinal-four-binary-vs-mmpd-univariate}"
 RAW_OUTPUT_SUFFIX="${RAW_OUTPUT_SUFFIX:-results/datasets/disc-lb336-hz720-ordinal-four-raw-trainval25}"
 MMPD_OUTPUT_SUFFIX="${MMPD_OUTPUT_SUFFIX:-results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset}"
 OUTPUT_DIR="$REPO/$DISC_OUTPUT_SUFFIX"
 RAW_EVAL_DIR="$REPO/$RAW_OUTPUT_SUFFIX"
 MMPD_ROOT="$REPO/$MMPD_OUTPUT_SUFFIX"
-SLICE_LENGTHS="${SLICE_LENGTHS:-8,16,32}"
-SLICE_LENGTHS="${SLICE_LENGTHS// /,}"
-IFS=',' read -r -a SLICE_ARR <<< "$SLICE_LENGTHS"
+SLICE_LENGTHS="${SLICE_LENGTHS// /;}"
+SLICE_LENGTHS="${SLICE_LENGTHS//,/;}"
+IFS=';' read -r -a SLICE_ARR <<< "$SLICE_LENGTHS"
 
 REQ="$REPO/setup/requirements-killarney.txt"
 [[ -f "$REQ" ]] || { echo "ERROR: missing $REQ"; exit 1; }
@@ -236,7 +246,10 @@ fi
 
 echo "[env] DATASET=$DATASET SMOKE=${SMOKE:-0} FORCE_TRAIN=${FORCE_TRAIN:-0}"
 echo "[env] ANCHOR_CONFIG=${ANCHOR_CONFIG:-}"
+echo "[env] ANCHOR_CONFIG_BY_DATASET=${ANCHOR_CONFIG_BY_DATASET:-}"
+echo "[env] BINARY_CONFIG_BY_DATASET=${BINARY_CONFIG_BY_DATASET:-}"
 echo "[env] PACK_SPLITS=${PACK_SPLITS:-} PACK_FRACTION=${PACK_FRACTION:-}"
+echo "[env] SLICE_LENGTHS=${SLICE_ARR[*]}"
 echo "[run] ${EVAL_ARGS[*]}"
 "$PYTHON" -u "$REPO/utils/eval_discriminator_binary_vs_mmpd_univariate.py" "${EVAL_ARGS[@]}"
 echo "Done: $(date)"
