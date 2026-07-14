@@ -55,12 +55,14 @@ CORNERS = ("TP", "TN", "FP", "FN")
 def _disc_defaults() -> argparse.Namespace:
     """Fair-campaign defaults matching the Killarney wrapper."""
     argv_backup = sys.argv
+    # disc_parse_args uses nargs="+"/choices — pass sources as separate tokens, not CSV.
     sys.argv = [
         argv_backup[0],
         "--datasets",
         "ETTh1",
         "--fake-sources",
-        "binary_staged,mmpd",
+        "binary_staged",
+        "mmpd",
         "--slice-lengths",
         "8",
         "--candidate-only",
