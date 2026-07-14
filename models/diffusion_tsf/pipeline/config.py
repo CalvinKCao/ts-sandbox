@@ -395,7 +395,11 @@ def _load_yaml_tree(path: str, seen: Optional[Set[str]] = None) -> Dict[str, Any
 
 
 def _apply_geometry_block(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge optional ``geometry:`` into ``experiment`` (geometry wins for its keys)."""
+    """Merge optional ``geometry:`` into ``experiment`` (geometry wins for its keys).
+
+    Leaf overrides of parent geometry must set ``geometry:`` (not only ``experiment:``),
+    e.g. uncompressed sets ``geometry.representation_time_stride: 1``.
+    """
     geom = cfg.get("geometry")
     if geom is None:
         return cfg
