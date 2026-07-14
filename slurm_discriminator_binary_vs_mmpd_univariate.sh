@@ -11,63 +11,66 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DATASETS=(ETTh1 traffic electricity exchange_rate)
-DATASET=""
-SMOKE=0
-FORCE_RAW=0
-FORCE_TRAIN=0
-WALL_OVERRIDE=""
-SLICE_LENGTHS="8 16 32"
-PACK_SPLITS=""
-PACK_FRACTION=""
-ANCHOR_CONFIG=""
-ANCHOR_CONFIG_BY_DATASET=""
-BINARY_CONFIG=""
-BINARY_CONFIG_BY_DATASET=""
-MMPD_OUTPUT_SUFFIX="results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset"
-DISC_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-binary-vs-mmpd-univariate"
-RAW_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-raw-trainval25"
-LOOKBACK=336
-HORIZON=720
-TEST_STRIDE=1
-MMPD_BACKBONE=Decoder
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --datasets)
-            IFS=',' read -r -a DATASETS <<< "$2"
-            shift 2
-            ;;
-        --dataset) DATASET="$2"; shift 2 ;;
-        --smoke-test) SMOKE=1; shift ;;
-        --force-raw-eval) FORCE_RAW=1; shift ;;
-        --force-train) FORCE_TRAIN=1; shift ;;
-        --time) WALL_OVERRIDE="$2"; shift 2 ;;
-        --slice-lengths) SLICE_LENGTHS="$2"; shift 2 ;;
-        --pack-splits) PACK_SPLITS="$2"; shift 2 ;;
-        --pack-fraction) PACK_FRACTION="$2"; shift 2 ;;
-        --anchor-config) ANCHOR_CONFIG="$2"; shift 2 ;;
-        --anchor-config-by-dataset) ANCHOR_CONFIG_BY_DATASET="$2"; shift 2 ;;
-        --binary-config) BINARY_CONFIG="$2"; shift 2 ;;
-        --binary-config-by-dataset) BINARY_CONFIG_BY_DATASET="$2"; shift 2 ;;
-        --mmpd-run) MMPD_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
-        --disc-run) DISC_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
-        --raw-run) RAW_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
-        --lookback) LOOKBACK="$2"; shift 2 ;;
-        --horizon) HORIZON="$2"; shift 2 ;;
-        --test-stride) TEST_STRIDE="$2"; shift 2 ;;
-        --mmpd-backbone) MMPD_BACKBONE="$2"; shift 2 ;;
-        --merge-partials-only) MERGE_PARTIALS=1; shift ;;
-        *)
-            echo "Unknown arg: $1" >&2
-            exit 1
-            ;;
-    esac
-done
-
-MERGE_PARTIALS="${MERGE_PARTIALS:-0}"
-
+# ---------------------------------------------------------------------------
+# Login node: parse CLI, submit shards. Do NOT run this block's defaults on
+# compute nodes — that would clobber --export=ALL env (DATASET, ANCHOR_*, …).
+# ---------------------------------------------------------------------------
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+    DATASETS=(ETTh1 traffic electricity exchange_rate)
+    DATASET=""
+    SMOKE=0
+    FORCE_RAW=0
+    FORCE_TRAIN=0
+    WALL_OVERRIDE=""
+    SLICE_LENGTHS="8,16,32"
+    PACK_SPLITS=""
+    PACK_FRACTION=""
+    ANCHOR_CONFIG=""
+    ANCHOR_CONFIG_BY_DATASET=""
+    BINARY_CONFIG=""
+    BINARY_CONFIG_BY_DATASET=""
+    MMPD_OUTPUT_SUFFIX="results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset"
+    DISC_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-binary-vs-mmpd-univariate"
+    RAW_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-raw-trainval25"
+    LOOKBACK=336
+    HORIZON=720
+    TEST_STRIDE=1
+    MMPD_BACKBONE=Decoder
+    MERGE_PARTIALS=0
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --datasets)
+                IFS=',' read -r -a DATASETS <<< "$2"
+                shift 2
+                ;;
+            --dataset) DATASET="$2"; shift 2 ;;
+            --smoke-test) SMOKE=1; shift ;;
+            --force-raw-eval) FORCE_RAW=1; shift ;;
+            --force-train) FORCE_TRAIN=1; shift ;;
+            --time) WALL_OVERRIDE="$2"; shift 2 ;;
+            --slice-lengths) SLICE_LENGTHS="${2// /,}"; shift 2 ;;
+            --pack-splits) PACK_SPLITS="$2"; shift 2 ;;
+            --pack-fraction) PACK_FRACTION="$2"; shift 2 ;;
+            --anchor-config) ANCHOR_CONFIG="$2"; shift 2 ;;
+            --anchor-config-by-dataset) ANCHOR_CONFIG_BY_DATASET="$2"; shift 2 ;;
+            --binary-config) BINARY_CONFIG="$2"; shift 2 ;;
+            --binary-config-by-dataset) BINARY_CONFIG_BY_DATASET="$2"; shift 2 ;;
+            --mmpd-run) MMPD_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
+            --disc-run) DISC_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
+            --raw-run) RAW_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
+            --lookback) LOOKBACK="$2"; shift 2 ;;
+            --horizon) HORIZON="$2"; shift 2 ;;
+            --test-stride) TEST_STRIDE="$2"; shift 2 ;;
+            --mmpd-backbone) MMPD_BACKBONE="$2"; shift 2 ;;
+            --merge-partials-only) MERGE_PARTIALS=1; shift ;;
+            *)
+                echo "Unknown arg: $1" >&2
+                exit 1
+                ;;
+        esac
+    done
+
     if [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
         REPO="${SCRATCH}/ts-sandbox"
     elif [[ -d "$HOME/ts-sandbox" ]]; then
@@ -118,7 +121,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --error="results/logs/disc-uni-${ds}-%j.log" \
             --mail-type=END,FAIL \
             --mail-user=ccao87@uwo.ca \
-            --export=ALL,DATASET="$ds",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$SLICE_LENGTHS",PACK_SPLITS="$PACK_SPLITS",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$ANCHOR_CONFIG_BY_DATASET",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$BINARY_CONFIG_BY_DATASET",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE" \
+            --export=ALL,DATASET="$ds",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$SLICE_LENGTHS",PACK_SPLITS="$PACK_SPLITS",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$ANCHOR_CONFIG_BY_DATASET",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$BINARY_CONFIG_BY_DATASET",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE",MERGE_PARTIALS=0 \
             "$SCRIPT_DIR/slurm_discriminator_binary_vs_mmpd_univariate.sh")"
         JOB_IDS+=("$job_id")
         echo "  -> job $job_id"
@@ -140,7 +143,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Inside the job
+# Inside the job — trust --export env; do not reset DATASET/ANCHOR_*/etc.
 # ---------------------------------------------------------------------------
 if [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
     REPO="${SCRATCH}/ts-sandbox"
@@ -157,6 +160,9 @@ MMPD_OUTPUT_SUFFIX="${MMPD_OUTPUT_SUFFIX:-results/datasets/07-10-mmpd-decoder-pa
 OUTPUT_DIR="$REPO/$DISC_OUTPUT_SUFFIX"
 RAW_EVAL_DIR="$REPO/$RAW_OUTPUT_SUFFIX"
 MMPD_ROOT="$REPO/$MMPD_OUTPUT_SUFFIX"
+SLICE_LENGTHS="${SLICE_LENGTHS:-8,16,32}"
+SLICE_LENGTHS="${SLICE_LENGTHS// /,}"
+IFS=',' read -r -a SLICE_ARR <<< "$SLICE_LENGTHS"
 
 REQ="$REPO/setup/requirements-killarney.txt"
 [[ -f "$REQ" ]] || { echo "ERROR: missing $REQ"; exit 1; }
@@ -185,12 +191,21 @@ if [[ "${MERGE_PARTIALS:-0}" -eq 1 ]]; then
     exit 0
 fi
 
+if [[ -z "${DATASET:-}" ]]; then
+    echo "ERROR: DATASET env empty inside GPU job (login submit clobber bug?)." >&2
+    exit 1
+fi
+if [[ -z "${ANCHOR_CONFIG:-}" && -z "${ANCHOR_CONFIG_BY_DATASET:-}" ]]; then
+    echo "ERROR: missing ANCHOR_CONFIG / ANCHOR_CONFIG_BY_DATASET in job env." >&2
+    exit 1
+fi
+
 "$PYTHON" -c "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
 
 EVAL_ARGS=(
-    --datasets "${DATASET}"
+    --datasets "$DATASET"
     --fake-sources binary_staged mmpd
-    --slice-lengths ${SLICE_LENGTHS}
+    --slice-lengths "${SLICE_ARR[@]}"
     --output-dir "$OUTPUT_DIR"
     --raw-eval-dir "$RAW_EVAL_DIR"
     --mmpd-output-root "$MMPD_ROOT"
@@ -219,6 +234,9 @@ if [[ -n "${DISC_NATIVE_REPR_STRIDE:-}" ]]; then
     EVAL_ARGS+=(--native-repr-stride "$DISC_NATIVE_REPR_STRIDE")
 fi
 
+echo "[env] DATASET=$DATASET SMOKE=${SMOKE:-0} FORCE_TRAIN=${FORCE_TRAIN:-0}"
+echo "[env] ANCHOR_CONFIG=${ANCHOR_CONFIG:-}"
+echo "[env] PACK_SPLITS=${PACK_SPLITS:-} PACK_FRACTION=${PACK_FRACTION:-}"
 echo "[run] ${EVAL_ARGS[*]}"
 "$PYTHON" -u "$REPO/utils/eval_discriminator_binary_vs_mmpd_univariate.py" "${EVAL_ARGS[@]}"
 echo "Done: $(date)"

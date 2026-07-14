@@ -407,7 +407,9 @@ def apply_smoke_defaults(args: argparse.Namespace) -> None:
     _apply_smoke_defaults_base(args)
     # Base smoke collapses fake_sources to 1; restore both for this task.
     args.fake_sources = [POSITIVE_SOURCE, NEGATIVE_SOURCE]
-    if args.output_dir == DEFAULT_DISC_OUTPUT or args.output_dir == DEFAULT_OUTPUT:
+    if args.smoke_test and (
+        args.output_dir == DEFAULT_DISC_OUTPUT or args.output_dir == DEFAULT_OUTPUT
+    ):
         args.output_dir = DEFAULT_OUTPUT.parent / f"{DEFAULT_OUTPUT.name}-smoke"
 
 
