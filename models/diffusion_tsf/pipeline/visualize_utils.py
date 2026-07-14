@@ -2050,6 +2050,231 @@ def run_eval_worst_window_visualizations(
     return paths
 
 
+@torch.no_grad()
+def _prob_window_pred_2d_maps(
+    coarse_model,
+    fine_model,
+    past: torch.Tensor,
+    *,
+    device: torch.device,
+    sampler: str = "dpmpp",
+    num_inference_steps: int = 20,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Probabilistic coarse/fine future 2D occupancy maps, shape (V, H, W)."""
+    past_b = past.unsqueeze(0).to(device)
+    stage = str(getattr(getattr(coarse_model, "config", None), "diffusion_stage", "") or "")
+    kwargs = {"sampler": sampler, "num_inference_steps": int(num_inference_steps)}
+    if stage == "vertical_dual" or fine_model is None or fine_model is coarse_model:
+        out = coarse_model.generate(past_b, **kwargs)
+        coarse_2d = out["future_2d_coarse"][0].detach().cpu().numpy()
+        fine_key = "future_2d_fine" if "future_2d_fine" in out else "future_2d_coarse"
+        fine_2d = out[fine_key][0].detach().cpu().numpy()
+        return coarse_2d, fine_2d
+    coarse_out = coarse_model.generate(past_b, **kwargs)
+    fine_out = fine_model.generate(
+        past_b,
+        future_coarse_2d=coarse_out["future_2d_coarse"],
+        **kwargs,
+    )
+    coarse_2d = coarse_out["future_2d_coarse"][0].detach().cpu().numpy()
+    fine_2d = fine_out["future_2d_fine"][0].detach().cpu().numpy()
+    return coarse_2d, fine_2d
+
+
+def plot_probabilistic_sample_panel(
+    *,
+    past: torch.Tensor,
+    future: torch.Tensor,
+    samples_vt_s: np.ndarray,
+    sample_mean: np.ndarray,
+    coarse_2d: np.ndarray,
+    fine_2d: np.ndarray,
+    metric: str,
+    rank: int,
+    window_index: int,
+    score: float,
+    output_dir: str,
+    jpeg_dpi: int = 100,
+    ordinal_mode: bool = False,
+    lookback_overlap: int = 0,
+    sampler_label: str = "dpmpp",
+    max_spaghetti: int = 20,
+) -> str:
+    """Probabilistic 2D maps + GT vs sample fan (not anchor). samples: (V, S, T)."""
+    os.makedirs(output_dir, exist_ok=True)
+    _past_cf, future_cf = _as_channel_first(past, future)
+    k = int(lookback_overlap)
+    gt = future_cf.numpy()
+    if k > 0 and gt.shape[-1] > k:
+        gt = gt[..., k:]
+    common_len = min(gt.shape[-1], sample_mean.shape[-1], samples_vt_s.shape[-1])
+    gt = gt[..., -common_len:]
+    sample_mean = sample_mean[..., -common_len:]
+    samples_vt_s = samples_vt_s[..., -common_len:]
+    t_axis = np.arange(0, common_len)
+    n_vars = min(3, gt.shape[0], coarse_2d.shape[0], fine_2d.shape[0], samples_vt_s.shape[0])
+    space_label = "global z (ordinal decode)" if ordinal_mode else "window-norm"
+    n_draw = min(int(max_spaghetti), int(samples_vt_s.shape[1]))
+
+    fig = plt.figure(figsize=(4.2 * n_vars, 2.3 * 3), constrained_layout=True)
+    gs = fig.add_gridspec(3, n_vars, height_ratios=[1.0, 1.0, 1.25])
+
+    for col in range(n_vars):
+        ax_c = fig.add_subplot(gs[0, col])
+        h, w = coarse_2d[col].shape
+        im_c = ax_c.imshow(
+            coarse_2d[col],
+            aspect="auto",
+            origin="lower",
+            extent=[0, w, 0, h],
+            cmap="gray",
+            vmin=0.0,
+            vmax=1.0,
+            interpolation="nearest",
+        )
+        ax_c.set_title(f"var {col} | coarse 2D ({sampler_label})", fontsize=8)
+        fig.colorbar(im_c, ax=ax_c, fraction=0.046, pad=0.04)
+
+        ax_f = fig.add_subplot(gs[1, col])
+        h, w = fine_2d[col].shape
+        im_f = ax_f.imshow(
+            fine_2d[col],
+            aspect="auto",
+            origin="lower",
+            extent=[0, w, 0, h],
+            cmap="gray",
+            vmin=0.0,
+            vmax=1.0,
+            interpolation="nearest",
+        )
+        ax_f.set_title(f"var {col} | fine 2D ({sampler_label})", fontsize=8)
+        fig.colorbar(im_f, ax=ax_f, fraction=0.046, pad=0.04)
+
+        ax_1d = fig.add_subplot(gs[2, col])
+        draws = samples_vt_s[col, :n_draw]
+        q10 = np.percentile(samples_vt_s[col], 10, axis=0)
+        q90 = np.percentile(samples_vt_s[col], 90, axis=0)
+        ax_1d.fill_between(t_axis, q10, q90, color="#FF9800", alpha=0.22, label="q10–q90")
+        for s_i in range(n_draw):
+            ax_1d.plot(t_axis, draws[s_i], color="#FF9800", linewidth=0.55, alpha=0.35)
+        ax_1d.plot(t_axis, gt[col], color="#2196F3", linewidth=1.5, label="GT")
+        ax_1d.plot(
+            t_axis, sample_mean[col], color="#E91E63", linewidth=1.2, label="sample mean",
+        )
+        ax_1d.grid(True, alpha=0.12)
+        ax_1d.set_title(f"var {col} | GT vs {n_draw} {sampler_label} samples", fontsize=8)
+        if col == 0:
+            ax_1d.legend(fontsize=7, loc="upper right")
+
+    fig.suptitle(
+        f"prob {metric} rank {rank} | window {window_index} | score={score:.5f}\n"
+        + _format_scale_banner(
+            norm_range=(float(gt.min()), float(gt.max())),
+            space_label=space_label,
+            extra=f"2D: one {sampler_label} sample occupancy [0,1] (not anchor)",
+        ),
+        fontsize=10,
+    )
+    path = os.path.join(output_dir, f"prob_{metric}_rank{rank:02d}_win{window_index}.jpg")
+    return save_figure_jpg(fig, path, dpi=jpeg_dpi)
+
+
+def run_eval_probabilistic_sample_visualizations(
+    state: Any,
+    *,
+    test_ds,
+    pack: Dict[str, np.ndarray],
+    worst_manifest: List[Dict[str, Any]],
+    coarse_model=None,
+    fine_model=None,
+    device: Optional[torch.device] = None,
+    sampler: str = "dpmpp",
+    num_inference_steps: int = 20,
+    max_windows: int = 10,
+) -> List[str]:
+    """Worst-CRPS (and a few random) windows: probabilistic 2D + sample fan charts."""
+    viz = _viz_cfg(state)
+    if not viz.get("enabled", True):
+        return []
+    samples = pack.get("samples")
+    sample_mean = pack.get("sample_mean")
+    if samples is None or sample_mean is None:
+        logger.warning("probabilistic sample viz skipped: pack missing samples")
+        return []
+    if coarse_model is None or device is None:
+        logger.warning("probabilistic sample viz skipped: model/device missing")
+        return []
+    if fine_model is None:
+        fine_model = coarse_model
+
+    # Prefer CRPS-ranked windows; fall back to any worst-manifest entries.
+    crps_entries = [e for e in (worst_manifest or []) if str(e.get("metric")) == "crps"]
+    entries = crps_entries or list(worst_manifest or [])
+    if not entries:
+        # No worst list: plot a few random pack windows.
+        n = min(int(max_windows), int(samples.shape[0]))
+        idxs = pick_sample_indices(int(samples.shape[0]), n, seed=int(getattr(state, "seed", 42)))
+        win_indices = pack.get("window_indices")
+        entries = [
+            {
+                "metric": "random",
+                "rank": rank,
+                "window_index": int(win_indices[i]) if win_indices is not None else int(i),
+                "score": float("nan"),
+            }
+            for rank, i in enumerate(idxs, start=1)
+        ]
+    entries = entries[: int(max_windows)]
+
+    output_dir = os.path.join(state.results_dir, "viz", "eval_prob_samples")
+    paths: List[str] = []
+    ordinal_mode = bool(getattr(state, "use_ordinal_window_norm", False))
+    k_overlap = int(getattr(coarse_model.config, "lookback_overlap", 0) or 0)
+    map_cache: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+
+    for entry in entries:
+        wi = int(entry["window_index"])
+        try:
+            pack_row = _pack_row_for_window(pack, wi)
+        except KeyError as exc:
+            logger.warning("prob sample viz skip win %s: %s", wi, exc)
+            continue
+        past, future = test_ds[wi]
+        if wi not in map_cache:
+            map_cache[wi] = _prob_window_pred_2d_maps(
+                coarse_model,
+                fine_model,
+                past,
+                device=device,
+                sampler=sampler,
+                num_inference_steps=num_inference_steps,
+            )
+        coarse_2d, fine_2d = map_cache[wi]
+        # samples: (B, V, S, T)
+        samp = samples[pack_row]
+        mean = sample_mean[pack_row]
+        paths.append(
+            plot_probabilistic_sample_panel(
+                past=past,
+                future=future,
+                samples_vt_s=samp,
+                sample_mean=mean,
+                coarse_2d=coarse_2d,
+                fine_2d=fine_2d,
+                metric=str(entry.get("metric", "crps")),
+                rank=int(entry.get("rank", 0)),
+                window_index=wi,
+                score=float(entry.get("score", float("nan"))),
+                output_dir=output_dir,
+                jpeg_dpi=int(viz.get("jpeg_dpi", 100)),
+                ordinal_mode=ordinal_mode,
+                lookback_overlap=k_overlap,
+                sampler_label=str(sampler),
+            )
+        )
+    return paths
+
+
 def run_ordinal_roundtrip_visualization(
     state: Any,
     *,

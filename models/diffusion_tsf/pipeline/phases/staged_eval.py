@@ -20,6 +20,7 @@ from models.diffusion_tsf.pipeline.visualize_utils import (
     decode_staged_anchor_components,
     per_window_anchor_mse,
     per_window_crps,
+    run_eval_probabilistic_sample_visualizations,
     run_eval_worst_window_visualizations,
     run_ordinal_roundtrip_visualization,
     run_ordinal_coarse_fine_2d_visualization,
@@ -843,6 +844,24 @@ class StagedEvalPhase(PipelinePhase):
                 wandb_utils.log_visualization_paths(worst_viz, wandb_key="eval/worst_windows")
             except Exception as e:
                 logger.warning("Worst-window eval viz failed: %s", e, exc_info=True)
+
+            try:
+                prob_viz = run_eval_probabilistic_sample_visualizations(
+                    state,
+                    test_ds=full_test_ds,
+                    pack=pack,
+                    worst_manifest=worst_manifest,
+                    coarse_model=coarse_model,
+                    fine_model=fine_model,
+                    device=device,
+                    sampler=selected_sampler,
+                    num_inference_steps=selected_steps,
+                )
+                wandb_utils.log_visualization_paths(
+                    prob_viz, wandb_key="eval/probabilistic_samples",
+                )
+            except Exception as e:
+                logger.warning("Probabilistic sample eval viz failed: %s", e, exc_info=True)
 
             if state.use_ordinal_window_norm:
                 try:
