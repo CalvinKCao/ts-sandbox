@@ -115,6 +115,15 @@ def resolve_data_subset(
         sample_stride = max(1, math.ceil(size_after_variates / float(target_size_mb)))
     if policy.get("sample_stride") not in (None, "auto"):
         sample_stride = max(sample_stride, int(policy["sample_stride"]))
+    # Per-dataset floor (e.g. dynamic: 60) — never lowers an auto/global stride.
+    ss_by_dataset = policy.get("sample_stride_by_dataset") or {}
+    if dataset_name in ss_by_dataset:
+        override = int(ss_by_dataset[dataset_name])
+        if override < 1:
+            raise ValueError(
+                f"sample_stride_by_dataset[{dataset_name!r}] must be >= 1, got {override}"
+            )
+        sample_stride = max(sample_stride, override)
 
     train_stride = max(train_stride, sample_stride)
     if bool(policy.get("apply_stride_to_test", True)):

@@ -1,0 +1,63 @@
+# Full mid HP vertical_dual @ g=7 with g1-pretrain reuse (validated campaign recipe).
+# Do NOT train fresh g=7 pretrain — that starved low-noise steps and hurt CRPS.
+# Retarget binary_length_g if Phase A grid picks a different winner.
+extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed_bs_mid_vertical_dual.yaml
+
+wandb:
+  tags:
+    - patch_decoder
+    - ordinal_norm
+    - lb336_hz720
+    - uncompressed
+    - vertical_dual
+    - g7p0
+    - reuse_g1_pretrain
+    - lr_eff_batch_univariate
+    - repr_t1
+
+experiment:
+  name: binary-anchor-ar-patch-decoder-lb336-hz720-ord-unc-bs-mid-vertical-dual-g7p0-reuse-g1
+  experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed_bs_mid_vertical_dual_g7p0_reuse_g1
+  binary_length_mode: power
+  binary_length_g: 7.0
+  binary_length_scale: 1.0
+  data_subset:
+    sample_stride_by_dataset:
+      dynamic: 60
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: binary_noise_sched_ablation_vertical_dual_g1p0
+
+  - phase: patch_guidance_finetune_hp
+    reuse_checkpoint_from_config: null
+
+  - phase: diffusion_vertical_dual_finetune_hp
+    n_trials: 7
+    max_epochs: 20
+    patience: 8
+    search_space: lr_eff_batch_univariate
+    hp_lr_min: 5.0e-5
+    hp_lr_max: 1.5e-3
+    effective_univariate_batch_grid: [512, 1024, 2048]
+    ema_decay: 0.995
+    prediction_target: x0
+    loss_weighting: min_snr
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+    binary_length_mode: power
+    binary_length_g: 7.0
+    binary_length_scale: 1.0
+
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 4
+    n_samples: 1
+    probabilistic_n_samples: 20
+    tune_sampler: false
+    probabilistic_sampler: dpmpp
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: false

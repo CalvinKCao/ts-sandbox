@@ -1,10 +1,11 @@
 # Short vertical_dual 336/720_uncompressed schedule ablation: BASELINE g=1.0 (identity).
-# Trains vertical_dual synthetic pretrain once; reuses uncompressed patch guidance.
+# Trains vertical_dual synthetic pretrain once. Patch guidance trained in-run (stride-1;
+# do not reuse older "uncompressed" donors that were effectively stride-2).
 # Fixed HP, ~4 epochs (same shape as binary_noise_sched_ablation_elec_unc_g*).
 extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed_bs_mid_vertical_dual.yaml
 
 wandb:
-  tags: [noise_sched_ablation, vertical_dual, uncompressed, g1p0, baseline]
+  tags: [noise_sched_ablation, vertical_dual, uncompressed, g1p0, baseline, repr_t1]
 
 experiment:
   name: binary-noise-sched-ablation-vertical-dual-g1p0
@@ -12,13 +13,17 @@ experiment:
   binary_length_mode: none
   binary_length_g: 1.0
   binary_length_scale: 1.0
+  data_subset:
+    # Floor dynamic window stride above ETTh1-matched auto (~29) to cut walltime.
+    sample_stride_by_dataset:
+      dynamic: 60
 
 phases:
   - phase: staged_diffusion_pretrain
     reuse_pretrain_from_config: null
 
   - phase: patch_guidance_finetune_hp
-    reuse_checkpoint_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed
+    reuse_checkpoint_from_config: null
 
   - phase: diffusion_vertical_dual_finetune_hp
     n_trials: 1

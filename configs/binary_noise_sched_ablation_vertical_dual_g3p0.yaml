@@ -16,7 +16,7 @@ phases:
     reuse_pretrain_from_config: binary_noise_sched_ablation_vertical_dual_g1p0
 
   - phase: patch_guidance_finetune_hp
-    reuse_checkpoint_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed
+    reuse_checkpoint_from_config: null
 
   - phase: diffusion_vertical_dual_finetune_hp
     n_trials: 1

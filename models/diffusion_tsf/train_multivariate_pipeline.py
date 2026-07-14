@@ -1032,6 +1032,12 @@ def resolve_pipeline_data_subset(state) -> Dict[str, Any]:
     state.n_variates = int(resolved["n_variates"])
     state.subset_id = str(resolved["subset_id"])
     state.data_subset_resolved = resolved
+    print(
+        f"[data_subset] {state.dataset}: subset_id={resolved['subset_id']} "
+        f"n_variates={resolved['n_variates']} sample_stride={resolved['sample_stride']} "
+        f"raw_mb={resolved['raw_size_mb']:.3f} reduced_mb={resolved['reduced_size_mb']:.3f} "
+        f"target_mb={resolved.get('target_size_mb')} reason={resolved.get('reason')}"
+    )
     return resolved
 
 
