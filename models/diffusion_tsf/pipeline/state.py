@@ -97,6 +97,8 @@ class PipelineState:
     binary_length_mode: str = "none"
     binary_length_g: float = 1.0
     binary_length_scale: float = 1.0
+    # Optional per-dataset override applied when dataset is known (see patch_globals).
+    binary_length_g_by_dataset: Dict[str, float] = field(default_factory=dict)
     prediction_target: str = "epsilon"
     loss_weighting: str = "none"
     min_snr_gamma: float = 5.0
@@ -239,6 +241,10 @@ class PipelineState:
         if "max_scale_by_dataset" in init_kwargs:
             init_kwargs["max_scale_by_dataset"] = {
                 str(k): float(v) for k, v in init_kwargs["max_scale_by_dataset"].items()
+            }
+        if "binary_length_g_by_dataset" in init_kwargs:
+            init_kwargs["binary_length_g_by_dataset"] = {
+                str(k): float(v) for k, v in (init_kwargs["binary_length_g_by_dataset"] or {}).items()
             }
         if "window_norm_std_floor" in init_kwargs:
             init_kwargs["window_norm_std_floor"] = float(init_kwargs["window_norm_std_floor"])

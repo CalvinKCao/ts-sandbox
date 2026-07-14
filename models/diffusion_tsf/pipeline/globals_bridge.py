@@ -37,6 +37,10 @@ def patch_globals(
     mod.ITRANS_E_LAYERS = state.itrans_e_layers
     mod.ITRANS_N_HEADS = state.itrans_n_heads
     mod.BINARY_NOISE_SCHEDULE = state.binary_noise_schedule
+    # Per-dataset length schedule (e.g. grid winners) overrides the leaf default.
+    by_g = getattr(state, "binary_length_g_by_dataset", None) or {}
+    if state.dataset and state.dataset in by_g:
+        state.binary_length_g = float(by_g[state.dataset])
     mod.BINARY_LENGTH_MODE = getattr(state, "binary_length_mode", "none")
     mod.BINARY_LENGTH_G = float(getattr(state, "binary_length_g", 1.0))
     mod.BINARY_LENGTH_SCALE = float(getattr(state, "binary_length_scale", 1.0))

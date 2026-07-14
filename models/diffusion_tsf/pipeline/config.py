@@ -75,6 +75,7 @@ REQUIRED_EXPERIMENT_KEYS = (
     "binary_length_mode",
     "binary_length_g",
     "binary_length_scale",
+    "binary_length_g_by_dataset",
     "binary_num_steps",
     "binary_beta_start",
     "binary_beta_end",

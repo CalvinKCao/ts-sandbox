@@ -326,6 +326,15 @@ def _suggest_lr_eff_batch_univariate(
         "min_snr_gamma": float(phase_overrides.get("min_snr_gamma", 2.0)),
         "prediction_target": str(phase_overrides.get("prediction_target", "x0")),
         "max_scale": base_ms,
+        "binary_length_mode": str(
+            phase_overrides.get("binary_length_mode", state.binary_length_mode)
+        ),
+        "binary_length_g": float(
+            phase_overrides.get("binary_length_g", state.binary_length_g)
+        ),
+        "binary_length_scale": float(
+            phase_overrides.get("binary_length_scale", state.binary_length_scale)
+        ),
     }
 
 
@@ -748,6 +757,20 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     "  [%s] ignoring unreadable cache %s: %s", self.name, best_pt, e,
                 )
                 return False
+            # Search@N + refit@M: only skip once the long refit has finished.
+            if self.get("refit_best_max_epochs") is not None:
+                try:
+                    with open(meta, encoding="utf-8") as f:
+                        meta_obj = json.load(f)
+                except Exception as e:
+                    logger.warning("  [%s] ignoring unreadable meta %s: %s", self.name, meta, e)
+                    return False
+                if not meta_obj.get("refit_completed"):
+                    logger.info(
+                        "  [%s] search ckpt present but refit_best_max_epochs pending; not skipping",
+                        self.name,
+                    )
+                    return False
             logger.info("  [%s] cached: %s", self.name, best_pt)
             params = None
             try:
@@ -935,6 +958,102 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             use_guidance_channel=state.use_guidance_channel,
             **model_kwargs,
         ).to(device)
+
+    def _inject_length_params(self, params: Dict[str, Any], state: PipelineState) -> Dict[str, Any]:
+        out = dict(params)
+        out.setdefault("binary_length_mode", state.binary_length_mode)
+        out.setdefault("binary_length_g", float(state.binary_length_g))
+        out.setdefault("binary_length_scale", float(state.binary_length_scale))
+        return out
+
+    def _refit_best_if_configured(
+        self,
+        *,
+        state: PipelineState,
+        train_ds,
+        val_ds,
+        best_params: Dict[str, Any],
+        diff_ckpt: str,
+        ft_guidance_ckpt: str,
+        device: torch.device,
+        variate_indices,
+        final_ckpt: str,
+        hp_best_val_loss: float,
+        best_trial_num: int,
+        search_space: str,
+        search_max_epochs: int,
+        search_patience: int,
+        subset_dir: str,
+        subset_id: str,
+        subset_meta: Dict[str, Any],
+        norm_stats: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], float, int, bool]:
+        """Optionally retrain the Optuna winner from pretrain for more epochs.
+
+        Returns (best_params, final_val, final_epoch, refit_completed).
+        """
+        refit_epochs = self.get("refit_best_max_epochs")
+        if refit_epochs is None:
+            return best_params, float(hp_best_val_loss), 0, False
+        refit_epochs = int(refit_epochs)
+        if refit_epochs < 1:
+            raise ValueError(f"refit_best_max_epochs must be >= 1, got {refit_epochs}")
+        if state.smoke_test:
+            refit_epochs = 1
+        refit_patience = int(self.get("refit_best_patience", refit_epochs))
+        if state.smoke_test:
+            refit_patience = 1
+        best_params = _with_state_anchor_params(
+            self._inject_length_params(best_params, state), state,
+        )
+        logger.info(
+            "  [%s] refit_best: search_epochs=%d -> refit_epochs=%d patience=%d "
+            "lr=%.2e g=%s",
+            self.name,
+            search_max_epochs,
+            refit_epochs,
+            refit_patience,
+            float(best_params.get("learning_rate", 0.0)),
+            best_params.get("binary_length_g"),
+        )
+        # Persist search winner before long refit so --resume can skip Optuna.
+        meta_pending: Dict[str, Any] = {
+            "subset_id": subset_id,
+            "dataset_name": state.dataset,
+            "variate_indices": list(variate_indices),
+            "data_subset": subset_meta,
+            "norm_mean": norm_stats["mean"].tolist(),
+            "norm_std": norm_stats["std"].tolist(),
+            "tuned_params": best_params,
+            "best_trial": best_trial_num,
+            "hp_best_val_loss": float(hp_best_val_loss),
+            "best_val_loss": float(hp_best_val_loss),
+            "diffusion_stage": self.stage,
+            "staged_representation": state.staged_representation,
+            "search_space": search_space,
+            "max_epochs": search_max_epochs,
+            "patience": search_patience,
+            "refit_best_max_epochs": refit_epochs,
+            "refit_completed": False,
+        }
+        with open(os.path.join(subset_dir, "metadata.json"), "w", encoding="utf-8") as f:
+            json.dump(meta_pending, f, indent=2, sort_keys=True)
+
+        final_val, final_epoch = self._train_once(
+            state=state,
+            train_ds=train_ds,
+            val_ds=val_ds,
+            params=best_params,
+            pretrained_path=diff_ckpt,
+            guidance_checkpoint=ft_guidance_ckpt,
+            device=device,
+            variate_indices=variate_indices,
+            ckpt_path=final_ckpt,
+            max_epochs=refit_epochs,
+            patience=refit_patience,
+            trial=None,
+        )
+        return best_params, float(final_val), int(final_epoch), True
 
     def _train_once(
         self,
@@ -1381,6 +1500,40 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         final_val = float("nan")
         final_epoch = 0
         search_space = "lr_only"
+        refit_completed = False
+        pending_refit = False
+        best_params: Dict[str, Any] = {}
+        meta_path = os.path.join(subset_dir, "metadata.json")
+
+        if (
+            not reuse_from
+            and self.get("refit_best_max_epochs") is not None
+            and os.path.isfile(final_ckpt)
+            and os.path.isfile(meta_path)
+        ):
+            try:
+                with open(meta_path, encoding="utf-8") as f:
+                    prev_meta = json.load(f)
+            except Exception as e:
+                prev_meta = {}
+                logger.warning("  [%s] could not read %s for pending refit: %s", self.name, meta_path, e)
+            if prev_meta.get("tuned_params") and not prev_meta.get("refit_completed"):
+                best_params = dict(prev_meta["tuned_params"])
+                hp_best_val_loss = float(
+                    prev_meta.get("hp_best_val_loss")
+                    or prev_meta.get("best_val_loss")
+                    or float("nan")
+                )
+                best_trial_num = int(prev_meta.get("best_trial", -1))
+                search_space = str(
+                    prev_meta.get("search_space") or self.get("search_space") or "lr_only"
+                ).lower()
+                pending_refit = True
+                logger.info(
+                    "  [%s] resuming pending refit (search already done, trial=%d)",
+                    self.name,
+                    best_trial_num,
+                )
 
         if reuse_from:
             best_params, source_dir, reuse_meta = _load_reused_stage_params(
@@ -1428,6 +1581,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 final_val = hp_best_val_loss
                 final_epoch = int(reuse_meta.get("best_epoch", 0))
                 logger.info("  [%s] reused %s from %s", self.name, self.stage, source_dir)
+        elif pending_refit:
+            logger.info("  [%s] skipping Optuna; using cached search winner for refit", self.name)
         else:
             n_trials = int(self.require("n_trials"))
             if state.smoke_test:
@@ -1661,6 +1816,30 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 final_val = hp_best_val_loss
                 _cleanup_trial_ckpts(trials_dir, subset_dir, keep=src)
 
+        if not reuse_from and self.get("refit_best_max_epochs") is not None:
+            if hp_best_val_loss is None:
+                raise RuntimeError(f"{self.name}: refit_best_max_epochs set but no HP winner available")
+            best_params, final_val, final_epoch, refit_completed = self._refit_best_if_configured(
+                state=state,
+                train_ds=train_ds,
+                val_ds=val_ds,
+                best_params=best_params,
+                diff_ckpt=diff_ckpt,
+                ft_guidance_ckpt=ft_guidance_ckpt,
+                device=device,
+                variate_indices=variate_indices,
+                final_ckpt=final_ckpt,
+                hp_best_val_loss=float(hp_best_val_loss),
+                best_trial_num=best_trial_num,
+                search_space=search_space,
+                search_max_epochs=max_epochs,
+                search_patience=patience,
+                subset_dir=subset_dir,
+                subset_id=subset_id,
+                subset_meta=subset_meta,
+                norm_stats=norm_stats,
+            )
+
         meta_out: Dict[str, Any] = {
             "subset_id": subset_id,
             "dataset_name": state.dataset,
@@ -1676,9 +1855,22 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "diffusion_stage": self.stage,
             "staged_representation": state.staged_representation,
             "search_space": search_space,
-            "max_epochs": max_epochs,
-            "patience": patience,
+            "max_epochs": (
+                int(self.get("refit_best_max_epochs"))
+                if refit_completed
+                else max_epochs
+            ),
+            "patience": (
+                int(self.get("refit_best_patience", self.get("refit_best_max_epochs")))
+                if refit_completed
+                else patience
+            ),
+            "search_max_epochs": max_epochs,
+            "search_patience": patience,
         }
+        if self.get("refit_best_max_epochs") is not None:
+            meta_out["refit_best_max_epochs"] = int(self.get("refit_best_max_epochs"))
+            meta_out["refit_completed"] = bool(refit_completed)
         if reuse_from:
             meta_out.update({
                 "reuse_tuned_params_from": str(reuse_from),
@@ -1715,6 +1907,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 "target_univariate_batch"
             ),
             f"hp/{self.stage}_diff_ft_max_scale": best_params.get("max_scale"),
+            f"hp/{self.stage}_diff_ft_refit_completed": bool(refit_completed),
+            f"hp/{self.stage}_diff_ft_binary_length_g": best_params.get("binary_length_g"),
         })
 
         self._log_post_finetune_viz_and_diagnostics(
