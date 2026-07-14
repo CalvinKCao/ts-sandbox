@@ -1,0 +1,224 @@
+#!/bin/bash
+# Univariate binary-vs-MMPD discriminator shards (one model per dataset).
+#
+# Same fair protocol as the texture disc campaign, but each example is a
+# single-variate L-patch and the label is binary_staged vs mmpd.
+#
+# Login-node usage:
+#   ./slurm_discriminator_binary_vs_mmpd_univariate.sh --datasets ETTh1,traffic,electricity,exchange_rate ...
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+DATASETS=(ETTh1 traffic electricity exchange_rate)
+DATASET=""
+SMOKE=0
+FORCE_RAW=0
+FORCE_TRAIN=0
+WALL_OVERRIDE=""
+SLICE_LENGTHS="8 16 32"
+PACK_SPLITS=""
+PACK_FRACTION=""
+ANCHOR_CONFIG=""
+ANCHOR_CONFIG_BY_DATASET=""
+BINARY_CONFIG=""
+BINARY_CONFIG_BY_DATASET=""
+MMPD_OUTPUT_SUFFIX="results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset"
+DISC_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-binary-vs-mmpd-univariate"
+RAW_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-raw-trainval25"
+LOOKBACK=336
+HORIZON=720
+TEST_STRIDE=1
+MMPD_BACKBONE=Decoder
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --datasets)
+            IFS=',' read -r -a DATASETS <<< "$2"
+            shift 2
+            ;;
+        --dataset) DATASET="$2"; shift 2 ;;
+        --smoke-test) SMOKE=1; shift ;;
+        --force-raw-eval) FORCE_RAW=1; shift ;;
+        --force-train) FORCE_TRAIN=1; shift ;;
+        --time) WALL_OVERRIDE="$2"; shift 2 ;;
+        --slice-lengths) SLICE_LENGTHS="$2"; shift 2 ;;
+        --pack-splits) PACK_SPLITS="$2"; shift 2 ;;
+        --pack-fraction) PACK_FRACTION="$2"; shift 2 ;;
+        --anchor-config) ANCHOR_CONFIG="$2"; shift 2 ;;
+        --anchor-config-by-dataset) ANCHOR_CONFIG_BY_DATASET="$2"; shift 2 ;;
+        --binary-config) BINARY_CONFIG="$2"; shift 2 ;;
+        --binary-config-by-dataset) BINARY_CONFIG_BY_DATASET="$2"; shift 2 ;;
+        --mmpd-run) MMPD_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
+        --disc-run) DISC_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
+        --raw-run) RAW_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
+        --lookback) LOOKBACK="$2"; shift 2 ;;
+        --horizon) HORIZON="$2"; shift 2 ;;
+        --test-stride) TEST_STRIDE="$2"; shift 2 ;;
+        --mmpd-backbone) MMPD_BACKBONE="$2"; shift 2 ;;
+        --merge-partials-only) MERGE_PARTIALS=1; shift ;;
+        *)
+            echo "Unknown arg: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+MERGE_PARTIALS="${MERGE_PARTIALS:-0}"
+
+if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+    if [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
+        REPO="${SCRATCH}/ts-sandbox"
+    elif [[ -d "$HOME/ts-sandbox" ]]; then
+        REPO="$HOME/ts-sandbox"
+    else
+        REPO="$SCRIPT_DIR"
+    fi
+    if [[ "$REPO" == /home/* ]]; then
+        echo "ERROR: submit from \$SCRATCH/ts-sandbox on Killarney, not /home." >&2
+        exit 1
+    fi
+    cd "$REPO"
+    mkdir -p results/logs
+
+    if [[ "$MERGE_PARTIALS" -eq 1 ]]; then
+        sbatch \
+            --job-name=disc-uni-merge \
+            --account=aip-boyuwang \
+            --nodes=1 --cpus-per-task=2 --mem=4G --time=0:15:00 \
+            --output=results/logs/disc-uni-merge-%j.log \
+            --error=results/logs/disc-uni-merge-%j.log \
+            --mail-type=FAIL --mail-user=ccao87@uwo.ca \
+            --export=ALL,MERGE_PARTIALS=1,DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX" \
+            "$SCRIPT_DIR/slurm_discriminator_binary_vs_mmpd_univariate.sh"
+        exit 0
+    fi
+
+    WALL="1:00:00"
+    [[ "$SMOKE" -eq 1 ]] && WALL="0:30:00"
+    [[ -n "$WALL_OVERRIDE" ]] && WALL="$WALL_OVERRIDE"
+
+    SUBMIT_DATASETS=("${DATASETS[@]}")
+    [[ -n "$DATASET" ]] && SUBMIT_DATASETS=("$DATASET")
+    [[ "$SMOKE" -eq 1 && -z "$DATASET" ]] && SUBMIT_DATASETS=(ETTh1)
+
+    JOB_IDS=()
+    for ds in "${SUBMIT_DATASETS[@]}"; do
+        echo "Submitting univariate binary-vs-mmpd disc for $ds (L40S, wall=$WALL)..."
+        job_id="$(sbatch --parsable \
+            --job-name="disc-uni-${ds}" \
+            --account=aip-boyuwang \
+            --nodes=1 \
+            --gres=gpu:l40s:1 \
+            --cpus-per-task=8 \
+            --mem=50G \
+            --time="$WALL" \
+            --output="results/logs/disc-uni-${ds}-%j.log" \
+            --error="results/logs/disc-uni-${ds}-%j.log" \
+            --mail-type=END,FAIL \
+            --mail-user=ccao87@uwo.ca \
+            --export=ALL,DATASET="$ds",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$SLICE_LENGTHS",PACK_SPLITS="$PACK_SPLITS",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$ANCHOR_CONFIG_BY_DATASET",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$BINARY_CONFIG_BY_DATASET",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE" \
+            "$SCRIPT_DIR/slurm_discriminator_binary_vs_mmpd_univariate.sh")"
+        JOB_IDS+=("$job_id")
+        echo "  -> job $job_id"
+    done
+
+    dep=$(IFS=:; echo "${JOB_IDS[*]}")
+    echo "Submitting merge after ${dep}..."
+    sbatch \
+        --job-name=disc-uni-merge \
+        --account=aip-boyuwang \
+        --nodes=1 --cpus-per-task=2 --mem=4G --time=0:15:00 \
+        --dependency=afterok:${dep} \
+        --output=results/logs/disc-uni-merge-%j.log \
+        --error=results/logs/disc-uni-merge-%j.log \
+        --mail-type=FAIL --mail-user=ccao87@uwo.ca \
+        --export=ALL,MERGE_PARTIALS=1,DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX" \
+        "$SCRIPT_DIR/slurm_discriminator_binary_vs_mmpd_univariate.sh"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Inside the job
+# ---------------------------------------------------------------------------
+if [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
+    REPO="${SCRATCH}/ts-sandbox"
+elif [[ -d "$HOME/ts-sandbox" ]]; then
+    REPO="$HOME/ts-sandbox"
+else
+    REPO="$SCRIPT_DIR"
+fi
+cd "$REPO"
+
+DISC_OUTPUT_SUFFIX="${DISC_OUTPUT_SUFFIX:-results/datasets/disc-lb336-hz720-ordinal-four-binary-vs-mmpd-univariate}"
+RAW_OUTPUT_SUFFIX="${RAW_OUTPUT_SUFFIX:-results/datasets/disc-lb336-hz720-ordinal-four-raw-trainval25}"
+MMPD_OUTPUT_SUFFIX="${MMPD_OUTPUT_SUFFIX:-results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset}"
+OUTPUT_DIR="$REPO/$DISC_OUTPUT_SUFFIX"
+RAW_EVAL_DIR="$REPO/$RAW_OUTPUT_SUFFIX"
+MMPD_ROOT="$REPO/$MMPD_OUTPUT_SUFFIX"
+
+REQ="$REPO/setup/requirements-killarney.txt"
+[[ -f "$REQ" ]] || { echo "ERROR: missing $REQ"; exit 1; }
+[[ -n "${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR unset"; exit 1; }
+
+module purge 2>/dev/null || true
+module load StdEnv/2023 python/3.11 2>/dev/null || true
+if [[ "${MERGE_PARTIALS:-0}" -ne 1 ]]; then
+    module load cuda/12.2 cudnn/8.9 2>/dev/null || true
+fi
+virtualenv --no-download "$SLURM_TMPDIR/env"
+# shellcheck source=/dev/null
+source "$SLURM_TMPDIR/env/bin/activate"
+export PYTHON="$SLURM_TMPDIR/env/bin/python"
+pip install --no-index --upgrade pip -q
+pip install --no-index -r "$REQ" -q
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
+
+if [[ "${MERGE_PARTIALS:-0}" -eq 1 ]]; then
+    "$PYTHON" -u "$REPO/utils/eval_discriminator_binary_vs_mmpd_univariate.py" \
+        --merge-partials-only \
+        --output-dir "$OUTPUT_DIR" \
+        --raw-eval-dir "$RAW_EVAL_DIR"
+    exit 0
+fi
+
+"$PYTHON" -c "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
+
+EVAL_ARGS=(
+    --datasets "${DATASET}"
+    --fake-sources binary_staged mmpd
+    --slice-lengths ${SLICE_LENGTHS}
+    --output-dir "$OUTPUT_DIR"
+    --raw-eval-dir "$RAW_EVAL_DIR"
+    --mmpd-output-root "$MMPD_ROOT"
+    --mmpd-backbone "${MMPD_BACKBONE:-Decoder}"
+    --lookback "${LOOKBACK:-336}"
+    --horizon "${HORIZON:-720}"
+    --test-stride "${TEST_STRIDE:-1}"
+    --candidate-only
+    --nonoverlapping-patches
+    --no-offset-embedding
+    --mmpd-ordinal-quantize
+    --save-checkpoints
+    --no-merge-metrics
+)
+
+[[ -n "${ANCHOR_CONFIG:-}" ]] && EVAL_ARGS+=(--anchor-config "$ANCHOR_CONFIG")
+[[ -n "${BINARY_CONFIG:-}" ]] && EVAL_ARGS+=(--binary-config "$BINARY_CONFIG")
+[[ -n "${ANCHOR_CONFIG_BY_DATASET:-}" ]] && EVAL_ARGS+=(--anchor-config-by-dataset "$ANCHOR_CONFIG_BY_DATASET")
+[[ -n "${BINARY_CONFIG_BY_DATASET:-}" ]] && EVAL_ARGS+=(--binary-config-by-dataset "$BINARY_CONFIG_BY_DATASET")
+[[ -n "${PACK_SPLITS:-}" ]] && EVAL_ARGS+=(--pack-splits "$PACK_SPLITS")
+[[ -n "${PACK_FRACTION:-}" ]] && EVAL_ARGS+=(--pack-fraction "$PACK_FRACTION")
+[[ "${FORCE_RAW:-0}" -eq 1 ]] && EVAL_ARGS+=(--force-raw-eval)
+[[ "${FORCE_TRAIN:-0}" -eq 1 ]] && EVAL_ARGS+=(--force-train)
+[[ "${SMOKE:-0}" -eq 1 ]] && EVAL_ARGS+=(--smoke-test)
+if [[ -n "${DISC_NATIVE_REPR_STRIDE:-}" ]]; then
+    EVAL_ARGS+=(--native-repr-stride "$DISC_NATIVE_REPR_STRIDE")
+fi
+
+echo "[run] ${EVAL_ARGS[*]}"
+"$PYTHON" -u "$REPO/utils/eval_discriminator_binary_vs_mmpd_univariate.py" "${EVAL_ARGS[@]}"
+echo "Done: $(date)"
