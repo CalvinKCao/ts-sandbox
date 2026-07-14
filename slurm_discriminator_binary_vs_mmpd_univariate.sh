@@ -31,13 +31,15 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     BINARY_CONFIG=""
     BINARY_CONFIG_BY_DATASET=""
     MMPD_OUTPUT_SUFFIX="results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset"
-    DISC_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-patch-only-fair-univariate"
+    DISC_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-patch-only-fair-univariate-bin16"
     RAW_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-raw-trainval25"
     LOOKBACK=336
     HORIZON=720
     TEST_STRIDE=1
     MMPD_BACKBONE=Decoder
     MERGE_PARTIALS=0
+    # Snap GT+binary+MMPD through dual-scale 16x16 lattice (not ordinal ladder).
+    BIN_MATCH_FILTER="all"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -69,6 +71,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --horizon) HORIZON="$2"; shift 2 ;;
             --test-stride) TEST_STRIDE="$2"; shift 2 ;;
             --mmpd-backbone) MMPD_BACKBONE="$2"; shift 2 ;;
+            --bin-match-filter) BIN_MATCH_FILTER="$2"; shift 2 ;;
             --merge-partials-only) MERGE_PARTIALS=1; shift ;;
             *)
                 echo "Unknown arg: $1" >&2
@@ -135,7 +138,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
                 --error="results/logs/disc-uni-${ds}-${src}-%j.log" \
                 --mail-type=END,FAIL \
                 --mail-user=ccao87@uwo.ca \
-                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$(slurm_encode "$SLICE_LENGTHS")",PACK_SPLITS="$(slurm_encode "$PACK_SPLITS")",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$(slurm_encode "$ANCHOR_CONFIG_BY_DATASET")",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$(slurm_encode "$BINARY_CONFIG_BY_DATASET")",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE",MERGE_PARTIALS=0 \
+                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$(slurm_encode "$SLICE_LENGTHS")",PACK_SPLITS="$(slurm_encode "$PACK_SPLITS")",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$(slurm_encode "$ANCHOR_CONFIG_BY_DATASET")",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$(slurm_encode "$BINARY_CONFIG_BY_DATASET")",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",MERGE_PARTIALS=0 \
                 "$SCRIPT_DIR/slurm_discriminator_binary_vs_mmpd_univariate.sh")"
             JOB_IDS+=("$job_id")
             echo "  -> job $job_id"
@@ -175,9 +178,10 @@ BINARY_CONFIG_BY_DATASET="$(slurm_decode "${BINARY_CONFIG_BY_DATASET:-}")"
 PACK_SPLITS="$(slurm_decode "${PACK_SPLITS:-}")"
 SLICE_LENGTHS="$(slurm_decode "${SLICE_LENGTHS:-8;16;32}")"
 
-DISC_OUTPUT_SUFFIX="${DISC_OUTPUT_SUFFIX:-results/datasets/disc-lb336-hz720-ordinal-four-patch-only-fair-univariate}"
+DISC_OUTPUT_SUFFIX="${DISC_OUTPUT_SUFFIX:-results/datasets/disc-lb336-hz720-ordinal-four-patch-only-fair-univariate-bin16}"
 RAW_OUTPUT_SUFFIX="${RAW_OUTPUT_SUFFIX:-results/datasets/disc-lb336-hz720-ordinal-four-raw-trainval25}"
 MMPD_OUTPUT_SUFFIX="${MMPD_OUTPUT_SUFFIX:-results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset}"
+BIN_MATCH_FILTER="${BIN_MATCH_FILTER:-all}"
 OUTPUT_DIR="$REPO/$DISC_OUTPUT_SUFFIX"
 RAW_EVAL_DIR="$REPO/$RAW_OUTPUT_SUFFIX"
 MMPD_ROOT="$REPO/$MMPD_OUTPUT_SUFFIX"
@@ -237,7 +241,11 @@ EVAL_ARGS=(
     --candidate-only
     --nonoverlapping-patches
     --no-offset-embedding
-    --mmpd-ordinal-quantize
+    --no-mmpd-ordinal-quantize
+    --bin-match-filter "$BIN_MATCH_FILTER"
+    --bin-image-height 16
+    --bin-coarse-height 16
+    --bin-fine-height 16
     --save-checkpoints
     --no-merge-metrics
 )
@@ -256,6 +264,7 @@ if [[ -n "${DISC_NATIVE_REPR_STRIDE:-}" ]]; then
 fi
 
 echo "[env] DATASET=$DATASET FAKE_SOURCE=$FAKE_SOURCE SMOKE=${SMOKE:-0} FORCE_TRAIN=${FORCE_TRAIN:-0}"
+echo "[env] BIN_MATCH_FILTER=$BIN_MATCH_FILTER (16x16 dual-scale; ordinal ladder OFF)"
 echo "[env] ANCHOR_CONFIG_BY_DATASET=${ANCHOR_CONFIG_BY_DATASET:-}"
 echo "[env] PACK_SPLITS=${PACK_SPLITS:-} PACK_FRACTION=${PACK_FRACTION:-}"
 echo "[env] SLICE_LENGTHS=${SLICE_ARR[*]}"

@@ -1,8 +1,8 @@
 #!/bin/bash
-# Fair univariate real-vs-fake discriminator (binary vs GT, MMPD vs GT).
+# Fair univariate real-vs-fake disc with 16x16 dual-scale bin-match (not ordinal ladder).
 #
-# One model per (dataset, fake_source, L); each example is a single-variate
-# L patch pooled across all variates. Reuses trainval25 raw packs.
+# Snap GT + binary + MMPD through encode_dual/decode_dual (H=16 coarse/fine) so
+# MMPD lives on the same lattice as decoded binary preds.
 #
 # USAGE (Killarney login, $SCRATCH/ts-sandbox):
 #   ./temp/submit_discriminator_binary_vs_mmpd_univariate_fair_killarney.sh --smoke-test
@@ -30,7 +30,8 @@ exec "$REPO_ROOT/slurm_discriminator_binary_vs_mmpd_univariate.sh" \
     --pack-splits train,val \
     --pack-fraction 0.25 \
     --force-train \
-    --disc-run disc-lb336-hz720-ordinal-four-patch-only-fair-univariate \
+    --bin-match-filter all \
+    --disc-run disc-lb336-hz720-ordinal-four-patch-only-fair-univariate-bin16 \
     --raw-run disc-lb336-hz720-ordinal-four-raw-trainval25 \
     --time 2:00:00 \
     "$@"

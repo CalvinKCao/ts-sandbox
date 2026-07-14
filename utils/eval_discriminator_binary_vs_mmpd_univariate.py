@@ -52,7 +52,8 @@ from utils.eval_trend_robust_texture_staged_vs_mmpd import (  # noqa: E402
 )
 
 DEFAULT_OUTPUT = (
-    DEFAULT_DISC_OUTPUT.parent / "disc-lb336-hz720-ordinal-four-patch-only-fair-univariate"
+    DEFAULT_DISC_OUTPUT.parent
+    / "disc-lb336-hz720-ordinal-four-patch-only-fair-univariate-bin16"
 )
 
 
