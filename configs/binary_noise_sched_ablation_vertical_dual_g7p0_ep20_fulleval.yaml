@@ -1,0 +1,51 @@
+# Fair control vs full mid-HP g7 campaign:
+# same recipe as short g7 ablation (reuse g1 pretrain + fixed LR 2.41e-4 + micro_bs=8),
+# but max_epochs=20 and eval_test_fraction=1.0.
+extends: configs/binary_noise_sched_ablation_vertical_dual_g7p0.yaml
+
+wandb:
+  tags: [noise_sched_ablation, vertical_dual, uncompressed, g7p0, control, g1_pretrain, ep20, fulleval]
+
+experiment:
+  name: binary-noise-sched-ablation-vertical-dual-g7p0-ep20-fulleval
+  experiment_name: binary_noise_sched_ablation_vertical_dual_g7p0_ep20_fulleval
+
+# Lock micro-batch to the ablation's observed bs=8 (parent mid ceiling is 2048).
+training:
+  diffusion_batch_size: 8
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: binary_noise_sched_ablation_vertical_dual_g1p0
+
+  - phase: patch_guidance_finetune_hp
+    reuse_checkpoint_from_config: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed
+
+  - phase: diffusion_vertical_dual_finetune_hp
+    n_trials: 1
+    max_epochs: 20
+    patience: 20
+    search_space: fixed
+    fixed_tuned_params:
+      learning_rate: 2.41e-4
+      ema_decay: 0.995
+      prediction_target: x0
+      loss_weighting: min_snr
+      min_snr_gamma: 2.0
+      binary_noise_schedule: linear
+      binary_length_mode: power
+      binary_length_g: 7.0
+      binary_length_scale: 1.0
+
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 4
+    n_samples: 1
+    probabilistic_n_samples: 20
+    tune_sampler: false
+    probabilistic_sampler: dpmpp
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: false
