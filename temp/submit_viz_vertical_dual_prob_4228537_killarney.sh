@@ -3,15 +3,23 @@
 # Offline dpmpp sample viz for electricity ep20 g7 control ckpt (job 4228537).
 #
 # USAGE (Killarney login, repo = $SCRATCH/ts-sandbox):
-#   git pull   # need temp/viz_vertical_dual_prob_samples_4228537.py
+#   cd "$SCRATCH/ts-sandbox" && git pull
 #   ./temp/submit_viz_vertical_dual_prob_4228537_killarney.sh
 #   ./temp/submit_viz_vertical_dual_prob_4228537_killarney.sh --n-windows 4 --n-samples 8 --steps 20
 # =============================================================================
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Prefer scratch checkout — sbatch copies the script into Spool, so
+# BASH_SOURCE is unreliable on the compute node.
+if [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
+    REPO="$SCRATCH/ts-sandbox"
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "$SLURM_SUBMIT_DIR/temp/viz_vertical_dual_prob_samples_4228537.py" ]]; then
+    REPO="$SLURM_SUBMIT_DIR"
+else
+    REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+SCRIPT_DIR="$REPO/temp"
 
 RUN="${VIZ_RUN:-07-13-4228537-electricity-binary_noise_sched_ablation_vertical_dual_g7p0_ep20_fulleval}"
 VIZ_PY="temp/viz_vertical_dual_prob_samples_4228537.py"
@@ -24,9 +32,11 @@ fi
 # Login node → sbatch L40S
 # ---------------------------------------------------------------------------
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+    cd "$REPO"
     mkdir -p "$REPO/results/logs"
-    echo "Submitting viz job (L40S, 1h) for run=$RUN ..."
+    echo "Submitting viz job (L40S, 1h) from $REPO run=$RUN ..."
     sbatch \
+        --chdir="$REPO" \
         --job-name="viz-vd-prob-4228537" \
         --account=aip-boyuwang \
         --time=1:00:00 \
@@ -46,7 +56,8 @@ fi
 # Compute node
 # ---------------------------------------------------------------------------
 ts() { date +'%d-%H:%M:%S'; }
-echo "$(ts) Job=$SLURM_JOB_ID node=${SLURMD_NODENAME:-?} GPU=$(nvidia-smi -L 2>/dev/null | head -1 || echo unknown)"
+echo "$(ts) Job=$SLURM_JOB_ID node=${SLURMD_NODENAME:-?} REPO=$REPO"
+echo "$(ts) GPU=$(nvidia-smi -L 2>/dev/null | head -1 || echo unknown)"
 
 REQ="$REPO/setup/requirements-killarney.txt"
 [[ -f "$REQ" ]] || { echo "ERROR: missing $REQ"; exit 1; }
