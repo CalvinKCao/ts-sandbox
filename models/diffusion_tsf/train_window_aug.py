@@ -274,22 +274,45 @@ def aug_linear_trend(
     vi: int,
     rng: np.random.Generator,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    spacing = _bin_spacing(ladder, vi)
+    """Add/subtract a linear ramp across lookback+horizon, clamped to ladder envelope.
+
+    Amplitude is a fraction of the per-variate z-score span (not raw bin spacing),
+    otherwise high-cardinality ordinal ladders make the ramp invisible.
+    """
     lo, hi = _envelope_for_variate(ladder, vi)
+    span = max(hi - lo, 1e-6)
     full = _join_past_future(past, future, overlap)
-    x = full[vi]
+    x = full[vi].astype(np.float64, copy=False)
     n = len(x)
-    amp = float(rng.uniform(1.5, 4.0) * spacing) * float(rng.choice([-1.0, 1.0]))
     t = np.linspace(-0.5, 0.5, n)
+
+    # Max |amp| such that x + amp*t stays inside [lo, hi] for all t.
+    # amp*t <= hi-x  and amp*t >= lo-x  for every i.
+    max_pos = np.inf
+    max_neg = np.inf
+    for ti, xi in zip(t, x):
+        if abs(ti) < 1e-12:
+            continue
+        if ti > 0:
+            max_pos = min(max_pos, (hi - xi) / ti)
+            max_neg = min(max_neg, (xi - lo) / ti)
+        else:
+            max_pos = min(max_pos, (xi - lo) / (-ti))
+            max_neg = min(max_neg, (hi - xi) / (-ti))
+    max_pos = float(max(0.0, max_pos if np.isfinite(max_pos) else 0.0))
+    max_neg = float(max(0.0, max_neg if np.isfinite(max_neg) else 0.0))
+
+    sign = float(rng.choice([-1.0, 1.0]))
+    room = max_pos if sign > 0 else max_neg
+    # Target ~12–40% of envelope peak-to-peak; fall back to whatever fits.
+    target = float(rng.uniform(0.12, 0.40) * span)
+    amp = sign * min(target, room)
+    if abs(amp) < 1e-8:
+        # Series already hugs both bounds; nudge with a smaller centered ramp if possible.
+        amp = sign * min(0.05 * span, max(max_pos, max_neg, 0.0))
+
     y = x + amp * t
-    # scale trend down if clamp would flatten ends
-    for _ in range(4):
-        yc = _clamp(y, lo, hi)
-        if np.allclose(yc, y, atol=1e-5):
-            break
-        amp *= 0.5
-        y = x + amp * t
-    full[vi] = _clamp(y, lo, hi)
+    full[vi] = _clamp(y, lo, hi).astype(np.float32)
     return _split_full(full, past.shape[-1], overlap)
 
 
