@@ -106,6 +106,9 @@ def patch_globals(
     mod.LR_WARMUP_EPOCHS = int(training_value(state, "lr_warmup_epochs", 0))
     mod.MAX_SCALE_TUNING = bool(training_value(state, "max_scale_tuning", False))
     mod.MAX_SCALE_TUNING_RANGE = training_value(state, "max_scale_tuning_range", [2.5, 14.0])
+    aug_cfg = training_value(state, "train_window_aug", None)
+    mod.TRAIN_WINDOW_AUG = dict(aug_cfg) if isinstance(aug_cfg, dict) else {}
+    mod.PIPELINE_SEED = int(state.seed)
     if state.checkpoint_dir:
         mod.CHECKPOINT_DIR = state.checkpoint_dir
     if state.results_dir:

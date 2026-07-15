@@ -616,13 +616,55 @@ def _build_fixed_hp_params(
     phase_overrides: Dict[str, Any],
 ) -> Dict[str, Any]:
     fixed = dict(phase_overrides.get("fixed_tuned_params") or {})
+    by_ds = phase_overrides.get("fixed_tuned_params_by_dataset") or {}
+    if isinstance(by_ds, dict) and state.dataset in by_ds:
+        fixed.update(dict(by_ds[state.dataset] or {}))
+    if not fixed and not by_ds:
+        raise ValueError(
+            "search_space=fixed requires fixed_tuned_params "
+            "(and/or fixed_tuned_params_by_dataset) in phase YAML"
+        )
     if not fixed:
-        raise ValueError("search_space=fixed requires fixed_tuned_params in phase YAML")
+        raise ValueError(
+            f"search_space=fixed: no fixed_tuned_params for dataset={state.dataset!r}"
+        )
     params = dict(fixed)
     params.setdefault(
         "max_scale",
         float(state.max_scale_by_dataset.get(state.dataset, state.max_scale)),
     )
+
+    target_u = params.pop("target_univariate_batch", None)
+    if target_u is None:
+        target_u = params.pop("effective_univariate_batch", None)
+    if target_u is not None:
+        batch_plan = _plan_univariate_effective_batch(
+            probed_max_windows=max_batch_size,
+            n_variates=_n_variates_for_batch(state),
+            target_univariate=int(target_u),
+            smoke_test=smoke_test,
+        )
+        params.update(batch_plan)
+        if smoke_test:
+            params["batch_size"] = min(int(params.get("batch_size", 1)), 2)
+            params["gradient_accumulation_steps"] = 1
+            params["effective_batch_size"] = int(params["batch_size"])
+            params["effective_univariate_batch"] = (
+                int(params["batch_size"]) * _n_variates_for_batch(state)
+            )
+        return params
+
+    if "batch_size" in params:
+        micro = max(1, int(params["batch_size"]))
+        accum = max(1, int(params.get("gradient_accumulation_steps", 1)))
+        if smoke_test:
+            micro = min(micro, 2)
+            accum = 1
+        params["batch_size"] = micro
+        params["gradient_accumulation_steps"] = accum
+        params["effective_batch_size"] = micro * accum
+        return params
+
     if smoke_test:
         params["batch_size"] = min(int(params.get("batch_size", 1)), 2)
         params["gradient_accumulation_steps"] = 1
@@ -1177,6 +1219,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
             for epoch in range(max_epochs):
                 epoch_start = time.perf_counter()
+                from models.diffusion_tsf.train_window_aug import set_train_window_aug_epoch
+
+                set_train_window_aug_epoch(train_loader, epoch)
                 logger.info(
                     "  [%s/%s] %s epoch %d/%d train_start",
                     self.name, self.stage, trial_label, epoch + 1, max_epochs,
@@ -1404,6 +1449,18 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         )
         if norm_stats.get("ordinal_ladder") is not None:
             state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
+        from models.diffusion_tsf.pipeline.config import training_value
+        from models.diffusion_tsf.train_window_aug import maybe_wrap_train_window_aug
+
+        aug_cfg = training_value(state, "train_window_aug", None) or {}
+        train_ds = maybe_wrap_train_window_aug(
+            train_ds,
+            enabled=bool(aug_cfg.get("enabled", False)),
+            apply_prob=float(aug_cfg.get("apply_prob", 0.5)),
+            seed=int(state.seed),
+            ladder=norm_stats.get("ordinal_ladder"),
+            acf_threshold=float(aug_cfg.get("acf_threshold", 0.35)),
+        )
         if state.smoke_test:
             train_ds = Subset(train_ds, list(range(min(4, len(train_ds)))))
             val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
@@ -1607,8 +1664,13 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         raise ValueError(
                             f"search_space=lr_eff_batch_univariate requires phase {key}"
                         )
-            if search_space == "fixed" and not self.get("fixed_tuned_params"):
-                raise ValueError("search_space=fixed requires fixed_tuned_params in phase YAML")
+            if search_space == "fixed" and not (
+                self.get("fixed_tuned_params") or self.get("fixed_tuned_params_by_dataset")
+            ):
+                raise ValueError(
+                    "search_space=fixed requires fixed_tuned_params "
+                    "and/or fixed_tuned_params_by_dataset in phase YAML"
+                )
 
             if search_space == "fixed":
                 best_params = _build_fixed_hp_params(

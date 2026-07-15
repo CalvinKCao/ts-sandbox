@@ -310,6 +310,8 @@ DIFFUSION_TYPE = "binary"
 USE_ORDINAL_WINDOW_NORM = False
 ORDINAL_TIE_ATOL = 1e-6
 GLOBAL_ORDINAL_LADDER = None
+TRAIN_WINDOW_AUG = {}
+PIPELINE_SEED = 42
 DIT_PATCH_SIZE = (8, 8)
 DIT_EMBED_DIM = 384
 DIT_DEPTH = 8
@@ -687,6 +689,14 @@ def train_patch_guidance_epoch(stack, loader, optimizer, device, scheduler=None)
     total_loss = 0.0
     n_batches = 0
     data_is_ranked = _dataset_yields_ordinal_ranks(loader.dataset)
+    from models.diffusion_tsf.train_window_aug import set_train_window_aug_epoch
+
+    # Epoch counter lives on the dataset; bump once per call (one epoch).
+    ds = loader.dataset
+    while hasattr(ds, "dataset") and not hasattr(ds, "set_epoch"):
+        ds = ds.dataset
+    if hasattr(ds, "set_epoch"):
+        set_train_window_aug_epoch(loader, int(getattr(ds, "_epoch", 0)) + 1)
     for past, future in loader:
         past_norm, y_true = _patch_guidance_batch(
             past, future, device, data_is_ranked=data_is_ranked,
@@ -818,10 +828,24 @@ def run_patch_guidance_finetune_hp_tuning(
     )
     logger.info("=" * 60)
 
-    train_ds, val_ds, _, _ = load_dataset(
+    train_ds, val_ds, _, norm_stats = load_dataset(
         dataset_name, variate_indices,
         stride=train_stride or WINDOW_STRIDE,
         test_stride=1 if test_stride is None else test_stride,
+    )
+    from models.diffusion_tsf.train_window_aug import maybe_wrap_train_window_aug
+
+    aug_cfg = globals().get("TRAIN_WINDOW_AUG") or {}
+    if not isinstance(aug_cfg, dict):
+        aug_cfg = {}
+    # Prefer patched pipeline globals when present (set via training.train_window_aug).
+    train_ds = maybe_wrap_train_window_aug(
+        train_ds,
+        enabled=bool(aug_cfg.get("enabled", False)),
+        apply_prob=float(aug_cfg.get("apply_prob", 0.5)),
+        seed=int(globals().get("PIPELINE_SEED", 42)),
+        ladder=norm_stats.get("ordinal_ladder"),
+        acf_threshold=float(aug_cfg.get("acf_threshold", 0.35)),
     )
     if smoke_test:
         train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
