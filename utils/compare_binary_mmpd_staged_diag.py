@@ -902,6 +902,14 @@ def _assert_horizon_aligned(
         raise ValueError(f"{name}: lag-0 corr={corr:.4f} < {min_corr} (likely time shift)")
 
 
+def _mark_overlap_span(ax: plt.Axes, k: int) -> None:
+    """Shade predicted lookback_overlap on t ∈ [-K, 0] (forecast origin at 0)."""
+    if k <= 0:
+        return
+    ax.axvspan(-k, 0.0, color="#FFC107", alpha=0.14, zorder=0)
+    ax.axvline(x=-k, color="#F57C00", linestyle=":", linewidth=0.9, alpha=0.75)
+
+
 def _plot_compare_panel(
     *,
     maps: Dict[str, Any],
@@ -918,9 +926,9 @@ def _plot_compare_panel(
 ) -> List[Path]:
     """Plot GT / binary / MMPD — one wide figure per variate.
 
-    Shared raw-time axis t ∈ [-LB, H) on every panel. Overlap K is decoded with
-    the future half, then stripped in raw time. Horizon binary curves come from
-    generate()'s prediction_global_norm.
+    Shared raw-time axis t ∈ [-LB, H) on every panel. Binary curves include the
+    predicted lookback_overlap K (map-decoded future prefix) on t ∈ [-K, 0) plus
+    generate()'s prediction_global_norm on t ∈ [0, H). MMPD packs are H-only.
     """
     k = int(getattr(fine_model.config, "lookback_overlap", 0) or 0)
     lookback = int(past_z.shape[-1])
@@ -959,6 +967,18 @@ def _plot_compare_panel(
     gt_final_np = _strip_overlap_raw(gt_final_full, lookback=lookback, lookback_overlap=k)
     pr_coarse_map = _strip_overlap_raw(pr_c_full, lookback=lookback, lookback_overlap=k)
     pr_final_map = _strip_overlap_raw(pr_final_full, lookback=lookback, lookback_overlap=k)
+    # Generated future half starts with K lookback-overlap steps (raw time).
+    if k > 0:
+        bin_coarse_k = pr_c_full[..., lookback : lookback + k]
+        bin_final_k = pr_final_full[..., lookback : lookback + k]
+        if bin_coarse_k.shape[-1] != k or bin_final_k.shape[-1] != k:
+            raise ValueError(
+                f"predicted overlap width coarse={bin_coarse_k.shape[-1]} "
+                f"final={bin_final_k.shape[-1]} != K={k}"
+            )
+    else:
+        bin_coarse_k = pr_c_full[..., lookback:lookback]
+        bin_final_k = pr_final_full[..., lookback:lookback]
 
     fine_out = maps["fine_out"]
     coarse_out = maps["coarse_out"]
@@ -1015,11 +1035,23 @@ def _plot_compare_panel(
             f"MMPD shape {mmpd_plot.shape} != future_core_z {future_core_z.shape}"
         )
 
+    # Binary ridges: GT past until -K, then model-predicted overlap + horizon.
     coarse_np = np.concatenate([gt_coarse_np[..., :lookback], bin_coarse_h], axis=-1)
     final_np = np.concatenate([gt_final_np[..., :lookback], bin_final_h], axis=-1)
     fine_np = np.concatenate(
         [gt_fine_np[..., :lookback], bin_final_h - bin_coarse_h],
         axis=-1,
+    )
+    if k > 0:
+        coarse_np[..., lookback - k : lookback] = bin_coarse_k
+        final_np[..., lookback - k : lookback] = bin_final_k
+        fine_np[..., lookback - k : lookback] = bin_final_k - bin_coarse_k
+
+    bin_coarse_kh = (
+        np.concatenate([bin_coarse_k, bin_coarse_h], axis=-1) if k > 0 else bin_coarse_h
+    )
+    bin_final_kh = (
+        np.concatenate([bin_final_k, bin_final_h], axis=-1) if k > 0 else bin_final_h
     )
 
     n_vars = min(variables_to_plot, int(gt_1d.shape[0]))
@@ -1027,6 +1059,7 @@ def _plot_compare_panel(
     if t_axis.shape[0] != canvas_len:
         raise ValueError(f"t_axis len {t_axis.shape[0]} != canvas {canvas_len}")
     t_h = t_axis[lookback:]
+    t_kh = t_axis[lookback - k :] if k > 0 else t_h
     span_label = f"LB={lookback}, K={k}, H={horizon_core}"
 
     kind = str(meta.get("pick_kind", "top_diff"))
@@ -1081,6 +1114,7 @@ def _plot_compare_panel(
             )
             ax.axhline(0.0, color="#888888", linestyle="-", linewidth=0.9, alpha=0.9)
             ax.axvline(x=0.0, color="#888888", linestyle="-", linewidth=1.1, alpha=0.95)
+            _mark_overlap_span(ax, k)
             ax.set_xlim(-lookback, horizon_core)
             ax.set_ylabel("global z" if not is_fine else "Δz", fontsize=11)
             ax.set_title(f"{label} | {span_label}", fontsize=12)
@@ -1099,20 +1133,20 @@ def _plot_compare_panel(
             zorder=2,
         )
         ax.plot(
-            t_h,
-            coarse_np[col, lookback:],
+            t_kh,
+            bin_coarse_kh[col],
             color="#EF6C00",
             linewidth=2.0,
             alpha=0.95,
-            label="Binary coarse (H)",
+            label="Binary coarse (K+H)" if k > 0 else "Binary coarse (H)",
             zorder=3,
         )
         ax.plot(
-            t_h,
-            final_np[col, lookback:],
+            t_kh,
+            bin_final_kh[col],
             color="#C2185B",
             linewidth=2.2,
-            label="Binary final (H)",
+            label="Binary final (K+H)" if k > 0 else "Binary final (H)",
             zorder=3,
         )
         ax.plot(
@@ -1126,6 +1160,7 @@ def _plot_compare_panel(
         )
         ax.axhline(0.0, color="black", linestyle=":", linewidth=0.8, alpha=0.45)
         ax.axvline(x=0, color="black", linestyle="-", linewidth=1.2, alpha=0.45)
+        _mark_overlap_span(ax, k)
         ax.set_ylim(-coarse_lim, coarse_lim)
         ax.set_xlim(-lookback, horizon_core)
         ax.set_xlabel("t (0 = forecast start)", fontsize=11)
