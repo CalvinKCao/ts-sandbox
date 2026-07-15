@@ -1,7 +1,9 @@
 # Per-dataset best-g mid Optuna on true-stride-1 vertical_dual.
 # Reuses g=1 vertical_dual pretrain (identity schedule); does NOT fresh-pretrain at g≠1.
 #
-# Best CRPS from short unc g-grid (Jul-14): ETTh1=3, electricity=8, exchange=4, traffic=4.
+# Per-dataset g:
+#   Jul-14 CRPS winners: ETTh1=3, electricity=8, exchange=4, traffic=4
+#   Jul-15 anchor_mse winners: ETTh2=1, ETTm1=2, ETTm2=1, weather=6, PeMS=8, solar=9
 #
 # Speed recipe: Optuna trials run max_epochs=4, then refit_best_max_epochs=20 retrains
 # the winner from pretrain (new knobs on diffusion_*_finetune_hp).
@@ -32,6 +34,12 @@ experiment:
     electricity: 8.0
     exchange_rate: 4.0
     traffic: 4.0
+    ETTh2: 1.0
+    ETTm1: 2.0
+    ETTm2: 1.0
+    weather: 6.0
+    PeMS: 8.0
+    solar_Alabama: 9.0
   data_subset:
     max_variates_by_dataset:
       dynamic: 2
