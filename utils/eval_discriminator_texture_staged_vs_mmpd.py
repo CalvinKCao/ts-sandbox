@@ -52,6 +52,7 @@ from utils.eval_trend_robust_texture_staged_vs_mmpd import (
     DEFAULT_CKPT_BASE,
     DEFAULT_MMPD_OUTPUT_ROOT,
     DEFAULT_SUBSET_DATASETS,
+    _binary_config_path,
     dataset_window_lengths_for_run,
     evaluate_staged_binary,
     load_ordinal_ladder_for_run,
@@ -474,21 +475,47 @@ def build_raw_bundle(
                 print(f"[warn] {msg}; each discriminator uses its own pack GT.", flush=True)
 
     if args.bin_match_filter:
+        # Same path binary ordinal_norm uses: train z-score → ordinal ranks
+        # (+ OOD constant shift) → [optional stride subsample] → bounded coarse/fine
+        # → upsample → ordinal decode. No instance norm.
+        ladder = load_ordinal_ladder_for_run(args, run)
+        _ms, coarse_h, fine_h = resolve_dual_scale_bin_params(
+            dataset,
+            sub,
+            fallback_max_scale=args.bin_max_scale,
+            coarse_height=args.bin_coarse_height or args.bin_image_height,
+            fine_height=args.bin_fine_height or args.bin_image_height,
+        )
+        from models.diffusion_tsf.pipeline.config import load_experiment_config
+
+        cfg = load_experiment_config(str(_binary_config_path(args, run.dataset)))
+        repr_stride = int(
+            (cfg.get("experiment") or {}).get("representation_time_stride", 1) or 1
+        )
         print(
-            f"[{dataset}] applying dual-scale bin-match filter={args.bin_match_filter} "
-            f"(H={args.bin_image_height}, max_scale={args.bin_max_scale}, decoder={args.bin_decoder})",
+            f"[{dataset}] applying ordinal dual-scale bin-match filter={args.bin_match_filter} "
+            f"(coarse={coarse_h}, fine={fine_h}, repr_stride={repr_stride}, "
+            f"decoder={args.bin_decoder}, ood_shift=on, no instance-norm)",
             flush=True,
         )
+        args._resolved_bin_repr_time_stride = repr_stride
+        if args.binary_debias_quantization:
+            raise ValueError(
+                "--bin-match-filter already canonicalizes all selected sources onto the "
+                "binary ordinal lattice; refuse combining with --binary-debias-quantization "
+                "(would jitter only binary_staged after the shared round-trip)"
+            )
         y_true_by_source, fakes = apply_bin_match_to_bundle(
             mode=args.bin_match_filter,
             past=past.astype(np.float32),
             y_true_by_source=y_true_by_source,
             fakes=fakes,
-            image_height=args.bin_image_height,
-            max_scale=args.bin_max_scale,
-            std_floor=args.bin_std_floor,
+            ladder=ladder,
+            coarse_height=coarse_h,
+            fine_height=fine_h,
             decoder=args.bin_decoder,
             device=device,
+            repr_time_stride=repr_stride,
         )
 
     if args.binary_debias_quantization and "binary_staged" in fakes:
@@ -1248,7 +1275,12 @@ def merge_partial_metrics(args: argparse.Namespace) -> Dict[str, Dict[str, Dict[
     if getattr(args, "bin_match_filter", None):
         manifest["bin_match_filter"] = args.bin_match_filter
         manifest["bin_image_height"] = args.bin_image_height
-        manifest["bin_max_scale"] = args.bin_max_scale
+        manifest["bin_coarse_height"] = args.bin_coarse_height
+        manifest["bin_fine_height"] = args.bin_fine_height
+        manifest["bin_match_space"] = "ordinal_bounded_dual_scale"
+        manifest["bin_repr_time_stride"] = int(
+            getattr(args, "_resolved_bin_repr_time_stride", 0) or 0
+        )
         manifest["bin_decoder"] = args.bin_decoder
     write_json(args.output_dir / "run_manifest.json", manifest)
     print(
@@ -1490,14 +1522,25 @@ def parse_args() -> argparse.Namespace:
         "--bin-match-filter",
         choices=list(BIN_MATCH_CHOICES),
         default=None,
-        help="Round-trip horizons through staged binary 16x16 occupancy lattice. "
-        "mmpd=fakes only; both=both fakes; all=GT+fakes.",
+        help="Round-trip horizons through binary ordinal_norm path "
+        "(train-set z-score → ordinal ranks + OOD shift → bounded coarse/fine). "
+        "No instance/window norm. mmpd=fakes only; both=both fakes; all=GT+fakes.",
     )
     parser.add_argument("--bin-image-height", type=int, default=16)
     parser.add_argument("--bin-coarse-height", type=int, default=16)
     parser.add_argument("--bin-fine-height", type=int, default=16)
-    parser.add_argument("--bin-max-scale", type=float, default=3.5)
-    parser.add_argument("--bin-std-floor", type=float, default=1e-8)
+    parser.add_argument(
+        "--bin-max-scale",
+        type=float,
+        default=3.5,
+        help="Legacy fallback for --binary-debias-quantization only; unused by ordinal bin-match.",
+    )
+    parser.add_argument(
+        "--bin-std-floor",
+        type=float,
+        default=1e-8,
+        help="Unused (kept for CLI compat); ordinal bin-match has no instance norm.",
+    )
     parser.add_argument(
         "--binary-debias-quantization",
         action=argparse.BooleanOptionalAction,

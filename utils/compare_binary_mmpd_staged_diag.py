@@ -1281,7 +1281,12 @@ def plot_dataset_windows(
     state = _build_state(binary_ckpt, dataset, subset_id, binary_config)
     lookback, horizon = _window_lengths(dataset, state)
     data_subset = bundle["fine_metadata"].get("data_subset") or {}
-    _, _, test_ds, _ = load_dataset(
+
+    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+
+    # Match run_binary_staged_eval: ordinal globals + ladder before guidance/model load.
+    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
+    _, _, test_ds, norm_stats = load_dataset(
         dataset,
         variate_indices,
         stride=int(data_subset.get("train_stride", state.window_stride)),
@@ -1291,6 +1296,9 @@ def plot_dataset_windows(
         ordinal_tie_atol=float(state.ordinal_tie_atol),
         use_ordinal_window_norm=state.use_ordinal_window_norm,
     )
+    if norm_stats.get("ordinal_ladder") is not None:
+        state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
+        pipeline_mod.GLOBAL_ORDINAL_LADDER = norm_stats["ordinal_ladder"]
 
     guidance_path, guidance_type = _resolve_guidance_ckpt(binary_ckpt, subset_id, "auto")
     guidance_model = load_wrapped_guidance(
@@ -1318,6 +1326,19 @@ def plot_dataset_windows(
     for m in (coarse_model, fine_model):
         m._ordinal_input_is_ranked = ranked
         m._ordinal_apply_ood_shift = bool(not ranked)
+    if bool(state.use_ordinal_window_norm) and not fine_model._uses_global_ordinal_encoding():
+        raise RuntimeError(
+            f"{dataset}: plot path loaded diffusion without ordinal_ladder "
+            "(USE_ORDINAL_WINDOW_NORM set but model._uses_global_ordinal_encoding() is False)"
+        )
+    if (
+        bool(state.use_ordinal_window_norm)
+        and getattr(guidance_model, "ordinal_ladder", None) is None
+    ):
+        raise RuntimeError(
+            f"{dataset}: plot path loaded patch guidance without ordinal_ladder "
+            "(guidance channel would be in the wrong space vs training/eval)"
+        )
 
     with np.load(mmpd_pack_path) as mmpd_data:
         mmpd_det = mmpd_data["deterministic"]
@@ -1336,6 +1357,22 @@ def plot_dataset_windows(
         past_z_t, future_z_t = _dataset_window_z_scores(test_ds, wi)
         past_z = past_z_t.numpy()
         future_z = future_z_t.numpy()
+        # Sanity: regenerated H-only pred MSE must match cached eval for this window.
+        fine_out = maps["fine_out"]
+        pred_h = fine_out["prediction_global_norm"][0].detach().cpu().numpy()
+        k_ov = int(getattr(fine_model.config, "lookback_overlap", 0) or 0)
+        future_core = _future_core_global_z(future_z, k_ov)
+        if pred_h.shape != future_core.shape:
+            raise RuntimeError(
+                f"{dataset} win {wi}: regenerated pred {pred_h.shape} != GT core {future_core.shape}"
+            )
+        regen_mse = float(((pred_h - future_core) ** 2).mean())
+        cached_mse = float(entry["binary_anchor_mse"])
+        if not np.isfinite(regen_mse) or abs(regen_mse - cached_mse) > max(1e-3, 0.05 * max(cached_mse, 1e-6)):
+            raise RuntimeError(
+                f"{dataset} win {wi}: plot regen MSE {regen_mse:.6f} != cached "
+                f"binary_anchor_mse {cached_mse:.6f} (ordinal/guidance/model load still wrong?)"
+            )
         del past_b, future_b
         if device.type == "cuda":
             torch.cuda.empty_cache()
