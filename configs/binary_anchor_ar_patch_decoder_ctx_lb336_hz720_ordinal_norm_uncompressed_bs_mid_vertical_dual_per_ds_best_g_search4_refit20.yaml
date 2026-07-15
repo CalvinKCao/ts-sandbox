@@ -33,8 +33,10 @@ experiment:
     exchange_rate: 4.0
     traffic: 4.0
   data_subset:
+    max_variates_by_dataset:
+      dynamic: 1
     sample_stride_by_dataset:
-      dynamic: 60
+      dynamic: 480
 
 phases:
   - phase: staged_diffusion_pretrain

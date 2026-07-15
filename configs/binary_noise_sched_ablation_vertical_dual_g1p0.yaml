@@ -14,9 +14,11 @@ experiment:
   binary_length_g: 1.0
   binary_length_scale: 1.0
   data_subset:
-    # Floor dynamic window stride above ETTh1-matched auto (~29) to cut walltime.
+    # Dynamic was 7v @ stride 60; cut both axes by ~8x for walltime.
+    max_variates_by_dataset:
+      dynamic: 1
     sample_stride_by_dataset:
-      dynamic: 60
+      dynamic: 480
 
 phases:
   - phase: staged_diffusion_pretrain
