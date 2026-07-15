@@ -122,6 +122,7 @@ experiment:
   binary_length_mode: none
   binary_length_g: 1.0
   binary_length_scale: 1.0
+  binary_length_g_by_dataset: {}
   binary_num_steps: 1000
   binary_beta_start: 1.0e-5
   binary_beta_end: 0.5
