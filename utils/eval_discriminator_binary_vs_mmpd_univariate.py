@@ -383,7 +383,7 @@ def merge_and_write(args: argparse.Namespace) -> Dict[str, Dict[str, Dict[str, D
         "native_repr_stride": int(getattr(args, "native_repr_stride", 1) or 1),
         "pack_splits": getattr(args, "pack_splits", "test"),
         "pack_fraction": getattr(args, "pack_fraction", None),
-        "mmpd_ordinal_quantize": bool(getattr(args, "mmpd_ordinal_quantize", False)),
+        "ordinal_ladder_quantize": bool(getattr(args, "ordinal_ladder_quantize", False)),
         "univariate": True,
     }
     write_json(args.output_dir / "run_manifest.json", manifest)

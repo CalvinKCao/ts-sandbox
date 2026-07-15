@@ -241,7 +241,7 @@ EVAL_ARGS=(
     --candidate-only
     --nonoverlapping-patches
     --no-offset-embedding
-    --no-mmpd-ordinal-quantize
+    --no-ordinal-ladder-quantize
     --bin-match-filter "$BIN_MATCH_FILTER"
     --bin-image-height 16
     --bin-coarse-height 16

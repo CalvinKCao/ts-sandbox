@@ -910,10 +910,99 @@ def _mark_overlap_span(ax: plt.Axes, k: int) -> None:
     ax.axvline(x=-k, color="#F57C00", linestyle=":", linewidth=0.9, alpha=0.75)
 
 
+@torch.no_grad()
+def _denormalize_future_keep_overlap(
+    model: torch.nn.Module,
+    future_norm: torch.Tensor,
+    past: torch.Tensor,
+    stats: Tuple[Any, ...],
+) -> torch.Tensor:
+    """Same as DiffusionTSF._denormalize_future but keeps the K overlap prefix."""
+    mean, std, ladder, *rest = stats
+    ood_shift = rest[0] if rest else None
+    if ladder is not None:
+        _, future_val = ordinal_decode(
+            torch.zeros_like(past[..., :1]).expand_as(past),
+            future_norm,
+            ladder,
+            ood_shift=ood_shift,
+        )
+        future_norm = future_val
+        mean = torch.zeros_like(mean)
+        std = torch.ones_like(std)
+
+    k_raw = int(model.config.lookback_overlap)
+    k_repr = model._overlap_repr_cols()
+    center_shift = (
+        ladder is None
+        and k_raw > 0
+        and getattr(model.config, "lookback_overlap_center_shift", False)
+        and future_norm.shape[-1] >= max(k_repr, 1)
+    )
+    if center_shift:
+        overlap_repr = future_norm[..., :k_repr]
+        if model._representation_time_stride() > 1 and k_repr > 0:
+            overlap_norm = model._resample_1d_time_series(overlap_repr, k_raw)
+        else:
+            overlap_norm = future_norm[..., :k_raw]
+        past_tail = past[..., -k_raw:]
+        overlap_raw = overlap_norm * std + mean
+        shift = (past_tail - overlap_raw).mean(dim=-1, keepdim=True)
+        future = future_norm * std + mean + shift
+    else:
+        future = model._denormalize(future_norm, (mean, std))
+
+    if model._representation_time_stride() > 1:
+        if k_raw > 0:
+            future = model._resample_1d_time_series(future, model._raw_canvas_length())
+        else:
+            future = model._upsample_repr_to_raw_horizon(future)
+    return future
+
+
+@torch.no_grad()
+def _generate_future_kh_global_z(
+    model: torch.nn.Module,
+    gen_out: Dict[str, Any],
+    past_b: torch.Tensor,
+    *,
+    which: str,
+) -> np.ndarray:
+    """Decode generate() future maps to global-z (V, K+H), same path as metrics.
+
+    which:
+      - \"final\": dual/combined decode (matches prediction_global_norm on [..., K:])
+      - \"coarse\": coarse-map-only decode
+    """
+    device = next(model.parameters()).device
+    past = past_b.to(device=device)
+    if past.dim() == 2:
+        past = past.unsqueeze(0)
+    fut_c = gen_out["future_2d_coarse"].to(device=device)
+    if which == "final":
+        fut_f = gen_out.get("future_2d_fine")
+        if fut_f is None:
+            raise KeyError("generate output missing future_2d_fine for final decode")
+        future_norm = model._decode_staged_combined_1d(
+            fut_c,
+            fut_f.to(device=device),
+            cdf_decoder="mean",
+        )
+    elif which == "coarse":
+        future_norm = model._decode_coarse_1d_from_map(fut_c, cdf_decoder="mean")
+    else:
+        raise ValueError(f"unknown which={which!r}")
+    future_norm = _ensure_bvt(future_norm)
+    _, _, stats = model._normalize_sequence(past, None)
+    future_kh = _denormalize_future_keep_overlap(model, future_norm, past, stats)
+    return future_kh[0].detach().cpu().numpy()
+
+
 def _plot_compare_panel(
     *,
     maps: Dict[str, Any],
     fine_model: torch.nn.Module,
+    coarse_model: torch.nn.Module,
     mmpd_1d: np.ndarray,
     past_z: np.ndarray,
     future_z: np.ndarray,
@@ -926,9 +1015,9 @@ def _plot_compare_panel(
 ) -> List[Path]:
     """Plot GT / binary / MMPD — one wide figure per variate.
 
-    Shared raw-time axis t ∈ [-LB, H) on every panel. Binary curves include the
-    predicted lookback_overlap K (map-decoded future prefix) on t ∈ [-K, 0) plus
-    generate()'s prediction_global_norm on t ∈ [0, H). MMPD packs are H-only.
+    Shared raw-time axis t ∈ [-LB, H) on every panel. Binary K+H curves come from
+    the same generate() decode+denorm path as prediction_global_norm (overlap kept),
+    so t∈[-K,0) and t∈[0,H) share one scale. MMPD packs are H-only.
     """
     k = int(getattr(fine_model.config, "lookback_overlap", 0) or 0)
     lookback = int(past_z.shape[-1])
@@ -954,60 +1043,58 @@ def _plot_compare_panel(
         lookback=lookback,
         future_raw_len=future_raw_len,
     )
-    pr_c_full, pr_f_full, pr_final_full = _decode_maps_to_plot_1d(
-        fine_model,
-        maps["pred_coarse"],
-        maps["pred_fine"],
-        lookback=lookback,
-        future_raw_len=future_raw_len,
-    )
-    del pr_f_full
     gt_coarse_np = _strip_overlap_raw(gt_c_full, lookback=lookback, lookback_overlap=k)
     gt_fine_np = _strip_overlap_raw(gt_f_full, lookback=lookback, lookback_overlap=k)
     gt_final_np = _strip_overlap_raw(gt_final_full, lookback=lookback, lookback_overlap=k)
-    pr_coarse_map = _strip_overlap_raw(pr_c_full, lookback=lookback, lookback_overlap=k)
-    pr_final_map = _strip_overlap_raw(pr_final_full, lookback=lookback, lookback_overlap=k)
-    # Generated future half starts with K lookback-overlap steps (raw time).
-    if k > 0:
-        bin_coarse_k = pr_c_full[..., lookback : lookback + k]
-        bin_final_k = pr_final_full[..., lookback : lookback + k]
-        if bin_coarse_k.shape[-1] != k or bin_final_k.shape[-1] != k:
-            raise ValueError(
-                f"predicted overlap width coarse={bin_coarse_k.shape[-1]} "
-                f"final={bin_final_k.shape[-1]} != K={k}"
-            )
-    else:
-        bin_coarse_k = pr_c_full[..., lookback:lookback]
-        bin_final_k = pr_final_full[..., lookback:lookback]
+    del gt_c_full, gt_f_full, gt_final_full
 
     fine_out = maps["fine_out"]
     coarse_out = maps["coarse_out"]
-    vertical_dual = bool(maps.get("vertical_dual"))
-    bin_final_h = fine_out["prediction_global_norm"][0].detach().cpu().numpy()
-    if vertical_dual:
-        # Single-model generate: final 1D is combined; coarse 1D comes from map decode.
-        bin_coarse_h = pr_coarse_map[..., lookback:]
-    else:
-        bin_coarse_h = coarse_out["prediction_global_norm"][0].detach().cpu().numpy()
-    if bin_final_h.shape[-1] != horizon_core or bin_coarse_h.shape[-1] != horizon_core:
-        raise ValueError(
-            f"prediction_global_norm width fine={bin_final_h.shape[-1]} "
-            f"coarse={bin_coarse_h.shape[-1]} != horizon_core {horizon_core}"
-        )
+    past_raw = maps.get("past_raw")
+    if past_raw is None:
+        raise KeyError("maps missing past_raw (needed for generate-consistent K+H decode)")
+    if not torch.is_tensor(past_raw):
+        past_raw = torch.as_tensor(past_raw)
+    if past_raw.dim() == 2:
+        past_raw = past_raw.unsqueeze(0)
 
-    if not vertical_dual:
-        _assert_horizon_aligned(
-            f"{dataset} win {window_index}: map-decode coarse vs prediction_global_norm",
-            pr_coarse_map[..., lookback:],
-            bin_coarse_h,
-            min_corr=0.75,
-        )
-    _assert_horizon_aligned(
-        f"{dataset} win {window_index}: map-decode final vs prediction_global_norm",
-        pr_final_map[..., lookback:],
-        bin_final_h,
-        min_corr=0.75,
+    # One generate() denorm path for K+H — do not mix map-add-decode K with stripped H.
+    bin_final_kh = _generate_future_kh_global_z(
+        fine_model, fine_out, past_raw, which="final",
     )
+    bin_coarse_kh = _generate_future_kh_global_z(
+        coarse_model, coarse_out, past_raw, which="coarse",
+    )
+    expected_kh = k + horizon_core
+    if bin_final_kh.shape[-1] != expected_kh or bin_coarse_kh.shape[-1] != expected_kh:
+        raise ValueError(
+            f"K+H width final={bin_final_kh.shape[-1]} coarse={bin_coarse_kh.shape[-1]} "
+            f"!= K+H={expected_kh}"
+        )
+    bin_final_h = bin_final_kh[..., k:] if k > 0 else bin_final_kh
+    bin_coarse_h = bin_coarse_kh[..., k:] if k > 0 else bin_coarse_kh
+    pred_h = fine_out["prediction_global_norm"][0].detach().cpu().numpy()
+    if pred_h.shape != bin_final_h.shape:
+        raise ValueError(
+            f"prediction_global_norm {pred_h.shape} != keep-overlap H {bin_final_h.shape}"
+        )
+    # Tight check: keep-overlap H must match generate()'s returned horizon.
+    if float(np.max(np.abs(pred_h - bin_final_h))) > 1e-4:
+        corr = _lag0_corr(pred_h, bin_final_h)
+        raise ValueError(
+            f"{dataset} win {window_index}: keep-overlap H != prediction_global_norm "
+            f"(max|Δ|={float(np.max(np.abs(pred_h - bin_final_h))):.4g}, corr={corr:.4f})"
+        )
+    coarse_pred_h = coarse_out["prediction_global_norm"][0].detach().cpu().numpy()
+    # VD generate returns combined final in prediction_global_norm — not coarse-only.
+    if not bool(maps.get("vertical_dual")) and coarse_pred_h.shape == bin_coarse_h.shape:
+        if float(np.max(np.abs(coarse_pred_h - bin_coarse_h))) > 1e-4:
+            corr = _lag0_corr(coarse_pred_h, bin_coarse_h)
+            raise ValueError(
+                f"{dataset} win {window_index}: keep-overlap coarse H != "
+                f"coarse prediction_global_norm "
+                f"(max|Δ|={float(np.max(np.abs(coarse_pred_h - bin_coarse_h))):.4g}, corr={corr:.4f})"
+            )
     _assert_horizon_aligned(
         f"{dataset} win {window_index}: GT encode→decode vs GT future",
         gt_final_np[..., lookback:],
@@ -1028,31 +1115,21 @@ def _plot_compare_panel(
             f"MMPD V={mmpd_plot.shape[0]} != GT V={gt_1d.shape[0]} "
             "(variate subset mismatch — wrong pack or ckpt)"
         )
-    # Time base must match GT horizon exactly (length already checked). Fail if
-    # someone accidentally passed y_true instead of deterministic with a shift.
     if mmpd_plot.shape != future_core_z.shape:
         raise ValueError(
             f"MMPD shape {mmpd_plot.shape} != future_core_z {future_core_z.shape}"
         )
 
-    # Binary ridges: GT past until -K, then model-predicted overlap + horizon.
+    # Binary ridges: GT past until -K, then generate-consistent predicted K+H.
     coarse_np = np.concatenate([gt_coarse_np[..., :lookback], bin_coarse_h], axis=-1)
     final_np = np.concatenate([gt_final_np[..., :lookback], bin_final_h], axis=-1)
-    fine_np = np.concatenate(
-        [gt_fine_np[..., :lookback], bin_final_h - bin_coarse_h],
-        axis=-1,
-    )
+    fine_kh = bin_final_kh - bin_coarse_kh
+    fine_h = fine_kh[..., k:] if k > 0 else fine_kh
+    fine_np = np.concatenate([gt_fine_np[..., :lookback], fine_h], axis=-1)
     if k > 0:
-        coarse_np[..., lookback - k : lookback] = bin_coarse_k
-        final_np[..., lookback - k : lookback] = bin_final_k
-        fine_np[..., lookback - k : lookback] = bin_final_k - bin_coarse_k
-
-    bin_coarse_kh = (
-        np.concatenate([bin_coarse_k, bin_coarse_h], axis=-1) if k > 0 else bin_coarse_h
-    )
-    bin_final_kh = (
-        np.concatenate([bin_final_k, bin_final_h], axis=-1) if k > 0 else bin_final_h
-    )
+        coarse_np[..., lookback - k : lookback] = bin_coarse_kh[..., :k]
+        final_np[..., lookback - k : lookback] = bin_final_kh[..., :k]
+        fine_np[..., lookback - k : lookback] = fine_kh[..., :k]
 
     n_vars = min(variables_to_plot, int(gt_1d.shape[0]))
     t_axis = np.arange(-lookback, horizon_core, dtype=np.float64)
@@ -1279,6 +1356,7 @@ def plot_dataset_windows(
                 _plot_compare_panel(
                     maps=maps,
                     fine_model=fine_model,
+                    coarse_model=coarse_model,
                     mmpd_1d=mmpd_1d,
                     past_z=past_z,
                     future_z=future_z,

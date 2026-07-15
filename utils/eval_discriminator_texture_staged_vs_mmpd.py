@@ -467,9 +467,9 @@ def build_raw_bundle(
                     f"{dataset}: y_true differs between {sources[0]} and {src} "
                     f"(mse={mse:.6f}); packs are not in the same coordinate space"
                 )
-                if getattr(args, "mmpd_ordinal_quantize", False) and "mmpd" in fakes:
+                if getattr(args, "ordinal_ladder_quantize", False) and "mmpd" in fakes:
                     raise ValueError(
-                        msg + "; refusing --mmpd-ordinal-quantize onto a mismatched ladder"
+                        msg + "; refusing --ordinal-ladder-quantize onto a mismatched ladder"
                     )
                 print(f"[warn] {msg}; each discriminator uses its own pack GT.", flush=True)
 
@@ -516,7 +516,7 @@ def build_raw_bundle(
             flush=True,
         )
 
-    if getattr(args, "mmpd_ordinal_quantize", False):
+    if getattr(args, "ordinal_ladder_quantize", False):
         # Snap ALL horizons (GT, MMPD fakes, binary fakes) onto the global ordinal ladder.
         # Binary preds are post stride-2 linear upsample and are mostly off-ladder otherwise.
         if "mmpd" in fakes:
@@ -527,13 +527,13 @@ def build_raw_bundle(
                 if bin_yt.shape != mmpd_yt.shape:
                     raise ValueError(
                         f"{dataset}: binary/mmpd y_true shape mismatch {bin_yt.shape} vs {mmpd_yt.shape} "
-                        "before --mmpd-ordinal-quantize"
+                        "before --ordinal-ladder-quantize"
                     )
                 mse = float(np.mean((bin_yt - mmpd_yt) ** 2))
                 if mse > 1e-6:
                     raise ValueError(
                         f"{dataset}: binary vs mmpd y_true mse={mse:.6f}; "
-                        "refusing --mmpd-ordinal-quantize onto a mismatched coordinate space"
+                        "refusing --ordinal-ladder-quantize onto a mismatched coordinate space"
                     )
         ladder = load_ordinal_ladder_for_run(args, run)
         for src in list(fakes):
@@ -1236,7 +1236,7 @@ def merge_partial_metrics(args: argparse.Namespace) -> Dict[str, Dict[str, Dict[
         "binary_config": getattr(args, "binary_config", None),
         "binary_config_by_dataset": dict(getattr(args, "binary_config_by_dataset", None) or {}),
         "binary_debias_quantization": bool(getattr(args, "binary_debias_quantization", False)),
-        "mmpd_ordinal_quantize": bool(getattr(args, "mmpd_ordinal_quantize", False)),
+        "ordinal_ladder_quantize": bool(getattr(args, "ordinal_ladder_quantize", False)),
         "candidate_only": bool(getattr(args, "candidate_only", False)),
         "pack_splits": getattr(args, "pack_splits", "test"),
         "pack_fraction": getattr(args, "pack_fraction", None),
@@ -1505,7 +1505,7 @@ def parse_args() -> argparse.Namespace:
         help="Jitter non-flatline binary_staged fakes by up to ±½ fine bin (discriminator only).",
     )
     parser.add_argument(
-        "--mmpd-ordinal-quantize",
+        "--ordinal-ladder-quantize",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Snap GT + all fakes (MMPD and binary_staged) to the global ordinal ladder. "

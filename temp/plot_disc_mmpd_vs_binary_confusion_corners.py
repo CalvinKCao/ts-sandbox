@@ -68,7 +68,7 @@ def _disc_defaults() -> argparse.Namespace:
         "--candidate-only",
         "--nonoverlapping-patches",
         "--no-offset-embedding",
-        "--mmpd-ordinal-quantize",
+        "--ordinal-ladder-quantize",
         "--pack-splits",
         "train,val",
         "--pack-fraction",

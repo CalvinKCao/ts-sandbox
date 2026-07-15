@@ -418,14 +418,14 @@ fi
 if [[ "${DISC_NO_BINARY_DEBIAS:-0}" == "1" ]]; then
     EVAL_ARGS+=(--no-binary-debias-quantization)
 fi
-if [[ "${DISC_MMPD_ORDINAL_QUANTIZE:-0}" == "1" ]]; then
-    EVAL_ARGS+=(--mmpd-ordinal-quantize)
+if [[ "${DISC_ORDINAL_LADDER_QUANTIZE:-0}" == "1" ]]; then
+    EVAL_ARGS+=(--ordinal-ladder-quantize)
 fi
 if [[ "${DISC_BINARY_DEBIAS:-0}" == "1" ]]; then
     EVAL_ARGS+=(--binary-debias-quantization)
 fi
-if [[ "${DISC_NO_MMPD_ORDINAL_QUANTIZE:-0}" == "1" ]]; then
-    EVAL_ARGS+=(--no-mmpd-ordinal-quantize)
+if [[ "${DISC_NO_ORDINAL_LADDER_QUANTIZE:-0}" == "1" ]]; then
+    EVAL_ARGS+=(--no-ordinal-ladder-quantize)
 fi
 if [[ "${DISC_CANDIDATE_ONLY:-0}" == "1" ]]; then
     EVAL_ARGS+=(--candidate-only)
