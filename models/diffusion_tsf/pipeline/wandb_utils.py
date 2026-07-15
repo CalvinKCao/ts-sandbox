@@ -55,6 +55,8 @@ def _api_key_usable() -> bool:
 _RUN_STEM_RE = re.compile(r"^\d{2}-\d{2}-\d+-.+")
 
 WANDB_RUN_NAME_MAX_LEN = 128
+# wandb API rejects GroupName longer than 128 (same cap as run name).
+WANDB_GROUP_MAX_LEN = 128
 
 
 def run_stem_from_checkpoint_dir(checkpoint_dir: str) -> str:
@@ -66,6 +68,21 @@ def _looks_like_run_stem(stem: str) -> bool:
     return bool(stem and _RUN_STEM_RE.match(stem))
 
 
+def truncate_wandb_group(group: str) -> str:
+    """Clamp group to wandb's GroupName limit; warn when truncating."""
+    if len(group) <= WANDB_GROUP_MAX_LEN:
+        return group
+    truncated = group[:WANDB_GROUP_MAX_LEN]
+    logger.warning(
+        "wandb group exceeds %d chars (%d); truncating: %r -> %r",
+        WANDB_GROUP_MAX_LEN,
+        len(group),
+        group,
+        truncated,
+    )
+    return truncated
+
+
 def make_local_group_name(
     seed: int,
     *,
@@ -75,7 +92,7 @@ def make_local_group_name(
     """Fallback wandb group for local runs without a Slurm-style checkpoint stem."""
     date_str = datetime.now().strftime("%m-%d")
     slug = config_slug or experiment_name
-    return f"{date_str}-{slug}-s{seed}"
+    return truncate_wandb_group(f"{date_str}-{slug}-s{seed}")
 
 
 def infer_wandb_group(
@@ -84,7 +101,7 @@ def infer_wandb_group(
 ) -> str:
     """Resolve wandb group: YAML override, else checkpoint run stem, else local fallback."""
     if state.wandb_group:
-        return state.wandb_group
+        return truncate_wandb_group(state.wandb_group)
 
     ckpt_stem = run_stem_from_checkpoint_dir(state.checkpoint_dir)
     env_stem = os.environ.get("GRID_RUN_STEM", "").strip()
@@ -95,7 +112,7 @@ def infer_wandb_group(
             ckpt_stem,
         )
     if _looks_like_run_stem(ckpt_stem):
-        return ckpt_stem
+        return truncate_wandb_group(ckpt_stem)
 
     yaml_path = merged_config.get("_yaml_path")
     return make_local_group_name(
@@ -107,6 +124,7 @@ def infer_wandb_group(
 
 def make_pipeline_run_name(group: str) -> str:
     """Build wandb run title for a full pipeline (same as run stem / group)."""
+    group = truncate_wandb_group(group)
     if len(group) <= WANDB_RUN_NAME_MAX_LEN:
         return group
     return group[:WANDB_RUN_NAME_MAX_LEN]
@@ -114,6 +132,7 @@ def make_pipeline_run_name(group: str) -> str:
 
 def make_phase_run_name(group: str, phase_slug: str) -> str:
     """Build legacy per-phase wandb run title: {group}-{phase}."""
+    group = truncate_wandb_group(group)
     phase_slug = phase_slug.replace("_", "-")
     full = f"{group}-{phase_slug}"
     if len(full) <= WANDB_RUN_NAME_MAX_LEN:
@@ -315,6 +334,7 @@ def init_pipeline_run(
     if not _WANDB_AVAILABLE or not _api_key_usable():
         return None
 
+    group = truncate_wandb_group(group)
     run_name = make_pipeline_run_name(group)
     try:
         init_kwargs: Dict[str, Any] = {
