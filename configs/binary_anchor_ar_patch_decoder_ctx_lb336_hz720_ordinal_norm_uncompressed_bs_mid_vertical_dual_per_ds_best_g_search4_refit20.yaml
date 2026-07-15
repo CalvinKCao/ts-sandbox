@@ -34,7 +34,7 @@ experiment:
     traffic: 4.0
   data_subset:
     max_variates_by_dataset:
-      dynamic: 1
+      dynamic: 2
     sample_stride_by_dataset:
       dynamic: 480
 
