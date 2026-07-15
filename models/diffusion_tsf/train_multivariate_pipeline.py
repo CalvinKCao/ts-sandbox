@@ -662,6 +662,15 @@ def _patch_guidance_batch(
         past, future = _sample_itrans_ar_chunk(past, future)
     past = past.to(device)
     future = future.to(device)
+    # Univariate loaders can yield (B, T); decoder expects (B, V, T).
+    if past.ndim == 2:
+        past = past.unsqueeze(1)
+        future = future.unsqueeze(1)
+    if past.ndim != 3 or future.ndim != 3:
+        raise ValueError(
+            f"patch guidance expects (B,V,T), got past={tuple(past.shape)} "
+            f"future={tuple(future.shape)}"
+        )
     past_norm, future_norm = _window_norm_past_future(
         past,
         future,

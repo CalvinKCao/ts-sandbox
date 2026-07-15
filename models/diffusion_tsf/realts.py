@@ -807,7 +807,7 @@ class RealTS(Dataset):
             past = np.array(past)
             future = np.array(future)
             
-            return torch.tensor(past, dtype=torch.float32), torch.tensor(future, dtype=torch.float32)
+            return self._to_vt_tensors(past, future)
 
         # Case 2: On-the-fly Generation (Legacy / Univariate RAM)
         K = self.lookback_overlap
@@ -838,11 +838,24 @@ class RealTS(Dataset):
             past = seq[:self.lookback_length]
             future = seq[self.lookback_length - K:]
         
-        # Convert to tensors
-        past_tensor = torch.tensor(past, dtype=torch.float32)
-        future_tensor = torch.tensor(future, dtype=torch.float32)
-        
-        return past_tensor, future_tensor
+        return self._to_vt_tensors(past, future)
+
+    def _to_vt_tensors(
+        self, past: np.ndarray, future: np.ndarray
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Always return (V, T) so DataLoader batches as (B, V, T), including V=1."""
+        past_t = torch.as_tensor(past, dtype=torch.float32)
+        future_t = torch.as_tensor(future, dtype=torch.float32)
+        if past_t.ndim == 1:
+            past_t = past_t.unsqueeze(0)
+        if future_t.ndim == 1:
+            future_t = future_t.unsqueeze(0)
+        if past_t.ndim != 2 or future_t.ndim != 2:
+            raise ValueError(
+                f"RealTS expected (V,T) windows, got past={tuple(past_t.shape)} "
+                f"future={tuple(future_t.shape)}"
+            )
+        return past_t, future_t
 
 
 def get_synthetic_dataloader(
