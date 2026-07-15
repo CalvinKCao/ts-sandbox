@@ -338,6 +338,69 @@ def _suggest_lr_eff_batch_univariate(
     }
 
 
+def _suggest_lr_eff_batch_g(
+    trial,
+    state: PipelineState,
+    max_batch_size: int,
+    smoke_test: bool,
+    phase_overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Tune LR + univariate batch + continuous length_g in [hp_g_min, hp_g_max]."""
+    params = _suggest_lr_eff_batch_univariate(
+        trial, state, max_batch_size, smoke_test, phase_overrides,
+    )
+    g_lo = float(phase_overrides.get("hp_g_min", 1.0))
+    g_hi = float(phase_overrides.get("hp_g_max", 10.0))
+    if g_hi < g_lo:
+        raise ValueError(f"hp_g_max ({g_hi}) must be >= hp_g_min ({g_lo})")
+    params["binary_length_g"] = float(trial.suggest_float("binary_length_g", g_lo, g_hi))
+    params["binary_length_mode"] = "power"
+    return params
+
+
+def _fraction_subset(ds, fraction: float, seed: int):
+    """Deterministic subset of a dataset (same idea as staged_eval)."""
+    import numpy as np
+
+    n = len(ds)
+    frac = float(fraction)
+    if frac >= 1.0:
+        return ds
+    if frac <= 0.0:
+        raise ValueError(f"fraction must be in (0, 1], got {frac}")
+    keep = max(1, int(round(n * frac)))
+    rng = np.random.default_rng(int(seed))
+    idx = sorted(rng.choice(n, size=min(keep, n), replace=False).tolist())
+    return Subset(ds, idx)
+
+
+@torch.no_grad()
+def _anchor_mse_on_loader(model, loader, device: torch.device) -> float:
+    """One-shot 2d→1d decoded anchor MSE vs dataloader future (global-norm space)."""
+    model.eval()
+    total = 0.0
+    n = 0
+    k = int(getattr(model.config, "lookback_overlap", 0) or 0)
+    for past, future in loader:
+        past = past.to(device)
+        future = future.to(device)
+        out = model.generate(past, sampler="anchor", num_inference_steps=1)
+        pred = out.get("prediction_global_norm", out.get("prediction"))
+        if pred is None:
+            raise KeyError("generate(anchor) missing prediction_global_norm/prediction")
+        fut = future[..., k:] if k > 0 else future
+        if tuple(pred.shape) != tuple(fut.shape):
+            raise RuntimeError(
+                f"anchor MSE shape mismatch after overlap strip k={k}: "
+                f"pred={tuple(pred.shape)} future={tuple(fut.shape)}"
+            )
+        err = (pred.float() - fut.float()).pow(2).mean()
+        b = int(pred.shape[0])
+        total += float(err.item()) * b
+        n += b
+    return total / max(n, 1)
+
+
 def _suggest_full_diffusion_params(
     trial,
     state: PipelineState,
@@ -698,6 +761,11 @@ def _suggest_staged_params(
             trial, state, max_batch_size, smoke_test, overrides,
         )
 
+    if search_space == "lr_eff_batch_g":
+        return _suggest_lr_eff_batch_g(
+            trial, state, max_batch_size, smoke_test, overrides,
+        )
+
     if search_space == "fixed":
         raise RuntimeError("_suggest_staged_params must not be called for search_space=fixed")
 
@@ -832,6 +900,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             else:
                 state.diffusion_finer_finetune_ckpt = best_pt
                 state.finer_finetune_best_params = params
+            self._apply_tuned_length_to_state(state, params)
             return True
         return False
 
@@ -846,6 +915,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 best_params = dict(json.load(f).get("tuned_params") or {})
         except Exception as e:
             logger.warning("Failed to load tuned params from %s: %s", meta_path, e)
+        self._apply_tuned_length_to_state(state, best_params)
         try:
             self._log_post_finetune_viz_and_diagnostics(
                 state,
@@ -1008,6 +1078,23 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         out.setdefault("binary_length_scale", float(state.binary_length_scale))
         return out
 
+    @staticmethod
+    def _apply_tuned_length_to_state(state: PipelineState, params: Optional[Dict[str, Any]]) -> None:
+        """Push winner length schedule onto state so staged_eval / patch_globals match train."""
+        if not params:
+            return
+        if "binary_length_mode" in params:
+            state.binary_length_mode = str(params["binary_length_mode"])
+        if "binary_length_g" in params:
+            g = float(params["binary_length_g"])
+            state.binary_length_g = g
+            by_g = dict(getattr(state, "binary_length_g_by_dataset", None) or {})
+            if state.dataset:
+                by_g[str(state.dataset)] = g
+            state.binary_length_g_by_dataset = by_g
+        if "binary_length_scale" in params:
+            state.binary_length_scale = float(params["binary_length_scale"])
+
     def _refit_best_if_configured(
         self,
         *,
@@ -1029,6 +1116,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         subset_id: str,
         subset_meta: Dict[str, Any],
         norm_stats: Dict[str, Any],
+        selection_metric: str = "diffusion_val",
+        anchor_val_ds=None,
     ) -> Tuple[Dict[str, Any], float, int, bool]:
         """Optionally retrain the Optuna winner from pretrain for more epochs.
 
@@ -1048,15 +1137,17 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         best_params = _with_state_anchor_params(
             self._inject_length_params(best_params, state), state,
         )
+        selection_metric = str(selection_metric)
         logger.info(
             "  [%s] refit_best: search_epochs=%d -> refit_epochs=%d patience=%d "
-            "lr=%.2e g=%s",
+            "lr=%.2e g=%s selection=%s",
             self.name,
             search_max_epochs,
             refit_epochs,
             refit_patience,
             float(best_params.get("learning_rate", 0.0)),
             best_params.get("binary_length_g"),
+            selection_metric,
         )
         # Persist search winner before long refit so --resume can skip Optuna.
         meta_pending: Dict[str, Any] = {
@@ -1073,6 +1164,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "diffusion_stage": self.stage,
             "staged_representation": state.staged_representation,
             "search_space": search_space,
+            "selection_metric": selection_metric,
             "max_epochs": search_max_epochs,
             "patience": search_patience,
             "refit_best_max_epochs": refit_epochs,
@@ -1094,6 +1186,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             max_epochs=refit_epochs,
             patience=refit_patience,
             trial=None,
+            selection_metric=selection_metric,
+            anchor_val_ds=anchor_val_ds,
         )
         return best_params, float(final_val), int(final_epoch), True
 
@@ -1114,6 +1208,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         trial=None,
         guidance=None,
         pretrained_state_dict: Optional[Dict[str, Any]] = None,
+        selection_metric: str = "diffusion_val",
+        anchor_val_ds=None,
     ) -> Tuple[float, int]:
         from models.diffusion_tsf.train_multivariate_pipeline import (
             EarlyStopping,
@@ -1126,10 +1222,24 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         )
 
         params = _with_state_anchor_params(params, state)
+        if selection_metric not in {"diffusion_val", "anchor_mse"}:
+            raise ValueError(
+                f"selection_metric must be 'diffusion_val' or 'anchor_mse', got {selection_metric!r}"
+            )
+        use_anchor = selection_metric == "anchor_mse"
+        if use_anchor and anchor_val_ds is None:
+            raise ValueError("selection_metric=anchor_mse requires anchor_val_ds")
         n_iv = len(variate_indices)
         batch_size = int(params["batch_size"])
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+        anchor_loader = None
+        if use_anchor:
+            # Cap micro-batch for one-shot generate; still covers the full subset.
+            anchor_bs = max(1, min(batch_size, 8))
+            anchor_loader = DataLoader(
+                anchor_val_ds, batch_size=anchor_bs, shuffle=False, num_workers=0,
+            )
         n_train_batches = len(train_loader)
         n_val_batches = len(val_loader)
         trial_label = (
@@ -1137,7 +1247,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         )
         logger.info(
             "  [%s/%s] %s START epochs=%d patience=%d lr=%.2e bs=%d accum=%d "
-            "train_batches=%d val_batches=%d",
+            "train_batches=%d val_batches=%d selection=%s anchor_batches=%s g=%s",
             self.name,
             self.stage,
             trial_label,
@@ -1148,6 +1258,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             int(params.get("gradient_accumulation_steps", 1)),
             n_train_batches,
             n_val_batches,
+            selection_metric,
+            len(anchor_loader) if anchor_loader is not None else "-",
+            params.get("binary_length_g"),
         )
         _log_gpu_mem(f"{self.stage}/{trial_label}/start")
 
@@ -1295,15 +1408,27 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         n_val += 1
                 val_loss /= max(n_val, 1)
                 val_elapsed = time.perf_counter() - val_start
+                anchor_mse = None
+                if use_anchor:
+                    anchor_start = time.perf_counter()
+                    anchor_mse = _anchor_mse_on_loader(model, anchor_loader, device)
+                    logger.info(
+                        "  [%s/%s] %s epoch %d/%d anchor_mse=%.6f time=%.1fs",
+                        self.name, self.stage, trial_label,
+                        epoch + 1, max_epochs, anchor_mse,
+                        time.perf_counter() - anchor_start,
+                    )
+                selection_score = float(anchor_mse) if use_anchor else float(val_loss)
                 lr_now = float(optimizer.param_groups[0]["lr"])
-                saved = val_loss < best_val
+                saved = selection_score < best_val
                 if saved:
-                    best_val = val_loss
+                    best_val = selection_score
                     best_epoch = epoch + 1
                     config = {
                         "tuned_params": dict(params),
                         "diffusion_stage": self.stage,
                         "best_epoch": best_epoch,
+                        "selection_metric": selection_metric,
                     }
                     if ckpt_path:
                         save_checkpoint(
@@ -1311,7 +1436,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             optimizer,
                             epoch,
                             train_loss_avg,
-                            val_loss,
+                            selection_score,
                             config,
                             ckpt_path,
                         )
@@ -1325,34 +1450,37 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     "epoch": epoch + 1,
                     "train_loss": float(train_loss_avg),
                     "val_loss": float(val_loss),
+                    "anchor_mse": None if anchor_mse is None else float(anchor_mse),
+                    "selection_score": float(selection_score),
                     "best_val": float(best_val),
                     "lr": lr_now,
                     "saved": bool(saved),
                 })
 
                 logger.info(
-                    "  [%s/%s] %s epoch %d/%d done train=%.4f val=%.4f best=%.4f "
+                    "  [%s/%s] %s epoch %d/%d done train=%.4f val=%.4f sel=%.4f best=%.4f "
                     "best_ep=%d lr=%.2e saved=%s train_t=%.1fs val_t=%.1fs epoch_t=%.1fs",
                     self.name, self.stage, trial_label,
                     epoch + 1, max_epochs,
-                    train_loss_avg, val_loss, best_val, best_epoch, lr_now,
+                    train_loss_avg, val_loss, selection_score, best_val, best_epoch, lr_now,
                     saved, train_elapsed, val_elapsed, time.perf_counter() - epoch_start,
                 )
                 _log_gpu_mem(f"{self.stage}/{trial_label}/ep{epoch + 1}")
 
                 if trial is not None:
-                    trial.report(val_loss, epoch)
+                    trial.report(selection_score, epoch)
                     if trial.should_prune():
                         logger.info(
-                            "  [%s/%s] %s epoch %d/%d PRUNED val=%.4f",
-                            self.name, self.stage, trial_label, epoch + 1, max_epochs, val_loss,
+                            "  [%s/%s] %s epoch %d/%d PRUNED sel=%.4f",
+                            self.name, self.stage, trial_label, epoch + 1, max_epochs,
+                            selection_score,
                         )
                         raise TrialPruned()
-                if early_stop(val_loss):
+                if early_stop(selection_score):
                     logger.info(
-                        "  [%s/%s] %s epoch %d/%d EARLY_STOP val=%.4f best=%.4f best_ep=%d",
+                        "  [%s/%s] %s epoch %d/%d EARLY_STOP sel=%.4f best=%.4f best_ep=%d",
                         self.name, self.stage, trial_label,
-                        epoch + 1, max_epochs, val_loss, best_val, best_epoch,
+                        epoch + 1, max_epochs, selection_score, best_val, best_epoch,
                     )
                     break
 
@@ -1379,18 +1507,20 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             "length_g": params.get("binary_length_g", 1.0),
                             "length_scale": params.get("binary_length_scale", 1.0),
                             "binary_noise_schedule": params.get("binary_noise_schedule"),
+                            "selection_metric": selection_metric,
                             "best_val": float(best_val),
                             "best_epoch": int(best_epoch),
                             "epochs": epoch_history,
-                            # Val/BCE is not comparable across length_g (different forward process).
+                            # Diffusion val/BCE is not comparable across length_g.
                             "val_loss_note": "not_comparable_across_schedules",
                         },
                         hf,
                         indent=2,
                     )
             logger.info(
-                "  [%s/%s] %s DONE best_val=%.4f best_epoch=%d total_time=%.1fs",
-                self.name, self.stage, trial_label, best_val, best_epoch, total_elapsed,
+                "  [%s/%s] %s DONE best_val=%.4f best_epoch=%d selection=%s total_time=%.1fs",
+                self.name, self.stage, trial_label, best_val, best_epoch,
+                selection_metric, total_elapsed,
             )
             return best_val, best_epoch
         finally:
@@ -1468,6 +1598,28 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "  [%s] train/val windows=%d/%d",
             self.name, len(train_ds), len(val_ds),
         )
+
+        # Optuna/refit selection: lr_eff_batch_g ranks trials by decoded val anchor MSE
+        # (diffusion val loss is not comparable across length_g).
+        _ss_hint = str(self.get("search_space") or "lr_only").lower()
+        selection_metric = "anchor_mse" if _ss_hint == "lr_eff_batch_g" else "diffusion_val"
+        if self.get("hp_objective") is not None:
+            selection_metric = str(self.get("hp_objective")).lower()
+        if selection_metric not in {"diffusion_val", "anchor_mse"}:
+            raise ValueError(
+                f"hp_objective/selection_metric must be diffusion_val or anchor_mse, "
+                f"got {selection_metric!r}"
+            )
+        anchor_val_ds = None
+        if selection_metric == "anchor_mse":
+            frac = float(self.get("hp_anchor_eval_val_fraction", 0.5))
+            if state.smoke_test:
+                frac = 1.0
+            anchor_val_ds = _fraction_subset(val_ds, frac, int(state.seed))
+            logger.info(
+                "  [%s] selection_metric=anchor_mse on %d/%d val windows (fraction=%.3f)",
+                self.name, len(anchor_val_ds), len(val_ds), frac,
+            )
 
         from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
         from models.diffusion_tsf.pipeline.visualize_utils import _load_staged_diffusion_from_ckpt
@@ -1614,6 +1766,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     max_epochs=max_epochs,
                     patience=patience,
                     trial=None,
+                    selection_metric=selection_metric,
+                    anchor_val_ds=anchor_val_ds,
                 )
                 hp_best_val_loss = float(final_val)
                 logger.info(
@@ -1651,6 +1805,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 "full_with_batch",
                 "reduced_hp",
                 "lr_eff_batch_univariate",
+                "lr_eff_batch_g",
                 "fixed",
             }:
                 raise ValueError(f"Unknown staged diffusion search_space={search_space!r}")
@@ -1658,11 +1813,11 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 for key in ("hp_lr_min", "hp_lr_max"):
                     if self.get(key) is None:
                         raise ValueError(f"search_space=reduced_hp requires phase {key}")
-            if search_space == "lr_eff_batch_univariate":
+            if search_space in {"lr_eff_batch_univariate", "lr_eff_batch_g"}:
                 for key in ("hp_lr_min", "hp_lr_max", "effective_univariate_batch_grid"):
                     if self.get(key) is None:
                         raise ValueError(
-                            f"search_space=lr_eff_batch_univariate requires phase {key}"
+                            f"search_space={search_space} requires phase {key}"
                         )
             if search_space == "fixed" and not (
                 self.get("fixed_tuned_params") or self.get("fixed_tuned_params_by_dataset")
@@ -1690,6 +1845,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     max_epochs=max_epochs,
                     patience=patience,
                     trial=None,
+                    selection_metric=selection_metric,
+                    anchor_val_ds=anchor_val_ds,
                 )
                 hp_best_val_loss = float(final_val)
                 best_trial_num = 0
@@ -1737,12 +1894,21 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             "full_with_batch",
                             "reduced_hp",
                             "lr_eff_batch_univariate",
+                            "lr_eff_batch_g",
                         } and not state.smoke_test:
                             micro = int(params["batch_size"])
                             accum = int(params.get("gradient_accumulation_steps", 1))
                             # Univariate plans may use micro=1 and large accum to hit U=B*C.
-                            min_micro = 1 if search_space == "lr_eff_batch_univariate" else 4
-                            max_accum = 2048 if search_space == "lr_eff_batch_univariate" else 512
+                            min_micro = (
+                                1
+                                if search_space in {"lr_eff_batch_univariate", "lr_eff_batch_g"}
+                                else 4
+                            )
+                            max_accum = (
+                                2048
+                                if search_space in {"lr_eff_batch_univariate", "lr_eff_batch_g"}
+                                else 512
+                            )
                             if micro < min_micro or accum > max_accum:
                                 raise RuntimeError(
                                     f"Degenerate batch plan micro_bs={micro} accum={accum} "
@@ -1750,7 +1916,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                                 )
                         logger.info(
                             "  [%s] Optuna trial %d/%d suggested lr=%.2e micro_bs=%d "
-                            "accum=%d effective_bs=%d univariate_U=%s (target_U=%s)",
+                            "accum=%d effective_bs=%d univariate_U=%s (target_U=%s) g=%s",
                             phase.name,
                             trial.number + 1,
                             n_trials,
@@ -1760,6 +1926,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             int(params.get("effective_batch_size", params["batch_size"])),
                             params.get("effective_univariate_batch", "-"),
                             params.get("target_univariate_batch", "-"),
+                            params.get("binary_length_g", "-"),
                         )
                         trial_ckpt = os.path.join(
                             trials_dir, f"trial_{trial.number}_best.pt",
@@ -1781,6 +1948,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                                 trial=trial,
                                 guidance=worker_guidance,
                                 pretrained_state_dict=worker_pretrained,
+                                selection_metric=selection_metric,
+                                anchor_val_ds=anchor_val_ds,
                             )
                         except torch.cuda.OutOfMemoryError:
                             logger.warning(
@@ -1900,6 +2069,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 subset_id=subset_id,
                 subset_meta=subset_meta,
                 norm_stats=norm_stats,
+                selection_metric=selection_metric,
+                anchor_val_ds=anchor_val_ds,
             )
 
         meta_out: Dict[str, Any] = {
@@ -1913,10 +2084,12 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "best_trial": best_trial_num,
             "hp_best_val_loss": hp_best_val_loss,
             "best_val_loss": float(final_val),
+            "best_selection_score": float(final_val),
             "best_epoch": int(final_epoch),
             "diffusion_stage": self.stage,
             "staged_representation": state.staged_representation,
             "search_space": search_space,
+            "selection_metric": selection_metric,
             "max_epochs": (
                 int(self.get("refit_best_max_epochs"))
                 if refit_completed
@@ -1955,6 +2128,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         else:
             state.diffusion_finer_finetune_ckpt = final_ckpt
             state.finer_finetune_best_params = best_params
+        self._apply_tuned_length_to_state(state, best_params)
 
         wandb_utils.log_summary({
             f"hp/{self.stage}_diff_ft_best_val_loss": final_val,
