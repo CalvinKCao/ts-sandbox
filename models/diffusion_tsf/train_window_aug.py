@@ -103,6 +103,38 @@ def _clamp(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return np.clip(x, lo, hi)
 
 
+def _compress_for_headroom(
+    x: np.ndarray,
+    lo: float,
+    hi: float,
+    rng: np.random.Generator,
+    *,
+    min_margin_frac: float = 0.15,
+    shrink_range: Tuple[float, float] = (0.45, 0.80),
+) -> np.ndarray:
+    """Shrink toward mean when the series hugs ladder bounds, freeing vertical room.
+
+    Always compresses if current headroom on either side is below
+    ``min_margin_frac * span``; otherwise compresses with probability 0.5 so
+    shifts/shocks still get flexible range most of the time.
+    """
+    span = max(hi - lo, 1e-6)
+    need = min_margin_frac * span
+    room_hi = hi - float(np.max(x))
+    room_lo = float(np.min(x)) - lo
+    tight = room_hi < need or room_lo < need
+    if not tight and rng.random() < 0.5:
+        return x
+    mean = float(np.mean(x))
+    factor = float(rng.uniform(*shrink_range))
+    return _clamp(mean + (x - mean) * factor, lo, hi)
+
+
+def _shift_room(x: np.ndarray, lo: float, hi: float) -> Tuple[float, float]:
+    """Return (room_up, room_down) for a uniform vertical shift of ``x``."""
+    return hi - float(np.max(x)), float(np.min(x)) - lo
+
+
 def _flatline_mask(x: np.ndarray, atol: float = 1e-6) -> np.ndarray:
     """True where timestep equals previous (consecutive flat runs)."""
     mask = np.zeros(len(x), dtype=bool)
@@ -155,19 +187,18 @@ def aug_amplitude_shift(
     vi: int,
     rng: np.random.Generator,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    spacing = _bin_spacing(ladder, vi)
+    """Vertically stretch/compress around the window mean (span-relative)."""
     lo, hi = _envelope_for_variate(ladder, vi)
     full = _join_past_future(past, future, overlap)
-    x = full[vi]
+    x = full[vi].astype(np.float64, copy=False)
     mean = float(x.mean())
-    # stretch so typical deviation moves by ~1–3 bins
-    bins = float(rng.uniform(1.2, 3.0))
-    std = float(np.std(x)) + 1e-8
-    factor = 1.0 + (bins * spacing) / std
-    if rng.random() < 0.5:
-        factor = 1.0 / max(factor, 1.05)
+    # Compress or expand deviations; compress is common so later shifts have room.
+    if rng.random() < 0.55:
+        factor = float(rng.uniform(0.40, 0.75))
+    else:
+        factor = float(rng.uniform(1.25, 1.90))
     y = mean + (x - mean) * factor
-    full[vi] = _clamp(y, lo, hi)
+    full[vi] = _clamp(y, lo, hi).astype(np.float32)
     return _split_full(full, past.shape[-1], overlap)
 
 
@@ -180,19 +211,17 @@ def aug_window_shift(
     vi: int,
     rng: np.random.Generator,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    spacing = _bin_spacing(ladder, vi)
+    """Add a constant offset across lookback+horizon (span-relative)."""
     lo, hi = _envelope_for_variate(ladder, vi)
+    span = max(hi - lo, 1e-6)
     full = _join_past_future(past, future, overlap)
-    x = full[vi]
-    delta = float(rng.uniform(1.0, 3.0) * spacing) * float(rng.choice([-1.0, 1.0]))
-    # shrink if needed so clamped series still moves
-    room_hi = hi - float(np.max(x))
-    room_lo = float(np.min(x)) - lo
-    if delta > 0:
-        delta = min(delta, max(0.0, room_hi))
-    else:
-        delta = -min(-delta, max(0.0, room_lo))
-    full[vi] = _clamp(x + delta, lo, hi)
+    x = _compress_for_headroom(full[vi].astype(np.float64, copy=False), lo, hi, rng)
+    room_up, room_down = _shift_room(x, lo, hi)
+    sign = float(rng.choice([-1.0, 1.0]))
+    room = room_up if sign > 0 else room_down
+    target = float(rng.uniform(0.12, 0.35) * span)
+    delta = sign * min(target, max(0.0, room))
+    full[vi] = _clamp(x + delta, lo, hi).astype(np.float32)
     return _split_full(full, past.shape[-1], overlap)
 
 
@@ -375,21 +404,26 @@ def aug_sudden_shock(
     vi: int,
     rng: np.random.Generator,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    spacing = _bin_spacing(ladder, vi)
+    """Offset only the first 10–60% of lookback; rest unchanged (span-relative)."""
     lo, hi = _envelope_for_variate(ladder, vi)
-    x = past[vi].copy()
+    span = max(hi - lo, 1e-6)
+    # Compress full lookback first so the shock segment has room, then restore tail.
+    x_full = past[vi].astype(np.float64, copy=True)
+    x = _compress_for_headroom(x_full, lo, hi, rng)
     n = len(x)
     frac = float(rng.uniform(0.10, 0.60))
     cut = max(1, int(round(n * frac)))
-    delta = float(rng.uniform(1.0, 4.0) * spacing) * float(rng.choice([-1.0, 1.0]))
     head = x[:cut]
-    if delta > 0:
-        delta = min(delta, max(0.0, hi - float(np.max(head))))
-    else:
-        delta = -min(-delta, max(0.0, float(np.min(head)) - lo))
+    room_up = hi - float(np.max(head))
+    room_down = float(np.min(head)) - lo
+    sign = float(rng.choice([-1.0, 1.0]))
+    room = room_up if sign > 0 else room_down
+    target = float(rng.uniform(0.15, 0.45) * span)
+    delta = sign * min(target, max(0.0, room))
     x[:cut] = _clamp(head + delta, lo, hi)
+    # Keep last 40% of lookback on the pre-shock compressed baseline (not shocked).
     past = past.copy()
-    past[vi] = x
+    past[vi] = x.astype(np.float32)
     future = _sync_overlap(past, future, overlap)
     return past, future
 
