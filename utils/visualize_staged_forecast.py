@@ -81,11 +81,33 @@ def _itrans_forward(
 
 
 def _load_staged_bundle(checkpoint_dir: Path, dataset: str) -> Dict[str, Any]:
-    """Find subset dir under staged run root with coarse/fine best.pt for *dataset*."""
+    """Find subset dir under staged run root with coarse/fine or vertical_dual best.pt."""
     candidates: List[Dict[str, Any]] = []
     for sub_dir in sorted(checkpoint_dir.iterdir()):
         if not sub_dir.is_dir():
             continue
+
+        vd_pt = sub_dir / "vertical_dual" / "best.pt"
+        vd_meta_path = sub_dir / "vertical_dual" / "metadata.json"
+        if vd_pt.is_file() and vd_meta_path.is_file():
+            with vd_meta_path.open(encoding="utf-8") as f:
+                vd_meta = json.load(f)
+            if vd_meta.get("dataset_name") == dataset:
+                candidates.append(
+                    {
+                        "subset_id": vd_meta["subset_id"],
+                        "variate_indices": vd_meta["variate_indices"],
+                        "variate_names": vd_meta.get("variate_names", []),
+                        "coarse_pt": vd_pt,
+                        "fine_pt": vd_pt,
+                        "fine_metadata": vd_meta,
+                        "coarse_metadata": vd_meta,
+                        "stage": "vertical_dual",
+                        "root": checkpoint_dir,
+                    }
+                )
+                continue
+
         coarse_pt = sub_dir / "coarse" / "best.pt"
         fine_pt = sub_dir / "fine" / "best.pt"
         fine_meta_path = sub_dir / "fine" / "metadata.json"
@@ -109,12 +131,14 @@ def _load_staged_bundle(checkpoint_dir: Path, dataset: str) -> Dict[str, Any]:
                 "fine_pt": fine_pt,
                 "fine_metadata": fine_meta,
                 "coarse_metadata": coarse_meta,
+                "stage": "staged",
                 "root": checkpoint_dir,
             }
         )
     if not candidates:
         raise FileNotFoundError(
-            f"No staged coarse/fine best.pt for dataset={dataset} under {checkpoint_dir}"
+            f"No staged coarse/fine or vertical_dual best.pt for dataset={dataset} "
+            f"under {checkpoint_dir}"
         )
     return candidates[0]
 

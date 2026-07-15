@@ -233,7 +233,7 @@ def discover_binary_ckpt(ckpt_base: Path, dataset: str, config_stem: str) -> Pat
     if not usable:
         raise FileNotFoundError(
             f"No usable checkpoint dir *{suffix} under {ckpt_base} "
-            f"(need {{subset}}/coarse|fine/best.pt)"
+            f"(need {{subset}}/coarse|fine/best.pt or {{subset}}/vertical_dual/best.pt)"
         )
     return usable[0]
 
@@ -446,13 +446,19 @@ def run_binary_staged_eval(
         dataset_lookback=lookback,
         dataset_horizon=horizon,
     )
-    coarse_model = phase._load_model(state, "coarse", guidance, len(variate_indices), device)
-    fine_model = phase._load_model(state, "fine", guidance, len(variate_indices), device)
-    finer_model = (
-        phase._load_model(state, "finer", guidance, len(variate_indices), device)
-        if state.use_triple_scale
-        else None
-    )
+    vertical_dual = bool(getattr(state, "use_vertical_dual_concat", False))
+    if vertical_dual:
+        coarse_model = phase._load_model(state, "vertical_dual", guidance, len(variate_indices), device)
+        fine_model = coarse_model
+        finer_model = None
+    else:
+        coarse_model = phase._load_model(state, "coarse", guidance, len(variate_indices), device)
+        fine_model = phase._load_model(state, "fine", guidance, len(variate_indices), device)
+        finer_model = (
+            phase._load_model(state, "finer", guidance, len(variate_indices), device)
+            if state.use_triple_scale
+            else None
+        )
 
     subset = Subset(test_ds, list(window_indices))
     # 336/720 maps are ~5.5× larger than 96/96; keep micro-batch small to avoid OOM kills.
@@ -956,20 +962,26 @@ def _plot_compare_panel(
 
     fine_out = maps["fine_out"]
     coarse_out = maps["coarse_out"]
+    vertical_dual = bool(maps.get("vertical_dual"))
     bin_final_h = fine_out["prediction_global_norm"][0].detach().cpu().numpy()
-    bin_coarse_h = coarse_out["prediction_global_norm"][0].detach().cpu().numpy()
+    if vertical_dual:
+        # Single-model generate: final 1D is combined; coarse 1D comes from map decode.
+        bin_coarse_h = pr_coarse_map[..., lookback:]
+    else:
+        bin_coarse_h = coarse_out["prediction_global_norm"][0].detach().cpu().numpy()
     if bin_final_h.shape[-1] != horizon_core or bin_coarse_h.shape[-1] != horizon_core:
         raise ValueError(
             f"prediction_global_norm width fine={bin_final_h.shape[-1]} "
             f"coarse={bin_coarse_h.shape[-1]} != horizon_core {horizon_core}"
         )
 
-    _assert_horizon_aligned(
-        f"{dataset} win {window_index}: map-decode coarse vs prediction_global_norm",
-        pr_coarse_map[..., lookback:],
-        bin_coarse_h,
-        min_corr=0.75,
-    )
+    if not vertical_dual:
+        _assert_horizon_aligned(
+            f"{dataset} win {window_index}: map-decode coarse vs prediction_global_norm",
+            pr_coarse_map[..., lookback:],
+            bin_coarse_h,
+            min_corr=0.75,
+        )
     _assert_horizon_aligned(
         f"{dataset} win {window_index}: map-decode final vs prediction_global_norm",
         pr_final_map[..., lookback:],
@@ -1177,8 +1189,19 @@ def plot_dataset_windows(
         dataset_lookback=lookback,
         dataset_horizon=horizon,
     )
-    coarse_model = _load_stage_model(state, "coarse", bundle["coarse_pt"], guidance_model, len(variate_indices), device)
-    fine_model = _load_stage_model(state, "fine", bundle["fine_pt"], guidance_model, len(variate_indices), device)
+    stage = str(bundle.get("stage") or "")
+    if stage == "vertical_dual" or bool(getattr(state, "use_vertical_dual_concat", False)):
+        coarse_model = _load_stage_model(
+            state, "vertical_dual", bundle["coarse_pt"], guidance_model, len(variate_indices), device,
+        )
+        fine_model = coarse_model
+    else:
+        coarse_model = _load_stage_model(
+            state, "coarse", bundle["coarse_pt"], guidance_model, len(variate_indices), device,
+        )
+        fine_model = _load_stage_model(
+            state, "fine", bundle["fine_pt"], guidance_model, len(variate_indices), device,
+        )
     ranked = bool(getattr(test_ds, "yields_ordinal_ranks", False))
     for m in (coarse_model, fine_model):
         m._ordinal_input_is_ranked = ranked

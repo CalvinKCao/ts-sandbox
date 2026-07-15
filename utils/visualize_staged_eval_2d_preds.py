@@ -214,6 +214,33 @@ def _anchor_maps(
     past_b: torch.Tensor,
     future_b: torch.Tensor,
 ) -> Dict[str, torch.Tensor]:
+    stage = str(getattr(getattr(coarse_model, "config", None), "diffusion_stage", "") or "")
+    vertical_dual = stage == "vertical_dual" or fine_model is coarse_model
+    if vertical_dual:
+        out = coarse_model.generate(past_b, sampler="anchor", num_inference_steps=1)
+        past_norm, future_norm, _norm_stats = coarse_model._normalize_sequence(past_b, future_b)
+        past_maps_gt = coarse_model._encode_staged_maps(past_norm)
+        future_maps_gt = coarse_model._encode_staged_maps(future_norm)
+        past_c_gt = past_maps_gt["coarse"][0].cpu().numpy()
+        past_f_gt = past_maps_gt["fine"][0].cpu().numpy()
+        fut_c_gt = future_maps_gt["coarse"][0].cpu().numpy()
+        fut_f_gt = future_maps_gt["fine"][0].cpu().numpy()
+        past_c_pred = out["past_2d_coarse"][0].cpu().numpy()
+        past_f_pred = out["past_2d_fine"][0].cpu().numpy()
+        fut_c_pred = out["future_2d_coarse"][0].cpu().numpy()
+        fut_f_pred = out["future_2d_fine"][0].cpu().numpy()
+        return {
+            "gt_coarse": np.concatenate([past_c_gt, fut_c_gt], axis=-1),
+            "gt_fine": np.concatenate([past_f_gt, fut_f_gt], axis=-1),
+            "pred_coarse": np.concatenate([past_c_pred, fut_c_pred], axis=-1),
+            "pred_fine": np.concatenate([past_f_pred, fut_f_pred], axis=-1),
+            "past_norm": past_norm[0].cpu(),
+            "future_norm": future_norm[0].cpu(),
+            "coarse_out": out,
+            "fine_out": out,
+            "vertical_dual": True,
+        }
+
     coarse_out = coarse_model.generate(past_b, sampler="anchor", num_inference_steps=1)
     fine_out = fine_model.generate(
         past_b,
@@ -241,6 +268,7 @@ def _anchor_maps(
         "future_norm": future_norm[0].cpu(),
         "coarse_out": coarse_out,
         "fine_out": fine_out,
+        "vertical_dual": False,
     }
 
 
