@@ -1661,6 +1661,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             del probe_model
         except Exception as e:
             logger.warning("[%s] phase-start diagnostics failed: %s", self.name, e, exc_info=True)
+        # Diagnostics may mutate module globals (e.g. DIT_PATCH_SIZE); restore from state.
+        patch_stage_globals(pipeline_mod, state, self.stage, honor_dataset_windows=True)
 
         ds_lb, ds_hz = dataset_window_lengths(state.dataset)
         micro_ceiling = configured_max_diffusion_batch(state, state.smoke_test)

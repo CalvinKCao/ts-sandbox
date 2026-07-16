@@ -133,15 +133,32 @@ def apply_checkpoint_architecture(ckpt: dict, diffusion_type: str, image_height:
     elif isinstance(cfg, dict) and 'staged_representation' in cfg:
         train_pipeline.STAGED_REPRESENTATION = str(cfg['staged_representation'])
     state = ckpt.get('model_state_dict', {})
+    # Prefer explicit config, then Conv2d kernel (supports non-square e.g. 16x4).
+    # Do NOT infer square side from head out_features: 16*4 == 8*8 == 64.
+    patch_from_cfg = None
+    if hasattr(cfg, "dit_patch_size") and cfg.dit_patch_size is not None:
+        patch_from_cfg = tuple(int(x) for x in cfg.dit_patch_size)
+    elif isinstance(cfg, dict) and cfg.get("dit_patch_size") is not None:
+        patch_from_cfg = tuple(int(x) for x in cfg["dit_patch_size"])
+    x_embed = state.get("noise_predictor.x_embed.weight")
+    patch_set = False
+    if patch_from_cfg is not None and len(patch_from_cfg) == 2:
+        train_pipeline.DIT_PATCH_SIZE = patch_from_cfg
+        patch_set = True
+    elif x_embed is not None and getattr(x_embed, "ndim", 0) == 4:
+        train_pipeline.DIT_PATCH_SIZE = (int(x_embed.shape[2]), int(x_embed.shape[3]))
+        patch_set = True
     head_weight = state.get('noise_predictor.head.weight')
     if head_weight is not None:
         out_features, embed_dim = map(int, head_weight.shape[:2])
         train_pipeline.DIT_EMBED_DIM = embed_dim
-        out_channels = 2 if diffusion_type == 'binary' else 1
-        patch_area = out_features // out_channels
-        patch_side = int(round(patch_area ** 0.5))
-        if patch_side * patch_side == patch_area:
-            train_pipeline.DIT_PATCH_SIZE = (patch_side, patch_side)
+        if not patch_set:
+            # Legacy square-only fallback when neither config nor x_embed is available.
+            out_channels = 2 if diffusion_type == 'binary' else 1
+            patch_area = out_features // out_channels
+            patch_side = int(round(patch_area ** 0.5))
+            if patch_side * patch_side == patch_area:
+                train_pipeline.DIT_PATCH_SIZE = (patch_side, patch_side)
     return height
 
 

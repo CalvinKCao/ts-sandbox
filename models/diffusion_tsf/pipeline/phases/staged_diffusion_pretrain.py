@@ -88,6 +88,10 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "ordinal_tie_atol": float(state.ordinal_tie_atol),
         "binary_anchor_input_mode": str(state.binary_anchor_input_mode),
         "binary_cdf_distance_alpha": float(state.binary_cdf_distance_alpha),
+        "binary_noise_schedule": str(state.binary_noise_schedule),
+        "binary_length_mode": str(state.binary_length_mode),
+        "binary_length_g": float(state.binary_length_g),
+        "binary_length_scale": float(state.binary_length_scale),
     }
     digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
     return (
