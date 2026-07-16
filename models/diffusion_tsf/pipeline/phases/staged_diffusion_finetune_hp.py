@@ -691,6 +691,14 @@ def _build_fixed_hp_params(
         raise ValueError(
             f"search_space=fixed: no fixed_tuned_params for dataset={state.dataset!r}"
         )
+    missing_keys = [k for k in ("learning_rate",) if k not in fixed]
+    if missing_keys:
+        known = sorted(str(k) for k in by_ds.keys()) if isinstance(by_ds, dict) else []
+        raise ValueError(
+            f"search_space=fixed: dataset={state.dataset!r} missing required "
+            f"keys {missing_keys} after merging fixed_tuned_params"
+            f"{'' if not known else f' (HPs defined for: {known})'}"
+        )
     params = dict(fixed)
     params.setdefault(
         "max_scale",

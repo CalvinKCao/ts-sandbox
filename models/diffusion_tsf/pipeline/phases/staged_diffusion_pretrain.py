@@ -16,6 +16,7 @@ from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.reused_paths import find_reused_pretrain_ckpt
 from models.diffusion_tsf.pipeline.visualize_utils import (
     run_pretrain_diffusion_visualizations,
+    run_dual_concat_synthetic_pretrain_visualizations,
     run_staged_synthetic_pretrain_diagnostics,
 )
 from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
@@ -879,10 +880,14 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         )
 
         viz_ckpt = state.diffusion_fine_pretrain_ckpt or state.diffusion_coarse_pretrain_ckpt
-        skip_dual_viz = bool(state.use_vertical_dual_concat) or bool(
+        dual_ckpt = (
+            state.diffusion_channel_dual_pretrain_ckpt
+            or state.diffusion_vertical_dual_pretrain_ckpt
+        )
+        is_dual_concat = bool(state.use_vertical_dual_concat) or bool(
             getattr(state, "use_channel_dual_concat", False)
         )
-        if viz_ckpt and guidance_ckpt and not state.smoke_test and not skip_dual_viz:
+        if viz_ckpt and guidance_ckpt and not state.smoke_test and not is_dual_concat:
             try:
                 viz_paths = run_pretrain_diffusion_visualizations(
                     state,
@@ -897,5 +902,23 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                 )
             except Exception as e:
                 logger.warning("Staged synthetic-pretrain viz failed: %s", e, exc_info=True)
+
+        if dual_ckpt and guidance_ckpt and is_dual_concat:
+            try:
+                dual_paths = run_dual_concat_synthetic_pretrain_visualizations(
+                    state,
+                    dual_ckpt_path=dual_ckpt,
+                    guidance_ckpt_path=guidance_ckpt,
+                    tuned_params=best_params,
+                    tag="dual_concat_synthetic_pretrain",
+                )
+                wandb_utils.log_visualization_paths(
+                    dual_paths,
+                    wandb_key="viz/dual_concat_synthetic_pretrain",
+                )
+            except Exception as e:
+                logger.warning(
+                    "Dual-concat synthetic-pretrain viz failed: %s", e, exc_info=True,
+                )
 
         return state

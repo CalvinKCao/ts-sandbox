@@ -63,6 +63,7 @@ phases:
       binary_length_mode: power
       binary_length_scale: 1.0
     fixed_tuned_params_by_dataset:
+      # Joint Optuna winners (jobs 4263255–61):
       ETTh2:
         learning_rate: 0.0005988811135760835
         target_univariate_batch: 1024
@@ -84,7 +85,6 @@ phases:
         target_univariate_batch: 512
         binary_length_g: 3.8021138287008247
       solar_Alabama:
-        # Joint Optuna winner (refit was still finishing when HPs were snapshotted).
         learning_rate: 0.00018878091236458985
         target_univariate_batch: 512
         binary_length_g: 7.483532317986583
@@ -92,6 +92,23 @@ phases:
         learning_rate: 0.0014043399738332717
         target_univariate_batch: 512
         binary_length_g: 6.370356224366058
+      # per_ds_best_g_aug_fixed20 winners (jobs 4241374–77); no joint Optuna for these.
+      ETTh1:
+        learning_rate: 0.00017383245752963103
+        target_univariate_batch: 512
+        binary_length_g: 3.0
+      electricity:
+        learning_rate: 0.0003830550353885683
+        target_univariate_batch: 1024
+        binary_length_g: 8.0
+      exchange_rate:
+        learning_rate: 0.0003830550353885683
+        target_univariate_batch: 1024
+        binary_length_g: 4.0
+      traffic:
+        learning_rate: 9.32997981245247e-05
+        target_univariate_batch: 512
+        binary_length_g: 4.0
 
   - phase: staged_eval
     eval_test_fraction: 1.0

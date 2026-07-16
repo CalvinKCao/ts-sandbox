@@ -681,6 +681,206 @@ def run_pretrain_diffusion_visualizations(
     return []
 
 
+def run_dual_concat_synthetic_pretrain_visualizations(
+    state: Any,
+    *,
+    dual_ckpt_path: str,
+    guidance_ckpt_path: str,
+    tuned_params: Optional[Dict[str, Any]] = None,
+    tag: str = "dual_concat_synthetic_pretrain",
+) -> List[str]:
+    """Lookback + GT + diffusion pred on a few RealTS windows (vertical/channel dual).
+
+    Writes local JPEGs and returns paths for wandb logging. Uses the synthetic
+    pretrain geometry (ordinal off) so panels match Phase-1 training.
+    """
+    from models.diffusion_tsf.realts import get_synthetic_dataloader
+    from models.diffusion_tsf.train_multivariate_pipeline import get_synth_cache_dir
+    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+    from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
+        _synthetic_pretrain_globals,
+    )
+
+    viz = _viz_cfg(state)
+    if not viz.get("enabled", True):
+        return []
+    if not dual_ckpt_path or not os.path.isfile(dual_ckpt_path):
+        logger.warning("dual pretrain viz skipped: missing ckpt %s", dual_ckpt_path)
+        return []
+    if not guidance_ckpt_path or not os.path.isfile(guidance_ckpt_path):
+        logger.warning("dual pretrain viz skipped: missing guidance %s", guidance_ckpt_path)
+        return []
+
+    if bool(getattr(state, "use_channel_dual_concat", False)):
+        stage = "channel_dual"
+    elif bool(getattr(state, "use_vertical_dual_concat", False)):
+        stage = "vertical_dual"
+    else:
+        logger.warning("dual pretrain viz skipped: neither channel nor vertical dual enabled")
+        return []
+
+    with _synthetic_pretrain_globals(pipeline_mod, state, stage):
+        return _run_dual_concat_synthetic_pretrain_visualizations_inner(
+            state,
+            dual_ckpt_path=dual_ckpt_path,
+            guidance_ckpt_path=guidance_ckpt_path,
+            tuned_params=tuned_params,
+            tag=tag,
+            stage=stage,
+            viz=viz,
+        )
+
+
+def _run_dual_concat_synthetic_pretrain_visualizations_inner(
+    state: Any,
+    *,
+    dual_ckpt_path: str,
+    guidance_ckpt_path: str,
+    tuned_params: Optional[Dict[str, Any]],
+    tag: str,
+    stage: str,
+    viz: Dict[str, Any],
+) -> List[str]:
+    from models.diffusion_tsf.realts import get_synthetic_dataloader
+    from models.diffusion_tsf.train_multivariate_pipeline import get_synth_cache_dir
+
+    device = state.resolve_device()
+    n_vars = int(state.n_variates)
+    n_plot = 1 if state.smoke_test else int(viz.get("n_samples", 3))
+    n_plot = max(1, min(n_plot, 4))
+    variables_to_plot = min(int(viz.get("n_dual_scale_vars", 3)), n_vars)
+    jpeg_dpi = int(viz.get("jpeg_dpi", 100))
+    sampler = str(viz.get("dual_scale_sampler", "anchor"))
+    num_steps = int(viz.get("dual_scale_inference_steps", 20))
+    if state.smoke_test:
+        sampler = "anchor"
+        num_steps = 1
+
+    # Tiny RealTS pool — same generators/augs as Phase-1 pretrain.
+    # cache_dir=None (via smoke_test=True) avoids writing a disk pool for a few panels.
+    n_synth = max(8, n_plot * 2)
+    synth_cache = get_synth_cache_dir(
+        checkpoint_dir=state.checkpoint_dir, smoke_test=True,
+    )
+    loader = get_synthetic_dataloader(
+        batch_size=1,
+        lookback_length=int(state.lookback_length),
+        forecast_length=int(state.forecast_length),
+        num_variables=n_vars,
+        num_samples=n_synth,
+        num_workers=0,
+        seed=int(state.seed) + 17,
+        lookback_overlap=int(state.lookback_overlap),
+        cache_dir=synth_cache,
+        skip_cross_var_aug=(n_vars > 32),
+        val_tail_n=0,
+        synthetic_epoch_capacity=1,
+    )
+    dataset = loader.dataset
+    if len(dataset) == 0:
+        return []
+
+    model, _ = _load_staged_diffusion_from_ckpt(
+        ckpt_path=dual_ckpt_path,
+        stage=stage,
+        itrans_ckpt_path=guidance_ckpt_path,
+        n_vars=n_vars,
+        device=device,
+        tuned_params=tuned_params,
+        guidance_type=getattr(state, "guidance_type", None),
+    )
+
+    indices = pick_sample_indices(len(dataset), n_plot, seed=int(state.seed))
+    output_dir = os.path.join(state.results_dir, "viz", tag)
+    os.makedirs(output_dir, exist_ok=True)
+    lb = int(state.lookback_length)
+    saved: List[str] = []
+
+    for row, idx in enumerate(indices):
+        past, future = dataset[idx]
+        if not torch.is_tensor(past):
+            past = torch.as_tensor(past, dtype=torch.float32)
+        if not torch.is_tensor(future):
+            future = torch.as_tensor(future, dtype=torch.float32)
+        # Expect (V, T); RealTS yields that layout.
+        if past.dim() != 2:
+            raise ValueError(f"expected past (V,T), got {tuple(past.shape)}")
+        past_b = past.unsqueeze(0).to(device)
+        with torch.no_grad():
+            out = model.generate(
+                past_b,
+                sampler=sampler,
+                num_inference_steps=num_steps,
+            )
+        pred = out.get("prediction", out.get("prediction_global_norm"))
+        if pred is None:
+            raise KeyError("dual generate missing prediction/prediction_global_norm")
+        pred = pred[0].detach().cpu()
+        past_np = past.detach().cpu()
+        future_np = future.detach().cpu()
+        # generate()/_denormalize_future already drops lookback_overlap from pred;
+        # align GT to that horizon (tail), do not trim pred again.
+        if pred.shape[-1] <= future_np.shape[-1]:
+            future_core = future_np[..., -pred.shape[-1] :]
+        else:
+            future_core = future_np
+        common = min(future_core.shape[-1], pred.shape[-1])
+        future_core = future_core[..., -common:]
+        pred = pred[..., -common:]
+
+        n_show = min(variables_to_plot, past_np.shape[0])
+        fig, axes = plt.subplots(
+            1,
+            n_show,
+            figsize=(4.5 * n_show, 3.2),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        t_past = np.arange(-lb, 0)
+        t_fut = np.arange(0, future_core.shape[-1])
+        for col in range(n_show):
+            ax = axes[0, col]
+            gt = future_core[col].numpy()
+            pr = pred[col].numpy()
+            ax.plot(
+                t_past,
+                past_np[col, -lb:].numpy(),
+                color="#9E9E9E",
+                alpha=0.7,
+                linewidth=1.0,
+                label="lookback" if col == 0 else "",
+            )
+            ax.plot(
+                t_fut, gt, color="#2196F3", linewidth=1.4,
+                label="GT future" if col == 0 else "",
+            )
+            ax.plot(
+                t_fut, pr, color="#FF9800", linewidth=1.2, linestyle="--",
+                label="diffusion pred" if col == 0 else "",
+            )
+            ax.axvline(x=0, color="black", linestyle=":", alpha=0.3)
+            mae = float(np.mean(np.abs(pr[: len(gt)] - gt)))
+            ax.set_title(f"var {col} | MAE {mae:.3f}", fontsize=9)
+            ax.set_xlabel("t (0 = forecast start)")
+        if n_show:
+            axes[0, 0].legend(loc="upper left", fontsize=7)
+        fig.suptitle(
+            f"RealTS synthetic pretrain ({stage}) | sample {idx} | sampler={sampler}",
+            fontsize=11,
+            fontweight="semibold",
+        )
+        path = os.path.join(
+            output_dir, f"{tag}_{stage}_sample{row:02d}_idx{idx}.jpg",
+        )
+        saved.append(save_figure_jpg(fig, path, dpi=jpeg_dpi))
+        logger.info("dual synthetic pretrain viz → %s", path)
+
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return saved
+
+
 def run_staged_finetune_visualizations(
     state: Any,
     *,
@@ -1238,7 +1438,8 @@ def run_staged_synthetic_pretrain_diagnostics(
     with torch.no_grad():
         past_norm, future_norm, norm_stats = model._normalize_sequence(past_b, future_b)
         future_maps = model._encode_staged_maps(future_norm)
-        W_fut = future_maps[stage].shape[-1]
+        map_key = stage if stage in future_maps else "coarse"
+        W_fut = future_maps[map_key].shape[-1]
         guidance_norm = model._get_guidance_forecast_norm(
             past_b, past_norm, norm_stats, W_fut,
         )
@@ -1680,7 +1881,8 @@ def run_real_dataset_phase_diagnostics(
             sample_index=sample_index, output_dir=output_dir, tag="dataset_sample",
             variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
         )
-        W_fut = future_maps[stage].shape[-1]
+        map_key = stage if stage in future_maps else "coarse"
+        W_fut = future_maps[map_key].shape[-1]
         guidance_norm = model._get_guidance_forecast_norm(past_b, past_norm, norm_stats, W_fut)
         guidance_maps = model._encode_staged_maps(guidance_norm)
         g_plot = _guidance_forecast_plot_kwargs(state)

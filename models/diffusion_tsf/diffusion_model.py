@@ -1620,9 +1620,23 @@ class DiffusionTSF(nn.Module):
 
         past_norm, future_norm, norm_stats = self._normalize_sequence(past, future)
         future_maps = self._encode_staged_maps(future_norm)
-        target_2d = future_maps[stage]
-        W_fut = target_2d.shape[3]
-        H = target_2d.shape[2]
+        if stage == "vertical_dual":
+            target_2d = self.to_2d.stack_vertical_dual(future_maps["coarse"], future_maps["fine"])
+            W_fut = target_2d.shape[3]
+            H = target_2d.shape[2]
+            target_flat = target_2d.reshape(BV, 1, H, W_fut)
+        elif stage == "channel_dual":
+            target_flat = self.to_2d.stack_channel_dual_flat(
+                future_maps["coarse"], future_maps["fine"],
+            )
+            H = target_flat.shape[2]
+            W_fut = target_flat.shape[3]
+            target_2d = future_maps["coarse"]
+        else:
+            target_2d = future_maps[stage]
+            W_fut = target_2d.shape[3]
+            H = target_2d.shape[2]
+            target_flat = target_2d.reshape(BV, 1, H, W_fut)
 
         cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
         guidance_norm = self._get_guidance_forecast_norm(
@@ -1639,7 +1653,6 @@ class DiffusionTSF(nn.Module):
         ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
         ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
 
-        target_flat = target_2d.reshape(BV, 1, H, W_fut)
         xt_flat, _ = self.binary_scheduler.add_noise(target_flat, t_flat)
         canvas = self._inject_coordinate_channel(xt_flat)
         canvas = self._inject_time_channels(canvas)
@@ -1650,7 +1663,17 @@ class DiffusionTSF(nn.Module):
             cond_for_unet = self._cat_past_and_horizon_cond(cond_for_unet, future_coarse_flat)
 
         if self.config.use_guidance_channel and guidance_maps is not None:
-            guidance_flat = guidance_maps[stage].reshape(BV, 1, H, W_fut)
+            if stage == "vertical_dual":
+                g_stack = self.to_2d.stack_vertical_dual(
+                    guidance_maps["coarse"], guidance_maps["fine"],
+                )
+                guidance_flat = g_stack.reshape(BV, 1, H, W_fut)
+            elif stage == "channel_dual":
+                guidance_flat = self.to_2d.stack_channel_dual_flat(
+                    guidance_maps["coarse"], guidance_maps["fine"],
+                )
+            else:
+                guidance_flat = guidance_maps[stage].reshape(BV, 1, H, W_fut)
             canvas = torch.cat([canvas, guidance_flat], dim=1)
 
         base_cond = cond_for_unet
