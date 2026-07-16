@@ -401,6 +401,50 @@ def _anchor_mse_on_loader(model, loader, device: torch.device) -> float:
     return total / max(n, 1)
 
 
+@torch.no_grad()
+def _anchor_pixel_error_on_loader(
+    model, loader, device: torch.device,
+) -> Tuple[float, float]:
+    """One-shot anchor 2D binary pixel error (=1-acc) vs GT stacked CDF canvas.
+
+    Compares thresholded ``future_2d`` from ``generate(sampler=anchor)`` to the
+    same vertical_dual coarse∥fine stack used as the diffusion training target.
+    Returns ``(error, accuracy)``; Optuna minimizes ``error``.
+    """
+    model.eval()
+    stage = str(getattr(model.config, "diffusion_stage", ""))
+    if stage != "vertical_dual":
+        raise ValueError(
+            f"anchor_pixel_acc selection supports vertical_dual only, got {stage!r}"
+        )
+    correct = 0.0
+    n_pix = 0
+    for past, future in loader:
+        past = past.to(device)
+        future = future.to(device)
+        out = model.generate(past, sampler="anchor", num_inference_steps=1)
+        pred = out.get("future_2d")
+        if pred is None:
+            raise KeyError("generate(anchor) missing future_2d for pixel accuracy")
+        _past_norm, future_norm, _stats = model._normalize_sequence(past, future)
+        future_maps = model._encode_staged_maps(future_norm)
+        gt = model.to_2d.stack_vertical_dual(future_maps["coarse"], future_maps["fine"])
+        pred_b = (pred.float() > 0.5).float()
+        gt_b = (gt.float() > 0.5).float()
+        if tuple(pred_b.shape) != tuple(gt_b.shape):
+            raise RuntimeError(
+                f"anchor pixel-acc shape mismatch: "
+                f"pred={tuple(pred_b.shape)} gt={tuple(gt_b.shape)}"
+            )
+        match = (pred_b == gt_b).float()
+        correct += float(match.sum().item())
+        n_pix += int(match.numel())
+    if n_pix < 1:
+        raise RuntimeError("anchor_pixel_acc: empty loader / zero pixels")
+    acc = correct / float(n_pix)
+    return 1.0 - acc, acc
+
+
 def _suggest_full_diffusion_params(
     trial,
     state: PipelineState,
@@ -1234,19 +1278,23 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         )
 
         params = _with_state_anchor_params(params, state)
-        if selection_metric not in {"diffusion_val", "anchor_mse"}:
+        _decoded = {"anchor_mse", "anchor_pixel_acc"}
+        if selection_metric not in {"diffusion_val"} | _decoded:
             raise ValueError(
-                f"selection_metric must be 'diffusion_val' or 'anchor_mse', got {selection_metric!r}"
+                f"selection_metric must be diffusion_val, anchor_mse, or "
+                f"anchor_pixel_acc, got {selection_metric!r}"
             )
-        use_anchor = selection_metric == "anchor_mse"
-        if use_anchor and anchor_val_ds is None:
-            raise ValueError("selection_metric=anchor_mse requires anchor_val_ds")
+        use_decoded = selection_metric in _decoded
+        if use_decoded and anchor_val_ds is None:
+            raise ValueError(
+                f"selection_metric={selection_metric} requires anchor_val_ds"
+            )
         n_iv = len(variate_indices)
         batch_size = int(params["batch_size"])
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
         anchor_loader = None
-        if use_anchor:
+        if use_decoded:
             # Cap micro-batch for one-shot generate; still covers the full subset.
             anchor_bs = max(1, min(batch_size, 8))
             anchor_loader = DataLoader(
@@ -1421,16 +1469,33 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 val_loss /= max(n_val, 1)
                 val_elapsed = time.perf_counter() - val_start
                 anchor_mse = None
-                if use_anchor:
+                anchor_pixel_acc = None
+                if use_decoded:
                     anchor_start = time.perf_counter()
-                    anchor_mse = _anchor_mse_on_loader(model, anchor_loader, device)
-                    logger.info(
-                        "  [%s/%s] %s epoch %d/%d anchor_mse=%.6f time=%.1fs",
-                        self.name, self.stage, trial_label,
-                        epoch + 1, max_epochs, anchor_mse,
-                        time.perf_counter() - anchor_start,
-                    )
-                selection_score = float(anchor_mse) if use_anchor else float(val_loss)
+                    if selection_metric == "anchor_mse":
+                        anchor_mse = _anchor_mse_on_loader(model, anchor_loader, device)
+                        selection_score = float(anchor_mse)
+                        logger.info(
+                            "  [%s/%s] %s epoch %d/%d anchor_mse=%.6f time=%.1fs",
+                            self.name, self.stage, trial_label,
+                            epoch + 1, max_epochs, anchor_mse,
+                            time.perf_counter() - anchor_start,
+                        )
+                    else:
+                        # Minimize (1 - pixel_acc) so Optuna direction stays minimize.
+                        pix_err, anchor_pixel_acc = _anchor_pixel_error_on_loader(
+                            model, anchor_loader, device,
+                        )
+                        selection_score = float(pix_err)
+                        logger.info(
+                            "  [%s/%s] %s epoch %d/%d anchor_pixel_acc=%.6f "
+                            "sel_err=%.6f time=%.1fs",
+                            self.name, self.stage, trial_label,
+                            epoch + 1, max_epochs, anchor_pixel_acc, selection_score,
+                            time.perf_counter() - anchor_start,
+                        )
+                else:
+                    selection_score = float(val_loss)
                 lr_now = float(optimizer.param_groups[0]["lr"])
                 saved = selection_score < best_val
                 if saved:
@@ -1463,6 +1528,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     "train_loss": float(train_loss_avg),
                     "val_loss": float(val_loss),
                     "anchor_mse": None if anchor_mse is None else float(anchor_mse),
+                    "anchor_pixel_acc": (
+                        None if anchor_pixel_acc is None else float(anchor_pixel_acc)
+                    ),
                     "selection_score": float(selection_score),
                     "best_val": float(best_val),
                     "lr": lr_now,
@@ -1611,26 +1679,28 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             self.name, len(train_ds), len(val_ds),
         )
 
-        # Optuna/refit selection: lr_eff_batch_g ranks trials by decoded val anchor MSE
-        # (diffusion val loss is not comparable across length_g).
+        # Optuna/refit selection: lr_eff_batch_g defaults to decoded val anchor MSE
+        # (diffusion val loss is not comparable across length_g). Override via hp_objective
+        # (e.g. anchor_pixel_acc = minimize 1 - 2D binary pixel accuracy on the canvas).
         _ss_hint = str(self.get("search_space") or "lr_only").lower()
         selection_metric = "anchor_mse" if _ss_hint == "lr_eff_batch_g" else "diffusion_val"
         if self.get("hp_objective") is not None:
             selection_metric = str(self.get("hp_objective")).lower()
-        if selection_metric not in {"diffusion_val", "anchor_mse"}:
+        _decoded = {"anchor_mse", "anchor_pixel_acc"}
+        if selection_metric not in {"diffusion_val"} | _decoded:
             raise ValueError(
-                f"hp_objective/selection_metric must be diffusion_val or anchor_mse, "
-                f"got {selection_metric!r}"
+                f"hp_objective/selection_metric must be diffusion_val, anchor_mse, "
+                f"or anchor_pixel_acc, got {selection_metric!r}"
             )
         anchor_val_ds = None
-        if selection_metric == "anchor_mse":
+        if selection_metric in _decoded:
             frac = float(self.get("hp_anchor_eval_val_fraction", 0.5))
             if state.smoke_test:
                 frac = 1.0
             anchor_val_ds = _fraction_subset(val_ds, frac, int(state.seed))
             logger.info(
-                "  [%s] selection_metric=anchor_mse on %d/%d val windows (fraction=%.3f)",
-                self.name, len(anchor_val_ds), len(val_ds), frac,
+                "  [%s] selection_metric=%s on %d/%d val windows (fraction=%.3f)",
+                self.name, selection_metric, len(anchor_val_ds), len(val_ds), frac,
             )
 
         from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics

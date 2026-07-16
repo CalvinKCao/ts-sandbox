@@ -1,0 +1,26 @@
+# Same joint Optuna as *_joint_g_lr_batch_s30r20, but rank trials by one-shot
+# decoded 2D binary pixel accuracy on the vertical_dual coarse∥fine canvas
+# (Optuna minimizes 1-acc). Everything else unchanged.
+extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed_bs_mid_vertical_dual_joint_g_lr_batch_s30r20.yaml
+
+wandb:
+  tags:
+    - patch_decoder
+    - ordinal_norm
+    - lb336_hz720
+    - uncompressed
+    - vertical_dual
+    - joint_g_lr_batch
+    - reuse_g1_pretrain
+    - search30_refit20
+    - train_window_aug
+    - anchor_pixel_acc_objective
+    - repr_t1
+
+experiment:
+  name: binary-anchor-ar-patch-decoder-lb336-hz720-ord-unc-bs-mid-vd-joint-g-lr-batch-s30r20-pixacc
+  experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed_bs_mid_vertical_dual_joint_g_lr_batch_s30r20_pixel_acc
+
+phases:
+  - phase: diffusion_vertical_dual_finetune_hp
+    hp_objective: anchor_pixel_acc
