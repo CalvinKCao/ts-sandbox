@@ -440,6 +440,47 @@ class TimeSeriesTo2D(nn.Module):
         return canvas[..., :coarse_height, :], canvas[..., coarse_height:, :]
 
     @staticmethod
+    def stack_channel_dual_flat(coarse: torch.Tensor, fine: torch.Tensor) -> torch.Tensor:
+        """Stack coarse/fine as occupancy channels → (BV, 2, H, W).
+
+        Accepts (B, V, H, W) or already-flat (BV, 1, H, W) maps.
+        """
+        if coarse.shape != fine.shape:
+            raise ValueError(f"coarse/fine shapes differ: {coarse.shape} vs {fine.shape}")
+        if coarse.dim() != 4:
+            raise ValueError(f"expected 4D coarse/fine, got {coarse.shape}")
+        if coarse.shape[1] == 1:
+            return torch.cat([coarse, fine], dim=1)
+        B, V, H, W = coarse.shape
+        return torch.cat(
+            [
+                coarse.reshape(B * V, 1, H, W),
+                fine.reshape(B * V, 1, H, W),
+            ],
+            dim=1,
+        )
+
+    @staticmethod
+    def split_channel_dual_flat(
+        canvas: torch.Tensor,
+        *,
+        B: int,
+        V: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Split (BV, 2, H, W) occupancy canvas into two (B, V, H, W) maps."""
+        if canvas.dim() != 4 or canvas.shape[1] != 2:
+            raise ValueError(f"expected (BV, 2, H, W) canvas, got {tuple(canvas.shape)}")
+        if canvas.shape[0] != B * V:
+            raise ValueError(
+                f"canvas batch {canvas.shape[0]} != B*V={B * V} (B={B}, V={V})"
+            )
+        H, W = canvas.shape[-2], canvas.shape[-1]
+        return (
+            canvas[:, 0].reshape(B, V, H, W),
+            canvas[:, 1].reshape(B, V, H, W),
+        )
+
+    @staticmethod
     def bin_indices_from_cdf(cdf_map: torch.Tensor) -> torch.Tensor:
         """Hard/soft CDF → per-column bin index k (column_sum - 1), shape (*batch, W)."""
         height = int(cdf_map.shape[-2])
@@ -452,17 +493,19 @@ class TimeSeriesTo2D(nn.Module):
         alpha: float = 1.0,
         *,
         coarse_height: Optional[int] = None,
+        per_occupancy_channel: bool = False,
     ) -> torch.Tensor:
         """Pixel weights W=1+α|r−k| for distance-weighted BCE.
 
         For a stacked vertical_dual canvas, pass coarse_height so each half
         gets its own staircase distance (fine uses local row index).
+        For channel_dual (BV, 2, H, W), set per_occupancy_channel=True so each
+        occupancy channel gets an independent staircase.
         target_cdf: (..., 1 or V, H, W) or (..., H, W) — weight matches shape.
         """
         if target_cdf.dim() < 2:
             raise ValueError(f"target_cdf must be at least 2D, got {target_cdf.shape}")
         H = int(target_cdf.shape[-2])
-        W = int(target_cdf.shape[-1])
         device = target_cdf.device
         dtype = target_cdf.dtype
         alpha = float(alpha)
@@ -475,6 +518,11 @@ class TimeSeriesTo2D(nn.Module):
             gt_k = TimeSeriesTo2D.bin_indices_from_cdf(cdf).to(dtype=dtype)
             gt_k = gt_k.unsqueeze(-2)  # (..., 1, W)
             return 1.0 + alpha * (rows - gt_k).abs()
+
+        if per_occupancy_channel and target_cdf.dim() >= 3 and int(target_cdf.shape[-3]) > 1:
+            c = int(target_cdf.shape[-3])
+            parts = [_weights_one(target_cdf[..., i : i + 1, :, :]) for i in range(c)]
+            return torch.cat(parts, dim=-3)
 
         if coarse_height is None or int(coarse_height) <= 0 or int(coarse_height) >= H:
             return _weights_one(target_cdf)

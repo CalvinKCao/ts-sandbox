@@ -7,6 +7,7 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     FineDiffusionFinetuneHPPhase,
     FinerDiffusionFinetuneHPPhase,
     VerticalDualDiffusionFinetuneHPPhase,
+    ChannelDualDiffusionFinetuneHPPhase,
 )
 from models.diffusion_tsf.pipeline.phases.staged_eval import StagedEvalPhase
 
@@ -17,6 +18,7 @@ PHASE_REGISTRY = {
     "diffusion_fine_finetune_hp": FineDiffusionFinetuneHPPhase,
     "diffusion_finer_finetune_hp": FinerDiffusionFinetuneHPPhase,
     "diffusion_vertical_dual_finetune_hp": VerticalDualDiffusionFinetuneHPPhase,
+    "diffusion_channel_dual_finetune_hp": ChannelDualDiffusionFinetuneHPPhase,
     "staged_eval": StagedEvalPhase,
 }
 
@@ -28,5 +30,6 @@ __all__ = [
     "FineDiffusionFinetuneHPPhase",
     "FinerDiffusionFinetuneHPPhase",
     "VerticalDualDiffusionFinetuneHPPhase",
+    "ChannelDualDiffusionFinetuneHPPhase",
     "StagedEvalPhase",
 ]

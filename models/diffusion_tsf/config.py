@@ -71,7 +71,7 @@ class DiffusionTSFConfig:
     # Distance-weighted BCE: W=1+α|r−k| (quadratic miss penalty in BCE space).
     binary_use_boundary_weighted_bce: bool = False
     binary_cdf_distance_alpha: float = 1.0
-    diffusion_stage: str = "joint"  # joint, coarse, fine, finer, vertical_dual
+    diffusion_stage: str = "joint"  # joint, coarse, fine, finer, vertical_dual, channel_dual
     use_triple_scale: bool = False
     # Soft-decode MSE mix inside deterministic anchor: λ*BCE + (1-λ)*MSE.
     anchor_mse_proxy_lambda: float = 0.5
@@ -169,11 +169,11 @@ class DiffusionTSFConfig:
                 "binary_anchor_input_mode must be 'stationary_flat' or 'random_bits', "
                 f"got {self.binary_anchor_input_mode!r}."
             )
-        valid_stages = {"joint", "coarse", "fine", "finer", "vertical_dual"}
+        valid_stages = {"joint", "coarse", "fine", "finer", "vertical_dual", "channel_dual"}
         if self.diffusion_stage not in valid_stages:
             raise ValueError(
                 "diffusion_stage must be one of "
-                "{'joint', 'coarse', 'fine', 'finer', 'vertical_dual'}, "
+                "{'joint', 'coarse', 'fine', 'finer', 'vertical_dual', 'channel_dual'}, "
                 f"got {self.diffusion_stage!r}."
             )
         if self.diffusion_stage == "finer" and not self.use_triple_scale:
@@ -183,9 +183,11 @@ class DiffusionTSFConfig:
                 "staged_representation must be 'value_precision', "
                 f"got {self.staged_representation!r}."
             )
-        if self.use_triple_scale and self.diffusion_stage in {"joint", "vertical_dual"}:
+        if self.use_triple_scale and self.diffusion_stage in {
+            "joint", "vertical_dual", "channel_dual",
+        }:
             raise ValueError(
-                "use_triple_scale has no joint/vertical_dual forward path; "
+                "use_triple_scale has no joint/vertical_dual/channel_dual forward path; "
                 "use staged coarse/fine/finer."
             )
         if self.diffusion_stage == "vertical_dual":
@@ -203,6 +205,23 @@ class DiffusionTSFConfig:
                 raise ValueError("coarse_image_height must divide dit_patch_size[0].")
             if self.fine_image_height % self.dit_patch_size[0] != 0:
                 raise ValueError("fine_image_height must divide dit_patch_size[0].")
+        if self.diffusion_stage == "channel_dual":
+            hc = int(self.coarse_image_height)
+            hf = int(self.fine_image_height)
+            if hc <= 0 or hf <= 0:
+                raise ValueError("coarse/fine image heights must be positive.")
+            if hc != hf:
+                raise ValueError(
+                    f"channel_dual requires coarse_image_height == fine_image_height, "
+                    f"got {hc} vs {hf}."
+                )
+            if self.image_height != hc:
+                raise ValueError(
+                    f"channel_dual expects image_height={hc} "
+                    f"(=coarse/fine height), got {self.image_height}."
+                )
+            if self.image_height % self.dit_patch_size[0] != 0:
+                raise ValueError("channel_dual image_height must divide dit_patch_size[0].")
         if self.diffusion_stage in {"coarse", "fine", "finer"}:
             expected_height = {
                 "coarse": self.coarse_image_height,
@@ -272,8 +291,18 @@ class DiffusionTSFConfig:
             raise ValueError(f"model_type must be 'dit', got {self.model_type!r}")
 
     @property
+    def data_occupancy_channels(self) -> int:
+        """Noisy canvas occupancy channels (1 normally; 2 for channel_dual coarse∥fine)."""
+        if self.diffusion_stage == "channel_dual":
+            return 2
+        return 1
+
+    @property
     def dit_out_channels(self) -> int:
-        return 2 if self.diffusion_type == "binary" else 1
+        # Binary: C x0 heads + C zt heads.
+        if self.diffusion_type == "binary":
+            return 2 * self.data_occupancy_channels
+        return self.data_occupancy_channels
 
     @property
     def bin_width(self) -> float:
@@ -301,7 +330,7 @@ class DiffusionTSFConfig:
 
     @property
     def backbone_in_channels(self) -> int:
-        return 1 + self.num_aux_channels + self.guidance_channels
+        return self.data_occupancy_channels + self.num_aux_channels + self.guidance_channels
 
     @property
     def visual_cond_channels(self) -> int:
@@ -310,6 +339,10 @@ class DiffusionTSFConfig:
         # Stacked past coarse∥fine as one H=Hc+Hf channel; no horizon GT coarse.
         if self.diffusion_stage == "vertical_dual":
             return per_scale + raw_extra
+        # Past coarse∥fine as C=2 at H; raw lookback also C=2 when enabled.
+        if self.diffusion_stage == "channel_dual":
+            raw_ch = 2 if self.use_raw_lookback_cond_channel else 0
+            return 2 * per_scale + raw_ch
         if self.diffusion_stage == "coarse":
             return per_scale * (3 if self.use_triple_scale else 2) + raw_extra
         if self.diffusion_stage == "fine":
@@ -324,4 +357,4 @@ class DiffusionTSFConfig:
     def guidance_channels(self) -> int:
         if not self.use_guidance_channel:
             return 0
-        return 1
+        return self.data_occupancy_channels

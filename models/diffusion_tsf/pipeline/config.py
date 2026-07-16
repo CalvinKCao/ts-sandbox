@@ -323,14 +323,20 @@ def normalize_guidance_phases(phases: list, guidance_type: str) -> list:
         if name == "itrans_finetune_hp":
             continue
         by_name[name] = dict(entry)
-    # Vertical-dual replaces separate coarse/fine finetune phases when both appear via extends.
+    # Vertical-dual / channel-dual replaces separate coarse/fine finetune phases when both appear via extends.
     if "diffusion_vertical_dual_finetune_hp" in by_name:
         by_name.pop("diffusion_coarse_finetune_hp", None)
         by_name.pop("diffusion_fine_finetune_hp", None)
         by_name.pop("diffusion_finer_finetune_hp", None)
+    if "diffusion_channel_dual_finetune_hp" in by_name:
+        by_name.pop("diffusion_coarse_finetune_hp", None)
+        by_name.pop("diffusion_fine_finetune_hp", None)
+        by_name.pop("diffusion_finer_finetune_hp", None)
+        by_name.pop("diffusion_vertical_dual_finetune_hp", None)
     preferred = (
         "staged_diffusion_pretrain",
         "patch_guidance_finetune_hp",
+        "diffusion_channel_dual_finetune_hp",
         "diffusion_vertical_dual_finetune_hp",
         "diffusion_coarse_finetune_hp",
         "diffusion_fine_finetune_hp",

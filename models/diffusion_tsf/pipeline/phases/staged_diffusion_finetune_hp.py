@@ -897,6 +897,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             elif self.stage == "vertical_dual":
                 state.diffusion_vertical_dual_finetune_ckpt = best_pt
                 state.vertical_dual_finetune_best_params = params
+            elif self.stage == "channel_dual":
+                state.diffusion_channel_dual_finetune_ckpt = best_pt
+                state.channel_dual_finetune_best_params = params
             else:
                 state.diffusion_finer_finetune_ckpt = best_pt
                 state.finer_finetune_best_params = params
@@ -977,7 +980,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         n_iv = len(variate_indices)
         device = state.resolve_device()
         coarse_ft = None
-        if self.stage != "vertical_dual":
+        if self.stage not in {"vertical_dual", "channel_dual"}:
             coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_best_ckpt(state, "coarse")
 
         if self.stage == "fine" and coarse_ft and final_ckpt and os.path.exists(coarse_ft):
@@ -1028,6 +1031,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "fine": state.diffusion_fine_pretrain_ckpt,
             "finer": state.diffusion_finer_pretrain_ckpt,
             "vertical_dual": state.diffusion_vertical_dual_pretrain_ckpt,
+            "channel_dual": state.diffusion_channel_dual_pretrain_ckpt,
         }[self.stage]
         candidates = [
             self.get("pretrained_ckpt"),
@@ -2127,6 +2131,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         elif self.stage == "vertical_dual":
             state.diffusion_vertical_dual_finetune_ckpt = final_ckpt
             state.vertical_dual_finetune_best_params = best_params
+        elif self.stage == "channel_dual":
+            state.diffusion_channel_dual_finetune_ckpt = final_ckpt
+            state.channel_dual_finetune_best_params = best_params
         else:
             state.diffusion_finer_finetune_ckpt = final_ckpt
             state.finer_finetune_best_params = best_params
@@ -2177,3 +2184,8 @@ class FinerDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
 class VerticalDualDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
     name = "diffusion_vertical_dual_finetune_hp"
     stage = "vertical_dual"
+
+
+class ChannelDualDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
+    name = "diffusion_channel_dual_finetune_hp"
+    stage = "channel_dual"

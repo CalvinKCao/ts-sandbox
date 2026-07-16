@@ -83,23 +83,24 @@ def find_reused_tuned_params_meta(
 
 
 def find_reused_binary_staged_root(config_stem: str, dataset: str) -> Optional[str]:
-    """Return reused binary run root if it has staged coarse/fine or vertical_dual best.pt."""
+    """Return reused binary run root if it has staged coarse/fine, vertical_dual, or channel_dual best.pt."""
     root = Path(reused_binary_staged_root(config_stem))
     if not root.is_dir():
         return None
     for sub_dir in root.iterdir():
         if not sub_dir.is_dir():
             continue
-        vd_meta = sub_dir / "vertical_dual" / "metadata.json"
-        if (sub_dir / "vertical_dual" / "best.pt").is_file() and vd_meta.is_file():
-            try:
-                import json
+        for dual_name in ("channel_dual", "vertical_dual"):
+            dual_meta = sub_dir / dual_name / "metadata.json"
+            if (sub_dir / dual_name / "best.pt").is_file() and dual_meta.is_file():
+                try:
+                    import json
 
-                meta = json.loads(vd_meta.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if meta.get("dataset_name") == dataset:
-                return str(root)
+                    meta = json.loads(dual_meta.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if meta.get("dataset_name") == dataset:
+                    return str(root)
         fine_meta = sub_dir / "fine" / "metadata.json"
         if not (sub_dir / "coarse" / "best.pt").is_file():
             continue

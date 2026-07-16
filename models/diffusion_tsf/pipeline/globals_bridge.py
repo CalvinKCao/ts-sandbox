@@ -62,6 +62,7 @@ def patch_globals(
     mod.DIT_DROPOUT = state.dit_dropout
     mod.USE_TRIPLE_SCALE = state.use_triple_scale
     mod.USE_VERTICAL_DUAL_CONCAT = state.use_vertical_dual_concat
+    mod.USE_CHANNEL_DUAL_CONCAT = state.use_channel_dual_concat
     mod.DIFFUSION_STAGE = state.diffusion_stage
     mod.USE_GUIDANCE_CHANNEL = state.use_guidance_channel
     mod.GUIDANCE_TYPE = state.guidance_type

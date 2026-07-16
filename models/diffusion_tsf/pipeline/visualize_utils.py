@@ -2064,7 +2064,7 @@ def _prob_window_pred_2d_maps(
     past_b = past.unsqueeze(0).to(device)
     stage = str(getattr(getattr(coarse_model, "config", None), "diffusion_stage", "") or "")
     kwargs = {"sampler": sampler, "num_inference_steps": int(num_inference_steps)}
-    if stage == "vertical_dual" or fine_model is None or fine_model is coarse_model:
+    if stage == "vertical_dual" or stage == "channel_dual" or fine_model is None or fine_model is coarse_model:
         out = coarse_model.generate(past_b, **kwargs)
         coarse_2d = out["future_2d_coarse"][0].detach().cpu().numpy()
         fine_key = "future_2d_fine" if "future_2d_fine" in out else "future_2d_coarse"

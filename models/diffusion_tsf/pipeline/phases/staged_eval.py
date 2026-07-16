@@ -108,6 +108,7 @@ def _stage_finetune_ckpt(state: PipelineState, stage: str) -> str:
         "fine": state.diffusion_fine_finetune_ckpt,
         "finer": state.diffusion_finer_finetune_ckpt,
         "vertical_dual": state.diffusion_vertical_dual_finetune_ckpt,
+        "channel_dual": state.diffusion_channel_dual_finetune_ckpt,
     }[stage]
     if value and os.path.exists(value):
         return value
@@ -316,6 +317,9 @@ class StagedEvalPhase(PipelinePhase):
         prob_kwargs = {"sampler": prob_sampler, "num_inference_steps": prob_steps}
         det_kwargs = _staged_det_gen_kwargs(state, prob_steps)
         vertical_dual = bool(getattr(state, "use_vertical_dual_concat", False))
+        channel_dual = bool(getattr(state, "use_channel_dual_concat", False))
+        joint_dual = vertical_dual or channel_dual
+        dual_stage = "channel_dual" if channel_dual else ("vertical_dual" if vertical_dual else None)
         y_true_all = []
         det_all = []
         coarse_all = []
@@ -354,19 +358,25 @@ class StagedEvalPhase(PipelinePhase):
                 y_true_all.append(future.cpu().numpy())
 
                 torch.manual_seed(state.seed + batch_idx)
-                if vertical_dual:
+                if joint_dual:
                     dual_det = coarse_model.generate(past, **det_kwargs)
                     det_t = dual_det.get("prediction_global_norm", dual_det.get("prediction"))
                     if det_t is None:
-                        raise KeyError("vertical_dual generate output missing prediction_global_norm/prediction")
+                        raise KeyError(
+                            f"{dual_stage} generate output missing prediction_global_norm/prediction"
+                        )
                     det_all.append(det_t.detach().cpu().numpy())
-                    future_2d = dual_det["future_2d"]
-                    coarse_all.append(
-                        future_2d[:, :, :int(state.coarse_image_height)].detach().cpu().numpy()
-                    )
-                    fine_all.append(
-                        future_2d[:, :, int(state.coarse_image_height):].detach().cpu().numpy()
-                    )
+                    if channel_dual:
+                        coarse_all.append(dual_det["future_2d_coarse"].detach().cpu().numpy())
+                        fine_all.append(dual_det["future_2d_fine"].detach().cpu().numpy())
+                    else:
+                        future_2d = dual_det["future_2d"]
+                        coarse_all.append(
+                            future_2d[:, :, :int(state.coarse_image_height)].detach().cpu().numpy()
+                        )
+                        fine_all.append(
+                            future_2d[:, :, int(state.coarse_image_height):].detach().cpu().numpy()
+                        )
                 elif _ar_eval_enabled(coarse_model):
                     det_t = _staged_generate_autoregressive(
                         coarse_model=coarse_model,
@@ -418,14 +428,14 @@ class StagedEvalPhase(PipelinePhase):
                 for sample_idx in range(prob_samples):
                     seed = state.seed + batch_idx * 1009 + sample_idx * 17
                     torch.manual_seed(seed)
-                    if vertical_dual:
+                    if joint_dual:
                         dual_sample = coarse_model.generate(past, **prob_kwargs)
                         sample_t = dual_sample.get(
                             "prediction_global_norm", dual_sample.get("prediction"),
                         )
                         if sample_t is None:
                             raise KeyError(
-                                "vertical_dual generate output missing prediction_global_norm/prediction"
+                                f"{dual_stage} generate output missing prediction_global_norm/prediction"
                             )
                         batch_samples.append(sample_t.detach().cpu().numpy())
                     elif _ar_eval_enabled(coarse_model):
@@ -535,8 +545,11 @@ class StagedEvalPhase(PipelinePhase):
             dataset_horizon=ds_hz,
         )
         vertical_dual = bool(getattr(state, "use_vertical_dual_concat", False))
-        if vertical_dual:
-            coarse_model = self._load_model(state, "vertical_dual", guidance, n_iv, device)
+        channel_dual = bool(getattr(state, "use_channel_dual_concat", False))
+        joint_dual = vertical_dual or channel_dual
+        dual_stage = "channel_dual" if channel_dual else ("vertical_dual" if vertical_dual else None)
+        if joint_dual:
+            coarse_model = self._load_model(state, dual_stage, guidance, n_iv, device)
             fine_model = coarse_model
             finer_model = None
         else:
@@ -576,8 +589,8 @@ class StagedEvalPhase(PipelinePhase):
             from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
 
             diagnostic_stages = (
-                [("vertical_dual", coarse_model, _stage_finetune_ckpt(state, "vertical_dual"), None)]
-                if vertical_dual
+                [(dual_stage, coarse_model, _stage_finetune_ckpt(state, dual_stage), None)]
+                if joint_dual
                 else [
                     ("coarse", coarse_model, _stage_finetune_ckpt(state, "coarse"), None),
                     ("fine", fine_model, _stage_finetune_ckpt(state, "fine"), _stage_finetune_ckpt(state, "coarse")),
@@ -625,7 +638,7 @@ class StagedEvalPhase(PipelinePhase):
                     diffusion_ckpt_path=eval_ckpt,
                     coarse_ckpt_path=eval_coarse,
                     tag=f"staged_eval/{eval_stage}",
-                    include_phase_start=(eval_stage in {"coarse", "vertical_dual"}),
+                    include_phase_start=(eval_stage in {"coarse", "vertical_dual", "channel_dual"}),
                 )
                 wandb_utils.log_phase_diagnostics_result(diag)
         except Exception as e:
@@ -795,10 +808,10 @@ class StagedEvalPhase(PipelinePhase):
         )
         viz_cfg = visualization_settings(state.merged_config)
         coarse_ft = fine_ft = None
-        if not vertical_dual:
+        if not joint_dual:
             coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_finetune_ckpt(state, "coarse")
             fine_ft = state.diffusion_fine_finetune_ckpt or _stage_finetune_ckpt(state, "fine")
-        if not vertical_dual and not skip_viz and viz_cfg.get("enabled", True) and not state.smoke_test:
+        if not joint_dual and not skip_viz and viz_cfg.get("enabled", True) and not state.smoke_test:
             try:
                 tuned = state.fine_finetune_best_params or state.coarse_finetune_best_params
                 viz_paths = run_staged_finetune_visualizations(

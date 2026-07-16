@@ -54,6 +54,7 @@ class PipelineState:
     dit_dropout: float = 0.0
     use_triple_scale: bool = False
     use_vertical_dual_concat: bool = False
+    use_channel_dual_concat: bool = False
     diffusion_stage: str = "joint"
     use_guidance_channel: bool = True
     guidance_type: str = "patch_decoder"
@@ -148,6 +149,7 @@ class PipelineState:
     diffusion_fine_pretrain_ckpt: Optional[str] = None
     diffusion_finer_pretrain_ckpt: Optional[str] = None
     diffusion_vertical_dual_pretrain_ckpt: Optional[str] = None
+    diffusion_channel_dual_pretrain_ckpt: Optional[str] = None
     itrans_finetune_ckpt: Optional[str] = None
     patch_guidance_finetune_ckpt: Optional[str] = None
     diffusion_finetune_ckpt: Optional[str] = None
@@ -155,6 +157,7 @@ class PipelineState:
     diffusion_fine_finetune_ckpt: Optional[str] = None
     diffusion_finer_finetune_ckpt: Optional[str] = None
     diffusion_vertical_dual_finetune_ckpt: Optional[str] = None
+    diffusion_channel_dual_finetune_ckpt: Optional[str] = None
 
     itrans_best_params: Optional[Dict[str, Any]] = None
     diffusion_best_params: Optional[Dict[str, Any]] = None
@@ -163,6 +166,7 @@ class PipelineState:
     fine_finetune_best_params: Optional[Dict[str, Any]] = None
     finer_finetune_best_params: Optional[Dict[str, Any]] = None
     vertical_dual_finetune_best_params: Optional[Dict[str, Any]] = None
+    channel_dual_finetune_best_params: Optional[Dict[str, Any]] = None
 
     # Phase-level overrides from YAML (list of dicts)
     phase_configs: List[Dict[str, Any]] = field(default_factory=list)
