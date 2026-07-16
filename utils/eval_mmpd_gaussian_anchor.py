@@ -2848,7 +2848,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mmpd-batch-size", type=int, default=32)
     parser.add_argument("--mmpd-eval-batch-size", type=int, default=16)
     parser.add_argument("--anchor-batch-size", type=int, default=16)
-    parser.add_argument("--anchor-prob-sampler", choices=["dpmpp", "ddim", "ddpm"], default="dpmpp")
+    parser.add_argument("--anchor-prob-sampler", choices=["quad_t", "ddim_quad", "ddim", "ddpm"], default="quad_t")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--cpu", action="store_true")

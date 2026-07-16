@@ -520,7 +520,7 @@ def main():
                         choices=['epsilon', 'x0_cumsum'],
                         help='Override prediction mode inferred from checkpoint')
     parser.add_argument('--diffusion-sampler', type=str, default='ddim',
-                        choices=['ddim', 'dpmpp', 'anchor', 'deterministic_anchor'],
+                        choices=['ddim', 'quad_t', 'ddim_quad', 'anchor', 'deterministic_anchor'],
                         help='Sampler for diffusion plots')
     parser.add_argument('--random-seed', type=int, default=13)
     parser.add_argument(

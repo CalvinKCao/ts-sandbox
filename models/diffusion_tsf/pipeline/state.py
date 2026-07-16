@@ -67,7 +67,7 @@ class PipelineState:
     binary_use_boundary_weighted_bce: bool = False
     binary_cdf_distance_alpha: float = 1.0
     anchor_mse_proxy_lambda: float = 0.5
-    eval_sampler: str = "dpmpp"
+    eval_sampler: str = "quad_t"
     disable_cross_attention: bool = False
     cross_variate_context_bias: float = 0.0
     use_window_normalization: bool = True

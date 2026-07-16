@@ -169,20 +169,37 @@ class BinaryDiffusionScheduler:
         reverse_step_indices: Optional[torch.Tensor] = None,
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
     ):
-        """Sample a clean binary image with a reduced set of reverse steps."""
+        """Sample a clean binary image with a reduced set of reverse steps.
+
+        ``sampler`` only selects the discrete timestep grid (not a continuous
+        DPM++ ODE solver):
+          - ``ddim``: linear spacing from T-1 → 0
+          - ``quad_t`` / ``ddim_quad``: quadratic spacing (more steps near high noise)
+        Legacy name ``dpmpp`` is rejected — it never ran real DPM++.
+        """
         if reverse_step_indices is not None:
             step_indices = reverse_step_indices.to(device=device, dtype=torch.long)
         else:
-            if sampler == "dpmpp":
+            name = str(sampler).lower()
+            if name == "dpmpp":
+                raise ValueError(
+                    "sampler='dpmpp' was only quadratic timestep spacing, not DPM++. "
+                    "Use sampler='quad_t' (alias: 'ddim_quad')."
+                )
+            if name in {"quad_t", "ddim_quad"}:
                 ramp = torch.linspace(1.0, 0.0, num_steps, device=device)
                 step_indices = torch.round((ramp ** 2) * (self.num_steps - 1)).long()
-            else:
+            elif name == "ddim":
                 step_indices = torch.linspace(
                     self.num_steps - 1,
                     0,
                     num_steps,
                     device=device,
                     dtype=torch.long,
+                )
+            else:
+                raise ValueError(
+                    f"Unknown binary sampler {sampler!r}; expected ddim, quad_t, or ddim_quad"
                 )
         snapshot_set = None
         if snapshot_timesteps is not None:

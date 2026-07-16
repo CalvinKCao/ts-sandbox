@@ -2259,7 +2259,7 @@ def _prob_window_pred_2d_maps(
     past: torch.Tensor,
     *,
     device: torch.device,
-    sampler: str = "dpmpp",
+    sampler: str = "quad_t",
     num_inference_steps: int = 20,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Probabilistic coarse/fine future 2D occupancy maps, shape (V, H, W)."""
@@ -2299,7 +2299,7 @@ def plot_probabilistic_sample_panel(
     jpeg_dpi: int = 100,
     ordinal_mode: bool = False,
     lookback_overlap: int = 0,
-    sampler_label: str = "dpmpp",
+    sampler_label: str = "quad_t",
     max_spaghetti: int = 20,
 ) -> str:
     """Probabilistic 2D maps + GT vs sample fan (not anchor). samples: (V, S, T)."""
@@ -2390,7 +2390,7 @@ def run_eval_probabilistic_sample_visualizations(
     coarse_model=None,
     fine_model=None,
     device: Optional[torch.device] = None,
-    sampler: str = "dpmpp",
+    sampler: str = "quad_t",
     num_inference_steps: int = 20,
     max_windows: int = 10,
 ) -> List[str]:

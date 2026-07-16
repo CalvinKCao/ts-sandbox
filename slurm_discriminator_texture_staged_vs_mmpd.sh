@@ -378,7 +378,7 @@ EVAL_ARGS=(
     --lookback "${LOOKBACK:-96}"
     --horizon "${HORIZON:-96}"
     --num-sampling-steps 20
-    --probabilistic-sampler dpmpp
+    --probabilistic-sampler quad_t
     --gmm-components 1
     --datasets "$DATASET"
     --fake-sources "$FAKE_SOURCE"

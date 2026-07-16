@@ -480,7 +480,7 @@ def run_binary_staged_eval(
         coarse_model=coarse_model,
         fine_model=fine_model,
         finer_model=finer_model,
-        prob_sampler=str(overrides.get("probabilistic_sampler", "dpmpp")),
+        prob_sampler=str(overrides.get("probabilistic_sampler", "quad_t")),
         prob_steps=n_steps,
         prob_samples=n_prob,
         gmm_components=int(overrides.get("gmm_components", 10)),

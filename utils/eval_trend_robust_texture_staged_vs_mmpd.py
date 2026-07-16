@@ -442,7 +442,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-stride", type=int, default=2)
     parser.add_argument("--sample-num", type=int, default=1)
     parser.add_argument("--num-sampling-steps", type=int, default=20)
-    parser.add_argument("--probabilistic-sampler", choices=["dpmpp", "ddim", "ddpm"], default="dpmpp")
+    parser.add_argument("--probabilistic-sampler", choices=["quad_t", "ddim_quad", "ddim", "ddpm"], default="quad_t")
     parser.add_argument("--gmm-components", type=int, default=1)
     parser.add_argument("--gmm-iterations", type=int, default=10)
     parser.add_argument("--topk-max", type=int, default=3)

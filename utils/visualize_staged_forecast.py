@@ -545,7 +545,7 @@ def main() -> None:
     parser.add_argument("--test-index", type=int, default=None)
     parser.add_argument("--prob-samples", type=int, default=5)
     parser.add_argument("--num-extra-lookbacks", type=int, default=2)
-    parser.add_argument("--prob-sampler", type=str, default="dpmpp")
+    parser.add_argument("--prob-sampler", type=str, default="quad_t")
     parser.add_argument("--prob-steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(

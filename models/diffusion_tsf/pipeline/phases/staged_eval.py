@@ -647,7 +647,9 @@ class StagedEvalPhase(PipelinePhase):
         sampler_tuning = []
         selected_sampler = str(self.require("probabilistic_sampler"))
         if selected_sampler in {"anchor", "deterministic_anchor"}:
-            raise ValueError("staged probabilistic_sampler must be ddim or dpmpp, not anchor.")
+            raise ValueError(
+                "staged probabilistic_sampler must be ddim, quad_t, or ddim_quad, not anchor."
+            )
         selected_steps = default_steps
         if bool(self.require("tune_sampler")) and not state.smoke_test:
             tune_fraction = float(self.require("sampler_tune_fraction"))
