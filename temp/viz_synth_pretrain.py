@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """Offline lookback / GT / pred panels for a synthetic diffusion pretrain ckpt.
 
-Uses RealTS windows (same generators as Phase-1) + anchor (default) or dpmpp
-sampling so you can eyeball whether the reused g1 synth pretrain still looks
-coherent before / after finetune.
+Writes per-sample panels with:
+  - GT coarse / pred coarse / GT fine / pred fine occupancy 2D maps
+  - 1D lookback + GT future + diffusion pred
+  - stacked vertical canvas (GT vs pred) for vertical_dual
+
+Uses RealTS windows (same generators as Phase-1).
 
 Example (Killarney / local with ckpts present):
   source .venv/bin/activate
   python temp/viz_synth_pretrain.py \\
     --ckpt results/ckpts/<run>/pretrained_vertical_dual/pretrained_diffusion.pt \\
     --config configs/binary_noise_sched_ablation_vertical_dual_g1p0.yaml \\
-    --n-samples 4
-
-  # Or pass a run dir / config stem and let the script discover paths:
-  python temp/viz_synth_pretrain.py \\
-    --run-dir results/ckpts/07-15-4243853-ETTh2-binary_noise_sched_ablation_vertical_dual_g1p0 \\
-    --config configs/binary_noise_sched_ablation_vertical_dual_g1p0.yaml
+    --n-samples 6
 """
 
 from __future__ import annotations
@@ -139,7 +137,7 @@ def main() -> None:
         default="vertical_dual",
         choices=tuple(PRETRAIN_REL),
     )
-    p.add_argument("--n-samples", type=int, default=4)
+    p.add_argument("--n-samples", type=int, default=6)
     p.add_argument("--n-vars-plot", type=int, default=3)
     p.add_argument("--sampler", default="anchor", choices=("anchor", "dpmpp", "ddim"))
     p.add_argument("--steps", type=int, default=20, help="inference steps (ignored for anchor)")

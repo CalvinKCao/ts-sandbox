@@ -731,6 +731,171 @@ def run_dual_concat_synthetic_pretrain_visualizations(
         )
 
 
+def _trim_map_time(maps: Tuple[np.ndarray, ...], w: int) -> Tuple[np.ndarray, ...]:
+    """Right-align crop all (V,H,W) maps to common width ``w``."""
+    out = []
+    for m in maps:
+        if m.shape[-1] > w:
+            out.append(m[..., -w:])
+        else:
+            out.append(m)
+    return tuple(out)
+
+
+def _plot_dual_concat_synth_panel(
+    *,
+    past_np: np.ndarray,
+    future_core: np.ndarray,
+    pred: np.ndarray,
+    gt_coarse: np.ndarray,
+    gt_fine: np.ndarray,
+    pred_coarse: np.ndarray,
+    pred_fine: np.ndarray,
+    lookback: int,
+    sample_idx: int,
+    stage: str,
+    sampler: str,
+    output_path: str,
+    variables_to_plot: int,
+    jpeg_dpi: int,
+) -> str:
+    """GT/pred coarse+fine occupancy maps + 1D lookback/GT/pred for a few vars."""
+    n_show = min(
+        variables_to_plot,
+        past_np.shape[0],
+        gt_coarse.shape[0],
+        pred_coarse.shape[0],
+    )
+    w = min(
+        gt_coarse.shape[-1],
+        gt_fine.shape[-1],
+        pred_coarse.shape[-1],
+        pred_fine.shape[-1],
+    )
+    gt_coarse, gt_fine, pred_coarse, pred_fine = _trim_map_time(
+        (gt_coarse, gt_fine, pred_coarse, pred_fine), w,
+    )
+    common_1d = min(future_core.shape[-1], pred.shape[-1], w)
+    future_core = future_core[..., -common_1d:]
+    pred = pred[..., -common_1d:]
+
+    row_specs = (
+        ("GT coarse", gt_coarse, "Blues"),
+        ("pred coarse", pred_coarse, "Oranges"),
+        ("GT fine", gt_fine, "Blues"),
+        ("pred fine", pred_fine, "Oranges"),
+    )
+    n_rows = len(row_specs) + 1  # +1D
+    fig = plt.figure(figsize=(4.0 * n_show, 2.05 * n_rows), constrained_layout=True)
+    gs = fig.add_gridspec(n_rows, n_show, height_ratios=[1.0] * len(row_specs) + [1.2])
+
+    for col in range(n_show):
+        for r, (label, data, cmap) in enumerate(row_specs):
+            ax = fig.add_subplot(gs[r, col])
+            h, ww = data[col].shape
+            im = ax.imshow(
+                data[col],
+                aspect="auto",
+                origin="lower",
+                extent=[0, ww, 0, h],
+                cmap=cmap,
+                vmin=0.0,
+                vmax=1.0,
+                interpolation="nearest",
+            )
+            ax.set_title(f"var {col} | {label} ({h}x{ww})", fontsize=8)
+            if col == 0:
+                ax.set_ylabel(label, fontsize=8)
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        ax_1d = fig.add_subplot(gs[len(row_specs), col])
+        t_past = np.arange(-lookback, 0)
+        t_fut = np.arange(0, future_core.shape[-1])
+        gt = future_core[col]
+        pr = pred[col]
+        ax_1d.plot(
+            t_past, past_np[col, -lookback:],
+            color="#9E9E9E", alpha=0.7, linewidth=1.0,
+            label="lookback" if col == 0 else "",
+        )
+        ax_1d.plot(
+            t_fut, gt, color="#2196F3", linewidth=1.4,
+            label="GT future" if col == 0 else "",
+        )
+        ax_1d.plot(
+            t_fut, pr, color="#FF9800", linewidth=1.2, linestyle="--",
+            label="diffusion pred" if col == 0 else "",
+        )
+        ax_1d.axvline(x=0, color="black", linestyle=":", alpha=0.3)
+        mae = float(np.mean(np.abs(pr[: len(gt)] - gt)))
+        ax_1d.set_title(f"var {col} | 1D MAE {mae:.3f}", fontsize=8)
+        ax_1d.set_xlabel("t (0 = forecast start)")
+        if col == 0:
+            ax_1d.legend(loc="upper left", fontsize=7)
+
+    fig.suptitle(
+        f"RealTS synth pretrain ({stage}) | sample {sample_idx} | sampler={sampler}\n"
+        "2D: occupancy CDF [0,1] — GT from future encode, pred from generate()",
+        fontsize=11,
+        fontweight="semibold",
+    )
+    return save_figure_jpg(fig, output_path, dpi=jpeg_dpi)
+
+
+def _plot_dual_concat_stacked_canvas(
+    *,
+    gt_stack: np.ndarray,
+    pred_stack: np.ndarray,
+    coarse_height: int,
+    sample_idx: int,
+    stage: str,
+    output_path: str,
+    variables_to_plot: int,
+    jpeg_dpi: int,
+) -> str:
+    """Side-by-side full stacked canvas (GT vs pred) with coarse/fine split line."""
+    n_show = min(variables_to_plot, gt_stack.shape[0], pred_stack.shape[0])
+    w = min(gt_stack.shape[-1], pred_stack.shape[-1])
+    gt_stack = gt_stack[..., -w:]
+    pred_stack = pred_stack[..., -w:]
+    fig, axes = plt.subplots(
+        2, n_show,
+        figsize=(4.0 * n_show, 6.0),
+        constrained_layout=True,
+        squeeze=False,
+    )
+    for col in range(n_show):
+        for r, (label, data, cmap) in enumerate((
+            ("GT stacked", gt_stack, "viridis"),
+            ("pred stacked", pred_stack, "viridis"),
+        )):
+            ax = axes[r, col]
+            h, ww = data[col].shape
+            im = ax.imshow(
+                data[col],
+                aspect="auto",
+                origin="lower",
+                extent=[0, ww, 0, h],
+                cmap=cmap,
+                vmin=0.0,
+                vmax=1.0,
+                interpolation="nearest",
+            )
+            if 0 < coarse_height < h:
+                ax.axhline(coarse_height - 0.5, color="w", linestyle="--", linewidth=1.0)
+            ax.set_title(f"var {col} | {label} ({h}x{ww})", fontsize=8)
+            if col == 0:
+                ax.set_ylabel(label, fontsize=8)
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.suptitle(
+        f"RealTS synth pretrain ({stage}) stacked canvas | sample {sample_idx}\n"
+        f"dashed line = coarse/fine split (Hc={coarse_height})",
+        fontsize=11,
+        fontweight="semibold",
+    )
+    return save_figure_jpg(fig, output_path, dpi=jpeg_dpi)
+
+
 def _run_dual_concat_synthetic_pretrain_visualizations_inner(
     state: Any,
     *,
@@ -747,7 +912,7 @@ def _run_dual_concat_synthetic_pretrain_visualizations_inner(
     device = state.resolve_device()
     n_vars = int(state.n_variates)
     n_plot = 1 if state.smoke_test else int(viz.get("n_samples", 3))
-    n_plot = max(1, min(n_plot, 4))
+    n_plot = max(1, min(n_plot, 6))
     variables_to_plot = min(int(viz.get("n_dual_scale_vars", 3)), n_vars)
     jpeg_dpi = int(viz.get("jpeg_dpi", 100))
     sampler = str(viz.get("dual_scale_sampler", "anchor"))
@@ -794,6 +959,7 @@ def _run_dual_concat_synthetic_pretrain_visualizations_inner(
     output_dir = os.path.join(state.results_dir, "viz", tag)
     os.makedirs(output_dir, exist_ok=True)
     lb = int(state.lookback_length)
+    hc = int(getattr(model.config, "coarse_image_height", 0) or state.coarse_image_height)
     saved: List[str] = []
 
     for row, idx in enumerate(indices):
@@ -806,18 +972,31 @@ def _run_dual_concat_synthetic_pretrain_visualizations_inner(
         if past.dim() != 2:
             raise ValueError(f"expected past (V,T), got {tuple(past.shape)}")
         past_b = past.unsqueeze(0).to(device)
+        future_b = future.unsqueeze(0).to(device)
         with torch.no_grad():
             out = model.generate(
                 past_b,
                 sampler=sampler,
                 num_inference_steps=num_steps,
             )
+            _past_norm, future_norm, _stats = model._normalize_sequence(past_b, future_b)
+            gt_maps = model._encode_staged_maps(future_norm)
+
         pred = out.get("prediction", out.get("prediction_global_norm"))
         if pred is None:
             raise KeyError("dual generate missing prediction/prediction_global_norm")
+        if "future_2d_coarse" not in out or "future_2d_fine" not in out:
+            raise KeyError(
+                "dual generate missing future_2d_coarse/fine "
+                f"(keys={sorted(out.keys())})"
+            )
         pred = pred[0].detach().cpu()
-        past_np = past.detach().cpu()
-        future_np = future.detach().cpu()
+        pred_coarse = out["future_2d_coarse"][0].detach().cpu().numpy()
+        pred_fine = out["future_2d_fine"][0].detach().cpu().numpy()
+        gt_coarse = gt_maps["coarse"][0].detach().cpu().numpy()
+        gt_fine = gt_maps["fine"][0].detach().cpu().numpy()
+        past_np = past.detach().cpu().numpy()
+        future_np = future.detach().cpu().numpy()
         # generate()/_denormalize_future already drops lookback_overlap from pred;
         # align GT to that horizon (tail), do not trim pred again.
         if pred.shape[-1] <= future_np.shape[-1]:
@@ -826,54 +1005,57 @@ def _run_dual_concat_synthetic_pretrain_visualizations_inner(
             future_core = future_np
         common = min(future_core.shape[-1], pred.shape[-1])
         future_core = future_core[..., -common:]
-        pred = pred[..., -common:]
+        pred_np = pred.numpy()[..., -common:]
 
-        n_show = min(variables_to_plot, past_np.shape[0])
-        fig, axes = plt.subplots(
-            1,
-            n_show,
-            figsize=(4.5 * n_show, 3.2),
-            squeeze=False,
-            constrained_layout=True,
-        )
-        t_past = np.arange(-lb, 0)
-        t_fut = np.arange(0, future_core.shape[-1])
-        for col in range(n_show):
-            ax = axes[0, col]
-            gt = future_core[col].numpy()
-            pr = pred[col].numpy()
-            ax.plot(
-                t_past,
-                past_np[col, -lb:].numpy(),
-                color="#9E9E9E",
-                alpha=0.7,
-                linewidth=1.0,
-                label="lookback" if col == 0 else "",
-            )
-            ax.plot(
-                t_fut, gt, color="#2196F3", linewidth=1.4,
-                label="GT future" if col == 0 else "",
-            )
-            ax.plot(
-                t_fut, pr, color="#FF9800", linewidth=1.2, linestyle="--",
-                label="diffusion pred" if col == 0 else "",
-            )
-            ax.axvline(x=0, color="black", linestyle=":", alpha=0.3)
-            mae = float(np.mean(np.abs(pr[: len(gt)] - gt)))
-            ax.set_title(f"var {col} | MAE {mae:.3f}", fontsize=9)
-            ax.set_xlabel("t (0 = forecast start)")
-        if n_show:
-            axes[0, 0].legend(loc="upper left", fontsize=7)
-        fig.suptitle(
-            f"RealTS synthetic pretrain ({stage}) | sample {idx} | sampler={sampler}",
-            fontsize=11,
-            fontweight="semibold",
-        )
         path = os.path.join(
-            output_dir, f"{tag}_{stage}_sample{row:02d}_idx{idx}.jpg",
+            output_dir, f"{tag}_{stage}_sample{row:02d}_idx{idx}_maps.jpg",
         )
-        saved.append(save_figure_jpg(fig, path, dpi=jpeg_dpi))
+        saved.append(
+            _plot_dual_concat_synth_panel(
+                past_np=past_np,
+                future_core=future_core,
+                pred=pred_np,
+                gt_coarse=gt_coarse,
+                gt_fine=gt_fine,
+                pred_coarse=pred_coarse,
+                pred_fine=pred_fine,
+                lookback=lb,
+                sample_idx=int(idx),
+                stage=stage,
+                sampler=sampler,
+                output_path=path,
+                variables_to_plot=variables_to_plot,
+                jpeg_dpi=jpeg_dpi,
+            )
+        )
         logger.info("dual synthetic pretrain viz → %s", path)
+
+        # Extra: full stacked canvas GT vs pred (vertical_dual only).
+        if stage == "vertical_dual":
+            with torch.no_grad():
+                gt_stack = model.to_2d.stack_vertical_dual(
+                    gt_maps["coarse"], gt_maps["fine"],
+                )[0].detach().cpu().numpy()
+            pred_stack = out["future_2d"][0].detach().cpu().numpy()
+            if pred_stack.ndim == 4:
+                # channel_dual leftover safety: (C,H,W) → collapse
+                pred_stack = pred_stack[0] if pred_stack.shape[0] == 1 else pred_stack.mean(0)
+            stack_path = os.path.join(
+                output_dir, f"{tag}_{stage}_sample{row:02d}_idx{idx}_stacked.jpg",
+            )
+            saved.append(
+                _plot_dual_concat_stacked_canvas(
+                    gt_stack=gt_stack,
+                    pred_stack=pred_stack,
+                    coarse_height=hc,
+                    sample_idx=int(idx),
+                    stage=stage,
+                    output_path=stack_path,
+                    variables_to_plot=variables_to_plot,
+                    jpeg_dpi=jpeg_dpi,
+                )
+            )
+            logger.info("dual synthetic pretrain stacked viz → %s", stack_path)
 
     del model
     if torch.cuda.is_available():

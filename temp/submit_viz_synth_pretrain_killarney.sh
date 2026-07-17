@@ -31,7 +31,7 @@ if [[ ${#PY_ARGS[@]} -eq 0 ]]; then
     PY_ARGS=(
         --config "$CONFIG"
         --dataset "$DATASET"
-        --n-samples 4
+        --n-samples 6
         --sampler anchor
     )
 fi
