@@ -758,6 +758,7 @@ def _plot_dual_concat_synth_panel(
     output_path: str,
     variables_to_plot: int,
     jpeg_dpi: int,
+    title: Optional[str] = None,
 ) -> str:
     """GT/pred coarse+fine occupancy maps + 1D lookback/GT/pred for a few vars."""
     n_show = min(
@@ -834,8 +835,11 @@ def _plot_dual_concat_synth_panel(
             ax_1d.legend(loc="upper left", fontsize=7)
 
     fig.suptitle(
-        f"RealTS synth pretrain ({stage}) | sample {sample_idx} | sampler={sampler}\n"
-        "2D: occupancy CDF [0,1] — GT from future encode, pred from generate()",
+        title
+        or (
+            f"RealTS synth pretrain ({stage}) | sample {sample_idx} | sampler={sampler}\n"
+            "2D: occupancy CDF [0,1] — GT from future encode, pred from generate()"
+        ),
         fontsize=11,
         fontweight="semibold",
     )
