@@ -12,7 +12,7 @@ wandb:
     - vertical_dual
     - joint_g_lr_batch
     - reuse_g1_pretrain
-    - search30_refit20
+    - search20_refit20
     - train_window_aug
     - anchor_pixel_acc_objective
     - repr_t1

@@ -2,7 +2,7 @@
 # Ranks trials by one-shot 2d→1d decoded val anchor MSE (diffusion val is not
 # comparable across g). Reuses g=1 synth pretrain; train-window augs on finetune.
 #
-# Recipe: 30 trials × max 4ep (patience 2, Hyperband) → refit winner 20ep.
+# Recipe: 20 trials × max 4ep (patience 2, Hyperband) → refit winner 20ep.
 extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed_bs_mid_vertical_dual.yaml
 
 wandb:
@@ -14,7 +14,7 @@ wandb:
     - vertical_dual
     - joint_g_lr_batch
     - reuse_g1_pretrain
-    - search30_refit20
+    - search20_refit20
     - train_window_aug
     - anchor_mse_objective
     - repr_t1
@@ -47,7 +47,7 @@ phases:
     reuse_checkpoint_from_config: null
 
   - phase: diffusion_vertical_dual_finetune_hp
-    n_trials: 30
+    n_trials: 20
     max_epochs: 4
     patience: 2
     refit_best_max_epochs: 20
