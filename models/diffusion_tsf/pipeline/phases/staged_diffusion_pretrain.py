@@ -485,29 +485,80 @@ def _resolve_diff_hp(state: PipelineState, source_dir: Optional[str]) -> Dict[st
     )
 
 
+def _guidance_search_dirs(
+    state: PipelineState,
+    source_dir: Optional[str] = None,
+) -> list[str]:
+    """Dirs that may hold synthetic patch-guidance weights used with pretrain."""
+    dirs: list[str] = []
+
+    def add(path: Optional[str]) -> None:
+        if not path:
+            return
+        path = os.path.abspath(path)
+        if path not in dirs and os.path.isdir(path):
+            dirs.append(path)
+
+    add(source_dir)
+    add(state.checkpoint_dir)
+    for attr in (
+        "diffusion_vertical_dual_pretrain_ckpt",
+        "diffusion_channel_dual_pretrain_ckpt",
+        "diffusion_fine_pretrain_ckpt",
+        "diffusion_coarse_pretrain_ckpt",
+        "diffusion_finer_pretrain_ckpt",
+    ):
+        ckpt = getattr(state, attr, None)
+        if ckpt and os.path.isfile(ckpt):
+            # .../pretrained_<stage>/pretrained_diffusion.pt → run dir
+            add(os.path.dirname(os.path.dirname(ckpt)))
+            add(os.path.dirname(ckpt))
+    return dirs
+
+
+def _find_existing_synthetic_patch_guidance(
+    state: PipelineState,
+    source_dir: Optional[str] = None,
+) -> Optional[str]:
+    """Locate an on-disk synthetic guidance ckpt without training a fallback."""
+    ckpt_names = ("pretrained_patch_guidance.pt", "patch_guidance_synthetic.pt")
+    candidates: list[str] = []
+    pretrain_override = state.extra.get("patch_guidance_pretrain_ckpt")
+    if pretrain_override:
+        candidates.append(str(pretrain_override))
+    for d in _guidance_search_dirs(state, source_dir):
+        for name in ckpt_names:
+            candidates.append(os.path.join(d, name))
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return os.path.abspath(path)
+    return None
+
+
 def _resolve_synthetic_patch_guidance(
     state: PipelineState,
     source_dir: Optional[str],
     *,
     retrain_synthetic_patch_guidance: bool = False,
 ) -> tuple[str, Dict[str, Any]]:
-    ckpt_names = ("pretrained_patch_guidance.pt", "patch_guidance_synthetic.pt")
-    candidates = []
-    pretrain_override = state.extra.get("patch_guidance_pretrain_ckpt")
-    if pretrain_override:
-        candidates.append(str(pretrain_override))
-    if source_dir and not retrain_synthetic_patch_guidance:
-        for name in ckpt_names:
-            candidates.append(os.path.join(source_dir, name))
-    for name in ckpt_names:
-        candidates.append(os.path.join(state.checkpoint_dir, name))
-    for path in candidates:
-        if path and os.path.exists(path):
-            return path, {
+    if not retrain_synthetic_patch_guidance:
+        found = _find_existing_synthetic_patch_guidance(state, source_dir)
+        if found:
+            return found, {
                 "loaded": True,
-                "path": os.path.abspath(path),
+                "path": found,
                 "source": "checkpoint",
             }
+    else:
+        pretrain_override = state.extra.get("patch_guidance_pretrain_ckpt")
+        if pretrain_override and os.path.isfile(str(pretrain_override)):
+            path = os.path.abspath(str(pretrain_override))
+            return path, {
+                "loaded": True,
+                "path": path,
+                "source": "checkpoint",
+            }
+
     logger.warning("No patch guidance pretrain checkpoint found.")
     from models.diffusion_tsf.train_multivariate_pipeline import run_patch_guidance_synthetic_tuning
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
@@ -553,6 +604,67 @@ def _resolve_synthetic_patch_guidance(
         "source": "trained_fallback",
         "best_params": best_params,
     }
+
+
+def _log_synthetic_pretrain_visualizations(
+    state: PipelineState,
+    *,
+    guidance_ckpt: Optional[str],
+    best_params: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Lookback/GT/pred panels after synth pretrain train *or* load/reuse.
+
+    Dual-concat (vertical/channel) always attempts a few RealTS panels.
+    Coarse/fine staged dual-scale viz skips smoke runs (existing policy).
+    """
+    if not guidance_ckpt or not os.path.isfile(guidance_ckpt):
+        logger.warning(
+            "Synthetic-pretrain viz skipped: missing guidance ckpt (%s)",
+            guidance_ckpt,
+        )
+        return
+
+    viz_ckpt = state.diffusion_fine_pretrain_ckpt or state.diffusion_coarse_pretrain_ckpt
+    dual_ckpt = (
+        state.diffusion_channel_dual_pretrain_ckpt
+        or state.diffusion_vertical_dual_pretrain_ckpt
+    )
+    is_dual_concat = bool(state.use_vertical_dual_concat) or bool(
+        getattr(state, "use_channel_dual_concat", False)
+    )
+    if viz_ckpt and not state.smoke_test and not is_dual_concat:
+        try:
+            viz_paths = run_pretrain_diffusion_visualizations(
+                state,
+                coarse_ckpt_path=state.diffusion_coarse_pretrain_ckpt,
+                fine_ckpt_path=state.diffusion_fine_pretrain_ckpt,
+                itrans_ckpt_path=guidance_ckpt,
+                tuned_params=best_params,
+                tag="staged_diffusion_synthetic_pretrain",
+            )
+            wandb_utils.log_visualization_paths(
+                viz_paths, wandb_key="viz/staged_diffusion_synthetic_pretrain",
+            )
+        except Exception as e:
+            logger.warning("Staged synthetic-pretrain viz failed: %s", e, exc_info=True)
+
+    if dual_ckpt and is_dual_concat:
+        try:
+            dual_paths = run_dual_concat_synthetic_pretrain_visualizations(
+                state,
+                dual_ckpt_path=dual_ckpt,
+                guidance_ckpt_path=guidance_ckpt,
+                tuned_params=best_params,
+                tag="dual_concat_synthetic_pretrain",
+            )
+            wandb_utils.log_visualization_paths(
+                dual_paths,
+                wandb_key="viz/dual_concat_synthetic_pretrain",
+            )
+        except Exception as e:
+            logger.warning(
+                "Dual-concat synthetic-pretrain viz failed: %s", e, exc_info=True,
+            )
 
 
 def _log_staged_pretrain_diagnostics(
@@ -715,6 +827,36 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             return True
         return False
 
+    def on_skip(self, state: PipelineState) -> PipelineState:
+        """Cached/reused pretrain still gets a couple RealTS pred panels + wandb."""
+        try:
+            config_name = self._config_name(state)
+            source_dir = None
+            try:
+                source_dir = _phase1_source_dir(
+                    state,
+                    self.get("phase1_source_dir"),
+                    config_name=config_name,
+                )
+            except FileNotFoundError:
+                source_dir = None
+            best_params: Dict[str, Any] = {}
+            try:
+                best_params = _resolve_diff_hp(state, source_dir)
+            except FileNotFoundError:
+                pass
+            guidance_ckpt = _find_existing_synthetic_patch_guidance(state, source_dir)
+            _log_synthetic_pretrain_visualizations(
+                state,
+                guidance_ckpt=guidance_ckpt,
+                best_params=best_params or None,
+            )
+        except Exception as e:
+            logger.warning(
+                "[%s] cached-pretrain viz failed: %s", self.name, e, exc_info=True,
+            )
+        return state
+
     def execute(self, state: PipelineState) -> PipelineState:
         from models.diffusion_tsf.pipeline.train.pretrain import pretrain_diffusion
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
@@ -762,6 +904,11 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                     guidance_meta=guidance_meta,
                     best_params=best_params,
                     n_samples=n_samples,
+                )
+                _log_synthetic_pretrain_visualizations(
+                    state,
+                    guidance_ckpt=guidance_ckpt,
+                    best_params=best_params,
                 )
                 return state
             # Soft-fail like patch_guidance: quota may have deleted the donor.
@@ -878,47 +1025,10 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             best_params=best_params,
             n_samples=n_samples,
         )
-
-        viz_ckpt = state.diffusion_fine_pretrain_ckpt or state.diffusion_coarse_pretrain_ckpt
-        dual_ckpt = (
-            state.diffusion_channel_dual_pretrain_ckpt
-            or state.diffusion_vertical_dual_pretrain_ckpt
+        _log_synthetic_pretrain_visualizations(
+            state,
+            guidance_ckpt=guidance_ckpt,
+            best_params=best_params,
         )
-        is_dual_concat = bool(state.use_vertical_dual_concat) or bool(
-            getattr(state, "use_channel_dual_concat", False)
-        )
-        if viz_ckpt and guidance_ckpt and not state.smoke_test and not is_dual_concat:
-            try:
-                viz_paths = run_pretrain_diffusion_visualizations(
-                    state,
-                    coarse_ckpt_path=state.diffusion_coarse_pretrain_ckpt,
-                    fine_ckpt_path=state.diffusion_fine_pretrain_ckpt,
-                    itrans_ckpt_path=guidance_ckpt,
-                    tuned_params=best_params,
-                    tag="staged_diffusion_synthetic_pretrain",
-                )
-                wandb_utils.log_visualization_paths(
-                    viz_paths, wandb_key="viz/staged_diffusion_synthetic_pretrain",
-                )
-            except Exception as e:
-                logger.warning("Staged synthetic-pretrain viz failed: %s", e, exc_info=True)
-
-        if dual_ckpt and guidance_ckpt and is_dual_concat:
-            try:
-                dual_paths = run_dual_concat_synthetic_pretrain_visualizations(
-                    state,
-                    dual_ckpt_path=dual_ckpt,
-                    guidance_ckpt_path=guidance_ckpt,
-                    tuned_params=best_params,
-                    tag="dual_concat_synthetic_pretrain",
-                )
-                wandb_utils.log_visualization_paths(
-                    dual_paths,
-                    wandb_key="viz/dual_concat_synthetic_pretrain",
-                )
-            except Exception as e:
-                logger.warning(
-                    "Dual-concat synthetic-pretrain viz failed: %s", e, exc_info=True,
-                )
 
         return state
