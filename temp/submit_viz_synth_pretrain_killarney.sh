@@ -4,14 +4,11 @@
 #
 # USAGE (Killarney login, repo = $SCRATCH/ts-sandbox):
 #   cd "$SCRATCH/ts-sandbox" && git pull
+#   # Auto-picks newest results/ckpts/*-ETTh2-..._vertical_dual_g1p0
 #   ./temp/submit_viz_synth_pretrain_killarney.sh
 #   ./temp/submit_viz_synth_pretrain_killarney.sh \
 #     --run-dir results/ckpts/07-15-4243853-ETTh2-binary_noise_sched_ablation_vertical_dual_g1p0 \
 #     --n-samples 4 --sampler anchor
-#   # Or point at reused store:
-#   # ./temp/submit_viz_synth_pretrain_killarney.sh \
-#   #   --ckpt "$SCRATCH/ts-sandbox/reused/pretrain/binary_noise_sched_ablation_vertical_dual_g1p0/pretrained_vertical_dual/pretrained_diffusion.pt" \
-#   #   --guidance "$SCRATCH/ts-sandbox/reused/pretrain/binary_noise_sched_ablation_vertical_dual_g1p0/patch_guidance_synthetic.pt"
 # =============================================================================
 
 set -euo pipefail
@@ -26,7 +23,7 @@ fi
 SCRIPT_DIR="$REPO/temp"
 VIZ_PY="temp/viz_synth_pretrain.py"
 
-# Defaults: g1 vertical_dual synth pretrain (override via env or CLI).
+# Defaults: g1 vertical_dual synth pretrain under results/ckpts (not reused/).
 CONFIG="${VIZ_CONFIG:-configs/binary_noise_sched_ablation_vertical_dual_g1p0.yaml}"
 DATASET="${VIZ_DATASET:-ETTh2}"
 PY_ARGS=("$@")

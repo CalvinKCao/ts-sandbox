@@ -32,7 +32,11 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 DEFAULT_CONFIG = "configs/binary_noise_sched_ablation_vertical_dual_g1p0.yaml"
-GUIDANCE_NAMES = ("pretrained_patch_guidance.pt", "patch_guidance_synthetic.pt")
+GUIDANCE_NAMES = (
+    "pretrained_patch_guidance.pt",
+    "patch_guidance_synthetic.pt",
+    "patch_guidance_synthetic_hp_best.pt",
+)
 PRETRAIN_REL = {
     "vertical_dual": "pretrained_vertical_dual/pretrained_diffusion.pt",
     "channel_dual": "pretrained_channel_dual/pretrained_diffusion.pt",
@@ -44,12 +48,31 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("viz_synth_pretrain")
 
 
+def _auto_run_dir(dataset: str, config: str) -> Path:
+    """Newest results/ckpts/*-<dataset>-<config_stem> that has the stage ckpt."""
+    stem = Path(config).stem
+    root = REPO / "results" / "ckpts"
+    token = f"-{dataset}-{stem}"
+    if not root.is_dir():
+        raise FileNotFoundError(f"missing ckpt root: {root}")
+    candidates = sorted(
+        (p for p in root.iterdir() if p.is_dir() and p.name.endswith(token)),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"no run dirs ending with {token!r} under {root}; pass --ckpt or --run-dir"
+        )
+    return candidates[0]
+
+
 def _find_guidance(run_dir: Path, explicit: Optional[str]) -> Path:
     if explicit:
-        p = Path(explicit)
-        if not p.is_file():
-            raise FileNotFoundError(f"--guidance not a file: {p}")
-        return p
+        p = Path(explicit).expanduser()
+        if p.is_file():
+            return p.resolve()
+        logger.warning("--guidance missing (%s); searching under %s", p, run_dir)
     for name in GUIDANCE_NAMES:
         cand = run_dir / name
         if cand.is_file():
@@ -61,47 +84,42 @@ def _find_guidance(run_dir: Path, explicit: Optional[str]) -> Path:
 
 def _resolve_ckpt(args: argparse.Namespace) -> tuple[Path, Path]:
     """Return (diffusion_ckpt, run_dir)."""
+    rel = PRETRAIN_REL.get(args.stage)
+    if rel is None:
+        raise ValueError(f"unknown --stage {args.stage!r}")
+
     if args.ckpt:
-        ckpt = Path(args.ckpt).expanduser().resolve()
+        ckpt = Path(args.ckpt).expanduser()
         if ckpt.is_dir():
-            # treat as run dir
-            run_dir = ckpt
-            rel = PRETRAIN_REL.get(args.stage)
-            if rel is None:
-                raise ValueError(f"unknown --stage {args.stage!r}")
+            run_dir = ckpt.resolve()
             ckpt = run_dir / rel
         else:
-            # .../pretrained_<stage>/pretrained_diffusion.pt → run dir two up
-            run_dir = ckpt.parent.parent if ckpt.parent.name.startswith("pretrained_") else ckpt.parent
+            ckpt = ckpt.resolve() if ckpt.exists() else ckpt
+            run_dir = (
+                ckpt.parent.parent
+                if ckpt.parent.name.startswith("pretrained_")
+                else ckpt.parent
+            )
+        if not ckpt.is_file():
+            # Common miss: reused/ store never populated — fall back to results/ckpts.
+            logger.warning(
+                "missing diffusion ckpt %s; falling back to newest results/ckpts match",
+                ckpt,
+            )
+            run_dir = _auto_run_dir(args.dataset, args.config)
+            ckpt = run_dir / rel
         if not ckpt.is_file():
             raise FileNotFoundError(f"missing diffusion ckpt: {ckpt}")
-        return ckpt, run_dir
+        return ckpt.resolve(), run_dir.resolve()
 
     if args.run_dir:
         run_dir = Path(args.run_dir).expanduser().resolve()
-        rel = PRETRAIN_REL.get(args.stage)
-        if rel is None:
-            raise ValueError(f"unknown --stage {args.stage!r}")
         ckpt = run_dir / rel
         if not ckpt.is_file():
             raise FileNotFoundError(f"missing {ckpt}")
         return ckpt, run_dir
 
-    # Auto: newest *-<dataset>-<config_stem> under results/ckpts
-    stem = Path(args.config).stem
-    root = REPO / "results" / "ckpts"
-    token = f"-{args.dataset}-{stem}"
-    candidates = sorted(
-        (p for p in root.iterdir() if p.is_dir() and p.name.endswith(token)),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if not candidates:
-        raise FileNotFoundError(
-            f"no run dirs ending with {token!r} under {root}; pass --ckpt or --run-dir"
-        )
-    run_dir = candidates[0]
-    rel = PRETRAIN_REL[args.stage]
+    run_dir = _auto_run_dir(args.dataset, args.config)
     ckpt = run_dir / rel
     if not ckpt.is_file():
         raise FileNotFoundError(f"newest run {run_dir.name} missing {rel}")
