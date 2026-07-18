@@ -229,10 +229,18 @@ accuracy_summary.csv
 
 # lnai-generated
 .agents/skills/alliancecan
+.agents/skills/audio_math_explainer
+.agents/skills/git
+.agents/skills/lnai
+.agents/skills/lnai-master-sync
 .agents/skills/messy
+.agents/skills/ml-review
 .agents/skills/natural
 .agents/skills/quick
 .agents/skills/slidev
+.agents/skills/slurm-killarney
+.agents/skills/slurm-test
+.agents/skills/summarize-paper
 .ai/.lnai-manifest.json
 .claude/CLAUDE.md
 .claude/skills/slidev

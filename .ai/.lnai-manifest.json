@@ -321,7 +321,7 @@
     "codex": {
       "version": 1,
       "tool": "codex",
-      "generatedAt": "2026-03-27T19:16:52.414Z",
+      "generatedAt": "2026-07-18T14:48:26.755Z",
       "files": [
         {
           "path": "AGENTS.md",
@@ -334,9 +334,34 @@
           "target": "../../.ai/skills/alliancecan"
         },
         {
+          "path": ".agents/skills/audio_math_explainer",
+          "type": "symlink",
+          "target": "../../.ai/skills/audio_math_explainer"
+        },
+        {
+          "path": ".agents/skills/git",
+          "type": "symlink",
+          "target": "../../.ai/skills/git"
+        },
+        {
+          "path": ".agents/skills/lnai",
+          "type": "symlink",
+          "target": "../../.ai/skills/lnai"
+        },
+        {
+          "path": ".agents/skills/lnai-master-sync",
+          "type": "symlink",
+          "target": "../../.ai/skills/lnai-master-sync"
+        },
+        {
           "path": ".agents/skills/messy",
           "type": "symlink",
           "target": "../../.ai/skills/messy"
+        },
+        {
+          "path": ".agents/skills/ml-review",
+          "type": "symlink",
+          "target": "../../.ai/skills/ml-review"
         },
         {
           "path": ".agents/skills/natural",
@@ -352,6 +377,21 @@
           "path": ".agents/skills/slidev",
           "type": "symlink",
           "target": "../../.ai/skills/slidev"
+        },
+        {
+          "path": ".agents/skills/slurm-killarney",
+          "type": "symlink",
+          "target": "../../.ai/skills/slurm-killarney"
+        },
+        {
+          "path": ".agents/skills/slurm-test",
+          "type": "symlink",
+          "target": "../../.ai/skills/slurm-test"
+        },
+        {
+          "path": ".agents/skills/summarize-paper",
+          "type": "symlink",
+          "target": "../../.ai/skills/summarize-paper"
         }
       ]
     }

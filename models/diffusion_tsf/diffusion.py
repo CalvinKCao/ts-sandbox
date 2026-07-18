@@ -176,6 +176,11 @@ class BinaryDiffusionScheduler:
           - ``ddim``: linear spacing from T-1 → 0
           - ``quad_t`` / ``ddim_quad``: quadratic spacing (more steps near high noise)
         Legacy name ``dpmpp`` is rejected — it never ran real DPM++.
+
+        Each step draws ``x0 ~ Bernoulli(sigmoid(logits))`` (not hard threshold)
+        and the final step keeps that Bernoulli draw (no silent freeze). Mid-loop
+        steps still reflip with ``Bernoulli(β_next)``. Anchor one-shot decode is
+        a separate path in ``generate`` and stays hard-thresholded.
         """
         if reverse_step_indices is not None:
             step_indices = reverse_step_indices.to(device=device, dtype=torch.long)
@@ -217,7 +222,8 @@ class BinaryDiffusionScheduler:
 
             t_batch = torch.full((shape[0],), t_idx, device=device, dtype=torch.long)
             x0_logits, _zt_logits = model_fn(xt, t_batch)
-            x0_hat = (torch.sigmoid(x0_logits) > 0.5).float()
+            # A1+A2: Bernoulli x0 every step, including the last (no hard threshold / freeze).
+            x0_hat = torch.bernoulli(torch.sigmoid(x0_logits))
 
             if i < len(step_indices) - 1:
                 t_next = int(step_indices[i + 1].item())
