@@ -2,6 +2,7 @@
 config for the diffusion tsf model.
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
@@ -144,6 +145,7 @@ class DiffusionTSFConfig:
 
     # Stage 1 guidance (ghost image + encoder tokens)
     use_guidance_channel: bool = True
+    guidance_placement: str = "canvas"  # canvas | cond_chunks
     context_embedding_dim: int = 256
     guidance_type: str = "itransformer"  # itransformer | patch_decoder
     mmpd_patch_size: int = 12
@@ -291,6 +293,11 @@ class DiffusionTSFConfig:
             raise ValueError("variate_factorized=False is no longer supported.")
         if self.model_type != "dit":
             raise ValueError(f"model_type must be 'dit', got {self.model_type!r}")
+        if self.guidance_placement not in {"canvas", "cond_chunks"}:
+            raise ValueError(
+                "guidance_placement must be 'canvas' or 'cond_chunks', "
+                f"got {self.guidance_placement!r}."
+            )
 
     @property
     def data_occupancy_channels(self) -> int:
@@ -335,28 +342,62 @@ class DiffusionTSFConfig:
         return self.data_occupancy_channels + self.num_aux_channels + self.guidance_channels
 
     @property
+    def guidance_core_len(self) -> int:
+        if int(self.dataset_forecast_length or 0) > 0:
+            return int(self.dataset_forecast_length)
+        return max(1, int(self.forecast_length) - int(self.lookback_overlap))
+
+    @property
+    def guidance_cond_chunk_width(self) -> int:
+        cap = int(self.diffusion_lookback_cap or 0)
+        if cap > 0:
+            return cap
+        return int(self.lookback_length)
+
+    @property
+    def guidance_cond_n_chunks(self) -> int:
+        if not self.use_guidance_channel or self.guidance_placement != "cond_chunks":
+            return 0
+        chunk_w = int(self.guidance_cond_chunk_width)
+        if chunk_w <= 0:
+            return 0
+        return int(math.ceil(self.guidance_core_len / chunk_w))
+
+    @property
+    def guidance_cond_channels(self) -> int:
+        n_chunks = int(self.guidance_cond_n_chunks)
+        if n_chunks <= 0:
+            return 0
+        if self.diffusion_stage == "channel_dual":
+            return n_chunks * 2
+        return n_chunks
+
+    @property
     def visual_cond_channels(self) -> int:
         per_scale = 1 + (1 if self.use_value_channel else 0)
         raw_extra = 1 if self.use_raw_lookback_cond_channel else 0
+        guidance_extra = self.guidance_cond_channels
         # Stacked past coarse∥fine as one H=Hc+Hf channel; no horizon GT coarse.
         if self.diffusion_stage == "vertical_dual":
-            return per_scale + raw_extra
+            return per_scale + raw_extra + guidance_extra
         # Past coarse∥fine as C=2 at H; raw lookback also C=2 when enabled.
         if self.diffusion_stage == "channel_dual":
             raw_ch = 2 if self.use_raw_lookback_cond_channel else 0
-            return 2 * per_scale + raw_ch
+            return 2 * per_scale + raw_ch + guidance_extra
         if self.diffusion_stage == "coarse":
-            return per_scale * (3 if self.use_triple_scale else 2) + raw_extra
+            return per_scale * (3 if self.use_triple_scale else 2) + raw_extra + guidance_extra
         if self.diffusion_stage == "fine":
-            return per_scale * (4 if self.use_triple_scale else 3) + raw_extra
+            return per_scale * (4 if self.use_triple_scale else 3) + raw_extra + guidance_extra
         if self.diffusion_stage == "finer":
-            return per_scale * 5 + raw_extra
+            return per_scale * 5 + raw_extra + guidance_extra
         if self.use_triple_scale:
-            return per_scale * 3 + raw_extra
-        return per_scale + raw_extra
+            return per_scale * 3 + raw_extra + guidance_extra
+        return per_scale + raw_extra + guidance_extra
 
     @property
     def guidance_channels(self) -> int:
         if not self.use_guidance_channel:
+            return 0
+        if self.guidance_placement == "cond_chunks":
             return 0
         return self.data_occupancy_channels

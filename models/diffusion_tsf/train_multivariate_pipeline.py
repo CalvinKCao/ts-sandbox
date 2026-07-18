@@ -111,6 +111,7 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'use_triple_scale': USE_TRIPLE_SCALE,
         'diffusion_stage': DIFFUSION_STAGE,
         'use_guidance_channel': USE_GUIDANCE_CHANNEL,
+        'guidance_placement': GUIDANCE_PLACEMENT,
         'cfg_dropout': CFG_DROPOUT,
         'disable_cross_attention': DISABLE_CROSS_ATTENTION,
         'cross_variate_context_bias': CROSS_VARIATE_CONTEXT_BIAS,
@@ -304,6 +305,7 @@ DISABLE_CROSS_ATTENTION = False
 USE_TRIPLE_SCALE = False
 DIFFUSION_STAGE = "coarse"
 USE_GUIDANCE_CHANNEL = False
+GUIDANCE_PLACEMENT = "canvas"
 CFG_DROPOUT = 0.0
 MODEL_TYPE = "dit"
 DIFFUSION_TYPE = "binary"
@@ -1342,6 +1344,7 @@ def create_diffusion_model(
             "use_raw_lookback_cond_channel", USE_RAW_LOOKBACK_COND_CHANNEL,
         ),
         use_guidance_channel=o("use_guidance_channel", USE_GUIDANCE_CHANNEL),
+        guidance_placement=o("guidance_placement", GUIDANCE_PLACEMENT),
         guidance_penalty_weight=0.0,
         model_type=o("model_type", MODEL_TYPE),
         disable_cross_attention=DISABLE_CROSS_ATTENTION,

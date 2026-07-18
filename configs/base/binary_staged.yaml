@@ -95,6 +95,7 @@ experiment:
   use_triple_scale: false
   diffusion_stage: joint
   use_guidance_channel: false
+  guidance_placement: canvas
   cfg_dropout: 0.0
   deterministic_anchor_loss: true
   deterministic_anchor_lambda: 0.99

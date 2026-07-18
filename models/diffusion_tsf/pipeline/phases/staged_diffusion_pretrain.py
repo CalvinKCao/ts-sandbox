@@ -73,6 +73,7 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "dit_mlp_ratio": float(state.dit_mlp_ratio),
         "dit_dropout": float(state.dit_dropout),
         "use_guidance_channel": bool(state.use_guidance_channel),
+        "guidance_placement": str(getattr(state, "guidance_placement", "canvas")),
         "deterministic_anchor_loss": bool(state.deterministic_anchor_loss),
         "deterministic_anchor_lambda": float(state.deterministic_anchor_lambda),
         "deterministic_anchor_alpha": float(state.deterministic_anchor_alpha),
@@ -729,6 +730,7 @@ def patch_stage_globals(
     mod.FINE_IMAGE_HEIGHT = int(state.fine_image_height)
     mod.FINER_IMAGE_HEIGHT = int(state.finer_image_height)
     mod.USE_GUIDANCE_CHANNEL = state.use_guidance_channel
+    mod.GUIDANCE_PLACEMENT = getattr(state, "guidance_placement", "canvas")
     mod.STAGED_REPRESENTATION = state.staged_representation
     if for_synthetic_pretrain:
         mod.USE_ORDINAL_WINDOW_NORM = False

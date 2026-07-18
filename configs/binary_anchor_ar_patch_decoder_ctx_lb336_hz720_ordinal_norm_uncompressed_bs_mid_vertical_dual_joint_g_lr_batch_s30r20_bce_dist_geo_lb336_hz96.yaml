@@ -1,0 +1,74 @@
+# Geo ablation: lb336 / hz96. Fresh pretrain + patch guidance (no hz720 reuse).
+# Optuna / refit / BCE-dist anchor / aug / eval identical to bce_dist joint leaf.
+extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed_bs_mid_vertical_dual_joint_g_lr_batch_s30r20_bce_dist.yaml
+
+geometry:
+  lookback_length: 336
+  forecast_length: 96
+  lookback_overlap: 8
+  diffusion_lookback_cap: 336
+  itrans_lookback_length: 336
+
+wandb:
+  tags:
+    - patch_decoder
+    - ordinal_norm
+    - lb336_hz96
+    - uncompressed
+    - vertical_dual
+    - joint_g_lr_batch
+    - search16_refit20
+    - train_window_aug
+    - anchor_mse_objective
+    - anchor_bce_dist_no_soft_mse
+    - repr_t1
+    - geo_ablation
+
+experiment:
+  name: binary-anchor-ar-patch-decoder-lb336-hz96-ord-unc-bs-mid-vd-joint-g-lr-batch-s30r20-bce-dist-geo
+  experiment_name: binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed_bs_mid_vertical_dual_joint_g_lr_batch_s30r20_bce_dist_geo_lb336_hz96
+  anchor_mse_proxy_lambda: 1.0
+  binary_use_boundary_weighted_bce: true
+  binary_cdf_distance_alpha: 1.0
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: null
+
+  - phase: patch_guidance_finetune_hp
+    reuse_checkpoint_from_config: null
+
+  - phase: diffusion_vertical_dual_finetune_hp
+    n_trials: 16
+    max_epochs: 4
+    patience: 2
+    refit_best_max_epochs: 20
+    refit_best_patience: 20
+    search_space: lr_eff_batch_g
+    hp_objective: anchor_mse
+    hp_anchor_eval_val_fraction: 0.5
+    hp_g_min: 1.0
+    hp_g_max: 10.0
+    hp_lr_min: 5.0e-5
+    hp_lr_max: 1.5e-3
+    effective_univariate_batch_grid: [512, 1024, 2048]
+    ema_decay: 0.995
+    prediction_target: x0
+    loss_weighting: min_snr
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+    binary_length_mode: power
+    binary_length_scale: 1.0
+
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 4
+    n_samples: 1
+    probabilistic_n_samples: 20
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: false

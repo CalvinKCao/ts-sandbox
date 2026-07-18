@@ -57,6 +57,7 @@ class PipelineState:
     use_channel_dual_concat: bool = False
     diffusion_stage: str = "joint"
     use_guidance_channel: bool = True
+    guidance_placement: str = "canvas"
     guidance_type: str = "patch_decoder"
     mmpd_patch_size: int = 12
     cfg_dropout: float = 0.1

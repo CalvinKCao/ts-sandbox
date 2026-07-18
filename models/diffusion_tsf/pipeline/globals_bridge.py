@@ -65,6 +65,7 @@ def patch_globals(
     mod.USE_CHANNEL_DUAL_CONCAT = state.use_channel_dual_concat
     mod.DIFFUSION_STAGE = state.diffusion_stage
     mod.USE_GUIDANCE_CHANNEL = state.use_guidance_channel
+    mod.GUIDANCE_PLACEMENT = getattr(state, "guidance_placement", "canvas")
     mod.GUIDANCE_TYPE = state.guidance_type
     mod.MMPD_PATCH_SIZE = int(state.mmpd_patch_size)
     mod.CFG_DROPOUT = state.cfg_dropout

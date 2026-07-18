@@ -1379,6 +1379,114 @@ class DiffusionTSF(nn.Module):
         )
         return cond, past_maps
 
+    def _guidance_placement(self) -> str:
+        return str(getattr(self.config, "guidance_placement", "canvas") or "canvas")
+
+    def _uses_canvas_guidance(self) -> bool:
+        return bool(self.config.use_guidance_channel) and self._guidance_placement() == "canvas"
+
+    def _uses_cond_chunk_guidance(self) -> bool:
+        return bool(self.config.use_guidance_channel) and self._guidance_placement() == "cond_chunks"
+
+    def _guidance_core_1d(self, guidance_forecast_norm: torch.Tensor) -> torch.Tensor:
+        """Drop overlap prefix; return core forecast (B,V,core_len)."""
+        K = int(self.config.lookback_overlap)
+        if K > 0 and guidance_forecast_norm.shape[-1] > K:
+            return guidance_forecast_norm[..., K:]
+        return guidance_forecast_norm
+
+    def _encode_guidance_cond_chunks(
+        self,
+        guidance_forecast_norm: torch.Tensor,
+        stage: str,
+        H: int,
+        BV: int,
+    ) -> torch.Tensor:
+        """Return (BV, n_chunks * C_per, H, chunk_w) encoded guidance chunks."""
+        core = self._guidance_core_1d(guidance_forecast_norm)
+        chunk_w = int(self.config.diffusion_lookback_cap or 0) or int(self.config.lookback_length)
+        if chunk_w <= 0:
+            raise ValueError("cond_chunks requires positive diffusion_lookback_cap or lookback_length")
+        chunks = []
+        T = core.shape[-1]
+        start = 0
+        while start < T:
+            piece = core[..., start:start + chunk_w]
+            start += chunk_w
+            pad = chunk_w - piece.shape[-1]
+            if pad > 0:
+                piece = F.pad(piece, (0, pad))
+            maps = self._encode_staged_maps(piece)
+            if stage == "vertical_dual":
+                stacked = self.to_2d.stack_vertical_dual(maps["coarse"], maps["fine"])
+                chunks.append(stacked.reshape(BV, 1, stacked.shape[-2], stacked.shape[-1]))
+            elif stage == "channel_dual":
+                flat = self.to_2d.stack_channel_dual_flat(maps["coarse"], maps["fine"])
+                chunks.append(flat)
+            else:
+                m = self._resize_cdf_height(maps[stage], H).reshape(BV, 1, H, maps[stage].shape[-1])
+                chunks.append(m)
+        return torch.cat(chunks, dim=1)
+
+    def _encode_guidance_cond_chunks_joint(
+        self,
+        guidance_forecast_norm: torch.Tensor,
+        H: int,
+        BV: int,
+    ) -> torch.Tensor:
+        """Joint-stage guidance chunks via encode_to_2d_binary."""
+        core = self._guidance_core_1d(guidance_forecast_norm)
+        chunk_w = int(self.config.diffusion_lookback_cap or 0) or int(self.config.lookback_length)
+        if chunk_w <= 0:
+            raise ValueError("cond_chunks requires positive diffusion_lookback_cap or lookback_length")
+        chunks = []
+        T = core.shape[-1]
+        start = 0
+        while start < T:
+            piece = core[..., start:start + chunk_w]
+            start += chunk_w
+            pad = chunk_w - piece.shape[-1]
+            if pad > 0:
+                piece = F.pad(piece, (0, pad))
+            maps_2d = self.encode_to_2d_binary(piece)
+            chunks.append(maps_2d.reshape(BV, 1, H, maps_2d.shape[-1]))
+        return torch.cat(chunks, dim=1)
+
+    def _align_guidance_cond_width(self, guidance_cond: torch.Tensor, cond_width: int) -> torch.Tensor:
+        cur_w = int(guidance_cond.shape[-1])
+        if cur_w == cond_width:
+            return guidance_cond
+        H = int(guidance_cond.shape[-2])
+        if cur_w < cond_width:
+            return F.pad(guidance_cond, (0, cond_width - cur_w))
+        return F.interpolate(
+            guidance_cond,
+            size=(H, cond_width),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+    def _zero_guidance_cond_tail(
+        self,
+        cond: torch.Tensor,
+        n_guidance_ch: int,
+        drop_mask_flat: torch.Tensor,
+    ) -> torch.Tensor:
+        if n_guidance_ch <= 0:
+            return cond
+        past_ch = int(cond.shape[1]) - int(n_guidance_ch)
+        if past_ch < 0:
+            raise ValueError(
+                f"cond channels {cond.shape[1]} < guidance tail {n_guidance_ch}"
+            )
+        past_part = cond[:, :past_ch]
+        guide_part = cond[:, past_ch:]
+        guide_part = torch.where(
+            drop_mask_flat.view(-1, 1, 1, 1),
+            torch.zeros_like(guide_part),
+            guide_part,
+        )
+        return torch.cat([past_part, guide_part], dim=1)
 
     def _forward_binary_staged(
         self,
@@ -1439,26 +1547,36 @@ class DiffusionTSF(nn.Module):
             future_fine_cond = self._resize_cdf_height(future_maps["fine"], H)
             future_fine_flat = future_fine_cond.reshape(BV, 1, H, W_fut)
             cond_for_unet = torch.cat((cond_for_unet, future_fine_flat), dim=1)
-        base_cond_for_unet = cond_for_unet
 
         guidance_flat = None
+        n_guidance_cond_ch = 0
         if self.config.use_guidance_channel:
             raw_hz_w = int(future_norm.shape[-1])
             guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, _stats, raw_hz_w)
-            guidance_maps = self._encode_staged_maps(guidance_forecast_norm)
-            if stage == "vertical_dual":
-                g_stack = self.to_2d.stack_vertical_dual(guidance_maps["coarse"], guidance_maps["fine"])
-                guidance_flat = g_stack.reshape(BV, 1, H, W_fut)
-            elif stage == "channel_dual":
-                guidance_flat = self.to_2d.stack_channel_dual_flat(
-                    guidance_maps["coarse"], guidance_maps["fine"],
+            if self._uses_canvas_guidance():
+                guidance_maps = self._encode_staged_maps(guidance_forecast_norm)
+                if stage == "vertical_dual":
+                    g_stack = self.to_2d.stack_vertical_dual(guidance_maps["coarse"], guidance_maps["fine"])
+                    guidance_flat = g_stack.reshape(BV, 1, H, W_fut)
+                elif stage == "channel_dual":
+                    guidance_flat = self.to_2d.stack_channel_dual_flat(
+                        guidance_maps["coarse"], guidance_maps["fine"],
+                    )
+                elif stage == "coarse":
+                    guidance_flat = self._resize_cdf_height(guidance_maps["coarse"], H).reshape(BV, 1, H, W_fut)
+                elif stage == "fine":
+                    guidance_flat = self._resize_cdf_height(guidance_maps["fine"], H).reshape(BV, 1, H, W_fut)
+                elif stage == "finer":
+                    guidance_flat = self._resize_cdf_height(guidance_maps["finer"], H).reshape(BV, 1, H, W_fut)
+            elif self._uses_cond_chunk_guidance():
+                guidance_cond = self._encode_guidance_cond_chunks(
+                    guidance_forecast_norm, stage, H, BV,
                 )
-            elif stage == "coarse":
-                guidance_flat = self._resize_cdf_height(guidance_maps["coarse"], H).reshape(BV, 1, H, W_fut)
-            elif stage == "fine":
-                guidance_flat = self._resize_cdf_height(guidance_maps["fine"], H).reshape(BV, 1, H, W_fut)
-            elif stage == "finer":
-                guidance_flat = self._resize_cdf_height(guidance_maps["finer"], H).reshape(BV, 1, H, W_fut)
+                n_guidance_cond_ch = int(guidance_cond.shape[1])
+                guidance_cond = self._align_guidance_cond_width(guidance_cond, cond_for_unet.shape[-1])
+                cond_for_unet = torch.cat([cond_for_unet, guidance_cond], dim=1)
+
+        base_cond_for_unet = cond_for_unet
 
         canvas = self._inject_coordinate_channel(xt_flat.float())
         canvas = self._inject_time_channels(canvas)
@@ -1482,6 +1600,10 @@ class DiffusionTSF(nn.Module):
                     guidance_flat,
                 )
                 canvas = torch.cat([canvas, guidance_for_unet], dim=1)
+            elif n_guidance_cond_ch > 0:
+                cond_for_unet = self._zero_guidance_cond_tail(
+                    cond_for_unet, n_guidance_cond_ch, drop_mask_flat,
+                )
         elif guidance_flat is not None:
             canvas = torch.cat([canvas, guidance_flat], dim=1)
 
@@ -1687,19 +1809,28 @@ class DiffusionTSF(nn.Module):
             future_coarse_flat = future_coarse_cond.reshape(BV, 1, H, W_fut)
             cond_for_unet = self._cat_past_and_horizon_cond(cond_for_unet, future_coarse_flat)
 
-        if self.config.use_guidance_channel and guidance_maps is not None:
-            if stage == "vertical_dual":
-                g_stack = self.to_2d.stack_vertical_dual(
-                    guidance_maps["coarse"], guidance_maps["fine"],
+        if self.config.use_guidance_channel and guidance_norm is not None:
+            if self._uses_canvas_guidance():
+                if stage == "vertical_dual":
+                    g_stack = self.to_2d.stack_vertical_dual(
+                        guidance_maps["coarse"], guidance_maps["fine"],
+                    )
+                    guidance_flat = g_stack.reshape(BV, 1, H, W_fut)
+                elif stage == "channel_dual":
+                    guidance_flat = self.to_2d.stack_channel_dual_flat(
+                        guidance_maps["coarse"], guidance_maps["fine"],
+                    )
+                else:
+                    guidance_flat = guidance_maps[stage].reshape(BV, 1, H, W_fut)
+                canvas = torch.cat([canvas, guidance_flat], dim=1)
+            elif self._uses_cond_chunk_guidance():
+                guidance_cond = self._encode_guidance_cond_chunks(
+                    guidance_norm, stage, H, BV,
                 )
-                guidance_flat = g_stack.reshape(BV, 1, H, W_fut)
-            elif stage == "channel_dual":
-                guidance_flat = self.to_2d.stack_channel_dual_flat(
-                    guidance_maps["coarse"], guidance_maps["fine"],
+                guidance_cond = self._align_guidance_cond_width(
+                    guidance_cond, cond_for_unet.shape[-1],
                 )
-            else:
-                guidance_flat = guidance_maps[stage].reshape(BV, 1, H, W_fut)
-            canvas = torch.cat([canvas, guidance_flat], dim=1)
+                cond_for_unet = torch.cat([cond_for_unet, guidance_cond], dim=1)
 
         base_cond = cond_for_unet
         self._predict_noise_chunked(
@@ -1791,20 +1922,29 @@ class DiffusionTSF(nn.Module):
         guidance_flat = None
         if self.config.use_guidance_channel:
             guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, raw_hz_w)
-            guidance_maps = self._encode_staged_maps(guidance_forecast_norm)
-            if stage == "vertical_dual":
-                g_stack = self.to_2d.stack_vertical_dual(guidance_maps["coarse"], guidance_maps["fine"])
-                guidance_flat = g_stack.reshape(BV, 1, H, W_fut)
-            elif stage == "channel_dual":
-                guidance_flat = self.to_2d.stack_channel_dual_flat(
-                    guidance_maps["coarse"], guidance_maps["fine"],
+            if self._uses_canvas_guidance():
+                guidance_maps = self._encode_staged_maps(guidance_forecast_norm)
+                if stage == "vertical_dual":
+                    g_stack = self.to_2d.stack_vertical_dual(guidance_maps["coarse"], guidance_maps["fine"])
+                    guidance_flat = g_stack.reshape(BV, 1, H, W_fut)
+                elif stage == "channel_dual":
+                    guidance_flat = self.to_2d.stack_channel_dual_flat(
+                        guidance_maps["coarse"], guidance_maps["fine"],
+                    )
+                elif stage == "coarse":
+                    guidance_flat = self._resize_cdf_height(guidance_maps["coarse"], H).reshape(BV, 1, H, W_fut)
+                elif stage == "fine":
+                    guidance_flat = self._resize_cdf_height(guidance_maps["fine"], H).reshape(BV, 1, H, W_fut)
+                elif stage == "finer":
+                    guidance_flat = self._resize_cdf_height(guidance_maps["finer"], H).reshape(BV, 1, H, W_fut)
+            elif self._uses_cond_chunk_guidance():
+                guidance_cond = self._encode_guidance_cond_chunks(
+                    guidance_forecast_norm, stage, H, BV,
                 )
-            elif stage == "coarse":
-                guidance_flat = self._resize_cdf_height(guidance_maps["coarse"], H).reshape(BV, 1, H, W_fut)
-            elif stage == "fine":
-                guidance_flat = self._resize_cdf_height(guidance_maps["fine"], H).reshape(BV, 1, H, W_fut)
-            elif stage == "finer":
-                guidance_flat = self._resize_cdf_height(guidance_maps["finer"], H).reshape(BV, 1, H, W_fut)
+                guidance_cond = self._align_guidance_cond_width(
+                    guidance_cond, cond_for_unet.shape[-1],
+                )
+                cond_for_unet = torch.cat([cond_for_unet, guidance_cond], dim=1)
 
         def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
             canvas = self._inject_coordinate_channel(xt)
@@ -1984,20 +2124,6 @@ class DiffusionTSF(nn.Module):
         future_flat = future_2d.reshape(BV, 1, H, W_fut)
         xt_flat, zt_flat = self.binary_scheduler.add_noise(future_flat, t_flat)
 
-        guidance_2d = None
-        if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(
-                past, past_norm, stats, int(future_norm.shape[-1]),
-            )
-            guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
-
-        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
-        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
-        ctx_anchor = ctx_flat
-
-        canvas = self._inject_coordinate_channel(xt_flat.float())
-        canvas = self._inject_time_channels(canvas)
-
         past_2d = self.encode_to_2d_binary(past_norm)
         W_past = past_2d.shape[3]
         past_flat = past_2d.reshape(BV, 1, H, W_past)
@@ -2006,17 +2132,48 @@ class DiffusionTSF(nn.Module):
         else:
             cond_for_unet = past_flat
         cond_for_unet = self._apply_coarse_dropout(cond_for_unet)
+
+        guidance_2d_flat = None
+        n_guidance_cond_ch = 0
+        if self.config.use_guidance_channel:
+            guidance_forecast_norm = self._get_guidance_forecast_norm(
+                past, past_norm, stats, int(future_norm.shape[-1]),
+            )
+            if self._uses_canvas_guidance():
+                guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
+                guidance_2d_flat = guidance_2d.reshape(BV, 1, H, W_fut)
+            elif self._uses_cond_chunk_guidance():
+                guidance_cond = self._encode_guidance_cond_chunks_joint(
+                    guidance_forecast_norm, H, BV,
+                )
+                n_guidance_cond_ch = int(guidance_cond.shape[1])
+                guidance_cond = self._align_guidance_cond_width(
+                    guidance_cond, cond_for_unet.shape[-1],
+                )
+                cond_for_unet = torch.cat([cond_for_unet, guidance_cond], dim=1)
+
         base_cond_for_unet = cond_for_unet
-        guidance_2d_flat = guidance_2d.reshape(BV, 1, H, W_fut) if guidance_2d is not None else None
+
+        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
+        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
+        ctx_anchor = ctx_flat
+
+        canvas = self._inject_coordinate_channel(xt_flat.float())
+        canvas = self._inject_time_channels(canvas)
 
         if self.training and self.config.cfg_dropout > 0.0:
             drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
             drop_mask_flat = drop_mask.unsqueeze(1).expand(-1, V).reshape(BV)
-            cond_for_unet = torch.where(
-                drop_mask_flat.view(BV, 1, 1, 1),
-                torch.zeros_like(cond_for_unet),
-                cond_for_unet,
-            )
+            if n_guidance_cond_ch > 0:
+                cond_for_unet = self._zero_guidance_cond_tail(
+                    cond_for_unet, n_guidance_cond_ch, drop_mask_flat,
+                )
+            else:
+                cond_for_unet = torch.where(
+                    drop_mask_flat.view(BV, 1, 1, 1),
+                    torch.zeros_like(cond_for_unet),
+                    cond_for_unet,
+                )
             if ctx_flat is not None:
                 ctx_flat = torch.where(
                     drop_mask_flat.view(BV, 1, 1),
@@ -2024,7 +2181,7 @@ class DiffusionTSF(nn.Module):
                     ctx_flat,
                 )
 
-            if guidance_2d is not None:
+            if guidance_2d_flat is not None:
                 guide_flat = torch.where(
                     drop_mask_flat.view(BV, 1, 1, 1),
                     torch.zeros_like(guidance_2d_flat),
@@ -2122,8 +2279,17 @@ class DiffusionTSF(nn.Module):
         guide_flat = None
         if self.config.use_guidance_channel:
             guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, raw_hz_w)
-            guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
-            guide_flat = guidance_2d.reshape(BV, 1, H, W_fut)
+            if self._uses_canvas_guidance():
+                guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
+                guide_flat = guidance_2d.reshape(BV, 1, H, W_fut)
+            elif self._uses_cond_chunk_guidance():
+                guidance_cond = self._encode_guidance_cond_chunks_joint(
+                    guidance_forecast_norm, H, BV,
+                )
+                guidance_cond = self._align_guidance_cond_width(
+                    guidance_cond, cond_for_unet.shape[-1],
+                )
+                cond_for_unet = torch.cat([cond_for_unet, guidance_cond], dim=1)
 
         ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
         ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
