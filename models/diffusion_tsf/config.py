@@ -74,6 +74,8 @@ class DiffusionTSFConfig:
     diffusion_stage: str = "joint"  # joint, coarse, fine, finer, vertical_dual, channel_dual
     use_triple_scale: bool = False
     # Soft-decode MSE mix inside deterministic anchor: λ*BCE + (1-λ)*MSE.
+    # MSE is unit-rank (or already O(1) window-norm) so it stays BCE-scale.
+    # Note: λ is the BCE weight (λ=1 → BCE-only), despite the "mse" name.
     anchor_mse_proxy_lambda: float = 0.5
 
     # classifier-free guidance (training dropout only; inference is always conditional)

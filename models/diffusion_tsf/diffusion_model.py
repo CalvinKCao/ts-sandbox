@@ -1135,6 +1135,30 @@ class DiffusionTSF(nn.Module):
         coarse, fine = self.to_2d.split_channel_dual_flat(soft_canvas, B=B, V=V)
         return self._decode_staged_combined_1d(coarse, fine, cdf_decoder="mean")
 
+    def _anchor_soft_decode_mse(
+        self,
+        soft_1d: torch.Tensor,
+        future_tgt: torch.Tensor,
+    ) -> torch.Tensor:
+        """Soft-decode MSE in O(1) space so it stays comparable to map BCE.
+
+        Ordinal finetune targets are raw ranks (hundreds–thousands). MSE in that
+        space swamps BCE even at a tiny outer weight; divide by per-variate
+        rank_max so both sides live in ~[0, 1]. Window-norm / synth targets are
+        already O(1), so leave them alone.
+        """
+        if soft_1d.shape != future_tgt.shape:
+            raise ValueError(
+                f"soft decode shape {tuple(soft_1d.shape)} != target {tuple(future_tgt.shape)}"
+            )
+        if self._uses_global_ordinal_encoding():
+            vmax = self._ordinal_rank_max_tensor(
+                soft_1d.device, dtype=soft_1d.dtype,
+            ).reshape(1, -1, 1).clamp_min(1.0)
+            soft_1d = soft_1d / vmax
+            future_tgt = future_tgt / vmax
+        return F.mse_loss(soft_1d, future_tgt)
+
     def _occupancy_channels(self) -> int:
         return int(getattr(self.config, "data_occupancy_channels", 1))
 
@@ -1517,7 +1541,8 @@ class DiffusionTSF(nn.Module):
                     raise ValueError(
                         f"soft decode width {soft_1d.shape[-1]} != target {future_tgt.shape[-1]}"
                     )
-                anchor_mse = F.mse_loss(soft_1d, future_tgt)
+                anchor_mse = self._anchor_soft_decode_mse(soft_1d, future_tgt)
+                # λ weights map BCE; (1-λ) weights unit-space soft-decode MSE.
                 lam_mse = float(getattr(self.config, "anchor_mse_proxy_lambda", 0.5))
                 anchor_loss = lam_mse * anchor_bce + (1.0 - lam_mse) * anchor_mse
             elif stage == "channel_dual":
@@ -1529,7 +1554,7 @@ class DiffusionTSF(nn.Module):
                     raise ValueError(
                         f"soft decode width {soft_1d.shape[-1]} != target {future_tgt.shape[-1]}"
                     )
-                anchor_mse = F.mse_loss(soft_1d, future_tgt)
+                anchor_mse = self._anchor_soft_decode_mse(soft_1d, future_tgt)
                 lam_mse = float(getattr(self.config, "anchor_mse_proxy_lambda", 0.5))
                 anchor_loss = lam_mse * anchor_bce + (1.0 - lam_mse) * anchor_mse
             else:
