@@ -40,6 +40,7 @@ submit_group() {
   local label="$1"
   local configs="$2"
   local wall="$3"
+  shift 3
   echo "Submitting ${label}: configs=${configs} datasets=${DATASETS} time=${wall}"
   ./submit_binary.sh \
     --configs "$configs" \
