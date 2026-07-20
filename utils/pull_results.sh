@@ -5,7 +5,8 @@
 #   ./utils/pull_results.sh [--light|--all] [--recent [HOURS]] [--no-npy-ckpt] [--dry-run] [subpath ...]
 #
 # Modes (default: --light):
-#   --light   discover all *.log, *.err, *.out, *.json via remote find, then rsync
+#   --light   discover logs + JSON + viz images (*.log/*.err/*.out/*.json/*.png/*.jpg/*.jpeg)
+#             via remote find, then rsync
 #   --all     sync all files (no extension filter)
 #
 # Filters:
@@ -194,7 +195,11 @@ if [ "$pull_mode" = "light" ]; then
         *.log|*.err|*.out|*.json)
             [ "$tree_kind" = "results" ] && light_ok=1
             ;;
-        *.png|*.jpg|*.jpeg|*.csv|*.md)
+        *.png|*.jpg|*.jpeg)
+            # results/viz JPGs + reports figures
+            light_ok=1
+            ;;
+        *.csv|*.md)
             [ "$tree_kind" = "reports" ] && light_ok=1
             ;;
         *.json)
@@ -259,7 +264,11 @@ if [ "$pull_mode" = "light" ]; then
             -o -name '*.csv' -o -name '*.json' -o -name '*.md' \)
         )
     else
-        file_args+=(\( -name '*.log' -o -name '*.err' -o -name '*.out' -o -name '*.json' \))
+        # Include results/viz (and any other) raster panels with logs/JSON.
+        file_args+=(
+            \( -name '*.log' -o -name '*.err' -o -name '*.out' -o -name '*.json'
+            -o -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \)
+        )
     fi
 fi
 
@@ -287,7 +296,7 @@ pull_via_file_list() {
         if [ "$tree_kind" = "reports" ]; then
             scope="*.png *.jpg *.jpeg *.csv *.json *.md"
         else
-            scope="*.log *.err *.out *.json"
+            scope="*.log *.err *.out *.json *.png *.jpg *.jpeg"
         fi
     fi
     local prune_note=""

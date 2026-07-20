@@ -1,18 +1,18 @@
 #!/bin/bash
 # =============================================================================
-# Viz sequential ordinal (coarse→fine) exchange_rate: 10 spaced windows × 10
-# quad_t prob samples → coarse/fine 2D + combined 1D JPGs.
+# Viz sequential ordinal (coarse→fine) exchange_rate: 5 spaced windows × 10
+# quad_t prob samples → wide coarse/fine 2D stacks + lookback/horizon 1D overlays.
 #
 # Run: 07-12-4213914-exchange_rate-..._ordinal_norm_g10p0
 #
 # USAGE (Killarney login, $SCRATCH/ts-sandbox):
 #   cd "$SCRATCH/ts-sandbox" && git pull
 #   ./temp/submit_viz_sequential_ordinal_exchange_prob_samples_killarney.sh
-#   ./temp/submit_viz_sequential_ordinal_exchange_prob_samples_killarney.sh --n-windows 4 --n-prob-samples 4
+#   ./temp/submit_viz_sequential_ordinal_exchange_prob_samples_killarney.sh --n-windows 5 --n-prob-samples 10
 #   ./temp/submit_viz_sequential_ordinal_exchange_prob_samples_killarney.sh --n-windows 1 --n-prob-samples 1  # smoke
 #
 # Outputs under:
-#   results/viz/sequential_ordinal_exchange_prob_samples/<run>/winXXXX/{coarse,fine,combined}/
+#   results/viz/sequential_ordinal_exchange_prob_samples/<run>/winXXXX_var*_*.jpg
 # =============================================================================
 
 set -euo pipefail
@@ -30,7 +30,7 @@ VIZ_PY="temp/visualize_sequential_ordinal_exchange_prob_samples.py"
 PY_ARGS=("$@")
 if [[ ${#PY_ARGS[@]} -eq 0 ]]; then
     PY_ARGS=(
-        --n-windows 10
+        --n-windows 5
         --n-prob-samples 10
         --device cuda
     )
@@ -39,13 +39,13 @@ fi
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     cd "$REPO"
     mkdir -p "$REPO/results/logs"
-    echo "Submitting sequential ordinal exchange prob-sample viz (L40S, 2h) from $REPO ..."
+    echo "Submitting sequential ordinal exchange prob-sample viz (L40S, 3h) from $REPO ..."
     echo "  python $VIZ_PY ${PY_ARGS[*]}"
     sbatch \
         --chdir="$REPO" \
         --job-name="viz-seq-ord-exch" \
         --account=aip-boyuwang \
-        --time=2:00:00 \
+        --time=3:00:00 \
         --nodes=1 \
         --gres=gpu:l40s:1 \
         --cpus-per-task=4 \
