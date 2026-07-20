@@ -99,12 +99,18 @@ def _gt_maps(
     past_b: torch.Tensor,
     future_b: torch.Tensor,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return GT coarse/fine 2D (V,H,W_fut) and GT combined 1D in model space (V,W_fut)."""
+    """Return GT coarse/fine 2D (V,H,W_fut) and GT combined 1D on the same W as maps.
+
+    Do not use raw future_norm here: with representation_time_stride>1 the 2D canvas
+    (and dual-decoded 1D) is shorter than the dataset horizon.
+    """
     past_norm, future_norm, _ = model._normalize_sequence(past_b, future_b)
     fut_maps = model._encode_staged_maps(future_norm)
     coarse = fut_maps["coarse"][0].detach().cpu().numpy()
     fine = fut_maps["fine"][0].detach().cpu().numpy()
-    gt_1d = future_norm[0].detach().cpu().numpy()
+    gt_1d = model._decode_staged_combined_1d(
+        fut_maps["coarse"], fut_maps["fine"],
+    )[0].detach().cpu().numpy()
     return coarse, fine, gt_1d
 
 
@@ -126,11 +132,8 @@ def _prob_sample_chain(
         num_inference_steps=num_steps,
         future_coarse_2d=coarse_out["future_2d_coarse"],
     )
-    # Prefer fine model's ordinal-aware dual decode of the sampled maps.
-    combined = fine_model._decode_staged_combined_1d(
-        fine_out["future_2d_coarse"],
-        fine_out["future_2d_fine"],
-    )[0].detach().cpu().numpy()
+    # Same dual-decode path as generate()'s prediction_norm for ordinal fine stage.
+    combined = fine_out["prediction_norm"][0].detach().cpu().numpy()
     return {
         "coarse": fine_out["future_2d_coarse"][0].detach().cpu().numpy(),
         "fine": fine_out["future_2d_fine"][0].detach().cpu().numpy(),
@@ -188,16 +191,22 @@ def _plot_combined_1d(
     out_path: Path,
     jpeg_dpi: int,
 ) -> Path:
-    """Horizon 1D: GT + faint samples + mean (ordinal/model space)."""
+    """Horizon 1D: GT + faint samples + mean (ordinal/model space, repr-time axis)."""
     s = np.stack([x[var_idx] for x in samples_1d], axis=0)
-    # Drop lookback-overlap prefix on the future canvas if present.
+    gt_v = gt_1d[var_idx]
+    if s.shape[-1] != gt_v.shape[-1]:
+        raise ValueError(
+            f"combined 1D length mismatch: samples T={s.shape[-1]} vs GT T={gt_v.shape[-1]} "
+            "(GT must be dual-decoded from staged maps, not raw future_norm)"
+        )
+    # Drop lookback-overlap prefix in *repr* columns if present.
     if k_overlap > 0 and s.shape[-1] > k_overlap:
         s_core = s[..., k_overlap:]
-        gt_core = gt_1d[var_idx, k_overlap:]
+        gt_core = gt_v[..., k_overlap:]
     else:
         s_core = s
-        gt_core = gt_1d[var_idx]
-    t = np.arange(gt_core.shape[-1])
+        gt_core = gt_v
+    t = np.arange(s_core.shape[-1])
     mean = s_core.mean(axis=0)
     lo, hi = np.quantile(s_core, [0.1, 0.9], axis=0)
 
@@ -300,7 +309,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if bool(state.use_ordinal_window_norm) and not fine_model._uses_global_ordinal_encoding():
         raise RuntimeError("ordinal_ladder not wired into fine model")
 
-    k_overlap = int(getattr(fine_model.config, "lookback_overlap", 0) or 0)
+    # Strip overlap in representation columns (raw K // stride), not raw timesteps.
+    k_overlap = int(fine_model._overlap_repr_cols())
     win_idxs = _evenly_spaced_indices(len(test_ds), args.n_windows)
     print(f"test_len={len(test_ds)} windows={win_idxs}")
 
