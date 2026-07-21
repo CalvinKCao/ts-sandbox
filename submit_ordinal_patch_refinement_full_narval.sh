@@ -10,7 +10,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLUTION=256
 DATASET=ETTh1
-WALL="8:00:00"
+WALL="1:00:00"
 SMOKE=0
 
 while [[ $# -gt 0 ]]; do
@@ -27,10 +27,6 @@ case "$DATASET" in
   ETTh1|exchange_rate|electricity|traffic) ;;
   *) echo "ERROR: --dataset must be ETTh1|exchange_rate|electricity|traffic (got $DATASET)" >&2; exit 2 ;;
 esac
-# Wide series: give electricity/traffic more wall by default unless overridden.
-if [[ "$WALL" == "8:00:00" && ( "$DATASET" == "electricity" || "$DATASET" == "traffic" ) ]]; then
-  WALL="12:00:00"
-fi
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   [[ "$(hostname)" == *"narval"* ]] || { echo "ERROR: submit this from a Narval login node." >&2; exit 2; }
