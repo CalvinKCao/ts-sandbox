@@ -1,13 +1,26 @@
-# Oracle-coarse ordinal patch-refinement kill test
+# Oracle-coarse ordinal patch refinement kill test
 
-`smoke.py` is the gated first stage: it loads one ETTh1 test window through the repository dataset path, creates a ground-truth 16-bin CDF oracle, enlarges it to 256x256 by nearest neighbour, and trains the existing `FactorizedDiT` locally on its sixteen input-coordinate patches.
+Vertical-only geometry (no horizontal stretch):
 
-The high-resolution target is independently encoded from the ordinal future at 256 value bins; it is never interpolated from the coarse map. GT, naïve, and refined decodes all use the same global ordinal ladder and snapping behavior as the discriminator tooling. Results are saved under `results/ordinal_patch_refinement_killtest/smoke`.
+1. Encode ordinal ranks to a hi-res CDF `(H, W=horizon)` with `H ∈ {256, 512}`.
+2. Encode the same ranks to GT coarse `(16, W)`.
+3. Nearest-upsample coarse **vertically only** to `(H, W)`.
+4. Train `FactorizedDiT` on in-bounds overlapping **8×8** crops (column stride 2); skip crops that would pad past the `(H, W)` canvas edge.
 
-Run locally:
+Train forecast windows use pack `train_stride=2` (overlapping). Val/test use non-overlapping futures. All splits apply the same 8×8 OOB filter.
 
-```powershell
-.venv\Scripts\python.exe experiments\ordinal_patch_refinement_killtest\smoke.py
+Discriminator eval calls `utils.eval_discriminator_texture_staged_vs_mmpd.train_classifier` + `visualize_combo` on packs written in the stock `y_true`/`samples`/`indices` schema (refined + naive). Optional `--import-mmpd-packs-from` runs the same entrypoints on an existing `mmpd_*.npz` when its horizon is 16.
+
+```bash
+# Local smoke (GPU if available)
+python -m experiments.ordinal_patch_refinement_killtest.smoke --steps 5 --resolution 256 \
+  --output results/ordinal_patch_refinement_killtest/vert8_smoke_256
+python -m experiments.ordinal_patch_refinement_killtest.smoke --steps 5 --resolution 512 \
+  --output results/ordinal_patch_refinement_killtest/vert8_smoke_512
+
+# Full Narval jobs
+./submit_ordinal_patch_refinement_full_narval.sh --dataset ETTh1 --resolution 256
+./submit_ordinal_patch_refinement_full_narval.sh --dataset ETTh1 --resolution 512
+./submit_ordinal_patch_refinement_full_narval.sh --dataset exchange_rate --resolution 256
+./submit_ordinal_patch_refinement_full_narval.sh --dataset exchange_rate --resolution 512
 ```
-
-This stage deliberately does not generate a held-out pack or run the discriminator. Those are post-smoke work, pending inspection of the saved arrays and figures.
