@@ -1,24 +1,17 @@
 # Oracle-coarse ordinal patch refinement kill test
 
-Vertical-only geometry (no horizontal stretch):
+## Geometry
+1. Encode ordinal ranks → hi-res CDF `(H, W=16)` and coarse `(16, W)`.
+2. Vertical-only NN upsample coarse → `(H, W)`.
+3. Overlapping **8×8** crops with coarse transition edge at local row 4; skip canvas-OOB.
 
-1. Encode ordinal ranks to a hi-res CDF `(H, W=horizon)` with `H ∈ {256, 512}`.
-2. Encode the same ranks to GT coarse `(16, W)`.
-3. Nearest-upsample coarse **vertically only** to `(H, W)`.
-4. Train `FactorizedDiT` on in-bounds overlapping **8×8** crops (column stride 2); skip crops that would pad past the `(H, W)` canvas edge.
+## Refiner (binary diffusion)
+`FactorizedDiT` trained with XOR bit-flip noise (linear schedule, T=1000, min-SNR), dual-head BCE (x0+zt), conditioned on `[naive_upscale, past_hist]`. Inference: iterative `quad_t` sample (20 steps).
 
-Train forecast windows use pack `train_stride=2` (overlapping). Val/test use non-overlapping futures. All splits apply the same 8×8 OOB filter.
+## Discriminator
+1D ordinal-rank **refined vs GT** only (`InvertedSliceDiscriminator`).
 
 ```bash
-# Local smoke (GPU if available)
-python -m experiments.ordinal_patch_refinement_killtest.smoke --steps 5 --resolution 256 \
-  --output results/ordinal_patch_refinement_killtest/vert8_smoke_256
-python -m experiments.ordinal_patch_refinement_killtest.smoke --steps 5 --resolution 512 \
-  --output results/ordinal_patch_refinement_killtest/vert8_smoke_512
-
-# Full Narval jobs
+python -m experiments.ordinal_patch_refinement_killtest.smoke --steps 30 --resolution 256
 ./submit_ordinal_patch_refinement_full_narval.sh --dataset ETTh1 --resolution 256
-./submit_ordinal_patch_refinement_full_narval.sh --dataset ETTh1 --resolution 512
-./submit_ordinal_patch_refinement_full_narval.sh --dataset exchange_rate --resolution 256
-./submit_ordinal_patch_refinement_full_narval.sh --dataset exchange_rate --resolution 512
 ```

@@ -4,8 +4,10 @@ Geometry: hi-res CDF is (H x W=horizon); coarse is (16 x W); naive input is
 vertical-only NN upsample to (H x W). Training uses in-bounds 8x8 crops only
 (OOB skipped on train/val/test). Train windows: stride-2 overlapping.
 
-Discriminator: 1D ordinal-rank refined vs 1D ordinal-rank GT only
-(InvertedSliceDiscriminator on rank traces; not 2D CDFs, not naive-vs-refined).
+Refiner: real binary XOR diffusion (FactorizedDiT dual-head, linear schedule,
+min-SNR) conditioned on naive upscale + lookback hist; iterative quad_t sample.
+
+Discriminator: 1D ordinal-rank refined vs 1D ordinal-rank GT only.
 """
 
 from __future__ import annotations
@@ -21,9 +23,9 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
+from experiments.ordinal_patch_refinement_killtest import diffusion_refine
 from experiments.ordinal_patch_refinement_killtest import smoke
 from experiments.ordinal_patch_refinement_killtest.nonoverlap_protocol import build_protocol
-from models.diffusion_tsf.dit import FactorizedDiT
 from models.diffusion_tsf.ordinal_window_norm import ordinal_decode, ordinal_encode
 from models.diffusion_tsf.preprocessing import TimeSeriesTo2D
 from models.diffusion_tsf.train_multivariate_pipeline import load_dataset
@@ -78,12 +80,13 @@ def _encode_window(
 
 
 def _patches_from_encoded(enc: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, dict]:
-    xs, cs, ys, meta = [], [], [], []
+    """Return naive, hist, target patch stacks (N,1,P,P) for diffusion."""
+    naives, hists, tgts, meta = [], [], [], []
     total_stats = {"candidates": 0, "skipped_oob": 0, "kept": 0}
     v_count = enc["upscaled"].shape[1]
     for v in range(v_count):
         bins = TimeSeriesTo2D.bin_indices_from_cdf(enc["coarse"][:, v : v + 1])[0, 0].long()
-        x, c, y, coords, stats = smoke._patch_batch(
+        naive_p, hist_p, tgt_p, coords, stats = smoke._patch_batch(
             enc["upscaled"][0, v : v + 1],
             enc["target"][0, v : v + 1],
             enc["hist"][0, v : v + 1],
@@ -92,14 +95,14 @@ def _patches_from_encoded(enc: dict[str, Any]) -> tuple[torch.Tensor, torch.Tens
         for key in total_stats:
             total_stats[key] += stats[key]
         for i, (row0, col0) in enumerate(coords):
-            xs.append(x[i].cpu())
-            cs.append(c[i].cpu())
-            ys.append(y[i].cpu())
+            naives.append(naive_p[i].cpu())
+            hists.append(hist_p[i].cpu())
+            tgts.append(tgt_p[i].cpu())
             meta.append({"variate": v, "row0": row0, "col0": col0})
-    if not xs:
-        empty = torch.zeros(0, 5, PATCH, PATCH)
-        return empty, empty[:, :1], empty[:, :1], [], total_stats
-    return torch.stack(xs), torch.stack(cs), torch.stack(ys), meta, total_stats
+    if not naives:
+        empty = torch.zeros(0, 1, PATCH, PATCH)
+        return empty, empty, empty, [], total_stats
+    return torch.stack(naives), torch.stack(hists), torch.stack(tgts), meta, total_stats
 
 
 def _materialize_split(
@@ -110,98 +113,94 @@ def _materialize_split(
     resolution: int,
     limit: int | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[dict], dict]:
-    xs, cs, ys, records = [], [], [], []
+    naives, hists, tgts, records = [], [], [], []
     agg = {"candidates": 0, "skipped_oob": 0, "kept": 0, "windows_with_patches": 0}
     chosen = indices if limit is None else indices[:limit]
     for wi in chosen:
         past, future = pool[wi]
         enc = _encode_window(past.unsqueeze(0), future.unsqueeze(0), ladder, device, resolution)
-        px, pc, py, meta, stats = _patches_from_encoded(enc)
+        pn, ph, pt, meta, stats = _patches_from_encoded(enc)
         for key in ("candidates", "skipped_oob", "kept"):
             agg[key] += stats[key]
         if stats["kept"] == 0:
             continue
         agg["windows_with_patches"] += 1
         for i, m in enumerate(meta):
-            xs.append(px[i])
-            cs.append(pc[i])
-            ys.append(py[i])
+            naives.append(pn[i])
+            hists.append(ph[i])
+            tgts.append(pt[i])
             records.append({"window": wi, **m})
-    if not xs:
-        empty = torch.zeros(0, 5, PATCH, PATCH)
-        return empty, empty[:, :1], empty[:, :1], [], agg
-    return torch.stack(xs), torch.stack(cs), torch.stack(ys), records, agg
-
-
-def _make_model(device: torch.device) -> FactorizedDiT:
-    return FactorizedDiT(
-        in_channels=5, cond_channels=1, out_channels=1, image_height=PATCH,
-        patch_size=(4, 4), embed_dim=384, depth=8, num_heads=6, context_dim=1,
-    ).to(device)
+    if not naives:
+        empty = torch.zeros(0, 1, PATCH, PATCH)
+        return empty, empty, empty, [], agg
+    return torch.stack(naives), torch.stack(hists), torch.stack(tgts), records, agg
 
 
 def _train_refiner(
-    tx, tc, ty, vx, vc, vy, device, epochs: int, smoke_mode: bool,
-) -> tuple[FactorizedDiT, float, int]:
-    if len(tx) == 0:
+    tn, th, ty, vn, vh, vy, device, epochs: int, smoke_mode: bool,
+):
+    """Binary XOR diffusion HP grid + refit (same LR/batch grid as vertical_dual)."""
+    if len(tn) == 0:
         raise RuntimeError("no in-bounds train patches after OOB filter")
     grid = [(LR_GRID[0], BATCH_GRID[0])] if smoke_mode else [(lr, b) for lr in LR_GRID for b in BATCH_GRID]
-    best: tuple[float, float, int, FactorizedDiT] | None = None
+    scheduler = diffusion_refine.make_scheduler(device)
+    best = None
     trial_epochs = 1 if smoke_mode else min(4, epochs)
     for lr, eff in grid:
-        model = _make_model(device)
+        model = diffusion_refine.make_refiner(PATCH, device)
         opt = torch.optim.AdamW(model.parameters(), lr=lr)
-        micro = min(64, len(tx))
+        micro = min(64, len(tn))
         acc = max(1, eff // micro)
+        model.train()
         for _ in range(trial_epochs):
-            order = torch.randperm(len(tx))
+            order = torch.randperm(len(tn))
             opt.zero_grad(set_to_none=True)
             for j, idx in enumerate(order.split(micro)):
-                xb, cb, yb = tx[idx].to(device), tc[idx].to(device), ty[idx].to(device)
-                loss = F.binary_cross_entropy_with_logits(
-                    model(xb, torch.zeros(len(idx), device=device), cb), yb,
-                )
+                x0 = ty[idx].to(device)
+                cond = diffusion_refine.build_cond(tn[idx].to(device), th[idx].to(device))
+                loss = diffusion_refine.diffusion_loss(model, scheduler, x0, cond)
                 (loss / acc).backward()
                 if (j + 1) % acc == 0:
                     opt.step()
                     opt.zero_grad(set_to_none=True)
         with torch.no_grad():
-            if len(vx) == 0:
+            if len(vn) == 0:
                 val = float("inf")
             else:
                 val = 0.0
-                for idx in torch.arange(len(vx)).split(64):
-                    xb, cb, yb = vx[idx].to(device), vc[idx].to(device), vy[idx].to(device)
-                    loss = F.binary_cross_entropy_with_logits(
-                        model(xb, torch.zeros(len(idx), device=device), cb), yb,
-                    )
+                model.eval()
+                for idx in torch.arange(len(vn)).split(64):
+                    x0 = vy[idx].to(device)
+                    cond = diffusion_refine.build_cond(vn[idx].to(device), vh[idx].to(device))
+                    loss = diffusion_refine.diffusion_loss(model, scheduler, x0, cond)
                     val += float(loss.item()) * len(idx)
-                val /= max(1, len(vx))
+                val /= max(1, len(vn))
         if best is None or val < best[0]:
             best = (val, lr, eff, model)
     assert best is not None
     _, lr, eff, model = best
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
-    loader = DataLoader(TensorDataset(tx, tc, ty), batch_size=64, shuffle=True)
+    loader = DataLoader(TensorDataset(tn, th, ty), batch_size=64, shuffle=True)
+    model.train()
     for _ in range(1 if smoke_mode else epochs):
-        for xb, cb, yb in loader:
-            xb, cb, yb = xb.to(device), cb.to(device), yb.to(device)
+        for nb, hb, yb in loader:
+            x0 = yb.to(device)
+            cond = diffusion_refine.build_cond(nb.to(device), hb.to(device))
             opt.zero_grad(set_to_none=True)
-            loss = F.binary_cross_entropy_with_logits(
-                model(xb, torch.zeros(len(xb), device=device), cb), yb,
-            )
+            loss = diffusion_refine.diffusion_loss(model, scheduler, x0, cond)
             loss.backward()
             opt.step()
-    return model, lr, eff
+    return model, scheduler, lr, eff
 
 
 @torch.no_grad()
-def _infer_windows(model, pool, indices, ladder, device, resolution):
-    """Infer held-out windows; disc uses 1D ordinal ranks (not 2D CDFs)."""
+def _infer_windows(model, scheduler, pool, indices, ladder, device, resolution, *, smoke_mode=False):
+    """Infer with iterative binary diffusion; disc uses 1D ordinal ranks."""
     past_ranks, gt_ranks, refined_ranks = [], [], []
     past_z, gt_z, naive_z, refined_z = [], [], [], []
     coarses, upscales, targets, refined_cdfs = [], [], [], []
     kept_indices = []
+    sample_steps = 5 if smoke_mode else diffusion_refine.NUM_SAMPLE_STEPS
     for wi in indices:
         past, future = pool[wi]
         enc = _encode_window(past.unsqueeze(0), future.unsqueeze(0), ladder, device, resolution)
@@ -210,7 +209,7 @@ def _infer_windows(model, pool, indices, ladder, device, resolution):
         any_patch = False
         for v in range(v_count):
             bins = TimeSeriesTo2D.bin_indices_from_cdf(enc["coarse"][:, v : v + 1])[0, 0].long()
-            x, c, _y, coords, _stats = smoke._patch_batch(
+            naive_p, hist_p, _tgt, coords, _stats = smoke._patch_batch(
                 enc["upscaled"][0, v : v + 1],
                 enc["target"][0, v : v + 1],
                 enc["hist"][0, v : v + 1],
@@ -219,8 +218,10 @@ def _infer_windows(model, pool, indices, ladder, device, resolution):
             if len(coords) == 0:
                 continue
             any_patch = True
-            logits = model(x.to(device), torch.zeros(len(x), device=device), c.to(device))
-            patches, _ = smoke._project_monotone(torch.sigmoid(logits))
+            cond = diffusion_refine.build_cond(naive_p.to(device), hist_p.to(device))
+            patches = diffusion_refine.sample_patches(
+                model, scheduler, cond, num_steps=sample_steps, sampler="quad_t",
+            )
             refined_canvas[:, v : v + 1] = smoke._blend_patches_into_canvas(
                 refined_canvas[:, v : v + 1], patches, coords,
             )
@@ -235,11 +236,9 @@ def _infer_windows(model, pool, indices, ladder, device, resolution):
             enc["past_ord"], refined_rank, enc["ladder_b"], ood_shift=enc["ood_shift"],
         )
         assert gt is not None and naive is not None and refined is not None
-        # Disc inputs: 1D ordinal ranks (same units as binary ordinal_encode).
         past_ranks.append(enc["past_ord"][0].cpu().numpy())
         gt_ranks.append(gt_rank[0].cpu().numpy())
         refined_ranks.append(refined_rank[0].cpu().numpy())
-        # Snapped-z kept for MAE / optional overlays only.
         past_z.append(past.cpu().numpy())
         gt_z.append(gt[0].cpu().numpy())
         naive_z.append(naive[0].cpu().numpy())
@@ -264,6 +263,7 @@ def _infer_windows(model, pool, indices, ladder, device, resolution):
         "target_cdf": np.stack(targets),
         "refined_cdf": np.stack(refined_cdfs),
         "window_ids": np.asarray(kept_indices, dtype=np.int64),
+        "sample_steps": sample_steps,
     }
 
 
@@ -421,20 +421,23 @@ def main() -> None:
     )
     ladder = stats["ordinal_ladder"]
 
-    tx, tc, ty, _, train_patch_stats = _materialize_split(
+    tn, th, ty, _, train_patch_stats = _materialize_split(
         pool_by["train"], protocol["splits"]["train"]["indices"], ladder, device, resolution, limit,
     )
-    vx, vc, vy, _, val_patch_stats = _materialize_split(
+    vn, vh, vy, _, val_patch_stats = _materialize_split(
         pool_by["val"], protocol["splits"]["val"]["indices"], ladder, device, resolution, limit,
     )
-    model, best_lr, best_batch = _train_refiner(
-        tx, tc, ty, vx, vc, vy, device, args.epochs, args.smoke,
+    model, scheduler, best_lr, best_batch = _train_refiner(
+        tn, th, ty, vn, vh, vy, device, args.epochs, args.smoke,
     )
 
     test_indices = protocol["splits"]["test"]["indices"]
     if args.smoke:
         test_indices = test_indices[: max(4, len(test_indices) // 20 or 4)]
-    pack = _infer_windows(model, pool_by["test"], test_indices, ladder, device, resolution)
+    pack = _infer_windows(
+        model, scheduler, pool_by["test"], test_indices, ladder, device, resolution,
+        smoke_mode=args.smoke,
+    )
 
     args.output.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -483,11 +486,21 @@ def main() -> None:
             "val": val_patch_stats,
             "rule": "skip 8x8 if crop would leave the (H x W) canvas",
         },
-        "train_patches": len(tx),
-        "val_patches": len(vx),
+        "train_patches": len(tn),
+        "val_patches": len(vn),
         "test_windows_scored": int(len(pack["window_ids"])),
         "best_lr": best_lr,
         "effective_batch": best_batch,
+        "refiner": {
+            "trainer": "binary_diffusion_xor",
+            "noise_schedule": diffusion_refine.SCHEDULE,
+            "train_T": diffusion_refine.NUM_TRAIN_STEPS,
+            "sample_steps": pack["sample_steps"],
+            "sampler": "quad_t",
+            "prediction_target": diffusion_refine.PRED_TARGET,
+            "min_snr_gamma": diffusion_refine.MIN_SNR_GAMMA,
+            "cond": "naive_vertical_upscale + past_hist",
+        },
         "discriminator": {"refined_vs_gt_ranks": metrics},
         "refine_mae_snapped_z": {
             "naive": float(np.mean(np.abs(pack["naive"] - pack["gt"]))),

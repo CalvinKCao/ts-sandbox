@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""One-window oracle-coarse smoke: vertical-only upscale + in-bounds 8x8 cutouts.
+"""One-window oracle-coarse smoke: binary diffusion refine on vertical-only upscale.
 
 Pipeline (W stays = horizon; no horizontal stretch):
   ordinal ranks -> hi-res CDF (H x W) + coarse CDF (16 x W)
   -> nearest upsample coarse on the vertical axis only (H x W)
-  -> 8x8 crops centered on the mid-column coarse edge; skip canvas-OOB crops
+  -> 8x8 crops centered on the mid-column coarse edge
+  -> train FactorizedDiT with XOR bit-flip diffusion (cond = naive + hist)
+  -> iterative quad_t sample to refine
 """
 
 from __future__ import annotations
@@ -20,11 +22,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from models.diffusion_tsf.dit import FactorizedDiT
 from models.diffusion_tsf.ordinal_window_norm import OrdinalLadder, ordinal_decode, ordinal_encode
 from models.diffusion_tsf.preprocessing import TimeSeriesTo2D
 from models.diffusion_tsf.train_multivariate_pipeline import load_dataset
 from utils.eval_mmpd_gaussian_anchor import load_tsf_pack_pool
+
+from experiments.ordinal_patch_refinement_killtest import diffusion_refine
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -155,49 +158,46 @@ def _patch_batch(
     patch_size: int = PATCH,
     col_stride: int = COL_STRIDE,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[int, int]], dict[str, int]]:
-    """Build overlapping 8x8 crops; skip canvas-OOB placements.
+    """Build overlapping PxP crops centered on the mid-column coarse CDF edge.
 
-    Vertical center is the mid-column coarse edge after vertical-only upscale.
-    Neighboring columns may have different edges inside the same crop; that is
-    expected. Only placements that stick out of the (H x W) canvas are skipped.
-
-    upscaled/target/past_canvas: (C, H, W) with W = horizon.
-    coarse_bins: (W,)
+    Vertical placement: coarse_edge at local row patch_size//2 (true center).
+    Returns (naive_patches, hist_patches, target_patches, coords, stats) each
+    shaped (N, 1, P, P) — ready for diffusion cond/x0.
     """
-    inputs, conds, targets, coords = [], [], [], []
+    naives, hists, targets, coords = [], [], [], []
     high = int(upscaled.shape[-2])
     width = int(coarse_bins.shape[-1])
     center = patch_size // 2
-    rows = torch.arange(patch_size, device=upscaled.device).view(1, patch_size, 1)
     n_cand = 0
     n_skip = 0
     for col0 in range(0, width - patch_size + 1, col_stride):
         n_cand += 1
         c_mid = col0 + center
         edge = _coarse_edge_row(int(coarse_bins[c_mid].item()), high)
+        # Center the transition edge in the crop (not the coarse-bin lower edge).
         row0 = edge - center
         if not _crop_in_canvas(row0, col0, high, width, patch_size):
             n_skip += 1
             continue
-        inp = _extract_block(upscaled, row0, col0, patch_size)
-        tgt = _extract_block(target, row0, col0, patch_size)
-        hist = _extract_block(past_canvas, row0, past_canvas.shape[-1] - patch_size, patch_size)
-        boundary = (rows == center).to(upscaled.dtype).expand(1, patch_size, patch_size)
-        # Channel kept for DiT width compatibility; always 1 after OOB skip.
-        valid = torch.ones_like(inp)
-        time_pos = torch.full_like(inp, float(c_mid) / max(1, width - 1))
-        vertical_pos = torch.linspace(
-            row0 / high, (row0 + patch_size - 1) / high, patch_size, device=upscaled.device,
-        ).view(1, patch_size, 1).expand_as(inp)
-        inputs.append(torch.cat([inp, boundary, valid, time_pos, vertical_pos], dim=0))
-        conds.append(hist)
-        targets.append(tgt)
+        # Sanity: edge must land on local mid-row after crop.
+        local_edge = edge - row0
+        if local_edge != center:
+            raise RuntimeError(f"centering bug: local_edge={local_edge} center={center}")
+        naives.append(_extract_block(upscaled, row0, col0, patch_size))
+        targets.append(_extract_block(target, row0, col0, patch_size))
+        hists.append(_extract_block(past_canvas, row0, past_canvas.shape[-1] - patch_size, patch_size))
         coords.append((row0, col0))
-    stats = {"candidates": n_cand, "skipped_oob": n_skip, "kept": len(coords)}
+    stats = {"candidates": n_cand, "skipped_oob": n_skip, "kept": len(coords), "boundary_local_row": center}
     if not coords:
-        empty = torch.zeros(0, 5, patch_size, patch_size, device=upscaled.device)
-        return empty, empty[:, :1], empty[:, :1], [], stats
-    return torch.stack(inputs), torch.stack(conds), torch.stack(targets), coords, stats
+        empty = torch.zeros(0, 1, patch_size, patch_size, device=upscaled.device)
+        return empty, empty, empty, [], stats
+    return (
+        torch.stack(naives),
+        torch.stack(hists),
+        torch.stack(targets),
+        coords,
+        stats,
+    )
 
 
 def _plot(output: Path, arrays: dict[str, np.ndarray], meta: SmokeMetadata) -> list[Path]:
@@ -245,8 +245,10 @@ def _plot(output: Path, arrays: dict[str, np.ndarray], meta: SmokeMetadata) -> l
     ax.imshow(arrays["upscaled_coarse_256"], origin="lower", aspect="auto", cmap="viridis")
     for row0, col0 in arrays["patch_coords"]:
         ax.add_patch(plt.Rectangle((col0 - 0.5, row0 - 0.5), patch, patch, fill=False, edgecolor="white", linewidth=0.9))
+        # Mid-row of each crop = coarse transition edge (centering check).
+        ax.plot([col0 - 0.5, col0 + patch - 0.5], [row0 + patch // 2, row0 + patch // 2], color="cyan", linewidth=0.8)
     ax.set(
-        title=f"In-bounds 8x8 crops (white) on vertical-only upscale — {title}",
+        title=f"8x8 crops centered on coarse edge (cyan) — {title}",
         xlabel="time column",
         ylabel="value row",
     )
@@ -352,29 +354,33 @@ def main() -> None:
             f"expected W={HORIZON}, got target W={target.shape[-1]} upscaled W={upscaled.shape[-1]}"
         )
     coarse_bins = TimeSeriesTo2D.bin_indices_from_cdf(coarse)[0, 0].long()
-    inputs, cond, target_patches, coords, patch_stats = _patch_batch(
+    naive_p, hist_p, target_patches, coords, patch_stats = _patch_batch(
         upscaled[0], target[0], past_cdf[0], coarse_bins,
     )
     if len(coords) == 0:
         raise RuntimeError(f"no in-bounds 8x8 crops for this window: {patch_stats}")
 
-    model = FactorizedDiT(
-        in_channels=5, cond_channels=1, out_channels=1, image_height=PATCH,
-        patch_size=(4, 4), embed_dim=384, depth=8, num_heads=6, context_dim=1,
-    ).to(device)
+    model = diffusion_refine.make_refiner(PATCH, device)
+    scheduler = diffusion_refine.make_scheduler(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0)
-    inputs, cond, target_patches = inputs.to(device), cond.to(device), target_patches.to(device)
+    naive_p = naive_p.to(device)
+    hist_p = hist_p.to(device)
+    target_patches = target_patches.to(device)
+    cond = diffusion_refine.build_cond(naive_p, hist_p)
     losses: list[float] = []
+    model.train()
     for _step in range(args.steps):
-        logits = model(inputs, torch.zeros(inputs.shape[0], device=device), cond)
-        loss = F.binary_cross_entropy_with_logits(logits, target_patches)
+        loss = diffusion_refine.diffusion_loss(model, scheduler, target_patches, cond)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
         losses.append(float(loss.item()))
     with torch.no_grad():
-        prob = torch.sigmoid(model(inputs, torch.zeros(inputs.shape[0], device=device), cond))
-        refined_patches, monotonic_violation = _project_monotone(prob)
+        # Iterative binary reverse sample (same scheduler path as binary pipeline).
+        sample_steps = min(20, max(5, args.steps))
+        refined_patches = diffusion_refine.sample_patches(
+            model, scheduler, cond, num_steps=sample_steps, sampler="quad_t",
+        )
         refined = _blend_patches_into_canvas(upscaled, refined_patches, coords)
 
     selected_rank_max = rank_max[vi : vi + 1]
@@ -390,10 +396,13 @@ def main() -> None:
     )
     assert gt_snapped is not None and naive is not None and refined_value is not None
     metrics = {
-        "initial_bce": losses[0],
-        "final_bce": losses[-1],
-        "steps": args.steps,
-        "patch_monotonic_violation_pre_projection": monotonic_violation,
+        "initial_diff_loss": losses[0],
+        "final_diff_loss": losses[-1],
+        "train_steps": args.steps,
+        "sample_steps": sample_steps,
+        "sampler": "quad_t",
+        "noise_schedule": diffusion_refine.SCHEDULE,
+        "prediction_target": diffusion_refine.PRED_TARGET,
         "naive_rank_mae": float((naive_rank - gt_rank).abs().mean().item()),
         "refined_rank_mae": float((refined_rank - gt_rank).abs().mean().item()),
         "naive_snapped_z_mae": float((naive - gt_snapped).abs().mean().item()),
@@ -403,6 +412,7 @@ def main() -> None:
         "patch_size": PATCH,
         "patch_stats": patch_stats,
         "boundary_local_row": PATCH // 2,
+        "trainer": "binary_diffusion_xor",
     }
     parameters = sum(p.numel() for p in model.parameters())
     meta = SmokeMetadata(
@@ -422,7 +432,7 @@ def main() -> None:
         "target_cdf_256": target[0, 0].detach().cpu().numpy(),
         "upscaled_coarse_256": upscaled[0, 0].detach().cpu().numpy(),
         "refined_cdf_256": refined[0, 0].detach().cpu().numpy(),
-        "input_patches": inputs.detach().cpu().numpy(),
+        "input_patches": naive_p.detach().cpu().numpy(),
         "target_patches": target_patches.detach().cpu().numpy(),
         "refined_patches": refined_patches.detach().cpu().numpy(),
         "patch_coords": np.asarray(coords, dtype=np.int64),
