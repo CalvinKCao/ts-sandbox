@@ -3,6 +3,9 @@
 Geometry: hi-res CDF is (H x W=horizon); coarse is (16 x W); naive input is
 vertical-only NN upsample to (H x W). Training uses in-bounds 8x8 crops only
 (OOB skipped on train/val/test). Train windows: stride-2 overlapping.
+
+Discriminator: 1D ordinal-rank refined vs 1D ordinal-rank GT only
+(InvertedSliceDiscriminator on rank traces; not 2D CDFs, not naive-vs-refined).
 """
 
 from __future__ import annotations
@@ -194,7 +197,9 @@ def _train_refiner(
 
 @torch.no_grad()
 def _infer_windows(model, pool, indices, ladder, device, resolution):
-    pasts, gts, naives, refineds = [], [], [], []
+    """Infer held-out windows; disc uses 1D ordinal ranks (not 2D CDFs)."""
+    past_ranks, gt_ranks, refined_ranks = [], [], []
+    past_z, gt_z, naive_z, refined_z = [], [], [], []
     coarses, upscales, targets, refined_cdfs = [], [], [], []
     kept_indices = []
     for wi in indices:
@@ -230,22 +235,30 @@ def _infer_windows(model, pool, indices, ladder, device, resolution):
             enc["past_ord"], refined_rank, enc["ladder_b"], ood_shift=enc["ood_shift"],
         )
         assert gt is not None and naive is not None and refined is not None
-        pasts.append(past.cpu().numpy())
-        gts.append(gt[0].cpu().numpy())
-        naives.append(naive[0].cpu().numpy())
-        refineds.append(refined[0].cpu().numpy())
+        # Disc inputs: 1D ordinal ranks (same units as binary ordinal_encode).
+        past_ranks.append(enc["past_ord"][0].cpu().numpy())
+        gt_ranks.append(gt_rank[0].cpu().numpy())
+        refined_ranks.append(refined_rank[0].cpu().numpy())
+        # Snapped-z kept for MAE / optional overlays only.
+        past_z.append(past.cpu().numpy())
+        gt_z.append(gt[0].cpu().numpy())
+        naive_z.append(naive[0].cpu().numpy())
+        refined_z.append(refined[0].cpu().numpy())
         coarses.append(enc["coarse"][0].cpu().numpy())
         upscales.append(enc["upscaled"][0].cpu().numpy())
         targets.append(enc["target"][0].cpu().numpy())
         refined_cdfs.append(refined_canvas[0].cpu().numpy())
         kept_indices.append(wi)
-    if not pasts:
+    if not past_ranks:
         raise RuntimeError("no test windows retained after OOB patch filter")
     return {
-        "past": np.stack(pasts),
-        "gt": np.stack(gts),
-        "naive": np.stack(naives),
-        "refined": np.stack(refineds),
+        "past_rank": np.stack(past_ranks),
+        "gt_rank": np.stack(gt_ranks),
+        "refined_rank": np.stack(refined_ranks),
+        "past": np.stack(past_z),
+        "gt": np.stack(gt_z),
+        "naive": np.stack(naive_z),
+        "refined": np.stack(refined_z),
         "coarse_cdf": np.stack(coarses),
         "upscaled_cdf": np.stack(upscales),
         "target_cdf": np.stack(targets),
@@ -255,6 +268,7 @@ def _infer_windows(model, pool, indices, ladder, device, resolution):
 
 
 def _train_disc(past, real, fake, device, *, slice_len=8, epochs=8, seed=0):
+    """Train texture disc: real=GT ranks, fake=refined ranks (1D ordinal space)."""
     n = past.shape[0]
     n_train = max(1, int(0.7 * n))
     n_val = max(1, int(0.15 * n))
@@ -305,7 +319,8 @@ def _bucket(label: int, pred: int) -> str:
 
 
 @torch.no_grad()
-def _confusion_plots(model, ds, pack, out_dir, *, fake_name, per_bucket=2, variate=0):
+def _confusion_plots(model, ds, pack, out_dir, *, per_bucket=2, variate=0):
+    """TP/FP/TN/FN plots for 1D ordinal-rank GT vs refined (CDFs are context only)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     device = next(model.parameters()).device
     loader = DataLoader(ds, batch_size=64, shuffle=False)
@@ -334,44 +349,40 @@ def _confusion_plots(model, ds, pack, out_dir, *, fake_name, per_bucket=2, varia
     for bucket, items in by_bucket.items():
         for j, rec in enumerate(items[:per_bucket]):
             pos = int(rec["window"])
-            if not 0 <= pos < len(pack["past"]):
+            if not 0 <= pos < len(pack["past_rank"]):
                 continue
-            past = pack["past"][pos, variate]
-            gt = pack["gt"][pos, variate]
-            naive = pack["naive"][pos, variate]
-            refined = pack["refined"][pos, variate]
-            fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+            past_r = pack["past_rank"][pos, variate]
+            gt_r = pack["gt_rank"][pos, variate]
+            ref_r = pack["refined_rank"][pos, variate]
+            fig, axes = plt.subplots(2, 2, figsize=(12, 8))
             ax = axes[0, 0]
-            ax.plot(np.arange(-len(past), 0), past, color="0.45", label="lookback")
-            ax.plot(np.arange(HORIZON), gt, marker="o", label="GT")
-            ax.plot(np.arange(HORIZON), naive, marker="x", label="naive")
-            ax.plot(np.arange(HORIZON), refined, marker="s", label="refined")
+            ax.plot(np.arange(-len(past_r), 0), past_r, color="0.45", label="lookback ranks")
+            ax.plot(np.arange(HORIZON), gt_r, marker="o", label="GT ranks")
+            ax.plot(np.arange(HORIZON), ref_r, marker="s", label="refined ranks")
             ax.axvspan(rec["offset"], rec["offset"] + ds.slice_len, color="C3", alpha=0.15)
-            ax.set_title(f"{bucket} p_fake={rec['prob_fake']:.3f} win={rec['window']} off={rec['offset']}")
+            ax.set_title(
+                f"{bucket} p_fake={rec['prob_fake']:.3f} win={rec['window']} off={rec['offset']}"
+            )
+            ax.set_ylabel("ordinal rank")
             ax.legend(fontsize=8)
+            ax = axes[0, 1]
+            ax.plot(np.arange(HORIZON), ref_r - gt_r, marker="d", color="C3")
+            ax.axhline(0.0, color="0.5", linewidth=0.8)
+            ax.axvspan(rec["offset"], rec["offset"] + ds.slice_len, color="C3", alpha=0.15)
+            ax.set_title("refined − GT (ordinal ranks)")
+            ax.set_ylabel("rank delta")
             for ax, key, title in zip(
-                axes[0, 1:], ("coarse_cdf", "upscaled_cdf"), ("coarse 16xW", "naive vertical upscale"),
+                axes[1],
+                ("refined_cdf", "target_cdf"),
+                ("refined CDF (context)", "GT hi-res CDF (context)"),
             ):
                 ax.imshow(pack[key][pos, variate], origin="lower", aspect="auto", cmap="viridis")
                 ax.set_title(title)
-            for ax, key, title in zip(
-                axes[1],
-                ("refined_cdf", "target_cdf", "upscaled_cdf"),
-                ("refined CDF", "GT hi-res CDF", "naive − GT"),
-            ):
-                if title.startswith("naive"):
-                    ax.imshow(
-                        pack["upscaled_cdf"][pos, variate] - pack["target_cdf"][pos, variate],
-                        origin="lower", aspect="auto", cmap="coolwarm",
-                    )
-                else:
-                    ax.imshow(pack[key][pos, variate], origin="lower", aspect="auto", cmap="viridis")
-                ax.set_title(title)
-            fig.suptitle(f"{fake_name} / {bucket} / variate {variate}")
+            fig.suptitle(f"1D ordinal disc: refined vs GT / {bucket} / v{variate}")
             fig.tight_layout()
-            fig.savefig(out_dir / f"{fake_name}_{bucket}_{j}_w{rec['window']}.png", dpi=140)
+            fig.savefig(out_dir / f"refined_vs_gt_{bucket}_{j}_w{rec['window']}.png", dpi=140)
             plt.close(fig)
-    (out_dir / f"{fake_name}_counts.json").write_text(json.dumps(counts, indent=2), encoding="utf-8")
+    (out_dir / "refined_vs_gt_counts.json").write_text(json.dumps(counts, indent=2), encoding="utf-8")
     return counts
 
 
@@ -394,7 +405,6 @@ def main() -> None:
     protocol = build_protocol(args.dataset, n_var, lookback=LOOKBACK)
     limit = 2 if args.smoke else None
 
-    # Train pack must use stride-2; val/test packs use their native strides.
     pool_train = load_tsf_pack_pool(
         args.dataset, list(range(n_var)), lookback=LOOKBACK, horizon=HORIZON,
         train_stride=2, test_stride=4, pack_splits=["train"],
@@ -429,6 +439,7 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         args.output / "heldout_windows.npz",
+        past_rank=pack["past_rank"], gt_rank=pack["gt_rank"], refined_rank=pack["refined_rank"],
         past=pack["past"], gt=pack["gt"], naive=pack["naive"], refined=pack["refined"],
         window_ids=pack["window_ids"],
     )
@@ -439,21 +450,23 @@ def main() -> None:
         window_ids=pack["window_ids"],
     )
 
-    disc_metrics = {}
-    for fake_name, fake in (("refined", pack["refined"]), ("naive", pack["naive"])):
-        disc, metrics, ds_test = _train_disc(
-            pack["past"], pack["gt"], fake, device,
-            epochs=2 if args.smoke else args.disc_epochs, seed=args.seed,
-        )
-        counts = _confusion_plots(
-            disc, ds_test, pack, args.output / "disc_confusions", fake_name=fake_name,
-        )
-        metrics = {**metrics, "confusion_counts": counts}
-        disc_metrics[fake_name] = metrics
-        torch.save(
-            {"model_state_dict": disc.state_dict(), "metrics": metrics, "fake_source": fake_name},
-            args.output / f"disc_{fake_name}.pt",
-        )
+    # Discriminator: 1D refined ranks vs 1D GT ranks only (no naive disc, no 2D inputs).
+    disc, metrics, ds_test = _train_disc(
+        pack["past_rank"], pack["gt_rank"], pack["refined_rank"], device,
+        epochs=2 if args.smoke else args.disc_epochs, seed=args.seed,
+    )
+    counts = _confusion_plots(disc, ds_test, pack, args.output / "disc_confusions")
+    metrics = {
+        **metrics,
+        "confusion_counts": counts,
+        "input": "1d_ordinal_ranks",
+        "real": "gt_rank",
+        "fake": "refined_rank",
+    }
+    torch.save(
+        {"model_state_dict": disc.state_dict(), "metrics": metrics, "fake_source": "refined_rank"},
+        args.output / "disc_refined_vs_gt_ranks.pt",
+    )
 
     manifest = {
         "dataset": args.dataset,
@@ -475,10 +488,13 @@ def main() -> None:
         "test_windows_scored": int(len(pack["window_ids"])),
         "best_lr": best_lr,
         "effective_batch": best_batch,
-        "discriminator": disc_metrics,
-        "refine_mae": {
+        "discriminator": {"refined_vs_gt_ranks": metrics},
+        "refine_mae_snapped_z": {
             "naive": float(np.mean(np.abs(pack["naive"] - pack["gt"]))),
             "refined": float(np.mean(np.abs(pack["refined"] - pack["gt"]))),
+        },
+        "refine_mae_ordinal_rank": {
+            "refined": float(np.mean(np.abs(pack["refined_rank"] - pack["gt_rank"]))),
         },
     }
     (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
