@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Narval A100 launcher for the full ordinal patch refinement + discriminator kill test.
-# Login: ./submit_ordinal_patch_refinement_full_narval.sh --dataset ETTh1 --resolution 256
+# Login:
+#   ./submit_ordinal_patch_refinement_full_narval.sh --dataset ETTh1 --resolution 256
+#   ./submit_ordinal_patch_refinement_full_narval.sh --dataset electricity --resolution 256
+#   ./submit_ordinal_patch_refinement_full_narval.sh --dataset traffic --resolution 256
+#   ./submit_ordinal_patch_refinement_full_narval.sh --dataset exchange_rate --resolution 256
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +22,15 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+case "$DATASET" in
+  ETTh1|exchange_rate|electricity|traffic) ;;
+  *) echo "ERROR: --dataset must be ETTh1|exchange_rate|electricity|traffic (got $DATASET)" >&2; exit 2 ;;
+esac
+# Wide series: give electricity/traffic more wall by default unless overridden.
+if [[ "$WALL" == "8:00:00" && ( "$DATASET" == "electricity" || "$DATASET" == "traffic" ) ]]; then
+  WALL="12:00:00"
+fi
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   [[ "$(hostname)" == *"narval"* ]] || { echo "ERROR: submit this from a Narval login node." >&2; exit 2; }

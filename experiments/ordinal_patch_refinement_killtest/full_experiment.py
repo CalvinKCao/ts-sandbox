@@ -8,7 +8,9 @@ overlapping.
 Refiner: real binary XOR diffusion (FactorizedDiT dual-head, linear schedule,
 min-SNR) conditioned on naive upscale + lookback hist; iterative quad_t sample.
 
-Discriminator: 1D ordinal-rank refined vs 1D ordinal-rank GT only.
+Discriminator: 1D ordinal-rank refined vs GT after ladder-snapping refined
+mid-bin ranks onto the same integer ladder as ordinal_encode.
+Datasets: ETTh1 (7), exchange_rate/electricity/traffic (first 8).
 """
 
 from __future__ import annotations
@@ -26,7 +28,10 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from experiments.ordinal_patch_refinement_killtest import diffusion_refine
 from experiments.ordinal_patch_refinement_killtest import smoke
-from experiments.ordinal_patch_refinement_killtest.nonoverlap_protocol import build_protocol
+from experiments.ordinal_patch_refinement_killtest.nonoverlap_protocol import (
+    DATASET_N_VARIATES,
+    build_protocol,
+)
 from models.diffusion_tsf.ordinal_window_norm import ordinal_decode, ordinal_encode
 from models.diffusion_tsf.preprocessing import TimeSeriesTo2D
 from models.diffusion_tsf.train_multivariate_pipeline import load_dataset
@@ -47,7 +52,21 @@ BATCH_GRID = (512, 1024, 2048)
 
 
 def _n_variates(dataset: str) -> int:
-    return 7 if dataset == "ETTh1" else 8
+    if dataset not in DATASET_N_VARIATES:
+        raise ValueError(
+            f"unsupported dataset {dataset!r}; expected one of {sorted(DATASET_N_VARIATES)}"
+        )
+    return DATASET_N_VARIATES[dataset]
+
+
+def _snap_ranks_to_ladder(ranks: torch.Tensor, ladder) -> torch.Tensor:
+    """Round continuous mid-bin ranks onto the same integer ladder as ordinal_encode."""
+    out = ranks.clone()
+    n_unique = ladder.n_unique[0]
+    for vi in range(int(ranks.shape[1])):
+        k = int(n_unique[vi].item())
+        out[:, vi] = ranks[:, vi].round().clamp(0, max(0, k - 1))
+    return out
 
 
 def _encode_window(
@@ -217,7 +236,7 @@ def _train_refiner(
 @torch.no_grad()
 def _infer_windows(model, scheduler, pool, indices, ladder, device, resolution, *, smoke_mode=False):
     """Infer with iterative binary diffusion; disc uses 1D ordinal ranks."""
-    past_ranks, gt_ranks, refined_ranks = [], [], []
+    past_ranks, gt_ranks, refined_ranks, refined_ranks_raw = [], [], [], []
     past_z, gt_z, naive_z, refined_z = [], [], [], []
     coarses, upscales, targets, refined_cdfs = [], [], [], []
     kept_indices = []
@@ -249,8 +268,11 @@ def _infer_windows(model, scheduler, pool, indices, ladder, device, resolution, 
         if not any_patch:
             continue
         gt_rank = enc["future_ord"]
-        naive_rank = smoke._decode_ranks(enc["upscaled"], enc["rank_max"])
-        refined_rank = smoke._decode_ranks(refined_canvas, enc["rank_max"])
+        naive_rank_raw = smoke._decode_ranks(enc["upscaled"], enc["rank_max"])
+        refined_rank_raw = smoke._decode_ranks(refined_canvas, enc["rank_max"])
+        # Same integer ladder as GT before disc / rank MAE (kills mid-bin float cue).
+        naive_rank = _snap_ranks_to_ladder(naive_rank_raw, enc["ladder_b"])
+        refined_rank = _snap_ranks_to_ladder(refined_rank_raw, enc["ladder_b"])
         _, gt = ordinal_decode(enc["past_ord"], gt_rank, enc["ladder_b"], ood_shift=enc["ood_shift"])
         _, naive = ordinal_decode(enc["past_ord"], naive_rank, enc["ladder_b"], ood_shift=enc["ood_shift"])
         _, refined = ordinal_decode(
@@ -260,6 +282,7 @@ def _infer_windows(model, scheduler, pool, indices, ladder, device, resolution, 
         past_ranks.append(enc["past_ord"][0].cpu().numpy())
         gt_ranks.append(gt_rank[0].cpu().numpy())
         refined_ranks.append(refined_rank[0].cpu().numpy())
+        refined_ranks_raw.append(refined_rank_raw[0].cpu().numpy())
         past_z.append(past.cpu().numpy())
         gt_z.append(gt[0].cpu().numpy())
         naive_z.append(naive[0].cpu().numpy())
@@ -275,6 +298,7 @@ def _infer_windows(model, scheduler, pool, indices, ladder, device, resolution, 
         "past_rank": np.stack(past_ranks),
         "gt_rank": np.stack(gt_ranks),
         "refined_rank": np.stack(refined_ranks),
+        "refined_rank_raw": np.stack(refined_ranks_raw),
         "past": np.stack(past_z),
         "gt": np.stack(gt_z),
         "naive": np.stack(naive_z),
@@ -285,11 +309,12 @@ def _infer_windows(model, scheduler, pool, indices, ladder, device, resolution, 
         "refined_cdf": np.stack(refined_cdfs),
         "window_ids": np.asarray(kept_indices, dtype=np.int64),
         "sample_steps": sample_steps,
+        "disc_rank_space": "ladder_snapped_integer",
     }
 
 
 def _train_disc(past, real, fake, device, *, slice_len=8, epochs=8, seed=0):
-    """Train texture disc: real=GT ranks, fake=refined ranks (1D ordinal space)."""
+    """Train texture disc: real=GT ladder ranks, fake=ladder-snapped refined ranks."""
     n = past.shape[0]
     n_train = max(1, int(0.7 * n))
     n_val = max(1, int(0.15 * n))
@@ -424,7 +449,10 @@ def main() -> None:
     n_var = _n_variates(args.dataset)
     resolution = args.resolution
     protocol = build_protocol(args.dataset, n_var, lookback=LOOKBACK)
-    limit = 2 if args.smoke else None
+    limit = None
+    if args.smoke:
+        # Strict OOB can empty the first few windows; take enough to keep patches.
+        limit = 64
 
     pool_train = load_tsf_pack_pool(
         args.dataset, list(range(n_var)), lookback=LOOKBACK, horizon=HORIZON,
@@ -463,7 +491,8 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         args.output / "heldout_windows.npz",
-        past_rank=pack["past_rank"], gt_rank=pack["gt_rank"], refined_rank=pack["refined_rank"],
+        past_rank=pack["past_rank"], gt_rank=pack["gt_rank"],
+        refined_rank=pack["refined_rank"], refined_rank_raw=pack["refined_rank_raw"],
         past=pack["past"], gt=pack["gt"], naive=pack["naive"], refined=pack["refined"],
         window_ids=pack["window_ids"],
     )
@@ -474,7 +503,7 @@ def main() -> None:
         window_ids=pack["window_ids"],
     )
 
-    # Discriminator: 1D refined ranks vs 1D GT ranks only (no naive disc, no 2D inputs).
+    # Discriminator: ladder-snapped refined ranks vs GT ladder ranks (same integer space).
     disc, metrics, ds_test = _train_disc(
         pack["past_rank"], pack["gt_rank"], pack["refined_rank"], device,
         epochs=2 if args.smoke else args.disc_epochs, seed=args.seed,
@@ -483,17 +512,23 @@ def main() -> None:
     metrics = {
         **metrics,
         "confusion_counts": counts,
-        "input": "1d_ordinal_ranks",
+        "input": "1d_ordinal_ranks_ladder_snapped",
         "real": "gt_rank",
-        "fake": "refined_rank",
+        "fake": "refined_rank_ladder_snapped",
+        "rank_space": pack["disc_rank_space"],
     }
     torch.save(
-        {"model_state_dict": disc.state_dict(), "metrics": metrics, "fake_source": "refined_rank"},
+        {
+            "model_state_dict": disc.state_dict(),
+            "metrics": metrics,
+            "fake_source": "refined_rank_ladder_snapped",
+        },
         args.output / "disc_refined_vs_gt_ranks.pt",
     )
 
     manifest = {
         "dataset": args.dataset,
+        "n_variates": n_var,
         "resolution": resolution,
         "patch_h": PATCH_H,
         "patch_w": PATCH_W,
@@ -529,7 +564,10 @@ def main() -> None:
             "refined": float(np.mean(np.abs(pack["refined"] - pack["gt"]))),
         },
         "refine_mae_ordinal_rank": {
-            "refined": float(np.mean(np.abs(pack["refined_rank"] - pack["gt_rank"]))),
+            "refined_snapped": float(np.mean(np.abs(pack["refined_rank"] - pack["gt_rank"]))),
+            "refined_raw_midbin": float(
+                np.mean(np.abs(pack["refined_rank_raw"] - pack["gt_rank"]))
+            ),
         },
     }
     (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")

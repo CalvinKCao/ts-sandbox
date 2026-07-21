@@ -18,6 +18,12 @@ from utils.eval_mmpd_gaussian_anchor import load_tsf_pack_pool
 HORIZON = 16
 TRAIN_STRIDE = 2
 LOOKBACK = 96
+DATASET_N_VARIATES = {
+    "ETTh1": 7,
+    "exchange_rate": 8,
+    "electricity": 8,
+    "traffic": 8,
+}
 
 
 def nonoverlap_indices(starts, horizon: int = HORIZON):
@@ -70,14 +76,22 @@ def build_protocol(dataset: str, n_variates: int, lookback: int = LOOKBACK):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--datasets", nargs="+", default=["ETTh1", "exchange_rate"])
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=["ETTh1", "exchange_rate", "electricity", "traffic"],
+    )
     parser.add_argument(
         "--output",
         type=Path,
         default=Path("results/ordinal_patch_refinement_killtest/window_protocol.json"),
     )
     args = parser.parse_args()
-    result = {ds: build_protocol(ds, 7 if ds == "ETTh1" else 8) for ds in args.datasets}
+    result = {}
+    for ds in args.datasets:
+        if ds not in DATASET_N_VARIATES:
+            raise ValueError(f"unsupported dataset {ds!r}; expected {sorted(DATASET_N_VARIATES)}")
+        result[ds] = build_protocol(ds, DATASET_N_VARIATES[ds])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # Indices make the JSON huge; write a summary sibling for humans.
     summary = {

@@ -9,9 +9,14 @@
 `FactorizedDiT` trained with XOR bit-flip noise (linear schedule, T=1000, min-SNR), dual-head BCE (x0+zt), conditioned on `[naive_upscale, past_hist]`. Inference: iterative `quad_t` sample (20 steps).
 
 ## Discriminator
-1D ordinal-rank **refined vs GT** only (`InvertedSliceDiscriminator`).
+1D ordinal-rank **refined vs GT** (`InvertedSliceDiscriminator`). Refined mid-bin ranks are **ladder-snapped** (round+clamp) onto the same integer ranks as GT before disc train/eval.
+
+## Datasets
+`ETTh1` (7 vars), `exchange_rate` / `electricity` / `traffic` (first 8 vars).
 
 ```bash
 python -m experiments.ordinal_patch_refinement_killtest.smoke --steps 30 --resolution 256
 ./submit_ordinal_patch_refinement_full_narval.sh --dataset ETTh1 --resolution 256
+./submit_ordinal_patch_refinement_full_narval.sh --dataset electricity --resolution 256
+./submit_ordinal_patch_refinement_full_narval.sh --dataset traffic --resolution 256
 ```
