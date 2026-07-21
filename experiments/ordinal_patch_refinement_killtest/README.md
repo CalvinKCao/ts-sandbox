@@ -9,8 +9,6 @@ Vertical-only geometry (no horizontal stretch):
 
 Train forecast windows use pack `train_stride=2` (overlapping). Val/test use non-overlapping futures. All splits apply the same 8×8 OOB filter.
 
-Discriminator eval calls `utils.eval_discriminator_texture_staged_vs_mmpd.train_classifier` + `visualize_combo` on packs written in the stock `y_true`/`samples`/`indices` schema (refined + naive). Optional `--import-mmpd-packs-from` runs the same entrypoints on an existing `mmpd_*.npz` when its horizon is 16.
-
 ```bash
 # Local smoke (GPU if available)
 python -m experiments.ordinal_patch_refinement_killtest.smoke --steps 5 --resolution 256 \

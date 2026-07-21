@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -24,11 +25,11 @@ from models.diffusion_tsf.ordinal_window_norm import ordinal_decode, ordinal_enc
 from models.diffusion_tsf.preprocessing import TimeSeriesTo2D
 from models.diffusion_tsf.train_multivariate_pipeline import load_dataset
 from utils.eval_discriminator_texture_staged_vs_mmpd import (
-    RawBundle,
-    train_classifier,
+    HorizonSliceDataset,
+    InvertedSliceDiscriminator,
+    evaluate_classifier,
 )
 from utils.eval_mmpd_gaussian_anchor import load_tsf_pack_pool
-from utils.visualize_discriminator_texture_confusions import visualize_combo
 
 HORIZON = smoke.HORIZON
 LOOKBACK = 96
@@ -253,128 +254,125 @@ def _infer_windows(model, pool, indices, ladder, device, resolution):
     }
 
 
-def _write_standard_pack(
-    path: Path,
-    *,
-    past: np.ndarray,
-    y_true: np.ndarray,
-    fake: np.ndarray,
-    indices: np.ndarray,
-) -> None:
-    """Same npz schema as eval_discriminator_texture_staged_vs_mmpd packs."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    samples = np.asarray(fake, dtype=np.float32)[:, :, None, :]
-    np.savez_compressed(
-        path,
-        y_true=np.asarray(y_true, dtype=np.float32),
-        samples=samples,
-        indices=np.asarray(indices, dtype=np.int64),
-        past=np.asarray(past, dtype=np.float32),
-    )
+def _train_disc(past, real, fake, device, *, slice_len=8, epochs=8, seed=0):
+    n = past.shape[0]
+    n_train = max(1, int(0.7 * n))
+    n_val = max(1, int(0.15 * n))
+    train_idx = np.arange(0, n_train)
+    val_idx = np.arange(n_train, min(n, n_train + n_val))
+    test_idx = np.arange(min(n, n_train + n_val), n)
+    if len(test_idx) == 0:
+        test_idx = val_idx.copy()
+    if len(val_idx) == 0:
+        val_idx = train_idx.copy()
+    ds_train = HorizonSliceDataset(past, real, fake, train_idx, slice_len, seed=seed)
+    ds_val = HorizonSliceDataset(past, real, fake, val_idx, slice_len, seed=seed + 1)
+    ds_test = HorizonSliceDataset(past, real, fake, test_idx, slice_len, seed=seed + 2)
+    model = InvertedSliceDiscriminator(
+        seq_len=LOOKBACK + slice_len, max_offset=HORIZON - slice_len, d_model=128,
+        n_heads=4, depth=2, d_ff=256, dropout=0.1,
+    ).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    train_loader = DataLoader(ds_train, batch_size=64, shuffle=True)
+    val_loader = DataLoader(ds_val, batch_size=64, shuffle=False)
+    test_loader = DataLoader(ds_test, batch_size=64, shuffle=False)
+    best_state, best_val = None, float("inf")
+    for _ in range(epochs):
+        model.train()
+        for batch in train_loader:
+            x, offsets, labels = batch[0].to(device), batch[1].to(device), batch[2].to(device)
+            opt.zero_grad(set_to_none=True)
+            loss = F.binary_cross_entropy_with_logits(model(x, offsets), labels)
+            loss.backward()
+            opt.step()
+        val_metrics = evaluate_classifier(model, val_loader, device)
+        if val_metrics["disc_bce"] < best_val:
+            best_val = val_metrics["disc_bce"]
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+    assert best_state is not None
+    model.load_state_dict(best_state)
+    return model, evaluate_classifier(model, test_loader, device), ds_test
 
 
-def _disc_namespace(output_dir: Path, *, smoke_mode: bool, seed: int) -> argparse.Namespace:
-    """Defaults mirrored from utils/eval_discriminator_texture_staged_vs_mmpd.parse_args."""
-    return argparse.Namespace(
-        seed=seed,
-        candidate_only=False,
-        offset_stride=1,
-        nonoverlapping_patches=False,
-        no_offset_embedding=False,
-        max_train_examples=128 if smoke_mode else None,
-        max_eval_examples=128 if smoke_mode else None,
-        max_batches_per_epoch=None,
-        batch_size=64 if smoke_mode else 512,
-        num_workers=0,
-        d_model=128,
-        n_heads=4,
-        depth=2,
-        d_ff=256,
-        dropout=0.1,
-        lr=1e-3,
-        weight_decay=1e-4,
-        epochs=2 if smoke_mode else 20,
-        patience=5,
-        grad_clip=1.0,
-        train_fraction=0.7,
-        val_fraction=0.15,
-        save_checkpoints=True,
-        output_dir=output_dir,
-        visualize_confusions=True,
-        viz_per_bucket=2,
-        viz_variate=0,
-        viz_lookback_tail=64,
-        viz_plot_dir=output_dir / "disc_confusions",
-        force_train=True,
-        cpu=False,
-        gpu=0,
-        native_repr_stride=1,
-    )
+def _bucket(label: int, pred: int) -> str:
+    if label == 1 and pred == 1:
+        return "TP"
+    if label == 0 and pred == 0:
+        return "TN"
+    if label == 0 and pred == 1:
+        return "FP"
+    return "FN"
 
 
-def _dense_splits(n: int, *, train_fraction: float, val_fraction: float) -> dict[str, np.ndarray]:
-    """Chronological dense split for small/smoke packs (avoids temporal-purge edge cases)."""
-    order = np.arange(n, dtype=np.int64)
-    n_train = max(1, int(round(n * train_fraction)))
-    n_val = max(1, int(round(n * val_fraction)))
-    if n_train + n_val >= n:
-        n_val = max(1, n - n_train - 1)
-    n_test = n - n_train - n_val
-    if n_test < 1:
-        n_test = 1
-        n_val = max(1, n - n_train - n_test)
-    return {
-        "train": order[:n_train],
-        "val": order[n_train : n_train + n_val],
-        "test": order[n_train + n_val :],
-    }
-
-
-def _run_original_discriminator(
-    *,
-    dataset: str,
-    past: np.ndarray,
-    y_true: np.ndarray,
-    fake: np.ndarray,
-    indices: np.ndarray,
-    fake_source: str,
-    output_dir: Path,
-    device: torch.device,
-    smoke_mode: bool,
-    seed: int,
-    slice_len: int = 8,
-) -> dict[str, float]:
-    """Train + TP/FP/TN/FN viz via the stock texture discriminator entrypoints."""
-    disc_dir = output_dir / "disc"
-    disc_dir.mkdir(parents=True, exist_ok=True)
-    _write_standard_pack(
-        disc_dir / "raw" / f"{fake_source}_{dataset}.npz",
-        past=past, y_true=y_true, fake=fake, indices=indices,
-    )
-    args = _disc_namespace(disc_dir, smoke_mode=smoke_mode, seed=seed)
-    bundle = RawBundle(
-        run=None,
-        sub={},
-        indices=[int(i) for i in indices.tolist()],
-        past=past.astype(np.float32),
-        y_true_by_source={fake_source: y_true.astype(np.float32)},
-        fakes={fake_source: fake.astype(np.float32)},
-        series_starts=np.asarray(indices, dtype=np.int64),
-        pack_splits=["killtest"],
-    )
-    splits = _dense_splits(
-        past.shape[0], train_fraction=args.train_fraction, val_fraction=args.val_fraction,
-    )
-    metrics = train_classifier(args, dataset, fake_source, slice_len, bundle, splits, device)
-    if args.visualize_confusions:
-        visualize_combo(
-            args, dataset, fake_source, slice_len, bundle, splits, device,
-            per_bucket=args.viz_per_bucket,
-            plot_dir=args.viz_plot_dir,
-            variate=args.viz_variate,
-            lookback_tail=args.viz_lookback_tail,
-        )
-    return metrics
+@torch.no_grad()
+def _confusion_plots(model, ds, pack, out_dir, *, fake_name, per_bucket=2, variate=0):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    device = next(model.parameters()).device
+    loader = DataLoader(ds, batch_size=64, shuffle=False)
+    records = []
+    cursor = 0
+    model.eval()
+    for batch in loader:
+        x, offsets, labels = batch[0].to(device), batch[1].to(device), batch[2]
+        logits = model(x, offsets)
+        probs = torch.sigmoid(logits).cpu().numpy()
+        preds = (logits >= 0).cpu().numpy().astype(np.int64)
+        labels_np = labels.numpy().astype(np.int64)
+        for i in range(len(labels_np)):
+            window, offset, label = ds.items[cursor]
+            records.append({
+                "window": int(window), "offset": int(offset), "label": int(label),
+                "pred": int(preds[i]), "prob_fake": float(probs[i]),
+                "bucket": _bucket(int(label), int(preds[i])),
+            })
+            cursor += 1
+    counts = {k: 0 for k in ("TP", "TN", "FP", "FN")}
+    by_bucket: dict[str, list] = {k: [] for k in counts}
+    for rec in records:
+        counts[rec["bucket"]] += 1
+        by_bucket[rec["bucket"]].append(rec)
+    for bucket, items in by_bucket.items():
+        for j, rec in enumerate(items[:per_bucket]):
+            pos = int(rec["window"])
+            if not 0 <= pos < len(pack["past"]):
+                continue
+            past = pack["past"][pos, variate]
+            gt = pack["gt"][pos, variate]
+            naive = pack["naive"][pos, variate]
+            refined = pack["refined"][pos, variate]
+            fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+            ax = axes[0, 0]
+            ax.plot(np.arange(-len(past), 0), past, color="0.45", label="lookback")
+            ax.plot(np.arange(HORIZON), gt, marker="o", label="GT")
+            ax.plot(np.arange(HORIZON), naive, marker="x", label="naive")
+            ax.plot(np.arange(HORIZON), refined, marker="s", label="refined")
+            ax.axvspan(rec["offset"], rec["offset"] + ds.slice_len, color="C3", alpha=0.15)
+            ax.set_title(f"{bucket} p_fake={rec['prob_fake']:.3f} win={rec['window']} off={rec['offset']}")
+            ax.legend(fontsize=8)
+            for ax, key, title in zip(
+                axes[0, 1:], ("coarse_cdf", "upscaled_cdf"), ("coarse 16xW", "naive vertical upscale"),
+            ):
+                ax.imshow(pack[key][pos, variate], origin="lower", aspect="auto", cmap="viridis")
+                ax.set_title(title)
+            for ax, key, title in zip(
+                axes[1],
+                ("refined_cdf", "target_cdf", "upscaled_cdf"),
+                ("refined CDF", "GT hi-res CDF", "naive − GT"),
+            ):
+                if title.startswith("naive"):
+                    ax.imshow(
+                        pack["upscaled_cdf"][pos, variate] - pack["target_cdf"][pos, variate],
+                        origin="lower", aspect="auto", cmap="coolwarm",
+                    )
+                else:
+                    ax.imshow(pack[key][pos, variate], origin="lower", aspect="auto", cmap="viridis")
+                ax.set_title(title)
+            fig.suptitle(f"{fake_name} / {bucket} / variate {variate}")
+            fig.tight_layout()
+            fig.savefig(out_dir / f"{fake_name}_{bucket}_{j}_w{rec['window']}.png", dpi=140)
+            plt.close(fig)
+    (out_dir / f"{fake_name}_counts.json").write_text(json.dumps(counts, indent=2), encoding="utf-8")
+    return counts
 
 
 def main() -> None:
@@ -382,17 +380,11 @@ def main() -> None:
     parser.add_argument("--dataset", default="ETTh1")
     parser.add_argument("--resolution", type=int, choices=[256, 512], default=256)
     parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--disc-epochs", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cpu", action="store_true")
-    parser.add_argument(
-        "--import-mmpd-packs-from",
-        type=Path,
-        default=None,
-        help="Optional dir with existing mmpd_*.npz (same schema as the texture disc script). "
-        "Only used when pack horizon matches this killtest (16).",
-    )
     args = parser.parse_args()
 
     smoke.set_seed(args.seed)
@@ -402,6 +394,7 @@ def main() -> None:
     protocol = build_protocol(args.dataset, n_var, lookback=LOOKBACK)
     limit = 2 if args.smoke else None
 
+    # Train pack must use stride-2; val/test packs use their native strides.
     pool_train = load_tsf_pack_pool(
         args.dataset, list(range(n_var)), lookback=LOOKBACK, horizon=HORIZON,
         train_stride=2, test_stride=4, pack_splits=["train"],
@@ -448,57 +441,19 @@ def main() -> None:
 
     disc_metrics = {}
     for fake_name, fake in (("refined", pack["refined"]), ("naive", pack["naive"])):
-        disc_metrics[fake_name] = _run_original_discriminator(
-            dataset=args.dataset,
-            past=pack["past"],
-            y_true=pack["gt"],
-            fake=fake,
-            indices=pack["window_ids"],
-            fake_source=fake_name,
-            output_dir=args.output,
-            device=device,
-            smoke_mode=args.smoke,
-            seed=args.seed,
+        disc, metrics, ds_test = _train_disc(
+            pack["past"], pack["gt"], fake, device,
+            epochs=2 if args.smoke else args.disc_epochs, seed=args.seed,
         )
-
-    mmpd_note = None
-    if args.import_mmpd_packs_from is not None:
-        # Reuse the stock pack loader path when a compatible hz=16 pack exists.
-        from utils.eval_discriminator_texture_staged_vs_mmpd import load_npz
-
-        candidates = [
-            args.import_mmpd_packs_from / "raw" / f"mmpd_{args.dataset}.npz",
-            args.import_mmpd_packs_from / f"mmpd_{args.dataset}.npz",
-        ]
-        mmpd_path = next((p for p in candidates if p.is_file()), None)
-        if mmpd_path is None:
-            mmpd_note = f"no mmpd_{args.dataset}.npz under {args.import_mmpd_packs_from}"
-        else:
-            mmpd_pack = load_npz(mmpd_path)
-            hz = int(mmpd_pack["y_true"].shape[-1])
-            if hz != HORIZON:
-                mmpd_note = (
-                    f"skipped MMPD pack {mmpd_path}: horizon={hz} != killtest {HORIZON}. "
-                    "Point --import-mmpd-packs-from at an hz16 pack to run the stock MMPD disc side-by-side."
-                )
-            else:
-                past_m = mmpd_pack.get("past")
-                if past_m is None:
-                    mmpd_note = f"{mmpd_path} missing past[]; cannot run disc without lookback"
-                else:
-                    disc_metrics["mmpd"] = _run_original_discriminator(
-                        dataset=args.dataset,
-                        past=past_m,
-                        y_true=mmpd_pack["y_true"],
-                        fake=mmpd_pack["samples"][:, :, 0, :],
-                        indices=mmpd_pack["indices"],
-                        fake_source="mmpd",
-                        output_dir=args.output,
-                        device=device,
-                        smoke_mode=args.smoke,
-                        seed=args.seed,
-                    )
-                    mmpd_note = f"ran stock disc on {mmpd_path}"
+        counts = _confusion_plots(
+            disc, ds_test, pack, args.output / "disc_confusions", fake_name=fake_name,
+        )
+        metrics = {**metrics, "confusion_counts": counts}
+        disc_metrics[fake_name] = metrics
+        torch.save(
+            {"model_state_dict": disc.state_dict(), "metrics": metrics, "fake_source": fake_name},
+            args.output / f"disc_{fake_name}.pt",
+        )
 
     manifest = {
         "dataset": args.dataset,
@@ -521,8 +476,6 @@ def main() -> None:
         "best_lr": best_lr,
         "effective_batch": best_batch,
         "discriminator": disc_metrics,
-        "discriminator_backend": "utils.eval_discriminator_texture_staged_vs_mmpd.train_classifier",
-        "mmpd_import": mmpd_note,
         "refine_mae": {
             "naive": float(np.mean(np.abs(pack["naive"] - pack["gt"]))),
             "refined": float(np.mean(np.abs(pack["refined"] - pack["gt"]))),
