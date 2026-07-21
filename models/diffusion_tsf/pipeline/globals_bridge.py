@@ -82,6 +82,9 @@ def patch_globals(
     mod.BINARY_ANCHOR_INPUT_MODE = state.binary_anchor_input_mode
     mod.BINARY_USE_BOUNDARY_WEIGHTED_BCE = state.binary_use_boundary_weighted_bce
     mod.BINARY_CDF_DISTANCE_ALPHA = state.binary_cdf_distance_alpha
+    mod.BINARY_USE_NORMALIZED_VALUE_WIDTH_WEIGHTED_BCE = (
+        state.binary_use_normalized_value_width_weighted_bce
+    )
     mod.ANCHOR_MSE_PROXY_LAMBDA = state.anchor_mse_proxy_lambda
     mod.EVAL_SAMPLER = state.eval_sampler
     mod.DISABLE_CROSS_ATTENTION = state.disable_cross_attention

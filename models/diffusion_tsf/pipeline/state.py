@@ -67,6 +67,7 @@ class PipelineState:
     binary_anchor_input_mode: str = "stationary_flat"
     binary_use_boundary_weighted_bce: bool = False
     binary_cdf_distance_alpha: float = 1.0
+    binary_use_normalized_value_width_weighted_bce: bool = False
     anchor_mse_proxy_lambda: float = 0.5
     eval_sampler: str = "quad_t"
     disable_cross_attention: bool = False

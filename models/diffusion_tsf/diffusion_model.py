@@ -1068,6 +1068,119 @@ class DiffusionTSF(nn.Module):
             src, alpha, coarse_height=coarse_h, per_occupancy_channel=per_ch,
         )
 
+    def _interpolate_global_ordinal_ladder(
+        self,
+        ranks: torch.Tensor,
+        variate_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Linearly map continuous ordinal ranks back to global z-score values."""
+        ladder = self.config.ordinal_ladder
+        if ladder is None:
+            raise ValueError("ordinal ladder is required for normalized-value row weights")
+        values = ladder.values[0].to(device=ranks.device, dtype=ranks.dtype)
+        n_unique = ladder.n_unique[0].to(device=ranks.device)
+        out = torch.empty_like(ranks)
+        for vi in range(values.shape[0]):
+            mask = variate_indices == vi
+            if not bool(mask.any()):
+                continue
+            k = int(n_unique[vi].item())
+            if k <= 1:
+                out[mask] = values[vi, 0]
+                continue
+            r = ranks[mask].clamp(0.0, float(k - 1))
+            lo = r.floor().long()
+            hi = (lo + 1).clamp_max(k - 1)
+            frac = r - lo.to(dtype=r.dtype)
+            ladder_values = values[vi, :k]
+            out[mask] = ladder_values[lo] + frac * (ladder_values[hi] - ladder_values[lo])
+        return out
+
+    def _normalise_value_width_weights(self, widths: torch.Tensor) -> torch.Tensor:
+        """Keep each scale half at mean weight one while preserving row ratios."""
+        mean = widths.mean(dim=(-2, -1), keepdim=True)
+        eps = torch.finfo(widths.dtype).eps
+        return torch.where(
+            mean > eps,
+            widths / mean.clamp_min(eps),
+            torch.ones_like(widths),
+        )
+
+    def _normalized_value_width_weight_tensor(self, source: torch.Tensor) -> torch.Tensor:
+        """Per-CDF-row weights from global z-score widths of ordinal bins.
+
+        Coarse and fine halves are normalized separately so the existing 50/50
+        dual-scale loss balance remains unchanged. Within either half, a row
+        spanning seven times more normalized value range gets seven times BCE weight.
+        """
+        if not getattr(self.config, "binary_use_normalized_value_width_weighted_bce", False):
+            return torch.ones_like(source)
+        if not self._uses_global_ordinal_encoding():
+            return torch.ones_like(source)
+        if self.config.diffusion_stage != "vertical_dual":
+            raise ValueError("normalized-value row weights currently require diffusion_stage=vertical_dual")
+        if source.dim() != 4 or source.shape[1] != 1:
+            raise ValueError(
+                "vertical_dual normalized-value row weights expect (BV, 1, H, W), "
+                f"got {tuple(source.shape)}"
+            )
+
+        BV, _, H, W = source.shape
+        coarse_h = int(self.config.coarse_image_height)
+        fine_h = H - coarse_h
+        if fine_h <= 0:
+            raise ValueError(f"vertical_dual H={H} must exceed coarse_height={coarse_h}")
+        n_variates = int(self.config.num_variables)
+        if n_variates <= 0 or BV % n_variates != 0:
+            raise ValueError(f"flat batch {BV} is incompatible with n_variates={n_variates}")
+
+        variate_indices = torch.arange(n_variates, device=source.device).repeat(BV // n_variates)
+        rank_max = self._ordinal_rank_max_tensor(source.device, dtype=source.dtype)
+        if rank_max.numel() != n_variates:
+            raise ValueError(
+                f"ordinal ladder variates={rank_max.numel()} != model variates={n_variates}"
+            )
+        rank_max_flat = rank_max.index_select(0, variate_indices)
+
+        coarse_frac = torch.linspace(0.0, 1.0, coarse_h + 1, device=source.device, dtype=source.dtype)
+        coarse_ranks = rank_max_flat[:, None, None] * coarse_frac[None, :, None]
+        coarse_values = self._interpolate_global_ordinal_ladder(coarse_ranks, variate_indices)
+        coarse_widths = (coarse_values[:, 1:] - coarse_values[:, :-1]).abs().expand(-1, -1, W)
+
+        coarse_bins = self.to_2d.bin_indices_from_cdf(source[:, :, :coarse_h, :]).squeeze(1)
+        fine_frac = torch.linspace(0.0, 1.0, fine_h + 1, device=source.device, dtype=source.dtype)
+        fine_ranks = rank_max_flat[:, None, None] * (
+            coarse_bins[:, None, :] + fine_frac[None, :, None]
+        ) / float(coarse_h)
+        fine_values = self._interpolate_global_ordinal_ladder(fine_ranks, variate_indices)
+        fine_widths = (fine_values[:, 1:] - fine_values[:, :-1]).abs()
+
+        row_weights = torch.cat(
+            [
+                self._normalise_value_width_weights(coarse_widths),
+                self._normalise_value_width_weights(fine_widths),
+            ],
+            dim=1,
+        )
+        return row_weights.unsqueeze(1)
+
+    def _binary_bce_weight_tensor(
+        self,
+        target: torch.Tensor,
+        *,
+        weight_source: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Combine optional CDF-distance and normalized-value row weights."""
+        src = target if weight_source is None else weight_source
+        weights = torch.ones_like(target)
+        if self.config.binary_use_boundary_weighted_bce:
+            weights = weights * self._cdf_distance_weight_tensor(
+                target, weight_source=weight_source,
+            ).to(dtype=weights.dtype)
+        if getattr(self.config, "binary_use_normalized_value_width_weighted_bce", False):
+            weights = weights * self._normalized_value_width_weight_tensor(src).to(dtype=weights.dtype)
+        return weights
+
     def _binary_plain_bce_loss(
         self,
         logits: torch.Tensor,
@@ -1077,10 +1190,9 @@ class DiffusionTSF(nn.Module):
     ) -> torch.Tensor:
         """Unweighted BCE for binary CDF images (optional distance weights)."""
         per_elem = F.binary_cross_entropy_with_logits(logits, target.float(), reduction="none")
-        if self.config.binary_use_boundary_weighted_bce:
-            per_elem = per_elem * self._cdf_distance_weight_tensor(
-                target, weight_source=weight_source,
-            )
+        per_elem = per_elem * self._binary_bce_weight_tensor(
+            target, weight_source=weight_source,
+        )
         return per_elem.mean()
 
     def _binary_weighted_bce_loss(
@@ -1093,10 +1205,9 @@ class DiffusionTSF(nn.Module):
     ) -> torch.Tensor:
         """BCE with optional CDF-distance + min-SNR timestep weighting."""
         per_elem = F.binary_cross_entropy_with_logits(logits, target.float(), reduction="none")
-        if self.config.binary_use_boundary_weighted_bce:
-            per_elem = per_elem * self._cdf_distance_weight_tensor(
-                target, weight_source=weight_source,
-            )
+        per_elem = per_elem * self._binary_bce_weight_tensor(
+            target, weight_source=weight_source,
+        )
         if t_flat is None or self.config.loss_weighting == "none":
             return per_elem.mean()
         beta_t = self.binary_scheduler.betas[t_flat].clamp(1e-5, 1.0 - 1e-5)
@@ -1390,12 +1501,10 @@ class DiffusionTSF(nn.Module):
     def _uses_cond_chunk_guidance(self) -> bool:
         return bool(self.config.use_guidance_channel) and self._guidance_placement() == "cond_chunks"
 
-    def _guidance_core_1d(self, guidance_forecast_norm: torch.Tensor) -> torch.Tensor:
-        """Drop overlap prefix; return core forecast (B,V,core_len)."""
+    def _guidance_core_1d_length(self, guidance_forecast_norm: torch.Tensor) -> int:
+        """Return the old core length used to preserve the cond-channel count."""
         K = int(self.config.lookback_overlap)
-        if K > 0 and guidance_forecast_norm.shape[-1] > K:
-            return guidance_forecast_norm[..., K:]
-        return guidance_forecast_norm
+        return max(0, int(guidance_forecast_norm.shape[-1]) - K)
 
     def _encode_guidance_cond_chunks(
         self,
@@ -1404,16 +1513,29 @@ class DiffusionTSF(nn.Module):
         H: int,
         BV: int,
     ) -> torch.Tensor:
-        """Return (BV, n_chunks * C_per, H, chunk_w) encoded guidance chunks."""
-        core = self._guidance_core_1d(guidance_forecast_norm)
+        """Encode ``past[-K:] ∥ guidance`` in fixed-width visual-cond chunks.
+
+        The first chunk starts with the known overlap, aligned with the target
+        canvas's first K columns. Keep the original chunk count so this is a
+        semantic repack, not a cond-channel shape change.
+        """
+        core_len = self._guidance_core_1d_length(guidance_forecast_norm)
         chunk_w = int(self.config.diffusion_lookback_cap or 0) or int(self.config.lookback_length)
         if chunk_w <= 0:
             raise ValueError("cond_chunks requires positive diffusion_lookback_cap or lookback_length")
+        n_chunks = (core_len + chunk_w - 1) // chunk_w
+        capacity = n_chunks * chunk_w
+        stream = guidance_forecast_norm
+        if stream.shape[-1] > capacity:
+            raise ValueError(
+                "lookback-overlap guidance does not fit the existing cond chunk layout: "
+                f"stream={stream.shape[-1]}, capacity={capacity}. "
+                "Increase the cond chunk count explicitly rather than silently changing channels."
+            )
         chunks = []
-        T = core.shape[-1]
         start = 0
-        while start < T:
-            piece = core[..., start:start + chunk_w]
+        for _ in range(n_chunks):
+            piece = stream[..., start:start + chunk_w]
             start += chunk_w
             pad = chunk_w - piece.shape[-1]
             if pad > 0:
@@ -1436,16 +1558,23 @@ class DiffusionTSF(nn.Module):
         H: int,
         BV: int,
     ) -> torch.Tensor:
-        """Joint-stage guidance chunks via encode_to_2d_binary."""
-        core = self._guidance_core_1d(guidance_forecast_norm)
+        """Joint-stage version of the overlap-preserving cond chunk repack."""
+        core_len = self._guidance_core_1d_length(guidance_forecast_norm)
         chunk_w = int(self.config.diffusion_lookback_cap or 0) or int(self.config.lookback_length)
         if chunk_w <= 0:
             raise ValueError("cond_chunks requires positive diffusion_lookback_cap or lookback_length")
+        n_chunks = (core_len + chunk_w - 1) // chunk_w
+        capacity = n_chunks * chunk_w
+        stream = guidance_forecast_norm
+        if stream.shape[-1] > capacity:
+            raise ValueError(
+                "lookback-overlap guidance does not fit the existing cond chunk layout: "
+                f"stream={stream.shape[-1]}, capacity={capacity}."
+            )
         chunks = []
-        T = core.shape[-1]
         start = 0
-        while start < T:
-            piece = core[..., start:start + chunk_w]
+        for _ in range(n_chunks):
+            piece = stream[..., start:start + chunk_w]
             start += chunk_w
             pad = chunk_w - piece.shape[-1]
             if pad > 0:

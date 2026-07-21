@@ -72,6 +72,9 @@ class DiffusionTSFConfig:
     # Distance-weighted BCE: W=1+α|r−k| (quadratic miss penalty in BCE space).
     binary_use_boundary_weighted_bce: bool = False
     binary_cdf_distance_alpha: float = 1.0
+    # Weight ordinal CDF rows by their span in global z-score space rather
+    # than treating equally spaced ordinal ranks as equally important.
+    binary_use_normalized_value_width_weighted_bce: bool = False
     diffusion_stage: str = "joint"  # joint, coarse, fine, finer, vertical_dual, channel_dual
     use_triple_scale: bool = False
     # Soft-decode MSE mix inside deterministic anchor: λ*BCE + (1-λ)*MSE.

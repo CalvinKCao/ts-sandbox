@@ -327,6 +327,7 @@ DETERMINISTIC_ANCHOR_ALPHA = 0.5
 BINARY_ANCHOR_INPUT_MODE = "stationary_flat"
 BINARY_USE_BOUNDARY_WEIGHTED_BCE = False
 BINARY_CDF_DISTANCE_ALPHA = 1.0
+BINARY_USE_NORMALIZED_VALUE_WIDTH_WEIGHTED_BCE = False
 ANCHOR_MSE_PROXY_LAMBDA = 0.5
 USE_VERTICAL_DUAL_CONCAT = False
 USE_CHANNEL_DUAL_CONCAT = False
@@ -1372,6 +1373,12 @@ def create_diffusion_model(
         ),
         binary_cdf_distance_alpha=float(
             o("binary_cdf_distance_alpha", BINARY_CDF_DISTANCE_ALPHA)
+        ),
+        binary_use_normalized_value_width_weighted_bce=bool(
+            o(
+                "binary_use_normalized_value_width_weighted_bce",
+                BINARY_USE_NORMALIZED_VALUE_WIDTH_WEIGHTED_BCE,
+            )
         ),
         anchor_mse_proxy_lambda=float(
             o("anchor_mse_proxy_lambda", ANCHOR_MSE_PROXY_LAMBDA)
