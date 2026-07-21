@@ -519,6 +519,8 @@ class DiffusionTSF(nn.Module):
         future_norm: torch.Tensor,
         past: torch.Tensor,
         stats: Tuple[torch.Tensor, torch.Tensor, Optional[OrdinalLadder], ...],
+        *,
+        trim_overlap: bool = True,
     ) -> torch.Tensor:
         """Map decoded future back to global z-score (ordinal inverse or window denorm)."""
         mean, std, ladder, *rest = stats
@@ -557,9 +559,9 @@ class DiffusionTSF(nn.Module):
 
         if self._representation_time_stride() > 1:
             future = self._resample_1d_time_series(future, self._raw_canvas_length())
-        if K_raw > 0:
+        if trim_overlap and K_raw > 0:
             future = future[..., K_raw:]
-        elif self._representation_time_stride() > 1:
+        elif trim_overlap and self._representation_time_stride() > 1:
             future = self._upsample_repr_to_raw_horizon(future)
         return future
     
@@ -2065,12 +2067,18 @@ class DiffusionTSF(nn.Module):
                     from_diffusion=False,
                     decoder_method=decoder_method,
                 )
-        future = self._denormalize_future(future_norm, past, stats)
+        future_with_overlap = self._denormalize_future(
+            future_norm, past, stats, trim_overlap=False,
+        )
+        future = future_with_overlap[..., int(self.config.lookback_overlap):]
 
         result = {
             'prediction': future,
             'prediction_norm': future_norm,
             'prediction_global_norm': future,
+            # Retain the K lookback-overlap predictions for diagnostic plots.
+            # Metrics continue to consume the forecast-only tensors above.
+            'prediction_with_overlap': future_with_overlap,
             'future_2d': generated_2d,
             'future_2d_coarse': future_2d_coarse,
             'past_2d_coarse': past_maps["coarse"],
@@ -2348,12 +2356,18 @@ class DiffusionTSF(nn.Module):
         future_norm = self.decode_from_2d(
             future_2d, from_diffusion=False, decoder_method=decoder_method, **kwargs
         )
-        future = self._denormalize_future(future_norm, past, stats)
+        future_with_overlap = self._denormalize_future(
+            future_norm, past, stats, trim_overlap=False,
+        )
+        future = future_with_overlap[..., int(self.config.lookback_overlap):]
 
         result = {
             'prediction': future,
             'prediction_norm': future_norm,
             'prediction_global_norm': future,
+            # Retain the K lookback-overlap predictions for diagnostic plots.
+            # Metrics continue to consume the forecast-only tensors above.
+            'prediction_with_overlap': future_with_overlap,
             'future_2d': future_2d,
             'past_2d': past_2d,
         }

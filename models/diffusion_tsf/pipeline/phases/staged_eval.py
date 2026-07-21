@@ -325,10 +325,13 @@ class StagedEvalPhase(PipelinePhase):
         joint_dual = vertical_dual or channel_dual
         dual_stage = "channel_dual" if channel_dual else ("vertical_dual" if vertical_dual else None)
         y_true_all = []
+        y_true_with_overlap_all = []
         det_all = []
+        det_with_overlap_all = []
         coarse_all = []
         fine_all = []
         sample_all = []
+        samples_with_overlap_all = []
         window_idx_all = []
         t0 = time.perf_counter()
         ranked = getattr(loader.dataset, "yields_ordinal_ranks", False)
@@ -357,6 +360,7 @@ class StagedEvalPhase(PipelinePhase):
                 batch_window_indices = window_indices[batch_start:batch_start + batch_n]
                 window_idx_all.extend(batch_window_indices)
                 K = getattr(coarse_model.config, "lookback_overlap", 0)
+                y_true_with_overlap_all.append(future.cpu().numpy())
                 if K > 0:
                     future = future[..., K:]
                 y_true_all.append(future.cpu().numpy())
@@ -370,6 +374,9 @@ class StagedEvalPhase(PipelinePhase):
                             f"{dual_stage} generate output missing prediction_global_norm/prediction"
                         )
                     det_all.append(det_t.detach().cpu().numpy())
+                    det_with_overlap_all.append(
+                        dual_det["prediction_with_overlap"].detach().cpu().numpy()
+                    )
                     if channel_dual:
                         coarse_all.append(dual_det["future_2d_coarse"].detach().cpu().numpy())
                         fine_all.append(dual_det["future_2d_fine"].detach().cpu().numpy())
@@ -417,6 +424,9 @@ class StagedEvalPhase(PipelinePhase):
                         )
                         det_t = finer_det["prediction_global_norm"]
                         det_all.append(det_t.detach().cpu().numpy())
+                        det_with_overlap_all.append(
+                            finer_det["prediction_with_overlap"].detach().cpu().numpy()
+                        )
                         coarse_np, fine_np, final_np = decode_staged_anchor_components(
                             finer_model, coarse_det, finer_det,
                         )
@@ -425,10 +435,14 @@ class StagedEvalPhase(PipelinePhase):
                             fine_model, coarse_det, fine_det,
                         )
                         det_all.append(fine_det["prediction_global_norm"].detach().cpu().numpy())
+                        det_with_overlap_all.append(
+                            fine_det["prediction_with_overlap"].detach().cpu().numpy()
+                        )
                     coarse_all.append(coarse_np)
                     fine_all.append(fine_np)
 
                 batch_samples = []
+                batch_samples_with_overlap = []
                 for sample_idx in range(prob_samples):
                     seed = state.seed + batch_idx * 1009 + sample_idx * 17
                     torch.manual_seed(seed)
@@ -442,6 +456,9 @@ class StagedEvalPhase(PipelinePhase):
                                 f"{dual_stage} generate output missing prediction_global_norm/prediction"
                             )
                         batch_samples.append(sample_t.detach().cpu().numpy())
+                        batch_samples_with_overlap.append(
+                            dual_sample["prediction_with_overlap"].detach().cpu().numpy()
+                        )
                     elif _ar_eval_enabled(coarse_model):
                         sample_t = _staged_generate_autoregressive(
                             coarse_model=coarse_model,
@@ -467,9 +484,17 @@ class StagedEvalPhase(PipelinePhase):
                                 **prob_kwargs,
                             )
                             batch_samples.append(finer_sample["prediction_global_norm"].cpu().numpy())
+                            batch_samples_with_overlap.append(
+                                finer_sample["prediction_with_overlap"].cpu().numpy()
+                            )
                         else:
                             batch_samples.append(fine_sample["prediction_global_norm"].cpu().numpy())
+                            batch_samples_with_overlap.append(
+                                fine_sample["prediction_with_overlap"].cpu().numpy()
+                            )
                 sample_all.append(np.stack(batch_samples, axis=2))
+                if batch_samples_with_overlap:
+                    samples_with_overlap_all.append(np.stack(batch_samples_with_overlap, axis=2))
 
                 if batch_idx < 3 or batch_idx == len(loader) - 1:
                     logger.info(
@@ -490,6 +515,13 @@ class StagedEvalPhase(PipelinePhase):
             "window_indices": np.array(window_idx_all, dtype=np.int64),
             "series_starts": np.array(window_idx_all, dtype=np.int64) * int(test_stride),
         }
+        if det_with_overlap_all and len(det_with_overlap_all) == len(det_all):
+            pack["y_true_with_overlap"] = np.concatenate(y_true_with_overlap_all, axis=0)
+            pack["deterministic_with_overlap"] = np.concatenate(det_with_overlap_all, axis=0)
+            pack["final_anchor_with_overlap"] = pack["deterministic_with_overlap"]
+        if samples_with_overlap_all and len(samples_with_overlap_all) == len(sample_all):
+            pack["samples_with_overlap"] = np.concatenate(samples_with_overlap_all, axis=0)
+            pack["sample_mean_with_overlap"] = pack["samples_with_overlap"].mean(axis=2)
         pack["sample_mean"] = pack["samples"].mean(axis=2)
         metrics = _summarize_staged_eval_metrics(
             pack,

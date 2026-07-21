@@ -1,0 +1,18 @@
+# Eval-only refresh for the Jul 20 Narval fresh fixed-HP runs.
+extends: configs/bce_dist_guidance_cond_3x336_narval_fresh_fixed_hp_temp.yaml
+
+phases:
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 4
+    n_samples: 1
+    probabilistic_n_samples: 20
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: false
+    refresh_eval_visualizations: true
+

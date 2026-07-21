@@ -1775,33 +1775,27 @@ def _plot_diffusion_model_space_prediction(
         }
     k_overlap = int(getattr(getattr(model, "config", None), "lookback_overlap", 0))
     w_map = int(future_coarse.shape[-1])
-    if k_overlap > 0 and w_map > int(getattr(model.config, "forecast_length", w_map)):
-        plot_coarse = coarse_1d[..., k_overlap:]
-        plot_combined = combined_1d[..., k_overlap:]
-        plot_fine = fine_1d[..., k_overlap:] if fine_1d is not None else None
-    else:
-        plot_coarse = coarse_1d
-        plot_combined = combined_1d
-        plot_fine = fine_1d
-    gt_fut = _future_core_slice(
-        future_norm, width=w_map, lookback_overlap=k_overlap,
-    )
-    # Overlap / forecast_length mismatches can leave GT at 720 and preds at 728.
-    common = min(gt_fut.shape[-1], plot_coarse.shape[-1], plot_combined.shape[-1])
-    gt_fut = gt_fut[..., -common:]
-    plot_coarse = plot_coarse[..., -common:]
-    plot_combined = plot_combined[..., -common:]
-    if plot_fine is not None:
-        plot_fine = plot_fine[..., -common:]
-    t_fut = np.arange(0, common)
+    gt_with_overlap = future_norm[0] if future_norm.dim() == 3 else future_norm
+    common = min(gt_with_overlap.shape[-1], coarse_1d.shape[-1], combined_1d.shape[-1])
+    gt_fut = gt_with_overlap[..., :common]
+    plot_coarse = coarse_1d[..., :common]
+    plot_combined = combined_1d[..., :common]
+    if fine_1d is not None:
+        plot_fine = fine_1d[..., :common]
+    t_fut = np.arange(-k_overlap, common - k_overlap)
+    past_plot = past_norm[0] if past_norm.dim() == 3 else past_norm
     n_cols = min(variables_to_plot, plot_coarse.shape[0])
 
     fig, axes = plt.subplots(1, n_cols, figsize=(4.2 * n_cols, 3.2), squeeze=False, constrained_layout=True)
     for col in range(n_cols):
         ax = axes[0, col]
-        ax.plot(t_fut, gt_fut[col].numpy(), color="#2196F3", linewidth=1.4, label="GT fut")
-        ax.plot(t_fut, plot_coarse[col].numpy(), color="#FF9800", linewidth=1.1, label="Coarse pred")
-        ax.plot(t_fut, plot_combined[col].numpy(), color="#E91E63", linewidth=1.1, label="Combined")
+        ax.plot(np.arange(-past_plot.shape[-1], 0), past_plot[col].numpy(), color="#9E9E9E", alpha=0.62, linewidth=1.0, label="lookback" if col == 0 else None)
+        if k_overlap > 0:
+            ax.axvspan(-k_overlap, 0, color="#90CAF9", alpha=0.14, zorder=-2, label=f"{k_overlap}-step overlap" if col == 0 else None)
+        ax.plot(t_fut, gt_fut[col].numpy(), color="#2196F3", linewidth=1.4, label="GT" if col == 0 else None)
+        ax.plot(t_fut, plot_coarse[col].numpy(), color="#FF9800", linewidth=1.1, label="Coarse pred" if col == 0 else None)
+        ax.plot(t_fut, plot_combined[col].numpy(), color="#E91E63", linewidth=1.1, label="Combined" if col == 0 else None)
+        ax.axvline(0, color="black", linestyle=":", alpha=0.35)
         ax.grid(True, alpha=0.12)
         ax.set_title(f"var {col}", fontsize=9)
         if col == 0:
@@ -2351,15 +2345,22 @@ def plot_worst_window_panel(
 ) -> str:
     """Pred coarse/fine 2D maps + GT vs combined final 1D line chart."""
     os.makedirs(output_dir, exist_ok=True)
-    _past_cf, future_cf = _as_channel_first(past, future)
-    k = int(lookback_overlap)
-    gt = future_cf.numpy()
-    if k > 0 and gt.shape[-1] > k:
-        gt = gt[..., k:]
-    common_len = min(gt.shape[-1], final_pred.shape[-1])
-    gt = gt[..., -common_len:]
-    final_pred = final_pred[..., -common_len:]
-    t_axis = np.arange(0, common_len)
+    past_cf, future_cf = _as_channel_first(past, future)
+    past_np = past_cf.detach().cpu().numpy()
+    k = max(0, int(lookback_overlap))
+    gt = future_cf.detach().cpu().numpy()
+    has_overlap_prediction = k > 0 and final_pred.shape[-1] >= gt.shape[-1]
+    if has_overlap_prediction:
+        common_len = min(gt.shape[-1], final_pred.shape[-1])
+        gt = gt[..., :common_len]
+        final_pred = final_pred[..., :common_len]
+        t_axis = np.arange(-k, common_len - k)
+    else:
+        gt = gt[..., k:] if k > 0 else gt
+        common_len = min(gt.shape[-1], final_pred.shape[-1])
+        gt = gt[..., -common_len:]
+        final_pred = final_pred[..., -common_len:]
+        t_axis = np.arange(common_len)
     n_vars = min(3, gt.shape[0], coarse_2d.shape[0], fine_2d.shape[0])
     space_label = "global z (ordinal decode)" if ordinal_mode else "window-norm"
     variate_ids = list(variate_ids or range(gt.shape[0]))
@@ -2374,7 +2375,7 @@ def plot_worst_window_panel(
             coarse_2d[col],
             aspect="auto",
             origin="lower",
-            extent=[0, w, 0, h],
+            extent=[-k, w - k, 0, h],
             cmap="gray",
             vmin=0.0,
             vmax=1.0,
@@ -2389,7 +2390,7 @@ def plot_worst_window_panel(
             fine_2d[col],
             aspect="auto",
             origin="lower",
-            extent=[0, w, 0, h],
+            extent=[-k, w - k, 0, h],
             cmap="gray",
             vmin=0.0,
             vmax=1.0,
@@ -2399,8 +2400,12 @@ def plot_worst_window_panel(
         fig.colorbar(im_f, ax=ax_f, fraction=0.046, pad=0.04)
 
         ax_1d = fig.add_subplot(gs[2, col])
-        ax_1d.plot(t_axis, gt[col], color="#2196F3", linewidth=1.5, label="GT")
-        ax_1d.plot(t_axis, final_pred[col], color="#E91E63", linewidth=1.2, label="Final")
+        ax_1d.plot(np.arange(-past_np.shape[-1], 0), past_np[col], color="#9E9E9E", alpha=0.62, linewidth=1.0, label="lookback" if col == 0 else None)
+        if has_overlap_prediction:
+            ax_1d.axvspan(-k, 0, color="#90CAF9", alpha=0.14, zorder=-2, label=f"{k}-step overlap" if col == 0 else None)
+        ax_1d.plot(t_axis, gt[col], color="#2196F3", linewidth=1.5, label="GT" if col == 0 else None)
+        ax_1d.plot(t_axis, final_pred[col], color="#E91E63", linewidth=1.2, linestyle="--", label="Final" if col == 0 else None)
+        ax_1d.axvline(0, color="black", linestyle=":", alpha=0.35)
         if coarse_bin_boundaries is not None:
             _draw_coarse_bin_boundaries(ax_1d, coarse_bin_boundaries[col], label=(col == 0))
         ax_1d.grid(True, alpha=0.12)
@@ -2445,7 +2450,7 @@ def run_eval_worst_window_visualizations(
     paths: List[str] = []
     ordinal_mode = bool(getattr(state, "use_ordinal_window_norm", False))
     variate_ids = list(getattr(state, "variate_indices", None) or range(pack["y_true"].shape[1]))
-    final = pack.get("final_anchor", pack.get("deterministic"))
+    final = pack.get("final_anchor_with_overlap", pack.get("final_anchor", pack.get("deterministic")))
     if final is None:
         return []
 
@@ -2543,16 +2548,28 @@ def plot_probabilistic_sample_panel(
 ) -> str:
     """Probabilistic 2D maps + GT vs sample fan (not anchor). samples: (V, S, T)."""
     os.makedirs(output_dir, exist_ok=True)
-    _past_cf, future_cf = _as_channel_first(past, future)
-    k = int(lookback_overlap)
-    gt = future_cf.numpy()
-    if k > 0 and gt.shape[-1] > k:
-        gt = gt[..., k:]
-    common_len = min(gt.shape[-1], sample_mean.shape[-1], samples_vt_s.shape[-1])
-    gt = gt[..., -common_len:]
-    sample_mean = sample_mean[..., -common_len:]
-    samples_vt_s = samples_vt_s[..., -common_len:]
-    t_axis = np.arange(0, common_len)
+    past_cf, future_cf = _as_channel_first(past, future)
+    past_np = past_cf.detach().cpu().numpy()
+    k = max(0, int(lookback_overlap))
+    gt = future_cf.detach().cpu().numpy()
+    has_overlap_prediction = (
+        k > 0
+        and sample_mean.shape[-1] >= gt.shape[-1]
+        and samples_vt_s.shape[-1] >= gt.shape[-1]
+    )
+    if has_overlap_prediction:
+        common_len = min(gt.shape[-1], sample_mean.shape[-1], samples_vt_s.shape[-1])
+        gt = gt[..., :common_len]
+        sample_mean = sample_mean[..., :common_len]
+        samples_vt_s = samples_vt_s[..., :common_len]
+        t_axis = np.arange(-k, common_len - k)
+    else:
+        gt = gt[..., k:] if k > 0 else gt
+        common_len = min(gt.shape[-1], sample_mean.shape[-1], samples_vt_s.shape[-1])
+        gt = gt[..., -common_len:]
+        sample_mean = sample_mean[..., -common_len:]
+        samples_vt_s = samples_vt_s[..., -common_len:]
+        t_axis = np.arange(common_len)
     n_vars = min(3, gt.shape[0], coarse_2d.shape[0], fine_2d.shape[0], samples_vt_s.shape[0])
     space_label = "global z (ordinal decode)" if ordinal_mode else "window-norm"
     variate_ids = list(variate_ids or range(gt.shape[0]))
@@ -2568,7 +2585,7 @@ def plot_probabilistic_sample_panel(
             coarse_2d[col],
             aspect="auto",
             origin="lower",
-            extent=[0, w, 0, h],
+            extent=[-k, w - k, 0, h],
             cmap="gray",
             vmin=0.0,
             vmax=1.0,
@@ -2583,7 +2600,7 @@ def plot_probabilistic_sample_panel(
             fine_2d[col],
             aspect="auto",
             origin="lower",
-            extent=[0, w, 0, h],
+            extent=[-k, w - k, 0, h],
             cmap="gray",
             vmin=0.0,
             vmax=1.0,
@@ -2596,13 +2613,17 @@ def plot_probabilistic_sample_panel(
         draws = samples_vt_s[col, :n_draw]
         q10 = np.percentile(samples_vt_s[col], 10, axis=0)
         q90 = np.percentile(samples_vt_s[col], 90, axis=0)
-        ax_1d.fill_between(t_axis, q10, q90, color="#FF9800", alpha=0.22, label="q10–q90")
+        ax_1d.plot(np.arange(-past_np.shape[-1], 0), past_np[col], color="#9E9E9E", alpha=0.62, linewidth=1.0, label="lookback" if col == 0 else None)
+        if has_overlap_prediction:
+            ax_1d.axvspan(-k, 0, color="#90CAF9", alpha=0.14, zorder=-2, label=f"{k}-step overlap" if col == 0 else None)
+        ax_1d.fill_between(t_axis, q10, q90, color="#FF9800", alpha=0.22, label="q10–q90" if col == 0 else None)
         for s_i in range(n_draw):
             ax_1d.plot(t_axis, draws[s_i], color="#FF9800", linewidth=0.55, alpha=0.35)
-        ax_1d.plot(t_axis, gt[col], color="#2196F3", linewidth=1.5, label="GT")
+        ax_1d.plot(t_axis, gt[col], color="#2196F3", linewidth=1.5, label="GT" if col == 0 else None)
         ax_1d.plot(
-            t_axis, sample_mean[col], color="#E91E63", linewidth=1.2, label="sample mean",
+            t_axis, sample_mean[col], color="#E91E63", linewidth=1.2, label="sample mean" if col == 0 else None,
         )
+        ax_1d.axvline(0, color="black", linestyle=":", alpha=0.35)
         if coarse_bin_boundaries is not None:
             _draw_coarse_bin_boundaries(ax_1d, coarse_bin_boundaries[col], label=(col == 0))
         ax_1d.grid(True, alpha=0.12)
@@ -2642,8 +2663,8 @@ def run_eval_probabilistic_sample_visualizations(
     viz = _viz_cfg(state)
     if not viz.get("enabled", True):
         return []
-    samples = pack.get("samples")
-    sample_mean = pack.get("sample_mean")
+    samples = pack.get("samples_with_overlap", pack.get("samples"))
+    sample_mean = pack.get("sample_mean_with_overlap", pack.get("sample_mean"))
     if samples is None or sample_mean is None:
         logger.warning("probabilistic sample viz skipped: pack missing samples")
         return []
