@@ -2291,6 +2291,45 @@ def _worst_window_pred_2d_maps(
     return coarse_2d, fine_2d
 
 
+@torch.no_grad()
+def _coarse_bin_boundaries_and_ood_shift(model, past: torch.Tensor, future: torch.Tensor, *, device: torch.device) -> Tuple[np.ndarray, np.ndarray]:
+    """Map coarse-bin edges and ordinal OOD input shifts into global-z plot space."""
+    past_b = past.unsqueeze(0).to(device)
+    coarse_h = int(getattr(model.config, "coarse_image_height", model.config.image_height))
+    ordinal = bool(getattr(model.config, "use_ordinal_window_norm", False))
+    # Generation receives only the lookback, so derive its ordinal shift from
+    # that same causal input rather than from the held-out future.
+    _past_norm, _future_norm, stats = model._normalize_sequence(past_b, None, apply_ood_shift=ordinal, data_is_ranked=False)
+    unit_edges = np.linspace(0.0, 1.0, coarse_h + 1, dtype=np.float32)
+    if ordinal:
+        _center, _std, ladder, ood_shift = stats
+        shift = ood_shift[0, :, 0].detach().cpu().numpy()
+        boundaries = []
+        for vi in range(past_b.shape[1]):
+            n_unique = int(ladder.n_unique[0, vi].item())
+            values = ladder.values[0, vi, :n_unique].detach().cpu().numpy()
+            boundaries.append(np.interp(unit_edges * max(n_unique - 1, 0), np.arange(n_unique), values) - shift[vi])
+        return np.asarray(boundaries, dtype=np.float32), shift.astype(np.float32)
+    center, std, _ladder = stats[:3]
+    repr_edges = -float(model.config.max_scale) + 2 * float(model.config.max_scale) * unit_edges
+    boundaries = center[0, :, 0].cpu().numpy()[:, None] + std[0, :, 0].cpu().numpy()[:, None] * repr_edges
+    return boundaries.astype(np.float32), np.zeros(past_b.shape[1], dtype=np.float32)
+
+
+def _ood_shift_label(ood_shift: np.ndarray, variate_ids: Sequence[int], n_vars: int) -> str:
+    pieces = []
+    for vi in range(n_vars):
+        shift, var_id = float(ood_shift[vi]), int(variate_ids[vi])
+        pieces.append(f"v{var_id}: no shift" if np.isclose(shift, 0.0) else f"v{var_id}: input shift {shift:+.3f} z")
+    return "OOD envelope -> " + "; ".join(pieces)
+
+
+def _draw_coarse_bin_boundaries(ax, boundaries: np.ndarray, *, label: bool) -> None:
+    for edge_idx, value in enumerate(boundaries):
+        outer = edge_idx in (0, len(boundaries) - 1)
+        ax.axhline(float(value), color="#455A64", linewidth=0.65 if outer else 0.45, linestyle="-" if outer else "--", alpha=0.38 if outer else 0.22, zorder=0, label="16 coarse-bin boundaries" if label and edge_idx == 1 else None)
+
+
 def plot_worst_window_panel(
     *,
     past: torch.Tensor,
@@ -2306,6 +2345,9 @@ def plot_worst_window_panel(
     jpeg_dpi: int = 100,
     ordinal_mode: bool = False,
     lookback_overlap: int = 0,
+    coarse_bin_boundaries: Optional[np.ndarray] = None,
+    ood_shift: Optional[np.ndarray] = None,
+    variate_ids: Optional[Sequence[int]] = None,
 ) -> str:
     """Pred coarse/fine 2D maps + GT vs combined final 1D line chart."""
     os.makedirs(output_dir, exist_ok=True)
@@ -2320,6 +2362,7 @@ def plot_worst_window_panel(
     t_axis = np.arange(0, common_len)
     n_vars = min(3, gt.shape[0], coarse_2d.shape[0], fine_2d.shape[0])
     space_label = "global z (ordinal decode)" if ordinal_mode else "window-norm"
+    variate_ids = list(variate_ids or range(gt.shape[0]))
 
     fig = plt.figure(figsize=(4.2 * n_vars, 2.3 * 3), constrained_layout=True)
     gs = fig.add_gridspec(3, n_vars, height_ratios=[1.0, 1.0, 1.15])
@@ -2358,6 +2401,8 @@ def plot_worst_window_panel(
         ax_1d = fig.add_subplot(gs[2, col])
         ax_1d.plot(t_axis, gt[col], color="#2196F3", linewidth=1.5, label="GT")
         ax_1d.plot(t_axis, final_pred[col], color="#E91E63", linewidth=1.2, label="Final")
+        if coarse_bin_boundaries is not None:
+            _draw_coarse_bin_boundaries(ax_1d, coarse_bin_boundaries[col], label=(col == 0))
         ax_1d.grid(True, alpha=0.12)
         ax_1d.set_title(f"var {col} | GT vs final", fontsize=8)
         if col == 0:
@@ -2368,10 +2413,12 @@ def plot_worst_window_panel(
         + _format_scale_banner(
             norm_range=(float(gt.min()), float(gt.max())),
             space_label=space_label,
-            extra="2D: anchor occupancy [0,1]",
+            extra="2D: anchor occupancy [0,1]; lines: 16 coarse-bin edges",
         ),
         fontsize=10,
     )
+    if ood_shift is not None:
+        fig.text(0.5, 0.005, _ood_shift_label(ood_shift, variate_ids, n_vars), ha="center", fontsize=7)
     path = os.path.join(output_dir, f"{metric}_rank{rank:02d}_win{window_index}.jpg")
     return save_figure_jpg(fig, path, dpi=jpeg_dpi)
 
@@ -2397,6 +2444,7 @@ def run_eval_worst_window_visualizations(
     output_dir = os.path.join(state.results_dir, "viz", "eval_worst")
     paths: List[str] = []
     ordinal_mode = bool(getattr(state, "use_ordinal_window_norm", False))
+    variate_ids = list(getattr(state, "variate_indices", None) or range(pack["y_true"].shape[1]))
     final = pack.get("final_anchor", pack.get("deterministic"))
     if final is None:
         return []
@@ -2418,6 +2466,7 @@ def run_eval_worst_window_visualizations(
             )
         coarse_2d, fine_2d = map_cache[wi]
         past, future = test_ds[wi]
+        boundaries, ood_shift = _coarse_bin_boundaries_and_ood_shift(coarse_model, past, future, device=device)
         paths.append(
             plot_worst_window_panel(
                 past=past,
@@ -2433,6 +2482,7 @@ def run_eval_worst_window_visualizations(
                 jpeg_dpi=int(viz.get("jpeg_dpi", 100)),
                 ordinal_mode=ordinal_mode,
                 lookback_overlap=k_overlap,
+                coarse_bin_boundaries=boundaries, ood_shift=ood_shift, variate_ids=variate_ids,
             )
         )
     return paths
@@ -2487,6 +2537,9 @@ def plot_probabilistic_sample_panel(
     lookback_overlap: int = 0,
     sampler_label: str = "quad_t",
     max_spaghetti: int = 20,
+    coarse_bin_boundaries: Optional[np.ndarray] = None,
+    ood_shift: Optional[np.ndarray] = None,
+    variate_ids: Optional[Sequence[int]] = None,
 ) -> str:
     """Probabilistic 2D maps + GT vs sample fan (not anchor). samples: (V, S, T)."""
     os.makedirs(output_dir, exist_ok=True)
@@ -2502,6 +2555,7 @@ def plot_probabilistic_sample_panel(
     t_axis = np.arange(0, common_len)
     n_vars = min(3, gt.shape[0], coarse_2d.shape[0], fine_2d.shape[0], samples_vt_s.shape[0])
     space_label = "global z (ordinal decode)" if ordinal_mode else "window-norm"
+    variate_ids = list(variate_ids or range(gt.shape[0]))
     n_draw = min(int(max_spaghetti), int(samples_vt_s.shape[1]))
 
     fig = plt.figure(figsize=(4.2 * n_vars, 2.3 * 3), constrained_layout=True)
@@ -2549,6 +2603,8 @@ def plot_probabilistic_sample_panel(
         ax_1d.plot(
             t_axis, sample_mean[col], color="#E91E63", linewidth=1.2, label="sample mean",
         )
+        if coarse_bin_boundaries is not None:
+            _draw_coarse_bin_boundaries(ax_1d, coarse_bin_boundaries[col], label=(col == 0))
         ax_1d.grid(True, alpha=0.12)
         ax_1d.set_title(f"var {col} | GT vs {n_draw} {sampler_label} samples", fontsize=8)
         if col == 0:
@@ -2559,10 +2615,12 @@ def plot_probabilistic_sample_panel(
         + _format_scale_banner(
             norm_range=(float(gt.min()), float(gt.max())),
             space_label=space_label,
-            extra=f"2D: one {sampler_label} sample occupancy [0,1] (not anchor)",
+            extra=f"2D: one {sampler_label} sample occupancy [0,1] (not anchor); lines: 16 coarse-bin edges",
         ),
         fontsize=10,
     )
+    if ood_shift is not None:
+        fig.text(0.5, 0.005, _ood_shift_label(ood_shift, variate_ids, n_vars), ha="center", fontsize=7)
     path = os.path.join(output_dir, f"prob_{metric}_rank{rank:02d}_win{window_index}.jpg")
     return save_figure_jpg(fig, path, dpi=jpeg_dpi)
 
@@ -2617,6 +2675,7 @@ def run_eval_probabilistic_sample_visualizations(
     output_dir = os.path.join(state.results_dir, "viz", "eval_prob_samples")
     paths: List[str] = []
     ordinal_mode = bool(getattr(state, "use_ordinal_window_norm", False))
+    variate_ids = list(getattr(state, "variate_indices", None) or range(samples.shape[1]))
     k_overlap = int(getattr(coarse_model.config, "lookback_overlap", 0) or 0)
     map_cache: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
@@ -2638,6 +2697,7 @@ def run_eval_probabilistic_sample_visualizations(
                 num_inference_steps=num_inference_steps,
             )
         coarse_2d, fine_2d = map_cache[wi]
+        boundaries, ood_shift = _coarse_bin_boundaries_and_ood_shift(coarse_model, past, future, device=device)
         # samples: (B, V, S, T)
         samp = samples[pack_row]
         mean = sample_mean[pack_row]
@@ -2658,9 +2718,41 @@ def run_eval_probabilistic_sample_visualizations(
                 ordinal_mode=ordinal_mode,
                 lookback_overlap=k_overlap,
                 sampler_label=str(sampler),
+                coarse_bin_boundaries=boundaries, ood_shift=ood_shift, variate_ids=variate_ids,
             )
         )
     return paths
+
+
+def run_eval_full_dataset_visualization(state: Any, *, splits: Dict[str, Any]) -> List[str]:
+    """Plot every split in the model input space for up to five trained variates."""
+    viz = _viz_cfg(state)
+    if not viz.get("enabled", True):
+        return []
+    variate_ids = list(getattr(state, "variate_indices", None) or range(next(iter(splits.values())).data.shape[1]))[:5]
+    ordinal = bool(getattr(state, "use_ordinal_window_norm", False))
+    ladder = getattr(state, "extra", {}).get("global_ordinal_ladder")
+    n_vars = len(variate_ids)
+    fig, axes = plt.subplots(n_vars, len(splits), figsize=(5.0 * len(splits), 2.1 * n_vars), squeeze=False, constrained_layout=True)
+    for col, (split_name, ds) in enumerate(splits.items()):
+        values = ds.data.detach().cpu().numpy().T
+        if ordinal:
+            if ladder is None:
+                raise ValueError("ordinal dataset visualization requires a global ordinal ladder")
+            from models.diffusion_tsf.ordinal_window_norm import encode_with_ladder, ranks_to_unit
+            ranked = encode_with_ladder(ds.data.T.unsqueeze(0), ladder)
+            values = ranks_to_unit(ranked, ladder)[0].detach().cpu().numpy()
+        for row, var_id in enumerate(variate_ids):
+            ax = axes[row, col]
+            ax.plot(values[row], color="#1565C0", linewidth=0.45)
+            ax.axhline(0.0, color="#455A64", linewidth=0.4, alpha=0.45)
+            ax.set_title(f"{split_name} | var {var_id} | {values.shape[1]:,} points", fontsize=8)
+            if col == 0:
+                ax.set_ylabel("ordinal unit rank" if ordinal else "train z-score", fontsize=8)
+            ax.grid(True, alpha=0.10)
+    fig.suptitle(f"Entire train / val / test dataset ({'ordinal-normalized' if ordinal else 'train-z normalized'}; first {n_vars} trained variates)", fontsize=10)
+    out_dir = os.path.join(state.results_dir, "viz", "eval_dataset_splits")
+    return [save_figure_jpg(fig, os.path.join(out_dir, "full_dataset_splits.jpg"), dpi=int(viz.get("jpeg_dpi", 100)))]
 
 
 def run_ordinal_roundtrip_visualization(

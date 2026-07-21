@@ -21,6 +21,7 @@ from models.diffusion_tsf.pipeline.visualize_utils import (
     per_window_anchor_mse,
     per_window_crps,
     run_eval_probabilistic_sample_visualizations,
+    run_eval_full_dataset_visualization,
     run_eval_worst_window_visualizations,
     run_ordinal_roundtrip_visualization,
     run_ordinal_coarse_fine_2d_visualization,
@@ -228,6 +229,9 @@ class StagedEvalPhase(PipelinePhase):
     name = "staged_eval"
 
     def should_skip(self, state: PipelineState) -> bool:
+        if bool(self.get("refresh_eval_visualizations", False)):
+            logger.info("  [%s] forcing eval refresh for visualizations", self.name)
+            return False
         subset_id = state.subset_id or state.dataset
         partial = os.path.join(state.results_dir, "partials", f"{state.dataset}_staged_anchor.json")
         nested = os.path.join(state.results_dir, subset_id, "staged_results.json")
@@ -518,7 +522,7 @@ class StagedEvalPhase(PipelinePhase):
         n_iv = len(variate_indices)
 
         patch_globals(pipeline_mod, state, honor_dataset_windows=True)
-        _, _, full_test_ds, norm_stats = load_dataset(
+        full_train_ds, full_val_ds, full_test_ds, norm_stats = load_dataset(
             state.dataset,
             variate_indices,
             stride=train_stride,
@@ -856,7 +860,7 @@ class StagedEvalPhase(PipelinePhase):
                     fine_model=fine_model,
                     device=device,
                 )
-                wandb_utils.log_visualization_paths(worst_viz, wandb_key="eval/worst_windows")
+                wandb_utils.log_visualization_paths(worst_viz, wandb_key="eval/worst_samples")
             except Exception as e:
                 logger.warning("Worst-window eval viz failed: %s", e, exc_info=True)
 
@@ -877,6 +881,14 @@ class StagedEvalPhase(PipelinePhase):
                 )
             except Exception as e:
                 logger.warning("Probabilistic sample eval viz failed: %s", e, exc_info=True)
+
+            try:
+                dataset_viz = run_eval_full_dataset_visualization(
+                    state, splits={"train": full_train_ds, "val": full_val_ds, "test": full_test_ds},
+                )
+                wandb_utils.log_visualization_paths(dataset_viz, wandb_key="eval/full_dataset_splits")
+            except Exception as e:
+                logger.warning("Full-dataset eval viz failed: %s", e, exc_info=True)
 
             if state.use_ordinal_window_norm:
                 try:
