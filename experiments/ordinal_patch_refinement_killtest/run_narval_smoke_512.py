@@ -1,4 +1,4 @@
-"""512 smoke: same vertical-only / 8x8 path at resolution 512."""
+"""512 smoke: same vertical-only / 32x8 path at resolution 512."""
 
 from __future__ import annotations
 

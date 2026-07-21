@@ -33,14 +33,26 @@ def make_scheduler(device: torch.device) -> BinaryDiffusionScheduler:
     ).to(str(device))
 
 
-def make_refiner(patch: int, device: torch.device) -> FactorizedDiT:
-    """DiT: noisy CDF in; dual heads out; cond = [naive_upscale, past_hist]."""
+def make_refiner(
+    patch_h: int,
+    device: torch.device,
+    *,
+    patch_w: int | None = None,
+) -> FactorizedDiT:
+    """DiT: noisy CDF in; dual heads out; cond = [naive_upscale, past_hist].
+
+    Accepts rectangular crops (H=patch_h, W=patch_w). Token patch defaults to
+    4x4 when both axes are divisible by 4.
+    """
+    if patch_w is None:
+        patch_w = patch_h
+    tok = (4, 4) if (patch_h % 4 == 0 and patch_w % 4 == 0) else (patch_h, patch_w)
     return FactorizedDiT(
         in_channels=1,
         cond_channels=2,
         out_channels=2,
-        image_height=patch,
-        patch_size=(4, 4) if patch % 4 == 0 else (patch, patch),
+        image_height=patch_h,
+        patch_size=tok,
         embed_dim=384,
         depth=8,
         num_heads=6,

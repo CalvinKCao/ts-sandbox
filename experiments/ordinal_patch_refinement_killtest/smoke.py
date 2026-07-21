@@ -4,7 +4,8 @@
 Pipeline (W stays = horizon; no horizontal stretch):
   ordinal ranks -> hi-res CDF (H x W) + coarse CDF (16 x W)
   -> nearest upsample coarse on the vertical axis only (H x W)
-  -> 8x8 crops centered on the mid-column coarse edge
+  -> stride-2 crops of 32 tall x 8 wide, mid-col coarse edge at local row 16
+  -> strict OOB: skip canvas pad or any coarse/GT column edge leaving the crop
   -> train FactorizedDiT with XOR bit-flip diffusion (cond = naive + hist)
   -> iterative quad_t sample to refine
 """
@@ -35,7 +36,9 @@ DEFAULT_OUTPUT = REPO_ROOT / "results" / "ordinal_patch_refinement_killtest" / "
 
 HORIZON = 16
 COARSE_H = 16
-PATCH = 8
+PATCH_H = 32  # value-axis crop height
+PATCH_W = 8  # time-axis crop width
+PATCH = PATCH_W  # backward-compat alias (width); prefer PATCH_H / PATCH_W
 COL_STRIDE = 2  # overlapping 8-wide crops every 2 columns
 
 
@@ -48,7 +51,8 @@ class SmokeMetadata:
     horizon: int
     coarse_height: int
     fine_height: int
-    patch_size: int
+    patch_h: int
+    patch_w: int
     normalization: str
     ordinal_snapping: str
     device: str
@@ -116,19 +120,45 @@ def _coarse_edge_row(coarse_bin: int, high: int) -> int:
     return (int(coarse_bin) + 1) * scale - 1
 
 
-def _crop_in_canvas(row0: int, col0: int, high: int, width: int, patch: int = PATCH) -> bool:
+def _crop_in_canvas(
+    row0: int,
+    col0: int,
+    high: int,
+    width: int,
+    *,
+    patch_h: int = PATCH_H,
+    patch_w: int = PATCH_W,
+) -> bool:
     """Skip crops that would require vertical/horizontal padding."""
-    return 0 <= row0 <= high - patch and 0 <= col0 <= width - patch
+    return 0 <= row0 <= high - patch_h and 0 <= col0 <= width - patch_w
 
 
-def _extract_block(canvas: torch.Tensor, row0: int, col0: int, size: int) -> torch.Tensor:
-    """Extract an in-bounds square block (caller must validate OOB first)."""
-    return canvas[..., row0 : row0 + size, col0 : col0 + size].clone()
+def _column_edges_in_crop(
+    edges: torch.Tensor,
+    row0: int,
+    col0: int,
+    *,
+    patch_h: int,
+    patch_w: int,
+) -> bool:
+    """True iff every column's transition edge lies inside [row0, row0+patch_h)."""
+    for c in range(col0, col0 + patch_w):
+        edge = int(edges[c].item())
+        if not (row0 <= edge < row0 + patch_h):
+            return False
+    return True
 
 
-def _write_block(canvas: torch.Tensor, block: torch.Tensor, row0: int, col0: int) -> None:
-    size = int(block.shape[-1])
-    canvas[..., row0 : row0 + size, col0 : col0 + size] = block
+def _extract_block(
+    canvas: torch.Tensor,
+    row0: int,
+    col0: int,
+    *,
+    patch_h: int,
+    patch_w: int,
+) -> torch.Tensor:
+    """Extract an in-bounds HxW block (caller must validate OOB first)."""
+    return canvas[..., row0 : row0 + patch_h, col0 : col0 + patch_w].clone()
 
 
 def _blend_patches_into_canvas(
@@ -136,14 +166,14 @@ def _blend_patches_into_canvas(
     patches: torch.Tensor,
     coords: list[tuple[int, int]],
 ) -> torch.Tensor:
-    """Average overlapping patch writes (COL_STRIDE < PATCH)."""
+    """Average overlapping patch writes (COL_STRIDE < PATCH_W)."""
     out = canvas.clone()
     acc = torch.zeros_like(out)
     weight = torch.zeros_like(out)
-    size = int(patches.shape[-1])
+    ph, pw = int(patches.shape[-2]), int(patches.shape[-1])
     for i, (row0, col0) in enumerate(coords):
-        acc[..., row0 : row0 + size, col0 : col0 + size] += patches[i : i + 1]
-        weight[..., row0 : row0 + size, col0 : col0 + size] += 1.0
+        acc[..., row0 : row0 + ph, col0 : col0 + pw] += patches[i : i + 1]
+        weight[..., row0 : row0 + ph, col0 : col0 + pw] += 1.0
     mask = weight > 0
     out[mask] = acc[mask] / weight[mask]
     return out
@@ -155,41 +185,82 @@ def _patch_batch(
     past_canvas: torch.Tensor,
     coarse_bins: torch.Tensor,
     *,
-    patch_size: int = PATCH,
+    patch_h: int = PATCH_H,
+    patch_w: int = PATCH_W,
     col_stride: int = COL_STRIDE,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[int, int]], dict[str, int]]:
-    """Build overlapping PxP crops centered on the mid-column coarse CDF edge.
+    """Build stride-2 (patch_h x patch_w) crops; skip canvas-OOB or edge leaving crop.
 
-    Vertical placement: coarse_edge at local row patch_size//2 (true center).
-    Returns (naive_patches, hist_patches, target_patches, coords, stats) each
-    shaped (N, 1, P, P) — ready for diffusion cond/x0.
+    Strict rule (train/val/test): every column in the crop must have both its
+    coarse NN-upscale transition and its GT hi-res transition inside the crop.
+    Vertical placement centers the mid-column coarse edge at local row patch_h//2.
     """
     naives, hists, targets, coords = [], [], [], []
     high = int(upscaled.shape[-2])
     width = int(coarse_bins.shape[-1])
-    center = patch_size // 2
+    center_row = patch_h // 2
+    center_col = patch_w // 2
+    # GT edge per column = last occupied hi-res row (bin index from CDF).
+    tgt = target if target.dim() == 3 else target.unsqueeze(0)
+    gt_edges = TimeSeriesTo2D.bin_indices_from_cdf(tgt)[0].long()  # (W,)
+    coarse_edges = torch.tensor(
+        [_coarse_edge_row(int(coarse_bins[c].item()), high) for c in range(width)],
+        device=coarse_bins.device,
+        dtype=torch.long,
+    )
     n_cand = 0
-    n_skip = 0
-    for col0 in range(0, width - patch_size + 1, col_stride):
+    n_skip_canvas = 0
+    n_skip_edge = 0
+    for col0 in range(0, width - patch_w + 1, col_stride):
         n_cand += 1
-        c_mid = col0 + center
-        edge = _coarse_edge_row(int(coarse_bins[c_mid].item()), high)
-        # Center the transition edge in the crop (not the coarse-bin lower edge).
-        row0 = edge - center
-        if not _crop_in_canvas(row0, col0, high, width, patch_size):
-            n_skip += 1
+        c_mid = col0 + center_col
+        edge = int(coarse_edges[c_mid].item())
+        row0 = edge - center_row
+        if not _crop_in_canvas(row0, col0, high, width, patch_h=patch_h, patch_w=patch_w):
+            n_skip_canvas += 1
             continue
-        # Sanity: edge must land on local mid-row after crop.
         local_edge = edge - row0
-        if local_edge != center:
-            raise RuntimeError(f"centering bug: local_edge={local_edge} center={center}")
-        naives.append(_extract_block(upscaled, row0, col0, patch_size))
-        targets.append(_extract_block(target, row0, col0, patch_size))
-        hists.append(_extract_block(past_canvas, row0, past_canvas.shape[-1] - patch_size, patch_size))
+        if local_edge != center_row:
+            raise RuntimeError(f"centering bug: local_edge={local_edge} center_row={center_row}")
+        if not _column_edges_in_crop(
+            coarse_edges, row0, col0, patch_h=patch_h, patch_w=patch_w,
+        ):
+            n_skip_edge += 1
+            continue
+        if not _column_edges_in_crop(
+            gt_edges, row0, col0, patch_h=patch_h, patch_w=patch_w,
+        ):
+            n_skip_edge += 1
+            continue
+        naives.append(
+            _extract_block(upscaled, row0, col0, patch_h=patch_h, patch_w=patch_w)
+        )
+        targets.append(
+            _extract_block(target, row0, col0, patch_h=patch_h, patch_w=patch_w)
+        )
+        hists.append(
+            _extract_block(
+                past_canvas,
+                row0,
+                past_canvas.shape[-1] - patch_w,
+                patch_h=patch_h,
+                patch_w=patch_w,
+            )
+        )
         coords.append((row0, col0))
-    stats = {"candidates": n_cand, "skipped_oob": n_skip, "kept": len(coords), "boundary_local_row": center}
+    stats = {
+        "candidates": n_cand,
+        "skipped_oob_canvas": n_skip_canvas,
+        "skipped_oob_column_edge": n_skip_edge,
+        "skipped_oob": n_skip_canvas + n_skip_edge,
+        "kept": len(coords),
+        "boundary_local_row": center_row,
+        "patch_h": patch_h,
+        "patch_w": patch_w,
+        "oob_rule": "strict: all coarse+GT column edges inside crop; canvas OOB skipped",
+    }
     if not coords:
-        empty = torch.zeros(0, 1, patch_size, patch_size, device=upscaled.device)
+        empty = torch.zeros(0, 1, patch_h, patch_w, device=upscaled.device)
         return empty, empty, empty, [], stats
     return (
         torch.stack(naives),
@@ -204,8 +275,10 @@ def _plot(output: Path, arrays: dict[str, np.ndarray], meta: SmokeMetadata) -> l
     output.mkdir(parents=True, exist_ok=True)
     title = f"{meta.dataset} v{meta.variate} window={meta.source_window_index}"
     paths: list[Path] = []
-    patch = int(meta.patch_size)
+    patch_h = int(meta.patch_h)
+    patch_w = int(meta.patch_w)
     horizon = int(meta.horizon)
+    patch_label = f"{patch_w}x{patch_h}"
 
     fig, ax = plt.subplots(figsize=(11, 4))
     ax.plot(np.arange(-len(arrays["past"]), 0), arrays["past"], label="history", color="0.4")
@@ -244,11 +317,21 @@ def _plot(output: Path, arrays: dict[str, np.ndarray], meta: SmokeMetadata) -> l
     fig, ax = plt.subplots(figsize=(6, 10))
     ax.imshow(arrays["upscaled_coarse_256"], origin="lower", aspect="auto", cmap="viridis")
     for row0, col0 in arrays["patch_coords"]:
-        ax.add_patch(plt.Rectangle((col0 - 0.5, row0 - 0.5), patch, patch, fill=False, edgecolor="white", linewidth=0.9))
+        ax.add_patch(
+            plt.Rectangle(
+                (col0 - 0.5, row0 - 0.5), patch_w, patch_h,
+                fill=False, edgecolor="white", linewidth=0.9,
+            )
+        )
         # Mid-row of each crop = coarse transition edge (centering check).
-        ax.plot([col0 - 0.5, col0 + patch - 0.5], [row0 + patch // 2, row0 + patch // 2], color="cyan", linewidth=0.8)
+        ax.plot(
+            [col0 - 0.5, col0 + patch_w - 0.5],
+            [row0 + patch_h // 2, row0 + patch_h // 2],
+            color="cyan",
+            linewidth=0.8,
+        )
     ax.set(
-        title=f"8x8 crops centered on coarse edge (cyan) — {title}",
+        title=f"{patch_label} crops centered on coarse edge (cyan) — {title}",
         xlabel="time column",
         ylabel="value row",
     )
@@ -274,10 +357,10 @@ def _plot(output: Path, arrays: dict[str, np.ndarray], meta: SmokeMetadata) -> l
         ):
             ax.imshow(img, origin="lower", aspect="auto", cmap=cmap)
             if name != "refined − GT":
-                ax.axhline(patch // 2, color="white", linewidth=0.7, linestyle="--")
+                ax.axhline(patch_h // 2, color="white", linewidth=0.7, linestyle="--")
             ax.set_title(f"i={i}: {name}")
             ax.axis("off")
-    fig.suptitle(f"8x8 patches (dashed = mid-col coarse edge) — {title}")
+    fig.suptitle(f"{patch_label} patches (dashed = mid-col coarse edge) — {title}")
     fig.tight_layout()
     path = output / "patches_before.png"
     fig.savefig(path, dpi=150)
@@ -286,12 +369,12 @@ def _plot(output: Path, arrays: dict[str, np.ndarray], meta: SmokeMetadata) -> l
 
     fig, axes = plt.subplots(2, 4, figsize=(12, 6))
     for ax, i in zip(axes.flat, range(n_show)):
-        ax.imshow(arrays["refined_patches"][i, 0], origin="lower", cmap="viridis")
+        ax.imshow(arrays["refined_patches"][i, 0], origin="lower", aspect="auto", cmap="viridis")
         ax.contour(arrays["target_patches"][i, 0], levels=[0.5], colors="white", linewidths=0.8)
-        ax.axhline(patch // 2, color="cyan", linewidth=0.7, linestyle="--")
+        ax.axhline(patch_h // 2, color="cyan", linewidth=0.7, linestyle="--")
         ax.set_title(f"i={i}")
         ax.axis("off")
-    fig.suptitle(f"Refined 8x8 with GT overlays — {title}")
+    fig.suptitle(f"Refined {patch_label} with GT overlays — {title}")
     fig.tight_layout()
     path = output / "patches_after.png"
     fig.savefig(path, dpi=150)
@@ -348,7 +431,7 @@ def main() -> None:
     target = _cdf_from_values(future_ord, rank_max, high)[:, vi : vi + 1]
     coarse = _cdf_from_values(future_ord, rank_max, COARSE_H)[:, vi : vi + 1]
     upscaled = _vertical_upsample(coarse, high)
-    past_cdf = _cdf_from_values(past_ord[..., -PATCH:], rank_max, high)[:, vi : vi + 1]
+    past_cdf = _cdf_from_values(past_ord[..., -PATCH_W:], rank_max, high)[:, vi : vi + 1]
     if target.shape[-1] != HORIZON or upscaled.shape[-1] != HORIZON:
         raise RuntimeError(
             f"expected W={HORIZON}, got target W={target.shape[-1]} upscaled W={upscaled.shape[-1]}"
@@ -357,10 +440,40 @@ def main() -> None:
     naive_p, hist_p, target_patches, coords, patch_stats = _patch_batch(
         upscaled[0], target[0], past_cdf[0], coarse_bins,
     )
+    # Strict OOB can empty the default window; search a few neighbors.
     if len(coords) == 0:
-        raise RuntimeError(f"no in-bounds 8x8 crops for this window: {patch_stats}")
+        found = False
+        for wi in range(len(pool)):
+            if wi == args.window_index:
+                continue
+            past_i, future_i = pool[wi]
+            past_i = past_i.unsqueeze(0).to(device=device, dtype=torch.float32)
+            future_i = future_i.unsqueeze(0).to(device=device, dtype=torch.float32)[..., : args.horizon]
+            past_ord, future_ord, ladder_b, ood_shift = ordinal_encode(
+                past_i, future_i, ladder=ladder, apply_ood_shift=True, causal_only=True,
+            )
+            assert future_ord is not None
+            rank_max = ladder_b.rank_max_per_variate().to(device=device, dtype=torch.float32)
+            target = _cdf_from_values(future_ord, rank_max, high)[:, vi : vi + 1]
+            coarse = _cdf_from_values(future_ord, rank_max, COARSE_H)[:, vi : vi + 1]
+            upscaled = _vertical_upsample(coarse, high)
+            past_cdf = _cdf_from_values(past_ord[..., -PATCH_W:], rank_max, high)[:, vi : vi + 1]
+            coarse_bins = TimeSeriesTo2D.bin_indices_from_cdf(coarse)[0, 0].long()
+            naive_p, hist_p, target_patches, coords, patch_stats = _patch_batch(
+                upscaled[0], target[0], past_cdf[0], coarse_bins,
+            )
+            if len(coords) > 0:
+                past = past_i
+                future = future_i
+                args.window_index = wi
+                found = True
+                break
+        if not found:
+            raise RuntimeError(
+                f"no in-bounds strict-OOB {PATCH_W}x{PATCH_H} crops in pack: last={patch_stats}"
+            )
 
-    model = diffusion_refine.make_refiner(PATCH, device)
+    model = diffusion_refine.make_refiner(PATCH_H, device, patch_w=PATCH_W)
     scheduler = diffusion_refine.make_scheduler(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0)
     naive_p = naive_p.to(device)
@@ -409,14 +522,16 @@ def main() -> None:
         "refined_snapped_z_mae": float((refined_value - gt_snapped).abs().mean().item()),
         "exact_snapped_bin_accuracy": float((refined_value == gt_snapped).float().mean().item()),
         "canvas_shape": [high, HORIZON],
-        "patch_size": PATCH,
+        "patch_h": PATCH_H,
+        "patch_w": PATCH_W,
         "patch_stats": patch_stats,
-        "boundary_local_row": PATCH // 2,
+        "boundary_local_row": PATCH_H // 2,
         "trainer": "binary_diffusion_xor",
     }
     parameters = sum(p.numel() for p in model.parameters())
     meta = SmokeMetadata(
-        args.dataset, vi, args.window_index, args.lookback, args.horizon, COARSE_H, high, PATCH,
+        args.dataset, vi, args.window_index, args.lookback, args.horizon, COARSE_H, high,
+        PATCH_H, PATCH_W,
         "train-split z-score; ordinal encode with causal OOD shift; no instance normalization",
         "decode_with_ladder rounds all GT/naive/refined ranks to the same global ladder",
         str(device), parameters,

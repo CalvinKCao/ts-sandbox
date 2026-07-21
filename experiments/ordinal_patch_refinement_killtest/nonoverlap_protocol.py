@@ -3,7 +3,7 @@
 Train: overlapping forecast windows with source stride 2 (larger set).
 Val/test: non-overlapping futures (timeline-disjoint eval).
 
-Patch-level OOB filtering (in-bounds 8x8 only) is applied later in the
+Patch-level OOB filtering (in-bounds 32x8 only) is applied later in the
 materializer — this module only selects source windows.
 """
 

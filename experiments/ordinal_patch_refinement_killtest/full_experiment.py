@@ -1,8 +1,9 @@
 """Full split-safe ordinal patch refinement + held-out discriminator kill test.
 
 Geometry: hi-res CDF is (H x W=horizon); coarse is (16 x W); naive input is
-vertical-only NN upsample to (H x W). Training uses in-bounds 8x8 crops only
-(OOB skipped on train/val/test). Train windows: stride-2 overlapping.
+vertical-only NN upsample to (H x W). Training uses in-bounds 32-tall x 8-wide
+crops only (strict OOB skipped on train/val/test). Train windows: stride-2
+overlapping.
 
 Refiner: real binary XOR diffusion (FactorizedDiT dual-head, linear schedule,
 min-SNR) conditioned on naive upscale + lookback hist; iterative quad_t sample.
@@ -38,7 +39,8 @@ from utils.eval_mmpd_gaussian_anchor import load_tsf_pack_pool
 
 HORIZON = smoke.HORIZON
 LOOKBACK = 96
-PATCH = smoke.PATCH
+PATCH_H = smoke.PATCH_H
+PATCH_W = smoke.PATCH_W
 COARSE_H = smoke.COARSE_H
 LR_GRID = (5e-5, 2.41e-4, 1.5e-3)
 BATCH_GRID = (512, 1024, 2048)
@@ -65,7 +67,7 @@ def _encode_window(
     target = smoke._cdf_from_values(future_ord, rank_max, resolution)
     coarse = smoke._cdf_from_values(future_ord, rank_max, COARSE_H)
     upscaled = smoke._vertical_upsample(coarse, resolution)
-    hist = smoke._cdf_from_values(past_ord[..., -PATCH:], rank_max, resolution)
+    hist = smoke._cdf_from_values(past_ord[..., -PATCH_W:], rank_max, resolution)
     return {
         "past_ord": past_ord,
         "future_ord": future_ord,
@@ -80,9 +82,15 @@ def _encode_window(
 
 
 def _patches_from_encoded(enc: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, dict]:
-    """Return naive, hist, target patch stacks (N,1,P,P) for diffusion."""
+    """Return naive, hist, target patch stacks (N,1,H,W) for diffusion."""
     naives, hists, tgts, meta = [], [], [], []
-    total_stats = {"candidates": 0, "skipped_oob": 0, "kept": 0}
+    total_stats = {
+        "candidates": 0,
+        "skipped_oob": 0,
+        "skipped_oob_canvas": 0,
+        "skipped_oob_column_edge": 0,
+        "kept": 0,
+    }
     v_count = enc["upscaled"].shape[1]
     for v in range(v_count):
         bins = TimeSeriesTo2D.bin_indices_from_cdf(enc["coarse"][:, v : v + 1])[0, 0].long()
@@ -93,14 +101,14 @@ def _patches_from_encoded(enc: dict[str, Any]) -> tuple[torch.Tensor, torch.Tens
             bins,
         )
         for key in total_stats:
-            total_stats[key] += stats[key]
+            total_stats[key] += int(stats[key])
         for i, (row0, col0) in enumerate(coords):
             naives.append(naive_p[i].cpu())
             hists.append(hist_p[i].cpu())
             tgts.append(tgt_p[i].cpu())
             meta.append({"variate": v, "row0": row0, "col0": col0})
     if not naives:
-        empty = torch.zeros(0, 1, PATCH, PATCH)
+        empty = torch.zeros(0, 1, PATCH_H, PATCH_W)
         return empty, empty, empty, [], total_stats
     return torch.stack(naives), torch.stack(hists), torch.stack(tgts), meta, total_stats
 
@@ -114,13 +122,26 @@ def _materialize_split(
     limit: int | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[dict], dict]:
     naives, hists, tgts, records = [], [], [], []
-    agg = {"candidates": 0, "skipped_oob": 0, "kept": 0, "windows_with_patches": 0}
+    agg = {
+        "candidates": 0,
+        "skipped_oob": 0,
+        "skipped_oob_canvas": 0,
+        "skipped_oob_column_edge": 0,
+        "kept": 0,
+        "windows_with_patches": 0,
+    }
     chosen = indices if limit is None else indices[:limit]
     for wi in chosen:
         past, future = pool[wi]
         enc = _encode_window(past.unsqueeze(0), future.unsqueeze(0), ladder, device, resolution)
         pn, ph, pt, meta, stats = _patches_from_encoded(enc)
-        for key in ("candidates", "skipped_oob", "kept"):
+        for key in (
+            "candidates",
+            "skipped_oob",
+            "skipped_oob_canvas",
+            "skipped_oob_column_edge",
+            "kept",
+        ):
             agg[key] += stats[key]
         if stats["kept"] == 0:
             continue
@@ -131,7 +152,7 @@ def _materialize_split(
             tgts.append(pt[i])
             records.append({"window": wi, **m})
     if not naives:
-        empty = torch.zeros(0, 1, PATCH, PATCH)
+        empty = torch.zeros(0, 1, PATCH_H, PATCH_W)
         return empty, empty, empty, [], agg
     return torch.stack(naives), torch.stack(hists), torch.stack(tgts), records, agg
 
@@ -147,7 +168,7 @@ def _train_refiner(
     best = None
     trial_epochs = 1 if smoke_mode else min(4, epochs)
     for lr, eff in grid:
-        model = diffusion_refine.make_refiner(PATCH, device)
+        model = diffusion_refine.make_refiner(PATCH_H, device, patch_w=PATCH_W)
         opt = torch.optim.AdamW(model.parameters(), lr=lr)
         micro = min(64, len(tn))
         acc = max(1, eff // micro)
@@ -474,7 +495,8 @@ def main() -> None:
     manifest = {
         "dataset": args.dataset,
         "resolution": resolution,
-        "patch": PATCH,
+        "patch_h": PATCH_H,
+        "patch_w": PATCH_W,
         "canvas": [resolution, HORIZON],
         "smoke": args.smoke,
         "protocol": {
@@ -484,7 +506,7 @@ def main() -> None:
         "patch_filter": {
             "train": train_patch_stats,
             "val": val_patch_stats,
-            "rule": "skip 8x8 if crop would leave the (H x W) canvas",
+            "rule": "strict: skip if canvas OOB or any coarse/GT column edge leaves the 32x8 crop",
         },
         "train_patches": len(tn),
         "val_patches": len(vn),
