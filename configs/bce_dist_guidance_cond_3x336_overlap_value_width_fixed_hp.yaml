@@ -6,6 +6,10 @@
 
 extends: configs/binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm_uncompressed_bs_mid_vertical_dual_joint_g_lr_batch_s30r20_bce_dist.yaml
 
+training:
+  train_window_aug:
+    exclude_names: [linear_trend]
+
 wandb:
   tags:
     - patch_decoder
@@ -15,7 +19,7 @@ wandb:
     - vertical_dual
     - joint_g_lr_batch
     - fixed_hp_from_bce_dist
-    - train_window_aug
+    - train_window_aug_no_linear_trend
     - anchor_mse_objective
     - anchor_bce_dist_no_soft_mse
     - guidance_cond_3x336

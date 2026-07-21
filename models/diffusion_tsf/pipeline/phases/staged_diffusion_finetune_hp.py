@@ -1670,6 +1670,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             seed=int(state.seed),
             ladder=norm_stats.get("ordinal_ladder"),
             acf_threshold=float(aug_cfg.get("acf_threshold", 0.35)),
+            excluded_names=aug_cfg.get("exclude_names", ()),
         )
         if state.smoke_test:
             train_ds = Subset(train_ds, list(range(min(4, len(train_ds)))))

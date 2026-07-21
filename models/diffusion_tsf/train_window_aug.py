@@ -483,6 +483,7 @@ def apply_stacked_augs(
     rng: np.random.Generator,
     donor_past: Optional[np.ndarray] = None,
     force_names: Optional[Sequence[str]] = None,
+    excluded_names: Optional[Sequence[str]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Apply stacked augs independently per variate. Returns (past, future, names)."""
     past = np.asarray(past, dtype=np.float32).copy()
@@ -493,6 +494,13 @@ def apply_stacked_augs(
     for vi in range(n_v):
         periodic = bool(periodic_flags[vi]) if vi < len(periodic_flags) else False
         pool = list(NON_HEAVY_AUGS) + ([] if periodic else list(HEAVY_AUGS))
+        excluded = set(excluded_names or ())
+        unknown = excluded.difference(_AUG_FNS)
+        if unknown:
+            raise ValueError(f"unknown train-window augmentations to exclude: {sorted(unknown)}")
+        pool = [name for name in pool if name not in excluded]
+        if not pool:
+            continue
         if force_names is not None:
             names = [n for n in force_names if n in pool]
             if not names:
@@ -548,6 +556,7 @@ def maybe_wrap_train_window_aug(
     seed: int = 42,
     ladder=None,
     acf_threshold: float = 0.35,
+    excluded_names: Optional[Sequence[str]] = None,
 ) -> Dataset:
     """Wrap train split with online augs when enabled; otherwise return as-is."""
     if not enabled:
@@ -572,6 +581,7 @@ def maybe_wrap_train_window_aug(
         seed=seed,
         ladder=ladder,
         periodic_flags=flags,
+        excluded_names=excluded_names,
     )
 
 
@@ -586,6 +596,7 @@ class TrainWindowAugDataset(Dataset):
         seed: int = 42,
         ladder=None,
         periodic_flags: Optional[np.ndarray] = None,
+        excluded_names: Optional[Sequence[str]] = None,
     ):
         self.base = base
         self.apply_prob = float(apply_prob)
@@ -600,6 +611,7 @@ class TrainWindowAugDataset(Dataset):
         if periodic_flags is None:
             periodic_flags = np.zeros(n_v, dtype=bool)
         self.periodic_flags = np.asarray(periodic_flags, dtype=bool)
+        self.excluded_names = tuple(excluded_names or ())
         self.yields_ordinal_ranks = ladder is not None
         self._epoch = 0
 
@@ -666,6 +678,7 @@ class TrainWindowAugDataset(Dataset):
                 periodic_flags=self.periodic_flags,
                 rng=rng,
                 donor_past=donor_past,
+                excluded_names=self.excluded_names,
             )
 
         return self._encode(past, future)

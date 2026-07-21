@@ -859,6 +859,7 @@ def run_patch_guidance_finetune_hp_tuning(
         seed=int(globals().get("PIPELINE_SEED", 42)),
         ladder=norm_stats.get("ordinal_ladder"),
         acf_threshold=float(aug_cfg.get("acf_threshold", 0.35)),
+        excluded_names=aug_cfg.get("exclude_names", ()),
     )
     if smoke_test:
         train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
