@@ -993,6 +993,11 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                     os.makedirs(stage_dir, exist_ok=True)
                     try:
                         with _synthetic_pretrain_globals(pipeline_mod, state, stage):
+                            # Stamp signature before training so a mid-run kill can resume
+                            # from pretrained_diffusion.pt (best-so-far) without retraining.
+                            sig_path = os.path.join(stage_dir, ".signature")
+                            with open(sig_path, "w", encoding="utf-8") as f:
+                                f.write(_stage_pretrain_signature(state, config_name))
                             ckpt = pretrain_diffusion(
                                 best_params=best_params,
                                 guidance_checkpoint=guidance_ckpt,
@@ -1023,6 +1028,10 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             elif ckpt is None:
                 stage_dir = _stage_pretrain_dir(state, stage)
                 os.makedirs(stage_dir, exist_ok=True)
+                # Stamp before training so mid-run kills can reuse best-so-far weights.
+                sig_path = os.path.join(stage_dir, ".signature")
+                with open(sig_path, "w", encoding="utf-8") as f:
+                    f.write(_stage_pretrain_signature(state, config_name))
                 with _synthetic_pretrain_globals(pipeline_mod, state, stage):
                     ckpt = pretrain_diffusion(
                         best_params=best_params,
@@ -1033,9 +1042,6 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                         checkpoint_dir=stage_dir,
                         smoke_test=state.smoke_test,
                     )
-                sig_path = os.path.join(stage_dir, ".signature")
-                with open(sig_path, "w", encoding="utf-8") as f:
-                    f.write(_stage_pretrain_signature(state, config_name))
             if stage == "coarse":
                 state.diffusion_coarse_pretrain_ckpt = ckpt
             elif stage == "fine":

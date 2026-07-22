@@ -3,7 +3,7 @@
 extends: configs/base/binary_staged.yaml
 
 training:
-  force_retrain_synthetic: true
+  force_retrain_synthetic: false
   use_hardcoded_synthetic_hp: true
   n_finetune_hp_trials: 1
   finetune_hp_lr_min: 0.0002
@@ -86,7 +86,7 @@ phases:
     n_samples: 10000
     epochs: 20
     patience: 4
-    shared_cache: false
+    shared_cache: true
 
   - phase: diffusion_coarse_finetune_hp
     n_trials: 1
@@ -120,6 +120,7 @@ phases:
 
   - phase: staged_eval
     eval_test_fraction: 1.0
+    # Floor only; staged_eval uses max(phase, subset test_stride) so dynamic@480 is honored.
     test_stride: 4
     n_samples: 1
     probabilistic_n_samples: 20

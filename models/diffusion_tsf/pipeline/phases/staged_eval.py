@@ -556,7 +556,18 @@ class StagedEvalPhase(PipelinePhase):
             variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
         subset_meta = state.data_subset_resolved or {}
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
-        test_stride = int(self.require("test_stride"))
+        phase_test_stride = int(self.require("test_stride"))
+        subset_test_stride = int(subset_meta.get("test_stride", 1))
+        # Never evaluate denser than the subset policy (e.g. dynamic sample_stride=480).
+        test_stride = max(phase_test_stride, subset_test_stride)
+        if test_stride != phase_test_stride:
+            logger.info(
+                "[%s] eval test_stride=%d (phase=%d, subset=%d)",
+                subset_id,
+                test_stride,
+                phase_test_stride,
+                subset_test_stride,
+            )
         n_iv = len(variate_indices)
 
         patch_globals(pipeline_mod, state, honor_dataset_windows=True)
