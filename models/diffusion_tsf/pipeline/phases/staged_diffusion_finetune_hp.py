@@ -946,6 +946,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             elif self.stage == "fine":
                 state.diffusion_fine_finetune_ckpt = best_pt
                 state.fine_finetune_best_params = params
+            elif self.stage == "patch_refine":
+                state.diffusion_patch_refine_finetune_ckpt = best_pt
+                state.patch_refine_finetune_best_params = params
             elif self.stage == "vertical_dual":
                 state.diffusion_vertical_dual_finetune_ckpt = best_pt
                 state.vertical_dual_finetune_best_params = params
@@ -1001,6 +1004,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
         if state.smoke_test:
+            return
+
+        needs_guidance = state.needs_guidance
+        if not needs_guidance:
             return
 
         patch_stage_globals(pipeline_mod, state, self.stage, honor_dataset_windows=True)
@@ -1084,6 +1091,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "finer": state.diffusion_finer_pretrain_ckpt,
             "vertical_dual": state.diffusion_vertical_dual_pretrain_ckpt,
             "channel_dual": state.diffusion_channel_dual_pretrain_ckpt,
+            "patch_refine": state.diffusion_patch_refine_pretrain_ckpt,
         }[self.stage]
         candidates = [
             self.get("pretrained_ckpt"),
@@ -1325,7 +1333,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         _log_gpu_mem(f"{self.stage}/{trial_label}/start")
 
         ds_lb, ds_hz = dataset_window_lengths(state.dataset)
-        if guidance is None:
+        if guidance is None and guidance_checkpoint:
             guidance = load_wrapped_guidance(
                 guidance_checkpoint,
                 n_iv,
@@ -1634,12 +1642,17 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         ft_guidance_ckpt = state.guidance_finetune_ckpt
         if not ft_guidance_ckpt or not os.path.exists(ft_guidance_ckpt):
             ft_guidance_ckpt = state.default_guidance_finetune_ckpt_path()
-        if not os.path.exists(ft_guidance_ckpt):
+        needs_guidance = state.needs_guidance
+        if needs_guidance and not os.path.exists(ft_guidance_ckpt):
             raise RuntimeError(
                 f"{self.name} requires finetuned guidance ({state.guidance_type}), got: {ft_guidance_ckpt}"
             )
+        if not needs_guidance:
+            ft_guidance_ckpt = ""
         if self.stage == "fine" and not state.diffusion_coarse_finetune_ckpt:
             raise RuntimeError("fine staged tuning requires completed coarse best model first")
+        if self.stage == "patch_refine" and not state.diffusion_coarse_finetune_ckpt:
+            raise RuntimeError("patch_refine staged tuning requires completed coarse best model first")
         if self.stage == "finer":
             if not state.use_triple_scale:
                 raise RuntimeError("finer staged tuning requires use_triple_scale=True")
@@ -1716,6 +1729,26 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 device=device,
                 guidance_type=state.guidance_type,
             )
+            ckpt_info = []
+            if ft_guidance_ckpt and os.path.exists(ft_guidance_ckpt):
+                ckpt_info.append(
+                    {
+                        "kind": state.guidance_type,
+                        "path": ft_guidance_ckpt,
+                        "n_variates": n_iv,
+                        "lookback": int(state.lookback_length),
+                        "horizon": int(state.forecast_length),
+                    }
+                )
+            ckpt_info.append(
+                {
+                    "kind": f"diffusion_pretrain_{self.stage}",
+                    "path": diff_ckpt,
+                    "n_variates": n_iv,
+                    "lookback": int(state.lookback_length),
+                    "horizon": int(state.forecast_length),
+                }
+            )
             phase_start = run_phase_start_diagnostics(
                 state,
                 phase_name=self.name,
@@ -1723,22 +1756,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 model_labels=[f"diffusion_{self.stage}"],
                 datasets=[train_ds],
                 dataset_prefixes=["dataset"],
-                ckpt_info=[
-                    {
-                        "kind": state.guidance_type,
-                        "path": ft_guidance_ckpt,
-                        "n_variates": n_iv,
-                        "lookback": int(state.lookback_length),
-                        "horizon": int(state.forecast_length),
-                    },
-                    {
-                        "kind": f"diffusion_pretrain_{self.stage}",
-                        "path": diff_ckpt,
-                        "n_variates": n_iv,
-                        "lookback": int(state.lookback_length),
-                        "horizon": int(state.forecast_length),
-                    },
-                ],
+                ckpt_info=ckpt_info,
             )
             wandb_utils.log_phase_diagnostics_result({"summary": phase_start})
             del probe_model
@@ -1950,14 +1968,16 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
                 def objective_builder(_worker_id: int):
                     dev = state.resolve_device()
-                    worker_guidance = load_wrapped_guidance(
-                        ft_guidance_ckpt,
-                        n_iv,
-                        dev,
-                        guidance_type=state.guidance_type,
-                        dataset_lookback=ds_lb,
-                        dataset_horizon=ds_hz,
-                    )
+                    worker_guidance = None
+                    if ft_guidance_ckpt:
+                        worker_guidance = load_wrapped_guidance(
+                            ft_guidance_ckpt,
+                            n_iv,
+                            dev,
+                            guidance_type=state.guidance_type,
+                            dataset_lookback=ds_lb,
+                            dataset_horizon=ds_hz,
+                        )
                     worker_pretrained = torch.load(
                         diff_ckpt, map_location=dev, weights_only=False,
                     )["model_state_dict"]
@@ -2207,6 +2227,9 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         elif self.stage == "fine":
             state.diffusion_fine_finetune_ckpt = final_ckpt
             state.fine_finetune_best_params = best_params
+        elif self.stage == "patch_refine":
+            state.diffusion_patch_refine_finetune_ckpt = final_ckpt
+            state.patch_refine_finetune_best_params = best_params
         elif self.stage == "vertical_dual":
             state.diffusion_vertical_dual_finetune_ckpt = final_ckpt
             state.vertical_dual_finetune_best_params = best_params
@@ -2268,3 +2291,8 @@ class VerticalDualDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
 class ChannelDualDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
     name = "diffusion_channel_dual_finetune_hp"
     stage = "channel_dual"
+
+
+class PatchRefineDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
+    name = "diffusion_patch_refine_finetune_hp"
+    stage = "patch_refine"

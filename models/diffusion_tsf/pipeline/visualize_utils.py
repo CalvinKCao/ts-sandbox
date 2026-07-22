@@ -171,12 +171,14 @@ def _load_staged_diffusion_from_ckpt(
         infer_model_type,
     )
 
-    guidance = load_wrapped_guidance(
-        str(itrans_ckpt_path),
-        n_vars,
-        device,
-        guidance_type=guidance_type,
-    )
+    guidance = None
+    if itrans_ckpt_path and os.path.exists(str(itrans_ckpt_path)):
+        guidance = load_wrapped_guidance(
+            str(itrans_ckpt_path),
+            n_vars,
+            device,
+            guidance_type=guidance_type,
+        )
     diff_ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     meta = diff_ckpt.get("config") or tuned_params or {}
     if isinstance(meta, dict) and "diffusion_params" in meta:
@@ -1082,6 +1084,13 @@ def run_staged_finetune_visualizations(
     viz = _viz_cfg(state)
     if not viz.get("enabled", True):
         return []
+    if getattr(state, "use_patch_refine_stage", False):
+        # Dual-scale residual panels assume 16-row fine maps; patch_refine uses
+        # absolute hi-res CDFs. Worst-window / decode_staged_anchor_components cover it.
+        logger.info(
+            "dual-scale residual viz skipped for patch_refine (use worst-window panels)"
+        )
+        return []
 
     variate_indices = state.variate_indices
     if variate_indices is None:
@@ -1507,11 +1516,15 @@ def run_staged_synthetic_pretrain_diagnostics(
     dataset = loader.dataset
 
     try:
-        ckpt_meta = itrans_checkpoint_metadata(itrans_ckpt_path, int(state.n_variates), device)
+        if itrans_ckpt_path and os.path.exists(str(itrans_ckpt_path)):
+            ckpt_meta = itrans_checkpoint_metadata(itrans_ckpt_path, int(state.n_variates), device)
+        else:
+            raise FileNotFoundError(str(itrans_ckpt_path or ""))
     except Exception as exc:
-        logger.warning("Could not read iTransformer checkpoint metadata (%s): %s", itrans_ckpt_path, exc)
+        if itrans_ckpt_path:
+            logger.warning("Could not read iTransformer checkpoint metadata (%s): %s", itrans_ckpt_path, exc)
         ckpt_meta = {
-            "itrans_checkpoint_path": os.path.abspath(itrans_ckpt_path),
+            "itrans_checkpoint_path": os.path.abspath(itrans_ckpt_path) if itrans_ckpt_path else "",
             "itrans_num_variates": int(state.n_variates),
             "itrans_seq_len": int(state.itrans_lookback_length or state.lookback_length),
             "itrans_pred_len": int(state.forecast_length),
@@ -1754,7 +1767,25 @@ def _plot_diffusion_model_space_prediction(
         future_coarse, value_range=to_2d.max_scale, to_2d=to_2d,
     )[0]
     fine_raw = gen_out.get("future_2d_fine")
-    if fine_raw is not None:
+    stage = str(getattr(getattr(model, "config", None), "diffusion_stage", "") or "")
+    if fine_raw is not None and stage == "patch_refine":
+        # Absolute hi-res CDF: decode with the refine canvas height, not residual range.
+        future_fine = fine_raw.cpu()
+        from models.diffusion_tsf.preprocessing import TimeSeriesTo2D
+
+        hir_to_2d = TimeSeriesTo2D(
+            height=int(future_fine.shape[-2]),
+            max_scale=float(to_2d.max_scale),
+        )
+        fine_1d = hir_to_2d._decode_occupancy_in_range(
+            future_fine, value_range=hir_to_2d.max_scale, cdf_decoder="mean",
+        )[0]
+        combined_1d = fine_1d
+        pred_maps = {
+            "coarse": future_coarse if future_coarse.dim() == 4 else future_coarse.unsqueeze(0),
+            "refine": future_fine if future_fine.dim() == 4 else future_fine.unsqueeze(0),
+        }
+    elif fine_raw is not None:
         future_fine = fine_raw.cpu()
         fine_1d = _decode_staged_cdf_1d(
             future_fine,
@@ -2210,26 +2241,42 @@ def decode_staged_anchor_components(
 
     final = _staged_anchor_global_norm(fine_model, coarse_out, fine_out)
     coarse_2d = coarse_out["future_2d_coarse"]
-    fine_2d = fine_out["future_2d_fine"]
+    B, V = coarse_2d.shape[:2]
     coarse_1d = fine_model._decode_coarse_1d_from_map(coarse_2d, cdf_decoder="mean")
+    if coarse_1d.dim() == 2:
+        coarse_1d = coarse_1d.unsqueeze(1)
+    coarse_np = coarse_1d.reshape(B, V, -1).detach().cpu().numpy()
+
+    if getattr(fine_model.config, "diffusion_stage", "") == "patch_refine":
+        # future_2d_fine is the absolute hi-res CDF, not a residual map.
+        k = fine_model._overlap_repr_cols()
+        if k > 0:
+            coarse_np = coarse_np[..., k:]
+        if int(getattr(fine_model.config, "representation_time_stride", 1)) > 1:
+            coarse_np = fine_model._upsample_repr_to_raw_horizon(
+                torch.from_numpy(coarse_np)
+            ).numpy()
+        # Align residual panel length to final forecast.
+        common = min(coarse_np.shape[-1], final.shape[-1])
+        coarse_np = coarse_np[..., :common]
+        final_trim = final[..., :common]
+        fine_np = final_trim - coarse_np
+        return coarse_np, fine_np, final
+
+    fine_2d = fine_out["future_2d_fine"]
     fine_1d = fine_model._decode_fine_1d_from_map(
         fine_2d,
         coarse_height=int(coarse_2d.shape[2]),
         cdf_decoder="mean",
     )
-    if coarse_1d.dim() == 2:
-        coarse_1d = coarse_1d.unsqueeze(1)
     if fine_1d.dim() == 2:
         fine_1d = fine_1d.unsqueeze(1)
-    B, V = coarse_2d.shape[:2]
-    coarse_np = coarse_1d.reshape(B, V, -1).detach().cpu().numpy()
     fine_np = fine_1d.reshape(B, V, -1).detach().cpu().numpy()
     k = fine_model._overlap_repr_cols()
     if k > 0:
         coarse_np = coarse_np[..., k:]
         fine_np = fine_np[..., k:]
     if int(getattr(fine_model.config, "representation_time_stride", 1)) > 1:
-        import torch
         coarse_np = fine_model._upsample_repr_to_raw_horizon(torch.from_numpy(coarse_np)).numpy()
         fine_np = fine_model._upsample_repr_to_raw_horizon(torch.from_numpy(fine_np)).numpy()
     return coarse_np, fine_np, final

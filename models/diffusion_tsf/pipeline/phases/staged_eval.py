@@ -51,13 +51,18 @@ def _staged_anchor_global_norm(
     coarse_out: Dict[str, Any],
     fine_out: Dict[str, Any],
 ) -> np.ndarray:
-    """Anchor forecast = decode_dual(coarse_hat, fine_hat) in global norm space."""
+    """Decode chained coarse→refine/fine forecast in global norm space."""
     pred = fine_out.get("prediction_global_norm", fine_out.get("prediction"))
-    if pred is None:
-        coarse_2d = coarse_out["future_2d_coarse"]
-        fine_2d = fine_out["future_2d_fine"]
-        pred = fine_model.decode_dual_from_2d(coarse_2d, fine_2d, from_diffusion=False)
-        pred = fine_model._strip_overlap_and_upsample_repr(pred)
+    if pred is not None:
+        if isinstance(pred, np.ndarray):
+            return pred
+        return pred.detach().cpu().numpy()
+    if getattr(fine_model.config, "diffusion_stage", "") == "patch_refine":
+        raise RuntimeError("patch_refine eval output missing prediction_global_norm")
+    coarse_2d = coarse_out["future_2d_coarse"]
+    fine_2d = fine_out["future_2d_fine"]
+    pred = fine_model.decode_dual_from_2d(coarse_2d, fine_2d, from_diffusion=False)
+    pred = fine_model._strip_overlap_and_upsample_repr(pred)
     return pred.detach().cpu().numpy()
 
 
@@ -110,6 +115,7 @@ def _stage_finetune_ckpt(state: PipelineState, stage: str) -> str:
         "finer": state.diffusion_finer_finetune_ckpt,
         "vertical_dual": state.diffusion_vertical_dual_finetune_ckpt,
         "channel_dual": state.diffusion_channel_dual_finetune_ckpt,
+        "patch_refine": state.diffusion_patch_refine_finetune_ckpt,
     }[stage]
     if value and os.path.exists(value):
         return value
@@ -568,20 +574,26 @@ class StagedEvalPhase(PipelinePhase):
         ft_guidance_ckpt = state.guidance_finetune_ckpt
         if not ft_guidance_ckpt or not os.path.exists(ft_guidance_ckpt):
             ft_guidance_ckpt = state.default_guidance_finetune_ckpt_path()
-        if not os.path.exists(ft_guidance_ckpt):
+        needs_guidance = state.needs_guidance
+        if needs_guidance and not os.path.exists(ft_guidance_ckpt):
             raise FileNotFoundError(f"Missing finetuned guidance checkpoint: {ft_guidance_ckpt}")
+        if not needs_guidance:
+            ft_guidance_ckpt = ""
 
         ds_lb, ds_hz = dataset_window_lengths(state.dataset)
-        guidance = load_wrapped_guidance(
-            ft_guidance_ckpt,
-            n_iv,
-            device,
-            guidance_type=state.guidance_type,
-            dataset_lookback=ds_lb,
-            dataset_horizon=ds_hz,
-        )
+        guidance = None
+        if needs_guidance:
+            guidance = load_wrapped_guidance(
+                ft_guidance_ckpt,
+                n_iv,
+                device,
+                guidance_type=state.guidance_type,
+                dataset_lookback=ds_lb,
+                dataset_horizon=ds_hz,
+            )
         vertical_dual = bool(getattr(state, "use_vertical_dual_concat", False))
         channel_dual = bool(getattr(state, "use_channel_dual_concat", False))
+        patch_refine = bool(getattr(state, "use_patch_refine_stage", False))
         joint_dual = vertical_dual or channel_dual
         dual_stage = "channel_dual" if channel_dual else ("vertical_dual" if vertical_dual else None)
         if joint_dual:
@@ -590,10 +602,11 @@ class StagedEvalPhase(PipelinePhase):
             finer_model = None
         else:
             coarse_model = self._load_model(state, "coarse", guidance, n_iv, device)
-            fine_model = self._load_model(state, "fine", guidance, n_iv, device)
+            refine_stage = "patch_refine" if patch_refine else "fine"
+            fine_model = self._load_model(state, refine_stage, guidance, n_iv, device)
             finer_model = (
                 self._load_model(state, "finer", guidance, n_iv, device)
-                if state.use_triple_scale
+                if state.use_triple_scale and not patch_refine
                 else None
             )
 
@@ -629,15 +642,17 @@ class StagedEvalPhase(PipelinePhase):
                 if joint_dual
                 else [
                     ("coarse", coarse_model, _stage_finetune_ckpt(state, "coarse"), None),
-                    ("fine", fine_model, _stage_finetune_ckpt(state, "fine"), _stage_finetune_ckpt(state, "coarse")),
+                    (
+                        "patch_refine" if patch_refine else "fine",
+                        fine_model,
+                        _stage_finetune_ckpt(state, "patch_refine" if patch_refine else "fine"),
+                        _stage_finetune_ckpt(state, "coarse"),
+                    ),
                 ]
             )
-            run_phase_start_diagnostics(
-                state,
-                phase_name=self.name,
-                models=[item[1] for item in diagnostic_stages],
-                model_labels=[f"diffusion_{item[0]}" for item in diagnostic_stages],
-                ckpt_info=[
+            ckpt_info = []
+            if ft_guidance_ckpt and os.path.exists(ft_guidance_ckpt):
+                ckpt_info.append(
                     {
                         "kind": state.guidance_type,
                         "path": ft_guidance_ckpt,
@@ -645,16 +660,23 @@ class StagedEvalPhase(PipelinePhase):
                         "lookback": int(ds_lb),
                         "horizon": int(ds_hz),
                     }
-                ] + [
-                    {
-                        "kind": f"diffusion_{stage}",
-                        "path": ckpt,
-                        "n_variates": n_iv,
-                        "lookback": int(ds_lb),
-                        "horizon": int(ds_hz),
-                    }
-                    for stage, _model, ckpt, _coarse_ckpt in diagnostic_stages
-                ],
+                )
+            ckpt_info.extend(
+                {
+                    "kind": f"diffusion_{stage}",
+                    "path": ckpt,
+                    "n_variates": n_iv,
+                    "lookback": int(ds_lb),
+                    "horizon": int(ds_hz),
+                }
+                for stage, _model, ckpt, _coarse_ckpt in diagnostic_stages
+            )
+            run_phase_start_diagnostics(
+                state,
+                phase_name=self.name,
+                models=[item[1] for item in diagnostic_stages],
+                model_labels=[f"diffusion_{item[0]}" for item in diagnostic_stages],
+                ckpt_info=ckpt_info,
             )
             _, _, test_ds, _ = load_dataset(
                 state.dataset,
@@ -848,7 +870,12 @@ class StagedEvalPhase(PipelinePhase):
         coarse_ft = fine_ft = None
         if not joint_dual:
             coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_finetune_ckpt(state, "coarse")
-            fine_ft = state.diffusion_fine_finetune_ckpt or _stage_finetune_ckpt(state, "fine")
+            refine_stage = "patch_refine" if patch_refine else "fine"
+            fine_ft = (
+                state.diffusion_patch_refine_finetune_ckpt
+                if patch_refine
+                else state.diffusion_fine_finetune_ckpt
+            ) or _stage_finetune_ckpt(state, refine_stage)
         if not joint_dual and not skip_viz and viz_cfg.get("enabled", True) and not state.smoke_test:
             try:
                 tuned = state.fine_finetune_best_params or state.coarse_finetune_best_params

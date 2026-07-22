@@ -45,12 +45,17 @@ def pretrain_diffusion(
     tuned_batch_size = m.require_tuned_param(best_params, "batch_size", "Diffusion pretraining")
     batch_size = tuned_batch_size
 
-    guidance = m.load_wrapped_guidance(
-        guidance_checkpoint,
-        m.N_VARIATES,
-        device,
-        guidance_type="patch_decoder",
-    )
+    needs_guidance = bool(m.USE_GUIDANCE_CHANNEL) or not bool(m.DISABLE_CROSS_ATTENTION)
+    guidance = None
+    if needs_guidance:
+        if not guidance_checkpoint:
+            raise ValueError("guidance_checkpoint is required when guidance/cross-attn is enabled")
+        guidance = m.load_wrapped_guidance(
+            guidance_checkpoint,
+            m.N_VARIATES,
+            device,
+            guidance_type="patch_decoder",
+        )
 
     synth_cache = m.get_synth_cache_dir(checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
     n_val = 0 if smoke_test else min(n_samples // 10, 5000)

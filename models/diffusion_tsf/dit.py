@@ -293,11 +293,15 @@ class FactorizedDiT(nn.Module):
         context_dim: int = 256,
         max_pos_tokens: int = 8192,
         gradient_checkpointing: bool = False,
+        cond_patch_size: Optional[Tuple[int, int]] = None,
         use_scale_embedding: bool = False,
         enable_cross_scale_attention: bool = False,
         use_variate_embedding: bool = False,
         max_variates: int = 512,
         cross_variate_context_bias: float = 0.0,
+        use_patch_abs_embedding: bool = False,
+        max_coarse_bins: int = 16,
+        max_horizon_steps: int = 1024,
     ):
         super().__init__()
         pH, pW = patch_size
@@ -312,9 +316,16 @@ class FactorizedDiT(nn.Module):
         self.use_scale_embedding = use_scale_embedding
         self.enable_cross_scale_attention = enable_cross_scale_attention
         self.use_variate_embedding = use_variate_embedding
+        self.use_patch_abs_embedding = use_patch_abs_embedding
+        self.cond_patch_size = cond_patch_size or patch_size
 
         self.x_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.cond_embed = nn.Conv2d(cond_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.cond_embed = nn.Conv2d(
+            cond_channels,
+            embed_dim,
+            kernel_size=self.cond_patch_size,
+            stride=self.cond_patch_size,
+        )
 
         # Separate learned positional embeddings for cond vs x slots so the model
         # can distinguish them even though they share the same sequence axis.
@@ -336,6 +347,12 @@ class FactorizedDiT(nn.Module):
             self.variate_embed = nn.Embedding(max_variates, embed_dim)
         else:
             self.variate_embed = None
+        if use_patch_abs_embedding:
+            self.coarse_bin_embed = nn.Embedding(max_coarse_bins, embed_dim)
+            self.horizon_time_embed = nn.Embedding(max_horizon_steps, embed_dim)
+        else:
+            self.coarse_bin_embed = None
+            self.horizon_time_embed = None
 
         self.ctx_proj = nn.Linear(context_dim, embed_dim)
         self.ctx_norm = nn.LayerNorm(embed_dim, eps=1e-6)
@@ -381,8 +398,12 @@ class FactorizedDiT(nn.Module):
         h = h.permute(0, 3, 1, 4, 2, 5).contiguous()
         return h.view(B, self.out_channels, gh * pH, gw * pW)
 
-    def _pad_to_patch(self, img: torch.Tensor) -> Tuple[torch.Tensor, int, int]:
-        pH, pW = self.patch_size
+    @staticmethod
+    def _pad_to_patch(
+        img: torch.Tensor,
+        patch_size: Tuple[int, int],
+    ) -> Tuple[torch.Tensor, int, int]:
+        pH, pW = patch_size
         H, W = img.shape[-2], img.shape[-1]
         pad_h = (pH - H % pH) % pH
         pad_w = (pW - W % pW) % pW
@@ -399,13 +420,15 @@ class FactorizedDiT(nn.Module):
         scale_indices: Optional[torch.Tensor] = None,
         variate_indices: Optional[torch.Tensor] = None,
         token_variate_ids: Optional[torch.Tensor] = None,
+        patch_coarse_bin: Optional[torch.Tensor] = None,
+        patch_time0: Optional[torch.Tensor] = None,
         return_cross_attn_weights: bool = False,
     ):
         BV, _, H, W = x.shape
         self._diag_cross_attn_weights = None
 
-        x_p, pad_h, pad_w = self._pad_to_patch(x)
-        cond_p, _, _ = self._pad_to_patch(cond)
+        x_p, pad_h, pad_w = self._pad_to_patch(x, self.patch_size)
+        cond_p, _, _ = self._pad_to_patch(cond, self.cond_patch_size)
 
         x_tok, gh, gw = self._patchify(x_p, self.x_embed)
         c_tok, _, _ = self._patchify(cond_p, self.cond_embed)
@@ -418,6 +441,25 @@ class FactorizedDiT(nn.Module):
             )
         x_tok = x_tok + self.pos_x[:, :Nx]
         c_tok = c_tok + self.pos_cond[:, :Nc]
+
+        if self.use_patch_abs_embedding:
+            if patch_coarse_bin is None or patch_time0 is None:
+                raise ValueError(
+                    "patch_coarse_bin and patch_time0 are required when "
+                    "use_patch_abs_embedding=True"
+                )
+            if patch_coarse_bin.shape[0] != BV or patch_time0.shape[0] != BV:
+                raise ValueError(
+                    f"patch location batch mismatch: bins={tuple(patch_coarse_bin.shape)} "
+                    f"time0={tuple(patch_time0.shape)} BV={BV}"
+                )
+            # Crop-level absolute ids broadcast over all target tokens.
+            abs_emb = (
+                self.coarse_bin_embed(patch_coarse_bin.long())
+                + self.horizon_time_embed(patch_time0.long())
+            ).unsqueeze(1)
+            x_tok = x_tok + abs_emb
+
         tokens = torch.cat([c_tok, x_tok], dim=1)  # (BV, Nc + Nx, D)
 
         if self.variate_embed is not None:

@@ -313,14 +313,17 @@ def _merge_phase_lists(base: list, override: list) -> list:
     return [merged[name] for name in order]
 
 
-def normalize_guidance_phases(phases: list, guidance_type: str) -> list:
-    """For patch_decoder configs merged from itrans YAMLs, drop itrans finetune and reorder."""
-    if guidance_type != "patch_decoder":
-        return phases
+def normalize_guidance_phases(
+    phases: list,
+    guidance_type: str,
+    *,
+    experiment: Optional[Dict[str, Any]] = None,
+) -> list:
+    """Normalize merged phase lists for guidance / dual / patch-refine variants."""
     by_name: Dict[str, Dict[str, Any]] = {}
     for entry in phases:
         name = str(entry["phase"])
-        if name == "itrans_finetune_hp":
+        if guidance_type == "patch_decoder" and name == "itrans_finetune_hp":
             continue
         by_name[name] = dict(entry)
     # Vertical-dual / channel-dual replaces separate coarse/fine finetune phases when both appear via extends.
@@ -333,6 +336,19 @@ def normalize_guidance_phases(phases: list, guidance_type: str) -> list:
         by_name.pop("diffusion_fine_finetune_hp", None)
         by_name.pop("diffusion_finer_finetune_hp", None)
         by_name.pop("diffusion_vertical_dual_finetune_hp", None)
+    if "diffusion_patch_refine_finetune_hp" in by_name:
+        by_name.pop("diffusion_fine_finetune_hp", None)
+        by_name.pop("diffusion_finer_finetune_hp", None)
+        by_name.pop("diffusion_vertical_dual_finetune_hp", None)
+        by_name.pop("diffusion_channel_dual_finetune_hp", None)
+    exp = experiment or {}
+    # Match DiffusionTSFConfig / PipelineState defaults (use_guidance_channel=True).
+    needs_guidance = bool(exp.get("use_guidance_channel", True)) or not bool(
+        exp.get("disable_cross_attention", False)
+    )
+    if not needs_guidance:
+        by_name.pop("patch_guidance_finetune_hp", None)
+        by_name.pop("itrans_finetune_hp", None)
     preferred = (
         "staged_diffusion_pretrain",
         "patch_guidance_finetune_hp",
@@ -341,6 +357,7 @@ def normalize_guidance_phases(phases: list, guidance_type: str) -> list:
         "diffusion_coarse_finetune_hp",
         "diffusion_fine_finetune_hp",
         "diffusion_finer_finetune_hp",
+        "diffusion_patch_refine_finetune_hp",
         "staged_eval",
     )
     ordered = [by_name[n] for n in preferred if n in by_name]
@@ -486,7 +503,11 @@ def load_experiment_config(
 
     validate_config(cfg)
     guidance_type = str(cfg.get("experiment", {}).get("guidance_type", "patch_decoder"))
-    cfg["phases"] = normalize_guidance_phases(cfg["phases"], guidance_type)
+    cfg["phases"] = normalize_guidance_phases(
+        cfg["phases"],
+        guidance_type,
+        experiment=cfg.get("experiment") or {},
+    )
     return cfg
 
 

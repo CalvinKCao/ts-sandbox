@@ -55,7 +55,13 @@ class PipelineState:
     use_triple_scale: bool = False
     use_vertical_dual_concat: bool = False
     use_channel_dual_concat: bool = False
+    use_patch_refine_stage: bool = False
     diffusion_stage: str = "joint"
+    patch_refine_canvas_height: int = 256
+    patch_refine_patch_height: int = 32
+    patch_refine_patch_width: int = 8
+    patch_refine_col_stride: int = 6
+    dit_cond_patch_size: Optional[Tuple[int, int]] = None
     use_guidance_channel: bool = True
     guidance_placement: str = "canvas"
     guidance_type: str = "patch_decoder"
@@ -152,6 +158,7 @@ class PipelineState:
     diffusion_finer_pretrain_ckpt: Optional[str] = None
     diffusion_vertical_dual_pretrain_ckpt: Optional[str] = None
     diffusion_channel_dual_pretrain_ckpt: Optional[str] = None
+    diffusion_patch_refine_pretrain_ckpt: Optional[str] = None
     itrans_finetune_ckpt: Optional[str] = None
     patch_guidance_finetune_ckpt: Optional[str] = None
     diffusion_finetune_ckpt: Optional[str] = None
@@ -160,6 +167,7 @@ class PipelineState:
     diffusion_finer_finetune_ckpt: Optional[str] = None
     diffusion_vertical_dual_finetune_ckpt: Optional[str] = None
     diffusion_channel_dual_finetune_ckpt: Optional[str] = None
+    diffusion_patch_refine_finetune_ckpt: Optional[str] = None
 
     itrans_best_params: Optional[Dict[str, Any]] = None
     diffusion_best_params: Optional[Dict[str, Any]] = None
@@ -169,6 +177,7 @@ class PipelineState:
     finer_finetune_best_params: Optional[Dict[str, Any]] = None
     vertical_dual_finetune_best_params: Optional[Dict[str, Any]] = None
     channel_dual_finetune_best_params: Optional[Dict[str, Any]] = None
+    patch_refine_finetune_best_params: Optional[Dict[str, Any]] = None
 
     # Phase-level overrides from YAML (list of dicts)
     phase_configs: List[Dict[str, Any]] = field(default_factory=list)
@@ -203,6 +212,11 @@ class PipelineState:
             return self.patch_guidance_finetune_ckpt
         return self.itrans_finetune_ckpt
 
+    @property
+    def needs_guidance(self) -> bool:
+        """True when the model needs a guidance checkpoint (channel and/or cross-attn)."""
+        return bool(self.use_guidance_channel) or not bool(self.disable_cross_attention)
+
     def default_guidance_finetune_ckpt_path(self) -> str:
         subset_id = self.subset_id or self.dataset
         if self.guidance_type == "patch_decoder":
@@ -233,7 +247,20 @@ class PipelineState:
 
         if "dit_patch_size" in init_kwargs:
             init_kwargs["dit_patch_size"] = tuple(int(x) for x in init_kwargs["dit_patch_size"])
-        for key in ("image_height", "coarse_image_height", "fine_image_height", "finer_image_height"):
+        if "dit_cond_patch_size" in init_kwargs and init_kwargs["dit_cond_patch_size"] is not None:
+            init_kwargs["dit_cond_patch_size"] = tuple(
+                int(x) for x in init_kwargs["dit_cond_patch_size"]
+            )
+        for key in (
+            "image_height",
+            "coarse_image_height",
+            "fine_image_height",
+            "finer_image_height",
+            "patch_refine_canvas_height",
+            "patch_refine_patch_height",
+            "patch_refine_patch_width",
+            "patch_refine_col_stride",
+        ):
             if key in init_kwargs:
                 init_kwargs[key] = int(init_kwargs[key])
         for key in ("dit_embed_dim", "dit_depth", "dit_num_heads", "itrans_d_model", "itrans_d_ff", "itrans_e_layers", "itrans_n_heads"):

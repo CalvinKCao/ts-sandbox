@@ -46,6 +46,10 @@ class DiffusionTSFConfig:
     coarse_image_height: int = 16
     fine_image_height: int = 16
     finer_image_height: int = 16
+    patch_refine_canvas_height: int = 256
+    patch_refine_patch_height: int = 32
+    patch_refine_patch_width: int = 8
+    patch_refine_col_stride: int = 6
     max_scale: float = 3.5
     representation_mode: str = "cdf"  # pdf or cdf
     staged_representation: str = "value_precision"
@@ -126,6 +130,7 @@ class DiffusionTSFConfig:
 
     # DiT backbone
     dit_patch_size: Tuple[int, int] = (8, 8)
+    dit_cond_patch_size: Optional[Tuple[int, int]] = None
     dit_embed_dim: int = 384
     dit_depth: int = 8
     dit_num_heads: int = 6
@@ -176,11 +181,13 @@ class DiffusionTSFConfig:
                 "binary_anchor_input_mode must be 'stationary_flat' or 'random_bits', "
                 f"got {self.binary_anchor_input_mode!r}."
             )
-        valid_stages = {"joint", "coarse", "fine", "finer", "vertical_dual", "channel_dual"}
+        valid_stages = {
+            "joint", "coarse", "fine", "finer", "vertical_dual", "channel_dual", "patch_refine",
+        }
         if self.diffusion_stage not in valid_stages:
             raise ValueError(
                 "diffusion_stage must be one of "
-                "{'joint', 'coarse', 'fine', 'finer', 'vertical_dual', 'channel_dual'}, "
+                "{'joint', 'coarse', 'fine', 'finer', 'vertical_dual', 'channel_dual', 'patch_refine'}, "
                 f"got {self.diffusion_stage!r}."
             )
         if self.diffusion_stage == "finer" and not self.use_triple_scale:
@@ -250,6 +257,20 @@ class DiffusionTSFConfig:
                 raise ValueError("fine_image_height must divide dit_patch_size[0].")
             if self.use_triple_scale and self.finer_image_height % self.dit_patch_size[0] != 0:
                 raise ValueError("finer_image_height must divide dit_patch_size[0].")
+        if self.diffusion_stage == "patch_refine":
+            if self.image_height != int(self.patch_refine_patch_height):
+                raise ValueError(
+                    "patch_refine expects image_height == patch_refine_patch_height "
+                    f"({self.patch_refine_patch_height}), got {self.image_height}."
+                )
+            if self.image_height % self.dit_patch_size[0] != 0:
+                raise ValueError("patch_refine image_height must divide dit_patch_size[0].")
+            if int(self.patch_refine_patch_width) % self.dit_patch_size[1] != 0:
+                raise ValueError("patch_refine_patch_width must divide dit_patch_size[1].")
+            if int(self.patch_refine_canvas_height) % int(self.coarse_image_height) != 0:
+                raise ValueError(
+                    "patch_refine_canvas_height must be divisible by coarse_image_height."
+                )
         if not 0.0 <= self.cfg_dropout <= 1.0:
             raise ValueError("cfg_dropout must be in [0, 1].")
         assert 0 <= self.cutout_prob <= 1
@@ -342,7 +363,13 @@ class DiffusionTSFConfig:
 
     @property
     def backbone_in_channels(self) -> int:
-        return self.data_occupancy_channels + self.num_aux_channels + self.guidance_channels
+        patch_refine_extra = 3 if self.diffusion_stage == "patch_refine" else 0
+        return (
+            self.data_occupancy_channels
+            + self.num_aux_channels
+            + self.guidance_channels
+            + patch_refine_extra
+        )
 
     @property
     def guidance_core_len(self) -> int:
@@ -380,6 +407,8 @@ class DiffusionTSFConfig:
         per_scale = 1 + (1 if self.use_value_channel else 0)
         raw_extra = 1 if self.use_raw_lookback_cond_channel else 0
         guidance_extra = self.guidance_cond_channels
+        if self.diffusion_stage == "patch_refine":
+            return 1
         # Stacked past coarse∥fine as one H=Hc+Hf channel; no horizon GT coarse.
         if self.diffusion_stage == "vertical_dual":
             return per_scale + raw_extra + guidance_extra

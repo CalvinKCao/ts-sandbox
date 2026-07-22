@@ -150,12 +150,17 @@ class DiffusionTSF(nn.Module):
         self.guidance_model = guidance_model if needs_guidance_model else None
 
         backbone_in_channels = config.backbone_in_channels
+        is_patch_refine = config.diffusion_stage == "patch_refine"
+        dit_patch = config.dit_patch_size
+        cond_patch = config.dit_cond_patch_size
+        if is_patch_refine and cond_patch is None:
+            cond_patch = (8, 8)
         self.noise_predictor = FactorizedDiT(
             in_channels=backbone_in_channels,
             cond_channels=config.visual_cond_channels,
             out_channels=config.dit_out_channels,
             image_height=config.image_height,
-            patch_size=config.dit_patch_size,
+            patch_size=dit_patch,
             embed_dim=config.dit_embed_dim,
             depth=config.dit_depth,
             num_heads=config.dit_num_heads,
@@ -163,6 +168,7 @@ class DiffusionTSF(nn.Module):
             dropout=config.dit_dropout,
             context_dim=config.context_embedding_dim,
             gradient_checkpointing=config.use_gradient_checkpointing,
+            cond_patch_size=cond_patch,
             use_scale_embedding=False,
             enable_cross_scale_attention=False,
             use_variate_embedding=(
@@ -172,6 +178,13 @@ class DiffusionTSF(nn.Module):
             ),
             max_variates=max(config.num_variables, 512),
             cross_variate_context_bias=config.cross_variate_context_bias,
+            use_patch_abs_embedding=is_patch_refine,
+            max_coarse_bins=max(16, int(config.coarse_image_height)),
+            max_horizon_steps=max(
+                1024,
+                int(config.dataset_forecast_length or 0),
+                int(config.forecast_length),
+            ),
         )
 
         self._ctx_token_variate_ids: Optional[torch.Tensor] = None
@@ -574,6 +587,8 @@ class DiffusionTSF(nn.Module):
         scale_indices: Optional[torch.Tensor] = None,
         variate_indices: Optional[torch.Tensor] = None,
         token_variate_ids: Optional[torch.Tensor] = None,
+        patch_coarse_bin: Optional[torch.Tensor] = None,
+        patch_time0: Optional[torch.Tensor] = None,
         return_cross_attn_weights: bool = False,
     ) -> torch.Tensor:
         """Run the denoiser with the same chunking rule used by training/eval."""
@@ -589,6 +604,8 @@ class DiffusionTSF(nn.Module):
                 c_ctx = ctx_flat[i:end] if ctx_flat is not None else None
                 c_scale = scale_indices[i:end] if scale_indices is not None else None
                 c_var = variate_indices[i:end] if variate_indices is not None else None
+                c_bin = patch_coarse_bin[i:end] if patch_coarse_bin is not None else None
+                c_t0 = patch_time0[i:end] if patch_time0 is not None else None
                 kwargs = {
                     "encoder_hidden_states": c_ctx,
                     "token_variate_ids": token_variate_ids,
@@ -598,6 +615,10 @@ class DiffusionTSF(nn.Module):
                     kwargs["scale_indices"] = c_scale
                 if c_var is not None:
                     kwargs["variate_indices"] = c_var
+                if c_bin is not None:
+                    kwargs["patch_coarse_bin"] = c_bin
+                if c_t0 is not None:
+                    kwargs["patch_time0"] = c_t0
                 outs.append(self.noise_predictor(c_canvas, c_t, c_cond, **kwargs))
             return torch.cat(outs, dim=0)
         kwargs = {
@@ -609,6 +630,10 @@ class DiffusionTSF(nn.Module):
             kwargs["scale_indices"] = scale_indices
         if variate_indices is not None:
             kwargs["variate_indices"] = variate_indices
+        if patch_coarse_bin is not None:
+            kwargs["patch_coarse_bin"] = patch_coarse_bin
+        if patch_time0 is not None:
+            kwargs["patch_time0"] = patch_time0
         return self.noise_predictor(canvas, t_flat, cond_for_unet, **kwargs)
 
     def _load_from_state_dict(
@@ -996,6 +1021,11 @@ class DiffusionTSF(nn.Module):
             "coarse", "fine", "finer", "vertical_dual", "channel_dual",
         }:
             return self._forward_binary_staged(past, future, t)
+        if self.config.diffusion_stage == "patch_refine":
+            # Training loops sample one timestep per window; expand onto crops.
+            return self._forward_binary_patch_refine(
+                past, future, t, expand_t_per_window=t is not None,
+            )
         return self._forward_binary_factorized(past, future, t)
 
     @torch.no_grad()
@@ -1042,6 +1072,8 @@ class DiffusionTSF(nn.Module):
             "coarse", "fine", "finer", "vertical_dual", "channel_dual",
         }:
             return self._generate_binary_staged(past, **gen_common)
+        if self.config.diffusion_stage == "patch_refine":
+            return self._generate_binary_patch_refine(past, **gen_common)
         return self._generate_binary_factorized(past, **gen_common)
 
 
@@ -1618,6 +1650,380 @@ class DiffusionTSF(nn.Module):
             guide_part,
         )
         return torch.cat([past_part, guide_part], dim=1)
+
+    def _patch_refine_geometry_knobs(self) -> Tuple[int, int, int, int]:
+        return (
+            int(self.config.patch_refine_canvas_height),
+            int(self.config.patch_refine_patch_height),
+            int(self.config.patch_refine_patch_width),
+            int(self.config.patch_refine_col_stride),
+        )
+
+    def _encode_absolute_future_hir(
+        self,
+        future_norm: torch.Tensor,
+        canvas_height: int,
+    ) -> torch.Tensor:
+        from .patch_refine import encode_absolute_hir_cdf
+
+        ordinal_max = None
+        if self._uses_global_ordinal_encoding():
+            ordinal_max = self._ordinal_rank_max_tensor(future_norm.device, dtype=future_norm.dtype)
+        return encode_absolute_hir_cdf(
+            future_norm,
+            canvas_height=canvas_height,
+            max_scale=float(self.config.max_scale),
+            ordinal_rank_max=ordinal_max,
+        )
+
+    def _decode_absolute_future_hir(self, hir_cdf: torch.Tensor) -> torch.Tensor:
+        from .patch_refine import decode_absolute_hir_cdf
+
+        ordinal_max = None
+        if self._uses_global_ordinal_encoding():
+            ordinal_max = self._ordinal_rank_max_tensor(hir_cdf.device, dtype=hir_cdf.dtype)
+        return decode_absolute_hir_cdf(
+            hir_cdf,
+            max_scale=float(self.config.max_scale),
+            ordinal_rank_max=ordinal_max,
+        )
+
+    def _patch_refine_lookback_cond(
+        self,
+        past_norm: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Full native-width stacked past coarse∥fine, never resized to the crop."""
+        from .patch_refine import stack_past_coarse_fine
+
+        past_tail_len = int(past_norm.shape[-1])
+        cap = int(self.config.diffusion_lookback_cap or 0)
+        if cap > 0:
+            past_tail_len = min(past_tail_len, cap)
+        past_tail = past_norm[..., -past_tail_len:]
+        past_maps = self._encode_staged_maps(past_tail)
+        cond = stack_past_coarse_fine(past_maps["coarse"], past_maps["fine"])
+        return cond, past_maps
+
+    def _forward_binary_patch_refine(
+        self,
+        past: torch.Tensor,
+        future: torch.Tensor,
+        t: Optional[torch.Tensor] = None,
+        *,
+        expand_t_per_window: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """Train boundary-centered 32x8 patches on absolute hi-res CDF crops."""
+        from .patch_refine import (
+            build_patch_aux_channels,
+            expand_ctx_for_patches,
+            expand_lookback_cond_for_patches,
+            expand_variate_indices_for_patches,
+            naive_upscale_coarse_cdf,
+        )
+        from .patch_refine_geometry import (
+            coarse_edges_from_cdf,
+            extract_patch_batch,
+            select_patch_locations,
+        )
+
+        assert self.binary_scheduler is not None
+        B = past.shape[0]
+        V = self.config.num_variables
+        device = past.device
+        canvas_h, patch_h, patch_w, col_stride = self._patch_refine_geometry_knobs()
+        coarse_h = int(self.config.coarse_image_height)
+
+        past_norm, future_norm, _stats = self._normalize_sequence(past, future)
+        future_maps = self._encode_staged_maps(future_norm)
+        hir_gt = self._encode_absolute_future_hir(future_norm, canvas_h)
+        naive = naive_upscale_coarse_cdf(future_maps["coarse"], canvas_h)
+        edges = coarse_edges_from_cdf(future_maps["coarse"], canvas_height=canvas_h)
+        locations = select_patch_locations(
+            edges,
+            canvas_height=canvas_h,
+            patch_height=patch_h,
+            patch_width=patch_w,
+            col_stride=col_stride,
+        )
+        if not locations:
+            raise RuntimeError("patch_refine produced zero training crops")
+
+        target_patches = extract_patch_batch(
+            hir_gt, locations, patch_height=patch_h, patch_width=patch_w,
+        )
+        n_patches = target_patches.shape[0]
+        if t is None:
+            t = torch.randint(0, self.config.binary_num_steps, (n_patches,), device=device)
+        elif expand_t_per_window:
+            if t.numel() != B:
+                raise ValueError(
+                    f"expand_t_per_window requires one timestep per window "
+                    f"(got {t.numel()}, B={B})"
+                )
+            t = torch.tensor(
+                [int(t[loc.batch_index].item()) for loc in locations],
+                device=device,
+                dtype=torch.long,
+            )
+        elif t.numel() != n_patches:
+            raise ValueError(
+                f"timestep batch {t.numel()} incompatible with {n_patches} patches "
+                "(pass expand_t_per_window=True to broadcast per-window timesteps)"
+            )
+
+        xt, zt = self.binary_scheduler.add_noise(target_patches, t)
+        lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
+        cond = expand_lookback_cond_for_patches(lookback_cond, locations)
+        aux, patch_coarse_bin, patch_time0 = build_patch_aux_channels(
+            naive,
+            edges,
+            locations,
+            patch_height=patch_h,
+            patch_width=patch_w,
+            canvas_height=canvas_h,
+            coarse_height=coarse_h,
+            horizon_width=int(hir_gt.shape[-1]),
+        )
+
+        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
+        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
+        ctx_patches = expand_ctx_for_patches(ctx_flat, locations)
+        variate_indices = expand_variate_indices_for_patches(locations, device)
+
+        canvas = self._inject_coordinate_channel(xt.float())
+        canvas = self._inject_time_channels(canvas)
+        canvas = torch.cat([canvas, aux], dim=1)
+        base_cond = cond
+
+        if self.training and self.config.cfg_dropout > 0.0 and ctx_patches is not None:
+            drop = torch.rand(n_patches, device=device) < self.config.cfg_dropout
+            ctx_patches = torch.where(
+                drop.view(n_patches, 1, 1),
+                torch.zeros_like(ctx_patches),
+                ctx_patches,
+            )
+
+        out = self._predict_noise_chunked(
+            canvas,
+            t,
+            cond,
+            ctx_patches,
+            variate_indices=variate_indices,
+            token_variate_ids=self._ctx_token_variate_ids,
+            patch_coarse_bin=patch_coarse_bin,
+            patch_time0=patch_time0,
+        )
+        primary_logits, zt_logits = self._split_binary_heads(out)
+        x0_logits = self._x0_logits_from_prediction(primary_logits, xt)
+        if self.config.prediction_target == "epsilon":
+            loss_x0 = self._binary_weighted_bce_loss(
+                primary_logits, zt, t, weight_source=target_patches,
+            )
+            loss_zt = self._binary_weighted_bce_loss(
+                zt_logits, target_patches, t, weight_source=target_patches,
+            )
+        else:
+            loss_x0 = self._binary_weighted_bce_loss(
+                primary_logits, target_patches, t, weight_source=target_patches,
+            )
+            loss_zt = self._binary_weighted_bce_loss(
+                zt_logits, zt, t, weight_source=target_patches,
+            )
+        regular_loss = loss_x0 + loss_zt
+
+        anchor_loss = torch.tensor(0.0, device=device)
+        combined_loss = regular_loss
+        if self.config.use_deterministic_anchor_loss:
+            anchor_t = torch.full((n_patches,), self.config.binary_num_steps - 1, device=device, dtype=t.dtype)
+            neutral = self._binary_anchor_canvas_like(target_patches)
+            anchor_canvas = self._inject_coordinate_channel(neutral)
+            anchor_canvas = self._inject_time_channels(anchor_canvas)
+            anchor_canvas = torch.cat([anchor_canvas, aux], dim=1)
+            anchor_out = self._predict_noise_chunked(
+                anchor_canvas,
+                anchor_t,
+                base_cond,
+                ctx_patches,
+                variate_indices=variate_indices,
+                token_variate_ids=self._ctx_token_variate_ids,
+                patch_coarse_bin=patch_coarse_bin,
+                patch_time0=patch_time0,
+            )
+            anchor_primary, _ = self._split_binary_heads(anchor_out)
+            anchor_x0 = self._x0_logits_from_prediction(anchor_primary, neutral)
+            anchor_loss = self._binary_plain_bce_loss(
+                anchor_x0, target_patches, weight_source=target_patches,
+            )
+            lam = self.config.deterministic_anchor_lambda
+            combined_loss = lam * regular_loss + (1.0 - lam) * anchor_loss
+
+        x0_pred = torch.sigmoid(x0_logits)
+        return {
+            "loss": combined_loss,
+            "noise_loss": regular_loss,
+            "combined_mse_loss": combined_loss,
+            "anchor_loss": anchor_loss,
+            "loss_x0": loss_x0,
+            "loss_zt": loss_zt,
+            "emd_loss": torch.tensor(0.0, device=device),
+            "guidance_loss": torch.tensor(0.0, device=device),
+            "noise_pred": x0_pred,
+            "x0_pred": x0_pred,
+            "future_2d": hir_gt,
+            "future_2d_coarse": future_maps["coarse"],
+            "future_2d_fine": future_maps["fine"],
+            "past_2d_coarse": past_maps["coarse"],
+            "past_2d_fine": past_maps["fine"],
+            "t": t,
+            "diffusion_stage": "patch_refine",
+            "n_patches": torch.tensor(float(n_patches), device=device),
+        }
+
+    @torch.no_grad()
+    def _generate_binary_patch_refine(
+        self,
+        past: torch.Tensor,
+        num_steps: int = 20,
+        verbose: bool = False,
+        decoder_method: str = "mean",
+        sampler: str = "ddim",
+        yield_intermediates: bool = False,
+        reverse_step_indices: Optional[torch.Tensor] = None,
+        snapshot_timesteps: Optional[Tuple[int, ...]] = None,
+        future_coarse_2d: Optional[torch.Tensor] = None,
+        future_fine_2d: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        """Refine a hi-res CDF scaffold with boundary patches, then decode."""
+        from .patch_refine import (
+            build_patch_aux_channels,
+            expand_ctx_for_patches,
+            expand_lookback_cond_for_patches,
+            expand_variate_indices_for_patches,
+            naive_upscale_coarse_cdf,
+        )
+        from .patch_refine_geometry import (
+            blend_patch_bins,
+            coarse_edges_from_cdf,
+            select_patch_locations,
+        )
+
+        assert self.binary_scheduler is not None
+        if future_coarse_2d is None:
+            raise ValueError("patch_refine generation requires future_coarse_2d from the coarse model")
+
+        B = past.shape[0]
+        V = self.config.num_variables
+        device = past.device
+        canvas_h, patch_h, patch_w, col_stride = self._patch_refine_geometry_knobs()
+        coarse_h = int(self.config.coarse_image_height)
+        raw_hz_w = int(self.config.forecast_length)
+        W_fut = self._repr_forecast_width(raw_hz_w)
+
+        past_norm, _, stats = self._normalize_sequence(past)
+        coarse = future_coarse_2d.to(device)
+        if coarse.shape[:2] != (B, V) or coarse.shape[3] != W_fut:
+            raise ValueError(
+                "future_coarse_2d must have shape "
+                f"(B={B}, V={V}, Hc, W={W_fut}), got {tuple(coarse.shape)}"
+            )
+
+        naive = naive_upscale_coarse_cdf(coarse, canvas_h)
+        edges = coarse_edges_from_cdf(coarse, canvas_height=canvas_h)
+        locations = select_patch_locations(
+            edges,
+            canvas_height=canvas_h,
+            patch_height=patch_h,
+            patch_width=patch_w,
+            col_stride=col_stride,
+        )
+        lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
+        cond = expand_lookback_cond_for_patches(lookback_cond, locations)
+        aux, patch_coarse_bin, patch_time0 = build_patch_aux_channels(
+            naive,
+            edges,
+            locations,
+            patch_height=patch_h,
+            patch_width=patch_w,
+            canvas_height=canvas_h,
+            coarse_height=coarse_h,
+            horizon_width=W_fut,
+        )
+
+        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
+        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
+        ctx_patches = expand_ctx_for_patches(ctx_flat, locations)
+        variate_indices = expand_variate_indices_for_patches(locations, device)
+        n_patches = len(locations)
+
+        def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
+            canvas = self._inject_coordinate_channel(xt)
+            canvas = self._inject_time_channels(canvas)
+            return torch.cat([canvas, aux], dim=1)
+
+        def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
+            out = self._predict_noise_chunked(
+                _build_canvas(xt),
+                t_batch,
+                cond,
+                ctx_patches,
+                variate_indices=variate_indices,
+                token_variate_ids=self._ctx_token_variate_ids,
+                patch_coarse_bin=patch_coarse_bin,
+                patch_time0=patch_time0,
+            )
+            primary, zt = self._split_binary_heads(out)
+            x0_logits = self._x0_logits_from_prediction(primary, xt)
+            return x0_logits, zt
+
+        sample_shape = (n_patches, 1, patch_h, patch_w)
+        if sampler in ("anchor", "deterministic_anchor"):
+            t_batch = torch.full(
+                (n_patches,),
+                self.config.binary_num_steps - 1,
+                device=device,
+                dtype=torch.long,
+            )
+            neutral = self._binary_anchor_canvas_shape(sample_shape, device=device)
+            x0_logits, _ = _chunked_model_fn(neutral, t_batch)
+            patch_cdf = (torch.sigmoid(x0_logits) > 0.5).float()
+        else:
+            patch_cdf = self.binary_scheduler.sample(
+                model_fn=_chunked_model_fn,
+                shape=sample_shape,
+                num_steps=num_steps,
+                device=device,
+                verbose=verbose,
+                sampler=sampler,
+                reverse_step_indices=reverse_step_indices,
+                snapshot_timesteps=snapshot_timesteps,
+            )
+
+        hir_cdf, _counts = blend_patch_bins(
+            patch_cdf,
+            locations,
+            edges,
+            canvas_height=canvas_h,
+            patch_height=patch_h,
+            patch_width=patch_w,
+        )
+        future_norm = self._decode_absolute_future_hir(hir_cdf)
+        future_with_overlap = self._denormalize_future(
+            future_norm, past, stats, trim_overlap=False,
+        )
+        future = future_with_overlap[..., int(self.config.lookback_overlap):]
+        return {
+            "prediction": future,
+            "prediction_norm": future_norm,
+            "prediction_global_norm": future,
+            "prediction_with_overlap": future_with_overlap,
+            "future_2d": hir_cdf,
+            "future_2d_coarse": coarse,
+            "future_2d_fine": hir_cdf,
+            "past_2d_coarse": past_maps["coarse"],
+            "past_2d_fine": past_maps["fine"],
+            "diffusion_stage": "patch_refine",
+        }
 
     def _forward_binary_staged(
         self,
