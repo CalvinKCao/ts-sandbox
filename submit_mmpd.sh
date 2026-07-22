@@ -43,6 +43,8 @@ MMPD_BACKBONE="Decoder"
 MMPD_TUNE_TRIALS=0
 MMPD_TUNE_EPOCHS=10
 MMPD_TUNE_PATIENCE=3
+ORDINAL_UPSCALE=0
+DATASETS_EXPLICIT=0
 GPU_TYPE=""
 MMPD_INSTANCE_NORM=1
 
@@ -56,7 +58,7 @@ while [[ $# -gt 0 ]]; do
         --subset-config) SUBSET_CONFIG="$2"; shift 2 ;;
         --use-anchor-ckpts) USE_ANCHOR_CKPTS=1; shift ;;
         --anchor-config) ANCHOR_CONFIG="$2"; USE_ANCHOR_CKPTS=1; shift 2 ;;
-        --datasets) DATASETS_CSV="$2"; shift 2 ;;
+        --datasets) DATASETS_CSV="$2"; DATASETS_EXPLICIT=1; shift 2 ;;
         --dependency) DEPENDENCY="$2"; shift 2 ;;
         --lookback) LOOKBACK="$2"; shift 2 ;;
         --horizon) HORIZON="$2"; shift 2 ;;
@@ -232,6 +234,10 @@ resolve_repo_yaml() {
 
 if [[ -n "$MMPD_RUN_CONFIG" ]]; then
     MMPD_RUN_CONFIG="$(resolve_repo_yaml "$MMPD_RUN_CONFIG")" || exit 1
+    if grep -Eq '^[[:space:]]*task:[[:space:]]*ordinal_upscale([[:space:]]|$)' "$MMPD_RUN_CONFIG"; then
+        ORDINAL_UPSCALE=1
+        echo "MMPD task: ordinal_upscale (custom 1D 16-bin -> 256-bin worker)"
+    fi
     EVAL_BASE=(
         "$REPO/utils/eval_mmpd_gaussian_anchor.py"
         --mmpd-run-config "$MMPD_RUN_CONFIG"
@@ -479,6 +485,56 @@ if [[ "$USE_ANCHOR_CKPTS" -eq 1 ]]; then
     done
 fi
 
+if [[ "$ORDINAL_UPSCALE" -eq 1 ]]; then
+    ORDINAL_SBATCH_EXTRA=()
+    if [[ "$DATASETS_EXPLICIT" -eq 0 ]]; then
+        ORDINAL_DATASETS=$(sed -n -E 's/^[[:space:]]*datasets:[[:space:]]*\[([^]]+)\][[:space:]]*$/\1/p' "$MMPD_RUN_CONFIG" | head -n 1)
+        if [[ -z "$ORDINAL_DATASETS" ]]; then
+            echo "ERROR: ordinal_upscale config must use an inline mmpd.datasets list or pass --datasets." >&2
+            exit 1
+        fi
+        DATASETS_CSV="${ORDINAL_DATASETS//[[:space:]]/}"
+        IFS=',' read -ra DATASETS <<< "$DATASETS_CSV"
+        filter_datasets_available
+        echo "Ordinal datasets from config: ${DATASETS[*]}"
+    fi
+    [[ -n "$DEPENDENCY" ]] && ORDINAL_SBATCH_EXTRA=(--dependency="$DEPENDENCY")
+    ORDINAL_EXTRA=()
+    [[ "$SMOKE" -eq 1 ]] && ORDINAL_EXTRA+=(--smoke)
+    ORDINAL_IDS=()
+    for ds in "${DATASETS[@]}"; do
+        case "$ds" in
+            ETTh1|exchange_rate|electricity|traffic) ;;
+            *)
+                echo "ERROR: ordinal_upscale supports ETTh1, exchange_rate, electricity, or traffic; got $ds" >&2
+                exit 1
+                ;;
+        esac
+        ORDINAL_OUT="$OUTPUT_DIR/$ds"
+        ORDINAL_WORKER="$LOG_DIR/submit-ordinal-upscale-${ds}.sh"
+        mkdir -p "$ORDINAL_OUT"
+        write_worker_script "$ORDINAL_WORKER" \
+            -m experiments.ordinal_patch_refinement_killtest.run_mmpd_ordinal_upscale_tpe_ema \
+            --config "$MMPD_RUN_CONFIG" \
+            --dataset "$ds" \
+            --output "$ORDINAL_OUT" \
+            --seed "$SEED" \
+            "${ORDINAL_EXTRA[@]}"
+        echo "Submitting ordinal-upscale-${ds} wall=${WALL_MMPD}..."
+        JOB_ORDINAL=$(sbatch --parsable \
+            --job-name="mmpd-ord-${ds}$([[ "$SMOKE" -eq 1 ]] && echo -smoke)" \
+            "${SBATCH_COMMON[@]}" \
+            --time="$WALL_MMPD" \
+            "${ORDINAL_SBATCH_EXTRA[@]}" \
+            --output="$LOG_DIR/ordinal-upscale-${ds}-%j.out" \
+            --error="$LOG_DIR/ordinal-upscale-${ds}-%j.err" \
+            "$ORDINAL_WORKER")
+        echo "  -> ordinal-upscale-${ds}: $JOB_ORDINAL"
+        ORDINAL_IDS+=("$JOB_ORDINAL")
+    done
+    echo "Submitted ordinal-upscale jobs: ${ORDINAL_IDS[*]}"
+    exit 0
+fi
 SKIP_INIT=0
 if [[ "$FORCE_INIT" -eq 1 ]]; then
     echo "Force-init: will rerun init (ignoring existing manifest)"

@@ -96,7 +96,7 @@ def _fit_with_mmpd_schedule(
             if stale >= patience:
                 break
         # The established MMPD command defaults --lradj cosine.
-        next_lr = lr * (1.0 + math.cos(math.pi * epoch / epochs)) / 2.0
+        next_lr = 0.01 * lr + 0.99 * lr * (1.0 + math.cos(math.pi * epoch / epochs)) / 2.0
         for group in optimizer.param_groups:
             group["lr"] = next_lr
     assert best_state is not None

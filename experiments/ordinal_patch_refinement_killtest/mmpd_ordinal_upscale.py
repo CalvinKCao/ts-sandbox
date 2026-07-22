@@ -166,6 +166,11 @@ def _load_config(path: Path) -> RunConfig:
         raise ValueError(f"Only upstream MMPD Decoder is supported, got {config.backbone!r}")
     if config.horizon != 16 or config.coarse_bins != 16 or config.high_bins != 256:
         raise ValueError("This kill test is fixed at 16-bin -> 256-bin, horizon 16")
+    if (config.train_stride, config.test_stride) != (2, 4):
+        raise ValueError(
+            "The binary discriminator kill-test protocol is fixed at train_stride=2 "
+            "and test_stride=4; refusing a YAML/config mismatch."
+        )
     return config
 
 
@@ -386,17 +391,32 @@ def _infer(model: BackboneLossModel, test: dict[str, torch.Tensor], ladder: Any,
     fake_bin = torch.floor(raw_units * config.high_bins).long().clamp_(0, config.high_bins - 1)
     rank_max = ladder.rank_max_per_variate().to(dtype=torch.float32)
     fake_raw_rank = _bin_centres_to_ranks(fake_bin, rank_max, config.high_bins)
-    fake_rank = _snap_ranks_to_ladder(fake_raw_rank, ladder)
-    gt_rank = test["gt_rank"].to(dtype=torch.float32)
-    # The binary path exposes true ordinal ranks for GT and ladder-snapped decoded ranks for fakes.
+    fake_ladder_rank = _snap_ranks_to_ladder(fake_raw_rank, ladder)
+    gt_ladder_rank = test["gt_rank"].to(dtype=torch.float32)
+
+    # Canonicalize both classes through the identical 256-bin bottleneck before
+    # discrimination. This prevents support/spacing cues from GT retaining a
+    # finer ordinal grid than an upscaled MMPD prediction.
+    _fake_centres, fake_disc_bin = _rank_to_bin_centres(
+        fake_ladder_rank, rank_max, config.high_bins,
+    )
+    fake_rank = _snap_ranks_to_ladder(
+        _bin_centres_to_ranks(fake_disc_bin, rank_max, config.high_bins), ladder,
+    )
+    _gt_centres, gt_disc_bin = _rank_to_bin_centres(
+        gt_ladder_rank, rank_max, config.high_bins,
+    )
+    gt_rank = _snap_ranks_to_ladder(
+        _bin_centres_to_ranks(gt_disc_bin, rank_max, config.high_bins), ladder,
+    )
     return {
         "past_rank": test["past_rank"].numpy(),
         "gt_rank": gt_rank.numpy(),
         "fake_rank": fake_rank.numpy(),
         "fake_rank_raw": fake_raw_rank.numpy(),
         "coarse_bin": test["coarse_bin"].numpy(),
-        "gt_high_bin": test["target_bin"].numpy(),
-        "fake_high_bin": fake_bin.numpy(),
+        "gt_high_bin": gt_disc_bin.numpy(),
+        "fake_high_bin": fake_disc_bin.numpy(),
         "window_ids": test["window_ids"].numpy(),
     }
 
@@ -552,7 +572,7 @@ def main() -> None:
         "mmpd": {"architecture": "upstream DecoderOnlyTransformer + MMPD_Loss", "config": config.__dict__, "tuning_winner": winner, "tuning_trials": trials},
         "protocol": {split: {key: value for key, value in data.items() if key != "indices"} for split, data in protocol["splits"].items()},
         "counts": {"train_windows": len(train["window_ids"]), "val_windows": len(val["window_ids"]), "test_windows": len(test["window_ids"])},
-        "snapping": "MMPD continuous output -> 256-bin centre -> global ordinal ladder; GT is the binary path ordinal ladder rank",
+        "snapping": "Both classes: ordinal rank -> 256-bin centre -> global ordinal ladder; MMPD first quantizes its continuous output to that same 256-bin grid",
         "discriminator": {**disc_metrics, "confusion_counts": counts, "split_window_positions": {name: values.tolist() for name, values in disc_split.items()}},
         "ordinal_rank_mae": float(np.mean(np.abs(pack["fake_rank"] - pack["gt_rank"]))),
     }
