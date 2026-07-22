@@ -1,7 +1,7 @@
 # Oracle-coarse 1D MMPD discriminator kill test.
-# The representation is full-resolution 256-bin ordinal lookback + oracle
-# 16-bin horizon, with a 256-bin ordinal horizon target.  This uses the
-# upstream Decoder MMPD architecture and its current tuning defaults.
+# Source windows and discriminator retain the binary run's 96-step lookback.
+# MMPD itself receives only the final 8 points at 256-bin resolution plus the
+# oracle 16-bin horizon, and predicts the 256-bin ordinal horizon.
 experiment:
   name: mmpd-ordinal-upscale-lb96-hz16
   experiment_name: mmpd_ordinal_upscale_lb96_hz16
@@ -10,13 +10,14 @@ mmpd:
   task: ordinal_upscale
   backbone: Decoder
   lookback: 96
+  condition_lookback: 8
   horizon: 16
   coarse_bins: 16
   high_bins: 256
   datasets: [ETTh1, exchange_rate, electricity, traffic]
   train_stride: 2
   test_stride: 4
-  patch_size_default: 12
+  patch_size_default: 8
   d_model: 256
   d_ff: 512
   n_heads: 4
