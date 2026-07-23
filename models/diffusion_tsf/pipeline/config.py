@@ -409,12 +409,19 @@ def _load_yaml_tree(path: str, seen: Optional[Set[str]] = None) -> Dict[str, Any
     extends = raw.pop("extends", [])
     if isinstance(extends, str):
         extends = [extends]
+    # Leaf opt-in: replace inherited phase list instead of merging by phase name.
+    replace_phases = bool(raw.pop("replace_phases", False))
+    phases_override = raw.get("phases") if replace_phases else None
 
     merged: Dict[str, Any] = {}
     for ext in extends:
         ext_path = _resolve_config_path(str(ext), path)
         merged = _deep_merge(merged, _load_yaml_tree(ext_path, seen))
     merged = _deep_merge(merged, raw)
+    if replace_phases:
+        if not _is_phase_list(phases_override):
+            raise ValueError(f"replace_phases=true requires a non-empty phases list: {path}")
+        merged["phases"] = [dict(p) for p in phases_override]
     return _apply_geometry_block(merged)
 
 

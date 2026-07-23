@@ -1,6 +1,7 @@
-# Re-run staged_eval with prediction visualizations against completed full runs.
-# Resume with --ckpt-config binary_patch_refine_lb336_hz96_full so FT/pretrain ckpts reuse.
+# Eval-only: reuse trained coarse + patch_refine ckpts; refresh pred visualizations.
+# Submit with --resume --ckpt-config binary_patch_refine_lb336_hz96_full
 extends: configs/binary_patch_refine_lb336_hz96_full.yaml
+replace_phases: true
 
 wandb:
   tags: [patch_refine, lb336_hz96, full, eval_viz]
