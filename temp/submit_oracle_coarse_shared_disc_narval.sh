@@ -14,7 +14,7 @@ DATASETS="ETTh1,exchange_rate,electricity,traffic"
 SEED=42
 BINARY_TIME="8:00:00"
 BINARY_EVAL_TIME="1:00:00"
-MMPD_TIME="6:00:00"
+MMPD_TIME="1:30:00"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
