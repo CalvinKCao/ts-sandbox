@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # Quick Killarney probe: load the Narval vertical-dual checkpoints and the
-# existing ordinal-normalized MMPD Decoder checkpoints, then train a tiny
-# univariate discriminator on each dataset after shared ordinal snapping.
+# existing paper MMPD Decoder checkpoints, then train a tiny univariate
+# discriminator on each dataset after shared ordinal snapping.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASETS="ETTh1,traffic,exchange_rate"
 SEED=42
 WALL="0:45:00"
+MMPD_ROOT_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --datasets) DATASETS="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         --time) WALL="$2"; shift 2 ;;
+        --mmpd-root) MMPD_ROOT_ARG="$2"; shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -28,7 +30,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         echo "ERROR: submit from the checkout under /scratch, not /home: $REPO" >&2
         exit 2
     }
-    MMPD_ROOT="$REPO/results/datasets/07-08-mmpd-decoder-ordinal-norm-lb336-hz720"
+    MMPD_ROOT="${MMPD_ROOT_ARG:-$REPO/results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset}"
     [[ -d "$MMPD_ROOT/mmpd_out/checkpoints" ]] || {
         echo "ERROR: missing MMPD campaign checkpoints: $MMPD_ROOT" >&2
         exit 2
