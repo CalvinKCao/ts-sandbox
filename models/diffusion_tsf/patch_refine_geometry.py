@@ -186,7 +186,12 @@ def blend_patch_bins(
     patch_height: int,
     patch_width: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Average absolute predicted bins per covered timestep and rebuild a hard CDF."""
+    """Blend visible patch-bin votes and rebuild a hard CDF.
+
+    Completely empty or full local CDF columns have no visible transition.
+    They abstain rather than voting for the crop boundary. If all overlapping
+    crops abstain, the coarse scaffold remains the prediction for that column.
+    """
     if patch_cdf.shape != (len(locations), 1, patch_height, patch_width):
         raise ValueError(
             "patch_cdf shape mismatch: "
@@ -202,21 +207,28 @@ def blend_patch_bins(
         dtype=torch.float32,
     )
     counts = torch.zeros_like(sums)
-    local_bins = TimeSeriesTo2D.bin_indices_from_cdf(patch_cdf[:, 0])
+    local_cdf = patch_cdf[:, 0]
+    local_bins = TimeSeriesTo2D.bin_indices_from_cdf(local_cdf)
+    occupancy = local_cdf.sum(dim=-2)
+    visible = (occupancy > 0) & (occupancy < patch_height)
 
     for pi, loc in enumerate(locations):
         for local_col in range(patch_width):
             col = loc.col0 + local_col
             edge = int(coarse_edges[loc.batch_index, loc.variate_index, col].item())
-            if loc.row0 <= edge < loc.row0 + patch_height:
+            if (
+                loc.row0 <= edge < loc.row0 + patch_height
+                and bool(visible[pi, local_col].item())
+            ):
                 absolute_bin = float(loc.row0) + local_bins[pi, local_col]
                 sums[loc.batch_index, loc.variate_index, col] += absolute_bin
                 counts[loc.batch_index, loc.variate_index, col] += 1.0
 
-    if bool((counts == 0).any()):
-        missing = (counts == 0).nonzero(as_tuple=False)[0].tolist()
-        raise RuntimeError(f"patch coverage invariant failed at B,V,t={missing}")
-    bins = (sums / counts).round().clamp(0, canvas_height - 1).long()
+    has_vote = counts > 0
+    averaged_bins = torch.zeros_like(sums)
+    averaged_bins[has_vote] = sums[has_vote] / counts[has_vote]
+    bins = torch.where(has_vote, averaged_bins.round(), coarse_edges.float())
+    bins = bins.clamp(0, canvas_height - 1).long()
     rows = torch.arange(
         canvas_height,
         device=patch_cdf.device,

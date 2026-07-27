@@ -1219,12 +1219,19 @@ class DiffusionTSF(nn.Module):
         target: torch.Tensor,
         *,
         weight_source: Optional[torch.Tensor] = None,
+        element_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Unweighted BCE for binary CDF images (optional distance weights)."""
         per_elem = F.binary_cross_entropy_with_logits(logits, target.float(), reduction="none")
         per_elem = per_elem * self._binary_bce_weight_tensor(
             target, weight_source=weight_source,
         )
+        if element_mask is not None:
+            if element_mask.shape != per_elem.shape:
+                raise ValueError(
+                    f"element_mask shape {tuple(element_mask.shape)} != loss shape {tuple(per_elem.shape)}"
+                )
+            return (per_elem * element_mask).sum() / element_mask.sum().clamp_min(1.0)
         return per_elem.mean()
 
     def _binary_weighted_bce_loss(
@@ -1234,19 +1241,29 @@ class DiffusionTSF(nn.Module):
         t_flat: Optional[torch.Tensor] = None,
         *,
         weight_source: Optional[torch.Tensor] = None,
+        element_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """BCE with optional CDF-distance + min-SNR timestep weighting."""
         per_elem = F.binary_cross_entropy_with_logits(logits, target.float(), reduction="none")
         per_elem = per_elem * self._binary_bce_weight_tensor(
             target, weight_source=weight_source,
         )
+        if element_mask is not None:
+            if element_mask.shape != per_elem.shape:
+                raise ValueError(
+                    f"element_mask shape {tuple(element_mask.shape)} != loss shape {tuple(per_elem.shape)}"
+                )
+            per_elem = per_elem * element_mask
+            reduction_denom = element_mask.sum().clamp_min(1.0)
+        else:
+            reduction_denom = torch.tensor(float(per_elem.numel()), device=per_elem.device)
         if t_flat is None or self.config.loss_weighting == "none":
-            return per_elem.mean()
+            return per_elem.sum() / reduction_denom
         beta_t = self.binary_scheduler.betas[t_flat].clamp(1e-5, 1.0 - 1e-5)
         snr = ((1.0 - beta_t) ** 2) / (beta_t ** 2)
         weight = torch.minimum(snr, torch.full_like(snr, self.config.min_snr_gamma)) / snr
         view_shape = (-1,) + (1,) * (per_elem.dim() - 1)
-        return (per_elem * weight.view(view_shape)).mean()
+        return (per_elem * weight.view(view_shape)).sum() / reduction_denom
 
     def _soft_decode_vertical_dual_1d(
         self,
@@ -1751,6 +1768,13 @@ class DiffusionTSF(nn.Module):
         target_patches = extract_patch_batch(
             hir_gt, locations, patch_height=patch_h, patch_width=patch_w,
         )
+        # Full/empty crop columns have their GT transition outside this patch.
+        # Mask them so training does not turn out-of-view into a boundary cue.
+        target_occupancy = target_patches.sum(dim=-2, keepdim=True)
+        target_visible = (target_occupancy > 0) & (target_occupancy < patch_h)
+        target_visible_mask = target_visible.expand_as(target_patches).to(target_patches.dtype)
+        if not bool(target_visible.any()):
+            raise RuntimeError("patch_refine batch has no visible GT transitions")
         n_patches = target_patches.shape[0]
         if t is None:
             t = torch.randint(0, self.config.binary_num_steps, (n_patches,), device=device)
@@ -1818,16 +1842,20 @@ class DiffusionTSF(nn.Module):
         if self.config.prediction_target == "epsilon":
             loss_x0 = self._binary_weighted_bce_loss(
                 primary_logits, zt, t, weight_source=target_patches,
+                element_mask=target_visible_mask,
             )
             loss_zt = self._binary_weighted_bce_loss(
                 zt_logits, target_patches, t, weight_source=target_patches,
+                element_mask=target_visible_mask,
             )
         else:
             loss_x0 = self._binary_weighted_bce_loss(
                 primary_logits, target_patches, t, weight_source=target_patches,
+                element_mask=target_visible_mask,
             )
             loss_zt = self._binary_weighted_bce_loss(
                 zt_logits, zt, t, weight_source=target_patches,
+                element_mask=target_visible_mask,
             )
         regular_loss = loss_x0 + loss_zt
 
@@ -1853,6 +1881,7 @@ class DiffusionTSF(nn.Module):
             anchor_x0 = self._x0_logits_from_prediction(anchor_primary, neutral)
             anchor_loss = self._binary_plain_bce_loss(
                 anchor_x0, target_patches, weight_source=target_patches,
+                element_mask=target_visible_mask,
             )
             lam = self.config.deterministic_anchor_lambda
             combined_loss = lam * regular_loss + (1.0 - lam) * anchor_loss
@@ -1877,6 +1906,7 @@ class DiffusionTSF(nn.Module):
             "t": t,
             "diffusion_stage": "patch_refine",
             "n_patches": torch.tensor(float(n_patches), device=device),
+            "patch_visible_column_fraction": target_visible.float().mean(),
         }
 
     @torch.no_grad()

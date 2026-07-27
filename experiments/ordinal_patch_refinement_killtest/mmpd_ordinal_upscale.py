@@ -28,7 +28,6 @@ from typing import Any, Iterable
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import yaml
 
@@ -48,25 +47,24 @@ from models.backbones.decoder_only_transformer import DecoderOnlyTransformer  # 
 from models.loss_funcs.mmpd.mmpd_loss import MMPD_Loss  # type: ignore  # noqa: E402
 
 from models.diffusion_tsf.ordinal_window_norm import ordinal_encode  # noqa: E402
-from models.diffusion_tsf.preprocessing import TimeSeriesTo2D  # noqa: E402
-from models.diffusion_tsf.train_multivariate_pipeline import load_dataset  # noqa: E402
 from utils.eval_discriminator_texture_staged_vs_mmpd import (  # noqa: E402
     HorizonSliceDataset,
     InvertedSliceDiscriminator,
-    evaluate_classifier,
 )
-from utils.eval_mmpd_gaussian_anchor import load_tsf_pack_pool  # noqa: E402
 
 from experiments.ordinal_patch_refinement_killtest.nonoverlap_protocol import (  # noqa: E402
     DATASET_N_VARIATES,
-    build_protocol,
 )
-from experiments.ordinal_patch_refinement_killtest import smoke as binary_smoke  # noqa: E402
+from experiments.ordinal_patch_refinement_killtest.ordinal_disc_protocol import (  # noqa: E402
+    DiscriminatorConfig,
+    canonicalize_disc_pair,
+    load_shared_ordinal_data,
+    strict_binary_patch_filter,
+    train_rank_discriminator,
+)
 from experiments.ordinal_patch_refinement_killtest.ordinal_grid import (  # noqa: E402
     bin_centres_to_ranks,
-    canonicalize_ranks,
     rank_to_bin_centres,
-    snap_ranks_to_ladder,
 )
 
 
@@ -229,53 +227,13 @@ def _binary_patch_filter(
     *,
     max_selected: int | None = None,
 ) -> tuple[list[int], dict[str, int | str]]:
-    """Retain exactly the windows that produce a strict binary 32x8 crop."""
-    selected: list[int] = []
-    stats: dict[str, int | str] = {
-        "candidates": 0,
-        "skipped_oob": 0,
-        "skipped_oob_canvas": 0,
-        "skipped_oob_column_edge": 0,
-        "kept": 0,
-        "windows_considered": 0,
-        "windows_with_patches": 0,
-        "rule": "strict: retain window iff binary 256-row CDF path has any valid 32x8 crop",
-    }
-    for raw_index in indices:
-        index = int(raw_index)
-        past, future = pool[index]
-        encoded = _encode_window(past.unsqueeze(0), future.unsqueeze(0), ladder, config)
-        rank_max = encoded["rank_max"]
-        target = binary_smoke._cdf_from_values(encoded["gt_rank"], rank_max, config.high_bins)
-        coarse = binary_smoke._cdf_from_values(encoded["gt_rank"], rank_max, config.coarse_bins)
-        upscaled = binary_smoke._vertical_upsample(coarse, config.high_bins)
-        history = binary_smoke._cdf_from_values(
-            encoded["past_rank"][..., -binary_smoke.PATCH_W :], rank_max, config.high_bins,
-        )
-        kept_in_window = 0
-        for variate in range(int(upscaled.shape[1])):
-            bins = TimeSeriesTo2D.bin_indices_from_cdf(coarse[:, variate : variate + 1])[0, 0].long()
-            _naive, _hist, _target, _coords, patch_stats = binary_smoke._patch_batch(
-                upscaled[0, variate : variate + 1],
-                target[0, variate : variate + 1],
-                history[0, variate : variate + 1],
-                bins,
-            )
-            for key in (
-                "candidates", "skipped_oob", "skipped_oob_canvas",
-                "skipped_oob_column_edge", "kept",
-            ):
-                stats[key] = int(stats[key]) + int(patch_stats[key])
-            kept_in_window += int(patch_stats["kept"])
-        stats["windows_considered"] = int(stats["windows_considered"]) + 1
-        if kept_in_window > 0:
-            selected.append(index)
-            stats["windows_with_patches"] = int(stats["windows_with_patches"]) + 1
-            if max_selected is not None and len(selected) >= max_selected:
-                break
-    if not selected:
-        raise RuntimeError("binary strict-OOB patch filter retained no windows")
-    return selected, stats
+    """Compatibility wrapper around the shared binary eligibility filter."""
+    return strict_binary_patch_filter(
+        pool, indices, ladder,
+        high_bins=config.high_bins,
+        coarse_bins=config.coarse_bins,
+        max_selected=max_selected,
+    )
 
 
 def _materialize(pool: Any, indices: Iterable[int], ladder: Any, config: RunConfig) -> dict[str, torch.Tensor]:
@@ -465,12 +423,9 @@ def _infer(model: BackboneLossModel, test: dict[str, torch.Tensor], ladder: Any,
     fake_bin = torch.floor(raw_units * config.high_bins).long().clamp_(0, config.high_bins - 1)
     rank_max = ladder.rank_max_per_variate().to(dtype=torch.float32)
     fake_raw_rank = bin_centres_to_ranks(fake_bin, rank_max, config.high_bins)
-    fake_ladder_rank = snap_ranks_to_ladder(fake_raw_rank, ladder)
-    gt_ladder_rank = test["gt_rank"].to(dtype=torch.float32)
-
-    # Both classes use the exact shared rank -> 256-bin -> ladder path.
-    fake_rank, fake_disc_bin = canonicalize_ranks(fake_ladder_rank, rank_max, ladder, config.high_bins)
-    gt_rank, gt_disc_bin = canonicalize_ranks(gt_ladder_rank, rank_max, ladder, config.high_bins)
+    gt_rank, fake_rank, gt_disc_bin, fake_disc_bin = canonicalize_disc_pair(
+        test["gt_rank"].to(dtype=torch.float32), fake_raw_rank, ladder, config.high_bins,
+    )
     return {
         "past_rank": test["past_rank"].numpy(),
         "gt_rank": gt_rank.numpy(),
@@ -486,51 +441,27 @@ def _infer(model: BackboneLossModel, test: dict[str, torch.Tensor], ladder: Any,
 
 
 def _train_discriminator(pack: dict[str, np.ndarray], config: RunConfig, device: torch.device, seed: int, smoke: bool):
-    n_windows = len(pack["window_ids"])
-    n_train = max(1, int(0.7 * n_windows))
-    n_val = max(1, int(0.15 * n_windows))
-    split = {
-        "train": np.arange(0, n_train),
-        "val": np.arange(n_train, min(n_windows, n_train + n_val)),
-        "test": np.arange(min(n_windows, n_train + n_val), n_windows),
-    }
-    if len(split["val"]) == 0:
-        split["val"] = split["train"].copy()
-    if len(split["test"]) == 0:
-        split["test"] = split["val"].copy()
-    kwargs = dict(slice_len=config.disc_slice_len, include_past=True, offset_stride=1)
-    ds_train = HorizonSliceDataset(pack["past_rank"], pack["gt_rank"], pack["fake_rank"], split["train"], seed=seed, **kwargs)
-    ds_val = HorizonSliceDataset(pack["past_rank"], pack["gt_rank"], pack["fake_rank"], split["val"], seed=seed + 1, **kwargs)
-    ds_test = HorizonSliceDataset(pack["past_rank"], pack["gt_rank"], pack["fake_rank"], split["test"], seed=seed + 2, **kwargs)
-    model = InvertedSliceDiscriminator(
-        seq_len=config.lookback + config.disc_slice_len,
-        max_offset=config.horizon - config.disc_slice_len,
-        d_model=config.disc_d_model,
-        n_heads=config.disc_n_heads,
-        depth=config.disc_depth,
-        d_ff=config.disc_d_ff,
-        dropout=config.disc_dropout,
-    ).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.disc_lr)
-    train_loader = DataLoader(ds_train, batch_size=config.disc_batch_size, shuffle=True)
-    val_loader = DataLoader(ds_val, batch_size=config.disc_batch_size, shuffle=False)
-    test_loader = DataLoader(ds_test, batch_size=config.disc_batch_size, shuffle=False)
-    best_state, best_val = None, float("inf")
-    for _ in range(1 if smoke else config.disc_epochs):
-        model.train()
-        for batch in train_loader:
-            x, offsets, labels = batch[0].to(device), batch[1].to(device), batch[2].to(device)
-            optimizer.zero_grad(set_to_none=True)
-            loss = F.binary_cross_entropy_with_logits(model(x, offsets), labels)
-            loss.backward()
-            optimizer.step()
-        val_metrics = evaluate_classifier(model, val_loader, device)
-        if val_metrics["disc_bce"] < best_val:
-            best_val = val_metrics["disc_bce"]
-            best_state = copy.deepcopy(model.state_dict())
-    assert best_state is not None
-    model.load_state_dict(best_state)
-    return model, evaluate_classifier(model, test_loader, device), ds_test, split
+    return train_rank_discriminator(
+        pack["past_rank"],
+        pack["gt_rank"],
+        pack["fake_rank"],
+        device=device,
+        config=DiscriminatorConfig(
+            lookback=config.lookback,
+            horizon=config.horizon,
+            slice_len=config.disc_slice_len,
+            epochs=config.disc_epochs,
+            batch_size=config.disc_batch_size,
+            learning_rate=config.disc_lr,
+            d_model=config.disc_d_model,
+            d_ff=config.disc_d_ff,
+            n_heads=config.disc_n_heads,
+            depth=config.disc_depth,
+            dropout=config.disc_dropout,
+        ),
+        seed=seed,
+        smoke=smoke,
+    )
 
 
 def _bucket(label: int, pred: int) -> str:
@@ -606,14 +537,13 @@ def main() -> None:
     _set_seed(args.seed)
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
     n_variates = DATASET_N_VARIATES[args.dataset]
-    protocol = build_protocol(args.dataset, n_variates, lookback=config.lookback)
-    pool_by = {
-        "train": load_tsf_pack_pool(args.dataset, list(range(n_variates)), lookback=config.lookback, horizon=config.horizon, train_stride=config.train_stride, test_stride=config.test_stride, pack_splits=["train"])[0],
-        "val": load_tsf_pack_pool(args.dataset, list(range(n_variates)), lookback=config.lookback, horizon=config.horizon, train_stride=1, test_stride=config.test_stride, pack_splits=["val"])[0],
-        "test": load_tsf_pack_pool(args.dataset, list(range(n_variates)), lookback=config.lookback, horizon=config.horizon, train_stride=1, test_stride=config.test_stride, pack_splits=["test"])[0],
-    }
-    _, _, _, stats = load_dataset(args.dataset, list(range(n_variates)), lookback=config.lookback, horizon=config.horizon, stride=1, test_stride=config.test_stride, use_ordinal_window_norm=True)
-    ladder = stats["ordinal_ladder"]
+    shared_data = load_shared_ordinal_data(
+        args.dataset, n_variates, lookback=config.lookback, horizon=config.horizon,
+        train_stride=config.train_stride, test_stride=config.test_stride,
+    )
+    protocol = shared_data.protocol
+    pool_by = shared_data.pool_by
+    ladder = shared_data.ladder
     limit = 8 if args.smoke else None
     filtered_indices: dict[str, list[int]] = {}
     filter_stats: dict[str, dict[str, int | str]] = {}

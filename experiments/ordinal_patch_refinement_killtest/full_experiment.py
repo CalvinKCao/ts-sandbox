@@ -23,28 +23,23 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from experiments.ordinal_patch_refinement_killtest import diffusion_refine
 from experiments.ordinal_patch_refinement_killtest import smoke
 from experiments.ordinal_patch_refinement_killtest.nonoverlap_protocol import (
     DATASET_N_VARIATES,
-    build_protocol,
+)
+from experiments.ordinal_patch_refinement_killtest.ordinal_disc_protocol import (
+    DiscriminatorConfig,
+    canonicalize_disc_pair,
+    load_shared_ordinal_data,
+    strict_binary_patch_filter,
+    train_rank_discriminator,
 )
 from models.diffusion_tsf.ordinal_window_norm import ordinal_decode, ordinal_encode
 from models.diffusion_tsf.preprocessing import TimeSeriesTo2D
-from experiments.ordinal_patch_refinement_killtest.ordinal_grid import (
-    canonicalize_ranks,
-    snap_ranks_to_ladder,
-)
-from models.diffusion_tsf.train_multivariate_pipeline import load_dataset
-from utils.eval_discriminator_texture_staged_vs_mmpd import (
-    HorizonSliceDataset,
-    InvertedSliceDiscriminator,
-    evaluate_classifier,
-)
-from utils.eval_mmpd_gaussian_anchor import load_tsf_pack_pool
+from experiments.ordinal_patch_refinement_killtest.ordinal_grid import snap_ranks_to_ladder
 
 HORIZON = smoke.HORIZON
 LOOKBACK = 96
@@ -268,13 +263,8 @@ def _infer_windows(model, scheduler, pool, indices, ladder, device, resolution, 
         naive_rank_raw = smoke._decode_ranks(enc["upscaled"], enc["rank_max"])
         refined_rank_raw = smoke._decode_ranks(refined_canvas, enc["rank_max"])
         naive_rank = snap_ranks_to_ladder(naive_rank_raw, enc["ladder_b"])
-        refined_ladder_rank = snap_ranks_to_ladder(refined_rank_raw, enc["ladder_b"])
-        # Both classes use the exact shared rank -> bin centre -> ladder path.
-        gt_rank, gt_high_bin = canonicalize_ranks(
-            gt_rank_raw, enc["rank_max"], enc["ladder_b"], resolution,
-        )
-        refined_rank, refined_high_bin = canonicalize_ranks(
-            refined_ladder_rank, enc["rank_max"], enc["ladder_b"], resolution,
+        gt_rank, refined_rank, gt_high_bin, refined_high_bin = canonicalize_disc_pair(
+            gt_rank_raw, refined_rank_raw, enc["ladder_b"], resolution,
         )
         _, gt = ordinal_decode(enc["past_ord"], gt_rank, enc["ladder_b"], ood_shift=enc["ood_shift"])
         _, naive = ordinal_decode(enc["past_ord"], naive_rank, enc["ladder_b"], ood_shift=enc["ood_shift"])
@@ -322,45 +312,17 @@ def _infer_windows(model, scheduler, pool, indices, ladder, device, resolution, 
     }
 
 
-def _train_disc(past, real, fake, device, *, slice_len=8, epochs=8, seed=0):
-    """Train texture disc after identical GT/fake bin-centre canonicalization."""
-    n = past.shape[0]
-    n_train = max(1, int(0.7 * n))
-    n_val = max(1, int(0.15 * n))
-    train_idx = np.arange(0, n_train)
-    val_idx = np.arange(n_train, min(n, n_train + n_val))
-    test_idx = np.arange(min(n, n_train + n_val), n)
-    if len(test_idx) == 0:
-        test_idx = val_idx.copy()
-    if len(val_idx) == 0:
-        val_idx = train_idx.copy()
-    ds_train = HorizonSliceDataset(past, real, fake, train_idx, slice_len, seed=seed)
-    ds_val = HorizonSliceDataset(past, real, fake, val_idx, slice_len, seed=seed + 1)
-    ds_test = HorizonSliceDataset(past, real, fake, test_idx, slice_len, seed=seed + 2)
-    model = InvertedSliceDiscriminator(
-        seq_len=LOOKBACK + slice_len, max_offset=HORIZON - slice_len, d_model=128,
-        n_heads=4, depth=2, d_ff=256, dropout=0.1,
-    ).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    train_loader = DataLoader(ds_train, batch_size=64, shuffle=True)
-    val_loader = DataLoader(ds_val, batch_size=64, shuffle=False)
-    test_loader = DataLoader(ds_test, batch_size=64, shuffle=False)
-    best_state, best_val = None, float("inf")
-    for _ in range(epochs):
-        model.train()
-        for batch in train_loader:
-            x, offsets, labels = batch[0].to(device), batch[1].to(device), batch[2].to(device)
-            opt.zero_grad(set_to_none=True)
-            loss = F.binary_cross_entropy_with_logits(model(x, offsets), labels)
-            loss.backward()
-            opt.step()
-        val_metrics = evaluate_classifier(model, val_loader, device)
-        if val_metrics["disc_bce"] < best_val:
-            best_val = val_metrics["disc_bce"]
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-    assert best_state is not None
-    model.load_state_dict(best_state)
-    return model, evaluate_classifier(model, test_loader, device), ds_test
+def _train_disc(past, real, fake, device, *, slice_len=8, epochs=8, seed=0, smoke_mode=False):
+    """Compatibility wrapper around the shared rank-discriminator trainer."""
+    return train_rank_discriminator(
+        past, real, fake,
+        device=device,
+        config=DiscriminatorConfig(
+            lookback=LOOKBACK, horizon=HORIZON, slice_len=slice_len, epochs=epochs,
+        ),
+        seed=seed,
+        smoke=smoke_mode,
+    )
 
 
 def _bucket(label: int, pred: int) -> str:
@@ -472,11 +434,8 @@ def _load_disc_only_pack(path: Path, ladder, resolution: int) -> dict[str, np.nd
 
     gt_tensor = torch.as_tensor(gt_raw, dtype=torch.float32)
     refined_raw_tensor = torch.as_tensor(refined_raw, dtype=torch.float32)
-    rank_max = ladder.rank_max_per_variate().to(dtype=torch.float32)
-    refined_ladder = snap_ranks_to_ladder(refined_raw_tensor, ladder)
-    gt_rank, gt_high_bin = canonicalize_ranks(gt_tensor, rank_max, ladder, resolution)
-    refined_rank, refined_high_bin = canonicalize_ranks(
-        refined_ladder, rank_max, ladder, resolution,
+    gt_rank, refined_rank, gt_high_bin, refined_high_bin = canonicalize_disc_pair(
+        gt_tensor, refined_raw_tensor, ladder, resolution,
     )
     pack.update({
         "gt_rank_raw": np.asarray(gt_raw),
@@ -515,17 +474,17 @@ def main() -> None:
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
     n_var = _n_variates(args.dataset)
     resolution = args.resolution
-    protocol = build_protocol(args.dataset, n_var, lookback=LOOKBACK)
-    limit = None
-    if args.smoke:
-        # Strict OOB can empty the first few windows; take enough to keep patches.
-        limit = 64
-
-    _, _, _, stats = load_dataset(
-        args.dataset, list(range(n_var)), lookback=LOOKBACK, horizon=HORIZON,
-        stride=1, test_stride=4, use_ordinal_window_norm=True,
+    comparison_protocol = (
+        "shared_16_to_256_comparable_to_mmpd"
+        if resolution == 256
+        else "binary_only_16_to_512_not_comparable_to_mmpd"
     )
-    ladder = stats["ordinal_ladder"]
+    shared_data = load_shared_ordinal_data(
+        args.dataset, n_var, lookback=LOOKBACK, horizon=HORIZON,
+    )
+    protocol = shared_data.protocol
+    ladder = shared_data.ladder
+    limit = 8 if args.smoke else None
 
     if args.disc_only_input is not None:
         pack = _load_disc_only_pack(args.disc_only_input, ladder, resolution)
@@ -534,9 +493,9 @@ def main() -> None:
             args.output / "heldout_windows_canonicalized.npz",
             **{key: value for key, value in pack.items() if isinstance(value, np.ndarray)},
         )
-        disc, metrics, ds_test = _train_disc(
+        disc, metrics, ds_test, disc_split = _train_disc(
             pack["past_rank"], pack["gt_rank"], pack["refined_rank"], device,
-            epochs=2 if args.smoke else args.disc_epochs, seed=args.seed,
+            epochs=args.disc_epochs, seed=args.seed, smoke_mode=args.smoke,
         )
         if all(key in pack for key in ("refined_cdf", "target_cdf")):
             counts = _confusion_plots(disc, ds_test, pack, args.output / "disc_confusions")
@@ -544,6 +503,7 @@ def main() -> None:
             counts = _confusion_counts(disc, ds_test)
         metrics = {
             **metrics,
+            "split_window_positions": {name: values.tolist() for name, values in disc_split.items()},
             "confusion_counts": counts,
             "input": f"1d_ordinal_ranks_shared_{resolution}_bin_canonicalized",
             "real": "gt_rank_bin_canonicalized",
@@ -570,6 +530,7 @@ def main() -> None:
             "canonicalization": (
                 f"Both classes: ordinal rank -> {resolution}-bin centre -> global ordinal ladder"
             ),
+            "comparison_protocol": comparison_protocol,
             "discriminator": metrics,
         }
         (args.output / "manifest.json").write_text(
@@ -578,31 +539,29 @@ def main() -> None:
         print(json.dumps(manifest, indent=2))
         return
 
-    pool_train = load_tsf_pack_pool(
-        args.dataset, list(range(n_var)), lookback=LOOKBACK, horizon=HORIZON,
-        train_stride=2, test_stride=4, pack_splits=["train"],
-    )[0]
-    pool_by = {"train": pool_train}
-    for split in ("val", "test"):
-        pool_by[split] = load_tsf_pack_pool(
-            args.dataset, list(range(n_var)), lookback=LOOKBACK, horizon=HORIZON,
-            train_stride=1, test_stride=4, pack_splits=[split],
-        )[0]
+    pool_by = shared_data.pool_by
+    filtered_indices: dict[str, list[int]] = {}
+    filter_stats: dict[str, dict[str, int | str]] = {}
+    for split in ("train", "val", "test"):
+        filtered_indices[split], filter_stats[split] = strict_binary_patch_filter(
+            pool_by[split],
+            protocol["splits"][split]["indices"],
+            ladder,
+            high_bins=resolution,
+            max_selected=limit,
+        )
     tn, th, ty, _, train_patch_stats = _materialize_split(
-        pool_by["train"], protocol["splits"]["train"]["indices"], ladder, device, resolution, limit,
+        pool_by["train"], filtered_indices["train"], ladder, device, resolution, None,
     )
     vn, vh, vy, _, val_patch_stats = _materialize_split(
-        pool_by["val"], protocol["splits"]["val"]["indices"], ladder, device, resolution, limit,
+        pool_by["val"], filtered_indices["val"], ladder, device, resolution, None,
     )
     model, scheduler, best_lr, best_batch = _train_refiner(
         tn, th, ty, vn, vh, vy, device, args.epochs, args.smoke,
     )
 
-    test_indices = protocol["splits"]["test"]["indices"]
-    if args.smoke:
-        test_indices = test_indices[: max(4, len(test_indices) // 20 or 4)]
     pack = _infer_windows(
-        model, scheduler, pool_by["test"], test_indices, ladder, device, resolution,
+        model, scheduler, pool_by["test"], filtered_indices["test"], ladder, device, resolution,
         smoke_mode=args.smoke,
     )
 
@@ -621,15 +580,20 @@ def main() -> None:
         target_cdf=pack["target_cdf"], refined_cdf=pack["refined_cdf"],
         window_ids=pack["window_ids"],
     )
+    np.savez_compressed(
+        args.output / "binary_filtered_window_ids.npz",
+        **{split: np.asarray(indices, dtype=np.int64) for split, indices in filtered_indices.items()},
+    )
 
     # Discriminator: GT and refined both use the shared bin-centre canonicalizer.
-    disc, metrics, ds_test = _train_disc(
+    disc, metrics, ds_test, disc_split = _train_disc(
         pack["past_rank"], pack["gt_rank"], pack["refined_rank"], device,
-        epochs=2 if args.smoke else args.disc_epochs, seed=args.seed,
+        epochs=args.disc_epochs, seed=args.seed, smoke_mode=args.smoke,
     )
     counts = _confusion_plots(disc, ds_test, pack, args.output / "disc_confusions")
     metrics = {
         **metrics,
+        "split_window_positions": {name: values.tolist() for name, values in disc_split.items()},
         "confusion_counts": counts,
         "input": f"1d_ordinal_ranks_shared_{resolution}_bin_canonicalized",
         "real": "gt_rank_bin_canonicalized",
@@ -654,6 +618,7 @@ def main() -> None:
         "canvas": [resolution, HORIZON],
         "smoke": args.smoke,
         "canonicalization": f"Both classes: ordinal rank -> {resolution}-bin centre -> global ordinal ladder",
+        "comparison_protocol": comparison_protocol,
         "protocol": {
             split: {k: v for k, v in vals.items() if k != "indices"}
             for split, vals in protocol["splits"].items()
@@ -663,6 +628,7 @@ def main() -> None:
             "val": val_patch_stats,
             "rule": "strict: skip if canvas OOB or any coarse/GT column edge leaves the 32x8 crop",
         },
+        "binary_patch_filter": filter_stats,
         "train_patches": len(tn),
         "val_patches": len(vn),
         "test_windows_scored": int(len(pack["window_ids"])),
