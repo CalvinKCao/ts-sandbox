@@ -47,14 +47,23 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     IFS=',' read -r -a DATASET_LIST <<< "$DATASETS"
     for DATASET in "${DATASET_LIST[@]}"; do
         case "$DATASET" in
-            ETTh1|traffic|exchange_rate) ;;
+            ETTh1) CKPT_SUBSET="ETTh1" ;;
+            traffic) CKPT_SUBSET="traffic_4v_s1" ;;
+            exchange_rate) CKPT_SUBSET="exchange_rate" ;;
             *) echo "ERROR: unsupported dataset: $DATASET" >&2; exit 2 ;;
         esac
         shopt -s nullglob
         CKPT_MATCHES=("$CKPT_BASE"/*-"$DATASET"-bce_dist_guidance_cond_3x336_overlap_value_width_fixed_hp)
         shopt -u nullglob
-        [[ "${#CKPT_MATCHES[@]}" -gt 0 ]] || {
-            echo "ERROR: missing $DATASET binary checkpoint under $CKPT_BASE" >&2
+        CKPT_READY=0
+        for CKPT_DIR in "${CKPT_MATCHES[@]}"; do
+            if [[ -f "$CKPT_DIR/$CKPT_SUBSET/vertical_dual/best.pt" ]]; then
+                CKPT_READY=1
+                break
+            fi
+        done
+        [[ "$CKPT_READY" -eq 1 ]] || {
+            echo "ERROR: missing $DATASET vertical_dual/best.pt under $CKPT_BASE" >&2
             exit 2
         }
         JOB="uni-ladder-${DATASET}"
