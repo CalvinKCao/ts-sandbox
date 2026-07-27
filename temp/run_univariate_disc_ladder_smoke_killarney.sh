@@ -9,6 +9,7 @@ DATASETS="ETTh1,traffic,exchange_rate"
 SEED=42
 WALL="0:45:00"
 MMPD_ROOT_ARG=""
+CKPT_BASE_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -16,6 +17,7 @@ while [[ $# -gt 0 ]]; do
         --seed) SEED="$2"; shift 2 ;;
         --time) WALL="$2"; shift 2 ;;
         --mmpd-root) MMPD_ROOT_ARG="$2"; shift 2 ;;
+        --ckpt-base) CKPT_BASE_ARG="$2"; shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -31,6 +33,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         exit 2
     }
     MMPD_ROOT="${MMPD_ROOT_ARG:-$REPO/results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset}"
+    CKPT_BASE="${CKPT_BASE_ARG:-$REPO/results/ckpts}"
     [[ -d "$MMPD_ROOT/mmpd_out/checkpoints" ]] || {
         echo "ERROR: missing MMPD campaign checkpoints: $MMPD_ROOT" >&2
         exit 2
@@ -47,6 +50,13 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             ETTh1|traffic|exchange_rate) ;;
             *) echo "ERROR: unsupported dataset: $DATASET" >&2; exit 2 ;;
         esac
+        shopt -s nullglob
+        CKPT_MATCHES=("$CKPT_BASE"/*-"$DATASET"-bce_dist_guidance_cond_3x336_overlap_value_width_fixed_hp)
+        shopt -u nullglob
+        [[ "${#CKPT_MATCHES[@]}" -gt 0 ]] || {
+            echo "ERROR: missing $DATASET binary checkpoint under $CKPT_BASE" >&2
+            exit 2
+        }
         JOB="uni-ladder-${DATASET}"
         sbatch \
             --job-name="$JOB" \
@@ -55,7 +65,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --output="$REPO/results/logs/${JOB}-%j.log" \
             --error="$REPO/results/logs/${JOB}-%j.log" \
             --mail-type=FAIL --mail-user=ccao87@uwo.ca \
-            --export=ALL,DISC_REPO="$REPO",DISC_DATASET="$DATASET",DISC_SEED="$SEED",DISC_MMPD_ROOT="$MMPD_ROOT",DISC_RUN_STEM="$RUN_STEM" \
+            --export=ALL,DISC_REPO="$REPO",DISC_DATASET="$DATASET",DISC_SEED="$SEED",DISC_MMPD_ROOT="$MMPD_ROOT",DISC_CKPT_BASE="$CKPT_BASE",DISC_RUN_STEM="$RUN_STEM" \
             "$REPO/temp/run_univariate_disc_ladder_smoke_killarney.sh"
     done
     exit 0
@@ -64,6 +74,7 @@ fi
 REPO="${DISC_REPO:?}"
 DATASET="${DISC_DATASET:?}"
 MMPD_ROOT="${DISC_MMPD_ROOT:?}"
+CKPT_BASE="${DISC_CKPT_BASE:?}"
 RUN_STEM="${DISC_RUN_STEM:?}"
 cd "$REPO"
 
@@ -84,6 +95,7 @@ COMMON_ARGS=(
     --fake-sources binary_staged mmpd
     --anchor-config bce_dist_guidance_cond_3x336_overlap_value_width_fixed_hp
     --binary-config configs/bce_dist_guidance_cond_3x336_overlap_value_width_fixed_hp.yaml
+    --ckpt-base "$CKPT_BASE"
     --mmpd-output-root "$MMPD_ROOT"
     --mmpd-backbone Decoder
     --mmpd-repo "$REPO/temp/MMPD"
