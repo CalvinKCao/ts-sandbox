@@ -12,7 +12,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mmpd_root", type=Path)
     args = parser.parse_args()
-    manifest_path = args.mmpd_root / "run_manifest.json"
+    campaign_root = args.mmpd_root.parent if args.mmpd_root.name == "mmpd_out" else args.mmpd_root
+    manifest_path = campaign_root / "run_manifest.json"
     if not manifest_path.is_file():
         raise FileNotFoundError(f"missing campaign manifest: {manifest_path}")
     with manifest_path.open(encoding="utf-8") as handle:
@@ -31,7 +32,7 @@ def main() -> None:
             f"{saved.get('mmpd_instance_norm')!r}"
         )
     print(
-        f"[mmpd-campaign] verified ordinal norm / no instance norm: {args.mmpd_root}",
+        f"[mmpd-campaign] verified ordinal norm / no instance norm: {campaign_root}",
         flush=True,
     )
 
