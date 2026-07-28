@@ -39,7 +39,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     TEST_STRIDE=1
     MMPD_BACKBONE=Decoder
     MERGE_PARTIALS=0
-    # Snap GT+binary+MMPD through dual-scale 16x16 lattice (not ordinal ladder).
+    # Snap GT+binary+MMPD through binary's dual-scale 16x16 ordinal lattice.
     BIN_MATCH_FILTER="all"
 
     while [[ $# -gt 0 ]]; do
@@ -227,7 +227,7 @@ if [[ -z "${ANCHOR_CONFIG:-}" && -z "${ANCHOR_CONFIG_BY_DATASET:-}" ]]; then
     exit 1
 fi
 
-"$PYTHON" -u "$REPO/temp/check_mmpd_ordinal_campaign.py" "$MMPD_ROOT"
+"$PYTHON" -u "$REPO/temp/check_mmpd_instance_campaign.py" "$MMPD_ROOT"
 "$PYTHON" -c "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
 
 EVAL_ARGS=(
@@ -262,13 +262,13 @@ EVAL_ARGS=(
 [[ "${FORCE_RAW:-0}" -eq 1 ]] && EVAL_ARGS+=(--force-raw-eval)
 [[ "${FORCE_TRAIN:-0}" -eq 1 ]] && EVAL_ARGS+=(--force-train)
 [[ "${SMOKE:-0}" -eq 1 ]] && EVAL_ARGS+=(--smoke-test)
-EVAL_ARGS+=(--mmpd-ordinal-norm --no-mmpd-instance-norm --mmpd-to-binary-dataset-norm)
+EVAL_ARGS+=(--no-mmpd-ordinal-norm --mmpd-instance-norm --mmpd-to-binary-dataset-norm)
 if [[ -n "${DISC_NATIVE_REPR_STRIDE:-}" ]]; then
     EVAL_ARGS+=(--native-repr-stride "$DISC_NATIVE_REPR_STRIDE")
 fi
 
 echo "[env] DATASET=$DATASET FAKE_SOURCE=$FAKE_SOURCE SMOKE=${SMOKE:-0} FORCE_TRAIN=${FORCE_TRAIN:-0}"
-echo "[env] BIN_MATCH_FILTER=$BIN_MATCH_FILTER (16x16 dual-scale; ordinal ladder OFF)"
+echo "[env] BIN_MATCH_FILTER=$BIN_MATCH_FILTER (binary 16x16 ordinal lattice)"
 echo "[env] ANCHOR_CONFIG_BY_DATASET=${ANCHOR_CONFIG_BY_DATASET:-}"
 echo "[env] PACK_SPLITS=${PACK_SPLITS:-} PACK_FRACTION=${PACK_FRACTION:-}"
 echo "[env] SLICE_LENGTHS=${SLICE_ARR[*]}"
