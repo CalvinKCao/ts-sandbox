@@ -32,7 +32,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         echo "ERROR: submit from the checkout under /scratch, not /home: $REPO" >&2
         exit 2
     }
-    MMPD_ROOT="${MMPD_ROOT_ARG:-$REPO/results/datasets/07-06-mmpd-decoder-ordinal-norm-lb336-hz720-v3}"
+    MMPD_ROOT="${MMPD_ROOT_ARG:-$REPO/reused/mmpd/mmpd_decoder_flat_subsets_paper_lb336_hz720_ordinal_norm}"
     CKPT_BASE="${CKPT_BASE_ARG:-$REPO/results/ckpts}"
     [[ -d "$MMPD_ROOT/mmpd_out/checkpoints" ]] || {
         echo "ERROR: missing MMPD campaign checkpoints: $MMPD_ROOT" >&2

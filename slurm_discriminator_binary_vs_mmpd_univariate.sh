@@ -31,6 +31,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     BINARY_CONFIG=""
     BINARY_CONFIG_BY_DATASET=""
     MMPD_OUTPUT_SUFFIX="results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset"
+    MMPD_ROOT_OVERRIDE=""
     DISC_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-patch-only-fair-univariate-bin16"
     RAW_OUTPUT_SUFFIX="results/datasets/disc-lb336-hz720-ordinal-four-raw-trainval25"
     LOOKBACK=336
@@ -65,6 +66,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --binary-config) BINARY_CONFIG="$2"; shift 2 ;;
             --binary-config-by-dataset) BINARY_CONFIG_BY_DATASET="$2"; shift 2 ;;
             --mmpd-run) MMPD_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
+            --mmpd-root) MMPD_ROOT_OVERRIDE="$2"; shift 2 ;;
             --disc-run) DISC_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
             --raw-run) RAW_OUTPUT_SUFFIX="results/datasets/$2"; shift 2 ;;
             --lookback) LOOKBACK="$2"; shift 2 ;;
@@ -138,7 +140,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
                 --error="results/logs/disc-uni-${ds}-${src}-%j.log" \
                 --mail-type=END,FAIL \
                 --mail-user=ccao87@uwo.ca \
-                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$(slurm_encode "$SLICE_LENGTHS")",PACK_SPLITS="$(slurm_encode "$PACK_SPLITS")",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$(slurm_encode "$ANCHOR_CONFIG_BY_DATASET")",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$(slurm_encode "$BINARY_CONFIG_BY_DATASET")",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",MERGE_PARTIALS=0 \
+                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$(slurm_encode "$SLICE_LENGTHS")",PACK_SPLITS="$(slurm_encode "$PACK_SPLITS")",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$(slurm_encode "$ANCHOR_CONFIG_BY_DATASET")",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$(slurm_encode "$BINARY_CONFIG_BY_DATASET")",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",MMPD_ROOT_OVERRIDE="$MMPD_ROOT_OVERRIDE",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",MERGE_PARTIALS=0 \
                 "$SCRIPT_DIR/slurm_discriminator_binary_vs_mmpd_univariate.sh")"
             JOB_IDS+=("$job_id")
             echo "  -> job $job_id"
@@ -184,7 +186,7 @@ MMPD_OUTPUT_SUFFIX="${MMPD_OUTPUT_SUFFIX:-results/datasets/07-10-mmpd-decoder-pa
 BIN_MATCH_FILTER="${BIN_MATCH_FILTER:-all}"
 OUTPUT_DIR="$REPO/$DISC_OUTPUT_SUFFIX"
 RAW_EVAL_DIR="$REPO/$RAW_OUTPUT_SUFFIX"
-MMPD_ROOT="$REPO/$MMPD_OUTPUT_SUFFIX"
+MMPD_ROOT="${MMPD_ROOT_OVERRIDE:-$REPO/$MMPD_OUTPUT_SUFFIX}"
 SLICE_LENGTHS="${SLICE_LENGTHS// /;}"
 SLICE_LENGTHS="${SLICE_LENGTHS//,/;}"
 IFS=';' read -r -a SLICE_ARR <<< "$SLICE_LENGTHS"
@@ -225,6 +227,7 @@ if [[ -z "${ANCHOR_CONFIG:-}" && -z "${ANCHOR_CONFIG_BY_DATASET:-}" ]]; then
     exit 1
 fi
 
+"$PYTHON" -u "$REPO/temp/check_mmpd_ordinal_campaign.py" "$MMPD_ROOT"
 "$PYTHON" -c "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
 
 EVAL_ARGS=(
@@ -259,6 +262,7 @@ EVAL_ARGS=(
 [[ "${FORCE_RAW:-0}" -eq 1 ]] && EVAL_ARGS+=(--force-raw-eval)
 [[ "${FORCE_TRAIN:-0}" -eq 1 ]] && EVAL_ARGS+=(--force-train)
 [[ "${SMOKE:-0}" -eq 1 ]] && EVAL_ARGS+=(--smoke-test)
+EVAL_ARGS+=(--mmpd-ordinal-norm --no-mmpd-instance-norm --mmpd-to-binary-dataset-norm)
 if [[ -n "${DISC_NATIVE_REPR_STRIDE:-}" ]]; then
     EVAL_ARGS+=(--native-repr-stride "$DISC_NATIVE_REPR_STRIDE")
 fi
