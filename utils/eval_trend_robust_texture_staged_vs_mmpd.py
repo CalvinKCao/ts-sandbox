@@ -230,6 +230,31 @@ def _prediction_tensor(result: Dict[str, torch.Tensor]) -> torch.Tensor:
     return result.get("prediction_global_norm", result["prediction"])
 
 
+def generate_staged_forecast(
+    coarse_model: Any,
+    fine_model: Any,
+    past: torch.Tensor,
+    *,
+    vertical_dual: bool,
+    fine_seed: Optional[int] = None,
+    **generate_kwargs: Any,
+) -> Dict[str, torch.Tensor]:
+    """Generate one final forecast through the checkpoint's actual refinement path."""
+    if vertical_dual:
+        # The vertical model samples the stacked 16+16 canvas and performs the
+        # fine decode / overlap trim internally.  It must not be fed back into
+        # a separately-instantiated 16-row fine model.
+        return coarse_model.generate(past, **generate_kwargs)
+    coarse_out = coarse_model.generate(past, **generate_kwargs)
+    if fine_seed is not None:
+        torch.manual_seed(int(fine_seed))
+    return fine_model.generate(
+        past,
+        future_coarse_2d=coarse_out["future_2d_coarse"],
+        **generate_kwargs,
+    )
+
+
 def evaluate_staged_binary(
     args: argparse.Namespace,
     run: AnchorRun,
@@ -300,12 +325,35 @@ def evaluate_staged_binary(
         dataset_lookback=lookback,
         dataset_horizon=horizon,
     )
-    coarse_model = _load_stage_model(
-        state, "coarse", Path(sub["coarse_pt"]), guidance_model, len(run_variate_indices(run)), device,
+    # A vertical-dual run has one H=(Hc+Hf) model, not independent Hc/Hf
+    # checkpoints.  _load_staged_bundle deliberately aliases coarse_pt/fine_pt
+    # to that one file for metadata compatibility, so dispatch on ``stage``
+    # before constructing the model.  Loading it as ``coarse`` or ``fine``
+    # silently drops the 32-row decoder parameters and invalidates the sample.
+    vertical_dual = (
+        str(sub.get("stage") or "") == "vertical_dual"
+        or bool(getattr(state, "use_vertical_dual_concat", False))
     )
-    fine_model = _load_stage_model(
-        state, "fine", Path(sub["fine_pt"]), guidance_model, len(run_variate_indices(run)), device,
-    )
+    if vertical_dual:
+        coarse_model = _load_stage_model(
+            state,
+            "vertical_dual",
+            Path(sub["coarse_pt"]),
+            guidance_model,
+            len(run_variate_indices(run)),
+            device,
+            strict_non_guidance_shapes=True,
+        )
+        fine_model = coarse_model
+    else:
+        coarse_model = _load_stage_model(
+            state, "coarse", Path(sub["coarse_pt"]), guidance_model, len(run_variate_indices(run)), device,
+            strict_non_guidance_shapes=True,
+        )
+        fine_model = _load_stage_model(
+            state, "fine", Path(sub["fine_pt"]), guidance_model, len(run_variate_indices(run)), device,
+            strict_non_guidance_shapes=True,
+        )
     # Pool windows are z-score series (not pre-ranked) even under ordinal configs.
     for m in (coarse_model, fine_model):
         m._ordinal_input_is_ranked = False
@@ -334,11 +382,12 @@ def evaluate_staged_binary(
             y_true_all.append(future.cpu().numpy())
 
             torch.manual_seed(args.seed + batch_idx)
-            coarse_det = coarse_model.generate(past, sampler="anchor")
-            fine_det = fine_model.generate(
+            fine_det = generate_staged_forecast(
+                coarse_model,
+                fine_model,
                 past,
+                vertical_dual=vertical_dual,
                 sampler="anchor",
-                future_coarse_2d=coarse_det["future_2d_coarse"],
             )
             det_all.append(_prediction_tensor(fine_det).cpu().numpy())
 
@@ -346,11 +395,12 @@ def evaluate_staged_binary(
             for sample_idx in range(args.sample_num):
                 seed = args.seed + batch_idx * 1009 + sample_idx * 17
                 torch.manual_seed(seed)
-                coarse_sample = coarse_model.generate(past, **prob_kwargs)
-                torch.manual_seed(seed)
-                fine_sample = fine_model.generate(
+                fine_sample = generate_staged_forecast(
+                    coarse_model,
+                    fine_model,
                     past,
-                    future_coarse_2d=coarse_sample["future_2d_coarse"],
+                    vertical_dual=vertical_dual,
+                    fine_seed=seed,
                     **prob_kwargs,
                 )
                 batch_samples.append(_prediction_tensor(fine_sample).cpu().numpy())

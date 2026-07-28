@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,6 +28,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from utils.dual_scale_bin_filter import (
     BIN_MATCH_CHOICES,
+    align_mmpd_to_binary_dataset_norm,
     apply_bin_match_to_bundle,
 )
 from utils.binary_disc_debias import (
@@ -39,6 +41,8 @@ from utils.eval_mmpd_gaussian_anchor import (
     DEFAULT_MMPD_REPO,
     ensure_mmpd_repo,
     load_tsf_pack_pool,
+    mmpd_data_split,
+    mmpd_staged_filename_for_run,
     load_tsf_test_subset,
     parse_pack_splits,
     run_mmpd_eval,
@@ -308,6 +312,13 @@ def raw_eval_args(args: argparse.Namespace, dataset: str) -> argparse.Namespace:
     }
     out.pack_splits = getattr(args, "pack_splits", "test")
     out.pack_fraction = getattr(args, "pack_fraction", None)
+    # The ordinal MMPD campaign was trained without instance normalization.
+    # Keep that model-internal representation separate from the final binary
+    # dataset-z output coordinate, which is harmonized below.
+    out.use_ordinal_window_norm = bool(getattr(args, "mmpd_ordinal_norm", False))
+    out.mmpd_instance_norm = bool(getattr(args, "mmpd_instance_norm", False))
+    if out.use_ordinal_window_norm and out.mmpd_instance_norm:
+        raise ValueError("--mmpd-ordinal-norm and --mmpd-instance-norm are mutually exclusive")
     return out
 
 
@@ -429,6 +440,58 @@ def load_past_windows(
     return np.concatenate(past_all, axis=0)
 
 
+def binary_mmpd_train_scaler_map(args: argparse.Namespace, run: Any) -> Dict[str, np.ndarray]:
+    """Read the two training-set scalers that define the output coordinates.
+
+    Binary uses its full training split's z-score scaler.  MMPD's persisted
+    pack uses ``Dataset_MTS``'s StandardScaler on the staged subset CSV.  This
+    function intentionally never looks at selected evaluation targets: it
+    derives the conversion solely from the scalers used to train/evaluate the
+    two models.
+    """
+    lookback, horizon = dataset_window_lengths_for_run(args, run)
+    _pool, _starts, _splits, _lengths, binary_stats = load_tsf_pack_pool(
+        run.dataset,
+        run_variate_indices(run),
+        lookback=lookback,
+        horizon=horizon,
+        train_stride=run_train_stride(run),
+        test_stride=run_test_stride(run),
+        pack_splits=("test",),
+    )
+    binary_mean = np.asarray(binary_stats["mean"], dtype=np.float64).reshape(-1)
+    binary_std = np.asarray(binary_stats["std"], dtype=np.float64).reshape(-1)
+
+    csv_path = Path(args.mmpd_data_dir) / mmpd_staged_filename_for_run(run)
+    meta_path = csv_path.with_suffix(csv_path.suffix + ".meta.json")
+    if not csv_path.is_file() or not meta_path.is_file():
+        raise FileNotFoundError(
+            f"{run.dataset}: missing MMPD staged CSV/scaler metadata at {csv_path}; "
+            "materialize the MMPD pack with the same --mmpd-data-dir first"
+        )
+    split_text = mmpd_data_split(run, Path(args.mmpd_data_dir))
+    train_rows = int(split_text.split(",", 1)[0])
+    frame = pd.read_csv(csv_path)
+    raw_train = frame.iloc[:train_rows, 1:].to_numpy(dtype=np.float64, copy=True)
+    mmpd_mean = raw_train.mean(axis=0)
+    mmpd_std = raw_train.std(axis=0)
+    n_vars = len(run_variate_indices(run))
+    for name, values in (
+        ("binary_mean", binary_mean),
+        ("binary_std", binary_std),
+        ("mmpd_mean", mmpd_mean),
+        ("mmpd_std", mmpd_std),
+    ):
+        if values.shape != (n_vars,) or not np.isfinite(values).all():
+            raise ValueError(f"{run.dataset}: invalid {name} shape/values: {values.shape}")
+    return {
+        "binary_mean": binary_mean,
+        "binary_std": binary_std,
+        "mmpd_mean": mmpd_mean,
+        "mmpd_std": mmpd_std,
+    }
+
+
 def build_raw_bundle(
     args: argparse.Namespace,
     dataset: str,
@@ -456,6 +519,32 @@ def build_raw_bundle(
     if past.shape[0] != ref_shape[0]:
         raise ValueError(f"{dataset}: past/y_true window mismatch {past.shape[0]} vs {ref_shape[0]}")
     validate_variate_alignment(dataset, run, sub, past, y_true_by_source, fakes)
+
+    if (
+        bool(getattr(args, "mmpd_to_binary_dataset_norm", False))
+        and "binary_staged" in y_true_by_source
+        and "mmpd" in y_true_by_source
+    ):
+        scalers = binary_mmpd_train_scaler_map(args, run)
+        aligned_mmpd, align_stats = align_mmpd_to_binary_dataset_norm(
+            binary_y_true=y_true_by_source["binary_staged"],
+            mmpd_y_true=y_true_by_source["mmpd"],
+            mmpd_fakes=fakes["mmpd"],
+            **scalers,
+        )
+        # Labels must use exactly one GT tensor.  This is deliberate rather
+        # than an approximate post-hoc equality check: both model forecasts
+        # are scored against binary's train-split dataset-z target values.
+        y_true_by_source["mmpd"] = y_true_by_source["binary_staged"].copy()
+        fakes["mmpd"] = aligned_mmpd
+        print(
+            f"[{dataset}] MMPD→binary dataset-norm map: "
+            f"scale=[{align_stats['scale_min']:.8f},{align_stats['scale_max']:.8f}] "
+            f"offset=[{align_stats['offset_min']:.8f},{align_stats['offset_max']:.8f}] "
+            f"target_rmse_max={align_stats['target_rmse_max']:.2e} "
+            f"target_max_abs={align_stats['target_max_abs']:.2e}",
+            flush=True,
+        )
 
     if len(y_true_by_source) > 1:
         sources = list(y_true_by_source)
@@ -543,25 +632,9 @@ def build_raw_bundle(
             flush=True,
         )
 
-    if getattr(args, "ordinal_ladder_quantize", False):
+    if getattr(args, "ordinal_ladder_quantize", False) and args.bin_match_filter != "all":
         # Snap ALL horizons (GT, MMPD fakes, binary fakes) onto the global ordinal ladder.
         # Binary preds are post stride-2 linear upsample and are mostly off-ladder otherwise.
-        if "mmpd" in fakes:
-            binary_pack_file = pack_path(args.raw_eval_dir, "binary_staged", dataset)
-            if binary_pack_file.is_file():
-                bin_yt = load_npz(binary_pack_file)["y_true"].astype(np.float32)
-                mmpd_yt = y_true_by_source["mmpd"]
-                if bin_yt.shape != mmpd_yt.shape:
-                    raise ValueError(
-                        f"{dataset}: binary/mmpd y_true shape mismatch {bin_yt.shape} vs {mmpd_yt.shape} "
-                        "before --ordinal-ladder-quantize"
-                    )
-                mse = float(np.mean((bin_yt - mmpd_yt) ** 2))
-                if mse > 1e-6:
-                    raise ValueError(
-                        f"{dataset}: binary vs mmpd y_true mse={mse:.6f}; "
-                        "refusing --ordinal-ladder-quantize onto a mismatched coordinate space"
-                    )
         ladder = load_ordinal_ladder_for_run(args, run)
         for src in list(fakes):
             quantized, q_stats = quantize_to_ordinal_ladder(fakes[src], ladder)
@@ -582,6 +655,17 @@ def build_raw_bundle(
                 f"max_abs_delta={gt_stats['max_abs_delta']:.6f}",
                 flush=True,
             )
+
+    elif getattr(args, "ordinal_ladder_quantize", False):
+        # apply_bin_match_to_bundle(mode=all) is already the exact binary
+        # ordinal -> 16x16 bounded dual decode -> ordinal denorm path.  A
+        # second generic nearest-global-ladder pass would move non-uniform
+        # ladder values off its legal 256 decoded rungs.
+        print(
+            f"[{dataset}] skipping generic ordinal quantize: bin-match=all already "
+            "produced the exact binary 256-bin dataset-z decode lattice",
+            flush=True,
+        )
 
     native_stride = int(getattr(args, "native_repr_stride", 1) or 1)
     if native_stride > 1:
@@ -1519,6 +1603,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-raw-eval", action="store_true")
     parser.add_argument("--no-update-mmpd", action="store_true")
     parser.add_argument(
+        "--mmpd-ordinal-norm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Evaluate the ordinal MMPD Decoder in its no-instance-norm ordinal representation.",
+    )
+    parser.add_argument(
+        "--mmpd-instance-norm",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use MMPD's legacy per-window instance normalization (incompatible with ordinal MMPD runs).",
+    )
+    parser.add_argument(
+        "--mmpd-to-binary-dataset-norm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Affinely map MMPD output z-scores to binary's dataset-z coordinates from both train-split scalers.",
+    )
+    parser.add_argument(
         "--bin-match-filter",
         choices=list(BIN_MATCH_CHOICES),
         default=None,
@@ -1559,6 +1661,12 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Feed only the z-scored horizon patch (no lookback). Isolates local texture from past-continuity cues.",
+    )
+    parser.add_argument(
+        "--save-classification-scores",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Persist per-patch discriminator probabilities for forecast/classification visualizations.",
     )
     parser.add_argument(
         "--pack-splits",

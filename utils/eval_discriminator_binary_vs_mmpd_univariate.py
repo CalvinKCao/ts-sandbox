@@ -104,7 +104,7 @@ class UnivariateRealVsFakeDataset(Dataset):
     def __len__(self) -> int:
         return len(self.items)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         window, offset, variate, label = self.items[idx]
         src = self.fake if label == 1 else self.real
         candidate = src[window, variate : variate + 1, offset : offset + self.slice_len]
@@ -118,6 +118,7 @@ class UnivariateRealVsFakeDataset(Dataset):
             torch.tensor(offset, dtype=torch.long),
             torch.tensor(float(label), dtype=torch.float32),
             torch.tensor(int(window), dtype=torch.long),
+            torch.tensor(int(variate), dtype=torch.long),
         )
 
 
@@ -134,7 +135,7 @@ def evaluate_classifier(
     labels_all: List[np.ndarray] = []
     windows_all: List[np.ndarray] = []
     for batch in loader:
-        x, offsets, labels, windows = batch
+        x, offsets, labels, windows, _variates = batch
         x = x.to(device)
         offsets = offsets.to(device)
         labels = labels.to(device)
@@ -160,6 +161,27 @@ def evaluate_classifier(
     }
     out.update(window_level_metrics(windows_np, labels_np, probs))
     return out
+
+
+@torch.no_grad()
+def collect_classifier_scores(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+) -> Dict[str, np.ndarray]:
+    """Keep per-patch test scores so forecast plots show classifier decisions."""
+    model.eval()
+    fields: Dict[str, List[np.ndarray]] = {
+        "prob_fake": [], "label": [], "window": [], "variate": [], "offset": [],
+    }
+    for x, offsets, labels, windows, variates in loader:
+        logits = model(x.to(device), offsets.to(device))
+        fields["prob_fake"].append(torch.sigmoid(logits).detach().cpu().numpy().astype(np.float32))
+        fields["label"].append(labels.numpy().astype(np.float32))
+        fields["window"].append(windows.numpy().astype(np.int64))
+        fields["variate"].append(variates.numpy().astype(np.int64))
+        fields["offset"].append(offsets.numpy().astype(np.int64))
+    return {key: np.concatenate(parts) for key, parts in fields.items()}
 
 
 def train_classifier(
@@ -285,6 +307,14 @@ def train_classifier(
     if best_state is not None:
         model.load_state_dict(best_state)
     test_metrics = evaluate_classifier(model, test_loader, device)
+
+    if bool(getattr(args, "save_classification_scores", False)):
+        score_path = (
+            args.output_dir / "scores" / f"{dataset}_{fake_source}_L{slice_len}_test_scores.npz"
+        )
+        score_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(score_path, **collect_classifier_scores(model, test_loader, device))
+        print(f"[disc-uni] wrote classifier scores {score_path}", flush=True)
 
     if args.save_checkpoints:
         ckpt_path = (

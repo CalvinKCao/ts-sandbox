@@ -116,6 +116,8 @@ def _load_stage_model(
     guidance_model: Any,
     n_vars: int,
     device: torch.device,
+    *,
+    strict_non_guidance_shapes: bool = False,
 ) -> torch.nn.Module:
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
@@ -140,6 +142,28 @@ def _load_stage_model(
         **model_kwargs,
     ).to(device)
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    if strict_non_guidance_shapes:
+        ckpt_state = ckpt["model_state_dict"]
+        model_state = model.state_dict()
+        mismatched = [
+            key for key, value in ckpt_state.items()
+            if not key.startswith("guidance_model.")
+            and key in model_state
+            and tuple(value.shape) != tuple(model_state[key].shape)
+        ]
+        missing = [
+            key for key in model_state
+            if not key.startswith("guidance_model.") and key not in ckpt_state
+        ]
+        unexpected = [
+            key for key in ckpt_state
+            if not key.startswith("guidance_model.") and key not in model_state
+        ]
+        if mismatched or missing or unexpected:
+            raise RuntimeError(
+                f"{ckpt_path}: {stage} checkpoint/model incompatibility; "
+                f"mismatched={mismatched[:3]} missing={missing[:3]} unexpected={unexpected[:3]}"
+            )
     load_diffusion_state_keep_attached_guidance(model, ckpt["model_state_dict"])
     model.eval()
     return model

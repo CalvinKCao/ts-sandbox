@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Literal, Tuple
+from typing import Any, Dict, Literal, Tuple
 
 import numpy as np
 import torch
@@ -38,6 +38,144 @@ from models.diffusion_tsf.preprocessing import TimeSeriesTo2D
 
 BinMatchMode = Literal["mmpd", "both", "all"]
 BIN_MATCH_CHOICES: Tuple[str, ...] = ("mmpd", "both", "all")
+
+
+def align_mmpd_to_binary_dataset_norm(
+    *,
+    binary_y_true: np.ndarray,
+    mmpd_y_true: np.ndarray,
+    mmpd_fakes: np.ndarray,
+    mmpd_mean: np.ndarray,
+    mmpd_std: np.ndarray,
+    binary_mean: np.ndarray,
+    binary_std: np.ndarray,
+    max_rmse: float = 2e-5,
+    max_abs_error: float = 2e-4,
+) -> tuple[np.ndarray, Dict[str, float]]:
+    """Map MMPD's dataset z-score convention into binary's convention.
+
+    MMPD and binary packs contain the same raw target windows, but their
+    train-split scalers can differ slightly.  Derive the affine map from those
+    saved training scalers -- never from evaluation targets -- then validate
+    it against the independently produced paired targets.  The caller keeps
+    ``binary_y_true`` as the canonical GT tensor only after that validation.
+    """
+    binary = np.asarray(binary_y_true, dtype=np.float32)
+    mmpd_true = np.asarray(mmpd_y_true, dtype=np.float32)
+    mmpd_pred = np.asarray(mmpd_fakes, dtype=np.float32)
+    if binary.shape != mmpd_true.shape or binary.shape != mmpd_pred.shape:
+        raise ValueError(
+            "binary/MMPD coordinate alignment requires identical (N,V,T) shapes, got "
+            f"binary={binary.shape} mmpd_y_true={mmpd_true.shape} mmpd_fakes={mmpd_pred.shape}"
+        )
+    if binary.ndim != 3:
+        raise ValueError(f"expected (N,V,T) packs, got {binary.shape}")
+    if not (np.isfinite(binary).all() and np.isfinite(mmpd_true).all() and np.isfinite(mmpd_pred).all()):
+        raise ValueError("cannot align non-finite MMPD/binary coordinate packs")
+
+    n_vars = binary.shape[1]
+    def _scaler(name: str, values: np.ndarray) -> np.ndarray:
+        flat = np.asarray(values, dtype=np.float64).reshape(-1)
+        if flat.size != n_vars or not np.isfinite(flat).all():
+            raise ValueError(f"{name} must contain {n_vars} finite variate values, got {flat.shape}")
+        return flat
+
+    src_mean = _scaler("mmpd_mean", mmpd_mean)
+    src_std = _scaler("mmpd_std", mmpd_std)
+    dst_mean = _scaler("binary_mean", binary_mean)
+    dst_std = _scaler("binary_std", binary_std)
+    if np.any(src_std <= 0.0) or np.any(dst_std <= 0.0):
+        raise ValueError("MMPD/binary training scaler standard deviations must be positive")
+    scale = src_std / dst_std
+    offset = (src_mean - dst_mean) / dst_std
+    aligned_true = mmpd_true * scale[None, :, None] + offset[None, :, None]
+    residual = aligned_true - binary
+    rmse = np.sqrt(np.mean(residual**2, axis=(0, 2)))
+    max_abs = np.max(np.abs(residual), axis=(0, 2))
+    if float(rmse.max()) > float(max_rmse) or float(max_abs.max()) > float(max_abs_error):
+        raise ValueError(
+            "MMPD and binary targets are not related by a dataset-normalization affine map: "
+            f"max_rmse={float(rmse.max()):.3e} max_abs={float(max_abs.max()):.3e}. "
+            "Refuse to compare predictions from non-corresponding windows or an instance-normalized pack."
+        )
+    aligned_pred = mmpd_pred * scale[None, :, None] + offset[None, :, None]
+    return aligned_pred.astype(np.float32), {
+        "scale_min": float(scale.min()),
+        "scale_max": float(scale.max()),
+        "offset_min": float(offset.min()),
+        "offset_max": float(offset.max()),
+        "target_rmse_max": float(rmse.max()),
+        "target_max_abs": float(max_abs.max()),
+    }
+
+
+def assert_on_binary_dual_ordinal_lattice(
+    horizon: np.ndarray,
+    past: np.ndarray,
+    *,
+    ladder: OrdinalLadder,
+    coarse_height: int,
+    fine_height: int,
+    device: torch.device,
+    repr_time_stride: int = 1,
+    batch_size: int = 64,
+) -> Dict[str, float]:
+    """Assert values decode from one of binary's Hc×Hf ordinal bins.
+
+    This is stricter than checking membership in the full training ladder:
+    each (window, variate) forecast value must correspond to one of the at
+    most ``coarse_height * fine_height`` decoded ordinal bins.  Interpolation
+    at representation stride >1 creates non-bin values, so this assertion is
+    intentionally unavailable for that representation.
+    """
+    if int(repr_time_stride) != 1:
+        raise ValueError(
+            "exact Hc×Hf ordinal-lattice validation requires representation_time_stride=1; "
+            f"got {repr_time_stride}"
+        )
+    values = np.asarray(horizon, dtype=np.float32)
+    if values.ndim != 3 or values.shape[:2] != past.shape[:2]:
+        raise ValueError(f"expected matching (N,V,T) horizon/past, got {values.shape}/{past.shape}")
+    n_bins = int(coarse_height) * int(fine_height)
+    if n_bins <= 0:
+        raise ValueError(f"invalid dual-scale bin count {coarse_height}×{fine_height}")
+    total = 0
+    invalid = 0
+    max_delta = 0.0
+    max_unique = 0
+    for start in range(0, values.shape[0], max(1, int(batch_size))):
+        end = min(values.shape[0], start + max(1, int(batch_size)))
+        legal = binary_dual_decode_levels_dataset_z(
+            past[start:end],
+            ladder=ladder,
+            coarse_height=coarse_height,
+            fine_height=fine_height,
+            device=device,
+        )
+        chunk = values[start:end]
+        # Compare to decoded dataset-z values directly.  Re-encoding an
+        # already decoded level can choose a different ordinal rank when the
+        # global ladder has uneven gaps, which is exactly the false positive
+        # this assertion is intended to avoid.
+        delta = np.min(np.abs(chunk[..., None] - legal[:, :, None, :]), axis=-1)
+        valid = delta <= 1e-6
+        invalid += int((~valid).sum())
+        total += int(valid.size)
+        max_delta = max(max_delta, float(delta.max(initial=0.0)))
+        max_unique = max(
+            max_unique,
+            max(int(np.unique(legal[bi, vi]).size) for bi in range(legal.shape[0]) for vi in range(legal.shape[1])),
+        )
+    if invalid:
+        raise AssertionError(
+            f"{invalid}/{total} values are outside binary's {n_bins}-bin ordinal decode lattice"
+        )
+    return {
+        "n_bins": float(n_bins),
+        "n_values": float(total),
+        "max_unique_per_chunk_variate": float(max_unique),
+        "max_decode_delta": float(max_delta),
+    }
 
 
 def _resample_1d_time_series(x: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -79,6 +217,59 @@ def dual_scale_ordinal_roundtrip(
         cdf_decoder=cdf_decoder,
         squeeze_univariate=False,
     )
+
+
+def binary_dual_decode_levels_dataset_z(
+    past: np.ndarray,
+    *,
+    ladder: OrdinalLadder,
+    coarse_height: int,
+    fine_height: int,
+    device: torch.device,
+) -> np.ndarray:
+    """Decode every Hc×Hf binary ordinal bin into final dataset-z space.
+
+    This deliberately runs rank centers through the same bounded dual-CDF
+    encode/decode and ordinal denormalization used by the discriminator
+    canonicalization.  The result is window-specific only when the causal OOD
+    envelope introduces a shift.
+    """
+    past_np = np.asarray(past, dtype=np.float32)
+    if past_np.ndim != 3:
+        raise ValueError(f"expected past (N,V,L), got {past_np.shape}")
+    n_bins = int(coarse_height) * int(fine_height)
+    if n_bins <= 0:
+        raise ValueError(f"invalid dual-scale bin count {coarse_height}×{fine_height}")
+    with torch.no_grad():
+        past_t = torch.from_numpy(past_np).to(device)
+        past_ord, _future_ord, ladder_b, ood_shift = ordinal_encode(
+            past_t,
+            None,
+            ladder=ladder,
+            apply_ood_shift=True,
+            causal_only=True,
+        )
+        rank_max = ladder_b.rank_max_per_variate().to(device=device, dtype=torch.float32)
+        centers = (
+            (torch.arange(n_bins, device=device, dtype=torch.float32) + 0.5)
+            / float(n_bins)
+        )
+        rank_centers = centers.view(1, 1, n_bins) * rank_max.view(1, -1, 1)
+        rank_centers = rank_centers.expand(past_t.shape[0], -1, -1)
+        to_2d = TimeSeriesTo2D(height=int(coarse_height), max_scale=1.0).to(device)
+        decoded_ranks = dual_scale_ordinal_roundtrip(
+            rank_centers,
+            to_2d,
+            coarse_height=int(coarse_height),
+            fine_height=int(fine_height),
+            rank_max=rank_max,
+            decoder="mean",
+        )
+        _past_z, decoded_z = ordinal_decode(
+            past_ord[..., :1], decoded_ranks, ladder_b, ood_shift=ood_shift,
+        )
+        assert decoded_z is not None
+        return decoded_z.detach().cpu().numpy().astype(np.float32)
 
 
 def apply_dual_scale_bin_filter(
@@ -213,9 +404,9 @@ def run_self_test() -> None:
     # Synthetic train ladder in z-score space (unique ranks per variate).
     train = np.stack(
         [
-            np.linspace(-2.0, 2.0, 64),
-            np.linspace(-1.5, 3.0, 64),
-            np.linspace(-0.5, 1.0, 64),
+            np.linspace(-1.0, 1.0, 64) ** 3 * 2.0,
+            np.exp(np.linspace(-1.5, 1.0, 64)) - 1.0,
+            np.sign(np.linspace(-1.0, 1.0, 64)) * np.linspace(-1.0, 1.0, 64) ** 2,
         ],
         axis=1,
     ).astype(np.float32)
@@ -250,6 +441,48 @@ def run_self_test() -> None:
     err = float(np.max(np.abs(filtered - again)))
     if err > 1e-5:
         raise AssertionError(f"ordinal dual-scale round-trip not idempotent: max err={err}")
+    lattice_stats = assert_on_binary_dual_ordinal_lattice(
+        filtered,
+        past,
+        ladder=ladder,
+        coarse_height=16,
+        fine_height=16,
+        device=device,
+    )
+    decoded_levels = binary_dual_decode_levels_dataset_z(
+        past[:1],
+        ladder=ladder,
+        coarse_height=16,
+        fine_height=16,
+        device=device,
+    )
+    if decoded_levels.shape != (1, 3, 256):
+        raise AssertionError(f"256-bin decode shape mismatch: {decoded_levels.shape}")
+    if not np.isfinite(decoded_levels).all():
+        raise AssertionError("256-bin ordinal decode produced non-finite dataset-z values")
+
+    # MMPD's saved outputs are train-set z-scores under its own scaler.  Use
+    # known train scalers, not target regression, to recover binary dataset-z.
+    mmpd_mean = np.asarray([11.0, -2.0, 4.0], dtype=np.float32)
+    mmpd_std = np.asarray([2.8, 1.4, 3.3], dtype=np.float32)
+    binary_mean = np.asarray([10.6, -3.0, 4.3], dtype=np.float32)
+    binary_std = np.asarray([2.0, 2.0, 3.0], dtype=np.float32)
+    mmpd_scale = mmpd_std / binary_std
+    mmpd_offset = (mmpd_mean - binary_mean) / binary_std
+    binary_target = horizon * mmpd_scale[None, :, None] + mmpd_offset[None, :, None]
+    mmpd_fake = (horizon + 0.15).astype(np.float32)
+    aligned_fake, align_stats = align_mmpd_to_binary_dataset_norm(
+        binary_y_true=binary_target,
+        mmpd_y_true=horizon,
+        mmpd_fakes=mmpd_fake,
+        mmpd_mean=mmpd_mean,
+        mmpd_std=mmpd_std,
+        binary_mean=binary_mean,
+        binary_std=binary_std,
+    )
+    expected_fake = mmpd_fake * mmpd_scale[None, :, None] + mmpd_offset[None, :, None]
+    if not np.allclose(aligned_fake, expected_fake.astype(np.float32), rtol=0.0, atol=2e-6):
+        raise AssertionError("MMPD→binary dataset-z affine mapping changed a known fake incorrectly")
 
     # Stride-2 path: upsample is lossy, so only check finiteness + shape.
     filtered_s2 = apply_dual_scale_bin_filter(
@@ -286,7 +519,11 @@ def run_self_test() -> None:
     )
     if not np.isfinite(out_ood).all():
         raise AssertionError("OOD shift path produced non-finite values")
-    print(f"dual_scale_bin_filter self-test ok (max idempotence err={err:.2e})")
+    print(
+        "dual_scale_bin_filter self-test ok "
+        f"(max idempotence err={err:.2e}, bins={int(lattice_stats['n_bins'])}, "
+        f"decoded_levels={decoded_levels.shape[-1]}, align_rmse={align_stats['target_rmse_max']:.2e})"
+    )
 
 
 def parse_args() -> argparse.Namespace:

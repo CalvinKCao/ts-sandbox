@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Quick Killarney probe: load the Narval vertical-dual checkpoints and the
-# existing paper MMPD Decoder checkpoints, then train a tiny univariate
-# discriminator on each dataset after shared ordinal snapping.
+# ordinal-normalized MMPD Decoder checkpoints, then train a tiny univariate
+# discriminator in binary's shared dataset-z / 256-bin ordinal decode space.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,12 +32,13 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         echo "ERROR: submit from the checkout under /scratch, not /home: $REPO" >&2
         exit 2
     }
-    MMPD_ROOT="${MMPD_ROOT_ARG:-$REPO/results/datasets/07-10-mmpd-decoder-paper-lb336-hz720-subset}"
+    MMPD_ROOT="${MMPD_ROOT_ARG:-$REPO/results/datasets/07-06-mmpd-decoder-ordinal-norm-lb336-hz720-v3}"
     CKPT_BASE="${CKPT_BASE_ARG:-$REPO/results/ckpts}"
     [[ -d "$MMPD_ROOT/mmpd_out/checkpoints" ]] || {
         echo "ERROR: missing MMPD campaign checkpoints: $MMPD_ROOT" >&2
         exit 2
     }
+    python3 -u "$REPO/temp/check_mmpd_ordinal_campaign.py" "$MMPD_ROOT"
     [[ -d "$REPO/temp/MMPD" ]] || {
         echo "ERROR: missing $REPO/temp/MMPD; clone the pinned MMPD checkout before running." >&2
         exit 2
@@ -113,6 +114,8 @@ COMMON_ARGS=(
     --pack-splits test
     --test-max-items 8 --max-windows 8
     --raw-eval-dir "$RAW_DIR"
+    --mmpd-ordinal-norm --no-mmpd-instance-norm
+    --mmpd-to-binary-dataset-norm
     --bin-match-filter all
     --ordinal-ladder-quantize
     --no-update-mmpd
@@ -132,4 +135,9 @@ python -u "$REPO/utils/eval_discriminator_binary_vs_mmpd_univariate.py" \
     --epochs 2 --patience 2 --batch-size 32 \
     --max-train-examples 128 --max-eval-examples 64 \
     --max-batches-per-epoch 2 \
-    --force-train --save-checkpoints
+    --force-train --save-checkpoints --save-classification-scores
+
+python -u "$REPO/temp/plot_univariate_disc_ladder.py" \
+    "${COMMON_ARGS[@]}" \
+    --output-dir "$DISC_DIR" \
+    --plot-slice-len 16 --plot-windows 2 --plot-variate 0
