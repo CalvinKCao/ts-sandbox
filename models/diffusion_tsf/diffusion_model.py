@@ -2029,7 +2029,7 @@ class DiffusionTSF(nn.Module):
                 snapshot_timesteps=snapshot_timesteps,
             )
 
-        hir_cdf, _counts = blend_patch_bins(
+        hir_cdf, patch_vote_counts = blend_patch_bins(
             patch_cdf,
             locations,
             edges,
@@ -2052,6 +2052,11 @@ class DiffusionTSF(nn.Module):
             "future_2d_fine": hir_cdf,
             "past_2d_coarse": past_maps["coarse"],
             "past_2d_fine": past_maps["fine"],
+            # Keep the pre-blend crops for diagnostics which must not average
+            # the stride-overlapping patch predictions.
+            "patch_cdf_unblended": patch_cdf,
+            "patch_locations": locations,
+            "patch_vote_counts": patch_vote_counts,
             "diffusion_stage": "patch_refine",
         }
 

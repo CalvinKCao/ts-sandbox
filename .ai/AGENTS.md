@@ -16,10 +16,10 @@ Run `git branch --show-current` to see what branch you're on. IF THE BRANCH HAS 
 - ALWAYS dry run risky glob/regex expansion commands that might accidentally permanently modify or delete things they're not supposed to.
 
 ## Alliance Canada / Slurm
-For anything Slurm/Alliance Canada related, ALWAYS use the `/alliancecan` skill first.
-If `/alliancecan` does not resolve the question, check `wiki_docs/` for cluster-specific details.
+For anything Slurm/Alliance Canada related, ALWAYS use the `/alliancecan-remote-gpu` skill first.
+If `/alliancecan-remote-gpu` does not resolve the question, check `wiki_docs/` for cluster-specific details.
 
-When giving **pull / prep / submit** commands for Killarney (or any cluster), follow the alliancecan skill: **one copy-pastable bash block**, with optional or alternate lines (e.g. smoke) **commented out** (`#`), not split across prose.
+When giving **pull / prep / submit** commands for Killarney (or any cluster), follow the alliancecan skill: **one copy-pastable bash block**, with optional or alternate lines **commented out** (`#`), not split across prose.
 
 ## Cluster job submission (strict)
 Only two login-node training/eval entrypoints exist. Always name them exactly:
@@ -53,7 +53,7 @@ Use `wandb` for training/eval runs tied to this repo.
 - **Leaderboard project:** pipeline runs that should appear in the sweep table must use **`ts-sandbox-leaderboard`** (`wandb.project` in YAML, or `configs/base/binary_staged.yaml` default). Do not point Slurm submit scripts at ad-hoc project names unless the user explicitly asks.
 - `submit_binary.sh` enables wandb when `WANDB_API_KEY` is set and defaults `--wandb-project ts-sandbox-leaderboard` unless you pass `--wandb-project …`. YAML `wandb.project` still applies for `submit_mmpd.sh` / in-process inits unless those paths pass an explicit project.
 - Staged eval rows: `job_type=staged_eval`, metrics `eval/staged_*` (e.g. `eval/staged_prob_mse`, `eval/staged_anchor_mse`, `eval/staged_crps`). Set `config_nickname` / tags so leaderboard scripts can filter runs.
-- **MMPD eval → leaderboard:** campaigns driven by `--mmpd-run-config` should set `mmpd.leaderboard: true` in that YAML. After each dataset worker finishes eval, `utils/eval_mmpd_gaussian_anchor.py` auto-creates an `mmpd_eval` run in `ts-sandbox-leaderboard` (group `MM-DD-{SLURM_JOB_ID}-{dataset}-{config_stem}`, metrics `eval/staged_*`). Requires `WANDB_API_KEY` on the compute node. Skip with `--no-mmpd-leaderboard`; backfill old runs with `python archive/utils/sync_leaderboard_wandb_metadata.py --decoder-grad-accum-only` (or add a matching stub creator for the campaign).
+- **MMPD eval → leaderboard:** campaigns driven by `--mmpd-run-config` should set `mmpd.leaderboard: true` in that YAML. After each dataset worker finishes eval, `utils/eval_mmpd_gaussian_anchor.py` auto-creates an `mmpd_eval` run in `ts-sandbox-leaderboard` (group `MM-DD-{SLURM_JOB_ID}-{dataset}-{config_stem}`, metrics `eval/staged_*`). Requires `WANDB_API_KEY` on the compute node. Skip with `--no-mmpd-leaderboard`; backfill old runs with `python utils/sync_leaderboard_wandb_metadata.py --decoder-grad-accum-only` (or add a matching stub creator for the campaign).
 - Use a stable project name via `wandb.init(...)`.
 - Standardize the API key env var as `WANDB_API_KEY` (do not depend on key files in this repo).
 - Set `name=` to describe what changed vs prior runs; avoid generic names.
@@ -76,6 +76,3 @@ Use `wandb` for training/eval runs tied to this repo.
 
 ## General code style
 Always fail fast over adding a million compatability/fallback paths.
-
-## One-off scripts
-Put throwaway or exploratory scripts in `temp/` at repo root (gitignored). Do not add them under `utils/` or the repo root unless they are meant to be permanent tooling.

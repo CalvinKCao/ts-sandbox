@@ -322,7 +322,7 @@ echo "=================================================================="
 | Default GPU | L40S (`--gres=gpu:l40s:1`) — shorter queue |
 | Heavy GPU | H100 (`--partition=gpubase_h100_b4 --gpus-per-node=h100:1`) |
 | Smoke wall time | `0:15:00` (L40S) — request ≥20 min to cover pip install |
-| Full wall (L40S) | `2-00:00:00` pretrain, `0-14:00:00` finetune |
+| Full wall (L40S) | `01:00:00` default |
 | Full wall (H100) | `1-12:00:00` |
 | Modules | `StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9` |
 | Venv | Always rebuild on `$SLURM_TMPDIR` — never activate from Lustre |
