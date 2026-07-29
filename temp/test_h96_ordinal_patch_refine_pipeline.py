@@ -86,6 +86,7 @@ def _test_config_and_search() -> None:
         str(REPO_ROOT / "configs" / "binary_patch_refine_lb336_hz96_ordinal_tuned_synth_fallback.yaml")
     )
     fallback_pretrain = next(p for p in fallback["phases"] if p["phase"] == "staged_diffusion_pretrain")
+    assert fallback_pretrain["reuse_pretrain_from_config"] == "binary_patch_refine_lb336_hz96_full"
     assert fallback_pretrain["require_reuse_pretrain"] is False
     assert fallback_pretrain["epochs"] == 20
     assert fallback_pretrain["patch_refine_epochs"] == 1
