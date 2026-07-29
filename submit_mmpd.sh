@@ -47,6 +47,10 @@ ORDINAL_UPSCALE=0
 DATASETS_EXPLICIT=0
 GPU_TYPE=""
 MMPD_INSTANCE_NORM=1
+EVAL_EXISTING_DISCRIMINATOR=0
+EXISTING_MMPD_ROOT=""
+DISC_RUN=""
+RAW_RUN=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -74,6 +78,10 @@ while [[ $# -gt 0 ]]; do
         --gpu) GPU_TYPE="$2"; shift 2 ;;
         --mmpd-instance-norm) MMPD_INSTANCE_NORM=1; shift ;;
         --no-mmpd-instance-norm) MMPD_INSTANCE_NORM=0; shift ;;
+        --eval-existing-discriminator) EVAL_EXISTING_DISCRIMINATOR=1; shift ;;
+        --existing-mmpd-root) EXISTING_MMPD_ROOT="$2"; shift 2 ;;
+        --disc-run) DISC_RUN="$2"; shift 2 ;;
+        --raw-run) RAW_RUN="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -152,6 +160,51 @@ filter_datasets_available() {
 }
 
 filter_datasets_available
+
+if [[ "$EVAL_EXISTING_DISCRIMINATOR" -eq 1 ]]; then
+    [[ -n "$EXISTING_MMPD_ROOT" ]] || {
+        echo "ERROR: --eval-existing-discriminator requires --existing-mmpd-root" >&2
+        exit 1
+    }
+    [[ -z "$MMPD_RUN_CONFIG" && "$SKIP_MMPD_TRAIN" -eq 0 && "$RESUME" -eq 0 && "$SMOKE" -eq 0 ]] || {
+        echo "ERROR: fixed MMPD discriminator mode does not accept --mmpd-run-config, --skip-mmpd-train, --resume, or --smoke" >&2
+        exit 1
+    }
+    [[ "$LOOKBACK" -eq 96 && "$HORIZON" -eq 96 ]] || {
+        echo "ERROR: fixed MMPD discriminator mode is fixed to lookback=336 and horizon=720; omit --lookback/--horizon" >&2
+        exit 1
+    }
+    [[ "$MMPD_BACKBONE" == Decoder ]] || {
+        echo "ERROR: fixed MMPD discriminator mode requires --mmpd-backbone Decoder" >&2
+        exit 1
+    }
+    [[ "$EXISTING_MMPD_ROOT" == /* ]] || EXISTING_MMPD_ROOT="$REPO/$EXISTING_MMPD_ROOT"
+    python3 -u "$REPO/temp/check_mmpd_reused_decoder_root.py" \
+        "$EXISTING_MMPD_ROOT" --datasets "${DATASETS[@]}"
+    DISC_RUN="${DISC_RUN:-$(date +%m-%d)-mmpd-h720-existing-disc}"
+    RAW_RUN="${RAW_RUN:-${DISC_RUN}-raw}"
+    echo "Submitting existing h720 MMPD discriminator jobs only; MMPD checkpoints will not be trained."
+    exec "$REPO/slurm_discriminator_binary_vs_mmpd_univariate.sh" \
+        --datasets "$DATASETS_CSV" \
+        --fake-sources mmpd \
+        --anchor-config bce_dist_guidance_cond_3x336_overlap_value_width_fixed_hp \
+        --binary-config configs/bce_dist_guidance_cond_3x336_overlap_value_width_fixed_hp.yaml \
+        --mmpd-root "$EXISTING_MMPD_ROOT" \
+        --mmpd-backbone Decoder \
+        --lookback 336 \
+        --horizon 720 \
+        --test-stride 4 \
+        --pack-splits test \
+        --pack-fraction 1.0 \
+        --slice-lengths 8,16,32 \
+        --bin-match-filter all \
+        --force-raw-eval \
+        --force-train \
+        --allow-reused-mmpd-root \
+        --disc-run "$DISC_RUN" \
+        --raw-run "$RAW_RUN" \
+        --time "$WALL_MMPD"
+fi
 
 pick_anchor_root() {
     local ds="$1"

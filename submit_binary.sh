@@ -32,6 +32,9 @@ WANDB_PROJECT=""
 WANDB_PROJECT_EXPLICIT=0
 WALL_OVERRIDE=""
 PARALLEL_OPTUNA=""
+EVAL_EXISTING_PATCH_REFINE=0
+EXISTING_CKPT_ROOTS=""
+DISC_RUN=""
 if [[ "$(hostname)" == *"narval"* ]]; then
     ACCOUNT="def-boyuwang"
     GPU_TYPE="a100"
@@ -52,10 +55,105 @@ while [[ $# -gt 0 ]]; do
         --wandb-project) WANDB_PROJECT="$2"; WANDB_PROJECT_EXPLICIT=1; shift 2 ;;
         --time) WALL_OVERRIDE="$2"; shift 2 ;;
         --parallel-optuna) PARALLEL_OPTUNA="$2"; shift 2 ;;
+        --eval-existing-patch-refine) EVAL_EXISTING_PATCH_REFINE=1; shift ;;
+        --existing-ckpt-roots) EXISTING_CKPT_ROOTS="$2"; shift 2 ;;
+        --disc-run) DISC_RUN="$2"; shift 2 ;;
         --gpu) GPU_TYPE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+# Fixed-checkpoint h96 discriminator mode.  This deliberately bypasses the
+# training pipeline: the only model fit is the discriminator inside the eval.
+if [[ "$EVAL_EXISTING_PATCH_REFINE" -eq 1 ]]; then
+    [[ -n "$EXISTING_CKPT_ROOTS" ]] || {
+        echo "ERROR: --eval-existing-patch-refine requires --existing-ckpt-roots dataset=/absolute/or/relative/run,..." >&2
+        exit 1
+    }
+    [[ -z "$CONFIGS" ]] || {
+        echo "ERROR: --configs is not used with --eval-existing-patch-refine" >&2
+        exit 1
+    }
+    [[ "$RESUME" -eq 0 && "$SMOKE" -eq 0 && -z "$PARALLEL_OPTUNA" ]] || {
+        echo "ERROR: --resume, --smoke, and --parallel-optuna are not valid with --eval-existing-patch-refine" >&2
+        exit 1
+    }
+
+    STORE="${RESULTS_ROOT:-$SCRIPT_DIR/results}"
+    LOG_DIR="$STORE/logs"
+    mkdir -p "$LOG_DIR"
+    IFS=',' read -ra EVAL_DATASETS <<< "$DATASETS"
+    IFS=',' read -ra ROOT_PAIRS <<< "$EXISTING_CKPT_ROOTS"
+    declare -A ROOT_BY_DATASET=()
+    for pair in "${ROOT_PAIRS[@]}"; do
+        [[ "$pair" == *=* ]] || {
+            echo "ERROR: invalid --existing-ckpt-roots entry: $pair (expected dataset=path)" >&2
+            exit 1
+        }
+        dataset_key="${pair%%=*}"
+        checkpoint_root="${pair#*=}"
+        [[ -n "$dataset_key" && -n "$checkpoint_root" ]] || {
+            echo "ERROR: invalid --existing-ckpt-roots entry: $pair" >&2
+            exit 1
+        }
+        [[ "$checkpoint_root" == /* ]] || checkpoint_root="$SCRIPT_DIR/$checkpoint_root"
+        ROOT_BY_DATASET["$dataset_key"]="$checkpoint_root"
+    done
+
+    DISC_RUN="${DISC_RUN:-$(date +%m-%d)-patch-refine-h96-existing-disc}"
+    [[ "$DISC_RUN" == /* ]] && {
+        echo "ERROR: --disc-run must be a relative results/datasets run name" >&2
+        exit 1
+    }
+    WALL="${WALL_OVERRIDE:-2:00:00}"
+    USER_NAME="$(whoami)"
+    if [[ "$GPU_TYPE" == a100* || "$GPU_TYPE" == h100* ]]; then
+        GPU_ARG="--gpus=${GPU_TYPE}:1"
+    else
+        GPU_ARG="--gres=gpu:${GPU_TYPE}:1"
+    fi
+
+    echo "Submitting fixed h96 patch-refine discriminator jobs (forecast checkpoints are read-only)."
+    for dataset_name in "${EVAL_DATASETS[@]}"; do
+        checkpoint_root="${ROOT_BY_DATASET[$dataset_name]:-}"
+        [[ -n "$checkpoint_root" ]] || {
+            echo "ERROR: no checkpoint root provided for dataset $dataset_name" >&2
+            exit 1
+        }
+        subset_name="$dataset_name"
+        [[ "$dataset_name" == traffic ]] && subset_name="traffic_4v_s1"
+        [[ -f "$checkpoint_root/$subset_name/coarse/best.pt" ]] || {
+            echo "ERROR: missing coarse checkpoint: $checkpoint_root/$subset_name/coarse/best.pt" >&2
+            exit 1
+        }
+        [[ -f "$checkpoint_root/$subset_name/patch_refine/best.pt" ]] || {
+            echo "ERROR: missing patch_refine checkpoint: $checkpoint_root/$subset_name/patch_refine/best.pt" >&2
+            exit 1
+        }
+        [[ -f "$checkpoint_root/$subset_name/patch_refine/metadata.json" ]] || {
+            echo "ERROR: missing patch_refine metadata: $checkpoint_root/$subset_name/patch_refine/metadata.json" >&2
+            exit 1
+        }
+        output_dir="$STORE/datasets/$DISC_RUN/$dataset_name"
+        job_id=$(sbatch --parsable \
+            --job-name="disc-pr96-${dataset_name}" \
+            --account="$ACCOUNT" \
+            --time="$WALL" \
+            --nodes=1 \
+            "$GPU_ARG" \
+            --cpus-per-task=8 \
+            --mem=50G \
+            --output="$LOG_DIR/disc-pr96-${dataset_name}-%j.log" \
+            --error="$LOG_DIR/disc-pr96-${dataset_name}-%j.log" \
+            --mail-type=FAIL \
+            --mail-user="${USER_NAME}@uwo.ca" \
+            --export=ALL,GRID_EVAL_PATCH_REFINE=1,GRID_DATASET="$dataset_name",GRID_EXISTING_CKPT="$checkpoint_root",GRID_DISC_OUTPUT="$output_dir" \
+            "$SCRIPT_DIR/slurm_worker.sh")
+        echo "  -> $dataset_name: $job_id ($output_dir)"
+    done
+    echo "Monitor with: squeue -u $USER_NAME"
+    exit 0
+fi
 
 if [[ "$SMOKE" -eq 1 ]]; then
     CONFIGS="${CONFIGS:-configs/smoke_test.yaml}"

@@ -38,6 +38,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     HORIZON=720
     TEST_STRIDE=1
     MMPD_BACKBONE=Decoder
+    ALLOW_REUSED_MMPD_ROOT=0
     MERGE_PARTIALS=0
     # Snap GT+binary+MMPD through binary's dual-scale 16x16 ordinal lattice.
     BIN_MATCH_FILTER="all"
@@ -73,6 +74,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --horizon) HORIZON="$2"; shift 2 ;;
             --test-stride) TEST_STRIDE="$2"; shift 2 ;;
             --mmpd-backbone) MMPD_BACKBONE="$2"; shift 2 ;;
+            --allow-reused-mmpd-root) ALLOW_REUSED_MMPD_ROOT=1; shift ;;
             --bin-match-filter) BIN_MATCH_FILTER="$2"; shift 2 ;;
             --merge-partials-only) MERGE_PARTIALS=1; shift ;;
             *)
@@ -140,7 +142,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
                 --error="results/logs/disc-uni-${ds}-${src}-%j.log" \
                 --mail-type=END,FAIL \
                 --mail-user=ccao87@uwo.ca \
-                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$(slurm_encode "$SLICE_LENGTHS")",PACK_SPLITS="$(slurm_encode "$PACK_SPLITS")",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$(slurm_encode "$ANCHOR_CONFIG_BY_DATASET")",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$(slurm_encode "$BINARY_CONFIG_BY_DATASET")",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",MMPD_ROOT_OVERRIDE="$MMPD_ROOT_OVERRIDE",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",MERGE_PARTIALS=0 \
+                --export=ALL,DATASET="$ds",FAKE_SOURCE="$src",SMOKE="$SMOKE",FORCE_RAW="$FORCE_RAW",FORCE_TRAIN="$FORCE_TRAIN",SLICE_LENGTHS="$(slurm_encode "$SLICE_LENGTHS")",PACK_SPLITS="$(slurm_encode "$PACK_SPLITS")",PACK_FRACTION="$PACK_FRACTION",ANCHOR_CONFIG="$ANCHOR_CONFIG",ANCHOR_CONFIG_BY_DATASET="$(slurm_encode "$ANCHOR_CONFIG_BY_DATASET")",BINARY_CONFIG="$BINARY_CONFIG",BINARY_CONFIG_BY_DATASET="$(slurm_encode "$BINARY_CONFIG_BY_DATASET")",MMPD_OUTPUT_SUFFIX="$MMPD_OUTPUT_SUFFIX",MMPD_ROOT_OVERRIDE="$MMPD_ROOT_OVERRIDE",DISC_OUTPUT_SUFFIX="$DISC_OUTPUT_SUFFIX",RAW_OUTPUT_SUFFIX="$RAW_OUTPUT_SUFFIX",LOOKBACK="$LOOKBACK",HORIZON="$HORIZON",TEST_STRIDE="$TEST_STRIDE",MMPD_BACKBONE="$MMPD_BACKBONE",BIN_MATCH_FILTER="$BIN_MATCH_FILTER",ALLOW_REUSED_MMPD_ROOT="$ALLOW_REUSED_MMPD_ROOT",MERGE_PARTIALS=0 \
                 "$SCRIPT_DIR/slurm_discriminator_binary_vs_mmpd_univariate.sh")"
             JOB_IDS+=("$job_id")
             echo "  -> job $job_id"
@@ -227,7 +229,11 @@ if [[ -z "${ANCHOR_CONFIG:-}" && -z "${ANCHOR_CONFIG_BY_DATASET:-}" ]]; then
     exit 1
 fi
 
-"$PYTHON" -u "$REPO/temp/check_mmpd_instance_campaign.py" "$MMPD_ROOT"
+if [[ "${ALLOW_REUSED_MMPD_ROOT:-0}" -eq 1 ]]; then
+    "$PYTHON" -u "$REPO/temp/check_mmpd_reused_decoder_root.py" "$MMPD_ROOT" --datasets "$DATASET"
+else
+    "$PYTHON" -u "$REPO/temp/check_mmpd_instance_campaign.py" "$MMPD_ROOT"
+fi
 "$PYTHON" -c "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
 
 EVAL_ARGS=(
@@ -238,6 +244,7 @@ EVAL_ARGS=(
     --raw-eval-dir "$RAW_EVAL_DIR"
     --mmpd-output-root "$MMPD_ROOT"
     --mmpd-backbone "${MMPD_BACKBONE:-Decoder}"
+    --no-update-mmpd
     --lookback "${LOOKBACK:-336}"
     --horizon "${HORIZON:-720}"
     --test-stride "${TEST_STRIDE:-1}"
