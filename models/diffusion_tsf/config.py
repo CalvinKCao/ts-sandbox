@@ -59,6 +59,9 @@ class DiffusionTSFConfig:
 
     diffusion_type: str = "binary"
     use_ordinal_window_norm: bool = False
+    # Derive any ordinal OOD envelope shift from the lookback alone so an
+    # unseen future cannot change the forecast coordinate system.
+    ordinal_ood_shift_causal_only: bool = False
     ordinal_tie_atol: float = 1e-6
     ordinal_ladder: Optional[Any] = None
     binary_num_steps: int = 1000

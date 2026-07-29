@@ -51,6 +51,7 @@ EVAL_EXISTING_DISCRIMINATOR=0
 EXISTING_MMPD_ROOT=""
 DISC_RUN=""
 RAW_RUN=""
+JOB_MANIFEST=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -82,6 +83,7 @@ while [[ $# -gt 0 ]]; do
         --existing-mmpd-root) EXISTING_MMPD_ROOT="$2"; shift 2 ;;
         --disc-run) DISC_RUN="$2"; shift 2 ;;
         --raw-run) RAW_RUN="$2"; shift 2 ;;
+        --job-manifest) JOB_MANIFEST="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -125,6 +127,10 @@ fi
 cd "$REPO"
 # shellcheck source=utils/mmpd_submit_helpers.sh
 source "$REPO/utils/mmpd_submit_helpers.sh"
+
+manifest_tool() {
+    python3 "$REPO/temp/submission_manifest.py" "$@"
+}
 
 MMPD_REPO="$REPO/temp/MMPD"
 MMPD_URL="https://github.com/Thinklab-SJTU/MMPD.git"
@@ -330,6 +336,14 @@ else
         --mmpd-only
     )
 fi
+fi
+
+if [[ -n "$JOB_MANIFEST" ]]; then
+    [[ "$JOB_MANIFEST" == /* ]] || JOB_MANIFEST="$REPO/$JOB_MANIFEST"
+    manifest_tool init --path "$JOB_MANIFEST" --component mmpd_training \
+        --repo "$REPO" --datasets "$DATASETS_CSV" \
+        --set "output_root=$OUTPUT_DIR" --set "run_config=${MMPD_RUN_CONFIG:-}" \
+        --set "subset_config=$SUBSET_CONFIG" --set "instance_norm=$MMPD_INSTANCE_NORM"
 fi
 
 if [[ "$SKIP_MMPD_TRAIN" -eq 1 ]]; then
@@ -620,6 +634,10 @@ if [[ "$SKIP_INIT" -eq 0 ]]; then
         --error="$LOG_DIR/init-%j.err" \
         "$INIT_SCRIPT")
     echo "  -> init: $JOB_INIT"
+    if [[ -n "$JOB_MANIFEST" ]]; then
+        manifest_tool record --path "$JOB_MANIFEST" --role mmpd_init --job-id "$JOB_INIT" \
+            --set "output_root=$OUTPUT_DIR"
+    fi
     WORKER_DEP=(--dependency="afterok:$JOB_INIT")
 fi
 
@@ -653,6 +671,10 @@ for ds in "${DATASETS[@]}"; do
         "$WORKER_SCRIPT")
     echo "  -> mmpd-${ds}: $JOB_MMPD"
     WORKER_IDS+=("$JOB_MMPD")
+    if [[ -n "$JOB_MANIFEST" ]]; then
+        manifest_tool record --path "$JOB_MANIFEST" --role mmpd_worker --dataset "$ds" --job-id "$JOB_MMPD" \
+            --set "output_root=$OUTPUT_DIR"
+    fi
 done
 
 if [[ ${#WORKER_IDS[@]} -eq 0 && ${#PENDING_DATASETS[@]} -eq 0 ]]; then
@@ -688,6 +710,10 @@ JOB_MERGE=$(sbatch --parsable \
     --mail-user=ccao87@uwo.ca \
     "$MERGE_SCRIPT")
 echo "  -> merge: $JOB_MERGE"
+if [[ -n "$JOB_MANIFEST" ]]; then
+    manifest_tool record --path "$JOB_MANIFEST" --role mmpd_merge --job-id "$JOB_MERGE" \
+        --set "output_root=$OUTPUT_DIR"
+fi
 
 echo ""
 echo "=================================================================="

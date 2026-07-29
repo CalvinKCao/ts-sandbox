@@ -118,6 +118,7 @@ def diffusion_arch_config_dict() -> Dict[str, Any]:
         'model_type': MODEL_TYPE,
         'diffusion_type': DIFFUSION_TYPE,
         'use_ordinal_window_norm': USE_ORDINAL_WINDOW_NORM,
+        'ordinal_ood_shift_causal_only': ORDINAL_OOD_SHIFT_CAUSAL_ONLY,
         'ordinal_tie_atol': ORDINAL_TIE_ATOL,
         'binary_anchor_input_mode': BINARY_ANCHOR_INPUT_MODE,
         'dit_patch_size': DIT_PATCH_SIZE,
@@ -310,6 +311,7 @@ CFG_DROPOUT = 0.0
 MODEL_TYPE = "dit"
 DIFFUSION_TYPE = "binary"
 USE_ORDINAL_WINDOW_NORM = False
+ORDINAL_OOD_SHIFT_CAUSAL_ONLY = False
 ORDINAL_TIE_ATOL = 1e-6
 GLOBAL_ORDINAL_LADDER = None
 TRAIN_WINDOW_AUG = {}
@@ -623,6 +625,7 @@ def _window_norm_past_future(
             future,
             ladder=GLOBAL_ORDINAL_LADDER,
             apply_ood_shift=apply_ood_shift,
+            causal_only=ORDINAL_OOD_SHIFT_CAUSAL_ONLY,
         )
         return past_ord, future_ord
     if not USE_WINDOW_NORMALIZATION:
@@ -1374,6 +1377,9 @@ def create_diffusion_model(
         use_amp=USE_AMP,
         diffusion_type=o("diffusion_type", DIFFUSION_TYPE),
         use_ordinal_window_norm=o("use_ordinal_window_norm", USE_ORDINAL_WINDOW_NORM),
+        ordinal_ood_shift_causal_only=o(
+            "ordinal_ood_shift_causal_only", ORDINAL_OOD_SHIFT_CAUSAL_ONLY,
+        ),
         ordinal_tie_atol=o("ordinal_tie_atol", ORDINAL_TIE_ATOL),
         ordinal_ladder=o("ordinal_ladder", GLOBAL_ORDINAL_LADDER),
         use_deterministic_anchor_loss=o("use_deterministic_anchor_loss", DETERMINISTIC_ANCHOR_LOSS),

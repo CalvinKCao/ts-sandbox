@@ -1,0 +1,53 @@
+# Ordinal h96 patch-refine transfer from the synthetic non-ordinal h96 donor.
+# Only synthetic coarse/patch-refine weights are reused; every real-data stage
+# gets a new focused HP study in the ordinal dataset-normalized representation.
+extends: configs/binary_patch_refine_lb336_hz96_full.yaml
+
+training:
+  n_finetune_hp_trials: 10
+  finetune_max_micro_batch: 2048
+
+wandb:
+  tags: [patch_refine, ordinal_norm, lb336_hz96, tuned]
+
+experiment:
+  name: binary-patch-refine-lb336-hz96-ordinal-tuned
+  experiment_name: binary_patch_refine_lb336_hz96_ordinal_tuned
+  use_window_normalization: false
+  use_ordinal_window_norm: true
+  ordinal_ood_shift_causal_only: true
+
+phases:
+  - phase: staged_diffusion_pretrain
+    # Reuse synthetic geometry-compatible weights only.  A missing donor is a
+    # submission error, never a request to silently synthesize a replacement.
+    reuse_pretrain_from_config: binary_patch_refine_lb336_hz96_full
+    require_reuse_pretrain: true
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 10
+    max_epochs: 20
+    patience: 8
+    search_space: lr_eff_batch_univariate_ema
+    hp_lr_min: 5.0e-5
+    hp_lr_max: 1.5e-3
+    effective_univariate_batch_grid: [512, 1024, 2048]
+    ema_decay_grid: [0.0, 0.99, 0.995, 0.999]
+    prediction_target: x0
+    loss_weighting: min_snr
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+
+  - phase: diffusion_patch_refine_finetune_hp
+    n_trials: 10
+    max_epochs: 20
+    patience: 8
+    search_space: lr_eff_batch_univariate_ema
+    hp_lr_min: 5.0e-5
+    hp_lr_max: 1.5e-3
+    effective_univariate_batch_grid: [512, 1024, 2048]
+    ema_decay_grid: [0.0, 0.99, 0.995, 0.999]
+    prediction_target: x0
+    loss_weighting: min_snr
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear

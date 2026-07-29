@@ -12,6 +12,8 @@
 set -euo pipefail
 
 PY_ARGS=("$@")
+ORDINAL_DISC_MODE="${GRID_EVAL_ORDINAL_PATCH_REFINE_MMPD:-0}"
+ORDINAL_DISC_MERGE="${GRID_ORDINAL_DISC_MERGE:-0}"
 
 ts() { date +'%d-%H:%M:%S'; }
 
@@ -46,7 +48,10 @@ fi
 [[ -n "${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR is not set." >&2; exit 1; }
 
 module purge 2>/dev/null || true
-module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9 2>/dev/null || true
+module load StdEnv/2023 python/3.11 2>/dev/null || true
+if [[ "$ORDINAL_DISC_MERGE" -ne 1 ]]; then
+    module load cuda/12.2 cudnn/8.9 2>/dev/null || true
+fi
 command -v virtualenv >/dev/null || { echo "ERROR: virtualenv not available after module load." >&2; exit 1; }
 
 echo "$(ts) [setup] Building node-local venv on \$SLURM_TMPDIR from $REQ"
@@ -55,7 +60,11 @@ virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 pip install --no-index -r "$REQ" -q
-python -c "import torch, optuna, wandb, einops, yaml; assert torch.cuda.is_available(), 'CUDA is not available (check driver compatibility)!'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
+if [[ "$ORDINAL_DISC_MERGE" -eq 1 ]]; then
+    python -c "import torch, optuna, wandb, einops, yaml; print('torch', torch.__version__, 'cpu merge worker')"
+else
+    python -c "import torch, optuna, wandb, einops, yaml; assert torch.cuda.is_available(), 'CUDA is not available (check driver compatibility)!'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
+fi
 
 export PYTHONUNBUFFERED=1
 
@@ -63,6 +72,53 @@ cd "$REPO"
 if [[ ! -f "models/diffusion_tsf/train_multivariate_pipeline.py" ]]; then
     echo "ERROR: slurm_worker.sh must be submitted from repo root." >&2
     exit 1
+fi
+
+# Explicit deferred mode used only by the h96 ordinal patch-refine campaign.
+# Checkpoints are intentionally validated here: this job is submitted before
+# its afterok parents have produced them, so a login-node existence check would
+# reject a correct DAG.
+if [[ "$ORDINAL_DISC_MODE" -eq 1 ]]; then
+    [[ -n "${GRID_DISC_OUTPUT:-}" ]] || { echo "ERROR: GRID_DISC_OUTPUT is unset" >&2; exit 1; }
+    [[ -n "${GRID_RAW_DISC_OUTPUT:-}" ]] || { echo "ERROR: GRID_RAW_DISC_OUTPUT is unset" >&2; exit 1; }
+    [[ -n "${GRID_ORDINAL_DISC_EVALUATOR:-}" ]] || { echo "ERROR: GRID_ORDINAL_DISC_EVALUATOR is unset" >&2; exit 1; }
+    [[ -n "${GRID_ORDINAL_BINARY_CONFIG:-}" ]] || { echo "ERROR: GRID_ORDINAL_BINARY_CONFIG is unset" >&2; exit 1; }
+    [[ -f "$GRID_ORDINAL_DISC_EVALUATOR" ]] || { echo "ERROR: ordinal evaluator missing: $GRID_ORDINAL_DISC_EVALUATOR" >&2; exit 1; }
+    [[ -f "$GRID_ORDINAL_BINARY_CONFIG" ]] || { echo "ERROR: ordinal binary config missing: $GRID_ORDINAL_BINARY_CONFIG" >&2; exit 1; }
+    if [[ "$ORDINAL_DISC_MERGE" -eq 1 ]]; then
+        echo "$(ts) [eval] merging ordinal patch-refine discriminator partials"
+        python -u "$GRID_ORDINAL_DISC_EVALUATOR" \
+            --merge-partials-only \
+            --output-dir "$GRID_DISC_OUTPUT" \
+            --raw-eval-dir "$GRID_RAW_DISC_OUTPUT"
+        echo "$(ts) Done"
+        exit 0
+    fi
+
+    [[ -n "${GRID_DATASET:-}" ]] || { echo "ERROR: GRID_DATASET is unset" >&2; exit 1; }
+    [[ -n "${GRID_EXISTING_CKPT:-}" ]] || { echo "ERROR: GRID_EXISTING_CKPT is unset" >&2; exit 1; }
+    [[ -n "${GRID_MMPD_ROOT:-}" ]] || { echo "ERROR: GRID_MMPD_ROOT is unset" >&2; exit 1; }
+    [[ -d "$GRID_EXISTING_CKPT" ]] || { echo "ERROR: binary checkpoint root missing: $GRID_EXISTING_CKPT" >&2; exit 1; }
+    [[ -d "$GRID_MMPD_ROOT" ]] || { echo "ERROR: MMPD output root missing: $GRID_MMPD_ROOT" >&2; exit 1; }
+    mapfile -t coarse_ckpts < <(find "$GRID_EXISTING_CKPT" -maxdepth 3 -type f -path '*/coarse/best.pt' | sort)
+    mapfile -t refine_ckpts < <(find "$GRID_EXISTING_CKPT" -maxdepth 3 -type f -path '*/patch_refine/best.pt' | sort)
+    [[ "${#coarse_ckpts[@]}" -eq 1 ]] || { echo "ERROR: expected exactly one coarse best.pt under $GRID_EXISTING_CKPT" >&2; exit 1; }
+    [[ "${#refine_ckpts[@]}" -eq 1 ]] || { echo "ERROR: expected exactly one patch_refine best.pt under $GRID_EXISTING_CKPT" >&2; exit 1; }
+    echo "$(ts) [eval] ordinal patch-refine checkpoint: $GRID_EXISTING_CKPT"
+    echo "$(ts) [eval] MMPD root: $GRID_MMPD_ROOT"
+    python -u "$GRID_ORDINAL_DISC_EVALUATOR" \
+        --datasets "$GRID_DATASET" \
+        --checkpoint-dir "$GRID_EXISTING_CKPT" \
+        --mmpd-output-root "$GRID_MMPD_ROOT" \
+        --binary-config "$GRID_ORDINAL_BINARY_CONFIG" \
+        --output-dir "$GRID_DISC_OUTPUT" \
+        --raw-eval-dir "$GRID_RAW_DISC_OUTPUT" \
+        --test-stride 4 \
+        --slice-lengths 8 16 32 \
+        --force-raw-eval \
+        --force-train
+    echo "$(ts) Done"
+    exit 0
 fi
 
 if [[ "${GRID_EVAL_PATCH_REFINE:-0}" -eq 1 ]]; then

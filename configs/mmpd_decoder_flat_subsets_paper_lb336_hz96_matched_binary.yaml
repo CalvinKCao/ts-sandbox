@@ -1,0 +1,43 @@
+# Paper-fixed Decoder MMPD, matching the ordinal h96 patch-refine subset policy.
+# MMPD itself intentionally remains non-ordinal and instance-normalized.
+
+experiment:
+  name: mmpd-decoder-flat-subsets-paper-lb336-hz96-matched-binary
+  experiment_name: mmpd_decoder_flat_subsets_paper_lb336_hz96_matched_binary
+
+mmpd:
+  backbone: Decoder
+  subset_config: binary_patch_refine_lb336_hz96_ordinal_tuned.yaml
+  lookback: 336
+  horizon: 96
+  datasets:
+    - ETTh1
+    - ETTh2
+    - ETTm1
+    - ETTm2
+    - exchange_rate
+    - weather
+    - electricity
+    - traffic
+    - PeMS
+    - solar_Alabama
+    - dynamic
+  patch_size_default: 12
+  patch_size_wide: 24
+  train_epochs: 20
+  patience: 5
+  learning_rate: 1.0e-4
+  point_weight: 0.01
+  dropout: 0.2
+  ema_decay: 0
+  batch_size: 32
+  sample_num: 20
+  num_sampling_steps: 20
+  gmm_components: 10
+  gmm_iterations: 10
+  prior_pi_decay: 0.5
+  prior_precision_shape: 100
+  lradj: fixed
+  tune_trials: 0
+  leaderboard: true
+  leaderboard_nickname: "MMPD h96 matched binary subset"

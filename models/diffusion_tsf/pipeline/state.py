@@ -37,6 +37,7 @@ class PipelineState:
     # -- Model / diffusion knobs --
     diffusion_type: str = "binary"
     use_ordinal_window_norm: bool = False
+    ordinal_ood_shift_causal_only: bool = False
     ordinal_tie_atol: float = 1e-6
     model_type: str = "dit"
     image_height: int = 32

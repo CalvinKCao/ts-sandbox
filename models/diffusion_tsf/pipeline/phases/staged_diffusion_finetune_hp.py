@@ -358,6 +358,29 @@ def _suggest_lr_eff_batch_g(
     return params
 
 
+def _suggest_lr_eff_batch_univariate_ema(
+    trial,
+    state: PipelineState,
+    max_batch_size: int,
+    smoke_test: bool,
+    phase_overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Tune only LR, univariate effective batch, and EMA for staged diffusion."""
+    params = _suggest_lr_eff_batch_univariate(
+        trial, state, max_batch_size, smoke_test, phase_overrides,
+    )
+    raw_grid = phase_overrides.get("ema_decay_grid")
+    if not raw_grid:
+        raise ValueError(
+            "search_space=lr_eff_batch_univariate_ema requires ema_decay_grid in phase YAML"
+        )
+    grid = sorted({float(x) for x in raw_grid})
+    if any(value < 0.0 or value >= 1.0 for value in grid):
+        raise ValueError(f"ema_decay_grid must be in [0, 1), got {grid}")
+    params["ema_decay"] = float(trial.suggest_categorical("ema_decay", grid))
+    return params
+
+
 def _fraction_subset(ds, fraction: float, seed: int):
     """Deterministic subset of a dataset (same idea as staged_eval)."""
     import numpy as np
@@ -815,6 +838,11 @@ def _suggest_staged_params(
 
     if search_space == "lr_eff_batch_g":
         return _suggest_lr_eff_batch_g(
+            trial, state, max_batch_size, smoke_test, overrides,
+        )
+
+    if search_space == "lr_eff_batch_univariate_ema":
+        return _suggest_lr_eff_batch_univariate_ema(
             trial, state, max_batch_size, smoke_test, overrides,
         )
 
@@ -1908,6 +1936,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 "full_with_batch",
                 "reduced_hp",
                 "lr_eff_batch_univariate",
+                "lr_eff_batch_univariate_ema",
                 "lr_eff_batch_g",
                 "fixed",
             }:
@@ -1916,8 +1945,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 for key in ("hp_lr_min", "hp_lr_max"):
                     if self.get(key) is None:
                         raise ValueError(f"search_space=reduced_hp requires phase {key}")
-            if search_space in {"lr_eff_batch_univariate", "lr_eff_batch_g"}:
-                for key in ("hp_lr_min", "hp_lr_max", "effective_univariate_batch_grid"):
+            if search_space in {
+                "lr_eff_batch_univariate",
+                "lr_eff_batch_univariate_ema",
+                "lr_eff_batch_g",
+            }:
+                required = ["hp_lr_min", "hp_lr_max", "effective_univariate_batch_grid"]
+                if search_space == "lr_eff_batch_univariate_ema":
+                    required.append("ema_decay_grid")
+                for key in required:
                     if self.get(key) is None:
                         raise ValueError(
                             f"search_space={search_space} requires phase {key}"
@@ -1999,6 +2035,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             "full_with_batch",
                             "reduced_hp",
                             "lr_eff_batch_univariate",
+                            "lr_eff_batch_univariate_ema",
                             "lr_eff_batch_g",
                         } and not state.smoke_test:
                             micro = int(params["batch_size"])
@@ -2006,12 +2043,20 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             # Univariate plans may use micro=1 and large accum to hit U=B*C.
                             min_micro = (
                                 1
-                                if search_space in {"lr_eff_batch_univariate", "lr_eff_batch_g"}
+                                if search_space in {
+                                    "lr_eff_batch_univariate",
+                                    "lr_eff_batch_univariate_ema",
+                                    "lr_eff_batch_g",
+                                }
                                 else 4
                             )
                             max_accum = (
                                 2048
-                                if search_space in {"lr_eff_batch_univariate", "lr_eff_batch_g"}
+                                if search_space in {
+                                    "lr_eff_batch_univariate",
+                                    "lr_eff_batch_univariate_ema",
+                                    "lr_eff_batch_g",
+                                }
                                 else 512
                             )
                             if micro < min_micro or accum > max_accum:

@@ -79,6 +79,7 @@ def patch_globals(
     mod.MODEL_TYPE = state.model_type
     mod.DIFFUSION_TYPE = state.diffusion_type
     mod.USE_ORDINAL_WINDOW_NORM = state.use_ordinal_window_norm
+    mod.ORDINAL_OOD_SHIFT_CAUSAL_ONLY = bool(state.ordinal_ood_shift_causal_only)
     mod.ORDINAL_TIE_ATOL = state.ordinal_tie_atol
     ladder = state.extra.get("global_ordinal_ladder")
     if ladder is not None:

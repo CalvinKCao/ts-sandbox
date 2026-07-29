@@ -752,24 +752,36 @@ def patch_stage_globals(
     mod.STAGED_REPRESENTATION = state.staged_representation
     if for_synthetic_pretrain:
         mod.USE_ORDINAL_WINDOW_NORM = False
+        mod.ORDINAL_OOD_SHIFT_CAUSAL_ONLY = False
         mod.GLOBAL_ORDINAL_LADDER = None
 
 
 @contextmanager
 def _synthetic_pretrain_globals(mod: Any, state: PipelineState, stage: str):
     """Isolate synthetic-pretrain window-norm policy from the rest of the pipeline."""
-    saved = (mod.USE_ORDINAL_WINDOW_NORM, mod.GLOBAL_ORDINAL_LADDER)
+    saved = (
+        mod.USE_ORDINAL_WINDOW_NORM,
+        mod.ORDINAL_OOD_SHIFT_CAUSAL_ONLY,
+        mod.GLOBAL_ORDINAL_LADDER,
+    )
     patch_stage_globals(
         mod, state, stage, honor_dataset_windows=False, for_synthetic_pretrain=True,
     )
     try:
         yield
     finally:
-        mod.USE_ORDINAL_WINDOW_NORM, mod.GLOBAL_ORDINAL_LADDER = saved
+        (
+            mod.USE_ORDINAL_WINDOW_NORM,
+            mod.ORDINAL_OOD_SHIFT_CAUSAL_ONLY,
+            mod.GLOBAL_ORDINAL_LADDER,
+        ) = saved
 
 
 class StagedDiffusionPretrainPhase(PipelinePhase):
     name = "staged_diffusion_pretrain"
+
+    def _requires_reused_pretrain(self) -> bool:
+        return bool(self.get("require_reuse_pretrain", False))
 
     def _config_name(self, state: PipelineState) -> str:
         if "phase1_config_name" in self.overrides:
@@ -830,10 +842,26 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
 
     def should_skip(self, state: PipelineState) -> bool:
         config_name = self._config_name(state)
+        reuse_from = self.get("reuse_pretrain_from_config")
+        if self._requires_reused_pretrain() and not reuse_from:
+            raise ValueError(
+                "require_reuse_pretrain=true requires reuse_pretrain_from_config"
+            )
         ckpts = {
             stage: self._cached_stage_ckpt(state, config_name, stage)
             for stage in staged_diffusion_stages(state)
         }
+        if self._requires_reused_pretrain():
+            missing = [stage for stage, ckpt in ckpts.items() if not ckpt]
+            if missing:
+                required = ", ".join(
+                    f"pretrained_{stage}/pretrained_diffusion.pt" for stage in missing
+                )
+                raise FileNotFoundError(
+                    "Required synthetic staged-pretrain donor missing for "
+                    f"dataset={state.dataset!r}, config={reuse_from!r}: {required}. "
+                    "Refusing to train a replacement synthetic pretrain."
+                )
         if all(ckpts.values()):
             if "channel_dual" in ckpts:
                 state.diffusion_channel_dual_pretrain_ckpt = ckpts["channel_dual"]
@@ -936,7 +964,16 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                     best_params=best_params,
                 )
                 return state
-            # Soft-fail like patch_guidance: quota may have deleted the donor.
+            if self._requires_reused_pretrain():
+                required = ", ".join(
+                    f"pretrained_{stage}/pretrained_diffusion.pt" for stage in missing
+                )
+                raise FileNotFoundError(
+                    "Required synthetic staged-pretrain donor missing for "
+                    f"dataset={state.dataset!r}, config={reuse_from!r}: {required}. "
+                    "Refusing to train a replacement synthetic pretrain."
+                )
+            # Legacy configs retain the soft fallback when a donor has been purged.
             logger.warning(
                 "  [%s] reuse_pretrain_from_config=%r missing pretrained_%s under "
                 "*-%s-%s (incl. cross-dataset fallback); training synthetic pretrain instead",

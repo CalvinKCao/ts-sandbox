@@ -479,6 +479,7 @@ class DiffusionTSF(nn.Module):
                 future,
                 ladder=ladder,
                 apply_ood_shift=apply_ood_shift,
+                causal_only=bool(self.config.ordinal_ood_shift_causal_only),
             )
             center = torch.zeros_like(past[..., :1])
             std = torch.ones_like(past[..., :1])
