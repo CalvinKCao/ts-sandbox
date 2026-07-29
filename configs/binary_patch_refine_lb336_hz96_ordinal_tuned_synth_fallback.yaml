@@ -1,0 +1,14 @@
+# Explicit fallback variant for a fresh synthetic pretrain when no donor exists.
+# This is opt-in through the h96 DAG coordinator's --allow-synthetic-pretrain.
+extends: configs/binary_patch_refine_lb336_hz96_ordinal_tuned.yaml
+
+experiment:
+  name: binary-patch-refine-lb336-hz96-ordinal-tuned-synth-fallback
+  experiment_name: binary_patch_refine_lb336_hz96_ordinal_tuned_synth_fallback
+
+phases:
+  - phase: staged_diffusion_pretrain
+    require_reuse_pretrain: false
+    # Keep coarse synthetic transfer at the normal budget, but cap a missing
+    # patch upscaler donor to the one-epoch fallback requested for this campaign.
+    patch_refine_epochs: 1

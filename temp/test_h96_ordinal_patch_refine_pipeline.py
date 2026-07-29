@@ -82,6 +82,14 @@ def _test_config_and_search() -> None:
         assert params["min_snr_gamma"] == 2.0
         assert params["binary_noise_schedule"] == "linear"
 
+    fallback = load_experiment_config(
+        str(REPO_ROOT / "configs" / "binary_patch_refine_lb336_hz96_ordinal_tuned_synth_fallback.yaml")
+    )
+    fallback_pretrain = next(p for p in fallback["phases"] if p["phase"] == "staged_diffusion_pretrain")
+    assert fallback_pretrain["require_reuse_pretrain"] is False
+    assert fallback_pretrain["epochs"] == 20
+    assert fallback_pretrain["patch_refine_epochs"] == 1
+
 
 def _test_causal_ordinal_shift() -> None:
     train = np.linspace(-1.0, 1.0, 257, dtype=np.float32).reshape(-1, 1)

@@ -19,6 +19,7 @@ BINARY_TIME="12:00:00"
 MMPD_TIME="12:00:00"
 DISC_TIME="3:00:00"
 PREFLIGHT_ONLY=0
+ALLOW_SYNTHETIC_PRETRAIN=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -31,9 +32,18 @@ while [[ $# -gt 0 ]]; do
         --mmpd-time) MMPD_TIME="$2"; shift 2 ;;
         --disc-time) DISC_TIME="$2"; shift 2 ;;
         --preflight-only) PREFLIGHT_ONLY=1; shift ;;
+        --allow-synthetic-pretrain) ALLOW_SYNTHETIC_PRETRAIN=1; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+if [[ "$ALLOW_SYNTHETIC_PRETRAIN" -eq 1 ]]; then
+    [[ "$BINARY_CONFIG" == "binary_patch_refine_lb336_hz96_ordinal_tuned" ]] || {
+        echo "ERROR: --allow-synthetic-pretrain supports only the default ordinal h96 binary config." >&2
+        exit 1
+    }
+    BINARY_CONFIG="binary_patch_refine_lb336_hz96_ordinal_tuned_synth_fallback"
+fi
 
 [[ -z "${SLURM_JOB_ID:-}" ]] || { echo "ERROR: run this coordinator from a login node." >&2; exit 1; }
 [[ -d "${SCRATCH:-}/ts-sandbox" ]] || {
@@ -80,6 +90,17 @@ grep -Eq "^[[:space:]]*horizon:[[:space:]]*96[[:space:]]*$" "$MMPD_CONFIG_PATH" 
     echo "ERROR: MMPD config must set horizon: 96." >&2
     exit 1
 }
+if [[ "$ALLOW_SYNTHETIC_PRETRAIN" -eq 0 ]]; then
+    grep -Eq "^[[:space:]]*require_reuse_pretrain:[[:space:]]*true[[:space:]]*$" "$BINARY_CONFIG_PATH" || {
+        echo "ERROR: strict binary config must require reused synthetic pretrains." >&2
+        exit 1
+    }
+else
+    grep -Eq "^[[:space:]]*require_reuse_pretrain:[[:space:]]*false[[:space:]]*$" "$BINARY_CONFIG_PATH" || {
+        echo "ERROR: synthetic fallback config must explicitly allow a new synthetic pretrain." >&2
+        exit 1
+    }
+fi
 find_dataset_donor() {
     local dataset="$1" stage="$2" global_path newest="" candidate
     global_path="$REPO/reused/pretrain/$DONOR_CONFIG/pretrained_${stage}/pretrained_diffusion.pt"
@@ -111,14 +132,22 @@ for dataset in "${DATASET_ARRAY[@]}"; do
         exit 1
     }
     MMPD_DATA_BY_DATASET["$dataset"]="$mmpd_dataset_path"
-    DONOR_COARSE_BY_DATASET["$dataset"]="$(find_dataset_donor "$dataset" coarse)" || {
+    if donor="$(find_dataset_donor "$dataset" coarse)"; then
+        DONOR_COARSE_BY_DATASET["$dataset"]="$donor"
+    elif [[ "$ALLOW_SYNTHETIC_PRETRAIN" -eq 1 ]]; then
+        DONOR_COARSE_BY_DATASET["$dataset"]="MISSING: will train synthetic coarse stage"
+    else
         echo "ERROR: missing synthetic coarse donor for $dataset. Expected reused/pretrain/$DONOR_CONFIG or results/ckpts/*-$dataset-$DONOR_CONFIG/pretrained_coarse/pretrained_diffusion.pt" >&2
         exit 1
-    }
-    DONOR_REFINE_BY_DATASET["$dataset"]="$(find_dataset_donor "$dataset" patch_refine)" || {
+    fi
+    if donor="$(find_dataset_donor "$dataset" patch_refine)"; then
+        DONOR_REFINE_BY_DATASET["$dataset"]="$donor"
+    elif [[ "$ALLOW_SYNTHETIC_PRETRAIN" -eq 1 ]]; then
+        DONOR_REFINE_BY_DATASET["$dataset"]="MISSING: will train synthetic patch-refine stage"
+    else
         echo "ERROR: missing synthetic patch-refine donor for $dataset. Expected reused/pretrain/$DONOR_CONFIG or results/ckpts/*-$dataset-$DONOR_CONFIG/pretrained_patch_refine/pretrained_diffusion.pt" >&2
         exit 1
-    }
+    fi
 done
 
 printf '%s\n' "[preflight] binary config: $BINARY_CONFIG_PATH"
@@ -129,6 +158,7 @@ for dataset in "${DATASET_ARRAY[@]}"; do
     printf '%s\n' "[preflight] $dataset refine donor: ${DONOR_REFINE_BY_DATASET[$dataset]}"
 done
 printf '%s\n' "[preflight] datasets:      $DATASETS"
+printf '%s\n' "[preflight] synthetic fallback: $([[ "$ALLOW_SYNTHETIC_PRETRAIN" -eq 1 ]] && echo enabled || echo disabled)"
 if [[ "$PREFLIGHT_ONLY" -eq 1 ]]; then
     exit 0
 fi

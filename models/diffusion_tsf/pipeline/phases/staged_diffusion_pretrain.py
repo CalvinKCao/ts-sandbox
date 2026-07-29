@@ -1014,6 +1014,8 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         shared_wait_seconds = float(self.get("shared_cache_wait_seconds", 6 * 60 * 60))
 
         for stage in staged_diffusion_stages(state):
+            stage_epochs = 1 if state.smoke_test else int(self.get(f"{stage}_epochs", epochs))
+            stage_patience = min(patience, stage_epochs)
             ckpt = self._cached_stage_ckpt(state, config_name, stage)
             if ckpt is None and shared_cache:
                 shared_ckpt = _wait_for_shared_stage_ckpt(
@@ -1039,8 +1041,8 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                                 best_params=best_params,
                                 guidance_checkpoint=guidance_ckpt,
                                 n_samples=n_samples,
-                                epochs=epochs,
-                                patience=patience,
+                                epochs=stage_epochs,
+                                patience=stage_patience,
                                 checkpoint_dir=stage_dir,
                                 smoke_test=state.smoke_test,
                             )
@@ -1074,8 +1076,8 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                         best_params=best_params,
                         guidance_checkpoint=guidance_ckpt,
                         n_samples=n_samples,
-                        epochs=epochs,
-                        patience=patience,
+                        epochs=stage_epochs,
+                        patience=stage_patience,
                         checkpoint_dir=stage_dir,
                         smoke_test=state.smoke_test,
                     )
