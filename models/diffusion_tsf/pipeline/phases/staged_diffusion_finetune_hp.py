@@ -2136,20 +2136,38 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
                     return objective
 
-                def _prune_non_best_trial_ckpts(study, _trial) -> None:
-                    # Keep only the current best trial weight to avoid scratch quota blowups
-                    # across 7 trials × ~400MB each × many concurrent jobs.
-                    try:
-                        best = study.best_trial
-                    except ValueError:
-                        return
-                    keep = os.path.join(trials_dir, f"trial_{best.number}_best.pt")
-                    if not os.path.isfile(keep):
-                        keep = os.path.join(
-                            subset_dir, f"_diff_ft_trial_{best.number}_best.pt",
+                def _retain_complete_trial_ckpts(study, _trial) -> None:
+                    # Keep every COMPLETE trial weight so --resume can still
+                    # promote whichever trial wins after more trials land.
+                    # Drop only pruned/failed mid-run checkpoints.
+                    from optuna.trial import TrialState
+
+                    keep_nums = {
+                        int(t.number)
+                        for t in study.get_trials(
+                            deepcopy=False, states=(TrialState.COMPLETE,),
                         )
-                    if os.path.isfile(keep):
-                        _cleanup_trial_ckpts(trials_dir, subset_dir, keep=keep)
+                    }
+                    keep_names = {f"trial_{n}_best.pt" for n in keep_nums}
+                    keep_names |= {f"_diff_ft_trial_{n}_best.pt" for n in keep_nums}
+                    for trial_dir in (trials_dir, subset_dir):
+                        if not os.path.isdir(trial_dir):
+                            continue
+                        for fn in os.listdir(trial_dir):
+                            if not fn.endswith("_best.pt"):
+                                continue
+                            if not (
+                                fn.startswith("trial_")
+                                or fn.startswith("_diff_ft_trial_")
+                            ):
+                                continue
+                            if fn in keep_names:
+                                continue
+                            path = os.path.join(trial_dir, fn)
+                            try:
+                                os.remove(path)
+                            except OSError:
+                                pass
 
                 logger.info(
                     "  [%s] Optuna study start: n_trials=%d max_epochs=%d patience=%d",
@@ -2168,7 +2186,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         min_resource=1, max_resource=max_epochs, reduction_factor=3,
                     ),
                     sampler_seed=state.seed,
-                    callbacks=[_prune_non_best_trial_ckpts],
+                    callbacks=[_retain_complete_trial_ckpts],
                 )
                 try:
                     best_trial = study.best_trial
