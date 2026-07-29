@@ -44,6 +44,8 @@ done
     echo "ERROR: run $0 from \$SCRATCH/ts-sandbox, not $REPO." >&2
     exit 1
 }
+# shellcheck source=utils/mmpd_submit_helpers.sh
+source "$REPO/utils/mmpd_submit_helpers.sh"
 
 resolve_config() {
     local token="$1" candidate
@@ -101,7 +103,14 @@ find_dataset_donor() {
 IFS=',' read -ra DATASET_ARRAY <<< "$DATASETS"
 declare -A DONOR_COARSE_BY_DATASET=()
 declare -A DONOR_REFINE_BY_DATASET=()
+declare -A MMPD_DATA_BY_DATASET=()
 for dataset in "${DATASET_ARRAY[@]}"; do
+    mmpd_dataset_path="$(mmpd_dataset_file_path "$dataset" "$REPO" 2>/dev/null || true)"
+    [[ -n "$mmpd_dataset_path" && -f "$mmpd_dataset_path" ]] || {
+        echo "ERROR: locked MMPD dataset is unavailable: $dataset (${mmpd_dataset_path:-unknown path})" >&2
+        exit 1
+    }
+    MMPD_DATA_BY_DATASET["$dataset"]="$mmpd_dataset_path"
     DONOR_COARSE_BY_DATASET["$dataset"]="$(find_dataset_donor "$dataset" coarse)" || {
         echo "ERROR: missing synthetic coarse donor for $dataset. Expected reused/pretrain/$DONOR_CONFIG or results/ckpts/*-$dataset-$DONOR_CONFIG/pretrained_coarse/pretrained_diffusion.pt" >&2
         exit 1
@@ -115,6 +124,7 @@ done
 printf '%s\n' "[preflight] binary config: $BINARY_CONFIG_PATH"
 printf '%s\n' "[preflight] MMPD config:   $MMPD_CONFIG_PATH"
 for dataset in "${DATASET_ARRAY[@]}"; do
+    printf '%s\n' "[preflight] $dataset MMPD data: ${MMPD_DATA_BY_DATASET[$dataset]}"
     printf '%s\n' "[preflight] $dataset coarse donor: ${DONOR_COARSE_BY_DATASET[$dataset]}"
     printf '%s\n' "[preflight] $dataset refine donor: ${DONOR_REFINE_BY_DATASET[$dataset]}"
 done
@@ -129,6 +139,7 @@ mkdir -p "$DAG_DIR"
 BINARY_MANIFEST="$DAG_DIR/binary_submission.json"
 MMPD_MANIFEST="$DAG_DIR/mmpd_submission.json"
 DISC_MANIFEST="$DAG_DIR/discriminator_submission.json"
+ASSERT_MANIFEST="$DAG_DIR/assertion_submission.json"
 MANIFEST_TOOL=(python3 "$REPO/temp/submission_manifest.py")
 
 cd "$REPO"
@@ -155,6 +166,7 @@ ALL_DEPENDENCY="afterok:${BINARY_TERMINALS}:${MMPD_TERMINAL}"
 
 ./submit_binary.sh \
     --eval-ordinal-patch-refine-vs-mmpd \
+    --ordinal-assert-only \
     --datasets "$DATASETS" \
     --existing-ckpt-roots "$BINARY_ROOTS" \
     --mmpd-root "$MMPD_ROOT" \
@@ -162,6 +174,22 @@ ALL_DEPENDENCY="afterok:${BINARY_TERMINALS}:${MMPD_TERMINAL}"
     --ordinal-disc-evaluator temp/eval_univariate_patch_refine_ordinal_vs_mmpd.py \
     --defer-checkpoint-check \
     --dependency "$ALL_DEPENDENCY" \
+    --disc-run "$RUN_NAME-assert" \
+    --raw-run "$RUN_NAME-assert-raw" \
+    --time "$DISC_TIME" \
+    --job-manifest "$ASSERT_MANIFEST"
+
+ASSERT_TERMINALS="$("${MANIFEST_TOOL[@]}" terminal-job-ids --path "$ASSERT_MANIFEST" --roles ordinal_assert)"
+
+./submit_binary.sh \
+    --eval-ordinal-patch-refine-vs-mmpd \
+    --datasets "$DATASETS" \
+    --existing-ckpt-roots "$BINARY_ROOTS" \
+    --mmpd-root "$MMPD_ROOT" \
+    --ordinal-binary-config "$BINARY_CONFIG_PATH" \
+    --ordinal-disc-evaluator temp/eval_univariate_patch_refine_ordinal_vs_mmpd.py \
+    --defer-checkpoint-check \
+    --dependency "afterok:${ASSERT_TERMINALS}" \
     --disc-run "$RUN_NAME-disc" \
     --raw-run "$RUN_NAME-disc-raw" \
     --time "$DISC_TIME" \
@@ -169,4 +197,5 @@ ALL_DEPENDENCY="afterok:${BINARY_TERMINALS}:${MMPD_TERMINAL}"
 
 printf '%s\n' "[submitted] binary manifest: $BINARY_MANIFEST"
 printf '%s\n' "[submitted] MMPD manifest:   $MMPD_MANIFEST"
+printf '%s\n' "[submitted] assertion manifest: $ASSERT_MANIFEST"
 printf '%s\n' "[submitted] disc manifest:   $DISC_MANIFEST"

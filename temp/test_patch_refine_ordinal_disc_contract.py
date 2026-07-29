@@ -15,6 +15,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from models.diffusion_tsf.ordinal_window_norm import build_global_ladder_from_training
+from models.diffusion_tsf.patch_refine_geometry import PatchLocation, blend_patch_bins, coarse_edges_from_cdf
+from models.diffusion_tsf.preprocessing import TimeSeriesTo2D
+from temp.eval_univariate_patch_refine_ordinal_vs_mmpd import _unblended_nonoverlap_patch_batch
 from utils.dual_scale_bin_filter import align_mmpd_to_binary_dataset_norm
 from utils.patch_refine_ordinal_ladder import (
     assert_on_patch_refine_levels,
@@ -107,6 +110,57 @@ def main() -> None:
     assert_support_is_causal(
         past, raw_gt, raw_gt + 100.0, ladder=ladder, canvas_height=256, device=device,
     )
+
+    # Three stride-6 crops cover 0:8, 6:14, and 12:20.  The raw coherent
+    # metric must retain the first and third only: each retained forecast is
+    # decoded from one CDF crop, never a blend of the overlapping votes.
+    def _cdf(rows: torch.Tensor, height: int) -> torch.Tensor:
+        grid = torch.arange(height, dtype=torch.long).view(1, 1, height, 1)
+        return (grid <= rows.unsqueeze(-2)).to(torch.float32)
+
+    coarse_rows = torch.full((1, 2, 96), 127, dtype=torch.long)
+    coarse_cdf = _cdf(coarse_rows // 16, 16)
+    patch_rows = torch.full((3, 8), 15, dtype=torch.long)
+    patch_cdf = _cdf(patch_rows.unsqueeze(1), 32)
+    raw_result = {
+        "future_2d_coarse": coarse_cdf,
+        "patch_cdf_unblended": patch_cdf,
+        "patch_locations": [
+            PatchLocation(flat_index=0, batch_index=0, variate_index=0, row0=112, col0=0),
+            PatchLocation(flat_index=0, batch_index=0, variate_index=0, row0=112, col0=6),
+            PatchLocation(flat_index=0, batch_index=0, variate_index=0, row0=112, col0=12),
+        ],
+    }
+    raw_pred, raw_gt_snap, raw_past, parents, starts, variates, raw_info = _unblended_nonoverlap_patch_batch(
+        result=raw_result,
+        target=torch.from_numpy(raw_gt),
+        past=torch.from_numpy(past),
+        legal_levels=legal,
+        canvas_height=256,
+        patch_height=32,
+        patch_width=8,
+    )
+    assert raw_pred.shape == raw_gt_snap.shape == (2, 1, 8)
+    assert raw_past.shape == (2, 1, 336)
+    assert parents.tolist() == [0, 0] and variates.tolist() == [0, 0]
+    assert starts.tolist() == [0, 12]
+    assert raw_info["selected"] == 2
+    raw_support = np.repeat(legal[:, :1], repeats=2, axis=0)
+    assert_on_patch_refine_levels(raw_pred, raw_support)
+    assert_on_patch_refine_levels(raw_gt_snap, raw_support)
+    blended, votes = blend_patch_bins(
+        patch_cdf,
+        raw_result["patch_locations"],
+        coarse_edges_from_cdf(coarse_cdf, canvas_height=256),
+        canvas_height=256,
+        patch_height=32,
+        patch_width=8,
+    )
+    blended_rows = TimeSeriesTo2D.bin_indices_from_cdf(blended)
+    if not torch.equal(blended_rows, blended_rows.round().to(torch.long)):
+        raise AssertionError("overlap blending did not round to integer absolute rows")
+    if not bool((votes[0, 0, 6:8] == 2).all()):
+        raise AssertionError("fixture did not exercise the two-timestep stride-6 overlap")
 
     out = REPO / "reports" / "h96_ordinal_patch_refine_disc_contract"
     out.mkdir(parents=True, exist_ok=True)

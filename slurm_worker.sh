@@ -14,6 +14,7 @@ set -euo pipefail
 PY_ARGS=("$@")
 ORDINAL_DISC_MODE="${GRID_EVAL_ORDINAL_PATCH_REFINE_MMPD:-0}"
 ORDINAL_DISC_MERGE="${GRID_ORDINAL_DISC_MERGE:-0}"
+ORDINAL_ASSERT_ONLY="${GRID_ORDINAL_ASSERT_ONLY:-0}"
 
 ts() { date +'%d-%H:%M:%S'; }
 
@@ -106,6 +107,8 @@ if [[ "$ORDINAL_DISC_MODE" -eq 1 ]]; then
     [[ "${#refine_ckpts[@]}" -eq 1 ]] || { echo "ERROR: expected exactly one patch_refine best.pt under $GRID_EXISTING_CKPT" >&2; exit 1; }
     echo "$(ts) [eval] ordinal patch-refine checkpoint: $GRID_EXISTING_CKPT"
     echo "$(ts) [eval] MMPD root: $GRID_MMPD_ROOT"
+    ORDINAL_ASSERT_ARGS=()
+    [[ "$ORDINAL_ASSERT_ONLY" -eq 0 ]] || ORDINAL_ASSERT_ARGS=(--assert-only)
     python -u "$GRID_ORDINAL_DISC_EVALUATOR" \
         --datasets "$GRID_DATASET" \
         --checkpoint-dir "$GRID_EXISTING_CKPT" \
@@ -116,7 +119,8 @@ if [[ "$ORDINAL_DISC_MODE" -eq 1 ]]; then
         --test-stride 4 \
         --slice-lengths 8 16 32 \
         --force-raw-eval \
-        --force-train
+        --force-train \
+        "${ORDINAL_ASSERT_ARGS[@]}"
     echo "$(ts) Done"
     exit 0
 fi

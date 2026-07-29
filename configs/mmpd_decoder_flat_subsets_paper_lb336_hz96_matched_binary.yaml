@@ -40,4 +40,4 @@ mmpd:
   lradj: fixed
   tune_trials: 0
   leaderboard: true
-  leaderboard_nickname: "MMPD h96 matched binary subset"
+  leaderboard_nickname: "MMPD Subset Recent"

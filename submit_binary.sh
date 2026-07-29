@@ -42,6 +42,7 @@ MMPD_ROOT=""
 ORDINAL_DISC_EVALUATOR="temp/eval_univariate_patch_refine_ordinal_vs_mmpd.py"
 ORDINAL_BINARY_CONFIG="configs/binary_patch_refine_lb336_hz96_ordinal_tuned.yaml"
 DEFER_CHECKPOINT_CHECK=0
+ORDINAL_ASSERT_ONLY=0
 if [[ "$(hostname)" == *"narval"* ]]; then
     ACCOUNT="def-boyuwang"
     GPU_TYPE="a100"
@@ -72,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         --ordinal-disc-evaluator) ORDINAL_DISC_EVALUATOR="$2"; shift 2 ;;
         --ordinal-binary-config) ORDINAL_BINARY_CONFIG="$2"; shift 2 ;;
         --defer-checkpoint-check) DEFER_CHECKPOINT_CHECK=1; shift ;;
+        --ordinal-assert-only) ORDINAL_ASSERT_ONLY=1; shift ;;
         --gpu) GPU_TYPE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
@@ -150,7 +152,9 @@ if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
     RAW_OUTPUT="$STORE/datasets/$RAW_RUN"
     MANIFEST_PATH="${JOB_MANIFEST:-$DISC_OUTPUT/submission_manifest.json}"
     [[ "$MANIFEST_PATH" == /* ]] || MANIFEST_PATH="$SCRIPT_DIR/$MANIFEST_PATH"
-    manifest_tool init --path "$MANIFEST_PATH" --component ordinal_patch_refine_discriminator \
+    MANIFEST_COMPONENT="ordinal_patch_refine_discriminator"
+    [[ "$ORDINAL_ASSERT_ONLY" -eq 0 ]] || MANIFEST_COMPONENT="ordinal_patch_refine_assertion"
+    manifest_tool init --path "$MANIFEST_PATH" --component "$MANIFEST_COMPONENT" \
         --repo "$SCRIPT_DIR" --datasets "$DATASETS" \
         --set "mmpd_root=$MMPD_ROOT" --set "output_dir=$DISC_OUTPUT" --set "raw_eval_dir=$RAW_OUTPUT" \
         --set "evaluator=$ORDINAL_DISC_EVALUATOR" --set "binary_config=$ORDINAL_BINARY_CONFIG"
@@ -167,20 +171,28 @@ if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
     DISC_JOB_IDS=()
     for dataset_name in "${EVAL_DATASETS[@]}"; do
         checkpoint_root="${ROOT_BY_DATASET[$dataset_name]}"
+        job_label="disc-opr96"
+        [[ "$ORDINAL_ASSERT_ONLY" -eq 0 ]] || job_label="assert-opr96"
         job_id=$(sbatch --parsable \
-            --job-name="disc-opr96-${dataset_name}" \
+            --job-name="${job_label}-${dataset_name}" \
             --account="$ACCOUNT" --time="$WALL" --nodes=1 "$GPU_ARG" \
             --cpus-per-task=8 --mem=50G \
             "${DEP_ARGS[@]}" \
-            --output="$LOG_DIR/disc-opr96-${dataset_name}-%j.log" \
-            --error="$LOG_DIR/disc-opr96-${dataset_name}-%j.log" \
+            --output="$LOG_DIR/${job_label}-${dataset_name}-%j.log" \
+            --error="$LOG_DIR/${job_label}-${dataset_name}-%j.log" \
             --mail-type=FAIL --mail-user="${USER_NAME}@uwo.ca" \
-            --export=ALL,GRID_EVAL_ORDINAL_PATCH_REFINE_MMPD=1,GRID_DATASET="$dataset_name",GRID_EXISTING_CKPT="$checkpoint_root",GRID_MMPD_ROOT="$MMPD_ROOT",GRID_DISC_OUTPUT="$DISC_OUTPUT",GRID_RAW_DISC_OUTPUT="$RAW_OUTPUT",GRID_ORDINAL_DISC_EVALUATOR="$ORDINAL_DISC_EVALUATOR",GRID_ORDINAL_BINARY_CONFIG="$ORDINAL_BINARY_CONFIG",GRID_SLICE_LENGTHS="8;16;32" \
+            --export=ALL,GRID_EVAL_ORDINAL_PATCH_REFINE_MMPD=1,GRID_ORDINAL_ASSERT_ONLY="$ORDINAL_ASSERT_ONLY",GRID_DATASET="$dataset_name",GRID_EXISTING_CKPT="$checkpoint_root",GRID_MMPD_ROOT="$MMPD_ROOT",GRID_DISC_OUTPUT="$DISC_OUTPUT",GRID_RAW_DISC_OUTPUT="$RAW_OUTPUT",GRID_ORDINAL_DISC_EVALUATOR="$ORDINAL_DISC_EVALUATOR",GRID_ORDINAL_BINARY_CONFIG="$ORDINAL_BINARY_CONFIG",GRID_SLICE_LENGTHS="8;16;32" \
             "$SCRIPT_DIR/slurm_worker.sh")
-        manifest_tool record --path "$MANIFEST_PATH" --role ordinal_disc --dataset "$dataset_name" --job-id "$job_id" \
+        manifest_role="ordinal_disc"
+        [[ "$ORDINAL_ASSERT_ONLY" -eq 0 ]] || manifest_role="ordinal_assert"
+        manifest_tool record --path "$MANIFEST_PATH" --role "$manifest_role" --dataset "$dataset_name" --job-id "$job_id" \
             --set "checkpoint_root=$checkpoint_root"
         DISC_JOB_IDS+=("$job_id")
     done
+    if [[ "$ORDINAL_ASSERT_ONLY" -eq 1 ]]; then
+        echo "ordinal patch-refine assertion manifest: $MANIFEST_PATH"
+        exit 0
+    fi
     disc_dep="afterok:${DISC_JOB_IDS[0]}"
     for job_id in "${DISC_JOB_IDS[@]:1}"; do disc_dep+=":$job_id"; done
     merge_id=$(sbatch --parsable \

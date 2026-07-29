@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import json
 import sys
+from copy import copy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
@@ -60,6 +62,7 @@ from utils.eval_mmpd_gaussian_anchor import (
 from utils.eval_trend_robust_texture_staged_vs_mmpd import generate_staged_forecast
 from utils.patch_refine_ordinal_ladder import (
     assert_on_patch_refine_levels,
+    assert_support_is_causal,
     legal_patch_refine_levels_dataset_z,
     snap_to_patch_refine_levels,
 )
@@ -67,6 +70,42 @@ from utils.visualize_staged_eval_2d_preds import _build_state, _load_stage_model
 
 
 DEFAULT_OUTPUT = REPO_ROOT / "results" / "datasets" / "disc-ordinal-patch-refine-h96-vs-mmpd"
+
+
+def _report_dir(output_dir: Path) -> Path:
+    """Keep report figures in the report tree, not inside transient raw packs."""
+    return REPO_ROOT / "reports" / output_dir.name
+
+
+def _mmpd_instance_summary(
+    *,
+    binary_past: np.ndarray,
+    mmpd_prediction: np.ndarray,
+    scalers: Mapping[str, np.ndarray],
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Use MMPD's actual normalization helpers for the report-only diagnostics."""
+    path = REPO_ROOT / "temp" / "MMPD" / "exp" / "normalization.py"
+    if not path.is_file():
+        raise FileNotFoundError(f"MMPD normalization helper missing: {path}")
+    spec = importlib.util.spec_from_file_location("h96_mmpd_normalization", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import MMPD normalization helper: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    binary_mean = np.asarray(scalers["binary_mean"], dtype=np.float32)[None, :, None]
+    binary_std = np.asarray(scalers["binary_std"], dtype=np.float32)[None, :, None]
+    mmpd_mean = np.asarray(scalers["mmpd_mean"], dtype=np.float32)[None, :, None]
+    mmpd_std = np.asarray(scalers["mmpd_std"], dtype=np.float32)[None, :, None]
+    mmpd_past = ((binary_past * binary_std + binary_mean) - mmpd_mean) / mmpd_std
+    mmpd_pred = ((mmpd_prediction * binary_std + binary_mean) - mmpd_mean) / mmpd_std
+    past_t = torch.from_numpy(mmpd_past)
+    pred_t = torch.from_numpy(mmpd_pred)
+    mean, std = module.get_statistics(past_t)
+    restored = module.denormalize(module.normalize(pred_t, mean, std), mean, std)
+    residual = float((restored - pred_t).abs().max().item())
+    if residual > 1e-6:
+        raise AssertionError(f"MMPD instance normalization round-trip failed: {residual:.3g}")
+    return mean.numpy(), std.numpy(), residual
 
 
 def _defaults(argv: Sequence[str]) -> List[str]:
@@ -98,6 +137,7 @@ def _defaults(argv: Sequence[str]) -> List[str]:
 def parse_args() -> argparse.Namespace:
     custom = argparse.ArgumentParser(add_help=False)
     custom.add_argument("--checkpoint-dir", type=Path, default=None)
+    custom.add_argument("--assert-only", action="store_true")
     extra, remaining = custom.parse_known_args(sys.argv[1:])
     saved = sys.argv
     sys.argv = [saved[0], *_defaults(remaining), *remaining]
@@ -107,6 +147,7 @@ def parse_args() -> argparse.Namespace:
         sys.argv = saved
     args.datasets = [piece for raw in args.datasets for piece in str(raw).split(",") if piece]
     args.checkpoint_dir = extra.checkpoint_dir.expanduser().resolve() if extra.checkpoint_dir else None
+    args.assert_only = bool(extra.assert_only)
     args.mmpd_output_root = args.mmpd_output_root.expanduser().resolve()
     args.raw_eval_dir = args.raw_eval_dir.expanduser().resolve()
     if args.merge_partials_only:
@@ -331,7 +372,7 @@ def _materialize_binary(
     required_cached = {
         "y_true", "samples", "indices", "past",
         "unblended_nonoverlap_patch_pred", "unblended_nonoverlap_patch_gt",
-        "unblended_nonoverlap_patch_past", "unblended_nonoverlap_patch_parent",
+        "unblended_nonoverlap_patch_past", "unblended_nonoverlap_patch_parent", "patch_vote_counts",
     }
     if cache.is_file() and not args.force_raw_eval:
         with np.load(cache) as data:
@@ -367,6 +408,7 @@ def _materialize_binary(
     patch_parent_chunks: List[np.ndarray] = []
     patch_start_chunks: List[np.ndarray] = []
     patch_variate_chunks: List[np.ndarray] = []
+    vote_count_chunks: List[np.ndarray] = []
     patch_diag = {"candidates": 0, "rejected_invalid_or_out_of_bounds": 0, "selected": 0}
     windows_seen = 0
     with torch.no_grad():
@@ -409,6 +451,7 @@ def _materialize_binary(
             patch_parent_chunks.append(patch_values[3] + windows_seen)
             patch_start_chunks.append(patch_values[4])
             patch_variate_chunks.append(patch_values[5])
+            vote_count_chunks.append(result["patch_vote_counts"].detach().cpu().numpy())
             for key, value in patch_values[6].items():
                 patch_diag[key] += int(value)
             windows_seen += int(past.shape[0])
@@ -440,6 +483,7 @@ def _materialize_binary(
             patch_diag["rejected_invalid_or_out_of_bounds"], dtype=np.int64,
         ),
         "unblended_patch_selected": np.asarray(patch_diag["selected"], dtype=np.int64),
+        "patch_vote_counts": np.concatenate(vote_count_chunks).astype(np.int64),
     }
     cache.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(cache, **pack)
@@ -450,36 +494,62 @@ def _plot_lattice(
     output_dir: Path,
     dataset: str,
     past: np.ndarray,
+    raw_gt: np.ndarray,
     gt: np.ndarray,
     binary: np.ndarray,
+    raw_mmpd: np.ndarray,
     mmpd: np.ndarray,
     legal_levels: np.ndarray,
+    patch_vote_counts: np.ndarray,
+    mmpd_window_mean: np.ndarray,
+    mmpd_window_std: np.ndarray,
+    mmpd_inverse_residual: float,
     classifier_scores: Mapping[str, Mapping[str, np.ndarray]],
 ) -> Path:
-    plot_dir = output_dir / "visualizations"
+    plot_dir = _report_dir(output_dir) / "visualizations"
     plot_dir.mkdir(parents=True, exist_ok=True)
     n_windows = min(2, past.shape[0])
     if n_windows < 2:
         raise ValueError("lattice visualization requires at least two evaluation windows")
-    fig, axes = plt.subplots(n_windows, 2, figsize=(16, 4 * n_windows), squeeze=False)
+    fig, axes = plt.subplots(n_windows, 3, figsize=(21, 4 * n_windows), squeeze=False)
     tail = min(48, past.shape[-1])
     x_past = np.arange(-tail, 0)
     x_future = np.arange(gt.shape[-1])
     for window_id in range(n_windows):
         ax = axes[window_id, 0]
-        prob_ax = axes[window_id, 1]
+        row_ax = axes[window_id, 1]
+        prob_ax = axes[window_id, 2]
         rows = legal_levels[window_id, 0]
         for row in rows:
             ax.axhline(float(row), color="0.45", alpha=0.12, linewidth=0.35, zorder=0)
         ax.plot(x_past, past[window_id, 0, -tail:], color="0.35", label="past")
+        ax.plot(x_future, raw_gt[window_id, 0], color="black", alpha=0.4, linestyle="--", label="GT raw")
         ax.step(x_future, gt[window_id, 0], where="mid", label="GT snapped", linewidth=1.8)
         ax.step(x_future, binary[window_id, 0], where="mid", label="binary raw/legal", linewidth=1.3)
+        ax.plot(x_future, raw_mmpd[window_id, 0], color="C2", alpha=0.45, linestyle="--", label="MMPD raw")
         ax.step(x_future, mmpd[window_id, 0], where="mid", label="MMPD snapped", linewidth=1.3)
         row_ids = np.asarray([0, 64, 128, 192, 255])
         ax.set_yticks(rows[row_ids], [f"row {row_id}" for row_id in row_ids])
         ax.axvline(0, color="black", linewidth=0.8)
-        ax.set(title=f"{dataset}: ordinal window {window_id} (256 legal rows)", ylabel="ordinal row ID")
-        ax.legend(loc="best", ncol=2)
+        ax.set(
+            title=f"{dataset}: window {window_id}; MMPD μ={mmpd_window_mean[window_id, 0]:.3g}, "
+            f"σ={mmpd_window_std[window_id, 0]:.3g}, inverse err={mmpd_inverse_residual:.1e}",
+            ylabel="binary dataset-z",
+        )
+        ax.legend(loc="best", ncol=2, fontsize=8)
+        row_ax.step(x_future, np.argmin(np.abs(binary[window_id, 0, :, None] - rows), axis=-1),
+                    where="mid", label="binary row", color="C0")
+        row_ax.step(x_future, np.argmin(np.abs(gt[window_id, 0, :, None] - rows), axis=-1),
+                    where="mid", label="GT row", color="black")
+        row_ax.step(x_future, np.argmin(np.abs(mmpd[window_id, 0, :, None] - rows), axis=-1),
+                    where="mid", label="MMPD row", color="C2")
+        for boundary in range(0, gt.shape[-1] - 7, 6):
+            row_ax.axvline(boundary, color="0.6", alpha=0.18, linewidth=0.7)
+        row_ax.set(title="absolute ordinal row / fine-patch boundaries", xlabel="forecast timestep", ylabel="row ID", ylim=(-2, 257))
+        row_ax.legend(loc="upper left", fontsize=8)
+        votes_ax = row_ax.twinx()
+        votes_ax.plot(x_future, patch_vote_counts[window_id, 0], color="0.25", alpha=0.55, linewidth=0.8, label="patch votes")
+        votes_ax.set_ylabel("votes")
         for source, color in (("binary_staged", "C1"), ("mmpd", "C2")):
             score = classifier_scores.get(source)
             if score is None:
@@ -558,8 +628,21 @@ def run_eval(args: argparse.Namespace) -> None:
         )
         past = np.stack([past_pool[index][0].detach().cpu().numpy() for index in indices]).astype(np.float32)
         legal_levels = legal_patch_refine_levels_dataset_z(past, ladder=ladder, device=device)
+        # Real-checkpoint counterpart of the synthetic causal contract.  The
+        # legal support must not change if only the future fixture changes.
+        assert_support_is_causal(
+            past,
+            binary_gt,
+            binary_gt + np.float32(123.456),
+            ladder=ladder,
+            canvas_height=256,
+            device=device,
+        )
         gt, gt_snap = snap_to_patch_refine_levels(binary_gt, legal_levels)
         mmpd, mmpd_snap = snap_to_patch_refine_levels(mmpd_binary_z, legal_levels)
+        mmpd_window_mean, mmpd_window_std, mmpd_inverse_residual = _mmpd_instance_summary(
+            binary_past=past, mmpd_prediction=mmpd_binary_z, scalers=scalers,
+        )
         # Patch-refine output must already be a legal absolute 256-row decode.
         # Keep it raw after this assertion; snapping it would conceal a bad decode.
         binary = binary_pred
@@ -572,7 +655,11 @@ def run_eval(args: argparse.Namespace) -> None:
         lattice["binary_staged"].update({"raw_binary_retained": 1.0})
         lattice["mmpd"].update(mmpd_snap)
         lattice["mmpd_alignment"] = align
+        lattice["causal_support_real_checkpoint_asserted"] = 1.0
         write_json(args.raw_eval_dir / f"lattice_assertion_{dataset}.json", lattice)
+        if args.assert_only:
+            print(f"[{dataset}] real checkpoint snapping/assertion gate passed", flush=True)
+            continue
         bundle = SimpleNamespace(
             fakes={"binary_staged": binary, "mmpd": mmpd},
             y_true_by_source={"binary_staged": gt, "mmpd": gt.copy()},
@@ -596,6 +683,28 @@ def run_eval(args: argparse.Namespace) -> None:
                     )
             write_json(args.output_dir / "partials" / f"{dataset}__{source}.json", per_length)
             by_source[source] = per_length
+            nonoverlap_args = copy(args)
+            nonoverlap_args.nonoverlapping_patches = True
+            nonoverlap_source = f"{source}_candidate_nonoverlap"
+            nonoverlap_bundle = SimpleNamespace(
+                fakes={nonoverlap_source: bundle.fakes[source]},
+                y_true_by_source={nonoverlap_source: bundle.y_true_by_source[source]},
+                past=bundle.past,
+                indices=bundle.indices,
+                series_starts=bundle.series_starts,
+                run=bundle.run,
+                pack_splits=bundle.pack_splits,
+            )
+            nonoverlap_per_length: Dict[str, float] = {}
+            for length in args.slice_lengths:
+                if int(length) <= args.horizon:
+                    nonoverlap_per_length[str(int(length))] = train_classifier(
+                        nonoverlap_args, dataset, nonoverlap_source, int(length), nonoverlap_bundle, splits, device,
+                    )
+            write_json(
+                args.output_dir / "partials" / f"{dataset}__{source}_candidate_nonoverlap.json",
+                nonoverlap_per_length,
+            )
         patch_pred = binary_pack["unblended_nonoverlap_patch_pred"].astype(np.float32)
         patch_gt = binary_pack["unblended_nonoverlap_patch_gt"].astype(np.float32)
         patch_past = binary_pack["unblended_nonoverlap_patch_past"].astype(np.float32)
@@ -640,7 +749,9 @@ def run_eval(args: argparse.Namespace) -> None:
         )
         score_data = _load_l8_classifier_scores(args.output_dir, dataset)
         plot = _plot_lattice(
-            args.output_dir, dataset, past, gt, binary, mmpd, legal_levels, score_data,
+            args.output_dir, dataset, past, binary_gt, gt, binary, mmpd_binary_z, mmpd,
+            legal_levels, binary_pack["patch_vote_counts"], mmpd_window_mean,
+            mmpd_window_std, mmpd_inverse_residual, score_data,
         )
         print(f"[{dataset}] canonical 256-row lattice asserted; visualization={plot}", flush=True)
 
@@ -667,7 +778,25 @@ def run_merge_only(args: argparse.Namespace) -> None:
                     row = {"dataset": dataset, "fake_source": fake_source, "slice_len": int(slice_key)}
                     row.update({key: metrics.get(key) for key in fields if key not in row})
                     writer.writerow(row)
-    print(f"[merge] wrote metrics.csv for {len(merged)} datasets", flush=True)
+    report_dir = _report_dir(args.output_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# h96 ordinal patch-refine vs non-ordinal MMPD discriminator", "",
+        "All discriminator inputs are binary dataset-z values on the same causal, "
+        "window-specific 256-row ordinal support. Figures are in `visualizations/`.", "",
+        "| Dataset | Fake source | Length | BCE | AUROC | Window AUROC |", "|---|---:|---:|---:|---:|---:|",
+    ]
+    for dataset, by_source in sorted(merged.items()):
+        for fake_source, by_length in sorted(by_source.items()):
+            for slice_key, metrics in sorted(by_length.items(), key=lambda item: int(item[0])):
+                lines.append(
+                    f"| {dataset} | {fake_source} | {slice_key} | "
+                    f"{metrics.get('disc_bce', float('nan')):.4f} | "
+                    f"{metrics.get('disc_auroc', float('nan')):.4f} | "
+                    f"{metrics.get('disc_auroc_window', float('nan')):.4f} |"
+                )
+    (report_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"[merge] wrote metrics.csv and {report_dir / 'report.md'} for {len(merged)} datasets", flush=True)
 
 
 def main() -> None:
