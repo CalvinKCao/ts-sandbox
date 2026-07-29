@@ -1372,6 +1372,12 @@ def create_diffusion_model(
         patch_refine_patch_height=int(globals().get("PATCH_REFINE_PATCH_HEIGHT", 32)),
         patch_refine_patch_width=int(globals().get("PATCH_REFINE_PATCH_WIDTH", 8)),
         patch_refine_col_stride=int(globals().get("PATCH_REFINE_COL_STRIDE", 6)),
+        patch_refine_unique_segments=bool(
+            globals().get("PATCH_REFINE_UNIQUE_SEGMENTS", False)
+        ),
+        patch_refine_prev_cond_dropout=float(
+            globals().get("PATCH_REFINE_PREV_COND_DROPOUT", 0.5)
+        ),
         use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
         unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
         use_amp=USE_AMP,

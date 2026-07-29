@@ -16,6 +16,8 @@ experiment:
   use_window_normalization: false
   use_ordinal_window_norm: true
   ordinal_ood_shift_causal_only: true
+  patch_refine_unique_segments: true
+  patch_refine_prev_cond_dropout: 0.5
 
 phases:
   - phase: staged_diffusion_pretrain

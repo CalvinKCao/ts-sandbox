@@ -68,6 +68,8 @@ def patch_globals(
     mod.PATCH_REFINE_PATCH_HEIGHT = int(getattr(state, "patch_refine_patch_height", 32))
     mod.PATCH_REFINE_PATCH_WIDTH = int(getattr(state, "patch_refine_patch_width", 8))
     mod.PATCH_REFINE_COL_STRIDE = int(getattr(state, "patch_refine_col_stride", 6))
+    mod.PATCH_REFINE_UNIQUE_SEGMENTS = bool(getattr(state, "patch_refine_unique_segments", False))
+    mod.PATCH_REFINE_PREV_COND_DROPOUT = float(getattr(state, "patch_refine_prev_cond_dropout", 0.5))
     cond_ps = getattr(state, "dit_cond_patch_size", None)
     mod.DIT_COND_PATCH_SIZE = tuple(cond_ps) if cond_ps is not None else None
     mod.DIFFUSION_STAGE = state.diffusion_stage

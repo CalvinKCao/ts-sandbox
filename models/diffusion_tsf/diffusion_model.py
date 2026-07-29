@@ -1016,6 +1016,8 @@ class DiffusionTSF(nn.Module):
         past: torch.Tensor,
         future: torch.Tensor,
         t: Optional[torch.Tensor] = None,
+        *,
+        patch_col0: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (binary factorized DiT path)."""
         if self.config.diffusion_stage in {
@@ -1025,7 +1027,9 @@ class DiffusionTSF(nn.Module):
         if self.config.diffusion_stage == "patch_refine":
             # Training loops sample one timestep per window; expand onto crops.
             return self._forward_binary_patch_refine(
-                past, future, t, expand_t_per_window=t is not None,
+                past, future, t,
+                expand_t_per_window=t is not None,
+                patch_col0=patch_col0,
             )
         return self._forward_binary_factorized(past, future, t)
 
@@ -1729,6 +1733,7 @@ class DiffusionTSF(nn.Module):
         t: Optional[torch.Tensor] = None,
         *,
         expand_t_per_window: bool = False,
+        patch_col0: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Train boundary-centered 32x8 patches on absolute hi-res CDF crops."""
         from .patch_refine import (
@@ -1743,6 +1748,11 @@ class DiffusionTSF(nn.Module):
             extract_patch_batch,
             select_patch_locations,
         )
+        from .patch_refine_segments import (
+            compress_prev_refine_32_to_16,
+            extract_prev_refine_crops,
+            locations_for_fixed_col0,
+        )
 
         assert self.binary_scheduler is not None
         B = past.shape[0]
@@ -1750,19 +1760,36 @@ class DiffusionTSF(nn.Module):
         device = past.device
         canvas_h, patch_h, patch_w, col_stride = self._patch_refine_geometry_knobs()
         coarse_h = int(self.config.coarse_image_height)
+        unique = bool(getattr(self.config, "patch_refine_unique_segments", False))
 
         past_norm, future_norm, _stats = self._normalize_sequence(past, future)
         future_maps = self._encode_staged_maps(future_norm)
         hir_gt = self._encode_absolute_future_hir(future_norm, canvas_h)
         naive = naive_upscale_coarse_cdf(future_maps["coarse"], canvas_h)
         edges = coarse_edges_from_cdf(future_maps["coarse"], canvas_height=canvas_h)
-        locations = select_patch_locations(
-            edges,
-            canvas_height=canvas_h,
-            patch_height=patch_h,
-            patch_width=patch_w,
-            col_stride=col_stride,
-        )
+        if unique:
+            if patch_col0 is None:
+                # Synth / legacy loaders: one random stride-1 crop per window.
+                max_c0 = int(edges.shape[-1]) - patch_w
+                patch_col0 = torch.randint(0, max_c0 + 1, (B,), device=device)
+            else:
+                patch_col0 = patch_col0.to(device=device, dtype=torch.long).view(B)
+            locations = locations_for_fixed_col0(
+                edges,
+                patch_col0,
+                canvas_height=canvas_h,
+                patch_height=patch_h,
+                patch_width=patch_w,
+                hir_canvas=hir_gt,
+            )
+        else:
+            locations = select_patch_locations(
+                edges,
+                canvas_height=canvas_h,
+                patch_height=patch_h,
+                patch_width=patch_w,
+                col_stride=col_stride,
+            )
         if not locations:
             raise RuntimeError("patch_refine produced zero training crops")
 
@@ -1799,6 +1826,27 @@ class DiffusionTSF(nn.Module):
         xt, zt = self.binary_scheduler.add_noise(target_patches, t)
         lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
         cond = expand_lookback_cond_for_patches(lookback_cond, locations)
+
+        prev_refine_16 = None
+        if unique:
+            # Prev GT in the previous primary's row frame (matches AR infer).
+            prev_32 = extract_prev_refine_crops(
+                hir_gt,
+                locations,
+                patch_height=patch_h,
+                patch_width=patch_w,
+                col_stride=col_stride,
+                coarse_edges=edges,
+                canvas_height=canvas_h,
+            )
+            prev_refine_16 = compress_prev_refine_32_to_16(prev_32)
+            drop_p = float(getattr(self.config, "patch_refine_prev_cond_dropout", 0.5))
+            if self.training and drop_p > 0.0:
+                keep = torch.rand(n_patches, device=device) >= drop_p
+                prev_refine_16 = prev_refine_16 * keep.view(n_patches, 1, 1, 1).to(
+                    dtype=prev_refine_16.dtype
+                )
+
         aux, patch_coarse_bin, patch_time0 = build_patch_aux_channels(
             naive,
             edges,
@@ -1808,6 +1856,7 @@ class DiffusionTSF(nn.Module):
             canvas_height=canvas_h,
             coarse_height=coarse_h,
             horizon_width=int(hir_gt.shape[-1]),
+            prev_refine_16=prev_refine_16,
         )
 
         ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
@@ -1961,65 +2010,65 @@ class DiffusionTSF(nn.Module):
 
         naive = naive_upscale_coarse_cdf(coarse, canvas_h)
         edges = coarse_edges_from_cdf(coarse, canvas_height=canvas_h)
-        locations = select_patch_locations(
-            edges,
-            canvas_height=canvas_h,
-            patch_height=patch_h,
-            patch_width=patch_w,
-            col_stride=col_stride,
-        )
+        unique = bool(getattr(self.config, "patch_refine_unique_segments", False))
         lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
-        cond = expand_lookback_cond_for_patches(lookback_cond, locations)
-        aux, patch_coarse_bin, patch_time0 = build_patch_aux_channels(
-            naive,
-            edges,
-            locations,
-            patch_height=patch_h,
-            patch_width=patch_w,
-            canvas_height=canvas_h,
-            coarse_height=coarse_h,
-            horizon_width=W_fut,
-        )
-
         ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
         ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
-        ctx_patches = expand_ctx_for_patches(ctx_flat, locations)
-        variate_indices = expand_variate_indices_for_patches(locations, device)
-        n_patches = len(locations)
 
-        def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
-            canvas = self._inject_coordinate_channel(xt)
-            canvas = self._inject_time_channels(canvas)
-            return torch.cat([canvas, aux], dim=1)
-
-        def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
-            out = self._predict_noise_chunked(
-                _build_canvas(xt),
-                t_batch,
-                cond,
-                ctx_patches,
-                variate_indices=variate_indices,
-                token_variate_ids=self._ctx_token_variate_ids,
-                patch_coarse_bin=patch_coarse_bin,
-                patch_time0=patch_time0,
+        def _sample_locations(
+            locs: List,
+            prev_refine_16: Optional[torch.Tensor],
+        ) -> torch.Tensor:
+            if not locs:
+                return torch.zeros(0, 1, patch_h, patch_w, device=device)
+            cond_l = expand_lookback_cond_for_patches(lookback_cond, locs)
+            aux_l, patch_coarse_bin_l, patch_time0_l = build_patch_aux_channels(
+                naive,
+                edges,
+                locs,
+                patch_height=patch_h,
+                patch_width=patch_w,
+                canvas_height=canvas_h,
+                coarse_height=coarse_h,
+                horizon_width=W_fut,
+                prev_refine_16=prev_refine_16,
             )
-            primary, zt = self._split_binary_heads(out)
-            x0_logits = self._x0_logits_from_prediction(primary, xt)
-            return x0_logits, zt
+            ctx_l = expand_ctx_for_patches(ctx_flat, locs)
+            var_l = expand_variate_indices_for_patches(locs, device)
+            n_l = len(locs)
 
-        sample_shape = (n_patches, 1, patch_h, patch_w)
-        if sampler in ("anchor", "deterministic_anchor"):
-            t_batch = torch.full(
-                (n_patches,),
-                self.config.binary_num_steps - 1,
-                device=device,
-                dtype=torch.long,
-            )
-            neutral = self._binary_anchor_canvas_shape(sample_shape, device=device)
-            x0_logits, _ = _chunked_model_fn(neutral, t_batch)
-            patch_cdf = (torch.sigmoid(x0_logits) > 0.5).float()
-        else:
-            patch_cdf = self.binary_scheduler.sample(
+            def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
+                canvas = self._inject_coordinate_channel(xt)
+                canvas = self._inject_time_channels(canvas)
+                return torch.cat([canvas, aux_l], dim=1)
+
+            def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
+                out = self._predict_noise_chunked(
+                    _build_canvas(xt),
+                    t_batch,
+                    cond_l,
+                    ctx_l,
+                    variate_indices=var_l,
+                    token_variate_ids=self._ctx_token_variate_ids,
+                    patch_coarse_bin=patch_coarse_bin_l,
+                    patch_time0=patch_time0_l,
+                )
+                primary, zt = self._split_binary_heads(out)
+                x0_logits = self._x0_logits_from_prediction(primary, xt)
+                return x0_logits, zt
+
+            sample_shape = (n_l, 1, patch_h, patch_w)
+            if sampler in ("anchor", "deterministic_anchor"):
+                t_batch = torch.full(
+                    (n_l,),
+                    self.config.binary_num_steps - 1,
+                    device=device,
+                    dtype=torch.long,
+                )
+                neutral = self._binary_anchor_canvas_shape(sample_shape, device=device)
+                x0_logits, _ = _chunked_model_fn(neutral, t_batch)
+                return (torch.sigmoid(x0_logits) > 0.5).float()
+            return self.binary_scheduler.sample(
                 model_fn=_chunked_model_fn,
                 shape=sample_shape,
                 num_steps=num_steps,
@@ -2029,6 +2078,129 @@ class DiffusionTSF(nn.Module):
                 reverse_step_indices=reverse_step_indices,
                 snapshot_timesteps=snapshot_timesteps,
             )
+
+        if unique:
+            from .patch_refine_segments import (
+                compress_prev_refine_32_to_16,
+                group_locations_by_col0,
+                select_coverage_gap_locations,
+                select_primary_ar_locations,
+            )
+            # AR is the main predictor: unique stride-6 col0 chain, then
+            # blanked-prev fills only where primary coverage is incomplete.
+            primary_locs = select_primary_ar_locations(
+                edges,
+                canvas_height=canvas_h,
+                patch_height=patch_h,
+                patch_width=patch_w,
+                col_stride=col_stride,
+            )
+            last_pred: Dict[Tuple[int, int], torch.Tensor] = {}
+            primary_pred_by_key: Dict[Tuple[int, int, int, int], torch.Tensor] = {}
+            for _col0, col_locs in group_locations_by_col0(primary_locs):
+                # Batch all (B,V) at this col0 together.
+                prev_chunks = []
+                for loc in col_locs:
+                    key = (loc.batch_index, loc.variate_index)
+                    if key in last_pred:
+                        prev_chunks.append(
+                            compress_prev_refine_32_to_16(last_pred[key].unsqueeze(0))
+                        )
+                    else:
+                        prev_chunks.append(
+                            torch.zeros(1, 1, 16, patch_w, device=device)
+                        )
+                prev_16 = torch.cat(prev_chunks, dim=0)
+                pred = _sample_locations(col_locs, prev_16)
+                for j, loc in enumerate(col_locs):
+                    last_pred[(loc.batch_index, loc.variate_index)] = pred[j]
+                    primary_pred_by_key[
+                        (loc.batch_index, loc.variate_index, loc.col0, loc.row0)
+                    ] = pred[j]
+
+            gap_locs = select_coverage_gap_locations(
+                edges,
+                primary_locs,
+                canvas_height=canvas_h,
+                patch_height=patch_h,
+                patch_width=patch_w,
+            )
+            locations = list(primary_locs) + list(gap_locs)
+            n_patches = len(locations)
+            patch_cdf = torch.zeros(n_patches, 1, patch_h, patch_w, device=device)
+            for i, loc in enumerate(primary_locs):
+                patch_cdf[i] = primary_pred_by_key[
+                    (loc.batch_index, loc.variate_index, loc.col0, loc.row0)
+                ]
+            if gap_locs:
+                gap_prev = torch.zeros(len(gap_locs), 1, 16, patch_w, device=device)
+                gap_pred = _sample_locations(gap_locs, gap_prev)
+                patch_cdf[len(primary_locs) :] = gap_pred
+        else:
+            locations = select_patch_locations(
+                edges,
+                canvas_height=canvas_h,
+                patch_height=patch_h,
+                patch_width=patch_w,
+                col_stride=col_stride,
+            )
+            n_patches = len(locations)
+            cond = expand_lookback_cond_for_patches(lookback_cond, locations)
+            aux, patch_coarse_bin, patch_time0 = build_patch_aux_channels(
+                naive,
+                edges,
+                locations,
+                patch_height=patch_h,
+                patch_width=patch_w,
+                canvas_height=canvas_h,
+                coarse_height=coarse_h,
+                horizon_width=W_fut,
+            )
+            ctx_patches = expand_ctx_for_patches(ctx_flat, locations)
+            variate_indices = expand_variate_indices_for_patches(locations, device)
+
+            def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
+                canvas = self._inject_coordinate_channel(xt)
+                canvas = self._inject_time_channels(canvas)
+                return torch.cat([canvas, aux], dim=1)
+
+            def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
+                out = self._predict_noise_chunked(
+                    _build_canvas(xt),
+                    t_batch,
+                    cond,
+                    ctx_patches,
+                    variate_indices=variate_indices,
+                    token_variate_ids=self._ctx_token_variate_ids,
+                    patch_coarse_bin=patch_coarse_bin,
+                    patch_time0=patch_time0,
+                )
+                primary, zt = self._split_binary_heads(out)
+                x0_logits = self._x0_logits_from_prediction(primary, xt)
+                return x0_logits, zt
+
+            sample_shape = (n_patches, 1, patch_h, patch_w)
+            if sampler in ("anchor", "deterministic_anchor"):
+                t_batch = torch.full(
+                    (n_patches,),
+                    self.config.binary_num_steps - 1,
+                    device=device,
+                    dtype=torch.long,
+                )
+                neutral = self._binary_anchor_canvas_shape(sample_shape, device=device)
+                x0_logits, _ = _chunked_model_fn(neutral, t_batch)
+                patch_cdf = (torch.sigmoid(x0_logits) > 0.5).float()
+            else:
+                patch_cdf = self.binary_scheduler.sample(
+                    model_fn=_chunked_model_fn,
+                    shape=sample_shape,
+                    num_steps=num_steps,
+                    device=device,
+                    verbose=verbose,
+                    sampler=sampler,
+                    reverse_step_indices=reverse_step_indices,
+                    snapshot_timesteps=snapshot_timesteps,
+                )
 
         hir_cdf, patch_vote_counts = blend_patch_bins(
             patch_cdf,
@@ -2956,10 +3128,12 @@ class DiffusionTSF(nn.Module):
     def get_loss(
         self,
         past: torch.Tensor,
-        future: torch.Tensor
+        future: torch.Tensor,
+        *,
+        patch_col0: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Convenience method to get just the loss for training."""
         if self._ar_training_enabled(future.shape[-1]):
             past, future = self._sample_ar_training_chunk(past, future)
-        outputs = self.forward(past, future)
+        outputs = self.forward(past, future, patch_col0=patch_col0)
         return outputs['loss']

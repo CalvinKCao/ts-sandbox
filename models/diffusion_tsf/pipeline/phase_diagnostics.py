@@ -174,6 +174,7 @@ def compute_dataset_stats(
     """Mean/std/min/max/quartiles per variate on pre-normalized windows."""
     from models.diffusion_tsf.pipeline.visualize_utils import (
         _as_channel_first,
+        _unpack_past_future,
         pick_sample_indices,
     )
 
@@ -185,7 +186,7 @@ def compute_dataset_stats(
     per_var_values: List[List[List[float]]] = []
 
     for idx in indices:
-        past, future = dataset[idx]
+        past, future = _unpack_past_future(dataset[idx])
         past, future = _as_channel_first(past, future)
         seq = torch.cat([past, future], dim=-1)
         per_var_values.append(seq.numpy().tolist())

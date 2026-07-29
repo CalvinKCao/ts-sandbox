@@ -405,7 +405,11 @@ def _anchor_mse_on_loader(model, loader, device: torch.device) -> float:
     total = 0.0
     n = 0
     k = int(getattr(model.config, "lookback_overlap", 0) or 0)
-    for past, future in loader:
+    for batch in loader:
+        if len(batch) == 3:
+            past, future, _col0 = batch
+        else:
+            past, future = batch
         past = past.to(device)
         future = future.to(device)
         out = model.generate(past, sampler="anchor", num_inference_steps=1)
@@ -1432,6 +1436,12 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 from models.diffusion_tsf.train_window_aug import set_train_window_aug_epoch
 
                 set_train_window_aug_epoch(train_loader, epoch)
+                # UniquePatchSegmentDataset.set_epoch may sit under Subset.
+                _epoch_ds = train_ds
+                while hasattr(_epoch_ds, "dataset") and not hasattr(_epoch_ds, "set_epoch"):
+                    _epoch_ds = _epoch_ds.dataset
+                if hasattr(_epoch_ds, "set_epoch"):
+                    _epoch_ds.set_epoch(epoch)
                 logger.info(
                     "  [%s/%s] %s epoch %d/%d train_start",
                     self.name, self.stage, trial_label, epoch + 1, max_epochs,
@@ -1443,16 +1453,22 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 train_loss = 0.0
                 n_train = 0
                 optimizer.zero_grad(set_to_none=True)
-                for batch_idx, (past, future) in enumerate(train_loader):
+                for batch_idx, batch in enumerate(train_loader):
                     if batch_idx == 0 or (batch_idx + 1) % train_log_stride == 0 or batch_idx + 1 == n_train_batches:
                         logger.info(
                             "  [%s/%s] %s epoch %d/%d train_batch %d/%d",
                             self.name, self.stage, trial_label,
                             epoch + 1, max_epochs, batch_idx + 1, n_train_batches,
                         )
+                    if len(batch) == 3:
+                        past, future, patch_col0 = batch
+                        patch_col0 = patch_col0.to(device)
+                    else:
+                        past, future = batch
+                        patch_col0 = None
                     past, future = past.to(device), future.to(device)
                     with amp_context():
-                        loss = model.get_loss(past, future) / accum_steps
+                        loss = model.get_loss(past, future, patch_col0=patch_col0) / accum_steps
                     loss.backward()
                     if (batch_idx + 1) % accum_steps == 0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -1491,16 +1507,22 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     self.name, self.stage, trial_label, epoch + 1, max_epochs,
                 )
                 with torch.no_grad():
-                    for val_idx, (past, future) in enumerate(val_loader):
+                    for val_idx, batch in enumerate(val_loader):
                         if val_idx == 0 or (val_idx + 1) % val_log_stride == 0 or val_idx + 1 == n_val_batches:
                             logger.info(
                                 "  [%s/%s] %s epoch %d/%d val_batch %d/%d",
                                 self.name, self.stage, trial_label,
                                 epoch + 1, max_epochs, val_idx + 1, n_val_batches,
                             )
+                        if len(batch) == 3:
+                            past, future, patch_col0 = batch
+                            patch_col0 = patch_col0.to(device)
+                        else:
+                            past, future = batch
+                            patch_col0 = None
                         past, future = past.to(device), future.to(device)
                         with amp_context():
-                            loss = model.get_loss(past, future)
+                            loss = model.get_loss(past, future, patch_col0=patch_col0)
                         val_loss += float(loss.item())
                         n_val += 1
                 val_loss /= max(n_val, 1)
@@ -1699,6 +1721,36 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             ordinal_tie_atol=float(state.ordinal_tie_atol),
             use_ordinal_window_norm=state.use_ordinal_window_norm,
         )
+        if (
+            self.stage == "patch_refine"
+            and bool(getattr(state, "patch_refine_unique_segments", False))
+        ):
+            from models.diffusion_tsf.patch_refine_segments import (
+                wrap_timeseries_as_unique_segments,
+            )
+
+            seg_stride = max(1, int(train_stride))
+            train_ds = wrap_timeseries_as_unique_segments(
+                train_ds,
+                patch_width=int(getattr(state, "patch_refine_patch_width", 8)),
+                segment_stride=seg_stride,
+                series_id=0,
+            )
+            val_ds = wrap_timeseries_as_unique_segments(
+                val_ds,
+                patch_width=int(getattr(state, "patch_refine_patch_width", 8)),
+                segment_stride=seg_stride,
+                series_id=1,
+            )
+            logger.info(
+                "  [%s] unique patch segments enabled "
+                "(segment_stride=%d train=%d val=%d prev_dropout=%.2f)",
+                self.name,
+                seg_stride,
+                len(train_ds),
+                len(val_ds),
+                float(getattr(state, "patch_refine_prev_cond_dropout", 0.5)),
+            )
         if norm_stats.get("ordinal_ladder") is not None:
             state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
         from models.diffusion_tsf.pipeline.config import training_value

@@ -20,6 +20,15 @@ from models.diffusion_tsf.pipeline.config import visualization_settings
 logger = logging.getLogger(__name__)
 
 
+def _unpack_past_future(sample) -> Tuple[Any, Any]:
+    """Accept ``(past, future)`` or unique-segment ``(past, future, col0)``."""
+    if isinstance(sample, (tuple, list)):
+        if len(sample) >= 2:
+            return sample[0], sample[1]
+        raise ValueError(f"expected at least (past, future), got len={len(sample)}")
+    raise TypeError(f"expected sequence sample, got {type(sample)!r}")
+
+
 def denorm(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
     """Denormalize (C, T) tensor using (C,) or (1, C) stats."""
     m = mean.squeeze().unsqueeze(-1)
@@ -101,7 +110,7 @@ def generate_itrans_prediction_viz(
     plot_horizon = min(int(forecast_length), pred_len)
 
     for row, idx in enumerate(indices):
-        past, future = dataset[idx]
+        past, future = _unpack_past_future(dataset[idx])
         past_t = past.unsqueeze(0).to(device)
         B, C, L = past_t.shape
         x_enc = past_t.permute(0, 2, 1)
@@ -481,7 +490,7 @@ def generate_staged_dual_scale_comparisons(
     saved: List[str] = []
 
     for sample_index in sample_indices:
-        past, future = test_ds[sample_index]
+        past, future = _unpack_past_future(test_ds[sample_index])
         past_t = past.unsqueeze(0).to(device)
 
         with torch.no_grad():
@@ -547,7 +556,7 @@ def generate_pipeline_visualizations(
     file_idx = 1
 
     for row, idx in enumerate(indices):
-        past, future = dataset[idx]
+        past, future = _unpack_past_future(dataset[idx])
         past_t = past.unsqueeze(0).to(device)
 
         with torch.no_grad():
@@ -969,7 +978,7 @@ def _run_dual_concat_synthetic_pretrain_visualizations_inner(
     saved: List[str] = []
 
     for row, idx in enumerate(indices):
-        past, future = dataset[idx]
+        past, future = _unpack_past_future(dataset[idx])
         if not torch.is_tensor(past):
             past = torch.as_tensor(past, dtype=torch.float32)
         if not torch.is_tensor(future):
@@ -1629,7 +1638,7 @@ def run_staged_synthetic_pretrain_diagnostics(
     jpeg_dpi = int(viz.get("jpeg_dpi", 100))
     sample_index = pick_sample_indices(len(dataset), 1, seed=state.seed)[0]
 
-    past, future = dataset[sample_index]
+    past, future = _unpack_past_future(dataset[sample_index])
     past_cf, future_cf = _as_channel_first(past, future)
     past_b = past_cf.unsqueeze(0).to(device)
     future_b = future_cf.unsqueeze(0).to(device)
@@ -2512,12 +2521,12 @@ def run_eval_worst_window_visualizations(
             logger.warning("worst-window viz skip win %s: %s", wi, exc)
             continue
         if wi not in map_cache:
-            past, future = test_ds[wi]
+            past, future = _unpack_past_future(test_ds[wi])
             map_cache[wi] = _worst_window_pred_2d_maps(
                 coarse_model, fine_model, past, device=device,
             )
         coarse_2d, fine_2d = map_cache[wi]
-        past, future = test_ds[wi]
+        past, future = _unpack_past_future(test_ds[wi])
         boundaries, ood_shift = _coarse_bin_boundaries_and_ood_shift(coarse_model, past, future, device=device)
         paths.append(
             plot_worst_window_panel(
@@ -2754,7 +2763,7 @@ def run_eval_probabilistic_sample_visualizations(
         except KeyError as exc:
             logger.warning("prob sample viz skip win %s: %s", wi, exc)
             continue
-        past, future = test_ds[wi]
+        past, future = _unpack_past_future(test_ds[wi])
         if wi not in map_cache:
             map_cache[wi] = _prob_window_pred_2d_maps(
                 coarse_model,
@@ -2936,7 +2945,7 @@ def run_vertical_dual_repr_visualization(
     window_idx = int(window_idx)
     vi_local = int(variate) % len(variate_indices)
 
-    past, future = train_ds[window_idx]
+    past, future = _unpack_past_future(train_ds[window_idx])
     if not torch.is_tensor(past):
         past = torch.as_tensor(past, dtype=torch.float32)
     if not torch.is_tensor(future):

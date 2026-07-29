@@ -62,6 +62,8 @@ class PipelineState:
     patch_refine_patch_height: int = 32
     patch_refine_patch_width: int = 8
     patch_refine_col_stride: int = 6
+    patch_refine_unique_segments: bool = False
+    patch_refine_prev_cond_dropout: float = 0.5
     dit_cond_patch_size: Optional[Tuple[int, int]] = None
     use_guidance_channel: bool = True
     guidance_placement: str = "canvas"
@@ -264,6 +266,14 @@ class PipelineState:
         ):
             if key in init_kwargs:
                 init_kwargs[key] = int(init_kwargs[key])
+        if "patch_refine_unique_segments" in init_kwargs:
+            init_kwargs["patch_refine_unique_segments"] = bool(
+                init_kwargs["patch_refine_unique_segments"]
+            )
+        if "patch_refine_prev_cond_dropout" in init_kwargs:
+            init_kwargs["patch_refine_prev_cond_dropout"] = float(
+                init_kwargs["patch_refine_prev_cond_dropout"]
+            )
         for key in ("dit_embed_dim", "dit_depth", "dit_num_heads", "itrans_d_model", "itrans_d_ff", "itrans_e_layers", "itrans_n_heads"):
             if key in init_kwargs:
                 init_kwargs[key] = int(init_kwargs[key])

@@ -100,10 +100,15 @@ def build_patch_aux_channels(
     canvas_height: int,
     coarse_height: int,
     horizon_width: int,
+    prev_refine_16: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return ``(aux, patch_coarse_bin, patch_time0)``.
 
     ``aux`` is ``(N,3,ph,pw)`` = naive crop, coarse-cell id map, absolute-time map.
+
+    When ``prev_refine_16`` is provided ``(N,1,16,pw)``, it is written into the
+    **top 16 rows** of the coarse-cell channel (which is otherwise H-constant).
+    The bottom 16 rows keep the real per-column coarse-cell values.
     """
     naive_patches = extract_patch_batch(
         naive_canvas, locations, patch_height=patch_height, patch_width=patch_width,
@@ -131,6 +136,18 @@ def build_patch_aux_channels(
         mid = patch_width // 2
         patch_coarse_bin[i] = bins[mid]
         patch_time0[i] = loc.col0
+
+    if prev_refine_16 is not None:
+        if prev_refine_16.shape != (n, 1, 16, patch_width):
+            raise ValueError(
+                f"prev_refine_16 must be {(n, 1, 16, patch_width)}, "
+                f"got {tuple(prev_refine_16.shape)}"
+            )
+        if patch_height < 16:
+            raise ValueError("prev_refine_16 stuffing requires patch_height >= 16")
+        # Reclaim H-padding of the H-constant coarse-cell map.
+        coarse_cell = coarse_cell.clone()
+        coarse_cell[:, :, :16, :] = prev_refine_16.to(device=device, dtype=dtype)
 
     aux = torch.cat([naive_patches, coarse_cell, time_map], dim=1)
     return aux, patch_coarse_bin, patch_time0
