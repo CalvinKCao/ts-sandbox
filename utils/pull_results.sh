@@ -59,13 +59,16 @@ SSH_OPTS=(
     -o "ControlPath=${SSH_CONTROL_DIR}/%r@%h:%p"
 )
 
+# No --update: early pulls often leave 0-byte Slurm .out/.err stubs whose local
+# mtime is newer than the finished remote file (WSL clock skew / pull-at-start).
+# --update then skips forever and logs look "missing". Plain -a still skips
+# identical size+mtime files.
 RSYNC_BASE=(
     -avz
     --progress
     --no-g
     --no-p
     --partial
-    --update
 )
 
 PULL_MODE="light"
@@ -316,21 +319,33 @@ pull_via_file_list() {
 
     local file_list
     file_list="$(mktemp)"
+    local list_rc=0
     if [ "${#rel_subpaths[@]}" -eq 0 ]; then
-        remote_list_files "$remote_root" "" "$tree_kind" >"$file_list" || true
+        remote_list_files "$remote_root" "" "$tree_kind" >"$file_list" || list_rc=$?
     else
         local rel
         for rel in "${rel_subpaths[@]}"; do
-            remote_list_files "$remote_root" "$rel" "$tree_kind" >>"$file_list" || true
+            remote_list_files "$remote_root" "$rel" "$tree_kind" >>"$file_list" || list_rc=$?
         done
         sort -u -o "$file_list" "$file_list"
     fi
 
+    # Drop blank lines / SSH banner junk so wc and rsync stay honest.
+    if [ -s "$file_list" ]; then
+        grep -v '^[[:space:]]*$' "$file_list" >"${file_list}.clean" || true
+        mv "${file_list}.clean" "$file_list"
+    fi
+
     local n
     n="$(wc -l <"$file_list" | tr -d ' ')"
+    if [ "$list_rc" -ne 0 ]; then
+        rm -f "$file_list"
+        echo "     remote find failed (exit ${list_rc}); is the SSH multiplex up? try: ssh ${REMOTE_HOST}" >&2
+        return 1
+    fi
     if [ "$n" -eq 0 ]; then
         rm -f "$file_list"
-        echo "     0 files on remote (check SSH / path / --recent window)"
+        echo "     0 files on remote (check path exists, --recent window, or light filters)"
         return
     fi
     echo "     ${n} files on remote (one rsync)"
@@ -423,7 +438,14 @@ echo "Pulling from ${REMOTE_HOST} (${PULL_MODE} mode, dest=${LOCAL_RESULTS_PATH}
 [ "$SKIP_NPY_CKPT" -eq 1 ] && echo "Skipping *.npy / *.npz / *.ckpt / *.pt"
 
 # One SSH session (shared ControlMaster socket) for find + rsync below.
-ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" true
+# Killarney/Narval need an interactive login first (2FA); pubkey alone fails.
+if ! ssh "${SSH_OPTS[@]}" -o BatchMode=yes "${REMOTE_USER}@${REMOTE_HOST}" true 2>/dev/null; then
+    echo "ERROR: no usable SSH session to ${REMOTE_HOST}." >&2
+    echo "  Open a multiplex master once (2FA), then rerun this script:" >&2
+    echo "    ssh ${REMOTE_HOST}" >&2
+    echo "  Socket: ${SSH_CONTROL_DIR}/%r@%h:%p" >&2
+    exit 1
+fi
 
 if [ "$PULL_RESULTS" -eq 1 ]; then
     for RP in "${REMOTE_PATHS[@]}"; do

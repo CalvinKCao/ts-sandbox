@@ -63,11 +63,16 @@ def _test_config_and_search() -> None:
     pretrain = phases["staged_diffusion_pretrain"]
     assert pretrain["reuse_pretrain_from_config"] == "binary_patch_refine_lb336_hz96_full"
     assert pretrain["require_reuse_pretrain"] is True
-    for stage in ("diffusion_coarse_finetune_hp", "diffusion_patch_refine_finetune_hp"):
+    expected_u_grid = {
+        "diffusion_coarse_finetune_hp": [512, 1024, 2048],
+        # Crop expansion (~17x) forces a smaller ladder than coarse.
+        "diffusion_patch_refine_finetune_hp": [64, 128, 256],
+    }
+    for stage, u_grid in expected_u_grid.items():
         phase = phases[stage]
-        assert phase["n_trials"] == 10
+        assert phase["n_trials"] == 4
         assert phase["search_space"] == "lr_eff_batch_univariate_ema"
-        assert phase["effective_univariate_batch_grid"] == [512, 1024, 2048]
+        assert phase["effective_univariate_batch_grid"] == u_grid
         assert phase["ema_decay_grid"] == [0.0, 0.99, 0.995, 0.999]
 
         params = _suggest_staged_params(
@@ -75,7 +80,7 @@ def _test_config_and_search() -> None:
             search_space=phase["search_space"], phase_overrides=phase,
         )
         assert params["learning_rate"] == phase["hp_lr_min"]
-        assert params["target_univariate_batch"] == 2048
+        assert params["target_univariate_batch"] == u_grid[-1]
         assert params["ema_decay"] == 0.999
         assert params["prediction_target"] == "x0"
         assert params["loss_weighting"] == "min_snr"

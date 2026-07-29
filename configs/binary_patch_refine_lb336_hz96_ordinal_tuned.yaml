@@ -4,7 +4,7 @@
 extends: configs/binary_patch_refine_lb336_hz96_full.yaml
 
 training:
-  n_finetune_hp_trials: 10
+  n_finetune_hp_trials: 4
   finetune_max_micro_batch: 2048
 
 wandb:
@@ -25,7 +25,7 @@ phases:
     require_reuse_pretrain: true
 
   - phase: diffusion_coarse_finetune_hp
-    n_trials: 10
+    n_trials: 4
     max_epochs: 20
     patience: 8
     search_space: lr_eff_batch_univariate_ema
@@ -39,13 +39,17 @@ phases:
     binary_noise_schedule: linear
 
   - phase: diffusion_patch_refine_finetune_hp
-    n_trials: 10
+    n_trials: 4
     max_epochs: 20
     patience: 8
     search_space: lr_eff_batch_univariate_ema
     hp_lr_min: 5.0e-5
     hp_lr_max: 1.5e-3
-    effective_univariate_batch_grid: [512, 1024, 2048]
+    # Patch-refine materializes ~17 local 32x8 crops per univariate window
+    # (W=8, stride=6 on hz=96). The coarse-stage {512,1024,2048} grid OOMs
+    # an L40S (~48 GiB) before a single trial completes; keep LR/EMA the same
+    # but drop the univariate batch ladder by ~8x so crop count fits.
+    effective_univariate_batch_grid: [64, 128, 256]
     ema_decay_grid: [0.0, 0.99, 0.995, 0.999]
     prediction_target: x0
     loss_weighting: min_snr

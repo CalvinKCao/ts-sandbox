@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import math
@@ -2106,12 +2107,21 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                                 "  [%s] trial %d OOM (batch=%s), pruning",
                                 phase.name, trial.number, params.get("batch_size"),
                             )
+                            # _train_once's finally deletes the model, but the
+                            # CUDA caching allocator only releases after the
+                            # frame unwinds — empty here or the next trial
+                            # starts already near the L40S ceiling.
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
                             raise TrialPruned() from None
                         except TrialPruned:
                             logger.info(
                                 "  [%s] Optuna trial %d pruned after %.1fs",
                                 phase.name, trial.number, time.perf_counter() - trial_t0,
                             )
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
                             raise
                         trial.set_user_attr("best_epoch", best_ep)
                         logger.info(
