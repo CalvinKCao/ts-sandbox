@@ -57,3 +57,13 @@ phases:
     loss_weighting: min_snr
     min_snr_gamma: 2.0
     binary_noise_schedule: linear
+
+  # Unique-seg AR makes full quad_t×20×20 eval ~hours; keep a lighter gate for
+  # campaign resumes. Discriminator eval still builds its own forecast packs.
+  - phase: staged_eval
+    eval_test_fraction: 0.25
+    test_stride: 16
+    probabilistic_n_samples: 4
+    probabilistic_num_inference_steps: 5
+    batch_size: 8
+    skip_eval_visualizations: true

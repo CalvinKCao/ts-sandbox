@@ -372,6 +372,7 @@ class StagedEvalPhase(PipelinePhase):
                 y_true_all.append(future.cpu().numpy())
 
                 torch.manual_seed(state.seed + batch_idx)
+                batch_t0 = time.perf_counter()
                 if joint_dual:
                     dual_det = coarse_model.generate(past, **det_kwargs)
                     det_t = dual_det.get("prediction_global_norm", dual_det.get("prediction"))
@@ -447,8 +448,10 @@ class StagedEvalPhase(PipelinePhase):
                     coarse_all.append(coarse_np)
                     fine_all.append(fine_np)
 
+                det_s = time.perf_counter() - batch_t0
                 batch_samples = []
                 batch_samples_with_overlap = []
+                prob_t0 = time.perf_counter()
                 for sample_idx in range(prob_samples):
                     seed = state.seed + batch_idx * 1009 + sample_idx * 17
                     torch.manual_seed(seed)
@@ -502,14 +505,26 @@ class StagedEvalPhase(PipelinePhase):
                 if batch_samples_with_overlap:
                     samples_with_overlap_all.append(np.stack(batch_samples_with_overlap, axis=2))
 
-                if batch_idx < 3 or batch_idx == len(loader) - 1:
-                    logger.info(
-                        "[%s] staged eval batch %d/%d elapsed=%.1fs",
-                        subset_id,
-                        batch_idx + 1,
-                        len(loader),
-                        time.perf_counter() - t0,
-                    )
+                prob_s = time.perf_counter() - prob_t0
+                batch_s = time.perf_counter() - batch_t0
+                done = batch_idx + 1
+                elapsed = time.perf_counter() - t0
+                eta_s = (elapsed / done) * (len(loader) - done) if done else 0.0
+                logger.info(
+                    "[%s] staged eval batch %d/%d n=%d "
+                    "det=%.1fs prob=%.1fs (n_samp=%d) batch=%.1fs "
+                    "elapsed=%.1fs eta=%.1fs",
+                    subset_id,
+                    done,
+                    len(loader),
+                    batch_n,
+                    det_s,
+                    prob_s,
+                    prob_samples,
+                    batch_s,
+                    elapsed,
+                    eta_s,
+                )
 
         pack = {
             "y_true": np.concatenate(y_true_all, axis=0),
