@@ -118,8 +118,8 @@ def _defaults(argv: Sequence[str]) -> List[str]:
     if "--horizon" not in text:
         defaults += ["--horizon", "96"]
     if "--test-stride" not in text:
-        # Match lighter staged_eval gate (was 4; unique-seg AR makes dense grids brutal).
-        defaults += ["--test-stride", "16"]
+        # Kept for CLI compat; pack alignment uses --pack-test-stride (default 4).
+        defaults += ["--test-stride", "4"]
     if "--test-fraction" not in text:
         defaults += ["--test-fraction", "0.25"]
     if "--output-dir" not in text:
@@ -162,12 +162,19 @@ def parse_args() -> argparse.Namespace:
         help="Upper bound for --probe-binary-batch-size search.",
     )
     custom.add_argument(
+        "--pack-test-stride",
+        type=int,
+        default=None,
+        help="TSF pool stride that MMPD pack indices address (campaign default: 4). "
+             "Must match MMPD eval_test_stride; do not use the binary metadata train "
+             "test_stride (often 1 or 480).",
+    )
+    custom.add_argument(
         "--disc-index-stride",
         type=int,
         default=None,
         help="Keep every N-th MMPD-aligned window after loading the pack. "
-             "Default: max(1, round(args.test_stride / 4)) so --test-stride 16 ≈ every "
-             "4th index when MMPD/binary packs were built at stride 4.",
+             "Default: 4 when --pack-test-stride is 4 (≈ staged_eval test_stride 16).",
     )
     extra, remaining = custom.parse_known_args(sys.argv[1:])
     saved = sys.argv
@@ -184,6 +191,9 @@ def parse_args() -> argparse.Namespace:
     )
     args.probe_binary_batch_size = bool(extra.probe_binary_batch_size)
     args.probe_binary_batch_size_max = max(1, int(extra.probe_binary_batch_size_max))
+    args.pack_test_stride = (
+        None if extra.pack_test_stride is None else max(1, int(extra.pack_test_stride))
+    )
     args.disc_index_stride = (
         None if extra.disc_index_stride is None else max(1, int(extra.disc_index_stride))
     )
@@ -270,6 +280,15 @@ def _thin_disc_windows(
         flush=True,
     )
     return _subset_mmpd_aligned(indices, pack, pick=pick)
+
+
+def _pack_test_stride(args: argparse.Namespace) -> int:
+    """Stride of the TSF pool that MMPD ``indices`` address (not binary metadata stride)."""
+    explicit = getattr(args, "pack_test_stride", None)
+    if explicit is not None:
+        return max(1, int(explicit))
+    # Historical worker default / MMPD matched-binary eval_test_stride.
+    return max(1, int(getattr(args, "test_stride", 4) or 4))
 
 
 def _mmpd_pack(root: Path, dataset: str) -> Mapping[str, np.ndarray]:
@@ -496,7 +515,7 @@ def _materialize_binary(
         lookback=args.lookback,
         horizon=args.horizon,
         train_stride=run_train_stride(run),
-        test_stride=run_test_stride(run),
+        test_stride=_pack_test_stride(args),
         pack_splits=parse_pack_splits(args.pack_splits),
         use_ordinal_window_norm=False,
     )
@@ -506,7 +525,9 @@ def _materialize_binary(
             f"(n_indices={len(indices)}, index_range="
             f"[{min(indices) if indices else 'n/a'}, {max(indices) if indices else 'n/a'}], "
             f"pool_len={len(pool)}, train_stride={run_train_stride(run)}, "
-            f"test_stride={run_test_stride(run)}, pack_splits={parse_pack_splits(args.pack_splits)})"
+            f"pack_test_stride={_pack_test_stride(args)}, "
+            f"binary_meta_test_stride={run_test_stride(run)}, "
+            f"pack_splits={parse_pack_splits(args.pack_splits)})"
         )
 
     batch_size = max(1, int(args.raw_binary_batch_size))
@@ -774,8 +795,8 @@ def run_eval(args: argparse.Namespace) -> None:
         else:
             disc_stride = args.disc_index_stride
             if disc_stride is None:
-                # Worker historically used --test-stride 4 for MMPD-aligned packs.
-                disc_stride = max(1, int(round(float(args.test_stride) / 4.0)))
+                # pack is already eval_test_stride=4; every 4th ≈ staged_eval stride 16.
+                disc_stride = 4
             indices, mmpd_pack = _thin_disc_windows(
                 indices,
                 mmpd_pack,
@@ -806,7 +827,7 @@ def run_eval(args: argparse.Namespace) -> None:
             lookback=args.lookback,
             horizon=args.horizon,
             train_stride=run_train_stride(run),
-            test_stride=run_test_stride(run),
+            test_stride=_pack_test_stride(args),
             pack_splits=parse_pack_splits(args.pack_splits),
             use_ordinal_window_norm=False,
         )
@@ -855,7 +876,7 @@ def run_eval(args: argparse.Namespace) -> None:
         )
         splits = split_windows(
             len(gt), args, dataset, indices=bundle.indices, lookback=args.lookback,
-            horizon=args.horizon, test_stride=run_test_stride(run), series_starts=bundle.series_starts,
+            horizon=args.horizon, test_stride=_pack_test_stride(args), series_starts=bundle.series_starts,
         )
         by_source: Dict[str, Dict[str, float]] = {}
         for source in ("binary_staged", "mmpd"):
