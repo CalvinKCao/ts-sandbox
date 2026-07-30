@@ -108,7 +108,7 @@ if [[ "$ORDINAL_DISC_MODE" -eq 1 ]]; then
     echo "$(ts) [eval] ordinal patch-refine checkpoint: $GRID_EXISTING_CKPT"
     echo "$(ts) [eval] MMPD root: $GRID_MMPD_ROOT"
     ORDINAL_ASSERT_ARGS=()
-    [[ "$ORDINAL_ASSERT_ONLY" -eq 0 ]] || ORDINAL_ASSERT_ARGS=(--assert-only)
+    [[ "$ORDINAL_ASSERT_ONLY" -eq 0 ]] || ORDINAL_ASSERT_ARGS=(--assert-only --assert-max-windows "${GRID_ASSERT_MAX_WINDOWS:-8}")
     python -u "$GRID_ORDINAL_DISC_EVALUATOR" \
         --datasets "$GRID_DATASET" \
         --checkpoint-dir "$GRID_EXISTING_CKPT" \

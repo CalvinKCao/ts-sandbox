@@ -138,6 +138,13 @@ def parse_args() -> argparse.Namespace:
     custom = argparse.ArgumentParser(add_help=False)
     custom.add_argument("--checkpoint-dir", type=Path, default=None)
     custom.add_argument("--assert-only", action="store_true")
+    custom.add_argument(
+        "--assert-max-windows",
+        type=int,
+        default=None,
+        help="When --assert-only, cap lattice checks to this many MMPD-aligned windows "
+             "(default: 8). Full disc eval ignores this.",
+    )
     extra, remaining = custom.parse_known_args(sys.argv[1:])
     saved = sys.argv
     sys.argv = [saved[0], *_defaults(remaining), *remaining]
@@ -148,6 +155,9 @@ def parse_args() -> argparse.Namespace:
     args.datasets = [piece for raw in args.datasets for piece in str(raw).split(",") if piece]
     args.checkpoint_dir = extra.checkpoint_dir.expanduser().resolve() if extra.checkpoint_dir else None
     args.assert_only = bool(extra.assert_only)
+    args.assert_max_windows = (
+        None if extra.assert_max_windows is None else max(1, int(extra.assert_max_windows))
+    )
     args.mmpd_output_root = args.mmpd_output_root.expanduser().resolve()
     args.raw_eval_dir = args.raw_eval_dir.expanduser().resolve()
     if args.merge_partials_only:
@@ -162,6 +172,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("ordinal patch-refine comparison is fixed to --lookback 336 --horizon 96")
     if args.mmpd_ordinal_norm or not args.mmpd_instance_norm:
         raise ValueError("this paired comparison requires non-ordinal, instance-normalized MMPD")
+    if args.assert_only and args.assert_max_windows is None:
+        args.assert_max_windows = 8
     return args
 
 
@@ -600,6 +612,27 @@ def run_eval(args: argparse.Namespace) -> None:
     for dataset in args.datasets:
         mmpd_pack = _mmpd_pack(args.mmpd_output_root, dataset)
         indices = [int(value) for value in mmpd_pack["indices"].tolist()]
+        n_full = len(indices)
+        if args.assert_only:
+            cap = int(args.assert_max_windows or 8)
+            if n_full > cap:
+                rng = np.random.default_rng(
+                    int(args.seed) + (sum(ord(c) for c in dataset) % 10_007)
+                )
+                pick = np.sort(rng.choice(n_full, size=cap, replace=False))
+                indices = [indices[int(i)] for i in pick]
+                mmpd_pack = {
+                    key: (
+                        value[pick]
+                        if isinstance(value, np.ndarray) and value.shape[:1] == (n_full,)
+                        else value
+                    )
+                    for key, value in mmpd_pack.items()
+                }
+                print(
+                    f"[{dataset}] assert-only: sampling {cap}/{n_full} windows for lattice gate",
+                    flush=True,
+                )
         binary_pack, run, ladder = _materialize_binary(
             args, dataset, args.checkpoint_dir, indices, device,
         )
