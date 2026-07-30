@@ -118,7 +118,10 @@ def _defaults(argv: Sequence[str]) -> List[str]:
     if "--horizon" not in text:
         defaults += ["--horizon", "96"]
     if "--test-stride" not in text:
-        defaults += ["--test-stride", "4"]
+        # Match lighter staged_eval gate (was 4; unique-seg AR makes dense grids brutal).
+        defaults += ["--test-stride", "16"]
+    if "--test-fraction" not in text:
+        defaults += ["--test-fraction", "0.25"]
     if "--output-dir" not in text:
         defaults += ["--output-dir", str(DEFAULT_OUTPUT)]
     if "--pack-splits" not in text:
@@ -145,6 +148,27 @@ def parse_args() -> argparse.Namespace:
         help="When --assert-only, cap lattice checks to this many MMPD-aligned windows "
              "(default: 8). Full disc eval ignores this.",
     )
+    custom.add_argument(
+        "--probe-binary-batch-size",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Probe max GPU batch for coarse→patch_refine generate before materializing "
+             "binary packs (default: on).",
+    )
+    custom.add_argument(
+        "--probe-binary-batch-size-max",
+        type=int,
+        default=64,
+        help="Upper bound for --probe-binary-batch-size search.",
+    )
+    custom.add_argument(
+        "--disc-index-stride",
+        type=int,
+        default=None,
+        help="Keep every N-th MMPD-aligned window after loading the pack. "
+             "Default: max(1, round(args.test_stride / 4)) so --test-stride 16 ≈ every "
+             "4th index when MMPD/binary packs were built at stride 4.",
+    )
     extra, remaining = custom.parse_known_args(sys.argv[1:])
     saved = sys.argv
     sys.argv = [saved[0], *_defaults(remaining), *remaining]
@@ -157,6 +181,11 @@ def parse_args() -> argparse.Namespace:
     args.assert_only = bool(extra.assert_only)
     args.assert_max_windows = (
         None if extra.assert_max_windows is None else max(1, int(extra.assert_max_windows))
+    )
+    args.probe_binary_batch_size = bool(extra.probe_binary_batch_size)
+    args.probe_binary_batch_size_max = max(1, int(extra.probe_binary_batch_size_max))
+    args.disc_index_stride = (
+        None if extra.disc_index_stride is None else max(1, int(extra.disc_index_stride))
     )
     args.mmpd_output_root = args.mmpd_output_root.expanduser().resolve()
     args.raw_eval_dir = args.raw_eval_dir.expanduser().resolve()
@@ -183,6 +212,64 @@ def apply_smoke_defaults(args: argparse.Namespace) -> None:
         args.raw_binary_batch_size = 1
         args.num_sampling_steps = min(int(args.num_sampling_steps), 2)
         args.slice_lengths = [length for length in args.slice_lengths if int(length) <= 16]
+        args.probe_binary_batch_size = False
+
+
+def _subset_mmpd_aligned(
+    indices: Sequence[int],
+    pack: Mapping[str, np.ndarray],
+    *,
+    pick: np.ndarray,
+) -> tuple[List[int], Dict[str, np.ndarray]]:
+    """Keep MMPD pack rows / index list at the same positions ``pick``."""
+    pick = np.asarray(pick, dtype=np.int64)
+    n_full = len(indices)
+    if pick.ndim != 1 or pick.size == 0:
+        raise ValueError("window subset pick must be a non-empty 1d index array")
+    if int(pick.min()) < 0 or int(pick.max()) >= n_full:
+        raise ValueError(f"window subset pick out of range for n={n_full}")
+    thinned_indices = [int(indices[int(i)]) for i in pick.tolist()]
+    thinned_pack = {
+        key: (
+            value[pick]
+            if isinstance(value, np.ndarray) and value.shape[:1] == (n_full,)
+            else value
+        )
+        for key, value in pack.items()
+    }
+    return thinned_indices, thinned_pack
+
+
+def _thin_disc_windows(
+    indices: Sequence[int],
+    pack: Mapping[str, np.ndarray],
+    *,
+    dataset: str,
+    seed: int,
+    test_fraction: float,
+    disc_index_stride: int,
+) -> tuple[List[int], Dict[str, np.ndarray]]:
+    """Apply stride-then-fraction thinning to MMPD-aligned windows (matches staged_eval spirit)."""
+    n_full = len(indices)
+    stride = max(1, int(disc_index_stride))
+    fraction = float(test_fraction)
+    if fraction <= 0.0 or fraction > 1.0:
+        raise ValueError(f"test_fraction must be in (0, 1], got {fraction}")
+    pick = np.arange(0, n_full, stride, dtype=np.int64)
+    if fraction < 1.0 and pick.size > 1:
+        n_keep = max(1, int(round(pick.size * fraction)))
+        if n_keep < pick.size:
+            rng = np.random.default_rng(int(seed) + (sum(ord(c) for c in dataset) % 10_007))
+            chosen = np.sort(rng.choice(pick.size, size=n_keep, replace=False))
+            pick = pick[chosen]
+    if pick.size == n_full and stride == 1 and fraction >= 1.0:
+        return list(indices), dict(pack)
+    print(
+        f"[{dataset}] disc window thin: {pick.size}/{n_full} "
+        f"(index_stride={stride}, test_fraction={fraction:.3f})",
+        flush=True,
+    )
+    return _subset_mmpd_aligned(indices, pack, pick=pick)
 
 
 def _mmpd_pack(root: Path, dataset: str) -> Mapping[str, np.ndarray]:
@@ -404,9 +491,38 @@ def _materialize_binary(
     )
     if not indices or min(indices) < 0 or max(indices) >= len(pool):
         raise ValueError(f"{dataset}: MMPD indices are outside the shared TSF pool")
+
+    batch_size = max(1, int(args.raw_binary_batch_size))
+    if bool(getattr(args, "probe_binary_batch_size", False)) and device.type == "cuda":
+        from models.diffusion_tsf.pipeline.phases.staged_eval import (
+            _probe_max_staged_eval_batch_size,
+        )
+
+        sample_past, _sample_future = pool[int(indices[0])]
+        max_fit = _probe_max_staged_eval_batch_size(
+            coarse_model=coarse,
+            fine_model=refine,
+            lookback=int(sample_past.shape[-1]),
+            n_variates=int(sample_past.shape[0]),
+            device=device,
+            det_kwargs={
+                "sampler": args.probabilistic_sampler,
+                "num_inference_steps": 1,
+            },
+            joint_dual=False,
+            min_bs=1,
+            max_bs=int(getattr(args, "probe_binary_batch_size_max", 64)),
+        )
+        if max_fit != batch_size:
+            print(
+                f"[{dataset}] binary generate probe: config batch={batch_size} -> probed={max_fit}",
+                flush=True,
+            )
+        batch_size = max(1, int(max_fit))
+
     loader = DataLoader(
         Subset(pool, list(indices)),
-        batch_size=min(int(args.raw_binary_batch_size), 2),
+        batch_size=batch_size,
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
@@ -423,6 +539,13 @@ def _materialize_binary(
     vote_count_chunks: List[np.ndarray] = []
     patch_diag = {"candidates": 0, "rejected_invalid_or_out_of_bounds": 0, "selected": 0}
     windows_seen = 0
+    n_batches = len(loader)
+    print(
+        f"[{dataset}] materializing binary packs: windows={len(indices)} "
+        f"batches={n_batches} batch_size={batch_size} "
+        f"sampler={args.probabilistic_sampler} steps={args.num_sampling_steps}",
+        flush=True,
+    )
     with torch.no_grad():
         for batch_i, (past, future) in enumerate(loader):
             past = past.to(device)
@@ -467,6 +590,12 @@ def _materialize_binary(
             for key, value in patch_values[6].items():
                 patch_diag[key] += int(value)
             windows_seen += int(past.shape[0])
+            if (batch_i + 1) == n_batches or (batch_i + 1) % max(1, n_batches // 10) == 0:
+                print(
+                    f"[{dataset}] binary generate {batch_i + 1}/{n_batches} "
+                    f"(windows_done={windows_seen}/{len(indices)})",
+                    flush=True,
+                )
     patch_pred = _concat_patch_chunks(patch_pred_chunks, width=int(refine.config.patch_refine_patch_width))
     patch_gt = _concat_patch_chunks(patch_gt_chunks, width=int(refine.config.patch_refine_patch_width))
     patch_past = _concat_patch_chunks(patch_past_chunks, width=int(args.lookback))
@@ -620,19 +749,24 @@ def run_eval(args: argparse.Namespace) -> None:
                     int(args.seed) + (sum(ord(c) for c in dataset) % 10_007)
                 )
                 pick = np.sort(rng.choice(n_full, size=cap, replace=False))
-                indices = [indices[int(i)] for i in pick]
-                mmpd_pack = {
-                    key: (
-                        value[pick]
-                        if isinstance(value, np.ndarray) and value.shape[:1] == (n_full,)
-                        else value
-                    )
-                    for key, value in mmpd_pack.items()
-                }
+                indices, mmpd_pack = _subset_mmpd_aligned(indices, mmpd_pack, pick=pick)
                 print(
                     f"[{dataset}] assert-only: sampling {cap}/{n_full} windows for lattice gate",
                     flush=True,
                 )
+        else:
+            disc_stride = args.disc_index_stride
+            if disc_stride is None:
+                # Worker historically used --test-stride 4 for MMPD-aligned packs.
+                disc_stride = max(1, int(round(float(args.test_stride) / 4.0)))
+            indices, mmpd_pack = _thin_disc_windows(
+                indices,
+                mmpd_pack,
+                dataset=dataset,
+                seed=int(args.seed),
+                test_fraction=float(args.test_fraction),
+                disc_index_stride=int(disc_stride),
+            )
         binary_pack, run, ladder = _materialize_binary(
             args, dataset, args.checkpoint_dir, indices, device,
         )
