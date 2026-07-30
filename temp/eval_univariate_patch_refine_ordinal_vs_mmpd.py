@@ -164,17 +164,17 @@ def parse_args() -> argparse.Namespace:
     custom.add_argument(
         "--pack-test-stride",
         type=int,
-        default=None,
-        help="TSF pool stride that MMPD pack indices address (campaign default: 4). "
-             "Must match MMPD eval_test_stride; do not use the binary metadata train "
-             "test_stride (often 1 or 480).",
+        default=4,
+        help="TSF pool stride that MMPD pack indices address. Must match MMPD "
+             "eval_test_stride (this campaign: 4). Independent of --test-stride / binary "
+             "metadata test_stride.",
     )
     custom.add_argument(
         "--disc-index-stride",
         type=int,
         default=None,
         help="Keep every N-th MMPD-aligned window after loading the pack. "
-             "Default: 4 when --pack-test-stride is 4 (≈ staged_eval test_stride 16).",
+             "Default: 4 (with pack stride 4 this ≈ staged_eval test_stride 16).",
     )
     extra, remaining = custom.parse_known_args(sys.argv[1:])
     saved = sys.argv
@@ -191,9 +191,9 @@ def parse_args() -> argparse.Namespace:
     )
     args.probe_binary_batch_size = bool(extra.probe_binary_batch_size)
     args.probe_binary_batch_size_max = max(1, int(extra.probe_binary_batch_size_max))
-    args.pack_test_stride = (
-        None if extra.pack_test_stride is None else max(1, int(extra.pack_test_stride))
-    )
+    # Never inherit --test-stride here: that flag was briefly set to 16 for thinning and
+    # silently broke MMPD index alignment when used as the pack grid.
+    args.pack_test_stride = max(1, int(extra.pack_test_stride))
     args.disc_index_stride = (
         None if extra.disc_index_stride is None else max(1, int(extra.disc_index_stride))
     )
@@ -283,12 +283,13 @@ def _thin_disc_windows(
 
 
 def _pack_test_stride(args: argparse.Namespace) -> int:
-    """Stride of the TSF pool that MMPD ``indices`` address (not binary metadata stride)."""
-    explicit = getattr(args, "pack_test_stride", None)
-    if explicit is not None:
-        return max(1, int(explicit))
-    # Historical worker default / MMPD matched-binary eval_test_stride.
-    return max(1, int(getattr(args, "test_stride", 4) or 4))
+    """Stride of the TSF pool that MMPD ``indices`` address (not binary metadata stride).
+
+    Hard-default 4 = MMPD matched-binary ``eval_test_stride``. Do **not** fall back to
+    ``args.test_stride`` — that flag is unrelated and was briefly set to 16 for disc
+    thinning, which produced pool_len mismatches (e.g. traffic 214 vs indices to 853).
+    """
+    return max(1, int(getattr(args, "pack_test_stride", 4) or 4))
 
 
 def _mmpd_pack(root: Path, dataset: str) -> Mapping[str, np.ndarray]:
@@ -527,8 +528,16 @@ def _materialize_binary(
             f"pool_len={len(pool)}, train_stride={run_train_stride(run)}, "
             f"pack_test_stride={_pack_test_stride(args)}, "
             f"binary_meta_test_stride={run_test_stride(run)}, "
-            f"pack_splits={parse_pack_splits(args.pack_splits)})"
+            f"pack_splits={parse_pack_splits(args.pack_splits)}). "
+            f"MMPD matched-binary packs require pack_test_stride=4 "
+            f"(got {_pack_test_stride(args)})."
         )
+    print(
+        f"[{dataset}] pack pool: len={len(pool)} pack_test_stride={_pack_test_stride(args)} "
+        f"n_indices={len(indices)} train_stride={run_train_stride(run)} "
+        f"binary_meta_test_stride={run_test_stride(run)}",
+        flush=True,
+    )
 
     batch_size = max(1, int(args.raw_binary_batch_size))
     if bool(getattr(args, "probe_binary_batch_size", False)) and device.type == "cuda":

@@ -118,8 +118,8 @@ if [[ "$ORDINAL_DISC_MODE" -eq 1 ]]; then
         --binary-config "$GRID_ORDINAL_BINARY_CONFIG" \
         --output-dir "$GRID_DISC_OUTPUT" \
         --raw-eval-dir "$GRID_RAW_DISC_OUTPUT" \
-        --pack-test-stride "${GRID_ORDINAL_PACK_TEST_STRIDE:-4}" \
-        --test-stride "${GRID_ORDINAL_PACK_TEST_STRIDE:-4}" \
+        --pack-test-stride 4 \
+        --test-stride 4 \
         --test-fraction "${GRID_ORDINAL_TEST_FRACTION:-0.25}" \
         --disc-index-stride "${GRID_ORDINAL_DISC_INDEX_STRIDE:-4}" \
         --raw-binary-batch-size "${GRID_ORDINAL_BINARY_BATCH:-8}" \
