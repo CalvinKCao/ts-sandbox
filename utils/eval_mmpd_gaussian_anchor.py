@@ -2549,6 +2549,27 @@ def run_phase_init(args: argparse.Namespace, commit: str) -> None:
     print(f"[init] Wrote {args.output_dir / 'run_manifest.json'}")
 
 
+def generate_mmpd_phase_viz(
+    args: argparse.Namespace, dataset: str, mmpd_pack: Dict[str, np.ndarray]
+) -> List[str]:
+    """Anchor + probabilistic sample panels for one dataset's MMPD eval pack (best-effort)."""
+    if getattr(args, "skip_mmpd_sample_viz", False) or getattr(args, "smoke_test", False):
+        return []
+    try:
+        from utils.mmpd_sample_viz import generate_mmpd_sample_visualizations
+
+        return generate_mmpd_sample_visualizations(
+            mmpd_pack,
+            dataset=dataset,
+            out_dir=args.output_dir / "viz" / "mmpd_samples" / dataset,
+            n_windows=int(getattr(args, "mmpd_sample_viz_windows", 4)),
+            seed=int(args.seed),
+        )
+    except Exception as exc:
+        print(f"[mmpd-viz] {dataset}: skipped ({exc})")
+        return []
+
+
 def run_phase_mmpd(
     args: argparse.Namespace,
     dataset: str,
@@ -2578,9 +2599,10 @@ def run_phase_mmpd(
     print(f"[mmpd] {dataset}: summarizing metrics", flush=True)
     metrics = summarize_for_profile(mmpd_pack, args, dataset)
     write_partial_metrics(args.output_dir, dataset, "mmpd", metrics)
+    sample_viz_paths = generate_mmpd_phase_viz(args, dataset, mmpd_pack)
     from utils.log_mmpd_eval_leaderboard import maybe_log_mmpd_eval_leaderboard
 
-    maybe_log_mmpd_eval_leaderboard(args, dataset, metrics)
+    maybe_log_mmpd_eval_leaderboard(args, dataset, metrics, extra_viz_paths=sample_viz_paths)
 
 
 def run_phase_anchor(
@@ -2759,6 +2781,17 @@ def parse_args() -> argparse.Namespace:
         "--force-mmpd-leaderboard",
         action="store_true",
         help="Re-log leaderboard even if a prior marker exists for this dataset.",
+    )
+    parser.add_argument(
+        "--skip-mmpd-sample-viz",
+        action="store_true",
+        help="Skip anchor/probabilistic sample panel generation after MMPD eval.",
+    )
+    parser.add_argument(
+        "--mmpd-sample-viz-windows",
+        type=int,
+        default=4,
+        help="Number of eval windows to render MMPD anchor+probabilistic sample panels for.",
     )
     parser.add_argument(
         "--anchor-config",

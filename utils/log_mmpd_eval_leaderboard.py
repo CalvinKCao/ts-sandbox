@@ -254,6 +254,7 @@ def maybe_log_mmpd_eval_leaderboard(
     args: Any,
     dataset: str,
     metrics: Dict[str, Any],
+    extra_viz_paths: Optional[list[str]] = None,
 ) -> None:
     if not getattr(args, "mmpd_log_leaderboard", False):
         return
@@ -261,7 +262,7 @@ def maybe_log_mmpd_eval_leaderboard(
         return
     if args.mmpd_run_config is None:
         return
-    viz_paths: list[str] = []
+    viz_paths: list[str] = list(extra_viz_paths or [])
     if getattr(args, "use_ordinal_window_norm", False):
         try:
             from pathlib import Path as _Path

@@ -69,3 +69,7 @@ def apply_mmpd_run_config(args: Any, block: Dict[str, Any], *, repo_root: Path =
         args.mmpd_log_leaderboard = True
     if nick := block.get("leaderboard_nickname"):
         args.mmpd_leaderboard_nickname = str(nick).strip()
+    if "skip_sample_viz" in block:
+        args.skip_mmpd_sample_viz = bool(block["skip_sample_viz"])
+    if sample_viz_windows := block.get("sample_viz_windows"):
+        args.mmpd_sample_viz_windows = int(sample_viz_windows)

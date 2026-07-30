@@ -214,6 +214,8 @@ temp/*
 !temp/README.md
 !temp/regen_eval_viz_overlap_narval_fresh_fixed_hp.sh
 !temp/run_h96_ordinal_patch_refine_mmpd_dag.sh
+!temp/scripts/
+!temp/scripts/**
 synth_data/
 results_experimental/
 results_simdiff/
@@ -225,7 +227,7 @@ assets/
 final_report/
 wiki_docs/
 wikidump_to_markdown.py
-scripts/
+/scripts/
 
 accuracy_summary.csv
 
