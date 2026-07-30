@@ -38,6 +38,86 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch
 logger = logging.getLogger(__name__)
 
 
+def _reshape_parallel_samples(t: torch.Tensor, batch: int, n_samples: int) -> torch.Tensor:
+    """``(B*S, V, ...)`` → ``(B, V, S, ...)``."""
+    if t.shape[0] != batch * n_samples:
+        raise ValueError(
+            f"parallel sample reshape expected leading {batch * n_samples}, got {tuple(t.shape)}"
+        )
+    rest = t.shape[1:]
+    return t.view(batch, n_samples, *rest).transpose(1, 2).contiguous()
+
+
+@torch.no_grad()
+def _probe_max_staged_eval_batch_size(
+    *,
+    coarse_model,
+    fine_model,
+    lookback: int,
+    n_variates: int,
+    device: torch.device,
+    det_kwargs: Dict[str, Any],
+    joint_dual: bool = False,
+    min_bs: int = 1,
+    max_bs: int = 64,
+    headroom: float = 0.85,
+) -> int:
+    """Largest window batch that fits one coarse→fine anchor generate on this GPU."""
+    if device.type != "cuda":
+        return max(min_bs, 8)
+
+    def _fits(bs: int) -> bool:
+        past = torch.zeros(bs, n_variates, lookback, device=device)
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats(device)
+            coarse_out = coarse_model.generate(past, **det_kwargs)
+            if not joint_dual:
+                fine_model.generate(
+                    past,
+                    future_coarse_2d=coarse_out["future_2d_coarse"],
+                    **det_kwargs,
+                )
+            torch.cuda.synchronize(device)
+            return True
+        except RuntimeError as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            torch.cuda.empty_cache()
+            return False
+
+    lo = max(1, int(min_bs))
+    hi = max(lo, int(max_bs))
+    if not _fits(lo):
+        logger.warning(
+            "staged_eval batch probe: min_bs=%d already OOMs; falling back to 1", lo,
+        )
+        return 1
+    best = lo
+    cand = lo
+    while cand * 2 <= hi and _fits(cand * 2):
+        cand *= 2
+        best = cand
+    # Binary search (best, next power] for a tighter fit.
+    left, right = best, min(hi, best * 2)
+    while left < right:
+        mid = (left + right + 1) // 2
+        if _fits(mid):
+            left = mid
+        else:
+            right = mid - 1
+    best = left
+    usable = max(1, int(best * float(headroom)))
+    logger.info(
+        "staged_eval batch probe: max_fit=%d headroom=%.2f -> batch_size=%d",
+        best,
+        headroom,
+        usable,
+    )
+    torch.cuda.empty_cache()
+    return usable
+
+
 def _deterministic_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     err = y_pred - y_true
     return {
@@ -449,61 +529,59 @@ class StagedEvalPhase(PipelinePhase):
                     fine_all.append(fine_np)
 
                 det_s = time.perf_counter() - batch_t0
-                batch_samples = []
-                batch_samples_with_overlap = []
                 prob_t0 = time.perf_counter()
-                for sample_idx in range(prob_samples):
-                    seed = state.seed + batch_idx * 1009 + sample_idx * 17
-                    torch.manual_seed(seed)
-                    if joint_dual:
-                        dual_sample = coarse_model.generate(past, **prob_kwargs)
-                        sample_t = dual_sample.get(
-                            "prediction_global_norm", dual_sample.get("prediction"),
+                # Expand window batch across independent MC samples so unique-seg
+                # AR (and other generate paths) fill the GPU in one forward chain.
+                torch.manual_seed(state.seed + batch_idx * 1009)
+                past_exp = past.repeat_interleave(prob_samples, dim=0)
+                if joint_dual:
+                    dual_sample = coarse_model.generate(past_exp, **prob_kwargs)
+                    sample_t = dual_sample.get(
+                        "prediction_global_norm", dual_sample.get("prediction"),
+                    )
+                    if sample_t is None:
+                        raise KeyError(
+                            f"{dual_stage} generate output missing prediction_global_norm/prediction"
                         )
-                        if sample_t is None:
-                            raise KeyError(
-                                f"{dual_stage} generate output missing prediction_global_norm/prediction"
-                            )
-                        batch_samples.append(sample_t.detach().cpu().numpy())
-                        batch_samples_with_overlap.append(
-                            dual_sample["prediction_with_overlap"].detach().cpu().numpy()
-                        )
-                    elif _ar_eval_enabled(coarse_model):
-                        sample_t = _staged_generate_autoregressive(
-                            coarse_model=coarse_model,
-                            fine_model=fine_model,
-                            finer_model=finer_model,
-                            past=past,
-                            gen_kwargs=prob_kwargs,
-                        )
-                        batch_samples.append(sample_t.cpu().numpy())
-                    else:
-                        coarse_sample = coarse_model.generate(past, **prob_kwargs)
-                        torch.manual_seed(seed)
-                        fine_sample = fine_model.generate(
-                            past,
+                    samples_bvs = _reshape_parallel_samples(sample_t, batch_n, prob_samples)
+                    overlap_bvs = _reshape_parallel_samples(
+                        dual_sample["prediction_with_overlap"], batch_n, prob_samples,
+                    )
+                    sample_all.append(samples_bvs.detach().cpu().numpy())
+                    samples_with_overlap_all.append(overlap_bvs.detach().cpu().numpy())
+                elif _ar_eval_enabled(coarse_model):
+                    sample_t = _staged_generate_autoregressive(
+                        coarse_model=coarse_model,
+                        fine_model=fine_model,
+                        finer_model=finer_model,
+                        past=past_exp,
+                        gen_kwargs=prob_kwargs,
+                    )
+                    samples_bvs = _reshape_parallel_samples(sample_t, batch_n, prob_samples)
+                    sample_all.append(samples_bvs.detach().cpu().numpy())
+                else:
+                    coarse_sample = coarse_model.generate(past_exp, **prob_kwargs)
+                    fine_sample = fine_model.generate(
+                        past_exp,
+                        future_coarse_2d=coarse_sample["future_2d_coarse"],
+                        **prob_kwargs,
+                    )
+                    if finer_model is not None:
+                        finer_sample = finer_model.generate(
+                            past_exp,
                             future_coarse_2d=coarse_sample["future_2d_coarse"],
+                            future_fine_2d=fine_sample["future_2d_fine"],
                             **prob_kwargs,
                         )
-                        if finer_model is not None:
-                            finer_sample = finer_model.generate(
-                                past,
-                                future_coarse_2d=coarse_sample["future_2d_coarse"],
-                                future_fine_2d=fine_sample["future_2d_fine"],
-                                **prob_kwargs,
-                            )
-                            batch_samples.append(finer_sample["prediction_global_norm"].cpu().numpy())
-                            batch_samples_with_overlap.append(
-                                finer_sample["prediction_with_overlap"].cpu().numpy()
-                            )
-                        else:
-                            batch_samples.append(fine_sample["prediction_global_norm"].cpu().numpy())
-                            batch_samples_with_overlap.append(
-                                fine_sample["prediction_with_overlap"].cpu().numpy()
-                            )
-                sample_all.append(np.stack(batch_samples, axis=2))
-                if batch_samples_with_overlap:
-                    samples_with_overlap_all.append(np.stack(batch_samples_with_overlap, axis=2))
+                        pred = finer_sample["prediction_global_norm"]
+                        overlap = finer_sample["prediction_with_overlap"]
+                    else:
+                        pred = fine_sample["prediction_global_norm"]
+                        overlap = fine_sample["prediction_with_overlap"]
+                    samples_bvs = _reshape_parallel_samples(pred, batch_n, prob_samples)
+                    overlap_bvs = _reshape_parallel_samples(overlap, batch_n, prob_samples)
+                    sample_all.append(samples_bvs.detach().cpu().numpy())
+                    samples_with_overlap_all.append(overlap_bvs.detach().cpu().numpy())
 
                 prob_s = time.perf_counter() - prob_t0
                 batch_s = time.perf_counter() - batch_t0
@@ -512,7 +590,7 @@ class StagedEvalPhase(PipelinePhase):
                 eta_s = (elapsed / done) * (len(loader) - done) if done else 0.0
                 logger.info(
                     "[%s] staged eval batch %d/%d n=%d "
-                    "det=%.1fs prob=%.1fs (n_samp=%d) batch=%.1fs "
+                    "det=%.1fs prob=%.1fs (n_samp=%d parallel) batch=%.1fs "
                     "elapsed=%.1fs eta=%.1fs",
                     subset_id,
                     done,
@@ -654,6 +732,40 @@ class StagedEvalPhase(PipelinePhase):
                 )
             prob_samples = int(self.require("probabilistic_n_samples"))
             default_steps = int(self.require("probabilistic_num_inference_steps"))
+
+        # Probe peak generate batch on this GPU; dataloader batch is smaller so
+        # that B_windows * n_prob_samples still fits the parallel MC expand.
+        if (
+            bool(self.get("probe_eval_batch_size", False))
+            and not state.smoke_test
+            and device.type == "cuda"
+        ):
+            probe_kwargs = dict(_staged_det_gen_kwargs(state, default_steps))
+            probe_kwargs["num_inference_steps"] = 1
+            max_fit = _probe_max_staged_eval_batch_size(
+                coarse_model=coarse_model,
+                fine_model=fine_model,
+                lookback=int(ds_lb),
+                n_variates=n_iv,
+                device=device,
+                det_kwargs=probe_kwargs,
+                joint_dual=joint_dual,
+                min_bs=1,
+                max_bs=int(self.get("probe_eval_batch_size_max", 64)),
+            )
+            # Parallel samples expand leading dim by prob_samples.
+            usable = max(1, max_fit // max(1, int(prob_samples)))
+            if usable != batch_size:
+                logger.info(
+                    "[%s] staged_eval probe: config batch_size=%d -> probed=%d "
+                    "(max_fit=%d / n_samples=%d)",
+                    subset_id,
+                    batch_size,
+                    usable,
+                    max_fit,
+                    prob_samples,
+                )
+            batch_size = usable
 
         if isinstance(final_ds, Subset):
             eval_window_indices = [int(i) for i in final_ds.indices]

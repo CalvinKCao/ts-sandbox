@@ -58,12 +58,13 @@ phases:
     min_snr_gamma: 2.0
     binary_noise_schedule: linear
 
-  # Unique-seg AR makes full quad_t×20×20 eval ~hours; keep a lighter gate for
-  # campaign resumes. Discriminator eval still builds its own forecast packs.
+  # Unique-seg AR: thin the window grid, but keep 20-step quad_t. Parallelize
+  # the 4 independent prob samples in one generate (see staged_eval).
   - phase: staged_eval
     eval_test_fraction: 0.25
     test_stride: 16
     probabilistic_n_samples: 4
-    probabilistic_num_inference_steps: 5
+    probabilistic_num_inference_steps: 20
     batch_size: 8
     skip_eval_visualizations: true
+    probe_eval_batch_size: true
