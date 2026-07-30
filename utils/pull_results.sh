@@ -275,7 +275,9 @@ if [ "$pull_mode" = "light" ]; then
     fi
 fi
 
-find "$search" "${prune[@]}" "${file_args[@]}" -print 2>/dev/null \
+# -H: follow symlink roots (e.g. results -> ../ts-sandbox-corrupt-*/results).
+# Default find -P does not descend into a symlink start path → 0 files.
+find -H "$search" "${prune[@]}" "${file_args[@]}" -print 2>/dev/null \
     | sed "s|^${remote_root}/||" \
     | sort -u
 REMOTE_FIND
@@ -438,13 +440,15 @@ echo "Pulling from ${REMOTE_HOST} (${PULL_MODE} mode, dest=${LOCAL_RESULTS_PATH}
 [ "$SKIP_NPY_CKPT" -eq 1 ] && echo "Skipping *.npy / *.npz / *.ckpt / *.pt"
 
 # One SSH session (shared ControlMaster socket) for find + rsync below.
-# Killarney/Narval need an interactive login first (2FA); pubkey alone fails.
+# Killarney/Narval need interactive 2FA when no multiplex master exists.
 if ! ssh "${SSH_OPTS[@]}" -o BatchMode=yes "${REMOTE_USER}@${REMOTE_HOST}" true 2>/dev/null; then
-    echo "ERROR: no usable SSH session to ${REMOTE_HOST}." >&2
-    echo "  Open a multiplex master once (2FA), then rerun this script:" >&2
-    echo "    ssh ${REMOTE_HOST}" >&2
-    echo "  Socket: ${SSH_CONTROL_DIR}/%r@%h:%p" >&2
-    exit 1
+    echo "No multiplex master for ${REMOTE_HOST}; authenticating (2FA)..."
+    # -fN: prompt in foreground, then background the ControlMaster for find/rsync.
+    if ! ssh "${SSH_OPTS[@]}" -o BatchMode=no -o ControlMaster=yes \
+        -fN "${REMOTE_USER}@${REMOTE_HOST}"; then
+        echo "ERROR: SSH authentication to ${REMOTE_HOST} failed." >&2
+        exit 1
+    fi
 fi
 
 if [ "$PULL_RESULTS" -eq 1 ]; then
@@ -461,5 +465,5 @@ if [ "$PULL_REPORTS" -eq 1 ]; then
     done
 fi
 
-ssh "${SSH_OPTS[@]}" -O exit "${REMOTE_USER}@${REMOTE_HOST}" 2>/dev/null || true
+# Leave the ControlMaster up so later pulls reuse it (ControlPersist in ~/.ssh/config).
 echo "Done."
