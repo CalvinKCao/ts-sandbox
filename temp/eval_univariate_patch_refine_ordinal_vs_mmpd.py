@@ -275,9 +275,18 @@ def _thin_disc_windows(
 def _mmpd_pack(root: Path, dataset: str) -> Mapping[str, np.ndarray]:
     path = root / "raw" / f"mmpd_{dataset}.npz"
     if not path.is_file():
+        resolved = path.resolve()
+        hint = ""
+        if "corrupt" in str(resolved).lower() or resolved != path:
+            hint = (
+                f" (requested {path}; resolved to {resolved} — check for a symlink "
+                f"into a corrupt/old tree, or a missing dataset pack)"
+            )
         raise FileNotFoundError(
-            f"missing actual MMPD evaluation pack {path}; submit_mmpd must complete its eval/merge first"
+            f"missing actual MMPD evaluation pack {path}{hint}; "
+            f"submit_mmpd must complete its eval/merge first"
         )
+    # Prefer the path the caller passed; only resolve for the open().
     with np.load(path) as data:
         pack = {key: data[key] for key in data.files}
     required = {"y_true", "samples", "indices"}
@@ -297,7 +306,9 @@ def _load_binary_models(
     root: Path,
     device: torch.device,
 ) -> tuple[Any, Any, Any, Any]:
-    run, stages = load_patch_refine_run(dataset, root, args.test_stride)
+    # Keep checkpoint metadata test_stride so MMPD pack indices address the same
+    # TSF pool. Window thinning is applied to the index list, not the pool grid.
+    run, stages = load_patch_refine_run(dataset, root, test_stride=None)
     state = _build_state(root, dataset, run_subset_id(run), str(args.binary_config))
     resolve_pipeline_data_subset(state)
     if not state.use_patch_refine_stage or not state.use_ordinal_window_norm or state.use_window_normalization:
@@ -490,7 +501,13 @@ def _materialize_binary(
         use_ordinal_window_norm=False,
     )
     if not indices or min(indices) < 0 or max(indices) >= len(pool):
-        raise ValueError(f"{dataset}: MMPD indices are outside the shared TSF pool")
+        raise ValueError(
+            f"{dataset}: MMPD indices are outside the shared TSF pool "
+            f"(n_indices={len(indices)}, index_range="
+            f"[{min(indices) if indices else 'n/a'}, {max(indices) if indices else 'n/a'}], "
+            f"pool_len={len(pool)}, train_stride={run_train_stride(run)}, "
+            f"test_stride={run_test_stride(run)}, pack_splits={parse_pack_splits(args.pack_splits)})"
+        )
 
     batch_size = max(1, int(args.raw_binary_batch_size))
     if bool(getattr(args, "probe_binary_batch_size", False)) and device.type == "cuda":

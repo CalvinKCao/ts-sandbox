@@ -233,7 +233,7 @@ def apply_smoke_defaults(args: argparse.Namespace) -> None:
 def load_patch_refine_run(
     dataset: str,
     checkpoint_dir: Path,
-    test_stride: int,
+    test_stride: int | None,
 ) -> Tuple[AnchorRun, Dict[str, Path]]:
     candidates: List[Tuple[AnchorRun, Dict[str, Path]]] = []
     for subset_dir in sorted(checkpoint_dir.iterdir()):
@@ -250,7 +250,11 @@ def load_patch_refine_run(
         metadata["dataset_name"] = dataset
         metadata["dataset"] = dataset
         data_subset = dict(metadata.get("data_subset") or {})
-        data_subset["test_stride"] = int(test_stride)
+        # Only override when the caller intentionally remaps the window grid.
+        # MMPD-aligned disc/assert must keep the campaign pool stride or indices
+        # land outside ``load_tsf_pack_pool``.
+        if test_stride is not None:
+            data_subset["test_stride"] = int(test_stride)
         metadata["data_subset"] = data_subset
         run = AnchorRun(
             variant="binary_patch_refine",
