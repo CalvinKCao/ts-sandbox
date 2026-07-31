@@ -96,7 +96,7 @@ def parse_args() -> argparse.Namespace:
         saved[0],
         "--fake-sources", "binary_staged", "mmpd",
         "--lookback", "336", "--horizon", "96",
-        "--test-stride", "4", "--test-fraction", "0.25",
+        "--test-stride", "4", "--test-fraction", "1.0",
         "--candidate-only", "--save-classification-scores",
         "--save-checkpoints", "--force-train",
         "--mmpd-instance-norm", "--no-mmpd-ordinal-norm",

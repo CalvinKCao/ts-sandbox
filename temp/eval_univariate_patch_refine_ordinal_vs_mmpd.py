@@ -125,7 +125,7 @@ def _defaults(argv: Sequence[str]) -> List[str]:
         # Kept for CLI compat; pack alignment uses --pack-test-stride (default 4).
         defaults += ["--test-stride", "4"]
     if "--test-fraction" not in text:
-        defaults += ["--test-fraction", "0.25"]
+        defaults += ["--test-fraction", "1.0"]
     if "--output-dir" not in text:
         defaults += ["--output-dir", str(DEFAULT_OUTPUT)]
     if "--pack-splits" not in text:
@@ -178,7 +178,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Keep every N-th MMPD-aligned window after loading the pack. "
-             "Default: 4 (with pack stride 4 this ≈ staged_eval test_stride 16).",
+             "Default: 1 (full pack-stride-4 pool; set >1 to thin further).",
     )
     custom.add_argument(
         "--fake-agg",
@@ -854,8 +854,8 @@ def run_eval(args: argparse.Namespace) -> None:
         else:
             disc_stride = args.disc_index_stride
             if disc_stride is None:
-                # pack is already eval_test_stride=4; every 4th ≈ staged_eval stride 16.
-                disc_stride = 4
+                # pack is already eval_test_stride=4; stride 1 keeps the full MMPD-aligned pool.
+                disc_stride = 1
             indices, mmpd_pack = _thin_disc_windows(
                 indices,
                 mmpd_pack,

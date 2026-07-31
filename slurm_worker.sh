@@ -109,8 +109,9 @@ if [[ "$ORDINAL_DISC_MODE" -eq 1 ]]; then
     echo "$(ts) [eval] MMPD root: $GRID_MMPD_ROOT"
     ORDINAL_ASSERT_ARGS=()
     [[ "$ORDINAL_ASSERT_ONLY" -eq 0 ]] || ORDINAL_ASSERT_ARGS=(--assert-only --assert-max-windows "${GRID_ASSERT_MAX_WINDOWS:-8}")
-    # Match MMPD pack index grid (eval_test_stride=4) + lighter disc thinning.
-    # Unique-seg AR previously crawled when the worker rebuilt the wrong stride-1/480 pool.
+    # Match MMPD pack index grid (eval_test_stride=4); keep full every-4 pack pool
+    # (test_fraction=1.0, disc_index_stride=1). Unique-seg AR previously crawled when
+    # the worker rebuilt the wrong stride-1/480 pool.
     python -u "$GRID_ORDINAL_DISC_EVALUATOR" \
         --datasets "$GRID_DATASET" \
         --checkpoint-dir "$GRID_EXISTING_CKPT" \
@@ -120,8 +121,8 @@ if [[ "$ORDINAL_DISC_MODE" -eq 1 ]]; then
         --raw-eval-dir "$GRID_RAW_DISC_OUTPUT" \
         --pack-test-stride 4 \
         --test-stride 4 \
-        --test-fraction "${GRID_ORDINAL_TEST_FRACTION:-0.25}" \
-        --disc-index-stride "${GRID_ORDINAL_DISC_INDEX_STRIDE:-4}" \
+        --test-fraction "${GRID_ORDINAL_TEST_FRACTION:-1.0}" \
+        --disc-index-stride "${GRID_ORDINAL_DISC_INDEX_STRIDE:-1}" \
         --raw-binary-batch-size "${GRID_ORDINAL_BINARY_BATCH:-8}" \
         --slice-lengths 8 16 32 \
         --force-raw-eval \
