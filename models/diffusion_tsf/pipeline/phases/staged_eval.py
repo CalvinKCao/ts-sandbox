@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
@@ -1102,6 +1103,25 @@ class StagedEvalPhase(PipelinePhase):
                     )
                 except Exception as e:
                     logger.warning("Ordinal coarse/fine 2D viz failed: %s", e, exc_info=True)
+
+            # Pack-native anchor + probabilistic mean/band panels (same shape as MMPD viz).
+            try:
+                from utils.mmpd_sample_viz import generate_mmpd_sample_visualizations
+
+                pack_viz_dir = os.path.join(state.results_dir, "viz", "binary_anchor_prob", state.dataset)
+                pack_viz = generate_mmpd_sample_visualizations(
+                    pack,
+                    dataset=state.dataset,
+                    out_dir=Path(pack_viz_dir),
+                    model_label="binary",
+                    n_windows=4 if not state.smoke_test else 1,
+                    seed=int(state.seed),
+                )
+                wandb_utils.log_visualization_paths(
+                    pack_viz, wandb_key="eval/binary_anchor_prob_samples",
+                )
+            except Exception as e:
+                logger.warning("Binary pack anchor+prob viz failed: %s", e, exc_info=True)
 
         logger.info(
             "[%s] staged eval done: sampler=%s steps=%d "

@@ -324,6 +324,18 @@ def visualize_combo(
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"[viz] wrote plots under {out_dir}", flush=True)
+    # Log when a wandb run is already active (no-op otherwise).
+    try:
+        from models.diffusion_tsf.pipeline import wandb_utils
+
+        pngs = sorted(out_dir.glob(f"{stem}_*.png"))
+        if pngs:
+            wandb_utils.log_visualization_paths(
+                [str(p) for p in pngs],
+                wandb_key=f"disc/confusions/{dataset}/{fake_source}/L{slice_len}",
+            )
+    except Exception as exc:
+        print(f"[viz] wandb log skipped: {exc}", flush=True)
     return out_dir
 
 

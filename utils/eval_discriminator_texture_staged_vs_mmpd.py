@@ -502,9 +502,15 @@ def build_raw_bundle(
     y_true_by_source: Dict[str, np.ndarray] = {}
     fakes: Dict[str, np.ndarray] = {}
     ref_shape: Optional[Tuple[int, ...]] = None
+    from utils.forecast_pack_reduce import reduce_pack_forecast
+
+    fake_agg = str(getattr(args, "fake_agg", "prob_mean") or "prob_mean")
     for fake_source, pack in packs.items():
         y_true = pack["y_true"].astype(np.float32)
-        fake = pack["samples"][:, :, 0, :].astype(np.float32)
+        # Default: mean over stochastic samples (probabilistic path). Use
+        # --fake-agg sample0 for the legacy first-draw behaviour; deterministic
+        # is refused for disc training unless explicitly requested.
+        fake = reduce_pack_forecast(pack, agg=fake_agg)
         if ref_shape is None:
             ref_shape = y_true.shape
         elif y_true.shape != ref_shape:
@@ -515,6 +521,7 @@ def build_raw_bundle(
             raise ValueError(f"{dataset}/{fake_source}: raw pack indices do not match discriminator indices")
         y_true_by_source[fake_source] = y_true
         fakes[fake_source] = fake
+    print(f"[{dataset}] disc fake aggregation: {fake_agg}", flush=True)
 
     if past.shape[0] != ref_shape[0]:
         raise ValueError(f"{dataset}: past/y_true window mismatch {past.shape[0]} vs {ref_shape[0]}")
@@ -1726,8 +1733,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-checkpoints", action="store_true")
     parser.add_argument(
         "--visualize-confusions",
-        action="store_true",
-        help="After each combo, save TP/TN/FP/FN PNGs under output-dir/disc_confusions/.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="After each combo, save TP/TN/FP/FN PNGs under output-dir/disc_confusions/ "
+             "(default: on; disable with --no-visualize-confusions).",
+    )
+    parser.add_argument(
+        "--fake-agg",
+        choices=["prob_mean", "sample0", "deterministic"],
+        default="prob_mean",
+        help="How to reduce pack['samples'] into the disc fake trajectory. "
+             "prob_mean (default) = mean over S; sample0 = first draw; "
+             "deterministic = anchor key (not for probabilistic disc).",
     )
     parser.add_argument("--viz-per-bucket", type=int, default=2)
     parser.add_argument("--viz-variate", type=int, default=0)
@@ -1760,6 +1777,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     args.anchor_config_by_dataset = _parse_dataset_map(args.anchor_config_by_dataset)
     args.binary_config_by_dataset = _parse_dataset_map(args.binary_config_by_dataset)
+    if bool(getattr(args, "visualize_confusions", False)):
+        args.save_checkpoints = True
     return args
 
 

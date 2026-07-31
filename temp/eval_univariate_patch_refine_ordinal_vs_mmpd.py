@@ -60,6 +60,7 @@ from utils.eval_mmpd_gaussian_anchor import (
     run_variate_indices,
 )
 from utils.eval_trend_robust_texture_staged_vs_mmpd import generate_staged_forecast
+from utils.forecast_pack_reduce import assert_not_anchor_agg, reduce_pack_forecast
 from utils.patch_refine_ordinal_ladder import (
     assert_on_patch_refine_levels,
     assert_support_is_causal,
@@ -67,6 +68,8 @@ from utils.patch_refine_ordinal_ladder import (
     snap_to_patch_refine_levels,
 )
 from utils.visualize_staged_eval_2d_preds import _build_state, _load_stage_model, _resolve_guidance_ckpt
+from utils.visualize_discriminator_univariate_confusions import visualize_univariate_combo
+from utils.binary_mmpd_sample_panels import generate_binary_vs_mmpd_anchor_prob_panels
 
 
 DEFAULT_OUTPUT = REPO_ROOT / "results" / "datasets" / "disc-ordinal-patch-refine-h96-vs-mmpd"
@@ -177,6 +180,26 @@ def parse_args() -> argparse.Namespace:
         help="Keep every N-th MMPD-aligned window after loading the pack. "
              "Default: 4 (with pack stride 4 this ≈ staged_eval test_stride 16).",
     )
+    custom.add_argument(
+        "--fake-agg",
+        choices=["prob_mean", "sample0"],
+        default="prob_mean",
+        help="Reduce pack samples to disc fakes: mean over S (default) or first draw. "
+             "Anchor/deterministic is never used.",
+    )
+    custom.add_argument(
+        "--visualize-confusions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="After L8 disc training, write TP/TN/FP/FN PNGs (default: on).",
+    )
+    custom.add_argument(
+        "--viz-anchor-prob-panels",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a few binary-vs-MMPD anchor+prob shared-window panels (default: on).",
+    )
+    custom.add_argument("--viz-anchor-prob-windows", type=int, default=2)
     extra, remaining = custom.parse_known_args(sys.argv[1:])
     saved = sys.argv
     sys.argv = [saved[0], *_defaults(remaining), *remaining]
@@ -198,8 +221,16 @@ def parse_args() -> argparse.Namespace:
     args.disc_index_stride = (
         None if extra.disc_index_stride is None else max(1, int(extra.disc_index_stride))
     )
+    args.fake_agg = str(extra.fake_agg)
+    assert_not_anchor_agg(args.fake_agg)
+    args.visualize_confusions = bool(extra.visualize_confusions)
+    args.viz_anchor_prob_panels = bool(extra.viz_anchor_prob_panels)
+    args.viz_anchor_prob_windows = max(1, int(extra.viz_anchor_prob_windows))
     args.mmpd_output_root = args.mmpd_output_root.expanduser().resolve()
     args.raw_eval_dir = args.raw_eval_dir.expanduser().resolve()
+    # Always persist checkpoints when confusion viz is on so panels can reload the disc.
+    if args.visualize_confusions:
+        args.save_checkpoints = True
     if args.merge_partials_only:
         return args
     if args.checkpoint_dir is None:
@@ -837,9 +868,14 @@ def run_eval(args: argparse.Namespace) -> None:
             args, dataset, args.checkpoint_dir, indices, device,
         )
         binary_gt = binary_pack["y_true"].astype(np.float32)
-        binary_pred = binary_pack["samples"][:, :, 0, :].astype(np.float32)
+        binary_pred = reduce_pack_forecast(binary_pack, agg=args.fake_agg)
         mmpd_gt = mmpd_pack["y_true"].astype(np.float32)
-        mmpd_pred = mmpd_pack["samples"][:, :, 0, :].astype(np.float32)
+        mmpd_pred = reduce_pack_forecast(mmpd_pack, agg=args.fake_agg)
+        print(
+            f"[{dataset}] disc forecasts via fake_agg={args.fake_agg} "
+            f"(binary S={binary_pack['samples'].shape[2]}, mmpd S={mmpd_pack['samples'].shape[2]})",
+            flush=True,
+        )
         if not np.array_equal(binary_pack["indices"], mmpd_pack["indices"]):
             raise RuntimeError(f"{dataset}: binary/MMPD indices differ")
         scalers = binary_mmpd_train_scaler_map(args, run)
@@ -993,6 +1029,92 @@ def run_eval(args: argparse.Namespace) -> None:
             mmpd_window_std, mmpd_inverse_residual, score_data,
         )
         print(f"[{dataset}] canonical 256-row lattice asserted; visualization={plot}", flush=True)
+
+        if bool(getattr(args, "visualize_confusions", True)):
+            conf_dir = args.output_dir / "disc_confusions"
+            for source in ("binary_staged", "mmpd"):
+                try:
+                    visualize_univariate_combo(
+                        output_dir=args.output_dir,
+                        dataset=dataset,
+                        fake_source=source,
+                        slice_len=8,
+                        past=past,
+                        y_true=gt,
+                        fake=bundle.fakes[source],
+                        test_windows=splits["test"],
+                        device=device,
+                        seed=int(args.seed),
+                        batch_size=int(args.batch_size),
+                        per_bucket=int(getattr(args, "viz_per_bucket", 2) or 2),
+                        lookback_tail=int(getattr(args, "viz_lookback_tail", 32) or 32),
+                        plot_dir=conf_dir,
+                        max_eval_examples=args.max_eval_examples,
+                        candidate_only=bool(args.candidate_only),
+                        offset_stride=int(args.offset_stride),
+                    )
+                except Exception as exc:
+                    print(f"[{dataset}] confusion viz skipped for {source}: {exc}", flush=True)
+
+        if bool(getattr(args, "viz_anchor_prob_panels", True)):
+            n_panel = min(
+                int(getattr(args, "viz_anchor_prob_windows", 2) or 2),
+                int(past.shape[0]),
+            )
+            # Prefer MMPD deterministic when present; binary disc-raw is usually S=1 only.
+            mmpd_full = _mmpd_pack(args.mmpd_output_root, dataset)
+            from utils.forecast_pack_reduce import subset_pack_by_pool_indices
+
+            mmpd_aligned = subset_pack_by_pool_indices(
+                mmpd_full, np.asarray(indices, dtype=np.int64),
+            )
+            mmpd_anchor = None
+            if "deterministic" in mmpd_aligned:
+                mmpd_anchor_raw = mmpd_aligned["deterministic"].astype(np.float32)
+                mmpd_anchor_z, _ = align_mmpd_to_binary_dataset_norm(
+                    binary_y_true=binary_gt,
+                    mmpd_y_true=mmpd_aligned["y_true"].astype(np.float32),
+                    mmpd_fakes=mmpd_anchor_raw,
+                    **scalers,
+                )
+                mmpd_anchor, _ = snap_to_patch_refine_levels(mmpd_anchor_z, legal_levels)
+            mmpd_samples = mmpd_aligned["samples"].astype(np.float32)
+            # Align each draw into binary dataset-z, then snap onto the ordinal ladder.
+            snapped_draws = []
+            for s_i in range(mmpd_samples.shape[2]):
+                aligned_s, _ = align_mmpd_to_binary_dataset_norm(
+                    binary_y_true=binary_gt,
+                    mmpd_y_true=mmpd_aligned["y_true"].astype(np.float32),
+                    mmpd_fakes=mmpd_samples[:, :, s_i, :],
+                    **scalers,
+                )
+                snapped_s, _ = snap_to_patch_refine_levels(aligned_s, legal_levels)
+                snapped_draws.append(snapped_s)
+            mmpd_samples_snapped = np.stack(snapped_draws, axis=2).astype(np.float32)
+            binary_samples = binary_pack["samples"].astype(np.float32)
+            panel_rows = list(range(n_panel))
+            panel_paths = generate_binary_vs_mmpd_anchor_prob_panels(
+                dataset=dataset,
+                out_dir=args.output_dir / "viz" / "binary_vs_mmpd_anchor_prob",
+                window_indices=panel_rows,
+                y_true=gt[panel_rows],
+                past=past[panel_rows],
+                binary_anchor=None,
+                binary_samples=binary_samples[panel_rows],
+                mmpd_anchor=None if mmpd_anchor is None else mmpd_anchor[panel_rows],
+                mmpd_samples=mmpd_samples_snapped[panel_rows],
+                pool_indices=[int(indices[i]) for i in panel_rows],
+            )
+            print(f"[{dataset}] wrote {len(panel_paths)} anchor+prob panels", flush=True)
+            try:
+                from models.diffusion_tsf.pipeline import wandb_utils
+
+                wandb_utils.log_visualization_paths(
+                    panel_paths,
+                    wandb_key=f"eval/binary_vs_mmpd_anchor_prob/{dataset}",
+                )
+            except Exception as exc:
+                print(f"[{dataset}] wandb panel log skipped: {exc}", flush=True)
 
 
 def run_merge_only(args: argparse.Namespace) -> None:
