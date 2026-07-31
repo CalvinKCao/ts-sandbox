@@ -859,6 +859,7 @@ class HorizonSliceDataset(Dataset):
         offset_stride: int = 1,
         max_examples: Optional[int] = None,
         include_past: bool = True,
+        apply_zscore: bool = True,
     ) -> None:
         if real.shape != fake.shape:
             raise ValueError(f"real/fake shape mismatch: {real.shape} vs {fake.shape}")
@@ -872,6 +873,7 @@ class HorizonSliceDataset(Dataset):
         self.fake = fake
         self.slice_len = int(slice_len)
         self.include_past = bool(include_past)
+        self.apply_zscore = bool(apply_zscore)
         offsets = list(range(0, real.shape[-1] - slice_len + 1, max(1, int(offset_stride))))
         real_items = [(int(w), int(o), 0) for w in windows for o in offsets]
         fake_items = [(int(w), int(o), 1) for w in windows for o in offsets]
@@ -893,12 +895,17 @@ class HorizonSliceDataset(Dataset):
         window, offset, label = self.items[idx]
         candidate_src = self.fake if label == 1 else self.real
         candidate = candidate_src[window, :, offset : offset + self.slice_len]
+        if self.apply_zscore:
+            norm = zscore_time
+        else:
+            def norm(t: np.ndarray) -> np.ndarray:
+                return np.asarray(t, dtype=np.float32)
         if self.include_past:
             past = self.past[window]
-            x = np.concatenate([zscore_time(past), zscore_time(candidate)], axis=-1).astype(np.float32)
+            x = np.concatenate([norm(past), norm(candidate)], axis=-1).astype(np.float32)
         else:
             # Local texture only: no lookback continuity cue.
-            x = zscore_time(candidate).astype(np.float32)
+            x = norm(candidate).astype(np.float32)
         return (
             torch.from_numpy(x),
             torch.tensor(offset, dtype=torch.long),
@@ -1069,9 +1076,11 @@ def train_classifier(
     if bool(getattr(args, "nonoverlapping_patches", False)):
         offset_stride = int(slice_len)
     use_offset_embedding = not bool(getattr(args, "no_offset_embedding", False))
+    apply_zscore = not bool(getattr(args, "disc_bin_center_shift", False))
     ds_kwargs = dict(
         offset_stride=offset_stride,
         include_past=include_past,
+        apply_zscore=apply_zscore,
     )
     ds_train = HorizonSliceDataset(
         bundle.past,
@@ -1668,6 +1677,19 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Feed only the z-scored horizon patch (no lookback). Isolates local texture from past-continuity cues.",
+    )
+    parser.add_argument(
+        "--disc-bin-center-shift",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Replace zscore_time with centered bin-index mean shift (utils.disc_bin_center_shift). "
+             "Ordinal evaluator defaults this ON; texture/univariate base defaults OFF.",
+    )
+    parser.add_argument(
+        "--disc-bin-center-reduce",
+        choices=["per_variate", "joint"],
+        default="per_variate",
+        help="How to average centered bin indices before the integer shift (default: per_variate).",
     )
     parser.add_argument(
         "--save-classification-scores",

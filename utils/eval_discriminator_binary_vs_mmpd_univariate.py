@@ -72,6 +72,7 @@ class UnivariateRealVsFakeDataset(Dataset):
         offset_stride: int = 1,
         max_examples: Optional[int] = None,
         include_past: bool = False,
+        apply_zscore: bool = True,
     ) -> None:
         if real.shape != fake.shape:
             raise ValueError(f"real/fake shape mismatch: {real.shape} vs {fake.shape}")
@@ -85,6 +86,7 @@ class UnivariateRealVsFakeDataset(Dataset):
         self.past = past
         self.slice_len = int(slice_len)
         self.include_past = bool(include_past)
+        self.apply_zscore = bool(apply_zscore)
         n_var = int(real.shape[1])
         offsets = list(range(0, real.shape[-1] - slice_len + 1, max(1, int(offset_stride))))
         # (window, offset, variate, label)
@@ -108,11 +110,16 @@ class UnivariateRealVsFakeDataset(Dataset):
         window, offset, variate, label = self.items[idx]
         src = self.fake if label == 1 else self.real
         candidate = src[window, variate : variate + 1, offset : offset + self.slice_len]
+        if self.apply_zscore:
+            norm = zscore_time
+        else:
+            def norm(t: np.ndarray) -> np.ndarray:
+                return np.asarray(t, dtype=np.float32)
         if self.include_past:
             past = self.past[window, variate : variate + 1]
-            x = np.concatenate([zscore_time(past), zscore_time(candidate)], axis=-1).astype(np.float32)
+            x = np.concatenate([norm(past), norm(candidate)], axis=-1).astype(np.float32)
         else:
-            x = zscore_time(candidate).astype(np.float32)
+            x = norm(candidate).astype(np.float32)
         return (
             torch.from_numpy(x),
             torch.tensor(offset, dtype=torch.long),
@@ -204,7 +211,8 @@ def train_classifier(
     if bool(getattr(args, "nonoverlapping_patches", False)):
         offset_stride = int(slice_len)
     use_offset_embedding = not bool(getattr(args, "no_offset_embedding", False))
-    ds_kwargs = dict(offset_stride=offset_stride, include_past=include_past)
+    apply_zscore = not bool(getattr(args, "disc_bin_center_shift", False))
+    ds_kwargs = dict(offset_stride=offset_stride, include_past=include_past, apply_zscore=apply_zscore)
 
     ds_train = UnivariateRealVsFakeDataset(
         y_true, fake, bundle.past, splits["train"], slice_len,

@@ -67,6 +67,7 @@ from utils.patch_refine_ordinal_ladder import (
     legal_patch_refine_levels_dataset_z,
     snap_to_patch_refine_levels,
 )
+from utils.disc_bin_center_shift import bin_center_shift  # noqa: E402
 from utils.visualize_staged_eval_2d_preds import _build_state, _load_stage_model, _resolve_guidance_ckpt
 from utils.visualize_discriminator_univariate_confusions import visualize_univariate_combo
 from utils.binary_mmpd_sample_panels import generate_binary_vs_mmpd_anchor_prob_panels
@@ -136,6 +137,8 @@ def _defaults(argv: Sequence[str]) -> List[str]:
         defaults += ["--no-mmpd-ordinal-norm"]
     if "--candidate-only" not in text and "--no-candidate-only" not in text:
         defaults += ["--candidate-only"]
+    if "--disc-bin-center-shift" not in text and "--no-disc-bin-center-shift" not in text:
+        defaults += ["--disc-bin-center-shift"]
     if "--save-classification-scores" not in text and "--no-save-classification-scores" not in text:
         defaults += ["--save-classification-scores"]
     return defaults
@@ -935,6 +938,27 @@ def run_eval(args: argparse.Namespace) -> None:
         if args.assert_only:
             print(f"[{dataset}] real checkpoint snapping/assertion gate passed", flush=True)
             continue
+        if bool(getattr(args, "disc_bin_center_shift", False)):
+            reduce_mode = str(getattr(args, "disc_bin_center_reduce", "per_variate"))
+            gt, gt_cstats = bin_center_shift(gt, legal_levels, reduce=reduce_mode)
+            binary, bin_cstats = bin_center_shift(binary, legal_levels, reduce=reduce_mode)
+            mmpd, mmpd_cstats = bin_center_shift(mmpd, legal_levels, reduce=reduce_mode)
+            # Keep on-ladder after integer centered shift.
+            assert_on_patch_refine_levels(gt, legal_levels)
+            assert_on_patch_refine_levels(binary, legal_levels, atol=_binary_lattice_atol(legal_levels))
+            assert_on_patch_refine_levels(mmpd, legal_levels)
+            write_json(
+                args.raw_eval_dir / f"bin_center_shift_{dataset}.json",
+                {"gt": gt_cstats, "binary_staged": bin_cstats, "mmpd": mmpd_cstats, "reduce": reduce_mode},
+            )
+            print(
+                f"[{dataset}] disc_bin_center_shift reduce={reduce_mode} "
+                f"mean_c gt {gt_cstats['mean_centered_before']:.3f}->{gt_cstats['mean_centered_after']:.3f} "
+                f"binary {bin_cstats['mean_centered_before']:.3f}->{bin_cstats['mean_centered_after']:.3f} "
+                f"mmpd {mmpd_cstats['mean_centered_before']:.3f}->{mmpd_cstats['mean_centered_after']:.3f} "
+                f"(zscore_time disabled)",
+                flush=True,
+            )
         bundle = SimpleNamespace(
             fakes={"binary_staged": binary, "mmpd": mmpd},
             y_true_by_source={"binary_staged": gt, "mmpd": gt.copy()},
@@ -984,6 +1008,12 @@ def run_eval(args: argparse.Namespace) -> None:
         patch_gt = binary_pack["unblended_nonoverlap_patch_gt"].astype(np.float32)
         patch_past = binary_pack["unblended_nonoverlap_patch_past"].astype(np.float32)
         patch_parent = binary_pack["unblended_nonoverlap_patch_parent"].astype(np.int64)
+        if bool(getattr(args, "disc_bin_center_shift", False)):
+            patch_variate = binary_pack["unblended_nonoverlap_patch_variate"].astype(np.int64)
+            reduce_mode = str(getattr(args, "disc_bin_center_reduce", "per_variate"))
+            patch_levels = legal_levels[patch_parent, patch_variate, :][:, None, :]
+            patch_pred, _ = bin_center_shift(patch_pred, patch_levels, reduce=reduce_mode)
+            patch_gt, _ = bin_center_shift(patch_gt, patch_levels, reduce=reduce_mode)
         if patch_pred.shape != patch_gt.shape or patch_pred.shape[1:] != (1, 8):
             raise RuntimeError(f"{dataset}: invalid coherent raw L8 patch shape {patch_pred.shape}")
         patch_splits = {
@@ -1052,6 +1082,7 @@ def run_eval(args: argparse.Namespace) -> None:
                         max_eval_examples=args.max_eval_examples,
                         candidate_only=bool(args.candidate_only),
                         offset_stride=int(args.offset_stride),
+                        apply_zscore=not bool(getattr(args, "disc_bin_center_shift", False)),
                     )
                 except Exception as exc:
                     print(f"[{dataset}] confusion viz skipped for {source}: {exc}", flush=True)

@@ -143,6 +143,7 @@ def visualize_univariate_combo(
     max_eval_examples: Optional[int] = None,
     candidate_only: bool = True,
     offset_stride: int = 1,
+    apply_zscore: bool = True,
     wandb_key: Optional[str] = None,
 ) -> Path:
     ckpt = univariate_checkpoint_path(output_dir, dataset, fake_source, slice_len)
@@ -165,6 +166,7 @@ def visualize_univariate_combo(
         offset_stride=offset_stride,
         max_examples=max_eval_examples,
         include_past=not candidate_only,
+        apply_zscore=apply_zscore,
     )
     records = collect_univariate_test_records(model, ds, device, batch_size)
     counts = summarize_buckets(records)
