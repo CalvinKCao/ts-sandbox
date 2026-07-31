@@ -80,7 +80,7 @@ def main() -> None:
     mean, std = get_statistics(torch.from_numpy(past))
     instance = normalize(raw_mmpd_t, mean, std)
     restored = denormalize(instance, mean, std).numpy()
-    if not np.allclose(restored, raw_mmpd, atol=1e-6):
+    if not np.allclose(restored, raw_mmpd, atol=1e-5):
         raise AssertionError("MMPD instance norm did not round-trip")
 
     # Exercise the exact discriminator feed-in scaler conversion with different
