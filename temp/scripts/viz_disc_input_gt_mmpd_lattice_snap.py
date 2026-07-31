@@ -86,6 +86,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", type=Path, default=DEFAULT_OUT)
     p.add_argument("--fake-agg", choices=["prob_mean", "sample0"], default="sample0")
     p.add_argument("--n-windows", type=int, default=3)
+    p.add_argument(
+        "--pool-indices",
+        type=int,
+        nargs="*",
+        default=None,
+        help="If set, plot these pack pool indices instead of auto-picked windows.",
+    )
     p.add_argument("--variate", type=int, default=0)
     p.add_argument("--zoom-len", type=int, default=24, help="Horizon steps in zoom inset")
     p.add_argument("--dpi", type=int, default=250)
@@ -170,7 +177,8 @@ def _pick_windows(
     variate: int,
     seed: int,
 ) -> np.ndarray:
-    """Prefer high-structure windows (GT range + |GT-MMPD| energy)."""
+    """Prefer high-structure windows by GT amplitude (stable across fake_agg)."""
+    del mmpd  # kept in signature for call-site compatibility
     n_win = int(gt.shape[0])
     v = int(variate)
     if v < 0 or v >= gt.shape[1]:
@@ -178,13 +186,10 @@ def _pick_windows(
     if n_win <= n:
         return np.arange(n_win, dtype=np.int64)
     gt_v = gt[:, v, :]
-    mmpd_v = mmpd[:, v, :]
     amp = gt_v.max(axis=-1) - gt_v.min(axis=-1)
-    resid = np.mean(np.abs(gt_v - mmpd_v), axis=-1)
-    score = 0.65 * amp + 0.35 * resid
     # Soft jitter so ties don't always pick the same early indices.
     rng = np.random.default_rng(int(seed))
-    score = score + 1e-6 * rng.random(n_win)
+    score = amp + 1e-6 * rng.random(n_win)
     order = np.argsort(-score)
     return np.sort(order[:n].astype(np.int64))
 
@@ -300,13 +305,46 @@ def _prepare_snapped(
     return tensors, meta, indices
 
 
-def _draw_levels(ax, levels_1d: np.ndarray, x0: float, x1: float) -> None:
+def _draw_levels(
+    ax,
+    levels_1d: np.ndarray,
+    x0: float,
+    x1: float,
+    *,
+    y_lo: float | None = None,
+    y_hi: float | None = None,
+    max_lines: int | None = 64,
+) -> int:
+    """Draw legal-level hlines, optionally clipped to ``[y_lo, y_hi]``.
+
+    Full-horizon panels thin via ``max_lines`` for readability. Zoom insets should
+    draw occupied series levels separately (and use an opaque face) — a subsampled
+    full ladder behind the inset makes snapped series look off-grid.
+    """
     uniq = np.unique(levels_1d.astype(np.float64))
-    # Cap line count for readability while still showing the lattice.
-    if uniq.size > 96:
-        step = max(1, uniq.size // 64)
+    if y_lo is not None and y_hi is not None:
+        lo, hi = (float(y_lo), float(y_hi)) if y_lo <= y_hi else (float(y_hi), float(y_lo))
+        pad = 0.02 * max(hi - lo, 1e-3)
+        uniq = uniq[(uniq >= lo - pad) & (uniq <= hi + pad)]
+    if max_lines is not None and uniq.size > int(max_lines):
+        step = max(1, int(np.ceil(uniq.size / float(max_lines))))
         uniq = uniq[::step]
-    ax.hlines(uniq, x0, x1, colors="0.75", linewidths=0.25, alpha=0.35, zorder=0)
+    if uniq.size == 0:
+        return 0
+    ax.hlines(uniq, x0, x1, colors="0.75", linewidths=0.25, alpha=0.45, zorder=0)
+    return int(uniq.size)
+
+
+def _plot_snapped_series(ax, x, y, *, color, lw, label, drawstyle: str, markers: bool) -> None:
+    ax.plot(
+        x, y, color=color, lw=lw, alpha=0.95 if color != "black" else 1.0,
+        drawstyle=drawstyle, label=label, zorder=2,
+    )
+    if markers:
+        ax.plot(
+            x, y, linestyle="none", marker="o", markersize=2.2,
+            markerfacecolor=color, markeredgewidth=0, alpha=0.9, zorder=3,
+        )
 
 
 def _plot_dataset(
@@ -322,10 +360,20 @@ def _plot_dataset(
     levels = tensors["legal_levels"]
     pool_idx = tensors["indices"]
     v = int(args.variate)
-    picks = _pick_windows(gt, mmpd, n=int(args.n_windows), variate=v, seed=int(args.seed))
+    if args.pool_indices:
+        want = [int(p) for p in args.pool_indices]
+        pool_to_local = {int(p): i for i, p in enumerate(pool_idx.tolist())}
+        missing = [p for p in want if p not in pool_to_local]
+        if missing:
+            raise KeyError(f"{dataset}: pool indices not in pack: {missing}")
+        picks = np.asarray([pool_to_local[p] for p in want], dtype=np.int64)
+    else:
+        picks = _pick_windows(gt, mmpd, n=int(args.n_windows), variate=v, seed=int(args.seed))
     paths: List[Path] = []
     lw = float(args.linewidth)
     zoom_len = max(4, min(int(args.zoom_len), HORIZON))
+    # steps-post: hold from integer t to t+1 (steps-mid shifts jumps to half-integers).
+    step_style = "steps-post"
 
     for local in picks.tolist():
         pool_i = int(pool_idx[local])
@@ -349,10 +397,17 @@ def _plot_dataset(
 
         past_x = np.arange(-LOOKBACK, 0)
         fut_x = np.arange(HORIZON)
-        _draw_levels(ax_main, levels_v, float(past_x[0]), float(fut_x[-1]))
+        y_main = np.concatenate([past_v, gt_v, mmpd_v])
+        _draw_levels(
+            ax_main, levels_v, float(past_x[0]), float(fut_x[-1]),
+            y_lo=float(y_main.min()), y_hi=float(y_main.max()), max_lines=64,
+        )
         ax_main.plot(past_x, past_v, color="0.55", lw=lw, label="lookback (binary dataset-z)")
         ax_main.plot(fut_x, gt_v, color="black", lw=lw, label="GT snapped")
-        ax_main.plot(fut_x, mmpd_v, color="#d62728", lw=lw, alpha=0.9, label=f"MMPD snapped ({args.fake_agg})")
+        ax_main.plot(
+            fut_x, mmpd_v, color="#d62728", lw=lw, alpha=0.9,
+            label=f"MMPD snapped ({args.fake_agg})",
+        )
         ax_main.axvline(0, color="0.25", lw=0.6)
         ax_main.set_ylabel("binary dataset-z\n(post-snap, pre zscore_time)")
         ax_main.set_title(
@@ -362,19 +417,47 @@ def _plot_dataset(
         ax_main.legend(loc="upper left", fontsize=8, framealpha=0.85, ncol=3)
         ax_main.grid(alpha=0.12, linewidth=0.4)
 
-        # Zoom inset on early horizon to make discrete levels obvious.
+        # Zoom: ONLY the legal rungs occupied by GT/MMPD in this window (exact snap
+        # membership). Opaque face so the main panel's thinned ladder cannot show
+        # through and make series look "off-grid".
         ax_in = ax_main.inset_axes([0.62, 0.12, 0.35, 0.45])
+        ax_in.set_facecolor("white")
+        ax_in.patch.set_alpha(1.0)
         z0, z1 = 0, zoom_len
-        _draw_levels(ax_in, levels_v, float(z0), float(z1 - 1))
-        ax_in.plot(np.arange(z0, z1), gt_v[z0:z1], color="black", lw=lw + 0.15, drawstyle="steps-mid")
-        ax_in.plot(np.arange(z0, z1), mmpd_v[z0:z1], color="#d62728", lw=lw + 0.15, drawstyle="steps-mid", alpha=0.9)
-        ax_in.set_title(f"zoom t=0..{z1 - 1} (steps-mid)", fontsize=7)
-        ax_in.tick_params(labelsize=6)
-        ax_in.grid(alpha=0.15, linewidth=0.3)
-        # Y-lim tight around zoom segment so rungs separate.
-        seg = np.concatenate([gt_v[z0:z1], mmpd_v[z0:z1]])
+        zx = np.arange(z0, z1)
+        gt_zseg = gt_v[z0:z1]
+        mmpd_zseg = mmpd_v[z0:z1]
+        seg = np.concatenate([gt_zseg, mmpd_zseg])
         pad = 0.08 * max(float(seg.max() - seg.min()), 1e-3)
-        ax_in.set_ylim(float(seg.min()) - pad, float(seg.max()) + pad)
+        y_lo, y_hi = float(seg.min()) - pad, float(seg.max()) + pad
+        occupied = np.unique(seg.astype(np.float64))
+        # Sanity: every plotted y must be a legal level (snap contract).
+        for name, arr in (("GT", gt_zseg), ("MMPD", mmpd_zseg)):
+            err = float(np.min(np.abs(arr[:, None] - levels_v[None, :]), axis=-1).max())
+            if err > 1e-5:
+                raise AssertionError(
+                    f"{dataset} local={local}: {name} zoom off legal ladder (max_err={err})"
+                )
+        ax_in.hlines(
+            occupied, float(z0), float(z1 - 1),
+            colors="0.55", linewidths=0.7, alpha=0.85, zorder=1,
+        )
+        _plot_snapped_series(
+            ax_in, zx, gt_zseg, color="black", lw=lw + 0.2,
+            label="GT", drawstyle=step_style, markers=True,
+        )
+        _plot_snapped_series(
+            ax_in, zx, mmpd_zseg, color="#d62728", lw=lw + 0.2,
+            label="MMPD", drawstyle=step_style, markers=True,
+        )
+        ax_in.set_ylim(y_lo, y_hi)
+        ax_in.set_xlim(float(z0) - 0.5, float(z1 - 1) + 0.5)
+        ax_in.set_title(
+            f"zoom t=0..{z1 - 1} ({step_style}; {occupied.size} occupied legal rungs)",
+            fontsize=7,
+        )
+        ax_in.tick_params(labelsize=6)
+        ax_in.grid(False)
         ax_main.indicate_inset_zoom(ax_in, edgecolor="0.4")
 
         ax_resid.axhline(0.0, color="0.4", lw=0.5)
@@ -411,7 +494,11 @@ def _plot_dataset(
         mmpd_v = mmpd[local, v]
         levels_v = levels[local, v]
         fut_x = np.arange(HORIZON)
-        _draw_levels(ax, levels_v, 0.0, float(HORIZON - 1))
+        y_strip = np.concatenate([gt_v, mmpd_v])
+        _draw_levels(
+            ax, levels_v, 0.0, float(HORIZON - 1),
+            y_lo=float(y_strip.min()), y_hi=float(y_strip.max()), max_lines=64,
+        )
         ax.plot(fut_x, gt_v, color="black", lw=lw, label="GT snapped")
         ax.plot(fut_x, mmpd_v, color="#d62728", lw=lw, alpha=0.9, label=f"MMPD ({args.fake_agg})")
         ax.set_ylabel("dataset-z")
@@ -475,6 +562,12 @@ def main() -> None:
             "NO disc zscore_time on main panels; NO extra instance/window norm"
         ),
         "tensors_plotted": "snapped GT (from binary y_true) and snapped MMPD (sample0 / first pack draw)",
+        "plot_note": (
+            "Zoom uses steps-post + markers; hlines are the occupied legal levels "
+            "(union of GT/MMPD y-values in the zoom). Snap max error is 0 — both "
+            "series sit on the window's 256-row support. Main panel thins the full "
+            "ladder for readability."
+        ),
         "disc_raw_note": (
             "07-31-0925 packs store pre-snap y_true/samples/past; snapped arrays "
             "are recomputed with the same helpers as the ordinal disc evaluator"
