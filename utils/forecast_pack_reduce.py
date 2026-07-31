@@ -1,18 +1,20 @@
 """Reduce forecast packs to a single trajectory per window.
 
 Packs from staged_eval / MMPD / ordinal disc materialize use
-``samples`` with shape ``(N, V, S, H)``. Discriminator paths historically
-took ``samples[:, :, 0, :]`` (one draw). Prefer ``prob_mean`` (mean over S)
-for probabilistic comparisons; never silently fall back to ``deterministic``.
+``samples`` with shape ``(N, V, S, H)``. Discriminator paths take
+``sample0`` (first stochastic draw along S) — one probabilistic sample,
+no mean-over-S. ``prob_mean`` remains available for intentional averaging;
+never silently fall back to ``deterministic``.
 """
 
 from __future__ import annotations
 
-from typing import Mapping, Optional
+from typing import Mapping
 
 import numpy as np
 
 FAKE_AGG_CHOICES = ("prob_mean", "sample0", "deterministic")
+DEFAULT_FAKE_AGG = "sample0"
 
 
 def pack_index_key(pack: Mapping[str, np.ndarray]) -> str:
@@ -26,12 +28,12 @@ def pack_index_key(pack: Mapping[str, np.ndarray]) -> str:
 def reduce_pack_forecast(
     pack: Mapping[str, np.ndarray],
     *,
-    agg: str = "prob_mean",
+    agg: str = DEFAULT_FAKE_AGG,
 ) -> np.ndarray:
     """Return ``(N, V, H)`` forecast for the requested aggregation.
 
+    ``sample0`` — first stochastic draw (disc default).
     ``prob_mean`` — mean over sample axis (requires ``samples`` with S>=1).
-    ``sample0`` — first stochastic draw.
     ``deterministic`` — anchor / point forecast key.
     """
     mode = str(agg).strip().lower()
@@ -103,5 +105,5 @@ def assert_not_anchor_agg(agg: str) -> None:
     if str(agg).strip().lower() == "deterministic":
         raise ValueError(
             "refusing deterministic/anchor aggregation for a probabilistic disc path; "
-            "use agg='prob_mean' (or 'sample0')"
+            "use agg='sample0' (or 'prob_mean' only if mean-over-S is intentional)"
         )

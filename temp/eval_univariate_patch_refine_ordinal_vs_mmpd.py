@@ -183,9 +183,9 @@ def parse_args() -> argparse.Namespace:
     custom.add_argument(
         "--fake-agg",
         choices=["prob_mean", "sample0"],
-        default="prob_mean",
-        help="Reduce pack samples to disc fakes: mean over S (default) or first draw. "
-             "Anchor/deterministic is never used.",
+        default="sample0",
+        help="Reduce pack samples to disc fakes: first stochastic draw (default) "
+             "or mean over S. Anchor/deterministic is never used.",
     )
     custom.add_argument(
         "--visualize-confusions",

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""One-off: rerun h96 ordinal disc with probabilistic (mean-over-samples) fakes + confusion PNGs.
+"""One-off: rerun h96 ordinal disc with one probabilistic sample fakes + confusion PNGs.
 
-Reuses ``07-31-0925-h96-ordinal-disc-raw`` binary packs and MMPD root packs, forces
-``fake_agg=prob_mean`` (never anchor), retrains univariate discs, writes TP/TN/FP/FN
-panels under ``results/datasets/<run>/disc_confusions/``.
+Reuses ``07-31-0925-h96-ordinal-disc-raw`` binary packs and MMPD root packs, defaults
+``fake_agg=sample0`` (first draw; never mean-over-S or anchor), retrains univariate
+discs, writes TP/TN/FP/FN panels under ``results/datasets/<run>/disc_confusions/``.
 
 Does **not** retrain forecast models.
 """
@@ -81,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     custom.add_argument("--disc-raw-dir", type=Path, default=DEFAULT_DISC_RAW)
     custom.add_argument("--mmpd-output-root", type=Path, default=DEFAULT_MMPD)
     custom.add_argument("--output-dir", type=Path, default=DEFAULT_OUT)
-    custom.add_argument("--fake-agg", choices=["prob_mean", "sample0"], default="prob_mean")
+    custom.add_argument("--fake-agg", choices=["prob_mean", "sample0"], default="sample0")
     custom.add_argument("--slice-lengths", nargs="+", type=int, default=[8])
     custom.add_argument("--per-bucket", type=int, default=2)
     custom.add_argument("--lookback-tail", type=int, default=32)

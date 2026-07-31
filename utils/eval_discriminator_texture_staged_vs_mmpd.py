@@ -502,14 +502,14 @@ def build_raw_bundle(
     y_true_by_source: Dict[str, np.ndarray] = {}
     fakes: Dict[str, np.ndarray] = {}
     ref_shape: Optional[Tuple[int, ...]] = None
-    from utils.forecast_pack_reduce import reduce_pack_forecast
+    from utils.forecast_pack_reduce import assert_not_anchor_agg, reduce_pack_forecast
 
-    fake_agg = str(getattr(args, "fake_agg", "prob_mean") or "prob_mean")
+    fake_agg = str(getattr(args, "fake_agg", "sample0") or "sample0")
+    assert_not_anchor_agg(fake_agg)
     for fake_source, pack in packs.items():
         y_true = pack["y_true"].astype(np.float32)
-        # Default: mean over stochastic samples (probabilistic path). Use
-        # --fake-agg sample0 for the legacy first-draw behaviour; deterministic
-        # is refused for disc training unless explicitly requested.
+        # Default: first stochastic draw (sample0). No mean-over-S; anchor
+        # rejected via assert_not_anchor_agg. Existing S>1 packs still work.
         fake = reduce_pack_forecast(pack, agg=fake_agg)
         if ref_shape is None:
             ref_shape = y_true.shape
@@ -1740,11 +1740,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--fake-agg",
-        choices=["prob_mean", "sample0", "deterministic"],
-        default="prob_mean",
+        choices=["prob_mean", "sample0"],
+        default="sample0",
         help="How to reduce pack['samples'] into the disc fake trajectory. "
-             "prob_mean (default) = mean over S; sample0 = first draw; "
-             "deterministic = anchor key (not for probabilistic disc).",
+             "sample0 (default) = first stochastic draw; "
+             "prob_mean = mean over S (intentional averaging only). "
+             "Anchor/deterministic is refused.",
     )
     parser.add_argument("--viz-per-bucket", type=int, default=2)
     parser.add_argument("--viz-variate", type=int, default=0)

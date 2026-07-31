@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# One-off: h96 ordinal disc confusion PNGs (prob_mean fakes, never anchor).
+# One-off: h96 ordinal disc confusion PNGs (sample0 fakes, never mean/anchor).
 #
 # USAGE (Killarney login, $SCRATCH/ts-sandbox):
 #   cd "$SCRATCH/ts-sandbox" && git pull
