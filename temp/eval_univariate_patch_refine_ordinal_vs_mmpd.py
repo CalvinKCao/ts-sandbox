@@ -938,31 +938,20 @@ def run_eval(args: argparse.Namespace) -> None:
         if args.assert_only:
             print(f"[{dataset}] real checkpoint snapping/assertion gate passed", flush=True)
             continue
+        # Bin-center shift runs per L-slice inside UnivariateRealVsFakeDataset
+        # (replaces zscore_time). Do not pre-shift full-H packs here.
         if bool(getattr(args, "disc_bin_center_shift", False)):
-            reduce_mode = str(getattr(args, "disc_bin_center_reduce", "per_variate"))
-            gt, gt_cstats = bin_center_shift(gt, legal_levels, reduce=reduce_mode)
-            binary, bin_cstats = bin_center_shift(binary, legal_levels, reduce=reduce_mode)
-            mmpd, mmpd_cstats = bin_center_shift(mmpd, legal_levels, reduce=reduce_mode)
-            # Keep on-ladder after integer centered shift.
-            assert_on_patch_refine_levels(gt, legal_levels)
-            assert_on_patch_refine_levels(binary, legal_levels, atol=_binary_lattice_atol(legal_levels))
-            assert_on_patch_refine_levels(mmpd, legal_levels)
-            write_json(
-                args.raw_eval_dir / f"bin_center_shift_{dataset}.json",
-                {"gt": gt_cstats, "binary_staged": bin_cstats, "mmpd": mmpd_cstats, "reduce": reduce_mode},
-            )
             print(
-                f"[{dataset}] disc_bin_center_shift reduce={reduce_mode} "
-                f"mean_c gt {gt_cstats['mean_centered_before']:.3f}->{gt_cstats['mean_centered_after']:.3f} "
-                f"binary {bin_cstats['mean_centered_before']:.3f}->{bin_cstats['mean_centered_after']:.3f} "
-                f"mmpd {mmpd_cstats['mean_centered_before']:.3f}->{mmpd_cstats['mean_centered_after']:.3f} "
-                f"(zscore_time disabled)",
+                f"[{dataset}] disc_bin_center_shift=ON (per L-slice in dataset; "
+                f"reduce={getattr(args, 'disc_bin_center_reduce', 'per_variate')}; "
+                f"zscore_time disabled)",
                 flush=True,
             )
         bundle = SimpleNamespace(
             fakes={"binary_staged": binary, "mmpd": mmpd},
             y_true_by_source={"binary_staged": gt, "mmpd": gt.copy()},
             past=past,
+            legal_levels=np.asarray(legal_levels, dtype=np.float32),
             indices=np.asarray(indices, dtype=np.int64),
             series_starts=binary_pack["series_starts"],
             run=run,
@@ -989,6 +978,7 @@ def run_eval(args: argparse.Namespace) -> None:
                 fakes={nonoverlap_source: bundle.fakes[source]},
                 y_true_by_source={nonoverlap_source: bundle.y_true_by_source[source]},
                 past=bundle.past,
+                legal_levels=bundle.legal_levels,
                 indices=bundle.indices,
                 series_starts=bundle.series_starts,
                 run=bundle.run,
@@ -1037,8 +1027,11 @@ def run_eval(args: argparse.Namespace) -> None:
                 run=run,
                 pack_splits=[str(value) for value in binary_pack["pack_splits"].tolist()],
             )
+            # Patches already bin-center-shifted on L=8 above; do not re-apply in dataset.
+            patch_args = copy(args)
+            patch_args.disc_bin_center_shift = False
             patch_metrics = train_classifier(
-                args, dataset, "binary_patch_unblended", 8, patch_bundle, patch_splits, device,
+                patch_args, dataset, "binary_patch_unblended", 8, patch_bundle, patch_splits, device,
             )
         patch_metrics.update(
             {

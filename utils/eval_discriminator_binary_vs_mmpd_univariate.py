@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from utils.disc_bin_center_shift import bin_center_shift  # noqa: E402
 from utils.eval_discriminator_texture_staged_vs_mmpd import (  # noqa: E402
     DEFAULT_DISC_OUTPUT,
     FAKE_SOURCES,
@@ -50,6 +51,9 @@ from utils.eval_trend_robust_texture_staged_vs_mmpd import (  # noqa: E402
     EvalProgress,
     fmt_duration,
 )
+from typing import Literal
+
+ReduceMode = Literal["per_variate", "joint"]
 
 DEFAULT_OUTPUT = (
     DEFAULT_DISC_OUTPUT.parent
@@ -73,6 +77,9 @@ class UnivariateRealVsFakeDataset(Dataset):
         max_examples: Optional[int] = None,
         include_past: bool = False,
         apply_zscore: bool = True,
+        apply_bin_center_shift: bool = False,
+        legal_levels: Optional[np.ndarray] = None,
+        bin_center_reduce: ReduceMode = "per_variate",
     ) -> None:
         if real.shape != fake.shape:
             raise ValueError(f"real/fake shape mismatch: {real.shape} vs {fake.shape}")
@@ -80,13 +87,28 @@ class UnivariateRealVsFakeDataset(Dataset):
             raise ValueError(f"past/real window mismatch: {past.shape[0]} vs {real.shape[0]}")
         if slice_len > real.shape[-1]:
             raise ValueError(f"slice_len={slice_len} exceeds horizon={real.shape[-1]}")
+        if apply_zscore and apply_bin_center_shift:
+            raise ValueError("apply_zscore and apply_bin_center_shift are mutually exclusive")
+        if apply_bin_center_shift:
+            if legal_levels is None:
+                raise ValueError("legal_levels required when apply_bin_center_shift=True")
+            levels = np.asarray(legal_levels, dtype=np.float32)
+            if levels.shape[:2] != real.shape[:2]:
+                raise ValueError(
+                    f"legal_levels N,V {levels.shape[:2]} != real {real.shape[:2]}"
+                )
 
         self.real = real
         self.fake = fake
         self.past = past
+        self.legal_levels = (
+            None if legal_levels is None else np.asarray(legal_levels, dtype=np.float32)
+        )
         self.slice_len = int(slice_len)
         self.include_past = bool(include_past)
         self.apply_zscore = bool(apply_zscore)
+        self.apply_bin_center_shift = bool(apply_bin_center_shift)
+        self.bin_center_reduce: ReduceMode = bin_center_reduce
         n_var = int(real.shape[1])
         offsets = list(range(0, real.shape[-1] - slice_len + 1, max(1, int(offset_stride))))
         # (window, offset, variate, label)
@@ -106,20 +128,38 @@ class UnivariateRealVsFakeDataset(Dataset):
     def __len__(self) -> int:
         return len(self.items)
 
+    def _norm_segment(self, segment: np.ndarray, window: int, variate: int) -> np.ndarray:
+        """Normalize one (1, T) univariate segment. Bin-center uses this segment's T only."""
+        seg = np.asarray(segment, dtype=np.float32)
+        if self.apply_bin_center_shift:
+            assert self.legal_levels is not None
+            levels = self.legal_levels[window, variate : variate + 1, :]  # (1, H)
+            # bin_center_shift expects (N,V,T) / (N,V,H); V=1 for univariate disc.
+            shifted, _ = bin_center_shift(
+                seg[None, :, :],
+                levels[None, :, :],
+                reduce=self.bin_center_reduce,
+            )
+            return shifted[0].astype(np.float32)
+        if self.apply_zscore:
+            return zscore_time(seg)
+        return seg
+
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         window, offset, variate, label = self.items[idx]
         src = self.fake if label == 1 else self.real
         candidate = src[window, variate : variate + 1, offset : offset + self.slice_len]
-        if self.apply_zscore:
-            norm = zscore_time
-        else:
-            def norm(t: np.ndarray) -> np.ndarray:
-                return np.asarray(t, dtype=np.float32)
         if self.include_past:
             past = self.past[window, variate : variate + 1]
-            x = np.concatenate([norm(past), norm(candidate)], axis=-1).astype(np.float32)
+            x = np.concatenate(
+                [
+                    self._norm_segment(past, window, variate),
+                    self._norm_segment(candidate, window, variate),
+                ],
+                axis=-1,
+            ).astype(np.float32)
         else:
-            x = norm(candidate).astype(np.float32)
+            x = self._norm_segment(candidate, window, variate).astype(np.float32)
         return (
             torch.from_numpy(x),
             torch.tensor(offset, dtype=torch.long),
@@ -211,8 +251,24 @@ def train_classifier(
     if bool(getattr(args, "nonoverlapping_patches", False)):
         offset_stride = int(slice_len)
     use_offset_embedding = not bool(getattr(args, "no_offset_embedding", False))
-    apply_zscore = not bool(getattr(args, "disc_bin_center_shift", False))
-    ds_kwargs = dict(offset_stride=offset_stride, include_past=include_past, apply_zscore=apply_zscore)
+    apply_bin_center = bool(getattr(args, "disc_bin_center_shift", False))
+    apply_zscore = not apply_bin_center
+    legal_levels = getattr(bundle, "legal_levels", None)
+    if apply_bin_center and legal_levels is None:
+        raise ValueError(
+            "disc_bin_center_shift requires bundle.legal_levels (N,V,H) for per-slice centering"
+        )
+    reduce_mode = str(getattr(args, "disc_bin_center_reduce", "per_variate"))
+    if reduce_mode not in ("per_variate", "joint"):
+        raise ValueError(f"invalid disc_bin_center_reduce={reduce_mode!r}")
+    ds_kwargs = dict(
+        offset_stride=offset_stride,
+        include_past=include_past,
+        apply_zscore=apply_zscore,
+        apply_bin_center_shift=apply_bin_center,
+        legal_levels=legal_levels,
+        bin_center_reduce=reduce_mode,  # type: ignore[arg-type]
+    )
 
     ds_train = UnivariateRealVsFakeDataset(
         y_true, fake, bundle.past, splits["train"], slice_len,

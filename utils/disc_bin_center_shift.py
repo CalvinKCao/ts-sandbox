@@ -4,12 +4,20 @@ Applies to series **after** lattice snap onto the window-specific H-row
 patch-refine ladder (binary dataset-z). Replaces per-slice ``zscore_time`` on
 the ordinal disc path: additive bin offset only.
 
+Mean is over the **disc candidate slice length L** (e.g. 8/16/32), not the
+full forecast horizon. Call once per extracted L-slice in
+``UnivariateRealVsFakeDataset`` / ``HorizonSliceDataset``; do not pre-shift
+full-H packs before slicing.
+
+Shapes: ``values`` ``(N, V, L)`` and ``legal_levels`` ``(N, V, H)`` — including
+the univariate disc case ``(1, 1, L)`` + ``(1, 1, H)``.
+
 Transform (“middle bin is zero”):
 1. Map each snapped value to nearest legal-level **raw** bin index in ``[0, H)``.
 2. ``center_index`` = ladder row whose level is closest to ``0.0`` dataset-z
    (fallback ``H // 2`` if the argmin is ambiguous / empty).
 3. ``centered_idx = raw_idx - center_index`` (0 means the level nearest to 0.0).
-4. Mean over the **candidate horizon** for that variate only
+4. Mean over the **slice length L** for that variate only
    (``reduce="per_variate"`` — required for univariate disc). Optional
    ``joint`` keeps one shift across variates for diagnostics.
 5. ``shift = round(mean(centered_idx))`` (integer by default).
@@ -31,11 +39,11 @@ ReduceMode = Literal["per_variate", "joint"]
 
 
 def nearest_bin_indices(values: np.ndarray, legal_levels: np.ndarray) -> np.ndarray:
-    """Nearest ladder-row index for each value. Shapes: (N,V,T), (N,V,H) → (N,V,T)."""
+    """Nearest ladder-row index for each value. Shapes: (N,V,L), (N,V,H) → (N,V,L)."""
     vals = np.asarray(values, dtype=np.float32)
     levels = np.asarray(legal_levels, dtype=np.float32)
     if vals.ndim != 3 or levels.ndim != 3:
-        raise ValueError(f"expected (N,V,T)/(N,V,H), got {vals.shape}/{levels.shape}")
+        raise ValueError(f"expected (N,V,L)/(N,V,H), got {vals.shape}/{levels.shape}")
     if vals.shape[:2] != levels.shape[:2]:
         raise ValueError(f"N,V mismatch: {vals.shape} vs {levels.shape}")
     if not (np.isfinite(vals).all() and np.isfinite(levels).all()):
