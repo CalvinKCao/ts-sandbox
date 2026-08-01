@@ -44,29 +44,32 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     }
 
     MMPD_REPO="$REPO/temp/MMPD"
+    need_clone=0
     if [[ ! -d "$MMPD_REPO/.git" ]]; then
+        need_clone=1
+    elif [[ ! -f "$MMPD_REPO/metrics/prob_metrics.py" ]] \
+        || [[ ! -f "$MMPD_REPO/models/backbones/decoder_only_transformer.py" ]]; then
+        echo "MMPD checkout incomplete; re-cloning..."
+        mv "$MMPD_REPO" "$REPO/temp/MMPD.corrupt-$(date +%m%d-%H%M)" || true
+        need_clone=1
+    fi
+    if [[ "$need_clone" -eq 1 ]]; then
         echo "Cloning MMPD on login node (compute nodes cannot reach GitHub)..."
         mkdir -p "$REPO/temp"
         git clone https://github.com/Thinklab-SJTU/MMPD.git "$MMPD_REPO"
     fi
-    # Partial/corrupt checkouts often delete metrics/*.py while leaving an empty dir.
-    if [[ ! -f "$MMPD_REPO/metrics/prob_metrics.py" ]]; then
-        echo "Restoring MMPD metrics/ from git (missing prob_metrics.py)..."
-        git -C "$MMPD_REPO" checkout -- metrics/ 2>/dev/null || {
-            echo "Re-cloning MMPD (metrics restore failed)..."
-            rm -rf "$MMPD_REPO"
-            git clone https://github.com/Thinklab-SJTU/MMPD.git "$MMPD_REPO"
-        }
-    fi
     [[ -f "$MMPD_REPO/metrics/prob_metrics.py" ]] || {
-        echo "ERROR: MMPD metrics/prob_metrics.py still missing after restore" >&2
+        echo "ERROR: MMPD metrics/prob_metrics.py missing" >&2
+        exit 1
+    }
+    [[ -f "$MMPD_REPO/models/backbones/decoder_only_transformer.py" ]] || {
+        echo "ERROR: MMPD decoder_only_transformer.py missing" >&2
         exit 1
     }
     MMPD_TOOLS="$MMPD_REPO/utils/tools.py"
     if [[ -f "$MMPD_TOOLS" ]] && grep -q 'np\.Inf' "$MMPD_TOOLS"; then
         sed -i 's/np\.Inf/np.inf/g' "$MMPD_TOOLS"
     fi
-    # Apply ts-sandbox MMPD compatibility patches (exp_forecast, dataset_mts, …).
     python3 - <<PY
 from pathlib import Path
 import sys

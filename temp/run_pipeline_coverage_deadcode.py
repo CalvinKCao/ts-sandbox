@@ -303,10 +303,11 @@ def main() -> int:
             f"MMPD checkout missing at {mmpd_repo}. Clone on the login node before submit."
         )
     metrics_py = mmpd_repo / "metrics" / "prob_metrics.py"
-    if not metrics_py.is_file():
+    decoder_py = mmpd_repo / "models" / "backbones" / "decoder_only_transformer.py"
+    if not metrics_py.is_file() or not decoder_py.is_file():
         raise FileNotFoundError(
-            f"MMPD metrics package incomplete ({metrics_py} missing). "
-            "On the login node: git -C temp/MMPD checkout -- metrics/"
+            f"MMPD checkout incomplete (need {metrics_py.name} and {decoder_py.name}). "
+            "Re-clone temp/MMPD on the login node."
         )
     from utils.eval_mmpd_gaussian_anchor import ensure_mmpd_repo
 
