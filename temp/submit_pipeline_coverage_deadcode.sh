@@ -1,9 +1,9 @@
 #!/bin/bash
 # =============================================================================
 # Coverage / dead-code probe for the ordinal patch-refine → MMPD → assert → disc
-# phase graph. One L40S job, ≤30 min, tiny coverage_synth data, forced-fresh dirs.
+# phase graph. One L40S job, wall default 25 min (override with COVERAGE_WALL),
+# tiny coverage_synth data, forced-fresh dirs.
 #
-#SBATCH wall kept short: local binary+synth-HP smoke was ~1–2 min; full DAG target ≤25 min.
 # USAGE (from $SCRATCH/ts-sandbox on Killarney login node):
 #   ./temp/submit_pipeline_coverage_deadcode.sh
 #   ./temp/submit_pipeline_coverage_deadcode.sh --dry-run
