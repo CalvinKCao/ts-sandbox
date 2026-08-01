@@ -438,4 +438,8 @@ class DiffusionTSFConfig:
             return 0
         if self.guidance_placement == "cond_chunks":
             return 0
+        # Patch-refine forward never cats a canvas ghost (aux already carries
+        # coarse/prev); sizing +1 here would expect 6ch while runtime builds 5.
+        if self.diffusion_stage == "patch_refine":
+            return 0
         return self.data_occupancy_channels
