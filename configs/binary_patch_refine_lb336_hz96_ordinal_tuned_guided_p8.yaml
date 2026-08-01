@@ -9,7 +9,7 @@ training:
   finetune_max_micro_batch: 2048
 
 wandb:
-  tags: [patch_refine, ordinal_norm, lb336_hz96, tuned, guided_p8, epsilon, none_weight]
+  tags: [patch_refine, ordinal_norm, lb336_hz96, tuned, guided_p8, epsilon, none_weight, cross_attn]
 
 experiment:
   name: binary-patch-refine-lb336-hz96-ordinal-tuned-guided-p8
@@ -23,7 +23,7 @@ experiment:
   use_guidance_channel: true
   guidance_type: patch_decoder
   guidance_placement: canvas
-  disable_cross_attention: true
+  disable_cross_attention: false   # early-July: channel ghost + cross-variate attn
   prediction_target: epsilon
   loss_weighting: none
 
