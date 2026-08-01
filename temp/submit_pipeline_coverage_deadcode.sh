@@ -49,10 +49,31 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         mkdir -p "$REPO/temp"
         git clone https://github.com/Thinklab-SJTU/MMPD.git "$MMPD_REPO"
     fi
+    # Partial/corrupt checkouts often delete metrics/*.py while leaving an empty dir.
+    if [[ ! -f "$MMPD_REPO/metrics/prob_metrics.py" ]]; then
+        echo "Restoring MMPD metrics/ from git (missing prob_metrics.py)..."
+        git -C "$MMPD_REPO" checkout -- metrics/ 2>/dev/null || {
+            echo "Re-cloning MMPD (metrics restore failed)..."
+            rm -rf "$MMPD_REPO"
+            git clone https://github.com/Thinklab-SJTU/MMPD.git "$MMPD_REPO"
+        }
+    fi
+    [[ -f "$MMPD_REPO/metrics/prob_metrics.py" ]] || {
+        echo "ERROR: MMPD metrics/prob_metrics.py still missing after restore" >&2
+        exit 1
+    }
     MMPD_TOOLS="$MMPD_REPO/utils/tools.py"
     if [[ -f "$MMPD_TOOLS" ]] && grep -q 'np\.Inf' "$MMPD_TOOLS"; then
         sed -i 's/np\.Inf/np.inf/g' "$MMPD_TOOLS"
     fi
+    # Apply ts-sandbox MMPD compatibility patches (exp_forecast, dataset_mts, …).
+    python3 - <<PY
+from pathlib import Path
+import sys
+sys.path.insert(0, "$REPO")
+from utils.eval_mmpd_gaussian_anchor import ensure_mmpd_repo
+print("mmpd commit", ensure_mmpd_repo(Path("$MMPD_REPO"), update=False)[:12])
+PY
 
     WHEEL="$(ls -1 "$REPO"/setup/coverage_wheels/coverage-*-cp311*.whl 2>/dev/null | head -1 || true)"
     [[ -n "$WHEEL" && -f "$WHEEL" ]] || {
@@ -149,8 +170,8 @@ pip install --no-index --upgrade pip -q
 pip install --no-index -r "$REQ" -q
 # Install by wheel path — Alliance wheelhouse has different coverage builds
 # (e.g. 7.13.4+computecanada); --find-links + ==7.15.2 can miss the local file.
-echo "$(ts) [setup] Installing coverage from $WHEEL"
-pip install --no-index "$WHEEL" -q || pip install --no-index "coverage" -q
+echo "$(ts) [setup] Installing coverage (Alliance wheelhouse preferred)"
+pip install --no-index coverage -q || pip install --no-index "$WHEEL" -q
 
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA required'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
 python -c "import coverage; print('coverage', coverage.__version__)"

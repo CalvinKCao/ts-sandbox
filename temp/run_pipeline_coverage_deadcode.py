@@ -298,10 +298,20 @@ def main() -> int:
         return 0
 
     mmpd_repo = REPO_ROOT / "temp" / "MMPD"
-    if not (mmpd_repo / ".git").is_dir() and not (mmpd_repo / "run.py").is_file():
+    if not (mmpd_repo / ".git").is_dir() and not (mmpd_repo / "main_mmpd.py").is_file():
         raise FileNotFoundError(
             f"MMPD checkout missing at {mmpd_repo}. Clone on the login node before submit."
         )
+    metrics_py = mmpd_repo / "metrics" / "prob_metrics.py"
+    if not metrics_py.is_file():
+        raise FileNotFoundError(
+            f"MMPD metrics package incomplete ({metrics_py} missing). "
+            "On the login node: git -C temp/MMPD checkout -- metrics/"
+        )
+    from utils.eval_mmpd_gaussian_anchor import ensure_mmpd_repo
+
+    print(f"[{_ts()}] ensuring MMPD patches at {mmpd_repo}", flush=True)
+    ensure_mmpd_repo(mmpd_repo, update=False)
 
     from temp.make_coverage_synth_dataset import write_coverage_synth
 
