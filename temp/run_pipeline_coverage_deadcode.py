@@ -245,8 +245,9 @@ def main() -> int:
         "--force-indices",
         "--mmpd-instance-norm",
         "--smoke-test",
+        # Disc hard-temporal split needs span ≳ lb+hz; 1-window MMPD packs always fail.
         "--test-max-items",
-        "1",
+        "48",
         "--no-update-mmpd",
         "--skip-mmpd-sample-viz",
     ]
@@ -287,7 +288,15 @@ def main() -> int:
         "--force-train",
         "--no-visualize-confusions",
         "--no-viz-anchor-prob-panels",
-        "--smoke-test",
+        # No --smoke-test: that caps max_windows at 8 and breaks lb336 temporal purge.
+        "--max-windows",
+        "48",
+        "--num-sampling-steps",
+        "2",
+        "--max-train-examples",
+        "128",
+        "--max-eval-examples",
+        "64",
     ]
 
     plan = {

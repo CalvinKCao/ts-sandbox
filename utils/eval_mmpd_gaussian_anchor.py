@@ -2952,7 +2952,11 @@ def apply_mmpd_smoke_defaults(args: argparse.Namespace) -> None:
         args.force_mmpd_tune = True
     args.mmpd_train_epochs = 1
     args.mmpd_patience = 1
-    args.test_max_items = 1
+    # Keep an explicit --test-max-items (coverage disc needs >>1 for temporal splits).
+    if args.test_max_items is None:
+        args.test_max_items = 1
+    else:
+        args.test_max_items = max(1, int(args.test_max_items))
     args.test_fraction = 1.0
     args.sample_num = 1
     args.num_sampling_steps = 2
