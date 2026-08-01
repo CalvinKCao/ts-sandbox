@@ -84,7 +84,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
             --results-root "$REPO/results"
         exit 0
     fi
-    echo "Submitting coverage deadcode probe (L40S, 30 min)..."
+    echo "Submitting coverage deadcode probe (L40S, wall=$WALL_TIME)..."
     sbatch \
         --job-name=coverage-deadcode \
         --account=aip-boyuwang \
