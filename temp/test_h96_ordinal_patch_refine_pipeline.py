@@ -96,6 +96,38 @@ def _test_config_and_search() -> None:
     assert fallback_pretrain["epochs"] == 20
     assert fallback_pretrain["patch_refine_epochs"] == 1
 
+    from_scratch = load_experiment_config(
+        str(
+            REPO_ROOT
+            / "configs"
+            / "binary_patch_refine_lb336_hz96_ordinal_tuned_from_scratch.yaml"
+        )
+    )
+    fs_phases = {p["phase"]: p for p in from_scratch["phases"]}
+    assert "staged_diffusion_pretrain" not in fs_phases
+    assert from_scratch["experiment"]["experiment_name"].endswith("from_scratch")
+    assert int(from_scratch["training"]["n_finetune_hp_trials"]) == 5
+    fs_eval = fs_phases["staged_eval"]
+    assert fs_eval["gmm_components"] == 10
+    assert fs_eval["topk_max"] == 3
+    assert fs_eval["probabilistic_sampler"] == "quad_t"
+    assert fs_eval["tune_sampler"] is False
+    for stage, u_grid in expected_u_grid.items():
+        phase = fs_phases[stage]
+        assert phase["from_random_init"] is True
+        assert phase["n_trials"] == 5
+        assert phase["search_space"] == "lr_eff_batch_univariate_ema"
+        assert float(phase["hp_lr_max"]) == 1.5e-2
+        assert phase["effective_univariate_batch_grid"] == u_grid
+        assert phase["ema_decay_grid"] == [0.99]
+        params = _suggest_staged_params(
+            _Trial(), state, max_batch_size=16, smoke_test=False,
+            search_space=phase["search_space"], phase_overrides=phase,
+        )
+        assert params["learning_rate"] == phase["hp_lr_min"]
+        assert params["target_univariate_batch"] == u_grid[-1]
+        assert params["ema_decay"] == 0.99
+
 
 def _test_causal_ordinal_shift() -> None:
     train = np.linspace(-1.0, 1.0, 257, dtype=np.float32).reshape(-1, 1)

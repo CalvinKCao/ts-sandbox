@@ -1117,7 +1117,13 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         except Exception as e:
             logger.warning("[%s] post-finetune diagnostics failed: %s", self.name, e, exc_info=True)
 
-    def _pretrained_ckpt(self, state: PipelineState) -> str:
+    def _pretrained_ckpt(self, state: PipelineState) -> Optional[str]:
+        if bool(self.get("from_random_init", False)):
+            logger.info(
+                "  [%s] from_random_init=true; skipping staged pretrain load",
+                self.name,
+            )
+            return None
         attr = {
             "coarse": state.diffusion_coarse_pretrain_ckpt,
             "fine": state.diffusion_fine_pretrain_ckpt,
@@ -1199,7 +1205,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         train_ds,
         val_ds,
         best_params: Dict[str, Any],
-        diff_ckpt: str,
+        diff_ckpt: Optional[str],
         ft_guidance_ckpt: str,
         device: torch.device,
         variate_indices,
@@ -1295,7 +1301,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         train_ds,
         val_ds,
         params: Dict[str, Any],
-        pretrained_path: str,
+        pretrained_path: Optional[str],
         guidance_checkpoint: str,
         device: torch.device,
         variate_indices,
@@ -1383,10 +1389,16 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             params=params,
         )
         try:
-            if pretrained_state_dict is None:
-                ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
-                pretrained_state_dict = ckpt["model_state_dict"]
-            load_diffusion_state_keep_attached_guidance(model, pretrained_state_dict)
+            if pretrained_path or pretrained_state_dict is not None:
+                if pretrained_state_dict is None:
+                    ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
+                    pretrained_state_dict = ckpt["model_state_dict"]
+                load_diffusion_state_keep_attached_guidance(model, pretrained_state_dict)
+            else:
+                logger.info(
+                    "  [%s] random init (no pretrain ckpt)",
+                    self.name,
+                )
 
             optimizer = torch.optim.AdamW(model.parameters(), lr=float(params["learning_rate"]))
 
@@ -1801,48 +1813,54 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
         from models.diffusion_tsf.pipeline.visualize_utils import _load_staged_diffusion_from_ckpt
 
-        try:
-            probe_model, _ = _load_staged_diffusion_from_ckpt(
-                ckpt_path=diff_ckpt,
-                stage=self.stage,
-                itrans_ckpt_path=ft_guidance_ckpt,
-                n_vars=n_iv,
-                device=device,
-                guidance_type=state.guidance_type,
+        if not diff_ckpt:
+            logger.info(
+                "  [%s] phase-start diagnostics skipped (from_random_init / no pretrain ckpt)",
+                self.name,
             )
-            ckpt_info = []
-            if ft_guidance_ckpt and os.path.exists(ft_guidance_ckpt):
+        else:
+            try:
+                probe_model, _ = _load_staged_diffusion_from_ckpt(
+                    ckpt_path=diff_ckpt,
+                    stage=self.stage,
+                    itrans_ckpt_path=ft_guidance_ckpt,
+                    n_vars=n_iv,
+                    device=device,
+                    guidance_type=state.guidance_type,
+                )
+                ckpt_info = []
+                if ft_guidance_ckpt and os.path.exists(ft_guidance_ckpt):
+                    ckpt_info.append(
+                        {
+                            "kind": state.guidance_type,
+                            "path": ft_guidance_ckpt,
+                            "n_variates": n_iv,
+                            "lookback": int(state.lookback_length),
+                            "horizon": int(state.forecast_length),
+                        }
+                    )
                 ckpt_info.append(
                     {
-                        "kind": state.guidance_type,
-                        "path": ft_guidance_ckpt,
+                        "kind": f"diffusion_pretrain_{self.stage}",
+                        "path": diff_ckpt,
                         "n_variates": n_iv,
                         "lookback": int(state.lookback_length),
                         "horizon": int(state.forecast_length),
                     }
                 )
-            ckpt_info.append(
-                {
-                    "kind": f"diffusion_pretrain_{self.stage}",
-                    "path": diff_ckpt,
-                    "n_variates": n_iv,
-                    "lookback": int(state.lookback_length),
-                    "horizon": int(state.forecast_length),
-                }
-            )
-            phase_start = run_phase_start_diagnostics(
-                state,
-                phase_name=self.name,
-                models=[probe_model],
-                model_labels=[f"diffusion_{self.stage}"],
-                datasets=[train_ds],
-                dataset_prefixes=["dataset"],
-                ckpt_info=ckpt_info,
-            )
-            wandb_utils.log_phase_diagnostics_result({"summary": phase_start})
-            del probe_model
-        except Exception as e:
-            logger.warning("[%s] phase-start diagnostics failed: %s", self.name, e, exc_info=True)
+                phase_start = run_phase_start_diagnostics(
+                    state,
+                    phase_name=self.name,
+                    models=[probe_model],
+                    model_labels=[f"diffusion_{self.stage}"],
+                    datasets=[train_ds],
+                    dataset_prefixes=["dataset"],
+                    ckpt_info=ckpt_info,
+                )
+                wandb_utils.log_phase_diagnostics_result({"summary": phase_start})
+                del probe_model
+            except Exception as e:
+                logger.warning("[%s] phase-start diagnostics failed: %s", self.name, e, exc_info=True)
         # Diagnostics may mutate module globals (e.g. DIT_PATCH_SIZE); restore from state.
         patch_stage_globals(pipeline_mod, state, self.stage, honor_dataset_windows=True)
 
@@ -2067,9 +2085,12 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             dataset_lookback=ds_lb,
                             dataset_horizon=ds_hz,
                         )
-                    worker_pretrained = torch.load(
-                        diff_ckpt, map_location=dev, weights_only=False,
-                    )["model_state_dict"]
+                    if diff_ckpt:
+                        worker_pretrained = torch.load(
+                            diff_ckpt, map_location=dev, weights_only=False,
+                        )["model_state_dict"]
+                    else:
+                        worker_pretrained = None
 
                     def objective(trial):
                         plan_batch = (
