@@ -35,6 +35,8 @@ PARALLEL_OPTUNA=""
 EVAL_EXISTING_PATCH_REFINE=0
 EXISTING_CKPT_ROOTS=""
 DISC_RUN=""
+ORDINAL_SLICE_LENGTHS="8;16;32"
+SBATCH_EXCLUDE_NODES=""
 RAW_RUN=""
 JOB_MANIFEST=""
 EVAL_ORDINAL_PATCH_REFINE_MMPD=0
@@ -74,6 +76,8 @@ while [[ $# -gt 0 ]]; do
         --ordinal-binary-config) ORDINAL_BINARY_CONFIG="$2"; shift 2 ;;
         --defer-checkpoint-check) DEFER_CHECKPOINT_CHECK=1; shift ;;
         --ordinal-assert-only) ORDINAL_ASSERT_ONLY=1; shift ;;
+        --slice-lengths) ORDINAL_SLICE_LENGTHS="${2//,/;}" ; ORDINAL_SLICE_LENGTHS="${ORDINAL_SLICE_LENGTHS// /;}"; shift 2 ;;
+        --exclude) SBATCH_EXCLUDE_NODES="$2"; shift 2 ;;
         --gpu) GPU_TYPE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
@@ -168,6 +172,8 @@ if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
     fi
     DEP_ARGS=()
     [[ -n "$DEPENDENCY" ]] && DEP_ARGS=(--dependency="$DEPENDENCY")
+    EXCLUDE_ARGS=()
+    [[ -n "${SBATCH_EXCLUDE_NODES:-}" ]] && EXCLUDE_ARGS=(--exclude="$SBATCH_EXCLUDE_NODES")
     DISC_JOB_IDS=()
     for dataset_name in "${EVAL_DATASETS[@]}"; do
         checkpoint_root="${ROOT_BY_DATASET[$dataset_name]}"
@@ -178,10 +184,11 @@ if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
             --account="$ACCOUNT" --time="$WALL" --nodes=1 "$GPU_ARG" \
             --cpus-per-task=8 --mem=50G \
             "${DEP_ARGS[@]}" \
+            "${EXCLUDE_ARGS[@]}" \
             --output="$LOG_DIR/${job_label}-${dataset_name}-%j.log" \
             --error="$LOG_DIR/${job_label}-${dataset_name}-%j.log" \
             --mail-type=FAIL --mail-user="${USER_NAME}@uwo.ca" \
-            --export=ALL,GRID_EVAL_ORDINAL_PATCH_REFINE_MMPD=1,GRID_ORDINAL_ASSERT_ONLY="$ORDINAL_ASSERT_ONLY",GRID_DATASET="$dataset_name",GRID_EXISTING_CKPT="$checkpoint_root",GRID_MMPD_ROOT="$MMPD_ROOT",GRID_DISC_OUTPUT="$DISC_OUTPUT",GRID_RAW_DISC_OUTPUT="$RAW_OUTPUT",GRID_ORDINAL_DISC_EVALUATOR="$ORDINAL_DISC_EVALUATOR",GRID_ORDINAL_BINARY_CONFIG="$ORDINAL_BINARY_CONFIG",GRID_SLICE_LENGTHS="8;16;32" \
+            --export=ALL,GRID_EVAL_ORDINAL_PATCH_REFINE_MMPD=1,GRID_ORDINAL_ASSERT_ONLY="$ORDINAL_ASSERT_ONLY",GRID_DATASET="$dataset_name",GRID_EXISTING_CKPT="$checkpoint_root",GRID_MMPD_ROOT="$MMPD_ROOT",GRID_DISC_OUTPUT="$DISC_OUTPUT",GRID_RAW_DISC_OUTPUT="$RAW_OUTPUT",GRID_ORDINAL_DISC_EVALUATOR="$ORDINAL_DISC_EVALUATOR",GRID_ORDINAL_BINARY_CONFIG="$ORDINAL_BINARY_CONFIG",GRID_SLICE_LENGTHS="$ORDINAL_SLICE_LENGTHS" \
             "$SCRIPT_DIR/slurm_worker.sh")
         manifest_role="ordinal_disc"
         [[ "$ORDINAL_ASSERT_ONLY" -eq 0 ]] || manifest_role="ordinal_assert"

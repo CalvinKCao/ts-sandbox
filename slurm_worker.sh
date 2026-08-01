@@ -112,6 +112,12 @@ if [[ "$ORDINAL_DISC_MODE" -eq 1 ]]; then
     # Match MMPD pack index grid (eval_test_stride=4); keep full every-4 pack pool
     # (test_fraction=1.0, disc_index_stride=1). Unique-seg AR previously crawled when
     # the worker rebuilt the wrong stride-1/480 pool.
+    # GRID_SLICE_LENGTHS uses ; or , separators (default 8;16;32)
+    _sl_raw="${GRID_SLICE_LENGTHS:-8;16;32}"
+    _sl_raw="${_sl_raw//,/;}"
+    IFS=';' read -r -a SLICE_ARR <<< "${_sl_raw}"
+    [[ "${#SLICE_ARR[@]}" -ge 1 ]] || { echo "ERROR: empty GRID_SLICE_LENGTHS=$_sl_raw" >&2; exit 1; }
+    echo "$(ts) [eval] slice_lengths=${SLICE_ARR[*]}"
     python -u "$GRID_ORDINAL_DISC_EVALUATOR" \
         --datasets "$GRID_DATASET" \
         --checkpoint-dir "$GRID_EXISTING_CKPT" \
@@ -124,7 +130,7 @@ if [[ "$ORDINAL_DISC_MODE" -eq 1 ]]; then
         --test-fraction "${GRID_ORDINAL_TEST_FRACTION:-1.0}" \
         --disc-index-stride "${GRID_ORDINAL_DISC_INDEX_STRIDE:-1}" \
         --raw-binary-batch-size "${GRID_ORDINAL_BINARY_BATCH:-8}" \
-        --slice-lengths 8 16 32 \
+        --slice-lengths "${SLICE_ARR[@]}" \
         --force-raw-eval \
         --force-train \
         "${ORDINAL_ASSERT_ARGS[@]}"
