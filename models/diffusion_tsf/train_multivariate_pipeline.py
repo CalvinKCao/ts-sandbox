@@ -397,6 +397,8 @@ DATASET_REGISTRY = {
     'solar_Alabama': ('solar_Alabama/solar_Alabama.csv', 'Unnamed: 0', 96),
     # First 500k timesteps only (see datasets/dynamic/dynamic_500K.csv).
     'dynamic': ('dynamic/dynamic_500K.csv', 'date', 96),
+    # Tiny synthetic series for coverage / dead-code probes (lb336/hz96 capable).
+    'coverage_synth': ('coverage_synth/coverage_synth.csv', 'date', 24),
 }
 
 

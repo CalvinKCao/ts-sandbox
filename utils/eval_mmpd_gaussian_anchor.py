@@ -75,6 +75,7 @@ DATASET_FILES = {
     "PeMS": REPO_ROOT / "datasets" / "PeMS" / "PEMS04.npz",
     "solar_Alabama": REPO_ROOT / "datasets" / "solar_Alabama" / "solar_Alabama.csv",
     "dynamic": REPO_ROOT / "datasets" / "dynamic" / "dynamic_500K.csv",
+    "coverage_synth": REPO_ROOT / "datasets" / "coverage_synth" / "coverage_synth.csv",
 }
 DATASET_DIMS = {
     "ETTh1": 7,
@@ -89,6 +90,7 @@ DATASET_DIMS = {
     "PeMS": 307,
     "solar_Alabama": 137,
     "dynamic": 17,
+    "coverage_synth": 2,
 }
 DATASET_SPLITS = {
     "ETTh1": "8640,2880,2880",
@@ -103,6 +105,7 @@ DATASET_SPLITS = {
     "PeMS": "0.7,0.1,0.2",
     "solar_Alabama": "0.7,0.1,0.2",
     "dynamic": "0.7,0.1,0.2",
+    "coverage_synth": "0.7,0.1,0.2",
 }
 DEFAULT_DATASETS = [
     "ETTh1", "ETTh2", "ETTm1", "ETTm2", "illness", "exchange_rate",
@@ -1048,7 +1051,9 @@ def resolve_mmpd_checkpoint(
     from utils.mmpd_paper_hparams import resolved_mmpd_hparams
 
     suffix = getattr(args, "mmpd_config_suffix", None)
-    if suffix:
+    # Never redirect into reused/ when forcing a fresh train — otherwise
+    # --force-mmpd-train writes into the canonical donor tree.
+    if suffix and not getattr(args, "force_mmpd_train", False):
         reused = find_reused_mmpd_campaign_root(
             suffix,
             data_names=mmpd_checkpoint_data_names(run),

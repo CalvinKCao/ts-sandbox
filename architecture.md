@@ -2,52 +2,55 @@
 
 This repo trains a probabilistic forecaster that treats future values as **2D binary images** and denoises them with diffusion. The core bet is simple: real series have sharp jumps, flat segments, and geometric structure that Gaussian MSE models smear out. By encoding values as hard cumulative-distribution (CDF) maps and diffusing in the **binary domain** (bit-flip noise, BCE loss), the model gets a much denser training signal on exactly those shapes.
 
-The pipeline is **staged** (coarse scale, then fine residual), **factorized per variate** (one channel denoised at a time), and **cross-variate only at the bottleneck** via a finetuned iTransformer. Training runs as a YAML-driven multi-phase pipeline from synthetic pretrain through real-data finetune to evaluation.
+The pipeline is **YAML-driven and multi-phase** (synthetic pretrain → real finetune HP → staged eval), **factorized per variate**, and usually **patch-decoder guidance** (not iTransformer) when cross-variate context is enabled. Live campaign leaves mostly use **ordinal window norm** plus one of the representation modes below — sequential coarse→fine is still implemented but is **not** the current default.
 
 ---
 
 ## Architecture Overview
 
-### Training phases at a glance
+### Representation modes (pick one family per leaf)
 
-| Phase | Name | Purpose |
-|-------|------|---------|
-| **1** | Synthetic staged pretrain | Teach the denoiser to produce **valid CDF maps** on synthetic `RealTS` windows — no real dataset yet |
-| **iTrans** | iTransformer finetune | Fit cross-variate context tokens on real data (cold start; synthetic iTrans tends toward a trivial mean predictor) |
-| **2** | Coarse diffusion finetune | Optuna-tune the **coarse** DiT on real data; warm-start from Phase 1 |
-| **3** | Fine diffusion finetune | Same for the **fine** residual denoiser; conditions on GT coarse during training |
-| **4** | Staged eval | Chain coarse → fine sampling, decode, metrics (CRPS, anchor MSE/MAE, viz) |
+| Mode | Flags | What it trains |
+|------|-------|----------------|
+| **Patch refine (current campaign default)** | `use_patch_refine_stage: true` | Full-horizon **coarse** DiT, then a second DiT on **localized overlapping patches** cropped from a tall canvas (`patch_refine_geometry.py`) |
+| **Vertical dual concat** | `use_vertical_dual_concat: true` | One DiT on a stacked `Hc∥Hf` canvas (`stack_vertical_dual` / `decode_vertical_dual`) |
+| **Channel dual** | `use_channel_dual_concat: true` | Coarse∥fine as two occupancy channels |
+| **Sequential coarse→fine (legacy path)** | neither of the above | Separate coarse then fine residual DiTs (`decode_dual`); still in the phase registry |
 
-Phase 1 is deliberately narrow: it does **not** need to match real data statistics. Its job is to make the network fluent in the representation — monotone binary staircases, correct column alignment, stable BCE gradients — before real finetuning teaches domain-specific patterns.
+### Training phases at a glance (patch-refine / ordinal campaign)
+
+| Phase | YAML `phase` | Purpose |
+|-------|--------------|---------|
+| **1** | `staged_diffusion_pretrain` | Teach valid CDF maps on synthetic `RealTS` (stages follow the representation mode) |
+| **2** | `diffusion_coarse_finetune_hp` | Optuna-tune coarse DiT on real data |
+| **3** | `diffusion_patch_refine_finetune_hp` | Optuna-tune overlapping-patch upscaler (replaces `diffusion_fine_finetune_hp`) |
+| **4** | `staged_eval` | Anchor + probabilistic metrics (CRPS, staged MSE/MAE) |
+
+When `use_guidance_channel` / cross-attn is on, a `patch_guidance_finetune_hp` phase may sit between pretrain and diffusion finetune. The old `itrans_finetune_hp` phase is **dropped** for `guidance_type=patch_decoder` and is no longer the production path.
+
+Phase 1 is deliberately narrow: it does **not** need to match real data statistics. Its job is representation fluency — monotone binary staircases, column alignment, stable BCE — before real finetuning.
 
 ```mermaid
 flowchart LR
     subgraph P1["Phase 1 — Synthetic pretrain"]
-        S1[RealTS synthetic windows] --> E1[Encode coarse + fine CDF]
-        E1 --> D1[Train coarse DiT]
-        E1 --> D2[Train fine DiT]
-    end
-
-    subgraph iT["iTrans finetune"]
-        R1[Real dataset windows] --> IT[iTransformer HP search]
+        S1[RealTS synthetic windows] --> E1[Encode CDF maps]
+        E1 --> D1[Train coarse plus patch_refine or dual]
     end
 
     subgraph P2["Phases 2–3 — Real finetune"]
-        R2[Real dataset] --> FC[Coarse DiT HP + train]
-        R2 --> FF[Fine DiT HP + train]
+        R2[Real dataset] --> FC[Coarse DiT HP]
+        R2 --> PR[Patch-refine DiT HP]
         D1 -. warm-start .-> FC
-        D2 -. warm-start .-> FF
+        D1 -. warm-start .-> PR
     end
 
     subgraph P4["Phase 4 — Eval"]
-        FC --> EV[Sample coarse → sample fine → decode]
-        FF --> EV
+        FC --> EV[Sample coarse then patches / dual decode]
+        PR --> EV
         EV --> M[Metrics + viz]
     end
 
-    P1 --> iT --> P2 --> P4
-    IT -. context tokens .-> FC
-    IT -. context tokens .-> FF
+    P1 --> P2 --> P4
 ```
 
 ### End-to-end data flow
@@ -75,7 +78,7 @@ flowchart TB
 
     subgraph Cond["Conditioning"]
         PM[Past CDF columns] --> COND[Visual cond patches]
-        IT[iTransformer tokens] --> XATTN[Bottleneck cross-attention]
+        GD[Patch-decoder / optional guidance tokens] --> XATTN[Bottleneck cross-attention]
     end
 
     subgraph Diff["Binary diffusion (one variate at a time)"]
@@ -95,29 +98,27 @@ flowchart TB
     end
 ```
 
-**Training vs inference.** During training, the fine stage sees **ground-truth** coarse CDF columns as an extra condition channel. At inference, coarse is **sampled first**, then fine is sampled conditioned on that draw. Both stages share the same iTransformer context but use **separate checkpoints**.
+**Training vs inference (sequential coarse→fine legacy).** The fine stage sees **GT** coarse CDF columns as a condition channel at train time; at inference, coarse is sampled first, then fine. **Patch refine** instead samples a full-horizon coarse map, then denoises **overlapping local crops** on a tall canvas and stitches them back. **Vertical dual** denoises a single stacked canvas in one model.
 
 ---
 
 ### One variate at a time
 
-Multivariate series are handled with a **factorized batch layout**: each variate is one row in a `(B×V, C, H, W)` tensor. Self-attention inside the DiT runs over **spatial patches only** — there is no variate axis in the transformer.
+Multivariate series use a **factorized batch layout**: each variate is one row in a `(B×V, C, H, W)` tensor. Self-attention inside the DiT runs over **spatial patches only**.
 
-Cross-variate information enters **once**, at the bottleneck, through cross-attention to `V` iTransformer tokens (one token per variate). This design avoids the memory and compute explosion of joint denoising over `V` channels × `H` × `W` pixels simultaneously. With `unet_max_chunk_size`, large `B×V` batches are chunked through the denoiser without changing the math.
+When guidance is enabled, cross-variate context enters at the bottleneck (patch-decoder tokens by default; legacy iTransformer helpers remain in-tree). Large `B×V` batches are chunked via `unet_max_chunk_size`. Many production leaves set `use_guidance_channel: false` / `disable_cross_attention: true` and rely on visual past-conditioning only.
 
 ---
 
-### Dual-scale decomposition
+### Dual-scale value factorization
 
-A single 256-bin discretization would mean a `256`-row image — expensive to diffuse and slow to train. Instead, value precision is **factored**:
+A single 256-bin map would be a `256`-row image. Value precision is still **factored** into coarse + fine residuals (`H_c × H_f = 256`), but **how those maps are trained** depends on the representation mode:
 
-1. **Coarse stage** — bin the normalized value into one of `H_c = 16` bins spanning `[-max_scale, max_scale]`. Encode as a hard binary CDF staircase (all rows from the bottom up to the bin index are `1`).
-2. **Fine stage** — within the selected coarse bin, bin the **residual** into another `H_f = 16` levels. Again a CDF staircase, but over the local residual range `±max_scale / H_c`.
-3. **Decode** — `decode_dual(coarse, fine)` decodes each map to a normalized scalar and **sums** them, then clamps to `[-max_scale, max_scale]`.
+1. **Coarse** — bin into `H_c = 16` over `[-max_scale, max_scale]` as a hard CDF staircase.
+2. **Fine residual** — another `H_f = 16` levels inside the coarse bin.
+3. **Decode** — sequential mode uses `decode_dual`; vertical-dual uses `decode_vertical_dual`; patch-refine reconstructs a tall canvas then decodes.
 
-Effective resolution is `H_c × H_f = 256` buckets, but each diffusion target is only **16 rows tall**. That is roughly **16× fewer pixels per denoising step** than a flat 256-row map, which is why dual-scale training empirically converges much faster while keeping fine precision.
-
-The two stages are **separate models**. Coarse and fine each get their own Phase 1 pretrain checkpoint and Phase 2/3 finetune run.
+In **patch refine**, the second stage does **not** diffuse a full-horizon fine map. It crops **localized overlapping patches** (`patch_refine_patch_width` / `col_stride`, coverage fill-ins in `patch_refine_geometry.py`) from a tall canvas (e.g. height 256) so the upscaler sees local structure only.
 
 ---
 
@@ -181,7 +182,7 @@ The same **λ = 0.99** balance is used, but the anchor input is adapted to binar
 | MSE on noise prediction | BCE on `x̂₀` vs ground-truth CDF map |
 | Anchor at `ᾱ_{k*} ≈ 0.5` | Anchor at `t = T−1` (max flip rate) |
 
-`stationary_flat` means every pixel is 0.5 — the **mean** of Bernoulli(0.5), not random bits. That fixed canvas is the binary analogue of "uninformative max noise": the model must infer the full CDF staircase from context (past columns + iTransformer tokens) alone.
+`stationary_flat` means every pixel is 0.5 — the **mean** of Bernoulli(0.5), not random bits. That fixed canvas is the binary analogue of "uninformative max noise": the model must infer the full CDF staircase from context (past columns + optional guidance tokens) alone.
 
 At inference, the **anchor sampler** runs this one-shot path: one forward pass at max noise → sigmoid threshold → decode. No iterative diffusion. Eval reports both anchor metrics (`anchor_mse`, `anchor_mae`) and full DPM++ sample metrics (CRPS, sample-mean MSE).
 
@@ -202,8 +203,8 @@ At inference, the **anchor sampler** runs this one-shot path: one forward pass a
 ### Tradeoffs to keep in mind
 
 - Very smooth, high-frequency continuous variation may be better served by more bins or longer fine stages than by coarse+fine alone.
-- Cross-variate coupling is only as strong as the iTransformer bottleneck — there is no pixel-level mixing across channels.
-- Staged inference is sequential (coarse then fine); errors in coarse propagate to fine.
+- Cross-variate coupling is only as strong as the guidance bottleneck (when enabled) — there is no pixel-level mixing across channels.
+- Coarse errors still propagate into patch-refine / fine residual stages.
 
 ---
 
@@ -213,22 +214,18 @@ The sections below are aimed at developers and coding assistants working in the 
 
 ### Current default (production)
 
-**What we run:** staged coarse→fine binary diffusion on hard CDF maps, **stationary-flat anchor** (`0.5` canvas, not random bits), **EMA 0.99** on diffusion weights during finetune, **anchor** training loss (`λ=0.99`), eval with **DPM-Solver++** (20 steps, 20 samples for sweeps).
+**What we run:** ordinal-normalized **patch-refine** binary diffusion (lb336 / hz96 campaign leaves), **stationary-flat anchor** (`0.5` canvas), patch-refine overlapping crops on a tall canvas, matched non-ordinal **MMPD** baseline, then ordinal assert + discriminator eval. Vertical-dual concat is the other active representation family on this branch.
 
 | Knob | Value | Config source |
 |------|-------|----------------|
 | Pipeline | YAML `phases` list | `configs/base/binary_staged.yaml` |
-| Leaf experiment | `binary_anchor_stationary_flat_subsets_ema099` (or `_flat` / `_flat_subsets`) | `configs/binary_anchor_stationary_flat*.yaml` |
-| Representation | Staged coarse + fine CDF (`image_height=16` each) | separate checkpoints per stage |
+| Leaf experiment (h96 ordinal) | `binary_patch_refine_lb336_hz96_ordinal_tuned` (+ `_synth_fallback`) | `configs/binary_patch_refine_*.yaml` |
+| Representation | Coarse + **patch_refine** overlapping crops | `use_patch_refine_stage: true` |
+| Norm | Ordinal window norm | `use_ordinal_window_norm: true` |
 | `binary_anchor_input_mode` | `stationary_flat` | flat `0.5` XOR anchor |
-| `diffusion_ema_decay` | `0.99` | `training:` section |
-| `deterministic_anchor_lambda` | `0.99` | anchor BCE mixed into train loss |
-| `deterministic_anchor_alpha` | `0.0` | unused for binary |
-| Diffusion finetune LR | `3e-5` fixed | `configs/base/fixed_lr_pipeline_base.yaml` |
-| `max_scale` | per-dataset | `max_scale_by_dataset` in `binary_staged.yaml` |
-| Variate policy | ETTh1-capped subsets | `data_subset` in `binary_staged.yaml` |
-| CFG / guidance channel | off | `use_guidance_channel: false`, `cfg_dropout: 0.0` |
-| Eval sampler | `dpmpp` (sweep) / `anchor` (loss) | `staged_eval` phase overrides |
+| Guidance | usually off for these leaves | `use_guidance_channel: false` |
+| MMPD match | Decoder, same lb/hz/subset | `configs/mmpd_decoder_flat_subsets_paper_lb336_hz96_matched_binary.yaml` |
+| Coverage / dead-code probe | tiny synthetic DAG under coverage.py | `temp/submit_pipeline_coverage_deadcode.sh` |
 
 ---
 
@@ -240,35 +237,39 @@ The sections below are aimed at developers and coding assistants working in the 
 | CLI entry | `models/diffusion_tsf/train_multivariate_pipeline.py` |
 | Model | `models/diffusion_tsf/diffusion_model.py`, `dit.py`, `diffusion.py`, `preprocessing.py` |
 | Config | `models/diffusion_tsf/pipeline/config.py`, `configs/base/binary_staged.yaml` |
-| Submit | `submit_binary.sh` (diffusion) / `submit_mmpd.sh` (MMPD); leaf YAML under `configs/`. See `legacy.md` for removed wrappers. |
-| iTransformer | `models/diffusion_tsf/guidance.py`, `models/iTransformer/` |
+| Submit | `submit_binary.sh` / `submit_mmpd.sh`; leaf YAML under `configs/`. Diagnostic probes may live under `temp/` (e.g. coverage dead-code). |
+| Patch refine | `models/diffusion_tsf/patch_refine_geometry.py`, `patch_refine_segments.py` |
+| Ordinal norm | `models/diffusion_tsf/ordinal_window_norm.py` |
+| Guidance (optional) | `models/diffusion_tsf/guidance.py`, patch-decoder stack |
 
 #### Submit conventions
 
 - Login node: **`./submit_binary.sh`** or **`./submit_mmpd.sh` only** for training/eval campaigns. Compute worker for binary is `slurm_worker.sh` (do not sbatch it by hand for normal runs).
 - Experiment variants are **leaf YAMLs** under `configs/`, not new shell wrappers. `--configs` / `--mmpd-run-config` accept bare stems (`foo` → `configs/foo.yaml`), paths, or globs.
 - Geometry (lookback / horizon) and HPs live in YAML. Prefer a new leaf config over CLI sprawl.
-- Removed thin wrappers and their equivalents: `legacy.md`.
+- Dead-code / coverage probe: `./temp/submit_pipeline_coverage_deadcode.sh` (not a third train entrypoint).
 
 ---
 
 ### Pipeline (YAML-driven)
 
-`PipelineState` holds paths and knobs; `Pipeline` runs registered `PipelinePhase` classes in order (`models/diffusion_tsf/pipeline/phases/`). Add steps by subclassing `PipelinePhase`, registering in `phases/__init__.py`, and listing the phase in YAML — avoid one-off shell DAGs.
+`PipelineState` holds paths and knobs; `Pipeline` runs registered `PipelinePhase` classes in order (`models/diffusion_tsf/pipeline/phases/`). `normalize_guidance_phases` drops incompatible phases (e.g. `itrans_finetune_hp` for patch-decoder guidance; fine/vertical when patch-refine is present).
 
-Sweep / flat-subset reuse configs skip Phase 1 (+ iTrans) via `reuse_pretrain_from_config` / `reuse_checkpoint_from_config` and only re-run Phases 2–4.
+Reuse configs skip synthetic pretrain via `reuse_pretrain_from_config` / `require_reuse_pretrain` when donors exist.
 
 #### Phase map (doc numbering)
 
 | Doc | YAML `phase` | Implementation |
 |-----|--------------|----------------|
 | **1** | `staged_diffusion_pretrain` | `StagedDiffusionPretrainPhase` |
-| *(iTrans)* | `itrans_finetune_hp` | `ITransFinetuneHPPhase` — runs after Phase 1, before Phase 2 |
+| *(guidance)* | `patch_guidance_finetune_hp` | `PatchGuidanceFinetuneHPPhase` (when guidance on) |
 | **2** | `diffusion_coarse_finetune_hp` | `CoarseDiffusionFinetuneHPPhase` |
-| **3** | `diffusion_fine_finetune_hp` | `FineDiffusionFinetuneHPPhase` |
+| **3a** | `diffusion_patch_refine_finetune_hp` | `PatchRefineDiffusionFinetuneHPPhase` (**campaign default**) |
+| **3b** | `diffusion_vertical_dual_finetune_hp` | `VerticalDualDiffusionFinetuneHPPhase` |
+| **3c** | `diffusion_fine_finetune_hp` | `FineDiffusionFinetuneHPPhase` (legacy sequential) |
 | **4** | `staged_eval` | `StagedEvalPhase` |
 
-Default trial/epoch counts below come from `configs/base/binary_staged.yaml`. Sweep leaves (`fixed_lr_pipeline_base.yaml`) override to `n_trials: 1`, fixed LR `3e-5`, `search_space: lr_only`.
+Default trial/epoch counts come from `configs/base/binary_staged.yaml` and leaf overrides.
 
 ---
 
@@ -276,81 +277,59 @@ Default trial/epoch counts below come from `configs/base/binary_staged.yaml`. Sw
 
 ##### Phase 1 — Synthetic staged pretrain (`staged_diffusion_pretrain`)
 
-Trains **separate** coarse and fine denoisers on synthetic `RealTS` windows (no Optuna in this phase — fixed HP from `use_hardcoded_synthetic_hp` / Phase-1 source config).
+Trains denoisers on synthetic `RealTS` windows (no Optuna here — fixed HP from `use_hardcoded_synthetic_hp` / Phase-1 source config).
 
 - **Entry:** `StagedDiffusionPretrainPhase.execute` → `pretrain_diffusion` per stage.
-- **Stages:** `coarse`, then `fine` (add `finer` when `use_triple_scale: true`).
-- **YAML defaults:** `n_samples: 10000`, `epochs: 20`, `patience: 4`, `phase1_config_name: binary_dual_scale_staged`.
-- **Guidance:** frozen synthetic-pretrain iTransformer from Phase-1 source dir (`itrans_hp_best.pt` lineage), or retrain a new iTrans on synthetic data if not available.
-- **Diffusion HP:** reuses `diff_hp.json` / hardcoded synthetic params from the same source (not re-searched here).
-- **Outputs:**
-  - `pretrained_coarse/pretrained_diffusion.pt`
-  - `pretrained_fine/pretrained_diffusion.pt`
-  - Shared cache under `_shared_staged_pretrain/<signature>/<stage>/` when `shared_cache: true`.
-- **Skip when:** both stage ckpts exist locally, in shared cache, or `reuse_pretrain_from_config` copies from a prior run config.
-- **Smoke:** `n_samples ≤ 4`, `epochs = patience = 1`.
+- **Stages:** follow representation mode — `coarse`+`patch_refine`, or `vertical_dual` / `channel_dual` single stage, or legacy `coarse`+`fine` (+ optional `finer`).
+- **YAML defaults:** `n_samples: 10000`, `epochs: 20`, `patience: 4`.
+- **Outputs:** `pretrained_<stage>/pretrained_diffusion.pt`; shared cache only when `shared_cache: true`.
+- **Skip when:** stage ckpts exist, shared cache hit, or `reuse_pretrain_from_config` copies a donor (unless `force_retrain_synthetic` / missing donor with `require_reuse_pretrain: false`).
+- **Smoke / coverage:** tiny `n_samples`, `epochs = 1`, `shared_cache: false`.
 
-##### iTrans finetune (`itrans_finetune_hp`) — between Phase 1 and Phase 2
+##### Patch guidance (`patch_guidance_finetune_hp`) — optional
 
-Real-data iTransformer HP search; **cold start by default** (`cold_start: true`) — synthetic pretrain is skipped because RealTS pretrain tends toward a trivial mean predictor.
-
-- **Entry:** `ITransFinetuneHPPhase` → `run_itransformer_finetune_hp_tuning`.
-- **YAML defaults:** `n_trials: 10`, `max_epochs: 10`.
-- **Search space:** `learning_rate` categorical over `itrans_paper_lr_grid` (`[1e-3, 5e-4, 1e-4]`); batch size fixed at `32`, dropout fixed at `0.1` (paper-faithful); Optuna `TPESampler`, `MedianPruner`.
-- **Data:** 70/10/20 train/val/test windows on the target dataset/subset.
-- **Outputs:** `{subset_id}_itrans_ft_hp_best.pt` promoted to `{subset_id}_itransformer_finetuned.pt`; `{subset_id}_itrans_ft_hp.json`.
-- **Skip when:** finetuned ckpt exists, or `reuse_checkpoint_from_config` copies from a sibling config.
-- **Downstream:** Phases 2–4 load this ckpt for cross-variate context tokens (guidance channel stays off in default binary flat runs).
+Real-data patch-decoder guidance HP when `use_guidance_channel` / cross-attn is enabled. Replaces the legacy `itrans_finetune_hp` path for `guidance_type=patch_decoder`. Many patch-refine campaign leaves keep guidance **off**.
 
 ##### Phase 2 — Coarse diffusion finetune HP (`diffusion_coarse_finetune_hp`)
 
-Optuna-tunes the **coarse** staged DiT on real data; **best trial checkpoint is final** (no extra full retrain after HP).
+Optuna-tunes the **coarse** DiT on real data; **best trial checkpoint is final**.
 
 - **Entry:** `CoarseDiffusionFinetuneHPPhase` (`diffusion_stage: coarse`).
-- **YAML defaults:** `n_trials: 20`, `max_epochs: 20`, `patience: 8`, `search_space: default`.
 - **Warm-start:** `pretrained_coarse/pretrained_diffusion.pt` from Phase 1.
-- **Context:** finetuned iTransformer from iTrans step (cross-attn tokens only when enabled).
-- **Search space `default`:** LR `3e-6`–`8e-4` log, batch from probed grid, `ema_decay` ∈ `{0, 0.99, 0.995, 0.999}`, noise schedule, loss weighting, prediction target; optional `max_scale` tune when `training.max_scale_tuning: true`.
-- **Search space `lr_only`:** LR only (sweep default: fixed `3e-5`); `ema_decay` taken from `training.diffusion_ema_decay` (default **0.99**).
-- **Search space `lr_eff_batch_univariate`:** LR + categorical effective univariate batch `{512,1024,2048}` (micro×accum); other diffusion knobs fixed.
-- **Search space `lr_eff_batch_g`:** same as `lr_eff_batch_univariate` plus continuous `binary_length_g` ∈ `[hp_g_min, hp_g_max]` (default 1–10, `binary_length_mode: power`). Optuna / Hyperband / early-stop / best-ckpt use **one-shot decoded val anchor MSE** on `hp_anchor_eval_val_fraction` of val (default 0.5), not diffusion val loss (incomparable across `g`). Winner `binary_length_*` is written into `PipelineState` (and `binary_length_g_by_dataset[dataset]`) so `staged_eval` / `patch_globals` use the tuned schedule, not the leaf YAML fallback. Leaf: `..._joint_g_lr_batch_s30r20.yaml` (30×4ep → refit 20; reuses g1 pretrain; optional `training.train_window_aug`).
-- **Optuna:** `TPESampler`, `HyperbandPruner`; EMA shadow weights updated during training when `ema_decay > 0`; promoted `best.pt` uses EMA weights.
-- **Outputs:** `{checkpoint_dir}/{subset_id}/coarse/best.pt` + `metadata.json` (`tuned_params`).
-- **Skip when:** `best.pt` + `metadata.json` exist, or `reuse_tuned_params_from` copies HP from another config (still retrains with current policy `max_scale`).
+- **Search spaces:** `lr_only`, `lr_eff_batch_univariate`, `lr_eff_batch_univariate_ema`, `fixed`, etc. (see phase YAML).
+- **Outputs:** `{checkpoint_dir}/{subset_id}/coarse/best.pt` + `metadata.json`.
 
-##### Phase 3 — Fine diffusion finetune HP (`diffusion_fine_finetune_hp`)
+##### Phase 3a — Patch-refine finetune HP (`diffusion_patch_refine_finetune_hp`) — campaign default
 
-Same machinery as Phase 2 for the **fine** residual denoiser.
+Same Optuna machinery for the **overlapping-patch** upscaler (`diffusion_stage: patch_refine`).
 
-- **Entry:** `FineDiffusionFinetuneHPPhase` (`diffusion_stage: fine`).
-- **YAML defaults:** same as Phase 2 (`n_trials: 20`, `max_epochs: 20`, `patience: 8`).
-- **Requires:** completed Phase 2 coarse `best.pt` (fine conditions on coarse at inference; training uses **GT** coarse channel).
-- **Warm-start:** `pretrained_fine/pretrained_diffusion.pt` from Phase 1.
-- **Outputs:** `{subset_id}/fine/best.pt` + `metadata.json`.
-- **Triple-scale:** optional `diffusion_finer_finetune_hp` after Phase 3 when `use_triple_scale: true` (not in current flat-subset defaults).
+- **Entry:** `PatchRefineDiffusionFinetuneHPPhase`.
+- **Requires:** coarse `best.pt`.
+- **Geometry:** canvas / patch H×W / col stride from experiment (`patch_refine_*`).
+- **Outputs:** `{subset_id}/patch_refine/best.pt` + `metadata.json`.
+
+##### Phase 3b/3c — Vertical dual / legacy fine
+
+- `diffusion_vertical_dual_finetune_hp` — single stacked-canvas DiT.
+- `diffusion_fine_finetune_hp` — legacy full-horizon fine residual (GT coarse cond at train).
 
 ##### Phase 4 — Staged eval (`staged_eval`)
 
-Loads coarse + fine `best.pt`, runs chained sampling, writes metrics and optional viz.
+Loads stage `best.pt` files for the active representation, runs anchor + probabilistic sampling, writes metrics.
 
 - **Entry:** `StagedEvalPhase`.
-- **YAML defaults:** `probabilistic_sampler: dpmpp`, `probabilistic_num_inference_steps: 20`, `probabilistic_n_samples: 20`, `tune_sampler: false`, `eval_test_fraction: 1.0`, `test_stride: 4`, `batch_size: 8`.
-- **Inference:** sample coarse → sample fine conditioned on sampled coarse → `decode_dual` to normalized values → denormalize.
-- **Metrics:** CRPS / top-k from DPM++ sample ensemble; `sample_mean_mse/mae`; separate **anchor** one-shot metrics (`anchor_mse`, `anchor_mae`).
-- **Outputs:** `results/partials/{dataset}_staged_anchor.json`, `{subset_id}/staged_results.json`, raw NPZ under `results/raw/`.
-- **Skip when:** partial JSON has full metric set and raw NPZ artifacts exist (re-runs if anchor or sample-mean fields missing).
-- **Baselines:** finetuned iTransformer evaluated alongside diffusion when enabled in phase.
+- **Inference:** depends on mode (coarse→patch crops, vertical dual decode, or coarse→fine `decode_dual`).
+- **Metrics:** `eval/staged_*` (CRPS, anchor/prob MSE, …); optional viz skipped when `skip_eval_visualizations: true`.
 
 #### Caching and resume
 
 | Artifact | Phase |
 |----------|-------|
-| `pretrained_{coarse,fine}/pretrained_diffusion.pt` | 1 |
-| `{subset_id}_itransformer_finetuned.pt` | iTrans |
-| `{subset_id}/coarse/best.pt`, `.../fine/best.pt` | 2, 3 |
+| `pretrained_<stage>/pretrained_diffusion.pt` | 1 |
+| `{subset_id}/coarse/best.pt`, `.../patch_refine/best.pt` (or `fine` / `vertical_dual`) | 2, 3 |
 | `results/partials/*_staged_anchor.json` | 4 |
 
-`should_skip` on each phase checks these paths. Reuse flags (`reuse_pretrain_from_config`, `reuse_checkpoint_from_config`, `reuse_tuned_params_from`) symlink/copy from a donor config so EMA sweeps and grad-accum ablations only rerun Phases 2–4.
+`should_skip` on each phase checks these paths. Coverage probe uses `--fresh` + unique run stems + `force_retrain_synthetic` so skips do not fire.
 
 ---
 
@@ -367,13 +346,15 @@ Synthetic pretrain: `RealTS` + `augmentation.py` (mixed generators, optional cac
 
 Values clipped to `[-max_scale, max_scale]`, binned into `H=16` rows; occupancy map is a monotone staircase in `{0,1}` (no Gaussian blur).
 
-**Staged (default):** dual decomposition with **separate models**:
+**Staged (legacy sequential coarse→fine):** dual decomposition with **separate models**:
 
 - **Coarse:** full-range binning → coarse CDF map.
 - **Fine:** residual within coarse bin → fine CDF map.
 - **Decode:** `decode_dual(coarse, fine)` = sum of decoded coarse + fine, clamped.
 
-**Training:** coarse stage predicts future coarse map from past maps; fine stage conditions on **GT** future coarse (not model prediction). **Inference:** sample coarse, then sample fine conditioned on sampled coarse, then decode.
+**Training (legacy):** coarse predicts future coarse from past; fine conditions on **GT** future coarse. **Inference:** sample coarse, then fine, then decode.
+
+**Current campaign default** is **patch refine** (coarse full-horizon + localized overlapping patches) or **vertical dual concat** — see Representation modes above. Do not treat sequential fine as production.
 
 ---
 
@@ -385,7 +366,7 @@ Values clipped to `[-max_scale, max_scale]`, binned into `H=16` rows; occupancy 
 - **Stationary-flat anchor:** at `t=T−1`, anchor canvas is **constant 0.5** (not `Bernoulli(0.5)`); see `_binary_anchor_canvas_like` when `binary_anchor_input_mode=stationary_flat`.
 - Combined train loss: `λ·L_reg + (1−λ)·L_anchor` with `λ=0.99`.
 
-**Eval:** `staged_eval` uses `probabilistic_sampler: dpmpp`, `probabilistic_num_inference_steps: 20`, `probabilistic_n_samples: 20` for sweep metrics; anchor path is one-shot at max noise for the anchor loss only.
+**Eval:** campaign leaves often use `probabilistic_sampler: quad_t` (e.g. h96 ordinal); older sweeps used `dpmpp`. Anchor path remains one-shot at max noise.
 
 ---
 
@@ -402,29 +383,27 @@ Chunking: `unet_max_chunk_size` caps `BV` through the denoiser for memory.
 
 ---
 
-### iTransformer
+### Guidance (optional)
 
-Frozen encoder; finetuned per dataset/subset. Provides bottleneck context tokens when cross-attention is enabled. With guidance channel off, it does **not** add a pixel ghost map. Cold-start finetune on real data (`itrans_finetune_hp`, `cold_start: true`).
+Default for many leaves: **off**. When on, prefer **patch-decoder** guidance (`patch_guidance_finetune_hp`). Legacy iTransformer finetune helpers remain in `train_multivariate_pipeline.py` but are not registered as the production phase for patch-decoder configs.
 
 ---
 
 ### Hyperparameters
 
-Read merged YAML — do not rely on stale `pipeline_config.py` module defaults.
+Read merged YAML — do not rely on deleted `pipeline_config.py` defaults.
 
-- **Base:** `configs/base/binary_staged.yaml` (experiment + training + phases).
-- **Fixed LR sweep base:** `configs/base/fixed_lr_pipeline_base.yaml` (`3e-5`, `lr_only` HP phases).
-- **Flat anchor leaf:** `configs/binary_anchor_stationary_flat.yaml` sets `binary_anchor_input_mode: stationary_flat`.
-- **EMA 0.99 leaf:** `configs/binary_anchor_stationary_flat_subsets_ema099.yaml` sets `diffusion_ema_decay: 0.99`.
-
-Optuna LR range when tuning: `finetune_hp_lr_min/max` = **`3e-6` – `2e-4`** log-uniform (`lr_only` search space).
+- **Base:** `configs/base/binary_staged.yaml`
+- **h96 ordinal patch-refine:** `configs/binary_patch_refine_lb336_hz96_ordinal_tuned*.yaml`
+- **Coverage probe:** `configs/coverage_deadcode_binary_patch_refine.yaml` + `configs/coverage_deadcode_mmpd.yaml`
 
 ---
 
 ### Pitfalls
 
-1. **Staged pipeline only** — separate coarse/fine checkpoints, chained eval.
-2. **Double normalization** — dataset z-score then per-window norm.
-3. **`image_height` must divide patch size** (16 / 8 = 2 patches tall).
-4. **Training flags must reach `PipelineState`** — `training.*` keys need wiring (`training_value()` / `apply_training_section_to_state`); module globals alone are not enough for Optuna paths.
-5. **Subset ckpt paths** use `subset_id` (e.g. `weather_4v_s2`), not bare dataset name.
+1. **Representation mode** — patch-refine / vertical-dual / sequential-fine are mutually exclusive after `normalize_guidance_phases`.
+2. **Double normalization** — dataset z-score then window or ordinal norm.
+3. **`image_height` must divide patch size**.
+4. **Training flags must reach `PipelineState`** — `training.*` keys need wiring (`training_value()` / `apply_training_section_to_state`).
+5. **Subset ckpt paths** use `subset_id` (e.g. `coverage_synth_2v_s480`), not bare dataset name.
+6. **Donor reuse** can silently skip synthetic pretrain — coverage probe forces fresh dirs + `force_retrain_synthetic`.

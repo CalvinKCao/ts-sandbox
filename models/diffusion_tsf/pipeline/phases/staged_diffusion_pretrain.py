@@ -479,18 +479,85 @@ def _resolve_diff_hp(state: PipelineState, source_dir: Optional[str]) -> Dict[st
     if source_dir:
         candidates.append(os.path.join(source_dir, "diff_hp.json"))
     candidates.append(os.path.join(state.checkpoint_dir, "diff_hp.json"))
-    for path in candidates:
-        if path and os.path.exists(path):
-            logger.info("Using fixed Phase 1 diffusion HP from %s", path)
-            params = _read_json(path)
-            state.diffusion_best_params = params
-            return params
+    force = bool(state.extra.get("force_retrain_synthetic", False))
+    if not force:
+        for path in candidates:
+            if path and os.path.exists(path):
+                logger.info("Using fixed Phase 1 diffusion HP from %s", path)
+                params = _read_json(path)
+                state.diffusion_best_params = params
+                return params
+
+    n_trials = int(getattr(state, "n_diffusion_hp_trials", 0) or state.extra.get("n_diffusion_hp_trials", 0) or 0)
+    if n_trials > 0:
+        params = _run_synthetic_diffusion_hp_tuning(state, n_trials=n_trials)
+        out_path = os.path.join(state.checkpoint_dir, "diff_hp.json")
+        os.makedirs(state.checkpoint_dir, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(params, f, indent=2, sort_keys=True)
+        logger.info("Wrote synthetic diffusion HP to %s: %s", out_path, params)
+        state.diffusion_best_params = params
+        return params
+
     suffix = _phase1_config_suffix(state)
     raise FileNotFoundError(
         f"Staged pretrain requires Phase 1 diff_hp.json for {state.dataset!r}. "
         f"Expected *{suffix} under one of {_candidate_phase1_ckpt_roots(state)} "
-        "or set phase1_source_dir or set use_hardcoded_synthetic_hp=True."
+        "or set phase1_source_dir / use_hardcoded_synthetic_hp=True / n_diffusion_hp_trials>0."
     )
+
+
+def _run_synthetic_diffusion_hp_tuning(state: PipelineState, *, n_trials: int) -> Dict[str, Any]:
+    """Optuna LR search on tiny synthetic coarse pretrain (writes trial dirs under ckpt)."""
+    import optuna
+    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+    from models.diffusion_tsf.pipeline.train.pretrain import pretrain_diffusion
+
+    lr_min = float(state.extra.get("finetune_hp_lr_min", 1e-4))
+    lr_max = float(state.extra.get("finetune_hp_lr_max", 5e-4))
+    if lr_min >= lr_max:
+        lr_max = lr_min * 5.0
+    batch_size = int(getattr(state, "diffusion_batch_size", 2) or 2)
+    n_samples = int(state.extra.get("synthetic_samples_diff_tune", 32) or 32)
+    n_samples = max(20, min(n_samples, 64))  # need val_tail > 0 (n_samples//10)
+    epochs = 1
+    patience = 1
+    study = optuna.create_study(direction="minimize", study_name="synthetic_diffusion_hp")
+    logger.info(
+        "Synthetic diffusion HP: %s trials, lr=[%.2e, %.2e], n_samples=%s, batch=%s",
+        n_trials,
+        lr_min,
+        lr_max,
+        n_samples,
+        batch_size,
+    )
+
+    def objective(trial: "optuna.Trial") -> float:
+        lr = trial.suggest_float("learning_rate", lr_min, lr_max, log=True)
+        params = {"learning_rate": float(lr), "batch_size": batch_size}
+        trial_dir = os.path.join(state.checkpoint_dir, f"_synth_diff_hp_trial_{trial.number}")
+        os.makedirs(trial_dir, exist_ok=True)
+        # Do not pass smoke_test=True — that zeros the val split and makes every trial look identical.
+        with _synthetic_pretrain_globals(pipeline_mod, state, "coarse"):
+            _ckpt, best_val = pretrain_diffusion(
+                best_params=params,
+                guidance_checkpoint="",
+                n_samples=n_samples,
+                epochs=epochs,
+                patience=patience,
+                checkpoint_dir=trial_dir,
+                smoke_test=False,
+            )
+        return float(best_val)
+
+    study.optimize(objective, n_trials=int(n_trials), show_progress_bar=not state.smoke_test)
+    best = study.best_params
+    out = {
+        "learning_rate": float(best["learning_rate"]),
+        "batch_size": batch_size,
+    }
+    logger.info("Synthetic diffusion HP best: %s (val=%.4f)", out, study.best_value)
+    return out
 
 
 def _guidance_search_dirs(
@@ -1037,7 +1104,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                             sig_path = os.path.join(stage_dir, ".signature")
                             with open(sig_path, "w", encoding="utf-8") as f:
                                 f.write(_stage_pretrain_signature(state, config_name))
-                            ckpt = pretrain_diffusion(
+                            ckpt, _best_val = pretrain_diffusion(
                                 best_params=best_params,
                                 guidance_checkpoint=guidance_ckpt,
                                 n_samples=n_samples,
@@ -1072,7 +1139,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                 with open(sig_path, "w", encoding="utf-8") as f:
                     f.write(_stage_pretrain_signature(state, config_name))
                 with _synthetic_pretrain_globals(pipeline_mod, state, stage):
-                    ckpt = pretrain_diffusion(
+                    ckpt, _best_val = pretrain_diffusion(
                         best_params=best_params,
                         guidance_checkpoint=guidance_ckpt,
                         n_samples=n_samples,

@@ -160,4 +160,4 @@ def pretrain_diffusion(
             break
 
     logger.info("Diffusion pretraining complete. Best val loss: %.4f", best_val_loss)
-    return ckpt_path
+    return ckpt_path, float(best_val_loss)

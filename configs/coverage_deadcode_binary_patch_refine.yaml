@@ -1,0 +1,98 @@
+# Tiny ordinal patch-refine leaf for coverage / dead-code probes.
+# Same phase graph as the h96 ordinal campaign; budgets shrunk to seconds–minutes.
+extends: configs/binary_patch_refine_lb336_hz96_ordinal_tuned_synth_fallback.yaml
+
+training:
+  force_retrain_synthetic: true
+  use_hardcoded_synthetic_hp: false
+  skip_synthetic_tuning: false
+  n_diffusion_hp_trials: 2
+  n_finetune_hp_trials: 2
+  finetune_hp_lr_min: 1.0e-4
+  finetune_hp_lr_max: 5.0e-4
+  synthetic_samples_diff_tune: 16
+  finetune_max_micro_batch: 8
+  diffusion_batch_size: 2
+  finetune_batch_sizes: [1, 2]
+
+wandb:
+  enabled: false
+  project: ts-sandbox-leaderboard
+  tags: [coverage, deadcode, patch_refine, ordinal_norm]
+
+experiment:
+  name: coverage-deadcode-binary-patch-refine
+  experiment_name: coverage_deadcode_binary_patch_refine
+  seed: 42
+  n_variates: 2
+  dit_embed_dim: 128
+  dit_depth: 2
+  dit_num_heads: 4
+  use_window_normalization: false
+  use_ordinal_window_norm: true
+  ordinal_ood_shift_causal_only: true
+  use_patch_refine_stage: true
+  patch_refine_unique_segments: true
+  patch_refine_prev_cond_dropout: 0.5
+  data_subset:
+    enabled: true
+    target_dataset: coverage_synth
+    reduce_if_larger_than_target: false
+    max_variates: 2
+    max_variates_by_dataset:
+      coverage_synth: 2
+    sample_stride_by_dataset:
+      coverage_synth: 480
+    variate_strategy: first
+    subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: null
+    require_reuse_pretrain: false
+    shared_cache: false
+    n_samples: 8
+    epochs: 1
+    patience: 1
+    coarse_epochs: 1
+    patch_refine_epochs: 1
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 2
+    max_epochs: 1
+    patience: 1
+    search_space: lr_only
+    hp_lr_min: 1.0e-4
+    hp_lr_max: 5.0e-4
+    effective_univariate_batch_grid: [2, 4]
+    ema_decay_grid: [0.0, 0.99]
+    prediction_target: x0
+    loss_weighting: min_snr
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+
+  - phase: diffusion_patch_refine_finetune_hp
+    n_trials: 2
+    max_epochs: 1
+    patience: 1
+    search_space: lr_only
+    hp_lr_min: 1.0e-4
+    hp_lr_max: 5.0e-4
+    effective_univariate_batch_grid: [2, 4]
+    ema_decay_grid: [0.0, 0.99]
+    prediction_target: x0
+    loss_weighting: min_snr
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+
+  - phase: staged_eval
+    eval_test_fraction: 0.05
+    test_stride: 480
+    n_samples: 1
+    probabilistic_n_samples: 1
+    probabilistic_num_inference_steps: 5
+    batch_size: 1
+    gmm_components: 1
+    topk_max: 1
+    skip_eval_visualizations: true
+    probe_eval_batch_size: false
