@@ -147,7 +147,10 @@ virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip -q
 pip install --no-index -r "$REQ" -q
-pip install --no-index --find-links="$REPO/setup/coverage_wheels" "coverage==7.15.2" -q
+# Install by wheel path — Alliance wheelhouse has different coverage builds
+# (e.g. 7.13.4+computecanada); --find-links + ==7.15.2 can miss the local file.
+echo "$(ts) [setup] Installing coverage from $WHEEL"
+pip install --no-index "$WHEEL" -q || pip install --no-index "coverage" -q
 
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA required'; print('torch', torch.__version__, 'gpu', torch.cuda.get_device_name(0))"
 python -c "import coverage; print('coverage', coverage.__version__)"
