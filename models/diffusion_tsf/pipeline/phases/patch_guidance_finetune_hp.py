@@ -109,8 +109,6 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
     def _log_finetune_viz_and_diagnostics(self, state: PipelineState) -> None:
         if state.guidance_type != "patch_decoder":
             return
-        if state.smoke_test:
-            return
 
         ft_ckpt = state.patch_guidance_finetune_ckpt or state.default_guidance_finetune_ckpt_path()
         if not os.path.exists(ft_ckpt):
@@ -122,22 +120,23 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
         # Needed on skip/resume paths where execute() never ran this phase.
         patch_globals(pipeline_mod, state)
 
-        try:
-            from models.diffusion_tsf.pipeline.visualize_utils import (
-                run_patch_guidance_finetune_diagnostics,
-                run_patch_guidance_finetune_visualizations,
-            )
+        if not state.smoke_test:
+            try:
+                from models.diffusion_tsf.pipeline.visualize_utils import (
+                    run_patch_guidance_finetune_visualizations,
+                )
 
-            viz_paths = run_patch_guidance_finetune_visualizations(state, ckpt_path=ft_ckpt)
-            wandb_utils.log_visualization_paths(
-                viz_paths, wandb_key="viz/patch_guidance_finetuned",
-            )
-            wandb_utils.log_visualization_paths(
-                viz_paths, wandb_key="viz/itrans_finetuned",
-            )
-        except Exception as e:
-            logger.warning("Patch guidance finetune viz failed: %s", e, exc_info=True)
+                viz_paths = run_patch_guidance_finetune_visualizations(state, ckpt_path=ft_ckpt)
+                wandb_utils.log_visualization_paths(
+                    viz_paths, wandb_key="viz/patch_guidance_finetuned",
+                )
+                wandb_utils.log_visualization_paths(
+                    viz_paths, wandb_key="viz/itrans_finetuned",
+                )
+            except Exception as e:
+                logger.warning("Patch guidance finetune viz failed: %s", e, exc_info=True)
 
+        # Diagnostics (incl. ordinal space alignment) also run on smoke when ordinal.
         try:
             from models.diffusion_tsf.train_multivariate_pipeline import (
                 generate_dataset_job,
@@ -230,7 +229,8 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
         if tune_ckpt_path:
             logger.info("  [%s] best HP checkpoint: %s", self.name, tune_ckpt_path)
 
-        if not state.smoke_test and os.path.exists(ft_ckpt):
+        if os.path.exists(ft_ckpt):
+            # Full forecast viz stays non-smoke; ordinal space alignment runs on smoke too.
             self._log_finetune_viz_and_diagnostics(state)
 
         return state

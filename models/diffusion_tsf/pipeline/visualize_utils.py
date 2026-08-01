@@ -1406,6 +1406,7 @@ def _plot_guidance_forecast_1d(
     gt_label: str = "GT",
     title: str | None = None,
     filename_tag: str = "guidance_pred",
+    ylabel: str | None = None,
 ) -> str:
     past_norm = past_norm[0] if past_norm.dim() == 3 else past_norm
     future_norm = future_norm[0] if future_norm.dim() == 3 else future_norm
@@ -1446,11 +1447,140 @@ def _plot_guidance_forecast_1d(
         ax.set_title(f"var {col} | MAE {mae:.3f}", fontsize=9)
         if col == 0:
             ax.legend(loc="upper left", fontsize=7)
+            if ylabel:
+                ax.set_ylabel(ylabel, fontsize=8)
 
     plot_title = title or f"{guidance_label} prediction | sample {sample_index}"
     fig.suptitle(plot_title, fontsize=11, fontweight="semibold")
     path = os.path.join(output_dir, f"{filename_tag}_1d_idx{sample_index}.jpg")
     return save_figure_jpg(fig, path, dpi=jpeg_dpi)
+
+
+def _assert_guidance_ordinal_absolute_space(
+    *,
+    past_norm: torch.Tensor,
+    future_norm: torch.Tensor,
+    guidance_norm: torch.Tensor,
+    rank_max: torch.Tensor,
+) -> list[str]:
+    """Soft-check that guidance lives in absolute ranks like lookback/future."""
+    warnings: list[str] = []
+    past = past_norm[0] if past_norm.dim() == 3 else past_norm
+    future = future_norm[0] if future_norm.dim() == 3 else future_norm
+    guidance = guidance_norm[0] if guidance_norm.dim() == 3 else guidance_norm
+    rm = rank_max.detach().float().reshape(-1)
+    n_vars = min(past.shape[0], future.shape[0], guidance.shape[0], int(rm.numel()))
+    for vi in range(n_vars):
+        vmax = float(rm[vi].item())
+        p_min = float(past[vi].min().item())
+        p_max = float(past[vi].max().item())
+        g_min = float(guidance[vi].min().item())
+        g_max = float(guidance[vi].max().item())
+        f_min = float(future[vi].min().item())
+        f_max = float(future[vi].max().item())
+        logger.info(
+            "  [guidance_ordinal_space] var=%d rank_max=%.1f "
+            "past=[%.3f,%.3f] future=[%.3f,%.3f] guidance=[%.3f,%.3f]",
+            vi, vmax, p_min, p_max, f_min, f_max, g_min, g_max,
+        )
+        # Absolute ranks for H=16+ ladders usually span >> 1; unit ranks stay in [0,1].
+        if vmax > 2.0 and p_max > 1.5 and g_max <= 1.0 + 1e-3 and g_min >= -1e-3:
+            warnings.append(
+                f"var {vi}: lookback looks absolute (max={p_max:.3f}) but guidance "
+                f"looks unit-rank (max={g_max:.3f}); missing ranks_from_unit?"
+            )
+        if g_min < -1e-2 or g_max > vmax + 1.0:
+            warnings.append(
+                f"var {vi}: guidance range [{g_min:.3f},{g_max:.3f}] outside "
+                f"[0, rank_max={vmax:.1f}] (+1 slack)"
+            )
+    return warnings
+
+
+def run_guidance_ordinal_space_alignment(
+    state: Any,
+    *,
+    past_norm: torch.Tensor,
+    future_norm: torch.Tensor,
+    guidance_norm: torch.Tensor,
+    past_maps: Dict[str, torch.Tensor],
+    future_maps: Dict[str, torch.Tensor],
+    guidance_maps: Dict[str, torch.Tensor],
+    rank_max: torch.Tensor,
+    sample_index: int,
+    jpeg_dpi: int = 100,
+    variables_to_plot: int = 3,
+) -> Dict[str, Any]:
+    """1D/2D panels proving guidance ghost shares absolute ordinal space with lookback/GT."""
+    out_dir = os.path.join(state.results_dir, "viz", "guidance_ordinal_space")
+    os.makedirs(out_dir, exist_ok=True)
+    warnings = _assert_guidance_ordinal_absolute_space(
+        past_norm=past_norm,
+        future_norm=future_norm,
+        guidance_norm=guidance_norm,
+        rank_max=rank_max,
+    )
+    for msg in warnings:
+        logger.warning("  [guidance_ordinal_space] %s", msg)
+
+    path_1d = _plot_guidance_forecast_1d(
+        past_norm=past_norm.cpu() if past_norm.dim() >= 2 else past_norm,
+        future_norm=future_norm.cpu(),
+        guidance_norm=guidance_norm.cpu(),
+        sample_index=sample_index,
+        output_dir=out_dir,
+        lookback_length=int(state.lookback_length),
+        jpeg_dpi=jpeg_dpi,
+        variables_to_plot=variables_to_plot,
+        guidance_label="guidance (abs ordinal rank)",
+        gt_label="GT future (abs ordinal rank)",
+        title=(
+            f"ordinal space alignment | sample {sample_index} | "
+            f"rank_max≈{float(rank_max.max().item()):.0f}"
+        ),
+        filename_tag="ordinal_space",
+        ylabel="absolute ordinal rank",
+    )
+
+    past = past_norm[0] if past_norm.dim() == 3 else past_norm
+    n_vars = min(int(variables_to_plot), int(past.shape[0]))
+    look_c = past_maps["coarse"][0].detach().cpu()
+    fut_c = future_maps["coarse"][0].detach().cpu()
+    g_c = guidance_maps["coarse"][0].detach().cpu()
+    fig, axes = plt.subplots(
+        n_vars, 3,
+        figsize=(9.0, 2.2 * n_vars),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    titles = ("lookback coarse CDF", "GT future coarse CDF", "guidance coarse CDF")
+    panels = (look_c, fut_c, g_c)
+    for vi in range(n_vars):
+        for col, (title, panel) in enumerate(zip(titles, panels)):
+            ax = axes[vi, col]
+            ax.imshow(panel[vi].numpy(), aspect="auto", origin="lower", cmap="gray_r", vmin=0.0, vmax=1.0)
+            if vi == 0:
+                ax.set_title(title, fontsize=9)
+            if col == 0:
+                ax.set_ylabel(f"var {vi}\nrank_max={float(rank_max[vi].item()):.0f}", fontsize=8)
+            ax.set_xticks([])
+            ax.set_yticks([])
+    fig.suptitle(
+        f"same ordinal bounded encode | sample {sample_index}",
+        fontsize=11,
+        fontweight="semibold",
+    )
+    path_2d = save_figure_jpg(
+        fig, os.path.join(out_dir, f"ordinal_space_2d_idx{sample_index}.jpg"), dpi=jpeg_dpi,
+    )
+    return {
+        "paths": [path_1d, path_2d],
+        "warnings": warnings,
+        "viz": {
+            "viz/guidance_ordinal_space/1d": [path_1d],
+            "viz/guidance_ordinal_space/2d": [path_2d],
+        },
+    }
 
 
 def _plot_itrans_window_norm_1d(
@@ -3152,7 +3282,9 @@ def run_patch_guidance_finetune_diagnostics(
         n_probe=32 if state.smoke_test else 256,
         seed=state.seed,
     )
-    if state.smoke_test:
+    ordinal = bool(getattr(state, "use_ordinal_window_norm", False))
+    # Smoke skips heavy panels, but still runs ordinal space alignment when needed.
+    if state.smoke_test and not ordinal:
         return {"summary": stats, "viz": {}}
 
     device = state.resolve_device()
@@ -3176,49 +3308,68 @@ def run_patch_guidance_finetune_diagnostics(
         future_b = future_cf.unsqueeze(0).to(device)
         with torch.no_grad():
             past_norm, future_norm, norm_stats = enc_model._normalize_sequence(past_b, future_b)
+            past_maps = enc_model._encode_staged_maps(past_norm)
             future_maps = enc_model._encode_staged_maps(future_norm)
             W_fut = future_norm.shape[-1]
             g_norm = enc_model._get_guidance_forecast_norm(past_b, past_norm, norm_stats, W_fut)
             g_maps = enc_model._encode_staged_maps(g_norm)
-        viz_out["viz"]["viz/patch_guidance_finetune/dataset_1d"] = [
-            _plot_realts_1d_pre_post_norm(
-                past=past_cf, future=future_cf,
-                past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
-                sample_index=sample_index, output_dir=output_dir,
-                lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
-                variables_to_plot=variables_to_plot,
-            )
-        ]
-        viz_out["viz"]["viz/patch_guidance_finetune/dataset_2d"] = [
-            _plot_staged_2d_maps_native(
-                maps={k: v.detach().cpu() for k, v in future_maps.items() if k in {"coarse", "fine"}},
-                sample_index=sample_index, output_dir=output_dir, tag="dataset_sample",
-                variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
-            )
-        ]
-        viz_out["viz"]["viz/patch_guidance_finetune/guidance_2d"] = [
-            _plot_staged_2d_maps_native(
-                maps={k: v.detach().cpu() for k, v in g_maps.items() if k in {"coarse", "fine"}},
-                sample_index=sample_index, output_dir=output_dir, tag="patch_pred",
-                variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
-            )
-        ]
-        g_plot = _guidance_forecast_plot_kwargs(state)
-        viz_out["viz"]["viz/patch_guidance_finetune/guidance_1d"] = [
-            _plot_guidance_forecast_1d(
-                past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
+        if not state.smoke_test:
+            viz_out["viz"]["viz/patch_guidance_finetune/dataset_1d"] = [
+                _plot_realts_1d_pre_post_norm(
+                    past=past_cf, future=future_cf,
+                    past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
+                    sample_index=sample_index, output_dir=output_dir,
+                    lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
+                    variables_to_plot=variables_to_plot,
+                )
+            ]
+            viz_out["viz"]["viz/patch_guidance_finetune/dataset_2d"] = [
+                _plot_staged_2d_maps_native(
+                    maps={k: v.detach().cpu() for k, v in future_maps.items() if k in {"coarse", "fine"}},
+                    sample_index=sample_index, output_dir=output_dir, tag="dataset_sample",
+                    variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
+                )
+            ]
+            viz_out["viz"]["viz/patch_guidance_finetune/guidance_2d"] = [
+                _plot_staged_2d_maps_native(
+                    maps={k: v.detach().cpu() for k, v in g_maps.items() if k in {"coarse", "fine"}},
+                    sample_index=sample_index, output_dir=output_dir, tag="patch_pred",
+                    variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
+                )
+            ]
+            g_plot = _guidance_forecast_plot_kwargs(state)
+            viz_out["viz"]["viz/patch_guidance_finetune/guidance_1d"] = [
+                _plot_guidance_forecast_1d(
+                    past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
+                    guidance_norm=g_norm[0].cpu(),
+                    sample_index=sample_index, output_dir=output_dir,
+                    lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
+                    variables_to_plot=variables_to_plot,
+                    **g_plot,
+                )
+            ]
+            # Same panels under legacy iTrans wandb keys (patch_decoder campaigns).
+            viz_out["viz"]["viz/itrans_finetune/dataset_1d"] = viz_out["viz"]["viz/patch_guidance_finetune/dataset_1d"]
+            viz_out["viz"]["viz/itrans_finetune/dataset_2d"] = viz_out["viz"]["viz/patch_guidance_finetune/dataset_2d"]
+            viz_out["viz"]["viz/itrans_finetune/itrans_1d"] = viz_out["viz"]["viz/patch_guidance_finetune/guidance_1d"]
+            viz_out["viz"]["viz/itrans_finetune/itrans_2d"] = viz_out["viz"]["viz/patch_guidance_finetune/guidance_2d"]
+        if ordinal:
+            rank_max = enc_model._ordinal_rank_max_tensor(past_norm.device)
+            align = run_guidance_ordinal_space_alignment(
+                state,
+                past_norm=past_norm[0].cpu(),
+                future_norm=future_norm[0].cpu(),
                 guidance_norm=g_norm[0].cpu(),
-                sample_index=sample_index, output_dir=output_dir,
-                lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
+                past_maps={k: v.detach().cpu() for k, v in past_maps.items()},
+                future_maps={k: v.detach().cpu() for k, v in future_maps.items()},
+                guidance_maps={k: v.detach().cpu() for k, v in g_maps.items()},
+                rank_max=rank_max.detach().cpu(),
+                sample_index=sample_index,
+                jpeg_dpi=jpeg_dpi,
                 variables_to_plot=variables_to_plot,
-                **g_plot,
             )
-        ]
-        # Same panels under legacy iTrans wandb keys (patch_decoder campaigns).
-        viz_out["viz"]["viz/itrans_finetune/dataset_1d"] = viz_out["viz"]["viz/patch_guidance_finetune/dataset_1d"]
-        viz_out["viz"]["viz/itrans_finetune/dataset_2d"] = viz_out["viz"]["viz/patch_guidance_finetune/dataset_2d"]
-        viz_out["viz"]["viz/itrans_finetune/itrans_1d"] = viz_out["viz"]["viz/patch_guidance_finetune/guidance_1d"]
-        viz_out["viz"]["viz/itrans_finetune/itrans_2d"] = viz_out["viz"]["viz/patch_guidance_finetune/guidance_2d"]
+            viz_out["viz"].update(align["viz"])
+            viz_out["guidance_ordinal_space_warnings"] = align["warnings"]
     except Exception as exc:
         logger.warning("Patch guidance finetune diagnostic maps skipped: %s", exc)
 
