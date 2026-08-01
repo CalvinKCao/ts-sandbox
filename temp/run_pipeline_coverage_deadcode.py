@@ -251,6 +251,8 @@ def main() -> int:
         "--skip-mmpd-sample-viz",
     ]
 
+    mmpd_data = run_root / "mmpd_data"
+
     disc_common = [
         DISC_EVALUATOR,
         "--datasets",
@@ -259,6 +261,10 @@ def main() -> int:
         BINARY_CONFIG,
         "--mmpd-output-root",
         str(mmpd_dir),
+        "--mmpd-data-dir",
+        str(mmpd_data),
+        "--mmpd-repo",
+        str(REPO_ROOT / "temp" / "MMPD"),
         "--pack-test-stride",
         "4",
         "--test-stride",
