@@ -5,6 +5,12 @@
 extends: configs/binary_patch_refine_lb336_hz96_ordinal_tuned_guided_p8.yaml
 replace_phases: true
 
+# Residual fine/finer cannot keep native lb336 past width (patch_refine-only
+# past_cond_resize_to_horizon=false). Resize past cond to horizon like early
+# dual-scale residual runs.
+geometry:
+  past_cond_resize_to_horizon: true
+
 training:
   n_finetune_hp_trials: 1
   finetune_max_micro_batch: 2048
