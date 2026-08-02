@@ -1379,12 +1379,37 @@ class DiffusionTSF(nn.Module):
             )
         return F.pad(cond, (0, width - cur))
 
+    def _expand_horizon_cond_to_past_width(
+        self,
+        horizon_cond: torch.Tensor,
+        past_width: int,
+    ) -> torch.Tensor:
+        """Right-pad horizon scaffold to native lookback width (no temporal squash)."""
+        cur = int(horizon_cond.shape[-1])
+        if cur == past_width:
+            return horizon_cond
+        if cur > past_width:
+            raise ValueError(
+                f"horizon cond width {cur} exceeds native past width {past_width}"
+            )
+        return F.pad(horizon_cond, (0, past_width - cur))
+
     def _cat_past_and_horizon_cond(
         self,
         past_cond: torch.Tensor,
         horizon_cond: torch.Tensor,
     ) -> torch.Tensor:
-        past_cond = self._resize_past_cond_to_width(past_cond, horizon_cond.shape[-1])
+        # resize=true: warp past down onto the horizon grid (classic dual-scale).
+        # resize=false: keep native lookback width and expand the horizon scaffold
+        # to match — same contract as joint/patch_refine native-past cond.
+        if self._past_cond_resize_to_horizon():
+            past_cond = self._resize_past_cond_to_width(
+                past_cond, horizon_cond.shape[-1],
+            )
+        else:
+            horizon_cond = self._expand_horizon_cond_to_past_width(
+                horizon_cond, past_cond.shape[-1],
+            )
         return torch.cat((past_cond, horizon_cond), dim=1)
 
     def _chunk_horizon(self) -> int:
