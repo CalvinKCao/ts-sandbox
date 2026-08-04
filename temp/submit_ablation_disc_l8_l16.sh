@@ -58,12 +58,22 @@ module load python/3.11
 module load cuda/12.2
 module load cudnn/8.9
 
-if [ -z "${SCRATCH:-}" ] || [ ! -d "$SCRATCH/ts-sandbox" ]; then
-    echo "ERROR: require Killarney checkout at \$SCRATCH/ts-sandbox" >&2
-    exit 1
-fi
-PROJECT_ROOT="$SCRATCH/ts-sandbox"
+# Prefer the checkout that owns this script (worktrees under $SCRATCH/*),
+# not a hard-coded $SCRATCH/ts-sandbox (often stuck on main).
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+case "$PROJECT_ROOT" in
+    "${SCRATCH}"/*) ;;
+    *)
+        if [ -n "${SCRATCH:-}" ] && [ -d "$SCRATCH/ts-sandbox" ]; then
+            PROJECT_ROOT="$SCRATCH/ts-sandbox"
+        else
+            echo "ERROR: submit script not under \$SCRATCH and no \$SCRATCH/ts-sandbox" >&2
+            exit 1
+        fi
+        ;;
+esac
 cd "$PROJECT_ROOT"
+echo "PROJECT_ROOT=$PROJECT_ROOT"
 
 # Prefer node-local venv; fall back to shared scratch .venv (same as other util jobs).
 if [ -f "$SLURM_TMPDIR/venv/bin/activate" ]; then
