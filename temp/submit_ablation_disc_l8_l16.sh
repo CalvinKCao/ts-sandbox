@@ -23,7 +23,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         MEM=32G
         NAME=ablation-disc-viz
     else
-        WALL=4:00:00
+        WALL=8:00:00
         MEM=50G
         NAME=ablation-disc-l8l16
     fi
