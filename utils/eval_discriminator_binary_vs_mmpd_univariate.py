@@ -342,7 +342,7 @@ def train_classifier(
             optimizer.step()
             train_loss += float(loss.item()) * int(labels.numel())
             train_count += int(labels.numel())
-            if args.max_batches_per_epoch and batch_idx + 1 >= args.max_batches_per_epoch:
+            if getattr(args, "max_batches_per_epoch", None) and batch_idx + 1 >= args.max_batches_per_epoch:
                 break
 
         val_metrics = evaluate_classifier(model, val_loader, device)
@@ -380,7 +380,7 @@ def train_classifier(
         np.savez_compressed(score_path, **collect_classifier_scores(model, test_loader, device))
         print(f"[disc-uni] wrote classifier scores {score_path}", flush=True)
 
-    if args.save_checkpoints:
+    if bool(getattr(args, "save_checkpoints", False)):
         ckpt_path = (
             args.output_dir
             / "checkpoints"
