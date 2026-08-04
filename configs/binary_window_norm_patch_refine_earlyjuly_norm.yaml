@@ -1,0 +1,114 @@
+# Ablation: keep guided patch_refine geometry (lb336 / unique-seg / [8,8] /
+# epsilon/none) but restore EXACT early-July window-norm encode/decode
+# (no ordinal ladder). Coarse HPs from 4037033; patch_refine HPs from bridge
+# job 4519745.
+extends: configs/binary_patch_refine_lb336_hz96_ordinal_tuned_guided_p8.yaml
+replace_phases: true
+
+training:
+  n_finetune_hp_trials: 1
+  finetune_max_micro_batch: 2048
+  # Early-July patch-guidance Optuna winner.
+  itrans_paper_lr_grid: [0.0005]
+
+wandb:
+  tags: [ablation, window_norm, patch_refine, fixed_hp, early_july_norm, guided_p8]
+
+experiment:
+  name: binary-window-norm-patch-refine-earlyjuly-norm
+  experiment_name: binary_window_norm_patch_refine_earlyjuly_norm
+  # --- exact early-July window norm / denorm (wandb 4037033 / iletzehu) ---
+  use_window_normalization: true
+  use_ordinal_window_norm: false
+  window_norm_center: mean
+  window_norm_std_floor: 0.1
+  # Early July left this unset → PipelineState default 0.0 (no low-var unit-std).
+  window_norm_low_var_threshold: 0.0
+  window_norm_low_var_unit_std: 1.0
+  lookback_overlap_center_shift: false
+  ordinal_ood_shift_causal_only: false
+  # Keep current campaign second stage + guidance knobs.
+  use_patch_refine_stage: true
+  use_triple_scale: false
+  patch_refine_unique_segments: true
+  patch_refine_prev_cond_dropout: 0.5
+  dit_patch_size: [8, 8]
+  use_guidance_channel: true
+  disable_cross_attention: false
+  prediction_target: epsilon
+  loss_weighting: none
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    n_samples: 10000
+    epochs: 20
+    patience: 4
+    shared_cache: true
+    # Norm flip changes pretrain signature vs ordinal bridge cache.
+    require_reuse_pretrain: false
+
+  - phase: patch_guidance_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 1
+    max_epochs: 20
+    patience: 8
+    search_space: fixed
+    # Early-July 4037033 coarse winner.
+    fixed_tuned_params:
+      learning_rate: 0.00016260630766856958
+      batch_size: 42
+      gradient_accumulation_steps: 2
+      ema_decay: 0.99
+      prediction_target: epsilon
+      loss_weighting: none
+      min_snr_gamma: 5.0
+      use_deterministic_anchor_loss: true
+      deterministic_anchor_lambda: 0.99
+      deterministic_anchor_alpha: 0.0
+      binary_noise_schedule: linear
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+      max_scale: 5.2
+
+  - phase: diffusion_patch_refine_finetune_hp
+    n_trials: 1
+    max_epochs: 20
+    patience: 8
+    search_space: fixed
+    # Bridge 4519745 patch_refine metadata.json winner.
+    fixed_tuned_params:
+      learning_rate: 0.0007817554354066733
+      batch_size: 36
+      gradient_accumulation_steps: 1
+      ema_decay: 0.995
+      prediction_target: epsilon
+      loss_weighting: none
+      min_snr_gamma: 2.0
+      use_deterministic_anchor_loss: true
+      deterministic_anchor_lambda: 0.99
+      deterministic_anchor_alpha: 0.0
+      binary_noise_schedule: linear
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+      max_scale: 5.2
+      target_univariate_batch: 256
+
+  - phase: staged_eval
+    eval_test_fraction: 0.25
+    test_stride: 16
+    n_samples: 1
+    probabilistic_n_samples: 20
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true
+    probe_eval_batch_size: true

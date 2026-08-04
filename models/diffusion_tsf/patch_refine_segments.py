@@ -101,13 +101,21 @@ def sample_parent_start(
     return int(parents[int(rng.randint(0, len(parents)))])
 
 
-def compress_prev_refine_32_to_16(prev_32: torch.Tensor) -> torch.Tensor:
-    """``(..., 32, 8)`` hir crop → ``(..., 16, 8)`` via vertical avg-pool."""
-    if prev_32.shape[-2] != 32:
-        raise ValueError(f"expected height 32, got {tuple(prev_32.shape)}")
-    flat = prev_32.reshape(-1, 1, prev_32.shape[-2], prev_32.shape[-1])
-    out = F.avg_pool2d(flat, kernel_size=(2, 1))
-    return out.reshape(*prev_32.shape[:-2], 16, prev_32.shape[-1])
+def compress_prev_refine_32_to_16(prev_hir: torch.Tensor) -> torch.Tensor:
+    """Pool a hir prev-crop vertically onto 16 coarse rows.
+
+    Historically named for 32→16 (factor 2). Also accepts any height divisible
+    by 16 (e.g. 64→16 with factor 4) via vertical avg-pool.
+    """
+    h = int(prev_hir.shape[-2])
+    if h < 16 or h % 16 != 0:
+        raise ValueError(
+            f"prev refine crop height must be a positive multiple of 16, got {tuple(prev_hir.shape)}"
+        )
+    kh = h // 16
+    flat = prev_hir.reshape(-1, 1, h, prev_hir.shape[-1])
+    out = F.avg_pool2d(flat, kernel_size=(kh, 1))
+    return out.reshape(*prev_hir.shape[:-2], 16, prev_hir.shape[-1])
 
 
 def prev_primary_row0(

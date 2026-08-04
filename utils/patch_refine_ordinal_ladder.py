@@ -1,9 +1,10 @@
-"""Canonical 256-row ordinal support for h96 patch-refine evaluation.
+"""Canonical absolute-row ordinal support for h96 patch-refine evaluation.
 
-The patch-refine model predicts absolute rows on a 256-row CDF canvas.  This
-module turns those rows into the exact dataset-z values used by the model at
-inference, including the causal ordinal OOD shift.  It deliberately does not
-use the legacy 16x16 dual-scale canonicalizer.
+The patch-refine model predicts absolute rows on a tall CDF canvas
+(``canvas_height``, typically 256 or 128).  This module turns those rows into
+the exact dataset-z values used by the model at inference, including the
+causal ordinal OOD shift.  It deliberately does not use the legacy 16x16
+dual-scale canonicalizer.
 """
 
 from __future__ import annotations
