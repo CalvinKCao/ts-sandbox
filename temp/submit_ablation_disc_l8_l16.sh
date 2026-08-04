@@ -75,20 +75,17 @@ esac
 cd "$PROJECT_ROOT"
 echo "PROJECT_ROOT=$PROJECT_ROOT"
 
-# Prefer node-local venv; fall back to shared scratch .venv (same as other util jobs).
-if [ -f "$SLURM_TMPDIR/venv/bin/activate" ]; then
-    # shellcheck disable=SC1091
-    source "$SLURM_TMPDIR/venv/bin/activate"
-elif [ -f "$SLURM_TMPDIR/ts-sandbox-venv/bin/activate" ]; then
-    # shellcheck disable=SC1091
-    source "$SLURM_TMPDIR/ts-sandbox-venv/bin/activate"
-elif [ -f .venv/bin/activate ]; then
-    # shellcheck disable=SC1091
-    source .venv/bin/activate
-else
-    echo "ERROR: no venv under \$SLURM_TMPDIR or \$SCRATCH/ts-sandbox/.venv" >&2
-    exit 1
-fi
+REQ="$PROJECT_ROOT/setup/requirements-killarney.txt"
+[[ -f "$REQ" ]] || { echo "ERROR: missing $REQ" >&2; exit 1; }
+[[ -n "${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR unset" >&2; exit 1; }
+command -v virtualenv >/dev/null || { echo "ERROR: virtualenv missing after module load" >&2; exit 1; }
+
+echo "[setup] Building node-local venv on \$SLURM_TMPDIR from $REQ"
+virtualenv --no-download "$SLURM_TMPDIR/env"
+# shellcheck disable=SC1091
+source "$SLURM_TMPDIR/env/bin/activate"
+pip install --no-index --upgrade pip -q
+pip install --no-index -r "$REQ" -q
 python - <<'PY'
 import torch
 assert torch.cuda.is_available(), "CUDA unavailable in job env"
