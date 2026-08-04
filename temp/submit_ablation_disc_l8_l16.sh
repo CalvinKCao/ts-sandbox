@@ -58,16 +58,22 @@ module load python/3.11
 module load cuda/12.2
 module load cudnn/8.9
 
-# Prefer the checkout that owns this script (worktrees under $SCRATCH/*),
-# not a hard-coded $SCRATCH/ts-sandbox (often stuck on main).
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Prefer SLURM_SUBMIT_DIR (directory where sbatch was invoked) so spool copies
+# of this script do not fall back to \$SCRATCH/ts-sandbox (often on main).
+if [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -d "${SLURM_SUBMIT_DIR}" ]; then
+    PROJECT_ROOT="$(cd "$SLURM_SUBMIT_DIR" && pwd)"
+else
+    PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 case "$PROJECT_ROOT" in
     "${SCRATCH}"/*) ;;
     *)
-        if [ -n "${SCRATCH:-}" ] && [ -d "$SCRATCH/ts-sandbox" ]; then
+        if [ -n "${SCRATCH:-}" ] && [ -d "$SCRATCH/ts-sandbox-ordinal-fine" ]; then
+            PROJECT_ROOT="$SCRATCH/ts-sandbox-ordinal-fine"
+        elif [ -n "${SCRATCH:-}" ] && [ -d "$SCRATCH/ts-sandbox" ]; then
             PROJECT_ROOT="$SCRATCH/ts-sandbox"
         else
-            echo "ERROR: submit script not under \$SCRATCH and no \$SCRATCH/ts-sandbox" >&2
+            echo "ERROR: cannot resolve PROJECT_ROOT under \$SCRATCH" >&2
             exit 1
         fi
         ;;
