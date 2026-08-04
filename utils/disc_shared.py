@@ -986,12 +986,36 @@ def binary_auroc(labels: np.ndarray, scores: np.ndarray) -> float:
     return float((rank_sum_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
 
 
-def window_level_metrics(windows: np.ndarray, labels: np.ndarray, probs: np.ndarray) -> Dict[str, float]:
-    """One decision per (window, label) via mean prob(fake) over slices."""
-    keys = {}
-    for w, y, p in zip(windows.tolist(), labels.tolist(), probs.tolist()):
-        key = (int(w), int(y))
-        keys.setdefault(key, []).append(float(p))
+def window_level_metrics(
+    windows: np.ndarray,
+    labels: np.ndarray,
+    probs: np.ndarray,
+    *,
+    variates: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """Mean P(fake) over offsets, then AUROC.
+
+    Multivariate disc examples already pack all variates in one tensor, so the
+    default key is ``(window, label)`` (average over offsets only).
+
+    Univariate disc emits one example per variate — pass ``variates`` so the
+    key is ``(window, variate, label)`` and we do **not** pool across series.
+    """
+    keys: Dict[Tuple[Any, ...], List[float]] = {}
+    if variates is None:
+        for w, y, p in zip(windows.tolist(), labels.tolist(), probs.tolist()):
+            key: Tuple[Any, ...] = (int(w), int(y))
+            keys.setdefault(key, []).append(float(p))
+    else:
+        if len(variates) != len(windows):
+            raise ValueError(
+                f"variates length {len(variates)} != windows length {len(windows)}"
+            )
+        for w, v, y, p in zip(
+            windows.tolist(), variates.tolist(), labels.tolist(), probs.tolist()
+        ):
+            key = (int(w), int(v), int(y))
+            keys.setdefault(key, []).append(float(p))
     if not keys:
         return {
             "disc_acc_window": float("nan"),
@@ -1000,8 +1024,8 @@ def window_level_metrics(windows: np.ndarray, labels: np.ndarray, probs: np.ndar
         }
     y_win = []
     p_win = []
-    for (w, y), vals in keys.items():
-        y_win.append(float(y))
+    for key, vals in keys.items():
+        y_win.append(float(key[-1]))
         p_win.append(float(np.mean(vals)))
     y_arr = np.asarray(y_win, dtype=np.float64)
     p_arr = np.asarray(p_win, dtype=np.float64)

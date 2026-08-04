@@ -124,6 +124,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--nonoverlapping-patches", action="store_true", default=False)
     p.add_argument("--no-offset-embedding", action="store_true", default=False)
     p.add_argument("--offset-stride", type=int, default=1)
+    p.add_argument(
+        "--unique-absolute-slices",
+        action="store_true",
+        default=True,
+        help="One random (window,offset) per absolute L-block across overlapping "
+        "96-horizons (UniquePatchSegmentDataset-style). Default on.",
+    )
+    p.add_argument(
+        "--no-unique-absolute-slices",
+        action="store_false",
+        dest="unique_absolute_slices",
+        help="Dense Cartesian product of windows × in-horizon offsets (old slow path).",
+    )
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-3)

@@ -61,6 +61,51 @@ DEFAULT_OUTPUT = (
 )
 
 
+def _unique_absolute_slice_items(
+    windows: np.ndarray,
+    *,
+    horizon: int,
+    slice_len: int,
+    n_var: int,
+    offset_stride: int,
+    series_starts: np.ndarray,
+    lookback: int,
+    seed: int,
+) -> List[Tuple[int, int, int, int]]:
+    """One random (window, offset) per absolute L-block × variate (real+fake pair).
+
+    Absolute future index ``T`` for offset ``o`` in window ``w`` is
+    ``series_starts[w] + lookback + o`` (past starts at ``series_starts[w]``).
+    Overlapping 96-horizons that cover the same ``[T, T+L)`` collapse to one draw —
+    same spirit as ``UniquePatchSegmentDataset`` for refine training.
+    """
+    starts = np.asarray(series_starts, dtype=np.int64)
+    if starts.ndim != 1:
+        raise ValueError(f"series_starts must be 1d, got {starts.shape}")
+    offsets = list(range(0, int(horizon) - int(slice_len) + 1, max(1, int(offset_stride))))
+    if not offsets:
+        raise ValueError(f"no offsets for horizon={horizon} slice_len={slice_len}")
+    # (abs_t, variate) -> [(window, offset), ...]
+    groups: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+    for w in windows:
+        w = int(w)
+        if w < 0 or w >= starts.shape[0]:
+            raise ValueError(f"window {w} out of range for series_starts len={starts.shape[0]}")
+        fut0 = int(starts[w]) + int(lookback)
+        for o in offsets:
+            abs_t = fut0 + int(o)
+            for v in range(int(n_var)):
+                groups.setdefault((abs_t, int(v)), []).append((w, int(o)))
+    rng = np.random.default_rng(int(seed))
+    items: List[Tuple[int, int, int, int]] = []
+    for (abs_t, v), parents in groups.items():
+        w, o = parents[int(rng.integers(0, len(parents)))]
+        items.append((w, o, v, 0))
+        items.append((w, o, v, 1))
+    rng.shuffle(items)
+    return items
+
+
 class UnivariateRealVsFakeDataset(Dataset):
     """Balanced univariate patches: label 1=fake, 0=GT. Pools all variates."""
 
@@ -80,6 +125,9 @@ class UnivariateRealVsFakeDataset(Dataset):
         apply_bin_center_shift: bool = False,
         legal_levels: Optional[np.ndarray] = None,
         bin_center_reduce: ReduceMode = "per_variate",
+        unique_absolute_slices: bool = False,
+        series_starts: Optional[np.ndarray] = None,
+        lookback: Optional[int] = None,
     ) -> None:
         if real.shape != fake.shape:
             raise ValueError(f"real/fake shape mismatch: {real.shape} vs {fake.shape}")
@@ -110,20 +158,67 @@ class UnivariateRealVsFakeDataset(Dataset):
         self.apply_bin_center_shift = bool(apply_bin_center_shift)
         self.bin_center_reduce: ReduceMode = bin_center_reduce
         n_var = int(real.shape[1])
-        offsets = list(range(0, real.shape[-1] - slice_len + 1, max(1, int(offset_stride))))
-        # (window, offset, variate, label)
-        real_items = [(int(w), int(o), int(v), 0) for w in windows for o in offsets for v in range(n_var)]
-        fake_items = [(int(w), int(o), int(v), 1) for w in windows for o in offsets for v in range(n_var)]
-
+        horizon = int(real.shape[-1])
+        offsets = list(range(0, horizon - slice_len + 1, max(1, int(offset_stride))))
         rng = np.random.default_rng(seed)
-        n = min(len(real_items), len(fake_items))
-        if max_examples is not None:
-            n = min(n, max(1, int(max_examples) // 2))
-        real_idx = rng.choice(len(real_items), size=n, replace=False)
-        fake_idx = rng.choice(len(fake_items), size=n, replace=False)
-        items = [real_items[i] for i in real_idx] + [fake_items[i] for i in fake_idx]
-        rng.shuffle(items)
-        self.items = items
+
+        if bool(unique_absolute_slices):
+            if series_starts is None or lookback is None:
+                raise ValueError(
+                    "unique_absolute_slices requires series_starts and lookback "
+                    "(absolute past starts + lookback → future timeline)"
+                )
+            items = _unique_absolute_slice_items(
+                np.asarray(windows, dtype=np.int64),
+                horizon=horizon,
+                slice_len=int(slice_len),
+                n_var=n_var,
+                offset_stride=int(offset_stride),
+                series_starts=np.asarray(series_starts, dtype=np.int64),
+                lookback=int(lookback),
+                seed=int(seed),
+            )
+            n_pairs = len(items) // 2
+            if max_examples is not None:
+                n_keep = min(n_pairs, max(1, int(max_examples) // 2))
+                # items are [real, fake] pairs shuffled as individuals; rebuild by pair keys
+                pair_keys = [(w, o, v) for (w, o, v, lab) in items if lab == 0]
+                pick = rng.choice(len(pair_keys), size=n_keep, replace=False)
+                items = []
+                for i in pick:
+                    w, o, v = pair_keys[int(i)]
+                    items.append((w, o, v, 0))
+                    items.append((w, o, v, 1))
+                rng.shuffle(items)
+            self.items = items
+            print(
+                f"[disc-uni] unique_absolute_slices: {n_pairs} unique (abs_t,variate) "
+                f"pairs → {len(self.items)} examples "
+                f"(from {len(windows)} windows × {len(offsets)} in-horizon offsets)",
+                flush=True,
+            )
+        else:
+            # (window, offset, variate, label)
+            real_items = [
+                (int(w), int(o), int(v), 0)
+                for w in windows
+                for o in offsets
+                for v in range(n_var)
+            ]
+            fake_items = [
+                (int(w), int(o), int(v), 1)
+                for w in windows
+                for o in offsets
+                for v in range(n_var)
+            ]
+            n = min(len(real_items), len(fake_items))
+            if max_examples is not None:
+                n = min(n, max(1, int(max_examples) // 2))
+            real_idx = rng.choice(len(real_items), size=n, replace=False)
+            fake_idx = rng.choice(len(fake_items), size=n, replace=False)
+            items = [real_items[i] for i in real_idx] + [fake_items[i] for i in fake_idx]
+            rng.shuffle(items)
+            self.items = items
 
     def __len__(self) -> int:
         return len(self.items)
@@ -181,8 +276,9 @@ def evaluate_classifier(
     logits_all: List[np.ndarray] = []
     labels_all: List[np.ndarray] = []
     windows_all: List[np.ndarray] = []
+    variates_all: List[np.ndarray] = []
     for batch in loader:
-        x, offsets, labels, windows, _variates = batch
+        x, offsets, labels, windows, variates = batch
         x = x.to(device)
         offsets = offsets.to(device)
         labels = labels.to(device)
@@ -193,10 +289,12 @@ def evaluate_classifier(
         logits_all.append(logits.detach().cpu().numpy())
         labels_all.append(labels.detach().cpu().numpy())
         windows_all.append(windows.detach().cpu().numpy())
+        variates_all.append(variates.detach().cpu().numpy())
 
     logits_np = np.concatenate(logits_all)
     labels_np = np.concatenate(labels_all)
     windows_np = np.concatenate(windows_all)
+    variates_np = np.concatenate(variates_all)
     probs = 1.0 / (1.0 + np.exp(-logits_np))
     preds = (logits_np >= 0.0).astype(np.float32)
     out = {
@@ -206,7 +304,9 @@ def evaluate_classifier(
         "n_examples": float(total_count),
         "positive_rate": float(labels_np.mean()),
     }
-    out.update(window_level_metrics(windows_np, labels_np, probs))
+    out.update(
+        window_level_metrics(windows_np, labels_np, probs, variates=variates_np)
+    )
     return out
 
 
@@ -268,7 +368,16 @@ def train_classifier(
         apply_bin_center_shift=apply_bin_center,
         legal_levels=legal_levels,
         bin_center_reduce=reduce_mode,  # type: ignore[arg-type]
+        unique_absolute_slices=bool(getattr(args, "unique_absolute_slices", False)),
+        series_starts=getattr(bundle, "series_starts", None),
+        lookback=int(getattr(args, "lookback", 0) or 0) or None,
     )
+    if ds_kwargs["unique_absolute_slices"] and (
+        ds_kwargs["series_starts"] is None or ds_kwargs["lookback"] is None
+    ):
+        raise ValueError(
+            "unique_absolute_slices requires bundle.series_starts and args.lookback"
+        )
 
     ds_train = UnivariateRealVsFakeDataset(
         y_true, fake, bundle.past, splits["train"], slice_len,
@@ -416,6 +525,9 @@ def train_classifier(
         "log2_bce_gap": float(abs(test_metrics["disc_bce"] - LOG2)),
         "candidate_only": float(1.0 if not include_past else 0.0),
         "offset_stride": float(offset_stride),
+        "unique_absolute_slices": float(
+            1.0 if bool(getattr(args, "unique_absolute_slices", False)) else 0.0
+        ),
         "no_offset_embedding": float(0.0 if use_offset_embedding else 1.0),
         "native_repr_stride": float(getattr(args, "native_repr_stride", 1) or 1),
         "univariate": 1.0,
