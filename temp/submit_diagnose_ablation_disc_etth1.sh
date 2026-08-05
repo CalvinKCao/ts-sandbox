@@ -1,0 +1,1 @@
+scripts/submit_diagnose_ablation_disc_etth1.sh

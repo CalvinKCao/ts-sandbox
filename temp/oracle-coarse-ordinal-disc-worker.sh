@@ -1,0 +1,1 @@
+scripts/oracle-coarse-ordinal-disc-worker.sh

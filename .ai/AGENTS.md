@@ -63,6 +63,11 @@ Use `wandb` for training/eval runs tied to this repo.
 - Attach visualization artifacts to the same run (for example with `wandb.Image`), and compress/downscale images before upload.
 - At run end, log the ENTIRE stdout and stderr output files to wandb as artifacts/files.
 
+## Temp layout
+- **All temp scripts** (`.sh` / `.py` one-offs, diag/viz/submit helpers) go in `./temp/scripts/`.
+- **Other temp artifacts** (data dumps, logs, viz outputs, cloned repos like `temp/MMPD`) go elsewhere under `./temp/` — not repo root, not `./tmp` for new work.
+- Compat symlinks may exist at old `./temp/<script>` paths for in-flight Killarney jobs; prefer `./temp/scripts/…` for new invocations.
+
 ## Reports & Visualizations
 - From now on, put visualizations in the same directory as their corresponding reports (e.g. within `reports/`).
 - Create a subfolder with the folder name equal to the report markdown filename (without the `.md` extension).

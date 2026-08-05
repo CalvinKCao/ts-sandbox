@@ -147,8 +147,11 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             )
 
             variate_indices = state.variate_indices
-            if variate_indices is None:
-                variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+            if not variate_indices:
+                raise ValueError(
+                    f"[{self.name}] Missing resolved variate_indices in state for dataset {state.dataset!r}. "
+                    "Data subset policy must be resolved before running phase."
+                )
             subset_meta = state.data_subset_resolved or {}
             train_stride = int(subset_meta.get("train_stride", state.window_stride))
             test_stride = int(subset_meta.get("test_stride", 1))
@@ -194,8 +197,11 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             # fall through to train
 
         variate_indices = state.variate_indices
-        if variate_indices is None:
-            variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+        if not variate_indices:
+            raise ValueError(
+                f"[{self.name}] Missing resolved variate_indices in state for dataset {state.dataset!r}. "
+                "Data subset policy must be resolved before running phase."
+            )
         subset_meta = state.data_subset_resolved or {}
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
         test_stride = int(subset_meta.get("test_stride", 1))

@@ -440,6 +440,30 @@ def load_past_windows(
     return np.concatenate(past_all, axis=0)
 
 
+def _hybrid_norm_from_run_metadata(run: Any) -> Optional[Dict[str, np.ndarray]]:
+    """If ckpt metadata has hybrid flat dsnorm, return binary mean/std from it."""
+    meta = getattr(run, "metadata", None) or {}
+    if not isinstance(meta, dict) or not meta.get("hybrid_flat_dataset_norm"):
+        return None
+    if "norm_mean" not in meta or "norm_std" not in meta:
+        raise RuntimeError(
+            f"{getattr(run, 'dataset', '?')}: hybrid_flat_dataset_norm metadata "
+            "missing norm_mean/norm_std"
+        )
+    mean = np.asarray(meta["norm_mean"], dtype=np.float64).reshape(-1)
+    std = np.asarray(meta["norm_std"], dtype=np.float64).reshape(-1)
+    if mean.shape != std.shape or mean.size == 0:
+        raise RuntimeError(
+            f"{getattr(run, 'dataset', '?')}: bad hybrid norm_mean/norm_std shapes "
+            f"{mean.shape} / {std.shape}"
+        )
+    if not np.isfinite(mean).all() or not np.isfinite(std).all() or (std <= 0).any():
+        raise RuntimeError(
+            f"{getattr(run, 'dataset', '?')}: non-finite or non-positive hybrid norm_std"
+        )
+    return {"mean": mean, "std": std}
+
+
 def binary_mmpd_train_scaler_map(args: argparse.Namespace, run: Any) -> Dict[str, np.ndarray]:
     """Read the two training-set scalers that define the output coordinates.
 
@@ -448,19 +472,31 @@ def binary_mmpd_train_scaler_map(args: argparse.Namespace, run: Any) -> Dict[str
     function intentionally never looks at selected evaluation targets: it
     derives the conversion solely from the scalers used to train/evaluate the
     two models.
+
+    When the binary ckpt metadata records ``hybrid_flat_dataset_norm``, prefer
+    persisted ``norm_mean`` / ``norm_std`` (coverage scales for flat variates)
+    over re-deriving via ``load_dataset`` — rematerialization must match train.
     """
     lookback, horizon = dataset_window_lengths_for_run(args, run)
-    _pool, _starts, _splits, _lengths, binary_stats = load_tsf_pack_pool(
-        run.dataset,
-        run_variate_indices(run),
-        lookback=lookback,
-        horizon=horizon,
-        train_stride=run_train_stride(run),
-        test_stride=run_test_stride(run),
-        pack_splits=("test",),
-    )
-    binary_mean = np.asarray(binary_stats["mean"], dtype=np.float64).reshape(-1)
-    binary_std = np.asarray(binary_stats["std"], dtype=np.float64).reshape(-1)
+    n_vars = len(run_variate_indices(run))
+    binary_mean: Optional[np.ndarray] = None
+    binary_std: Optional[np.ndarray] = None
+    meta_hybrid = _hybrid_norm_from_run_metadata(run)
+    if meta_hybrid is not None:
+        binary_mean = meta_hybrid["mean"]
+        binary_std = meta_hybrid["std"]
+    else:
+        _pool, _starts, _splits, _lengths, binary_stats = load_tsf_pack_pool(
+            run.dataset,
+            run_variate_indices(run),
+            lookback=lookback,
+            horizon=horizon,
+            train_stride=run_train_stride(run),
+            test_stride=run_test_stride(run),
+            pack_splits=("test",),
+        )
+        binary_mean = np.asarray(binary_stats["mean"], dtype=np.float64).reshape(-1)
+        binary_std = np.asarray(binary_stats["std"], dtype=np.float64).reshape(-1)
 
     csv_path = Path(args.mmpd_data_dir) / mmpd_staged_filename_for_run(run)
     meta_path = csv_path.with_suffix(csv_path.suffix + ".meta.json")
@@ -475,7 +511,6 @@ def binary_mmpd_train_scaler_map(args: argparse.Namespace, run: Any) -> Dict[str
     raw_train = frame.iloc[:train_rows, 1:].to_numpy(dtype=np.float64, copy=True)
     mmpd_mean = raw_train.mean(axis=0)
     mmpd_std = raw_train.std(axis=0)
-    n_vars = len(run_variate_indices(run))
     for name, values in (
         ("binary_mean", binary_mean),
         ("binary_std", binary_std),
@@ -715,6 +750,8 @@ def window_time_bounds(
     *,
     series_starts: Optional[Sequence[int]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    # Prefer absolute [start, end) from series_starts + lookback+horizon;
+    # else fall back to index * test_stride (less accurate for purged splits).
     if series_starts is not None:
         starts = np.asarray(series_starts, dtype=np.int64)
         if starts.shape[0] != len(indices):
@@ -756,6 +793,30 @@ def _purge_nonoverlapping(
     return np.asarray(kept, dtype=np.int64)
 
 
+def apply_disc_pack_protocol(args: argparse.Namespace) -> List[str]:
+    """Normalize ``--pack-splits``; default val+test → train 0.8 / val 0 / test 0.2.
+
+    If pack is ``val,test`` (any order) and fractions are still the legacy
+    ``0.7/0.15`` defaults, switch to ``train_fraction=0.8``, ``val_fraction=0``
+    (test ≈ 0.2; early-stop val carved from train in ``split_windows``).
+    Explicit ``--train-fraction`` / ``--val-fraction`` overrides are kept.
+    """
+    splits = parse_pack_splits(getattr(args, "pack_splits", None))
+    args.pack_splits = ",".join(splits)
+    if set(splits) == {"val", "test"}:
+        train_f = float(getattr(args, "train_fraction", 0.7))
+        val_f = float(getattr(args, "val_fraction", 0.15))
+        if abs(train_f - 0.7) < 1e-12 and abs(val_f - 0.15) < 1e-12:
+            args.train_fraction = 0.8
+            args.val_fraction = 0.0
+            print(
+                "[split] pack_splits=val,test → defaulting train/val frac to "
+                "0.8/0.0 (test≈0.2; early-stop val = last 10% of purged train)",
+                flush=True,
+            )
+    return splits
+
+
 def split_windows(
     n_windows: int,
     args: argparse.Namespace,
@@ -767,6 +828,17 @@ def split_windows(
     test_stride: Optional[int] = None,
     series_starts: Optional[Sequence[int]] = None,
 ) -> Dict[str, np.ndarray]:
+    """Chronological disc train/val/test with hard purge vs the held-out test tail.
+
+    Default ablation pack is paper **test** only; the 70/15/15 fractions here carve
+    that pack, not the paper train/val/test borders. Train↔test absolute overlap is
+    forbidden; train↔val overlap inside the purged pool is allowed on purpose.
+
+    ``val_fraction <= 0`` (e.g. ``--train-fraction 0.8 --val-fraction 0`` with
+    ``--pack-splits val,test``): last ``1 - train_fraction`` of the pack is test;
+    early-stop val is the last 10% of the purged train pool (≈72/8/20 when
+    train_fraction=0.8). Does not touch the final test tail.
+    """
     if args.max_windows is not None:
         n_windows = min(n_windows, int(args.max_windows))
     if indices is None or lookback is None or horizon is None or test_stride is None:
@@ -784,18 +856,37 @@ def split_windows(
         int(test_stride),
         series_starts=starts_all,
     )
-    order = np.argsort(starts, kind="mergesort")
-    n_train_target = max(1, int(round(len(order) * args.train_fraction)))
-    n_val_target = max(1, int(round(len(order) * args.val_fraction)))
-    if n_train_target + n_val_target >= len(order):
-        n_val_target = max(1, len(order) - n_train_target - 1)
-    n_test = len(order) - n_train_target - n_val_target
+    order = np.argsort(starts, kind="mergesort")  # chronological by past start
+    train_frac = float(args.train_fraction)
+    val_frac = float(args.val_fraction)
+
+    if val_frac <= 0:
+        # 80/20-style: test = last (1 - train_frac); val carved from train pool.
+        if not (0.0 < train_frac < 1.0):
+            raise ValueError(f"train_fraction must be in (0,1) when val_fraction<=0, got {train_frac}")
+        n_test = max(1, int(round(len(order) * (1.0 - train_frac))))
+        if n_test >= len(order) - 1:
+            raise ValueError(
+                f"not enough windows for train/test split: pack={len(order)} n_test={n_test}"
+            )
+        n_train_target = len(order) - n_test
+        n_val_target = 0
+        mode = "80/20+val_from_train"
+    else:
+        # Target sizes from --train-fraction / --val-fraction (default 0.7 / 0.15).
+        n_train_target = max(1, int(round(len(order) * train_frac)))
+        n_val_target = max(1, int(round(len(order) * val_frac)))
+        if n_train_target + n_val_target >= len(order):
+            n_val_target = max(1, len(order) - n_train_target - 1)
+        n_test = len(order) - n_train_target - n_val_target
+        mode = "train/val/test fractions"
     if n_test < 1:
         raise ValueError(f"not enough windows for train/val/test split: {len(order)}")
 
-    test = order[-n_test:]
+    test = order[-n_test:]  # latest windows → disc test
     test_start = int(starts[test].min())
-    # Hold out anything whose span reaches into the test region. No silent fallback.
+    # HARD PURGE: drop any earlier window whose span reaches into test region.
+    # No silent “allow overlap with test” fallback.
     train_val_pool = np.asarray(
         [idx for idx in order[:-n_test] if int(ends[idx]) <= test_start],
         dtype=np.int64,
@@ -810,8 +901,14 @@ def split_windows(
 
     # Allow overlap *within* train and within val (needed at lb336/hz720). The leak we
     # kill is train/val ↔ test absolute-time overlap, not within-split density.
-    val_ratio = args.val_fraction / max(args.train_fraction + args.val_fraction, 1e-8)
-    n_val = max(1, int(round(len(train_val_pool) * val_ratio)))
+    # Note: under unique_abs, train↔val may still share absolute [T,T+L) — that would
+    # tend to inflate val metrics if anything, not explain chance test AUROC.
+    if val_frac <= 0:
+        # Last 10% of purged train pool → early-stop val; rest → train.
+        n_val = max(1, int(round(len(train_val_pool) * 0.1)))
+    else:
+        val_ratio = val_frac / max(train_frac + val_frac, 1e-8)
+        n_val = max(1, int(round(len(train_val_pool) * val_ratio)))
     if n_val >= len(train_val_pool):
         n_val = len(train_val_pool) - 1
     # Chronological train then val within the purged pool.
@@ -822,7 +919,7 @@ def split_windows(
     print(
         f"[split] {dataset}: pack={len(order)} -> train/val/test="
         f"{len(train)}/{len(val)}/{len(test)} "
-        f"(raw targets {n_train_target}/{n_val_target}/{n_test}; "
+        f"(raw targets {n_train_target}/{n_val_target}/{n_test}; mode={mode}; "
         f"test_start={test_start}; train/val purged vs test only)",
         flush=True,
     )
@@ -847,6 +944,12 @@ def zscore_time(x: np.ndarray) -> np.ndarray:
 
 
 class HorizonSliceDataset(Dataset):
+    """Dense multivariate real-vs-fake slices (legacy / texture-disc path).
+
+    Not what the unique_abs L8/L16 ablation trains — that uses
+    ``UnivariateRealVsFakeDataset`` in ``eval_discriminator_binary_vs_mmpd_univariate``.
+    """
+
     def __init__(
         self,
         past: np.ndarray,
@@ -915,6 +1018,12 @@ class HorizonSliceDataset(Dataset):
 
 
 class InvertedSliceDiscriminator(nn.Module):
+    """iTransformer-style disc: linear over time → token dim, then TransformerEncoder.
+
+    Univariate ablation feeds C=1 → effectively one token + optional offset emb
+    (fine for L=8/16). Output logit is P(fake).
+    """
+
     def __init__(
         self,
         seq_len: int,
@@ -929,6 +1038,7 @@ class InvertedSliceDiscriminator(nn.Module):
     ) -> None:
         super().__init__()
         self.use_offset_embedding = bool(use_offset_embedding)
+        # Linear over time length → token dim (variates are tokens).
         self.value_embedding = nn.Linear(seq_len, d_model)
         self.offset_embedding = (
             nn.Embedding(max_offset + 1, d_model) if self.use_offset_embedding else None
@@ -958,10 +1068,12 @@ class InvertedSliceDiscriminator(nn.Module):
             tokens = tokens + self.offset_embedding(offsets).unsqueeze(1)
         tokens = self.encoder(tokens)
         pooled = self.norm(tokens).mean(dim=1)
-        return self.head(pooled).squeeze(-1)
+        return self.head(pooled).squeeze(-1)  # logit P(fake)
+
 
 
 def binary_auroc(labels: np.ndarray, scores: np.ndarray) -> float:
+    """Mann–Whitney AUROC on P(fake) vs labels (ties averaged). Chance = 0.5."""
     labels = labels.astype(np.int64)
     pos = labels == 1
     neg = labels == 0
@@ -1000,6 +1112,7 @@ def window_level_metrics(
 
     Univariate disc emits one example per variate — pass ``variates`` so the
     key is ``(window, variate, label)`` and we do **not** pool across series.
+    Under unique_abs there is usually ~1 offset per key → nearly equals example AUROC.
     """
     keys: Dict[Tuple[Any, ...], List[float]] = {}
     if variates is None:

@@ -138,26 +138,6 @@ if [[ "$ORDINAL_DISC_MODE" -eq 1 ]]; then
     exit 0
 fi
 
-if [[ "${GRID_EVAL_PATCH_REFINE:-0}" -eq 1 ]]; then
-    [[ -n "${GRID_DATASET:-}" ]] || { echo "ERROR: GRID_DATASET is unset" >&2; exit 1; }
-    [[ -n "${GRID_EXISTING_CKPT:-}" ]] || { echo "ERROR: GRID_EXISTING_CKPT is unset" >&2; exit 1; }
-    [[ -n "${GRID_DISC_OUTPUT:-}" ]] || { echo "ERROR: GRID_DISC_OUTPUT is unset" >&2; exit 1; }
-    [[ -d "$GRID_EXISTING_CKPT" ]] || { echo "ERROR: checkpoint root missing: $GRID_EXISTING_CKPT" >&2; exit 1; }
-
-    echo "$(ts) [eval] fixed h96 patch-refine checkpoint: $GRID_EXISTING_CKPT"
-    echo "$(ts) [eval] discriminator output: $GRID_DISC_OUTPUT"
-    python -u temp/eval_univariate_patch_refine_vs_gt.py \
-        --datasets "$GRID_DATASET" \
-        --checkpoint-dir "$GRID_EXISTING_CKPT" \
-        --output-dir "$GRID_DISC_OUTPUT" \
-        --test-stride 4 \
-        --slice-lengths 8 16 32 \
-        --force-raw-eval \
-        --force-train
-    echo "$(ts) Done"
-    exit 0
-fi
-
 DATE_STR="${GRID_DATE_STR:-$(date +%m-%d)}"
 DS="${GRID_DATASET:-unknown}"
 CFG_NAME="${GRID_CFG_NAME:-run}"

@@ -92,7 +92,11 @@ def bin_center_shift(
     reduce: ReduceMode = "per_variate",
     integer_shift: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
-    """Zero-mean in centered bin coords; remap to ladder levels. Additive only."""
+    """Zero-mean in centered bin coords; remap to ladder levels. Additive only.
+
+    If fakes are mostly “right shape, wrong level,” this + candidate_only L=8
+    can erase the usable cue — deliberate for texture-focused protocol.
+    """
     vals = np.asarray(values, dtype=np.float32)
     levels = np.asarray(legal_levels, dtype=np.float32)
     n_rows = int(levels.shape[-1])
@@ -100,7 +104,7 @@ def bin_center_shift(
         raise ValueError("empty ladder")
 
     raw = nearest_bin_indices(vals, levels)
-    center = center_bin_index(levels)  # (N,V)
+    center = center_bin_index(levels)  # (N,V) — ladder row nearest dataset-z 0
     center_b = center[:, :, None]
     centered = raw.astype(np.int64) - center_b
     mean_c = _mean_centered(centered, reduce=reduce)
@@ -114,6 +118,7 @@ def bin_center_shift(
     raw_new = centered_new + center_b
     clamped = np.clip(raw_new, 0, n_rows - 1)
     n_clamped = int(np.sum(clamped != raw_new))
+    # Remap shifted bin indices back onto the same window-specific ladder.
     shifted = np.take_along_axis(levels[:, :, None, :], clamped[..., None], axis=-1)[..., 0]
 
     raw_after = nearest_bin_indices(shifted, levels)

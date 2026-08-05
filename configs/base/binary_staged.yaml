@@ -63,6 +63,16 @@ experiment:
   dataset: ETTh1
   n_variates: 7
   seed: 42
+  seeds: [42]
+  ckpt_config: null
+  walltime: "3:00:00"
+  existing_ckpt_roots: {}
+  mmpd_root: "datasets/mmpd"
+  ordinal_disc_evaluator: "temp/scripts/eval_univariate_patch_refine_ordinal_vs_mmpd.py"
+  ordinal_binary_config: "configs/binary_patch_refine_lb336_hz96_ordinal_tuned.yaml"
+  disc_run: null
+  raw_run: null
+  slice_lengths: [8, 16, 32]
   diffusion_type: binary
   model_type: dit
   image_height: 16
@@ -87,6 +97,14 @@ experiment:
   window_norm_std_floor: 0.1
   window_norm_center: mean
   dit_patch_size: [8, 8]
+  dit_cond_patch_size: [8, 8]
+  patch_refine_canvas_height: 256
+  patch_refine_patch_height: 32
+  patch_refine_patch_width: 8
+  patch_refine_col_stride: 6
+  patch_refine_unique_segments: false
+  patch_refine_prev_cond_dropout: 0.5
+  patch_refine_finetune_window_fraction: 1.0
   dit_embed_dim: 384
   dit_depth: 8
   dit_num_heads: 6
@@ -132,17 +150,85 @@ experiment:
   min_snr_gamma: 5.0
   use_coordinate_channel: true
   window_stride: 1
-  data_subset:
-    enabled: true
-    target_dataset: ETTh1
-    reduce_if_larger_than_target: true
-    max_variates: 7
-    max_variates_by_dataset:
-      ETTm1: 4
-      weather: 4
-      solar_Alabama: 2
-    variate_strategy: first
-    subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
+  data_subset_by_dataset:
+    ETTh1:
+      variate_indices: [0, 1, 2, 3, 4, 5, 6]
+      n_variates: 7
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+    ETTh2:
+      variate_indices: [0, 1, 2, 3, 4, 5, 6]
+      n_variates: 7
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+    ETTm1:
+      variate_indices: [0, 1, 2, 3]
+      n_variates: 4
+      train_stride: 3
+      val_stride: 3
+      test_stride: 1
+    ETTm2:
+      variate_indices: [0, 1, 2, 3, 4, 5, 6]
+      n_variates: 7
+      train_stride: 4
+      val_stride: 4
+      test_stride: 1
+    illness:
+      variate_indices: [0, 1, 2, 3, 4, 5, 6]
+      n_variates: 7
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+    exchange_rate:
+      variate_indices: [0, 1, 2, 3, 4, 5, 6, 7]
+      n_variates: 8
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+    weather:
+      variate_indices: [0, 1, 2, 3]
+      n_variates: 4
+      train_stride: 2
+      val_stride: 2
+      test_stride: 1
+    electricity:
+      variate_indices: [0, 1, 2, 3]
+      n_variates: 4
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+    traffic:
+      variate_indices: [0, 1, 2, 3]
+      n_variates: 4
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+    PeMS:
+      variate_indices: [0, 1, 2, 3, 4, 5, 6]
+      n_variates: 7
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+    solar_Alabama:
+      variate_indices: [0, 1]
+      n_variates: 2
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+    dynamic:
+      variate_indices: [0, 1, 2, 3, 4, 5, 6]
+      n_variates: 7
+      train_stride: 60
+      val_stride: 60
+      test_stride: 480
+    coverage_synth:
+      variate_indices: [0, 1, 2, 3, 4, 5, 6]
+      n_variates: 7
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
 
 phases:
   - phase: staged_diffusion_pretrain

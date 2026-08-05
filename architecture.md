@@ -225,7 +225,7 @@ The sections below are aimed at developers and coding assistants working in the 
 | `binary_anchor_input_mode` | `stationary_flat` | flat `0.5` XOR anchor |
 | Guidance | usually off for these leaves | `use_guidance_channel: false` |
 | MMPD match | Decoder, same lb/hz/subset | `configs/mmpd_decoder_flat_subsets_paper_lb336_hz96_matched_binary.yaml` |
-| Coverage / dead-code probe | tiny synthetic DAG under coverage.py | `temp/submit_pipeline_coverage_deadcode.sh` |
+| Coverage / dead-code probe | tiny synthetic DAG under coverage.py | `temp/scripts/submit_pipeline_coverage_deadcode.sh` |
 
 ---
 
@@ -237,7 +237,7 @@ The sections below are aimed at developers and coding assistants working in the 
 | CLI entry | `models/diffusion_tsf/train_multivariate_pipeline.py` |
 | Model | `models/diffusion_tsf/diffusion_model.py`, `dit.py`, `diffusion.py`, `preprocessing.py` |
 | Config | `models/diffusion_tsf/pipeline/config.py`, `configs/base/binary_staged.yaml` |
-| Submit | `submit_binary.sh` / `submit_mmpd.sh`; leaf YAML under `configs/`. Diagnostic probes may live under `temp/` (e.g. coverage dead-code). |
+| Submit | `submit_binary.sh` / `submit_mmpd.sh`; leaf YAML under `configs/`. Diagnostic probes may live under `temp/scripts/` (e.g. coverage dead-code). |
 | Patch refine | `models/diffusion_tsf/patch_refine_geometry.py`, `patch_refine_segments.py` |
 | Ordinal norm | `models/diffusion_tsf/ordinal_window_norm.py` |
 | Guidance (optional) | `models/diffusion_tsf/guidance.py`, patch-decoder stack |
@@ -247,7 +247,7 @@ The sections below are aimed at developers and coding assistants working in the 
 - Login node: **`./submit_binary.sh`** or **`./submit_mmpd.sh` only** for training/eval campaigns. Compute worker for binary is `slurm_worker.sh` (do not sbatch it by hand for normal runs).
 - Experiment variants are **leaf YAMLs** under `configs/`, not new shell wrappers. `--configs` / `--mmpd-run-config` accept bare stems (`foo` → `configs/foo.yaml`), paths, or globs.
 - Geometry (lookback / horizon) and HPs live in YAML. Prefer a new leaf config over CLI sprawl.
-- Dead-code / coverage probe: `./temp/submit_pipeline_coverage_deadcode.sh` (not a third train entrypoint).
+- Dead-code / coverage probe: `./temp/scripts/submit_pipeline_coverage_deadcode.sh` (not a third train entrypoint).
 
 ---
 

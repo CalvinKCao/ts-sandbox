@@ -65,7 +65,12 @@ def snap_to_patch_refine_levels(
     values: np.ndarray,
     legal_levels: np.ndarray,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
-    """Nearest-row snap in binary dataset-z coordinates, with endpoint clamp."""
+    """Nearest-row snap in binary dataset-z coordinates, with endpoint clamp.
+
+    Puts GT / binary / MMPD on one discrete alphabet. Continuous quirks that
+    lived between rungs disappear — fair for lattice disc, destructive for
+    sub-bin distinguishability.
+    """
     vals = np.asarray(values, dtype=np.float32)
     levels = np.asarray(legal_levels, dtype=np.float32)
     if vals.ndim != 3 or levels.ndim != 3:

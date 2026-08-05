@@ -12,10 +12,8 @@
 #   ./submit_binary.sh --configs configs/binary_anchor.yaml --datasets ETTh1,exchange_rate
 #   ./submit_binary.sh --smoke
 #   ./submit_binary.sh --resume --configs binary_dual_scale_staged --datasets ETTh1
-#   ./submit_binary.sh --parallel-optuna 4 --configs binary_dual_scale_staged --datasets ETTh1
 #
 # --configs accepts comma-separated paths, globs, or bare stems under configs/*.yaml.
-# Do NOT add new submit_*.sh wrappers for minor YAML variants — use this script.
 # =============================================================================
 
 set -euo pipefail
@@ -31,8 +29,6 @@ DEPENDENCY=""
 WANDB_PROJECT=""
 WANDB_PROJECT_EXPLICIT=0
 WALL_OVERRIDE=""
-PARALLEL_OPTUNA=""
-EVAL_EXISTING_PATCH_REFINE=0
 EXISTING_CKPT_ROOTS=""
 DISC_RUN=""
 ORDINAL_SLICE_LENGTHS="8;16;32"
@@ -41,10 +37,11 @@ RAW_RUN=""
 JOB_MANIFEST=""
 EVAL_ORDINAL_PATCH_REFINE_MMPD=0
 MMPD_ROOT=""
-ORDINAL_DISC_EVALUATOR="temp/eval_univariate_patch_refine_ordinal_vs_mmpd.py"
+ORDINAL_DISC_EVALUATOR="temp/scripts/eval_univariate_patch_refine_ordinal_vs_mmpd.py"
 ORDINAL_BINARY_CONFIG="configs/binary_patch_refine_lb336_hz96_ordinal_tuned.yaml"
 DEFER_CHECKPOINT_CHECK=0
-ORDINAL_ASSERT_ONLY=0
+N_VARIATES=""
+
 if [[ "$(hostname)" == *"narval"* ]]; then
     ACCOUNT="def-boyuwang"
     GPU_TYPE="a100"
@@ -52,11 +49,11 @@ else
     ACCOUNT="aip-boyuwang"
     GPU_TYPE="l40s"
 fi
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --configs|--config) CONFIGS="$2"; shift 2 ;;
         --datasets) DATASETS="$2"; shift 2 ;;
-        --n-variates) N_VARIATES="$2"; shift 2 ;;
         --seeds) SEEDS="$2"; shift 2 ;;
         --smoke|--smoke-test) SMOKE=1; shift ;;
         --resume) RESUME=1; shift ;;
@@ -64,8 +61,6 @@ while [[ $# -gt 0 ]]; do
         --dependency) DEPENDENCY="$2"; shift 2 ;;
         --wandb-project) WANDB_PROJECT="$2"; WANDB_PROJECT_EXPLICIT=1; shift 2 ;;
         --time) WALL_OVERRIDE="$2"; shift 2 ;;
-        --parallel-optuna) PARALLEL_OPTUNA="$2"; shift 2 ;;
-        --eval-existing-patch-refine) EVAL_EXISTING_PATCH_REFINE=1; shift ;;
         --existing-ckpt-roots) EXISTING_CKPT_ROOTS="$2"; shift 2 ;;
         --disc-run) DISC_RUN="$2"; shift 2 ;;
         --raw-run) RAW_RUN="$2"; shift 2 ;;
@@ -75,7 +70,6 @@ while [[ $# -gt 0 ]]; do
         --ordinal-disc-evaluator) ORDINAL_DISC_EVALUATOR="$2"; shift 2 ;;
         --ordinal-binary-config) ORDINAL_BINARY_CONFIG="$2"; shift 2 ;;
         --defer-checkpoint-check) DEFER_CHECKPOINT_CHECK=1; shift ;;
-        --ordinal-assert-only) ORDINAL_ASSERT_ONLY=1; shift ;;
         --slice-lengths) ORDINAL_SLICE_LENGTHS="${2//,/;}" ; ORDINAL_SLICE_LENGTHS="${ORDINAL_SLICE_LENGTHS// /;}"; shift 2 ;;
         --exclude) SBATCH_EXCLUDE_NODES="$2"; shift 2 ;;
         --gpu) GPU_TYPE="$2"; shift 2 ;;
@@ -84,13 +78,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 manifest_tool() {
-    python3 "$SCRIPT_DIR/temp/submission_manifest.py" "$@"
+    python3 "$SCRIPT_DIR/temp/scripts/submission_manifest.py" "$@"
 }
 
-# Deferred h96 ordinal patch-refine discriminator. This mode exists for
-# campaign DAGs: forecast checkpoints are expected outputs of afterok parents,
-# so their presence is checked by the compute worker rather than prematurely
-# on the login node. Normal fixed-checkpoint mode below remains strict.
+# Deferred h96 ordinal patch-refine discriminator mode.
 if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
     [[ -n "$EXISTING_CKPT_ROOTS" ]] || {
         echo "ERROR: --eval-ordinal-patch-refine-vs-mmpd requires --existing-ckpt-roots dataset=run,..." >&2
@@ -104,8 +95,8 @@ if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
         echo "ERROR: --eval-ordinal-patch-refine-vs-mmpd requires --ordinal-binary-config" >&2
         exit 1
     }
-    [[ -z "$CONFIGS" && "$RESUME" -eq 0 && "$SMOKE" -eq 0 && -z "$PARALLEL_OPTUNA" ]] || {
-        echo "ERROR: ordinal patch-refine discriminator mode does not accept --configs, --resume, --smoke, or --parallel-optuna" >&2
+    [[ -z "$CONFIGS" && "$RESUME" -eq 0 && "$SMOKE" -eq 0 ]] || {
+        echo "ERROR: ordinal patch-refine discriminator mode does not accept --configs, --resume, or --smoke" >&2
         exit 1
     }
     [[ "$DEFER_CHECKPOINT_CHECK" -eq 1 ]] || {
@@ -156,9 +147,7 @@ if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
     RAW_OUTPUT="$STORE/datasets/$RAW_RUN"
     MANIFEST_PATH="${JOB_MANIFEST:-$DISC_OUTPUT/submission_manifest.json}"
     [[ "$MANIFEST_PATH" == /* ]] || MANIFEST_PATH="$SCRIPT_DIR/$MANIFEST_PATH"
-    MANIFEST_COMPONENT="ordinal_patch_refine_discriminator"
-    [[ "$ORDINAL_ASSERT_ONLY" -eq 0 ]] || MANIFEST_COMPONENT="ordinal_patch_refine_assertion"
-    manifest_tool init --path "$MANIFEST_PATH" --component "$MANIFEST_COMPONENT" \
+    manifest_tool init --path "$MANIFEST_PATH" --component "ordinal_patch_refine_discriminator" \
         --repo "$SCRIPT_DIR" --datasets "$DATASETS" \
         --set "mmpd_root=$MMPD_ROOT" --set "output_dir=$DISC_OUTPUT" --set "raw_eval_dir=$RAW_OUTPUT" \
         --set "evaluator=$ORDINAL_DISC_EVALUATOR" --set "binary_config=$ORDINAL_BINARY_CONFIG"
@@ -178,7 +167,6 @@ if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
     for dataset_name in "${EVAL_DATASETS[@]}"; do
         checkpoint_root="${ROOT_BY_DATASET[$dataset_name]}"
         job_label="disc-opr96"
-        [[ "$ORDINAL_ASSERT_ONLY" -eq 0 ]] || job_label="assert-opr96"
         job_id=$(sbatch --parsable \
             --job-name="${job_label}-${dataset_name}" \
             --account="$ACCOUNT" --time="$WALL" --nodes=1 "$GPU_ARG" \
@@ -188,18 +176,13 @@ if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
             --output="$LOG_DIR/${job_label}-${dataset_name}-%j.log" \
             --error="$LOG_DIR/${job_label}-${dataset_name}-%j.log" \
             --mail-type=FAIL --mail-user="${USER_NAME}@uwo.ca" \
-            --export=ALL,GRID_EVAL_ORDINAL_PATCH_REFINE_MMPD=1,GRID_ORDINAL_ASSERT_ONLY="$ORDINAL_ASSERT_ONLY",GRID_DATASET="$dataset_name",GRID_EXISTING_CKPT="$checkpoint_root",GRID_MMPD_ROOT="$MMPD_ROOT",GRID_DISC_OUTPUT="$DISC_OUTPUT",GRID_RAW_DISC_OUTPUT="$RAW_OUTPUT",GRID_ORDINAL_DISC_EVALUATOR="$ORDINAL_DISC_EVALUATOR",GRID_ORDINAL_BINARY_CONFIG="$ORDINAL_BINARY_CONFIG",GRID_SLICE_LENGTHS="$ORDINAL_SLICE_LENGTHS" \
+            --export=ALL,GRID_EVAL_ORDINAL_PATCH_REFINE_MMPD=1,GRID_DATASET="$dataset_name",GRID_EXISTING_CKPT="$checkpoint_root",GRID_MMPD_ROOT="$MMPD_ROOT",GRID_DISC_OUTPUT="$DISC_OUTPUT",GRID_RAW_DISC_OUTPUT="$RAW_OUTPUT",GRID_ORDINAL_DISC_EVALUATOR="$ORDINAL_DISC_EVALUATOR",GRID_ORDINAL_BINARY_CONFIG="$ORDINAL_BINARY_CONFIG",GRID_SLICE_LENGTHS="$ORDINAL_SLICE_LENGTHS" \
             "$SCRIPT_DIR/slurm_worker.sh")
-        manifest_role="ordinal_disc"
-        [[ "$ORDINAL_ASSERT_ONLY" -eq 0 ]] || manifest_role="ordinal_assert"
-        manifest_tool record --path "$MANIFEST_PATH" --role "$manifest_role" --dataset "$dataset_name" --job-id "$job_id" \
+        manifest_tool record --path "$MANIFEST_PATH" --role "ordinal_disc" --dataset "$dataset_name" --job-id "$job_id" \
             --set "checkpoint_root=$checkpoint_root"
         DISC_JOB_IDS+=("$job_id")
     done
-    if [[ "$ORDINAL_ASSERT_ONLY" -eq 1 ]]; then
-        echo "ordinal patch-refine assertion manifest: $MANIFEST_PATH"
-        exit 0
-    fi
+
     disc_dep="afterok:${DISC_JOB_IDS[0]}"
     for job_id in "${DISC_JOB_IDS[@]:1}"; do disc_dep+=":$job_id"; done
     merge_id=$(sbatch --parsable \
@@ -211,98 +194,6 @@ if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
         "$SCRIPT_DIR/slurm_worker.sh")
     manifest_tool record --path "$MANIFEST_PATH" --role ordinal_disc_merge --job-id "$merge_id"
     echo "ordinal patch-refine discriminator manifest: $MANIFEST_PATH"
-    exit 0
-fi
-
-# Fixed-checkpoint h96 discriminator mode.  This deliberately bypasses the
-# training pipeline: the only model fit is the discriminator inside the eval.
-if [[ "$EVAL_EXISTING_PATCH_REFINE" -eq 1 ]]; then
-    [[ -n "$EXISTING_CKPT_ROOTS" ]] || {
-        echo "ERROR: --eval-existing-patch-refine requires --existing-ckpt-roots dataset=/absolute/or/relative/run,..." >&2
-        exit 1
-    }
-    [[ -z "$CONFIGS" ]] || {
-        echo "ERROR: --configs is not used with --eval-existing-patch-refine" >&2
-        exit 1
-    }
-    [[ "$RESUME" -eq 0 && "$SMOKE" -eq 0 && -z "$PARALLEL_OPTUNA" ]] || {
-        echo "ERROR: --resume, --smoke, and --parallel-optuna are not valid with --eval-existing-patch-refine" >&2
-        exit 1
-    }
-
-    STORE="${RESULTS_ROOT:-$SCRIPT_DIR/results}"
-    LOG_DIR="$STORE/logs"
-    mkdir -p "$LOG_DIR"
-    IFS=',' read -ra EVAL_DATASETS <<< "$DATASETS"
-    IFS=',' read -ra ROOT_PAIRS <<< "$EXISTING_CKPT_ROOTS"
-    declare -A ROOT_BY_DATASET=()
-    for pair in "${ROOT_PAIRS[@]}"; do
-        [[ "$pair" == *=* ]] || {
-            echo "ERROR: invalid --existing-ckpt-roots entry: $pair (expected dataset=path)" >&2
-            exit 1
-        }
-        dataset_key="${pair%%=*}"
-        checkpoint_root="${pair#*=}"
-        [[ -n "$dataset_key" && -n "$checkpoint_root" ]] || {
-            echo "ERROR: invalid --existing-ckpt-roots entry: $pair" >&2
-            exit 1
-        }
-        [[ "$checkpoint_root" == /* ]] || checkpoint_root="$SCRIPT_DIR/$checkpoint_root"
-        ROOT_BY_DATASET["$dataset_key"]="$checkpoint_root"
-    done
-
-    DISC_RUN="${DISC_RUN:-$(date +%m-%d)-patch-refine-h96-existing-disc}"
-    [[ "$DISC_RUN" == /* ]] && {
-        echo "ERROR: --disc-run must be a relative results/datasets run name" >&2
-        exit 1
-    }
-    WALL="${WALL_OVERRIDE:-2:00:00}"
-    USER_NAME="$(whoami)"
-    if [[ "$GPU_TYPE" == a100* || "$GPU_TYPE" == h100* ]]; then
-        GPU_ARG="--gpus=${GPU_TYPE}:1"
-    else
-        GPU_ARG="--gres=gpu:${GPU_TYPE}:1"
-    fi
-
-    echo "Submitting fixed h96 patch-refine discriminator jobs (forecast checkpoints are read-only)."
-    for dataset_name in "${EVAL_DATASETS[@]}"; do
-        checkpoint_root="${ROOT_BY_DATASET[$dataset_name]:-}"
-        [[ -n "$checkpoint_root" ]] || {
-            echo "ERROR: no checkpoint root provided for dataset $dataset_name" >&2
-            exit 1
-        }
-        subset_name="$dataset_name"
-        [[ "$dataset_name" == traffic ]] && subset_name="traffic_4v_s1"
-        [[ -f "$checkpoint_root/$subset_name/coarse/best.pt" ]] || {
-            echo "ERROR: missing coarse checkpoint: $checkpoint_root/$subset_name/coarse/best.pt" >&2
-            exit 1
-        }
-        [[ -f "$checkpoint_root/$subset_name/patch_refine/best.pt" ]] || {
-            echo "ERROR: missing patch_refine checkpoint: $checkpoint_root/$subset_name/patch_refine/best.pt" >&2
-            exit 1
-        }
-        [[ -f "$checkpoint_root/$subset_name/patch_refine/metadata.json" ]] || {
-            echo "ERROR: missing patch_refine metadata: $checkpoint_root/$subset_name/patch_refine/metadata.json" >&2
-            exit 1
-        }
-        output_dir="$STORE/datasets/$DISC_RUN/$dataset_name"
-        job_id=$(sbatch --parsable \
-            --job-name="disc-pr96-${dataset_name}" \
-            --account="$ACCOUNT" \
-            --time="$WALL" \
-            --nodes=1 \
-            "$GPU_ARG" \
-            --cpus-per-task=8 \
-            --mem=50G \
-            --output="$LOG_DIR/disc-pr96-${dataset_name}-%j.log" \
-            --error="$LOG_DIR/disc-pr96-${dataset_name}-%j.log" \
-            --mail-type=FAIL \
-            --mail-user="${USER_NAME}@uwo.ca" \
-            --export=ALL,GRID_EVAL_PATCH_REFINE=1,GRID_DATASET="$dataset_name",GRID_EXISTING_CKPT="$checkpoint_root",GRID_DISC_OUTPUT="$output_dir" \
-            "$SCRIPT_DIR/slurm_worker.sh")
-        echo "  -> $dataset_name: $job_id ($output_dir)"
-    done
-    echo "Monitor with: squeue -u $USER_NAME"
     exit 0
 fi
 
@@ -322,31 +213,15 @@ else
     JOB_PREFIX="grid"
 fi
 
-# Leaderboard default when wandb is enabled and caller did not pass --wandb-project.
 if [[ -n "${WANDB_API_KEY:-}" && "$WANDB_PROJECT_EXPLICIT" -eq 0 ]]; then
     WANDB_PROJECT="ts-sandbox-leaderboard"
     WANDB_PROJECT_EXPLICIT=1
-fi
-
-if [[ -n "$PARALLEL_OPTUNA" ]]; then
-    if [[ "$SMOKE" -eq 1 ]]; then
-        echo "ERROR: --parallel-optuna is not supported with --smoke" >&2
-        exit 1
-    fi
-    if ! [[ "$PARALLEL_OPTUNA" =~ ^[1-9][0-9]*$ ]]; then
-        echo "ERROR: --parallel-optuna requires a positive integer (got: $PARALLEL_OPTUNA)" >&2
-        exit 1
-    fi
-    GPUS="$PARALLEL_OPTUNA"
-    MEM="$((PARALLEL_OPTUNA * 20))G"
-    CPUS="$((PARALLEL_OPTUNA * 2))"
 fi
 
 IFS=',' read -ra CONF_ARR <<< "$CONFIGS"
 IFS=',' read -ra DATA_ARR <<< "$DATASETS"
 IFS=',' read -ra SEED_ARR <<< "$SEEDS"
 
-# Resolve a single config token to a repo-relative path under configs/.
 resolve_config_token() {
     local raw="$1" cand
     raw="${raw#./}"
@@ -405,7 +280,6 @@ CKPT_ROOT="$STORE/ckpts"
 DATA_ROOT="$STORE/datasets"
 mkdir -p "$LOG_DIR" "$CKPT_ROOT" "$DATA_ROOT"
 
-# Resume: find newest ckpts/*-<dataset>-<config> dir; stem is reused for logs/ckpts/datasets.
 pick_resume_stem() {
     local ds="$1" cfg="$2"
     local best="" best_mtime=0 d m
@@ -497,16 +371,15 @@ for CFG in "${CONF_ARR[@]}"; do
             if [[ -n "$DEPENDENCY" ]]; then
                 S_ARGS+=(--dependency="$DEPENDENCY")
             fi
+            if [[ -n "${SBATCH_EXCLUDE_NODES:-}" ]]; then
+                S_ARGS+=(--exclude="$SBATCH_EXCLUDE_NODES")
+            fi
 
             PY_ARGS=(
                 --config "$CFG"
                 --dataset "$DS"
                 --seed "$SD"
             )
-
-            if [[ -n "${N_VARIATES:-}" ]]; then
-                PY_ARGS+=(--n-variates "$N_VARIATES")
-            fi
 
             if [[ -n "${WANDB_API_KEY:-}" ]]; then
                 PY_ARGS+=(--wandb)
@@ -521,10 +394,6 @@ for CFG in "${CONF_ARR[@]}"; do
 
             if [[ "$RESUME" -eq 1 && -n "$RUN_STEM" ]]; then
                 PY_ARGS+=(--resume)
-            fi
-
-            if [[ -n "$PARALLEL_OPTUNA" ]]; then
-                PY_ARGS+=(--parallel-optuna-workers "$PARALLEL_OPTUNA")
             fi
 
             JOB_ID=$(sbatch "${S_ARGS[@]}" "$SCRIPT_DIR/slurm_worker.sh" "${PY_ARGS[@]}")

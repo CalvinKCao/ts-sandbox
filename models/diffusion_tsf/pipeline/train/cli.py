@@ -26,16 +26,13 @@ def main():
     parser = argparse.ArgumentParser(description="Diffusion TSF Training Pipeline")
     parser.add_argument("--config", type=str, required=True, help="YAML experiment config")
     parser.add_argument("--dataset", type=str, default=None, help="Override dataset from YAML")
-    parser.add_argument("--n-variates", type=int, default=None, help="Override variate count")
-    parser.add_argument("--variate-indices", type=str, default=None, help="Comma-separated variate indices")
-    parser.add_argument("--subset-id", type=str, default=None, help="Optional subset id label")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--smoke-test", action="store_true", help="Quick validation run")
     parser.add_argument("--seed", type=int, default=None, help="Override random seed from YAML")
-    parser.add_argument("--parallel-optuna-workers", type=int, default=1, help="Parallel Optuna workers")
     parser.add_argument("--checkpoint-dir", type=str, default=None, help="Override checkpoint directory")
     parser.add_argument("--results-dir", type=str, default=None, help="Override results directory")
     parser.add_argument("--datasets-dir", type=str, default=None, help="Benchmark CSV/NPZ root")
+    parser.add_argument("--subset-id", type=str, default=None, help="Override data subset id")
     parser.add_argument("--synth-cache-dir", type=str, default=None, help="Shared synthetic pool cache")
     parser.add_argument("--fresh", action="store_true", help="Wipe manifest and checkpoints")
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
@@ -47,22 +44,6 @@ def main():
     cli_overrides = {}
     if args.dataset:
         cli_overrides["dataset"] = args.dataset
-
-    nv = args.n_variates
-    variate_indices = None
-    if args.variate_indices:
-        variate_indices = [int(x.strip()) for x in args.variate_indices.split(",") if x.strip()]
-        cli_overrides["variate_indices"] = variate_indices
-        if not nv:
-            nv = len(variate_indices)
-
-    if not nv and args.dataset:
-        try:
-            nv = pipeline_mod.get_dim_for_dataset(args.dataset)
-        except Exception:
-            pass
-    if nv:
-        cli_overrides["n_variates"] = nv
 
     if args.seed is not None:
         cli_overrides["seed"] = args.seed
@@ -83,9 +64,6 @@ def main():
     if args.subset_id:
         cli_overrides["subset_id"] = args.subset_id
 
-    parallel_workers = 1 if args.smoke_test else max(1, int(args.parallel_optuna_workers))
-    cli_overrides["parallel_optuna_workers"] = parallel_workers
-
     cfg = load_experiment_config(args.config, cli_overrides)
     state = PipelineState.from_config(cfg)
     apply_cli_state_overrides(state, cfg)
@@ -104,21 +82,17 @@ def main():
         pipeline_mod.SYNTH_CACHE_DIR = args.synth_cache_dir
     if args.datasets_dir:
         pipeline_mod.DATASETS_DIR = os.path.abspath(args.datasets_dir)
-    if nv:
-        pipeline_mod.N_VARIATES = nv
 
     subset_meta = pipeline_mod.resolve_pipeline_data_subset(state)
-    if subset_meta.get("enabled"):
-        logger.info(
-            "Data subset resolved: %s -> %s vars, train_stride=%s, test_stride=%s, "
-            "raw=%.2f MiB, reduced≈%.2f MiB",
-            state.subset_id,
-            subset_meta.get("n_variates"),
-            subset_meta.get("train_stride"),
-            subset_meta.get("test_stride"),
-            float(subset_meta.get("raw_size_mb") or 0.0),
-            float(subset_meta.get("reduced_size_mb") or 0.0),
-        )
+    pipeline_mod.N_VARIATES = state.n_variates
+    logger.info(
+        "Data subset resolved from YAML: %s -> %s vars, train_stride=%s, val_stride=%s, test_stride=%s",
+        state.subset_id,
+        subset_meta.get("n_variates"),
+        subset_meta.get("train_stride"),
+        subset_meta.get("val_stride"),
+        subset_meta.get("test_stride"),
+    )
 
     phases = []
     for p in cfg["phases"]:

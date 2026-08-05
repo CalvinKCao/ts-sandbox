@@ -129,7 +129,7 @@ cd "$REPO"
 source "$REPO/utils/mmpd_submit_helpers.sh"
 
 manifest_tool() {
-    python3 "$REPO/temp/submission_manifest.py" "$@"
+    python3 "$REPO/temp/scripts/submission_manifest.py" "$@"
 }
 
 MMPD_REPO="$REPO/temp/MMPD"
@@ -185,7 +185,7 @@ if [[ "$EVAL_EXISTING_DISCRIMINATOR" -eq 1 ]]; then
         exit 1
     }
     [[ "$EXISTING_MMPD_ROOT" == /* ]] || EXISTING_MMPD_ROOT="$REPO/$EXISTING_MMPD_ROOT"
-    python3 -u "$REPO/temp/check_mmpd_reused_decoder_root.py" \
+    python3 -u "$REPO/temp/scripts/check_mmpd_reused_decoder_root.py" \
         "$EXISTING_MMPD_ROOT" --datasets "${DATASETS[@]}"
     DISC_RUN="${DISC_RUN:-$(date +%m-%d)-mmpd-h720-existing-disc}"
     RAW_RUN="${RAW_RUN:-${DISC_RUN}-raw}"

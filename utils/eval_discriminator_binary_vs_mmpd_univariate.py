@@ -78,6 +78,10 @@ def _unique_absolute_slice_items(
     ``series_starts[w] + lookback + o`` (past starts at ``series_starts[w]``).
     Overlapping 96-horizons that cover the same ``[T, T+L)`` collapse to one draw —
     same spirit as ``UniquePatchSegmentDataset`` for refine training.
+
+    Dense ``windows × offsets`` (``--no-unique-absolute-slices``) reuses the same
+    absolute L-block under many (window, offset) ids and can inflate AUROC; this
+    path removes that free lunch.
     """
     starts = np.asarray(series_starts, dtype=np.int64)
     if starts.ndim != 1:
@@ -85,23 +89,24 @@ def _unique_absolute_slice_items(
     offsets = list(range(0, int(horizon) - int(slice_len) + 1, max(1, int(offset_stride))))
     if not offsets:
         raise ValueError(f"no offsets for horizon={horizon} slice_len={slice_len}")
-    # (abs_t, variate) -> [(window, offset), ...]
+    # Group all (window, offset) that cover the same absolute future start T.
     groups: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
     for w in windows:
         w = int(w)
         if w < 0 or w >= starts.shape[0]:
             raise ValueError(f"window {w} out of range for series_starts len={starts.shape[0]}")
-        fut0 = int(starts[w]) + int(lookback)
+        fut0 = int(starts[w]) + int(lookback)  # absolute t of horizon step 0
         for o in offsets:
-            abs_t = fut0 + int(o)
+            abs_t = fut0 + int(o)  # absolute t of L-slice start
             for v in range(int(n_var)):
                 groups.setdefault((abs_t, int(v)), []).append((w, int(o)))
     rng = np.random.default_rng(int(seed))
     items: List[Tuple[int, int, int, int]] = []
     for (abs_t, v), parents in groups.items():
+        # Pick one parent window that covers this absolute block; emit real+fake.
         w, o = parents[int(rng.integers(0, len(parents)))]
-        items.append((w, o, v, 0))
-        items.append((w, o, v, 1))
+        items.append((w, o, v, 0))  # real (GT)
+        items.append((w, o, v, 1))  # fake — same (w, o, v)
     rng.shuffle(items)
     return items
 
@@ -198,7 +203,9 @@ class UnivariateRealVsFakeDataset(Dataset):
                 flush=True,
             )
         else:
-            # (window, offset, variate, label)
+            # Dense path: every (window, offset, variate) for real and fake.
+            # With pack-test-stride=4 and H=96 the same absolute L-block is trained
+            # many times under different (window, offset) ids — slow + leaky.
             real_items = [
                 (int(w), int(o), int(v), 0)
                 for w in windows
@@ -228,8 +235,10 @@ class UnivariateRealVsFakeDataset(Dataset):
         seg = np.asarray(segment, dtype=np.float32)
         if self.apply_bin_center_shift:
             assert self.legal_levels is not None
-            levels = self.legal_levels[window, variate : variate + 1, :]  # (1, H)
-            # bin_center_shift expects (N,V,T) / (N,V,H); V=1 for univariate disc.
+            levels = self.legal_levels[window, variate : variate + 1, :]  # (1, canvas_H)
+            # Mean over *this L-slice only*; integer shift in centered bin coords;
+            # remap back onto the same ladder. Strips absolute level/bias; keeps
+            # local step pattern. Applied identically to real and fake.
             shifted, _ = bin_center_shift(
                 seg[None, :, :],
                 levels[None, :, :],
@@ -241,8 +250,10 @@ class UnivariateRealVsFakeDataset(Dataset):
         return seg
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # label 0 = GT (real), 1 = fake — not inverted in the live path.
         window, offset, variate, label = self.items[idx]
         src = self.fake if label == 1 else self.real
+        # Shape (1, L) — one variate; candidate_only → no lookback concat.
         candidate = src[window, variate : variate + 1, offset : offset + self.slice_len]
         if self.include_past:
             past = self.past[window, variate : variate + 1]
@@ -264,12 +275,43 @@ class UnivariateRealVsFakeDataset(Dataset):
         )
 
 
+def per_variate_metrics(
+    labels: np.ndarray,
+    probs: np.ndarray,
+    variates: np.ndarray,
+) -> Dict[str, Dict[str, float]]:
+    """Per-variate disc acc / AUROC on real-vs-fake examples (label 1=fake)."""
+    labels = np.asarray(labels, dtype=np.float64).reshape(-1)
+    probs = np.asarray(probs, dtype=np.float64).reshape(-1)
+    variates = np.asarray(variates, dtype=np.int64).reshape(-1)
+    if not (len(labels) == len(probs) == len(variates)):
+        raise ValueError(
+            f"per_variate_metrics length mismatch: "
+            f"labels={len(labels)} probs={len(probs)} variates={len(variates)}"
+        )
+    preds = (probs >= 0.5).astype(np.float64)
+    out: Dict[str, Dict[str, float]] = {}
+    for v in sorted(set(int(x) for x in variates.tolist())):
+        mask = variates == int(v)
+        y = labels[mask]
+        p = probs[mask]
+        pr = preds[mask]
+        key = str(int(v))
+        out[key] = {
+            "disc_acc": float((pr == y).mean()) if y.size else float("nan"),
+            "disc_auroc": binary_auroc(y, p) if y.size else float("nan"),
+            "n_examples": float(y.size),
+            "positive_rate": float(y.mean()) if y.size else float("nan"),
+        }
+    return out
+
+
 @torch.no_grad()
 def evaluate_classifier(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     model.eval()
     total_loss = 0.0
     total_count = 0
@@ -297,13 +339,21 @@ def evaluate_classifier(
     variates_np = np.concatenate(variates_all)
     probs = 1.0 / (1.0 + np.exp(-logits_np))
     preds = (logits_np >= 0.0).astype(np.float32)
-    out = {
+    # Example-level AUROC: Mann–Whitney on P(fake) vs labels.
+    by_var = per_variate_metrics(labels_np, probs, variates_np)
+    out: Dict[str, Any] = {
         "disc_bce": total_loss / max(1, total_count),
         "disc_acc": float((preds == labels_np).mean()),
         "disc_auroc": binary_auroc(labels_np, probs),
         "n_examples": float(total_count),
         "positive_rate": float(labels_np.mean()),
+        "acc_by_variate": {k: float(v["disc_acc"]) for k, v in by_var.items()},
+        "auroc_by_variate": {k: float(v["disc_auroc"]) for k, v in by_var.items()},
+        "n_by_variate": {k: float(v["n_examples"]) for k, v in by_var.items()},
+        "by_variate": by_var,
     }
+    # Window-level: mean P(fake) over offsets per (window, variate, label).
+    # Under unique_abs there is usually ~1 offset → disc_auroc_window ≈ disc_auroc.
     out.update(
         window_level_metrics(windows_np, labels_np, probs, variates=variates_np)
     )
@@ -339,20 +389,30 @@ def train_classifier(
     bundle: Any,
     splits: Mapping[str, np.ndarray],
     device: torch.device,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     fake = bundle.fakes[fake_source]
     y_true = bundle.y_true_by_source[fake_source]
     horizon = int(y_true.shape[-1])
     n_variates = int(y_true.shape[1])
     max_offset = horizon - slice_len
     seed_base = args.seed + stable_hash(f"{dataset}:{fake_source}:uni:{slice_len}")
+    # Ablation default: candidate_only → include_past=False (L-slice texture only).
     include_past = not bool(getattr(args, "candidate_only", False))
     offset_stride = int(getattr(args, "offset_stride", 1) or 1)
     if bool(getattr(args, "nonoverlapping_patches", False)):
         offset_stride = int(slice_len)
     use_offset_embedding = not bool(getattr(args, "no_offset_embedding", False))
+    # Bin-center replaces zscore on the ablation path.
+    # Fail if both requested; BC on → zscore hard-off; else zscore on (legacy).
     apply_bin_center = bool(getattr(args, "disc_bin_center_shift", False))
-    apply_zscore = not apply_bin_center
+    apply_zscore_flag = bool(getattr(args, "disc_apply_zscore", False))
+    if apply_bin_center and apply_zscore_flag:
+        raise ValueError(
+            "disc_bin_center_shift and disc_apply_zscore are mutually exclusive"
+        )
+    apply_zscore = False if apply_bin_center else True
+    if apply_zscore_flag and not apply_bin_center:
+        apply_zscore = True
     legal_levels = getattr(bundle, "legal_levels", None)
     if apply_bin_center and legal_levels is None:
         raise ValueError(
@@ -379,6 +439,9 @@ def train_classifier(
             "unique_absolute_slices requires bundle.series_starts and args.lookback"
         )
 
+    # Separate datasets per split; unique_abs re-run with seeds seed_base / +1 / +2
+    # so train/val/test each pick their own parent when absolute blocks collide
+    # *within* that split.
     ds_train = UnivariateRealVsFakeDataset(
         y_true, fake, bundle.past, splits["train"], slice_len,
         seed=seed_base, max_examples=args.max_train_examples, **ds_kwargs,
@@ -412,6 +475,7 @@ def train_classifier(
         f"[disc-uni] {dataset}/{fake_source}/L{slice_len}: real-vs-fake univariate "
         f"candidate_only={not include_past} offset_stride={offset_stride} "
         f"offset_emb={use_offset_embedding} seq_len={seq_len} n_variates={n_variates} "
+        f"bin_center={apply_bin_center} zscore={apply_zscore} "
         f"n_train={len(ds_train)} n_val={len(ds_val)} n_test={len(ds_test)}",
         flush=True,
     )
@@ -456,6 +520,7 @@ def train_classifier(
 
         val_metrics = evaluate_classifier(model, val_loader, device)
         train_bce = train_loss / max(1, train_count)
+        # Checkpoint on best val BCE (not AUROC); report test AUROC after restore.
         if val_metrics["disc_bce"] < best_val:
             best_val = val_metrics["disc_bce"]
             best_epoch = epoch + 1
@@ -480,13 +545,18 @@ def train_classifier(
     if best_state is not None:
         model.load_state_dict(best_state)
     test_metrics = evaluate_classifier(model, test_loader, device)
+    # Always collect test scores once (reuse for save + disagreement viz).
+    test_scores = collect_classifier_scores(model, test_loader, device)
 
-    if bool(getattr(args, "save_classification_scores", False)):
+
+    score_path: Optional[Path] = None
+    # Default on: ablation / future disc runs need scores for disagreement viz.
+    if bool(getattr(args, "save_classification_scores", True)):
         score_path = (
             args.output_dir / "scores" / f"{dataset}_{fake_source}_L{slice_len}_test_scores.npz"
         )
         score_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(score_path, **collect_classifier_scores(model, test_loader, device))
+        np.savez_compressed(score_path, **test_scores)
         print(f"[disc-uni] wrote classifier scores {score_path}", flush=True)
 
     if bool(getattr(args, "save_checkpoints", False)):
@@ -508,7 +578,19 @@ def train_classifier(
             ckpt_path,
         )
 
-    return {
+    by_var = test_metrics.get("by_variate") or {}
+    if by_var:
+        parts = [
+            f"v{k}:acc={float(v['disc_acc']):.3f}/auc={float(v['disc_auroc']):.3f}"
+            for k, v in sorted(by_var.items(), key=lambda kv: int(kv[0]))
+        ]
+        print(
+            f"[disc-uni] {dataset}/{fake_source}/L{slice_len} by_variate "
+            f"({' | '.join(parts)})",
+            flush=True,
+        )
+
+    out: Dict[str, Any] = {
         **test_metrics,
         "best_val_bce": float(best_val),
         "best_epoch": float(best_epoch),
@@ -522,7 +604,7 @@ def train_classifier(
         "slice_len": float(slice_len),
         "horizon": float(horizon),
         "n_variates": float(n_variates),
-        "log2_bce_gap": float(abs(test_metrics["disc_bce"] - LOG2)),
+        "log2_bce_gap": float(abs(float(test_metrics["disc_bce"]) - LOG2)),
         "candidate_only": float(1.0 if not include_past else 0.0),
         "offset_stride": float(offset_stride),
         "unique_absolute_slices": float(
@@ -531,7 +613,12 @@ def train_classifier(
         "no_offset_embedding": float(0.0 if use_offset_embedding else 1.0),
         "native_repr_stride": float(getattr(args, "native_repr_stride", 1) or 1),
         "univariate": 1.0,
+        "score_path": str(score_path) if score_path is not None else "",
     }
+    # In-memory scores for callers that want disagreement viz without a reload.
+    if bool(getattr(args, "return_test_scores", False)):
+        out["_test_scores"] = test_scores
+    return out
 
 
 def partial_path(output_dir: Path, dataset: str, fake_source: str) -> Path:
