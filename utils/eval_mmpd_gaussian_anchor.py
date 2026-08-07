@@ -314,7 +314,12 @@ def _load_pems_npz_array(path: Path) -> np.ndarray:
 
 
 def _export_csv_variate_subset(src_csv: Path, dst_csv: Path, variate_indices: Sequence[int]) -> None:
-    """Stage only the selected value columns, preserving the first date/index column."""
+    """Legacy CSV column slice: keep col0 as date, take value cols at index+1.
+
+    Do not use for headerless sources (e.g. solar_Alabama): col0 is a real
+    variate, so this shifts channels by one vs binary's loader. Prefer
+    ``_export_binary_aligned_mmpd_csv``.
+    """
     variate_indices = [int(i) for i in variate_indices]
     with src_csv.open(encoding="utf-8", newline="") as src, dst_csv.open("w", encoding="utf-8", newline="") as dst:
         reader = csv.reader(src)
@@ -327,6 +332,41 @@ def _export_csv_variate_subset(src_csv: Path, dst_csv: Path, variate_indices: Se
     print(
         f"[mmpd-data] {src_csv.name}: wrote {dst_csv} "
         f"({len(variate_indices)} selected variates)"
+    )
+
+
+def _export_binary_aligned_mmpd_csv(
+    dataset: str,
+    dst_csv: Path,
+    variate_indices: Sequence[int],
+) -> None:
+    """Stage MMPD CSV from the same array binary ``load_dataset`` uses.
+
+    Headerless CSVs (solar) have no date column: treating col0 as date and
+    selecting ``i+1`` silently trains MMPD on the wrong variates and breaks
+    ``align_mmpd_to_binary_dataset_norm``. Always go through the binary loader.
+    """
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        _load_dataset_array,
+        _resolve_registry_path,
+    )
+
+    path, date_col = _resolve_registry_path(dataset)
+    data = _load_dataset_array(str(path), date_col)
+    idxs = [int(i) for i in variate_indices]
+    if data.ndim != 2:
+        raise ValueError(f"{dataset}: expected 2D series for MMPD staging, got {data.shape}")
+    if not idxs or max(idxs) >= data.shape[1] or min(idxs) < 0:
+        raise ValueError(
+            f"{dataset}: variate_indices={idxs} out of range for shape {data.shape}"
+        )
+    values = np.asarray(data[:, idxs], dtype=np.float32)
+    columns = [f"var_{i}" for i in range(values.shape[1])]
+    _write_mmpd_csv(dst_csv, values, columns)
+    print(
+        f"[mmpd-data] {dataset}: wrote {dst_csv} from binary loader "
+        f"({values.shape[0]} steps, {values.shape[1]} vars, indices={idxs})",
+        flush=True,
     )
 
 
@@ -545,6 +585,8 @@ def stage_mmpd_dataset_for_run(data_dir: Path, run: AnchorRun) -> None:
         "variate_indices": run_variate_indices(run),
         "train_stride": run_train_stride(run),
         "test_stride": run_test_stride(run),
+        # Bust caches staged with the old header+col0-as-date CSV slicer.
+        "value_source": "binary_load_dataset_array",
     }
     if dst.is_symlink():
         dst.unlink()
@@ -566,7 +608,7 @@ def stage_mmpd_dataset_for_run(data_dir: Path, run: AnchorRun) -> None:
     if dataset == "PeMS":
         _export_pems_mmpd_csv(src, dst, expected_meta["variate_indices"])
     else:
-        _export_csv_variate_subset(src, dst, expected_meta["variate_indices"])
+        _export_binary_aligned_mmpd_csv(dataset, dst, expected_meta["variate_indices"])
     from models.diffusion_tsf.train_multivariate_pipeline import LOOKBACK_LENGTH
 
     lookback = LOOKBACK_LENGTH
@@ -650,10 +692,20 @@ def _load_data_subset_policy(config_path: Path) -> Dict[str, Any]:
     from models.diffusion_tsf.pipeline.config import load_experiment_config
 
     cfg = load_experiment_config(str(config_path.resolve()))
-    policy = cfg.get("experiment", {}).get("data_subset")
-    if not policy:
-        raise ValueError(f"{config_path} missing experiment.data_subset")
-    return dict(policy)
+    exp = dict(cfg.get("experiment") or {})
+    by_dataset = exp.get("data_subset_by_dataset")
+    if isinstance(by_dataset, dict) and by_dataset:
+        # Prefer explicit per-dataset policy (matches binary canvas128 subsets).
+        return {"data_subset_by_dataset": dict(by_dataset)}
+    policy = exp.get("data_subset")
+    if isinstance(policy, dict) and (
+        policy.get("data_subset_by_dataset") or policy.get("by_dataset")
+    ):
+        return dict(policy)
+    raise ValueError(
+        f"{config_path} missing experiment.data_subset_by_dataset "
+        "(legacy experiment.data_subset alone is not supported)"
+    )
 
 
 def resolve_subset_meta_for_dataset(
