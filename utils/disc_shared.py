@@ -830,14 +830,15 @@ def split_windows(
 ) -> Dict[str, np.ndarray]:
     """Chronological disc train/val/test with hard purge vs the held-out test tail.
 
-    Default ablation pack is paper **test** only; the 70/15/15 fractions here carve
-    that pack, not the paper train/val/test borders. Train↔test absolute overlap is
-    forbidden; train↔val overlap inside the purged pool is allowed on purpose.
+    Walkthrough (live ablation defaults = train_fraction=0.8, val_fraction=0):
+      1. Sort pack windows by absolute past start time.
+      2. Last 20% → disc TEST (never used for early stop).
+      3. HARD PURGE: drop any earlier window whose time span overlaps that test
+         tail (lookback+horizon reach). No soft “allow overlap” fallback.
+      4. Of the purged early pool: last 10% → VAL (early stop), rest → TRAIN.
+         That lands ≈72/8/20 of the original pack.
 
-    ``val_fraction <= 0`` (e.g. ``--train-fraction 0.8 --val-fraction 0`` with
-    ``--pack-splits val,test``): last ``1 - train_fraction`` of the pack is test;
-    early-stop val is the last 10% of the purged train pool (≈72/8/20 when
-    train_fraction=0.8). Does not touch the final test tail.
+    ``val_fraction > 0`` uses the older explicit train/val/test fractions instead.
     """
     if args.max_windows is not None:
         n_windows = min(n_windows, int(args.max_windows))
@@ -848,6 +849,7 @@ def split_windows(
         raise ValueError(f"{dataset}: got {len(raw_indices)} split indices for {n_windows} windows")
     starts_all = None if series_starts is None else list(series_starts)[:n_windows]
 
+    # Absolute [start, end) for each pack row on the series timeline.
     starts, ends = window_time_bounds(
         dataset,
         raw_indices,
@@ -1018,10 +1020,13 @@ class HorizonSliceDataset(Dataset):
 
 
 class InvertedSliceDiscriminator(nn.Module):
-    """iTransformer-style disc: linear over time → token dim, then TransformerEncoder.
+    """OLD / default disc: iTransformer-style over variate tokens.
 
-    Univariate ablation feeds C=1 → effectively one token + optional offset emb
-    (fine for L=8/16). Output logit is P(fake).
+    Walkthrough: input x is [B, C, T] where T=slice length (e.g. L=8) and C is
+    the number of variate channels in one example. Live unique_abs ablation uses
+    C=1 (one variate per example), so the TransformerEncoder only ever sees a
+    *single* token — attention is mostly dead weight. Output is a logit for
+    P(fake); train with BCEWithLogits (label 1=fake, 0=GT).
     """
 
     def __init__(
@@ -1038,11 +1043,14 @@ class InvertedSliceDiscriminator(nn.Module):
     ) -> None:
         super().__init__()
         self.use_offset_embedding = bool(use_offset_embedding)
-        # Linear over time length → token dim (variates are tokens).
+        # Collapse the time axis into a vector, then project to d_model.
+        # One Linear per variate-token: shape [B,C,T] → [B,C,d_model].
         self.value_embedding = nn.Linear(seq_len, d_model)
+        # Optional: tell the model *where* in the horizon this L-slice starts.
         self.offset_embedding = (
             nn.Embedding(max_offset + 1, d_model) if self.use_offset_embedding else None
         )
+        # Pre-norm TransformerEncoder stack (GELU FFN). Depth default=2.
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
@@ -1053,7 +1061,9 @@ class InvertedSliceDiscriminator(nn.Module):
             norm_first=True,
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=depth)
+        # LayerNorm only (no InstanceNorm) — keeps C=1 path honest.
         self.norm = nn.LayerNorm(d_model)
+        # MLP head → scalar logit.
         self.head = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.GELU(),
@@ -1062,14 +1072,185 @@ class InvertedSliceDiscriminator(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
-        # x: [B, C, T]. Like iTransformer, variates are tokens and time is embedded.
+        # x: [B, C, T]. Embed time → token dim; C becomes the sequence length.
         tokens = self.value_embedding(x)
+        # Broadcast offset emb onto every variate token of the example.
         if self.offset_embedding is not None:
             tokens = tokens + self.offset_embedding(offsets).unsqueeze(1)
         tokens = self.encoder(tokens)
+        # Mean-pool over variate tokens (trivial when C=1), then classify.
         pooled = self.norm(tokens).mean(dim=1)
         return self.head(pooled).squeeze(-1)  # logit P(fake)
 
+
+# New lean backends selectable via --disc-arch (same forward(x, offsets) API).
+DISC_ARCH_CHOICES = ("transformer", "mlp", "cnn1d", "flatness")
+
+
+class FlatnessSliceDiscriminator(nn.Module):
+    """NEW lean baseline: score how non-flat the L-slice is.
+
+    Walkthrough: after bin-center, GT on LULL is often nearly constant while MMPD
+    wiggles. std(x) is a one-number texture cue. We map log1p(std) → logit with
+    learnable scale/bias (2 params). Offsets are ignored on purpose.
+    """
+
+    def __init__(self, *, learnable: bool = True) -> None:
+        super().__init__()
+        # Trainable a,b so BCE can flip the sign if "flat ⇒ real" is inverted.
+        if learnable:
+            self.scale = nn.Parameter(torch.tensor(1.0))
+            self.bias = nn.Parameter(torch.tensor(0.0))
+        else:
+            self.register_buffer("scale", torch.tensor(1.0))
+            self.register_buffer("bias", torch.tensor(0.0))
+
+    def forward(self, x: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+        del offsets  # flatness does not use horizon position
+        # Flatten [B,C,T] → [B, C*T]; for univariate C=1 this is just T steps.
+        std = x.flatten(1).std(dim=-1, unbiased=False).clamp_min(0.0)
+        # log1p keeps tiny stds from vanishing; scale/bias are the only knobs.
+        return self.scale * torch.log1p(std) + self.bias
+
+
+class MLPSliceDiscriminator(nn.Module):
+    """NEW lean disc: small MLP on the flattened L-vector (audit-matched 64×2).
+
+    Walkthrough: same input as the transformer path, but no attention — just
+    Linear→ReLU stacks on the L floats. Default turns offset embedding OFF so
+    capacity stays tiny (~5k params at L=8). This is what recovered LULL texture
+    in the probe when the transformer collapsed to constant 0.5.
+    """
+
+    def __init__(
+        self,
+        seq_len: int,
+        max_offset: int,
+        *,
+        hidden: int = 64,
+        depth: int = 2,
+        dropout: float = 0.0,
+        use_offset_embedding: bool = False,
+    ) -> None:
+        super().__init__()
+        self.use_offset_embedding = bool(use_offset_embedding)
+        layers: List[nn.Module] = []
+        # First Linear reads the whole L-slice as one feature vector.
+        in_dim = int(seq_len)
+        for _ in range(max(1, int(depth))):
+            layers.extend([nn.Linear(in_dim, hidden), nn.ReLU()])
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            in_dim = hidden
+        # Final Linear → one logit.
+        layers.append(nn.Linear(in_dim, 1))
+        self.net = nn.Sequential(*layers)
+        # Optional additive offset bias (usually off for lean runs).
+        self.offset_embedding = (
+            nn.Embedding(max_offset + 1, 1) if self.use_offset_embedding else None
+        )
+
+    def forward(self, x: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+        # [B,C,T] → [B, C*T]; with C=1 this is exactly the L-slice.
+        logits = self.net(x.flatten(1)).squeeze(-1)
+        if self.offset_embedding is not None:
+            logits = logits + self.offset_embedding(offsets).squeeze(-1)
+        return logits
+
+
+class CNN1DSliceDiscriminator(nn.Module):
+    """NEW lean disc: tiny 1D CNN over time for local step patterns.
+
+    Walkthrough: Conv1d treats T as the sequence and C as channels (C=1 for the
+    univariate ablation). Two small convs + global average pool + Linear → logit.
+    AdaptiveAvgPool makes the architecture length-agnostic (L=8 or L=16).
+    """
+
+    def __init__(
+        self,
+        seq_len: int,
+        *,
+        in_channels: int = 1,
+        channels: Tuple[int, int] = (16, 32),
+        kernel_size: int = 3,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        del seq_len  # length handled by AdaptiveAvgPool1d
+        c1, c2 = int(channels[0]), int(channels[1])
+        k = int(kernel_size)
+        pad = k // 2  # same-length convs so short L=8 still works
+        self.conv = nn.Sequential(
+            nn.Conv1d(in_channels, c1, kernel_size=k, padding=pad),
+            nn.ReLU(),
+            nn.Conv1d(c1, c2, kernel_size=k, padding=pad),
+            nn.ReLU(),
+            # Collapse time → one vector of size c2 per example.
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.head = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+            nn.Linear(c2, 1),
+        )
+
+    def forward(self, x: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+        del offsets  # CNN ignores absolute horizon offset
+        # x already [B, C, T] — Conv1d-ready.
+        return self.head(self.conv(x)).squeeze(-1)
+
+
+def build_slice_discriminator(
+    arch: str,
+    *,
+    seq_len: int,
+    max_offset: int,
+    d_model: int = 128,
+    n_heads: int = 4,
+    depth: int = 2,
+    d_ff: int = 256,
+    dropout: float = 0.1,
+    use_offset_embedding: bool = True,
+    mlp_hidden: int = 64,
+) -> nn.Module:
+    """Factory: pick OLD transformer or a NEW lean arch.
+
+    Walkthrough: every backend must accept (x, offsets) and return a logit so
+    train_classifier / evaluate_classifier stay architecture-agnostic. CLI flag
+    is --disc-arch {transformer,mlp,cnn1d,flatness}.
+    """
+    name = str(arch).strip().lower()
+    if name == "transformer":
+        # Legacy path (~294k params at default hparams).
+        return InvertedSliceDiscriminator(
+            seq_len=seq_len,
+            max_offset=max_offset,
+            d_model=d_model,
+            n_heads=n_heads,
+            depth=depth,
+            d_ff=d_ff,
+            dropout=dropout,
+            use_offset_embedding=use_offset_embedding,
+        )
+    if name == "mlp":
+        # Lean MLP; force offset emb off regardless of transformer defaults.
+        return MLPSliceDiscriminator(
+            seq_len=seq_len,
+            max_offset=max_offset,
+            hidden=mlp_hidden,
+            depth=2,
+            dropout=float(dropout),
+            use_offset_embedding=False,
+        )
+    if name == "cnn1d":
+        return CNN1DSliceDiscriminator(
+            seq_len=seq_len,
+            in_channels=1,
+            dropout=float(dropout),
+        )
+    if name == "flatness":
+        return FlatnessSliceDiscriminator(learnable=True)
+    raise ValueError(f"unknown disc_arch={arch!r}; choose from {DISC_ARCH_CHOICES}")
 
 
 def binary_auroc(labels: np.ndarray, scores: np.ndarray) -> float:

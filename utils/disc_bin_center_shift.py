@@ -94,6 +94,11 @@ def bin_center_shift(
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """Zero-mean in centered bin coords; remap to ladder levels. Additive only.
 
+    Walkthrough (called once per L-slice inside UnivariateRealVsFakeDataset):
+      values already snapped onto legal_levels. We work in *bin indices*, not
+      continuous z: subtract the slice's mean bin so absolute level/bias dies
+      and local step texture remains. Same shift recipe for GT and fakes.
+
     If fakes are mostly “right shape, wrong level,” this + candidate_only L=8
     can erase the usable cue — deliberate for texture-focused protocol.
     """
@@ -103,10 +108,14 @@ def bin_center_shift(
     if n_rows <= 0:
         raise ValueError("empty ladder")
 
+    # Step 1: each value → nearest canvas row index in [0, H).
     raw = nearest_bin_indices(vals, levels)
-    center = center_bin_index(levels)  # (N,V) — ladder row nearest dataset-z 0
+    # Step 2: which row is closest to dataset-z 0? That becomes "middle".
+    center = center_bin_index(levels)  # (N,V)
     center_b = center[:, :, None]
+    # Step 3: recenter so 0 means "the level nearest to 0.0 dataset-z".
     centered = raw.astype(np.int64) - center_b
+    # Step 4: mean over L (per variate by default) → integer shift to subtract.
     mean_c = _mean_centered(centered, reduce=reduce)
     if integer_shift:
         shift = np.rint(mean_c).astype(np.int64)
@@ -115,12 +124,14 @@ def bin_center_shift(
         shift = mean_c
         centered_new = np.rint(centered.astype(np.float64) - shift).astype(np.int64)
 
+    # Step 5: convert back to raw rows; clip if shift pushed past [0, H).
     raw_new = centered_new + center_b
     clamped = np.clip(raw_new, 0, n_rows - 1)
     n_clamped = int(np.sum(clamped != raw_new))
-    # Remap shifted bin indices back onto the same window-specific ladder.
+    # Step 6: look up dataset-z levels for the shifted rows (still on lattice).
     shifted = np.take_along_axis(levels[:, :, None, :], clamped[..., None], axis=-1)[..., 0]
 
+    # Diagnostics: mean should drop; first-diffs (texture) should stay similar.
     raw_after = nearest_bin_indices(shifted, levels)
     centered_after = raw_after.astype(np.int64) - center_b
     diff_before = np.diff(centered.astype(np.float64), axis=-1)

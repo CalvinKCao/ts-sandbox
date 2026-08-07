@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""One-off: staged_eval sample panels for the three ETTh1 ablation ckpts.
+"""
+# Pipeline home: utils/staged_eval_sample_viz.py + StagedEvalPhase (visualization.viz_patch_boxes).
+# Ablation --redbox-viz still calls viz_run below.
+One-off: staged_eval sample panels for the three ETTh1 ablation ckpts.
 
 Works around the cancelled in-pipeline KeyError('fine') on patch_refine runs
 (pred_maps uses key 'refine' but the native 2D plotter hardcodes maps['fine']).
@@ -69,7 +72,7 @@ from models.diffusion_tsf.train_multivariate_pipeline import (
     load_wrapped_guidance,
     resolve_pipeline_data_subset,
 )
-from temp.eval_ablation_disc_l8_l16 import load_ablation_run
+from temp.eval_ablation_disc_l8_l16 import load_ablation_run, _load_models as _load_ablation_models
 from utils.eval_mmpd_gaussian_anchor import (
     load_tsf_pack_pool,
     parse_pack_splits,
@@ -159,266 +162,20 @@ def _pick_indices(n_pool: int, n_samples: int, seed: int, explicit: Optional[Lis
     return sorted(int(i) for i in rng.choice(n_pool, size=k, replace=False).tolist())
 
 
-def _upsample_coarse_to_canvas(coarse_2d: np.ndarray, canvas_h: int) -> np.ndarray:
-    # coarse_2d: (V, Hc, W) float -> (V, Hfine, W) nearest
-    t = torch.from_numpy(np.asarray(coarse_2d, dtype=np.float32))[None]  # 1,V,Hc,W
-    up = torch.nn.functional.interpolate(
-        t, size=(int(canvas_h), int(coarse_2d.shape[-1])), mode="nearest"
-    )
-    return up[0].numpy()
+
+from utils.staged_eval_sample_viz import (  # noqa: E402
+    add_patch_boxes as _add_patch_boxes,
+    plot_1d as _plot_1d,
+    plot_2d_coarse_fine as _plot_2d_coarse_fine,
+    plot_refine_boxes as _plot_refine_boxes,
+    save_jpg as _save_jpg,
+    upsample_coarse_to_canvas as _upsample_coarse_to_canvas,
+    write_staged_sample_panels,
+)
+
+# Local plotters live in utils.staged_eval_sample_viz; viz_run below still loads models.
 
 
-def _save_jpg(fig: plt.Figure, path: Path, dpi: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=dpi, format="jpg", bbox_inches="tight", pil_kwargs={"quality": 90})
-    plt.close(fig)
-
-
-def _load_models(
-    *,
-    dataset: str,
-    ckpt_root: Path,
-    config_path: str,
-    lookback: int,
-    horizon: int,
-    device: torch.device,
-) -> Tuple[Any, Any, Any, Any, str]:
-    run, stages, kind = load_ablation_run(dataset, ckpt_root)
-    state = _build_state(ckpt_root, dataset, run_subset_id(run), config_path)
-    resolve_pipeline_data_subset(state)
-    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
-
-    use_ord = bool(state.use_ordinal_window_norm)
-    _, _, _, norm_stats = load_dataset(
-        dataset,
-        run_variate_indices(run),
-        stride=run_train_stride(run),
-        test_stride=run_test_stride(run),
-        lookback=lookback,
-        horizon=horizon,
-        ordinal_tie_atol=float(getattr(state, "ordinal_tie_atol", 1e-6) or 1e-6),
-        use_ordinal_window_norm=use_ord,
-    )
-    ladder = norm_stats.get("ordinal_ladder") if use_ord else None
-    if use_ord:
-        if ladder is None:
-            raise RuntimeError(f"{dataset}: ordinal ladder missing")
-        state.extra["global_ordinal_ladder"] = ladder
-        pipeline_mod.GLOBAL_ORDINAL_LADDER = ladder
-    else:
-        pipeline_mod.GLOBAL_ORDINAL_LADDER = None
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
-
-    guidance = None
-    if bool(state.use_guidance_channel) or not bool(state.disable_cross_attention):
-        gpath, gtype = _resolve_guidance_ckpt(ckpt_root, run_subset_id(run), "auto")
-        guidance = load_wrapped_guidance(
-            str(gpath),
-            len(run_variate_indices(run)),
-            device,
-            guidance_type=gtype,
-            dataset_lookback=lookback,
-            dataset_horizon=horizon,
-        )
-        if hasattr(guidance, "ordinal_ladder") and ladder is not None:
-            guidance.ordinal_ladder = ladder
-
-    refine_stage = "patch_refine" if kind == "patch_refine" else "fine"
-    n_vars = len(run_variate_indices(run))
-    coarse = _load_stage_model(
-        state, "coarse", stages["coarse_pt"], guidance, n_vars, device,
-        strict_non_guidance_shapes=True,
-    )
-    refine = _load_stage_model(
-        state, refine_stage, stages["refine_pt"], guidance, n_vars, device,
-        strict_non_guidance_shapes=True,
-    )
-    for model in (coarse, refine):
-        if use_ord:
-            model._ordinal_input_is_ranked = False
-            model._ordinal_apply_ood_shift = True
-    return run, coarse, refine, state, kind
-
-
-def _plot_1d(*, path, past, gt, pred, title, n_vars, dpi) -> None:
-    v_show = min(int(n_vars), past.shape[0])
-    fig, axes = plt.subplots(v_show, 1, figsize=(11, 2.2 * v_show), sharex=True)
-    if v_show == 1:
-        axes = [axes]
-    lb = past.shape[-1]
-    x_p = np.arange(-lb, 0)
-    x_f = np.arange(gt.shape[-1])
-    for v, ax in enumerate(axes):
-        ax.plot(x_p, past[v], color="0.55", lw=1.0, label="lookback")
-        ax.plot(x_f, gt[v], color="black", lw=1.2, label="GT")
-        ax.plot(x_f, pred[v], color="#1f77b4", lw=1.2, alpha=0.9, label="pred")
-        ax.axvline(0, color="0.3", lw=0.6)
-        ax.set_ylabel(f"v{v}")
-        ax.grid(alpha=0.15)
-        if v == 0:
-            ax.legend(loc="upper left", fontsize=8, ncol=3)
-            ax.set_title(title, fontsize=10)
-    axes[-1].set_xlabel("t (horizon starts at 0)")
-    fig.tight_layout()
-    _save_jpg(fig, path, dpi)
-
-
-def _plot_2d_coarse_fine(*, path, coarse, second, second_name, title, n_vars, dpi) -> None:
-    v_show = min(int(n_vars), coarse.shape[0])
-    fig, axes = plt.subplots(v_show, 2, figsize=(10, 2.0 * v_show), sharex=False)
-    if v_show == 1:
-        axes = np.asarray([axes])
-    for v in range(v_show):
-        for col, (arr, name) in enumerate(((coarse, "coarse"), (second, second_name))):
-            ax = axes[v, col]
-            h, w = arr[v].shape[-2], arr[v].shape[-1]
-            ax.imshow(
-                arr[v], aspect="auto", origin="lower", extent=[0, w, 0, h],
-                cmap="plasma", vmin=0.0, vmax=1.0,
-            )
-            ax.set_title(f"v{v} {name} ({h}x{w})", fontsize=9)
-            ax.set_ylabel("row")
-            if v == v_show - 1:
-                ax.set_xlabel("t")
-    fig.suptitle(title, fontsize=11)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
-    _save_jpg(fig, path, dpi)
-
-
-def _add_patch_boxes(ax, locs, patch_h: int, patch_w: int) -> None:
-    for loc in locs:
-        ax.add_patch(
-            Rectangle(
-                (float(loc.col0), float(loc.row0)),
-                float(patch_w),
-                float(patch_h),
-                fill=False,
-                edgecolor="red",
-                linewidth=0.8,
-            )
-        )
-
-
-def _plot_refine_boxes(
-    *,
-    path: Path,
-    coarse_up_v: np.ndarray,
-    blended_v: np.ndarray,
-    patch_cdf: torch.Tensor,
-    locations: Sequence[Any],
-    variate: int,
-    patch_h: int,
-    patch_w: int,
-    title: str,
-    dpi: int,
-    max_patches: int = MAX_UNBLENDED_PATCHES,
-) -> None:
-    """3-row panel for one variate: upsampled coarse | unblended grid | blended."""
-    locs_v = [
-        loc for loc in locations
-        if int(loc.batch_index) == 0 and int(loc.variate_index) == int(variate)
-    ]
-    # Keep patch_cdf rows aligned with full locations list indices.
-    pair_idx = [
-        i for i, loc in enumerate(locations)
-        if int(loc.batch_index) == 0 and int(loc.variate_index) == int(variate)
-    ]
-    if len(pair_idx) > max_patches:
-        pair_idx = pair_idx[:max_patches]
-
-    n = len(pair_idx)
-    ncols = min(8, max(n, 1))
-    nrows = int(math.ceil(max(n, 1) / ncols))
-
-    fig = plt.figure(figsize=(12, 3.2 + 1.35 * nrows + 3.2))
-    # row0: coarse, row1: unblended grid, row2: blended
-    gs = fig.add_gridspec(
-        2 + nrows, ncols,
-        height_ratios=[3.0] + [1.2] * nrows + [3.0],
-        hspace=0.55,
-        wspace=0.2,
-    )
-
-    # (A) nearest-upsampled coarse + all boxes for this variate
-    ax_a = fig.add_subplot(gs[0, :])
-    h, w = coarse_up_v.shape[-2], coarse_up_v.shape[-1]
-    ax_a.imshow(
-        coarse_up_v, aspect="auto", origin="lower", extent=[0, w, 0, h],
-        cmap="plasma", vmin=0.0, vmax=1.0,
-    )
-    _add_patch_boxes(ax_a, locs_v, patch_h, patch_w)
-    ax_a.set_title(
-        f"(A) coarse CDF nearest-up -> {h}x{w}  |  {len(locs_v)} boxes  v{variate}",
-        fontsize=10,
-    )
-    ax_a.set_ylabel("row")
-    ax_a.set_xlabel("t")
-
-    # (B) grid of unblended refine patches
-    ax_b_list: List[Tuple[Any, Any, int, int]] = []  # (loc, ax, ph, pw)
-    if n == 0:
-        ax_b = fig.add_subplot(gs[1, :])
-        ax_b.set_axis_off()
-        ax_b.text(0.5, 0.5, "no patches for this variate", ha="center", va="center")
-        ax_b.set_title("(B) unblended refine patches", fontsize=10)
-    else:
-        first_ax = None
-        for j, pi in enumerate(pair_idx):
-            r, c = divmod(j, ncols)
-            ax = fig.add_subplot(gs[1 + r, c])
-            if first_ax is None:
-                first_ax = ax
-            patch = patch_cdf[pi, 0].detach().cpu().numpy().astype(np.float32)
-            ph, pw = patch.shape[-2], patch.shape[-1]
-            ax.imshow(
-                patch, aspect="auto", origin="lower", extent=[0, pw, 0, ph],
-                cmap="plasma", vmin=0.0, vmax=1.0,
-            )
-            loc = locations[pi]
-            ax.set_title(f"r{int(loc.row0)},c{int(loc.col0)}", fontsize=7)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax_b_list.append((loc, ax, ph, pw))
-        if first_ax is not None:
-            first_ax.set_ylabel(
-                f"(B) unblended n={n}/{max_patches}",
-                fontsize=9,
-            )
-
-    # (C) blended canvas + same boxes
-    ax_c = fig.add_subplot(gs[1 + nrows, :])
-    hb, wb = blended_v.shape[-2], blended_v.shape[-1]
-    ax_c.imshow(
-        blended_v, aspect="auto", origin="lower", extent=[0, wb, 0, hb],
-        cmap="plasma", vmin=0.0, vmax=1.0,
-    )
-    _add_patch_boxes(ax_c, locs_v, patch_h, patch_w)
-    ax_c.set_title(f"(C) blended future_2d_fine v{variate} ({hb}x{wb})", fontsize=10)
-    ax_c.set_ylabel("row")
-    ax_c.set_xlabel("t")
-
-    fig.suptitle(title, fontsize=11)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
-    # Arrows after layout so ConnectionPatch transforms match final axes positions.
-    for loc, ax_b_j, ph, pw in ax_b_list:
-        xy_a = (float(loc.col0) + float(patch_w) / 2.0, float(loc.row0) + float(patch_h) / 2.0)
-        xy_b = (float(pw) / 2.0, float(ph) / 2.0)
-        con = ConnectionPatch(
-            xyA=xy_a,
-            xyB=xy_b,
-            coordsA=ax_a.transData,
-            coordsB=ax_b_j.transData,
-            arrowstyle="->",
-            color="red",
-            linewidth=0.7,
-            alpha=0.75,
-            mutation_scale=10,
-        )
-        fig.add_artist(con)
-    _save_jpg(fig, path, dpi)
-
-
-@torch.no_grad()
 def viz_run(
     args,
     *,
@@ -440,7 +197,7 @@ def viz_run(
                 if line.endswith(".jpg")]
 
     print(f"\n=== {run_name} ({ckpt_root.name}) ===", flush=True)
-    run, coarse, refine, _state, kind = _load_models(
+    run, coarse, refine, _ladder, kind, _canvas_h = _load_ablation_models(
         dataset=dataset,
         ckpt_root=ckpt_root,
         config_path=config_path,
@@ -448,6 +205,7 @@ def viz_run(
         horizon=args.horizon,
         device=device,
     )
+    _state = _build_state(ckpt_root, dataset, run_subset_id(run), config_path)
     print(f"[{run_name}] kind={kind} pool={len(pool)} picks={picks}", flush=True)
     # Native-past (past_cond_resize_to_horizon=false) needs horizon expand helper.
     if not bool(getattr(_state, "past_cond_resize_to_horizon", True)):
@@ -484,6 +242,7 @@ def viz_run(
             vertical_dual=False,
             sampler=args.sampler,
             num_inference_steps=int(args.num_sampling_steps),
+            require_guidance_pred=True,
         )
         overlap = int(getattr(refine.config, "lookback_overlap", 0) or 0)
         gt = future[0, :, overlap:] if overlap else future[0]
@@ -492,10 +251,15 @@ def viz_run(
             h = min(int(pred.shape[-1]), int(gt.shape[-1]))
             pred = pred[..., -h:]
             gt = gt[..., -h:]
+        guide = result["guidance_prediction_global_norm"][0]
+        if guide.shape != pred.shape:
+            h = min(int(guide.shape[-1]), int(pred.shape[-1]))
+            guide = guide[..., -h:]
 
         past_np = past[0].detach().cpu().numpy().astype(np.float32)
         gt_np = gt.detach().cpu().numpy().astype(np.float32)
         pred_np = pred.detach().cpu().numpy().astype(np.float32)
+        guide_np = guide.detach().cpu().numpy().astype(np.float32)
         coarse_2d = result["future_2d_coarse"][0].detach().cpu().numpy().astype(np.float32)
         second_2d = result["future_2d_fine"][0].detach().cpu().numpy().astype(np.float32)
 
@@ -505,7 +269,11 @@ def viz_run(
             past=past_np,
             gt=gt_np,
             pred=pred_np,
-            title=f"{run_name}/{dataset} pool={pool_i} kind={kind} sampler={args.sampler}",
+            guidance=guide_np,
+            title=(
+                f"{run_name}/{dataset} pool={pool_i} kind={kind} sampler={args.sampler} "
+                f"(GT + refine + guidance)"
+            ),
             n_vars=n_plot,
             dpi=args.jpeg_dpi,
         )

@@ -6,6 +6,7 @@ Kept so existing imports keep working. Prefer importing ``utils.disc_shared`` di
 from utils.disc_shared import *  # noqa: F401,F403
 from utils.disc_shared import (  # noqa: F401
     DEFAULT_DISC_OUTPUT,
+    DISC_ARCH_CHOICES,
     FAKE_SOURCES,
     HorizonSliceDataset,
     InvertedSliceDiscriminator,
@@ -15,6 +16,7 @@ from utils.disc_shared import (  # noqa: F401
     binary_auroc,
     binary_mmpd_train_scaler_map,
     build_raw_bundle,
+    build_slice_discriminator,
     collect_partials,
     evaluate_classifier,
     load_ordinal_ladder_for_run,

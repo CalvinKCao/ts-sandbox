@@ -1,3 +1,4 @@
+# Pipeline integration: Prefer --viz-sanity snap,pre_post + --viz-variates 2.
 #!/usr/bin/env python3
 """electricity variate index 2 (CSV col ``2``) window_norm_grid canvas128 snap viz.
 

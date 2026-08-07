@@ -1,3 +1,4 @@
+# Pipeline integration: Prefer --viz-sanity snap,pre_post on ordinal leaf; encode via --viz-encode-bins.
 #!/usr/bin/env python3
 """LULL (ETTh1 v=5) ordinal-absolute ladder snap viz — foil to hybrid flat.
 

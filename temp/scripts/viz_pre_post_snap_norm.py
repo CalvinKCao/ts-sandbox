@@ -1,3 +1,4 @@
+# Pipeline integration: Prefer ablation/lean --viz-sanity pre_post (utils.disc_snap_viz.viz_disc_pre_post); do not rebuild ladders.
 #!/usr/bin/env python3
 """Pre- vs post- snap / disc-norm panels for GT, binary, MMPD.
 

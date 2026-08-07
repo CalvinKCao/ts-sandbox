@@ -1,3 +1,4 @@
+# Pipeline integration: Prefer --viz-sanity snap + --viz-variates 5 on hybrid_flat snap_mode.
 #!/usr/bin/env python3
 """LULL (ETTh2 v=5) forecast viz from hybrid-flat-dsnorm canvas128 packs.
 

@@ -1,3 +1,4 @@
+# Pipeline integration: Prefer ablation/lean --viz-sanity snap (utils.disc_snap_viz.viz_disc_snap_sanity); render-only over _snap_bundle.
 #!/usr/bin/env python3
 """MMPD forecast viz from canvas128 disc packs: L8 snapproof + H=96 panels.
 

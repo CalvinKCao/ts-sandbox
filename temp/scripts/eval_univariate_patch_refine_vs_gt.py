@@ -236,7 +236,15 @@ def load_patch_refine_run(
     test_stride: int | None,
 ) -> Tuple[AnchorRun, Dict[str, Path]]:
     candidates: List[Tuple[AnchorRun, Dict[str, Path]]] = []
+    seen_roots: set[Path] = set()
     for subset_dir in sorted(checkpoint_dir.iterdir()):
+        # Symlink aliases (e.g. ETTh2_7v_s1 -> ETTh2) must not double-count.
+        try:
+            resolved = subset_dir.resolve()
+        except OSError:
+            resolved = subset_dir
+        if resolved in seen_roots:
+            continue
         coarse_pt = subset_dir / "coarse" / "best.pt"
         refine_pt = subset_dir / "patch_refine" / "best.pt"
         metadata_path = subset_dir / "patch_refine" / "metadata.json"
@@ -245,6 +253,7 @@ def load_patch_refine_run(
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata.get("dataset_name") != dataset:
             continue
+        seen_roots.add(resolved)
         subset_id = str(metadata["subset_id"])
         metadata = dict(metadata)
         metadata["dataset_name"] = dataset

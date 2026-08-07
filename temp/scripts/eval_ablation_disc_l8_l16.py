@@ -21,10 +21,14 @@ Supports both checkpoint layouts:
 ``--viz-only``: skip disc train; write zoomed L8/L16 disc-input panels so the
 ladder snap is visually checkable before a Killarney submit.
 
-By default also writes full-horizon staged_eval red-box panels
-(``viz/staged_eval_samples/<run>/``) via ``viz_ablation_staged_eval_samples``
-helpers (1d hz96 + 2d coarse/fine + per-variate refine_boxes). Opt out with
-``--no-redbox-viz``.
+``--viz-sanity`` defaults to ``all`` (``snap`` + ``pre_post``): render-only
+H96 / snapproof / pre→post→BC panels reusing ``_snap_bundle`` tensors.
+Disable with ``--viz-sanity none`` or ``--no-viz``.
+
+``--redbox-viz`` defaults on (full-horizon staged_eval panels under
+``viz/staged_eval_samples/<run>/``). Opt out with ``--no-redbox-viz``.
+Disagreement panels (binary vs MMPD correct/wrong) default on; opt out with
+``--no-disc-disagreement`` or ``--no-viz``.
 """
 
 from __future__ import annotations
@@ -57,7 +61,17 @@ from models.diffusion_tsf.train_multivariate_pipeline import (
     resolve_pipeline_data_subset,
 )
 from temp.eval_univariate_patch_refine_vs_gt import load_patch_refine_run
-from utils.disc_bin_center_shift import bin_center_shift, nearest_bin_indices
+from utils.disc_shared import DISC_ARCH_CHOICES
+from utils.disc_snap_viz import (
+    DEFAULT_VIZ_SANITY,
+    flatten_viz_paths,
+    parse_viz_sanity,
+    plot_snap_proof_panel,
+    viz_disc_pre_post,
+    viz_disc_snap_sanity,
+    viz_gt_encode_bins,
+    write_disc_disagreement_viz,
+)
 from utils.dual_scale_bin_filter import align_mmpd_to_binary_dataset_norm
 from utils.eval_discriminator_binary_vs_mmpd_univariate import train_classifier
 from utils.eval_discriminator_texture_staged_vs_mmpd import (
@@ -171,6 +185,19 @@ def parse_args() -> argparse.Namespace:
         help="Disable shared forecast cache (only use output_dir/raw).",
     )
     p.add_argument(
+        "--disc-disagreement",
+        action="store_true",
+        default=True,
+        help="After training both sources, write binary↔MMPD disagreement panels "
+        "(default on).",
+    )
+    p.add_argument(
+        "--no-disc-disagreement",
+        action="store_false",
+        dest="disc_disagreement",
+        help="Skip binary↔MMPD disagreement panels.",
+    )
+    p.add_argument(
         "--disc-disagreement-max",
         type=int,
         default=12,
@@ -218,6 +245,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--depth", type=int, default=2)
     p.add_argument("--d-ff", type=int, default=256)
     p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument(
+        "--disc-arch",
+        choices=list(DISC_ARCH_CHOICES),
+        default="transformer",
+        help="Disc backend (transformer=legacy InvertedSlice; mlp/cnn1d/flatness=lean).",
+    )
+    p.add_argument(
+        "--disc-variates",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Optional variate-index filter (e.g. 5 for ETTh2 LULL-only).",
+    )
+    p.add_argument("--disc-mlp-hidden", type=int, default=64)
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--patience", type=int, default=5)
@@ -250,9 +291,40 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Generate zoomed L8/L16 disc-input lattice panels; skip disc training.",
     )
+    p.add_argument(
+        "--viz-sanity",
+        default=DEFAULT_VIZ_SANITY,
+        help="Comma list of render-only sanity hooks after _snap_bundle: "
+        "snap, pre_post, all/true (default: all = snap+pre_post). "
+        "Pass none/off to disable. staged_boxes is pipeline YAML only. "
+        "encode_bins is opt-in via --viz-encode-bins (model rebuild).",
+    )
+    p.add_argument(
+        "--no-viz",
+        action="store_true",
+        help="Disable all disc viz: sanity, encode bins, disagreement, redbox.",
+    )
+    p.add_argument(
+        "--viz-dir",
+        type=Path,
+        default=None,
+        help="Root for --viz-sanity panels (default: <output-dir>/viz/<run>).",
+    )
     p.add_argument("--viz-n-windows", type=int, default=2)
     p.add_argument("--viz-variate", type=int, default=0)
+    p.add_argument(
+        "--viz-variates",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Variates for viz-sanity panels (default: --viz-variate).",
+    )
     p.add_argument("--viz-zoom-steps", type=int, default=12)
+    p.add_argument(
+        "--viz-encode-bins",
+        action="store_true",
+        help="Also write GT encode-alphabet panels (separate from disc lattice).",
+    )
     p.add_argument(
         "--redbox-viz",
         action="store_true",
@@ -281,6 +353,16 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def apply_viz_master_switch(args: argparse.Namespace) -> None:
+    """``--no-viz`` clears sanity / disagreement / redbox / encode-bins."""
+    if not bool(getattr(args, "no_viz", False)):
+        return
+    args.viz_sanity = "none"
+    args.viz_encode_bins = False
+    args.disc_disagreement = False
+    args.redbox_viz = False
+
+
 def apply_smoke(args: argparse.Namespace) -> None:
     if bool(getattr(args, "disc_bin_center_shift", False)) and bool(
         getattr(args, "disc_apply_zscore", False)
@@ -294,9 +376,10 @@ def apply_smoke(args: argparse.Namespace) -> None:
     args.max_windows = min(int(args.max_windows or 4), 4)
     args.num_sampling_steps = min(int(args.num_sampling_steps), 2)
     args.epochs = min(int(args.epochs), 2)
-    args.viz_n_windows = min(int(args.viz_n_windows), 2)
+    args.viz_n_windows = min(int(args.viz_n_windows), 1)
     args.raw_binary_batch_size = 1
     args.redbox_n_samples = min(int(args.redbox_n_samples), 1)
+    args.disc_disagreement_max = min(int(args.disc_disagreement_max), 2)
 
 
 def _parse_run_specs(specs: Sequence[str]) -> List[Dict[str, str]]:
@@ -805,8 +888,19 @@ def _legal_levels_for_run(
     ladder: Any,
     device: torch.device,
 ) -> Tuple[np.ndarray, str, Dict[str, float]]:
-    """Pick the lattice that matches the binary training leaf (not a foreign ordinal one)."""
+    """Choose the discrete alphabet GT/binary/MMPD will be snapped onto.
+
+    Walkthrough — this is the snap-mode switch:
+      * ordinal leaf (use_ordinal_window_norm=True)
+          → absolute ordinal ladder rows in dataset-z
+      * canvas128 / window-norm leaf (the live campaign)
+          → H-row window-norm midpoints from past mean/std + max_scale
+            (optionally hybrid_flat for flat variates like ETTh2 LULL)
+
+    Returns (legal_levels[N,V,H], snap_mode_str, meta_dict).
+    """
     h = int(canvas_height)
+    # Branch A: ordinal-trained ckpt → absolute ordinal ladder.
     if bool(getattr(state, "use_ordinal_window_norm", False)):
         if ladder is None:
             raise RuntimeError(f"{dataset}: ordinal ladder required for ordinal snap")
@@ -815,8 +909,9 @@ def _legal_levels_for_run(
         )
         return levels, "ordinal_absolute", {"canvas_height": float(h)}
 
-    # Window-norm canvas128 (and non-ordinal window-norm) leaves.
+    # Branch B: window-norm / canvas128 (and hybrid flat) leaves.
     max_scale = _max_scale_from_ckpt_metadata(ckpt_root, dataset)
+    # Flat variates skip window-norm and use dataset affine (hybrid leaf only).
     flat_mask = _flat_mask_from_ckpt(ckpt_root, dataset)
     grid_cfg = _window_norm_grid_config(
         state,
@@ -824,6 +919,7 @@ def _legal_levels_for_run(
         max_scale=max_scale,
         skip_window_norm_variate_mask=flat_mask,
     )
+    # legal_levels[i,v,:] = the H canvas midpoints for that window/variate in dataset-z.
     levels = legal_window_norm_patch_refine_levels_dataset_z(past, grid_cfg)
     snap_mode = "window_norm_grid_hybrid_flat" if flat_mask and any(flat_mask) else "window_norm_grid"
     meta = {
@@ -1079,12 +1175,19 @@ def _snap_bundle(
     ckpt_root: Path,
     config_path: str,
 ) -> Dict[str, np.ndarray]:
-    """Align binary + MMPD onto one discrete alphabet (training lattice).
+    """Snap GT + binary + MMPD forecasts onto the training discrete alphabet.
 
-    Fair for “same lattice?” disc work — and it also destroys sub-rung signal.
-    If models mostly differ from GT by sub-bin noise, AUROC collapses toward
-    chance by design after this step.
+    Walkthrough:
+      1. Pull y_true / forecasts from both packs (same windows after thinning).
+      2. Affine-align MMPD's dataset-z → binary's train-scaler z.
+      3. Build legal_levels from past (window-norm midpoints or ordinal ladder).
+      4. Nearest-rung snap everything onto that lattice.
+      5. Return snapped arrays + legal_levels for bin-center in the disc dataset.
+
+    Side effect of snapping: any sub-rung texture difference is destroyed. If
+    models only differed by sub-bin noise, disc AUROC → chance by construction.
     """
+    # Raw continuous forecasts / GT (still in their own scaler spaces).
     binary_gt = np.asarray(binary_pack["y_true"], dtype=np.float32)
     binary_pred = reduce_pack_forecast(binary_pack, agg=args.fake_agg)
     mmpd_gt = np.asarray(mmpd_pack["y_true"], dtype=np.float32)
@@ -1105,6 +1208,7 @@ def _snap_bundle(
     if h <= 0:
         raise RuntimeError(f"canvas_height must be positive, got {h}")
 
+    # Leaf-aware lattice: ordinal vs window_norm_grid (+ hybrid flat).
     state = _build_state(ckpt_root, str(args.dataset), run_subset_id(run), config_path)
     legal_levels, snap_mode, snap_meta = _legal_levels_for_run(
         past,
@@ -1120,11 +1224,16 @@ def _snap_bundle(
         f"(dataset-z values; no instance-norm on disc series)",
         flush=True,
     )
-    # Nearest-rung snap for GT, aligned MMPD, and binary forecast.
+    # Pre-snap tensors kept for viz_disc_pre_post (render-only; no second ladder).
+    binary_raw = np.asarray(binary_pred, dtype=np.float32)
+    gt_pre = np.asarray(binary_gt, dtype=np.float32)
+    binary_pre = binary_raw
+    mmpd_pre = np.asarray(mmpd_binary_z, dtype=np.float32)
+
+    # Nearest-rung snap for GT, aligned MMPD, and binary forecast → all on lattice.
     gt, gt_snap = snap_to_patch_refine_levels(binary_gt, legal_levels)
     mmpd, mmpd_snap = snap_to_patch_refine_levels(mmpd_binary_z, legal_levels)
     atol = _binary_lattice_atol(legal_levels)
-    binary_raw = np.asarray(binary_pred, dtype=np.float32)
     binary, binary_snap = snap_to_patch_refine_levels(binary_raw, legal_levels)
     raw_err = float(np.abs(binary_raw - binary).max(initial=0.0))
     if raw_err > atol:
@@ -1154,10 +1263,15 @@ def _snap_bundle(
         "snap_mode": snap_mode,
         "snap_meta": snap_meta,
     }
+    # Pack everything the disc trainer needs: snapped series + legal_levels for BC.
+    # Also expose pre-snap (gt_pre / binary_pre / mmpd_pre) for render-only viz.
     return {
         "gt": gt,
         "binary": binary,
         "mmpd": mmpd,
+        "gt_pre": gt_pre,
+        "binary_pre": binary_pre,
+        "mmpd_pre": mmpd_pre,
         "past": past,
         "legal_levels": np.asarray(legal_levels, dtype=np.float32),
         "indices": np.asarray(binary_pack["indices"], dtype=np.int64),
@@ -1169,9 +1283,8 @@ def _snap_bundle(
 
 
 def _snap_residual(values_1d: np.ndarray, levels_1d: np.ndarray) -> float:
-    vals = np.asarray(values_1d, dtype=np.float32)
-    lev = np.asarray(levels_1d, dtype=np.float32)
-    return float(np.abs(vals[:, None] - lev[None, :]).min(axis=1).max(initial=0.0))
+    from utils.disc_snap_viz import snap_residual
+    return snap_residual(values_1d, levels_1d)
 
 
 def _plot_snap_proof_panel(
@@ -1183,86 +1296,15 @@ def _plot_snap_proof_panel(
     colors: Mapping[str, str],
     t0: int = 0,
 ) -> Dict[str, float]:
-    """Marker + occupied-rung proof that values sit on the absolute ladder.
-
-    Drawing *all* rungs on a dense canvas looks continuous, and steps-post
-    verticals cross between rungs — both make a true snap look wrong. Here we
-    only draw occupied legal levels and plot markers (no step verticals), plus
-    an integer bin-index panel that cannot lie.
-    """
-    names = list(series.keys())
-    y_stack = np.concatenate([np.asarray(series[n], dtype=np.float64) for n in names])
-    x = np.arange(t0, t0 + int(y_stack.size // len(names)))
-    # per-series length check
-    length = int(next(iter(series.values())).shape[0])
-    x = np.arange(t0, t0 + length)
-    n_rows = int(np.asarray(levels_1d).shape[0])
-
-    residuals = {n: _snap_residual(series[n], levels_1d) for n in names}
-    max_err = float(max(residuals.values()))
-    if max_err > 1e-5:
-        raise RuntimeError(f"{title}: snap residual {max_err:.3e} — refusing to plot")
-
-    occupied = np.unique(
-        np.concatenate([np.asarray(series[n], dtype=np.float64) for n in names])
+    """Thin wrapper → ``utils.disc_snap_viz.plot_snap_proof_panel``."""
+    return plot_snap_proof_panel(
+        out_path=out_path,
+        title=title,
+        levels_1d=levels_1d,
+        series=series,
+        colors=colors,
+        t0=t0,
     )
-    bins = {
-        n: nearest_bin_indices(
-            np.asarray(series[n], dtype=np.float32)[None, None, :],
-            np.asarray(levels_1d, dtype=np.float32)[None, None, :],
-        )[0, 0]
-        for n in names
-    }
-
-    fig, (ax_y, ax_b) = plt.subplots(
-        2, 1, figsize=(max(9.0, 0.55 * length + 3.5), 7.0),
-        gridspec_kw={"height_ratios": [2.2, 1.4]}, sharex=True,
-    )
-    ax_y.set_facecolor("white")
-    # Occupied rungs only — exact membership of the plotted points.
-    for y in occupied:
-        ax_y.axhline(float(y), color="0.55", lw=0.9, alpha=0.85, zorder=0)
-    for n in names:
-        y = np.asarray(series[n], dtype=np.float64)
-        # Faint polyline (no steps) so eye can track series; markers carry the snap proof.
-        ax_y.plot(x, y, color=colors[n], lw=1.0, alpha=0.35, zorder=1)
-        ax_y.plot(
-            x, y, linestyle="none", marker="o", markersize=7.5,
-            markerfacecolor=colors[n], markeredgecolor="white", markeredgewidth=0.6,
-            label=f"{n} (max|Δ|={residuals[n]:.1e})", zorder=3,
-        )
-    ax_y.set_ylabel("dataset-z (snapped)")
-    ax_y.set_title(
-        f"{title}\noccupied rungs only ({occupied.size}/{n_rows}); "
-        f"all markers on ladder (max residual {max_err:.1e})",
-        fontsize=10,
-    )
-    ax_y.legend(loc="best", fontsize=8, framealpha=0.9)
-    ax_y.grid(alpha=0.15)
-
-    for n in names:
-        ax_b.plot(
-            x, bins[n], color=colors[n], lw=1.0, alpha=0.35, zorder=1,
-        )
-        ax_b.plot(
-            x, bins[n], linestyle="none", marker="s", markersize=6.5,
-            markerfacecolor=colors[n], markeredgecolor="white", markeredgewidth=0.5,
-            label=n, zorder=3,
-        )
-    ax_b.set_ylabel(f"{n_rows}-row bin index")
-    ax_b.set_xlabel("horizon step t")
-    ax_b.set_title("integer ladder row (discrete; same alphabet for GT / binary / MMPD)", fontsize=9)
-    ax_b.legend(loc="best", fontsize=8, framealpha=0.9, ncol=3)
-    ax_b.grid(alpha=0.15)
-    ax_b.set_yticks(sorted({int(v) for b in bins.values() for v in b.tolist()}))
-
-    fig.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    return {"max_snap_residual": max_err, "n_occupied_rungs": float(occupied.size), **{
-        f"residual_{n}": residuals[n] for n in names
-    }}
 
 
 def _write_zoom_viz(
@@ -1277,261 +1319,265 @@ def _write_zoom_viz(
     zoom_steps: int,
     seed: int,
 ) -> List[Path]:
+    """Legacy zoomed L-slice + early-horizon snapproof (subset of snap sanity)."""
+    from utils.disc_snap_viz import (
+        select_window_locals,
+        write_early_horizon_snapproof,
+        write_snapproof_slices,
+    )
+
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    gt = snapped["gt"]
-    binary = snapped["binary"]
-    mmpd = snapped["mmpd"]
-    levels = snapped["legal_levels"]
-    indices = snapped["indices"]
-    n = int(gt.shape[0])
-    rng = np.random.default_rng(int(seed) + 17)
-    picks = np.sort(rng.choice(n, size=min(int(n_windows), n), replace=False))
-    colors = {"GT": "black", "binary": "#1f77b4", "MMPD": "#d62728"}
-    paths: List[Path] = []
-    for local in picks.tolist():
-        pool_i = int(indices[local])
-        levels_v = levels[local, variate]
-        for L in slice_lengths:
-            L = int(L)
-            if L > int(gt.shape[-1]):
-                continue
-            offset = max(0, (int(gt.shape[-1]) - L) // 2)
-            # Disc sees bin-center-shifted L-slice; show that exact input.
-            series_raw = {
-                "GT": gt[local, variate, offset : offset + L],
-                "binary": binary[local, variate, offset : offset + L],
-                "MMPD": mmpd[local, variate, offset : offset + L],
-            }
-            series_disc: Dict[str, np.ndarray] = {}
-            for name, seg in series_raw.items():
-                shifted, _ = bin_center_shift(
-                    seg[None, None, :],
-                    levels[local : local + 1, variate : variate + 1, :],
-                    reduce="per_variate",
-                )
-                series_disc[name] = shifted[0, 0]
-            # Zoom crop inside the L-slice for readability.
-            z_steps = min(int(zoom_steps), L)
-            z0 = max(0, (L - z_steps) // 2)
-            z1 = z0 + z_steps
-            path = out_dir / (
-                f"{run_name}_{dataset}_v{variate}_local{local}_pool{pool_i}_"
-                f"L{L}_off{offset}_snapproof.png"
-            )
-            _plot_snap_proof_panel(
-                out_path=path,
-                title=(
-                    f"{run_name}/{dataset} pool={pool_i} local={local} v={variate} | "
-                    f"disc L={L} off={offset} t=[{z0},{z1}) AFTER bin_center_shift "
-                f"(dataset-z; NO instance norm; canvas{snapped.get('canvas_height', '?')} "
-                f"snap={snapped.get('snap_mode', '?')})"
-                ),
-                levels_1d=levels_v,
-                series={k: v[z0:z1] for k, v in series_disc.items()},
-                colors=colors,
-                t0=offset + z0,
-            )
-            paths.append(path)
+    gt = np.asarray(snapped["gt"])
+    locals_ = select_window_locals(int(gt.shape[0]), n_windows, seed=seed)
+    variates = [int(variate)]
+    zoomed = write_snapproof_slices(
+        out_dir=out_dir,
+        run_name=run_name,
+        dataset=dataset,
+        snapped=snapped,
+        locals_=locals_,
+        variates=variates,
+        slice_lengths=slice_lengths,
+        zoom_steps=zoom_steps,
+        after_bin_center=True,
+    )
+    early = write_early_horizon_snapproof(
+        out_dir=out_dir,
+        run_name=run_name,
+        dataset=dataset,
+        snapped=snapped,
+        locals_=locals_,
+        variates=variates,
+        n_steps=16,
+    )
+    return list(zoomed) + list(early)
 
-        # Early-horizon snap proof (pre bin-center; post lattice snap).
-        z1 = min(16, int(gt.shape[-1]))
-        path = out_dir / (
-            f"{run_name}_{dataset}_v{variate}_local{local}_pool{pool_i}_t0-{z1}_snapproof.png"
-        )
-        _plot_snap_proof_panel(
-            out_path=path,
-            title=(
-                f"{run_name}/{dataset} pool={pool_i} local={local} v={variate} | "
-                f"post-snap (pre bin_center) t=0..{z1 - 1} "
-                f"(dataset-z; NO instance norm; canvas{snapped.get('canvas_height', '?')} "
-                f"snap={snapped.get('snap_mode', '?')})"
-            ),
-            levels_1d=levels_v,
-            series={
-                "GT": gt[local, variate, :z1],
-                "binary": binary[local, variate, :z1],
-                "MMPD": mmpd[local, variate, :z1],
-            },
-            colors=colors,
-            t0=0,
-        )
-        paths.append(path)
-    return paths
+def _resolve_viz_variates(args: argparse.Namespace) -> List[int]:
+    if getattr(args, "viz_variates", None):
+        return [int(v) for v in args.viz_variates]
+    return [int(args.viz_variate)]
 
 
-def _score_index(scores: Mapping[str, np.ndarray]) -> Dict[Tuple[int, int, int, int], Dict[str, float]]:
-    """Map (window, offset, variate, label) → {prob_fake, correct}."""
-    out: Dict[Tuple[int, int, int, int], Dict[str, float]] = {}
-    n = int(scores["label"].shape[0])
-    for i in range(n):
-        label = int(scores["label"][i])
-        prob = float(scores["prob_fake"][i])
-        pred = 1 if prob >= 0.5 else 0
-        key = (
-            int(scores["window"][i]),
-            int(scores["offset"][i]),
-            int(scores["variate"][i]),
-            label,
+def _run_viz_sanity_hooks(
+    *,
+    args: argparse.Namespace,
+    run_name: str,
+    dataset: str,
+    snapped: Mapping[str, Any],
+    ckpt_root: Path,
+    config_path: str,
+    device: torch.device,
+) -> Dict[str, Any]:
+    """Attach render-only sanity panels after ``_snap_bundle`` (no ladder rebuild)."""
+    hooks = parse_viz_sanity(getattr(args, "viz_sanity", "") or "")
+    encode = bool(getattr(args, "viz_encode_bins", False))
+    if "staged_boxes" in hooks:
+        print(
+            f"[{run_name}] note: staged_boxes is a staged_eval YAML flag "
+            "(visualization.viz_patch_boxes); ignored on disc ablation path",
+            flush=True,
         )
-        out[key] = {"prob_fake": prob, "pred": float(pred), "correct": float(pred == label)}
+        hooks = set(hooks) - {"staged_boxes"}
+    if not hooks and not encode:
+        return {}
+
+    viz_root = Path(args.viz_dir) if getattr(args, "viz_dir", None) else (
+        Path(args.output_dir) / "viz" / run_name
+    )
+    variates = _resolve_viz_variates(args)
+    n_win = int(args.viz_n_windows)
+    out: Dict[str, Any] = {"viz_root": str(viz_root), "hooks": sorted(hooks)}
+
+    if "snap" in hooks:
+        # Hook A: H96 + L snapproof post-BC (covers leaf scripts #1,2,5–7 snap parts).
+        groups = viz_disc_snap_sanity(
+            out_dir=viz_root / "snap_sanity",
+            run_name=run_name,
+            dataset=dataset,
+            snapped=snapped,
+            n_windows=n_win,
+            variates=variates,
+            slice_lengths=args.slice_lengths,
+            zoom_steps=int(args.viz_zoom_steps),
+            seed=int(args.seed),
+        )
+        paths = flatten_viz_paths(groups)
+        out["snap"] = [str(p) for p in paths]
+        print(f"[{run_name}] viz-sanity snap: {len(paths)} panels under {viz_root / 'snap_sanity'}", flush=True)
+
+    if "pre_post" in hooks:
+        # Hook B: pre→post→BC; assert wn128 when canvas is 128 (leaf #3/#4).
+        require_wn128 = (
+            str(snapped.get("snap_mode", "")).startswith("window_norm_grid")
+            and int(snapped.get("canvas_height", -1)) == 128
+        )
+        groups = viz_disc_pre_post(
+            out_dir=viz_root / "pre_post",
+            run_name=run_name,
+            dataset=dataset,
+            snapped=snapped,
+            n_windows=n_win,
+            variates=variates,
+            slice_lengths=args.slice_lengths,
+            seed=int(args.seed),
+            require_wn128=require_wn128,
+        )
+        paths = flatten_viz_paths(groups)
+        out["pre_post"] = [str(p) for p in paths]
+        print(f"[{run_name}] viz-sanity pre_post: {len(paths)} panels under {viz_root / 'pre_post'}", flush=True)
+
+    if encode:
+        # Hook C: encode alphabet (NOT disc lattice). Fail fast if model build fails.
+        encode_fn = _build_gt_encode_fn(
+            dataset=dataset,
+            ckpt_root=ckpt_root,
+            config_path=config_path,
+            device=device,
+            snap_mode=str(snapped.get("snap_mode", "")),
+            lookback=int(args.lookback),
+            horizon=int(args.horizon),
+        )
+        groups = viz_gt_encode_bins(
+            out_dir=viz_root / "gt_encode_bins",
+            run_name=run_name,
+            dataset=dataset,
+            past=np.asarray(snapped["past"], dtype=np.float32),
+            gt=np.asarray(snapped["gt_pre"], dtype=np.float32),
+            indices=np.asarray(snapped["indices"], dtype=np.int64),
+            encode_fn=encode_fn,
+            n_windows=n_win,
+            variates=variates,
+            slice_lengths=args.slice_lengths,
+            seed=int(args.seed),
+            snap_mode=str(snapped.get("snap_mode", "")),
+        )
+        paths = flatten_viz_paths(groups)
+        out["encode_bins"] = [str(p) for p in paths]
+        print(
+            f"[{run_name}] viz-encode-bins: {len(paths)} panels under {viz_root / 'gt_encode_bins'}",
+            flush=True,
+        )
     return out
+
+
+def _build_gt_encode_fn(
+    *,
+    dataset: str,
+    ckpt_root: Path,
+    config_path: str,
+    device: torch.device,
+    snap_mode: str,
+    lookback: int,
+    horizon: int,
+):
+    """Encode-only model for ``viz_gt_encode_bins`` (no DiT weights; alphabet check)."""
+    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
+    from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
+        patch_stage_globals,
+    )
+    from models.diffusion_tsf.train_multivariate_pipeline import create_diffusion_model
+    from utils.visualize_staged_eval_2d_preds import _build_state
+
+    run, _, kind = load_ablation_run(dataset, ckpt_root)
+    state = _build_state(ckpt_root, dataset, run_subset_id(run), config_path)
+    resolve_pipeline_data_subset(state)
+    n_vars = len(run_variate_indices(run))
+    use_ord = bool(state.use_ordinal_window_norm)
+    if use_ord and not snap_mode.startswith("ordinal"):
+        raise RuntimeError(
+            f"viz-encode-bins: config ordinal but snap_mode={snap_mode!r}"
+        )
+    if (not use_ord) and snap_mode.startswith("ordinal"):
+        raise RuntimeError(
+            f"viz-encode-bins: snap_mode={snap_mode!r} but config is not ordinal"
+        )
+
+    _, _, _, norm_stats = load_dataset(
+        dataset,
+        run_variate_indices(run),
+        stride=run_train_stride(run),
+        test_stride=run_test_stride(run),
+        lookback=lookback,
+        horizon=horizon,
+        ordinal_tie_atol=float(getattr(state, "ordinal_tie_atol", 1e-6) or 1e-6),
+        use_ordinal_window_norm=use_ord,
+    )
+    ladder = norm_stats.get("ordinal_ladder") if use_ord else None
+    if use_ord:
+        if ladder is None:
+            raise RuntimeError(f"{dataset}: ordinal ladder missing for encode bins")
+        state.extra["global_ordinal_ladder"] = ladder
+        pipeline_mod.GLOBAL_ORDINAL_LADDER = ladder
+    else:
+        pipeline_mod.GLOBAL_ORDINAL_LADDER = None
+        state.extra.pop("global_ordinal_ladder", None)
+    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
+    patch_stage_globals(pipeline_mod, state, "coarse", honor_dataset_windows=True)
+    pipeline_mod.DISABLE_CROSS_ATTENTION = True
+    pipeline_mod.USE_GUIDANCE_CHANNEL = False
+
+    model = create_diffusion_model(
+        n_variates=n_vars,
+        lookback=lookback,
+        horizon=horizon,
+        guidance_model=None,
+        diffusion_stage="coarse",
+        use_guidance_channel=False,
+    ).to(device)
+    model.eval()
+
+    @torch.no_grad()
+    def _encode(past_np: np.ndarray, future_np: np.ndarray, variate: int) -> Dict[str, np.ndarray]:
+        past = torch.from_numpy(np.asarray(past_np, dtype=np.float32)).to(device)
+        future = torch.from_numpy(np.asarray(future_np, dtype=np.float32)).to(device)
+        past_norm, future_norm, stats = model._normalize_sequence(past, future)
+        assert future_norm is not None
+        maps = model._encode_staged_maps(future_norm)
+        coarse_h = int(model.config.coarse_image_height)
+        coarse_1d = model._decode_coarse_1d_from_map(maps["coarse"], cdf_decoder="mean")
+        fine_res = model._decode_fine_1d_from_map(
+            maps["fine"], coarse_height=coarse_h, cdf_decoder="mean",
+        )
+        if coarse_1d.dim() == 2:
+            coarse_1d = coarse_1d.unsqueeze(1)
+        if fine_res.dim() == 2:
+            fine_res = fine_res.unsqueeze(1)
+        combined = coarse_1d + fine_res
+        canvas_h = int(getattr(model.config, "patch_refine_canvas_height", 0) or 0)
+        hir_1d = None
+        if canvas_h > 0 and hasattr(model, "_encode_absolute_future_hir"):
+            hir = model._encode_absolute_future_hir(future_norm, canvas_h)
+            hir_1d = model._decode_absolute_future_hir(hir)
+        h = int(future.shape[-1])
+
+        def _trim(x: torch.Tensor) -> np.ndarray:
+            y = x[0, variate].detach().cpu().numpy().astype(np.float32)
+            if y.shape[-1] > h:
+                y = y[-h:]
+            return y
+
+        gt_norm = future_norm[0, variate].detach().cpu().numpy().astype(np.float32)
+        if gt_norm.shape[-1] > h:
+            gt_norm = gt_norm[-h:]
+        out = {
+            "gt_norm": gt_norm,
+            "coarse": _trim(coarse_1d),
+            "fine_refined": _trim(combined),
+            "center": float(stats[0][0, variate, 0].item()),
+            "std": float(stats[1][0, variate, 0].item()),
+        }
+        if hir_1d is not None:
+            out["fine_hir"] = _trim(hir_1d)
+        return out
+
+    _ = kind  # kind unused; snap_mode already asserted against config
+    return _encode
 
 
 def _load_scores(path: Path) -> Dict[str, np.ndarray]:
     with np.load(path) as data:
         return {k: data[k] for k in data.files}
-
-
-def _plot_disagreement_panel(
-    *,
-    out_path: Path,
-    title: str,
-    past_1d: Optional[np.ndarray],
-    gt_1d: np.ndarray,
-    binary_1d: np.ndarray,
-    mmpd_1d: np.ndarray,
-    binary_prob: float,
-    mmpd_prob: float,
-    label: int,
-    offset: int,
-) -> None:
-    """GT / binary / MMPD L-slice (±lookback) with disc P(fake) annotations."""
-    L = int(gt_1d.shape[0])
-    t_h = np.arange(offset, offset + L)
-    fig, ax = plt.subplots(figsize=(10.0, 3.6))
-    if past_1d is not None and past_1d.size:
-        t_past = np.arange(offset - int(past_1d.shape[0]), offset)
-        ax.plot(t_past, past_1d, color="#555555", lw=1.2, label="lookback", alpha=0.85)
-        ax.axvline(offset, color="black", ls="--", lw=0.8, alpha=0.45)
-    ax.plot(t_h, gt_1d, color="black", lw=2.0, label="GT")
-    ax.plot(
-        t_h, binary_1d, color="#1f77b4", lw=1.8, alpha=0.9,
-        label=f"binary (Pfake={binary_prob:.2f})",
-    )
-    ax.plot(
-        t_h, mmpd_1d, color="#d62728", lw=1.8, alpha=0.9,
-        label=f"MMPD (Pfake={mmpd_prob:.2f})",
-    )
-    # Highlight the L-slice the disc scored.
-    ax.axvspan(offset, offset + L - 1, color="#ffe08a", alpha=0.25, zorder=0)
-    shown = "FAKE" if label == 1 else "REAL"
-    ax.set_title(f"{title}\nshown_to_disc={shown} (label={label})", fontsize=10)
-    ax.set_xlabel("horizon step t")
-    ax.set_ylabel("dataset-z (snapped)")
-    ax.legend(loc="best", fontsize=8, framealpha=0.9)
-    ax.grid(alpha=0.15)
-    fig.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=140)
-    plt.close(fig)
-
-
-def write_disc_disagreement_viz(
-    *,
-    out_dir: Path,
-    run_name: str,
-    dataset: str,
-    slice_len: int,
-    snapped: Mapping[str, np.ndarray],
-    binary_scores: Mapping[str, np.ndarray],
-    mmpd_scores: Mapping[str, np.ndarray],
-    include_past: bool,
-    max_panels: int,
-    seed: int,
-) -> Dict[str, Any]:
-    """Panels where one source's disc is correct and the other's is wrong.
-
-    Keys align on (window, offset, variate, label). For label=0 both discs see
-    GT; for label=1 each sees its own fake. Cap panels per direction.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    bin_ix = _score_index(binary_scores)
-    mmpd_ix = _score_index(mmpd_scores)
-    shared = sorted(set(bin_ix) & set(mmpd_ix))
-    dirs = {
-        "mmpd_wrong_binary_right": [],
-        "binary_wrong_mmpd_right": [],
-    }
-    for key in shared:
-        b = bin_ix[key]
-        m = mmpd_ix[key]
-        if b["correct"] >= 0.5 and m["correct"] < 0.5:
-            dirs["mmpd_wrong_binary_right"].append(key)
-        elif b["correct"] < 0.5 and m["correct"] >= 0.5:
-            dirs["binary_wrong_mmpd_right"].append(key)
-
-    rng = np.random.default_rng(int(seed) + int(slice_len) * 17)
-    gt = np.asarray(snapped["gt"])
-    binary = np.asarray(snapped["binary"])
-    mmpd = np.asarray(snapped["mmpd"])
-    past = np.asarray(snapped["past"])
-    L = int(slice_len)
-    lookback_tail = min(32, int(past.shape[-1])) if include_past else 0
-    paths: Dict[str, List[str]] = {}
-    counts = {k: len(v) for k, v in dirs.items()}
-
-    for direction, keys in dirs.items():
-        # Prefer confident mistakes: large |Pfake - 0.5| on the wrong disc.
-        def _wrong_margin(k: Tuple[int, int, int, int]) -> float:
-            if direction.startswith("mmpd_wrong"):
-                return abs(float(mmpd_ix[k]["prob_fake"]) - 0.5)
-            return abs(float(bin_ix[k]["prob_fake"]) - 0.5)
-
-        keys_sorted = sorted(keys, key=_wrong_margin, reverse=True)
-        n = min(int(max_panels), len(keys_sorted))
-        if n < len(keys_sorted):
-            top = keys_sorted[: max(1, n // 2)]
-            rest = keys_sorted[max(1, n // 2) :]
-            extra = n - len(top)
-            if extra > 0 and rest:
-                pick = rng.choice(len(rest), size=min(extra, len(rest)), replace=False)
-                top.extend([rest[int(i)] for i in np.atleast_1d(pick)])
-            chosen = top[:n]
-        else:
-            chosen = keys_sorted
-
-        dir_paths: List[str] = []
-        for i, (window, offset, variate, label) in enumerate(chosen):
-            past_1d = None
-            if lookback_tail > 0:
-                past_1d = past[window, variate, -lookback_tail:]
-            path = out_dir / (
-                f"{run_name}_{dataset}_L{L}_{direction}_"
-                f"w{window}_off{offset}_v{variate}_lab{label}_{i:02d}.png"
-            )
-            _plot_disagreement_panel(
-                out_path=path,
-                title=(
-                    f"{run_name}/{dataset} L={L} {direction} | "
-                    f"w={window} off={offset} v={variate}"
-                ),
-                past_1d=past_1d,
-                gt_1d=gt[window, variate, offset : offset + L],
-                binary_1d=binary[window, variate, offset : offset + L],
-                mmpd_1d=mmpd[window, variate, offset : offset + L],
-                binary_prob=float(bin_ix[(window, offset, variate, label)]["prob_fake"]),
-                mmpd_prob=float(mmpd_ix[(window, offset, variate, label)]["prob_fake"]),
-                label=int(label),
-                offset=int(offset),
-            )
-            dir_paths.append(str(path))
-        paths[direction] = dir_paths
-        print(
-            f"[disc-disagree] {run_name}/{dataset}/L{L} {direction}: "
-            f"pool={counts[direction]} wrote={len(dir_paths)} → {out_dir}",
-            flush=True,
-        )
-
-    manifest = {
-        "run": run_name,
-        "dataset": dataset,
-        "slice_len": L,
-        "n_shared_keys": len(shared),
-        "counts": counts,
-        "paths": paths,
-    }
-    write_json(out_dir / f"manifest_L{L}.json", manifest)
-    return manifest
 
 
 def run_one(
@@ -1645,22 +1691,42 @@ def run_one(
         },
     )
 
-    viz_dir = args.output_dir / "viz" / run_name
-    viz_paths = _write_zoom_viz(
-        out_dir=viz_dir,
+    # Render-only sanity hooks reuse snapped (+ pre-snap) tensors — no ladder rebuild.
+    sanity_manifest = _run_viz_sanity_hooks(
+        args=args,
         run_name=run_name,
         dataset=dataset,
         snapped=snapped,
-        n_windows=int(args.viz_n_windows),
-        variate=int(args.viz_variate),
-        slice_lengths=args.slice_lengths,
-        zoom_steps=int(args.viz_zoom_steps),
-        seed=int(args.seed),
+        ckpt_root=ckpt_root,
+        config_path=config_path,
+        device=device,
     )
-    print(f"[{run_name}] wrote {len(viz_paths)} viz panels under {viz_dir}", flush=True)
+
+    viz_dir = args.output_dir / "viz" / run_name
+    # Legacy zoom panels. When --viz-sanity includes snap, snap_sanity/ already supersets these.
+    viz_paths: List[Path] = []
+    if "snap" not in parse_viz_sanity(getattr(args, "viz_sanity", "") or ""):
+        viz_paths = _write_zoom_viz(
+            out_dir=viz_dir,
+            run_name=run_name,
+            dataset=dataset,
+            snapped=snapped,
+            n_windows=int(args.viz_n_windows),
+            variate=int(args.viz_variate),
+            slice_lengths=args.slice_lengths,
+            zoom_steps=int(args.viz_zoom_steps),
+            seed=int(args.seed),
+        )
+        print(f"[{run_name}] wrote {len(viz_paths)} viz panels under {viz_dir}", flush=True)
+    else:
+        viz_paths = [Path(p) for p in (sanity_manifest.get("snap") or [])]
+        print(
+            f"[{run_name}] skipped legacy zoom viz (covered by --viz-sanity snap)",
+            flush=True,
+        )
 
     redbox_paths: List[str] = []
-    if bool(getattr(args, "redbox_viz", True)):
+    if bool(getattr(args, "redbox_viz", False)):
         redbox_paths = write_redbox_forecast_viz(
             args=args,
             run_name=run_name,
@@ -1673,6 +1739,7 @@ def run_one(
         return {
             "kind": kind,
             "viz": [str(p) for p in viz_paths],
+            "viz_sanity": sanity_manifest,
             "redbox_viz": redbox_paths,
             "metrics": {},
         }
@@ -1727,28 +1794,31 @@ def run_one(
         write_json(args.output_dir / "partials" / f"{run_name}__{dataset}__{source}.json", per_len)
         metrics[source] = per_len
 
-    # Always write disagreement panels (MMPD wrong / binary right and vice versa).
+    # Binary↔MMPD disagreement panels (default on; --no-disc-disagreement / --no-viz).
     disagree_root = args.output_dir / "viz" / "disc_disagreement" / run_name
     disagree_manifests: Dict[str, Any] = {}
-    for length in args.slice_lengths:
-        key = str(int(length))
-        if key not in scores_by_source.get("binary_staged", {}):
-            continue
-        if key not in scores_by_source.get("mmpd", {}):
-            continue
-        disagree_manifests[key] = write_disc_disagreement_viz(
-            out_dir=disagree_root,
-            run_name=run_name,
-            dataset=dataset,
-            slice_len=int(length),
-            snapped=snapped,
-            binary_scores=scores_by_source["binary_staged"][key],
-            mmpd_scores=scores_by_source["mmpd"][key],
-            include_past=not bool(args.candidate_only),
-            max_panels=int(getattr(args, "disc_disagreement_max", 12)),
-            seed=int(args.seed),
-        )
-    write_json(disagree_root / "summary.json", disagree_manifests)
+    if bool(getattr(args, "disc_disagreement", True)):
+        for length in args.slice_lengths:
+            key = str(int(length))
+            if key not in scores_by_source.get("binary_staged", {}):
+                continue
+            if key not in scores_by_source.get("mmpd", {}):
+                continue
+            disagree_manifests[key] = write_disc_disagreement_viz(
+                out_dir=disagree_root,
+                run_name=run_name,
+                dataset=dataset,
+                slice_len=int(length),
+                snapped=snapped,
+                binary_scores=scores_by_source["binary_staged"][key],
+                mmpd_scores=scores_by_source["mmpd"][key],
+                include_past=not bool(args.candidate_only),
+                max_panels=int(getattr(args, "disc_disagreement_max", 12)),
+                seed=int(args.seed),
+            )
+        write_json(disagree_root / "summary.json", disagree_manifests)
+    else:
+        print(f"[{run_name}] skipped disc disagreement viz", flush=True)
 
     # Flat per-variate dump for the whole run.
     by_var_rows: List[Dict[str, Any]] = []
@@ -1778,6 +1848,7 @@ def run_one(
     return {
         "kind": kind,
         "viz": [str(p) for p in viz_paths],
+        "viz_sanity": sanity_manifest,
         "redbox_viz": redbox_paths,
         "disc_disagreement": disagree_manifests,
         "metrics": metrics,
@@ -1786,6 +1857,7 @@ def run_one(
 
 def main() -> None:
     args = parse_args()
+    apply_viz_master_switch(args)
     apply_smoke(args)
     pack_splits = apply_disc_pack_protocol(args)
     args.output_dir = Path(args.output_dir)
@@ -1797,7 +1869,8 @@ def main() -> None:
     )
     print(
         f"device={device} viz_only={args.viz_only} smoke={args.smoke_test} "
-        f"redbox_viz={args.redbox_viz} pack_splits={pack_splits} "
+        f"viz_sanity={args.viz_sanity!r} redbox_viz={args.redbox_viz} "
+        f"disc_disagreement={args.disc_disagreement} pack_splits={pack_splits} "
         f"train_frac={args.train_fraction} val_frac={args.val_fraction}",
         flush=True,
     )

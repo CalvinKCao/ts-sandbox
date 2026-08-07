@@ -13,9 +13,11 @@
 # Disable shared cache: --no-forecast-cache
 # Force regenerate: --force-raw-eval / --force-mmpd-eval
 #
-# Outputs: auroc_table.json, auroc_by_variate.json,
-#          viz/disc_disagreement/<run>/ (MMPD-wrong/binary-right and vice versa),
-#          viz/staged_eval_samples/<run>/ (full-horizon 1d + red-box panels; --no-redbox-viz to skip).
+# Outputs (viz ON by default): auroc_table.json, auroc_by_variate.json,
+#          viz/<run>/{snap_sanity,pre_post}/ (--viz-sanity all; pass none / --no-viz to skip),
+#          viz/disc_disagreement/<run>/ (MMPD-wrong/binary-right and vice versa;
+#            --no-disc-disagreement / --no-viz to skip),
+#          viz/staged_eval_samples/<run>/ (full-horizon 1d + red-box; --no-redbox-viz to skip).
 #
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"

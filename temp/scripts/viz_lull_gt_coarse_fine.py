@@ -1,3 +1,4 @@
+# Pipeline integration: Prefer ablation --viz-encode-bins (utils.disc_snap_viz.viz_gt_encode_bins).
 #!/usr/bin/env python3
 """LULL (ETTh2 v=5) GT coarse/fine bin viz — hybrid flat-dsnorm canvas128.
 

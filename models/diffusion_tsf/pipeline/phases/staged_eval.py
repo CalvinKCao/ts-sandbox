@@ -1126,6 +1126,48 @@ class StagedEvalPhase(PipelinePhase):
             except Exception as e:
                 logger.warning("Binary pack anchor+prob viz failed: %s", e, exc_info=True)
 
+            # Patch-box / 1d / 2d staged sample panels (off by default; smoke n=1).
+            # Reuses already-loaded coarse/fine models + test pool — no ladder rebuild.
+            if bool(viz_cfg.get("viz_patch_boxes", False)) and not joint_dual:
+                try:
+                    from utils.staged_eval_sample_viz import (
+                        pick_indices,
+                        write_staged_sample_panels,
+                    )
+
+                    kind = "patch_refine" if patch_refine else "fine"
+                    n_box = int(viz_cfg.get("viz_patch_boxes_n_samples", 1) or 1)
+                    if state.smoke_test:
+                        n_box = min(n_box, 1)
+                    picks = pick_indices(len(full_test_ds), n_box, int(state.seed), None)
+                    box_dir = Path(state.results_dir) / "viz" / "staged_eval_samples" / subset_id
+                    box_paths = write_staged_sample_panels(
+                        out_dir=box_dir,
+                        run_name=str(subset_id),
+                        dataset=str(state.dataset),
+                        kind=kind,
+                        coarse_model=coarse_model,
+                        fine_model=fine_model,
+                        pool=full_test_ds,
+                        picks=picks,
+                        device=device,
+                        sampler=str(selected_sampler),
+                        num_sampling_steps=int(selected_steps),
+                        seed=int(state.seed),
+                        variables_to_plot=int(viz_cfg.get("n_dual_scale_vars", 0) or 0),
+                        jpeg_dpi=int(viz_cfg.get("jpeg_dpi", 100) or 100),
+                    )
+                    wandb_utils.log_visualization_paths(
+                        [str(p) for p in box_paths],
+                        wandb_key="eval/staged_eval_sample_panels",
+                    )
+                    logger.info(
+                        "[%s] viz_patch_boxes wrote %d panels under %s",
+                        subset_id, len(box_paths), box_dir,
+                    )
+                except Exception as e:
+                    logger.warning("Staged patch-box sample viz failed: %s", e, exc_info=True)
+
         logger.info(
             "[%s] staged eval done: sampler=%s steps=%d "
             "prob_mse=%.4f prob_mae=%.4f anchor_mse=%.4f anchor_mae=%.4f crps=%.4f",

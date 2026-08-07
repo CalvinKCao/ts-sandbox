@@ -1,3 +1,4 @@
+# Pipeline integration: Prefer --viz-sanity pre_post (assert window_norm_grid + canvas 128 on snapped tensors).
 #!/usr/bin/env python3
 """Prove GT / binary / MMPD sit on the canvas128 window-norm 128-row lattice.
 

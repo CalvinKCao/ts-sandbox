@@ -52,6 +52,9 @@ visualization:
   jpeg_dpi: 100
   dual_scale_sampler: anchor
   dual_scale_inference_steps: 20
+  # Off by default (GPU-heavy). Smoke / local: set true or pass CLI override.
+  viz_patch_boxes: false
+  viz_patch_boxes_n_samples: 1
 
 wandb:
   enabled: true

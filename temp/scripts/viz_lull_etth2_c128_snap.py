@@ -1,3 +1,4 @@
+# Pipeline integration: Prefer --viz-sanity snap,pre_post + --viz-variates 5; encode via --viz-encode-bins.
 #!/usr/bin/env python3
 """LULL (ETTh2 v=5) window_norm_grid canvas128 snap viz — foil to ordinal absolute.
 
