@@ -55,6 +55,22 @@ visualization:
   # Off by default (GPU-heavy). Smoke / local: set true or pass CLI override.
   viz_patch_boxes: false
   viz_patch_boxes_n_samples: 1
+  # Point-acc stage: always emit top-gap binary↔MMPD + redbox (anchor ranking).
+  # Requires visualization.mmpd_campaign_root (or mmpd_campaign_root_by_dataset).
+  # Unset → skip with log; set but missing pack → fail fast.
+  viz_binary_mmpd_gap: true
+  viz_binary_mmpd_redbox: true
+  viz_binary_mmpd_top_k: 10
+  viz_binary_mmpd_min_spacing: 48
+  viz_binary_mmpd_diff_mode: abs_diff
+  viz_binary_mmpd_eval_test_stride: 4
+  viz_binary_mmpd_variables_to_plot: 99
+  viz_binary_mmpd_redbox_variables_to_plot: 0
+  viz_binary_mmpd_smoke_top_k: 1
+  viz_binary_mmpd_smoke_variables: 2
+  mmpd_campaign_root: null
+  mmpd_config: configs/mmpd_decoder_flat_subsets_paper_lb336_hz96_matched_binary.yaml
+  mmpd_config_suffix: mmpd_decoder_flat_subsets_paper_lb336_hz96_matched_binary
 
 wandb:
   enabled: true

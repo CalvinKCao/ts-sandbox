@@ -6,6 +6,10 @@ extends: configs/binary_window_norm_patch_refine_earlyjuly_norm.yaml
 wandb:
   tags: [ablation, window_norm, patch_refine, canvas128, p64x6, early_july_norm]
 
+visualization:
+  # Matched-binary MMPD campaign for ETTh1 canvas128 point-gap / redbox.
+  mmpd_campaign_root: results/datasets/07-29-0151-h96-ordinal-binary-nonordinal-mmpd-mmpd
+
 experiment:
   name: binary-window-norm-patch-refine-canvas128-p64x6
   experiment_name: binary_window_norm_patch_refine_canvas128_p64x6

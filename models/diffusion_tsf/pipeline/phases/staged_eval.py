@@ -1168,6 +1168,47 @@ class StagedEvalPhase(PipelinePhase):
                 except Exception as e:
                     logger.warning("Staged patch-box sample viz failed: %s", e, exc_info=True)
 
+        # Point-acc gap/redbox: default ON; runs even when skip_eval_visualizations
+        # (earlyjuly leaves). Gated only by viz_binary_mmpd_{gap,redbox} + campaign path.
+        if bool(viz_cfg.get("viz_binary_mmpd_gap", True)) or bool(
+            viz_cfg.get("viz_binary_mmpd_redbox", True)
+        ):
+            try:
+                from utils.staged_point_gap_redbox_viz import (
+                    run_binary_mmpd_gap_and_redbox_viz,
+                )
+
+                merged = state.merged_config or {}
+                cfg_path = merged.get("_yaml_path") or state.extra.get("config_path")
+                gap_paths = run_binary_mmpd_gap_and_redbox_viz(
+                    state=state,
+                    pack=pack,
+                    coarse_model=coarse_model,
+                    fine_model=fine_model,
+                    device=device,
+                    viz_cfg=viz_cfg,
+                    patch_refine=patch_refine,
+                    joint_dual=joint_dual,
+                    pack_test_stride=int(test_stride),
+                    binary_config_path=str(cfg_path) if cfg_path else None,
+                )
+                wandb_utils.log_visualization_paths(
+                    gap_paths.get("gap", []),
+                    wandb_key="eval/point_gap_binary_mmpd",
+                )
+                wandb_utils.log_visualization_paths(
+                    gap_paths.get("redbox", []),
+                    wandb_key="eval/point_gap_redbox",
+                )
+            except Exception as e:
+                # Fail-fast when campaign is configured but broken; soft-skip only
+                # when the util itself logged an unset-campaign skip (no raise).
+                if isinstance(e, FileNotFoundError):
+                    raise
+                logger.warning(
+                    "Point-gap/redbox viz failed: %s", e, exc_info=True,
+                )
+
         logger.info(
             "[%s] staged eval done: sampler=%s steps=%d "
             "prob_mse=%.4f prob_mae=%.4f anchor_mse=%.4f anchor_mae=%.4f crps=%.4f",
