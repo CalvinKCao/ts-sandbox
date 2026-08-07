@@ -237,17 +237,53 @@ def _decode_staged_1d_from_maps(
     )
 
 
+def _match_map_height(arr: np.ndarray, target_h: int) -> np.ndarray:
+    """Align 2D map height for past|future concat (HW or CHW).
+
+    Canvas128 patch_refine futures are H=128 while coarse past_2d_fine is H=16.
+    """
+    if arr.ndim == 2:
+        h_ax = 0
+    elif arr.ndim == 3:
+        h_ax = 1
+    else:
+        raise ValueError(f"expected HW or CHW map, got shape {arr.shape}")
+    h = int(arr.shape[h_ax])
+    if h == int(target_h):
+        return arr
+    if h <= 0 or int(target_h) % h != 0:
+        # nearest resize along height via repeat of floor ratios + pad last row
+        reps = max(1, int(round(target_h / max(h, 1))))
+        out = np.repeat(arr, reps, axis=h_ax)
+        cur = int(out.shape[h_ax])
+        if cur > target_h:
+            out = np.take(out, indices=range(target_h), axis=h_ax)
+        elif cur < target_h:
+            pad_n = target_h - cur
+            last = np.take(out, indices=[-1], axis=h_ax)
+            out = np.concatenate([out, np.repeat(last, pad_n, axis=h_ax)], axis=h_ax)
+        return out
+    return np.repeat(arr, int(target_h // h), axis=h_ax)
+
+
 @torch.no_grad()
 def _anchor_maps(
     coarse_model: torch.nn.Module,
     fine_model: torch.nn.Module,
     past_b: torch.Tensor,
     future_b: torch.Tensor,
+    *,
+    emit_guidance_prediction: bool = True,
 ) -> Dict[str, torch.Tensor]:
     stage = str(getattr(getattr(coarse_model, "config", None), "diffusion_stage", "") or "")
     vertical_dual = stage == "vertical_dual" or fine_model is coarse_model
     if vertical_dual:
-        out = coarse_model.generate(past_b, sampler="anchor", num_inference_steps=1)
+        out = coarse_model.generate(
+            past_b,
+            sampler="anchor",
+            num_inference_steps=1,
+            emit_guidance_prediction=bool(emit_guidance_prediction),
+        )
         past_norm, future_norm, _norm_stats = coarse_model._normalize_sequence(past_b, future_b)
         past_maps_gt = coarse_model._encode_staged_maps(past_norm)
         future_maps_gt = coarse_model._encode_staged_maps(future_norm)
@@ -259,6 +295,11 @@ def _anchor_maps(
         past_f_pred = out["past_2d_fine"][0].cpu().numpy()
         fut_c_pred = out["future_2d_coarse"][0].cpu().numpy()
         fut_f_pred = out["future_2d_fine"][0].cpu().numpy()
+        if emit_guidance_prediction and "guidance_prediction_global_norm" not in out:
+            raise KeyError(
+                "vertical_dual generate missing guidance_prediction_global_norm "
+                "(emit_guidance_prediction=True)"
+            )
         return {
             "gt_coarse": np.concatenate([past_c_gt, fut_c_gt], axis=-1),
             "gt_fine": np.concatenate([past_f_gt, fut_f_gt], axis=-1),
@@ -278,7 +319,13 @@ def _anchor_maps(
         sampler="anchor",
         num_inference_steps=1,
         future_coarse_2d=coarse_out["future_2d_coarse"],
+        emit_guidance_prediction=bool(emit_guidance_prediction),
     )
+    if emit_guidance_prediction and "guidance_prediction_global_norm" not in fine_out:
+        raise KeyError(
+            "refine generate missing guidance_prediction_global_norm "
+            "(emit_guidance_prediction=True)"
+        )
     past_norm, future_norm, _norm_stats = fine_model._normalize_sequence(past_b, future_b)
     past_maps_gt = fine_model._encode_staged_maps(past_norm)
     future_maps_gt = fine_model._encode_staged_maps(future_norm)
@@ -287,9 +334,16 @@ def _anchor_maps(
     fut_c_gt = future_maps_gt["coarse"][0].cpu().numpy()
     fut_f_gt = future_maps_gt["fine"][0].cpu().numpy()
     past_c_pred = coarse_out["past_2d_coarse"][0].cpu().numpy()
-    past_f_pred = coarse_out["past_2d_fine"][0].cpu().numpy()
+    # Prefer fine/patch_refine past map when present (canvas128 H=128); else upsample coarse.
+    if "past_2d_fine" in fine_out:
+        past_f_pred = fine_out["past_2d_fine"][0].cpu().numpy()
+    else:
+        past_f_pred = coarse_out["past_2d_fine"][0].cpu().numpy()
     fut_c_pred = coarse_out["future_2d_coarse"][0].cpu().numpy()
     fut_f_pred = fine_out["future_2d_fine"][0].cpu().numpy()
+    target_fh = int(fut_f_pred.shape[-2] if fut_f_pred.ndim >= 2 else fut_f_pred.shape[0])
+    past_f_pred = _match_map_height(past_f_pred, target_fh)
+    past_f_gt = _match_map_height(past_f_gt, int(fut_f_gt.shape[-2] if fut_f_gt.ndim >= 2 else fut_f_gt.shape[0]))
     return {
         "gt_coarse": np.concatenate([past_c_gt, fut_c_gt], axis=-1),
         "gt_fine": np.concatenate([past_f_gt, fut_f_gt], axis=-1),

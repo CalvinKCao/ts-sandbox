@@ -109,36 +109,46 @@ def _load_staged_bundle(checkpoint_dir: Path, dataset: str) -> Dict[str, Any]:
                 continue
 
         coarse_pt = sub_dir / "coarse" / "best.pt"
-        fine_pt = sub_dir / "fine" / "best.pt"
-        fine_meta_path = sub_dir / "fine" / "metadata.json"
-        if not (coarse_pt.is_file() and fine_pt.is_file() and fine_meta_path.is_file()):
-            continue
-        with fine_meta_path.open(encoding="utf-8") as f:
-            fine_meta = json.load(f)
-        if fine_meta.get("dataset_name") != dataset:
-            continue
-        coarse_meta_path = sub_dir / "coarse" / "metadata.json"
-        coarse_meta: Dict[str, Any] = {}
-        if coarse_meta_path.is_file():
-            with coarse_meta_path.open(encoding="utf-8") as f:
-                coarse_meta = json.load(f)
-        candidates.append(
-            {
-                "subset_id": fine_meta["subset_id"],
-                "variate_indices": fine_meta["variate_indices"],
-                "variate_names": fine_meta.get("variate_names", []),
-                "coarse_pt": coarse_pt,
-                "fine_pt": fine_pt,
-                "fine_metadata": fine_meta,
-                "coarse_metadata": coarse_meta,
-                "stage": "staged",
-                "root": checkpoint_dir,
-            }
-        )
+        # Prefer patch_refine over residual fine when both exist (canvas128 leaves).
+        refine_stage = None
+        fine_pt = None
+        fine_meta_path = None
+        for cand_stage in ("patch_refine", "fine"):
+            pt = sub_dir / cand_stage / "best.pt"
+            meta_path = sub_dir / cand_stage / "metadata.json"
+            if pt.is_file() and meta_path.is_file():
+                refine_stage = cand_stage
+                fine_pt = pt
+                fine_meta_path = meta_path
+                break
+        if coarse_pt.is_file() and fine_pt is not None and fine_meta_path is not None:
+            with fine_meta_path.open(encoding="utf-8") as f:
+                fine_meta = json.load(f)
+            if fine_meta.get("dataset_name") == dataset:
+                coarse_meta_path = sub_dir / "coarse" / "metadata.json"
+                coarse_meta: Dict[str, Any] = {}
+                if coarse_meta_path.is_file():
+                    with coarse_meta_path.open(encoding="utf-8") as f:
+                        coarse_meta = json.load(f)
+                candidates.append(
+                    {
+                        "subset_id": fine_meta["subset_id"],
+                        "variate_indices": fine_meta["variate_indices"],
+                        "variate_names": fine_meta.get("variate_names", []),
+                        "coarse_pt": coarse_pt,
+                        "fine_pt": fine_pt,
+                        "fine_metadata": fine_meta,
+                        "coarse_metadata": coarse_meta,
+                        "stage": "patch_refine" if refine_stage == "patch_refine" else "staged",
+                        "refine_stage": refine_stage,
+                        "root": checkpoint_dir,
+                    }
+                )
+                continue
     if not candidates:
         raise FileNotFoundError(
-            f"No staged coarse/fine or vertical_dual best.pt for dataset={dataset} "
-            f"under {checkpoint_dir}"
+            f"No staged coarse/fine|patch_refine or vertical_dual best.pt for "
+            f"dataset={dataset} under {checkpoint_dir}"
         )
     return candidates[0]
 

@@ -74,11 +74,16 @@ def legal_window_norm_patch_refine_levels_dataset_z(
 ) -> np.ndarray:
     """Finite H-row window-norm lattice midpoints in dataset-z. Shape ``(N, V, H)``.
 
-    Row ``i`` → ``(-max_scale + (i + 0.5) * step) * std + center`` with
-    ``center``/``std`` from the lookback only (same as training encode). Values
-    returned are still in **global dataset-z** — this does not instance-norm
-    the series; it only places the training canvas rungs into that space.
+    Walkthrough (canvas128 / window-norm disc snap):
+      1. From lookback ``past``, get per-window center/std (same as train encode).
+      2. Build H midpoints on the *normalized* axis: [-max_scale, +max_scale].
+      3. Map those midpoints back to dataset-z: level = norm * std + center.
+      4. Disc snap uses nearest of these H values — NOT ordinal ladder rows.
+
+    Returned values stay in **global dataset-z** (no instance-norm of the
+    forecast itself). Hybrid-flat leaves may override std/center for flat vars.
     """
+    # Ordinal leaves use a different helper — fail fast if someone mixed flags.
     if bool(getattr(config, "use_ordinal_window_norm", False)):
         raise ValueError(
             "legal_window_norm_patch_refine_levels_dataset_z is for non-ordinal "
@@ -87,6 +92,7 @@ def legal_window_norm_patch_refine_levels_dataset_z(
     past_np = np.asarray(past, dtype=np.float32)
     if past_np.ndim != 3:
         raise ValueError(f"past must be (N,V,L), got {past_np.shape}")
+    # H = canvas height (128 for canvas128 leaf, 256 for older leaves).
     height = int(getattr(config, "patch_refine_canvas_height", 0) or 0)
     if height <= 0:
         raise ValueError(f"patch_refine_canvas_height must be positive, got {height}")
@@ -95,10 +101,14 @@ def legal_window_norm_patch_refine_levels_dataset_z(
         raise ValueError(f"max_scale must be positive, got {max_scale}")
 
     past_t = torch.from_numpy(past_np)
+    # center/std: (N,V,1) — lookback stats used during binary encode.
     center, std = window_normalization_stats(past_t, config)
+    # Step size on the normalized canvas so H rows span ±max_scale.
     step = normalized_grid_step(config)
     rows = torch.arange(height, dtype=torch.float32)
+    # Midpoint of row i on normalized axis (same formula as training denorm).
     norm_levels = -max_scale + (rows + 0.5) * step  # (H,)
+    # Broadcast: each (window,variate) gets its own H-rung ladder in dataset-z.
     levels = norm_levels.view(1, 1, -1) * std + center  # (N,V,H)
     if not torch.isfinite(levels).all():
         raise ValueError("window-norm patch-refine support contains non-finite values")

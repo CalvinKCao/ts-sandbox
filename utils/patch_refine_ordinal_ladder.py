@@ -67,9 +67,11 @@ def snap_to_patch_refine_levels(
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """Nearest-row snap in binary dataset-z coordinates, with endpoint clamp.
 
-    Puts GT / binary / MMPD on one discrete alphabet. Continuous quirks that
-    lived between rungs disappear — fair for lattice disc, destructive for
-    sub-bin distinguishability.
+    Walkthrough (used by ``_snap_bundle`` for GT / binary / MMPD):
+      For each (window, variate, time) value, pick the closest rung among that
+      window's H legal levels. Output is still dataset-z, but now discrete.
+      Continuous quirks between rungs disappear — fair for lattice disc,
+      destructive for sub-bin distinguishability.
     """
     vals = np.asarray(values, dtype=np.float32)
     levels = np.asarray(legal_levels, dtype=np.float32)
@@ -79,8 +81,10 @@ def snap_to_patch_refine_levels(
         raise ValueError(f"values/levels N,V mismatch: {vals.shape}/{levels.shape}")
     if not (np.isfinite(vals).all() and np.isfinite(levels).all()):
         raise ValueError("cannot snap non-finite values")
+    # |value - level| over H → argmin row per timestep.
     delta = np.abs(vals[..., None] - levels[:, :, None, :])
     rows = np.argmin(delta, axis=-1)
+    # Gather the actual dataset-z midpoint for that row.
     snapped = np.take_along_axis(levels[:, :, None, :], rows[..., None], axis=-1)[..., 0]
     residual = np.abs(vals - snapped)
     return snapped.astype(np.float32), {
