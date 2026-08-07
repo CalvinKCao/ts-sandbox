@@ -262,12 +262,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     from models.diffusion_tsf.pipeline.config import load_experiment_config
     from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
     from models.diffusion_tsf.pipeline.state import PipelineState
-    from models.diffusion_tsf.pipeline.data_subset import resolve_pipeline_data_subset
     from models.diffusion_tsf.train_multivariate_pipeline import (
         LOOKBACK_LENGTH,
         PREDICTION_LENGTH,
         load_dataset,
         load_wrapped_guidance,
+        resolve_pipeline_data_subset,
     )
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
     from utils.visualize_staged_eval_2d_preds import (
