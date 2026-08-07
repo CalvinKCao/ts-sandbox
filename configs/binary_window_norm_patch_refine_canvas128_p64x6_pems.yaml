@@ -1,0 +1,23 @@
+# Canvas128 p64x6 on PeMS (default data_subset → PeMS_7v_s1).
+# Patch-refine FT uses 50% seeded random train windows.
+# Synth: reuse geometry-matched canvas128 donor (ETTh1 job 4571065 shared
+# pretrain planted under $SCRATCH/ts-sandbox/reused/pretrain/...).
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
+
+wandb:
+  tags: [ablation, window_norm, patch_refine, canvas128, p64x6, early_july_norm, PeMS, win_frac_0p5]
+
+experiment:
+  name: binary-window-norm-patch-refine-canvas128-p64x6-pems
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_pems
+  patch_refine_finetune_window_fraction: 0.5
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    n_samples: 10000
+    epochs: 20
+    patience: 4
+    shared_cache: true
+    reuse_pretrain_from_config: binary_window_norm_patch_refine_canvas128_p64x6
+    require_reuse_pretrain: true
