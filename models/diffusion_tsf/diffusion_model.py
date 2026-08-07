@@ -409,6 +409,41 @@ class DiffusionTSF(nn.Module):
             )
         return out
 
+    def _guidance_prediction_fields(
+        self,
+        past: torch.Tensor,
+        past_norm: torch.Tensor,
+        stats: Tuple[torch.Tensor, torch.Tensor],
+        horizon_width: int,
+    ) -> Dict[str, torch.Tensor]:
+        """1D patch-guidance forecast in window-norm and global-z (horizon core).
+
+        Fail-fast when guidance channel is enabled but the attached model cannot
+        produce a forecast (used by redbox / gap viz overlays).
+        """
+        if self.guidance_model is None:
+            raise RuntimeError(
+                "guidance_model is None; cannot emit guidance_prediction_global_norm "
+                f"(stage={self.config.diffusion_stage})"
+            )
+        if bool(getattr(self.config, "zero_guidance_forecast", False)):
+            raise RuntimeError(
+                "zero_guidance_forecast=True; refuse empty guidance overlay for viz"
+            )
+        guidance_norm = self._get_guidance_forecast_norm(
+            past, past_norm, stats, int(horizon_width),
+        )
+        guidance_with_overlap = self._denormalize_future(
+            guidance_norm, past, stats, trim_overlap=False,
+        )
+        k = int(self.config.lookback_overlap)
+        guidance_pred = guidance_with_overlap[..., k:]
+        return {
+            "guidance_norm": guidance_norm,
+            "guidance_prediction_with_overlap": guidance_with_overlap,
+            "guidance_prediction_global_norm": guidance_pred,
+        }
+
     def _flatten_ctx_for_factorized_dit(
         self,
         ctx: Optional[torch.Tensor],
@@ -1121,11 +1156,14 @@ class DiffusionTSF(nn.Module):
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
         future_coarse_2d: Optional[torch.Tensor] = None,
         future_fine_2d: Optional[torch.Tensor] = None,
+        emit_guidance_prediction: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions via binary reverse sampling.
 
         sampler: 'ddim' (default), 'anchor' / 'deterministic_anchor' for one-shot anchor decode.
         num_inference_steps overrides binary_sample_steps when set.
+        emit_guidance_prediction: if True, also return guidance_prediction_global_norm
+        (expensive AR rollout — opt-in for redbox viz only, not bulk eval).
         """
         steps = num_inference_steps if num_inference_steps is not None else self.config.binary_sample_steps
         gen_common = dict(
@@ -1141,6 +1179,7 @@ class DiffusionTSF(nn.Module):
             snapshot_timesteps=snapshot_timesteps,
             future_coarse_2d=future_coarse_2d,
             future_fine_2d=future_fine_2d,
+            emit_guidance_prediction=bool(emit_guidance_prediction),
         )
         if self.config.diffusion_stage in {
             "coarse", "fine", "finer", "vertical_dual", "channel_dual",
@@ -2309,7 +2348,7 @@ class DiffusionTSF(nn.Module):
             future_norm, past, stats, trim_overlap=False,
         )
         future = future_with_overlap[..., int(self.config.lookback_overlap):]
-        return {
+        out = {
             "prediction": future,
             "prediction_norm": future_norm,
             "prediction_global_norm": future,
@@ -2326,6 +2365,11 @@ class DiffusionTSF(nn.Module):
             "patch_vote_counts": patch_vote_counts,
             "diffusion_stage": "patch_refine",
         }
+        if bool(kwargs.get("emit_guidance_prediction", False)):
+            out.update(
+                self._guidance_prediction_fields(past, past_norm, stats, W_fut)
+            )
+        return out
 
     def _forward_binary_staged(
         self,
@@ -2928,6 +2972,10 @@ class DiffusionTSF(nn.Module):
             result['future_2d_finer'] = future_2d_finer
         if "finer" in past_maps:
             result['past_2d_finer'] = past_maps["finer"]
+        if bool(kwargs.get("emit_guidance_prediction", False)):
+            result.update(
+                self._guidance_prediction_fields(past, past_norm, stats, W_fut)
+            )
         if intermediates is not None:
             reshaped_intermediates = []
             for (t_idx, i_tensor) in intermediates:
