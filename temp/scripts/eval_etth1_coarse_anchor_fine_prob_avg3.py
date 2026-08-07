@@ -264,7 +264,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     from models.diffusion_tsf.pipeline.state import PipelineState
     from models.diffusion_tsf.train_multivariate_pipeline import (
         LOOKBACK_LENGTH,
-        PREDICTION_LENGTH,
+        FORECAST_LENGTH,
         load_dataset,
         load_wrapped_guidance,
         resolve_pipeline_data_subset,
@@ -289,8 +289,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     state.subset_id = subset_id
     patch_globals(pipeline_mod, state, honor_dataset_windows=True)
 
-    lookback = int(getattr(pipeline_mod, "LOOKBACK_LENGTH", LOOKBACK_LENGTH) or LOOKBACK_LENGTH)
-    horizon = int(getattr(pipeline_mod, "PREDICTION_LENGTH", PREDICTION_LENGTH) or PREDICTION_LENGTH)
+    lookback = int(
+        getattr(pipeline_mod, "LOOKBACK_LENGTH", None)
+        or getattr(state, "lookback", None)
+        or LOOKBACK_LENGTH
+        or 336
+    )
+    horizon = int(
+        getattr(pipeline_mod, "FORECAST_LENGTH", None)
+        or getattr(state, "horizon", None)
+        or FORECAST_LENGTH
+        or 96
+    )
     variate_indices = list(state.variate_indices or [])
     if not variate_indices:
         raise RuntimeError(f"{args.dataset}: empty variate_indices")
