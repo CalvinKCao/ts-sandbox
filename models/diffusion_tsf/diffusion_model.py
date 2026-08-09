@@ -1122,6 +1122,7 @@ class DiffusionTSF(nn.Module):
         t: Optional[torch.Tensor] = None,
         *,
         patch_col0: Optional[torch.Tensor] = None,
+        variate_keep: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (binary factorized DiT path)."""
         if self.config.diffusion_stage in {
@@ -1134,6 +1135,7 @@ class DiffusionTSF(nn.Module):
                 past, future, t,
                 expand_t_per_window=t is not None,
                 patch_col0=patch_col0,
+                variate_keep=variate_keep,
             )
         return self._forward_binary_factorized(past, future, t)
 
@@ -1867,6 +1869,7 @@ class DiffusionTSF(nn.Module):
         *,
         expand_t_per_window: bool = False,
         patch_col0: Optional[torch.Tensor] = None,
+        variate_keep: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Train boundary-centered 32x8 patches on absolute hi-res CDF crops."""
         from .patch_refine import (
@@ -1900,6 +1903,15 @@ class DiffusionTSF(nn.Module):
         hir_gt = self._encode_absolute_future_hir(future_norm, canvas_h)
         naive = naive_upscale_coarse_cdf(future_maps["coarse"], canvas_h)
         edges = coarse_edges_from_cdf(future_maps["coarse"], canvas_height=canvas_h)
+        keep = None
+        if variate_keep is not None:
+            keep = variate_keep.to(device=device, dtype=torch.bool)
+            if keep.shape != (B, V):
+                raise ValueError(
+                    f"variate_keep shape {tuple(keep.shape)} != batch/vars {(B, V)}"
+                )
+            if not bool(keep.any()):
+                raise RuntimeError("variate_keep is all-False for this batch")
         if unique:
             if patch_col0 is None:
                 # Synth / legacy loaders: one random stride-1 crop per window.
@@ -1914,6 +1926,7 @@ class DiffusionTSF(nn.Module):
                 patch_height=patch_h,
                 patch_width=patch_w,
                 hir_canvas=hir_gt,
+                variate_keep=keep,
             )
         else:
             locations = select_patch_locations(
@@ -1922,6 +1935,7 @@ class DiffusionTSF(nn.Module):
                 patch_height=patch_h,
                 patch_width=patch_w,
                 col_stride=col_stride,
+                variate_keep=keep,
             )
         if not locations:
             raise RuntimeError("patch_refine produced zero training crops")
@@ -3273,9 +3287,12 @@ class DiffusionTSF(nn.Module):
         future: torch.Tensor,
         *,
         patch_col0: Optional[torch.Tensor] = None,
+        variate_keep: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Convenience method to get just the loss for training."""
         if self._ar_training_enabled(future.shape[-1]):
             past, future = self._sample_ar_training_chunk(past, future)
-        outputs = self.forward(past, future, patch_col0=patch_col0)
+        outputs = self.forward(
+            past, future, patch_col0=patch_col0, variate_keep=variate_keep
+        )
         return outputs['loss']

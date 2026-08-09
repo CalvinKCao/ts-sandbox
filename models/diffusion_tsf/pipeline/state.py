@@ -66,6 +66,14 @@ class PipelineState:
     patch_refine_prev_cond_dropout: float = 0.5
     # Fraction of train windows used only during patch_refine finetune (1.0 = all).
     patch_refine_finetune_window_fraction: float = 1.0
+    # Keep all wiggle refine crops; randomly keep this fraction of GT-flatline
+    # crops when building the patch_refine train set (1.0 = disabled / keep all).
+    # Unit is (unique absolute patch segment, active_variate); flatness is judged
+    # only on that patch_width crop span — not the full H-horizon parent.
+    patch_refine_flatline_keep_frac: float = 1.0
+    patch_refine_flatline_seed: Optional[int] = None  # default: seed + 91
+    patch_refine_flatline_min_run: int = 3
+    patch_refine_flatline_eps_frac: float = 0.25
     dit_cond_patch_size: Tuple[int, int] = (8, 8)
     use_guidance_channel: bool = True
     guidance_placement: str = "canvas"
@@ -296,6 +304,25 @@ class PipelineState:
         if "patch_refine_finetune_window_fraction" in init_kwargs:
             init_kwargs["patch_refine_finetune_window_fraction"] = float(
                 init_kwargs["patch_refine_finetune_window_fraction"]
+            )
+        if "patch_refine_flatline_keep_frac" in init_kwargs:
+            init_kwargs["patch_refine_flatline_keep_frac"] = float(
+                init_kwargs["patch_refine_flatline_keep_frac"]
+            )
+        if (
+            "patch_refine_flatline_seed" in init_kwargs
+            and init_kwargs["patch_refine_flatline_seed"] is not None
+        ):
+            init_kwargs["patch_refine_flatline_seed"] = int(
+                init_kwargs["patch_refine_flatline_seed"]
+            )
+        if "patch_refine_flatline_min_run" in init_kwargs:
+            init_kwargs["patch_refine_flatline_min_run"] = int(
+                init_kwargs["patch_refine_flatline_min_run"]
+            )
+        if "patch_refine_flatline_eps_frac" in init_kwargs:
+            init_kwargs["patch_refine_flatline_eps_frac"] = float(
+                init_kwargs["patch_refine_flatline_eps_frac"]
             )
         for key in ("dit_embed_dim", "dit_depth", "dit_num_heads", "itrans_d_model", "itrans_d_ff", "itrans_e_layers", "itrans_n_heads"):
             if key in init_kwargs:

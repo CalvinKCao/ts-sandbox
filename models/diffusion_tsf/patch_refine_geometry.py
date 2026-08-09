@@ -50,6 +50,7 @@ def select_patch_locations(
     patch_width: int,
     col_stride: int,
     max_patches_per_variate: Optional[int] = None,
+    variate_keep: Optional[torch.Tensor] = None,
 ) -> list[PatchLocation]:
     """Place stride crops, then add crops until every timestep boundary is covered."""
     if coarse_edges.ndim != 3:
@@ -63,6 +64,14 @@ def select_patch_locations(
         raise ValueError("col_stride must be positive")
 
     batch_size, n_variates, _ = coarse_edges.shape
+    keep = None
+    if variate_keep is not None:
+        keep = variate_keep.to(dtype=torch.bool)
+        if keep.shape != (batch_size, n_variates):
+            raise ValueError(
+                f"variate_keep shape {tuple(keep.shape)} != "
+                f"batch/vars {(batch_size, n_variates)}"
+            )
     max_row0 = canvas_height - patch_height
     max_col0 = width - patch_width
     primary_starts = list(range(0, max_col0 + 1, col_stride))
@@ -79,6 +88,8 @@ def select_patch_locations(
 
     for bi in range(batch_size):
         for vi in range(n_variates):
+            if keep is not None and not bool(keep[bi, vi].item()):
+                continue
             flat_index = bi * n_variates + vi
             edges = coarse_edges[bi, vi]
             covered = torch.zeros(width, device=edges.device, dtype=torch.bool)
