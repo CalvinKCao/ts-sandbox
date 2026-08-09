@@ -88,7 +88,7 @@ experiment:
   existing_ckpt_roots: {}
   mmpd_root: "datasets/mmpd"
   ordinal_disc_evaluator: "temp/scripts/eval_univariate_patch_refine_ordinal_vs_mmpd.py"
-  ordinal_binary_config: "configs/binary_patch_refine_lb336_hz96_ordinal_tuned.yaml"
+  ordinal_binary_config: "configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml"
   disc_run: null
   raw_run: null
   slice_lengths: [8, 16, 32]
@@ -130,6 +130,7 @@ experiment:
   dit_mlp_ratio: 4.0
   dit_dropout: 0.0
   use_triple_scale: false
+  use_patch_refine_stage: true
   diffusion_stage: joint
   use_guidance_channel: false
   guidance_placement: canvas
@@ -265,13 +266,7 @@ phases:
     patience: 8
     search_space: default
 
-  - phase: diffusion_fine_finetune_hp
-    n_trials: 20
-    max_epochs: 20
-    patience: 8
-    search_space: default
-
-  - phase: diffusion_finer_finetune_hp
+  - phase: diffusion_patch_refine_finetune_hp
     n_trials: 20
     max_epochs: 20
     patience: 8
