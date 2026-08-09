@@ -2470,26 +2470,6 @@ class CoarseDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
     stage = "coarse"
 
 
-class FineDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
-    name = "diffusion_fine_finetune_hp"
-    stage = "fine"
-
-
-class FinerDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
-    name = "diffusion_finer_finetune_hp"
-    stage = "finer"
-
-
-class VerticalDualDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
-    name = "diffusion_vertical_dual_finetune_hp"
-    stage = "vertical_dual"
-
-
-class ChannelDualDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
-    name = "diffusion_channel_dual_finetune_hp"
-    stage = "channel_dual"
-
-
 class PatchRefineDiffusionFinetuneHPPhase(_BaseStagedDiffusionFinetuneHPPhase):
     name = "diffusion_patch_refine_finetune_hp"
     stage = "patch_refine"

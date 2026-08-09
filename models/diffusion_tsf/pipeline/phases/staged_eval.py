@@ -28,7 +28,6 @@ from models.diffusion_tsf.pipeline.visualize_utils import (
     run_ordinal_coarse_fine_2d_visualization,
     run_real_dataset_phase_diagnostics,
     run_staged_finetune_visualizations,
-    run_vertical_dual_repr_visualization,
 )
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     _model_kwargs_from_tuned,
@@ -632,6 +631,16 @@ class StagedEvalPhase(PipelinePhase):
         return metrics, pack
 
     def execute(self, state: PipelineState) -> PipelineState:
+        if getattr(state, "use_vertical_dual_concat", False) or getattr(
+            state, "use_channel_dual_concat", False
+        ):
+            raise ValueError(
+                "vertical_dual / channel_dual eval paths were removed; use patch_refine"
+            )
+        if not getattr(state, "use_patch_refine_stage", False):
+            raise ValueError(
+                "use_patch_refine_stage must be true; residual fine-as-primary eval was removed"
+            )
         from models.diffusion_tsf.train_multivariate_pipeline import (
             generate_dataset_job,
             load_dataset,
@@ -699,24 +708,14 @@ class StagedEvalPhase(PipelinePhase):
                 dataset_lookback=ds_lb,
                 dataset_horizon=ds_hz,
             )
-        vertical_dual = bool(getattr(state, "use_vertical_dual_concat", False))
-        channel_dual = bool(getattr(state, "use_channel_dual_concat", False))
-        patch_refine = bool(getattr(state, "use_patch_refine_stage", False))
-        joint_dual = vertical_dual or channel_dual
-        dual_stage = "channel_dual" if channel_dual else ("vertical_dual" if vertical_dual else None)
-        if joint_dual:
-            coarse_model = self._load_model(state, dual_stage, guidance, n_iv, device)
-            fine_model = coarse_model
-            finer_model = None
-        else:
-            coarse_model = self._load_model(state, "coarse", guidance, n_iv, device)
-            refine_stage = "patch_refine" if patch_refine else "fine"
-            fine_model = self._load_model(state, refine_stage, guidance, n_iv, device)
-            finer_model = (
-                self._load_model(state, "finer", guidance, n_iv, device)
-                if state.use_triple_scale and not patch_refine
-                else None
-            )
+        vertical_dual = False
+        channel_dual = False
+        patch_refine = True
+        joint_dual = False
+        dual_stage = None
+        coarse_model = self._load_model(state, "coarse", guidance, n_iv, device)
+        fine_model = self._load_model(state, "patch_refine", guidance, n_iv, device)
+        finer_model = None
 
         batch_size = int(self.require("batch_size"))
         if state.smoke_test:
@@ -1034,21 +1033,6 @@ class StagedEvalPhase(PipelinePhase):
                 )
             except Exception as e:
                 logger.warning("Staged eval visualizations failed: %s", e, exc_info=True)
-
-        # Vertical-dual stacked-repr panels: always write locally (including smoke).
-        if vertical_dual and not skip_viz and viz_cfg.get("enabled", True):
-            try:
-                vd_paths = run_vertical_dual_repr_visualization(
-                    state,
-                    model=coarse_model,
-                    device=device,
-                    tag="eval_vertical_dual",
-                )
-                wandb_utils.log_visualization_paths(
-                    vd_paths, wandb_key="viz/vertical_dual_repr",
-                )
-            except Exception as e:
-                logger.warning("Vertical-dual repr viz failed: %s", e, exc_info=True)
 
         if not skip_viz and viz_cfg.get("enabled", True):
             try:

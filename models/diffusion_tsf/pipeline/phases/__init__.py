@@ -4,10 +4,6 @@ from models.diffusion_tsf.pipeline.phases.patch_guidance_finetune_hp import Patc
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import StagedDiffusionPretrainPhase
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     CoarseDiffusionFinetuneHPPhase,
-    FineDiffusionFinetuneHPPhase,
-    FinerDiffusionFinetuneHPPhase,
-    VerticalDualDiffusionFinetuneHPPhase,
-    ChannelDualDiffusionFinetuneHPPhase,
     PatchRefineDiffusionFinetuneHPPhase,
 )
 from models.diffusion_tsf.pipeline.phases.staged_eval import StagedEvalPhase
@@ -16,10 +12,6 @@ PHASE_REGISTRY = {
     "patch_guidance_finetune_hp": PatchGuidanceFinetuneHPPhase,
     "staged_diffusion_pretrain": StagedDiffusionPretrainPhase,
     "diffusion_coarse_finetune_hp": CoarseDiffusionFinetuneHPPhase,
-    "diffusion_fine_finetune_hp": FineDiffusionFinetuneHPPhase,
-    "diffusion_finer_finetune_hp": FinerDiffusionFinetuneHPPhase,
-    "diffusion_vertical_dual_finetune_hp": VerticalDualDiffusionFinetuneHPPhase,
-    "diffusion_channel_dual_finetune_hp": ChannelDualDiffusionFinetuneHPPhase,
     "diffusion_patch_refine_finetune_hp": PatchRefineDiffusionFinetuneHPPhase,
     "staged_eval": StagedEvalPhase,
 }
@@ -29,10 +21,6 @@ __all__ = [
     "PatchGuidanceFinetuneHPPhase",
     "StagedDiffusionPretrainPhase",
     "CoarseDiffusionFinetuneHPPhase",
-    "FineDiffusionFinetuneHPPhase",
-    "FinerDiffusionFinetuneHPPhase",
-    "VerticalDualDiffusionFinetuneHPPhase",
-    "ChannelDualDiffusionFinetuneHPPhase",
     "PatchRefineDiffusionFinetuneHPPhase",
     "StagedEvalPhase",
 ]

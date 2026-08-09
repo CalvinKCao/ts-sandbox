@@ -2,28 +2,29 @@
 
 This repo trains a probabilistic forecaster that treats future values as **2D binary images** and denoises them with diffusion. The core bet is simple: real series have sharp jumps, flat segments, and geometric structure that Gaussian MSE models smear out. By encoding values as hard cumulative-distribution (CDF) maps and diffusing in the **binary domain** (bit-flip noise, BCE loss), the model gets a much denser training signal on exactly those shapes.
 
-The pipeline is **YAML-driven and multi-phase** (synthetic pretrain → real finetune HP → staged eval), **factorized per variate**, and usually **patch-decoder guidance** (not iTransformer) when cross-variate context is enabled. Live campaign leaves mostly use **ordinal window norm** plus one of the representation modes below — sequential coarse→fine is still implemented but is **not** the current default.
+The pipeline is **YAML-driven and multi-phase** (synthetic pretrain → real finetune HP → staged eval), **factorized per variate**, and usually **patch-decoder guidance** (not iTransformer) when cross-variate context is enabled. The **only live binary architecture** is **canvas128 / patch_refine (p64×6)** — full-horizon coarse DiT plus overlapping absolute hi-res CDF crops. Legacy residual fine-as-primary (16h×96w strip), vertical dual, and channel dual paths have been removed.
 
 ---
 
 ## Architecture Overview
 
-### Representation modes (pick one family per leaf)
+### Representation mode (live)
 
 | Mode | Flags | What it trains |
 |------|-------|----------------|
-| **Patch refine (current campaign default)** | `use_patch_refine_stage: true` | Full-horizon **coarse** DiT, then a second DiT on **overlapping absolute hi-res CDF crops** (not fine residual) from a tall canvas (`patch_refine.py` / `patch_refine_geometry.py`) |
-| **Vertical dual concat** | `use_vertical_dual_concat: true` | One DiT on a stacked `Hc∥Hf` canvas (`stack_vertical_dual` / `decode_vertical_dual`) |
-| **Channel dual** | `use_channel_dual_concat: true` | Coarse∥fine as two occupancy channels |
-| **Sequential coarse→fine (legacy path)** | neither of the above | Separate coarse then fine residual DiTs (`decode_dual`); still in the phase registry |
+| **Patch refine (only live binary path)** | `use_patch_refine_stage: true` | Full-horizon **coarse** DiT, then a second DiT on **overlapping absolute hi-res CDF crops** (not fine residual) from a tall canvas (`patch_refine.py` / `patch_refine_geometry.py`) |
 
-### Training phases at a glance (patch-refine / ordinal campaign)
+Campaign leaf: `configs/binary_window_norm_patch_refine_canvas128_p64x6*.yaml` (extends flattened `earlyjuly_norm` → `base/binary_staged`). Past conditioning still stacks `Hc∥Hf` via `encode_dual_heights` / `stack_past_coarse_fine` (`fine_image_height` kept for that stack only).
+
+Obsolete (deleted): sequential fine residual strip (`binary_ordinal_fine_finer_*`), vertical dual concat, channel dual, noise-schedule ablations, legacy `binary_anchor_ar*`.
+
+### Training phases at a glance (patch-refine / canvas128)
 
 | Phase | YAML `phase` | Purpose |
 |-------|--------------|---------|
-| **1** | `staged_diffusion_pretrain` | Teach valid CDF maps on synthetic `RealTS` (stages follow the representation mode) |
+| **1** | `staged_diffusion_pretrain` | Teach valid CDF maps on synthetic `RealTS` (coarse + patch_refine) |
 | **2** | `diffusion_coarse_finetune_hp` | Optuna-tune coarse DiT on real data |
-| **3** | `diffusion_patch_refine_finetune_hp` | Optuna-tune overlapping absolute-HIR upscaler (replaces `diffusion_fine_finetune_hp`) |
+| **3** | `diffusion_patch_refine_finetune_hp` | Optuna-tune overlapping absolute-HIR upscaler |
 | **4** | `staged_eval` | Anchor + probabilistic metrics (CRPS, staged MSE/MAE) |
 
 When `use_guidance_channel` / cross-attn is on, a `patch_guidance_finetune_hp` phase may sit between pretrain and diffusion finetune. The old `itrans_finetune_hp` phase is **dropped** for `guidance_type=patch_decoder` and is no longer the production path.
@@ -34,7 +35,7 @@ Phase 1 is deliberately narrow: it does **not** need to match real data statisti
 flowchart LR
     subgraph P1["Phase 1 — Synthetic pretrain"]
         S1[RealTS synthetic windows] --> E1[Encode CDF maps]
-        E1 --> D1[Train coarse plus patch_refine or dual]
+        E1 --> D1[Train coarse plus patch_refine]
     end
 
     subgraph P2["Phases 2–3 — Real finetune"]
@@ -45,7 +46,7 @@ flowchart LR
     end
 
     subgraph P4["Phase 4 — Eval"]
-        FC --> EV[Sample coarse then patches / dual decode]
+        FC --> EV[Sample coarse then patches]
         PR --> EV
         EV --> M[Metrics + viz]
     end
@@ -71,13 +72,13 @@ flowchart TB
 
     subgraph Encode["2D encoding (per variate)"]
         WN --> CB[Coarse bin index<br/>H=16 over full range]
-        WN --> FB[Fine residual OR absolute HIR<br/>mode-dependent]
+        WN --> FB[Absolute HIR canvas<br/>patch_refine crops]
         CB --> CM["Coarse CDF map<br/>(H×W binary staircase)"]
-        FB --> FM["Fine residual CDF / absolute HIR canvas"]
+        FB --> FM["Absolute HIR CDF crops"]
     end
 
     subgraph Cond["Conditioning"]
-        PM[Past CDF columns] --> COND[Visual cond patches]
+        PM[Past CDF columns Hc∥Hf] --> COND[Visual cond patches]
         GD[Patch-decoder / optional guidance tokens] --> XATTN[Bottleneck cross-attention]
     end
 
@@ -91,14 +92,14 @@ flowchart TB
     end
 
     subgraph Decode["Decode"]
-        SC[Sampled coarse map] --> DD[decode_dual / vertical_dual / blend_patch_bins]
-        SF[Sampled fine residual or HIR patches] --> DD
+        SC[Sampled coarse map] --> DD[blend_patch_bins]
+        SF[Sampled absolute HIR patches] --> DD
         DD --> VAL[Normalized 1D forecast]
         VAL --> DN[Denormalize]
     end
 ```
 
-**Training vs inference.** **Legacy sequential fine:** GT coarse CDF as a condition channel at train; at inference, sample coarse then fine. **Patch refine:** sample full-horizon coarse, then denoise **overlapping absolute-HIR crops** (aux + optional AR prev-refine) and stitch with `blend_patch_bins`. **Vertical dual:** one stacked canvas in one model.
+**Training vs inference.** Sample full-horizon coarse, then denoise **overlapping absolute-HIR crops** (aux + optional AR prev-refine) and stitch with `blend_patch_bins`. Past visual cond remains a lossless `Hc∥Hf` stack (`stack_past_coarse_fine`).
 
 ---
 
@@ -112,13 +113,14 @@ When guidance is enabled, cross-variate context enters at the bottleneck (patch-
 
 ### Dual-scale value factorization
 
-A single tall absolute map would be one huge image. Value precision is **factored**, but the second stage’s target differs by mode:
+A single tall absolute map would be one huge image. Value precision is **factored**:
 
-1. **Coarse** — bin into `H_c = 16` over `[-max_scale, max_scale]` (or ordinal span) as a hard CDF staircase. Always trained as a full-horizon FactorizedDiT when using staged modes.
-2. **Legacy fine residual** — another `H_f = 16` levels *inside* the coarse bin; decode with `decode_dual` (sequential) or `decode_vertical_dual` / channel dual.
-3. **Patch refine (absolute HIR)** — second stage does **not** train a residual fine map. It encodes the future as an **absolute hi-res CDF** of height `patch_refine_canvas_height` (`encode_absolute_hir_cdf` in `patch_refine.py`), crops **boundary-centered overlapping patches**, denoises those crops, then stitches bins back (`blend_patch_bins`) and mid-bin decodes (`decode_absolute_hir_cdf`).
+1. **Coarse** — bin into `H_c = 16` over `[-max_scale, max_scale]` (or ordinal span) as a hard CDF staircase. Trained as a full-horizon FactorizedDiT.
+2. **Patch refine (absolute HIR)** — second stage does **not** train a residual fine map. It encodes the future as an **absolute hi-res CDF** of height `patch_refine_canvas_height` (`encode_absolute_hir_cdf` in `patch_refine.py`), crops **boundary-centered overlapping patches**, denoises those crops, then stitches bins back (`blend_patch_bins`) and mid-bin decodes (`decode_absolute_hir_cdf`).
 
-Default geometry in `configs/base/binary_staged.yaml`: canvas **256**, patch **32×8**, col stride **6**. Canvas128 leaf (`configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml`): canvas **128** (= 8 hi-res bins per coarse row), patch **64×6**, stride **5** (overlap 1), `dit_patch_size` / `dit_cond_patch_size` **[8,6]** so W divides the DiT patch.
+`fine_image_height` remains only so past conditioning can stack `Hc∥Hf` (`encode_dual_heights` / `stack_past_coarse_fine`).
+
+Default geometry in `configs/base/binary_staged.yaml`: canvas **256**, patch **32×8**, col stride **6**. Live campaign leaf (`configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml`): canvas **128** (= 8 hi-res bins per coarse row), patch **64×6**, stride **5** (overlap 1), `dit_patch_size` / `dit_cond_patch_size` **[8,6]** so W divides the DiT patch.
 
 ---
 
@@ -144,7 +146,7 @@ Modules: `patch_refine.py`, `patch_refine_geometry.py`, `patch_refine_segments.p
 
 | Knob | Role |
 |------|------|
-| `use_patch_refine_stage` | Enables coarse+`patch_refine` stages; drops fine/vertical phases via `normalize_guidance_phases` |
+| `use_patch_refine_stage` | Required; enables coarse+`patch_refine` stages |
 | `patch_refine_canvas_height` | Absolute HIR rows (must divide by `coarse_image_height`) |
 | `patch_refine_patch_height` / `_width` | Crop H×W |
 | `patch_refine_col_stride` | Primary horizontal stride (overlap = width − stride) |
@@ -247,7 +249,7 @@ The sections below are aimed at developers and coding assistants working in the 
 
 ### Current default (production)
 
-**What we run:** ordinal-normalized **patch-refine** binary diffusion (lb336 / hz96 campaign leaves), **stationary-flat anchor** (`0.5` canvas), overlapping absolute-HIR crops (base canvas 256 / patch 32×8; canvas128 leaf uses 128 / 64×6), matched non-ordinal **MMPD** baseline, then ordinal assert + discriminator eval. Window-norm guided chain (`binary_window_norm_patch_refine_canvas128_p64x6*`) is the other active patch-refine family. Vertical-dual concat remains on this branch.
+**What we run:** window-norm **canvas128 patch_refine (p64×6)** binary diffusion (`binary_window_norm_patch_refine_canvas128_p64x6*`), **stationary-flat anchor** (`0.5` canvas), overlapping absolute-HIR crops, matched non-ordinal **MMPD** baseline (`mmpd_decoder_flat_subsets_paper_lb336_hz96_matched_binary`), then discriminator eval. Vertical dual / residual fine paths are gone.
 
 | Knob | Value | Config source |
 |------|-------|----------------|
@@ -259,7 +261,6 @@ The sections below are aimed at developers and coding assistants working in the 
 | `binary_anchor_input_mode` | `stationary_flat` | flat `0.5` XOR anchor |
 | Guidance | often off on ordinal leaves; **on** for canvas128 / guided_p8 chain | `use_guidance_channel` + `guidance_type: patch_decoder` |
 | MMPD match | Decoder, same lb/hz/subset | `configs/mmpd_decoder_flat_subsets_paper_lb336_hz96_matched_binary.yaml` |
-| Coverage / dead-code probe | tiny synthetic DAG under coverage.py | `temp/scripts/submit_pipeline_coverage_deadcode.sh` |
 
 ---
 
@@ -281,13 +282,12 @@ The sections below are aimed at developers and coding assistants working in the 
 - Login node: **`./submit_binary.sh`** or **`./submit_mmpd.sh` only** for training/eval campaigns. Compute worker for binary is `slurm_worker.sh` (do not sbatch it by hand for normal runs).
 - Experiment variants are **leaf YAMLs** under `configs/`, not new shell wrappers. `--configs` / `--mmpd-run-config` accept bare stems (`foo` → `configs/foo.yaml`), paths, or globs.
 - Geometry (lookback / horizon) and HPs live in YAML. Prefer a new leaf config over CLI sprawl.
-- Dead-code / coverage probe: `./temp/scripts/submit_pipeline_coverage_deadcode.sh` (not a third train entrypoint).
 
 ---
 
 ### Pipeline (YAML-driven)
 
-`PipelineState` holds paths and knobs; `Pipeline` runs registered `PipelinePhase` classes in order (`models/diffusion_tsf/pipeline/phases/`). `normalize_guidance_phases` drops incompatible phases (e.g. `itrans_finetune_hp` for patch-decoder guidance; fine/vertical when patch-refine is present).
+`PipelineState` holds paths and knobs; `Pipeline` runs registered `PipelinePhase` classes in order (`models/diffusion_tsf/pipeline/phases/`). `normalize_guidance_phases` drops incompatible phases (e.g. `itrans_finetune_hp` for patch-decoder guidance) and **rejects** obsolete fine/finer/vertical/channel phases.
 
 Reuse configs skip synthetic pretrain via `reuse_pretrain_from_config` / `require_reuse_pretrain` when donors exist.
 
@@ -298,9 +298,7 @@ Reuse configs skip synthetic pretrain via `reuse_pretrain_from_config` / `requir
 | **1** | `staged_diffusion_pretrain` | `StagedDiffusionPretrainPhase` |
 | *(guidance)* | `patch_guidance_finetune_hp` | `PatchGuidanceFinetuneHPPhase` (when guidance on) |
 | **2** | `diffusion_coarse_finetune_hp` | `CoarseDiffusionFinetuneHPPhase` |
-| **3a** | `diffusion_patch_refine_finetune_hp` | `PatchRefineDiffusionFinetuneHPPhase` (**campaign default**) |
-| **3b** | `diffusion_vertical_dual_finetune_hp` | `VerticalDualDiffusionFinetuneHPPhase` |
-| **3c** | `diffusion_fine_finetune_hp` | `FineDiffusionFinetuneHPPhase` (legacy sequential) |
+| **3** | `diffusion_patch_refine_finetune_hp` | `PatchRefineDiffusionFinetuneHPPhase` |
 | **4** | `staged_eval` | `StagedEvalPhase` |
 
 Default trial/epoch counts come from `configs/base/binary_staged.yaml` and leaf overrides.
@@ -314,11 +312,11 @@ Default trial/epoch counts come from `configs/base/binary_staged.yaml` and leaf 
 Trains denoisers on synthetic `RealTS` windows (no Optuna here — fixed HP from `use_hardcoded_synthetic_hp` / Phase-1 source config).
 
 - **Entry:** `StagedDiffusionPretrainPhase.execute` → `pretrain_diffusion` per stage.
-- **Stages:** follow representation mode — `coarse`+`patch_refine`, or `vertical_dual` / `channel_dual` single stage, or legacy `coarse`+`fine` (+ optional `finer`).
+- **Stages:** `coarse` + `patch_refine` only (`use_patch_refine_stage` required).
 - **YAML defaults:** `n_samples: 10000`, `epochs: 20`, `patience: 4`.
 - **Outputs:** `pretrained_<stage>/pretrained_diffusion.pt`; shared cache only when `shared_cache: true`.
 - **Skip when:** stage ckpts exist, shared cache hit, or `reuse_pretrain_from_config` copies a donor (unless `force_retrain_synthetic` / missing donor with `require_reuse_pretrain: false`).
-- **Smoke / coverage:** tiny `n_samples`, `epochs = 1`, `shared_cache: false`.
+- **Smoke:** tiny `n_samples`, `epochs = 1`, `shared_cache: false`; or `python temp/scripts/smoke_patch_refine.py`.
 
 ##### Patch guidance (`patch_guidance_finetune_hp`) — optional
 
@@ -345,17 +343,12 @@ Same Optuna machinery for the **overlapping absolute-HIR** upscaler (`diffusion_
 
 See **Patch refine stage** above for aux channels, AR unique-seg path, and DiT location embeds.
 
-##### Phase 3b/3c — Vertical dual / legacy fine
-
-- `diffusion_vertical_dual_finetune_hp` — single stacked-canvas DiT.
-- `diffusion_fine_finetune_hp` — legacy full-horizon fine residual (GT coarse cond at train).
-
 ##### Phase 4 — Staged eval (`staged_eval`)
 
-Loads stage `best.pt` files for the active representation, runs anchor + probabilistic sampling, writes metrics.
+Loads coarse + patch_refine `best.pt`, runs anchor + probabilistic sampling, writes metrics.
 
 - **Entry:** `StagedEvalPhase`.
-- **Inference:** depends on mode (coarse→patch crops, vertical dual decode, or coarse→fine `decode_dual`).
+- **Inference:** sample coarse, then absolute-HIR patch crops (`blend_patch_bins`).
 - **Metrics:** `eval/staged_*` (CRPS, anchor/prob MSE, …); optional viz skipped when `skip_eval_visualizations: true`.
 
 #### Caching and resume
@@ -363,7 +356,7 @@ Loads stage `best.pt` files for the active representation, runs anchor + probabi
 | Artifact | Phase |
 |----------|-------|
 | `pretrained_<stage>/pretrained_diffusion.pt` | 1 |
-| `{subset_id}/coarse/best.pt`, `.../patch_refine/best.pt` (or `fine` / `vertical_dual`) | 2, 3 |
+| `{subset_id}/coarse/best.pt`, `.../patch_refine/best.pt` | 2, 3 |
 | `results/partials/*_staged_anchor.json` | 4 |
 
 `should_skip` on each phase checks these paths. Coverage probe uses `--fresh` + unique run stems + `force_retrain_synthetic` so skips do not fire.
@@ -383,15 +376,15 @@ Synthetic pretrain: `RealTS` + `augmentation.py` (mixed generators, optional cac
 
 Values clipped to `[-max_scale, max_scale]`, binned into `H=16` rows; occupancy map is a monotone staircase in `{0,1}` (no Gaussian blur).
 
-**Staged (legacy sequential coarse→fine):** dual decomposition with **separate models**:
+**Staged (live):** coarse full-range CDF + absolute-HIR patch_refine crops. Past cond still uses `Hc∥Hf` from `encode_dual_heights`.
 
 - **Coarse:** full-range binning → coarse CDF map.
-- **Fine:** residual within coarse bin → fine CDF map.
+- **Patch refine:** absolute hi-res CDF crops (not residual fine).
 - **Decode:** `decode_dual(coarse, fine)` = sum of decoded coarse + fine, clamped.
 
 **Training (legacy):** coarse predicts future coarse from past; fine conditions on **GT** future coarse. **Inference:** sample coarse, then fine, then decode.
 
-**Current campaign default** is **patch refine** (coarse full-horizon + overlapping absolute-HIR crops) or **vertical dual concat** — see Representation modes / Patch refine stage above. Do not treat sequential fine residual as production.
+**Only live binary path** is **patch refine** (coarse full-horizon + overlapping absolute-HIR crops) — see Representation mode / Patch refine stage above.
 
 ---
 
@@ -416,7 +409,7 @@ Values clipped to `[-max_scale, max_scale]`, binned into `H=16` rows; occupancy 
 - **Patch absolute location embeds:** on `diffusion_stage=patch_refine`, `use_patch_abs_embedding` adds `coarse_bin_embed(patch_coarse_bin) + horizon_time_embed(patch_time0)`.
 - Cross-variate signal: bottleneck cross-attention. With `guidance_type=patch_decoder`, tokens are `guidance_model.get_encoder_tokens(past_norm)` (no `iTransformerTokenAdapter`). Legacy itransformer path still uses the adapter in `unet.py`.
 - With `use_guidance_channel=false` / `disable_cross_attention=true`, no ghost forecast channel and no ctx — visual past-cond only.
-- Legacy fine-stage `cond` includes **GT coarse CDF channel** during training; coarse channel from sampled coarse at inference. Patch refine instead feeds **3 aux channels** (naive / coarse-cell / time) plus optional prev-refine stuffing — see Patch refine stage.
+- Patch refine feeds **3 aux channels** (naive / coarse-cell / time) plus optional prev-refine stuffing — see Patch refine stage. Past visual cond remains `Hc∥Hf`.
 - Optional **EMA** shadow weights during finetune when `training.diffusion_ema_decay > 0` (default **0.99**).
 
 Chunking: `unet_max_chunk_size` caps `BV` (or patch-refine `N` crops) through the denoiser for memory.
@@ -436,13 +429,12 @@ Read merged YAML — do not rely on deleted `pipeline_config.py` defaults.
 - **Base:** `configs/base/binary_staged.yaml`
 - **h96 ordinal patch-refine:** `configs/binary_patch_refine_lb336_hz96_ordinal_tuned*.yaml`
 - **Window-norm canvas128:** `configs/binary_window_norm_patch_refine_canvas128_p64x6*.yaml` (extends early-July guided window-norm)
-- **Coverage probe:** `configs/coverage_deadcode_binary_patch_refine.yaml` + `configs/coverage_deadcode_mmpd.yaml`
 
 ---
 
 ### Pitfalls
 
-1. **Representation mode** — patch-refine / vertical-dual / sequential-fine are mutually exclusive after `normalize_guidance_phases`.
+1. **Representation mode** — only `use_patch_refine_stage: true` (coarse + patch_refine). Obsolete dual/fine phases raise in `normalize_guidance_phases`.
 2. **Patch refine is absolute HIR, not residual fine** — do not feed `decode_dual` residual math to patch-refine canvases; use `decode_absolute_hir_cdf` / `blend_patch_bins`.
 3. **`patch_refine_canvas_height` must be divisible by `coarse_image_height`**; patch W and DiT patch W must divide cleanly (`dit_patch_size`).
 4. **Double normalization** — dataset z-score then window or ordinal norm.

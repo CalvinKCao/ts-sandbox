@@ -193,82 +193,39 @@ class DiffusionTSFConfig:
                 "binary_anchor_input_mode must be 'stationary_flat' or 'random_bits', "
                 f"got {self.binary_anchor_input_mode!r}."
             )
-        valid_stages = {
-            "joint", "coarse", "fine", "finer", "vertical_dual", "channel_dual", "patch_refine",
-        }
+        valid_stages = {"joint", "coarse", "patch_refine"}
         if self.diffusion_stage not in valid_stages:
             raise ValueError(
                 "diffusion_stage must be one of "
-                "{'joint', 'coarse', 'fine', 'finer', 'vertical_dual', 'channel_dual', 'patch_refine'}, "
-                f"got {self.diffusion_stage!r}."
+                "{'joint', 'coarse', 'patch_refine'}, "
+                f"got {self.diffusion_stage!r}. "
+                "fine/finer/vertical_dual/channel_dual paths were removed."
             )
-        if self.diffusion_stage == "finer" and not self.use_triple_scale:
-            raise ValueError("diffusion_stage='finer' requires use_triple_scale=True.")
+        if self.use_triple_scale:
+            raise ValueError(
+                "use_triple_scale / finer residual path is obsolete; "
+                "live binary path is coarse + patch_refine"
+            )
         if self.staged_representation != "value_precision":
             raise ValueError(
                 "staged_representation must be 'value_precision', "
                 f"got {self.staged_representation!r}."
             )
-        if self.use_triple_scale and self.diffusion_stage in {
-            "joint", "vertical_dual", "channel_dual",
-        }:
-            raise ValueError(
-                "use_triple_scale has no joint/vertical_dual/channel_dual forward path; "
-                "use staged coarse/fine/finer."
-            )
-        if self.diffusion_stage == "vertical_dual":
-            expected = int(self.coarse_image_height) + int(self.fine_image_height)
-            if self.image_height != expected:
-                raise ValueError(
-                    f"vertical_dual expects image_height={expected} "
-                    f"(coarse+fine), got {self.image_height}."
-                )
-            if self.image_height % self.dit_patch_size[0] != 0:
-                raise ValueError("vertical_dual image_height must divide dit_patch_size[0].")
-            if self.coarse_image_height <= 0 or self.fine_image_height <= 0:
-                raise ValueError("coarse/fine image heights must be positive.")
-            if self.coarse_image_height % self.dit_patch_size[0] != 0:
-                raise ValueError("coarse_image_height must divide dit_patch_size[0].")
-            if self.fine_image_height % self.dit_patch_size[0] != 0:
-                raise ValueError("fine_image_height must divide dit_patch_size[0].")
-        if self.diffusion_stage == "channel_dual":
-            hc = int(self.coarse_image_height)
-            hf = int(self.fine_image_height)
-            if hc <= 0 or hf <= 0:
-                raise ValueError("coarse/fine image heights must be positive.")
-            if hc != hf:
-                raise ValueError(
-                    f"channel_dual requires coarse_image_height == fine_image_height, "
-                    f"got {hc} vs {hf}."
-                )
-            if self.image_height != hc:
-                raise ValueError(
-                    f"channel_dual expects image_height={hc} "
-                    f"(=coarse/fine height), got {self.image_height}."
-                )
-            if self.image_height % self.dit_patch_size[0] != 0:
-                raise ValueError("channel_dual image_height must divide dit_patch_size[0].")
-        if self.diffusion_stage in {"coarse", "fine", "finer"}:
-            expected_height = {
-                "coarse": self.coarse_image_height,
-                "fine": self.fine_image_height,
-                "finer": self.finer_image_height,
-            }[self.diffusion_stage]
+        if self.diffusion_stage == "coarse":
+            expected_height = self.coarse_image_height
             if self.image_height != expected_height:
                 raise ValueError(
-                    f"staged {self.diffusion_stage} model expects image_height={expected_height}, "
+                    f"staged coarse model expects image_height={expected_height}, "
                     f"got {self.image_height}."
                 )
             if self.image_height % self.dit_patch_size[0] != 0:
                 raise ValueError("staged image_height must divide dit_patch_size[0].")
-            if self.coarse_image_height <= 0 or self.fine_image_height <= 0 or self.finer_image_height <= 0:
-                raise ValueError("coarse/fine/finer image heights must be positive.")
+            if self.coarse_image_height <= 0 or self.fine_image_height <= 0:
+                raise ValueError("coarse/fine image heights must be positive (fine used for past Hc∥Hf).")
             if self.coarse_image_height % self.dit_patch_size[0] != 0:
                 raise ValueError("coarse_image_height must divide dit_patch_size[0].")
             if self.fine_image_height % self.dit_patch_size[0] != 0:
                 raise ValueError("fine_image_height must divide dit_patch_size[0].")
-            if self.use_triple_scale and self.finer_image_height % self.dit_patch_size[0] != 0:
-                raise ValueError("finer_image_height must divide dit_patch_size[0].")
         if self.diffusion_stage == "patch_refine":
             if self.image_height != int(self.patch_refine_patch_height):
                 raise ValueError(

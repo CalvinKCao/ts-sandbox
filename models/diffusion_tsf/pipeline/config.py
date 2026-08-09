@@ -342,21 +342,17 @@ def normalize_guidance_phases(
         if guidance_type == "patch_decoder" and name == "itrans_finetune_hp":
             continue
         by_name[name] = dict(entry)
-    # Vertical-dual / channel-dual replaces separate coarse/fine finetune phases when both appear via extends.
-    if "diffusion_vertical_dual_finetune_hp" in by_name:
-        by_name.pop("diffusion_coarse_finetune_hp", None)
-        by_name.pop("diffusion_fine_finetune_hp", None)
-        by_name.pop("diffusion_finer_finetune_hp", None)
-    if "diffusion_channel_dual_finetune_hp" in by_name:
-        by_name.pop("diffusion_coarse_finetune_hp", None)
-        by_name.pop("diffusion_fine_finetune_hp", None)
-        by_name.pop("diffusion_finer_finetune_hp", None)
-        by_name.pop("diffusion_vertical_dual_finetune_hp", None)
-    if "diffusion_patch_refine_finetune_hp" in by_name:
-        by_name.pop("diffusion_fine_finetune_hp", None)
-        by_name.pop("diffusion_finer_finetune_hp", None)
-        by_name.pop("diffusion_vertical_dual_finetune_hp", None)
-        by_name.pop("diffusion_channel_dual_finetune_hp", None)
+    obsolete = (
+        "diffusion_fine_finetune_hp",
+        "diffusion_finer_finetune_hp",
+        "diffusion_vertical_dual_finetune_hp",
+        "diffusion_channel_dual_finetune_hp",
+    )
+    for name in obsolete:
+        if name in by_name:
+            raise ValueError(
+                f"obsolete phase {name!r}; live binary path is coarse + patch_refine only"
+            )
     exp = experiment or {}
     # Match DiffusionTSFConfig / PipelineState defaults (use_guidance_channel=True).
     needs_guidance = bool(exp.get("use_guidance_channel", True)) or not bool(
@@ -368,11 +364,7 @@ def normalize_guidance_phases(
     preferred = (
         "staged_diffusion_pretrain",
         "patch_guidance_finetune_hp",
-        "diffusion_channel_dual_finetune_hp",
-        "diffusion_vertical_dual_finetune_hp",
         "diffusion_coarse_finetune_hp",
-        "diffusion_fine_finetune_hp",
-        "diffusion_finer_finetune_hp",
         "diffusion_patch_refine_finetune_hp",
         "staged_eval",
     )

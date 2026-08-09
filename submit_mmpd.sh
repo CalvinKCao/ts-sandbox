@@ -569,54 +569,8 @@ if [[ "$USE_ANCHOR_CKPTS" -eq 1 ]]; then
 fi
 
 if [[ "$ORDINAL_UPSCALE" -eq 1 ]]; then
-    ORDINAL_SBATCH_EXTRA=()
-    if [[ "$DATASETS_EXPLICIT" -eq 0 ]]; then
-        ORDINAL_DATASETS=$(sed -n -E 's/^[[:space:]]*datasets:[[:space:]]*\[([^]]+)\][[:space:]]*$/\1/p' "$MMPD_RUN_CONFIG" | head -n 1)
-        if [[ -z "$ORDINAL_DATASETS" ]]; then
-            echo "ERROR: ordinal_upscale config must use an inline mmpd.datasets list or pass --datasets." >&2
-            exit 1
-        fi
-        DATASETS_CSV="${ORDINAL_DATASETS//[[:space:]]/}"
-        IFS=',' read -ra DATASETS <<< "$DATASETS_CSV"
-        filter_datasets_available
-        echo "Ordinal datasets from config: ${DATASETS[*]}"
-    fi
-    [[ -n "$DEPENDENCY" ]] && ORDINAL_SBATCH_EXTRA=(--dependency="$DEPENDENCY")
-    ORDINAL_EXTRA=()
-    [[ "$SMOKE" -eq 1 ]] && ORDINAL_EXTRA+=(--smoke)
-    ORDINAL_IDS=()
-    for ds in "${DATASETS[@]}"; do
-        case "$ds" in
-            ETTh1|exchange_rate|electricity|traffic) ;;
-            *)
-                echo "ERROR: ordinal_upscale supports ETTh1, exchange_rate, electricity, or traffic; got $ds" >&2
-                exit 1
-                ;;
-        esac
-        ORDINAL_OUT="$OUTPUT_DIR/$ds"
-        ORDINAL_WORKER="$LOG_DIR/submit-ordinal-upscale-${ds}.sh"
-        mkdir -p "$ORDINAL_OUT"
-        write_worker_script "$ORDINAL_WORKER" \
-            -m experiments.ordinal_patch_refinement_killtest.run_mmpd_ordinal_upscale_tpe_ema \
-            --config "$MMPD_RUN_CONFIG" \
-            --dataset "$ds" \
-            --output "$ORDINAL_OUT" \
-            --seed "$SEED" \
-            "${ORDINAL_EXTRA[@]}"
-        echo "Submitting ordinal-upscale-${ds} wall=${WALL_MMPD}..."
-        JOB_ORDINAL=$(sbatch --parsable \
-            --job-name="mmpd-ord-${ds}$([[ "$SMOKE" -eq 1 ]] && echo -smoke)" \
-            "${SBATCH_COMMON[@]}" \
-            --time="$WALL_MMPD" \
-            "${ORDINAL_SBATCH_EXTRA[@]}" \
-            --output="$LOG_DIR/ordinal-upscale-${ds}-%j.out" \
-            --error="$LOG_DIR/ordinal-upscale-${ds}-%j.err" \
-            "$ORDINAL_WORKER")
-        echo "  -> ordinal-upscale-${ds}: $JOB_ORDINAL"
-        ORDINAL_IDS+=("$JOB_ORDINAL")
-    done
-    echo "Submitted ordinal-upscale jobs: ${ORDINAL_IDS[*]}"
-    exit 0
+    echo "ERROR: mmpd ordinal_upscale (experiments/ordinal_patch_refinement_killtest) was removed; use matched_binary MMPD configs instead." >&2
+    exit 1
 fi
 SKIP_INIT=0
 if [[ "$FORCE_INIT" -eq 1 ]]; then

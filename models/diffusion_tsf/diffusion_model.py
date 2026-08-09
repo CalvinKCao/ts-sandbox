@@ -1125,9 +1125,7 @@ class DiffusionTSF(nn.Module):
         variate_keep: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (binary factorized DiT path)."""
-        if self.config.diffusion_stage in {
-            "coarse", "fine", "finer", "vertical_dual", "channel_dual",
-        }:
+        if self.config.diffusion_stage == "coarse":
             return self._forward_binary_staged(past, future, t)
         if self.config.diffusion_stage == "patch_refine":
             # Training loops sample one timestep per window; expand onto crops.
@@ -1136,6 +1134,13 @@ class DiffusionTSF(nn.Module):
                 expand_t_per_window=t is not None,
                 patch_col0=patch_col0,
                 variate_keep=variate_keep,
+            )
+        if self.config.diffusion_stage in {
+            "fine", "finer", "vertical_dual", "channel_dual",
+        }:
+            raise ValueError(
+                f"obsolete diffusion_stage={self.config.diffusion_stage!r}; "
+                "only coarse + patch_refine remain"
             )
         return self._forward_binary_factorized(past, future, t)
 
@@ -1183,12 +1188,17 @@ class DiffusionTSF(nn.Module):
             future_fine_2d=future_fine_2d,
             emit_guidance_prediction=bool(emit_guidance_prediction),
         )
-        if self.config.diffusion_stage in {
-            "coarse", "fine", "finer", "vertical_dual", "channel_dual",
-        }:
+        if self.config.diffusion_stage == "coarse":
             return self._generate_binary_staged(past, **gen_common)
         if self.config.diffusion_stage == "patch_refine":
             return self._generate_binary_patch_refine(past, **gen_common)
+        if self.config.diffusion_stage in {
+            "fine", "finer", "vertical_dual", "channel_dual",
+        }:
+            raise ValueError(
+                f"obsolete diffusion_stage={self.config.diffusion_stage!r}; "
+                "only coarse + patch_refine remain"
+            )
         return self._generate_binary_factorized(past, **gen_common)
 
 
@@ -2391,11 +2401,13 @@ class DiffusionTSF(nn.Module):
         future: torch.Tensor,
         t: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Train one staged denoiser: coarse, fine, finer, vertical_dual, or channel_dual."""
+        """Train the coarse staged denoiser (patch_refine has its own forward)."""
         assert self.binary_scheduler is not None, "binary scheduler is not initialized"
         stage = self.config.diffusion_stage
-        if stage not in {"coarse", "fine", "finer", "vertical_dual", "channel_dual"}:
-            raise ValueError(f"_forward_binary_staged called for stage={stage!r}")
+        if stage != "coarse":
+            raise ValueError(
+                f"_forward_binary_staged only supports stage='coarse', got {stage!r}"
+            )
 
         B = past.shape[0]
         V = self.config.num_variables
@@ -2766,12 +2778,13 @@ class DiffusionTSF(nn.Module):
         future_fine_2d: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
-        """Generate one staged output, chaining coarse/fine maps into later stages."""
+        """Generate coarse staged output (patch_refine has its own generate)."""
         assert self.binary_scheduler is not None, "binary scheduler is not initialized"
         stage = self.config.diffusion_stage
-        if stage not in {"coarse", "fine", "finer", "vertical_dual", "channel_dual"}:
-            raise ValueError(f"_generate_binary_staged called for stage={stage!r}")
-
+        if stage != "coarse":
+            raise ValueError(
+                f"_generate_binary_staged only supports stage='coarse', got {stage!r}"
+            )
         B = past.shape[0]
         V = self.config.num_variables
         H = self.config.image_height

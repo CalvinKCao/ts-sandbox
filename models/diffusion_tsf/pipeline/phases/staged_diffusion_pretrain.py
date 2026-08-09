@@ -32,13 +32,18 @@ def _stage_pretrain_ckpt(state: PipelineState, stage: str) -> str:
 
 
 def staged_diffusion_stages(state: PipelineState) -> tuple[str, ...]:
+    """Live binary path is coarse + absolute-HIR patch_refine only."""
     if getattr(state, "use_channel_dual_concat", False):
-        return ("channel_dual",)
+        raise ValueError("use_channel_dual_concat is obsolete; use patch_refine (canvas128)")
     if getattr(state, "use_vertical_dual_concat", False):
-        return ("vertical_dual",)
-    if getattr(state, "use_patch_refine_stage", False):
-        return ("coarse", "patch_refine")
-    return ("coarse", "fine", "finer") if state.use_triple_scale else ("coarse", "fine")
+        raise ValueError("use_vertical_dual_concat is obsolete; use patch_refine (canvas128)")
+    if getattr(state, "use_triple_scale", False):
+        raise ValueError("use_triple_scale / finer residual path is obsolete")
+    if not getattr(state, "use_patch_refine_stage", False):
+        raise ValueError(
+            "use_patch_refine_stage must be true; residual fine-as-primary path was removed"
+        )
+    return ("coarse", "patch_refine")
 
 
 def _stage_pretrain_cache_enabled(phase: PipelinePhase, state: PipelineState) -> bool:

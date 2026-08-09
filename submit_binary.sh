@@ -38,7 +38,7 @@ JOB_MANIFEST=""
 EVAL_ORDINAL_PATCH_REFINE_MMPD=0
 MMPD_ROOT=""
 ORDINAL_DISC_EVALUATOR="temp/scripts/eval_univariate_patch_refine_ordinal_vs_mmpd.py"
-ORDINAL_BINARY_CONFIG="configs/binary_patch_refine_lb336_hz96_ordinal_tuned.yaml"
+ORDINAL_BINARY_CONFIG="configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml"
 DEFER_CHECKPOINT_CHECK=0
 N_VARIATES=""
 
@@ -198,7 +198,9 @@ if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
 fi
 
 if [[ "$SMOKE" -eq 1 ]]; then
-    CONFIGS="${CONFIGS:-configs/smoke_test.yaml}"
+    # Legacy configs/smoke_test.yaml (residual fine) was removed; canvas128 leaf
+    # or temp/scripts/smoke_patch_refine.py for a few-second geometry+step smoke.
+    CONFIGS="${CONFIGS:-configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml}"
     WALL_DEFAULT="0:30:00"
     MEM="24G"
     CPUS=4

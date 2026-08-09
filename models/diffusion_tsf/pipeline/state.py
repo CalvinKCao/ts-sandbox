@@ -175,7 +175,7 @@ class PipelineState:
     existing_ckpt_roots: Dict[str, str] = field(default_factory=dict)
     mmpd_root: str = "datasets/mmpd"
     ordinal_disc_evaluator: str = "temp/scripts/eval_univariate_patch_refine_ordinal_vs_mmpd.py"
-    ordinal_binary_config: str = "configs/binary_patch_refine_lb336_hz96_ordinal_tuned.yaml"
+    ordinal_binary_config: str = "configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml"
     disc_run: Optional[str] = None
     raw_run: Optional[str] = None
     slice_lengths: List[int] = field(default_factory=lambda: [8, 16, 32])

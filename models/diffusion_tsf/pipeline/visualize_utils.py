@@ -3015,7 +3015,7 @@ def run_ordinal_roundtrip_visualization(
         config_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
             "configs",
-            "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm.yaml",
+            "binary_window_norm_patch_refine_canvas128_p64x6.yaml",
         )
 
     out_dir = os.path.join(state.results_dir, "viz", "ordinal_roundtrip")
@@ -3244,7 +3244,7 @@ def run_ordinal_coarse_fine_2d_visualization(
         if candidate.is_file():
             config_path = candidate
     if config_path is None:
-        config_path = repo / "configs" / "binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm.yaml"
+        config_path = repo / "configs" / "binary_window_norm_patch_refine_canvas128_p64x6.yaml"
 
     out_dir = os.path.join(state.results_dir, "viz", "ordinal_coarse_fine_2d")
     return [
