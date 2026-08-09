@@ -1201,30 +1201,41 @@ def _plot_compare_panel(
             f"MMPD shape {mmpd_plot.shape} != future_core_z {future_core_z.shape}"
         )
 
-    # Patch-guidance 1D (same series redbox overlays) — H-core, fail-fast if missing.
+    # Optional patch-guidance overlay (redbox is the hard require_guidance path).
+    guide_h = None
+    guide_kh = None
     guide_t = fine_out.get("guidance_prediction_global_norm")
     if guide_t is None:
-        raise KeyError(
-            f"{dataset} win {window_index}: fine_out missing "
-            "guidance_prediction_global_norm (need emit_guidance_prediction=True)"
+        print(
+            f"[plot] warn {dataset} win {window_index}: fine_out missing "
+            "guidance_prediction_global_norm; gap panel without guidance",
+            flush=True,
         )
-    if not torch.is_tensor(guide_t):
-        raise TypeError(
-            f"guidance_prediction_global_norm must be a tensor, got {type(guide_t)}"
+    else:
+        if not torch.is_tensor(guide_t):
+            raise TypeError(
+                f"guidance_prediction_global_norm must be a tensor, got {type(guide_t)}"
+            )
+        guide_h = (
+            guide_t[0].detach().cpu().numpy()
+            if guide_t.dim() == 3
+            else guide_t.detach().cpu().numpy()
         )
-    guide_h = guide_t[0].detach().cpu().numpy() if guide_t.dim() == 3 else guide_t.detach().cpu().numpy()
-    if guide_h.ndim != 2:
-        raise ValueError(f"guidance expected (V,H), got {guide_h.shape}")
-    if guide_h.shape != future_core_z.shape:
-        raise ValueError(
-            f"guidance shape {guide_h.shape} != future_core_z {future_core_z.shape}"
-        )
-    guide_kh = None
-    guide_with = fine_out.get("guidance_prediction_with_overlap")
-    if guide_with is not None and torch.is_tensor(guide_with):
-        garr = guide_with[0].detach().cpu().numpy() if guide_with.dim() == 3 else guide_with.detach().cpu().numpy()
-        if garr.shape[-1] == expected_kh:
-            guide_kh = garr
+        if guide_h.ndim != 2:
+            raise ValueError(f"guidance expected (V,H), got {guide_h.shape}")
+        if guide_h.shape != future_core_z.shape:
+            raise ValueError(
+                f"guidance shape {guide_h.shape} != future_core_z {future_core_z.shape}"
+            )
+        guide_with = fine_out.get("guidance_prediction_with_overlap")
+        if guide_with is not None and torch.is_tensor(guide_with):
+            garr = (
+                guide_with[0].detach().cpu().numpy()
+                if guide_with.dim() == 3
+                else guide_with.detach().cpu().numpy()
+            )
+            if garr.shape[-1] == expected_kh:
+                guide_kh = garr
 
     # Rebuild K+H after any H overrides so residual Δz = final - coarse everywhere.
     if k > 0:
@@ -1276,19 +1287,16 @@ def _plot_compare_panel(
 
     for col in range(n_vars):
         # Per-variate y-limits so one bad channel doesn't squash the rest.
-        coarse_lim = _symmetric_lim(
-            np.concatenate(
-                [
-                    gt_1d[col],
-                    gt_coarse_np[col],
-                    coarse_np[col],
-                    final_np[col],
-                    mmpd_plot[col],
-                    guide_h[col],
-                ],
-                axis=0,
-            )
-        )
+        lim_parts = [
+            gt_1d[col],
+            gt_coarse_np[col],
+            coarse_np[col],
+            final_np[col],
+            mmpd_plot[col],
+        ]
+        if guide_h is not None:
+            lim_parts.append(guide_h[col])
+        coarse_lim = _symmetric_lim(np.concatenate(lim_parts, axis=0))
         fine_lim = _symmetric_lim(np.concatenate([gt_fine_np[col], fine_np[col]], axis=0))
         fine_lim = max(fine_lim, 0.05 * coarse_lim)
         fine_lim = min(fine_lim, 0.5 * coarse_lim)
@@ -1365,7 +1373,7 @@ def _plot_compare_panel(
                 label="Guidance (K+H)" if k > 0 else "Guidance (H)",
                 zorder=3,
             )
-        else:
+        elif guide_h is not None:
             ax.plot(
                 t_h,
                 guide_h[col],
