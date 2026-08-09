@@ -110,6 +110,19 @@ def patch_globals(
     mod.WINDOW_NORM_LOW_VAR_UNIT_STD = unit_std
     per_v = (state.window_norm_low_var_unit_std_by_variate or {}).get(state.dataset)
     mod.WINDOW_NORM_LOW_VAR_UNIT_STD_PER_VARIATE = list(per_v) if per_v else None
+    mod.HYBRID_FLAT_DATASET_NORM = bool(getattr(state, "hybrid_flat_dataset_norm", False))
+    mod.HYBRID_FLAT_FRAC_THRESHOLD = float(
+        getattr(state, "hybrid_flat_frac_threshold", 0.5)
+    )
+    mod.HYBRID_FLAT_OOB_COVERAGE = float(
+        getattr(state, "hybrid_flat_oob_coverage", 0.99)
+    )
+    hybrid_stats = state.extra.get("hybrid_flat_norm_stats") or {}
+    flat_mask = hybrid_stats.get("flat_variate_mask")
+    if flat_mask is not None:
+        mod.HYBRID_SKIP_WINDOW_NORM_MASK = [bool(x) for x in flat_mask]
+    else:
+        mod.HYBRID_SKIP_WINDOW_NORM_MASK = None
     mod.LOOKBACK_OVERLAP_CENTER_SHIFT = bool(state.lookback_overlap_center_shift)
     mod.ZERO_GUIDANCE_FORECAST = state.zero_guidance_forecast
     mod.USE_RAW_LOOKBACK_COND_CHANNEL = state.use_raw_lookback_cond_channel

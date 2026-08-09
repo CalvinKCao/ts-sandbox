@@ -7,7 +7,7 @@
 #
 # USAGE (login node, from $SCRATCH/ts-sandbox):
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --smoke-test
-#   ./temp/submit_discriminator_texture_lb336_hz720_ordinal_four_killarney.sh
+#   ./temp/scripts/submit_discriminator_texture_lb336_hz720_ordinal_four_killarney.sh
 #   ./slurm_discriminator_texture_staged_vs_mmpd.sh --dataset ETTh1 --fake-source mmpd
 # =============================================================================
 

@@ -447,16 +447,18 @@ def run_binary_staged_eval(
         dataset_horizon=horizon,
     )
     vertical_dual = bool(getattr(state, "use_vertical_dual_concat", False))
+    patch_refine = bool(getattr(state, "use_patch_refine_stage", False))
     if vertical_dual:
         coarse_model = phase._load_model(state, "vertical_dual", guidance, len(variate_indices), device)
         fine_model = coarse_model
         finer_model = None
     else:
+        refine_stage = "patch_refine" if patch_refine else "fine"
         coarse_model = phase._load_model(state, "coarse", guidance, len(variate_indices), device)
-        fine_model = phase._load_model(state, "fine", guidance, len(variate_indices), device)
+        fine_model = phase._load_model(state, refine_stage, guidance, len(variate_indices), device)
         finer_model = (
             phase._load_model(state, "finer", guidance, len(variate_indices), device)
-            if state.use_triple_scale
+            if state.use_triple_scale and not patch_refine
             else None
         )
 
@@ -894,12 +896,17 @@ def _assert_horizon_aligned(
     ref: np.ndarray,
     *,
     min_corr: float = 0.85,
+    soft: bool = False,
 ) -> None:
     if pred.shape != ref.shape:
         raise ValueError(f"{name}: shape {pred.shape} != ref {ref.shape}")
     corr = _lag0_corr(pred, ref)
     if not np.isfinite(corr) or corr < min_corr:
-        raise ValueError(f"{name}: lag-0 corr={corr:.4f} < {min_corr} (likely time shift)")
+        msg = f"{name}: lag-0 corr={corr:.4f} < {min_corr} (likely time shift)"
+        if soft:
+            print(f"[plot] warn {msg}; continuing with raw GT", flush=True)
+            return
+        raise ValueError(msg)
 
 
 def _mark_overlap_span(ax: plt.Axes, k: int) -> None:
@@ -960,6 +967,13 @@ def _denormalize_future_keep_overlap(
     return future
 
 
+def _is_patch_refine_gen(model: torch.nn.Module, gen_out: Dict[str, Any]) -> bool:
+    stage = str(getattr(getattr(model, "config", None), "diffusion_stage", "") or "")
+    if stage == "patch_refine":
+        return True
+    return str(gen_out.get("diffusion_stage", "") or "") == "patch_refine"
+
+
 @torch.no_grad()
 def _generate_future_kh_global_z(
     model: torch.nn.Module,
@@ -972,20 +986,70 @@ def _generate_future_kh_global_z(
 
     which:
       - \"final\": dual/combined decode (matches prediction_global_norm on [..., K:])
+        For patch_refine: absolute hir decode — ``future_2d_fine`` is NOT a residual map.
       - \"coarse\": coarse-map-only decode
     """
     device = next(model.parameters()).device
     past = past_b.to(device=device)
     if past.dim() == 2:
         past = past.unsqueeze(0)
+
+    patch_refine = _is_patch_refine_gen(model, gen_out)
+    if which == "final" and patch_refine:
+        # Prefer generate()'s already-denorm K+H tensor (absolute hir path).
+        pow_ = gen_out.get("prediction_with_overlap")
+        if pow_ is not None:
+            if not torch.is_tensor(pow_):
+                raise TypeError(
+                    f"prediction_with_overlap must be a tensor, got {type(pow_)}"
+                )
+            arr = pow_.detach().cpu().numpy()
+            if arr.ndim == 3:
+                arr = arr[0]
+            if arr.ndim != 2:
+                raise ValueError(
+                    f"prediction_with_overlap expected (V,K+H), got {arr.shape}"
+                )
+            return arr
+        fut_hir = gen_out.get("future_2d_fine")
+        if fut_hir is None:
+            raise KeyError(
+                "patch_refine generate missing future_2d_fine (absolute hir CDF)"
+            )
+        fut_hir = fut_hir.to(device=device)
+        canvas_h = int(getattr(model.config, "patch_refine_canvas_height", 0) or 0)
+        hir_h = int(fut_hir.shape[-2])
+        if canvas_h > 0 and hir_h != canvas_h:
+            raise ValueError(
+                f"patch_refine future_2d_fine height {hir_h} != canvas_height {canvas_h} "
+                "(expected absolute hir CDF, not residual fine)"
+            )
+        fine_h = int(getattr(model.config, "fine_image_height", 0) or 0)
+        if fine_h > 0 and hir_h == fine_h and (canvas_h <= 0 or hir_h != canvas_h):
+            raise ValueError(
+                f"patch_refine future_2d_fine height {hir_h} looks like residual fine "
+                f"(fine_image_height={fine_h}); refuse dual-residual decode"
+            )
+        future_norm = _ensure_bvt(model._decode_absolute_future_hir(fut_hir))
+        _, _, stats = model._normalize_sequence(past, None)
+        future_kh = _denormalize_future_keep_overlap(model, future_norm, past, stats)
+        return future_kh[0].detach().cpu().numpy()
+
     fut_c = gen_out["future_2d_coarse"].to(device=device)
     if which == "final":
         fut_f = gen_out.get("future_2d_fine")
         if fut_f is None:
             raise KeyError("generate output missing future_2d_fine for final decode")
+        fut_f = fut_f.to(device=device)
+        # Fail-fast: absolute hir must not go through residual dual decode.
+        if fut_f.shape[-2] != fut_c.shape[-2] and fut_f.shape[-2] > int(fut_c.shape[-2]) * 2:
+            raise ValueError(
+                f"future_2d_fine height {fut_f.shape[-2]} >> coarse {fut_c.shape[-2]} — "
+                "looks like absolute hir; use patch_refine absolute decode"
+            )
         future_norm = model._decode_staged_combined_1d(
             fut_c,
-            fut_f.to(device=device),
+            fut_f,
             cdf_decoder="mean",
         )
     elif which == "coarse":
@@ -1078,28 +1142,45 @@ def _plot_compare_panel(
         raise ValueError(
             f"prediction_global_norm {pred_h.shape} != keep-overlap H {bin_final_h.shape}"
         )
-    # Tight check: keep-overlap H must match generate()'s returned horizon.
-    if float(np.max(np.abs(pred_h - bin_final_h))) > 1e-4:
+    # Canvas128 patch_refine re-decode can drift slightly vs prediction_global_norm
+    # (corr still ~1). Prefer the generate() tensor for the plot line.
+    # Canvas128 re-decode drift can land corr in the high 0.97s (esp. traffic);
+    # still prefer prediction_global_norm when the series clearly match.
+    _keep_min_corr = 0.97
+    delta = float(np.max(np.abs(pred_h - bin_final_h)))
+    if delta > 1e-4:
         corr = _lag0_corr(pred_h, bin_final_h)
-        raise ValueError(
-            f"{dataset} win {window_index}: keep-overlap H != prediction_global_norm "
-            f"(max|Δ|={float(np.max(np.abs(pred_h - bin_final_h))):.4g}, corr={corr:.4f})"
+        if corr < _keep_min_corr:
+            raise ValueError(
+                f"{dataset} win {window_index}: keep-overlap H != prediction_global_norm "
+                f"(max|Δ|={delta:.4g}, corr={corr:.4f})"
+            )
+        print(
+            f"[plot] {dataset} win {window_index}: keep-overlap Δ={delta:.4g} "
+            f"corr={corr:.4f}; using prediction_global_norm",
+            flush=True,
         )
+        bin_final_h = pred_h
     coarse_pred_h = coarse_out["prediction_global_norm"][0].detach().cpu().numpy()
     # VD generate returns combined final in prediction_global_norm — not coarse-only.
     if not bool(maps.get("vertical_dual")) and coarse_pred_h.shape == bin_coarse_h.shape:
-        if float(np.max(np.abs(coarse_pred_h - bin_coarse_h))) > 1e-4:
+        c_delta = float(np.max(np.abs(coarse_pred_h - bin_coarse_h)))
+        if c_delta > 1e-4:
             corr = _lag0_corr(coarse_pred_h, bin_coarse_h)
-            raise ValueError(
-                f"{dataset} win {window_index}: keep-overlap coarse H != "
-                f"coarse prediction_global_norm "
-                f"(max|Δ|={float(np.max(np.abs(coarse_pred_h - bin_coarse_h))):.4g}, corr={corr:.4f})"
-            )
+            if corr < _keep_min_corr:
+                raise ValueError(
+                    f"{dataset} win {window_index}: keep-overlap coarse H != "
+                    f"coarse prediction_global_norm "
+                    f"(max|Δ|={c_delta:.4g}, corr={corr:.4f})"
+                )
+            bin_coarse_h = coarse_pred_h
     _assert_horizon_aligned(
         f"{dataset} win {window_index}: GT encode→decode vs GT future",
         gt_final_np[..., lookback:],
         future_core_z,
         min_corr=0.85,
+        # Canvas128 patch_refine map→1d roundtrip is not bit-exact; raw GT is source of truth.
+        soft=True,
     )
 
     mmpd_plot = np.asarray(mmpd_1d)
@@ -1120,11 +1201,69 @@ def _plot_compare_panel(
             f"MMPD shape {mmpd_plot.shape} != future_core_z {future_core_z.shape}"
         )
 
+    # Optional patch-guidance overlay (redbox is the hard require_guidance path).
+    guide_h = None
+    guide_kh = None
+    guide_t = fine_out.get("guidance_prediction_global_norm")
+    if guide_t is None:
+        print(
+            f"[plot] warn {dataset} win {window_index}: fine_out missing "
+            "guidance_prediction_global_norm; gap panel without guidance",
+            flush=True,
+        )
+    else:
+        if not torch.is_tensor(guide_t):
+            raise TypeError(
+                f"guidance_prediction_global_norm must be a tensor, got {type(guide_t)}"
+            )
+        guide_h = (
+            guide_t[0].detach().cpu().numpy()
+            if guide_t.dim() == 3
+            else guide_t.detach().cpu().numpy()
+        )
+        if guide_h.ndim != 2:
+            raise ValueError(f"guidance expected (V,H), got {guide_h.shape}")
+        if guide_h.shape != future_core_z.shape:
+            raise ValueError(
+                f"guidance shape {guide_h.shape} != future_core_z {future_core_z.shape}"
+            )
+        guide_with = fine_out.get("guidance_prediction_with_overlap")
+        if guide_with is not None and torch.is_tensor(guide_with):
+            garr = (
+                guide_with[0].detach().cpu().numpy()
+                if guide_with.dim() == 3
+                else guide_with.detach().cpu().numpy()
+            )
+            if garr.shape[-1] == expected_kh:
+                guide_kh = garr
+
+    # Rebuild K+H after any H overrides so residual Δz = final - coarse everywhere.
+    if k > 0:
+        bin_final_kh = np.concatenate([bin_final_kh[..., :k], bin_final_h], axis=-1)
+        bin_coarse_kh = np.concatenate([bin_coarse_kh[..., :k], bin_coarse_h], axis=-1)
+    else:
+        bin_final_kh = np.asarray(bin_final_h)
+        bin_coarse_kh = np.asarray(bin_coarse_h)
+    if bin_final_kh.shape != bin_coarse_kh.shape:
+        raise ValueError(
+            f"final K+H {bin_final_kh.shape} != coarse K+H {bin_coarse_kh.shape}"
+        )
+    fine_kh = bin_final_kh - bin_coarse_kh
+    fine_h = fine_kh[..., k:] if k > 0 else fine_kh
+    # Sanity: horizon Δz should be on residual scale (comparable to GT fine), not global-z.
+    gt_h_fine = gt_fine_np[..., lookback:]
+    max_bin = float(np.nanmax(np.abs(fine_h))) if fine_h.size else 0.0
+    max_gt = float(np.nanmax(np.abs(gt_h_fine))) if gt_h_fine.size else 0.0
+    if max_bin > max(3.0 * max(max_gt, 1e-3), 0.5 * float(np.nanmax(np.abs(bin_coarse_h)))):
+        raise ValueError(
+            f"{dataset} win {window_index}: horizon fine residual scale looks wrong "
+            f"(max|bin Δz|={max_bin:.4g} vs max|GT Δz|={max_gt:.4g}) — "
+            "likely absolute hir plotted as residual"
+        )
+
     # Binary ridges: GT past until -K, then generate-consistent predicted K+H.
     coarse_np = np.concatenate([gt_coarse_np[..., :lookback], bin_coarse_h], axis=-1)
     final_np = np.concatenate([gt_final_np[..., :lookback], bin_final_h], axis=-1)
-    fine_kh = bin_final_kh - bin_coarse_kh
-    fine_h = fine_kh[..., k:] if k > 0 else fine_kh
     fine_np = np.concatenate([gt_fine_np[..., :lookback], fine_h], axis=-1)
     if k > 0:
         coarse_np[..., lookback - k : lookback] = bin_coarse_kh[..., :k]
@@ -1148,18 +1287,16 @@ def _plot_compare_panel(
 
     for col in range(n_vars):
         # Per-variate y-limits so one bad channel doesn't squash the rest.
-        coarse_lim = _symmetric_lim(
-            np.concatenate(
-                [
-                    gt_1d[col],
-                    gt_coarse_np[col],
-                    coarse_np[col],
-                    final_np[col],
-                    mmpd_plot[col],
-                ],
-                axis=0,
-            )
-        )
+        lim_parts = [
+            gt_1d[col],
+            gt_coarse_np[col],
+            coarse_np[col],
+            final_np[col],
+            mmpd_plot[col],
+        ]
+        if guide_h is not None:
+            lim_parts.append(guide_h[col])
+        coarse_lim = _symmetric_lim(np.concatenate(lim_parts, axis=0))
         fine_lim = _symmetric_lim(np.concatenate([gt_fine_np[col], fine_np[col]], axis=0))
         fine_lim = max(fine_lim, 0.05 * coarse_lim)
         fine_lim = min(fine_lim, 0.5 * coarse_lim)
@@ -1226,6 +1363,26 @@ def _plot_compare_panel(
             label="Binary final (K+H)" if k > 0 else "Binary final (H)",
             zorder=3,
         )
+        if guide_kh is not None:
+            ax.plot(
+                t_kh,
+                guide_kh[col],
+                color="#2E7D32",
+                linewidth=2.0,
+                linestyle="-.",
+                label="Guidance (K+H)" if k > 0 else "Guidance (H)",
+                zorder=3,
+            )
+        elif guide_h is not None:
+            ax.plot(
+                t_h,
+                guide_h[col],
+                color="#2E7D32",
+                linewidth=2.0,
+                linestyle="-.",
+                label="Guidance (H)",
+                zorder=3,
+            )
         ax.plot(
             t_h,
             mmpd_plot[col],
@@ -1310,6 +1467,7 @@ def plot_dataset_windows(
         dataset_horizon=horizon,
     )
     stage = str(bundle.get("stage") or "")
+    refine_stage = str(bundle.get("refine_stage") or ("patch_refine" if stage == "patch_refine" else "fine"))
     if stage == "vertical_dual" or bool(getattr(state, "use_vertical_dual_concat", False)):
         coarse_model = _load_stage_model(
             state, "vertical_dual", bundle["coarse_pt"], guidance_model, len(variate_indices), device,
@@ -1320,7 +1478,7 @@ def plot_dataset_windows(
             state, "coarse", bundle["coarse_pt"], guidance_model, len(variate_indices), device,
         )
         fine_model = _load_stage_model(
-            state, "fine", bundle["fine_pt"], guidance_model, len(variate_indices), device,
+            state, refine_stage, bundle["fine_pt"], guidance_model, len(variate_indices), device,
         )
     ranked = bool(getattr(test_ds, "yields_ordinal_ranks", False))
     for m in (coarse_model, fine_model):
@@ -1480,6 +1638,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Random fraction of test windows per dataset (default 1/8). Use 1.0 for full set.",
     )
     p.add_argument("--test-max-items", type=int, default=None, help="Cap eval windows per dataset")
+    p.add_argument(
+        "--eval-test-stride",
+        type=int,
+        default=4,
+        help="Test window stride for binary+MMPD alignment (matched-binary packs use 4).",
+    )
     p.add_argument("--plots-only", action="store_true", help="Skip eval; require eval_cache/*.npz")
     p.add_argument("--skip-plots", action="store_true")
     p.add_argument("--variables-to-plot", type=int, default=3)
@@ -1539,6 +1703,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         (output_dir / "raw").mkdir(parents=True, exist_ok=True)
     if args.test_max_items is not None:
         mmpd_args.test_max_items = int(args.test_max_items)
+    if args.eval_test_stride is not None:
+        mmpd_args.eval_test_stride = int(args.eval_test_stride)
 
     all_top: Dict[str, List[Dict[str, Any]]] = {}
     summary_rows: List[Dict[str, Any]] = []

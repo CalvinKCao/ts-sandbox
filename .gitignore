@@ -209,11 +209,10 @@ wandb/
 .tmp_timing_full4phase_ckpt/
 .tmp_timing_full4phase_ckpt2/
 temp/*
-!temp/submit_*.sh
+# Compat symlinks at temp/*.sh|*.py → temp/scripts/ (scripts live under scripts/)
+!temp/*.sh
 !temp/*.py
 !temp/README.md
-!temp/regen_eval_viz_overlap_narval_fresh_fixed_hp.sh
-!temp/run_h96_ordinal_patch_refine_mmpd_dag.sh
 !temp/scripts/
 !temp/scripts/**
 synth_data/

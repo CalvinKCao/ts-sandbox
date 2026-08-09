@@ -7,8 +7,9 @@ import json
 import logging
 import math
 import os
+import random
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from optuna.exceptions import TrialPruned
@@ -27,6 +28,140 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _hybrid_norm_metadata(norm_stats: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist hybrid flat-variate affine so disc/MMPD rematerialize the same scales."""
+    if not norm_stats.get("hybrid_flat_dataset_norm"):
+        return {}
+    out: Dict[str, Any] = {
+        "hybrid_flat_dataset_norm": True,
+        "flat_variate_mask": [bool(x) for x in norm_stats["flat_variate_mask"].tolist()],
+        "flat_variate_frac": [float(x) for x in norm_stats["flat_variate_frac"].tolist()],
+        "hybrid_flat_frac_threshold": float(norm_stats["hybrid_flat_frac_threshold"]),
+        "hybrid_flat_oob_coverage": float(norm_stats["hybrid_flat_oob_coverage"]),
+        "hybrid_flat_max_scale": float(norm_stats["hybrid_flat_max_scale"]),
+        "hybrid_flat_lookback": int(norm_stats["hybrid_flat_lookback"]),
+        "hybrid_flat_details": list(norm_stats.get("hybrid_flat_details") or []),
+    }
+    if norm_stats.get("emp_std") is not None:
+        out["emp_std"] = norm_stats["emp_std"].tolist()
+    return out
+
+
+def _maybe_subsample_patch_refine_train_windows(state: PipelineState, train_ds):
+    """Keep a seeded random fraction of train windows for patch_refine finetune only."""
+    frac = float(getattr(state, "patch_refine_finetune_window_fraction", 1.0))
+    if not math.isfinite(frac) or frac <= 0.0 or frac > 1.0:
+        raise ValueError(
+            f"patch_refine_finetune_window_fraction must be in (0, 1], got {frac!r}"
+        )
+    if frac >= 1.0:
+        return train_ds
+    n = len(train_ds)
+    if n <= 1:
+        return train_ds
+    k = max(1, int(round(n * frac)))
+    k = min(k, n)
+    rng = random.Random(int(state.seed) + 17)
+    indices = sorted(rng.sample(range(n), k))
+    logger.info(
+        "  [diffusion_patch_refine_finetune_hp] train window fraction=%.3f: %d/%d "
+        "(seed=%s)",
+        frac,
+        k,
+        n,
+        state.seed,
+    )
+    return Subset(train_ds, indices)
+
+
+def _resolve_flatline_undersample_seed(state: PipelineState) -> int:
+    from models.diffusion_tsf.flatline_windows import DEFAULT_SEED_OFFSET
+
+    raw = getattr(state, "patch_refine_flatline_seed", None)
+    if raw is None:
+        return int(state.seed) + int(DEFAULT_SEED_OFFSET)
+    return int(raw)
+
+
+def _maybe_flatline_undersample_patch_refine_train(
+    state: PipelineState, train_ds, *, segment_stride: int
+) -> Tuple[Any, Optional[Dict[int, List[int]]]]:
+    """Undersample GT-flatline refine crops before unique-seg wrap.
+
+    Returns (train_ds, allowed_segment_variates|None). Flatness is judged on
+    each unique absolute ``patch_width`` crop × active variate — not the full
+    H-horizon parent. Unique-seg keep masks drop discarded (segment, var) crops.
+    """
+    keep_frac = float(getattr(state, "patch_refine_flatline_keep_frac", 1.0))
+    if not math.isfinite(keep_frac) or keep_frac <= 0.0 or keep_frac > 1.0:
+        raise ValueError(
+            f"patch_refine_flatline_keep_frac must be in (0, 1], got {keep_frac!r}"
+        )
+    if keep_frac >= 1.0:
+        return train_ds, None
+
+    from models.diffusion_tsf.flatline_windows import undersample_flatline_refine_crops
+    from models.diffusion_tsf.train_multivariate_pipeline import TimeSeriesDataset
+
+    if not isinstance(train_ds, TimeSeriesDataset):
+        raise TypeError(
+            "patch_refine_flatline_keep_frac requires TimeSeriesDataset train "
+            f"windows before unique-seg wrap, got {type(train_ds).__name__}"
+        )
+    if not bool(getattr(state, "patch_refine_unique_segments", False)):
+        raise RuntimeError(
+            "patch_refine_flatline_keep_frac < 1 requires "
+            "patch_refine_unique_segments=True (per-crop filtering)"
+        )
+    if bool(getattr(state, "use_ordinal_window_norm", False)):
+        raise RuntimeError(
+            "patch_refine_flatline_keep_frac expects early-July window-norm "
+            "(use_ordinal_window_norm=False); refuse ordinal-rank flat defs"
+        )
+    if not bool(getattr(state, "use_window_normalization", True)):
+        raise RuntimeError(
+            "patch_refine_flatline_keep_frac requires use_window_normalization=True"
+        )
+
+    max_scale = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
+    seed = _resolve_flatline_undersample_seed(state)
+    patch_width = int(getattr(state, "patch_refine_patch_width", 8))
+    allowed_vars, stats = undersample_flatline_refine_crops(
+        train_ds,
+        patch_width=patch_width,
+        segment_stride=max(1, int(segment_stride)),
+        max_scale=max_scale,
+        coarse_h=int(state.coarse_image_height),
+        std_floor=float(state.window_norm_std_floor),
+        keep_frac=keep_frac,
+        seed=seed,
+        min_run=int(getattr(state, "patch_refine_flatline_min_run", 3)),
+        flat_eps_frac=float(getattr(state, "patch_refine_flatline_eps_frac", 0.25)),
+    )
+    state.extra["patch_refine_flatline_undersample"] = stats
+    return train_ds, allowed_vars
+
+
+def _unpack_patch_refine_batch(batch):
+    """Unpack train/val batch: optional col0 + optional per-active-var keep mask."""
+    patch_col0 = None
+    variate_keep = None
+    if len(batch) == 4:
+        past, future, patch_col0, variate_keep = batch
+    elif len(batch) == 3:
+        past, future, third = batch
+        if third.dtype == torch.bool:
+            variate_keep = third
+        else:
+            patch_col0 = third
+    elif len(batch) == 2:
+        past, future = batch
+    else:
+        raise ValueError(f"unexpected patch_refine batch length {len(batch)}")
+    return past, future, patch_col0, variate_keep
+
 
 
 def _log_gpu_mem(tag: str) -> None:
@@ -398,79 +533,7 @@ def _fraction_subset(ds, fraction: float, seed: int):
     return Subset(ds, idx)
 
 
-@torch.no_grad()
-def _anchor_mse_on_loader(model, loader, device: torch.device) -> float:
-    """One-shot 2d→1d decoded anchor MSE vs dataloader future (global-norm space)."""
-    model.eval()
-    total = 0.0
-    n = 0
-    k = int(getattr(model.config, "lookback_overlap", 0) or 0)
-    for batch in loader:
-        if len(batch) == 3:
-            past, future, _col0 = batch
-        else:
-            past, future = batch
-        past = past.to(device)
-        future = future.to(device)
-        out = model.generate(past, sampler="anchor", num_inference_steps=1)
-        pred = out.get("prediction_global_norm", out.get("prediction"))
-        if pred is None:
-            raise KeyError("generate(anchor) missing prediction_global_norm/prediction")
-        fut = future[..., k:] if k > 0 else future
-        if tuple(pred.shape) != tuple(fut.shape):
-            raise RuntimeError(
-                f"anchor MSE shape mismatch after overlap strip k={k}: "
-                f"pred={tuple(pred.shape)} future={tuple(fut.shape)}"
-            )
-        err = (pred.float() - fut.float()).pow(2).mean()
-        b = int(pred.shape[0])
-        total += float(err.item()) * b
-        n += b
-    return total / max(n, 1)
 
-
-@torch.no_grad()
-def _anchor_pixel_error_on_loader(
-    model, loader, device: torch.device,
-) -> Tuple[float, float]:
-    """One-shot anchor 2D binary pixel error (=1-acc) vs GT stacked CDF canvas.
-
-    Compares thresholded ``future_2d`` from ``generate(sampler=anchor)`` to the
-    same vertical_dual coarse∥fine stack used as the diffusion training target.
-    Returns ``(error, accuracy)``; Optuna minimizes ``error``.
-    """
-    model.eval()
-    stage = str(getattr(model.config, "diffusion_stage", ""))
-    if stage != "vertical_dual":
-        raise ValueError(
-            f"anchor_pixel_acc selection supports vertical_dual only, got {stage!r}"
-        )
-    correct = 0.0
-    n_pix = 0
-    for past, future in loader:
-        past = past.to(device)
-        future = future.to(device)
-        out = model.generate(past, sampler="anchor", num_inference_steps=1)
-        pred = out.get("future_2d")
-        if pred is None:
-            raise KeyError("generate(anchor) missing future_2d for pixel accuracy")
-        _past_norm, future_norm, _stats = model._normalize_sequence(past, future)
-        future_maps = model._encode_staged_maps(future_norm)
-        gt = model.to_2d.stack_vertical_dual(future_maps["coarse"], future_maps["fine"])
-        pred_b = (pred.float() > 0.5).float()
-        gt_b = (gt.float() > 0.5).float()
-        if tuple(pred_b.shape) != tuple(gt_b.shape):
-            raise RuntimeError(
-                f"anchor pixel-acc shape mismatch: "
-                f"pred={tuple(pred_b.shape)} gt={tuple(gt_b.shape)}"
-            )
-        match = (pred_b == gt_b).float()
-        correct += float(match.sum().item())
-        n_pix += int(match.numel())
-    if n_pix < 1:
-        raise RuntimeError("anchor_pixel_acc: empty loader / zero pixels")
-    acc = correct / float(n_pix)
-    return 1.0 - acc, acc
 
 
 def _suggest_full_diffusion_params(
@@ -1045,8 +1108,11 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
         patch_stage_globals(pipeline_mod, state, self.stage, honor_dataset_windows=True)
         variate_indices = state.variate_indices
-        if variate_indices is None:
-            variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+        if not variate_indices:
+            raise ValueError(
+                f"[{self.name}] Missing resolved variate_indices in state for dataset {state.dataset!r}. "
+                "Data subset policy must be resolved before running phase."
+            )
         subset_meta = state.data_subset_resolved or {}
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
         test_stride = int(subset_meta.get("test_stride", 1))
@@ -1061,6 +1127,17 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             )
             if norm_stats.get("ordinal_ladder") is not None:
                 state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
+            if norm_stats.get("hybrid_flat_dataset_norm"):
+                state.extra["hybrid_flat_norm_stats"] = {
+                    k: norm_stats[k]
+                    for k in (
+                        "flat_variate_mask",
+                        "flat_variate_frac",
+                        "hybrid_flat_details",
+                        "emp_std",
+                    )
+                    if k in norm_stats
+                }
 
         ft_guidance_ckpt = state.guidance_finetune_ckpt
         if not ft_guidance_ckpt or not os.path.exists(ft_guidance_ckpt):
@@ -1219,8 +1296,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         subset_id: str,
         subset_meta: Dict[str, Any],
         norm_stats: Dict[str, Any],
-        selection_metric: str = "diffusion_val",
-        anchor_val_ds=None,
     ) -> Tuple[Dict[str, Any], float, int, bool]:
         """Optionally retrain the Optuna winner from pretrain for more epochs.
 
@@ -1240,17 +1315,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         best_params = _with_state_anchor_params(
             self._inject_length_params(best_params, state), state,
         )
-        selection_metric = str(selection_metric)
         logger.info(
             "  [%s] refit_best: search_epochs=%d -> refit_epochs=%d patience=%d "
-            "lr=%.2e g=%s selection=%s",
+            "lr=%.2e g=%s",
             self.name,
             search_max_epochs,
             refit_epochs,
             refit_patience,
             float(best_params.get("learning_rate", 0.0)),
             best_params.get("binary_length_g"),
-            selection_metric,
         )
         # Persist search winner before long refit so --resume can skip Optuna.
         meta_pending: Dict[str, Any] = {
@@ -1267,12 +1340,12 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "diffusion_stage": self.stage,
             "staged_representation": state.staged_representation,
             "search_space": search_space,
-            "selection_metric": selection_metric,
             "max_epochs": search_max_epochs,
             "patience": search_patience,
             "refit_best_max_epochs": refit_epochs,
             "refit_completed": False,
         }
+        meta_pending.update(_hybrid_norm_metadata(norm_stats))
         with open(os.path.join(subset_dir, "metadata.json"), "w", encoding="utf-8") as f:
             json.dump(meta_pending, f, indent=2, sort_keys=True)
 
@@ -1289,8 +1362,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             max_epochs=refit_epochs,
             patience=refit_patience,
             trial=None,
-            selection_metric=selection_metric,
-            anchor_val_ds=anchor_val_ds,
         )
         return best_params, float(final_val), int(final_epoch), True
 
@@ -1311,8 +1382,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         trial=None,
         guidance=None,
         pretrained_state_dict: Optional[Dict[str, Any]] = None,
-        selection_metric: str = "diffusion_val",
-        anchor_val_ds=None,
     ) -> Tuple[float, int]:
         from models.diffusion_tsf.train_multivariate_pipeline import (
             EarlyStopping,
@@ -1325,28 +1394,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         )
 
         params = _with_state_anchor_params(params, state)
-        _decoded = {"anchor_mse", "anchor_pixel_acc"}
-        if selection_metric not in {"diffusion_val"} | _decoded:
-            raise ValueError(
-                f"selection_metric must be diffusion_val, anchor_mse, or "
-                f"anchor_pixel_acc, got {selection_metric!r}"
-            )
-        use_decoded = selection_metric in _decoded
-        if use_decoded and anchor_val_ds is None:
-            raise ValueError(
-                f"selection_metric={selection_metric} requires anchor_val_ds"
-            )
         n_iv = len(variate_indices)
         batch_size = int(params["batch_size"])
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
-        anchor_loader = None
-        if use_decoded:
-            # Cap micro-batch for one-shot generate; still covers the full subset.
-            anchor_bs = max(1, min(batch_size, 8))
-            anchor_loader = DataLoader(
-                anchor_val_ds, batch_size=anchor_bs, shuffle=False, num_workers=0,
-            )
         n_train_batches = len(train_loader)
         n_val_batches = len(val_loader)
         trial_label = (
@@ -1354,7 +1405,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         )
         logger.info(
             "  [%s/%s] %s START epochs=%d patience=%d lr=%.2e bs=%d accum=%d "
-            "train_batches=%d val_batches=%d selection=%s anchor_batches=%s g=%s",
+            "train_batches=%d val_batches=%d g=%s",
             self.name,
             self.stage,
             trial_label,
@@ -1365,8 +1416,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             int(params.get("gradient_accumulation_steps", 1)),
             n_train_batches,
             n_val_batches,
-            selection_metric,
-            len(anchor_loader) if anchor_loader is not None else "-",
             params.get("binary_length_g"),
         )
         _log_gpu_mem(f"{self.stage}/{trial_label}/start")
@@ -1472,15 +1521,24 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             self.name, self.stage, trial_label,
                             epoch + 1, max_epochs, batch_idx + 1, n_train_batches,
                         )
-                    if len(batch) == 3:
-                        past, future, patch_col0 = batch
+                    past, future, patch_col0, variate_keep = _unpack_patch_refine_batch(
+                        batch
+                    )
+                    if patch_col0 is not None:
                         patch_col0 = patch_col0.to(device)
-                    else:
-                        past, future = batch
-                        patch_col0 = None
+                    if variate_keep is not None:
+                        variate_keep = variate_keep.to(device)
                     past, future = past.to(device), future.to(device)
                     with amp_context():
-                        loss = model.get_loss(past, future, patch_col0=patch_col0) / accum_steps
+                        loss = (
+                            model.get_loss(
+                                past,
+                                future,
+                                patch_col0=patch_col0,
+                                variate_keep=variate_keep,
+                            )
+                            / accum_steps
+                        )
                     loss.backward()
                     if (batch_idx + 1) % accum_steps == 0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -1526,47 +1584,26 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                                 self.name, self.stage, trial_label,
                                 epoch + 1, max_epochs, val_idx + 1, n_val_batches,
                             )
-                        if len(batch) == 3:
-                            past, future, patch_col0 = batch
+                        past, future, patch_col0, variate_keep = _unpack_patch_refine_batch(
+                            batch
+                        )
+                        if patch_col0 is not None:
                             patch_col0 = patch_col0.to(device)
-                        else:
-                            past, future = batch
-                            patch_col0 = None
+                        if variate_keep is not None:
+                            variate_keep = variate_keep.to(device)
                         past, future = past.to(device), future.to(device)
                         with amp_context():
-                            loss = model.get_loss(past, future, patch_col0=patch_col0)
+                            loss = model.get_loss(
+                                past,
+                                future,
+                                patch_col0=patch_col0,
+                                variate_keep=variate_keep,
+                            )
                         val_loss += float(loss.item())
                         n_val += 1
                 val_loss /= max(n_val, 1)
                 val_elapsed = time.perf_counter() - val_start
-                anchor_mse = None
-                anchor_pixel_acc = None
-                if use_decoded:
-                    anchor_start = time.perf_counter()
-                    if selection_metric == "anchor_mse":
-                        anchor_mse = _anchor_mse_on_loader(model, anchor_loader, device)
-                        selection_score = float(anchor_mse)
-                        logger.info(
-                            "  [%s/%s] %s epoch %d/%d anchor_mse=%.6f time=%.1fs",
-                            self.name, self.stage, trial_label,
-                            epoch + 1, max_epochs, anchor_mse,
-                            time.perf_counter() - anchor_start,
-                        )
-                    else:
-                        # Minimize (1 - pixel_acc) so Optuna direction stays minimize.
-                        pix_err, anchor_pixel_acc = _anchor_pixel_error_on_loader(
-                            model, anchor_loader, device,
-                        )
-                        selection_score = float(pix_err)
-                        logger.info(
-                            "  [%s/%s] %s epoch %d/%d anchor_pixel_acc=%.6f "
-                            "sel_err=%.6f time=%.1fs",
-                            self.name, self.stage, trial_label,
-                            epoch + 1, max_epochs, anchor_pixel_acc, selection_score,
-                            time.perf_counter() - anchor_start,
-                        )
-                else:
-                    selection_score = float(val_loss)
+                selection_score = float(val_loss)
                 lr_now = float(optimizer.param_groups[0]["lr"])
                 saved = selection_score < best_val
                 if saved:
@@ -1576,7 +1613,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         "tuned_params": dict(params),
                         "diffusion_stage": self.stage,
                         "best_epoch": best_epoch,
-                        "selection_metric": selection_metric,
+                        "selection_metric": "val_loss",
                     }
                     if ckpt_path:
                         save_checkpoint(
@@ -1598,10 +1635,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     "epoch": epoch + 1,
                     "train_loss": float(train_loss_avg),
                     "val_loss": float(val_loss),
-                    "anchor_mse": None if anchor_mse is None else float(anchor_mse),
-                    "anchor_pixel_acc": (
-                        None if anchor_pixel_acc is None else float(anchor_pixel_acc)
-                    ),
                     "selection_score": float(selection_score),
                     "best_val": float(best_val),
                     "lr": lr_now,
@@ -1609,11 +1642,11 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 })
 
                 logger.info(
-                    "  [%s/%s] %s epoch %d/%d done train=%.4f val=%.4f sel=%.4f best=%.4f "
+                    "  [%s/%s] %s epoch %d/%d done train=%.4f val=%.4f best=%.4f "
                     "best_ep=%d lr=%.2e saved=%s train_t=%.1fs val_t=%.1fs epoch_t=%.1fs",
                     self.name, self.stage, trial_label,
                     epoch + 1, max_epochs,
-                    train_loss_avg, val_loss, selection_score, best_val, best_epoch, lr_now,
+                    train_loss_avg, val_loss, best_val, best_epoch, lr_now,
                     saved, train_elapsed, val_elapsed, time.perf_counter() - epoch_start,
                 )
                 _log_gpu_mem(f"{self.stage}/{trial_label}/ep{epoch + 1}")
@@ -1622,14 +1655,14 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     trial.report(selection_score, epoch)
                     if trial.should_prune():
                         logger.info(
-                            "  [%s/%s] %s epoch %d/%d PRUNED sel=%.4f",
+                            "  [%s/%s] %s epoch %d/%d PRUNED val=%.4f",
                             self.name, self.stage, trial_label, epoch + 1, max_epochs,
                             selection_score,
                         )
                         raise TrialPruned()
                 if early_stop(selection_score):
                     logger.info(
-                        "  [%s/%s] %s epoch %d/%d EARLY_STOP sel=%.4f best=%.4f best_ep=%d",
+                        "  [%s/%s] %s epoch %d/%d EARLY_STOP val=%.4f best=%.4f best_ep=%d",
                         self.name, self.stage, trial_label,
                         epoch + 1, max_epochs, selection_score, best_val, best_epoch,
                     )
@@ -1658,20 +1691,17 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             "length_g": params.get("binary_length_g", 1.0),
                             "length_scale": params.get("binary_length_scale", 1.0),
                             "binary_noise_schedule": params.get("binary_noise_schedule"),
-                            "selection_metric": selection_metric,
+                            "selection_metric": "val_loss",
                             "best_val": float(best_val),
                             "best_epoch": int(best_epoch),
                             "epochs": epoch_history,
-                            # Diffusion val/BCE is not comparable across length_g.
-                            "val_loss_note": "not_comparable_across_schedules",
                         },
                         hf,
                         indent=2,
                     )
             logger.info(
-                "  [%s/%s] %s DONE best_val=%.4f best_epoch=%d selection=%s total_time=%.1fs",
-                self.name, self.stage, trial_label, best_val, best_epoch,
-                selection_metric, total_elapsed,
+                "  [%s/%s] %s DONE best_val=%.4f best_epoch=%d total_time=%.1fs",
+                self.name, self.stage, trial_label, best_val, best_epoch, total_elapsed,
             )
             return best_val, best_epoch
         finally:
@@ -1696,8 +1726,11 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
         subset_id = state.subset_id or state.dataset
         variate_indices = state.variate_indices
-        if variate_indices is None:
-            variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+        if not variate_indices:
+            raise ValueError(
+                f"[{self.name}] Missing resolved variate_indices in state for dataset {state.dataset!r}. "
+                "Data subset policy must be resolved before running phase."
+            )
         subset_meta = state.data_subset_resolved or {}
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
         test_stride = int(subset_meta.get("test_stride", 1))
@@ -1733,6 +1766,34 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             ordinal_tie_atol=float(state.ordinal_tie_atol),
             use_ordinal_window_norm=state.use_ordinal_window_norm,
         )
+        if norm_stats.get("hybrid_flat_dataset_norm"):
+            flat_mask = [bool(x) for x in norm_stats["flat_variate_mask"].tolist()]
+            state.extra["hybrid_flat_norm_stats"] = {
+                k: norm_stats[k]
+                for k in (
+                    "flat_variate_mask",
+                    "flat_variate_frac",
+                    "hybrid_flat_details",
+                    "emp_std",
+                )
+                if k in norm_stats
+            }
+            logger.info(
+                "  [%s] hybrid flat dataset-norm: flat_mask=%s frac=%s details=%s",
+                self.name,
+                flat_mask,
+                [round(float(x), 4) for x in norm_stats["flat_variate_frac"].tolist()],
+                norm_stats.get("hybrid_flat_details"),
+            )
+        allowed_segment_variates: Optional[Dict[int, List[int]]] = None
+        seg_stride = max(1, int(train_stride))
+        if self.stage == "patch_refine":
+            (
+                train_ds,
+                allowed_segment_variates,
+            ) = _maybe_flatline_undersample_patch_refine_train(
+                state, train_ds, segment_stride=seg_stride
+            )
         if (
             self.stage == "patch_refine"
             and bool(getattr(state, "patch_refine_unique_segments", False))
@@ -1741,28 +1802,48 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 wrap_timeseries_as_unique_segments,
             )
 
-            seg_stride = max(1, int(train_stride))
-            train_ds = wrap_timeseries_as_unique_segments(
-                train_ds,
-                patch_width=int(getattr(state, "patch_refine_patch_width", 8)),
-                segment_stride=seg_stride,
-                series_id=0,
-            )
+            # Unique-seg rebuilds from .data; flatline undersample restricts
+            # kept (absolute_segment_start, active_var) crops via keep masks.
+            if allowed_segment_variates is not None:
+                train_ds = wrap_timeseries_as_unique_segments(
+                    train_ds,
+                    patch_width=int(getattr(state, "patch_refine_patch_width", 8)),
+                    segment_stride=seg_stride,
+                    series_id=0,
+                    allowed_segment_variates=allowed_segment_variates,
+                )
+            else:
+                train_ds = wrap_timeseries_as_unique_segments(
+                    train_ds,
+                    patch_width=int(getattr(state, "patch_refine_patch_width", 8)),
+                    segment_stride=seg_stride,
+                    series_id=0,
+                )
             val_ds = wrap_timeseries_as_unique_segments(
                 val_ds,
                 patch_width=int(getattr(state, "patch_refine_patch_width", 8)),
                 segment_stride=seg_stride,
                 series_id=1,
             )
+            flat_note = ""
+            if allowed_segment_variates is not None:
+                n_crops = sum(len(vs) for vs in allowed_segment_variates.values())
+                flat_note = (
+                    f" flat_segments={len(allowed_segment_variates)}"
+                    f" flat_kept_crops={n_crops}"
+                )
             logger.info(
                 "  [%s] unique patch segments enabled "
-                "(segment_stride=%d train=%d val=%d prev_dropout=%.2f)",
+                "(segment_stride=%d train=%d val=%d prev_dropout=%.2f%s)",
                 self.name,
                 seg_stride,
                 len(train_ds),
                 len(val_ds),
                 float(getattr(state, "patch_refine_prev_cond_dropout", 0.5)),
+                flat_note,
             )
+        if self.stage == "patch_refine":
+            train_ds = _maybe_subsample_patch_refine_train_windows(state, train_ds)
         if norm_stats.get("ordinal_ladder") is not None:
             state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
         from models.diffusion_tsf.pipeline.config import training_value
@@ -1786,29 +1867,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             self.name, len(train_ds), len(val_ds),
         )
 
-        # Optuna/refit selection: lr_eff_batch_g defaults to decoded val anchor MSE
-        # (diffusion val loss is not comparable across length_g). Override via hp_objective
-        # (e.g. anchor_pixel_acc = minimize 1 - 2D binary pixel accuracy on the canvas).
-        _ss_hint = str(self.get("search_space") or "lr_only").lower()
-        selection_metric = "anchor_mse" if _ss_hint == "lr_eff_batch_g" else "diffusion_val"
-        if self.get("hp_objective") is not None:
-            selection_metric = str(self.get("hp_objective")).lower()
-        _decoded = {"anchor_mse", "anchor_pixel_acc"}
-        if selection_metric not in {"diffusion_val"} | _decoded:
-            raise ValueError(
-                f"hp_objective/selection_metric must be diffusion_val, anchor_mse, "
-                f"or anchor_pixel_acc, got {selection_metric!r}"
-            )
-        anchor_val_ds = None
-        if selection_metric in _decoded:
-            frac = float(self.get("hp_anchor_eval_val_fraction", 0.5))
-            if state.smoke_test:
-                frac = 1.0
-            anchor_val_ds = _fraction_subset(val_ds, frac, int(state.seed))
-            logger.info(
-                "  [%s] selection_metric=%s on %d/%d val windows (fraction=%.3f)",
-                self.name, selection_metric, len(anchor_val_ds), len(val_ds), frac,
-            )
+
 
         from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
         from models.diffusion_tsf.pipeline.visualize_utils import _load_staged_diffusion_from_ckpt
@@ -1968,8 +2027,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     max_epochs=max_epochs,
                     patience=patience,
                     trial=None,
-                    selection_metric=selection_metric,
-                    anchor_val_ds=anchor_val_ds,
                 )
                 hp_best_val_loss = float(final_val)
                 logger.info(
@@ -2055,8 +2112,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     max_epochs=max_epochs,
                     patience=patience,
                     trial=None,
-                    selection_metric=selection_metric,
-                    anchor_val_ds=anchor_val_ds,
                 )
                 hp_best_val_loss = float(final_val)
                 best_trial_num = 0
@@ -2172,8 +2227,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                                 trial=trial,
                                 guidance=worker_guidance,
                                 pretrained_state_dict=worker_pretrained,
-                                selection_metric=selection_metric,
-                                anchor_val_ds=anchor_val_ds,
                             )
                         except torch.cuda.OutOfMemoryError:
                             logger.warning(
@@ -2251,7 +2304,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     study_name=f"{state.experiment_name}-{self.stage}-hp",
                     checkpoint_dir=subset_dir,
                     n_trials=n_trials,
-                    parallel_workers=state.parallel_optuna_workers,
                     direction="minimize",
                     objective_builder=objective_builder,
                     sampler=TPESampler(seed=state.seed, multivariate=True, group=True),
@@ -2320,8 +2372,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 subset_id=subset_id,
                 subset_meta=subset_meta,
                 norm_stats=norm_stats,
-                selection_metric=selection_metric,
-                anchor_val_ds=anchor_val_ds,
             )
 
         meta_out: Dict[str, Any] = {
@@ -2340,7 +2390,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "diffusion_stage": self.stage,
             "staged_representation": state.staged_representation,
             "search_space": search_space,
-            "selection_metric": selection_metric,
+            "selection_metric": "val_loss",
             "max_epochs": (
                 int(self.get("refit_best_max_epochs"))
                 if refit_completed
@@ -2354,6 +2404,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "search_max_epochs": max_epochs,
             "search_patience": patience,
         }
+        meta_out.update(_hybrid_norm_metadata(norm_stats))
         if self.get("refit_best_max_epochs") is not None:
             meta_out["refit_best_max_epochs"] = int(self.get("refit_best_max_epochs"))
             meta_out["refit_completed"] = bool(refit_completed)

@@ -125,6 +125,12 @@ class DiffusionTSFConfig:
     window_norm_low_var_unit_std: float = 1.0
     # Per local variate index (batch dim V); falls back to window_norm_low_var_unit_std.
     window_norm_low_var_unit_std_per_variate: Optional[List[float]] = None
+    # Hybrid flat: per-variate skip of window/instance norm (identity in dataset-affine space).
+    # Length must match num_variables when set. See utils/hybrid_flat_dataset_norm.py.
+    skip_window_norm_variate_mask: Optional[List[bool]] = None
+    hybrid_flat_dataset_norm: bool = False
+    hybrid_flat_frac_threshold: float = 0.5
+    hybrid_flat_oob_coverage: float = 0.99
     # Shift window center at decode so overlap preds align with past tail (quantization fix).
     lookback_overlap_center_shift: bool = False
     zero_guidance_forecast: bool = False

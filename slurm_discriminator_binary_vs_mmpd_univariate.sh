@@ -230,9 +230,9 @@ if [[ -z "${ANCHOR_CONFIG:-}" && -z "${ANCHOR_CONFIG_BY_DATASET:-}" ]]; then
 fi
 
 if [[ "${ALLOW_REUSED_MMPD_ROOT:-0}" -eq 1 ]]; then
-    "$PYTHON" -u "$REPO/temp/check_mmpd_reused_decoder_root.py" "$MMPD_ROOT" --datasets "$DATASET"
+    "$PYTHON" -u "$REPO/temp/scripts/check_mmpd_reused_decoder_root.py" "$MMPD_ROOT" --datasets "$DATASET"
 else
-    "$PYTHON" -u "$REPO/temp/check_mmpd_instance_campaign.py" "$MMPD_ROOT"
+    "$PYTHON" -u "$REPO/temp/scripts/check_mmpd_instance_campaign.py" "$MMPD_ROOT"
 fi
 "$PYTHON" -c "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
 

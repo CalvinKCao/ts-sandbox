@@ -440,6 +440,30 @@ def load_past_windows(
     return np.concatenate(past_all, axis=0)
 
 
+def _hybrid_norm_from_run_metadata(run: Any) -> Optional[Dict[str, np.ndarray]]:
+    """If ckpt metadata has hybrid flat dsnorm, return binary mean/std from it."""
+    meta = getattr(run, "metadata", None) or {}
+    if not isinstance(meta, dict) or not meta.get("hybrid_flat_dataset_norm"):
+        return None
+    if "norm_mean" not in meta or "norm_std" not in meta:
+        raise RuntimeError(
+            f"{getattr(run, 'dataset', '?')}: hybrid_flat_dataset_norm metadata "
+            "missing norm_mean/norm_std"
+        )
+    mean = np.asarray(meta["norm_mean"], dtype=np.float64).reshape(-1)
+    std = np.asarray(meta["norm_std"], dtype=np.float64).reshape(-1)
+    if mean.shape != std.shape or mean.size == 0:
+        raise RuntimeError(
+            f"{getattr(run, 'dataset', '?')}: bad hybrid norm_mean/norm_std shapes "
+            f"{mean.shape} / {std.shape}"
+        )
+    if not np.isfinite(mean).all() or not np.isfinite(std).all() or (std <= 0).any():
+        raise RuntimeError(
+            f"{getattr(run, 'dataset', '?')}: non-finite or non-positive hybrid norm_std"
+        )
+    return {"mean": mean, "std": std}
+
+
 def binary_mmpd_train_scaler_map(args: argparse.Namespace, run: Any) -> Dict[str, np.ndarray]:
     """Read the two training-set scalers that define the output coordinates.
 
@@ -448,19 +472,31 @@ def binary_mmpd_train_scaler_map(args: argparse.Namespace, run: Any) -> Dict[str
     function intentionally never looks at selected evaluation targets: it
     derives the conversion solely from the scalers used to train/evaluate the
     two models.
+
+    When the binary ckpt metadata records ``hybrid_flat_dataset_norm``, prefer
+    persisted ``norm_mean`` / ``norm_std`` (coverage scales for flat variates)
+    over re-deriving via ``load_dataset`` — rematerialization must match train.
     """
     lookback, horizon = dataset_window_lengths_for_run(args, run)
-    _pool, _starts, _splits, _lengths, binary_stats = load_tsf_pack_pool(
-        run.dataset,
-        run_variate_indices(run),
-        lookback=lookback,
-        horizon=horizon,
-        train_stride=run_train_stride(run),
-        test_stride=run_test_stride(run),
-        pack_splits=("test",),
-    )
-    binary_mean = np.asarray(binary_stats["mean"], dtype=np.float64).reshape(-1)
-    binary_std = np.asarray(binary_stats["std"], dtype=np.float64).reshape(-1)
+    n_vars = len(run_variate_indices(run))
+    binary_mean: Optional[np.ndarray] = None
+    binary_std: Optional[np.ndarray] = None
+    meta_hybrid = _hybrid_norm_from_run_metadata(run)
+    if meta_hybrid is not None:
+        binary_mean = meta_hybrid["mean"]
+        binary_std = meta_hybrid["std"]
+    else:
+        _pool, _starts, _splits, _lengths, binary_stats = load_tsf_pack_pool(
+            run.dataset,
+            run_variate_indices(run),
+            lookback=lookback,
+            horizon=horizon,
+            train_stride=run_train_stride(run),
+            test_stride=run_test_stride(run),
+            pack_splits=("test",),
+        )
+        binary_mean = np.asarray(binary_stats["mean"], dtype=np.float64).reshape(-1)
+        binary_std = np.asarray(binary_stats["std"], dtype=np.float64).reshape(-1)
 
     csv_path = Path(args.mmpd_data_dir) / mmpd_staged_filename_for_run(run)
     meta_path = csv_path.with_suffix(csv_path.suffix + ".meta.json")
@@ -475,7 +511,6 @@ def binary_mmpd_train_scaler_map(args: argparse.Namespace, run: Any) -> Dict[str
     raw_train = frame.iloc[:train_rows, 1:].to_numpy(dtype=np.float64, copy=True)
     mmpd_mean = raw_train.mean(axis=0)
     mmpd_std = raw_train.std(axis=0)
-    n_vars = len(run_variate_indices(run))
     for name, values in (
         ("binary_mean", binary_mean),
         ("binary_std", binary_std),
@@ -715,6 +750,8 @@ def window_time_bounds(
     *,
     series_starts: Optional[Sequence[int]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    # Prefer absolute [start, end) from series_starts + lookback+horizon;
+    # else fall back to index * test_stride (less accurate for purged splits).
     if series_starts is not None:
         starts = np.asarray(series_starts, dtype=np.int64)
         if starts.shape[0] != len(indices):
@@ -756,6 +793,30 @@ def _purge_nonoverlapping(
     return np.asarray(kept, dtype=np.int64)
 
 
+def apply_disc_pack_protocol(args: argparse.Namespace) -> List[str]:
+    """Normalize ``--pack-splits``; default val+test → train 0.8 / val 0 / test 0.2.
+
+    If pack is ``val,test`` (any order) and fractions are still the legacy
+    ``0.7/0.15`` defaults, switch to ``train_fraction=0.8``, ``val_fraction=0``
+    (test ≈ 0.2; early-stop val carved from train in ``split_windows``).
+    Explicit ``--train-fraction`` / ``--val-fraction`` overrides are kept.
+    """
+    splits = parse_pack_splits(getattr(args, "pack_splits", None))
+    args.pack_splits = ",".join(splits)
+    if set(splits) == {"val", "test"}:
+        train_f = float(getattr(args, "train_fraction", 0.7))
+        val_f = float(getattr(args, "val_fraction", 0.15))
+        if abs(train_f - 0.7) < 1e-12 and abs(val_f - 0.15) < 1e-12:
+            args.train_fraction = 0.8
+            args.val_fraction = 0.0
+            print(
+                "[split] pack_splits=val,test → defaulting train/val frac to "
+                "0.8/0.0 (test≈0.2; early-stop val = last 10% of purged train)",
+                flush=True,
+            )
+    return splits
+
+
 def split_windows(
     n_windows: int,
     args: argparse.Namespace,
@@ -767,6 +828,18 @@ def split_windows(
     test_stride: Optional[int] = None,
     series_starts: Optional[Sequence[int]] = None,
 ) -> Dict[str, np.ndarray]:
+    """Chronological disc train/val/test with hard purge vs the held-out test tail.
+
+    Walkthrough (live ablation defaults = train_fraction=0.8, val_fraction=0):
+      1. Sort pack windows by absolute past start time.
+      2. Last 20% → disc TEST (never used for early stop).
+      3. HARD PURGE: drop any earlier window whose time span overlaps that test
+         tail (lookback+horizon reach). No soft “allow overlap” fallback.
+      4. Of the purged early pool: last 10% → VAL (early stop), rest → TRAIN.
+         That lands ≈72/8/20 of the original pack.
+
+    ``val_fraction > 0`` uses the older explicit train/val/test fractions instead.
+    """
     if args.max_windows is not None:
         n_windows = min(n_windows, int(args.max_windows))
     if indices is None or lookback is None or horizon is None or test_stride is None:
@@ -776,6 +849,7 @@ def split_windows(
         raise ValueError(f"{dataset}: got {len(raw_indices)} split indices for {n_windows} windows")
     starts_all = None if series_starts is None else list(series_starts)[:n_windows]
 
+    # Absolute [start, end) for each pack row on the series timeline.
     starts, ends = window_time_bounds(
         dataset,
         raw_indices,
@@ -784,18 +858,37 @@ def split_windows(
         int(test_stride),
         series_starts=starts_all,
     )
-    order = np.argsort(starts, kind="mergesort")
-    n_train_target = max(1, int(round(len(order) * args.train_fraction)))
-    n_val_target = max(1, int(round(len(order) * args.val_fraction)))
-    if n_train_target + n_val_target >= len(order):
-        n_val_target = max(1, len(order) - n_train_target - 1)
-    n_test = len(order) - n_train_target - n_val_target
+    order = np.argsort(starts, kind="mergesort")  # chronological by past start
+    train_frac = float(args.train_fraction)
+    val_frac = float(args.val_fraction)
+
+    if val_frac <= 0:
+        # 80/20-style: test = last (1 - train_frac); val carved from train pool.
+        if not (0.0 < train_frac < 1.0):
+            raise ValueError(f"train_fraction must be in (0,1) when val_fraction<=0, got {train_frac}")
+        n_test = max(1, int(round(len(order) * (1.0 - train_frac))))
+        if n_test >= len(order) - 1:
+            raise ValueError(
+                f"not enough windows for train/test split: pack={len(order)} n_test={n_test}"
+            )
+        n_train_target = len(order) - n_test
+        n_val_target = 0
+        mode = "80/20+val_from_train"
+    else:
+        # Target sizes from --train-fraction / --val-fraction (default 0.7 / 0.15).
+        n_train_target = max(1, int(round(len(order) * train_frac)))
+        n_val_target = max(1, int(round(len(order) * val_frac)))
+        if n_train_target + n_val_target >= len(order):
+            n_val_target = max(1, len(order) - n_train_target - 1)
+        n_test = len(order) - n_train_target - n_val_target
+        mode = "train/val/test fractions"
     if n_test < 1:
         raise ValueError(f"not enough windows for train/val/test split: {len(order)}")
 
-    test = order[-n_test:]
+    test = order[-n_test:]  # latest windows → disc test
     test_start = int(starts[test].min())
-    # Hold out anything whose span reaches into the test region. No silent fallback.
+    # HARD PURGE: drop any earlier window whose span reaches into test region.
+    # No silent “allow overlap with test” fallback.
     train_val_pool = np.asarray(
         [idx for idx in order[:-n_test] if int(ends[idx]) <= test_start],
         dtype=np.int64,
@@ -810,8 +903,14 @@ def split_windows(
 
     # Allow overlap *within* train and within val (needed at lb336/hz720). The leak we
     # kill is train/val ↔ test absolute-time overlap, not within-split density.
-    val_ratio = args.val_fraction / max(args.train_fraction + args.val_fraction, 1e-8)
-    n_val = max(1, int(round(len(train_val_pool) * val_ratio)))
+    # Note: under unique_abs, train↔val may still share absolute [T,T+L) — that would
+    # tend to inflate val metrics if anything, not explain chance test AUROC.
+    if val_frac <= 0:
+        # Last 10% of purged train pool → early-stop val; rest → train.
+        n_val = max(1, int(round(len(train_val_pool) * 0.1)))
+    else:
+        val_ratio = val_frac / max(train_frac + val_frac, 1e-8)
+        n_val = max(1, int(round(len(train_val_pool) * val_ratio)))
     if n_val >= len(train_val_pool):
         n_val = len(train_val_pool) - 1
     # Chronological train then val within the purged pool.
@@ -822,7 +921,7 @@ def split_windows(
     print(
         f"[split] {dataset}: pack={len(order)} -> train/val/test="
         f"{len(train)}/{len(val)}/{len(test)} "
-        f"(raw targets {n_train_target}/{n_val_target}/{n_test}; "
+        f"(raw targets {n_train_target}/{n_val_target}/{n_test}; mode={mode}; "
         f"test_start={test_start}; train/val purged vs test only)",
         flush=True,
     )
@@ -847,6 +946,12 @@ def zscore_time(x: np.ndarray) -> np.ndarray:
 
 
 class HorizonSliceDataset(Dataset):
+    """Dense multivariate real-vs-fake slices (legacy / texture-disc path).
+
+    Not what the unique_abs L8/L16 ablation trains — that uses
+    ``UnivariateRealVsFakeDataset`` in ``eval_discriminator_binary_vs_mmpd_univariate``.
+    """
+
     def __init__(
         self,
         past: np.ndarray,
@@ -915,6 +1020,15 @@ class HorizonSliceDataset(Dataset):
 
 
 class InvertedSliceDiscriminator(nn.Module):
+    """OLD / default disc: iTransformer-style over variate tokens.
+
+    Walkthrough: input x is [B, C, T] where T=slice length (e.g. L=8) and C is
+    the number of variate channels in one example. Live unique_abs ablation uses
+    C=1 (one variate per example), so the TransformerEncoder only ever sees a
+    *single* token — attention is mostly dead weight. Output is a logit for
+    P(fake); train with BCEWithLogits (label 1=fake, 0=GT).
+    """
+
     def __init__(
         self,
         seq_len: int,
@@ -929,10 +1043,14 @@ class InvertedSliceDiscriminator(nn.Module):
     ) -> None:
         super().__init__()
         self.use_offset_embedding = bool(use_offset_embedding)
+        # Collapse the time axis into a vector, then project to d_model.
+        # One Linear per variate-token: shape [B,C,T] → [B,C,d_model].
         self.value_embedding = nn.Linear(seq_len, d_model)
+        # Optional: tell the model *where* in the horizon this L-slice starts.
         self.offset_embedding = (
             nn.Embedding(max_offset + 1, d_model) if self.use_offset_embedding else None
         )
+        # Pre-norm TransformerEncoder stack (GELU FFN). Depth default=2.
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
@@ -943,7 +1061,9 @@ class InvertedSliceDiscriminator(nn.Module):
             norm_first=True,
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=depth)
+        # LayerNorm only (no InstanceNorm) — keeps C=1 path honest.
         self.norm = nn.LayerNorm(d_model)
+        # MLP head → scalar logit.
         self.head = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.GELU(),
@@ -952,16 +1072,189 @@ class InvertedSliceDiscriminator(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
-        # x: [B, C, T]. Like iTransformer, variates are tokens and time is embedded.
+        # x: [B, C, T]. Embed time → token dim; C becomes the sequence length.
         tokens = self.value_embedding(x)
+        # Broadcast offset emb onto every variate token of the example.
         if self.offset_embedding is not None:
             tokens = tokens + self.offset_embedding(offsets).unsqueeze(1)
         tokens = self.encoder(tokens)
+        # Mean-pool over variate tokens (trivial when C=1), then classify.
         pooled = self.norm(tokens).mean(dim=1)
-        return self.head(pooled).squeeze(-1)
+        return self.head(pooled).squeeze(-1)  # logit P(fake)
+
+
+# New lean backends selectable via --disc-arch (same forward(x, offsets) API).
+DISC_ARCH_CHOICES = ("transformer", "mlp", "cnn1d", "flatness")
+
+
+class FlatnessSliceDiscriminator(nn.Module):
+    """NEW lean baseline: score how non-flat the L-slice is.
+
+    Walkthrough: after bin-center, GT on LULL is often nearly constant while MMPD
+    wiggles. std(x) is a one-number texture cue. We map log1p(std) → logit with
+    learnable scale/bias (2 params). Offsets are ignored on purpose.
+    """
+
+    def __init__(self, *, learnable: bool = True) -> None:
+        super().__init__()
+        # Trainable a,b so BCE can flip the sign if "flat ⇒ real" is inverted.
+        if learnable:
+            self.scale = nn.Parameter(torch.tensor(1.0))
+            self.bias = nn.Parameter(torch.tensor(0.0))
+        else:
+            self.register_buffer("scale", torch.tensor(1.0))
+            self.register_buffer("bias", torch.tensor(0.0))
+
+    def forward(self, x: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+        del offsets  # flatness does not use horizon position
+        # Flatten [B,C,T] → [B, C*T]; for univariate C=1 this is just T steps.
+        std = x.flatten(1).std(dim=-1, unbiased=False).clamp_min(0.0)
+        # log1p keeps tiny stds from vanishing; scale/bias are the only knobs.
+        return self.scale * torch.log1p(std) + self.bias
+
+
+class MLPSliceDiscriminator(nn.Module):
+    """NEW lean disc: small MLP on the flattened L-vector (audit-matched 64×2).
+
+    Walkthrough: same input as the transformer path, but no attention — just
+    Linear→ReLU stacks on the L floats. Default turns offset embedding OFF so
+    capacity stays tiny (~5k params at L=8). This is what recovered LULL texture
+    in the probe when the transformer collapsed to constant 0.5.
+    """
+
+    def __init__(
+        self,
+        seq_len: int,
+        max_offset: int,
+        *,
+        hidden: int = 64,
+        depth: int = 2,
+        dropout: float = 0.0,
+        use_offset_embedding: bool = False,
+    ) -> None:
+        super().__init__()
+        self.use_offset_embedding = bool(use_offset_embedding)
+        layers: List[nn.Module] = []
+        # First Linear reads the whole L-slice as one feature vector.
+        in_dim = int(seq_len)
+        for _ in range(max(1, int(depth))):
+            layers.extend([nn.Linear(in_dim, hidden), nn.ReLU()])
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            in_dim = hidden
+        # Final Linear → one logit.
+        layers.append(nn.Linear(in_dim, 1))
+        self.net = nn.Sequential(*layers)
+        # Optional additive offset bias (usually off for lean runs).
+        self.offset_embedding = (
+            nn.Embedding(max_offset + 1, 1) if self.use_offset_embedding else None
+        )
+
+    def forward(self, x: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+        # [B,C,T] → [B, C*T]; with C=1 this is exactly the L-slice.
+        logits = self.net(x.flatten(1)).squeeze(-1)
+        if self.offset_embedding is not None:
+            logits = logits + self.offset_embedding(offsets).squeeze(-1)
+        return logits
+
+
+class CNN1DSliceDiscriminator(nn.Module):
+    """NEW lean disc: tiny 1D CNN over time for local step patterns.
+
+    Walkthrough: Conv1d treats T as the sequence and C as channels (C=1 for the
+    univariate ablation). Two small convs + global average pool + Linear → logit.
+    AdaptiveAvgPool makes the architecture length-agnostic (L=8 or L=16).
+    """
+
+    def __init__(
+        self,
+        seq_len: int,
+        *,
+        in_channels: int = 1,
+        channels: Tuple[int, int] = (16, 32),
+        kernel_size: int = 3,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        del seq_len  # length handled by AdaptiveAvgPool1d
+        c1, c2 = int(channels[0]), int(channels[1])
+        k = int(kernel_size)
+        pad = k // 2  # same-length convs so short L=8 still works
+        self.conv = nn.Sequential(
+            nn.Conv1d(in_channels, c1, kernel_size=k, padding=pad),
+            nn.ReLU(),
+            nn.Conv1d(c1, c2, kernel_size=k, padding=pad),
+            nn.ReLU(),
+            # Collapse time → one vector of size c2 per example.
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.head = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+            nn.Linear(c2, 1),
+        )
+
+    def forward(self, x: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+        del offsets  # CNN ignores absolute horizon offset
+        # x already [B, C, T] — Conv1d-ready.
+        return self.head(self.conv(x)).squeeze(-1)
+
+
+def build_slice_discriminator(
+    arch: str,
+    *,
+    seq_len: int,
+    max_offset: int,
+    d_model: int = 128,
+    n_heads: int = 4,
+    depth: int = 2,
+    d_ff: int = 256,
+    dropout: float = 0.1,
+    use_offset_embedding: bool = True,
+    mlp_hidden: int = 64,
+) -> nn.Module:
+    """Factory: pick OLD transformer or a NEW lean arch.
+
+    Walkthrough: every backend must accept (x, offsets) and return a logit so
+    train_classifier / evaluate_classifier stay architecture-agnostic. CLI flag
+    is --disc-arch {transformer,mlp,cnn1d,flatness}.
+    """
+    name = str(arch).strip().lower()
+    if name == "transformer":
+        # Legacy path (~294k params at default hparams).
+        return InvertedSliceDiscriminator(
+            seq_len=seq_len,
+            max_offset=max_offset,
+            d_model=d_model,
+            n_heads=n_heads,
+            depth=depth,
+            d_ff=d_ff,
+            dropout=dropout,
+            use_offset_embedding=use_offset_embedding,
+        )
+    if name == "mlp":
+        # Lean MLP; force offset emb off regardless of transformer defaults.
+        return MLPSliceDiscriminator(
+            seq_len=seq_len,
+            max_offset=max_offset,
+            hidden=mlp_hidden,
+            depth=2,
+            dropout=float(dropout),
+            use_offset_embedding=False,
+        )
+    if name == "cnn1d":
+        return CNN1DSliceDiscriminator(
+            seq_len=seq_len,
+            in_channels=1,
+            dropout=float(dropout),
+        )
+    if name == "flatness":
+        return FlatnessSliceDiscriminator(learnable=True)
+    raise ValueError(f"unknown disc_arch={arch!r}; choose from {DISC_ARCH_CHOICES}")
 
 
 def binary_auroc(labels: np.ndarray, scores: np.ndarray) -> float:
+    """Mann–Whitney AUROC on P(fake) vs labels (ties averaged). Chance = 0.5."""
     labels = labels.astype(np.int64)
     pos = labels == 1
     neg = labels == 0
@@ -986,12 +1279,37 @@ def binary_auroc(labels: np.ndarray, scores: np.ndarray) -> float:
     return float((rank_sum_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
 
 
-def window_level_metrics(windows: np.ndarray, labels: np.ndarray, probs: np.ndarray) -> Dict[str, float]:
-    """One decision per (window, label) via mean prob(fake) over slices."""
-    keys = {}
-    for w, y, p in zip(windows.tolist(), labels.tolist(), probs.tolist()):
-        key = (int(w), int(y))
-        keys.setdefault(key, []).append(float(p))
+def window_level_metrics(
+    windows: np.ndarray,
+    labels: np.ndarray,
+    probs: np.ndarray,
+    *,
+    variates: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """Mean P(fake) over offsets, then AUROC.
+
+    Multivariate disc examples already pack all variates in one tensor, so the
+    default key is ``(window, label)`` (average over offsets only).
+
+    Univariate disc emits one example per variate — pass ``variates`` so the
+    key is ``(window, variate, label)`` and we do **not** pool across series.
+    Under unique_abs there is usually ~1 offset per key → nearly equals example AUROC.
+    """
+    keys: Dict[Tuple[Any, ...], List[float]] = {}
+    if variates is None:
+        for w, y, p in zip(windows.tolist(), labels.tolist(), probs.tolist()):
+            key: Tuple[Any, ...] = (int(w), int(y))
+            keys.setdefault(key, []).append(float(p))
+    else:
+        if len(variates) != len(windows):
+            raise ValueError(
+                f"variates length {len(variates)} != windows length {len(windows)}"
+            )
+        for w, v, y, p in zip(
+            windows.tolist(), variates.tolist(), labels.tolist(), probs.tolist()
+        ):
+            key = (int(w), int(v), int(y))
+            keys.setdefault(key, []).append(float(p))
     if not keys:
         return {
             "disc_acc_window": float("nan"),
@@ -1000,8 +1318,8 @@ def window_level_metrics(windows: np.ndarray, labels: np.ndarray, probs: np.ndar
         }
     y_win = []
     p_win = []
-    for (w, y), vals in keys.items():
-        y_win.append(float(y))
+    for key, vals in keys.items():
+        y_win.append(float(key[-1]))
         p_win.append(float(np.mean(vals)))
     y_arr = np.asarray(y_win, dtype=np.float64)
     p_arr = np.asarray(p_win, dtype=np.float64)
@@ -1179,7 +1497,7 @@ def train_classifier(
             optimizer.step()
             train_loss += float(loss.item()) * int(labels.numel())
             train_count += int(labels.numel())
-            if args.max_batches_per_epoch and batch_idx + 1 >= args.max_batches_per_epoch:
+            if getattr(args, "max_batches_per_epoch", None) and batch_idx + 1 >= args.max_batches_per_epoch:
                 break
 
         val_metrics = evaluate_classifier(model, val_loader, device)
@@ -1209,7 +1527,7 @@ def train_classifier(
         model.load_state_dict(best_state)
     test_metrics = evaluate_classifier(model, test_loader, device)
 
-    if args.save_checkpoints:
+    if bool(getattr(args, "save_checkpoints", False)):
         ckpt_path = (
             args.output_dir
             / "checkpoints"

@@ -4,7 +4,7 @@
 Shows post-snap binary-dataset-z values as stored/fed into disc dataset construction
 **before** the classifier's per-slice ``zscore_time``. No extra instance/window norm.
 
-Data path matches ``temp/eval_univariate_patch_refine_ordinal_vs_mmpd.py`` /
+Data path matches ``temp/scripts/eval_univariate_patch_refine_ordinal_vs_mmpd.py`` /
 ``temp/scripts/rerun_ordinal_disc_confusions_h96.py``:
   disc-raw binary pack → MMPD pack (sample0) → align_mmpd_to_binary_dataset_norm
   → legal 256-row ladder from past → snap_to_patch_refine_levels.

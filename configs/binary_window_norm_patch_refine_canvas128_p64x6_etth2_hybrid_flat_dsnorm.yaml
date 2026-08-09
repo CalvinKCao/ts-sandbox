@@ -1,0 +1,29 @@
+# ETTh2 canvas128 with hybrid flat/dataset-norm:
+# - Flat variates (>50% consecutive-equal on raw train): dataset-level affine only
+#   (coverage scale so >=99% of lb336 lookbacks stay inside [-max_scale, max_scale]);
+#   NO per-window / instance norm.
+# - Non-flat: existing early-July window-norm (use_window_normalization=True).
+# max_scale_by_dataset.ETTh2 matches earlyjuly fixed_tuned_params (5.2), not base 9.0.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_etth2.yaml
+
+wandb:
+  tags:
+    - ablation
+    - window_norm
+    - patch_refine
+    - canvas128
+    - p64x6
+    - early_july_norm
+    - ETTh2
+    - hybrid_flat_dsnorm
+    - win_frac_0p5
+
+experiment:
+  name: binary-window-norm-patch-refine-canvas128-p64x6-etth2-hybrid-flat-dsnorm
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_etth2_hybrid_flat_dsnorm
+  config_nickname: c128-etth2-hybrid-flat-dsnorm
+  hybrid_flat_dataset_norm: true
+  hybrid_flat_frac_threshold: 0.5
+  hybrid_flat_oob_coverage: 0.99
+  max_scale_by_dataset:
+    ETTh2: 5.2

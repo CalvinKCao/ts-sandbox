@@ -237,22 +237,62 @@ def generate_staged_forecast(
     *,
     vertical_dual: bool,
     fine_seed: Optional[int] = None,
+    require_guidance_pred: bool = True,
     **generate_kwargs: Any,
 ) -> Dict[str, torch.Tensor]:
-    """Generate one final forecast through the checkpoint's actual refinement path."""
+    """Generate one final forecast through the checkpoint's actual refinement path.
+
+    When ``require_guidance_pred`` is True (default), the returned dict must
+    include ``guidance_prediction_global_norm`` (patch-guidance 1D forecast in
+    global-z). Fail-fast if the generate path omits it.
+    """
+    if require_guidance_pred:
+        generate_kwargs = {
+            **generate_kwargs,
+            "emit_guidance_prediction": True,
+        }
     if vertical_dual:
         # The vertical model samples the stacked 16+16 canvas and performs the
         # fine decode / overlap trim internally.  It must not be fed back into
         # a separately-instantiated 16-row fine model.
-        return coarse_model.generate(past, **generate_kwargs)
-    coarse_out = coarse_model.generate(past, **generate_kwargs)
-    if fine_seed is not None:
-        torch.manual_seed(int(fine_seed))
-    return fine_model.generate(
-        past,
-        future_coarse_2d=coarse_out["future_2d_coarse"],
-        **generate_kwargs,
-    )
+        result = coarse_model.generate(past, **generate_kwargs)
+    else:
+        # Guidance AR only needed once; emit on refine (or coarse if vertical).
+        coarse_kwargs = {**generate_kwargs, "emit_guidance_prediction": False}
+        coarse_out = coarse_model.generate(past, **coarse_kwargs)
+        if fine_seed is not None:
+            torch.manual_seed(int(fine_seed))
+        result = fine_model.generate(
+            past,
+            future_coarse_2d=coarse_out["future_2d_coarse"],
+            **generate_kwargs,
+        )
+        # Prefer refine-stage guidance; fall back to coarse generate fields.
+        for key in (
+            "guidance_norm",
+            "guidance_prediction_with_overlap",
+            "guidance_prediction_global_norm",
+        ):
+            if key not in result and key in coarse_out:
+                result[key] = coarse_out[key]
+
+    if require_guidance_pred:
+        if "guidance_prediction_global_norm" not in result:
+            raise RuntimeError(
+                "generate_staged_forecast missing guidance_prediction_global_norm; "
+                "wire guidance through DiffusionTSF.generate / _guidance_prediction_fields "
+                f"(keys={sorted(result.keys())})"
+            )
+        g = result["guidance_prediction_global_norm"]
+        pred = result.get("prediction_global_norm", result.get("prediction"))
+        if pred is None:
+            raise RuntimeError("generate_staged_forecast missing prediction_global_norm")
+        if tuple(g.shape) != tuple(pred.shape):
+            raise RuntimeError(
+                f"guidance_prediction_global_norm shape {tuple(g.shape)} "
+                f"!= prediction_global_norm {tuple(pred.shape)}"
+            )
+    return result
 
 
 def evaluate_staged_binary(

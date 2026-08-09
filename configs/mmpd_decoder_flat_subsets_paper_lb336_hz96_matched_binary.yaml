@@ -1,4 +1,4 @@
-# Paper-fixed Decoder MMPD, matching the ordinal h96 patch-refine subset policy.
+# Paper-fixed Decoder MMPD, matching canvas128 binary subset policy (data_subset_by_dataset).
 # MMPD itself intentionally remains non-ordinal and instance-normalized.
 
 experiment:
@@ -7,7 +7,7 @@ experiment:
 
 mmpd:
   backbone: Decoder
-  subset_config: binary_patch_refine_lb336_hz96_ordinal_tuned.yaml
+  subset_config: binary_window_norm_patch_refine_canvas128_p64x6.yaml
   lookback: 336
   horizon: 96
   datasets:

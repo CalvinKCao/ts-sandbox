@@ -113,7 +113,9 @@ else
     GPU_SBATCH=(--gres="gpu:${GPU_TYPE}:1")
 fi
 
-if [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
+if [[ -d "${SCRATCH:-}/ts-sandbox-ordinal-fine" ]]; then
+    REPO="${SCRATCH}/ts-sandbox-ordinal-fine"
+elif [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
     REPO="${SCRATCH}/ts-sandbox"
 elif [[ -d "$HOME/ts-sandbox" ]]; then
     REPO="$HOME/ts-sandbox"
@@ -129,7 +131,7 @@ cd "$REPO"
 source "$REPO/utils/mmpd_submit_helpers.sh"
 
 manifest_tool() {
-    python3 "$REPO/temp/submission_manifest.py" "$@"
+    python3 "$REPO/temp/scripts/submission_manifest.py" "$@"
 }
 
 MMPD_REPO="$REPO/temp/MMPD"
@@ -185,7 +187,7 @@ if [[ "$EVAL_EXISTING_DISCRIMINATOR" -eq 1 ]]; then
         exit 1
     }
     [[ "$EXISTING_MMPD_ROOT" == /* ]] || EXISTING_MMPD_ROOT="$REPO/$EXISTING_MMPD_ROOT"
-    python3 -u "$REPO/temp/check_mmpd_reused_decoder_root.py" \
+    python3 -u "$REPO/temp/scripts/check_mmpd_reused_decoder_root.py" \
         "$EXISTING_MMPD_ROOT" --datasets "${DATASETS[@]}"
     DISC_RUN="${DISC_RUN:-$(date +%m-%d)-mmpd-h720-existing-disc}"
     RAW_RUN="${RAW_RUN:-${DISC_RUN}-raw}"
@@ -477,8 +479,22 @@ REQ="\$REPO/setup/requirements-killarney.txt"
 [[ -f "\$REQ" ]] || { echo "ERROR: missing \$REQ — run ./setup/killarney_freeze_requirements.sh on login node" >&2; exit 1; }
 [[ -n "\${SLURM_TMPDIR:-}" ]] || { echo "ERROR: SLURM_TMPDIR is not set." >&2; exit 1; }
 
+# Non-interactive sbatch may lack Lmod; init profile before module.
+if ! type module >/dev/null 2>&1; then
+    if [ -f /cvmfs/soft.computecanada.ca/config/profile/bash.sh ]; then
+        export SKIP_CC_CVMFS="\${SKIP_CC_CVMFS:-0}"
+        set +u
+        # shellcheck disable=SC1091
+        source /cvmfs/soft.computecanada.ca/config/profile/bash.sh
+        set -u
+    fi
+fi
+type module >/dev/null 2>&1 || { echo "ERROR: Lmod unavailable after profile source" >&2; exit 127; }
 module purge 2>/dev/null || true
-module load StdEnv/2023 python/3.11 cuda/12.2 cudnn/8.9 2>/dev/null || true
+module load StdEnv/2023
+module load python/3.11
+module load cuda/12.2
+module load cudnn/8.9
 command -v virtualenv >/dev/null || { echo "ERROR: virtualenv not available after module load." >&2; exit 1; }
 
 echo "[setup] Building node-local venv on \$SLURM_TMPDIR from \$REQ"

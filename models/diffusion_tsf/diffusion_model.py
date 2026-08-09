@@ -152,9 +152,7 @@ class DiffusionTSF(nn.Module):
         backbone_in_channels = config.backbone_in_channels
         is_patch_refine = config.diffusion_stage == "patch_refine"
         dit_patch = config.dit_patch_size
-        cond_patch = config.dit_cond_patch_size
-        if is_patch_refine and cond_patch is None:
-            cond_patch = (8, 8)
+        cond_patch = config.dit_cond_patch_size or (8, 8)
         self.noise_predictor = FactorizedDiT(
             in_channels=backbone_in_channels,
             cond_channels=config.visual_cond_channels,
@@ -207,6 +205,9 @@ class DiffusionTSF(nn.Module):
             length_g=float(getattr(config, "binary_length_g", 1.0)),
             length_scale=float(getattr(config, "binary_length_scale", 1.0)),
         )
+
+        self._ordinal_apply_ood_shift: bool = False
+        self._ordinal_input_is_ranked: bool = False
 
         logger.debug("DiffusionTSF initialized:")
         logger.debug(
@@ -408,6 +409,41 @@ class DiffusionTSF(nn.Module):
             )
         return out
 
+    def _guidance_prediction_fields(
+        self,
+        past: torch.Tensor,
+        past_norm: torch.Tensor,
+        stats: Tuple[torch.Tensor, torch.Tensor],
+        horizon_width: int,
+    ) -> Dict[str, torch.Tensor]:
+        """1D patch-guidance forecast in window-norm and global-z (horizon core).
+
+        Fail-fast when guidance channel is enabled but the attached model cannot
+        produce a forecast (used by redbox / gap viz overlays).
+        """
+        if self.guidance_model is None:
+            raise RuntimeError(
+                "guidance_model is None; cannot emit guidance_prediction_global_norm "
+                f"(stage={self.config.diffusion_stage})"
+            )
+        if bool(getattr(self.config, "zero_guidance_forecast", False)):
+            raise RuntimeError(
+                "zero_guidance_forecast=True; refuse empty guidance overlay for viz"
+            )
+        guidance_norm = self._get_guidance_forecast_norm(
+            past, past_norm, stats, int(horizon_width),
+        )
+        guidance_with_overlap = self._denormalize_future(
+            guidance_norm, past, stats, trim_overlap=False,
+        )
+        k = int(self.config.lookback_overlap)
+        guidance_pred = guidance_with_overlap[..., k:]
+        return {
+            "guidance_norm": guidance_norm,
+            "guidance_prediction_with_overlap": guidance_with_overlap,
+            "guidance_prediction_global_norm": guidance_pred,
+        }
+
     def _flatten_ctx_for_factorized_dit(
         self,
         ctx: Optional[torch.Tensor],
@@ -459,21 +495,53 @@ class DiffusionTSF(nn.Module):
         apply_ood_shift: Optional[bool] = None,
         data_is_ranked: Optional[bool] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Tuple[torch.Tensor, torch.Tensor, Optional[OrdinalLadder]]]:
-        """Prepare sequences for diffusion: ordinal-only or legacy window norm."""
+        """Prepares raw input sequences for diffusion modeling by applying normalization.
+
+        This method is the first step in every forward pass and sample generation loop.
+        It supports three distinct normalization pathways:
+          1. Ordinal Window Normalization: Converts raw continuous values into discrete
+             unit-interval ordinal ranks using a pre-computed OrdinalLadder.
+          2. No Normalization: Passes raw inputs through without modification.
+          3. Standard Window Normalization: Performs per-window z-score normalization
+             ((x - center) / std) with low-variance fallback protection.
+
+        Args:
+            past: Lookback window tensor of shape (Batch, Variates, Time_lookback).
+            future: Optional ground-truth forecast tensor of shape (Batch, Variates, Time_forecast).
+            apply_ood_shift: Override flag for applying out-of-distribution shift correction.
+            data_is_ranked: Override flag indicating if incoming tensors are pre-ranked.
+
+        Returns:
+            A tuple of (past_norm, future_norm, stats):
+              - past_norm: Normalized lookback tensor.
+              - future_norm: Normalized forecast tensor (or None if future was None).
+              - stats: Tuple containing (center, std, ladder, [ood_shift]) used for denormalization.
+        """
+        # STEP 1: Fall back to model instance attributes if per-call flags were not provided.
         if apply_ood_shift is None:
-            apply_ood_shift = bool(getattr(self, "_ordinal_apply_ood_shift", False))
+            apply_ood_shift = self._ordinal_apply_ood_shift
         if data_is_ranked is None:
-            data_is_ranked = bool(getattr(self, "_ordinal_input_is_ranked", False))
+            data_is_ranked = self._ordinal_input_is_ranked
+
+        # =========================================================================
+        # PATHWAY 1: ORDINAL WINDOW NORMALIZATION
+        # =========================================================================
+        # Quantizes numerical values into discrete ordinal CDF bins [0, 1].
         if self.config.use_ordinal_window_norm:
             ladder = self.config.ordinal_ladder
             if ladder is None:
                 raise ValueError("ordinal_ladder is required when use_ordinal_window_norm=True")
+            
+            # CASE A: The dataset loader already pre-converted input values into ordinal unit ranks.
             if data_is_ranked:
                 batch_size = past.shape[0] if past.dim() == 3 else 1
                 ladder_b = ladder.expand_batch(batch_size)
+                # Create dummy center=0 and std=1 tensors so tensor shapes match standard stats.
                 center = torch.zeros_like(past[..., :1])
                 std = torch.ones_like(past[..., :1])
                 return past, future, (center, std, ladder_b)
+
+            # CASE B: Raw continuous values need to be encoded into ordinal unit ranks now.
             past_ord, future_ord, ladder_b, ood_shift = ordinal_encode(
                 past,
                 future,
@@ -481,19 +549,35 @@ class DiffusionTSF(nn.Module):
                 apply_ood_shift=apply_ood_shift,
                 causal_only=bool(self.config.ordinal_ood_shift_causal_only),
             )
+            # Create dummy center=0 and std=1 tensors for ordinal representation.
             center = torch.zeros_like(past[..., :1])
             std = torch.ones_like(past[..., :1])
             return past_ord, future_ord, (center, std, ladder_b, ood_shift)
 
+        # =========================================================================
+        # PATHWAY 2: NO NORMALIZATION (IDENTITY)
+        # =========================================================================
         if not self.config.use_window_normalization:
             mean = torch.zeros_like(past[..., :1])
             std = torch.ones_like(past[..., :1])
             return past, future, (mean, std, None)
+
+        # =========================================================================
+        # PATHWAY 3: STANDARD WINDOW NORMALIZATION (PER-WINDOW Z-SCORE)
+        # =========================================================================
+        # Step 3A: Compute the center for each window (either lookback mean or last value).
         center = self._window_norm_center(past)
+        
+        # Step 3B: Compute standard deviation across time for each window (shape: B, V, 1).
         past_std = past.std(dim=-1, keepdim=True)
         threshold = float(self.config.window_norm_low_var_threshold)
+
+        # Step 3C: Handle low-variance / flat time series windows to avoid division by zero.
         if threshold > 0.0:
+            # Floor standard deviation to avoid zero division (e.g., 1e-8).
             std_floor = past_std.clamp_min(self.config.window_norm_std_floor)
+            
+            # Determine replacement unit std for low-variance windows (either per-variate or scalar).
             per_v = self.config.window_norm_low_var_unit_std_per_variate
             default_unit = float(self.config.window_norm_low_var_unit_std)
             if per_v is not None:
@@ -507,16 +591,36 @@ class DiffusionTSF(nn.Module):
                 ).view(1, -1, 1).expand_as(past_std)
             else:
                 unit = torch.full_like(past_std, default_unit)
+                
+            # Identify windows with variance below threshold or completely flat.
             low_var = past_std < threshold
             flat = past_std <= self.config.window_norm_std_floor
+            
+            # If flat/low variance, use replacement unit std; otherwise use clamped past_std.
             std = torch.where(flat | low_var, unit, std_floor)
         else:
+            # Standard clamping without low-variance threshold override.
             std = past_std.clamp_min(self.config.window_norm_std_floor)
+
+        # Hybrid flat variates: already in coverage-scaled dataset space — no instance norm.
+        skip_mask = getattr(self.config, "skip_window_norm_variate_mask", None)
+        if bool(getattr(self.config, "hybrid_flat_dataset_norm", False)) and skip_mask is None:
+            raise RuntimeError(
+                "hybrid_flat_dataset_norm=True but skip_window_norm_variate_mask is unset; "
+                "call load_dataset (or restore mask from metadata) before encode"
+            )
+        if skip_mask is not None:
+            from utils.hybrid_flat_dataset_norm import apply_skip_window_norm_mask
+
+            center, std = apply_skip_window_norm_mask(center, std, skip_mask)
+
+        # Step 3D: Apply z-score normalization: (x - center) / std.
         past_norm = (past - center) / std
         if future is not None:
             future_norm = (future - center) / std
         else:
             future_norm = None
+
         return past_norm, future_norm, (center, std, None)
     
     def _denormalize(
@@ -1018,6 +1122,7 @@ class DiffusionTSF(nn.Module):
         t: Optional[torch.Tensor] = None,
         *,
         patch_col0: Optional[torch.Tensor] = None,
+        variate_keep: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (binary factorized DiT path)."""
         if self.config.diffusion_stage in {
@@ -1030,6 +1135,7 @@ class DiffusionTSF(nn.Module):
                 past, future, t,
                 expand_t_per_window=t is not None,
                 patch_col0=patch_col0,
+                variate_keep=variate_keep,
             )
         return self._forward_binary_factorized(past, future, t)
 
@@ -1052,11 +1158,14 @@ class DiffusionTSF(nn.Module):
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
         future_coarse_2d: Optional[torch.Tensor] = None,
         future_fine_2d: Optional[torch.Tensor] = None,
+        emit_guidance_prediction: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions via binary reverse sampling.
 
         sampler: 'ddim' (default), 'anchor' / 'deterministic_anchor' for one-shot anchor decode.
         num_inference_steps overrides binary_sample_steps when set.
+        emit_guidance_prediction: if True, also return guidance_prediction_global_norm
+        (expensive AR rollout — opt-in for redbox viz only, not bulk eval).
         """
         steps = num_inference_steps if num_inference_steps is not None else self.config.binary_sample_steps
         gen_common = dict(
@@ -1072,6 +1181,7 @@ class DiffusionTSF(nn.Module):
             snapshot_timesteps=snapshot_timesteps,
             future_coarse_2d=future_coarse_2d,
             future_fine_2d=future_fine_2d,
+            emit_guidance_prediction=bool(emit_guidance_prediction),
         )
         if self.config.diffusion_stage in {
             "coarse", "fine", "finer", "vertical_dual", "channel_dual",
@@ -1379,12 +1489,37 @@ class DiffusionTSF(nn.Module):
             )
         return F.pad(cond, (0, width - cur))
 
+    def _expand_horizon_cond_to_past_width(
+        self,
+        horizon_cond: torch.Tensor,
+        past_width: int,
+    ) -> torch.Tensor:
+        """Right-pad horizon scaffold to native lookback width (no temporal squash)."""
+        cur = int(horizon_cond.shape[-1])
+        if cur == past_width:
+            return horizon_cond
+        if cur > past_width:
+            raise ValueError(
+                f"horizon cond width {cur} exceeds native past width {past_width}"
+            )
+        return F.pad(horizon_cond, (0, past_width - cur))
+
     def _cat_past_and_horizon_cond(
         self,
         past_cond: torch.Tensor,
         horizon_cond: torch.Tensor,
     ) -> torch.Tensor:
-        past_cond = self._resize_past_cond_to_width(past_cond, horizon_cond.shape[-1])
+        # resize=true: warp past down onto the horizon grid (classic dual-scale).
+        # resize=false: keep native lookback width and expand the horizon scaffold
+        # to match — same contract as joint/patch_refine native-past cond.
+        if self._past_cond_resize_to_horizon():
+            past_cond = self._resize_past_cond_to_width(
+                past_cond, horizon_cond.shape[-1],
+            )
+        else:
+            horizon_cond = self._expand_horizon_cond_to_past_width(
+                horizon_cond, past_cond.shape[-1],
+            )
         return torch.cat((past_cond, horizon_cond), dim=1)
 
     def _chunk_horizon(self) -> int:
@@ -1734,6 +1869,7 @@ class DiffusionTSF(nn.Module):
         *,
         expand_t_per_window: bool = False,
         patch_col0: Optional[torch.Tensor] = None,
+        variate_keep: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Train boundary-centered 32x8 patches on absolute hi-res CDF crops."""
         from .patch_refine import (
@@ -1767,6 +1903,15 @@ class DiffusionTSF(nn.Module):
         hir_gt = self._encode_absolute_future_hir(future_norm, canvas_h)
         naive = naive_upscale_coarse_cdf(future_maps["coarse"], canvas_h)
         edges = coarse_edges_from_cdf(future_maps["coarse"], canvas_height=canvas_h)
+        keep = None
+        if variate_keep is not None:
+            keep = variate_keep.to(device=device, dtype=torch.bool)
+            if keep.shape != (B, V):
+                raise ValueError(
+                    f"variate_keep shape {tuple(keep.shape)} != batch/vars {(B, V)}"
+                )
+            if not bool(keep.any()):
+                raise RuntimeError("variate_keep is all-False for this batch")
         if unique:
             if patch_col0 is None:
                 # Synth / legacy loaders: one random stride-1 crop per window.
@@ -1781,6 +1926,7 @@ class DiffusionTSF(nn.Module):
                 patch_height=patch_h,
                 patch_width=patch_w,
                 hir_canvas=hir_gt,
+                variate_keep=keep,
             )
         else:
             locations = select_patch_locations(
@@ -1789,6 +1935,7 @@ class DiffusionTSF(nn.Module):
                 patch_height=patch_h,
                 patch_width=patch_w,
                 col_stride=col_stride,
+                variate_keep=keep,
             )
         if not locations:
             raise RuntimeError("patch_refine produced zero training crops")
@@ -2215,7 +2362,7 @@ class DiffusionTSF(nn.Module):
             future_norm, past, stats, trim_overlap=False,
         )
         future = future_with_overlap[..., int(self.config.lookback_overlap):]
-        return {
+        out = {
             "prediction": future,
             "prediction_norm": future_norm,
             "prediction_global_norm": future,
@@ -2232,6 +2379,11 @@ class DiffusionTSF(nn.Module):
             "patch_vote_counts": patch_vote_counts,
             "diffusion_stage": "patch_refine",
         }
+        if bool(kwargs.get("emit_guidance_prediction", False)):
+            out.update(
+                self._guidance_prediction_fields(past, past_norm, stats, W_fut)
+            )
+        return out
 
     def _forward_binary_staged(
         self,
@@ -2834,6 +2986,10 @@ class DiffusionTSF(nn.Module):
             result['future_2d_finer'] = future_2d_finer
         if "finer" in past_maps:
             result['past_2d_finer'] = past_maps["finer"]
+        if bool(kwargs.get("emit_guidance_prediction", False)):
+            result.update(
+                self._guidance_prediction_fields(past, past_norm, stats, W_fut)
+            )
         if intermediates is not None:
             reshaped_intermediates = []
             for (t_idx, i_tensor) in intermediates:
@@ -3131,9 +3287,12 @@ class DiffusionTSF(nn.Module):
         future: torch.Tensor,
         *,
         patch_col0: Optional[torch.Tensor] = None,
+        variate_keep: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Convenience method to get just the loss for training."""
         if self._ar_training_enabled(future.shape[-1]):
             past, future = self._sample_ar_training_chunk(past, future)
-        outputs = self.forward(past, future, patch_col0=patch_col0)
+        outputs = self.forward(
+            past, future, patch_col0=patch_col0, variate_keep=variate_keep
+        )
         return outputs['loss']

@@ -64,7 +64,17 @@ class PipelineState:
     patch_refine_col_stride: int = 6
     patch_refine_unique_segments: bool = False
     patch_refine_prev_cond_dropout: float = 0.5
-    dit_cond_patch_size: Optional[Tuple[int, int]] = None
+    # Fraction of train windows used only during patch_refine finetune (1.0 = all).
+    patch_refine_finetune_window_fraction: float = 1.0
+    # Keep all wiggle refine crops; randomly keep this fraction of GT-flatline
+    # crops when building the patch_refine train set (1.0 = disabled / keep all).
+    # Unit is (unique absolute patch segment, active_variate); flatness is judged
+    # only on that patch_width crop span — not the full H-horizon parent.
+    patch_refine_flatline_keep_frac: float = 1.0
+    patch_refine_flatline_seed: Optional[int] = None  # default: seed + 91
+    patch_refine_flatline_min_run: int = 3
+    patch_refine_flatline_eps_frac: float = 0.25
+    dit_cond_patch_size: Tuple[int, int] = (8, 8)
     use_guidance_channel: bool = True
     guidance_placement: str = "canvas"
     guidance_type: str = "patch_decoder"
@@ -88,6 +98,10 @@ class PipelineState:
     window_norm_low_var_unit_std: float = 1.0
     window_norm_low_var_unit_std_by_variate: Dict[str, List[float]] = field(default_factory=dict)
     window_norm_low_var_unit_std_by_dataset: Dict[str, float] = field(default_factory=dict)
+    # ETTh2-style hybrid: flat vars → dataset-level affine only (no window norm).
+    hybrid_flat_dataset_norm: bool = False
+    hybrid_flat_frac_threshold: float = 0.5
+    hybrid_flat_oob_coverage: float = 0.99
     lookback_overlap_center_shift: bool = False
     zero_guidance_forecast: bool = False
     use_raw_lookback_cond_channel: bool = False
@@ -137,6 +151,7 @@ class PipelineState:
     variate_indices: Optional[List[int]] = None
     subset_id: Optional[str] = None
     data_subset: Dict[str, Any] = field(default_factory=dict)
+    data_subset_by_dataset: Dict[str, Any] = field(default_factory=dict)
     data_subset_resolved: Dict[str, Any] = field(default_factory=dict)
 
     # -- Device --
@@ -152,6 +167,18 @@ class PipelineState:
     # -- Resume / fresh --
     resume: bool = False
     fresh: bool = False
+
+    # -- Refactored YAML options --
+    seeds: List[int] = field(default_factory=lambda: [42])
+    ckpt_config: Optional[str] = None
+    walltime: str = "3:00:00"
+    existing_ckpt_roots: Dict[str, str] = field(default_factory=dict)
+    mmpd_root: str = "datasets/mmpd"
+    ordinal_disc_evaluator: str = "temp/scripts/eval_univariate_patch_refine_ordinal_vs_mmpd.py"
+    ordinal_binary_config: str = "configs/binary_patch_refine_lb336_hz96_ordinal_tuned.yaml"
+    disc_run: Optional[str] = None
+    raw_run: Optional[str] = None
+    slice_lengths: List[int] = field(default_factory=lambda: [8, 16, 32])
 
     # -- Mutable: populated by phases as they produce artifacts --
     itrans_pretrain_ckpt: Optional[str] = None
@@ -273,6 +300,29 @@ class PipelineState:
         if "patch_refine_prev_cond_dropout" in init_kwargs:
             init_kwargs["patch_refine_prev_cond_dropout"] = float(
                 init_kwargs["patch_refine_prev_cond_dropout"]
+            )
+        if "patch_refine_finetune_window_fraction" in init_kwargs:
+            init_kwargs["patch_refine_finetune_window_fraction"] = float(
+                init_kwargs["patch_refine_finetune_window_fraction"]
+            )
+        if "patch_refine_flatline_keep_frac" in init_kwargs:
+            init_kwargs["patch_refine_flatline_keep_frac"] = float(
+                init_kwargs["patch_refine_flatline_keep_frac"]
+            )
+        if (
+            "patch_refine_flatline_seed" in init_kwargs
+            and init_kwargs["patch_refine_flatline_seed"] is not None
+        ):
+            init_kwargs["patch_refine_flatline_seed"] = int(
+                init_kwargs["patch_refine_flatline_seed"]
+            )
+        if "patch_refine_flatline_min_run" in init_kwargs:
+            init_kwargs["patch_refine_flatline_min_run"] = int(
+                init_kwargs["patch_refine_flatline_min_run"]
+            )
+        if "patch_refine_flatline_eps_frac" in init_kwargs:
+            init_kwargs["patch_refine_flatline_eps_frac"] = float(
+                init_kwargs["patch_refine_flatline_eps_frac"]
             )
         for key in ("dit_embed_dim", "dit_depth", "dit_num_heads", "itrans_d_model", "itrans_d_ff", "itrans_e_layers", "itrans_n_heads"):
             if key in init_kwargs:

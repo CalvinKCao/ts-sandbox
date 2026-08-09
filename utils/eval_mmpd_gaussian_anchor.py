@@ -314,7 +314,12 @@ def _load_pems_npz_array(path: Path) -> np.ndarray:
 
 
 def _export_csv_variate_subset(src_csv: Path, dst_csv: Path, variate_indices: Sequence[int]) -> None:
-    """Stage only the selected value columns, preserving the first date/index column."""
+    """Legacy CSV column slice: keep col0 as date, take value cols at index+1.
+
+    Do not use for headerless sources (e.g. solar_Alabama): col0 is a real
+    variate, so this shifts channels by one vs binary's loader. Prefer
+    ``_export_binary_aligned_mmpd_csv``.
+    """
     variate_indices = [int(i) for i in variate_indices]
     with src_csv.open(encoding="utf-8", newline="") as src, dst_csv.open("w", encoding="utf-8", newline="") as dst:
         reader = csv.reader(src)
@@ -327,6 +332,41 @@ def _export_csv_variate_subset(src_csv: Path, dst_csv: Path, variate_indices: Se
     print(
         f"[mmpd-data] {src_csv.name}: wrote {dst_csv} "
         f"({len(variate_indices)} selected variates)"
+    )
+
+
+def _export_binary_aligned_mmpd_csv(
+    dataset: str,
+    dst_csv: Path,
+    variate_indices: Sequence[int],
+) -> None:
+    """Stage MMPD CSV from the same array binary ``load_dataset`` uses.
+
+    Headerless CSVs (solar) have no date column: treating col0 as date and
+    selecting ``i+1`` silently trains MMPD on the wrong variates and breaks
+    ``align_mmpd_to_binary_dataset_norm``. Always go through the binary loader.
+    """
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        _load_dataset_array,
+        _resolve_registry_path,
+    )
+
+    path, date_col = _resolve_registry_path(dataset)
+    data = _load_dataset_array(str(path), date_col)
+    idxs = [int(i) for i in variate_indices]
+    if data.ndim != 2:
+        raise ValueError(f"{dataset}: expected 2D series for MMPD staging, got {data.shape}")
+    if not idxs or max(idxs) >= data.shape[1] or min(idxs) < 0:
+        raise ValueError(
+            f"{dataset}: variate_indices={idxs} out of range for shape {data.shape}"
+        )
+    values = np.asarray(data[:, idxs], dtype=np.float32)
+    columns = [f"var_{i}" for i in range(values.shape[1])]
+    _write_mmpd_csv(dst_csv, values, columns)
+    print(
+        f"[mmpd-data] {dataset}: wrote {dst_csv} from binary loader "
+        f"({values.shape[0]} steps, {values.shape[1]} vars, indices={idxs})",
+        flush=True,
     )
 
 
@@ -366,10 +406,36 @@ def parse_mmpd_data_split(split: str) -> List[Any]:
     return parts
 
 
+def mmpd_pack_window_stride(
+    args: argparse.Namespace,
+    run: AnchorRun,
+    pack_splits: Sequence[str],
+) -> int:
+    """WINDOW_STRIDE for non-test MMPD splits in a pack pool.
+
+    Binary multi-split packs (e.g. val,test) force the same density on every
+    part via ``pack_test_stride``. MMPD's Dataset_MTS uses WINDOW_STRIDE for
+    train/val and TEST_STRIDE for test — so multi-split rematerialize must
+    override WINDOW_STRIDE too, or pool index ``i`` means different absolute
+    windows and affine align fails (seen on exchange_rate val+test).
+    """
+    eval_stride = eval_test_stride(args, run)
+    if list(pack_splits) == ["test"]:
+        return run_train_stride(run)
+    return int(eval_stride)
+
+
 @contextmanager
-def mmpd_stride_env(run: AnchorRun, *, test_stride: Optional[int] = None):
+def mmpd_stride_env(
+    run: AnchorRun,
+    *,
+    test_stride: Optional[int] = None,
+    window_stride: Optional[int] = None,
+):
     updates = {
-        "MMPD_WINDOW_STRIDE": str(run_train_stride(run)),
+        "MMPD_WINDOW_STRIDE": str(
+            window_stride if window_stride is not None else run_train_stride(run)
+        ),
         "MMPD_TEST_STRIDE": str(test_stride if test_stride is not None else run_test_stride(run)),
     }
     saved: Dict[str, Optional[str]] = {}
@@ -431,7 +497,8 @@ def build_mmpd_pack_pool(
     lookback, horizon = dataset_window_lengths(args, run.dataset)
     split = parse_mmpd_data_split(mmpd_data_split(run, args.mmpd_data_dir))
     eval_stride = eval_test_stride(args, run)
-    with mmpd_stride_env(run, test_stride=eval_stride):
+    window_stride = mmpd_pack_window_stride(args, run, pack_splits)
+    with mmpd_stride_env(run, test_stride=eval_stride, window_stride=window_stride):
         parts = [
             Dataset_MTS(
                 root_path=str(args.mmpd_data_dir),
@@ -518,6 +585,8 @@ def stage_mmpd_dataset_for_run(data_dir: Path, run: AnchorRun) -> None:
         "variate_indices": run_variate_indices(run),
         "train_stride": run_train_stride(run),
         "test_stride": run_test_stride(run),
+        # Bust caches staged with the old header+col0-as-date CSV slicer.
+        "value_source": "binary_load_dataset_array",
     }
     if dst.is_symlink():
         dst.unlink()
@@ -539,7 +608,7 @@ def stage_mmpd_dataset_for_run(data_dir: Path, run: AnchorRun) -> None:
     if dataset == "PeMS":
         _export_pems_mmpd_csv(src, dst, expected_meta["variate_indices"])
     else:
-        _export_csv_variate_subset(src, dst, expected_meta["variate_indices"])
+        _export_binary_aligned_mmpd_csv(dataset, dst, expected_meta["variate_indices"])
     from models.diffusion_tsf.train_multivariate_pipeline import LOOKBACK_LENGTH
 
     lookback = LOOKBACK_LENGTH
@@ -623,10 +692,20 @@ def _load_data_subset_policy(config_path: Path) -> Dict[str, Any]:
     from models.diffusion_tsf.pipeline.config import load_experiment_config
 
     cfg = load_experiment_config(str(config_path.resolve()))
-    policy = cfg.get("experiment", {}).get("data_subset")
-    if not policy:
-        raise ValueError(f"{config_path} missing experiment.data_subset")
-    return dict(policy)
+    exp = dict(cfg.get("experiment") or {})
+    by_dataset = exp.get("data_subset_by_dataset")
+    if isinstance(by_dataset, dict) and by_dataset:
+        # Prefer explicit per-dataset policy (matches binary canvas128 subsets).
+        return {"data_subset_by_dataset": dict(by_dataset)}
+    policy = exp.get("data_subset")
+    if isinstance(policy, dict) and (
+        policy.get("data_subset_by_dataset") or policy.get("by_dataset")
+    ):
+        return dict(policy)
+    raise ValueError(
+        f"{config_path} missing experiment.data_subset_by_dataset "
+        "(legacy experiment.data_subset alone is not supported)"
+    )
 
 
 def resolve_subset_meta_for_dataset(
@@ -813,7 +892,12 @@ def mmpd_env_for_run(
     env["MMPD_KEEP_CLI_DATA_ARGS"] = "1"
     env["MMPD_WINDOW_STRIDE"] = str(run_train_stride(run))
     if for_eval and args is not None:
-        env["MMPD_TEST_STRIDE"] = str(eval_test_stride(args, run))
+        eval_stride = eval_test_stride(args, run)
+        env["MMPD_TEST_STRIDE"] = str(eval_stride)
+        # Helper Dataset_MTS(val) reads WINDOW_STRIDE; keep it tied to the pack
+        # grid when rematerializing val(+test) packs (see mmpd_pack_window_stride).
+        pack_splits = parse_pack_splits(getattr(args, "pack_splits", None))
+        env["MMPD_WINDOW_STRIDE"] = str(mmpd_pack_window_stride(args, run, pack_splits))
     else:
         env["MMPD_TEST_STRIDE"] = str(run_test_stride(run))
     if args is not None and getattr(args, "smoke_test", False):
@@ -1664,16 +1748,29 @@ def load_tsf_test_subset(
 
 
 def parse_pack_splits(raw: Optional[str]) -> List[str]:
-    """Comma list of TSF splits used as the disc/generation window pool."""
+    """Comma- or whitespace-separated TSF splits for the disc/generation pool.
+
+    Examples: ``test``, ``val,test``, ``val test``, ``train,val``.
+    """
     text = (raw or "test").strip() or "test"
-    splits = [part.strip() for part in text.split(",") if part.strip()]
+    # Allow "val,test" or "val test" (or mixed).
+    parts = []
+    for chunk in text.replace(",", " ").split():
+        part = chunk.strip()
+        if part:
+            parts.append(part)
     allowed = {"train", "val", "test"}
-    bad = [s for s in splits if s not in allowed]
+    bad = [s for s in parts if s not in allowed]
     if bad:
         raise ValueError(f"pack splits must be in {sorted(allowed)}, got {bad}")
-    if not splits:
+    if not parts:
         raise ValueError("pack splits must be non-empty")
-    return splits
+    # Preserve order; drop duplicates (first wins).
+    out: List[str] = []
+    for s in parts:
+        if s not in out:
+            out.append(s)
+    return out
 
 
 def _absolute_series_starts_for_splits(
@@ -1685,7 +1782,11 @@ def _absolute_series_starts_for_splits(
     train_stride: int,
     test_stride: int,
 ) -> np.ndarray:
-    """Absolute timeline starts (row index in full CSV) for ConcatDataset(order=splits)."""
+    """Absolute timeline starts (row index in full CSV) for ConcatDataset(order=splits).
+
+    ``border1s`` from ``_paper_split_borders``: train/val/test CSV row starts
+    (val/test lookbacks reach back into previous split — paper protocol).
+    """
     from models.diffusion_tsf.train_multivariate_pipeline import (
         _load_dataset_array,
         _paper_split_borders,
@@ -1721,6 +1822,9 @@ def load_tsf_pack_pool(
     Pack pools always load **z-score** series (`use_ordinal_window_norm=False`) so
     train/val/test stay in the same coordinate space. Ordinal ladder snapping for
     the discriminator is applied later in `build_raw_bundle`.
+
+    With ``pack_splits=("test",)`` every window lives in the paper test region;
+    disc train/val/test is a second chronological carve via ``split_windows``.
     """
     from torch.utils.data import ConcatDataset
 
@@ -1740,6 +1844,7 @@ def load_tsf_pack_pool(
     mapping = {"train": train_ds, "val": val_ds, "test": test_ds}
     parts = [mapping[name] for name in pack_splits]
     part_lengths = [len(part) for part in parts]
+    # ConcatDataset in pack_splits order; series_starts aligned 1:1 with pool rows.
     pool: Any = parts[0] if len(parts) == 1 else ConcatDataset(parts)
     series_starts = _absolute_series_starts_for_splits(
         dataset,
@@ -1865,13 +1970,22 @@ def run_mmpd_eval(
     indices: Sequence[int],
 ) -> Dict[str, np.ndarray]:
     dataset = run.dataset
-    out_npz = args.output_dir / "raw" / f"mmpd_{dataset}.npz"
-    indices_json = args.output_dir / "raw" / f"indices_{dataset}_mmpd_eval.json"
+    # Helper runs with cwd=mmpd_repo — relative out/indices paths resolve under
+    # temp/MMPD and miss the real files. Always pass absolute paths.
+    out_dir = Path(args.output_dir).resolve()
+    out_npz = (out_dir / "raw" / f"mmpd_{dataset}.npz").resolve()
+    indices_json = (out_dir / "raw" / f"indices_{dataset}_mmpd_eval.json").resolve()
     indices_json.parent.mkdir(parents=True, exist_ok=True)
     pack_splits = parse_pack_splits(getattr(args, "pack_splits", None))
     eval_ds = build_mmpd_pack_pool(args, run, pack_splits)
     indices = filter_valid_mmpd_indices(dataset, eval_ds, indices)
     write_json_atomic(indices_json, list(indices))
+    if not indices_json.is_file():
+        raise FileNotFoundError(
+            f"MMPD indices JSON missing after write: {indices_json} "
+            f"(pack_splits={list(pack_splits)}, n_indices={len(indices)}). "
+            "Refuse launching the helper with a broken --indices-json path."
+        )
 
     if not out_npz.exists() or args.force_mmpd_eval:
         stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
@@ -1888,20 +2002,22 @@ def run_mmpd_eval(
         hp = resolved_mmpd_hparams(
             mmpd_hparams_root(args), dataset, fallback=mmpd_run_fallback_hparams(args)
         )
+        root_path = str(Path(args.mmpd_data_dir).resolve())
+        output_root = str((mmpd_output_root(args) / "mmpd_out").resolve())
         cmd = [
             pipeline_python(),
             "-u",
-            str(helper),
+            str(Path(helper).resolve()),
             "--dataset",
             mmpd_data,
             "--root-path",
-            str(args.mmpd_data_dir),
+            root_path,
             "--data-path",
             mmpd_staged_filename_for_run(run),
             "--data-split",
             mmpd_data_split(run, args.mmpd_data_dir),
             "--output-root",
-            str(mmpd_output_root(args) / "mmpd_out"),
+            output_root,
             "--out-npz",
             str(out_npz),
             "--indices-json",
@@ -1951,14 +2067,16 @@ def run_mmpd_eval(
             f"[mmpd-eval] {dataset}: launching helper "
             f"(windows={len(indices)}, batch={batch_size}, variates={data_dim}, "
             f"pack_splits={pack_splits}, "
-            f"eval_test_stride={eval_test_stride(args, run)})",
+            f"eval_test_stride={eval_test_stride(args, run)}, "
+            f"window_stride={mmpd_pack_window_stride(args, run, pack_splits)}, "
+            f"indices_json={indices_json})",
             flush=True,
         )
         run_cmd(
             cmd,
-            cwd=args.mmpd_repo,
+            cwd=Path(args.mmpd_repo).resolve(),
             env=env,
-            log_path=args.output_dir / "logs" / f"mmpd_eval_{dataset}.log",
+            log_path=out_dir / "logs" / f"mmpd_eval_{dataset}.log",
         )
         print(f"[mmpd-eval] {dataset}: helper finished -> {out_npz}", flush=True)
 

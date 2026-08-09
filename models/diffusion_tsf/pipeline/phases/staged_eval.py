@@ -646,8 +646,11 @@ class StagedEvalPhase(PipelinePhase):
         topk_max = int(self.require("topk_max"))
         subset_id = state.subset_id or state.dataset
         variate_indices = state.variate_indices
-        if variate_indices is None:
-            variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+        if not variate_indices:
+            raise ValueError(
+                f"[{self.name}] Missing resolved variate_indices in state for dataset {state.dataset!r}. "
+                "Data subset policy must be resolved before running phase."
+            )
         subset_meta = state.data_subset_resolved or {}
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
         phase_test_stride = int(self.require("test_stride"))
@@ -1122,6 +1125,89 @@ class StagedEvalPhase(PipelinePhase):
                 )
             except Exception as e:
                 logger.warning("Binary pack anchor+prob viz failed: %s", e, exc_info=True)
+
+            # Patch-box / 1d / 2d staged sample panels (off by default; smoke n=1).
+            # Reuses already-loaded coarse/fine models + test pool — no ladder rebuild.
+            if bool(viz_cfg.get("viz_patch_boxes", False)) and not joint_dual:
+                try:
+                    from utils.staged_eval_sample_viz import (
+                        pick_indices,
+                        write_staged_sample_panels,
+                    )
+
+                    kind = "patch_refine" if patch_refine else "fine"
+                    n_box = int(viz_cfg.get("viz_patch_boxes_n_samples", 1) or 1)
+                    if state.smoke_test:
+                        n_box = min(n_box, 1)
+                    picks = pick_indices(len(full_test_ds), n_box, int(state.seed), None)
+                    box_dir = Path(state.results_dir) / "viz" / "staged_eval_samples" / subset_id
+                    box_paths = write_staged_sample_panels(
+                        out_dir=box_dir,
+                        run_name=str(subset_id),
+                        dataset=str(state.dataset),
+                        kind=kind,
+                        coarse_model=coarse_model,
+                        fine_model=fine_model,
+                        pool=full_test_ds,
+                        picks=picks,
+                        device=device,
+                        sampler=str(selected_sampler),
+                        num_sampling_steps=int(selected_steps),
+                        seed=int(state.seed),
+                        variables_to_plot=int(viz_cfg.get("n_dual_scale_vars", 0) or 0),
+                        jpeg_dpi=int(viz_cfg.get("jpeg_dpi", 100) or 100),
+                    )
+                    wandb_utils.log_visualization_paths(
+                        [str(p) for p in box_paths],
+                        wandb_key="eval/staged_eval_sample_panels",
+                    )
+                    logger.info(
+                        "[%s] viz_patch_boxes wrote %d panels under %s",
+                        subset_id, len(box_paths), box_dir,
+                    )
+                except Exception as e:
+                    logger.warning("Staged patch-box sample viz failed: %s", e, exc_info=True)
+
+        # Point-acc gap/redbox: default ON; runs even when skip_eval_visualizations
+        # (earlyjuly leaves). Gated only by viz_binary_mmpd_{gap,redbox} + campaign path.
+        if bool(viz_cfg.get("viz_binary_mmpd_gap", True)) or bool(
+            viz_cfg.get("viz_binary_mmpd_redbox", True)
+        ):
+            try:
+                from utils.staged_point_gap_redbox_viz import (
+                    run_binary_mmpd_gap_and_redbox_viz,
+                )
+
+                merged = state.merged_config or {}
+                cfg_path = merged.get("_yaml_path") or state.extra.get("config_path")
+                gap_paths = run_binary_mmpd_gap_and_redbox_viz(
+                    state=state,
+                    pack=pack,
+                    coarse_model=coarse_model,
+                    fine_model=fine_model,
+                    device=device,
+                    viz_cfg=viz_cfg,
+                    patch_refine=patch_refine,
+                    joint_dual=joint_dual,
+                    pack_test_stride=int(test_stride),
+                    binary_config_path=str(cfg_path) if cfg_path else None,
+                )
+                wandb_utils.log_visualization_paths(
+                    gap_paths.get("gap", []),
+                    wandb_key="eval/point_gap_binary_mmpd",
+                )
+                wandb_utils.log_visualization_paths(
+                    gap_paths.get("redbox", []),
+                    wandb_key="eval/point_gap_redbox",
+                )
+            except Exception as e:
+                # Fail-fast when campaign is configured but broken; soft-skip only
+                # when the util itself logged an unset-campaign skip (no raise).
+                if isinstance(e, FileNotFoundError):
+                    raise
+                logger.warning(
+                    "Point-gap/redbox viz failed: %s", e, exc_info=True,
+                )
 
         logger.info(
             "[%s] staged eval done: sampler=%s steps=%d "

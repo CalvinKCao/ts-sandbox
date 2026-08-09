@@ -1,0 +1,21 @@
+# Window-norm patch_refine (early-July HPs) with coarser absolute ladder:
+# canvas 128 (= 8 fine bins per coarse H=16), patch 64x6, stride 5 (overlap 1).
+# DiT patch [8,6] so W=6 divides dit_patch_size[1] (parent [8,8] would fail).
+extends: configs/binary_window_norm_patch_refine_earlyjuly_norm.yaml
+
+wandb:
+  tags: [ablation, window_norm, patch_refine, canvas128, p64x6, early_july_norm]
+
+visualization:
+  # Matched-binary MMPD campaign for ETTh1 canvas128 point-gap / redbox.
+  mmpd_campaign_root: results/datasets/07-29-0151-h96-ordinal-binary-nonordinal-mmpd-mmpd
+
+experiment:
+  name: binary-window-norm-patch-refine-canvas128-p64x6
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6
+  patch_refine_canvas_height: 128
+  patch_refine_patch_height: 64
+  patch_refine_patch_width: 6
+  patch_refine_col_stride: 5
+  dit_patch_size: [8, 6]
+  dit_cond_patch_size: [8, 6]

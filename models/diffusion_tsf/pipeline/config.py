@@ -42,6 +42,13 @@ REQUIRED_EXPERIMENT_KEYS = (
     "window_norm_std_floor",
     "window_norm_center",
     "dit_patch_size",
+    "dit_cond_patch_size",
+    "patch_refine_canvas_height",
+    "patch_refine_patch_height",
+    "patch_refine_patch_width",
+    "patch_refine_col_stride",
+    "patch_refine_unique_segments",
+    "patch_refine_prev_cond_dropout",
     "dit_embed_dim",
     "dit_depth",
     "dit_num_heads",
@@ -147,7 +154,17 @@ CLI_EXPERIMENT_KEYS = frozenset({
     "n_variates",
     "variate_indices",
     "seed",
+    "seeds",
     "subset_id",
+    "ckpt_config",
+    "walltime",
+    "existing_ckpt_roots",
+    "mmpd_root",
+    "ordinal_disc_evaluator",
+    "ordinal_binary_config",
+    "disc_run",
+    "raw_run",
+    "slice_lengths",
 })
 
 CLI_STATE_KEYS = frozenset({
@@ -158,7 +175,6 @@ CLI_STATE_KEYS = frozenset({
     "smoke_test",
     "resume",
     "fresh",
-    "parallel_optuna_workers",
 })
 
 # Maps YAML training keys -> train_multivariate_pipeline module attribute names.

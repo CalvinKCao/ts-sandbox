@@ -339,8 +339,14 @@ PATCH_REFINE_CANVAS_HEIGHT = 256
 PATCH_REFINE_PATCH_HEIGHT = 32
 PATCH_REFINE_PATCH_WIDTH = 8
 PATCH_REFINE_COL_STRIDE = 6
+PATCH_REFINE_UNIQUE_SEGMENTS = False
+PATCH_REFINE_PREV_COND_DROPOUT = 0.5
 USE_WINDOW_NORMALIZATION = True
 WINDOW_NORM_CENTER = "mean"
+HYBRID_FLAT_DATASET_NORM = False
+HYBRID_FLAT_FRAC_THRESHOLD = 0.5
+HYBRID_FLAT_OOB_COVERAGE = 0.99
+HYBRID_SKIP_WINDOW_NORM_MASK: Optional[List[bool]] = None
 ZERO_GUIDANCE_FORECAST = False
 WINDOW_STRIDE = 1
 EVAL_NUM_SAMPLES = 30
@@ -1052,30 +1058,19 @@ def get_dataset_shape(dataset_name: str) -> Tuple[int, int]:
 
 
 def resolve_pipeline_data_subset(state) -> Dict[str, Any]:
-    """Resolve state.data_subset and write concrete variates/strides to state."""
-    base_indices = state.variate_indices
-    if base_indices is None:
-        base_indices = generate_dataset_job(state.dataset)["variate_indices"]
+    """Resolve state.data_subset_by_dataset and write concrete variates/strides to state."""
     raw_rows, raw_variates = get_dataset_shape(state.dataset)
-    policy = dict(state.data_subset or {})
-    target_dataset = policy.get("target_dataset")
-    target_rows = target_variates = None
-    if target_dataset:
-        try:
-            target_rows, target_variates = get_dataset_shape(str(target_dataset))
-        except Exception as exc:
-            raise ValueError(f"Could not resolve data_subset target_dataset={target_dataset!r}: {exc}") from exc
+    base_indices = list(range(raw_variates))
+    policy = {"data_subset_by_dataset": getattr(state, "data_subset_by_dataset", {})}
     resolved = resolve_data_subset(
         dataset_name=state.dataset,
         raw_rows=raw_rows,
         raw_variates=raw_variates,
-        base_variate_indices=list(base_indices),
+        base_variate_indices=base_indices,
         default_subset_id=state.subset_id,
         default_window_stride=state.window_stride,
         seed=state.seed,
         policy=policy,
-        target_rows=target_rows,
-        target_variates=target_variates,
     )
     state.variate_indices = list(resolved["variate_indices"])
     state.n_variates = int(resolved["n_variates"])
@@ -1083,9 +1078,9 @@ def resolve_pipeline_data_subset(state) -> Dict[str, Any]:
     state.data_subset_resolved = resolved
     print(
         f"[data_subset] {state.dataset}: subset_id={resolved['subset_id']} "
-        f"n_variates={resolved['n_variates']} sample_stride={resolved['sample_stride']} "
-        f"raw_mb={resolved['raw_size_mb']:.3f} reduced_mb={resolved['reduced_size_mb']:.3f} "
-        f"target_mb={resolved.get('target_size_mb')} reason={resolved.get('reason')}"
+        f"n_variates={resolved['n_variates']} train_stride={resolved['train_stride']} "
+        f"val_stride={resolved['val_stride']} test_stride={resolved['test_stride']} "
+        f"reason={resolved.get('reason')}"
     )
     return resolved
 
@@ -1420,6 +1415,12 @@ def create_diffusion_model(
         window_norm_low_var_threshold=WINDOW_NORM_LOW_VAR_THRESHOLD,
         window_norm_low_var_unit_std=WINDOW_NORM_LOW_VAR_UNIT_STD,
         window_norm_low_var_unit_std_per_variate=WINDOW_NORM_LOW_VAR_UNIT_STD_PER_VARIATE,
+        skip_window_norm_variate_mask=list(HYBRID_SKIP_WINDOW_NORM_MASK)
+        if HYBRID_SKIP_WINDOW_NORM_MASK is not None
+        else None,
+        hybrid_flat_dataset_norm=bool(HYBRID_FLAT_DATASET_NORM),
+        hybrid_flat_frac_threshold=float(HYBRID_FLAT_FRAC_THRESHOLD),
+        hybrid_flat_oob_coverage=float(HYBRID_FLAT_OOB_COVERAGE),
         lookback_overlap_center_shift=LOOKBACK_OVERLAP_CENTER_SHIFT,
         zero_guidance_forecast=ZERO_GUIDANCE_FORECAST,
         itrans_d_model=ITRANS_D_MODEL,
@@ -1432,11 +1433,21 @@ def create_diffusion_model(
 
 
 # ============================================================================
-# Dataset Classes
+# Dataset Classes & Data Splitting Protocol
 # ============================================================================
 
 class TimeSeriesDataset(Dataset):
-    """Dataset for multivariate time series forecasting."""
+    """Dataset for multivariate time series forecasting.
+    
+    Generates sliding window samples of (past_lookback, future_horizon) from
+    a continuous time-series 2D array of shape (time_steps, num_variates).
+    
+    Window Indexing:
+    - start = idx * stride
+    - past: time slice [start : start + lookback]
+    - future: time slice [start + lookback - lookback_overlap : start + lookback + horizon]
+      (includes lookback_overlap past steps to ensure smooth predictions at the boundary)
+    """
 
     def __init__(
         self,
@@ -1458,6 +1469,7 @@ class TimeSeriesDataset(Dataset):
         self.stride = stride
         self.lookback_overlap = lookback_overlap
         total_len = lookback + horizon
+        # Number of valid sliding windows fitting in data length given the stride
         self.n_samples = max(0, (len(data) - total_len) // stride + 1)
 
     def __len__(self):
@@ -1466,7 +1478,9 @@ class TimeSeriesDataset(Dataset):
     def __getitem__(self, idx):
         start = idx * self.stride
         source = self.rank_data if self.rank_data is not None else self.data
+        # past lookback window: shape (num_variates, lookback)
         past = source[start:start + self.lookback].T
+        # target future horizon window (with overlap): shape (num_variates, lookback_overlap + horizon)
         target_start = start + self.lookback - self.lookback_overlap
         target_end = start + self.lookback + self.horizon
         future = source[target_start:target_end].T
@@ -1474,31 +1488,42 @@ class TimeSeriesDataset(Dataset):
 
 
 def _paper_split_borders(dataset_name: str, n: int, seq_len: int) -> Tuple[List[int], List[int]]:
-    """Return (border1s, border2s) following the iTransformer / TimesNet protocol.
+    """Return (border1s, border2s) start/end index boundaries for train/val/test splits.
 
-    Each split's window-construction array runs from ``border1s[i]`` to
-    ``border2s[i]``. ``border1s[i] = boundary - seq_len`` for val/test so the
-    first val/test lookback reaches back into the previous split (no "dead
-    zone" of unevaluated steps right after the train boundary).
+    Following the standard benchmark protocol from iTransformer / TimesNet:
+    
+    1. Border Ratios / Fixed Months:
+       - ETTh1, ETTh2: Fixed 12-month train, 4-month val, 4-month test (24h resolution).
+       - ETTm1, ETTm2: Fixed 12-month train, 4-month val, 4-month test (15-min resolution).
+       - PeMS: Length-based ratio 60% train / 20% val / 20% test.
+       - All other datasets (weather, electricity, traffic, etc.): 70% train / 10% val / 20% test.
 
-    ETTh{1,2} and ETTm{1,2} use fixed month-based boundaries. Every other
-    dataset uses the 70/10/20 length-based convention with the same overlap
-    trick — this mirrors ``Dataset_Custom`` in the upstream iTransformer repo.
+    2. The Lookback Overlap Trick (b1 boundaries):
+       - border2s = [end_train, end_val, end_test]
+       - border1s = [0, end_train - seq_len, end_val - seq_len]
+       - val/test split slice starts `seq_len` steps BEFORE the split boundary so that the
+         very first validation/testing window has a full lookback history inside the dataset,
+         preventing any unevaluated "dead zone" at split boundaries.
     """
     if dataset_name in ('ETTh1', 'ETTh2'):
+        # 12 months, 4 months, 4 months at hourly resolution
         b2 = [12 * 30 * 24, 12 * 30 * 24 + 4 * 30 * 24, 12 * 30 * 24 + 8 * 30 * 24]
     elif dataset_name in ('ETTm1', 'ETTm2'):
+        # 12 months, 4 months, 4 months at 15-min resolution
         b2 = [12 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 8 * 30 * 24 * 4]
     elif dataset_name == 'PeMS':
+        # 60% train, 20% val, 20% test
         n_train = int(n * 0.6)
         n_val = int(n * 0.2)
         n_test = n - n_train - n_val
         b2 = [n_train, n_train + n_val, n_train + n_val + n_test]
     else:
+        # Standard benchmark ratio: 70% train, 10% val, 20% test
         n_train = int(n * 0.7)
         n_test = int(n * 0.2)
         n_val = n - n_train - n_test
         b2 = [n_train, n_train + n_val, n_train + n_val + n_test]
+    # Apply lookback overlap to start indices of val (b1[1]) and test (b1[2])
     b1 = [0, b2[0] - seq_len, b2[1] - seq_len]
     return b1, b2
 
@@ -1513,16 +1538,27 @@ def load_dataset(
     lookback_overlap: Optional[int] = None,
     ordinal_tie_atol: float = 1e-6,
     use_ordinal_window_norm: Optional[bool] = None,
+    hybrid_flat_dataset_norm: Optional[bool] = None,
+    hybrid_flat_frac_threshold: Optional[float] = None,
+    hybrid_flat_oob_coverage: Optional[float] = None,
+    max_scale: Optional[float] = None,
 ) -> Tuple[Dataset, Dataset, Dataset, Dict]:
-    """Load dataset and return train/val/test splits matching iTransformer paper.
+    """Load raw dataset and construct PyTorch Dataset objects for train, val, and test splits.
 
-    Splits follow the upstream iTransformer / TimesNet data loaders: fixed
-    month-based boundaries for ETT* and 70/10/20 length-based otherwise, with
-    the standard overlap trick (val/test windows can reach back into the
-    previous split by ``lookback`` steps). Train/val use ``stride``; test uses
-    ``test_stride`` (default: same as ``stride``). Finetune jobs pass
-    ``test_stride=1`` so eval keeps the dense paper protocol while train/val
-  can use a larger stride to cut redundant overlap.
+    Data Flow & Leak Prevention:
+    1. Load continuous raw array & filter requested variate columns.
+    2. Partition into train/val/test boundary ranges using `_paper_split_borders`.
+    3. Normalization: Compute mean and std strictly on the TRAINING SLICE (`data[:train_end]`),
+       then normalize the ENTIRE sequence using these training statistics to prevent data leakage.
+       When ``hybrid_flat_dataset_norm`` is on, flat variates (see
+       ``utils/hybrid_flat_dataset_norm``) use a coverage scale instead of empirical std
+       so >=oob_coverage of train lookbacks stay inside ``[-max_scale, max_scale]``.
+    4. Optional Ordinal Ladder: When ordinal window norm is enabled, build a global rank
+       ladder strictly from training data values (`build_global_ladder_from_training`).
+    5. Construct TimeSeriesDataset instances:
+       - train_ds: Uses `stride` (e.g., WINDOW_STRIDE)
+       - val_ds: Uses `stride`
+       - test_ds: Uses `test_stride` (allows dense eval test_stride=1 while train_stride is larger)
     """
     if stride is None:
         stride = WINDOW_STRIDE
@@ -1553,13 +1589,54 @@ def load_dataset(
     train_end = border2s[0]
 
     train_slice = data[:train_end]
-    mean = train_slice.mean(axis=0, keepdims=True)
-    std = train_slice.std(axis=0, keepdims=True) + 1e-8
-    data = (data - mean) / std
+    use_hybrid = (
+        HYBRID_FLAT_DATASET_NORM
+        if hybrid_flat_dataset_norm is None
+        else bool(hybrid_flat_dataset_norm)
+    )
+    use_ord = USE_ORDINAL_WINDOW_NORM if use_ordinal_window_norm is None else bool(use_ordinal_window_norm)
+    if use_hybrid and use_ord:
+        raise ValueError(
+            "hybrid_flat_dataset_norm is incompatible with use_ordinal_window_norm"
+        )
+    frac_thr = (
+        HYBRID_FLAT_FRAC_THRESHOLD
+        if hybrid_flat_frac_threshold is None
+        else float(hybrid_flat_frac_threshold)
+    )
+    oob_cov = (
+        HYBRID_FLAT_OOB_COVERAGE
+        if hybrid_flat_oob_coverage is None
+        else float(hybrid_flat_oob_coverage)
+    )
+    ms = float(MAX_SCALE if max_scale is None else max_scale)
+
+    global HYBRID_SKIP_WINDOW_NORM_MASK
+
+    if use_hybrid:
+        from utils.hybrid_flat_dataset_norm import build_hybrid_affine_scales
+
+        hybrid = build_hybrid_affine_scales(
+            train_slice,
+            lookback=int(lookback),
+            max_scale=ms,
+            frac_threshold=frac_thr,
+            oob_coverage=oob_cov,
+        )
+        mean = hybrid["mean"].astype(np.float32)
+        std = hybrid["std"].astype(np.float32)
+        data = (data - mean) / std
+        flat_mask = hybrid["flat_mask"]
+        HYBRID_SKIP_WINDOW_NORM_MASK = [bool(x) for x in flat_mask.tolist()]
+    else:
+        mean = train_slice.mean(axis=0, keepdims=True)
+        std = train_slice.std(axis=0, keepdims=True) + 1e-8
+        data = (data - mean) / std
+        hybrid = None
+        HYBRID_SKIP_WINDOW_NORM_MASK = None
 
     ordinal_ladder = None
     rank_full = None
-    use_ord = USE_ORDINAL_WINDOW_NORM if use_ordinal_window_norm is None else use_ordinal_window_norm
     if use_ord:
         ordinal_ladder = build_global_ladder_from_training(
             data[border1s[0]:border2s[0]],
@@ -1588,6 +1665,16 @@ def load_dataset(
     stats: Dict = {'mean': mean, 'std': std}
     if ordinal_ladder is not None:
         stats['ordinal_ladder'] = ordinal_ladder
+    if hybrid is not None:
+        stats['flat_variate_mask'] = hybrid['flat_mask']
+        stats['flat_variate_frac'] = hybrid['flat_frac']
+        stats['emp_std'] = hybrid['emp_std'].astype(np.float32)
+        stats['hybrid_flat_details'] = hybrid['flat_details']
+        stats['hybrid_flat_dataset_norm'] = True
+        stats['hybrid_flat_frac_threshold'] = frac_thr
+        stats['hybrid_flat_oob_coverage'] = oob_cov
+        stats['hybrid_flat_max_scale'] = ms
+        stats['hybrid_flat_lookback'] = int(lookback)
     return train_ds, val_ds, test_ds, stats
 
 
