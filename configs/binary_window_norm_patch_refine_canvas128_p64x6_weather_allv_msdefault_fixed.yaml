@@ -1,0 +1,77 @@
+# Full-variates fixed-control canvas128 run. Every selected split stays below
+# 250 MiB; test uses dense stride 16 and only the deterministic anchor path.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
+
+wandb:
+  tags: [control, fixed_hp, default_max_scale, weather, all_variates, canvas128, p64x6, full_attention, anchor_only_eval_s16]
+
+experiment:
+  dataset: weather
+  name: binary-window-norm-patch-refine-c128-weather_allv-msdefault-fixed
+  experiment_name: binary_window_norm_patch_refine_c128_weather_allv_msdefault_fixed
+  patch_refine_finetune_window_fraction: 0.5
+  data_subset_by_dataset:
+    weather:
+      subset_id: weather_allv_s8
+      variate_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+      n_variates: 21
+      train_stride: 8
+      val_stride: 8
+      test_stride: 16
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    n_samples: 10000
+    epochs: 20
+    patience: 4
+    shared_cache: true
+    reuse_pretrain_from_config: binary_window_norm_patch_refine_canvas128_p64x6
+    require_reuse_pretrain: true
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 1
+    search_space: fixed
+    fixed_tuned_params:
+      learning_rate: 0.00016260630766856958
+      target_univariate_batch: 336
+      ema_decay: 0.99
+      binary_noise_schedule: linear
+      loss_weighting: none
+      min_snr_gamma: 5.0
+      prediction_target: epsilon
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+      max_scale: 9.3
+
+  - phase: diffusion_patch_refine_finetune_hp
+    n_trials: 1
+    search_space: fixed
+    fixed_tuned_params:
+      learning_rate: 0.0007817554354066733
+      target_univariate_batch: 256
+      ema_decay: 0.995
+      binary_noise_schedule: linear
+      loss_weighting: none
+      min_snr_gamma: 2.0
+      prediction_target: epsilon
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+      max_scale: 9.3
+
+  - phase: staged_eval
+    anchor_only: true
+    eval_test_fraction: 1.0
+    test_stride: 16
+    n_samples: 1
+    probabilistic_n_samples: 0
+    tune_sampler: false
+    probabilistic_sampler: anchor
+    probabilistic_num_inference_steps: 1
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true
+    probe_eval_batch_size: true
