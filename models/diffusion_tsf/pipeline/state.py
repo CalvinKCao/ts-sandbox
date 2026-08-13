@@ -39,8 +39,10 @@ class PipelineState:
     use_ordinal_window_norm: bool = False
     ordinal_ood_shift_causal_only: bool = False
     ordinal_tie_atol: float = 1e-6
+    # Derived from the training split when ordinal normalization is enabled.
+    ordinal_ladder: Optional[Any] = None
     model_type: str = "dit"
-    image_height: int = 32
+    image_height: int = 16
     coarse_image_height: int = 16
     fine_image_height: int = 16
     finer_image_height: int = 16
@@ -57,7 +59,7 @@ class PipelineState:
     use_vertical_dual_concat: bool = False
     use_channel_dual_concat: bool = False
     use_patch_refine_stage: bool = False
-    diffusion_stage: str = "joint"
+    diffusion_stage: str = "coarse"
     patch_refine_canvas_height: int = 256
     patch_refine_patch_height: int = 32
     patch_refine_patch_width: int = 8
@@ -102,6 +104,9 @@ class PipelineState:
     hybrid_flat_dataset_norm: bool = False
     hybrid_flat_frac_threshold: float = 0.5
     hybrid_flat_oob_coverage: float = 0.99
+    # Derived with the dataset-affine hybrid normalization and copied into
+    # DiffusionTSFConfig when a model is built.
+    skip_window_norm_variate_mask: Optional[List[bool]] = None
     lookback_overlap_center_shift: bool = False
     zero_guidance_forecast: bool = False
     use_raw_lookback_cond_channel: bool = False
@@ -123,7 +128,7 @@ class PipelineState:
     binary_length_mode: str = "none"
     binary_length_g: float = 1.0
     binary_length_scale: float = 1.0
-    # Optional per-dataset override applied when dataset is known (see patch_globals).
+    # Optional per-dataset override applied when constructing a model.
     binary_length_g_by_dataset: Dict[str, float] = field(default_factory=dict)
     prediction_target: str = "epsilon"
     loss_weighting: str = "none"
@@ -141,6 +146,40 @@ class PipelineState:
     n_diffusion_hp_trials: int = 10
     n_finetune_hp_trials: int = 10
 
+    # -- Training knobs --
+    pretrain_epochs: int = 10
+    pretrain_diffusion_epochs: int = 20
+    pretrain_diffusion_max_epochs: int = 20
+    pretrain_synthetic_override: Optional[int] = None
+    synthetic_samples_full_cap: int = 50_000
+    synthetic_samples_hp_tune: int = 20_000
+    synthetic_samples_diff_tune: int = 10_000
+    synthetic_samples_min: int = 4_096
+    itrans_hp_pretrain_max_epochs: int = 10
+    itrans_hp_finetune_max_epochs: int = 10
+    patch_guidance_hp_finetune_max_epochs: int = 10
+    diffusion_hp_patience: int = 4
+    hp_tune_epochs: int = 20
+    hp_tune_patience: int = 15
+    itrans_real_cold_start: bool = True
+    itrans_paper_batch_size: int = 32
+    itrans_paper_lr_grid: List[float] = field(
+        default_factory=lambda: [1e-3, 5e-4, 1e-4]
+    )
+    itrans_paper_dropout: float = 0.1
+    diffusion_batch_size: int = 32
+    diffusion_batch_sizes: List[int] = field(default_factory=lambda: [16])
+    finetune_batch_sizes: List[int] = field(default_factory=lambda: [4, 8, 16])
+    finetune_max_micro_batch: Optional[int] = None
+    finetune_hp_lr_min: float = 3e-6
+    finetune_hp_lr_max: float = 2e-4
+    use_amp: bool = True
+    use_gradient_checkpointing: bool = True
+    unet_max_chunk_size: int = 128
+    eval_num_samples: int = 30
+    past_loss_weight: float = 0.3
+    train_window_aug: Dict[str, Any] = field(default_factory=dict)
+
     # -- Paths --
     checkpoint_dir: str = "./results/ckpts"
     results_dir: str = "./results/datasets"
@@ -153,6 +192,9 @@ class PipelineState:
     data_subset: Dict[str, Any] = field(default_factory=dict)
     data_subset_by_dataset: Dict[str, Any] = field(default_factory=dict)
     data_subset_resolved: Dict[str, Any] = field(default_factory=dict)
+    dataset_shape_cache: Dict[Tuple[str, str], Tuple[int, int]] = field(
+        default_factory=dict
+    )
 
     # -- Device --
     device: Optional[torch.device] = None

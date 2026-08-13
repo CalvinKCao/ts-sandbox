@@ -97,7 +97,6 @@ experiment:
   image_height: 16
   coarse_image_height: 16
   fine_image_height: 16
-  finer_image_height: 16
   staged_representation: value_precision
   max_scale: 3.5
   max_scale_by_dataset:
@@ -129,9 +128,8 @@ experiment:
   dit_num_heads: 6
   dit_mlp_ratio: 4.0
   dit_dropout: 0.0
-  use_triple_scale: false
   use_patch_refine_stage: true
-  diffusion_stage: joint
+  diffusion_stage: coarse
   use_guidance_channel: false
   guidance_placement: canvas
   cfg_dropout: 0.0

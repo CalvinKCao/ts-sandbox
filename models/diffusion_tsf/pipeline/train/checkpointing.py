@@ -26,10 +26,8 @@ class EarlyStopping:
         return self.should_stop
 
 
-def amp_context():
-    from models.diffusion_tsf import train_multivariate_pipeline as m
-
-    if m.USE_AMP and torch.cuda.is_available():
+def amp_context(use_amp: bool):
+    if use_amp and torch.cuda.is_available():
         return torch.amp.autocast("cuda", dtype=torch.bfloat16)
     from contextlib import nullcontext
 

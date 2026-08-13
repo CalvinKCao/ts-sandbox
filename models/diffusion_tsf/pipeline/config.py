@@ -36,7 +36,6 @@ REQUIRED_EXPERIMENT_KEYS = (
     "image_height",
     "coarse_image_height",
     "fine_image_height",
-    "finer_image_height",
     "max_scale",
     "max_scale_by_dataset",
     "window_norm_std_floor",
@@ -54,7 +53,6 @@ REQUIRED_EXPERIMENT_KEYS = (
     "dit_num_heads",
     "dit_mlp_ratio",
     "dit_dropout",
-    "use_triple_scale",
     "diffusion_stage",
     "use_guidance_channel",
     "cfg_dropout",
@@ -177,54 +175,9 @@ CLI_STATE_KEYS = frozenset({
     "fresh",
 })
 
-# Maps YAML training keys -> train_multivariate_pipeline module attribute names.
-_TRAINING_GLOBAL_MAP: Dict[str, str] = {
-    "pretrain_epochs": "PRETRAIN_EPOCHS",
-    "pretrain_diffusion_epochs": "PRETRAIN_DIFFUSION_EPOCHS",
-    "pretrain_diffusion_max_epochs": "PRETRAIN_DIFFUSION_MAX_EPOCHS",
-    "pretrain_synthetic_override": "PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE",
-    "synthetic_samples_full_cap": "SYNTHETIC_SAMPLES_CAP",
-    "synthetic_samples_hp_tune": "SYNTHETIC_SAMPLES_HP_TUNE",
-    "synthetic_samples_diff_tune": "SYNTHETIC_SAMPLES_DIFF_TUNE",
-    "synthetic_samples_min": "SYNTHETIC_SAMPLES_MIN",
-    "n_itrans_hp_trials": "N_ITRANS_HP_TRIALS",
-    "n_diffusion_hp_trials": "N_DIFFUSION_HP_TRIALS",
-    "n_finetune_hp_trials": "N_FINETUNE_HP_TRIALS",
-    "itrans_hp_pretrain_max_epochs": "ITRANS_HP_PRETRAIN_MAX_EPOCHS",
-    "itrans_hp_finetune_max_epochs": "ITRANS_HP_FINETUNE_MAX_EPOCHS",
-    "diffusion_hp_patience": "DIFFUSION_HP_PATIENCE",
-    "hp_tune_epochs": "HP_TUNE_EPOCHS",
-    "hp_tune_patience": "HP_TUNE_PATIENCE",
-    "itrans_real_cold_start": "ITRANS_REAL_COLD_START",
-    "itrans_paper_batch_size": "ITRANS_PAPER_BATCH_SIZE",
-    "itrans_paper_lr_grid": "ITRANS_PAPER_LR_GRID",
-    "itrans_paper_dropout": "ITRANS_PAPER_DROPOUT",
-    "diffusion_batch_size": "DIFFUSION_BATCH_SIZE",
-    "diffusion_batch_sizes": "DIFFUSION_BATCH_SIZES",
-    "finetune_batch_sizes": "FINETUNE_BATCH_SIZES",
-    "finetune_hp_lr_min": "FINETUNE_HP_LR_MIN",
-    "finetune_hp_lr_max": "FINETUNE_HP_LR_MAX",
-    "use_amp": "USE_AMP",
-    "use_gradient_checkpointing": "USE_GRADIENT_CHECKPOINTING",
-    "unet_max_chunk_size": "UNET_MAX_CHUNK_SIZE",
-    "eval_num_samples": "EVAL_NUM_SAMPLES",
-    "past_loss_weight": "PAST_LOSS_WEIGHT",
-    "lr_scheduler_type": "LR_SCHEDULER_TYPE",
-    "lr_warmup_epochs": "LR_WARMUP_EPOCHS",
-    "max_scale_tuning": "MAX_SCALE_TUNING",
-    "max_scale_tuning_range": "MAX_SCALE_TUNING_RANGE",
-}
-
-# training.* keys mirrored onto PipelineState (YAML is source of truth).
-TRAINING_STATE_KEYS = (
-    "n_itrans_hp_trials",
-    "n_diffusion_hp_trials",
-    "n_finetune_hp_trials",
-    "lr_scheduler_type",
-    "lr_warmup_epochs",
-    "max_scale_tuning",
-    "max_scale_tuning_range",
-)
+# Every training value is held by PipelineState.  Keeping this list explicit
+# makes YAML validation and state construction use the same contract.
+TRAINING_STATE_KEYS = REQUIRED_TRAINING_KEYS
 
 TRAINING_EXTRA_KEYS = (
     "use_hardcoded_synthetic_hp",
@@ -335,24 +288,13 @@ def normalize_guidance_phases(
     *,
     experiment: Optional[Dict[str, Any]] = None,
 ) -> list:
-    """Normalize merged phase lists for guidance / dual / patch-refine variants."""
+    """Normalize merged phase lists for the live guidance and patch-refine path."""
     by_name: Dict[str, Dict[str, Any]] = {}
     for entry in phases:
         name = str(entry["phase"])
         if guidance_type == "patch_decoder" and name == "itrans_finetune_hp":
             continue
         by_name[name] = dict(entry)
-    obsolete = (
-        "diffusion_fine_finetune_hp",
-        "diffusion_finer_finetune_hp",
-        "diffusion_vertical_dual_finetune_hp",
-        "diffusion_channel_dual_finetune_hp",
-    )
-    for name in obsolete:
-        if name in by_name:
-            raise ValueError(
-                f"obsolete phase {name!r}; live binary path is coarse + patch_refine only"
-            )
     exp = experiment or {}
     # Match DiffusionTSFConfig / PipelineState defaults (use_guidance_channel=True).
     needs_guidance = bool(exp.get("use_guidance_channel", True)) or not bool(
@@ -536,17 +478,6 @@ def apply_cli_state_overrides(state: Any, cfg: Dict[str, Any]) -> None:
         if key not in known_fields:
             raise ValueError(f"unsupported CLI state override: {key!r}")
         setattr(state, key, value)
-
-
-def apply_training_config_to_module(mod: Any, cfg: Optional[Dict[str, Any]], state: Any = None) -> None:
-    """Push training section from merged YAML onto pipeline module globals."""
-    training = (cfg or {}).get("training")
-    if not isinstance(training, dict):
-        raise ValueError("merged config missing training section")
-    for yaml_key, attr in _TRAINING_GLOBAL_MAP.items():
-        if yaml_key not in training:
-            raise KeyError(f"training.{yaml_key} required")
-        setattr(mod, attr, training[yaml_key])
 
 
 def build_wandb_config(

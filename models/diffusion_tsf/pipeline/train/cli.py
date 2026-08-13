@@ -74,17 +74,7 @@ def main():
 
     configure_diagnostic_logging(bool(logging_settings(cfg).get("diagnostics_enabled", True)))
 
-    if args.checkpoint_dir:
-        pipeline_mod.CHECKPOINT_DIR = args.checkpoint_dir
-    if args.results_dir:
-        pipeline_mod.RESULTS_DIR = args.results_dir
-    if args.synth_cache_dir:
-        pipeline_mod.SYNTH_CACHE_DIR = args.synth_cache_dir
-    if args.datasets_dir:
-        pipeline_mod.DATASETS_DIR = os.path.abspath(args.datasets_dir)
-
     subset_meta = pipeline_mod.resolve_pipeline_data_subset(state)
-    pipeline_mod.N_VARIATES = state.n_variates
     logger.info(
         "Data subset resolved from YAML: %s -> %s vars, train_stride=%s, val_stride=%s, test_stride=%s",
         state.subset_id,

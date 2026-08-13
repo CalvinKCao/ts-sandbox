@@ -707,10 +707,7 @@ def run_dual_concat_synthetic_pretrain_visualizations(
     """
     from models.diffusion_tsf.realts import get_synthetic_dataloader
     from models.diffusion_tsf.train_multivariate_pipeline import get_synth_cache_dir
-    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
-    from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
-        _synthetic_pretrain_globals,
-    )
+    from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import stage_state
 
     viz = _viz_cfg(state)
     if not viz.get("enabled", True):
@@ -730,16 +727,15 @@ def run_dual_concat_synthetic_pretrain_visualizations(
         logger.warning("dual pretrain viz skipped: neither channel nor vertical dual enabled")
         return []
 
-    with _synthetic_pretrain_globals(pipeline_mod, state, stage):
-        return _run_dual_concat_synthetic_pretrain_visualizations_inner(
-            state,
-            dual_ckpt_path=dual_ckpt_path,
-            guidance_ckpt_path=guidance_ckpt_path,
-            tuned_params=tuned_params,
-            tag=tag,
-            stage=stage,
-            viz=viz,
-        )
+    return _run_dual_concat_synthetic_pretrain_visualizations_inner(
+        stage_state(state, stage, honor_dataset_windows=False, for_synthetic_pretrain=True),
+        dual_ckpt_path=dual_ckpt_path,
+        guidance_ckpt_path=guidance_ckpt_path,
+        tuned_params=tuned_params,
+        tag=tag,
+        stage=stage,
+        viz=viz,
+    )
 
 
 def _trim_map_time(maps: Tuple[np.ndarray, ...], w: int) -> Tuple[np.ndarray, ...]:
@@ -1249,18 +1245,18 @@ def _build_staged_encoding_model(
         create_diffusion_model,
         load_itransformer_from_checkpoint,
     )
-    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
     from models.diffusion_tsf.guidance import iTransformerGuidance
-    from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch_stage_globals
+    from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import stage_state
 
-    patch_stage_globals(pipeline_mod, state, stage, honor_dataset_windows=False)
+    model_state = stage_state(state, stage, honor_dataset_windows=False)
     device = state.resolve_device()
     n_vars = int(state.n_variates)
-    itrans = load_itransformer_from_checkpoint(itrans_ckpt_path, n_vars, device)
+    itrans = load_itransformer_from_checkpoint(model_state, itrans_ckpt_path, n_vars, device)
     guidance = iTransformerGuidance(itrans)
     model = create_diffusion_model(
+        model_state,
         guidance_model=guidance,
-        **anchor_kwargs_from_params(tuned_params),
+        **anchor_kwargs_from_params(model_state, tuned_params),
     ).to(device)
     model.eval()
     return model, itrans, device
@@ -1628,16 +1624,13 @@ def run_staged_synthetic_pretrain_diagnostics(
         get_synth_cache_dir,
         synthetic_epoch_capacity_pretrain_diffusion,
     )
-    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
-    from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 
     viz = _viz_cfg(state)
-    patch_globals(pipeline_mod, state, honor_dataset_windows=False)
 
     device = state.resolve_device()
     n_val = 0 if state.smoke_test else min(n_samples // 10, 5000)
-    epoch_cap = 1 if state.smoke_test else synthetic_epoch_capacity_pretrain_diffusion()
-    synth_cache = get_synth_cache_dir(checkpoint_dir=state.checkpoint_dir, smoke_test=state.smoke_test)
+    epoch_cap = 1 if state.smoke_test else synthetic_epoch_capacity_pretrain_diffusion(state)
+    synth_cache = get_synth_cache_dir(state, checkpoint_dir=state.checkpoint_dir, smoke_test=state.smoke_test)
     loader = get_synthetic_dataloader(
         batch_size=2,
         lookback_length=state.lookback_length,

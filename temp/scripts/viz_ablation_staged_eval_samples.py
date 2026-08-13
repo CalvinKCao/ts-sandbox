@@ -111,6 +111,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pack-splits", default="test")
     p.add_argument("--n-samples", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--draw-seed-step",
+        type=int,
+        default=0,
+        help="Additional seed offset per emitted sample; use with repeated pool indices.",
+    )
     p.add_argument("--pool-indices", type=int, nargs="+", default=None)
     p.add_argument(
         "--variables-to-plot",
@@ -234,7 +240,9 @@ def viz_run(
         past_t, future_t = pool[int(pool_i)]
         past = past_t.unsqueeze(0).to(device)
         future = future_t.unsqueeze(0).to(device)
-        torch.manual_seed(int(args.seed) + int(pool_i))
+        torch.manual_seed(
+            int(args.seed) + int(pool_i) + int(s_i) * int(args.draw_seed_step)
+        )
         result = generate_staged_forecast(
             coarse,
             refine,

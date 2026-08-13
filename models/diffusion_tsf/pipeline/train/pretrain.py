@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def pretrain_diffusion(
+    state,
     best_params: Dict,
     guidance_checkpoint: str,
     n_samples: int,
@@ -30,7 +31,6 @@ def pretrain_diffusion(
     smoke_test: bool = False,
 ) -> str:
     """Train one staged diffusion checkpoint on synthetic data (not post-HP retrain)."""
-    # Lazy: train_multivariate_pipeline re-exports this module at import time.
     from models.diffusion_tsf import train_multivariate_pipeline as m
 
     logger.info("=" * 60)
@@ -39,37 +39,37 @@ def pretrain_diffusion(
     logger.info("Params: %s", best_params)
     logger.info("=" * 60)
 
-    device = m.get_device()
+    device = m.get_device(state)
 
     lr = m.require_tuned_param(best_params, "learning_rate", "Diffusion pretraining")
     tuned_batch_size = m.require_tuned_param(best_params, "batch_size", "Diffusion pretraining")
     batch_size = tuned_batch_size
 
-    needs_guidance = bool(m.USE_GUIDANCE_CHANNEL) or not bool(m.DISABLE_CROSS_ATTENTION)
+    needs_guidance = state.needs_guidance
     guidance = None
     if needs_guidance:
         if not guidance_checkpoint:
             raise ValueError("guidance_checkpoint is required when guidance/cross-attn is enabled")
         guidance = m.load_wrapped_guidance(
-            guidance_checkpoint,
-            m.N_VARIATES,
+            state, guidance_checkpoint,
+            state.n_variates,
             device,
             guidance_type="patch_decoder",
         )
 
-    synth_cache = m.get_synth_cache_dir(checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
+    synth_cache = m.get_synth_cache_dir(state, checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
     n_val = 0 if smoke_test else min(n_samples // 10, 5000)
-    epoch_cap = 1 if smoke_test else m.synthetic_epoch_capacity_pretrain_diffusion()
+    epoch_cap = 1 if smoke_test else m.synthetic_epoch_capacity_pretrain_diffusion(state)
     synthetic_loader = get_synthetic_dataloader(
         batch_size=min(16, max(2, tuned_batch_size)),
-        lookback_length=m.LOOKBACK_LENGTH,
-        forecast_length=m.FORECAST_LENGTH,
-        num_variables=m.N_VARIATES,
+        lookback_length=state.lookback_length,
+        forecast_length=state.forecast_length,
+        num_variables=state.n_variates,
         num_samples=n_samples,
         num_workers=0 if smoke_test else 4,
-        lookback_overlap=m.LOOKBACK_OVERLAP,
+        lookback_overlap=state.lookback_overlap,
         cache_dir=synth_cache,
-        skip_cross_var_aug=(m.N_VARIATES > 32),
+        skip_cross_var_aug=(state.n_variates > 32),
         val_tail_n=n_val,
         synthetic_epoch_capacity=epoch_cap,
     )
@@ -78,7 +78,7 @@ def pretrain_diffusion(
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
     batch_size = tuned_batch_size or (
-        min(4, m.DIFFUSION_BATCH_SIZE) if smoke_test else m.DIFFUSION_BATCH_SIZE
+        min(4, state.diffusion_batch_size) if smoke_test else state.diffusion_batch_size
     )
     train_loader = DataLoader(
         train_subset,
@@ -88,7 +88,7 @@ def pretrain_diffusion(
     )
     val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    model_kwargs = m.anchor_kwargs_from_params(best_params)
+    model_kwargs = m.anchor_kwargs_from_params(state, best_params)
     for key in (
         "max_scale",
         "dit_dropout",
@@ -100,7 +100,7 @@ def pretrain_diffusion(
         if key in best_params:
             model_kwargs[key] = best_params[key]
     model = m.create_diffusion_model(
-        guidance_model=guidance,
+        state, guidance_model=guidance,
         **model_kwargs,
     ).to(device)
 
@@ -120,7 +120,9 @@ def pretrain_diffusion(
             train_loader,
             device,
             optimizer,
-            set_loader_mode=m._set_ordinal_loader_mode,
+            set_loader_mode=lambda model, loader, eval_mode=False: m._set_ordinal_loader_mode(
+                state, model, loader, eval_mode=eval_mode,
+            ),
             set_training_epoch=m.set_realts_training_epoch,
             epoch=epoch,
         )
@@ -128,7 +130,9 @@ def pretrain_diffusion(
             model,
             val_loader,
             device,
-            set_loader_mode=m._set_ordinal_loader_mode,
+            set_loader_mode=lambda model, loader, eval_mode=False: m._set_ordinal_loader_mode(
+                state, model, loader, eval_mode=eval_mode,
+            ),
         )
 
         scheduler.step()

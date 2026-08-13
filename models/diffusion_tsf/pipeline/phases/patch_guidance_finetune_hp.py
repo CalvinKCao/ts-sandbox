@@ -10,7 +10,6 @@ import torch
 
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     discover_dataset_run_ckpt_dir,
 )
@@ -115,11 +114,6 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             logger.warning("  [%s] viz skipped: missing patch guidance ckpt %s", self.name, ft_ckpt)
             return
 
-        import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
-
-        # Needed on skip/resume paths where execute() never ran this phase.
-        patch_globals(pipeline_mod, state)
-
         if not state.smoke_test:
             try:
                 from models.diffusion_tsf.pipeline.visualize_utils import (
@@ -156,7 +150,7 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             train_stride = int(subset_meta.get("train_stride", state.window_stride))
             test_stride = int(subset_meta.get("test_stride", 1))
             train_ds, _, _, _ = load_dataset(
-                state.dataset,
+                state, state.dataset,
                 variate_indices,
                 lookback=state.lookback_length,
                 horizon=state.forecast_length,
@@ -178,10 +172,6 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             run_patch_guidance_finetune_hp_tuning,
             generate_dataset_job,
         )
-        import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
-
-        patch_globals(pipeline_mod, state)
-
         subset_id = state.subset_id or state.dataset
         ft_ckpt = state.default_guidance_finetune_ckpt_path()
 
@@ -211,7 +201,7 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             n_trials = 1
 
         best_params, tune_ckpt_path = run_patch_guidance_finetune_hp_tuning(
-            dataset_name=state.dataset,
+            state, dataset_name=state.dataset,
             variate_indices=variate_indices,
             n_trials=n_trials,
             device=state.resolve_device(),

@@ -52,6 +52,26 @@ def _fail_stale_running_trials(study: optuna.Study, study_name: str) -> None:
             )
 
 
+def _enqueue_unique_trials(
+    study: optuna.Study,
+    trials: Optional[Sequence[dict[str, Any]]],
+) -> None:
+    """Queue configured control trials once, preserving resumable studies."""
+    if not trials:
+        return
+    if not all(isinstance(params, dict) and params for params in trials):
+        raise ValueError("enqueue_trials must be a sequence of non-empty parameter mappings")
+
+    existing = [dict(trial.params) for trial in study.get_trials(deepcopy=False)]
+    for params in trials:
+        candidate = dict(params)
+        if candidate in existing:
+            continue
+        study.enqueue_trial(candidate)
+        existing.append(candidate)
+        logger.info("Optuna %s: queued control trial %s", study.study_name, candidate)
+
+
 def _optimize_until_complete(
     study: optuna.Study,
     *,
@@ -111,6 +131,7 @@ def run_optuna_study(
     catch: Sequence[type[BaseException]] = (),
     sampler_seed: Optional[int] = None,
     parallel_workers: int = 1,
+    enqueue_trials: Optional[Sequence[dict[str, Any]]] = None,
 ) -> optuna.Study:
     """Run Optuna study sequentially on a single GPU worker.
 
@@ -136,6 +157,7 @@ def run_optuna_study(
         study_kwargs["pruner"] = pruner
     study = optuna.create_study(**study_kwargs)
     _fail_stale_running_trials(study, study_name)
+    _enqueue_unique_trials(study, enqueue_trials)
 
     remaining = remaining_complete_trials(study, n_trials)
     n_complete = n_trials - remaining

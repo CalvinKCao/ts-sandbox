@@ -42,10 +42,9 @@ class DiffusionTSFConfig:
     cross_variate_context_bias: float = 0.0
 
     # 2d mapping (hard binary CDF, no vertical blur)
-    image_height: int = 32
+    image_height: int = 16
     coarse_image_height: int = 16
     fine_image_height: int = 16
-    finer_image_height: int = 16
     patch_refine_canvas_height: int = 256
     patch_refine_patch_height: int = 32
     patch_refine_patch_width: int = 8
@@ -82,15 +81,7 @@ class DiffusionTSFConfig:
     # Distance-weighted BCE: W=1+α|r−k| (quadratic miss penalty in BCE space).
     binary_use_boundary_weighted_bce: bool = False
     binary_cdf_distance_alpha: float = 1.0
-    # Weight ordinal CDF rows by their span in global z-score space rather
-    # than treating equally spaced ordinal ranks as equally important.
-    binary_use_normalized_value_width_weighted_bce: bool = False
-    diffusion_stage: str = "joint"  # joint, coarse, fine, finer, vertical_dual, channel_dual
-    use_triple_scale: bool = False
-    # Soft-decode MSE mix inside deterministic anchor: λ*BCE + (1-λ)*MSE.
-    # MSE is unit-rank (or already O(1) window-norm) so it stays BCE-scale.
-    # Note: λ is the BCE weight (λ=1 → BCE-only), despite the "mse" name.
-    anchor_mse_proxy_lambda: float = 0.5
+    diffusion_stage: str = "coarse"  # coarse or patch_refine
 
     # classifier-free guidance (training dropout only; inference is always conditional)
     cfg_dropout: float = 0.1
@@ -193,18 +184,13 @@ class DiffusionTSFConfig:
                 "binary_anchor_input_mode must be 'stationary_flat' or 'random_bits', "
                 f"got {self.binary_anchor_input_mode!r}."
             )
-        valid_stages = {"joint", "coarse", "patch_refine"}
+        valid_stages = {"coarse", "patch_refine"}
         if self.diffusion_stage not in valid_stages:
             raise ValueError(
                 "diffusion_stage must be one of "
-                "{'joint', 'coarse', 'patch_refine'}, "
+                "{'coarse', 'patch_refine'}, "
                 f"got {self.diffusion_stage!r}. "
                 "fine/finer/vertical_dual/channel_dual paths were removed."
-            )
-        if self.use_triple_scale:
-            raise ValueError(
-                "use_triple_scale / finer residual path is obsolete; "
-                "live binary path is coarse + patch_refine"
             )
         if self.staged_representation != "value_precision":
             raise ValueError(
@@ -245,7 +231,6 @@ class DiffusionTSFConfig:
         assert 0 <= self.cutout_prob <= 1
         assert 0.0 <= self.deterministic_anchor_lambda <= 1.0
         assert 0.0 <= self.deterministic_anchor_alpha < 1.0
-        assert 0.0 <= self.anchor_mse_proxy_lambda <= 1.0
         assert self.window_norm_std_floor > 0
         assert self.window_norm_low_var_threshold >= 0.0
         assert self.window_norm_low_var_unit_std > 0.0
@@ -294,9 +279,7 @@ class DiffusionTSFConfig:
 
     @property
     def data_occupancy_channels(self) -> int:
-        """Noisy canvas occupancy channels (1 normally; 2 for channel_dual coarse∥fine)."""
-        if self.diffusion_stage == "channel_dual":
-            return 2
+        """Noisy canvas occupancy channels."""
         return 1
 
     @property
@@ -367,8 +350,6 @@ class DiffusionTSFConfig:
         n_chunks = int(self.guidance_cond_n_chunks)
         if n_chunks <= 0:
             return 0
-        if self.diffusion_stage == "channel_dual":
-            return n_chunks * 2
         return n_chunks
 
     @property
@@ -378,22 +359,9 @@ class DiffusionTSFConfig:
         guidance_extra = self.guidance_cond_channels
         if self.diffusion_stage == "patch_refine":
             return 1
-        # Stacked past coarse∥fine as one H=Hc+Hf channel; no horizon GT coarse.
-        if self.diffusion_stage == "vertical_dual":
-            return per_scale + raw_extra + guidance_extra
-        # Past coarse∥fine as C=2 at H; raw lookback also C=2 when enabled.
-        if self.diffusion_stage == "channel_dual":
-            raw_ch = 2 if self.use_raw_lookback_cond_channel else 0
-            return 2 * per_scale + raw_ch + guidance_extra
         if self.diffusion_stage == "coarse":
-            return per_scale * (3 if self.use_triple_scale else 2) + raw_extra + guidance_extra
-        if self.diffusion_stage == "fine":
-            return per_scale * (4 if self.use_triple_scale else 3) + raw_extra + guidance_extra
-        if self.diffusion_stage == "finer":
-            return per_scale * 5 + raw_extra + guidance_extra
-        if self.use_triple_scale:
-            return per_scale * 3 + raw_extra + guidance_extra
-        return per_scale + raw_extra + guidance_extra
+            return per_scale * 2 + raw_extra + guidance_extra
+        raise ValueError(f"unsupported diffusion_stage={self.diffusion_stage!r}")
 
     @property
     def guidance_channels(self) -> int:

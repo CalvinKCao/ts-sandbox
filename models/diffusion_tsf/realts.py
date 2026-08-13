@@ -513,6 +513,7 @@ class RealTS(Dataset):
         skip_cross_var_aug: bool = False,
         synthetic_epoch_capacity: int = 1,
         val_tail_n: Optional[int] = None,
+        synthetic_samples_cap: Optional[int] = None,
     ):
         self.num_samples = num_samples  # Virtual epoch size
         self.lookback_length = lookback_length
@@ -545,16 +546,10 @@ class RealTS(Dataset):
             self._use_epoch_stride = True
             self.pool_size = self.train_n * self.synthetic_epoch_capacity + self.val_tail_n
             
-            # [Gemini CLI] Enforce global sample cap to prevent massive disk/RAM allocations
-            try:
-                from models.diffusion_tsf.train_multivariate_pipeline import SYNTHETIC_SAMPLES_CAP
-            except ImportError:
-                SYNTHETIC_SAMPLES_CAP = None
-
-            if SYNTHETIC_SAMPLES_CAP is not None and self.pool_size > SYNTHETIC_SAMPLES_CAP:
+            if synthetic_samples_cap is not None and self.pool_size > synthetic_samples_cap:
                 logger.warning(
                     f"RealTS: calculated pool_size {self.pool_size} exceeds "
-                    f"SYNTHETIC_SAMPLES_CAP {SYNTHETIC_SAMPLES_CAP}. Capping and "
+                    f"synthetic_samples_cap {synthetic_samples_cap}. Capping and "
                     "disabling epoch-stride for safety."
                 )
                 self.pool_size = SYNTHETIC_SAMPLES_CAP
@@ -871,8 +866,9 @@ def get_synthetic_dataloader(
     cache_dir: Optional[str] = None,
     lookback_overlap: int = 0,
     skip_cross_var_aug: bool = False,
-    synthetic_epoch_capacity: int = 1,
-    val_tail_n: Optional[int] = None,
+        synthetic_epoch_capacity: int = 1,
+        val_tail_n: Optional[int] = None,
+        synthetic_samples_cap: Optional[int] = None,
 ) -> DataLoader:
     """DataLoader over synthetic RealTS data for pretraining."""
     synthetic_dataset = RealTS(
@@ -887,6 +883,7 @@ def get_synthetic_dataloader(
         skip_cross_var_aug=skip_cross_var_aug,
         synthetic_epoch_capacity=synthetic_epoch_capacity,
         val_tail_n=val_tail_n,
+        synthetic_samples_cap=synthetic_samples_cap,
     )
 
     logger.info(
@@ -906,4 +903,3 @@ def get_synthetic_dataloader(
         num_workers=num_workers,
         pin_memory=True,
     )
-

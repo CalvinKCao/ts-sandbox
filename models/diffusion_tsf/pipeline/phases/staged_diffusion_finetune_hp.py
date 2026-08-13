@@ -24,7 +24,7 @@ from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     _stage_pretrain_ckpt,
     discover_dataset_run_ckpt_dir,
-    patch_stage_globals,
+    stage_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -643,13 +643,23 @@ TUNED_MODEL_KEYS = (
 )
 
 
-def _stage_subset_dir(state: PipelineState, stage: str) -> str:
+def _stage_subset_dir(
+    state: PipelineState,
+    stage: str,
+    *,
+    checkpoint_dir: Optional[str] = None,
+) -> str:
     subset_id = state.subset_id or state.dataset
-    return os.path.join(state.checkpoint_dir, subset_id, stage)
+    return os.path.join(checkpoint_dir or state.checkpoint_dir, subset_id, stage)
 
 
-def _stage_best_ckpt(state: PipelineState, stage: str) -> str:
-    return os.path.join(_stage_subset_dir(state, stage), "best.pt")
+def _stage_best_ckpt(
+    state: PipelineState,
+    stage: str,
+    *,
+    checkpoint_dir: Optional[str] = None,
+) -> str:
+    return os.path.join(_stage_subset_dir(state, stage, checkpoint_dir=checkpoint_dir), "best.pt")
 
 
 def _model_kwargs_from_tuned(params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -887,11 +897,6 @@ def _suggest_staged_params(
     search_space: str = "default",
     phase_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    from models.diffusion_tsf.train_multivariate_pipeline import (
-        FINETUNE_HP_LR_MAX,
-        FINETUNE_HP_LR_MIN,
-    )
-
     overrides = phase_overrides or {}
 
     if search_space == "reduced_hp":
@@ -946,16 +951,11 @@ def _suggest_staged_params(
         ms = base_ms
 
     if search_space == "lr_only":
-        from models.diffusion_tsf.train_multivariate_pipeline import (
-            FINETUNE_HP_LR_MAX,
-            FINETUNE_HP_LR_MIN,
-        )
-
-        if FINETUNE_HP_LR_MIN == FINETUNE_HP_LR_MAX:
-            lr = float(FINETUNE_HP_LR_MIN)
+        if state.finetune_hp_lr_min == state.finetune_hp_lr_max:
+            lr = float(state.finetune_hp_lr_min)
         else:
             lr = trial.suggest_float(
-                "learning_rate", FINETUNE_HP_LR_MIN, FINETUNE_HP_LR_MAX, log=True
+                "learning_rate", state.finetune_hp_lr_min, state.finetune_hp_lr_max, log=True
             )
         return _apply_effective_batch_multiplier(
             {
@@ -1097,7 +1097,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             run_real_dataset_phase_diagnostics,
             run_staged_finetune_visualizations,
         )
-        import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
         if state.smoke_test:
             return
@@ -1106,7 +1105,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         if not needs_guidance:
             return
 
-        patch_stage_globals(pipeline_mod, state, self.stage, honor_dataset_windows=True)
         variate_indices = state.variate_indices
         if not variate_indices:
             raise ValueError(
@@ -1118,7 +1116,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         test_stride = int(subset_meta.get("test_stride", 1))
         if train_ds is None:
             train_ds, _, _, norm_stats = load_dataset(
-                state.dataset,
+                state, state.dataset,
                 variate_indices,
                 stride=train_stride,
                 test_stride=test_stride,
@@ -1126,7 +1124,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 use_ordinal_window_norm=state.use_ordinal_window_norm,
             )
             if norm_stats.get("ordinal_ladder") is not None:
-                state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
+                state.ordinal_ladder = norm_stats["ordinal_ladder"]
             if norm_stats.get("hybrid_flat_dataset_norm"):
                 state.extra["hybrid_flat_norm_stats"] = {
                     k: norm_stats[k]
@@ -1237,11 +1235,13 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             dataset_window_lengths,
         )
 
-        ds_lb, ds_hz = dataset_window_lengths(state.dataset)
-        model_kwargs = anchor_kwargs_from_params(params)
+        ds_lb, ds_hz = dataset_window_lengths(state, state.dataset)
+        model_state = stage_state(state, self.stage, honor_dataset_windows=True)
+        model_kwargs = anchor_kwargs_from_params(model_state, params)
         model_kwargs.update(_state_anchor_kwargs(state))
         model_kwargs.update(_model_kwargs_from_tuned(params))
         return create_diffusion_model(
+            model_state,
             n_variates=n_iv,
             lookback=ds_lb,
             horizon=ds_hz,
@@ -1260,7 +1260,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
     @staticmethod
     def _apply_tuned_length_to_state(state: PipelineState, params: Optional[Dict[str, Any]]) -> None:
-        """Push winner length schedule onto state so staged_eval / patch_globals match train."""
+        """Keep the winning length schedule in shared state for later phases."""
         if not params:
             return
         if "binary_length_mode" in params:
@@ -1420,10 +1420,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         )
         _log_gpu_mem(f"{self.stage}/{trial_label}/start")
 
-        ds_lb, ds_hz = dataset_window_lengths(state.dataset)
+        ds_lb, ds_hz = dataset_window_lengths(state, state.dataset)
         if guidance is None and guidance_checkpoint:
             guidance = load_wrapped_guidance(
-                guidance_checkpoint,
+                state, guidance_checkpoint,
                 n_iv,
                 device,
                 guidance_type=state.guidance_type,
@@ -1510,7 +1510,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 model.train()
                 from models.diffusion_tsf.train_multivariate_pipeline import _set_ordinal_loader_mode
 
-                _set_ordinal_loader_mode(model, train_loader, eval_mode=False)
+                _set_ordinal_loader_mode(state, model, train_loader, eval_mode=False)
                 train_loss = 0.0
                 n_train = 0
                 optimizer.zero_grad(set_to_none=True)
@@ -1568,7 +1568,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
                 backup = ema.swap_in(model) if ema is not None else None
                 model.eval()
-                _set_ordinal_loader_mode(model, val_loader, eval_mode=True)
+                _set_ordinal_loader_mode(state, model, val_loader, eval_mode=True)
                 val_loss = 0.0
                 n_val = 0
                 val_start = time.perf_counter()
@@ -1720,10 +1720,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             configured_finetune_micro_batch,
             configured_max_diffusion_batch,
         )
-        import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
-
-        patch_stage_globals(pipeline_mod, state, self.stage, honor_dataset_windows=True)
-
         subset_id = state.subset_id or state.dataset
         variate_indices = state.variate_indices
         if not variate_indices:
@@ -1759,7 +1755,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         device = state.resolve_device()
         n_iv = len(variate_indices)
         train_ds, val_ds, _, norm_stats = load_dataset(
-            state.dataset,
+            state, state.dataset,
             variate_indices,
             stride=train_stride,
             test_stride=test_stride,
@@ -1920,10 +1916,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 del probe_model
             except Exception as e:
                 logger.warning("[%s] phase-start diagnostics failed: %s", self.name, e, exc_info=True)
-        # Diagnostics may mutate module globals (e.g. DIT_PATCH_SIZE); restore from state.
-        patch_stage_globals(pipeline_mod, state, self.stage, honor_dataset_windows=True)
-
-        ds_lb, ds_hz = dataset_window_lengths(state.dataset)
+        ds_lb, ds_hz = dataset_window_lengths(state, state.dataset)
         micro_ceiling = configured_max_diffusion_batch(state, state.smoke_test)
         default_micro = configured_finetune_micro_batch(state, state.smoke_test)
         logger.info(
@@ -2133,7 +2126,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     worker_guidance = None
                     if ft_guidance_ckpt:
                         worker_guidance = load_wrapped_guidance(
-                            ft_guidance_ckpt,
+                            state, ft_guidance_ckpt,
                             n_iv,
                             dev,
                             guidance_type=state.guidance_type,
@@ -2312,6 +2305,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     ),
                     sampler_seed=state.seed,
                     callbacks=[_retain_complete_trial_ckpts],
+                    enqueue_trials=self.get("enqueue_trials"),
                 )
                 try:
                     best_trial = study.best_trial

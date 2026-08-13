@@ -33,6 +33,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from models.diffusion_tsf.config import DiffusionTSFConfig
+from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.diffusion_model import DiffusionTSF
 from models.diffusion_tsf.realts import get_synthetic_dataloader
 from models.diffusion_tsf.guidance import iTransformerGuidance, PatchDecoderGuidance
@@ -45,19 +46,14 @@ from models.diffusion_tsf.ordinal_window_norm import (
 from models.diffusion_tsf.storage_paths import resolve_checkpoint_dir, resolve_results_dir
 from models.diffusion_tsf.pipeline.data_subset import resolve_data_subset
 
-DATASETS_DIR = os.path.join(project_root, "datasets")
-CHECKPOINT_DIR = resolve_checkpoint_dir(script_dir)
-RESULTS_DIR = resolve_results_dir(script_dir)
-SYNTH_CACHE_DIR: Optional[str] = None
-
 def is_main_process() -> bool:
     """True on the coordinator process (not an Optuna child worker)."""
     from models.diffusion_tsf.pipeline.optuna_parallel import is_optuna_child_worker
     return not is_optuna_child_worker()
 
 
-def get_device() -> torch.device:
-    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def get_device(state: PipelineState) -> torch.device:
+    return state.resolve_device()
 
 
 def unwrap_model(model: nn.Module) -> nn.Module:
@@ -75,17 +71,17 @@ def require_tuned_param(params: Dict, key: str, stage_name: str):
     return params[key]
 
 
-def fixed_deterministic_anchor_hp() -> Tuple[float, float]:
+def fixed_deterministic_anchor_hp(state: PipelineState) -> Tuple[float, float]:
     """Fixed anchor hyperparameters from YAML (not Optuna-tuned)."""
-    return DETERMINISTIC_ANCHOR_LAMBDA, DETERMINISTIC_ANCHOR_ALPHA
+    return state.deterministic_anchor_lambda, state.deterministic_anchor_alpha
 
 
-def anchor_kwargs_from_params(params: Optional[Dict] = None) -> Dict:
-    """Kwargs for create_diffusion_model from CLI anchor settings."""
+def anchor_kwargs_from_params(state: PipelineState, params: Optional[Dict] = None) -> Dict:
+    """Kwargs for create_diffusion_model from immutable state settings."""
     del params  # kept for call-site compatibility; anchor HP is not tuned
-    if not DETERMINISTIC_ANCHOR_LOSS:
+    if not state.deterministic_anchor_loss:
         return {}
-    anchor_lambda, anchor_alpha = fixed_deterministic_anchor_hp()
+    anchor_lambda, anchor_alpha = fixed_deterministic_anchor_hp(state)
     return {
         'use_deterministic_anchor_loss': True,
         'deterministic_anchor_lambda': anchor_lambda,
@@ -93,53 +89,50 @@ def anchor_kwargs_from_params(params: Optional[Dict] = None) -> Dict:
     }
 
 
-def diffusion_arch_config_dict() -> Dict[str, Any]:
+def diffusion_arch_config_dict(state: PipelineState) -> Dict[str, Any]:
     """Architecture/runtime flags needed to reconstruct diffusion checkpoints."""
     return {
-        'image_height': IMAGE_HEIGHT,
-        'coarse_image_height': COARSE_IMAGE_HEIGHT,
-        'fine_image_height': FINE_IMAGE_HEIGHT,
-        'finer_image_height': FINER_IMAGE_HEIGHT,
-        'max_scale': MAX_SCALE,
-        'staged_representation': STAGED_REPRESENTATION,
-        'window_norm_std_floor': WINDOW_NORM_STD_FLOOR,
-        'window_norm_low_var_threshold': WINDOW_NORM_LOW_VAR_THRESHOLD,
-        'window_norm_low_var_unit_std': WINDOW_NORM_LOW_VAR_UNIT_STD,
-        'window_norm_low_var_unit_std_per_variate': WINDOW_NORM_LOW_VAR_UNIT_STD_PER_VARIATE,
-        'lookback_overlap_center_shift': LOOKBACK_OVERLAP_CENTER_SHIFT,
-        'window_norm_center': WINDOW_NORM_CENTER,
-        'use_triple_scale': USE_TRIPLE_SCALE,
-        'diffusion_stage': DIFFUSION_STAGE,
-        'use_guidance_channel': USE_GUIDANCE_CHANNEL,
-        'guidance_placement': GUIDANCE_PLACEMENT,
-        'cfg_dropout': CFG_DROPOUT,
-        'disable_cross_attention': DISABLE_CROSS_ATTENTION,
-        'cross_variate_context_bias': CROSS_VARIATE_CONTEXT_BIAS,
-        'model_type': MODEL_TYPE,
-        'diffusion_type': DIFFUSION_TYPE,
-        'use_ordinal_window_norm': USE_ORDINAL_WINDOW_NORM,
-        'ordinal_ood_shift_causal_only': ORDINAL_OOD_SHIFT_CAUSAL_ONLY,
-        'ordinal_tie_atol': ORDINAL_TIE_ATOL,
-        'binary_anchor_input_mode': BINARY_ANCHOR_INPUT_MODE,
-        'dit_patch_size': DIT_PATCH_SIZE,
-        'dit_embed_dim': DIT_EMBED_DIM,
-        'dit_depth': DIT_DEPTH,
-        'dit_num_heads': DIT_NUM_HEADS,
-        'dit_mlp_ratio': DIT_MLP_RATIO,
-        'dit_dropout': DIT_DROPOUT,
-        'use_window_normalization': USE_WINDOW_NORMALIZATION,
-        'window_norm_center': WINDOW_NORM_CENTER,
-        'zero_guidance_forecast': ZERO_GUIDANCE_FORECAST,
-        'window_stride': WINDOW_STRIDE,
-        'binary_noise_schedule': BINARY_NOISE_SCHEDULE,
-        'prediction_target': PREDICTION_TARGET,
-        'loss_weighting': LOSS_WEIGHTING,
-        'min_snr_gamma': MIN_SNR_GAMMA,
-        'use_coordinate_channel': USE_COORDINATE_CHANNEL,
-        'use_raw_lookback_cond_channel': USE_RAW_LOOKBACK_COND_CHANNEL,
-        'representation_time_stride': REPRESENTATION_TIME_STRIDE,
-        'past_cond_resize_to_horizon': PAST_COND_RESIZE_TO_HORIZON,
-        'itrans_d_model': ITRANS_D_MODEL,
+        'image_height': state.image_height,
+        'coarse_image_height': state.coarse_image_height,
+        'fine_image_height': state.fine_image_height,
+        'max_scale': state.max_scale_by_dataset.get(state.dataset, state.max_scale),
+        'staged_representation': state.staged_representation,
+        'window_norm_std_floor': state.window_norm_std_floor,
+        'window_norm_low_var_threshold': state.window_norm_low_var_threshold,
+        'window_norm_low_var_unit_std': state.window_norm_low_var_unit_std,
+        'window_norm_low_var_unit_std_per_variate': state.window_norm_low_var_unit_std_by_variate.get(state.dataset),
+        'lookback_overlap_center_shift': state.lookback_overlap_center_shift,
+        'window_norm_center': state.window_norm_center,
+        'diffusion_stage': state.diffusion_stage,
+        'use_guidance_channel': state.use_guidance_channel,
+        'guidance_placement': state.guidance_placement,
+        'cfg_dropout': state.cfg_dropout,
+        'disable_cross_attention': state.disable_cross_attention,
+        'cross_variate_context_bias': state.cross_variate_context_bias,
+        'model_type': state.model_type,
+        'diffusion_type': state.diffusion_type,
+        'use_ordinal_window_norm': state.use_ordinal_window_norm,
+        'ordinal_ood_shift_causal_only': state.ordinal_ood_shift_causal_only,
+        'ordinal_tie_atol': state.ordinal_tie_atol,
+        'binary_anchor_input_mode': state.binary_anchor_input_mode,
+        'dit_patch_size': state.dit_patch_size,
+        'dit_embed_dim': state.dit_embed_dim,
+        'dit_depth': state.dit_depth,
+        'dit_num_heads': state.dit_num_heads,
+        'dit_mlp_ratio': state.dit_mlp_ratio,
+        'dit_dropout': state.dit_dropout,
+        'use_window_normalization': state.use_window_normalization,
+        'zero_guidance_forecast': state.zero_guidance_forecast,
+        'window_stride': state.window_stride,
+        'binary_noise_schedule': state.binary_noise_schedule,
+        'prediction_target': state.prediction_target,
+        'loss_weighting': state.loss_weighting,
+        'min_snr_gamma': state.min_snr_gamma,
+        'use_coordinate_channel': state.use_coordinate_channel,
+        'use_raw_lookback_cond_channel': state.use_raw_lookback_cond_channel,
+        'representation_time_stride': state.representation_time_stride,
+        'past_cond_resize_to_horizon': state.past_cond_resize_to_horizon,
+        'itrans_d_model': state.itrans_d_model,
     }
 
 
@@ -225,167 +218,40 @@ def get_system_info() -> dict:
 
 
 # ============================================================================
-# Runtime knobs — populated from YAML via patch_globals / apply_training_config.
-# ============================================================================
-
 from models.diffusion_tsf.pipeline import training_helpers as _training_helpers
 
-LOOKBACK_LENGTH = 96
-FORECAST_LENGTH = 96
-ITRANSFORMER_SEQ_LEN = 96
-DIFFUSION_LOOKBACK_CAP = 0
-DIFFUSION_CHUNK_HORIZON = 0
-REPRESENTATION_TIME_STRIDE = 1
-PAST_COND_RESIZE_TO_HORIZON = True
-ITRANS_LOOKBACK_LENGTH = None
-IMAGE_HEIGHT = 16
-COARSE_IMAGE_HEIGHT = 16
-FINE_IMAGE_HEIGHT = 16
-FINER_IMAGE_HEIGHT = 16
-MAX_SCALE = 3.5
-STAGED_REPRESENTATION = "value_precision"
-WINDOW_NORM_STD_FLOOR = 1e-8
-WINDOW_NORM_LOW_VAR_THRESHOLD = 0.0
-WINDOW_NORM_LOW_VAR_UNIT_STD = 1.0
-WINDOW_NORM_LOW_VAR_UNIT_STD_PER_VARIATE: Optional[List[float]] = None
-LOOKBACK_OVERLAP_CENTER_SHIFT = False
-LOOKBACK_OVERLAP = 8
-PAST_LOSS_WEIGHT = 0.3
-PRETRAIN_EPOCHS = 10
-PRETRAIN_DIFFUSION_EPOCHS = 20
-PRETRAIN_DIFFUSION_MAX_EPOCHS = 20
-DIFFUSION_HP_PATIENCE = 4
-SYNTHETIC_SAMPLES_HP_TUNE = 20_000
-SYNTHETIC_SAMPLES_DIFF_TUNE = 10_000
-SYNTHETIC_SAMPLES_MIN = 4_096
-SYNTHETIC_SAMPLES_CAP = 50_000
-PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE = None
-HP_TUNE_EPOCHS = 20
-HP_TUNE_PATIENCE = 15
-N_ITRANS_HP_TRIALS = 10
-N_DIFFUSION_HP_TRIALS = 8
-N_FINETUNE_HP_TRIALS = 5
-ITRANS_HP_PRETRAIN_MAX_EPOCHS = 10
-ITRANS_HP_FINETUNE_MAX_EPOCHS = 10
-ITRANS_REAL_COLD_START = True
-ITRANS_PAPER_BATCH_SIZE = 32
-ITRANS_PAPER_LR_GRID = [1e-3, 5e-4, 1e-4]
-ITRANS_PAPER_DROPOUT = 0.1
-ITRANS_D_MODEL = 512
-ITRANS_D_FF = 512
-ITRANS_E_LAYERS = 4
-ITRANS_N_HEADS = 8
-GUIDANCE_TYPE = "patch_decoder"
-MMPD_PATCH_SIZE = 12
-PATCH_GUIDANCE_HP_FINETUNE_MAX_EPOCHS = 10
-BINARY_NOISE_SCHEDULE = "linear"
-BINARY_LENGTH_MODE = "none"
-BINARY_LENGTH_G = 1.0
-BINARY_LENGTH_SCALE = 1.0
-PREDICTION_TARGET = "x0"
-LOSS_WEIGHTING = "none"
-MIN_SNR_GAMMA = 5.0
-BINARY_NUM_STEPS = 1000
-BINARY_BETA_START = 1e-5
-BINARY_BETA_END = 0.5
-LR_SCHEDULER_TYPE = "none"
-LR_WARMUP_EPOCHS = 0
-MAX_SCALE_TUNING = False
-MAX_SCALE_TUNING_RANGE = [2.5, 14.0]
-USE_COORDINATE_CHANNEL = True
-USE_RAW_LOOKBACK_COND_CHANNEL = False
-DIFFUSION_BATCH_SIZE = 32
-DIFFUSION_BATCH_SIZES = [16]
-FINETUNE_BATCH_SIZES = [4, 8, 16]
-FINETUNE_HP_LR_MIN = 3e-6
-FINETUNE_HP_LR_MAX = 2e-4
-USE_AMP = True
-USE_GRADIENT_CHECKPOINTING = True
-UNET_MAX_CHUNK_SIZE = 128
-DISABLE_CROSS_ATTENTION = False
-USE_TRIPLE_SCALE = False
-DIFFUSION_STAGE = "coarse"
-USE_GUIDANCE_CHANNEL = False
-GUIDANCE_PLACEMENT = "canvas"
-CFG_DROPOUT = 0.0
-MODEL_TYPE = "dit"
-DIFFUSION_TYPE = "binary"
-USE_ORDINAL_WINDOW_NORM = False
-ORDINAL_OOD_SHIFT_CAUSAL_ONLY = False
-ORDINAL_TIE_ATOL = 1e-6
-GLOBAL_ORDINAL_LADDER = None
-TRAIN_WINDOW_AUG = {}
-PIPELINE_SEED = 42
-DIT_PATCH_SIZE = (8, 8)
-DIT_COND_PATCH_SIZE = None
-DIT_EMBED_DIM = 384
-DIT_DEPTH = 8
-DIT_NUM_HEADS = 6
-DIT_MLP_RATIO = 4.0
-DIT_DROPOUT = 0.0
-CROSS_VARIATE_CONTEXT_BIAS = 0.0
-DETERMINISTIC_ANCHOR_LOSS = True
-DETERMINISTIC_ANCHOR_LAMBDA = 0.99
-DETERMINISTIC_ANCHOR_ALPHA = 0.5
-BINARY_ANCHOR_INPUT_MODE = "stationary_flat"
-BINARY_USE_BOUNDARY_WEIGHTED_BCE = False
-BINARY_CDF_DISTANCE_ALPHA = 1.0
-BINARY_USE_NORMALIZED_VALUE_WIDTH_WEIGHTED_BCE = False
-ANCHOR_MSE_PROXY_LAMBDA = 0.5
-USE_VERTICAL_DUAL_CONCAT = False
-USE_CHANNEL_DUAL_CONCAT = False
-USE_PATCH_REFINE_STAGE = False
-PATCH_REFINE_CANVAS_HEIGHT = 256
-PATCH_REFINE_PATCH_HEIGHT = 32
-PATCH_REFINE_PATCH_WIDTH = 8
-PATCH_REFINE_COL_STRIDE = 6
-PATCH_REFINE_UNIQUE_SEGMENTS = False
-PATCH_REFINE_PREV_COND_DROPOUT = 0.5
-USE_WINDOW_NORMALIZATION = True
-WINDOW_NORM_CENTER = "mean"
-HYBRID_FLAT_DATASET_NORM = False
-HYBRID_FLAT_FRAC_THRESHOLD = 0.5
-HYBRID_FLAT_OOB_COVERAGE = 0.99
-HYBRID_SKIP_WINDOW_NORM_MASK: Optional[List[bool]] = None
-ZERO_GUIDANCE_FORECAST = False
-WINDOW_STRIDE = 1
-EVAL_NUM_SAMPLES = 30
-EVAL_SAMPLER = "quad_t"
 
-N_VARIATES = 7
-
-
-def resolve_synthetic_params(requested_n: int, requested_cap: int, smoke_test: bool):
+def resolve_synthetic_params(state: PipelineState, requested_n: int, requested_cap: int, smoke_test: bool):
     return _training_helpers.resolve_synthetic_params(
         requested_n,
         requested_cap,
         smoke_test,
-        samples_cap=SYNTHETIC_SAMPLES_CAP,
-        samples_min=SYNTHETIC_SAMPLES_MIN,
+        samples_cap=state.synthetic_samples_full_cap,
+        samples_min=state.synthetic_samples_min,
     )
 
 
-def resolve_pretrain_virtual_dataset_size(smoke_test: bool) -> int:
+def resolve_pretrain_virtual_dataset_size(state: PipelineState, smoke_test: bool) -> int:
     return _training_helpers.resolve_pretrain_virtual_dataset_size(
         smoke_test,
-        pretrain_epochs=PRETRAIN_EPOCHS,
-        pretrain_diffusion_max_epochs=PRETRAIN_DIFFUSION_MAX_EPOCHS,
-        pretrain_synthetic_override=PRETRAIN_SYNTHETIC_SAMPLES_OVERRIDE,
-        samples_cap=SYNTHETIC_SAMPLES_CAP,
-        samples_min=SYNTHETIC_SAMPLES_MIN,
+        pretrain_epochs=state.pretrain_epochs,
+        pretrain_diffusion_max_epochs=state.pretrain_diffusion_max_epochs,
+        pretrain_synthetic_override=state.pretrain_synthetic_override,
+        samples_cap=state.synthetic_samples_full_cap,
+        samples_min=state.synthetic_samples_min,
     )
 
 
-def synthetic_epoch_capacity_itrans_hp() -> int:
-    return ITRANS_HP_PRETRAIN_MAX_EPOCHS
+def synthetic_epoch_capacity_itrans_hp(state: PipelineState) -> int:
+    return state.itrans_hp_pretrain_max_epochs
 
 
-def synthetic_epoch_capacity_diff_hp() -> int:
-    return PRETRAIN_DIFFUSION_MAX_EPOCHS
+def synthetic_epoch_capacity_diff_hp(state: PipelineState) -> int:
+    return state.pretrain_diffusion_max_epochs
 
 
-def synthetic_epoch_capacity_pretrain_diffusion() -> int:
-    return PRETRAIN_DIFFUSION_MAX_EPOCHS
+def synthetic_epoch_capacity_pretrain_diffusion(state: PipelineState) -> int:
+    return state.pretrain_diffusion_max_epochs
 
 # Dataset registry: name -> (path, date_col, seasonal_period)
 DATASET_REGISTRY = {
@@ -408,8 +274,8 @@ DATASET_REGISTRY = {
 }
 
 
-def _datasets_root() -> str:
-    return os.path.abspath(os.path.expanduser(DATASETS_DIR))
+def _datasets_root(state: PipelineState) -> str:
+    return os.path.abspath(os.path.expanduser(state.datasets_dir))
 
 
 def _path_is_file(path: str, retries: int = 3, delay_s: float = 0.5) -> bool:
@@ -425,10 +291,10 @@ def _path_is_file(path: str, retries: int = 3, delay_s: float = 0.5) -> bool:
     return False
 
 
-def _resolve_registry_path(dataset_name: str) -> Tuple[str, Optional[str]]:
+def _resolve_registry_path(state: PipelineState, dataset_name: str) -> Tuple[str, Optional[str]]:
     """Return (absolute path, date_col or None for NPZ/headerless)."""
     rel, date_col, _ = DATASET_REGISTRY[dataset_name]
-    path = os.path.join(_datasets_root(), rel)
+    path = os.path.join(_datasets_root(state), rel)
     if not _path_is_file(path):
         raise FileNotFoundError(f"Dataset file not found: {path}")
     return path, date_col
@@ -487,21 +353,22 @@ def _dataset_variate_names(path: str, date_col: Optional[str], n_cols: int) -> L
         return [f"var_{i}" for i in range(n_cols)]
 
 
-def dataset_window_lengths(dataset_name: str) -> Tuple[int, int]:
+def dataset_window_lengths(state: PipelineState, dataset_name: str) -> Tuple[int, int]:
     """Per-dataset (lookback, forecast) for finetune/eval; pretrain stays on pipeline defaults."""
-    return LOOKBACK_LENGTH, FORECAST_LENGTH
+    return state.lookback_length, state.forecast_length
 
 
-def itrans_model_lengths(dataset_lookback: int, dataset_horizon: int) -> Tuple[int, int]:
+def itrans_model_lengths(state: PipelineState, dataset_lookback: int, dataset_horizon: int) -> Tuple[int, int]:
     """iTrans seq_len / pred_len decoupled from diffusion AR chunk canvas."""
-    seq_len = int(ITRANSFORMER_SEQ_LEN) if ITRANSFORMER_SEQ_LEN else dataset_lookback
-    chunk_hz = int(DIFFUSION_CHUNK_HORIZON or 0)
+    seq_len = int(state.itrans_lookback_length or dataset_lookback)
+    chunk_hz = int(state.diffusion_chunk_horizon or 0)
     pred_len = min(dataset_horizon, chunk_hz) if chunk_hz > 0 else dataset_horizon
     return seq_len, pred_len
 
 
 def wrap_itrans_guidance(
     model: nn.Module,
+    state: PipelineState,
     *,
     seq_len: Optional[int] = None,
     pred_len: Optional[int] = None,
@@ -510,21 +377,21 @@ def wrap_itrans_guidance(
     from models.diffusion_tsf.guidance import iTransformerGuidance
 
     if seq_len is None:
-        seq_len = int(ITRANSFORMER_SEQ_LEN or getattr(model, "seq_len", 96))
+        seq_len = int(state.itrans_lookback_length or getattr(model, "seq_len", state.lookback_length))
     if pred_len is None:
-        chunk = int(DIFFUSION_CHUNK_HORIZON or 0)
-        pred_len = chunk if chunk > 0 else int(FORECAST_LENGTH)
+        chunk = int(state.diffusion_chunk_horizon or 0)
+        pred_len = chunk if chunk > 0 else int(state.forecast_length)
     return iTransformerGuidance(model, seq_len=int(seq_len), pred_len=int(pred_len))
 
 
-def _patch_guidance_out_len() -> int:
+def _patch_guidance_out_len(state: PipelineState) -> int:
     """Native decoder forecast length (dataset horizon, not diffusion AR chunk)."""
-    return int(FORECAST_LENGTH)
+    return int(state.forecast_length)
 
 
-def _patch_guidance_pred_len() -> int:
-    chunk = int(DIFFUSION_CHUNK_HORIZON or 0)
-    return chunk if chunk > 0 else int(FORECAST_LENGTH)
+def _patch_guidance_pred_len(state: PipelineState) -> int:
+    chunk = int(state.diffusion_chunk_horizon or 0)
+    return chunk if chunk > 0 else int(state.forecast_length)
 
 
 def _checkpoint_is_patch_guidance(ckpt: dict) -> bool:
@@ -538,6 +405,7 @@ def _checkpoint_is_patch_guidance(ckpt: dict) -> bool:
 
 
 def create_patch_guidance_stack(
+    state: PipelineState,
     num_vars: int,
     *,
     in_len: Optional[int] = None,
@@ -545,24 +413,25 @@ def create_patch_guidance_stack(
     patch_size: Optional[int] = None,
 ) -> PatchGuidanceStack:
     cfg = PatchGuidanceStackConfig(
-        in_len=int(in_len or LOOKBACK_LENGTH),
-        out_len=int(out_len or _patch_guidance_out_len()),
-        patch_size=int(patch_size or MMPD_PATCH_SIZE),
+        in_len=int(in_len or state.lookback_length),
+        out_len=int(out_len or _patch_guidance_out_len(state)),
+        patch_size=int(patch_size or state.mmpd_patch_size),
         data_dim=int(num_vars),
     )
     return PatchGuidanceStack(cfg)
 
 
-def wrap_patch_guidance(stack: PatchGuidanceStack) -> PatchDecoderGuidance:
-    ordinal_ladder = GLOBAL_ORDINAL_LADDER if USE_ORDINAL_WINDOW_NORM else None
+def wrap_patch_guidance(state: PipelineState, stack: PatchGuidanceStack) -> PatchDecoderGuidance:
+    ordinal_ladder = state.ordinal_ladder if state.use_ordinal_window_norm else None
     return PatchDecoderGuidance(
         stack,
-        chunk_horizon=_patch_guidance_pred_len(),
+        chunk_horizon=_patch_guidance_pred_len(state),
         ordinal_ladder=ordinal_ladder,
     )
 
 
 def load_patch_guidance_from_checkpoint(
+    state: PipelineState,
     path: str,
     num_vars: int,
     device: torch.device,
@@ -572,9 +441,9 @@ def load_patch_guidance_from_checkpoint(
         ckpt = torch.load(path, map_location=device, weights_only=False)
     cfg_dict = dict(ckpt.get("config") or {})
     cfg_dict.setdefault("data_dim", num_vars)
-    cfg_dict.setdefault("in_len", LOOKBACK_LENGTH)
-    cfg_dict.setdefault("out_len", _patch_guidance_out_len())
-    cfg_dict.setdefault("patch_size", MMPD_PATCH_SIZE)
+    cfg_dict.setdefault("in_len", state.lookback_length)
+    cfg_dict.setdefault("out_len", _patch_guidance_out_len(state))
+    cfg_dict.setdefault("patch_size", state.mmpd_patch_size)
     cfg = PatchGuidanceStackConfig(**cfg_dict)
     stack = PatchGuidanceStack(cfg).to(device)
     stack.load_state_dict(ckpt["model_state_dict"], strict=True)
@@ -583,6 +452,7 @@ def load_patch_guidance_from_checkpoint(
 
 
 def load_wrapped_guidance(
+    state: PipelineState,
     ckpt_path: str,
     num_vars: int,
     device: torch.device,
@@ -592,7 +462,7 @@ def load_wrapped_guidance(
     dataset_horizon: Optional[int] = None,
 ):
     """Load finetuned patch_decoder guidance."""
-    gtype = guidance_type or GUIDANCE_TYPE
+    gtype = guidance_type or state.guidance_type
     if gtype != "patch_decoder":
         raise ValueError(f"Only patch_decoder guidance is supported; got {gtype!r}")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
@@ -600,10 +470,10 @@ def load_wrapped_guidance(
         raise ValueError(
             f"guidance_type=patch_decoder but checkpoint is not patch guidance: {ckpt_path}"
         )
-    if USE_ORDINAL_WINDOW_NORM:
-        if GLOBAL_ORDINAL_LADDER is None:
+    if state.use_ordinal_window_norm:
+        if state.ordinal_ladder is None:
             raise ValueError(
-                "GLOBAL_ORDINAL_LADDER must be set before loading ordinal patch guidance"
+                "state.ordinal_ladder must be set before loading ordinal patch guidance"
             )
         if not bool(ckpt.get("ordinal_patch_guidance_unit_ranks", False)):
             raise ValueError(
@@ -611,54 +481,55 @@ def load_wrapped_guidance(
                 "targets. Delete this patch guidance checkpoint and retrain it."
             )
     stack = load_patch_guidance_from_checkpoint(
-        ckpt_path, num_vars, device, ckpt=ckpt,
+        state, ckpt_path, num_vars, device, ckpt=ckpt,
     )
-    return wrap_patch_guidance(stack)
+    return wrap_patch_guidance(state, stack)
 
 
 def _window_norm_past_future(
+    state: PipelineState,
     past: torch.Tensor,
     future: torch.Tensor,
     *,
     apply_ood_shift: bool = False,
     data_is_ranked: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if USE_ORDINAL_WINDOW_NORM:
-        if GLOBAL_ORDINAL_LADDER is None:
-            raise ValueError("GLOBAL_ORDINAL_LADDER must be set before ordinal encoding")
+    if state.use_ordinal_window_norm:
+        if state.ordinal_ladder is None:
+            raise ValueError("state.ordinal_ladder must be set before ordinal encoding")
         if data_is_ranked:
             return past, future
         past_ord, future_ord, _ladder, _ood_shift = ordinal_encode(
             past,
             future,
-            ladder=GLOBAL_ORDINAL_LADDER,
+            ladder=state.ordinal_ladder,
             apply_ood_shift=apply_ood_shift,
-            causal_only=ORDINAL_OOD_SHIFT_CAUSAL_ONLY,
+            causal_only=state.ordinal_ood_shift_causal_only,
         )
         return past_ord, future_ord
-    if not USE_WINDOW_NORMALIZATION:
+    if not state.use_window_normalization:
         return past, future
-    if WINDOW_NORM_CENTER == "last":
+    if state.window_norm_center == "last":
         center = past[..., -1:]
-    elif WINDOW_NORM_CENTER == "mean":
+    elif state.window_norm_center == "mean":
         center = past.mean(dim=-1, keepdim=True)
     else:
-        raise ValueError(f"unknown window_norm_center {WINDOW_NORM_CENTER!r}")
+        raise ValueError(f"unknown window_norm_center {state.window_norm_center!r}")
     past_std = past.std(dim=-1, keepdim=True)
-    if WINDOW_NORM_LOW_VAR_THRESHOLD > 0.0:
-        std_floor = past_std.clamp_min(WINDOW_NORM_STD_FLOOR)
-        unit = torch.full_like(past_std, WINDOW_NORM_LOW_VAR_UNIT_STD)
-        low_var = past_std < WINDOW_NORM_LOW_VAR_THRESHOLD
-        flat = past_std <= WINDOW_NORM_STD_FLOOR
+    if state.window_norm_low_var_threshold > 0.0:
+        std_floor = past_std.clamp_min(state.window_norm_std_floor)
+        unit = torch.full_like(past_std, state.window_norm_low_var_unit_std_by_dataset.get(state.dataset, state.window_norm_low_var_unit_std))
+        low_var = past_std < state.window_norm_low_var_threshold
+        flat = past_std <= state.window_norm_std_floor
         std = torch.where(flat | low_var, unit, std_floor)
     else:
-        std = past_std.clamp_min(WINDOW_NORM_STD_FLOOR)
+        std = past_std.clamp_min(state.window_norm_std_floor)
     return (past - center) / std, (future - center) / std
 
 
-def _set_ordinal_loader_mode(model, loader, *, eval_mode: bool = False) -> None:
+def _set_ordinal_loader_mode(state: PipelineState, model, loader, *, eval_mode: bool = False) -> None:
     """Configure per-batch ordinal flags on the diffusion model."""
-    if not USE_ORDINAL_WINDOW_NORM:
+    if not state.use_ordinal_window_norm:
         return
     ranked = _dataset_yields_ordinal_ranks(loader.dataset)
     model._ordinal_input_is_ranked = ranked
@@ -672,6 +543,7 @@ def _dataset_yields_ordinal_ranks(dataset) -> bool:
 
 
 def _patch_guidance_batch(
+    state: PipelineState,
     past: torch.Tensor,
     future: torch.Tensor,
     device: torch.device,
@@ -679,8 +551,8 @@ def _patch_guidance_batch(
     apply_ood_shift: bool = False,
     data_is_ranked: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if _itrans_ar_enabled(future.shape[-1]):
-        past, future = _sample_itrans_ar_chunk(past, future)
+    if _itrans_ar_enabled(state, future.shape[-1]):
+        past, future = _sample_itrans_ar_chunk(state, past, future)
     past = past.to(device)
     future = future.to(device)
     # Univariate loaders can yield (B, T); decoder expects (B, V, T).
@@ -693,28 +565,28 @@ def _patch_guidance_batch(
             f"future={tuple(future.shape)}"
         )
     past_norm, future_norm = _window_norm_past_future(
-        past,
+        state, past,
         future,
         apply_ood_shift=apply_ood_shift,
         data_is_ranked=data_is_ranked,
     )
-    avail = future_norm.shape[-1] - LOOKBACK_OVERLAP if LOOKBACK_OVERLAP > 0 else future_norm.shape[-1]
-    pred_len = min(_patch_guidance_out_len(), avail)
-    if LOOKBACK_OVERLAP > 0:
-        target = future_norm[..., LOOKBACK_OVERLAP : LOOKBACK_OVERLAP + pred_len]
+    avail = future_norm.shape[-1] - state.lookback_overlap if state.lookback_overlap > 0 else future_norm.shape[-1]
+    pred_len = min(_patch_guidance_out_len(state), avail)
+    if state.lookback_overlap > 0:
+        target = future_norm[..., state.lookback_overlap : state.lookback_overlap + pred_len]
     else:
         target = future_norm[..., :pred_len]
-    if USE_ORDINAL_WINDOW_NORM:
-        if GLOBAL_ORDINAL_LADDER is None:
-            raise ValueError("GLOBAL_ORDINAL_LADDER must be set before ordinal patch guidance")
-        ladder_past = GLOBAL_ORDINAL_LADDER.expand_batch(past_norm.shape[0])
-        ladder_target = GLOBAL_ORDINAL_LADDER.expand_batch(target.shape[0])
+    if state.use_ordinal_window_norm:
+        if state.ordinal_ladder is None:
+            raise ValueError("state.ordinal_ladder must be set before ordinal patch guidance")
+        ladder_past = state.ordinal_ladder.expand_batch(past_norm.shape[0])
+        ladder_target = state.ordinal_ladder.expand_batch(target.shape[0])
         past_norm = ranks_to_unit(past_norm, ladder_past)
         target = ranks_to_unit(target, ladder_target)
     return past_norm, target
 
 
-def train_patch_guidance_epoch(stack, loader, optimizer, device, scheduler=None):
+def train_patch_guidance_epoch(state: PipelineState, stack, loader, optimizer, device, scheduler=None):
     stack.train()
     total_loss = 0.0
     n_batches = 0
@@ -729,7 +601,7 @@ def train_patch_guidance_epoch(stack, loader, optimizer, device, scheduler=None)
         set_train_window_aug_epoch(loader, int(getattr(ds, "_epoch", 0)) + 1)
     for past, future in loader:
         past_norm, y_true = _patch_guidance_batch(
-            past, future, device, data_is_ranked=data_is_ranked,
+            state, past, future, device, data_is_ranked=data_is_ranked,
         )
         optimizer.zero_grad()
         loss = stack.finetune_loss(past_norm, y_true)
@@ -742,7 +614,7 @@ def train_patch_guidance_epoch(stack, loader, optimizer, device, scheduler=None)
     return total_loss / max(n_batches, 1)
 
 
-def validate_patch_guidance(stack, loader, device):
+def validate_patch_guidance(state: PipelineState, stack, loader, device):
     stack.eval()
     total_loss = 0.0
     n_batches = 0
@@ -750,10 +622,10 @@ def validate_patch_guidance(stack, loader, device):
     with torch.no_grad():
         for past, future in loader:
             past_norm, y_true = _patch_guidance_batch(
-                past,
+                state, past,
                 future,
                 device,
-                apply_ood_shift=USE_ORDINAL_WINDOW_NORM,
+                apply_ood_shift=state.use_ordinal_window_norm,
                 data_is_ranked=data_is_ranked,
             )
             loss = stack.finetune_loss(past_norm, y_true)
@@ -763,6 +635,7 @@ def validate_patch_guidance(stack, loader, device):
 
 
 def patch_guidance_hp_objective(
+    state: PipelineState,
     trial,
     train_loader,
     val_loader,
@@ -770,15 +643,16 @@ def patch_guidance_hp_objective(
     device,
     smoke_test=False,
     fixed_batch_size: Optional[int] = None,
-    max_epochs: int = PATCH_GUIDANCE_HP_FINETUNE_MAX_EPOCHS,
+    max_epochs: Optional[int] = None,
     trial_ckpt_dir: Optional[str] = None,
 ):
-    lr = trial.suggest_categorical("learning_rate", ITRANS_PAPER_LR_GRID)
-    batch_size = fixed_batch_size if fixed_batch_size is not None else ITRANS_PAPER_BATCH_SIZE
+    lr = trial.suggest_categorical("learning_rate", state.itrans_paper_lr_grid)
+    batch_size = fixed_batch_size if fixed_batch_size is not None else state.itrans_paper_batch_size
+    max_epochs = state.patch_guidance_hp_finetune_max_epochs if max_epochs is None else max_epochs
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    stack = create_patch_guidance_stack(num_vars).to(device)
+    stack = create_patch_guidance_stack(state, num_vars).to(device)
 
     train_loader_local = DataLoader(
         train_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0,
@@ -800,8 +674,8 @@ def patch_guidance_hp_objective(
 
     try:
         for epoch in range(epochs):
-            train_patch_guidance_epoch(stack, train_loader_local, optimizer, device)
-            val_loss = validate_patch_guidance(stack, val_loader_local, device)
+            train_patch_guidance_epoch(state, stack, train_loader_local, optimizer, device)
+            val_loss = validate_patch_guidance(state, stack, val_loader_local, device)
             trial.report(val_loss, epoch)
             if trial.should_prune():
                 raise optuna.TrialPruned()
@@ -815,10 +689,10 @@ def patch_guidance_hp_objective(
                             "config": stack.config.to_dict(),
                             "best_params": tuned,
                             "val_loss": val_loss,
-                            "ordinal_patch_guidance_unit_ranks": bool(USE_ORDINAL_WINDOW_NORM),
+                            "ordinal_patch_guidance_unit_ranks": bool(state.use_ordinal_window_norm),
                             "patch_guidance_target_space": (
                                 "ordinal_unit_rank"
-                                if USE_ORDINAL_WINDOW_NORM
+                                if state.use_ordinal_window_norm
                                 else "window_normalized"
                             ),
                         },
@@ -837,6 +711,7 @@ def patch_guidance_hp_objective(
 
 
 def run_patch_guidance_finetune_hp_tuning(
+    state: PipelineState,
     dataset_name: str,
     variate_indices: List[int],
     n_trials: int,
@@ -859,21 +734,18 @@ def run_patch_guidance_finetune_hp_tuning(
     logger.info("=" * 60)
 
     train_ds, val_ds, _, norm_stats = load_dataset(
-        dataset_name, variate_indices,
-        stride=train_stride or WINDOW_STRIDE,
+        state, dataset_name, variate_indices,
+        stride=train_stride or state.window_stride,
         test_stride=1 if test_stride is None else test_stride,
     )
     from models.diffusion_tsf.train_window_aug import maybe_wrap_train_window_aug
 
-    aug_cfg = globals().get("TRAIN_WINDOW_AUG") or {}
-    if not isinstance(aug_cfg, dict):
-        aug_cfg = {}
-    # Prefer patched pipeline globals when present (set via training.train_window_aug).
+    aug_cfg = state.train_window_aug
     train_ds = maybe_wrap_train_window_aug(
         train_ds,
         enabled=bool(aug_cfg.get("enabled", False)),
         apply_prob=float(aug_cfg.get("apply_prob", 0.5)),
-        seed=int(globals().get("PIPELINE_SEED", 42)),
+        seed=state.seed,
         ladder=norm_stats.get("ordinal_ladder"),
         acf_threshold=float(aug_cfg.get("acf_threshold", 0.35)),
         excluded_names=aug_cfg.get("exclude_names", ()),
@@ -882,11 +754,11 @@ def run_patch_guidance_finetune_hp_tuning(
         train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
         val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
 
-    train_bs = ITRANS_PAPER_BATCH_SIZE
+    train_bs = state.itrans_paper_batch_size
     train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
 
-    trial_dir = checkpoint_dir or CHECKPOINT_DIR
+    trial_dir = checkpoint_dir or state.checkpoint_dir
     os.makedirs(trial_dir, exist_ok=True)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -897,9 +769,9 @@ def run_patch_guidance_finetune_hp_tuning(
 
         def objective(trial):
             return patch_guidance_hp_objective(
-                trial, train_loader, val_loader, n_vars, dev, smoke_test,
+                state, trial, train_loader, val_loader, n_vars, dev, smoke_test,
                 fixed_batch_size=train_bs,
-                max_epochs=PATCH_GUIDANCE_HP_FINETUNE_MAX_EPOCHS,
+                max_epochs=state.patch_guidance_hp_finetune_max_epochs,
                 trial_ckpt_dir=trial_dir,
             )
 
@@ -935,24 +807,24 @@ def run_patch_guidance_finetune_hp_tuning(
     return best_params, ckpt_path
 
 
-def _itrans_chunk_horizon() -> int:
-    chunk = int(DIFFUSION_CHUNK_HORIZON or 0)
+def _itrans_chunk_horizon(state: PipelineState) -> int:
+    chunk = int(state.diffusion_chunk_horizon or 0)
     if chunk > 0:
         return chunk
-    return int(FORECAST_LENGTH)
+    return int(state.forecast_length)
 
 
-def _itrans_ar_enabled(future_len: int) -> bool:
-    chunk = _itrans_chunk_horizon()
+def _itrans_ar_enabled(state: PipelineState, future_len: int) -> bool:
+    chunk = _itrans_chunk_horizon(state)
     if chunk <= 0:
         return False
-    dataset_h = future_len - int(LOOKBACK_OVERLAP)
+    dataset_h = future_len - int(state.lookback_overlap)
     return dataset_h > chunk
 
 
-def _itrans_ar_num_chunks(dataset_horizon: int) -> int:
-    K = int(LOOKBACK_OVERLAP)
-    C = _itrans_chunk_horizon()
+def _itrans_ar_num_chunks(state: PipelineState, dataset_horizon: int) -> int:
+    K = int(state.lookback_overlap)
+    C = _itrans_chunk_horizon(state)
     if dataset_horizon <= C:
         return 1
     stride = max(1, C - K)
@@ -960,14 +832,15 @@ def _itrans_ar_num_chunks(dataset_horizon: int) -> int:
 
 
 def _sample_itrans_ar_chunk(
+    state: PipelineState,
     past: torch.Tensor,
     future: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Random AR chunk for iTrans: full-seq past window, 96-step target."""
-    K = int(LOOKBACK_OVERLAP)
-    C = _itrans_chunk_horizon()
+    K = int(state.lookback_overlap)
+    C = _itrans_chunk_horizon(state)
     dataset_h = future.shape[-1] - K
-    n_chunks = _itrans_ar_num_chunks(dataset_h)
+    n_chunks = _itrans_ar_num_chunks(state, dataset_h)
     if n_chunks <= 1:
         return past, future
 
@@ -1011,13 +884,13 @@ def set_realts_training_epoch(loader_or_subset_or_dataset, epoch: int) -> None:
         ds.set_synthetic_epoch(epoch)
 
 
-def get_synth_cache_dir(checkpoint_dir: Optional[str] = None, smoke_test: bool = False) -> Optional[str]:
+def get_synth_cache_dir(state: PipelineState, checkpoint_dir: Optional[str] = None, smoke_test: Optional[bool] = None) -> Optional[str]:
     """Resolve synthetic cache dir; prefer shared cache when configured."""
-    if smoke_test:
+    if state.smoke_test if smoke_test is None else smoke_test:
         return None
-    if SYNTH_CACHE_DIR:
-        os.makedirs(SYNTH_CACHE_DIR, exist_ok=True)
-        return SYNTH_CACHE_DIR
+    if state.synth_cache_dir:
+        os.makedirs(state.synth_cache_dir, exist_ok=True)
+        return state.synth_cache_dir
     path = os.path.join(project_root, 'synth_data')
     os.makedirs(path, exist_ok=True)
     return path
@@ -1027,9 +900,9 @@ def get_synth_cache_dir(checkpoint_dir: Optional[str] = None, smoke_test: bool =
 # Dimensionality Helpers
 # ============================================================================
 
-def get_dataset_n_cols(dataset_name: str) -> int:
+def get_dataset_n_cols(state: PipelineState, dataset_name: str) -> int:
     """Return the number of numeric columns in a dataset (excluding date)."""
-    path, date_col = _resolve_registry_path(dataset_name)
+    path, date_col = _resolve_registry_path(state, dataset_name)
     if path.endswith('.npz'):
         data = _load_pems_npz(path)
         return int(data.shape[1])
@@ -1042,24 +915,21 @@ def get_dataset_n_cols(dataset_name: str) -> int:
         return int(_load_solar_lines(path).shape[1])
 
 
-_DATASET_SHAPE_CACHE: Dict[Tuple[str, str], Tuple[int, int]] = {}
-
-
-def get_dataset_shape(dataset_name: str) -> Tuple[int, int]:
+def get_dataset_shape(state: PipelineState, dataset_name: str) -> Tuple[int, int]:
     """Return raw row/variate counts without materializing the full numeric array."""
-    key = (DATASETS_DIR, dataset_name)
-    if key in _DATASET_SHAPE_CACHE:
-        return _DATASET_SHAPE_CACHE[key]
-    path, date_col = _resolve_registry_path(dataset_name)
+    key = (state.datasets_dir, dataset_name)
+    if key in state.dataset_shape_cache:
+        return state.dataset_shape_cache[key]
+    path, date_col = _resolve_registry_path(state, dataset_name)
     data = _load_dataset_array(path, date_col)
     shape = (int(data.shape[0]), int(data.shape[1]))
-    _DATASET_SHAPE_CACHE[key] = shape
+    state.dataset_shape_cache[key] = shape
     return shape
 
 
 def resolve_pipeline_data_subset(state) -> Dict[str, Any]:
     """Resolve state.data_subset_by_dataset and write concrete variates/strides to state."""
-    raw_rows, raw_variates = get_dataset_shape(state.dataset)
+    raw_rows, raw_variates = get_dataset_shape(state, state.dataset)
     base_indices = list(range(raw_variates))
     policy = {"data_subset_by_dataset": getattr(state, "data_subset_by_dataset", {})}
     resolved = resolve_data_subset(
@@ -1085,14 +955,14 @@ def resolve_pipeline_data_subset(state) -> Dict[str, Any]:
     return resolved
 
 
-def get_dim_for_dataset(dataset_name: str) -> int:
+def get_dim_for_dataset(state: PipelineState, dataset_name: str) -> int:
     """Return native dataset dimensionality (always full variates)."""
-    return get_dataset_n_cols(dataset_name)
+    return get_dataset_n_cols(state, dataset_name)
 
 
-def pretrain_dir_for_dim(dim: int, base_dir: str = None) -> str:
+def pretrain_dir_for_dim(state: PipelineState, dim: int, base_dir: str = None) -> str:
     """Checkpoint subdirectory for a specific pretrain dimensionality."""
-    base = base_dir or CHECKPOINT_DIR
+    base = base_dir or state.checkpoint_dir
     return os.path.join(base, f'pretrained_dim{dim}')
 
 
@@ -1143,27 +1013,28 @@ def get_itransformer_class():
 
 
 def create_itransformer_config(
+    state: PipelineState,
     *,
     seq_len: Optional[int] = None,
     pred_len: Optional[int] = None,
     num_vars: Optional[int] = None,
     dropout: Optional[float] = None,
 ):
-    """Create iTransformer config object from YAML-patched module globals."""
-    seq_len = ITRANSFORMER_SEQ_LEN if seq_len is None else seq_len
-    pred_len = FORECAST_LENGTH if pred_len is None else pred_len
-    num_vars = N_VARIATES if num_vars is None else num_vars
-    dropout = ITRANS_PAPER_DROPOUT if dropout is None else dropout
+    """Create iTransformer config object from explicit pipeline state."""
+    seq_len = state.itrans_lookback_length or state.lookback_length if seq_len is None else seq_len
+    pred_len = state.forecast_length if pred_len is None else pred_len
+    num_vars = state.n_variates if num_vars is None else num_vars
+    dropout = state.itrans_paper_dropout if dropout is None else dropout
     class iTransConfig:
         def __init__(self):
             self.seq_len = seq_len
             self.pred_len = pred_len
             self.output_attention = False
             self.use_norm = True
-            self.d_model = ITRANS_D_MODEL
-            self.d_ff = ITRANS_D_FF
-            self.e_layers = ITRANS_E_LAYERS
-            self.n_heads = ITRANS_N_HEADS
+            self.d_model = state.itrans_d_model
+            self.d_ff = state.itrans_d_ff
+            self.e_layers = state.itrans_e_layers
+            self.n_heads = state.itrans_n_heads
             self.dropout = dropout
             self.activation = 'gelu'
             self.embed = 'fixed'
@@ -1175,16 +1046,17 @@ def create_itransformer_config(
 
 
 def create_itransformer(
+    state: PipelineState,
     *,
     seq_len: Optional[int] = None,
     pred_len: Optional[int] = None,
     num_vars: Optional[int] = None,
     dropout: Optional[float] = None,
 ) -> nn.Module:
-    """Create iTransformer model from YAML-patched module globals."""
+    """Create iTransformer model from explicit pipeline state."""
     iTransformerModel = get_itransformer_class()
     config = create_itransformer_config(
-        seq_len=seq_len,
+        state, seq_len=seq_len,
         pred_len=pred_len,
         num_vars=num_vars,
         dropout=dropout,
@@ -1193,6 +1065,7 @@ def create_itransformer(
 
 
 def load_itransformer_from_checkpoint(
+    state: PipelineState,
     path: str,
     num_vars: int,
     device: torch.device,
@@ -1217,10 +1090,10 @@ def load_itransformer_from_checkpoint(
     if proj_key in state:
         ckpt_pred_len = int(state[proj_key].shape[0])
     else:
-        ckpt_pred_len = FORECAST_LENGTH
+        ckpt_pred_len = state.forecast_length
 
     model = create_itransformer(
-        seq_len=ckpt_seq_len,
+        state, seq_len=ckpt_seq_len,
         pred_len=ckpt_pred_len,
         num_vars=num_vars,
     ).to(device)
@@ -1232,10 +1105,11 @@ def load_itransformer_from_checkpoint(
             f"(inferred seq_len={ckpt_seq_len}): {e}"
         ) from e
     model.eval()
-    if ckpt_seq_len != ITRANSFORMER_SEQ_LEN:
+    expected_seq_len = state.itrans_lookback_length or state.lookback_length
+    if ckpt_seq_len != expected_seq_len:
         logger.warning(
             f"iTransformer checkpoint {path} has seq_len={ckpt_seq_len}, "
-            f"differs from current ITRANSFORMER_SEQ_LEN={ITRANSFORMER_SEQ_LEN}. "
+            f"differs from current state seq_len={expected_seq_len}. "
             f"Loaded with checkpoint's seq_len; ensure callers slice past inputs accordingly."
         )
     return model
@@ -1275,7 +1149,7 @@ def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Di
 # Diffusion Model Creation (with guidance support)
 # ============================================================================
 
-def _resolve_guidance_type(guidance_model, override: Optional[str] = None) -> str:
+def _resolve_guidance_type(state: PipelineState, guidance_model, override: Optional[str] = None) -> str:
     """Match DiffusionTSF routing to the attached guidance, not YAML alone."""
     if override is not None:
         return str(override)
@@ -1283,10 +1157,11 @@ def _resolve_guidance_type(guidance_model, override: Optional[str] = None) -> st
         return "patch_decoder"
     if guidance_model is not None:
         return "itransformer"
-    return GUIDANCE_TYPE
+    return state.guidance_type
 
 
 def create_diffusion_model(
+    state: PipelineState,
     *,
     guidance_model=None,
     n_variates: Optional[int] = None,
@@ -1295,7 +1170,7 @@ def create_diffusion_model(
     diffusion_stage: Optional[str] = None,
     **overrides: Any,
 ) -> DiffusionTSF:
-    """Build DiffusionTSF from YAML-patched module globals.
+    """Build DiffusionTSF from explicit PipelineState values.
 
     Pass explicit lookback/horizon/n_variates for per-dataset geometry, diffusion_stage
     for staged training, and overrides only for runtime exceptions (HP search, checkpoints).
@@ -1306,128 +1181,106 @@ def create_diffusion_model(
         val = overrides[key]
         return default if val is None else val
 
-    lb = LOOKBACK_LENGTH if lookback is None else lookback
-    hz = FORECAST_LENGTH if horizon is None else horizon
-    stage = DIFFUSION_STAGE if diffusion_stage is None else diffusion_stage
-    chunk_hz = int(DIFFUSION_CHUNK_HORIZON or 0)
+    lb = state.lookback_length if lookback is None else lookback
+    hz = state.forecast_length if horizon is None else horizon
+    stage = state.diffusion_stage if diffusion_stage is None else diffusion_stage
+    chunk_hz = int(state.diffusion_chunk_horizon or 0)
     if chunk_hz > 0 and hz > chunk_hz:
-        model_hz = chunk_hz + LOOKBACK_OVERLAP
+        model_hz = chunk_hz + state.lookback_overlap
     else:
-        model_hz = hz + LOOKBACK_OVERLAP
+        model_hz = hz + state.lookback_overlap
 
     config = DiffusionTSFConfig(
-        num_variables=N_VARIATES if n_variates is None else n_variates,
+        num_variables=state.n_variates if n_variates is None else n_variates,
         lookback_length=lb,
         forecast_length=model_hz,
         dataset_forecast_length=hz,
-        lookback_overlap=LOOKBACK_OVERLAP,
-        diffusion_lookback_cap=int(DIFFUSION_LOOKBACK_CAP or 0),
+        lookback_overlap=state.lookback_overlap,
+        diffusion_lookback_cap=int(state.diffusion_lookback_cap or 0),
         diffusion_chunk_horizon=chunk_hz,
-        representation_time_stride=int(REPRESENTATION_TIME_STRIDE),
-        past_cond_resize_to_horizon=bool(PAST_COND_RESIZE_TO_HORIZON),
-        itrans_lookback_length=ITRANS_LOOKBACK_LENGTH,
-        past_loss_weight=PAST_LOSS_WEIGHT,
-        image_height=IMAGE_HEIGHT,
-        coarse_image_height=COARSE_IMAGE_HEIGHT,
-        fine_image_height=FINE_IMAGE_HEIGHT,
-        finer_image_height=FINER_IMAGE_HEIGHT,
-        max_scale=o("max_scale", MAX_SCALE),
-        staged_representation=o("staged_representation", STAGED_REPRESENTATION),
-        binary_noise_schedule=o("binary_noise_schedule", BINARY_NOISE_SCHEDULE),
-        binary_length_mode=o(
-            "binary_length_mode",
-            globals().get("BINARY_LENGTH_MODE", "none"),
-        ),
-        binary_length_g=float(
-            o("binary_length_g", globals().get("BINARY_LENGTH_G", 1.0))
-        ),
-        binary_length_scale=float(
-            o("binary_length_scale", globals().get("BINARY_LENGTH_SCALE", 1.0))
-        ),
-        prediction_target=o("prediction_target", PREDICTION_TARGET),
-        loss_weighting=o("loss_weighting", LOSS_WEIGHTING),
-        min_snr_gamma=o("min_snr_gamma", MIN_SNR_GAMMA),
-        use_coordinate_channel=USE_COORDINATE_CHANNEL,
+        representation_time_stride=int(state.representation_time_stride),
+        past_cond_resize_to_horizon=bool(state.past_cond_resize_to_horizon),
+        itrans_lookback_length=state.itrans_lookback_length,
+        past_loss_weight=state.past_loss_weight,
+        image_height=state.image_height,
+        coarse_image_height=state.coarse_image_height,
+        fine_image_height=state.fine_image_height,
+        max_scale=o("max_scale", state.max_scale_by_dataset.get(state.dataset, state.max_scale)),
+        staged_representation=o("staged_representation", state.staged_representation),
+        binary_noise_schedule=o("binary_noise_schedule", state.binary_noise_schedule),
+        binary_length_mode=o("binary_length_mode", state.binary_length_mode),
+        binary_length_g=float(o("binary_length_g", state.binary_length_g_by_dataset.get(state.dataset, state.binary_length_g))),
+        binary_length_scale=float(o("binary_length_scale", state.binary_length_scale)),
+        prediction_target=o("prediction_target", state.prediction_target),
+        loss_weighting=o("loss_weighting", state.loss_weighting),
+        min_snr_gamma=o("min_snr_gamma", state.min_snr_gamma),
+        use_coordinate_channel=state.use_coordinate_channel,
         use_raw_lookback_cond_channel=o(
-            "use_raw_lookback_cond_channel", USE_RAW_LOOKBACK_COND_CHANNEL,
+            "use_raw_lookback_cond_channel", state.use_raw_lookback_cond_channel,
         ),
-        use_guidance_channel=o("use_guidance_channel", USE_GUIDANCE_CHANNEL),
-        guidance_placement=o("guidance_placement", GUIDANCE_PLACEMENT),
+        use_guidance_channel=o("use_guidance_channel", state.use_guidance_channel),
+        guidance_placement=o("guidance_placement", state.guidance_placement),
         guidance_penalty_weight=0.0,
-        model_type=o("model_type", MODEL_TYPE),
-        disable_cross_attention=DISABLE_CROSS_ATTENTION,
+        model_type=o("model_type", state.model_type),
+        disable_cross_attention=state.disable_cross_attention,
         diffusion_stage=stage,
-        use_triple_scale=USE_TRIPLE_SCALE,
-        dit_patch_size=DIT_PATCH_SIZE,
-        dit_embed_dim=DIT_EMBED_DIM,
-        dit_depth=DIT_DEPTH,
-        dit_num_heads=DIT_NUM_HEADS,
-        dit_mlp_ratio=DIT_MLP_RATIO,
-        dit_dropout=o("dit_dropout", DIT_DROPOUT),
-        dit_cond_patch_size=globals().get("DIT_COND_PATCH_SIZE"),
-        patch_refine_canvas_height=int(globals().get("PATCH_REFINE_CANVAS_HEIGHT", 256)),
-        patch_refine_patch_height=int(globals().get("PATCH_REFINE_PATCH_HEIGHT", 32)),
-        patch_refine_patch_width=int(globals().get("PATCH_REFINE_PATCH_WIDTH", 8)),
-        patch_refine_col_stride=int(globals().get("PATCH_REFINE_COL_STRIDE", 6)),
-        patch_refine_unique_segments=bool(
-            globals().get("PATCH_REFINE_UNIQUE_SEGMENTS", False)
-        ),
-        patch_refine_prev_cond_dropout=float(
-            globals().get("PATCH_REFINE_PREV_COND_DROPOUT", 0.5)
-        ),
-        use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
-        unet_max_chunk_size=UNET_MAX_CHUNK_SIZE,
-        use_amp=USE_AMP,
-        diffusion_type=o("diffusion_type", DIFFUSION_TYPE),
-        use_ordinal_window_norm=o("use_ordinal_window_norm", USE_ORDINAL_WINDOW_NORM),
+        dit_patch_size=state.dit_patch_size,
+        dit_embed_dim=state.dit_embed_dim,
+        dit_depth=state.dit_depth,
+        dit_num_heads=state.dit_num_heads,
+        dit_mlp_ratio=state.dit_mlp_ratio,
+        dit_dropout=o("dit_dropout", state.dit_dropout),
+        dit_cond_patch_size=state.dit_cond_patch_size,
+        patch_refine_canvas_height=state.patch_refine_canvas_height,
+        patch_refine_patch_height=state.patch_refine_patch_height,
+        patch_refine_patch_width=state.patch_refine_patch_width,
+        patch_refine_col_stride=state.patch_refine_col_stride,
+        patch_refine_unique_segments=state.patch_refine_unique_segments,
+        patch_refine_prev_cond_dropout=state.patch_refine_prev_cond_dropout,
+        use_gradient_checkpointing=state.use_gradient_checkpointing,
+        unet_max_chunk_size=state.unet_max_chunk_size,
+        use_amp=state.use_amp,
+        diffusion_type=o("diffusion_type", state.diffusion_type),
+        use_ordinal_window_norm=o("use_ordinal_window_norm", state.use_ordinal_window_norm),
         ordinal_ood_shift_causal_only=o(
-            "ordinal_ood_shift_causal_only", ORDINAL_OOD_SHIFT_CAUSAL_ONLY,
+            "ordinal_ood_shift_causal_only", state.ordinal_ood_shift_causal_only,
         ),
-        ordinal_tie_atol=o("ordinal_tie_atol", ORDINAL_TIE_ATOL),
-        ordinal_ladder=o("ordinal_ladder", GLOBAL_ORDINAL_LADDER),
-        use_deterministic_anchor_loss=o("use_deterministic_anchor_loss", DETERMINISTIC_ANCHOR_LOSS),
-        deterministic_anchor_lambda=o("deterministic_anchor_lambda", DETERMINISTIC_ANCHOR_LAMBDA),
-        deterministic_anchor_alpha=o("deterministic_anchor_alpha", DETERMINISTIC_ANCHOR_ALPHA),
-        binary_anchor_input_mode=o("binary_anchor_input_mode", BINARY_ANCHOR_INPUT_MODE),
+        ordinal_tie_atol=o("ordinal_tie_atol", state.ordinal_tie_atol),
+        ordinal_ladder=o("ordinal_ladder", state.ordinal_ladder),
+        use_deterministic_anchor_loss=o("use_deterministic_anchor_loss", state.deterministic_anchor_loss),
+        deterministic_anchor_lambda=o("deterministic_anchor_lambda", state.deterministic_anchor_lambda),
+        deterministic_anchor_alpha=o("deterministic_anchor_alpha", state.deterministic_anchor_alpha),
+        binary_anchor_input_mode=o("binary_anchor_input_mode", state.binary_anchor_input_mode),
         binary_use_boundary_weighted_bce=o(
-            "binary_use_boundary_weighted_bce", BINARY_USE_BOUNDARY_WEIGHTED_BCE,
+            "binary_use_boundary_weighted_bce", state.binary_use_boundary_weighted_bce,
         ),
         binary_cdf_distance_alpha=float(
-            o("binary_cdf_distance_alpha", BINARY_CDF_DISTANCE_ALPHA)
+            o("binary_cdf_distance_alpha", state.binary_cdf_distance_alpha)
         ),
-        binary_use_normalized_value_width_weighted_bce=bool(
-            o(
-                "binary_use_normalized_value_width_weighted_bce",
-                BINARY_USE_NORMALIZED_VALUE_WIDTH_WEIGHTED_BCE,
-            )
-        ),
-        anchor_mse_proxy_lambda=float(
-            o("anchor_mse_proxy_lambda", ANCHOR_MSE_PROXY_LAMBDA)
-        ),
-        cross_variate_context_bias=CROSS_VARIATE_CONTEXT_BIAS,
-        cfg_dropout=CFG_DROPOUT,
-        binary_num_steps=o("binary_num_steps", BINARY_NUM_STEPS),
-        binary_beta_start=o("binary_beta_start", BINARY_BETA_START),
-        binary_beta_end=o("binary_beta_end", BINARY_BETA_END),
-        use_window_normalization=USE_WINDOW_NORMALIZATION,
-        window_norm_center=WINDOW_NORM_CENTER,
-        window_norm_std_floor=WINDOW_NORM_STD_FLOOR,
-        window_norm_low_var_threshold=WINDOW_NORM_LOW_VAR_THRESHOLD,
-        window_norm_low_var_unit_std=WINDOW_NORM_LOW_VAR_UNIT_STD,
-        window_norm_low_var_unit_std_per_variate=WINDOW_NORM_LOW_VAR_UNIT_STD_PER_VARIATE,
-        skip_window_norm_variate_mask=list(HYBRID_SKIP_WINDOW_NORM_MASK)
-        if HYBRID_SKIP_WINDOW_NORM_MASK is not None
+        cross_variate_context_bias=state.cross_variate_context_bias,
+        cfg_dropout=state.cfg_dropout,
+        binary_num_steps=o("binary_num_steps", state.binary_num_steps),
+        binary_beta_start=o("binary_beta_start", state.binary_beta_start),
+        binary_beta_end=o("binary_beta_end", state.binary_beta_end),
+        use_window_normalization=state.use_window_normalization,
+        window_norm_center=state.window_norm_center,
+        window_norm_std_floor=state.window_norm_std_floor,
+        window_norm_low_var_threshold=state.window_norm_low_var_threshold,
+        window_norm_low_var_unit_std=state.window_norm_low_var_unit_std_by_dataset.get(state.dataset, state.window_norm_low_var_unit_std),
+        window_norm_low_var_unit_std_per_variate=state.window_norm_low_var_unit_std_by_variate.get(state.dataset),
+        skip_window_norm_variate_mask=list(state.skip_window_norm_variate_mask)
+        if state.skip_window_norm_variate_mask is not None
         else None,
-        hybrid_flat_dataset_norm=bool(HYBRID_FLAT_DATASET_NORM),
-        hybrid_flat_frac_threshold=float(HYBRID_FLAT_FRAC_THRESHOLD),
-        hybrid_flat_oob_coverage=float(HYBRID_FLAT_OOB_COVERAGE),
-        lookback_overlap_center_shift=LOOKBACK_OVERLAP_CENTER_SHIFT,
-        zero_guidance_forecast=ZERO_GUIDANCE_FORECAST,
-        itrans_d_model=ITRANS_D_MODEL,
+        hybrid_flat_dataset_norm=state.hybrid_flat_dataset_norm,
+        hybrid_flat_frac_threshold=state.hybrid_flat_frac_threshold,
+        hybrid_flat_oob_coverage=state.hybrid_flat_oob_coverage,
+        lookback_overlap_center_shift=state.lookback_overlap_center_shift,
+        zero_guidance_forecast=state.zero_guidance_forecast,
+        itrans_d_model=state.itrans_d_model,
         guidance_type=_resolve_guidance_type(
-            guidance_model, o("guidance_type", None),
+            state, guidance_model, o("guidance_type", None),
         ),
-        mmpd_patch_size=MMPD_PATCH_SIZE,
+        mmpd_patch_size=state.mmpd_patch_size,
     )
     return DiffusionTSF(config, guidance_model=guidance_model)
 
@@ -1529,6 +1382,7 @@ def _paper_split_borders(dataset_name: str, n: int, seq_len: int) -> Tuple[List[
 
 
 def load_dataset(
+    state: PipelineState,
     dataset_name: str,
     variate_indices: List[int] = None,
     lookback: Optional[int] = None,
@@ -1561,16 +1415,16 @@ def load_dataset(
        - test_ds: Uses `test_stride` (allows dense eval test_stride=1 while train_stride is larger)
     """
     if stride is None:
-        stride = WINDOW_STRIDE
+        stride = state.window_stride
     if test_stride is None:
         test_stride = stride
     if lookback_overlap is None:
-        lookback_overlap = LOOKBACK_OVERLAP
+        lookback_overlap = state.lookback_overlap
     if lookback is None:
-        lookback = LOOKBACK_LENGTH
+        lookback = state.lookback_length
     if horizon is None:
-        horizon = FORECAST_LENGTH
-    path, date_col = _resolve_registry_path(dataset_name)
+        horizon = state.forecast_length
+    path, date_col = _resolve_registry_path(state, dataset_name)
     data = _load_dataset_array(path, date_col)
 
     if variate_indices is not None:
@@ -1590,28 +1444,26 @@ def load_dataset(
 
     train_slice = data[:train_end]
     use_hybrid = (
-        HYBRID_FLAT_DATASET_NORM
+        state.hybrid_flat_dataset_norm
         if hybrid_flat_dataset_norm is None
         else bool(hybrid_flat_dataset_norm)
     )
-    use_ord = USE_ORDINAL_WINDOW_NORM if use_ordinal_window_norm is None else bool(use_ordinal_window_norm)
+    use_ord = state.use_ordinal_window_norm if use_ordinal_window_norm is None else bool(use_ordinal_window_norm)
     if use_hybrid and use_ord:
         raise ValueError(
             "hybrid_flat_dataset_norm is incompatible with use_ordinal_window_norm"
         )
     frac_thr = (
-        HYBRID_FLAT_FRAC_THRESHOLD
+        state.hybrid_flat_frac_threshold
         if hybrid_flat_frac_threshold is None
         else float(hybrid_flat_frac_threshold)
     )
     oob_cov = (
-        HYBRID_FLAT_OOB_COVERAGE
+        state.hybrid_flat_oob_coverage
         if hybrid_flat_oob_coverage is None
         else float(hybrid_flat_oob_coverage)
     )
-    ms = float(MAX_SCALE if max_scale is None else max_scale)
-
-    global HYBRID_SKIP_WINDOW_NORM_MASK
+    ms = float(state.max_scale_by_dataset.get(dataset_name, state.max_scale) if max_scale is None else max_scale)
 
     if use_hybrid:
         from utils.hybrid_flat_dataset_norm import build_hybrid_affine_scales
@@ -1627,13 +1479,13 @@ def load_dataset(
         std = hybrid["std"].astype(np.float32)
         data = (data - mean) / std
         flat_mask = hybrid["flat_mask"]
-        HYBRID_SKIP_WINDOW_NORM_MASK = [bool(x) for x in flat_mask.tolist()]
+        state.skip_window_norm_variate_mask = [bool(x) for x in flat_mask.tolist()]
     else:
         mean = train_slice.mean(axis=0, keepdims=True)
         std = train_slice.std(axis=0, keepdims=True) + 1e-8
         data = (data - mean) / std
         hybrid = None
-        HYBRID_SKIP_WINDOW_NORM_MASK = None
+        state.skip_window_norm_variate_mask = None
 
     ordinal_ladder = None
     rank_full = None
@@ -1644,8 +1496,7 @@ def load_dataset(
             precompute_ranks_for=data,
         )
         rank_full = ordinal_ladder.precomputed_ranks.numpy()
-        global GLOBAL_ORDINAL_LADDER
-        GLOBAL_ORDINAL_LADDER = ordinal_ladder
+        state.ordinal_ladder = ordinal_ladder
 
     train_rank = rank_full[border1s[0]:border2s[0]] if rank_full is not None else None
     train_ds = TimeSeriesDataset(
@@ -1682,10 +1533,10 @@ def load_dataset(
 # Variate Subset Management
 # ============================================================================
 
-def generate_dataset_job(dataset_name: str, n_variates: int = None, seed: int = 42) -> Dict:
+def generate_dataset_job(state: PipelineState, dataset_name: str, n_variates: int = None, seed: int = 42) -> Dict:
     """Return one full-dataset training job (no variate partitioning)."""
-    path, date_col = _resolve_registry_path(dataset_name)
-    n_cols = get_dataset_n_cols(dataset_name)
+    path, date_col = _resolve_registry_path(state, dataset_name)
+    n_cols = get_dataset_n_cols(state, dataset_name)
     all_cols = _dataset_variate_names(path, date_col, n_cols)
     indices = list(range(len(all_cols)))
     return {'dataset_id': dataset_name, 'variate_indices': indices, 'variate_names': all_cols}
@@ -1710,11 +1561,11 @@ from models.diffusion_tsf.pipeline.train.diffusion_loop import (
 # PHASE 1A: iTransformer HP Tuning
 # ============================================================================
 
-def _itrans_targets(future: torch.Tensor, model: nn.Module, device: torch.device) -> torch.Tensor:
+def _itrans_targets(state: PipelineState, future: torch.Tensor, model: nn.Module, device: torch.device) -> torch.Tensor:
     """Align supervised horizon with iTransformer pred_len (AR may use H>pred_len)."""
     y_true = future.permute(0, 2, 1).to(device)
-    if LOOKBACK_OVERLAP > 0:
-        y_true = y_true[:, LOOKBACK_OVERLAP:, :]
+    if state.lookback_overlap > 0:
+        y_true = y_true[:, state.lookback_overlap:, :]
     pred_len = int(getattr(model, "pred_len", 0) or 0)
     if pred_len > 0:
         if y_true.shape[1] < pred_len:
@@ -1726,32 +1577,33 @@ def _itrans_targets(future: torch.Tensor, model: nn.Module, device: torch.device
 
 
 def _itrans_batch(
+    state: PipelineState,
     past: torch.Tensor,
     future: torch.Tensor,
     model: nn.Module,
     device: torch.device,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Prepare iTrans past/target: full seq_len lookback, 96-step chunk target."""
-    if _itrans_ar_enabled(future.shape[-1]):
-        past, future = _sample_itrans_ar_chunk(past, future)
+    if _itrans_ar_enabled(state, future.shape[-1]):
+        past, future = _sample_itrans_ar_chunk(state, past, future)
     past = past.to(device)
     future = future.to(device)
     x_enc = past.permute(0, 2, 1)
     seq_sl = int(getattr(model, "seq_len", x_enc.shape[1]) or x_enc.shape[1])
     if x_enc.shape[1] > seq_sl:
         x_enc = x_enc[:, -seq_sl:, :]
-    y_true = _itrans_targets(future, model, device)
+    y_true = _itrans_targets(state, future, model, device)
     return x_enc, y_true
 
 
-def train_itransformer_epoch(model, loader, optimizer, criterion, device, scheduler=None):
+def train_itransformer_epoch(state: PipelineState, model, loader, optimizer, criterion, device, scheduler=None):
     """Train iTransformer for one epoch."""
     model.train()
     total_loss = 0.0
     n_batches = 0
     
     for past, future in loader:
-        x_enc, y_true = _itrans_batch(past, future, model, device)
+        x_enc, y_true = _itrans_batch(state, past, future, model, device)
         
         optimizer.zero_grad()
         y_pred = model(x_enc, None, None, None)
@@ -1767,7 +1619,7 @@ def train_itransformer_epoch(model, loader, optimizer, criterion, device, schedu
     return total_loss / max(n_batches, 1)
 
 
-def validate_itransformer(model, loader, criterion, device):
+def validate_itransformer(state: PipelineState, model, loader, criterion, device):
     """Validate iTransformer."""
     model.eval()
     total_loss = 0.0
@@ -1775,7 +1627,7 @@ def validate_itransformer(model, loader, criterion, device):
     
     with torch.no_grad():
         for past, future in loader:
-            x_enc, y_true = _itrans_batch(past, future, model, device)
+            x_enc, y_true = _itrans_batch(state, past, future, model, device)
             y_pred = model(x_enc, None, None, None)
             loss = criterion(y_pred, y_true)
             total_loss += loss.item()
@@ -1785,6 +1637,7 @@ def validate_itransformer(model, loader, criterion, device):
 
 
 def itrans_hp_objective(
+    state: PipelineState,
     trial,
     synthetic_loader,
     val_loader,
@@ -1793,7 +1646,7 @@ def itrans_hp_objective(
     fixed_batch_size: Optional[int] = None,
     best_state: Optional[dict] = None,
     pretrained_ckpt: Optional[str] = None,
-    max_epochs: int = ITRANS_HP_PRETRAIN_MAX_EPOCHS,
+    max_epochs: Optional[int] = None,
     seq_len: Optional[int] = None,
     pred_len: Optional[int] = None,
     trial_ckpt_dir: Optional[str] = None,
@@ -1809,12 +1662,13 @@ def itrans_hp_objective(
     best_state: shared mutable dict; updated with best cross-trial model state
         whenever a new minimum val loss is achieved.
     """
-    lr = trial.suggest_categorical('learning_rate', ITRANS_PAPER_LR_GRID)
-    batch_size = fixed_batch_size if fixed_batch_size is not None else ITRANS_PAPER_BATCH_SIZE
+    lr = trial.suggest_categorical('learning_rate', state.itrans_paper_lr_grid)
+    batch_size = fixed_batch_size if fixed_batch_size is not None else state.itrans_paper_batch_size
+    max_epochs = state.itrans_hp_pretrain_max_epochs if max_epochs is None else max_epochs
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    model = create_itransformer(seq_len=seq_len, pred_len=pred_len).to(device)
+    model = create_itransformer(state, seq_len=seq_len, pred_len=pred_len).to(device)
     if pretrained_ckpt is not None and os.path.exists(pretrained_ckpt):
         ckpt = torch.load(pretrained_ckpt, map_location=device, weights_only=False)
         try:
@@ -1842,8 +1696,8 @@ def itrans_hp_objective(
     try:
         for epoch in range(epochs):
             set_realts_training_epoch(synthetic_loader, epoch)
-            train_itransformer_epoch(model, train_loader, optimizer, criterion, device)
-            val_loss = validate_itransformer(model, val_loader_local, criterion, device)
+            train_itransformer_epoch(state, model, train_loader, optimizer, criterion, device)
+            val_loss = validate_itransformer(state, model, val_loader_local, criterion, device)
 
             trial.report(val_loss, epoch)
             if trial.should_prune():
@@ -1854,7 +1708,7 @@ def itrans_hp_objective(
                 tuned = {
                     'learning_rate': lr,
                     'batch_size': batch_size,
-                    'dropout': ITRANS_PAPER_DROPOUT,
+                    'dropout': state.itrans_paper_dropout,
                 }
                 if trial_ckpt_path is not None:
                     torch.save(
@@ -1886,6 +1740,7 @@ def _promote_trial_ckpt(study, trial_dir: str, trial_filename: str, dest: str) -
 
 
 def run_itransformer_hp_tuning(
+    state: PipelineState,
     n_trials: int,
     smoke_test: bool = False,
     checkpoint_dir: Optional[str] = None,
@@ -1901,26 +1756,27 @@ def run_itransformer_hp_tuning(
     logger.info("PHASE 1A: iTransformer HP Tuning")
     logger.info(f"Trials: {n_trials}")
     logger.info(
-        f"iTransformer seq_len={ITRANSFORMER_SEQ_LEN} (diffusion lookback={LOOKBACK_LENGTH})"
+        f"iTransformer seq_len={state.itrans_lookback_length or state.lookback_length} "
+        f"(diffusion lookback={state.lookback_length})"
     )
     logger.info("=" * 60)
 
-    requested_n = SYNTHETIC_SAMPLES_HP_TUNE
-    requested_cap = synthetic_epoch_capacity_itrans_hp()
-    n_samples, epoch_cap = resolve_synthetic_params(requested_n, requested_cap, smoke_test)
+    requested_n = state.synthetic_samples_hp_tune
+    requested_cap = synthetic_epoch_capacity_itrans_hp(state)
+    n_samples, epoch_cap = resolve_synthetic_params(state, requested_n, requested_cap, smoke_test)
 
     n_val = 0 if smoke_test else min(n_samples // 10, 1000)
-    synth_cache = get_synth_cache_dir(smoke_test=smoke_test)
+    synth_cache = get_synth_cache_dir(state, smoke_test=smoke_test)
     synthetic_loader = get_synthetic_dataloader(
         batch_size=64,
-        lookback_length=LOOKBACK_LENGTH,
-        forecast_length=FORECAST_LENGTH,
-        num_variables=N_VARIATES,
+        lookback_length=state.lookback_length,
+        forecast_length=state.forecast_length,
+        num_variables=state.n_variates,
         num_samples=n_samples,
         num_workers=0,
-        lookback_overlap=LOOKBACK_OVERLAP,
+        lookback_overlap=state.lookback_overlap,
         cache_dir=synth_cache,
-        skip_cross_var_aug=(N_VARIATES > 32),
+        skip_cross_var_aug=(state.n_variates > 32),
         val_tail_n=n_val,
         synthetic_epoch_capacity=epoch_cap,
     )
@@ -1933,11 +1789,11 @@ def run_itransformer_hp_tuning(
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset   = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
 
-    train_bs = ITRANS_PAPER_BATCH_SIZE
+    train_bs = state.itrans_paper_batch_size
     train_loader = DataLoader(train_subset, batch_size=train_bs, shuffle=True, num_workers=0)
     val_loader   = DataLoader(val_subset,   batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
 
-    trial_dir = checkpoint_dir or CHECKPOINT_DIR
+    trial_dir = checkpoint_dir or state.checkpoint_dir
     os.makedirs(trial_dir, exist_ok=True)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -1947,9 +1803,9 @@ def run_itransformer_hp_tuning(
         dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         def objective(trial):
             return itrans_hp_objective(
-                trial, train_loader, val_loader, dev, smoke_test,
+                state, trial, train_loader, val_loader, dev, smoke_test,
                 fixed_batch_size=train_bs,
-                max_epochs=ITRANS_HP_PRETRAIN_MAX_EPOCHS,
+                max_epochs=state.itrans_hp_pretrain_max_epochs,
                 trial_ckpt_dir=trial_dir,
             )
         return objective
@@ -1973,7 +1829,7 @@ def run_itransformer_hp_tuning(
 
     best_params = dict(study.best_params)
     best_params['batch_size'] = train_bs
-    best_params['dropout'] = ITRANS_PAPER_DROPOUT
+    best_params['dropout'] = state.itrans_paper_dropout
     logger.info(
         "Best iTransformer params: lr=%.2e bs=%s dropout=%.3f val=%.4f",
         best_params['learning_rate'], best_params['batch_size'],
@@ -1990,6 +1846,7 @@ def run_itransformer_hp_tuning(
 
 
 def run_patch_guidance_synthetic_tuning(
+    state: PipelineState,
     n_trials: int,
     smoke_test: bool = False,
     checkpoint_dir: Optional[str] = None,
@@ -2001,22 +1858,22 @@ def run_patch_guidance_synthetic_tuning(
     logger.info("Trials: %s", n_trials)
     logger.info("=" * 60)
 
-    requested_n = SYNTHETIC_SAMPLES_HP_TUNE
-    requested_cap = synthetic_epoch_capacity_itrans_hp()
-    n_samples, epoch_cap = resolve_synthetic_params(requested_n, requested_cap, smoke_test)
+    requested_n = state.synthetic_samples_hp_tune
+    requested_cap = synthetic_epoch_capacity_itrans_hp(state)
+    n_samples, epoch_cap = resolve_synthetic_params(state, requested_n, requested_cap, smoke_test)
 
     n_val = 0 if smoke_test else min(n_samples // 10, 1000)
-    synth_cache = get_synth_cache_dir(smoke_test=smoke_test)
+    synth_cache = get_synth_cache_dir(state, smoke_test=smoke_test)
     synthetic_loader = get_synthetic_dataloader(
         batch_size=64,
-        lookback_length=LOOKBACK_LENGTH,
-        forecast_length=FORECAST_LENGTH,
-        num_variables=N_VARIATES,
+        lookback_length=state.lookback_length,
+        forecast_length=state.forecast_length,
+        num_variables=state.n_variates,
         num_samples=n_samples,
         num_workers=0,
-        lookback_overlap=LOOKBACK_OVERLAP,
+        lookback_overlap=state.lookback_overlap,
         cache_dir=synth_cache,
-        skip_cross_var_aug=(N_VARIATES > 32),
+        skip_cross_var_aug=(state.n_variates > 32),
         val_tail_n=n_val,
         synthetic_epoch_capacity=epoch_cap,
     )
@@ -2029,11 +1886,11 @@ def run_patch_guidance_synthetic_tuning(
     train_subset = Subset(dataset, list(range(len(dataset) - n_val)))
     val_subset = Subset(dataset, list(range(len(dataset) - n_val, len(dataset))))
 
-    train_bs = ITRANS_PAPER_BATCH_SIZE
+    train_bs = state.itrans_paper_batch_size
     train_loader = DataLoader(train_subset, batch_size=train_bs, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_subset, batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
 
-    trial_dir = checkpoint_dir or CHECKPOINT_DIR
+    trial_dir = checkpoint_dir or state.checkpoint_dir
     os.makedirs(trial_dir, exist_ok=True)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -2044,9 +1901,9 @@ def run_patch_guidance_synthetic_tuning(
 
         def objective(trial):
             return patch_guidance_hp_objective(
-                trial, train_loader, val_loader, N_VARIATES, dev, smoke_test,
+                state, trial, train_loader, val_loader, state.n_variates, dev, smoke_test,
                 fixed_batch_size=train_bs,
-                max_epochs=ITRANS_HP_PRETRAIN_MAX_EPOCHS,
+                max_epochs=state.itrans_hp_pretrain_max_epochs,
                 trial_ckpt_dir=trial_dir,
             )
 
@@ -2084,6 +1941,7 @@ def run_patch_guidance_synthetic_tuning(
 
 
 def run_itransformer_finetune_hp_tuning(
+    state: PipelineState,
     dataset_name: str,
     variate_indices: List[int],
     pretrained_ckpt: str,
@@ -2098,34 +1956,34 @@ def run_itransformer_finetune_hp_tuning(
 ) -> Tuple[Dict, Optional[str]]:
     """HP tune iTransformer on real data using Optuna parallel workers."""
     label = subset_id or dataset_name
-    warm = (None if ITRANS_REAL_COLD_START else pretrained_ckpt)
+    warm = (None if state.itrans_real_cold_start else pretrained_ckpt)
     logger.info("=" * 60)
     logger.info(f"iTrans Finetune HP Tuning: {label} ({n_trials} trials, {parallel_workers} workers)")
     logger.info(
-        f"{ITRANS_HP_FINETUNE_MAX_EPOCHS} epochs per trial, "
+        f"{state.itrans_hp_finetune_max_epochs} epochs per trial, "
         f"warm_start={'no (cold start)' if warm is None else os.path.basename(warm)}"
     )
     logger.info("=" * 60)
 
     train_ds, val_ds, _, _ = load_dataset(
-        dataset_name, variate_indices,
-        stride=train_stride or WINDOW_STRIDE,
+        state, dataset_name, variate_indices,
+        stride=train_stride or state.window_stride,
         test_stride=1 if test_stride is None else test_stride,
     )
     if smoke_test:
         train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
         val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
 
-    train_bs = ITRANS_PAPER_BATCH_SIZE
+    train_bs = state.itrans_paper_batch_size
     train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
 
-    trial_dir = checkpoint_dir or CHECKPOINT_DIR
+    trial_dir = checkpoint_dir or state.checkpoint_dir
     os.makedirs(trial_dir, exist_ok=True)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    ds_lb, ds_hz = dataset_window_lengths(dataset_name)
-    itrans_seq, itrans_pred = itrans_model_lengths(ds_lb, ds_hz)
+    ds_lb, ds_hz = dataset_window_lengths(state, dataset_name)
+    itrans_seq, itrans_pred = itrans_model_lengths(state, ds_lb, ds_hz)
 
     from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
 
@@ -2133,10 +1991,10 @@ def run_itransformer_finetune_hp_tuning(
         dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         def objective(trial):
             return itrans_hp_objective(
-                trial, train_loader, val_loader, dev, smoke_test,
+                state, trial, train_loader, val_loader, dev, smoke_test,
                 fixed_batch_size=train_bs,
                 pretrained_ckpt=warm,
-                max_epochs=ITRANS_HP_FINETUNE_MAX_EPOCHS,
+                max_epochs=state.itrans_hp_finetune_max_epochs,
                 trial_ckpt_dir=trial_dir,
                 seq_len=itrans_seq,
                 pred_len=itrans_pred,
@@ -2158,7 +2016,7 @@ def run_itransformer_finetune_hp_tuning(
 
     best_params = dict(study.best_params)
     best_params['batch_size'] = train_bs
-    best_params['dropout'] = ITRANS_PAPER_DROPOUT
+    best_params['dropout'] = state.itrans_paper_dropout
     best_params['lookback_length'] = itrans_seq
     best_params['forecast_length'] = itrans_pred
 

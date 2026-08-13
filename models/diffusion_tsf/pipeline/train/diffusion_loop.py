@@ -37,7 +37,7 @@ def train_diffusion_epoch(
 
     for batch_idx, (past, future) in enumerate(train_loader):
         past, future = past.to(device), future.to(device)
-        with amp_context():
+        with amp_context(bool(model.config.use_amp)):
             loss = model.get_loss(past, future) / accum_steps
         loss.backward()
         if (batch_idx + 1) % accum_steps == 0:
@@ -77,7 +77,7 @@ def validate_diffusion_epoch(
     with torch.no_grad():
         for past, future in val_loader:
             past, future = past.to(device), future.to(device)
-            with amp_context():
+            with amp_context(bool(model.config.use_amp)):
                 loss = model.get_loss(past, future)
             total_loss += float(loss.item())
             n_batches += 1

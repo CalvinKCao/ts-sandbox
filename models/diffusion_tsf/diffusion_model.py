@@ -5,12 +5,13 @@ Binary CDF images, FactorizedDiT denoiser, iTransformer guidance channel.
 """
 
 import math
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .config import DiffusionTSFConfig
 from .preprocessing import TimeSeriesTo2D
@@ -125,6 +126,195 @@ def beam_search_decoder(
     return torch.stack(results)  # (batch, seq_len)
 
 
+@dataclass(frozen=True)
+class BinaryLossBreakdown:
+    regular: torch.Tensor
+    x0: torch.Tensor
+    zt: torch.Tensor
+
+
+class BinaryLossFunction:
+    """Stateless BCE, min-SNR, and deterministic-anchor loss calculator."""
+
+    def __init__(
+        self,
+        config: DiffusionTSFConfig,
+        scheduler: BinaryDiffusionScheduler,
+        weight_tensor: Callable[..., torch.Tensor],
+    ) -> None:
+        self.config = config
+        self.scheduler = scheduler
+        self._weight_tensor = weight_tensor
+
+    def bce(
+        self,
+        logits: torch.Tensor,
+        target: torch.Tensor,
+        *,
+        t_flat: Optional[torch.Tensor] = None,
+        weight_source: Optional[torch.Tensor] = None,
+        element_mask: Optional[torch.Tensor] = None,
+        apply_min_snr: bool,
+    ) -> torch.Tensor:
+        per_elem = F.binary_cross_entropy_with_logits(logits, target.float(), reduction="none")
+        per_elem = per_elem * self._weight_tensor(
+            target, weight_source=weight_source,
+        ).to(dtype=per_elem.dtype)
+        if element_mask is not None:
+            if element_mask.shape != per_elem.shape:
+                raise ValueError(
+                    f"element_mask shape {tuple(element_mask.shape)} != loss shape {tuple(per_elem.shape)}"
+                )
+            per_elem = per_elem * element_mask
+            reduction_denom = element_mask.sum().clamp_min(1.0)
+        else:
+            reduction_denom = torch.tensor(float(per_elem.numel()), device=per_elem.device)
+        if not apply_min_snr or t_flat is None or self.config.loss_weighting == "none":
+            return per_elem.sum() / reduction_denom
+        beta_t = self.scheduler.betas[t_flat].clamp(1e-5, 1.0 - 1e-5)
+        snr = ((1.0 - beta_t) ** 2) / (beta_t ** 2)
+        weight = torch.minimum(snr, torch.full_like(snr, self.config.min_snr_gamma)) / snr
+        view_shape = (-1,) + (1,) * (per_elem.dim() - 1)
+        return (per_elem * weight.view(view_shape)).sum() / reduction_denom
+
+    def regular(
+        self,
+        primary_logits: torch.Tensor,
+        secondary_logits: torch.Tensor,
+        clean_target: torch.Tensor,
+        noise_target: torch.Tensor,
+        t_flat: torch.Tensor,
+        *,
+        element_mask: Optional[torch.Tensor] = None,
+    ) -> BinaryLossBreakdown:
+        if self.config.prediction_target == "epsilon":
+            x0_target, zt_target = noise_target, clean_target
+        else:
+            x0_target, zt_target = clean_target, noise_target
+        x0 = self.bce(
+            primary_logits, x0_target, t_flat=t_flat,
+            weight_source=clean_target, element_mask=element_mask,
+            apply_min_snr=True,
+        )
+        zt = self.bce(
+            secondary_logits, zt_target, t_flat=t_flat,
+            weight_source=clean_target, element_mask=element_mask,
+            apply_min_snr=True,
+        )
+        return BinaryLossBreakdown(regular=x0 + zt, x0=x0, zt=zt)
+
+    def combine_anchor(self, regular: torch.Tensor, anchor: torch.Tensor) -> torch.Tensor:
+        lam = float(self.config.deterministic_anchor_lambda)
+        return lam * regular + (1.0 - lam) * anchor
+
+
+class BinaryDataPreparer:
+    """Pure normalized-series to binary-CDF conversion operations."""
+
+    def __init__(self, config: DiffusionTSFConfig, to_2d: TimeSeriesTo2D) -> None:
+        self.config = config
+        self.to_2d = to_2d
+
+    def _subsample(self, x: torch.Tensor) -> torch.Tensor:
+        stride = max(1, int(getattr(self.config, "representation_time_stride", 1)))
+        return x if stride == 1 else x[..., ::stride]
+
+    def encode_binary(self, x: torch.Tensor) -> torch.Tensor:
+        return self.to_2d(self._subsample(x))
+
+    def encode_staged(
+        self,
+        x: torch.Tensor,
+        *,
+        ordinal_rank_max: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        x = self._subsample(x)
+        coarse_h = int(getattr(self.config, "coarse_image_height", self.config.image_height))
+        fine_h = int(getattr(self.config, "fine_image_height", self.config.image_height))
+        if ordinal_rank_max is not None:
+            coarse, fine = self.to_2d.encode_dual_heights_bounded(
+                x, coarse_height=coarse_h, fine_height=fine_h, value_min=0.0,
+                value_max_per_variate=ordinal_rank_max,
+            )
+        else:
+            coarse, fine = self.to_2d.encode_dual_heights(
+                x, coarse_height=coarse_h, fine_height=fine_h,
+            )
+        return {"coarse": coarse, "fine": fine}
+
+    @staticmethod
+    def resize_cdf_height(image: torch.Tensor, target_height: int) -> torch.Tensor:
+        if image.shape[2] == target_height:
+            return image
+        flat = image.reshape(-1, 1, image.shape[2], image.shape[3])
+        resized = F.interpolate(flat, size=(target_height, image.shape[3]), mode="bilinear", align_corners=False)
+        return resized.reshape(image.shape[0], image.shape[1], target_height, image.shape[3])
+
+    def coarse_cdf_to_height(self, coarse_map: torch.Tensor, target_height: int) -> torch.Tensor:
+        if coarse_map.shape[2] == target_height:
+            return coarse_map
+        values = self.to_2d._decode_occupancy_in_range(
+            coarse_map, value_range=self.config.max_scale, cdf_decoder="mean",
+        )
+        return self.to_2d._encode_values_in_range(
+            values, value_range=self.config.max_scale, height=target_height,
+        )
+
+
+class DiffusionStageStrategy:
+    name: str
+    uses_patch_abs_embedding = False
+
+    def forward(self, model: "DiffusionTSF", past, future, t, **kwargs) -> Dict[str, torch.Tensor]:
+        raise NotImplementedError
+
+    def generate(self, model: "DiffusionTSF", past, **kwargs) -> Dict[str, torch.Tensor]:
+        raise NotImplementedError
+
+    def capture_diagnostics(self, model: "DiffusionTSF", past, future, **kwargs) -> Dict[str, Any]:
+        raise NotImplementedError
+
+
+class CoarseStageStrategy(DiffusionStageStrategy):
+    name = "coarse"
+
+    def forward(self, model, past, future, t, **_kwargs):
+        return model._forward_binary_coarse(past, future, t)
+
+    def generate(self, model, past, **kwargs):
+        return model._generate_binary_coarse(past, **kwargs)
+
+    def capture_diagnostics(self, model, past, future, **kwargs):
+        return model._diagnostic_capture_coarse(past, future, **kwargs)
+
+
+class PatchRefineStageStrategy(DiffusionStageStrategy):
+    name = "patch_refine"
+    uses_patch_abs_embedding = True
+
+    def forward(self, model, past, future, t, *, patch_col0=None, variate_keep=None, **_kwargs):
+        return model._forward_binary_patch_refine(
+            past, future, t, expand_t_per_window=t is not None,
+            patch_col0=patch_col0, variate_keep=variate_keep,
+        )
+
+    def generate(self, model, past, **kwargs):
+        return model._generate_binary_patch_refine(past, **kwargs)
+
+    def capture_diagnostics(self, model, past, future, **kwargs):
+        return model._diagnostic_capture_patch_refine(past, future, **kwargs)
+
+
+def build_diffusion_stage_strategy(stage: str) -> DiffusionStageStrategy:
+    strategies = {"coarse": CoarseStageStrategy, "patch_refine": PatchRefineStageStrategy}
+    try:
+        return strategies[stage]()
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported diffusion_stage={stage!r}; only coarse and patch_refine remain"
+        ) from exc
+
+
 class DiffusionTSF(nn.Module):
     """Binary diffusion TSF with FactorizedDiT and optional iTransformer guidance."""
 
@@ -135,6 +325,7 @@ class DiffusionTSF(nn.Module):
     ):
         super().__init__()
         self.config = config
+        self.stage_strategy = build_diffusion_stage_strategy(config.diffusion_stage)
 
         needs_guidance_model = config.use_guidance_channel or not config.disable_cross_attention
         if needs_guidance_model and guidance_model is None:
@@ -147,10 +338,10 @@ class DiffusionTSF(nn.Module):
             height=config.image_height,
             max_scale=config.max_scale,
         )
+        self.data_prep = BinaryDataPreparer(config, self.to_2d)
         self.guidance_model = guidance_model if needs_guidance_model else None
 
         backbone_in_channels = config.backbone_in_channels
-        is_patch_refine = config.diffusion_stage == "patch_refine"
         dit_patch = config.dit_patch_size
         cond_patch = config.dit_cond_patch_size or (8, 8)
         self.noise_predictor = FactorizedDiT(
@@ -176,7 +367,7 @@ class DiffusionTSF(nn.Module):
             ),
             max_variates=max(config.num_variables, 512),
             cross_variate_context_bias=config.cross_variate_context_bias,
-            use_patch_abs_embedding=is_patch_refine,
+            use_patch_abs_embedding=self.stage_strategy.uses_patch_abs_embedding,
             max_coarse_bins=max(16, int(config.coarse_image_height)),
             max_horizon_steps=max(
                 1024,
@@ -204,6 +395,11 @@ class DiffusionTSF(nn.Module):
             length_mode=getattr(config, "binary_length_mode", "none"),
             length_g=float(getattr(config, "binary_length_g", 1.0)),
             length_scale=float(getattr(config, "binary_length_scale", 1.0)),
+        )
+        self.loss_function = BinaryLossFunction(
+            config,
+            self.binary_scheduler,
+            self._binary_bce_weight_tensor,
         )
 
         self._ordinal_apply_ood_shift: bool = False
@@ -424,7 +620,7 @@ class DiffusionTSF(nn.Module):
         if self.guidance_model is None:
             raise RuntimeError(
                 "guidance_model is None; cannot emit guidance_prediction_global_norm "
-                f"(stage={self.config.diffusion_stage})"
+                f"(stage={self.stage_strategy.name})"
             )
         if bool(getattr(self.config, "zero_guidance_forecast", False)):
             raise RuntimeError(
@@ -767,14 +963,7 @@ class DiffusionTSF(nn.Module):
 
     def encode_to_2d_binary(self, x: torch.Tensor) -> torch.Tensor:
         """Encode 1D series to a hard binary CDF image without blur."""
-        return self.to_2d(self._subsample_repr_time(x))
-
-    def _staged_image_heights(self) -> Tuple[int, int, int]:
-        return (
-            int(getattr(self.config, "coarse_image_height", self.config.image_height)),
-            int(getattr(self.config, "fine_image_height", self.config.image_height)),
-            int(getattr(self.config, "finer_image_height", self.config.image_height)),
-        )
+        return self.data_prep.encode_binary(x)
 
     def _uses_global_ordinal_encoding(self) -> bool:
         return bool(
@@ -893,32 +1082,10 @@ class DiffusionTSF(nn.Module):
         )
 
     def _encode_staged_maps(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        x = self._subsample_repr_time(x)
-        coarse_h, fine_h, finer_h = self._staged_image_heights()
+        ordinal_rank_max = None
         if self._uses_global_ordinal_encoding():
-            vmax = self._ordinal_rank_max_tensor(x.device, dtype=x.dtype)
-            coarse, fine = self.to_2d.encode_dual_heights_bounded(
-                x,
-                coarse_height=coarse_h,
-                fine_height=fine_h,
-                value_min=0.0,
-                value_max_per_variate=vmax,
-            )
-            return {"coarse": coarse, "fine": fine}
-        if getattr(self.config, "use_triple_scale", False):
-            coarse, fine, finer = self.to_2d.encode_triple_heights(
-                x,
-                coarse_height=coarse_h,
-                fine_height=fine_h,
-                finer_height=finer_h,
-            )
-            return {"coarse": coarse, "fine": fine, "finer": finer}
-        coarse, fine = self.to_2d.encode_dual_heights(
-            x,
-            coarse_height=coarse_h,
-            fine_height=fine_h,
-        )
-        return {"coarse": coarse, "fine": fine}
+            ordinal_rank_max = self._ordinal_rank_max_tensor(x.device, dtype=x.dtype)
+        return self.data_prep.encode_staged(x, ordinal_rank_max=ordinal_rank_max)
 
 
 
@@ -948,25 +1115,10 @@ class DiffusionTSF(nn.Module):
 
 
     def _resize_cdf_height(self, image: torch.Tensor, target_height: int) -> torch.Tensor:
-        if image.shape[2] == target_height:
-            return image
-        flat = image.reshape(-1, 1, image.shape[2], image.shape[3])
-        resized = F.interpolate(flat, size=(target_height, image.shape[3]), mode="bilinear", align_corners=False)
-        return resized.reshape(image.shape[0], image.shape[1], target_height, image.shape[3])
+        return self.data_prep.resize_cdf_height(image, target_height)
 
     def _coarse_cdf_to_height(self, coarse_map: torch.Tensor, target_height: int) -> torch.Tensor:
-        if coarse_map.shape[2] == target_height:
-            return coarse_map
-        coarse_value = self.to_2d._decode_occupancy_in_range(
-            coarse_map,
-            value_range=self.config.max_scale,
-            cdf_decoder="mean",
-        )
-        return self.to_2d._encode_values_in_range(
-            coarse_value,
-            value_range=self.config.max_scale,
-            height=target_height,
-        )
+        return self.data_prep.coarse_cdf_to_height(coarse_map, target_height)
 
     def decode_dual_from_2d(
         self,
@@ -997,30 +1149,6 @@ class DiffusionTSF(nn.Module):
             squeeze_univariate=(coarse_map.shape[1] == 1),
         )
 
-    def decode_triple_from_2d(
-        self,
-        coarse_map: torch.Tensor,
-        fine_map: torch.Tensor,
-        finer_map: torch.Tensor,
-        from_diffusion: bool = False,
-        decoder_method: str = "mean",
-    ) -> torch.Tensor:
-        """Decode triple-scale CDF maps to normalized 1D values."""
-        if from_diffusion:
-            coarse_map = (coarse_map + 1.0) / 2.0
-            fine_map = (fine_map + 1.0) / 2.0
-            finer_map = (finer_map + 1.0) / 2.0
-        cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
-        temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
-        return self.to_2d.decode_triple(
-            coarse_map,
-            fine_map,
-            finer_map,
-            cdf_decoder=cdf_decoder,
-            expectation_sharpen_temp=temperature,
-            squeeze_univariate=(coarse_map.shape[1] == 1),
-        )
-    
     def decode_from_2d(
         self,
         image: torch.Tensor,
@@ -1125,24 +1253,14 @@ class DiffusionTSF(nn.Module):
         variate_keep: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (binary factorized DiT path)."""
-        if self.config.diffusion_stage == "coarse":
-            return self._forward_binary_staged(past, future, t)
-        if self.config.diffusion_stage == "patch_refine":
-            # Training loops sample one timestep per window; expand onto crops.
-            return self._forward_binary_patch_refine(
-                past, future, t,
-                expand_t_per_window=t is not None,
-                patch_col0=patch_col0,
-                variate_keep=variate_keep,
-            )
-        if self.config.diffusion_stage in {
-            "fine", "finer", "vertical_dual", "channel_dual",
-        }:
-            raise ValueError(
-                f"obsolete diffusion_stage={self.config.diffusion_stage!r}; "
-                "only coarse + patch_refine remain"
-            )
-        return self._forward_binary_factorized(past, future, t)
+        return self.stage_strategy.forward(
+            self,
+            past,
+            future,
+            t,
+            patch_col0=patch_col0,
+            variate_keep=variate_keep,
+        )
 
     @torch.no_grad()
     def generate(
@@ -1188,18 +1306,7 @@ class DiffusionTSF(nn.Module):
             future_fine_2d=future_fine_2d,
             emit_guidance_prediction=bool(emit_guidance_prediction),
         )
-        if self.config.diffusion_stage == "coarse":
-            return self._generate_binary_staged(past, **gen_common)
-        if self.config.diffusion_stage == "patch_refine":
-            return self._generate_binary_patch_refine(past, **gen_common)
-        if self.config.diffusion_stage in {
-            "fine", "finer", "vertical_dual", "channel_dual",
-        }:
-            raise ValueError(
-                f"obsolete diffusion_stage={self.config.diffusion_stage!r}; "
-                "only coarse + patch_refine remain"
-            )
-        return self._generate_binary_factorized(past, **gen_common)
+        return self.stage_strategy.generate(self, past, **gen_common)
 
 
     def _cdf_distance_weight_tensor(
@@ -1214,112 +1321,8 @@ class DiffusionTSF(nn.Module):
         from a random flip mask — that would scramble the distance geometry.
         """
         alpha = float(getattr(self.config, "binary_cdf_distance_alpha", 1.0))
-        coarse_h = None
-        per_ch = False
-        if self.config.diffusion_stage == "vertical_dual":
-            coarse_h = int(self.config.coarse_image_height)
-        elif self.config.diffusion_stage == "channel_dual":
-            per_ch = True
         src = target if weight_source is None else weight_source
-        return self.to_2d.cdf_distance_weights(
-            src, alpha, coarse_height=coarse_h, per_occupancy_channel=per_ch,
-        )
-
-    def _interpolate_global_ordinal_ladder(
-        self,
-        ranks: torch.Tensor,
-        variate_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        """Linearly map continuous ordinal ranks back to global z-score values."""
-        ladder = self.config.ordinal_ladder
-        if ladder is None:
-            raise ValueError("ordinal ladder is required for normalized-value row weights")
-        values = ladder.values[0].to(device=ranks.device, dtype=ranks.dtype)
-        n_unique = ladder.n_unique[0].to(device=ranks.device)
-        out = torch.empty_like(ranks)
-        for vi in range(values.shape[0]):
-            mask = variate_indices == vi
-            if not bool(mask.any()):
-                continue
-            k = int(n_unique[vi].item())
-            if k <= 1:
-                out[mask] = values[vi, 0]
-                continue
-            r = ranks[mask].clamp(0.0, float(k - 1))
-            lo = r.floor().long()
-            hi = (lo + 1).clamp_max(k - 1)
-            frac = r - lo.to(dtype=r.dtype)
-            ladder_values = values[vi, :k]
-            out[mask] = ladder_values[lo] + frac * (ladder_values[hi] - ladder_values[lo])
-        return out
-
-    def _normalise_value_width_weights(self, widths: torch.Tensor) -> torch.Tensor:
-        """Keep each scale half at mean weight one while preserving row ratios."""
-        mean = widths.mean(dim=(-2, -1), keepdim=True)
-        eps = torch.finfo(widths.dtype).eps
-        return torch.where(
-            mean > eps,
-            widths / mean.clamp_min(eps),
-            torch.ones_like(widths),
-        )
-
-    def _normalized_value_width_weight_tensor(self, source: torch.Tensor) -> torch.Tensor:
-        """Per-CDF-row weights from global z-score widths of ordinal bins.
-
-        Coarse and fine halves are normalized separately so the existing 50/50
-        dual-scale loss balance remains unchanged. Within either half, a row
-        spanning seven times more normalized value range gets seven times BCE weight.
-        """
-        if not getattr(self.config, "binary_use_normalized_value_width_weighted_bce", False):
-            return torch.ones_like(source)
-        if not self._uses_global_ordinal_encoding():
-            return torch.ones_like(source)
-        if self.config.diffusion_stage != "vertical_dual":
-            raise ValueError("normalized-value row weights currently require diffusion_stage=vertical_dual")
-        if source.dim() != 4 or source.shape[1] != 1:
-            raise ValueError(
-                "vertical_dual normalized-value row weights expect (BV, 1, H, W), "
-                f"got {tuple(source.shape)}"
-            )
-
-        BV, _, H, W = source.shape
-        coarse_h = int(self.config.coarse_image_height)
-        fine_h = H - coarse_h
-        if fine_h <= 0:
-            raise ValueError(f"vertical_dual H={H} must exceed coarse_height={coarse_h}")
-        n_variates = int(self.config.num_variables)
-        if n_variates <= 0 or BV % n_variates != 0:
-            raise ValueError(f"flat batch {BV} is incompatible with n_variates={n_variates}")
-
-        variate_indices = torch.arange(n_variates, device=source.device).repeat(BV // n_variates)
-        rank_max = self._ordinal_rank_max_tensor(source.device, dtype=source.dtype)
-        if rank_max.numel() != n_variates:
-            raise ValueError(
-                f"ordinal ladder variates={rank_max.numel()} != model variates={n_variates}"
-            )
-        rank_max_flat = rank_max.index_select(0, variate_indices)
-
-        coarse_frac = torch.linspace(0.0, 1.0, coarse_h + 1, device=source.device, dtype=source.dtype)
-        coarse_ranks = rank_max_flat[:, None, None] * coarse_frac[None, :, None]
-        coarse_values = self._interpolate_global_ordinal_ladder(coarse_ranks, variate_indices)
-        coarse_widths = (coarse_values[:, 1:] - coarse_values[:, :-1]).abs().expand(-1, -1, W)
-
-        coarse_bins = self.to_2d.bin_indices_from_cdf(source[:, :, :coarse_h, :]).squeeze(1)
-        fine_frac = torch.linspace(0.0, 1.0, fine_h + 1, device=source.device, dtype=source.dtype)
-        fine_ranks = rank_max_flat[:, None, None] * (
-            coarse_bins[:, None, :] + fine_frac[None, :, None]
-        ) / float(coarse_h)
-        fine_values = self._interpolate_global_ordinal_ladder(fine_ranks, variate_indices)
-        fine_widths = (fine_values[:, 1:] - fine_values[:, :-1]).abs()
-
-        row_weights = torch.cat(
-            [
-                self._normalise_value_width_weights(coarse_widths),
-                self._normalise_value_width_weights(fine_widths),
-            ],
-            dim=1,
-        )
-        return row_weights.unsqueeze(1)
+        return self.to_2d.cdf_distance_weights(src, alpha)
 
     def _binary_bce_weight_tensor(
         self,
@@ -1327,15 +1330,12 @@ class DiffusionTSF(nn.Module):
         *,
         weight_source: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Combine optional CDF-distance and normalized-value row weights."""
-        src = target if weight_source is None else weight_source
+        """Combine the supported CDF-distance weights."""
         weights = torch.ones_like(target)
         if self.config.binary_use_boundary_weighted_bce:
             weights = weights * self._cdf_distance_weight_tensor(
                 target, weight_source=weight_source,
             ).to(dtype=weights.dtype)
-        if getattr(self.config, "binary_use_normalized_value_width_weighted_bce", False):
-            weights = weights * self._normalized_value_width_weight_tensor(src).to(dtype=weights.dtype)
         return weights
 
     def _binary_plain_bce_loss(
@@ -1347,17 +1347,13 @@ class DiffusionTSF(nn.Module):
         element_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Unweighted BCE for binary CDF images (optional distance weights)."""
-        per_elem = F.binary_cross_entropy_with_logits(logits, target.float(), reduction="none")
-        per_elem = per_elem * self._binary_bce_weight_tensor(
-            target, weight_source=weight_source,
+        return self.loss_function.bce(
+            logits,
+            target,
+            weight_source=weight_source,
+            element_mask=element_mask,
+            apply_min_snr=False,
         )
-        if element_mask is not None:
-            if element_mask.shape != per_elem.shape:
-                raise ValueError(
-                    f"element_mask shape {tuple(element_mask.shape)} != loss shape {tuple(per_elem.shape)}"
-                )
-            return (per_elem * element_mask).sum() / element_mask.sum().clamp_min(1.0)
-        return per_elem.mean()
 
     def _binary_weighted_bce_loss(
         self,
@@ -1369,82 +1365,14 @@ class DiffusionTSF(nn.Module):
         element_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """BCE with optional CDF-distance + min-SNR timestep weighting."""
-        per_elem = F.binary_cross_entropy_with_logits(logits, target.float(), reduction="none")
-        per_elem = per_elem * self._binary_bce_weight_tensor(
-            target, weight_source=weight_source,
+        return self.loss_function.bce(
+            logits,
+            target,
+            t_flat=t_flat,
+            weight_source=weight_source,
+            element_mask=element_mask,
+            apply_min_snr=True,
         )
-        if element_mask is not None:
-            if element_mask.shape != per_elem.shape:
-                raise ValueError(
-                    f"element_mask shape {tuple(element_mask.shape)} != loss shape {tuple(per_elem.shape)}"
-                )
-            per_elem = per_elem * element_mask
-            reduction_denom = element_mask.sum().clamp_min(1.0)
-        else:
-            reduction_denom = torch.tensor(float(per_elem.numel()), device=per_elem.device)
-        if t_flat is None or self.config.loss_weighting == "none":
-            return per_elem.sum() / reduction_denom
-        beta_t = self.binary_scheduler.betas[t_flat].clamp(1e-5, 1.0 - 1e-5)
-        snr = ((1.0 - beta_t) ** 2) / (beta_t ** 2)
-        weight = torch.minimum(snr, torch.full_like(snr, self.config.min_snr_gamma)) / snr
-        view_shape = (-1,) + (1,) * (per_elem.dim() - 1)
-        return (per_elem * weight.view(view_shape)).sum() / reduction_denom
-
-    def _soft_decode_vertical_dual_1d(
-        self,
-        soft_canvas: torch.Tensor,
-        *,
-        B: int,
-        V: int,
-    ) -> torch.Tensor:
-        """Soft (pre-threshold) stacked canvas → normalized 1D via decode_dual."""
-        Hc = int(self.config.coarse_image_height)
-        # soft_canvas: (BV, 1, H, W) or (B, V, H, W)
-        if soft_canvas.dim() == 4 and soft_canvas.shape[1] == 1 and soft_canvas.shape[0] == B * V:
-            canvas = soft_canvas.reshape(B, V, soft_canvas.shape[2], soft_canvas.shape[3])
-        else:
-            canvas = soft_canvas
-        coarse, fine = self.to_2d.split_vertical_dual(canvas, Hc)
-        return self._decode_staged_combined_1d(coarse, fine, cdf_decoder="mean")
-
-    def _soft_decode_channel_dual_1d(
-        self,
-        soft_canvas: torch.Tensor,
-        *,
-        B: int,
-        V: int,
-    ) -> torch.Tensor:
-        """Soft (BV, 2, H, W) channel-stacked canvas → normalized 1D."""
-        if soft_canvas.dim() != 4 or soft_canvas.shape[1] != 2:
-            raise ValueError(
-                f"channel_dual soft canvas expected (BV, 2, H, W), got {tuple(soft_canvas.shape)}"
-            )
-        coarse, fine = self.to_2d.split_channel_dual_flat(soft_canvas, B=B, V=V)
-        return self._decode_staged_combined_1d(coarse, fine, cdf_decoder="mean")
-
-    def _anchor_soft_decode_mse(
-        self,
-        soft_1d: torch.Tensor,
-        future_tgt: torch.Tensor,
-    ) -> torch.Tensor:
-        """Soft-decode MSE in O(1) space so it stays comparable to map BCE.
-
-        Ordinal finetune targets are raw ranks (hundreds–thousands). MSE in that
-        space swamps BCE even at a tiny outer weight; divide by per-variate
-        rank_max so both sides live in ~[0, 1]. Window-norm / synth targets are
-        already O(1), so leave them alone.
-        """
-        if soft_1d.shape != future_tgt.shape:
-            raise ValueError(
-                f"soft decode shape {tuple(soft_1d.shape)} != target {tuple(future_tgt.shape)}"
-            )
-        if self._uses_global_ordinal_encoding():
-            vmax = self._ordinal_rank_max_tensor(
-                soft_1d.device, dtype=soft_1d.dtype,
-            ).reshape(1, -1, 1).clamp_min(1.0)
-            soft_1d = soft_1d / vmax
-            future_tgt = future_tgt / vmax
-        return F.mse_loss(soft_1d, future_tgt)
 
     def _occupancy_channels(self) -> int:
         return int(getattr(self.config, "data_occupancy_channels", 1))
@@ -1614,21 +1542,9 @@ class DiffusionTSF(nn.Module):
         BV = B * V
         past_tail_raw = past_raw[..., -past_tail_len:]
         raw_maps = self._encode_staged_maps(past_tail_raw)
-        if self.config.diffusion_stage == "vertical_dual":
-            stacked = self.to_2d.stack_vertical_dual(raw_maps["coarse"], raw_maps["fine"])
-            past_repr_w = stacked.shape[-1]
-            raw_cond = stacked.reshape(BV, 1, H, past_repr_w)
-        elif self.config.diffusion_stage == "channel_dual":
-            raw_cond = self.to_2d.stack_channel_dual_flat(
-                raw_maps["coarse"], raw_maps["fine"],
-            )
-        else:
-            if self.config.diffusion_stage == "coarse":
-                raw_coarse = self._resize_cdf_height(raw_maps["coarse"], H)
-            else:
-                raw_coarse = self._coarse_cdf_to_height(raw_maps["coarse"], H)
-            past_repr_w = raw_maps["coarse"].shape[-1]
-            raw_cond = raw_coarse.reshape(BV, 1, H, past_repr_w)
+        raw_coarse = self._resize_cdf_height(raw_maps["coarse"], H)
+        past_repr_w = raw_maps["coarse"].shape[-1]
+        raw_cond = raw_coarse.reshape(BV, 1, H, past_repr_w)
         if self._past_cond_resize_to_horizon():
             raw_cond = F.interpolate(
                 raw_cond,
@@ -1657,33 +1573,14 @@ class DiffusionTSF(nn.Module):
         past_tail_len = self._past_cond_tail_len(past_norm.shape[-1], target_width)
         past_tail_norm = past_norm[..., -past_tail_len:]
         past_maps = self._encode_staged_maps(past_tail_norm)
-        if self.config.diffusion_stage == "vertical_dual":
-            stacked = self.to_2d.stack_vertical_dual(past_maps["coarse"], past_maps["fine"])
-            past_repr_w = stacked.shape[-1]
-            cond = stacked.reshape(BV, 1, H, past_repr_w)
-        elif self.config.diffusion_stage == "channel_dual":
-            cond = self.to_2d.stack_channel_dual_flat(
-                past_maps["coarse"], past_maps["fine"],
-            )
-            past_repr_w = past_maps["coarse"].shape[-1]
-            if cond.shape[-1] != past_repr_w:
-                raise ValueError(
-                    f"channel_dual past cond W={cond.shape[-1]} != {past_repr_w}"
-                )
-        else:
-            cond_maps = []
-            if self.config.diffusion_stage == "coarse":
-                cond_maps.append(self._resize_cdf_height(past_maps["coarse"], H))
-            else:
-                cond_maps.append(self._coarse_cdf_to_height(past_maps["coarse"], H))
-            cond_maps.append(self._resize_cdf_height(past_maps["fine"], H))
-            if getattr(self.config, "use_triple_scale", False):
-                cond_maps.append(self._resize_cdf_height(past_maps["finer"], H))
-            past_repr_w = past_maps["coarse"].shape[-1]
-            cond = torch.cat(
-                [m.reshape(BV, 1, H, past_repr_w) for m in cond_maps],
-                dim=1,
-            )
+        past_repr_w = past_maps["coarse"].shape[-1]
+        cond_maps = [
+            self._resize_cdf_height(past_maps["coarse"], H),
+            self._resize_cdf_height(past_maps["fine"], H),
+        ]
+        cond = torch.cat(
+            [m.reshape(BV, 1, H, past_repr_w) for m in cond_maps], dim=1,
+        )
         if self._past_cond_resize_to_horizon():
             cond = F.interpolate(cond, size=(H, target_width), mode='bilinear', align_corners=False)
         cond = self._append_raw_lookback_cond_channel(
@@ -1708,7 +1605,6 @@ class DiffusionTSF(nn.Module):
     def _encode_guidance_cond_chunks(
         self,
         guidance_forecast_norm: torch.Tensor,
-        stage: str,
         H: int,
         BV: int,
     ) -> torch.Tensor:
@@ -1740,15 +1636,8 @@ class DiffusionTSF(nn.Module):
             if pad > 0:
                 piece = F.pad(piece, (0, pad))
             maps = self._encode_staged_maps(piece)
-            if stage == "vertical_dual":
-                stacked = self.to_2d.stack_vertical_dual(maps["coarse"], maps["fine"])
-                chunks.append(stacked.reshape(BV, 1, stacked.shape[-2], stacked.shape[-1]))
-            elif stage == "channel_dual":
-                flat = self.to_2d.stack_channel_dual_flat(maps["coarse"], maps["fine"])
-                chunks.append(flat)
-            else:
-                m = self._resize_cdf_height(maps[stage], H).reshape(BV, 1, H, maps[stage].shape[-1])
-                chunks.append(m)
+            coarse = self._resize_cdf_height(maps["coarse"], H)
+            chunks.append(coarse.reshape(BV, 1, H, coarse.shape[-1]))
         return torch.cat(chunks, dim=1)
 
     def _encode_guidance_cond_chunks_joint(
@@ -2046,25 +1935,17 @@ class DiffusionTSF(nn.Module):
         )
         primary_logits, zt_logits = self._split_binary_heads(out)
         x0_logits = self._x0_logits_from_prediction(primary_logits, xt)
-        if self.config.prediction_target == "epsilon":
-            loss_x0 = self._binary_weighted_bce_loss(
-                primary_logits, zt, t, weight_source=target_patches,
-                element_mask=target_visible_mask,
-            )
-            loss_zt = self._binary_weighted_bce_loss(
-                zt_logits, target_patches, t, weight_source=target_patches,
-                element_mask=target_visible_mask,
-            )
-        else:
-            loss_x0 = self._binary_weighted_bce_loss(
-                primary_logits, target_patches, t, weight_source=target_patches,
-                element_mask=target_visible_mask,
-            )
-            loss_zt = self._binary_weighted_bce_loss(
-                zt_logits, zt, t, weight_source=target_patches,
-                element_mask=target_visible_mask,
-            )
-        regular_loss = loss_x0 + loss_zt
+        loss_breakdown = self.loss_function.regular(
+            primary_logits,
+            zt_logits,
+            target_patches,
+            zt,
+            t,
+            element_mask=target_visible_mask,
+        )
+        loss_x0 = loss_breakdown.x0
+        loss_zt = loss_breakdown.zt
+        regular_loss = loss_breakdown.regular
 
         anchor_loss = torch.tensor(0.0, device=device)
         combined_loss = regular_loss
@@ -2086,12 +1967,14 @@ class DiffusionTSF(nn.Module):
             )
             anchor_primary, _ = self._split_binary_heads(anchor_out)
             anchor_x0 = self._x0_logits_from_prediction(anchor_primary, neutral)
-            anchor_loss = self._binary_plain_bce_loss(
-                anchor_x0, target_patches, weight_source=target_patches,
+            anchor_loss = self.loss_function.bce(
+                anchor_x0,
+                target_patches,
+                weight_source=target_patches,
                 element_mask=target_visible_mask,
+                apply_min_snr=False,
             )
-            lam = self.config.deterministic_anchor_lambda
-            combined_loss = lam * regular_loss + (1.0 - lam) * anchor_loss
+            combined_loss = self.loss_function.combine_anchor(regular_loss, anchor_loss)
 
         x0_pred = torch.sigmoid(x0_logits)
         return {
@@ -2395,7 +2278,7 @@ class DiffusionTSF(nn.Module):
             )
         return out
 
-    def _forward_binary_staged(
+    def _forward_binary_coarse(
         self,
         past: torch.Tensor,
         future: torch.Tensor,
@@ -2403,11 +2286,6 @@ class DiffusionTSF(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """Train the coarse staged denoiser (patch_refine has its own forward)."""
         assert self.binary_scheduler is not None, "binary scheduler is not initialized"
-        stage = self.config.diffusion_stage
-        if stage != "coarse":
-            raise ValueError(
-                f"_forward_binary_staged only supports stage='coarse', got {stage!r}"
-            )
 
         B = past.shape[0]
         V = self.config.num_variables
@@ -2418,22 +2296,10 @@ class DiffusionTSF(nn.Module):
 
         past_norm, future_norm, _stats = self._normalize_sequence(past, future)
         future_maps = self._encode_staged_maps(future_norm)
-        if stage == "vertical_dual":
-            target_2d = self.to_2d.stack_vertical_dual(future_maps["coarse"], future_maps["fine"])
-            W_fut = target_2d.shape[3]
-            H = target_2d.shape[2]
-            target_flat = target_2d.reshape(BV, 1, H, W_fut)
-        elif stage == "channel_dual":
-            target_flat = self.to_2d.stack_channel_dual_flat(
-                future_maps["coarse"], future_maps["fine"],
-            )
-            H = target_flat.shape[2]
-            W_fut = target_flat.shape[3]
-        else:
-            target_2d = future_maps[stage]
-            W_fut = target_2d.shape[3]
-            H = target_2d.shape[2]
-            target_flat = target_2d.reshape(BV, 1, H, W_fut)
+        target_2d = future_maps["coarse"]
+        W_fut = target_2d.shape[3]
+        H = target_2d.shape[2]
+        target_flat = target_2d.reshape(BV, 1, H, W_fut)
 
         if t is None:
             t = torch.randint(0, self.config.binary_num_steps, (B,), device=device)
@@ -2448,14 +2314,6 @@ class DiffusionTSF(nn.Module):
         ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
 
         cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
-        if stage in {"fine", "finer"}:
-            future_coarse_cond = self._coarse_cdf_to_height(future_maps["coarse"], H)
-            future_coarse_flat = future_coarse_cond.reshape(BV, 1, H, W_fut)
-            cond_for_unet = self._cat_past_and_horizon_cond(cond_for_unet, future_coarse_flat)
-        if stage == "finer":
-            future_fine_cond = self._resize_cdf_height(future_maps["fine"], H)
-            future_fine_flat = future_fine_cond.reshape(BV, 1, H, W_fut)
-            cond_for_unet = torch.cat((cond_for_unet, future_fine_flat), dim=1)
 
         guidance_flat = None
         n_guidance_cond_ch = 0
@@ -2464,22 +2322,12 @@ class DiffusionTSF(nn.Module):
             guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, _stats, raw_hz_w)
             if self._uses_canvas_guidance():
                 guidance_maps = self._encode_staged_maps(guidance_forecast_norm)
-                if stage == "vertical_dual":
-                    g_stack = self.to_2d.stack_vertical_dual(guidance_maps["coarse"], guidance_maps["fine"])
-                    guidance_flat = g_stack.reshape(BV, 1, H, W_fut)
-                elif stage == "channel_dual":
-                    guidance_flat = self.to_2d.stack_channel_dual_flat(
-                        guidance_maps["coarse"], guidance_maps["fine"],
-                    )
-                elif stage == "coarse":
-                    guidance_flat = self._resize_cdf_height(guidance_maps["coarse"], H).reshape(BV, 1, H, W_fut)
-                elif stage == "fine":
-                    guidance_flat = self._resize_cdf_height(guidance_maps["fine"], H).reshape(BV, 1, H, W_fut)
-                elif stage == "finer":
-                    guidance_flat = self._resize_cdf_height(guidance_maps["finer"], H).reshape(BV, 1, H, W_fut)
+                guidance_flat = self._resize_cdf_height(
+                    guidance_maps["coarse"], H,
+                ).reshape(BV, 1, H, W_fut)
             elif self._uses_cond_chunk_guidance():
                 guidance_cond = self._encode_guidance_cond_chunks(
-                    guidance_forecast_norm, stage, H, BV,
+                    guidance_forecast_norm, H, BV,
                 )
                 n_guidance_cond_ch = int(guidance_cond.shape[1])
                 guidance_cond = self._align_guidance_cond_width(guidance_cond, cond_for_unet.shape[-1])
@@ -2521,21 +2369,12 @@ class DiffusionTSF(nn.Module):
         )
         primary_logits, zt_logits = self._split_binary_heads(out_flat)
         x0_logits = self._x0_logits_from_prediction(primary_logits, xt_flat)
-        if self.config.prediction_target == "epsilon":
-            loss_x0 = self._binary_weighted_bce_loss(
-                primary_logits, zt_flat, t_flat, weight_source=target_flat,
-            )
-            loss_zt = self._binary_weighted_bce_loss(
-                zt_logits, target_flat, t_flat, weight_source=target_flat,
-            )
-        else:
-            loss_x0 = self._binary_weighted_bce_loss(
-                primary_logits, target_flat, t_flat, weight_source=target_flat,
-            )
-            loss_zt = self._binary_weighted_bce_loss(
-                zt_logits, zt_flat, t_flat, weight_source=target_flat,
-            )
-        regular_loss = loss_x0 + loss_zt
+        loss_breakdown = self.loss_function.regular(
+            primary_logits, zt_logits, target_flat, zt_flat, t_flat,
+        )
+        loss_x0 = loss_breakdown.x0
+        loss_zt = loss_breakdown.zt
+        regular_loss = loss_breakdown.regular
 
         anchor_loss = torch.tensor(0.0, device=device)
         combined_loss = regular_loss
@@ -2560,68 +2399,13 @@ class DiffusionTSF(nn.Module):
             )
             anchor_primary, _ = self._split_binary_heads(anchor_out_flat)
             anchor_x0_logits = self._x0_logits_from_prediction(anchor_primary, neutral_future_flat)
-            anchor_bce = self._binary_plain_bce_loss(
-                anchor_x0_logits, target_flat, weight_source=target_flat,
+            anchor_loss = self.loss_function.bce(
+                anchor_x0_logits,
+                target_flat,
+                weight_source=target_flat,
+                apply_min_snr=False,
             )
-            if stage == "vertical_dual":
-                soft_1d = self._soft_decode_vertical_dual_1d(
-                    torch.sigmoid(anchor_x0_logits), B=B, V=V,
-                )
-                future_tgt = self._subsample_repr_time(future_norm)
-                if soft_1d.shape[-1] != future_tgt.shape[-1]:
-                    raise ValueError(
-                        f"soft decode width {soft_1d.shape[-1]} != target {future_tgt.shape[-1]}"
-                    )
-                anchor_mse = self._anchor_soft_decode_mse(soft_1d, future_tgt)
-                # λ weights map BCE; (1-λ) weights unit-space soft-decode MSE.
-                lam_mse = float(getattr(self.config, "anchor_mse_proxy_lambda", 0.5))
-                anchor_loss = lam_mse * anchor_bce + (1.0 - lam_mse) * anchor_mse
-            elif stage == "channel_dual":
-                soft_1d = self._soft_decode_channel_dual_1d(
-                    torch.sigmoid(anchor_x0_logits), B=B, V=V,
-                )
-                future_tgt = self._subsample_repr_time(future_norm)
-                if soft_1d.shape[-1] != future_tgt.shape[-1]:
-                    raise ValueError(
-                        f"soft decode width {soft_1d.shape[-1]} != target {future_tgt.shape[-1]}"
-                    )
-                anchor_mse = self._anchor_soft_decode_mse(soft_1d, future_tgt)
-                lam_mse = float(getattr(self.config, "anchor_mse_proxy_lambda", 0.5))
-                anchor_loss = lam_mse * anchor_bce + (1.0 - lam_mse) * anchor_mse
-            else:
-                anchor_loss = anchor_bce
-            lam = self.config.deterministic_anchor_lambda
-            combined_loss = lam * regular_loss + (1.0 - lam) * anchor_loss
-
-        if stage == "channel_dual":
-            x0_pred = torch.sigmoid(x0_logits)  # (BV, 2, H, W)
-            x0_coarse, x0_fine = self.to_2d.split_channel_dual_flat(x0_pred, B=B, V=V)
-            result = {
-                'loss': combined_loss,
-                'noise_loss': regular_loss,
-                'combined_mse_loss': combined_loss,
-                'anchor_loss': anchor_loss,
-                'loss_x0': loss_x0,
-                'loss_zt': loss_zt,
-                'emd_loss': torch.tensor(0.0, device=device),
-                'guidance_loss': torch.tensor(0.0, device=device),
-                'noise_pred': x0_coarse,
-                'x0_pred': x0_pred,
-                'x0_pred_channel_dual': x0_pred,
-                'x0_pred_coarse': x0_coarse,
-                'x0_pred_fine': x0_fine,
-                'future_2d': target_flat.reshape(B, V, C_occ, H, W_fut),
-                'future_2d_coarse': future_maps["coarse"],
-                'future_2d_fine': future_maps["fine"],
-                'past_2d_coarse': past_maps["coarse"],
-                'past_2d_fine': past_maps["fine"],
-                't': t,
-                'diffusion_stage': stage,
-            }
-            if "finer" in future_maps:
-                result['future_2d_finer'] = future_maps["finer"]
-                result['past_2d_finer'] = past_maps["finer"]
-            return result
+            combined_loss = self.loss_function.combine_anchor(regular_loss, anchor_loss)
 
         x0_pred = torch.sigmoid(x0_logits).reshape(B, V, H, W_fut)
         result = {
@@ -2641,22 +2425,9 @@ class DiffusionTSF(nn.Module):
             'past_2d_coarse': past_maps["coarse"],
             'past_2d_fine': past_maps["fine"],
             't': t,
-            'diffusion_stage': stage,
+            'diffusion_stage': self.stage_strategy.name,
         }
-        if "finer" in future_maps:
-            result['future_2d_finer'] = future_maps["finer"]
-            result['past_2d_finer'] = past_maps["finer"]
-        if stage == "coarse":
-            result['x0_pred_coarse'] = x0_pred
-        elif stage == "fine":
-            result['x0_pred_fine'] = x0_pred
-        elif stage == "vertical_dual":
-            result['x0_pred_vertical_dual'] = x0_pred
-            Hc = int(self.config.coarse_image_height)
-            result['x0_pred_coarse'] = x0_pred[:, :, :Hc]
-            result['x0_pred_fine'] = x0_pred[:, :, Hc:]
-        else:
-            result['x0_pred_finer'] = x0_pred
+        result['x0_pred_coarse'] = x0_pred
         return result
 
     @torch.no_grad()
@@ -2667,38 +2438,39 @@ class DiffusionTSF(nn.Module):
         *,
         capture_cross_attn: bool = True,
     ) -> Dict[str, Any]:
-        """One diagnostic forward: conditioning tensors + optional cross-attn weights."""
+        """Capture strategy-specific conditioning tensors for diagnostics."""
+        return self.stage_strategy.capture_diagnostics(
+            self, past, future, capture_cross_attn=capture_cross_attn,
+        )
+
+    @torch.no_grad()
+    def _diagnostic_capture_coarse(
+        self,
+        past: torch.Tensor,
+        future: torch.Tensor,
+        *,
+        capture_cross_attn: bool = True,
+    ) -> Dict[str, Any]:
+        """One coarse diagnostic forward: conditioning tensors and cross-attention."""
         B = past.shape[0]
         V = self.config.num_variables
         device = past.device
         BV = B * V
-        stage = self.config.diffusion_stage
-
         past_norm, future_norm, norm_stats = self._normalize_sequence(past, future)
         future_maps = self._encode_staged_maps(future_norm)
-        if stage == "vertical_dual":
-            target_2d = self.to_2d.stack_vertical_dual(future_maps["coarse"], future_maps["fine"])
-            W_fut = target_2d.shape[3]
-            H = target_2d.shape[2]
-            target_flat = target_2d.reshape(BV, 1, H, W_fut)
-        elif stage == "channel_dual":
-            target_flat = self.to_2d.stack_channel_dual_flat(
-                future_maps["coarse"], future_maps["fine"],
-            )
-            H = target_flat.shape[2]
-            W_fut = target_flat.shape[3]
-            target_2d = future_maps["coarse"]
-        else:
-            target_2d = future_maps[stage]
-            W_fut = target_2d.shape[3]
-            H = target_2d.shape[2]
-            target_flat = target_2d.reshape(BV, 1, H, W_fut)
+        target_2d = future_maps["coarse"]
+        W_fut = target_2d.shape[3]
+        H = target_2d.shape[2]
+        target_flat = target_2d.reshape(BV, 1, H, W_fut)
 
         cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
-        guidance_norm = self._get_guidance_forecast_norm(
-            past, past_norm, norm_stats, int(future_norm.shape[-1]),
-        )
-        guidance_maps = self._encode_staged_maps(guidance_norm) if guidance_norm is not None else None
+        guidance_norm = None
+        guidance_maps = None
+        if self.config.use_guidance_channel:
+            guidance_norm = self._get_guidance_forecast_norm(
+                past, past_norm, norm_stats, int(future_norm.shape[-1]),
+            )
+            guidance_maps = self._encode_staged_maps(guidance_norm)
 
         t = torch.zeros(B, device=device, dtype=torch.long)
         t_flat = t.unsqueeze(1).expand(-1, V).reshape(BV)
@@ -2713,28 +2485,15 @@ class DiffusionTSF(nn.Module):
         canvas = self._inject_coordinate_channel(xt_flat)
         canvas = self._inject_time_channels(canvas)
 
-        if stage in {"fine", "finer"}:
-            future_coarse_cond = self._coarse_cdf_to_height(future_maps["coarse"], H)
-            future_coarse_flat = future_coarse_cond.reshape(BV, 1, H, W_fut)
-            cond_for_unet = self._cat_past_and_horizon_cond(cond_for_unet, future_coarse_flat)
-
         if self.config.use_guidance_channel and guidance_norm is not None:
             if self._uses_canvas_guidance():
-                if stage == "vertical_dual":
-                    g_stack = self.to_2d.stack_vertical_dual(
-                        guidance_maps["coarse"], guidance_maps["fine"],
-                    )
-                    guidance_flat = g_stack.reshape(BV, 1, H, W_fut)
-                elif stage == "channel_dual":
-                    guidance_flat = self.to_2d.stack_channel_dual_flat(
-                        guidance_maps["coarse"], guidance_maps["fine"],
-                    )
-                else:
-                    guidance_flat = guidance_maps[stage].reshape(BV, 1, H, W_fut)
+                guidance_flat = self._resize_cdf_height(
+                    guidance_maps["coarse"], H,
+                ).reshape(BV, 1, H, W_fut)
                 canvas = torch.cat([canvas, guidance_flat], dim=1)
             elif self._uses_cond_chunk_guidance():
                 guidance_cond = self._encode_guidance_cond_chunks(
-                    guidance_norm, stage, H, BV,
+                    guidance_norm, H, BV,
                 )
                 guidance_cond = self._align_guidance_cond_width(
                     guidance_cond, cond_for_unet.shape[-1],
@@ -2761,10 +2520,41 @@ class DiffusionTSF(nn.Module):
             "future_maps": future_maps,
         }
 
+    @torch.no_grad()
+    def _diagnostic_capture_patch_refine(
+        self,
+        past: torch.Tensor,
+        future: torch.Tensor,
+        *,
+        capture_cross_attn: bool = True,
+    ) -> Dict[str, Any]:
+        """Expose patch-refine's native stacked lookback condition for plotting."""
+        del capture_cross_attn  # Cross-attention is evaluated per selected patch.
+        past_norm, future_norm, norm_stats = self._normalize_sequence(past, future)
+        cond_for_unet, past_maps = self._patch_refine_lookback_cond(past_norm)
+        guidance_norm = None
+        guidance_maps = None
+        if self.config.use_guidance_channel:
+            guidance_norm = self._get_guidance_forecast_norm(
+                past, past_norm, norm_stats, int(future_norm.shape[-1]),
+            )
+            guidance_maps = self._encode_staged_maps(guidance_norm)
+        return {
+            "past_norm": past_norm,
+            "future_norm": future_norm,
+            "norm_stats": norm_stats,
+            "cond_for_unet": cond_for_unet,
+            "past_maps": past_maps,
+            "guidance_norm": guidance_norm,
+            "guidance_maps": guidance_maps,
+            "cross_attn_weights": None,
+            "future_maps": self._encode_staged_maps(future_norm),
+        }
+
 
 
     @torch.no_grad()
-    def _generate_binary_staged(
+    def _generate_binary_coarse(
         self,
         past: torch.Tensor,
         num_steps: int = 20,
@@ -2780,11 +2570,6 @@ class DiffusionTSF(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """Generate coarse staged output (patch_refine has its own generate)."""
         assert self.binary_scheduler is not None, "binary scheduler is not initialized"
-        stage = self.config.diffusion_stage
-        if stage != "coarse":
-            raise ValueError(
-                f"_generate_binary_staged only supports stage='coarse', got {stage!r}"
-            )
         B = past.shape[0]
         V = self.config.num_variables
         H = self.config.image_height
@@ -2796,32 +2581,6 @@ class DiffusionTSF(nn.Module):
 
         past_norm, _, stats = self._normalize_sequence(past)
         cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
-        coarse_for_decode = future_coarse_2d
-        fine_for_decode = future_fine_2d
-        if stage in {"fine", "finer"}:
-            if future_coarse_2d is None:
-                raise ValueError(f"{stage}-stage generation requires future_coarse_2d from the coarse model.")
-            if future_coarse_2d.shape[:2] != (B, V) or future_coarse_2d.shape[3] != W_fut:
-                raise ValueError(
-                    "future_coarse_2d must have shape "
-                    f"(B={B}, V={V}, Hc, W={W_fut}), got {tuple(future_coarse_2d.shape)}"
-                )
-            future_coarse_cond = self._coarse_cdf_to_height(future_coarse_2d.to(device), H)
-            future_coarse_flat = future_coarse_cond.reshape(BV, 1, H, W_fut)
-            cond_for_unet = self._cat_past_and_horizon_cond(cond_for_unet, future_coarse_flat)
-        if stage == "finer":
-            if future_fine_2d is None:
-                raise ValueError("finer-stage generation requires future_fine_2d from the fine model.")
-            if future_fine_2d.shape[:2] != (B, V) or future_fine_2d.shape[3] != W_fut:
-                raise ValueError(
-                    "future_fine_2d must have shape "
-                    f"(B={B}, V={V}, Hf, W={W_fut}), got {tuple(future_fine_2d.shape)}"
-                )
-            future_fine_cond = self._resize_cdf_height(future_fine_2d.to(device), H)
-            cond_for_unet = torch.cat(
-                (cond_for_unet, future_fine_cond.reshape(BV, 1, H, W_fut)),
-                dim=1,
-            )
 
         ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
         ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
@@ -2834,22 +2593,12 @@ class DiffusionTSF(nn.Module):
             guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, raw_hz_w)
             if self._uses_canvas_guidance():
                 guidance_maps = self._encode_staged_maps(guidance_forecast_norm)
-                if stage == "vertical_dual":
-                    g_stack = self.to_2d.stack_vertical_dual(guidance_maps["coarse"], guidance_maps["fine"])
-                    guidance_flat = g_stack.reshape(BV, 1, H, W_fut)
-                elif stage == "channel_dual":
-                    guidance_flat = self.to_2d.stack_channel_dual_flat(
-                        guidance_maps["coarse"], guidance_maps["fine"],
-                    )
-                elif stage == "coarse":
-                    guidance_flat = self._resize_cdf_height(guidance_maps["coarse"], H).reshape(BV, 1, H, W_fut)
-                elif stage == "fine":
-                    guidance_flat = self._resize_cdf_height(guidance_maps["fine"], H).reshape(BV, 1, H, W_fut)
-                elif stage == "finer":
-                    guidance_flat = self._resize_cdf_height(guidance_maps["finer"], H).reshape(BV, 1, H, W_fut)
+                guidance_flat = self._resize_cdf_height(
+                    guidance_maps["coarse"], H,
+                ).reshape(BV, 1, H, W_fut)
             elif self._uses_cond_chunk_guidance():
                 guidance_cond = self._encode_guidance_cond_chunks(
-                    guidance_forecast_norm, stage, H, BV,
+                    guidance_forecast_norm, H, BV,
                 )
                 guidance_cond = self._align_guidance_cond_width(
                     guidance_cond, cond_for_unet.shape[-1],
@@ -2907,74 +2656,15 @@ class DiffusionTSF(nn.Module):
             else:
                 future_2d_flat = self.binary_scheduler.sample(**sample_kwargs)
 
-        if stage == "channel_dual":
-            future_2d_coarse, future_2d_fine = self.to_2d.split_channel_dual_flat(
-                future_2d_flat, B=B, V=V,
-            )
-            future_2d_finer = None
-            cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
-            temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
-            future_norm = self._decode_staged_combined_1d(
-                future_2d_coarse,
-                future_2d_fine,
-                cdf_decoder=cdf_decoder,
-                expectation_sharpen_temp=temperature,
-            )
-            generated_2d = future_2d_flat.reshape(B, V, C_occ, H, W_fut)
-        else:
-            generated_2d = future_2d_flat.reshape(B, V, H, W_fut)
-            if stage == "vertical_dual":
-                Hc = int(self.config.coarse_image_height)
-                future_2d_coarse, future_2d_fine = self.to_2d.split_vertical_dual(generated_2d, Hc)
-                future_2d_finer = None
-                cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
-                temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
-                future_norm = self._decode_staged_combined_1d(
-                    future_2d_coarse,
-                    future_2d_fine,
-                    cdf_decoder=cdf_decoder,
-                    expectation_sharpen_temp=temperature,
-                )
-            elif stage == "coarse":
-                future_2d_coarse = generated_2d
-                # Must use staged coarse decode: ordinal maps live in [0, rank_max], not
-                # legacy [-max_scale, max_scale] (to_2d.inverse → garbage after ordinal_decode).
-                cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
-                temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
-                future_norm = self._decode_coarse_1d_from_map(
-                    future_2d_coarse,
-                    cdf_decoder=cdf_decoder,
-                    expectation_sharpen_temp=temperature,
-                )
-                future_2d_fine = None
-                future_2d_finer = None
-            elif stage == "fine":
-                future_2d_coarse = coarse_for_decode.to(device)
-                future_2d_fine = generated_2d
-                future_2d_finer = None
-                k = int(self.config.lookback_overlap)
-                if k > 0:
-                    past_seed = past_norm[..., k - 1]
-                else:
-                    past_seed = past_norm[..., -1]
-                future_norm = self.decode_dual_from_2d(
-                    future_2d_coarse,
-                    future_2d_fine,
-                    from_diffusion=False,
-                    decoder_method=decoder_method,
-                    past_seed=past_seed,
-                )
-            else:
-                future_2d_coarse = coarse_for_decode.to(device)
-                future_2d_fine = fine_for_decode.to(device)
-                future_2d_finer = generated_2d
-                future_norm = self.decode_triple_from_2d(
-                    future_2d_coarse,
-                    future_2d_fine,
-                    future_2d_finer,
-                    from_diffusion=False,
-                    decoder_method=decoder_method,
-                )
+        generated_2d = future_2d_flat.reshape(B, V, H, W_fut)
+        future_2d_coarse = generated_2d
+        cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
+        temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
+        future_norm = self._decode_coarse_1d_from_map(
+            future_2d_coarse,
+            cdf_decoder=cdf_decoder,
+            expectation_sharpen_temp=temperature,
+        )
         future_with_overlap = self._denormalize_future(
             future_norm, past, stats, trim_overlap=False,
         )
@@ -2991,14 +2681,8 @@ class DiffusionTSF(nn.Module):
             'future_2d_coarse': future_2d_coarse,
             'past_2d_coarse': past_maps["coarse"],
             'past_2d_fine': past_maps["fine"],
-            'diffusion_stage': stage,
+            'diffusion_stage': self.stage_strategy.name,
         }
-        if future_2d_fine is not None:
-            result['future_2d_fine'] = future_2d_fine
-        if future_2d_finer is not None:
-            result['future_2d_finer'] = future_2d_finer
-        if "finer" in past_maps:
-            result['past_2d_finer'] = past_maps["finer"]
         if bool(kwargs.get("emit_guidance_prediction", False)):
             result.update(
                 self._guidance_prediction_fields(past, past_norm, stats, W_fut)
@@ -3006,12 +2690,7 @@ class DiffusionTSF(nn.Module):
         if intermediates is not None:
             reshaped_intermediates = []
             for (t_idx, i_tensor) in intermediates:
-                if stage == "channel_dual":
-                    reshaped_intermediates.append(
-                        (t_idx, i_tensor.reshape(B, V, C_occ, H, W_fut))
-                    )
-                else:
-                    reshaped_intermediates.append((t_idx, i_tensor.reshape(B, V, H, W_fut)))
+                reshaped_intermediates.append((t_idx, i_tensor.reshape(B, V, H, W_fut)))
             result['intermediates'] = reshaped_intermediates
         return result
 
