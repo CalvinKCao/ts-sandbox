@@ -954,9 +954,11 @@ class StagedEvalPhase(PipelinePhase):
             or state.extra.get("skip_eval_visualizations", False)
         )
         viz_cfg = visualization_settings(state.merged_config)
-        coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_finetune_ckpt(state, "coarse")
+        coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_finetune_ckpt(
+            state, "coarse", checkpoint_dir=source_checkpoint_dir,
+        )
         fine_ft = state.diffusion_patch_refine_finetune_ckpt or _stage_finetune_ckpt(
-            state, "patch_refine",
+            state, "patch_refine", checkpoint_dir=source_checkpoint_dir,
         )
         if not skip_viz and viz_cfg.get("enabled", True) and not state.smoke_test:
             try:
