@@ -9,6 +9,10 @@ training:
 wandb:
   tags: [control, fixed_hp, default_max_scale, traffic, channels_000_430, all_variates, canvas128, p64x6, full_attention, anchor_only_eval_s16]
 
+visualization:
+  viz_binary_mmpd_gap: false
+  viz_binary_mmpd_redbox: false
+
 experiment:
   dataset: traffic
   name: binary-window-norm-patch-refine-c128-traffic_v000_430-msdefault-fixed

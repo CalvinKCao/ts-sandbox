@@ -5,6 +5,10 @@ extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
 wandb:
   tags: [control, fixed_hp, default_max_scale, weather, all_variates, canvas128, p64x6, full_attention, anchor_only_eval_s16]
 
+visualization:
+  viz_binary_mmpd_gap: false
+  viz_binary_mmpd_redbox: false
+
 experiment:
   dataset: weather
   name: binary-window-norm-patch-refine-c128-weather_allv-msdefault-fixed

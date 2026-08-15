@@ -9,6 +9,10 @@ training:
 wandb:
   tags: [control, fixed_hp, default_max_scale, solar_Alabama, all_variates, canvas128, p64x6, full_attention, anchor_only_eval_s16]
 
+visualization:
+  viz_binary_mmpd_gap: false
+  viz_binary_mmpd_redbox: false
+
 experiment:
   dataset: solar_Alabama
   name: binary-window-norm-patch-refine-c128-solar_alabama_allv-msdefault-fixed
