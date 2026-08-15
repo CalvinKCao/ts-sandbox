@@ -78,7 +78,9 @@ phases:
     tune_sampler: false
     probabilistic_sampler: anchor
     probabilistic_num_inference_steps: 1
-    batch_size: 8
+    # Full 137-variate cross-attention needs a one-window fallback for eval.
+    # The CUDA probe may increase the full-run batch size when it is safe.
+    batch_size: 1
     gmm_components: 10
     topk_max: 3
     skip_eval_visualizations: true
