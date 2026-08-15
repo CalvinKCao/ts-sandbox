@@ -68,7 +68,6 @@ def main() -> None:
     args = ap.parse_args()
 
     from models.diffusion_tsf.pipeline.config import load_experiment_config
-    from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
     from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
         _anchor_mse_on_loader,
         _anchor_pixel_error_on_loader,
@@ -126,7 +125,6 @@ def main() -> None:
     if args.device:
         state.device = args.device
     device = state.resolve_device()
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
 
     job = generate_dataset_job(state.dataset)
     variate_indices = list(state.variate_indices or job["variate_indices"])

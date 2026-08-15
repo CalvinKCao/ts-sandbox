@@ -92,6 +92,13 @@ REQUIRED_EXPERIMENT_KEYS = (
     "data_subset",
 )
 
+REMOVED_EXPERIMENT_KEYS = frozenset({
+    "finer_image_height",
+    "use_triple_scale",
+    "use_vertical_dual_concat",
+    "use_channel_dual_concat",
+})
+
 REQUIRED_TRAINING_KEYS = (
     "pretrain_epochs",
     "pretrain_diffusion_epochs",
@@ -408,6 +415,11 @@ def validate_config(cfg: Dict[str, Any]) -> None:
     missing_exp = [k for k in REQUIRED_EXPERIMENT_KEYS if k not in exp]
     if missing_exp:
         raise ValueError(f"experiment missing required key(s): {missing_exp}")
+    removed_exp = sorted(set(exp) & REMOVED_EXPERIMENT_KEYS)
+    if removed_exp:
+        raise ValueError(
+            f"experiment uses removed representation setting(s): {removed_exp}"
+        )
 
     training = cfg["training"]
     if not isinstance(training, dict):

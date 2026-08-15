@@ -8,23 +8,60 @@ import logging
 import math
 import os
 import random
+import shutil
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 from optuna.exceptions import TrialPruned
 from optuna.pruners import HyperbandPruner
 from optuna.samplers import TPESampler
+from optuna.trial import TrialState
 from torch.utils.data import DataLoader, Subset
 
+from models.diffusion_tsf import train_multivariate_pipeline as pipeline_mod
+from models.diffusion_tsf.flatline_windows import (
+    DEFAULT_SEED_OFFSET,
+    undersample_flatline_refine_crops,
+)
+from models.diffusion_tsf.patch_refine_segments import wrap_timeseries_as_unique_segments
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.config import training_value
+from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
+from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
+from models.diffusion_tsf.pipeline.reused_paths import (
+    find_reused_tuned_params_meta,
+    reused_root,
+    reused_stage_best_ckpt,
+)
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     _stage_pretrain_ckpt,
     discover_dataset_run_ckpt_dir,
     stage_state,
+)
+from models.diffusion_tsf.pipeline.train.batch_config import (
+    configured_finetune_micro_batch,
+    configured_max_diffusion_batch,
+)
+from models.diffusion_tsf.pipeline.train.checkpointing import (
+    EarlyStopping,
+    ensure_checkpoint_dir,
+    save_checkpoint,
+)
+from models.diffusion_tsf.pipeline.train.diffusion_loop import (
+    DiffusionEpochMetrics,
+    DiffusionTrainer,
+)
+from models.diffusion_tsf.pipeline.visualize_utils import (
+    _load_staged_diffusion_from_ckpt,
+    run_real_dataset_phase_diagnostics,
+)
+from models.diffusion_tsf.train_window_aug import (
+    maybe_wrap_train_window_aug,
+    set_train_window_aug_epoch,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,8 +114,6 @@ def _maybe_subsample_patch_refine_train_windows(state: PipelineState, train_ds):
 
 
 def _resolve_flatline_undersample_seed(state: PipelineState) -> int:
-    from models.diffusion_tsf.flatline_windows import DEFAULT_SEED_OFFSET
-
     raw = getattr(state, "patch_refine_flatline_seed", None)
     if raw is None:
         return int(state.seed) + int(DEFAULT_SEED_OFFSET)
@@ -102,10 +137,7 @@ def _maybe_flatline_undersample_patch_refine_train(
     if keep_frac >= 1.0:
         return train_ds, None
 
-    from models.diffusion_tsf.flatline_windows import undersample_flatline_refine_crops
-    from models.diffusion_tsf.train_multivariate_pipeline import TimeSeriesDataset
-
-    if not isinstance(train_ds, TimeSeriesDataset):
+    if not isinstance(train_ds, pipeline_mod.TimeSeriesDataset):
         raise TypeError(
             "patch_refine_flatline_keep_frac requires TimeSeriesDataset train "
             f"windows before unique-seg wrap, got {type(train_ds).__name__}"
@@ -519,8 +551,6 @@ def _suggest_lr_eff_batch_univariate_ema(
 
 def _fraction_subset(ds, fraction: float, seed: int):
     """Deterministic subset of a dataset (same idea as staged_eval)."""
-    import numpy as np
-
     n = len(ds)
     frac = float(fraction)
     if frac >= 1.0:
@@ -691,12 +721,6 @@ def _load_reused_stage_params(
     subset_id: str,
     source_config: str,
 ) -> Tuple[Dict[str, Any], str, Dict[str, Any]]:
-    from models.diffusion_tsf.pipeline.reused_paths import (
-        find_reused_tuned_params_meta,
-        reused_root,
-        reused_stage_best_ckpt,
-    )
-
     reused_meta = find_reused_tuned_params_meta(source_config, subset_id, stage)
     if reused_meta:
         with open(reused_meta, encoding="utf-8") as f:
@@ -727,36 +751,6 @@ def _load_reused_stage_params(
     params["max_scale"] = policy_ms
     params.setdefault("min_snr_gamma", 5.0)
     return params, source_dir, {**source_meta, "reused_max_scale_previous": old_ms}
-
-
-class _Ema:
-    def __init__(self, model: torch.nn.Module, decay: float):
-        self.decay = float(decay)
-        self.shadow = {
-            k: v.detach().clone()
-            for k, v in model.state_dict().items()
-            if torch.is_floating_point(v)
-        }
-
-    @torch.no_grad()
-    def update(self, model: torch.nn.Module) -> None:
-        state = model.state_dict()
-        for key, avg in self.shadow.items():
-            avg.mul_(self.decay).add_(state[key].detach(), alpha=1.0 - self.decay)
-
-    @torch.no_grad()
-    def swap_in(self, model: torch.nn.Module) -> Dict[str, torch.Tensor]:
-        state = model.state_dict()
-        backup = {key: state[key].detach().clone() for key in self.shadow}
-        for key, avg in self.shadow.items():
-            state[key].copy_(avg)
-        return backup
-
-    @torch.no_grad()
-    def restore(self, model: torch.nn.Module, backup: Dict[str, torch.Tensor]) -> None:
-        state = model.state_dict()
-        for key, value in backup.items():
-            state[key].copy_(value)
 
 
 def _suggest_reduced_hp_params(
@@ -997,9 +991,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
     stage = ""
 
     def should_skip(self, state: PipelineState) -> bool:
-        if self.stage == "finer" and not getattr(state, "use_triple_scale", False):
-            logger.info("  [%s] skipping: use_triple_scale=False", self.name)
-            return True
         # retrain=true forces a fresh train on a new run, but --resume must still
         # honor local best.pt+metadata so we can finish eval after quota crashes.
         if self.get("retrain", False) and not bool(getattr(state, "resume", False)):
@@ -1036,27 +1027,25 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     params = json.load(f).get("tuned_params")
             except Exception as e:
                 logger.warning("Failed to load tuned params from %s: %s", meta, e)
-            if self.stage == "coarse":
-                state.diffusion_coarse_finetune_ckpt = best_pt
-                state.coarse_finetune_best_params = params
-            elif self.stage == "fine":
-                state.diffusion_fine_finetune_ckpt = best_pt
-                state.fine_finetune_best_params = params
-            elif self.stage == "patch_refine":
-                state.diffusion_patch_refine_finetune_ckpt = best_pt
-                state.patch_refine_finetune_best_params = params
-            elif self.stage == "vertical_dual":
-                state.diffusion_vertical_dual_finetune_ckpt = best_pt
-                state.vertical_dual_finetune_best_params = params
-            elif self.stage == "channel_dual":
-                state.diffusion_channel_dual_finetune_ckpt = best_pt
-                state.channel_dual_finetune_best_params = params
-            else:
-                state.diffusion_finer_finetune_ckpt = best_pt
-                state.finer_finetune_best_params = params
+            self._record_finetune_result(state, best_pt, params)
             self._apply_tuned_length_to_state(state, params)
             return True
         return False
+
+    def _record_finetune_result(
+        self,
+        state: PipelineState,
+        checkpoint_path: str,
+        params: Optional[Dict[str, Any]],
+    ) -> None:
+        if self.stage == "coarse":
+            state.diffusion_coarse_finetune_ckpt = checkpoint_path
+            state.coarse_finetune_best_params = params
+        elif self.stage == "patch_refine":
+            state.diffusion_patch_refine_finetune_ckpt = checkpoint_path
+            state.patch_refine_finetune_best_params = params
+        else:
+            raise ValueError(f"unsupported finetune stage: {self.stage!r}")
 
     def on_skip(self, state: PipelineState) -> PipelineState:
         best_pt = _stage_best_ckpt(state, self.stage)
@@ -1088,16 +1077,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         best_params: Dict[str, Any],
         train_ds=None,
     ) -> None:
-        from models.diffusion_tsf.train_multivariate_pipeline import (
-            generate_dataset_job,
-            load_dataset,
-        )
-        from models.diffusion_tsf.pipeline.visualize_utils import (
-            _load_staged_diffusion_from_ckpt,
-            run_real_dataset_phase_diagnostics,
-            run_staged_finetune_visualizations,
-        )
-
         if state.smoke_test:
             return
 
@@ -1115,7 +1094,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
         test_stride = int(subset_meta.get("test_stride", 1))
         if train_ds is None:
-            train_ds, _, _, norm_stats = load_dataset(
+            train_ds, _, _, norm_stats = pipeline_mod.load_dataset(
                 state, state.dataset,
                 variate_indices,
                 stride=train_stride,
@@ -1146,25 +1125,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
 
         n_iv = len(variate_indices)
         device = state.resolve_device()
-        coarse_ft = None
-        if self.stage not in {"vertical_dual", "channel_dual"}:
-            coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_best_ckpt(state, "coarse")
-
-        if self.stage == "fine" and coarse_ft and final_ckpt and os.path.exists(coarse_ft):
-            try:
-                viz_paths = run_staged_finetune_visualizations(
-                    state,
-                    coarse_ckpt_path=coarse_ft,
-                    fine_ckpt_path=final_ckpt,
-                    itrans_ckpt_path=ft_guidance_ckpt,
-                    tuned_params=best_params,
-                    tag="staged_diffusion_finetuned",
-                )
-                wandb_utils.log_visualization_paths(
-                    viz_paths, wandb_key="viz/staged_diffusion_finetuned",
-                )
-            except Exception as e:
-                logger.warning("Staged finetune viz failed: %s", e, exc_info=True)
+        coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_best_ckpt(state, "coarse")
 
         try:
             finetuned_model, _ = _load_staged_diffusion_from_ckpt(
@@ -1183,7 +1144,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 itrans_ckpt_path=ft_guidance_ckpt,
                 stage=self.stage,
                 diffusion_ckpt_path=final_ckpt,
-                coarse_ckpt_path=coarse_ft if self.stage == "fine" else None,
+                coarse_ckpt_path=None,
                 tag=f"diffusion_{self.stage}_finetune",
                 include_phase_start=False,
             )
@@ -1201,10 +1162,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             return None
         attr = {
             "coarse": state.diffusion_coarse_pretrain_ckpt,
-            "fine": state.diffusion_fine_pretrain_ckpt,
-            "finer": state.diffusion_finer_pretrain_ckpt,
-            "vertical_dual": state.diffusion_vertical_dual_pretrain_ckpt,
-            "channel_dual": state.diffusion_channel_dual_pretrain_ckpt,
             "patch_refine": state.diffusion_patch_refine_pretrain_ckpt,
         }[self.stage]
         candidates = [
@@ -1229,18 +1186,12 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         device: torch.device,
         params: Dict[str, Any],
     ):
-        from models.diffusion_tsf.train_multivariate_pipeline import (
-            anchor_kwargs_from_params,
-            create_diffusion_model,
-            dataset_window_lengths,
-        )
-
-        ds_lb, ds_hz = dataset_window_lengths(state, state.dataset)
+        ds_lb, ds_hz = pipeline_mod.dataset_window_lengths(state, state.dataset)
         model_state = stage_state(state, self.stage, honor_dataset_windows=True)
-        model_kwargs = anchor_kwargs_from_params(model_state, params)
+        model_kwargs = pipeline_mod.anchor_kwargs_from_params(model_state, params)
         model_kwargs.update(_state_anchor_kwargs(state))
         model_kwargs.update(_model_kwargs_from_tuned(params))
-        return create_diffusion_model(
+        return pipeline_mod.create_diffusion_model(
             model_state,
             n_variates=n_iv,
             lookback=ds_lb,
@@ -1257,6 +1208,54 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         out.setdefault("binary_length_g", float(state.binary_length_g))
         out.setdefault("binary_length_scale", float(state.binary_length_scale))
         return out
+
+    @staticmethod
+    def _build_lr_scheduler(optimizer, state: PipelineState, max_epochs: int, learning_rate: float):
+        scheduler_type = str(training_value(state, "lr_scheduler_type", "none"))
+        warmup_epochs = min(
+            int(training_value(state, "lr_warmup_epochs", 0)),
+            max(0, max_epochs - 1),
+        )
+        if scheduler_type == "cosine":
+            if warmup_epochs > 0:
+                return torch.optim.lr_scheduler.SequentialLR(
+                    optimizer,
+                    schedulers=[
+                        torch.optim.lr_scheduler.LinearLR(
+                            optimizer, start_factor=0.1, total_iters=warmup_epochs,
+                        ),
+                        torch.optim.lr_scheduler.CosineAnnealingLR(
+                            optimizer,
+                            T_max=max_epochs - warmup_epochs,
+                            eta_min=learning_rate * 0.01,
+                        ),
+                    ],
+                    milestones=[warmup_epochs],
+                )
+            return torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max_epochs, eta_min=learning_rate * 0.01,
+            )
+        if scheduler_type == "linear":
+            if warmup_epochs > 0:
+                return torch.optim.lr_scheduler.SequentialLR(
+                    optimizer,
+                    schedulers=[
+                        torch.optim.lr_scheduler.LinearLR(
+                            optimizer, start_factor=0.1, total_iters=warmup_epochs,
+                        ),
+                        torch.optim.lr_scheduler.LinearLR(
+                            optimizer,
+                            start_factor=1.0,
+                            end_factor=0.01,
+                            total_iters=max_epochs - warmup_epochs,
+                        ),
+                    ],
+                    milestones=[warmup_epochs],
+                )
+            return torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=1.0, end_factor=0.01, total_iters=max_epochs,
+            )
+        return None
 
     @staticmethod
     def _apply_tuned_length_to_state(state: PipelineState, params: Optional[Dict[str, Any]]) -> None:
@@ -1383,295 +1382,119 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         guidance=None,
         pretrained_state_dict: Optional[Dict[str, Any]] = None,
     ) -> Tuple[float, int]:
-        from models.diffusion_tsf.train_multivariate_pipeline import (
-            EarlyStopping,
-            amp_context,
-            dataset_window_lengths,
-            load_diffusion_state_keep_attached_guidance,
-            load_wrapped_guidance,
-            save_checkpoint,
-            unwrap_model,
-        )
-
         params = _with_state_anchor_params(params, state)
         n_iv = len(variate_indices)
         batch_size = int(params["batch_size"])
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
-        n_train_batches = len(train_loader)
-        n_val_batches = len(val_loader)
-        trial_label = (
-            f"trial={trial.number}" if trial is not None else "trial=single"
-        )
+        trial_label = f"trial={trial.number}" if trial is not None else "trial=single"
         logger.info(
             "  [%s/%s] %s START epochs=%d patience=%d lr=%.2e bs=%d accum=%d "
             "train_batches=%d val_batches=%d g=%s",
-            self.name,
-            self.stage,
-            trial_label,
-            max_epochs,
-            patience,
-            float(params["learning_rate"]),
-            batch_size,
+            self.name, self.stage, trial_label, max_epochs, patience,
+            float(params["learning_rate"]), batch_size,
             int(params.get("gradient_accumulation_steps", 1)),
-            n_train_batches,
-            n_val_batches,
-            params.get("binary_length_g"),
+            len(train_loader), len(val_loader), params.get("binary_length_g"),
         )
         _log_gpu_mem(f"{self.stage}/{trial_label}/start")
 
-        ds_lb, ds_hz = dataset_window_lengths(state, state.dataset)
+        ds_lb, ds_hz = pipeline_mod.dataset_window_lengths(state, state.dataset)
         if guidance is None and guidance_checkpoint:
-            guidance = load_wrapped_guidance(
-                state, guidance_checkpoint,
-                n_iv,
-                device,
+            guidance = pipeline_mod.load_wrapped_guidance(
+                state, guidance_checkpoint, n_iv, device,
                 guidance_type=state.guidance_type,
-                dataset_lookback=ds_lb,
-                dataset_horizon=ds_hz,
+                dataset_lookback=ds_lb, dataset_horizon=ds_hz,
             )
         model = self._build_model(
-            state=state,
-            n_iv=n_iv,
-            itrans_guidance=guidance,
-            device=device,
-            params=params,
+            state=state, n_iv=n_iv, itrans_guidance=guidance, device=device, params=params,
         )
         try:
             if pretrained_path or pretrained_state_dict is not None:
                 if pretrained_state_dict is None:
-                    ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
-                    pretrained_state_dict = ckpt["model_state_dict"]
-                load_diffusion_state_keep_attached_guidance(model, pretrained_state_dict)
+                    pretrained_state_dict = torch.load(
+                        pretrained_path, map_location=device, weights_only=False,
+                    )["model_state_dict"]
+                pipeline_mod.load_diffusion_state_keep_attached_guidance(
+                    model, pretrained_state_dict,
+                )
             else:
-                logger.info(
-                    "  [%s] random init (no pretrain ckpt)",
-                    self.name,
-                )
+                logger.info("  [%s] random init (no pretrain ckpt)", self.name)
 
-            optimizer = torch.optim.AdamW(model.parameters(), lr=float(params["learning_rate"]))
-
-            lr_scheduler_type = str(training_value(state, "lr_scheduler_type", "none"))
-            warmup_epochs = int(training_value(state, "lr_warmup_epochs", 0))
-            warmup_epochs = min(warmup_epochs, max(0, max_epochs - 1))
-            
-            scheduler = None
-            if lr_scheduler_type == "cosine":
-                if warmup_epochs > 0:
-                    scheduler = torch.optim.lr_scheduler.SequentialLR(
-                        optimizer,
-                        schedulers=[
-                            torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs),
-                            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs - warmup_epochs, eta_min=float(params["learning_rate"]) * 0.01)
-                        ],
-                        milestones=[warmup_epochs]
-                    )
-                else:
-                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=float(params["learning_rate"]) * 0.01)
-            elif lr_scheduler_type == "linear":
-                if warmup_epochs > 0:
-                    scheduler = torch.optim.lr_scheduler.SequentialLR(
-                        optimizer,
-                        schedulers=[
-                            torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs),
-                            torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.01, total_iters=max_epochs - warmup_epochs)
-                        ],
-                        milestones=[warmup_epochs]
-                    )
-                else:
-                    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.01, total_iters=max_epochs)
-
-            early_stop = EarlyStopping(patience=patience)
-            ema = _Ema(model, float(params.get("ema_decay", 0.0))) if params.get("ema_decay", 0.0) else None
-            accum_steps = max(1, int(params.get("gradient_accumulation_steps", 1)))
-            best_val = float("inf")
-            best_epoch = 0
+            optimizer = torch.optim.AdamW(
+                model.parameters(), lr=float(params["learning_rate"]),
+            )
+            scheduler = self._build_lr_scheduler(
+                optimizer, state, max_epochs, float(params["learning_rate"]),
+            )
             saved_ckpt = False
-            train_log_stride = max(1, n_train_batches // 4)
-            val_log_stride = max(1, n_val_batches // 2)
-            epoch_t0 = time.perf_counter()
-            epoch_history: list[Dict[str, Any]] = []
 
-            for epoch in range(max_epochs):
-                epoch_start = time.perf_counter()
-                from models.diffusion_tsf.train_window_aug import set_train_window_aug_epoch
+            def set_training_epoch(loader: DataLoader, epoch: int) -> None:
+                set_train_window_aug_epoch(loader, epoch)
+                epoch_ds = train_ds
+                while hasattr(epoch_ds, "dataset") and not hasattr(epoch_ds, "set_epoch"):
+                    epoch_ds = epoch_ds.dataset
+                if hasattr(epoch_ds, "set_epoch"):
+                    epoch_ds.set_epoch(epoch)
 
-                set_train_window_aug_epoch(train_loader, epoch)
-                # UniquePatchSegmentDataset.set_epoch may sit under Subset.
-                _epoch_ds = train_ds
-                while hasattr(_epoch_ds, "dataset") and not hasattr(_epoch_ds, "set_epoch"):
-                    _epoch_ds = _epoch_ds.dataset
-                if hasattr(_epoch_ds, "set_epoch"):
-                    _epoch_ds.set_epoch(epoch)
-                logger.info(
-                    "  [%s/%s] %s epoch %d/%d train_start",
-                    self.name, self.stage, trial_label, epoch + 1, max_epochs,
+            def save_best(metrics: DiffusionEpochMetrics) -> None:
+                nonlocal saved_ckpt
+                if ckpt_path is None:
+                    return
+                config = {
+                    "tuned_params": dict(params),
+                    "diffusion_stage": self.stage,
+                    "best_epoch": metrics.epoch,
+                    "selection_metric": "val_loss",
+                }
+                save_checkpoint(
+                    pipeline_mod.unwrap_model(model), optimizer, metrics.epoch - 1,
+                    metrics.train_loss, metrics.selection_score, config, ckpt_path,
                 )
-                model.train()
-                from models.diffusion_tsf.train_multivariate_pipeline import _set_ordinal_loader_mode
-
-                _set_ordinal_loader_mode(state, model, train_loader, eval_mode=False)
-                train_loss = 0.0
-                n_train = 0
-                optimizer.zero_grad(set_to_none=True)
-                for batch_idx, batch in enumerate(train_loader):
-                    if batch_idx == 0 or (batch_idx + 1) % train_log_stride == 0 or batch_idx + 1 == n_train_batches:
-                        logger.info(
-                            "  [%s/%s] %s epoch %d/%d train_batch %d/%d",
-                            self.name, self.stage, trial_label,
-                            epoch + 1, max_epochs, batch_idx + 1, n_train_batches,
-                        )
-                    past, future, patch_col0, variate_keep = _unpack_patch_refine_batch(
-                        batch
-                    )
-                    if patch_col0 is not None:
-                        patch_col0 = patch_col0.to(device)
-                    if variate_keep is not None:
-                        variate_keep = variate_keep.to(device)
-                    past, future = past.to(device), future.to(device)
-                    with amp_context():
-                        loss = (
-                            model.get_loss(
-                                past,
-                                future,
-                                patch_col0=patch_col0,
-                                variate_keep=variate_keep,
-                            )
-                            / accum_steps
-                        )
-                    loss.backward()
-                    if (batch_idx + 1) % accum_steps == 0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                        optimizer.step()
-                        optimizer.zero_grad(set_to_none=True)
-                        if ema is not None:
-                            ema.update(model)
-                    train_loss += float(loss.item()) * accum_steps
-                    n_train += 1
-                if accum_steps > 1 and len(train_loader) % accum_steps != 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    if ema is not None:
-                        ema.update(model)
-
-                train_loss_avg = train_loss / max(n_train, 1)
-                train_elapsed = time.perf_counter() - epoch_start
-                logger.info(
-                    "  [%s/%s] %s epoch %d/%d train_done loss=%.4f time=%.1fs",
-                    self.name, self.stage, trial_label,
-                    epoch + 1, max_epochs, train_loss_avg, train_elapsed,
-                )
-
-                if scheduler is not None:
-                    scheduler.step()
-
-                backup = ema.swap_in(model) if ema is not None else None
-                model.eval()
-                _set_ordinal_loader_mode(state, model, val_loader, eval_mode=True)
-                val_loss = 0.0
-                n_val = 0
-                val_start = time.perf_counter()
-                logger.info(
-                    "  [%s/%s] %s epoch %d/%d val_start",
-                    self.name, self.stage, trial_label, epoch + 1, max_epochs,
-                )
-                with torch.no_grad():
-                    for val_idx, batch in enumerate(val_loader):
-                        if val_idx == 0 or (val_idx + 1) % val_log_stride == 0 or val_idx + 1 == n_val_batches:
-                            logger.info(
-                                "  [%s/%s] %s epoch %d/%d val_batch %d/%d",
-                                self.name, self.stage, trial_label,
-                                epoch + 1, max_epochs, val_idx + 1, n_val_batches,
-                            )
-                        past, future, patch_col0, variate_keep = _unpack_patch_refine_batch(
-                            batch
-                        )
-                        if patch_col0 is not None:
-                            patch_col0 = patch_col0.to(device)
-                        if variate_keep is not None:
-                            variate_keep = variate_keep.to(device)
-                        past, future = past.to(device), future.to(device)
-                        with amp_context():
-                            loss = model.get_loss(
-                                past,
-                                future,
-                                patch_col0=patch_col0,
-                                variate_keep=variate_keep,
-                            )
-                        val_loss += float(loss.item())
-                        n_val += 1
-                val_loss /= max(n_val, 1)
-                val_elapsed = time.perf_counter() - val_start
-                selection_score = float(val_loss)
-                lr_now = float(optimizer.param_groups[0]["lr"])
-                saved = selection_score < best_val
-                if saved:
-                    best_val = selection_score
-                    best_epoch = epoch + 1
-                    config = {
-                        "tuned_params": dict(params),
-                        "diffusion_stage": self.stage,
-                        "best_epoch": best_epoch,
-                        "selection_metric": "val_loss",
-                    }
-                    if ckpt_path:
-                        save_checkpoint(
-                            unwrap_model(model),
-                            optimizer,
-                            epoch,
-                            train_loss_avg,
-                            selection_score,
-                            config,
-                            ckpt_path,
-                        )
-                        saved_ckpt = True
-                        if trial is not None:
-                            trial.set_user_attr("ckpt_path", ckpt_path)
-                if backup is not None:
-                    ema.restore(model, backup)
-
-                epoch_history.append({
-                    "epoch": epoch + 1,
-                    "train_loss": float(train_loss_avg),
-                    "val_loss": float(val_loss),
-                    "selection_score": float(selection_score),
-                    "best_val": float(best_val),
-                    "lr": lr_now,
-                    "saved": bool(saved),
-                })
-
-                logger.info(
-                    "  [%s/%s] %s epoch %d/%d done train=%.4f val=%.4f best=%.4f "
-                    "best_ep=%d lr=%.2e saved=%s train_t=%.1fs val_t=%.1fs epoch_t=%.1fs",
-                    self.name, self.stage, trial_label,
-                    epoch + 1, max_epochs,
-                    train_loss_avg, val_loss, best_val, best_epoch, lr_now,
-                    saved, train_elapsed, val_elapsed, time.perf_counter() - epoch_start,
-                )
-                _log_gpu_mem(f"{self.stage}/{trial_label}/ep{epoch + 1}")
-
+                saved_ckpt = True
                 if trial is not None:
-                    trial.report(selection_score, epoch)
-                    if trial.should_prune():
-                        logger.info(
-                            "  [%s/%s] %s epoch %d/%d PRUNED val=%.4f",
-                            self.name, self.stage, trial_label, epoch + 1, max_epochs,
-                            selection_score,
-                        )
-                        raise TrialPruned()
-                if early_stop(selection_score):
-                    logger.info(
-                        "  [%s/%s] %s epoch %d/%d EARLY_STOP val=%.4f best=%.4f best_ep=%d",
-                        self.name, self.stage, trial_label,
-                        epoch + 1, max_epochs, selection_score, best_val, best_epoch,
-                    )
-                    break
+                    trial.set_user_attr("ckpt_path", ckpt_path)
 
-            total_elapsed = time.perf_counter() - epoch_t0
-            if ckpt_path and best_epoch > 0 and not saved_ckpt:
+            def report_epoch(metrics: DiffusionEpochMetrics) -> None:
+                _log_gpu_mem(f"{self.stage}/{trial_label}/ep{metrics.epoch}")
+                if trial is None:
+                    return
+                trial.report(metrics.selection_score, metrics.epoch - 1)
+                if trial.should_prune():
+                    logger.info(
+                        "  [%s/%s] %s epoch %d/%d PRUNED val=%.4f",
+                        self.name, self.stage, trial_label, metrics.epoch, max_epochs,
+                        metrics.selection_score,
+                    )
+                    raise TrialPruned()
+
+            trainer = DiffusionTrainer(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                device=device,
+                optimizer=optimizer,
+                accum_steps=int(params.get("gradient_accumulation_steps", 1)),
+                clip_grad=1.0,
+                scheduler=scheduler,
+                ema_decay=float(params.get("ema_decay", 0.0)),
+                unpack_batch=_unpack_patch_refine_batch,
+                set_loader_mode=lambda current_model, loader, eval_mode=False: (
+                    pipeline_mod._set_ordinal_loader_mode(
+                        state, current_model, loader, eval_mode=eval_mode,
+                    )
+                ),
+                set_training_epoch=set_training_epoch,
+                log_prefix=f"{self.name}/{self.stage}/{trial_label}",
+            )
+            result = trainer.fit(
+                max_epochs=max_epochs,
+                early_stopping=EarlyStopping(patience=patience),
+                on_best=save_best,
+                on_epoch_end=report_epoch,
+            )
+            if ckpt_path and result.best_epoch > 0 and not saved_ckpt:
                 raise RuntimeError(
-                    f"{trial_label}: best_val={best_val:.4f} at epoch {best_epoch} "
+                    f"{trial_label}: best_val={result.best_val:.4f} at epoch {result.best_epoch} "
                     f"but no checkpoint was written to {ckpt_path}"
                 )
             if ckpt_path and saved_ckpt and not os.path.isfile(ckpt_path):
@@ -1692,34 +1515,36 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                             "length_scale": params.get("binary_length_scale", 1.0),
                             "binary_noise_schedule": params.get("binary_noise_schedule"),
                             "selection_metric": "val_loss",
-                            "best_val": float(best_val),
-                            "best_epoch": int(best_epoch),
-                            "epochs": epoch_history,
+                            "best_val": result.best_val,
+                            "best_epoch": result.best_epoch,
+                            "epochs": [
+                                {
+                                    "epoch": metrics.epoch,
+                                    "train_loss": metrics.train_loss,
+                                    "val_loss": metrics.val_loss,
+                                    "selection_score": metrics.selection_score,
+                                    "best_val": metrics.best_val,
+                                    "lr": metrics.lr,
+                                    "saved": metrics.saved,
+                                }
+                                for metrics in result.history
+                            ],
                         },
                         hf,
                         indent=2,
                     )
             logger.info(
                 "  [%s/%s] %s DONE best_val=%.4f best_epoch=%d total_time=%.1fs",
-                self.name, self.stage, trial_label, best_val, best_epoch, total_elapsed,
+                self.name, self.stage, trial_label, result.best_val, result.best_epoch,
+                result.elapsed_seconds,
             )
-            return best_val, best_epoch
+            return result.best_val, result.best_epoch
         finally:
             del model, guidance
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
     def execute(self, state: PipelineState) -> PipelineState:
-        from models.diffusion_tsf.train_multivariate_pipeline import (
-            dataset_window_lengths,
-            generate_dataset_job,
-            load_dataset,
-            load_wrapped_guidance,
-        )
-        from models.diffusion_tsf.pipeline.train.batch_config import (
-            configured_finetune_micro_batch,
-            configured_max_diffusion_batch,
-        )
         subset_id = state.subset_id or state.dataset
         variate_indices = state.variate_indices
         if not variate_indices:
@@ -1741,20 +1566,13 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             )
         if not needs_guidance:
             ft_guidance_ckpt = ""
-        if self.stage == "fine" and not state.diffusion_coarse_finetune_ckpt:
-            raise RuntimeError("fine staged tuning requires completed coarse best model first")
         if self.stage == "patch_refine" and not state.diffusion_coarse_finetune_ckpt:
             raise RuntimeError("patch_refine staged tuning requires completed coarse best model first")
-        if self.stage == "finer":
-            if not state.use_triple_scale:
-                raise RuntimeError("finer staged tuning requires use_triple_scale=True")
-            if not state.diffusion_fine_finetune_ckpt:
-                raise RuntimeError("finer staged tuning requires completed fine best model first")
         diff_ckpt = self._pretrained_ckpt(state)
 
         device = state.resolve_device()
         n_iv = len(variate_indices)
-        train_ds, val_ds, _, norm_stats = load_dataset(
+        train_ds, val_ds, _, norm_stats = pipeline_mod.load_dataset(
             state, state.dataset,
             variate_indices,
             stride=train_stride,
@@ -1794,10 +1612,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             self.stage == "patch_refine"
             and bool(getattr(state, "patch_refine_unique_segments", False))
         ):
-            from models.diffusion_tsf.patch_refine_segments import (
-                wrap_timeseries_as_unique_segments,
-            )
-
             # Unique-seg rebuilds from .data; flatline undersample restricts
             # kept (absolute_segment_start, active_var) crops via keep masks.
             if allowed_segment_variates is not None:
@@ -1842,9 +1656,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             train_ds = _maybe_subsample_patch_refine_train_windows(state, train_ds)
         if norm_stats.get("ordinal_ladder") is not None:
             state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
-        from models.diffusion_tsf.pipeline.config import training_value
-        from models.diffusion_tsf.train_window_aug import maybe_wrap_train_window_aug
-
         aug_cfg = training_value(state, "train_window_aug", None) or {}
         train_ds = maybe_wrap_train_window_aug(
             train_ds,
@@ -1864,9 +1675,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         )
 
 
-
-        from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
-        from models.diffusion_tsf.pipeline.visualize_utils import _load_staged_diffusion_from_ckpt
 
         if not diff_ckpt:
             logger.info(
@@ -1916,7 +1724,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 del probe_model
             except Exception as e:
                 logger.warning("[%s] phase-start diagnostics failed: %s", self.name, e, exc_info=True)
-        ds_lb, ds_hz = dataset_window_lengths(state, state.dataset)
+        ds_lb, ds_hz = pipeline_mod.dataset_window_lengths(state, state.dataset)
         micro_ceiling = configured_max_diffusion_batch(state, state.smoke_test)
         default_micro = configured_finetune_micro_batch(state, state.smoke_test)
         logger.info(
@@ -1951,8 +1759,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             max_epochs = patience = 1
 
         subset_dir = _stage_subset_dir(state, self.stage)
-        from models.diffusion_tsf.train_multivariate_pipeline import ensure_checkpoint_dir
-
         ensure_checkpoint_dir(final_ckpt := _stage_best_ckpt(state, self.stage))
         trials_dir = os.path.join(subset_dir, "_trials")
         ensure_checkpoint_dir(os.path.join(trials_dir, "_trial.pt"))
@@ -2034,7 +1840,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 if not os.path.exists(src_best):
                     raise FileNotFoundError(f"Missing reused staged checkpoint: {src_best}")
                 if not os.path.exists(final_ckpt):
-                    import shutil
                     shutil.copy2(src_best, final_ckpt)
                 hp_best_val_loss = float(
                     reuse_meta.get("best_val_loss")
@@ -2117,15 +1922,13 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     int(best_params.get("batch_size", 1)),
                 )
             else:
-                from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
-
                 phase = self
 
                 def objective_builder(_worker_id: int):
                     dev = state.resolve_device()
                     worker_guidance = None
                     if ft_guidance_ckpt:
-                        worker_guidance = load_wrapped_guidance(
+                        worker_guidance = pipeline_mod.load_wrapped_guidance(
                             state, ft_guidance_ckpt,
                             n_iv,
                             dev,
@@ -2259,8 +2062,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     # Keep every COMPLETE trial weight so --resume can still
                     # promote whichever trial wins after more trials land.
                     # Drop only pruned/failed mid-run checkpoints.
-                    from optuna.trial import TrialState
-
                     keep_nums = {
                         int(t.number)
                         for t in study.get_trials(
@@ -2334,7 +2135,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     float(best_params.get("learning_rate", 0.0)),
                 )
 
-                import shutil
                 src = _resolve_best_trial_ckpt(
                     study, trials_dir, subset_dir, best_trial_num,
                 )
@@ -2412,24 +2212,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         with open(os.path.join(subset_dir, "metadata.json"), "w", encoding="utf-8") as f:
             json.dump(meta_out, f, indent=2, sort_keys=True)
 
-        if self.stage == "coarse":
-            state.diffusion_coarse_finetune_ckpt = final_ckpt
-            state.coarse_finetune_best_params = best_params
-        elif self.stage == "fine":
-            state.diffusion_fine_finetune_ckpt = final_ckpt
-            state.fine_finetune_best_params = best_params
-        elif self.stage == "patch_refine":
-            state.diffusion_patch_refine_finetune_ckpt = final_ckpt
-            state.patch_refine_finetune_best_params = best_params
-        elif self.stage == "vertical_dual":
-            state.diffusion_vertical_dual_finetune_ckpt = final_ckpt
-            state.vertical_dual_finetune_best_params = best_params
-        elif self.stage == "channel_dual":
-            state.diffusion_channel_dual_finetune_ckpt = final_ckpt
-            state.channel_dual_finetune_best_params = best_params
-        else:
-            state.diffusion_finer_finetune_ckpt = final_ckpt
-            state.finer_finetune_best_params = best_params
+        self._record_finetune_result(state, final_ckpt, best_params)
         self._apply_tuned_length_to_state(state, best_params)
 
         wandb_utils.log_summary({

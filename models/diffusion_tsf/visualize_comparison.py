@@ -36,11 +36,13 @@ if project_root not in sys.path:
 from models.diffusion_tsf.storage_paths import resolve_checkpoint_dir
 import models.diffusion_tsf.train_multivariate_pipeline as train_pipeline
 from models.diffusion_tsf.train_multivariate_pipeline import (
-    RESULTS_DIR,
-    LOOKBACK_LENGTH, FORECAST_LENGTH, create_diffusion_model, load_dataset,
+    create_diffusion_model, load_dataset,
     pretrain_dir_for_dim,
     load_itransformer_from_checkpoint,
 )
+RESULTS_DIR = "results"
+LOOKBACK_LENGTH = 96
+FORECAST_LENGTH = 96
 DEFAULT_IMAGE_HEIGHT = 16
 from models.diffusion_tsf.guidance import iTransformerGuidance
 

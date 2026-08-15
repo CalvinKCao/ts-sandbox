@@ -43,9 +43,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from models.diffusion_tsf.pipeline.config import load_experiment_config  # noqa: E402
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals  # noqa: E402
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (  # noqa: E402
-    patch_stage_globals,
+    stage_state,
 )
 from models.diffusion_tsf.pipeline.state import PipelineState  # noqa: E402
 from models.diffusion_tsf.train_multivariate_pipeline import (  # noqa: E402
@@ -130,11 +129,10 @@ def _build_encode_model(
     state.dataset = DATASET
     state.subset_id = DATASET
     state.extra["hybrid_flat_norm_stats"] = {"flat_variate_mask": list(flat_mask)}
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
-    patch_stage_globals(pipeline_mod, state, "coarse", honor_dataset_windows=True)
+    state = stage_state(state, "coarse", honor_dataset_windows=True)
     # Encode path never needs guidance / cross-attn tokens.
-    pipeline_mod.DISABLE_CROSS_ATTENTION = True
-    pipeline_mod.USE_GUIDANCE_CHANNEL = False
+    state.disable_cross_attention = True
+    state.use_guidance_channel = False
     model = create_diffusion_model(
         n_variates=len(flat_mask),
         lookback=lookback,

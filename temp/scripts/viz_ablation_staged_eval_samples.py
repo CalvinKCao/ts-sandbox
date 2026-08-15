@@ -66,7 +66,6 @@ for _root in (REPO_ROOT, _CODE_ROOT):
         sys.path.remove(s)
     sys.path.insert(0, s)
 
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.train_multivariate_pipeline import (
     load_dataset,
     load_wrapped_guidance,

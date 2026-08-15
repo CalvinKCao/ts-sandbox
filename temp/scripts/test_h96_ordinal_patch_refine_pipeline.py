@@ -19,7 +19,6 @@ from models.diffusion_tsf.ordinal_window_norm import (
     ordinal_encode,
 )
 from models.diffusion_tsf.pipeline.config import load_experiment_config
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     _suggest_staged_params,
 )
@@ -56,7 +55,6 @@ def _test_config_and_search() -> None:
     assert state.patch_refine_col_stride == 6
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
-    patch_globals(pipeline_mod, state)
     assert pipeline_mod.ORDINAL_OOD_SHIFT_CAUSAL_ONLY is True
 
     phases = {p["phase"]: p for p in cfg["phases"]}

@@ -42,7 +42,7 @@ from models.diffusion_tsf.pipeline.config import load_experiment_config
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     _model_kwargs_from_tuned,
 )
-from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch_stage_globals
+from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import stage_state
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline.visualize_utils import (
     pick_sample_indices,
@@ -121,7 +121,7 @@ def _load_stage_model(
 ) -> torch.nn.Module:
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
-    patch_stage_globals(pipeline_mod, state, stage, honor_dataset_windows=True)
+    stage_config = stage_state(state, stage, honor_dataset_windows=True)
     lookback, horizon = _window_lengths(state.dataset, state)
     meta_path = ckpt_path.parent / "metadata.json"
     tuned: Dict[str, Any] = {}
@@ -138,7 +138,7 @@ def _load_stage_model(
         guidance_model=guidance_model,
         diffusion_stage=stage,
         use_guidance_channel=state.use_guidance_channel,
-        ordinal_ladder=pipeline_mod.GLOBAL_ORDINAL_LADDER,
+        ordinal_ladder=stage_config.ordinal_ladder,
         **model_kwargs,
     ).to(device)
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
@@ -480,10 +480,8 @@ def run_viz(
         )
 
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
-    from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 
     # Match StagedEvalPhase.execute: ordinal globals + ladder before guidance/model load.
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
     _, _, test_ds, norm_stats = load_dataset(
         dataset,
         variate_indices,
@@ -497,8 +495,7 @@ def run_viz(
     if len(test_ds) == 0:
         raise ValueError(f"Empty test set for {dataset}")
     if norm_stats.get("ordinal_ladder") is not None:
-        state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
-        pipeline_mod.GLOBAL_ORDINAL_LADDER = norm_stats["ordinal_ladder"]
+        state.ordinal_ladder = norm_stats["ordinal_ladder"]
 
     guidance_path, resolved_guidance_type = _resolve_guidance_ckpt(
         checkpoint_dir, subset_id, guidance_type,

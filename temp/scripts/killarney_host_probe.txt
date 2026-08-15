@@ -1,0 +1,44 @@
+=== ssh config ===
+1:Host github.com
+2:    HostName github.com
+7:Host killarney killarney.alliancecan.ca
+8:    HostName killarney.alliancecan.ca
+13:Host narval.alliancecan.ca
+=== known hosts grep ===
+=== skill ssh mentions ===
+388:            --mail-user=ccao87@uwo.ca \
+404:            --mail-user=ccao87@uwo.ca \
+602:    --mail-type=FAIL --mail-user=ccao87@uwo.ca \
+625:    --mail-type=FAIL --mail-user=ccao87@uwo.ca \
+658:| User / email | `ccao87` / `ccao87@uwo.ca` |
+=== scripts ===
+/home/cao/ts-sandbox/temp/lean_disc_c128_results/viz_point_gap/STATUS.md:32:1. **SSH MFA to Killarney** — ControlMaster mux expired; `BatchMode` gets `Permission denied (keyboard-interactive)`. Need user to `ssh killarney` once, then rsync missing `*_patch_guidance.pt` for ETTh1/ETTh2/electricity/traffic/exchange_rate.
+/home/cao/ts-sandbox/temp/lean_disc_c128_results/viz_point_gap/STATUS.md:37:ssh killarney   # complete MFA / keyboard-interactive once
+/home/cao/ts-sandbox/temp/scripts/wait_mux_then_poll_four_mlp.sh:11:log "waiting for ControlMaster under $SOCK_DIR (need interactive MFA ssh killarney)"
+/home/cao/ts-sandbox/temp/scripts/wait_mux_then_poll_four_mlp.sh:17:    if ssh -o BatchMode=yes -o ControlPath="$s" -o ConnectTimeout=8 killarney 'true' 2>/dev/null; then
+/home/cao/ts-sandbox/temp/scripts/wait_mux_then_poll_four_mlp.sh:20:      ssh -o BatchMode=yes -o ControlPath="$s" killarney "$SSH
+/home/cao/ts-sandbox/temp/scripts/wait_mux_then_poll_four_mlp.sh:36:  if ssh -o BatchMode=yes -o ConnectTimeout=5 killarney 'true' 2>/dev/null; then
+/home/cao/ts-sandbox/temp/scripts/disc_poll_loop.sh:16:  el_sec=$(ssh -o BatchMode=yes killarney "$SSH; sacct -j $jid -X -n -o ElapsedRaw | head -1 | tr -d ' '")
+/home/cao/ts-sandbox/temp/scripts/disc_poll_loop.sh:28:  out=$(ssh -o BatchMode=yes killarney "$SSH
+/home/cao/ts-sandbox/temp/scripts/disc_poll_loop.sh:50:  [ -n "$auto_merge" ] && ssh -o BatchMode=yes killarney "$SSH; scancel $auto_merge 2>/dev/null; true"
+/home/cao/ts-sandbox/temp/scripts/disc_poll_loop.sh:52:  ssh -o BatchMode=yes killarney "$SSH; scancel $old_merge 2>/dev/null; true"
+/home/cao/ts-sandbox/temp/scripts/disc_poll_loop.sh:59:  new_merge=$(ssh -o BatchMode=yes killarney "$SSH
+/home/cao/ts-sandbox/temp/scripts/disc_poll_loop.sh:79:  OUT=$(ssh -o BatchMode=yes -o ConnectTimeout=45 killarney "$SSH; sacct -j ${JOBS} -X -o JobID,JobName%40,State,ExitCode,Elapsed,Timelimit,NodeList,End; echo ---; squeue -u ccao87 -o '%.18i %.8T %.10M %R %j' | head -40")
+/home/cao/ts-sandbox/temp/scripts/disc_poll_loop.sh:94:      ssh -o BatchMode=yes killarney "$SSH; f=\$(ls -t /scratch/ccao87/ts-sandbox/results/logs/disc-opr96*-${jid}.log 2>/dev/null | head -1); echo ===== ${jid} ${jname} ${jst} =====; tail -40 \$f" | tee -a "$LOG"
+/home/cao/ts-sandbox/temp/scripts/poll_solar_disc_only.sh:16:  ssh -o BatchMode=yes -o ConnectTimeout=40 killarney "source /etc/profile >/dev/null 2>&1; export PATH=/cm/shared/apps/slurm/current/bin:\$PATH; [ -f /cm/shared/apps/slurm/var/etc/killarney/slurm.conf ] && export SLURM_CONF=/cm/shared/apps/slurm/var/etc/killarney/slurm.conf; $*"
+/home/cao/ts-sandbox/temp/scripts/disc_poll_wn128grid.sh:2:# Poll wn128grid disc ablation jobs. Re-auth first if needed: ssh killarney
+/home/cao/ts-sandbox/temp/scripts/disc_poll_wn128grid.sh:5:ssh killarney 'bash -s' <<'REMOTE'
+/home/cao/ts-sandbox/temp/scripts/poll_three_mlp_disc_c128.sh:28:  ssh -o BatchMode=yes -o ConnectTimeout=40 killarney "$SSH_PRE
+/home/cao/ts-sandbox/temp/scripts/poll_three_mlp_disc_c128.sh:39:  ssh -o BatchMode=yes -o ConnectTimeout=40 killarney "$SSH_PRE
+/home/cao/ts-sandbox/temp/scripts/poll_three_mlp_disc_c128.sh:51:  ssh -o BatchMode=yes killarney "$SSH_PRE
+/home/cao/ts-sandbox/temp/scripts/poll_three_mlp_disc_c128.sh:66:  out=$(ssh -o BatchMode=yes killarney "$SSH_PRE
+/home/cao/ts-sandbox/temp/scripts/poll_three_mlp_disc_c128.sh:126:  mapfile -t PACK_LINES < <(ssh -o BatchMode=yes killarney "$SSH_PRE
+/home/cao/ts-sandbox/temp/scripts/poll_four_mlp_disc_c128.sh:29:  ssh -o BatchMode=yes -o ConnectTimeout=40 killarney "$SSH_PRE
+/home/cao/ts-sandbox/temp/scripts/poll_four_mlp_disc_c128.sh:40:  ssh -o BatchMode=yes killarney "$SSH_PRE
+/home/cao/ts-sandbox/temp/scripts/poll_four_mlp_disc_c128.sh:55:  out=$(ssh -o BatchMode=yes killarney "$SSH_PRE
+/home/cao/ts-sandbox/temp/scripts/poll_four_mlp_disc_c128.sh:120:  mapfile -t PACK_LINES < <(ssh -o BatchMode=yes killarney "$SSH_PRE
+/home/cao/ts-sandbox/temp/scripts/poll_ablation_jobs.sh:9:ssh -o BatchMode=yes -o ConnectTimeout=40 killarney "bash -l -c $(printf '%q' "
+/home/cao/ts-sandbox/temp/scripts/poll_solar_align_fix_disc.sh:27:  ssh -o BatchMode=yes -o ConnectTimeout=40 killarney "$SSH_PRE
+/home/cao/ts-sandbox/temp/scripts/poll_solar_align_fix_disc.sh:59:  out=$(ssh -o BatchMode=yes killarney "$SSH_PRE
+/home/cao/ts-sandbox/temp/scripts/poll_solar_align_fix_disc.sh:101:  mapfile -t PACK_LINES < <(ssh -o BatchMode=yes killarney "$SSH_PRE
+/home/cao/ts-sandbox/temp/scripts/poll_solar_align_fix_disc.sh:177:    prog=$(ssh -o BatchMode=yes -o ConnectTimeout=40 killarney "$SSH_PRE

@@ -22,7 +22,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals  # noqa: E402
 from models.diffusion_tsf.train_multivariate_pipeline import (  # noqa: E402
     load_dataset,
     load_wrapped_guidance,
@@ -108,8 +107,7 @@ def _load_models(dataset: str, ckpt_root: Path, device: torch.device):
     )
     ladder = norm_stats["ordinal_ladder"]
     state.extra["global_ordinal_ladder"] = ladder
-    pipeline_mod.GLOBAL_ORDINAL_LADDER = ladder
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
+    state.ordinal_ladder = ladder
 
     guidance = None
     if bool(state.use_guidance_channel) or not bool(state.disable_cross_attention):

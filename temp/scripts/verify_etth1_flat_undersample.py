@@ -54,7 +54,6 @@ def main() -> int:
     )
     from models.diffusion_tsf.patch_refine_segments import iter_unique_segment_starts
     from models.diffusion_tsf.pipeline.config import load_experiment_config
-    from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
     from models.diffusion_tsf.pipeline.state import PipelineState
     from models.diffusion_tsf.train_multivariate_pipeline import (
         load_dataset,
@@ -65,7 +64,6 @@ def main() -> int:
 
     cfg = load_experiment_config(args.config, cli_overrides={"dataset": args.dataset})
     state = PipelineState.from_config(cfg)
-    patch_globals(pipeline_mod, state)
     resolve_pipeline_data_subset(state)
 
     keep_frac = float(state.patch_refine_flatline_keep_frac)

@@ -49,7 +49,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from models.diffusion_tsf.guidance import iTransformerGuidance
 from models.diffusion_tsf.pipeline.config import load_experiment_config
-from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import patch_stage_globals
+from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import stage_state
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.train_multivariate_pipeline import (
     anchor_kwargs_from_params,
@@ -180,7 +180,7 @@ def _load_staged_diffusion(
 ) -> torch.nn.Module:
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
-    patch_stage_globals(pipeline_mod, state, stage, honor_dataset_windows=True)
+    stage_config = stage_state(state, stage, honor_dataset_windows=True)
     lookback, horizon = _window_lengths(state.dataset, state)
     meta_path = ckpt_path.parent / "metadata.json"
     tuned: Dict[str, Any] = {}

@@ -54,7 +54,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.train_multivariate_pipeline import (
     load_dataset,
     load_wrapped_guidance,
@@ -962,7 +961,6 @@ def _load_models(
         state.extra.pop("global_ordinal_ladder", None)
         pipeline_mod.GLOBAL_ORDINAL_LADDER = None
         # Window-norm canvas128 leaves: disc snap uses window-norm grid, not ordinal.
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
 
     guidance = None
     if bool(state.use_guidance_channel) or not bool(state.disable_cross_attention):
@@ -1474,7 +1472,7 @@ def _build_gt_encode_fn(
     """Encode-only model for ``viz_gt_encode_bins`` (no DiT weights; alphabet check)."""
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
     from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
-        patch_stage_globals,
+        stage_state,
     )
     from models.diffusion_tsf.train_multivariate_pipeline import create_diffusion_model
     from utils.visualize_staged_eval_2d_preds import _build_state
@@ -1512,8 +1510,7 @@ def _build_gt_encode_fn(
     else:
         pipeline_mod.GLOBAL_ORDINAL_LADDER = None
         state.extra.pop("global_ordinal_ladder", None)
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
-    patch_stage_globals(pipeline_mod, state, "coarse", honor_dataset_windows=True)
+    state = stage_state(state, "coarse", honor_dataset_windows=True)
     pipeline_mod.DISABLE_CROSS_ATTENTION = True
     pipeline_mod.USE_GUIDANCE_CHANNEL = False
 

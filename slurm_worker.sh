@@ -40,7 +40,7 @@ if [[ -n "$CONFIG_REL" ]]; then
     if [[ ! -f "$CONFIG_PATH" ]]; then
         BRANCH="$(git -C "$REPO" branch --show-current 2>/dev/null || echo unknown)"
         echo "ERROR: config not found: $CONFIG_PATH" >&2
-        echo "ERROR: repo branch=$BRANCH — git checkout feat/patch-decoder-cross-variate-ctx && git pull" >&2
+        echo "ERROR: repo branch=$BRANCH — update this checkout to a revision containing the requested config, then resubmit." >&2
         exit 1
     fi
 fi

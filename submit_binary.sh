@@ -11,7 +11,7 @@
 #       --datasets ETTh1,traffic --time 10:00:00
 #   ./submit_binary.sh --configs configs/binary_anchor.yaml --datasets ETTh1,exchange_rate
 #   ./submit_binary.sh --smoke
-#   ./submit_binary.sh --resume --configs binary_dual_scale_staged --datasets ETTh1
+#   ./submit_binary.sh --resume --configs binary_window_norm_patch_refine_canvas128_p64x6 --datasets ETTh1
 #
 # --configs accepts comma-separated paths, globs, or bare stems under configs/*.yaml.
 # =============================================================================
@@ -207,7 +207,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
     GPUS=1
     JOB_PREFIX="smoke"
 else
-    CONFIGS="${CONFIGS:-configs/binary_dual_scale_staged.yaml}"
+    CONFIGS="${CONFIGS:-configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml}"
     WALL_DEFAULT="3:00:00"
     MEM="60G"
     CPUS=8

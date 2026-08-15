@@ -37,9 +37,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from models.diffusion_tsf.pipeline.config import load_experiment_config  # noqa: E402
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals  # noqa: E402
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (  # noqa: E402
-    patch_stage_globals,
+    stage_state,
 )
 from models.diffusion_tsf.pipeline.state import PipelineState  # noqa: E402
 from models.diffusion_tsf.train_multivariate_pipeline import load_dataset  # noqa: E402
@@ -329,8 +328,7 @@ def main() -> None:
     state = PipelineState.from_config(cfg)
     state.dataset = DATASET
     state.subset_id = DATASET
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
-    patch_stage_globals(pipeline_mod, state, "coarse", honor_dataset_windows=True)
+    state = stage_state(state, "coarse", honor_dataset_windows=True)
 
     if bool(getattr(pipeline_mod, "USE_ORDINAL_WINDOW_NORM", False)):
         raise RuntimeError(f"{args.config}: expected use_ordinal_window_norm=False")

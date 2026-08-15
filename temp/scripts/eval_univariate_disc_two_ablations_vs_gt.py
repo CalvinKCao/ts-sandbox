@@ -36,7 +36,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.train_multivariate_pipeline import (
     load_dataset,
     load_wrapped_guidance,
@@ -365,7 +364,6 @@ def _load_models(
         pipeline_mod.GLOBAL_ORDINAL_LADDER = ladder_model
     else:
         pipeline_mod.GLOBAL_ORDINAL_LADDER = None
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
 
     guidance = None
     if bool(state.use_guidance_channel) or not bool(state.disable_cross_attention):

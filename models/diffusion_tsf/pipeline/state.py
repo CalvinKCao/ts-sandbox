@@ -45,7 +45,6 @@ class PipelineState:
     image_height: int = 16
     coarse_image_height: int = 16
     fine_image_height: int = 16
-    finer_image_height: int = 16
     max_scale: float = 3.5
     max_scale_by_dataset: Dict[str, float] = field(default_factory=dict)
     staged_representation: str = "value_precision"
@@ -55,9 +54,6 @@ class PipelineState:
     dit_num_heads: int = 6
     dit_mlp_ratio: float = 4.0
     dit_dropout: float = 0.0
-    use_triple_scale: bool = False
-    use_vertical_dual_concat: bool = False
-    use_channel_dual_concat: bool = False
     use_patch_refine_stage: bool = False
     diffusion_stage: str = "coarse"
     patch_refine_canvas_height: int = 256
@@ -227,18 +223,12 @@ class PipelineState:
     diffusion_pretrain_ckpt: Optional[str] = None
     diffusion_coarse_pretrain_ckpt: Optional[str] = None
     diffusion_fine_pretrain_ckpt: Optional[str] = None
-    diffusion_finer_pretrain_ckpt: Optional[str] = None
-    diffusion_vertical_dual_pretrain_ckpt: Optional[str] = None
-    diffusion_channel_dual_pretrain_ckpt: Optional[str] = None
     diffusion_patch_refine_pretrain_ckpt: Optional[str] = None
     itrans_finetune_ckpt: Optional[str] = None
     patch_guidance_finetune_ckpt: Optional[str] = None
     diffusion_finetune_ckpt: Optional[str] = None
     diffusion_coarse_finetune_ckpt: Optional[str] = None
     diffusion_fine_finetune_ckpt: Optional[str] = None
-    diffusion_finer_finetune_ckpt: Optional[str] = None
-    diffusion_vertical_dual_finetune_ckpt: Optional[str] = None
-    diffusion_channel_dual_finetune_ckpt: Optional[str] = None
     diffusion_patch_refine_finetune_ckpt: Optional[str] = None
 
     itrans_best_params: Optional[Dict[str, Any]] = None
@@ -246,9 +236,6 @@ class PipelineState:
     finetune_best_params: Optional[Dict[str, Any]] = None
     coarse_finetune_best_params: Optional[Dict[str, Any]] = None
     fine_finetune_best_params: Optional[Dict[str, Any]] = None
-    finer_finetune_best_params: Optional[Dict[str, Any]] = None
-    vertical_dual_finetune_best_params: Optional[Dict[str, Any]] = None
-    channel_dual_finetune_best_params: Optional[Dict[str, Any]] = None
     patch_refine_finetune_best_params: Optional[Dict[str, Any]] = None
 
     # Phase-level overrides from YAML (list of dicts)
@@ -327,7 +314,6 @@ class PipelineState:
             "image_height",
             "coarse_image_height",
             "fine_image_height",
-            "finer_image_height",
             "patch_refine_canvas_height",
             "patch_refine_patch_height",
             "patch_refine_patch_width",

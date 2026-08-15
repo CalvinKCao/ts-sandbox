@@ -27,7 +27,6 @@ from models.diffusion_tsf.pipeline.visualize_utils import (
     run_ordinal_roundtrip_visualization,
     run_ordinal_coarse_fine_2d_visualization,
     run_real_dataset_phase_diagnostics,
-    run_staged_finetune_visualizations,
 )
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     _model_kwargs_from_tuned,
@@ -954,29 +953,6 @@ class StagedEvalPhase(PipelinePhase):
             or state.extra.get("skip_eval_visualizations", False)
         )
         viz_cfg = visualization_settings(state.merged_config)
-        coarse_ft = state.diffusion_coarse_finetune_ckpt or _stage_finetune_ckpt(
-            state, "coarse", checkpoint_dir=source_checkpoint_dir,
-        )
-        fine_ft = state.diffusion_patch_refine_finetune_ckpt or _stage_finetune_ckpt(
-            state, "patch_refine", checkpoint_dir=source_checkpoint_dir,
-        )
-        if not skip_viz and viz_cfg.get("enabled", True) and not state.smoke_test:
-            try:
-                tuned = state.fine_finetune_best_params or state.coarse_finetune_best_params
-                viz_paths = run_staged_finetune_visualizations(
-                    state,
-                    coarse_ckpt_path=coarse_ft,
-                    fine_ckpt_path=fine_ft,
-                    itrans_ckpt_path=ft_guidance_ckpt,
-                    tuned_params=tuned,
-                    tag="eval_staged_dual_scale",
-                )
-                wandb_utils.log_visualization_paths(
-                    viz_paths, wandb_key="eval/dual_scale_visualizations",
-                )
-            except Exception as e:
-                logger.warning("Staged eval visualizations failed: %s", e, exc_info=True)
-
         if not skip_viz and viz_cfg.get("enabled", True):
             try:
                 worst_viz = run_eval_worst_window_visualizations(

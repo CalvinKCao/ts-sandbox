@@ -115,9 +115,8 @@ def _eval_anchor_pack(
     device: torch.device,
 ) -> Dict[str, np.ndarray]:
     """Anchor-only staged generate on fixed window indices (global-norm space)."""
-    from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
     from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
-        patch_stage_globals,
+        stage_state,
     )
     from models.diffusion_tsf.train_multivariate_pipeline import (
         load_dataset,
@@ -134,7 +133,6 @@ def _eval_anchor_pack(
     resolve_pipeline_data_subset(state)
     variate_indices = list(state.variate_indices)
 
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
     train_stride = int((state.data_subset_resolved or {}).get("train_stride", state.window_stride))
     _, _, test_ds, norm_stats = load_dataset(
         dataset,
@@ -267,7 +265,6 @@ def _fetch_past_future(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Return (past, future_horizon) in test-loader space (global z-score)."""
     from models.diffusion_tsf.pipeline.config import load_experiment_config
-    from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
     from models.diffusion_tsf.pipeline.state import PipelineState
     from models.diffusion_tsf.train_multivariate_pipeline import (
         generate_dataset_job,
@@ -283,7 +280,6 @@ def _fetch_past_future(
     job = generate_dataset_job(dataset)
     state.variate_indices = list(state.variate_indices or job["variate_indices"])
     resolve_pipeline_data_subset(state)
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
     train_stride = int((state.data_subset_resolved or {}).get("train_stride", state.window_stride))
     _, _, test_ds, _ = load_dataset(
         dataset,

@@ -55,7 +55,6 @@ experiment:
   ordinal_ood_shift_causal_only: false
   # Patch refine (absolute HIR) — only live binary second stage.
   use_patch_refine_stage: true
-  use_triple_scale: false
   patch_refine_canvas_height: 256
   patch_refine_patch_height: 32
   patch_refine_patch_width: 8

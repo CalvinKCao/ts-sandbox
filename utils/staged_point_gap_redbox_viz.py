@@ -387,7 +387,6 @@ def _load_test_pool_for_stride(
     """Rebuild test dataset at ``test_stride`` for redbox picks."""
     del device  # pool is CPU dataset; generate moves batches later
     from models.diffusion_tsf.pipeline.config import load_experiment_config
-    from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
     from models.diffusion_tsf.train_multivariate_pipeline import load_dataset
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
@@ -400,7 +399,6 @@ def _load_test_pool_for_stride(
     variate_indices = list(state.variate_indices or [])
     if not variate_indices:
         raise RuntimeError(f"{state.dataset}: empty variate_indices for redbox pool")
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
     _, _, test_ds, norm_stats = load_dataset(
         str(state.dataset),
         variate_indices,
@@ -412,8 +410,7 @@ def _load_test_pool_for_stride(
         use_ordinal_window_norm=bool(getattr(state, "use_ordinal_window_norm", False)),
     )
     if norm_stats.get("ordinal_ladder") is not None:
-        state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
-        pipeline_mod.GLOBAL_ORDINAL_LADDER = norm_stats["ordinal_ladder"]
+        state.ordinal_ladder = norm_stats["ordinal_ladder"]
     # Silence unused cfg (kept for load_experiment_config side effects / validation).
     _ = cfg
     return test_ds

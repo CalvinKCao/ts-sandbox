@@ -104,9 +104,8 @@ def _build_encode_model(
     load_coarse_weights: bool,
 ) -> Tuple[Any, Any]:
     """Return (model, test_ds). Model has guidance attached for ghost encode."""
-    from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
     from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
-        patch_stage_globals,
+        stage_state,
     )
     from models.diffusion_tsf.train_multivariate_pipeline import (
         create_diffusion_model,
@@ -126,7 +125,6 @@ def _build_encode_model(
     job = generate_dataset_job(dataset)
     state.variate_indices = list(state.variate_indices or job["variate_indices"])
     resolve_pipeline_data_subset(state)
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
 
     train_stride = int((state.data_subset_resolved or {}).get("train_stride", state.window_stride))
     # eval packs used test_stride=16
@@ -156,7 +154,7 @@ def _build_encode_model(
         )
     else:
         # Encode + guidance forecast only — no need for trained coarse weights.
-        patch_stage_globals(pipeline_mod, state, "coarse", honor_dataset_windows=True)
+        state = stage_state(state, "coarse", honor_dataset_windows=True)
         lookback, horizon = _window_lengths(state.dataset, state)
         meta_path = ckpt_dir / dataset / "coarse" / "metadata.json"
         tuned: Dict[str, Any] = {}

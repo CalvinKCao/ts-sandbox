@@ -31,7 +31,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from models.diffusion_tsf.pipeline.config import load_experiment_config
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.train_multivariate_pipeline import (
     _patch_guidance_batch,
@@ -174,7 +173,6 @@ def eval_one(
     state.dataset = spec.dataset
     state.checkpoint_dir = str(ckpt_dir.resolve())
     resolve_pipeline_data_subset(state)
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
 
     if bool(state.use_ordinal_window_norm):
         raise RuntimeError(

@@ -183,7 +183,6 @@ def _prepare_bundle(
     # Ladder from ckpt-linked ordinal loader via past windows on the shared pool.
     from utils.visualize_staged_eval_2d_preds import _build_state
     from models.diffusion_tsf.train_multivariate_pipeline import load_dataset
-    from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
     from utils.eval_mmpd_gaussian_anchor import run_subset_id, run_test_stride
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
@@ -204,9 +203,7 @@ def _prepare_bundle(
     ladder = norm_stats.get("ordinal_ladder")
     if ladder is None:
         raise RuntimeError(f"{dataset}: ordinal ladder missing")
-    state.extra["global_ordinal_ladder"] = ladder
-    pipeline_mod.GLOBAL_ORDINAL_LADDER = ladder
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
+    state.ordinal_ladder = ladder
 
     past_pool, _, _, _, _ = load_tsf_pack_pool(
         dataset,

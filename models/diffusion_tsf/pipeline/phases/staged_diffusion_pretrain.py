@@ -15,7 +15,6 @@ from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.reused_paths import find_reused_pretrain_ckpt
 from models.diffusion_tsf.pipeline.visualize_utils import (
-    run_pretrain_diffusion_visualizations,
     run_staged_synthetic_pretrain_diagnostics,
 )
 
@@ -621,39 +620,6 @@ def _resolve_synthetic_patch_guidance(
     )
 
 
-def _log_synthetic_pretrain_visualizations(
-    state: PipelineState,
-    *,
-    guidance_ckpt: Optional[str],
-    best_params: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Lookback/GT/pred panels after synthetic pretrain load or reuse."""
-    if not guidance_ckpt or not os.path.isfile(guidance_ckpt):
-        logger.warning(
-            "Synthetic-pretrain viz skipped: missing guidance ckpt (%s)",
-            guidance_ckpt,
-        )
-        return
-
-    viz_ckpt = state.diffusion_patch_refine_pretrain_ckpt or state.diffusion_coarse_pretrain_ckpt
-    if viz_ckpt and not state.smoke_test:
-        try:
-            viz_paths = run_pretrain_diffusion_visualizations(
-                state,
-                coarse_ckpt_path=state.diffusion_coarse_pretrain_ckpt,
-                fine_ckpt_path=state.diffusion_patch_refine_pretrain_ckpt,
-                itrans_ckpt_path=guidance_ckpt,
-                tuned_params=best_params,
-                tag="staged_diffusion_synthetic_pretrain",
-            )
-            wandb_utils.log_visualization_paths(
-                viz_paths, wandb_key="viz/staged_diffusion_synthetic_pretrain",
-            )
-        except Exception as e:
-            logger.warning("Staged synthetic-pretrain viz failed: %s", e, exc_info=True)
-
-
-
 def _log_staged_pretrain_diagnostics(
     state: PipelineState,
     *,
@@ -823,11 +789,6 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             except FileNotFoundError:
                 pass
             guidance_ckpt = _find_existing_synthetic_patch_guidance(state, source_dir)
-            _log_synthetic_pretrain_visualizations(
-                state,
-                guidance_ckpt=guidance_ckpt,
-                best_params=best_params or None,
-            )
         except Exception as e:
             logger.warning(
                 "[%s] cached-pretrain viz failed: %s", self.name, e, exc_info=True,
@@ -870,11 +831,6 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                     guidance_meta=guidance_meta,
                     best_params=best_params,
                     n_samples=n_samples,
-                )
-                _log_synthetic_pretrain_visualizations(
-                    state,
-                    guidance_ckpt=guidance_ckpt,
-                    best_params=best_params,
                 )
                 return state
             required = ", ".join(
@@ -990,11 +946,6 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             guidance_meta=guidance_meta,
             best_params=best_params,
             n_samples=n_samples,
-        )
-        _log_synthetic_pretrain_visualizations(
-            state,
-            guidance_ckpt=guidance_ckpt,
-            best_params=best_params,
         )
 
         return state

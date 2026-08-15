@@ -44,9 +44,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from models.diffusion_tsf.pipeline.config import load_experiment_config  # noqa: E402
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals  # noqa: E402
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (  # noqa: E402
-    patch_stage_globals,
+    stage_state,
 )
 from models.diffusion_tsf.pipeline.state import PipelineState  # noqa: E402
 from models.diffusion_tsf.train_multivariate_pipeline import (  # noqa: E402
@@ -366,8 +365,7 @@ def _build_window_norm_encode_model(
     pipeline_mod.GLOBAL_ORDINAL_LADDER = None
     state.extra.pop("global_ordinal_ladder", None)
     state.extra.pop("hybrid_flat_norm_stats", None)
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
-    patch_stage_globals(pipeline_mod, state, "coarse", honor_dataset_windows=True)
+    state = stage_state(state, "coarse", honor_dataset_windows=True)
     pipeline_mod.DISABLE_CROSS_ATTENTION = True
     pipeline_mod.USE_GUIDANCE_CHANNEL = False
     pipeline_mod.USE_ORDINAL_WINDOW_NORM = False

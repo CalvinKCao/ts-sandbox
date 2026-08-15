@@ -134,8 +134,8 @@ def main() -> None:
     p.add_argument("--guidance", default="", help="synthetic patch guidance .pt")
     p.add_argument(
         "--stage",
-        default="vertical_dual",
-        choices=tuple(PRETRAIN_REL),
+        default="coarse",
+        choices=("coarse",),
     )
     p.add_argument("--n-samples", type=int, default=6)
     p.add_argument("--n-vars-plot", type=int, default=3)
@@ -151,13 +151,10 @@ def main() -> None:
     args = p.parse_args()
 
     from models.diffusion_tsf.pipeline.config import load_experiment_config
-    from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
     from models.diffusion_tsf.pipeline.state import PipelineState
     from models.diffusion_tsf.pipeline.visualize_utils import (
-        run_dual_concat_synthetic_pretrain_visualizations,
         run_pretrain_diffusion_visualizations,
     )
-    import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
     ckpt, run_dir = _resolve_ckpt(args)
     guidance = _find_guidance(run_dir, args.guidance or None)
@@ -193,42 +190,20 @@ def main() -> None:
         },
     }
 
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
     logger.info("ckpt=%s", ckpt)
     logger.info("guidance=%s", guidance)
     logger.info("out=%s sampler=%s n=%d", out_root, args.sampler, args.n_samples)
 
-    is_dual = bool(state.use_vertical_dual_concat) or bool(
-        getattr(state, "use_channel_dual_concat", False)
+    if args.stage != "coarse":
+        raise ValueError("only the coarse synthetic-pretrain visualization remains supported")
+    state.diffusion_coarse_pretrain_ckpt = str(ckpt)
+    paths = run_pretrain_diffusion_visualizations(
+        state,
+        coarse_ckpt_path=state.diffusion_coarse_pretrain_ckpt,
+        itrans_ckpt_path=str(guidance),
+        tuned_params=None,
+        tag="synth_pretrain_offline",
     )
-    if is_dual or args.stage in {"vertical_dual", "channel_dual"}:
-        if args.stage == "channel_dual":
-            state.use_channel_dual_concat = True
-            state.use_vertical_dual_concat = False
-            state.diffusion_channel_dual_pretrain_ckpt = str(ckpt)
-        else:
-            state.use_vertical_dual_concat = True
-            state.diffusion_vertical_dual_pretrain_ckpt = str(ckpt)
-        paths = run_dual_concat_synthetic_pretrain_visualizations(
-            state,
-            dual_ckpt_path=str(ckpt),
-            guidance_ckpt_path=str(guidance),
-            tuned_params=None,
-            tag="synth_pretrain_offline",
-        )
-    else:
-        if args.stage == "coarse":
-            state.diffusion_coarse_pretrain_ckpt = str(ckpt)
-        elif args.stage == "fine":
-            state.diffusion_fine_pretrain_ckpt = str(ckpt)
-        paths = run_pretrain_diffusion_visualizations(
-            state,
-            coarse_ckpt_path=state.diffusion_coarse_pretrain_ckpt,
-            fine_ckpt_path=state.diffusion_fine_pretrain_ckpt or str(ckpt),
-            itrans_ckpt_path=str(guidance),
-            tuned_params=None,
-            tag="synth_pretrain_offline",
-        )
 
     if not paths:
         raise SystemExit("no panels written (viz disabled or empty dataset?)")

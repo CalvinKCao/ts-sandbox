@@ -19,7 +19,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline.reused_paths import find_reused_binary_staged_root
 from models.diffusion_tsf.train_multivariate_pipeline import (
     load_dataset,
@@ -136,7 +135,6 @@ def load_ordinal_ladder_for_run(
         )
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
     _train_ds, _val_ds, _test_ds, norm_stats = load_dataset(
         run.dataset,
         run_variate_indices(run),
@@ -339,7 +337,6 @@ def evaluate_staged_binary(
     resolve_pipeline_data_subset(state)
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
     # Rebuild ladder under the same binary config knobs as training.
     _, _, _test_ds, norm_stats = load_dataset(
         run.dataset,
@@ -352,8 +349,7 @@ def evaluate_staged_binary(
         use_ordinal_window_norm=state.use_ordinal_window_norm,
     )
     if norm_stats.get("ordinal_ladder") is not None:
-        state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
-        pipeline_mod.GLOBAL_ORDINAL_LADDER = norm_stats["ordinal_ladder"]
+        state.ordinal_ladder = norm_stats["ordinal_ladder"]
 
     guidance_type = str(run.metadata.get("guidance_type") or "auto")
     guidance_path, guidance_type = _resolve_guidance_ckpt(run.root, subset_id, guidance_type)

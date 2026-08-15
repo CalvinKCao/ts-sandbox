@@ -41,7 +41,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from models.diffusion_tsf.pipeline.config import load_experiment_config
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals
 from models.diffusion_tsf.pipeline.phase_diagnostics import select_spaced_top_k
 from models.diffusion_tsf.pipeline.phases.staged_eval import StagedEvalPhase
 from models.diffusion_tsf.pipeline.state import PipelineState
@@ -415,7 +414,6 @@ def run_binary_staged_eval(
 
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
 
     variate_indices = state.variate_indices
     if variate_indices is None:
@@ -1442,7 +1440,6 @@ def plot_dataset_windows(
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 
     # Match run_binary_staged_eval: ordinal globals + ladder before guidance/model load.
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
     _, _, test_ds, norm_stats = load_dataset(
         dataset,
         variate_indices,
@@ -1454,8 +1451,7 @@ def plot_dataset_windows(
         use_ordinal_window_norm=state.use_ordinal_window_norm,
     )
     if norm_stats.get("ordinal_ladder") is not None:
-        state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
-        pipeline_mod.GLOBAL_ORDINAL_LADDER = norm_stats["ordinal_ladder"]
+        state.ordinal_ladder = norm_stats["ordinal_ladder"]
 
     guidance_path, guidance_type = _resolve_guidance_ckpt(binary_ckpt, subset_id, "auto")
     guidance_model = load_wrapped_guidance(

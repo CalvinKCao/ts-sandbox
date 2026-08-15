@@ -48,7 +48,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from models.diffusion_tsf.pipeline.globals_bridge import patch_globals  # noqa: E402
 from models.diffusion_tsf.train_multivariate_pipeline import (  # noqa: E402
     load_wrapped_guidance,
     resolve_pipeline_data_subset,
@@ -636,7 +635,7 @@ def main() -> None:
 
     from models.diffusion_tsf.pipeline.config import load_experiment_config
     from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
-        patch_stage_globals,
+        stage_state,
     )
     from models.diffusion_tsf.pipeline.state import PipelineState
 
@@ -644,8 +643,7 @@ def main() -> None:
     state0 = PipelineState.from_config(cfg)
     state0.dataset = DATASET
     state0.subset_id = DATASET
-    patch_globals(pipeline_mod, state0, honor_dataset_windows=True)
-    patch_stage_globals(pipeline_mod, state0, "coarse", honor_dataset_windows=True)
+    state0 = stage_state(state0, "coarse", honor_dataset_windows=True)
 
     if bool(getattr(pipeline_mod, "USE_ORDINAL_WINDOW_NORM", False)):
         raise RuntimeError("expected use_ordinal_window_norm=False")
@@ -721,7 +719,6 @@ def main() -> None:
     resolve_pipeline_data_subset(state)
     pipeline_mod.GLOBAL_ORDINAL_LADDER = None
     state.extra.pop("global_ordinal_ladder", None)
-    patch_globals(pipeline_mod, state, honor_dataset_windows=True)
 
     guidance = None
     if bool(state.use_guidance_channel) or not bool(state.disable_cross_attention):
