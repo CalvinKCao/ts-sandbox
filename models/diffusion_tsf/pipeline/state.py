@@ -172,6 +172,7 @@ class PipelineState:
     use_amp: bool = True
     use_gradient_checkpointing: bool = True
     unet_max_chunk_size: int = 128
+    sequential_anchor_backward: bool = False
     eval_num_samples: int = 30
     past_loss_weight: float = 0.3
     train_window_aug: Dict[str, Any] = field(default_factory=dict)

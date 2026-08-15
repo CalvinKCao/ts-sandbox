@@ -8,6 +8,7 @@ training:
   # Patch-refine duplicates full 431-variate context per factorized patch row.
   # Smaller chunks retain full attention without exceeding an L40S's VRAM.
   unet_max_chunk_size: 32
+  sequential_anchor_backward: true
 
 wandb:
   tags: [control, fixed_hp, default_max_scale, traffic, channels_000_430, all_variates, canvas128, p64x6, full_attention, anchor_only_eval_s16]

@@ -129,6 +129,7 @@ REQUIRED_TRAINING_KEYS = (
     "use_amp",
     "use_gradient_checkpointing",
     "unet_max_chunk_size",
+    "sequential_anchor_backward",
     "eval_num_samples",
     "past_loss_weight",
     "lr_scheduler_type",

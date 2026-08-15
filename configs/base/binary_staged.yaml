@@ -34,6 +34,7 @@ training:
   use_amp: true
   use_gradient_checkpointing: true
   unet_max_chunk_size: 128
+  sequential_anchor_backward: false
   eval_num_samples: 30
   past_loss_weight: 0.3
   lr_scheduler_type: none

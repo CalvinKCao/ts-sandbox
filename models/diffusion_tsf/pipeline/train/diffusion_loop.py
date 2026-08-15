@@ -90,6 +90,7 @@ class DiffusionTrainer:
         unpack_batch: Optional[Callable[[Any], Tuple[torch.Tensor, torch.Tensor, Any, Any]]] = None,
         set_loader_mode: Optional[Callable] = None,
         set_training_epoch: Optional[Callable[[DataLoader, int], None]] = None,
+        sequential_anchor_backward: bool = False,
         log_prefix: str = "diffusion",
     ) -> None:
         self.model = model
@@ -104,6 +105,7 @@ class DiffusionTrainer:
         self.unpack_batch = unpack_batch or self._unpack_standard_batch
         self.set_loader_mode = set_loader_mode
         self.set_training_epoch = set_training_epoch
+        self.sequential_anchor_backward = bool(sequential_anchor_backward)
         self.log_prefix = log_prefix
 
     @staticmethod
@@ -111,7 +113,7 @@ class DiffusionTrainer:
         past, future = batch
         return past, future, None, None
 
-    def _loss_from_batch(self, batch, *, scale_for_accumulation: bool) -> torch.Tensor:
+    def _inputs_from_batch(self, batch):
         past, future, patch_col0, variate_keep = self.unpack_batch(batch)
         past = past.to(self.device)
         future = future.to(self.device)
@@ -119,14 +121,31 @@ class DiffusionTrainer:
             patch_col0 = patch_col0.to(self.device)
         if variate_keep is not None:
             variate_keep = variate_keep.to(self.device)
+        return past, future, patch_col0, variate_keep
+
+    def _loss_from_inputs(
+        self,
+        inputs,
+        *,
+        loss_mode: str = "combined",
+        scale_for_accumulation: bool,
+    ) -> torch.Tensor:
+        past, future, patch_col0, variate_keep = inputs
         with amp_context(bool(self.model.config.use_amp)):
             loss = self.model.get_loss(
                 past,
                 future,
                 patch_col0=patch_col0,
                 variate_keep=variate_keep,
+                loss_mode=loss_mode,
             )
         return loss / self.accum_steps if scale_for_accumulation else loss
+
+    def _loss_from_batch(self, batch, *, scale_for_accumulation: bool) -> torch.Tensor:
+        return self._loss_from_inputs(
+            self._inputs_from_batch(batch),
+            scale_for_accumulation=scale_for_accumulation,
+        )
 
     def _train_epoch(self, epoch: int, max_epochs: int) -> Tuple[float, float]:
         if self.set_training_epoch is not None:
@@ -146,8 +165,45 @@ class DiffusionTrainer:
                     "  [%s] epoch %d/%d train_batch %d/%d",
                     self.log_prefix, epoch + 1, max_epochs, batch_idx + 1, n_train_batches,
                 )
-            loss = self._loss_from_batch(batch, scale_for_accumulation=True)
-            loss.backward()
+            if self.sequential_anchor_backward and bool(
+                self.model.config.use_deterministic_anchor_loss
+            ):
+                # Both passes must see the same sampled timestep and conditioning
+                # dropout as the original combined forward.  Replaying the RNG state
+                # keeps this memory-saving split algebraically equivalent per update.
+                cpu_rng_state = torch.get_rng_state()
+                cuda_rng_state = (
+                    torch.cuda.get_rng_state(self.device)
+                    if self.device.type == "cuda"
+                    else None
+                )
+                regular_inputs = self._inputs_from_batch(batch)
+                regular_loss = self._loss_from_inputs(
+                    regular_inputs,
+                    loss_mode="regular",
+                    scale_for_accumulation=False,
+                )
+                anchor_weight = 1.0 - float(self.model.config.deterministic_anchor_lambda)
+                regular_weight = float(self.model.config.deterministic_anchor_lambda)
+                (regular_loss * regular_weight / self.accum_steps).backward()
+                regular_value = float(regular_loss.detach().item())
+                del regular_loss, regular_inputs
+
+                torch.set_rng_state(cpu_rng_state)
+                if cuda_rng_state is not None:
+                    torch.cuda.set_rng_state(cuda_rng_state, self.device)
+                anchor_inputs = self._inputs_from_batch(batch)
+                anchor_loss = self._loss_from_inputs(
+                    anchor_inputs,
+                    loss_mode="anchor",
+                    scale_for_accumulation=False,
+                )
+                (anchor_loss * anchor_weight / self.accum_steps).backward()
+                loss = regular_weight * regular_value + anchor_weight * float(anchor_loss.detach().item())
+                del anchor_loss, anchor_inputs
+            else:
+                loss = self._loss_from_batch(batch, scale_for_accumulation=True)
+                loss.backward()
             if (batch_idx + 1) % self.accum_steps == 0:
                 if self.clip_grad is not None:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
@@ -155,7 +211,8 @@ class DiffusionTrainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 if self.ema is not None:
                     self.ema.update(self.model)
-            total_loss += float(loss.item()) * self.accum_steps
+            batch_loss = float(loss.item()) * self.accum_steps if torch.is_tensor(loss) else float(loss)
+            total_loss += batch_loss
             n_batches += 1
         if self.accum_steps > 1 and n_train_batches % self.accum_steps != 0:
             if self.clip_grad is not None:

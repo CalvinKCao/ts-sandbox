@@ -292,10 +292,21 @@ class PatchRefineStageStrategy(DiffusionStageStrategy):
     name = "patch_refine"
     uses_patch_abs_embedding = True
 
-    def forward(self, model, past, future, t, *, patch_col0=None, variate_keep=None, **_kwargs):
+    def forward(
+        self,
+        model,
+        past,
+        future,
+        t,
+        *,
+        patch_col0=None,
+        variate_keep=None,
+        loss_mode: str = "combined",
+        **_kwargs,
+    ):
         return model._forward_binary_patch_refine(
             past, future, t, expand_t_per_window=t is not None,
-            patch_col0=patch_col0, variate_keep=variate_keep,
+            patch_col0=patch_col0, variate_keep=variate_keep, loss_mode=loss_mode,
         )
 
     def generate(self, model, past, **kwargs):
@@ -1251,6 +1262,7 @@ class DiffusionTSF(nn.Module):
         *,
         patch_col0: Optional[torch.Tensor] = None,
         variate_keep: Optional[torch.Tensor] = None,
+        loss_mode: str = "combined",
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (binary factorized DiT path)."""
         return self.stage_strategy.forward(
@@ -1260,6 +1272,7 @@ class DiffusionTSF(nn.Module):
             t,
             patch_col0=patch_col0,
             variate_keep=variate_keep,
+            loss_mode=loss_mode,
         )
 
     @torch.no_grad()
@@ -1769,6 +1782,7 @@ class DiffusionTSF(nn.Module):
         expand_t_per_window: bool = False,
         patch_col0: Optional[torch.Tensor] = None,
         variate_keep: Optional[torch.Tensor] = None,
+        loss_mode: str = "combined",
     ) -> Dict[str, torch.Tensor]:
         """Train boundary-centered 32x8 patches on absolute hi-res CDF crops."""
         from .patch_refine import (
@@ -1789,6 +1803,8 @@ class DiffusionTSF(nn.Module):
             locations_for_fixed_col0,
         )
 
+        if loss_mode not in {"combined", "regular", "anchor"}:
+            raise ValueError(f"unknown patch-refine loss_mode={loss_mode!r}")
         assert self.binary_scheduler is not None
         B = past.shape[0]
         V = self.config.num_variables
@@ -1910,9 +1926,6 @@ class DiffusionTSF(nn.Module):
         ctx_patches = expand_ctx_for_patches(ctx_flat, locations)
         variate_indices = expand_variate_indices_for_patches(locations, device)
 
-        canvas = self._inject_coordinate_channel(xt.float())
-        canvas = self._inject_time_channels(canvas)
-        canvas = torch.cat([canvas, aux], dim=1)
         base_cond = cond
 
         if self.training and self.config.cfg_dropout > 0.0 and ctx_patches is not None:
@@ -1923,33 +1936,42 @@ class DiffusionTSF(nn.Module):
                 ctx_patches,
             )
 
-        out = self._predict_noise_chunked(
-            canvas,
-            t,
-            cond,
-            ctx_patches,
-            variate_indices=variate_indices,
-            token_variate_ids=self._ctx_token_variate_ids,
-            patch_coarse_bin=patch_coarse_bin,
-            patch_time0=patch_time0,
-        )
-        primary_logits, zt_logits = self._split_binary_heads(out)
-        x0_logits = self._x0_logits_from_prediction(primary_logits, xt)
-        loss_breakdown = self.loss_function.regular(
-            primary_logits,
-            zt_logits,
-            target_patches,
-            zt,
-            t,
-            element_mask=target_visible_mask,
-        )
-        loss_x0 = loss_breakdown.x0
-        loss_zt = loss_breakdown.zt
-        regular_loss = loss_breakdown.regular
+        regular_loss = torch.tensor(0.0, device=device)
+        loss_x0 = torch.tensor(0.0, device=device)
+        loss_zt = torch.tensor(0.0, device=device)
+        x0_pred = torch.empty_like(target_patches)
+        if loss_mode != "anchor":
+            canvas = self._inject_coordinate_channel(xt.float())
+            canvas = self._inject_time_channels(canvas)
+            canvas = torch.cat([canvas, aux], dim=1)
+            out = self._predict_noise_chunked(
+                canvas,
+                t,
+                cond,
+                ctx_patches,
+                variate_indices=variate_indices,
+                token_variate_ids=self._ctx_token_variate_ids,
+                patch_coarse_bin=patch_coarse_bin,
+                patch_time0=patch_time0,
+            )
+            primary_logits, zt_logits = self._split_binary_heads(out)
+            x0_logits = self._x0_logits_from_prediction(primary_logits, xt)
+            loss_breakdown = self.loss_function.regular(
+                primary_logits,
+                zt_logits,
+                target_patches,
+                zt,
+                t,
+                element_mask=target_visible_mask,
+            )
+            loss_x0 = loss_breakdown.x0
+            loss_zt = loss_breakdown.zt
+            regular_loss = loss_breakdown.regular
+            x0_pred = torch.sigmoid(x0_logits)
 
         anchor_loss = torch.tensor(0.0, device=device)
-        combined_loss = regular_loss
-        if self.config.use_deterministic_anchor_loss:
+        combined_loss = regular_loss if loss_mode != "anchor" else anchor_loss
+        if loss_mode != "regular" and self.config.use_deterministic_anchor_loss:
             anchor_t = torch.full((n_patches,), self.config.binary_num_steps - 1, device=device, dtype=t.dtype)
             neutral = self._binary_anchor_canvas_like(target_patches)
             anchor_canvas = self._inject_coordinate_channel(neutral)
@@ -1974,9 +1996,12 @@ class DiffusionTSF(nn.Module):
                 element_mask=target_visible_mask,
                 apply_min_snr=False,
             )
-            combined_loss = self.loss_function.combine_anchor(regular_loss, anchor_loss)
+            combined_loss = (
+                self.loss_function.combine_anchor(regular_loss, anchor_loss)
+                if loss_mode == "combined"
+                else anchor_loss
+            )
 
-        x0_pred = torch.sigmoid(x0_logits)
         return {
             "loss": combined_loss,
             "noise_loss": regular_loss,
@@ -2980,11 +3005,16 @@ class DiffusionTSF(nn.Module):
         *,
         patch_col0: Optional[torch.Tensor] = None,
         variate_keep: Optional[torch.Tensor] = None,
+        loss_mode: str = "combined",
     ) -> torch.Tensor:
         """Convenience method to get just the loss for training."""
         if self._ar_training_enabled(future.shape[-1]):
             past, future = self._sample_ar_training_chunk(past, future)
         outputs = self.forward(
-            past, future, patch_col0=patch_col0, variate_keep=variate_keep
+            past,
+            future,
+            patch_col0=patch_col0,
+            variate_keep=variate_keep,
+            loss_mode=loss_mode,
         )
         return outputs['loss']

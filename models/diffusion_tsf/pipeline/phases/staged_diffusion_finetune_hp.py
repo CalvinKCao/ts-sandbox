@@ -1484,6 +1484,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     )
                 ),
                 set_training_epoch=set_training_epoch,
+                sequential_anchor_backward=(
+                    self.stage == "patch_refine"
+                    and bool(getattr(state, "sequential_anchor_backward", False))
+                ),
                 log_prefix=f"{self.name}/{self.stage}/{trial_label}",
             )
             result = trainer.fit(
