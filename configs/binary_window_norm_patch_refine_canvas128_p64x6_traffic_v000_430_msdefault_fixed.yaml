@@ -82,7 +82,9 @@ phases:
     tune_sampler: false
     probabilistic_sampler: anchor
     probabilistic_num_inference_steps: 1
-    batch_size: 8
+    # Evaluation expands full V×patch cross-attention; one window is the
+    # safe smoke fallback while the CUDA probe can select a larger full-run batch.
+    batch_size: 1
     gmm_components: 10
     topk_max: 3
     skip_eval_visualizations: true
