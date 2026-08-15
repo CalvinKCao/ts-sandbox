@@ -5,6 +5,9 @@ extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
 training:
   # Full V×patch attention needs one multivariate window per guidance update.
   itrans_paper_batch_size: 1
+  # Patch-refine duplicates full 431-variate context per factorized patch row.
+  # Smaller chunks retain full attention without exceeding an L40S's VRAM.
+  unet_max_chunk_size: 32
 
 wandb:
   tags: [control, fixed_hp, default_max_scale, traffic, channels_431_861, all_variates, canvas128, p64x6, full_attention, anchor_only_eval_s16]
