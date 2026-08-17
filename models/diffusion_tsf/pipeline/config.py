@@ -54,7 +54,6 @@ REQUIRED_EXPERIMENT_KEYS = (
     "dit_mlp_ratio",
     "dit_dropout",
     "diffusion_stage",
-    "use_guidance_channel",
     "cfg_dropout",
     "deterministic_anchor_loss",
     "deterministic_anchor_lambda",
@@ -63,7 +62,6 @@ REQUIRED_EXPERIMENT_KEYS = (
     "disable_cross_attention",
     "cross_variate_context_bias",
     "use_window_normalization",
-    "zero_guidance_forecast",
     "lookback_length",
     "forecast_length",
     "lookback_overlap",
@@ -97,6 +95,13 @@ REMOVED_EXPERIMENT_KEYS = frozenset({
     "use_triple_scale",
     "use_vertical_dual_concat",
     "use_channel_dual_concat",
+    "use_guidance_channel",
+    "guidance_placement",
+    "zero_guidance_forecast",
+    "patch_refine_flatline_keep_frac",
+    "patch_refine_flatline_seed",
+    "patch_refine_flatline_min_run",
+    "patch_refine_flatline_eps_frac",
 })
 
 REQUIRED_TRAINING_KEYS = (
@@ -128,6 +133,7 @@ REQUIRED_TRAINING_KEYS = (
     "finetune_hp_lr_max",
     "use_amp",
     "use_gradient_checkpointing",
+    "torch_compile",
     "unet_max_chunk_size",
     "sequential_anchor_backward",
     "eval_num_samples",
@@ -248,7 +254,7 @@ def apply_training_section_to_state(
         value = training[key]
         if key in ("n_itrans_hp_trials", "n_diffusion_hp_trials", "n_finetune_hp_trials", "lr_warmup_epochs"):
             init_kwargs[key] = int(value)
-        elif key == "max_scale_tuning":
+        elif key in ("max_scale_tuning", "torch_compile"):
             init_kwargs[key] = bool(value)
         elif key == "max_scale_tuning_range":
             init_kwargs[key] = [float(x) for x in value]
@@ -304,10 +310,7 @@ def normalize_guidance_phases(
             continue
         by_name[name] = dict(entry)
     exp = experiment or {}
-    # Match DiffusionTSFConfig / PipelineState defaults (use_guidance_channel=True).
-    needs_guidance = bool(exp.get("use_guidance_channel", True)) or not bool(
-        exp.get("disable_cross_attention", False)
-    )
+    needs_guidance = not bool(exp.get("disable_cross_attention", False))
     if not needs_guidance:
         by_name.pop("patch_guidance_finetune_hp", None)
         by_name.pop("itrans_finetune_hp", None)

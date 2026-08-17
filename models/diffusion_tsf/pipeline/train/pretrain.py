@@ -85,8 +85,13 @@ def pretrain_diffusion(
         batch_size=batch_size,
         shuffle=True,
         num_workers=0 if smoke_test else 4,
+        drop_last=not smoke_test,
     )
     val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=0)
+    if len(train_loader) == 0:
+        raise ValueError(
+            f"synthetic pretrain has {len(train_subset)} windows, smaller than batch_size={batch_size}"
+        )
 
     model_kwargs = m.anchor_kwargs_from_params(state, best_params)
     for key in (
@@ -125,6 +130,7 @@ def pretrain_diffusion(
             ),
             set_training_epoch=m.set_realts_training_epoch,
             epoch=epoch,
+            deterministic_anchor_every_n_batches=state.deterministic_anchor_every_n_batches,
         )
         val_loss = validate_diffusion_epoch(
             model,

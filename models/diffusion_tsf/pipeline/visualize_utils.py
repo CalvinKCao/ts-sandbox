@@ -1557,12 +1557,6 @@ def run_staged_synthetic_pretrain_diagnostics(
     with torch.no_grad():
         past_norm, future_norm, norm_stats = model._normalize_sequence(past_b, future_b)
         future_maps = model._encode_staged_maps(future_norm)
-        map_key = stage if stage in future_maps else "coarse"
-        W_fut = future_maps[map_key].shape[-1]
-        guidance_norm = model._get_guidance_forecast_norm(
-            past_b, past_norm, norm_stats, W_fut,
-        )
-        guidance_maps = model._encode_staged_maps(guidance_norm)
 
     sample_paths = [
         _plot_realts_1d_pre_post_norm(
@@ -1584,29 +1578,9 @@ def run_staged_synthetic_pretrain_diagnostics(
             variables_to_plot=variables_to_plot,
             jpeg_dpi=jpeg_dpi,
         ),
-        _plot_itrans_window_norm_1d(
-            past_norm=past_norm[0].cpu(),
-            future_norm=future_norm[0].cpu(),
-            guidance_norm=guidance_norm[0].cpu(),
-            sample_index=sample_index,
-            output_dir=output_dir,
-            lookback_length=state.lookback_length,
-            jpeg_dpi=jpeg_dpi,
-            variables_to_plot=variables_to_plot,
-        ),
-        _plot_staged_2d_maps_native(
-            maps={k: v.detach().cpu() for k, v in guidance_maps.items() if k in {"coarse", "fine"}},
-            sample_index=sample_index,
-            output_dir=output_dir,
-            tag="itrans_pred",
-            variables_to_plot=variables_to_plot,
-            jpeg_dpi=jpeg_dpi,
-        ),
     ]
     viz_paths["viz/staged_synthetic_pretrain/realts_1d"] = [sample_paths[0]]
     viz_paths["viz/staged_synthetic_pretrain/realts_2d"] = [sample_paths[1]]
-    viz_paths["viz/staged_synthetic_pretrain/itrans_1d"] = [sample_paths[2]]
-    viz_paths["viz/staged_synthetic_pretrain/itrans_2d"] = [sample_paths[3]]
 
     with torch.no_grad():
         gen_out = _staged_diag_generate(
@@ -2012,24 +1986,6 @@ def run_real_dataset_phase_diagnostics(
             sample_index=sample_index, output_dir=output_dir, tag="dataset_sample",
             variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
         )
-        map_key = stage if stage in future_maps else "coarse"
-        W_fut = future_maps[map_key].shape[-1]
-        guidance_norm = model._get_guidance_forecast_norm(past_b, past_norm, norm_stats, W_fut)
-        guidance_maps = model._encode_staged_maps(guidance_norm)
-        g_plot = _guidance_forecast_plot_kwargs(state)
-        p3 = _plot_guidance_forecast_1d(
-            past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
-            guidance_norm=guidance_norm[0].cpu(),
-            sample_index=sample_index, output_dir=output_dir,
-            lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
-            variables_to_plot=variables_to_plot,
-            **g_plot,
-        )
-        p4 = _plot_staged_2d_maps_native(
-            maps={k: v.detach().cpu() for k, v in guidance_maps.items() if k in {"coarse", "fine"}},
-            sample_index=sample_index, output_dir=output_dir, tag=g_plot["filename_tag"],
-            variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
-        )
         cond_paths = run_diffusion_conditioning_diagnostics(
             state=state, model=model, past=past_b, future=future_b, stage=stage,
             output_dir=os.path.join(output_dir, "conditioning"),
@@ -2039,8 +1995,6 @@ def run_real_dataset_phase_diagnostics(
 
     viz_paths[f"viz/{tag}/dataset_1d"] = [p1]
     viz_paths[f"viz/{tag}/dataset_2d"] = [p2]
-    viz_paths[f"viz/{tag}/itrans_1d"] = [p3]
-    viz_paths[f"viz/{tag}/itrans_2d"] = [p4]
     for k, v in cond_paths.items():
         viz_paths.setdefault(k, []).extend(v)
 
@@ -2089,66 +2043,7 @@ def run_itrans_finetune_diagnostics(
         }],
     )
     summary = {**stats, **phase_summary}
-
-    output_dir = os.path.join(state.results_dir, "viz", "itrans_finetune_diagnostics")
-    os.makedirs(output_dir, exist_ok=True)
-    sample_index = pick_sample_indices(len(train_ds), 1, seed=state.seed)[0]
-    past, future = _dataset_window_z_scores(train_ds, sample_index)
-    past_cf, future_cf = _as_channel_first(past, future)
-    variables_to_plot = int(viz.get("n_dual_scale_vars", 3))
-    jpeg_dpi = int(viz.get("jpeg_dpi", 100))
-
-    viz_out: Dict[str, Any] = {"summary": summary, "viz": {}}
-    try:
-        from models.diffusion_tsf.guidance import iTransformerGuidance
-        from models.diffusion_tsf.train_multivariate_pipeline import create_diffusion_model
-        guidance = iTransformerGuidance(model)
-        enc_model = create_diffusion_model(guidance_model=guidance, diffusion_stage="coarse").to(device)
-        enc_model.eval()
-        past_b = past_cf.unsqueeze(0).to(device)
-        future_b = future_cf.unsqueeze(0).to(device)
-        with torch.no_grad():
-            past_norm, future_norm, norm_stats = enc_model._normalize_sequence(past_b, future_b)
-            future_maps = enc_model._encode_staged_maps(future_norm)
-            W_fut = future_norm.shape[-1]
-            g_norm = enc_model._get_guidance_forecast_norm(past_b, past_norm, norm_stats, W_fut)
-            g_maps = enc_model._encode_staged_maps(g_norm)
-        viz_out["viz"]["viz/itrans_finetune/dataset_1d"] = [
-            _plot_realts_1d_pre_post_norm(
-                past=past_cf, future=future_cf,
-                past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
-                sample_index=sample_index, output_dir=output_dir,
-                lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
-                variables_to_plot=variables_to_plot,
-            )
-        ]
-        viz_out["viz"]["viz/itrans_finetune/dataset_2d"] = [
-            _plot_staged_2d_maps_native(
-                maps={k: v.detach().cpu() for k, v in future_maps.items() if k in {"coarse", "fine"}},
-                sample_index=sample_index, output_dir=output_dir, tag="dataset_sample",
-                variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
-            )
-        ]
-        viz_out["viz"]["viz/itrans_finetune/itrans_2d"] = [
-            _plot_staged_2d_maps_native(
-                maps={k: v.detach().cpu() for k, v in g_maps.items() if k in {"coarse", "fine"}},
-                sample_index=sample_index, output_dir=output_dir, tag="itrans_pred",
-                variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
-            )
-        ]
-        viz_out["viz"]["viz/itrans_finetune/itrans_1d"] = [
-            _plot_itrans_window_norm_1d(
-                past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
-                guidance_norm=g_norm[0].cpu(),
-                sample_index=sample_index, output_dir=output_dir,
-                lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
-                variables_to_plot=variables_to_plot,
-            )
-        ]
-    except Exception as exc:
-        logger.warning("iTrans finetune diagnostic maps skipped: %s", exc)
-
-    return viz_out
+    return {"summary": summary, "viz": {}}
 
 
 def decode_staged_anchor_components(
@@ -2911,98 +2806,7 @@ def run_patch_guidance_finetune_diagnostics(
         n_probe=32 if state.smoke_test else 256,
         seed=state.seed,
     )
-    ordinal = bool(getattr(state, "use_ordinal_window_norm", False))
-    # Smoke skips heavy panels, but still runs ordinal space alignment when needed.
-    if state.smoke_test and not ordinal:
-        return {"summary": stats, "viz": {}}
-
-    device = state.resolve_device()
-    n_iv = int(state.n_variates)
-    stack = load_patch_guidance_from_checkpoint(ckpt_path, n_iv, device)
-    guidance = wrap_patch_guidance(stack)
-
-    output_dir = os.path.join(state.results_dir, "viz", "patch_guidance_finetune_diagnostics")
-    os.makedirs(output_dir, exist_ok=True)
-    sample_index = pick_sample_indices(len(train_ds), 1, seed=state.seed)[0]
-    past, future = _dataset_window_z_scores(train_ds, sample_index)
-    past_cf, future_cf = _as_channel_first(past, future)
-    variables_to_plot = int(viz.get("n_dual_scale_vars", 3))
-    jpeg_dpi = int(viz.get("jpeg_dpi", 100))
-
-    viz_out: Dict[str, Any] = {"summary": stats, "viz": {}}
-    try:
-        enc_model = create_diffusion_model(guidance_model=guidance, diffusion_stage="coarse").to(device)
-        enc_model.eval()
-        past_b = past_cf.unsqueeze(0).to(device)
-        future_b = future_cf.unsqueeze(0).to(device)
-        with torch.no_grad():
-            past_norm, future_norm, norm_stats = enc_model._normalize_sequence(past_b, future_b)
-            past_maps = enc_model._encode_staged_maps(past_norm)
-            future_maps = enc_model._encode_staged_maps(future_norm)
-            W_fut = future_norm.shape[-1]
-            g_norm = enc_model._get_guidance_forecast_norm(past_b, past_norm, norm_stats, W_fut)
-            g_maps = enc_model._encode_staged_maps(g_norm)
-        if not state.smoke_test:
-            viz_out["viz"]["viz/patch_guidance_finetune/dataset_1d"] = [
-                _plot_realts_1d_pre_post_norm(
-                    past=past_cf, future=future_cf,
-                    past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
-                    sample_index=sample_index, output_dir=output_dir,
-                    lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
-                    variables_to_plot=variables_to_plot,
-                )
-            ]
-            viz_out["viz"]["viz/patch_guidance_finetune/dataset_2d"] = [
-                _plot_staged_2d_maps_native(
-                    maps={k: v.detach().cpu() for k, v in future_maps.items() if k in {"coarse", "fine"}},
-                    sample_index=sample_index, output_dir=output_dir, tag="dataset_sample",
-                    variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
-                )
-            ]
-            viz_out["viz"]["viz/patch_guidance_finetune/guidance_2d"] = [
-                _plot_staged_2d_maps_native(
-                    maps={k: v.detach().cpu() for k, v in g_maps.items() if k in {"coarse", "fine"}},
-                    sample_index=sample_index, output_dir=output_dir, tag="patch_pred",
-                    variables_to_plot=variables_to_plot, jpeg_dpi=jpeg_dpi,
-                )
-            ]
-            g_plot = _guidance_forecast_plot_kwargs(state)
-            viz_out["viz"]["viz/patch_guidance_finetune/guidance_1d"] = [
-                _plot_guidance_forecast_1d(
-                    past_norm=past_norm[0].cpu(), future_norm=future_norm[0].cpu(),
-                    guidance_norm=g_norm[0].cpu(),
-                    sample_index=sample_index, output_dir=output_dir,
-                    lookback_length=state.lookback_length, jpeg_dpi=jpeg_dpi,
-                    variables_to_plot=variables_to_plot,
-                    **g_plot,
-                )
-            ]
-            # Same panels under legacy iTrans wandb keys (patch_decoder campaigns).
-            viz_out["viz"]["viz/itrans_finetune/dataset_1d"] = viz_out["viz"]["viz/patch_guidance_finetune/dataset_1d"]
-            viz_out["viz"]["viz/itrans_finetune/dataset_2d"] = viz_out["viz"]["viz/patch_guidance_finetune/dataset_2d"]
-            viz_out["viz"]["viz/itrans_finetune/itrans_1d"] = viz_out["viz"]["viz/patch_guidance_finetune/guidance_1d"]
-            viz_out["viz"]["viz/itrans_finetune/itrans_2d"] = viz_out["viz"]["viz/patch_guidance_finetune/guidance_2d"]
-        if ordinal:
-            rank_max = enc_model._ordinal_rank_max_tensor(past_norm.device)
-            align = run_guidance_ordinal_space_alignment(
-                state,
-                past_norm=past_norm[0].cpu(),
-                future_norm=future_norm[0].cpu(),
-                guidance_norm=g_norm[0].cpu(),
-                past_maps={k: v.detach().cpu() for k, v in past_maps.items()},
-                future_maps={k: v.detach().cpu() for k, v in future_maps.items()},
-                guidance_maps={k: v.detach().cpu() for k, v in g_maps.items()},
-                rank_max=rank_max.detach().cpu(),
-                sample_index=sample_index,
-                jpeg_dpi=jpeg_dpi,
-                variables_to_plot=variables_to_plot,
-            )
-            viz_out["viz"].update(align["viz"])
-            viz_out["guidance_ordinal_space_warnings"] = align["warnings"]
-    except Exception as exc:
-        logger.warning("Patch guidance finetune diagnostic maps skipped: %s", exc)
-
-    return viz_out
+    return {"summary": stats, "viz": {}}
 
 
 def run_patch_guidance_finetune_visualizations(

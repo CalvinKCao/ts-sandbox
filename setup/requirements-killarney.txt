@@ -46,6 +46,7 @@ sympy==1.14.0+computecanada
 threadpoolctl==3.6.0+computecanada
 torch==2.11.0+computecanada
 tqdm==4.68.1+computecanada
+triton==3.6.0+computecanada
 typing_extensions==4.15.0+computecanada
 typing_inspection==0.4.2+computecanada
 urllib3==2.7.0+computecanada

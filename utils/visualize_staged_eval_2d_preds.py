@@ -137,7 +137,6 @@ def _load_stage_model(
         horizon=horizon,
         guidance_model=guidance_model,
         diffusion_stage=stage,
-        use_guidance_channel=state.use_guidance_channel,
         ordinal_ladder=stage_config.ordinal_ladder,
         **model_kwargs,
     ).to(device)
@@ -272,8 +271,6 @@ def _anchor_maps(
     fine_model: torch.nn.Module,
     past_b: torch.Tensor,
     future_b: torch.Tensor,
-    *,
-    emit_guidance_prediction: bool = True,
 ) -> Dict[str, torch.Tensor]:
     stage = str(getattr(getattr(coarse_model, "config", None), "diffusion_stage", "") or "")
     vertical_dual = stage == "vertical_dual" or fine_model is coarse_model
@@ -282,7 +279,6 @@ def _anchor_maps(
             past_b,
             sampler="anchor",
             num_inference_steps=1,
-            emit_guidance_prediction=bool(emit_guidance_prediction),
         )
         past_norm, future_norm, _norm_stats = coarse_model._normalize_sequence(past_b, future_b)
         past_maps_gt = coarse_model._encode_staged_maps(past_norm)
@@ -295,11 +291,6 @@ def _anchor_maps(
         past_f_pred = out["past_2d_fine"][0].cpu().numpy()
         fut_c_pred = out["future_2d_coarse"][0].cpu().numpy()
         fut_f_pred = out["future_2d_fine"][0].cpu().numpy()
-        if emit_guidance_prediction and "guidance_prediction_global_norm" not in out:
-            raise KeyError(
-                "vertical_dual generate missing guidance_prediction_global_norm "
-                "(emit_guidance_prediction=True)"
-            )
         return {
             "gt_coarse": np.concatenate([past_c_gt, fut_c_gt], axis=-1),
             "gt_fine": np.concatenate([past_f_gt, fut_f_gt], axis=-1),
@@ -319,13 +310,7 @@ def _anchor_maps(
         sampler="anchor",
         num_inference_steps=1,
         future_coarse_2d=coarse_out["future_2d_coarse"],
-        emit_guidance_prediction=bool(emit_guidance_prediction),
     )
-    if emit_guidance_prediction and "guidance_prediction_global_norm" not in fine_out:
-        raise KeyError(
-            "refine generate missing guidance_prediction_global_norm "
-            "(emit_guidance_prediction=True)"
-        )
     past_norm, future_norm, _norm_stats = fine_model._normalize_sequence(past_b, future_b)
     past_maps_gt = fine_model._encode_staged_maps(past_norm)
     future_maps_gt = fine_model._encode_staged_maps(future_norm)

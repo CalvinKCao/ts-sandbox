@@ -114,23 +114,8 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             logger.warning("  [%s] viz skipped: missing patch guidance ckpt %s", self.name, ft_ckpt)
             return
 
-        if not state.smoke_test:
-            try:
-                from models.diffusion_tsf.pipeline.visualize_utils import (
-                    run_patch_guidance_finetune_visualizations,
-                )
-
-                viz_paths = run_patch_guidance_finetune_visualizations(state, ckpt_path=ft_ckpt)
-                wandb_utils.log_visualization_paths(
-                    viz_paths, wandb_key="viz/patch_guidance_finetuned",
-                )
-                wandb_utils.log_visualization_paths(
-                    viz_paths, wandb_key="viz/itrans_finetuned",
-                )
-            except Exception as e:
-                logger.warning("Patch guidance finetune viz failed: %s", e, exc_info=True)
-
-        # Diagnostics (incl. ordinal space alignment) also run on smoke when ordinal.
+        # The decoder checkpoint is used only to produce frozen cross-variate
+        # tokens. Its forecast overlays are not a diffusion conditioning path.
         try:
             from models.diffusion_tsf.train_multivariate_pipeline import (
                 generate_dataset_job,

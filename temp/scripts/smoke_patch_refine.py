@@ -10,9 +10,18 @@ import torch
 from models.diffusion_tsf.config import DiffusionTSFConfig
 from models.diffusion_tsf.diffusion_model import DiffusionTSF
 from models.diffusion_tsf.patch_refine_geometry import (
+    PatchLayout,
     blend_patch_bins,
+    blend_patch_bins_layout,
     coarse_edges_from_cdf,
+    patch_layout_for_fixed_col0,
+    primary_stride_col0s,
     select_patch_locations,
+)
+from models.diffusion_tsf.patch_refine_segments import (
+    coverage_gap_layout,
+    select_coverage_gap_locations,
+    select_primary_ar_locations,
 )
 from models.diffusion_tsf.preprocessing import TimeSeriesTo2D
 
@@ -61,6 +70,85 @@ def _test_geometry() -> None:
     print("geometry ok")
 
 
+def _loc_key(loc) -> tuple:
+    return (loc.batch_index, loc.variate_index, loc.row0, loc.col0)
+
+
+def _test_layout_equivalence() -> None:
+    torch.manual_seed(0)
+    coarse = torch.zeros(2, 3, 16, 24)
+    # Varied boundary heights so some crops miss and need gap fills.
+    for b in range(2):
+        for v in range(3):
+            row = 4 + (b + 2 * v) % 10
+            coarse[b, v, :row, :] = 1.0
+            coarse[b, v, :, 10 + v] = 0.0
+            coarse[b, v, :15, 10 + v] = 1.0
+    edges = coarse_edges_from_cdf(coarse, canvas_height=256)
+    canvas_h, patch_h, patch_w, stride = 256, 32, 8, 6
+    locs = select_patch_locations(
+        edges,
+        canvas_height=canvas_h,
+        patch_height=patch_h,
+        patch_width=patch_w,
+        col_stride=stride,
+    )
+    rng = torch.Generator().manual_seed(1)
+    patches = torch.rand(len(locs), 1, patch_h, patch_w, generator=rng)
+    patches = (patches > 0.4).float()
+    # Force a couple fully empty / full columns so abstain matches the old path.
+    patches[0, 0, :, 0] = 0
+    patches[1, 0, :, 1] = 1
+    hard_list, counts_list = blend_patch_bins(
+        patches, locs, edges,
+        canvas_height=canvas_h, patch_height=patch_h, patch_width=patch_w,
+    )
+    layout = PatchLayout.from_locations(locs, device=patches.device)
+    hard_t, counts_t = blend_patch_bins_layout(
+        patches, layout, edges,
+        canvas_height=canvas_h, patch_height=patch_h, patch_width=patch_w,
+    )
+    assert torch.equal(hard_list, hard_t), "blend layout mismatch"
+    assert torch.equal(counts_list, counts_t), "blend vote-count mismatch"
+
+    primary = select_primary_ar_locations(
+        edges,
+        canvas_height=canvas_h,
+        patch_height=patch_h,
+        patch_width=patch_w,
+        col_stride=stride,
+    )
+    primary_keys = {_loc_key(loc) for loc in primary}
+    layout_keys = set()
+    layouts = []
+    for col0 in primary_stride_col0s(int(edges.shape[-1]), patch_w, stride):
+        step = patch_layout_for_fixed_col0(
+            edges,
+            torch.full((edges.shape[0],), col0, dtype=torch.long),
+            canvas_height=canvas_h,
+            patch_height=patch_h,
+            patch_width=patch_w,
+        )
+        layouts.append(step)
+        layout_keys.update(_loc_key(loc) for loc in step.to_locations())
+    assert primary_keys == layout_keys, "primary AR layout key mismatch"
+
+    gap_list = select_coverage_gap_locations(
+        edges, primary,
+        canvas_height=canvas_h, patch_height=patch_h, patch_width=patch_w,
+    )
+    gap_layout = coverage_gap_layout(
+        edges, PatchLayout.cat(layouts),
+        canvas_height=canvas_h, patch_height=patch_h, patch_width=patch_w,
+    )
+    gap_list_keys = {_loc_key(loc) for loc in gap_list}
+    gap_t_keys = set() if gap_layout is None else {
+        _loc_key(loc) for loc in gap_layout.to_locations()
+    }
+    assert gap_list_keys == gap_t_keys, f"gap keys {gap_list_keys} vs {gap_t_keys}"
+    print("layout equivalence ok")
+
+
 def _test_train_generate() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = DiffusionTSFConfig(
@@ -83,7 +171,6 @@ def _test_train_generate() -> None:
         dit_embed_dim=64,
         dit_depth=2,
         dit_num_heads=2,
-        use_guidance_channel=False,
         disable_cross_attention=True,
         use_coordinate_channel=True,
         use_deterministic_anchor_loss=True,
@@ -95,6 +182,7 @@ def _test_train_generate() -> None:
         use_window_normalization=True,
         use_variate_embedding=False,
         past_cond_resize_to_horizon=False,
+        patch_refine_unique_segments=True,
     )
     model = DiffusionTSF(cfg).to(device)
     model.train()
@@ -122,8 +210,19 @@ def _test_train_generate() -> None:
     assert gen["prediction"].shape[-1] == 96, gen["prediction"].shape
     print(f"generate ok pred={tuple(gen['prediction'].shape)} {time.time()-t1:.1f}s")
 
+    model.config.patch_refine_unique_segments = False
+    with torch.no_grad():
+        gen_dense = model.generate(
+            past,
+            sampler="anchor",
+            future_coarse_2d=coarse,
+        )
+    assert gen_dense["prediction"].shape[-1] == 96, gen_dense["prediction"].shape
+    print(f"generate dense ok n_patches={len(gen_dense['patch_locations'])}")
+
 
 if __name__ == "__main__":
     _test_geometry()
+    _test_layout_equivalence()
     _test_train_generate()
     print("patch_refine smoke passed")

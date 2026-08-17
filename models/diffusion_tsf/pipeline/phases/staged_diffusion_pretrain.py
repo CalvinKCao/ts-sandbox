@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import hashlib
+import shutil
 import time
 from dataclasses import replace
 from typing import Any, Dict, Optional
@@ -71,9 +72,9 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "dit_num_heads": int(state.dit_num_heads),
         "dit_mlp_ratio": float(state.dit_mlp_ratio),
         "dit_dropout": float(state.dit_dropout),
-        "use_guidance_channel": bool(state.use_guidance_channel),
+        "conditioning_architecture": "cross_attention_only_v1",
+        "disable_cross_attention": bool(state.disable_cross_attention),
         "guidance_type": str(getattr(state, "guidance_type", "patch_decoder")),
-        "guidance_placement": str(getattr(state, "guidance_placement", "canvas")),
         "prediction_target": str(getattr(state, "prediction_target", "x0")),
         "loss_weighting": str(getattr(state, "loss_weighting", "none")),
         "min_snr_gamma": float(getattr(state, "min_snr_gamma", 5.0)),
@@ -620,6 +621,27 @@ def _resolve_synthetic_patch_guidance(
     )
 
 
+def _build_synthetic_patch_guidance(state: PipelineState) -> tuple[str, Dict[str, Any]]:
+    """Train the frozen patch-decoder token source when no donor exists."""
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        run_patch_guidance_synthetic_tuning,
+    )
+
+    n_trials = 1 if state.smoke_test else int(state.n_itrans_hp_trials)
+    _params, tuned_ckpt = run_patch_guidance_synthetic_tuning(
+        state,
+        n_trials=n_trials,
+        smoke_test=state.smoke_test,
+        checkpoint_dir=state.checkpoint_dir,
+        parallel_workers=1,
+    )
+    if not tuned_ckpt or not os.path.isfile(tuned_ckpt):
+        raise RuntimeError("synthetic patch-guidance tuning did not produce a checkpoint")
+    target = os.path.join(state.checkpoint_dir, "patch_guidance_synthetic.pt")
+    shutil.copy2(tuned_ckpt, target)
+    return target, {"loaded": False, "path": target, "source": "trained"}
+
+
 def _log_staged_pretrain_diagnostics(
     state: PipelineState,
     *,
@@ -736,10 +758,6 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
             if os.path.exists(shared_ckpt):
                 logger.info("  [%s] %s shared cached: %s", self.name, stage, shared_ckpt)
                 return shared_ckpt
-            discovered = _discover_existing_stage_pretrain(state, stage)
-            if discovered:
-                logger.info("  [%s] %s discovered cached: %s", self.name, stage, discovered)
-                return discovered
         return None
 
     def should_skip(self, state: PipelineState) -> bool:
@@ -849,10 +867,12 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         best_params = _resolve_diff_hp(state, source_dir)
         needs_guidance = state.needs_guidance
         if needs_guidance:
-            guidance_ckpt, guidance_meta = _resolve_synthetic_patch_guidance(
-                state,
-                source_dir,
-            )
+            try:
+                guidance_ckpt, guidance_meta = _resolve_synthetic_patch_guidance(
+                    state, source_dir,
+                )
+            except FileNotFoundError:
+                guidance_ckpt, guidance_meta = _build_synthetic_patch_guidance(state)
         else:
             guidance_ckpt, guidance_meta = "", {}
 

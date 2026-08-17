@@ -126,10 +126,6 @@ def apply_checkpoint_architecture(ckpt: dict, diffusion_type: str, image_height:
         train_pipeline.WINDOW_NORM_CENTER = str(cfg.window_norm_center)
     elif isinstance(cfg, dict) and 'window_norm_center' in cfg:
         train_pipeline.WINDOW_NORM_CENTER = str(cfg['window_norm_center'])
-    if hasattr(cfg, 'zero_guidance_forecast'):
-        train_pipeline.ZERO_GUIDANCE_FORECAST = bool(cfg.zero_guidance_forecast)
-    elif isinstance(cfg, dict) and 'zero_guidance_forecast' in cfg:
-        train_pipeline.ZERO_GUIDANCE_FORECAST = bool(cfg['zero_guidance_forecast'])
     if hasattr(cfg, 'staged_representation'):
         train_pipeline.STAGED_REPRESENTATION = str(cfg.staged_representation)
     elif isinstance(cfg, dict) and 'staged_representation' in cfg:

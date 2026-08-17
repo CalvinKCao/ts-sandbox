@@ -24,6 +24,182 @@ class PatchLocation:
     col0: int
 
 
+@dataclass(frozen=True)
+class PatchLayout:
+    """Device-resident, ragged patch layout used by the training hot path."""
+
+    flat_index: torch.Tensor
+    batch_index: torch.Tensor
+    variate_index: torch.Tensor
+    row0: torch.Tensor
+    col0: torch.Tensor
+
+    @property
+    def n_patches(self) -> int:
+        return int(self.flat_index.shape[0])
+
+    def to_locations(self) -> list[PatchLocation]:
+        """CPU list copy for diagnostics/viz that still walk PatchLocation."""
+        return [
+            PatchLocation(
+                flat_index=int(flat_index),
+                batch_index=int(batch_index),
+                variate_index=int(variate_index),
+                row0=int(row0),
+                col0=int(col0),
+            )
+            for flat_index, batch_index, variate_index, row0, col0 in zip(
+                self.flat_index.tolist(),
+                self.batch_index.tolist(),
+                self.variate_index.tolist(),
+                self.row0.tolist(),
+                self.col0.tolist(),
+            )
+        ]
+
+    @classmethod
+    def cat(cls, layouts: Sequence["PatchLayout"]) -> "PatchLayout":
+        if not layouts:
+            raise ValueError("cannot concatenate an empty layout list")
+        return cls(
+            flat_index=torch.cat([layout.flat_index for layout in layouts]),
+            batch_index=torch.cat([layout.batch_index for layout in layouts]),
+            variate_index=torch.cat([layout.variate_index for layout in layouts]),
+            row0=torch.cat([layout.row0 for layout in layouts]),
+            col0=torch.cat([layout.col0 for layout in layouts]),
+        )
+
+    @classmethod
+    def from_locations(
+        cls,
+        locations: Sequence[PatchLocation],
+        *,
+        device: torch.device,
+    ) -> "PatchLayout":
+        """Compatibility bridge for inference-only/list geometry callers."""
+        if not locations:
+            raise ValueError("cannot build an empty patch layout")
+        fields = (
+            "flat_index",
+            "batch_index",
+            "variate_index",
+            "row0",
+            "col0",
+        )
+        return cls(
+            **{
+                name: torch.tensor(
+                    [getattr(location, name) for location in locations],
+                    device=device,
+                    dtype=torch.long,
+                )
+                for name in fields
+            }
+        )
+
+
+def patch_layout_for_fixed_col0(
+    coarse_edges: torch.Tensor,
+    col0: torch.Tensor,
+    *,
+    canvas_height: int,
+    patch_height: int,
+    patch_width: int,
+    hir_canvas: Optional[torch.Tensor] = None,
+) -> PatchLayout:
+    """Vectorized equivalent of :func:`locations_for_fixed_col0`.
+
+    The sampled ``col0`` remains per parent window, preserving unique-segment
+    training stochasticity while keeping location values on the active device.
+    """
+    if coarse_edges.ndim != 3:
+        raise ValueError(f"coarse_edges must be (B,V,W), got {tuple(coarse_edges.shape)}")
+    batch_size, n_variates, width = coarse_edges.shape
+    if col0.shape != (batch_size,):
+        raise ValueError(f"col0 must be ({batch_size},), got {tuple(col0.shape)}")
+    if patch_height > canvas_height or patch_width > width:
+        raise ValueError("patch geometry exceeds its canvas")
+    if hir_canvas is not None and hir_canvas.shape[:2] != (batch_size, n_variates):
+        raise ValueError("hir_canvas batch/variate shape does not match coarse_edges")
+    device = coarse_edges.device
+    col0 = col0.to(device=device, dtype=torch.long)
+    max_col0 = width - patch_width
+    # Values come from the sampler or the dataloader. Keep range checking out
+    # of the per-step path; invalid indices fail naturally at the gather below.
+    col0 = col0.clamp(0, max_col0)
+    batch_index = torch.arange(batch_size, device=device).repeat_interleave(n_variates)
+    variate_index = torch.arange(n_variates, device=device).repeat(batch_size)
+    flat_index = batch_index * n_variates + variate_index
+    patch_col0 = col0.index_select(0, batch_index)
+    anchor = patch_col0 + patch_width // 2
+    edge_rows = coarse_edges.reshape(-1, width)[flat_index, anchor]
+    max_row0 = canvas_height - patch_height
+    row0 = (edge_rows - patch_height // 2).clamp(0, max_row0)
+    if hir_canvas is not None:
+        cols = patch_col0[:, None] + torch.arange(patch_width, device=device)
+        rows = torch.arange(canvas_height, device=device)[None, :, None]
+        local_cdf = hir_canvas.reshape(-1, canvas_height, width)[
+            flat_index[:, None, None], rows, cols[:, None, :]
+        ]
+        hir_edges = local_cdf.sum(dim=1).long() - 1
+        in_view = (hir_edges >= row0[:, None]) & (hir_edges < row0[:, None] + patch_height)
+        fallback_edge = hir_edges[:, patch_width // 2].clamp(0, canvas_height - 1)
+        fallback_row0 = (fallback_edge - patch_height // 2).clamp(0, max_row0)
+        row0 = torch.where(in_view.any(dim=1), row0, fallback_row0)
+    return PatchLayout(flat_index, batch_index, variate_index, row0, patch_col0)
+
+
+def primary_stride_col0s(width: int, patch_width: int, col_stride: int) -> list[int]:
+    max_col0 = int(width) - int(patch_width)
+    if max_col0 < 0:
+        raise ValueError(f"patch width {patch_width} exceeds future width {width}")
+    if col_stride <= 0:
+        raise ValueError("col_stride must be positive")
+    return list(range(0, max_col0 + 1, int(col_stride)))
+
+
+def coverage_mask_for_layout(
+    coarse_edges: torch.Tensor,
+    layout: PatchLayout,
+    *,
+    patch_height: int,
+    patch_width: int,
+) -> torch.Tensor:
+    """Bool ``(B,V,W)`` — True where a layout crop sees the coarse boundary."""
+    if coarse_edges.ndim != 3:
+        raise ValueError(f"coarse_edges must be (B,V,W), got {tuple(coarse_edges.shape)}")
+    batch_size, n_variates, width = coarse_edges.shape
+    device = coarse_edges.device
+    cols = layout.col0[:, None] + torch.arange(patch_width, device=device)
+    edges = coarse_edges.reshape(-1, width)[layout.flat_index[:, None], cols]
+    in_rows = (edges >= layout.row0[:, None]) & (edges < layout.row0[:, None] + patch_height)
+    covered = torch.zeros(
+        batch_size * n_variates, width, device=device, dtype=torch.bool,
+    )
+    flat = layout.flat_index[:, None].expand_as(cols)
+    covered[flat[in_rows], cols[in_rows]] = True
+    return covered.view(batch_size, n_variates, width)
+
+
+def extract_patch_batch_layout(
+    canvas: torch.Tensor,
+    layout: PatchLayout,
+    *,
+    patch_height: int,
+    patch_width: int,
+) -> torch.Tensor:
+    """Vectorized crop gather returning ``(N,1,patch_height,patch_width)``."""
+    if canvas.ndim != 4:
+        raise ValueError(f"canvas must be (B,V,H,W), got {tuple(canvas.shape)}")
+    _, _, height, width = canvas.shape
+    rows = layout.row0[:, None, None] + torch.arange(patch_height, device=canvas.device)[None, :, None]
+    cols = layout.col0[:, None, None] + torch.arange(patch_width, device=canvas.device)[None, None, :]
+    if layout.n_patches == 0:
+        raise ValueError("cannot extract an empty patch layout")
+    flat = canvas.reshape(-1, height, width)
+    return flat[layout.flat_index[:, None, None], rows, cols].unsqueeze(1)
+
+
 def coarse_edges_from_cdf(
     coarse_cdf: torch.Tensor,
     *,
@@ -50,7 +226,6 @@ def select_patch_locations(
     patch_width: int,
     col_stride: int,
     max_patches_per_variate: Optional[int] = None,
-    variate_keep: Optional[torch.Tensor] = None,
 ) -> list[PatchLocation]:
     """Place stride crops, then add crops until every timestep boundary is covered."""
     if coarse_edges.ndim != 3:
@@ -64,14 +239,6 @@ def select_patch_locations(
         raise ValueError("col_stride must be positive")
 
     batch_size, n_variates, _ = coarse_edges.shape
-    keep = None
-    if variate_keep is not None:
-        keep = variate_keep.to(dtype=torch.bool)
-        if keep.shape != (batch_size, n_variates):
-            raise ValueError(
-                f"variate_keep shape {tuple(keep.shape)} != "
-                f"batch/vars {(batch_size, n_variates)}"
-            )
     max_row0 = canvas_height - patch_height
     max_col0 = width - patch_width
     primary_starts = list(range(0, max_col0 + 1, col_stride))
@@ -88,8 +255,6 @@ def select_patch_locations(
 
     for bi in range(batch_size):
         for vi in range(n_variates):
-            if keep is not None and not bool(keep[bi, vi].item()):
-                continue
             flat_index = bi * n_variates + vi
             edges = coarse_edges[bi, vi]
             covered = torch.zeros(width, device=edges.device, dtype=torch.bool)
@@ -188,6 +353,57 @@ def extract_patch_batch(
     return torch.stack(patches, dim=0).unsqueeze(1)
 
 
+def blend_patch_bins_layout(
+    patch_cdf: torch.Tensor,
+    layout: PatchLayout,
+    coarse_edges: torch.Tensor,
+    *,
+    canvas_height: int,
+    patch_height: int,
+    patch_width: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Vectorized blend of visible patch-bin votes into a hard CDF."""
+    n_patches = layout.n_patches
+    if patch_cdf.shape != (n_patches, 1, patch_height, patch_width):
+        raise ValueError(
+            "patch_cdf shape mismatch: "
+            f"got {tuple(patch_cdf.shape)}, expected "
+            f"({n_patches},1,{patch_height},{patch_width})"
+        )
+    batch_size, n_variates, width = coarse_edges.shape
+    device = patch_cdf.device
+    local_cdf = patch_cdf[:, 0]
+    local_bins = TimeSeriesTo2D.bin_indices_from_cdf(local_cdf)
+    occupancy = local_cdf.sum(dim=-2)
+    visible = (occupancy > 0) & (occupancy < patch_height)
+    cols = layout.col0[:, None] + torch.arange(patch_width, device=device)
+    edges = coarse_edges.reshape(-1, width)[layout.flat_index[:, None], cols]
+    in_rows = (edges >= layout.row0[:, None]) & (edges < layout.row0[:, None] + patch_height)
+    vote = visible & in_rows
+    absolute_bin = layout.row0[:, None].to(dtype=torch.float32) + local_bins.to(dtype=torch.float32)
+    sums_flat = torch.zeros(
+        batch_size * n_variates, width, device=device, dtype=torch.float32,
+    )
+    counts_flat = torch.zeros_like(sums_flat)
+    flat = layout.flat_index[:, None].expand_as(cols)
+    sums_flat.index_put_((flat[vote], cols[vote]), absolute_bin[vote], accumulate=True)
+    counts_flat.index_put_(
+        (flat[vote], cols[vote]),
+        torch.ones_like(absolute_bin[vote]),
+        accumulate=True,
+    )
+    sums = sums_flat.view(batch_size, n_variates, width)
+    counts = counts_flat.view(batch_size, n_variates, width)
+    has_vote = counts > 0
+    averaged_bins = torch.zeros_like(sums)
+    averaged_bins[has_vote] = sums[has_vote] / counts[has_vote]
+    bins = torch.where(has_vote, averaged_bins.round(), coarse_edges.float())
+    bins = bins.clamp(0, canvas_height - 1).long()
+    rows = torch.arange(canvas_height, device=device).view(1, 1, canvas_height, 1)
+    hard_cdf = (rows <= bins.unsqueeze(-2)).to(patch_cdf.dtype)
+    return hard_cdf, counts
+
+
 def blend_patch_bins(
     patch_cdf: torch.Tensor,
     locations: Sequence[PatchLocation],
@@ -197,52 +413,13 @@ def blend_patch_bins(
     patch_height: int,
     patch_width: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Blend visible patch-bin votes and rebuild a hard CDF.
-
-    Completely empty or full local CDF columns have no visible transition.
-    They abstain rather than voting for the crop boundary. If all overlapping
-    crops abstain, the coarse scaffold remains the prediction for that column.
-    """
-    if patch_cdf.shape != (len(locations), 1, patch_height, patch_width):
-        raise ValueError(
-            "patch_cdf shape mismatch: "
-            f"got {tuple(patch_cdf.shape)}, expected "
-            f"({len(locations)},1,{patch_height},{patch_width})"
-        )
-    batch_size, n_variates, width = coarse_edges.shape
-    sums = torch.zeros(
-        batch_size,
-        n_variates,
-        width,
-        device=patch_cdf.device,
-        dtype=torch.float32,
+    """List-API wrapper around :func:`blend_patch_bins_layout`."""
+    layout = PatchLayout.from_locations(locations, device=patch_cdf.device)
+    return blend_patch_bins_layout(
+        patch_cdf,
+        layout,
+        coarse_edges,
+        canvas_height=canvas_height,
+        patch_height=patch_height,
+        patch_width=patch_width,
     )
-    counts = torch.zeros_like(sums)
-    local_cdf = patch_cdf[:, 0]
-    local_bins = TimeSeriesTo2D.bin_indices_from_cdf(local_cdf)
-    occupancy = local_cdf.sum(dim=-2)
-    visible = (occupancy > 0) & (occupancy < patch_height)
-
-    for pi, loc in enumerate(locations):
-        for local_col in range(patch_width):
-            col = loc.col0 + local_col
-            edge = int(coarse_edges[loc.batch_index, loc.variate_index, col].item())
-            if (
-                loc.row0 <= edge < loc.row0 + patch_height
-                and bool(visible[pi, local_col].item())
-            ):
-                absolute_bin = float(loc.row0) + local_bins[pi, local_col]
-                sums[loc.batch_index, loc.variate_index, col] += absolute_bin
-                counts[loc.batch_index, loc.variate_index, col] += 1.0
-
-    has_vote = counts > 0
-    averaged_bins = torch.zeros_like(sums)
-    averaged_bins[has_vote] = sums[has_vote] / counts[has_vote]
-    bins = torch.where(has_vote, averaged_bins.round(), coarse_edges.float())
-    bins = bins.clamp(0, canvas_height - 1).long()
-    rows = torch.arange(
-        canvas_height,
-        device=patch_cdf.device,
-    ).view(1, 1, canvas_height, 1)
-    hard_cdf = (rows <= bins.unsqueeze(-2)).to(patch_cdf.dtype)
-    return hard_cdf, counts

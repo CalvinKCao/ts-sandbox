@@ -104,8 +104,6 @@ def diffusion_arch_config_dict(state: PipelineState) -> Dict[str, Any]:
         'lookback_overlap_center_shift': state.lookback_overlap_center_shift,
         'window_norm_center': state.window_norm_center,
         'diffusion_stage': state.diffusion_stage,
-        'use_guidance_channel': state.use_guidance_channel,
-        'guidance_placement': state.guidance_placement,
         'cfg_dropout': state.cfg_dropout,
         'disable_cross_attention': state.disable_cross_attention,
         'cross_variate_context_bias': state.cross_variate_context_bias,
@@ -122,7 +120,6 @@ def diffusion_arch_config_dict(state: PipelineState) -> Dict[str, Any]:
         'dit_mlp_ratio': state.dit_mlp_ratio,
         'dit_dropout': state.dit_dropout,
         'use_window_normalization': state.use_window_normalization,
-        'zero_guidance_forecast': state.zero_guidance_forecast,
         'window_stride': state.window_stride,
         'binary_noise_schedule': state.binary_noise_schedule,
         'prediction_target': state.prediction_target,
@@ -655,7 +652,11 @@ def patch_guidance_hp_objective(
     stack = create_patch_guidance_stack(state, num_vars).to(device)
 
     train_loader_local = DataLoader(
-        train_loader.dataset, batch_size=batch_size, shuffle=True, num_workers=0,
+        train_loader.dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        drop_last=not smoke_test,
     )
     val_bs = min(batch_size, 32)
     val_loader_local = DataLoader(
@@ -755,7 +756,9 @@ def run_patch_guidance_finetune_hp_tuning(
         val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
 
     train_bs = state.itrans_paper_batch_size
-    train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
+    train_loader = DataLoader(
+        train_ds, batch_size=train_bs, shuffle=True, num_workers=0, drop_last=not smoke_test,
+    )
     val_loader = DataLoader(val_ds, batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
 
     trial_dir = checkpoint_dir or state.checkpoint_dir
@@ -1126,14 +1129,24 @@ def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Di
     real-finetuned iTransformer). We always want to keep the attached guidance
     and only restore the diffusion backbone weights.
     """
+    architecture_key = "conditioning_architecture_version"
+    if architecture_key not in ckpt_state:
+        raise RuntimeError(
+            "Refusing legacy diffusion checkpoint without cross-attention-only architecture "
+            "marker. Guided-channel checkpoints are intentionally incompatible."
+        )
     model_state = model.state_dict()
+    if not torch.equal(ckpt_state[architecture_key].cpu(), model_state[architecture_key].cpu()):
+        raise RuntimeError("Diffusion checkpoint conditioning architecture version mismatch.")
     filtered = {}
     for k, v in ckpt_state.items():
         if k.startswith('guidance_model.'):
             continue
         if k in model_state and model_state[k].shape != v.shape:
-            logger.warning(f"Skipping {k} due to shape mismatch: ckpt {v.shape} vs model {model_state[k].shape}")
-            continue
+            raise RuntimeError(
+                f"Diffusion checkpoint tensor mismatch for {k}: checkpoint {v.shape} "
+                f"vs current {model_state[k].shape}. Do not partially load architecture changes."
+            )
         filtered[k] = v
         
     missing, unexpected = model.load_state_dict(filtered, strict=False)
@@ -1218,8 +1231,6 @@ def create_diffusion_model(
         use_raw_lookback_cond_channel=o(
             "use_raw_lookback_cond_channel", state.use_raw_lookback_cond_channel,
         ),
-        use_guidance_channel=o("use_guidance_channel", state.use_guidance_channel),
-        guidance_placement=o("guidance_placement", state.guidance_placement),
         guidance_penalty_weight=0.0,
         model_type=o("model_type", state.model_type),
         disable_cross_attention=state.disable_cross_attention,
@@ -1275,14 +1286,26 @@ def create_diffusion_model(
         hybrid_flat_frac_threshold=state.hybrid_flat_frac_threshold,
         hybrid_flat_oob_coverage=state.hybrid_flat_oob_coverage,
         lookback_overlap_center_shift=state.lookback_overlap_center_shift,
-        zero_guidance_forecast=state.zero_guidance_forecast,
         itrans_d_model=state.itrans_d_model,
         guidance_type=_resolve_guidance_type(
             state, guidance_model, o("guidance_type", None),
         ),
         mmpd_patch_size=state.mmpd_patch_size,
     )
-    return DiffusionTSF(config, guidance_model=guidance_model)
+    model = DiffusionTSF(config, guidance_model=guidance_model)
+    if bool(getattr(state, "torch_compile", False)) and not bool(state.smoke_test):
+        if not torch.cuda.is_available():
+            raise RuntimeError("training.torch_compile=true requires CUDA")
+        logger.info(
+            "torch.compile FactorizedDiT (inductor, fullgraph=False, dynamic=True)"
+        )
+        model.noise_predictor = torch.compile(
+            model.noise_predictor,
+            backend="inductor",
+            fullgraph=False,
+            dynamic=True,
+        )
+    return model
 
 
 # ============================================================================

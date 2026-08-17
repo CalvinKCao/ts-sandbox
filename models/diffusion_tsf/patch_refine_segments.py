@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
-from .patch_refine_geometry import PatchLocation
-
-AllowedParentVariates = Dict[int, Set[int]]
-AllowedSegmentVariates = Dict[int, Set[int]]
+from .patch_refine_geometry import (
+    PatchLayout,
+    PatchLocation,
+    coverage_mask_for_layout,
+    extract_patch_batch_layout,
+)
 
 
 def iter_unique_segment_starts(
@@ -86,8 +88,6 @@ def sample_parent_start(
     overlap: int,
     patch_width: int,
     series_len: int,
-    allowed_parent_starts: Optional[Sequence[int]] = None,
-    allowed_parent_variates: Optional[AllowedParentVariates] = None,
 ) -> int:
     parents = parent_starts_for_segment(
         t,
@@ -97,15 +97,6 @@ def sample_parent_start(
         patch_width=patch_width,
         series_len=series_len,
     )
-    if allowed_parent_variates is not None:
-        parents = [
-            s
-            for s in parents
-            if int(s) in allowed_parent_variates and allowed_parent_variates[int(s)]
-        ]
-    elif allowed_parent_starts is not None:
-        allow = set(int(s) for s in allowed_parent_starts)
-        parents = [s for s in parents if int(s) in allow]
     if not parents:
         raise RuntimeError(f"no valid parent for absolute segment t={t}")
     seed_bytes = hashlib.sha256(
@@ -207,6 +198,39 @@ def extract_prev_refine_crops(
     return out
 
 
+def extract_prev_refine_crops_layout(
+    hir_canvas: torch.Tensor,
+    layout: PatchLayout,
+    *,
+    patch_height: int,
+    patch_width: int,
+    col_stride: int,
+    coarse_edges: torch.Tensor,
+    canvas_height: Optional[int] = None,
+) -> torch.Tensor:
+    """Tensor-layout teacher-force crop extraction for unique-segment training."""
+    if canvas_height is None:
+        canvas_height = int(hir_canvas.shape[-2])
+    width = int(hir_canvas.shape[-1])
+    prev_col0 = layout.col0 - col_stride
+    valid = (prev_col0 >= 0) & (prev_col0 + patch_width <= width)
+    safe_col0 = prev_col0.clamp(0, width - patch_width)
+    prev_anchor = safe_col0 + patch_width // 2
+    prev_edges = coarse_edges.reshape(-1, width)[layout.flat_index, prev_anchor]
+    prev_row0 = (prev_edges - patch_height // 2).clamp(0, canvas_height - patch_height)
+    previous_layout = PatchLayout(
+        flat_index=layout.flat_index,
+        batch_index=layout.batch_index,
+        variate_index=layout.variate_index,
+        row0=prev_row0,
+        col0=safe_col0,
+    )
+    crops = extract_patch_batch_layout(
+        hir_canvas, previous_layout, patch_height=patch_height, patch_width=patch_width,
+    )
+    return crops * valid[:, None, None, None].to(dtype=crops.dtype)
+
+
 def locations_for_fixed_col0(
     coarse_edges: torch.Tensor,
     col0: torch.Tensor,
@@ -215,17 +239,14 @@ def locations_for_fixed_col0(
     patch_height: int,
     patch_width: int,
     hir_canvas: Optional[torch.Tensor] = None,
-    variate_keep: Optional[torch.Tensor] = None,
 ) -> List[PatchLocation]:
-    """One boundary-centered crop per kept (B,V) at the given per-batch ``col0``.
+    """One boundary-centered crop per (B,V) at the given per-batch ``col0``.
 
     Centers vertically on the coarse edge at the patch mid-column. When
     ``hir_canvas`` is provided and that crop would miss every hi-res GT
     transition in ``[col0, col0+pw)``, recenters on the hir edge at the
     mid-column (same fallback idea as ``select_patch_locations``).
 
-    ``variate_keep`` optional bool ``(B,V)`` — skip active vars marked False
-    (flatline undersample per active variate).
     """
     if col0.ndim != 1:
         raise ValueError(f"col0 must be (B,), got {tuple(col0.shape)}")
@@ -236,13 +257,6 @@ def locations_for_fixed_col0(
         raise ValueError(
             f"hir_canvas batch/vars {tuple(hir_canvas.shape[:2])} != coarse {(B, V)}"
         )
-    keep = None
-    if variate_keep is not None:
-        keep = variate_keep.to(dtype=torch.bool)
-        if keep.shape != (B, V):
-            raise ValueError(
-                f"variate_keep shape {tuple(keep.shape)} != batch/vars {(B, V)}"
-            )
     max_row0 = canvas_height - patch_height
     max_col0 = W - patch_width
     locations: List[PatchLocation] = []
@@ -252,8 +266,6 @@ def locations_for_fixed_col0(
             raise ValueError(f"col0={c0} out of range [0, {max_col0}] for W={W}")
         anchor = c0 + patch_width // 2
         for vi in range(V):
-            if keep is not None and not bool(keep[bi, vi].item()):
-                continue
             edge = int(coarse_edges[bi, vi, anchor].item())
             row0 = max(0, min(edge - patch_height // 2, max_row0))
             if hir_canvas is not None:
@@ -401,6 +413,79 @@ def select_coverage_gap_locations(
     return gap
 
 
+def coverage_gap_layout(
+    coarse_edges: torch.Tensor,
+    primary_layout: PatchLayout,
+    *,
+    canvas_height: int,
+    patch_height: int,
+    patch_width: int,
+) -> Optional[PatchLayout]:
+    """Tensor gap fills for timesteps the primary AR crops leave uncovered.
+
+    Each round places one crop per still-gapped parent, in parallel across
+    ``(B,V)``. Equivalent to :func:`select_coverage_gap_locations` as a set of
+    ``(batch, variate, row0, col0)`` keys.
+    """
+    if coarse_edges.ndim != 3:
+        raise ValueError(f"coarse_edges must be (B,V,W), got {tuple(coarse_edges.shape)}")
+    batch_size, n_variates, width = coarse_edges.shape
+    device = coarse_edges.device
+    max_row0 = canvas_height - patch_height
+    max_col0 = width - patch_width
+    covered = coverage_mask_for_layout(
+        coarse_edges,
+        primary_layout,
+        patch_height=patch_height,
+        patch_width=patch_width,
+    )
+    gap_layouts: List[PatchLayout] = []
+    while bool((~covered).any()):
+        uncovered = ~covered
+        parent_gap = uncovered.any(dim=-1)
+        timestep = uncovered.to(dtype=torch.int64).argmax(dim=-1)
+        col0 = (timestep - patch_width // 2).clamp(0, max_col0)
+        edge_at_t = coarse_edges.gather(-1, timestep.unsqueeze(-1)).squeeze(-1)
+        row0 = (edge_at_t - patch_height // 2).clamp(0, max_row0)
+        valid = parent_gap.reshape(-1)
+        if not bool(valid.any()):
+            break
+        batch_index = torch.arange(batch_size, device=device).repeat_interleave(n_variates)[valid]
+        variate_index = torch.arange(n_variates, device=device).repeat(batch_size)[valid]
+        layout = PatchLayout(
+            flat_index=batch_index * n_variates + variate_index,
+            batch_index=batch_index,
+            variate_index=variate_index,
+            row0=row0.reshape(-1)[valid],
+            col0=col0.reshape(-1)[valid],
+        )
+        t_flat = timestep.reshape(-1)[valid]
+        edge_flat = edge_at_t.reshape(-1)[valid]
+        covers = (
+            (t_flat >= layout.col0)
+            & (t_flat < layout.col0 + patch_width)
+            & (edge_flat >= layout.row0)
+            & (edge_flat < layout.row0 + patch_height)
+        )
+        if not bool(covers.all()):
+            bad = int((~covers).nonzero(as_tuple=False)[0].item())
+            raise RuntimeError(
+                "failed to cover boundary at "
+                f"B={int(layout.batch_index[bad])} V={int(layout.variate_index[bad])} "
+                f"t={int(t_flat[bad])}"
+            )
+        gap_layouts.append(layout)
+        covered = covered | coverage_mask_for_layout(
+            coarse_edges,
+            layout,
+            patch_height=patch_height,
+            patch_width=patch_width,
+        )
+    if not gap_layouts:
+        return None
+    return PatchLayout.cat(gap_layouts)
+
+
 def group_locations_by_col0(
     locations: Sequence[PatchLocation],
 ) -> List[Tuple[int, List[PatchLocation]]]:
@@ -439,40 +524,6 @@ def partition_primary_and_gap(
     return primary, gap
 
 
-def _normalize_var_allow_map(
-    allowed: Optional[Dict[int, Sequence[int]]],
-    *,
-    name: str,
-) -> Optional[Dict[int, Set[int]]]:
-    if allowed is None:
-        return None
-    out: Dict[int, Set[int]] = {}
-    for key, vars_ in allowed.items():
-        vs = {int(v) for v in vars_}
-        if not vs:
-            continue
-        out[int(key)] = vs
-    if not out:
-        raise RuntimeError(f"{name} is empty")
-    return out
-
-
-def _normalize_allowed_parent_variates(
-    allowed_parent_variates: Optional[Dict[int, Sequence[int]]],
-) -> Optional[AllowedParentVariates]:
-    return _normalize_var_allow_map(
-        allowed_parent_variates, name="allowed_parent_variates"
-    )
-
-
-def _normalize_allowed_segment_variates(
-    allowed_segment_variates: Optional[Dict[int, Sequence[int]]],
-) -> Optional[AllowedSegmentVariates]:
-    return _normalize_var_allow_map(
-        allowed_segment_variates, name="allowed_segment_variates"
-    )
-
-
 class UniquePatchSegmentDataset(Dataset):
     """Index unique absolute patch starts; resample parent window each epoch."""
 
@@ -487,27 +538,9 @@ class UniquePatchSegmentDataset(Dataset):
         segment_stride: int = 1,
         series_id: int = 0,
         rank_data: Optional[torch.Tensor] = None,
-        allowed_parent_starts: Optional[Sequence[int]] = None,
-        allowed_parent_variates: Optional[Dict[int, Sequence[int]]] = None,
-        allowed_segment_variates: Optional[Dict[int, Sequence[int]]] = None,
     ):
         if data.ndim != 2:
             raise ValueError(f"data must be (T,V), got {tuple(data.shape)}")
-        if (
-            allowed_segment_variates is not None
-            and allowed_parent_variates is not None
-        ):
-            raise ValueError(
-                "pass only one of allowed_segment_variates / allowed_parent_variates"
-            )
-        if (
-            allowed_segment_variates is not None
-            and allowed_parent_starts is not None
-        ):
-            raise ValueError(
-                "allowed_segment_variates already filters crops; do not also pass "
-                "allowed_parent_starts"
-            )
         self.data = data if isinstance(data, torch.Tensor) else torch.tensor(data)
         self.rank_data = rank_data
         self.lookback = int(lookback)
@@ -520,23 +553,6 @@ class UniquePatchSegmentDataset(Dataset):
         # Matches TimeSeriesDataset: loaders must not re-run ordinal_encode on ranks.
         self.yields_ordinal_ranks = self.rank_data is not None
         self.n_variates = int(self.data.shape[1])
-        self.allowed_segment_variates = _normalize_allowed_segment_variates(
-            allowed_segment_variates
-        )
-        self.allowed_parent_variates = _normalize_allowed_parent_variates(
-            allowed_parent_variates
-        )
-        self.allowed_parent_starts: Optional[set[int]]
-        if self.allowed_parent_variates is not None:
-            self.allowed_parent_starts = set(self.allowed_parent_variates.keys())
-        elif allowed_parent_starts is None:
-            self.allowed_parent_starts = None
-        else:
-            self.allowed_parent_starts = {int(s) for s in allowed_parent_starts}
-            if not self.allowed_parent_starts:
-                raise RuntimeError(
-                    "UniquePatchSegmentDataset: allowed_parent_starts is empty"
-                )
         starts = iter_unique_segment_starts(
             int(self.data.shape[0]),
             lookback=self.lookback,
@@ -545,32 +561,7 @@ class UniquePatchSegmentDataset(Dataset):
             patch_width=self.patch_width,
             segment_stride=self.segment_stride,
         )
-        if self.allowed_segment_variates is not None:
-            allow_t = self.allowed_segment_variates
-            self.segment_starts = [int(t) for t in starts if int(t) in allow_t]
-        elif self.allowed_parent_starts is not None:
-            filtered: List[int] = []
-            for t in starts:
-                parents = parent_starts_for_segment(
-                    int(t),
-                    lookback=self.lookback,
-                    horizon=self.horizon,
-                    overlap=self.overlap,
-                    patch_width=self.patch_width,
-                    series_len=int(self.data.shape[0]),
-                )
-                if self.allowed_parent_variates is not None:
-                    if any(
-                        int(s) in self.allowed_parent_variates
-                        and self.allowed_parent_variates[int(s)]
-                        for s in parents
-                    ):
-                        filtered.append(int(t))
-                elif any(int(s) in self.allowed_parent_starts for s in parents):
-                    filtered.append(int(t))
-            self.segment_starts = filtered
-        else:
-            self.segment_starts = starts
+        self.segment_starts = starts
         if not self.segment_starts:
             raise RuntimeError("UniquePatchSegmentDataset: zero valid segments")
 
@@ -579,42 +570,6 @@ class UniquePatchSegmentDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.segment_starts)
-
-    def _variate_keep_for_parent(self, parent_start: int) -> torch.Tensor:
-        mask = torch.ones(self.n_variates, dtype=torch.bool)
-        if self.allowed_parent_variates is None:
-            return mask
-        allowed = self.allowed_parent_variates.get(int(parent_start))
-        if not allowed:
-            raise RuntimeError(
-                f"parent_start={parent_start} has no allowed active variates"
-            )
-        mask.zero_()
-        for v in allowed:
-            if v < 0 or v >= self.n_variates:
-                raise IndexError(
-                    f"allowed variate {v} out of range for V={self.n_variates}"
-                )
-            mask[v] = True
-        return mask
-
-    def _variate_keep_for_segment(self, segment_start: int) -> torch.Tensor:
-        mask = torch.ones(self.n_variates, dtype=torch.bool)
-        if self.allowed_segment_variates is None:
-            return mask
-        allowed = self.allowed_segment_variates.get(int(segment_start))
-        if not allowed:
-            raise RuntimeError(
-                f"segment_start={segment_start} has no allowed active variates"
-            )
-        mask.zero_()
-        for v in allowed:
-            if v < 0 or v >= self.n_variates:
-                raise IndexError(
-                    f"allowed variate {v} out of range for V={self.n_variates}"
-                )
-            mask[v] = True
-        return mask
 
     def __getitem__(self, idx: int):
         t = int(self.segment_starts[idx])
@@ -627,25 +582,12 @@ class UniquePatchSegmentDataset(Dataset):
             overlap=self.overlap,
             patch_width=self.patch_width,
             series_len=int(self.data.shape[0]),
-            allowed_parent_starts=(
-                sorted(self.allowed_parent_starts)
-                if self.allowed_parent_starts is not None
-                and self.allowed_parent_variates is None
-                else None
-            ),
-            allowed_parent_variates=self.allowed_parent_variates,
         )
         source = self.rank_data if self.rank_data is not None else self.data
         past = source[S : S + self.lookback].T
         fut_start = S + self.lookback - self.overlap
         future = source[fut_start : S + self.lookback + self.horizon].T
         col0 = t - fut_start
-        if self.allowed_segment_variates is not None:
-            keep = self._variate_keep_for_segment(t)
-            return past, future, torch.tensor(col0, dtype=torch.long), keep
-        if self.allowed_parent_variates is not None:
-            keep = self._variate_keep_for_parent(S)
-            return past, future, torch.tensor(col0, dtype=torch.long), keep
         return past, future, torch.tensor(col0, dtype=torch.long)
 
 
@@ -655,9 +597,6 @@ def wrap_timeseries_as_unique_segments(
     patch_width: int,
     segment_stride: int = 1,
     series_id: int = 0,
-    allowed_parent_starts: Optional[Sequence[int]] = None,
-    allowed_parent_variates: Optional[Dict[int, Sequence[int]]] = None,
-    allowed_segment_variates: Optional[Dict[int, Sequence[int]]] = None,
 ) -> UniquePatchSegmentDataset:
     """Rebuild a ``TimeSeriesDataset`` as unique absolute patch segments."""
     data = ts_ds.data
@@ -671,7 +610,4 @@ def wrap_timeseries_as_unique_segments(
         segment_stride=int(segment_stride),
         series_id=int(series_id),
         rank_data=rank,
-        allowed_parent_starts=allowed_parent_starts,
-        allowed_parent_variates=allowed_parent_variates,
-        allowed_segment_variates=allowed_segment_variates,
     )

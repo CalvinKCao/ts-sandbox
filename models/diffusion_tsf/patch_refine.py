@@ -8,10 +8,12 @@ import torch
 import torch.nn.functional as F
 
 from .patch_refine_geometry import (
+    PatchLayout,
     PatchLocation,
     blend_patch_bins,
     coarse_edges_from_cdf,
     extract_patch_batch,
+    extract_patch_batch_layout,
     select_patch_locations,
 )
 from .preprocessing import TimeSeriesTo2D
@@ -151,6 +153,65 @@ def build_patch_aux_channels(
 
     aux = torch.cat([naive_patches, coarse_cell, time_map], dim=1)
     return aux, patch_coarse_bin, patch_time0
+
+
+def build_patch_aux_channels_layout(
+    naive_canvas: torch.Tensor,
+    coarse_edges: torch.Tensor,
+    layout: PatchLayout,
+    *,
+    patch_height: int,
+    patch_width: int,
+    canvas_height: int,
+    coarse_height: int,
+    horizon_width: int,
+    prev_refine_16: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Tensor-layout version of :func:`build_patch_aux_channels`."""
+    naive_patches = extract_patch_batch_layout(
+        naive_canvas, layout, patch_height=patch_height, patch_width=patch_width,
+    )
+    n_patches = layout.n_patches
+    device = naive_canvas.device
+    dtype = naive_canvas.dtype
+    cols = layout.col0[:, None] + torch.arange(patch_width, device=device)
+    edges = coarse_edges.reshape(-1, coarse_edges.shape[-1])[layout.flat_index[:, None], cols]
+    scale = canvas_height // coarse_height
+    bins = ((edges + 1) // scale - 1).clamp(0, coarse_height - 1)
+    coarse_cell = (
+        bins.to(dtype=dtype) / float(max(1, coarse_height - 1))
+    )[:, None, None, :].expand(-1, 1, patch_height, -1)
+    time_map = (
+        cols.to(dtype=dtype) / float(max(1, horizon_width - 1))
+    )[:, None, None, :].expand(-1, 1, patch_height, -1)
+    if prev_refine_16 is not None:
+        if prev_refine_16.shape != (n_patches, 1, 16, patch_width):
+            raise ValueError(
+                f"prev_refine_16 must be {(n_patches, 1, 16, patch_width)}, "
+                f"got {tuple(prev_refine_16.shape)}"
+            )
+        if patch_height < 16:
+            raise ValueError("prev_refine_16 stuffing requires patch_height >= 16")
+        coarse_cell = coarse_cell.clone()
+        coarse_cell[:, :, :16, :] = prev_refine_16.to(device=device, dtype=dtype)
+    aux = torch.cat([naive_patches, coarse_cell, time_map], dim=1)
+    return aux, bins[:, patch_width // 2], layout.col0
+
+
+def expand_lookback_cond_for_layout(
+    lookback_cond: torch.Tensor,
+    layout: PatchLayout,
+) -> torch.Tensor:
+    return lookback_cond.index_select(0, layout.flat_index)
+
+
+def expand_ctx_for_layout(
+    ctx_flat: Optional[torch.Tensor],
+    layout: PatchLayout,
+) -> Optional[torch.Tensor]:
+    if ctx_flat is None:
+        return None
+    return ctx_flat.index_select(0, layout.flat_index)
 
 
 def expand_lookback_cond_for_patches(

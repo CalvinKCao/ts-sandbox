@@ -282,7 +282,6 @@ def plot_ordinal_coarse_fine_2d(
         use_window_normalization=False,
         staged_representation=str(exp.get("staged_representation", "value_precision")),
         disable_cross_attention=True,
-        use_guidance_channel=False,
     )
     model = DiffusionTSF(model_cfg)
     maps = model._encode_staged_maps(seq_ord)

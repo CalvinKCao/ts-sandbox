@@ -86,13 +86,51 @@ class _CrossAttention(nn.Module):
         x: torch.Tensor,
         ctx: torch.Tensor,
         attn_bias: Optional[torch.Tensor] = None,
+        context_window_indices: Optional[torch.Tensor] = None,
         return_attn_weights: bool = False,
     ):
         B, N, C = x.shape
-        _, M, _ = ctx.shape
+        ctx_batch, M, _ = ctx.shape
         q = self.q(x).reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        kv = self.kv(ctx).reshape(B, M, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        kv = self.kv(ctx).reshape(
+            ctx_batch, M, 2, self.num_heads, self.head_dim
+        ).permute(2, 0, 3, 1, 4)
         k, v = kv.unbind(0)
+        if context_window_indices is not None:
+            if context_window_indices.shape != (B,):
+                raise ValueError(
+                    "context_window_indices must have one entry per query row, got "
+                    f"{tuple(context_window_indices.shape)} for B={B}"
+                )
+            # Project K/V once per parent, then index them to patch rows. This
+            # keeps the shared frozen context semantics but reduces the former
+            # per-parent nonzero/SDPA loop to one batched attention call.
+            k = k.index_select(0, context_window_indices)
+            v = v.index_select(0, context_window_indices)
+            bias_rows = (
+                attn_bias[:, None, None, :].to(dtype=q.dtype)
+                if attn_bias is not None
+                else None
+            )
+            if return_attn_weights:
+                logits = torch.matmul(q, k.transpose(-2, -1)) * (self.head_dim ** -0.5)
+                if bias_rows is not None:
+                    logits = logits + bias_rows
+                weights = torch.softmax(logits, dim=-1)
+                out = torch.matmul(weights, v)
+                mean_weights = weights.mean(dim=(1, 2))
+            else:
+                out = F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=bias_rows,
+                    dropout_p=self.drop if self.training else 0.0,
+                )
+            out = out.transpose(1, 2).reshape(B, N, C)
+            out = self.proj(out)
+            if return_attn_weights:
+                return out, mean_weights
+            return out
+        if ctx_batch != B:
+            raise ValueError(f"ctx batch {ctx_batch} != query batch {B}")
         if return_attn_weights:
             scale = self.head_dim ** -0.5
             attn_logits = torch.matmul(q, k.transpose(-2, -1)) * scale
@@ -192,6 +230,7 @@ class _DiTCrossAttnBlock(nn.Module):
         scale_indices: Optional[torch.Tensor] = None,
         variate_indices: Optional[torch.Tensor] = None,
         token_variate_ids: Optional[torch.Tensor] = None,
+        context_window_indices: Optional[torch.Tensor] = None,
         return_attn_weights: bool = False,
     ):
         mods = self.adaLN(c).chunk(12 if self.enable_cross_scale_attention else 9, dim=-1)
@@ -240,10 +279,19 @@ class _DiTCrossAttnBlock(nn.Module):
             cross_in = _modulate(self.norm_x(x), sx, scx)
             if return_attn_weights:
                 cross_out, cross_attn_weights = self.cross_attn(
-                    cross_in, ctx, attn_bias=attn_bias, return_attn_weights=True,
+                    cross_in,
+                    ctx,
+                    attn_bias=attn_bias,
+                    context_window_indices=context_window_indices,
+                    return_attn_weights=True,
                 )
             else:
-                cross_out = self.cross_attn(cross_in, ctx, attn_bias=attn_bias)
+                cross_out = self.cross_attn(
+                    cross_in,
+                    ctx,
+                    attn_bias=attn_bias,
+                    context_window_indices=context_window_indices,
+                )
             x = x + gx.unsqueeze(1) * cross_out
         if self.enable_cross_scale_attention:
             if scale_indices is None:
@@ -266,13 +314,13 @@ class _DiTCrossAttnBlock(nn.Module):
 
 
 class FactorizedDiT(nn.Module):
-    """Per-variate DiT backbone with bottleneck cross-attention to iTrans tokens.
+    """Per-variate DiT backbone with bottleneck cross-attention to frozen tokens.
 
     Inputs:
-        x: (BV, in_channels, H, W_fut) noisy future canvas + aux + guidance ghost
+        x: (BV, in_channels, H, W_fut) noisy future canvas plus stage auxiliaries
         t: (BV,) diffusion timestep
         cond: (BV, cond_channels, H, W_fut) visual conditioning (past 2D resized)
-        encoder_hidden_states: (BV, V, ctx_dim) or None — iTransformer token memory
+        encoder_hidden_states: (BV, V, ctx_dim) or None — cross-variate token memory
 
     Returns:
         (BV, out_channels, H, W_fut) noise prediction
@@ -420,6 +468,7 @@ class FactorizedDiT(nn.Module):
         scale_indices: Optional[torch.Tensor] = None,
         variate_indices: Optional[torch.Tensor] = None,
         token_variate_ids: Optional[torch.Tensor] = None,
+        context_window_indices: Optional[torch.Tensor] = None,
         patch_coarse_bin: Optional[torch.Tensor] = None,
         patch_time0: Optional[torch.Tensor] = None,
         return_cross_attn_weights: bool = False,
@@ -482,28 +531,71 @@ class FactorizedDiT(nn.Module):
 
         ctx_proj: Optional[torch.Tensor] = None
         if encoder_hidden_states is not None:
-            if encoder_hidden_states.shape[0] != BV:
+            if context_window_indices is not None and context_window_indices.shape != (BV,):
                 raise ValueError(
-                    f"encoder_hidden_states batch {encoder_hidden_states.shape[0]} != BV {BV}"
+                    "context_window_indices must have one entry per DiT row, got "
+                    f"{tuple(context_window_indices.shape)} for BV={BV}"
                 )
+            if context_window_indices is None:
+                if encoder_hidden_states.shape[0] != BV:
+                    raise ValueError(
+                        "encoder_hidden_states batch "
+                        f"{encoder_hidden_states.shape[0]} != DiT batch {BV}"
+                    )
             ctx_proj = self.ctx_norm(self.ctx_proj(encoder_hidden_states))  # (BV, V, D)
 
         for i, block in enumerate(self.blocks):
             if i == self.bottleneck_idx:
                 if self.gradient_checkpointing and self.training:
-                    tokens = checkpoint(
-                        block,
-                        tokens,
-                        t_emb,
-                        ctx_proj,
-                        scale_indices,
-                        variate_indices,
-                        use_reentrant=False,
-                    )
+                    if context_window_indices is None:
+                        tokens = checkpoint(
+                            block,
+                            tokens,
+                            t_emb,
+                            ctx_proj,
+                            scale_indices,
+                            variate_indices,
+                            use_reentrant=False,
+                        )
+                    else:
+                        cross_block = block
+
+                        def checkpointed_cross_block(
+                            block_tokens,
+                            block_t_emb,
+                            block_ctx,
+                            block_scale,
+                            block_variate,
+                            block_context_windows,
+                        ):
+                            # checkpoint replays this closure during backward,
+                            # after the outer loop has advanced to a different
+                            # block. Capture the bottleneck block explicitly.
+                            return cross_block(
+                                block_tokens,
+                                block_t_emb,
+                                block_ctx,
+                                block_scale,
+                                block_variate,
+                                token_variate_ids=token_variate_ids,
+                                context_window_indices=block_context_windows,
+                            )
+
+                        tokens = checkpoint(
+                            checkpointed_cross_block,
+                            tokens,
+                            t_emb,
+                            ctx_proj,
+                            scale_indices,
+                            variate_indices,
+                            context_window_indices,
+                            use_reentrant=False,
+                        )
                 elif return_cross_attn_weights:
                     tokens, attn_w = block(
                         tokens, t_emb, ctx_proj, scale_indices, variate_indices,
                         token_variate_ids=token_variate_ids,
+                        context_window_indices=context_window_indices,
                         return_attn_weights=True,
                     )
                     self._diag_cross_attn_weights = attn_w
@@ -511,6 +603,7 @@ class FactorizedDiT(nn.Module):
                     tokens = block(
                         tokens, t_emb, ctx_proj, scale_indices, variate_indices,
                         token_variate_ids=token_variate_ids,
+                        context_window_indices=context_window_indices,
                     )
             else:
                 if self.gradient_checkpointing and self.training:

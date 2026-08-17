@@ -21,10 +21,6 @@ from optuna.trial import TrialState
 from torch.utils.data import DataLoader, Subset
 
 from models.diffusion_tsf import train_multivariate_pipeline as pipeline_mod
-from models.diffusion_tsf.flatline_windows import (
-    DEFAULT_SEED_OFFSET,
-    undersample_flatline_refine_crops,
-)
 from models.diffusion_tsf.patch_refine_segments import wrap_timeseries_as_unique_segments
 from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.config import training_value
@@ -55,6 +51,7 @@ from models.diffusion_tsf.pipeline.train.diffusion_loop import (
     DiffusionEpochMetrics,
     DiffusionTrainer,
 )
+from models.diffusion_tsf.pipeline.train.cross_variate_cache import CrossVariateTokenCache
 from models.diffusion_tsf.pipeline.visualize_utils import (
     _load_staged_diffusion_from_ckpt,
     run_real_dataset_phase_diagnostics,
@@ -65,6 +62,15 @@ from models.diffusion_tsf.train_window_aug import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _has_train_window_augmentation(dataset) -> bool:
+    current = dataset
+    while current is not None:
+        if current.__class__.__name__ == "TrainWindowAugDataset":
+            return True
+        current = getattr(current, "dataset", None) or getattr(current, "base", None)
+    return False
 
 
 def _hybrid_norm_metadata(norm_stats: Dict[str, Any]) -> Dict[str, Any]:
@@ -113,86 +119,16 @@ def _maybe_subsample_patch_refine_train_windows(state: PipelineState, train_ds):
     return Subset(train_ds, indices)
 
 
-def _resolve_flatline_undersample_seed(state: PipelineState) -> int:
-    raw = getattr(state, "patch_refine_flatline_seed", None)
-    if raw is None:
-        return int(state.seed) + int(DEFAULT_SEED_OFFSET)
-    return int(raw)
-
-
-def _maybe_flatline_undersample_patch_refine_train(
-    state: PipelineState, train_ds, *, segment_stride: int
-) -> Tuple[Any, Optional[Dict[int, List[int]]]]:
-    """Undersample GT-flatline refine crops before unique-seg wrap.
-
-    Returns (train_ds, allowed_segment_variates|None). Flatness is judged on
-    each unique absolute ``patch_width`` crop × active variate — not the full
-    H-horizon parent. Unique-seg keep masks drop discarded (segment, var) crops.
-    """
-    keep_frac = float(getattr(state, "patch_refine_flatline_keep_frac", 1.0))
-    if not math.isfinite(keep_frac) or keep_frac <= 0.0 or keep_frac > 1.0:
-        raise ValueError(
-            f"patch_refine_flatline_keep_frac must be in (0, 1], got {keep_frac!r}"
-        )
-    if keep_frac >= 1.0:
-        return train_ds, None
-
-    if not isinstance(train_ds, pipeline_mod.TimeSeriesDataset):
-        raise TypeError(
-            "patch_refine_flatline_keep_frac requires TimeSeriesDataset train "
-            f"windows before unique-seg wrap, got {type(train_ds).__name__}"
-        )
-    if not bool(getattr(state, "patch_refine_unique_segments", False)):
-        raise RuntimeError(
-            "patch_refine_flatline_keep_frac < 1 requires "
-            "patch_refine_unique_segments=True (per-crop filtering)"
-        )
-    if bool(getattr(state, "use_ordinal_window_norm", False)):
-        raise RuntimeError(
-            "patch_refine_flatline_keep_frac expects early-July window-norm "
-            "(use_ordinal_window_norm=False); refuse ordinal-rank flat defs"
-        )
-    if not bool(getattr(state, "use_window_normalization", True)):
-        raise RuntimeError(
-            "patch_refine_flatline_keep_frac requires use_window_normalization=True"
-        )
-
-    max_scale = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
-    seed = _resolve_flatline_undersample_seed(state)
-    patch_width = int(getattr(state, "patch_refine_patch_width", 8))
-    allowed_vars, stats = undersample_flatline_refine_crops(
-        train_ds,
-        patch_width=patch_width,
-        segment_stride=max(1, int(segment_stride)),
-        max_scale=max_scale,
-        coarse_h=int(state.coarse_image_height),
-        std_floor=float(state.window_norm_std_floor),
-        keep_frac=keep_frac,
-        seed=seed,
-        min_run=int(getattr(state, "patch_refine_flatline_min_run", 3)),
-        flat_eps_frac=float(getattr(state, "patch_refine_flatline_eps_frac", 0.25)),
-    )
-    state.extra["patch_refine_flatline_undersample"] = stats
-    return train_ds, allowed_vars
-
-
 def _unpack_patch_refine_batch(batch):
-    """Unpack train/val batch: optional col0 + optional per-active-var keep mask."""
-    patch_col0 = None
-    variate_keep = None
-    if len(batch) == 4:
-        past, future, patch_col0, variate_keep = batch
-    elif len(batch) == 3:
-        past, future, third = batch
-        if third.dtype == torch.bool:
-            variate_keep = third
-        else:
-            patch_col0 = third
+    """Unpack train/val patch-refine batches with their absolute crop column."""
+    if len(batch) == 3:
+        past, future, patch_col0 = batch
     elif len(batch) == 2:
         past, future = batch
+        patch_col0 = None
     else:
         raise ValueError(f"unexpected patch_refine batch length {len(batch)}")
-    return past, future, patch_col0, variate_keep
+    return past, future, patch_col0
 
 
 
@@ -1198,7 +1134,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             horizon=ds_hz,
             guidance_model=itrans_guidance,
             diffusion_stage=self.stage,
-            use_guidance_channel=state.use_guidance_channel,
             **model_kwargs,
         ).to(device)
 
@@ -1385,8 +1320,18 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         params = _with_state_anchor_params(params, state)
         n_iv = len(variate_indices)
         batch_size = int(params["batch_size"])
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0,
+            drop_last=not state.smoke_test,
+        )
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+        if len(train_loader) == 0:
+            raise ValueError(
+                f"{self.stage} train set has {len(train_ds)} windows, smaller than batch_size={batch_size}"
+            )
         trial_label = f"trial={trial.number}" if trial is not None else "trial=single"
         logger.info(
             "  [%s/%s] %s START epochs=%d patience=%d lr=%.2e bs=%d accum=%d "
@@ -1419,6 +1364,33 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 )
             else:
                 logger.info("  [%s] random init (no pretrain ckpt)", self.name)
+
+            token_cache = getattr(self, "_phase_token_cache", None)
+            if (
+                not state.disable_cross_attention
+                and bool(self.get("cache_cross_variate_tokens", True))
+                and token_cache is None
+            ):
+                token_cache = CrossVariateTokenCache(
+                    model=model,
+                    device=device,
+                    storage=str(self.get("cross_variate_token_cache_storage", "pinned_cpu")),
+                )
+                stable_train = not _has_train_window_augmentation(train_ds)
+                if stable_train:
+                    token_cache.precompute_dataset(train_ds, batch_size=batch_size)
+                else:
+                    logger.info(
+                        "  [%s/%s] train token cache disabled: train-window augmentation changes past inputs",
+                        self.name, self.stage,
+                    )
+                token_cache.precompute_dataset(val_ds, batch_size=batch_size)
+                token_cache.release_encoder()
+                self._phase_token_cache = token_cache
+                self._phase_cache_train_enabled = stable_train
+            train_token_cache = (
+                token_cache if getattr(self, "_phase_cache_train_enabled", False) else None
+            )
 
             optimizer = torch.optim.AdamW(
                 model.parameters(), lr=float(params["learning_rate"]),
@@ -1488,6 +1460,11 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     self.stage == "patch_refine"
                     and bool(getattr(state, "sequential_anchor_backward", False))
                 ),
+                deterministic_anchor_every_n_batches=(
+                    state.deterministic_anchor_every_n_batches
+                ),
+                train_token_cache=train_token_cache,
+                val_token_cache=token_cache,
                 log_prefix=f"{self.name}/{self.stage}/{trial_label}",
             )
             result = trainer.fit(
@@ -1603,58 +1580,31 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 [round(float(x), 4) for x in norm_stats["flat_variate_frac"].tolist()],
                 norm_stats.get("hybrid_flat_details"),
             )
-        allowed_segment_variates: Optional[Dict[int, List[int]]] = None
         seg_stride = max(1, int(train_stride))
-        if self.stage == "patch_refine":
-            (
-                train_ds,
-                allowed_segment_variates,
-            ) = _maybe_flatline_undersample_patch_refine_train(
-                state, train_ds, segment_stride=seg_stride
-            )
         if (
             self.stage == "patch_refine"
             and bool(getattr(state, "patch_refine_unique_segments", False))
         ):
-            # Unique-seg rebuilds from .data; flatline undersample restricts
-            # kept (absolute_segment_start, active_var) crops via keep masks.
-            if allowed_segment_variates is not None:
-                train_ds = wrap_timeseries_as_unique_segments(
-                    train_ds,
-                    patch_width=int(getattr(state, "patch_refine_patch_width", 8)),
-                    segment_stride=seg_stride,
-                    series_id=0,
-                    allowed_segment_variates=allowed_segment_variates,
-                )
-            else:
-                train_ds = wrap_timeseries_as_unique_segments(
-                    train_ds,
-                    patch_width=int(getattr(state, "patch_refine_patch_width", 8)),
-                    segment_stride=seg_stride,
-                    series_id=0,
-                )
+            train_ds = wrap_timeseries_as_unique_segments(
+                train_ds,
+                patch_width=int(getattr(state, "patch_refine_patch_width", 8)),
+                segment_stride=seg_stride,
+                series_id=0,
+            )
             val_ds = wrap_timeseries_as_unique_segments(
                 val_ds,
                 patch_width=int(getattr(state, "patch_refine_patch_width", 8)),
                 segment_stride=seg_stride,
                 series_id=1,
             )
-            flat_note = ""
-            if allowed_segment_variates is not None:
-                n_crops = sum(len(vs) for vs in allowed_segment_variates.values())
-                flat_note = (
-                    f" flat_segments={len(allowed_segment_variates)}"
-                    f" flat_kept_crops={n_crops}"
-                )
             logger.info(
                 "  [%s] unique patch segments enabled "
-                "(segment_stride=%d train=%d val=%d prev_dropout=%.2f%s)",
+                "(segment_stride=%d train=%d val=%d prev_dropout=%.2f)",
                 self.name,
                 seg_stride,
                 len(train_ds),
                 len(val_ds),
                 float(getattr(state, "patch_refine_prev_cond_dropout", 0.5)),
-                flat_note,
             )
         if self.stage == "patch_refine":
             train_ds = _maybe_subsample_patch_refine_train_windows(state, train_ds)
@@ -2242,6 +2192,12 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             best_params=best_params,
             train_ds=train_ds,
         )
+
+        token_cache = getattr(self, "_phase_token_cache", None)
+        if token_cache is not None:
+            token_cache.release()
+            del self._phase_token_cache
+            self._phase_cache_train_enabled = False
 
         return state
 

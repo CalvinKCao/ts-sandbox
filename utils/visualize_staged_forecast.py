@@ -194,7 +194,6 @@ def _load_staged_diffusion(
         horizon=horizon,
         guidance_model=itrans_guidance,
         diffusion_stage=stage,
-        use_guidance_channel=state.use_guidance_channel,
         **anchor_kwargs_from_params(tuned),
     ).to(device)
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)

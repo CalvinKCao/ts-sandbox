@@ -66,9 +66,7 @@ experiment:
   dit_embed_dim: 384
   dit_depth: 8
   dit_num_heads: 6
-  use_guidance_channel: true
   guidance_type: patch_decoder
-  guidance_placement: canvas
   disable_cross_attention: false
   cfg_dropout: 0.0
   prediction_target: epsilon

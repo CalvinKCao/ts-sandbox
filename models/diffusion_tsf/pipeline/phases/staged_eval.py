@@ -387,7 +387,6 @@ class StagedEvalPhase(PipelinePhase):
             horizon=ds_hz,
             guidance_model=itrans_guidance,
             diffusion_stage=stage,
-            use_guidance_channel=state.use_guidance_channel,
             ordinal_ladder=state.ordinal_ladder,
             **model_kwargs,
         ).to(device)

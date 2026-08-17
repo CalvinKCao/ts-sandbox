@@ -278,8 +278,13 @@ class DiffusionStageStrategy:
 class CoarseStageStrategy(DiffusionStageStrategy):
     name = "coarse"
 
-    def forward(self, model, past, future, t, **_kwargs):
-        return model._forward_binary_coarse(past, future, t)
+    def forward(self, model, past, future, t, *, include_anchor: bool = True,
+                cross_variate_context=None, context_token_variate_ids=None, **_kwargs):
+        return model._forward_binary_coarse(
+            past, future, t, include_anchor=include_anchor,
+            cross_variate_context=cross_variate_context,
+            context_token_variate_ids=context_token_variate_ids,
+        )
 
     def generate(self, model, past, **kwargs):
         return model._generate_binary_coarse(past, **kwargs)
@@ -300,13 +305,18 @@ class PatchRefineStageStrategy(DiffusionStageStrategy):
         t,
         *,
         patch_col0=None,
-        variate_keep=None,
         loss_mode: str = "combined",
+        include_anchor: bool = True,
+        cross_variate_context=None,
+        context_token_variate_ids=None,
         **_kwargs,
     ):
         return model._forward_binary_patch_refine(
             past, future, t, expand_t_per_window=t is not None,
-            patch_col0=patch_col0, variate_keep=variate_keep, loss_mode=loss_mode,
+            patch_col0=patch_col0, loss_mode=loss_mode,
+            include_anchor=include_anchor,
+            cross_variate_context=cross_variate_context,
+            context_token_variate_ids=context_token_variate_ids,
         )
 
     def generate(self, model, past, **kwargs):
@@ -336,13 +346,17 @@ class DiffusionTSF(nn.Module):
     ):
         super().__init__()
         self.config = config
+        # Persisted in every diffusion state dict: old guided-channel weights are
+        # intentionally incompatible with this cross-attention-only backbone.
+        self.register_buffer(
+            "conditioning_architecture_version", torch.tensor(1, dtype=torch.int8),
+        )
         self.stage_strategy = build_diffusion_stage_strategy(config.diffusion_stage)
 
-        needs_guidance_model = config.use_guidance_channel or not config.disable_cross_attention
+        needs_guidance_model = not config.disable_cross_attention
         if needs_guidance_model and guidance_model is None:
             raise ValueError(
-                "A guidance model is required for forecast channels or cross-variate "
-                "encoder tokens; none was provided."
+                "Cross-attention requires a frozen patch-decoder guidance model; none was provided."
             )
 
         self.to_2d = TimeSeriesTo2D(
@@ -559,98 +573,6 @@ class DiffusionTSF(nn.Module):
             future_norm = future_norm[..., k:]
         return self._upsample_repr_to_raw_horizon(future_norm)
 
-    def _get_guidance_forecast_norm(
-        self,
-        past: torch.Tensor,
-        past_norm: torch.Tensor,
-        stats: Tuple[torch.Tensor, torch.Tensor],
-        horizon_width: int,
-    ) -> torch.Tensor:
-        """Build a window-normalized 1D series for the 2D guidance ghost channel.
-
-        Output shape is (B, V, horizon_width): overlap prefix from past_norm plus a core
-        forecast whose length is horizon_width - lookback_overlap, matching future_norm.
-        iTransformer instance norm is disabled; rollout stays in diffusion window-norm space.
-        """
-        if self.guidance_model is None:
-            raise ValueError("guidance model is None but guidance channel requested")
-        K = int(self.config.lookback_overlap)
-        core_len = int(horizon_width) - K
-        if core_len <= 0:
-            raise ValueError(
-                f"horizon_width={horizon_width} must exceed lookback_overlap={K}"
-            )
-
-        if self.config.zero_guidance_forecast:
-            core_norm = torch.zeros(
-                past.shape[0],
-                self.config.num_variables,
-                core_len,
-                device=past.device,
-                dtype=past.dtype,
-            )
-            if K > 0:
-                out = torch.cat([torch.zeros_like(past_norm[..., -K:]), core_norm], dim=-1)
-            else:
-                out = core_norm
-        else:
-            if not hasattr(self.guidance_model, "get_forecast_window_norm"):
-                raise RuntimeError(
-                    "guidance model must implement get_forecast_window_norm() "
-                    "when use_guidance_channel is enabled"
-                )
-            with torch.no_grad():
-                core_norm = self.guidance_model.get_forecast_window_norm(
-                    past_norm, core_len, overlap=K,
-                )
-            if core_norm.shape[-1] != core_len:
-                core_norm = self._resample_1d_time_series(core_norm, core_len)
-            if K > 0:
-                out = torch.cat([past_norm[..., -K:], core_norm], dim=-1)
-            else:
-                out = core_norm
-
-        if out.shape[-1] != horizon_width:
-            raise RuntimeError(
-                f"guidance width {out.shape[-1]} != horizon canvas width {horizon_width}"
-            )
-        return out
-
-    def _guidance_prediction_fields(
-        self,
-        past: torch.Tensor,
-        past_norm: torch.Tensor,
-        stats: Tuple[torch.Tensor, torch.Tensor],
-        horizon_width: int,
-    ) -> Dict[str, torch.Tensor]:
-        """1D patch-guidance forecast in window-norm and global-z (horizon core).
-
-        Fail-fast when guidance channel is enabled but the attached model cannot
-        produce a forecast (used by redbox / gap viz overlays).
-        """
-        if self.guidance_model is None:
-            raise RuntimeError(
-                "guidance_model is None; cannot emit guidance_prediction_global_norm "
-                f"(stage={self.stage_strategy.name})"
-            )
-        if bool(getattr(self.config, "zero_guidance_forecast", False)):
-            raise RuntimeError(
-                "zero_guidance_forecast=True; refuse empty guidance overlay for viz"
-            )
-        guidance_norm = self._get_guidance_forecast_norm(
-            past, past_norm, stats, int(horizon_width),
-        )
-        guidance_with_overlap = self._denormalize_future(
-            guidance_norm, past, stats, trim_overlap=False,
-        )
-        k = int(self.config.lookback_overlap)
-        guidance_pred = guidance_with_overlap[..., k:]
-        return {
-            "guidance_norm": guidance_norm,
-            "guidance_prediction_with_overlap": guidance_with_overlap,
-            "guidance_prediction_global_norm": guidance_pred,
-        }
-
     def _flatten_ctx_for_factorized_dit(
         self,
         ctx: Optional[torch.Tensor],
@@ -684,6 +606,21 @@ class DiffusionTSF(nn.Module):
         if self.context_encoder is None:
             raise RuntimeError("itransformer guidance requires context_encoder.")
         return self.context_encoder(enc_tokens)
+
+    def _resolve_cross_variate_context(
+        self,
+        past: torch.Tensor,
+        past_norm: torch.Tensor,
+        cached_context: Optional[torch.Tensor] = None,
+        cached_token_variate_ids: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        """Use phase-cached frozen tokens when provided, otherwise encode live."""
+        if self.config.disable_cross_attention:
+            return None
+        if cached_context is not None:
+            self._ctx_token_variate_ids = cached_token_variate_ids
+            return cached_context
+        return self._get_cross_variate_context(past, past_norm)
 
     def _window_norm_center(self, past: torch.Tensor) -> torch.Tensor:
         if self.config.window_norm_center == "last":
@@ -899,6 +836,7 @@ class DiffusionTSF(nn.Module):
         scale_indices: Optional[torch.Tensor] = None,
         variate_indices: Optional[torch.Tensor] = None,
         token_variate_ids: Optional[torch.Tensor] = None,
+        context_window_indices: Optional[torch.Tensor] = None,
         patch_coarse_bin: Optional[torch.Tensor] = None,
         patch_time0: Optional[torch.Tensor] = None,
         return_cross_attn_weights: bool = False,
@@ -913,7 +851,14 @@ class DiffusionTSF(nn.Module):
                 c_canvas = canvas[i:end]
                 c_t = t_flat[i:end] if t_flat.shape[0] == n_items else t_flat
                 c_cond = cond_for_unet[i:end] if cond_for_unet is not None else None
-                c_ctx = ctx_flat[i:end] if ctx_flat is not None else None
+                c_ctx = ctx_flat
+                c_context_windows = (
+                    context_window_indices[i:end]
+                    if context_window_indices is not None
+                    else None
+                )
+                if c_ctx is not None and c_context_windows is None:
+                    c_ctx = c_ctx[i:end]
                 c_scale = scale_indices[i:end] if scale_indices is not None else None
                 c_var = variate_indices[i:end] if variate_indices is not None else None
                 c_bin = patch_coarse_bin[i:end] if patch_coarse_bin is not None else None
@@ -921,6 +866,7 @@ class DiffusionTSF(nn.Module):
                 kwargs = {
                     "encoder_hidden_states": c_ctx,
                     "token_variate_ids": token_variate_ids,
+                    "context_window_indices": c_context_windows,
                     "return_cross_attn_weights": return_cross_attn_weights and i == 0,
                 }
                 if c_scale is not None:
@@ -936,6 +882,7 @@ class DiffusionTSF(nn.Module):
         kwargs = {
             "encoder_hidden_states": ctx_flat,
             "token_variate_ids": token_variate_ids,
+            "context_window_indices": context_window_indices,
             "return_cross_attn_weights": return_cross_attn_weights,
         }
         if scale_indices is not None:
@@ -1261,8 +1208,10 @@ class DiffusionTSF(nn.Module):
         t: Optional[torch.Tensor] = None,
         *,
         patch_col0: Optional[torch.Tensor] = None,
-        variate_keep: Optional[torch.Tensor] = None,
         loss_mode: str = "combined",
+        include_anchor: bool = True,
+        cross_variate_context: Optional[torch.Tensor] = None,
+        context_token_variate_ids: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (binary factorized DiT path)."""
         return self.stage_strategy.forward(
@@ -1271,8 +1220,10 @@ class DiffusionTSF(nn.Module):
             future,
             t,
             patch_col0=patch_col0,
-            variate_keep=variate_keep,
             loss_mode=loss_mode,
+            include_anchor=include_anchor,
+            cross_variate_context=cross_variate_context,
+            context_token_variate_ids=context_token_variate_ids,
         )
 
     @torch.no_grad()
@@ -1294,14 +1245,11 @@ class DiffusionTSF(nn.Module):
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
         future_coarse_2d: Optional[torch.Tensor] = None,
         future_fine_2d: Optional[torch.Tensor] = None,
-        emit_guidance_prediction: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions via binary reverse sampling.
 
         sampler: 'ddim' (default), 'anchor' / 'deterministic_anchor' for one-shot anchor decode.
         num_inference_steps overrides binary_sample_steps when set.
-        emit_guidance_prediction: if True, also return guidance_prediction_global_norm
-        (expensive AR rollout — opt-in for redbox viz only, not bulk eval).
         """
         steps = num_inference_steps if num_inference_steps is not None else self.config.binary_sample_steps
         gen_common = dict(
@@ -1317,7 +1265,6 @@ class DiffusionTSF(nn.Module):
             snapshot_timesteps=snapshot_timesteps,
             future_coarse_2d=future_coarse_2d,
             future_fine_2d=future_fine_2d,
-            emit_guidance_prediction=bool(emit_guidance_prediction),
         )
         return self.stage_strategy.generate(self, past, **gen_common)
 
@@ -1601,125 +1548,6 @@ class DiffusionTSF(nn.Module):
         )
         return cond, past_maps
 
-    def _guidance_placement(self) -> str:
-        return str(getattr(self.config, "guidance_placement", "canvas") or "canvas")
-
-    def _uses_canvas_guidance(self) -> bool:
-        return bool(self.config.use_guidance_channel) and self._guidance_placement() == "canvas"
-
-    def _uses_cond_chunk_guidance(self) -> bool:
-        return bool(self.config.use_guidance_channel) and self._guidance_placement() == "cond_chunks"
-
-    def _guidance_core_1d_length(self, guidance_forecast_norm: torch.Tensor) -> int:
-        """Return the old core length used to preserve the cond-channel count."""
-        K = int(self.config.lookback_overlap)
-        return max(0, int(guidance_forecast_norm.shape[-1]) - K)
-
-    def _encode_guidance_cond_chunks(
-        self,
-        guidance_forecast_norm: torch.Tensor,
-        H: int,
-        BV: int,
-    ) -> torch.Tensor:
-        """Encode ``past[-K:] ∥ guidance`` in fixed-width visual-cond chunks.
-
-        The first chunk starts with the known overlap, aligned with the target
-        canvas's first K columns. Keep the original chunk count so this is a
-        semantic repack, not a cond-channel shape change.
-        """
-        core_len = self._guidance_core_1d_length(guidance_forecast_norm)
-        chunk_w = int(self.config.diffusion_lookback_cap or 0) or int(self.config.lookback_length)
-        if chunk_w <= 0:
-            raise ValueError("cond_chunks requires positive diffusion_lookback_cap or lookback_length")
-        n_chunks = (core_len + chunk_w - 1) // chunk_w
-        capacity = n_chunks * chunk_w
-        stream = guidance_forecast_norm
-        if stream.shape[-1] > capacity:
-            raise ValueError(
-                "lookback-overlap guidance does not fit the existing cond chunk layout: "
-                f"stream={stream.shape[-1]}, capacity={capacity}. "
-                "Increase the cond chunk count explicitly rather than silently changing channels."
-            )
-        chunks = []
-        start = 0
-        for _ in range(n_chunks):
-            piece = stream[..., start:start + chunk_w]
-            start += chunk_w
-            pad = chunk_w - piece.shape[-1]
-            if pad > 0:
-                piece = F.pad(piece, (0, pad))
-            maps = self._encode_staged_maps(piece)
-            coarse = self._resize_cdf_height(maps["coarse"], H)
-            chunks.append(coarse.reshape(BV, 1, H, coarse.shape[-1]))
-        return torch.cat(chunks, dim=1)
-
-    def _encode_guidance_cond_chunks_joint(
-        self,
-        guidance_forecast_norm: torch.Tensor,
-        H: int,
-        BV: int,
-    ) -> torch.Tensor:
-        """Joint-stage version of the overlap-preserving cond chunk repack."""
-        core_len = self._guidance_core_1d_length(guidance_forecast_norm)
-        chunk_w = int(self.config.diffusion_lookback_cap or 0) or int(self.config.lookback_length)
-        if chunk_w <= 0:
-            raise ValueError("cond_chunks requires positive diffusion_lookback_cap or lookback_length")
-        n_chunks = (core_len + chunk_w - 1) // chunk_w
-        capacity = n_chunks * chunk_w
-        stream = guidance_forecast_norm
-        if stream.shape[-1] > capacity:
-            raise ValueError(
-                "lookback-overlap guidance does not fit the existing cond chunk layout: "
-                f"stream={stream.shape[-1]}, capacity={capacity}."
-            )
-        chunks = []
-        start = 0
-        for _ in range(n_chunks):
-            piece = stream[..., start:start + chunk_w]
-            start += chunk_w
-            pad = chunk_w - piece.shape[-1]
-            if pad > 0:
-                piece = F.pad(piece, (0, pad))
-            maps_2d = self.encode_to_2d_binary(piece)
-            chunks.append(maps_2d.reshape(BV, 1, H, maps_2d.shape[-1]))
-        return torch.cat(chunks, dim=1)
-
-    def _align_guidance_cond_width(self, guidance_cond: torch.Tensor, cond_width: int) -> torch.Tensor:
-        cur_w = int(guidance_cond.shape[-1])
-        if cur_w == cond_width:
-            return guidance_cond
-        H = int(guidance_cond.shape[-2])
-        if cur_w < cond_width:
-            return F.pad(guidance_cond, (0, cond_width - cur_w))
-        return F.interpolate(
-            guidance_cond,
-            size=(H, cond_width),
-            mode="bilinear",
-            align_corners=False,
-        )
-
-    def _zero_guidance_cond_tail(
-        self,
-        cond: torch.Tensor,
-        n_guidance_ch: int,
-        drop_mask_flat: torch.Tensor,
-    ) -> torch.Tensor:
-        if n_guidance_ch <= 0:
-            return cond
-        past_ch = int(cond.shape[1]) - int(n_guidance_ch)
-        if past_ch < 0:
-            raise ValueError(
-                f"cond channels {cond.shape[1]} < guidance tail {n_guidance_ch}"
-            )
-        past_part = cond[:, :past_ch]
-        guide_part = cond[:, past_ch:]
-        guide_part = torch.where(
-            drop_mask_flat.view(-1, 1, 1, 1),
-            torch.zeros_like(guide_part),
-            guide_part,
-        )
-        return torch.cat([past_part, guide_part], dim=1)
-
     def _patch_refine_geometry_knobs(self) -> Tuple[int, int, int, int]:
         return (
             int(self.config.patch_refine_canvas_height),
@@ -1773,7 +1601,7 @@ class DiffusionTSF(nn.Module):
         cond = stack_past_coarse_fine(past_maps["coarse"], past_maps["fine"])
         return cond, past_maps
 
-    def _forward_binary_patch_refine(
+    def _prepare_binary_patch_refine(
         self,
         past: torch.Tensor,
         future: torch.Tensor,
@@ -1781,30 +1609,28 @@ class DiffusionTSF(nn.Module):
         *,
         expand_t_per_window: bool = False,
         patch_col0: Optional[torch.Tensor] = None,
-        variate_keep: Optional[torch.Tensor] = None,
-        loss_mode: str = "combined",
-    ) -> Dict[str, torch.Tensor]:
-        """Train boundary-centered 32x8 patches on absolute hi-res CDF crops."""
+        cross_variate_context: Optional[torch.Tensor] = None,
+        context_token_variate_ids: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        """Build the graph-free tensors shared by regular and anchor losses."""
         from .patch_refine import (
-            build_patch_aux_channels,
-            expand_ctx_for_patches,
-            expand_lookback_cond_for_patches,
-            expand_variate_indices_for_patches,
+            build_patch_aux_channels_layout,
+            expand_ctx_for_layout,
+            expand_lookback_cond_for_layout,
             naive_upscale_coarse_cdf,
         )
         from .patch_refine_geometry import (
+            PatchLayout,
             coarse_edges_from_cdf,
-            extract_patch_batch,
+            extract_patch_batch_layout,
+            patch_layout_for_fixed_col0,
             select_patch_locations,
         )
         from .patch_refine_segments import (
             compress_prev_refine_32_to_16,
-            extract_prev_refine_crops,
-            locations_for_fixed_col0,
+            extract_prev_refine_crops_layout,
         )
 
-        if loss_mode not in {"combined", "regular", "anchor"}:
-            raise ValueError(f"unknown patch-refine loss_mode={loss_mode!r}")
         assert self.binary_scheduler is not None
         B = past.shape[0]
         V = self.config.num_variables
@@ -1818,51 +1644,43 @@ class DiffusionTSF(nn.Module):
         hir_gt = self._encode_absolute_future_hir(future_norm, canvas_h)
         naive = naive_upscale_coarse_cdf(future_maps["coarse"], canvas_h)
         edges = coarse_edges_from_cdf(future_maps["coarse"], canvas_height=canvas_h)
-        keep = None
-        if variate_keep is not None:
-            keep = variate_keep.to(device=device, dtype=torch.bool)
-            if keep.shape != (B, V):
-                raise ValueError(
-                    f"variate_keep shape {tuple(keep.shape)} != batch/vars {(B, V)}"
-                )
-            if not bool(keep.any()):
-                raise RuntimeError("variate_keep is all-False for this batch")
         if unique:
             if patch_col0 is None:
-                # Synth / legacy loaders: one random stride-1 crop per window.
                 max_c0 = int(edges.shape[-1]) - patch_w
                 patch_col0 = torch.randint(0, max_c0 + 1, (B,), device=device)
             else:
                 patch_col0 = patch_col0.to(device=device, dtype=torch.long).view(B)
-            locations = locations_for_fixed_col0(
+            layout = patch_layout_for_fixed_col0(
                 edges,
                 patch_col0,
                 canvas_height=canvas_h,
                 patch_height=patch_h,
                 patch_width=patch_w,
                 hir_canvas=hir_gt,
-                variate_keep=keep,
             )
         else:
+            # Non-unique inference-compatible geometry still chooses coverage
+            # repairs with the legacy policy. Downstream crop/condition work is
+            # tensorized through PatchLayout, and the live canvas128 training
+            # path uses the fully vectorized unique-segment branch above.
             locations = select_patch_locations(
                 edges,
                 canvas_height=canvas_h,
                 patch_height=patch_h,
                 patch_width=patch_w,
                 col_stride=col_stride,
-                variate_keep=keep,
             )
-        if not locations:
-            raise RuntimeError("patch_refine produced zero training crops")
+            layout = PatchLayout.from_locations(locations, device=device)
 
-        target_patches = extract_patch_batch(
-            hir_gt, locations, patch_height=patch_h, patch_width=patch_w,
+        target_patches = extract_patch_batch_layout(
+            hir_gt, layout, patch_height=patch_h, patch_width=patch_w,
         )
-        # Full/empty crop columns have their GT transition outside this patch.
-        # Mask them so training does not turn out-of-view into a boundary cue.
         target_occupancy = target_patches.sum(dim=-2, keepdim=True)
         target_visible = (target_occupancy > 0) & (target_occupancy < patch_h)
         target_visible_mask = target_visible.expand_as(target_patches).to(target_patches.dtype)
+        # This is a data-validity guard, not layout validation: a fully
+        # saturated batch would otherwise make the masked BCE a silent zero
+        # loss update. Keep it before the denoiser/compiled region.
         if not bool(target_visible.any()):
             raise RuntimeError("patch_refine batch has no visible GT transitions")
         n_patches = target_patches.shape[0]
@@ -1871,14 +1689,10 @@ class DiffusionTSF(nn.Module):
         elif expand_t_per_window:
             if t.numel() != B:
                 raise ValueError(
-                    f"expand_t_per_window requires one timestep per window "
+                    "expand_t_per_window requires one timestep per window "
                     f"(got {t.numel()}, B={B})"
                 )
-            t = torch.tensor(
-                [int(t[loc.batch_index].item()) for loc in locations],
-                device=device,
-                dtype=torch.long,
-            )
+            t = t.to(device=device, dtype=torch.long).index_select(0, layout.batch_index)
         elif t.numel() != n_patches:
             raise ValueError(
                 f"timestep batch {t.numel()} incompatible with {n_patches} patches "
@@ -1887,14 +1701,13 @@ class DiffusionTSF(nn.Module):
 
         xt, zt = self.binary_scheduler.add_noise(target_patches, t)
         lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
-        cond = expand_lookback_cond_for_patches(lookback_cond, locations)
+        cond = expand_lookback_cond_for_layout(lookback_cond, layout)
 
         prev_refine_16 = None
         if unique:
-            # Prev GT in the previous primary's row frame (matches AR infer).
-            prev_32 = extract_prev_refine_crops(
+            prev_32 = extract_prev_refine_crops_layout(
                 hir_gt,
-                locations,
+                layout,
                 patch_height=patch_h,
                 patch_width=patch_w,
                 col_stride=col_stride,
@@ -1909,10 +1722,10 @@ class DiffusionTSF(nn.Module):
                     dtype=prev_refine_16.dtype
                 )
 
-        aux, patch_coarse_bin, patch_time0 = build_patch_aux_channels(
+        aux, patch_coarse_bin, patch_time0 = build_patch_aux_channels_layout(
             naive,
             edges,
-            locations,
+            layout,
             patch_height=patch_h,
             patch_width=patch_w,
             canvas_height=canvas_h,
@@ -1921,20 +1734,98 @@ class DiffusionTSF(nn.Module):
             prev_refine_16=prev_refine_16,
         )
 
-        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
-        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
-        ctx_patches = expand_ctx_for_patches(ctx_flat, locations)
-        variate_indices = expand_variate_indices_for_patches(locations, device)
+        ctx = self._resolve_cross_variate_context(
+            past, past_norm, cross_variate_context, context_token_variate_ids,
+        )
+        context_window_indices = None
+        if ctx is not None:
+            if self.training and self.config.cfg_dropout > 0.0:
+                # Per-crop CFG dropout needs genuinely distinct zero contexts.
+                # Preserve the legacy expanded path for this uncommon mode.
+                ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
+                ctx_for_patches = expand_ctx_for_layout(ctx_flat, layout)
+                drop = torch.rand(n_patches, device=device) < self.config.cfg_dropout
+                ctx_for_patches = torch.where(
+                    drop.view(n_patches, 1, 1),
+                    torch.zeros_like(ctx_for_patches),
+                    ctx_for_patches,
+                )
+            else:
+                ctx_for_patches = ctx
+                context_window_indices = layout.batch_index
+        else:
+            ctx_for_patches = None
 
-        base_cond = cond
+        return {
+            "target_patches": target_patches,
+            "target_visible": target_visible,
+            "target_visible_mask": target_visible_mask,
+            "t": t,
+            "xt": xt,
+            "zt": zt,
+            "cond": cond,
+            "aux": aux,
+            "ctx": ctx_for_patches,
+            "context_window_indices": context_window_indices,
+            "variate_indices": layout.variate_index,
+            "patch_coarse_bin": patch_coarse_bin,
+            "patch_time0": patch_time0,
+            "hir_gt": hir_gt,
+            "future_maps": future_maps,
+            "past_maps": past_maps,
+            "n_patches": n_patches,
+        }
 
-        if self.training and self.config.cfg_dropout > 0.0 and ctx_patches is not None:
-            drop = torch.rand(n_patches, device=device) < self.config.cfg_dropout
-            ctx_patches = torch.where(
-                drop.view(n_patches, 1, 1),
-                torch.zeros_like(ctx_patches),
-                ctx_patches,
-            )
+    def prepare_patch_refine_loss_inputs(
+        self,
+        past: torch.Tensor,
+        future: torch.Tensor,
+        *,
+        patch_col0: Optional[torch.Tensor] = None,
+        cross_variate_context: Optional[torch.Tensor] = None,
+        context_token_variate_ids: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        """Prepare one patch batch for separate regular/anchor backwards."""
+        if self.stage_strategy.name != "patch_refine":
+            raise RuntimeError("prepared patch losses are only valid for patch_refine")
+        if self._ar_training_enabled(future.shape[-1]):
+            past, future = self._sample_ar_training_chunk(past, future)
+        return self._prepare_binary_patch_refine(
+            past,
+            future,
+            patch_col0=patch_col0,
+            cross_variate_context=cross_variate_context,
+            context_token_variate_ids=context_token_variate_ids,
+        )
+
+    def patch_refine_loss_from_prepared(
+        self,
+        prepared: Dict[str, Any],
+        *,
+        loss_mode: str = "combined",
+        include_anchor: bool = True,
+        cross_variate_context: Optional[torch.Tensor] = None,
+        context_token_variate_ids: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Run one or both patch losses from a shared prepared patch batch."""
+        if loss_mode not in {"combined", "regular", "anchor"}:
+            raise ValueError(f"unknown patch-refine loss_mode={loss_mode!r}")
+
+        target_patches = prepared["target_patches"]
+        target_visible = prepared["target_visible"]
+        target_visible_mask = prepared["target_visible_mask"]
+        t = prepared["t"]
+        xt = prepared["xt"]
+        zt = prepared["zt"]
+        cond = prepared["cond"]
+        aux = prepared["aux"]
+        ctx = prepared["ctx"]
+        context_window_indices = prepared["context_window_indices"]
+        variate_indices = prepared["variate_indices"]
+        patch_coarse_bin = prepared["patch_coarse_bin"]
+        patch_time0 = prepared["patch_time0"]
+        n_patches = int(prepared["n_patches"])
+        device = target_patches.device
 
         regular_loss = torch.tensor(0.0, device=device)
         loss_x0 = torch.tensor(0.0, device=device)
@@ -1948,7 +1839,8 @@ class DiffusionTSF(nn.Module):
                 canvas,
                 t,
                 cond,
-                ctx_patches,
+                ctx,
+                context_window_indices=context_window_indices,
                 variate_indices=variate_indices,
                 token_variate_ids=self._ctx_token_variate_ids,
                 patch_coarse_bin=patch_coarse_bin,
@@ -1971,8 +1863,17 @@ class DiffusionTSF(nn.Module):
 
         anchor_loss = torch.tensor(0.0, device=device)
         combined_loss = regular_loss if loss_mode != "anchor" else anchor_loss
-        if loss_mode != "regular" and self.config.use_deterministic_anchor_loss:
-            anchor_t = torch.full((n_patches,), self.config.binary_num_steps - 1, device=device, dtype=t.dtype)
+        if (
+            include_anchor
+            and loss_mode != "regular"
+            and self.config.use_deterministic_anchor_loss
+        ):
+            anchor_t = torch.full(
+                (n_patches,),
+                self.config.binary_num_steps - 1,
+                device=device,
+                dtype=t.dtype,
+            )
             neutral = self._binary_anchor_canvas_like(target_patches)
             anchor_canvas = self._inject_coordinate_channel(neutral)
             anchor_canvas = self._inject_time_channels(anchor_canvas)
@@ -1980,8 +1881,9 @@ class DiffusionTSF(nn.Module):
             anchor_out = self._predict_noise_chunked(
                 anchor_canvas,
                 anchor_t,
-                base_cond,
-                ctx_patches,
+                cond,
+                ctx,
+                context_window_indices=context_window_indices,
                 variate_indices=variate_indices,
                 token_variate_ids=self._ctx_token_variate_ids,
                 patch_coarse_bin=patch_coarse_bin,
@@ -2013,16 +1915,45 @@ class DiffusionTSF(nn.Module):
             "guidance_loss": torch.tensor(0.0, device=device),
             "noise_pred": x0_pred,
             "x0_pred": x0_pred,
-            "future_2d": hir_gt,
-            "future_2d_coarse": future_maps["coarse"],
-            "future_2d_fine": future_maps["fine"],
-            "past_2d_coarse": past_maps["coarse"],
-            "past_2d_fine": past_maps["fine"],
+            "future_2d": prepared["hir_gt"],
+            "future_2d_coarse": prepared["future_maps"]["coarse"],
+            "future_2d_fine": prepared["future_maps"]["fine"],
+            "past_2d_coarse": prepared["past_maps"]["coarse"],
+            "past_2d_fine": prepared["past_maps"]["fine"],
             "t": t,
             "diffusion_stage": "patch_refine",
             "n_patches": torch.tensor(float(n_patches), device=device),
             "patch_visible_column_fraction": target_visible.float().mean(),
         }
+
+    def _forward_binary_patch_refine(
+        self,
+        past: torch.Tensor,
+        future: torch.Tensor,
+        t: Optional[torch.Tensor] = None,
+        *,
+        expand_t_per_window: bool = False,
+        patch_col0: Optional[torch.Tensor] = None,
+        loss_mode: str = "combined",
+        include_anchor: bool = True,
+        cross_variate_context: Optional[torch.Tensor] = None,
+        context_token_variate_ids: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Train boundary-centered 32x8 patches on absolute hi-res CDF crops."""
+        prepared = self._prepare_binary_patch_refine(
+            past,
+            future,
+            t=t,
+            expand_t_per_window=expand_t_per_window,
+            patch_col0=patch_col0,
+            cross_variate_context=cross_variate_context,
+            context_token_variate_ids=context_token_variate_ids,
+        )
+        return self.patch_refine_loss_from_prepared(
+            prepared,
+            loss_mode=loss_mode,
+            include_anchor=include_anchor,
+        )
 
     @torch.no_grad()
     def _generate_binary_patch_refine(
@@ -2041,16 +1972,21 @@ class DiffusionTSF(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """Refine a hi-res CDF scaffold with boundary patches, then decode."""
         from .patch_refine import (
-            build_patch_aux_channels,
-            expand_ctx_for_patches,
-            expand_lookback_cond_for_patches,
-            expand_variate_indices_for_patches,
+            build_patch_aux_channels_layout,
+            expand_lookback_cond_for_layout,
             naive_upscale_coarse_cdf,
         )
         from .patch_refine_geometry import (
-            blend_patch_bins,
+            PatchLayout,
+            blend_patch_bins_layout,
             coarse_edges_from_cdf,
+            patch_layout_for_fixed_col0,
+            primary_stride_col0s,
             select_patch_locations,
+        )
+        from .patch_refine_segments import (
+            compress_prev_refine_32_to_16,
+            coverage_gap_layout,
         )
 
         assert self.binary_scheduler is not None
@@ -2078,19 +2014,16 @@ class DiffusionTSF(nn.Module):
         unique = bool(getattr(self.config, "patch_refine_unique_segments", False))
         lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
         ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
-        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
 
-        def _sample_locations(
-            locs: List,
+        def _sample_layout(
+            layout: PatchLayout,
             prev_refine_16: Optional[torch.Tensor],
         ) -> torch.Tensor:
-            if not locs:
-                return torch.zeros(0, 1, patch_h, patch_w, device=device)
-            cond_l = expand_lookback_cond_for_patches(lookback_cond, locs)
-            aux_l, patch_coarse_bin_l, patch_time0_l = build_patch_aux_channels(
+            cond_l = expand_lookback_cond_for_layout(lookback_cond, layout)
+            aux_l, patch_coarse_bin_l, patch_time0_l = build_patch_aux_channels_layout(
                 naive,
                 edges,
-                locs,
+                layout,
                 patch_height=patch_h,
                 patch_width=patch_w,
                 canvas_height=canvas_h,
@@ -2098,9 +2031,8 @@ class DiffusionTSF(nn.Module):
                 horizon_width=W_fut,
                 prev_refine_16=prev_refine_16,
             )
-            ctx_l = expand_ctx_for_patches(ctx_flat, locs)
-            var_l = expand_variate_indices_for_patches(locs, device)
-            n_l = len(locs)
+            context_window_indices_l = layout.batch_index if ctx is not None else None
+            n_l = layout.n_patches
 
             def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
                 canvas = self._inject_coordinate_channel(xt)
@@ -2112,8 +2044,9 @@ class DiffusionTSF(nn.Module):
                     _build_canvas(xt),
                     t_batch,
                     cond_l,
-                    ctx_l,
-                    variate_indices=var_l,
+                    ctx,
+                    context_window_indices=context_window_indices_l,
+                    variate_indices=layout.variate_index,
                     token_variate_ids=self._ctx_token_variate_ids,
                     patch_coarse_bin=patch_coarse_bin_l,
                     patch_time0=patch_time0_l,
@@ -2145,62 +2078,38 @@ class DiffusionTSF(nn.Module):
             )
 
         if unique:
-            from .patch_refine_segments import (
-                compress_prev_refine_32_to_16,
-                group_locations_by_col0,
-                select_coverage_gap_locations,
-                select_primary_ar_locations,
-            )
-            # AR is the main predictor: unique stride-6 col0 chain, then
-            # blanked-prev fills only where primary coverage is incomplete.
-            primary_locs = select_primary_ar_locations(
+            # AR along the stride grid, then blanked-prev fills for leftover gaps.
+            primary_layouts = []
+            primary_preds = []
+            prev_16 = torch.zeros(B * V, 1, 16, patch_w, device=device)
+            for col0 in primary_stride_col0s(int(edges.shape[-1]), patch_w, col_stride):
+                layout = patch_layout_for_fixed_col0(
+                    edges,
+                    torch.full((B,), col0, device=device, dtype=torch.long),
+                    canvas_height=canvas_h,
+                    patch_height=patch_h,
+                    patch_width=patch_w,
+                )
+                pred = _sample_layout(layout, prev_16)
+                primary_layouts.append(layout)
+                primary_preds.append(pred)
+                prev_16 = compress_prev_refine_32_to_16(pred)
+            layout = PatchLayout.cat(primary_layouts)
+            patch_cdf = torch.cat(primary_preds, dim=0)
+            gap_layout = coverage_gap_layout(
                 edges,
-                canvas_height=canvas_h,
-                patch_height=patch_h,
-                patch_width=patch_w,
-                col_stride=col_stride,
-            )
-            last_pred: Dict[Tuple[int, int], torch.Tensor] = {}
-            primary_pred_by_key: Dict[Tuple[int, int, int, int], torch.Tensor] = {}
-            for _col0, col_locs in group_locations_by_col0(primary_locs):
-                # Batch all (B,V) at this col0 together.
-                prev_chunks = []
-                for loc in col_locs:
-                    key = (loc.batch_index, loc.variate_index)
-                    if key in last_pred:
-                        prev_chunks.append(
-                            compress_prev_refine_32_to_16(last_pred[key].unsqueeze(0))
-                        )
-                    else:
-                        prev_chunks.append(
-                            torch.zeros(1, 1, 16, patch_w, device=device)
-                        )
-                prev_16 = torch.cat(prev_chunks, dim=0)
-                pred = _sample_locations(col_locs, prev_16)
-                for j, loc in enumerate(col_locs):
-                    last_pred[(loc.batch_index, loc.variate_index)] = pred[j]
-                    primary_pred_by_key[
-                        (loc.batch_index, loc.variate_index, loc.col0, loc.row0)
-                    ] = pred[j]
-
-            gap_locs = select_coverage_gap_locations(
-                edges,
-                primary_locs,
+                layout,
                 canvas_height=canvas_h,
                 patch_height=patch_h,
                 patch_width=patch_w,
             )
-            locations = list(primary_locs) + list(gap_locs)
-            n_patches = len(locations)
-            patch_cdf = torch.zeros(n_patches, 1, patch_h, patch_w, device=device)
-            for i, loc in enumerate(primary_locs):
-                patch_cdf[i] = primary_pred_by_key[
-                    (loc.batch_index, loc.variate_index, loc.col0, loc.row0)
-                ]
-            if gap_locs:
-                gap_prev = torch.zeros(len(gap_locs), 1, 16, patch_w, device=device)
-                gap_pred = _sample_locations(gap_locs, gap_prev)
-                patch_cdf[len(primary_locs) :] = gap_pred
+            if gap_layout is not None:
+                gap_prev = torch.zeros(
+                    gap_layout.n_patches, 1, 16, patch_w, device=device,
+                )
+                gap_pred = _sample_layout(gap_layout, gap_prev)
+                layout = PatchLayout.cat([layout, gap_layout])
+                patch_cdf = torch.cat([patch_cdf, gap_pred], dim=0)
         else:
             locations = select_patch_locations(
                 edges,
@@ -2209,72 +2118,18 @@ class DiffusionTSF(nn.Module):
                 patch_width=patch_w,
                 col_stride=col_stride,
             )
-            n_patches = len(locations)
-            cond = expand_lookback_cond_for_patches(lookback_cond, locations)
-            aux, patch_coarse_bin, patch_time0 = build_patch_aux_channels(
-                naive,
-                edges,
-                locations,
-                patch_height=patch_h,
-                patch_width=patch_w,
-                canvas_height=canvas_h,
-                coarse_height=coarse_h,
-                horizon_width=W_fut,
-            )
-            ctx_patches = expand_ctx_for_patches(ctx_flat, locations)
-            variate_indices = expand_variate_indices_for_patches(locations, device)
+            layout = PatchLayout.from_locations(locations, device=device)
+            patch_cdf = _sample_layout(layout, None)
 
-            def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
-                canvas = self._inject_coordinate_channel(xt)
-                canvas = self._inject_time_channels(canvas)
-                return torch.cat([canvas, aux], dim=1)
-
-            def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
-                out = self._predict_noise_chunked(
-                    _build_canvas(xt),
-                    t_batch,
-                    cond,
-                    ctx_patches,
-                    variate_indices=variate_indices,
-                    token_variate_ids=self._ctx_token_variate_ids,
-                    patch_coarse_bin=patch_coarse_bin,
-                    patch_time0=patch_time0,
-                )
-                primary, zt = self._split_binary_heads(out)
-                x0_logits = self._x0_logits_from_prediction(primary, xt)
-                return x0_logits, zt
-
-            sample_shape = (n_patches, 1, patch_h, patch_w)
-            if sampler in ("anchor", "deterministic_anchor"):
-                t_batch = torch.full(
-                    (n_patches,),
-                    self.config.binary_num_steps - 1,
-                    device=device,
-                    dtype=torch.long,
-                )
-                neutral = self._binary_anchor_canvas_shape(sample_shape, device=device)
-                x0_logits, _ = _chunked_model_fn(neutral, t_batch)
-                patch_cdf = (torch.sigmoid(x0_logits) > 0.5).float()
-            else:
-                patch_cdf = self.binary_scheduler.sample(
-                    model_fn=_chunked_model_fn,
-                    shape=sample_shape,
-                    num_steps=num_steps,
-                    device=device,
-                    verbose=verbose,
-                    sampler=sampler,
-                    reverse_step_indices=reverse_step_indices,
-                    snapshot_timesteps=snapshot_timesteps,
-                )
-
-        hir_cdf, patch_vote_counts = blend_patch_bins(
+        hir_cdf, patch_vote_counts = blend_patch_bins_layout(
             patch_cdf,
-            locations,
+            layout,
             edges,
             canvas_height=canvas_h,
             patch_height=patch_h,
             patch_width=patch_w,
         )
+        locations = layout.to_locations()
         future_norm = self._decode_absolute_future_hir(hir_cdf)
         future_with_overlap = self._denormalize_future(
             future_norm, past, stats, trim_overlap=False,
@@ -2297,10 +2152,6 @@ class DiffusionTSF(nn.Module):
             "patch_vote_counts": patch_vote_counts,
             "diffusion_stage": "patch_refine",
         }
-        if bool(kwargs.get("emit_guidance_prediction", False)):
-            out.update(
-                self._guidance_prediction_fields(past, past_norm, stats, W_fut)
-            )
         return out
 
     def _forward_binary_coarse(
@@ -2308,6 +2159,10 @@ class DiffusionTSF(nn.Module):
         past: torch.Tensor,
         future: torch.Tensor,
         t: Optional[torch.Tensor] = None,
+        *,
+        include_anchor: bool = True,
+        cross_variate_context: Optional[torch.Tensor] = None,
+        context_token_variate_ids: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Train the coarse staged denoiser (patch_refine has its own forward)."""
         assert self.binary_scheduler is not None, "binary scheduler is not initialized"
@@ -2335,28 +2190,12 @@ class DiffusionTSF(nn.Module):
 
         xt_flat, zt_flat = self.binary_scheduler.add_noise(target_flat, t_flat)
 
-        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
+        ctx = self._resolve_cross_variate_context(
+            past, past_norm, cross_variate_context, context_token_variate_ids,
+        )
         ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
 
         cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
-
-        guidance_flat = None
-        n_guidance_cond_ch = 0
-        if self.config.use_guidance_channel:
-            raw_hz_w = int(future_norm.shape[-1])
-            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, _stats, raw_hz_w)
-            if self._uses_canvas_guidance():
-                guidance_maps = self._encode_staged_maps(guidance_forecast_norm)
-                guidance_flat = self._resize_cdf_height(
-                    guidance_maps["coarse"], H,
-                ).reshape(BV, 1, H, W_fut)
-            elif self._uses_cond_chunk_guidance():
-                guidance_cond = self._encode_guidance_cond_chunks(
-                    guidance_forecast_norm, H, BV,
-                )
-                n_guidance_cond_ch = int(guidance_cond.shape[1])
-                guidance_cond = self._align_guidance_cond_width(guidance_cond, cond_for_unet.shape[-1])
-                cond_for_unet = torch.cat([cond_for_unet, guidance_cond], dim=1)
 
         base_cond_for_unet = cond_for_unet
 
@@ -2375,19 +2214,6 @@ class DiffusionTSF(nn.Module):
                     torch.zeros_like(ctx_flat),
                     ctx_flat,
                 )
-            if guidance_flat is not None:
-                guidance_for_unet = torch.where(
-                    drop_mask_flat.view(BV, 1, 1, 1),
-                    torch.zeros_like(guidance_flat),
-                    guidance_flat,
-                )
-                canvas = torch.cat([canvas, guidance_for_unet], dim=1)
-            elif n_guidance_cond_ch > 0:
-                cond_for_unet = self._zero_guidance_cond_tail(
-                    cond_for_unet, n_guidance_cond_ch, drop_mask_flat,
-                )
-        elif guidance_flat is not None:
-            canvas = torch.cat([canvas, guidance_flat], dim=1)
 
         out_flat = self._predict_noise_chunked(
             canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
@@ -2403,7 +2229,7 @@ class DiffusionTSF(nn.Module):
 
         anchor_loss = torch.tensor(0.0, device=device)
         combined_loss = regular_loss
-        if self.config.use_deterministic_anchor_loss:
+        if include_anchor and self.config.use_deterministic_anchor_loss:
             anchor_t_flat = torch.full(
                 (BV,),
                 self.config.binary_num_steps - 1,
@@ -2413,8 +2239,6 @@ class DiffusionTSF(nn.Module):
             neutral_future_flat = self._binary_anchor_canvas_like(target_flat)
             anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
             anchor_canvas = self._inject_time_channels(anchor_canvas)
-            if guidance_flat is not None:
-                anchor_canvas = torch.cat([anchor_canvas, guidance_flat], dim=1)
             anchor_out_flat = self._predict_noise_chunked(
                 anchor_canvas,
                 anchor_t_flat,
@@ -2489,13 +2313,6 @@ class DiffusionTSF(nn.Module):
         target_flat = target_2d.reshape(BV, 1, H, W_fut)
 
         cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
-        guidance_norm = None
-        guidance_maps = None
-        if self.config.use_guidance_channel:
-            guidance_norm = self._get_guidance_forecast_norm(
-                past, past_norm, norm_stats, int(future_norm.shape[-1]),
-            )
-            guidance_maps = self._encode_staged_maps(guidance_norm)
 
         t = torch.zeros(B, device=device, dtype=torch.long)
         t_flat = t.unsqueeze(1).expand(-1, V).reshape(BV)
@@ -2509,21 +2326,6 @@ class DiffusionTSF(nn.Module):
         xt_flat, _ = self.binary_scheduler.add_noise(target_flat, t_flat)
         canvas = self._inject_coordinate_channel(xt_flat)
         canvas = self._inject_time_channels(canvas)
-
-        if self.config.use_guidance_channel and guidance_norm is not None:
-            if self._uses_canvas_guidance():
-                guidance_flat = self._resize_cdf_height(
-                    guidance_maps["coarse"], H,
-                ).reshape(BV, 1, H, W_fut)
-                canvas = torch.cat([canvas, guidance_flat], dim=1)
-            elif self._uses_cond_chunk_guidance():
-                guidance_cond = self._encode_guidance_cond_chunks(
-                    guidance_norm, H, BV,
-                )
-                guidance_cond = self._align_guidance_cond_width(
-                    guidance_cond, cond_for_unet.shape[-1],
-                )
-                cond_for_unet = torch.cat([cond_for_unet, guidance_cond], dim=1)
 
         base_cond = cond_for_unet
         self._predict_noise_chunked(
@@ -2539,8 +2341,6 @@ class DiffusionTSF(nn.Module):
             "norm_stats": norm_stats,
             "cond_for_unet": cond_for_unet,
             "past_maps": past_maps,
-            "guidance_norm": guidance_norm,
-            "guidance_maps": guidance_maps,
             "cross_attn_weights": cross_attn_weights,
             "future_maps": future_maps,
         }
@@ -2557,21 +2357,12 @@ class DiffusionTSF(nn.Module):
         del capture_cross_attn  # Cross-attention is evaluated per selected patch.
         past_norm, future_norm, norm_stats = self._normalize_sequence(past, future)
         cond_for_unet, past_maps = self._patch_refine_lookback_cond(past_norm)
-        guidance_norm = None
-        guidance_maps = None
-        if self.config.use_guidance_channel:
-            guidance_norm = self._get_guidance_forecast_norm(
-                past, past_norm, norm_stats, int(future_norm.shape[-1]),
-            )
-            guidance_maps = self._encode_staged_maps(guidance_norm)
         return {
             "past_norm": past_norm,
             "future_norm": future_norm,
             "norm_stats": norm_stats,
             "cond_for_unet": cond_for_unet,
             "past_maps": past_maps,
-            "guidance_norm": guidance_norm,
-            "guidance_maps": guidance_maps,
             "cross_attn_weights": None,
             "future_maps": self._encode_staged_maps(future_norm),
         }
@@ -2613,28 +2404,9 @@ class DiffusionTSF(nn.Module):
         if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
             variate_indices = self._flat_variate_indices(BV, V, device)
 
-        guidance_flat = None
-        if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, raw_hz_w)
-            if self._uses_canvas_guidance():
-                guidance_maps = self._encode_staged_maps(guidance_forecast_norm)
-                guidance_flat = self._resize_cdf_height(
-                    guidance_maps["coarse"], H,
-                ).reshape(BV, 1, H, W_fut)
-            elif self._uses_cond_chunk_guidance():
-                guidance_cond = self._encode_guidance_cond_chunks(
-                    guidance_forecast_norm, H, BV,
-                )
-                guidance_cond = self._align_guidance_cond_width(
-                    guidance_cond, cond_for_unet.shape[-1],
-                )
-                cond_for_unet = torch.cat([cond_for_unet, guidance_cond], dim=1)
-
         def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
             canvas = self._inject_coordinate_channel(xt)
             canvas = self._inject_time_channels(canvas)
-            if guidance_flat is not None:
-                canvas = torch.cat([canvas, guidance_flat], dim=1)
             return canvas
 
         def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
@@ -2708,10 +2480,6 @@ class DiffusionTSF(nn.Module):
             'past_2d_fine': past_maps["fine"],
             'diffusion_stage': self.stage_strategy.name,
         }
-        if bool(kwargs.get("emit_guidance_prediction", False)):
-            result.update(
-                self._guidance_prediction_fields(past, past_norm, stats, W_fut)
-            )
         if intermediates is not None:
             reshaped_intermediates = []
             for (t_idx, i_tensor) in intermediates:
@@ -2757,25 +2525,6 @@ class DiffusionTSF(nn.Module):
             cond_for_unet = past_flat
         cond_for_unet = self._apply_coarse_dropout(cond_for_unet)
 
-        guidance_2d_flat = None
-        n_guidance_cond_ch = 0
-        if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(
-                past, past_norm, stats, int(future_norm.shape[-1]),
-            )
-            if self._uses_canvas_guidance():
-                guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
-                guidance_2d_flat = guidance_2d.reshape(BV, 1, H, W_fut)
-            elif self._uses_cond_chunk_guidance():
-                guidance_cond = self._encode_guidance_cond_chunks_joint(
-                    guidance_forecast_norm, H, BV,
-                )
-                n_guidance_cond_ch = int(guidance_cond.shape[1])
-                guidance_cond = self._align_guidance_cond_width(
-                    guidance_cond, cond_for_unet.shape[-1],
-                )
-                cond_for_unet = torch.cat([cond_for_unet, guidance_cond], dim=1)
-
         base_cond_for_unet = cond_for_unet
 
         ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
@@ -2788,16 +2537,11 @@ class DiffusionTSF(nn.Module):
         if self.training and self.config.cfg_dropout > 0.0:
             drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
             drop_mask_flat = drop_mask.unsqueeze(1).expand(-1, V).reshape(BV)
-            if n_guidance_cond_ch > 0:
-                cond_for_unet = self._zero_guidance_cond_tail(
-                    cond_for_unet, n_guidance_cond_ch, drop_mask_flat,
-                )
-            else:
-                cond_for_unet = torch.where(
-                    drop_mask_flat.view(BV, 1, 1, 1),
-                    torch.zeros_like(cond_for_unet),
-                    cond_for_unet,
-                )
+            cond_for_unet = torch.where(
+                drop_mask_flat.view(BV, 1, 1, 1),
+                torch.zeros_like(cond_for_unet),
+                cond_for_unet,
+            )
             if ctx_flat is not None:
                 ctx_flat = torch.where(
                     drop_mask_flat.view(BV, 1, 1),
@@ -2805,15 +2549,6 @@ class DiffusionTSF(nn.Module):
                     ctx_flat,
                 )
 
-            if guidance_2d_flat is not None:
-                guide_flat = torch.where(
-                    drop_mask_flat.view(BV, 1, 1, 1),
-                    torch.zeros_like(guidance_2d_flat),
-                    guidance_2d_flat,
-                )
-                canvas = torch.cat([canvas, guide_flat], dim=1)
-        elif guidance_2d_flat is not None:
-            canvas = torch.cat([canvas, guidance_2d_flat], dim=1)
 
         out_flat = self._predict_noise_chunked(
             canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
@@ -2837,8 +2572,6 @@ class DiffusionTSF(nn.Module):
             neutral_future_flat = self._binary_anchor_canvas_like(future_flat)
             anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
             anchor_canvas = self._inject_time_channels(anchor_canvas)
-            if guidance_2d_flat is not None:
-                anchor_canvas = torch.cat([anchor_canvas, guidance_2d_flat], dim=1)
             anchor_out_flat = self._predict_noise_chunked(
                 anchor_canvas,
                 anchor_t_flat,
@@ -2899,37 +2632,19 @@ class DiffusionTSF(nn.Module):
         else:
             cond_for_unet = past_flat
 
-        guidance_2d = None
-        guide_flat = None
-        if self.config.use_guidance_channel:
-            guidance_forecast_norm = self._get_guidance_forecast_norm(past, past_norm, stats, raw_hz_w)
-            if self._uses_canvas_guidance():
-                guidance_2d = self.encode_to_2d_binary(guidance_forecast_norm)
-                guide_flat = guidance_2d.reshape(BV, 1, H, W_fut)
-            elif self._uses_cond_chunk_guidance():
-                guidance_cond = self._encode_guidance_cond_chunks_joint(
-                    guidance_forecast_norm, H, BV,
-                )
-                guidance_cond = self._align_guidance_cond_width(
-                    guidance_cond, cond_for_unet.shape[-1],
-                )
-                cond_for_unet = torch.cat([cond_for_unet, guidance_cond], dim=1)
-
         ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
         ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
         variate_indices = None
         if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
             variate_indices = self._flat_variate_indices(BV, V, device)
 
-        def _build_canvas(xt: torch.Tensor, guide: Optional[torch.Tensor] = None) -> torch.Tensor:
+        def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
             canvas = self._inject_coordinate_channel(xt)
             canvas = self._inject_time_channels(canvas)
-            if guide is not None:
-                canvas = torch.cat([canvas, guide], dim=1)
             return canvas
 
         def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
-            canvas = _build_canvas(xt, guide_flat)
+            canvas = _build_canvas(xt)
             out = self._predict_noise_chunked(
                 canvas, t_batch, cond_for_unet, ctx_flat, variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             )
@@ -2987,8 +2702,6 @@ class DiffusionTSF(nn.Module):
             'future_2d': future_2d,
             'past_2d': past_2d,
         }
-        if guidance_2d is not None:
-            result['guidance_2d'] = guidance_2d
         if intermediates is not None:
             # Reshape intermediate lists from (BV, ...) to (B, V, ...)
             reshaped_intermediates = []
@@ -3004,8 +2717,10 @@ class DiffusionTSF(nn.Module):
         future: torch.Tensor,
         *,
         patch_col0: Optional[torch.Tensor] = None,
-        variate_keep: Optional[torch.Tensor] = None,
         loss_mode: str = "combined",
+        include_anchor: bool = True,
+        cross_variate_context: Optional[torch.Tensor] = None,
+        context_token_variate_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Convenience method to get just the loss for training."""
         if self._ar_training_enabled(future.shape[-1]):
@@ -3014,7 +2729,9 @@ class DiffusionTSF(nn.Module):
             past,
             future,
             patch_col0=patch_col0,
-            variate_keep=variate_keep,
             loss_mode=loss_mode,
+            include_anchor=include_anchor,
+            cross_variate_context=cross_variate_context,
+            context_token_variate_ids=context_token_variate_ids,
         )
         return outputs['loss']

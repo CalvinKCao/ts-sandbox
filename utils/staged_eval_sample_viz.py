@@ -331,16 +331,6 @@ def write_staged_sample_panels(
         past_np = past[0].detach().cpu().numpy().astype(np.float32)
         gt_np = gt.detach().cpu().numpy().astype(np.float32)
         pred_np = pred.detach().cpu().numpy().astype(np.float32)
-        if "guidance_prediction_global_norm" not in result:
-            raise RuntimeError(
-                f"{run_name}: missing guidance_prediction_global_norm from "
-                "generate_staged_forecast (need patch-guidance overlay on redbox 1d)"
-            )
-        guide_t = result["guidance_prediction_global_norm"][0]
-        if guide_t.shape != pred.shape:
-            h = min(int(guide_t.shape[-1]), int(pred.shape[-1]))
-            guide_t = guide_t[..., -h:]
-        guide_np = guide_t.detach().cpu().numpy().astype(np.float32)
         coarse_2d = result["future_2d_coarse"][0].detach().cpu().numpy().astype(np.float32)
         second_2d = result["future_2d_fine"][0].detach().cpu().numpy().astype(np.float32)
 
@@ -350,10 +340,10 @@ def write_staged_sample_panels(
             past=past_np,
             gt=gt_np,
             pred=pred_np,
-            guidance=guide_np,
+            guidance=None,
             title=(
                 f"{run_name}/{dataset} pool={pool_i} kind={kind} sampler={sampler} "
-                f"(GT + refine + guidance)"
+                f"(GT + refine)"
             ),
             n_vars=n_plot,
             dpi=jpeg_dpi,

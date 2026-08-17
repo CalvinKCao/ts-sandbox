@@ -33,6 +33,7 @@ training:
   finetune_hp_lr_max: 0.0002
   use_amp: true
   use_gradient_checkpointing: true
+  torch_compile: true
   unet_max_chunk_size: 128
   sequential_anchor_backward: false
   eval_num_samples: 30
@@ -131,8 +132,6 @@ experiment:
   dit_dropout: 0.0
   use_patch_refine_stage: true
   diffusion_stage: coarse
-  use_guidance_channel: false
-  guidance_placement: canvas
   cfg_dropout: 0.0
   deterministic_anchor_loss: true
   deterministic_anchor_lambda: 0.99
@@ -142,7 +141,6 @@ experiment:
   cross_variate_context_bias: 0.0
   use_window_normalization: true
   # window_norm_center: mean | last — subtract lookback mean (default) or last value before /std
-  zero_guidance_forecast: false
   lookback_length: 96
   forecast_length: 96
   lookback_overlap: 8

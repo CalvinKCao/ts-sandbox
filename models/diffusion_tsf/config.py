@@ -124,7 +124,6 @@ class DiffusionTSFConfig:
     hybrid_flat_oob_coverage: float = 0.99
     # Shift window center at decode so overlap preds align with past tail (quantization fix).
     lookback_overlap_center_shift: bool = False
-    zero_guidance_forecast: bool = False
     prediction_target: str = "x0"  # x0 or epsilon (bit-flip mask)
     loss_weighting: str = "none"  # none or min_snr
     min_snr_gamma: float = 5.0
@@ -154,9 +153,7 @@ class DiffusionTSFConfig:
     # Extra visual cond: coarse CDF of lookback tail in dataset z-score space.
     use_raw_lookback_cond_channel: bool = False
 
-    # Stage 1 guidance (ghost image + encoder tokens)
-    use_guidance_channel: bool = True
-    guidance_placement: str = "canvas"  # canvas | cond_chunks
+    # Frozen patch-decoder encoder tokens for bottleneck cross-attention.
     context_embedding_dim: int = 256
     guidance_type: str = "itransformer"  # itransformer | patch_decoder
     mmpd_patch_size: int = 12
@@ -271,11 +268,6 @@ class DiffusionTSFConfig:
             raise ValueError("variate_factorized=False is no longer supported.")
         if self.model_type != "dit":
             raise ValueError(f"model_type must be 'dit', got {self.model_type!r}")
-        if self.guidance_placement not in {"canvas", "cond_chunks"}:
-            raise ValueError(
-                "guidance_placement must be 'canvas' or 'cond_chunks', "
-                f"got {self.guidance_placement!r}."
-            )
 
     @property
     def data_occupancy_channels(self) -> int:
@@ -319,58 +311,15 @@ class DiffusionTSFConfig:
         return (
             self.data_occupancy_channels
             + self.num_aux_channels
-            + self.guidance_channels
             + patch_refine_extra
         )
-
-    @property
-    def guidance_core_len(self) -> int:
-        if int(self.dataset_forecast_length or 0) > 0:
-            return int(self.dataset_forecast_length)
-        return max(1, int(self.forecast_length) - int(self.lookback_overlap))
-
-    @property
-    def guidance_cond_chunk_width(self) -> int:
-        cap = int(self.diffusion_lookback_cap or 0)
-        if cap > 0:
-            return cap
-        return int(self.lookback_length)
-
-    @property
-    def guidance_cond_n_chunks(self) -> int:
-        if not self.use_guidance_channel or self.guidance_placement != "cond_chunks":
-            return 0
-        chunk_w = int(self.guidance_cond_chunk_width)
-        if chunk_w <= 0:
-            return 0
-        return int(math.ceil(self.guidance_core_len / chunk_w))
-
-    @property
-    def guidance_cond_channels(self) -> int:
-        n_chunks = int(self.guidance_cond_n_chunks)
-        if n_chunks <= 0:
-            return 0
-        return n_chunks
 
     @property
     def visual_cond_channels(self) -> int:
         per_scale = 1 + (1 if self.use_value_channel else 0)
         raw_extra = 1 if self.use_raw_lookback_cond_channel else 0
-        guidance_extra = self.guidance_cond_channels
         if self.diffusion_stage == "patch_refine":
             return 1
         if self.diffusion_stage == "coarse":
-            return per_scale * 2 + raw_extra + guidance_extra
+            return per_scale * 2 + raw_extra
         raise ValueError(f"unsupported diffusion_stage={self.diffusion_stage!r}")
-
-    @property
-    def guidance_channels(self) -> int:
-        if not self.use_guidance_channel:
-            return 0
-        if self.guidance_placement == "cond_chunks":
-            return 0
-        # Patch-refine forward never cats a canvas ghost (aux already carries
-        # coarse/prev); sizing +1 here would expect 6ch while runtime builds 5.
-        if self.diffusion_stage == "patch_refine":
-            return 0
-        return self.data_occupancy_channels

@@ -87,10 +87,13 @@ class DiffusionTrainer:
         clip_grad: Optional[float] = 1.0,
         scheduler=None,
         ema_decay: float = 0.0,
-        unpack_batch: Optional[Callable[[Any], Tuple[torch.Tensor, torch.Tensor, Any, Any]]] = None,
+        unpack_batch: Optional[Callable[[Any], Tuple[torch.Tensor, torch.Tensor, Any]]] = None,
         set_loader_mode: Optional[Callable] = None,
         set_training_epoch: Optional[Callable[[DataLoader, int], None]] = None,
         sequential_anchor_backward: bool = False,
+        deterministic_anchor_every_n_batches: int = 1,
+        train_token_cache=None,
+        val_token_cache=None,
         log_prefix: str = "diffusion",
     ) -> None:
         self.model = model
@@ -106,45 +109,69 @@ class DiffusionTrainer:
         self.set_loader_mode = set_loader_mode
         self.set_training_epoch = set_training_epoch
         self.sequential_anchor_backward = bool(sequential_anchor_backward)
+        self.deterministic_anchor_every_n_batches = int(deterministic_anchor_every_n_batches)
+        self.train_token_cache = train_token_cache
+        self.val_token_cache = val_token_cache
+        if self.deterministic_anchor_every_n_batches < 1:
+            raise ValueError("deterministic_anchor_every_n_batches must be >= 1")
         self.log_prefix = log_prefix
 
     @staticmethod
     def _unpack_standard_batch(batch):
         past, future = batch
-        return past, future, None, None
+        return past, future, None
 
     def _inputs_from_batch(self, batch):
-        past, future, patch_col0, variate_keep = self.unpack_batch(batch)
+        past, future, patch_col0 = self.unpack_batch(batch)
+        cache_key_past = past
         past = past.to(self.device)
         future = future.to(self.device)
         if patch_col0 is not None:
             patch_col0 = patch_col0.to(self.device)
-        if variate_keep is not None:
-            variate_keep = variate_keep.to(self.device)
-        return past, future, patch_col0, variate_keep
+        return past, future, patch_col0, cache_key_past
 
     def _loss_from_inputs(
         self,
         inputs,
         *,
         loss_mode: str = "combined",
+        include_anchor: bool = True,
         scale_for_accumulation: bool,
+        token_cache=None,
     ) -> torch.Tensor:
-        past, future, patch_col0, variate_keep = inputs
+        past, future, patch_col0, cache_key_past = inputs
+        cached = token_cache.get(cache_key_past) if token_cache is not None else None
         with amp_context(bool(self.model.config.use_amp)):
             loss = self.model.get_loss(
                 past,
                 future,
                 patch_col0=patch_col0,
-                variate_keep=variate_keep,
                 loss_mode=loss_mode,
+                include_anchor=include_anchor,
+                cross_variate_context=None if cached is None else cached.tokens,
+                context_token_variate_ids=None if cached is None else cached.token_variate_ids,
             )
         return loss / self.accum_steps if scale_for_accumulation else loss
 
-    def _loss_from_batch(self, batch, *, scale_for_accumulation: bool) -> torch.Tensor:
+    def _loss_from_batch(
+        self,
+        batch,
+        *,
+        include_anchor: bool = True,
+        scale_for_accumulation: bool,
+        token_cache=None,
+    ) -> torch.Tensor:
         return self._loss_from_inputs(
             self._inputs_from_batch(batch),
+            include_anchor=include_anchor,
             scale_for_accumulation=scale_for_accumulation,
+            token_cache=token_cache,
+        )
+
+    def _has_trainable_context_encoder(self) -> bool:
+        context_encoder = getattr(self.model, "context_encoder", None)
+        return context_encoder is not None and any(
+            parameter.requires_grad for parameter in context_encoder.parameters()
         )
 
     def _train_epoch(self, epoch: int, max_epochs: int) -> Tuple[float, float]:
@@ -160,17 +187,75 @@ class DiffusionTrainer:
         started = time.perf_counter()
         self.optimizer.zero_grad(set_to_none=True)
         for batch_idx, batch in enumerate(self.train_loader):
+            include_anchor = (
+                not bool(self.model.config.use_deterministic_anchor_loss)
+                or batch_idx % self.deterministic_anchor_every_n_batches == 0
+            )
             if batch_idx == 0 or (batch_idx + 1) % log_stride == 0 or batch_idx + 1 == n_train_batches:
                 logger.info(
                     "  [%s] epoch %d/%d train_batch %d/%d",
                     self.log_prefix, epoch + 1, max_epochs, batch_idx + 1, n_train_batches,
                 )
-            if self.sequential_anchor_backward and bool(
-                self.model.config.use_deterministic_anchor_loss
+            if (
+                self.sequential_anchor_backward
+                and bool(self.model.config.use_deterministic_anchor_loss)
+                and include_anchor
+                and self.model.stage_strategy.name == "patch_refine"
+                and not self._has_trainable_context_encoder()
             ):
-                # Both passes must see the same sampled timestep and conditioning
-                # dropout as the original combined forward.  Replaying the RNG state
-                # keeps this memory-saving split algebraically equivalent per update.
+                inputs = self._inputs_from_batch(batch)
+                past, future, patch_col0, cache_key_past = inputs
+                # Crop selection, diffusion noise, frozen guidance tokens, and
+                # conditioning are identical for both backwards. Preparing them
+                # once leaves the RNG at the same state as the prior replay path.
+                with amp_context(bool(self.model.config.use_amp)):
+                    prepared = self.model.prepare_patch_refine_loss_inputs(
+                        past,
+                        future,
+                        patch_col0=patch_col0,
+                        cross_variate_context=(self.train_token_cache.get(cache_key_past).tokens
+                                                if self.train_token_cache is not None else None),
+                        context_token_variate_ids=(self.train_token_cache.get(cache_key_past).token_variate_ids
+                                                   if self.train_token_cache is not None else None),
+                    )
+                    # Reuse the prepared inputs, but replay stochastic denoiser
+                    # layers so this remains algebraically identical to the old
+                    # prepare-and-replay path when DiT dropout is enabled.
+                    cpu_model_rng_state = torch.get_rng_state()
+                    cuda_model_rng_state = (
+                        torch.cuda.get_rng_state(self.device)
+                        if self.device.type == "cuda"
+                        else None
+                    )
+                    regular_loss = self.model.patch_refine_loss_from_prepared(
+                        prepared,
+                        loss_mode="regular",
+                    )["loss"]
+                anchor_weight = 1.0 - float(self.model.config.deterministic_anchor_lambda)
+                regular_weight = float(self.model.config.deterministic_anchor_lambda)
+                (regular_loss * regular_weight / self.accum_steps).backward()
+                regular_value = float(regular_loss.detach().item())
+                del regular_loss
+
+                torch.set_rng_state(cpu_model_rng_state)
+                if cuda_model_rng_state is not None:
+                    torch.cuda.set_rng_state(cuda_model_rng_state, self.device)
+                with amp_context(bool(self.model.config.use_amp)):
+                    anchor_loss = self.model.patch_refine_loss_from_prepared(
+                        prepared,
+                        loss_mode="anchor",
+                    )["loss"]
+                (anchor_loss * anchor_weight / self.accum_steps).backward()
+                loss = regular_weight * regular_value + anchor_weight * float(anchor_loss.detach().item())
+                del anchor_loss, prepared, inputs
+            elif (
+                self.sequential_anchor_backward
+                and bool(self.model.config.use_deterministic_anchor_loss)
+                and include_anchor
+            ):
+                # A trainable context adapter has its own autograd graph, so it
+                # cannot be shared between separate backwards. Keep the previous
+                # replay path for that uncommon configuration.
                 cpu_rng_state = torch.get_rng_state()
                 cuda_rng_state = (
                     torch.cuda.get_rng_state(self.device)
@@ -182,6 +267,7 @@ class DiffusionTrainer:
                     regular_inputs,
                     loss_mode="regular",
                     scale_for_accumulation=False,
+                    token_cache=self.train_token_cache,
                 )
                 anchor_weight = 1.0 - float(self.model.config.deterministic_anchor_lambda)
                 regular_weight = float(self.model.config.deterministic_anchor_lambda)
@@ -197,12 +283,18 @@ class DiffusionTrainer:
                     anchor_inputs,
                     loss_mode="anchor",
                     scale_for_accumulation=False,
+                    token_cache=self.train_token_cache,
                 )
                 (anchor_loss * anchor_weight / self.accum_steps).backward()
                 loss = regular_weight * regular_value + anchor_weight * float(anchor_loss.detach().item())
                 del anchor_loss, anchor_inputs
             else:
-                loss = self._loss_from_batch(batch, scale_for_accumulation=True)
+                loss = self._loss_from_batch(
+                    batch,
+                    include_anchor=include_anchor,
+                    scale_for_accumulation=True,
+                    token_cache=self.train_token_cache,
+                )
                 loss.backward()
             if (batch_idx + 1) % self.accum_steps == 0:
                 if self.clip_grad is not None:
@@ -239,7 +331,9 @@ class DiffusionTrainer:
                         "  [%s] epoch %d/%d val_batch %d/%d",
                         self.log_prefix, epoch + 1, max_epochs, batch_idx + 1, n_val_batches,
                     )
-                loss = self._loss_from_batch(batch, scale_for_accumulation=False)
+                loss = self._loss_from_batch(
+                    batch, scale_for_accumulation=False, token_cache=self.val_token_cache,
+                )
                 total_loss += float(loss.item())
                 n_batches += 1
         return total_loss / max(n_batches, 1), time.perf_counter() - started
@@ -328,6 +422,7 @@ def train_diffusion_epoch(
     set_training_epoch: Optional[Callable] = None,
     epoch: Optional[int] = None,
     ema=None,
+    deterministic_anchor_every_n_batches: int = 1,
 ) -> float:
     if set_training_epoch is not None and epoch is not None:
         set_training_epoch(train_loader, epoch)
@@ -340,11 +435,22 @@ def train_diffusion_epoch(
     n_batches = 0
     optimizer.zero_grad(set_to_none=True)
     accum_steps = max(1, int(accum_steps))
+    deterministic_anchor_every_n_batches = int(deterministic_anchor_every_n_batches)
+    if deterministic_anchor_every_n_batches < 1:
+        raise ValueError("deterministic_anchor_every_n_batches must be >= 1")
 
     for batch_idx, (past, future) in enumerate(train_loader):
         past, future = past.to(device), future.to(device)
+        include_anchor = (
+            not bool(model.config.use_deterministic_anchor_loss)
+            or batch_idx % deterministic_anchor_every_n_batches == 0
+        )
         with amp_context(bool(model.config.use_amp)):
-            loss = model.get_loss(past, future) / accum_steps
+            loss = model.get_loss(
+                past,
+                future,
+                include_anchor=include_anchor,
+            ) / accum_steps
         loss.backward()
         if (batch_idx + 1) % accum_steps == 0:
             if clip_grad is not None:

@@ -64,23 +64,16 @@ class PipelineState:
     patch_refine_prev_cond_dropout: float = 0.5
     # Fraction of train windows used only during patch_refine finetune (1.0 = all).
     patch_refine_finetune_window_fraction: float = 1.0
-    # Keep all wiggle refine crops; randomly keep this fraction of GT-flatline
-    # crops when building the patch_refine train set (1.0 = disabled / keep all).
-    # Unit is (unique absolute patch segment, active_variate); flatness is judged
-    # only on that patch_width crop span — not the full H-horizon parent.
-    patch_refine_flatline_keep_frac: float = 1.0
-    patch_refine_flatline_seed: Optional[int] = None  # default: seed + 91
-    patch_refine_flatline_min_run: int = 3
-    patch_refine_flatline_eps_frac: float = 0.25
     dit_cond_patch_size: Tuple[int, int] = (8, 8)
-    use_guidance_channel: bool = True
-    guidance_placement: str = "canvas"
     guidance_type: str = "patch_decoder"
     mmpd_patch_size: int = 12
     cfg_dropout: float = 0.1
     deterministic_anchor_loss: bool = False
     deterministic_anchor_lambda: float = 0.99
     deterministic_anchor_alpha: float = 0.5
+    # Apply the expensive deterministic-anchor forward every N train batches.
+    # One preserves the standard combined objective on every batch.
+    deterministic_anchor_every_n_batches: int = 1
     binary_anchor_input_mode: str = "stationary_flat"
     binary_use_boundary_weighted_bce: bool = False
     binary_cdf_distance_alpha: float = 1.0
@@ -104,7 +97,6 @@ class PipelineState:
     # DiffusionTSFConfig when a model is built.
     skip_window_norm_variate_mask: Optional[List[bool]] = None
     lookback_overlap_center_shift: bool = False
-    zero_guidance_forecast: bool = False
     use_raw_lookback_cond_channel: bool = False
 
     # -- Sequence geometry --
@@ -171,6 +163,9 @@ class PipelineState:
     finetune_hp_lr_max: float = 2e-4
     use_amp: bool = True
     use_gradient_checkpointing: bool = True
+    # Compile FactorizedDiT (eager geometry/validation, compiled denoiser).
+    # Smoke tests skip this even when true. Requires CUDA.
+    torch_compile: bool = False
     unet_max_chunk_size: int = 128
     sequential_anchor_backward: bool = False
     eval_num_samples: int = 30
@@ -274,8 +269,8 @@ class PipelineState:
 
     @property
     def needs_guidance(self) -> bool:
-        """True when the model needs a guidance checkpoint (channel and/or cross-attn)."""
-        return bool(self.use_guidance_channel) or not bool(self.disable_cross_attention)
+        """True when bottleneck cross-attention needs a frozen encoder checkpoint."""
+        return not bool(self.disable_cross_attention)
 
     def default_guidance_finetune_ckpt_path(self) -> str:
         subset_id = self.subset_id or self.dataset
@@ -334,25 +329,6 @@ class PipelineState:
             init_kwargs["patch_refine_finetune_window_fraction"] = float(
                 init_kwargs["patch_refine_finetune_window_fraction"]
             )
-        if "patch_refine_flatline_keep_frac" in init_kwargs:
-            init_kwargs["patch_refine_flatline_keep_frac"] = float(
-                init_kwargs["patch_refine_flatline_keep_frac"]
-            )
-        if (
-            "patch_refine_flatline_seed" in init_kwargs
-            and init_kwargs["patch_refine_flatline_seed"] is not None
-        ):
-            init_kwargs["patch_refine_flatline_seed"] = int(
-                init_kwargs["patch_refine_flatline_seed"]
-            )
-        if "patch_refine_flatline_min_run" in init_kwargs:
-            init_kwargs["patch_refine_flatline_min_run"] = int(
-                init_kwargs["patch_refine_flatline_min_run"]
-            )
-        if "patch_refine_flatline_eps_frac" in init_kwargs:
-            init_kwargs["patch_refine_flatline_eps_frac"] = float(
-                init_kwargs["patch_refine_flatline_eps_frac"]
-            )
         for key in ("dit_embed_dim", "dit_depth", "dit_num_heads", "itrans_d_model", "itrans_d_ff", "itrans_e_layers", "itrans_n_heads"):
             if key in init_kwargs:
                 init_kwargs[key] = int(init_kwargs[key])
@@ -391,6 +367,11 @@ class PipelineState:
             init_kwargs["past_cond_resize_to_horizon"] = bool(init_kwargs["past_cond_resize_to_horizon"])
         if "min_snr_gamma" in init_kwargs:
             init_kwargs["min_snr_gamma"] = float(init_kwargs["min_snr_gamma"])
+        if "deterministic_anchor_every_n_batches" in init_kwargs:
+            interval = int(init_kwargs["deterministic_anchor_every_n_batches"])
+            if interval < 1:
+                raise ValueError("deterministic_anchor_every_n_batches must be >= 1")
+            init_kwargs["deterministic_anchor_every_n_batches"] = interval
         if "use_coordinate_channel" in init_kwargs:
             init_kwargs["use_coordinate_channel"] = bool(init_kwargs["use_coordinate_channel"])
         if "use_raw_lookback_cond_channel" in init_kwargs:
