@@ -1,0 +1,37 @@
+# Clean-break Weather baseline: past visual conditioning + frozen decoder tokens
+# at the DiT bottleneck. No 2D decoder forecast channel is present.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
+
+wandb:
+  tags: [baseline, weather, default_subset, cross_attention_only, frozen_token_cache, canvas128, p64x6, full_eval, stride16]
+
+visualization:
+  viz_binary_mmpd_gap: false
+  viz_binary_mmpd_redbox: false
+
+experiment:
+  dataset: weather
+  name: binary-window-norm-patch-refine-c128-weather-default-xattn-cache-eval-s16
+  experiment_name: binary_window_norm_patch_refine_c128_weather_default_xattn_cache_eval_s16
+  disable_cross_attention: false
+
+phases:
+  - phase: staged_diffusion_pretrain
+    # No diffusion donor: the architecture marker forces a fresh cache namespace.
+    shared_cache: true
+    require_reuse_pretrain: false
+
+  - phase: staged_eval
+    anchor_only: false
+    eval_test_fraction: 1.0
+    test_stride: 16
+    n_samples: 1
+    probabilistic_n_samples: 20
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true
+    probe_eval_batch_size: true
