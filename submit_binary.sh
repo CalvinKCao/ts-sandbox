@@ -30,6 +30,7 @@ DEPENDENCY=""
 WANDB_PROJECT=""
 WANDB_PROJECT_EXPLICIT=0
 WALL_OVERRIDE=""
+MEM_OVERRIDE=""
 EXISTING_CKPT_ROOTS=""
 DISC_RUN=""
 ORDINAL_SLICE_LENGTHS="8;16;32"
@@ -63,6 +64,7 @@ while [[ $# -gt 0 ]]; do
         --dependency) DEPENDENCY="$2"; shift 2 ;;
         --wandb-project) WANDB_PROJECT="$2"; WANDB_PROJECT_EXPLICIT=1; shift 2 ;;
         --time) WALL_OVERRIDE="$2"; shift 2 ;;
+        --mem) MEM_OVERRIDE="$2"; shift 2 ;;
         --existing-ckpt-roots) EXISTING_CKPT_ROOTS="$2"; shift 2 ;;
         --disc-run) DISC_RUN="$2"; shift 2 ;;
         --raw-run) RAW_RUN="$2"; shift 2 ;;
@@ -287,6 +289,9 @@ if [[ "$GPU_TYPE" == h100* ]]; then
         MEM="80G"
         CPUS=16
     fi
+fi
+if [[ -n "$MEM_OVERRIDE" ]]; then
+    MEM="$MEM_OVERRIDE"
 fi
 
 if [[ -n "${WANDB_API_KEY:-}" && "$WANDB_PROJECT_EXPLICIT" -eq 0 ]]; then
