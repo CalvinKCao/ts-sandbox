@@ -258,6 +258,15 @@ def _candidate_phase1_ckpt_roots(state: PipelineState) -> list[str]:
     return roots
 
 
+def _pretrain_has_xattn_marker(path: str) -> bool:
+    """True when the ckpt is the live cross-attention-only architecture."""
+    import torch
+
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    payload = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+    return isinstance(payload, dict) and "conditioning_architecture_version" in payload
+
+
 def source_run_stage_pretrain_ckpt(
     state: PipelineState,
     source_config: str,
@@ -266,12 +275,19 @@ def source_run_stage_pretrain_ckpt(
     """``pretrained_{stage}/pretrained_diffusion.pt`` from reused store or a prior grid run."""
     reused = find_reused_pretrain_ckpt(source_config, stage)
     if reused:
-        logger.info(
-            "  [staged_diffusion_pretrain] %s reused pretrain from %s",
+        if _pretrain_has_xattn_marker(reused):
+            logger.info(
+                "  [staged_diffusion_pretrain] %s reused pretrain from %s",
+                stage,
+                reused,
+            )
+            return reused
+        logger.warning(
+            "  [staged_diffusion_pretrain] %s skipping reused pretrain without "
+            "cross-attention-only marker: %s",
             stage,
             reused,
         )
-        return reused
 
     ckpt_rel = f"pretrained_{stage}/pretrained_diffusion.pt"
     try:
