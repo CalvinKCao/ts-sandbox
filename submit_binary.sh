@@ -99,14 +99,14 @@ slurm_time_to_seconds() {
     echo $(( days * 86400 + h * 3600 + m * 60 + s ))
 }
 
-pick_h100_partition() {
-    local need_s="$1" part max_wall max_s best="" best_s=0
+pick_gpubase_partition() {
+    local prefix="$1" need_s="$2" part max_wall max_s best="" best_s=0
     if [[ -n "$PARTITION_OVERRIDE" ]]; then
         echo "$PARTITION_OVERRIDE"
         return 0
     fi
     while read -r part max_wall; do
-        [[ "$part" == gpubase_h100_b* ]] || continue
+        [[ "$part" == ${prefix}* ]] || continue
         part="${part%\*}"
         max_s="$(slurm_time_to_seconds "$max_wall")"
         if [[ "$max_s" -ge "$need_s" ]]; then
@@ -117,7 +117,7 @@ pick_h100_partition() {
         fi
     done < <(sinfo -h -o "%P %l" 2>/dev/null || true)
     if [[ -z "$best" ]]; then
-        echo "ERROR: no gpubase_h100_b* partition allows --time wall ($need_s s). Check sinfo." >&2
+        echo "ERROR: no ${prefix}* partition allows --time wall ($need_s s). Check sinfo." >&2
         return 1
     fi
     echo "$best"
@@ -129,11 +129,17 @@ gpu_sbatch_args() {
     if [[ "$GPU_TYPE" == h100* ]]; then
         local wall="${WALL:-${WALL_DEFAULT:-1:00:00}}"
         local part
-        part="$(pick_h100_partition "$(slurm_time_to_seconds "$wall")")" || return 1
+        part="$(pick_gpubase_partition "gpubase_h100_b" "$(slurm_time_to_seconds "$wall")")" || return 1
         GPU_SBATCH_ARGS=(--partition="$part" --gpus-per-node=h100:"$gpus")
         echo "H100 request: partition=$part gpus-per-node=h100:$gpus wall=$wall" >&2
     elif [[ "$GPU_TYPE" == a100* ]]; then
         GPU_SBATCH_ARGS=(--gpus="${GPU_TYPE}:${gpus}")
+    elif [[ "$GPU_TYPE" == l40s* ]]; then
+        local wall="${WALL:-${WALL_DEFAULT:-1:00:00}}"
+        local part
+        part="$(pick_gpubase_partition "gpubase_l40s_b" "$(slurm_time_to_seconds "$wall")")" || return 1
+        GPU_SBATCH_ARGS=(--partition="$part" --gres=gpu:l40s:"$gpus")
+        echo "L40S request: partition=$part gres=gpu:l40s:$gpus wall=$wall" >&2
     else
         GPU_SBATCH_ARGS=(--gres=gpu:${GPU_TYPE}:${gpus})
     fi

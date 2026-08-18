@@ -68,6 +68,9 @@ else
 fi
 
 export PYTHONUNBUFFERED=1
+export TORCHINDUCTOR_CACHE_DIR="${SLURM_TMPDIR}/inductor"
+export TRITON_CACHE_DIR="${SLURM_TMPDIR}/triton"
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
 
 cd "$REPO"
 if [[ ! -f "models/diffusion_tsf/train_multivariate_pipeline.py" ]]; then
