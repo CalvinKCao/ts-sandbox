@@ -120,15 +120,20 @@ class CrossVariateTokenCache:
         if not self._cpu_entries:
             raise RuntimeError("cannot finalize an empty pinned CPU token cache")
         prototype = self._cpu_entries[0]
+        n = len(self._cpu_entries)
         packed = torch.empty(
-            (len(self._cpu_entries), *prototype.shape),
+            (n, *prototype.shape),
             dtype=prototype.dtype,
             device="cpu",
             pin_memory=True,
         )
-        packed.copy_(torch.stack(self._cpu_entries, dim=0))
-        self._packed_cpu = packed
+        # Row copies instead of stack(): stack() kept the list tensors live
+        # and added a third full copy, which oom-killed 160-var jobs at 150G.
+        for i in range(n):
+            packed[i].copy_(self._cpu_entries[i])
+            self._cpu_entries[i] = None
         self._cpu_entries.clear()
+        self._packed_cpu = packed
 
     def _pinned_cpu_batch(self, indices: List[int]) -> torch.Tensor:
         self._finalize_pinned_cpu()
