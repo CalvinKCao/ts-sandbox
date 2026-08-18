@@ -1248,6 +1248,9 @@ def create_diffusion_model(
         patch_refine_col_stride=state.patch_refine_col_stride,
         patch_refine_unique_segments=state.patch_refine_unique_segments,
         patch_refine_prev_cond_dropout=state.patch_refine_prev_cond_dropout,
+        patch_refine_finetune_patch_fraction=float(
+            getattr(state, "patch_refine_finetune_patch_fraction", 1.0)
+        ),
         use_gradient_checkpointing=state.use_gradient_checkpointing,
         unet_max_chunk_size=state.unet_max_chunk_size,
         use_amp=state.use_amp,

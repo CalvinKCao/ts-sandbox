@@ -9,6 +9,7 @@
 # USAGE (run from login node, repo root / $SCRATCH/ts-sandbox):
 #   ./submit_binary.sh --configs binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm \
 #       --datasets ETTh1,traffic --time 10:00:00
+#   ./submit_binary.sh --gpu h100 --configs <stem> --datasets electricity --time 1-00:00:00
 #   ./submit_binary.sh --configs configs/binary_anchor.yaml --datasets ETTh1,exchange_rate
 #   ./submit_binary.sh --smoke
 #   ./submit_binary.sh --resume --configs binary_window_norm_patch_refine_canvas128_p64x6 --datasets ETTh1
@@ -49,6 +50,7 @@ else
     ACCOUNT="aip-boyuwang"
     GPU_TYPE="l40s"
 fi
+PARTITION_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -73,9 +75,69 @@ while [[ $# -gt 0 ]]; do
         --slice-lengths) ORDINAL_SLICE_LENGTHS="${2//,/;}" ; ORDINAL_SLICE_LENGTHS="${ORDINAL_SLICE_LENGTHS// /;}"; shift 2 ;;
         --exclude) SBATCH_EXCLUDE_NODES="$2"; shift 2 ;;
         --gpu) GPU_TYPE="$2"; shift 2 ;;
+        --partition) PARTITION_OVERRIDE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+slurm_time_to_seconds() {
+    local t="$1" days=0 rest h=0 m=0 s=0
+    if [[ "$t" == *-* ]]; then
+        days="${t%%-*}"
+        rest="${t#*-}"
+    else
+        rest="$t"
+    fi
+    IFS=':' read -r a b c <<< "$rest"
+    if [[ -n "${c:-}" ]]; then
+        h="$a"; m="$b"; s="$c"
+    elif [[ -n "${b:-}" ]]; then
+        h=0; m="$a"; s="$b"
+    else
+        h=0; m=0; s="$a"
+    fi
+    echo $(( days * 86400 + h * 3600 + m * 60 + s ))
+}
+
+pick_h100_partition() {
+    local need_s="$1" part max_wall max_s best="" best_s=0
+    if [[ -n "$PARTITION_OVERRIDE" ]]; then
+        echo "$PARTITION_OVERRIDE"
+        return 0
+    fi
+    while read -r part max_wall; do
+        [[ "$part" == gpubase_h100_b* ]] || continue
+        part="${part%\*}"
+        max_s="$(slurm_time_to_seconds "$max_wall")"
+        if [[ "$max_s" -ge "$need_s" ]]; then
+            if [[ -z "$best" || "$max_s" -lt "$best_s" ]]; then
+                best="$part"
+                best_s="$max_s"
+            fi
+        fi
+    done < <(sinfo -h -o "%P %l" 2>/dev/null || true)
+    if [[ -z "$best" ]]; then
+        echo "ERROR: no gpubase_h100_b* partition allows --time wall ($need_s s). Check sinfo." >&2
+        return 1
+    fi
+    echo "$best"
+}
+
+gpu_sbatch_args() {
+    local gpus="${1:-1}"
+    GPU_SBATCH_ARGS=()
+    if [[ "$GPU_TYPE" == h100* ]]; then
+        local wall="${WALL:-${WALL_DEFAULT:-1:00:00}}"
+        local part
+        part="$(pick_h100_partition "$(slurm_time_to_seconds "$wall")")" || return 1
+        GPU_SBATCH_ARGS=(--partition="$part" --gpus-per-node=h100:"$gpus")
+        echo "H100 request: partition=$part gpus-per-node=h100:$gpus wall=$wall" >&2
+    elif [[ "$GPU_TYPE" == a100* ]]; then
+        GPU_SBATCH_ARGS=(--gpus="${GPU_TYPE}:${gpus}")
+    else
+        GPU_SBATCH_ARGS=(--gres=gpu:${GPU_TYPE}:${gpus})
+    fi
+}
 
 manifest_tool() {
     python3 "$SCRIPT_DIR/temp/scripts/submission_manifest.py" "$@"
@@ -154,11 +216,7 @@ if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
 
     WALL="${WALL_OVERRIDE:-2:00:00}"
     USER_NAME="$(whoami)"
-    if [[ "$GPU_TYPE" == a100* || "$GPU_TYPE" == h100* ]]; then
-        GPU_ARG="--gpus=${GPU_TYPE}:1"
-    else
-        GPU_ARG="--gres=gpu:${GPU_TYPE}:1"
-    fi
+    gpu_sbatch_args 1 || exit 1
     DEP_ARGS=()
     [[ -n "$DEPENDENCY" ]] && DEP_ARGS=(--dependency="$DEPENDENCY")
     EXCLUDE_ARGS=()
@@ -169,7 +227,7 @@ if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
         job_label="disc-opr96"
         job_id=$(sbatch --parsable \
             --job-name="${job_label}-${dataset_name}" \
-            --account="$ACCOUNT" --time="$WALL" --nodes=1 "$GPU_ARG" \
+            --account="$ACCOUNT" --time="$WALL" --nodes=1 "${GPU_SBATCH_ARGS[@]}" \
             --cpus-per-task=8 --mem=50G \
             "${DEP_ARGS[@]}" \
             "${EXCLUDE_ARGS[@]}" \
@@ -213,6 +271,16 @@ else
     CPUS=8
     GPUS=1
     JOB_PREFIX="grid"
+fi
+
+if [[ "$GPU_TYPE" == h100* ]]; then
+    if [[ "$SMOKE" -eq 1 ]]; then
+        MEM="48G"
+        CPUS=8
+    else
+        MEM="80G"
+        CPUS=16
+    fi
 fi
 
 if [[ -n "${WANDB_API_KEY:-}" && "$WANDB_PROJECT_EXPLICIT" -eq 0 ]]; then
@@ -348,11 +416,7 @@ for CFG in "${CONF_ARR[@]}"; do
                 LOG_FILE="$LOG_DIR/${DATE_STR}-%j-${DS}-${CFG_NAME}.log"
             fi
 
-            if [[ "$GPU_TYPE" == a100* || "$GPU_TYPE" == h100* ]]; then
-                GPU_ARG="--gpus=${GPU_TYPE}:${GPUS}"
-            else
-                GPU_ARG="--gres=gpu:${GPU_TYPE}:${GPUS}"
-            fi
+            gpu_sbatch_args "$GPUS" || exit 1
 
             S_ARGS=(
                 --parsable
@@ -360,7 +424,7 @@ for CFG in "${CONF_ARR[@]}"; do
                 --account="$ACCOUNT"
                 --time="$WALL"
                 --nodes=1
-                "$GPU_ARG"
+                "${GPU_SBATCH_ARGS[@]}"
                 --cpus-per-task="$CPUS"
                 --mem="$MEM"
                 --output="$LOG_FILE"

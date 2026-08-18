@@ -17,6 +17,7 @@ from models.diffusion_tsf.patch_refine_geometry import (
     patch_layout_for_fixed_col0,
     primary_stride_col0s,
     select_patch_locations,
+    subsample_unique_seg_layout,
 )
 from models.diffusion_tsf.patch_refine_segments import (
     coverage_gap_layout,
@@ -221,8 +222,37 @@ def _test_train_generate() -> None:
     print(f"generate dense ok n_patches={len(gen_dense['patch_locations'])}")
 
 
+def _test_patch_fraction() -> None:
+    torch.manual_seed(0)
+    coarse = torch.zeros(2, 7, 16, 24)
+    coarse[:, :, :8, :] = 1.0
+    edges = coarse_edges_from_cdf(coarse, canvas_height=128)
+    col0 = torch.zeros(2, dtype=torch.long)
+    layout = patch_layout_for_fixed_col0(
+        edges, col0, canvas_height=128, patch_height=64, patch_width=6,
+    )
+    assert layout.n_patches == 14
+    kept = subsample_unique_seg_layout(
+        layout, 0.5, unique_segments=True, training=True,
+    )
+    assert kept.n_patches == 8, kept.n_patches  # even variates 0,2,4,6 × B=2
+    assert set(kept.variate_index.tolist()) == {0, 2, 4, 6}
+    eval_kept = subsample_unique_seg_layout(
+        layout, 0.5, unique_segments=True, training=False,
+    )
+    assert eval_kept.n_patches == 14
+    try:
+        subsample_unique_seg_layout(layout, 0.5, unique_segments=False, training=True)
+    except ValueError as exc:
+        assert "unique_segments" in str(exc)
+    else:
+        raise AssertionError("expected fail-fast without unique_segments")
+    print("patch fraction ok")
+
+
 if __name__ == "__main__":
     _test_geometry()
     _test_layout_equivalence()
+    _test_patch_fraction()
     _test_train_generate()
     print("patch_refine smoke passed")

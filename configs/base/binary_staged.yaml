@@ -125,6 +125,9 @@ experiment:
   patch_refine_unique_segments: false
   patch_refine_prev_cond_dropout: 0.5
   patch_refine_finetune_window_fraction: 1.0
+  # Train-only: keep this fraction of unique-seg (B,V) crops per window.
+  # Independent of window_fraction. 1.0 = all variate-crops.
+  patch_refine_finetune_patch_fraction: 1.0
   dit_embed_dim: 384
   dit_depth: 8
   dit_num_heads: 6

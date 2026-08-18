@@ -1625,6 +1625,7 @@ class DiffusionTSF(nn.Module):
             extract_patch_batch_layout,
             patch_layout_for_fixed_col0,
             select_patch_locations,
+            subsample_unique_seg_layout,
         )
         from .patch_refine_segments import (
             compress_prev_refine_32_to_16,
@@ -1657,6 +1658,12 @@ class DiffusionTSF(nn.Module):
                 patch_height=patch_h,
                 patch_width=patch_w,
                 hir_canvas=hir_gt,
+            )
+            layout = subsample_unique_seg_layout(
+                layout,
+                float(getattr(self.config, "patch_refine_finetune_patch_fraction", 1.0)),
+                unique_segments=True,
+                training=bool(self.training),
             )
         else:
             # Non-unique inference-compatible geometry still chooses coverage

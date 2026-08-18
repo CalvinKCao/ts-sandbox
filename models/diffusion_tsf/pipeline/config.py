@@ -48,6 +48,8 @@ REQUIRED_EXPERIMENT_KEYS = (
     "patch_refine_col_stride",
     "patch_refine_unique_segments",
     "patch_refine_prev_cond_dropout",
+    "patch_refine_finetune_window_fraction",
+    "patch_refine_finetune_patch_fraction",
     "dit_embed_dim",
     "dit_depth",
     "dit_num_heads",
@@ -302,32 +304,44 @@ def normalize_guidance_phases(
     *,
     experiment: Optional[Dict[str, Any]] = None,
 ) -> list:
-    """Normalize merged phase lists for the live guidance and patch-refine path."""
+    """Normalize merged phase lists for the live guidance and patch-refine path.
+
+    Duplicate ``staged_eval`` entries are kept in YAML order so one job can run
+    det-then-prob at different strides.
+    """
     by_name: Dict[str, Dict[str, Any]] = {}
+    kept: list = []
     for entry in phases:
         name = str(entry["phase"])
         if guidance_type == "patch_decoder" and name == "itrans_finetune_hp":
             continue
         by_name[name] = dict(entry)
+        kept.append(dict(entry))
     exp = experiment or {}
     needs_guidance = not bool(exp.get("disable_cross_attention", False))
     if not needs_guidance:
         by_name.pop("patch_guidance_finetune_hp", None)
         by_name.pop("itrans_finetune_hp", None)
+        kept = [
+            e for e in kept
+            if str(e["phase"]) not in {"patch_guidance_finetune_hp", "itrans_finetune_hp"}
+        ]
     preferred = (
         "staged_diffusion_pretrain",
         "patch_guidance_finetune_hp",
         "diffusion_coarse_finetune_hp",
         "diffusion_patch_refine_finetune_hp",
-        "staged_eval",
     )
     ordered = [by_name[n] for n in preferred if n in by_name]
-    seen = {str(p["phase"]) for p in ordered}
-    for entry in phases:
+    seen_non_eval = set(preferred) & set(by_name)
+    for entry in kept:
         name = str(entry["phase"])
-        if name not in seen and name != "itrans_finetune_hp" and name in by_name:
+        if name == "staged_eval":
+            ordered.append(dict(entry))
+            continue
+        if name not in seen_non_eval and name != "itrans_finetune_hp" and name in by_name:
             ordered.append(dict(by_name[name]))
-            seen.add(name)
+            seen_non_eval.add(name)
     return ordered
 
 

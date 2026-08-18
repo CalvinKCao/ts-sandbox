@@ -132,6 +132,85 @@ def _unpack_patch_refine_batch(batch):
 
 
 
+def _probe_max_finetune_batch_size(
+    *,
+    model,
+    lookback: int,
+    horizon: int,
+    overlap: int,
+    n_variates: int,
+    device: torch.device,
+    stage: str,
+    min_bs: int = 1,
+    max_bs: int = 16,
+    headroom: float = 0.85,
+) -> int:
+    """Largest window batch that fits one train forward+backward on this GPU."""
+    if device.type != "cuda":
+        raise RuntimeError("probe_train_batch_size=true requires CUDA")
+    fut_w = int(horizon) + int(overlap)
+    patch_w = int(getattr(model.config, "patch_refine_patch_width", 8))
+    unique = bool(getattr(model.config, "patch_refine_unique_segments", False))
+
+    def _fits(bs: int) -> bool:
+        past = torch.randn(bs, n_variates, lookback, device=device)
+        future = torch.randn(bs, n_variates, fut_w, device=device)
+        patch_col0 = None
+        if stage == "patch_refine" and unique:
+            max_c0 = max(0, fut_w - patch_w)
+            patch_col0 = torch.zeros(bs, device=device, dtype=torch.long)
+            if max_c0 > 0:
+                patch_col0 = torch.randint(0, max_c0 + 1, (bs,), device=device)
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats(device)
+            model.train()
+            model.zero_grad(set_to_none=True)
+            loss = model.get_loss(
+                past, future, patch_col0=patch_col0, include_anchor=True,
+            )
+            loss.backward()
+            model.zero_grad(set_to_none=True)
+            torch.cuda.synchronize(device)
+            return True
+        except RuntimeError as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            torch.cuda.empty_cache()
+            return False
+
+    lo = max(1, int(min_bs))
+    hi = max(lo, int(max_bs))
+    if not _fits(lo):
+        logger.warning(
+            "finetune batch probe: min_bs=%d already OOMs; falling back to 1", lo,
+        )
+        torch.cuda.empty_cache()
+        return 1
+    best = lo
+    cand = lo
+    while cand * 2 <= hi and _fits(cand * 2):
+        cand *= 2
+        best = cand
+    left, right = best, min(hi, best * 2)
+    while left < right:
+        mid = (left + right + 1) // 2
+        if _fits(mid):
+            left = mid
+        else:
+            right = mid - 1
+    best = left
+    usable = max(1, int(best * float(headroom)))
+    logger.info(
+        "finetune batch probe: max_fit=%d headroom=%.2f -> batch_size=%d",
+        best,
+        headroom,
+        usable,
+    )
+    torch.cuda.empty_cache()
+    return usable
+
+
 def _log_gpu_mem(tag: str) -> None:
     if not torch.cuda.is_available():
         return
@@ -1365,6 +1444,50 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             else:
                 logger.info("  [%s] random init (no pretrain ckpt)", self.name)
 
+            if (
+                bool(self.get("probe_train_batch_size", False))
+                and not state.smoke_test
+            ):
+                probed = _probe_max_finetune_batch_size(
+                    model=model,
+                    lookback=int(ds_lb),
+                    horizon=int(ds_hz),
+                    overlap=int(state.lookback_overlap),
+                    n_variates=n_iv,
+                    device=device,
+                    stage=self.stage,
+                    min_bs=1,
+                    max_bs=int(self.get("probe_train_batch_size_max", 16)),
+                    headroom=float(self.get("probe_train_batch_size_headroom", 0.85)),
+                )
+                if probed != batch_size:
+                    logger.info(
+                        "  [%s] train batch probe: yaml/plan batch_size=%d -> probed=%d",
+                        self.name,
+                        batch_size,
+                        probed,
+                    )
+                    params["batch_size"] = int(probed)
+                    params["gradient_accumulation_steps"] = 1
+                    params["effective_batch_size"] = int(probed)
+                    params["effective_univariate_batch"] = int(probed) * n_iv
+                    batch_size = int(probed)
+                    train_loader = DataLoader(
+                        train_ds,
+                        batch_size=batch_size,
+                        shuffle=True,
+                        num_workers=0,
+                        drop_last=not state.smoke_test,
+                    )
+                    val_loader = DataLoader(
+                        val_ds, batch_size=batch_size, shuffle=False, num_workers=0,
+                    )
+                    if len(train_loader) == 0:
+                        raise ValueError(
+                            f"{self.stage} train set has {len(train_ds)} windows, "
+                            f"smaller than probed batch_size={batch_size}"
+                        )
+
             token_cache = getattr(self, "_phase_token_cache", None)
             if (
                 not state.disable_cross_attention
@@ -1608,6 +1731,24 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             )
         if self.stage == "patch_refine":
             train_ds = _maybe_subsample_patch_refine_train_windows(state, train_ds)
+            patch_frac = float(getattr(state, "patch_refine_finetune_patch_fraction", 1.0))
+            if not math.isfinite(patch_frac) or patch_frac <= 0.0 or patch_frac > 1.0:
+                raise ValueError(
+                    f"patch_refine_finetune_patch_fraction must be in (0, 1], got {patch_frac!r}"
+                )
+            if patch_frac < 1.0 and not bool(getattr(state, "patch_refine_unique_segments", False)):
+                raise ValueError(
+                    "patch_refine_finetune_patch_fraction < 1 requires "
+                    "patch_refine_unique_segments=true"
+                )
+            if patch_frac < 1.0:
+                logger.info(
+                    "  [%s] train unique-seg crop fraction=%.3f (stride on variate index; "
+                    "independent of window_fraction=%.3f)",
+                    self.name,
+                    patch_frac,
+                    float(getattr(state, "patch_refine_finetune_window_fraction", 1.0)),
+                )
         if norm_stats.get("ordinal_ladder") is not None:
             state.extra["global_ordinal_ladder"] = norm_stats["ordinal_ladder"]
         aug_cfg = training_value(state, "train_window_aug", None) or {}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
@@ -67,6 +68,28 @@ class PatchLayout:
             variate_index=torch.cat([layout.variate_index for layout in layouts]),
             row0=torch.cat([layout.row0 for layout in layouts]),
             col0=torch.cat([layout.col0 for layout in layouts]),
+        )
+
+    def index_select(self, keep: torch.Tensor) -> "PatchLayout":
+        """Boolean or index mask over the flattened crop list."""
+        if keep.ndim != 1:
+            raise ValueError(f"keep must be 1-D, got {tuple(keep.shape)}")
+        if keep.dtype == torch.bool:
+            if keep.numel() != self.n_patches:
+                raise ValueError(
+                    f"boolean keep length {keep.numel()} != n_patches {self.n_patches}"
+                )
+            n_keep = int(keep.sum().item())
+        else:
+            n_keep = int(keep.numel())
+        if n_keep < 1:
+            raise RuntimeError("patch layout mask kept zero crops")
+        return PatchLayout(
+            flat_index=self.flat_index[keep],
+            batch_index=self.batch_index[keep],
+            variate_index=self.variate_index[keep],
+            row0=self.row0[keep],
+            col0=self.col0[keep],
         )
 
     @classmethod
@@ -147,6 +170,52 @@ def patch_layout_for_fixed_col0(
         fallback_row0 = (fallback_edge - patch_height // 2).clamp(0, max_row0)
         row0 = torch.where(in_view.any(dim=1), row0, fallback_row0)
     return PatchLayout(flat_index, batch_index, variate_index, row0, patch_col0)
+
+
+def subsample_unique_seg_layout(
+    layout: PatchLayout,
+    fraction: float,
+    *,
+    unique_segments: bool,
+    training: bool,
+) -> PatchLayout:
+    """Keep a 1/N stride of unique-seg (B,V) crops. Train-only.
+
+    Unique-seg emits one crop per (B,V). ``fraction=0.5`` is stride-2 on
+    variate index (even variates). Window subsampling is a separate knob.
+    """
+    frac = float(fraction)
+    if not math.isfinite(frac) or frac <= 0.0 or frac > 1.0:
+        raise ValueError(
+            f"patch_refine_finetune_patch_fraction must be in (0, 1], got {frac!r}"
+        )
+    if frac >= 1.0:
+        return layout
+    if not unique_segments:
+        raise ValueError(
+            "patch_refine_finetune_patch_fraction < 1 requires "
+            "patch_refine_unique_segments=true (one crop per (B,V); fraction "
+            "drops variate-crops, not windows)"
+        )
+    if not training:
+        return layout
+    stride = int(round(1.0 / frac))
+    if stride < 2:
+        return layout
+    implied = 1.0 / float(stride)
+    if abs(implied - frac) > 1e-6:
+        raise ValueError(
+            f"patch_refine_finetune_patch_fraction={frac} is not a 1/N stride "
+            f"(use 0.5 for every-other variate crop); implied 1/{stride}={implied}"
+        )
+    keep = (layout.variate_index % stride) == 0
+    n_keep = int(keep.sum().item())
+    if n_keep < 1:
+        raise RuntimeError(
+            "patch_refine_finetune_patch_fraction kept zero crops "
+            f"(fraction={frac}, n_patches={layout.n_patches})"
+        )
+    return layout.index_select(keep)
 
 
 def primary_stride_col0s(width: int, patch_width: int, col_stride: int) -> list[int]:

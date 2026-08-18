@@ -37,6 +37,13 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import stage
 logger = logging.getLogger(__name__)
 
 
+def _eval_artifact_tag(phase: PipelinePhase) -> str:
+    stride = int(phase.require("test_stride"))
+    if bool(phase.get("anchor_only", False)):
+        return f"s{stride}_anchor"
+    return f"s{stride}_prob"
+
+
 def _eval_checkpoint_dir(state: PipelineState) -> str:
     """Return source weights for an evaluation-only run, or this run's root."""
     raw = state.extra.get("eval_source_checkpoint_dir")
@@ -332,13 +339,16 @@ class StagedEvalPhase(PipelinePhase):
             logger.info("  [%s] forcing eval refresh for visualizations", self.name)
             return False
         subset_id = state.subset_id or state.dataset
-        partial = os.path.join(state.results_dir, "partials", f"{state.dataset}_staged_anchor.json")
-        nested = os.path.join(state.results_dir, subset_id, "staged_results.json")
+        tag = _eval_artifact_tag(self)
+        partial = os.path.join(
+            state.results_dir, "partials", f"{state.dataset}_staged_{tag}.json",
+        )
+        nested = os.path.join(state.results_dir, subset_id, f"staged_results_{tag}.json")
         raw_dir = os.path.join(state.results_dir, "raw")
-        anchor_npz = os.path.join(raw_dir, f"staged_anchor_samples_{state.dataset}.npz")
-        samples_npz = os.path.join(raw_dir, f"staged_dpmpp_samples_{state.dataset}.npz")
-        full_npz = os.path.join(raw_dir, f"staged_anchor_{state.dataset}.npz")
-        worst_json = os.path.join(state.results_dir, subset_id, "worst_windows.json")
+        anchor_npz = os.path.join(raw_dir, f"staged_anchor_samples_{state.dataset}_{tag}.npz")
+        samples_npz = os.path.join(raw_dir, f"staged_dpmpp_samples_{state.dataset}_{tag}.npz")
+        full_npz = os.path.join(raw_dir, f"staged_anchor_{state.dataset}_{tag}.npz")
+        worst_json = os.path.join(state.results_dir, subset_id, f"worst_windows_{tag}.json")
         if os.path.exists(partial) and os.path.exists(nested):
             try:
                 with open(partial) as f:
@@ -346,7 +356,11 @@ class StagedEvalPhase(PipelinePhase):
                 core_ok = "crps" in metrics and "top3_mse" in metrics
                 anchor_ok = "anchor_mse" in metrics and "anchor_mae" in metrics
                 sample_mean_ok = "sample_mean_mse" in metrics and "sample_mean_mae" in metrics
-                raw_ok = os.path.exists(anchor_npz) and os.path.exists(samples_npz)
+                raw_ok = os.path.exists(anchor_npz)
+                if not bool(self.get("anchor_only", False)):
+                    raw_ok = raw_ok and os.path.exists(samples_npz)
+                    if not (core_ok and sample_mean_ok):
+                        raw_ok = False
                 diag_ok = True
                 if os.path.exists(full_npz):
                     with np.load(full_npz) as z:
@@ -361,10 +375,13 @@ class StagedEvalPhase(PipelinePhase):
                 diag_ok = False
                 worst_ok = False
                 sampler_ok = False
-            if core_ok and anchor_ok and sample_mean_ok and raw_ok and diag_ok and worst_ok and sampler_ok:
-                logger.info("  [%s] already evaluated: %s", self.name, partial)
+            skip_ok = anchor_ok and raw_ok and diag_ok and worst_ok and sampler_ok
+            if not bool(self.get("anchor_only", False)):
+                skip_ok = skip_ok and core_ok and sample_mean_ok
+            if skip_ok:
+                logger.info("  [%s] already evaluated (%s): %s", self.name, tag, partial)
                 return True
-            logger.info("  [%s] re-evaluating to add missing metrics: %s", self.name, partial)
+            logger.info("  [%s] re-evaluating %s to add missing metrics: %s", self.name, tag, partial)
         return False
 
     def _load_model(self, state: PipelineState, stage: str, itrans_guidance, n_iv: int, device: torch.device):
@@ -895,28 +912,31 @@ class StagedEvalPhase(PipelinePhase):
         os.makedirs(partial_dir, exist_ok=True)
         os.makedirs(raw_dir, exist_ok=True)
         os.makedirs(nested_dir, exist_ok=True)
-        with open(os.path.join(nested_dir, "worst_windows.json"), "w") as f:
+        tag = _eval_artifact_tag(self)
+        with open(os.path.join(nested_dir, f"worst_windows_{tag}.json"), "w") as f:
             json.dump(worst_manifest, f, indent=2)
-        with open(os.path.join(partial_dir, f"{state.dataset}_staged_anchor.json"), "w") as f:
+        with open(os.path.join(partial_dir, f"{state.dataset}_staged_{tag}.json"), "w") as f:
             payload = dict(metrics)
             payload["seed"] = int(state.seed)
             payload["binary_length_mode"] = getattr(state, "binary_length_mode", "none")
             payload["binary_length_g"] = float(getattr(state, "binary_length_g", 1.0))
+            payload["eval_artifact_tag"] = tag
+            payload["test_stride"] = int(test_stride)
             json.dump(payload, f, indent=2, sort_keys=True)
-        np.savez_compressed(os.path.join(raw_dir, f"staged_anchor_{state.dataset}.npz"), **pack)
+        np.savez_compressed(os.path.join(raw_dir, f"staged_anchor_{state.dataset}_{tag}.npz"), **pack)
         np.savez_compressed(
-            os.path.join(raw_dir, f"staged_anchor_samples_{state.dataset}.npz"),
+            os.path.join(raw_dir, f"staged_anchor_samples_{state.dataset}_{tag}.npz"),
             y_true=pack["y_true"],
             anchor=pack["deterministic"],
         )
         if not anchor_only:
             np.savez_compressed(
-                os.path.join(raw_dir, f"staged_dpmpp_samples_{state.dataset}.npz"),
+                os.path.join(raw_dir, f"staged_dpmpp_samples_{state.dataset}_{tag}.npz"),
                 y_true=pack["y_true"],
                 samples=pack["samples"],
                 sample_mean=pack["sample_mean"],
             )
-        with open(os.path.join(nested_dir, "staged_results.json"), "w") as f:
+        with open(os.path.join(nested_dir, f"staged_results_{tag}.json"), "w") as f:
             json.dump({
                 "dataset": state.dataset,
                 "subset_id": subset_id,
@@ -926,16 +946,20 @@ class StagedEvalPhase(PipelinePhase):
                 "variate_indices": variate_indices,
                 "data_subset": subset_meta,
                 "sampler_tuning": sampler_tuning,
+                "eval_artifact_tag": tag,
+                "test_stride": int(test_stride),
                 "eval_metrics": {"staged_anchor": metrics},
             }, f, indent=2, sort_keys=True)
 
         wandb_metrics = {
-            "eval/staged_anchor_mse": metrics.get("anchor_mse"),
-            "eval/staged_anchor_mae": metrics.get("anchor_mae"),
-            "eval/selected_sampler": selected_sampler,
-            "eval/selected_steps": selected_steps,
+            "eval/test_stride": int(test_stride),
         }
-        if not anchor_only:
+        if anchor_only:
+            wandb_metrics.update({
+                "eval/staged_anchor_mse": metrics.get("anchor_mse"),
+                "eval/staged_anchor_mae": metrics.get("anchor_mae"),
+            })
+        else:
             wandb_metrics.update({
                 "eval/staged_prob_mse": metrics.get("mse"),
                 "eval/staged_prob_mae": metrics.get("mae"),
@@ -944,8 +968,14 @@ class StagedEvalPhase(PipelinePhase):
                 "eval/staged_crps": metrics.get("crps"),
                 "eval/staged_top1_mse": metrics.get("top1_mse"),
                 "eval/staged_top3_mse": metrics.get("top3_mse"),
+                "eval/selected_sampler": selected_sampler,
+                "eval/selected_steps": selected_steps,
             })
-        wandb_utils.log_eval_metrics(wandb_metrics)
+        wandb_metrics.update({
+            f"eval/{tag}/staged_anchor_mse": metrics.get("anchor_mse"),
+            f"eval/{tag}/staged_anchor_mae": metrics.get("anchor_mae"),
+        })
+        wandb_utils.log_eval_metrics(wandb_metrics, step=int(test_stride))
 
         skip_viz = bool(
             self.get("skip_eval_visualizations", False)

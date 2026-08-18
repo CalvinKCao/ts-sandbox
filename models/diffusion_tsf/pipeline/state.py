@@ -7,6 +7,7 @@ artifacts they produce (checkpoint paths, best HP params, etc.).
 
 from __future__ import annotations
 
+import math
 import os
 import random
 from dataclasses import dataclass, field
@@ -64,6 +65,9 @@ class PipelineState:
     patch_refine_prev_cond_dropout: float = 0.5
     # Fraction of train windows used only during patch_refine finetune (1.0 = all).
     patch_refine_finetune_window_fraction: float = 1.0
+    # Train-only fraction of unique-seg (B,V) crops kept inside each window.
+    # Independent of window_fraction. 1.0 = all variate-crops.
+    patch_refine_finetune_patch_fraction: float = 1.0
     dit_cond_patch_size: Tuple[int, int] = (8, 8)
     guidance_type: str = "patch_decoder"
     mmpd_patch_size: int = 12
@@ -329,6 +333,13 @@ class PipelineState:
             init_kwargs["patch_refine_finetune_window_fraction"] = float(
                 init_kwargs["patch_refine_finetune_window_fraction"]
             )
+        if "patch_refine_finetune_patch_fraction" in init_kwargs:
+            frac = float(init_kwargs["patch_refine_finetune_patch_fraction"])
+            if not math.isfinite(frac) or frac <= 0.0 or frac > 1.0:
+                raise ValueError(
+                    f"patch_refine_finetune_patch_fraction must be in (0, 1], got {frac!r}"
+                )
+            init_kwargs["patch_refine_finetune_patch_fraction"] = frac
         for key in ("dit_embed_dim", "dit_depth", "dit_num_heads", "itrans_d_model", "itrans_d_ff", "itrans_e_layers", "itrans_n_heads"):
             if key in init_kwargs:
                 init_kwargs[key] = int(init_kwargs[key])

@@ -52,6 +52,8 @@ class DiffusionTSFConfig:
     # Unique absolute 8-step segments + AR prev-refine cond (see patch_refine_segments).
     patch_refine_unique_segments: bool = False
     patch_refine_prev_cond_dropout: float = 0.5
+    # Train-only unique-seg crop keep-rate (1.0 = all (B,V) crops).
+    patch_refine_finetune_patch_fraction: float = 1.0
     max_scale: float = 3.5
     representation_mode: str = "cdf"  # pdf or cdf
     staged_representation: str = "value_precision"
