@@ -17,6 +17,13 @@ from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.config import visualization_settings
+from models.diffusion_tsf.pipeline.eval_bench import (
+    configure as configure_eval_bench,
+    dump as dump_eval_bench,
+    enabled as eval_bench_enabled,
+    reset as reset_eval_bench,
+    span as eval_bench_span,
+)
 from models.diffusion_tsf.pipeline.visualize_utils import (
     decode_staged_anchor_components,
     per_window_anchor_mse,
@@ -164,24 +171,25 @@ def _staged_anchor_global_norm(
 
 
 def _summarize_staged_eval_metrics(
-  pack: Dict[str, np.ndarray],
-  *,
-  gmm_components: int,
-  seed: int,
-  topk_max: int,
+    pack: Dict[str, np.ndarray],
+    *,
+    gmm_components: int,
+    seed: int,
+    topk_max: int,
 ) -> Dict[str, float]:
     from models.diffusion_tsf.metrics import probabilistic_forecast_metrics
 
     y_true = pack["y_true"]
     samples = pack["samples"]
     sample_mean = samples.mean(axis=2)
-    metrics = probabilistic_forecast_metrics(
-        y_true,
-        samples,
-        gmm_components=gmm_components,
-        topk_max=topk_max,
-        seed=seed,
-    )
+    with eval_bench_span("sklearn_gmm"):
+        metrics = probabilistic_forecast_metrics(
+            y_true,
+            samples,
+            gmm_components=gmm_components,
+            topk_max=topk_max,
+            seed=seed,
+        )
     sample_mean_metrics = _deterministic_metrics(y_true, sample_mean)
     metrics["sample_mean_mse"] = sample_mean_metrics["mse"]
     metrics["sample_mean_mae"] = sample_mean_metrics["mae"]
@@ -258,12 +266,128 @@ def _resolve_eval_test_fraction(phase: PipelinePhase, state: PipelineState) -> f
     return float(phase.require("eval_test_fraction"))
 
 
-def _ar_eval_enabled(model) -> bool:
-    chunk = int(getattr(model.config, "diffusion_chunk_horizon", 0) or 0)
-    if chunk <= 0:
-        return False
-    dataset_h = int(getattr(model.config, "dataset_forecast_length", 0) or 0)
-    return dataset_h > chunk
+def _resolve_eval_max_windows(phase: PipelinePhase, state: PipelineState):
+    by_dataset = phase.get("eval_max_windows_by_dataset") or {}
+    if not by_dataset:
+        return None
+    if not isinstance(by_dataset, dict):
+        raise ValueError("eval_max_windows_by_dataset must be a mapping")
+    if state.dataset not in by_dataset:
+        return None
+    k = int(by_dataset[state.dataset])
+    if k < 1:
+        raise ValueError(
+            f"eval_max_windows_by_dataset[{state.dataset!r}] must be >= 1, got {k}"
+        )
+    return k
+
+
+def _eval_progress_dir(
+    phase: PipelinePhase, state: PipelineState, subset_id: str,
+) -> Path | None:
+    """Job-independent resume dir: results/eval_resume/<key>/<subset_id>/."""
+    key = phase.get("eval_progress_key")
+    if not key:
+        return None
+    results_root = Path(state.results_dir).resolve()
+    store = (
+        results_root.parents[1]
+        if results_root.parent.name == "datasets"
+        else results_root.parent
+    )
+    return store / "eval_resume" / str(key) / str(subset_id)
+
+
+def _load_eval_progress(path: Path) -> Tuple[List[Dict[str, Any]], set]:
+    jsonl = path / "windows.jsonl"
+    records: List[Dict[str, Any]] = []
+    done: set = set()
+    if not jsonl.is_file():
+        return records, done
+    with jsonl.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            wi = int(rec["window_index"])
+            if wi in done:
+                continue
+            done.add(wi)
+            records.append(rec)
+    return records, done
+
+
+def _metrics_from_progress_records(
+    records: Sequence[Dict[str, Any]], *, anchor_only: bool,
+) -> Dict[str, float]:
+    if not records:
+        raise ValueError("no eval progress records to summarize")
+
+    def _mean(key: str) -> float:
+        vals = [float(r[key]) for r in records if r.get(key) is not None]
+        return float(np.mean(vals)) if vals else float("nan")
+
+    out: Dict[str, float] = {
+        "anchor_mse": _mean("anchor_mse"),
+        "anchor_mae": _mean("anchor_mae"),
+        "anchor_n_samples": 1.0,
+        "n_windows": float(len(records)),
+    }
+    if anchor_only:
+        out["metrics_profile"] = "anchor_only"
+        return out
+    mse = _mean("mse")
+    mae = _mean("mae")
+    out.update({
+        "mse": mse,
+        "mae": mae,
+        "sample_mean_mse": _mean("sample_mean_mse") if any(
+            "sample_mean_mse" in r for r in records
+        ) else mse,
+        "sample_mean_mae": _mean("sample_mean_mae") if any(
+            "sample_mean_mae" in r for r in records
+        ) else mae,
+        "crps": _mean("crps"),
+        "metrics_profile": "dpmpp_prob_core_plus_anchor",
+    })
+    return out
+
+
+def _write_eval_progress_summary(
+    path: Path,
+    records: Sequence[Dict[str, Any]],
+    *,
+    n_planned: int,
+    extra: Dict[str, Any],
+) -> Dict[str, Any]:
+    path.mkdir(parents=True, exist_ok=True)
+    metrics = (
+        _metrics_from_progress_records(
+            records, anchor_only=bool(extra.get("anchor_only", False)),
+        )
+        if records else {}
+    )
+    payload = {
+        "n_planned": int(n_planned),
+        "n_done": len(records),
+        "complete": bool(n_planned > 0 and len(records) >= int(n_planned)),
+        **metrics,
+        **{k: v for k, v in extra.items() if k != "anchor_only"},
+    }
+    tmp = path / "summary.json.tmp"
+    with tmp.open("w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+    tmp.replace(path / "summary.json")
+    return payload
+
+
+def _per_window_mae(y_true: np.ndarray, pred: np.ndarray) -> np.ndarray:
+    return np.abs(y_true - pred).mean(axis=(1, 2))
+
+
+def _horizon_stitch_enabled(model) -> bool:
+    return bool(getattr(model.config, "horizon_stitch", False))
 
 
 def _staged_generate_once(
@@ -284,51 +408,61 @@ def _staged_generate_once(
     return {"coarse": coarse_out, "fine": fine_out, "prediction": pred_t}
 
 
-def _staged_generate_autoregressive(
+def _staged_generate_horizon_stitch(
     *,
     coarse_model,
     fine_model,
     past: torch.Tensor,
     gen_kwargs: Dict[str, Any],
-) -> torch.Tensor:
-    """Roll out staged coarse/fine in AR chunks; return global-norm forecast (B,V,H)."""
-    K = int(getattr(coarse_model.config, "lookback_overlap", 0))
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Independent 104-canvas generates + overlap-average stitch to length H."""
+    from models.diffusion_tsf.horizon_chunks import chunk_starts, overlap_average_stitch
+
+    k = int(getattr(coarse_model.config, "lookback_overlap", 0))
+    inner = int(getattr(coarse_model.config, "horizon_chunk_inner", 96))
     dataset_h = int(getattr(coarse_model.config, "dataset_forecast_length", 0) or 0)
-    n_chunks = coarse_model._ar_num_chunks(dataset_h)
-    pieces = []
-    remaining = dataset_h
-    for c in range(n_chunks):
-        if c == 0:
-            past_c = past
-        else:
-            hist = torch.cat(pieces, dim=-1)
-            past_c = torch.cat([past, hist], dim=-1)
-        out = _staged_generate_once(
-            coarse_model=coarse_model,
-            fine_model=fine_model,
-            past=past_c,
-            gen_kwargs=gen_kwargs,
+    if dataset_h < inner:
+        raise ValueError(
+            f"horizon_stitch dataset_forecast_length {dataset_h} < inner {inner}"
         )
-        chunk = out["prediction"]
-        if isinstance(chunk, np.ndarray):
-            chunk = torch.from_numpy(chunk).to(past.device)
-        if c > 0:
-            chunk = chunk[..., K:]
-        if chunk.shape[-1] > remaining:
-            chunk = chunk[..., :remaining]
-        pieces.append(chunk)
-        remaining -= chunk.shape[-1]
-        if remaining <= 0:
-            break
-    return torch.cat(pieces, dim=-1)
+    starts = chunk_starts(dataset_h, inner=inner, overlap=k)
+    n_chunks = len(starts)
+    batch = past.shape[0]
+    device = past.device
+    past_rep = past.repeat_interleave(n_chunks, dim=0)
+    t0 = torch.tensor(starts, device=device, dtype=torch.long).repeat(batch)
+    chunk_kwargs = dict(gen_kwargs)
+    chunk_kwargs["horizon_chunk_t0"] = t0
+    out = _staged_generate_once(
+        coarse_model=coarse_model,
+        fine_model=fine_model,
+        past=past_rep,
+        gen_kwargs=chunk_kwargs,
+    )
+    canvas = out["fine"]["prediction_with_overlap"]
+    expected_w = k + inner
+    if canvas.shape[-1] != expected_w:
+        raise ValueError(
+            f"stitch canvas width {canvas.shape[-1]} != overlap+inner {expected_w}"
+        )
+    # past.repeat_interleave(n_chunks): [b0_c0, b0_c1, ..., b1_c0, ...]
+    canvas_bn = canvas.view(batch, n_chunks, *canvas.shape[1:])
+    stitched = overlap_average_stitch(
+        canvas_bn, starts, horizon=dataset_h, inner=inner, overlap=k,
+    )
+    chunk0 = slice(0, None, n_chunks)
+    diag = {
+        "coarse": {key: val[chunk0] if torch.is_tensor(val) else val for key, val in out["coarse"].items()},
+        "fine": {key: val[chunk0] if torch.is_tensor(val) else val for key, val in out["fine"].items()},
+    }
+    return stitched, diag
 
 
 def _staged_det_gen_kwargs(state: PipelineState, default_steps: int) -> Dict[str, Any]:
     sampler = str(getattr(state, "eval_sampler", "anchor"))
     if sampler in ("anchor", "deterministic_anchor"):
         return {"sampler": sampler}
-    steps = 5 if state.smoke_test else int(default_steps)
-    return {"sampler": sampler, "num_inference_steps": steps}
+    return {"sampler": sampler, "num_inference_steps": int(default_steps)}
 
 
 class StagedEvalPhase(PipelinePhase):
@@ -433,6 +567,9 @@ class StagedEvalPhase(PipelinePhase):
         window_indices: Sequence[int],
         test_stride: int,
         anchor_only: bool = False,
+        progress_dir: Path | None = None,
+        prior_records: Sequence[Dict[str, Any]] | None = None,
+        n_planned: int | None = None,
     ) -> Tuple[Dict[str, float], Dict[str, np.ndarray]]:
         if not anchor_only and prob_sampler in {"anchor", "deterministic_anchor"}:
             raise ValueError("staged probabilistic eval must use a regular sampler, not anchor.")
@@ -463,109 +600,193 @@ class StagedEvalPhase(PipelinePhase):
             prob_sampler,
             prob_steps,
         )
-        with torch.no_grad():
-            for batch_idx, (past, future) in enumerate(loader):
-                past = past.to(device)
-                future = future.to(device)
-                batch_n = past.shape[0]
-                batch_start = batch_idx * loader.batch_size
-                batch_window_indices = window_indices[batch_start:batch_start + batch_n]
-                window_idx_all.extend(batch_window_indices)
-                K = getattr(coarse_model.config, "lookback_overlap", 0)
-                y_true_with_overlap_all.append(future.cpu().numpy())
-                if K > 0:
-                    future = future[..., K:]
-                y_true_all.append(future.cpu().numpy())
+        progress_records: List[Dict[str, Any]] = [dict(r) for r in (prior_records or ())]
+        progress_fh = None
+        planned = int(n_planned) if n_planned is not None else (
+            len(progress_records) + len(loader.dataset)
+        )
+        if progress_dir is not None:
+            progress_dir.mkdir(parents=True, exist_ok=True)
+            progress_fh = (progress_dir / "windows.jsonl").open("a")
+        keep_pack = progress_dir is None
+        try:
+            with torch.no_grad():
+                for batch_idx, (past, future) in enumerate(loader):
+                    if eval_bench_enabled():
+                        reset_eval_bench()
+                    with eval_bench_span("to_device"):
+                        past = past.to(device)
+                        future = future.to(device)
+                    batch_n = past.shape[0]
+                    batch_start = batch_idx * loader.batch_size
+                    batch_window_indices = window_indices[batch_start:batch_start + batch_n]
+                    window_idx_all.extend(batch_window_indices)
+                    K = getattr(coarse_model.config, "lookback_overlap", 0)
+                    y_true_with_overlap_all.append(future.cpu().numpy())
+                    if K > 0:
+                        future = future[..., K:]
+                    y_true_all.append(future.cpu().numpy())
 
-                torch.manual_seed(state.seed + batch_idx)
-                batch_t0 = time.perf_counter()
-                if _ar_eval_enabled(coarse_model):
-                    det_t = _staged_generate_autoregressive(
-                        coarse_model=coarse_model,
-                        fine_model=fine_model,
-                        past=past,
-                        gen_kwargs=det_kwargs,
-                    )
-                    det_all.append(det_t.detach().cpu().numpy())
-                    coarse_det = coarse_model.generate(past, **det_kwargs)
-                    fine_det = fine_model.generate(
-                        past,
-                        future_coarse_2d=coarse_det["future_2d_coarse"],
-                        **det_kwargs,
-                    )
-                    coarse_np, fine_np, _ = decode_staged_anchor_components(
-                        fine_model, coarse_det, fine_det,
-                    )
-                    coarse_all.append(coarse_np)
-                    fine_all.append(fine_np)
-                else:
-                    coarse_det = coarse_model.generate(past, **det_kwargs)
-                    fine_det = fine_model.generate(
-                        past,
-                        future_coarse_2d=coarse_det["future_2d_coarse"],
-                        **det_kwargs,
-                    )
-                    coarse_np, fine_np, final_np = decode_staged_anchor_components(
-                        fine_model, coarse_det, fine_det,
-                    )
-                    det_all.append(fine_det["prediction_global_norm"].detach().cpu().numpy())
-                    det_with_overlap_all.append(
-                        fine_det["prediction_with_overlap"].detach().cpu().numpy()
-                    )
-                    coarse_all.append(coarse_np)
-                    fine_all.append(fine_np)
+                    torch.manual_seed(state.seed + batch_idx)
+                    batch_t0 = time.perf_counter()
+                    with eval_bench_span("det"):
+                        if _horizon_stitch_enabled(coarse_model):
+                            det_t, stitch_diag = _staged_generate_horizon_stitch(
+                                coarse_model=coarse_model,
+                                fine_model=fine_model,
+                                past=past,
+                                gen_kwargs=det_kwargs,
+                            )
+                            det_all.append(det_t.detach().cpu().numpy())
+                            with eval_bench_span("decode_components"):
+                                coarse_np, fine_np, _ = decode_staged_anchor_components(
+                                    fine_model, stitch_diag["coarse"], stitch_diag["fine"],
+                                )
+                            coarse_all.append(coarse_np)
+                            fine_all.append(fine_np)
+                        else:
+                            coarse_det = coarse_model.generate(past, **det_kwargs)
+                            fine_det = fine_model.generate(
+                                past,
+                                future_coarse_2d=coarse_det["future_2d_coarse"],
+                                **det_kwargs,
+                            )
+                            with eval_bench_span("decode_components"):
+                                coarse_np, fine_np, final_np = decode_staged_anchor_components(
+                                    fine_model, coarse_det, fine_det,
+                                )
+                            det_all.append(fine_det["prediction_global_norm"].detach().cpu().numpy())
+                            det_with_overlap_all.append(
+                                fine_det["prediction_with_overlap"].detach().cpu().numpy()
+                            )
+                            coarse_all.append(coarse_np)
+                            fine_all.append(fine_np)
 
-                det_s = time.perf_counter() - batch_t0
-                prob_s = 0.0
-                if not anchor_only:
-                    prob_t0 = time.perf_counter()
-                    # Expand window batch across independent MC samples so unique-seg
-                    # AR (and other generate paths) fill the GPU in one forward chain.
-                    torch.manual_seed(state.seed + batch_idx * 1009)
-                    past_exp = past.repeat_interleave(prob_samples, dim=0)
-                    if _ar_eval_enabled(coarse_model):
-                        sample_t = _staged_generate_autoregressive(
-                            coarse_model=coarse_model,
-                            fine_model=fine_model,
-                            past=past_exp,
-                            gen_kwargs=prob_kwargs,
+                    det_s = time.perf_counter() - batch_t0
+                    prob_s = 0.0
+                    if not anchor_only:
+                        prob_t0 = time.perf_counter()
+                        with eval_bench_span("prob"):
+                            # Expand window batch across independent MC samples so unique-seg
+                            # AR (and other generate paths) fill the GPU in one forward chain.
+                            torch.manual_seed(state.seed + batch_idx * 1009)
+                            with eval_bench_span("mc_expand"):
+                                past_exp = past.repeat_interleave(prob_samples, dim=0)
+                            if _horizon_stitch_enabled(coarse_model):
+                                sample_t, _ = _staged_generate_horizon_stitch(
+                                    coarse_model=coarse_model,
+                                    fine_model=fine_model,
+                                    past=past_exp,
+                                    gen_kwargs=prob_kwargs,
+                                )
+                                with eval_bench_span("reshape_cpu"):
+                                    samples_bvs = _reshape_parallel_samples(sample_t, batch_n, prob_samples)
+                                    sample_all.append(samples_bvs.detach().cpu().numpy())
+                            else:
+                                coarse_sample = coarse_model.generate(past_exp, **prob_kwargs)
+                                fine_sample = fine_model.generate(
+                                    past_exp,
+                                    future_coarse_2d=coarse_sample["future_2d_coarse"],
+                                    **prob_kwargs,
+                                )
+                                with eval_bench_span("reshape_cpu"):
+                                    pred = fine_sample["prediction_global_norm"]
+                                    overlap = fine_sample["prediction_with_overlap"]
+                                    samples_bvs = _reshape_parallel_samples(pred, batch_n, prob_samples)
+                                    overlap_bvs = _reshape_parallel_samples(overlap, batch_n, prob_samples)
+                                    sample_all.append(samples_bvs.detach().cpu().numpy())
+                                    samples_with_overlap_all.append(overlap_bvs.detach().cpu().numpy())
+                        prob_s = time.perf_counter() - prob_t0
+                    batch_s = time.perf_counter() - batch_t0
+                    done = batch_idx + 1
+                    elapsed = time.perf_counter() - t0
+                    eta_s = (elapsed / done) * (len(loader) - done) if done else 0.0
+                    logger.info(
+                        "[%s] staged eval batch %d/%d n=%d "
+                        "det=%.1fs prob=%.1fs (n_samp=%d%s) batch=%.1fs "
+                        "elapsed=%.1fs eta=%.1fs",
+                        subset_id,
+                        done,
+                        len(loader),
+                        batch_n,
+                        det_s,
+                        prob_s,
+                        prob_samples,
+                        " anchor-only" if anchor_only else " parallel",
+                        batch_s,
+                        elapsed,
+                        eta_s,
+                    )
+                    if eval_bench_enabled():
+                        dump_eval_bench(
+                            logger,
+                            title=(
+                                f"[{subset_id}] batch {done}/{len(loader)} "
+                                f"n={batch_n} n_samp={prob_samples} steps={prob_steps}"
+                            ),
                         )
-                        samples_bvs = _reshape_parallel_samples(sample_t, batch_n, prob_samples)
-                        sample_all.append(samples_bvs.detach().cpu().numpy())
-                    else:
-                        coarse_sample = coarse_model.generate(past_exp, **prob_kwargs)
-                        fine_sample = fine_model.generate(
-                            past_exp,
-                            future_coarse_2d=coarse_sample["future_2d_coarse"],
-                            **prob_kwargs,
+                    if progress_dir is not None:
+                        y_np = y_true_all[-1]
+                        det_np = det_all[-1]
+                        amse = per_window_anchor_mse(y_np, det_np)
+                        amae = _per_window_mae(y_np, det_np)
+                        if not anchor_only:
+                            samp_np = sample_all[-1]
+                            smean = samp_np.mean(axis=2)
+                            pmse = ((y_np - smean) ** 2).mean(axis=(1, 2))
+                            pmae = _per_window_mae(y_np, smean)
+                            crps = per_window_crps(y_np, samp_np)
+                        for j, wi in enumerate(batch_window_indices):
+                            rec = {
+                                "window_index": int(wi),
+                                "anchor_mse": float(amse[j]),
+                                "anchor_mae": float(amae[j]),
+                            }
+                            if not anchor_only:
+                                rec.update({
+                                    "mse": float(pmse[j]),
+                                    "mae": float(pmae[j]),
+                                    "sample_mean_mse": float(pmse[j]),
+                                    "sample_mean_mae": float(pmae[j]),
+                                    "crps": float(crps[j]),
+                                })
+                            progress_records.append(rec)
+                            if progress_fh is not None:
+                                progress_fh.write(json.dumps(rec) + "\n")
+                        if progress_fh is not None:
+                            progress_fh.flush()
+                        summary = _write_eval_progress_summary(
+                            progress_dir,
+                            progress_records,
+                            n_planned=planned,
+                            extra={"anchor_only": anchor_only, "subset_id": subset_id},
                         )
-                        pred = fine_sample["prediction_global_norm"]
-                        overlap = fine_sample["prediction_with_overlap"]
-                        samples_bvs = _reshape_parallel_samples(pred, batch_n, prob_samples)
-                        overlap_bvs = _reshape_parallel_samples(overlap, batch_n, prob_samples)
-                        sample_all.append(samples_bvs.detach().cpu().numpy())
-                        samples_with_overlap_all.append(overlap_bvs.detach().cpu().numpy())
-                    prob_s = time.perf_counter() - prob_t0
-                batch_s = time.perf_counter() - batch_t0
-                done = batch_idx + 1
-                elapsed = time.perf_counter() - t0
-                eta_s = (elapsed / done) * (len(loader) - done) if done else 0.0
-                logger.info(
-                    "[%s] staged eval batch %d/%d n=%d "
-                    "det=%.1fs prob=%.1fs (n_samp=%d%s) batch=%.1fs "
-                    "elapsed=%.1fs eta=%.1fs",
-                    subset_id,
-                    done,
-                    len(loader),
-                    batch_n,
-                    det_s,
-                    prob_s,
-                    prob_samples,
-                    " anchor-only" if anchor_only else " parallel",
-                    batch_s,
-                    elapsed,
-                    eta_s,
-                )
+                        logger.info(
+                            "[%s] eval progress %d/%d anchor_mse=%.4f %s",
+                            subset_id,
+                            summary.get("n_done", len(progress_records)),
+                            planned,
+                            summary.get("anchor_mse", float("nan")),
+                            "" if anchor_only else f"prob_mse={summary.get('mse', float('nan')):.4f} crps={summary.get('crps', float('nan')):.4f}",
+                        )
+                        wandb_utils.log_eval_metrics({
+                            "eval/progress_n_done": float(summary.get("n_done", 0)),
+                            "eval/progress_n_planned": float(planned),
+                            "eval/staged_anchor_mse": summary.get("anchor_mse"),
+                            **({} if anchor_only else {
+                                "eval/staged_prob_mse": summary.get("mse"),
+                                "eval/staged_crps": summary.get("crps"),
+                            }),
+                        }, step=int(summary.get("n_done", 0)))
+        finally:
+            if progress_fh is not None:
+                progress_fh.close()
+
+        if progress_dir is not None:
+            metrics = _metrics_from_progress_records(
+                progress_records, anchor_only=anchor_only,
+            )
+            return metrics, {}
 
         pack = {
             "y_true": np.concatenate(y_true_all, axis=0),
@@ -589,12 +810,16 @@ class StagedEvalPhase(PipelinePhase):
             metrics = _summarize_anchor_only_metrics(pack)
         else:
             pack["sample_mean"] = pack["samples"].mean(axis=2)
+            if eval_bench_enabled():
+                reset_eval_bench()
             metrics = _summarize_staged_eval_metrics(
                 pack,
                 gmm_components=gmm_components,
                 seed=state.seed,
                 topk_max=topk_max,
             )
+            if eval_bench_enabled():
+                dump_eval_bench(logger, title="sklearn_gmm_metrics")
         return metrics, pack
 
     def execute(self, state: PipelineState) -> PipelineState:
@@ -610,10 +835,16 @@ class StagedEvalPhase(PipelinePhase):
         )
 
         device = state.resolve_device()
+        subset_id = state.subset_id or state.dataset
+        bench = configure_eval_bench(bool(getattr(state, "eval_bench", False)))
+        if bench:
+            logger.info(
+                "[%s] eval-bench on (TS_EVAL_BENCH / --eval-bench); skipping viz and diagnostics",
+                subset_id,
+            )
         anchor_only = bool(self.get("anchor_only", False))
         gmm_components = int(self.require("gmm_components"))
         topk_max = int(self.require("topk_max"))
-        subset_id = state.subset_id or state.dataset
         variate_indices = state.variate_indices
         if not variate_indices:
             raise ValueError(
@@ -672,6 +903,14 @@ class StagedEvalPhase(PipelinePhase):
             )
         coarse_model = self._load_model(state, "coarse", guidance, n_iv, device)
         fine_model = self._load_model(state, "patch_refine", guidance, n_iv, device)
+        n_chunks = 1
+        if _horizon_stitch_enabled(coarse_model):
+            from models.diffusion_tsf.horizon_chunks import chunk_starts
+            n_chunks = len(chunk_starts(
+                int(coarse_model.config.dataset_forecast_length),
+                inner=int(coarse_model.config.horizon_chunk_inner),
+                overlap=int(coarse_model.config.lookback_overlap),
+            ))
 
         batch_size = int(self.require("batch_size"))
         if state.smoke_test:
@@ -680,8 +919,14 @@ class StagedEvalPhase(PipelinePhase):
             default_steps = 5
         else:
             eval_fraction = _resolve_eval_test_fraction(self, state)
-            final_ds = _fraction_subset(full_test_ds, eval_fraction, state.seed) if eval_fraction < 1.0 else full_test_ds
+            eval_k = _resolve_eval_max_windows(self, state)
+            if eval_k is not None and eval_fraction < 1.0:
+                raise ValueError(
+                    f"{subset_id}: eval_max_windows_by_dataset and "
+                    "eval_test_fraction<1 cannot both apply"
+                )
             if eval_fraction < 1.0:
+                final_ds = _fraction_subset(full_test_ds, eval_fraction, state.seed)
                 logger.info(
                     "[%s] eval subset: %d/%d windows (eval_test_fraction=%.3f)",
                     subset_id,
@@ -689,14 +934,40 @@ class StagedEvalPhase(PipelinePhase):
                     len(full_test_ds),
                     eval_fraction,
                 )
+            elif eval_k is not None:
+                from models.diffusion_tsf.pipeline.data_subset import random_window_subset
+                final_ds = random_window_subset(
+                    full_test_ds,
+                    eval_k,
+                    int(state.seed),
+                    label=f"{subset_id}/eval",
+                )
+            else:
+                final_ds = full_test_ds
             prob_samples = 0 if anchor_only else int(self.require("probabilistic_n_samples"))
             default_steps = 1 if anchor_only else int(self.require("probabilistic_num_inference_steps"))
+
+        max_windows = getattr(state, "eval_max_windows", None)
+        if max_windows is not None:
+            n_keep = min(int(max_windows), len(final_ds))
+            if isinstance(final_ds, Subset):
+                final_ds = Subset(full_test_ds, list(final_ds.indices[:n_keep]))
+            else:
+                final_ds = Subset(final_ds, list(range(n_keep)))
+            logger.info("[%s] eval_max_windows=%d -> %d windows", subset_id, int(max_windows), n_keep)
+        max_steps = getattr(state, "eval_max_steps", None)
+        if max_steps is not None:
+            default_steps = int(max_steps)
+            logger.info("[%s] eval_max_steps=%d", subset_id, default_steps)
+        if bench:
+            batch_size = 1
 
         # Probe peak generate batch on this GPU; dataloader batch is smaller so
         # that B_windows * n_prob_samples still fits the parallel MC expand.
         if (
             bool(self.get("probe_eval_batch_size", False))
             and not state.smoke_test
+            and not bench
             and device.type == "cuda"
         ):
             probe_kwargs = dict(_staged_det_gen_kwargs(state, default_steps))
@@ -711,17 +982,18 @@ class StagedEvalPhase(PipelinePhase):
                 min_bs=1,
                 max_bs=int(self.get("probe_eval_batch_size_max", 64)),
             )
-            # Parallel samples expand leading dim by prob_samples.
-            usable = max(1, max_fit // max(1, int(prob_samples)))
+            # Parallel samples (and horizon chunks) expand the leading dim.
+            usable = max(1, max_fit // max(1, int(prob_samples) * n_chunks))
             if usable != batch_size:
                 logger.info(
                     "[%s] staged_eval probe: config batch_size=%d -> probed=%d "
-                    "(max_fit=%d / n_samples=%d)",
+                    "(max_fit=%d / n_samples=%d n_chunks=%d)",
                     subset_id,
                     batch_size,
                     usable,
                     max_fit,
                     prob_samples,
+                    n_chunks,
                 )
             batch_size = usable
 
@@ -729,74 +1001,94 @@ class StagedEvalPhase(PipelinePhase):
             eval_window_indices = [int(i) for i in final_ds.indices]
         else:
             eval_window_indices = list(range(len(final_ds)))
+        planned_indices = list(eval_window_indices)
+        progress_dir = _eval_progress_dir(self, state, subset_id)
+        progress_records: List[Dict[str, Any]] = []
+        if progress_dir is not None:
+            progress_dir.mkdir(parents=True, exist_ok=True)
+            progress_records, done = _load_eval_progress(progress_dir)
+            remaining = [i for i in planned_indices if i not in done]
+            logger.info(
+                "[%s] eval progress resume: %d/%d saved, %d remaining (%s)",
+                subset_id,
+                len(progress_records),
+                len(planned_indices),
+                len(remaining),
+                progress_dir,
+            )
+            eval_window_indices = remaining
+            final_ds = Subset(full_test_ds, remaining)
 
-        try:
-            from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
+        if bench:
+            logger.info("[%s] skipping eval diagnostics (eval-bench)", subset_id)
+        else:
+            try:
+                from models.diffusion_tsf.pipeline.phase_diagnostics import run_phase_start_diagnostics
 
-            diagnostic_stages = [
-                (
-                    "coarse", coarse_model,
-                    _stage_finetune_ckpt(state, "coarse", checkpoint_dir=source_checkpoint_dir),
-                    None,
-                ),
-                (
-                    "patch_refine",
-                    fine_model,
-                    _stage_finetune_ckpt(state, "patch_refine", checkpoint_dir=source_checkpoint_dir),
-                    _stage_finetune_ckpt(state, "coarse", checkpoint_dir=source_checkpoint_dir),
-                ),
-            ]
-            ckpt_info = []
-            if ft_guidance_ckpt and os.path.exists(ft_guidance_ckpt):
-                ckpt_info.append(
+                diagnostic_stages = [
+                    (
+                        "coarse", coarse_model,
+                        _stage_finetune_ckpt(state, "coarse", checkpoint_dir=source_checkpoint_dir),
+                        None,
+                    ),
+                    (
+                        "patch_refine",
+                        fine_model,
+                        _stage_finetune_ckpt(state, "patch_refine", checkpoint_dir=source_checkpoint_dir),
+                        _stage_finetune_ckpt(state, "coarse", checkpoint_dir=source_checkpoint_dir),
+                    ),
+                ]
+                ckpt_info = []
+                if ft_guidance_ckpt and os.path.exists(ft_guidance_ckpt):
+                    ckpt_info.append(
+                        {
+                            "kind": state.guidance_type,
+                            "path": ft_guidance_ckpt,
+                            "n_variates": n_iv,
+                            "lookback": int(ds_lb),
+                            "horizon": int(ds_hz),
+                        }
+                    )
+                ckpt_info.extend(
                     {
-                        "kind": state.guidance_type,
-                        "path": ft_guidance_ckpt,
+                        "kind": f"diffusion_{stage}",
+                        "path": ckpt,
                         "n_variates": n_iv,
                         "lookback": int(ds_lb),
                         "horizon": int(ds_hz),
                     }
+                    for stage, _model, ckpt, _coarse_ckpt in diagnostic_stages
                 )
-            ckpt_info.extend(
-                {
-                    "kind": f"diffusion_{stage}",
-                    "path": ckpt,
-                    "n_variates": n_iv,
-                    "lookback": int(ds_lb),
-                    "horizon": int(ds_hz),
-                }
-                for stage, _model, ckpt, _coarse_ckpt in diagnostic_stages
-            )
-            run_phase_start_diagnostics(
-                state,
-                phase_name=self.name,
-                models=[item[1] for item in diagnostic_stages],
-                model_labels=[f"diffusion_{item[0]}" for item in diagnostic_stages],
-                ckpt_info=ckpt_info,
-            )
-            _, _, test_ds, _ = load_dataset(
-                state, state.dataset,
-                variate_indices,
-                stride=train_stride,
-                test_stride=test_stride,
-                ordinal_tie_atol=float(state.ordinal_tie_atol),
-                use_ordinal_window_norm=state.use_ordinal_window_norm,
-            )
-            for eval_stage, eval_model, eval_ckpt, eval_coarse in diagnostic_stages:
-                diag = run_real_dataset_phase_diagnostics(
+                run_phase_start_diagnostics(
                     state,
-                    train_ds=test_ds,
-                    model=eval_model,
-                    itrans_ckpt_path=ft_guidance_ckpt,
-                    stage=eval_stage,
-                    diffusion_ckpt_path=eval_ckpt,
-                    coarse_ckpt_path=eval_coarse,
-                    tag=f"staged_eval/{eval_stage}",
-                    include_phase_start=(eval_stage == "coarse"),
+                    phase_name=self.name,
+                    models=[item[1] for item in diagnostic_stages],
+                    model_labels=[f"diffusion_{item[0]}" for item in diagnostic_stages],
+                    ckpt_info=ckpt_info,
                 )
-                wandb_utils.log_phase_diagnostics_result(diag)
-        except Exception as e:
-            logger.warning("[%s] eval diagnostics failed: %s", self.name, e, exc_info=True)
+                _, _, test_ds, _ = load_dataset(
+                    state, state.dataset,
+                    variate_indices,
+                    stride=train_stride,
+                    test_stride=test_stride,
+                    ordinal_tie_atol=float(state.ordinal_tie_atol),
+                    use_ordinal_window_norm=state.use_ordinal_window_norm,
+                )
+                for eval_stage, eval_model, eval_ckpt, eval_coarse in diagnostic_stages:
+                    diag = run_real_dataset_phase_diagnostics(
+                        state,
+                        train_ds=test_ds,
+                        model=eval_model,
+                        itrans_ckpt_path=ft_guidance_ckpt,
+                        stage=eval_stage,
+                        diffusion_ckpt_path=eval_ckpt,
+                        coarse_ckpt_path=eval_coarse,
+                        tag=f"staged_eval/{eval_stage}",
+                        include_phase_start=(eval_stage == "coarse"),
+                    )
+                    wandb_utils.log_phase_diagnostics_result(diag)
+            except Exception as e:
+                logger.warning("[%s] eval diagnostics failed: %s", self.name, e, exc_info=True)
 
         sampler_tuning = []
         selected_sampler = "anchor" if anchor_only else str(self.require("probabilistic_sampler"))
@@ -805,7 +1097,7 @@ class StagedEvalPhase(PipelinePhase):
                 "staged probabilistic_sampler must be ddim, quad_t, or ddim_quad, not anchor."
             )
         selected_steps = default_steps
-        if not anchor_only and bool(self.require("tune_sampler")) and not state.smoke_test:
+        if not anchor_only and bool(self.require("tune_sampler")) and not state.smoke_test and not bench:
             tune_fraction = float(self.require("sampler_tune_fraction"))
             tune_samples = int(self.require("sampler_tune_probabilistic_n_samples"))
             candidate_samplers = list(self.require("sampler_tune_candidates"))
@@ -863,23 +1155,32 @@ class StagedEvalPhase(PipelinePhase):
                 100 * tune_fraction,
             )
 
-        loader = DataLoader(final_ds, batch_size=batch_size, shuffle=False)
-        metrics, pack = self._run_eval(
-            state=state,
-            subset_id=subset_id,
-            loader=loader,
-            device=device,
-            coarse_model=coarse_model,
-            fine_model=fine_model,
-            prob_sampler=selected_sampler,
-            prob_steps=selected_steps,
-            prob_samples=prob_samples,
-            gmm_components=gmm_components,
-            topk_max=topk_max,
-            window_indices=eval_window_indices,
-            test_stride=test_stride,
-            anchor_only=anchor_only,
-        )
+        if progress_dir is not None and not eval_window_indices:
+            metrics = _metrics_from_progress_records(
+                progress_records, anchor_only=anchor_only,
+            )
+            pack: Dict[str, np.ndarray] = {}
+        else:
+            loader = DataLoader(final_ds, batch_size=batch_size, shuffle=False)
+            metrics, pack = self._run_eval(
+                state=state,
+                subset_id=subset_id,
+                loader=loader,
+                device=device,
+                coarse_model=coarse_model,
+                fine_model=fine_model,
+                prob_sampler=selected_sampler,
+                prob_steps=selected_steps,
+                prob_samples=prob_samples,
+                gmm_components=gmm_components,
+                topk_max=topk_max,
+                window_indices=eval_window_indices,
+                test_stride=test_stride,
+                anchor_only=anchor_only,
+                progress_dir=progress_dir,
+                prior_records=progress_records,
+                n_planned=len(planned_indices),
+            )
         metrics.update({
             "sampler_tuned": bool(sampler_tuning),
             "selected_probabilistic_sampler": selected_sampler,
@@ -888,23 +1189,25 @@ class StagedEvalPhase(PipelinePhase):
 
         from models.diffusion_tsf.pipeline.phase_diagnostics import select_spaced_top_k
 
-        anchor_scores = per_window_anchor_mse(pack["y_true"], pack["final_anchor"])
-        series_starts = pack["series_starts"]
-        window_indices_arr = pack["window_indices"]
         worst_manifest: List[Dict[str, Any]] = []
-        worst_metrics = [("anchor_mse", anchor_scores)]
-        if not anchor_only:
-            worst_metrics.insert(0, ("crps", per_window_crps(pack["y_true"], pack["samples"])))
-        for metric_name, scores in worst_metrics:
-            top_idx = select_spaced_top_k(scores, series_starts, k=10, min_spacing=48)
-            for rank, wi in enumerate(top_idx, start=1):
-                worst_manifest.append({
-                    "metric": metric_name,
-                    "rank": rank,
-                    "window_index": int(window_indices_arr[wi]),
-                    "series_start": int(series_starts[wi]),
-                    "score": float(scores[wi]),
-                })
+        has_pack = bool(pack.get("y_true") is not None and len(pack.get("y_true", [])) > 0)
+        if has_pack:
+            anchor_scores = per_window_anchor_mse(pack["y_true"], pack["final_anchor"])
+            series_starts = pack["series_starts"]
+            window_indices_arr = pack["window_indices"]
+            worst_metrics = [("anchor_mse", anchor_scores)]
+            if not anchor_only:
+                worst_metrics.insert(0, ("crps", per_window_crps(pack["y_true"], pack["samples"])))
+            for metric_name, scores in worst_metrics:
+                top_idx = select_spaced_top_k(scores, series_starts, k=10, min_spacing=48)
+                for rank, wi in enumerate(top_idx, start=1):
+                    worst_manifest.append({
+                        "metric": metric_name,
+                        "rank": rank,
+                        "window_index": int(window_indices_arr[wi]),
+                        "series_start": int(series_starts[wi]),
+                        "score": float(scores[wi]),
+                    })
 
         partial_dir = os.path.join(state.results_dir, "partials")
         raw_dir = os.path.join(state.results_dir, "raw")
@@ -923,19 +1226,20 @@ class StagedEvalPhase(PipelinePhase):
             payload["eval_artifact_tag"] = tag
             payload["test_stride"] = int(test_stride)
             json.dump(payload, f, indent=2, sort_keys=True)
-        np.savez_compressed(os.path.join(raw_dir, f"staged_anchor_{state.dataset}_{tag}.npz"), **pack)
-        np.savez_compressed(
-            os.path.join(raw_dir, f"staged_anchor_samples_{state.dataset}_{tag}.npz"),
-            y_true=pack["y_true"],
-            anchor=pack["deterministic"],
-        )
-        if not anchor_only:
+        if has_pack:
+            np.savez_compressed(os.path.join(raw_dir, f"staged_anchor_{state.dataset}_{tag}.npz"), **pack)
             np.savez_compressed(
-                os.path.join(raw_dir, f"staged_dpmpp_samples_{state.dataset}_{tag}.npz"),
+                os.path.join(raw_dir, f"staged_anchor_samples_{state.dataset}_{tag}.npz"),
                 y_true=pack["y_true"],
-                samples=pack["samples"],
-                sample_mean=pack["sample_mean"],
+                anchor=pack["deterministic"],
             )
+            if not anchor_only:
+                np.savez_compressed(
+                    os.path.join(raw_dir, f"staged_dpmpp_samples_{state.dataset}_{tag}.npz"),
+                    y_true=pack["y_true"],
+                    samples=pack["samples"],
+                    sample_mean=pack["sample_mean"],
+                )
         with open(os.path.join(nested_dir, f"staged_results_{tag}.json"), "w") as f:
             json.dump({
                 "dataset": state.dataset,
@@ -980,6 +1284,7 @@ class StagedEvalPhase(PipelinePhase):
         skip_viz = bool(
             self.get("skip_eval_visualizations", False)
             or state.extra.get("skip_eval_visualizations", False)
+            or bench
         )
         viz_cfg = visualization_settings(state.merged_config)
         if not skip_viz and viz_cfg.get("enabled", True):
@@ -1102,8 +1407,10 @@ class StagedEvalPhase(PipelinePhase):
 
         # Point-acc gap/redbox: default ON; runs even when skip_eval_visualizations
         # (earlyjuly leaves). Gated only by viz_binary_mmpd_{gap,redbox} + campaign path.
-        if bool(viz_cfg.get("viz_binary_mmpd_gap", True)) or bool(
-            viz_cfg.get("viz_binary_mmpd_redbox", True)
+        # eval-bench skips this too so viz cannot hang the timing run.
+        if (not bench) and (
+            bool(viz_cfg.get("viz_binary_mmpd_gap", True))
+            or bool(viz_cfg.get("viz_binary_mmpd_redbox", True))
         ):
             try:
                 from utils.staged_point_gap_redbox_viz import (

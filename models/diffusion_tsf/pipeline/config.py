@@ -20,6 +20,8 @@ GEOMETRY_KEYS = (
     "lookback_overlap",
     "diffusion_lookback_cap",
     "diffusion_chunk_horizon",
+    "horizon_stitch",
+    "horizon_chunk_inner",
     "representation_time_stride",
     "past_cond_resize_to_horizon",
     "itrans_lookback_length",
@@ -47,6 +49,7 @@ REQUIRED_EXPERIMENT_KEYS = (
     "patch_refine_patch_width",
     "patch_refine_col_stride",
     "patch_refine_unique_segments",
+    "patch_refine_use_prev_cond",
     "patch_refine_prev_cond_dropout",
     "patch_refine_finetune_window_fraction",
     "patch_refine_finetune_patch_fraction",
@@ -69,6 +72,8 @@ REQUIRED_EXPERIMENT_KEYS = (
     "lookback_overlap",
     "diffusion_lookback_cap",
     "diffusion_chunk_horizon",
+    "horizon_stitch",
+    "horizon_chunk_inner",
     "representation_time_stride",
     "past_cond_resize_to_horizon",
     "itrans_lookback_length",
@@ -142,6 +147,8 @@ REQUIRED_TRAINING_KEYS = (
     "past_loss_weight",
     "lr_scheduler_type",
     "lr_warmup_epochs",
+    "train_epoch_groups",
+    "train_epoch_max_bytes",
     "max_scale_tuning",
     "max_scale_tuning_range",
 )
@@ -189,6 +196,9 @@ CLI_STATE_KEYS = frozenset({
     "smoke_test",
     "resume",
     "fresh",
+    "eval_bench",
+    "eval_max_windows",
+    "eval_max_steps",
 })
 
 # Every training value is held by PipelineState.  Keeping this list explicit
@@ -254,8 +264,28 @@ def apply_training_section_to_state(
         if key not in training:
             continue
         value = training[key]
-        if key in ("n_itrans_hp_trials", "n_diffusion_hp_trials", "n_finetune_hp_trials", "lr_warmup_epochs"):
+        if key == "train_epoch_max_bytes":
+            if value is None:
+                init_kwargs[key] = None
+            else:
+                init_kwargs[key] = int(value)
+                if init_kwargs[key] < 1:
+                    raise ValueError(
+                        f"training.train_epoch_max_bytes must be an integer >= 1 "
+                        f"or null, got {value!r}"
+                    )
+        elif key in (
+            "n_itrans_hp_trials",
+            "n_diffusion_hp_trials",
+            "n_finetune_hp_trials",
+            "lr_warmup_epochs",
+            "train_epoch_groups",
+        ):
             init_kwargs[key] = int(value)
+            if key == "train_epoch_groups" and init_kwargs[key] < 1:
+                raise ValueError(
+                    f"training.train_epoch_groups must be an integer >= 1, got {value!r}"
+                )
         elif key in ("max_scale_tuning", "torch_compile"):
             init_kwargs[key] = bool(value)
         elif key == "max_scale_tuning_range":

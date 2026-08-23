@@ -40,6 +40,14 @@ training:
   past_loss_weight: 0.3
   lr_scheduler_type: none
   lr_warmup_epochs: 0
+  # 1 = one epoch is the full train set. Raise in a leaf so each epoch is a
+  # disjoint group of constant-B batches (a full cycle still covers every window).
+  # After each cycle, indices are reshuffled and batches are repacked.
+  train_epoch_groups: 1
+  # null = use train_epoch_groups as-is. Integer cap (bytes) computes N after
+  # the batch probe so each packed group is <= this many fp32 past+future bytes.
+  # When set, the cap wins over train_epoch_groups > 1.
+  train_epoch_max_bytes: null
   max_scale_tuning: false
   max_scale_tuning_range: [2.5, 14.0]
   diffusion_ema_decay: 0.99
@@ -112,6 +120,9 @@ experiment:
     electricity: 5.4
     traffic: 6.0
     PeMS: 11.8
+    PEMS03: 11.8
+    PEMS07: 11.8
+    PEMS08: 11.8
     solar_Alabama: 13.0
     dynamic: 6.0
   window_norm_std_floor: 0.1
@@ -123,6 +134,7 @@ experiment:
   patch_refine_patch_width: 8
   patch_refine_col_stride: 6
   patch_refine_unique_segments: false
+  patch_refine_use_prev_cond: true
   patch_refine_prev_cond_dropout: 0.5
   patch_refine_finetune_window_fraction: 1.0
   # Train-only: keep this fraction of unique-seg (B,V) crops per window.
@@ -149,6 +161,8 @@ experiment:
   lookback_overlap: 8
   diffusion_lookback_cap: 0
   diffusion_chunk_horizon: 0
+  horizon_stitch: false
+  horizon_chunk_inner: 96
   representation_time_stride: 1
   past_cond_resize_to_horizon: true
   itrans_lookback_length: null

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -22,6 +22,39 @@ def raw_window_key(past: torch.Tensor) -> str:
 class CachedCrossVariateContext:
     tokens: torch.Tensor
     token_variate_ids: Optional[torch.Tensor]
+
+
+def _unwrap_cache_source(dataset) -> Tuple[object, List[int]]:
+    from torch.utils.data import Subset
+
+    base = dataset
+    selected_indices = list(range(len(dataset)))
+    while isinstance(base, Subset):
+        selected_indices = [int(base.indices[i]) for i in selected_indices]
+        base = base.dataset
+    return base, selected_indices
+
+
+def count_cache_windows(dataset) -> int:
+    """Host rows that ``precompute_dataset`` will encode for ``dataset``."""
+    from models.diffusion_tsf.patch_refine_segments import (
+        UniquePatchSegmentDataset,
+        parent_starts_for_segment,
+    )
+
+    base, selected_indices = _unwrap_cache_source(dataset)
+    if not isinstance(base, UniquePatchSegmentDataset):
+        return len(selected_indices)
+    parents = set()
+    for segment_index in selected_indices:
+        segment_start = base.segment_starts[segment_index]
+        for parent in parent_starts_for_segment(
+            int(segment_start), lookback=base.lookback, horizon=base.horizon,
+            overlap=base.overlap, patch_width=base.patch_width,
+            series_len=int(base.data.shape[0]),
+        ):
+            parents.add(parent)
+    return len(parents)
 
 
 class CrossVariateTokenCache:
@@ -54,9 +87,11 @@ class CrossVariateTokenCache:
         self.device = device
         self.storage = storage
         self._entries: Dict[str, torch.Tensor | int] = {}
-        self._cpu_entries: List[torch.Tensor] = []
         self._packed_cpu: Optional[torch.Tensor] = None
         self._token_variate_ids: Optional[torch.Tensor] = None
+        self._reserved_n = 0
+        self._next_idx = 0
+        self._finalize_logged = False
 
     @property
     def n_entries(self) -> int:
@@ -65,9 +100,10 @@ class CrossVariateTokenCache:
     @property
     def bytes(self) -> int:
         if self._packed_cpu is not None:
-            return self._packed_cpu.numel() * self._packed_cpu.element_size()
-        if self.storage == "pinned_cpu":
-            return sum(t.numel() * t.element_size() for t in self._cpu_entries)
+            used = int(self._next_idx)
+            if used == 0:
+                return 0
+            return used * self._packed_cpu[0].numel() * self._packed_cpu.element_size()
         return sum(
             t.numel() * t.element_size()
             for t in self._entries.values()
@@ -78,13 +114,53 @@ class CrossVariateTokenCache:
     def _memory_label(self) -> str:
         return "gpu_memory" if self.storage == "gpu" else "pinned_cpu_memory"
 
+    def reserve(self, n: int) -> None:
+        """Reserve pinned packed rows before the first ``add``.
+
+        Call once with train+val window counts so packing never keeps a live
+        list of individual tensors. Cannot grow after the packed buffer exists.
+        """
+        n = int(n)
+        if n < 1:
+            raise ValueError(f"token cache reserve must be >= 1, got {n}")
+        if self._packed_cpu is not None:
+            if n > self._packed_cpu.shape[0]:
+                raise RuntimeError(
+                    f"cannot grow pinned cache after allocation "
+                    f"({self._packed_cpu.shape[0]} -> {n})"
+                )
+            return
+        self._reserved_n = max(int(self._reserved_n), n)
+
+    def _store_cpu_token(self, token: torch.Tensor) -> int:
+        cpu_token = token.detach().cpu()
+        if self._packed_cpu is None:
+            reserved = int(self._reserved_n)
+            if reserved < 1:
+                raise RuntimeError(
+                    "pinned_cpu CrossVariateTokenCache requires reserve(n) before add()"
+                )
+            self._packed_cpu = torch.empty(
+                (reserved, *cpu_token.shape),
+                dtype=cpu_token.dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+            self._next_idx = 0
+        idx = int(self._next_idx)
+        if idx >= self._packed_cpu.shape[0]:
+            raise RuntimeError(
+                f"token cache exceeded reserve {self._packed_cpu.shape[0]}"
+            )
+        self._packed_cpu[idx].copy_(cpu_token)
+        self._next_idx = idx + 1
+        return idx
+
     @torch.no_grad()
     def add(self, past: torch.Tensor) -> None:
         """Encode windows not already present, retaining native GPU dtype."""
         if self.model is None:
             raise RuntimeError("token-cache encoder was released before precompute completed")
-        if self._packed_cpu is not None:
-            raise RuntimeError("cannot add entries after pinned CPU cache finalization")
         if past.ndim != 3:
             raise ValueError(f"past must be (B,V,L), got {tuple(past.shape)}")
         keys = [raw_window_key(row) for row in past]
@@ -107,33 +183,27 @@ class CrossVariateTokenCache:
             elif not torch.equal(self._token_variate_ids, ids):
                 raise RuntimeError("token variate IDs changed while building frozen cache")
         for local_i, batch_i in enumerate(missing):
-            token = tokens[local_i].detach()
+            token = tokens[local_i]
             if self.storage == "gpu":
-                self._entries[keys[batch_i]] = token.clone()
+                self._entries[keys[batch_i]] = token.detach().clone()
             else:
-                self._entries[keys[batch_i]] = len(self._cpu_entries)
-                self._cpu_entries.append(token.cpu().clone())
+                self._entries[keys[batch_i]] = self._store_cpu_token(token)
 
     def _finalize_pinned_cpu(self) -> None:
-        if self.storage != "pinned_cpu" or self._packed_cpu is not None:
+        if self.storage != "pinned_cpu":
             return
-        if not self._cpu_entries:
+        if self._packed_cpu is None:
             raise RuntimeError("cannot finalize an empty pinned CPU token cache")
-        prototype = self._cpu_entries[0]
-        n = len(self._cpu_entries)
-        packed = torch.empty(
-            (n, *prototype.shape),
-            dtype=prototype.dtype,
-            device="cpu",
-            pin_memory=True,
-        )
-        # Row copies instead of stack(): stack() kept the list tensors live
-        # and added a third full copy, which oom-killed 160-var jobs at 150G.
-        for i in range(n):
-            packed[i].copy_(self._cpu_entries[i])
-            self._cpu_entries[i] = None
-        self._cpu_entries.clear()
-        self._packed_cpu = packed
+        if getattr(self, "_finalize_logged", False):
+            return
+        used = int(self._next_idx)
+        reserved = int(self._packed_cpu.shape[0])
+        if used < reserved:
+            logger.info(
+                "  [cross-variate-cache] packed using %d/%d reserved slots",
+                used, reserved,
+            )
+        self._finalize_logged = True
 
     def _pinned_cpu_batch(self, indices: List[int]) -> torch.Tensor:
         self._finalize_pinned_cpu()
@@ -184,17 +254,16 @@ class CrossVariateTokenCache:
     @torch.no_grad()
     def precompute_dataset(self, dataset, *, batch_size: int) -> None:
         """Populate every stable parent window, including unique-segment parents."""
-        from torch.utils.data import DataLoader, Subset
+        from torch.utils.data import DataLoader
         from models.diffusion_tsf.patch_refine_segments import (
             UniquePatchSegmentDataset,
             parent_starts_for_segment,
         )
 
-        base = dataset
-        selected_indices = list(range(len(dataset)))
-        while isinstance(base, Subset):
-            selected_indices = [int(base.indices[i]) for i in selected_indices]
-            base = base.dataset
+        n_expected = count_cache_windows(dataset)
+        if self.storage == "pinned_cpu" and self._packed_cpu is None:
+            self.reserve(max(int(self._reserved_n), n_expected))
+        base, selected_indices = _unwrap_cache_source(dataset)
         if not isinstance(base, UniquePatchSegmentDataset):
             self.precompute_loader(DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0))
             return
@@ -220,7 +289,9 @@ class CrossVariateTokenCache:
 
     def release(self) -> None:
         self._entries.clear()
-        self._cpu_entries.clear()
         self._packed_cpu = None
         self._token_variate_ids = None
+        self._reserved_n = 0
+        self._next_idx = 0
+        self._finalize_logged = False
         self.model = None

@@ -7,6 +7,23 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
 
+def parse_horizon_stitch(value: Any) -> bool:
+    """YAML ``horizon_stitch``: false or overlap_avg/true."""
+    if value is True or value == 1:
+        return True
+    if value is False or value in (0, None, ""):
+        return False
+    if isinstance(value, str):
+        key = value.strip().lower().replace("-", "_")
+        if key in {"overlap_avg", "true", "yes", "on"}:
+            return True
+        if key in {"false", "no", "off", "none"}:
+            return False
+    raise ValueError(
+        f"horizon_stitch must be false or overlap_avg, got {value!r}"
+    )
+
+
 @dataclass
 class DiffusionTSFConfig:
     """Settings for binary CDF diffusion with FactorizedDiT."""
@@ -14,12 +31,16 @@ class DiffusionTSFConfig:
     # seq lens
     lookback_length: int = 512
     forecast_length: int = 96
-    # YAML horizon (before overlap); used for AR when > diffusion_chunk_horizon.
+    # YAML horizon (before overlap). Canvas width is lookback_overlap + inner when
+    # horizon_stitch is on; otherwise forecast_length already includes overlap.
     dataset_forecast_length: int = 0
     # Cap 2D past conditioning width; 0 = legacy min(past_len, target_width).
     diffusion_lookback_cap: int = 0
-    # Fixed denoiser chunk width; 0 = use full dataset_forecast_length.
+    # Removed grow-past AR. Must stay 0; use horizon_stitch instead.
     diffusion_chunk_horizon: int = 0
+    # Overlap-average stitch: fixed 104 canvas + chunk token, not grow-the-past AR.
+    horizon_stitch: bool = False
+    horizon_chunk_inner: int = 96
     # Subsample timesteps before 2D encode (x[..., ::stride]); decode upsamples linearly.
     representation_time_stride: int = 1
     # When False, past 2D cond keeps native lookback width (e.g. 336); DiT cond tokens
@@ -51,6 +72,8 @@ class DiffusionTSFConfig:
     patch_refine_col_stride: int = 6
     # Unique absolute 8-step segments + AR prev-refine cond (see patch_refine_segments).
     patch_refine_unique_segments: bool = False
+    # When False, never write left-neighbor refine into the coarse-cell aux map.
+    patch_refine_use_prev_cond: bool = True
     patch_refine_prev_cond_dropout: float = 0.5
     # Train-only unique-seg crop keep-rate (1.0 = all (B,V) crops).
     patch_refine_finetune_patch_fraction: float = 1.0
@@ -270,6 +293,28 @@ class DiffusionTSFConfig:
             raise ValueError("variate_factorized=False is no longer supported.")
         if self.model_type != "dit":
             raise ValueError(f"model_type must be 'dit', got {self.model_type!r}")
+        if int(self.diffusion_chunk_horizon or 0) != 0:
+            raise ValueError(
+                "diffusion_chunk_horizon AR was removed; set horizon_stitch "
+                "to overlap_avg (true) instead of a non-zero diffusion_chunk_horizon"
+            )
+        if self.horizon_chunk_inner <= 0:
+            raise ValueError(
+                f"horizon_chunk_inner must be positive, got {self.horizon_chunk_inner}"
+            )
+        if self.horizon_stitch:
+            canvas_w = int(self.lookback_overlap) + int(self.horizon_chunk_inner)
+            if int(self.forecast_length) != canvas_w:
+                raise ValueError(
+                    "horizon_stitch requires forecast_length == lookback_overlap + "
+                    f"horizon_chunk_inner ({canvas_w}), got {self.forecast_length}"
+                )
+            dhz = int(self.dataset_forecast_length or 0)
+            if dhz < int(self.horizon_chunk_inner):
+                raise ValueError(
+                    "horizon_stitch requires dataset_forecast_length >= "
+                    f"horizon_chunk_inner ({self.horizon_chunk_inner}), got {dhz}"
+                )
 
     @property
     def data_occupancy_channels(self) -> int:

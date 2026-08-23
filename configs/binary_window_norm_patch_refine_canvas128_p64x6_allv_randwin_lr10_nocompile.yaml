@@ -1,0 +1,11 @@
+# Traffic 862-variate: inductor compile OOMs at batch=1. Keep compile off.
+# Coarse bs=1 still OOMs on L40S without activation checkpointing (~42GB
+# peak already at electricity 321v). Checkpointing is required on L40S.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10.yaml
+
+training:
+  torch_compile: false
+  use_gradient_checkpointing: true
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_0p5, patch_frac_0p5, anchor_every4, eval_s1_n10_steps4, nopruner, from_pretrain, no_compile]

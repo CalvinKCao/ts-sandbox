@@ -1,0 +1,98 @@
+# ETTh1 fine-only probe: skip coarse train, load lr10 job 4964361 best coarse
+# weights, then 20ep / patience 8 patch_refine at the donor fine LR (no Optuna).
+# Donor data recipe: window/patch fractions default 1.0, anchor every batch.
+# Do NOT set the lr10 starvation knobs (window 0.5 / patch 0.5 / anchor every 4).
+# Unique-seg stays on via the canvas128 -> earlyjuly parent.
+# Keep ETTh1_allv_randwin so the coarse ckpt matches the same windows.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
+replace_phases: true
+
+training:
+  itrans_paper_batch_size: 1
+
+wandb:
+  tags: [all_variates, randwin, lr10, etth1, fine_only, donor_lr, from_lr10_coarse_best, canvas128, p64x6]
+
+visualization:
+  viz_binary_mmpd_gap: false
+  viz_binary_mmpd_redbox: false
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-allv-randwin-lr10-etth1-fine20-donorlr
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_etth1_fine20_donorlr
+  seed: 42
+  data_subset_by_dataset:
+    ETTh1:
+      subset_id: ETTh1_allv_randwin
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: 8209
+      val_max_windows: 2785
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    n_samples: 10000
+    epochs: 20
+    patience: 4
+    shared_cache: true
+    reuse_pretrain_from_config: binary_window_norm_patch_refine_canvas128_p64x6
+    require_reuse_pretrain: true
+
+  - phase: patch_guidance_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+    reuse_checkpoint_dir: /scratch/ccao87/ts-sandbox-allv-randwin-lr10/results/ckpts/08-22-4964361-ETTh1-binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 1
+    max_epochs: 20
+    patience: 8
+    search_space: fixed
+    # Skip coarse train: copy lr10 ETTh1 coarse best.pt + metadata.json.
+    reuse_checkpoint_dir: /scratch/ccao87/ts-sandbox-allv-randwin-lr10/results/ckpts/08-22-4964361-ETTh1-binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10
+    # Donor coarse HP unused when reuse hits; kept so the phase schema is valid.
+    fixed_tuned_params:
+      learning_rate: 0.00016260630766856958
+      batch_size: 42
+      gradient_accumulation_steps: 2
+      ema_decay: 0.99
+      prediction_target: epsilon
+      loss_weighting: none
+      min_snr_gamma: 5.0
+      use_deterministic_anchor_loss: true
+      deterministic_anchor_lambda: 0.99
+      deterministic_anchor_alpha: 0.0
+      binary_noise_schedule: linear
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+      max_scale: 5.2
+
+  - phase: diffusion_patch_refine_finetune_hp
+    n_trials: 1
+    max_epochs: 20
+    patience: 8
+    search_space: fixed
+    retrain: true
+    # Straight-shot 20ep from synthetic patch_refine pretrain (not Optuna, not
+    # another coarse train). Donor fine HP from earlyjuly_norm.
+    fixed_tuned_params:
+      learning_rate: 0.0007817554354066733
+      batch_size: 36
+      gradient_accumulation_steps: 1
+      ema_decay: 0.995
+      prediction_target: epsilon
+      loss_weighting: none
+      min_snr_gamma: 2.0
+      use_deterministic_anchor_loss: true
+      deterministic_anchor_lambda: 0.99
+      deterministic_anchor_alpha: 0.0
+      binary_noise_schedule: linear
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+      max_scale: 5.2
+      target_univariate_batch: 256

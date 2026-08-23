@@ -1,0 +1,10 @@
+# Historical no-cross-attention timing ablation.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_weather_allv_msdefault_fixed.yaml
+
+wandb:
+  tags: [ablation, no_guidance, window_norm, patch_refine, canvas128, p64x6, weather, all_variates, anchor_only_eval_s16]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-weather-allv-no-guidance
+  experiment_name: binary_window_norm_patch_refine_c128_weather_allv_no_guidance
+  disable_cross_attention: true

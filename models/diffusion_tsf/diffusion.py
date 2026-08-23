@@ -2,9 +2,17 @@
 
 import math
 import logging
+import time
 from typing import Optional, Tuple
 
 import torch
+
+from models.diffusion_tsf.pipeline.eval_bench import (
+    enabled as eval_bench_enabled,
+    repeat as eval_bench_repeat,
+    span as eval_bench_span,
+    sync as eval_bench_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -212,29 +220,44 @@ class BinaryDiffusionScheduler:
         xt = torch.bernoulli(torch.full(shape, 0.5, device=device))
 
         intermediates = []
+        _bench = eval_bench_enabled()
+        with eval_bench_span("denoise"):
+            for i, t_val in enumerate(step_indices):
+                if _bench:
+                    eval_bench_sync()
+                    _t_step = time.perf_counter()
+                t_idx = int(t_val.item())
+                if yield_intermediates and (
+                    snapshot_set is None or t_idx in snapshot_set
+                ):
+                    intermediates.append((t_idx, xt.clone()))
 
-        for i, t_val in enumerate(step_indices):
-            t_idx = int(t_val.item())
-            if yield_intermediates and (
-                snapshot_set is None or t_idx in snapshot_set
-            ):
-                intermediates.append((t_idx, xt.clone()))
+                t_batch = torch.full((shape[0],), t_idx, device=device, dtype=torch.long)
+                if _bench:
+                    eval_bench_sync()
+                    _t_fn = time.perf_counter()
+                x0_logits, _zt_logits = model_fn(xt, t_batch)
+                if _bench:
+                    eval_bench_sync()
+                    eval_bench_repeat("denoise_model_fn", time.perf_counter() - _t_fn)
+                    _t_draw = time.perf_counter()
+                # A1+A2: Bernoulli x0 every step, including the last (no hard threshold / freeze).
+                x0_hat = torch.bernoulli(torch.sigmoid(x0_logits))
 
-            t_batch = torch.full((shape[0],), t_idx, device=device, dtype=torch.long)
-            x0_logits, _zt_logits = model_fn(xt, t_batch)
-            # A1+A2: Bernoulli x0 every step, including the last (no hard threshold / freeze).
-            x0_hat = torch.bernoulli(torch.sigmoid(x0_logits))
+                if i < len(step_indices) - 1:
+                    t_next = int(step_indices[i + 1].item())
+                    beta_next = self.betas[t_next].item()
+                    zt_new = torch.bernoulli(torch.full_like(x0_hat, beta_next))
+                    xt = (x0_hat.bool() ^ zt_new.bool()).float()
+                else:
+                    xt = x0_hat
+                if _bench:
+                    eval_bench_sync()
+                    eval_bench_repeat("denoise_bernoulli", time.perf_counter() - _t_draw)
+                    eval_bench_repeat("denoise_step", time.perf_counter() - _t_step)
 
-            if i < len(step_indices) - 1:
-                t_next = int(step_indices[i + 1].item())
-                beta_next = self.betas[t_next].item()
-                zt_new = torch.bernoulli(torch.full_like(x0_hat, beta_next))
-                xt = (x0_hat.bool() ^ zt_new.bool()).float()
-            else:
-                xt = x0_hat
-
-            if verbose and i % 5 == 0:
-                logger.debug(f"  binary step {i + 1}/{num_steps} (t={t_idx})")
+                if verbose and i % 5 == 0:
+                    logger.debug(f"  binary step {i + 1}/{num_steps} (t={t_idx})")
 
         if yield_intermediates:
             if snapshot_set is None or 0 in snapshot_set:

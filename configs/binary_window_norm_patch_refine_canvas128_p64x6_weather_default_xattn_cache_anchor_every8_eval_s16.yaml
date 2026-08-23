@@ -1,0 +1,11 @@
+# Cross-attention-only Weather cache control with the deterministic-anchor
+# forward computed on batches 1, 9, 17, ... of each training epoch.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_weather_default_xattn_cache_eval_s16.yaml
+
+wandb:
+  tags: [ablation, weather, default_subset, cross_attention_only, frozen_token_cache, anchor_every8, canvas128, p64x6, full_eval, stride16]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-weather-xattn-cache-anchor-every8-eval-s16
+  experiment_name: binary_window_norm_patch_refine_c128_weather_default_xattn_cache_anchor_every8_eval_s16
+  deterministic_anchor_every_n_batches: 8

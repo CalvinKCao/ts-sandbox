@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from optuna.exceptions import TrialPruned
-from optuna.pruners import HyperbandPruner
+from optuna.pruners import HyperbandPruner, MedianPruner, NopPruner
 from optuna.samplers import TPESampler
 from optuna.trial import TrialState
 from torch.utils.data import DataLoader, Subset
@@ -32,6 +32,7 @@ from models.diffusion_tsf.pipeline.reused_paths import (
     reused_stage_best_ckpt,
 )
 from models.diffusion_tsf.pipeline.state import PipelineState
+from models.diffusion_tsf.pipeline.data_subset import random_window_subset
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     _stage_pretrain_ckpt,
@@ -50,8 +51,13 @@ from models.diffusion_tsf.pipeline.train.checkpointing import (
 from models.diffusion_tsf.pipeline.train.diffusion_loop import (
     DiffusionEpochMetrics,
     DiffusionTrainer,
+    log_epoch_shard_contract,
+    make_grouped_train_loader,
 )
-from models.diffusion_tsf.pipeline.train.cross_variate_cache import CrossVariateTokenCache
+from models.diffusion_tsf.pipeline.train.cross_variate_cache import (
+    CrossVariateTokenCache,
+    count_cache_windows,
+)
 from models.diffusion_tsf.pipeline.visualize_utils import (
     _load_staged_diffusion_from_ckpt,
     run_real_dataset_phase_diagnostics,
@@ -174,7 +180,13 @@ def _probe_max_finetune_batch_size(
             torch.cuda.synchronize(device)
             return True
         except RuntimeError as exc:
-            if "out of memory" not in str(exc).lower():
+            err = str(exc).lower()
+            # CheckpointError from unique-seg + gradient checkpointing in the
+            # probe is a "does not fit" signal, not a config bug.
+            if (
+                "out of memory" not in err
+                and "checkpoint" not in err
+            ):
                 raise
             torch.cuda.empty_cache()
             return False
@@ -960,22 +972,45 @@ def _suggest_staged_params(
         ms = base_ms
 
     if search_space == "lr_only":
-        if state.finetune_hp_lr_min == state.finetune_hp_lr_max:
-            lr = float(state.finetune_hp_lr_min)
-        else:
-            lr = trial.suggest_float(
-                "learning_rate", state.finetune_hp_lr_min, state.finetune_hp_lr_max, log=True
+        if "hp_lr_min" not in overrides or "hp_lr_max" not in overrides:
+            raise ValueError("search_space=lr_only requires phase hp_lr_min and hp_lr_max")
+        lr_min = float(overrides["hp_lr_min"])
+        lr_max = float(overrides["hp_lr_max"])
+        if lr_max < lr_min:
+            raise ValueError(f"hp_lr_max ({lr_max}) must be >= hp_lr_min ({lr_min})")
+        lr = float(trial.suggest_float("learning_rate", lr_min, lr_max, log=True))
+        params = {
+            "learning_rate": lr,
+            "ema_decay": float(overrides.get("ema_decay", state.extra.get("diffusion_ema_decay", 0.0))),
+            "binary_noise_schedule": str(overrides.get("binary_noise_schedule", state.binary_noise_schedule)),
+            "loss_weighting": str(overrides.get("loss_weighting", state.loss_weighting)),
+            "min_snr_gamma": float(overrides.get("min_snr_gamma", state.min_snr_gamma)),
+            "prediction_target": str(overrides.get("prediction_target", state.prediction_target)),
+            "max_scale": ms,
+            "binary_length_mode": str(
+                overrides.get("binary_length_mode", state.binary_length_mode)
+            ),
+            "binary_length_g": float(
+                overrides.get("binary_length_g", state.binary_length_g)
+            ),
+            "binary_length_scale": float(
+                overrides.get("binary_length_scale", state.binary_length_scale)
+            ),
+        }
+        target_u = overrides.get("target_univariate_batch")
+        if target_u is not None:
+            batch_plan = _plan_univariate_effective_batch(
+                probed_max_windows=max_batch_size,
+                n_variates=_n_variates_for_batch(state),
+                target_univariate=int(target_u),
+                smoke_test=smoke_test,
             )
+            params.update(batch_plan)
+            return params
         return _apply_effective_batch_multiplier(
             {
-                "learning_rate": lr,
+                **params,
                 "batch_size": max(1, max_batch_size),
-                "ema_decay": float(state.extra.get("diffusion_ema_decay", 0.0)),
-                "binary_noise_schedule": state.binary_noise_schedule,
-                "loss_weighting": state.loss_weighting,
-                "min_snr_gamma": float(state.min_snr_gamma),
-                "prediction_target": state.prediction_target,
-                "max_scale": ms,
             },
             max_batch_size,
             state,
@@ -1005,11 +1040,37 @@ def _suggest_staged_params(
 class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
     stage = ""
 
+    def _copy_reused_stage_checkpoint(self, state: PipelineState) -> None:
+        reuse_dir = self.get("reuse_checkpoint_dir")
+        if not reuse_dir:
+            return
+        reuse_dir = os.path.abspath(str(reuse_dir))
+        src_best = _stage_best_ckpt(state, self.stage, checkpoint_dir=reuse_dir)
+        src_meta = os.path.join(
+            _stage_subset_dir(state, self.stage, checkpoint_dir=reuse_dir),
+            "metadata.json",
+        )
+        if not os.path.isfile(src_best) or not os.path.isfile(src_meta):
+            raise FileNotFoundError(
+                f"{self.name} reuse_checkpoint_dir={reuse_dir!r} missing "
+                f"{self.stage} best.pt/metadata.json (looked for {src_best})"
+            )
+        dest_dir = _stage_subset_dir(state, self.stage)
+        dest_best = _stage_best_ckpt(state, self.stage)
+        dest_meta = os.path.join(dest_dir, "metadata.json")
+        if os.path.isfile(dest_best) and os.path.isfile(dest_meta):
+            return
+        os.makedirs(dest_dir, exist_ok=True)
+        shutil.copy2(src_best, dest_best)
+        shutil.copy2(src_meta, dest_meta)
+        logger.info("  [%s] copied %s checkpoint from %s", self.name, self.stage, reuse_dir)
+
     def should_skip(self, state: PipelineState) -> bool:
         # retrain=true forces a fresh train on a new run, but --resume must still
         # honor local best.pt+metadata so we can finish eval after quota crashes.
         if self.get("retrain", False) and not bool(getattr(state, "resume", False)):
             return False
+        self._copy_reused_stage_checkpoint(state)
         best_pt = _stage_best_ckpt(state, self.stage)
         meta = os.path.join(_stage_subset_dir(state, self.stage), "metadata.json")
         if os.path.exists(best_pt) and os.path.exists(meta):
@@ -1216,6 +1277,23 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             **model_kwargs,
         ).to(device)
 
+    def _make_pruner(self, max_epochs: int):
+        pruner_name = str(self.get("pruner", "hyperband")).lower()
+        if pruner_name in ("none", "nop", "off"):
+            return NopPruner()
+        if pruner_name == "median":
+            return MedianPruner(
+                n_startup_trials=int(self.get("pruner_n_startup_trials", 2)),
+            )
+        if pruner_name == "hyperband":
+            return HyperbandPruner(
+                min_resource=1, max_resource=max_epochs, reduction_factor=3,
+            )
+        raise ValueError(
+            f"{self.name}: unknown pruner={pruner_name!r} "
+            "(expected none, median, or hyperband)"
+        )
+
     def _inject_length_params(self, params: Dict[str, Any], state: PipelineState) -> Dict[str, Any]:
         out = dict(params)
         out.setdefault("binary_length_mode", state.binary_length_mode)
@@ -1310,7 +1388,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         subset_meta: Dict[str, Any],
         norm_stats: Dict[str, Any],
     ) -> Tuple[Dict[str, Any], float, int, bool]:
-        """Optionally retrain the Optuna winner from pretrain for more epochs.
+        """Train the Optuna winner for refit_best_max_epochs.
+
+        Default continues the search checkpoint. ``refit_from_pretrain: true``
+        loads synthetic pretrain weights instead (fresh optimizer / EMA).
 
         Returns (best_params, final_val, final_epoch, refit_completed).
         """
@@ -1328,15 +1409,21 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         best_params = _with_state_anchor_params(
             self._inject_length_params(best_params, state), state,
         )
+        from_pretrain = bool(self.get("refit_from_pretrain", False))
+        if from_pretrain and not (diff_ckpt and os.path.isfile(diff_ckpt)):
+            raise FileNotFoundError(
+                f"{self.name} refit_from_pretrain requires pretrain ckpt, got {diff_ckpt!r}"
+            )
         logger.info(
             "  [%s] refit_best: search_epochs=%d -> refit_epochs=%d patience=%d "
-            "lr=%.2e g=%s",
+            "lr=%.2e g=%s from_pretrain=%s",
             self.name,
             search_max_epochs,
             refit_epochs,
             refit_patience,
             float(best_params.get("learning_rate", 0.0)),
             best_params.get("binary_length_g"),
+            from_pretrain,
         )
         # Persist search winner before long refit so --resume can skip Optuna.
         meta_pending: Dict[str, Any] = {
@@ -1356,6 +1443,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "max_epochs": search_max_epochs,
             "patience": search_patience,
             "refit_best_max_epochs": refit_epochs,
+            "refit_from_pretrain": from_pretrain,
             "refit_completed": False,
         }
         meta_pending.update(_hybrid_norm_metadata(norm_stats))
@@ -1367,7 +1455,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             train_ds=train_ds,
             val_ds=val_ds,
             params=best_params,
-            pretrained_path=diff_ckpt,
+            pretrained_path=diff_ckpt if from_pretrain else None,
             guidance_checkpoint=ft_guidance_ckpt,
             device=device,
             variate_indices=variate_indices,
@@ -1375,6 +1463,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             max_epochs=refit_epochs,
             patience=refit_patience,
             trial=None,
+            resume_ckpt=None if from_pretrain else final_ckpt,
         )
         return best_params, float(final_val), int(final_epoch), True
 
@@ -1395,31 +1484,21 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         trial=None,
         guidance=None,
         pretrained_state_dict: Optional[Dict[str, Any]] = None,
+        resume_ckpt: Optional[str] = None,
     ) -> Tuple[float, int]:
         params = _with_state_anchor_params(params, state)
         n_iv = len(variate_indices)
         batch_size = int(params["batch_size"])
-        train_loader = DataLoader(
-            train_ds,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=0,
-            drop_last=not state.smoke_test,
-        )
-        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
-        if len(train_loader) == 0:
+        n_groups_cfg = int(training_value(state, "train_epoch_groups", 1))
+        if n_groups_cfg < 1:
             raise ValueError(
-                f"{self.stage} train set has {len(train_ds)} windows, smaller than batch_size={batch_size}"
+                f"training.train_epoch_groups must be >= 1, got {n_groups_cfg!r}"
             )
+        raw_max_bytes = training_value(state, "train_epoch_max_bytes", None)
+        max_bytes = None if raw_max_bytes is None else int(raw_max_bytes)
+        if len(train_ds) == 0:
+            raise ValueError(f"{self.stage} train set is empty")
         trial_label = f"trial={trial.number}" if trial is not None else "trial=single"
-        logger.info(
-            "  [%s/%s] %s START epochs=%d patience=%d lr=%.2e bs=%d accum=%d "
-            "train_batches=%d val_batches=%d g=%s",
-            self.name, self.stage, trial_label, max_epochs, patience,
-            float(params["learning_rate"]), batch_size,
-            int(params.get("gradient_accumulation_steps", 1)),
-            len(train_loader), len(val_loader), params.get("binary_length_g"),
-        )
         _log_gpu_mem(f"{self.stage}/{trial_label}/start")
 
         ds_lb, ds_hz = pipeline_mod.dataset_window_lengths(state, state.dataset)
@@ -1433,7 +1512,33 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             state=state, n_iv=n_iv, itrans_guidance=guidance, device=device, params=params,
         )
         try:
-            if pretrained_path or pretrained_state_dict is not None:
+            resume_state = None
+            start_epoch = 0
+            if resume_ckpt:
+                if not os.path.isfile(resume_ckpt):
+                    raise FileNotFoundError(f"{self.name} resume_ckpt missing: {resume_ckpt}")
+                resume_state = torch.load(
+                    resume_ckpt, map_location=device, weights_only=False,
+                )
+                pipeline_mod.load_diffusion_state_keep_attached_guidance(
+                    model, resume_state["model_state_dict"],
+                )
+                start_epoch = int(resume_state.get("epoch", -1)) + 1
+                if start_epoch < 0:
+                    raise RuntimeError(f"{self.name} resume ckpt has invalid epoch={resume_state.get('epoch')!r}")
+                logger.info(
+                    "  [%s] resume weights from %s at epoch %d/%d",
+                    self.name, resume_ckpt, start_epoch, max_epochs,
+                )
+                if start_epoch >= int(max_epochs):
+                    resume_val = float(resume_state["val_loss"])
+                    resume_best_epoch = int(resume_state.get("epoch", -1)) + 1
+                    logger.info(
+                        "  [%s] resume already at epoch %d >= max_epochs=%d; keeping ckpt val=%.4f",
+                        self.name, start_epoch, max_epochs, resume_val,
+                    )
+                    return resume_val, resume_best_epoch
+            elif pretrained_path or pretrained_state_dict is not None:
                 if pretrained_state_dict is None:
                     pretrained_state_dict = torch.load(
                         pretrained_path, map_location=device, weights_only=False,
@@ -1460,33 +1565,70 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     max_bs=int(self.get("probe_train_batch_size_max", 16)),
                     headroom=float(self.get("probe_train_batch_size_headroom", 0.85)),
                 )
-                if probed != batch_size:
+                if probed != batch_size or params.get("target_univariate_batch") is not None:
                     logger.info(
                         "  [%s] train batch probe: yaml/plan batch_size=%d -> probed=%d",
                         self.name,
                         batch_size,
                         probed,
                     )
-                    params["batch_size"] = int(probed)
-                    params["gradient_accumulation_steps"] = 1
-                    params["effective_batch_size"] = int(probed)
-                    params["effective_univariate_batch"] = int(probed) * n_iv
-                    batch_size = int(probed)
-                    train_loader = DataLoader(
-                        train_ds,
-                        batch_size=batch_size,
-                        shuffle=True,
-                        num_workers=0,
-                        drop_last=not state.smoke_test,
-                    )
-                    val_loader = DataLoader(
-                        val_ds, batch_size=batch_size, shuffle=False, num_workers=0,
-                    )
-                    if len(train_loader) == 0:
-                        raise ValueError(
-                            f"{self.stage} train set has {len(train_ds)} windows, "
-                            f"smaller than probed batch_size={batch_size}"
+                    target_u = params.get("target_univariate_batch")
+                    if target_u is not None:
+                        batch_plan = _plan_univariate_effective_batch(
+                            probed_max_windows=int(probed),
+                            n_variates=n_iv,
+                            target_univariate=int(target_u),
+                            smoke_test=False,
                         )
+                        params.update(batch_plan)
+                        batch_size = int(params["batch_size"])
+                    else:
+                        params["batch_size"] = int(probed)
+                        params["gradient_accumulation_steps"] = 1
+                        params["effective_batch_size"] = int(probed)
+                        params["effective_univariate_batch"] = int(probed) * n_iv
+                        batch_size = int(probed)
+
+            trial_seed = int(state.seed)
+            if trial is not None:
+                trial_seed = trial_seed + 17 * int(trial.number)
+            train_loader, n_groups, window_nbytes, group_nbytes = make_grouped_train_loader(
+                train_ds,
+                batch_size=batch_size,
+                n_groups=n_groups_cfg,
+                seed=trial_seed,
+                max_bytes=max_bytes,
+                n_variates=n_iv,
+                lookback=int(ds_lb),
+                horizon=int(ds_hz),
+                overlap=int(state.lookback_overlap),
+                smoke_test=bool(state.smoke_test),
+            )
+            val_loader = DataLoader(
+                val_ds, batch_size=batch_size, shuffle=False, num_workers=0,
+            )
+            if len(train_loader) == 0:
+                raise ValueError(
+                    f"{self.stage} train set has {len(train_ds)} windows, "
+                    f"smaller than batch_size={batch_size}"
+                )
+            logger.info(
+                "  [%s/%s] %s START epochs=%d patience=%d lr=%.2e bs=%d accum=%d "
+                "train_epoch_groups=%d train_n=%d train_batches=%d val_batches=%d "
+                "window_bytes=%s group_bytes=%s g=%s",
+                self.name, self.stage, trial_label, max_epochs, patience,
+                float(params["learning_rate"]), batch_size,
+                int(params.get("gradient_accumulation_steps", 1)),
+                n_groups, len(train_ds), len(train_loader), len(val_loader),
+                window_nbytes, group_nbytes,
+                params.get("binary_length_g"),
+            )
+            log_epoch_shard_contract(
+                name=f"{self.name}/{self.stage}",
+                n_groups=n_groups,
+                max_epochs=max_epochs,
+                patience=patience,
+            )
 
             token_cache = getattr(self, "_phase_token_cache", None)
             if (
@@ -1500,6 +1642,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     storage=str(self.get("cross_variate_token_cache_storage", "pinned_cpu")),
                 )
                 stable_train = not _has_train_window_augmentation(train_ds)
+                n_cache = count_cache_windows(val_ds)
+                if stable_train:
+                    n_cache += count_cache_windows(train_ds)
+                token_cache.reserve(n_cache)
                 if stable_train:
                     token_cache.precompute_dataset(train_ds, batch_size=batch_size)
                 else:
@@ -1518,12 +1664,20 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             optimizer = torch.optim.AdamW(
                 model.parameters(), lr=float(params["learning_rate"]),
             )
+            if resume_state is not None and resume_state.get("optimizer_state_dict") is not None:
+                optimizer.load_state_dict(resume_state["optimizer_state_dict"])
             scheduler = self._build_lr_scheduler(
                 optimizer, state, max_epochs, float(params["learning_rate"]),
             )
+            if scheduler is not None and start_epoch > 0:
+                for _ in range(start_epoch):
+                    scheduler.step()
             saved_ckpt = False
 
             def set_training_epoch(loader: DataLoader, epoch: int) -> None:
+                batch_sampler = getattr(loader, "batch_sampler", None)
+                if hasattr(batch_sampler, "set_epoch"):
+                    batch_sampler.set_epoch(epoch)
                 set_train_window_aug_epoch(loader, epoch)
                 epoch_ds = train_ds
                 while hasattr(epoch_ds, "dataset") and not hasattr(epoch_ds, "set_epoch"):
@@ -1590,17 +1744,28 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 val_token_cache=token_cache,
                 log_prefix=f"{self.name}/{self.stage}/{trial_label}",
             )
+            early_stopping = EarlyStopping(patience=patience)
+            if resume_state is not None:
+                early_stopping.best_loss = float(resume_state["val_loss"])
             result = trainer.fit(
                 max_epochs=max_epochs,
-                early_stopping=EarlyStopping(patience=patience),
+                start_epoch=start_epoch,
+                initial_best_val=(
+                    None if resume_state is None else float(resume_state["val_loss"])
+                ),
+                initial_best_epoch=(
+                    0 if resume_state is None else int(resume_state.get("epoch", -1)) + 1
+                ),
+                early_stopping=early_stopping,
                 on_best=save_best,
                 on_epoch_end=report_epoch,
             )
             if ckpt_path and result.best_epoch > 0 and not saved_ckpt:
-                raise RuntimeError(
-                    f"{trial_label}: best_val={result.best_val:.4f} at epoch {result.best_epoch} "
-                    f"but no checkpoint was written to {ckpt_path}"
-                )
+                if not (resume_ckpt and os.path.isfile(ckpt_path)):
+                    raise RuntimeError(
+                        f"{trial_label}: best_val={result.best_val:.4f} at epoch {result.best_epoch} "
+                        f"but no checkpoint was written to {ckpt_path}"
+                    )
             if ckpt_path and saved_ckpt and not os.path.isfile(ckpt_path):
                 raise RuntimeError(
                     f"{trial_label}: expected checkpoint at {ckpt_path} after save"
@@ -1684,25 +1849,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             ordinal_tie_atol=float(state.ordinal_tie_atol),
             use_ordinal_window_norm=state.use_ordinal_window_norm,
         )
-        if norm_stats.get("hybrid_flat_dataset_norm"):
-            flat_mask = [bool(x) for x in norm_stats["flat_variate_mask"].tolist()]
-            state.extra["hybrid_flat_norm_stats"] = {
-                k: norm_stats[k]
-                for k in (
-                    "flat_variate_mask",
-                    "flat_variate_frac",
-                    "hybrid_flat_details",
-                    "emp_std",
-                )
-                if k in norm_stats
-            }
-            logger.info(
-                "  [%s] hybrid flat dataset-norm: flat_mask=%s frac=%s details=%s",
-                self.name,
-                flat_mask,
-                [round(float(x), 4) for x in norm_stats["flat_variate_frac"].tolist()],
-                norm_stats.get("hybrid_flat_details"),
-            )
+        # Unique-segment wrap rebuilds from ts_ds.data. Cap windows after that
+        # so a random_window_subset Subset is never passed into the wrap.
         seg_stride = max(1, int(train_stride))
         if (
             self.stage == "patch_refine"
@@ -1728,6 +1876,37 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 len(train_ds),
                 len(val_ds),
                 float(getattr(state, "patch_refine_prev_cond_dropout", 0.5)),
+            )
+        train_ds = random_window_subset(
+            train_ds,
+            subset_meta.get("train_max_windows"),
+            int(state.seed) + 17,
+            label=f"{self.name}/train",
+        )
+        val_ds = random_window_subset(
+            val_ds,
+            subset_meta.get("val_max_windows"),
+            int(state.seed) + 29,
+            label=f"{self.name}/val",
+        )
+        if norm_stats.get("hybrid_flat_dataset_norm"):
+            flat_mask = [bool(x) for x in norm_stats["flat_variate_mask"].tolist()]
+            state.extra["hybrid_flat_norm_stats"] = {
+                k: norm_stats[k]
+                for k in (
+                    "flat_variate_mask",
+                    "flat_variate_frac",
+                    "hybrid_flat_details",
+                    "emp_std",
+                )
+                if k in norm_stats
+            }
+            logger.info(
+                "  [%s] hybrid flat dataset-norm: flat_mask=%s frac=%s details=%s",
+                self.name,
+                flat_mask,
+                [round(float(x), 4) for x in norm_stats["flat_variate_frac"].tolist()],
+                norm_stats.get("hybrid_flat_details"),
             )
         if self.stage == "patch_refine":
             train_ds = _maybe_subsample_patch_refine_train_windows(state, train_ds)
@@ -1762,8 +1941,8 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             excluded_names=aug_cfg.get("exclude_names", ()),
         )
         if state.smoke_test:
-            train_ds = Subset(train_ds, list(range(min(4, len(train_ds)))))
-            val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
+            train_ds = Subset(train_ds, list(range(min(1, len(train_ds)))))
+            val_ds = Subset(val_ds, list(range(min(1, len(val_ds)))))
         logger.info(
             "  [%s] train/val windows=%d/%d",
             self.name, len(train_ds), len(val_ds),
@@ -1962,10 +2141,10 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 "fixed",
             }:
                 raise ValueError(f"Unknown staged diffusion search_space={search_space!r}")
-            if search_space == "reduced_hp":
+            if search_space in {"reduced_hp", "lr_only"}:
                 for key in ("hp_lr_min", "hp_lr_max"):
                     if self.get(key) is None:
-                        raise ValueError(f"search_space=reduced_hp requires phase {key}")
+                        raise ValueError(f"search_space={search_space} requires phase {key}")
             if search_space in {
                 "lr_eff_batch_univariate",
                 "lr_eff_batch_univariate_ema",
@@ -2189,6 +2368,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     self.name, n_trials, max_epochs, patience,
                 )
                 study_t0 = time.perf_counter()
+                pruner = self._make_pruner(max_epochs)
                 study = run_optuna_study(
                     study_name=f"{state.experiment_name}-{self.stage}-hp",
                     checkpoint_dir=subset_dir,
@@ -2196,9 +2376,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     direction="minimize",
                     objective_builder=objective_builder,
                     sampler=TPESampler(seed=state.seed, multivariate=True, group=True),
-                    pruner=HyperbandPruner(
-                        min_resource=1, max_resource=max_epochs, reduction_factor=3,
-                    ),
+                    pruner=pruner,
                     sampler_seed=state.seed,
                     callbacks=[_retain_complete_trial_ckpts],
                     enqueue_trials=self.get("enqueue_trials"),

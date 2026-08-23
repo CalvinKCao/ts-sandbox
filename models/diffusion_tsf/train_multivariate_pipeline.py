@@ -261,8 +261,12 @@ DATASET_REGISTRY = {
     'weather': ('weather/weather.csv', 'date', 144),
     'electricity': ('electricity/electricity.csv', 'date', 96),
     'traffic': ('traffic/traffic.csv', 'date', 24),
-    # PeMS benchmarks ship as NPZ (iTransformer Dataset_PEMS); see scripts/fetch_pems_solar.sh
+    # PeMS benchmarks ship as NPZ (iTransformer Dataset_PEMS).
+    # `PeMS` stays PEMS04 for back-compat; 03/07/08 live in sibling folders.
     'PeMS': ('PeMS/PEMS04.npz', None, 24),
+    'PEMS03': ('PEMS03/PEMS03.npz', None, 24),
+    'PEMS07': ('PEMS07/PEMS07.npz', None, 24),
+    'PEMS08': ('PEMS08/PEMS08.npz', None, 24),
     'solar_Alabama': ('solar_Alabama/solar_Alabama.csv', 'Unnamed: 0', 96),
     # First 500k timesteps only (see datasets/dynamic/dynamic_500K.csv).
     'dynamic': ('dynamic/dynamic_500K.csv', 'date', 96),
@@ -651,16 +655,54 @@ def patch_guidance_hp_objective(
         torch.cuda.empty_cache()
     stack = create_patch_guidance_stack(state, num_vars).to(device)
 
-    train_loader_local = DataLoader(
+    from models.diffusion_tsf.pipeline.config import training_value
+    from models.diffusion_tsf.pipeline.train.diffusion_loop import (
+        EpochGroupBatchSampler,
+        log_epoch_shard_contract,
+        make_grouped_train_loader,
+    )
+
+    n_groups_cfg = int(training_value(state, "train_epoch_groups", 1))
+    if n_groups_cfg < 1:
+        raise ValueError(
+            f"training.train_epoch_groups must be >= 1, got {n_groups_cfg!r}"
+        )
+    raw_max_bytes = training_value(state, "train_epoch_max_bytes", None)
+    max_bytes = None if raw_max_bytes is None else int(raw_max_bytes)
+    ds_lb, ds_hz = dataset_window_lengths(state, state.dataset)
+    train_loader_local, n_groups, window_nbytes, group_nbytes = make_grouped_train_loader(
         train_loader.dataset,
         batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,
-        drop_last=not smoke_test,
+        n_groups=n_groups_cfg,
+        seed=int(state.seed) + 31 * int(getattr(trial, "number", 0)),
+        max_bytes=max_bytes,
+        n_variates=int(num_vars),
+        lookback=int(ds_lb),
+        horizon=int(ds_hz),
+        overlap=int(state.lookback_overlap),
+        smoke_test=bool(smoke_test),
     )
+    sampler = getattr(train_loader_local, "batch_sampler", None)
+    if not isinstance(sampler, EpochGroupBatchSampler):
+        raise TypeError(
+            "patch-guidance training requires EpochGroupBatchSampler; "
+            f"got {type(sampler)}"
+        )
     val_bs = min(batch_size, 32)
     val_loader_local = DataLoader(
         val_loader.dataset, batch_size=val_bs, shuffle=False, num_workers=0,
+    )
+    logger.info(
+        "[Patch guidance HP] groups=%d train_n=%d train_batches=%d "
+        "window_bytes=%s group_bytes=%s bs=%d",
+        n_groups, len(train_loader.dataset), len(train_loader_local),
+        window_nbytes, group_nbytes, batch_size,
+    )
+    log_epoch_shard_contract(
+        name="patch_guidance_hp",
+        n_groups=n_groups,
+        max_epochs=max_epochs if not smoke_test else 1,
+        patience=None,
     )
 
     optimizer = torch.optim.Adam(stack.parameters(), lr=lr)
@@ -675,6 +717,7 @@ def patch_guidance_hp_objective(
 
     try:
         for epoch in range(epochs):
+            train_loader_local.batch_sampler.set_epoch(epoch)
             train_patch_guidance_epoch(state, stack, train_loader_local, optimizer, device)
             val_loss = validate_patch_guidance(state, stack, val_loader_local, device)
             trial.report(val_loss, epoch)
@@ -738,6 +781,20 @@ def run_patch_guidance_finetune_hp_tuning(
         state, dataset_name, variate_indices,
         stride=train_stride or state.window_stride,
         test_stride=1 if test_stride is None else test_stride,
+    )
+    from models.diffusion_tsf.pipeline.data_subset import random_window_subset
+    subset_meta = state.data_subset_resolved or {}
+    train_ds = random_window_subset(
+        train_ds,
+        subset_meta.get("train_max_windows"),
+        int(state.seed) + 17,
+        label="patch_guidance/train",
+    )
+    val_ds = random_window_subset(
+        val_ds,
+        subset_meta.get("val_max_windows"),
+        int(state.seed) + 29,
+        label="patch_guidance/val",
     )
     from models.diffusion_tsf.train_window_aug import maybe_wrap_train_window_aug
 
@@ -953,6 +1010,8 @@ def resolve_pipeline_data_subset(state) -> Dict[str, Any]:
         f"[data_subset] {state.dataset}: subset_id={resolved['subset_id']} "
         f"n_variates={resolved['n_variates']} train_stride={resolved['train_stride']} "
         f"val_stride={resolved['val_stride']} test_stride={resolved['test_stride']} "
+        f"train_max_windows={resolved.get('train_max_windows')} "
+        f"val_max_windows={resolved.get('val_max_windows')} "
         f"reason={resolved.get('reason')}"
     )
     return resolved
@@ -1143,6 +1202,24 @@ def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Di
         if k.startswith('guidance_model.'):
             continue
         if k in model_state and model_state[k].shape != v.shape:
+            dst = model_state[k]
+            # Floor is 512; datasets with V>512 grow nn.Embedding. Copy the
+            # pretrained rows and leave the extra IDs at init.
+            if (
+                k.endswith("variate_embed.weight")
+                and v.ndim == 2
+                and dst.ndim == 2
+                and dst.shape[1] == v.shape[1]
+                and dst.shape[0] > v.shape[0]
+            ):
+                expanded = dst.clone()
+                expanded[: v.shape[0]].copy_(v)
+                filtered[k] = expanded
+                logger.warning(
+                    "Expanding %s %s -> %s (copy pretrained rows, extra IDs stay at init)",
+                    k, tuple(v.shape), tuple(dst.shape),
+                )
+                continue
             raise RuntimeError(
                 f"Diffusion checkpoint tensor mismatch for {k}: checkpoint {v.shape} "
                 f"vs current {model_state[k].shape}. Do not partially load architecture changes."
@@ -1198,8 +1275,15 @@ def create_diffusion_model(
     hz = state.forecast_length if horizon is None else horizon
     stage = state.diffusion_stage if diffusion_stage is None else diffusion_stage
     chunk_hz = int(state.diffusion_chunk_horizon or 0)
-    if chunk_hz > 0 and hz > chunk_hz:
-        model_hz = chunk_hz + state.lookback_overlap
+    if chunk_hz > 0:
+        raise ValueError(
+            "diffusion_chunk_horizon AR was removed; use experiment.horizon_stitch="
+            "overlap_avg with horizon_chunk_inner instead"
+        )
+    stitch = bool(getattr(state, "horizon_stitch", False))
+    inner = int(getattr(state, "horizon_chunk_inner", 96) or 96)
+    if stitch:
+        model_hz = int(state.lookback_overlap) + inner
     else:
         model_hz = hz + state.lookback_overlap
 
@@ -1210,7 +1294,9 @@ def create_diffusion_model(
         dataset_forecast_length=hz,
         lookback_overlap=state.lookback_overlap,
         diffusion_lookback_cap=int(state.diffusion_lookback_cap or 0),
-        diffusion_chunk_horizon=chunk_hz,
+        diffusion_chunk_horizon=0,
+        horizon_stitch=stitch,
+        horizon_chunk_inner=inner,
         representation_time_stride=int(state.representation_time_stride),
         past_cond_resize_to_horizon=bool(state.past_cond_resize_to_horizon),
         itrans_lookback_length=state.itrans_lookback_length,
@@ -1247,6 +1333,9 @@ def create_diffusion_model(
         patch_refine_patch_width=state.patch_refine_patch_width,
         patch_refine_col_stride=state.patch_refine_col_stride,
         patch_refine_unique_segments=state.patch_refine_unique_segments,
+        patch_refine_use_prev_cond=bool(
+            getattr(state, "patch_refine_use_prev_cond", True)
+        ),
         patch_refine_prev_cond_dropout=state.patch_refine_prev_cond_dropout,
         patch_refine_finetune_patch_fraction=float(
             getattr(state, "patch_refine_finetune_patch_fraction", 1.0)
@@ -1390,7 +1479,7 @@ def _paper_split_borders(dataset_name: str, n: int, seq_len: int) -> Tuple[List[
     elif dataset_name in ('ETTm1', 'ETTm2'):
         # 12 months, 4 months, 4 months at 15-min resolution
         b2 = [12 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 8 * 30 * 24 * 4]
-    elif dataset_name == 'PeMS':
+    elif dataset_name in ('PeMS', 'PEMS03', 'PEMS07', 'PEMS08'):
         # 60% train, 20% val, 20% test
         n_train = int(n * 0.6)
         n_val = int(n * 0.2)

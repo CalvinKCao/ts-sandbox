@@ -1,0 +1,186 @@
+# allv-randwin LR search: 10 complete trials/stage, no prune, 20-ep from pretrain.
+# Coarse LR still ±10x around 1.626e-4. Fine tightened to 0.3–3x around 7.818e-4.
+# ETTm/PeMS use donor-like train/val strides (s3/s4/s2) so search is not stride-1 dense.
+# Other datasets keep the lr4 random-window caps. Eval still s1 n10 4-step.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
+replace_phases: true
+
+training:
+  itrans_paper_batch_size: 1
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_0p5, patch_frac_0p5, anchor_every4, eval_s1_n10_steps4, nopruner, from_pretrain]
+
+visualization:
+  viz_binary_mmpd_gap: false
+  viz_binary_mmpd_redbox: false
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-allv-randwin-lr10
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10
+  seed: 42
+  patch_refine_finetune_window_fraction: 0.5
+  patch_refine_finetune_patch_fraction: 0.5
+  deterministic_anchor_every_n_batches: 4
+  data_subset_by_dataset:
+    ETTh1:
+      subset_id: ETTh1_allv_randwin
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: 8209
+      val_max_windows: 2785
+    ETTh2:
+      subset_id: ETTh2_allv_randwin
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: 8209
+      val_max_windows: 2785
+    ETTm1:
+      subset_id: ETTm1_allv_randwin_s3
+      all_variates: true
+      train_stride: 3
+      val_stride: 3
+      test_stride: 1
+    ETTm2:
+      subset_id: ETTm2_allv_randwin_s4
+      all_variates: true
+      train_stride: 4
+      val_stride: 4
+      test_stride: 1
+    electricity:
+      subset_id: electricity_allv_randwin
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: 716
+      val_max_windows: 242
+    traffic:
+      subset_id: traffic_allv_randwin
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: 266
+      val_max_windows: 90
+    exchange_rate:
+      subset_id: exchange_rate_allv_randwin
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: 4880
+      val_max_windows: 665
+    weather:
+      subset_id: weather_allv_randwin
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: 10945
+      val_max_windows: 3713
+    solar_Alabama:
+      subset_id: solar_Alabama_allv_randwin
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: 1677
+      val_max_windows: 569
+    PeMS:
+      subset_id: PeMS_allv_randwin_s2
+      all_variates: true
+      train_stride: 2
+      val_stride: 2
+      test_stride: 1
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    n_samples: 10000
+    epochs: 20
+    patience: 4
+    shared_cache: true
+    reuse_pretrain_from_config: binary_window_norm_patch_refine_canvas128_p64x6
+    require_reuse_pretrain: true
+
+  - phase: patch_guidance_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 10
+    max_epochs: 4
+    patience: 5
+    refit_best_max_epochs: 20
+    refit_best_patience: 5
+    refit_from_pretrain: true
+    pruner: none
+    search_space: lr_only
+    probe_train_batch_size: true
+    probe_train_batch_size_max: 16
+    hp_lr_min: 1.6260630766856958e-5
+    hp_lr_max: 1.6260630766856958e-3
+    target_univariate_batch: 336
+    ema_decay: 0.99
+    min_snr_gamma: 5.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: diffusion_patch_refine_finetune_hp
+    n_trials: 10
+    max_epochs: 4
+    patience: 5
+    refit_best_max_epochs: 20
+    refit_best_patience: 5
+    refit_from_pretrain: true
+    pruner: none
+    search_space: lr_only
+    probe_train_batch_size: true
+    probe_train_batch_size_max: 16
+    hp_lr_min: 2.34526630622002e-4
+    hp_lr_max: 2.34526630622002e-3
+    target_univariate_batch: 256
+    ema_decay: 0.995
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: staged_eval
+    anchor_only: false
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_progress_key: canvas128_allv_randwin_lr10_s1_n10_steps4
+    eval_max_windows_by_dataset:
+      ETTh1: 1838
+      ETTh2: 1838
+      ETTm1: 1959
+      ETTm2: 1942
+      electricity: 42
+      traffic: 10
+      exchange_rate: 939
+      weather: 1313
+      solar_Alabama: 100
+      PeMS: 50
+    n_samples: 1
+    probabilistic_n_samples: 10
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 4
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true
+    probe_eval_batch_size: true

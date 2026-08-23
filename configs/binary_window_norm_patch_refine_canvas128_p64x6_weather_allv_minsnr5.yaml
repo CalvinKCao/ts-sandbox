@@ -1,0 +1,21 @@
+# Full-variate Weather Min-SNR ablation with frozen decoder-token cross-attention.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_weather_allv_msdefault_fixed.yaml
+
+wandb:
+  tags: [ablation, min_snr, gamma5, cross_variate_attention, window_norm, patch_refine, canvas128, p64x6, weather, all_variates, anchor_only_eval_s16]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-weather-allv-minsnr5
+  experiment_name: binary_window_norm_patch_refine_c128_weather_allv_minsnr5
+  disable_cross_attention: false
+
+phases:
+  - phase: diffusion_coarse_finetune_hp
+    fixed_tuned_params:
+      loss_weighting: min_snr
+      min_snr_gamma: 5.0
+
+  - phase: diffusion_patch_refine_finetune_hp
+    fixed_tuned_params:
+      loss_weighting: min_snr
+      min_snr_gamma: 5.0

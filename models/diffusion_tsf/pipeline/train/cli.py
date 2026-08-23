@@ -28,6 +28,23 @@ def main():
     parser.add_argument("--dataset", type=str, default=None, help="Override dataset from YAML")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--smoke-test", action="store_true", help="Quick validation run")
+    parser.add_argument(
+        "--eval-bench",
+        action="store_true",
+        help="Time staged eval generate blocks; skip viz/diagnostics",
+    )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Cap staged eval windows (alias for eval_max_windows)",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Cap denoise steps for staged eval (alias for eval_max_steps)",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Override random seed from YAML")
     parser.add_argument("--checkpoint-dir", type=str, default=None, help="Override checkpoint directory")
     parser.add_argument("--results-dir", type=str, default=None, help="Override results directory")
@@ -49,6 +66,12 @@ def main():
         cli_overrides["seed"] = args.seed
     if args.smoke_test:
         cli_overrides["smoke_test"] = True
+    if args.eval_bench:
+        cli_overrides["eval_bench"] = True
+    if args.max_samples is not None:
+        cli_overrides["eval_max_windows"] = int(args.max_samples)
+    if args.max_steps is not None:
+        cli_overrides["eval_max_steps"] = int(args.max_steps)
     if args.checkpoint_dir:
         cli_overrides["checkpoint_dir"] = args.checkpoint_dir
     if args.results_dir:

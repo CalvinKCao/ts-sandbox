@@ -33,6 +33,9 @@ class PipelineState:
     n_variates: int = 7
     seed: int = 42
     smoke_test: bool = False
+    eval_bench: bool = False
+    eval_max_windows: Optional[int] = None
+    eval_max_steps: Optional[int] = None
     parallel_optuna_workers: int = 1
 
     # -- Model / diffusion knobs --
@@ -62,6 +65,7 @@ class PipelineState:
     patch_refine_patch_width: int = 8
     patch_refine_col_stride: int = 6
     patch_refine_unique_segments: bool = False
+    patch_refine_use_prev_cond: bool = True
     patch_refine_prev_cond_dropout: float = 0.5
     # Fraction of train windows used only during patch_refine finetune (1.0 = all).
     patch_refine_finetune_window_fraction: float = 1.0
@@ -109,6 +113,8 @@ class PipelineState:
     lookback_overlap: int = 8
     diffusion_lookback_cap: int = 0
     diffusion_chunk_horizon: int = 0
+    horizon_stitch: bool = False
+    horizon_chunk_inner: int = 96
     representation_time_stride: int = 1
     past_cond_resize_to_horizon: bool = True
     itrans_lookback_length: Optional[int] = None
@@ -132,6 +138,13 @@ class PipelineState:
     binary_beta_end: float = 0.5
     lr_scheduler_type: str = "none"
     lr_warmup_epochs: int = 0
+    # 1 = each train epoch walks the full packed batch list. N>1 splits that
+    # list into N groups; epoch e uses group e % N (full cycle still covers all).
+    # After each cycle, indices are reshuffled and batches are repacked.
+    train_epoch_groups: int = 1
+    # If set, N is computed after the batch-size probe so each packed group is
+    # <= this many bytes (fp32 past+future). Wins over train_epoch_groups > 1.
+    train_epoch_max_bytes: Optional[int] = None
     max_scale_tuning: bool = False
     max_scale_tuning_range: List[float] = field(default_factory=lambda: [2.5, 14.0])
     n_itrans_hp_trials: int = 10
@@ -310,6 +323,9 @@ class PipelineState:
             init_kwargs["dit_cond_patch_size"] = tuple(
                 int(x) for x in init_kwargs["dit_cond_patch_size"]
             )
+        if "horizon_stitch" in init_kwargs:
+            from models.diffusion_tsf.config import parse_horizon_stitch
+            init_kwargs["horizon_stitch"] = parse_horizon_stitch(init_kwargs["horizon_stitch"])
         for key in (
             "image_height",
             "coarse_image_height",
@@ -325,9 +341,21 @@ class PipelineState:
             init_kwargs["patch_refine_unique_segments"] = bool(
                 init_kwargs["patch_refine_unique_segments"]
             )
+        if "patch_refine_use_prev_cond" in init_kwargs:
+            init_kwargs["patch_refine_use_prev_cond"] = bool(
+                init_kwargs["patch_refine_use_prev_cond"]
+            )
         if "patch_refine_prev_cond_dropout" in init_kwargs:
             init_kwargs["patch_refine_prev_cond_dropout"] = float(
                 init_kwargs["patch_refine_prev_cond_dropout"]
+            )
+        if (
+            not bool(init_kwargs.get("patch_refine_use_prev_cond", True))
+            and float(init_kwargs.get("patch_refine_prev_cond_dropout", 0.0)) != 0.0
+        ):
+            raise ValueError(
+                "patch_refine_prev_cond_dropout must be 0 when "
+                "patch_refine_use_prev_cond is false"
             )
         if "patch_refine_finetune_window_fraction" in init_kwargs:
             init_kwargs["patch_refine_finetune_window_fraction"] = float(

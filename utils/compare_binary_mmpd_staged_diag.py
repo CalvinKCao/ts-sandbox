@@ -1199,41 +1199,8 @@ def _plot_compare_panel(
             f"MMPD shape {mmpd_plot.shape} != future_core_z {future_core_z.shape}"
         )
 
-    # Optional patch-guidance overlay (redbox is the hard require_guidance path).
     guide_h = None
     guide_kh = None
-    guide_t = fine_out.get("guidance_prediction_global_norm")
-    if guide_t is None:
-        print(
-            f"[plot] warn {dataset} win {window_index}: fine_out missing "
-            "guidance_prediction_global_norm; gap panel without guidance",
-            flush=True,
-        )
-    else:
-        if not torch.is_tensor(guide_t):
-            raise TypeError(
-                f"guidance_prediction_global_norm must be a tensor, got {type(guide_t)}"
-            )
-        guide_h = (
-            guide_t[0].detach().cpu().numpy()
-            if guide_t.dim() == 3
-            else guide_t.detach().cpu().numpy()
-        )
-        if guide_h.ndim != 2:
-            raise ValueError(f"guidance expected (V,H), got {guide_h.shape}")
-        if guide_h.shape != future_core_z.shape:
-            raise ValueError(
-                f"guidance shape {guide_h.shape} != future_core_z {future_core_z.shape}"
-            )
-        guide_with = fine_out.get("guidance_prediction_with_overlap")
-        if guide_with is not None and torch.is_tensor(guide_with):
-            garr = (
-                guide_with[0].detach().cpu().numpy()
-                if guide_with.dim() == 3
-                else guide_with.detach().cpu().numpy()
-            )
-            if garr.shape[-1] == expected_kh:
-                guide_kh = garr
 
     # Rebuild K+H after any H overrides so residual Δz = final - coarse everywhere.
     if k > 0:

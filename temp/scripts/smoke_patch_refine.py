@@ -184,6 +184,7 @@ def _test_train_generate() -> None:
         use_variate_embedding=False,
         past_cond_resize_to_horizon=False,
         patch_refine_unique_segments=True,
+        patch_refine_use_prev_cond=True,
     )
     model = DiffusionTSF(cfg).to(device)
     model.train()
@@ -221,6 +222,29 @@ def _test_train_generate() -> None:
     assert gen_dense["prediction"].shape[-1] == 96, gen_dense["prediction"].shape
     print(f"generate dense ok n_patches={len(gen_dense['patch_locations'])}")
 
+    model.config.patch_refine_unique_segments = True
+    model.config.patch_refine_use_prev_cond = False
+    model.config.patch_refine_prev_cond_dropout = 0.0
+    t2 = time.time()
+    with torch.no_grad():
+        gen_noprev = model.generate(
+            past,
+            sampler="anchor",
+            future_coarse_2d=coarse,
+        )
+    assert gen_noprev["prediction"].shape[-1] == 96, gen_noprev["prediction"].shape
+    print(
+        f"generate no-prev unique ok pred={tuple(gen_noprev['prediction'].shape)} "
+        f"{time.time()-t2:.1f}s"
+    )
+    model.train()
+    out_noprev = model.forward(past, future)
+    out_noprev["loss"].backward()
+    print(
+        f"train_step no-prev ok loss={float(out_noprev['loss'].detach()):.4f} "
+        f"n_patches={float(out_noprev['n_patches'])}"
+    )
+
 
 def _test_patch_fraction() -> None:
     torch.manual_seed(0)
@@ -250,9 +274,153 @@ def _test_patch_fraction() -> None:
     print("patch fraction ok")
 
 
+def _test_horizon_chunk_geometry() -> None:
+    from models.diffusion_tsf.horizon_chunks import (
+        chunk_starts,
+        overlap_average_stitch,
+        slice_future_canvas,
+    )
+
+    starts = chunk_starts(284, inner=96, overlap=8)
+    assert starts == [0, 96, 188], starts
+    assert chunk_starts(96, inner=96, overlap=8) == [0]
+    try:
+        chunk_starts(50, inner=96, overlap=8)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("short horizon must fail")
+
+    future = torch.arange(292, dtype=torch.float32).view(1, 1, 292).expand(2, 1, 292).clone()
+    t0 = torch.tensor([0, 188])
+    canvas = slice_future_canvas(future, t0, inner=96, overlap=8)
+    assert canvas.shape == (2, 1, 104)
+    assert int(canvas[0, 0, 0]) == 0 and int(canvas[0, 0, -1]) == 103
+    assert int(canvas[1, 0, 0]) == 188 and int(canvas[1, 0, -1]) == 291
+
+    # Three constant chunks; overlap mean stays finite and length is H.
+    preds = torch.zeros(1, 3, 1, 104)
+    preds[0, 0] = 1.0
+    preds[0, 1] = 3.0
+    preds[0, 2] = 5.0
+    stitched = overlap_average_stitch(
+        preds, starts, horizon=284, inner=96, overlap=8,
+    )
+    assert stitched.shape == (1, 1, 284)
+    assert torch.isfinite(stitched).all()
+    # t in [0, 88) only chunk 0; [88, 96) chunks 0+1; ...
+    assert float(stitched[0, 0, 0]) == 1.0
+    assert abs(float(stitched[0, 0, 90]) - 2.0) < 1e-5
+    assert float(stitched[0, 0, 283]) == 5.0
+    print("horizon chunk geometry ok")
+
+
+def _test_horizon_stitch_train_eval() -> None:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cfg = DiffusionTSFConfig(
+        num_variables=1,
+        lookback_length=96,
+        forecast_length=104,
+        dataset_forecast_length=284,
+        lookback_overlap=8,
+        horizon_stitch=True,
+        horizon_chunk_inner=96,
+        diffusion_lookback_cap=96,
+        image_height=64,
+        coarse_image_height=16,
+        fine_image_height=16,
+        patch_refine_canvas_height=128,
+        patch_refine_patch_height=64,
+        patch_refine_patch_width=6,
+        patch_refine_col_stride=5,
+        diffusion_stage="patch_refine",
+        dit_patch_size=(8, 6),
+        dit_cond_patch_size=(8, 6),
+        dit_embed_dim=64,
+        dit_depth=2,
+        dit_num_heads=2,
+        disable_cross_attention=True,
+        use_coordinate_channel=True,
+        use_deterministic_anchor_loss=True,
+        deterministic_anchor_lambda=0.99,
+        prediction_target="x0",
+        loss_weighting="min_snr",
+        min_snr_gamma=2.0,
+        binary_noise_schedule="linear",
+        use_window_normalization=True,
+        use_variate_embedding=False,
+        past_cond_resize_to_horizon=False,
+        patch_refine_unique_segments=True,
+        patch_refine_use_prev_cond=False,
+        patch_refine_prev_cond_dropout=0.0,
+    )
+    model = DiffusionTSF(cfg).to(device)
+    model.train()
+    past = torch.randn(1, 1, 96, device=device)
+    future = torch.randn(1, 1, 292, device=device)
+    t0 = time.time()
+    out = model.forward(past, future)
+    out["loss"].backward()
+    print(
+        f"horizon stitch train_step ok loss={float(out['loss'].detach()):.4f} "
+        f"{time.time()-t0:.1f}s"
+    )
+
+    coarse_cfg = DiffusionTSFConfig(
+        num_variables=1,
+        lookback_length=96,
+        forecast_length=104,
+        dataset_forecast_length=284,
+        lookback_overlap=8,
+        horizon_stitch=True,
+        horizon_chunk_inner=96,
+        diffusion_lookback_cap=96,
+        image_height=16,
+        coarse_image_height=16,
+        fine_image_height=16,
+        diffusion_stage="coarse",
+        dit_patch_size=(8, 6),
+        dit_cond_patch_size=(8, 6),
+        dit_embed_dim=64,
+        dit_depth=2,
+        dit_num_heads=2,
+        disable_cross_attention=True,
+        use_coordinate_channel=True,
+        prediction_target="x0",
+        use_window_normalization=True,
+        use_variate_embedding=False,
+        past_cond_resize_to_horizon=True,
+    )
+    coarse = DiffusionTSF(coarse_cfg).to(device)
+    coarse.eval()
+    model.eval()
+    from models.diffusion_tsf.horizon_chunks import chunk_starts, overlap_average_stitch
+
+    starts = chunk_starts(284, inner=96, overlap=8)
+    t0s = torch.tensor(starts, device=device, dtype=torch.long)
+    past_rep = past.repeat(len(starts), 1, 1)
+    with torch.no_grad():
+        coarse_out = coarse.generate(past_rep, sampler="anchor", horizon_chunk_t0=t0s)
+        fine_out = model.generate(
+            past_rep,
+            sampler="anchor",
+            future_coarse_2d=coarse_out["future_2d_coarse"],
+            horizon_chunk_t0=t0s,
+        )
+    canvas = fine_out["prediction_with_overlap"].unsqueeze(0)
+    stitched = overlap_average_stitch(
+        canvas, starts, horizon=284, inner=96, overlap=8,
+    )
+    assert stitched.shape[-1] == 284, stitched.shape
+    assert torch.isfinite(stitched).all()
+    print(f"horizon stitch eval ok stitched={tuple(stitched.shape)}")
+
+
 if __name__ == "__main__":
     _test_geometry()
     _test_layout_equivalence()
     _test_patch_fraction()
+    _test_horizon_chunk_geometry()
     _test_train_generate()
+    _test_horizon_stitch_train_eval()
     print("patch_refine smoke passed")

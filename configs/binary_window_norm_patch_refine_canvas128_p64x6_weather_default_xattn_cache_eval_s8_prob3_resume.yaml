@@ -1,0 +1,27 @@
+# Evaluation-only continuation of cached-token Weather job 4806196.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_weather_default_xattn_cache_eval_s16.yaml
+replace_phases: true
+
+wandb:
+  tags: [evaluation_only, weather, default_subset, cross_attention_only, frozen_token_cache, stride8, probabilistic_3]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-weather-xattn-cache-eval-s8-prob3-resume
+  experiment_name: binary_window_norm_patch_refine_c128_weather_default_xattn_cache_eval_s8_prob3_resume
+  eval_source_checkpoint_dir: /scratch/ccao87/ts-sandbox-xattn-cache-20260815/results/ckpts/08-15-4806196-weather-binary_window_norm_patch_refine_canvas128_p64x6_weather_default_xattn_cache_eval_s16
+
+phases:
+  - phase: staged_eval
+    anchor_only: false
+    eval_test_fraction: 1.0
+    test_stride: 8
+    n_samples: 1
+    probabilistic_n_samples: 3
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true
+    probe_eval_batch_size: true

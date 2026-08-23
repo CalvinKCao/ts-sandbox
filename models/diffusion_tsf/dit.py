@@ -350,6 +350,7 @@ class FactorizedDiT(nn.Module):
         use_patch_abs_embedding: bool = False,
         max_coarse_bins: int = 16,
         max_horizon_steps: int = 1024,
+        use_horizon_chunk_embedding: bool = False,
     ):
         super().__init__()
         pH, pW = patch_size
@@ -365,6 +366,7 @@ class FactorizedDiT(nn.Module):
         self.enable_cross_scale_attention = enable_cross_scale_attention
         self.use_variate_embedding = use_variate_embedding
         self.use_patch_abs_embedding = use_patch_abs_embedding
+        self.use_horizon_chunk_embedding = use_horizon_chunk_embedding
         self.cond_patch_size = cond_patch_size or patch_size
 
         self.x_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
@@ -401,6 +403,16 @@ class FactorizedDiT(nn.Module):
         else:
             self.coarse_bin_embed = None
             self.horizon_time_embed = None
+        if use_horizon_chunk_embedding:
+            self.horizon_chunk_mlp = nn.Sequential(
+                nn.Linear(embed_dim, embed_dim),
+                nn.SiLU(),
+                nn.Linear(embed_dim, embed_dim),
+            )
+            nn.init.zeros_(self.horizon_chunk_mlp[-1].weight)
+            nn.init.zeros_(self.horizon_chunk_mlp[-1].bias)
+        else:
+            self.horizon_chunk_mlp = None
 
         self.ctx_proj = nn.Linear(context_dim, embed_dim)
         self.ctx_norm = nn.LayerNorm(embed_dim, eps=1e-6)
@@ -459,6 +471,26 @@ class FactorizedDiT(nn.Module):
             img = F.pad(img, (0, pad_w, 0, pad_h), mode="reflect")
         return img, pad_h, pad_w
 
+    def encode_horizon_chunk(
+        self,
+        t0: torch.Tensor,
+        horizon: torch.Tensor,
+        inner: int,
+    ) -> torch.Tensor:
+        """Sinusoid of t0/H and t1/H through a zero-init MLP → (N, embed_dim)."""
+        if self.horizon_chunk_mlp is None:
+            raise RuntimeError("horizon chunk embed requested but DiT was built without it")
+        if t0.shape != horizon.shape:
+            raise ValueError(
+                f"t0 shape {tuple(t0.shape)} != horizon shape {tuple(horizon.shape)}"
+            )
+        h = horizon.to(dtype=torch.float32).clamp(min=1.0)
+        t0_f = t0.to(dtype=torch.float32)
+        t1_f = t0_f + float(inner)
+        e0 = _timestep_embedding(t0_f / h, self.embed_dim)
+        e1 = _timestep_embedding(t1_f / h, self.embed_dim)
+        return self.horizon_chunk_mlp(e0 + e1)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -471,6 +503,7 @@ class FactorizedDiT(nn.Module):
         context_window_indices: Optional[torch.Tensor] = None,
         patch_coarse_bin: Optional[torch.Tensor] = None,
         patch_time0: Optional[torch.Tensor] = None,
+        horizon_chunk_emb: Optional[torch.Tensor] = None,
         return_cross_attn_weights: bool = False,
     ):
         BV, _, H, W = x.shape
@@ -528,6 +561,21 @@ class FactorizedDiT(nn.Module):
             if scale_indices.shape[0] != BV:
                 raise ValueError(f"scale_indices batch {scale_indices.shape[0]} != BV {BV}")
             t_emb = t_emb + self.scale_embed(scale_indices.long())
+        if self.use_horizon_chunk_embedding:
+            if horizon_chunk_emb is None:
+                raise ValueError(
+                    "horizon_chunk_emb is required when use_horizon_chunk_embedding=True"
+                )
+            if horizon_chunk_emb.shape != (BV, self.embed_dim):
+                raise ValueError(
+                    f"horizon_chunk_emb must be {(BV, self.embed_dim)}, "
+                    f"got {tuple(horizon_chunk_emb.shape)}"
+                )
+            t_emb = t_emb + horizon_chunk_emb
+        elif horizon_chunk_emb is not None:
+            raise ValueError(
+                "horizon_chunk_emb was passed but this DiT has no horizon-chunk embed"
+            )
 
         ctx_proj: Optional[torch.Tensor] = None
         if encoder_hidden_states is not None:
@@ -543,6 +591,26 @@ class FactorizedDiT(nn.Module):
                         f"{encoder_hidden_states.shape[0]} != DiT batch {BV}"
                     )
             ctx_proj = self.ctx_norm(self.ctx_proj(encoder_hidden_states))  # (BV, V, D)
+
+        if horizon_chunk_emb is not None:
+            extra = horizon_chunk_emb.unsqueeze(1)
+            if ctx_proj is None:
+                ctx_proj = extra
+            elif context_window_indices is not None:
+                b_ctx = ctx_proj.shape[0]
+                window_extra = extra.new_zeros(b_ctx, extra.shape[-1])
+                window_extra[context_window_indices] = extra.squeeze(1)
+                ctx_proj = torch.cat([ctx_proj, window_extra.unsqueeze(1)], dim=1)
+            else:
+                if extra.shape[0] != ctx_proj.shape[0]:
+                    raise ValueError(
+                        f"horizon_chunk_emb batch {extra.shape[0]} != ctx batch {ctx_proj.shape[0]}"
+                    )
+                ctx_proj = torch.cat([ctx_proj, extra], dim=1)
+            if token_variate_ids is not None:
+                token_variate_ids = torch.cat(
+                    [token_variate_ids, token_variate_ids.new_full((1,), -1)], dim=0
+                )
 
         for i, block in enumerate(self.blocks):
             if i == self.bottleneck_idx:

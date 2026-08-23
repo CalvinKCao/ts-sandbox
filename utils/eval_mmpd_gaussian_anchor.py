@@ -73,6 +73,9 @@ DATASET_FILES = {
     "electricity": REPO_ROOT / "datasets" / "electricity" / "electricity.csv",
     "traffic": REPO_ROOT / "datasets" / "traffic" / "traffic.csv",
     "PeMS": REPO_ROOT / "datasets" / "PeMS" / "PEMS04.npz",
+    "PEMS03": REPO_ROOT / "datasets" / "PEMS03" / "PEMS03.npz",
+    "PEMS07": REPO_ROOT / "datasets" / "PEMS07" / "PEMS07.npz",
+    "PEMS08": REPO_ROOT / "datasets" / "PEMS08" / "PEMS08.npz",
     "solar_Alabama": REPO_ROOT / "datasets" / "solar_Alabama" / "solar_Alabama.csv",
     "dynamic": REPO_ROOT / "datasets" / "dynamic" / "dynamic_500K.csv",
     "coverage_synth": REPO_ROOT / "datasets" / "coverage_synth" / "coverage_synth.csv",
@@ -88,6 +91,9 @@ DATASET_DIMS = {
     "electricity": 321,
     "traffic": 862,
     "PeMS": 307,
+    "PEMS03": 358,
+    "PEMS07": 883,
+    "PEMS08": 170,
     "solar_Alabama": 137,
     "dynamic": 17,
     "coverage_synth": 2,
@@ -103,6 +109,9 @@ DATASET_SPLITS = {
     "electricity": "0.7,0.1,0.2",
     "traffic": "0.7,0.1,0.2",
     "PeMS": "0.7,0.1,0.2",
+    "PEMS03": "0.6,0.2,0.2",
+    "PEMS07": "0.6,0.2,0.2",
+    "PEMS08": "0.6,0.2,0.2",
     "solar_Alabama": "0.7,0.1,0.2",
     "dynamic": "0.7,0.1,0.2",
     "coverage_synth": "0.7,0.1,0.2",
@@ -605,7 +614,7 @@ def stage_mmpd_dataset_for_run(data_dir: Path, run: AnchorRun) -> None:
     if meta_path.exists():
         meta_path.unlink()
 
-    if dataset == "PeMS":
+    if dataset in {"PeMS", "PEMS03", "PEMS07", "PEMS08"}:
         _export_pems_mmpd_csv(src, dst, expected_meta["variate_indices"])
     else:
         _export_binary_aligned_mmpd_csv(dataset, dst, expected_meta["variate_indices"])

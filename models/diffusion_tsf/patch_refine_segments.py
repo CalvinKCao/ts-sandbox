@@ -8,7 +8,7 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
 
 from .patch_refine_geometry import (
     PatchLayout,
@@ -599,6 +599,11 @@ def wrap_timeseries_as_unique_segments(
     series_id: int = 0,
 ) -> UniquePatchSegmentDataset:
     """Rebuild a ``TimeSeriesDataset`` as unique absolute patch segments."""
+    if isinstance(ts_ds, Subset):
+        raise TypeError(
+            "wrap_timeseries_as_unique_segments requires TimeSeriesDataset; "
+            "apply random_window_subset after wrapping unique segments"
+        )
     data = ts_ds.data
     rank = getattr(ts_ds, "rank_data", None)
     return UniquePatchSegmentDataset(

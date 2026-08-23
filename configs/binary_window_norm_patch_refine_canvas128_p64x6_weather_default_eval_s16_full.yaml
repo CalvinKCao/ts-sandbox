@@ -1,0 +1,37 @@
+# Default Weather subset control: weather_4v_s2 from the canvas128 base leaf.
+# Keep both deterministic-anchor and probabilistic evaluation paths at stride 16.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
+
+wandb:
+  tags: [control, weather, default_subset, weather_4v_s2, canvas128, p64x6, crossvar, full_eval, stride16]
+
+visualization:
+  viz_binary_mmpd_gap: false
+  viz_binary_mmpd_redbox: false
+
+experiment:
+  dataset: weather
+  name: binary-window-norm-patch-refine-c128-weather-default-eval-s16-full
+  experiment_name: binary_window_norm_patch_refine_c128_weather_default_eval_s16_full
+
+phases:
+  # Reuse the canonical canvas128 synthetic pretraining, as the established
+  # Weather full-variate control does; real-data fine-tuning remains fresh.
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: binary_window_norm_patch_refine_canvas128_p64x6
+    require_reuse_pretrain: true
+
+  - phase: staged_eval
+    anchor_only: false
+    eval_test_fraction: 1.0
+    test_stride: 16
+    n_samples: 1
+    probabilistic_n_samples: 20
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 20
+    batch_size: 8
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true
+    probe_eval_batch_size: true

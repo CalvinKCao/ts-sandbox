@@ -54,6 +54,22 @@ class PatchGuidanceFinetuneHPPhase(PipelinePhase):
             return True
 
         reuse_from = self.get("reuse_checkpoint_from_config")
+        reuse_dir = self.get("reuse_checkpoint_dir")
+        if reuse_dir:
+            src_ckpt = os.path.join(
+                os.path.abspath(str(reuse_dir)), f"{subset_id}_patch_guidance.pt",
+            )
+            if not self._patch_guidance_ckpt_usable(state, src_ckpt):
+                raise FileNotFoundError(
+                    f"{self.name} reuse_checkpoint_dir={reuse_dir!r} missing "
+                    f"usable patch guidance at {src_ckpt}"
+                )
+            os.makedirs(os.path.dirname(ft_ckpt), exist_ok=True)
+            shutil.copy2(src_ckpt, ft_ckpt)
+            state.patch_guidance_finetune_ckpt = ft_ckpt
+            logger.info("  [%s] reused finetuned patch guidance from %s", self.name, src_ckpt)
+            return True
+
         if not reuse_from:
             return False
 

@@ -5,14 +5,334 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
 from models.diffusion_tsf.pipeline.train.checkpointing import amp_context
 
 logger = logging.getLogger(__name__)
+
+
+def fp32_window_nbytes(
+    n_variates: int,
+    lookback: int,
+    horizon: int,
+    overlap: int,
+) -> int:
+    """Bytes for one loader window: fp32 past (V, L) + future (V, K+H)."""
+    n_variates = int(n_variates)
+    lookback = int(lookback)
+    horizon = int(horizon)
+    overlap = int(overlap)
+    if n_variates < 1 or lookback < 1 or horizon < 1:
+        raise ValueError(
+            "fp32 window nbytes needs n_variates, lookback, horizon >= 1, got "
+            f"V={n_variates} L={lookback} H={horizon} K={overlap}"
+        )
+    if overlap < 0:
+        raise ValueError(f"lookback_overlap must be >= 0, got {overlap}")
+    return n_variates * (lookback + overlap + horizon) * 4
+
+
+def resolve_train_epoch_groups(
+    *,
+    n_samples: int,
+    batch_size: int,
+    n_groups: int,
+    max_bytes: Optional[int] = None,
+    n_variates: Optional[int] = None,
+    lookback: Optional[int] = None,
+    horizon: Optional[int] = None,
+    overlap: Optional[int] = None,
+) -> Tuple[int, Optional[int], Optional[int]]:
+    """Pick N so a packed group stays under ``max_bytes`` when that cap is set.
+
+    ``train_epoch_max_bytes`` wins over an explicit ``train_epoch_groups > 1``.
+    One compile-constant batch is atomic: if a single batch already exceeds the
+    cap, this fails rather than splitting B.
+    Returns ``(n_groups, bytes_per_window, bytes_per_group_upper)``.
+    """
+    n_groups = int(n_groups)
+    if n_groups < 1:
+        raise ValueError(f"train_epoch_groups must be >= 1, got {n_groups!r}")
+    n_samples = int(n_samples)
+    batch_size = int(batch_size)
+    if n_samples < 1:
+        raise ValueError(f"n_samples must be >= 1, got {n_samples}")
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    if max_bytes is None:
+        return n_groups, None, None
+    max_bytes = int(max_bytes)
+    if max_bytes < 1:
+        raise ValueError(f"train_epoch_max_bytes must be >= 1, got {max_bytes!r}")
+    missing = [
+        name
+        for name, val in (
+            ("n_variates", n_variates),
+            ("lookback", lookback),
+            ("horizon", horizon),
+            ("overlap", overlap),
+        )
+        if val is None
+    ]
+    if missing:
+        raise ValueError(
+            f"train_epoch_max_bytes={max_bytes} requires {missing}; "
+            "cannot compute bytes/window"
+        )
+    nbytes = fp32_window_nbytes(n_variates, lookback, horizon, overlap)
+    batch_bytes = nbytes * batch_size
+    if batch_bytes > max_bytes:
+        raise ValueError(
+            f"one packed batch is {batch_bytes} bytes "
+            f"(B={batch_size} * {nbytes}/window) > train_epoch_max_bytes={max_bytes}; "
+            "cannot split a compile-constant batch"
+        )
+    max_windows = max_bytes // nbytes
+    max_batches = max(1, max_windows // batch_size)
+    n_batches = (n_samples + batch_size - 1) // batch_size
+    computed = max(1, (n_batches + max_batches - 1) // max_batches)
+    if n_groups > 1 and n_groups != computed:
+        logger.info(
+            "train_epoch_max_bytes=%d wins over train_epoch_groups=%d -> N=%d "
+            "(window=%d B=%d batch_bytes=%d max_batches/group=%d packed_batches=%d)",
+            max_bytes, n_groups, computed, nbytes, batch_size, batch_bytes,
+            max_batches, n_batches,
+        )
+    else:
+        logger.info(
+            "train_epoch_max_bytes=%d -> N=%d "
+            "(window=%d B=%d batch_bytes=%d max_batches/group=%d packed_batches=%d)",
+            max_bytes, computed, nbytes, batch_size, batch_bytes,
+            max_batches, n_batches,
+        )
+    return computed, nbytes, max_batches * batch_bytes
+
+
+def pack_constant_size_batches(
+    indices: Sequence[int],
+    batch_size: int,
+) -> Tuple[List[Tuple[int, ...]], int]:
+    """Pack shuffled indices into batches of ``batch_size``.
+
+    The last incomplete batch is padded by repeating indices already in that
+    batch so every batch has length B (needed for torch.compile shapes).
+    Returns ``(batches, n_padded)``. Does not drop leftover windows.
+    """
+    packed = [int(i) for i in indices]
+    n = len(packed)
+    bsz = int(batch_size)
+    if bsz < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size!r}")
+    if n == 0:
+        raise ValueError("cannot pack an empty index list into batches")
+    batches: List[Tuple[int, ...]] = []
+    n_padded = 0
+    for start in range(0, n, bsz):
+        chunk = packed[start:start + bsz]
+        if len(chunk) < bsz:
+            need = bsz - len(chunk)
+            chunk = chunk + [chunk[i % len(chunk)] for i in range(need)]
+            n_padded += need
+        batches.append(tuple(chunk))
+    return batches, n_padded
+
+
+def split_batches_into_groups(
+    batches: Sequence[Sequence[int]],
+    n_groups: int,
+) -> List[List[Tuple[int, ...]]]:
+    """Split a packed batch list into ``n_groups`` contiguous groups.
+
+    Fails if any group would have zero batches (cannot fill one batch).
+    """
+    n_groups = int(n_groups)
+    if n_groups < 1:
+        raise ValueError(f"n_groups must be >= 1, got {n_groups!r}")
+    batch_tuples = [tuple(int(i) for i in batch) for batch in batches]
+    n_batches = len(batch_tuples)
+    if n_batches < n_groups:
+        raise ValueError(
+            f"train_epoch_groups={n_groups} but only {n_batches} packed batches; "
+            "a group would have zero batches"
+        )
+    base, extra = divmod(n_batches, n_groups)
+    groups: List[List[Tuple[int, ...]]] = []
+    cursor = 0
+    for group_i in range(n_groups):
+        take = base + (1 if group_i < extra else 0)
+        group = batch_tuples[cursor:cursor + take]
+        cursor += take
+        if not group:
+            raise ValueError(
+                f"train_epoch_groups={n_groups} left group {group_i} empty"
+            )
+        groups.append(group)
+    return groups
+
+
+class EpochGroupBatchSampler(Sampler[List[int]]):
+    """Pack shuffled indices to constant B, then cycle N batch-groups.
+
+    Epoch ``e`` yields group ``e % N``. After each full cycle (when
+    ``e // N`` advances), indices are reshuffled and batches are repacked so
+    the next cycle does not repeat the same batch membership. Batch order
+    inside a group is shuffled every epoch. ``batch_size`` is constant.
+    """
+
+    def __init__(
+        self,
+        n_samples: int,
+        batch_size: int,
+        n_groups: int,
+        *,
+        seed: int,
+        smoke_test: bool = False,
+    ) -> None:
+        n_samples = int(n_samples)
+        batch_size = int(batch_size)
+        n_groups = int(n_groups)
+        if n_samples < 1:
+            raise ValueError(f"n_samples must be >= 1, got {n_samples}")
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+        if n_groups < 1:
+            raise ValueError(f"n_groups must be >= 1, got {n_groups}")
+        n_batches = (n_samples + batch_size - 1) // batch_size
+        groups_used = n_groups
+        if bool(smoke_test) and n_batches < n_groups:
+            logger.info(
+                "smoke-test: clamping train_epoch_groups %d -> %d (only %d packed batches)",
+                n_groups, n_batches, n_batches,
+            )
+            groups_used = n_batches
+        self.n_samples = n_samples
+        self.batch_size = batch_size
+        self.n_groups = groups_used
+        self.n_groups_requested = n_groups
+        self.seed = int(seed)
+        self.epoch = 0
+        self._cycle = 0
+        self._repack_for_cycle(0)
+
+    def _repack_for_cycle(self, cycle: int) -> None:
+        gen = torch.Generator()
+        gen.manual_seed(self.seed + 2_000_003 * int(cycle))
+        shuffled = torch.randperm(self.n_samples, generator=gen).tolist()
+        packed, n_padded = pack_constant_size_batches(shuffled, self.batch_size)
+        groups = split_batches_into_groups(packed, self.n_groups)
+        self.groups = groups
+        self.n_padded = int(n_padded)
+        logger.info(
+            "epoch-group sampler: cycle=%d n=%d B=%d groups=%d (requested=%d) "
+            "packed_batches=%d padded=%d group_batch_counts=%s",
+            int(cycle),
+            self.n_samples,
+            self.batch_size,
+            self.n_groups,
+            self.n_groups_requested,
+            len(packed),
+            n_padded,
+            [len(g) for g in groups],
+        )
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+        cycle = self.epoch // self.n_groups
+        if cycle != self._cycle:
+            self._repack_for_cycle(cycle)
+            self._cycle = cycle
+
+    def _group(self) -> List[Tuple[int, ...]]:
+        return self.groups[self.epoch % self.n_groups]
+
+    def __iter__(self) -> Iterable[List[int]]:
+        group = self._group()
+        gen = torch.Generator()
+        gen.manual_seed(self.seed + 1_000_003 * self.epoch)
+        order = torch.randperm(len(group), generator=gen).tolist()
+        for idx in order:
+            yield list(group[idx])
+
+    def __len__(self) -> int:
+        return len(self._group())
+
+
+def make_epoch_group_train_loader(
+    dataset,
+    *,
+    batch_size: int,
+    n_groups: int,
+    seed: int,
+    smoke_test: bool = False,
+) -> DataLoader:
+    sampler = EpochGroupBatchSampler(
+        len(dataset),
+        batch_size,
+        n_groups,
+        seed=int(seed),
+        smoke_test=bool(smoke_test),
+    )
+    return DataLoader(dataset, batch_sampler=sampler, num_workers=0)
+
+
+def make_grouped_train_loader(
+    dataset,
+    *,
+    batch_size: int,
+    n_groups: int,
+    seed: int,
+    max_bytes: Optional[int] = None,
+    n_variates: Optional[int] = None,
+    lookback: Optional[int] = None,
+    horizon: Optional[int] = None,
+    overlap: Optional[int] = None,
+    smoke_test: bool = False,
+) -> Tuple[DataLoader, int, Optional[int], Optional[int]]:
+    """Build a constant-B grouped loader; ``max_bytes`` wins when set.
+
+    Returns ``(loader, n_groups_used, bytes_per_window, bytes_per_group_upper)``.
+    """
+    n_groups_used, nbytes, group_bytes = resolve_train_epoch_groups(
+        n_samples=len(dataset),
+        batch_size=int(batch_size),
+        n_groups=int(n_groups),
+        max_bytes=max_bytes,
+        n_variates=n_variates,
+        lookback=lookback,
+        horizon=horizon,
+        overlap=overlap,
+    )
+    loader = make_epoch_group_train_loader(
+        dataset,
+        batch_size=int(batch_size),
+        n_groups=n_groups_used,
+        seed=int(seed),
+        smoke_test=bool(smoke_test),
+    )
+    return loader, n_groups_used, nbytes, group_bytes
+
+
+def log_epoch_shard_contract(
+    *,
+    name: str,
+    n_groups: int,
+    max_epochs: int,
+    patience: Optional[int],
+) -> None:
+    """Patience / max_epochs count shards when N>1, not full dataset passes."""
+    if int(n_groups) <= 1:
+        return
+    patience_s = "none" if patience is None else str(int(patience))
+    logger.info(
+        "  [%s] epoch is a shard: train_epoch_groups=%d so patience=%s and "
+        "max_epochs=%d count shards, not full dataset passes "
+        "(one full pass = %d shards)",
+        name, int(n_groups), patience_s, int(max_epochs), int(n_groups),
+    )
 
 
 @dataclass(frozen=True)
@@ -342,15 +662,25 @@ class DiffusionTrainer:
         self,
         *,
         max_epochs: int,
+        start_epoch: int = 0,
+        initial_best_val: Optional[float] = None,
+        initial_best_epoch: int = 0,
         early_stopping: Optional[Callable[[float], bool]] = None,
         on_best: Optional[Callable[[DiffusionEpochMetrics], None]] = None,
         on_epoch_end: Optional[Callable[[DiffusionEpochMetrics], None]] = None,
     ) -> DiffusionTrainingResult:
-        best_val = float("inf")
-        best_epoch = 0
+        best_val = float("inf") if initial_best_val is None else float(initial_best_val)
+        best_epoch = 0 if initial_best_val is None else int(initial_best_epoch)
         history: List[DiffusionEpochMetrics] = []
         started = time.perf_counter()
-        for epoch in range(max_epochs):
+        start_epoch = int(start_epoch)
+        if start_epoch < 0:
+            raise ValueError(f"start_epoch must be >= 0, got {start_epoch}")
+        if start_epoch >= int(max_epochs):
+            raise ValueError(
+                f"start_epoch={start_epoch} >= max_epochs={max_epochs}; nothing to train"
+            )
+        for epoch in range(start_epoch, max_epochs):
             epoch_started = time.perf_counter()
             logger.info("  [%s] epoch %d/%d train_start", self.log_prefix, epoch + 1, max_epochs)
             train_loss, train_seconds = self._train_epoch(epoch, max_epochs)

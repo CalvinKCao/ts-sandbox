@@ -19,6 +19,10 @@ from .diffusion import BinaryDiffusionScheduler
 from .ordinal_window_norm import OrdinalLadder, ordinal_decode, ordinal_encode
 from .guidance import GuidanceModel, iTransformerTokenAdapter
 from .dit import FactorizedDiT
+from .pipeline.eval_bench import (
+    note as eval_bench_note,
+    span as eval_bench_span,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -399,6 +403,7 @@ class DiffusionTSF(nn.Module):
                 int(config.dataset_forecast_length or 0),
                 int(config.forecast_length),
             ),
+            use_horizon_chunk_embedding=bool(config.horizon_stitch),
         )
 
         self._ctx_token_variate_ids: Optional[torch.Tensor] = None
@@ -597,12 +602,14 @@ class DiffusionTSF(nn.Module):
         if getattr(self.config, "guidance_type", "itransformer") == "patch_decoder":
             if past_norm is None:
                 past_norm, _, _ = self._normalize_sequence(past_raw, None)
-            enc_tokens = self.guidance_model.get_encoder_tokens(past_norm)
+            with eval_bench_span("token_retrieval"):
+                enc_tokens = self.guidance_model.get_encoder_tokens(past_norm)
             self._ctx_token_variate_ids = getattr(
                 self.guidance_model, "token_variate_ids", None
             )
             return enc_tokens
-        enc_tokens = self.guidance_model.get_encoder_tokens(past_raw)
+        with eval_bench_span("token_retrieval"):
+            enc_tokens = self.guidance_model.get_encoder_tokens(past_raw)
         if self.context_encoder is None:
             raise RuntimeError("itransformer guidance requires context_encoder.")
         return self.context_encoder(enc_tokens)
@@ -839,11 +846,14 @@ class DiffusionTSF(nn.Module):
         context_window_indices: Optional[torch.Tensor] = None,
         patch_coarse_bin: Optional[torch.Tensor] = None,
         patch_time0: Optional[torch.Tensor] = None,
+        horizon_chunk_emb: Optional[torch.Tensor] = None,
         return_cross_attn_weights: bool = False,
     ) -> torch.Tensor:
         """Run the denoiser with the same chunking rule used by training/eval."""
         chunk_size = self.config.unet_max_chunk_size
         n_items = canvas.shape[0]
+        eval_bench_note("dit_n_items", n_items)
+        eval_bench_note("dit_chunk_size", int(chunk_size) if chunk_size else n_items)
         if chunk_size > 0 and n_items > chunk_size:
             outs = []
             for i in range(0, n_items, chunk_size):
@@ -863,6 +873,7 @@ class DiffusionTSF(nn.Module):
                 c_var = variate_indices[i:end] if variate_indices is not None else None
                 c_bin = patch_coarse_bin[i:end] if patch_coarse_bin is not None else None
                 c_t0 = patch_time0[i:end] if patch_time0 is not None else None
+                c_h = horizon_chunk_emb[i:end] if horizon_chunk_emb is not None else None
                 kwargs = {
                     "encoder_hidden_states": c_ctx,
                     "token_variate_ids": token_variate_ids,
@@ -877,6 +888,8 @@ class DiffusionTSF(nn.Module):
                     kwargs["patch_coarse_bin"] = c_bin
                 if c_t0 is not None:
                     kwargs["patch_time0"] = c_t0
+                if c_h is not None:
+                    kwargs["horizon_chunk_emb"] = c_h
                 outs.append(self.noise_predictor(c_canvas, c_t, c_cond, **kwargs))
             return torch.cat(outs, dim=0)
         kwargs = {
@@ -893,6 +906,8 @@ class DiffusionTSF(nn.Module):
             kwargs["patch_coarse_bin"] = patch_coarse_bin
         if patch_time0 is not None:
             kwargs["patch_time0"] = patch_time0
+        if horizon_chunk_emb is not None:
+            kwargs["horizon_chunk_emb"] = horizon_chunk_emb
         return self.noise_predictor(canvas, t_flat, cond_for_unet, **kwargs)
 
     def _load_from_state_dict(
@@ -1245,6 +1260,7 @@ class DiffusionTSF(nn.Module):
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
         future_coarse_2d: Optional[torch.Tensor] = None,
         future_fine_2d: Optional[torch.Tensor] = None,
+        horizon_chunk_t0: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions via binary reverse sampling.
 
@@ -1265,6 +1281,7 @@ class DiffusionTSF(nn.Module):
             snapshot_timesteps=snapshot_timesteps,
             future_coarse_2d=future_coarse_2d,
             future_fine_2d=future_fine_2d,
+            horizon_chunk_t0=horizon_chunk_t0,
         )
         return self.stage_strategy.generate(self, past, **gen_common)
 
@@ -1420,71 +1437,109 @@ class DiffusionTSF(nn.Module):
             )
         return torch.cat((past_cond, horizon_cond), dim=1)
 
-    def _chunk_horizon(self) -> int:
-        chunk = int(self.config.diffusion_chunk_horizon or 0)
-        if chunk > 0:
-            return chunk
-        return max(1, int(self.config.dataset_forecast_length or 0) or (self.config.forecast_length - self.config.lookback_overlap))
+    def _horizon_chunk_inner(self) -> int:
+        return int(self.config.horizon_chunk_inner)
 
-    def _ar_stride(self) -> int:
-        return self._chunk_horizon() - int(self.config.lookback_overlap)
+    def _horizon_canvas_width(self) -> int:
+        return int(self.config.lookback_overlap) + self._horizon_chunk_inner()
 
-    def _ar_num_chunks(self, dataset_horizon: int) -> int:
-        K = int(self.config.lookback_overlap)
-        C = self._chunk_horizon()
-        if dataset_horizon <= C:
-            return 1
-        return int(math.ceil((dataset_horizon - K) / max(1, self._ar_stride())))
+    def _dit_module(self) -> FactorizedDiT:
+        pred = self.noise_predictor
+        return getattr(pred, "_orig_mod", pred)
 
-    def _ar_training_enabled(self, future_len: int) -> bool:
-        chunk = int(self.config.diffusion_chunk_horizon or 0)
-        if chunk <= 0:
-            return False
-        dataset_h = future_len - int(self.config.lookback_overlap)
-        return dataset_h > chunk
+    def _horizon_chunk_emb_for_rows(
+        self,
+        t0: torch.Tensor,
+        horizon: torch.Tensor,
+        n_rows: int,
+        row_window_index: Optional[torch.Tensor] = None,
+        n_variates: Optional[int] = None,
+    ) -> Optional[torch.Tensor]:
+        if not self.config.horizon_stitch:
+            return None
+        dit = self._dit_module()
+        window_emb = dit.encode_horizon_chunk(
+            t0, horizon, self._horizon_chunk_inner(),
+        )
+        if row_window_index is not None:
+            if row_window_index.numel() != n_rows:
+                raise ValueError(
+                    f"row_window_index length {row_window_index.numel()} != n_rows {n_rows}"
+                )
+            return window_emb.index_select(0, row_window_index)
+        v = int(n_variates or 0)
+        if v <= 0:
+            if window_emb.shape[0] != n_rows:
+                raise ValueError(
+                    f"horizon_chunk_emb batch {window_emb.shape[0]} != n_rows {n_rows}"
+                )
+            return window_emb
+        if window_emb.shape[0] * v != n_rows:
+            raise ValueError(
+                f"cannot expand horizon_chunk_emb ({window_emb.shape[0]},) over "
+                f"V={v} to n_rows={n_rows}"
+            )
+        return window_emb.unsqueeze(1).expand(-1, v, -1).reshape(n_rows, -1)
 
-    def _sample_ar_training_chunk(
+    def _slice_horizon_stitch_future(
         self,
         past: torch.Tensor,
         future: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Pick one random AR chunk per batch row (teacher-forced history)."""
-        K = int(self.config.lookback_overlap)
-        C = self._chunk_horizon()
-        dataset_h = future.shape[-1] - K
-        n_chunks = self._ar_num_chunks(dataset_h)
-        if n_chunks <= 1:
-            return past, future
+        t0: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Keep original past; slice a fixed canvas from a long future when stitch is on."""
+        from .horizon_chunks import chunk_starts, slice_future_canvas
 
-        device = past.device
-        B = past.shape[0]
-        past_out = []
-        future_out = []
-        for b in range(B):
-            c = int(torch.randint(0, n_chunks, (1,), device=device).item())
-            offset = c * self._ar_stride()
-            end = min(offset + K + C, future.shape[-1])
-            fut_b = future[b : b + 1, ..., offset:end]
-            if c == 0:
-                past_b = past[b : b + 1]
-            else:
-                hist = future[b : b + 1, ..., K : K + offset]
-                past_b = torch.cat([past[b : b + 1], hist], dim=-1)
-            past_out.append(past_b)
-            future_out.append(fut_b)
-        max_past = max(p.shape[-1] for p in past_out)
-        max_fut = max(f.shape[-1] for f in future_out)
-        past_pad = []
-        future_pad = []
-        for p, f in zip(past_out, future_out):
-            if p.shape[-1] < max_past:
-                pad = max_past - p.shape[-1]
-                p = torch.cat([p[..., :1].expand(*p.shape[:-1], pad), p], dim=-1)
-            if f.shape[-1] < max_fut:
-                f = F.pad(f, (0, max_fut - f.shape[-1]))
-            past_pad.append(p)
-            future_pad.append(f)
-        return torch.cat(past_pad, dim=0), torch.cat(future_pad, dim=0)
+        k = int(self.config.lookback_overlap)
+        inner = self._horizon_chunk_inner()
+        canvas_w = k + inner
+        b = future.shape[0]
+        device = future.device
+        h = int(self.config.dataset_forecast_length or 0)
+        if h <= 0:
+            h = max(1, int(self.config.forecast_length) - k)
+        if not self.config.horizon_stitch:
+            t0_out = torch.zeros(b, device=device, dtype=torch.long)
+            h_t = torch.full((b,), h, device=device, dtype=torch.long)
+            return past, future, t0_out, h_t
+        expected = k + h
+        if future.shape[-1] != expected:
+            raise ValueError(
+                f"horizon_stitch expects future width {expected} "
+                f"(overlap {k} + H {h}), got {future.shape[-1]}"
+            )
+        starts = chunk_starts(h, inner=inner, overlap=k)
+        starts_t = torch.tensor(starts, device=device, dtype=torch.long)
+        if t0 is None:
+            idx = torch.randint(0, len(starts), (b,), device=device)
+            t0_out = starts_t[idx]
+        else:
+            t0_out = t0.to(device=device, dtype=torch.long).reshape(b)
+            if not bool(torch.isin(t0_out, starts_t).all()):
+                raise ValueError(f"t0 must be in {starts}, got {t0_out.tolist()}")
+        future_c = slice_future_canvas(future, t0_out, inner=inner, overlap=k)
+        if future_c.shape[-1] != canvas_w:
+            raise ValueError(
+                f"sliced canvas width {future_c.shape[-1]} != {canvas_w}"
+            )
+        h_t = torch.full((b,), h, device=device, dtype=torch.long)
+        return past, future_c, t0_out, h_t
+
+    def _window_horizon_ids(
+        self,
+        n_windows: int,
+        device: torch.device,
+        t0: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        h = int(self.config.dataset_forecast_length or 0)
+        if h <= 0:
+            h = max(1, int(self.config.forecast_length) - int(self.config.lookback_overlap))
+        if t0 is None:
+            t0_out = torch.zeros(n_windows, device=device, dtype=torch.long)
+        else:
+            t0_out = t0.to(device=device, dtype=torch.long).reshape(n_windows)
+        h_t = torch.full((n_windows,), h, device=device, dtype=torch.long)
+        return t0_out, h_t
 
     def _append_raw_lookback_cond_channel(
         self,
@@ -1532,7 +1587,8 @@ class DiffusionTSF(nn.Module):
         BV = B * V
         past_tail_len = self._past_cond_tail_len(past_norm.shape[-1], target_width)
         past_tail_norm = past_norm[..., -past_tail_len:]
-        past_maps = self._encode_staged_maps(past_tail_norm)
+        with eval_bench_span("encode_past"):
+            past_maps = self._encode_staged_maps(past_tail_norm)
         past_repr_w = past_maps["coarse"].shape[-1]
         cond_maps = [
             self._resize_cdf_height(past_maps["coarse"], H),
@@ -1597,7 +1653,8 @@ class DiffusionTSF(nn.Module):
         if cap > 0:
             past_tail_len = min(past_tail_len, cap)
         past_tail = past_norm[..., -past_tail_len:]
-        past_maps = self._encode_staged_maps(past_tail)
+        with eval_bench_span("encode_past"):
+            past_maps = self._encode_staged_maps(past_tail)
         cond = stack_past_coarse_fine(past_maps["coarse"], past_maps["fine"])
         return cond, past_maps
 
@@ -1633,6 +1690,7 @@ class DiffusionTSF(nn.Module):
         )
 
         assert self.binary_scheduler is not None
+        past, future, t0, horizon = self._slice_horizon_stitch_future(past, future)
         B = past.shape[0]
         V = self.config.num_variables
         device = past.device
@@ -1711,7 +1769,8 @@ class DiffusionTSF(nn.Module):
         cond = expand_lookback_cond_for_layout(lookback_cond, layout)
 
         prev_refine_16 = None
-        if unique:
+        use_prev = bool(getattr(self.config, "patch_refine_use_prev_cond", True))
+        if unique and use_prev:
             prev_32 = extract_prev_refine_crops_layout(
                 hir_gt,
                 layout,
@@ -1775,8 +1834,11 @@ class DiffusionTSF(nn.Module):
             "ctx": ctx_for_patches,
             "context_window_indices": context_window_indices,
             "variate_indices": layout.variate_index,
+            "window_index": layout.batch_index,
             "patch_coarse_bin": patch_coarse_bin,
             "patch_time0": patch_time0,
+            "horizon_chunk_t0": t0,
+            "horizon_chunk_h": horizon,
             "hir_gt": hir_gt,
             "future_maps": future_maps,
             "past_maps": past_maps,
@@ -1795,8 +1857,6 @@ class DiffusionTSF(nn.Module):
         """Prepare one patch batch for separate regular/anchor backwards."""
         if self.stage_strategy.name != "patch_refine":
             raise RuntimeError("prepared patch losses are only valid for patch_refine")
-        if self._ar_training_enabled(future.shape[-1]):
-            past, future = self._sample_ar_training_chunk(past, future)
         return self._prepare_binary_patch_refine(
             past,
             future,
@@ -1833,6 +1893,12 @@ class DiffusionTSF(nn.Module):
         patch_time0 = prepared["patch_time0"]
         n_patches = int(prepared["n_patches"])
         device = target_patches.device
+        horizon_emb = self._horizon_chunk_emb_for_rows(
+            prepared["horizon_chunk_t0"],
+            prepared["horizon_chunk_h"],
+            n_patches,
+            row_window_index=prepared["window_index"],
+        )
 
         regular_loss = torch.tensor(0.0, device=device)
         loss_x0 = torch.tensor(0.0, device=device)
@@ -1852,6 +1918,7 @@ class DiffusionTSF(nn.Module):
                 token_variate_ids=self._ctx_token_variate_ids,
                 patch_coarse_bin=patch_coarse_bin,
                 patch_time0=patch_time0,
+                horizon_chunk_emb=horizon_emb,
             )
             primary_logits, zt_logits = self._split_binary_heads(out)
             x0_logits = self._x0_logits_from_prediction(primary_logits, xt)
@@ -1895,6 +1962,7 @@ class DiffusionTSF(nn.Module):
                 token_variate_ids=self._ctx_token_variate_ids,
                 patch_coarse_bin=patch_coarse_bin,
                 patch_time0=patch_time0,
+                horizon_chunk_emb=horizon_emb,
             )
             anchor_primary, _ = self._split_binary_heads(anchor_out)
             anchor_x0 = self._x0_logits_from_prediction(anchor_primary, neutral)
@@ -2000,166 +2068,216 @@ class DiffusionTSF(nn.Module):
         if future_coarse_2d is None:
             raise ValueError("patch_refine generation requires future_coarse_2d from the coarse model")
 
-        B = past.shape[0]
-        V = self.config.num_variables
-        device = past.device
-        canvas_h, patch_h, patch_w, col_stride = self._patch_refine_geometry_knobs()
-        coarse_h = int(self.config.coarse_image_height)
-        raw_hz_w = int(self.config.forecast_length)
-        W_fut = self._repr_forecast_width(raw_hz_w)
-
-        past_norm, _, stats = self._normalize_sequence(past)
-        coarse = future_coarse_2d.to(device)
-        if coarse.shape[:2] != (B, V) or coarse.shape[3] != W_fut:
-            raise ValueError(
-                "future_coarse_2d must have shape "
-                f"(B={B}, V={V}, Hc, W={W_fut}), got {tuple(coarse.shape)}"
+        with eval_bench_span("patch_refine"):
+            B = past.shape[0]
+            V = self.config.num_variables
+            device = past.device
+            canvas_h, patch_h, patch_w, col_stride = self._patch_refine_geometry_knobs()
+            coarse_h = int(self.config.coarse_image_height)
+            raw_hz_w = int(self.config.forecast_length)
+            W_fut = self._repr_forecast_width(raw_hz_w)
+            t0, h_t = self._window_horizon_ids(
+                B, device, t0=kwargs.get("horizon_chunk_t0"),
+            )
+            eval_bench_note("refine_B", B)
+            eval_bench_note("refine_V", V)
+            eval_bench_note("refine_W", W_fut)
+            eval_bench_note("unique_segments", int(bool(getattr(self.config, "patch_refine_unique_segments", False))))
+            eval_bench_note(
+                "use_prev_cond",
+                int(bool(getattr(self.config, "patch_refine_use_prev_cond", True))),
             )
 
-        naive = naive_upscale_coarse_cdf(coarse, canvas_h)
-        edges = coarse_edges_from_cdf(coarse, canvas_height=canvas_h)
-        unique = bool(getattr(self.config, "patch_refine_unique_segments", False))
-        lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
-        ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
-
-        def _sample_layout(
-            layout: PatchLayout,
-            prev_refine_16: Optional[torch.Tensor],
-        ) -> torch.Tensor:
-            cond_l = expand_lookback_cond_for_layout(lookback_cond, layout)
-            aux_l, patch_coarse_bin_l, patch_time0_l = build_patch_aux_channels_layout(
-                naive,
-                edges,
-                layout,
-                patch_height=patch_h,
-                patch_width=patch_w,
-                canvas_height=canvas_h,
-                coarse_height=coarse_h,
-                horizon_width=W_fut,
-                prev_refine_16=prev_refine_16,
-            )
-            context_window_indices_l = layout.batch_index if ctx is not None else None
-            n_l = layout.n_patches
-
-            def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
-                canvas = self._inject_coordinate_channel(xt)
-                canvas = self._inject_time_channels(canvas)
-                return torch.cat([canvas, aux_l], dim=1)
-
-            def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
-                out = self._predict_noise_chunked(
-                    _build_canvas(xt),
-                    t_batch,
-                    cond_l,
-                    ctx,
-                    context_window_indices=context_window_indices_l,
-                    variate_indices=layout.variate_index,
-                    token_variate_ids=self._ctx_token_variate_ids,
-                    patch_coarse_bin=patch_coarse_bin_l,
-                    patch_time0=patch_time0_l,
+            with eval_bench_span("normalize"):
+                past_norm, _, stats = self._normalize_sequence(past)
+            coarse = future_coarse_2d.to(device)
+            if coarse.shape[:2] != (B, V) or coarse.shape[3] != W_fut:
+                raise ValueError(
+                    "future_coarse_2d must have shape "
+                    f"(B={B}, V={V}, Hc, W={W_fut}), got {tuple(coarse.shape)}"
                 )
-                primary, zt = self._split_binary_heads(out)
-                x0_logits = self._x0_logits_from_prediction(primary, xt)
-                return x0_logits, zt
 
-            sample_shape = (n_l, 1, patch_h, patch_w)
-            if sampler in ("anchor", "deterministic_anchor"):
-                t_batch = torch.full(
-                    (n_l,),
-                    self.config.binary_num_steps - 1,
+            with eval_bench_span("geometry"):
+                naive = naive_upscale_coarse_cdf(coarse, canvas_h)
+                edges = coarse_edges_from_cdf(coarse, canvas_height=canvas_h)
+            unique = bool(getattr(self.config, "patch_refine_unique_segments", False))
+            use_prev = bool(getattr(self.config, "patch_refine_use_prev_cond", True))
+            lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
+            ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
+
+            def _sample_layout(
+                layout: PatchLayout,
+                prev_refine_16: Optional[torch.Tensor],
+            ) -> torch.Tensor:
+                if not use_prev and prev_refine_16 is not None:
+                    raise ValueError(
+                        "prev_refine_16 must be None when patch_refine_use_prev_cond is false"
+                    )
+                with eval_bench_span("layout_aux"):
+                    cond_l = expand_lookback_cond_for_layout(lookback_cond, layout)
+                    aux_l, patch_coarse_bin_l, patch_time0_l = build_patch_aux_channels_layout(
+                        naive,
+                        edges,
+                        layout,
+                        patch_height=patch_h,
+                        patch_width=patch_w,
+                        canvas_height=canvas_h,
+                        coarse_height=coarse_h,
+                        horizon_width=W_fut,
+                        prev_refine_16=prev_refine_16,
+                    )
+                context_window_indices_l = layout.batch_index if ctx is not None else None
+                n_l = layout.n_patches
+                eval_bench_note("refine_n_patches", n_l)
+
+                def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
+                    canvas = self._inject_coordinate_channel(xt)
+                    canvas = self._inject_time_channels(canvas)
+                    return torch.cat([canvas, aux_l], dim=1)
+
+                def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
+                    horizon_emb = self._horizon_chunk_emb_for_rows(
+                        t0, h_t, n_l, row_window_index=layout.batch_index,
+                    )
+                    out = self._predict_noise_chunked(
+                        _build_canvas(xt),
+                        t_batch,
+                        cond_l,
+                        ctx,
+                        context_window_indices=context_window_indices_l,
+                        variate_indices=layout.variate_index,
+                        token_variate_ids=self._ctx_token_variate_ids,
+                        patch_coarse_bin=patch_coarse_bin_l,
+                        patch_time0=patch_time0_l,
+                        horizon_chunk_emb=horizon_emb,
+                    )
+                    primary, zt = self._split_binary_heads(out)
+                    x0_logits = self._x0_logits_from_prediction(primary, xt)
+                    return x0_logits, zt
+
+                sample_shape = (n_l, 1, patch_h, patch_w)
+                if sampler in ("anchor", "deterministic_anchor"):
+                    with eval_bench_span("anchor_decode"):
+                        t_batch = torch.full(
+                            (n_l,),
+                            self.config.binary_num_steps - 1,
+                            device=device,
+                            dtype=torch.long,
+                        )
+                        neutral = self._binary_anchor_canvas_shape(sample_shape, device=device)
+                        x0_logits, _ = _chunked_model_fn(neutral, t_batch)
+                        return (torch.sigmoid(x0_logits) > 0.5).float()
+                return self.binary_scheduler.sample(
+                    model_fn=_chunked_model_fn,
+                    shape=sample_shape,
+                    num_steps=num_steps,
                     device=device,
-                    dtype=torch.long,
+                    verbose=verbose,
+                    sampler=sampler,
+                    reverse_step_indices=reverse_step_indices,
+                    snapshot_timesteps=snapshot_timesteps,
                 )
-                neutral = self._binary_anchor_canvas_shape(sample_shape, device=device)
-                x0_logits, _ = _chunked_model_fn(neutral, t_batch)
-                return (torch.sigmoid(x0_logits) > 0.5).float()
-            return self.binary_scheduler.sample(
-                model_fn=_chunked_model_fn,
-                shape=sample_shape,
-                num_steps=num_steps,
-                device=device,
-                verbose=verbose,
-                sampler=sampler,
-                reverse_step_indices=reverse_step_indices,
-                snapshot_timesteps=snapshot_timesteps,
-            )
 
-        if unique:
-            # AR along the stride grid, then blanked-prev fills for leftover gaps.
-            primary_layouts = []
-            primary_preds = []
-            prev_16 = torch.zeros(B * V, 1, 16, patch_w, device=device)
-            for col0 in primary_stride_col0s(int(edges.shape[-1]), patch_w, col_stride):
-                layout = patch_layout_for_fixed_col0(
+            if unique:
+                col0s = primary_stride_col0s(int(edges.shape[-1]), patch_w, col_stride)
+                eval_bench_note("n_ar_col0", len(col0s) if use_prev else 0)
+                eval_bench_note("n_stride_col0", len(col0s))
+                if use_prev:
+                    # AR along the stride grid, then blanked-prev fills for leftover gaps.
+                    primary_layouts = []
+                    primary_preds = []
+                    prev_16 = torch.zeros(B * V, 1, 16, patch_w, device=device)
+                    with eval_bench_span("ar_primary"):
+                        for col0 in col0s:
+                            with eval_bench_span("ar_col0"):
+                                layout = patch_layout_for_fixed_col0(
+                                    edges,
+                                    torch.full((B,), col0, device=device, dtype=torch.long),
+                                    canvas_height=canvas_h,
+                                    patch_height=patch_h,
+                                    patch_width=patch_w,
+                                )
+                                pred = _sample_layout(layout, prev_16)
+                            primary_layouts.append(layout)
+                            primary_preds.append(pred)
+                            prev_16 = compress_prev_refine_32_to_16(pred)
+                    layout = PatchLayout.cat(primary_layouts)
+                    patch_cdf = torch.cat(primary_preds, dim=0)
+                else:
+                    with eval_bench_span("parallel_col0s"):
+                        layouts = [
+                            patch_layout_for_fixed_col0(
+                                edges,
+                                torch.full((B,), col0, device=device, dtype=torch.long),
+                                canvas_height=canvas_h,
+                                patch_height=patch_h,
+                                patch_width=patch_w,
+                            )
+                            for col0 in col0s
+                        ]
+                        layout = PatchLayout.cat(layouts)
+                        patch_cdf = _sample_layout(layout, None)
+                with eval_bench_span("ar_gap"):
+                    gap_layout = coverage_gap_layout(
+                        edges,
+                        layout,
+                        canvas_height=canvas_h,
+                        patch_height=patch_h,
+                        patch_width=patch_w,
+                    )
+                    if gap_layout is not None:
+                        gap_prev = None if not use_prev else torch.zeros(
+                            gap_layout.n_patches, 1, 16, patch_w, device=device,
+                        )
+                        gap_pred = _sample_layout(gap_layout, gap_prev)
+                        layout = PatchLayout.cat([layout, gap_layout])
+                        patch_cdf = torch.cat([patch_cdf, gap_pred], dim=0)
+            else:
+                with eval_bench_span("parallel_patches"):
+                    locations = select_patch_locations(
+                        edges,
+                        canvas_height=canvas_h,
+                        patch_height=patch_h,
+                        patch_width=patch_w,
+                        col_stride=col_stride,
+                    )
+                    layout = PatchLayout.from_locations(locations, device=device)
+                    patch_cdf = _sample_layout(layout, None)
+
+            with eval_bench_span("blend_decode"):
+                hir_cdf, patch_vote_counts = blend_patch_bins_layout(
+                    patch_cdf,
+                    layout,
                     edges,
-                    torch.full((B,), col0, device=device, dtype=torch.long),
                     canvas_height=canvas_h,
                     patch_height=patch_h,
                     patch_width=patch_w,
                 )
-                pred = _sample_layout(layout, prev_16)
-                primary_layouts.append(layout)
-                primary_preds.append(pred)
-                prev_16 = compress_prev_refine_32_to_16(pred)
-            layout = PatchLayout.cat(primary_layouts)
-            patch_cdf = torch.cat(primary_preds, dim=0)
-            gap_layout = coverage_gap_layout(
-                edges,
-                layout,
-                canvas_height=canvas_h,
-                patch_height=patch_h,
-                patch_width=patch_w,
-            )
-            if gap_layout is not None:
-                gap_prev = torch.zeros(
-                    gap_layout.n_patches, 1, 16, patch_w, device=device,
+                future_norm = self._decode_absolute_future_hir(hir_cdf)
+                future_with_overlap = self._denormalize_future(
+                    future_norm, past, stats, trim_overlap=False,
                 )
-                gap_pred = _sample_layout(gap_layout, gap_prev)
-                layout = PatchLayout.cat([layout, gap_layout])
-                patch_cdf = torch.cat([patch_cdf, gap_pred], dim=0)
-        else:
-            locations = select_patch_locations(
-                edges,
-                canvas_height=canvas_h,
-                patch_height=patch_h,
-                patch_width=patch_w,
-                col_stride=col_stride,
-            )
-            layout = PatchLayout.from_locations(locations, device=device)
-            patch_cdf = _sample_layout(layout, None)
-
-        hir_cdf, patch_vote_counts = blend_patch_bins_layout(
-            patch_cdf,
-            layout,
-            edges,
-            canvas_height=canvas_h,
-            patch_height=patch_h,
-            patch_width=patch_w,
-        )
-        locations = layout.to_locations()
-        future_norm = self._decode_absolute_future_hir(hir_cdf)
-        future_with_overlap = self._denormalize_future(
-            future_norm, past, stats, trim_overlap=False,
-        )
-        future = future_with_overlap[..., int(self.config.lookback_overlap):]
-        out = {
-            "prediction": future,
-            "prediction_norm": future_norm,
-            "prediction_global_norm": future,
-            "prediction_with_overlap": future_with_overlap,
-            "future_2d": hir_cdf,
-            "future_2d_coarse": coarse,
-            "future_2d_fine": hir_cdf,
-            "past_2d_coarse": past_maps["coarse"],
-            "past_2d_fine": past_maps["fine"],
-            # Keep the pre-blend crops for diagnostics which must not average
-            # the stride-overlapping patch predictions.
-            "patch_cdf_unblended": patch_cdf,
-            "patch_locations": locations,
-            "patch_vote_counts": patch_vote_counts,
-            "diffusion_stage": "patch_refine",
-        }
-        return out
+                future = future_with_overlap[..., int(self.config.lookback_overlap):]
+            with eval_bench_span("layout_to_cpu"):
+                locations = layout.to_locations()
+            out = {
+                "prediction": future,
+                "prediction_norm": future_norm,
+                "prediction_global_norm": future,
+                "prediction_with_overlap": future_with_overlap,
+                "future_2d": hir_cdf,
+                "future_2d_coarse": coarse,
+                "future_2d_fine": hir_cdf,
+                "past_2d_coarse": past_maps["coarse"],
+                "past_2d_fine": past_maps["fine"],
+                # Keep the pre-blend crops for diagnostics which must not average
+                # the stride-overlapping patch predictions.
+                "patch_cdf_unblended": patch_cdf,
+                "patch_locations": locations,
+                "patch_vote_counts": patch_vote_counts,
+                "diffusion_stage": "patch_refine",
+            }
+            return out
 
     def _forward_binary_coarse(
         self,
@@ -2174,12 +2292,14 @@ class DiffusionTSF(nn.Module):
         """Train the coarse staged denoiser (patch_refine has its own forward)."""
         assert self.binary_scheduler is not None, "binary scheduler is not initialized"
 
+        past, future, t0, horizon = self._slice_horizon_stitch_future(past, future)
         B = past.shape[0]
         V = self.config.num_variables
         H = self.config.image_height
         device = past.device
         BV = B * V
         C_occ = self._occupancy_channels()
+        horizon_emb = self._horizon_chunk_emb_for_rows(t0, horizon, BV, n_variates=V)
 
         past_norm, future_norm, _stats = self._normalize_sequence(past, future)
         future_maps = self._encode_staged_maps(future_norm)
@@ -2223,7 +2343,9 @@ class DiffusionTSF(nn.Module):
                 )
 
         out_flat = self._predict_noise_chunked(
-            canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+            canvas, t_flat, cond_for_unet, ctx_flat,
+            variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+            horizon_chunk_emb=horizon_emb,
         )
         primary_logits, zt_logits = self._split_binary_heads(out_flat)
         x0_logits = self._x0_logits_from_prediction(primary_logits, xt_flat)
@@ -2252,6 +2374,7 @@ class DiffusionTSF(nn.Module):
                 base_cond_for_unet,
                 ctx_anchor,
                 variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+                horizon_chunk_emb=horizon_emb,
             )
             anchor_primary, _ = self._split_binary_heads(anchor_out_flat)
             anchor_x0_logits = self._x0_logits_from_prediction(anchor_primary, neutral_future_flat)
@@ -2308,6 +2431,7 @@ class DiffusionTSF(nn.Module):
         capture_cross_attn: bool = True,
     ) -> Dict[str, Any]:
         """One coarse diagnostic forward: conditioning tensors and cross-attention."""
+        past, future, t0, horizon = self._slice_horizon_stitch_future(past, future)
         B = past.shape[0]
         V = self.config.num_variables
         device = past.device
@@ -2339,6 +2463,7 @@ class DiffusionTSF(nn.Module):
             canvas, t_flat, base_cond, ctx_flat,
             variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             return_cross_attn_weights=capture_cross_attn,
+            horizon_chunk_emb=self._horizon_chunk_emb_for_rows(t0, horizon, BV, n_variates=V),
         )
         cross_attn_weights = getattr(self.noise_predictor, "_diag_cross_attn_weights", None)
 
@@ -2362,6 +2487,7 @@ class DiffusionTSF(nn.Module):
     ) -> Dict[str, Any]:
         """Expose patch-refine's native stacked lookback condition for plotting."""
         del capture_cross_attn  # Cross-attention is evaluated per selected patch.
+        past, future, _, _ = self._slice_horizon_stitch_future(past, future)
         past_norm, future_norm, norm_stats = self._normalize_sequence(past, future)
         cond_for_unet, past_maps = self._patch_refine_lookback_cond(past_norm)
         return {
@@ -2393,106 +2519,118 @@ class DiffusionTSF(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """Generate coarse staged output (patch_refine has its own generate)."""
         assert self.binary_scheduler is not None, "binary scheduler is not initialized"
-        B = past.shape[0]
-        V = self.config.num_variables
-        H = self.config.image_height
-        device = past.device
-        BV = B * V
-        C_occ = self._occupancy_channels()
-        raw_hz_w = int(self.config.forecast_length)
-        W_fut = self._repr_forecast_width(raw_hz_w)
-
-        past_norm, _, stats = self._normalize_sequence(past)
-        cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
-
-        ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
-        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
-        variate_indices = None
-        if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
-            variate_indices = self._flat_variate_indices(BV, V, device)
-
-        def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
-            canvas = self._inject_coordinate_channel(xt)
-            canvas = self._inject_time_channels(canvas)
-            return canvas
-
-        def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
-            out = self._predict_noise_chunked(
-                _build_canvas(xt), t_batch, cond_for_unet, ctx_flat,
-                variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+        with eval_bench_span("coarse"):
+            B = past.shape[0]
+            V = self.config.num_variables
+            H = self.config.image_height
+            device = past.device
+            BV = B * V
+            C_occ = self._occupancy_channels()
+            raw_hz_w = int(self.config.forecast_length)
+            W_fut = self._repr_forecast_width(raw_hz_w)
+            t0, h_t = self._window_horizon_ids(
+                B, device, t0=kwargs.get("horizon_chunk_t0"),
             )
-            primary, zt = self._split_binary_heads(out)
-            x0_logits = self._x0_logits_from_prediction(primary, xt)
-            return x0_logits, zt
+            horizon_emb = self._horizon_chunk_emb_for_rows(t0, h_t, BV, n_variates=V)
+            eval_bench_note("coarse_B", B)
+            eval_bench_note("coarse_V", V)
+            eval_bench_note("coarse_W", W_fut)
 
-        intermediates = None
-        sample_shape = (BV, C_occ, H, W_fut)
-        if sampler in ("anchor", "deterministic_anchor"):
-            t_batch = torch.full(
-                (BV,),
-                self.config.binary_num_steps - 1,
-                device=device,
-                dtype=torch.long,
-            )
-            neutral_future_flat = self._binary_anchor_canvas_shape(
-                sample_shape, device=device,
-            )
-            x0_logits, _zt_logits = _chunked_model_fn(neutral_future_flat, t_batch)
-            future_2d_flat = (torch.sigmoid(x0_logits) > 0.5).float()
-            if yield_intermediates:
-                intermediates = [(999, neutral_future_flat.clone()), (0, future_2d_flat.clone())]
-        else:
-            sample_kwargs = dict(
-                model_fn=_chunked_model_fn,
-                shape=sample_shape,
-                num_steps=num_steps,
-                device=device,
-                verbose=verbose,
-                sampler=sampler,
-                reverse_step_indices=reverse_step_indices,
-                snapshot_timesteps=snapshot_timesteps,
-            )
-            if yield_intermediates:
-                future_2d_flat, intermediates = self.binary_scheduler.sample(
-                    yield_intermediates=True,
-                    **sample_kwargs,
+            with eval_bench_span("normalize"):
+                past_norm, _, stats = self._normalize_sequence(past)
+            cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
+
+            ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
+            ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
+            variate_indices = None
+            if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
+                variate_indices = self._flat_variate_indices(BV, V, device)
+
+            def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
+                canvas = self._inject_coordinate_channel(xt)
+                canvas = self._inject_time_channels(canvas)
+                return canvas
+
+            def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
+                out = self._predict_noise_chunked(
+                    _build_canvas(xt), t_batch, cond_for_unet, ctx_flat,
+                    variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+                    horizon_chunk_emb=horizon_emb,
                 )
+                primary, zt = self._split_binary_heads(out)
+                x0_logits = self._x0_logits_from_prediction(primary, xt)
+                return x0_logits, zt
+
+            intermediates = None
+            sample_shape = (BV, C_occ, H, W_fut)
+            if sampler in ("anchor", "deterministic_anchor"):
+                with eval_bench_span("anchor_decode"):
+                    t_batch = torch.full(
+                        (BV,),
+                        self.config.binary_num_steps - 1,
+                        device=device,
+                        dtype=torch.long,
+                    )
+                    neutral_future_flat = self._binary_anchor_canvas_shape(
+                        sample_shape, device=device,
+                    )
+                    x0_logits, _zt_logits = _chunked_model_fn(neutral_future_flat, t_batch)
+                    future_2d_flat = (torch.sigmoid(x0_logits) > 0.5).float()
+                    if yield_intermediates:
+                        intermediates = [(999, neutral_future_flat.clone()), (0, future_2d_flat.clone())]
             else:
-                future_2d_flat = self.binary_scheduler.sample(**sample_kwargs)
+                sample_kwargs = dict(
+                    model_fn=_chunked_model_fn,
+                    shape=sample_shape,
+                    num_steps=num_steps,
+                    device=device,
+                    verbose=verbose,
+                    sampler=sampler,
+                    reverse_step_indices=reverse_step_indices,
+                    snapshot_timesteps=snapshot_timesteps,
+                )
+                if yield_intermediates:
+                    future_2d_flat, intermediates = self.binary_scheduler.sample(
+                        yield_intermediates=True,
+                        **sample_kwargs,
+                    )
+                else:
+                    future_2d_flat = self.binary_scheduler.sample(**sample_kwargs)
 
-        generated_2d = future_2d_flat.reshape(B, V, H, W_fut)
-        future_2d_coarse = generated_2d
-        cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
-        temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
-        future_norm = self._decode_coarse_1d_from_map(
-            future_2d_coarse,
-            cdf_decoder=cdf_decoder,
-            expectation_sharpen_temp=temperature,
-        )
-        future_with_overlap = self._denormalize_future(
-            future_norm, past, stats, trim_overlap=False,
-        )
-        future = future_with_overlap[..., int(self.config.lookback_overlap):]
+            with eval_bench_span("decode"):
+                generated_2d = future_2d_flat.reshape(B, V, H, W_fut)
+                future_2d_coarse = generated_2d
+                cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
+                temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
+                future_norm = self._decode_coarse_1d_from_map(
+                    future_2d_coarse,
+                    cdf_decoder=cdf_decoder,
+                    expectation_sharpen_temp=temperature,
+                )
+                future_with_overlap = self._denormalize_future(
+                    future_norm, past, stats, trim_overlap=False,
+                )
+                future = future_with_overlap[..., int(self.config.lookback_overlap):]
 
-        result = {
-            'prediction': future,
-            'prediction_norm': future_norm,
-            'prediction_global_norm': future,
-            # Retain the K lookback-overlap predictions for diagnostic plots.
-            # Metrics continue to consume the forecast-only tensors above.
-            'prediction_with_overlap': future_with_overlap,
-            'future_2d': generated_2d,
-            'future_2d_coarse': future_2d_coarse,
-            'past_2d_coarse': past_maps["coarse"],
-            'past_2d_fine': past_maps["fine"],
-            'diffusion_stage': self.stage_strategy.name,
-        }
-        if intermediates is not None:
-            reshaped_intermediates = []
-            for (t_idx, i_tensor) in intermediates:
-                reshaped_intermediates.append((t_idx, i_tensor.reshape(B, V, H, W_fut)))
-            result['intermediates'] = reshaped_intermediates
-        return result
+            result = {
+                'prediction': future,
+                'prediction_norm': future_norm,
+                'prediction_global_norm': future,
+                # Retain the K lookback-overlap predictions for diagnostic plots.
+                # Metrics continue to consume the forecast-only tensors above.
+                'prediction_with_overlap': future_with_overlap,
+                'future_2d': generated_2d,
+                'future_2d_coarse': future_2d_coarse,
+                'past_2d_coarse': past_maps["coarse"],
+                'past_2d_fine': past_maps["fine"],
+                'diffusion_stage': self.stage_strategy.name,
+            }
+            if intermediates is not None:
+                reshaped_intermediates = []
+                for (t_idx, i_tensor) in intermediates:
+                    reshaped_intermediates.append((t_idx, i_tensor.reshape(B, V, H, W_fut)))
+                result['intermediates'] = reshaped_intermediates
+            return result
 
     def _forward_binary_factorized(
         self,
@@ -2730,8 +2868,6 @@ class DiffusionTSF(nn.Module):
         context_token_variate_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Convenience method to get just the loss for training."""
-        if self._ar_training_enabled(future.shape[-1]):
-            past, future = self._sample_ar_training_chunk(past, future)
         outputs = self.forward(
             past,
             future,
@@ -2741,4 +2877,4 @@ class DiffusionTSF(nn.Module):
             cross_variate_context=cross_variate_context,
             context_token_variate_ids=context_token_variate_ids,
         )
-        return outputs['loss']
+        return outputs["loss"]
