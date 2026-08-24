@@ -30,6 +30,14 @@ def apply_mmpd_run_config(args: Any, block: Dict[str, Any], *, repo_root: Path =
     if subset_config := block.get("subset_config"):
         args.subset_config = resolve_subset_config_path(str(subset_config), repo_root=repo_root)
         args.mmpd_only = True
+        if getattr(args, "eval_test_stride", None) is None:
+            from models.diffusion_tsf.pipeline.config import load_experiment_config
+
+            cfg = load_experiment_config(str(args.subset_config))
+            for phase in cfg.get("phases") or []:
+                if phase.get("phase") == "staged_eval" and phase.get("test_stride") is not None:
+                    args.eval_test_stride = int(phase["test_stride"])
+                    break
     if lookback := block.get("lookback"):
         args.lookback = int(lookback)
     if horizon := block.get("horizon"):

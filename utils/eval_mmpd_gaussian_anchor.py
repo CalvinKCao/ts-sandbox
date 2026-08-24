@@ -286,7 +286,11 @@ def run_test_stride(run: AnchorRun) -> int:
 
 
 def eval_test_stride(args: argparse.Namespace, run: AnchorRun) -> int:
-    """Test stride for eval indices / MMPD eval helper (binary staged_eval uses 4)."""
+    """Test stride for eval indices / MMPD Dataset_MTS test split.
+
+    CLI ``--eval-test-stride`` wins when set. Otherwise use the subset YAML
+    ``test_stride`` (lr10 ETTh1/traffic are 1, not the old default 4).
+    """
     override = getattr(args, "eval_test_stride", None)
     if override is not None:
         return max(1, int(override))
@@ -3027,9 +3031,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--eval-test-stride",
         type=int,
-        default=4,
-        help="Test stride for eval indices/MMPD eval (binary staged_eval uses 4). "
-        "Training still uses subset test_stride.",
+        default=None,
+        help="Test stride for eval indices/MMPD test split. Default: subset YAML "
+        "test_stride (lr10 ETTh1/traffic=1). Pass 4 only to keep the old lattice.",
     )
     parser.add_argument("--test-max-items", type=int, default=None)
     parser.add_argument("--seed", type=int, default=2026)
