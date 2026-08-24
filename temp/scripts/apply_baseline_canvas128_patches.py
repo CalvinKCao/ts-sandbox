@@ -114,6 +114,47 @@ class _StrideWrap(Dataset):
         return len(self.indices)
 
 
+class _WindowCapWrap(Dataset):
+    def __init__(self, base, max_windows: int, seed: int):
+        import random
+        self.base = base
+        n = len(base)
+        k = int(max_windows)
+        if k < 1:
+            raise ValueError('max_windows must be >= 1, got %r' % (max_windows,))
+        if k >= n:
+            self.indices = list(range(n))
+        else:
+            rng = random.Random(int(seed))
+            self.indices = sorted(rng.sample(range(n), k))
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+    def __getitem__(self, index):
+        return self.base[self.indices[index]]
+
+    def __len__(self):
+        return len(self.indices)
+
+
+def _apply_window_cap(data_set, args, flag):
+    if flag == 'pred':
+        return data_set
+    seed = int(getattr(args, 'window_subset_seed', 42))
+    if flag == 'train':
+        cap = int(getattr(args, 'train_max_windows', 0) or 0)
+        seed = seed + 17
+    elif flag == 'val':
+        cap = int(getattr(args, 'val_max_windows', 0) or 0)
+        seed = seed + 29
+    else:
+        cap = int(getattr(args, 'test_max_windows', 0) or 0)
+    if cap > 0:
+        data_set = _WindowCapWrap(data_set, cap, seed)
+    return data_set
+
+
 def data_provider(args, flag):
     Data = data_dict[args.data]
     timeenc = 0 if args.embed != 'timeF' else 1
@@ -153,6 +194,7 @@ def data_provider(args, flag):
         stride = int(getattr(args, 'test_window_stride', 1) or 1)
     if stride > 1 and flag != 'pred':
         data_set = _StrideWrap(data_set, stride)
+    data_set = _apply_window_cap(data_set, args, flag)
     print(flag, len(data_set), f'stride={stride}')
     data_loader = DataLoader(
         data_set,
@@ -191,6 +233,47 @@ class _StrideWrap(Dataset):
 
     def __len__(self):
         return len(self.indices)
+
+
+class _WindowCapWrap(Dataset):
+    def __init__(self, base, max_windows: int, seed: int):
+        import random
+        self.base = base
+        n = len(base)
+        k = int(max_windows)
+        if k < 1:
+            raise ValueError('max_windows must be >= 1, got %r' % (max_windows,))
+        if k >= n:
+            self.indices = list(range(n))
+        else:
+            rng = random.Random(int(seed))
+            self.indices = sorted(rng.sample(range(n), k))
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+    def __getitem__(self, index):
+        return self.base[self.indices[index]]
+
+    def __len__(self):
+        return len(self.indices)
+
+
+def _apply_window_cap(data_set, args, flag):
+    if flag == 'pred':
+        return data_set
+    seed = int(getattr(args, 'window_subset_seed', 42))
+    if flag == 'train':
+        cap = int(getattr(args, 'train_max_windows', 0) or 0)
+        seed = seed + 17
+    elif flag == 'val':
+        cap = int(getattr(args, 'val_max_windows', 0) or 0)
+        seed = seed + 29
+    else:
+        cap = int(getattr(args, 'test_max_windows', 0) or 0)
+    if cap > 0:
+        data_set = _WindowCapWrap(data_set, cap, seed)
+    return data_set
 
 
 def data_provider(args, flag):
@@ -234,6 +317,7 @@ def data_provider(args, flag):
         stride = int(getattr(args, 'test_window_stride', 1) or 1)
     if stride > 1 and flag != 'pred':
         data_set = _StrideWrap(data_set, stride)
+    data_set = _apply_window_cap(data_set, args, flag)
     print(flag, len(data_set), f'stride={stride}')
     data_loader = DataLoader(
         data_set,
@@ -254,17 +338,30 @@ def _ensure_cli(path: Path, anchor: str) -> None:
                 lines.append("    " + line.lstrip())
             else:
                 lines.append(line)
-        path.write_text("".join(lines), encoding="utf-8")
-        return
-    if anchor not in text:
+        text = "".join(lines)
+    elif anchor not in text:
         raise RuntimeError(f"anchor missing in {path}: {anchor!r}")
-    insert = (
-        "    parser.add_argument('--train_window_stride', type=int, default=1)\n"
-        "    parser.add_argument('--val_window_stride', type=int, default=1)\n"
-        "    parser.add_argument('--test_window_stride', type=int, default=1)\n"
-        "    " + anchor
-    )
-    path.write_text(text.replace(anchor, insert, 1), encoding="utf-8")
+    else:
+        insert = (
+            "    parser.add_argument('--train_window_stride', type=int, default=1)\n"
+            "    parser.add_argument('--val_window_stride', type=int, default=1)\n"
+            "    parser.add_argument('--test_window_stride', type=int, default=1)\n"
+            "    " + anchor
+        )
+        text = text.replace(anchor, insert, 1)
+    if "train_max_windows" not in text:
+        stride_anchor = "parser.add_argument('--test_window_stride', type=int, default=1)"
+        if stride_anchor not in text:
+            raise RuntimeError(f"cannot insert window-cap CLI in {path}")
+        cap_insert = (
+            stride_anchor
+            + "\n    parser.add_argument('--train_max_windows', type=int, default=0)\n"
+            "    parser.add_argument('--val_max_windows', type=int, default=0)\n"
+            "    parser.add_argument('--test_max_windows', type=int, default=0)\n"
+            "    parser.add_argument('--window_subset_seed', type=int, default=42)"
+        )
+        text = text.replace(stride_anchor, cap_insert, 1)
+    path.write_text(text, encoding="utf-8")
 
 
 def _stub_reformer_import() -> None:

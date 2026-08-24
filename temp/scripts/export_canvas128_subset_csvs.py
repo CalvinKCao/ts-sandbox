@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Export canvas128 table subsets as paper-format CSVs for iTransformer / PatchTST.
 
-Uses the same variate_indices as configs/base/binary_staged.yaml data_subset_by_dataset
-for the nine leaderboard datasets. Writes date + selected feature columns (OT = last).
+Variate lists, strides, and window caps come from the lr10 binary campaign YAML
+(``all_variates: true`` wins over leftover parent 4v index lists).
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -16,29 +17,31 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
+from models.diffusion_tsf.pipeline.config import load_experiment_config  # noqa: E402
 from models.diffusion_tsf.train_multivariate_pipeline import (  # noqa: E402
-    DATASET_REGISTRY,
     _load_dataset_array,
     _resolve_registry_path,
 )
 
-# Mirror configs/base/binary_staged.yaml for the table datasets.
-SUBSETS = {
-    "ETTh1": {"variate_indices": [0, 1, 2, 3, 4, 5, 6], "train_stride": 1, "val_stride": 1, "test_stride": 1, "freq": "h", "loader": "ETTh1"},
-    "ETTh2": {"variate_indices": [0, 1, 2, 3, 4, 5, 6], "train_stride": 1, "val_stride": 1, "test_stride": 1, "freq": "h", "loader": "ETTh2"},
-    "ETTm1": {"variate_indices": [0, 1, 2, 3], "train_stride": 3, "val_stride": 3, "test_stride": 1, "freq": "min", "loader": "ETTm1"},
-    "ETTm2": {"variate_indices": [0, 1, 2, 3, 4, 5, 6], "train_stride": 4, "val_stride": 4, "test_stride": 1, "freq": "min", "loader": "ETTm2"},
-    "electricity": {"variate_indices": [0, 1, 2, 3], "train_stride": 1, "val_stride": 1, "test_stride": 1, "freq": "h", "loader": "custom"},
-    "traffic": {"variate_indices": [0, 1, 2, 3], "train_stride": 1, "val_stride": 1, "test_stride": 1, "freq": "h", "loader": "custom"},
-    "exchange_rate": {"variate_indices": [0, 1, 2, 3, 4, 5, 6, 7], "train_stride": 1, "val_stride": 1, "test_stride": 1, "freq": "d", "loader": "custom"},
-    # PEMS → Dataset_PEMS_CSV (60/20/20); not Dataset_Custom 70/10/20.
-    "PeMS": {"variate_indices": [0, 1, 2, 3, 4, 5, 6], "train_stride": 1, "val_stride": 1, "test_stride": 1, "freq": "h", "loader": "PEMS"},
-    "solar_Alabama": {"variate_indices": [0, 1], "train_stride": 1, "val_stride": 1, "test_stride": 1, "freq": "min", "loader": "custom"},
+DEFAULT_SUBSET_YAML = (
+    REPO / "configs" / "binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10.yaml"
+)
+
+# Loader/freq only. Variate indices come from YAML.
+LOADER_META = {
+    "ETTh1": {"freq": "h", "loader": "ETTh1"},
+    "ETTh2": {"freq": "h", "loader": "ETTh2"},
+    "ETTm1": {"freq": "min", "loader": "ETTm1"},
+    "ETTm2": {"freq": "min", "loader": "ETTm2"},
+    "electricity": {"freq": "h", "loader": "custom"},
+    "traffic": {"freq": "h", "loader": "custom"},
+    "exchange_rate": {"freq": "d", "loader": "custom"},
+    "PeMS": {"freq": "h", "loader": "PEMS"},
+    "solar_Alabama": {"freq": "min", "loader": "custom"},
 }
 
 
 def _synthetic_dates(n: int, freq: str) -> pd.DatetimeIndex:
-    # Paper loaders only need a parseable date column for stamps.
     start = "2016-07-01 00:00:00"
     if freq in ("t", "min", "15min"):
         return pd.date_range(start, periods=n, freq="15min")
@@ -47,16 +50,49 @@ def _synthetic_dates(n: int, freq: str) -> pd.DatetimeIndex:
     return pd.date_range(start, periods=n, freq="h")
 
 
-def export_one(name: str, out_dir: Path) -> dict:
-    spec = SUBSETS[name]
+def load_subset_specs(yaml_path: Path) -> dict:
+    cfg = load_experiment_config(str(yaml_path))
+    by_ds = (cfg.get("experiment") or {}).get("data_subset_by_dataset") or {}
+    eval_caps = {}
+    for phase in cfg.get("phases") or []:
+        if phase.get("phase") == "staged_eval":
+            eval_caps = dict(phase.get("eval_max_windows_by_dataset") or {})
+            break
+    specs = {}
+    for name, spec in by_ds.items():
+        if name not in LOADER_META:
+            continue
+        specs[name] = {
+            **LOADER_META[name],
+            "all_variates": bool(spec.get("all_variates", False)),
+            "variate_indices": list(spec.get("variate_indices") or []),
+            "train_stride": int(spec.get("train_stride", 1)),
+            "val_stride": int(spec.get("val_stride", 1)),
+            "test_stride": int(spec.get("test_stride", 1)),
+            "train_max_windows": spec.get("train_max_windows"),
+            "val_max_windows": spec.get("val_max_windows"),
+            "eval_max_windows": eval_caps.get(name),
+            "subset_id": spec.get("subset_id"),
+        }
+    if not specs:
+        raise ValueError(f"{yaml_path}: no overlapping datasets with LOADER_META")
+    return specs
+
+
+def export_one(name: str, spec: dict, out_dir: Path) -> dict:
     path, date_col = _resolve_registry_path(name)
     arr = _load_dataset_array(path, date_col)
-    idx = list(spec["variate_indices"])
-    if max(idx) >= arr.shape[1]:
-        raise ValueError(f"{name}: variate_indices {idx} out of range for V={arr.shape[1]}")
+    n_raw = int(arr.shape[1])
+    if spec.get("all_variates"):
+        idx = list(range(n_raw))
+    else:
+        idx = [int(i) for i in spec["variate_indices"]]
+        if not idx:
+            raise ValueError(f"{name}: empty variate_indices and all_variates is false")
+    if max(idx) >= n_raw:
+        raise ValueError(f"{name}: variate_indices {idx} out of range for V={n_raw}")
     sub = arr[:, idx].astype(np.float64)
 
-    # Prefer real dates when CSV has them.
     dates = None
     if path.endswith(".csv") and date_col:
         try:
@@ -79,22 +115,54 @@ def export_one(name: str, out_dir: Path) -> dict:
         "csv": str(out_path.name),
         "n_rows": int(len(df)),
         "n_variates": int(n_v),
+        "all_variates": bool(spec.get("all_variates")),
         "variate_indices": idx,
         "train_stride": int(spec["train_stride"]),
         "val_stride": int(spec["val_stride"]),
         "test_stride": int(spec["test_stride"]),
+        "train_max_windows": spec.get("train_max_windows"),
+        "val_max_windows": spec.get("val_max_windows"),
+        "eval_max_windows": spec.get("eval_max_windows"),
+        "subset_id": spec.get("subset_id"),
         "freq": spec["freq"],
         "loader": spec["loader"],
         "source_path": path,
     }
-    print(f"[ok] {name}: {out_path} shape={df.shape[0]}x{n_v}", flush=True)
+    print(
+        f"[ok] {name}: {out_path} shape={df.shape[0]}x{n_v} "
+        f"all_variates={meta['all_variates']} "
+        f"train_max_windows={meta['train_max_windows']}",
+        flush=True,
+    )
     return meta
 
 
 def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--subset-yaml",
+        type=Path,
+        default=DEFAULT_SUBSET_YAML,
+        help="Binary campaign YAML whose data_subset_by_dataset to mirror",
+    )
+    p.add_argument(
+        "--datasets",
+        type=str,
+        default="",
+        help="Comma-separated dataset names (default: all overlapping YAML keys)",
+    )
+    args = p.parse_args()
+    specs = load_subset_specs(args.subset_yaml)
+    if args.datasets.strip():
+        names = [x.strip() for x in args.datasets.split(",") if x.strip()]
+        missing = [n for n in names if n not in specs]
+        if missing:
+            raise KeyError(f"not in subset YAML/LOADER_META: {missing}")
+    else:
+        names = list(specs)
     out_dir = REPO / "temp" / "baselines_canvas128_subset" / "data"
     out_dir.mkdir(parents=True, exist_ok=True)
-    metas = [export_one(name, out_dir) for name in SUBSETS]
+    metas = [export_one(name, specs[name], out_dir) for name in names]
     (out_dir / "subset_meta.json").write_text(json.dumps(metas, indent=2) + "\n")
     print(f"[done] wrote {out_dir / 'subset_meta.json'}", flush=True)
     return 0

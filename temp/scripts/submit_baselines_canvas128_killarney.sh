@@ -131,7 +131,7 @@ CLONE_LOCK="$PWD/results/baselines_canvas128_subset/clone.lock"
   fi
   find temp/iTransformer temp/PatchTST -name '*.py' -print0 | xargs -0 sed -i 's/np\.Inf/np.inf/g' || true
   python -u temp/scripts/apply_baseline_canvas128_patches.py
-  python -u temp/scripts/export_canvas128_subset_csvs.py
+  python -u temp/scripts/export_canvas128_subset_csvs.py --datasets "$DATASETS"
 ) 9>"$CLONE_LOCK"
 
 EXTRA_FLAGS=()
