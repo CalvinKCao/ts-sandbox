@@ -92,6 +92,16 @@ echo "=========================================="
 cd "${SLURM_SUBMIT_DIR:?}"
 echo "PROJECT_ROOT=$PWD"
 
+if ! type module >/dev/null 2>&1; then
+  if [ -f /etc/profile.d/z00_lmod.sh ]; then
+    # shellcheck disable=SC1091
+    source /etc/profile.d/z00_lmod.sh
+  elif [ -f /cvmfs/soft.computecanada.ca/config/profile/bash.sh ]; then
+    # shellcheck disable=SC1091
+    source /cvmfs/soft.computecanada.ca/config/profile/bash.sh
+  fi
+fi
+type module >/dev/null 2>&1 || { echo "ERROR: Lmod unavailable after profile source" >&2; exit 127; }
 module purge || true
 module load StdEnv/2023
 module load python/3.11
