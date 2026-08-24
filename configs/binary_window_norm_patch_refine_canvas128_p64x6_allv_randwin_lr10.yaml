@@ -1,4 +1,5 @@
-# allv-randwin HP search: 10 complete trials/stage, no prune, 20-ep from pretrain.
+# allv-randwin HP search: 10 complete trials/stage, 20 epochs with patience 8, no prune.
+# Next stage resumes from the best trial checkpoint (no from-pretrain refit).
 # Search: donor LR ±10x, effective univariate batch ±1 power of 2, EMA default ± one neighbor.
 # Donor trial is enqueued. Window/patch fractions are 1.0 (full data, all variate crops).
 # ETTm/PeMS use donor-like train/val strides (s3/s4/s2) so search is not stride-1 dense.
@@ -115,11 +116,8 @@ phases:
 
   - phase: diffusion_coarse_finetune_hp
     n_trials: 10
-    max_epochs: 4
-    patience: 5
-    refit_best_max_epochs: 20
-    refit_best_patience: 5
-    refit_from_pretrain: true
+    max_epochs: 20
+    patience: 8
     pruner: none
     search_space: lr_eff_batch_univariate_ema
     # L40S 08-22 lr10 probe (max_bs=16, headroom=0.85). Usable window batch;
@@ -155,11 +153,8 @@ phases:
 
   - phase: diffusion_patch_refine_finetune_hp
     n_trials: 10
-    max_epochs: 4
-    patience: 5
-    refit_best_max_epochs: 20
-    refit_best_patience: 5
-    refit_from_pretrain: true
+    max_epochs: 20
+    patience: 8
     pruner: none
     search_space: lr_eff_batch_univariate_ema
     # Fine unique-seg often fits the probe cap even when coarse does not.
