@@ -515,7 +515,7 @@ def build_pipeline_test_dataset(args: argparse.Namespace, run: AnchorRun):
 def build_mmpd_test_dataset(args: argparse.Namespace, run: AnchorRun):
     from utils.mmpd_patches.dataset_mts import Dataset_MTS
 
-    stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
+    stage_mmpd_dataset_for_run(args.mmpd_data_dir, run, lookback=int(args.lookback))
     lookback, horizon = dataset_window_lengths(args, run.dataset)
     split = parse_mmpd_data_split(mmpd_data_split(run, args.mmpd_data_dir))
     eval_stride = eval_test_stride(args, run)
@@ -538,7 +538,7 @@ def build_mmpd_pack_pool(
     from torch.utils.data import ConcatDataset
     from utils.mmpd_patches.dataset_mts import Dataset_MTS
 
-    stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
+    stage_mmpd_dataset_for_run(args.mmpd_data_dir, run, lookback=int(args.lookback))
     lookback, horizon = dataset_window_lengths(args, run.dataset)
     split = parse_mmpd_data_split(mmpd_data_split(run, args.mmpd_data_dir))
     eval_stride = eval_test_stride(args, run)
@@ -615,7 +615,11 @@ def mmpd_data_split(run_or_dataset: Any, data_dir: Path) -> str:
     return DATASET_SPLITS[dataset]
 
 
-def stage_mmpd_dataset_for_run(data_dir: Path, run: AnchorRun) -> None:
+def stage_mmpd_dataset_for_run(
+    data_dir: Path,
+    run: AnchorRun,
+    lookback: int = 336,
+) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     dataset = run.dataset
     src = DATASET_FILES[dataset]
@@ -654,9 +658,7 @@ def stage_mmpd_dataset_for_run(data_dir: Path, run: AnchorRun) -> None:
         _export_pems_mmpd_csv(src, dst, expected_meta["variate_indices"])
     else:
         _export_binary_aligned_mmpd_csv(dataset, dst, expected_meta["variate_indices"])
-    from models.diffusion_tsf.train_multivariate_pipeline import LOOKBACK_LENGTH
-
-    lookback = LOOKBACK_LENGTH
+    lookback = int(lookback)
     if "data_split" not in expected_meta:
         n_rows = _count_csv_rows(dst)
         expected_meta["data_split"] = pipeline_mmpd_row_split(dataset, n_rows, lookback)
@@ -1231,7 +1233,7 @@ def train_mmpd(args: argparse.Namespace, runs: Sequence[AnchorRun]) -> None:
 
     for run in runs:
         dataset = run.dataset
-        stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
+        stage_mmpd_dataset_for_run(args.mmpd_data_dir, run, lookback=int(args.lookback))
         if args.mmpd_tune_trials > 0:
             tuned = load_tuned_hparams(args.output_dir, dataset)
             if tuned is None or args.force_mmpd_tune:
@@ -2042,7 +2044,7 @@ def run_mmpd_eval(
         )
 
     if not out_npz.exists() or args.force_mmpd_eval:
-        stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
+        stage_mmpd_dataset_for_run(args.mmpd_data_dir, run, lookback=int(args.lookback))
         ckpt_path, mmpd_data = resolve_mmpd_checkpoint(args, run)
         if not ckpt_path.exists():
             raise FileNotFoundError(f"MMPD checkpoint missing for {dataset}: {ckpt_path}")
@@ -2710,7 +2712,7 @@ def run_phase_init(args: argparse.Namespace, commit: str) -> None:
     indices_by_dataset: Dict[str, List[int]] = {}
     for dataset in args.datasets:
         run = anchors["binary"][dataset]
-        stage_mmpd_dataset_for_run(args.mmpd_data_dir, run)
+        stage_mmpd_dataset_for_run(args.mmpd_data_dir, run, lookback=int(args.lookback))
         indices_by_dataset[dataset] = get_or_create_indices(args, run)
 
     manifest = {
@@ -2763,7 +2765,7 @@ def run_phase_mmpd(
     if not args.skip_mmpd_train:
         train_mmpd(args, [binary_run])
     elif not args.skip_mmpd_eval:
-        stage_mmpd_dataset_for_run(args.mmpd_data_dir, binary_run)
+        stage_mmpd_dataset_for_run(args.mmpd_data_dir, binary_run, lookback=int(args.lookback))
         ckpt, _ = resolve_mmpd_checkpoint(args, binary_run)
         if not ckpt.exists():
             raise FileNotFoundError(
