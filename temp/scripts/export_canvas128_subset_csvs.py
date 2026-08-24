@@ -19,8 +19,8 @@ sys.path.insert(0, str(REPO))
 
 from models.diffusion_tsf.pipeline.config import load_experiment_config  # noqa: E402
 from models.diffusion_tsf.train_multivariate_pipeline import (  # noqa: E402
+    DATASET_REGISTRY,
     _load_dataset_array,
-    _resolve_registry_path,
 )
 
 DEFAULT_SUBSET_YAML = (
@@ -80,7 +80,8 @@ def load_subset_specs(yaml_path: Path) -> dict:
 
 
 def export_one(name: str, spec: dict, out_dir: Path) -> dict:
-    path, date_col = _resolve_registry_path(name)
+    rel, date_col, _ = DATASET_REGISTRY[name]
+    path = str(REPO / "datasets" / rel)
     arr = _load_dataset_array(path, date_col)
     n_raw = int(arr.shape[1])
     if spec.get("all_variates"):

@@ -755,13 +755,12 @@ def resolve_subset_meta_for_dataset(
     seed: int,
 ) -> Dict[str, Any]:
     from models.diffusion_tsf.pipeline.data_subset import resolve_data_subset
-    from models.diffusion_tsf.train_multivariate_pipeline import get_dataset_shape
 
-    raw_rows, raw_variates = get_dataset_shape(dataset)
+    raw_rows, raw_variates = _raw_csv_shape(dataset)
     target_dataset = policy.get("target_dataset")
     target_rows = target_variates = None
     if target_dataset:
-        target_rows, target_variates = get_dataset_shape(str(target_dataset))
+        target_rows, target_variates = _raw_csv_shape(str(target_dataset))
     return resolve_data_subset(
         dataset_name=dataset,
         raw_rows=raw_rows,
@@ -774,6 +773,18 @@ def resolve_subset_meta_for_dataset(
         target_rows=target_rows,
         target_variates=target_variates,
     )
+
+
+def _raw_csv_shape(dataset: str) -> Tuple[int, int]:
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        DATASET_REGISTRY,
+        _load_dataset_array,
+    )
+
+    rel, date_col, _ = DATASET_REGISTRY[dataset]
+    path = str(REPO_ROOT / "datasets" / rel)
+    arr = _load_dataset_array(path, date_col)
+    return int(arr.shape[0]), int(arr.shape[1])
 
 
 def build_anchor_run_from_subset_meta(
