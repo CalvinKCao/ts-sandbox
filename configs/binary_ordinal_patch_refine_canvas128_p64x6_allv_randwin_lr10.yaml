@@ -1,0 +1,18 @@
+# Same campaign as allv-randwin lr10, but global ordinal ranks instead of window-norm/max_scale.
+# Coarse stays 16 bins; canvas 128 / patch 64x6 still spans 8 coarse bins vertically.
+# Patch-guidance is trained here (do not reuse a window-norm guidance ckpt).
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10.yaml
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, ordinal, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, nopruner, from_pretrain]
+
+experiment:
+  name: binary-ordinal-patch-refine-c128-allv-randwin-lr10
+  experiment_name: binary_ordinal_patch_refine_canvas128_p64x6_allv_randwin_lr10
+  use_window_normalization: false
+  use_ordinal_window_norm: true
+  ordinal_ood_shift_causal_only: true
+
+phases:
+  - phase: staged_eval
+    eval_progress_key: canvas128_allv_randwin_lr10_ordinal_s1_n10_steps4
