@@ -4,6 +4,9 @@
 # Do NOT set the lr10 starvation knobs (window 0.5 / patch 0.5 / anchor every 4).
 # Unique-seg stays on via the canvas128 -> earlyjuly parent.
 # Keep ETTh1_allv_randwin so the coarse ckpt matches the same windows.
+# staged_eval: s1 n10 4-step like lr10. Unique eval_progress_key so we do not
+# resume the 4964361 campaign's eval_resume. Eval-only: ./submit_binary.sh
+# --resume against 4984196 (retrain:true still skips when resume + local ckpt).
 extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
 replace_phases: true
 
@@ -11,7 +14,7 @@ training:
   itrans_paper_batch_size: 1
 
 wandb:
-  tags: [all_variates, randwin, lr10, etth1, fine_only, donor_lr, from_lr10_coarse_best, canvas128, p64x6]
+  tags: [all_variates, randwin, lr10, etth1, fine_only, donor_lr, from_lr10_coarse_best, canvas128, p64x6, eval_s1_n10_steps4]
 
 visualization:
   viz_binary_mmpd_gap: false
@@ -96,3 +99,22 @@ phases:
       binary_length_scale: 1.0
       max_scale: 5.2
       target_univariate_batch: 256
+
+  - phase: staged_eval
+    anchor_only: false
+    eval_test_fraction: 1.0
+    test_stride: 1
+    # Distinct from lr10's canvas128_allv_randwin_lr10_s1_n10_steps4 (4964361).
+    eval_progress_key: canvas128_allv_randwin_lr10_etth1_fine20_donorlr_s1_n10_steps4
+    eval_max_windows_by_dataset:
+      ETTh1: 1838
+    n_samples: 1
+    probabilistic_n_samples: 10
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 4
+    # Same L40S small-V probe as lr10 ETTh1 4964361: max_fit=54 / n_samples=10 -> 5
+    batch_size: 5
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true

@@ -1,1 +1,0 @@
-scripts/submit_viz_canvas128_etth1_killarney.sh

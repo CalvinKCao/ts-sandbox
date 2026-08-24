@@ -66,8 +66,8 @@ visualization:
   viz_patch_boxes: false
   viz_patch_boxes_n_samples: 1
   # Point-acc stage: always emit top-gap binary↔MMPD + redbox (anchor ranking).
-  # Requires visualization.mmpd_campaign_root (or mmpd_campaign_root_by_dataset).
-  # Unset → skip with log; set but missing pack → fail fast.
+  # Requires visualization.mmpd_campaign_root_by_dataset[dataset] (or a global
+  # mmpd_campaign_root). Unset for this dataset → skip; set but missing pack → fail.
   viz_binary_mmpd_gap: true
   viz_binary_mmpd_redbox: true
   viz_binary_mmpd_top_k: 10
@@ -79,6 +79,7 @@ visualization:
   viz_binary_mmpd_smoke_top_k: 1
   viz_binary_mmpd_smoke_variables: 2
   mmpd_campaign_root: null
+  mmpd_campaign_root_by_dataset: {}
   mmpd_config: configs/mmpd_decoder_flat_subsets_paper_lb336_hz96_matched_binary.yaml
   mmpd_config_suffix: mmpd_decoder_flat_subsets_paper_lb336_hz96_matched_binary
 
@@ -95,13 +96,6 @@ experiment:
   seeds: [42]
   ckpt_config: null
   walltime: "3:00:00"
-  existing_ckpt_roots: {}
-  mmpd_root: "datasets/mmpd"
-  ordinal_disc_evaluator: "temp/scripts/eval_univariate_patch_refine_ordinal_vs_mmpd.py"
-  ordinal_binary_config: "configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml"
-  disc_run: null
-  raw_run: null
-  slice_lengths: [8, 16, 32]
   diffusion_type: binary
   model_type: dit
   image_height: 16
@@ -134,8 +128,6 @@ experiment:
   patch_refine_patch_width: 8
   patch_refine_col_stride: 6
   patch_refine_unique_segments: false
-  patch_refine_use_prev_cond: true
-  patch_refine_prev_cond_dropout: 0.5
   patch_refine_finetune_window_fraction: 1.0
   # Train-only: keep this fraction of unique-seg (B,V) crops per window.
   # Independent of window_fraction. 1.0 = all variate-crops.
@@ -160,7 +152,6 @@ experiment:
   forecast_length: 96
   lookback_overlap: 8
   diffusion_lookback_cap: 0
-  diffusion_chunk_horizon: 0
   horizon_stitch: false
   horizon_chunk_inner: 96
   representation_time_stride: 1
@@ -294,7 +285,8 @@ phases:
     tune_sampler: false
     probabilistic_sampler: quad_t
     probabilistic_num_inference_steps: 20
-    batch_size: 8
+    # Small-V canvas128 (7v) L40S probe: max_fit=54, n_samples=20 -> 2
+    batch_size: 2
     gmm_components: 10
     topk_max: 3
     skip_eval_visualizations: false

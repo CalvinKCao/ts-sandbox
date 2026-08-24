@@ -1,1 +1,0 @@
-scripts/submit_viz_synth_pretrain_killarney.sh

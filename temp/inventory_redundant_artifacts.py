@@ -1,1 +1,0 @@
-scripts/inventory_redundant_artifacts.py

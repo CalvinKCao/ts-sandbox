@@ -1,1 +1,0 @@
-scripts/run_h96_ordinal_patch_refine_mmpd_dag.sh

@@ -1,1 +1,0 @@
-scripts/check_mmpd_instance_campaign.py

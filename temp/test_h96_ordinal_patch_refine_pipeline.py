@@ -1,1 +1,0 @@
-scripts/test_h96_ordinal_patch_refine_pipeline.py

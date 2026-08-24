@@ -96,11 +96,14 @@ phases:
     tune_sampler: false
     probabilistic_sampler: anchor
     probabilistic_num_inference_steps: 1
-    batch_size: 1
+    # L40S probes: 4854713 allv max_fit=11; 4854714 v000-159=46; 4854715 v160-320=45
+    batch_size_by_subset_id:
+      electricity_allv_s2: 11
+      electricity_v000_159_s2: 46
+      electricity_v160_320_s2: 45
     gmm_components: 10
     topk_max: 3
     skip_eval_visualizations: true
-    probe_eval_batch_size: true
 
   - phase: staged_eval
     anchor_only: false
@@ -111,8 +114,11 @@ phases:
     tune_sampler: false
     probabilistic_sampler: quad_t
     probabilistic_num_inference_steps: 20
-    batch_size: 1
+    # Same jobs: usable = max_fit // 3 -> 3 / 15 / 15
+    batch_size_by_subset_id:
+      electricity_allv_s2: 3
+      electricity_v000_159_s2: 15
+      electricity_v160_320_s2: 15
     gmm_components: 10
     topk_max: 3
     skip_eval_visualizations: true
-    probe_eval_batch_size: true

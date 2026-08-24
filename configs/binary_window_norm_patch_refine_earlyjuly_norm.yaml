@@ -25,7 +25,6 @@ geometry:
   forecast_length: 96
   lookback_overlap: 8
   diffusion_lookback_cap: 336
-  diffusion_chunk_horizon: 0
   representation_time_stride: 1
   past_cond_resize_to_horizon: false
   itrans_lookback_length: 336
@@ -60,7 +59,6 @@ experiment:
   patch_refine_patch_width: 8
   patch_refine_col_stride: 6
   patch_refine_unique_segments: true
-  patch_refine_prev_cond_dropout: 0.5
   dit_patch_size: [8, 8]
   dit_cond_patch_size: [8, 8]
   dit_embed_dim: 384
@@ -78,24 +76,6 @@ experiment:
   binary_anchor_input_mode: stationary_flat
   binary_noise_schedule: linear
   eval_sampler: anchor
-  # Same caps as mid vertical-dual / patch16x4_fixed20_from_joint era.
-  data_subset:
-    enabled: true
-    target_dataset: ETTh1
-    reduce_if_larger_than_target: true
-    max_variates: 7
-    max_variates_by_dataset:
-      ETTm1: 4
-      weather: 4
-      solar_Alabama: 2
-      electricity: 4
-      traffic: 4
-      exchange_rate: 7
-      dynamic: 2
-    sample_stride_by_dataset:
-      dynamic: 480
-    variate_strategy: first
-    subset_id_template: "{dataset}_{n_variates}v_s{sample_stride}"
 
 phases:
   - phase: staged_diffusion_pretrain
@@ -166,8 +146,8 @@ phases:
     tune_sampler: false
     probabilistic_sampler: quad_t
     probabilistic_num_inference_steps: 20
-    batch_size: 8
+    # Small-V canvas128 L40S probe: max_fit=54, n_samples=20 -> 2
+    batch_size: 2
     gmm_components: 10
     topk_max: 3
     skip_eval_visualizations: true
-    probe_eval_batch_size: true

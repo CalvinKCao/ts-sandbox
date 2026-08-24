@@ -35,7 +35,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from utils.disc_bin_center_shift import bin_center_shift, nearest_bin_indices  # noqa: E402
 from utils.dual_scale_bin_filter import align_mmpd_to_binary_dataset_norm  # noqa: E402
-from utils.eval_discriminator_texture_staged_vs_mmpd import (  # noqa: E402
+from utils.disc_shared import (  # noqa: E402
     binary_mmpd_train_scaler_map,
 )
 from utils.eval_mmpd_gaussian_anchor import (  # noqa: E402

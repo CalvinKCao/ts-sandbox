@@ -184,7 +184,6 @@ def _test_train_generate() -> None:
         use_variate_embedding=False,
         past_cond_resize_to_horizon=False,
         patch_refine_unique_segments=True,
-        patch_refine_use_prev_cond=True,
     )
     model = DiffusionTSF(cfg).to(device)
     model.train()
@@ -223,8 +222,6 @@ def _test_train_generate() -> None:
     print(f"generate dense ok n_patches={len(gen_dense['patch_locations'])}")
 
     model.config.patch_refine_unique_segments = True
-    model.config.patch_refine_use_prev_cond = False
-    model.config.patch_refine_prev_cond_dropout = 0.0
     t2 = time.time()
     with torch.no_grad():
         gen_noprev = model.generate(
@@ -234,14 +231,14 @@ def _test_train_generate() -> None:
         )
     assert gen_noprev["prediction"].shape[-1] == 96, gen_noprev["prediction"].shape
     print(
-        f"generate no-prev unique ok pred={tuple(gen_noprev['prediction'].shape)} "
+        f"generate unique ok pred={tuple(gen_noprev['prediction'].shape)} "
         f"{time.time()-t2:.1f}s"
     )
     model.train()
     out_noprev = model.forward(past, future)
     out_noprev["loss"].backward()
     print(
-        f"train_step no-prev ok loss={float(out_noprev['loss'].detach()):.4f} "
+        f"train_step unique ok loss={float(out_noprev['loss'].detach()):.4f} "
         f"n_patches={float(out_noprev['n_patches'])}"
     )
 
@@ -351,8 +348,6 @@ def _test_horizon_stitch_train_eval() -> None:
         use_variate_embedding=False,
         past_cond_resize_to_horizon=False,
         patch_refine_unique_segments=True,
-        patch_refine_use_prev_cond=False,
-        patch_refine_prev_cond_dropout=0.0,
     )
     model = DiffusionTSF(cfg).to(device)
     model.train()

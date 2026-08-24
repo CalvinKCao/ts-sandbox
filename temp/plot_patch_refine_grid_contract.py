@@ -1,1 +1,0 @@
-scripts/plot_patch_refine_grid_contract.py

@@ -121,8 +121,19 @@ phases:
     refit_from_pretrain: true
     pruner: none
     search_space: lr_only
-    probe_train_batch_size: true
-    probe_train_batch_size_max: 16
+    # L40S 08-22 lr10 probe (max_bs=16, headroom=0.85). Usable window batch;
+    # lr_only still splits against target_univariate_batch.
+    batch_size_by_dataset:
+      ETTh1: 13
+      ETTh2: 13
+      ETTm1: 13
+      ETTm2: 13
+      exchange_rate: 13
+      weather: 13
+      electricity: 1
+      solar_Alabama: 8
+      PeMS: 1
+      traffic: 1
     hp_lr_min: 1.6260630766856958e-5
     hp_lr_max: 1.6260630766856958e-3
     target_univariate_batch: 336
@@ -144,8 +155,19 @@ phases:
     refit_from_pretrain: true
     pruner: none
     search_space: lr_only
-    probe_train_batch_size: true
-    probe_train_batch_size_max: 16
+    # Fine unique-seg often fits the probe cap even when coarse does not.
+    # PeMS/traffic never finished fine; both OOMed or cancelled at coarse=1.
+    batch_size_by_dataset:
+      ETTh1: 13
+      ETTh2: 13
+      ETTm1: 13
+      ETTm2: 13
+      exchange_rate: 13
+      weather: 13
+      electricity: 13
+      solar_Alabama: 13
+      PeMS: 1
+      traffic: 1
     hp_lr_min: 2.34526630622002e-4
     hp_lr_max: 2.34526630622002e-3
     target_univariate_batch: 256
@@ -179,8 +201,21 @@ phases:
     tune_sampler: false
     probabilistic_sampler: quad_t
     probabilistic_num_inference_steps: 4
-    batch_size: 8
+    # L40S eval probes, n_samples=10, n_chunks=1. Small-V max_fit=54 -> 5.
+    # electricity 4964367 max_fit=10 -> 1. PeMS lr4 4946713 max_fit=11 -> 1.
+    # traffic 862v: no eval probe (4964633 never reached eval); 431v shards
+    # max_fit=6 so 862v cannot exceed 1 at n=10.
+    batch_size_by_dataset:
+      ETTh1: 5
+      ETTh2: 5
+      ETTm1: 5
+      ETTm2: 5
+      exchange_rate: 5
+      weather: 5
+      solar_Alabama: 5
+      electricity: 1
+      PeMS: 1
+      traffic: 1
     gmm_components: 10
     topk_max: 3
     skip_eval_visualizations: true
-    probe_eval_batch_size: true

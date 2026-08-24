@@ -1,1 +1,0 @@
-scripts/check_mmpd_ordinal_campaign.py

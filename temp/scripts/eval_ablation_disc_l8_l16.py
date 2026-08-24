@@ -59,7 +59,6 @@ from models.diffusion_tsf.train_multivariate_pipeline import (
     load_wrapped_guidance,
     resolve_pipeline_data_subset,
 )
-from temp.eval_univariate_patch_refine_vs_gt import load_patch_refine_run
 from utils.disc_shared import DISC_ARCH_CHOICES
 from utils.disc_snap_viz import (
     DEFAULT_VIZ_SANITY,
@@ -73,7 +72,7 @@ from utils.disc_snap_viz import (
 )
 from utils.dual_scale_bin_filter import align_mmpd_to_binary_dataset_norm
 from utils.eval_discriminator_binary_vs_mmpd_univariate import train_classifier
-from utils.eval_discriminator_texture_staged_vs_mmpd import (
+from utils.disc_shared import (
     apply_disc_pack_protocol,
     binary_mmpd_train_scaler_map,
     split_windows,
@@ -113,6 +112,58 @@ from utils.visualize_staged_forecast import _load_staged_bundle
 DEFAULT_MMPD = (
     REPO_ROOT / "results/datasets/07-29-0151-h96-ordinal-binary-nonordinal-mmpd-mmpd"
 )
+
+
+def load_patch_refine_run(
+    dataset: str,
+    checkpoint_dir: Path,
+    test_stride: Optional[int],
+) -> Tuple[AnchorRun, Dict[str, Path]]:
+    """Load the sole coarse + patch-refine checkpoint for a dataset."""
+    candidates: List[Tuple[AnchorRun, Dict[str, Path]]] = []
+    seen_roots: set[Path] = set()
+    for subset_dir in sorted(checkpoint_dir.iterdir()):
+        try:
+            resolved = subset_dir.resolve()
+        except OSError:
+            resolved = subset_dir
+        if resolved in seen_roots:
+            continue
+        coarse_pt = subset_dir / "coarse" / "best.pt"
+        refine_pt = subset_dir / "patch_refine" / "best.pt"
+        metadata_path = subset_dir / "patch_refine" / "metadata.json"
+        if not (coarse_pt.is_file() and refine_pt.is_file() and metadata_path.is_file()):
+            continue
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata.get("dataset_name") != dataset:
+            continue
+        seen_roots.add(resolved)
+        metadata = dict(metadata)
+        metadata["dataset_name"] = dataset
+        metadata["dataset"] = dataset
+        from models.diffusion_tsf.pipeline.data_subset import put_subset_record, read_subset_record
+
+        rec = read_subset_record(metadata, dataset)
+        if test_stride is not None:
+            rec["test_stride"] = int(test_stride)
+        put_subset_record(metadata, dataset, rec)
+        run = AnchorRun(
+            variant="binary_patch_refine",
+            dataset=dataset,
+            root=checkpoint_dir,
+            subset_dir=subset_dir,
+            best_pt=refine_pt,
+            itrans_pt=None,
+            metadata=metadata,
+        )
+        candidates.append((run, {"coarse_pt": coarse_pt, "refine_pt": refine_pt}))
+    if not candidates:
+        raise FileNotFoundError(
+            f"No coarse + patch_refine checkpoint for {dataset} under {checkpoint_dir}"
+        )
+    if len(candidates) != 1:
+        raise RuntimeError(f"ambiguous patch-refine subsets for {dataset} under {checkpoint_dir}")
+    return candidates[0]
 # Default: canvas128 coarser ladder leaf (override --runs after train / for legacy 256 ckpts).
 DEFAULT_RUNS = (
     "window_norm_c128:results/ckpts/PLACEHOLDER-ETTh1-binary_window_norm_patch_refine_canvas128_p64x6:"

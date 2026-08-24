@@ -1,1 +1,0 @@
-scripts/submission_manifest.py

@@ -1,1 +1,0 @@
-scripts/eval_ckpt_anchor_mse.py

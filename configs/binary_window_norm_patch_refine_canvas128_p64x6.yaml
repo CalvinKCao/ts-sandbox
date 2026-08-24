@@ -7,8 +7,10 @@ wandb:
   tags: [ablation, window_norm, patch_refine, canvas128, p64x6, early_july_norm]
 
 visualization:
-  # Matched-binary MMPD campaign for ETTh1 canvas128 point-gap / redbox.
-  mmpd_campaign_root: results/datasets/07-29-0151-h96-ordinal-binary-nonordinal-mmpd-mmpd
+  # ETTh1-only. Other datasets inherit gap/redbox=true with no campaign → skip.
+  mmpd_campaign_root: null
+  mmpd_campaign_root_by_dataset:
+    ETTh1: results/datasets/07-29-0151-h96-ordinal-binary-nonordinal-mmpd-mmpd
 
 experiment:
   name: binary-window-norm-patch-refine-canvas128-p64x6
