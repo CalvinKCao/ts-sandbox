@@ -1,4 +1,4 @@
-# allv-randwin HP search: 10 complete trials/stage, 20 epochs with patience 8, no prune.
+# allv-randwin HP search: 10 complete trials/stage, 20 epochs with patience 4, no prune.
 # Next stage resumes from the best trial checkpoint (no from-pretrain refit).
 # Search: donor LR ±10x, effective univariate batch ±1 power of 2, EMA default ± one neighbor.
 # Donor trial is enqueued. Window/patch fractions are 1.0 (full data, all variate crops).
@@ -117,7 +117,7 @@ phases:
   - phase: diffusion_coarse_finetune_hp
     n_trials: 10
     max_epochs: 20
-    patience: 8
+    patience: 4
     pruner: none
     search_space: lr_eff_batch_univariate_ema
     # L40S 08-22 lr10 probe (max_bs=16, headroom=0.85). Usable window batch;
@@ -154,7 +154,7 @@ phases:
   - phase: diffusion_patch_refine_finetune_hp
     n_trials: 10
     max_epochs: 20
-    patience: 8
+    patience: 4
     pruner: none
     search_space: lr_eff_batch_univariate_ema
     # Fine unique-seg often fits the probe cap even when coarse does not.

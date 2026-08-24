@@ -436,12 +436,48 @@ def mmpd_pack_window_stride(
     return int(eval_stride)
 
 
+def mmpd_window_cap_env(
+    run: AnchorRun,
+    args: Optional[argparse.Namespace] = None,
+) -> Dict[str, str]:
+    """Match binary random_window_subset caps (train seed+17, val +29, test +0)."""
+    out: Dict[str, str] = {}
+    subset = run_data_subset(run)
+    for key, env_key in (
+        ("train_max_windows", "MMPD_MAX_TRAIN_WINDOWS"),
+        ("val_max_windows", "MMPD_MAX_VAL_WINDOWS"),
+    ):
+        val = subset.get(key)
+        if val is not None:
+            out[env_key] = str(int(val))
+    eval_cap = None
+    cfg_path = getattr(args, "subset_config", None) if args is not None else None
+    if cfg_path is not None:
+        from models.diffusion_tsf.pipeline.config import load_experiment_config
+
+        cfg = load_experiment_config(str(cfg_path))
+        for phase in cfg.get("phases") or []:
+            if phase.get("phase") == "staged_eval":
+                caps = phase.get("eval_max_windows_by_dataset") or {}
+                if run.dataset in caps:
+                    eval_cap = int(caps[run.dataset])
+                break
+    if eval_cap is not None:
+        out["MMPD_MAX_TEST_WINDOWS"] = str(int(eval_cap))
+    seed = 42
+    if args is not None and getattr(args, "seed", None) is not None:
+        seed = int(args.seed)
+    out["MMPD_WINDOW_SAMPLE_SEED"] = str(seed)
+    return out
+
+
 @contextmanager
 def mmpd_stride_env(
     run: AnchorRun,
     *,
     test_stride: Optional[int] = None,
     window_stride: Optional[int] = None,
+    args: Optional[argparse.Namespace] = None,
 ):
     updates = {
         "MMPD_WINDOW_STRIDE": str(
@@ -449,6 +485,7 @@ def mmpd_stride_env(
         ),
         "MMPD_TEST_STRIDE": str(test_stride if test_stride is not None else run_test_stride(run)),
     }
+    updates.update(mmpd_window_cap_env(run, args))
     saved: Dict[str, Optional[str]] = {}
     try:
         for key, value in updates.items():
@@ -485,7 +522,7 @@ def build_mmpd_test_dataset(args: argparse.Namespace, run: AnchorRun):
     lookback, horizon = dataset_window_lengths(args, run.dataset)
     split = parse_mmpd_data_split(mmpd_data_split(run, args.mmpd_data_dir))
     eval_stride = eval_test_stride(args, run)
-    with mmpd_stride_env(run, test_stride=eval_stride):
+    with mmpd_stride_env(run, test_stride=eval_stride, args=args):
         return Dataset_MTS(
             root_path=str(args.mmpd_data_dir),
             data_path=mmpd_staged_filename_for_run(run),
@@ -509,7 +546,7 @@ def build_mmpd_pack_pool(
     split = parse_mmpd_data_split(mmpd_data_split(run, args.mmpd_data_dir))
     eval_stride = eval_test_stride(args, run)
     window_stride = mmpd_pack_window_stride(args, run, pack_splits)
-    with mmpd_stride_env(run, test_stride=eval_stride, window_stride=window_stride):
+    with mmpd_stride_env(run, test_stride=eval_stride, window_stride=window_stride, args=args):
         parts = [
             Dataset_MTS(
                 root_path=str(args.mmpd_data_dir),
@@ -926,6 +963,7 @@ def mmpd_env_for_run(
     env["TS_SANDBOX_REPO"] = repo
     prev = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = repo if not prev else f"{repo}:{prev}"
+    env.update(mmpd_window_cap_env(run, args))
     return env
 
 

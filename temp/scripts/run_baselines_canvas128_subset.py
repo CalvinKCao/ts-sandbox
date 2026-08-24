@@ -112,6 +112,21 @@ def _patchtst_arch(dataset: str) -> Dict[str, Any]:
     return large
 
 
+def _cap_args(meta: dict) -> List[str]:
+    out: List[str] = []
+    mapping = (
+        ("train_max_windows", "--train_max_windows"),
+        ("val_max_windows", "--val_max_windows"),
+        ("eval_max_windows", "--test_max_windows"),
+    )
+    for key, flag in mapping:
+        val = meta.get(key)
+        if val is None:
+            continue
+        out.extend([flag, str(int(val))])
+    return out
+
+
 def _parse_mse_mae(text: str) -> Tuple[Optional[float], Optional[float]]:
     mse = mae = None
     for m in re.finditer(r"mse[:\s]+([0-9.eE+-]+).*?mae[:\s]+([0-9.eE+-]+)", text, re.I | re.S):
@@ -199,6 +214,8 @@ def run_itransformer(
         "--train_window_stride", str(meta["train_stride"]),
         "--val_window_stride", str(meta["val_stride"]),
         "--test_window_stride", str(meta["test_stride"]),
+        "--window_subset_seed", "42",
+        * _cap_args(meta),
     ]
     text = _run(cmd, ITRANS_DIR, log)
     mse, mae = _parse_mse_mae(text)
@@ -290,6 +307,8 @@ def run_patchtst(
         "--train_window_stride", str(meta["train_stride"]),
         "--val_window_stride", str(meta["val_stride"]),
         "--test_window_stride", str(meta["test_stride"]),
+        "--window_subset_seed", "42",
+        * _cap_args(meta),
     ]
     text = _run(cmd, PATCH_DIR, log)
     mse, mae = _parse_mse_mae(text)

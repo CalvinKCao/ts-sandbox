@@ -109,17 +109,11 @@ else
     GPU_SBATCH=(--gres="gpu:${GPU_TYPE}:1")
 fi
 
-if [[ -d "${SCRATCH:-}/ts-sandbox-ordinal-fine" ]]; then
-    REPO="${SCRATCH}/ts-sandbox-ordinal-fine"
-elif [[ -d "${SCRATCH:-}/ts-sandbox" ]]; then
-    REPO="${SCRATCH}/ts-sandbox"
-elif [[ -d "$HOME/ts-sandbox" ]]; then
-    REPO="$HOME/ts-sandbox"
-else
-    REPO="$SCRIPT_DIR"
-fi
+# Prefer the tree that contains this script (worktree-safe). Do not silently
+# cd into the live $SCRATCH/ts-sandbox checkout.
+REPO="$SCRIPT_DIR"
 if [[ "$REPO" == /home/* ]]; then
-    echo "ERROR: submit from \$SCRATCH/ts-sandbox on ${CLUSTER}, not /home." >&2
+    echo "ERROR: submit from \$SCRATCH worktree on ${CLUSTER}, not /home." >&2
     exit 1
 fi
 cd "$REPO"

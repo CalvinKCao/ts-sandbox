@@ -1,4 +1,5 @@
 import os
+import random
 import pandas as pd
 
 from torch.utils.data import Dataset
@@ -29,6 +30,7 @@ class Dataset_MTS(Dataset):
         self.stride = env_test_stride if flag == 'test' else env_stride
         self.block_len = int(os.environ.get('MMPD_BLOCK_LEN', '0'))
         self.__read_data__()
+        self._index_map = self._build_index_map(flag)
 
     def __read_data__(self):
         df_raw = pd.read_csv(os.path.join(self.root_path,
@@ -66,6 +68,8 @@ class Dataset_MTS(Dataset):
         self.data_y = data[border1:border2]
 
     def __getitem__(self, index):
+        if self._index_map is not None:
+            index = self._index_map[index]
         if self.block_len > 0:
             s_begin = index * self.stride * self.block_len
         else:
@@ -79,11 +83,36 @@ class Dataset_MTS(Dataset):
 
         return seq_x, seq_y
 
-    def __len__(self):
+    def _n_windows(self):
         if self.block_len > 0:
             n_blocks = len(self.data_x) // self.block_len
             return (n_blocks - 1) // self.stride + 1
         return (len(self.data_x) - self.in_len - self.out_len) // self.stride + 1
+
+    def _build_index_map(self, flag):
+        env_key = {
+            "train": "MMPD_MAX_TRAIN_WINDOWS",
+            "val": "MMPD_MAX_VAL_WINDOWS",
+            "test": "MMPD_MAX_TEST_WINDOWS",
+        }[flag]
+        raw = os.environ.get(env_key, "").strip()
+        if not raw:
+            return None
+        cap = int(raw)
+        n = self._n_windows()
+        if cap < 1:
+            raise ValueError(f"{env_key} must be >= 1, got {raw!r}")
+        if cap >= n:
+            return None
+        seed_base = int(os.environ.get("MMPD_WINDOW_SAMPLE_SEED", "42"))
+        offset = {"train": 17, "val": 29, "test": 0}[flag]
+        rng = random.Random(seed_base + offset)
+        return sorted(rng.sample(range(n), cap))
+
+    def __len__(self):
+        if self._index_map is not None:
+            return len(self._index_map)
+        return self._n_windows()
 
     def inverse_transform(self, data):
         return self.scaler.inverse_transform(data)
