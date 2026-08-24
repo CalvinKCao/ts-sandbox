@@ -2575,21 +2575,17 @@ def build_indices_for_dataset(
     run: AnchorRun,
 ) -> List[int]:
     dataset = run.dataset
-    test_ds = build_pipeline_test_dataset(args, run)
+    # Subset-config campaigns have no PipelineState; MMPD Dataset_MTS already
+    # applies the same strides and random_window_subset caps as binary.
     mmpd_test_ds = build_mmpd_test_dataset(args, run)
-    if len(test_ds) != len(mmpd_test_ds):
-        raise RuntimeError(
-            f"{dataset}: pipeline test windows ({len(test_ds)}) != "
-            f"MMPD test windows ({len(mmpd_test_ds)}) after split alignment"
-        )
     indices = make_eval_indices(
-        len(test_ds),
+        len(mmpd_test_ds),
         args.test_fraction,
         stable_dataset_seed(args.seed, dataset),
         args.test_max_items,
     )
     print(
-        f"[subset] {dataset}: {len(indices)}/{len(test_ds)} test windows "
+        f"[subset] {dataset}: {len(indices)}/{len(mmpd_test_ds)} test windows "
         f"(variates={len(run_variate_indices(run))}, eval_test_stride={eval_test_stride(args, run)})"
     )
     return indices
