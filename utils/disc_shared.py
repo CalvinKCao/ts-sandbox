@@ -51,7 +51,7 @@ from utils.eval_mmpd_gaussian_anchor import (
     run_train_stride,
     run_variate_indices,
 )
-from utils.eval_trend_robust_texture_staged_vs_mmpd import (
+from utils.staged_binary_forecast import (
     DEFAULT_ANCHOR_CONFIG,
     DEFAULT_CKPT_BASE,
     DEFAULT_MMPD_OUTPUT_ROOT,
@@ -1801,26 +1801,11 @@ def run_eval(args: argparse.Namespace) -> None:
                     trained = True
 
                 if args.visualize_confusions:
-                    try:
-                        from utils.visualize_discriminator_texture_confusions import visualize_combo
-                    except ModuleNotFoundError as exc:
-                        print(f"[viz] skip {dataset}/{fake_source}/L{slice_len}: {exc}", flush=True)
-                        continue
-
-                    try:
-                        visualize_combo(
-                            args,
-                            dataset,
-                            fake_source,
-                            int(slice_len),
-                            bundle,
-                            splits,
-                            device,
-                        )
-                    except FileNotFoundError as exc:
-                        if trained:
-                            raise
-                        print(f"[viz] skip {dataset}/{fake_source}/L{slice_len}: {exc}", flush=True)
+                    print(
+                        "[viz] Legacy multivariate confusion plots were removed; "
+                        "use the unique-absolute ablation runner's visualizations instead.",
+                        flush=True,
+                    )
             write_outputs(args, {dataset: {fake_source: results[dataset][fake_source]}})
 
 

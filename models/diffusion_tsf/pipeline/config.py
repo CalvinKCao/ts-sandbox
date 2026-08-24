@@ -19,7 +19,6 @@ GEOMETRY_KEYS = (
     "forecast_length",
     "lookback_overlap",
     "diffusion_lookback_cap",
-    "diffusion_chunk_horizon",
     "horizon_stitch",
     "horizon_chunk_inner",
     "representation_time_stride",
@@ -49,8 +48,6 @@ REQUIRED_EXPERIMENT_KEYS = (
     "patch_refine_patch_width",
     "patch_refine_col_stride",
     "patch_refine_unique_segments",
-    "patch_refine_use_prev_cond",
-    "patch_refine_prev_cond_dropout",
     "patch_refine_finetune_window_fraction",
     "patch_refine_finetune_patch_fraction",
     "dit_embed_dim",
@@ -71,7 +68,6 @@ REQUIRED_EXPERIMENT_KEYS = (
     "forecast_length",
     "lookback_overlap",
     "diffusion_lookback_cap",
-    "diffusion_chunk_horizon",
     "horizon_stitch",
     "horizon_chunk_inner",
     "representation_time_stride",
@@ -94,7 +90,7 @@ REQUIRED_EXPERIMENT_KEYS = (
     "min_snr_gamma",
     "use_coordinate_channel",
     "window_stride",
-    "data_subset",
+    "data_subset_by_dataset",
 )
 
 REMOVED_EXPERIMENT_KEYS = frozenset({
@@ -109,6 +105,17 @@ REMOVED_EXPERIMENT_KEYS = frozenset({
     "patch_refine_flatline_seed",
     "patch_refine_flatline_min_run",
     "patch_refine_flatline_eps_frac",
+    "patch_refine_use_prev_cond",
+    "patch_refine_prev_cond_dropout",
+    "data_subset",
+    "ordinal_disc_evaluator",
+    "ordinal_binary_config",
+    "disc_run",
+    "raw_run",
+    "slice_lengths",
+    "diffusion_chunk_horizon",
+    "existing_ckpt_roots",
+    "mmpd_root",
 })
 
 REQUIRED_TRAINING_KEYS = (
@@ -179,13 +186,6 @@ CLI_EXPERIMENT_KEYS = frozenset({
     "subset_id",
     "ckpt_config",
     "walltime",
-    "existing_ckpt_roots",
-    "mmpd_root",
-    "ordinal_disc_evaluator",
-    "ordinal_binary_config",
-    "disc_run",
-    "raw_run",
-    "slice_lengths",
 })
 
 CLI_STATE_KEYS = frozenset({
@@ -460,13 +460,19 @@ def validate_config(cfg: Dict[str, Any]) -> None:
     exp = cfg["experiment"]
     if not isinstance(exp, dict):
         raise ValueError("experiment must be a mapping")
-    missing_exp = [k for k in REQUIRED_EXPERIMENT_KEYS if k not in exp]
-    if missing_exp:
-        raise ValueError(f"experiment missing required key(s): {missing_exp}")
     removed_exp = sorted(set(exp) & REMOVED_EXPERIMENT_KEYS)
     if removed_exp:
         raise ValueError(
-            f"experiment uses removed representation setting(s): {removed_exp}"
+            f"experiment uses removed setting(s): {removed_exp}"
+        )
+    missing_exp = [k for k in REQUIRED_EXPERIMENT_KEYS if k not in exp]
+    if missing_exp:
+        raise ValueError(f"experiment missing required key(s): {missing_exp}")
+    by_ds = exp.get("data_subset_by_dataset")
+    if not isinstance(by_ds, dict) or not by_ds:
+        raise ValueError(
+            "experiment.data_subset_by_dataset must be a non-empty mapping of "
+            "dataset -> subset recipe"
         )
 
     training = cfg["training"]

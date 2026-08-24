@@ -17,6 +17,7 @@ from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.config import visualization_settings
+from models.diffusion_tsf.pipeline.data_subset import put_subset_record
 from models.diffusion_tsf.pipeline.eval_bench import (
     configure as configure_eval_bench,
     dump as dump_eval_bench,
@@ -74,72 +75,66 @@ def _reshape_parallel_samples(t: torch.Tensor, batch: int, n_samples: int) -> to
     return t.view(batch, n_samples, *rest).transpose(1, 2).contiguous()
 
 
-@torch.no_grad()
-def _probe_max_staged_eval_batch_size(
-    *,
-    coarse_model,
-    fine_model,
-    lookback: int,
-    n_variates: int,
-    device: torch.device,
-    det_kwargs: Dict[str, Any],
-    min_bs: int = 1,
-    max_bs: int = 64,
-    headroom: float = 0.85,
-) -> int:
-    """Largest window batch that fits one coarse→fine anchor generate on this GPU."""
-    if device.type != "cuda":
-        return max(min_bs, 8)
-
-    def _fits(bs: int) -> bool:
-        past = torch.zeros(bs, n_variates, lookback, device=device)
-        try:
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats(device)
-            coarse_out = coarse_model.generate(past, **det_kwargs)
-            fine_model.generate(
-                past,
-                future_coarse_2d=coarse_out["future_2d_coarse"],
-                **det_kwargs,
-            )
-            torch.cuda.synchronize(device)
-            return True
-        except RuntimeError as exc:
-            if "out of memory" not in str(exc).lower():
-                raise
-            torch.cuda.empty_cache()
-            return False
-
-    lo = max(1, int(min_bs))
-    hi = max(lo, int(max_bs))
-    if not _fits(lo):
-        logger.warning(
-            "staged_eval batch probe: min_bs=%d already OOMs; falling back to 1", lo,
+def _eval_window_batch_size(phase: PipelinePhase, state: PipelineState) -> int:
+    """Dataloader window batch from YAML. No GPU probe, no copy of train batch."""
+    leftover = [
+        key for key in ("probe_eval_batch_size", "probe_eval_batch_size_max")
+        if key in phase.overrides
+    ]
+    if leftover:
+        raise ValueError(
+            "staged_eval keys "
+            f"{leftover} were removed; set staged_eval.batch_size in YAML"
         )
-        return 1
-    best = lo
-    cand = lo
-    while cand * 2 <= hi and _fits(cand * 2):
-        cand *= 2
-        best = cand
-    # Binary search (best, next power] for a tighter fit.
-    left, right = best, min(hi, best * 2)
-    while left < right:
-        mid = (left + right + 1) // 2
-        if _fits(mid):
-            left = mid
-        else:
-            right = mid - 1
-    best = left
-    usable = max(1, int(best * float(headroom)))
-    logger.info(
-        "staged_eval batch probe: max_fit=%d headroom=%.2f -> batch_size=%d",
-        best,
-        headroom,
-        usable,
-    )
-    torch.cuda.empty_cache()
-    return usable
+    by_ds = phase.get("batch_size_by_dataset")
+    by_subset = phase.get("batch_size_by_subset_id")
+    yaml_bs = phase.get("batch_size")
+    set_keys = [
+        name
+        for name, val in (
+            ("batch_size", yaml_bs),
+            ("batch_size_by_dataset", by_ds),
+            ("batch_size_by_subset_id", by_subset),
+        )
+        if val is not None
+    ]
+    if len(set_keys) > 1:
+        raise ValueError(
+            "staged_eval can set only one of batch_size, "
+            f"batch_size_by_dataset, batch_size_by_subset_id; got {set_keys}"
+        )
+    if by_subset is not None:
+        if not isinstance(by_subset, dict) or not by_subset:
+            raise ValueError(
+                "staged_eval.batch_size_by_subset_id must be a non-empty "
+                "subset_id -> int map"
+            )
+        subset_id = state.subset_id or state.dataset
+        if subset_id not in by_subset:
+            raise ValueError(
+                f"staged_eval.batch_size_by_subset_id missing {subset_id!r}; "
+                f"have {sorted(by_subset)}"
+            )
+        bs = int(by_subset[subset_id])
+    elif by_ds is not None:
+        if not isinstance(by_ds, dict) or not by_ds:
+            raise ValueError(
+                "staged_eval.batch_size_by_dataset must be a non-empty "
+                "dataset -> int map"
+            )
+        if state.dataset not in by_ds:
+            raise ValueError(
+                f"staged_eval.batch_size_by_dataset missing {state.dataset!r}; "
+                f"have {sorted(by_ds)}"
+            )
+        bs = int(by_ds[state.dataset])
+    elif yaml_bs is not None:
+        bs = int(yaml_bs)
+    else:
+        bs = 1
+    if bs < 1:
+        raise ValueError(f"staged_eval.batch_size must be >= 1, got {bs}")
+    return bs
 
 
 def _deterministic_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
@@ -903,16 +898,8 @@ class StagedEvalPhase(PipelinePhase):
             )
         coarse_model = self._load_model(state, "coarse", guidance, n_iv, device)
         fine_model = self._load_model(state, "patch_refine", guidance, n_iv, device)
-        n_chunks = 1
-        if _horizon_stitch_enabled(coarse_model):
-            from models.diffusion_tsf.horizon_chunks import chunk_starts
-            n_chunks = len(chunk_starts(
-                int(coarse_model.config.dataset_forecast_length),
-                inner=int(coarse_model.config.horizon_chunk_inner),
-                overlap=int(coarse_model.config.lookback_overlap),
-            ))
 
-        batch_size = int(self.require("batch_size"))
+        batch_size = _eval_window_batch_size(self, state)
         if state.smoke_test:
             final_ds = Subset(full_test_ds, list(range(min(2, len(full_test_ds)))))
             prob_samples = 1
@@ -961,41 +948,6 @@ class StagedEvalPhase(PipelinePhase):
             logger.info("[%s] eval_max_steps=%d", subset_id, default_steps)
         if bench:
             batch_size = 1
-
-        # Probe peak generate batch on this GPU; dataloader batch is smaller so
-        # that B_windows * n_prob_samples still fits the parallel MC expand.
-        if (
-            bool(self.get("probe_eval_batch_size", False))
-            and not state.smoke_test
-            and not bench
-            and device.type == "cuda"
-        ):
-            probe_kwargs = dict(_staged_det_gen_kwargs(state, default_steps))
-            probe_kwargs["num_inference_steps"] = 1
-            max_fit = _probe_max_staged_eval_batch_size(
-                coarse_model=coarse_model,
-                fine_model=fine_model,
-                lookback=int(ds_lb),
-                n_variates=n_iv,
-                device=device,
-                det_kwargs=probe_kwargs,
-                min_bs=1,
-                max_bs=int(self.get("probe_eval_batch_size_max", 64)),
-            )
-            # Parallel samples (and horizon chunks) expand the leading dim.
-            usable = max(1, max_fit // max(1, int(prob_samples) * n_chunks))
-            if usable != batch_size:
-                logger.info(
-                    "[%s] staged_eval probe: config batch_size=%d -> probed=%d "
-                    "(max_fit=%d / n_samples=%d n_chunks=%d)",
-                    subset_id,
-                    batch_size,
-                    usable,
-                    max_fit,
-                    prob_samples,
-                    n_chunks,
-                )
-            batch_size = usable
 
         if isinstance(final_ds, Subset):
             eval_window_indices = [int(i) for i in final_ds.indices]
@@ -1240,20 +1192,21 @@ class StagedEvalPhase(PipelinePhase):
                     samples=pack["samples"],
                     sample_mean=pack["sample_mean"],
                 )
+        eval_payload = {
+            "dataset": state.dataset,
+            "subset_id": subset_id,
+            "seed": int(state.seed),
+            "binary_length_mode": getattr(state, "binary_length_mode", "none"),
+            "binary_length_g": float(getattr(state, "binary_length_g", 1.0)),
+            "variate_indices": variate_indices,
+            "sampler_tuning": sampler_tuning,
+            "eval_artifact_tag": tag,
+            "test_stride": int(test_stride),
+            "eval_metrics": {"staged_anchor": metrics},
+        }
+        put_subset_record(eval_payload, state.dataset, subset_meta)
         with open(os.path.join(nested_dir, f"staged_results_{tag}.json"), "w") as f:
-            json.dump({
-                "dataset": state.dataset,
-                "subset_id": subset_id,
-                "seed": int(state.seed),
-                "binary_length_mode": getattr(state, "binary_length_mode", "none"),
-                "binary_length_g": float(getattr(state, "binary_length_g", 1.0)),
-                "variate_indices": variate_indices,
-                "data_subset": subset_meta,
-                "sampler_tuning": sampler_tuning,
-                "eval_artifact_tag": tag,
-                "test_stride": int(test_stride),
-                "eval_metrics": {"staged_anchor": metrics},
-            }, f, indent=2, sort_keys=True)
+            json.dump(eval_payload, f, indent=2, sort_keys=True)
 
         wandb_metrics = {
             "eval/test_stride": int(test_stride),
@@ -1412,41 +1365,32 @@ class StagedEvalPhase(PipelinePhase):
             bool(viz_cfg.get("viz_binary_mmpd_gap", True))
             or bool(viz_cfg.get("viz_binary_mmpd_redbox", True))
         ):
-            try:
-                from utils.staged_point_gap_redbox_viz import (
-                    run_binary_mmpd_gap_and_redbox_viz,
-                )
+            from utils.staged_point_gap_redbox_viz import (
+                run_binary_mmpd_gap_and_redbox_viz,
+            )
 
-                merged = state.merged_config or {}
-                cfg_path = merged.get("_yaml_path") or state.extra.get("config_path")
-                gap_paths = run_binary_mmpd_gap_and_redbox_viz(
-                    state=state,
-                    pack=pack,
-                    coarse_model=coarse_model,
-                    fine_model=fine_model,
-                    device=device,
-                    viz_cfg=viz_cfg,
-                    patch_refine=True,
-                    joint_dual=False,
-                    pack_test_stride=int(test_stride),
-                    binary_config_path=str(cfg_path) if cfg_path else None,
-                )
-                wandb_utils.log_visualization_paths(
-                    gap_paths.get("gap", []),
-                    wandb_key="eval/point_gap_binary_mmpd",
-                )
-                wandb_utils.log_visualization_paths(
-                    gap_paths.get("redbox", []),
-                    wandb_key="eval/point_gap_redbox",
-                )
-            except Exception as e:
-                # Fail-fast when campaign is configured but broken; soft-skip only
-                # when the util itself logged an unset-campaign skip (no raise).
-                if isinstance(e, FileNotFoundError):
-                    raise
-                logger.warning(
-                    "Point-gap/redbox viz failed: %s", e, exc_info=True,
-                )
+            merged = state.merged_config or {}
+            cfg_path = merged.get("_yaml_path") or state.extra.get("config_path")
+            gap_paths = run_binary_mmpd_gap_and_redbox_viz(
+                state=state,
+                pack=pack,
+                coarse_model=coarse_model,
+                fine_model=fine_model,
+                device=device,
+                viz_cfg=viz_cfg,
+                patch_refine=True,
+                joint_dual=False,
+                pack_test_stride=int(test_stride),
+                binary_config_path=str(cfg_path) if cfg_path else None,
+            )
+            wandb_utils.log_visualization_paths(
+                gap_paths.get("gap", []),
+                wandb_key="eval/point_gap_binary_mmpd",
+            )
+            wandb_utils.log_visualization_paths(
+                gap_paths.get("redbox", []),
+                wandb_key="eval/point_gap_redbox",
+            )
 
         logger.info(
             "[%s] staged eval done: sampler=%s steps=%d "

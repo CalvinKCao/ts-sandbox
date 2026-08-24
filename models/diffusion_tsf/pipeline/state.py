@@ -65,8 +65,6 @@ class PipelineState:
     patch_refine_patch_width: int = 8
     patch_refine_col_stride: int = 6
     patch_refine_unique_segments: bool = False
-    patch_refine_use_prev_cond: bool = True
-    patch_refine_prev_cond_dropout: float = 0.5
     # Fraction of train windows used only during patch_refine finetune (1.0 = all).
     patch_refine_finetune_window_fraction: float = 1.0
     # Train-only fraction of unique-seg (B,V) crops kept inside each window.
@@ -112,7 +110,6 @@ class PipelineState:
     forecast_length: int = 96
     lookback_overlap: int = 8
     diffusion_lookback_cap: int = 0
-    diffusion_chunk_horizon: int = 0
     horizon_stitch: bool = False
     horizon_chunk_inner: int = 96
     representation_time_stride: int = 1
@@ -198,7 +195,6 @@ class PipelineState:
     # -- Variate selection --
     variate_indices: Optional[List[int]] = None
     subset_id: Optional[str] = None
-    data_subset: Dict[str, Any] = field(default_factory=dict)
     data_subset_by_dataset: Dict[str, Any] = field(default_factory=dict)
     data_subset_resolved: Dict[str, Any] = field(default_factory=dict)
     dataset_shape_cache: Dict[Tuple[str, str], Tuple[int, int]] = field(
@@ -223,13 +219,6 @@ class PipelineState:
     seeds: List[int] = field(default_factory=lambda: [42])
     ckpt_config: Optional[str] = None
     walltime: str = "3:00:00"
-    existing_ckpt_roots: Dict[str, str] = field(default_factory=dict)
-    mmpd_root: str = "datasets/mmpd"
-    ordinal_disc_evaluator: str = "temp/scripts/eval_univariate_patch_refine_ordinal_vs_mmpd.py"
-    ordinal_binary_config: str = "configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml"
-    disc_run: Optional[str] = None
-    raw_run: Optional[str] = None
-    slice_lengths: List[int] = field(default_factory=lambda: [8, 16, 32])
 
     # -- Mutable: populated by phases as they produce artifacts --
     itrans_pretrain_ckpt: Optional[str] = None
@@ -341,22 +330,6 @@ class PipelineState:
             init_kwargs["patch_refine_unique_segments"] = bool(
                 init_kwargs["patch_refine_unique_segments"]
             )
-        if "patch_refine_use_prev_cond" in init_kwargs:
-            init_kwargs["patch_refine_use_prev_cond"] = bool(
-                init_kwargs["patch_refine_use_prev_cond"]
-            )
-        if "patch_refine_prev_cond_dropout" in init_kwargs:
-            init_kwargs["patch_refine_prev_cond_dropout"] = float(
-                init_kwargs["patch_refine_prev_cond_dropout"]
-            )
-        if (
-            not bool(init_kwargs.get("patch_refine_use_prev_cond", True))
-            and float(init_kwargs.get("patch_refine_prev_cond_dropout", 0.0)) != 0.0
-        ):
-            raise ValueError(
-                "patch_refine_prev_cond_dropout must be 0 when "
-                "patch_refine_use_prev_cond is false"
-            )
         if "patch_refine_finetune_window_fraction" in init_kwargs:
             init_kwargs["patch_refine_finetune_window_fraction"] = float(
                 init_kwargs["patch_refine_finetune_window_fraction"]
@@ -422,6 +395,8 @@ class PipelineState:
         apply_training_section_to_state(training, init_kwargs, extra)
         apply_wandb_section_to_state(cfg.get("wandb"), init_kwargs)
 
+        if cfg.get("_yaml_path"):
+            extra["config_path"] = cfg["_yaml_path"]
         init_kwargs["extra"] = extra
         init_kwargs["phase_configs"] = cfg.get("phases", [])
         init_kwargs["merged_config"] = cfg

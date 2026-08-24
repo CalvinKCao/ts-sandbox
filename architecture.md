@@ -134,13 +134,13 @@ Modules: `patch_refine.py`, `patch_refine_geometry.py`, `patch_refine_segments.p
 
 **Absolute HIR vs residual.** Targets are absolute-canvas CDF crops, not within-bin residual maps. Visible-transition masking drops all-empty / all-full columns so out-of-view boundaries are not treated as cues. At infer, abstaining columns keep the naive coarse scaffold (`blend_patch_bins`).
 
-**Aux channels (3).** `build_patch_aux_channels` concatenates onto the noisy occupancy canvas: (1) naive-upscaled coarse crop, (2) H-constant coarse-cell id map, (3) absolute-time map. When `patch_refine_unique_segments` is on, the previous-stride refine crop (pooled to 16 rows via `compress_prev_refine_32_to_16`) is stuffed into the top 16 rows of the coarse-cell channel; train-time `patch_refine_prev_cond_dropout` (default 0.5) zeros that teacher force.
+**Aux channels (3).** `build_patch_aux_channels` concatenates onto the noisy occupancy canvas: (1) naive-upscaled coarse crop, (2) H-constant coarse-cell id map, (3) absolute-time map. Patch-refine never conditions on previously generated refine patches.
 
 **Lookback cond.** Full native-width past **coarse∥fine** stack (`stack_past_coarse_fine`), expanded per crop — never resized to the patch width.
 
 **FactorizedDiT extras (patch_refine only).** `use_patch_abs_embedding=True` adds learned embeds for `patch_coarse_bin` + `patch_time0` (absolute crop location). `use_variate_embedding` (when `variate_factorized` and `V>1`) tags each crop’s variate. Cross-attn tokens come from patch-decoder `get_encoder_tokens(past_norm)` when `guidance_type=patch_decoder` and `disable_cross_attention=false`; otherwise ctx is skipped.
 
-**Unique-segment AR path.** With `patch_refine_unique_segments: true` (many ordinal / guided leaves, including the canvas128 window-norm chain), train samples one fixed-`col0` crop per window (`locations_for_fixed_col0`); infer runs an AR primary chain (`select_primary_ar_locations` / `group_locations_by_col0`) then blanked-prev coverage-gap fills. Overlapping stride mode (`unique_segments: false`) trains/samples all coverage crops in parallel.
+**Unique-segment path.** With `patch_refine_unique_segments: true` (many ordinal / guided leaves, including the canvas128 window-norm chain), train samples one fixed-`col0` crop per window (`locations_for_fixed_col0`); infer samples every stride-grid crop in parallel (`primary_stride_col0s` / `patch_layout_for_fixed_col0`) then coverage-gap fills. Overlapping stride mode (`unique_segments: false`) trains/samples all coverage crops in parallel.
 
 **Config knobs** (`experiment.*` → `PipelineState` / `DiffusionConfig`):
 
@@ -150,8 +150,7 @@ Modules: `patch_refine.py`, `patch_refine_geometry.py`, `patch_refine_segments.p
 | `patch_refine_canvas_height` | Absolute HIR rows (must divide by `coarse_image_height`) |
 | `patch_refine_patch_height` / `_width` | Crop H×W |
 | `patch_refine_col_stride` | Primary horizontal stride (overlap = width − stride) |
-| `patch_refine_unique_segments` | Unique absolute segments + AR prev-refine cond |
-| `patch_refine_prev_cond_dropout` | Dropout on stuffed prev-refine channel |
+| `patch_refine_unique_segments` | Unique absolute segments; infer is fully parallel across patches |
 | `dit_patch_size` / `dit_cond_patch_size` | Must divide patch / lookback spatial sizes |
 | `guidance_type: patch_decoder` | Cross-attn context from patch-decoder guidance (when enabled) |
 
@@ -442,3 +441,7 @@ Read merged YAML — do not rely on deleted `pipeline_config.py` defaults.
 6. **Training flags must reach `PipelineState`** — `training.*` keys need wiring (`training_value()` / `apply_training_section_to_state`).
 7. **Subset ckpt paths** use `subset_id` (e.g. `coverage_synth_2v_s480`), not bare dataset name.
 8. **Donor reuse** can silently skip synthetic pretrain — coverage probe forces fresh dirs + `force_retrain_synthetic`.
+9. **`experiment.data_subset` is removed.** Config policy is only `experiment.data_subset_by_dataset`. Checkpoint/result metadata uses the same key keyed by dataset. Old artifacts with only `data_subset` fail until `python utils/backfill_data_subset_metadata.py --path <artifact>`.
+10. **MMPD gap/redbox packs are per-dataset.** Shared canvas128 leaves must not set a global `mmpd_campaign_root` (that inherited an ETTh1 campaign onto weather/ETTh2/…). Use `mmpd_campaign_root_by_dataset`. Flags on + campaign set + missing pack → fail at submit/pipeline start. Flags on + no campaign for this dataset → skip.
+11. **Ordinal discriminator DAG is gone.** `submit_binary.sh` no longer launches the deleted ordinal evaluator. Retained disc path is `utils/eval_discriminator_binary_vs_mmpd_univariate.py` plus `utils/disc_shared.py`.
+12. **Redbox pool geometry** reads `lookback_length` / `forecast_length` on `PipelineState`. `getattr(state, "lookback")` silently used 336/96 defaults.

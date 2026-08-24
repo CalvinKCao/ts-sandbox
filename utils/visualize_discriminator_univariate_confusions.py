@@ -1,7 +1,6 @@
 """TP/TN/FP/FN sample plots for the univariate real-vs-fake discriminator.
 
-Mirrors ``visualize_discriminator_texture_confusions`` but for the univariate
-dataset / checkpoint naming used by
+Uses the univariate dataset / checkpoint naming from
 ``utils/eval_discriminator_binary_vs_mmpd_univariate.py`` and the h96 ordinal
 evaluator. When a wandb run is active, PNGs are logged automatically.
 """
@@ -17,16 +16,82 @@ import torch
 from torch.utils.data import DataLoader
 
 from utils.eval_discriminator_binary_vs_mmpd_univariate import UnivariateRealVsFakeDataset
-from utils.eval_discriminator_texture_staged_vs_mmpd import (
+from utils.disc_shared import (
     InvertedSliceDiscriminator,
     stable_hash,
 )
-from utils.visualize_discriminator_texture_confusions import (
-    bucket_name,
-    pick_examples,
-    plot_example,
-    summarize_buckets,
-)
+
+
+def bucket_name(label: int, pred: int) -> str:
+    if label == 1 and pred == 1:
+        return "TP"
+    if label == 0 and pred == 0:
+        return "TN"
+    if label == 0 and pred == 1:
+        return "FP"
+    return "FN"
+
+
+def summarize_buckets(records: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts = {"TP": 0, "TN": 0, "FP": 0, "FN": 0}
+    for row in records:
+        counts[bucket_name(row["label"], row["pred"])] += 1
+    return counts
+
+
+def pick_examples(
+    records: List[Dict[str, Any]],
+    per_bucket: int,
+    rng: np.random.Generator,
+) -> Dict[str, List[Dict[str, Any]]]:
+    out: Dict[str, List[Dict[str, Any]]] = {key: [] for key in ("TP", "TN", "FP", "FN")}
+    for bucket in out:
+        pool = [row for row in records if bucket_name(row["label"], row["pred"]) == bucket]
+        if not pool:
+            continue
+        pool.sort(key=lambda row: row["prob_fake"], reverse=bucket in ("TP", "FP"))
+        n = min(per_bucket, len(pool))
+        if n == len(pool):
+            out[bucket] = pool
+            continue
+        top = pool[: max(1, n // 2)]
+        rest = pool[max(1, n // 2) :]
+        extra = min(n - len(top), len(rest))
+        if extra:
+            idx = rng.choice(len(rest), size=extra, replace=False)
+            top.extend(rest[i] for i in idx)
+        out[bucket] = top[:n]
+    return out
+
+
+def plot_example(
+    row: Dict[str, Any],
+    *,
+    variate: int,
+    lookback_tail: int,
+    title: str,
+    out_path: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    past = row["past"][variate, -lookback_tail:]
+    gt = row.get("gt", row["candidate"])[variate]
+    fake = row.get("fake", row["candidate"])[variate]
+    t_past = np.arange(-len(past), 0)
+    t_horizon = np.arange(len(gt))
+    fig, ax = plt.subplots(figsize=(9, 3.2))
+    ax.plot(t_past, past, color="#444444", lw=1.4, label="lookback")
+    ax.plot(t_horizon, gt, color="#1f77b4", lw=2.0, label="GT")
+    ax.plot(t_horizon, fake, color="#d62728", lw=2.0, alpha=0.9, label="model pred")
+    ax.axvline(0, color="black", ls="--", lw=0.8, alpha=0.5)
+    ax.set_title(title)
+    ax.set_xlabel("time (steps; 0 = horizon start)")
+    ax.set_ylabel("value")
+    ax.legend(loc="upper right", fontsize=8)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
 
 
 def univariate_checkpoint_path(

@@ -234,7 +234,7 @@ def run_binary_mmpd_gap_and_redbox_viz(
     vars_gap = int(viz_cfg.get("viz_binary_mmpd_variables_to_plot", 99) or 99)
     vars_rb = int(viz_cfg.get("viz_binary_mmpd_redbox_variables_to_plot", 0) or 0)
     jpeg_dpi = int(viz_cfg.get("jpeg_dpi", 100) or 100)
-    if bool(getattr(state, "smoke_test", False)):
+    if bool(state.smoke_test):
         top_k = min(top_k, int(viz_cfg.get("viz_binary_mmpd_smoke_top_k", 1) or 1))
         vars_gap = min(vars_gap, int(viz_cfg.get("viz_binary_mmpd_smoke_variables", 2) or 2))
         if vars_rb <= 0:
@@ -250,7 +250,7 @@ def run_binary_mmpd_gap_and_redbox_viz(
     )
     if not cfg_path:
         # Fall back to experiment_name leaf under configs/ if present.
-        stem = str(getattr(state, "experiment_name", "") or "")
+        stem = str(state.experiment_name or "")
         guess = REPO_ROOT / "configs" / f"{stem}.yaml"
         if guess.is_file():
             cfg_path = str(guess)
@@ -270,7 +270,7 @@ def run_binary_mmpd_gap_and_redbox_viz(
         eval_test_stride=eval_stride,
         work_dir=work_dir,
         device=device,
-        smoke_test=bool(getattr(state, "smoke_test", False)),
+        smoke_test=bool(state.smoke_test),
         force_eval=bool(state.extra.get("force_point_gap_eval", False)),
         mmpd_config=str(viz_cfg.get("mmpd_config", DEFAULT_MMPD_CONFIG)),
         mmpd_config_suffix=str(
@@ -339,7 +339,7 @@ def run_binary_mmpd_gap_and_redbox_viz(
         kind = "patch_refine" if patch_refine else "fine"
         rb_paths = write_staged_sample_panels(
             out_dir=redbox_dir,
-            run_name=str(getattr(state, "subset_id", dataset) or dataset),
+            run_name=str(state.subset_id or dataset),
             dataset=dataset,
             kind=kind,
             coarse_model=coarse_model,
@@ -394,20 +394,21 @@ def _load_test_pool_for_stride(
         binary_config, cli_overrides={"dataset": str(state.dataset)}
     )
     # Honor state's subset / lookback / horizon when already resolved.
-    lookback = int(getattr(state, "lookback", 336) or 336)
-    horizon = int(getattr(state, "horizon", 96) or 96)
+    lookback = int(state.lookback_length)
+    horizon = int(state.forecast_length)
     variate_indices = list(state.variate_indices or [])
     if not variate_indices:
         raise RuntimeError(f"{state.dataset}: empty variate_indices for redbox pool")
     _, _, test_ds, norm_stats = load_dataset(
-        str(state.dataset),
+        state,
+        state.dataset,
         variate_indices,
-        stride=int(getattr(state, "window_stride", 1) or 1),
+        stride=int(state.window_stride),
         test_stride=int(test_stride),
         lookback=lookback,
         horizon=horizon,
-        ordinal_tie_atol=float(getattr(state, "ordinal_tie_atol", 0.0) or 0.0),
-        use_ordinal_window_norm=bool(getattr(state, "use_ordinal_window_norm", False)),
+        ordinal_tie_atol=float(state.ordinal_tie_atol),
+        use_ordinal_window_norm=bool(state.use_ordinal_window_norm),
     )
     if norm_stats.get("ordinal_ladder") is not None:
         state.ordinal_ladder = norm_stats["ordinal_ladder"]

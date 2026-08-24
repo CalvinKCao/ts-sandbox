@@ -1684,10 +1684,6 @@ class DiffusionTSF(nn.Module):
             select_patch_locations,
             subsample_unique_seg_layout,
         )
-        from .patch_refine_segments import (
-            compress_prev_refine_32_to_16,
-            extract_prev_refine_crops_layout,
-        )
 
         assert self.binary_scheduler is not None
         past, future, t0, horizon = self._slice_horizon_stitch_future(past, future)
@@ -1768,26 +1764,6 @@ class DiffusionTSF(nn.Module):
         lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
         cond = expand_lookback_cond_for_layout(lookback_cond, layout)
 
-        prev_refine_16 = None
-        use_prev = bool(getattr(self.config, "patch_refine_use_prev_cond", True))
-        if unique and use_prev:
-            prev_32 = extract_prev_refine_crops_layout(
-                hir_gt,
-                layout,
-                patch_height=patch_h,
-                patch_width=patch_w,
-                col_stride=col_stride,
-                coarse_edges=edges,
-                canvas_height=canvas_h,
-            )
-            prev_refine_16 = compress_prev_refine_32_to_16(prev_32)
-            drop_p = float(getattr(self.config, "patch_refine_prev_cond_dropout", 0.5))
-            if self.training and drop_p > 0.0:
-                keep = torch.rand(n_patches, device=device) >= drop_p
-                prev_refine_16 = prev_refine_16 * keep.view(n_patches, 1, 1, 1).to(
-                    dtype=prev_refine_16.dtype
-                )
-
         aux, patch_coarse_bin, patch_time0 = build_patch_aux_channels_layout(
             naive,
             edges,
@@ -1797,7 +1773,6 @@ class DiffusionTSF(nn.Module):
             canvas_height=canvas_h,
             coarse_height=coarse_h,
             horizon_width=int(hir_gt.shape[-1]),
-            prev_refine_16=prev_refine_16,
         )
 
         ctx = self._resolve_cross_variate_context(
@@ -2060,7 +2035,6 @@ class DiffusionTSF(nn.Module):
             select_patch_locations,
         )
         from .patch_refine_segments import (
-            compress_prev_refine_32_to_16,
             coverage_gap_layout,
         )
 
@@ -2083,10 +2057,6 @@ class DiffusionTSF(nn.Module):
             eval_bench_note("refine_V", V)
             eval_bench_note("refine_W", W_fut)
             eval_bench_note("unique_segments", int(bool(getattr(self.config, "patch_refine_unique_segments", False))))
-            eval_bench_note(
-                "use_prev_cond",
-                int(bool(getattr(self.config, "patch_refine_use_prev_cond", True))),
-            )
 
             with eval_bench_span("normalize"):
                 past_norm, _, stats = self._normalize_sequence(past)
@@ -2101,18 +2071,10 @@ class DiffusionTSF(nn.Module):
                 naive = naive_upscale_coarse_cdf(coarse, canvas_h)
                 edges = coarse_edges_from_cdf(coarse, canvas_height=canvas_h)
             unique = bool(getattr(self.config, "patch_refine_unique_segments", False))
-            use_prev = bool(getattr(self.config, "patch_refine_use_prev_cond", True))
             lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
             ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
 
-            def _sample_layout(
-                layout: PatchLayout,
-                prev_refine_16: Optional[torch.Tensor],
-            ) -> torch.Tensor:
-                if not use_prev and prev_refine_16 is not None:
-                    raise ValueError(
-                        "prev_refine_16 must be None when patch_refine_use_prev_cond is false"
-                    )
+            def _sample_layout(layout: PatchLayout) -> torch.Tensor:
                 with eval_bench_span("layout_aux"):
                     cond_l = expand_lookback_cond_for_layout(lookback_cond, layout)
                     aux_l, patch_coarse_bin_l, patch_time0_l = build_patch_aux_channels_layout(
@@ -2124,7 +2086,6 @@ class DiffusionTSF(nn.Module):
                         canvas_height=canvas_h,
                         coarse_height=coarse_h,
                         horizon_width=W_fut,
-                        prev_refine_16=prev_refine_16,
                     )
                 context_window_indices_l = layout.batch_index if ctx is not None else None
                 n_l = layout.n_patches
@@ -2180,44 +2141,21 @@ class DiffusionTSF(nn.Module):
 
             if unique:
                 col0s = primary_stride_col0s(int(edges.shape[-1]), patch_w, col_stride)
-                eval_bench_note("n_ar_col0", len(col0s) if use_prev else 0)
                 eval_bench_note("n_stride_col0", len(col0s))
-                if use_prev:
-                    # AR along the stride grid, then blanked-prev fills for leftover gaps.
-                    primary_layouts = []
-                    primary_preds = []
-                    prev_16 = torch.zeros(B * V, 1, 16, patch_w, device=device)
-                    with eval_bench_span("ar_primary"):
-                        for col0 in col0s:
-                            with eval_bench_span("ar_col0"):
-                                layout = patch_layout_for_fixed_col0(
-                                    edges,
-                                    torch.full((B,), col0, device=device, dtype=torch.long),
-                                    canvas_height=canvas_h,
-                                    patch_height=patch_h,
-                                    patch_width=patch_w,
-                                )
-                                pred = _sample_layout(layout, prev_16)
-                            primary_layouts.append(layout)
-                            primary_preds.append(pred)
-                            prev_16 = compress_prev_refine_32_to_16(pred)
-                    layout = PatchLayout.cat(primary_layouts)
-                    patch_cdf = torch.cat(primary_preds, dim=0)
-                else:
-                    with eval_bench_span("parallel_col0s"):
-                        layouts = [
-                            patch_layout_for_fixed_col0(
-                                edges,
-                                torch.full((B,), col0, device=device, dtype=torch.long),
-                                canvas_height=canvas_h,
-                                patch_height=patch_h,
-                                patch_width=patch_w,
-                            )
-                            for col0 in col0s
-                        ]
-                        layout = PatchLayout.cat(layouts)
-                        patch_cdf = _sample_layout(layout, None)
-                with eval_bench_span("ar_gap"):
+                with eval_bench_span("parallel_col0s"):
+                    layouts = [
+                        patch_layout_for_fixed_col0(
+                            edges,
+                            torch.full((B,), col0, device=device, dtype=torch.long),
+                            canvas_height=canvas_h,
+                            patch_height=patch_h,
+                            patch_width=patch_w,
+                        )
+                        for col0 in col0s
+                    ]
+                    layout = PatchLayout.cat(layouts)
+                    patch_cdf = _sample_layout(layout)
+                with eval_bench_span("coverage_gap"):
                     gap_layout = coverage_gap_layout(
                         edges,
                         layout,
@@ -2226,10 +2164,7 @@ class DiffusionTSF(nn.Module):
                         patch_width=patch_w,
                     )
                     if gap_layout is not None:
-                        gap_prev = None if not use_prev else torch.zeros(
-                            gap_layout.n_patches, 1, 16, patch_w, device=device,
-                        )
-                        gap_pred = _sample_layout(gap_layout, gap_prev)
+                        gap_pred = _sample_layout(gap_layout)
                         layout = PatchLayout.cat([layout, gap_layout])
                         patch_cdf = torch.cat([patch_cdf, gap_pred], dim=0)
             else:
@@ -2242,7 +2177,7 @@ class DiffusionTSF(nn.Module):
                         col_stride=col_stride,
                     )
                     layout = PatchLayout.from_locations(locations, device=device)
-                    patch_cdf = _sample_layout(layout, None)
+                    patch_cdf = _sample_layout(layout)
 
             with eval_bench_span("blend_decode"):
                 hir_cdf, patch_vote_counts = blend_patch_bins_layout(

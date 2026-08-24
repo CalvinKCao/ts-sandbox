@@ -31,18 +31,8 @@ WANDB_PROJECT=""
 WANDB_PROJECT_EXPLICIT=0
 WALL_OVERRIDE=""
 MEM_OVERRIDE=""
-EXISTING_CKPT_ROOTS=""
-DISC_RUN=""
-ORDINAL_SLICE_LENGTHS="8;16;32"
 SBATCH_EXCLUDE_NODES=""
-RAW_RUN=""
 JOB_MANIFEST=""
-EVAL_ORDINAL_PATCH_REFINE_MMPD=0
-MMPD_ROOT=""
-ORDINAL_DISC_EVALUATOR="temp/scripts/eval_univariate_patch_refine_ordinal_vs_mmpd.py"
-ORDINAL_BINARY_CONFIG="configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml"
-DEFER_CHECKPOINT_CHECK=0
-N_VARIATES=""
 
 if [[ "$(hostname)" == *"narval"* ]]; then
     ACCOUNT="def-boyuwang"
@@ -65,16 +55,7 @@ while [[ $# -gt 0 ]]; do
         --wandb-project) WANDB_PROJECT="$2"; WANDB_PROJECT_EXPLICIT=1; shift 2 ;;
         --time) WALL_OVERRIDE="$2"; shift 2 ;;
         --mem) MEM_OVERRIDE="$2"; shift 2 ;;
-        --existing-ckpt-roots) EXISTING_CKPT_ROOTS="$2"; shift 2 ;;
-        --disc-run) DISC_RUN="$2"; shift 2 ;;
-        --raw-run) RAW_RUN="$2"; shift 2 ;;
         --job-manifest) JOB_MANIFEST="$2"; shift 2 ;;
-        --eval-ordinal-patch-refine-vs-mmpd) EVAL_ORDINAL_PATCH_REFINE_MMPD=1; shift ;;
-        --mmpd-root) MMPD_ROOT="$2"; shift 2 ;;
-        --ordinal-disc-evaluator) ORDINAL_DISC_EVALUATOR="$2"; shift 2 ;;
-        --ordinal-binary-config) ORDINAL_BINARY_CONFIG="$2"; shift 2 ;;
-        --defer-checkpoint-check) DEFER_CHECKPOINT_CHECK=1; shift ;;
-        --slice-lengths) ORDINAL_SLICE_LENGTHS="${2//,/;}" ; ORDINAL_SLICE_LENGTHS="${ORDINAL_SLICE_LENGTHS// /;}"; shift 2 ;;
         --exclude) SBATCH_EXCLUDE_NODES="$2"; shift 2 ;;
         --gpu) GPU_TYPE="$2"; shift 2 ;;
         --partition) PARTITION_OVERRIDE="$2"; shift 2 ;;
@@ -150,118 +131,6 @@ gpu_sbatch_args() {
 manifest_tool() {
     python3 "$SCRIPT_DIR/temp/scripts/submission_manifest.py" "$@"
 }
-
-# Deferred h96 ordinal patch-refine discriminator mode.
-if [[ "$EVAL_ORDINAL_PATCH_REFINE_MMPD" -eq 1 ]]; then
-    [[ -n "$EXISTING_CKPT_ROOTS" ]] || {
-        echo "ERROR: --eval-ordinal-patch-refine-vs-mmpd requires --existing-ckpt-roots dataset=run,..." >&2
-        exit 1
-    }
-    [[ -n "$MMPD_ROOT" ]] || {
-        echo "ERROR: --eval-ordinal-patch-refine-vs-mmpd requires --mmpd-root" >&2
-        exit 1
-    }
-    [[ -n "$ORDINAL_BINARY_CONFIG" ]] || {
-        echo "ERROR: --eval-ordinal-patch-refine-vs-mmpd requires --ordinal-binary-config" >&2
-        exit 1
-    }
-    [[ -z "$CONFIGS" && "$RESUME" -eq 0 && "$SMOKE" -eq 0 ]] || {
-        echo "ERROR: ordinal patch-refine discriminator mode does not accept --configs, --resume, or --smoke" >&2
-        exit 1
-    }
-    [[ "$DEFER_CHECKPOINT_CHECK" -eq 1 ]] || {
-        echo "ERROR: ordinal patch-refine discriminator mode requires --defer-checkpoint-check for its explicit compute-node validation contract" >&2
-        exit 1
-    }
-
-    STORE="${RESULTS_ROOT:-$SCRIPT_DIR/results}"
-    [[ "$STORE" == /* ]] || STORE="$SCRIPT_DIR/$STORE"
-    LOG_DIR="$STORE/logs"
-    mkdir -p "$LOG_DIR"
-    [[ "$MMPD_ROOT" == /* ]] || MMPD_ROOT="$SCRIPT_DIR/$MMPD_ROOT"
-    [[ "$ORDINAL_DISC_EVALUATOR" == /* ]] || ORDINAL_DISC_EVALUATOR="$SCRIPT_DIR/$ORDINAL_DISC_EVALUATOR"
-    [[ "$ORDINAL_BINARY_CONFIG" == /* ]] || ORDINAL_BINARY_CONFIG="$SCRIPT_DIR/$ORDINAL_BINARY_CONFIG"
-    [[ -f "$ORDINAL_DISC_EVALUATOR" ]] || {
-        echo "ERROR: ordinal discriminator evaluator not found: $ORDINAL_DISC_EVALUATOR" >&2
-        exit 1
-    }
-    [[ -f "$ORDINAL_BINARY_CONFIG" ]] || {
-        echo "ERROR: ordinal binary config not found: $ORDINAL_BINARY_CONFIG" >&2
-        exit 1
-    }
-    IFS=',' read -ra EVAL_DATASETS <<< "$DATASETS"
-    IFS=',' read -ra ROOT_PAIRS <<< "$EXISTING_CKPT_ROOTS"
-    declare -A ROOT_BY_DATASET=()
-    for pair in "${ROOT_PAIRS[@]}"; do
-        [[ "$pair" == *=* ]] || { echo "ERROR: invalid --existing-ckpt-roots entry: $pair" >&2; exit 1; }
-        dataset_key="${pair%%=*}"
-        checkpoint_root="${pair#*=}"
-        [[ -n "$dataset_key" && -n "$checkpoint_root" ]] || { echo "ERROR: invalid --existing-ckpt-roots entry: $pair" >&2; exit 1; }
-        [[ "$checkpoint_root" == /* ]] || checkpoint_root="$SCRIPT_DIR/$checkpoint_root"
-        ROOT_BY_DATASET["$dataset_key"]="$checkpoint_root"
-    done
-    for dataset_name in "${EVAL_DATASETS[@]}"; do
-        [[ -n "${ROOT_BY_DATASET[$dataset_name]:-}" ]] || {
-            echo "ERROR: no checkpoint root provided for dataset $dataset_name" >&2
-            exit 1
-        }
-    done
-
-    DISC_RUN="${DISC_RUN:-$(date +%m-%d)-ordinal-patch-refine-h96-disc}"
-    RAW_RUN="${RAW_RUN:-${DISC_RUN}-raw}"
-    [[ "$DISC_RUN" != /* && "$RAW_RUN" != /* ]] || {
-        echo "ERROR: --disc-run/--raw-run must be relative results/datasets names" >&2
-        exit 1
-    }
-    DISC_OUTPUT="$STORE/datasets/$DISC_RUN"
-    RAW_OUTPUT="$STORE/datasets/$RAW_RUN"
-    MANIFEST_PATH="${JOB_MANIFEST:-$DISC_OUTPUT/submission_manifest.json}"
-    [[ "$MANIFEST_PATH" == /* ]] || MANIFEST_PATH="$SCRIPT_DIR/$MANIFEST_PATH"
-    manifest_tool init --path "$MANIFEST_PATH" --component "ordinal_patch_refine_discriminator" \
-        --repo "$SCRIPT_DIR" --datasets "$DATASETS" \
-        --set "mmpd_root=$MMPD_ROOT" --set "output_dir=$DISC_OUTPUT" --set "raw_eval_dir=$RAW_OUTPUT" \
-        --set "evaluator=$ORDINAL_DISC_EVALUATOR" --set "binary_config=$ORDINAL_BINARY_CONFIG"
-
-    WALL="${WALL_OVERRIDE:-2:00:00}"
-    USER_NAME="$(whoami)"
-    gpu_sbatch_args 1 || exit 1
-    DEP_ARGS=()
-    [[ -n "$DEPENDENCY" ]] && DEP_ARGS=(--dependency="$DEPENDENCY")
-    EXCLUDE_ARGS=()
-    [[ -n "${SBATCH_EXCLUDE_NODES:-}" ]] && EXCLUDE_ARGS=(--exclude="$SBATCH_EXCLUDE_NODES")
-    DISC_JOB_IDS=()
-    for dataset_name in "${EVAL_DATASETS[@]}"; do
-        checkpoint_root="${ROOT_BY_DATASET[$dataset_name]}"
-        job_label="disc-opr96"
-        job_id=$(sbatch --parsable \
-            --job-name="${job_label}-${dataset_name}" \
-            --account="$ACCOUNT" --time="$WALL" --nodes=1 "${GPU_SBATCH_ARGS[@]}" \
-            --cpus-per-task=8 --mem=50G \
-            "${DEP_ARGS[@]}" \
-            "${EXCLUDE_ARGS[@]}" \
-            --output="$LOG_DIR/${job_label}-${dataset_name}-%j.log" \
-            --error="$LOG_DIR/${job_label}-${dataset_name}-%j.log" \
-            --mail-type=FAIL --mail-user="${USER_NAME}@uwo.ca" \
-            --export=ALL,GRID_EVAL_ORDINAL_PATCH_REFINE_MMPD=1,GRID_DATASET="$dataset_name",GRID_EXISTING_CKPT="$checkpoint_root",GRID_MMPD_ROOT="$MMPD_ROOT",GRID_DISC_OUTPUT="$DISC_OUTPUT",GRID_RAW_DISC_OUTPUT="$RAW_OUTPUT",GRID_ORDINAL_DISC_EVALUATOR="$ORDINAL_DISC_EVALUATOR",GRID_ORDINAL_BINARY_CONFIG="$ORDINAL_BINARY_CONFIG",GRID_SLICE_LENGTHS="$ORDINAL_SLICE_LENGTHS" \
-            "$SCRIPT_DIR/slurm_worker.sh")
-        manifest_tool record --path "$MANIFEST_PATH" --role "ordinal_disc" --dataset "$dataset_name" --job-id "$job_id" \
-            --set "checkpoint_root=$checkpoint_root"
-        DISC_JOB_IDS+=("$job_id")
-    done
-
-    disc_dep="afterok:${DISC_JOB_IDS[0]}"
-    for job_id in "${DISC_JOB_IDS[@]:1}"; do disc_dep+=":$job_id"; done
-    merge_id=$(sbatch --parsable \
-        --job-name="disc-opr96-merge" --account="$ACCOUNT" --nodes=1 \
-        --cpus-per-task=2 --mem=8G --time=0:30:00 --dependency="$disc_dep" \
-        --output="$LOG_DIR/disc-opr96-merge-%j.log" --error="$LOG_DIR/disc-opr96-merge-%j.log" \
-        --mail-type=FAIL --mail-user="${USER_NAME}@uwo.ca" \
-        --export=ALL,GRID_EVAL_ORDINAL_PATCH_REFINE_MMPD=1,GRID_ORDINAL_DISC_MERGE=1,GRID_DISC_OUTPUT="$DISC_OUTPUT",GRID_RAW_DISC_OUTPUT="$RAW_OUTPUT",GRID_ORDINAL_DISC_EVALUATOR="$ORDINAL_DISC_EVALUATOR",GRID_ORDINAL_BINARY_CONFIG="$ORDINAL_BINARY_CONFIG" \
-        "$SCRIPT_DIR/slurm_worker.sh")
-    manifest_tool record --path "$MANIFEST_PATH" --role ordinal_disc_merge --job-id "$merge_id"
-    echo "ordinal patch-refine discriminator manifest: $MANIFEST_PATH"
-    exit 0
-fi
 
 if [[ "$SMOKE" -eq 1 ]]; then
     # Legacy configs/smoke_test.yaml (residual fine) was removed; canvas128 leaf
@@ -383,6 +252,18 @@ for CFG in "${CONF_ARR[@]}"; do
         exit 1
     fi
 done
+
+echo "Preflight: MMPD gap/redbox packs for each config x dataset"
+for CFG in "${CONF_ARR[@]}"; do
+    for DS in "${DATA_ARR[@]}"; do
+        (
+            cd "$SCRIPT_DIR"
+            python3 -m models.diffusion_tsf.pipeline.mmpd_viz_preflight \
+                --config "$CFG" --dataset "$DS" --repo-root "$SCRIPT_DIR"
+        ) || { echo "ERROR: MMPD viz preflight failed for $CFG / $DS" >&2; exit 1; }
+    done
+done
+
 
 if [[ -n "$JOB_MANIFEST" ]]; then
     [[ "$JOB_MANIFEST" == /* ]] || JOB_MANIFEST="$SCRIPT_DIR/$JOB_MANIFEST"

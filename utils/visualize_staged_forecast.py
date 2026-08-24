@@ -48,6 +48,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from models.diffusion_tsf.guidance import iTransformerGuidance
+from models.diffusion_tsf.pipeline.data_subset import read_subset_record
 from models.diffusion_tsf.pipeline.config import load_experiment_config
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import stage_state
 from models.diffusion_tsf.pipeline.state import PipelineState
@@ -338,7 +339,7 @@ def plot_staged_forecast_panel(
     mean = torch.tensor(norm_stats["mean"], dtype=torch.float32)
     std = torch.tensor(norm_stats["std"], dtype=torch.float32)
 
-    data_subset = sub["fine_metadata"].get("data_subset") or {}
+    data_subset = read_subset_record(sub["fine_metadata"], dataset)
     test_stride = int(data_subset.get("test_stride", 1))
 
     guidance_path, full_path = _resolve_itrans_paths(checkpoint_dir, subset_id)

@@ -107,6 +107,18 @@ def main():
         subset_meta.get("test_stride"),
     )
 
+    from models.diffusion_tsf.pipeline.config import visualization_settings
+    from models.diffusion_tsf.pipeline.mmpd_viz_preflight import (
+        REPO_ROOT,
+        validate_mmpd_viz_requirements,
+    )
+
+    validate_mmpd_viz_requirements(
+        visualization_settings(cfg),
+        state.dataset,
+        repo_root=REPO_ROOT,
+    )
+
     phases = []
     for p in cfg["phases"]:
         p_class = PHASE_REGISTRY.get(p["phase"])

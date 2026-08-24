@@ -43,8 +43,8 @@ from models.diffusion_tsf.ordinal_window_norm import (
     ordinal_encode,
     ranks_to_unit,
 )
-from models.diffusion_tsf.storage_paths import resolve_checkpoint_dir, resolve_results_dir
 from models.diffusion_tsf.pipeline.data_subset import resolve_data_subset
+
 
 def is_main_process() -> bool:
     """True on the coordinator process (not an Optuna child worker)."""
@@ -86,50 +86,6 @@ def anchor_kwargs_from_params(state: PipelineState, params: Optional[Dict] = Non
         'use_deterministic_anchor_loss': True,
         'deterministic_anchor_lambda': anchor_lambda,
         'deterministic_anchor_alpha': anchor_alpha,
-    }
-
-
-def diffusion_arch_config_dict(state: PipelineState) -> Dict[str, Any]:
-    """Architecture/runtime flags needed to reconstruct diffusion checkpoints."""
-    return {
-        'image_height': state.image_height,
-        'coarse_image_height': state.coarse_image_height,
-        'fine_image_height': state.fine_image_height,
-        'max_scale': state.max_scale_by_dataset.get(state.dataset, state.max_scale),
-        'staged_representation': state.staged_representation,
-        'window_norm_std_floor': state.window_norm_std_floor,
-        'window_norm_low_var_threshold': state.window_norm_low_var_threshold,
-        'window_norm_low_var_unit_std': state.window_norm_low_var_unit_std,
-        'window_norm_low_var_unit_std_per_variate': state.window_norm_low_var_unit_std_by_variate.get(state.dataset),
-        'lookback_overlap_center_shift': state.lookback_overlap_center_shift,
-        'window_norm_center': state.window_norm_center,
-        'diffusion_stage': state.diffusion_stage,
-        'cfg_dropout': state.cfg_dropout,
-        'disable_cross_attention': state.disable_cross_attention,
-        'cross_variate_context_bias': state.cross_variate_context_bias,
-        'model_type': state.model_type,
-        'diffusion_type': state.diffusion_type,
-        'use_ordinal_window_norm': state.use_ordinal_window_norm,
-        'ordinal_ood_shift_causal_only': state.ordinal_ood_shift_causal_only,
-        'ordinal_tie_atol': state.ordinal_tie_atol,
-        'binary_anchor_input_mode': state.binary_anchor_input_mode,
-        'dit_patch_size': state.dit_patch_size,
-        'dit_embed_dim': state.dit_embed_dim,
-        'dit_depth': state.dit_depth,
-        'dit_num_heads': state.dit_num_heads,
-        'dit_mlp_ratio': state.dit_mlp_ratio,
-        'dit_dropout': state.dit_dropout,
-        'use_window_normalization': state.use_window_normalization,
-        'window_stride': state.window_stride,
-        'binary_noise_schedule': state.binary_noise_schedule,
-        'prediction_target': state.prediction_target,
-        'loss_weighting': state.loss_weighting,
-        'min_snr_gamma': state.min_snr_gamma,
-        'use_coordinate_channel': state.use_coordinate_channel,
-        'use_raw_lookback_cond_channel': state.use_raw_lookback_cond_channel,
-        'representation_time_stride': state.representation_time_stride,
-        'past_cond_resize_to_horizon': state.past_cond_resize_to_horizon,
-        'itrans_d_model': state.itrans_d_model,
     }
 
 
@@ -362,8 +318,7 @@ def dataset_window_lengths(state: PipelineState, dataset_name: str) -> Tuple[int
 def itrans_model_lengths(state: PipelineState, dataset_lookback: int, dataset_horizon: int) -> Tuple[int, int]:
     """iTrans seq_len / pred_len decoupled from diffusion AR chunk canvas."""
     seq_len = int(state.itrans_lookback_length or dataset_lookback)
-    chunk_hz = int(state.diffusion_chunk_horizon or 0)
-    pred_len = min(dataset_horizon, chunk_hz) if chunk_hz > 0 else dataset_horizon
+    pred_len = dataset_horizon
     return seq_len, pred_len
 
 
@@ -380,8 +335,7 @@ def wrap_itrans_guidance(
     if seq_len is None:
         seq_len = int(state.itrans_lookback_length or getattr(model, "seq_len", state.lookback_length))
     if pred_len is None:
-        chunk = int(state.diffusion_chunk_horizon or 0)
-        pred_len = chunk if chunk > 0 else int(state.forecast_length)
+        pred_len = int(state.forecast_length)
     return iTransformerGuidance(model, seq_len=int(seq_len), pred_len=int(pred_len))
 
 
@@ -391,8 +345,7 @@ def _patch_guidance_out_len(state: PipelineState) -> int:
 
 
 def _patch_guidance_pred_len(state: PipelineState) -> int:
-    chunk = int(state.diffusion_chunk_horizon or 0)
-    return chunk if chunk > 0 else int(state.forecast_length)
+    return int(state.forecast_length)
 
 
 def _checkpoint_is_patch_guidance(ckpt: dict) -> bool:
@@ -868,9 +821,6 @@ def run_patch_guidance_finetune_hp_tuning(
 
 
 def _itrans_chunk_horizon(state: PipelineState) -> int:
-    chunk = int(state.diffusion_chunk_horizon or 0)
-    if chunk > 0:
-        return chunk
     return int(state.forecast_length)
 
 
@@ -991,7 +941,7 @@ def resolve_pipeline_data_subset(state) -> Dict[str, Any]:
     """Resolve state.data_subset_by_dataset and write concrete variates/strides to state."""
     raw_rows, raw_variates = get_dataset_shape(state, state.dataset)
     base_indices = list(range(raw_variates))
-    policy = {"data_subset_by_dataset": getattr(state, "data_subset_by_dataset", {})}
+    policy = {"data_subset_by_dataset": state.data_subset_by_dataset}
     resolved = resolve_data_subset(
         dataset_name=state.dataset,
         raw_rows=raw_rows,
@@ -1274,14 +1224,8 @@ def create_diffusion_model(
     lb = state.lookback_length if lookback is None else lookback
     hz = state.forecast_length if horizon is None else horizon
     stage = state.diffusion_stage if diffusion_stage is None else diffusion_stage
-    chunk_hz = int(state.diffusion_chunk_horizon or 0)
-    if chunk_hz > 0:
-        raise ValueError(
-            "diffusion_chunk_horizon AR was removed; use experiment.horizon_stitch="
-            "overlap_avg with horizon_chunk_inner instead"
-        )
-    stitch = bool(getattr(state, "horizon_stitch", False))
-    inner = int(getattr(state, "horizon_chunk_inner", 96) or 96)
+    stitch = bool(state.horizon_stitch)
+    inner = int(state.horizon_chunk_inner or 96)
     if stitch:
         model_hz = int(state.lookback_overlap) + inner
     else:
@@ -1333,10 +1277,6 @@ def create_diffusion_model(
         patch_refine_patch_width=state.patch_refine_patch_width,
         patch_refine_col_stride=state.patch_refine_col_stride,
         patch_refine_unique_segments=state.patch_refine_unique_segments,
-        patch_refine_use_prev_cond=bool(
-            getattr(state, "patch_refine_use_prev_cond", True)
-        ),
-        patch_refine_prev_cond_dropout=state.patch_refine_prev_cond_dropout,
         patch_refine_finetune_patch_fraction=float(
             getattr(state, "patch_refine_finetune_patch_fraction", 1.0)
         ),

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Univariate real-vs-fake discriminator (binary vs GT, MMPD vs GT).
 
-Same fair protocol as `eval_discriminator_texture_staged_vs_mmpd.py`, but each
-example is a **single-variate** L-patch `[1, L]` (z-scored). One model per
+The live fair protocol uses a **single-variate** L-patch `[1, L]` (z-scored).
+One model per
 `(dataset, fake_source, L)` is trained on patches pooled across **all**
 variates.
 
@@ -31,7 +31,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from utils.disc_bin_center_shift import bin_center_shift  # noqa: E402
-from utils.eval_discriminator_texture_staged_vs_mmpd import (  # noqa: E402
+from utils.disc_shared import (  # noqa: E402
     DEFAULT_DISC_OUTPUT,
     DISC_ARCH_CHOICES,
     FAKE_SOURCES,
@@ -48,7 +48,7 @@ from utils.eval_discriminator_texture_staged_vs_mmpd import (  # noqa: E402
     zscore_time,
 )
 from utils.eval_mmpd_gaussian_anchor import run_test_stride  # noqa: E402
-from utils.eval_trend_robust_texture_staged_vs_mmpd import (  # noqa: E402
+from utils.mmpd_eval_progress import (  # noqa: E402
     EvalProgress,
     fmt_duration,
 )

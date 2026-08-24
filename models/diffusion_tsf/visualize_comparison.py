@@ -33,14 +33,13 @@ project_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from models.diffusion_tsf.storage_paths import resolve_checkpoint_dir
+from models.diffusion_tsf.storage_paths import RESULTS_DIR, resolve_checkpoint_dir
 import models.diffusion_tsf.train_multivariate_pipeline as train_pipeline
 from models.diffusion_tsf.train_multivariate_pipeline import (
     create_diffusion_model, load_dataset,
     pretrain_dir_for_dim,
     load_itransformer_from_checkpoint,
 )
-RESULTS_DIR = "results"
 LOOKBACK_LENGTH = 96
 FORECAST_LENGTH = 96
 DEFAULT_IMAGE_HEIGHT = 16
@@ -527,7 +526,7 @@ def main():
     )
     args = parser.parse_args()
 
-    output_dir = args.output_dir or os.path.join(RESULTS_DIR, 'viz', 'comparison')
+    output_dir = args.output_dir or os.path.join(project_root, RESULTS_DIR, 'viz', 'comparison')
     run_comparison(
         args.checkpoint_dir, output_dir, args.num_samples, args.vars, args.ensemble,
         args.lookback_length, args.forecast_length,

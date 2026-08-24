@@ -1,11 +1,7 @@
 # Discriminator walkthrough — unique_abs L8/L16 ablation (live path)
 #
 # Inline comments for this path also live in the source files below (see File map).
-# Refreshed against working tree on `exp/ordinal-fine-residual` (2026-08-05).
-# Note: this markdown was never committed; earlier excerpts matched an Aug-4
-# working-tree snapshot. Major drift since then: training-lattice snap
-# (`window_norm_grid` / hybrid_flat), submit defaults `val,test` + 80/20,
-# forecast cache, LayerNorm-only disc, lean arches (mlp/cnn1d/flatness).
+# Refreshed for the retained unique-absolute ablation path.
 
 Read this top-to-bottom in **runtime order**. Code blocks are real excerpts from the repo (line ranges in the fence header). Comments inside the blocks are walkthrough annotations (what happens to tensors / windows / labels); many of the same explanations are mirrored as inline comments in those modules.
 
@@ -24,16 +20,14 @@ Read this top-to-bottom in **runtime order**. Code blocks are real excerpts from
 | Ordinal lattice + nearest snap | `utils/patch_refine_ordinal_ladder.py` → `legal_patch_refine_levels_dataset_z`, `snap_to_patch_refine_levels` | ordinal leaves + shared snap helper |
 | Bin-center preprocess | `utils/disc_bin_center_shift.py` → `bin_center_shift` | kills absolute level; keeps step texture |
 | Hybrid flat (LULL-like) | `utils/hybrid_flat_dataset_norm.py` | flat variates skip window-norm |
-| Lean multi-arch runner | `temp/scripts/smoke_lean_disc_arches.py` | pack → snap → loop arches × sources × L |
-| Slurm (legacy transformer) | `temp/scripts/submit_ablation_disc_l8_l16.sh` | original unique_abs ablation |
-| Slurm (lean sweep) | `temp/scripts/submit_lean_disc_c128_killarney.sh` | canvas128 × datasets × arches |
+| Slurm entrypoint | `temp/scripts/submit_ablation_disc_l8_l16.sh` | current unique-absolute ablation |
 
 **Live path (unique_abs ablation disc):** login submit → compute-node Python → pack pool (paper **val+test** by default) → binary + MMPD fakes → **training-lattice** snap → chrono purged split (**80/20** + val-from-train) → unique absolute L-slices → disc (`--disc-arch`, default transformer) → test AUROC.
 
 **Entrypoints:**
 
 - `temp/scripts/submit_ablation_disc_l8_l16.sh` (self-sbatch wrapper)
-- `temp/scripts/eval_ablation_disc_l8_l16.py` (symlink: `temp/eval_ablation_disc_l8_l16.py`)
+- `temp/scripts/eval_ablation_disc_l8_l16.py`
 - Shared train/eval: `utils/eval_discriminator_binary_vs_mmpd_univariate.py` (`train_classifier`, `UnivariateRealVsFakeDataset`, `_unique_absolute_slice_items`)
 - Shared split / AUROC helpers: `utils/disc_shared.py` (`split_windows`, `apply_disc_pack_protocol`, `binary_auroc`, `window_level_metrics`, `InvertedSliceDiscriminator` + lean arches)
 - Ladder / snap: `utils/patch_refine_ordinal_ladder.py` (ordinal leaves), `utils/patch_refine_value_grid.py` (window-norm / canvas128), `utils/hybrid_flat_dataset_norm.py` (flat-variate hybrid), `utils/disc_bin_center_shift.py`
@@ -557,7 +551,7 @@ Applied identically to real and fake. Strips absolute level / bias in bin space;
 
 ## 8. Model architecture — `InvertedSliceDiscriminator`
 
-**This is the live discriminator module.** Same class as the multivariate disc (imported via `eval_discriminator_texture_staged_vs_mmpd` / `disc_shared`). Defined here:
+**This is the live discriminator module.** It imports the shared model utilities directly from `disc_shared`. Defined here:
 
 ```python
 # utils/disc_shared.py:1020-1071

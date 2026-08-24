@@ -70,11 +70,9 @@ class DiffusionTSFConfig:
     patch_refine_patch_height: int = 32
     patch_refine_patch_width: int = 8
     patch_refine_col_stride: int = 6
-    # Unique absolute 8-step segments + AR prev-refine cond (see patch_refine_segments).
+    # Unique absolute segments (see patch_refine_segments). Infer samples all
+    # stride-grid crops in parallel — no previous-patch conditioning.
     patch_refine_unique_segments: bool = False
-    # When False, never write left-neighbor refine into the coarse-cell aux map.
-    patch_refine_use_prev_cond: bool = True
-    patch_refine_prev_cond_dropout: float = 0.5
     # Train-only unique-seg crop keep-rate (1.0 = all (B,V) crops).
     patch_refine_finetune_patch_fraction: float = 1.0
     max_scale: float = 3.5

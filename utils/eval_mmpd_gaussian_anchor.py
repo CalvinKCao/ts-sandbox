@@ -270,7 +270,9 @@ def run_variate_indices(run: AnchorRun) -> List[int]:
 
 
 def run_data_subset(run: AnchorRun) -> Dict[str, Any]:
-    return dict(run.metadata.get("data_subset") or {})
+    from models.diffusion_tsf.pipeline.data_subset import read_subset_record
+
+    return read_subset_record(run.metadata, run.dataset)
 
 
 def run_train_stride(run: AnchorRun) -> int:
@@ -704,16 +706,9 @@ def _load_data_subset_policy(config_path: Path) -> Dict[str, Any]:
     exp = dict(cfg.get("experiment") or {})
     by_dataset = exp.get("data_subset_by_dataset")
     if isinstance(by_dataset, dict) and by_dataset:
-        # Prefer explicit per-dataset policy (matches binary canvas128 subsets).
         return {"data_subset_by_dataset": dict(by_dataset)}
-    policy = exp.get("data_subset")
-    if isinstance(policy, dict) and (
-        policy.get("data_subset_by_dataset") or policy.get("by_dataset")
-    ):
-        return dict(policy)
     raise ValueError(
-        f"{config_path} missing experiment.data_subset_by_dataset "
-        "(legacy experiment.data_subset alone is not supported)"
+        f"{config_path} missing experiment.data_subset_by_dataset"
     )
 
 
@@ -750,14 +745,16 @@ def build_anchor_run_from_subset_meta(
     *,
     variant: str = "binary",
 ) -> AnchorRun:
+    from models.diffusion_tsf.pipeline.data_subset import put_subset_record
+
     subset_id = str(subset_meta["subset_id"])
     metadata = {
         "dataset_name": dataset,
         "dataset": dataset,
         "subset_id": subset_id,
         "variate_indices": [int(i) for i in subset_meta["variate_indices"]],
-        "data_subset": subset_meta,
     }
+    put_subset_record(metadata, dataset, subset_meta)
     stub = REPO_ROOT / "results" / "subset_spec" / dataset
     return AnchorRun(
         variant=variant,

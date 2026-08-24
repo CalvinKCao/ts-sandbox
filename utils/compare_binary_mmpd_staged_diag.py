@@ -40,6 +40,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from models.diffusion_tsf.pipeline.data_subset import read_subset_record
 from models.diffusion_tsf.pipeline.config import load_experiment_config
 from models.diffusion_tsf.pipeline.phase_diagnostics import select_spaced_top_k
 from models.diffusion_tsf.pipeline.phases.staged_eval import StagedEvalPhase
@@ -1402,7 +1403,7 @@ def plot_dataset_windows(
     variate_indices = bundle["variate_indices"]
     state = _build_state(binary_ckpt, dataset, subset_id, binary_config)
     lookback, horizon = _window_lengths(dataset, state)
-    data_subset = bundle["fine_metadata"].get("data_subset") or {}
+    data_subset = read_subset_record(bundle["fine_metadata"], dataset)
 
     import models.diffusion_tsf.train_multivariate_pipeline as pipeline_mod
 

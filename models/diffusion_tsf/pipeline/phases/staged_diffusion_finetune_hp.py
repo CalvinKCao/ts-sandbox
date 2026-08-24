@@ -32,7 +32,7 @@ from models.diffusion_tsf.pipeline.reused_paths import (
     reused_stage_best_ckpt,
 )
 from models.diffusion_tsf.pipeline.state import PipelineState
-from models.diffusion_tsf.pipeline.data_subset import random_window_subset
+from models.diffusion_tsf.pipeline.data_subset import put_subset_record, random_window_subset
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     _stage_pretrain_ckpt,
@@ -40,8 +40,8 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import (
     stage_state,
 )
 from models.diffusion_tsf.pipeline.train.batch_config import (
-    configured_finetune_micro_batch,
     configured_max_diffusion_batch,
+    configured_phase_micro_batch,
 )
 from models.diffusion_tsf.pipeline.train.checkpointing import (
     EarlyStopping,
@@ -1430,7 +1430,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "subset_id": subset_id,
             "dataset_name": state.dataset,
             "variate_indices": list(variate_indices),
-            "data_subset": subset_meta,
             "norm_mean": norm_stats["mean"].tolist(),
             "norm_std": norm_stats["std"].tolist(),
             "tuned_params": best_params,
@@ -1447,6 +1446,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "refit_completed": False,
         }
         meta_pending.update(_hybrid_norm_metadata(norm_stats))
+        put_subset_record(meta_pending, state.dataset, subset_meta)
         with open(os.path.join(subset_dir, "metadata.json"), "w", encoding="utf-8") as f:
             json.dump(meta_pending, f, indent=2, sort_keys=True)
 
@@ -1870,12 +1870,11 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             )
             logger.info(
                 "  [%s] unique patch segments enabled "
-                "(segment_stride=%d train=%d val=%d prev_dropout=%.2f)",
+                "(segment_stride=%d train=%d val=%d)",
                 self.name,
                 seg_stride,
                 len(train_ds),
                 len(val_ds),
-                float(getattr(state, "patch_refine_prev_cond_dropout", 0.5)),
             )
         train_ds = random_window_subset(
             train_ds,
@@ -2000,12 +1999,15 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 logger.warning("[%s] phase-start diagnostics failed: %s", self.name, e, exc_info=True)
         ds_lb, ds_hz = pipeline_mod.dataset_window_lengths(state, state.dataset)
         micro_ceiling = configured_max_diffusion_batch(state, state.smoke_test)
-        default_micro = configured_finetune_micro_batch(state, state.smoke_test)
+        default_micro = configured_phase_micro_batch(
+            state, state.smoke_test, self.overrides,
+        )
         logger.info(
-            "  [%s] finetune micro-batch default=%d ceiling=%d (YAML; no GPU probe)",
+            "  [%s] finetune micro-batch default=%d ceiling=%d dataset=%s (YAML; no GPU probe)",
             self.name,
             default_micro,
             micro_ceiling,
+            state.dataset,
         )
 
         accum_mult = state.extra.get("diffusion_effective_batch_multiplier")
@@ -2445,7 +2447,6 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
             "subset_id": subset_id,
             "dataset_name": state.dataset,
             "variate_indices": variate_indices,
-            "data_subset": subset_meta,
             "norm_mean": norm_stats["mean"].tolist(),
             "norm_std": norm_stats["std"].tolist(),
             "tuned_params": best_params,
@@ -2483,6 +2484,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 "reused_max_scale_previous": reuse_meta.get("reused_max_scale_previous"),
             })
         with open(os.path.join(subset_dir, "metadata.json"), "w", encoding="utf-8") as f:
+            put_subset_record(meta_out, state.dataset, subset_meta)
             json.dump(meta_out, f, indent=2, sort_keys=True)
 
         self._record_finetune_result(state, final_ckpt, best_params)

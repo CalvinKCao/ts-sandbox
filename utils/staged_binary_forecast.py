@@ -172,9 +172,11 @@ def staged_anchor_run(dataset: str, checkpoint_dir: Path, test_stride: int) -> T
     meta["subset_id"] = subset_id
     meta["variate_indices"] = [int(i) for i in sub["variate_indices"]]
     meta["guidance_type"] = guidance_type
-    data_subset = dict(meta.get("data_subset") or {})
-    data_subset["test_stride"] = int(test_stride)
-    meta["data_subset"] = data_subset
+    from models.diffusion_tsf.pipeline.data_subset import put_subset_record, read_subset_record
+
+    rec = read_subset_record(meta, dataset)
+    rec["test_stride"] = int(test_stride)
+    put_subset_record(meta, dataset, rec)
 
     run = AnchorRun(
         variant="binary",

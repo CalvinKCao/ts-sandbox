@@ -1,4 +1,4 @@
-"""Unique absolute patch-refine segments + previous-stride teacher force."""
+"""Unique absolute patch-refine segments."""
 
 from __future__ import annotations
 
@@ -7,14 +7,12 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset, Subset
 
 from .patch_refine_geometry import (
     PatchLayout,
     PatchLocation,
     coverage_mask_for_layout,
-    extract_patch_batch_layout,
 )
 
 
@@ -104,131 +102,6 @@ def sample_parent_start(
     ).digest()
     rng = np.random.RandomState(int.from_bytes(seed_bytes[:4], "little"))
     return int(parents[int(rng.randint(0, len(parents)))])
-
-
-def compress_prev_refine_32_to_16(prev_hir: torch.Tensor) -> torch.Tensor:
-    """Pool a hir prev-crop vertically onto 16 coarse rows.
-
-    Historically named for 32→16 (factor 2). Also accepts any height divisible
-    by 16 (e.g. 64→16 with factor 4) via vertical avg-pool.
-    """
-    h = int(prev_hir.shape[-2])
-    if h < 16 or h % 16 != 0:
-        raise ValueError(
-            f"prev refine crop height must be a positive multiple of 16, got {tuple(prev_hir.shape)}"
-        )
-    kh = h // 16
-    flat = prev_hir.reshape(-1, 1, h, prev_hir.shape[-1])
-    out = F.avg_pool2d(flat, kernel_size=(kh, 1))
-    return out.reshape(*prev_hir.shape[:-2], 16, prev_hir.shape[-1])
-
-
-def prev_primary_row0(
-    coarse_edges: torch.Tensor,
-    loc: PatchLocation,
-    *,
-    canvas_height: int,
-    patch_height: int,
-    patch_width: int,
-    col_stride: int,
-) -> Optional[int]:
-    """Row0 the previous stride primary would use (coarse-edge centered).
-
-    Matches AR infer, which compresses the prior primary prediction in that
-    patch's own frame. Returns ``None`` when the prev window is OOB.
-    """
-    prev_col0 = int(loc.col0) - int(col_stride)
-    width = int(coarse_edges.shape[-1])
-    if prev_col0 < 0 or prev_col0 + patch_width > width:
-        return None
-    max_row0 = int(canvas_height) - int(patch_height)
-    anchor = prev_col0 + int(patch_width) // 2
-    edge = int(coarse_edges[loc.batch_index, loc.variate_index, anchor].item())
-    return max(0, min(edge - int(patch_height) // 2, max_row0))
-
-
-def extract_prev_refine_crops(
-    hir_canvas: torch.Tensor,
-    locations: Sequence[PatchLocation],
-    *,
-    patch_height: int,
-    patch_width: int,
-    col_stride: int,
-    coarse_edges: torch.Tensor,
-    canvas_height: Optional[int] = None,
-) -> torch.Tensor:
-    """Teacher-force crops at ``[col0 - col_stride, col0 - col_stride + pw)``.
-
-    For pw=8, stride=6 this is absolute ``[t-6, t+2)`` relative to the current
-    patch left edge. Crops use the **previous primary's row0** (coarse-centered
-    at the prev mid-column), matching AR infer which compresses the prior
-    primary prediction in its own frame. Missing / OOB → zeros.
-    Returns ``(N,1,ph,pw)``.
-    """
-    n = len(locations)
-    device = hir_canvas.device
-    dtype = hir_canvas.dtype
-    out = torch.zeros(n, 1, patch_height, patch_width, device=device, dtype=dtype)
-    if canvas_height is None:
-        canvas_height = int(hir_canvas.shape[-2])
-    width = int(hir_canvas.shape[-1])
-    for i, loc in enumerate(locations):
-        prev_col0 = int(loc.col0) - int(col_stride)
-        if prev_col0 < 0 or prev_col0 + patch_width > width:
-            continue
-        prev_row0 = prev_primary_row0(
-            coarse_edges,
-            loc,
-            canvas_height=canvas_height,
-            patch_height=patch_height,
-            patch_width=patch_width,
-            col_stride=col_stride,
-        )
-        if prev_row0 is None:
-            continue
-        crop = hir_canvas[
-            loc.batch_index,
-            loc.variate_index,
-            prev_row0 : prev_row0 + patch_height,
-            prev_col0 : prev_col0 + patch_width,
-        ]
-        if crop.shape[-2] != patch_height or crop.shape[-1] != patch_width:
-            continue
-        out[i, 0] = crop
-    return out
-
-
-def extract_prev_refine_crops_layout(
-    hir_canvas: torch.Tensor,
-    layout: PatchLayout,
-    *,
-    patch_height: int,
-    patch_width: int,
-    col_stride: int,
-    coarse_edges: torch.Tensor,
-    canvas_height: Optional[int] = None,
-) -> torch.Tensor:
-    """Tensor-layout teacher-force crop extraction for unique-segment training."""
-    if canvas_height is None:
-        canvas_height = int(hir_canvas.shape[-2])
-    width = int(hir_canvas.shape[-1])
-    prev_col0 = layout.col0 - col_stride
-    valid = (prev_col0 >= 0) & (prev_col0 + patch_width <= width)
-    safe_col0 = prev_col0.clamp(0, width - patch_width)
-    prev_anchor = safe_col0 + patch_width // 2
-    prev_edges = coarse_edges.reshape(-1, width)[layout.flat_index, prev_anchor]
-    prev_row0 = (prev_edges - patch_height // 2).clamp(0, canvas_height - patch_height)
-    previous_layout = PatchLayout(
-        flat_index=layout.flat_index,
-        batch_index=layout.batch_index,
-        variate_index=layout.variate_index,
-        row0=prev_row0,
-        col0=safe_col0,
-    )
-    crops = extract_patch_batch_layout(
-        hir_canvas, previous_layout, patch_height=patch_height, patch_width=patch_width,
-    )
-    return crops * valid[:, None, None, None].to(dtype=crops.dtype)
 
 
 def locations_for_fixed_col0(
@@ -357,9 +230,9 @@ def select_coverage_gap_locations(
     patch_height: int,
     patch_width: int,
 ) -> List[PatchLocation]:
-    """Blanked-prev fallbacks only for timesteps AR primaries leave uncovered.
+    """Coverage fills for timesteps the primary stride crops leave uncovered.
 
-    Coverage gaps are OOB / boundary too hi/lo for the 32-high primary patches —
+    Coverage gaps are OOB / boundary too hi/lo for the primary patches —
     not every off-stride ``col0`` from the old dense fallback set.
     """
     if coarse_edges.ndim != 3:
@@ -421,7 +294,7 @@ def coverage_gap_layout(
     patch_height: int,
     patch_width: int,
 ) -> Optional[PatchLayout]:
-    """Tensor gap fills for timesteps the primary AR crops leave uncovered.
+    """Tensor gap fills for timesteps the primary stride crops leave uncovered.
 
     Each round places one crop per still-gapped parent, in parallel across
     ``(B,V)``. Equivalent to :func:`select_coverage_gap_locations` as a set of
@@ -489,7 +362,7 @@ def coverage_gap_layout(
 def group_locations_by_col0(
     locations: Sequence[PatchLocation],
 ) -> List[Tuple[int, List[PatchLocation]]]:
-    """Group locations into ``(col0, locs)`` sorted left→right for batched AR."""
+    """Group locations into ``(col0, locs)`` sorted left→right."""
     by_col: dict[int, List[PatchLocation]] = {}
     for loc in locations:
         by_col.setdefault(int(loc.col0), []).append(loc)

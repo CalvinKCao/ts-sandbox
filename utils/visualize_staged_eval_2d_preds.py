@@ -38,6 +38,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from models.diffusion_tsf.pipeline.data_subset import read_subset_record
 from models.diffusion_tsf.pipeline.config import load_experiment_config
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     _model_kwargs_from_tuned,
@@ -456,7 +457,7 @@ def run_viz(
     state = _build_state(checkpoint_dir, dataset, subset_id, config_path)
     lookback, horizon = _window_lengths(dataset, state)
 
-    data_subset = bundle["fine_metadata"].get("data_subset") or {}
+    data_subset = read_subset_record(bundle["fine_metadata"], dataset)
     if test_stride is None:
         test_stride = _eval_test_stride(
             config_path,

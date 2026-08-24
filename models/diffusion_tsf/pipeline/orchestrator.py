@@ -31,6 +31,18 @@ class Pipeline:
         self.state.resolve_device()
         self.state.ensure_dirs()
 
+        from models.diffusion_tsf.pipeline.config import visualization_settings
+        from models.diffusion_tsf.pipeline.mmpd_viz_preflight import (
+            REPO_ROOT,
+            validate_mmpd_viz_requirements,
+        )
+
+        validate_mmpd_viz_requirements(
+            visualization_settings(self.merged_config),
+            self.state.dataset,
+            repo_root=REPO_ROOT,
+        )
+
         wandb_manifest: dict = {}
         phase_names = [p.name for p in self.phases]
         if self.state.wandb_enabled:
