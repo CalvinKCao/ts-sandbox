@@ -357,12 +357,9 @@ def _export_binary_aligned_mmpd_csv(
     selecting ``i+1`` silently trains MMPD on the wrong variates and breaks
     ``align_mmpd_to_binary_dataset_norm``. Always go through the binary loader.
     """
-    from models.diffusion_tsf.train_multivariate_pipeline import (
-        _load_dataset_array,
-        _resolve_registry_path,
-    )
+    from models.diffusion_tsf.train_multivariate_pipeline import _load_dataset_array
 
-    path, date_col = _resolve_registry_path(dataset)
+    path, date_col = _dataset_file(dataset)
     data = _load_dataset_array(str(path), date_col)
     idxs = [int(i) for i in variate_indices]
     if data.ndim != 2:
@@ -775,14 +772,17 @@ def resolve_subset_meta_for_dataset(
     )
 
 
-def _raw_csv_shape(dataset: str) -> Tuple[int, int]:
-    from models.diffusion_tsf.train_multivariate_pipeline import (
-        DATASET_REGISTRY,
-        _load_dataset_array,
-    )
+def _dataset_file(dataset: str) -> Tuple[str, Optional[str]]:
+    from models.diffusion_tsf.train_multivariate_pipeline import DATASET_REGISTRY
 
     rel, date_col, _ = DATASET_REGISTRY[dataset]
-    path = str(REPO_ROOT / "datasets" / rel)
+    return str(REPO_ROOT / "datasets" / rel), date_col
+
+
+def _raw_csv_shape(dataset: str) -> Tuple[int, int]:
+    from models.diffusion_tsf.train_multivariate_pipeline import _load_dataset_array
+
+    path, date_col = _dataset_file(dataset)
     arr = _load_dataset_array(path, date_col)
     return int(arr.shape[0]), int(arr.shape[1])
 
@@ -1845,10 +1845,9 @@ def _absolute_series_starts_for_splits(
     from models.diffusion_tsf.train_multivariate_pipeline import (
         _load_dataset_array,
         _paper_split_borders,
-        _resolve_registry_path,
     )
 
-    path, date_col = _resolve_registry_path(dataset)
+    path, date_col = _dataset_file(dataset)
     n_rows = len(_load_dataset_array(path, date_col))
     border1s, _border2s = _paper_split_borders(dataset, n_rows, lookback)
     split_to_border = {"train": 0, "val": 1, "test": 2}

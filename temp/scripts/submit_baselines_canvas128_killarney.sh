@@ -93,12 +93,15 @@ cd "${SLURM_SUBMIT_DIR:?}"
 echo "PROJECT_ROOT=$PWD"
 
 if ! type module >/dev/null 2>&1; then
-  if [ -f /etc/profile.d/z00_lmod.sh ]; then
-    # shellcheck disable=SC1091
-    source /etc/profile.d/z00_lmod.sh
-  elif [ -f /cvmfs/soft.computecanada.ca/config/profile/bash.sh ]; then
+  if [ -f /cvmfs/soft.computecanada.ca/config/profile/bash.sh ]; then
+    export SKIP_CC_CVMFS="${SKIP_CC_CVMFS:-0}"
+    set +u
     # shellcheck disable=SC1091
     source /cvmfs/soft.computecanada.ca/config/profile/bash.sh
+    set -u
+  elif [ -f /etc/profile.d/z00_lmod.sh ]; then
+    # shellcheck disable=SC1091
+    source /etc/profile.d/z00_lmod.sh
   fi
 fi
 type module >/dev/null 2>&1 || { echo "ERROR: Lmod unavailable after profile source" >&2; exit 127; }
