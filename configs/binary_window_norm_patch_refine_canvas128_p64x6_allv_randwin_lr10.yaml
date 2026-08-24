@@ -1,5 +1,6 @@
-# allv-randwin LR search: 10 complete trials/stage, no prune, 20-ep from pretrain.
-# Coarse LR still ±10x around 1.626e-4. Fine tightened to 0.3–3x around 7.818e-4.
+# allv-randwin HP search: 10 complete trials/stage, no prune, 20-ep from pretrain.
+# Search: donor LR ±10x, effective univariate batch ±1 power of 2, EMA default ± one neighbor.
+# Donor trial is enqueued. Window/patch fractions are 1.0 (full data, all variate crops).
 # ETTm/PeMS use donor-like train/val strides (s3/s4/s2) so search is not stride-1 dense.
 # Other datasets keep the lr4 random-window caps. Eval still s1 n10 4-step.
 extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
@@ -9,7 +10,7 @@ training:
   itrans_paper_batch_size: 1
 
 wandb:
-  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_0p5, patch_frac_0p5, anchor_every4, eval_s1_n10_steps4, nopruner, from_pretrain]
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, nopruner, from_pretrain]
 
 visualization:
   viz_binary_mmpd_gap: false
@@ -19,8 +20,8 @@ experiment:
   name: binary-window-norm-patch-refine-c128-allv-randwin-lr10
   experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10
   seed: 42
-  patch_refine_finetune_window_fraction: 0.5
-  patch_refine_finetune_patch_fraction: 0.5
+  patch_refine_finetune_window_fraction: 1.0
+  patch_refine_finetune_patch_fraction: 1.0
   deterministic_anchor_every_n_batches: 4
   data_subset_by_dataset:
     ETTh1:
@@ -120,9 +121,9 @@ phases:
     refit_best_patience: 5
     refit_from_pretrain: true
     pruner: none
-    search_space: lr_only
+    search_space: lr_eff_batch_univariate_ema
     # L40S 08-22 lr10 probe (max_bs=16, headroom=0.85). Usable window batch;
-    # lr_only still splits against target_univariate_batch.
+    # grid still splits against target_univariate_batch / microbatch.
     batch_size_by_dataset:
       ETTh1: 13
       ETTh2: 13
@@ -137,7 +138,13 @@ phases:
     hp_lr_min: 1.6260630766856958e-5
     hp_lr_max: 1.6260630766856958e-3
     target_univariate_batch: 336
+    effective_univariate_batch_grid: [168, 336, 672]
     ema_decay: 0.99
+    ema_decay_grid: [0.98, 0.99, 0.995]
+    enqueue_trials:
+      - learning_rate: 0.00016260630766856958
+        effective_univariate_batch: 336
+        ema_decay: 0.99
     min_snr_gamma: 5.0
     binary_noise_schedule: linear
     loss_weighting: none
@@ -154,7 +161,7 @@ phases:
     refit_best_patience: 5
     refit_from_pretrain: true
     pruner: none
-    search_space: lr_only
+    search_space: lr_eff_batch_univariate_ema
     # Fine unique-seg often fits the probe cap even when coarse does not.
     # PeMS/traffic never finished fine; both OOMed or cancelled at coarse=1.
     batch_size_by_dataset:
@@ -168,10 +175,16 @@ phases:
       solar_Alabama: 13
       PeMS: 1
       traffic: 1
-    hp_lr_min: 2.34526630622002e-4
-    hp_lr_max: 2.34526630622002e-3
+    hp_lr_min: 7.817554354066733e-5
+    hp_lr_max: 7.817554354066733e-3
     target_univariate_batch: 256
+    effective_univariate_batch_grid: [128, 256, 512]
     ema_decay: 0.995
+    ema_decay_grid: [0.99, 0.995, 0.999]
+    enqueue_trials:
+      - learning_rate: 0.0007817554354066733
+        effective_univariate_batch: 256
+        ema_decay: 0.995
     min_snr_gamma: 2.0
     binary_noise_schedule: linear
     loss_weighting: none
