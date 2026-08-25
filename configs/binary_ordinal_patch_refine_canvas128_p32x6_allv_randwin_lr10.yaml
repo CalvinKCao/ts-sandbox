@@ -1,0 +1,18 @@
+# Ordinal lr10 sibling: same search/subsets/fractions as p64x6 ordinal, patch height 32.
+# Electricity stays on the p64x6 ordinal lr10 leaf. Pretrain donor is ordinal H=32 stem.
+extends: configs/binary_ordinal_patch_refine_canvas128_p64x6_allv_randwin_lr10.yaml
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p32x6, ordinal, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, from_pretrain]
+
+experiment:
+  name: binary-ordinal-patch-refine-c128-p32x6-allv-randwin-lr10
+  experiment_name: binary_ordinal_patch_refine_canvas128_p32x6_allv_randwin_lr10
+  patch_refine_patch_height: 32
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: binary_ordinal_patch_refine_canvas128_p32x6_pretrain
+    require_reuse_pretrain: true
+  - phase: staged_eval
+    eval_progress_key: canvas128_p32x6_allv_randwin_lr10_ordinal_s1_n10_steps4

@@ -1,0 +1,24 @@
+# Canvas128 unique-seg H=64 ordinal pretrain donor (width 6, col stride 5, DiT [8,6]).
+# Synthetic only — later p64 ordinal lr10 jobs set reuse_pretrain_from_config to this stem.
+# Do NOT reuse window-norm p64x6; pretrain signature includes use_ordinal_window_norm.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
+replace_phases: true
+
+wandb:
+  tags: [canvas128, p64x6, pretrain, unique_seg, width6, stride5, ordinal]
+
+experiment:
+  name: binary-ordinal-patch-refine-c128-p64x6-pretrain
+  experiment_name: binary_ordinal_patch_refine_canvas128_p64x6_pretrain
+  use_window_normalization: false
+  use_ordinal_window_norm: true
+  ordinal_ood_shift_causal_only: true
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    n_samples: 10000
+    epochs: 20
+    patience: 4
+    shared_cache: true
+    require_reuse_pretrain: false

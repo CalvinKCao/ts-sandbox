@@ -1,0 +1,12 @@
+# Canvas128 unique-seg H=32 ordinal pretrain donor (width 6, col stride 5, DiT [8,6]).
+# Synthetic only — later p32 ordinal lr10 jobs set reuse_pretrain_from_config to this stem.
+# Do not reuse window-norm p32x6_pretrain or p64x6; H + ordinal signature both differ.
+extends: configs/binary_ordinal_patch_refine_canvas128_p64x6_pretrain.yaml
+
+wandb:
+  tags: [canvas128, p32x6, pretrain, unique_seg, width6, stride5, ordinal]
+
+experiment:
+  name: binary-ordinal-patch-refine-c128-p32x6-pretrain
+  experiment_name: binary_ordinal_patch_refine_canvas128_p32x6_pretrain
+  patch_refine_patch_height: 32
