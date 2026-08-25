@@ -1900,6 +1900,49 @@ def run_itransformer_hp_tuning(
     return best_params, ckpt_path
 
 
+def _ensure_synthetic_ordinal_ladder(state: PipelineState, dataset) -> None:
+    """Build ordinal_ladder from RealTS pool when pretrain has no real-data ladder yet.
+
+    Ordinal staged pretrain still trains patch guidance with unit-rank targets
+    (`ordinal_patch_guidance_unit_ranks`). Real loaders set the ladder in
+    ``load_normalized_splits``; synthetic guidance has only a RealTS pool, so
+    build one here or fail fast.
+    """
+    if not state.use_ordinal_window_norm:
+        return
+    if state.ordinal_ladder is not None:
+        return
+    cache = getattr(dataset, "data_cache", None)
+    if cache is None:
+        raise ValueError(
+            "ordinal synthetic patch guidance requires RealTS.data_cache to build "
+            "state.ordinal_ladder (no real-data ladder at pretrain time)"
+        )
+    arr = np.asarray(cache)
+    # Cap so mmap pools do not explode RAM; unique-value ladders converge quickly.
+    max_seqs = 4096 if not getattr(state, "smoke_test", False) else min(arr.shape[0], 64)
+    if arr.shape[0] > max_seqs:
+        arr = np.asarray(arr[:max_seqs])
+    if arr.ndim == 3:
+        # RealTS multivariate cache: (N, V, T) -> (N*T, V)
+        n, v, t = arr.shape
+        train = np.transpose(arr, (0, 2, 1)).reshape(n * t, v)
+    elif arr.ndim == 2:
+        # Univariate: (N, T) -> (N*T, 1)
+        train = arr.reshape(-1, 1)
+    else:
+        raise ValueError(f"unexpected RealTS data_cache shape {tuple(arr.shape)}")
+    state.ordinal_ladder = build_global_ladder_from_training(
+        train,
+        tie_atol=float(state.ordinal_tie_atol),
+    )
+    logger.info(
+        "Built synthetic ordinal_ladder for patch guidance (cells=%d, V=%d)",
+        train.shape[0],
+        train.shape[1],
+    )
+
+
 def run_patch_guidance_synthetic_tuning(
     state: PipelineState,
     n_trials: int,
@@ -1934,6 +1977,7 @@ def run_patch_guidance_synthetic_tuning(
     )
 
     dataset = synthetic_loader.dataset
+    _ensure_synthetic_ordinal_ladder(state, dataset)
     if smoke_test:
         n_val = max(1, min(len(dataset) // 4, len(dataset) - 1))
     else:
