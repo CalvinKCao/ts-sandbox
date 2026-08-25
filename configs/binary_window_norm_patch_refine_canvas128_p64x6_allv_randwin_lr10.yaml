@@ -1,7 +1,9 @@
-# allv-randwin HP search: 10 complete trials/stage, 20 epochs with patience 4, no prune.
-# Next stage resumes from the best trial checkpoint (no from-pretrain refit).
-# Search: donor LR ±10x, effective univariate batch ±1 power of 2, EMA default ± one neighbor.
-# Donor trial is enqueued. Window/patch fractions are 1.0 (full data, all variate crops).
+# allv-randwin HP search: 10 trial attempts/stage (COMPLETE+PRUNED+FAIL), 20 epochs with
+# patience 5, median pruner (startup 3, warmup 8 → first prune at epoch 9). Next stage
+# resumes from the best trial checkpoint (no from-pretrain refit). Search: donor LR ±10x,
+# effective univariate batch via [1,2,4]× probed U, EMA default ± one neighbor. Donor
+# trial is enqueued at 1× U.
+# Window/patch fractions are 1.0 (full data, all variate crops).
 # ETTm/PeMS use donor-like train/val strides (s3/s4/s2) so search is not stride-1 dense.
 # Other datasets keep the lr4 random-window caps. Eval still s1 n10 4-step.
 extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
@@ -11,7 +13,7 @@ training:
   itrans_paper_batch_size: 1
 
 wandb:
-  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, nopruner, from_pretrain]
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, from_pretrain]
 
 visualization:
   viz_binary_mmpd_gap: false
@@ -99,6 +101,27 @@ experiment:
       train_stride: 2
       val_stride: 2
       test_stride: 1
+      # Same ~230k-crop randwin budget as weather/electricity/traffic (V=307).
+      # Cap samples from the s2 pool (floor(229840/307)=748, floor(77700/307)=253).
+      train_max_windows: 748
+      val_max_windows: 253
+    illness:
+      subset_id: illness_allv_randwin
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      # Row split is Dataset_Custom 70/10/20 in _paper_split_borders (illness
+      # branch), matching iTransformer/PatchTST national_illness. Not 60/20/20.
+    dynamic:
+      subset_id: dynamic_allv_randwin
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      # Same ~230k-crop randwin budget as weather/electricity/traffic (V=17).
+      train_max_windows: 13520
+      val_max_windows: 4586
 
 phases:
   - phase: staged_diffusion_pretrain
@@ -117,31 +140,34 @@ phases:
   - phase: diffusion_coarse_finetune_hp
     n_trials: 10
     max_epochs: 20
-    patience: 4
-    pruner: none
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
     search_space: lr_eff_batch_univariate_ema
-    # L40S 08-22 lr10 probe (max_bs=16, headroom=0.85). Usable window batch;
-    # grid still splits against target_univariate_batch / microbatch.
-    batch_size_by_dataset:
-      ETTh1: 13
-      ETTh2: 13
-      ETTm1: 13
-      ETTm2: 13
-      exchange_rate: 13
-      weather: 13
-      electricity: 1
-      solar_Alabama: 8
-      PeMS: 1
-      traffic: 1
+    # L40S probe 5008723, headroom 0.85. max_fit hit search cap 256 on every
+    # dataset/stage (including traffic 862v coarse). usable = int(256*0.85)=217.
+    # HP grid is [1,2,4]× this U via grad accum. Enqueue injects 1× U (not 336).
+    max_univariate_micro_batch_by_dataset:
+      ETTh1: 217
+      ETTh2: 217
+      ETTm1: 217
+      ETTm2: 217
+      exchange_rate: 217
+      weather: 217
+      electricity: 217
+      solar_Alabama: 217
+      PeMS: 217
+      traffic: 217
+      illness: 217
+      dynamic: 217
     hp_lr_min: 1.6260630766856958e-5
     hp_lr_max: 1.6260630766856958e-3
-    target_univariate_batch: 336
-    effective_univariate_batch_grid: [168, 336, 672]
+    effective_univariate_batch_multipliers: [1, 2, 4]
     ema_decay: 0.99
     ema_decay_grid: [0.98, 0.99, 0.995]
     enqueue_trials:
       - learning_rate: 0.00016260630766856958
-        effective_univariate_batch: 336
         ema_decay: 0.99
     min_snr_gamma: 5.0
     binary_noise_schedule: linear
@@ -154,31 +180,34 @@ phases:
   - phase: diffusion_patch_refine_finetune_hp
     n_trials: 10
     max_epochs: 20
-    patience: 4
-    pruner: none
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
     search_space: lr_eff_batch_univariate_ema
-    # Fine unique-seg often fits the probe cap even when coarse does not.
-    # PeMS/traffic never finished fine; both OOMed or cancelled at coarse=1.
-    batch_size_by_dataset:
-      ETTh1: 13
-      ETTh2: 13
-      ETTm1: 13
-      ETTm2: 13
-      exchange_rate: 13
-      weather: 13
-      electricity: 13
-      solar_Alabama: 13
-      PeMS: 1
-      traffic: 1
+    # L40S probe 5008723, headroom 0.85. max_fit hit search cap 256 on every
+    # dataset/stage (including traffic 862v coarse). usable = int(256*0.85)=217.
+    # HP grid is [1,2,4]× this U via grad accum. Enqueue injects 1× U (not 336).
+    max_univariate_micro_batch_by_dataset:
+      ETTh1: 217
+      ETTh2: 217
+      ETTm1: 217
+      ETTm2: 217
+      exchange_rate: 217
+      weather: 217
+      electricity: 217
+      solar_Alabama: 217
+      PeMS: 217
+      traffic: 217
+      illness: 217
+      dynamic: 217
     hp_lr_min: 7.817554354066733e-5
     hp_lr_max: 7.817554354066733e-3
-    target_univariate_batch: 256
-    effective_univariate_batch_grid: [128, 256, 512]
+    effective_univariate_batch_multipliers: [1, 2, 4]
     ema_decay: 0.995
     ema_decay_grid: [0.99, 0.995, 0.999]
     enqueue_trials:
       - learning_rate: 0.0007817554354066733
-        effective_univariate_batch: 256
         ema_decay: 0.995
     min_snr_gamma: 2.0
     binary_noise_schedule: linear
@@ -204,6 +233,7 @@ phases:
       weather: 1313
       solar_Alabama: 100
       PeMS: 50
+      dynamic: 1622
     n_samples: 1
     probabilistic_n_samples: 10
     tune_sampler: false
@@ -224,6 +254,8 @@ phases:
       electricity: 1
       PeMS: 1
       traffic: 1
+      illness: 5
+      dynamic: 5
     gmm_components: 10
     topk_max: 3
     skip_eval_visualizations: true
