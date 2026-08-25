@@ -1,0 +1,22 @@
+# Canvas128 unique-seg H=32 pretrain donor (width 6, col stride 5, DiT [8,6]).
+# Synthetic only — later p32 lr10 jobs set reuse_pretrain_from_config to this stem.
+# Do not reuse the p64x6 H=64 ckpt; that mismatches to_2d.bin_centers [64] vs [32].
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml
+replace_phases: true
+
+wandb:
+  tags: [canvas128, p32x6, pretrain, unique_seg, width6, stride5]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-p32x6-pretrain
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_pretrain
+  patch_refine_patch_height: 32
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    n_samples: 10000
+    epochs: 20
+    patience: 4
+    shared_cache: true
+    require_reuse_pretrain: false

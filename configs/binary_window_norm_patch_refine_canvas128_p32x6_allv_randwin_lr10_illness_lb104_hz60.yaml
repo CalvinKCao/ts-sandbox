@@ -1,0 +1,33 @@
+# p32 lr10 HP at PatchTST ILI lookback (104) and horizon 60 + 8 overlap.
+# Reuses the lb104/hz60 p32x6 pretrain donor. Illness only at submit time.
+# Split stays Dataset_Custom 70/10/20 (illness branch in _paper_split_borders).
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10.yaml
+
+geometry:
+  lookback_length: 104
+  forecast_length: 60
+  lookback_overlap: 8
+  diffusion_lookback_cap: 104
+  past_cond_resize_to_horizon: false
+  itrans_lookback_length: 104
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p32x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, from_pretrain, illness, lb104, hz60, overlap8]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-p32x6-allv-randwin-lr10-illness-lb104-hz60
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_illness_lb104_hz60
+  data_subset_by_dataset:
+    illness:
+      subset_id: illness_allv_randwin_lb104_hz60
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: binary_window_norm_patch_refine_canvas128_p32x6_lb104_hz60_pretrain
+    require_reuse_pretrain: true
+  - phase: staged_eval
+    eval_progress_key: canvas128_p32x6_illness_lb104_hz60_s1_n10_steps4

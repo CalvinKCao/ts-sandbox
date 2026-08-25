@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CPU smoke: single-worker Optuna journals and resumes COMPLETE trials only."""
+"""CPU smoke: Optuna journals; n_trials is a finished-attempt budget."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from optuna.exceptions import TrialPruned
 from optuna.trial import TrialState
 
 from models.diffusion_tsf.pipeline.optuna_parallel import (
-    remaining_complete_trials,
+    remaining_trial_attempts,
     run_optuna_study,
 )
 
@@ -34,33 +34,37 @@ def main() -> None:
 
             return objective
 
+        # Budget 3 attempts: 1 PRUNED + 2 COMPLETE, then stop (pruned counts).
         study = run_optuna_study(
             study_name="resume-smoke",
             checkpoint_dir=tmp,
-            n_trials=2,
+            n_trials=3,
             parallel_workers=1,
             direction="minimize",
             objective_builder=builder,
         )
-        assert remaining_complete_trials(study, 2) == 0
+        assert remaining_trial_attempts(study, 3) == 0
+        finished = sum(1 for t in study.trials if t.state.is_finished())
+        assert finished == 3
+        assert len(study.get_trials(states=(TrialState.PRUNED,))) == 1
         assert len(study.get_trials(states=(TrialState.COMPLETE,))) == 2
         first_calls = calls["n"]
-        assert first_calls >= 3  # one prune + two complete
+        assert first_calls == 3
 
-        # Second pass must not schedule more trials once the COMPLETE budget is met.
+        # Second pass must not schedule more once the attempt budget is met.
         study2 = run_optuna_study(
             study_name="resume-smoke",
             checkpoint_dir=tmp,
-            n_trials=2,
+            n_trials=3,
             parallel_workers=1,
             direction="minimize",
             objective_builder=builder,
         )
         assert calls["n"] == first_calls
-        assert remaining_complete_trials(study2, 2) == 0
+        assert remaining_trial_attempts(study2, 3) == 0
         assert study2.best_trial is not None
 
-    print("optuna resume journal smoke ok")
+    print("optuna attempt-budget resume smoke ok")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,22 @@
+# lr10 sibling: same search/subsets/fractions as p64x6, patch height 32.
+# DiT [8,6] still divides H=32. Use for datasets in the H=32 column of
+# temp/allv-randwin-lr10-context-handoff.md §5 (illness/dynamic included).
+# Electricity stays on the p64x6 lr10 leaf. Height does not fix traffic;
+# include traffic only because probe 5008723 coarse U>=1 after shared-ctx
+# (usable 217).
+# Pretrain donor is the H=32 stem, not p64x6 (H=64 bin_centers mismatch).
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10.yaml
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p32x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, from_pretrain]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-p32x6-allv-randwin-lr10
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10
+  patch_refine_patch_height: 32
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: binary_window_norm_patch_refine_canvas128_p32x6_pretrain
+    require_reuse_pretrain: true
+
