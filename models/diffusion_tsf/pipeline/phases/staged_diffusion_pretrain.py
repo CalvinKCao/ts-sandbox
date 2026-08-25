@@ -975,6 +975,16 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                 state.diffusion_coarse_pretrain_ckpt = ckpt
             elif stage == "patch_refine":
                 state.diffusion_patch_refine_pretrain_ckpt = ckpt
+            local_ckpt = _stage_pretrain_ckpt(state, stage)
+            if os.path.abspath(ckpt) != os.path.abspath(local_ckpt):
+                os.makedirs(os.path.dirname(local_ckpt), exist_ok=True)
+                shutil.copy2(ckpt, local_ckpt)
+                logger.info(
+                    "  [%s] %s copied pretrain to isolated donor path: %s",
+                    self.name,
+                    stage,
+                    local_ckpt,
+                )
 
         _log_staged_pretrain_diagnostics(
             state,
