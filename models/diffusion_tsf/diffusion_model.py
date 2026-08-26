@@ -283,11 +283,13 @@ class CoarseStageStrategy(DiffusionStageStrategy):
     name = "coarse"
 
     def forward(self, model, past, future, t, *, include_anchor: bool = True,
-                cross_variate_context=None, context_token_variate_ids=None, **_kwargs):
+                cross_variate_context=None, context_token_variate_ids=None,
+                univariate_row_index=None, **_kwargs):
         return model._forward_binary_coarse(
             past, future, t, include_anchor=include_anchor,
             cross_variate_context=cross_variate_context,
             context_token_variate_ids=context_token_variate_ids,
+            univariate_row_index=univariate_row_index,
         )
 
     def generate(self, model, past, **kwargs):
@@ -313,6 +315,7 @@ class PatchRefineStageStrategy(DiffusionStageStrategy):
         include_anchor: bool = True,
         cross_variate_context=None,
         context_token_variate_ids=None,
+        univariate_row_index=None,
         **_kwargs,
     ):
         return model._forward_binary_patch_refine(
@@ -321,6 +324,7 @@ class PatchRefineStageStrategy(DiffusionStageStrategy):
             include_anchor=include_anchor,
             cross_variate_context=cross_variate_context,
             context_token_variate_ids=context_token_variate_ids,
+            univariate_row_index=univariate_row_index,
         )
 
     def generate(self, model, past, **kwargs):
@@ -587,6 +591,58 @@ class DiffusionTSF(nn.Module):
         if ctx is None:
             return None
         return ctx.unsqueeze(1).expand(-1, V, -1, -1).reshape(B * V, ctx.shape[1], -1)
+
+    def _univariate_row_index(
+        self,
+        n_flat_rows: int,
+        device: torch.device,
+        univariate_row_index: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Select flattened ``B * V`` DiT rows; default is every row."""
+        if univariate_row_index is None:
+            return torch.arange(n_flat_rows, device=device)
+        idx = univariate_row_index.to(device=device, dtype=torch.long).reshape(-1)
+        if idx.numel() < 1:
+            raise ValueError("univariate_row_index is empty")
+        lo = int(idx.min().item())
+        hi = int(idx.max().item())
+        if lo < 0 or hi >= n_flat_rows:
+            raise ValueError(
+                f"univariate_row_index out of range [{lo}, {hi}] for n_flat={n_flat_rows}"
+            )
+        return idx
+
+    def _shared_ctx_for_factorized_dit(
+        self,
+        ctx: Optional[torch.Tensor],
+        n_windows: int,
+        n_variates: int,
+        device: torch.device,
+        row_index: Optional[torch.Tensor] = None,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Keep ctx ``(n_windows, M, D)``; index K/V via parent window ids."""
+        if ctx is None:
+            return None, None
+        indices = torch.arange(n_windows, device=device).repeat_interleave(n_variates)
+        if row_index is not None:
+            indices = indices.index_select(0, row_index)
+        return ctx, indices
+
+    def _cfg_dropout_shared_ctx(
+        self,
+        ctx: Optional[torch.Tensor],
+        n_windows: int,
+        device: torch.device,
+    ) -> Optional[torch.Tensor]:
+        """Zero entire parent windows. Live ``cfg_dropout`` is 0.0."""
+        if ctx is None or not self.training or self.config.cfg_dropout <= 0.0:
+            return ctx
+        drop_mask = torch.rand(n_windows, device=device) < self.config.cfg_dropout
+        return torch.where(
+            drop_mask.view(n_windows, 1, 1),
+            torch.zeros_like(ctx),
+            ctx,
+        )
 
     def _get_cross_variate_context(
         self,
@@ -1227,6 +1283,7 @@ class DiffusionTSF(nn.Module):
         include_anchor: bool = True,
         cross_variate_context: Optional[torch.Tensor] = None,
         context_token_variate_ids: Optional[torch.Tensor] = None,
+        univariate_row_index: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Training forward pass (binary factorized DiT path)."""
         return self.stage_strategy.forward(
@@ -1239,6 +1296,7 @@ class DiffusionTSF(nn.Module):
             include_anchor=include_anchor,
             cross_variate_context=cross_variate_context,
             context_token_variate_ids=context_token_variate_ids,
+            univariate_row_index=univariate_row_index,
         )
 
     @torch.no_grad()
@@ -1668,6 +1726,7 @@ class DiffusionTSF(nn.Module):
         patch_col0: Optional[torch.Tensor] = None,
         cross_variate_context: Optional[torch.Tensor] = None,
         context_token_variate_ids: Optional[torch.Tensor] = None,
+        univariate_row_index: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         """Build the graph-free tensors shared by regular and anchor losses."""
         from .patch_refine import (
@@ -1732,6 +1791,12 @@ class DiffusionTSF(nn.Module):
                 col_stride=col_stride,
             )
             layout = PatchLayout.from_locations(locations, device=device)
+
+        if univariate_row_index is not None:
+            row_index = self._univariate_row_index(B * V, device, univariate_row_index)
+            flat_ids = layout.batch_index * V + layout.variate_index
+            keep = torch.isin(flat_ids, row_index)
+            layout = layout.index_select(keep)
 
         target_patches = extract_patch_batch_layout(
             hir_gt, layout, patch_height=patch_h, patch_width=patch_w,
@@ -1825,9 +1890,11 @@ class DiffusionTSF(nn.Module):
         past: torch.Tensor,
         future: torch.Tensor,
         *,
+        t: Optional[torch.Tensor] = None,
         patch_col0: Optional[torch.Tensor] = None,
         cross_variate_context: Optional[torch.Tensor] = None,
         context_token_variate_ids: Optional[torch.Tensor] = None,
+        univariate_row_index: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         """Prepare one patch batch for separate regular/anchor backwards."""
         if self.stage_strategy.name != "patch_refine":
@@ -1835,9 +1902,12 @@ class DiffusionTSF(nn.Module):
         return self._prepare_binary_patch_refine(
             past,
             future,
+            t=t,
+            expand_t_per_window=t is not None,
             patch_col0=patch_col0,
             cross_variate_context=cross_variate_context,
             context_token_variate_ids=context_token_variate_ids,
+            univariate_row_index=univariate_row_index,
         )
 
     def patch_refine_loss_from_prepared(
@@ -1988,6 +2058,7 @@ class DiffusionTSF(nn.Module):
         include_anchor: bool = True,
         cross_variate_context: Optional[torch.Tensor] = None,
         context_token_variate_ids: Optional[torch.Tensor] = None,
+        univariate_row_index: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Train boundary-centered 32x8 patches on absolute hi-res CDF crops."""
         prepared = self._prepare_binary_patch_refine(
@@ -1998,6 +2069,7 @@ class DiffusionTSF(nn.Module):
             patch_col0=patch_col0,
             cross_variate_context=cross_variate_context,
             context_token_variate_ids=context_token_variate_ids,
+            univariate_row_index=univariate_row_index,
         )
         return self.patch_refine_loss_from_prepared(
             prepared,
@@ -2223,6 +2295,7 @@ class DiffusionTSF(nn.Module):
         include_anchor: bool = True,
         cross_variate_context: Optional[torch.Tensor] = None,
         context_token_variate_ids: Optional[torch.Tensor] = None,
+        univariate_row_index: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Train the coarse staged denoiser (patch_refine has its own forward)."""
         assert self.binary_scheduler is not None, "binary scheduler is not initialized"
@@ -2233,53 +2306,48 @@ class DiffusionTSF(nn.Module):
         H = self.config.image_height
         device = past.device
         BV = B * V
-        C_occ = self._occupancy_channels()
-        horizon_emb = self._horizon_chunk_emb_for_rows(t0, horizon, BV, n_variates=V)
+        row_index = self._univariate_row_index(BV, device, univariate_row_index)
+        n_rows = int(row_index.numel())
+        window_index = torch.div(row_index, V, rounding_mode="floor")
+        horizon_emb = self._horizon_chunk_emb_for_rows(
+            t0, horizon, n_rows, row_window_index=window_index,
+        )
 
         past_norm, future_norm, _stats = self._normalize_sequence(past, future)
         future_maps = self._encode_staged_maps(future_norm)
         target_2d = future_maps["coarse"]
         W_fut = target_2d.shape[3]
         H = target_2d.shape[2]
-        target_flat = target_2d.reshape(BV, 1, H, W_fut)
+        target_flat = target_2d.reshape(BV, 1, H, W_fut).index_select(0, row_index)
 
         if t is None:
             t = torch.randint(0, self.config.binary_num_steps, (B,), device=device)
-        t_flat = t.unsqueeze(1).expand(-1, V).reshape(BV)
+        t_flat = t.unsqueeze(1).expand(-1, V).reshape(BV).index_select(0, row_index)
         variate_indices = None
         if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
-            variate_indices = self._flat_variate_indices(BV, V, device)
+            variate_indices = (row_index % V)
 
         xt_flat, zt_flat = self.binary_scheduler.add_noise(target_flat, t_flat)
 
         ctx = self._resolve_cross_variate_context(
             past, past_norm, cross_variate_context, context_token_variate_ids,
         )
-        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
+        ctx_shared, context_window_indices = self._shared_ctx_for_factorized_dit(
+            ctx, B, V, device, row_index=row_index,
+        )
+        ctx_reg = self._cfg_dropout_shared_ctx(ctx_shared, B, device)
 
         cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
-
+        cond_for_unet = cond_for_unet.index_select(0, row_index)
         base_cond_for_unet = cond_for_unet
 
         canvas = self._inject_coordinate_channel(xt_flat.float())
         canvas = self._inject_time_channels(canvas)
 
-        # Staged visual conditioning is always GT during training. CFG dropout is
-        # restricted to context tokens so the fine stage never sees predicted coarse.
-        ctx_anchor = ctx_flat
-        if self.training and self.config.cfg_dropout > 0.0:
-            drop_mask = torch.rand(B, device=device) < self.config.cfg_dropout
-            drop_mask_flat = drop_mask.unsqueeze(1).expand(-1, V).reshape(BV)
-            if ctx_flat is not None:
-                ctx_flat = torch.where(
-                    drop_mask_flat.view(BV, 1, 1),
-                    torch.zeros_like(ctx_flat),
-                    ctx_flat,
-                )
-
         out_flat = self._predict_noise_chunked(
-            canvas, t_flat, cond_for_unet, ctx_flat,
+            canvas, t_flat, cond_for_unet, ctx_reg,
             variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+            context_window_indices=context_window_indices,
             horizon_chunk_emb=horizon_emb,
         )
         primary_logits, zt_logits = self._split_binary_heads(out_flat)
@@ -2295,7 +2363,7 @@ class DiffusionTSF(nn.Module):
         combined_loss = regular_loss
         if include_anchor and self.config.use_deterministic_anchor_loss:
             anchor_t_flat = torch.full(
-                (BV,),
+                (n_rows,),
                 self.config.binary_num_steps - 1,
                 device=device,
                 dtype=t_flat.dtype,
@@ -2307,8 +2375,9 @@ class DiffusionTSF(nn.Module):
                 anchor_canvas,
                 anchor_t_flat,
                 base_cond_for_unet,
-                ctx_anchor,
+                ctx_shared,
                 variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+                context_window_indices=context_window_indices,
                 horizon_chunk_emb=horizon_emb,
             )
             anchor_primary, _ = self._split_binary_heads(anchor_out_flat)
@@ -2321,7 +2390,9 @@ class DiffusionTSF(nn.Module):
             )
             combined_loss = self.loss_function.combine_anchor(regular_loss, anchor_loss)
 
-        x0_pred = torch.sigmoid(x0_logits).reshape(B, V, H, W_fut)
+        x0_full = torch.zeros(B, V, H, W_fut, device=device, dtype=x0_logits.dtype)
+        x0_full.view(BV, H, W_fut)[row_index] = torch.sigmoid(x0_logits).reshape(n_rows, H, W_fut)
+        x0_pred = x0_full
         result = {
             'loss': combined_loss,
             'noise_loss': regular_loss,
@@ -2387,7 +2458,9 @@ class DiffusionTSF(nn.Module):
             variate_indices = self._flat_variate_indices(BV, V, device)
 
         ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
-        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
+        ctx_shared, context_window_indices = self._shared_ctx_for_factorized_dit(
+            ctx, B, V, device,
+        )
 
         xt_flat, _ = self.binary_scheduler.add_noise(target_flat, t_flat)
         canvas = self._inject_coordinate_channel(xt_flat)
@@ -2395,8 +2468,9 @@ class DiffusionTSF(nn.Module):
 
         base_cond = cond_for_unet
         self._predict_noise_chunked(
-            canvas, t_flat, base_cond, ctx_flat,
+            canvas, t_flat, base_cond, ctx_shared,
             variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+            context_window_indices=context_window_indices,
             return_cross_attn_weights=capture_cross_attn,
             horizon_chunk_emb=self._horizon_chunk_emb_for_rows(t0, horizon, BV, n_variates=V),
         )
@@ -2476,7 +2550,9 @@ class DiffusionTSF(nn.Module):
             cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
 
             ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
-            ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
+            ctx_shared, context_window_indices = self._shared_ctx_for_factorized_dit(
+                ctx, B, V, device,
+            )
             variate_indices = None
             if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
                 variate_indices = self._flat_variate_indices(BV, V, device)
@@ -2488,8 +2564,9 @@ class DiffusionTSF(nn.Module):
 
             def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
                 out = self._predict_noise_chunked(
-                    _build_canvas(xt), t_batch, cond_for_unet, ctx_flat,
+                    _build_canvas(xt), t_batch, cond_for_unet, ctx_shared,
                     variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+                    context_window_indices=context_window_indices,
                     horizon_chunk_emb=horizon_emb,
                 )
                 primary, zt = self._split_binary_heads(out)
@@ -2608,8 +2685,10 @@ class DiffusionTSF(nn.Module):
         base_cond_for_unet = cond_for_unet
 
         ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
-        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
-        ctx_anchor = ctx_flat
+        ctx_shared, context_window_indices = self._shared_ctx_for_factorized_dit(
+            ctx, B, V, device,
+        )
+        ctx_reg = self._cfg_dropout_shared_ctx(ctx_shared, B, device)
 
         canvas = self._inject_coordinate_channel(xt_flat.float())
         canvas = self._inject_time_channels(canvas)
@@ -2622,16 +2701,12 @@ class DiffusionTSF(nn.Module):
                 torch.zeros_like(cond_for_unet),
                 cond_for_unet,
             )
-            if ctx_flat is not None:
-                ctx_flat = torch.where(
-                    drop_mask_flat.view(BV, 1, 1),
-                    torch.zeros_like(ctx_flat),
-                    ctx_flat,
-                )
 
 
         out_flat = self._predict_noise_chunked(
-            canvas, t_flat, cond_for_unet, ctx_flat, variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+            canvas, t_flat, cond_for_unet, ctx_reg,
+            variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+            context_window_indices=context_window_indices,
         )
 
         x0_logits = out_flat[:, 0:1, :, :]
@@ -2656,8 +2731,9 @@ class DiffusionTSF(nn.Module):
                 anchor_canvas,
                 anchor_t_flat,
                 base_cond_for_unet,
-                ctx_anchor,
+                ctx_shared,
                 variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+                context_window_indices=context_window_indices,
             )
             anchor_x0_logits = anchor_out_flat[:, 0:1, :, :]
             anchor_loss = self._binary_plain_bce_loss(anchor_x0_logits, future_flat)
@@ -2713,7 +2789,9 @@ class DiffusionTSF(nn.Module):
             cond_for_unet = past_flat
 
         ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
-        ctx_flat = self._flatten_ctx_for_factorized_dit(ctx, B, V)
+        ctx_shared, context_window_indices = self._shared_ctx_for_factorized_dit(
+            ctx, B, V, device,
+        )
         variate_indices = None
         if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
             variate_indices = self._flat_variate_indices(BV, V, device)
@@ -2726,7 +2804,9 @@ class DiffusionTSF(nn.Module):
         def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
             canvas = _build_canvas(xt)
             out = self._predict_noise_chunked(
-                canvas, t_batch, cond_for_unet, ctx_flat, variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+                canvas, t_batch, cond_for_unet, ctx_shared,
+                variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
+                context_window_indices=context_window_indices,
             )
             return out[:, 0:1], out[:, 1:2]
 
@@ -2796,20 +2876,24 @@ class DiffusionTSF(nn.Module):
         past: torch.Tensor,
         future: torch.Tensor,
         *,
+        t: Optional[torch.Tensor] = None,
         patch_col0: Optional[torch.Tensor] = None,
         loss_mode: str = "combined",
         include_anchor: bool = True,
         cross_variate_context: Optional[torch.Tensor] = None,
         context_token_variate_ids: Optional[torch.Tensor] = None,
+        univariate_row_index: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Convenience method to get just the loss for training."""
         outputs = self.forward(
             past,
             future,
+            t,
             patch_col0=patch_col0,
             loss_mode=loss_mode,
             include_anchor=include_anchor,
             cross_variate_context=cross_variate_context,
             context_token_variate_ids=context_token_variate_ids,
+            univariate_row_index=univariate_row_index,
         )
         return outputs["loss"]

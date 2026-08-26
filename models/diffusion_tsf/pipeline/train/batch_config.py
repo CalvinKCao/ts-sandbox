@@ -26,32 +26,44 @@ def configured_phase_micro_batch(
     smoke_test: bool,
     phase_overrides: Optional[Mapping[str, Any]] = None,
 ) -> int:
-    """Phase micro-batch ceiling: per-dataset probe dump, else training YAML.
+    """Phase micro-batch ceiling: per-dataset U map, else window-unit YAML.
 
-    ``batch_size_by_dataset`` is the usable window batch after the old GPU
-    probe (max_fit * headroom). ``lr_only`` still splits that ceiling against
-    ``target_univariate_batch``. Mutually exclusive with
+    ``max_univariate_micro_batch_by_dataset`` is max univariate DiT rows (U)
+    that fit one fwd+bwd. ``batch_size_by_dataset`` is the older window-unit
+    map. The two cannot be set together. Mutually exclusive with
     ``probe_train_batch_size``.
     """
     overrides = dict(phase_overrides or {})
-    if bool(overrides.get("probe_train_batch_size", False)) and overrides.get(
-        "batch_size_by_dataset"
-    ):
+    u_by_ds = overrides.get("max_univariate_micro_batch_by_dataset")
+    by_ds = overrides.get("batch_size_by_dataset")
+    if u_by_ds is not None and by_ds is not None:
+        raise ValueError(
+            "max_univariate_micro_batch_by_dataset and batch_size_by_dataset "
+            "cannot both be set"
+        )
+    if bool(overrides.get("probe_train_batch_size", False)) and by_ds:
         raise ValueError(
             "probe_train_batch_size and batch_size_by_dataset cannot both be set"
         )
-    by_ds = overrides.get("batch_size_by_dataset")
-    if by_ds is not None:
-        if not isinstance(by_ds, dict) or not by_ds:
+    if bool(overrides.get("probe_train_batch_size", False)) and u_by_ds:
+        raise ValueError(
+            "probe_train_batch_size and max_univariate_micro_batch_by_dataset "
+            "cannot both be set"
+        )
+    chosen = u_by_ds if u_by_ds is not None else by_ds
+    key_name = (
+        "max_univariate_micro_batch_by_dataset"
+        if u_by_ds is not None
+        else "batch_size_by_dataset"
+    )
+    if chosen is not None:
+        if not isinstance(chosen, dict) or not chosen:
+            raise ValueError(f"{key_name} must be a non-empty dataset -> int map")
+        if state.dataset not in chosen:
             raise ValueError(
-                "batch_size_by_dataset must be a non-empty dataset -> int map"
+                f"{key_name} missing {state.dataset!r}; have {sorted(chosen)}"
             )
-        if state.dataset not in by_ds:
-            raise ValueError(
-                f"batch_size_by_dataset missing {state.dataset!r}; "
-                f"have {sorted(by_ds)}"
-            )
-        bs = max(1, int(by_ds[state.dataset]))
+        bs = max(1, int(chosen[state.dataset]))
         if smoke_test:
             return max(1, min(2, bs))
         return bs

@@ -43,6 +43,10 @@ from models.diffusion_tsf.pipeline.train.batch_config import (
     configured_max_diffusion_batch,
     configured_phase_micro_batch,
 )
+from models.diffusion_tsf.pipeline.train.univariate_microbatch import (
+    dataloader_windows_for_univariate_rows,
+    require_probed_univariate_u,
+)
 from models.diffusion_tsf.pipeline.train.checkpointing import (
     EarlyStopping,
     ensure_checkpoint_dir,
@@ -138,7 +142,7 @@ def _unpack_patch_refine_batch(batch):
 
 
 
-def _probe_max_finetune_batch_size(
+def _probe_max_univariate_micro_batch(
     *,
     model,
     lookback: int,
@@ -150,23 +154,26 @@ def _probe_max_finetune_batch_size(
     min_bs: int = 1,
     max_bs: int = 16,
     headroom: float = 0.85,
-) -> int:
-    """Largest window batch that fits one train forward+backward on this GPU."""
+) -> Dict[str, int]:
+    """Largest univariate row count U that fits one train forward+backward."""
     if device.type != "cuda":
-        raise RuntimeError("probe_train_batch_size=true requires CUDA")
+        raise RuntimeError("univariate micro-batch probe requires CUDA")
     fut_w = int(horizon) + int(overlap)
     patch_w = int(getattr(model.config, "patch_refine_patch_width", 8))
     unique = bool(getattr(model.config, "patch_refine_unique_segments", False))
+    n_variates = max(1, int(n_variates))
 
-    def _fits(bs: int) -> bool:
-        past = torch.randn(bs, n_variates, lookback, device=device)
-        future = torch.randn(bs, n_variates, fut_w, device=device)
+    def _fits(u: int) -> bool:
+        n_win = dataloader_windows_for_univariate_rows(u, n_variates)
+        past = torch.randn(n_win, n_variates, lookback, device=device)
+        future = torch.randn(n_win, n_variates, fut_w, device=device)
+        row_index = torch.arange(int(u), device=device)
         patch_col0 = None
         if stage == "patch_refine" and unique:
             max_c0 = max(0, fut_w - patch_w)
-            patch_col0 = torch.zeros(bs, device=device, dtype=torch.long)
+            patch_col0 = torch.zeros(n_win, device=device, dtype=torch.long)
             if max_c0 > 0:
-                patch_col0 = torch.randint(0, max_c0 + 1, (bs,), device=device)
+                patch_col0 = torch.randint(0, max_c0 + 1, (n_win,), device=device)
         try:
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats(device)
@@ -174,6 +181,7 @@ def _probe_max_finetune_batch_size(
             model.zero_grad(set_to_none=True)
             loss = model.get_loss(
                 past, future, patch_col0=patch_col0, include_anchor=True,
+                univariate_row_index=row_index,
             )
             loss.backward()
             model.zero_grad(set_to_none=True)
@@ -181,8 +189,6 @@ def _probe_max_finetune_batch_size(
             return True
         except RuntimeError as exc:
             err = str(exc).lower()
-            # CheckpointError from unique-seg + gradient checkpointing in the
-            # probe is a "does not fit" signal, not a config bug.
             if (
                 "out of memory" not in err
                 and "checkpoint" not in err
@@ -195,10 +201,10 @@ def _probe_max_finetune_batch_size(
     hi = max(lo, int(max_bs))
     if not _fits(lo):
         logger.warning(
-            "finetune batch probe: min_bs=%d already OOMs; falling back to 1", lo,
+            "finetune U probe: min_u=%d already OOMs; max_fit=0 usable=0", lo,
         )
         torch.cuda.empty_cache()
-        return 1
+        return {"max_fit": 0, "usable": 0}
     best = lo
     cand = lo
     while cand * 2 <= hi and _fits(cand * 2):
@@ -214,13 +220,43 @@ def _probe_max_finetune_batch_size(
     best = left
     usable = max(1, int(best * float(headroom)))
     logger.info(
-        "finetune batch probe: max_fit=%d headroom=%.2f -> batch_size=%d",
+        "finetune U probe: max_fit=%d headroom=%.2f -> U=%d",
         best,
         headroom,
         usable,
     )
     torch.cuda.empty_cache()
-    return usable
+    return {"max_fit": int(best), "usable": int(usable)}
+
+
+def _probe_max_finetune_batch_size(
+    *,
+    model,
+    lookback: int,
+    horizon: int,
+    overlap: int,
+    n_variates: int,
+    device: torch.device,
+    stage: str,
+    min_bs: int = 1,
+    max_bs: int = 16,
+    headroom: float = 0.85,
+) -> int:
+    """Usable univariate micro-batch U after headroom (legacy int return)."""
+    return int(
+        _probe_max_univariate_micro_batch(
+            model=model,
+            lookback=lookback,
+            horizon=horizon,
+            overlap=overlap,
+            n_variates=n_variates,
+            device=device,
+            stage=stage,
+            min_bs=min_bs,
+            max_bs=max_bs,
+            headroom=headroom,
+        )["usable"]
+    )
 
 
 def _log_gpu_mem(tag: str) -> None:
@@ -425,56 +461,104 @@ def _plan_univariate_effective_batch(
     target_univariate: int,
     smoke_test: bool = False,
 ) -> Dict[str, int]:
-    """Map univariate effective batch U=B_windows*C to micro-window + grad-accum.
+    """Map target univariate batch U to micro-U + grad-accum.
 
-    DataLoader ``batch_size`` stays multivariate windows; UNet tokens are B*C.
+    ``probed_max_windows`` is the max univariate row count that fits one
+    fwd+bwd (legacy kwarg name). ``batch_size`` is that micro U, not window B.
     """
     n_variates = max(1, int(n_variates))
-    probed_max_windows = max(1, int(probed_max_windows))
-    target_u = max(n_variates, int(target_univariate))
-    # Snap down to a multiple of C so U == window_eff * C exactly.
-    window_eff = max(1, target_u // n_variates)
-    actual_u = window_eff * n_variates
+    probed_u = max(1, int(probed_max_windows))
+    target_u = max(1, int(target_univariate))
     if smoke_test:
-        window_eff = min(window_eff, max(1, min(2, probed_max_windows)))
-        actual_u = window_eff * n_variates
+        micro = min(probed_u, target_u, 2)
         return {
-            "batch_size": window_eff,
+            "batch_size": micro,
             "gradient_accumulation_steps": 1,
-            "effective_batch_size": window_eff,
-            "effective_univariate_batch": actual_u,
+            "effective_batch_size": micro,
+            "effective_univariate_batch": micro,
             "target_univariate_batch": int(target_univariate),
+            "univariate_row_micro_batch": True,
+            "dataloader_windows": dataloader_windows_for_univariate_rows(micro, n_variates),
         }
 
-    plan = resolve_target_effective_batch(
-        probed_max_windows,
-        window_eff,
-        lo=1,
-        hi=max(window_eff, probed_max_windows),
-    )
-    # If planner could not reach window_eff (rare), force accum.
-    got = int(plan["effective_batch_size"])
-    if got != window_eff:
-        micro = min(probed_max_windows, window_eff)
-        accum = max(1, math.ceil(window_eff / micro))
-        if micro * accum < window_eff:
-            accum += 1
-        # Prefer exact product when possible
-        while micro * accum > window_eff and micro > 1:
-            micro -= 1
-            accum = max(1, math.ceil(window_eff / micro))
-        if micro * accum != window_eff:
-            # Fall back to closest under target
-            accum = max(1, window_eff // max(1, micro))
-            micro = min(probed_max_windows, max(1, window_eff // accum))
-        plan = {
-            "batch_size": micro,
-            "gradient_accumulation_steps": accum,
-            "effective_batch_size": micro * accum,
-        }
-    plan["effective_univariate_batch"] = int(plan["effective_batch_size"]) * n_variates
-    plan["target_univariate_batch"] = int(target_univariate)
-    return plan
+    micro = min(probed_u, target_u)
+    accum = max(1, math.ceil(target_u / micro))
+    actual_u = micro * accum
+    return {
+        "batch_size": micro,
+        "gradient_accumulation_steps": accum,
+        "effective_batch_size": actual_u,
+        "effective_univariate_batch": actual_u,
+        "target_univariate_batch": target_u,
+        "univariate_row_micro_batch": True,
+        "dataloader_windows": dataloader_windows_for_univariate_rows(micro, n_variates),
+    }
+
+
+def _effective_univariate_batch_grid(
+    state: PipelineState,
+    phase_overrides: Dict[str, Any],
+) -> Tuple[list[int], Optional[int]]:
+    """Return (grid, probed_U or None). Grid is [U, 2U, 4U] when multipliers are set."""
+    multipliers = phase_overrides.get("effective_univariate_batch_multipliers")
+    raw_grid = phase_overrides.get("effective_univariate_batch_grid")
+    if multipliers is not None and raw_grid is not None:
+        raise ValueError(
+            "cannot set both effective_univariate_batch_grid and "
+            "effective_univariate_batch_multipliers"
+        )
+    if multipliers is not None:
+        by_u = phase_overrides.get("max_univariate_micro_batch_by_dataset")
+        if not isinstance(by_u, dict) or not by_u:
+            raise ValueError(
+                "effective_univariate_batch_multipliers requires "
+                "max_univariate_micro_batch_by_dataset"
+            )
+        if state.dataset not in by_u:
+            raise ValueError(
+                f"max_univariate_micro_batch_by_dataset missing {state.dataset!r}; "
+                f"have {sorted(by_u)}"
+            )
+        probed_u = require_probed_univariate_u(by_u[state.dataset], dataset=state.dataset)
+        grid = sorted({max(1, int(m)) * probed_u for m in multipliers})
+        if not grid:
+            raise ValueError("effective_univariate_batch_multipliers is empty")
+        return grid, probed_u
+    if not raw_grid:
+        raise ValueError(
+            "search_space=lr_eff_batch_univariate requires "
+            "effective_univariate_batch_grid or effective_univariate_batch_multipliers"
+        )
+    grid = sorted({int(x) for x in raw_grid})
+    if not grid:
+        raise ValueError("effective_univariate_batch_grid is empty")
+    return grid, None
+
+
+def _resolved_enqueue_trials(
+    phase_overrides: Dict[str, Any],
+    state: PipelineState,
+) -> Optional[List[Dict[str, Any]]]:
+    """Rewrite donor enqueue so 1x U is per-dataset, not a hardcoded 336."""
+    trials = phase_overrides.get("enqueue_trials")
+    if not trials:
+        return trials
+    multipliers = phase_overrides.get("effective_univariate_batch_multipliers")
+    by_u = phase_overrides.get("max_univariate_micro_batch_by_dataset")
+    if not multipliers or not isinstance(by_u, dict):
+        return trials
+    if state.dataset not in by_u:
+        raise ValueError(
+            f"max_univariate_micro_batch_by_dataset missing {state.dataset!r}; "
+            f"have {sorted(by_u)}"
+        )
+    probed_u = require_probed_univariate_u(by_u[state.dataset], dataset=state.dataset)
+    out = []
+    for trial_params in trials:
+        row = dict(trial_params)
+        row["effective_univariate_batch"] = probed_u
+        out.append(row)
+    return out
 
 
 def _suggest_lr_eff_batch_univariate(
@@ -484,24 +568,17 @@ def _suggest_lr_eff_batch_univariate(
     smoke_test: bool,
     phase_overrides: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Tune LR + effective univariate batch (U=B*C); other diffusion HP fixed."""
+    """Tune LR + effective univariate batch (U rows); other diffusion HP fixed."""
     lr_min = float(phase_overrides["hp_lr_min"])
     lr_max = float(phase_overrides["hp_lr_max"])
-    raw_grid = phase_overrides.get("effective_univariate_batch_grid")
-    if not raw_grid:
-        raise ValueError(
-            "search_space=lr_eff_batch_univariate requires "
-            "effective_univariate_batch_grid in phase YAML"
-        )
-    grid = sorted({int(x) for x in raw_grid})
-    if not grid:
-        raise ValueError("effective_univariate_batch_grid is empty")
+    grid, probed_u = _effective_univariate_batch_grid(state, phase_overrides)
 
     n_vars = _n_variates_for_batch(state)
     base_ms = float(state.max_scale_by_dataset.get(state.dataset, state.max_scale))
     target_u = int(trial.suggest_categorical("effective_univariate_batch", grid))
+    plan_ceiling = int(probed_u) if probed_u is not None else int(max_batch_size)
     batch_plan = _plan_univariate_effective_batch(
-        probed_max_windows=max_batch_size,
+        probed_max_windows=plan_ceiling,
         n_variates=n_vars,
         target_univariate=target_u,
         smoke_test=smoke_test,
@@ -515,6 +592,8 @@ def _suggest_lr_eff_batch_univariate(
         "effective_batch_size": int(batch_plan["effective_batch_size"]),
         "effective_univariate_batch": int(batch_plan["effective_univariate_batch"]),
         "target_univariate_batch": int(batch_plan["target_univariate_batch"]),
+        "univariate_row_micro_batch": True,
+        "dataloader_windows": int(batch_plan["dataloader_windows"]),
         "ema_decay": float(phase_overrides.get("ema_decay", 0.995)),
         "binary_noise_schedule": str(phase_overrides.get("binary_noise_schedule", "linear")),
         "loss_weighting": str(phase_overrides.get("loss_weighting", "min_snr")),
@@ -886,9 +965,7 @@ def _build_fixed_hp_params(
             params["batch_size"] = min(int(params.get("batch_size", 1)), 2)
             params["gradient_accumulation_steps"] = 1
             params["effective_batch_size"] = int(params["batch_size"])
-            params["effective_univariate_batch"] = (
-                int(params["batch_size"]) * _n_variates_for_batch(state)
-            )
+            params["effective_univariate_batch"] = int(params["batch_size"])
         return params
 
     if "batch_size" in params:
@@ -1284,10 +1361,12 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
         if pruner_name == "median":
             return MedianPruner(
                 n_startup_trials=int(self.get("pruner_n_startup_trials", 2)),
+                n_warmup_steps=int(self.get("pruner_n_warmup_steps", 0)),
             )
         if pruner_name == "hyperband":
             return HyperbandPruner(
-                min_resource=1, max_resource=max_epochs, reduction_factor=3,
+                min_resource=int(self.get("pruner_n_warmup_steps", 1)),
+                max_resource=max_epochs, reduction_factor=3,
             )
         raise ValueError(
             f"{self.name}: unknown pruner={pruner_name!r} "
@@ -1586,15 +1665,24 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         params["batch_size"] = int(probed)
                         params["gradient_accumulation_steps"] = 1
                         params["effective_batch_size"] = int(probed)
-                        params["effective_univariate_batch"] = int(probed) * n_iv
+                        params["effective_univariate_batch"] = int(probed)
                         batch_size = int(probed)
 
             trial_seed = int(state.seed)
             if trial is not None:
                 trial_seed = trial_seed + 17 * int(trial.number)
+            u_micro = int(params["batch_size"])
+            use_u_rows = bool(params.get("univariate_row_micro_batch")) or (
+                self.get("max_univariate_micro_batch_by_dataset") is not None
+            )
+            loader_bs = (
+                dataloader_windows_for_univariate_rows(u_micro, n_iv)
+                if use_u_rows
+                else u_micro
+            )
             train_loader, n_groups, window_nbytes, group_nbytes = make_grouped_train_loader(
                 train_ds,
-                batch_size=batch_size,
+                batch_size=loader_bs,
                 n_groups=n_groups_cfg,
                 seed=trial_seed,
                 max_bytes=max_bytes,
@@ -1605,19 +1693,19 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 smoke_test=bool(state.smoke_test),
             )
             val_loader = DataLoader(
-                val_ds, batch_size=batch_size, shuffle=False, num_workers=0,
+                val_ds, batch_size=loader_bs, shuffle=False, num_workers=0,
             )
             if len(train_loader) == 0:
                 raise ValueError(
                     f"{self.stage} train set has {len(train_ds)} windows, "
-                    f"smaller than batch_size={batch_size}"
+                    f"smaller than dataloader_windows={loader_bs}"
                 )
             logger.info(
-                "  [%s/%s] %s START epochs=%d patience=%d lr=%.2e bs=%d accum=%d "
+                "  [%s/%s] %s START epochs=%d patience=%d lr=%.2e U=%d windows=%d accum=%d "
                 "train_epoch_groups=%d train_n=%d train_batches=%d val_batches=%d "
                 "window_bytes=%s group_bytes=%s g=%s",
                 self.name, self.stage, trial_label, max_epochs, patience,
-                float(params["learning_rate"]), batch_size,
+                float(params["learning_rate"]), u_micro, loader_bs,
                 int(params.get("gradient_accumulation_steps", 1)),
                 n_groups, len(train_ds), len(train_loader), len(val_loader),
                 window_nbytes, group_nbytes,
@@ -1647,13 +1735,13 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     n_cache += count_cache_windows(train_ds)
                 token_cache.reserve(n_cache)
                 if stable_train:
-                    token_cache.precompute_dataset(train_ds, batch_size=batch_size)
+                    token_cache.precompute_dataset(train_ds, batch_size=loader_bs)
                 else:
                     logger.info(
                         "  [%s/%s] train token cache disabled: train-window augmentation changes past inputs",
                         self.name, self.stage,
                     )
-                token_cache.precompute_dataset(val_ds, batch_size=batch_size)
+                token_cache.precompute_dataset(val_ds, batch_size=loader_bs)
                 token_cache.release_encoder()
                 self._phase_token_cache = token_cache
                 self._phase_cache_train_enabled = stable_train
@@ -1743,6 +1831,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 train_token_cache=train_token_cache,
                 val_token_cache=token_cache,
                 log_prefix=f"{self.name}/{self.stage}/{trial_label}",
+                univariate_micro_batch=u_micro if use_u_rows else None,
             )
             early_stopping = EarlyStopping(patience=patience)
             if resume_state is not None:
@@ -2152,7 +2241,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 "lr_eff_batch_univariate_ema",
                 "lr_eff_batch_g",
             }:
-                required = ["hp_lr_min", "hp_lr_max", "effective_univariate_batch_grid"]
+                required = ["hp_lr_min", "hp_lr_max"]
                 if search_space == "lr_eff_batch_univariate_ema":
                     required.append("ema_decay_grid")
                 for key in required:
@@ -2160,6 +2249,20 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                         raise ValueError(
                             f"search_space={search_space} requires phase {key}"
                         )
+                has_grid = self.get("effective_univariate_batch_grid") is not None
+                has_mult = self.get("effective_univariate_batch_multipliers") is not None
+                if has_grid and has_mult:
+                    raise ValueError(
+                        f"search_space={search_space} cannot set both "
+                        "effective_univariate_batch_grid and "
+                        "effective_univariate_batch_multipliers"
+                    )
+                if not has_grid and not has_mult:
+                    raise ValueError(
+                        f"search_space={search_space} requires "
+                        "effective_univariate_batch_grid or "
+                        "effective_univariate_batch_multipliers"
+                    )
             if search_space == "fixed" and not (
                 self.get("fixed_tuned_params") or self.get("fixed_tuned_params_by_dataset")
             ):
@@ -2381,7 +2484,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     pruner=pruner,
                     sampler_seed=state.seed,
                     callbacks=[_retain_complete_trial_ckpts],
-                    enqueue_trials=self.get("enqueue_trials"),
+                    enqueue_trials=_resolved_enqueue_trials(self.overrides, state),
                 )
                 try:
                     best_trial = study.best_trial

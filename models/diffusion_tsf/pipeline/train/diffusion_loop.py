@@ -11,6 +11,11 @@ import torch
 from torch.utils.data import DataLoader, Sampler
 
 from models.diffusion_tsf.pipeline.train.checkpointing import amp_context
+from models.diffusion_tsf.pipeline.train.univariate_microbatch import (
+    iter_flat_row_slices,
+    loss_scale_for_rows,
+    next_row_take,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +420,7 @@ class DiffusionTrainer:
         train_token_cache=None,
         val_token_cache=None,
         log_prefix: str = "diffusion",
+        univariate_micro_batch: Optional[int] = None,
     ) -> None:
         self.model = model
         self.train_loader = train_loader
@@ -435,6 +441,9 @@ class DiffusionTrainer:
         if self.deterministic_anchor_every_n_batches < 1:
             raise ValueError("deterministic_anchor_every_n_batches must be >= 1")
         self.log_prefix = log_prefix
+        self.univariate_micro_batch = (
+            None if univariate_micro_batch is None else max(1, int(univariate_micro_batch))
+        )
 
     @staticmethod
     def _unpack_standard_batch(batch):
@@ -450,6 +459,27 @@ class DiffusionTrainer:
             patch_col0 = patch_col0.to(self.device)
         return past, future, patch_col0, cache_key_past
 
+    def _opt_target_rows(self) -> Optional[int]:
+        if self.univariate_micro_batch is None:
+            return None
+        return int(self.univariate_micro_batch) * int(self.accum_steps)
+
+    def _sample_window_timesteps(self, n_windows: int) -> torch.Tensor:
+        n_steps = int(self.model.config.binary_num_steps)
+        if n_steps < 1:
+            raise ValueError(f"binary_num_steps must be >= 1, got {n_steps}")
+        return torch.randint(0, n_steps, (int(n_windows),), device=self.device)
+
+    def _row_slices_for_past(self, past: torch.Tensor):
+        if self.univariate_micro_batch is None:
+            yield None
+            return
+        n_windows, n_variates = int(past.shape[0]), int(past.shape[1])
+        for start, end in iter_flat_row_slices(
+            n_windows, n_variates, self.univariate_micro_batch,
+        ):
+            yield torch.arange(start, end, device=self.device)
+
     def _loss_from_inputs(
         self,
         inputs,
@@ -458,6 +488,8 @@ class DiffusionTrainer:
         include_anchor: bool = True,
         scale_for_accumulation: bool,
         token_cache=None,
+        univariate_row_index=None,
+        t=None,
     ) -> torch.Tensor:
         past, future, patch_col0, cache_key_past = inputs
         cached = token_cache.get(cache_key_past) if token_cache is not None else None
@@ -465,11 +497,13 @@ class DiffusionTrainer:
             loss = self.model.get_loss(
                 past,
                 future,
+                t=t,
                 patch_col0=patch_col0,
                 loss_mode=loss_mode,
                 include_anchor=include_anchor,
                 cross_variate_context=None if cached is None else cached.tokens,
                 context_token_variate_ids=None if cached is None else cached.token_variate_ids,
+                univariate_row_index=univariate_row_index,
             )
         return loss / self.accum_steps if scale_for_accumulation else loss
 
@@ -480,13 +514,140 @@ class DiffusionTrainer:
         include_anchor: bool = True,
         scale_for_accumulation: bool,
         token_cache=None,
+        univariate_row_index=None,
+        t=None,
     ) -> torch.Tensor:
         return self._loss_from_inputs(
             self._inputs_from_batch(batch),
             include_anchor=include_anchor,
             scale_for_accumulation=scale_for_accumulation,
             token_cache=token_cache,
+            univariate_row_index=univariate_row_index,
+            t=t,
         )
+
+    def _optimizer_step(self) -> None:
+        if self.clip_grad is not None:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
+        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        if self.ema is not None:
+            self.ema.update(self.model)
+
+    def _backward_slice(
+        self,
+        inputs,
+        *,
+        row_index,
+        t,
+        include_anchor: bool,
+        scale: float,
+    ) -> float:
+        """Backward one row-slice; return unscaled mean loss for logging."""
+        past, future, patch_col0, cache_key_past = inputs
+        if (
+            self.sequential_anchor_backward
+            and bool(self.model.config.use_deterministic_anchor_loss)
+            and include_anchor
+            and self.model.stage_strategy.name == "patch_refine"
+            and not self._has_trainable_context_encoder()
+        ):
+            with amp_context(bool(self.model.config.use_amp)):
+                prepared = self.model.prepare_patch_refine_loss_inputs(
+                    past,
+                    future,
+                    t=t,
+                    patch_col0=patch_col0,
+                    cross_variate_context=(self.train_token_cache.get(cache_key_past).tokens
+                                            if self.train_token_cache is not None else None),
+                    context_token_variate_ids=(self.train_token_cache.get(cache_key_past).token_variate_ids
+                                               if self.train_token_cache is not None else None),
+                    univariate_row_index=row_index,
+                )
+                cpu_model_rng_state = torch.get_rng_state()
+                cuda_model_rng_state = (
+                    torch.cuda.get_rng_state(self.device)
+                    if self.device.type == "cuda"
+                    else None
+                )
+                regular_loss = self.model.patch_refine_loss_from_prepared(
+                    prepared,
+                    loss_mode="regular",
+                )["loss"]
+            anchor_weight = 1.0 - float(self.model.config.deterministic_anchor_lambda)
+            regular_weight = float(self.model.config.deterministic_anchor_lambda)
+            (regular_loss * regular_weight * scale).backward()
+            regular_value = float(regular_loss.detach().item())
+            del regular_loss
+
+            torch.set_rng_state(cpu_model_rng_state)
+            if cuda_model_rng_state is not None:
+                torch.cuda.set_rng_state(cuda_model_rng_state, self.device)
+            with amp_context(bool(self.model.config.use_amp)):
+                anchor_loss = self.model.patch_refine_loss_from_prepared(
+                    prepared,
+                    loss_mode="anchor",
+                )["loss"]
+            (anchor_loss * anchor_weight * scale).backward()
+            unscaled = regular_weight * regular_value + anchor_weight * float(
+                anchor_loss.detach().item()
+            )
+            del anchor_loss, prepared
+            return unscaled
+        if (
+            self.sequential_anchor_backward
+            and bool(self.model.config.use_deterministic_anchor_loss)
+            and include_anchor
+        ):
+            cpu_rng_state = torch.get_rng_state()
+            cuda_rng_state = (
+                torch.cuda.get_rng_state(self.device)
+                if self.device.type == "cuda"
+                else None
+            )
+            regular_loss = self._loss_from_inputs(
+                inputs,
+                loss_mode="regular",
+                scale_for_accumulation=False,
+                token_cache=self.train_token_cache,
+                univariate_row_index=row_index,
+                t=t,
+            )
+            anchor_weight = 1.0 - float(self.model.config.deterministic_anchor_lambda)
+            regular_weight = float(self.model.config.deterministic_anchor_lambda)
+            (regular_loss * regular_weight * scale).backward()
+            regular_value = float(regular_loss.detach().item())
+            del regular_loss
+
+            torch.set_rng_state(cpu_rng_state)
+            if cuda_rng_state is not None:
+                torch.cuda.set_rng_state(cuda_rng_state, self.device)
+            anchor_loss = self._loss_from_inputs(
+                inputs,
+                loss_mode="anchor",
+                scale_for_accumulation=False,
+                token_cache=self.train_token_cache,
+                univariate_row_index=row_index,
+                t=t,
+            )
+            (anchor_loss * anchor_weight * scale).backward()
+            unscaled = regular_weight * regular_value + anchor_weight * float(
+                anchor_loss.detach().item()
+            )
+            del anchor_loss
+            return unscaled
+        loss = self._loss_from_inputs(
+            inputs,
+            include_anchor=include_anchor,
+            scale_for_accumulation=False,
+            token_cache=self.train_token_cache,
+            univariate_row_index=row_index,
+            t=t,
+        )
+        (loss * scale).backward()
+        unscaled = float(loss.detach().item())
+        del loss
+        return unscaled
 
     def _has_trainable_context_encoder(self) -> bool:
         context_encoder = getattr(self.model, "context_encoder", None)
@@ -500,147 +661,91 @@ class DiffusionTrainer:
         self.model.train()
         if self.set_loader_mode is not None:
             self.set_loader_mode(self.model, self.train_loader, eval_mode=False)
-        total_loss = 0.0
-        n_batches = 0
+        weighted_loss = 0.0
+        n_loss_units = 0
         n_train_batches = len(self.train_loader)
         log_stride = max(1, n_train_batches // 4)
         started = time.perf_counter()
         self.optimizer.zero_grad(set_to_none=True)
+        target_rows = self._opt_target_rows()
+        gpu_u = self.univariate_micro_batch
+        rows_in_step = 0
+        logical_u_idx = 0
+        micro_idx = 0
+        use_det = bool(self.model.config.use_deterministic_anchor_loss)
+        every_n = self.deterministic_anchor_every_n_batches
         for batch_idx, batch in enumerate(self.train_loader):
-            include_anchor = (
-                not bool(self.model.config.use_deterministic_anchor_loss)
-                or batch_idx % self.deterministic_anchor_every_n_batches == 0
-            )
             if batch_idx == 0 or (batch_idx + 1) % log_stride == 0 or batch_idx + 1 == n_train_batches:
                 logger.info(
                     "  [%s] epoch %d/%d train_batch %d/%d",
                     self.log_prefix, epoch + 1, max_epochs, batch_idx + 1, n_train_batches,
                 )
-            if (
-                self.sequential_anchor_backward
-                and bool(self.model.config.use_deterministic_anchor_loss)
-                and include_anchor
-                and self.model.stage_strategy.name == "patch_refine"
-                and not self._has_trainable_context_encoder()
-            ):
-                inputs = self._inputs_from_batch(batch)
-                past, future, patch_col0, cache_key_past = inputs
-                # Crop selection, diffusion noise, frozen guidance tokens, and
-                # conditioning are identical for both backwards. Preparing them
-                # once leaves the RNG at the same state as the prior replay path.
-                with amp_context(bool(self.model.config.use_amp)):
-                    prepared = self.model.prepare_patch_refine_loss_inputs(
-                        past,
-                        future,
-                        patch_col0=patch_col0,
-                        cross_variate_context=(self.train_token_cache.get(cache_key_past).tokens
-                                                if self.train_token_cache is not None else None),
-                        context_token_variate_ids=(self.train_token_cache.get(cache_key_past).token_variate_ids
-                                                   if self.train_token_cache is not None else None),
-                    )
-                    # Reuse the prepared inputs, but replay stochastic denoiser
-                    # layers so this remains algebraically identical to the old
-                    # prepare-and-replay path when DiT dropout is enabled.
-                    cpu_model_rng_state = torch.get_rng_state()
-                    cuda_model_rng_state = (
-                        torch.cuda.get_rng_state(self.device)
-                        if self.device.type == "cuda"
-                        else None
-                    )
-                    regular_loss = self.model.patch_refine_loss_from_prepared(
-                        prepared,
-                        loss_mode="regular",
-                    )["loss"]
-                anchor_weight = 1.0 - float(self.model.config.deterministic_anchor_lambda)
-                regular_weight = float(self.model.config.deterministic_anchor_lambda)
-                (regular_loss * regular_weight / self.accum_steps).backward()
-                regular_value = float(regular_loss.detach().item())
-                del regular_loss
-
-                torch.set_rng_state(cpu_model_rng_state)
-                if cuda_model_rng_state is not None:
-                    torch.cuda.set_rng_state(cuda_model_rng_state, self.device)
-                with amp_context(bool(self.model.config.use_amp)):
-                    anchor_loss = self.model.patch_refine_loss_from_prepared(
-                        prepared,
-                        loss_mode="anchor",
-                    )["loss"]
-                (anchor_loss * anchor_weight / self.accum_steps).backward()
-                loss = regular_weight * regular_value + anchor_weight * float(anchor_loss.detach().item())
-                del anchor_loss, prepared, inputs
-            elif (
-                self.sequential_anchor_backward
-                and bool(self.model.config.use_deterministic_anchor_loss)
-                and include_anchor
-            ):
-                # A trainable context adapter has its own autograd graph, so it
-                # cannot be shared between separate backwards. Keep the previous
-                # replay path for that uncommon configuration.
-                cpu_rng_state = torch.get_rng_state()
-                cuda_rng_state = (
-                    torch.cuda.get_rng_state(self.device)
-                    if self.device.type == "cuda"
-                    else None
-                )
-                regular_inputs = self._inputs_from_batch(batch)
-                regular_loss = self._loss_from_inputs(
-                    regular_inputs,
-                    loss_mode="regular",
-                    scale_for_accumulation=False,
-                    token_cache=self.train_token_cache,
-                )
-                anchor_weight = 1.0 - float(self.model.config.deterministic_anchor_lambda)
-                regular_weight = float(self.model.config.deterministic_anchor_lambda)
-                (regular_loss * regular_weight / self.accum_steps).backward()
-                regular_value = float(regular_loss.detach().item())
-                del regular_loss, regular_inputs
-
-                torch.set_rng_state(cpu_rng_state)
-                if cuda_rng_state is not None:
-                    torch.cuda.set_rng_state(cuda_rng_state, self.device)
-                anchor_inputs = self._inputs_from_batch(batch)
-                anchor_loss = self._loss_from_inputs(
-                    anchor_inputs,
-                    loss_mode="anchor",
-                    scale_for_accumulation=False,
-                    token_cache=self.train_token_cache,
-                )
-                (anchor_loss * anchor_weight / self.accum_steps).backward()
-                loss = regular_weight * regular_value + anchor_weight * float(anchor_loss.detach().item())
-                del anchor_loss, anchor_inputs
-            else:
-                loss = self._loss_from_batch(
-                    batch,
+            inputs = self._inputs_from_batch(batch)
+            past = inputs[0]
+            if gpu_u is None:
+                include_anchor = (not use_det) or (batch_idx % every_n == 0)
+                unscaled = self._backward_slice(
+                    inputs,
+                    row_index=None,
+                    t=None,
                     include_anchor=include_anchor,
-                    scale_for_accumulation=True,
-                    token_cache=self.train_token_cache,
+                    scale=1.0 / self.accum_steps,
                 )
-                loss.backward()
-            if (batch_idx + 1) % self.accum_steps == 0:
-                if self.clip_grad is not None:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
-                self.optimizer.step()
-                self.optimizer.zero_grad(set_to_none=True)
-                if self.ema is not None:
-                    self.ema.update(self.model)
-            batch_loss = float(loss.item()) * self.accum_steps if torch.is_tensor(loss) else float(loss)
-            total_loss += batch_loss
-            n_batches += 1
-        if self.accum_steps > 1 and n_train_batches % self.accum_steps != 0:
-            if self.clip_grad is not None:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
-            self.optimizer.step()
+                micro_idx += 1
+                if micro_idx % self.accum_steps == 0:
+                    self._optimizer_step()
+                weighted_loss += unscaled
+                n_loss_units += 1
+            else:
+                n_windows, n_variates = int(past.shape[0]), int(past.shape[1])
+                n_rows = n_windows * n_variates
+                window_t = self._sample_window_timesteps(n_windows)
+                cursor = 0
+                while cursor < n_rows:
+                    remaining_budget = int(target_rows) - rows_in_step
+                    take = next_row_take(
+                        n_rows - cursor,
+                        gpu_u=gpu_u,
+                        remaining_budget=remaining_budget,
+                        rows_in_step=rows_in_step,
+                    )
+                    row_index = torch.arange(cursor, cursor + take, device=self.device)
+                    include_anchor = (not use_det) or (logical_u_idx % every_n == 0)
+                    scale = loss_scale_for_rows(take, int(target_rows))
+                    unscaled = self._backward_slice(
+                        inputs,
+                        row_index=row_index,
+                        t=window_t,
+                        include_anchor=include_anchor,
+                        scale=scale,
+                    )
+                    cursor += take
+                    rows_in_step += take
+                    weighted_loss += unscaled * take
+                    n_loss_units += take
+                    if rows_in_step % gpu_u == 0:
+                        logical_u_idx += 1
+                    if rows_in_step == int(target_rows):
+                        self._optimizer_step()
+                        rows_in_step = 0
+            del inputs
+        if gpu_u is None:
+            if self.accum_steps > 1 and micro_idx % self.accum_steps != 0:
+                self._optimizer_step()
+        elif rows_in_step > 0:
+            logger.info(
+                "  [%s] dropping %d leftover univariate rows (< target %d)",
+                self.log_prefix, rows_in_step, int(target_rows),
+            )
             self.optimizer.zero_grad(set_to_none=True)
-            if self.ema is not None:
-                self.ema.update(self.model)
-        return total_loss / max(n_batches, 1), time.perf_counter() - started
+        return weighted_loss / max(n_loss_units, 1), time.perf_counter() - started
 
     def _validate_epoch(self, epoch: int, max_epochs: int) -> Tuple[float, float]:
         self.model.eval()
         if self.set_loader_mode is not None:
             self.set_loader_mode(self.model, self.val_loader, eval_mode=True)
-        total_loss = 0.0
-        n_batches = 0
+        weighted_loss = 0.0
+        n_rows_seen = 0
         n_val_batches = len(self.val_loader)
         log_stride = max(1, n_val_batches // 2)
         started = time.perf_counter()
@@ -651,12 +756,29 @@ class DiffusionTrainer:
                         "  [%s] epoch %d/%d val_batch %d/%d",
                         self.log_prefix, epoch + 1, max_epochs, batch_idx + 1, n_val_batches,
                     )
-                loss = self._loss_from_batch(
-                    batch, scale_for_accumulation=False, token_cache=self.val_token_cache,
+                inputs = self._inputs_from_batch(batch)
+                past = inputs[0]
+                window_t = (
+                    self._sample_window_timesteps(int(past.shape[0]))
+                    if self.univariate_micro_batch is not None
+                    else None
                 )
-                total_loss += float(loss.item())
-                n_batches += 1
-        return total_loss / max(n_batches, 1), time.perf_counter() - started
+                for row_index in self._row_slices_for_past(past):
+                    n_rows = (
+                        int(past.shape[0]) * int(past.shape[1])
+                        if row_index is None
+                        else int(row_index.numel())
+                    )
+                    slice_loss = self._loss_from_inputs(
+                        inputs,
+                        scale_for_accumulation=False,
+                        token_cache=self.val_token_cache,
+                        univariate_row_index=row_index,
+                        t=window_t,
+                    )
+                    weighted_loss += float(slice_loss.item()) * n_rows
+                    n_rows_seen += n_rows
+        return weighted_loss / max(n_rows_seen, 1), time.perf_counter() - started
 
     def fit(
         self,

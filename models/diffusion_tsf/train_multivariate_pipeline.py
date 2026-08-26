@@ -1425,6 +1425,15 @@ def _paper_split_borders(dataset_name: str, n: int, seq_len: int) -> Tuple[List[
         n_val = int(n * 0.2)
         n_test = n - n_train - n_val
         b2 = [n_train, n_train + n_val, n_train + n_val + n_test]
+    elif dataset_name == 'illness':
+        # iTransformer Dataset_Custom.__read_data__ and PatchTST_supervised
+        # Dataset_Custom.__read_data__: num_train=int(n*0.7), num_test=int(n*0.2),
+        # remainder val. Illness scripts set --data custom --data_path national_illness.csv
+        # (not 60/20/20). Do not fold this into the generic else.
+        n_train = int(n * 0.7)
+        n_test = int(n * 0.2)
+        n_val = n - n_train - n_test
+        b2 = [n_train, n_train + n_val, n_train + n_val + n_test]
     else:
         # Standard benchmark ratio: 70% train, 10% val, 20% test
         n_train = int(n * 0.7)
