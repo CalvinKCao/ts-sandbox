@@ -44,6 +44,93 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import stage
 
 logger = logging.getLogger(__name__)
 
+# Standard forecast prefixes for long-horizon (stitch) eval: score the stitched
+# forecast on [:h] without re-generating. Full-H metrics stay un-suffixed.
+STAGED_PREFIX_HORIZONS = (96, 192, 336, 720)
+
+
+def _prefix_horizons_for_length(horizon: int) -> Tuple[int, ...]:
+    h = int(horizon)
+    return tuple(p for p in STAGED_PREFIX_HORIZONS if p <= h)
+
+
+def _per_window_prefix_fields(
+    y_true: np.ndarray,
+    deterministic: np.ndarray,
+    samples: np.ndarray | None,
+    *,
+    anchor_only: bool,
+) -> Dict[str, np.ndarray]:
+    """Per-window prefix metrics keyed like ``anchor_mse_h96`` / ``mse_h96``."""
+    out: Dict[str, np.ndarray] = {}
+    for h in _prefix_horizons_for_length(y_true.shape[-1]):
+        yt = y_true[..., :h]
+        det = deterministic[..., :h]
+        out[f"anchor_mse_h{h}"] = per_window_anchor_mse(yt, det)
+        out[f"anchor_mae_h{h}"] = _per_window_mae(yt, det)
+        if not anchor_only and samples is not None:
+            samp = samples[..., :h]
+            smean = samp.mean(axis=2)
+            out[f"mse_h{h}"] = ((yt - smean) ** 2).mean(axis=(1, 2))
+            out[f"mae_h{h}"] = _per_window_mae(yt, smean)
+            out[f"sample_mean_mse_h{h}"] = out[f"mse_h{h}"]
+            out[f"sample_mean_mae_h{h}"] = out[f"mae_h{h}"]
+            out[f"crps_h{h}"] = per_window_crps(yt, samp)
+    return out
+
+
+def _add_prefix_horizon_metrics(
+    metrics: Dict[str, float],
+    *,
+    y_true: np.ndarray,
+    deterministic: np.ndarray,
+    samples: np.ndarray | None,
+    anchor_only: bool,
+) -> Dict[str, float]:
+    """Attach aggregate prefix metrics (mse/mae/crps) for each standard H."""
+    from models.diffusion_tsf.metrics import crps_ensemble
+
+    for h in _prefix_horizons_for_length(y_true.shape[-1]):
+        yt = y_true[..., :h]
+        det = deterministic[..., :h]
+        anchor = _deterministic_metrics(yt, det)
+        metrics[f"anchor_mse_h{h}"] = anchor["mse"]
+        metrics[f"anchor_mae_h{h}"] = anchor["mae"]
+        if not anchor_only and samples is not None:
+            samp = samples[..., :h]
+            smean = samp.mean(axis=2)
+            sm = _deterministic_metrics(yt, smean)
+            metrics[f"mse_h{h}"] = sm["mse"]
+            metrics[f"mae_h{h}"] = sm["mae"]
+            metrics[f"sample_mean_mse_h{h}"] = sm["mse"]
+            metrics[f"sample_mean_mae_h{h}"] = sm["mae"]
+            metrics[f"crps_h{h}"] = float(crps_ensemble(yt, samp))
+    return metrics
+
+
+def _prefix_wandb_metrics(metrics: Dict[str, float], *, anchor_only: bool) -> Dict[str, float]:
+    """Map ``*_h{H}`` metric keys to ``eval/staged_*_h{H}`` wandb names."""
+    out: Dict[str, float] = {}
+    for h in STAGED_PREFIX_HORIZONS:
+        amse = metrics.get(f"anchor_mse_h{h}")
+        if amse is not None:
+            out[f"eval/staged_anchor_mse_h{h}"] = amse
+            out[f"eval/staged_anchor_mae_h{h}"] = metrics.get(f"anchor_mae_h{h}")
+        if anchor_only:
+            continue
+        pmse = metrics.get(f"mse_h{h}")
+        if pmse is not None:
+            out[f"eval/staged_prob_mse_h{h}"] = pmse
+            out[f"eval/staged_prob_mae_h{h}"] = metrics.get(f"mae_h{h}")
+            out[f"eval/staged_sample_mean_mse_h{h}"] = metrics.get(
+                f"sample_mean_mse_h{h}", pmse,
+            )
+            out[f"eval/staged_sample_mean_mae_h{h}"] = metrics.get(
+                f"sample_mean_mae_h{h}", metrics.get(f"mae_h{h}"),
+            )
+            out[f"eval/staged_crps_h{h}"] = metrics.get(f"crps_h{h}")
+    return out
+
 
 def _eval_artifact_tag(phase: PipelinePhase) -> str:
     stride = int(phase.require("test_stride"))
@@ -197,18 +284,35 @@ def _summarize_staged_eval_metrics(
     metrics["anchor_mae"] = anchor["mae"]
     metrics["anchor_n_samples"] = 1.0
     metrics["metrics_profile"] = "dpmpp_prob_core_plus_anchor"
+    _add_prefix_horizon_metrics(
+        metrics,
+        y_true=y_true,
+        deterministic=pack["deterministic"],
+        samples=samples,
+        anchor_only=False,
+    )
     return metrics
 
 
 def _summarize_anchor_only_metrics(pack: Dict[str, np.ndarray]) -> Dict[str, float]:
     """Report deterministic anchor metrics without fabricating sample statistics."""
-    anchor = _deterministic_metrics(pack["y_true"], pack["deterministic"])
-    return {
+    y_true = pack["y_true"]
+    det = pack["deterministic"]
+    anchor = _deterministic_metrics(y_true, det)
+    metrics = {
         "anchor_mse": anchor["mse"],
         "anchor_mae": anchor["mae"],
         "anchor_n_samples": 1.0,
         "metrics_profile": "anchor_only",
     }
+    _add_prefix_horizon_metrics(
+        metrics,
+        y_true=y_true,
+        deterministic=det,
+        samples=None,
+        anchor_only=True,
+    )
+    return metrics
 
 
 def _load_stage_metadata(state: PipelineState, stage: str) -> Dict:
@@ -329,6 +433,10 @@ def _metrics_from_progress_records(
         "anchor_n_samples": 1.0,
         "n_windows": float(len(records)),
     }
+    for h in STAGED_PREFIX_HORIZONS:
+        for key in (f"anchor_mse_h{h}", f"anchor_mae_h{h}"):
+            if any(key in r for r in records):
+                out[key] = _mean(key)
     if anchor_only:
         out["metrics_profile"] = "anchor_only"
         return out
@@ -346,6 +454,17 @@ def _metrics_from_progress_records(
         "crps": _mean("crps"),
         "metrics_profile": "dpmpp_prob_core_plus_anchor",
     })
+    # Probabilistic prefix keys are optional (older progress jsonl may lack them).
+    for h in STAGED_PREFIX_HORIZONS:
+        for key in (
+            f"mse_h{h}",
+            f"mae_h{h}",
+            f"sample_mean_mse_h{h}",
+            f"sample_mean_mae_h{h}",
+            f"crps_h{h}",
+        ):
+            if any(key in r for r in records):
+                out[key] = _mean(key)
     return out
 
 
@@ -725,12 +844,15 @@ class StagedEvalPhase(PipelinePhase):
                         det_np = det_all[-1]
                         amse = per_window_anchor_mse(y_np, det_np)
                         amae = _per_window_mae(y_np, det_np)
+                        samp_np = None if anchor_only else sample_all[-1]
                         if not anchor_only:
-                            samp_np = sample_all[-1]
                             smean = samp_np.mean(axis=2)
                             pmse = ((y_np - smean) ** 2).mean(axis=(1, 2))
                             pmae = _per_window_mae(y_np, smean)
                             crps = per_window_crps(y_np, samp_np)
+                        prefix_fields = _per_window_prefix_fields(
+                            y_np, det_np, samp_np, anchor_only=anchor_only,
+                        )
                         for j, wi in enumerate(batch_window_indices):
                             rec = {
                                 "window_index": int(wi),
@@ -745,6 +867,8 @@ class StagedEvalPhase(PipelinePhase):
                                     "sample_mean_mae": float(pmae[j]),
                                     "crps": float(crps[j]),
                                 })
+                            for key, arr in prefix_fields.items():
+                                rec[key] = float(arr[j])
                             progress_records.append(rec)
                             if progress_fh is not None:
                                 progress_fh.write(json.dumps(rec) + "\n")
@@ -772,6 +896,7 @@ class StagedEvalPhase(PipelinePhase):
                                 "eval/staged_prob_mse": summary.get("mse"),
                                 "eval/staged_crps": summary.get("crps"),
                             }),
+                            **_prefix_wandb_metrics(summary, anchor_only=anchor_only),
                         }, step=int(summary.get("n_done", 0)))
         finally:
             if progress_fh is not None:
@@ -1228,6 +1353,7 @@ class StagedEvalPhase(PipelinePhase):
                 "eval/selected_sampler": selected_sampler,
                 "eval/selected_steps": selected_steps,
             })
+        wandb_metrics.update(_prefix_wandb_metrics(metrics, anchor_only=anchor_only))
         wandb_metrics.update({
             f"eval/{tag}/staged_anchor_mse": metrics.get("anchor_mse"),
             f"eval/{tag}/staged_anchor_mae": metrics.get("anchor_mae"),
