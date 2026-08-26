@@ -50,8 +50,9 @@ STAGED_PREFIX_HORIZONS = (96, 192, 336, 720)
 
 
 def _prefix_horizons_for_length(horizon: int) -> Tuple[int, ...]:
+    """Prefixes strictly shorter than H (full-H stays on unsuffixed keys)."""
     h = int(horizon)
-    return tuple(p for p in STAGED_PREFIX_HORIZONS if p <= h)
+    return tuple(p for p in STAGED_PREFIX_HORIZONS if p < h)
 
 
 def _per_window_prefix_fields(
@@ -529,7 +530,13 @@ def _staged_generate_horizon_stitch(
     past: torch.Tensor,
     gen_kwargs: Dict[str, Any],
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    """Independent 104-canvas generates + overlap-average stitch to length H."""
+    """Independent 104-canvas generates + overlap-average stitch to length H.
+
+    Chunks run sequentially (not ``past.repeat_interleave(n_chunks)``) so peak
+    rows stay ``batch`` — same as single-canvas eval. Materialising all 8
+    chunks at once with MC samples blew past the L40S probed row budget
+    (``batch × n_samp × n_chunks``).
+    """
     from models.diffusion_tsf.horizon_chunks import chunk_starts, overlap_average_stitch
 
     k = int(getattr(coarse_model.config, "lookback_overlap", 0))
@@ -543,33 +550,34 @@ def _staged_generate_horizon_stitch(
     n_chunks = len(starts)
     batch = past.shape[0]
     device = past.device
-    past_rep = past.repeat_interleave(n_chunks, dim=0)
-    t0 = torch.tensor(starts, device=device, dtype=torch.long).repeat(batch)
-    chunk_kwargs = dict(gen_kwargs)
-    chunk_kwargs["horizon_chunk_t0"] = t0
-    out = _staged_generate_once(
-        coarse_model=coarse_model,
-        fine_model=fine_model,
-        past=past_rep,
-        gen_kwargs=chunk_kwargs,
-    )
-    canvas = out["fine"]["prediction_with_overlap"]
     expected_w = k + inner
-    if canvas.shape[-1] != expected_w:
-        raise ValueError(
-            f"stitch canvas width {canvas.shape[-1]} != overlap+inner {expected_w}"
+    canvases = []
+    diag0 = None
+    for start in starts:
+        t0 = torch.full((batch,), int(start), device=device, dtype=torch.long)
+        chunk_kwargs = dict(gen_kwargs)
+        chunk_kwargs["horizon_chunk_t0"] = t0
+        out = _staged_generate_once(
+            coarse_model=coarse_model,
+            fine_model=fine_model,
+            past=past,
+            gen_kwargs=chunk_kwargs,
         )
-    # past.repeat_interleave(n_chunks): [b0_c0, b0_c1, ..., b1_c0, ...]
-    canvas_bn = canvas.view(batch, n_chunks, *canvas.shape[1:])
+        canvas = out["fine"]["prediction_with_overlap"]
+        if canvas.shape[-1] != expected_w:
+            raise ValueError(
+                f"stitch canvas width {canvas.shape[-1]} != overlap+inner {expected_w}"
+            )
+        canvases.append(canvas)
+        if diag0 is None:
+            diag0 = {"coarse": out["coarse"], "fine": out["fine"]}
+    canvas_bn = torch.stack(canvases, dim=1)
+    if canvas_bn.shape[1] != n_chunks:
+        raise ValueError(f"stacked n_chunks {canvas_bn.shape[1]} != {n_chunks}")
     stitched = overlap_average_stitch(
         canvas_bn, starts, horizon=dataset_h, inner=inner, overlap=k,
     )
-    chunk0 = slice(0, None, n_chunks)
-    diag = {
-        "coarse": {key: val[chunk0] if torch.is_tensor(val) else val for key, val in out["coarse"].items()},
-        "fine": {key: val[chunk0] if torch.is_tensor(val) else val for key, val in out["fine"].items()},
-    }
-    return stitched, diag
+    return stitched, diag0
 
 
 def _staged_det_gen_kwargs(state: PipelineState, default_steps: int) -> Dict[str, Any]:

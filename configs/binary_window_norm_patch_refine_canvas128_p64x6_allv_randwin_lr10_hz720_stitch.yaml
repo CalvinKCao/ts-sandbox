@@ -1,8 +1,10 @@
 # lr10 allv-randwin + horizon stitch to H=720 (canvas 104 = overlap8 + inner96).
-# Clones p64x6 lr10 search/eval protocol; sample caps relative to ETTh1 lr10
-# windows (8209 / 2785): 1× for fat-V (electricity, traffic, PeMS, solar),
-# 2× for the rest. Illness omitted — national_illness (~966 rows) cannot form
-# lb336 + H720 windows (use the separate illness lb104/hz60 leaf instead).
+# Clones p64x6 lr10 search/eval protocol. Caps are in *crops* relative to the
+# H=720 ETTh1 full-pool (~7577 train / ~2153 val windows × 7V ≈ 53039 / 15071
+# crops): 1× for fat-V (electricity, traffic, PeMS, solar), 2× for large-enough
+# others (weather, dynamic). ETTh1 and other pool-limited sets omit caps
+# (null overrides clear the parent h96 window caps). Illness omitted —
+# national_illness cannot form lb336 + H720 windows.
 extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10.yaml
 
 geometry:
@@ -11,46 +13,65 @@ geometry:
   horizon_chunk_inner: 96
 
 wandb:
-  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, from_pretrain, hz720, horizon_stitch, caps_1x2x_etth1]
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, from_pretrain, hz720, horizon_stitch, caps_crops_1x2x_etth1]
 
 experiment:
   name: binary-window-norm-patch-refine-c128-allv-randwin-lr10-hz720-stitch
   experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_hz720_stitch
   data_subset_by_dataset:
+    # Full pool (parent h96 caps would under/over-bind oddly at H=720).
     ETTh1:
-      train_max_windows: 16418
-      val_max_windows: 5570
+      train_max_windows: null
+      val_max_windows: null
     ETTh2:
-      train_max_windows: 16418
-      val_max_windows: 5570
+      train_max_windows: null
+      val_max_windows: null
     ETTm1:
-      train_max_windows: 16418
-      val_max_windows: 5570
+      train_max_windows: null
+      val_max_windows: null
     ETTm2:
-      train_max_windows: 16418
-      val_max_windows: 5570
-    electricity:
-      train_max_windows: 8209
-      val_max_windows: 2785
-    traffic:
-      train_max_windows: 8209
-      val_max_windows: 2785
+      train_max_windows: null
+      val_max_windows: null
     exchange_rate:
-      train_max_windows: 16418
-      val_max_windows: 5570
-    weather:
-      train_max_windows: 16418
-      val_max_windows: 5570
-    solar_Alabama:
-      train_max_windows: 8209
-      val_max_windows: 2785
+      train_max_windows: null
+      val_max_windows: null
+    # 1× ETTh1 crops / V
+    electricity:
+      train_max_windows: 165
+      val_max_windows: 46
+    traffic:
+      train_max_windows: 61
+      val_max_windows: 17
     PeMS:
-      train_max_windows: 8209
-      val_max_windows: 2785
+      train_max_windows: 172
+      val_max_windows: 49
+    solar_Alabama:
+      train_max_windows: 387
+      val_max_windows: 110
+    # 2× ETTh1 crops / V
+    weather:
+      train_max_windows: 5051
+      val_max_windows: 1435
     dynamic:
-      train_max_windows: 16418
-      val_max_windows: 5570
+      train_max_windows: 6239
+      val_max_windows: 1773
 
 phases:
   - phase: staged_eval
     eval_progress_key: canvas128_allv_randwin_lr10_hz720_stitch_s1_n10_steps4
+    # Stitch used to expand rows by n_chunks=8 in one generate; code now loops
+    # chunks, but keep small-V eval B=1 so peak stays well under the h96 probe
+    # (max_fit≈54 at n_samp=10). Fat-V already 1.
+    batch_size_by_dataset:
+      ETTh1: 1
+      ETTh2: 1
+      ETTm1: 1
+      ETTm2: 1
+      exchange_rate: 1
+      weather: 1
+      solar_Alabama: 1
+      electricity: 1
+      PeMS: 1
+      traffic: 1
+      illness: 1
+      dynamic: 1
