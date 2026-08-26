@@ -1,0 +1,56 @@
+# lr10 allv-randwin + horizon stitch to H=720 (canvas 104 = overlap8 + inner96).
+# Clones p64x6 lr10 search/eval protocol; sample caps relative to ETTh1 lr10
+# windows (8209 / 2785): 1× for fat-V (electricity, traffic, PeMS, solar),
+# 2× for the rest. Illness omitted — national_illness (~966 rows) cannot form
+# lb336 + H720 windows (use the separate illness lb104/hz60 leaf instead).
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10.yaml
+
+geometry:
+  forecast_length: 720
+  horizon_stitch: overlap_avg
+  horizon_chunk_inner: 96
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, from_pretrain, hz720, horizon_stitch, caps_1x2x_etth1]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-allv-randwin-lr10-hz720-stitch
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_hz720_stitch
+  data_subset_by_dataset:
+    ETTh1:
+      train_max_windows: 16418
+      val_max_windows: 5570
+    ETTh2:
+      train_max_windows: 16418
+      val_max_windows: 5570
+    ETTm1:
+      train_max_windows: 16418
+      val_max_windows: 5570
+    ETTm2:
+      train_max_windows: 16418
+      val_max_windows: 5570
+    electricity:
+      train_max_windows: 8209
+      val_max_windows: 2785
+    traffic:
+      train_max_windows: 8209
+      val_max_windows: 2785
+    exchange_rate:
+      train_max_windows: 16418
+      val_max_windows: 5570
+    weather:
+      train_max_windows: 16418
+      val_max_windows: 5570
+    solar_Alabama:
+      train_max_windows: 8209
+      val_max_windows: 2785
+    PeMS:
+      train_max_windows: 8209
+      val_max_windows: 2785
+    dynamic:
+      train_max_windows: 16418
+      val_max_windows: 5570
+
+phases:
+  - phase: staged_eval
+    eval_progress_key: canvas128_allv_randwin_lr10_hz720_stitch_s1_n10_steps4

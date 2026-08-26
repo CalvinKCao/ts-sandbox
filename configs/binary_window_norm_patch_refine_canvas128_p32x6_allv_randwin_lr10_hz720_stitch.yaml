@@ -1,0 +1,16 @@
+# p32 sibling of the p64x6 hz720 stitch leaf (weather/solar/ETTh2/…).
+# Same caps/geometry/search; height 32 + H=32 pretrain donor (bin_centers).
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_hz720_stitch.yaml
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p32x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, from_pretrain, hz720, horizon_stitch, caps_1x2x_etth1]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-p32x6-allv-randwin-lr10-hz720-stitch
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_hz720_stitch
+  patch_refine_patch_height: 32
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: binary_window_norm_patch_refine_canvas128_p32x6_pretrain
+    require_reuse_pretrain: true
