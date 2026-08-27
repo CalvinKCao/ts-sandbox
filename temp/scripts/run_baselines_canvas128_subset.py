@@ -29,16 +29,25 @@ ITRANS_DIR = REPO / "temp" / "iTransformer"
 PATCH_DIR = REPO / "temp" / "PatchTST" / "PatchTST_supervised"
 APPLY_PATCHES = REPO / "temp" / "scripts" / "apply_baseline_canvas128_patches.py"
 
+
+def _out_dir_for(model: str, dataset: str, pred_len: int) -> Path:
+    """Isolate H=96 vs H=720 campaigns so summaries do not collide."""
+    return OUT_ROOT / f"hz{int(pred_len)}" / model / dataset
+
+
 DATASETS_ALL = [
     "ETTh1",
     "ETTh2",
+    "ETTm1",
+    "ETTm2",
     "electricity",
     "traffic",
     "exchange_rate",
-    "PeMS",
+    "weather",
     "solar_Alabama",
-    "ETTm1",
-    "ETTm2",
+    "PeMS",
+    "illness",
+    "dynamic",
 ]
 
 
@@ -82,6 +91,12 @@ def _itrans_arch(dataset: str) -> Dict[str, Any]:
     if dataset == "PeMS":
         return {**base, "e_layers": 4, "d_model": 512, "d_ff": 512,
                 "learning_rate": 1e-3}
+    if dataset == "weather":
+        return {**base, "e_layers": 3, "d_model": 512, "d_ff": 512}
+    if dataset == "illness":
+        return {**base, "e_layers": 2, "d_model": 128, "d_ff": 128}
+    if dataset == "dynamic":
+        return {**base, "e_layers": 3, "d_model": 512, "d_ff": 512}
     raise KeyError(f"no iTransformer script HP map for {dataset}")
 
 
@@ -99,7 +114,7 @@ def _patchtst_arch(dataset: str) -> Dict[str, Any]:
         learning_rate=1e-4, patience=20, train_epochs=100,
         lradj="type3", pct_start=0.3,
     )
-    if dataset in ("ETTh1", "ETTh2"):
+    if dataset in ("ETTh1", "ETTh2", "illness"):
         return small
     if dataset in ("ETTm1", "ETTm2"):
         return {**large, "lradj": "TST", "pct_start": 0.4, "patience": 20}
@@ -388,7 +403,7 @@ def main() -> int:
             raise KeyError(f"no subset meta for {ds}")
         meta = meta_by[ds]
         for model in models:
-            out_dir = OUT_ROOT / model / ds
+            out_dir = _out_dir_for(model, ds, args.pred_len)
             out_dir.mkdir(parents=True, exist_ok=True)
             summary_name = (
                 "itransformer_summary.json" if model == "itransformer" else "patchtst_summary.json"
@@ -421,7 +436,9 @@ def main() -> int:
                 print(f"[error] {model} {ds}: {e}", flush=True)
                 traceback.print_exc()
 
-    stamp = OUT_ROOT / "campaign_summary.json"
+    stamp_dir = OUT_ROOT / f"hz{int(args.pred_len)}"
+    stamp_dir.mkdir(parents=True, exist_ok=True)
+    stamp = stamp_dir / "campaign_summary.json"
     stamp.write_text(json.dumps({"summaries": summaries, "errors": errors}, indent=2) + "\n")
     print(f"[done] {stamp} errors={len(errors)}", flush=True)
     return 1 if errors else 0

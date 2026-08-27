@@ -10,17 +10,38 @@
 #   ./temp/scripts/submit_baselines_canvas128_killarney.sh --smoke-test
 #   ./temp/scripts/submit_baselines_canvas128_killarney.sh
 #   ./temp/scripts/submit_baselines_canvas128_killarney.sh --model itransformer --datasets ETTh1,ETTh2
+#   ./temp/scripts/submit_baselines_canvas128_killarney.sh \
+#       --subset-yaml configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x.yaml \
+#       --pred-len 96 --datasets ETTh1,weather,solar_Alabama --time 2:00:00 --force
 # =============================================================================
 
 set -euo pipefail
 
 MODEL="both"
-DATASETS="ETTh1,ETTh2,electricity,traffic,exchange_rate,PeMS,solar_Alabama,ETTm1,ETTm2"
+DATASETS="ETTh1,ETTh2,ETTm1,ETTm2,electricity,traffic,exchange_rate,weather,solar_Alabama,PeMS,illness,dynamic"
 SMOKE=0
 TIME_FULL="2:00:00"
 TIME_SMOKE="0:45:00"
 WALL_OVERRIDE=""
 FORCE=0
+SEQ_LEN=336
+PRED_LEN=96
+SUBSET_YAML="configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10.yaml"
+
+# Per-dataset L40S walls. PatchTST can run 100 ep; dynamic is stride-1 on 500k.
+# --time override wins for every dataset (use for <2h cap campaigns).
+ds_wall() {
+  local ds="$1" default="$2"
+  if [ -n "$WALL_OVERRIDE" ] || [ "$SMOKE" -eq 1 ]; then
+    echo "$default"
+    return
+  fi
+  case "$ds" in
+    dynamic) echo "12:00:00" ;;
+    traffic|electricity|weather|PeMS) echo "6:00:00" ;;
+    *) echo "$default" ;;
+  esac
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -29,6 +50,9 @@ while [[ $# -gt 0 ]]; do
     --smoke-test|--smoke) SMOKE=1; shift ;;
     --time) WALL_OVERRIDE="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
+    --seq-len) SEQ_LEN="$2"; shift 2 ;;
+    --pred-len) PRED_LEN="$2"; shift 2 ;;
+    --subset-yaml) SUBSET_YAML="$2"; shift 2 ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -57,16 +81,23 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
   for ds in "${DS_ARR[@]}"; do
     ds="$(echo "$ds" | xargs)"
     [ -n "$ds" ] || continue
-    JOB_NAME="base-c128-${ds}"
-    [ "$SMOKE" -eq 1 ] && JOB_NAME="base-c128-smoke-${ds}"
-    EXTRA=(--model "$MODEL" --datasets "$ds")
+    JOB_NAME="base-c128-h${PRED_LEN}-${ds}"
+    [ "$SMOKE" -eq 1 ] && JOB_NAME="base-c128-smoke-h${PRED_LEN}-${ds}"
+    EXTRA=(
+      --model "$MODEL"
+      --datasets "$ds"
+      --seq-len "$SEQ_LEN"
+      --pred-len "$PRED_LEN"
+      --subset-yaml "$SUBSET_YAML"
+    )
     [ "$SMOKE" -eq 1 ] && EXTRA+=(--smoke-test)
     [ "$FORCE" -eq 1 ] && EXTRA+=(--force)
-    echo "[submit] $ds wall=$WALL"
+    DS_WALL="$(ds_wall "$ds" "$WALL")"
+    echo "[submit] $ds wall=$DS_WALL pred_len=$PRED_LEN subset=$SUBSET_YAML"
     sbatch \
       --job-name="$JOB_NAME" \
       --account=aip-boyuwang \
-      --time="$WALL" \
+      --time="$DS_WALL" \
       --nodes=1 \
       --gres=gpu:l40s:1 \
       --cpus-per-task=8 \
@@ -87,6 +118,7 @@ echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID   Node: ${SLURMD_NODENAME:-unknown}"
 echo "GPU:    $(nvidia-smi -L 2>/dev/null | head -1 || echo unknown)"
 echo "Started: $(date)"
+echo "seq_len=$SEQ_LEN pred_len=$PRED_LEN subset_yaml=$SUBSET_YAML"
 echo "=========================================="
 
 cd "${SLURM_SUBMIT_DIR:?}"
@@ -144,7 +176,9 @@ CLONE_LOCK="$PWD/results/baselines_canvas128_subset/clone.lock"
   fi
   find temp/iTransformer temp/PatchTST -name '*.py' -print0 | xargs -0 sed -i 's/np\.Inf/np.inf/g' || true
   python -u temp/scripts/apply_baseline_canvas128_patches.py
-  python -u temp/scripts/export_canvas128_subset_csvs.py --datasets "$DATASETS"
+  python -u temp/scripts/export_canvas128_subset_csvs.py \
+    --subset-yaml "$SUBSET_YAML" \
+    --datasets "$DATASETS"
 ) 9>"$CLONE_LOCK"
 
 EXTRA_FLAGS=()
@@ -154,8 +188,8 @@ EXTRA_FLAGS=()
 python -u temp/scripts/run_baselines_canvas128_subset.py \
   --model "$MODEL" \
   --dataset "$DATASETS" \
-  --seq-len 336 \
-  --pred-len 96 \
+  --seq-len "$SEQ_LEN" \
+  --pred-len "$PRED_LEN" \
   --force \
   "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}"
 

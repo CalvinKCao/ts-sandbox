@@ -36,8 +36,11 @@ LOADER_META = {
     "electricity": {"freq": "h", "loader": "custom"},
     "traffic": {"freq": "h", "loader": "custom"},
     "exchange_rate": {"freq": "d", "loader": "custom"},
+    "weather": {"freq": "h", "loader": "custom"},
     "PeMS": {"freq": "h", "loader": "PEMS"},
     "solar_Alabama": {"freq": "min", "loader": "custom"},
+    "illness": {"freq": "h", "loader": "custom"},
+    "dynamic": {"freq": "h", "loader": "custom"},
 }
 
 
@@ -163,9 +166,19 @@ def main() -> int:
         names = list(specs)
     out_dir = REPO / "temp" / "baselines_canvas128_subset" / "data"
     out_dir.mkdir(parents=True, exist_ok=True)
-    metas = [export_one(name, specs[name], out_dir) for name in names]
-    (out_dir / "subset_meta.json").write_text(json.dumps(metas, indent=2) + "\n")
-    print(f"[done] wrote {out_dir / 'subset_meta.json'}", flush=True)
+    meta_path = out_dir / "subset_meta.json"
+    existing: dict = {}
+    if meta_path.is_file():
+        try:
+            for row in json.loads(meta_path.read_text()):
+                existing[row["dataset"]] = row
+        except Exception:
+            existing = {}
+    for name in names:
+        existing[name] = export_one(name, specs[name], out_dir)
+    metas = list(existing.values())
+    meta_path.write_text(json.dumps(metas, indent=2) + "\n")
+    print(f"[done] wrote {meta_path} ({len(metas)} datasets)", flush=True)
     return 0
 
 
