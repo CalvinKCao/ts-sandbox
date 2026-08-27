@@ -1,0 +1,57 @@
+# H=96 (no stitch) sibling of the hz720 stitch leaf crop-cap policy.
+# Same window caps as *_hz720_stitch: full-pool (null) for ETT/exchange;
+# 1× ETTh1 H720 crop budget for fat-V (electricity, traffic, PeMS, solar);
+# 2× for weather/dynamic. Leaves the old uncapped/4× lr10 baselines alone.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10.yaml
+
+geometry:
+  forecast_length: 96
+  horizon_stitch: false
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, from_pretrain, hz96, caps_crops_1x2x_etth1]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-allv-randwin-lr10-cap1x2x
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x
+  data_subset_by_dataset:
+    # Full pool (clear parent h96 window caps).
+    ETTh1:
+      train_max_windows: null
+      val_max_windows: null
+    ETTh2:
+      train_max_windows: null
+      val_max_windows: null
+    ETTm1:
+      train_max_windows: null
+      val_max_windows: null
+    ETTm2:
+      train_max_windows: null
+      val_max_windows: null
+    exchange_rate:
+      train_max_windows: null
+      val_max_windows: null
+    # 1× ETTh1 H720 crops / V
+    electricity:
+      train_max_windows: 165
+      val_max_windows: 46
+    traffic:
+      train_max_windows: 61
+      val_max_windows: 17
+    PeMS:
+      train_max_windows: 172
+      val_max_windows: 49
+    solar_Alabama:
+      train_max_windows: 387
+      val_max_windows: 110
+    # 2× ETTh1 H720 crops / V
+    weather:
+      train_max_windows: 5051
+      val_max_windows: 1435
+    dynamic:
+      train_max_windows: 6239
+      val_max_windows: 1773
+
+phases:
+  - phase: staged_eval
+    eval_progress_key: canvas128_allv_randwin_lr10_cap1x2x_s1_n10_steps4
