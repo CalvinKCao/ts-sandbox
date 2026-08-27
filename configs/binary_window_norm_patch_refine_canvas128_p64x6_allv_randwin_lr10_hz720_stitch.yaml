@@ -58,7 +58,14 @@ experiment:
 
 phases:
   - phase: staged_eval
-    eval_progress_key: canvas128_allv_randwin_lr10_hz720_stitch_s1_n10_steps4
+    # Fresh key: weather/solar eval budget cut 66%→22% of the inherited lr10
+    # absolute caps (1313→438, 100→33); old progress was for the 1313-window set.
+    eval_progress_key: canvas128_allv_randwin_lr10_hz720_stitch_s1_n10_steps4_eval22pct
+    # Parent lr10 caps weather=1313 / solar=100 (ETTh1-style ~66% policy mirrored
+    # as absolute counts). Scale those by 22/66 for H=720 stitch only.
+    eval_max_windows_by_dataset:
+      weather: 438
+      solar_Alabama: 33
     # Stitch used to expand rows by n_chunks=8 in one generate; code now loops
     # chunks, but keep small-V eval B=1 so peak stays well under the h96 probe
     # (max_fit≈54 at n_samp=10). Fat-V already 1.

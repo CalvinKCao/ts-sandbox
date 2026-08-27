@@ -8,7 +8,9 @@ experiment:
 
 mmpd:
   backbone: Decoder
-  subset_config: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x.yaml
+  # Same crop caps as cap1x2x; use hz720_stitch so eval_max_windows picks up the
+  # weather/solar 22%-of-prior-budget overrides (438 / 33).
+  subset_config: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_hz720_stitch.yaml
   lookback: 336
   horizon: 720
   datasets:
