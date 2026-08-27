@@ -144,7 +144,8 @@ if [[ "$SMOKE" -eq 1 ]]; then
 else
     CONFIGS="${CONFIGS:-configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml}"
     WALL_DEFAULT="3:00:00"
-    MEM="60G"
+    # torch.compile (inductor) + wide multivariate (e.g. solar 137) can exceed 60G host RSS
+    MEM="96G"
     CPUS=8
     GPUS=1
     JOB_PREFIX="grid"
