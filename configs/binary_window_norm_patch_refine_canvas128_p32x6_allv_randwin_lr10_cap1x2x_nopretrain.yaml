@@ -1,0 +1,11 @@
+# p32 sibling of the p64 H96 cap1x2x nopretrain ablation. Same crop caps;
+# inherits omitted pretrain + from_random_init. Height 32 only (no p32 donor).
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_nopretrain.yaml
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p32x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, nopretrain, from_random_init, hz96, caps_crops_1x2x_etth1]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-p32x6-allv-randwin-lr10-cap1x2x-nopretrain
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x_nopretrain
+  patch_refine_patch_height: 32
