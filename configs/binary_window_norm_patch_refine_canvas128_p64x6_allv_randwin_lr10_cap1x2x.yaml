@@ -1,7 +1,9 @@
 # H=96 (no stitch) sibling of the hz720 stitch leaf crop-cap policy.
-# Same window caps as *_hz720_stitch: full-pool (null) for ETT/exchange;
-# 1× ETTh1 H720 crop budget for fat-V (electricity, traffic, PeMS, solar);
-# 2× for weather/dynamic. Leaves the old uncapped/4× lr10 baselines alone.
+# Crop caps vs H=720 ETTh1 full-pool crops (~53039 train / ~15071 val):
+# 1× fat-V (electricity, traffic, PeMS, solar); 2× weather/dynamic + all ETT
+# (V=7 → 15153/4305). exchange stays full-pool null. ETTm*/PeMS stride→1
+# (subset_id drops _s3/_s4/_s2; isolates from parent lr10 dense-stride ckpts).
+# Leaves the old uncapped/4× lr10 baselines alone.
 extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10.yaml
 
 geometry:
@@ -15,19 +17,27 @@ experiment:
   name: binary-window-norm-patch-refine-c128-allv-randwin-lr10-cap1x2x
   experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x
   data_subset_by_dataset:
-    # Full pool (clear parent h96 window caps).
+    # 2× ETTh1 H720 crops / V (V=7 → floor(106071/7), floor(30135/7))
     ETTh1:
-      train_max_windows: null
-      val_max_windows: null
+      train_max_windows: 15153
+      val_max_windows: 4305
     ETTh2:
-      train_max_windows: null
-      val_max_windows: null
+      train_max_windows: 15153
+      val_max_windows: 4305
     ETTm1:
-      train_max_windows: null
-      val_max_windows: null
+      subset_id: ETTm1_allv_randwin
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: 15153
+      val_max_windows: 4305
     ETTm2:
-      train_max_windows: null
-      val_max_windows: null
+      subset_id: ETTm2_allv_randwin
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: 15153
+      val_max_windows: 4305
     exchange_rate:
       train_max_windows: null
       val_max_windows: null
@@ -39,6 +49,10 @@ experiment:
       train_max_windows: 61
       val_max_windows: 17
     PeMS:
+      subset_id: PeMS_allv_randwin
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
       train_max_windows: 172
       val_max_windows: 49
     solar_Alabama:

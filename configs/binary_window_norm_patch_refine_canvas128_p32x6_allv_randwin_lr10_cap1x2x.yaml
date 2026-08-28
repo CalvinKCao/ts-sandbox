@@ -1,6 +1,7 @@
-# p32 sibling of the p64x6 H=96 cap1x2x leaf. Same crop caps/geometry/search;
-# height 32 + H=32 pretrain donor. Dataset→leaf mapping matches lr10 handoff:
-# p32 for weather/solar (and ETTh2/ETTm*/exchange/PeMS); ETTh1 stays on p64.
+# p32 sibling of the p64x6 H=96 cap1x2x leaf. Same crop caps/geometry/search
+# (inherits ETT 2× + ETTm*/PeMS stride-1 subset_ids from p64 leaf); height 32
+# + H=32 pretrain donor. Dataset→leaf mapping matches lr10 handoff: p32 for
+# weather/solar (and ETTh2/ETTm*/exchange/PeMS); ETTh1 stays on p64.
 extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x.yaml
 
 wandb:
