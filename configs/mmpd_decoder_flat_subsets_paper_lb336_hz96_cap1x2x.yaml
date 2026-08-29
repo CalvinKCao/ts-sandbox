@@ -12,8 +12,16 @@ mmpd:
   horizon: 96
   datasets:
     - ETTh1
+    - ETTh2
+    - ETTm1
+    - ETTm2
+    - exchange_rate
     - weather
+    - electricity
+    - traffic
+    - PeMS
     - solar_Alabama
+    - dynamic
   patch_size_default: 12
   patch_size_wide: 24
   train_epochs: 20
