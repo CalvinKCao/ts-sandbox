@@ -1,0 +1,136 @@
+# Nopre + fixed HPs: lock coarse/fine to with-pre cap1x2x Optuna bests
+# (no n_trials=10 search). Same nopre semantics as *_nopretrain (no
+# staged_diffusion_pretrain, from_random_init on coarse+fine).
+#
+# HP sources (Killarney journals under results/ckpts/08-*-*cap1x2x):
+#   ETTh2  5057763  coarse#8 / fine#9
+#   ETTm1  5057764  coarse#7 / fine#1
+#   ETTm2  5057765  coarse#4 / fine#9
+#   PeMS   5057767  coarse#1 / fine#2
+#   traffic 5057769 coarse#6 / fine#3
+# Dynamic with-pre fine still incomplete — omit until bests exist.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x_nopretrain.yaml
+replace_phases: true
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p32x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, patience_5, nopretrain, from_random_init, fixed_hp, withpre_best, no_optuna, hz96, caps_crops_1x2x_etth1]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-p32x6-allv-randwin-lr10-cap1x2x-nopretrain-fixedhp
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x_nopretrain_fixedhp
+
+phases:
+  - phase: patch_guidance_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    from_random_init: true
+    n_trials: 1
+    max_epochs: 20
+    patience: 5
+    search_space: fixed
+    fixed_tuned_params:
+      binary_noise_schedule: linear
+      loss_weighting: none
+      min_snr_gamma: 5.0
+      prediction_target: epsilon
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+    fixed_tuned_params_by_dataset:
+      ETTh2:
+        learning_rate: 0.0012306520272612079
+        ema_decay: 0.995
+        target_univariate_batch: 434
+      ETTm1:
+        learning_rate: 0.00034370191906144844
+        ema_decay: 0.995
+        target_univariate_batch: 434
+      ETTm2:
+        learning_rate: 0.00013282424524005128
+        ema_decay: 0.98
+        target_univariate_batch: 868
+      PeMS:
+        learning_rate: 0.0002561264067373431
+        ema_decay: 0.98
+        target_univariate_batch: 434
+      traffic:
+        learning_rate: 0.0003798424000105789
+        ema_decay: 0.995
+        target_univariate_batch: 217
+
+  - phase: diffusion_patch_refine_finetune_hp
+    from_random_init: true
+    n_trials: 1
+    max_epochs: 20
+    patience: 5
+    search_space: fixed
+    fixed_tuned_params:
+      binary_noise_schedule: linear
+      loss_weighting: none
+      min_snr_gamma: 2.0
+      prediction_target: epsilon
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+    fixed_tuned_params_by_dataset:
+      ETTh2:
+        learning_rate: 0.00034972893955420933
+        ema_decay: 0.999
+        target_univariate_batch: 434
+      ETTm1:
+        learning_rate: 0.0012313680415535365
+        ema_decay: 0.99
+        target_univariate_batch: 434
+      ETTm2:
+        learning_rate: 0.00034972893955420933
+        ema_decay: 0.999
+        target_univariate_batch: 434
+      PeMS:
+        learning_rate: 8.594881594258425e-05
+        ema_decay: 0.99
+        target_univariate_batch: 217
+      traffic:
+        learning_rate: 8.594881594258425e-05
+        ema_decay: 0.99
+        target_univariate_batch: 217
+
+  - phase: staged_eval
+    anchor_only: false
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_progress_key: canvas128_allv_randwin_lr10_cap1x2x_nopretrain_fixedhp_s1_n10_steps4
+    eval_max_windows_by_dataset:
+      ETTh1: 1838
+      ETTh2: 1838
+      ETTm1: 1959
+      ETTm2: 1942
+      electricity: 42
+      traffic: 10
+      exchange_rate: 939
+      weather: 1313
+      solar_Alabama: 100
+      PeMS: 50
+      dynamic: 1622
+    n_samples: 1
+    probabilistic_n_samples: 10
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 4
+    batch_size_by_dataset:
+      ETTh1: 5
+      ETTh2: 5
+      ETTm1: 5
+      ETTm2: 5
+      exchange_rate: 5
+      weather: 5
+      solar_Alabama: 5
+      electricity: 1
+      PeMS: 1
+      traffic: 1
+      illness: 5
+      dynamic: 5
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true
