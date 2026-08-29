@@ -22,6 +22,7 @@ mmpd:
     - PeMS
     - solar_Alabama
     - dynamic
+    - illness
   patch_size_default: 12
   patch_size_wide: 24
   train_epochs: 20
