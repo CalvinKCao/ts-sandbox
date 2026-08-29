@@ -27,6 +27,15 @@ from .pipeline.eval_bench import (
 logger = logging.getLogger(__name__)
 
 
+class NoVisiblePatchTransitions(RuntimeError):
+    """Patch-refine microbatch has no partial-occupancy GT columns.
+
+    Raised so the train loop can skip the update instead of applying a masked
+    BCE that would be a silent all-zero loss (fully empty or fully saturated
+    occupancy). Common on near-constant dynamic variates under window-norm.
+    """
+
+
 def beam_search_decoder(
     cdf_map: torch.Tensor,
     bin_centers: torch.Tensor,
@@ -1808,7 +1817,9 @@ class DiffusionTSF(nn.Module):
         # saturated batch would otherwise make the masked BCE a silent zero
         # loss update. Keep it before the denoiser/compiled region.
         if not bool(target_visible.any()):
-            raise RuntimeError("patch_refine batch has no visible GT transitions")
+            raise NoVisiblePatchTransitions(
+                "patch_refine batch has no visible GT transitions"
+            )
         n_patches = target_patches.shape[0]
         if t is None:
             t = torch.randint(0, self.config.binary_num_steps, (n_patches,), device=device)
