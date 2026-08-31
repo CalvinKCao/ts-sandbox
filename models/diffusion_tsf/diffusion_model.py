@@ -420,6 +420,7 @@ class DiffusionTSF(nn.Module):
         )
 
         self._ctx_token_variate_ids: Optional[torch.Tensor] = None
+        self._ctx_key_padding_mask: Optional[torch.Tensor] = None
         if config.guidance_type == "patch_decoder":
             self.context_encoder = None
         else:
@@ -684,6 +685,74 @@ class DiffusionTSF(nn.Module):
         )
         return adapted
 
+    def _encode_pre_mixer_tokens(
+        self,
+        past_raw: torch.Tensor,
+        past_norm: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Frozen per-channel past tokens (B, V, N_past, d) before mixer."""
+        self._ctx_token_variate_ids = None
+        g = self.guidance_model
+        if g is None or not hasattr(g, "encode_past_tokens"):
+            raise RuntimeError(
+                "pre-mixer tokens require PatchDecoderGuidance.encode_past_tokens"
+            )
+        if past_norm is None:
+            past_norm, _, _ = self._normalize_sequence(past_raw, None)
+        return g.encode_past_tokens(past_norm)
+
+    def _mix_pre_mixer_tokens(
+        self,
+        past_tokens: torch.Tensor,
+        src_key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        g = self.guidance_model
+        if g is None or not hasattr(g, "mix_past_tokens"):
+            raise RuntimeError(
+                "channel dropout requires PatchDecoderGuidance.mix_past_tokens"
+            )
+        mixed, var_ids = g.mix_past_tokens(
+            past_tokens, src_key_padding_mask=src_key_padding_mask,
+        )
+        self._ctx_token_variate_ids = var_ids
+        return mixed, var_ids
+
+    def _mix_pre_mixer_tokens_with_channel_dropout(
+        self,
+        past_tokens: torch.Tensor,
+        drop_frac: float,
+    ) -> torch.Tensor:
+        """Sample one keep-mask, mix with it, stash the same mask for DiT x-attn."""
+        from models.diffusion_tsf.channel_dropout import (
+            sample_kept_channel_mask,
+            token_drop_mask_from_channel_keep,
+        )
+
+        batch_size, num_variates, num_patches, _ = past_tokens.shape
+        device = past_tokens.device
+        var_ids = torch.arange(num_variates, device=device).repeat_interleave(num_patches)
+        keep = sample_kept_channel_mask(
+            batch_size,
+            num_variates,
+            drop_frac,
+            training=True,
+            device=device,
+        )
+        pad = (
+            None
+            if keep is None
+            else token_drop_mask_from_channel_keep(keep, var_ids)
+        )
+        mixed, ids = self._mix_pre_mixer_tokens(past_tokens, pad)
+        if ids.shape[0] != num_variates * num_patches:
+            raise RuntimeError(
+                f"mixer must keep full M={num_variates * num_patches} absolute IDs, "
+                f"got {tuple(ids.shape)}"
+            )
+        self._ctx_token_variate_ids = ids
+        self._ctx_key_padding_mask = pad
+        return mixed
+
     def _resolve_cross_variate_context(
         self,
         past: torch.Tensor,
@@ -691,10 +760,43 @@ class DiffusionTSF(nn.Module):
         cached_context: Optional[torch.Tensor] = None,
         cached_token_variate_ids: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
-        """Use phase-cached frozen tokens when provided, otherwise encode live."""
+        """Use phase-cached frozen tokens when provided, otherwise encode live.
+
+        Train-time channel dropout caches *pre-mixer* tokens (4D) and remixes
+        with a sampled keep-mask. Post-mixer cache + DiT-only masking would
+        leak dropped channels through mixer mixing.
+        """
+        self._ctx_key_padding_mask = None
         if self.config.disable_cross_attention:
             return None
+        drop_frac = float(getattr(self.config, "channel_dropout_drop_frac", 0.0))
+        apply_drop = bool(self.training) and drop_frac > 0.0
+        if apply_drop:
+            if getattr(self.config, "guidance_type", "itransformer") != "patch_decoder":
+                raise RuntimeError(
+                    "channel_dropout_drop_frac>0 requires guidance_type=patch_decoder "
+                    "(mixer and DiT x-attn share one keep-mask)"
+                )
+            if float(getattr(self.config, "cfg_dropout", 0.0)) > 0.0:
+                raise RuntimeError(
+                    "channel_dropout_drop_frac>0 is incompatible with cfg_dropout>0"
+                )
+            if cached_context is not None:
+                if cached_context.dim() != 4:
+                    raise RuntimeError(
+                        "channel dropout cannot use post-mixer cached tokens; "
+                        "those already mixed information from dropped channels. "
+                        "Cache pre-mixer past tokens instead."
+                    )
+                past_tokens = cached_context
+            else:
+                past_tokens = self._encode_pre_mixer_tokens(past, past_norm)
+            return self._mix_pre_mixer_tokens_with_channel_dropout(past_tokens, drop_frac)
         if cached_context is not None:
+            if cached_context.dim() == 4:
+                mixed, var_ids = self._mix_pre_mixer_tokens(cached_context, None)
+                self._ctx_token_variate_ids = var_ids
+                return mixed
             self._ctx_token_variate_ids = cached_token_variate_ids
             return cached_context
         return self._get_cross_variate_context(past, past_norm)
@@ -904,34 +1006,6 @@ class DiffusionTSF(nn.Module):
             future = self._upsample_repr_to_raw_horizon(future)
         return future
 
-    def _sample_ctx_key_padding_mask(
-        self,
-        ctx: Optional[torch.Tensor],
-        token_variate_ids: Optional[torch.Tensor],
-    ) -> Optional[torch.Tensor]:
-        """Train-only (n_windows, M) True=drop. None at eval or drop_frac=0."""
-        drop_frac = float(getattr(self.config, "channel_dropout_drop_frac", 0.0))
-        if ctx is None or not self.training or drop_frac <= 0.0:
-            return None
-        from models.diffusion_tsf.channel_dropout import (
-            sample_kept_channel_mask,
-            token_drop_mask_from_channel_keep,
-        )
-        n_windows, n_tok, _ = ctx.shape
-        if token_variate_ids is None:
-            token_variate_ids = torch.arange(n_tok, device=ctx.device, dtype=torch.long)
-        n_variates = int(token_variate_ids.max().item()) + 1
-        keep = sample_kept_channel_mask(
-            n_windows,
-            n_variates,
-            drop_frac,
-            training=True,
-            device=ctx.device,
-        )
-        if keep is None:
-            return None
-        return token_drop_mask_from_channel_keep(keep, token_variate_ids)
-
     def _predict_noise_chunked(
         self,
         canvas: torch.Tensor,
@@ -948,7 +1022,18 @@ class DiffusionTSF(nn.Module):
         return_cross_attn_weights: bool = False,
     ) -> torch.Tensor:
         """Run the denoiser with the same chunking rule used by training/eval."""
-        ctx_pad = self._sample_ctx_key_padding_mask(ctx_flat, token_variate_ids)
+        ctx_pad = self._ctx_key_padding_mask
+        drop_frac = float(getattr(self.config, "channel_dropout_drop_frac", 0.0))
+        if (
+            self.training
+            and drop_frac > 0.0
+            and ctx_flat is not None
+            and ctx_pad is None
+        ):
+            raise RuntimeError(
+                "channel dropout is on but mixer/DiT pad mask is missing; "
+                "the keep-mask must be sampled once and shared"
+            )
         chunk_size = self.config.unet_max_chunk_size
         n_items = canvas.shape[0]
         eval_bench_note("dit_n_items", n_items)
@@ -961,6 +1046,7 @@ class DiffusionTSF(nn.Module):
                 c_t = t_flat[i:end] if t_flat.shape[0] == n_items else t_flat
                 c_cond = cond_for_unet[i:end] if cond_for_unet is not None else None
                 c_ctx = ctx_flat
+                c_pad = ctx_pad
                 c_context_windows = (
                     context_window_indices[i:end]
                     if context_window_indices is not None
@@ -968,6 +1054,8 @@ class DiffusionTSF(nn.Module):
                 )
                 if c_ctx is not None and c_context_windows is None:
                     c_ctx = c_ctx[i:end]
+                    if c_pad is not None:
+                        c_pad = c_pad[i:end]
                 c_scale = scale_indices[i:end] if scale_indices is not None else None
                 c_var = variate_indices[i:end] if variate_indices is not None else None
                 c_bin = patch_coarse_bin[i:end] if patch_coarse_bin is not None else None
@@ -977,7 +1065,7 @@ class DiffusionTSF(nn.Module):
                     "encoder_hidden_states": c_ctx,
                     "token_variate_ids": token_variate_ids,
                     "context_window_indices": c_context_windows,
-                    "ctx_key_padding_mask": ctx_pad,
+                    "ctx_key_padding_mask": c_pad,
                     "return_cross_attn_weights": return_cross_attn_weights and i == 0,
                 }
                 if c_scale is not None:

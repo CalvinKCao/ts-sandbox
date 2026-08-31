@@ -1,6 +1,7 @@
 # Weather allv_randwin cap1x2x: P=24 guidance patches (vs default 12).
-# With-pre, locked with-pre Optuna HPs (weather coarse 3.80e-4/U217/ema0.995,
-# fine 1.23e-3 / U434 / ema 0.99). No Optuna search.
+# With-pre. Coarse/fine lock weather with-pre Optuna HPs (search_space=fixed).
+# Guidance stays n_trials=1 like the 0.150 parent (one Optuna LR draw — not a
+# locked guidance LR; matching parent is apples-to-apples).
 extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x.yaml
 replace_phases: true
 

@@ -1724,10 +1724,13 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                 and bool(self.get("cache_cross_variate_tokens", True))
                 and token_cache is None
             ):
+                drop_frac = float(getattr(state, "channel_dropout_drop_frac", 0.0))
+                token_kind = "pre_mixer" if drop_frac > 0.0 else "mixed"
                 token_cache = CrossVariateTokenCache(
                     model=model,
                     device=device,
                     storage=str(self.get("cross_variate_token_cache_storage", "pinned_cpu")),
+                    token_kind=token_kind,
                 )
                 stable_train = not _has_train_window_augmentation(train_ds)
                 n_cache = count_cache_windows(val_ds)

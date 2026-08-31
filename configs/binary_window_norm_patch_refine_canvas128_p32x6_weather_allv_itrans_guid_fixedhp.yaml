@@ -1,5 +1,6 @@
 # Weather allv_randwin cap1x2x: iTransformer encoder tokens for DiT x-attn
 # (no 2D guidance channel). With-pre diffusion, locked weather with-pre HPs.
+# Guidance stays n_trials=1 like the 0.150 parent (one Optuna LR draw).
 extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x.yaml
 replace_phases: true
 

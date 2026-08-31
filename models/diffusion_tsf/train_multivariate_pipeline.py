@@ -2094,6 +2094,32 @@ def run_itransformer_finetune_hp_tuning(
         stride=train_stride or state.window_stride,
         test_stride=1 if test_stride is None else test_stride,
     )
+    from models.diffusion_tsf.pipeline.data_subset import random_window_subset
+    subset_meta = state.data_subset_resolved or {}
+    train_cap = subset_meta.get("train_max_windows")
+    val_cap = subset_meta.get("val_max_windows")
+    train_ds = random_window_subset(
+        train_ds,
+        train_cap,
+        int(state.seed) + 17,
+        label="itrans_ft/train",
+    )
+    val_ds = random_window_subset(
+        val_ds,
+        val_cap,
+        int(state.seed) + 29,
+        label="itrans_ft/val",
+    )
+    if train_cap is not None and len(train_ds) > int(train_cap):
+        raise RuntimeError(
+            f"itrans_ft/train: train_max_windows={int(train_cap)} was ignored "
+            f"({len(train_ds)} windows remain)"
+        )
+    if val_cap is not None and len(val_ds) > int(val_cap):
+        raise RuntimeError(
+            f"itrans_ft/val: val_max_windows={int(val_cap)} was ignored "
+            f"({len(val_ds)} windows remain)"
+        )
     if smoke_test:
         train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
         val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))

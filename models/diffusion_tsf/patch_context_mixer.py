@@ -46,10 +46,15 @@ class PatchContextMixer(nn.Module):
     def forward(
         self,
         past_tokens: torch.Tensor,
+        src_key_padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             past_tokens: (B, V, N_past, d_in)
+            src_key_padding_mask: optional (B, M) True=drop. When omitted, sample
+                from ``channel_dropout_drop_frac`` only if this module is in train
+                mode. Callers that keep the mixer in eval (frozen diffusion
+                guidance) must pass the mask explicitly.
 
         Returns:
             mixed: (B, M, d_out) where M = V * N_past
@@ -62,23 +67,30 @@ class PatchContextMixer(nn.Module):
 
         batch_size, num_variates, num_patches, _ = past_tokens.shape
         device = past_tokens.device
-        flat = past_tokens.reshape(batch_size, num_variates * num_patches, -1)
+        n_tok = num_variates * num_patches
+        flat = past_tokens.reshape(batch_size, n_tok, -1)
         x = self.in_proj(flat)
 
         var_ids = torch.arange(num_variates, device=device).repeat_interleave(num_patches)
         patch_ids = torch.arange(num_patches, device=device).repeat(num_variates)
         x = x + self.channel_embed(var_ids)[None, :, :] + self.patch_slot_embed(patch_ids)[None, :, :]
 
-        pad_mask = None
-        keep = sample_kept_channel_mask(
-            batch_size,
-            num_variates,
-            float(self.channel_dropout_drop_frac),
-            training=self.training,
-            device=device,
-        )
-        if keep is not None:
-            pad_mask = token_drop_mask_from_channel_keep(keep, var_ids)
+        pad_mask = src_key_padding_mask
+        if pad_mask is None:
+            keep = sample_kept_channel_mask(
+                batch_size,
+                num_variates,
+                float(self.channel_dropout_drop_frac),
+                training=self.training,
+                device=device,
+            )
+            if keep is not None:
+                pad_mask = token_drop_mask_from_channel_keep(keep, var_ids)
+        elif pad_mask.shape != (batch_size, n_tok):
+            raise ValueError(
+                f"src_key_padding_mask must be {(batch_size, n_tok)}, "
+                f"got {tuple(pad_mask.shape)}"
+            )
 
         x = self.encoder(x, src_key_padding_mask=pad_mask)
         x = self.norm(self.out_proj(x))

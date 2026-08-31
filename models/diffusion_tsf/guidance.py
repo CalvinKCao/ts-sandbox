@@ -300,13 +300,33 @@ class PatchDecoderGuidance(BaseGuidance):
             return x
         return ranks_from_unit(x, ladder)
 
+    def _prepare_past(self, past: torch.Tensor) -> torch.Tensor:
+        if past.dim() == 2:
+            past = past.unsqueeze(1)
+        return self._to_model_space(past)
+
+    @torch.no_grad()
+    def encode_past_tokens(self, past: torch.Tensor) -> torch.Tensor:
+        """Per-channel past tokens (B, V, N_past, d) before mixer mixing."""
+        return self.stack.decoder.encode_past_tokens(self._prepare_past(past))
+
+    @torch.no_grad()
+    def mix_past_tokens(
+        self,
+        past_tokens: torch.Tensor,
+        src_key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Mix full-M tokens. Optional pad mask is True=drop (eval-safe)."""
+        mixed, var_ids = self.stack.mixer(
+            past_tokens, src_key_padding_mask=src_key_padding_mask,
+        )
+        self._token_variate_ids = var_ids
+        return mixed, var_ids
+
     @torch.no_grad()
     def get_encoder_tokens(self, past: torch.Tensor) -> torch.Tensor:
         """Return mixed patch context tokens (B, M, context_dim)."""
-        if past.dim() == 2:
-            past = past.unsqueeze(1)
-        past = self._to_model_space(past)
-        mixed, var_ids = self.stack.encode_context(past)
+        mixed, var_ids = self.stack.encode_context(self._prepare_past(past))
         self._token_variate_ids = var_ids
         return mixed
 
