@@ -67,9 +67,13 @@ class PatchGuidanceStack(nn.Module):
     def set_channel_dropout_drop_frac(self, drop_frac: float) -> None:
         self.mixer.channel_dropout_drop_frac = float(drop_frac)
 
-    def encode_context(self, past: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def encode_context(
+        self,
+        past: torch.Tensor,
+        src_key_padding_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         past_tokens = self.decoder.encode_past_tokens(past)
-        return self.mixer(past_tokens)
+        return self.mixer(past_tokens, src_key_padding_mask=src_key_padding_mask)
 
     def forecast(self, past: torch.Tensor) -> torch.Tensor:
         return self.decoder.forecast(past)

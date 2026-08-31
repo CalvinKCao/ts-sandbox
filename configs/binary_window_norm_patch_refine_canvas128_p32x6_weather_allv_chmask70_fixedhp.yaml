@@ -1,6 +1,7 @@
 # Weather allv_randwin cap1x2x: train-only 70% channel drop in mixer + DiT
 # x-attn (full V encoded, absolute IDs, eval uses 100% V).
-# With-pre, locked weather with-pre HPs. No Optuna search.
+# With-pre. Coarse/fine lock weather with-pre HPs. Guidance stays n_trials=1
+# like the 0.150 parent (one Optuna LR draw, not a locked guidance LR).
 extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x.yaml
 replace_phases: true
 

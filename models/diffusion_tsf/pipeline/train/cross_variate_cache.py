@@ -73,6 +73,7 @@ class CrossVariateTokenCache:
         model,
         device: torch.device,
         storage: str = "pinned_cpu",
+        token_kind: str = "mixed",
     ) -> None:
         if model.config.disable_cross_attention:
             raise ValueError("CrossVariateTokenCache requires cross-attention enabled")
@@ -83,9 +84,21 @@ class CrossVariateTokenCache:
             )
         if storage == "pinned_cpu" and device.type != "cuda":
             raise ValueError("pinned_cpu token caching requires a CUDA training device")
+        if token_kind not in {"mixed", "pre_mixer"}:
+            raise ValueError(
+                f"token_kind must be 'mixed' or 'pre_mixer', got {token_kind!r}"
+            )
+        drop_frac = float(getattr(model.config, "channel_dropout_drop_frac", 0.0))
+        if drop_frac > 0.0 and token_kind == "mixed":
+            raise RuntimeError(
+                "channel_dropout_drop_frac>0 cannot cache post-mixer tokens "
+                "(dropped channels would already be mixed in). "
+                "Use token_kind='pre_mixer'."
+            )
         self.model = model
         self.device = device
         self.storage = storage
+        self.token_kind = token_kind
         self._entries: Dict[str, torch.Tensor | int] = {}
         self._packed_cpu: Optional[torch.Tensor] = None
         self._token_variate_ids: Optional[torch.Tensor] = None
@@ -172,10 +185,22 @@ class CrossVariateTokenCache:
 
         with amp_context(bool(self.model.config.use_amp)):
             norm, _, _ = self.model._normalize_sequence(source, None)
-            tokens = self.model._get_cross_variate_context(source, norm)
+            if self.token_kind == "pre_mixer":
+                tokens = self.model._encode_pre_mixer_tokens(source, norm)
+            else:
+                tokens = self.model._get_cross_variate_context(source, norm)
         if tokens is None:
             raise RuntimeError("cross-attention unexpectedly produced no context tokens")
-        ids = self.model._ctx_token_variate_ids
+        if self.token_kind == "pre_mixer":
+            if tokens.dim() != 4:
+                raise RuntimeError(
+                    f"pre_mixer cache expects (B, V, N_past, d), got {tuple(tokens.shape)}"
+                )
+        elif tokens.dim() != 3:
+            raise RuntimeError(
+                f"mixed cache expects (B, M, d), got {tuple(tokens.shape)}"
+            )
+        ids = None if self.token_kind == "pre_mixer" else self.model._ctx_token_variate_ids
         if ids is not None:
             ids = ids.detach().to(self.device).clone()
             if self._token_variate_ids is None:
