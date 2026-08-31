@@ -64,6 +64,9 @@ class PatchGuidanceStack(nn.Module):
         self.mixer = PatchContextMixer(mixer_cfg)
         self.token_recon = nn.Linear(config.context_dim, config.decoder_d_model)
 
+    def set_channel_dropout_drop_frac(self, drop_frac: float) -> None:
+        self.mixer.channel_dropout_drop_frac = float(drop_frac)
+
     def encode_context(self, past: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         past_tokens = self.decoder.encode_past_tokens(past)
         return self.mixer(past_tokens)

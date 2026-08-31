@@ -345,6 +345,8 @@ def normalize_guidance_phases(
         name = str(entry["phase"])
         if guidance_type == "patch_decoder" and name == "itrans_finetune_hp":
             continue
+        if guidance_type == "itransformer" and name == "patch_guidance_finetune_hp":
+            continue
         by_name[name] = dict(entry)
         kept.append(dict(entry))
     exp = experiment or {}
@@ -359,6 +361,7 @@ def normalize_guidance_phases(
     preferred = (
         "staged_diffusion_pretrain",
         "patch_guidance_finetune_hp",
+        "itrans_finetune_hp",
         "diffusion_coarse_finetune_hp",
         "diffusion_patch_refine_finetune_hp",
     )

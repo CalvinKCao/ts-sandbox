@@ -677,7 +677,12 @@ class DiffusionTSF(nn.Module):
             enc_tokens = self.guidance_model.get_encoder_tokens(past_raw)
         if self.context_encoder is None:
             raise RuntimeError("itransformer guidance requires context_encoder.")
-        return self.context_encoder(enc_tokens)
+        adapted = self.context_encoder(enc_tokens)
+        n_tok = int(adapted.shape[1])
+        self._ctx_token_variate_ids = torch.arange(
+            n_tok, device=adapted.device, dtype=torch.long,
+        )
+        return adapted
 
     def _resolve_cross_variate_context(
         self,
@@ -898,7 +903,35 @@ class DiffusionTSF(nn.Module):
         elif trim_overlap and self._representation_time_stride() > 1:
             future = self._upsample_repr_to_raw_horizon(future)
         return future
-    
+
+    def _sample_ctx_key_padding_mask(
+        self,
+        ctx: Optional[torch.Tensor],
+        token_variate_ids: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        """Train-only (n_windows, M) True=drop. None at eval or drop_frac=0."""
+        drop_frac = float(getattr(self.config, "channel_dropout_drop_frac", 0.0))
+        if ctx is None or not self.training or drop_frac <= 0.0:
+            return None
+        from models.diffusion_tsf.channel_dropout import (
+            sample_kept_channel_mask,
+            token_drop_mask_from_channel_keep,
+        )
+        n_windows, n_tok, _ = ctx.shape
+        if token_variate_ids is None:
+            token_variate_ids = torch.arange(n_tok, device=ctx.device, dtype=torch.long)
+        n_variates = int(token_variate_ids.max().item()) + 1
+        keep = sample_kept_channel_mask(
+            n_windows,
+            n_variates,
+            drop_frac,
+            training=True,
+            device=ctx.device,
+        )
+        if keep is None:
+            return None
+        return token_drop_mask_from_channel_keep(keep, token_variate_ids)
+
     def _predict_noise_chunked(
         self,
         canvas: torch.Tensor,
@@ -915,6 +948,7 @@ class DiffusionTSF(nn.Module):
         return_cross_attn_weights: bool = False,
     ) -> torch.Tensor:
         """Run the denoiser with the same chunking rule used by training/eval."""
+        ctx_pad = self._sample_ctx_key_padding_mask(ctx_flat, token_variate_ids)
         chunk_size = self.config.unet_max_chunk_size
         n_items = canvas.shape[0]
         eval_bench_note("dit_n_items", n_items)
@@ -943,6 +977,7 @@ class DiffusionTSF(nn.Module):
                     "encoder_hidden_states": c_ctx,
                     "token_variate_ids": token_variate_ids,
                     "context_window_indices": c_context_windows,
+                    "ctx_key_padding_mask": ctx_pad,
                     "return_cross_attn_weights": return_cross_attn_weights and i == 0,
                 }
                 if c_scale is not None:
@@ -961,6 +996,7 @@ class DiffusionTSF(nn.Module):
             "encoder_hidden_states": ctx_flat,
             "token_variate_ids": token_variate_ids,
             "context_window_indices": context_window_indices,
+            "ctx_key_padding_mask": ctx_pad,
             "return_cross_attn_weights": return_cross_attn_weights,
         }
         if scale_indices is not None:

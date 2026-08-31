@@ -372,7 +372,9 @@ def create_patch_guidance_stack(
         patch_size=int(patch_size or state.mmpd_patch_size),
         data_dim=int(num_vars),
     )
-    return PatchGuidanceStack(cfg)
+    stack = PatchGuidanceStack(cfg)
+    stack.set_channel_dropout_drop_frac(float(getattr(state, "channel_dropout_drop_frac", 0.0)))
+    return stack
 
 
 def wrap_patch_guidance(state: PipelineState, stack: PatchGuidanceStack) -> PatchDecoderGuidance:
@@ -400,6 +402,7 @@ def load_patch_guidance_from_checkpoint(
     cfg_dict.setdefault("patch_size", state.mmpd_patch_size)
     cfg = PatchGuidanceStackConfig(**cfg_dict)
     stack = PatchGuidanceStack(cfg).to(device)
+    stack.set_channel_dropout_drop_frac(float(getattr(state, "channel_dropout_drop_frac", 0.0)))
     stack.load_state_dict(ckpt["model_state_dict"], strict=True)
     stack.eval()
     return stack
@@ -415,10 +418,20 @@ def load_wrapped_guidance(
     dataset_lookback: Optional[int] = None,
     dataset_horizon: Optional[int] = None,
 ):
-    """Load finetuned patch_decoder guidance."""
+    """Load finetuned patch_decoder or iTransformer encoder tokens for DiT x-attn."""
     gtype = guidance_type or state.guidance_type
+    if gtype == "itransformer":
+        ds_lb = dataset_lookback
+        ds_hz = dataset_horizon
+        if ds_lb is None or ds_hz is None:
+            resolved_lb, resolved_hz = dataset_window_lengths(state, state.dataset)
+            ds_lb = ds_lb if ds_lb is not None else resolved_lb
+            ds_hz = ds_hz if ds_hz is not None else resolved_hz
+        seq_len, pred_len = itrans_model_lengths(state, int(ds_lb), int(ds_hz))
+        model = load_itransformer_from_checkpoint(state, ckpt_path, num_vars, device)
+        return wrap_itrans_guidance(model, state, seq_len=seq_len, pred_len=pred_len)
     if gtype != "patch_decoder":
-        raise ValueError(f"Only patch_decoder guidance is supported; got {gtype!r}")
+        raise ValueError(f"Only patch_decoder or itransformer guidance is supported; got {gtype!r}")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     if not _checkpoint_is_patch_guidance(ckpt):
         raise ValueError(
@@ -1077,7 +1090,7 @@ def create_itransformer(
 
 
 def load_itransformer_from_checkpoint(
-    state: PipelineState,
+    pipe_state: PipelineState,
     path: str,
     num_vars: int,
     device: torch.device,
@@ -1090,34 +1103,34 @@ def load_itransformer_from_checkpoint(
     hardcoded fallback list.
     """
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    state = ckpt['model_state_dict']
+    sd = ckpt['model_state_dict']
     weight_key = 'enc_embedding.value_embedding.weight'
-    if weight_key not in state:
+    if weight_key not in sd:
         raise RuntimeError(
             f"iTransformer checkpoint {path} is missing key {weight_key!r}; "
             f"cannot infer seq_len."
         )
-    ckpt_seq_len = int(state[weight_key].shape[1])
+    ckpt_seq_len = int(sd[weight_key].shape[1])
     proj_key = 'projector.weight'
-    if proj_key in state:
-        ckpt_pred_len = int(state[proj_key].shape[0])
+    if proj_key in sd:
+        ckpt_pred_len = int(sd[proj_key].shape[0])
     else:
-        ckpt_pred_len = state.forecast_length
+        ckpt_pred_len = pipe_state.forecast_length
 
     model = create_itransformer(
-        state, seq_len=ckpt_seq_len,
+        pipe_state, seq_len=ckpt_seq_len,
         pred_len=ckpt_pred_len,
         num_vars=num_vars,
     ).to(device)
     try:
-        model.load_state_dict(state, strict=True)
+        model.load_state_dict(sd, strict=True)
     except RuntimeError as e:
         raise RuntimeError(
             f"Cannot load iTransformer checkpoint {path} "
             f"(inferred seq_len={ckpt_seq_len}): {e}"
         ) from e
     model.eval()
-    expected_seq_len = state.itrans_lookback_length or state.lookback_length
+    expected_seq_len = pipe_state.itrans_lookback_length or pipe_state.lookback_length
     if ckpt_seq_len != expected_seq_len:
         logger.warning(
             f"iTransformer checkpoint {path} has seq_len={ckpt_seq_len}, "
@@ -1301,6 +1314,9 @@ def create_diffusion_model(
             o("binary_cdf_distance_alpha", state.binary_cdf_distance_alpha)
         ),
         cross_variate_context_bias=state.cross_variate_context_bias,
+        channel_dropout_drop_frac=float(
+            getattr(state, "channel_dropout_drop_frac", 0.0)
+        ),
         cfg_dropout=state.cfg_dropout,
         binary_num_steps=o("binary_num_steps", state.binary_num_steps),
         binary_beta_start=o("binary_beta_start", state.binary_beta_start),

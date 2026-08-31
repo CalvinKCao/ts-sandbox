@@ -28,6 +28,7 @@ class PatchContextMixer(nn.Module):
     def __init__(self, config: PatchContextMixerConfig):
         super().__init__()
         self.config = config
+        self.channel_dropout_drop_frac = 0.0
         self.in_proj = nn.Linear(config.d_in, config.d_model)
         self.channel_embed = nn.Embedding(config.max_variates, config.d_model)
         self.patch_slot_embed = nn.Embedding(config.max_past_patches, config.d_model)
@@ -54,6 +55,11 @@ class PatchContextMixer(nn.Module):
             mixed: (B, M, d_out) where M = V * N_past
             token_variate_ids: (M,) long, variate index per token
         """
+        from models.diffusion_tsf.channel_dropout import (
+            sample_kept_channel_mask,
+            token_drop_mask_from_channel_keep,
+        )
+
         batch_size, num_variates, num_patches, _ = past_tokens.shape
         device = past_tokens.device
         flat = past_tokens.reshape(batch_size, num_variates * num_patches, -1)
@@ -63,6 +69,17 @@ class PatchContextMixer(nn.Module):
         patch_ids = torch.arange(num_patches, device=device).repeat(num_variates)
         x = x + self.channel_embed(var_ids)[None, :, :] + self.patch_slot_embed(patch_ids)[None, :, :]
 
-        x = self.encoder(x)
+        pad_mask = None
+        keep = sample_kept_channel_mask(
+            batch_size,
+            num_variates,
+            float(self.channel_dropout_drop_frac),
+            training=self.training,
+            device=device,
+        )
+        if keep is not None:
+            pad_mask = token_drop_mask_from_channel_keep(keep, var_ids)
+
+        x = self.encoder(x, src_key_padding_mask=pad_mask)
         x = self.norm(self.out_proj(x))
         return x, var_ids
