@@ -87,6 +87,7 @@ class _CrossAttention(nn.Module):
         ctx: torch.Tensor,
         attn_bias: Optional[torch.Tensor] = None,
         context_window_indices: Optional[torch.Tensor] = None,
+        ctx_key_padding_mask: Optional[torch.Tensor] = None,
         return_attn_weights: bool = False,
     ):
         B, N, C = x.shape
@@ -96,6 +97,17 @@ class _CrossAttention(nn.Module):
             ctx_batch, M, 2, self.num_heads, self.head_dim
         ).permute(2, 0, 3, 1, 4)
         k, v = kv.unbind(0)
+        pad_bias = None
+        if ctx_key_padding_mask is not None:
+            if ctx_key_padding_mask.shape != (ctx_batch, M):
+                raise ValueError(
+                    f"ctx_key_padding_mask must be {(ctx_batch, M)}, "
+                    f"got {tuple(ctx_key_padding_mask.shape)}"
+                )
+            pad_bias = torch.zeros(
+                ctx_batch, M, device=ctx.device, dtype=q.dtype,
+            )
+            pad_bias = pad_bias.masked_fill(ctx_key_padding_mask, torch.finfo(q.dtype).min)
         if context_window_indices is not None:
             if context_window_indices.shape != (B,):
                 raise ValueError(
@@ -112,6 +124,9 @@ class _CrossAttention(nn.Module):
                 if attn_bias is not None
                 else None
             )
+            if pad_bias is not None:
+                pad_rows = pad_bias.index_select(0, context_window_indices)[:, None, None, :]
+                bias_rows = pad_rows if bias_rows is None else bias_rows + pad_rows
             if return_attn_weights:
                 logits = torch.matmul(q, k.transpose(-2, -1)) * (self.head_dim ** -0.5)
                 if bias_rows is not None:
@@ -131,6 +146,8 @@ class _CrossAttention(nn.Module):
             return out
         if ctx_batch != B:
             raise ValueError(f"ctx batch {ctx_batch} != query batch {B}")
+        if pad_bias is not None:
+            attn_bias = pad_bias if attn_bias is None else attn_bias + pad_bias
         if return_attn_weights:
             scale = self.head_dim ** -0.5
             attn_logits = torch.matmul(q, k.transpose(-2, -1)) * scale
@@ -140,7 +157,6 @@ class _CrossAttention(nn.Module):
             out = torch.matmul(attn_weights, v)
             out = out.transpose(1, 2).reshape(B, N, C)
             out = self.proj(out)
-            # mean over heads and query tokens -> (B, M)
             mean_weights = attn_weights.mean(dim=(1, 2))
             return out, mean_weights
         if attn_bias is not None:
@@ -231,6 +247,7 @@ class _DiTCrossAttnBlock(nn.Module):
         variate_indices: Optional[torch.Tensor] = None,
         token_variate_ids: Optional[torch.Tensor] = None,
         context_window_indices: Optional[torch.Tensor] = None,
+        ctx_key_padding_mask: Optional[torch.Tensor] = None,
         return_attn_weights: bool = False,
     ):
         mods = self.adaLN(c).chunk(12 if self.enable_cross_scale_attention else 9, dim=-1)
@@ -283,6 +300,7 @@ class _DiTCrossAttnBlock(nn.Module):
                     ctx,
                     attn_bias=attn_bias,
                     context_window_indices=context_window_indices,
+                    ctx_key_padding_mask=ctx_key_padding_mask,
                     return_attn_weights=True,
                 )
             else:
@@ -291,6 +309,7 @@ class _DiTCrossAttnBlock(nn.Module):
                     ctx,
                     attn_bias=attn_bias,
                     context_window_indices=context_window_indices,
+                    ctx_key_padding_mask=ctx_key_padding_mask,
                 )
             x = x + gx.unsqueeze(1) * cross_out
         if self.enable_cross_scale_attention:
@@ -504,6 +523,7 @@ class FactorizedDiT(nn.Module):
         patch_coarse_bin: Optional[torch.Tensor] = None,
         patch_time0: Optional[torch.Tensor] = None,
         horizon_chunk_emb: Optional[torch.Tensor] = None,
+        ctx_key_padding_mask: Optional[torch.Tensor] = None,
         return_cross_attn_weights: bool = False,
     ):
         BV, _, H, W = x.shape
@@ -647,6 +667,7 @@ class FactorizedDiT(nn.Module):
                                 block_variate,
                                 token_variate_ids=token_variate_ids,
                                 context_window_indices=block_context_windows,
+                                ctx_key_padding_mask=ctx_key_padding_mask,
                             )
 
                         tokens = checkpoint(
@@ -664,6 +685,7 @@ class FactorizedDiT(nn.Module):
                         tokens, t_emb, ctx_proj, scale_indices, variate_indices,
                         token_variate_ids=token_variate_ids,
                         context_window_indices=context_window_indices,
+                        ctx_key_padding_mask=ctx_key_padding_mask,
                         return_attn_weights=True,
                     )
                     self._diag_cross_attn_weights = attn_w
@@ -672,6 +694,7 @@ class FactorizedDiT(nn.Module):
                         tokens, t_emb, ctx_proj, scale_indices, variate_indices,
                         token_variate_ids=token_variate_ids,
                         context_window_indices=context_window_indices,
+                        ctx_key_padding_mask=ctx_key_padding_mask,
                     )
             else:
                 if self.gradient_checkpointing and self.training:

@@ -61,6 +61,9 @@ class DiffusionTSFConfig:
     use_variate_embedding: bool = True
     disable_cross_attention: bool = False
     cross_variate_context_bias: float = 0.0
+    # Train-only: drop this fraction of channels in mixer/DiT x-attn (keep rest).
+    # Encode still uses full V; eval uses drop_frac=0.
+    channel_dropout_drop_frac: float = 0.0
 
     # 2d mapping (hard binary CDF, no vertical blur)
     image_height: int = 16
@@ -198,6 +201,11 @@ class DiffusionTSFConfig:
         if self.binary_cdf_distance_alpha < 0.0:
             raise ValueError(
                 f"binary_cdf_distance_alpha must be >= 0, got {self.binary_cdf_distance_alpha}"
+            )
+        if not (0.0 <= float(self.channel_dropout_drop_frac) < 1.0):
+            raise ValueError(
+                "channel_dropout_drop_frac must be in [0, 1), "
+                f"got {self.channel_dropout_drop_frac}"
             )
         if self.binary_anchor_input_mode not in {"stationary_flat", "random_bits"}:
             raise ValueError(
