@@ -16,6 +16,7 @@ experiment:
 
 phases:
   - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
     reuse_pretrain_from_config: binary_window_norm_patch_refine_canvas128_p32x6_pretrain
     require_reuse_pretrain: true
 
