@@ -101,6 +101,9 @@ REMOVED_EXPERIMENT_KEYS = frozenset({
     "use_guidance_channel",
     "guidance_placement",
     "zero_guidance_forecast",
+    "channel_dropout_drop_frac",
+    "patch_guidance_finetune_ckpt",
+    "patch_guidance_hp_finetune_max_epochs",
     "patch_refine_flatline_keep_frac",
     "patch_refine_flatline_seed",
     "patch_refine_flatline_min_run",
@@ -334,33 +337,37 @@ def normalize_guidance_phases(
     *,
     experiment: Optional[Dict[str, Any]] = None,
 ) -> list:
-    """Normalize merged phase lists for the live guidance and patch-refine path.
+    """Normalize merged phase lists for iTransformer guidance + patch-refine.
 
     Duplicate ``staged_eval`` entries are kept in YAML order so one job can run
     det-then-prob at different strides.
     """
+    if guidance_type != "itransformer":
+        raise ValueError(
+            f"Only guidance_type='itransformer' is supported; got {guidance_type!r}. "
+            "Patch-decoder guidance has been removed."
+        )
     by_name: Dict[str, Dict[str, Any]] = {}
     kept: list = []
     for entry in phases:
         name = str(entry["phase"])
-        if guidance_type == "patch_decoder" and name == "itrans_finetune_hp":
-            continue
-        if guidance_type == "itransformer" and name == "patch_guidance_finetune_hp":
-            continue
+        if name == "patch_guidance_finetune_hp":
+            raise ValueError(
+                "phase 'patch_guidance_finetune_hp' has been removed; "
+                "use itrans_finetune_hp"
+            )
         by_name[name] = dict(entry)
         kept.append(dict(entry))
     exp = experiment or {}
     needs_guidance = not bool(exp.get("disable_cross_attention", False))
     if not needs_guidance:
-        by_name.pop("patch_guidance_finetune_hp", None)
         by_name.pop("itrans_finetune_hp", None)
         kept = [
             e for e in kept
-            if str(e["phase"]) not in {"patch_guidance_finetune_hp", "itrans_finetune_hp"}
+            if str(e["phase"]) != "itrans_finetune_hp"
         ]
     preferred = (
         "staged_diffusion_pretrain",
-        "patch_guidance_finetune_hp",
         "itrans_finetune_hp",
         "diffusion_coarse_finetune_hp",
         "diffusion_patch_refine_finetune_hp",
@@ -528,7 +535,7 @@ def load_experiment_config(
             cfg["_cli_state_overrides"] = state_overrides
 
     validate_config(cfg)
-    guidance_type = str(cfg.get("experiment", {}).get("guidance_type", "patch_decoder"))
+    guidance_type = str(cfg.get("experiment", {}).get("guidance_type", "itransformer"))
     cfg["phases"] = normalize_guidance_phases(
         cfg["phases"],
         guidance_type,

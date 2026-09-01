@@ -11,11 +11,9 @@ Example:
     --n-random 2 --n-worst 3
 
   python utils/visualize_staged_eval_2d_preds.py \\
-    --checkpoint-dir results/ckpts/07-04-4053057-dynamic-..._healthy_norm_retrain \\
+    --checkpoint-dir results/ckpts/07-04-4053057-dynamic-... \\
     --dataset dynamic \\
-    --config configs/binary_anchor_ar_patch_decoder_ctx_healthy_norm_retrain.yaml \\
-    --results-dir results/datasets/07-04-4053057-dynamic-..._healthy_norm_retrain \\
-    --guidance-type patch_decoder --n-random 2 --n-worst 3
+    --n-random 2 --n-worst 3
 """
 
 from __future__ import annotations
@@ -90,23 +88,14 @@ def _resolve_guidance_ckpt(
     subset_id: str,
     guidance_type: str,
 ) -> Tuple[Path, str]:
-    patch_path = checkpoint_dir / f"{subset_id}_patch_guidance.pt"
     itrans_path = checkpoint_dir / f"{subset_id}_itransformer_finetuned.pt"
-    if guidance_type == "patch_decoder":
-        if not patch_path.is_file():
-            raise FileNotFoundError(f"Missing patch guidance ckpt: {patch_path}")
-        return patch_path, "patch_decoder"
-    if guidance_type == "itransformer":
+    if guidance_type in {"auto", "itransformer", ""}:
         if not itrans_path.is_file():
             raise FileNotFoundError(f"Missing iTrans guidance ckpt: {itrans_path}")
         return itrans_path, "itransformer"
-    if patch_path.is_file():
-        return patch_path, "patch_decoder"
-    if itrans_path.is_file():
-        return itrans_path, "itransformer"
-    raise FileNotFoundError(
-        f"Missing guidance ckpt under {checkpoint_dir} "
-        f"(expected {patch_path.name} or {itrans_path.name})"
+    raise ValueError(
+        f"Only guidance_type='itransformer' is supported; got {guidance_type!r}. "
+        "Patch-decoder guidance has been removed."
     )
 
 
@@ -556,9 +545,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--config", default=DEFAULT_CONFIG)
     p.add_argument(
         "--guidance-type",
-        choices=("auto", "patch_decoder", "itransformer"),
-        default="auto",
-        help="Guidance ckpt to load (auto prefers patch_guidance.pt when present)",
+        choices=("auto", "itransformer"),
+        default="itransformer",
+        help="Guidance ckpt to load (iTransformer finetuned tokens)",
     )
     p.add_argument(
         "--test-stride",

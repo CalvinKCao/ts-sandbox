@@ -27,7 +27,7 @@ experiment:
       val_max_windows: null
 
 phases:
-  - phase: patch_guidance_finetune_hp
+  - phase: itrans_finetune_hp
     n_trials: 1
     max_epochs: 10
 

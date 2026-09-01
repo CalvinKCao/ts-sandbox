@@ -44,7 +44,7 @@ phases:
     reuse_pretrain_from_config: binary_window_norm_patch_refine_canvas128_p64x6
     require_reuse_pretrain: true
 
-  - phase: patch_guidance_finetune_hp
+  - phase: itrans_finetune_hp
     n_trials: 1
     max_epochs: 10
     reuse_checkpoint_dir: /scratch/ccao87/ts-sandbox-allv-randwin-lr10/results/ckpts/08-22-4964361-ETTh1-binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10

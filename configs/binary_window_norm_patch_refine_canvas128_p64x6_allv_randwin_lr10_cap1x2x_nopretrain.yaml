@@ -1,8 +1,8 @@
 # No-pretrain ablation of H96 cap1x2x (p64). Same crop caps / eval budgets;
 # omit staged_diffusion_pretrain and start coarse + patch_refine from random
-# init (from_random_init). Patch-guidance FT is already cold-start on real data
-# (create_patch_guidance_stack) — no synth donor warm-start when pretrain is
-# skipped. Distinct experiment_name / tags / eval_progress_key vs pretrained.
+# init (from_random_init). iTransformer FT is already cold-start on real data
+# — no synth donor warm-start when pretrain is skipped. Distinct experiment_name
+# / tags / eval_progress_key vs pretrained.
 extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x.yaml
 replace_phases: true
 
@@ -14,7 +14,7 @@ experiment:
   experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_nopretrain
 
 phases:
-  - phase: patch_guidance_finetune_hp
+  - phase: itrans_finetune_hp
     n_trials: 1
     max_epochs: 10
 

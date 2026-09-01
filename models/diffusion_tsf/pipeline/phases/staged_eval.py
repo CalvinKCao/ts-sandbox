@@ -1010,7 +1010,7 @@ class StagedEvalPhase(PipelinePhase):
         ft_guidance_ckpt = state.guidance_finetune_ckpt
         if not ft_guidance_ckpt or not os.path.exists(ft_guidance_ckpt):
             ft_guidance_ckpt = os.path.join(
-                source_checkpoint_dir, f"{subset_id}_patch_guidance.pt"
+                source_checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt"
             )
         needs_guidance = state.needs_guidance
         if needs_guidance and not os.path.exists(ft_guidance_ckpt):

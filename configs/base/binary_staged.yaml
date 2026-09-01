@@ -262,7 +262,7 @@ phases:
     epochs: 20
     patience: 4
 
-  - phase: patch_guidance_finetune_hp
+  - phase: itrans_finetune_hp
     n_trials: 10
 
   - phase: diffusion_coarse_finetune_hp

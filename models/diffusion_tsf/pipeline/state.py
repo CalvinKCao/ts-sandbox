@@ -71,7 +71,7 @@ class PipelineState:
     # Independent of window_fraction. 1.0 = all variate-crops.
     patch_refine_finetune_patch_fraction: float = 1.0
     dit_cond_patch_size: Tuple[int, int] = (8, 8)
-    guidance_type: str = "patch_decoder"
+    guidance_type: str = "itransformer"
     mmpd_patch_size: int = 12
     cfg_dropout: float = 0.1
     deterministic_anchor_loss: bool = False
@@ -88,7 +88,6 @@ class PipelineState:
     eval_sampler: str = "quad_t"
     disable_cross_attention: bool = False
     cross_variate_context_bias: float = 0.0
-    channel_dropout_drop_frac: float = 0.0
     use_window_normalization: bool = True
     window_norm_center: str = "mean"
     window_norm_std_floor: float = 1e-8
@@ -160,7 +159,6 @@ class PipelineState:
     synthetic_samples_min: int = 4_096
     itrans_hp_pretrain_max_epochs: int = 10
     itrans_hp_finetune_max_epochs: int = 10
-    patch_guidance_hp_finetune_max_epochs: int = 10
     diffusion_hp_patience: int = 4
     hp_tune_epochs: int = 20
     hp_tune_patience: int = 15
@@ -228,7 +226,6 @@ class PipelineState:
     diffusion_fine_pretrain_ckpt: Optional[str] = None
     diffusion_patch_refine_pretrain_ckpt: Optional[str] = None
     itrans_finetune_ckpt: Optional[str] = None
-    patch_guidance_finetune_ckpt: Optional[str] = None
     diffusion_finetune_ckpt: Optional[str] = None
     diffusion_coarse_finetune_ckpt: Optional[str] = None
     diffusion_fine_finetune_ckpt: Optional[str] = None
@@ -270,8 +267,6 @@ class PipelineState:
 
     @property
     def guidance_finetune_ckpt(self) -> Optional[str]:
-        if self.guidance_type == "patch_decoder":
-            return self.patch_guidance_finetune_ckpt
         return self.itrans_finetune_ckpt
 
     @property
@@ -281,8 +276,6 @@ class PipelineState:
 
     def default_guidance_finetune_ckpt_path(self) -> str:
         subset_id = self.subset_id or self.dataset
-        if self.guidance_type == "patch_decoder":
-            return os.path.join(self.checkpoint_dir, f"{subset_id}_patch_guidance.pt")
         return os.path.join(self.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
 
     @classmethod

@@ -12,7 +12,7 @@ experiment:
   experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_illness_lb104_hz60_nopretrain
 
 phases:
-  - phase: patch_guidance_finetune_hp
+  - phase: itrans_finetune_hp
     n_trials: 1
     max_epochs: 10
 

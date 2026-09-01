@@ -34,7 +34,7 @@ def pretrain_diffusion(
     from models.diffusion_tsf import train_multivariate_pipeline as m
 
     logger.info("=" * 60)
-    logger.info("Staged synthetic diffusion pretrain (with patch_decoder guidance)")
+    logger.info("Staged synthetic diffusion pretrain (with iTransformer guidance)")
     logger.info("Samples: %s, Epochs: %s, Patience: %s", n_samples, epochs, patience)
     logger.info("Params: %s", best_params)
     logger.info("=" * 60)
@@ -54,7 +54,7 @@ def pretrain_diffusion(
             state, guidance_checkpoint,
             state.n_variates,
             device,
-            guidance_type="patch_decoder",
+            guidance_type="itransformer",
         )
 
     synth_cache = m.get_synth_cache_dir(state, checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)

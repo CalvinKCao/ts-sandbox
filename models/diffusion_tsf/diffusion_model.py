@@ -421,9 +421,14 @@ class DiffusionTSF(nn.Module):
 
         self._ctx_token_variate_ids: Optional[torch.Tensor] = None
         self._ctx_key_padding_mask: Optional[torch.Tensor] = None
-        if config.guidance_type == "patch_decoder":
-            self.context_encoder = None
-        else:
+        gtype = str(config.guidance_type)
+        if gtype != "itransformer":
+            raise ValueError(
+                f"Only guidance_type='itransformer' is supported; got {gtype!r}. "
+                "Patch-decoder guidance has been removed."
+            )
+        self.context_encoder = None
+        if not config.disable_cross_attention:
             self.context_encoder = iTransformerTokenAdapter(
                 d_model=config.itrans_d_model,
                 context_dim=config.context_embedding_dim,
@@ -659,21 +664,12 @@ class DiffusionTSF(nn.Module):
         past_raw: torch.Tensor,
         past_norm: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
-        """Produce (B, M, ctx_dim) context tokens for DiT bottleneck cross-attention."""
+        """Produce (B, V, ctx_dim) iTransformer tokens for DiT bottleneck cross-attention."""
         if self.guidance_model is None or not hasattr(self.guidance_model, "get_encoder_tokens"):
             raise RuntimeError(
                 "Cross-attention requires a guidance model with get_encoder_tokens()."
             )
         self._ctx_token_variate_ids = None
-        if getattr(self.config, "guidance_type", "itransformer") == "patch_decoder":
-            if past_norm is None:
-                past_norm, _, _ = self._normalize_sequence(past_raw, None)
-            with eval_bench_span("token_retrieval"):
-                enc_tokens = self.guidance_model.get_encoder_tokens(past_norm)
-            self._ctx_token_variate_ids = getattr(
-                self.guidance_model, "token_variate_ids", None
-            )
-            return enc_tokens
         with eval_bench_span("token_retrieval"):
             enc_tokens = self.guidance_model.get_encoder_tokens(past_raw)
         if self.context_encoder is None:
@@ -685,74 +681,6 @@ class DiffusionTSF(nn.Module):
         )
         return adapted
 
-    def _encode_pre_mixer_tokens(
-        self,
-        past_raw: torch.Tensor,
-        past_norm: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Frozen per-channel past tokens (B, V, N_past, d) before mixer."""
-        self._ctx_token_variate_ids = None
-        g = self.guidance_model
-        if g is None or not hasattr(g, "encode_past_tokens"):
-            raise RuntimeError(
-                "pre-mixer tokens require PatchDecoderGuidance.encode_past_tokens"
-            )
-        if past_norm is None:
-            past_norm, _, _ = self._normalize_sequence(past_raw, None)
-        return g.encode_past_tokens(past_norm)
-
-    def _mix_pre_mixer_tokens(
-        self,
-        past_tokens: torch.Tensor,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        g = self.guidance_model
-        if g is None or not hasattr(g, "mix_past_tokens"):
-            raise RuntimeError(
-                "channel dropout requires PatchDecoderGuidance.mix_past_tokens"
-            )
-        mixed, var_ids = g.mix_past_tokens(
-            past_tokens, src_key_padding_mask=src_key_padding_mask,
-        )
-        self._ctx_token_variate_ids = var_ids
-        return mixed, var_ids
-
-    def _mix_pre_mixer_tokens_with_channel_dropout(
-        self,
-        past_tokens: torch.Tensor,
-        drop_frac: float,
-    ) -> torch.Tensor:
-        """Sample one keep-mask, mix with it, stash the same mask for DiT x-attn."""
-        from models.diffusion_tsf.channel_dropout import (
-            sample_kept_channel_mask,
-            token_drop_mask_from_channel_keep,
-        )
-
-        batch_size, num_variates, num_patches, _ = past_tokens.shape
-        device = past_tokens.device
-        var_ids = torch.arange(num_variates, device=device).repeat_interleave(num_patches)
-        keep = sample_kept_channel_mask(
-            batch_size,
-            num_variates,
-            drop_frac,
-            training=True,
-            device=device,
-        )
-        pad = (
-            None
-            if keep is None
-            else token_drop_mask_from_channel_keep(keep, var_ids)
-        )
-        mixed, ids = self._mix_pre_mixer_tokens(past_tokens, pad)
-        if ids.shape[0] != num_variates * num_patches:
-            raise RuntimeError(
-                f"mixer must keep full M={num_variates * num_patches} absolute IDs, "
-                f"got {tuple(ids.shape)}"
-            )
-        self._ctx_token_variate_ids = ids
-        self._ctx_key_padding_mask = pad
-        return mixed
-
     def _resolve_cross_variate_context(
         self,
         past: torch.Tensor,
@@ -760,43 +688,15 @@ class DiffusionTSF(nn.Module):
         cached_context: Optional[torch.Tensor] = None,
         cached_token_variate_ids: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
-        """Use phase-cached frozen tokens when provided, otherwise encode live.
-
-        Train-time channel dropout caches *pre-mixer* tokens (4D) and remixes
-        with a sampled keep-mask. Post-mixer cache + DiT-only masking would
-        leak dropped channels through mixer mixing.
-        """
+        """Use phase-cached frozen iTransformer tokens when provided, else encode live."""
         self._ctx_key_padding_mask = None
         if self.config.disable_cross_attention:
             return None
-        drop_frac = float(getattr(self.config, "channel_dropout_drop_frac", 0.0))
-        apply_drop = bool(self.training) and drop_frac > 0.0
-        if apply_drop:
-            if getattr(self.config, "guidance_type", "itransformer") != "patch_decoder":
-                raise RuntimeError(
-                    "channel_dropout_drop_frac>0 requires guidance_type=patch_decoder "
-                    "(mixer and DiT x-attn share one keep-mask)"
-                )
-            if float(getattr(self.config, "cfg_dropout", 0.0)) > 0.0:
-                raise RuntimeError(
-                    "channel_dropout_drop_frac>0 is incompatible with cfg_dropout>0"
-                )
-            if cached_context is not None:
-                if cached_context.dim() != 4:
-                    raise RuntimeError(
-                        "channel dropout cannot use post-mixer cached tokens; "
-                        "those already mixed information from dropped channels. "
-                        "Cache pre-mixer past tokens instead."
-                    )
-                past_tokens = cached_context
-            else:
-                past_tokens = self._encode_pre_mixer_tokens(past, past_norm)
-            return self._mix_pre_mixer_tokens_with_channel_dropout(past_tokens, drop_frac)
         if cached_context is not None:
-            if cached_context.dim() == 4:
-                mixed, var_ids = self._mix_pre_mixer_tokens(cached_context, None)
-                self._ctx_token_variate_ids = var_ids
-                return mixed
+            if cached_context.dim() != 3:
+                raise RuntimeError(
+                    f"iTransformer context cache must be (B, V, C), got {tuple(cached_context.shape)}"
+                )
             self._ctx_token_variate_ids = cached_token_variate_ids
             return cached_context
         return self._get_cross_variate_context(past, past_norm)
@@ -1023,17 +923,6 @@ class DiffusionTSF(nn.Module):
     ) -> torch.Tensor:
         """Run the denoiser with the same chunking rule used by training/eval."""
         ctx_pad = self._ctx_key_padding_mask
-        drop_frac = float(getattr(self.config, "channel_dropout_drop_frac", 0.0))
-        if (
-            self.training
-            and drop_frac > 0.0
-            and ctx_flat is not None
-            and ctx_pad is None
-        ):
-            raise RuntimeError(
-                "channel dropout is on but mixer/DiT pad mask is missing; "
-                "the keep-mask must be sampled once and shared"
-            )
         chunk_size = self.config.unet_max_chunk_size
         n_items = canvas.shape[0]
         eval_bench_note("dit_n_items", n_items)

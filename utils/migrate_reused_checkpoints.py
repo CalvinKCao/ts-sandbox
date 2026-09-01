@@ -234,7 +234,7 @@ def migrate_binary_config(
             dst = reused_pretrain_ckpt(config_suffix, stage)
             _copy_file(src, dst, dry_run=dry_run)
 
-    guidance_name = f"{sid}_patch_guidance.pt"
+    guidance_name = f"{sid}_itransformer_finetuned.pt"
     guidance_run = _newest_matching_run(
         roots, dataset=dataset, config_suffix=config_suffix, required_file=guidance_name,
     )

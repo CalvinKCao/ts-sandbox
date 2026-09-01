@@ -74,7 +74,7 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "dit_dropout": float(state.dit_dropout),
         "conditioning_architecture": "cross_attention_only_v1",
         "disable_cross_attention": bool(state.disable_cross_attention),
-        "guidance_type": str(getattr(state, "guidance_type", "patch_decoder")),
+        "guidance_type": str(getattr(state, "guidance_type", "itransformer")),
         "prediction_target": str(getattr(state, "prediction_target", "x0")),
         "loss_weighting": str(getattr(state, "loss_weighting", "none")),
         "min_snr_gamma": float(getattr(state, "min_snr_gamma", 5.0)),
@@ -600,18 +600,22 @@ def _guidance_search_dirs(
     return dirs
 
 
-def _find_existing_synthetic_patch_guidance(
+def _find_existing_synthetic_itransformer(
     state: PipelineState,
     source_dir: Optional[str] = None,
 ) -> Optional[str]:
-    """Locate an on-disk synthetic guidance checkpoint."""
-    ckpt_names = ("pretrained_patch_guidance.pt", "patch_guidance_synthetic.pt")
+    """Locate an on-disk synthetic iTransformer checkpoint."""
+    ckpt_names = ("pretrained_itransformer.pt", "itrans_hp_best.pt")
     candidates: list[str] = []
-    pretrain_override = state.extra.get("patch_guidance_pretrain_ckpt")
+    if state.extra.get("patch_guidance_pretrain_ckpt"):
+        raise ValueError(
+            "patch_guidance_pretrain_ckpt is removed; use extra.itrans_pretrain_ckpt"
+        )
+    pretrain_override = state.extra.get("itrans_pretrain_ckpt")
     if pretrain_override:
         candidates.append(str(pretrain_override))
     for d in _guidance_search_dirs(state, source_dir):
-        for name in ckpt_names:
+        for name in ("pretrained_itransformer.pt", "itrans_hp_best.pt"):
             candidates.append(os.path.join(d, name))
     for path in candidates:
         if path and os.path.isfile(path):
@@ -619,11 +623,11 @@ def _find_existing_synthetic_patch_guidance(
     return None
 
 
-def _resolve_synthetic_patch_guidance(
+def _resolve_synthetic_itransformer(
     state: PipelineState,
     source_dir: Optional[str],
 ) -> tuple[str, Dict[str, Any]]:
-    found = _find_existing_synthetic_patch_guidance(state, source_dir)
+    found = _find_existing_synthetic_itransformer(state, source_dir)
     if found:
         return found, {
             "loaded": True,
@@ -631,20 +635,20 @@ def _resolve_synthetic_patch_guidance(
             "source": "checkpoint",
         }
     raise FileNotFoundError(
-        "Missing synthetic patch-guidance checkpoint. Expected "
-        "pretrained_patch_guidance.pt or patch_guidance_synthetic.pt under "
+        "Missing synthetic iTransformer checkpoint. Expected "
+        "pretrained_itransformer.pt or itrans_hp_best.pt under "
         f"{source_dir or state.checkpoint_dir}."
     )
 
 
-def _build_synthetic_patch_guidance(state: PipelineState) -> tuple[str, Dict[str, Any]]:
-    """Train the frozen patch-decoder token source when no donor exists."""
+def _build_synthetic_itransformer(state: PipelineState) -> tuple[str, Dict[str, Any]]:
+    """Train a frozen iTransformer token source when no donor exists."""
     from models.diffusion_tsf.train_multivariate_pipeline import (
-        run_patch_guidance_synthetic_tuning,
+        run_itransformer_hp_tuning,
     )
 
     n_trials = 1 if state.smoke_test else int(state.n_itrans_hp_trials)
-    _params, tuned_ckpt = run_patch_guidance_synthetic_tuning(
+    _params, tuned_ckpt = run_itransformer_hp_tuning(
         state,
         n_trials=n_trials,
         smoke_test=state.smoke_test,
@@ -652,8 +656,8 @@ def _build_synthetic_patch_guidance(state: PipelineState) -> tuple[str, Dict[str
         parallel_workers=1,
     )
     if not tuned_ckpt or not os.path.isfile(tuned_ckpt):
-        raise RuntimeError("synthetic patch-guidance tuning did not produce a checkpoint")
-    target = os.path.join(state.checkpoint_dir, "patch_guidance_synthetic.pt")
+        raise RuntimeError("synthetic iTransformer tuning did not produce a checkpoint")
+    target = os.path.join(state.checkpoint_dir, "pretrained_itransformer.pt")
     shutil.copy2(tuned_ckpt, target)
     return target, {"loaded": False, "path": target, "source": "trained"}
 
@@ -822,7 +826,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                 best_params = _resolve_diff_hp(state, source_dir)
             except FileNotFoundError:
                 pass
-            guidance_ckpt = _find_existing_synthetic_patch_guidance(state, source_dir)
+            guidance_ckpt = _find_existing_synthetic_itransformer(state, source_dir)
         except Exception as e:
             logger.warning(
                 "[%s] cached-pretrain viz failed: %s", self.name, e, exc_info=True,
@@ -852,7 +856,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                     config_name=config_name,
                 )
                 best_params = _resolve_diff_hp(state, source_dir)
-                guidance_ckpt, guidance_meta = _resolve_synthetic_patch_guidance(
+                guidance_ckpt, guidance_meta = _resolve_synthetic_itransformer(
                     state,
                     source_dir,
                 )
@@ -884,11 +888,11 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         needs_guidance = state.needs_guidance
         if needs_guidance:
             try:
-                guidance_ckpt, guidance_meta = _resolve_synthetic_patch_guidance(
+                guidance_ckpt, guidance_meta = _resolve_synthetic_itransformer(
                     state, source_dir,
                 )
             except FileNotFoundError:
-                guidance_ckpt, guidance_meta = _build_synthetic_patch_guidance(state)
+                guidance_ckpt, guidance_meta = _build_synthetic_itransformer(state)
         else:
             guidance_ckpt, guidance_meta = "", {}
 

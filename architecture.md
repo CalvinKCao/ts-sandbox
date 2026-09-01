@@ -2,7 +2,7 @@
 
 This repo trains a probabilistic forecaster that treats future values as **2D binary images** and denoises them with diffusion. The core bet is simple: real series have sharp jumps, flat segments, and geometric structure that Gaussian MSE models smear out. By encoding values as hard cumulative-distribution (CDF) maps and diffusing in the **binary domain** (bit-flip noise, BCE loss), the model gets a much denser training signal on exactly those shapes.
 
-The pipeline is **YAML-driven and multi-phase** (synthetic pretrain → real finetune HP → staged eval), **factorized per variate**, and usually **patch-decoder guidance** (not iTransformer) when cross-variate context is enabled. The **only live binary architecture** is **canvas128 / patch_refine (p64×6)** — full-horizon coarse DiT plus overlapping absolute hi-res CDF crops. Legacy residual fine-as-primary (16h×96w strip), vertical dual, and channel dual paths have been removed.
+The pipeline is **YAML-driven and multi-phase** (synthetic pretrain → real finetune HP → staged eval), **factorized per variate**, and uses **iTransformer encoder tokens** for cross-variate context when enabled. The **only live binary architecture** is **canvas128 / patch_refine (p64×6)** — full-horizon coarse DiT plus overlapping absolute hi-res CDF crops. Legacy residual fine-as-primary (16h×96w strip), vertical dual, channel dual, and patch-decoder guidance paths have been removed.
 
 ---
 
@@ -27,7 +27,7 @@ Obsolete (deleted): sequential fine residual strip (`binary_ordinal_fine_finer_*
 | **3** | `diffusion_patch_refine_finetune_hp` | Optuna-tune overlapping absolute-HIR upscaler |
 | **4** | `staged_eval` | Anchor + probabilistic metrics (CRPS, staged MSE/MAE) |
 
-When cross-attention is enabled, a `patch_guidance_finetune_hp` phase sits between pretrain and diffusion finetune. Its frozen patch-decoder encoder is the sole source of cross-variate tokens; it does not provide a 2D diffusion input. The old `itrans_finetune_hp` phase is **dropped** for `guidance_type=patch_decoder` and is no longer the production path.
+When cross-attention is enabled, an `itrans_finetune_hp` phase sits between pretrain and diffusion finetune. Its frozen iTransformer encoder is the sole source of cross-variate tokens; it does not provide a 2D diffusion input. Patch-decoder guidance (`guidance_type=patch_decoder`, `patch_guidance_finetune_hp`) has been removed.
 
 Phase 1 is deliberately narrow: it does **not** need to match real data statistics. Its job is representation fluency — monotone binary staircases, column alignment, stable BCE — before real finetuning.
 
@@ -79,7 +79,7 @@ flowchart TB
 
     subgraph Cond["Conditioning"]
         PM[Past CDF columns Hc∥Hf] --> COND[Visual cond patches]
-        GD[Frozen patch-decoder tokens] --> XATTN[Bottleneck cross-attention]
+        GD[Frozen iTransformer tokens] --> XATTN[Bottleneck cross-attention]
     end
 
     subgraph Diff["Binary diffusion (one variate at a time)"]
@@ -107,7 +107,7 @@ flowchart TB
 
 Multivariate series use a **factorized batch layout**: each variate is one row in a `(B×V, C, H, W)` tensor. Self-attention inside the DiT runs over **spatial patches only**.
 
-Cross-variate context enters at the bottleneck as frozen patch-decoder tokens. Large `B×V` (or patch-refine crop) batches are chunked via `unet_max_chunk_size`. `disable_cross_attention: true` selects visual past-conditioning only; otherwise patch-decoder cross-attention is on by default. Stable real windows cache their frozen tokens on GPU for the entire diffusion phase.
+Cross-variate context enters at the bottleneck as frozen iTransformer tokens. Large `B×V` (or patch-refine crop) batches are chunked via `unet_max_chunk_size`. `disable_cross_attention: true` selects visual past-conditioning only; otherwise iTransformer cross-attention is on by default. Stable real windows cache their frozen tokens on GPU for the entire diffusion phase.
 
 ---
 
@@ -138,7 +138,7 @@ Modules: `patch_refine.py`, `patch_refine_geometry.py`, `patch_refine_segments.p
 
 **Lookback cond.** Full native-width past **coarse∥fine** stack (`stack_past_coarse_fine`), expanded per crop — never resized to the patch width.
 
-**FactorizedDiT extras (patch_refine only).** `use_patch_abs_embedding=True` adds learned embeds for `patch_coarse_bin` + `patch_time0` (absolute crop location). `use_variate_embedding` (when `variate_factorized` and `V>1`) tags each crop’s variate. Cross-attn tokens come from patch-decoder `get_encoder_tokens(past_norm)` when `guidance_type=patch_decoder` and `disable_cross_attention=false`; otherwise ctx is skipped.
+**FactorizedDiT extras (patch_refine only).** `use_patch_abs_embedding=True` adds learned embeds for `patch_coarse_bin` + `patch_time0` (absolute crop location). `use_variate_embedding` (when `variate_factorized` and `V>1`) tags each crop’s variate. Cross-attn tokens come from iTransformer `get_encoder_tokens(past)` (then `iTransformerTokenAdapter`) when `guidance_type=itransformer` and `disable_cross_attention=false`; otherwise ctx is skipped.
 
 **Unique-segment path.** With `patch_refine_unique_segments: true` (many ordinal / guided leaves, including the canvas128 window-norm chain), train samples one fixed-`col0` crop per window (`locations_for_fixed_col0`); infer samples every stride-grid crop in parallel (`primary_stride_col0s` / `patch_layout_for_fixed_col0`) then coverage-gap fills. Overlapping stride mode (`unique_segments: false`) trains/samples all coverage crops in parallel.
 
@@ -152,7 +152,7 @@ Modules: `patch_refine.py`, `patch_refine_geometry.py`, `patch_refine_segments.p
 | `patch_refine_col_stride` | Primary horizontal stride (overlap = width − stride) |
 | `patch_refine_unique_segments` | Unique absolute segments; infer is fully parallel across patches |
 | `dit_patch_size` / `dit_cond_patch_size` | Must divide patch / lookback spatial sizes |
-| `guidance_type: patch_decoder` | Cross-attn context from patch-decoder guidance (when enabled) |
+| `guidance_type: itransformer` | Cross-attn context from frozen iTransformer tokens (when enabled) |
 
 ---
 
@@ -258,7 +258,7 @@ The sections below are aimed at developers and coding assistants working in the 
 | Representation | Coarse + **patch_refine** absolute HIR crops | `use_patch_refine_stage: true` |
 | Norm | Ordinal window norm (ordinal leaves) / window mean-std (canvas128 chain) | `use_ordinal_window_norm` / `use_window_normalization` |
 | `binary_anchor_input_mode` | `stationary_flat` | flat `0.5` XOR anchor |
-| Cross-variate conditioning | frozen patch-decoder encoder tokens by default | `guidance_type: patch_decoder`; disable only with `disable_cross_attention: true` |
+| Cross-variate conditioning | frozen iTransformer encoder tokens by default | `guidance_type: itransformer`; disable only with `disable_cross_attention: true` |
 | MMPD match | Decoder, same lb/hz/subset | `configs/mmpd_decoder_flat_subsets_paper_lb336_hz96_matched_binary.yaml` |
 
 ---
@@ -274,7 +274,7 @@ The sections below are aimed at developers and coding assistants working in the 
 | Submit | `submit_binary.sh` / `submit_mmpd.sh`; leaf YAML under `configs/`. Diagnostic probes may live under `temp/scripts/` (e.g. coverage dead-code). |
 | Patch refine | `models/diffusion_tsf/patch_refine.py`, `patch_refine_geometry.py`, `patch_refine_segments.py` |
 | Ordinal norm | `models/diffusion_tsf/ordinal_window_norm.py` |
-| Guidance (optional) | `models/diffusion_tsf/guidance.py`, patch-decoder stack |
+| Guidance | `models/diffusion_tsf/guidance.py` (`iTransformerGuidance`) |
 
 #### Submit conventions
 
@@ -286,7 +286,7 @@ The sections below are aimed at developers and coding assistants working in the 
 
 ### Pipeline (YAML-driven)
 
-`PipelineState` holds paths and knobs; `Pipeline` runs registered `PipelinePhase` classes in order (`models/diffusion_tsf/pipeline/phases/`). `normalize_guidance_phases` drops incompatible phases (e.g. `itrans_finetune_hp` for patch-decoder guidance) and **rejects** obsolete fine/finer/vertical/channel phases.
+`PipelineState` holds paths and knobs; `Pipeline` runs registered `PipelinePhase` classes in order (`models/diffusion_tsf/pipeline/phases/`). `normalize_guidance_phases` **rejects** patch-decoder phases and obsolete fine/finer/vertical/channel phases.
 
 Reuse configs skip synthetic pretrain via `reuse_pretrain_from_config` / `require_reuse_pretrain` when donors exist.
 
@@ -295,7 +295,7 @@ Reuse configs skip synthetic pretrain via `reuse_pretrain_from_config` / `requir
 | Doc | YAML `phase` | Implementation |
 |-----|--------------|----------------|
 | **1** | `staged_diffusion_pretrain` | `StagedDiffusionPretrainPhase` |
-| *(guidance)* | `patch_guidance_finetune_hp` | `PatchGuidanceFinetuneHPPhase` (when guidance on) |
+| *(guidance)* | `itrans_finetune_hp` | `ITransFinetuneHPPhase` (when guidance on) |
 | **2** | `diffusion_coarse_finetune_hp` | `CoarseDiffusionFinetuneHPPhase` |
 | **3** | `diffusion_patch_refine_finetune_hp` | `PatchRefineDiffusionFinetuneHPPhase` |
 | **4** | `staged_eval` | `StagedEvalPhase` |
@@ -317,9 +317,9 @@ Trains denoisers on synthetic `RealTS` windows (no Optuna here — fixed HP from
 - **Skip when:** stage ckpts exist, shared cache hit, or `reuse_pretrain_from_config` copies a donor (unless `force_retrain_synthetic` / missing donor with `require_reuse_pretrain: false`).
 - **Smoke:** tiny `n_samples`, `epochs = 1`, `shared_cache: false`; or `python temp/scripts/smoke_patch_refine.py`.
 
-##### Patch guidance (`patch_guidance_finetune_hp`) — optional
+##### iTransformer guidance (`itrans_finetune_hp`) — optional
 
-Real-data patch-decoder guidance HP when cross-attention is enabled. Replaces the legacy `itrans_finetune_hp` path for `guidance_type=patch_decoder`; the frozen decoder supplies context tokens only.
+Real-data iTransformer HP when cross-attention is enabled. Frozen encoder tokens feed FactorizedDiT bottleneck cross-attn via `get_encoder_tokens` + `iTransformerTokenAdapter`. There is no 2D guidance channel.
 
 ##### Phase 2 — Coarse diffusion finetune HP (`diffusion_coarse_finetune_hp`)
 
@@ -406,7 +406,7 @@ Values clipped to `[-max_scale, max_scale]`, binned into `H=16` rows; occupancy 
 - One variate = one batch row (`BV`); self-attention is **spatial patches only** (no variate axis in DiT).
 - **Variate embedding:** when `use_variate_embedding` and `variate_factorized` and `V>1`, a learned embed is added per row (including each patch-refine crop’s `variate_index`).
 - **Patch absolute location embeds:** on `diffusion_stage=patch_refine`, `use_patch_abs_embedding` adds `coarse_bin_embed(patch_coarse_bin) + horizon_time_embed(patch_time0)`.
-- Cross-variate signal: bottleneck cross-attention. With `guidance_type=patch_decoder`, tokens are `guidance_model.get_encoder_tokens(past_norm)` (no `iTransformerTokenAdapter`). Legacy itransformer path still uses the adapter in `unet.py`.
+- Cross-variate signal: bottleneck cross-attention. With `guidance_type=itransformer`, tokens are `guidance_model.get_encoder_tokens(past_raw)` projected by `iTransformerTokenAdapter`.
 - With `disable_cross_attention=true`, no cross-variate context — visual past-conditioning only. There is no forecast/ghost guidance channel in this architecture.
 - Patch refine feeds **3 aux channels** (naive / coarse-cell / time) plus optional prev-refine stuffing — see Patch refine stage. Past visual cond remains `Hc∥Hf`.
 - Optional **EMA** shadow weights during finetune when `training.diffusion_ema_decay > 0` (default **0.99**).
@@ -417,7 +417,7 @@ Chunking: `unet_max_chunk_size` caps `BV` (or patch-refine `N` crops) through th
 
 ### Guidance (optional)
 
-Default for many ordinal leaves: **off**. When on (guided_p8 / early-July window-norm / canvas128 chain), prefer **`guidance_type: patch_decoder`** with `patch_guidance_finetune_hp`. Tokens feed FactorizedDiT bottleneck cross-attn via `get_encoder_tokens`. Legacy iTransformer finetune helpers remain in `train_multivariate_pipeline.py` but are dropped by `normalize_guidance_phases` for patch-decoder configs.
+Default for many ordinal leaves: **off**. When on (guided_p8 / early-July window-norm / canvas128 chain), **`guidance_type: itransformer`** with `itrans_finetune_hp`. Tokens feed FactorizedDiT bottleneck cross-attn via `get_encoder_tokens` + adapter. Patch-decoder guidance has been removed.
 
 ---
 

@@ -18,8 +18,10 @@ class ITransFinetuneHPPhase(PipelinePhase):
 
     def should_skip(self, state: PipelineState) -> bool:
         if state.guidance_type != "itransformer":
-            logger.info("  [%s] skipping: guidance_type=%s", self.name, state.guidance_type)
-            return True
+            raise ValueError(
+                f"[{self.name}] only guidance_type='itransformer' is supported; "
+                f"got {state.guidance_type!r}"
+            )
         ckpt = state.default_guidance_finetune_ckpt_path()
         if os.path.exists(ckpt):
             state.itrans_finetune_ckpt = ckpt

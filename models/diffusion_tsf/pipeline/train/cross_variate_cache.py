@@ -84,16 +84,9 @@ class CrossVariateTokenCache:
             )
         if storage == "pinned_cpu" and device.type != "cuda":
             raise ValueError("pinned_cpu token caching requires a CUDA training device")
-        if token_kind not in {"mixed", "pre_mixer"}:
+        if token_kind != "mixed":
             raise ValueError(
-                f"token_kind must be 'mixed' or 'pre_mixer', got {token_kind!r}"
-            )
-        drop_frac = float(getattr(model.config, "channel_dropout_drop_frac", 0.0))
-        if drop_frac > 0.0 and token_kind == "mixed":
-            raise RuntimeError(
-                "channel_dropout_drop_frac>0 cannot cache post-mixer tokens "
-                "(dropped channels would already be mixed in). "
-                "Use token_kind='pre_mixer'."
+                f"token_kind must be 'mixed' (iTransformer tokens); got {token_kind!r}"
             )
         self.model = model
         self.device = device

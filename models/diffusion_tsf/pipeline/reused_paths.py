@@ -29,7 +29,7 @@ def reused_guidance_ckpt(config_suffix: str, subset_id: str) -> str:
         reused_root(),
         "guidance",
         config_suffix,
-        f"{subset_id}_patch_guidance.pt",
+        f"{subset_id}_itransformer_finetuned.pt",
     )
 
 

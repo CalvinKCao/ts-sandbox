@@ -64,7 +64,7 @@ experiment:
   dit_embed_dim: 384
   dit_depth: 8
   dit_num_heads: 6
-  guidance_type: patch_decoder
+  guidance_type: itransformer
   disable_cross_attention: false
   cfg_dropout: 0.0
   prediction_target: epsilon
@@ -87,7 +87,7 @@ phases:
     # Norm flip changes pretrain signature vs ordinal bridge cache.
     require_reuse_pretrain: false
 
-  - phase: patch_guidance_finetune_hp
+  - phase: itrans_finetune_hp
     n_trials: 1
     max_epochs: 10
 

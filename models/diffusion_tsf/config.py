@@ -61,9 +61,6 @@ class DiffusionTSFConfig:
     use_variate_embedding: bool = True
     disable_cross_attention: bool = False
     cross_variate_context_bias: float = 0.0
-    # Train-only: drop this fraction of channels in mixer/DiT x-attn (keep rest).
-    # Encode still uses full V; eval uses drop_frac=0.
-    channel_dropout_drop_frac: float = 0.0
 
     # 2d mapping (hard binary CDF, no vertical blur)
     image_height: int = 16
@@ -179,9 +176,9 @@ class DiffusionTSFConfig:
     # Extra visual cond: coarse CDF of lookback tail in dataset z-score space.
     use_raw_lookback_cond_channel: bool = False
 
-    # Frozen patch-decoder encoder tokens for bottleneck cross-attention.
+    # Frozen iTransformer encoder tokens for bottleneck cross-attention.
     context_embedding_dim: int = 256
-    guidance_type: str = "itransformer"  # itransformer | patch_decoder
+    guidance_type: str = "itransformer"
     mmpd_patch_size: int = 12
     itrans_d_model: int = 512
 
@@ -202,10 +199,10 @@ class DiffusionTSFConfig:
             raise ValueError(
                 f"binary_cdf_distance_alpha must be >= 0, got {self.binary_cdf_distance_alpha}"
             )
-        if not (0.0 <= float(self.channel_dropout_drop_frac) < 1.0):
+        if str(self.guidance_type) != "itransformer":
             raise ValueError(
-                "channel_dropout_drop_frac must be in [0, 1), "
-                f"got {self.channel_dropout_drop_frac}"
+                f"Only guidance_type='itransformer' is supported; got {self.guidance_type!r}. "
+                "Patch-decoder guidance has been removed."
             )
         if self.binary_anchor_input_mode not in {"stationary_flat", "random_bits"}:
             raise ValueError(
