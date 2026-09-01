@@ -1,0 +1,37 @@
+# H=720 non-stitch: one generate of the full canvas (DiT width 728 =
+# forecast_length 720 + lookback_overlap 8). Not the 104-chunk overlap_avg path.
+#
+# Nopretrain clone of H96 cap1x2x p64 (Killarney 5057773 ETTh1). Same subset
+# keys / Optuna search / from_random_init; geometry + eval B=1 only.
+# Subsets: ETTh1 5057773 (allv s1, train/val caps 15153/4305, eval 1838).
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_nopretrain.yaml
+
+geometry:
+  forecast_length: 720
+  horizon_stitch: false
+  lookback_overlap: 8
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, nopretrain, from_random_init, hz720, nostitch, caps_crops_1x2x_etth1]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-allv-randwin-lr10-cap1x2x-hz720-nostitch-nopretrain
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_hz720_nostitch_nopretrain
+
+phases:
+  - phase: staged_eval
+    eval_progress_key: canvas128_allv_randwin_lr10_cap1x2x_hz720_nostitch_nopretrain_s1_n10_steps4
+    # 728-wide unique-seg crops; stitch H720 already needed B=1 after OOM.
+    batch_size_by_dataset:
+      ETTh1: 1
+      ETTh2: 1
+      ETTm1: 1
+      ETTm2: 1
+      exchange_rate: 1
+      weather: 1
+      solar_Alabama: 1
+      electricity: 1
+      PeMS: 1
+      traffic: 1
+      illness: 1
+      dynamic: 1
