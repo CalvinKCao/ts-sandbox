@@ -164,6 +164,9 @@ class DiffusionTSFConfig:
     dit_num_heads: int = 6
     dit_mlp_ratio: float = 4.0
     dit_dropout: float = 0.0
+    use_linear_attn: bool = False
+    use_linear_cross_attn: bool = False
+    use_attn_res: bool = False
 
     # memory optimization
     use_gradient_checkpointing: bool = False

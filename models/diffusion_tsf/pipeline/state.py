@@ -58,6 +58,9 @@ class PipelineState:
     dit_num_heads: int = 6
     dit_mlp_ratio: float = 4.0
     dit_dropout: float = 0.0
+    use_linear_attn: bool = False
+    use_linear_cross_attn: bool = False
+    use_attn_res: bool = False
     use_patch_refine_stage: bool = False
     diffusion_stage: str = "coarse"
     patch_refine_canvas_height: int = 256
@@ -389,6 +392,9 @@ class PipelineState:
             init_kwargs["use_coordinate_channel"] = bool(init_kwargs["use_coordinate_channel"])
         if "use_raw_lookback_cond_channel" in init_kwargs:
             init_kwargs["use_raw_lookback_cond_channel"] = bool(init_kwargs["use_raw_lookback_cond_channel"])
+        for key in ("use_linear_attn", "use_linear_cross_attn", "use_attn_res"):
+            if key in init_kwargs:
+                init_kwargs[key] = bool(init_kwargs[key])
 
         training = cfg.get("training", {})
         if not isinstance(training, dict):

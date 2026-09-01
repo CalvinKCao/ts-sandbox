@@ -417,6 +417,9 @@ class DiffusionTSF(nn.Module):
                 int(config.forecast_length),
             ),
             use_horizon_chunk_embedding=bool(config.horizon_stitch),
+            use_linear_attn=bool(config.use_linear_attn),
+            use_linear_cross_attn=bool(config.use_linear_cross_attn),
+            use_attn_res=bool(config.use_attn_res),
         )
 
         self._ctx_token_variate_ids: Optional[torch.Tensor] = None

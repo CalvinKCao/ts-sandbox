@@ -137,6 +137,9 @@ experiment:
   dit_num_heads: 6
   dit_mlp_ratio: 4.0
   dit_dropout: 0.0
+  use_linear_attn: false
+  use_linear_cross_attn: false
+  use_attn_res: false
   use_patch_refine_stage: true
   diffusion_stage: coarse
   cfg_dropout: 0.0
