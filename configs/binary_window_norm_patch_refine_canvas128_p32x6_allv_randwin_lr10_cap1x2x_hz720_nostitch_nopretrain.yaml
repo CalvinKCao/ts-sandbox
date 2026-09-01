@@ -1,12 +1,13 @@
 # p32 sibling of the p64x6 H=720 non-stitch nopretrain leaf. Height 32 only
-# (no pretrain donor). Dataset→leaf matches H96 nopretrain: p32 for
-# exchange (5069647) and solar (5063770 cap1x2x 387-window); ETTh1 stays p64.
+# (no pretrain donor). iTransformer tokens. Dataset→leaf matches H96 nopretrain:
+# p32 for exchange (5069647) and solar (5063770 cap1x2x 387-window); ETTh1 stays p64.
 extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_hz720_nostitch_nopretrain.yaml
 
 wandb:
-  tags: [all_variates, randwin, lr10, canvas128, p32x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, nopretrain, from_random_init, hz720, nostitch, caps_crops_1x2x_etth1]
+  tags: [all_variates, randwin, lr10, canvas128, p32x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, nopretrain, from_random_init, hz720, nostitch, itrans_guid, caps_crops_1x2x_etth1]
 
 experiment:
   name: binary-window-norm-patch-refine-c128-p32x6-allv-randwin-lr10-cap1x2x-hz720-nostitch-nopretrain
   experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x_hz720_nostitch_nopretrain
   patch_refine_patch_height: 32
+  guidance_type: itransformer

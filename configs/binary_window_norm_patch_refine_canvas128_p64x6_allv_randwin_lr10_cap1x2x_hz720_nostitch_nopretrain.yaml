@@ -3,6 +3,7 @@
 #
 # Nopretrain clone of H96 cap1x2x p64 (Killarney 5057773 ETTh1). Same subset
 # keys / Optuna search / from_random_init; geometry + eval B=1 only.
+# iTransformer tokens for DiT x-attn (not patch-decoder).
 # Subsets: ETTh1 5057773 (allv s1, train/val caps 15153/4305, eval 1838).
 extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_nopretrain.yaml
 
@@ -12,11 +13,12 @@ geometry:
   lookback_overlap: 8
 
 wandb:
-  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, nopretrain, from_random_init, hz720, nostitch, caps_crops_1x2x_etth1]
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, nopretrain, from_random_init, hz720, nostitch, itrans_guid, caps_crops_1x2x_etth1]
 
 experiment:
   name: binary-window-norm-patch-refine-c128-allv-randwin-lr10-cap1x2x-hz720-nostitch-nopretrain
   experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_hz720_nostitch_nopretrain
+  guidance_type: itransformer
 
 phases:
   - phase: staged_eval
