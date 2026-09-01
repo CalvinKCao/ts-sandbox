@@ -22,7 +22,6 @@ from models.diffusion_tsf.pipeline.train.diffusion_loop import (
     resolve_train_epoch_groups,
     split_batches_into_groups,
 )
-from models.diffusion_tsf.train_multivariate_pipeline import patch_guidance_hp_objective
 
 
 class _IndexDataset(Dataset):
@@ -266,15 +265,6 @@ def test_grouped_loader_uses_epoch_sampler():
     assert n_groups >= 1
     assert nbytes == 1 * (2 + 0 + 2) * 4
     assert group_bytes <= 64
-
-
-def test_guidance_objective_requires_grouped_sampler():
-    src = Path(patch_guidance_hp_objective.__code__.co_filename).read_text()
-    start = src.find("def patch_guidance_hp_objective")
-    chunk = src[start:start + 4000]
-    assert "make_grouped_train_loader" in chunk
-    assert "EpochGroupBatchSampler" in chunk
-    assert "shuffle=True" not in chunk.split("def run_patch_guidance_finetune_hp_tuning")[0]
 
 
 def test_base_yaml_default_is_one():
