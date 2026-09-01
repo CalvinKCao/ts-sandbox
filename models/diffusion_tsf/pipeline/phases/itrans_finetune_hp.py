@@ -45,8 +45,16 @@ class ITransFinetuneHPPhase(PipelinePhase):
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
         test_stride = int(subset_meta.get("test_stride", 1))
         n_trials = int(self.require("n_trials"))
+        yaml_epochs = self.get("max_epochs")
+        if yaml_epochs is None:
+            max_epochs = int(state.itrans_hp_finetune_max_epochs)
+        else:
+            max_epochs = int(yaml_epochs)
+            if max_epochs < 1:
+                raise ValueError(f"[{self.name}] max_epochs must be >= 1, got {max_epochs}")
         if state.smoke_test:
             n_trials = 1
+            max_epochs = 1
 
         pretrained = ""
         best_params, tune_ckpt_path = run_itransformer_finetune_hp_tuning(
@@ -62,6 +70,7 @@ class ITransFinetuneHPPhase(PipelinePhase):
             train_stride=train_stride,
             test_stride=test_stride,
             parallel_workers=state.parallel_optuna_workers,
+            max_epochs=max_epochs,
         )
         hp_best = os.path.join(state.checkpoint_dir, f"{subset_id}_itrans_ft_hp_best.pt")
         src = tune_ckpt_path if tune_ckpt_path and os.path.exists(tune_ckpt_path) else hp_best

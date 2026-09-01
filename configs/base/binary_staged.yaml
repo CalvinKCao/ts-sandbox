@@ -264,6 +264,7 @@ phases:
 
   - phase: itrans_finetune_hp
     n_trials: 10
+    max_epochs: 10
 
   - phase: diffusion_coarse_finetune_hp
     n_trials: 20

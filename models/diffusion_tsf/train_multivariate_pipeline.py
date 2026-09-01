@@ -1480,14 +1480,18 @@ def run_itransformer_finetune_hp_tuning(
     train_stride: Optional[int] = None,
     test_stride: Optional[int] = None,
     parallel_workers: int = 1,
+    max_epochs: Optional[int] = None,
 ) -> Tuple[Dict, Optional[str]]:
     """HP tune iTransformer on real data using Optuna parallel workers."""
     label = subset_id or dataset_name
     warm = (None if state.itrans_real_cold_start else pretrained_ckpt)
+    epochs = int(state.itrans_hp_finetune_max_epochs if max_epochs is None else max_epochs)
+    if epochs < 1:
+        raise ValueError(f"itrans finetune max_epochs must be >= 1, got {epochs}")
     logger.info("=" * 60)
     logger.info(f"iTrans Finetune HP Tuning: {label} ({n_trials} trials, {parallel_workers} workers)")
     logger.info(
-        f"{state.itrans_hp_finetune_max_epochs} epochs per trial, "
+        f"{epochs} epochs per trial, "
         f"warm_start={'no (cold start)' if warm is None else os.path.basename(warm)}"
     )
     logger.info("=" * 60)
@@ -1547,7 +1551,7 @@ def run_itransformer_finetune_hp_tuning(
                 state, trial, train_loader, val_loader, dev, smoke_test,
                 fixed_batch_size=train_bs,
                 pretrained_ckpt=warm,
-                max_epochs=state.itrans_hp_finetune_max_epochs,
+                max_epochs=1 if smoke_test else epochs,
                 trial_ckpt_dir=trial_dir,
                 seq_len=itrans_seq,
                 pred_len=itrans_pred,
