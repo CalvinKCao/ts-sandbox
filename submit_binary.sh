@@ -1,13 +1,13 @@
 #!/bin/bash
 # =============================================================================
-# Login-node submitter for binary / patch-decoder diffusion pipeline jobs.
+# Login-node submitter for binary diffusion pipeline jobs (iTransformer x-attn).
 # Compute worker: slurm_worker.sh → models.diffusion_tsf.train_multivariate_pipeline
 #
 # Each job gets isolated checkpoint/results dirs:
 #   ./results/ckpts/MM-DD-<jobid>-<dataset>-<config>/
 #
 # USAGE (run from login node, repo root / $SCRATCH/ts-sandbox):
-#   ./submit_binary.sh --configs binary_anchor_ar_patch_decoder_ctx_lb336_hz720_ordinal_norm \
+#   ./submit_binary.sh --configs binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x \
 #       --datasets ETTh1,traffic --time 10:00:00
 #   ./submit_binary.sh --gpu h100 --configs <stem> --datasets electricity --time 1-00:00:00
 #   ./submit_binary.sh --configs configs/binary_anchor.yaml --datasets ETTh1,exchange_rate

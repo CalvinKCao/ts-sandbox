@@ -2,9 +2,9 @@
 
 Read this top-to-bottom in **runtime order**. Code blocks are real excerpts from the repo (line ranges in the fence header). Sparse walk-through comments live in the source files themselves; this doc stitches the hot path so you can follow a computer through one campaign.
 
-**Live DAG (ordinal leaf):** pretrain reuse → coarse HP → patch_refine HP → staged_eval. Fine is an alternate second stage, not stacked with patch_refine.
+**Live DAG:** optional pretrain reuse → `itrans_finetune_hp` → coarse HP → patch_refine HP → staged_eval. Guidance is **iTransformer encoder tokens** (`guidance_type: itransformer`); patch-decoder guidance has been removed.
 
-**Entrypoints:** `./submit_binary.sh` → `slurm_worker.sh` → `python -m models.diffusion_tsf.train_multivariate_pipeline`. MMPD / disc sit downstream.
+**Entrypoints:** `./submit_binary.sh` → `slurm_worker.sh` → `python -m models.diffusion_tsf.train_multivariate_pipeline`. MMPD sits on `./submit_mmpd.sh` as its own model, not as binary DiT guidance.
 
 Companion: `architecture.md`. Refactor smells collected at the end.
 
@@ -13,32 +13,16 @@ Companion: `architecture.md`. Refactor smells collected at the end.
 Packs `--configs` / `--datasets` into env, then sbatch's the worker. Smoke vs full modes diverge here.
 
 ```bash
-# submit_binary.sh:1-80
+# submit_binary.sh:1-18
 #!/bin/bash
-# Login-node submitter for binary / patch-decoder diffusion jobs.
-#
-# Flow: this script parses args → sbatch slurm_worker.sh → worker runs
-#   python -m models.diffusion_tsf.train_multivariate_pipeline
-# (except discriminator modes, which call temp/eval_* scripts instead).
-#
-# Live training leaf: configs/binary_patch_refine_lb336_hz96_ordinal_tuned.yaml
-# (ordinal window norm, coarse → patch_refine). Fine is an alternate second
-# stage, not stacked with patch_refine.
-#
-# Each job gets isolated dirs:
-#   ./results/ckpts/MM-DD-<jobid>-<dataset>-<config>/
-#   ./results/datasets/MM-DD-<jobid>-<dataset>-<config>/
-#
-# Three modes (mutually exclusive after flags):
-#   1) deferred ordinal disc vs MMPD (--eval-ordinal-patch-refine-vs-mmpd)
-#   2) fixed-ckpt patch-refine disc (--eval-existing-patch-refine)
-#   3) normal train/eval grid (default; --smoke / --resume / --parallel-optuna)
+# Login-node submitter for binary diffusion pipeline jobs (iTransformer x-attn).
+# Compute worker: slurm_worker.sh → models.diffusion_tsf.train_multivariate_pipeline
 #
 # USAGE (login node, repo root / $SCRATCH/ts-sandbox):
-#   ./submit_binary.sh --configs binary_patch_refine_lb336_hz96_ordinal_tuned \
+#   ./submit_binary.sh --configs binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x \
 #       --datasets ETTh1,traffic --time 10:00:00
 #   ./submit_binary.sh --smoke
-#   ./submit_binary.sh --resume --configs binary_dual_scale_staged --datasets ETTh1
+#   ./submit_binary.sh --resume --configs binary_window_norm_patch_refine_canvas128_p64x6 --datasets ETTh1
 #
 # --configs: comma paths, globs, or bare stems under configs/*.yaml.
 # Do NOT add new submit_*.sh wrappers for minor YAML variants — edit a leaf YAML.
@@ -321,8 +305,7 @@ if project_root not in sys.path:
 from models.diffusion_tsf.config import DiffusionTSFConfig
 from models.diffusion_tsf.diffusion_model import DiffusionTSF
 from models.diffusion_tsf.realts import get_synthetic_dataloader
-from models.diffusion_tsf.guidance import PatchDecoderGuidance
-from models.diffusion_tsf.patch_guidance_stack import PatchGuidanceStack, PatchGuidanceStackConfig
+from models.diffusion_tsf.guidance import iTransformerGuidance
 from models.diffusion_tsf.ordinal_window_norm import (
     build_global_ladder_from_training,
     ordinal_encode,
@@ -522,116 +505,53 @@ if __name__ == "__main__":
 Leaf YAML `extends` base; `normalize_guidance_phases` keeps fine XOR patch_refine.
 
 ```python
-# models/diffusion_tsf/pipeline/phases/__init__.py:1-40
-"""Phase registry — maps YAML ``phase:`` names to concrete classes.
+# models/diffusion_tsf/pipeline/phases/__init__.py:1-26
+"""Phase registry — maps YAML phase names to concrete classes."""
 
-cli.py looks up each entry in the merged config's ``phases:`` list here.
-Live ordinal leaf: staged_diffusion_pretrain → diffusion_coarse_finetune_hp →
-diffusion_patch_refine_finetune_hp → staged_eval.
-
-``diffusion_fine_finetune_hp`` remains registered for coarse→fine campaigns;
-``normalize_guidance_phases`` drops fine when patch_refine is also listed.
-``itrans_finetune_hp`` is a scrubbed alias — same class as patch_guidance, no
-iTransformer package.
-"""
-
-from models.diffusion_tsf.pipeline.phases.patch_guidance_finetune_hp import PatchGuidanceFinetuneHPPhase
+from models.diffusion_tsf.pipeline.phases.itrans_finetune_hp import ITransFinetuneHPPhase
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import StagedDiffusionPretrainPhase
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     CoarseDiffusionFinetuneHPPhase,
-    FineDiffusionFinetuneHPPhase,
     PatchRefineDiffusionFinetuneHPPhase,
 )
 from models.diffusion_tsf.pipeline.phases.staged_eval import StagedEvalPhase
 
-# itrans_finetune_hp is a scrubbed YAML alias for patch-decoder guidance (no iTransformer).
 PHASE_REGISTRY = {
-    "patch_guidance_finetune_hp": PatchGuidanceFinetuneHPPhase,
-    "itrans_finetune_hp": PatchGuidanceFinetuneHPPhase,
+    "itrans_finetune_hp": ITransFinetuneHPPhase,
     "staged_diffusion_pretrain": StagedDiffusionPretrainPhase,
     "diffusion_coarse_finetune_hp": CoarseDiffusionFinetuneHPPhase,
-    "diffusion_fine_finetune_hp": FineDiffusionFinetuneHPPhase,
     "diffusion_patch_refine_finetune_hp": PatchRefineDiffusionFinetuneHPPhase,
     "staged_eval": StagedEvalPhase,
 }
-
-__all__ = [
-    "PHASE_REGISTRY",
-    "PatchGuidanceFinetuneHPPhase",
-    "StagedDiffusionPretrainPhase",
-    "CoarseDiffusionFinetuneHPPhase",
-    "FineDiffusionFinetuneHPPhase",
-    "PatchRefineDiffusionFinetuneHPPhase",
-    "StagedEvalPhase",
 ```
+
 ```python
-# models/diffusion_tsf/pipeline/config.py:312-401
+# models/diffusion_tsf/pipeline/config.py:334-358
 def normalize_guidance_phases(
     phases: list,
     guidance_type: str,
     *,
     experiment: Optional[Dict[str, Any]] = None,
 ) -> list:
-    """Normalize merged phase lists for guidance / patch-refine variants.
-
-    ``itrans_finetune_hp`` is a scrubbed YAML alias for patch-decoder guidance.
-    If ``diffusion_patch_refine_finetune_hp`` is present, fine is dropped —
-    fine and patch_refine are alternative second stages, not stacked.
-    Removed phases (finer / vertical_dual / channel_dual) fail fast.
-    """
-    removed = {
-        "diffusion_finer_finetune_hp",
-        "diffusion_vertical_dual_finetune_hp",
-        "diffusion_channel_dual_finetune_hp",
-    }
+    """Normalize merged phase lists for iTransformer guidance + patch-refine."""
+    if guidance_type != "itransformer":
+        raise ValueError(
+            f"Only guidance_type='itransformer' is supported; got {guidance_type!r}. "
+            "Patch-decoder guidance has been removed."
+        )
     by_name: Dict[str, Dict[str, Any]] = {}
+    kept: list = []
     for entry in phases:
         name = str(entry["phase"])
-        if name in removed:
+        if name == "patch_guidance_finetune_hp":
             raise ValueError(
-                f"phase {name!r} was removed; use coarse+fine or coarse+patch_refine"
+                "phase 'patch_guidance_finetune_hp' has been removed; "
+                "use itrans_finetune_hp"
             )
-        # Scrubbed alias: historical iTransformer slot → patch_decoder guidance.
-        if name == "itrans_finetune_hp":
-            if guidance_type not in ("patch_decoder", "", "none"):
-                raise ValueError(
-                    "itrans_finetune_hp no longer loads iTransformer weights; "
-                    "use patch_guidance_finetune_hp / guidance_type=patch_decoder"
-                )
-            entry = dict(entry)
-            entry["phase"] = "patch_guidance_finetune_hp"
-            name = "patch_guidance_finetune_hp"
-        by_name[name] = dict(entry)
-    if "diffusion_patch_refine_finetune_hp" in by_name:
-        by_name.pop("diffusion_fine_finetune_hp", None)
-    exp = experiment or {}
-    # Match DiffusionTSFConfig / live YAML: guidance channel defaults off; XA may still need tokens.
-    needs_guidance = bool(exp.get("use_guidance_channel", False)) or not bool(
-        exp.get("disable_cross_attention", False)
-    )
-    if not needs_guidance:
-        by_name.pop("patch_guidance_finetune_hp", None)
-    preferred = (
-        "staged_diffusion_pretrain",
-        "patch_guidance_finetune_hp",
-        "diffusion_coarse_finetune_hp",
-        "diffusion_fine_finetune_hp",
-        "diffusion_patch_refine_finetune_hp",
-        "staged_eval",
-    )
-    ordered = [by_name[n] for n in preferred if n in by_name]
-    seen = {str(p["phase"]) for p in ordered}
-    for entry in phases:
-        name = str(entry["phase"])
-        if name == "itrans_finetune_hp":
-            name = "patch_guidance_finetune_hp"
-        if name in removed:
-            continue
-        if name not in seen and name in by_name:
-            ordered.append(dict(by_name[name]))
-            seen.add(name)
-    return ordered
+```
 
+```python
+# models/diffusion_tsf/pipeline/config.py (excerpt continues)
 def _deep_merge(base: dict, override: dict) -> dict:
     out = dict(base)
     for k, v in override.items():
@@ -693,10 +613,11 @@ def load_experiment_config(
 
     validate_config(cfg)
     exp = cfg.get("experiment") or {}
-    guidance_type = str(exp.get("guidance_type", "patch_decoder"))
-    if guidance_type != "patch_decoder":
+    guidance_type = str(exp.get("guidance_type", "itransformer"))
+    if guidance_type != "itransformer":
         raise ValueError(
-            f"Only guidance_type='patch_decoder' is supported; got {guidance_type!r}"
+            f"Only guidance_type='itransformer' is supported; got {guidance_type!r}. "
+            "Patch-decoder guidance has been removed."
         )
     guidance_placement = str(exp.get("guidance_placement", "canvas"))
     if guidance_placement != "canvas":
@@ -1119,7 +1040,7 @@ class PipelineState:
     dit_cond_patch_size: Optional[Tuple[int, int]] = None
     use_guidance_channel: bool = True
     guidance_placement: str = "canvas"
-    guidance_type: str = "patch_decoder"
+    guidance_type: str = "itransformer"
     mmpd_patch_size: int = 12
     cfg_dropout: float = 0.1
     deterministic_anchor_loss: bool = False
@@ -1325,7 +1246,7 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                 best_params = _resolve_diff_hp(state, source_dir)
             except FileNotFoundError:
                 pass
-            guidance_ckpt = _find_existing_synthetic_patch_guidance(state, source_dir)
+            guidance_ckpt = _find_existing_synthetic_itransformer(state, source_dir)
             _log_synthetic_pretrain_visualizations(
                 state,
                 guidance_ckpt=guidance_ckpt,
@@ -1380,11 +1301,11 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
                     config_name=config_name,
                 )
                 best_params = _resolve_diff_hp(state, source_dir)
-                guidance_ckpt, guidance_meta = _resolve_synthetic_patch_guidance(
+                guidance_ckpt, guidance_meta = _resolve_synthetic_itransformer(
                     state,
                     source_dir,
-                    retrain_synthetic_patch_guidance=bool(
-                        self.get("retrain_synthetic_patch_guidance")
+                    retrain_synthetic_itransformer=bool(
+                        self.get("retrain_synthetic_itransformer")
                         or self.get("retrain_synthetic_itrans", False)
                     ),
                 )
@@ -1431,11 +1352,11 @@ class StagedDiffusionPretrainPhase(PipelinePhase):
         best_params = _resolve_diff_hp(state, source_dir)
         needs_guidance = state.needs_guidance
         if needs_guidance:
-            guidance_ckpt, guidance_meta = _resolve_synthetic_patch_guidance(
+            guidance_ckpt, guidance_meta = _resolve_synthetic_itransformer(
                 state,
                 source_dir,
-                retrain_synthetic_patch_guidance=bool(
-                    self.get("retrain_synthetic_patch_guidance")
+                retrain_synthetic_itransformer=bool(
+                    self.get("retrain_synthetic_itransformer")
                     or self.get("retrain_synthetic_itrans", False)
                 ),
             )
@@ -1591,7 +1512,7 @@ def pretrain_diffusion(
     from models.diffusion_tsf import train_multivariate_pipeline as m
 
     logger.info("=" * 60)
-    logger.info("Staged synthetic diffusion pretrain (with patch_decoder guidance)")
+    logger.info("Staged synthetic diffusion pretrain (with iTransformer guidance)")
     logger.info("Samples: %s, Epochs: %s, Patience: %s", n_samples, epochs, patience)
     logger.info("Params: %s", best_params)
     logger.info("=" * 60)
@@ -1611,7 +1532,7 @@ def pretrain_diffusion(
             guidance_checkpoint,
             m.N_VARIATES,
             device,
-            guidance_type="patch_decoder",
+            guidance_type="itransformer",
         )
 
     synth_cache = m.get_synth_cache_dir(checkpoint_dir=checkpoint_dir, smoke_test=smoke_test)
@@ -1753,7 +1674,7 @@ def reused_guidance_ckpt(config_suffix: str, subset_id: str) -> str:
         reused_root(),
         "guidance",
         config_suffix,
-        f"{subset_id}_patch_guidance.pt",
+        f"{subset_id}_itransformer_finetuned.pt",
     )
 
 
@@ -3407,9 +3328,9 @@ class DiffusionTSF(nn.Module):
         )
 
         self._ctx_token_variate_ids: Optional[torch.Tensor] = None
-        if config.guidance_type != "patch_decoder":
+        if config.guidance_type != "itransformer":
             raise ValueError(
-                f"Only guidance_type='patch_decoder' is supported; got {config.guidance_type!r}"
+                f"Only guidance_type='itransformer' is supported; got {config.guidance_type!r}"
             )
         self.context_encoder = None
 
@@ -5554,7 +5475,7 @@ class DiffusionTSFConfig:
     use_guidance_channel: bool = False
     guidance_placement: str = "canvas"  # only canvas allowed; cond_chunks code is dead
     context_embedding_dim: int = 256
-    guidance_type: str = "patch_decoder"
+    guidance_type: str = "itransformer"
     mmpd_patch_size: int = 12
 
     # train
