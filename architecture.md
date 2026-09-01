@@ -2,7 +2,7 @@
 
 This repo trains a probabilistic forecaster that treats future values as **2D binary images** and denoises them with diffusion. The core bet is simple: real series have sharp jumps, flat segments, and geometric structure that Gaussian MSE models smear out. By encoding values as hard cumulative-distribution (CDF) maps and diffusing in the **binary domain** (bit-flip noise, BCE loss), the model gets a much denser training signal on exactly those shapes.
 
-The pipeline is **YAML-driven and multi-phase** (synthetic pretrain → real finetune HP → staged eval), **factorized per variate**, and uses **iTransformer encoder tokens** for cross-variate context when enabled. The **only live binary architecture** is **canvas128 / patch_refine (p64×6)** — full-horizon coarse DiT plus overlapping absolute hi-res CDF crops. Legacy residual fine-as-primary (16h×96w strip), vertical dual, channel dual, and patch-decoder guidance paths have been removed.
+The pipeline is **YAML-driven and multi-phase** (synthetic pretrain → real finetune HP → staged eval), **factorized per variate**, and uses **iTransformer encoder tokens** for cross-variate context when enabled. Live binary geometry is **canvas128 / patch_refine**: **p64×6** (ETTh1 and other p64 leaves) and **p32×6** (solar, exchange, weather, and other p32 leaves). Legacy residual fine-as-primary (16h×96w strip), vertical dual, channel dual, and patch-decoder guidance paths have been removed.
 
 ---
 
@@ -14,7 +14,7 @@ The pipeline is **YAML-driven and multi-phase** (synthetic pretrain → real fin
 |------|-------|----------------|
 | **Patch refine (only live binary path)** | `use_patch_refine_stage: true` | Full-horizon **coarse** DiT, then a second DiT on **overlapping absolute hi-res CDF crops** (not fine residual) from a tall canvas (`patch_refine.py` / `patch_refine_geometry.py`) |
 
-Campaign leaf: `configs/binary_window_norm_patch_refine_canvas128_p64x6*.yaml` (extends flattened `earlyjuly_norm` → `base/binary_staged`). Past conditioning still stacks `Hc∥Hf` via `encode_dual_heights` / `stack_past_coarse_fine` (`fine_image_height` kept for that stack only).
+Campaign leaves: `configs/binary_window_norm_patch_refine_canvas128_p64x6*.yaml` and `configs/binary_window_norm_patch_refine_canvas128_p32x6*.yaml` (extend flattened `earlyjuly_norm` → `base/binary_staged`). Height is the crop H (`patch_refine_patch_height`); width/stride stay 6/5. ETTh1 uses p64; solar / exchange / weather use p32. Past conditioning still stacks `Hc∥Hf` via `encode_dual_heights` / `stack_past_coarse_fine` (`fine_image_height` kept for that stack only).
 
 Obsolete (deleted): sequential fine residual strip (`binary_ordinal_fine_finer_*`), vertical dual concat, channel dual, noise-schedule ablations, legacy `binary_anchor_ar*`.
 
@@ -107,7 +107,7 @@ flowchart TB
 
 Multivariate series use a **factorized batch layout**: each variate is one row in a `(B×V, C, H, W)` tensor. Self-attention inside the DiT runs over **spatial patches only**.
 
-Cross-variate context enters at the bottleneck as frozen iTransformer tokens. Large `B×V` (or patch-refine crop) batches are chunked via `unet_max_chunk_size`. `disable_cross_attention: true` selects visual past-conditioning only; otherwise iTransformer cross-attention is on by default. Stable real windows cache their frozen tokens on GPU for the entire diffusion phase.
+Cross-variate context enters at the bottleneck as frozen iTransformer encoder tokens, projected each forward by a trainable `iTransformerTokenAdapter` (dropout included). Large `B×V` (or patch-refine crop) batches are chunked via `unet_max_chunk_size`. `disable_cross_attention: true` selects visual past-conditioning only; otherwise iTransformer cross-attention is on by default. Stable real windows cache **encoder** tokens (not adapter outputs) for the diffusion phase.
 
 ---
 
@@ -120,7 +120,7 @@ A single tall absolute map would be one huge image. Value precision is **factore
 
 `fine_image_height` remains only so past conditioning can stack `Hc∥Hf` (`encode_dual_heights` / `stack_past_coarse_fine`).
 
-Default geometry in `configs/base/binary_staged.yaml`: canvas **256**, patch **32×8**, col stride **6**. Live campaign leaf (`configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml`): canvas **128** (= 8 hi-res bins per coarse row), patch **64×6**, stride **5** (overlap 1), `dit_patch_size` / `dit_cond_patch_size` **[8,6]** so W divides the DiT patch.
+Default geometry in `configs/base/binary_staged.yaml`: canvas **256**, patch **32×8**, col stride **6**. Live campaign leaves (`configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml` and `...p32x6...`): canvas **128** (= 8 hi-res bins per coarse row), patch **64×6** or **32×6**, stride **5** (overlap 1), `dit_patch_size` / `dit_cond_patch_size` **[8,6]** so W divides the DiT patch.
 
 ---
 
@@ -248,13 +248,14 @@ The sections below are aimed at developers and coding assistants working in the 
 
 ### Current default (production)
 
-**What we run:** window-norm **canvas128 patch_refine (p64×6)** binary diffusion (`binary_window_norm_patch_refine_canvas128_p64x6*`), **stationary-flat anchor** (`0.5` canvas), overlapping absolute-HIR crops, matched non-ordinal **MMPD** baseline (`mmpd_decoder_flat_subsets_paper_lb336_hz96_matched_binary`), then discriminator eval. Vertical dual / residual fine paths are gone.
+**What we run:** window-norm **canvas128 patch_refine** binary diffusion — **p64×6** (`binary_window_norm_patch_refine_canvas128_p64x6*`, e.g. ETTh1) and **p32×6** (`...p32x6*`, e.g. solar / exchange / weather) — **stationary-flat anchor** (`0.5` canvas), overlapping absolute-HIR crops, matched non-ordinal **MMPD** baseline (`mmpd_decoder_flat_subsets_paper_lb336_hz96_matched_binary`), then discriminator eval. Vertical dual / residual fine paths are gone.
 
 | Knob | Value | Config source |
 |------|-------|----------------|
 | Pipeline | YAML `phases` list | `configs/base/binary_staged.yaml` |
 | Leaf experiment (h96 ordinal) | `binary_patch_refine_lb336_hz96_ordinal_tuned` (+ `_synth_fallback`) | `configs/binary_patch_refine_*.yaml` |
-| Leaf (window-norm canvas128) | `binary_window_norm_patch_refine_canvas128_p64x6` | `configs/binary_window_norm_patch_refine_canvas128_p64x6*.yaml` |
+| Leaf (window-norm canvas128 p64) | `binary_window_norm_patch_refine_canvas128_p64x6` | `configs/binary_window_norm_patch_refine_canvas128_p64x6*.yaml` |
+| Leaf (window-norm canvas128 p32) | `binary_window_norm_patch_refine_canvas128_p32x6` | `configs/binary_window_norm_patch_refine_canvas128_p32x6*.yaml` |
 | Representation | Coarse + **patch_refine** absolute HIR crops | `use_patch_refine_stage: true` |
 | Norm | Ordinal window norm (ordinal leaves) / window mean-std (canvas128 chain) | `use_ordinal_window_norm` / `use_window_normalization` |
 | `binary_anchor_input_mode` | `stationary_flat` | flat `0.5` XOR anchor |
@@ -319,7 +320,7 @@ Trains denoisers on synthetic `RealTS` windows (no Optuna here — fixed HP from
 
 ##### iTransformer guidance (`itrans_finetune_hp`) — optional
 
-Real-data iTransformer HP when cross-attention is enabled. Frozen encoder tokens feed FactorizedDiT bottleneck cross-attn via `get_encoder_tokens` + `iTransformerTokenAdapter`. There is no 2D guidance channel.
+Real-data iTransformer HP when cross-attention is enabled. Frozen encoder tokens feed FactorizedDiT bottleneck cross-attn via `get_encoder_tokens` + `iTransformerTokenAdapter` (adapter runs every train/val forward; the phase cache stores encoder tokens only). There is no 2D guidance channel.
 
 ##### Phase 2 — Coarse diffusion finetune HP (`diffusion_coarse_finetune_hp`)
 
@@ -401,7 +402,7 @@ Values clipped to `[-max_scale, max_scale]`, binned into `H=16` rows; occupancy 
 
 ### Model: FactorizedDiT (staged path)
 
-- `model_type: dit` → `FactorizedDiT` (`dit.py`); leaf `dit_patch_size` / `dit_cond_patch_size` must divide image / patch widths (e.g. `[8,8]` default, `[8,6]` on canvas128 p64×6).
+- `model_type: dit` → `FactorizedDiT` (`dit.py`); leaf `dit_patch_size` / `dit_cond_patch_size` must divide image / patch widths (e.g. `[8,8]` default, `[8,6]` on canvas128 p64×6 and p32×6).
 - Typical capacity: `embed_dim=384`, `depth=8`, `heads=6`.
 - One variate = one batch row (`BV`); self-attention is **spatial patches only** (no variate axis in DiT).
 - **Variate embedding:** when `use_variate_embedding` and `variate_factorized` and `V>1`, a learned embed is added per row (including each patch-refine crop’s `variate_index`).
@@ -427,7 +428,7 @@ Read merged YAML — do not rely on deleted `pipeline_config.py` defaults.
 
 - **Base:** `configs/base/binary_staged.yaml`
 - **h96 ordinal patch-refine:** `configs/binary_patch_refine_lb336_hz96_ordinal_tuned*.yaml`
-- **Window-norm canvas128:** `configs/binary_window_norm_patch_refine_canvas128_p64x6*.yaml` (extends early-July guided window-norm)
+- **Window-norm canvas128:** `configs/binary_window_norm_patch_refine_canvas128_p64x6*.yaml` and `...p32x6*.yaml` (extends early-July guided window-norm). Patch height is 64 or 32; both use width 6.
 
 ---
 
