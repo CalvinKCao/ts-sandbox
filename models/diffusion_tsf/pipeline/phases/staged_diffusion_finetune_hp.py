@@ -1729,7 +1729,7 @@ class _BaseStagedDiffusionFinetuneHPPhase(PipelinePhase):
                     model=model,
                     device=device,
                     storage=str(self.get("cross_variate_token_cache_storage", "pinned_cpu")),
-                    token_kind="raw",
+                    token_kind="mixed",
                 )
                 stable_train = not _has_train_window_augmentation(train_ds)
                 n_cache = count_cache_windows(val_ds)

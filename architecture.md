@@ -107,7 +107,7 @@ flowchart TB
 
 Multivariate series use a **factorized batch layout**: each variate is one row in a `(B×V, C, H, W)` tensor. Self-attention inside the DiT runs over **spatial patches only**.
 
-Cross-variate context enters at the bottleneck as frozen iTransformer encoder tokens, projected each forward by a trainable `iTransformerTokenAdapter` (dropout included). Large `B×V` (or patch-refine crop) batches are chunked via `unet_max_chunk_size`. `disable_cross_attention: true` selects visual past-conditioning only; otherwise iTransformer cross-attention is on by default. Stable real windows cache **encoder** tokens (not adapter outputs) for the diffusion phase.
+Cross-variate context enters at the bottleneck as frozen iTransformer tokens. Large `B×V` (or patch-refine crop) batches are chunked via `unet_max_chunk_size`. `disable_cross_attention: true` selects visual past-conditioning only; otherwise iTransformer cross-attention is on by default. Stable real windows cache their frozen tokens (post-adapter mixed context) for the entire diffusion phase.
 
 ---
 
@@ -320,7 +320,7 @@ Trains denoisers on synthetic `RealTS` windows (no Optuna here — fixed HP from
 
 ##### iTransformer guidance (`itrans_finetune_hp`) — optional
 
-Real-data iTransformer HP when cross-attention is enabled. Frozen encoder tokens feed FactorizedDiT bottleneck cross-attn via `get_encoder_tokens` + `iTransformerTokenAdapter` (adapter runs every train/val forward; the phase cache stores encoder tokens only). There is no 2D guidance channel.
+Real-data iTransformer HP when cross-attention is enabled. Frozen encoder tokens feed FactorizedDiT bottleneck cross-attn via `get_encoder_tokens` + `iTransformerTokenAdapter` (adapter is applied when the mixed cache is built; DiT training looks up those frozen tokens). There is no 2D guidance channel.
 
 ##### Phase 2 — Coarse diffusion finetune HP (`diffusion_coarse_finetune_hp`)
 
