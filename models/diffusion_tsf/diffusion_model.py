@@ -659,19 +659,33 @@ class DiffusionTSF(nn.Module):
             ctx,
         )
 
-    def _get_cross_variate_context(
-        self,
-        past_raw: torch.Tensor,
-        past_norm: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
-        """Produce (B, V, ctx_dim) iTransformer tokens for DiT bottleneck cross-attention."""
+    def _encode_frozen_encoder_tokens(self, past_raw: torch.Tensor) -> torch.Tensor:
+        """Frozen iTransformer encoder tokens (B, V, itrans_d_model). No adapter."""
         if self.guidance_model is None or not hasattr(self.guidance_model, "get_encoder_tokens"):
             raise RuntimeError(
                 "Cross-attention requires a guidance model with get_encoder_tokens()."
             )
+        encoder = getattr(self.guidance_model, "model", self.guidance_model)
+        if any(p.requires_grad for p in encoder.parameters()):
+            raise RuntimeError(
+                "iTransformer encoder must stay frozen during DiT; got requires_grad=True"
+            )
         self._ctx_token_variate_ids = None
         with eval_bench_span("token_retrieval"):
             enc_tokens = self.guidance_model.get_encoder_tokens(past_raw)
+        if enc_tokens.dim() != 3:
+            raise RuntimeError(
+                f"encoder tokens must be (B, V, d_model), got {tuple(enc_tokens.shape)}"
+            )
+        d_model = int(self.config.itrans_d_model)
+        if enc_tokens.shape[-1] != d_model:
+            raise RuntimeError(
+                f"encoder tokens last dim {enc_tokens.shape[-1]} != itrans_d_model {d_model}"
+            )
+        return enc_tokens
+
+    def _adapt_encoder_tokens(self, enc_tokens: torch.Tensor) -> torch.Tensor:
+        """Trainable adapter: (B, V, d_model) -> (B, V, context_dim)."""
         if self.context_encoder is None:
             raise RuntimeError("itransformer guidance requires context_encoder.")
         adapted = self.context_encoder(enc_tokens)
@@ -681,6 +695,15 @@ class DiffusionTSF(nn.Module):
         )
         return adapted
 
+    def _get_cross_variate_context(
+        self,
+        past_raw: torch.Tensor,
+        past_norm: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        """Encode frozen tokens once, then run the trainable adapter."""
+        enc_tokens = self._encode_frozen_encoder_tokens(past_raw)
+        return self._adapt_encoder_tokens(enc_tokens)
+
     def _resolve_cross_variate_context(
         self,
         past: torch.Tensor,
@@ -688,17 +711,28 @@ class DiffusionTSF(nn.Module):
         cached_context: Optional[torch.Tensor] = None,
         cached_token_variate_ids: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
-        """Use phase-cached frozen iTransformer tokens when provided, else encode live."""
+        """Lookup cached encoder tokens (or encode live), then run the adapter.
+
+        ``cached_context`` must be frozen encoder tokens ``(B, V, itrans_d_model)``,
+        not post-adapter context. The adapter stays in the train graph.
+        ``cached_token_variate_ids`` is unused; the adapter assigns ids.
+        """
         self._ctx_key_padding_mask = None
         if self.config.disable_cross_attention:
             return None
         if cached_context is not None:
             if cached_context.dim() != 3:
                 raise RuntimeError(
-                    f"iTransformer context cache must be (B, V, C), got {tuple(cached_context.shape)}"
+                    f"encoder-token cache must be (B, V, d_model), got {tuple(cached_context.shape)}"
                 )
-            self._ctx_token_variate_ids = cached_token_variate_ids
-            return cached_context
+            d_model = int(self.config.itrans_d_model)
+            if cached_context.shape[-1] != d_model:
+                raise RuntimeError(
+                    f"cached encoder tokens last dim {cached_context.shape[-1]} != "
+                    f"itrans_d_model {d_model}; cache must store frozen encoder tokens, "
+                    "not post-adapter context"
+                )
+            return self._adapt_encoder_tokens(cached_context)
         return self._get_cross_variate_context(past, past_norm)
 
     def _window_norm_center(self, past: torch.Tensor) -> torch.Tensor:
@@ -1750,7 +1784,11 @@ class DiffusionTSF(nn.Module):
         context_token_variate_ids: Optional[torch.Tensor] = None,
         univariate_row_index: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
-        """Build the graph-free tensors shared by regular and anchor losses."""
+        """Build tensors shared by regular and anchor losses.
+
+        Cross-variate ctx is adapted from frozen encoder tokens (cache or live);
+        the adapter stays in the graph when trainable.
+        """
         from .patch_refine import (
             build_patch_aux_channels_layout,
             expand_ctx_for_layout,

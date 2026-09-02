@@ -58,13 +58,16 @@ def count_cache_windows(dataset) -> int:
 
 
 class CrossVariateTokenCache:
-    """Exact frozen tokens keyed by immutable raw lookback windows.
+    """Frozen iTransformer encoder tokens keyed by immutable raw lookback windows.
 
-    Tokens are built once before the first trial and reused across epochs and
-    HP trials. ``pinned_cpu`` keeps the full cache out of VRAM, then transfers
-    only the requested batch asynchronously. ``gpu`` is retained for explicit
-    no-transfer experiments. A cache miss is an error: silent live fallback
-    would make timing and numerical comparisons ambiguous.
+    Stores ``(V, itrans_d_model)`` encoder tokens only — not post-adapter
+    context. DiT train/val looks up a batch then runs ``iTransformerTokenAdapter``
+    live (trainable, dropout on train). Tokens are built once before the first
+    trial and reused across epochs and HP trials. ``pinned_cpu`` keeps the full
+    cache out of VRAM, then transfers only the requested batch asynchronously.
+    ``gpu`` is retained for explicit no-transfer experiments. A cache miss is
+    an error: silent live fallback would make timing and numerical comparisons
+    ambiguous.
     """
 
     def __init__(
@@ -86,7 +89,8 @@ class CrossVariateTokenCache:
             raise ValueError("pinned_cpu token caching requires a CUDA training device")
         if token_kind != "mixed":
             raise ValueError(
-                f"token_kind must be 'mixed' (iTransformer tokens); got {token_kind!r}"
+                f"token_kind must be 'mixed' (frozen encoder tokens); got {token_kind!r}. "
+                "pre_mixer caching has been removed."
             )
         self.model = model
         self.device = device
@@ -174,32 +178,16 @@ class CrossVariateTokenCache:
         if not missing:
             return
         source = past[missing].to(self.device, non_blocking=True)
-        from models.diffusion_tsf.pipeline.train.checkpointing import amp_context
-
-        with amp_context(bool(self.model.config.use_amp)):
-            norm, _, _ = self.model._normalize_sequence(source, None)
-            if self.token_kind == "pre_mixer":
-                tokens = self.model._encode_pre_mixer_tokens(source, norm)
-            else:
-                tokens = self.model._get_cross_variate_context(source, norm)
-        if tokens is None:
-            raise RuntimeError("cross-attention unexpectedly produced no context tokens")
-        if self.token_kind == "pre_mixer":
-            if tokens.dim() != 4:
-                raise RuntimeError(
-                    f"pre_mixer cache expects (B, V, N_past, d), got {tuple(tokens.shape)}"
-                )
-        elif tokens.dim() != 3:
+        tokens = self.model._encode_frozen_encoder_tokens(source)
+        if tokens.dim() != 3:
             raise RuntimeError(
-                f"mixed cache expects (B, M, d), got {tuple(tokens.shape)}"
+                f"encoder-token cache expects (B, V, d_model), got {tuple(tokens.shape)}"
             )
-        ids = None if self.token_kind == "pre_mixer" else self.model._ctx_token_variate_ids
-        if ids is not None:
-            ids = ids.detach().to(self.device).clone()
-            if self._token_variate_ids is None:
-                self._token_variate_ids = ids
-            elif not torch.equal(self._token_variate_ids, ids):
-                raise RuntimeError("token variate IDs changed while building frozen cache")
+        d_model = int(self.model.config.itrans_d_model)
+        if tokens.shape[-1] != d_model:
+            raise RuntimeError(
+                f"encoder-token cache last dim {tokens.shape[-1]} != itrans_d_model {d_model}"
+            )
         for local_i, batch_i in enumerate(missing):
             token = tokens[local_i]
             if self.storage == "gpu":

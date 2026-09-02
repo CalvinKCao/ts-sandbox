@@ -551,6 +551,8 @@ class DiffusionTrainer:
         """
         past, future, patch_col0, cache_key_past = inputs
         try:
+            # Cached tensors are encoder tokens. Sequential prepare detaches ctx,
+            # so skip it when the adapter must stay in the regular backward graph.
             if (
                 self.sequential_anchor_backward
                 and bool(self.model.config.use_deterministic_anchor_loss)

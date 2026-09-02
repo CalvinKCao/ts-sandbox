@@ -320,7 +320,7 @@ Trains denoisers on synthetic `RealTS` windows (no Optuna here — fixed HP from
 
 ##### iTransformer guidance (`itrans_finetune_hp`) — optional
 
-Real-data iTransformer HP when cross-attention is enabled. Frozen encoder tokens feed FactorizedDiT bottleneck cross-attn via `get_encoder_tokens` + `iTransformerTokenAdapter` (adapter is applied when the mixed cache is built; DiT training looks up those frozen tokens). There is no 2D guidance channel.
+Real-data iTransformer HP when cross-attention is enabled. During DiT the encoder is frozen and cached (`get_encoder_tokens` once per window); `iTransformerTokenAdapter` stays trainable and runs on every train/val step. There is no 2D guidance channel.
 
 ##### Phase 2 — Coarse diffusion finetune HP (`diffusion_coarse_finetune_hp`)
 
