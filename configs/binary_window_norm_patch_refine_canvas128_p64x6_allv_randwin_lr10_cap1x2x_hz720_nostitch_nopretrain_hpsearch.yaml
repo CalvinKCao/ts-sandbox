@@ -1,0 +1,29 @@
+# Redo H720 nostitch nopre iTrans-token HP search (ETTh1 + electricity).
+# Distinct from 5160029–31: new experiment_name / eval_progress_key,
+# electricity train 4× (660 vs 165), in-job viz_patch_boxes (hoisted past skip_viz).
+# Traffic 8× cap lives here so the p32 nocompile child inherits it; this leaf
+# is submitted for p64 datasets only.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_hz720_nostitch_nopretrain.yaml
+
+visualization:
+  viz_patch_boxes: true
+  viz_patch_boxes_n_samples: 3
+  viz_binary_mmpd_gap: false
+  viz_binary_mmpd_redbox: false
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, nopretrain, from_random_init, hz720, nostitch, itrans_guid, hpsearch, elec_train4x, traffic_train8x, viz_patch_boxes]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-allv-randwin-lr10-cap1x2x-hz720-nostitch-nopretrain-hpsearch
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_hz720_nostitch_nopretrain_hpsearch
+  guidance_type: itransformer
+  data_subset_by_dataset:
+    electricity:
+      train_max_windows: 660
+    traffic:
+      train_max_windows: 488
+
+phases:
+  - phase: staged_eval
+    eval_progress_key: canvas128_allv_randwin_lr10_hz720_hpsearch_s1_n10_steps4

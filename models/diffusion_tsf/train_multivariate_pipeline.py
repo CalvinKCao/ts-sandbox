@@ -1541,6 +1541,15 @@ def run_itransformer_finetune_hp_tuning(
 
     ds_lb, ds_hz = dataset_window_lengths(state, dataset_name)
     itrans_seq, itrans_pred = itrans_model_lengths(state, ds_lb, ds_hz)
+    logger.info(
+        "iTrans FT geometry: seq_len=%d pred_len=%d (dataset lb=%d hz=%d)",
+        itrans_seq, itrans_pred, ds_lb, ds_hz,
+    )
+    if int(itrans_pred) != int(state.forecast_length):
+        raise RuntimeError(
+            f"iTrans pred_len={itrans_pred} != geometry.forecast_length="
+            f"{state.forecast_length}; encoder must match the diffusion horizon"
+        )
 
     from models.diffusion_tsf.pipeline.optuna_parallel import run_optuna_study
 
