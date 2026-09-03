@@ -119,9 +119,10 @@ def _load_stage_model(
         with meta_path.open(encoding="utf-8") as f:
             tuned = json.load(f).get("tuned_params") or {}
 
-    model_kwargs = anchor_kwargs_from_params(tuned)
+    model_kwargs = anchor_kwargs_from_params(stage_config, tuned)
     model_kwargs.update(_model_kwargs_from_tuned(tuned))
     model = create_diffusion_model(
+        stage_config,
         n_variates=n_vars,
         lookback=lookback,
         horizon=horizon,

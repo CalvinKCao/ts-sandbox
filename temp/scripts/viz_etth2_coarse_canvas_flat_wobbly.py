@@ -721,9 +721,10 @@ def main() -> None:
     state.extra.pop("global_ordinal_ladder", None)
 
     guidance = None
-    if bool(state.use_guidance_channel) or not bool(state.disable_cross_attention):
+    if state.needs_guidance:
         gpath, gtype = _resolve_guidance_ckpt(args.ckpt, run_subset_id(run), "auto")
         guidance = load_wrapped_guidance(
+            state,
             str(gpath),
             len(run_variate_indices(run)),
             device,

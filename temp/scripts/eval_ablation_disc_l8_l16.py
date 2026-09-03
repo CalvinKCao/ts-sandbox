@@ -1014,9 +1014,10 @@ def _load_models(
         # Window-norm canvas128 leaves: disc snap uses window-norm grid, not ordinal.
 
     guidance = None
-    if bool(state.use_guidance_channel) or not bool(state.disable_cross_attention):
+    if state.needs_guidance:
         path, guidance_type = _resolve_guidance_ckpt(ckpt_root, run_subset_id(run), "auto")
         guidance = load_wrapped_guidance(
+            state,
             str(path),
             len(run_variate_indices(run)),
             device,

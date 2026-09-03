@@ -132,14 +132,12 @@ def _build_encode_model(
     state = stage_state(state, "coarse", honor_dataset_windows=True)
     # Encode path never needs guidance / cross-attn tokens.
     state.disable_cross_attention = True
-    state.use_guidance_channel = False
     model = create_diffusion_model(
         n_variates=len(flat_mask),
         lookback=lookback,
         horizon=horizon,
         guidance_model=None,
         diffusion_stage="coarse",
-        use_guidance_channel=False,
     ).to(device)
     model.config.skip_window_norm_variate_mask = list(flat_mask)
     model.config.hybrid_flat_dataset_norm = True
