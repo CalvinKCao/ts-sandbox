@@ -44,8 +44,8 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import stage
 
 logger = logging.getLogger(__name__)
 
-# Standard forecast prefixes for long-horizon (stitch) eval: score the stitched
-# forecast on [:h] without re-generating. Full-H metrics stay un-suffixed.
+# Standard forecast prefixes for long-horizon eval: score [:h] without
+# re-generating. Full-H metrics stay un-suffixed.
 STAGED_PREFIX_HORIZONS = (96, 192, 336, 720)
 
 
@@ -233,24 +233,34 @@ def _deterministic_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, 
     }
 
 
-def _staged_anchor_global_norm(
-    fine_model,
-    coarse_out: Dict[str, Any],
-    fine_out: Dict[str, Any],
-) -> np.ndarray:
-    """Decode chained coarse→refine/fine forecast in global norm space."""
-    pred = fine_out.get("prediction_global_norm", fine_out.get("prediction"))
-    if pred is not None:
-        if isinstance(pred, np.ndarray):
-            return pred
-        return pred.detach().cpu().numpy()
-    if getattr(fine_model.config, "diffusion_stage", "") == "patch_refine":
-        raise RuntimeError("patch_refine eval output missing prediction_global_norm")
-    coarse_2d = coarse_out["future_2d_coarse"]
-    fine_2d = fine_out["future_2d_fine"]
-    pred = fine_model.decode_dual_from_2d(coarse_2d, fine_2d, from_diffusion=False)
-    pred = fine_model._strip_overlap_and_upsample_repr(pred)
-    return pred.detach().cpu().numpy()
+def _worst_mse_window_picks(
+    worst_manifest: Sequence[Dict[str, Any]],
+    n_box: int,
+    pool_len: int,
+    seed: int,
+) -> List[int]:
+    """Prefer top-k anchor_mse windows for redbox panels; else random."""
+    ordered = [
+        e for e in worst_manifest
+        if str(e.get("metric", "")) == "anchor_mse"
+    ]
+    ordered.sort(key=lambda e: int(e.get("rank", 10**9)))
+    if not ordered:
+        ordered = list(worst_manifest)
+    picks: List[int] = []
+    seen = set()
+    for e in ordered:
+        wi = int(e["window_index"])
+        if wi in seen or wi < 0 or wi >= pool_len:
+            continue
+        seen.add(wi)
+        picks.append(wi)
+        if len(picks) >= n_box:
+            return picks
+    if picks:
+        return picks
+    from utils.staged_eval_sample_viz import pick_indices
+    return pick_indices(pool_len, n_box, seed, None)
 
 
 def _summarize_staged_eval_metrics(
@@ -501,85 +511,6 @@ def _per_window_mae(y_true: np.ndarray, pred: np.ndarray) -> np.ndarray:
     return np.abs(y_true - pred).mean(axis=(1, 2))
 
 
-def _horizon_stitch_enabled(model) -> bool:
-    return bool(getattr(model.config, "horizon_stitch", False))
-
-
-def _staged_generate_once(
-    *,
-    coarse_model,
-    fine_model,
-    past: torch.Tensor,
-    gen_kwargs: Dict[str, Any],
-) -> Dict[str, torch.Tensor]:
-    coarse_out = coarse_model.generate(past, **gen_kwargs)
-    fine_out = fine_model.generate(
-        past,
-        future_coarse_2d=coarse_out["future_2d_coarse"],
-        **gen_kwargs,
-    )
-    pred = _staged_anchor_global_norm(fine_model, coarse_out, fine_out)
-    pred_t = torch.from_numpy(pred).to(past.device)
-    return {"coarse": coarse_out, "fine": fine_out, "prediction": pred_t}
-
-
-def _staged_generate_horizon_stitch(
-    *,
-    coarse_model,
-    fine_model,
-    past: torch.Tensor,
-    gen_kwargs: Dict[str, Any],
-) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    """Independent 104-canvas generates + overlap-average stitch to length H.
-
-    Chunks run sequentially (not ``past.repeat_interleave(n_chunks)``) so peak
-    rows stay ``batch`` — same as single-canvas eval. Materialising all 8
-    chunks at once with MC samples blew past the L40S probed row budget
-    (``batch × n_samp × n_chunks``).
-    """
-    from models.diffusion_tsf.horizon_chunks import chunk_starts, overlap_average_stitch
-
-    k = int(getattr(coarse_model.config, "lookback_overlap", 0))
-    inner = int(getattr(coarse_model.config, "horizon_chunk_inner", 96))
-    dataset_h = int(getattr(coarse_model.config, "dataset_forecast_length", 0) or 0)
-    if dataset_h < inner:
-        raise ValueError(
-            f"horizon_stitch dataset_forecast_length {dataset_h} < inner {inner}"
-        )
-    starts = chunk_starts(dataset_h, inner=inner, overlap=k)
-    n_chunks = len(starts)
-    batch = past.shape[0]
-    device = past.device
-    expected_w = k + inner
-    canvases = []
-    diag0 = None
-    for start in starts:
-        t0 = torch.full((batch,), int(start), device=device, dtype=torch.long)
-        chunk_kwargs = dict(gen_kwargs)
-        chunk_kwargs["horizon_chunk_t0"] = t0
-        out = _staged_generate_once(
-            coarse_model=coarse_model,
-            fine_model=fine_model,
-            past=past,
-            gen_kwargs=chunk_kwargs,
-        )
-        canvas = out["fine"]["prediction_with_overlap"]
-        if canvas.shape[-1] != expected_w:
-            raise ValueError(
-                f"stitch canvas width {canvas.shape[-1]} != overlap+inner {expected_w}"
-            )
-        canvases.append(canvas)
-        if diag0 is None:
-            diag0 = {"coarse": out["coarse"], "fine": out["fine"]}
-    canvas_bn = torch.stack(canvases, dim=1)
-    if canvas_bn.shape[1] != n_chunks:
-        raise ValueError(f"stacked n_chunks {canvas_bn.shape[1]} != {n_chunks}")
-    stitched = overlap_average_stitch(
-        canvas_bn, starts, horizon=dataset_h, inner=inner, overlap=k,
-    )
-    return stitched, diag0
-
-
 def _staged_det_gen_kwargs(state: PipelineState, default_steps: int) -> Dict[str, Any]:
     sampler = str(getattr(state, "eval_sampler", "anchor"))
     if sampler in ("anchor", "deterministic_anchor"):
@@ -752,37 +683,22 @@ class StagedEvalPhase(PipelinePhase):
                     torch.manual_seed(state.seed + batch_idx)
                     batch_t0 = time.perf_counter()
                     with eval_bench_span("det"):
-                        if _horizon_stitch_enabled(coarse_model):
-                            det_t, stitch_diag = _staged_generate_horizon_stitch(
-                                coarse_model=coarse_model,
-                                fine_model=fine_model,
-                                past=past,
-                                gen_kwargs=det_kwargs,
+                        coarse_det = coarse_model.generate(past, **det_kwargs)
+                        fine_det = fine_model.generate(
+                            past,
+                            future_coarse_2d=coarse_det["future_2d_coarse"],
+                            **det_kwargs,
+                        )
+                        with eval_bench_span("decode_components"):
+                            coarse_np, fine_np, _ = decode_staged_anchor_components(
+                                fine_model, coarse_det, fine_det,
                             )
-                            det_all.append(det_t.detach().cpu().numpy())
-                            with eval_bench_span("decode_components"):
-                                coarse_np, fine_np, _ = decode_staged_anchor_components(
-                                    fine_model, stitch_diag["coarse"], stitch_diag["fine"],
-                                )
-                            coarse_all.append(coarse_np)
-                            fine_all.append(fine_np)
-                        else:
-                            coarse_det = coarse_model.generate(past, **det_kwargs)
-                            fine_det = fine_model.generate(
-                                past,
-                                future_coarse_2d=coarse_det["future_2d_coarse"],
-                                **det_kwargs,
-                            )
-                            with eval_bench_span("decode_components"):
-                                coarse_np, fine_np, final_np = decode_staged_anchor_components(
-                                    fine_model, coarse_det, fine_det,
-                                )
-                            det_all.append(fine_det["prediction_global_norm"].detach().cpu().numpy())
-                            det_with_overlap_all.append(
-                                fine_det["prediction_with_overlap"].detach().cpu().numpy()
-                            )
-                            coarse_all.append(coarse_np)
-                            fine_all.append(fine_np)
+                        det_all.append(fine_det["prediction_global_norm"].detach().cpu().numpy())
+                        det_with_overlap_all.append(
+                            fine_det["prediction_with_overlap"].detach().cpu().numpy()
+                        )
+                        coarse_all.append(coarse_np)
+                        fine_all.append(fine_np)
 
                     det_s = time.perf_counter() - batch_t0
                     prob_s = 0.0
@@ -794,30 +710,19 @@ class StagedEvalPhase(PipelinePhase):
                             torch.manual_seed(state.seed + batch_idx * 1009)
                             with eval_bench_span("mc_expand"):
                                 past_exp = past.repeat_interleave(prob_samples, dim=0)
-                            if _horizon_stitch_enabled(coarse_model):
-                                sample_t, _ = _staged_generate_horizon_stitch(
-                                    coarse_model=coarse_model,
-                                    fine_model=fine_model,
-                                    past=past_exp,
-                                    gen_kwargs=prob_kwargs,
-                                )
-                                with eval_bench_span("reshape_cpu"):
-                                    samples_bvs = _reshape_parallel_samples(sample_t, batch_n, prob_samples)
-                                    sample_all.append(samples_bvs.detach().cpu().numpy())
-                            else:
-                                coarse_sample = coarse_model.generate(past_exp, **prob_kwargs)
-                                fine_sample = fine_model.generate(
-                                    past_exp,
-                                    future_coarse_2d=coarse_sample["future_2d_coarse"],
-                                    **prob_kwargs,
-                                )
-                                with eval_bench_span("reshape_cpu"):
-                                    pred = fine_sample["prediction_global_norm"]
-                                    overlap = fine_sample["prediction_with_overlap"]
-                                    samples_bvs = _reshape_parallel_samples(pred, batch_n, prob_samples)
-                                    overlap_bvs = _reshape_parallel_samples(overlap, batch_n, prob_samples)
-                                    sample_all.append(samples_bvs.detach().cpu().numpy())
-                                    samples_with_overlap_all.append(overlap_bvs.detach().cpu().numpy())
+                            coarse_sample = coarse_model.generate(past_exp, **prob_kwargs)
+                            fine_sample = fine_model.generate(
+                                past_exp,
+                                future_coarse_2d=coarse_sample["future_2d_coarse"],
+                                **prob_kwargs,
+                            )
+                            with eval_bench_span("reshape_cpu"):
+                                pred = fine_sample["prediction_global_norm"]
+                                overlap = fine_sample["prediction_with_overlap"]
+                                samples_bvs = _reshape_parallel_samples(pred, batch_n, prob_samples)
+                                overlap_bvs = _reshape_parallel_samples(overlap, batch_n, prob_samples)
+                                sample_all.append(samples_bvs.detach().cpu().numpy())
+                                samples_with_overlap_all.append(overlap_bvs.detach().cpu().numpy())
                         prob_s = time.perf_counter() - prob_t0
                     batch_s = time.perf_counter() - batch_t0
                     done = batch_idx + 1
@@ -1374,7 +1279,10 @@ class StagedEvalPhase(PipelinePhase):
             or bench
         )
         viz_cfg = visualization_settings(state.merged_config)
-        if not skip_viz and viz_cfg.get("enabled", True):
+
+        # Top-k MSE-diff panels: same skip_eval_visualizations bypass as patch-box
+        # redbox (H720 leaves set skip true to drop dual-scale / pack viz).
+        if (not bench) and viz_cfg.get("enabled", True):
             try:
                 worst_viz = run_eval_worst_window_visualizations(
                     state,
@@ -1389,6 +1297,7 @@ class StagedEvalPhase(PipelinePhase):
             except Exception as e:
                 logger.warning("Worst-window eval viz failed: %s", e, exc_info=True)
 
+        if not skip_viz and viz_cfg.get("enabled", True):
             try:
                 prob_viz = run_eval_probabilistic_sample_visualizations(
                     state,
@@ -1453,18 +1362,17 @@ class StagedEvalPhase(PipelinePhase):
         # Patch-box / 1d / 2d panels: same skip_eval_visualizations bypass as MMPD
         # gap/redbox. YAML viz_binary_mmpd_redbox is a no-op without MMPD packs;
         # viz_patch_boxes writes refine_boxes from already-loaded coarse/fine.
-        if (not bench) and bool(viz_cfg.get("viz_patch_boxes", False)):
+        if (not bench) and bool(viz_cfg.get("viz_patch_boxes", True)):
             try:
-                from utils.staged_eval_sample_viz import (
-                    pick_indices,
-                    write_staged_sample_panels,
-                )
+                from utils.staged_eval_sample_viz import write_staged_sample_panels
 
                 kind = "patch_refine"
-                n_box = int(viz_cfg.get("viz_patch_boxes_n_samples", 1) or 1)
+                n_box = int(viz_cfg.get("viz_patch_boxes_n_samples", 3) or 3)
                 if state.smoke_test:
                     n_box = min(n_box, 1)
-                picks = pick_indices(len(full_test_ds), n_box, int(state.seed), None)
+                picks = _worst_mse_window_picks(
+                    worst_manifest, n_box, len(full_test_ds), int(state.seed),
+                )
                 box_dir = Path(state.results_dir) / "viz" / "staged_eval_samples" / subset_id
                 box_paths = write_staged_sample_panels(
                     out_dir=box_dir,

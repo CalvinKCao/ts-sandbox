@@ -110,8 +110,6 @@ class PipelineState:
     forecast_length: int = 96
     lookback_overlap: int = 8
     diffusion_lookback_cap: int = 0
-    horizon_stitch: bool = False
-    horizon_chunk_inner: int = 96
     representation_time_stride: int = 1
     past_cond_resize_to_horizon: bool = True
     itrans_lookback_length: Optional[int] = None
@@ -306,9 +304,6 @@ class PipelineState:
             init_kwargs["dit_cond_patch_size"] = tuple(
                 int(x) for x in init_kwargs["dit_cond_patch_size"]
             )
-        if "horizon_stitch" in init_kwargs:
-            from models.diffusion_tsf.config import parse_horizon_stitch
-            init_kwargs["horizon_stitch"] = parse_horizon_stitch(init_kwargs["horizon_stitch"])
         for key in (
             "image_height",
             "coarse_image_height",

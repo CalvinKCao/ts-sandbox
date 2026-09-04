@@ -7,23 +7,6 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
 
-def parse_horizon_stitch(value: Any) -> bool:
-    """YAML ``horizon_stitch``: false or overlap_avg/true."""
-    if value is True or value == 1:
-        return True
-    if value is False or value in (0, None, ""):
-        return False
-    if isinstance(value, str):
-        key = value.strip().lower().replace("-", "_")
-        if key in {"overlap_avg", "true", "yes", "on"}:
-            return True
-        if key in {"false", "no", "off", "none"}:
-            return False
-    raise ValueError(
-        f"horizon_stitch must be false or overlap_avg, got {value!r}"
-    )
-
-
 @dataclass
 class DiffusionTSFConfig:
     """Settings for binary CDF diffusion with FactorizedDiT."""
@@ -31,16 +14,12 @@ class DiffusionTSFConfig:
     # seq lens
     lookback_length: int = 512
     forecast_length: int = 96
-    # YAML horizon (before overlap). Canvas width is lookback_overlap + inner when
-    # horizon_stitch is on; otherwise forecast_length already includes overlap.
+    # YAML horizon (before overlap). Canvas width is forecast_length + lookback_overlap.
     dataset_forecast_length: int = 0
     # Cap 2D past conditioning width; 0 = legacy min(past_len, target_width).
     diffusion_lookback_cap: int = 0
-    # Removed grow-past AR. Must stay 0; use horizon_stitch instead.
+    # Removed grow-past AR. Must stay 0.
     diffusion_chunk_horizon: int = 0
-    # Overlap-average stitch: fixed 104 canvas + chunk token, not grow-the-past AR.
-    horizon_stitch: bool = False
-    horizon_chunk_inner: int = 96
     # Subsample timesteps before 2D encode (x[..., ::stride]); decode upsamples linearly.
     representation_time_stride: int = 1
     # When False, past 2D cond keeps native lookback width (e.g. 336); DiT cond tokens
@@ -298,26 +277,8 @@ class DiffusionTSFConfig:
             raise ValueError(f"model_type must be 'dit', got {self.model_type!r}")
         if int(self.diffusion_chunk_horizon or 0) != 0:
             raise ValueError(
-                "diffusion_chunk_horizon AR was removed; set horizon_stitch "
-                "to overlap_avg (true) instead of a non-zero diffusion_chunk_horizon"
+                "diffusion_chunk_horizon AR was removed; keep it 0"
             )
-        if self.horizon_chunk_inner <= 0:
-            raise ValueError(
-                f"horizon_chunk_inner must be positive, got {self.horizon_chunk_inner}"
-            )
-        if self.horizon_stitch:
-            canvas_w = int(self.lookback_overlap) + int(self.horizon_chunk_inner)
-            if int(self.forecast_length) != canvas_w:
-                raise ValueError(
-                    "horizon_stitch requires forecast_length == lookback_overlap + "
-                    f"horizon_chunk_inner ({canvas_w}), got {self.forecast_length}"
-                )
-            dhz = int(self.dataset_forecast_length or 0)
-            if dhz < int(self.horizon_chunk_inner):
-                raise ValueError(
-                    "horizon_stitch requires dataset_forecast_length >= "
-                    f"horizon_chunk_inner ({self.horizon_chunk_inner}), got {dhz}"
-                )
 
     @property
     def data_occupancy_channels(self) -> int:

@@ -416,7 +416,6 @@ class DiffusionTSF(nn.Module):
                 int(config.dataset_forecast_length or 0),
                 int(config.forecast_length),
             ),
-            use_horizon_chunk_embedding=bool(config.horizon_stitch),
         )
 
         self._ctx_token_variate_ids: Optional[torch.Tensor] = None
@@ -952,7 +951,6 @@ class DiffusionTSF(nn.Module):
         context_window_indices: Optional[torch.Tensor] = None,
         patch_coarse_bin: Optional[torch.Tensor] = None,
         patch_time0: Optional[torch.Tensor] = None,
-        horizon_chunk_emb: Optional[torch.Tensor] = None,
         return_cross_attn_weights: bool = False,
     ) -> torch.Tensor:
         """Run the denoiser with the same chunking rule used by training/eval."""
@@ -983,7 +981,6 @@ class DiffusionTSF(nn.Module):
                 c_var = variate_indices[i:end] if variate_indices is not None else None
                 c_bin = patch_coarse_bin[i:end] if patch_coarse_bin is not None else None
                 c_t0 = patch_time0[i:end] if patch_time0 is not None else None
-                c_h = horizon_chunk_emb[i:end] if horizon_chunk_emb is not None else None
                 kwargs = {
                     "encoder_hidden_states": c_ctx,
                     "token_variate_ids": token_variate_ids,
@@ -999,8 +996,6 @@ class DiffusionTSF(nn.Module):
                     kwargs["patch_coarse_bin"] = c_bin
                 if c_t0 is not None:
                     kwargs["patch_time0"] = c_t0
-                if c_h is not None:
-                    kwargs["horizon_chunk_emb"] = c_h
                 outs.append(self.noise_predictor(c_canvas, c_t, c_cond, **kwargs))
             return torch.cat(outs, dim=0)
         kwargs = {
@@ -1018,8 +1013,6 @@ class DiffusionTSF(nn.Module):
             kwargs["patch_coarse_bin"] = patch_coarse_bin
         if patch_time0 is not None:
             kwargs["patch_time0"] = patch_time0
-        if horizon_chunk_emb is not None:
-            kwargs["horizon_chunk_emb"] = horizon_chunk_emb
         return self.noise_predictor(canvas, t_flat, cond_for_unet, **kwargs)
 
     def _load_from_state_dict(
@@ -1374,7 +1367,6 @@ class DiffusionTSF(nn.Module):
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
         future_coarse_2d: Optional[torch.Tensor] = None,
         future_fine_2d: Optional[torch.Tensor] = None,
-        horizon_chunk_t0: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions via binary reverse sampling.
 
@@ -1395,7 +1387,6 @@ class DiffusionTSF(nn.Module):
             snapshot_timesteps=snapshot_timesteps,
             future_coarse_2d=future_coarse_2d,
             future_fine_2d=future_fine_2d,
-            horizon_chunk_t0=horizon_chunk_t0,
         )
         return self.stage_strategy.generate(self, past, **gen_common)
 
@@ -1551,110 +1542,6 @@ class DiffusionTSF(nn.Module):
             )
         return torch.cat((past_cond, horizon_cond), dim=1)
 
-    def _horizon_chunk_inner(self) -> int:
-        return int(self.config.horizon_chunk_inner)
-
-    def _horizon_canvas_width(self) -> int:
-        return int(self.config.lookback_overlap) + self._horizon_chunk_inner()
-
-    def _dit_module(self) -> FactorizedDiT:
-        pred = self.noise_predictor
-        return getattr(pred, "_orig_mod", pred)
-
-    def _horizon_chunk_emb_for_rows(
-        self,
-        t0: torch.Tensor,
-        horizon: torch.Tensor,
-        n_rows: int,
-        row_window_index: Optional[torch.Tensor] = None,
-        n_variates: Optional[int] = None,
-    ) -> Optional[torch.Tensor]:
-        if not self.config.horizon_stitch:
-            return None
-        dit = self._dit_module()
-        window_emb = dit.encode_horizon_chunk(
-            t0, horizon, self._horizon_chunk_inner(),
-        )
-        if row_window_index is not None:
-            if row_window_index.numel() != n_rows:
-                raise ValueError(
-                    f"row_window_index length {row_window_index.numel()} != n_rows {n_rows}"
-                )
-            return window_emb.index_select(0, row_window_index)
-        v = int(n_variates or 0)
-        if v <= 0:
-            if window_emb.shape[0] != n_rows:
-                raise ValueError(
-                    f"horizon_chunk_emb batch {window_emb.shape[0]} != n_rows {n_rows}"
-                )
-            return window_emb
-        if window_emb.shape[0] * v != n_rows:
-            raise ValueError(
-                f"cannot expand horizon_chunk_emb ({window_emb.shape[0]},) over "
-                f"V={v} to n_rows={n_rows}"
-            )
-        return window_emb.unsqueeze(1).expand(-1, v, -1).reshape(n_rows, -1)
-
-    def _slice_horizon_stitch_future(
-        self,
-        past: torch.Tensor,
-        future: torch.Tensor,
-        t0: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Keep original past; slice a fixed canvas from a long future when stitch is on."""
-        from .horizon_chunks import chunk_starts, slice_future_canvas
-
-        k = int(self.config.lookback_overlap)
-        inner = self._horizon_chunk_inner()
-        canvas_w = k + inner
-        b = future.shape[0]
-        device = future.device
-        h = int(self.config.dataset_forecast_length or 0)
-        if h <= 0:
-            h = max(1, int(self.config.forecast_length) - k)
-        if not self.config.horizon_stitch:
-            t0_out = torch.zeros(b, device=device, dtype=torch.long)
-            h_t = torch.full((b,), h, device=device, dtype=torch.long)
-            return past, future, t0_out, h_t
-        expected = k + h
-        if future.shape[-1] != expected:
-            raise ValueError(
-                f"horizon_stitch expects future width {expected} "
-                f"(overlap {k} + H {h}), got {future.shape[-1]}"
-            )
-        starts = chunk_starts(h, inner=inner, overlap=k)
-        starts_t = torch.tensor(starts, device=device, dtype=torch.long)
-        if t0 is None:
-            idx = torch.randint(0, len(starts), (b,), device=device)
-            t0_out = starts_t[idx]
-        else:
-            t0_out = t0.to(device=device, dtype=torch.long).reshape(b)
-            if not bool(torch.isin(t0_out, starts_t).all()):
-                raise ValueError(f"t0 must be in {starts}, got {t0_out.tolist()}")
-        future_c = slice_future_canvas(future, t0_out, inner=inner, overlap=k)
-        if future_c.shape[-1] != canvas_w:
-            raise ValueError(
-                f"sliced canvas width {future_c.shape[-1]} != {canvas_w}"
-            )
-        h_t = torch.full((b,), h, device=device, dtype=torch.long)
-        return past, future_c, t0_out, h_t
-
-    def _window_horizon_ids(
-        self,
-        n_windows: int,
-        device: torch.device,
-        t0: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        h = int(self.config.dataset_forecast_length or 0)
-        if h <= 0:
-            h = max(1, int(self.config.forecast_length) - int(self.config.lookback_overlap))
-        if t0 is None:
-            t0_out = torch.zeros(n_windows, device=device, dtype=torch.long)
-        else:
-            t0_out = t0.to(device=device, dtype=torch.long).reshape(n_windows)
-        h_t = torch.full((n_windows,), h, device=device, dtype=torch.long)
-        return t0_out, h_t
-
     def _append_raw_lookback_cond_channel(
         self,
         cond: torch.Tensor,
@@ -1805,7 +1692,6 @@ class DiffusionTSF(nn.Module):
         )
 
         assert self.binary_scheduler is not None
-        past, future, t0, horizon = self._slice_horizon_stitch_future(past, future)
         B = past.shape[0]
         V = self.config.num_variables
         device = past.device
@@ -1939,8 +1825,6 @@ class DiffusionTSF(nn.Module):
             "window_index": layout.batch_index,
             "patch_coarse_bin": patch_coarse_bin,
             "patch_time0": patch_time0,
-            "horizon_chunk_t0": t0,
-            "horizon_chunk_h": horizon,
             "hir_gt": hir_gt,
             "future_maps": future_maps,
             "past_maps": past_maps,
@@ -2000,12 +1884,6 @@ class DiffusionTSF(nn.Module):
         patch_time0 = prepared["patch_time0"]
         n_patches = int(prepared["n_patches"])
         device = target_patches.device
-        horizon_emb = self._horizon_chunk_emb_for_rows(
-            prepared["horizon_chunk_t0"],
-            prepared["horizon_chunk_h"],
-            n_patches,
-            row_window_index=prepared["window_index"],
-        )
 
         regular_loss = torch.tensor(0.0, device=device)
         loss_x0 = torch.tensor(0.0, device=device)
@@ -2025,7 +1903,6 @@ class DiffusionTSF(nn.Module):
                 token_variate_ids=self._ctx_token_variate_ids,
                 patch_coarse_bin=patch_coarse_bin,
                 patch_time0=patch_time0,
-                horizon_chunk_emb=horizon_emb,
             )
             primary_logits, zt_logits = self._split_binary_heads(out)
             x0_logits = self._x0_logits_from_prediction(primary_logits, xt)
@@ -2069,7 +1946,6 @@ class DiffusionTSF(nn.Module):
                 token_variate_ids=self._ctx_token_variate_ids,
                 patch_coarse_bin=patch_coarse_bin,
                 patch_time0=patch_time0,
-                horizon_chunk_emb=horizon_emb,
             )
             anchor_primary, _ = self._split_binary_heads(anchor_out)
             anchor_x0 = self._x0_logits_from_prediction(anchor_primary, neutral)
@@ -2184,9 +2060,6 @@ class DiffusionTSF(nn.Module):
             coarse_h = int(self.config.coarse_image_height)
             raw_hz_w = int(self.config.forecast_length)
             W_fut = self._repr_forecast_width(raw_hz_w)
-            t0, h_t = self._window_horizon_ids(
-                B, device, t0=kwargs.get("horizon_chunk_t0"),
-            )
             eval_bench_note("refine_B", B)
             eval_bench_note("refine_V", V)
             eval_bench_note("refine_W", W_fut)
@@ -2231,9 +2104,6 @@ class DiffusionTSF(nn.Module):
                     return torch.cat([canvas, aux_l], dim=1)
 
                 def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
-                    horizon_emb = self._horizon_chunk_emb_for_rows(
-                        t0, h_t, n_l, row_window_index=layout.batch_index,
-                    )
                     out = self._predict_noise_chunked(
                         _build_canvas(xt),
                         t_batch,
@@ -2244,7 +2114,6 @@ class DiffusionTSF(nn.Module):
                         token_variate_ids=self._ctx_token_variate_ids,
                         patch_coarse_bin=patch_coarse_bin_l,
                         patch_time0=patch_time0_l,
-                        horizon_chunk_emb=horizon_emb,
                     )
                     primary, zt = self._split_binary_heads(out)
                     x0_logits = self._x0_logits_from_prediction(primary, xt)
@@ -2362,7 +2231,6 @@ class DiffusionTSF(nn.Module):
         """Train the coarse staged denoiser (patch_refine has its own forward)."""
         assert self.binary_scheduler is not None, "binary scheduler is not initialized"
 
-        past, future, t0, horizon = self._slice_horizon_stitch_future(past, future)
         B = past.shape[0]
         V = self.config.num_variables
         H = self.config.image_height
@@ -2370,10 +2238,6 @@ class DiffusionTSF(nn.Module):
         BV = B * V
         row_index = self._univariate_row_index(BV, device, univariate_row_index)
         n_rows = int(row_index.numel())
-        window_index = torch.div(row_index, V, rounding_mode="floor")
-        horizon_emb = self._horizon_chunk_emb_for_rows(
-            t0, horizon, n_rows, row_window_index=window_index,
-        )
 
         past_norm, future_norm, _stats = self._normalize_sequence(past, future)
         future_maps = self._encode_staged_maps(future_norm)
@@ -2410,7 +2274,6 @@ class DiffusionTSF(nn.Module):
             canvas, t_flat, cond_for_unet, ctx_reg,
             variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             context_window_indices=context_window_indices,
-            horizon_chunk_emb=horizon_emb,
         )
         primary_logits, zt_logits = self._split_binary_heads(out_flat)
         x0_logits = self._x0_logits_from_prediction(primary_logits, xt_flat)
@@ -2440,7 +2303,6 @@ class DiffusionTSF(nn.Module):
                 ctx_shared,
                 variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
                 context_window_indices=context_window_indices,
-                horizon_chunk_emb=horizon_emb,
             )
             anchor_primary, _ = self._split_binary_heads(anchor_out_flat)
             anchor_x0_logits = self._x0_logits_from_prediction(anchor_primary, neutral_future_flat)
@@ -2499,7 +2361,6 @@ class DiffusionTSF(nn.Module):
         capture_cross_attn: bool = True,
     ) -> Dict[str, Any]:
         """One coarse diagnostic forward: conditioning tensors and cross-attention."""
-        past, future, t0, horizon = self._slice_horizon_stitch_future(past, future)
         B = past.shape[0]
         V = self.config.num_variables
         device = past.device
@@ -2534,7 +2395,6 @@ class DiffusionTSF(nn.Module):
             variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
             context_window_indices=context_window_indices,
             return_cross_attn_weights=capture_cross_attn,
-            horizon_chunk_emb=self._horizon_chunk_emb_for_rows(t0, horizon, BV, n_variates=V),
         )
         cross_attn_weights = getattr(self.noise_predictor, "_diag_cross_attn_weights", None)
 
@@ -2558,7 +2418,6 @@ class DiffusionTSF(nn.Module):
     ) -> Dict[str, Any]:
         """Expose patch-refine's native stacked lookback condition for plotting."""
         del capture_cross_attn  # Cross-attention is evaluated per selected patch.
-        past, future, _, _ = self._slice_horizon_stitch_future(past, future)
         past_norm, future_norm, norm_stats = self._normalize_sequence(past, future)
         cond_for_unet, past_maps = self._patch_refine_lookback_cond(past_norm)
         return {
@@ -2599,10 +2458,6 @@ class DiffusionTSF(nn.Module):
             C_occ = self._occupancy_channels()
             raw_hz_w = int(self.config.forecast_length)
             W_fut = self._repr_forecast_width(raw_hz_w)
-            t0, h_t = self._window_horizon_ids(
-                B, device, t0=kwargs.get("horizon_chunk_t0"),
-            )
-            horizon_emb = self._horizon_chunk_emb_for_rows(t0, h_t, BV, n_variates=V)
             eval_bench_note("coarse_B", B)
             eval_bench_note("coarse_V", V)
             eval_bench_note("coarse_W", W_fut)
@@ -2629,7 +2484,6 @@ class DiffusionTSF(nn.Module):
                     _build_canvas(xt), t_batch, cond_for_unet, ctx_shared,
                     variate_indices=variate_indices, token_variate_ids=self._ctx_token_variate_ids,
                     context_window_indices=context_window_indices,
-                    horizon_chunk_emb=horizon_emb,
                 )
                 primary, zt = self._split_binary_heads(out)
                 x0_logits = self._x0_logits_from_prediction(primary, xt)

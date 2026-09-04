@@ -1,6 +1,6 @@
 # Paper-fixed Decoder MMPD matching the H=720 binary cap1x2x crop policy
-# (same window caps as hz720_stitch / H96 cap1x2x leaves). Baselines predict
-# H=720 directly (no stitch); MMPD trains at horizon 720.
+# (same window caps as H720 / H96 cap1x2x leaves). Baselines predict
+# H=720 directly. MMPD trains at horizon 720.
 
 experiment:
   name: mmpd-decoder-flat-subsets-paper-lb336-hz720-cap1x2x
@@ -8,9 +8,9 @@ experiment:
 
 mmpd:
   backbone: Decoder
-  # Same crop caps as cap1x2x; use hz720_stitch so eval_max_windows picks up the
-  # weather/solar 22%-of-prior-budget overrides (438 / 33).
-  subset_config: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_hz720_stitch.yaml
+  # Same crop caps as cap1x2x; nostitch H720 leaf also carries weather/solar
+  # eval_max_windows (438 / 33).
+  subset_config: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_hz720_nostitch_nopretrain.yaml
   lookback: 336
   horizon: 720
   datasets:

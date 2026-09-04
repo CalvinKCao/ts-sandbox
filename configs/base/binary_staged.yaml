@@ -62,9 +62,10 @@ visualization:
   jpeg_dpi: 100
   dual_scale_sampler: anchor
   dual_scale_inference_steps: 20
-  # Off by default (GPU-heavy). Smoke / local: set true or pass CLI override.
-  viz_patch_boxes: false
-  viz_patch_boxes_n_samples: 1
+  # Patch-box redbox + top-k MSE-diff panels run during staged_eval even when
+  # skip_eval_visualizations is true (H720 leaves). GPU-heavy; smoke caps to 1.
+  viz_patch_boxes: true
+  viz_patch_boxes_n_samples: 3
   # Point-acc stage: always emit top-gap binary↔MMPD + redbox (anchor ranking).
   # Requires visualization.mmpd_campaign_root_by_dataset[dataset] (or a global
   # mmpd_campaign_root). Unset for this dataset → skip; set but missing pack → fail.
@@ -152,8 +153,6 @@ experiment:
   forecast_length: 96
   lookback_overlap: 8
   diffusion_lookback_cap: 0
-  horizon_stitch: false
-  horizon_chunk_inner: 96
   representation_time_stride: 1
   past_cond_resize_to_horizon: true
   itrans_lookback_length: null

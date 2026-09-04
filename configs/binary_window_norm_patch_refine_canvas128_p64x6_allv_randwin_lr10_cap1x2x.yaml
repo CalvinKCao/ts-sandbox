@@ -1,4 +1,4 @@
-# H=96 (no stitch) sibling of the hz720 stitch leaf crop-cap policy.
+# H=96 sibling of the hz720 leaf crop-cap policy.
 # Crop caps vs H=720 ETTh1 full-pool crops (~53039 train / ~15071 val):
 # 1× fat-V (electricity, traffic, PeMS, solar); 2× weather/dynamic + all ETT
 # (V=7 → 15153/4305). exchange stays full-pool null. ETTm*/PeMS stride→1
@@ -8,7 +8,6 @@ extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr
 
 geometry:
   forecast_length: 96
-  horizon_stitch: false
 
 wandb:
   tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, from_pretrain, hz96, caps_crops_1x2x_etth1]

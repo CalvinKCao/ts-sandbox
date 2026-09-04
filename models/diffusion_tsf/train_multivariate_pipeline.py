@@ -782,12 +782,7 @@ def create_diffusion_model(
     lb = state.lookback_length if lookback is None else lookback
     hz = state.forecast_length if horizon is None else horizon
     stage = state.diffusion_stage if diffusion_stage is None else diffusion_stage
-    stitch = bool(state.horizon_stitch)
-    inner = int(state.horizon_chunk_inner or 96)
-    if stitch:
-        model_hz = int(state.lookback_overlap) + inner
-    else:
-        model_hz = hz + state.lookback_overlap
+    model_hz = hz + state.lookback_overlap
 
     config = DiffusionTSFConfig(
         num_variables=state.n_variates if n_variates is None else n_variates,
@@ -797,8 +792,6 @@ def create_diffusion_model(
         lookback_overlap=state.lookback_overlap,
         diffusion_lookback_cap=int(state.diffusion_lookback_cap or 0),
         diffusion_chunk_horizon=0,
-        horizon_stitch=stitch,
-        horizon_chunk_inner=inner,
         representation_time_stride=int(state.representation_time_stride),
         past_cond_resize_to_horizon=bool(state.past_cond_resize_to_horizon),
         itrans_lookback_length=state.itrans_lookback_length,
