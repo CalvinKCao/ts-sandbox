@@ -18,6 +18,8 @@ import numpy as np
 import torch
 from matplotlib.patches import ConnectionPatch, Rectangle
 
+from utils.staged_binary_forecast import generate_staged_forecast
+
 MAX_UNBLENDED_PATCHES = 24
 
 
@@ -286,8 +288,6 @@ def write_staged_sample_panels(
       pool[i] → generate_staged_forecast → prediction_global_norm + 2d maps
       (+ patch_cdf_unblended / patch_locations when kind=patch_refine).
     """
-    from utils.staged_binary_forecast import generate_staged_forecast
-
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     second_name = "blended refine" if kind == "patch_refine" else "fine"
