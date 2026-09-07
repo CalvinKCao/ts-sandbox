@@ -59,13 +59,39 @@ class _SelfAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.drop = drop
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _qkv(self, x: torch.Tensor):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
+        return q, k, v, B, N, C
+
+    def _proj_sdpa(self, out: torch.Tensor, B: int, N: int, C: int) -> torch.Tensor:
+        return self.proj(out.transpose(1, 2).reshape(B, N, C))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        q, k, v, B, N, C = self._qkv(x)
         out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.drop if self.training else 0.0)
-        out = out.transpose(1, 2).reshape(B, N, C)
-        return self.proj(out)
+        return self._proj_sdpa(out, B, N, C)
+
+    def prefix_kv(self, x: torch.Tensor):
+        """Cond-only self-attn. Returns (out, k, v) with k/v in SDPA layout."""
+        q, k, v, B, N, C = self._qkv(x)
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.drop if self.training else 0.0)
+        return self._proj_sdpa(out, B, N, C), k, v
+
+    def crop_with_cached_kv(
+        self,
+        x: torch.Tensor,
+        cached_k: torch.Tensor,
+        cached_v: torch.Tensor,
+        parent_index: torch.Tensor,
+    ) -> torch.Tensor:
+        """Crop queries attend to cached cond K/V plus crop K/V. Cond does not see crop."""
+        q, k_x, v_x, B, N, C = self._qkv(x)
+        k = torch.cat([cached_k.index_select(0, parent_index), k_x], dim=2)
+        v = torch.cat([cached_v.index_select(0, parent_index), v_x], dim=2)
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.drop if self.training else 0.0)
+        return self._proj_sdpa(out, B, N, C)
 
 
 class _CrossAttention(nn.Module):
@@ -203,6 +229,29 @@ class _DiTBlock(nn.Module):
         x = x + g2.unsqueeze(1) * self.mlp(_modulate(self.norm2(x), s2, sc2))
         return x
 
+    def forward_cond_prefix(self, x: torch.Tensor, c: torch.Tensor):
+        s1, sc1, g1, s2, sc2, g2 = self.adaLN(c).chunk(6, dim=-1)
+        attn_out, k, v = self.attn.prefix_kv(_modulate(self.norm1(x), s1, sc1))
+        x = x + g1.unsqueeze(1) * attn_out
+        x = x + g2.unsqueeze(1) * self.mlp(_modulate(self.norm2(x), s2, sc2))
+        return x, (k, v)
+
+    def forward_crop_cached(
+        self,
+        x: torch.Tensor,
+        c: torch.Tensor,
+        cached_kv: Tuple[torch.Tensor, torch.Tensor],
+        parent_index: torch.Tensor,
+    ) -> torch.Tensor:
+        s1, sc1, g1, s2, sc2, g2 = self.adaLN(c).chunk(6, dim=-1)
+        k_c, v_c = cached_kv
+        attn_out = self.attn.crop_with_cached_kv(
+            _modulate(self.norm1(x), s1, sc1), k_c, v_c, parent_index,
+        )
+        x = x + g1.unsqueeze(1) * attn_out
+        x = x + g2.unsqueeze(1) * self.mlp(_modulate(self.norm2(x), s2, sc2))
+        return x
+
 
 class _DiTCrossAttnBlock(nn.Module):
     """Bottleneck variant: adds cross-attention to encoder_hidden_states.
@@ -331,6 +380,111 @@ class _DiTCrossAttnBlock(nn.Module):
             return x, cross_attn_weights
         return x
 
+    def _cross_mlp_no_scale(
+        self,
+        x: torch.Tensor,
+        sx: torch.Tensor,
+        scx: torch.Tensor,
+        gx: torch.Tensor,
+        s2: torch.Tensor,
+        sc2: torch.Tensor,
+        g2: torch.Tensor,
+        ctx: Optional[torch.Tensor],
+        variate_indices: Optional[torch.Tensor],
+        token_variate_ids: Optional[torch.Tensor],
+        context_window_indices: Optional[torch.Tensor],
+        ctx_key_padding_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if self.enable_cross_scale_attention:
+            raise RuntimeError("cache_cond_kv does not support cross-scale attention")
+        if ctx is not None:
+            attn_bias = None
+            if self.target_context_bias != 0.0 and ctx.shape[1] > 1:
+                if variate_indices is None:
+                    raise ValueError("variate_indices are required for target-context attention bias.")
+                if variate_indices.shape[0] != x.shape[0]:
+                    raise ValueError(
+                        f"variate_indices batch {variate_indices.shape[0]} != x batch {x.shape[0]}"
+                    )
+                target_ids = variate_indices.long()
+                if token_variate_ids is not None:
+                    if token_variate_ids.shape[0] != ctx.shape[1]:
+                        raise ValueError(
+                            f"token_variate_ids length {token_variate_ids.shape[0]} "
+                            f"!= ctx tokens {ctx.shape[1]}"
+                        )
+                    attn_bias = torch.zeros(
+                        x.shape[0], ctx.shape[1], device=x.device, dtype=x.dtype,
+                    )
+                    own_mask = token_variate_ids[None, :] == target_ids[:, None]
+                    attn_bias = attn_bias.masked_fill(own_mask, self.target_context_bias)
+                else:
+                    if target_ids.min() < 0 or target_ids.max() >= ctx.shape[1]:
+                        raise ValueError(
+                            f"variate_indices must be in [0, {ctx.shape[1] - 1}] for ctx tokens."
+                        )
+                    attn_bias = torch.zeros(
+                        x.shape[0], ctx.shape[1], device=x.device, dtype=x.dtype,
+                    )
+                    attn_bias.scatter_(1, target_ids.unsqueeze(1), self.target_context_bias)
+            cross_in = _modulate(self.norm_x(x), sx, scx)
+            cross_out = self.cross_attn(
+                cross_in,
+                ctx,
+                attn_bias=attn_bias,
+                context_window_indices=context_window_indices,
+                ctx_key_padding_mask=ctx_key_padding_mask,
+            )
+            x = x + gx.unsqueeze(1) * cross_out
+        x = x + g2.unsqueeze(1) * self.mlp(_modulate(self.norm2(x), s2, sc2))
+        return x
+
+    def forward_cond_prefix(
+        self,
+        x: torch.Tensor,
+        c: torch.Tensor,
+        ctx: Optional[torch.Tensor],
+        variate_indices: Optional[torch.Tensor] = None,
+        token_variate_ids: Optional[torch.Tensor] = None,
+        context_window_indices: Optional[torch.Tensor] = None,
+        ctx_key_padding_mask: Optional[torch.Tensor] = None,
+    ):
+        if self.enable_cross_scale_attention:
+            raise RuntimeError("cache_cond_kv does not support cross-scale attention")
+        s1, sc1, g1, sx, scx, gx, s2, sc2, g2 = self.adaLN(c).chunk(9, dim=-1)
+        attn_out, k, v = self.self_attn.prefix_kv(_modulate(self.norm1(x), s1, sc1))
+        x = x + g1.unsqueeze(1) * attn_out
+        x = self._cross_mlp_no_scale(
+            x, sx, scx, gx, s2, sc2, g2, ctx,
+            variate_indices, token_variate_ids, context_window_indices, ctx_key_padding_mask,
+        )
+        return x, (k, v)
+
+    def forward_crop_cached(
+        self,
+        x: torch.Tensor,
+        c: torch.Tensor,
+        cached_kv: Tuple[torch.Tensor, torch.Tensor],
+        parent_index: torch.Tensor,
+        ctx: Optional[torch.Tensor],
+        variate_indices: Optional[torch.Tensor] = None,
+        token_variate_ids: Optional[torch.Tensor] = None,
+        context_window_indices: Optional[torch.Tensor] = None,
+        ctx_key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if self.enable_cross_scale_attention:
+            raise RuntimeError("cache_cond_kv does not support cross-scale attention")
+        s1, sc1, g1, sx, scx, gx, s2, sc2, g2 = self.adaLN(c).chunk(9, dim=-1)
+        k_c, v_c = cached_kv
+        attn_out = self.self_attn.crop_with_cached_kv(
+            _modulate(self.norm1(x), s1, sc1), k_c, v_c, parent_index,
+        )
+        x = x + g1.unsqueeze(1) * attn_out
+        return self._cross_mlp_no_scale(
+            x, sx, scx, gx, s2, sc2, g2, ctx,
+            variate_indices, token_variate_ids, context_window_indices, ctx_key_padding_mask,
+        )
+
 
 class FactorizedDiT(nn.Module):
     """Per-variate DiT backbone with bottleneck cross-attention to frozen tokens.
@@ -385,6 +539,8 @@ class FactorizedDiT(nn.Module):
         self.use_variate_embedding = use_variate_embedding
         self.use_patch_abs_embedding = use_patch_abs_embedding
         self.cond_patch_size = cond_patch_size or patch_size
+        # Eval-only: prefix-cache cond K/V. Default off = bidirectional 228-token SDPA.
+        self.cache_cond_kv = False
 
         self.x_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
         self.cond_embed = nn.Conv2d(
@@ -492,7 +648,27 @@ class FactorizedDiT(nn.Module):
         patch_time0: Optional[torch.Tensor] = None,
         ctx_key_padding_mask: Optional[torch.Tensor] = None,
         return_cross_attn_weights: bool = False,
+        cond_parent_index: Optional[torch.Tensor] = None,
     ):
+        if self.cache_cond_kv:
+            if cond_parent_index is None:
+                raise ValueError("cache_cond_kv=True requires cond_parent_index")
+            if return_cross_attn_weights:
+                raise ValueError("cache_cond_kv does not support return_cross_attn_weights")
+            return self._forward_cached_cond(
+                x, t, cond,
+                encoder_hidden_states=encoder_hidden_states,
+                scale_indices=scale_indices,
+                variate_indices=variate_indices,
+                token_variate_ids=token_variate_ids,
+                context_window_indices=context_window_indices,
+                patch_coarse_bin=patch_coarse_bin,
+                patch_time0=patch_time0,
+                ctx_key_padding_mask=ctx_key_padding_mask,
+                cond_parent_index=cond_parent_index,
+            )
+        if cond_parent_index is not None:
+            raise ValueError("cond_parent_index requires cache_cond_kv=True")
         BV, _, H, W = x.shape
         self._diag_cross_attn_weights = None
 
@@ -639,6 +815,150 @@ class FactorizedDiT(nn.Module):
         x_out = _modulate(self.final_norm(x_out), shift, scale)
         out = self._unpatchify(x_out, gh, gw)
 
+        if pad_h or pad_w:
+            out = out[:, :, :H, :W]
+        return out
+
+    def _forward_cached_cond(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        cond: torch.Tensor,
+        *,
+        encoder_hidden_states: Optional[torch.Tensor],
+        scale_indices: Optional[torch.Tensor],
+        variate_indices: Optional[torch.Tensor],
+        token_variate_ids: Optional[torch.Tensor],
+        context_window_indices: Optional[torch.Tensor],
+        patch_coarse_bin: Optional[torch.Tensor],
+        patch_time0: Optional[torch.Tensor],
+        ctx_key_padding_mask: Optional[torch.Tensor],
+        cond_parent_index: torch.Tensor,
+    ):
+        """Encoder-decoder split: cond K/V once per parent, crops attend into the cache.
+
+        Not numerically identical to bidirectional cat[cond, x] self-attn: cond ↛ crop.
+        AdaLN still sees diffusion t, so the cache key is (parent, t).
+        """
+        if self.gradient_checkpointing and self.training:
+            raise RuntimeError("cache_cond_kv is eval-only; disable gradient checkpointing")
+        if self.scale_embed is not None:
+            raise RuntimeError("cache_cond_kv does not support scale embeddings")
+        n_crops, _, H, W = x.shape
+        n_parents = cond.shape[0]
+        self._diag_cross_attn_weights = None
+        if cond_parent_index.shape != (n_crops,):
+            raise ValueError(
+                f"cond_parent_index must be ({n_crops},), got {tuple(cond_parent_index.shape)}"
+            )
+        if int(cond_parent_index.min()) < 0 or int(cond_parent_index.max()) >= n_parents:
+            raise ValueError(
+                f"cond_parent_index out of range for n_parents={n_parents}"
+            )
+        if t.shape[0] != n_crops:
+            raise ValueError(f"timestep batch {t.shape[0]} != n_crops {n_crops}")
+        if not torch.equal(t, t[:1].expand_as(t)):
+            raise ValueError("cache_cond_kv requires uniform diffusion t across the crop pack")
+
+        x_p, pad_h, pad_w = self._pad_to_patch(x, self.patch_size)
+        cond_p, _, _ = self._pad_to_patch(cond, self.cond_patch_size)
+        x_tok, gh, gw = self._patchify(x_p, self.x_embed)
+        c_tok, _, _ = self._patchify(cond_p, self.cond_embed)
+        Nx, Nc = x_tok.shape[1], c_tok.shape[1]
+        if Nx > self.pos_x.shape[1] or Nc > self.pos_cond.shape[1]:
+            raise RuntimeError(
+                f"DiT pos table too small: need Nx={Nx}, Nc={Nc}, "
+                f"have {self.pos_x.shape[1]}. Increase max_pos_tokens."
+            )
+        x_tok = x_tok + self.pos_x[:, :Nx]
+        c_tok = c_tok + self.pos_cond[:, :Nc]
+
+        if self.use_patch_abs_embedding:
+            if patch_coarse_bin is None or patch_time0 is None:
+                raise ValueError(
+                    "patch_coarse_bin and patch_time0 are required when "
+                    "use_patch_abs_embedding=True"
+                )
+            if patch_coarse_bin.shape[0] != n_crops or patch_time0.shape[0] != n_crops:
+                raise ValueError(
+                    f"patch location batch mismatch: bins={tuple(patch_coarse_bin.shape)} "
+                    f"time0={tuple(patch_time0.shape)} n_crops={n_crops}"
+                )
+            abs_emb = (
+                self.coarse_bin_embed(patch_coarse_bin.long())
+                + self.horizon_time_embed(patch_time0.long())
+            ).unsqueeze(1)
+            x_tok = x_tok + abs_emb
+
+        if encoder_hidden_states is not None:
+            n_windows = encoder_hidden_states.shape[0]
+            if n_parents % n_windows != 0:
+                raise ValueError(
+                    f"unique cond rows {n_parents} not divisible by ctx windows {n_windows}"
+                )
+            n_var = n_parents // n_windows
+        elif variate_indices is not None:
+            n_var = int(variate_indices.max().item()) + 1
+            if n_parents % n_var != 0:
+                raise ValueError(
+                    f"unique cond rows {n_parents} not divisible by inferred V={n_var}"
+                )
+            n_windows = n_parents // n_var
+        else:
+            n_var = 1
+            n_windows = n_parents
+        parent_windows = torch.arange(n_parents, device=x.device, dtype=torch.long) // n_var
+        parent_variates = torch.arange(n_parents, device=x.device, dtype=torch.long) % n_var
+
+        if self.variate_embed is not None:
+            if variate_indices is None:
+                raise ValueError("variate_indices are required when variate embeddings are enabled.")
+            if variate_indices.shape[0] != n_crops:
+                raise ValueError(
+                    f"variate_indices batch {variate_indices.shape[0]} != n_crops {n_crops}"
+                )
+            c_tok = c_tok + self.variate_embed(parent_variates).unsqueeze(1)
+            x_tok = x_tok + self.variate_embed(variate_indices.long()).unsqueeze(1)
+
+        t_crop = self.t_embed(_timestep_embedding(t, self.embed_dim))
+        t_parent = self.t_embed(_timestep_embedding(t[:1].expand(n_parents), self.embed_dim))
+        if scale_indices is not None:
+            raise RuntimeError("cache_cond_kv does not support scale_indices")
+
+        ctx_proj: Optional[torch.Tensor] = None
+        if encoder_hidden_states is not None:
+            if context_window_indices is not None and context_window_indices.shape != (n_crops,):
+                raise ValueError(
+                    "context_window_indices must have one entry per crop row, got "
+                    f"{tuple(context_window_indices.shape)} for n_crops={n_crops}"
+                )
+            ctx_proj = self.ctx_norm(self.ctx_proj(encoder_hidden_states))
+
+        for i, block in enumerate(self.blocks):
+            if i == self.bottleneck_idx:
+                c_tok, cached_kv = block.forward_cond_prefix(
+                    c_tok, t_parent, ctx_proj,
+                    variate_indices=parent_variates,
+                    token_variate_ids=token_variate_ids,
+                    context_window_indices=parent_windows,
+                    ctx_key_padding_mask=ctx_key_padding_mask,
+                )
+                x_tok = block.forward_crop_cached(
+                    x_tok, t_crop, cached_kv, cond_parent_index, ctx_proj,
+                    variate_indices=variate_indices,
+                    token_variate_ids=token_variate_ids,
+                    context_window_indices=context_window_indices,
+                    ctx_key_padding_mask=ctx_key_padding_mask,
+                )
+            else:
+                c_tok, cached_kv = block.forward_cond_prefix(c_tok, t_parent)
+                x_tok = block.forward_crop_cached(
+                    x_tok, t_crop, cached_kv, cond_parent_index,
+                )
+
+        shift, scale = self.final_adaLN(t_crop).chunk(2, dim=-1)
+        x_out = _modulate(self.final_norm(x_tok), shift, scale)
+        out = self._unpatchify(x_out, gh, gw)
         if pad_h or pad_w:
             out = out[:, :, :H, :W]
         return out

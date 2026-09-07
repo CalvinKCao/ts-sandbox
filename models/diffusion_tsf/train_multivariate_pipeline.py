@@ -870,6 +870,7 @@ def create_diffusion_model(
         hybrid_flat_oob_coverage=state.hybrid_flat_oob_coverage,
         lookback_overlap_center_shift=state.lookback_overlap_center_shift,
         itrans_d_model=state.itrans_d_model,
+        cache_cond_kv=bool(o("cache_cond_kv", False)),
         guidance_type=_resolve_guidance_type(
             state, guidance_model, o("guidance_type", None),
         ),

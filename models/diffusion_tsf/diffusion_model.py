@@ -417,6 +417,7 @@ class DiffusionTSF(nn.Module):
                 int(config.forecast_length),
             ),
         )
+        self.noise_predictor.cache_cond_kv = bool(getattr(config, "cache_cond_kv", False))
 
         self._ctx_token_variate_ids: Optional[torch.Tensor] = None
         self._ctx_key_padding_mask: Optional[torch.Tensor] = None
@@ -952,6 +953,7 @@ class DiffusionTSF(nn.Module):
         patch_coarse_bin: Optional[torch.Tensor] = None,
         patch_time0: Optional[torch.Tensor] = None,
         return_cross_attn_weights: bool = False,
+        cond_parent_index: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run the denoiser with the same chunking rule used by training/eval."""
         ctx_pad = self._ctx_key_padding_mask
@@ -959,13 +961,26 @@ class DiffusionTSF(nn.Module):
         n_items = canvas.shape[0]
         eval_bench_note("dit_n_items", n_items)
         eval_bench_note("dit_chunk_size", int(chunk_size) if chunk_size else n_items)
+        cache_kv = cond_parent_index is not None
+        if cache_kv:
+            if cond_for_unet is None:
+                raise ValueError("cache_cond_kv requires a unique lookback cond tensor")
+            if cond_parent_index.shape != (n_items,):
+                raise ValueError(
+                    f"cond_parent_index must be ({n_items},), got {tuple(cond_parent_index.shape)}"
+                )
         if chunk_size > 0 and n_items > chunk_size:
             outs = []
             for i in range(0, n_items, chunk_size):
                 end = min(i + chunk_size, n_items)
                 c_canvas = canvas[i:end]
                 c_t = t_flat[i:end] if t_flat.shape[0] == n_items else t_flat
-                c_cond = cond_for_unet[i:end] if cond_for_unet is not None else None
+                if cache_kv:
+                    c_cond = cond_for_unet
+                    c_parent = cond_parent_index[i:end]
+                else:
+                    c_cond = cond_for_unet[i:end] if cond_for_unet is not None else None
+                    c_parent = None
                 c_ctx = ctx_flat
                 c_pad = ctx_pad
                 c_context_windows = (
@@ -996,6 +1011,8 @@ class DiffusionTSF(nn.Module):
                     kwargs["patch_coarse_bin"] = c_bin
                 if c_t0 is not None:
                     kwargs["patch_time0"] = c_t0
+                if c_parent is not None:
+                    kwargs["cond_parent_index"] = c_parent
                 outs.append(self.noise_predictor(c_canvas, c_t, c_cond, **kwargs))
             return torch.cat(outs, dim=0)
         kwargs = {
@@ -1013,6 +1030,8 @@ class DiffusionTSF(nn.Module):
             kwargs["patch_coarse_bin"] = patch_coarse_bin
         if patch_time0 is not None:
             kwargs["patch_time0"] = patch_time0
+        if cond_parent_index is not None:
+            kwargs["cond_parent_index"] = cond_parent_index
         return self.noise_predictor(canvas, t_flat, cond_for_unet, **kwargs)
 
     def _load_from_state_dict(
@@ -2080,10 +2099,17 @@ class DiffusionTSF(nn.Module):
             unique = bool(getattr(self.config, "patch_refine_unique_segments", False))
             lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
             ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
+            cache_kv = bool(getattr(self.config, "cache_cond_kv", False))
+            if cache_kv:
+                eval_bench_note("cache_cond_kv", 1)
 
             def _sample_layout(layout: PatchLayout) -> torch.Tensor:
                 with eval_bench_span("layout_aux"):
-                    cond_l = expand_lookback_cond_for_layout(lookback_cond, layout)
+                    cond_l = (
+                        lookback_cond
+                        if cache_kv
+                        else expand_lookback_cond_for_layout(lookback_cond, layout)
+                    )
                     aux_l, patch_coarse_bin_l, patch_time0_l = build_patch_aux_channels_layout(
                         naive,
                         edges,
@@ -2097,6 +2123,8 @@ class DiffusionTSF(nn.Module):
                 context_window_indices_l = layout.batch_index if ctx is not None else None
                 n_l = layout.n_patches
                 eval_bench_note("refine_n_patches", n_l)
+                if cache_kv:
+                    eval_bench_note("cache_cond_parents", int(lookback_cond.shape[0]))
 
                 def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
                     canvas = self._inject_coordinate_channel(xt)
@@ -2104,6 +2132,9 @@ class DiffusionTSF(nn.Module):
                     return torch.cat([canvas, aux_l], dim=1)
 
                 def _chunked_model_fn(xt: torch.Tensor, t_batch: torch.Tensor):
+                    extra = {}
+                    if cache_kv:
+                        extra["cond_parent_index"] = layout.flat_index
                     out = self._predict_noise_chunked(
                         _build_canvas(xt),
                         t_batch,
@@ -2114,6 +2145,7 @@ class DiffusionTSF(nn.Module):
                         token_variate_ids=self._ctx_token_variate_ids,
                         patch_coarse_bin=patch_coarse_bin_l,
                         patch_time0=patch_time0_l,
+                        **extra,
                     )
                     primary, zt = self._split_binary_heads(out)
                     x0_logits = self._x0_logits_from_prediction(primary, xt)

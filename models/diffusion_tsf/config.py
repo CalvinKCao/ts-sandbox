@@ -140,6 +140,9 @@ class DiffusionTSFConfig:
     dit_num_heads: int = 6
     dit_mlp_ratio: float = 4.0
     dit_dropout: float = 0.0
+    # Eval-only prefix cache of lookback-cond K/V. Default keeps bidirectional
+    # cat[cond, x] self-attn. Cached path is not numerically identical (cond ↛ crop).
+    cache_cond_kv: bool = False
 
     # memory optimization
     use_gradient_checkpointing: bool = False
