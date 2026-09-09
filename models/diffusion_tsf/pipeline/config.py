@@ -591,7 +591,10 @@ def build_wandb_config(
     runtime.update(get_git_info())
     runtime.update(get_system_info())
     wandb_cfg["runtime"] = runtime
-    if cfg.get("_yaml_path"):
+    explicit_nick = exp.get("config_nickname")
+    if isinstance(explicit_nick, str) and explicit_nick.strip():
+        wandb_cfg["config_nickname"] = explicit_nick.strip()
+    elif cfg.get("_yaml_path"):
         wandb_cfg["_yaml_path"] = cfg["_yaml_path"]
         try:
             from utils.leaderboard_config_nicknames import leaderboard_nickname
@@ -601,6 +604,8 @@ def build_wandb_config(
                 wandb_cfg["config_nickname"] = nick
         except Exception:
             pass
+    if cfg.get("_yaml_path"):
+        wandb_cfg["_yaml_path"] = cfg["_yaml_path"]
     return wandb_cfg
 
 

@@ -120,7 +120,7 @@ A single tall absolute map would be one huge image. Value precision is **factore
 
 `fine_image_height` remains only so past conditioning can stack `Hc∥Hf` (`encode_dual_heights` / `stack_past_coarse_fine`).
 
-Default geometry in `configs/base/binary_staged.yaml`: canvas **256**, patch **32×8**, col stride **6**. Live campaign leaves (`configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml` and `...p32x6...`): canvas **128** (= 8 hi-res bins per coarse row), patch **64×6** or **32×6**, stride **5** (overlap 1), `dit_patch_size` / `dit_cond_patch_size` **[8,6]** so W divides the DiT patch.
+Default geometry in `configs/base/binary_staged.yaml`: canvas **256**, patch **32×8**, col stride **6**, `unique_segments: false`. Live campaign leaves (`configs/binary_window_norm_patch_refine_canvas128_p64x6.yaml` and `...p32x6...`): canvas **128** (= 8 hi-res bins per coarse row), patch **64×6** or **32×6**, stride **5** (overlap 1), `dit_patch_size` / `dit_cond_patch_size` **[8,6]**. FactorizedDiT **pads** spatial dims that do not divide the patch size (`dit.py` `_pad_to_patch`). Live canvas128 leaves set `patch_refine_unique_segments: true` (train: one crop per `(window, variate)`; eval generate still covers all stride col0s).
 
 ---
 
@@ -358,8 +358,25 @@ Loads coarse + patch_refine `best.pt`, runs anchor + probabilistic sampling, wri
 | `pretrained_<stage>/pretrained_diffusion.pt` | 1 |
 | `{subset_id}/coarse/best.pt`, `.../patch_refine/best.pt` | 2, 3 |
 | `results/partials/*_staged_anchor.json` | 4 |
+| `results/eval_resume/<eval_progress_key>/<subset_id>/` | 4 (mid-eval) |
 
 `should_skip` on each phase checks these paths. Coverage probe uses `--fresh` + unique run stems + `force_retrain_synthetic` so skips do not fire.
+
+**Eval resume** (`staged_eval.eval_progress_key`): job-independent dir so a Slurm timeout can continue. After each origin batch, eval writes:
+
+```
+results/eval_resume/<key>/<subset_id>/
+  windows.jsonl              # per-origin metrics + pred_file / pred_offset / horizon / series_start
+  summary.json
+  preds/block_{first}_{last}.npz
+    window_indices           (n,)
+    series_starts            (n,)  origin index * test_stride
+    y_true                   (n, V, H)
+    prediction_global_norm   (n, V, H)
+    samples                  (n, V, S, H)  if probabilistic
+```
+
+npz then jsonl, each fsync'd (file + parent dir) so SIGTERM keeps the last completed batch. Resume skips origins whose jsonl line **and** pred npz exist; metrics keep aggregating from those saved arrays. A jsonl line without a valid pred file is not done.
 
 ---
 
@@ -412,7 +429,9 @@ Values clipped to `[-max_scale, max_scale]`, binned into `H=16` rows; occupancy 
 - Patch refine feeds **3 aux channels** (naive / coarse-cell / time) plus optional prev-refine stuffing — see Patch refine stage. Past visual cond remains `Hc∥Hf`.
 - Optional **EMA** shadow weights during finetune when `training.diffusion_ema_decay > 0` (default **0.99**).
 
-Chunking: `unet_max_chunk_size` caps `BV` (or patch-refine `N` crops) through the denoiser for memory.
+Chunking: `unet_max_chunk_size` is a **memory valve** — it caps `BV` (or patch-refine `N` crops) per DiT forward via `_predict_noise_chunked`. It does not change the number of patches or the math. Train U is a separate cap (`max_univariate_micro_batch_by_dataset`).
+
+Eval-only `cache_cond_kv` (YAML → `PipelineState` → `DiffusionTSFConfig`) prefix-caches lookback-cond K/V once per `(window, variate, t)` on the patch_refine generate path. Default stays bidirectional SDPA (`cache_cond_kv=False`). The cached path is encoder-decoder (cond ↛ crop), not a metric match to bidirectional attn.
 
 ---
 

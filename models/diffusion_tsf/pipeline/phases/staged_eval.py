@@ -17,7 +17,10 @@ from models.diffusion_tsf.pipeline.phase import PipelinePhase
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.pipeline import wandb_utils
 from models.diffusion_tsf.pipeline.config import visualization_settings
-from models.diffusion_tsf.pipeline.data_subset import put_subset_record
+from models.diffusion_tsf.pipeline.data_subset import (
+    put_subset_record,
+    random_window_subset,
+)
 from models.diffusion_tsf.pipeline.eval_bench import (
     configure as configure_eval_bench,
     dump as dump_eval_bench,
@@ -41,7 +44,6 @@ from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     _stage_best_ckpt,
 )
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import stage_state
-
 logger = logging.getLogger(__name__)
 
 # Standard forecast prefixes for long-horizon eval: score [:h] without
@@ -136,8 +138,15 @@ def _prefix_wandb_metrics(metrics: Dict[str, float], *, anchor_only: bool) -> Di
 def _eval_artifact_tag(phase: PipelinePhase) -> str:
     stride = int(phase.require("test_stride"))
     if bool(phase.get("anchor_only", False)):
-        return f"s{stride}_anchor"
-    return f"s{stride}_prob"
+        base = f"s{stride}_anchor"
+    else:
+        base = f"s{stride}_prob"
+    key = str(phase.get("eval_progress_key") or "")
+    # Keep 10% artifact names stable; a _fulltest key must not look like the
+    # completed 10% run or should_skip would drop the 100% eval.
+    if key.endswith("_fulltest"):
+        return f"{base}_fulltest"
+    return base
 
 
 def _eval_checkpoint_dir(state: PipelineState) -> str:
@@ -231,6 +240,7 @@ def _deterministic_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, 
         "mse": float(np.mean(err ** 2)),
         "mae": float(np.mean(np.abs(err))),
     }
+
 
 
 def _worst_mse_window_picks(
@@ -369,6 +379,7 @@ def _fraction_subset(ds, fraction: float, seed: int):
     return Subset(ds, idx)
 
 
+
 def _resolve_eval_test_fraction(phase: PipelinePhase, state: PipelineState) -> float:
     by_dataset = phase.get("eval_test_fraction_by_dataset") or {}
     if state.dataset in by_dataset:
@@ -395,7 +406,11 @@ def _resolve_eval_max_windows(phase: PipelinePhase, state: PipelineState):
 def _eval_progress_dir(
     phase: PipelinePhase, state: PipelineState, subset_id: str,
 ) -> Path | None:
-    """Job-independent resume dir: results/eval_resume/<key>/<subset_id>/."""
+    """Job-independent resume dir: results/eval_resume/<key>/<subset_id>/.
+
+    Holds windows.jsonl plus preds/block_*.npz (full-H 1D forecasts) so an
+    interrupted eval can skip completed origins without regenerating.
+    """
     key = phase.get("eval_progress_key")
     if not key:
         return None
@@ -408,21 +423,190 @@ def _eval_progress_dir(
     return store / "eval_resume" / str(key) / str(subset_id)
 
 
+def _fsync_handle(fh) -> None:
+    fh.flush()
+    os.fsync(fh.fileno())
+
+
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _durable_savez(path: Path, **arrays: np.ndarray) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        np.savez_compressed(f, **arrays)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    _fsync_dir(path.parent)
+
+
+def _durable_json_dump(path: Path, payload: Any) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    _fsync_dir(path.parent)
+
+
+def _pred_block_relpath(window_indices: Sequence[int]) -> str:
+    first = int(window_indices[0])
+    last = int(window_indices[-1])
+    return f"preds/block_{first:08d}_{last:08d}.npz"
+
+
+def _write_eval_pred_block(
+    progress_dir: Path,
+    *,
+    window_indices: Sequence[int],
+    y_true: np.ndarray,
+    deterministic: np.ndarray,
+    samples: np.ndarray | None,
+    test_stride: int,
+) -> str:
+    """Write full-H 1D preds for one flushed origin batch. Returns relpath."""
+    n = len(window_indices)
+    if n < 1:
+        raise ValueError("pred block requires at least one window")
+    if y_true.ndim != 3 or deterministic.ndim != 3:
+        raise ValueError(
+            f"expected (n,V,H) y_true/det, got {y_true.shape} {deterministic.shape}"
+        )
+    if y_true.shape[0] != n or deterministic.shape[0] != n:
+        raise ValueError(
+            f"pred block n={n} windows but y_true {y_true.shape} det {deterministic.shape}"
+        )
+    if y_true.shape != deterministic.shape:
+        raise ValueError(
+            f"y_true {y_true.shape} != prediction_global_norm {deterministic.shape}"
+        )
+    h = int(y_true.shape[-1])
+    if h < 2:
+        raise ValueError(
+            f"prediction last dim must be full horizon (>=2), got {y_true.shape}"
+        )
+    arrays: Dict[str, np.ndarray] = {
+        "window_indices": np.asarray(window_indices, dtype=np.int64),
+        "series_starts": np.asarray(window_indices, dtype=np.int64) * int(test_stride),
+        "y_true": np.asarray(y_true, dtype=np.float32),
+        "prediction_global_norm": np.asarray(deterministic, dtype=np.float32),
+        "pred_shape": np.asarray(deterministic.shape, dtype=np.int64),
+    }
+    if samples is not None:
+        if samples.ndim != 4:
+            raise ValueError(f"samples must be (n,V,S,H), got {samples.shape}")
+        if (
+            samples.shape[0] != n
+            or samples.shape[1] != y_true.shape[1]
+            or samples.shape[-1] != h
+        ):
+            raise ValueError(
+                f"samples {samples.shape} incompatible with y_true {y_true.shape}"
+            )
+        arrays["samples"] = np.asarray(samples, dtype=np.float32)
+        arrays["sample_shape"] = np.asarray(samples.shape, dtype=np.int64)
+    rel = _pred_block_relpath(window_indices)
+    _durable_savez(progress_dir / rel, **arrays)
+    return rel
+
+
+def _pred_block_meta(progress_dir: Path, rel: str) -> Tuple[np.ndarray, Tuple[int, ...], bool]:
+    pred_path = progress_dir / rel
+    with np.load(pred_path) as z:
+        needed = ("prediction_global_norm", "window_indices", "y_true", "pred_shape")
+        missing = [k for k in needed if k not in z.files]
+        if missing:
+            raise ValueError(f"{pred_path} missing {missing}")
+        wis = np.asarray(z["window_indices"])
+        shape = tuple(int(x) for x in np.asarray(z["pred_shape"]))
+        has_samples = "samples" in z.files
+        if len(shape) != 3:
+            raise ValueError(
+                f"{pred_path} prediction_global_norm must be (n,V,H), got {shape}"
+            )
+        if int(wis.shape[0]) != shape[0]:
+            raise ValueError(
+                f"{pred_path} window_indices n={wis.shape[0]} != pred n={shape[0]}"
+            )
+        if has_samples:
+            if "sample_shape" not in z.files:
+                raise ValueError(f"{pred_path} has samples but no sample_shape")
+            sshape = tuple(int(x) for x in np.asarray(z["sample_shape"]))
+            if len(sshape) != 4 or sshape[0] != shape[0] or sshape[-1] != shape[-1]:
+                raise ValueError(
+                    f"{pred_path} samples shape {sshape} incompatible with pred {shape}"
+                )
+        return wis.copy(), shape, has_samples
+
+
 def _load_eval_progress(path: Path) -> Tuple[List[Dict[str, Any]], set]:
+    """Load completed origins: jsonl metrics plus a durable full-H pred block."""
     jsonl = path / "windows.jsonl"
     records: List[Dict[str, Any]] = []
     done: set = set()
     if not jsonl.is_file():
         return records, done
+    pred_meta: Dict[str, Tuple[np.ndarray, Tuple[int, ...], bool]] = {}
     with jsonl.open() as f:
-        for line in f:
+        for line_i, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
-            rec = json.loads(line)
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "skipping truncated eval progress line %d in %s", line_i, jsonl,
+                )
+                continue
             wi = int(rec["window_index"])
             if wi in done:
                 continue
+            rel = rec.get("pred_file")
+            if not rel:
+                continue
+            pred_path = path / str(rel)
+            if not pred_path.is_file():
+                continue
+            if rel not in pred_meta:
+                pred_meta[rel] = _pred_block_meta(path, str(rel))
+            wis, shape, has_samples = pred_meta[rel]
+            if "pred_offset" not in rec:
+                raise ValueError(
+                    f"{jsonl}:{line_i} window {wi} has pred_file but no pred_offset"
+                )
+            offset = int(rec["pred_offset"])
+            if offset < 0 or offset >= shape[0]:
+                raise ValueError(
+                    f"{pred_path} pred_offset {offset} out of range n={shape[0]} "
+                    f"(window {wi})"
+                )
+            if int(wis[offset]) != wi:
+                raise ValueError(
+                    f"{pred_path} offset {offset} is window {int(wis[offset])}, "
+                    f"jsonl says {wi}"
+                )
+            rec_h = rec.get("horizon")
+            if rec_h is not None and int(rec_h) != shape[-1]:
+                raise ValueError(
+                    f"{pred_path} horizon {shape[-1]} != jsonl horizon {rec_h} "
+                    f"(window {wi})"
+                )
+            if rec.get("crps") is not None and not has_samples:
+                raise ValueError(
+                    f"{pred_path} window {wi} jsonl has crps but npz has no samples"
+                )
             done.add(wi)
             records.append(rec)
     return records, done
@@ -500,11 +684,53 @@ def _write_eval_progress_summary(
         **metrics,
         **{k: v for k, v in extra.items() if k != "anchor_only"},
     }
-    tmp = path / "summary.json.tmp"
-    with tmp.open("w") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-    tmp.replace(path / "summary.json")
+    _durable_json_dump(path / "summary.json", payload)
     return payload
+
+
+def _flush_eval_progress_block(
+    *,
+    progress_dir: Path,
+    progress_fh,
+    progress_records: List[Dict[str, Any]],
+    window_indices: Sequence[int],
+    y_true: np.ndarray,
+    deterministic: np.ndarray,
+    samples: np.ndarray | None,
+    test_stride: int,
+    metric_records: Sequence[Dict[str, Any]],
+    n_planned: int,
+    extra_summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist preds then jsonl for one block/batch; fsync so SIGTERM keeps it."""
+    if len(metric_records) != len(window_indices):
+        raise ValueError("metric_records length must match window_indices")
+    rel = _write_eval_pred_block(
+        progress_dir,
+        window_indices=window_indices,
+        y_true=y_true,
+        deterministic=deterministic,
+        samples=samples,
+        test_stride=test_stride,
+    )
+    h = int(y_true.shape[-1])
+    stride = int(test_stride)
+    for j, (wi, base) in enumerate(zip(window_indices, metric_records)):
+        rec = dict(base)
+        rec["window_index"] = int(wi)
+        rec["series_start"] = int(wi) * stride
+        rec["horizon"] = h
+        rec["pred_file"] = rel
+        rec["pred_offset"] = int(j)
+        progress_records.append(rec)
+        progress_fh.write(json.dumps(rec) + "\n")
+    _fsync_handle(progress_fh)
+    return _write_eval_progress_summary(
+        progress_dir,
+        progress_records,
+        n_planned=n_planned,
+        extra=extra_summary,
+    )
 
 
 def _per_window_mae(y_true: np.ndarray, pred: np.ndarray) -> np.ndarray:
@@ -584,6 +810,7 @@ class StagedEvalPhase(PipelinePhase):
         tuned = meta.get("tuned_params") or {}
         model_kwargs = anchor_kwargs_from_params(model_state, tuned)
         model_kwargs.update(_model_kwargs_from_tuned(tuned))
+        model_kwargs.pop("cache_cond_kv", None)
         model = create_diffusion_model(
             model_state,
             n_variates=n_iv,
@@ -592,6 +819,8 @@ class StagedEvalPhase(PipelinePhase):
             guidance_model=itrans_guidance,
             diffusion_stage=stage,
             ordinal_ladder=state.ordinal_ladder,
+            cache_cond_kv=bool(getattr(state, "cache_cond_kv", False))
+            and stage == "patch_refine",
             **model_kwargs,
         ).to(device)
         ckpt = torch.load(
@@ -660,7 +889,8 @@ class StagedEvalPhase(PipelinePhase):
         )
         if progress_dir is not None:
             progress_dir.mkdir(parents=True, exist_ok=True)
-            progress_fh = (progress_dir / "windows.jsonl").open("a")
+            (progress_dir / "preds").mkdir(parents=True, exist_ok=True)
+            progress_fh = (progress_dir / "windows.jsonl").open("a", buffering=1)
         keep_pack = progress_dir is None
         try:
             with torch.no_grad():
@@ -753,6 +983,8 @@ class StagedEvalPhase(PipelinePhase):
                             ),
                         )
                     if progress_dir is not None:
+                        if progress_fh is None:
+                            raise RuntimeError("eval progress_dir set but jsonl handle is closed")
                         y_np = y_true_all[-1]
                         det_np = det_all[-1]
                         amse = per_window_anchor_mse(y_np, det_np)
@@ -766,6 +998,7 @@ class StagedEvalPhase(PipelinePhase):
                         prefix_fields = _per_window_prefix_fields(
                             y_np, det_np, samp_np, anchor_only=anchor_only,
                         )
+                        metric_records = []
                         for j, wi in enumerate(batch_window_indices):
                             rec = {
                                 "window_index": int(wi),
@@ -782,16 +1015,22 @@ class StagedEvalPhase(PipelinePhase):
                                 })
                             for key, arr in prefix_fields.items():
                                 rec[key] = float(arr[j])
-                            progress_records.append(rec)
-                            if progress_fh is not None:
-                                progress_fh.write(json.dumps(rec) + "\n")
-                        if progress_fh is not None:
-                            progress_fh.flush()
-                        summary = _write_eval_progress_summary(
-                            progress_dir,
-                            progress_records,
+                            metric_records.append(rec)
+                        summary = _flush_eval_progress_block(
+                            progress_dir=progress_dir,
+                            progress_fh=progress_fh,
+                            progress_records=progress_records,
+                            window_indices=batch_window_indices,
+                            y_true=y_np,
+                            deterministic=det_np,
+                            samples=samp_np,
+                            test_stride=test_stride,
+                            metric_records=metric_records,
                             n_planned=planned,
-                            extra={"anchor_only": anchor_only, "subset_id": subset_id},
+                            extra_summary={
+                                "anchor_only": anchor_only,
+                                "subset_id": subset_id,
+                            },
                         )
                         logger.info(
                             "[%s] eval progress %d/%d anchor_mse=%.4f %s",
@@ -888,6 +1127,11 @@ class StagedEvalPhase(PipelinePhase):
         train_stride = int(subset_meta.get("train_stride", state.window_stride))
         phase_test_stride = int(self.require("test_stride"))
         subset_test_stride = int(subset_meta.get("test_stride", 1))
+        if self.get("eval_block_r") is not None:
+            raise ValueError(
+                "eval_block_r was removed; rolling eval only "
+                "(eval_test_fraction / random_window_subset)"
+            )
         # Never evaluate denser than the subset policy (e.g. dynamic sample_stride=480).
         test_stride = max(phase_test_stride, subset_test_stride)
         if test_stride != phase_test_stride:
@@ -939,7 +1183,8 @@ class StagedEvalPhase(PipelinePhase):
 
         batch_size = _eval_window_batch_size(self, state)
         if state.smoke_test:
-            final_ds = Subset(full_test_ds, list(range(min(2, len(full_test_ds)))))
+            n_smoke = min(2, len(full_test_ds))
+            final_ds = Subset(full_test_ds, list(range(n_smoke)))
             prob_samples = 1
             default_steps = 5
         else:
@@ -951,16 +1196,18 @@ class StagedEvalPhase(PipelinePhase):
                     "eval_test_fraction<1 cannot both apply"
                 )
             if eval_fraction < 1.0:
-                final_ds = _fraction_subset(full_test_ds, eval_fraction, state.seed)
+                keep = max(1, int(round(len(full_test_ds) * float(eval_fraction))))
+                final_ds = random_window_subset(
+                    full_test_ds, keep, state.seed,
+                    label=f"{subset_id}-eval-frac",
+                )
                 logger.info(
-                    "[%s] eval subset: %d/%d windows (eval_test_fraction=%.3f)",
-                    subset_id,
-                    len(final_ds),
-                    len(full_test_ds),
-                    eval_fraction,
+                    "[%s] eval random subset: %d/%d windows "
+                    "(eval_test_fraction=%.3f, seed=%s)",
+                    subset_id, len(final_ds), len(full_test_ds),
+                    eval_fraction, state.seed,
                 )
             elif eval_k is not None:
-                from models.diffusion_tsf.pipeline.data_subset import random_window_subset
                 final_ds = random_window_subset(
                     full_test_ds,
                     eval_k,
@@ -1249,6 +1496,9 @@ class StagedEvalPhase(PipelinePhase):
         wandb_metrics = {
             "eval/test_stride": int(test_stride),
         }
+        cov = getattr(state, "train_time_coverage", None)
+        if cov is not None:
+            wandb_metrics["eval/train_time_coverage"] = float(cov)
         if anchor_only:
             wandb_metrics.update({
                 "eval/staged_anchor_mse": metrics.get("anchor_mse"),
@@ -1271,7 +1521,10 @@ class StagedEvalPhase(PipelinePhase):
             f"eval/{tag}/staged_anchor_mse": metrics.get("anchor_mse"),
             f"eval/{tag}/staged_anchor_mae": metrics.get("anchor_mae"),
         })
-        wandb_utils.log_eval_metrics(wandb_metrics, step=int(test_stride))
+        wandb_utils.log_eval_metrics(
+            wandb_metrics,
+            step=int(test_stride),
+        )
 
         skip_viz = bool(
             self.get("skip_eval_visualizations", False)

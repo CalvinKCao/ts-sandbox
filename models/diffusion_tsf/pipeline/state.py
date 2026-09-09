@@ -104,6 +104,8 @@ class PipelineState:
     skip_window_norm_variate_mask: Optional[List[bool]] = None
     lookback_overlap_center_shift: bool = False
     use_raw_lookback_cond_channel: bool = False
+    # Eval-only encoder-decoder cond K/V cache (unique-seg generate). Ignored in train.
+    cache_cond_kv: bool = False
 
     # -- Sequence geometry --
     lookback_length: int = 96
@@ -194,6 +196,10 @@ class PipelineState:
     subset_id: Optional[str] = None
     data_subset_by_dataset: Dict[str, Any] = field(default_factory=dict)
     data_subset_resolved: Dict[str, Any] = field(default_factory=dict)
+    # Unique time coverage of train-split T. 1.0 = full train T (ignore
+    # train_max_windows). Other values are rejected until a real T-union
+    # sampler exists — window subsample is not a coverage cap.
+    train_time_coverage: Optional[float] = None
     dataset_shape_cache: Dict[Tuple[str, str], Tuple[int, int]] = field(
         default_factory=dict
     )
@@ -348,6 +354,14 @@ class PipelineState:
             }
         if "window_norm_std_floor" in init_kwargs:
             init_kwargs["window_norm_std_floor"] = float(init_kwargs["window_norm_std_floor"])
+        if "train_time_coverage" in init_kwargs and init_kwargs["train_time_coverage"] is not None:
+            cov = float(init_kwargs["train_time_coverage"])
+            if cov != 1.0:
+                raise ValueError(
+                    f"train_time_coverage only supports 1.0 (full train T); got {cov!r}. "
+                    "A window subsample still tiles ~100% of T — do not use it as a coverage cap."
+                )
+            init_kwargs["train_time_coverage"] = cov
         for key in ("window_norm_low_var_threshold", "window_norm_low_var_unit_std"):
             if key in init_kwargs:
                 init_kwargs[key] = float(init_kwargs[key])
@@ -366,6 +380,8 @@ class PipelineState:
             init_kwargs["representation_time_stride"] = int(init_kwargs["representation_time_stride"])
         if "past_cond_resize_to_horizon" in init_kwargs:
             init_kwargs["past_cond_resize_to_horizon"] = bool(init_kwargs["past_cond_resize_to_horizon"])
+        if "cache_cond_kv" in init_kwargs:
+            init_kwargs["cache_cond_kv"] = bool(init_kwargs["cache_cond_kv"])
         if "min_snr_gamma" in init_kwargs:
             init_kwargs["min_snr_gamma"] = float(init_kwargs["min_snr_gamma"])
         if "deterministic_anchor_every_n_batches" in init_kwargs:

@@ -91,6 +91,21 @@ def read_subset_record(metadata: Mapping[str, Any], dataset: str) -> Dict[str, A
     )
 
 
+def random_fraction_indices(n: int, fraction: float, seed: int) -> List[int]:
+    """Same keep=round(n*frac) + ``random.Random(seed).sample`` as staged_eval."""
+    n = int(n)
+    if n <= 0:
+        raise ValueError(f"n must be >= 1, got {n}")
+    frac = float(fraction)
+    if not (0.0 < frac <= 1.0):
+        raise ValueError(f"fraction must be in (0, 1], got {fraction!r}")
+    k = max(1, int(round(n * frac)))
+    if k >= n:
+        return list(range(n))
+    rng = random.Random(int(seed))
+    return sorted(rng.sample(range(n), k))
+
+
 def random_window_subset(ds, max_windows, seed: int, *, label: str):
     """Keep a seeded random subset of windows. ``max_windows is None`` is a no-op."""
     if max_windows is None:
