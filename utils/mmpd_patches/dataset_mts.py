@@ -96,12 +96,20 @@ class Dataset_MTS(Dataset):
             "test": "MMPD_MAX_TEST_WINDOWS",
         }[flag]
         raw = os.environ.get(env_key, "").strip()
-        if not raw:
-            return None
-        cap = int(raw)
         n = self._n_windows()
-        if cap < 1:
-            raise ValueError(f"{env_key} must be >= 1, got {raw!r}")
+        cap = None
+        if raw:
+            cap = int(raw)
+            if cap < 1:
+                raise ValueError(f"{env_key} must be >= 1, got {raw!r}")
+        elif flag == "test":
+            frac_raw = os.environ.get("MMPD_TEST_FRACTION", "").strip()
+            if frac_raw:
+                frac = float(frac_raw)
+                if 0.0 < frac < 1.0:
+                    cap = max(1, int(round(n * frac)))
+        if cap is None:
+            return None
         if cap >= n:
             return None
         seed_base = int(os.environ.get("MMPD_WINDOW_SAMPLE_SEED", "42"))

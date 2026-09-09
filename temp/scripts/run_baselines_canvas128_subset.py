@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
 DATA_DIR = REPO / "temp" / "baselines_canvas128_subset" / "data"
 OUT_ROOT = REPO / "temp" / "baselines_canvas128_subset" / "results"
 ITRANS_DIR = REPO / "temp" / "iTransformer"
@@ -124,21 +125,86 @@ def _patchtst_arch(dataset: str) -> Dict[str, Any]:
         return {**large, "lradj": "TST", "pct_start": 0.2, "patience": 10, "batch_size": 24}
     if dataset == "solar_Alabama":
         return small
+    if dataset == "PeMS":
+        # 128 OOM'd on A100-40GB (2695915–18, 307 variates). Electricity is 32.
+        return {**large, "lradj": "TST", "pct_start": 0.2, "patience": 10, "batch_size": 32}
     return large
 
 
-def _cap_args(meta: dict) -> List[str]:
+def _train_val_cap_args(meta: dict) -> List[str]:
     out: List[str] = []
     mapping = (
         ("train_max_windows", "--train_max_windows"),
         ("val_max_windows", "--val_max_windows"),
-        ("eval_max_windows", "--test_max_windows"),
     )
     for key, flag in mapping:
         val = meta.get(key)
         if val is None:
             continue
         out.extend([flag, str(int(val))])
+    return out
+
+
+def _test_cap_args(meta: dict) -> List[str]:
+    out: List[str] = []
+    val = meta.get("eval_max_windows")
+    if val is not None:
+        out.extend(["--test_max_windows", str(int(val))])
+    frac = meta.get("eval_test_fraction")
+    if frac is not None:
+        out.extend(["--eval_test_fraction", str(float(frac))])
+    seed = meta.get("window_subset_seed")
+    if seed is not None:
+        out.extend(["--window_subset_seed", str(int(seed))])
+    return out
+
+
+def _cap_args(meta: dict) -> List[str]:
+    return _train_val_cap_args(meta) + _test_cap_args(meta)
+
+
+def _eval_subset_args(subset: str, dataset: str, pred_len: int) -> List[str]:
+    from utils.compare_eval_subsets import (
+        EVAL_TEST_FRACTION,
+        EVAL_WINDOW_SEED,
+        campaign_horizon,
+    )
+
+    camp = campaign_horizon(dataset)
+    if int(pred_len) > camp:
+        raise ValueError(
+            f"{dataset}: pred_len {pred_len} > campaign H {camp}; "
+            "10% starts are sampled from the campaign-H pool"
+        )
+    if subset == "binary_10pct":
+        return [
+            "--eval_test_fraction", str(EVAL_TEST_FRACTION),
+            "--window_subset_seed", str(EVAL_WINDOW_SEED),
+            "--eval_ref_pred_len", str(camp),
+        ]
+    if subset == "test_100pct":
+        return ["--eval_test_fraction", "0", "--eval_ref_pred_len", "0"]
+    raise KeyError(f"unknown eval subset {subset}")
+
+
+def _replace_eval_flags(cmd: List[str], new_eval: List[str]) -> List[str]:
+    drop = {
+        "--eval_test_fraction",
+        "--eval_ref_pred_len",
+        "--test_max_windows",
+        "--window_subset_seed",
+    }
+    out: List[str] = []
+    skip_next = False
+    for tok in cmd:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in drop:
+            skip_next = True
+            continue
+        out.append(tok)
+    out.extend(new_eval)
     return out
 
 
@@ -178,6 +244,10 @@ def _run(cmd: List[str], cwd: Path, log_path: Path) -> str:
     return text
 
 
+def _reuse_checkpoint(out_dir: Path) -> bool:
+    return any((out_dir / "ckpts").glob("*/checkpoint.pth"))
+
+
 def run_itransformer(
     dataset: str,
     meta: dict,
@@ -186,6 +256,8 @@ def run_itransformer(
     seq_len: int,
     pred_len: int,
     out_dir: Path,
+    eval_subsets: List[str],
+    force: bool = False,
 ) -> dict:
     n_v = int(meta["n_variates"])
     arch = _itrans_arch(dataset)
@@ -196,6 +268,8 @@ def run_itransformer(
     tag = f"L{arch['e_layers']}_D{arch['d_model']}_lr{arch['learning_rate']}"
     model_id = f"{dataset}_{seq_len}_{pred_len}_{tag}"
     log = out_dir / f"itrans_{tag}.log"
+    train_eval = eval_subsets[0] if eval_subsets else ""
+    extra_eval = _eval_subset_args(train_eval, dataset, pred_len) if train_eval else _test_cap_args(meta)
     cmd = [
         sys.executable, "-u", "run.py",
         "--is_training", "1",
@@ -229,13 +303,29 @@ def run_itransformer(
         "--train_window_stride", str(meta["train_stride"]),
         "--val_window_stride", str(meta["val_stride"]),
         "--test_window_stride", str(meta["test_stride"]),
-        "--window_subset_seed", "42",
-        * _cap_args(meta),
+        *_train_val_cap_args(meta),
+        *extra_eval,
     ]
+    if (not force) and (not smoke) and _reuse_checkpoint(out_dir):
+        cmd[cmd.index("--is_training") + 1] = "0"
+        print(f"[itrans] {dataset}: reuse ckpt, eval-only", flush=True)
     text = _run(cmd, ITRANS_DIR, log)
     mse, mae = _parse_mse_mae(text)
     vals = [float(x) for x in re.findall(r"Vali Loss:\s*([0-9.eE+-]+)", text)]
     vali = min(vals) if vals else None
+    subset_metrics = {}
+    if train_eval:
+        subset_metrics[train_eval] = {"mse": mse, "mae": mae, "log": str(log)}
+    for extra in eval_subsets[1:]:
+        extra_log = out_dir / f"itrans_{tag}_{extra}.log"
+        extra_cmd = list(cmd)
+        extra_cmd[extra_cmd.index("--is_training") + 1] = "0"
+        # Drop previous eval flags then append the next subset.
+        extra_cmd = _replace_eval_flags(extra_cmd, _eval_subset_args(extra, dataset, pred_len))
+        extra_text = _run(extra_cmd, ITRANS_DIR, extra_log)
+        extra_mse, extra_mae = _parse_mse_mae(extra_text)
+        subset_metrics[extra] = {"mse": extra_mse, "mae": extra_mae, "log": str(extra_log)}
+        print(f"[itrans] {dataset} {tag} {extra}: mse={extra_mse} mae={extra_mae}", flush=True)
     row = {
         "tag": tag,
         "arch": arch,
@@ -243,6 +333,7 @@ def run_itransformer(
         "mse": mse,
         "mae": mae,
         "log": str(log),
+        "eval_subsets": subset_metrics,
     }
     print(f"[itrans] {dataset} {tag}: vali={vali} mse={mse} mae={mae}", flush=True)
     result = {
@@ -255,6 +346,7 @@ def run_itransformer(
         "selection": "published_script_hp",
         "best": row,
         "git_sha": _git_sha(ITRANS_DIR),
+        "eval_subsets": subset_metrics,
     }
     (out_dir / "itransformer_summary.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
@@ -268,6 +360,8 @@ def run_patchtst(
     seq_len: int,
     pred_len: int,
     out_dir: Path,
+    eval_subsets: List[str],
+    force: bool = False,
 ) -> dict:
     arch = _patchtst_arch(dataset)
     if smoke:
@@ -277,6 +371,8 @@ def run_patchtst(
     data_name = _data_name(meta["loader"])
     model_id = f"{dataset}_{seq_len}_{pred_len}_patchtst42"
     log = out_dir / "patchtst.log"
+    train_eval = eval_subsets[0] if eval_subsets else ""
+    extra_eval = _eval_subset_args(train_eval, dataset, pred_len) if train_eval else _test_cap_args(meta)
     cmd = [
         sys.executable, "-u", "run_longExp.py",
         "--random_seed", "2021",
@@ -322,11 +418,26 @@ def run_patchtst(
         "--train_window_stride", str(meta["train_stride"]),
         "--val_window_stride", str(meta["val_stride"]),
         "--test_window_stride", str(meta["test_stride"]),
-        "--window_subset_seed", "42",
-        * _cap_args(meta),
+        *_train_val_cap_args(meta),
+        *extra_eval,
     ]
+    if (not force) and (not smoke) and _reuse_checkpoint(out_dir):
+        cmd[cmd.index("--is_training") + 1] = "0"
+        print(f"[patchtst] {dataset}: reuse ckpt, eval-only", flush=True)
     text = _run(cmd, PATCH_DIR, log)
     mse, mae = _parse_mse_mae(text)
+    subset_metrics = {}
+    if train_eval:
+        subset_metrics[train_eval] = {"mse": mse, "mae": mae, "log": str(log)}
+    for extra in eval_subsets[1:]:
+        extra_log = out_dir / f"patchtst_{extra}.log"
+        extra_cmd = list(cmd)
+        extra_cmd[extra_cmd.index("--is_training") + 1] = "0"
+        extra_cmd = _replace_eval_flags(extra_cmd, _eval_subset_args(extra, dataset, pred_len))
+        extra_text = _run(extra_cmd, PATCH_DIR, extra_log)
+        extra_mse, extra_mae = _parse_mse_mae(extra_text)
+        subset_metrics[extra] = {"mse": extra_mse, "mae": extra_mae, "log": str(extra_log)}
+        print(f"[patchtst] {dataset} {extra}: mse={extra_mse} mae={extra_mae}", flush=True)
     result = {
         "model": "PatchTST",
         "dataset": dataset,
@@ -338,6 +449,7 @@ def run_patchtst(
         "mse": mse,
         "mae": mae,
         "log": str(log),
+        "eval_subsets": subset_metrics,
         "git_sha": _git_sha(PATCH_DIR.parent),
     }
     print(f"[patchtst] {dataset}: mse={mse} mae={mae}", flush=True)
@@ -370,6 +482,12 @@ def main() -> int:
     p.add_argument("--force", action="store_true", help="re-run even if summary.json exists")
     p.add_argument("--seq-len", type=int, default=336, help="Match canvas128 table lookback")
     p.add_argument("--pred-len", type=int, default=96, help="Match canvas128 table horizon")
+    p.add_argument(
+        "--eval-subsets",
+        type=str,
+        default="",
+        help="Comma list: binary_10pct,test_100pct. Empty keeps YAML eval caps.",
+    )
     args = p.parse_args()
 
     if not ITRANS_DIR.is_dir() or not PATCH_DIR.is_dir():
@@ -395,6 +513,10 @@ def main() -> int:
         models.append("itransformer")
     if args.model in ("patchtst", "both"):
         models.append("patchtst")
+
+    from utils.compare_eval_subsets import parse_eval_subset_list
+
+    eval_subsets = parse_eval_subset_list(args.eval_subsets)
 
     summaries = []
     errors = []
@@ -422,6 +544,7 @@ def main() -> int:
                         run_itransformer(
                             ds, meta, smoke=args.smoke_test,
                             seq_len=args.seq_len, pred_len=args.pred_len, out_dir=out_dir,
+                            eval_subsets=eval_subsets, force=args.force,
                         )
                     )
                 else:
@@ -429,6 +552,7 @@ def main() -> int:
                         run_patchtst(
                             ds, meta, smoke=args.smoke_test,
                             seq_len=args.seq_len, pred_len=args.pred_len, out_dir=out_dir,
+                            eval_subsets=eval_subsets, force=args.force,
                         )
                     )
             except Exception as e:

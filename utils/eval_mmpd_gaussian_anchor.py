@@ -452,6 +452,7 @@ def mmpd_window_cap_env(
         if val is not None:
             out[env_key] = str(int(val))
     eval_cap = None
+    eval_frac = None
     cfg_path = getattr(args, "subset_config", None) if args is not None else None
     if cfg_path is not None:
         from models.diffusion_tsf.pipeline.config import load_experiment_config
@@ -462,9 +463,24 @@ def mmpd_window_cap_env(
                 caps = phase.get("eval_max_windows_by_dataset") or {}
                 if run.dataset in caps:
                     eval_cap = int(caps[run.dataset])
+                frac = phase.get("eval_test_fraction")
+                if frac is not None:
+                    eval_frac = float(frac)
                 break
-    if eval_cap is not None:
+    skip_test_cap = False
+    if args is not None:
+        from utils.compare_eval_subsets import parse_eval_subset_list
+
+        skip_test_cap = bool(parse_eval_subset_list(getattr(args, "eval_subsets", "") or ""))
+    if skip_test_cap:
+        # Dual eval samples campaign-H 10% and full test in Python.
+        pass
+    elif eval_cap is not None:
         out["MMPD_MAX_TEST_WINDOWS"] = str(int(eval_cap))
+    elif eval_frac is not None and 0.0 < eval_frac < 1.0:
+        # Same keep=round(n*frac) + random.Random(seed).sample as staged_eval
+        # random_window_subset.
+        out["MMPD_TEST_FRACTION"] = str(eval_frac)
     seed = 42
     if args is not None and getattr(args, "seed", None) is not None:
         seed = int(args.seed)
@@ -1521,12 +1537,6 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                     drop_last=False,
                 )
 
-                y_true_all = []
-                det_all = []
-                samples_all = []
-                mode_center_all = []
-                mode_prob_all = []
-
                 n_batches = len(loader)
                 n_windows = len(indices)
                 print(
@@ -1536,6 +1546,18 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                     flush=True,
                 )
                 progress = EvalProgress(f"mmpd-eval/{ns.dataset}", n_batches)
+
+                # Disk memmaps — concatenating 100% traffic samples in RAM OOMs 128G
+                # (2707897/2695861 died at np.savez_compressed after the last batch).
+                scratch = ns.out_npz + ".d"
+                os.makedirs(os.path.dirname(ns.out_npz) or ".", exist_ok=True)
+                if os.path.isdir(scratch):
+                    for name in os.listdir(scratch):
+                        os.remove(os.path.join(scratch, name))
+                else:
+                    os.makedirs(scratch)
+                maps = {}
+                filled = 0
 
                 with torch.no_grad():
                     for batch_i, (batch_x, batch_y) in enumerate(loader):
@@ -1562,34 +1584,61 @@ def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
                             gmm_iterations=args.gmm_iterations,
                         )
 
-                        y_true_all.append(batch_y.detach().cpu().numpy())
-                        det_all.append(_denormalize_predictions(det, norm_ctx).detach().cpu().numpy())
-                        samples_all.append(_denormalize_predictions(samples, norm_ctx).detach().cpu().numpy())
-                        mode_center_all.append(
-                            _denormalize_predictions(modes["mode_center"], norm_ctx).detach().cpu().numpy()
+                        yt = np.ascontiguousarray(batch_y.detach().cpu().numpy(), dtype=np.float32)
+                        det_np = np.ascontiguousarray(
+                            _denormalize_predictions(det, norm_ctx).detach().cpu().numpy(),
+                            dtype=np.float32,
                         )
-                        mode_prob_all.append(modes["mode_prob"].detach().cpu().numpy())
+                        samp_np = np.ascontiguousarray(
+                            _denormalize_predictions(samples, norm_ctx).detach().cpu().numpy(),
+                            dtype=np.float32,
+                        )
+                        mc_np = np.ascontiguousarray(
+                            _denormalize_predictions(modes["mode_center"], norm_ctx).detach().cpu().numpy(),
+                            dtype=np.float32,
+                        )
+                        mp_np = np.ascontiguousarray(
+                            modes["mode_prob"].detach().cpu().numpy(), dtype=np.float32
+                        )
+                        bsz = int(yt.shape[0])
+                        if filled == 0:
+                            def _mm(name, example):
+                                path = os.path.join(scratch, name + ".npy")
+                                return np.lib.format.open_memmap(
+                                    path, mode="w+", dtype=np.float32,
+                                    shape=(n_windows,) + example.shape[1:],
+                                )
+                            maps["y_true"] = _mm("y_true", yt)
+                            maps["deterministic"] = _mm("deterministic", det_np)
+                            maps["samples"] = _mm("samples", samp_np)
+                            maps["mode_center"] = _mm("mode_center", mc_np)
+                            maps["mode_prob"] = _mm("mode_prob", mp_np)
+                        maps["y_true"][filled:filled + bsz] = yt
+                        maps["deterministic"][filled:filled + bsz] = det_np
+                        maps["samples"][filled:filled + bsz] = samp_np
+                        maps["mode_center"][filled:filled + bsz] = mc_np
+                        maps["mode_prob"][filled:filled + bsz] = mp_np
+                        filled += bsz
                         done = batch_i + 1
                         progress.maybe_log(
                             done,
                             extra=(
                                 f"last_batch={fmt_duration(time.time() - t_batch)} "
-                                f"windows~{min(done * args.batch_size, n_windows)}/{n_windows}"
+                                f"windows~{min(filled, n_windows)}/{n_windows}"
                             ),
                         )
 
-                progress.done(extra=f"writing {ns.out_npz}")
-                os.makedirs(os.path.dirname(ns.out_npz), exist_ok=True)
-                np.savez_compressed(
-                    ns.out_npz,
-                    y_true=np.concatenate(y_true_all, axis=0),
-                    deterministic=np.concatenate(det_all, axis=0),
-                    samples=np.concatenate(samples_all, axis=0),
-                    mode_center=np.concatenate(mode_center_all, axis=0),
-                    mode_prob=np.concatenate(mode_prob_all, axis=0),
-                    indices=np.array(indices, dtype=np.int64),
-                )
-                print(f"[mmpd-eval] {ns.dataset}: saved {ns.out_npz}", flush=True)
+                if filled != n_windows:
+                    raise RuntimeError(
+                        f"mmpd eval wrote {filled} windows, expected {n_windows}"
+                    )
+                for mm in maps.values():
+                    mm.flush()
+                np.save(os.path.join(scratch, "indices.npy"), np.asarray(indices, dtype=np.int64))
+                # Marker so callers see out_npz; arrays live in the .d memmap dir.
+                np.savez(ns.out_npz, n_windows=np.int64(filled))
+                progress.done(extra=f"wrote memmap dir {scratch}")
+                print(f"[mmpd-eval] {ns.dataset}: saved {ns.out_npz} + {scratch}", flush=True)
 
 
             if __name__ == "__main__":
@@ -2028,13 +2077,16 @@ def run_mmpd_eval(
     args: argparse.Namespace,
     run: AnchorRun,
     indices: Sequence[int],
+    *,
+    subset_tag: Optional[str] = None,
 ) -> Dict[str, np.ndarray]:
     dataset = run.dataset
     # Helper runs with cwd=mmpd_repo — relative out/indices paths resolve under
     # temp/MMPD and miss the real files. Always pass absolute paths.
     out_dir = Path(args.output_dir).resolve()
-    out_npz = (out_dir / "raw" / f"mmpd_{dataset}.npz").resolve()
-    indices_json = (out_dir / "raw" / f"indices_{dataset}_mmpd_eval.json").resolve()
+    tag = f"_{subset_tag}" if subset_tag else ""
+    out_npz = (out_dir / "raw" / f"mmpd_{dataset}{tag}.npz").resolve()
+    indices_json = (out_dir / "raw" / f"indices_{dataset}_mmpd_eval{tag}.json").resolve()
     indices_json.parent.mkdir(parents=True, exist_ok=True)
     pack_splits = parse_pack_splits(getattr(args, "pack_splits", None))
     eval_ds = build_mmpd_pack_pool(args, run, pack_splits)
@@ -2047,7 +2099,9 @@ def run_mmpd_eval(
             "Refuse launching the helper with a broken --indices-json path."
         )
 
-    if not out_npz.exists() or args.force_mmpd_eval:
+    npy_ready = (Path(str(out_npz) + ".d") / "y_true.npy").is_file()
+    npz_ready = out_npz.exists() and out_npz.stat().st_size > 1024
+    if args.force_mmpd_eval or not (npy_ready or npz_ready):
         stage_mmpd_dataset_for_run(args.mmpd_data_dir, run, lookback=int(args.lookback))
         ckpt_path, mmpd_data = resolve_mmpd_checkpoint(args, run)
         if not ckpt_path.exists():
@@ -2140,32 +2194,86 @@ def run_mmpd_eval(
         )
         print(f"[mmpd-eval] {dataset}: helper finished -> {out_npz}", flush=True)
 
-    with np.load(out_npz) as data:
-        return {key: data[key] for key in data.files}
+    return _load_mmpd_eval_pack(out_npz)
+
+
+def _load_mmpd_eval_pack(out_npz: Path) -> Dict[str, np.ndarray]:
+    """Load helper output without materializing 100% sample tensors."""
+    npy_dir = Path(str(out_npz) + ".d")
+    y_path = npy_dir / "y_true.npy"
+    if y_path.is_file():
+        pack: Dict[str, np.ndarray] = {
+            "y_true": np.load(y_path, mmap_mode="r"),
+            "deterministic": np.load(npy_dir / "deterministic.npy", mmap_mode="r"),
+            "samples": np.load(npy_dir / "samples.npy", mmap_mode="r"),
+            "mode_center": np.load(npy_dir / "mode_center.npy", mmap_mode="r"),
+            "mode_prob": np.load(npy_dir / "mode_prob.npy", mmap_mode="r"),
+        }
+        idx_path = npy_dir / "indices.npy"
+        if idx_path.is_file():
+            pack["indices"] = np.load(idx_path)
+        return pack
+    data = np.load(out_npz, mmap_mode="r")
+    pack = {key: data[key] for key in data.files}
+    pack["_npz_keep"] = data  # keep mmap zip alive
+    return pack
 
 
 def _as_float(x: np.ndarray) -> float:
     return float(np.asarray(x, dtype=np.float64).mean())
 
 
+def _window_chunks(n: int, chunk: int = 16) -> range:
+    return range(0, n, max(1, int(chunk)))
+
+
 def deterministic_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    return {
-        "mse": _as_float((y_true - y_pred) ** 2),
-        "mae": _as_float(np.abs(y_true - y_pred)),
-    }
+    n = int(y_true.shape[0])
+    sse = 0.0
+    sae = 0.0
+    count = 0
+    for start in _window_chunks(n):
+        end = min(n, start + 16)
+        yt = np.asarray(y_true[start:end], dtype=np.float64)
+        yp = np.asarray(y_pred[start:end], dtype=np.float64)
+        err = yp - yt
+        sse += float(np.square(err).sum())
+        sae += float(np.abs(err).sum())
+        count += int(err.size)
+    return {"mse": sse / max(count, 1), "mae": sae / max(count, 1)}
+
+
+def _chunked_sample_mean(samples: np.ndarray, chunk: int = 16) -> np.ndarray:
+    n = int(samples.shape[0])
+    out = None
+    for start in _window_chunks(n, chunk):
+        end = min(n, start + chunk)
+        sl = np.asarray(samples[start:end], dtype=np.float32).mean(axis=2)
+        if out is None:
+            out = np.empty((n,) + sl.shape[1:], dtype=np.float32)
+        out[start:end] = sl
+    if out is None:
+        raise ValueError("empty samples")
+    return out
 
 
 def crps_gr(y_true: np.ndarray, samples: np.ndarray) -> float:
     # y_true: [B, V, L], samples: [B, V, S, L]
-    expected_abs = np.abs(samples - y_true[:, :, None, :]).mean(axis=2)
-    sample_count = samples.shape[2]
-    total = np.zeros_like(y_true, dtype=np.float64)
-    chunk = max(1, 256 // max(1, sample_count))
-    for start in range(0, samples.shape[0], chunk):
-        end = min(samples.shape[0], start + chunk)
-        s = samples[start:end].astype(np.float64)
-        total[start:end] = np.abs(s[:, :, :, None, :] - s[:, :, None, :, :]).mean(axis=(2, 3))
-    return _as_float(expected_abs - 0.5 * total)
+    n = int(y_true.shape[0])
+    sample_count = int(samples.shape[2])
+    chunk = max(1, min(16, 256 // max(1, sample_count)))
+    acc = 0.0
+    count = 0
+    for start in _window_chunks(n, chunk):
+        end = min(n, start + chunk)
+        yt = np.asarray(y_true[start:end], dtype=np.float64)
+        s = np.asarray(samples[start:end], dtype=np.float64)
+        expected_abs = np.abs(s - yt[:, :, None, :]).mean(axis=2)
+        pair = np.abs(s[:, :, :, None, :] - s[:, :, None, :, :]).mean(axis=(2, 3))
+        term = expected_abs - 0.5 * pair
+        acc += float(term.sum())
+        count += int(term.size)
+    return acc / max(count, 1)
 
 
 def topk_from_modes(
@@ -2175,18 +2283,29 @@ def topk_from_modes(
     max_k: int = 5,
 ) -> Dict[str, float]:
     # y_true [B,V,L], centers [B,V,M,L], probs [B,V,M]
-    order = np.argsort(-mode_prob, axis=2)
-    out: Dict[str, float] = {}
-    max_k = min(max_k, mode_center.shape[2])
-    for k in sorted({1, max_k}):
-        if k < 1 or k > max_k:
-            continue
-        gathered = np.take_along_axis(mode_center, order[:, :, :k, None], axis=2)
-        mse = ((gathered - y_true[:, :, None, :]) ** 2).mean(axis=-1).min(axis=2)
-        mae = np.abs(gathered - y_true[:, :, None, :]).mean(axis=-1).min(axis=2)
-        out[f"top{k}_mse"] = _as_float(mse)
-        out[f"top{k}_mae"] = _as_float(mae)
-    return out
+    n = int(y_true.shape[0])
+    max_k = min(max_k, int(mode_center.shape[2]))
+    ks = sorted({1, max_k})
+    sums: Dict[str, float] = {f"top{k}_mse": 0.0 for k in ks}
+    sums.update({f"top{k}_mae": 0.0 for k in ks})
+    counts: Dict[str, int] = {key: 0 for key in sums}
+    for start in _window_chunks(n, 8):
+        end = min(n, start + 8)
+        yt = np.asarray(y_true[start:end], dtype=np.float64)
+        mc = np.asarray(mode_center[start:end], dtype=np.float64)
+        mp = np.asarray(mode_prob[start:end], dtype=np.float64)
+        order = np.argsort(-mp, axis=2)
+        for k in ks:
+            if k < 1:
+                continue
+            gathered = np.take_along_axis(mc, order[:, :, :k, None], axis=2)
+            mse = ((gathered - yt[:, :, None, :]) ** 2).mean(axis=-1).min(axis=2)
+            mae = np.abs(gathered - yt[:, :, None, :]).mean(axis=-1).min(axis=2)
+            sums[f"top{k}_mse"] += float(mse.sum())
+            sums[f"top{k}_mae"] += float(mae.sum())
+            counts[f"top{k}_mse"] += int(mse.size)
+            counts[f"top{k}_mae"] += int(mae.size)
+    return {key: sums[key] / max(counts[key], 1) for key in sums}
 
 
 def empirical_modes_from_samples(
@@ -2391,7 +2510,7 @@ def summarize_anchor_prob_core_metrics(
     y_true = pack["y_true"]
     samples = pack["samples"]
     det = pack["deterministic"]
-    sample_mean = samples.mean(axis=2)
+    sample_mean = _chunked_sample_mean(samples)
     metrics: Dict[str, float] = {
         "crps": crps_gr(y_true, samples),
         "n_windows": float(y_true.shape[0]),
@@ -2429,7 +2548,7 @@ def summarize_prob_core_metrics(
     """Probabilistic metrics only: MSE/MAE of mean-of-samples, CRPS, top-k modes."""
     y_true = pack["y_true"]
     samples = pack["samples"]
-    sample_mean = samples.mean(axis=2)
+    sample_mean = _chunked_sample_mean(samples)
     metrics: Dict[str, float] = {
         "mse": deterministic_metrics(y_true, sample_mean)["mse"],
         "mae": deterministic_metrics(y_true, sample_mean)["mae"],
@@ -2749,19 +2868,34 @@ def generate_mmpd_phase_viz(
         return []
 
 
+def count_mmpd_test_windows(args: argparse.Namespace, run: AnchorRun, horizon: int) -> int:
+    saved = int(args.horizon)
+    args.horizon = int(horizon)
+    try:
+        return len(build_mmpd_test_dataset(args, run))
+    finally:
+        args.horizon = saved
+
+
 def run_phase_mmpd(
     args: argparse.Namespace,
     dataset: str,
     anchors_by_variant: Dict[str, Dict[str, AnchorRun]],
 ) -> None:
-    binary_run = anchors_by_variant["binary"][dataset]
-    indices = get_or_create_indices(args, binary_run)
-    indices = subsample_eval_indices(
-        indices,
-        args.test_max_items,
-        seed=args.seed,
-        dataset=dataset,
+    from utils.compare_eval_subsets import (
+        binary_10pct_indices,
+        campaign_horizon,
+        parse_eval_subset_list,
+        prefix_metrics,
     )
+
+    binary_run = anchors_by_variant["binary"][dataset]
+    subsets = parse_eval_subset_list(getattr(args, "eval_subsets", "") or "")
+    if subsets and args.test_max_items is not None and not args.smoke_test:
+        raise ValueError(
+            "--test-max-items is incompatible with --eval-subsets "
+            "(100% eval needs the full test pool)"
+        )
     if not args.skip_mmpd_train:
         train_mmpd(args, [binary_run])
     elif not args.skip_mmpd_eval:
@@ -2773,12 +2907,56 @@ def run_phase_mmpd(
             )
     if args.skip_mmpd_eval:
         return
-    print(f"[mmpd] {dataset}: eval phase ({len(indices)} windows)", flush=True)
-    mmpd_pack = run_mmpd_eval(args, binary_run, indices)
-    print(f"[mmpd] {dataset}: summarizing metrics", flush=True)
-    metrics = summarize_for_profile(mmpd_pack, args, dataset)
+    if not subsets:
+        indices = get_or_create_indices(args, binary_run)
+        indices = subsample_eval_indices(
+            indices,
+            args.test_max_items,
+            seed=args.seed,
+            dataset=dataset,
+        )
+        print(f"[mmpd] {dataset}: eval phase ({len(indices)} windows)", flush=True)
+        mmpd_pack = run_mmpd_eval(args, binary_run, indices)
+        print(f"[mmpd] {dataset}: summarizing metrics", flush=True)
+        metrics = summarize_for_profile(mmpd_pack, args, dataset)
+        write_partial_metrics(args.output_dir, dataset, "mmpd", metrics)
+        sample_viz_paths = generate_mmpd_phase_viz(args, dataset, mmpd_pack)
+        from utils.log_mmpd_eval_leaderboard import maybe_log_mmpd_eval_leaderboard
+
+        maybe_log_mmpd_eval_leaderboard(args, dataset, metrics, extra_viz_paths=sample_viz_paths)
+        return
+
+    n_pred = count_mmpd_test_windows(args, binary_run, int(args.horizon))
+    n_ref = count_mmpd_test_windows(
+        args, binary_run, campaign_horizon(dataset),
+    )
+    metrics: Dict[str, float] = {}
+    last_pack = None
+    primary_metrics = None
+    primary_name = "binary_10pct" if "binary_10pct" in subsets else subsets[0]
+    for subset in subsets:
+        if subset == "binary_10pct":
+            idxs = binary_10pct_indices(n_ref, n_pred, seed=int(args.seed))
+        elif subset == "test_100pct":
+            idxs = list(range(n_pred))
+        else:
+            raise ValueError(f"unknown eval subset {subset}")
+        if args.smoke_test:
+            cap = int(args.test_max_items or 1)
+            idxs = idxs[:cap]
+        pack = run_mmpd_eval(args, binary_run, idxs, subset_tag=subset)
+        last_pack = pack
+        sub = summarize_for_profile(pack, args, dataset)
+        metrics.update(prefix_metrics(sub, subset))
+        if subset == primary_name:
+            primary_metrics = sub
+    if primary_metrics is None:
+        raise RuntimeError(f"{dataset}: missing primary subset {primary_name}")
+    for key, val in primary_metrics.items():
+        if isinstance(val, (int, float)):
+            metrics[key] = float(val)
     write_partial_metrics(args.output_dir, dataset, "mmpd", metrics)
-    sample_viz_paths = generate_mmpd_phase_viz(args, dataset, mmpd_pack)
+    sample_viz_paths = generate_mmpd_phase_viz(args, dataset, last_pack or {})
     from utils.log_mmpd_eval_leaderboard import maybe_log_mmpd_eval_leaderboard
 
     maybe_log_mmpd_eval_leaderboard(args, dataset, metrics, extra_viz_paths=sample_viz_paths)
@@ -3028,6 +3206,12 @@ def parse_args() -> argparse.Namespace:
         help="Upstream MMPD backbone (MaskAE = UP2ME-style masked autoencoder).",
     )
     parser.add_argument("--test-fraction", type=float, default=0.5)
+    parser.add_argument(
+        "--eval-subsets",
+        type=str,
+        default="",
+        help="Comma list binary_10pct,test_100pct. Empty keeps the single-eval path.",
+    )
     parser.add_argument(
         "--eval-test-stride",
         type=int,

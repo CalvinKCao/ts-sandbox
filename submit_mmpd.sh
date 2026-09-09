@@ -50,6 +50,10 @@ MMPD_INSTANCE_NORM=1
 DISC_RUN=""
 RAW_RUN=""
 JOB_MANIFEST=""
+NO_DATASET_EXTRA=0
+SKIP_MMPD_VIZ=0
+EVAL_SUBSETS=""
+MEM_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -80,6 +84,10 @@ while [[ $# -gt 0 ]]; do
         --disc-run) DISC_RUN="$2"; shift 2 ;;
         --raw-run) RAW_RUN="$2"; shift 2 ;;
         --job-manifest) JOB_MANIFEST="$2"; shift 2 ;;
+        --no-dataset-extra-args) NO_DATASET_EXTRA=1; shift ;;
+        --skip-mmpd-sample-viz) SKIP_MMPD_VIZ=1; shift ;;
+        --eval-subsets) EVAL_SUBSETS="$2"; shift 2 ;;
+        --mem) MEM_OVERRIDE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -412,6 +420,17 @@ if [[ "$MMPD_TUNE_TRIALS" -gt 0 ]]; then
     fi
 fi
 
+if [[ -n "$MEM_OVERRIDE" ]]; then
+    MEM="$MEM_OVERRIDE"
+fi
+
+if [[ "$SKIP_MMPD_VIZ" -eq 1 ]]; then
+    EVAL_EXTRA+=(--skip-mmpd-sample-viz)
+fi
+if [[ -n "$EVAL_SUBSETS" ]]; then
+    EVAL_EXTRA+=(--eval-subsets "$EVAL_SUBSETS")
+fi
+
 PREAMBLE_FILE="$REPO/results/job_preamble_mmpd_sweep_subset.sh"
 cat > "$PREAMBLE_FILE" << PREAMBLE
 set -euo pipefail
@@ -568,9 +587,11 @@ for ds in "${DATASETS[@]}"; do
 
     WORKER_SCRIPT="$LOG_DIR/submit-mmpd-${ds}.sh"
     DS_EXTRA=()
-    while IFS= read -r _arg; do
-        [[ -n "$_arg" ]] && DS_EXTRA+=("$_arg")
-    done < <(mmpd_dataset_worker_extra_args "$ds")
+    if [[ "$NO_DATASET_EXTRA" -eq 0 ]]; then
+        while IFS= read -r _arg; do
+            [[ -n "$_arg" ]] && DS_EXTRA+=("$_arg")
+        done < <(mmpd_dataset_worker_extra_args "$ds")
+    fi
     DS_WALL="$(mmpd_dataset_wall_time "$ds" "$WALL_MMPD")"
     write_worker_script "$WORKER_SCRIPT" "${EVAL_BASE[@]}" "${EVAL_EXTRA[@]}" \
         "${DS_EXTRA[@]}" \

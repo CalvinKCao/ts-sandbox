@@ -81,3 +81,5 @@ def apply_mmpd_run_config(args: Any, block: Dict[str, Any], *, repo_root: Path =
         args.skip_mmpd_sample_viz = bool(block["skip_sample_viz"])
     if sample_viz_windows := block.get("sample_viz_windows"):
         args.mmpd_sample_viz_windows = int(sample_viz_windows)
+    if eval_subsets := block.get("eval_subsets"):
+        args.eval_subsets = str(eval_subsets)

@@ -62,6 +62,11 @@ _mmpd_wall_to_sec() {
 mmpd_dataset_wall_time() {
     local ds="$1" default_wall="$2"
     local long=0 bumped="$default_wall"
+    # Multi-day --time is the requested wall; do not replace with H96 6h/12h floors.
+    if [[ "$default_wall" == *-* ]]; then
+        echo "$default_wall"
+        return
+    fi
     if [[ "$default_wall" =~ ^(2[4-9]|48): ]]; then
         long=1
     fi

@@ -57,9 +57,12 @@ def load_subset_specs(yaml_path: Path) -> dict:
     cfg = load_experiment_config(str(yaml_path))
     by_ds = (cfg.get("experiment") or {}).get("data_subset_by_dataset") or {}
     eval_caps = {}
+    eval_frac = None
     for phase in cfg.get("phases") or []:
         if phase.get("phase") == "staged_eval":
             eval_caps = dict(phase.get("eval_max_windows_by_dataset") or {})
+            if phase.get("eval_test_fraction") is not None:
+                eval_frac = float(phase["eval_test_fraction"])
             break
     specs = {}
     for name, spec in by_ds.items():
@@ -75,6 +78,8 @@ def load_subset_specs(yaml_path: Path) -> dict:
             "train_max_windows": spec.get("train_max_windows"),
             "val_max_windows": spec.get("val_max_windows"),
             "eval_max_windows": eval_caps.get(name),
+            "eval_test_fraction": eval_frac,
+            "window_subset_seed": 42,
             "subset_id": spec.get("subset_id"),
         }
     if not specs:
@@ -113,7 +118,9 @@ def export_one(name: str, spec: dict, out_dir: Path) -> dict:
     df = pd.DataFrame(sub, columns=cols)
     df.insert(0, "date", dates)
     out_path = out_dir / f"{name}.csv"
-    df.to_csv(out_path, index=False)
+    tmp_path = out_dir / f".{name}.csv.tmp"
+    df.to_csv(tmp_path, index=False)
+    tmp_path.replace(out_path)
     meta = {
         "dataset": name,
         "csv": str(out_path.name),
@@ -127,6 +134,8 @@ def export_one(name: str, spec: dict, out_dir: Path) -> dict:
         "train_max_windows": spec.get("train_max_windows"),
         "val_max_windows": spec.get("val_max_windows"),
         "eval_max_windows": spec.get("eval_max_windows"),
+        "eval_test_fraction": spec.get("eval_test_fraction"),
+        "window_subset_seed": spec.get("window_subset_seed", 42),
         "subset_id": spec.get("subset_id"),
         "freq": spec["freq"],
         "loader": spec["loader"],

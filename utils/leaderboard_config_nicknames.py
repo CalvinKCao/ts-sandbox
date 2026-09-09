@@ -374,4 +374,22 @@ def mmpd_stub_wandb_metrics(metrics: Dict[str, Any]) -> Dict[str, float]:
         out["eval/staged_top1_mse"] = float(raw["top1_mse"])
     if raw.get("top3_mse") is not None:
         out["eval/staged_top3_mse"] = float(raw["top3_mse"])
+    if "mse_test_100pct" in raw:
+        out["eval/test_100pct_prob_mse"] = float(raw["mse_test_100pct"])
+        out["eval/test_100pct_sample_mean_mse"] = float(raw["mse_test_100pct"])
+    if "mae_test_100pct" in raw:
+        out["eval/test_100pct_prob_mae"] = float(raw["mae_test_100pct"])
+        out["eval/test_100pct_sample_mean_mae"] = float(raw["mae_test_100pct"])
+    if "crps_test_100pct" in raw:
+        out["eval/test_100pct_crps"] = float(raw["crps_test_100pct"])
+    if "anchor_mse_test_100pct" in raw:
+        out["eval/test_100pct_anchor_mse"] = float(raw["anchor_mse_test_100pct"])
+    if "anchor_mae_test_100pct" in raw:
+        out["eval/test_100pct_anchor_mae"] = float(raw["anchor_mae_test_100pct"])
+    if "mse_binary_10pct" in raw:
+        out["eval/binary_10pct_prob_mse"] = float(raw["mse_binary_10pct"])
+    if "mae_binary_10pct" in raw:
+        out["eval/binary_10pct_prob_mae"] = float(raw["mae_binary_10pct"])
+    if "crps_binary_10pct" in raw:
+        out["eval/binary_10pct_crps"] = float(raw["crps_binary_10pct"])
     return out

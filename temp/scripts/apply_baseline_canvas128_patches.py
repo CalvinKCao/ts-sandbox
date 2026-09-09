@@ -13,6 +13,8 @@ PATCH_FACTORY = REPO / "temp/PatchTST/PatchTST_supervised/data_provider/data_fac
 ITRANS_RUN = REPO / "temp/iTransformer/run.py"
 PATCH_RUN = REPO / "temp/PatchTST/PatchTST_supervised/run_longExp.py"
 ITRANS_ATTN = REPO / "temp/iTransformer/layers/SelfAttention_Family.py"
+ITRANS_EXP = REPO / "temp/iTransformer/experiments/exp_long_term_forecasting.py"
+PATCH_EXP = REPO / "temp/PatchTST/PatchTST_supervised/exp/exp_main.py"
 
 # PeMS CSV: 60/20/20 like Dataset_PEMS / repo _paper_split_borders; zero time marks.
 _PEMS_CSV_CLASS = '''
@@ -101,8 +103,8 @@ data_dict = {
 class _StrideWrap(Dataset):
     def __init__(self, base, stride: int):
         self.base = base
-        stride = max(1, int(stride))
-        self.indices = list(range(0, len(base), stride))
+        self.stride = max(1, int(stride))
+        self.indices = list(range(0, len(base), self.stride))
 
     def __getattr__(self, name):
         return getattr(self.base, name)
@@ -138,6 +140,26 @@ class _WindowCapWrap(Dataset):
         return len(self.indices)
 
 
+class _IndexWrap(Dataset):
+    def __init__(self, base, indices):
+        self.base = base
+        self.indices = list(indices)
+        n = len(base)
+        if not self.indices:
+            raise ValueError('index wrap is empty')
+        if any(i < 0 or i >= n for i in self.indices):
+            raise ValueError('index wrap out of range for n=%d' % n)
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+    def __getitem__(self, index):
+        return self.base[self.indices[index]]
+
+    def __len__(self):
+        return len(self.indices)
+
+
 def _apply_window_cap(data_set, args, flag):
     if flag == 'pred':
         return data_set
@@ -150,6 +172,36 @@ def _apply_window_cap(data_set, args, flag):
         seed = seed + 29
     else:
         cap = int(getattr(args, 'test_max_windows', 0) or 0)
+        frac = float(getattr(args, 'eval_test_fraction', 0) or 0)
+        ref_pred = int(getattr(args, 'eval_ref_pred_len', 0) or 0)
+        if cap > 0 and 0.0 < frac < 1.0:
+            raise ValueError('test_max_windows and eval_test_fraction cannot both apply')
+        if cap < 1 and 0.0 < frac < 1.0 and ref_pred > 0:
+            import random
+            pred_len = int(args.pred_len)
+            stride = 1
+            unstrided = data_set
+            if isinstance(data_set, _StrideWrap):
+                stride = int(data_set.stride)
+                unstrided = data_set.base
+            n_unstrided_ref = len(unstrided) + pred_len - ref_pred
+            if n_unstrided_ref < 1:
+                raise ValueError('eval_ref_pred_len=%s leaves no campaign-H windows' % ref_pred)
+            n_ref = len(range(0, n_unstrided_ref, stride))
+            k = max(1, int(round(n_ref * frac)))
+            if k >= n_ref:
+                idxs = list(range(n_ref))
+            else:
+                rng = random.Random(int(seed))
+                idxs = sorted(rng.sample(range(n_ref), k))
+            n = len(data_set)
+            idxs = [i for i in idxs if i < n]
+            if not idxs:
+                raise ValueError('binary_10pct empty after clip to pred_len=%s' % pred_len)
+            return _IndexWrap(data_set, idxs)
+        if cap < 1 and 0.0 < frac < 1.0:
+            n = len(data_set)
+            cap = max(1, int(round(n * frac)))
     if cap > 0:
         data_set = _WindowCapWrap(data_set, cap, seed)
     return data_set
@@ -222,8 +274,8 @@ data_dict = {
 class _StrideWrap(Dataset):
     def __init__(self, base, stride: int):
         self.base = base
-        stride = max(1, int(stride))
-        self.indices = list(range(0, len(base), stride))
+        self.stride = max(1, int(stride))
+        self.indices = list(range(0, len(base), self.stride))
 
     def __getattr__(self, name):
         return getattr(self.base, name)
@@ -259,6 +311,26 @@ class _WindowCapWrap(Dataset):
         return len(self.indices)
 
 
+class _IndexWrap(Dataset):
+    def __init__(self, base, indices):
+        self.base = base
+        self.indices = list(indices)
+        n = len(base)
+        if not self.indices:
+            raise ValueError('index wrap is empty')
+        if any(i < 0 or i >= n for i in self.indices):
+            raise ValueError('index wrap out of range for n=%d' % n)
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+    def __getitem__(self, index):
+        return self.base[self.indices[index]]
+
+    def __len__(self):
+        return len(self.indices)
+
+
 def _apply_window_cap(data_set, args, flag):
     if flag == 'pred':
         return data_set
@@ -271,6 +343,36 @@ def _apply_window_cap(data_set, args, flag):
         seed = seed + 29
     else:
         cap = int(getattr(args, 'test_max_windows', 0) or 0)
+        frac = float(getattr(args, 'eval_test_fraction', 0) or 0)
+        ref_pred = int(getattr(args, 'eval_ref_pred_len', 0) or 0)
+        if cap > 0 and 0.0 < frac < 1.0:
+            raise ValueError('test_max_windows and eval_test_fraction cannot both apply')
+        if cap < 1 and 0.0 < frac < 1.0 and ref_pred > 0:
+            import random
+            pred_len = int(args.pred_len)
+            stride = 1
+            unstrided = data_set
+            if isinstance(data_set, _StrideWrap):
+                stride = int(data_set.stride)
+                unstrided = data_set.base
+            n_unstrided_ref = len(unstrided) + pred_len - ref_pred
+            if n_unstrided_ref < 1:
+                raise ValueError('eval_ref_pred_len=%s leaves no campaign-H windows' % ref_pred)
+            n_ref = len(range(0, n_unstrided_ref, stride))
+            k = max(1, int(round(n_ref * frac)))
+            if k >= n_ref:
+                idxs = list(range(n_ref))
+            else:
+                rng = random.Random(int(seed))
+                idxs = sorted(rng.sample(range(n_ref), k))
+            n = len(data_set)
+            idxs = [i for i in idxs if i < n]
+            if not idxs:
+                raise ValueError('binary_10pct empty after clip to pred_len=%s' % pred_len)
+            return _IndexWrap(data_set, idxs)
+        if cap < 1 and 0.0 < frac < 1.0:
+            n = len(data_set)
+            cap = max(1, int(round(n * frac)))
     if cap > 0:
         data_set = _WindowCapWrap(data_set, cap, seed)
     return data_set
@@ -358,10 +460,47 @@ def _ensure_cli(path: Path, anchor: str) -> None:
             + "\n    parser.add_argument('--train_max_windows', type=int, default=0)\n"
             "    parser.add_argument('--val_max_windows', type=int, default=0)\n"
             "    parser.add_argument('--test_max_windows', type=int, default=0)\n"
+            "    parser.add_argument('--eval_test_fraction', type=float, default=0.0)\n"
+            "    parser.add_argument('--eval_ref_pred_len', type=int, default=0)\n"
             "    parser.add_argument('--window_subset_seed', type=int, default=42)"
         )
         text = text.replace(stride_anchor, cap_insert, 1)
+    elif "eval_test_fraction" not in text:
+        cap_anchor = "parser.add_argument('--test_max_windows', type=int, default=0)"
+        if cap_anchor not in text:
+            raise RuntimeError(f"cannot insert eval_test_fraction CLI in {path}")
+        text = text.replace(
+            cap_anchor,
+            cap_anchor
+            + "\n    parser.add_argument('--eval_test_fraction', type=float, default=0.0)"
+            + "\n    parser.add_argument('--eval_ref_pred_len', type=int, default=0)",
+            1,
+        )
+    elif "eval_ref_pred_len" not in text:
+        frac_anchor = "parser.add_argument('--eval_test_fraction', type=float, default=0.0)"
+        if frac_anchor not in text:
+            raise RuntimeError(f"cannot insert eval_ref_pred_len CLI in {path}")
+        text = text.replace(
+            frac_anchor,
+            frac_anchor
+            + "\n    parser.add_argument('--eval_ref_pred_len', type=int, default=0)",
+            1,
+        )
     path.write_text(text, encoding="utf-8")
+
+
+def _patch_test_checkpoint_path(path: Path) -> None:
+    """is_training=0 was loading ./checkpoints/ instead of --checkpoints."""
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    text = path.read_text(encoding="utf-8")
+    needle = "os.path.join('./checkpoints/' + setting, 'checkpoint.pth')"
+    repl = "os.path.join(self.args.checkpoints, setting, 'checkpoint.pth')"
+    if needle not in text:
+        if repl in text:
+            return
+        raise RuntimeError(f"test() checkpoint join missing in {path}")
+    path.write_text(text.replace(needle, repl), encoding="utf-8")
 
 
 def _stub_reformer_import() -> None:
@@ -409,6 +548,10 @@ def main() -> int:
     print(f"[ok] patched {PATCH_FACTORY}")
     _stub_reformer_import()
     print(f"[ok] reformer stub in {ITRANS_ATTN}")
+    _patch_test_checkpoint_path(ITRANS_EXP)
+    print(f"[ok] test ckpt path {ITRANS_EXP}")
+    _patch_test_checkpoint_path(PATCH_EXP)
+    print(f"[ok] test ckpt path {PATCH_EXP}")
     assert_stride_wrap_present()
     return 0
 
