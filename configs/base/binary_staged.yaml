@@ -284,6 +284,7 @@ phases:
   - phase: staged_eval
     eval_test_fraction: 1.0
     test_stride: 4
+    eval_progress_key: base_binary_staged_s4_n20_steps20
     n_samples: 1
     probabilistic_n_samples: 20
     tune_sampler: false

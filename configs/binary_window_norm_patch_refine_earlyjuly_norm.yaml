@@ -141,6 +141,7 @@ phases:
   - phase: staged_eval
     eval_test_fraction: 0.25
     test_stride: 16
+    eval_progress_key: earlyjuly_norm_s16_n20_steps20
     n_samples: 1
     probabilistic_n_samples: 20
     tune_sampler: false

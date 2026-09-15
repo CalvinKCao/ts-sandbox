@@ -91,6 +91,7 @@ phases:
     anchor_only: true
     eval_test_fraction: 1.0
     test_stride: 8
+    eval_progress_key: canvas128_electricity_allv_msdefault_s8_anchor
     n_samples: 1
     probabilistic_n_samples: 0
     tune_sampler: false
@@ -109,6 +110,7 @@ phases:
     anchor_only: false
     eval_test_fraction: 1.0
     test_stride: 32
+    eval_progress_key: canvas128_electricity_allv_msdefault_s32_n3_steps20
     n_samples: 1
     probabilistic_n_samples: 3
     tune_sampler: false
