@@ -1,0 +1,15 @@
+# Electricity 100% unique-seg n=10 efficient-pack eval (Killarney L40S shards).
+# Shared V=321 parents, tiled n=10 crops. Distinct progress key vs prior
+# xeroxed-past OOM shards. Table Binary-anchor ckpt is Narval 2650276 p64.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv.yaml
+
+training:
+  unet_max_chunk_size: 8192
+  torch_compile: true
+
+phases:
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    eval_progress_key: canvas128_p64x6_fullT_hz720_r0_ms35_kv_s1_n10_steps4_fulltest_effpack
+    batch_size_by_dataset:
+      electricity: 1
