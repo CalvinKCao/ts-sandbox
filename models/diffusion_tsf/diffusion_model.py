@@ -327,14 +327,28 @@ class PatchRefineStageStrategy(DiffusionStageStrategy):
         univariate_row_index=None,
         **_kwargs,
     ):
-        return model._forward_binary_patch_refine(
-            past, future, t, expand_t_per_window=t is not None,
-            patch_col0=patch_col0, loss_mode=loss_mode,
-            include_anchor=include_anchor,
-            cross_variate_context=cross_variate_context,
-            context_token_variate_ids=context_token_variate_ids,
-            univariate_row_index=univariate_row_index,
-        )
+        try:
+            return model._forward_binary_patch_refine(
+                past, future, t, expand_t_per_window=t is not None,
+                patch_col0=patch_col0, loss_mode=loss_mode,
+                include_anchor=include_anchor,
+                cross_variate_context=cross_variate_context,
+                context_token_variate_ids=context_token_variate_ids,
+                univariate_row_index=univariate_row_index,
+            )
+        except NoVisiblePatchTransitions:
+            # DDP.forward must return so the reducer stays in lockstep.
+            import torch.distributed as dist
+            if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
+                raise
+            acc = None
+            for p in model.parameters():
+                if p.requires_grad:
+                    piece = p.view(-1)[0] * 0
+                    acc = piece if acc is None else acc + piece
+            if acc is None:
+                raise RuntimeError("DDP dummy loss: no trainable parameters")
+            return {"loss": acc}
 
     def generate(self, model, past, **kwargs):
         return model._generate_binary_patch_refine(past, **kwargs)
@@ -422,13 +436,13 @@ class DiffusionTSF(nn.Module):
         self._ctx_token_variate_ids: Optional[torch.Tensor] = None
         self._ctx_key_padding_mask: Optional[torch.Tensor] = None
         gtype = str(config.guidance_type)
-        if gtype != "itransformer":
+        if gtype not in {"itransformer", "patch_decoder"}:
             raise ValueError(
-                f"Only guidance_type='itransformer' is supported; got {gtype!r}. "
-                "Patch-decoder guidance has been removed."
+                f"guidance_type must be 'itransformer' or 'patch_decoder'; "
+                f"got {gtype!r}"
             )
         self.context_encoder = None
-        if not config.disable_cross_attention:
+        if not config.disable_cross_attention and gtype == "itransformer":
             self.context_encoder = iTransformerTokenAdapter(
                 d_model=config.itrans_d_model,
                 context_dim=config.context_embedding_dim,
@@ -700,7 +714,20 @@ class DiffusionTSF(nn.Module):
         past_raw: torch.Tensor,
         past_norm: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
-        """Encode frozen tokens once, then run the trainable adapter."""
+        """Encode frozen tokens once, then (iTransformer) run the trainable adapter."""
+        if getattr(self.config, "guidance_type", "itransformer") == "patch_decoder":
+            if self.guidance_model is None or not hasattr(self.guidance_model, "get_encoder_tokens"):
+                raise RuntimeError(
+                    "Cross-attention requires a guidance model with get_encoder_tokens()."
+                )
+            if past_norm is None:
+                past_norm, _, _ = self._normalize_sequence(past_raw, None)
+            with eval_bench_span("token_retrieval"):
+                enc_tokens = self.guidance_model.get_encoder_tokens(past_norm)
+            self._ctx_token_variate_ids = getattr(
+                self.guidance_model, "token_variate_ids", None
+            )
+            return enc_tokens
         enc_tokens = self._encode_frozen_encoder_tokens(past_raw)
         return self._adapt_encoder_tokens(enc_tokens)
 
@@ -720,6 +747,13 @@ class DiffusionTSF(nn.Module):
         self._ctx_key_padding_mask = None
         if self.config.disable_cross_attention:
             return None
+        if getattr(self.config, "guidance_type", "itransformer") == "patch_decoder":
+            if cached_context is not None:
+                raise RuntimeError(
+                    "patch_decoder guidance does not use the iTransformer encoder-token "
+                    "cache; set cache_cross_variate_tokens: false"
+                )
+            return self._get_cross_variate_context(past, past_norm)
         if cached_context is not None:
             if cached_context.dim() != 3:
                 raise RuntimeError(

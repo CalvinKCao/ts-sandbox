@@ -73,6 +73,20 @@ def find_reused_guidance_ckpt(config_suffix: str, subset_id: str) -> Optional[st
     return path if os.path.isfile(path) else None
 
 
+def reused_patch_guidance_ckpt(config_suffix: str, subset_id: str) -> str:
+    return os.path.join(
+        reused_root(),
+        "guidance",
+        config_suffix,
+        f"{subset_id}_patch_guidance.pt",
+    )
+
+
+def find_reused_patch_guidance_ckpt(config_suffix: str, subset_id: str) -> Optional[str]:
+    path = reused_patch_guidance_ckpt(config_suffix, subset_id)
+    return path if os.path.isfile(path) else None
+
+
 def find_reused_tuned_params_meta(
     config_suffix: str,
     subset_id: str,

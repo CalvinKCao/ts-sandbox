@@ -158,9 +158,9 @@ class DiffusionTSFConfig:
     # Extra visual cond: coarse CDF of lookback tail in dataset z-score space.
     use_raw_lookback_cond_channel: bool = False
 
-    # Frozen iTransformer encoder tokens for bottleneck cross-attention.
+    # Frozen encoder tokens for bottleneck cross-attention.
     context_embedding_dim: int = 256
-    guidance_type: str = "itransformer"
+    guidance_type: str = "itransformer"  # itransformer | patch_decoder
     mmpd_patch_size: int = 12
     itrans_d_model: int = 512
 
@@ -181,10 +181,10 @@ class DiffusionTSFConfig:
             raise ValueError(
                 f"binary_cdf_distance_alpha must be >= 0, got {self.binary_cdf_distance_alpha}"
             )
-        if str(self.guidance_type) != "itransformer":
+        if str(self.guidance_type) not in {"itransformer", "patch_decoder"}:
             raise ValueError(
-                f"Only guidance_type='itransformer' is supported; got {self.guidance_type!r}. "
-                "Patch-decoder guidance has been removed."
+                f"guidance_type must be 'itransformer' or 'patch_decoder'; "
+                f"got {self.guidance_type!r}"
             )
         if self.binary_anchor_input_mode not in {"stationary_flat", "random_bits"}:
             raise ValueError(
