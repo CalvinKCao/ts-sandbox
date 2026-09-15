@@ -17,8 +17,26 @@ if str(REPO_ROOT) not in sys.path:
 
 from models.diffusion_tsf.pipeline.phases.staged_diffusion_finetune_hp import (
     PatchRefineDiffusionFinetuneHPPhase,
+    _hp_search_train_subset,
 )
 from models.diffusion_tsf.pipeline.state import PipelineState
+
+
+def _subset_meta(subset_id: str, n: int = 7) -> dict:
+    return {
+        "subset_id": subset_id,
+        "variate_indices": list(range(n)),
+        "n_variates": n,
+        "train_stride": 1,
+        "val_stride": 1,
+        "test_stride": 1,
+    }
+
+
+def _train_ds_mock(n: int = 100):
+    ds = MagicMock()
+    ds.__len__.return_value = n
+    return ds
 
 
 def _assert_pruners() -> None:
@@ -66,7 +84,7 @@ def _assert_refit_from_pretrain() -> None:
         std = torch.ones(7)
         params, val, epoch, done = phase._refit_best_if_configured(
             state=state,
-            train_ds=MagicMock(),
+            train_ds=_train_ds_mock(),
             val_ds=MagicMock(),
             best_params={"learning_rate": 7.8e-4, "binary_length_g": 1.0},
             hp_best_val_loss=0.4,
@@ -81,7 +99,7 @@ def _assert_refit_from_pretrain() -> None:
             search_patience=5,
             subset_dir=str(subset_dir),
             subset_id="ETTh1_allv_randwin",
-            subset_meta={"train_stride": 1},
+            subset_meta=_subset_meta("ETTh1_allv_randwin"),
             norm_stats={"mean": mean, "std": std},
         )
         assert done is True
@@ -101,7 +119,7 @@ def _assert_refit_from_pretrain() -> None:
         phase_resume._train_once = fake_train_once  # type: ignore[method-assign]
         phase_resume._refit_best_if_configured(
             state=state,
-            train_ds=MagicMock(),
+            train_ds=_train_ds_mock(),
             val_ds=MagicMock(),
             best_params={"learning_rate": 1e-3},
             hp_best_val_loss=0.4,
@@ -116,11 +134,40 @@ def _assert_refit_from_pretrain() -> None:
             search_patience=5,
             subset_dir=str(subset_dir),
             subset_id="ETTh1_allv_randwin",
-            subset_meta={"train_stride": 1},
+            subset_meta=_subset_meta("ETTh1_allv_randwin"),
             norm_stats={"mean": mean, "std": std},
         )
         assert captured["pretrained_path"] is None
         assert captured["resume_ckpt"] == final_ckpt
+
+        phase_random = PatchRefineDiffusionFinetuneHPPhase(
+            refit_best_max_epochs=20,
+            from_random_init=True,
+        )
+        captured.clear()
+        phase_random._train_once = fake_train_once  # type: ignore[method-assign]
+        phase_random._refit_best_if_configured(
+            state=state,
+            train_ds=_train_ds_mock(),
+            val_ds=MagicMock(),
+            best_params={"learning_rate": 1e-3},
+            hp_best_val_loss=0.4,
+            best_trial_num=1,
+            diff_ckpt=None,
+            ft_guidance_ckpt="unused.pt",
+            device=torch.device("cpu"),
+            variate_indices=list(range(7)),
+            final_ckpt=final_ckpt,
+            search_space="lr_eff_batch_univariate_ema",
+            search_max_epochs=4,
+            search_patience=5,
+            subset_dir=str(subset_dir),
+            subset_id="weather_allv_s1_full",
+            subset_meta=_subset_meta("weather_allv_s1_full", n=21),
+            norm_stats={"mean": mean, "std": std},
+        )
+        assert captured["pretrained_path"] is None
+        assert captured["resume_ckpt"] is None
 
         phase_missing = PatchRefineDiffusionFinetuneHPPhase(
             refit_best_max_epochs=20,
@@ -129,7 +176,7 @@ def _assert_refit_from_pretrain() -> None:
         try:
             phase_missing._refit_best_if_configured(
                 state=state,
-                train_ds=MagicMock(),
+                train_ds=_train_ds_mock(),
                 val_ds=MagicMock(),
                 best_params={"learning_rate": 1e-3},
                 hp_best_val_loss=0.4,
@@ -144,7 +191,7 @@ def _assert_refit_from_pretrain() -> None:
                 search_patience=5,
                 subset_dir=str(subset_dir),
                 subset_id="ETTh1_allv_randwin",
-                subset_meta={"train_stride": 1},
+                subset_meta=_subset_meta("ETTh1_allv_randwin"),
                 norm_stats={"mean": mean, "std": std},
             )
         except FileNotFoundError:
@@ -153,9 +200,55 @@ def _assert_refit_from_pretrain() -> None:
             raise AssertionError("missing pretrain should fail")
 
 
+def _assert_hp_train_fraction() -> None:
+    class _DS(torch.utils.data.Dataset):
+        def __len__(self):
+            return 10
+
+        def __getitem__(self, i):
+            return i
+
+    state = PipelineState(experiment_name="smoke", dataset="weather", seed=42, smoke_test=False)
+    full = _DS()
+    none_p = PatchRefineDiffusionFinetuneHPPhase()
+    assert _hp_search_train_subset(none_p, full, state) is full
+
+    ok = PatchRefineDiffusionFinetuneHPPhase(
+        hp_train_fraction=0.5, refit_best_max_epochs=20,
+    )
+    subset = _hp_search_train_subset(ok, full, state)
+    assert len(subset) == 5
+
+    try:
+        PatchRefineDiffusionFinetuneHPPhase(
+            hp_train_fraction=0.5,
+        )
+        _hp_search_train_subset(
+            PatchRefineDiffusionFinetuneHPPhase(hp_train_fraction=0.5), full, state,
+        )
+    except ValueError as e:
+        assert "refit_best_max_epochs" in str(e)
+    else:
+        raise AssertionError("hp_train_fraction without refit should fail")
+
+    try:
+        _hp_search_train_subset(
+            PatchRefineDiffusionFinetuneHPPhase(
+                hp_train_fraction=0.0, refit_best_max_epochs=20,
+            ),
+            full,
+            state,
+        )
+    except ValueError as e:
+        assert "hp_train_fraction" in str(e)
+    else:
+        raise AssertionError("hp_train_fraction=0 should fail")
+
+
 def main() -> None:
     _assert_pruners()
     _assert_refit_from_pretrain()
+    _assert_hp_train_fraction()
     print("finetune hp pruner/refit smoke ok")
 
 

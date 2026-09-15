@@ -1,0 +1,116 @@
+# p64 H720 allv full-T, r=0 rolling eval, max_scale 3.5, cache_cond_kv on
+# refine generate only. Caps are univariate windows U, not multivariate B
+# and not patch bites. B_yaml = max(1, U_eval_fine // (V * n_samples)).
+# Chunk only when one n=10 window pack exceeds U_eval_fine.
+#
+# Train U: Sep 4 L40S compiled 0.85 (no A100 shrink).
+# Eval U: 09-07 L40S cache-on probe, n=1 generate; n_samples=10 in YAML.
+#   ETTh1 U_eval_fine=41*7=287 -> B=4, unchunked
+#   electricity U_eval_fine=1*321=321 -> B=1, chunk=321*145=46545
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_hz720_nostitch_nopretrain.yaml
+replace_phases: true
+
+training:
+  unet_max_chunk_size: 46545
+
+wandb:
+  tags: [all_variates, canvas128, p64x6, nopretrain, from_random_init, hz720, nostitch, itrans_guid, fixed_hp, no_optuna, train_time_coverage_1, r0, ms35, cache_cond_kv, eval_frac_0p1_random, compile]
+
+experiment:
+  name: binary-c128-p64x6-fullT-hz720-nopre-fixedhp-r0-ms35-kv
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv
+  guidance_type: itransformer
+  train_time_coverage: 1.0
+  cache_cond_kv: true
+  max_scale: 3.5
+  max_scale_by_dataset:
+    ETTh1: 3.5
+    electricity: 3.5
+  config_nickname: c128-p64-fullT-hz720-r0-ms35-kv
+  data_subset_by_dataset:
+    ETTh1:
+      subset_id: ETTh1_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+    electricity:
+      subset_id: electricity_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+
+phases:
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    from_random_init: true
+    n_trials: 1
+    max_epochs: 20
+    patience: 5
+    search_space: fixed
+    max_univariate_micro_batch_by_dataset:
+      ETTh1: 1187
+      electricity: 1182
+    fixed_tuned_params:
+      learning_rate: 1.626e-4
+      ema_decay: 0.99
+      max_scale: 3.5
+      binary_noise_schedule: linear
+      loss_weighting: none
+      min_snr_gamma: 5.0
+      prediction_target: epsilon
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+    fixed_tuned_params_by_dataset:
+      ETTh1: {target_univariate_batch: 1187}
+      electricity: {target_univariate_batch: 1182}
+
+  - phase: diffusion_patch_refine_finetune_hp
+    from_random_init: true
+    n_trials: 1
+    max_epochs: 20
+    patience: 5
+    search_space: fixed
+    max_univariate_micro_batch_by_dataset:
+      ETTh1: 1795
+      electricity: 1793
+    fixed_tuned_params:
+      learning_rate: 7.818e-4
+      ema_decay: 0.995
+      max_scale: 3.5
+      binary_noise_schedule: linear
+      loss_weighting: none
+      min_snr_gamma: 2.0
+      prediction_target: epsilon
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+    fixed_tuned_params_by_dataset:
+      ETTh1: {target_univariate_batch: 1795}
+      electricity: {target_univariate_batch: 1793}
+
+  - phase: staged_eval
+    anchor_only: false
+    eval_test_fraction: 0.1
+    test_stride: 1
+    eval_progress_key: canvas128_p64x6_fullT_hz720_r0_ms35_kv_s1_n10_steps4
+    n_samples: 1
+    probabilistic_n_samples: 10
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 4
+    batch_size_by_dataset:
+      ETTh1: 4
+      electricity: 1
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true

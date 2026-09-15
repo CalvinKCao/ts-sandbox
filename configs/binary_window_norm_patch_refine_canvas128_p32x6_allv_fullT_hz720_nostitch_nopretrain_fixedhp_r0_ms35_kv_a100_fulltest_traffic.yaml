@@ -1,0 +1,10 @@
+# Traffic 100% eval shards. Submit only after the n=10 A100 probe finds a
+# fine chunk that fits (512 OOM'd). Unique vs the empty 10% eval_resume dir.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv_a100_fulltest.yaml
+
+phases:
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    eval_progress_key: canvas128_p32x6_fullT_hz720_r0_ms35_kv_a100_s1_n10_steps4_fulltest_traffic
+    batch_size_by_dataset:
+      traffic: 1

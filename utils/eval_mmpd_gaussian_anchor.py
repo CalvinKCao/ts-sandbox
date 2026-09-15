@@ -963,6 +963,8 @@ def mmpd_env_for_run(
     args: Optional[argparse.Namespace] = None,
     *,
     for_eval: bool = False,
+    window_stride: Optional[int] = None,
+    pretrained_ckpt: Optional[str] = None,
 ) -> Dict[str, str]:
     env = os.environ.copy()
     env["MMPD_KEEP_CLI_DATA_ARGS"] = "1"
@@ -976,6 +978,16 @@ def mmpd_env_for_run(
         env["MMPD_WINDOW_STRIDE"] = str(mmpd_pack_window_stride(args, run, pack_splits))
     else:
         env["MMPD_TEST_STRIDE"] = str(run_test_stride(run))
+    if window_stride is not None:
+        env["MMPD_WINDOW_STRIDE"] = str(int(window_stride))
+        env["MMPD_TEST_STRIDE"] = str(int(window_stride))
+    if pretrained_ckpt:
+        ckpt_path = Path(pretrained_ckpt)
+        if not ckpt_path.is_file():
+            raise FileNotFoundError(f"MMPD_PRETRAINED_CKPT missing: {ckpt_path}")
+        env["MMPD_PRETRAINED_CKPT"] = str(ckpt_path)
+    else:
+        env.pop("MMPD_PRETRAINED_CKPT", None)
     if args is not None and getattr(args, "smoke_test", False):
         env["MMPD_SMOKE_MAX_TRAIN_BATCHES"] = "1"
         env["MMPD_SMOKE_MAX_VAL_BATCHES"] = "1"
@@ -1023,11 +1035,14 @@ def build_mmpd_train_cmd(
     output_root: Optional[Path] = None,
     train_epochs: Optional[int] = None,
     patience: Optional[int] = None,
+    data_path: Optional[str] = None,
+    data_split: Optional[str] = None,
 ) -> List[str]:
     from utils.mmpd_paper_hparams import resolved_mmpd_hparams
 
     dataset = run.dataset
-    data_path = mmpd_staged_filename_for_run(run)
+    if data_path is None:
+        data_path = mmpd_staged_filename_for_run(run)
     lookback, horizon = dataset_window_lengths(args, dataset)
     patch_size = dataset_mmpd_patch_size(args, dataset)
     data_dim = len(run_variate_indices(run))
@@ -1061,7 +1076,7 @@ def build_mmpd_train_cmd(
         "--data_path",
         data_path,
         "--data_split",
-        mmpd_data_split(run, args.mmpd_data_dir),
+        data_split if data_split is not None else mmpd_data_split(run, args.mmpd_data_dir),
         "--output_root",
         str(mmpd_out),
         "--backbone",
@@ -1253,6 +1268,9 @@ def train_mmpd(args: argparse.Namespace, runs: Sequence[AnchorRun]) -> None:
 
     for run in runs:
         dataset = run.dataset
+        if getattr(args, "pretrain_synth", "none") == "pwb_linear":
+            train_mmpd_pwb_linear(args, run)
+            continue
         stage_mmpd_dataset_for_run(args.mmpd_data_dir, run, lookback=int(args.lookback))
         if args.mmpd_tune_trials > 0:
             tuned = load_tuned_hparams(args.output_dir, dataset)
@@ -1276,6 +1294,116 @@ def train_mmpd(args: argparse.Namespace, runs: Sequence[AnchorRun]) -> None:
             env=mmpd_env_for_run(run, args),
             log_path=log_path,
         )
+
+
+def _pwb_linear_synth_csv_for_run(args: argparse.Namespace, run: AnchorRun) -> Tuple[str, int]:
+    from utils.pwb_linear_synth_csv import (
+        columns_from_csv,
+        pwb_linear_csv_name,
+        pwb_linear_n_windows,
+        write_pwb_linear_csv,
+    )
+
+    lookback, horizon = dataset_window_lengths(args, run.dataset)
+    src = DATASET_FILES[run.dataset]
+    if not src.is_file():
+        raise FileNotFoundError(f"missing dataset CSV {src}")
+    cols_all = columns_from_csv(src)
+    idxs = run_variate_indices(run)
+    if not idxs:
+        raise ValueError(f"{run.dataset}: empty variate_indices")
+    if max(idxs) >= len(cols_all) or min(idxs) < 0:
+        raise ValueError(
+            f"{run.dataset}: variate_indices={idxs} out of range for columns={cols_all}"
+        )
+    cols = [cols_all[i] for i in idxs]
+    n_windows = pwb_linear_n_windows(smoke=bool(getattr(args, "smoke_test", False)))
+    name = pwb_linear_csv_name(run.dataset, lookback, horizon)
+    dest = Path(args.mmpd_data_dir) / name
+    print(
+        f"[mmpd-pretrain] writing {dest} n_windows={n_windows} "
+        f"L={lookback} H={horizon} V={len(cols)}",
+        flush=True,
+    )
+    write_pwb_linear_csv(
+        dest,
+        n_variates=len(cols),
+        seq_len=lookback,
+        pred_len=horizon,
+        n_windows=n_windows,
+        columns=cols,
+        seed=int(getattr(args, "seed", 42)),
+    )
+    return name, int(lookback) + int(horizon)
+
+
+def _find_ckpt_under_mmpd_out(mmpd_out: Path) -> Path:
+    hits = list(mmpd_out.glob("checkpoints/*-MMPD/*/model_checkpoint.pth"))
+    if not hits:
+        raise FileNotFoundError(f"no MMPD checkpoint under {mmpd_out}")
+    return max(hits, key=lambda p: p.stat().st_mtime)
+
+
+def train_mmpd_pwb_linear(args: argparse.Namespace, run: AnchorRun) -> None:
+    dataset = run.dataset
+    csv_name, stride = _pwb_linear_synth_csv_for_run(args, run)
+    pre_out = Path(args.output_dir) / "pretrain" / "mmpd_out"
+    ft_out = Path(args.output_dir) / "mmpd_out"
+    saved_root = getattr(args, "mmpd_output_root", None)
+    args.mmpd_output_root = Path(args.output_dir)
+    try:
+        ft_ckpt, _ = resolve_mmpd_checkpoint(args, run)
+    finally:
+        args.mmpd_output_root = saved_root
+    if ft_ckpt.exists() and not args.force_mmpd_train:
+        print(f"[mmpd] Reusing finetune checkpoint for {dataset}: {ft_ckpt}")
+        return
+    if args.skip_mmpd_train:
+        if args.skip_mmpd_eval:
+            print(f"[mmpd] Skipping train/eval for {dataset}; checkpoint not required.")
+            return
+        raise FileNotFoundError(f"--skip-mmpd-train set but missing {ft_ckpt}")
+
+    pre_ckpt: Optional[Path] = None
+    if (not args.force_mmpd_train) and pre_out.is_dir():
+        try:
+            pre_ckpt = _find_ckpt_under_mmpd_out(pre_out)
+        except FileNotFoundError:
+            pre_ckpt = None
+    if pre_ckpt is None:
+        log_path = args.output_dir / "logs" / f"mmpd_pretrain_{dataset}.log"
+        print(
+            f"[mmpd-pretrain] {dataset}: synth {csv_name} stride={stride} out={pre_out}",
+            flush=True,
+        )
+        run_cmd(
+            build_mmpd_train_cmd(
+                args,
+                run,
+                output_root=pre_out,
+                data_path=csv_name,
+                data_split="0.7,0.1,0.2",
+            ),
+            cwd=args.mmpd_repo,
+            env=mmpd_env_for_run(run, args, window_stride=stride),
+            log_path=log_path,
+        )
+        pre_ckpt = _find_ckpt_under_mmpd_out(pre_out)
+    else:
+        print(f"[mmpd-pretrain] {dataset}: reuse {pre_ckpt}", flush=True)
+
+    stage_mmpd_dataset_for_run(args.mmpd_data_dir, run, lookback=int(args.lookback))
+    log_path = args.output_dir / "logs" / f"mmpd_train_{dataset}.log"
+    print(
+        f"[mmpd-finetune] {dataset}: load {pre_ckpt} then real CSV",
+        flush=True,
+    )
+    run_cmd(
+        build_mmpd_train_cmd(args, run, output_root=ft_out),
+        cwd=args.mmpd_repo,
+        env=mmpd_env_for_run(run, args, pretrained_ckpt=str(pre_ckpt)),
+        log_path=log_path,
+    )
 
 
 def write_mmpd_eval_helper(mmpd_repo: Path) -> Path:
@@ -3293,6 +3421,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Minimal end-to-end run: 1 train batch, 1 val batch, 1 eval window, 1 sample/step.",
     )
+    parser.add_argument(
+        "--pretrain-synth",
+        choices=["none", "pwb_linear"],
+        default="none",
+        help="none=real only; pwb_linear=PWB+linear synth pretrain then real finetune",
+    )
     return parser.parse_args()
 
 
@@ -3422,6 +3556,16 @@ def main() -> None:
         with args.mmpd_tune_spec_file.open(encoding="utf-8") as f:
             args.mmpd_tune_params = json.load(f)
     apply_mmpd_smoke_defaults(args)
+    args.datasets = [
+        "exchange_rate" if str(d).strip() == "exchange" else str(d).strip()
+        for d in args.datasets
+    ]
+    if getattr(args, "pretrain_synth", "none") == "pwb_linear":
+        tag = f"hz{int(args.horizon)}_lb{int(args.lookback)}_pwb_linear"
+        out = Path(args.output_dir)
+        if tag not in out.parts:
+            args.output_dir = out / tag
+            print(f"[mmpd] isolated output dir {args.output_dir}", flush=True)
     args.datasets = list(dict.fromkeys(args.datasets))
     unknown = sorted(set(args.datasets) - set(DATASET_FILES))
     if unknown:

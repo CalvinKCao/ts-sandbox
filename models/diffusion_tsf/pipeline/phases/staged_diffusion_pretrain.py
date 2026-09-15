@@ -38,6 +38,12 @@ def staged_diffusion_stages(state: PipelineState) -> tuple[str, ...]:
     return ("coarse", "patch_refine")
 
 
+def _synthetic_generators_for_signature(state: PipelineState) -> list[str]:
+    from models.diffusion_tsf.realts import generator_names_for_state
+
+    return generator_names_for_state(state)
+
+
 def _stage_pretrain_cache_enabled(phase: PipelinePhase, state: PipelineState) -> bool:
     if state.extra.get("force_retrain_synthetic", False):
         return False
@@ -101,6 +107,7 @@ def _stage_pretrain_signature(state: PipelineState, config_name: str) -> str:
         "binary_length_mode": str(state.binary_length_mode),
         "binary_length_g": float(state.binary_length_g),
         "binary_length_scale": float(state.binary_length_scale),
+        "synthetic_generators": _synthetic_generators_for_signature(state),
     }
     digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
     return (

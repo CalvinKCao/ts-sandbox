@@ -12,6 +12,11 @@ from torch.utils.data import DataLoader, Sampler
 
 from models.diffusion_tsf.diffusion_model import NoVisiblePatchTransitions
 from models.diffusion_tsf.pipeline.train.checkpointing import amp_context
+from models.diffusion_tsf.pipeline.train.distributed import (
+    dummy_ddp_backward,
+    is_distributed,
+    unwrap_module,
+)
 from models.diffusion_tsf.pipeline.train.univariate_microbatch import (
     iter_flat_row_slices,
     loss_scale_for_rows,
@@ -197,6 +202,8 @@ class EpochGroupBatchSampler(Sampler[List[int]]):
         *,
         seed: int,
         smoke_test: bool = False,
+        dist_rank: int = 0,
+        dist_world_size: int = 1,
     ) -> None:
         n_samples = int(n_samples)
         batch_size = int(batch_size)
@@ -207,6 +214,10 @@ class EpochGroupBatchSampler(Sampler[List[int]]):
             raise ValueError(f"batch_size must be >= 1, got {batch_size}")
         if n_groups < 1:
             raise ValueError(f"n_groups must be >= 1, got {n_groups}")
+        if dist_world_size < 1:
+            raise ValueError(f"dist_world_size must be >= 1, got {dist_world_size}")
+        if dist_rank < 0 or dist_rank >= dist_world_size:
+            raise ValueError(f"dist_rank={dist_rank} out of range for world={dist_world_size}")
         n_batches = (n_samples + batch_size - 1) // batch_size
         groups_used = n_groups
         if bool(smoke_test) and n_batches < n_groups:
@@ -220,6 +231,8 @@ class EpochGroupBatchSampler(Sampler[List[int]]):
         self.n_groups = groups_used
         self.n_groups_requested = n_groups
         self.seed = int(seed)
+        self.dist_rank = int(dist_rank)
+        self.dist_world_size = int(dist_world_size)
         self.epoch = 0
         self._cycle = 0
         self._repack_for_cycle(0)
@@ -255,8 +268,20 @@ class EpochGroupBatchSampler(Sampler[List[int]]):
     def _group(self) -> List[Tuple[int, ...]]:
         return self.groups[self.epoch % self.n_groups]
 
-    def __iter__(self) -> Iterable[List[int]]:
+    def _rank_group(self) -> List[Tuple[int, ...]]:
         group = self._group()
+        world = self.dist_world_size
+        if world <= 1:
+            return group
+        n_per = (len(group) + world - 1) // world
+        padded = list(group)
+        while len(padded) < n_per * world:
+            padded.append(padded[len(padded) % len(group)])
+        start = self.dist_rank * n_per
+        return padded[start:start + n_per]
+
+    def __iter__(self) -> Iterable[List[int]]:
+        group = self._rank_group()
         gen = torch.Generator()
         gen.manual_seed(self.seed + 1_000_003 * self.epoch)
         order = torch.randperm(len(group), generator=gen).tolist()
@@ -264,7 +289,7 @@ class EpochGroupBatchSampler(Sampler[List[int]]):
             yield list(group[idx])
 
     def __len__(self) -> int:
-        return len(self._group())
+        return len(self._rank_group())
 
 
 def make_epoch_group_train_loader(
@@ -275,12 +300,16 @@ def make_epoch_group_train_loader(
     seed: int,
     smoke_test: bool = False,
 ) -> DataLoader:
+    from models.diffusion_tsf.pipeline.train.distributed import rank, world_size
+
     sampler = EpochGroupBatchSampler(
         len(dataset),
         batch_size,
         n_groups,
         seed=int(seed),
         smoke_test=bool(smoke_test),
+        dist_rank=rank(),
+        dist_world_size=world_size(),
     )
     return DataLoader(dataset, batch_sampler=sampler, num_workers=0)
 
@@ -423,7 +452,12 @@ class DiffusionTrainer:
         log_prefix: str = "diffusion",
         univariate_micro_batch: Optional[int] = None,
     ) -> None:
-        self.model = model
+        from torch.nn.parallel import DistributedDataParallel as DDP
+
+        if is_distributed() and not isinstance(model, DDP):
+            raise RuntimeError("WORLD_SIZE>1 requires wrap_ddp before DiffusionTrainer")
+        self.ddp_model = model if isinstance(model, DDP) else None
+        self.model = unwrap_module(model)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
@@ -431,7 +465,7 @@ class DiffusionTrainer:
         self.accum_steps = max(1, int(accum_steps))
         self.clip_grad = clip_grad
         self.scheduler = scheduler
-        self.ema = ExponentialMovingAverage(model, ema_decay) if ema_decay else None
+        self.ema = ExponentialMovingAverage(self.model, ema_decay) if ema_decay else None
         self.unpack_batch = unpack_batch or self._unpack_standard_batch
         self.set_loader_mode = set_loader_mode
         self.set_training_epoch = set_training_epoch
@@ -441,6 +475,11 @@ class DiffusionTrainer:
         self.val_token_cache = val_token_cache
         if self.deterministic_anchor_every_n_batches < 1:
             raise ValueError("deterministic_anchor_every_n_batches must be >= 1")
+        if self.sequential_anchor_backward and self.ddp_model is not None:
+            raise RuntimeError(
+                "sequential_anchor_backward is incompatible with DDP; "
+                "route loss through DDP.forward or disable sequential_anchor_backward"
+            )
         self.log_prefix = log_prefix
         self.univariate_micro_batch = (
             None if univariate_micro_batch is None else max(1, int(univariate_micro_batch))
@@ -494,18 +533,20 @@ class DiffusionTrainer:
     ) -> torch.Tensor:
         past, future, patch_col0, cache_key_past = inputs
         cached = token_cache.get(cache_key_past) if token_cache is not None else None
+        fwd = self.ddp_model if self.ddp_model is not None else self.model
+        kwargs = dict(
+            patch_col0=patch_col0,
+            loss_mode=loss_mode,
+            include_anchor=include_anchor,
+            cross_variate_context=None if cached is None else cached.tokens,
+            context_token_variate_ids=None if cached is None else cached.token_variate_ids,
+            univariate_row_index=univariate_row_index,
+        )
         with amp_context(bool(self.model.config.use_amp)):
-            loss = self.model.get_loss(
-                past,
-                future,
-                t=t,
-                patch_col0=patch_col0,
-                loss_mode=loss_mode,
-                include_anchor=include_anchor,
-                cross_variate_context=None if cached is None else cached.tokens,
-                context_token_variate_ids=None if cached is None else cached.token_variate_ids,
-                univariate_row_index=univariate_row_index,
-            )
+            if self.ddp_model is not None:
+                loss = fwd(past, future, t, **kwargs)["loss"]
+            else:
+                loss = self.model.get_loss(past, future, t=t, **kwargs)
         return loss / self.accum_steps if scale_for_accumulation else loss
 
     def _loss_from_batch(
@@ -658,6 +699,9 @@ class DiffusionTrainer:
             return unscaled
 
         except NoVisiblePatchTransitions:
+            if self.ddp_model is not None:
+                dummy_ddp_backward(self.ddp_model)
+                return 0.0
             return None
 
     def _has_trainable_context_encoder(self) -> bool:

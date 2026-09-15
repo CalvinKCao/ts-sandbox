@@ -5,6 +5,7 @@ Idempotent. Fail-fast if clones are missing when invoked from the runner.
 """
 from __future__ import annotations
 
+import fcntl
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -465,7 +466,18 @@ def _ensure_cli(path: Path, anchor: str) -> None:
             "    parser.add_argument('--window_subset_seed', type=int, default=42)"
         )
         text = text.replace(stride_anchor, cap_insert, 1)
-    elif "eval_test_fraction" not in text:
+    if "pretrained_ckpt" not in text:
+        seed_anchor = "parser.add_argument('--window_subset_seed', type=int, default=42)"
+        frac_anchor = "parser.add_argument('--eval_ref_pred_len', type=int, default=0)"
+        hook = seed_anchor if seed_anchor in text else frac_anchor
+        if hook not in text:
+            raise RuntimeError(f"cannot insert pretrained_ckpt CLI in {path}")
+        text = text.replace(
+            hook,
+            hook + "\n    parser.add_argument('--pretrained_ckpt', type=str, default='')",
+            1,
+        )
+    if "eval_test_fraction" not in text:
         cap_anchor = "parser.add_argument('--test_max_windows', type=int, default=0)"
         if cap_anchor not in text:
             raise RuntimeError(f"cannot insert eval_test_fraction CLI in {path}")
@@ -487,6 +499,31 @@ def _ensure_cli(path: Path, anchor: str) -> None:
             1,
         )
     path.write_text(text, encoding="utf-8")
+
+
+def _patch_pretrained_ckpt_train(path: Path) -> None:
+    """Load --pretrained_ckpt (or empty) at the start of train(), after the optimizer."""
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    text = path.read_text(encoding="utf-8")
+    if "CANVAS128_PRETRAINED_CKPT" in text:
+        return
+    needle = "model_optim = self._select_optimizer()"
+    if needle not in text:
+        raise RuntimeError(f"optimizer assign missing in {path}")
+    block = (
+        "model_optim = self._select_optimizer()\n"
+        "        # CANVAS128_PRETRAINED_CKPT\n"
+        "        _pt = getattr(self.args, 'pretrained_ckpt', '') or ''\n"
+        "        if _pt:\n"
+        "            import torch as _torch\n"
+        "            _sd = _torch.load(_pt, map_location='cpu')\n"
+        "            if isinstance(_sd, dict) and 'model_state_dict' in _sd:\n"
+        "                _sd = _sd['model_state_dict']\n"
+        "            missing, unexpected = self.model.load_state_dict(_sd, strict=False)\n"
+        "            print('loaded pretrained_ckpt', _pt, 'missing', missing, 'unexpected', unexpected)\n"
+    )
+    path.write_text(text.replace(needle, block, 1), encoding="utf-8")
 
 
 def _patch_test_checkpoint_path(path: Path) -> None:
@@ -540,6 +577,18 @@ def assert_stride_wrap_present() -> None:
 def main() -> int:
     if not ITRANS_FACTORY.is_file() or not PATCH_FACTORY.is_file():
         raise FileNotFoundError("clone temp/iTransformer and temp/PatchTST first")
+    lock_path = REPO / "temp" / ".baseline_canvas128_patches.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fh = open(lock_path, "a", encoding="utf-8")
+    fcntl.flock(lock_fh, fcntl.LOCK_EX)
+    try:
+        return _apply_patches_locked()
+    finally:
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        lock_fh.close()
+
+
+def _apply_patches_locked() -> int:
     ITRANS_FACTORY.write_text(FACTORY_BODY_ITRANS, encoding="utf-8")
     _ensure_cli(ITRANS_RUN, "parser.add_argument('--partial_start_index'")
     print(f"[ok] patched {ITRANS_FACTORY}")
@@ -552,6 +601,10 @@ def main() -> int:
     print(f"[ok] test ckpt path {ITRANS_EXP}")
     _patch_test_checkpoint_path(PATCH_EXP)
     print(f"[ok] test ckpt path {PATCH_EXP}")
+    _patch_pretrained_ckpt_train(ITRANS_EXP)
+    print(f"[ok] pretrained_ckpt train {ITRANS_EXP}")
+    _patch_pretrained_ckpt_train(PATCH_EXP)
+    print(f"[ok] pretrained_ckpt train {PATCH_EXP}")
     assert_stride_wrap_present()
     return 0
 

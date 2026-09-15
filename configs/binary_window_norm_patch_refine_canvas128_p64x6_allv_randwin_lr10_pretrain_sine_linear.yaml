@@ -1,0 +1,22 @@
+# Synth pretrain on sine (PWB) + linear ramps only. Other RealTS generators off.
+# Dataset comes from submit_binary --datasets (electricity / illness both in parent).
+# Actually trains staged pretrain (does not reuse the full-mix p64x6 donor).
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10.yaml
+
+training:
+  synthetic_generators: [PWB, linear]
+  force_retrain_synthetic: true
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, sine_linear_pretrain, from_pretrain]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-allv-randwin-lr10-pretrain-sine-linear
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_pretrain_sine_linear
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: null
+    require_reuse_pretrain: false
+  - phase: staged_eval
+    eval_progress_key: canvas128_allv_randwin_lr10_sine_linear_pretrain_s1_n10_steps4

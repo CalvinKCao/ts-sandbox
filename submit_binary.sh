@@ -9,6 +9,7 @@
 # USAGE (run from login node, repo root / $SCRATCH/ts-sandbox):
 #   ./submit_binary.sh --configs binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x \
 #       --datasets ETTh1,traffic --time 10:00:00
+#   ./submit_binary.sh --gpu l40s --gpus 2 --smoke --configs <stem> --datasets traffic
 #   ./submit_binary.sh --gpu h100 --configs <stem> --datasets electricity --time 1-00:00:00
 #   ./submit_binary.sh --configs configs/binary_anchor.yaml --datasets ETTh1,exchange_rate
 #   ./submit_binary.sh --smoke
@@ -33,6 +34,14 @@ WALL_OVERRIDE=""
 MEM_OVERRIDE=""
 SBATCH_EXCLUDE_NODES=""
 JOB_MANIFEST=""
+GPUS_OVERRIDE=""
+
+EVAL_ONLY=0
+EVAL_ANCHOR_ONLY=0
+EVAL_SOURCE_CKPT=""
+EVAL_NUM_SHARDS=""
+EVAL_SHARD_ID=""
+UNET_MAX_CHUNK=""
 
 if [[ "$(hostname)" == *"narval"* ]]; then
     ACCOUNT="def-boyuwang"
@@ -58,7 +67,23 @@ while [[ $# -gt 0 ]]; do
         --job-manifest) JOB_MANIFEST="$2"; shift 2 ;;
         --exclude) SBATCH_EXCLUDE_NODES="$2"; shift 2 ;;
         --gpu) GPU_TYPE="$2"; shift 2 ;;
+        --gpus) GPUS_OVERRIDE="$2"; shift 2 ;;
         --partition) PARTITION_OVERRIDE="$2"; shift 2 ;;
+        --eval-only) EVAL_ONLY=1; shift ;;
+        --eval-anchor-only) EVAL_ANCHOR_ONLY=1; shift ;;
+        --eval-source-checkpoint-dir) EVAL_SOURCE_CKPT="$2"; shift 2 ;;
+        --eval-num-shards) EVAL_NUM_SHARDS="$2"; shift 2 ;;
+        --eval-shard-id) EVAL_SHARD_ID="$2"; shift 2 ;;
+        --eval-shard)
+            if [[ "$2" != */* ]]; then
+                echo "ERROR: --eval-shard must be I/N (e.g. 0/10)" >&2
+                exit 1
+            fi
+            EVAL_SHARD_ID="${2%%/*}"
+            EVAL_NUM_SHARDS="${2#*/}"
+            shift 2
+            ;;
+        --unet-max-chunk-size) UNET_MAX_CHUNK="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -117,6 +142,9 @@ gpu_sbatch_args() {
         echo "H100 request: partition=$part gpus-per-node=h100:$gpus wall=$wall" >&2
     elif [[ "$GPU_TYPE" == a100* ]]; then
         GPU_SBATCH_ARGS=(--gpus="${GPU_TYPE}:${gpus}")
+        if [[ -n "$PARTITION_OVERRIDE" ]]; then
+            GPU_SBATCH_ARGS+=(--partition="$PARTITION_OVERRIDE")
+        fi
     elif [[ "$GPU_TYPE" == l40s* ]]; then
         local wall="${WALL:-${WALL_DEFAULT:-1:00:00}}"
         local part
@@ -151,7 +179,23 @@ else
     JOB_PREFIX="grid"
 fi
 
-if [[ "$GPU_TYPE" == h100* ]]; then
+if [[ -n "$GPUS_OVERRIDE" ]]; then
+    if ! [[ "$GPUS_OVERRIDE" =~ ^[0-9]+$ ]] || [[ "$GPUS_OVERRIDE" -lt 1 ]]; then
+        echo "ERROR: --gpus must be an integer >= 1, got $GPUS_OVERRIDE" >&2
+        exit 1
+    fi
+    GPUS="$GPUS_OVERRIDE"
+fi
+if [[ "$GPUS" -gt 1 ]]; then
+    CPUS=$((8 * GPUS))
+    if [[ "$SMOKE" -eq 1 ]]; then
+        MEM="$((24 * GPUS))G"
+    else
+        MEM="$((64 * GPUS))G"
+    fi
+fi
+
+if [[ "$GPU_TYPE" == h100* && "$GPUS" -eq 1 ]]; then
     if [[ "$SMOKE" -eq 1 ]]; then
         MEM="48G"
         CPUS=8
@@ -167,6 +211,26 @@ fi
 if [[ -n "${WANDB_API_KEY:-}" && "$WANDB_PROJECT_EXPLICIT" -eq 0 ]]; then
     WANDB_PROJECT="ts-sandbox-leaderboard"
     WANDB_PROJECT_EXPLICIT=1
+fi
+
+if [[ "$EVAL_ONLY" -eq 1 ]]; then
+    JOB_PREFIX="eval"
+fi
+if [[ -n "$EVAL_NUM_SHARDS" || -n "$EVAL_SHARD_ID" ]]; then
+    if [[ -z "$EVAL_NUM_SHARDS" || -z "$EVAL_SHARD_ID" ]]; then
+        echo "ERROR: --eval-num-shards and --eval-shard-id must both be set" >&2
+        exit 1
+    fi
+fi
+if [[ "$EVAL_ONLY" -eq 1 && "$RESUME" -eq 0 && -z "$EVAL_SOURCE_CKPT" ]]; then
+    echo "ERROR: --eval-only requires --resume (to find the ckpt dir) or --eval-source-checkpoint-dir" >&2
+    exit 1
+fi
+if [[ -n "$UNET_MAX_CHUNK" ]]; then
+    if ! [[ "$UNET_MAX_CHUNK" =~ ^[0-9]+$ ]] || [[ "$UNET_MAX_CHUNK" -lt 1 ]]; then
+        echo "ERROR: --unet-max-chunk-size must be an integer >= 1, got $UNET_MAX_CHUNK" >&2
+        exit 1
+    fi
 fi
 
 IFS=',' read -ra CONF_ARR <<< "$CONFIGS"
@@ -285,6 +349,12 @@ for CFG in "${CONF_ARR[@]}"; do
         for SD in "${SEED_ARR[@]}"; do
 
             JOB_NAME="${JOB_PREFIX}-${DS}-${CFG_NAME}"
+            if [[ -n "$EVAL_NUM_SHARDS" ]]; then
+                JOB_NAME="${JOB_PREFIX}-s${EVAL_SHARD_ID}of${EVAL_NUM_SHARDS}-${DS}"
+            fi
+            if [[ "$EVAL_ANCHOR_ONLY" -eq 1 ]]; then
+                JOB_NAME="${JOB_NAME}-anchor"
+            fi
             DATE_STR=$(date +%m-%d)
 
             if [[ -n "$WALL_OVERRIDE" ]]; then
@@ -294,19 +364,43 @@ for CFG in "${CONF_ARR[@]}"; do
             fi
 
             RUN_STEM=""
+            PY_RESUME=0
+            GRID_RESUME_FLAG="$RESUME"
             CKPT_MATCH="${CKPT_CONFIG:-$CFG_NAME}"
-            if [[ "$RESUME" -eq 1 ]]; then
+            DS_EVAL_SOURCE="$EVAL_SOURCE_CKPT"
+            if [[ "$EVAL_ONLY" -eq 1 ]]; then
+                GRID_RESUME_FLAG=0
+                if [[ -z "$DS_EVAL_SOURCE" ]]; then
+                    SOURCE_STEM=$(pick_resume_stem "$DS" "$CKPT_MATCH")
+                    if [[ -z "$SOURCE_STEM" ]]; then
+                        echo "ERROR: --eval-only --resume but no checkpoint dir matching ${CKPT_ROOT}/*-${DS}-${CKPT_MATCH}" >&2
+                        exit 1
+                    fi
+                    DS_EVAL_SOURCE="$CKPT_ROOT/$SOURCE_STEM"
+                fi
+                if [[ "$DS_EVAL_SOURCE" != /* ]]; then
+                    DS_EVAL_SOURCE="$SCRIPT_DIR/$DS_EVAL_SOURCE"
+                fi
+            elif [[ "$RESUME" -eq 1 ]]; then
                 RUN_STEM=$(pick_resume_stem "$DS" "$CKPT_MATCH")
                 if [[ -z "$RUN_STEM" ]]; then
                     echo "ERROR: --resume but no checkpoint dir matching ${CKPT_ROOT}/*-${DS}-${CKPT_MATCH}" >&2
                     exit 1
                 fi
+                PY_RESUME=1
             fi
 
+            LOG_STEM_EXTRA=""
+            if [[ -n "$EVAL_NUM_SHARDS" ]]; then
+                LOG_STEM_EXTRA="-s${EVAL_SHARD_ID}of${EVAL_NUM_SHARDS}"
+            fi
+            if [[ "$EVAL_ANCHOR_ONLY" -eq 1 ]]; then
+                LOG_STEM_EXTRA="${LOG_STEM_EXTRA}-anchor"
+            fi
             if [[ -n "$RUN_STEM" ]]; then
                 LOG_FILE="$LOG_DIR/${RUN_STEM}.log"
             else
-                LOG_FILE="$LOG_DIR/${DATE_STR}-%j-${DS}-${CFG_NAME}.log"
+                LOG_FILE="$LOG_DIR/${DATE_STR}-%j-${DS}-${CFG_NAME}${LOG_STEM_EXTRA}.log"
             fi
 
             gpu_sbatch_args "$GPUS" || exit 1
@@ -324,7 +418,7 @@ for CFG in "${CONF_ARR[@]}"; do
                 --error="$LOG_FILE"
                 --mail-type=FAIL
                 --mail-user="${USER}@uwo.ca"
-                --export=ALL,GRID_DATE_STR="$DATE_STR",GRID_DATASET="$DS",GRID_CFG_NAME="$CFG_NAME",GRID_STORE="$STORE",GRID_RESUME="$RESUME",GRID_RUN_STEM="$RUN_STEM"
+                --export=ALL,GRID_DATE_STR="$DATE_STR",GRID_DATASET="$DS",GRID_CFG_NAME="${CFG_NAME}${LOG_STEM_EXTRA}",GRID_STORE="$STORE",GRID_RESUME="$GRID_RESUME_FLAG",GRID_RUN_STEM="$RUN_STEM"
             )
 
             if [[ -n "$DEPENDENCY" ]]; then
@@ -340,7 +434,7 @@ for CFG in "${CONF_ARR[@]}"; do
                 --seed "$SD"
             )
 
-            if [[ -n "${WANDB_API_KEY:-}" ]]; then
+            if [[ -n "${WANDB_API_KEY:-}" && "$EVAL_ONLY" -eq 0 && -z "$EVAL_NUM_SHARDS" ]]; then
                 PY_ARGS+=(--wandb)
                 if [[ "$WANDB_PROJECT_EXPLICIT" -eq 1 ]]; then
                     PY_ARGS+=(--wandb-project "$WANDB_PROJECT")
@@ -351,18 +445,30 @@ for CFG in "${CONF_ARR[@]}"; do
                 PY_ARGS+=(--smoke-test)
             fi
 
-            if [[ "$RESUME" -eq 1 && -n "$RUN_STEM" ]]; then
+            if [[ "$PY_RESUME" -eq 1 && -n "$RUN_STEM" ]]; then
                 PY_ARGS+=(--resume)
+            fi
+            if [[ "$EVAL_ONLY" -eq 1 ]]; then
+                PY_ARGS+=(--eval-only --eval-source-checkpoint-dir "$DS_EVAL_SOURCE")
+            fi
+            if [[ "$EVAL_ANCHOR_ONLY" -eq 1 ]]; then
+                PY_ARGS+=(--eval-anchor-only)
+            fi
+            if [[ -n "$EVAL_NUM_SHARDS" ]]; then
+                PY_ARGS+=(--eval-num-shards "$EVAL_NUM_SHARDS" --eval-shard-id "$EVAL_SHARD_ID")
+            fi
+            if [[ -n "$UNET_MAX_CHUNK" ]]; then
+                PY_ARGS+=(--unet-max-chunk-size "$UNET_MAX_CHUNK")
             fi
 
             JOB_ID=$(sbatch "${S_ARGS[@]}" "$SCRIPT_DIR/slurm_worker.sh" "${PY_ARGS[@]}")
 
             if [[ -z "$RUN_STEM" ]]; then
-                RUN_STEM="${DATE_STR}-${JOB_ID}-${DS}-${CFG_NAME}"
+                RUN_STEM="${DATE_STR}-${JOB_ID}-${DS}-${CFG_NAME}${LOG_STEM_EXTRA}"
             fi
             ACTUAL_LOG="$LOG_DIR/${RUN_STEM}.log"
             if [[ "$LOG_FILE" == *'%j'* ]]; then
-                ACTUAL_LOG="$LOG_DIR/${DATE_STR}-${JOB_ID}-${DS}-${CFG_NAME}.log"
+                ACTUAL_LOG="$LOG_DIR/${DATE_STR}-${JOB_ID}-${DS}-${CFG_NAME}${LOG_STEM_EXTRA}.log"
             fi
             printf "%-10s %-15s %-25s %-8s %s\n" "$JOB_ID" "$DS" "$CFG_NAME" "$SD" "$ACTUAL_LOG"
             if [[ -n "$JOB_MANIFEST" ]]; then

@@ -285,6 +285,16 @@ class Exp_Forecast(Exp_Basic):
         smoke_max_batches = int(os.environ.get("MMPD_SMOKE_MAX_TRAIN_BATCHES", "0") or "0")
         
         model_optim = self._select_optimizer()
+        _pt = os.environ.get("MMPD_PRETRAINED_CKPT", "").strip()
+        if _pt:
+            if not os.path.isfile(_pt):
+                raise FileNotFoundError(f"MMPD_PRETRAINED_CKPT does not exist: {_pt}")
+            _sd = torch.load(_pt, map_location="cpu")
+            missing, unexpected = self.model.load_state_dict(_sd, strict=False)
+            print(
+                f"loaded MMPD_PRETRAINED_CKPT {_pt} missing={missing} unexpected={unexpected}",
+                flush=True,
+            )
         ema_decay = float(getattr(self.args, "ema_decay", 0.0) or 0.0)
         ema = _Ema(self.model, ema_decay) if ema_decay > 0.0 else None
 

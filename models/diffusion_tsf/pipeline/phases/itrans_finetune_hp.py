@@ -56,6 +56,18 @@ class ITransFinetuneHPPhase(PipelinePhase):
             n_trials = 1
             max_epochs = 1
 
+        from models.diffusion_tsf.pipeline.train.distributed import barrier, is_distributed, is_rank0
+
+        if is_distributed() and not is_rank0():
+            barrier()
+            if not os.path.exists(ft_ckpt):
+                raise FileNotFoundError(
+                    f"{self.name} rank {os.environ.get('RANK')}: missing iTransformer "
+                    f"ckpt at {ft_ckpt} after rank0 train"
+                )
+            state.itrans_finetune_ckpt = ft_ckpt
+            return state
+
         pretrained = ""
         best_params, tune_ckpt_path = run_itransformer_finetune_hp_tuning(
             state,
@@ -84,4 +96,6 @@ class ITransFinetuneHPPhase(PipelinePhase):
             "hp/itrans_ft_best_lr": best_params.get("learning_rate"),
         })
         logger.info("  [%s] finetuned iTransformer tokens → %s", self.name, ft_ckpt)
+        if is_distributed():
+            barrier()
         return state

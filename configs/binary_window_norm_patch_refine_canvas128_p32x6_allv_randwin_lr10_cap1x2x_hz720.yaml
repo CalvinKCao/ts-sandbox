@@ -1,0 +1,32 @@
+# Dedicated H=720 with-pretrain sibling of H=96 p32 cap1x2x (Killarney 5057766
+# exchange). Full canvas generate (720+8 overlap); not clip-from-720. Same p32
+# donor, crop caps, Optuna search, n=10 eval.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x.yaml
+
+geometry:
+  forecast_length: 720
+  lookback_overlap: 8
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p32x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, from_pretrain, hz720, nostitch, caps_crops_1x2x_etth1]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-p32x6-allv-randwin-lr10-cap1x2x-hz720
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x_hz720
+
+phases:
+  - phase: staged_eval
+    eval_progress_key: canvas128_allv_randwin_lr10_cap1x2x_hz720_s1_n10_steps4
+    batch_size_by_dataset:
+      ETTh1: 1
+      ETTh2: 1
+      ETTm1: 1
+      ETTm2: 1
+      exchange_rate: 1
+      weather: 1
+      solar_Alabama: 1
+      electricity: 1
+      PeMS: 1
+      traffic: 1
+      illness: 1
+      dynamic: 1

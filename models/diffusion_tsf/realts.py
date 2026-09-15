@@ -13,6 +13,7 @@ Generator Functions:
 - IFFTB: Inverse FFT Behavior (synthetic spectrum)
 - STB: Smooth Trend Behavior (slow trend + optional mild seasonality)
 - seasonal_periodicity: Complex seasonal patterns
+- linear: Straight-line ramp (opt-in via training.synthetic_generators; not in default mix)
 
 Reference: ViTime Paper - "Foundation Model for Time Series Forecasting 
            Powered by Vision Intelligence" (Yang et al., 2025)
@@ -21,7 +22,7 @@ Reference: ViTime Paper - "Foundation Model for Time Series Forecasting
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 import logging
 import os
 import uuid
@@ -281,6 +282,18 @@ def TWDB(length: int) -> np.ndarray:
     return signal
 
 
+def linear(length: int) -> np.ndarray:
+    """Straight-line trend (linear wave).
+
+    Formula: x_t = slope * t + intercept. Not in the default RealTS mix;
+    opt in via training.synthetic_generators.
+    """
+    t = np.linspace(0, 1, length)
+    slope = np.random.uniform(-2, 2)
+    intercept = np.random.uniform(-1, 1)
+    return slope * t + intercept
+
+
 def IFFTB(length: int) -> np.ndarray:
     """Inverse FFT Behavior (Synthetic Spectrum Generator).
     
@@ -454,7 +467,101 @@ def seasonal_periodicity(length: int) -> np.ndarray:
     return signal
 
 
+# Name -> generator. Default mix is GENERATORS below; `linear` is opt-in only.
+GENERATOR_REGISTRY = {
+    "IFFTB": IFFTB,
+    "seasonal_periodicity": seasonal_periodicity,
+    "STB": STB,
+    "PWB": PWB,
+    "TWDB": TWDB,
+    "RWB": RWB,
+    "LGB": LGB,
+    "linear": linear,
+}
 
+# Default RealTS mix (name, probability). Sums to 1.0. `linear` is not included.
+GENERATORS = [
+    ("IFFTB", 0.24),
+    ("seasonal_periodicity", 0.24),
+    ("STB", 0.20),
+    ("PWB", 0.13),
+    ("TWDB", 0.07),
+    ("RWB", 0.06),
+    ("LGB", 0.06),
+]
+DEFAULT_GENERATOR_NAMES = [name for name, _ in GENERATORS]
+
+
+def resolve_generator_names(spec: Optional[object]) -> list[str]:
+    """null/omitted → default mix. Non-empty list of known names otherwise."""
+    if spec is None:
+        return list(DEFAULT_GENERATOR_NAMES)
+    if isinstance(spec, str):
+        names = [spec]
+    elif isinstance(spec, (list, tuple)):
+        names = [str(n) for n in spec]
+    else:
+        raise TypeError(
+            "training.synthetic_generators must be null or a list of names, "
+            f"got {type(spec).__name__}"
+        )
+    if not names:
+        raise ValueError(
+            "training.synthetic_generators is empty; enable at least one generator "
+            f"(valid: {sorted(GENERATOR_REGISTRY)})"
+        )
+    unknown = [n for n in names if n not in GENERATOR_REGISTRY]
+    if unknown:
+        raise ValueError(
+            f"unknown synthetic_generators {unknown}; "
+            f"valid: {sorted(GENERATOR_REGISTRY)}"
+        )
+    seen = set()
+    out: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def generator_names_for_state(state: object) -> list[str]:
+    """Read training.synthetic_generators from a PipelineState / extra dict."""
+    spec = None
+    cfg = getattr(state, "merged_config", None) or {}
+    training = cfg.get("training") if isinstance(cfg, dict) else None
+    if isinstance(training, dict) and "synthetic_generators" in training:
+        spec = training.get("synthetic_generators")
+    else:
+        extra = getattr(state, "extra", None) or {}
+        if isinstance(extra, dict):
+            spec = extra.get("synthetic_generators")
+    return resolve_generator_names(spec)
+
+
+def uses_default_generator_mix(names: Sequence[str]) -> bool:
+    return set(names) == set(DEFAULT_GENERATOR_NAMES)
+
+
+def synth_pool_cache_filename(num_variables: int, total_length: int, names: Sequence[str]) -> str:
+    stem = f"synth_pool_v{num_variables}_L{total_length}"
+    if uses_default_generator_mix(names):
+        return f"{stem}.npy"
+    tag = "-".join(sorted(names))
+    return f"{stem}_gens-{tag}.npy"
+
+
+def generators_and_probs(names: Sequence[str]) -> Tuple[list, list]:
+    """Callables + sampling probs. Default mix keeps YAML-independent weights;
+    a subset is uniform over the enabled names."""
+    resolved = resolve_generator_names(list(names))
+    fns = [GENERATOR_REGISTRY[n] for n in resolved]
+    if uses_default_generator_mix(resolved):
+        by_name = {n: p for n, p in GENERATORS}
+        probs = [by_name[n] for n in resolved]
+        return fns, probs
+    n = len(fns)
+    return fns, [1.0 / n] * n
 
 
 # ============================================================================
@@ -471,7 +578,7 @@ class RealTS(Dataset):
     Supports both univariate and multivariate generation.
     
     Generator mix includes STB (smooth trends) and seasonal/IFFTB emphasis;
-    see GENERATORS for exact probabilities.
+    see GENERATORS for exact probabilities. Pass generator_names to restrict.
     
     Args:
         num_samples: Virtual epoch length (indices 0 .. num_samples-1 per DataLoader epoch)
@@ -486,17 +593,6 @@ class RealTS(Dataset):
         val_tail_n: Validation tail length; None uses ``min(max(1, num_samples//10), 5000)``
             capped to ``num_samples - 1``.
     """
-    
-    # Generator functions and their probabilities
-    GENERATORS = [
-        (IFFTB,               0.24),
-        (seasonal_periodicity, 0.24),
-        (STB,                  0.20),
-        (PWB,                  0.13),
-        (TWDB,                 0.07),
-        (RWB,                  0.06),
-        (LGB,                  0.06),
-    ]
     
     def __init__(
         self,
@@ -514,6 +610,7 @@ class RealTS(Dataset):
         synthetic_epoch_capacity: int = 1,
         val_tail_n: Optional[int] = None,
         synthetic_samples_cap: Optional[int] = None,
+        generator_names: Optional[Sequence[str]] = None,
     ):
         self.num_samples = num_samples  # Virtual epoch size
         self.lookback_length = lookback_length
@@ -540,6 +637,8 @@ class RealTS(Dataset):
             )
 
         self.skip_cross_var_aug = skip_cross_var_aug
+        self.generator_names = resolve_generator_names(generator_names)
+        self.generators, self.probabilities = generators_and_probs(self.generator_names)
 
         self._use_epoch_stride = False
         if self.synthetic_epoch_capacity > 1 and cache_dir:
@@ -575,10 +674,6 @@ class RealTS(Dataset):
         self.data_cache = None
         self.use_disk_cache = False
         
-        # Extract generators and probabilities
-        self.generators = [g for g, _ in self.GENERATORS]
-        self.probabilities = [p for _, p in self.GENERATORS]
-        
         # Set seed if provided
         if seed is not None:
             np.random.seed(seed)
@@ -588,7 +683,8 @@ class RealTS(Dataset):
             f"lookback={lookback_length}, forecast={forecast_length}, "
             f"variables={num_variables}, pool_rows={self.pool_size}, "
             f"epoch_stride={self._use_epoch_stride} (train_n={self.train_n}, val_tail={self.val_tail_n}, "
-            f"cap={self.synthetic_epoch_capacity})"
+            f"cap={self.synthetic_epoch_capacity}), "
+            f"generators={self.generator_names}"
         )
         
         # Disk Caching Logic (Large Pool)
@@ -596,7 +692,9 @@ class RealTS(Dataset):
             os.makedirs(cache_dir, exist_ok=True)
             self.use_disk_cache = True
 
-            cache_filename = f"synth_pool_v{self.num_variables}_L{self.total_length}.npy"
+            cache_filename = synth_pool_cache_filename(
+                self.num_variables, self.total_length, self.generator_names
+            )
             cache_path = os.path.join(cache_dir, cache_filename)
 
             with _synth_pool_file_lock(cache_path):
@@ -645,6 +743,7 @@ class RealTS(Dataset):
                                         seed=seed,
                                         skip_cross_var_aug=self.skip_cross_var_aug,
                                         output_path=temp_path,
+                                        generator_names=self.generator_names,
                                     )
                                 else:
                                     existing_n = int(existing_data.shape[0])
@@ -678,6 +777,7 @@ class RealTS(Dataset):
                                             skip_cross_var_aug=self.skip_cross_var_aug,
                                             output_memmap=mm,
                                             memmap_row_offset=existing_n,
+                                            generator_names=self.generator_names,
                                         )
                                     finally:
                                         del mm
@@ -740,6 +840,7 @@ class RealTS(Dataset):
                 length=self.total_length,
                 seed=seed,
                 skip_cross_var_aug=self.skip_cross_var_aug,
+                generator_names=self.generator_names,
             )
             self.pool_size = self.num_samples # Pool size is fixed to what we generated
             logger.info("Pre-generation complete.")
@@ -811,7 +912,8 @@ class RealTS(Dataset):
             seq_batch = generate_multivariate_synthetic_data(
                 num_samples=1,
                 num_vars=self.num_variables,
-                length=self.total_length
+                length=self.total_length,
+                generator_names=self.generator_names,
             )
             seq = seq_batch[0]  # (num_vars, total_length)
             
@@ -866,9 +968,10 @@ def get_synthetic_dataloader(
     cache_dir: Optional[str] = None,
     lookback_overlap: int = 0,
     skip_cross_var_aug: bool = False,
-        synthetic_epoch_capacity: int = 1,
-        val_tail_n: Optional[int] = None,
-        synthetic_samples_cap: Optional[int] = None,
+    synthetic_epoch_capacity: int = 1,
+    val_tail_n: Optional[int] = None,
+    synthetic_samples_cap: Optional[int] = None,
+    generator_names: Optional[Sequence[str]] = None,
 ) -> DataLoader:
     """DataLoader over synthetic RealTS data for pretraining."""
     synthetic_dataset = RealTS(
@@ -884,16 +987,18 @@ def get_synthetic_dataloader(
         synthetic_epoch_capacity=synthetic_epoch_capacity,
         val_tail_n=val_tail_n,
         synthetic_samples_cap=synthetic_samples_cap,
+        generator_names=generator_names,
     )
 
     logger.info(
         "Created synthetic-only dataloader: %d samples/epoch (pool: %s), "
-        "lookback=%d, forecast=%d, variables=%d",
+        "lookback=%d, forecast=%d, variables=%d, generators=%s",
         num_samples,
         pool_size or num_samples,
         lookback_length,
         forecast_length,
         num_variables,
+        resolve_generator_names(generator_names),
     )
 
     return DataLoader(

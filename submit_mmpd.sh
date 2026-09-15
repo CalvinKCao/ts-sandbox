@@ -27,6 +27,7 @@ FORCE=0
 FORCE_INIT=0
 SKIP_MMPD_TRAIN=0
 OUTPUT_DIR=""
+OUTPUT_DIR_EXPLICIT=0
 SUBSET_CONFIG="configs/binary_anchor_stationary_flat_subsets.yaml"
 USE_ANCHOR_CKPTS=0
 ANCHOR_CONFIG="binary_anchor_stationary_flat_subsets"
@@ -54,6 +55,7 @@ NO_DATASET_EXTRA=0
 SKIP_MMPD_VIZ=0
 EVAL_SUBSETS=""
 MEM_OVERRIDE=""
+PRETRAIN_SYNTH="none"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -61,7 +63,7 @@ while [[ $# -gt 0 ]]; do
         --resume) RESUME=1; shift ;;
         --force-init) FORCE_INIT=1; shift ;;
         --force) FORCE=1; shift ;;
-        --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
+        --output-dir) OUTPUT_DIR="$2"; OUTPUT_DIR_EXPLICIT=1; shift 2 ;;
         --subset-config) SUBSET_CONFIG="$2"; shift 2 ;;
         --use-anchor-ckpts) USE_ANCHOR_CKPTS=1; shift ;;
         --anchor-config) ANCHOR_CONFIG="$2"; USE_ANCHOR_CKPTS=1; shift 2 ;;
@@ -88,6 +90,7 @@ while [[ $# -gt 0 ]]; do
         --skip-mmpd-sample-viz) SKIP_MMPD_VIZ=1; shift ;;
         --eval-subsets) EVAL_SUBSETS="$2"; shift 2 ;;
         --mem) MEM_OVERRIDE="$2"; shift 2 ;;
+        --pretrain-synth) PRETRAIN_SYNTH="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -145,6 +148,12 @@ if [[ -f "$MMPD_TOOLS" ]] && grep -q 'np\.Inf' "$MMPD_TOOLS"; then
 fi
 
 IFS=',' read -ra DATASETS <<< "$DATASETS_CSV"
+for i in "${!DATASETS[@]}"; do
+    case "${DATASETS[$i]}" in
+        exchange) DATASETS[$i]="exchange_rate" ;;
+    esac
+done
+DATASETS_CSV=$(IFS=,; echo "${DATASETS[*]}")
 
 filter_datasets_available() {
     local ds path
@@ -211,7 +220,9 @@ if [[ -z "$OUTPUT_DIR" ]]; then
     if [[ "$RESUME" -eq 1 ]]; then
         OUTPUT_DIR="$(pick_resume_output_dir)"
     else
-        RUN_STEM="$(date +%m-%d)-$$-sweep-subset-mmpd$([[ "$SMOKE" -eq 1 ]] && echo -smoke)"
+        SUF=""
+        if [[ "$SMOKE" -eq 1 ]]; then SUF="-smoke"; fi
+        RUN_STEM="$(date +%m-%d)-$$-sweep-subset-mmpd${SUF}"
         OUTPUT_DIR="$REPO/results/datasets/${RUN_STEM}"
     fi
 else
@@ -251,6 +262,18 @@ if [[ -n "$MMPD_RUN_CONFIG" ]]; then
     if grep -Eq '^[[:space:]]*task:[[:space:]]*ordinal_upscale([[:space:]]|$)' "$MMPD_RUN_CONFIG"; then
         ORDINAL_UPSCALE=1
         echo "MMPD task: ordinal_upscale (custom 1D 16-bin -> 256-bin worker)"
+    fi
+    _yaml_lb=$(awk '/^[[:space:]]*lookback:/{print $2; exit}' "$MMPD_RUN_CONFIG")
+    _yaml_hz=$(awk '/^[[:space:]]*horizon:/{print $2; exit}' "$MMPD_RUN_CONFIG")
+    [[ -n "$_yaml_lb" ]] && LOOKBACK="$_yaml_lb"
+    [[ -n "$_yaml_hz" ]] && HORIZON="$_yaml_hz"
+    if [[ "$PRETRAIN_SYNTH" == "pwb_linear" && "$OUTPUT_DIR_EXPLICIT" -eq 0 ]]; then
+        OUTPUT_DIR="$REPO/results/datasets/hz${HORIZON}_lb${LOOKBACK}_pwb_linear"
+        [[ "$SMOKE" -eq 1 ]] && OUTPUT_DIR="${OUTPUT_DIR}-smoke"
+        RUN_STEM="$(basename "$OUTPUT_DIR")"
+        LOG_DIR="$REPO/results/logs/${RUN_STEM}"
+        mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
+        echo "pretrain-synth pwb_linear: output $OUTPUT_DIR"
     fi
     EVAL_BASE=(
         "$REPO/utils/eval_mmpd_gaussian_anchor.py"
@@ -430,6 +453,9 @@ fi
 if [[ -n "$EVAL_SUBSETS" ]]; then
     EVAL_EXTRA+=(--eval-subsets "$EVAL_SUBSETS")
 fi
+if [[ -n "$PRETRAIN_SYNTH" ]]; then
+    EVAL_EXTRA+=(--pretrain-synth "$PRETRAIN_SYNTH")
+fi
 
 PREAMBLE_FILE="$REPO/results/job_preamble_mmpd_sweep_subset.sh"
 cat > "$PREAMBLE_FILE" << PREAMBLE
@@ -559,9 +585,14 @@ if [[ "$SKIP_INIT" -eq 0 ]]; then
     echo "Init script: $INIT_SCRIPT"
     grep -E 'subset-config|anchor-config' "$INIT_SCRIPT" || true
     echo "Submitting init..."
+    INIT_PART=()
+    if [[ "$GPU_TYPE" == l40s* && "$CLUSTER" == "killarney" ]]; then
+        INIT_PART=(--partition="$(mmpd_pick_l40s_partition "$(_mmpd_wall_to_sec "$WALL_INIT")")")
+    fi
     JOB_INIT=$(sbatch --parsable \
         --job-name="mmpd-sw-init$([[ "$SMOKE" -eq 1 ]] && echo -smoke)" \
         "${SBATCH_COMMON[@]}" \
+        "${INIT_PART[@]}" \
         --time="$WALL_INIT" \
         "${INIT_SBATCH_EXTRA[@]}" \
         --output="$LOG_DIR/init-%j.out" \
@@ -597,9 +628,14 @@ for ds in "${DATASETS[@]}"; do
         "${DS_EXTRA[@]}" \
         --phase mmpd --datasets "$ds"
     echo "Submitting mmpd-${ds} wall=${DS_WALL} ${WORKER_DEP[*]}..."
+    DS_PART=()
+    if [[ "$GPU_TYPE" == l40s* && "$CLUSTER" == "killarney" ]]; then
+        DS_PART=(--partition="$(mmpd_pick_l40s_partition "$(_mmpd_wall_to_sec "$DS_WALL")")")
+    fi
     JOB_MMPD=$(sbatch --parsable \
         --job-name="mmpd-sw-${ds}$([[ "$SMOKE" -eq 1 ]] && echo -smoke)" \
         "${SBATCH_COMMON[@]}" \
+        "${DS_PART[@]}" \
         --time="$DS_WALL" \
         "${WORKER_DEP[@]}" \
         --output="$LOG_DIR/mmpd-${ds}-%j.out" \

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -118,7 +119,8 @@ def export_one(name: str, spec: dict, out_dir: Path) -> dict:
     df = pd.DataFrame(sub, columns=cols)
     df.insert(0, "date", dates)
     out_path = out_dir / f"{name}.csv"
-    tmp_path = out_dir / f".{name}.csv.tmp"
+    # Unique tmp: concurrent jobs sharing .PeMS.csv.tmp race on Lustre (5443990).
+    tmp_path = out_dir / f".{name}.{os.getpid()}.csv.tmp"
     df.to_csv(tmp_path, index=False)
     tmp_path.replace(out_path)
     meta = {

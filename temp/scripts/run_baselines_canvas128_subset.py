@@ -31,9 +31,26 @@ PATCH_DIR = REPO / "temp" / "PatchTST" / "PatchTST_supervised"
 APPLY_PATCHES = REPO / "temp" / "scripts" / "apply_baseline_canvas128_patches.py"
 
 
-def _out_dir_for(model: str, dataset: str, pred_len: int) -> Path:
-    """Isolate H=96 vs H=720 campaigns so summaries do not collide."""
-    return OUT_ROOT / f"hz{int(pred_len)}" / model / dataset
+def _out_dir_for(
+    model: str,
+    dataset: str,
+    pred_len: int,
+    seq_len: int,
+    *,
+    pretrain_tag: str = "",
+) -> Path:
+    """Isolate horizon and lookback so PatchTST/42 vs /64 summaries do not collide."""
+    stem = f"hz{int(pred_len)}_lb{int(seq_len)}"
+    if pretrain_tag:
+        stem = f"{stem}_{pretrain_tag}"
+    return OUT_ROOT / stem / model / dataset
+
+
+DATASET_ALIASES = {"exchange": "exchange_rate"}
+
+
+def _canonical_dataset(name: str) -> str:
+    return DATASET_ALIASES.get(name.strip(), name.strip())
 
 
 DATASETS_ALL = [
@@ -72,7 +89,7 @@ def _itrans_arch(dataset: str) -> Dict[str, Any]:
     Defaults from run.py when scripts omit a flag: lr=1e-4, batch=32, epochs=10, patience=3.
     """
     base = dict(
-        e_layers=2, d_model=256, d_ff=256, n_heads=8,
+        e_layers=2, d_model=256, d_ff=256, n_heads=8, dropout=0.1,
         batch_size=32, learning_rate=1e-4,
         train_epochs=10, patience=3, lradj="type1",
     )
@@ -101,6 +118,17 @@ def _itrans_arch(dataset: str) -> Dict[str, Any]:
     raise KeyError(f"no iTransformer script HP map for {dataset}")
 
 
+def _apply_itrans_hp_overrides(arch: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """CLI flags replace the per-dataset map. d_ff follows d_model unless set."""
+    if not overrides:
+        return arch
+    out = dict(arch)
+    if "d_model" in overrides and "d_ff" not in overrides:
+        out["d_ff"] = int(overrides["d_model"])
+    out.update(overrides)
+    return out
+
+
 def _patchtst_arch(dataset: str) -> Dict[str, Any]:
     """Published scripts/PatchTST/*.sh settings (enc_in overridden by subset)."""
     small = dict(
@@ -115,8 +143,18 @@ def _patchtst_arch(dataset: str) -> Dict[str, Any]:
         learning_rate=1e-4, patience=20, train_epochs=100,
         lradj="type3", pct_start=0.3,
     )
-    if dataset in ("ETTh1", "ETTh2", "illness"):
+    if dataset in ("ETTh1", "ETTh2"):
         return small
+    if dataset == "illness":
+        # Official PatchTST_supervised/scripts/PatchTST/illness.sh (PatchTST/42).
+        return {
+            **small,
+            "batch_size": 16,
+            "learning_rate": 2.5e-3,
+            "lradj": "constant",
+            "patch_len": 24,
+            "stride": 2,
+        }
     if dataset in ("ETTm1", "ETTm2"):
         return {**large, "lradj": "TST", "pct_start": 0.4, "patience": 20}
     if dataset == "electricity":
@@ -161,6 +199,16 @@ def _test_cap_args(meta: dict) -> List[str]:
 
 def _cap_args(meta: dict) -> List[str]:
     return _train_val_cap_args(meta) + _test_cap_args(meta)
+
+
+def _maybe_smoke_meta(meta: dict, smoke: bool) -> dict:
+    if not smoke:
+        return meta
+    out = dict(meta)
+    out["train_max_windows"] = 8
+    out["val_max_windows"] = 8
+    out["eval_max_windows"] = 8
+    return out
 
 
 def _eval_subset_args(subset: str, dataset: str, pred_len: int) -> List[str]:
@@ -258,11 +306,14 @@ def run_itransformer(
     out_dir: Path,
     eval_subsets: List[str],
     force: bool = False,
+    hp_overrides: Optional[Dict[str, Any]] = None,
+    pretrained_ckpt: str = "",
 ) -> dict:
     n_v = int(meta["n_variates"])
-    arch = _itrans_arch(dataset)
+    arch = _apply_itrans_hp_overrides(_itrans_arch(dataset), hp_overrides or {})
     if smoke:
-        arch = {**arch, "train_epochs": 2, "patience": 1}
+        arch = {**arch, "train_epochs": 2, "patience": 1, "batch_size": 1}
+        meta = _maybe_smoke_meta(meta, True)
 
     data_name = _data_name(meta["loader"])
     tag = f"L{arch['e_layers']}_D{arch['d_model']}_lr{arch['learning_rate']}"
@@ -289,6 +340,7 @@ def run_itransformer(
         "--d_model", str(arch["d_model"]),
         "--d_ff", str(arch["d_ff"]),
         "--n_heads", str(arch["n_heads"]),
+        "--dropout", str(arch["dropout"]),
         "--des", "canvas128_subset",
         "--itr", "1",
         "--batch_size", str(arch["batch_size"]),
@@ -305,6 +357,7 @@ def run_itransformer(
         "--test_window_stride", str(meta["test_stride"]),
         *_train_val_cap_args(meta),
         *extra_eval,
+        "--pretrained_ckpt", pretrained_ckpt or "",
     ]
     if (not force) and (not smoke) and _reuse_checkpoint(out_dir):
         cmd[cmd.index("--is_training") + 1] = "0"
@@ -343,7 +396,7 @@ def run_itransformer(
         "pred_len": pred_len,
         "n_variates": n_v,
         "subset": meta,
-        "selection": "published_script_hp",
+        "selection": "global_cli_hp" if hp_overrides else "published_script_hp",
         "best": row,
         "git_sha": _git_sha(ITRANS_DIR),
         "eval_subsets": subset_metrics,
@@ -362,14 +415,23 @@ def run_patchtst(
     out_dir: Path,
     eval_subsets: List[str],
     force: bool = False,
+    hp_overrides: Optional[Dict[str, Any]] = None,
+    pretrained_ckpt: str = "",
 ) -> dict:
     arch = _patchtst_arch(dataset)
+    overrides = hp_overrides or {}
+    if "batch_size" in overrides:
+        arch = {**arch, "batch_size": int(overrides["batch_size"])}
+    elif dataset == "traffic" and seq_len >= 512:
+        # L=512 @ batch 24 OOM'd L40S (~42/48 GiB). L=336 @ 24 finished on A100.
+        arch = {**arch, "batch_size": min(int(arch["batch_size"]), 8)}
     if smoke:
-        arch = {**arch, "train_epochs": 2, "patience": 1, "batch_size": min(32, arch["batch_size"])}
+        arch = {**arch, "train_epochs": 2, "patience": 1, "batch_size": 1}
+        meta = _maybe_smoke_meta(meta, True)
 
     n_v = int(meta["n_variates"])
     data_name = _data_name(meta["loader"])
-    model_id = f"{dataset}_{seq_len}_{pred_len}_patchtst42"
+    model_id = f"{dataset}_{seq_len}_{pred_len}_patchtst"
     log = out_dir / "patchtst.log"
     train_eval = eval_subsets[0] if eval_subsets else ""
     extra_eval = _eval_subset_args(train_eval, dataset, pred_len) if train_eval else _test_cap_args(meta)
@@ -396,8 +458,8 @@ def run_patchtst(
         "--dropout", str(arch["dropout"]),
         "--fc_dropout", str(arch["fc_dropout"]),
         "--head_dropout", "0",
-        "--patch_len", "16",
-        "--stride", "8",
+        "--patch_len", str(arch.get("patch_len", 16)),
+        "--stride", str(arch.get("stride", 8)),
         "--padding_patch", "end",
         "--revin", "1",
         "--affine", "0",
@@ -420,6 +482,7 @@ def run_patchtst(
         "--test_window_stride", str(meta["test_stride"]),
         *_train_val_cap_args(meta),
         *extra_eval,
+        "--pretrained_ckpt", pretrained_ckpt or "",
     ]
     if (not force) and (not smoke) and _reuse_checkpoint(out_dir):
         cmd[cmd.index("--is_training") + 1] = "0"
@@ -466,6 +529,99 @@ def _git_sha(path: Path) -> str:
         return "unknown"
 
 
+def _find_ckpt(out_dir: Path) -> Optional[Path]:
+    hits = sorted((out_dir / "ckpts").glob("*/checkpoint.pth"))
+    return hits[-1] if hits else None
+
+
+def _synth_meta(meta: dict, csv_name: str, seq_len: int, pred_len: int) -> dict:
+    stride = int(seq_len) + int(pred_len)
+    out = dict(meta)
+    out["csv"] = csv_name
+    out["train_stride"] = stride
+    out["val_stride"] = stride
+    out["test_stride"] = stride
+    out["train_max_windows"] = None
+    out["val_max_windows"] = None
+    out["eval_max_windows"] = None
+    out["eval_test_fraction"] = None
+    return out
+
+
+def _ensure_pwb_linear_csv(meta: dict, seq_len: int, pred_len: int, smoke: bool) -> str:
+    from utils.pwb_linear_synth_csv import (
+        columns_from_csv,
+        pwb_linear_csv_name,
+        pwb_linear_n_windows,
+        write_pwb_linear_csv,
+    )
+
+    real_csv = DATA_DIR / meta["csv"]
+    if not real_csv.is_file():
+        raise FileNotFoundError(f"missing real CSV {real_csv}; export subsets first")
+    cols = columns_from_csv(real_csv)
+    name = pwb_linear_csv_name(meta["dataset"], seq_len, pred_len)
+    dest = DATA_DIR / name
+    n_windows = pwb_linear_n_windows(smoke=smoke)
+    print(
+        f"[pretrain] writing {dest.name} n_windows={n_windows} "
+        f"L={seq_len} H={pred_len} V={len(cols)}",
+        flush=True,
+    )
+    write_pwb_linear_csv(
+        dest,
+        n_variates=int(meta["n_variates"]),
+        seq_len=seq_len,
+        pred_len=pred_len,
+        n_windows=n_windows,
+        columns=cols,
+        seed=42,
+    )
+    return name
+
+
+def _run_pwb_linear_pretrain(
+    model: str,
+    dataset: str,
+    meta: dict,
+    *,
+    smoke: bool,
+    seq_len: int,
+    pred_len: int,
+    out_dir: Path,
+    force: bool,
+    hp_overrides: Optional[Dict[str, Any]],
+) -> str:
+    csv_name = _ensure_pwb_linear_csv(meta, seq_len, pred_len, smoke)
+    synth_meta = _synth_meta(meta, csv_name, seq_len, pred_len)
+    pre_dir = out_dir / "pretrain"
+    pre_dir.mkdir(parents=True, exist_ok=True)
+    existing = _find_ckpt(pre_dir)
+    if existing is not None and (not smoke) and (not force):
+        print(f"[pretrain] {model} {dataset}: reuse {existing}", flush=True)
+        return str(existing)
+    print(f"[pretrain] {model} {dataset}: train on {csv_name} stride={seq_len + pred_len}", flush=True)
+    if model == "itransformer":
+        run_itransformer(
+            dataset, synth_meta, smoke=smoke,
+            seq_len=seq_len, pred_len=pred_len, out_dir=pre_dir,
+            eval_subsets=[], force=True, hp_overrides=hp_overrides,
+            pretrained_ckpt="",
+        )
+    else:
+        run_patchtst(
+            dataset, synth_meta, smoke=smoke,
+            seq_len=seq_len, pred_len=pred_len, out_dir=pre_dir,
+            eval_subsets=[], force=True, hp_overrides=hp_overrides,
+            pretrained_ckpt="",
+        )
+    ckpt = _find_ckpt(pre_dir)
+    if ckpt is None:
+        raise FileNotFoundError(f"synth pretrain produced no checkpoint in {pre_dir / 'ckpts'}")
+    print(f"[pretrain] {model} {dataset}: ckpt {ckpt}", flush=True)
+    return str(ckpt)
+
+
 def _ensure_patches() -> None:
     subprocess.check_call([sys.executable, str(APPLY_PATCHES)], cwd=str(REPO))
     sys.path.insert(0, str(APPLY_PATCHES.parent))
@@ -488,25 +644,47 @@ def main() -> int:
         default="",
         help="Comma list: binary_10pct,test_100pct. Empty keeps YAML eval caps.",
     )
+    p.add_argument("--lr", type=float, default=None, help="Override iTransformer learning_rate")
+    p.add_argument("--d-model", type=int, default=None, help="Override iTransformer d_model")
+    p.add_argument("--d-ff", type=int, default=None, help="Override iTransformer d_ff")
+    p.add_argument("--e-layers", type=int, default=None, help="Override iTransformer e_layers")
+    p.add_argument("--n-heads", type=int, default=None, help="Override iTransformer n_heads")
+    p.add_argument("--batch-size", type=int, default=None, help="Override batch_size (iTransformer or PatchTST)")
+    p.add_argument("--dropout", type=float, default=None, help="Override iTransformer dropout")
+    p.add_argument("--train-epochs", type=int, default=None, help="Override iTransformer train_epochs")
+    p.add_argument(
+        "--pretrain-synth",
+        choices=["none", "pwb_linear"],
+        default="none",
+        help="none=real only; pwb_linear=synth pretrain then real finetune",
+    )
+    p.add_argument(
+        "--subset-yaml",
+        type=Path,
+        default=None,
+        help="Re-export canvas128 CSVs from this YAML before training",
+    )
     args = p.parse_args()
 
     if not ITRANS_DIR.is_dir() or not PATCH_DIR.is_dir():
         raise FileNotFoundError("clone temp/iTransformer and temp/PatchTST first")
 
-    if not (DATA_DIR / "subset_meta.json").is_file():
-        subprocess.check_call(
-            [sys.executable, str(REPO / "temp/scripts/export_canvas128_subset_csvs.py")],
-            cwd=str(REPO),
-        )
-    _ensure_patches()
-    meta_by = _load_meta()
-
     if args.all:
         datasets = DATASETS_ALL
     elif args.dataset.strip():
-        datasets = [x.strip() for x in args.dataset.split(",") if x.strip()]
+        datasets = [_canonical_dataset(x) for x in args.dataset.split(",") if x.strip()]
     else:
         raise SystemExit("pass --dataset NAME or --all")
+
+    export_cmd = [sys.executable, str(REPO / "temp/scripts/export_canvas128_subset_csvs.py")]
+    if args.subset_yaml is not None:
+        export_cmd.extend(["--subset-yaml", str(args.subset_yaml)])
+        export_cmd.extend(["--datasets", ",".join(datasets)])
+        subprocess.check_call(export_cmd, cwd=str(REPO))
+    elif not (DATA_DIR / "subset_meta.json").is_file():
+        subprocess.check_call(export_cmd, cwd=str(REPO))
+    _ensure_patches()
+    meta_by = _load_meta()
 
     models = []
     if args.model in ("itransformer", "both"):
@@ -514,9 +692,30 @@ def main() -> int:
     if args.model in ("patchtst", "both"):
         models.append("patchtst")
 
+    hp_overrides: Dict[str, Any] = {}
+    for dest, key in (
+        ("lr", "learning_rate"),
+        ("d_model", "d_model"),
+        ("d_ff", "d_ff"),
+        ("e_layers", "e_layers"),
+        ("n_heads", "n_heads"),
+        ("batch_size", "batch_size"),
+        ("dropout", "dropout"),
+        ("train_epochs", "train_epochs"),
+    ):
+        val = getattr(args, dest)
+        if val is not None:
+            hp_overrides[key] = val
+    non_batch = {k: v for k, v in hp_overrides.items() if k != "batch_size"}
+    if non_batch and "itransformer" not in models:
+        raise SystemExit("iTransformer HP flags require --model itransformer or both")
+
     from utils.compare_eval_subsets import parse_eval_subset_list
 
     eval_subsets = parse_eval_subset_list(args.eval_subsets)
+    if args.smoke_test and len(eval_subsets) > 1:
+        eval_subsets = eval_subsets[:1]
+    pretrain_tag = "pwb_linear" if args.pretrain_synth == "pwb_linear" else ""
 
     summaries = []
     errors = []
@@ -525,7 +724,9 @@ def main() -> int:
             raise KeyError(f"no subset meta for {ds}")
         meta = meta_by[ds]
         for model in models:
-            out_dir = _out_dir_for(model, ds, args.pred_len)
+            out_dir = _out_dir_for(
+                model, ds, args.pred_len, args.seq_len, pretrain_tag=pretrain_tag,
+            )
             out_dir.mkdir(parents=True, exist_ok=True)
             summary_name = (
                 "itransformer_summary.json" if model == "itransformer" else "patchtst_summary.json"
@@ -539,12 +740,23 @@ def main() -> int:
                     pass
                 continue
             try:
+                pretrained_ckpt = ""
+                if args.pretrain_synth == "pwb_linear":
+                    pretrained_ckpt = _run_pwb_linear_pretrain(
+                        model, ds, meta,
+                        smoke=args.smoke_test,
+                        seq_len=args.seq_len, pred_len=args.pred_len,
+                        out_dir=out_dir, force=args.force,
+                        hp_overrides=hp_overrides,
+                    )
                 if model == "itransformer":
                     summaries.append(
                         run_itransformer(
                             ds, meta, smoke=args.smoke_test,
                             seq_len=args.seq_len, pred_len=args.pred_len, out_dir=out_dir,
                             eval_subsets=eval_subsets, force=args.force,
+                            hp_overrides=hp_overrides,
+                            pretrained_ckpt=pretrained_ckpt,
                         )
                     )
                 else:
@@ -553,6 +765,8 @@ def main() -> int:
                             ds, meta, smoke=args.smoke_test,
                             seq_len=args.seq_len, pred_len=args.pred_len, out_dir=out_dir,
                             eval_subsets=eval_subsets, force=args.force,
+                            hp_overrides=hp_overrides,
+                            pretrained_ckpt=pretrained_ckpt,
                         )
                     )
             except Exception as e:
@@ -560,7 +774,10 @@ def main() -> int:
                 print(f"[error] {model} {ds}: {e}", flush=True)
                 traceback.print_exc()
 
-    stamp_dir = OUT_ROOT / f"hz{int(args.pred_len)}"
+    stem = f"hz{int(args.pred_len)}_lb{int(args.seq_len)}"
+    if pretrain_tag:
+        stem = f"{stem}_{pretrain_tag}"
+    stamp_dir = OUT_ROOT / stem
     stamp_dir.mkdir(parents=True, exist_ok=True)
     stamp = stamp_dir / "campaign_summary.json"
     stamp.write_text(json.dumps({"summaries": summaries, "errors": errors}, indent=2) + "\n")

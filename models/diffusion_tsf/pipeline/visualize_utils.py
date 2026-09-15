@@ -1163,9 +1163,16 @@ def _plot_staged_2d_maps_native(
 
 
 def _guidance_forecast_plot_kwargs(state: Any) -> Dict[str, str]:
-    """Labels/filenames for iTransformer guidance forecast panels."""
+    """Labels/filenames for guidance forecast panels (patch vs iTrans)."""
     ordinal = bool(getattr(state, "use_ordinal_window_norm", False))
     gt_label = "GT (ordinal rank)" if ordinal else "GT (window norm)"
+    if getattr(state, "guidance_type", "") == "patch_decoder":
+        return {
+            "guidance_label": "patch decoder",
+            "gt_label": gt_label,
+            "title": None,
+            "filename_tag": "patch_pred",
+        }
     return {
         "guidance_label": "iTrans",
         "gt_label": gt_label,
@@ -1405,7 +1412,7 @@ def run_staged_synthetic_pretrain_diagnostics(
     include_phase_start: bool = True,
 ) -> Dict[str, Any]:
     """RealTS + iTransformer diagnostics for staged synthetic pretrain (architecture.md §Phase 1)."""
-    from models.diffusion_tsf.realts import get_synthetic_dataloader
+    from models.diffusion_tsf.realts import generator_names_for_state, get_synthetic_dataloader
     from models.diffusion_tsf.train_multivariate_pipeline import (
         get_synth_cache_dir,
         synthetic_epoch_capacity_pretrain_diffusion,
@@ -1430,6 +1437,7 @@ def run_staged_synthetic_pretrain_diagnostics(
         skip_cross_var_aug=(int(state.n_variates) > 32),
         val_tail_n=n_val,
         synthetic_epoch_capacity=epoch_cap,
+        generator_names=generator_names_for_state(state),
     )
     dataset = loader.dataset
 
@@ -2781,3 +2789,112 @@ def run_ordinal_coarse_fine_2d_visualization(
             variate=int(vi),
         ))
     ]
+
+def run_patch_guidance_finetune_diagnostics(
+    state: Any,
+    *,
+    ckpt_path: str,
+    train_ds,
+) -> Dict[str, Any]:
+    """Patch guidance finetune: dataset + guidance encoding maps (mirrors iTrans diagnostics)."""
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        create_diffusion_model,
+        load_patch_guidance_from_checkpoint,
+        wrap_patch_guidance,
+    )
+
+    viz = _viz_cfg(state)
+    if not viz.get("enabled", True):
+        return {"viz": {}}
+
+    from models.diffusion_tsf.pipeline.phase_diagnostics import compute_dataset_stats
+
+    stats = compute_dataset_stats(
+        train_ds, prefix="dataset",
+        n_probe=32 if state.smoke_test else 256,
+        seed=state.seed,
+    )
+    return {"summary": stats, "viz": {}}
+
+
+def run_patch_guidance_finetune_visualizations(
+    state: Any,
+    *,
+    ckpt_path: str,
+    tag: str = "patch_guidance_finetuned",
+) -> list[str]:
+    """1D patch-decoder forecast plots after guidance finetune."""
+    from models.diffusion_tsf.train_multivariate_pipeline import (
+        _patch_guidance_batch,
+        generate_dataset_job,
+        load_dataset,
+        load_patch_guidance_from_checkpoint,
+    )
+
+    viz = _viz_cfg(state)
+    if not viz.get("enabled", True) or state.smoke_test:
+        return []
+
+    variate_indices = state.variate_indices
+    if variate_indices is None:
+        variate_indices = generate_dataset_job(state.dataset)["variate_indices"]
+    subset_meta = state.data_subset_resolved or {}
+    train_stride = int(subset_meta.get("train_stride", state.window_stride))
+    test_stride = int(subset_meta.get("test_stride", 1))
+
+    _, _, test_ds, _ = load_dataset(
+        state.dataset,
+        variate_indices,
+        lookback=state.lookback_length,
+        horizon=state.forecast_length,
+        stride=train_stride,
+        test_stride=test_stride,
+        lookback_overlap=state.lookback_overlap,
+        ordinal_tie_atol=float(getattr(state, "ordinal_tie_atol", 1e-6)),
+        use_ordinal_window_norm=getattr(state, "use_ordinal_window_norm", None),
+    )
+    device = state.resolve_device()
+    stack = load_patch_guidance_from_checkpoint(
+        ckpt_path, len(variate_indices), device,
+    )
+    output_dir = os.path.join(state.results_dir, "viz", tag)
+    os.makedirs(output_dir, exist_ok=True)
+    jpeg_dpi = int(viz.get("jpeg_dpi", 100))
+    indices = pick_sample_indices(len(test_ds), int(viz.get("n_samples", 3)), seed=state.seed)
+    paths: list[str] = []
+
+    for row, idx in enumerate(indices):
+        past, future = test_ds[idx]
+        past_b = past.unsqueeze(0).to(device)
+        future_b = future.unsqueeze(0).to(device)
+        with torch.no_grad():
+            # _patch_guidance_batch expects a batch dim (B, V, T).
+            past_norm, target = _patch_guidance_batch(
+                past_b,
+                future_b,
+                device,
+                apply_ood_shift=bool(state.use_ordinal_window_norm),
+                data_is_ranked=getattr(test_ds, "yields_ordinal_ranks", False),
+            )
+            pred = stack.forecast(past_norm)[0].cpu()
+            past_plot = past_norm[0].cpu()
+            target_plot = target[0].cpu()
+
+        n_vars = min(int(viz.get("n_dual_scale_vars", 3)), past.shape[0])
+        fig, axes = plt.subplots(1, n_vars, figsize=(4.5 * n_vars, 3.0), squeeze=False)
+        t_past = np.arange(-past_plot.shape[-1], 0)
+        t_fut = np.arange(0, target_plot.shape[-1])
+        for col in range(n_vars):
+            ax = axes[0, col]
+            ax.plot(t_past, past_plot[col].numpy(), color="#9E9E9E", alpha=0.5, lw=1.0)
+            ax.plot(t_fut, target_plot[col].numpy(), color="#2196F3", lw=1.5, label="GT" if col == 0 else "")
+            ax.plot(t_fut, pred[col].numpy(), color="#FF9800", lw=1.2, ls="--", label="patch" if col == 0 else "")
+            ax.axvline(0, color="k", ls=":", alpha=0.25)
+            mae = float(np.mean(np.abs(pred[col].numpy() - target_plot[col].numpy())))
+            ax.set_title(f"Var {col} | MAE {mae:.3f}", fontsize=9)
+        fig.suptitle(f"Patch guidance {tag} | sample {idx}", fontsize=11)
+        if n_vars:
+            axes[0, 0].legend(loc="upper left", fontsize=7)
+        path = os.path.join(output_dir, f"patch_guidance_{tag}_sample{row:02d}_idx{idx}.jpg")
+        paths.append(save_figure_jpg(fig, path, dpi=jpeg_dpi))
+    return paths

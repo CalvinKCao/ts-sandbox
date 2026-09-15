@@ -1,0 +1,10 @@
+# Dynamic 100% eval shards. 10% (33/33) finished on 2650288; this key is distinct.
+# Use probe fine_max 10234 (not min(coarse,fine)=256). Coarse pack is ~170.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_dynamic_lb600_hz300_nopretrain_fixedhp_r0_ms35_kv_a100.yaml
+
+phases:
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    eval_progress_key: canvas128_p32x6_dynamic_lb600_hz300_r0_ms35_kv_a100_s300_n10_steps4_fulltest
+    batch_size_by_dataset:
+      dynamic: 1

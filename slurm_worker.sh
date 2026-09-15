@@ -103,8 +103,23 @@ PY_ARGS+=(
     --datasets-dir "$BENCHMARK_DATASETS"
 )
 
-echo "$(ts) [train] Starting pipeline: ${PY_ARGS[*]}"
-python -u -m models.diffusion_tsf.train_multivariate_pipeline "${PY_ARGS[@]}"
+NPROC="${SLURM_GPUS_ON_NODE:-}"
+if [[ -z "$NPROC" ]]; then
+    NPROC="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')"
+fi
+if ! [[ "$NPROC" =~ ^[0-9]+$ ]] || [[ "$NPROC" -lt 1 ]]; then
+    echo "ERROR: could not resolve GPU count for torchrun (got ${NPROC:-empty})" >&2
+    exit 1
+fi
+
+echo "$(ts) [train] Starting pipeline: ${PY_ARGS[*]}  nproc=$NPROC"
+if [[ "$NPROC" -gt 1 ]]; then
+    export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
+    export NCCL_ASYNC_ERROR_HANDLING=1
+    torchrun --standalone --nproc_per_node="$NPROC" -m models.diffusion_tsf.train_multivariate_pipeline "${PY_ARGS[@]}"
+else
+    python -u -m models.diffusion_tsf.train_multivariate_pipeline "${PY_ARGS[@]}"
+fi
 
 echo "$(ts) =========================================="
 echo "$(ts) Done"

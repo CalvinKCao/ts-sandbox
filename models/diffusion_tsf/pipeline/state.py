@@ -36,6 +36,8 @@ class PipelineState:
     eval_bench: bool = False
     eval_max_windows: Optional[int] = None
     eval_max_steps: Optional[int] = None
+    eval_num_shards: Optional[int] = None
+    eval_shard_id: Optional[int] = None
     parallel_optuna_workers: int = 1
 
     # -- Model / diffusion knobs --
@@ -88,6 +90,7 @@ class PipelineState:
     eval_sampler: str = "quad_t"
     disable_cross_attention: bool = False
     cross_variate_context_bias: float = 0.0
+    channel_dropout_drop_frac: float = 0.0
     use_window_normalization: bool = True
     window_norm_center: str = "mean"
     window_norm_std_floor: float = 1e-8
@@ -159,6 +162,7 @@ class PipelineState:
     synthetic_samples_min: int = 4_096
     itrans_hp_pretrain_max_epochs: int = 10
     itrans_hp_finetune_max_epochs: int = 10
+    patch_guidance_hp_finetune_max_epochs: int = 10
     diffusion_hp_patience: int = 4
     hp_tune_epochs: int = 20
     hp_tune_patience: int = 15
@@ -230,6 +234,7 @@ class PipelineState:
     diffusion_fine_pretrain_ckpt: Optional[str] = None
     diffusion_patch_refine_pretrain_ckpt: Optional[str] = None
     itrans_finetune_ckpt: Optional[str] = None
+    patch_guidance_finetune_ckpt: Optional[str] = None
     diffusion_finetune_ckpt: Optional[str] = None
     diffusion_coarse_finetune_ckpt: Optional[str] = None
     diffusion_fine_finetune_ckpt: Optional[str] = None
@@ -262,7 +267,8 @@ class PipelineState:
     def resolve_device(self) -> torch.device:
         if self.device is not None:
             return self.device
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        from models.diffusion_tsf.pipeline.train.distributed import device_for_rank
+        self.device = device_for_rank()
         return self.device
 
     def ensure_dirs(self) -> None:
@@ -271,6 +277,8 @@ class PipelineState:
 
     @property
     def guidance_finetune_ckpt(self) -> Optional[str]:
+        if self.guidance_type == "patch_decoder":
+            return self.patch_guidance_finetune_ckpt
         return self.itrans_finetune_ckpt
 
     @property
@@ -280,6 +288,8 @@ class PipelineState:
 
     def default_guidance_finetune_ckpt_path(self) -> str:
         subset_id = self.subset_id or self.dataset
+        if self.guidance_type == "patch_decoder":
+            return os.path.join(self.checkpoint_dir, f"{subset_id}_patch_guidance.pt")
         return os.path.join(self.checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt")
 
     @classmethod

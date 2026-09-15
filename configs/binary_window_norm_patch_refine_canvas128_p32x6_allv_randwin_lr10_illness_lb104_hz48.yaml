@@ -1,0 +1,32 @@
+# Dedicated H=48 with-pretrain sibling of H=60 illness (Killarney 5057771).
+# Same p32 lb104/hz60 donor, L=104, n=10 eval.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10.yaml
+
+geometry:
+  lookback_length: 104
+  forecast_length: 48
+  lookback_overlap: 8
+  diffusion_lookback_cap: 104
+  past_cond_resize_to_horizon: false
+  itrans_lookback_length: 104
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p32x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, from_pretrain, illness, lb104, hz48, overlap8]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-p32x6-allv-randwin-lr10-illness-lb104-hz48
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_illness_lb104_hz48
+  data_subset_by_dataset:
+    illness:
+      subset_id: illness_allv_randwin_lb104_hz48
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+
+phases:
+  - phase: staged_diffusion_pretrain
+    reuse_pretrain_from_config: binary_window_norm_patch_refine_canvas128_p32x6_lb104_hz60_pretrain
+    require_reuse_pretrain: true
+  - phase: staged_eval
+    eval_progress_key: canvas128_p32x6_illness_lb104_hz48_s1_n10_steps4

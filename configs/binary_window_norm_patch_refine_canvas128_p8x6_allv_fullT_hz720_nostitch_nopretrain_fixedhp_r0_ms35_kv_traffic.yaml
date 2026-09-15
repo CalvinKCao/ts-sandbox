@@ -1,0 +1,29 @@
+# Traffic full-T, sole arch change vs p32 kv leaf: patch_refine_patch_height=8.
+# H picked by coverage-crop (unique_segments=false) 10% train-window sweep;
+# train still inherits unique_segments=true. Anchor-only 100% eval, no CRPS.
+# Parent unet_max_chunk_size 16180 OOMs p8 generate on L40S 48GB: cross-attn
+# index_select of K/V is ~20 GiB at that chunk (862 ctx tokens) on top of ~26 GiB
+# already held. 8192 keeps the gather ~10 GiB.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv.yaml
+
+training:
+  unet_max_chunk_size: 8192
+
+wandb:
+  tags: [all_variates, canvas128, p8x6, nopretrain, from_random_init, hz720, nostitch, itrans_guid, fixed_hp, no_optuna, train_time_coverage_1, r0, ms35, cache_cond_kv, eval_frac_1_anchor, compile, traffic]
+
+experiment:
+  name: binary-c128-p8x6-fullT-hz720-nopre-fixedhp-r0-ms35-kv-traffic
+  experiment_name: binary_window_norm_patch_refine_canvas128_p8x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv_traffic
+  patch_refine_patch_height: 8
+  config_nickname: c128-p8-fullT-hz720-r0-ms35-kv-traffic
+
+phases:
+  - phase: staged_eval
+    anchor_only: true
+    eval_test_fraction: 1.0
+    n_samples: 1
+    probabilistic_n_samples: 0
+    tune_sampler: false
+    probabilistic_sampler: anchor
+    eval_progress_key: canvas128_p8x6_fullT_hz720_r0_ms35_kv_traffic_s1_anchor_fulltest

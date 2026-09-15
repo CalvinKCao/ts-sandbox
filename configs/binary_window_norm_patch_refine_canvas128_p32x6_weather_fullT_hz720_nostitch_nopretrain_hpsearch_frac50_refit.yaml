@@ -1,0 +1,98 @@
+# Weather H720 clip-from-max-H: 10-trial lr/batch/EMA search on 50% train
+# windows, then from-scratch 100% retrain of the winner, then 100%
+# anchor-only eval (n_samp=1, skip CRPS). Old weather grid from
+# cap1x2x nopretrain: U=217 x {1,2,4} via grad accum, donor LR ±10x,
+# ema_decay_grid coarse [0.98,0.99,0.995] / fine [0.99,0.995,0.999].
+# Geometry / r=0 / max_scale 3.5 / cache_cond_kv from the p32 fullT leaf.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv.yaml
+replace_phases: true
+
+wandb:
+  tags: [weather, all_variates, canvas128, p32x6, nopretrain, from_random_init, hz720, nostitch, itrans_guid, hpsearch, lr_batch_ema, frac50_refit100, eval_anchor_only, n_samp_1, train_time_coverage_1, r0, ms35, cache_cond_kv, compile]
+
+experiment:
+  dataset: weather
+  name: binary-c128-p32x6-weather-fullT-hz720-hpsearch-frac50-refit
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_weather_fullT_hz720_nostitch_nopretrain_hpsearch_frac50_refit
+  config_nickname: c128-p32-weather-hz720-hpsearch-frac50-refit-anchor
+
+phases:
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    from_random_init: true
+    n_trials: 10
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate_ema
+    hp_train_fraction: 0.5
+    refit_best_max_epochs: 20
+    refit_best_patience: 5
+    max_univariate_micro_batch_by_dataset:
+      weather: 217
+    hp_lr_min: 1.6260630766856958e-5
+    hp_lr_max: 1.6260630766856958e-3
+    effective_univariate_batch_multipliers: [1, 2, 4]
+    ema_decay: 0.99
+    ema_decay_grid: [0.98, 0.99, 0.995]
+    enqueue_trials:
+      - learning_rate: 0.00016260630766856958
+        ema_decay: 0.99
+    min_snr_gamma: 5.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: diffusion_patch_refine_finetune_hp
+    from_random_init: true
+    n_trials: 10
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate_ema
+    hp_train_fraction: 0.5
+    refit_best_max_epochs: 20
+    refit_best_patience: 5
+    max_univariate_micro_batch_by_dataset:
+      weather: 217
+    hp_lr_min: 7.817554354066733e-5
+    hp_lr_max: 7.817554354066733e-3
+    effective_univariate_batch_multipliers: [1, 2, 4]
+    ema_decay: 0.995
+    ema_decay_grid: [0.99, 0.995, 0.999]
+    enqueue_trials:
+      - learning_rate: 0.0007817554354066733
+        ema_decay: 0.995
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: staged_eval
+    anchor_only: true
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_progress_key: canvas128_p32x6_weather_hz720_hpsearch_frac50_refit_s1_n1_anchor
+    n_samples: 1
+    probabilistic_n_samples: 10
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 4
+    batch_size_by_dataset:
+      weather: 1
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true

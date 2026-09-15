@@ -15,7 +15,7 @@ from models.diffusion_tsf.pipeline.train.diffusion_loop import (
     train_diffusion_epoch,
     validate_diffusion_epoch,
 )
-from models.diffusion_tsf.realts import get_synthetic_dataloader
+from models.diffusion_tsf.realts import generator_names_for_state, get_synthetic_dataloader
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,7 @@ def pretrain_diffusion(
         skip_cross_var_aug=(state.n_variates > 32),
         val_tail_n=n_val,
         synthetic_epoch_capacity=epoch_cap,
+        generator_names=generator_names_for_state(state),
     )
 
     dataset = synthetic_loader.dataset

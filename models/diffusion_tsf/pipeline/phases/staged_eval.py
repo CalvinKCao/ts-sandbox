@@ -51,6 +51,26 @@ logger = logging.getLogger(__name__)
 STAGED_PREFIX_HORIZONS = (96, 192, 336, 720)
 
 
+def _staged_anchor_global_norm(
+    fine_model,
+    coarse_out: Dict[str, Any],
+    fine_out: Dict[str, Any],
+) -> np.ndarray:
+    """Decode chained coarse→refine/fine forecast in global (window/variate) norm."""
+    pred = fine_out.get("prediction_global_norm", fine_out.get("prediction"))
+    if pred is not None:
+        if isinstance(pred, np.ndarray):
+            return pred
+        return pred.detach().cpu().numpy()
+    if getattr(fine_model.config, "diffusion_stage", "") == "patch_refine":
+        raise RuntimeError("patch_refine eval output missing prediction_global_norm")
+    coarse_2d = coarse_out["future_2d_coarse"]
+    fine_2d = fine_out["future_2d_fine"]
+    pred = fine_model.decode_dual_from_2d(coarse_2d, fine_2d, from_diffusion=False)
+    pred = fine_model._strip_overlap_and_upsample_repr(pred)
+    return pred.detach().cpu().numpy()
+
+
 def _prefix_horizons_for_length(horizon: int) -> Tuple[int, ...]:
     """Prefixes strictly shorter than H (full-H stays on unsuffixed keys)."""
     h = int(horizon)
@@ -135,7 +155,7 @@ def _prefix_wandb_metrics(metrics: Dict[str, float], *, anchor_only: bool) -> Di
     return out
 
 
-def _eval_artifact_tag(phase: PipelinePhase) -> str:
+def _eval_artifact_tag(phase: PipelinePhase, state: PipelineState | None = None) -> str:
     stride = int(phase.require("test_stride"))
     if bool(phase.get("anchor_only", False)):
         base = f"s{stride}_anchor"
@@ -145,8 +165,45 @@ def _eval_artifact_tag(phase: PipelinePhase) -> str:
     # Keep 10% artifact names stable; a _fulltest key must not look like the
     # completed 10% run or should_skip would drop the 100% eval.
     if key.endswith("_fulltest"):
-        return f"{base}_fulltest"
+        base = f"{base}_fulltest"
+    shard = _eval_shard_spec(state) if state is not None else None
+    if shard is not None:
+        num_shards, shard_id = shard
+        base = f"{base}_shard{shard_id}of{num_shards}"
     return base
+
+
+def _eval_shard_spec(state: PipelineState | None) -> tuple[int, int] | None:
+    if state is None:
+        return None
+    n = getattr(state, "eval_num_shards", None)
+    i = getattr(state, "eval_shard_id", None)
+    if n is None and i is None:
+        return None
+    if n is None or i is None:
+        raise ValueError("eval_num_shards and eval_shard_id must both be set")
+    num_shards = int(n)
+    shard_id = int(i)
+    if num_shards < 1:
+        raise ValueError(f"eval_num_shards must be >= 1, got {num_shards}")
+    if not (0 <= shard_id < num_shards):
+        raise ValueError(
+            f"eval_shard_id must be in [0, {num_shards}), got {shard_id}"
+        )
+    return num_shards, shard_id
+
+
+def _contiguous_shard_slice(n_items: int, shard_id: int, num_shards: int) -> slice:
+    """Disjoint contiguous slice; last shard takes the remainder."""
+    if n_items < 1:
+        raise ValueError(f"cannot shard empty eval set (n={n_items})")
+    start = shard_id * n_items // num_shards
+    end = n_items if shard_id == num_shards - 1 else (shard_id + 1) * n_items // num_shards
+    if start >= end:
+        raise ValueError(
+            f"empty eval shard {shard_id}/{num_shards} for n={n_items}"
+        )
+    return slice(start, end)
 
 
 def _eval_checkpoint_dir(state: PipelineState) -> str:
@@ -414,6 +471,10 @@ def _eval_progress_dir(
     key = phase.get("eval_progress_key")
     if not key:
         return None
+    shard = _eval_shard_spec(state)
+    if shard is not None:
+        num_shards, shard_id = shard
+        key = f"{key}_shard{shard_id}of{num_shards}"
     results_root = Path(state.results_dir).resolve()
     store = (
         results_root.parents[1]
@@ -752,7 +813,7 @@ class StagedEvalPhase(PipelinePhase):
             logger.info("  [%s] forcing eval refresh for visualizations", self.name)
             return False
         subset_id = state.subset_id or state.dataset
-        tag = _eval_artifact_tag(self)
+        tag = _eval_artifact_tag(self, state)
         partial = os.path.join(
             state.results_dir, "partials", f"{state.dataset}_staged_{tag}.json",
         )
@@ -910,7 +971,21 @@ class StagedEvalPhase(PipelinePhase):
                         future = future[..., K:]
                     y_true_all.append(future.cpu().numpy())
 
-                    torch.manual_seed(state.seed + batch_idx)
+                    shard = _eval_shard_spec(state)
+                    if shard is not None:
+                        if batch_n != 1:
+                            raise RuntimeError(
+                                "eval sharding seeds by global window id; "
+                                f"batched generate (n={batch_n}) would silently "
+                                "rematch wrong. Set staged_eval batch size to 1."
+                            )
+                        wi0 = int(batch_window_indices[0])
+                        det_seed = state.seed + wi0
+                        prob_seed = state.seed + wi0 * 1009
+                    else:
+                        det_seed = state.seed + batch_idx
+                        prob_seed = state.seed + batch_idx * 1009
+                    torch.manual_seed(det_seed)
                     batch_t0 = time.perf_counter()
                     with eval_bench_span("det"):
                         coarse_det = coarse_model.generate(past, **det_kwargs)
@@ -937,7 +1012,7 @@ class StagedEvalPhase(PipelinePhase):
                         with eval_bench_span("prob"):
                             # Expand window batch across independent MC samples so unique-seg
                             # AR (and other generate paths) fill the GPU in one forward chain.
-                            torch.manual_seed(state.seed + batch_idx * 1009)
+                            torch.manual_seed(prob_seed)
                             with eval_bench_span("mc_expand"):
                                 past_exp = past.repeat_interleave(prob_samples, dim=0)
                             coarse_sample = coarse_model.generate(past_exp, **prob_kwargs)
@@ -1105,6 +1180,11 @@ class StagedEvalPhase(PipelinePhase):
             load_wrapped_guidance,
             dataset_window_lengths,
         )
+        from models.diffusion_tsf.pipeline.train.distributed import barrier, is_distributed, is_rank0
+
+        if is_distributed() and not is_rank0():
+            barrier()
+            return state
 
         device = state.resolve_device()
         subset_id = state.subset_id or state.dataset
@@ -1158,9 +1238,8 @@ class StagedEvalPhase(PipelinePhase):
         source_checkpoint_dir = _eval_checkpoint_dir(state)
         ft_guidance_ckpt = state.guidance_finetune_ckpt
         if not ft_guidance_ckpt or not os.path.exists(ft_guidance_ckpt):
-            ft_guidance_ckpt = os.path.join(
-                source_checkpoint_dir, f"{subset_id}_itransformer_finetuned.pt"
-            )
+            guide_name = os.path.basename(state.default_guidance_finetune_ckpt_path())
+            ft_guidance_ckpt = os.path.join(source_checkpoint_dir, guide_name)
         needs_guidance = state.needs_guidance
         if needs_guidance and not os.path.exists(ft_guidance_ckpt):
             raise FileNotFoundError(f"Missing finetuned guidance checkpoint: {ft_guidance_ckpt}")
@@ -1182,7 +1261,28 @@ class StagedEvalPhase(PipelinePhase):
         fine_model = self._load_model(state, "patch_refine", guidance, n_iv, device)
 
         batch_size = _eval_window_batch_size(self, state)
-        if state.smoke_test:
+        shard = _eval_shard_spec(state)
+        if shard is not None:
+            if state.smoke_test:
+                raise ValueError("eval sharding is incompatible with --smoke-test")
+            if getattr(state, "eval_max_windows", None) is not None:
+                raise ValueError(
+                    "eval sharding cannot combine with --max-samples / eval_max_windows"
+                )
+            num_shards, shard_id = shard
+            n_full = len(full_test_ds)
+            shard_slice = _contiguous_shard_slice(n_full, shard_id, num_shards)
+            shard_idx = list(range(n_full))[shard_slice]
+            final_ds = Subset(full_test_ds, shard_idx)
+            logger.info(
+                "[%s] eval shard %d/%d windows [%d:%d] of %d "
+                "(contiguous full test; eval_test_fraction ignored)",
+                subset_id, shard_id, num_shards,
+                shard_slice.start, shard_slice.stop, n_full,
+            )
+            prob_samples = 0 if anchor_only else int(self.require("probabilistic_n_samples"))
+            default_steps = 1 if anchor_only else int(self.require("probabilistic_num_inference_steps"))
+        elif state.smoke_test:
             n_smoke = min(2, len(full_test_ds))
             final_ds = Subset(full_test_ds, list(range(n_smoke)))
             prob_samples = 1
@@ -1452,7 +1552,7 @@ class StagedEvalPhase(PipelinePhase):
         os.makedirs(partial_dir, exist_ok=True)
         os.makedirs(raw_dir, exist_ok=True)
         os.makedirs(nested_dir, exist_ok=True)
-        tag = _eval_artifact_tag(self)
+        tag = _eval_artifact_tag(self, state)
         with open(os.path.join(nested_dir, f"worst_windows_{tag}.json"), "w") as f:
             json.dump(worst_manifest, f, indent=2)
         with open(os.path.join(partial_dir, f"{state.dataset}_staged_{tag}.json"), "w") as f:
@@ -1700,4 +1800,6 @@ class StagedEvalPhase(PipelinePhase):
             metrics.get("anchor_mae", float("nan")),
             metrics.get("crps", float("nan")),
         )
+        if is_distributed():
+            barrier()
         return state

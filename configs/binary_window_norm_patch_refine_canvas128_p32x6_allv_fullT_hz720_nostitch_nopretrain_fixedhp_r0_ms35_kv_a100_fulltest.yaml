@@ -1,0 +1,8 @@
+# 100% test eval from trained r0_ms35_kv_a100 ckpts (p32 hz720).
+# New eval_progress_key so 10% eval_resume is not treated as done.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv_a100.yaml
+
+phases:
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    eval_progress_key: canvas128_p32x6_fullT_hz720_r0_ms35_kv_a100_s1_n10_steps4_fulltest

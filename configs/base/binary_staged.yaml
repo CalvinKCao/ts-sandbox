@@ -13,6 +13,10 @@ training:
   synthetic_samples_hp_tune: 20000
   synthetic_samples_diff_tune: 10000
   synthetic_samples_min: 4096
+  # null = all default RealTS generators (IFFTB, seasonal_periodicity, STB,
+  # PWB, TWDB, RWB, LGB). A list enables only those names (unknown/empty fail).
+  # Opt-in `linear` is a straight-line ramp, not in the default mix.
+  synthetic_generators: null
   n_itrans_hp_trials: 10
   n_diffusion_hp_trials: 8
   n_finetune_hp_trials: 5

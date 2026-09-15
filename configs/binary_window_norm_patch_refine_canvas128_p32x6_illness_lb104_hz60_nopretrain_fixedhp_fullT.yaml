@@ -1,0 +1,86 @@
+# Illness lb104/hz60, 100% train, paper-fixed DiT HPs (no Optuna).
+# H=60 is the ILI paper max; clip prefixes cover 24/36/48.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_illness_lb104_hz60_nopretrain.yaml
+replace_phases: true
+
+wandb:
+  tags: [all_variates, canvas128, p32x6, nopretrain, from_random_init, illness, lb104, hz60, overlap8, itrans_guid, fixed_hp, no_optuna, train_time_coverage_1]
+
+experiment:
+  name: binary-c128-p32x6-illness-lb104-hz60-nopre-fixedhp-fullT
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_illness_lb104_hz60_nopretrain_fixedhp_fullT
+  guidance_type: itransformer
+  train_time_coverage: 1.0
+  config_nickname: c128-p32-illness-lb104-hz60-fullT-fixedhp
+  data_subset_by_dataset:
+    illness:
+      subset_id: illness_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+
+phases:
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    from_random_init: true
+    n_trials: 1
+    max_epochs: 20
+    patience: 5
+    search_space: fixed
+    max_univariate_micro_batch_by_dataset:
+      illness: 217
+    fixed_tuned_params:
+      learning_rate: 1.626e-4
+      ema_decay: 0.99
+      binary_noise_schedule: linear
+      loss_weighting: none
+      min_snr_gamma: 5.0
+      prediction_target: epsilon
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+    fixed_tuned_params_by_dataset:
+      illness: {target_univariate_batch: 217}
+
+  - phase: diffusion_patch_refine_finetune_hp
+    from_random_init: true
+    n_trials: 1
+    max_epochs: 20
+    patience: 5
+    search_space: fixed
+    max_univariate_micro_batch_by_dataset:
+      illness: 217
+    fixed_tuned_params:
+      learning_rate: 7.818e-4
+      ema_decay: 0.995
+      binary_noise_schedule: linear
+      loss_weighting: none
+      min_snr_gamma: 2.0
+      prediction_target: epsilon
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+    fixed_tuned_params_by_dataset:
+      illness: {target_univariate_batch: 217}
+
+  - phase: staged_eval
+    anchor_only: false
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_progress_key: canvas128_p32x6_illness_lb104_hz60_fullT_fixedhp_s1_n10_steps4
+    n_samples: 1
+    probabilistic_n_samples: 10
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 4
+    batch_size_by_dataset:
+      illness: 5
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true

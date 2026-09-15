@@ -42,8 +42,9 @@ EVAL_WINDOW_SEED = 42
 
 # Informer/Autoformer/PatchTST/iTransformer long-term grids (PatchTST ILI;
 # iTransformer Table 9 PEMS 12/24/48/96, not the PDF {12,24,36,48} typo).
-# dynamic: no paper 4-horizon grid; use the binary hz720 quartet so 10% starts
-# are a subset of the H=720 pool.
+# MMPD Dynamic paper uses L=600 and {60,120,180,300}; PatchTST/iTransformer
+# have no Dynamic table, so paper_horizons(dynamic) stays the 96/192/336/720
+# quartet (binary hz720 clip-prefix protocol).
 PAPER_HORIZONS: Dict[str, Tuple[int, ...]] = {
     "illness": (24, 36, 48, 60),
     "PeMS": (12, 24, 48, 96),

@@ -1,0 +1,10 @@
+# PeMS 100% eval shards. 10% (330/3304) is complete; this key is distinct.
+# Fine pack is ~61400; use probe fine_max 31080 (not min(coarse,fine)=2815).
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_pems_lb96_hz96_nopretrain_fixedhp_r0_ms35_kv_a100.yaml
+
+phases:
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    eval_progress_key: canvas128_p32x6_pems_lb96_hz96_r0_ms35_kv_a100_s1_n10_steps4_fulltest
+    batch_size_by_dataset:
+      PeMS: 1

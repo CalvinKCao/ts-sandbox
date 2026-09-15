@@ -35,7 +35,7 @@ if project_root not in sys.path:
 from models.diffusion_tsf.config import DiffusionTSFConfig
 from models.diffusion_tsf.pipeline.state import PipelineState
 from models.diffusion_tsf.diffusion_model import DiffusionTSF
-from models.diffusion_tsf.realts import get_synthetic_dataloader
+from models.diffusion_tsf.realts import generator_names_for_state, get_synthetic_dataloader
 from models.diffusion_tsf.ordinal_window_norm import (
     build_global_ladder_from_training,
 )
@@ -53,7 +53,8 @@ def get_device(state: PipelineState) -> torch.device:
 
 
 def unwrap_model(model: nn.Module) -> nn.Module:
-    return model
+    from models.diffusion_tsf.pipeline.train.distributed import unwrap_module
+    return unwrap_module(model)
 
 
 def require_tuned_param(params: Dict, key: str, stage_name: str):
@@ -90,7 +91,9 @@ def setup_logging():
     """Setup logging - only coordinator logs to file/stdout."""
     from models.diffusion_tsf.pipeline.logging_utils import configure_pipeline_logging
 
-    is_main = is_main_process()
+    from models.diffusion_tsf.pipeline.train.distributed import is_rank0
+
+    is_main = is_main_process() and is_rank0()
     level = logging.INFO if is_main else logging.WARNING
     handlers = []
     if is_main:
@@ -335,6 +338,16 @@ def wrap_itrans_guidance(
     return iTransformerGuidance(model, seq_len=int(seq_len), pred_len=int(pred_len))
 
 
+from models.diffusion_tsf.pipeline.patch_guidance_train import (  # noqa: E402
+    _checkpoint_is_patch_guidance,
+    _patch_guidance_batch,
+    create_patch_guidance_stack,
+    load_patch_guidance_from_checkpoint,
+    run_patch_guidance_finetune_hp_tuning,
+    wrap_patch_guidance,
+)
+
+
 def load_wrapped_guidance(
     state: PipelineState,
     ckpt_path: str,
@@ -345,22 +358,46 @@ def load_wrapped_guidance(
     dataset_lookback: Optional[int] = None,
     dataset_horizon: Optional[int] = None,
 ):
-    """Load finetuned iTransformer encoder tokens for DiT x-attn."""
+    """Load finetuned patch_decoder or iTransformer encoder tokens for DiT x-attn."""
+    from models.diffusion_tsf.guidance import PatchDecoderGuidance
+
     gtype = guidance_type or state.guidance_type
-    if gtype != "itransformer":
+    if gtype == "itransformer":
+        ds_lb = dataset_lookback
+        ds_hz = dataset_horizon
+        if ds_lb is None or ds_hz is None:
+            resolved_lb, resolved_hz = dataset_window_lengths(state, state.dataset)
+            ds_lb = ds_lb if ds_lb is not None else resolved_lb
+            ds_hz = ds_hz if ds_hz is not None else resolved_hz
+        seq_len, pred_len = itrans_model_lengths(state, int(ds_lb), int(ds_hz))
+        model = load_itransformer_from_checkpoint(state, ckpt_path, num_vars, device)
+        return wrap_itrans_guidance(model, state, seq_len=seq_len, pred_len=pred_len)
+    if gtype != "patch_decoder":
         raise ValueError(
-            f"Only guidance_type='itransformer' is supported; got {gtype!r}. "
-            "Patch-decoder guidance has been removed."
+            f"guidance_type must be 'patch_decoder' or 'itransformer'; got {gtype!r}"
         )
-    ds_lb = dataset_lookback
-    ds_hz = dataset_horizon
-    if ds_lb is None or ds_hz is None:
-        resolved_lb, resolved_hz = dataset_window_lengths(state, state.dataset)
-        ds_lb = ds_lb if ds_lb is not None else resolved_lb
-        ds_hz = ds_hz if ds_hz is not None else resolved_hz
-    seq_len, pred_len = itrans_model_lengths(state, int(ds_lb), int(ds_hz))
-    model = load_itransformer_from_checkpoint(state, ckpt_path, num_vars, device)
-    return wrap_itrans_guidance(model, state, seq_len=seq_len, pred_len=pred_len)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    if not _checkpoint_is_patch_guidance(ckpt):
+        raise ValueError(
+            f"guidance_type=patch_decoder but checkpoint is not patch guidance: {ckpt_path}"
+        )
+    if state.use_ordinal_window_norm:
+        if state.ordinal_ladder is None:
+            raise ValueError(
+                "state.ordinal_ladder must be set before loading ordinal patch guidance"
+            )
+        if not bool(ckpt.get("ordinal_patch_guidance_unit_ranks", False)):
+            raise ValueError(
+                "Patch guidance checkpoint was not trained with unit-rank ordinal "
+                "targets. Delete this patch guidance checkpoint and retrain it."
+            )
+    stack = load_patch_guidance_from_checkpoint(
+        state, ckpt_path, num_vars, device, ckpt=ckpt,
+    )
+    wrapped = wrap_patch_guidance(state, stack)
+    if not isinstance(wrapped, PatchDecoderGuidance):
+        raise TypeError(f"expected PatchDecoderGuidance, got {type(wrapped)}")
+    return wrapped
 
 
 def _set_ordinal_loader_mode(state: PipelineState, model, loader, *, eval_mode: bool = False) -> None:
@@ -749,11 +786,19 @@ def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Di
 
 def _resolve_guidance_type(state: PipelineState, guidance_model, override: Optional[str] = None) -> str:
     """Match DiffusionTSF routing to the attached guidance, not YAML alone."""
-    gtype = str(override) if override is not None else str(state.guidance_type)
-    if gtype != "itransformer":
+    from models.diffusion_tsf.guidance import PatchDecoderGuidance
+
+    if override is not None:
+        gtype = str(override)
+    elif isinstance(guidance_model, PatchDecoderGuidance):
+        gtype = "patch_decoder"
+    elif guidance_model is not None:
+        gtype = "itransformer"
+    else:
+        gtype = str(state.guidance_type)
+    if gtype not in {"itransformer", "patch_decoder"}:
         raise ValueError(
-            f"Only guidance_type='itransformer' is supported; got {gtype!r}. "
-            "Patch-decoder guidance has been removed."
+            f"guidance_type must be 'itransformer' or 'patch_decoder'; got {gtype!r}"
         )
     return gtype
 
@@ -1397,6 +1442,7 @@ def run_itransformer_hp_tuning(
         skip_cross_var_aug=(state.n_variates > 32),
         val_tail_n=n_val,
         synthetic_epoch_capacity=epoch_cap,
+        generator_names=generator_names_for_state(state),
     )
 
     dataset = synthetic_loader.dataset

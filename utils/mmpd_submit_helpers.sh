@@ -8,7 +8,7 @@ mmpd_dataset_file_path() {
         ETTm1) echo "$repo/datasets/ETT-small/ETTm1.csv" ;;
         ETTm2) echo "$repo/datasets/ETT-small/ETTm2.csv" ;;
         illness) echo "$repo/datasets/illness/national_illness.csv" ;;
-        exchange_rate) echo "$repo/datasets/exchange_rate/exchange_rate.csv" ;;
+        exchange|exchange_rate) echo "$repo/datasets/exchange_rate/exchange_rate.csv" ;;
         weather) echo "$repo/datasets/weather/weather.csv" ;;
         electricity) echo "$repo/datasets/electricity/electricity.csv" ;;
         traffic) echo "$repo/datasets/traffic/traffic.csv" ;;
@@ -94,4 +94,24 @@ mmpd_dataset_worker_extra_args() {
     case "$ds" in
         dynamic) printf '%s\n' --test-max-items 512 ;;
     esac
+}
+
+mmpd_pick_l40s_partition() {
+    local need_s="$1" part max_wall max_s best="" best_s=0
+    while read -r part max_wall; do
+        [[ "$part" == gpubase_l40s_b* ]] || continue
+        part="${part%\*}"
+        max_s="$(_mmpd_wall_to_sec "$max_wall")"
+        if [[ "$max_s" -ge "$need_s" ]]; then
+            if [[ -z "$best" || "$max_s" -lt "$best_s" ]]; then
+                best="$part"
+                best_s="$max_s"
+            fi
+        fi
+    done < <(sinfo -h -o "%P %l" 2>/dev/null || true)
+    if [[ -z "$best" ]]; then
+        echo "ERROR: no gpubase_l40s_b* partition allows wall ${need_s}s" >&2
+        return 1
+    fi
+    echo "$best"
 }

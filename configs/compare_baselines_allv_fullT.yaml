@@ -1,0 +1,122 @@
+# Uncapped 100% train/val windows (stride 1) for MMPD / iTransformer / PatchTST.
+# Same chronological splits as the binary campaign; no train_max_windows /
+# val_max_windows / MMPD_MAX_TRAIN_WINDOWS. Not a binary training leaf.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x.yaml
+replace_phases: true
+
+experiment:
+  name: compare-baselines-allv-fullT
+  experiment_name: compare_baselines_allv_fullT
+  seed: 42
+  data_subset_by_dataset:
+    ETTh1:
+      subset_id: ETTh1_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+    ETTh2:
+      subset_id: ETTh2_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+    ETTm1:
+      subset_id: ETTm1_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+    ETTm2:
+      subset_id: ETTm2_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+    weather:
+      subset_id: weather_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+    electricity:
+      subset_id: electricity_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+    traffic:
+      subset_id: traffic_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+    exchange_rate:
+      subset_id: exchange_rate_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+    solar_Alabama:
+      subset_id: solar_Alabama_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+    PeMS:
+      subset_id: PeMS_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+    illness:
+      subset_id: illness_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+    dynamic:
+      subset_id: dynamic_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+
+phases:
+  - phase: staged_eval
+    eval_test_fraction: 0.1
+    eval_max_windows_by_dataset: null
+    test_stride: 1
+    skip_eval_visualizations: true
+    eval_progress_key: compare_baselines_allv_fullT
+    n_samples: 1
+    probabilistic_n_samples: 10
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 4
+    gmm_components: 10
+    topk_max: 3
