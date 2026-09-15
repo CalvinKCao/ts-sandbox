@@ -936,6 +936,24 @@ def create_diffusion_model(
             fullgraph=False,
             dynamic=True,
         )
+        inner = getattr(model.noise_predictor, "_orig_mod", model.noise_predictor)
+        if hasattr(inner, "encode_cached_prefix") and hasattr(inner, "forward_cached_crops"):
+            logger.info(
+                "torch.compile encode_cached_prefix + forward_cached_crops "
+                "(inductor, fullgraph=False, dynamic=False)"
+            )
+            inner.encode_cached_prefix = torch.compile(
+                inner.encode_cached_prefix,
+                backend="inductor",
+                fullgraph=False,
+                dynamic=False,
+            )
+            inner.forward_cached_crops = torch.compile(
+                inner.forward_cached_crops,
+                backend="inductor",
+                fullgraph=False,
+                dynamic=False,
+            )
     return model
 
 

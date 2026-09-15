@@ -462,15 +462,19 @@ def _resolve_eval_max_windows(phase: PipelinePhase, state: PipelineState):
 
 def _eval_progress_dir(
     phase: PipelinePhase, state: PipelineState, subset_id: str,
-) -> Path | None:
+) -> Path:
     """Job-independent resume dir: results/eval_resume/<key>/<subset_id>/.
 
-    Holds windows.jsonl plus preds/block_*.npz (full-H 1D forecasts) so an
-    interrupted eval can skip completed origins without regenerating.
+    Holds windows.jsonl plus preds/block_*.npz (y_true, det, and n-sample
+    tensors) so an interrupted eval can skip completed origins.
     """
     key = phase.get("eval_progress_key")
-    if not key:
-        return None
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError(
+            "staged_eval.eval_progress_key is required so full window preds "
+            "(y_true, prediction_global_norm, samples) flush under "
+            "results/eval_resume/<key>/ as eval proceeds"
+        )
     shard = _eval_shard_spec(state)
     if shard is not None:
         num_shards, shard_id = shard
@@ -535,6 +539,7 @@ def _write_eval_pred_block(
     deterministic: np.ndarray,
     samples: np.ndarray | None,
     test_stride: int,
+    require_samples: bool = False,
 ) -> str:
     """Write full-H 1D preds for one flushed origin batch. Returns relpath."""
     n = len(window_indices)
@@ -564,6 +569,11 @@ def _write_eval_pred_block(
         "prediction_global_norm": np.asarray(deterministic, dtype=np.float32),
         "pred_shape": np.asarray(deterministic.shape, dtype=np.int64),
     }
+    if require_samples and samples is None:
+        raise ValueError(
+            "probabilistic eval must dump samples with shape (n,V,S,H); "
+            "got samples=None"
+        )
     if samples is not None:
         if samples.ndim != 4:
             raise ValueError(f"samples must be (n,V,S,H), got {samples.shape}")
@@ -575,6 +585,8 @@ def _write_eval_pred_block(
             raise ValueError(
                 f"samples {samples.shape} incompatible with y_true {y_true.shape}"
             )
+        if int(samples.shape[2]) < 1:
+            raise ValueError(f"samples S must be >= 1, got {samples.shape}")
         arrays["samples"] = np.asarray(samples, dtype=np.float32)
         arrays["sample_shape"] = np.asarray(samples.shape, dtype=np.int64)
     rel = _pred_block_relpath(window_indices)
@@ -762,6 +774,7 @@ def _flush_eval_progress_block(
     metric_records: Sequence[Dict[str, Any]],
     n_planned: int,
     extra_summary: Dict[str, Any],
+    require_samples: bool = False,
 ) -> Dict[str, Any]:
     """Persist preds then jsonl for one block/batch; fsync so SIGTERM keeps it."""
     if len(metric_records) != len(window_indices):
@@ -773,6 +786,7 @@ def _flush_eval_progress_block(
         deterministic=deterministic,
         samples=samples,
         test_stride=test_stride,
+        require_samples=require_samples,
     )
     h = int(y_true.shape[-1])
     stride = int(test_stride)
@@ -1010,14 +1024,14 @@ class StagedEvalPhase(PipelinePhase):
                     if not anchor_only:
                         prob_t0 = time.perf_counter()
                         with eval_bench_span("prob"):
-                            # Expand window batch across independent MC samples so unique-seg
-                            # AR (and other generate paths) fill the GPU in one forward chain.
+                            # Shared-prefix pack: one past (V parents), n tiled sample crops.
                             torch.manual_seed(prob_seed)
-                            with eval_bench_span("mc_expand"):
-                                past_exp = past.repeat_interleave(prob_samples, dim=0)
-                            coarse_sample = coarse_model.generate(past_exp, **prob_kwargs)
+                            coarse_sample = coarse_model.generate(
+                                past, n_samples=prob_samples, **prob_kwargs,
+                            )
                             fine_sample = fine_model.generate(
-                                past_exp,
+                                past,
+                                n_samples=prob_samples,
                                 future_coarse_2d=coarse_sample["future_2d_coarse"],
                                 **prob_kwargs,
                             )
@@ -1044,7 +1058,7 @@ class StagedEvalPhase(PipelinePhase):
                         det_s,
                         prob_s,
                         prob_samples,
-                        " anchor-only" if anchor_only else " parallel",
+                        " anchor-only" if anchor_only else " efficient-pack",
                         batch_s,
                         elapsed,
                         eta_s,
@@ -1106,6 +1120,7 @@ class StagedEvalPhase(PipelinePhase):
                                 "anchor_only": anchor_only,
                                 "subset_id": subset_id,
                             },
+                            require_samples=not anchor_only,
                         )
                         logger.info(
                             "[%s] eval progress %d/%d anchor_mse=%.4f %s",

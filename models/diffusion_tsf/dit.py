@@ -20,7 +20,7 @@ Design (matches user spec):
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -106,6 +106,8 @@ class _CrossAttention(nn.Module):
         self.kv = nn.Linear(dim, 2 * dim, bias=True)
         self.proj = nn.Linear(dim, dim)
         self.drop = drop
+        # Expand/group shared-window K/V instead of index_select-copying to every Q row.
+        self.broadcast_uniform_ctx_kv = False
 
     def forward(
         self,
@@ -140,35 +142,75 @@ class _CrossAttention(nn.Module):
                     "context_window_indices must have one entry per query row, got "
                     f"{tuple(context_window_indices.shape)} for B={B}"
                 )
-            # Project K/V once per parent, then index them to patch rows. This
-            # keeps the shared frozen context semantics but reduces the former
-            # per-parent nonzero/SDPA loop to one batched attention call.
-            k = k.index_select(0, context_window_indices)
-            v = v.index_select(0, context_window_indices)
-            bias_rows = (
-                attn_bias[:, None, None, :].to(dtype=q.dtype)
-                if attn_bias is not None
-                else None
-            )
-            if pad_bias is not None:
-                pad_rows = pad_bias.index_select(0, context_window_indices)[:, None, None, :]
-                bias_rows = pad_rows if bias_rows is None else bias_rows + pad_rows
-            if return_attn_weights:
-                logits = torch.matmul(q, k.transpose(-2, -1)) * (self.head_dim ** -0.5)
-                if bias_rows is not None:
-                    logits = logits + bias_rows
-                weights = torch.softmax(logits, dim=-1)
-                out = torch.matmul(weights, v)
-                mean_weights = weights.mean(dim=(1, 2))
-            else:
+            # Project K/V once per parent window. Identical rows share a view
+            # (expand) instead of index_select-copying (B, V) K/V for every crop.
+            drop_p = self.drop if self.training else 0.0
+            n_unique = 0
+            uniq = None
+            inv = None
+            if bool(getattr(self, "broadcast_uniform_ctx_kv", True)) and not return_attn_weights:
+                uniq, inv = torch.unique(context_window_indices, return_inverse=True)
+                n_unique = int(uniq.numel())
+            if n_unique == 1:
+                w = int(uniq[0].item())
+                k = k[w:w + 1].expand(B, -1, -1, -1)
+                v = v[w:w + 1].expand(B, -1, -1, -1)
+                bias_rows = (
+                    attn_bias[:, None, None, :].to(dtype=q.dtype)
+                    if attn_bias is not None
+                    else None
+                )
+                if pad_bias is not None:
+                    pad_rows = pad_bias[w:w + 1].expand(B, -1)[:, None, None, :]
+                    bias_rows = pad_rows if bias_rows is None else bias_rows + pad_rows
                 out = F.scaled_dot_product_attention(
-                    q, k, v, attn_mask=bias_rows,
-                    dropout_p=self.drop if self.training else 0.0,
+                    q, k, v, attn_mask=bias_rows, dropout_p=drop_p,
+                )
+            elif 1 < n_unique < B:
+                out = q.new_empty(B, self.num_heads, N, self.head_dim)
+                for i in range(n_unique):
+                    sel = (inv == i).nonzero(as_tuple=True)[0]
+                    n_i = int(sel.numel())
+                    wi = int(uniq[i].item())
+                    qi = q.index_select(0, sel)
+                    ki = k[wi:wi + 1].expand(n_i, -1, -1, -1)
+                    vi = v[wi:wi + 1].expand(n_i, -1, -1, -1)
+                    bias_i = None
+                    if attn_bias is not None:
+                        bias_i = attn_bias.index_select(0, sel)[:, None, None, :].to(dtype=q.dtype)
+                    if pad_bias is not None:
+                        pad_i = pad_bias[wi:wi + 1].expand(n_i, -1)[:, None, None, :]
+                        bias_i = pad_i if bias_i is None else bias_i + pad_i
+                    oi = F.scaled_dot_product_attention(
+                        qi, ki, vi, attn_mask=bias_i, dropout_p=drop_p,
+                    )
+                    out.index_copy_(0, sel, oi)
+            else:
+                k = k.index_select(0, context_window_indices)
+                v = v.index_select(0, context_window_indices)
+                bias_rows = (
+                    attn_bias[:, None, None, :].to(dtype=q.dtype)
+                    if attn_bias is not None
+                    else None
+                )
+                if pad_bias is not None:
+                    pad_rows = pad_bias.index_select(0, context_window_indices)[:, None, None, :]
+                    bias_rows = pad_rows if bias_rows is None else bias_rows + pad_rows
+                if return_attn_weights:
+                    logits = torch.matmul(q, k.transpose(-2, -1)) * (self.head_dim ** -0.5)
+                    if bias_rows is not None:
+                        logits = logits + bias_rows
+                    weights = torch.softmax(logits, dim=-1)
+                    out = torch.matmul(weights, v)
+                    mean_weights = weights.mean(dim=(1, 2))
+                    out = out.transpose(1, 2).reshape(B, N, C)
+                    out = self.proj(out)
+                    return out, mean_weights
+                out = F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=bias_rows, dropout_p=drop_p,
                 )
             out = out.transpose(1, 2).reshape(B, N, C)
             out = self.proj(out)
-            if return_attn_weights:
-                return out, mean_weights
             return out
         if ctx_batch != B:
             raise ValueError(f"ctx batch {ctx_batch} != query batch {B}")
@@ -540,7 +582,11 @@ class FactorizedDiT(nn.Module):
         self.use_patch_abs_embedding = use_patch_abs_embedding
         self.cond_patch_size = cond_patch_size or patch_size
         # Eval-only: prefix-cache cond K/V. Default off = bidirectional 228-token SDPA.
+        # When on, generate encodes V parents once per t and tiles crops against that
+        # prefix (cond_parent_index wraps 0..V-1). There is no xerox / per-crop parent path.
         self.cache_cond_kv = False
+        self.cross_attn_own_variate_only = False
+        self.max_cond_chunk = 0
 
         self.x_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
         self.cond_embed = nn.Conv2d(
@@ -739,6 +785,16 @@ class FactorizedDiT(nn.Module):
                         f"{encoder_hidden_states.shape[0]} != DiT batch {BV}"
                     )
             ctx_proj = self.ctx_norm(self.ctx_proj(encoder_hidden_states))  # (BV, V, D)
+            if self.cross_attn_own_variate_only:
+                if context_window_indices is None or variate_indices is None:
+                    raise ValueError(
+                        "cross_attn_own_variate_only requires context_window_indices "
+                        "and variate_indices"
+                    )
+                ctx_proj = ctx_proj[
+                    context_window_indices.long(), variate_indices.long()
+                ].unsqueeze(1)
+                context_window_indices = None
 
         for i, block in enumerate(self.blocks):
             if i == self.bottleneck_idx:
@@ -819,34 +875,140 @@ class FactorizedDiT(nn.Module):
             out = out[:, :, :H, :W]
         return out
 
-    def _forward_cached_cond(
+    def _parent_ids_from_cond(
         self,
-        x: torch.Tensor,
-        t: torch.Tensor,
-        cond: torch.Tensor,
-        *,
+        n_parents: int,
+        device: torch.device,
         encoder_hidden_states: Optional[torch.Tensor],
-        scale_indices: Optional[torch.Tensor],
-        variate_indices: Optional[torch.Tensor],
-        token_variate_ids: Optional[torch.Tensor],
-        context_window_indices: Optional[torch.Tensor],
-        patch_coarse_bin: Optional[torch.Tensor],
-        patch_time0: Optional[torch.Tensor],
-        ctx_key_padding_mask: Optional[torch.Tensor],
-        cond_parent_index: torch.Tensor,
-    ):
-        """Encoder-decoder split: cond K/V once per parent, crops attend into the cache.
+        parent_ids: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        """Map each cond row to (window, variate). V comes from ctx, not n_parents/B."""
+        if parent_ids is None:
+            parent_ids = torch.arange(n_parents, device=device, dtype=torch.long)
+        elif parent_ids.shape != (n_parents,):
+            raise ValueError(
+                f"parent_ids must be ({n_parents},), got {tuple(parent_ids.shape)}"
+            )
+        if encoder_hidden_states is not None:
+            if encoder_hidden_states.dim() != 3:
+                raise ValueError(
+                    f"encoder_hidden_states must be (B, V, D), got "
+                    f"{tuple(encoder_hidden_states.shape)}"
+                )
+            n_var = int(encoder_hidden_states.shape[1])
+        else:
+            n_var = 1
+        if n_var < 1:
+            raise ValueError(f"n_var must be >= 1, got {n_var}")
+        return parent_ids // n_var, parent_ids % n_var, n_var
 
-        Not numerically identical to bidirectional cat[cond, x] self-attn: cond ↛ crop.
-        AdaLN still sees diffusion t, so the cache key is (parent, t).
-        """
+    def encode_cached_prefix(
+        self,
+        cond: torch.Tensor,
+        t_one: torch.Tensor,
+        *,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        token_variate_ids: Optional[torch.Tensor] = None,
+        ctx_key_padding_mask: Optional[torch.Tensor] = None,
+        parent_ids: Optional[torch.Tensor] = None,
+    ) -> dict:
+        """Cond-only prefix K/V for every DiT block. AdaLN uses t_one (same t)."""
         if self.gradient_checkpointing and self.training:
             raise RuntimeError("cache_cond_kv is eval-only; disable gradient checkpointing")
         if self.scale_embed is not None:
             raise RuntimeError("cache_cond_kv does not support scale embeddings")
-        n_crops, _, H, W = x.shape
+        if t_one.numel() != 1:
+            if not torch.equal(t_one, t_one[:1].expand_as(t_one)):
+                raise ValueError("encode_cached_prefix requires a single diffusion t")
+            t_one = t_one[:1]
         n_parents = cond.shape[0]
-        self._diag_cross_attn_weights = None
+        cond_p, _, _ = self._pad_to_patch(cond, self.cond_patch_size)
+        c_tok, _, _ = self._patchify(cond_p, self.cond_embed)
+        nc = c_tok.shape[1]
+        if nc > self.pos_cond.shape[1]:
+            raise RuntimeError(
+                f"DiT pos table too small: need Nc={nc}, have {self.pos_cond.shape[1]}"
+            )
+        c_tok = c_tok + self.pos_cond[:, :nc]
+        parent_windows, parent_variates, _n_var = self._parent_ids_from_cond(
+            n_parents, cond.device, encoder_hidden_states, parent_ids,
+        )
+        if self.variate_embed is not None:
+            c_tok = c_tok + self.variate_embed(parent_variates).unsqueeze(1)
+        t_parent = self.t_embed(_timestep_embedding(t_one.expand(n_parents), self.embed_dim))
+        ctx_proj: Optional[torch.Tensor] = None
+        if encoder_hidden_states is not None:
+            ctx_proj = self.ctx_norm(self.ctx_proj(encoder_hidden_states))
+        prefix_ctx = ctx_proj
+        prefix_windows = parent_windows
+        if self.cross_attn_own_variate_only and ctx_proj is not None:
+            prefix_ctx = ctx_proj[parent_windows, parent_variates].unsqueeze(1)
+            prefix_windows = None
+
+        parent_chunk = int(self.max_cond_chunk or 0)
+        kvs: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        if parent_chunk > 0 and n_parents > parent_chunk:
+            parts: List[List[Tuple[torch.Tensor, torch.Tensor]]] = [
+                [] for _ in self.blocks
+            ]
+            for start in range(0, n_parents, parent_chunk):
+                end = min(start + parent_chunk, n_parents)
+                c_part = c_tok[start:end]
+                t_part = t_parent[start:end]
+                var_part = parent_variates[start:end]
+                win_part = None if prefix_windows is None else prefix_windows[start:end]
+                ctx_part = prefix_ctx[start:end] if prefix_windows is None and prefix_ctx is not None else prefix_ctx
+                for i, block in enumerate(self.blocks):
+                    if i == self.bottleneck_idx:
+                        c_part, kv = block.forward_cond_prefix(
+                            c_part, t_part, ctx_part,
+                            variate_indices=var_part,
+                            token_variate_ids=token_variate_ids,
+                            context_window_indices=win_part,
+                            ctx_key_padding_mask=ctx_key_padding_mask,
+                        )
+                    else:
+                        c_part, kv = block.forward_cond_prefix(c_part, t_part)
+                    parts[i].append(kv)
+            for i in range(len(self.blocks)):
+                kvs.append((
+                    torch.cat([p[0] for p in parts[i]], dim=0),
+                    torch.cat([p[1] for p in parts[i]], dim=0),
+                ))
+        else:
+            for i, block in enumerate(self.blocks):
+                if i == self.bottleneck_idx:
+                    c_tok, kv = block.forward_cond_prefix(
+                        c_tok, t_parent, prefix_ctx,
+                        variate_indices=parent_variates,
+                        token_variate_ids=token_variate_ids,
+                        context_window_indices=prefix_windows,
+                        ctx_key_padding_mask=ctx_key_padding_mask,
+                    )
+                else:
+                    c_tok, kv = block.forward_cond_prefix(c_tok, t_parent)
+                kvs.append(kv)
+        return {"kvs": kvs, "ctx_proj": ctx_proj, "n_parents": n_parents}
+
+    def forward_cached_crops(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        prefix: dict,
+        *,
+        cond_parent_index: torch.Tensor,
+        variate_indices: Optional[torch.Tensor] = None,
+        token_variate_ids: Optional[torch.Tensor] = None,
+        context_window_indices: Optional[torch.Tensor] = None,
+        patch_coarse_bin: Optional[torch.Tensor] = None,
+        patch_time0: Optional[torch.Tensor] = None,
+        ctx_key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Crop stream attending into a prefix from encode_cached_prefix."""
+        n_crops, _, H, W = x.shape
+        n_parents = int(prefix["n_parents"])
+        kvs: List[Tuple[torch.Tensor, torch.Tensor]] = prefix["kvs"]
+        ctx_proj: Optional[torch.Tensor] = prefix["ctx_proj"]
         if cond_parent_index.shape != (n_crops,):
             raise ValueError(
                 f"cond_parent_index must be ({n_crops},), got {tuple(cond_parent_index.shape)}"
@@ -857,108 +1019,103 @@ class FactorizedDiT(nn.Module):
             )
         if t.shape[0] != n_crops:
             raise ValueError(f"timestep batch {t.shape[0]} != n_crops {n_crops}")
-        if not torch.equal(t, t[:1].expand_as(t)):
-            raise ValueError("cache_cond_kv requires uniform diffusion t across the crop pack")
-
         x_p, pad_h, pad_w = self._pad_to_patch(x, self.patch_size)
-        cond_p, _, _ = self._pad_to_patch(cond, self.cond_patch_size)
         x_tok, gh, gw = self._patchify(x_p, self.x_embed)
-        c_tok, _, _ = self._patchify(cond_p, self.cond_embed)
-        Nx, Nc = x_tok.shape[1], c_tok.shape[1]
-        if Nx > self.pos_x.shape[1] or Nc > self.pos_cond.shape[1]:
+        nx = x_tok.shape[1]
+        if nx > self.pos_x.shape[1]:
             raise RuntimeError(
-                f"DiT pos table too small: need Nx={Nx}, Nc={Nc}, "
-                f"have {self.pos_x.shape[1]}. Increase max_pos_tokens."
+                f"DiT pos table too small: need Nx={nx}, have {self.pos_x.shape[1]}"
             )
-        x_tok = x_tok + self.pos_x[:, :Nx]
-        c_tok = c_tok + self.pos_cond[:, :Nc]
-
+        x_tok = x_tok + self.pos_x[:, :nx]
         if self.use_patch_abs_embedding:
             if patch_coarse_bin is None or patch_time0 is None:
                 raise ValueError(
                     "patch_coarse_bin and patch_time0 are required when "
                     "use_patch_abs_embedding=True"
                 )
-            if patch_coarse_bin.shape[0] != n_crops or patch_time0.shape[0] != n_crops:
-                raise ValueError(
-                    f"patch location batch mismatch: bins={tuple(patch_coarse_bin.shape)} "
-                    f"time0={tuple(patch_time0.shape)} n_crops={n_crops}"
-                )
             abs_emb = (
                 self.coarse_bin_embed(patch_coarse_bin.long())
                 + self.horizon_time_embed(patch_time0.long())
             ).unsqueeze(1)
             x_tok = x_tok + abs_emb
-
-        if encoder_hidden_states is not None:
-            n_windows = encoder_hidden_states.shape[0]
-            if n_parents % n_windows != 0:
-                raise ValueError(
-                    f"unique cond rows {n_parents} not divisible by ctx windows {n_windows}"
-                )
-            n_var = n_parents // n_windows
-        elif variate_indices is not None:
-            n_var = int(variate_indices.max().item()) + 1
-            if n_parents % n_var != 0:
-                raise ValueError(
-                    f"unique cond rows {n_parents} not divisible by inferred V={n_var}"
-                )
-            n_windows = n_parents // n_var
-        else:
-            n_var = 1
-            n_windows = n_parents
-        parent_windows = torch.arange(n_parents, device=x.device, dtype=torch.long) // n_var
-        parent_variates = torch.arange(n_parents, device=x.device, dtype=torch.long) % n_var
-
         if self.variate_embed is not None:
             if variate_indices is None:
                 raise ValueError("variate_indices are required when variate embeddings are enabled.")
-            if variate_indices.shape[0] != n_crops:
-                raise ValueError(
-                    f"variate_indices batch {variate_indices.shape[0]} != n_crops {n_crops}"
-                )
-            c_tok = c_tok + self.variate_embed(parent_variates).unsqueeze(1)
             x_tok = x_tok + self.variate_embed(variate_indices.long()).unsqueeze(1)
-
         t_crop = self.t_embed(_timestep_embedding(t, self.embed_dim))
-        t_parent = self.t_embed(_timestep_embedding(t[:1].expand(n_parents), self.embed_dim))
-        if scale_indices is not None:
-            raise RuntimeError("cache_cond_kv does not support scale_indices")
-
-        ctx_proj: Optional[torch.Tensor] = None
-        if encoder_hidden_states is not None:
-            if context_window_indices is not None and context_window_indices.shape != (n_crops,):
+        crop_ctx = ctx_proj
+        crop_windows = context_window_indices
+        if self.cross_attn_own_variate_only and ctx_proj is not None:
+            if context_window_indices is None or variate_indices is None:
                 raise ValueError(
-                    "context_window_indices must have one entry per crop row, got "
-                    f"{tuple(context_window_indices.shape)} for n_crops={n_crops}"
+                    "cross_attn_own_variate_only requires context_window_indices "
+                    "and variate_indices"
                 )
-            ctx_proj = self.ctx_norm(self.ctx_proj(encoder_hidden_states))
-
+            crop_ctx = ctx_proj[context_window_indices.long(), variate_indices.long()].unsqueeze(1)
+            crop_windows = None
         for i, block in enumerate(self.blocks):
             if i == self.bottleneck_idx:
-                c_tok, cached_kv = block.forward_cond_prefix(
-                    c_tok, t_parent, ctx_proj,
-                    variate_indices=parent_variates,
-                    token_variate_ids=token_variate_ids,
-                    context_window_indices=parent_windows,
-                    ctx_key_padding_mask=ctx_key_padding_mask,
-                )
                 x_tok = block.forward_crop_cached(
-                    x_tok, t_crop, cached_kv, cond_parent_index, ctx_proj,
+                    x_tok, t_crop, kvs[i], cond_parent_index, crop_ctx,
                     variate_indices=variate_indices,
                     token_variate_ids=token_variate_ids,
-                    context_window_indices=context_window_indices,
+                    context_window_indices=crop_windows,
                     ctx_key_padding_mask=ctx_key_padding_mask,
                 )
             else:
-                c_tok, cached_kv = block.forward_cond_prefix(c_tok, t_parent)
                 x_tok = block.forward_crop_cached(
-                    x_tok, t_crop, cached_kv, cond_parent_index,
+                    x_tok, t_crop, kvs[i], cond_parent_index,
                 )
-
         shift, scale = self.final_adaLN(t_crop).chunk(2, dim=-1)
         x_out = _modulate(self.final_norm(x_tok), shift, scale)
         out = self._unpatchify(x_out, gh, gw)
         if pad_h or pad_w:
             out = out[:, :, :H, :W]
         return out
+
+    def _forward_cached_cond(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        cond: torch.Tensor,
+        *,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        scale_indices: Optional[torch.Tensor] = None,
+        variate_indices: Optional[torch.Tensor] = None,
+        token_variate_ids: Optional[torch.Tensor] = None,
+        context_window_indices: Optional[torch.Tensor] = None,
+        patch_coarse_bin: Optional[torch.Tensor] = None,
+        patch_time0: Optional[torch.Tensor] = None,
+        ctx_key_padding_mask: Optional[torch.Tensor] = None,
+        cond_parent_index: torch.Tensor,
+        parent_ids: Optional[torch.Tensor] = None,
+    ):
+        """Encoder-decoder split: cond K/V once per parent, crops attend into the cache.
+
+        Not numerically identical to bidirectional cat[cond, x] self-attn: cond ↛ crop.
+        AdaLN still sees diffusion t, so the cache key is (parent, t).
+        """
+        self._diag_cross_attn_weights = None
+        if scale_indices is not None:
+            raise RuntimeError("cache_cond_kv does not support scale_indices")
+        if t.shape[0] != x.shape[0]:
+            raise ValueError(f"timestep batch {t.shape[0]} != n_crops {x.shape[0]}")
+        if not torch.equal(t, t[:1].expand_as(t)):
+            raise ValueError("cache_cond_kv requires uniform diffusion t across the crop pack")
+        prefix = self.encode_cached_prefix(
+            cond, t[:1],
+            encoder_hidden_states=encoder_hidden_states,
+            token_variate_ids=token_variate_ids,
+            ctx_key_padding_mask=ctx_key_padding_mask,
+            parent_ids=parent_ids,
+        )
+        return self.forward_cached_crops(
+            x, t, prefix,
+            cond_parent_index=cond_parent_index,
+            variate_indices=variate_indices,
+            token_variate_ids=token_variate_ids,
+            context_window_indices=context_window_indices,
+            patch_coarse_bin=patch_coarse_bin,
+            patch_time0=patch_time0,
+            ctx_key_padding_mask=ctx_key_padding_mask,
+        )

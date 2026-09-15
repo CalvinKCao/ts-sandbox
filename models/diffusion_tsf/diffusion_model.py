@@ -996,6 +996,7 @@ class DiffusionTSF(nn.Module):
         eval_bench_note("dit_n_items", n_items)
         eval_bench_note("dit_chunk_size", int(chunk_size) if chunk_size else n_items)
         cache_kv = cond_parent_index is not None
+        dit = getattr(self.noise_predictor, "_orig_mod", self.noise_predictor)
         if cache_kv:
             if cond_for_unet is None:
                 raise ValueError("cache_cond_kv requires a unique lookback cond tensor")
@@ -1003,18 +1004,59 @@ class DiffusionTSF(nn.Module):
                 raise ValueError(
                     f"cond_parent_index must be ({n_items},), got {tuple(cond_parent_index.shape)}"
                 )
+            dit.max_cond_chunk = int(chunk_size) if chunk_size else 0
+            n_parents = int(cond_for_unet.shape[0])
+            eval_bench_note("dit_n_parents", n_parents)
+            if int(cond_parent_index.max()) >= n_parents:
+                raise RuntimeError(
+                    f"cond_parent_index max={int(cond_parent_index.max())} "
+                    f">= n_parents={n_parents}; refusing xeroxed lookback cond"
+                )
+        if cache_kv and chunk_size > 0 and n_items > chunk_size:
+            if return_cross_attn_weights:
+                raise ValueError("cache_cond_kv prefix reuse does not support return_cross_attn_weights")
+            t_one = t_flat[:1] if t_flat.shape[0] == n_items else t_flat.reshape(-1)[:1]
+            prefix = dit.encode_cached_prefix(
+                cond_for_unet, t_one,
+                encoder_hidden_states=ctx_flat,
+                token_variate_ids=token_variate_ids,
+                ctx_key_padding_mask=ctx_pad,
+            )
+            outs = []
+            for i in range(0, n_items, chunk_size):
+                end = min(i + chunk_size, n_items)
+                c_t = t_flat[i:end] if t_flat.shape[0] == n_items else t_flat
+                outs.append(dit.forward_cached_crops(
+                    canvas[i:end], c_t, prefix,
+                    cond_parent_index=cond_parent_index[i:end],
+                    variate_indices=(
+                        variate_indices[i:end] if variate_indices is not None else None
+                    ),
+                    token_variate_ids=token_variate_ids,
+                    context_window_indices=(
+                        context_window_indices[i:end]
+                        if context_window_indices is not None
+                        else None
+                    ),
+                    patch_coarse_bin=(
+                        patch_coarse_bin[i:end] if patch_coarse_bin is not None else None
+                    ),
+                    patch_time0=patch_time0[i:end] if patch_time0 is not None else None,
+                    ctx_key_padding_mask=ctx_pad,
+                ))
+            return torch.cat(outs, dim=0)
         if chunk_size > 0 and n_items > chunk_size:
+            if cache_kv:
+                raise RuntimeError(
+                    "cache_cond_kv chunking must reuse the prefix path; "
+                    f"n_items={n_items} chunk={chunk_size}"
+                )
             outs = []
             for i in range(0, n_items, chunk_size):
                 end = min(i + chunk_size, n_items)
                 c_canvas = canvas[i:end]
                 c_t = t_flat[i:end] if t_flat.shape[0] == n_items else t_flat
-                if cache_kv:
-                    c_cond = cond_for_unet
-                    c_parent = cond_parent_index[i:end]
-                else:
-                    c_cond = cond_for_unet[i:end] if cond_for_unet is not None else None
-                    c_parent = None
+                c_cond = cond_for_unet[i:end] if cond_for_unet is not None else None
                 c_ctx = ctx_flat
                 c_pad = ctx_pad
                 c_context_windows = (
@@ -1045,8 +1087,6 @@ class DiffusionTSF(nn.Module):
                     kwargs["patch_coarse_bin"] = c_bin
                 if c_t0 is not None:
                     kwargs["patch_time0"] = c_t0
-                if c_parent is not None:
-                    kwargs["cond_parent_index"] = c_parent
                 outs.append(self.noise_predictor(c_canvas, c_t, c_cond, **kwargs))
             return torch.cat(outs, dim=0)
         kwargs = {
@@ -1420,12 +1460,17 @@ class DiffusionTSF(nn.Module):
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
         future_coarse_2d: Optional[torch.Tensor] = None,
         future_fine_2d: Optional[torch.Tensor] = None,
+        n_samples: int = 1,
     ) -> Dict[str, torch.Tensor]:
         """Generate future predictions via binary reverse sampling.
 
         sampler: 'ddim' (default), 'anchor' / 'deterministic_anchor' for one-shot anchor decode.
         num_inference_steps overrides binary_sample_steps when set.
+        n_samples>1 packs independent MC draws against one past (shared V parents /
+        cond); do not expand past with repeat_interleave.
         """
+        if int(n_samples) < 1:
+            raise ValueError(f"n_samples must be >= 1, got {n_samples}")
         steps = num_inference_steps if num_inference_steps is not None else self.config.binary_sample_steps
         gen_common = dict(
             num_steps=steps,
@@ -1440,6 +1485,7 @@ class DiffusionTSF(nn.Module):
             snapshot_timesteps=snapshot_timesteps,
             future_coarse_2d=future_coarse_2d,
             future_fine_2d=future_fine_2d,
+            n_samples=int(n_samples),
         )
         return self.stage_strategy.generate(self, past, **gen_common)
 
@@ -2081,9 +2127,15 @@ class DiffusionTSF(nn.Module):
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
         future_coarse_2d: Optional[torch.Tensor] = None,
         future_fine_2d: Optional[torch.Tensor] = None,
+        n_samples: int = 1,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
-        """Refine a hi-res CDF scaffold with boundary patches, then decode."""
+        """Refine a hi-res CDF scaffold with boundary patches, then decode.
+
+        n_samples>1 tiles sample crops against the same B*V lookback parents.
+        future_coarse_2d is ``(B, V, ...)`` or ``(B * n_samples, V, ...)`` in
+        repeat_interleave sample order.
+        """
         from .patch_refine import (
             build_patch_aux_channels_layout,
             expand_lookback_cond_for_layout,
@@ -2104,6 +2156,9 @@ class DiffusionTSF(nn.Module):
         assert self.binary_scheduler is not None
         if future_coarse_2d is None:
             raise ValueError("patch_refine generation requires future_coarse_2d from the coarse model")
+        n_samples = int(n_samples)
+        if n_samples < 1:
+            raise ValueError(f"n_samples must be >= 1, got {n_samples}")
 
         with eval_bench_span("patch_refine"):
             B = past.shape[0]
@@ -2116,49 +2171,122 @@ class DiffusionTSF(nn.Module):
             eval_bench_note("refine_B", B)
             eval_bench_note("refine_V", V)
             eval_bench_note("refine_W", W_fut)
-            eval_bench_note("unique_segments", int(bool(getattr(self.config, "patch_refine_unique_segments", False))))
+            eval_bench_note("n_samples", n_samples)
+            unique = bool(getattr(self.config, "patch_refine_unique_segments", False))
+            eval_bench_note("unique_segments", int(unique))
 
             with eval_bench_span("normalize"):
                 past_norm, _, stats = self._normalize_sequence(past)
             coarse = future_coarse_2d.to(device)
-            if coarse.shape[:2] != (B, V) or coarse.shape[3] != W_fut:
+            if coarse.ndim != 4 or coarse.shape[1] != V or coarse.shape[3] != W_fut:
                 raise ValueError(
                     "future_coarse_2d must have shape "
-                    f"(B={B}, V={V}, Hc, W={W_fut}), got {tuple(coarse.shape)}"
+                    f"(B or B*n_samples, V={V}, Hc, W={W_fut}), got {tuple(coarse.shape)}"
+                )
+            if coarse.shape[0] == B:
+                if n_samples != 1:
+                    raise ValueError(
+                        f"n_samples={n_samples} needs future_coarse_2d batch {B * n_samples}, got {B}"
+                    )
+            elif coarse.shape[0] != B * n_samples:
+                raise ValueError(
+                    f"future_coarse_2d batch {coarse.shape[0]} != B={B} "
+                    f"or B*n_samples={B * n_samples}"
                 )
 
-            with eval_bench_span("geometry"):
-                naive = naive_upscale_coarse_cdf(coarse, canvas_h)
-                edges = coarse_edges_from_cdf(coarse, canvas_height=canvas_h)
-            unique = bool(getattr(self.config, "patch_refine_unique_segments", False))
             lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
+            n_parents = B * V
+            if lookback_cond.shape[0] != n_parents:
+                raise RuntimeError(
+                    f"lookback parents {lookback_cond.shape[0]} != B*V={n_parents}; "
+                    "refusing xeroxed past"
+                )
             ctx = None if getattr(self.config, "disable_cross_attention", False) else self._get_cross_variate_context(past, past_norm)
             cache_kv = bool(getattr(self.config, "cache_cond_kv", False))
+            if unique and n_samples > 1 and not cache_kv:
+                raise RuntimeError(
+                    "unique-seg n_samples>1 requires cache_cond_kv "
+                    "(encode V parents once, tile crops)"
+                )
             if cache_kv:
                 eval_bench_note("cache_cond_kv", 1)
+                eval_bench_note("cache_cond_parents", n_parents)
 
-            def _sample_layout(layout: PatchLayout) -> torch.Tensor:
-                with eval_bench_span("layout_aux"):
-                    cond_l = (
-                        lookback_cond
-                        if cache_kv
-                        else expand_lookback_cond_for_layout(lookback_cond, layout)
-                    )
-                    aux_l, patch_coarse_bin_l, patch_time0_l = build_patch_aux_channels_layout(
-                        naive,
-                        edges,
-                        layout,
+            def _layout_and_aux(coarse_b: torch.Tensor):
+                naive_b = naive_upscale_coarse_cdf(coarse_b, canvas_h)
+                edges_b = coarse_edges_from_cdf(coarse_b, canvas_height=canvas_h)
+                if unique:
+                    col0s = primary_stride_col0s(int(edges_b.shape[-1]), patch_w, col_stride)
+                    layouts = [
+                        patch_layout_for_fixed_col0(
+                            edges_b,
+                            torch.full((B,), col0, device=device, dtype=torch.long),
+                            canvas_height=canvas_h,
+                            patch_height=patch_h,
+                            patch_width=patch_w,
+                        )
+                        for col0 in col0s
+                    ]
+                    layout_b = PatchLayout.cat(layouts)
+                    gap_layout = coverage_gap_layout(
+                        edges_b,
+                        layout_b,
+                        canvas_height=canvas_h,
                         patch_height=patch_h,
                         patch_width=patch_w,
-                        canvas_height=canvas_h,
-                        coarse_height=coarse_h,
-                        horizon_width=W_fut,
                     )
+                    if gap_layout is not None:
+                        layout_b = PatchLayout.cat([layout_b, gap_layout])
+                else:
+                    locations = select_patch_locations(
+                        edges_b,
+                        canvas_height=canvas_h,
+                        patch_height=patch_h,
+                        patch_width=patch_w,
+                        col_stride=col_stride,
+                    )
+                    layout_b = PatchLayout.from_locations(locations, device=device)
+                aux_b, bins_b, t0_b = build_patch_aux_channels_layout(
+                    naive_b,
+                    edges_b,
+                    layout_b,
+                    patch_height=patch_h,
+                    patch_width=patch_w,
+                    canvas_height=canvas_h,
+                    coarse_height=coarse_h,
+                    horizon_width=W_fut,
+                )
+                return layout_b, edges_b, aux_b, bins_b, t0_b
+
+            with eval_bench_span("geometry"):
+                packed = []
+                for s in range(n_samples):
+                    coarse_s = coarse[s::n_samples] if n_samples > 1 else coarse
+                    packed.append(_layout_and_aux(coarse_s))
+                layout = PatchLayout.cat([p[0] for p in packed])
+                aux_l = torch.cat([p[2] for p in packed], dim=0)
+                patch_coarse_bin_l = torch.cat([p[3] for p in packed], dim=0)
+                patch_time0_l = torch.cat([p[4] for p in packed], dim=0)
+            if unique:
+                eval_bench_note(
+                    "n_stride_col0",
+                    len(primary_stride_col0s(int(packed[0][1].shape[-1]), patch_w, col_stride)),
+                )
+            if int(layout.flat_index.max()) >= n_parents:
+                raise RuntimeError(
+                    f"cond_parent_index max={int(layout.flat_index.max())} "
+                    f">= n_parents={n_parents}; xeroxed past"
+                )
+            n_l = layout.n_patches
+            eval_bench_note("refine_n_patches", n_l)
+
+            def _sample_packed() -> torch.Tensor:
+                cond_l = (
+                    lookback_cond
+                    if cache_kv
+                    else expand_lookback_cond_for_layout(lookback_cond, layout)
+                )
                 context_window_indices_l = layout.batch_index if ctx is not None else None
-                n_l = layout.n_patches
-                eval_bench_note("refine_n_patches", n_l)
-                if cache_kv:
-                    eval_bench_note("cache_cond_parents", int(lookback_cond.shape[0]))
 
                 def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
                     canvas = self._inject_coordinate_channel(xt)
@@ -2208,60 +2336,59 @@ class DiffusionTSF(nn.Module):
                     snapshot_timesteps=snapshot_timesteps,
                 )
 
-            if unique:
-                col0s = primary_stride_col0s(int(edges.shape[-1]), patch_w, col_stride)
-                eval_bench_note("n_stride_col0", len(col0s))
-                with eval_bench_span("parallel_col0s"):
-                    layouts = [
-                        patch_layout_for_fixed_col0(
-                            edges,
-                            torch.full((B,), col0, device=device, dtype=torch.long),
-                            canvas_height=canvas_h,
-                            patch_height=patch_h,
-                            patch_width=patch_w,
-                        )
-                        for col0 in col0s
-                    ]
-                    layout = PatchLayout.cat(layouts)
-                    patch_cdf = _sample_layout(layout)
-                with eval_bench_span("coverage_gap"):
-                    gap_layout = coverage_gap_layout(
-                        edges,
-                        layout,
-                        canvas_height=canvas_h,
-                        patch_height=patch_h,
-                        patch_width=patch_w,
-                    )
-                    if gap_layout is not None:
-                        gap_pred = _sample_layout(gap_layout)
-                        layout = PatchLayout.cat([layout, gap_layout])
-                        patch_cdf = torch.cat([patch_cdf, gap_pred], dim=0)
-            else:
-                with eval_bench_span("parallel_patches"):
-                    locations = select_patch_locations(
-                        edges,
-                        canvas_height=canvas_h,
-                        patch_height=patch_h,
-                        patch_width=patch_w,
-                        col_stride=col_stride,
-                    )
-                    layout = PatchLayout.from_locations(locations, device=device)
-                    patch_cdf = _sample_layout(layout)
+            span_name = "parallel_col0s" if unique else "parallel_patches"
+            with eval_bench_span(span_name):
+                patch_cdf = _sample_packed()
 
             with eval_bench_span("blend_decode"):
-                hir_cdf, patch_vote_counts = blend_patch_bins_layout(
-                    patch_cdf,
-                    layout,
-                    edges,
-                    canvas_height=canvas_h,
-                    patch_height=patch_h,
-                    patch_width=patch_w,
+                hir_parts = []
+                vote_parts = []
+                future_parts = []
+                overlap_parts = []
+                norm_parts = []
+                offset = 0
+                for layout_s, edges_s, *_ in packed:
+                    n_s = layout_s.n_patches
+                    cdf_s = patch_cdf[offset:offset + n_s]
+                    hir_s, votes_s = blend_patch_bins_layout(
+                        cdf_s,
+                        layout_s,
+                        edges_s,
+                        canvas_height=canvas_h,
+                        patch_height=patch_h,
+                        patch_width=patch_w,
+                    )
+                    future_norm_s = self._decode_absolute_future_hir(hir_s)
+                    overlap_s = self._denormalize_future(
+                        future_norm_s, past, stats, trim_overlap=False,
+                    )
+                    hir_parts.append(hir_s)
+                    vote_parts.append(votes_s)
+                    overlap_parts.append(overlap_s)
+                    future_parts.append(
+                        overlap_s[..., int(self.config.lookback_overlap):]
+                    )
+                    norm_parts.append(future_norm_s)
+                    offset += n_s
+                if offset != n_l:
+                    raise RuntimeError(
+                        f"packed crop count {n_l} != blended {offset}"
+                    )
+                hir_cdf = torch.stack(hir_parts, dim=1).reshape(
+                    B * n_samples, *hir_parts[0].shape[1:]
                 )
-                future_norm = self._decode_absolute_future_hir(hir_cdf)
-                future_with_overlap = self._denormalize_future(
-                    future_norm, past, stats, trim_overlap=False,
+                patch_vote_counts = torch.stack(vote_parts, dim=1).reshape(
+                    B * n_samples, *vote_parts[0].shape[1:]
                 )
-                future = future_with_overlap[..., int(self.config.lookback_overlap):]
+                future_norm = torch.stack(norm_parts, dim=1).reshape(
+                    B * n_samples, *norm_parts[0].shape[1:]
+                )
+                future_with_overlap = torch.stack(overlap_parts, dim=1).reshape(
+                    B * n_samples, *overlap_parts[0].shape[1:]
+                )
+                future = torch.stack(future_parts, dim=1).reshape(
+                    B * n_samples, *future_parts[0].shape[1:]
+                )
             with eval_bench_span("layout_to_cpu"):
                 locations = layout.to_locations()
             out = {
@@ -2274,8 +2401,6 @@ class DiffusionTSF(nn.Module):
                 "future_2d_fine": hir_cdf,
                 "past_2d_coarse": past_maps["coarse"],
                 "past_2d_fine": past_maps["fine"],
-                # Keep the pre-blend crops for diagnostics which must not average
-                # the stride-overlapping patch predictions.
                 "patch_cdf_unblended": patch_cdf,
                 "patch_locations": locations,
                 "patch_vote_counts": patch_vote_counts,
@@ -2511,10 +2636,14 @@ class DiffusionTSF(nn.Module):
         snapshot_timesteps: Optional[Tuple[int, ...]] = None,
         future_coarse_2d: Optional[torch.Tensor] = None,
         future_fine_2d: Optional[torch.Tensor] = None,
+        n_samples: int = 1,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         """Generate coarse staged output (patch_refine has its own generate)."""
         assert self.binary_scheduler is not None, "binary scheduler is not initialized"
+        n_samples = int(n_samples)
+        if n_samples < 1:
+            raise ValueError(f"n_samples must be >= 1, got {n_samples}")
         with eval_bench_span("coarse"):
             B = past.shape[0]
             V = self.config.num_variables
@@ -2527,10 +2656,16 @@ class DiffusionTSF(nn.Module):
             eval_bench_note("coarse_B", B)
             eval_bench_note("coarse_V", V)
             eval_bench_note("coarse_W", W_fut)
+            eval_bench_note("n_samples", n_samples)
 
             with eval_bench_span("normalize"):
                 past_norm, _, stats = self._normalize_sequence(past)
             cond_for_unet, past_maps = self._staged_past_condition(past_norm, W_fut, past_raw=past)
+            if cond_for_unet.shape[0] != BV:
+                raise RuntimeError(
+                    f"coarse cond rows {cond_for_unet.shape[0]} != B*V={BV}; "
+                    "refusing xeroxed past"
+                )
 
             ctx = None if getattr(self.config, 'disable_cross_attention', False) else self._get_cross_variate_context(past, past_norm)
             ctx_shared, context_window_indices = self._shared_ctx_for_factorized_dit(
@@ -2539,6 +2674,22 @@ class DiffusionTSF(nn.Module):
             variate_indices = None
             if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
                 variate_indices = self._flat_variate_indices(BV, V, device)
+
+            B_out = B * n_samples
+            BV_out = B_out * V
+            if n_samples > 1:
+                rest = cond_for_unet.shape[1:]
+                cond_for_unet = (
+                    cond_for_unet.view(B, V, *rest)
+                    .repeat_interleave(n_samples, dim=0)
+                    .reshape(BV_out, *rest)
+                )
+                if context_window_indices is not None:
+                    context_window_indices = torch.arange(
+                        B, device=device,
+                    ).repeat_interleave(n_samples * V)
+                if variate_indices is not None:
+                    variate_indices = torch.arange(V, device=device).repeat(B_out)
 
             def _build_canvas(xt: torch.Tensor) -> torch.Tensor:
                 canvas = self._inject_coordinate_channel(xt)
@@ -2556,11 +2707,11 @@ class DiffusionTSF(nn.Module):
                 return x0_logits, zt
 
             intermediates = None
-            sample_shape = (BV, C_occ, H, W_fut)
+            sample_shape = (BV_out, C_occ, H, W_fut)
             if sampler in ("anchor", "deterministic_anchor"):
                 with eval_bench_span("anchor_decode"):
                     t_batch = torch.full(
-                        (BV,),
+                        (BV_out,),
                         self.config.binary_num_steps - 1,
                         device=device,
                         dtype=torch.long,
@@ -2592,7 +2743,7 @@ class DiffusionTSF(nn.Module):
                     future_2d_flat = self.binary_scheduler.sample(**sample_kwargs)
 
             with eval_bench_span("decode"):
-                generated_2d = future_2d_flat.reshape(B, V, H, W_fut)
+                generated_2d = future_2d_flat.reshape(B_out, V, H, W_fut)
                 future_2d_coarse = generated_2d
                 cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
                 temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None
@@ -2601,10 +2752,26 @@ class DiffusionTSF(nn.Module):
                     cdf_decoder=cdf_decoder,
                     expectation_sharpen_temp=temperature,
                 )
-                future_with_overlap = self._denormalize_future(
-                    future_norm, past, stats, trim_overlap=False,
-                )
-                future = future_with_overlap[..., int(self.config.lookback_overlap):]
+                if n_samples == 1:
+                    future_with_overlap = self._denormalize_future(
+                        future_norm, past, stats, trim_overlap=False,
+                    )
+                    future = future_with_overlap[..., int(self.config.lookback_overlap):]
+                else:
+                    ov_parts = []
+                    fu_parts = []
+                    for s in range(n_samples):
+                        ov = self._denormalize_future(
+                            future_norm[s::n_samples], past, stats, trim_overlap=False,
+                        )
+                        ov_parts.append(ov)
+                        fu_parts.append(ov[..., int(self.config.lookback_overlap):])
+                    future_with_overlap = torch.stack(ov_parts, dim=1).reshape(
+                        B_out, *ov_parts[0].shape[1:]
+                    )
+                    future = torch.stack(fu_parts, dim=1).reshape(
+                        B_out, *fu_parts[0].shape[1:]
+                    )
 
             result = {
                 'prediction': future,
@@ -2622,7 +2789,7 @@ class DiffusionTSF(nn.Module):
             if intermediates is not None:
                 reshaped_intermediates = []
                 for (t_idx, i_tensor) in intermediates:
-                    reshaped_intermediates.append((t_idx, i_tensor.reshape(B, V, H, W_fut)))
+                    reshaped_intermediates.append((t_idx, i_tensor.reshape(B_out, V, H, W_fut)))
                 result['intermediates'] = reshaped_intermediates
             return result
 
