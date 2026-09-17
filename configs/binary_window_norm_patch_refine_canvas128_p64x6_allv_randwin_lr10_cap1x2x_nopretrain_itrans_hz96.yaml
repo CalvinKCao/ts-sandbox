@@ -1,0 +1,20 @@
+# Dedicated H=96 ETTh1: Killarney 5057773 recipe with iTransformer x-attn
+# (not patch-decoder). Same Optuna / caps / n=1838 / n_samp=10 / max_scale 5.2.
+# Train and eval at H=96 only — do not clip prefixes from a longer canvas.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_nopretrain.yaml
+
+geometry:
+  forecast_length: 96
+  lookback_overlap: 8
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, nopretrain, from_random_init, hz96, dedicated_h, itrans_guid, caps_crops_1x2x_etth1]
+
+experiment:
+  name: binary-c128-p64x6-cap1x2x-nopre-itrans-hz96
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_nopretrain_itrans_hz96
+  guidance_type: itransformer
+
+phases:
+  - phase: staged_eval
+    eval_progress_key: canvas128_p64x6_cap1x2x_nopre_itrans_hz96_s1_n10_steps4

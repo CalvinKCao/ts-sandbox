@@ -1,0 +1,32 @@
+# Dedicated H=192 sibling of the 5057773→iTrans H=96 leaf. Train and eval at
+# H=192 only (canvas 192+8); not a prefix clip from H=720.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_nopretrain_itrans_hz96.yaml
+
+geometry:
+  forecast_length: 192
+  lookback_overlap: 8
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, win_frac_1, patch_frac_1, lr_batch_ema, anchor_every4, eval_s1_n10_steps4, median_pruner, patience_5, nopretrain, from_random_init, hz192, dedicated_h, nostitch, itrans_guid, caps_crops_1x2x_etth1]
+
+experiment:
+  name: binary-c128-p64x6-cap1x2x-nopre-itrans-hz192
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_nopretrain_itrans_hz192
+  guidance_type: itransformer
+
+phases:
+  - phase: staged_eval
+    eval_progress_key: canvas128_p64x6_cap1x2x_nopre_itrans_hz192_s1_n10_steps4
+    batch_size_by_dataset:
+      ETTh1: 1
+      ETTh2: 1
+      ETTm1: 1
+      ETTm2: 1
+      exchange_rate: 1
+      weather: 1
+      solar_Alabama: 1
+      electricity: 1
+      PeMS: 1
+      traffic: 1
+      illness: 1
+      dynamic: 1
