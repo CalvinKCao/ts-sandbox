@@ -445,13 +445,24 @@ def _ensure_cli(path: Path, anchor: str) -> None:
     elif anchor not in text:
         raise RuntimeError(f"anchor missing in {path}: {anchor!r}")
     else:
-        insert = (
-            "    parser.add_argument('--train_window_stride', type=int, default=1)\n"
-            "    parser.add_argument('--val_window_stride', type=int, default=1)\n"
-            "    parser.add_argument('--test_window_stride', type=int, default=1)\n"
-            "    " + anchor
-        )
-        text = text.replace(anchor, insert, 1)
+        lines = text.splitlines(True)
+        out = []
+        inserted = False
+        for line in lines:
+            if not inserted and anchor in line:
+                indent = line[: len(line) - len(line.lstrip())]
+                out.extend(
+                    [
+                        f"{indent}parser.add_argument('--train_window_stride', type=int, default=1)\n",
+                        f"{indent}parser.add_argument('--val_window_stride', type=int, default=1)\n",
+                        f"{indent}parser.add_argument('--test_window_stride', type=int, default=1)\n",
+                    ]
+                )
+                inserted = True
+            out.append(line)
+        if not inserted:
+            raise RuntimeError(f"anchor line not found in {path}: {anchor!r}")
+        text = "".join(out)
     if "train_max_windows" not in text:
         stride_anchor = "parser.add_argument('--test_window_stride', type=int, default=1)"
         if stride_anchor not in text:
