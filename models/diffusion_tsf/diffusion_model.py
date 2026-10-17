@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .config import DiffusionTSFConfig
 from .preprocessing import TimeSeriesTo2D
-from .diffusion import BinaryDiffusionScheduler
+from .diffusion import BinaryDiffusionScheduler, GaussianEpsilonScheduler
 from .ordinal_window_norm import OrdinalLadder, ordinal_decode, ordinal_encode
 from .guidance import GuidanceModel, iTransformerTokenAdapter
 from .dit import FactorizedDiT
@@ -25,6 +25,31 @@ from .pipeline.eval_bench import (
 )
 
 logger = logging.getLogger(__name__)
+
+SERIES_1D_COARSE_STRIDE = 8
+
+
+def _pool_series_1d_time(maps: torch.Tensor, factor: int = SERIES_1D_COARSE_STRIDE) -> torch.Tensor:
+    """Avg-pool (B,V,1,W) along time by `factor`, replicating the tail so W divides."""
+    if maps.ndim != 4 or maps.shape[2] != 1:
+        raise ValueError(f"series_1d map must be (B,V,1,W), got {tuple(maps.shape)}")
+    if factor <= 1:
+        return maps
+    w = int(maps.shape[-1])
+    pad = (factor - (w % factor)) % factor
+    if pad:
+        maps = F.pad(maps, (0, pad), mode="replicate")
+    return F.avg_pool2d(maps, kernel_size=(1, factor), stride=(1, factor))
+
+
+def _upsample_series_1d_time(maps: torch.Tensor, target_w: int) -> torch.Tensor:
+    if maps.ndim != 4 or maps.shape[2] != 1:
+        raise ValueError(f"series_1d map must be (B,V,1,W), got {tuple(maps.shape)}")
+    if int(maps.shape[-1]) == int(target_w):
+        return maps
+    flat = maps.reshape(-1, 1, 1, maps.shape[-1])
+    up = F.interpolate(flat, size=(1, int(target_w)), mode="bilinear", align_corners=False)
+    return up.reshape(maps.shape[0], maps.shape[1], 1, int(target_w))
 
 
 class NoVisiblePatchTransitions(RuntimeError):
@@ -242,6 +267,14 @@ class BinaryDataPreparer:
         ordinal_rank_max: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         x = self._subsample(x)
+        if str(getattr(self.config, "representation", "cdf_2d")) == "series_1d":
+            if ordinal_rank_max is not None:
+                raise ValueError("series_1d does not support ordinal encoding")
+            ms = float(self.config.max_scale)
+            maps = x.clamp(-ms, ms).unsqueeze(2)
+            if str(self.config.diffusion_stage) == "coarse":
+                maps = _pool_series_1d_time(maps)
+            return {"coarse": maps, "fine": maps}
         coarse_h = int(getattr(self.config, "coarse_image_height", self.config.image_height))
         fine_h = int(getattr(self.config, "fine_image_height", self.config.image_height))
         if ordinal_rank_max is not None:
@@ -393,6 +426,14 @@ class DiffusionTSF(nn.Module):
         self.to_2d = TimeSeriesTo2D(
             height=config.image_height,
             max_scale=config.max_scale,
+            occupancy_encoding=getattr(config, "occupancy_encoding", "cdf"),
+        )
+        logger.info(
+            "DiffusionTSF occupancy_encoding=%s image_height=%s max_scale=%s stage=%s",
+            self.to_2d.occupancy_encoding,
+            config.image_height,
+            config.max_scale,
+            config.diffusion_stage,
         )
         self.data_prep = BinaryDataPreparer(config, self.to_2d)
         self.guidance_model = guidance_model if needs_guidance_model else None
@@ -459,6 +500,14 @@ class DiffusionTSF(nn.Module):
             length_g=float(getattr(config, "binary_length_g", 1.0)),
             length_scale=float(getattr(config, "binary_length_scale", 1.0)),
         )
+        self.gaussian_scheduler = None
+        if str(getattr(config, "representation", "cdf_2d")) == "series_1d":
+            self.gaussian_scheduler = GaussianEpsilonScheduler(
+                num_steps=int(getattr(config, "gaussian_num_steps", 1000)),
+                beta_start=float(getattr(config, "gaussian_beta_start", 1e-4)),
+                beta_end=float(getattr(config, "gaussian_beta_end", 0.02)),
+                schedule_type=str(getattr(config, "gaussian_noise_schedule", "linear")),
+            )
         self.loss_function = BinaryLossFunction(
             config,
             self.binary_scheduler,
@@ -490,6 +539,8 @@ class DiffusionTSF(nn.Module):
         super().to(device)
         if self.binary_scheduler is not None:
             self.binary_scheduler = self.binary_scheduler.to(device)
+        if self.gaussian_scheduler is not None:
+            self.gaussian_scheduler = self.gaussian_scheduler.to(device)
         return self
 
     def _get_coordinate_grid(
@@ -862,13 +913,14 @@ class DiffusionTSF(nn.Module):
         # Step 3B: Compute standard deviation across time for each window (shape: B, V, 1).
         past_std = past.std(dim=-1, keepdim=True)
         threshold = float(self.config.window_norm_low_var_threshold)
+        from utils.sticky_discrete_dataset_norm import clamp_past_std
+        per_floor = getattr(self.config, "window_norm_std_floor_per_variate", None)
 
         # Step 3C: Handle low-variance / flat time series windows to avoid division by zero.
         if threshold > 0.0:
-            # Floor standard deviation to avoid zero division (e.g., 1e-8).
-            std_floor = past_std.clamp_min(self.config.window_norm_std_floor)
-            
-            # Determine replacement unit std for low-variance windows (either per-variate or scalar).
+            std_floor = clamp_past_std(
+                past_std, self.config.window_norm_std_floor, per_floor,
+            )
             per_v = self.config.window_norm_low_var_unit_std_per_variate
             default_unit = float(self.config.window_norm_low_var_unit_std)
             if per_v is not None:
@@ -882,18 +934,21 @@ class DiffusionTSF(nn.Module):
                 ).view(1, -1, 1).expand_as(past_std)
             else:
                 unit = torch.full_like(past_std, default_unit)
-                
-            # Identify windows with variance below threshold or completely flat.
             low_var = past_std < threshold
-            flat = past_std <= self.config.window_norm_std_floor
-            
-            # If flat/low variance, use replacement unit std; otherwise use clamped past_std.
+            if per_floor is not None:
+                floor_t = torch.as_tensor(
+                    list(per_floor), device=past.device, dtype=past.dtype,
+                ).view(1, -1, 1)
+                flat = past_std <= floor_t
+            else:
+                flat = past_std <= self.config.window_norm_std_floor
             std = torch.where(flat | low_var, unit, std_floor)
         else:
-            # Standard clamping without low-variance threshold override.
-            std = past_std.clamp_min(self.config.window_norm_std_floor)
+            std = clamp_past_std(
+                past_std, self.config.window_norm_std_floor, per_floor,
+            )
 
-        # Hybrid flat variates: already in coverage-scaled dataset space — no instance norm.
+        # Discrete / hybrid-flat: already in dataset-affine space — skip instance norm.
         skip_mask = getattr(self.config, "skip_window_norm_variate_mask", None)
         if bool(getattr(self.config, "hybrid_flat_dataset_norm", False)) and skip_mask is None:
             raise RuntimeError(
@@ -1195,6 +1250,8 @@ class DiffusionTSF(nn.Module):
         cdf_decoder: str = "mean",
         expectation_sharpen_temp: Optional[float] = None,
     ) -> torch.Tensor:
+        if self._is_series_1d():
+            return self._decode_series_1d(coarse_map)
         if self._uses_global_ordinal_encoding():
             vmax = self._ordinal_rank_max_tensor(coarse_map.device, dtype=coarse_map.dtype)
             vals = []
@@ -1471,7 +1528,12 @@ class DiffusionTSF(nn.Module):
         """
         if int(n_samples) < 1:
             raise ValueError(f"n_samples must be >= 1, got {n_samples}")
-        steps = num_inference_steps if num_inference_steps is not None else self.config.binary_sample_steps
+        if num_inference_steps is not None:
+            steps = num_inference_steps
+        elif self._is_series_1d():
+            steps = int(self.config.gaussian_sample_steps)
+        else:
+            steps = self.config.binary_sample_steps
         gen_common = dict(
             num_steps=steps,
             verbose=verbose,
@@ -1558,6 +1620,114 @@ class DiffusionTSF(nn.Module):
     def _occupancy_channels(self) -> int:
         return int(getattr(self.config, "data_occupancy_channels", 1))
 
+    def _representation(self) -> str:
+        return str(getattr(self.config, "representation", "cdf_2d"))
+
+    def _is_series_1d(self) -> bool:
+        return self._representation() == "series_1d"
+
+    def _gaussian_eval_sampler(self, sampler: str) -> str:
+        name = str(sampler).lower()
+        if name in {"anchor", "deterministic_anchor"}:
+            raise RuntimeError(
+                "gaussian_scheduler.sample is iterative DDIM; "
+                "series_1d one-shot must use the zeros-at-T anchor branch"
+            )
+        return name
+
+    def _gaussian_x0_from_eps(
+        self,
+        xt: torch.Tensor,
+        eps: torch.Tensor,
+        t: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.gaussian_scheduler is None:
+            raise RuntimeError("series_1d requires GaussianEpsilonScheduler")
+        a_bar = self.gaussian_scheduler.alphas_cumprod[t]
+        view = (-1,) + (1,) * (xt.dim() - 1)
+        a_bar = a_bar.view(view).to(dtype=xt.dtype)
+        return (xt - (1.0 - a_bar).sqrt() * eps) / a_bar.sqrt().clamp(min=1e-8)
+
+    def _gaussian_anchor_canvas_like(self, like: torch.Tensor) -> torch.Tensor:
+        return torch.zeros_like(like)
+
+    def _gaussian_anchor_t(self, n: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        if self.gaussian_scheduler is None:
+            raise RuntimeError("series_1d requires GaussianEpsilonScheduler")
+        return torch.full(
+            (n,),
+            self.gaussian_scheduler.num_steps - 1,
+            device=device,
+            dtype=dtype,
+        )
+
+    def _series_1d_anchor_x0(
+        self,
+        *,
+        model_fn,
+        shape: Tuple[int, ...],
+        device: torch.device,
+    ) -> torch.Tensor:
+        n = int(shape[0])
+        t_batch = self._gaussian_anchor_t(n, device, torch.long)
+        neutral = torch.zeros(shape, device=device)
+        eps, _ = model_fn(neutral, t_batch)
+        return self._gaussian_x0_from_eps(neutral, eps, t_batch)
+
+    def _is_occupancy_mse(self) -> bool:
+        return str(self.config.prediction_target) == "occupancy_mse"
+
+    def _require_cdf_2d(self, op: str) -> None:
+        if self._is_series_1d():
+            raise RuntimeError(f"{op} is occupancy-canvas-only; representation=series_1d")
+
+    def _series_1d_map(self, values: torch.Tensor) -> torch.Tensor:
+        if self._is_series_1d() is False:
+            raise RuntimeError("_series_1d_map requires representation=series_1d")
+        ms = float(self.config.max_scale)
+        return values.clamp(-ms, ms).unsqueeze(2)
+
+    def _decode_series_1d(self, maps: torch.Tensor) -> torch.Tensor:
+        if maps.ndim != 4 or maps.shape[2] != 1:
+            raise ValueError(f"series_1d decode expects (B,V,1,W), got {tuple(maps.shape)}")
+        return maps[:, :, 0, :]
+
+    def _noised_canvas(
+        self,
+        target: torch.Tensor,
+        t: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return (xt, noise_target). noise_target is zt bits or Gaussian ε."""
+        if self._is_occupancy_mse():
+            if int(t.max().item()) != 0 or int(t.min().item()) != 0:
+                raise RuntimeError(
+                    f"occupancy_mse requires t=0, got t in [{int(t.min())}, {int(t.max())}]"
+                )
+            dummy = self._binary_anchor_canvas_like(target)
+            return dummy, torch.zeros_like(target)
+        if self._is_series_1d():
+            if self.gaussian_scheduler is None:
+                raise RuntimeError("series_1d requires GaussianEpsilonScheduler")
+            return self.gaussian_scheduler.add_noise(target, t)
+        return self.binary_scheduler.add_noise(target, t)
+
+    def _mse_with_mask(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        element_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        per_elem = (pred - target) ** 2
+        if element_mask is not None:
+            if element_mask.shape != per_elem.shape:
+                raise ValueError(
+                    f"element_mask shape {tuple(element_mask.shape)} != loss shape {tuple(per_elem.shape)}"
+                )
+            per_elem = per_elem * element_mask
+            denom = element_mask.sum().clamp_min(1.0)
+            return per_elem.sum() / denom
+        return per_elem.mean()
+
     def _split_binary_heads(self, out_flat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Split DiT binary outputs into x0 and zt heads (C occupancy channels each)."""
         c = self._occupancy_channels()
@@ -1571,6 +1741,12 @@ class DiffusionTSF(nn.Module):
         primary_logits: torch.Tensor,
         xt: torch.Tensor,
     ) -> torch.Tensor:
+        if self._is_series_1d() or self._is_occupancy_mse():
+            raise RuntimeError(
+                "_x0_logits_from_prediction is XOR bit-flip only; "
+                f"representation={self._representation()} "
+                f"prediction_target={self.config.prediction_target}"
+            )
         if self.config.prediction_target == "epsilon":
             return torch.where(xt > 0.5, -primary_logits, primary_logits)
         return primary_logits
@@ -1689,6 +1865,21 @@ class DiffusionTSF(nn.Module):
         past_tail_norm = past_norm[..., -past_tail_len:]
         with eval_bench_span("encode_past"):
             past_maps = self._encode_staged_maps(past_tail_norm)
+        if self._is_series_1d():
+            cond_map = past_maps["coarse"]
+            if cond_map.shape[2] != 1:
+                raise RuntimeError(
+                    f"series_1d past cond height must be 1, got {tuple(cond_map.shape)}"
+                )
+            cond = cond_map.reshape(BV, 1, 1, cond_map.shape[-1])
+            if self._past_cond_resize_to_horizon():
+                raise RuntimeError(
+                    "series_1d forbids past_cond_resize_to_horizon (do not squash lookback to H)"
+                )
+            cond = self._append_raw_lookback_cond_channel(
+                cond, past_raw, past_tail_len, target_width,
+            )
+            return cond, past_maps
         past_repr_w = past_maps["coarse"].shape[-1]
         cond_maps = [
             self._resize_cdf_height(past_maps["coarse"], H),
@@ -1712,11 +1903,21 @@ class DiffusionTSF(nn.Module):
             int(self.config.patch_refine_col_stride),
         )
 
+    def _occupancy_encoding(self) -> str:
+        from .preprocessing import require_occupancy_encoding
+        return require_occupancy_encoding(getattr(self.config, "occupancy_encoding", "cdf"))
+
     def _encode_absolute_future_hir(
         self,
         future_norm: torch.Tensor,
         canvas_height: int,
     ) -> torch.Tensor:
+        if self._is_series_1d():
+            if int(canvas_height) != 1:
+                raise RuntimeError(
+                    f"series_1d hir canvas_height must be 1, got {canvas_height}"
+                )
+            return self._series_1d_map(future_norm)
         from .patch_refine import encode_absolute_hir_cdf
 
         ordinal_max = None
@@ -1727,9 +1928,12 @@ class DiffusionTSF(nn.Module):
             canvas_height=canvas_height,
             max_scale=float(self.config.max_scale),
             ordinal_rank_max=ordinal_max,
+            occupancy_encoding=self._occupancy_encoding(),
         )
 
     def _decode_absolute_future_hir(self, hir_cdf: torch.Tensor) -> torch.Tensor:
+        if self._is_series_1d():
+            return self._decode_series_1d(hir_cdf)
         from .patch_refine import decode_absolute_hir_cdf
 
         ordinal_max = None
@@ -1739,6 +1943,7 @@ class DiffusionTSF(nn.Module):
             hir_cdf,
             max_scale=float(self.config.max_scale),
             ordinal_rank_max=ordinal_max,
+            occupancy_encoding=self._occupancy_encoding(),
         )
 
     def _patch_refine_lookback_cond(
@@ -1755,6 +1960,14 @@ class DiffusionTSF(nn.Module):
         past_tail = past_norm[..., -past_tail_len:]
         with eval_bench_span("encode_past"):
             past_maps = self._encode_staged_maps(past_tail)
+        if self._is_series_1d():
+            cond_map = past_maps["coarse"]
+            if cond_map.shape[2] != 1:
+                raise RuntimeError(
+                    f"series_1d patch lookback height must be 1, got {tuple(cond_map.shape)}"
+                )
+            b, v, _, w = cond_map.shape
+            return cond_map.reshape(b * v, 1, 1, w), past_maps
         cond = stack_past_coarse_fine(past_maps["coarse"], past_maps["fine"])
         return cond, past_maps
 
@@ -1801,8 +2014,22 @@ class DiffusionTSF(nn.Module):
         past_norm, future_norm, _stats = self._normalize_sequence(past, future)
         future_maps = self._encode_staged_maps(future_norm)
         hir_gt = self._encode_absolute_future_hir(future_norm, canvas_h)
-        naive = naive_upscale_coarse_cdf(future_maps["coarse"], canvas_h)
-        edges = coarse_edges_from_cdf(future_maps["coarse"], canvas_height=canvas_h)
+        if self._is_series_1d():
+            pooled = _pool_series_1d_time(hir_gt)
+            naive = _upsample_series_1d_time(pooled, int(hir_gt.shape[-1]))
+            edges = torch.zeros(
+                hir_gt.shape[0], hir_gt.shape[1], hir_gt.shape[-1],
+                device=device, dtype=torch.long,
+            )
+        else:
+            naive = naive_upscale_coarse_cdf(
+                future_maps["coarse"], canvas_h, occupancy_encoding=self._occupancy_encoding(),
+            )
+            edges = coarse_edges_from_cdf(
+                future_maps["coarse"],
+                canvas_height=canvas_h,
+                occupancy_encoding=self._occupancy_encoding(),
+            )
         if unique:
             if patch_col0 is None:
                 max_c0 = int(edges.shape[-1]) - patch_w
@@ -1815,7 +2042,7 @@ class DiffusionTSF(nn.Module):
                 canvas_height=canvas_h,
                 patch_height=patch_h,
                 patch_width=patch_w,
-                hir_canvas=hir_gt,
+                hir_canvas=None if self._is_series_1d() else hir_gt,
             )
             layout = subsample_unique_seg_layout(
                 layout,
@@ -1846,18 +2073,30 @@ class DiffusionTSF(nn.Module):
         target_patches = extract_patch_batch_layout(
             hir_gt, layout, patch_height=patch_h, patch_width=patch_w,
         )
-        target_occupancy = target_patches.sum(dim=-2, keepdim=True)
-        target_visible = (target_occupancy > 0) & (target_occupancy < patch_h)
+        if self._is_series_1d() or self._occupancy_encoding() == "one_hot":
+            target_visible = torch.ones(
+                target_patches.shape[0],
+                1,
+                1,
+                target_patches.shape[-1],
+                device=target_patches.device,
+                dtype=torch.bool,
+            )
+        else:
+            target_occupancy = target_patches.sum(dim=-2, keepdim=True)
+            target_visible = (target_occupancy > 0) & (target_occupancy < patch_h)
         target_visible_mask = target_visible.expand_as(target_patches).to(target_patches.dtype)
         # This is a data-validity guard, not layout validation: a fully
         # saturated batch would otherwise make the masked BCE a silent zero
         # loss update. Keep it before the denoiser/compiled region.
-        if not bool(target_visible.any()):
+        if not self._is_series_1d() and not bool(target_visible.any()):
             raise NoVisiblePatchTransitions(
                 "patch_refine batch has no visible GT transitions"
             )
         n_patches = target_patches.shape[0]
-        if t is None:
+        if self._is_occupancy_mse():
+            t = torch.zeros(n_patches, device=device, dtype=torch.long)
+        elif t is None:
             t = torch.randint(0, self.config.binary_num_steps, (n_patches,), device=device)
         elif expand_t_per_window:
             if t.numel() != B:
@@ -1872,7 +2111,7 @@ class DiffusionTSF(nn.Module):
                 "(pass expand_t_per_window=True to broadcast per-window timesteps)"
             )
 
-        xt, zt = self.binary_scheduler.add_noise(target_patches, t)
+        xt, zt = self._noised_canvas(target_patches, t)
         lookback_cond, past_maps = self._patch_refine_lookback_cond(past_norm)
         cond = expand_lookback_cond_for_layout(lookback_cond, layout)
 
@@ -2004,19 +2243,32 @@ class DiffusionTSF(nn.Module):
                 patch_time0=patch_time0,
             )
             primary_logits, zt_logits = self._split_binary_heads(out)
-            x0_logits = self._x0_logits_from_prediction(primary_logits, xt)
-            loss_breakdown = self.loss_function.regular(
-                primary_logits,
-                zt_logits,
-                target_patches,
-                zt,
-                t,
-                element_mask=target_visible_mask,
-            )
-            loss_x0 = loss_breakdown.x0
-            loss_zt = loss_breakdown.zt
-            regular_loss = loss_breakdown.regular
-            x0_pred = torch.sigmoid(x0_logits)
+            if self._is_occupancy_mse():
+                loss_x0 = self._mse_with_mask(
+                    primary_logits, target_patches, element_mask=target_visible_mask,
+                )
+                loss_zt = torch.tensor(0.0, device=device)
+                regular_loss = loss_x0
+                x0_pred = primary_logits.clamp(0.0, 1.0)
+            elif self._is_series_1d():
+                loss_x0 = self._mse_with_mask(primary_logits, zt)
+                loss_zt = torch.tensor(0.0, device=device)
+                regular_loss = loss_x0
+                x0_pred = self._gaussian_x0_from_eps(xt, primary_logits, t)
+            else:
+                x0_logits = self._x0_logits_from_prediction(primary_logits, xt)
+                loss_breakdown = self.loss_function.regular(
+                    primary_logits,
+                    zt_logits,
+                    target_patches,
+                    zt,
+                    t,
+                    element_mask=target_visible_mask,
+                )
+                loss_x0 = loss_breakdown.x0
+                loss_zt = loss_breakdown.zt
+                regular_loss = loss_breakdown.regular
+                x0_pred = torch.sigmoid(x0_logits)
 
         anchor_loss = torch.tensor(0.0, device=device)
         combined_loss = regular_loss if loss_mode != "anchor" else anchor_loss
@@ -2025,13 +2277,23 @@ class DiffusionTSF(nn.Module):
             and loss_mode != "regular"
             and self.config.use_deterministic_anchor_loss
         ):
-            anchor_t = torch.full(
-                (n_patches,),
-                self.config.binary_num_steps - 1,
-                device=device,
-                dtype=t.dtype,
-            )
-            neutral = self._binary_anchor_canvas_like(target_patches)
+            if self._is_occupancy_mse():
+                raise RuntimeError(
+                    "deterministic_anchor_loss is XOR-only; "
+                    f"representation={self._representation()} "
+                    f"prediction_target={self.config.prediction_target}"
+                )
+            if self._is_series_1d():
+                anchor_t = self._gaussian_anchor_t(n_patches, device, t.dtype)
+                neutral = self._gaussian_anchor_canvas_like(target_patches)
+            else:
+                anchor_t = torch.full(
+                    (n_patches,),
+                    self.config.binary_num_steps - 1,
+                    device=device,
+                    dtype=t.dtype,
+                )
+                neutral = self._binary_anchor_canvas_like(target_patches)
             anchor_canvas = self._inject_coordinate_channel(neutral)
             anchor_canvas = self._inject_time_channels(anchor_canvas)
             anchor_canvas = torch.cat([anchor_canvas, aux], dim=1)
@@ -2047,14 +2309,20 @@ class DiffusionTSF(nn.Module):
                 patch_time0=patch_time0,
             )
             anchor_primary, _ = self._split_binary_heads(anchor_out)
-            anchor_x0 = self._x0_logits_from_prediction(anchor_primary, neutral)
-            anchor_loss = self.loss_function.bce(
-                anchor_x0,
-                target_patches,
-                weight_source=target_patches,
-                element_mask=target_visible_mask,
-                apply_min_snr=False,
-            )
+            if self._is_series_1d():
+                anchor_x0 = self._gaussian_x0_from_eps(neutral, anchor_primary, anchor_t)
+                anchor_loss = self._mse_with_mask(
+                    anchor_x0, target_patches, element_mask=target_visible_mask,
+                )
+            else:
+                anchor_x0 = self._x0_logits_from_prediction(anchor_primary, neutral)
+                anchor_loss = self.loss_function.bce(
+                    anchor_x0,
+                    target_patches,
+                    weight_source=target_patches,
+                    element_mask=target_visible_mask,
+                    apply_min_snr=False,
+                )
             combined_loss = (
                 self.loss_function.combine_anchor(regular_loss, anchor_loss)
                 if loss_mode == "combined"
@@ -2144,6 +2412,7 @@ class DiffusionTSF(nn.Module):
         from .patch_refine_geometry import (
             PatchLayout,
             blend_patch_bins_layout,
+            blend_series_1d_layout,
             coarse_edges_from_cdf,
             patch_layout_for_fixed_col0,
             primary_stride_col0s,
@@ -2213,8 +2482,25 @@ class DiffusionTSF(nn.Module):
                 eval_bench_note("cache_cond_parents", n_parents)
 
             def _layout_and_aux(coarse_b: torch.Tensor):
-                naive_b = naive_upscale_coarse_cdf(coarse_b, canvas_h)
-                edges_b = coarse_edges_from_cdf(coarse_b, canvas_height=canvas_h)
+                if self._is_series_1d():
+                    if coarse_b.shape[2] != 1:
+                        raise RuntimeError(
+                            f"series_1d coarse canvas height must be 1, got {tuple(coarse_b.shape)}"
+                        )
+                    naive_b = coarse_b
+                    edges_b = torch.zeros(
+                        coarse_b.shape[0], coarse_b.shape[1], coarse_b.shape[-1],
+                        device=device, dtype=torch.long,
+                    )
+                else:
+                    naive_b = naive_upscale_coarse_cdf(
+                        coarse_b, canvas_h, occupancy_encoding=self._occupancy_encoding(),
+                    )
+                    edges_b = coarse_edges_from_cdf(
+                        coarse_b,
+                        canvas_height=canvas_h,
+                        occupancy_encoding=self._occupancy_encoding(),
+                    )
                 if unique:
                     col0s = primary_stride_col0s(int(edges_b.shape[-1]), patch_w, col_stride)
                     layouts = [
@@ -2310,21 +2596,49 @@ class DiffusionTSF(nn.Module):
                         **extra,
                     )
                     primary, zt = self._split_binary_heads(out)
+                    if self._is_series_1d() or self._is_occupancy_mse():
+                        return primary, zt
                     x0_logits = self._x0_logits_from_prediction(primary, xt)
                     return x0_logits, zt
 
                 sample_shape = (n_l, 1, patch_h, patch_w)
-                if sampler in ("anchor", "deterministic_anchor"):
+                if self._is_occupancy_mse() or (
+                    sampler in ("anchor", "deterministic_anchor") and not self._is_series_1d()
+                ):
                     with eval_bench_span("anchor_decode"):
+                        t_idx = 0 if self._is_occupancy_mse() else (self.config.binary_num_steps - 1)
                         t_batch = torch.full(
                             (n_l,),
-                            self.config.binary_num_steps - 1,
+                            t_idx,
                             device=device,
                             dtype=torch.long,
                         )
                         neutral = self._binary_anchor_canvas_shape(sample_shape, device=device)
-                        x0_logits, _ = _chunked_model_fn(neutral, t_batch)
-                        return (torch.sigmoid(x0_logits) > 0.5).float()
+                        primary, _ = _chunked_model_fn(neutral, t_batch)
+                        if self._is_occupancy_mse():
+                            return primary.clamp(0.0, 1.0)
+                        return (torch.sigmoid(primary) > 0.5).float()
+                if self._is_series_1d() and sampler in ("anchor", "deterministic_anchor"):
+                    if self.gaussian_scheduler is None:
+                        raise RuntimeError("series_1d generate requires GaussianEpsilonScheduler")
+                    return self._series_1d_anchor_x0(
+                        model_fn=_chunked_model_fn,
+                        shape=sample_shape,
+                        device=device,
+                    )
+                if self._is_series_1d():
+                    if self.gaussian_scheduler is None:
+                        raise RuntimeError("series_1d generate requires GaussianEpsilonScheduler")
+                    return self.gaussian_scheduler.sample(
+                        model_fn=_chunked_model_fn,
+                        shape=sample_shape,
+                        num_steps=num_steps,
+                        device=device,
+                        verbose=verbose,
+                        sampler=self._gaussian_eval_sampler(sampler),
+                        reverse_step_indices=reverse_step_indices,
+                        snapshot_timesteps=snapshot_timesteps,
+                    )
                 return self.binary_scheduler.sample(
                     model_fn=_chunked_model_fn,
                     shape=sample_shape,
@@ -2350,14 +2664,23 @@ class DiffusionTSF(nn.Module):
                 for layout_s, edges_s, *_ in packed:
                     n_s = layout_s.n_patches
                     cdf_s = patch_cdf[offset:offset + n_s]
-                    hir_s, votes_s = blend_patch_bins_layout(
-                        cdf_s,
-                        layout_s,
-                        edges_s,
-                        canvas_height=canvas_h,
-                        patch_height=patch_h,
-                        patch_width=patch_w,
-                    )
+                    if self._is_series_1d():
+                        hir_s, votes_s = blend_series_1d_layout(
+                            cdf_s,
+                            layout_s,
+                            canvas_width=W_fut,
+                            patch_width=patch_w,
+                        )
+                    else:
+                        hir_s, votes_s = blend_patch_bins_layout(
+                            cdf_s,
+                            layout_s,
+                            edges_s,
+                            canvas_height=canvas_h,
+                            patch_height=patch_h,
+                            patch_width=patch_w,
+                            occupancy_encoding=self._occupancy_encoding(),
+                        )
                     future_norm_s = self._decode_absolute_future_hir(hir_s)
                     overlap_s = self._denormalize_future(
                         future_norm_s, past, stats, trim_overlap=False,
@@ -2438,13 +2761,16 @@ class DiffusionTSF(nn.Module):
         target_flat = target_2d.reshape(BV, 1, H, W_fut).index_select(0, row_index)
 
         if t is None:
-            t = torch.randint(0, self.config.binary_num_steps, (B,), device=device)
+            if self._is_occupancy_mse():
+                t = torch.zeros(B, device=device, dtype=torch.long)
+            else:
+                t = torch.randint(0, self.config.binary_num_steps, (B,), device=device)
         t_flat = t.unsqueeze(1).expand(-1, V).reshape(BV).index_select(0, row_index)
         variate_indices = None
         if self.config.use_variate_embedding and self.config.variate_factorized and V > 1:
             variate_indices = (row_index % V)
 
-        xt_flat, zt_flat = self.binary_scheduler.add_noise(target_flat, t_flat)
+        xt_flat, zt_flat = self._noised_canvas(target_flat, t_flat)
 
         ctx = self._resolve_cross_variate_context(
             past, past_norm, cross_variate_context, context_token_variate_ids,
@@ -2467,24 +2793,48 @@ class DiffusionTSF(nn.Module):
             context_window_indices=context_window_indices,
         )
         primary_logits, zt_logits = self._split_binary_heads(out_flat)
-        x0_logits = self._x0_logits_from_prediction(primary_logits, xt_flat)
-        loss_breakdown = self.loss_function.regular(
-            primary_logits, zt_logits, target_flat, zt_flat, t_flat,
-        )
-        loss_x0 = loss_breakdown.x0
-        loss_zt = loss_breakdown.zt
-        regular_loss = loss_breakdown.regular
+        if self._is_occupancy_mse():
+            loss_x0 = self._mse_with_mask(primary_logits, target_flat)
+            loss_zt = torch.tensor(0.0, device=device)
+            regular_loss = loss_x0
+            x0_logits = primary_logits
+            x0_map = primary_logits.clamp(0.0, 1.0)
+        elif self._is_series_1d():
+            loss_x0 = self._mse_with_mask(primary_logits, zt_flat)
+            loss_zt = torch.tensor(0.0, device=device)
+            regular_loss = loss_x0
+            x0_map = self._gaussian_x0_from_eps(xt_flat, primary_logits, t_flat)
+            x0_logits = x0_map
+        else:
+            x0_logits = self._x0_logits_from_prediction(primary_logits, xt_flat)
+            loss_breakdown = self.loss_function.regular(
+                primary_logits, zt_logits, target_flat, zt_flat, t_flat,
+            )
+            loss_x0 = loss_breakdown.x0
+            loss_zt = loss_breakdown.zt
+            regular_loss = loss_breakdown.regular
+            x0_map = torch.sigmoid(x0_logits)
 
         anchor_loss = torch.tensor(0.0, device=device)
         combined_loss = regular_loss
         if include_anchor and self.config.use_deterministic_anchor_loss:
-            anchor_t_flat = torch.full(
-                (n_rows,),
-                self.config.binary_num_steps - 1,
-                device=device,
-                dtype=t_flat.dtype,
-            )
-            neutral_future_flat = self._binary_anchor_canvas_like(target_flat)
+            if self._is_occupancy_mse():
+                raise RuntimeError(
+                    "deterministic_anchor_loss is XOR-only; "
+                    f"representation={self._representation()} "
+                    f"prediction_target={self.config.prediction_target}"
+                )
+            if self._is_series_1d():
+                anchor_t_flat = self._gaussian_anchor_t(n_rows, device, t_flat.dtype)
+                neutral_future_flat = self._gaussian_anchor_canvas_like(target_flat)
+            else:
+                anchor_t_flat = torch.full(
+                    (n_rows,),
+                    self.config.binary_num_steps - 1,
+                    device=device,
+                    dtype=t_flat.dtype,
+                )
+                neutral_future_flat = self._binary_anchor_canvas_like(target_flat)
             anchor_canvas = self._inject_coordinate_channel(neutral_future_flat)
             anchor_canvas = self._inject_time_channels(anchor_canvas)
             anchor_out_flat = self._predict_noise_chunked(
@@ -2496,17 +2846,23 @@ class DiffusionTSF(nn.Module):
                 context_window_indices=context_window_indices,
             )
             anchor_primary, _ = self._split_binary_heads(anchor_out_flat)
-            anchor_x0_logits = self._x0_logits_from_prediction(anchor_primary, neutral_future_flat)
-            anchor_loss = self.loss_function.bce(
-                anchor_x0_logits,
-                target_flat,
-                weight_source=target_flat,
-                apply_min_snr=False,
-            )
+            if self._is_series_1d():
+                anchor_x0 = self._gaussian_x0_from_eps(
+                    neutral_future_flat, anchor_primary, anchor_t_flat,
+                )
+                anchor_loss = self._mse_with_mask(anchor_x0, target_flat)
+            else:
+                anchor_x0_logits = self._x0_logits_from_prediction(anchor_primary, neutral_future_flat)
+                anchor_loss = self.loss_function.bce(
+                    anchor_x0_logits,
+                    target_flat,
+                    weight_source=target_flat,
+                    apply_min_snr=False,
+                )
             combined_loss = self.loss_function.combine_anchor(regular_loss, anchor_loss)
 
-        x0_full = torch.zeros(B, V, H, W_fut, device=device, dtype=x0_logits.dtype)
-        x0_full.view(BV, H, W_fut)[row_index] = torch.sigmoid(x0_logits).reshape(n_rows, H, W_fut)
+        x0_full = torch.zeros(B, V, H, W_fut, device=device, dtype=x0_map.dtype)
+        x0_full.view(BV, H, W_fut)[row_index] = x0_map.reshape(n_rows, H, W_fut)
         x0_pred = x0_full
         result = {
             'loss': combined_loss,
@@ -2652,7 +3008,12 @@ class DiffusionTSF(nn.Module):
             BV = B * V
             C_occ = self._occupancy_channels()
             raw_hz_w = int(self.config.forecast_length)
-            W_fut = self._repr_forecast_width(raw_hz_w)
+            W_canvas = self._repr_forecast_width(raw_hz_w)
+            if self._is_series_1d():
+                pad = (SERIES_1D_COARSE_STRIDE - (W_canvas % SERIES_1D_COARSE_STRIDE)) % SERIES_1D_COARSE_STRIDE
+                W_fut = (W_canvas + pad) // SERIES_1D_COARSE_STRIDE
+            else:
+                W_fut = W_canvas
             eval_bench_note("coarse_B", B)
             eval_bench_note("coarse_V", V)
             eval_bench_note("coarse_W", W_fut)
@@ -2703,26 +3064,64 @@ class DiffusionTSF(nn.Module):
                     context_window_indices=context_window_indices,
                 )
                 primary, zt = self._split_binary_heads(out)
+                if self._is_series_1d() or self._is_occupancy_mse():
+                    return primary, zt
                 x0_logits = self._x0_logits_from_prediction(primary, xt)
                 return x0_logits, zt
 
             intermediates = None
             sample_shape = (BV_out, C_occ, H, W_fut)
-            if sampler in ("anchor", "deterministic_anchor"):
+            if self._is_occupancy_mse() or (
+                sampler in ("anchor", "deterministic_anchor") and not self._is_series_1d()
+            ):
                 with eval_bench_span("anchor_decode"):
+                    t_idx = 0 if self._is_occupancy_mse() else (self.config.binary_num_steps - 1)
                     t_batch = torch.full(
                         (BV_out,),
-                        self.config.binary_num_steps - 1,
+                        t_idx,
                         device=device,
                         dtype=torch.long,
                     )
                     neutral_future_flat = self._binary_anchor_canvas_shape(
                         sample_shape, device=device,
                     )
-                    x0_logits, _zt_logits = _chunked_model_fn(neutral_future_flat, t_batch)
-                    future_2d_flat = (torch.sigmoid(x0_logits) > 0.5).float()
+                    primary, _zt_logits = _chunked_model_fn(neutral_future_flat, t_batch)
+                    if self._is_occupancy_mse():
+                        future_2d_flat = primary.clamp(0.0, 1.0)
+                    else:
+                        future_2d_flat = (torch.sigmoid(primary) > 0.5).float()
                     if yield_intermediates:
-                        intermediates = [(999, neutral_future_flat.clone()), (0, future_2d_flat.clone())]
+                        intermediates = [(t_idx, neutral_future_flat.clone()), (0, future_2d_flat.clone())]
+            elif self._is_series_1d() and sampler in ("anchor", "deterministic_anchor"):
+                if self.gaussian_scheduler is None:
+                    raise RuntimeError("series_1d generate requires GaussianEpsilonScheduler")
+                future_2d_flat = self._series_1d_anchor_x0(
+                    model_fn=_chunked_model_fn,
+                    shape=sample_shape,
+                    device=device,
+                )
+                if yield_intermediates:
+                    intermediates = [(self.gaussian_scheduler.num_steps - 1, torch.zeros_like(future_2d_flat)), (0, future_2d_flat.clone())]
+            elif self._is_series_1d():
+                if self.gaussian_scheduler is None:
+                    raise RuntimeError("series_1d generate requires GaussianEpsilonScheduler")
+                sample_kwargs = dict(
+                    model_fn=_chunked_model_fn,
+                    shape=sample_shape,
+                    num_steps=num_steps,
+                    device=device,
+                    verbose=verbose,
+                    sampler=self._gaussian_eval_sampler(sampler),
+                    reverse_step_indices=reverse_step_indices,
+                    snapshot_timesteps=snapshot_timesteps,
+                )
+                if yield_intermediates:
+                    future_2d_flat, intermediates = self.gaussian_scheduler.sample(
+                        yield_intermediates=True,
+                        **sample_kwargs,
+                    )
+                else:
+                    future_2d_flat = self.gaussian_scheduler.sample(**sample_kwargs)
             else:
                 sample_kwargs = dict(
                     model_fn=_chunked_model_fn,
@@ -2744,6 +3143,8 @@ class DiffusionTSF(nn.Module):
 
             with eval_bench_span("decode"):
                 generated_2d = future_2d_flat.reshape(B_out, V, H, W_fut)
+                if self._is_series_1d() and generated_2d.shape[-1] != W_canvas:
+                    generated_2d = _upsample_series_1d_time(generated_2d, W_canvas)
                 future_2d_coarse = generated_2d
                 cdf_decoder = "pdf_expectation" if decoder_method == "pdf_expectation" else decoder_method
                 temperature = self.config.decode_temperature if cdf_decoder == "pdf_expectation" else None

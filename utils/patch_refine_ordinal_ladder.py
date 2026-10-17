@@ -81,16 +81,31 @@ def snap_to_patch_refine_levels(
         raise ValueError(f"values/levels N,V mismatch: {vals.shape}/{levels.shape}")
     if not (np.isfinite(vals).all() and np.isfinite(levels).all()):
         raise ValueError("cannot snap non-finite values")
-    # |value - level| over H → argmin row per timestep.
-    delta = np.abs(vals[..., None] - levels[:, :, None, :])
-    rows = np.argmin(delta, axis=-1)
-    # Gather the actual dataset-z midpoint for that row.
-    snapped = np.take_along_axis(levels[:, :, None, :], rows[..., None], axis=-1)[..., 0]
-    residual = np.abs(vals - snapped)
+    n, v, t = vals.shape
+    h = int(levels.shape[-1])
+    # (n,v,t,h) float32 working buffer; chunk N so peak stays ~1 GiB.
+    bytes_per_row = max(int(v) * int(t) * h * 4, 1)
+    chunk_n = max(1, min(n, int(1_073_741_824 // bytes_per_row)))
+    snapped = np.empty_like(vals)
+    residual_sum = 0.0
+    residual_max = 0.0
+    n_elem = 0
+    for i0 in range(0, n, chunk_n):
+        i1 = min(n, i0 + chunk_n)
+        sl = slice(i0, i1)
+        delta = np.abs(vals[sl, ..., None] - levels[sl, :, None, :])
+        rows = np.argmin(delta, axis=-1)
+        part = np.take_along_axis(levels[sl, :, None, :], rows[..., None], axis=-1)[..., 0]
+        snapped[sl] = part
+        res = np.abs(vals[sl] - part)
+        residual_sum += float(res.sum())
+        residual_max = max(residual_max, float(res.max(initial=0.0)))
+        n_elem += int(res.size)
+        del delta, rows, part, res
     return snapped.astype(np.float32), {
-        "mean_abs_snap_delta": float(residual.mean()),
-        "max_abs_snap_delta": float(residual.max(initial=0.0)),
-        "n_rows": float(levels.shape[-1]),
+        "mean_abs_snap_delta": float(residual_sum / max(n_elem, 1)),
+        "max_abs_snap_delta": residual_max,
+        "n_rows": float(h),
         "n_unique_levels_min": float(min(np.unique(levels[i, j]).size for i in range(levels.shape[0]) for j in range(levels.shape[1]))),
     }
 

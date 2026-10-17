@@ -30,6 +30,7 @@ OPTIONAL_SUBSET_KEYS = (
     "sample_stride",
     "train_max_windows",
     "val_max_windows",
+    "max_series_timesteps",
 )
 
 
@@ -179,6 +180,7 @@ def resolve_data_subset(
         sample_stride = int(ds_spec.get("sample_stride", max(train_stride, 1)))
         train_max_windows = ds_spec.get("train_max_windows")
         val_max_windows = ds_spec.get("val_max_windows")
+        max_series_timesteps = ds_spec.get("max_series_timesteps")
         if train_max_windows is not None:
             train_max_windows = int(train_max_windows)
             if train_max_windows < 1:
@@ -187,6 +189,10 @@ def resolve_data_subset(
             val_max_windows = int(val_max_windows)
             if val_max_windows < 1:
                 raise ValueError(f"{dataset_name}: val_max_windows must be >= 1")
+        if max_series_timesteps is not None:
+            max_series_timesteps = int(max_series_timesteps)
+            if max_series_timesteps < 1:
+                raise ValueError(f"{dataset_name}: max_series_timesteps must be >= 1")
         subset_id = str(
             ds_spec.get(
                 "subset_id",
@@ -205,6 +211,7 @@ def resolve_data_subset(
             "sample_stride": sample_stride,
             "train_max_windows": train_max_windows,
             "val_max_windows": val_max_windows,
+            "max_series_timesteps": max_series_timesteps,
             "raw_rows": raw_rows,
             "raw_variates": raw_variates,
             "reason": "yaml_explicit",
@@ -227,6 +234,7 @@ def resolve_data_subset(
         "sample_stride": 1,
         "train_max_windows": None,
         "val_max_windows": None,
+        "max_series_timesteps": None,
         "raw_rows": raw_rows,
         "raw_variates": raw_variates,
         "reason": "yaml_fallback",

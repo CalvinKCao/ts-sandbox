@@ -14,7 +14,15 @@
 #   ./submit_binary.sh --configs configs/binary_anchor.yaml --datasets ETTh1,exchange_rate
 #   ./submit_binary.sh --smoke
 #   ./submit_binary.sh --resume --configs binary_window_norm_patch_refine_canvas128_p64x6 --datasets ETTh1
+#   ./submit_binary.sh --hp-only --configs <stem> --datasets solar_Alabama --time 1-06:00:00
+#   ./submit_binary.sh --refit-only --hp-job-id <HP_ID> --dependency afterok:<HP_ID> \
+#       --configs <stem> --datasets solar_Alabama --time 12:00:00
+#   ./submit_binary.sh --refit-only --ckpt-dir results/ckpts/<stem> --dependency afterok:<HP_ID> ...
 #
+# --hp-only / --skip-refit: Optuna search only (skip refit_best + staged_eval).
+# --refit-only: skip search; needs --ckpt-dir, --hp-job-id, or --resume.
+# --hp-job-id: worker globs results/ckpts/*-<jobid>-<dataset>-<config> after AfterOk.
+# --ckpt-dir: share an explicit checkpoint dir (need not exist at submit time).
 # --configs accepts comma-separated paths, globs, or bare stems under configs/*.yaml.
 # =============================================================================
 
@@ -26,6 +34,10 @@ DATASETS="ETTh1,ETTh2,ETTm1,ETTm2,illness,exchange_rate,weather,electricity,traf
 SEEDS="42"
 SMOKE=0
 RESUME=0
+HP_ONLY=0
+REFIT_ONLY=0
+CKPT_DIR_OVERRIDE=""
+HP_JOB_ID=""
 CKPT_CONFIG=""
 DEPENDENCY=""
 WANDB_PROJECT=""
@@ -43,9 +55,13 @@ EVAL_NUM_SHARDS=""
 EVAL_SHARD_ID=""
 UNET_MAX_CHUNK=""
 
-if [[ "$(hostname)" == *"narval"* ]]; then
+HOSTF="$(hostname -f 2>/dev/null || hostname)"
+if [[ "$HOSTF" == *narval* || "$(hostname)" == *narval* ]]; then
     ACCOUNT="def-boyuwang"
     GPU_TYPE="a100"
+elif [[ "$HOSTF" == *fir* || "${CC_CLUSTER:-}" == "fir" ]]; then
+    ACCOUNT="def-boyuwang_gpu"
+    GPU_TYPE="h100"
 else
     ACCOUNT="aip-boyuwang"
     GPU_TYPE="l40s"
@@ -59,6 +75,10 @@ while [[ $# -gt 0 ]]; do
         --seeds) SEEDS="$2"; shift 2 ;;
         --smoke|--smoke-test) SMOKE=1; shift ;;
         --resume) RESUME=1; shift ;;
+        --hp-only|--skip-refit) HP_ONLY=1; shift ;;
+        --refit-only) REFIT_ONLY=1; shift ;;
+        --ckpt-dir) CKPT_DIR_OVERRIDE="$2"; shift 2 ;;
+        --hp-job-id) HP_JOB_ID="$2"; shift 2 ;;
         --ckpt-config) CKPT_CONFIG="$2"; shift 2 ;;
         --dependency) DEPENDENCY="$2"; shift 2 ;;
         --wandb-project) WANDB_PROJECT="$2"; WANDB_PROJECT_EXPLICIT=1; shift 2 ;;
@@ -69,6 +89,7 @@ while [[ $# -gt 0 ]]; do
         --gpu) GPU_TYPE="$2"; shift 2 ;;
         --gpus) GPUS_OVERRIDE="$2"; shift 2 ;;
         --partition) PARTITION_OVERRIDE="$2"; shift 2 ;;
+        --account) ACCOUNT="$2"; shift 2 ;;
         --eval-only) EVAL_ONLY=1; shift ;;
         --eval-anchor-only) EVAL_ANCHOR_ONLY=1; shift ;;
         --eval-source-checkpoint-dir) EVAL_SOURCE_CKPT="$2"; shift 2 ;;
@@ -136,10 +157,22 @@ gpu_sbatch_args() {
     GPU_SBATCH_ARGS=()
     if [[ "$GPU_TYPE" == h100* ]]; then
         local wall="${WALL:-${WALL_DEFAULT:-1:00:00}}"
-        local part
-        part="$(pick_gpubase_partition "gpubase_h100_b" "$(slurm_time_to_seconds "$wall")")" || return 1
-        GPU_SBATCH_ARGS=(--partition="$part" --gpus-per-node=h100:"$gpus")
-        echo "H100 request: partition=$part gpus-per-node=h100:$gpus wall=$wall" >&2
+        local part=""
+        if [[ -n "$PARTITION_OVERRIDE" ]]; then
+            part="$PARTITION_OVERRIDE"
+        else
+            part="$(pick_gpubase_partition "gpubase_h100_b" "$(slurm_time_to_seconds "$wall")")" || true
+            if [[ -z "$part" ]]; then
+                part="$(pick_gpubase_partition "gpubase_bygpu_b" "$(slurm_time_to_seconds "$wall")")" || return 1
+            fi
+        fi
+        if [[ "$part" == *bygpu* || "$part" == *bynode* ]]; then
+            GPU_SBATCH_ARGS=(--partition="$part" --gpus=h100:"$gpus")
+            echo "H100 request: partition=$part gpus=h100:$gpus wall=$wall" >&2
+        else
+            GPU_SBATCH_ARGS=(--partition="$part" --gpus-per-node=h100:"$gpus")
+            echo "H100 request: partition=$part gpus-per-node=h100:$gpus wall=$wall" >&2
+        fi
     elif [[ "$GPU_TYPE" == a100* ]]; then
         GPU_SBATCH_ARGS=(--gpus="${GPU_TYPE}:${gpus}")
         if [[ -n "$PARTITION_OVERRIDE" ]]; then
@@ -215,6 +248,43 @@ fi
 
 if [[ "$EVAL_ONLY" -eq 1 ]]; then
     JOB_PREFIX="eval"
+fi
+if [[ "$HP_ONLY" -eq 1 ]]; then
+    JOB_PREFIX="hp"
+fi
+if [[ "$REFIT_ONLY" -eq 1 ]]; then
+    JOB_PREFIX="refit"
+fi
+if [[ "$HP_ONLY" -eq 1 && "$REFIT_ONLY" -eq 1 ]]; then
+    echo "ERROR: --hp-only/--skip-refit and --refit-only are mutually exclusive" >&2
+    exit 1
+fi
+if [[ "$HP_ONLY" -eq 1 && "$EVAL_ONLY" -eq 1 ]]; then
+    echo "ERROR: --hp-only/--skip-refit cannot be combined with --eval-only" >&2
+    exit 1
+fi
+if [[ "$REFIT_ONLY" -eq 1 && "$EVAL_ONLY" -eq 1 ]]; then
+    echo "ERROR: --refit-only cannot be combined with --eval-only" >&2
+    exit 1
+fi
+if [[ -n "$CKPT_DIR_OVERRIDE" && -n "$HP_JOB_ID" ]]; then
+    echo "ERROR: use --ckpt-dir or --hp-job-id, not both" >&2
+    exit 1
+fi
+if [[ -n "$HP_JOB_ID" ]]; then
+    if ! [[ "$HP_JOB_ID" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: --hp-job-id must be a Slurm job id, got $HP_JOB_ID" >&2
+        exit 1
+    fi
+fi
+if [[ -n "$CKPT_DIR_OVERRIDE" ]]; then
+    if [[ "$CKPT_DIR_OVERRIDE" != /* ]]; then
+        CKPT_DIR_OVERRIDE="$SCRIPT_DIR/$CKPT_DIR_OVERRIDE"
+    fi
+fi
+if [[ "$REFIT_ONLY" -eq 1 && -z "$CKPT_DIR_OVERRIDE" && -z "$HP_JOB_ID" && "$RESUME" -eq 0 ]]; then
+    echo "ERROR: --refit-only requires --ckpt-dir, --hp-job-id, or --resume" >&2
+    exit 1
 fi
 if [[ -n "$EVAL_NUM_SHARDS" || -n "$EVAL_SHARD_ID" ]]; then
     if [[ -z "$EVAL_NUM_SHARDS" || -z "$EVAL_SHARD_ID" ]]; then
@@ -318,6 +388,14 @@ for CFG in "${CONF_ARR[@]}"; do
     fi
 done
 
+if [[ -n "$CKPT_DIR_OVERRIDE" || -n "$HP_JOB_ID" ]]; then
+    ncombo=$(( ${#CONF_ARR[@]} * ${#DATA_ARR[@]} * ${#SEED_ARR[@]} ))
+    if [[ "$ncombo" -ne 1 ]]; then
+        echo "ERROR: --ckpt-dir / --hp-job-id require a single config x dataset x seed job (got $ncombo)" >&2
+        exit 1
+    fi
+fi
+
 echo "Preflight: MMPD gap/redbox packs for each config x dataset"
 for CFG in "${CONF_ARR[@]}"; do
     for DS in "${DATA_ARR[@]}"; do
@@ -338,7 +416,11 @@ if [[ -n "$JOB_MANIFEST" ]]; then
 fi
 
 echo "Submitting grid... (Storage: $STORE)"
-[[ "$RESUME" -eq 1 ]] && echo "Resume: requires existing *-<dataset>-<config> checkpoint dir (newest mtime wins)."
+[[ "$RESUME" -eq 1 ]] && echo "Resume: requires existing *-<dataset>-<config> checkpoint dir (newest mtime wins) unless --ckpt-dir/--hp-job-id."
+[[ "$HP_ONLY" -eq 1 ]] && echo "Mode: hp-only / skip-refit (Optuna search; skip refit_best + staged_eval)."
+[[ "$REFIT_ONLY" -eq 1 ]] && echo "Mode: refit-only (skip Optuna; fail if HP artifacts missing at job start)."
+[[ -n "$CKPT_DIR_OVERRIDE" ]] && echo "Checkpoint dir (need not exist at submit): $CKPT_DIR_OVERRIDE"
+[[ -n "$HP_JOB_ID" ]] && echo "HP job id (worker globs ckpts/*-${HP_JOB_ID}-<dataset>-<config> after AfterOk): $HP_JOB_ID"
 [[ -n "$CKPT_CONFIG" ]] && echo "Checkpoint stem matcher: *-<dataset>-${CKPT_CONFIG}"
 printf "%-10s %-15s %-25s %-8s %s\n" "JOB ID" "DATASET" "CONFIG" "SEED" "LOG"
 echo "--------------------------------------------------------------------------------"
@@ -368,6 +450,7 @@ for CFG in "${CONF_ARR[@]}"; do
             GRID_RESUME_FLAG="$RESUME"
             CKPT_MATCH="${CKPT_CONFIG:-$CFG_NAME}"
             DS_EVAL_SOURCE="$EVAL_SOURCE_CKPT"
+            DS_CKPT_DIR="$CKPT_DIR_OVERRIDE"
             if [[ "$EVAL_ONLY" -eq 1 ]]; then
                 GRID_RESUME_FLAG=0
                 if [[ -z "$DS_EVAL_SOURCE" ]]; then
@@ -380,6 +463,11 @@ for CFG in "${CONF_ARR[@]}"; do
                 fi
                 if [[ "$DS_EVAL_SOURCE" != /* ]]; then
                     DS_EVAL_SOURCE="$SCRIPT_DIR/$DS_EVAL_SOURCE"
+                fi
+            elif [[ -n "$DS_CKPT_DIR" || -n "$HP_JOB_ID" ]]; then
+                # AfterOk refit: HP dir is created by the upstream job, not at submit.
+                if [[ "$REFIT_ONLY" -eq 1 ]]; then
+                    PY_RESUME=1
                 fi
             elif [[ "$RESUME" -eq 1 ]]; then
                 RUN_STEM=$(pick_resume_stem "$DS" "$CKPT_MATCH")
@@ -418,7 +506,7 @@ for CFG in "${CONF_ARR[@]}"; do
                 --error="$LOG_FILE"
                 --mail-type=FAIL
                 --mail-user="${USER}@uwo.ca"
-                --export=ALL,GRID_DATE_STR="$DATE_STR",GRID_DATASET="$DS",GRID_CFG_NAME="${CFG_NAME}${LOG_STEM_EXTRA}",GRID_STORE="$STORE",GRID_RESUME="$GRID_RESUME_FLAG",GRID_RUN_STEM="$RUN_STEM"
+                --export=ALL,GRID_DATE_STR="$DATE_STR",GRID_DATASET="$DS",GRID_CFG_NAME="${CFG_NAME}${LOG_STEM_EXTRA}",GRID_STORE="$STORE",GRID_RESUME="$GRID_RESUME_FLAG",GRID_RUN_STEM="$RUN_STEM",GRID_CKPT_DIR="$DS_CKPT_DIR",GRID_HP_JOB_ID="$HP_JOB_ID"
             )
 
             if [[ -n "$DEPENDENCY" ]]; then
@@ -445,8 +533,14 @@ for CFG in "${CONF_ARR[@]}"; do
                 PY_ARGS+=(--smoke-test)
             fi
 
-            if [[ "$PY_RESUME" -eq 1 && -n "$RUN_STEM" ]]; then
+            if [[ "$PY_RESUME" -eq 1 && ( -n "$RUN_STEM" || -n "$DS_CKPT_DIR" || -n "$HP_JOB_ID" ) ]]; then
                 PY_ARGS+=(--resume)
+            fi
+            if [[ "$HP_ONLY" -eq 1 ]]; then
+                PY_ARGS+=(--hp-only)
+            fi
+            if [[ "$REFIT_ONLY" -eq 1 ]]; then
+                PY_ARGS+=(--refit-only)
             fi
             if [[ "$EVAL_ONLY" -eq 1 ]]; then
                 PY_ARGS+=(--eval-only --eval-source-checkpoint-dir "$DS_EVAL_SOURCE")

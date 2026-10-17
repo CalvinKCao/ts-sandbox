@@ -437,6 +437,17 @@ class UniquePatchSegmentDataset(Dataset):
         self.segment_starts = starts
         if not self.segment_starts:
             raise RuntimeError("UniquePatchSegmentDataset: zero valid segments")
+        # stride-1 on dynamic_500K (T≈3.5e5, L=600) is ~349k segments and
+        # CPU-spins for hours (Killarney 5527088). Cut that path.
+        n_seg = len(self.segment_starts)
+        if n_seg >= 80_000:
+            raise RuntimeError(
+                f"UniquePatchSegmentDataset: {n_seg} segments "
+                f"(T={int(self.data.shape[0])} L={self.lookback} H={self.horizon} "
+                f"stride={self.segment_stride}). Unique-seg × long T × stride-1 "
+                f"hangs. Raise segment_stride (e.g. dynamic test_stride=300) or "
+                f"set patch_refine_unique_segments=false."
+            )
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)

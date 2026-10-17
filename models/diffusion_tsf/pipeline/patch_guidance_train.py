@@ -149,14 +149,26 @@ def _window_norm_past_future(
     else:
         raise ValueError(f"unknown window_norm_center {state.window_norm_center!r}")
     past_std = past.std(dim=-1, keepdim=True)
+    from utils.sticky_discrete_dataset_norm import clamp_past_std
+    per_floor = getattr(state, "window_norm_std_floor_per_variate", None)
     if state.window_norm_low_var_threshold > 0.0:
-        std_floor = past_std.clamp_min(state.window_norm_std_floor)
+        std_floor = clamp_past_std(past_std, state.window_norm_std_floor, per_floor)
         unit = torch.full_like(past_std, state.window_norm_low_var_unit_std_by_dataset.get(state.dataset, state.window_norm_low_var_unit_std))
         low_var = past_std < state.window_norm_low_var_threshold
-        flat = past_std <= state.window_norm_std_floor
+        if per_floor is not None:
+            floor_t = torch.as_tensor(
+                list(per_floor), device=past.device, dtype=past.dtype,
+            ).view(1, -1, 1)
+            flat = past_std <= floor_t
+        else:
+            flat = past_std <= state.window_norm_std_floor
         std = torch.where(flat | low_var, unit, std_floor)
     else:
-        std = past_std.clamp_min(state.window_norm_std_floor)
+        std = clamp_past_std(past_std, state.window_norm_std_floor, per_floor)
+    skip_mask = getattr(state, "skip_window_norm_variate_mask", None)
+    if skip_mask is not None:
+        from utils.hybrid_flat_dataset_norm import apply_skip_window_norm_mask
+        center, std = apply_skip_window_norm_mask(center, std, skip_mask)
     return (past - center) / std, (future - center) / std
 
 

@@ -35,9 +35,11 @@ def window_normalization_stats(
 
     past_std = past.std(dim=-1, keepdim=True)
     std_floor = float(getattr(config, "window_norm_std_floor", 0.1))
+    per_floor = getattr(config, "window_norm_std_floor_per_variate", None)
+    from utils.sticky_discrete_dataset_norm import clamp_past_std
     threshold = float(getattr(config, "window_norm_low_var_threshold", 0.0))
     if threshold <= 0.0:
-        center_out, std_out = center, past_std.clamp_min(std_floor)
+        center_out, std_out = center, clamp_past_std(past_std, std_floor, per_floor)
     else:
         default_unit = float(getattr(config, "window_norm_low_var_unit_std", 1.0))
         per_variate = getattr(config, "window_norm_low_var_unit_std_per_variate", None)
@@ -47,9 +49,15 @@ def window_normalization_stats(
             if len(per_variate) != past.shape[1]:
                 raise ValueError("window_norm_low_var_unit_std_per_variate has wrong length")
             unit = torch.tensor(per_variate, device=past.device, dtype=past.dtype).view(1, -1, 1)
-        std = past_std.clamp_min(std_floor)
+        std = clamp_past_std(past_std, std_floor, per_floor)
         low_var = past_std < threshold
-        flat = past_std <= std_floor
+        if per_floor is not None:
+            floor_t = torch.as_tensor(
+                list(per_floor), device=past.device, dtype=past.dtype,
+            ).view(1, -1, 1)
+            flat = past_std <= floor_t
+        else:
+            flat = past_std <= std_floor
         center_out, std_out = center, torch.where(flat | low_var, unit, std)
 
     skip_mask = getattr(config, "skip_window_norm_variate_mask", None)

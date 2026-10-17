@@ -264,3 +264,118 @@ class BinaryDiffusionScheduler:
                 intermediates.append((0, xt.clone()))
             return xt, intermediates
         return xt
+
+
+class GaussianEpsilonScheduler:
+    """Linear/cosine Gaussian noise for 1D series ε-MSE (not XOR bit-flip)."""
+
+    def __init__(
+        self,
+        num_steps: int = 1000,
+        beta_start: float = 1e-5,
+        beta_end: float = 0.5,
+        schedule_type: str = "linear",
+        device: str = "cpu",
+        length_mode: str = "none",
+        length_g: float = 1.0,
+        length_scale: float = 1.0,
+    ):
+        self.num_steps = num_steps
+        self.device = device
+        self.betas = _build_transition_schedule(
+            num_steps,
+            beta_start,
+            beta_end,
+            schedule_type,
+            device,
+            length_mode=(length_mode or "none").lower(),
+            length_g=float(length_g),
+            length_scale=float(length_scale),
+        )
+        self.alphas = 1.0 - self.betas
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        if float(self.alphas_cumprod[-1].item()) <= 0.0:
+            raise ValueError(
+                f"Gaussian ᾱ_T underflowed to {float(self.alphas_cumprod[-1].item())} "
+                f"(beta_end={beta_end}, steps={num_steps}, schedule={schedule_type}). "
+                "Use a Ho-style schedule (β_end≈0.02), not binary β_end=0.5."
+            )
+        self.schedule_type = schedule_type
+
+    def to(self, device: str) -> "GaussianEpsilonScheduler":
+        self.device = device
+        self.betas = self.betas.to(device)
+        self.alphas = self.alphas.to(device)
+        self.alphas_cumprod = self.alphas_cumprod.to(device)
+        return self
+
+    def add_noise(self, x0: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        noise = torch.randn_like(x0)
+        a_bar = self.alphas_cumprod[t]
+        shape = (-1,) + (1,) * (x0.dim() - 1)
+        a_bar = a_bar.view(shape).to(dtype=x0.dtype)
+        xt = a_bar.sqrt() * x0 + (1.0 - a_bar).sqrt() * noise
+        return xt, noise
+
+    @torch.no_grad()
+    def sample(
+        self,
+        model_fn,
+        shape: Tuple[int, ...],
+        num_steps: int = 20,
+        device: str = "cpu",
+        verbose: bool = False,
+        sampler: str = "ddim",
+        yield_intermediates: bool = False,
+        reverse_step_indices: Optional[torch.Tensor] = None,
+        snapshot_timesteps: Optional[Tuple[int, ...]] = None,
+    ):
+        if reverse_step_indices is not None:
+            step_indices = reverse_step_indices.to(device=device, dtype=torch.long)
+        else:
+            name = str(sampler).lower()
+            if name == "dpmpp":
+                raise ValueError(
+                    "sampler='dpmpp' is not a DPM++ solver. Use sampler='quad_t'."
+                )
+            if name in {"quad_t", "ddim_quad"}:
+                ramp = torch.linspace(1.0, 0.0, num_steps, device=device)
+                step_indices = torch.round((ramp ** 2) * (self.num_steps - 1)).long()
+            elif name == "ddim":
+                step_indices = torch.linspace(
+                    self.num_steps - 1,
+                    0,
+                    num_steps,
+                    device=device,
+                    dtype=torch.long,
+                )
+            else:
+                raise ValueError(
+                    f"Unknown gaussian sampler {sampler!r}; expected ddim, quad_t, or ddim_quad"
+                )
+        snapshot_set = None
+        if snapshot_timesteps is not None:
+            snapshot_set = {int(min(max(0, t), self.num_steps - 1)) for t in snapshot_timesteps}
+        xt = torch.randn(shape, device=device)
+        intermediates = []
+        for i, t_val in enumerate(step_indices):
+            t_idx = int(t_val.item())
+            if yield_intermediates and (snapshot_set is None or t_idx in snapshot_set):
+                intermediates.append((t_idx, xt.clone()))
+            t_batch = torch.full((shape[0],), t_idx, device=device, dtype=torch.long)
+            eps, _unused = model_fn(xt, t_batch)
+            a_bar = self.alphas_cumprod[t_idx].to(dtype=xt.dtype)
+            x0_hat = (xt - (1.0 - a_bar).sqrt() * eps) / a_bar.sqrt().clamp(min=1e-8)
+            if i < len(step_indices) - 1:
+                t_next = int(step_indices[i + 1].item())
+                a_bar_next = self.alphas_cumprod[t_next].to(dtype=xt.dtype)
+                xt = a_bar_next.sqrt() * x0_hat + (1.0 - a_bar_next).sqrt() * eps
+            else:
+                xt = x0_hat
+            if verbose and i % 5 == 0:
+                logger.debug(f"  gaussian step {i + 1}/{num_steps} (t={t_idx})")
+        if yield_intermediates:
+            if snapshot_set is None or 0 in snapshot_set:
+                intermediates.append((0, xt.clone()))
+            return xt, intermediates
+        return xt

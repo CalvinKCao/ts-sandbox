@@ -80,8 +80,27 @@ if [[ -n "${SLURM_JOB_ID:-}" && "${SLURM_JOB_NAME:-}" != "$RUN_STEM" ]]; then
 fi
 
 
-CKPT_DIR="$STORE/ckpts/${RUN_STEM}"
 DATA_DIR="$STORE/datasets/${RUN_STEM}"
+if [[ -n "${GRID_CKPT_DIR:-}" ]]; then
+    CKPT_DIR="$GRID_CKPT_DIR"
+    echo "$(ts) Checkpoint dir (GRID_CKPT_DIR): $CKPT_DIR"
+elif [[ -n "${GRID_HP_JOB_ID:-}" ]]; then
+    shopt -s nullglob
+    matches=( "$STORE/ckpts/"*"-${GRID_HP_JOB_ID}-${DS}-${CFG_NAME}" )
+    shopt -u nullglob
+    if [[ ${#matches[@]} -eq 0 ]]; then
+        echo "ERROR: --hp-job-id ${GRID_HP_JOB_ID}: no ckpt dir matching $STORE/ckpts/*-${GRID_HP_JOB_ID}-${DS}-${CFG_NAME}" >&2
+        exit 1
+    fi
+    if [[ ${#matches[@]} -gt 1 ]]; then
+        echo "ERROR: --hp-job-id ${GRID_HP_JOB_ID}: multiple ckpt dirs: ${matches[*]}" >&2
+        exit 1
+    fi
+    CKPT_DIR="${matches[0]}"
+    echo "$(ts) Checkpoint dir (--hp-job-id ${GRID_HP_JOB_ID}): $CKPT_DIR"
+else
+    CKPT_DIR="$STORE/ckpts/${RUN_STEM}"
+fi
 mkdir -p "$CKPT_DIR" "$DATA_DIR"
 
 # Benchmark CSVs live in the repo clone ($SCRATCH/ts-sandbox/datasets), not under $STORE/datasets.

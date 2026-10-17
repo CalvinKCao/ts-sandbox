@@ -23,6 +23,33 @@ from models.diffusion_tsf.pipeline.config import (
 )
 
 
+def _fail_incompatible_dataset_norm(init_kwargs: Dict[str, Any]) -> None:
+    mode_anchor = bool(init_kwargs.get("mode_anchor_dataset_norm", False))
+    sticky = bool(init_kwargs.get("sticky_discrete_dataset_norm", False))
+    hybrid = bool(init_kwargs.get("hybrid_flat_dataset_norm", False))
+    ordinal = bool(init_kwargs.get("use_ordinal_window_norm", False))
+    window_norm = bool(init_kwargs.get("use_window_normalization", True))
+    flags = [
+        ("mode_anchor_dataset_norm", mode_anchor),
+        ("sticky_discrete_dataset_norm", sticky),
+        ("hybrid_flat_dataset_norm", hybrid),
+        ("use_ordinal_window_norm", ordinal),
+    ]
+    enabled = [name for name, on in flags if on]
+    if len(enabled) > 1:
+        raise ValueError("incompatible dataset-norm flags: " + ", ".join(enabled))
+    if mode_anchor and window_norm:
+        raise ValueError(
+            "mode_anchor_dataset_norm is incompatible with use_window_normalization; "
+            "set use_window_normalization: false"
+        )
+    if sticky and not window_norm:
+        raise ValueError(
+            "sticky_discrete_dataset_norm requires use_window_normalization: true "
+            "(discrete variates skip IN via skip_window_norm_variate_mask)"
+        )
+
+
 @dataclass
 class PipelineState:
     """Everything that flows between phases."""
@@ -52,6 +79,9 @@ class PipelineState:
     coarse_image_height: int = 16
     fine_image_height: int = 16
     max_scale: float = 3.5
+    occupancy_encoding: str = "cdf"
+    # cdf_2d = live binary occupancy canvas; series_1d = instance-normed 1D values.
+    representation: str = "cdf_2d"
     max_scale_by_dataset: Dict[str, float] = field(default_factory=dict)
     staged_representation: str = "value_precision"
     dit_patch_size: Tuple[int, int] = (8, 8)
@@ -102,9 +132,17 @@ class PipelineState:
     hybrid_flat_dataset_norm: bool = False
     hybrid_flat_frac_threshold: float = 0.5
     hybrid_flat_oob_coverage: float = 0.99
-    # Derived with the dataset-affine hybrid normalization and copied into
+    # Solar mode-0: skip z-score mean subtract; raw 0 → canvas floor (-max_scale).
+    mode_anchor_dataset_norm: bool = False
+    # Dynamic sticky/discrete: per-variate IN floor + coarse-bin affine on raw.
+    sticky_discrete_dataset_norm: bool = False
+    sticky_inorm_frac_threshold: float = 0.3
+    sticky_inorm_window_clip_coverage: float = 0.95
+    discrete_coarse_align_max_uniques: int = 3
+    # Derived with the dataset-affine hybrid/sticky normalization and copied into
     # DiffusionTSFConfig when a model is built.
     skip_window_norm_variate_mask: Optional[List[bool]] = None
+    window_norm_std_floor_per_variate: Optional[List[float]] = None
     lookback_overlap_center_shift: bool = False
     use_raw_lookback_cond_channel: bool = False
     # Eval-only encoder-decoder cond K/V cache (unique-seg generate). Ignored in train.
@@ -136,6 +174,11 @@ class PipelineState:
     binary_num_steps: int = 1000
     binary_beta_start: float = 1e-5
     binary_beta_end: float = 0.5
+    gaussian_num_steps: int = 1000
+    gaussian_sample_steps: int = 20
+    gaussian_beta_start: float = 1e-4
+    gaussian_beta_end: float = 0.02
+    gaussian_noise_schedule: str = "linear"
     lr_scheduler_type: str = "none"
     lr_warmup_epochs: int = 0
     # 1 = each train epoch walks the full packed batch list. N>1 splits that
@@ -221,6 +264,9 @@ class PipelineState:
     # -- Resume / fresh --
     resume: bool = False
     fresh: bool = False
+    # Split Optuna search and refit_best across Slurm jobs.
+    hp_only: bool = False
+    refit_only: bool = False
 
     # -- Refactored YAML options --
     seeds: List[int] = field(default_factory=lambda: [42])
@@ -354,6 +400,30 @@ class PipelineState:
                 init_kwargs[key] = float(init_kwargs[key])
         if "max_scale" in init_kwargs:
             init_kwargs["max_scale"] = float(init_kwargs["max_scale"])
+        if "occupancy_encoding" in init_kwargs:
+            enc = str(init_kwargs["occupancy_encoding"]).lower()
+            if enc not in {"cdf", "one_hot"}:
+                raise ValueError(
+                    f"occupancy_encoding must be 'cdf' or 'one_hot', got "
+                    f"{init_kwargs['occupancy_encoding']!r}"
+                )
+            init_kwargs["occupancy_encoding"] = enc
+        if "representation" in init_kwargs:
+            rep = str(init_kwargs["representation"]).lower()
+            if rep not in {"cdf_2d", "series_1d"}:
+                raise ValueError(
+                    f"representation must be 'cdf_2d' or 'series_1d', got "
+                    f"{init_kwargs['representation']!r}"
+                )
+            init_kwargs["representation"] = rep
+        if "prediction_target" in init_kwargs:
+            target = str(init_kwargs["prediction_target"]).lower()
+            if target not in {"x0", "epsilon", "occupancy_mse"}:
+                raise ValueError(
+                    f"prediction_target must be 'x0', 'epsilon', or 'occupancy_mse', "
+                    f"got {init_kwargs['prediction_target']!r}"
+                )
+            init_kwargs["prediction_target"] = target
         if "max_scale_by_dataset" in init_kwargs:
             init_kwargs["max_scale_by_dataset"] = {
                 str(k): float(v) for k, v in init_kwargs["max_scale_by_dataset"].items()
@@ -364,6 +434,28 @@ class PipelineState:
             }
         if "window_norm_std_floor" in init_kwargs:
             init_kwargs["window_norm_std_floor"] = float(init_kwargs["window_norm_std_floor"])
+        for key in (
+            "mode_anchor_dataset_norm",
+            "sticky_discrete_dataset_norm",
+            "hybrid_flat_dataset_norm",
+            "use_window_normalization",
+            "use_ordinal_window_norm",
+        ):
+            if key in init_kwargs:
+                init_kwargs[key] = bool(init_kwargs[key])
+        if "sticky_inorm_frac_threshold" in init_kwargs:
+            init_kwargs["sticky_inorm_frac_threshold"] = float(
+                init_kwargs["sticky_inorm_frac_threshold"]
+            )
+        if "sticky_inorm_window_clip_coverage" in init_kwargs:
+            init_kwargs["sticky_inorm_window_clip_coverage"] = float(
+                init_kwargs["sticky_inorm_window_clip_coverage"]
+            )
+        if "discrete_coarse_align_max_uniques" in init_kwargs:
+            init_kwargs["discrete_coarse_align_max_uniques"] = int(
+                init_kwargs["discrete_coarse_align_max_uniques"]
+            )
+        _fail_incompatible_dataset_norm(init_kwargs)
         if "train_time_coverage" in init_kwargs and init_kwargs["train_time_coverage"] is not None:
             cov = float(init_kwargs["train_time_coverage"])
             if cov != 1.0:
@@ -394,6 +486,14 @@ class PipelineState:
             init_kwargs["cache_cond_kv"] = bool(init_kwargs["cache_cond_kv"])
         if "min_snr_gamma" in init_kwargs:
             init_kwargs["min_snr_gamma"] = float(init_kwargs["min_snr_gamma"])
+        for key in ("gaussian_beta_start", "gaussian_beta_end"):
+            if key in init_kwargs:
+                init_kwargs[key] = float(init_kwargs[key])
+        for key in ("gaussian_num_steps", "gaussian_sample_steps"):
+            if key in init_kwargs:
+                init_kwargs[key] = int(init_kwargs[key])
+        if "gaussian_noise_schedule" in init_kwargs:
+            init_kwargs["gaussian_noise_schedule"] = str(init_kwargs["gaussian_noise_schedule"])
         if "deterministic_anchor_every_n_batches" in init_kwargs:
             interval = int(init_kwargs["deterministic_anchor_every_n_batches"])
             if interval < 1:

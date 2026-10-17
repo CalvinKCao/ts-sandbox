@@ -7,7 +7,9 @@ last window may contribute only some variates.
 
 Optimizer steps accumulate by exact row count: each forward is scaled by
 ``slice_rows / target_rows`` so one step equals the target U-row budget, with
-leftover rows carried across loader batches.
+leftover rows carried across loader batches. An incomplete pack at epoch end
+is still one optimizer step (same mean-loss scale, leftover count as the
+row budget for that step).
 """
 
 from __future__ import annotations

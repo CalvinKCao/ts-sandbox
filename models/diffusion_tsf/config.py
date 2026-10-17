@@ -55,7 +55,9 @@ class DiffusionTSFConfig:
     # Train-only unique-seg crop keep-rate (1.0 = all (B,V) crops).
     patch_refine_finetune_patch_fraction: float = 1.0
     max_scale: float = 3.5
-    representation_mode: str = "cdf"  # pdf or cdf
+    representation_mode: str = "cdf"  # pdf or cdf (decode_from_2d leftover)
+    occupancy_encoding: str = "cdf"  # cdf staircase or one_hot APDF
+    representation: str = "cdf_2d"  # cdf_2d occupancy canvas or series_1d
     staged_representation: str = "value_precision"
 
     # unified time axis (L+F vs Future-Only)
@@ -73,6 +75,12 @@ class DiffusionTSFConfig:
     binary_beta_start: float = 1e-5
     binary_beta_end: float = 0.5
     binary_noise_schedule: str = "sqrt_linear"  # sqrt_linear, linear, cosine
+    # series_1d only. Ho linear defaults; do not reuse binary β_end=0.5.
+    gaussian_num_steps: int = 1000
+    gaussian_sample_steps: int = 20
+    gaussian_beta_start: float = 1e-4
+    gaussian_beta_end: float = 0.02
+    gaussian_noise_schedule: str = "linear"
     # Length-dependent β remap (diag / ablation). Default none = identity schedule.
     binary_length_mode: str = "none"  # none | power | scale
     binary_length_g: float = 1.0
@@ -121,12 +129,13 @@ class DiffusionTSFConfig:
     # Hybrid flat: per-variate skip of window/instance norm (identity in dataset-affine space).
     # Length must match num_variables when set. See utils/hybrid_flat_dataset_norm.py.
     skip_window_norm_variate_mask: Optional[List[bool]] = None
+    window_norm_std_floor_per_variate: Optional[List[float]] = None
     hybrid_flat_dataset_norm: bool = False
     hybrid_flat_frac_threshold: float = 0.5
     hybrid_flat_oob_coverage: float = 0.99
     # Shift window center at decode so overlap preds align with past tail (quantization fix).
     lookback_overlap_center_shift: bool = False
-    prediction_target: str = "x0"  # x0 or epsilon (bit-flip mask)
+    prediction_target: str = "x0"  # x0, epsilon (bit-flip), or occupancy_mse
     loss_weighting: str = "none"  # none or min_snr
     min_snr_gamma: float = 5.0
 
@@ -247,6 +256,21 @@ class DiffusionTSFConfig:
                 raise ValueError("window_norm_low_var_unit_std_per_variate must be non-empty.")
             if any(float(u) <= 0.0 for u in per_v):
                 raise ValueError("window_norm_low_var_unit_std_per_variate values must be > 0.")
+        per_floor = self.window_norm_std_floor_per_variate
+        if per_floor is not None:
+            if len(per_floor) != int(self.num_variables):
+                raise ValueError(
+                    "window_norm_std_floor_per_variate length "
+                    f"{len(per_floor)} != num_variables {self.num_variables}"
+                )
+            if any(float(u) <= 0.0 for u in per_floor):
+                raise ValueError("window_norm_std_floor_per_variate values must be > 0.")
+        skip_mask = self.skip_window_norm_variate_mask
+        if skip_mask is not None and len(skip_mask) != int(self.num_variables):
+            raise ValueError(
+                "skip_window_norm_variate_mask length "
+                f"{len(skip_mask)} != num_variables {self.num_variables}"
+            )
         if self.window_norm_center not in {"mean", "last"}:
             raise ValueError(
                 "window_norm_center must be 'mean' or 'last', "
@@ -267,13 +291,71 @@ class DiffusionTSFConfig:
                 raise ValueError("binary_length_g must be > 0.")
             if float(self.binary_length_scale) <= 0:
                 raise ValueError("binary_length_scale must be > 0.")
-            if self.prediction_target not in {"x0", "epsilon"}:
-                raise ValueError("prediction_target must be 'x0' or 'epsilon'.")
+            if self.prediction_target not in {"x0", "epsilon", "occupancy_mse"}:
+                raise ValueError(
+                    "prediction_target must be 'x0', 'epsilon', or 'occupancy_mse'."
+                )
             if self.loss_weighting not in {"none", "min_snr"}:
                 raise ValueError("loss_weighting must be 'none' or 'min_snr'.")
         if self.min_snr_gamma <= 0:
             raise ValueError("min_snr_gamma must be > 0.")
         assert self.representation_mode in ["pdf", "cdf"]
+        enc = str(self.occupancy_encoding).lower()
+        if enc not in {"cdf", "one_hot"}:
+            raise ValueError(
+                f"occupancy_encoding must be 'cdf' or 'one_hot', got {self.occupancy_encoding!r}"
+            )
+        self.occupancy_encoding = enc
+        rep = str(getattr(self, "representation", "cdf_2d")).lower()
+        if rep not in {"cdf_2d", "series_1d"}:
+            raise ValueError(f"representation must be 'cdf_2d' or 'series_1d', got {rep!r}")
+        self.representation = rep
+        if self.representation == "series_1d" and self.prediction_target == "occupancy_mse":
+            raise ValueError("series_1d cannot use prediction_target=occupancy_mse")
+        if self.prediction_target == "occupancy_mse" and self.representation != "cdf_2d":
+            raise ValueError("occupancy_mse requires representation=cdf_2d")
+        if self.prediction_target == "occupancy_mse" and self.use_deterministic_anchor_loss:
+            raise ValueError("occupancy_mse is already one-shot; set deterministic_anchor_loss=false")
+        if self.representation == "series_1d":
+            if float(self.gaussian_beta_end) > 0.05:
+                raise ValueError(
+                    "series_1d Gaussian β_end must be <= 0.05 (Ho-style); "
+                    f"got {self.gaussian_beta_end}. Do not reuse binary β_end=0.5."
+                )
+            if int(self.gaussian_num_steps) < 1:
+                raise ValueError(f"gaussian_num_steps must be >= 1, got {self.gaussian_num_steps}")
+            if int(self.gaussian_sample_steps) < 1:
+                raise ValueError(
+                    f"gaussian_sample_steps must be >= 1, got {self.gaussian_sample_steps}"
+                )
+            if str(self.gaussian_noise_schedule) not in {"linear", "cosine", "sqrt_linear"}:
+                raise ValueError(
+                    f"gaussian_noise_schedule must be linear/cosine/sqrt_linear, "
+                    f"got {self.gaussian_noise_schedule!r}"
+                )
+            if int(self.image_height) != 1 or int(self.coarse_image_height) != 1 or int(self.fine_image_height) != 1:
+                raise ValueError(
+                    "series_1d requires image_height=coarse_image_height=fine_image_height=1, "
+                    f"got {self.image_height}/{self.coarse_image_height}/{self.fine_image_height}"
+                )
+            if int(self.patch_refine_canvas_height) != 1 or int(self.patch_refine_patch_height) != 1:
+                raise ValueError(
+                    "series_1d requires patch_refine_canvas_height=patch_refine_patch_height=1, "
+                    f"got canvas={self.patch_refine_canvas_height} patch_h={self.patch_refine_patch_height}"
+                )
+            if int(self.dit_patch_size[0]) != 1:
+                raise ValueError(
+                    f"series_1d requires dit_patch_size[0]=1, got {self.dit_patch_size}"
+                )
+            if self.prediction_target != "epsilon":
+                raise ValueError(
+                    "series_1d trains Gaussian ε-MSE; prediction_target must be 'epsilon', "
+                    f"got {self.prediction_target!r}"
+                )
+            if self.dit_embed_dim % self.dit_num_heads != 0:
+                raise ValueError(
+                    f"dit_embed_dim {self.dit_embed_dim} not divisible by dit_num_heads {self.dit_num_heads}"
+                )
         if not self.variate_factorized:
             raise ValueError("variate_factorized=False is no longer supported.")
         if self.model_type != "dit":
@@ -330,8 +412,12 @@ class DiffusionTSFConfig:
 
     @property
     def visual_cond_channels(self) -> int:
-        per_scale = 1 + (1 if self.use_value_channel else 0)
         raw_extra = 1 if self.use_raw_lookback_cond_channel else 0
+        if str(getattr(self, "representation", "cdf_2d")) == "series_1d":
+            if self.diffusion_stage in {"coarse", "patch_refine"}:
+                return 1 + (raw_extra if self.diffusion_stage == "coarse" else 0)
+            raise ValueError(f"unsupported diffusion_stage={self.diffusion_stage!r}")
+        per_scale = 1 + (1 if self.use_value_channel else 0)
         if self.diffusion_stage == "patch_refine":
             return 1
         if self.diffusion_stage == "coarse":

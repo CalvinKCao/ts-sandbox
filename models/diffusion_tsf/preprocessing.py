@@ -12,23 +12,75 @@ from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+OCCUPANCY_ENCODINGS = ("cdf", "one_hot")
+
+
+def require_occupancy_encoding(value: str) -> str:
+    enc = str(value).lower()
+    if enc not in OCCUPANCY_ENCODINGS:
+        raise ValueError(
+            f"occupancy_encoding must be 'cdf' or 'one_hot', got {value!r}"
+        )
+    return enc
+
+
+def occupancy_from_bin_indices(
+    bin_indices: torch.Tensor,
+    height: int,
+    occupancy_encoding: str = "cdf",
+    *,
+    dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor:
+    """(B,V,W) bin indices → (B,V,H,W) occupancy. CDF staircase or one-hot column."""
+    enc = require_occupancy_encoding(occupancy_encoding)
+    if bin_indices.dim() != 3:
+        raise ValueError(f"bin_indices must be (B,V,W), got {tuple(bin_indices.shape)}")
+    height_range = torch.arange(height, device=bin_indices.device).view(1, 1, height, 1)
+    bins = bin_indices.unsqueeze(2)
+    if enc == "one_hot":
+        occ = height_range == bins
+    else:
+        occ = height_range <= bins
+    return occ.to(dtype=dtype if dtype is not None else torch.float32)
+
+
+def bin_indices_from_occupancy(
+    occupancy: torch.Tensor,
+    occupancy_encoding: str = "cdf",
+) -> torch.Tensor:
+    """Occupancy (..., H, W) → per-column bin index (..., W)."""
+    enc = require_occupancy_encoding(occupancy_encoding)
+    if occupancy.dim() < 2:
+        raise ValueError(f"occupancy must be at least 2D, got {tuple(occupancy.shape)}")
+    if enc == "one_hot":
+        return occupancy.argmax(dim=-2).to(dtype=occupancy.dtype)
+    height = int(occupancy.shape[-2])
+    column_sum = occupancy.sum(dim=-2).clamp(1.0, float(height))
+    return (column_sum - 1.0).clamp(0.0, float(height - 1))
+
 
 class TimeSeriesTo2D(nn.Module):
-    """Maps 1D time series to 2D occupancy (CDF-style) images along the value axis.
+    """Maps 1D time series to 2D occupancy images along the value axis.
 
-    For each time step, bins the normalized value and fills all rows from the bottom
-    up to that bin — a soft cumulative / bar-stack view (not a one-hot stripe).
+    CDF (default): fill rows 0..k. one_hot: a single 1 on row k.
     """
 
-    def __init__(self, height: int = 32, max_scale: float = 3.5):
+    def __init__(
+        self,
+        height: int = 32,
+        max_scale: float = 3.5,
+        occupancy_encoding: str = "cdf",
+    ):
         """
         Args:
             height: Height H of the 2D representation (number of bins)
             max_scale: MS parameter - values beyond [-MS, MS] are clipped
+            occupancy_encoding: 'cdf' staircase or 'one_hot' APDF stripe
         """
         super().__init__()
         self.height = height
         self.max_scale = max_scale
+        self.occupancy_encoding = require_occupancy_encoding(occupancy_encoding)
         
         # Precompute bin centers for inverse mapping
         # Centers: (j + 0.5) * (2*MS/H) - MS for j in [0, H-1]
@@ -39,7 +91,10 @@ class TimeSeriesTo2D(nn.Module):
         ])
         self.register_buffer('bin_centers', bin_centers)
         
-        logger.debug("TimeSeriesTo2D initialized: H=%s, MS=%s", height, max_scale)
+        logger.debug(
+            "TimeSeriesTo2D initialized: H=%s, MS=%s, occupancy_encoding=%s",
+            height, max_scale, self.occupancy_encoding,
+        )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """1D normalized series → 2D occupancy map (values in [0, 1] per column).
@@ -61,17 +116,18 @@ class TimeSeriesTo2D(nn.Module):
         bin_indices = ((x_clipped + self.max_scale) / (2 * self.max_scale) * self.height)
         bin_indices = torch.clamp(bin_indices.long(), 0, self.height - 1)
 
-        height_range = torch.arange(self.height, device=x.device).view(1, 1, self.height, 1)
-        filled = (height_range <= bin_indices.unsqueeze(2)).float()
-        image = filled
+        image = occupancy_from_bin_indices(
+            bin_indices, self.height, self.occupancy_encoding, dtype=torch.float32,
+        )
 
         logger.debug(f"TimeSeriesTo2D: input {x.shape} -> output {image.shape}")
         return image
 
     def _cdf_from_bin_indices(self, bin_indices: torch.Tensor, height: Optional[int] = None) -> torch.Tensor:
         height = int(height or self.height)
-        height_range = torch.arange(height, device=bin_indices.device).view(1, 1, height, 1)
-        return (height_range <= bin_indices.unsqueeze(2)).float()
+        return occupancy_from_bin_indices(
+            bin_indices, height, self.occupancy_encoding, dtype=torch.float32,
+        )
 
     def _encode_values_in_range(
         self,
@@ -193,11 +249,14 @@ class TimeSeriesTo2D(nn.Module):
         ).view(1, 1, -1, 1)
 
         if cdf_decoder in ("expectation", "pdf_expectation"):
-            cdf_padded = torch.cat(
-                [cdf_map, torch.zeros_like(cdf_map[:, :, :1, :])],
-                dim=2,
-            )
-            pdf = F.relu(cdf_padded[:, :, :-1, :] - cdf_padded[:, :, 1:, :])
+            if self.occupancy_encoding == "one_hot":
+                pdf = cdf_map
+            else:
+                cdf_padded = torch.cat(
+                    [cdf_map, torch.zeros_like(cdf_map[:, :, :1, :])],
+                    dim=2,
+                )
+                pdf = F.relu(cdf_padded[:, :, :-1, :] - cdf_padded[:, :, 1:, :])
             if expectation_sharpen_temp is not None and expectation_sharpen_temp != 1.0:
                 power = 1.0 / max(expectation_sharpen_temp, eps)
                 pdf = torch.pow(pdf, power)
@@ -207,8 +266,11 @@ class TimeSeriesTo2D(nn.Module):
         if cdf_decoder != "mean":
             raise ValueError(f"Unknown dual CDF decoder '{cdf_decoder}'")
 
-        column_sum = cdf_map.sum(dim=2).clamp(1.0, float(height))
-        bin_idx = (column_sum - 1.0).clamp(0.0, float(height - 1))
+        if self.occupancy_encoding == "one_hot":
+            bin_idx = cdf_map.argmax(dim=2).to(dtype=cdf_map.dtype)
+        else:
+            column_sum = cdf_map.sum(dim=2).clamp(1.0, float(height))
+            bin_idx = (column_sum - 1.0).clamp(0.0, float(height - 1))
         return (bin_idx + 0.5) / float(height) * span + float(value_min)
 
     def decode_dual_heights_bounded(
@@ -311,26 +373,21 @@ class TimeSeriesTo2D(nn.Module):
         sharpen_temp: Optional[float] = None,
         eps: float = 1e-8,
     ) -> torch.Tensor:
-        """Decode occupancy map via vertical gradient → normalized mass → expected bin index."""
-        # Ensure valid CDF range
+        """Decode occupancy via mass along the value axis → expected bin index."""
         cdf_map = torch.clamp(cdf_map, 0.0, 1.0)
-        
-        # Pad a zero row at the top so the final drop to 0 is captured
-        cdf_padded = torch.cat(
-            [cdf_map, torch.zeros_like(cdf_map[:, :, :1, :])],
-            dim=2
-        )
-        
-        # PDF is the positive drop between adjacent rows (bottom -> top)
-        pdf = cdf_padded[:, :, :-1, :] - cdf_padded[:, :, 1:, :]
-        pdf = F.relu(pdf)
-        
-        # Optional sharpening temperature (temperature < 1 sharpens)
+        if self.occupancy_encoding == "one_hot":
+            pdf = cdf_map
+        else:
+            cdf_padded = torch.cat(
+                [cdf_map, torch.zeros_like(cdf_map[:, :, :1, :])],
+                dim=2
+            )
+            pdf = F.relu(cdf_padded[:, :, :-1, :] - cdf_padded[:, :, 1:, :])
+
         if sharpen_temp is not None and sharpen_temp != 1.0:
             power = 1.0 / max(sharpen_temp, eps)
             pdf = torch.pow(pdf, power)
-        
-        # Normalize per column
+
         pdf_sum = pdf.sum(dim=2, keepdim=True).clamp(min=eps)
         pdf = pdf / pdf_sum
         
@@ -365,11 +422,14 @@ class TimeSeriesTo2D(nn.Module):
         ).view(1, 1, -1, 1)
 
         if cdf_decoder in ("expectation", "pdf_expectation"):
-            cdf_padded = torch.cat(
-                [cdf_map, torch.zeros_like(cdf_map[:, :, :1, :])],
-                dim=2,
-            )
-            pdf = F.relu(cdf_padded[:, :, :-1, :] - cdf_padded[:, :, 1:, :])
+            if self.occupancy_encoding == "one_hot":
+                pdf = cdf_map
+            else:
+                cdf_padded = torch.cat(
+                    [cdf_map, torch.zeros_like(cdf_map[:, :, :1, :])],
+                    dim=2,
+                )
+                pdf = F.relu(cdf_padded[:, :, :-1, :] - cdf_padded[:, :, 1:, :])
             if expectation_sharpen_temp is not None and expectation_sharpen_temp != 1.0:
                 power = 1.0 / max(expectation_sharpen_temp, eps)
                 pdf = torch.pow(pdf, power)
@@ -379,8 +439,11 @@ class TimeSeriesTo2D(nn.Module):
         if cdf_decoder != "mean":
             raise ValueError(f"Unknown dual CDF decoder '{cdf_decoder}'")
 
-        column_sum = cdf_map.sum(dim=2).clamp(1.0, float(height))
-        bin_idx = (column_sum - 1.0).clamp(0.0, float(height - 1))
+        if self.occupancy_encoding == "one_hot":
+            bin_idx = cdf_map.argmax(dim=2).to(dtype=cdf_map.dtype)
+        else:
+            column_sum = cdf_map.sum(dim=2).clamp(1.0, float(height))
+            bin_idx = (column_sum - 1.0).clamp(0.0, float(height - 1))
         return ((bin_idx + 0.5) / float(height) * (2 * value_range)) - value_range
 
     def decode_dual(
@@ -483,9 +546,7 @@ class TimeSeriesTo2D(nn.Module):
     @staticmethod
     def bin_indices_from_cdf(cdf_map: torch.Tensor) -> torch.Tensor:
         """Hard/soft CDF → per-column bin index k (column_sum - 1), shape (*batch, W)."""
-        height = int(cdf_map.shape[-2])
-        column_sum = cdf_map.sum(dim=-2).clamp(1.0, float(height))
-        return (column_sum - 1.0).clamp(0.0, float(height - 1))
+        return bin_indices_from_occupancy(cdf_map, "cdf")
 
     @staticmethod
     def cdf_distance_weights(
@@ -651,7 +712,14 @@ class TimeSeriesTo2D(nn.Module):
         batch_size, num_vars, height, seq_len = image.shape
         squeeze_output = squeeze_univariate and (num_vars == 1)
 
-        if cdf_decoder == "expectation":
+        if self.occupancy_encoding == "one_hot":
+            x = self._decode_occupancy_in_range(
+                image,
+                value_range=self.max_scale,
+                cdf_decoder=cdf_decoder,
+                expectation_sharpen_temp=expectation_sharpen_temp,
+            )
+        elif cdf_decoder == "expectation":
             x = self._decode_expectation_from_occupancy(image, expectation_sharpen_temp)
         else:
             occupancy = torch.clamp(image, min=0.0, max=1.0)

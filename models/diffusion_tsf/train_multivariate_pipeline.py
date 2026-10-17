@@ -505,6 +505,31 @@ def get_synth_cache_dir(state: PipelineState, checkpoint_dir: Optional[str] = No
 # Dimensionality Helpers
 # ============================================================================
 
+def _max_series_timesteps_from_state(state: PipelineState, dataset_name: str) -> Optional[int]:
+    by_ds = getattr(state, "data_subset_by_dataset", None) or {}
+    spec = by_ds.get(dataset_name) or {}
+    raw = spec.get("max_series_timesteps")
+    if raw is None:
+        return None
+    max_t = int(raw)
+    if max_t < 1:
+        raise ValueError(f"{dataset_name}: max_series_timesteps must be >= 1, got {raw!r}")
+    return max_t
+
+
+def _apply_max_series_timesteps(
+    data: np.ndarray, max_t: Optional[int], dataset_name: str,
+) -> np.ndarray:
+    if max_t is None:
+        return data
+    n = int(data.shape[0])
+    if n < int(max_t):
+        raise ValueError(
+            f"{dataset_name}: max_series_timesteps={max_t} exceeds series T={n}"
+        )
+    return data[: int(max_t)]
+
+
 def get_dataset_n_cols(state: PipelineState, dataset_name: str) -> int:
     """Return the number of numeric columns in a dataset (excluding date)."""
     path, date_col = _resolve_registry_path(state, dataset_name)
@@ -522,11 +547,13 @@ def get_dataset_n_cols(state: PipelineState, dataset_name: str) -> int:
 
 def get_dataset_shape(state: PipelineState, dataset_name: str) -> Tuple[int, int]:
     """Return raw row/variate counts without materializing the full numeric array."""
-    key = (state.datasets_dir, dataset_name)
+    max_t = _max_series_timesteps_from_state(state, dataset_name)
+    key = (state.datasets_dir, dataset_name, max_t)
     if key in state.dataset_shape_cache:
         return state.dataset_shape_cache[key]
     path, date_col = _resolve_registry_path(state, dataset_name)
     data = _load_dataset_array(path, date_col)
+    data = _apply_max_series_timesteps(data, max_t, dataset_name)
     shape = (int(data.shape[0]), int(data.shape[1]))
     state.dataset_shape_cache[key] = shape
     return shape
@@ -553,10 +580,13 @@ def resolve_pipeline_data_subset(state) -> Dict[str, Any]:
     state.data_subset_resolved = resolved
     print(
         f"[data_subset] {state.dataset}: subset_id={resolved['subset_id']} "
-        f"n_variates={resolved['n_variates']} train_stride={resolved['train_stride']} "
+        f"n_variates={resolved['n_variates']} "
+        f"variate_indices={resolved['variate_indices']} "
+        f"train_stride={resolved['train_stride']} "
         f"val_stride={resolved['val_stride']} test_stride={resolved['test_stride']} "
         f"train_max_windows={resolved.get('train_max_windows')} "
         f"val_max_windows={resolved.get('val_max_windows')} "
+        f"max_series_timesteps={resolved.get('max_series_timesteps')} "
         f"reason={resolved.get('reason')}"
     )
     return resolved
@@ -601,6 +631,37 @@ def _purge_repo_utils_for_itransformer() -> None:
         sys.modules.pop(name, None)
 
 
+def _restore_repo_utils_after_itransformer(itrans_dir: str) -> None:
+    """Put repo ``utils`` back after iTransformer load.
+
+    ``get_itransformer_class`` prepends ``models/iTransformer`` so ``import utils``
+    is iTransformer's package. Leave that on sys.path and later
+    ``from utils.sticky_discrete_dataset_norm`` (and mode_anchor) fail.
+    """
+    itrans_abs = os.path.abspath(itrans_dir)
+    sys.path = [p for p in sys.path if os.path.abspath(p) != itrans_abs]
+    repo_root = str(Path(__file__).resolve().parents[2])
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    drop: List[str] = []
+    for name, mod in list(sys.modules.items()):
+        if name != "utils" and not name.startswith("utils."):
+            continue
+        mod_file = getattr(mod, "__file__", None)
+        if not mod_file:
+            if name == "utils":
+                drop.append(name)
+            continue
+        try:
+            parts = Path(mod_file).resolve().parts
+        except OSError:
+            continue
+        if "iTransformer" in parts:
+            drop.append(name)
+    for name in drop:
+        sys.modules.pop(name, None)
+
+
 def get_itransformer_class():
     """Dynamically load iTransformer model class."""
     itrans_path = os.path.join(script_dir, '..', 'iTransformer', 'model', 'iTransformer.py')
@@ -612,11 +673,13 @@ def get_itransformer_class():
     _purge_repo_utils_for_itransformer()
     sys.path = [p for p in sys.path if os.path.abspath(p) != itrans_dir]
     sys.path.insert(0, itrans_dir)
-    
-    spec = importlib.util.spec_from_file_location("iTransformer_module", itrans_path)
-    itrans_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(itrans_module)
-    return itrans_module.Model
+    try:
+        spec = importlib.util.spec_from_file_location("iTransformer_module", itrans_path)
+        itrans_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(itrans_module)
+        return itrans_module.Model
+    finally:
+        _restore_repo_utils_after_itransformer(itrans_dir)
 
 
 def create_itransformer_config(
@@ -722,7 +785,35 @@ def load_itransformer_from_checkpoint(
     return model
 
 
-def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Dict) -> None:
+_OCCUPANCY_GEOMETRY_KEYS = frozenset({"to_2d.bin_centers"})
+
+
+def occupancy_geometry_differs(model: nn.Module, ckpt_state: Dict) -> bool:
+    """True when ckpt occupancy bins do not match the already-built model.
+
+    Patch-refine HP searches image_height (= patch_h). Coarse HP searches
+    max_scale. Both live in ``to_2d.bin_centers`` (length and/or values).
+    """
+    ckpt_bins = ckpt_state.get("to_2d.bin_centers")
+    model_bins = model.state_dict().get("to_2d.bin_centers")
+    if ckpt_bins is None or model_bins is None:
+        return False
+    if tuple(ckpt_bins.shape) != tuple(model_bins.shape):
+        return True
+    return not torch.allclose(
+        ckpt_bins.detach().cpu().float(),
+        model_bins.detach().cpu().float(),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+
+
+def load_diffusion_state_keep_attached_guidance(
+    model: nn.Module,
+    ckpt_state: Dict,
+    *,
+    skip_incompatible: bool = False,
+) -> None:
     """Load a diffusion checkpoint while preserving the guidance submodule that the
     caller already attached on the model.
 
@@ -732,6 +823,10 @@ def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Di
     different ``seq_len`` than the attached one (e.g. synthetic-pretrain vs
     real-finetuned iTransformer). We always want to keep the attached guidance
     and only restore the diffusion backbone weights.
+
+    ``skip_incompatible=True`` is HP warm-start only: keep the trial-built
+    occupancy geometry (``to_2d.bin_centers``) and skip other shape-mismatched
+    tensors. Default stays fail-fast on architecture changes.
     """
     architecture_key = "conditioning_architecture_version"
     if architecture_key not in ckpt_state:
@@ -742,9 +837,36 @@ def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Di
     model_state = model.state_dict()
     if not torch.equal(ckpt_state[architecture_key].cpu(), model_state[architecture_key].cpu()):
         raise RuntimeError("Diffusion checkpoint conditioning architecture version mismatch.")
+
+    def _unwrap_compile_key(k: str) -> str:
+        while "._orig_mod." in k:
+            k = k.replace("._orig_mod.", ".")
+        if k.startswith("_orig_mod."):
+            k = k[len("_orig_mod.") :]
+        return k
+
+    def _live_compile_key(key: str) -> str:
+        # Unwrap drops OptimizedModule to noise_predictor.weight, but a
+        # compiled module's state_dict still uses noise_predictor._orig_mod.weight.
+        # strict=False then keeps the random init and anchor MSE does not move.
+        if key in model_state:
+            return key
+        parts = key.split(".")
+        for i in range(len(parts)):
+            candidate = ".".join([*parts[:i], "_orig_mod", *parts[i:]])
+            if candidate in model_state:
+                return candidate
+        return key
+
     filtered = {}
-    for k, v in ckpt_state.items():
-        if k.startswith('guidance_model.'):
+    skipped = []
+    for raw_k, v in ckpt_state.items():
+        unwrapped = _unwrap_compile_key(raw_k)
+        if unwrapped.startswith('guidance_model.'):
+            continue
+        k = _live_compile_key(unwrapped)
+        if skip_incompatible and unwrapped in _OCCUPANCY_GEOMETRY_KEYS:
+            skipped.append(k)
             continue
         if k in model_state and model_state[k].shape != v.shape:
             dst = model_state[k]
@@ -765,14 +887,36 @@ def load_diffusion_state_keep_attached_guidance(model: nn.Module, ckpt_state: Di
                     k, tuple(v.shape), tuple(dst.shape),
                 )
                 continue
+            if skip_incompatible:
+                skipped.append(k)
+                continue
             raise RuntimeError(
                 f"Diffusion checkpoint tensor mismatch for {k}: checkpoint {v.shape} "
                 f"vs current {model_state[k].shape}. Do not partially load architecture changes."
             )
         filtered[k] = v
-        
+
     missing, unexpected = model.load_state_dict(filtered, strict=False)
-    leaked = [k for k in (missing or []) if not k.startswith('guidance_model.')]
+    skipped_set = set(skipped)
+    if skipped:
+        logger.info(
+            "Diffusion ckpt skipped %d occupancy/shape-mismatched tensors: %s",
+            len(skipped), skipped[:12],
+        )
+    leaked = [
+        k for k in (missing or [])
+        if not k.startswith('guidance_model.') and k not in skipped_set
+    ]
+    compile_miss = [
+        k for k in leaked
+        if "._orig_mod." in k or k.startswith("_orig_mod.")
+    ]
+    if compile_miss:
+        raise RuntimeError(
+            "Compiled diffusion checkpoint did not load "
+            f"{len(compile_miss)} parameter(s) (first: {compile_miss[:5]}). "
+            "Refusing to continue on the random init."
+        )
     if leaked:
         logger.warning(f"Diffusion ckpt missing non-guidance keys: {leaked[:5]}...")
     real_unexpected = [k for k in (unexpected or []) if not k.startswith('guidance_model.')]
@@ -845,6 +989,8 @@ def create_diffusion_model(
         coarse_image_height=state.coarse_image_height,
         fine_image_height=state.fine_image_height,
         max_scale=o("max_scale", state.max_scale_by_dataset.get(state.dataset, state.max_scale)),
+        occupancy_encoding=str(getattr(state, "occupancy_encoding", "cdf")),
+        representation=str(getattr(state, "representation", "cdf_2d")),
         staged_representation=o("staged_representation", state.staged_representation),
         binary_noise_schedule=o("binary_noise_schedule", state.binary_noise_schedule),
         binary_length_mode=o("binary_length_mode", state.binary_length_mode),
@@ -901,14 +1047,22 @@ def create_diffusion_model(
         binary_num_steps=o("binary_num_steps", state.binary_num_steps),
         binary_beta_start=o("binary_beta_start", state.binary_beta_start),
         binary_beta_end=o("binary_beta_end", state.binary_beta_end),
+        gaussian_num_steps=o("gaussian_num_steps", state.gaussian_num_steps),
+        gaussian_sample_steps=o("gaussian_sample_steps", state.gaussian_sample_steps),
+        gaussian_beta_start=o("gaussian_beta_start", state.gaussian_beta_start),
+        gaussian_beta_end=o("gaussian_beta_end", state.gaussian_beta_end),
+        gaussian_noise_schedule=o("gaussian_noise_schedule", state.gaussian_noise_schedule),
         use_window_normalization=state.use_window_normalization,
         window_norm_center=state.window_norm_center,
-        window_norm_std_floor=state.window_norm_std_floor,
+        window_norm_std_floor=o("window_norm_std_floor", state.window_norm_std_floor),
         window_norm_low_var_threshold=state.window_norm_low_var_threshold,
         window_norm_low_var_unit_std=state.window_norm_low_var_unit_std_by_dataset.get(state.dataset, state.window_norm_low_var_unit_std),
         window_norm_low_var_unit_std_per_variate=state.window_norm_low_var_unit_std_by_variate.get(state.dataset),
         skip_window_norm_variate_mask=list(state.skip_window_norm_variate_mask)
         if state.skip_window_norm_variate_mask is not None
+        else None,
+        window_norm_std_floor_per_variate=list(state.window_norm_std_floor_per_variate)
+        if state.window_norm_std_floor_per_variate is not None
         else None,
         hybrid_flat_dataset_norm=state.hybrid_flat_dataset_norm,
         hybrid_flat_frac_threshold=state.hybrid_flat_frac_threshold,
@@ -940,19 +1094,19 @@ def create_diffusion_model(
         if hasattr(inner, "encode_cached_prefix") and hasattr(inner, "forward_cached_crops"):
             logger.info(
                 "torch.compile encode_cached_prefix + forward_cached_crops "
-                "(inductor, fullgraph=False, dynamic=False)"
+                "(inductor, fullgraph=False, dynamic=True)"
             )
             inner.encode_cached_prefix = torch.compile(
                 inner.encode_cached_prefix,
                 backend="inductor",
                 fullgraph=False,
-                dynamic=False,
+                dynamic=True,
             )
             inner.forward_cached_crops = torch.compile(
                 inner.forward_cached_crops,
                 backend="inductor",
                 fullgraph=False,
-                dynamic=False,
+                dynamic=True,
             )
     return model
 
@@ -1107,6 +1261,9 @@ def load_dataset(
         horizon = state.forecast_length
     path, date_col = _resolve_registry_path(state, dataset_name)
     data = _load_dataset_array(path, date_col)
+    data = _apply_max_series_timesteps(
+        data, _max_series_timesteps_from_state(state, dataset_name), dataset_name,
+    )
 
     if variate_indices is not None:
         data = data[:, variate_indices]
@@ -1130,9 +1287,22 @@ def load_dataset(
         else bool(hybrid_flat_dataset_norm)
     )
     use_ord = state.use_ordinal_window_norm if use_ordinal_window_norm is None else bool(use_ordinal_window_norm)
-    if use_hybrid and use_ord:
+    use_mode_anchor = bool(getattr(state, "mode_anchor_dataset_norm", False))
+    use_sticky = bool(getattr(state, "sticky_discrete_dataset_norm", False))
+    n_norm = sum([use_hybrid, use_ord, use_mode_anchor, use_sticky])
+    if n_norm > 1:
         raise ValueError(
-            "hybrid_flat_dataset_norm is incompatible with use_ordinal_window_norm"
+            "hybrid_flat_dataset_norm, use_ordinal_window_norm, "
+            "mode_anchor_dataset_norm, and sticky_discrete_dataset_norm "
+            "are mutually exclusive"
+        )
+    if use_mode_anchor and state.use_window_normalization:
+        raise ValueError(
+            "mode_anchor_dataset_norm is incompatible with use_window_normalization"
+        )
+    if use_sticky and not state.use_window_normalization:
+        raise ValueError(
+            "sticky_discrete_dataset_norm requires use_window_normalization"
         )
     frac_thr = (
         state.hybrid_flat_frac_threshold
@@ -1146,6 +1316,10 @@ def load_dataset(
     )
     ms = float(state.max_scale_by_dataset.get(dataset_name, state.max_scale) if max_scale is None else max_scale)
 
+    hybrid = None
+    mode_anchor = None
+    sticky = None
+    state.window_norm_std_floor_per_variate = None
     if use_hybrid:
         from utils.hybrid_flat_dataset_norm import build_hybrid_affine_scales
 
@@ -1161,11 +1335,44 @@ def load_dataset(
         data = (data - mean) / std
         flat_mask = hybrid["flat_mask"]
         state.skip_window_norm_variate_mask = [bool(x) for x in flat_mask.tolist()]
+    elif use_mode_anchor:
+        from utils.mode_anchor_dataset_norm import build_mode_anchor_affine
+
+        mode_anchor = build_mode_anchor_affine(train_slice, max_scale=ms)
+        mean = mode_anchor["mean"].astype(np.float32)
+        std = mode_anchor["std"].astype(np.float32)
+        data = data.astype(np.float32) / std - np.float32(ms)
+        state.skip_window_norm_variate_mask = None
+    elif use_sticky:
+        from utils.sticky_discrete_dataset_norm import build_sticky_discrete_affine
+
+        sticky = build_sticky_discrete_affine(
+            train_slice,
+            lookback=int(lookback),
+            horizon=int(horizon),
+            max_scale=ms,
+            coarse_height=int(state.coarse_image_height),
+            sticky_frac_threshold=float(state.sticky_inorm_frac_threshold),
+            clip_coverage=float(state.sticky_inorm_window_clip_coverage),
+            discrete_max_uniques=int(state.discrete_coarse_align_max_uniques),
+            default_std_floor=float(state.window_norm_std_floor),
+        )
+        mean = sticky["mean"].astype(np.float32)
+        std = sticky["std"].astype(np.float32)
+        data = (data - mean) / std
+        skip_mask = list(sticky["skip_window_norm_variate_mask"])
+        floors = list(sticky["window_norm_std_floor_per_variate"])
+        if len(skip_mask) != data.shape[1] or len(floors) != data.shape[1]:
+            raise ValueError(
+                f"sticky_discrete mask/floor length {len(skip_mask)}/{len(floors)} "
+                f"!= V={data.shape[1]}"
+            )
+        state.skip_window_norm_variate_mask = skip_mask
+        state.window_norm_std_floor_per_variate = floors
     else:
         mean = train_slice.mean(axis=0, keepdims=True)
         std = train_slice.std(axis=0, keepdims=True) + 1e-8
         data = (data - mean) / std
-        hybrid = None
         state.skip_window_norm_variate_mask = None
 
     ordinal_ladder = None
@@ -1207,6 +1414,23 @@ def load_dataset(
         stats['hybrid_flat_oob_coverage'] = oob_cov
         stats['hybrid_flat_max_scale'] = ms
         stats['hybrid_flat_lookback'] = int(lookback)
+    if mode_anchor is not None:
+        stats['mode_anchor_dataset_norm'] = True
+        stats['mode_anchor_p99'] = mode_anchor['p99'].astype(np.float32)
+        stats['mode_anchor_max_scale'] = ms
+    if sticky is not None:
+        stats['sticky_discrete_dataset_norm'] = True
+        stats['skip_window_norm_variate_mask'] = list(sticky['skip_window_norm_variate_mask'])
+        stats['window_norm_std_floor_per_variate'] = list(
+            sticky['window_norm_std_floor_per_variate']
+        )
+        stats['discrete_mask'] = sticky['discrete_mask']
+        stats['sticky_mask'] = sticky['sticky_mask']
+        stats['sticky_frac'] = sticky['sticky_frac']
+        stats['n_unique'] = sticky['n_unique']
+        stats['discrete_details'] = sticky['discrete_details']
+        stats['sticky_details'] = sticky['sticky_details']
+        stats['emp_std'] = sticky['emp_std'].astype(np.float32)
     return train_ds, val_ds, test_ds, stats
 
 
@@ -1384,6 +1608,11 @@ def itrans_hp_objective(
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
+            logger.info(
+                "iTrans trial %s epoch %d/%d val_loss=%.6f (best=%.6f) device=%s",
+                trial.number, epoch + 1, epochs, val_loss, min(best_val_loss, val_loss),
+                device,
+            )
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 tuned = {
@@ -1541,6 +1770,8 @@ def run_itransformer_finetune_hp_tuning(
     test_stride: Optional[int] = None,
     parallel_workers: int = 1,
     max_epochs: Optional[int] = None,
+    train_max_windows: Optional[int] = None,
+    val_max_windows: Optional[int] = None,
 ) -> Tuple[Dict, Optional[str]]:
     """HP tune iTransformer on real data using Optuna parallel workers."""
     label = subset_id or dataset_name
@@ -1563,8 +1794,14 @@ def run_itransformer_finetune_hp_tuning(
     )
     from models.diffusion_tsf.pipeline.data_subset import random_window_subset
     subset_meta = state.data_subset_resolved or {}
-    train_cap = subset_meta.get("train_max_windows")
-    val_cap = subset_meta.get("val_max_windows")
+    train_cap = (
+        train_max_windows if train_max_windows is not None
+        else subset_meta.get("train_max_windows")
+    )
+    val_cap = (
+        val_max_windows if val_max_windows is not None
+        else subset_meta.get("val_max_windows")
+    )
     train_ds = random_window_subset(
         train_ds,
         train_cap,
@@ -1587,6 +1824,14 @@ def run_itransformer_finetune_hp_tuning(
             f"itrans_ft/val: val_max_windows={int(val_cap)} was ignored "
             f"({len(val_ds)} windows remain)"
         )
+    # dynamic_500K stride-1 ≈ 349k train windows. Job 5527088: 3/10 epochs in
+    # ~9h, Python 100% CPU, GPU ~5%/693MiB, Optuna tqdm frozen at 0/1.
+    if len(train_ds) >= 80_000:
+        raise RuntimeError(
+            f"itrans_ft/train has {len(train_ds)} windows. Uncapped "
+            f"dynamic_500K stride-1 iTrans HP is a multi-day CPU-spin. Set "
+            f"phases.itrans_finetune_hp.train_max_windows."
+        )
     if smoke_test:
         train_ds = Subset(train_ds, list(range(min(2, len(train_ds)))))
         val_ds = Subset(val_ds, list(range(min(2, len(val_ds)))))
@@ -1594,6 +1839,10 @@ def run_itransformer_finetune_hp_tuning(
     train_bs = state.itrans_paper_batch_size
     train_loader = DataLoader(train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=min(train_bs, 32), shuffle=False, num_workers=0)
+    logger.info(
+        "iTrans FT windows: train=%d val=%d batch=%d (cap train=%s val=%s)",
+        len(train_ds), len(val_ds), train_bs, train_cap, val_cap,
+    )
 
     trial_dir = checkpoint_dir or state.checkpoint_dir
     os.makedirs(trial_dir, exist_ok=True)

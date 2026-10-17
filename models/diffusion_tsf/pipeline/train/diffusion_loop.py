@@ -451,6 +451,7 @@ class DiffusionTrainer:
         val_token_cache=None,
         log_prefix: str = "diffusion",
         univariate_micro_batch: Optional[int] = None,
+        selection_score_fn: Optional[Callable[[Any], float]] = None,
     ) -> None:
         from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -484,6 +485,7 @@ class DiffusionTrainer:
         self.univariate_micro_batch = (
             None if univariate_micro_batch is None else max(1, int(univariate_micro_batch))
         )
+        self.selection_score_fn = selection_score_fn
 
     @staticmethod
     def _unpack_standard_batch(batch):
@@ -508,6 +510,9 @@ class DiffusionTrainer:
         n_steps = int(self.model.config.binary_num_steps)
         if n_steps < 1:
             raise ValueError(f"binary_num_steps must be >= 1, got {n_steps}")
+        # occupancy_mse is one-shot pixel MSE at t=0 (see _noised_canvas).
+        if str(self.model.config.prediction_target) == "occupancy_mse":
+            return torch.zeros(int(n_windows), device=self.device, dtype=torch.long)
         return torch.randint(0, n_steps, (int(n_windows),), device=self.device)
 
     def _row_slices_for_past(self, past: torch.Tensor):
@@ -805,11 +810,24 @@ class DiffusionTrainer:
             if self.accum_steps > 1 and micro_idx % self.accum_steps != 0:
                 self._optimizer_step()
         elif rows_in_step > 0:
-            logger.info(
-                "  [%s] dropping %d leftover univariate rows (< target %d)",
-                self.log_prefix, rows_in_step, int(target_rows),
+            # Slices used loss_scale_for_rows(take, target_rows). This leftover
+            # pack is one step whose row budget is rows_in_step, so rewrite the
+            # denominator (same mean reduction as a full U pack).
+            leftover_scale = float(int(target_rows)) / float(rows_in_step)
+            params = (
+                self.ddp_model.parameters()
+                if self.ddp_model is not None
+                else self.model.parameters()
             )
-            self.optimizer.zero_grad(set_to_none=True)
+            for param in params:
+                if param.grad is not None:
+                    param.grad.mul_(leftover_scale)
+            logger.info(
+                "  [%s] partial optimizer step on %d leftover univariate rows "
+                "(< target %d, grad_scale=%.4f)",
+                self.log_prefix, rows_in_step, int(target_rows), leftover_scale,
+            )
+            self._optimizer_step()
         return weighted_loss / max(n_loss_units, 1), time.perf_counter() - started
 
     def _validate_epoch(self, epoch: int, max_epochs: int) -> Tuple[float, float]:
@@ -902,7 +920,12 @@ class DiffusionTrainer:
             backup = self.ema.swap_in(self.model) if self.ema is not None else None
             logger.info("  [%s] epoch %d/%d val_start", self.log_prefix, epoch + 1, max_epochs)
             val_loss, val_seconds = self._validate_epoch(epoch, max_epochs)
-            selection_score = float(val_loss)
+            if self.selection_score_fn is None:
+                selection_score = float(val_loss)
+            else:
+                score_started = time.perf_counter()
+                selection_score = float(self.selection_score_fn(self.model))
+                val_seconds += time.perf_counter() - score_started
             saved = selection_score < best_val
             if saved:
                 best_val = selection_score
@@ -927,10 +950,11 @@ class DiffusionTrainer:
                     self.ema.restore(self.model, backup)
             history.append(metrics)
             logger.info(
-                "  [%s] epoch %d/%d done train=%.4f val=%.4f best=%.4f best_ep=%d "
+                "  [%s] epoch %d/%d done train=%.4f val=%.4f sel=%.4f best=%.4f best_ep=%d "
                 "lr=%.2e saved=%s train_t=%.1fs val_t=%.1fs epoch_t=%.1fs",
                 self.log_prefix, metrics.epoch, max_epochs, metrics.train_loss,
-                metrics.val_loss, metrics.best_val, best_epoch, metrics.lr, metrics.saved,
+                metrics.val_loss, metrics.selection_score, metrics.best_val, best_epoch,
+                metrics.lr, metrics.saved,
                 metrics.train_seconds, metrics.val_seconds, metrics.epoch_seconds,
             )
             if on_epoch_end is not None:

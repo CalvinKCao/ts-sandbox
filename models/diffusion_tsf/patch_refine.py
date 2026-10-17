@@ -16,18 +16,34 @@ from .patch_refine_geometry import (
     extract_patch_batch_layout,
     select_patch_locations,
 )
-from .preprocessing import TimeSeriesTo2D
+from .preprocessing import (
+    bin_indices_from_occupancy,
+    occupancy_from_bin_indices,
+    require_occupancy_encoding,
+)
 
 
-def naive_upscale_coarse_cdf(coarse_cdf: torch.Tensor, canvas_height: int) -> torch.Tensor:
-    """Nearest-neighbor vertical upscale of coarse CDF to ``canvas_height``."""
+def naive_upscale_coarse_cdf(
+    coarse_cdf: torch.Tensor,
+    canvas_height: int,
+    occupancy_encoding: str = "cdf",
+) -> torch.Tensor:
+    """Nearest-neighbor vertical upscale. one_hot is re-encoded after interpolate."""
+    enc = require_occupancy_encoding(occupancy_encoding)
     if coarse_cdf.ndim != 4:
         raise ValueError(f"coarse_cdf must be (B,V,H,W), got {tuple(coarse_cdf.shape)}")
-    if coarse_cdf.shape[2] == canvas_height:
-        return coarse_cdf
-    flat = coarse_cdf.reshape(-1, 1, coarse_cdf.shape[2], coarse_cdf.shape[3])
-    up = F.interpolate(flat, size=(canvas_height, coarse_cdf.shape[3]), mode="nearest")
-    return up.reshape(coarse_cdf.shape[0], coarse_cdf.shape[1], canvas_height, coarse_cdf.shape[3])
+    if coarse_cdf.shape[2] != canvas_height:
+        flat = coarse_cdf.reshape(-1, 1, coarse_cdf.shape[2], coarse_cdf.shape[3])
+        up = F.interpolate(flat, size=(canvas_height, coarse_cdf.shape[3]), mode="nearest")
+        up = up.reshape(coarse_cdf.shape[0], coarse_cdf.shape[1], canvas_height, coarse_cdf.shape[3])
+    else:
+        up = coarse_cdf
+    if enc == "one_hot":
+        bins = up.argmax(dim=2)
+        return occupancy_from_bin_indices(
+            bins, canvas_height, "one_hot", dtype=up.dtype,
+        )
+    return up
 
 
 def stack_past_coarse_fine(
@@ -50,8 +66,10 @@ def encode_absolute_hir_cdf(
     canvas_height: int,
     max_scale: float,
     ordinal_rank_max: Optional[torch.Tensor] = None,
+    occupancy_encoding: str = "cdf",
 ) -> torch.Tensor:
-    """Encode absolute hi-res CDF ``(B,V,H_hi,W)`` from 1D values."""
+    """Encode absolute hi-res occupancy ``(B,V,H_hi,W)`` from 1D values."""
+    enc = require_occupancy_encoding(occupancy_encoding)
     if values.dim() == 2:
         values = values.unsqueeze(1)
     if ordinal_rank_max is not None:
@@ -65,15 +83,15 @@ def encode_absolute_hir_cdf(
             else:
                 pos = (xi.clamp(0.0, span) / span) * canvas_height
                 bins = pos.long().clamp(0, canvas_height - 1)
-            rows = torch.arange(canvas_height, device=values.device).view(1, 1, canvas_height, 1)
-            maps.append((rows <= bins.unsqueeze(2)).to(values.dtype))
+            maps.append(
+                occupancy_from_bin_indices(bins, canvas_height, enc, dtype=values.dtype)
+            )
         return torch.cat(maps, dim=1)
 
     x_clipped = values.clamp(-max_scale, max_scale)
     pos = (x_clipped + max_scale) / (2 * max_scale) * canvas_height
     bins = pos.long().clamp(0, canvas_height - 1)
-    rows = torch.arange(canvas_height, device=values.device).view(1, 1, canvas_height, 1)
-    return (rows <= bins.unsqueeze(2)).to(values.dtype)
+    return occupancy_from_bin_indices(bins, canvas_height, enc, dtype=values.dtype)
 
 
 def decode_absolute_hir_cdf(
@@ -81,9 +99,10 @@ def decode_absolute_hir_cdf(
     *,
     max_scale: float,
     ordinal_rank_max: Optional[torch.Tensor] = None,
+    occupancy_encoding: str = "cdf",
 ) -> torch.Tensor:
-    """Mid-bin decode of absolute hi-res CDF to 1D values ``(B,V,W)``."""
-    bins = TimeSeriesTo2D.bin_indices_from_cdf(hir_cdf)
+    """Mid-bin decode of absolute hi-res occupancy to 1D values ``(B,V,W)``."""
+    bins = bin_indices_from_occupancy(hir_cdf, occupancy_encoding)
     height = float(hir_cdf.shape[-2])
     mid = (bins + 0.5) / height
     if ordinal_rank_max is not None:

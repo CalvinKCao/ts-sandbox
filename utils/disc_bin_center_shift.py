@@ -91,6 +91,7 @@ def bin_center_shift(
     *,
     reduce: ReduceMode = "per_variate",
     integer_shift: bool = True,
+    diagnostics: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """Zero-mean in centered bin coords; remap to ladder levels. Additive only.
 
@@ -130,13 +131,19 @@ def bin_center_shift(
     n_clamped = int(np.sum(clamped != raw_new))
     # Step 6: look up dataset-z levels for the shifted rows (still on lattice).
     shifted = np.take_along_axis(levels[:, :, None, :], clamped[..., None], axis=-1)[..., 0]
+    shifted = shifted.astype(np.float32)
+    if not diagnostics:
+        return shifted, {
+            "n_rows": float(n_rows),
+            "n_clamped": float(n_clamped),
+        }
 
     # Diagnostics: mean should drop; first-diffs (texture) should stay similar.
     raw_after = nearest_bin_indices(shifted, levels)
     centered_after = raw_after.astype(np.int64) - center_b
     diff_before = np.diff(centered.astype(np.float64), axis=-1)
     diff_after = np.diff(centered_after.astype(np.float64), axis=-1)
-    return shifted.astype(np.float32), {
+    return shifted, {
         "reduce": 0.0 if reduce == "per_variate" else 1.0,
         "integer_shift": 1.0 if integer_shift else 0.0,
         "n_rows": float(n_rows),
@@ -150,6 +157,45 @@ def bin_center_shift(
         "diff_std_after": float(diff_after.std()) if diff_after.size else 0.0,
         "max_abs_diff_delta": float(np.max(np.abs(diff_after - diff_before))) if diff_before.size else 0.0,
     }
+
+
+def bin_center_shift_slices(
+    values: np.ndarray,
+    legal_levels: np.ndarray,
+    *,
+    reduce: ReduceMode = "per_variate",
+    integer_shift: bool = True,
+    max_bytes: int = 256 * 1024 * 1024,
+) -> np.ndarray:
+    """``bin_center_shift`` over stacked univariate slices without (M,L,H) at once.
+
+    ``values`` is (M, L), ``legal_levels`` is (M, H). Each row is one disc
+    example (one window, one variate). Chunked so peak working set stays near
+    ``max_bytes``. Output matches per-row ``bin_center_shift``.
+    """
+    vals = np.asarray(values, dtype=np.float32)
+    levels = np.asarray(legal_levels, dtype=np.float32)
+    if vals.ndim != 2 or levels.ndim != 2:
+        raise ValueError(f"expected (M,L)/(M,H), got {vals.shape}/{levels.shape}")
+    if vals.shape[0] != levels.shape[0]:
+        raise ValueError(f"M mismatch: values {vals.shape} vs levels {levels.shape}")
+    m = int(vals.shape[0])
+    if m == 0:
+        return np.empty((0, vals.shape[1]), dtype=np.float32)
+    bytes_per = max(int(vals.shape[1]) * int(levels.shape[1]) * 4, 1)
+    chunk = max(1, min(m, int(max_bytes) // bytes_per))
+    out = np.empty_like(vals)
+    for i0 in range(0, m, chunk):
+        i1 = min(m, i0 + chunk)
+        shifted, _ = bin_center_shift(
+            vals[i0:i1, None, :],
+            levels[i0:i1, None, :],
+            reduce=reduce,
+            integer_shift=integer_shift,
+            diagnostics=False,
+        )
+        out[i0:i1] = shifted[:, 0, :]
+    return out
 
 
 def _self_check() -> None:
@@ -177,6 +223,14 @@ def _self_check() -> None:
     out_j, stats_j = bin_center_shift(values, levels, reduce="joint", integer_shift=True)
     assert abs(stats_j["mean_centered_after"]) < 1.0, stats_j
     assert np.isfinite(out_j).all()
+    stacked = bin_center_shift_slices(
+        values.reshape(n * v, t),
+        levels.reshape(n * v, h),
+        reduce="per_variate",
+    )
+    assert np.allclose(stacked.reshape(n, v, t), out, atol=0.0, rtol=0.0), (
+        "bin_center_shift_slices must match bin_center_shift"
+    )
     print(
         f"[disc_bin_center_shift] self-check ok center={center} "
         f"mean_c {stats['mean_centered_before']:.3f}->{stats['mean_centered_after']:.3f} "

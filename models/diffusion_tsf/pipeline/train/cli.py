@@ -34,6 +34,19 @@ def main():
     parser.add_argument("--config", type=str, required=True, help="YAML experiment config")
     parser.add_argument("--dataset", type=str, default=None, help="Override dataset from YAML")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
+    split_mode = parser.add_mutually_exclusive_group()
+    split_mode.add_argument(
+        "--hp-only",
+        "--skip-refit",
+        dest="hp_only",
+        action="store_true",
+        help="Run HP search only; skip refit_best and staged_eval",
+    )
+    split_mode.add_argument(
+        "--refit-only",
+        action="store_true",
+        help="Skip Optuna; refit from HP artifacts already in --checkpoint-dir",
+    )
     parser.add_argument("--smoke-test", action="store_true", help="Quick validation run")
     parser.add_argument(
         "--eval-bench",
@@ -126,6 +139,10 @@ def main():
         parser.error("--eval-num-shards and --eval-shard-id must be set together")
     if args.eval_only and not args.eval_source_checkpoint_dir:
         parser.error("--eval-only requires --eval-source-checkpoint-dir")
+    if args.hp_only and args.eval_only:
+        parser.error("--hp-only/--skip-refit cannot be combined with --eval-only")
+    if args.refit_only and args.eval_only:
+        parser.error("--refit-only cannot be combined with --eval-only")
 
     cli_overrides = {}
     if args.dataset:
@@ -159,6 +176,11 @@ def main():
     if args.fresh:
         cli_overrides["fresh"] = True
     if args.resume:
+        cli_overrides["resume"] = True
+    if args.hp_only:
+        cli_overrides["hp_only"] = True
+    if args.refit_only:
+        cli_overrides["refit_only"] = True
         cli_overrides["resume"] = True
     if args.subset_id:
         cli_overrides["subset_id"] = args.subset_id
@@ -208,6 +230,14 @@ def main():
             logger.error("--eval-only requires a staged_eval phase in %s", args.config)
             sys.exit(1)
         logger.info("--eval-only: running %d staged_eval phase(s)", len(phase_cfgs))
+    if args.hp_only:
+        kept = [p for p in phase_cfgs if p.get("phase") != "staged_eval"]
+        dropped = len(phase_cfgs) - len(kept)
+        phase_cfgs = kept
+        logger.info(
+            "--hp-only/--skip-refit: skip refit_best; dropped %d staged_eval phase(s)",
+            dropped,
+        )
     if args.eval_anchor_only:
         staged = [p for p in phase_cfgs if p.get("phase") == "staged_eval"]
         if not staged:

@@ -9,7 +9,11 @@ from typing import Optional, Sequence
 
 import torch
 
-from .preprocessing import TimeSeriesTo2D
+from .preprocessing import (
+    bin_indices_from_occupancy,
+    occupancy_from_bin_indices,
+    require_occupancy_encoding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +277,7 @@ def coarse_edges_from_cdf(
     coarse_cdf: torch.Tensor,
     *,
     canvas_height: int,
+    occupancy_encoding: str = "cdf",
 ) -> torch.Tensor:
     """Return nearest-neighbour-upscaled coarse boundary rows, shape ``(B,V,W)``."""
     if coarse_cdf.ndim != 4:
@@ -283,7 +288,7 @@ def coarse_edges_from_cdf(
             f"canvas_height={canvas_height} must be divisible by coarse height={coarse_height}"
         )
     scale = canvas_height // coarse_height
-    bins = TimeSeriesTo2D.bin_indices_from_cdf(coarse_cdf).round().long()
+    bins = bin_indices_from_occupancy(coarse_cdf, occupancy_encoding).round().long()
     return ((bins + 1) * scale - 1).clamp(0, canvas_height - 1)
 
 
@@ -430,8 +435,10 @@ def blend_patch_bins_layout(
     canvas_height: int,
     patch_height: int,
     patch_width: int,
+    occupancy_encoding: str = "cdf",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Vectorized blend of visible patch-bin votes into a hard CDF."""
+    """Vectorized blend of visible patch-bin votes into a hard occupancy canvas."""
+    enc = require_occupancy_encoding(occupancy_encoding)
     n_patches = layout.n_patches
     if patch_cdf.shape != (n_patches, 1, patch_height, patch_width):
         raise ValueError(
@@ -442,9 +449,12 @@ def blend_patch_bins_layout(
     batch_size, n_variates, width = coarse_edges.shape
     device = patch_cdf.device
     local_cdf = patch_cdf[:, 0]
-    local_bins = TimeSeriesTo2D.bin_indices_from_cdf(local_cdf)
+    local_bins = bin_indices_from_occupancy(local_cdf, enc)
     occupancy = local_cdf.sum(dim=-2)
-    visible = (occupancy > 0) & (occupancy < patch_height)
+    if enc == "one_hot":
+        visible = torch.ones_like(occupancy, dtype=torch.bool)
+    else:
+        visible = (occupancy > 0) & (occupancy < patch_height)
     cols = layout.col0[:, None] + torch.arange(patch_width, device=device)
     edges = coarse_edges.reshape(-1, width)[layout.flat_index[:, None], cols]
     in_rows = (edges >= layout.row0[:, None]) & (edges < layout.row0[:, None] + patch_height)
@@ -468,9 +478,50 @@ def blend_patch_bins_layout(
     averaged_bins[has_vote] = sums[has_vote] / counts[has_vote]
     bins = torch.where(has_vote, averaged_bins.round(), coarse_edges.float())
     bins = bins.clamp(0, canvas_height - 1).long()
-    rows = torch.arange(canvas_height, device=device).view(1, 1, canvas_height, 1)
-    hard_cdf = (rows <= bins.unsqueeze(-2)).to(patch_cdf.dtype)
-    return hard_cdf, counts
+    return occupancy_from_bin_indices(
+        bins, canvas_height, enc, dtype=patch_cdf.dtype,
+    ), counts
+
+
+def blend_series_1d_layout(
+    patch_values: torch.Tensor,
+    layout: PatchLayout,
+    *,
+    canvas_width: int,
+    patch_width: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Average overlapping 1D temporal crops into (B,V,1,W)."""
+    n_patches = layout.n_patches
+    if patch_values.shape != (n_patches, 1, 1, patch_width):
+        raise ValueError(
+            "series_1d patch shape mismatch: "
+            f"got {tuple(patch_values.shape)}, expected "
+            f"({n_patches},1,1,{patch_width})"
+        )
+    batch_size = int(layout.batch_index.max().item()) + 1 if n_patches else 0
+    n_variates = int(layout.variate_index.max().item()) + 1 if n_patches else 0
+    device = patch_values.device
+    dtype = patch_values.dtype
+    cols = layout.col0[:, None] + torch.arange(patch_width, device=device)
+    local = patch_values[:, 0, 0]
+    sums_flat = torch.zeros(
+        batch_size * n_variates, canvas_width, device=device, dtype=dtype,
+    )
+    counts_flat = torch.zeros_like(sums_flat)
+    flat = layout.flat_index[:, None].expand_as(cols)
+    valid = (cols >= 0) & (cols < canvas_width)
+    sums_flat.index_put_((flat[valid], cols[valid]), local[valid], accumulate=True)
+    counts_flat.index_put_(
+        (flat[valid], cols[valid]),
+        torch.ones_like(local[valid]),
+        accumulate=True,
+    )
+    counts = counts_flat.view(batch_size, n_variates, canvas_width)
+    averaged = torch.zeros_like(sums_flat)
+    has = counts_flat > 0
+    averaged[has] = sums_flat[has] / counts_flat[has]
+    maps = averaged.view(batch_size, n_variates, 1, canvas_width)
+    return maps, counts
 
 
 def blend_patch_bins(
@@ -481,6 +532,7 @@ def blend_patch_bins(
     canvas_height: int,
     patch_height: int,
     patch_width: int,
+    occupancy_encoding: str = "cdf",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """List-API wrapper around :func:`blend_patch_bins_layout`."""
     layout = PatchLayout.from_locations(locations, device=patch_cdf.device)
@@ -491,4 +543,5 @@ def blend_patch_bins(
         canvas_height=canvas_height,
         patch_height=patch_height,
         patch_width=patch_width,
+        occupancy_encoding=occupancy_encoding,
     )

@@ -30,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from utils.disc_bin_center_shift import bin_center_shift  # noqa: E402
+from utils.disc_bin_center_shift import bin_center_shift, bin_center_shift_slices  # noqa: E402
 from utils.disc_shared import (  # noqa: E402
     DEFAULT_DISC_OUTPUT,
     DISC_ARCH_CHOICES,
@@ -48,6 +48,9 @@ from utils.disc_shared import (  # noqa: E402
     zscore_time,
 )
 from utils.eval_mmpd_gaussian_anchor import run_test_stride  # noqa: E402
+
+sys.path.insert(0, str(REPO_ROOT / "temp" / "scripts"))
+from horizon_random_crops import crop_starts_batch  # noqa: E402
 from utils.mmpd_eval_progress import (  # noqa: E402
     EvalProgress,
     fmt_duration,
@@ -55,6 +58,81 @@ from utils.mmpd_eval_progress import (  # noqa: E402
 from typing import Literal
 
 ReduceMode = Literal["per_variate", "joint"]
+
+
+def collate_univariate_disc_batch(batch):
+    """Identity when ``__getitems__`` already returned a 5-tuple of batched tensors."""
+    if (
+        isinstance(batch, tuple)
+        and len(batch) == 5
+        and isinstance(batch[0], torch.Tensor)
+        and batch[0].dim() >= 2
+    ):
+        return batch
+    return torch.utils.data.default_collate(batch)
+
+
+def _dataloader_kwargs(
+    args: argparse.Namespace,
+    device: torch.device,
+    *,
+    shuffle: bool,
+    generator: Optional[torch.Generator] = None,
+) -> Dict[str, Any]:
+    nw = int(getattr(args, "num_workers", 0) or 0)
+    if nw < 0:
+        raise ValueError(f"num_workers must be >= 0, got {nw}")
+    kw: Dict[str, Any] = {
+        "batch_size": int(args.batch_size),
+        "shuffle": shuffle,
+        "num_workers": nw,
+        "pin_memory": device.type == "cuda",
+        "collate_fn": collate_univariate_disc_batch,
+        "drop_last": False,
+    }
+    if generator is not None:
+        kw["generator"] = generator
+    if nw > 0:
+        kw["persistent_workers"] = True
+        pf = int(getattr(args, "prefetch_factor", 2) or 2)
+        if pf < 1:
+            raise ValueError(f"prefetch_factor must be >= 1, got {pf}")
+        kw["prefetch_factor"] = pf
+    return kw
+
+
+def _inhorizon_item_array(
+    windows: np.ndarray,
+    origin_ids: np.ndarray,
+    *,
+    horizon: int,
+    slice_len: int,
+    k: int,
+    n_var: int,
+    seed: int,
+) -> np.ndarray:
+    """(w, o, v, label) rows: window-major, crop, variate, real-then-fake."""
+    windows_arr = np.asarray(windows, dtype=np.int64).reshape(-1)
+    if windows_arr.size == 0:
+        return np.empty((0, 4), dtype=np.int64)
+    origin = np.asarray(origin_ids, dtype=np.int64)
+    starts = crop_starts_batch(
+        origin[windows_arr],
+        horizon=int(horizon),
+        length=int(slice_len),
+        k=int(k),
+        seed=int(seed),
+    )
+    n_w, k_i = starts.shape
+    if k_i != int(k):
+        raise ValueError(f"crop_starts_batch K={k_i} != requested {k}")
+    n_var_i = int(n_var)
+    w_col = np.repeat(windows_arr, k_i * n_var_i * 2)
+    o_col = np.repeat(starts.reshape(-1), n_var_i * 2)
+    v_col = np.tile(np.repeat(np.arange(n_var_i, dtype=np.int64), 2), n_w * k_i)
+    lab_col = np.tile(np.array([0, 1], dtype=np.int64), n_w * k_i * n_var_i)
+    return np.stack([w_col, o_col, v_col, lab_col], axis=1)
+
 
 DEFAULT_OUTPUT = (
     DEFAULT_DISC_OUTPUT.parent
@@ -144,6 +222,9 @@ class UnivariateRealVsFakeDataset(Dataset):
         series_starts: Optional[np.ndarray] = None,
         lookback: Optional[int] = None,
         variate_filter: Optional[Sequence[int]] = None,
+        inhorizon_k: Optional[int] = None,
+        origin_ids: Optional[np.ndarray] = None,
+        crop_seed: Optional[int] = None,
     ) -> None:
         # Shape checks: real/fake must align window×variate×horizon with past.
         if real.shape != fake.shape:
@@ -180,8 +261,38 @@ class UnivariateRealVsFakeDataset(Dataset):
         horizon = int(real.shape[-1])
         offsets = list(range(0, horizon - slice_len + 1, max(1, int(offset_stride))))
         rng = np.random.default_rng(seed)
+        inhorizon_k = None if inhorizon_k is None else int(inhorizon_k)
 
-        if bool(unique_absolute_slices):
+        if inhorizon_k is not None:
+            if bool(unique_absolute_slices):
+                raise ValueError("inhorizon_k and unique_absolute_slices are mutually exclusive")
+            if origin_ids is None:
+                raise ValueError("inhorizon_k requires origin_ids (pack window_index per row)")
+            origin_ids = np.asarray(origin_ids, dtype=np.int64)
+            if origin_ids.shape[0] != real.shape[0]:
+                raise ValueError(
+                    f"origin_ids len {origin_ids.shape[0]} != real N={real.shape[0]}"
+                )
+            crop_seed_i = int(crop_seed) if crop_seed is not None else int(seed)
+            items_arr = _inhorizon_item_array(
+                np.asarray(windows, dtype=np.int64),
+                origin_ids,
+                horizon=horizon,
+                slice_len=int(slice_len),
+                k=inhorizon_k,
+                n_var=n_var,
+                seed=crop_seed_i,
+            )
+            items_arr = items_arr[rng.permutation(items_arr.shape[0])]
+            self.items = items_arr
+            print(
+                f"[disc-uni] inhorizon random crops: K={inhorizon_k} L={slice_len} "
+                f"H={horizon} windows={len(np.asarray(windows).reshape(-1))} → "
+                f"{int(self.items.shape[0])} examples "
+                f"(shared starts via window_index, seed={crop_seed_i})",
+                flush=True,
+            )
+        elif bool(unique_absolute_slices):
             # Fair path: one (w,o) per absolute L-block × variate.
             if series_starts is None or lookback is None:
                 raise ValueError(
@@ -210,10 +321,10 @@ class UnivariateRealVsFakeDataset(Dataset):
                     items.append((w, o, v, 0))
                     items.append((w, o, v, 1))
                 rng.shuffle(items)
-            self.items = items
+            self.items = np.asarray(items, dtype=np.int64).reshape(-1, 4)
             print(
                 f"[disc-uni] unique_absolute_slices: {n_pairs} unique (abs_t,variate) "
-                f"pairs → {len(self.items)} examples "
+                f"pairs → {int(self.items.shape[0])} examples "
                 f"(from {len(windows)} windows × {len(offsets)} in-horizon offsets)",
                 flush=True,
             )
@@ -238,25 +349,86 @@ class UnivariateRealVsFakeDataset(Dataset):
             fake_idx = rng.choice(len(fake_items), size=n, replace=False)
             items = [real_items[i] for i in real_idx] + [fake_items[i] for i in fake_idx]
             rng.shuffle(items)
-            self.items = items
+            self.items = np.asarray(items, dtype=np.int64).reshape(-1, 4)
+
+        if self.items.ndim != 2 or self.items.shape[1] != 4:
+            raise ValueError(f"items must be (N,4), got {self.items.shape}")
+        self.items = np.ascontiguousarray(self.items, dtype=np.int64)
 
         # Optional: train on a subset of variates (e.g. ETTh2 LULL = v=5 only).
         if variate_filter is not None:
-            keep = {int(v) for v in variate_filter}
-            filtered = [it for it in self.items if int(it[2]) in keep]
-            if not filtered:
+            keep = np.asarray(sorted({int(v) for v in variate_filter}), dtype=np.int64)
+            mask = np.isin(self.items[:, 2], keep)
+            filtered = self.items[mask]
+            if filtered.shape[0] == 0:
                 raise ValueError(
-                    f"variate_filter={sorted(keep)} left 0 examples "
-                    f"(from {len(self.items)} before filter)"
+                    f"variate_filter={keep.tolist()} left 0 examples "
+                    f"(from {int(self.items.shape[0])} before filter)"
                 )
-            self.items = filtered
+            self.items = np.ascontiguousarray(filtered, dtype=np.int64)
             print(
-                f"[disc-uni] variate_filter={sorted(keep)} → {len(self.items)} examples",
+                f"[disc-uni] variate_filter={keep.tolist()} → {int(self.items.shape[0])} examples",
                 flush=True,
             )
 
+        self._x: Optional[np.ndarray] = None
+        if self.apply_bin_center_shift and not self.include_past:
+            self._materialize_bin_center_x()
+
     def __len__(self) -> int:
-        return len(self.items)
+        return int(self.items.shape[0])
+
+    def _gather_l_slices(
+        self,
+        src: np.ndarray,
+        windows: np.ndarray,
+        offsets: np.ndarray,
+        variates: np.ndarray,
+    ) -> np.ndarray:
+        t = offsets[:, None] + np.arange(self.slice_len, dtype=np.int64)[None, :]
+        return np.ascontiguousarray(src[windows[:, None], variates[:, None], t])
+
+    def _materialize_bin_center_x(self) -> None:
+        """Vectorized L-crop + bin-center once; __getitem__ is then an array index."""
+        if self.legal_levels is None:
+            raise ValueError("legal_levels required to precompute bin-center x")
+        t0 = time.time()
+        w = self.items[:, 0]
+        o = self.items[:, 1]
+        v = self.items[:, 2]
+        lab = self.items[:, 3]
+        n = int(self.items.shape[0])
+        vals = np.empty((n, self.slice_len), dtype=np.float32)
+        real_mask = lab == 0
+        fake_mask = lab == 1
+        if np.any(real_mask):
+            vals[real_mask] = self._gather_l_slices(
+                self.real, w[real_mask], o[real_mask], v[real_mask]
+            )
+        if np.any(fake_mask):
+            vals[fake_mask] = self._gather_l_slices(
+                self.fake, w[fake_mask], o[fake_mask], v[fake_mask]
+            )
+        # Chunk the (M,H) level gather so electricity/weather stay well under RAM.
+        h_bins = int(self.legal_levels.shape[-1])
+        bytes_per = max(self.slice_len * h_bins * 4, 1)
+        chunk = max(1, min(n, int(256 * 1024 * 1024) // bytes_per))
+        shifted = np.empty_like(vals)
+        for i0 in range(0, n, chunk):
+            i1 = min(n, i0 + chunk)
+            sl = slice(i0, i1)
+            shifted[sl] = bin_center_shift_slices(
+                vals[sl],
+                self.legal_levels[w[sl], v[sl]],
+                reduce=self.bin_center_reduce,
+            )
+        self._x = np.ascontiguousarray(shifted[:, None, :], dtype=np.float32)
+        dt = time.time() - t0
+        print(
+            f"[disc-uni] precomputed bin-center x: N={n} L={self.slice_len} "
+            f"bytes={self._x.nbytes} in {dt:.1f}s",
+            flush=True,
+        )
 
     def _norm_segment(self, segment: np.ndarray, window: int, variate: int) -> np.ndarray:
         """Per-example preprocess before the disc sees the slice.
@@ -281,14 +453,18 @@ class UnivariateRealVsFakeDataset(Dataset):
         return seg
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Unpack the unique_abs / dense item tuple.
-        window, offset, variate, label = self.items[idx]
-        # Pick GT or fake series for this label.
+        window, offset, variate, label = (int(x) for x in self.items[idx])
+        if self._x is not None:
+            return (
+                torch.from_numpy(self._x[idx]),
+                torch.tensor(offset, dtype=torch.long),
+                torch.tensor(float(label), dtype=torch.float32),
+                torch.tensor(window, dtype=torch.long),
+                torch.tensor(variate, dtype=torch.long),
+            )
         src = self.fake if label == 1 else self.real
-        # Crop the L-slice for one variate → shape (1, L).
         candidate = src[window, variate : variate + 1, offset : offset + self.slice_len]
         if self.include_past:
-            # Rare on live ablation (candidate_only=True → skip lookback).
             past = self.past[window, variate : variate + 1]
             x = np.concatenate(
                 [
@@ -298,15 +474,28 @@ class UnivariateRealVsFakeDataset(Dataset):
                 axis=-1,
             ).astype(np.float32)
         else:
-            # Default: disc only sees the L-slice after bin-center/zscore.
             x = self._norm_segment(candidate, window, variate).astype(np.float32)
         return (
             torch.from_numpy(x),
             torch.tensor(offset, dtype=torch.long),
             torch.tensor(float(label), dtype=torch.float32),
-            torch.tensor(int(window), dtype=torch.long),
-            torch.tensor(int(variate), dtype=torch.long),
+            torch.tensor(window, dtype=torch.long),
+            torch.tensor(variate, dtype=torch.long),
         )
+
+    def __getitems__(self, indices: Sequence[int]):
+        idx = np.asarray(indices, dtype=np.int64)
+        it = self.items[idx]
+        if self._x is not None:
+            x = torch.from_numpy(np.ascontiguousarray(self._x[idx]))
+        else:
+            xs = [self[int(i)][0] for i in idx.tolist()]
+            x = torch.stack(xs, dim=0)
+        offsets = torch.from_numpy(np.ascontiguousarray(it[:, 1], dtype=np.int64))
+        labels = torch.from_numpy(it[:, 3].astype(np.float32, copy=True))
+        windows = torch.from_numpy(np.ascontiguousarray(it[:, 0], dtype=np.int64))
+        variates = torch.from_numpy(np.ascontiguousarray(it[:, 2], dtype=np.int64))
+        return (x, offsets, labels, windows, variates)
 
 
 def per_variate_metrics(
@@ -362,9 +551,9 @@ def evaluate_classifier(
     for batch in loader:
         # Batch from UnivariateRealVsFakeDataset: x, offset, label, window, variate.
         x, offsets, labels, windows, variates = batch
-        x = x.to(device)
-        offsets = offsets.to(device)
-        labels = labels.to(device)
+        x = x.to(device, non_blocking=device.type == "cuda")
+        offsets = offsets.to(device, non_blocking=device.type == "cuda")
+        labels = labels.to(device, non_blocking=device.type == "cuda")
         # logit > 0 ⇒ predict fake; sigmoid → P(fake) for AUROC.
         logits = model(x, offsets)
         loss = F.binary_cross_entropy_with_logits(logits, labels, reduction="sum")
@@ -418,7 +607,7 @@ def collect_classifier_scores(
         "prob_fake": [], "label": [], "window": [], "variate": [], "offset": [],
     }
     for x, offsets, labels, windows, variates in loader:
-        logits = model(x.to(device), offsets.to(device))
+        logits = model(x.to(device, non_blocking=device.type == "cuda"), offsets.to(device, non_blocking=device.type == "cuda"))
         fields["prob_fake"].append(torch.sigmoid(logits).detach().cpu().numpy().astype(np.float32))
         fields["label"].append(labels.numpy().astype(np.float32))
         fields["window"].append(windows.numpy().astype(np.int64))
@@ -498,7 +687,18 @@ def train_classifier(
         series_starts=getattr(bundle, "series_starts", None),
         lookback=int(getattr(args, "lookback", 0) or 0) or None,
         variate_filter=variate_filter,
+        inhorizon_k=None,
+        origin_ids=getattr(bundle, "origin_ids", None),
+        crop_seed=int(getattr(args, "seed", 0) or 0) or None,
     )
+    if bool(getattr(args, "inhorizon_random_crops", False)):
+        from horizon_random_crops import crops_per_horizon  # noqa: WPS433
+        ds_kwargs["inhorizon_k"] = crops_per_horizon(
+            int(slice_len), getattr(args, "crops_per_horizon", None),
+        )
+        ds_kwargs["unique_absolute_slices"] = False
+        if ds_kwargs["origin_ids"] is None:
+            raise ValueError("inhorizon_random_crops requires bundle.origin_ids")
     if ds_kwargs["unique_absolute_slices"] and (
         ds_kwargs["series_starts"] is None or ds_kwargs["lookback"] is None
     ):
@@ -524,16 +724,16 @@ def train_classifier(
     generator = torch.Generator()
     generator.manual_seed(seed_base)
     train_loader = DataLoader(
-        ds_train, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=(device.type == "cuda"), generator=generator,
+        ds_train, **_dataloader_kwargs(args, device, shuffle=True, generator=generator)
     )
-    val_loader = DataLoader(
-        ds_val, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=(device.type == "cuda"),
-    )
-    test_loader = DataLoader(
-        ds_test, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=(device.type == "cuda"),
+    val_loader = DataLoader(ds_val, **_dataloader_kwargs(args, device, shuffle=False))
+    test_loader = DataLoader(ds_test, **_dataloader_kwargs(args, device, shuffle=False))
+    print(
+        f"[disc-uni] loader batch_size={int(args.batch_size)} "
+        f"num_workers={int(getattr(args, 'num_workers', 0) or 0)} "
+        f"pin_memory={device.type == 'cuda'} "
+        f"persistent_workers={int(getattr(args, 'num_workers', 0) or 0) > 0}",
+        flush=True,
     )
 
     # seq_len = L under candidate_only; Lb+L if lookback is concatenated.
@@ -575,6 +775,7 @@ def train_classifier(
     progress = EvalProgress(f"disc-uni/{dataset}/{fake_source}/L{slice_len}", args.epochs)
     t0 = time.time()
     epoch = -1
+    pin_nb = device.type == "cuda"
     for epoch in range(args.epochs):
         model.train()
         train_loss = 0.0
@@ -582,9 +783,9 @@ def train_classifier(
         for batch_idx, batch in enumerate(train_loader):
             # batch: x [B,1,L], offsets [B], labels [B] (1=fake).
             x, offsets, labels = batch[0], batch[1], batch[2]
-            x = x.to(device)
-            offsets = offsets.to(device)
-            labels = labels.to(device)
+            x = x.to(device, non_blocking=pin_nb)
+            offsets = offsets.to(device, non_blocking=pin_nb)
+            labels = labels.to(device, non_blocking=pin_nb)
             optimizer.zero_grad(set_to_none=True)
             logits = model(x, offsets)
             loss = F.binary_cross_entropy_with_logits(logits, labels)

@@ -2068,7 +2068,14 @@ def load_tsf_pack_pool(
     pipeline = load_tsf_pipeline()
     # Force z-score windows: train-split rank tensors must not mix with val/test z.
     _ = use_ordinal_window_norm  # callers may pass this; pack pool ignores it on purpose
+    from models.diffusion_tsf.pipeline.state import PipelineState
+
+    state = PipelineState(
+        dataset=dataset,
+        datasets_dir=str(REPO_ROOT / "datasets"),
+    )
     train_ds, val_ds, test_ds, stats = pipeline.load_dataset(
+        state,
         dataset,
         list(variate_indices),
         lookback=lookback,

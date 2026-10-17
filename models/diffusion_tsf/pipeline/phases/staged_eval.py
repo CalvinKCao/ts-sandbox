@@ -819,6 +819,18 @@ def _staged_det_gen_kwargs(state: PipelineState, default_steps: int) -> Dict[str
     return {"sampler": sampler, "num_inference_steps": int(default_steps)}
 
 
+def _eval_default_steps(state: PipelineState, phase: "StagedEvalPhase", *, anchor_only: bool) -> int:
+    if not anchor_only:
+        return int(phase.require("probabilistic_num_inference_steps"))
+    sampler = str(getattr(state, "eval_sampler", "anchor"))
+    if (
+        str(getattr(state, "representation", "cdf_2d")) == "series_1d"
+        and sampler not in ("anchor", "deterministic_anchor")
+    ):
+        return int(getattr(state, "gaussian_sample_steps", 20))
+    return 1
+
+
 class StagedEvalPhase(PipelinePhase):
     name = "staged_eval"
 
@@ -1296,7 +1308,7 @@ class StagedEvalPhase(PipelinePhase):
                 shard_slice.start, shard_slice.stop, n_full,
             )
             prob_samples = 0 if anchor_only else int(self.require("probabilistic_n_samples"))
-            default_steps = 1 if anchor_only else int(self.require("probabilistic_num_inference_steps"))
+            default_steps = _eval_default_steps(state, self, anchor_only=anchor_only)
         elif state.smoke_test:
             n_smoke = min(2, len(full_test_ds))
             final_ds = Subset(full_test_ds, list(range(n_smoke)))
@@ -1332,7 +1344,7 @@ class StagedEvalPhase(PipelinePhase):
             else:
                 final_ds = full_test_ds
             prob_samples = 0 if anchor_only else int(self.require("probabilistic_n_samples"))
-            default_steps = 1 if anchor_only else int(self.require("probabilistic_num_inference_steps"))
+            default_steps = _eval_default_steps(state, self, anchor_only=anchor_only)
 
         max_windows = getattr(state, "eval_max_windows", None)
         if max_windows is not None:

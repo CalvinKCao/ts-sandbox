@@ -52,6 +52,20 @@ class ITransFinetuneHPPhase(PipelinePhase):
             max_epochs = int(yaml_epochs)
             if max_epochs < 1:
                 raise ValueError(f"[{self.name}] max_epochs must be >= 1, got {max_epochs}")
+        train_cap = self.get("train_max_windows")
+        if train_cap is not None:
+            train_cap = int(train_cap)
+            if train_cap < 1:
+                raise ValueError(f"[{self.name}] train_max_windows must be >= 1, got {train_cap}")
+        else:
+            train_cap = subset_meta.get("train_max_windows")
+        val_cap = self.get("val_max_windows")
+        if val_cap is not None:
+            val_cap = int(val_cap)
+            if val_cap < 1:
+                raise ValueError(f"[{self.name}] val_max_windows must be >= 1, got {val_cap}")
+        else:
+            val_cap = subset_meta.get("val_max_windows")
         if state.smoke_test:
             n_trials = 1
             max_epochs = 1
@@ -83,6 +97,8 @@ class ITransFinetuneHPPhase(PipelinePhase):
             test_stride=test_stride,
             parallel_workers=state.parallel_optuna_workers,
             max_epochs=max_epochs,
+            train_max_windows=train_cap,
+            val_max_windows=val_cap,
         )
         hp_best = os.path.join(state.checkpoint_dir, f"{subset_id}_itrans_ft_hp_best.pt")
         src = tune_ckpt_path if tune_ckpt_path and os.path.exists(tune_ckpt_path) else hp_best

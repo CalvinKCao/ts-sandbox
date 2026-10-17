@@ -169,6 +169,9 @@ def _load_staged_diffusion_from_ckpt(
     guidance_type: Optional[str] = None,
     state: Any = None,
 ):
+    from dataclasses import replace
+
+    from models.diffusion_tsf.pipeline.phases.staged_diffusion_pretrain import stage_state
     from models.diffusion_tsf.train_multivariate_pipeline import (
         create_diffusion_model,
         load_wrapped_guidance,
@@ -200,9 +203,16 @@ def _load_staged_diffusion_from_ckpt(
     backbone = infer_model_type(diff_ckpt)
     apply_checkpoint_architecture(diff_ckpt, diff_type)
     anchor_kwargs = infer_anchor_kwargs(diff_ckpt, meta if isinstance(meta, dict) else {})
+    model_state = stage_state(state, stage, honor_dataset_windows=True)
+    if isinstance(meta, dict) and meta.get("patch_refine_patch_height") is not None:
+        ph = int(meta["patch_refine_patch_height"])
+        updates = {"patch_refine_patch_height": ph}
+        if stage == "patch_refine":
+            updates["image_height"] = ph
+        model_state = replace(model_state, **updates)
 
     model = create_diffusion_model(
-        state,
+        model_state,
         n_variates=n_vars,
         diffusion_type=diff_type,
         model_type=backbone,
@@ -1678,6 +1688,7 @@ def _plot_diffusion_model_space_prediction(
         hir_to_2d = TimeSeriesTo2D(
             height=int(future_fine.shape[-2]),
             max_scale=float(to_2d.max_scale),
+            occupancy_encoding=getattr(to_2d, "occupancy_encoding", "cdf"),
         )
         fine_1d = hir_to_2d._decode_occupancy_in_range(
             future_fine, value_range=hir_to_2d.max_scale, cdf_decoder="mean",

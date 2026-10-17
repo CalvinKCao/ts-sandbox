@@ -676,8 +676,9 @@ class FactorizedDiT(nn.Module):
         H, W = img.shape[-2], img.shape[-1]
         pad_h = (pH - H % pH) % pH
         pad_w = (pW - W % pW) % pW
-        if pad_h or pad_w:
-            img = F.pad(img, (0, pad_w, 0, pad_h), mode="reflect")
+        # Always pad (including zeros) so inductor cannot constant-fold away
+        # the pad branch from a first example whose H/W already divide pH/pW.
+        img = F.pad(img, (0, pad_w, 0, pad_h), mode="reflect")
         return img, pad_h, pad_w
 
     def forward(

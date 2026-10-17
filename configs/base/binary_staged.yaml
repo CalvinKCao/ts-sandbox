@@ -107,6 +107,8 @@ experiment:
   coarse_image_height: 16
   fine_image_height: 16
   staged_representation: value_precision
+  occupancy_encoding: cdf
+  representation: cdf_2d
   max_scale: 3.5
   max_scale_by_dataset:
     ETTh1: 5.2
@@ -173,6 +175,12 @@ experiment:
   binary_num_steps: 1000
   binary_beta_start: 1.0e-5
   binary_beta_end: 0.5
+  # series_1d Gaussian ε schedule (ignored by cdf_2d). Ho linear, not binary β_end=0.5.
+  gaussian_num_steps: 1000
+  gaussian_sample_steps: 20
+  gaussian_beta_start: 1.0e-4
+  gaussian_beta_end: 0.02
+  gaussian_noise_schedule: linear
   prediction_target: epsilon
   loss_weighting: none
   min_snr_gamma: 5.0
