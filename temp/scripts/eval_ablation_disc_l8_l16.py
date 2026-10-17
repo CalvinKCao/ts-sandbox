@@ -53,6 +53,13 @@ from torch.utils.data import DataLoader, Subset
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+_SCRIPTS = REPO_ROOT / "temp" / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+from horizon_random_crops import (  # noqa: E402
+    load_unique_seg_index,
+    rows_for_kept_window_indices,
+)
 
 from models.diffusion_tsf.train_multivariate_pipeline import (
     load_dataset,
@@ -184,7 +191,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mmpd-data-dir", type=Path, default=DEFAULT_MMPD_DATA)
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--lookback", type=int, default=336)
-    p.add_argument("--horizon", type=int, default=96)
+    p.add_argument("--horizon", type=int, default=720)
     # Pack pool: paper-test windows at stride 4 by default (MMPD-aligned).
     # Use --pack-splits val,test for paper val+test combined pool (80/20 disc carve).
     p.add_argument("--pack-test-stride", type=int, default=4)
@@ -206,12 +213,53 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gpu", type=int, default=0)
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--fake-agg", choices=["sample0", "prob_mean"], default="sample0")
+    p.add_argument(
+        "--fake-sources",
+        nargs="+",
+        default=["binary_staged", "mmpd", "itransformer", "patchtst"],
+        choices=["binary_staged", "mmpd", "itransformer", "patchtst"],
+        help="Train one real-vs-fake disc per source. Missing dumps are skipped.",
+    )
+    p.add_argument(
+        "--external-pack-dir",
+        type=Path,
+        default=REPO_ROOT / "results" / "table_texture_packs" / "compact",
+        help="Compact {dataset}_{itransformer|patchtst}.npz packs (existing preds only).",
+    )
     p.add_argument("--slice-lengths", type=int, nargs="+", default=[8, 16])
+    p.add_argument(
+        "--inhorizon-random-crops",
+        action="store_true",
+        default=True,
+        help="Sample K random L-crops from each H=720 forecast (not sliding-on-96 / unique_abs).",
+    )
+    p.add_argument(
+        "--no-inhorizon-random-crops",
+        action="store_false",
+        dest="inhorizon_random_crops",
+    )
+    p.add_argument(
+        "--crops-per-horizon",
+        type=int,
+        default=None,
+        help="K crops per 720-step series. Default 89 for L=8 and 81 for L=16.",
+    )
+    p.add_argument(
+        "--compact-fakes",
+        action="store_true",
+        default=True,
+        help="Load binary_prob / mmpd_prob / itransformer from --external-pack-dir (H=720 packs).",
+    )
+    p.add_argument(
+        "--no-compact-fakes",
+        action="store_false",
+        dest="compact_fakes",
+    )
     p.add_argument("--num-sampling-steps", type=int, default=20)
     p.add_argument("--probabilistic-sampler", default="quad_t")
     p.add_argument("--raw-binary-batch-size", type=int, default=2)
     p.add_argument("--num-workers", type=int, default=0)
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--seed", type=int, default=20260812)
     p.add_argument("--force-raw-eval", action="store_true")
     # Shared forecast packs (binary + MMPD) so later disc runs skip regeneration.
     # Default dir: results/datasets/disc_forecast_cache/<keyed>.npz
@@ -226,8 +274,8 @@ def parse_args() -> argparse.Namespace:
         "--require-forecast-cache",
         "--reuse-forecast-cache",
         action="store_true",
-        help="Fail fast if a compatible shared/local forecast pack is missing "
-        "(no regenerate). Pass as --reuse-forecast-cache or --require-forecast-cache.",
+        help="Load existing forecast packs only (no generate). Missing binary/MMPD "
+        "pairs are skipped. Pass as --reuse-forecast-cache or --require-forecast-cache.",
     )
     p.add_argument(
         "--no-forecast-cache",
@@ -255,6 +303,15 @@ def parse_args() -> argparse.Namespace:
         "binary_wrong_mmpd_right). Default 12.",
     )
     p.add_argument("--max-windows", type=int, default=None)
+    p.add_argument(
+        "--keep-index",
+        "--unique-seg-index",
+        dest="keep_index",
+        type=Path,
+        default=None,
+        help="Texture sibling JSON of kept unique-seg window_indices "
+        "(kept_u_hz720_ettm1_valtest50_seed20260812.json). Do not re-roll.",
+    )
     p.add_argument("--test-fraction", type=float, default=1.0)
     p.add_argument("--disc-index-stride", type=int, default=1)
     # candidate_only: disc sees L-slice only (no lookback continuity).
@@ -277,9 +334,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--unique-absolute-slices",
         action="store_true",
-        default=True,
-        help="One random (window,offset) per absolute L-block across overlapping "
-        "96-horizons (UniquePatchSegmentDataset-style). Default on.",
+        default=False,
+        help="One random (window,offset) per absolute L-block. Off for the H=720 random-crop campaign.",
     )
     p.add_argument(
         "--no-unique-absolute-slices",
@@ -593,6 +649,44 @@ def _thin_windows(
     rng = np.random.default_rng(int(seed))
     pick = np.sort(rng.choice(n, size=int(max_windows), replace=False))
     return _subset_aligned(indices, pack, pick)
+
+
+def _apply_unique_seg_index(
+    args: argparse.Namespace,
+    dataset: str,
+    y_true: np.ndarray,
+    pred: np.ndarray,
+    win_idx: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    index_path = getattr(args, "keep_index", None)
+    if index_path is None:
+        return y_true, pred, win_idx
+    if getattr(args, "_unique_seg_index_payload", None) is None:
+        args._unique_seg_index_payload = load_unique_seg_index(index_path)
+    payload = args._unique_seg_index_payload
+    rec = (payload.get("datasets") or {}).get(dataset)
+    if rec is None:
+        miss = (payload.get("missing") or {}).get(dataset)
+        raise KeyError(
+            f"{dataset}: not in keep-index {index_path}"
+            + (f" ({miss})" if miss else "")
+        )
+    if "window_indices" not in rec:
+        raise KeyError(f"{dataset}: keep-index missing window_indices")
+    kept = np.asarray(rec["window_indices"], dtype=np.int64)
+    pick = rows_for_kept_window_indices(win_idx, kept, dataset=dataset)
+    y2 = np.ascontiguousarray(y_true[pick])
+    p2 = np.ascontiguousarray(pred[pick])
+    i2 = np.ascontiguousarray(win_idx[pick])
+    print(
+        f"[keep-index] {dataset} packed={len(win_idx)} V={y_true.shape[1]} "
+        f"own_U={len(win_idx) * int(y_true.shape[1])} -> N={len(pick)} "
+        f"kept_U={len(pick) * int(y_true.shape[1])} cap_u={payload.get('cap_u')} "
+        f"ref={payload.get('dataset')} T_train_excluded={payload.get('T_train_excluded')} "
+        f"file={index_path}",
+        flush=True,
+    )
+    return y2, p2, i2
 
 
 def _pack_strides(
@@ -1629,6 +1723,379 @@ def _load_scores(path: Path) -> Dict[str, np.ndarray]:
         return {k: data[k] for k in data.files}
 
 
+FULL_DATASET_V = {
+    "ETTh1": 7,
+    "ETTh2": 7,
+    "ETTm1": 7,
+    "ETTm2": 7,
+    "weather": 21,
+    "electricity": 321,
+    "traffic": 862,
+    "exchange_rate": 8,
+    "solar_Alabama": 137,
+    "PeMS": 307,
+}
+
+EXTERNAL_FAKE_SOURCES = ("itransformer", "patchtst")
+COMPACT_FAKE_STEM = {
+    "binary_staged": "binary_prob",
+    "mmpd": "mmpd_prob",
+    "itransformer": "itransformer",
+    "patchtst": "patchtst",
+}
+
+
+def _stage_mod():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import stage_table_texture_packs as stage_mod  # noqa: WPS433
+
+    return stage_mod
+
+
+def _source_lookback(source: str, dataset: str, default: int) -> int:
+    if dataset == "PeMS":
+        # Native PeMS compact packs are lb=96 / hz=96 (not iTrans table 336).
+        return 96
+    if source == "patchtst":
+        return 336 if dataset == "exchange_rate" else 512
+    return int(default)
+
+
+def _variates_for_pack(run: AnchorRun, n_var: int, dataset: str) -> Optional[List[int]]:
+    run_vars = [int(v) for v in run_variate_indices(run)]
+    if len(run_vars) == int(n_var):
+        return run_vars
+    full = FULL_DATASET_V.get(dataset)
+    if full is not None and int(n_var) == int(full):
+        return list(range(int(n_var)))
+    return None
+
+
+def _try_cached_binary_pack(
+    args: argparse.Namespace,
+    *,
+    run_name: str,
+    dataset: str,
+    ckpt_root: Path,
+) -> Optional[Dict[str, np.ndarray]]:
+    pack_splits = parse_pack_splits(args.pack_splits)
+    local_cache = args.output_dir / "raw" / (
+        f"binary_{run_name}_{dataset}_{_pack_tag(pack_splits)}.npz"
+    )
+    shared_dir = _shared_cache_dir(args)
+    shared_cache = (
+        None
+        if shared_dir is None
+        else shared_dir / _binary_forecast_cache_name(
+            run_name=run_name,
+            dataset=dataset,
+            ckpt_root=ckpt_root,
+            pack_splits=pack_splits,
+            args=args,
+        )
+    )
+    pack = _try_load_pack(local_cache, indices=None, label=f"binary/{run_name}")
+    if pack is not None:
+        return pack
+    if shared_cache is not None:
+        pack = _try_load_pack(shared_cache, indices=None, label=f"binary-shared/{run_name}")
+        if pack is not None:
+            _write_pack(local_cache, pack, label=f"binary/{run_name}")
+            return pack
+    return None
+
+
+def _try_cached_mmpd_pack(
+    args: argparse.Namespace,
+    *,
+    dataset: str,
+) -> Optional[Dict[str, np.ndarray]]:
+    pack_splits = parse_pack_splits(args.pack_splits)
+    local_cache = args.output_dir / "raw" / f"mmpd_{dataset}_{_pack_tag(pack_splits)}.npz"
+    shared_dir = _shared_cache_dir(args)
+    shared_cache = (
+        None
+        if shared_dir is None
+        else shared_dir / _mmpd_forecast_cache_name(
+            dataset=dataset, pack_splits=pack_splits, args=args,
+        )
+    )
+    pack = _try_load_pack(local_cache, indices=None, label="mmpd")
+    if pack is not None:
+        return pack
+    if shared_cache is not None:
+        pack = _try_load_pack(shared_cache, indices=None, label="mmpd-shared")
+        if pack is not None:
+            _write_pack(local_cache, pack, label="mmpd")
+            return pack
+    return None
+
+
+def _nvh(values: np.ndarray, horizon: int) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    if values.ndim != 3:
+        raise ValueError(f"expected 3-D pack, got {values.shape}")
+    if values.shape[1] == 96 or values.shape[-1] == 96:
+        if values.shape[1] != horizon and values.shape[-1] != horizon:
+            raise ValueError(
+                f"H=96 pack {tuple(values.shape)}; refuse to slice. Need H={horizon}."
+            )
+    if values.shape[1] == horizon and values.shape[-1] != horizon:
+        values = np.transpose(values, (0, 2, 1))
+    if values.shape[-1] != horizon:
+        raise ValueError(
+            f"no {horizon}-step horizon in {values.shape} (prefix-slice disabled)"
+        )
+    return np.ascontiguousarray(values, dtype=np.float32)
+
+
+def _load_external_fake(
+    args: argparse.Namespace,
+    *,
+    dataset: str,
+    source: str,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, str]]:
+    """Return (y_true, pred, window_indices, path) or None if dump missing/unusable."""
+    pack_dir = Path(args.external_pack_dir)
+    if not pack_dir.is_absolute():
+        pack_dir = REPO_ROOT / pack_dir
+    stem = COMPACT_FAKE_STEM.get(source, source)
+    compact = pack_dir / f"{dataset}_{stem}.npz"
+    if compact.is_file():
+        with np.load(compact, allow_pickle=True) as data:
+            y_true = _nvh(data["y_true"], int(args.horizon))
+            pred = _nvh(data["pred"], int(args.horizon))
+            if "window_indices" in data.files:
+                idx = np.asarray(data["window_indices"], dtype=np.int64)
+            else:
+                idx = np.arange(len(y_true), dtype=np.int64)
+        if y_true.shape != pred.shape:
+            print(f"[skip] {dataset}/{source}: y_true {y_true.shape} != pred {pred.shape}", flush=True)
+            return None
+        if source == "patchtst" and dataset == "electricity" and y_true.shape[0] < 100:
+            print(f"[skip] {dataset}/{source}: incomplete dump n={y_true.shape[0]}", flush=True)
+            return None
+        if source == "patchtst" and dataset == "PeMS" and y_true.shape[0] <= 50:
+            print(f"[skip] {dataset}/{source}: capped dump n={y_true.shape[0]}", flush=True)
+            return None
+        y_true, pred, idx = _apply_unique_seg_index(args, dataset, y_true, pred, idx)
+        if dataset == "PeMS" and int(y_true.shape[-1]) != 96:
+            raise ValueError(
+                f"PeMS pack {compact} horizon {y_true.shape[-1]} != 96; "
+                "refuse non-native / prefix-sliced dumps"
+            )
+        return y_true, pred, idx, str(compact)
+
+    stage = _stage_mod()
+    if source == "itransformer":
+        roots = [
+            Path("/scratch/ccao87/ts-sandbox/temp/iTransformer/results"),
+            Path("/scratch/ccao87/ts-sandbox-fullT/temp/iTransformer/results"),
+            REPO_ROOT / "temp" / "iTransformer" / "results",
+        ]
+        hit = stage.resolve_itrans_any(dataset, *roots)
+        if hit is None:
+            return None
+        y_true = _nvh(np.load(hit / "true.npy", mmap_mode="r"), int(args.horizon))
+        pred = _nvh(np.load(hit / "pred.npy", mmap_mode="r"), int(args.horizon))
+        idx = np.arange(len(y_true), dtype=np.int64)
+        return y_true, pred, idx, str(hit)
+
+    if source == "patchtst":
+        patch_root = Path("/scratch/ccao87/ts-sandbox/temp/PatchTST/PatchTST_supervised/results")
+        if not patch_root.is_dir():
+            patch_root = REPO_ROOT / "temp" / "PatchTST" / "PatchTST_supervised" / "results"
+        found = stage.resolve_patchtst(patch_root, dataset) if patch_root.is_dir() else None
+        if found is None:
+            return None
+        pred_dir, _seq = found
+        pred_raw = np.load(pred_dir / "pred.npy", mmap_mode="r")
+        pred = _nvh(pred_raw, int(args.horizon))
+        if dataset == "electricity" and pred.shape[0] < 100:
+            print(f"[skip] {dataset}/{source}: incomplete dump n={pred.shape[0]}", flush=True)
+            return None
+        if dataset == "PeMS" and pred.shape[0] <= 50:
+            print(f"[skip] {dataset}/{source}: capped dump n={pred.shape[0]}", flush=True)
+            return None
+        true_path = pred_dir / "true.npy"
+        if not true_path.is_file():
+            print(f"[skip] {dataset}/{source}: pred.npy at {pred_dir} has no true.npy", flush=True)
+            return None
+        y_true = _nvh(np.load(true_path, mmap_mode="r"), int(args.horizon))
+        idx = np.arange(len(y_true), dtype=np.int64)
+        return y_true, pred, idx, str(pred_dir)
+    return None
+
+
+def _reconstruct_past_starts(
+    *,
+    dataset: str,
+    variate_indices: Sequence[int],
+    lookback: int,
+    horizon: int,
+    window_indices: np.ndarray,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[str]]:
+    pool, starts, _splits, _, _ = load_tsf_pack_pool(
+        dataset,
+        list(variate_indices),
+        lookback=int(lookback),
+        horizon=int(horizon),
+        train_stride=1,
+        test_stride=1,
+        pack_splits=["test"],
+        use_ordinal_window_norm=False,
+    )
+    idx = np.asarray(window_indices, dtype=np.int64)
+    n_pool = len(pool)
+    if idx.size == 0:
+        return None, None, "empty window_indices"
+    if int(idx.max()) >= n_pool:
+        if idx.size == n_pool and np.array_equal(idx, np.arange(n_pool, dtype=np.int64)):
+            take = np.arange(n_pool, dtype=np.int64)
+        else:
+            return None, None, f"window_indices max {int(idx.max())} >= pool {n_pool}"
+    else:
+        take = idx
+    past_rows: List[np.ndarray] = []
+    for i in take.tolist():
+        past, _future = pool[int(i)]
+        past_rows.append(np.asarray(past, dtype=np.float32))
+    past = np.stack(past_rows, axis=0)
+    series_starts = np.asarray(starts, dtype=np.int64)[take]
+    return past, series_starts, None
+
+
+def _snap_pair(
+    *,
+    gt: np.ndarray,
+    fake: np.ndarray,
+    past: np.ndarray,
+    run: AnchorRun,
+    ladder: Any,
+    args: argparse.Namespace,
+    device: torch.device,
+    canvas_height: int,
+    ckpt_root: Path,
+    config_path: str,
+) -> Dict[str, np.ndarray]:
+    state = _build_state(ckpt_root, str(args.dataset), run_subset_id(run), config_path)
+    try:
+        legal_levels, snap_mode, snap_meta = _legal_levels_for_run(
+            past,
+            state=state,
+            ckpt_root=Path(ckpt_root),
+            dataset=str(args.dataset),
+            canvas_height=int(canvas_height),
+            ladder=ladder,
+            device=device,
+        )
+    except Exception as exc:
+        print(f"  lattice from ckpt failed ({exc}); window-norm grid, no flat mask", flush=True)
+        legal_levels = None
+        snap_mode = "window_norm_grid"
+        snap_meta = {}
+    if legal_levels is None or legal_levels.shape[:2] != gt.shape[:2]:
+        print(
+            f"  rebuilding lattice from past {tuple(past.shape)} without hybrid mask",
+            flush=True,
+        )
+        max_scale = _max_scale_from_ckpt_metadata(ckpt_root, str(args.dataset))
+        grid_cfg = _window_norm_grid_config(
+            state,
+            canvas_height=int(canvas_height),
+            max_scale=max_scale,
+            skip_window_norm_variate_mask=None,
+        )
+        legal_levels = legal_window_norm_patch_refine_levels_dataset_z(past, grid_cfg)
+        snap_mode = "window_norm_grid"
+        snap_meta = {"canvas_height": float(canvas_height), "max_scale": float(max_scale)}
+    print(
+        f"  snap mode={snap_mode} canvas_height={canvas_height} meta={snap_meta}",
+        flush=True,
+    )
+    gt_s, _gt_info = snap_to_patch_refine_levels(gt, legal_levels)
+    fake_s, _fake_info = snap_to_patch_refine_levels(fake, legal_levels)
+    return {
+        "gt": np.asarray(gt_s, dtype=np.float32),
+        "fake": np.asarray(fake_s, dtype=np.float32),
+        "past": np.asarray(past, dtype=np.float32),
+        "legal_levels": np.asarray(legal_levels, dtype=np.float32),
+        "snap_mode": snap_mode,
+    }
+
+
+def _train_source(
+    args: argparse.Namespace,
+    *,
+    dataset: str,
+    run_name: str,
+    source: str,
+    snapped_gt: np.ndarray,
+    snapped_fake: np.ndarray,
+    past: np.ndarray,
+    legal_levels: np.ndarray,
+    indices: np.ndarray,
+    series_starts: np.ndarray,
+    origin_ids: np.ndarray,
+    run: AnchorRun,
+    lookback: int,
+    device: torch.device,
+    test_stride: Optional[int] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Dict[str, np.ndarray]]]:
+    bundle = SimpleNamespace(
+        fakes={source: snapped_fake},
+        y_true_by_source={source: snapped_gt},
+        past=past,
+        legal_levels=legal_levels,
+        indices=indices,
+        series_starts=series_starts,
+        origin_ids=np.asarray(origin_ids, dtype=np.int64),
+        run=run,
+        pack_splits=["test"],
+    )
+    prev_lb = args.lookback
+    args.lookback = int(lookback)
+    n_pack = int(len(snapped_gt))
+    split_starts = bundle.series_starts
+    split_stride = int(args.pack_test_stride if test_stride is None else test_stride)
+    if bool(getattr(args, "inhorizon_random_crops", False)):
+        # Test-only H=720 packs overlap on the series timeline (lb336/hz720).
+        # Hard purge then empties train. Split packed rows on a non-overlapping
+        # synthetic axis; crop starts stay keyed by real window_index.
+        span = int(lookback) + int(args.horizon)
+        split_starts = np.arange(n_pack, dtype=np.int64) * int(span)
+        split_stride = int(span)
+    splits = split_windows(
+        n_pack,
+        args,
+        dataset,
+        indices=bundle.indices,
+        lookback=int(lookback),
+        horizon=args.horizon,
+        test_stride=split_stride,
+        series_starts=split_starts,
+    )
+    args.save_classification_scores = True
+    args.return_test_scores = True
+    per_len: Dict[str, Any] = {}
+    scores: Dict[str, Dict[str, np.ndarray]] = {}
+    for length in args.slice_lengths:
+        if int(length) > args.horizon:
+            continue
+        raw = train_classifier(
+            args, dataset, source, int(length), bundle, splits, device,
+        )
+        test_scores = raw.pop("_test_scores", None)
+        if test_scores is None and raw.get("score_path"):
+            test_scores = _load_scores(Path(str(raw["score_path"])))
+        if test_scores is not None:
+            scores[str(int(length))] = test_scores
+        per_len[str(int(length))] = raw
+    args.lookback = prev_lb
+    write_json(args.output_dir / "partials" / f"{run_name}__{dataset}__{source}.json", per_len)
+    return per_len, scores
+
+
 def run_one(
     args: argparse.Namespace,
     *,
@@ -1637,216 +2104,316 @@ def run_one(
     config_path: str,
     device: torch.device,
 ) -> Dict[str, Any]:
-    """Pack pool → binary + MMPD fakes on same rows → snap → purged split → disc.
+    """Load existing preds only → snap → chrono 80/20 unique_abs disc.
 
-    ``pack_splits=test`` (default): drive indices from the precomputed MMPD pack
-    (MMPD-aligned). ``pack_splits=val,test``: build the combined TSF pool at
-    ``pack_test_stride`` density, rematerialize MMPD into output_dir/raw, and
-    regenerate binary on those rows. Mixing precomputed test-only MMPD indices
-    into a val+test ConcatDataset is refused (wrong offset — fail fast).
+    Binary/MMPD use disc_forecast_cache (val+test stride 4, sample0). iTransformer /
+    PatchTST use compact packs or pred.npy dumps. Missing pairs are skipped; this
+    path never calls generate().
     """
     dataset = str(args.dataset)
-    print(f"\n=== {run_name} ({ckpt_root.name}) ===", flush=True)
-    pack_splits = parse_pack_splits(args.pack_splits)
+    wanted = [str(s) for s in (args.fake_sources or [])]
+    print(f"\n=== {run_name} ({ckpt_root.name}) sources={wanted} ===", flush=True)
+    skipped: Dict[str, str] = {}
+    run, _stages, kind = load_ablation_run(dataset, ckpt_root)
+    state = _build_state(ckpt_root, dataset, run_subset_id(run), config_path)
+    canvas_height = _canvas_height_from_state(state, getattr(args, "canvas_height", None))
+    ladder = None
+    if bool(getattr(state, "use_ordinal_window_norm", False)):
+        ladder = _ladder_only(
+            dataset=dataset, run=run, lookback=args.lookback, horizon=args.horizon,
+        )
+    print(f"[{run_name}] stage_kind={kind} canvas_height={canvas_height}", flush=True)
 
-    # Need run metadata (variates / strides) before building an expanded pool.
-    run, _stages, _kind_peek = load_ablation_run(dataset, ckpt_root)
-    train_stride, test_stride = _pack_strides(args, run, pack_splits)
-
-    if list(pack_splits) == ["test"]:
-        mmpd_full = _mmpd_pack(args.mmpd_output_root, dataset)
-        indices = [int(x) for x in np.asarray(mmpd_full["indices"], dtype=np.int64).tolist()]
-        indices, mmpd_pack = _thin_windows(
-            indices, mmpd_full, max_windows=args.max_windows, seed=args.seed,
-        )
-        print(
-            f"[{run_name}] windows={len(indices)} (MMPD-aligned pack_splits=test)",
-            flush=True,
-        )
-    else:
-        # Expanded pack: indices are into ConcatDataset(pack_splits), not the
-        # precomputed test-only MMPD pack. Rematerialize MMPD for this pool.
-        pool, _starts, _splits, part_lengths, _ = load_tsf_pack_pool(
-            dataset,
-            run_variate_indices(run),
-            lookback=args.lookback,
-            horizon=args.horizon,
-            train_stride=train_stride,
-            test_stride=test_stride,
-            pack_splits=pack_splits,
-            use_ordinal_window_norm=False,
-        )
-        indices = list(range(len(pool)))
-        if args.max_windows is not None and int(args.max_windows) < len(indices):
-            rng = np.random.default_rng(int(args.seed))
-            pick = np.sort(rng.choice(len(indices), size=int(args.max_windows), replace=False))
-            indices = [indices[int(i)] for i in pick.tolist()]
-        print(
-            f"[{run_name}] windows={len(indices)}/{len(pool)} "
-            f"pack_splits={pack_splits} parts={part_lengths} "
-            f"stride_train={train_stride} stride_test={test_stride} "
-            f"(rematerialize MMPD; refuse test-only index reuse)",
-            flush=True,
-        )
-        mmpd_pack = _rematerialize_mmpd_pack(
-            args, run=run, indices=indices, pack_splits=pack_splits,
-        )
-        # Keep only windows MMPD accepted (filter_valid may drop a few).
-        mmpd_idx = [int(x) for x in np.asarray(mmpd_pack["indices"], dtype=np.int64).tolist()]
-        if mmpd_idx != indices:
+    require_cache = bool(getattr(args, "require_forecast_cache", False))
+    compact_fakes = bool(getattr(args, "compact_fakes", False))
+    if compact_fakes:
+        hz = int(args.horizon)
+        if hz not in (96, 720):
+            raise ValueError(
+                f"--compact-fakes requires --horizon 96 or 720, got {hz} "
+                "(do not prefix-slice)"
+            )
+        if dataset == "PeMS" and hz != 96:
+            raise ValueError(
+                f"PeMS compact packs are native H=96; got --horizon {args.horizon} "
+                "(do not prefix-slice a 720 dump)"
+            )
+    if compact_fakes and bool(getattr(args, "inhorizon_random_crops", False)) and bool(
+        getattr(args, "unique_absolute_slices", False)
+    ):
+        raise ValueError("inhorizon_random_crops cannot combine with unique_absolute_slices")
+    binary_pack: Optional[Dict[str, np.ndarray]] = None
+    mmpd_pack: Optional[Dict[str, np.ndarray]] = None
+    if compact_fakes:
+        if dataset == "PeMS" or hz == 96:
             print(
-                f"[{run_name}] MMPD kept {len(mmpd_idx)}/{len(indices)} indices; aligning",
+                f"[{run_name}] compact H={hz} fakes from {args.external_pack_dir} "
+                "(random L-crops from the packed horizon, seed inhorizon)",
                 flush=True,
             )
-            indices = mmpd_idx
-
-    # Generate (or cache-load) binary_staged pack on those exact pool indices.
-    binary_pack, run, ladder, kind, canvas_height = materialize_binary_pack(
-        args,
-        dataset=dataset,
-        run_name=run_name,
-        ckpt_root=ckpt_root,
-        config_path=config_path,
-        indices=indices,
-        device=device,
-    )
-    print(f"[{run_name}] stage_kind={kind} canvas_height={canvas_height}", flush=True)
-    snapped = _snap_bundle(
-        binary_pack=binary_pack,
-        mmpd_pack=mmpd_pack,
-        run=run,
-        ladder=ladder,
-        args=args,
-        device=device,
-        canvas_height=canvas_height,
-        ckpt_root=ckpt_root,
-        config_path=config_path,
-    )
-    write_json(
-        args.output_dir / "partials" / f"lattice_{run_name}_{dataset}.json",
-        {
-            "kind": kind,
-            "canvas_height": canvas_height,
-            "snap_mode": snapped.get("snap_mode"),
-            "snap_meta": snapped["lattice"].get("snap_meta"),
-            "raw_binary_max_error": snapped["lattice"]["raw_binary_max_error"],
-            "support_atol": snapped["lattice"]["support_atol"],
-            "gt": snapped["lattice"]["gt"],
-            "binary": snapped["lattice"]["binary"],
-            "mmpd": snapped["lattice"]["mmpd"],
-            "gt_snap": snapped["lattice"]["gt_snap"],
-            "binary_snap": snapped["lattice"]["binary_snap"],
-            "mmpd_snap": snapped["lattice"]["mmpd_snap"],
-        },
-    )
-
-    # Render-only sanity hooks reuse snapped (+ pre-snap) tensors — no ladder rebuild.
-    sanity_manifest = _run_viz_sanity_hooks(
-        args=args,
-        run_name=run_name,
-        dataset=dataset,
-        snapped=snapped,
-        ckpt_root=ckpt_root,
-        config_path=config_path,
-        device=device,
-    )
-
-    viz_dir = args.output_dir / "viz" / run_name
-    # Legacy zoom panels. When --viz-sanity includes snap, snap_sanity/ already supersets these.
-    viz_paths: List[Path] = []
-    if "snap" not in parse_viz_sanity(getattr(args, "viz_sanity", "") or ""):
-        viz_paths = _write_zoom_viz(
-            out_dir=viz_dir,
-            run_name=run_name,
-            dataset=dataset,
-            snapped=snapped,
-            n_windows=int(args.viz_n_windows),
-            variate=int(args.viz_variate),
-            slice_lengths=args.slice_lengths,
-            zoom_steps=int(args.viz_zoom_steps),
-            seed=int(args.seed),
-        )
-        print(f"[{run_name}] wrote {len(viz_paths)} viz panels under {viz_dir}", flush=True)
+        else:
+            print(f"[{run_name}] compact H=720 fakes from {args.external_pack_dir}", flush=True)
     else:
-        viz_paths = [Path(p) for p in (sanity_manifest.get("snap") or [])]
-        print(
-            f"[{run_name}] skipped legacy zoom viz (covered by --viz-sanity snap)",
-            flush=True,
-        )
+        if "binary_staged" in wanted:
+            binary_pack = _try_cached_binary_pack(
+                args, run_name=run_name, dataset=dataset, ckpt_root=ckpt_root,
+            )
+            if binary_pack is None:
+                skipped["binary_staged"] = "no sample0 disc_forecast_cache"
+                print(f"[skip] {dataset}/binary_staged: {skipped['binary_staged']}", flush=True)
+                if not require_cache:
+                    raise FileNotFoundError(
+                        f"{dataset}/binary_staged missing cache; pass --reuse-forecast-cache to skip"
+                    )
+        if "mmpd" in wanted:
+            mmpd_pack = _try_cached_mmpd_pack(args, dataset=dataset)
+            if mmpd_pack is None:
+                skipped["mmpd"] = "no sample disc_forecast_cache"
+                print(f"[skip] {dataset}/mmpd: {skipped['mmpd']}", flush=True)
+                if not require_cache:
+                    raise FileNotFoundError(
+                        f"{dataset}/mmpd missing cache; pass --reuse-forecast-cache to skip"
+                    )
 
+    metrics: Dict[str, Any] = {"kind": kind, "skipped": skipped}
+    scores_by_source: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
+    snapped: Optional[Dict[str, Any]] = None
+    viz_paths: List[Path] = []
+    sanity_manifest: Dict[str, Any] = {}
     redbox_paths: List[str] = []
-    if bool(getattr(args, "redbox_viz", False)):
-        redbox_paths = write_redbox_forecast_viz(
+    disagree_manifests: Dict[str, Any] = {}
+
+    if binary_pack is not None and mmpd_pack is not None:
+        snapped = _snap_bundle(
+            binary_pack=binary_pack,
+            mmpd_pack=mmpd_pack,
+            run=run,
+            ladder=ladder,
             args=args,
-            run_name=run_name,
+            device=device,
+            canvas_height=canvas_height,
             ckpt_root=ckpt_root,
             config_path=config_path,
-            device=device,
         )
-
-    if args.viz_only:
-        return {
-            "kind": kind,
-            "viz": [str(p) for p in viz_paths],
-            "viz_sanity": sanity_manifest,
-            "redbox_viz": redbox_paths,
-            "metrics": {},
-        }
-
-    bundle = SimpleNamespace(
-        fakes={"binary_staged": snapped["binary"], "mmpd": snapped["mmpd"]},
-        # Same snapped GT for both fake sources (real-vs-fake, not binary-vs-mmpd).
-        y_true_by_source={
-            "binary_staged": snapped["gt"],
-            "mmpd": snapped["gt"].copy(),
-        },
-        past=snapped["past"],
-        legal_levels=snapped["legal_levels"],
-        indices=snapped["indices"],
-        series_starts=snapped["series_starts"],
-        run=run,
-        pack_splits=[str(x) for x in binary_pack["pack_splits"].tolist()],
-    )
-    # Chronological carve of the pack + hard purge vs disc test
-    # (default 70/15/15; or 80/20 + val-from-train when val_fraction<=0).
-    # With pack_splits=test this is *not* paper train — second carve of the pack.
-    splits = split_windows(
-        len(snapped["gt"]),
-        args,
-        dataset,
-        indices=bundle.indices,
-        lookback=args.lookback,
-        horizon=args.horizon,
-        test_stride=int(args.pack_test_stride),
-        series_starts=bundle.series_starts,
-    )
-    metrics: Dict[str, Any] = {"kind": kind}
-    # Univariate train_classifier (unique_abs / bin-center) — not disc_shared's
-    # multivariate HorizonSliceDataset path.
-    args.save_classification_scores = True
-    args.return_test_scores = True
-    scores_by_source: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
-    for source in ("binary_staged", "mmpd"):
-        per_len: Dict[str, Any] = {}
-        scores_by_source[source] = {}
-        for length in args.slice_lengths:
-            if int(length) <= args.horizon:
-                raw = train_classifier(
-                    args, dataset, source, int(length), bundle, splits, device,
+        write_json(
+            args.output_dir / "partials" / f"lattice_{run_name}_{dataset}.json",
+            {
+                "kind": kind,
+                "canvas_height": canvas_height,
+                "snap_mode": snapped.get("snap_mode"),
+                "snap_meta": snapped["lattice"].get("snap_meta"),
+                "raw_binary_max_error": snapped["lattice"]["raw_binary_max_error"],
+                "support_atol": snapped["lattice"]["support_atol"],
+            },
+        )
+        if not bool(getattr(args, "no_viz", False)):
+            sanity_manifest = _run_viz_sanity_hooks(
+                args=args,
+                run_name=run_name,
+                dataset=dataset,
+                snapped=snapped,
+                ckpt_root=ckpt_root,
+                config_path=config_path,
+                device=device,
+            )
+        if args.viz_only:
+            return {
+                "kind": kind,
+                "skipped": skipped,
+                "viz_sanity": sanity_manifest,
+                "metrics": {},
+            }
+        for source, fake_key in (("binary_staged", "binary"), ("mmpd", "mmpd")):
+            per_len, scores = _train_source(
+                args,
+                dataset=dataset,
+                run_name=run_name,
+                source=source,
+                snapped_gt=snapped["gt"],
+                snapped_fake=snapped[fake_key],
+                past=snapped["past"],
+                legal_levels=snapped["legal_levels"],
+                indices=snapped["indices"],
+                series_starts=snapped["series_starts"],
+                origin_ids=snapped["indices"],
+                run=run,
+                lookback=int(args.lookback),
+                device=device,
+            )
+            metrics[source] = per_len
+            scores_by_source[source] = scores
+    else:
+        if binary_pack is not None:
+            binary_gt = np.asarray(binary_pack["y_true"], dtype=np.float32)
+            binary_pred = reduce_pack_forecast(binary_pack, agg=args.fake_agg)
+            past = np.asarray(binary_pack["past"], dtype=np.float32)
+            pair = _snap_pair(
+                gt=binary_gt,
+                fake=binary_pred,
+                past=past,
+                run=run,
+                ladder=ladder,
+                args=args,
+                device=device,
+                canvas_height=canvas_height,
+                ckpt_root=ckpt_root,
+                config_path=config_path,
+            )
+            per_len, scores = _train_source(
+                args,
+                dataset=dataset,
+                run_name=run_name,
+                source="binary_staged",
+                snapped_gt=pair["gt"],
+                snapped_fake=pair["fake"],
+                past=pair["past"],
+                legal_levels=pair["legal_levels"],
+                indices=np.asarray(binary_pack["indices"], dtype=np.int64),
+                series_starts=np.asarray(binary_pack["series_starts"], dtype=np.int64),
+                origin_ids=np.asarray(binary_pack["indices"], dtype=np.int64),
+                run=run,
+                lookback=int(args.lookback),
+                device=device,
+            )
+            metrics["binary_staged"] = per_len
+            scores_by_source["binary_staged"] = scores
+        if mmpd_pack is not None:
+            mmpd_gt = np.asarray(mmpd_pack["y_true"], dtype=np.float32)
+            mmpd_pred = reduce_pack_forecast(mmpd_pack, agg=args.fake_agg)
+            if "past" in mmpd_pack:
+                past = np.asarray(mmpd_pack["past"], dtype=np.float32)
+                starts = np.asarray(mmpd_pack["series_starts"], dtype=np.int64)
+                idx = np.asarray(mmpd_pack["indices"], dtype=np.int64)
+            else:
+                vars_ = _variates_for_pack(run, int(mmpd_gt.shape[1]), dataset)
+                if vars_ is None:
+                    skipped["mmpd"] = (
+                        f"cannot reconstruct past for V={mmpd_gt.shape[1]} "
+                        f"(ckpt V={len(run_variate_indices(run))})"
+                    )
+                    print(f"[skip] {dataset}/mmpd: {skipped['mmpd']}", flush=True)
+                    mmpd_pack = None
+                else:
+                    past, starts, err = _reconstruct_past_starts(
+                        dataset=dataset,
+                        variate_indices=vars_,
+                        lookback=int(args.lookback),
+                        horizon=int(args.horizon),
+                        window_indices=np.asarray(mmpd_pack["indices"], dtype=np.int64),
+                    )
+                    if err:
+                        skipped["mmpd"] = err
+                        print(f"[skip] {dataset}/mmpd: {err}", flush=True)
+                        mmpd_pack = None
+                    else:
+                        idx = np.asarray(mmpd_pack["indices"], dtype=np.int64)
+            if mmpd_pack is not None:
+                pair = _snap_pair(
+                    gt=mmpd_gt,
+                    fake=mmpd_pred,
+                    past=past,
+                    run=run,
+                    ladder=ladder,
+                    args=args,
+                    device=device,
+                    canvas_height=canvas_height,
+                    ckpt_root=ckpt_root,
+                    config_path=config_path,
                 )
-                scores = raw.pop("_test_scores", None)
-                if scores is None and raw.get("score_path"):
-                    scores = _load_scores(Path(str(raw["score_path"])))
-                if scores is not None:
-                    scores_by_source[source][str(int(length))] = scores
-                per_len[str(int(length))] = raw
-        write_json(args.output_dir / "partials" / f"{run_name}__{dataset}__{source}.json", per_len)
-        metrics[source] = per_len
+                per_len, scores = _train_source(
+                    args,
+                    dataset=dataset,
+                    run_name=run_name,
+                    source="mmpd",
+                    snapped_gt=pair["gt"],
+                    snapped_fake=pair["fake"],
+                    past=pair["past"],
+                    legal_levels=pair["legal_levels"],
+                    indices=idx,
+                    series_starts=starts,
+                    origin_ids=idx,
+                    run=run,
+                    lookback=int(args.lookback),
+                    device=device,
+                )
+                metrics["mmpd"] = per_len
+                scores_by_source["mmpd"] = scores
 
-    # Binary↔MMPD disagreement panels (default on; --no-disc-disagreement / --no-viz).
-    disagree_root = args.output_dir / "viz" / "disc_disagreement" / run_name
-    disagree_manifests: Dict[str, Any] = {}
-    if bool(getattr(args, "disc_disagreement", True)):
+    for source in (wanted if compact_fakes else list(EXTERNAL_FAKE_SOURCES)):
+        if source not in wanted:
+            continue
+        if (not compact_fakes) and source in ("binary_staged", "mmpd"):
+            continue
+        loaded = _load_external_fake(args, dataset=dataset, source=source)
+        if loaded is None:
+            skipped[source] = "no compact pack or pred.npy dump"
+            print(f"[skip] {dataset}/{source}: {skipped[source]}", flush=True)
+            continue
+        y_true, pred, win_idx, src_path = loaded
+        print(
+            f"[{run_name}] {source} from {src_path} y={tuple(y_true.shape)}",
+            flush=True,
+        )
+        vars_ = _variates_for_pack(run, int(y_true.shape[1]), dataset)
+        if vars_ is None:
+            skipped[source] = (
+                f"V={y_true.shape[1]} matches neither ckpt "
+                f"{len(run_variate_indices(run))} nor full {FULL_DATASET_V.get(dataset)}"
+            )
+            print(f"[skip] {dataset}/{source}: {skipped[source]}", flush=True)
+            continue
+        lookback = _source_lookback(source, dataset, int(args.lookback))
+        past, starts, err = _reconstruct_past_starts(
+            dataset=dataset,
+            variate_indices=vars_,
+            lookback=lookback,
+            horizon=int(args.horizon),
+            window_indices=win_idx,
+        )
+        if err:
+            skipped[source] = err
+            print(f"[skip] {dataset}/{source}: {err}", flush=True)
+            continue
+        if past.shape[0] != y_true.shape[0] or past.shape[1] != y_true.shape[1]:
+            skipped[source] = f"past {past.shape} vs y_true {y_true.shape}"
+            print(f"[skip] {dataset}/{source}: {skipped[source]}", flush=True)
+            continue
+        pair = _snap_pair(
+            gt=y_true,
+            fake=pred,
+            past=past,
+            run=run,
+            ladder=ladder,
+            args=args,
+            device=device,
+            canvas_height=canvas_height,
+            ckpt_root=ckpt_root,
+            config_path=config_path,
+        )
+        if args.viz_only:
+            continue
+        per_len, scores = _train_source(
+            args,
+            dataset=dataset,
+            run_name=run_name,
+            source=source,
+            snapped_gt=pair["gt"],
+            snapped_fake=pair["fake"],
+            past=pair["past"],
+            legal_levels=pair["legal_levels"],
+            indices=np.arange(len(y_true), dtype=np.int64),
+            series_starts=starts,
+            origin_ids=win_idx,
+            run=run,
+            lookback=lookback,
+            device=device,
+            test_stride=1,
+        )
+        metrics[source] = per_len
+        scores_by_source[source] = scores
+
+    if bool(getattr(args, "disc_disagreement", True)) and snapped is not None:
+        disagree_root = args.output_dir / "viz" / "disc_disagreement" / run_name
         for length in args.slice_lengths:
             key = str(int(length))
             if key not in scores_by_source.get("binary_staged", {}):
@@ -1865,14 +2432,14 @@ def run_one(
                 max_panels=int(getattr(args, "disc_disagreement_max", 12)),
                 seed=int(args.seed),
             )
-        write_json(disagree_root / "summary.json", disagree_manifests)
+        if disagree_manifests:
+            write_json(disagree_root / "summary.json", disagree_manifests)
     else:
         print(f"[{run_name}] skipped disc disagreement viz", flush=True)
 
-    # Flat per-variate dump for the whole run.
     by_var_rows: List[Dict[str, Any]] = []
     for source, per_len in metrics.items():
-        if source == "kind" or not isinstance(per_len, dict):
+        if source in {"kind", "skipped"} or not isinstance(per_len, dict):
             continue
         for L, mets in per_len.items():
             if not isinstance(mets, dict):
@@ -1893,9 +2460,14 @@ def run_one(
                     }
                 )
     write_json(args.output_dir / "auroc_by_variate.json", by_var_rows)
-
+    trained = [k for k in metrics if k not in {"kind", "skipped"}]
+    if not trained:
+        raise RuntimeError(
+            f"{dataset}: no discriminator trained (skipped={skipped})"
+        )
     return {
         "kind": kind,
+        "skipped": skipped,
         "viz": [str(p) for p in viz_paths],
         "viz_sanity": sanity_manifest,
         "redbox_viz": redbox_paths,
@@ -1908,6 +2480,12 @@ def main() -> None:
     args = parse_args()
     apply_viz_master_switch(args)
     apply_smoke(args)
+    if args.keep_index is not None:
+        idx_path = Path(args.keep_index)
+        if not idx_path.is_absolute():
+            idx_path = REPO_ROOT / idx_path
+        args.keep_index = idx_path
+        load_unique_seg_index(idx_path)
     pack_splits = apply_disc_pack_protocol(args)
     args.output_dir = Path(args.output_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)
