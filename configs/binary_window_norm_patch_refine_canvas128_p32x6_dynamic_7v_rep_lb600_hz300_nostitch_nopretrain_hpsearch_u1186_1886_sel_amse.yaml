@@ -1,0 +1,128 @@
+# Dynamic 7 PAM variates: same 10+10 HP search as traffic
+# ...traffic_7v_rep...hpsearch_u1186_1886_sel_amse (job 5503757).
+# Epoch val / early-stop / best.pt stay occupancy BCE. Optuna trial ranking
+# uses n=1 window val anchor MSE (unique-seg cut: L=600 × dynamic_500K ×
+# stride-1 is ~349k segments and CPU-spins; Killarney 5527088, 10.5h still
+# on iTrans trial 0/1).
+# This leaf caps train/val to 20k / 3k seeded windows (existing
+# train_max_windows knob — not a chronological series slice). 20k/349k of
+# 5527088 iTrans plus traffic-7v 10+10 (5453867 7:42 on ~11k windows) → ~12h.
+# Search: lr / U×{1,2,4} / EMA 0.995, coarse max_scale [3, 7], fine
+# patch_h {16,32,48,64}. U copied from traffic 7v L40S (1186/1886).
+# Native L=600 H=300. Eval test_stride 300 matches the table dynamic leaf.
+# Indices from reports/dynamic-7v-representative/ (train-split PAM, seed 42).
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv.yaml
+replace_phases: true
+
+geometry:
+  lookback_length: 600
+  forecast_length: 300
+  lookback_overlap: 8
+  diffusion_lookback_cap: 600
+  past_cond_resize_to_horizon: false
+  itrans_lookback_length: 600
+
+wandb:
+  tags: [dynamic, dynamic_7v_rep, canvas128, p32x6, nopretrain, from_random_init, lb600, hz300, nostitch, itrans_guid, hpsearch, lr_batch_ema, ema995, max_scale_3_7, patch_h_16_32_48_64, eval_anchor_only, n_samp_1, train_time_coverage_1, r0, cache_cond_kv, compile, u1186_1886, sel_amse, w20k]
+
+experiment:
+  name: binary-c128-p32x6-dynamic-7v-rep-lb600-hz300-hpsearch-u1186-1886-sel-amse
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_dynamic_7v_rep_lb600_hz300_nostitch_nopretrain_hpsearch_u1186_1886_sel_amse
+  n_variates: 7
+  patch_refine_patch_height: 32
+  patch_refine_unique_segments: false
+  config_nickname: c128-p32-dynamic-7v-rep-lb600-hz300-hpsearch-ema995-u1186-1886-sel-amse
+  data_subset_by_dataset:
+    dynamic:
+      subset_id: dynamic_7v_rep_s1_sel_amse_w20k
+      all_variates: false
+      variate_indices: [0, 3, 6, 7, 9, 13, 14]
+      n_variates: 7
+      train_stride: 1
+      val_stride: 1
+      test_stride: 300
+      train_max_windows: 20000
+      val_max_windows: 3000
+
+phases:
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    from_random_init: true
+    n_trials: 10
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate_ema
+    selection_metric: staged_anchor_mse
+    hp_anchor_eval_val_fraction: 0.04
+    max_univariate_micro_batch_by_dataset:
+      dynamic: 1186
+    hp_lr_min: 1.6260630766856958e-5
+    hp_lr_max: 1.6260630766856958e-3
+    effective_univariate_batch_multipliers: [1, 2, 4]
+    ema_decay: 0.995
+    ema_decay_grid: [0.995]
+    hp_max_scale_min: 3.0
+    hp_max_scale_max: 7.0
+    enqueue_trials:
+      - learning_rate: 0.00016260630766856958
+        ema_decay: 0.995
+        max_scale: 3.5
+    min_snr_gamma: 5.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: diffusion_patch_refine_finetune_hp
+    from_random_init: true
+    n_trials: 10
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate_ema
+    selection_metric: staged_anchor_mse
+    hp_anchor_eval_val_fraction: 0.04
+    max_univariate_micro_batch_by_dataset:
+      dynamic: 1886
+    hp_lr_min: 7.817554354066733e-5
+    hp_lr_max: 7.817554354066733e-3
+    effective_univariate_batch_multipliers: [1, 2, 4]
+    ema_decay: 0.995
+    ema_decay_grid: [0.995]
+    hp_patch_refine_height_grid: [16, 32, 48, 64]
+    enqueue_trials:
+      - learning_rate: 0.0007817554354066733
+        ema_decay: 0.995
+        patch_refine_patch_height: 32
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: staged_eval
+    anchor_only: true
+    eval_test_fraction: 1.0
+    test_stride: 300
+    eval_progress_key: canvas128_p32x6_dynamic_7v_rep_lb600_hz300_hpsearch_u1186_1886_sel_amse_w20k_s300_n1_anchor
+    n_samples: 1
+    probabilistic_n_samples: 0
+    tune_sampler: false
+    probabilistic_sampler: anchor
+    batch_size_by_dataset:
+      dynamic: 1
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true

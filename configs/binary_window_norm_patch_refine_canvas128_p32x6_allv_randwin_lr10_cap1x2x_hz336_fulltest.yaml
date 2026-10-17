@@ -1,0 +1,35 @@
+# 100% stride-1 eval of table exchange H=336 (Narval 2890532 / resume 2952252).
+# Train yaml caps eval at 939/1182. This leaf drops the cap. Keep n_samp=10.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x_hz336.yaml
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p32x6, from_pretrain, hz336, dedicated_h, eval_only, fulltest, exchange]
+
+experiment:
+  name: binary-c128-p32x6-cap1x2x-hz336-fulltest
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x_hz336_fulltest
+  config_nickname: c128-p32-cap1x2x-hz336-fulltest
+
+training:
+  torch_compile: false
+
+phases:
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_max_windows_by_dataset: null
+    skip_eval_visualizations: true
+    eval_progress_key: canvas128_p32x6_cap1x2x_hz336_s1_n10_fulltest
+    batch_size_by_dataset:
+      ETTh1: 1
+      ETTh2: 1
+      ETTm1: 1
+      ETTm2: 1
+      exchange_rate: 1
+      weather: 1
+      solar_Alabama: 1
+      electricity: 1
+      PeMS: 1
+      traffic: 1
+      illness: 1
+      dynamic: 1

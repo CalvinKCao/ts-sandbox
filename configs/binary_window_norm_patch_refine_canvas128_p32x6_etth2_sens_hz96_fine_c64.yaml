@@ -1,0 +1,15 @@
+# ETTh2 H=96 sensitivity: patch_refine_canvas_height 64 (vs 128). Coarse H stays 16.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_etth2_sens_hz96_base.yaml
+
+wandb:
+  tags: [ETTh2, etth2_sens, all_variates, canvas64, p32x6, nopretrain, from_random_init, hz96, dedicated_h, nostitch, itrans_guid, fixed_hp, no_optuna, train_time_coverage_1, r0, ms35, cache_cond_kv, eval_anchor_only, n_samp_1, compile, u1186_1886, l40s, sens_fine, c64]
+
+experiment:
+  name: binary-c128-p32x6-etth2-sens-hz96-fine-c64
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_etth2_sens_hz96_fine_c64
+  patch_refine_canvas_height: 64
+  config_nickname: c64-p32-etth2-sens-hz96-fine-c64
+
+phases:
+  - phase: staged_eval
+    eval_progress_key: etth2_sens_hz96_fine_c64_s1_anchor

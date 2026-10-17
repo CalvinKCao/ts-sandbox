@@ -1,0 +1,14 @@
+# ILI L104/H60 unique-seg pretrain, sine (PWB) + linear ramps only.
+# Clone of ...p32x6_lb104_hz60_pretrain with the full RealTS mix stripped.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_lb104_hz60_pretrain.yaml
+
+training:
+  synthetic_generators: [PWB, linear]
+  force_retrain_synthetic: true
+
+wandb:
+  tags: [canvas128, p32x6, pretrain, unique_seg, width6, stride5, lb104, hz60, overlap8, sine_linear_pretrain]
+
+experiment:
+  name: binary-window-norm-patch-refine-c128-p32x6-lb104-hz60-pretrain-sine-linear
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_lb104_hz60_pretrain_sine_linear

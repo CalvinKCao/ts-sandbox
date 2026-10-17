@@ -1,0 +1,42 @@
+# ETTh2 dedicated H=96 no-tuning sensitivity control.
+# Freeze p32 fullT HPs (LR/EMA/U/ms35). L=336. 100% eval-anchor, n_samp=1.
+# Not clip-from-720. Variants override one knob each.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv.yaml
+
+geometry:
+  forecast_length: 96
+  lookback_overlap: 8
+
+wandb:
+  tags: [ETTh2, etth2_sens, all_variates, canvas128, p32x6, nopretrain, from_random_init, hz96, dedicated_h, nostitch, itrans_guid, fixed_hp, no_optuna, train_time_coverage_1, r0, ms35, cache_cond_kv, eval_anchor_only, n_samp_1, compile, u1186_1886, l40s, sens_base]
+
+experiment:
+  dataset: ETTh2
+  name: binary-c128-p32x6-etth2-sens-hz96-base
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_etth2_sens_hz96_base
+  patch_refine_patch_height: 32
+  config_nickname: c128-p32-etth2-sens-hz96-base
+  data_subset_by_dataset:
+    ETTh2:
+      subset_id: ETTh2_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+
+phases:
+  - phase: staged_eval
+    anchor_only: true
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_max_windows_by_dataset: null
+    eval_progress_key: etth2_sens_hz96_base_s1_anchor
+    n_samples: 1
+    probabilistic_n_samples: 0
+    tune_sampler: false
+    probabilistic_sampler: anchor
+    batch_size_by_dataset:
+      ETTh2: 4
+    skip_eval_visualizations: true

@@ -1,0 +1,115 @@
+# ETTh1 unique-seg canvas128 p64 H720: weather leftover HP grid (lr ±10x,
+# U-multipliers as grad-accum, EMA coarse/fine) with occupancy-BCE val_loss.
+# Freeze max_scale=3.5 and patch_h=64 (weathergrid freeze; ETTh1 stays p64).
+# Full unique-seg windows, no frac50 refit. Not sel_amse.
+#
+# L40S 1x micro = Sep-4 compiled 0.85 unique-seg canvas128/p64/H720 probe
+# (coarse 1187 / fine 1795). NOT table U=217. Grad-accum is x{1,2,4} on
+# top of that max-fit micro. A100 80/48 scale lives in the _a100 sibling.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv.yaml
+replace_phases: true
+
+training:
+  finetune_max_micro_batch: 1795
+
+visualization:
+  viz_binary_mmpd_gap: false
+  viz_binary_mmpd_redbox: false
+
+wandb:
+  tags: [ETTh1, all_variates, canvas128, p64x6, nopretrain, from_random_init, hz720, nostitch, itrans_guid, hpsearch, lr_batch_ema, weathergrid, ema_coarse_098_099_0995, ema_fine_099_0995_0999, max_scale_35_frozen, patch_h_64_frozen, sel_valloss, eval_anchor_only, n_samp_1, train_time_coverage_1, r0, cache_cond_kv, compile, u1187_1795, l40s]
+
+experiment:
+  dataset: ETTh1
+  name: binary-c128-p64x6-etth1-fullT-hz720-hpsearch-weathergrid-valloss
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_etth1_fullT_hz720_nostitch_nopretrain_hpsearch_weathergrid_valloss
+  patch_refine_patch_height: 64
+  max_scale: 3.5
+  max_scale_by_dataset:
+    ETTh1: 3.5
+  config_nickname: c128-p64-etth1-fullT-hz720-hpsearch-weathergrid-valloss
+  data_subset_by_dataset:
+    ETTh1:
+      subset_id: ETTh1_allv_s1_full
+      all_variates: true
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+
+phases:
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    from_random_init: true
+    n_trials: 10
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate_ema
+    selection_metric: val_loss
+    max_univariate_micro_batch_by_dataset:
+      ETTh1: 1187
+    hp_lr_min: 1.6260630766856958e-5
+    hp_lr_max: 1.6260630766856958e-3
+    effective_univariate_batch_multipliers: [1, 2, 4]
+    ema_decay: 0.99
+    ema_decay_grid: [0.98, 0.99, 0.995]
+    enqueue_trials:
+      - learning_rate: 0.00016260630766856958
+        ema_decay: 0.99
+    min_snr_gamma: 5.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: diffusion_patch_refine_finetune_hp
+    from_random_init: true
+    n_trials: 10
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate_ema
+    selection_metric: val_loss
+    max_univariate_micro_batch_by_dataset:
+      ETTh1: 1795
+    hp_lr_min: 7.817554354066733e-5
+    hp_lr_max: 7.817554354066733e-3
+    effective_univariate_batch_multipliers: [1, 2, 4]
+    ema_decay: 0.995
+    ema_decay_grid: [0.99, 0.995, 0.999]
+    enqueue_trials:
+      - learning_rate: 0.0007817554354066733
+        ema_decay: 0.995
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: staged_eval
+    anchor_only: true
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_progress_key: canvas128_p64x6_etth1_hz720_hpsearch_weathergrid_valloss_s1_n1_anchor
+    n_samples: 1
+    probabilistic_n_samples: 0
+    tune_sampler: false
+    probabilistic_sampler: anchor
+    batch_size_by_dataset:
+      ETTh1: 1
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true

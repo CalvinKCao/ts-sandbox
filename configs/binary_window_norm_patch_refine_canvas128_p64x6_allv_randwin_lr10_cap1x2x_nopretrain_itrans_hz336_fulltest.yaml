@@ -1,0 +1,23 @@
+# 100% stride-1 eval-anchor of table ETTh1 H=336 (Killarney 5474033).
+# Train yaml caps eval at 1838/2545. Submit with --eval-only --ckpt-config …hz336.
+extends: configs/binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_nopretrain_itrans_hz336.yaml
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p64x6, nopretrain, from_random_init, hz336, dedicated_h, itrans_guid, eval_only, eval_anchor, fulltest]
+
+experiment:
+  name: binary-c128-p64x6-cap1x2x-nopre-itrans-hz336-fulltest
+  experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_nopretrain_itrans_hz336_fulltest
+  config_nickname: c128-p64-cap1x2x-nopre-itrans-hz336-fulltest
+
+training:
+  torch_compile: false
+
+phases:
+  - phase: staged_eval
+    anchor_only: true
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_max_windows_by_dataset: null
+    skip_eval_visualizations: true
+    eval_progress_key: canvas128_p64x6_cap1x2x_nopre_itrans_hz336_s1_anchor_fulltest

@@ -1,0 +1,22 @@
+# APDF electricity 7v dedicated H=192. Same 7 indices + table HPs as hz720
+# sibling. Not clip-from-720. Seed 42 RandomState [9, 104, 119, 132, 173, 197, 250].
+extends: configs/binary_c128_p64x6_apdf_elec7v_hz720_fixedhp.yaml
+
+geometry:
+  forecast_length: 192
+  lookback_overlap: 8
+
+wandb:
+  tags: [ablation_apdf, one_hot, electricity, elec_7v_rand_s42, dedicated_h, hz192, canvas128, p64x6, nopretrain, from_random_init, fixed_hp, no_optuna, itrans_guid, unique_seg, ms35, eval_anchor]
+
+experiment:
+  name: binary-c128-p64x6-apdf-elec7v-hz192-fixedhp
+  experiment_name: binary_c128_p64x6_apdf_elec7v_hz192_fixedhp
+  occupancy_encoding: one_hot
+  config_nickname: apdf-p64-elec7v-s42-hz192-ms35
+
+phases:
+  - phase: staged_eval
+    eval_progress_key: apdf_p64_elec7v_s42_hz192_s1_n1_anchor
+    batch_size_by_dataset:
+      electricity: 1

@@ -1,0 +1,126 @@
+# Illness full 7v dedicated H=48: same recipe as Killarney 5548243 (H=60).
+# 10+10 HP search, U=217 x {1,2,4}, PWB+linear pretrain donor (not clip-from-max-H).
+# Coarse/fine load donor 5527925 (not from_random_init). Trial ranking is n=1 unique-seg
+# (fine) / window (coarse) val anchor MSE.
+# ILI is already 7 columns; indices [0..6], seed 42 (dataset seed; no PAM).
+# Donor 5527925 already trained sine+linear at lb104/hz60; reuse it (do not retrain).
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_illness_lb104_hz48.yaml
+replace_phases: true
+
+training:
+  synthetic_generators: [PWB, linear]
+  force_retrain_synthetic: false
+
+wandb:
+  tags: [illness, all_variates, canvas128, p32x6, sine_linear_pretrain, from_pretrain, lb104, hz48, overlap8, nostitch, itrans_guid, hpsearch, lr_batch_ema, ema995, max_scale_3_7, patch_h_16_32_48_64, eval_s1_n10_steps4, n_samp_10, train_time_coverage_1, r0, cache_cond_kv, compile, u217, sel_amse]
+
+experiment:
+  name: binary-c128-p32x6-illness-allv-lb104-hz48-sine-linear-hpsearch-u217-sel-amse
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_illness_allv_lb104_hz48_pretrain_sine_linear_hpsearch_u217_sel_amse
+  n_variates: 7
+  patch_refine_patch_height: 32
+  patch_refine_unique_segments: true
+  guidance_type: itransformer
+  train_time_coverage: 1.0
+  cache_cond_kv: true
+  config_nickname: c128-p32-illness-lb104-hz48-sine-linear-hpsearch-ema995-u217-sel-amse
+  data_subset_by_dataset:
+    illness:
+      subset_id: illness_allv_s1_full_sel_amse
+      all_variates: true
+      variate_indices: [0, 1, 2, 3, 4, 5, 6]
+      n_variates: 7
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+
+phases:
+  - phase: staged_diffusion_pretrain
+    phase1_config_name: binary_dual_scale_staged
+    n_samples: 10000
+    epochs: 20
+    patience: 4
+    shared_cache: true
+    reuse_pretrain_from_config: binary_window_norm_patch_refine_canvas128_p32x6_lb104_hz60_pretrain_sine_linear
+    require_reuse_pretrain: true
+
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    n_trials: 10
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate_ema
+    selection_metric: staged_anchor_mse
+    max_univariate_micro_batch_by_dataset:
+      illness: 217
+    hp_lr_min: 1.6260630766856958e-5
+    hp_lr_max: 1.6260630766856958e-3
+    effective_univariate_batch_multipliers: [1, 2, 4]
+    ema_decay: 0.995
+    ema_decay_grid: [0.995]
+    hp_max_scale_min: 3.0
+    hp_max_scale_max: 7.0
+    enqueue_trials:
+      - learning_rate: 0.00016260630766856958
+        ema_decay: 0.995
+        max_scale: 3.5
+    min_snr_gamma: 5.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: diffusion_patch_refine_finetune_hp
+    n_trials: 10
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate_ema
+    selection_metric: staged_anchor_mse
+    max_univariate_micro_batch_by_dataset:
+      illness: 217
+    hp_lr_min: 7.817554354066733e-5
+    hp_lr_max: 7.817554354066733e-3
+    effective_univariate_batch_multipliers: [1, 2, 4]
+    ema_decay: 0.995
+    ema_decay_grid: [0.995]
+    hp_patch_refine_height_grid: [16, 32, 48, 64]
+    enqueue_trials:
+      - learning_rate: 0.0007817554354066733
+        ema_decay: 0.995
+        patch_refine_patch_height: 32
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: staged_eval
+    anchor_only: false
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_progress_key: canvas128_p32x6_illness_allv_lb104_hz48_sine_linear_hpsearch_u217_sel_amse_s1_n10_steps4
+    n_samples: 1
+    probabilistic_n_samples: 10
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 4
+    batch_size_by_dataset:
+      illness: 1
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true

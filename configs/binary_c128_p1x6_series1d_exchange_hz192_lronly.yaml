@@ -1,0 +1,126 @@
+# 1D instance-norm series ablation, exchange dedicated H=192.
+# Drops occupancy. DiT width 96 / heads 3 / depth 8. LR-only 10+10 at 1x U.
+# Ho Gaussian schedule (β 1e-4→0.02) + zeros-at-T anchor + 20-step DDIM.
+# nopre / from_random_init. Donor LR ±10x. EMA frozen at table donor.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x_nopretrain.yaml
+replace_phases: true
+
+geometry:
+  forecast_length: 192
+  lookback_overlap: 8
+  past_cond_resize_to_horizon: false
+
+wandb:
+  tags: [ablation_1d, series_1d, exchange, dedicated_h, hz192, p1x6, embed96, nopretrain, from_random_init, lr_only, unique_seg, itrans_guid, u2048, ms106]
+
+experiment:
+  name: binary-c128-p1x6-series1d-exchange-hz192-lronly
+  experiment_name: binary_c128_p1x6_series1d_exchange_hz192_lronly
+  representation: series_1d
+  occupancy_encoding: cdf
+  guidance_type: itransformer
+  cache_cond_kv: true
+  deterministic_anchor_loss: true
+  gaussian_num_steps: 1000
+  gaussian_sample_steps: 20
+  gaussian_beta_start: 1.0e-4
+  gaussian_beta_end: 0.02
+  gaussian_noise_schedule: linear
+  image_height: 1
+  coarse_image_height: 1
+  fine_image_height: 1
+  patch_refine_canvas_height: 1
+  patch_refine_patch_height: 1
+  patch_refine_patch_width: 6
+  patch_refine_col_stride: 5
+  patch_refine_unique_segments: true
+  dit_patch_size: [1, 6]
+  dit_cond_patch_size: [1, 6]
+  dit_embed_dim: 96
+  dit_num_heads: 3
+  dit_depth: 8
+  max_scale: 10.6
+  max_scale_by_dataset:
+    exchange_rate: 10.6
+  config_nickname: series1d-p1-exchange-hz192-u2048-ms106-ho
+  eval_sampler: anchor
+
+phases:
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    from_random_init: true
+    n_trials: 10
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate_ema
+    selection_metric: val_loss
+    max_univariate_micro_batch_by_dataset:
+      exchange_rate: 2048
+    hp_lr_min: 1.6260630766856958e-5
+    hp_lr_max: 1.6260630766856958e-3
+    effective_univariate_batch_multipliers: [1]
+    ema_decay: 0.99
+    ema_decay_grid: [0.99]
+    enqueue_trials:
+      - learning_rate: 0.00016260630766856958
+        ema_decay: 0.99
+    min_snr_gamma: 5.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: diffusion_patch_refine_finetune_hp
+    from_random_init: true
+    n_trials: 10
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate_ema
+    selection_metric: val_loss
+    max_univariate_micro_batch_by_dataset:
+      exchange_rate: 2048
+    hp_lr_min: 7.817554354066733e-5
+    hp_lr_max: 7.817554354066733e-3
+    effective_univariate_batch_multipliers: [1]
+    ema_decay: 0.995
+    ema_decay_grid: [0.995]
+    enqueue_trials:
+      - learning_rate: 0.0007817554354066733
+        ema_decay: 0.995
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: staged_eval
+    # Det = Gaussian zeros-at-T one-shot (table aMSE). Also 20-step DDIM n=1.
+    anchor_only: false
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_progress_key: series1d_p1_exchange_hz192_ho_anchor_ddim20
+    eval_max_windows_by_dataset:
+      exchange_rate: 939
+    n_samples: 1
+    probabilistic_n_samples: 1
+    tune_sampler: false
+    probabilistic_sampler: ddim
+    probabilistic_num_inference_steps: 20
+    batch_size_by_dataset:
+      exchange_rate: 1
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true

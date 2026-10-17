@@ -1,0 +1,20 @@
+# ETTh2 H=96 sensitivity: binary_noise_schedule cosine (vs linear).
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_etth2_sens_hz96_base.yaml
+
+wandb:
+  tags: [ETTh2, etth2_sens, all_variates, canvas128, p32x6, nopretrain, from_random_init, hz96, dedicated_h, nostitch, itrans_guid, fixed_hp, no_optuna, train_time_coverage_1, r0, ms35, cache_cond_kv, eval_anchor_only, n_samp_1, compile, u1186_1886, l40s, sens_noise, cosine]
+
+experiment:
+  name: binary-c128-p32x6-etth2-sens-hz96-noise-cosine
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_etth2_sens_hz96_noise_cosine
+  config_nickname: c128-p32-etth2-sens-hz96-noise-cosine
+
+phases:
+  - phase: diffusion_coarse_finetune_hp
+    fixed_tuned_params:
+      binary_noise_schedule: cosine
+  - phase: diffusion_patch_refine_finetune_hp
+    fixed_tuned_params:
+      binary_noise_schedule: cosine
+  - phase: staged_eval
+    eval_progress_key: etth2_sens_hz96_noise_cosine_s1_anchor

@@ -1,0 +1,120 @@
+# Same full-T solar 7v batch grid as the window-norm lr_stdfloor leaf, with
+# mode_anchor_dataset_norm: raw 0 maps to the canvas floor (-max_scale).
+# use_window_normalization must be false or the trainer rejects the pair.
+# std_floor is pinned at 1e-6 in the study; window-norm is off so it does not
+# enter the mode-anchor forward. Lookback, horizon, and canvas are unchanged.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv.yaml
+replace_phases: true
+
+geometry:
+  lookback_length: 336
+  forecast_length: 96
+  lookback_overlap: 8
+  diffusion_lookback_cap: 336
+  past_cond_resize_to_horizon: false
+  itrans_lookback_length: 336
+
+wandb:
+  tags: [solar_Alabama, solar_7v_rep, fullT, canvas128, p32x6, nopretrain, from_random_init, lb336, hz96, nostitch, itrans_guid, hpsearch, lr_eff_batch_univariate, std_floor_1e-6, probe_u1x2x4, refit_best, eval_anchor_only, n_samp_1, train_time_coverage_1, r0, cache_cond_kv, compile, sel_amse, vast_a100, mode_anchor, canvas_floor]
+
+experiment:
+  dataset: solar_Alabama
+  name: binary-c128-p32x6-solar-7v-rep-fullT-lb336-hz96-hpsearch-lr-stdfloor-mode0
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_solar_alabama_7v_rep_fullT_lb336_hz96_nostitch_nopretrain_hpsearch_lr_stdfloor_mode0
+  use_window_normalization: false
+  mode_anchor_dataset_norm: true
+  n_variates: 7
+  patch_refine_patch_height: 32
+  patch_refine_unique_segments: true
+  config_nickname: c128-p32-solar-7v-rep-fullT-lb336-hz96-hpsearch-lr-stdfloor-mode0
+  data_subset_by_dataset:
+    solar_Alabama:
+      subset_id: solar_alabama_7v_rep_fullT_s1_sel_amse
+      all_variates: false
+      variate_indices: [4, 35, 45, 110, 115, 117, 124]
+      n_variates: 7
+      train_stride: 1
+      val_stride: 1
+      test_stride: 1
+      train_max_windows: null
+      val_max_windows: null
+
+phases:
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    from_random_init: true
+    n_trials: 3
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate
+    selection_metric: staged_anchor_mse
+    probe_univariate_micro_batch_once: true
+    refit_best_max_epochs: 20
+    refit_best_patience: 5
+    hp_lr_min: 1.6260630766856958e-4
+    hp_lr_max: 1.6260630766856958e-4
+    effective_univariate_batch_multipliers: [1, 2, 4]
+    hp_window_norm_std_floor_min: 1.0e-6
+    hp_window_norm_std_floor_max: 1.0e-6
+    ema_decay: 0.995
+    enqueue_trials:
+      - learning_rate: 1.6260630766856958e-4
+        window_norm_std_floor: 1.0e-6
+    min_snr_gamma: 5.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: diffusion_patch_refine_finetune_hp
+    from_random_init: true
+    n_trials: 3
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate
+    selection_metric: staged_anchor_mse
+    probe_univariate_micro_batch_once: true
+    refit_best_max_epochs: 20
+    refit_best_patience: 5
+    hp_lr_min: 7.817554354066733e-4
+    hp_lr_max: 7.817554354066733e-4
+    effective_univariate_batch_multipliers: [1, 2, 4]
+    hp_window_norm_std_floor_min: 1.0e-6
+    hp_window_norm_std_floor_max: 1.0e-6
+    ema_decay: 0.995
+    enqueue_trials:
+      - learning_rate: 7.817554354066733e-4
+        window_norm_std_floor: 1.0e-6
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: staged_eval
+    anchor_only: true
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_progress_key: canvas128_p32x6_solar_7v_rep_fullT_lb336_hz96_hpsearch_lr_stdfloor_mode0_s1_n1_anchor
+    n_samples: 1
+    probabilistic_n_samples: 0
+    tune_sampler: false
+    probabilistic_sampler: anchor
+    batch_size_by_dataset:
+      solar_Alabama: 1
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true

@@ -1,0 +1,89 @@
+# Deterministic 2D CDF occupancy-MSE ablation, exchange dedicated H=192.
+# Same canvas/DiT as table Binary; no XOR diffusion; t=0 one-shot pixel MSE.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x_nopretrain.yaml
+replace_phases: true
+
+geometry:
+  forecast_length: 192
+  lookback_overlap: 8
+
+wandb:
+  tags: [ablation_detmse, occupancy_mse, exchange, dedicated_h, hz192, canvas128, p32x6, nopretrain, from_random_init, fixed_hp, no_optuna, itrans_guid, unique_seg, u217, ms106, eval_anchor]
+
+experiment:
+  name: binary-c128-p32x6-detmse-exchange-hz192-fixedhp
+  experiment_name: binary_c128_p32x6_detmse_exchange_hz192_fixedhp
+  representation: cdf_2d
+  occupancy_encoding: cdf
+  prediction_target: occupancy_mse
+  guidance_type: itransformer
+  cache_cond_kv: true
+  deterministic_anchor_loss: false
+  max_scale: 10.6
+  max_scale_by_dataset:
+    exchange_rate: 10.6
+  config_nickname: detmse-p32-exchange-hz192-u217-ms106
+
+phases:
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    from_random_init: true
+    n_trials: 1
+    max_epochs: 20
+    patience: 5
+    search_space: fixed
+    max_univariate_micro_batch_by_dataset:
+      exchange_rate: 217
+    fixed_tuned_params:
+      learning_rate: 0.00016260630766856958
+      ema_decay: 0.99
+      max_scale: 10.6
+      target_univariate_batch: 217
+      binary_noise_schedule: linear
+      loss_weighting: none
+      min_snr_gamma: 5.0
+      prediction_target: occupancy_mse
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+
+  - phase: diffusion_patch_refine_finetune_hp
+    from_random_init: true
+    n_trials: 1
+    max_epochs: 20
+    patience: 5
+    search_space: fixed
+    max_univariate_micro_batch_by_dataset:
+      exchange_rate: 217
+    fixed_tuned_params:
+      learning_rate: 0.0007817554354066733
+      ema_decay: 0.995
+      max_scale: 10.6
+      target_univariate_batch: 217
+      binary_noise_schedule: linear
+      loss_weighting: none
+      min_snr_gamma: 2.0
+      prediction_target: occupancy_mse
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+
+  - phase: staged_eval
+    anchor_only: true
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_progress_key: detmse_p32_exchange_hz192_s1_n1_anchor
+    eval_max_windows_by_dataset:
+      exchange_rate: 939
+    n_samples: 1
+    probabilistic_n_samples: 0
+    tune_sampler: false
+    probabilistic_sampler: anchor
+    batch_size_by_dataset:
+      exchange_rate: 1
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true

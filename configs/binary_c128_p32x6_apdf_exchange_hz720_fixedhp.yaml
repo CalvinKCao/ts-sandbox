@@ -1,0 +1,20 @@
+# APDF exchange dedicated H=720. Same frozen HPs as hz96 sibling.
+extends: configs/binary_c128_p32x6_apdf_exchange_hz96_fixedhp.yaml
+
+geometry:
+  forecast_length: 720
+  lookback_overlap: 8
+
+wandb:
+  tags: [ablation_apdf, one_hot, exchange, dedicated_h, hz720, canvas128, p32x6, nopretrain, from_random_init, fixed_hp, no_optuna, itrans_guid, unique_seg, u217, ms106]
+
+experiment:
+  name: binary-c128-p32x6-apdf-exchange-hz720-fixedhp
+  experiment_name: binary_c128_p32x6_apdf_exchange_hz720_fixedhp
+  config_nickname: apdf-p32-exchange-hz720-u217-ms106
+
+phases:
+  - phase: staged_eval
+    eval_progress_key: apdf_p32_exchange_hz720_s1_n10_steps4
+    batch_size_by_dataset:
+      exchange_rate: 1

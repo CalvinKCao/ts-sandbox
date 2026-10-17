@@ -1,0 +1,108 @@
+# Weather H720 clip-from-max-H: occupancy 5452593/2954159 searched lr/U/EMA
+# on val_loss BCE. New study ranks Optuna by trial-end n=1 val aMSE
+# (epoch val / early-stop / best.pt stay occupancy BCE). Freeze occupancy
+# winner lr/U (coarse 1.231e-3 / 434, fine 6.386e-4 / 868, micro 217);
+# do not search leftover 1195/1868. Search coarse max_scale [3, 7], fine
+# patch_h {16,32,48,64}, original EMA grids. Enqueue occupancy winner as
+# trial 0. Distinct stem / eval_progress_key vs 5452593.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv.yaml
+replace_phases: true
+
+wandb:
+  tags: [weather, all_variates, canvas128, p32x6, nopretrain, from_random_init, hz720, nostitch, itrans_guid, hpsearch, sel_amse, frozen_lr_u, ema_grid, max_scale_3_7, patch_h_16_32_48_64, frac50_refit100, eval_anchor_only, n_samp_1, train_time_coverage_1, r0, cache_cond_kv, compile]
+
+experiment:
+  dataset: weather
+  name: binary-c128-p32x6-weather-fullT-hz720-hpsearch-frac50-refit-sel-amse
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_weather_fullT_hz720_nostitch_nopretrain_hpsearch_frac50_refit_sel_amse
+  config_nickname: c128-p32-weather-hz720-hpsearch-frac50-refit-sel-amse-anchor
+
+phases:
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    from_random_init: true
+    n_trials: 10
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate_ema
+    selection_metric: staged_anchor_mse
+    hp_train_fraction: 0.5
+    refit_best_max_epochs: 20
+    refit_best_patience: 5
+    max_univariate_micro_batch_by_dataset:
+      weather: 217
+    hp_lr_min: 0.0012306520272612079
+    hp_lr_max: 0.0012306520272612079
+    effective_univariate_batch_multipliers: [2]
+    ema_decay: 0.995
+    ema_decay_grid: [0.98, 0.99, 0.995]
+    hp_max_scale_min: 3.0
+    hp_max_scale_max: 7.0
+    enqueue_trials:
+      - learning_rate: 0.0012306520272612079
+        ema_decay: 0.995
+        effective_univariate_batch: 434
+        max_scale: 3.5
+    min_snr_gamma: 5.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: diffusion_patch_refine_finetune_hp
+    from_random_init: true
+    n_trials: 10
+    max_epochs: 20
+    patience: 5
+    pruner: median
+    pruner_n_startup_trials: 3
+    pruner_n_warmup_steps: 8
+    search_space: lr_eff_batch_univariate_ema
+    selection_metric: staged_anchor_mse
+    hp_train_fraction: 0.5
+    refit_best_max_epochs: 20
+    refit_best_patience: 5
+    max_univariate_micro_batch_by_dataset:
+      weather: 217
+    hp_lr_min: 0.0006385734794608442
+    hp_lr_max: 0.0006385734794608442
+    effective_univariate_batch_multipliers: [4]
+    ema_decay: 0.99
+    ema_decay_grid: [0.99, 0.995, 0.999]
+    hp_patch_refine_height_grid: [16, 32, 48, 64]
+    enqueue_trials:
+      - learning_rate: 0.0006385734794608442
+        ema_decay: 0.99
+        effective_univariate_batch: 868
+        patch_refine_patch_height: 32
+    min_snr_gamma: 2.0
+    binary_noise_schedule: linear
+    loss_weighting: none
+    prediction_target: epsilon
+    binary_length_mode: none
+    binary_length_g: 1.0
+    binary_length_scale: 1.0
+
+  - phase: staged_eval
+    anchor_only: true
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_progress_key: canvas128_p32x6_weather_hz720_hpsearch_frac50_refit_sel_amse_s1_n1_anchor
+    n_samples: 1
+    probabilistic_n_samples: 10
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 4
+    batch_size_by_dataset:
+      weather: 1
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true

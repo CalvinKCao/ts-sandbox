@@ -1,0 +1,24 @@
+# ETTh2 H=96 sensitivity: linear schedule + length power g=1.5 (front-loads β).
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_etth2_sens_hz96_base.yaml
+
+wandb:
+  tags: [ETTh2, etth2_sens, all_variates, canvas128, p32x6, nopretrain, from_random_init, hz96, dedicated_h, nostitch, itrans_guid, fixed_hp, no_optuna, train_time_coverage_1, r0, ms35, cache_cond_kv, eval_anchor_only, n_samp_1, compile, u1186_1886, l40s, sens_noise, power_g15]
+
+experiment:
+  name: binary-c128-p32x6-etth2-sens-hz96-noise-powerg15
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_etth2_sens_hz96_noise_powerg15
+  config_nickname: c128-p32-etth2-sens-hz96-noise-powerg15
+
+phases:
+  - phase: diffusion_coarse_finetune_hp
+    fixed_tuned_params:
+      binary_noise_schedule: linear
+      binary_length_mode: power
+      binary_length_g: 1.5
+  - phase: diffusion_patch_refine_finetune_hp
+    fixed_tuned_params:
+      binary_noise_schedule: linear
+      binary_length_mode: power
+      binary_length_g: 1.5
+  - phase: staged_eval
+    eval_progress_key: etth2_sens_hz96_noise_powerg15_s1_anchor

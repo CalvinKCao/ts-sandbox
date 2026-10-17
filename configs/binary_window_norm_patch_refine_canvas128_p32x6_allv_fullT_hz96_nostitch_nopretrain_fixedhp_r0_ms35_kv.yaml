@@ -1,0 +1,26 @@
+# Dedicated H=96 of the table p32 fullT r0 ms35 recipe (clip-from-720 parent).
+# Same HPs / U / compile as hz720; train and eval at H=96 only. 100% test.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_fullT_hz720_nostitch_nopretrain_fixedhp_r0_ms35_kv.yaml
+
+geometry:
+  forecast_length: 96
+  lookback_overlap: 8
+
+wandb:
+  tags: [all_variates, canvas128, p32x6, nopretrain, from_random_init, hz96, dedicated_h, nostitch, itrans_guid, fixed_hp, no_optuna, train_time_coverage_1, r0, ms35, cache_cond_kv, eval_frac_1_fulltest, compile]
+
+experiment:
+  name: binary-c128-p32x6-fullT-hz96-nopre-fixedhp-r0-ms35-kv
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_allv_fullT_hz96_nostitch_nopretrain_fixedhp_r0_ms35_kv
+  config_nickname: c128-p32-fullT-hz96-r0-ms35-kv
+
+phases:
+  - phase: staged_eval
+    anchor_only: false
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_max_windows_by_dataset: null
+    eval_progress_key: canvas128_p32x6_fullT_hz96_r0_ms35_kv_s1_n10_steps4_fulltest
+    n_samples: 1
+    probabilistic_n_samples: 10
+    skip_eval_visualizations: true

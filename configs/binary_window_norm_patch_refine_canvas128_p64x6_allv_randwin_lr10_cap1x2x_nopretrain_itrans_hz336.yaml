@@ -13,6 +13,7 @@ experiment:
   name: binary-c128-p64x6-cap1x2x-nopre-itrans-hz336
   experiment_name: binary_window_norm_patch_refine_canvas128_p64x6_allv_randwin_lr10_cap1x2x_nopretrain_itrans_hz336
   guidance_type: itransformer
+  cache_cond_kv: true
 
 phases:
   - phase: staged_eval

@@ -1,0 +1,20 @@
+# APDF ETTh1 dedicated H=192. Same frozen HPs as hz96 sibling. Eval-anchor.
+extends: configs/binary_c128_p64x6_apdf_etth1_hz96_fixedhp.yaml
+
+geometry:
+  forecast_length: 192
+  lookback_overlap: 8
+
+wandb:
+  tags: [ablation_apdf, one_hot, ETTh1, dedicated_h, hz192, canvas128, p64x6, nopretrain, from_random_init, fixed_hp, no_optuna, itrans_guid, unique_seg, u217, ms52, eval_anchor]
+
+experiment:
+  name: binary-c128-p64x6-apdf-etth1-hz192-fixedhp
+  experiment_name: binary_c128_p64x6_apdf_etth1_hz192_fixedhp
+  config_nickname: apdf-p64-etth1-hz192-u217-ms52
+
+phases:
+  - phase: staged_eval
+    eval_progress_key: apdf_p64_etth1_hz192_s1_n1_anchor
+    batch_size_by_dataset:
+      ETTh1: 1

@@ -1,0 +1,25 @@
+# 100% stride-1 eval of table exchange H=96 (Killarney 5057766).
+# Train yaml caps eval at 939/1422 (eval_max_windows). This leaf drops the cap.
+# Keep n_samp=10 so both Binary-anchor and Binary-prob get full-test numbers.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x.yaml
+
+wandb:
+  tags: [all_variates, randwin, lr10, canvas128, p32x6, from_pretrain, hz96, dedicated_h, eval_only, fulltest, exchange]
+
+experiment:
+  name: binary-c128-p32x6-cap1x2x-hz96-fulltest
+  experiment_name: binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x_hz96_fulltest
+  config_nickname: c128-p32-cap1x2x-hz96-fulltest
+  # 5057766 train used patch-decoder x-attn (not iTransformer finetune).
+  guidance_type: patch_decoder
+
+training:
+  torch_compile: false
+
+phases:
+  - phase: staged_eval
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_max_windows_by_dataset: null
+    skip_eval_visualizations: true
+    eval_progress_key: canvas128_p32x6_cap1x2x_hz96_s1_n10_fulltest

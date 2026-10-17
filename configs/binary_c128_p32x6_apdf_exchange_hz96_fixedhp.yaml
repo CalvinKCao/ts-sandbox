@@ -1,0 +1,84 @@
+# APDF (one-hot columns) ablation, exchange dedicated H=96.
+# Table Binary HPs frozen: p32x6, max_scale 10.6, U=217 1x, donor LRs, unique-seg,
+# iTrans, nopre (cannot reuse CDF pretrain). n_samp=10 matches table exchange eval.
+extends: configs/binary_window_norm_patch_refine_canvas128_p32x6_allv_randwin_lr10_cap1x2x_nopretrain.yaml
+replace_phases: true
+
+wandb:
+  tags: [ablation_apdf, one_hot, exchange, dedicated_h, hz96, canvas128, p32x6, nopretrain, from_random_init, fixed_hp, no_optuna, itrans_guid, unique_seg, u217, ms106]
+
+experiment:
+  name: binary-c128-p32x6-apdf-exchange-hz96-fixedhp
+  experiment_name: binary_c128_p32x6_apdf_exchange_hz96_fixedhp
+  occupancy_encoding: one_hot
+  guidance_type: itransformer
+  cache_cond_kv: true
+  max_scale: 10.6
+  max_scale_by_dataset:
+    exchange_rate: 10.6
+  config_nickname: apdf-p32-exchange-hz96-u217-ms106
+
+phases:
+  - phase: itrans_finetune_hp
+    n_trials: 1
+    max_epochs: 10
+
+  - phase: diffusion_coarse_finetune_hp
+    from_random_init: true
+    n_trials: 1
+    max_epochs: 20
+    patience: 5
+    search_space: fixed
+    max_univariate_micro_batch_by_dataset:
+      exchange_rate: 217
+    fixed_tuned_params:
+      learning_rate: 0.00016260630766856958
+      ema_decay: 0.99
+      max_scale: 10.6
+      target_univariate_batch: 217
+      binary_noise_schedule: linear
+      loss_weighting: none
+      min_snr_gamma: 5.0
+      prediction_target: epsilon
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+
+  - phase: diffusion_patch_refine_finetune_hp
+    from_random_init: true
+    n_trials: 1
+    max_epochs: 20
+    patience: 5
+    search_space: fixed
+    max_univariate_micro_batch_by_dataset:
+      exchange_rate: 217
+    fixed_tuned_params:
+      learning_rate: 0.0007817554354066733
+      ema_decay: 0.995
+      max_scale: 10.6
+      target_univariate_batch: 217
+      binary_noise_schedule: linear
+      loss_weighting: none
+      min_snr_gamma: 2.0
+      prediction_target: epsilon
+      binary_length_mode: none
+      binary_length_g: 1.0
+      binary_length_scale: 1.0
+
+  - phase: staged_eval
+    anchor_only: false
+    eval_test_fraction: 1.0
+    test_stride: 1
+    eval_progress_key: apdf_p32_exchange_hz96_s1_n10_steps4
+    eval_max_windows_by_dataset:
+      exchange_rate: 939
+    n_samples: 1
+    probabilistic_n_samples: 10
+    tune_sampler: false
+    probabilistic_sampler: quad_t
+    probabilistic_num_inference_steps: 4
+    batch_size_by_dataset:
+      exchange_rate: 5
+    gmm_components: 10
+    topk_max: 3
+    skip_eval_visualizations: true
